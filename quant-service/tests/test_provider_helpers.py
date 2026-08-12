@@ -722,10 +722,17 @@ class ProviderHelperTests(unittest.TestCase):
             "outcome_counts": {"5m": {"matured": 1, "pending": 2}},
             "post_close": {"status": "blocked", "reason": "daily coverage is incomplete", "candidates": []},
             "readiness": {"decision_ready": False, "blockers": ["daily_basic", "trade_limits"]},
+            "offline_policy_learning": {
+                "validation_gate": {"status": "accumulating", "matured_unique_signals": 1, "trading_days": 1,
+                                    "required_unique_signals": 200, "required_trading_days": 60},
+                "daily_review": {"delivered_signals": 2, "matured_30m_signals": 1},
+            },
         }, "https://research.example")
         self.assertIn("日终研究摘要", text)
         self.assertIn("盘后候选：blocked", text)
         self.assertIn("daily_basic、trade_limits", text)
+        self.assertIn("策略学习", text)
+        self.assertIn("未自动改参", text)
         self.assertIn("不展示胜率", text)
 
     def test_delivery_health_recovery_receipt_is_operational_not_a_market_signal(self):

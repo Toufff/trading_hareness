@@ -130,6 +130,7 @@ from .intraday_outcomes import (
     intraday_signal_outcome_metrics,
     a_share_return_decomposition,
 )
+from .contextual_policy_learning import contextual_bandit_policy_review
 from .runtime_resources import runtime_resource_status
 from .health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
 from .replay_readiness import historical_replay_readiness
@@ -5663,6 +5664,19 @@ def build_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
                  GROUP BY horizon_key,status""",
             (exchange_date, exchange_date + timedelta(days=1)),
         ).fetchall()
+        # The daily learner consumes only alerts actually delivered to the
+        # human.  It is intentionally tied to the outcome ledger's mature 30m
+        # result: no live quote is fetched and no threshold is updated here.
+        learning_rows = connection.execute(
+            """SELECT s.signal_event_id,s.signal_type,s.observed_at,s.evidence,
+                      (s.observed_at AT TIME ZONE 'Asia/Shanghai')::date AS exchange_date,
+                      o.status,o.raw_return,o.maximum_favorable_excursion,o.maximum_adverse_excursion
+                 FROM quant.intraday_signal_events s
+                 LEFT JOIN quant.intraday_signal_outcomes o
+                   ON o.signal_event_id=s.signal_event_id AND o.horizon_key='30m'
+                WHERE s.state='alerted' AND s.signal_type IN ('entry','watch','reduce','exit')
+                ORDER BY s.observed_at""",
+        ).fetchall()
         post_close_run = connection.execute(
             """SELECT run_id,status,summary FROM quant.post_close_strategy_runs
                  WHERE as_of_date=%s ORDER BY updated_at DESC LIMIT 1""",
@@ -5686,6 +5700,11 @@ def build_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
     outcome_counts: dict[str, dict[str, int]] = {}
     for row in outcome_rows:
         outcome_counts.setdefault(str(row["horizon_key"]), {})[str(row["status"])] = int(row["count"] or 0)
+    learning_input = [
+        {**strategy_json_safe(dict(row)), "exchange_date": str(exchange_date)}
+        for row in learning_rows
+    ]
+    policy_learning = contextual_bandit_policy_review(learning_input, focus_exchange_date=str(exchange_date))
     return {
         "exchange_date": str(exchange_date), "signal_counts": signal_counts,
         "outcome_counts": outcome_counts,
@@ -5696,6 +5715,7 @@ def build_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
         },
         "close_review": strategy_json_safe(dict(close_review)) if close_review else None,
         "readiness": readiness,
+        "offline_policy_learning": policy_learning,
     }
 
 

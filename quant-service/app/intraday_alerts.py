@@ -111,6 +111,9 @@ def daily_strategy_summary_text(summary: dict[str, Any], dashboard_url: str | No
     outcome_counts = summary.get("outcome_counts") or {}
     post_close = summary.get("post_close") or {}
     readiness = summary.get("readiness") or {}
+    learning = summary.get("offline_policy_learning") or {}
+    daily_learning = learning.get("daily_review") if isinstance(learning.get("daily_review"), dict) else {}
+    learning_gate = learning.get("validation_gate") if isinstance(learning.get("validation_gate"), dict) else {}
     candidates = post_close.get("candidates") or []
     candidate_text = "；".join(
         f"{item.get('name') or item.get('symbol')} {item.get('candidate_type')} {item.get('score')}"
@@ -127,6 +130,11 @@ def daily_strategy_summary_text(summary: dict[str, Any], dashboard_url: str | No
         f"信号结算：{outcomes}。",
         f"盘后候选：{post_close.get('status', 'missing')}｜{candidate_text}。",
         f"数据门禁：{'通过' if readiness.get('decision_ready') else '未通过'}；阻塞项：{blockers}。",
+        "策略学习：上下文动作回报离线复盘｜"
+        f"当日已送达 {daily_learning.get('delivered_signals', 0)}，30m 已结算 {daily_learning.get('matured_30m_signals', 0)}｜"
+        f"验证门禁 {learning_gate.get('status', 'accumulating')} "
+        f"({learning_gate.get('matured_unique_signals', 0)}/{learning_gate.get('required_unique_signals', 200)} 信号，"
+        f"{learning_gate.get('trading_days', 0)}/{learning_gate.get('required_trading_days', 60)} 交易日)；未自动改参。",
     ]
     if post_close.get("reason"):
         lines.append(f"盘后说明：{post_close['reason']}")

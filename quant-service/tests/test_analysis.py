@@ -1,6 +1,7 @@
 import unittest
 
 from app.analysis import direction_source, extract_signals, normalize_symbol
+from app.contextual_policy_learning import contextual_bandit_policy_review
 
 
 class AnalysisExtractionTests(unittest.TestCase):
@@ -26,6 +27,33 @@ class AnalysisExtractionTests(unittest.TestCase):
         self.assertEqual(signals["689009.SH"].direction, 1)
         self.assertEqual(signals["603369.SH"].direction, -1)
         self.assertEqual(direction_source(signals["689009.SH"].evidence_text), "explicit_action_positive")
+
+    def test_offline_policy_learning_keeps_small_sample_descriptive(self):
+        result = contextual_bandit_policy_review([{
+            "exchange_date": "2026-08-11", "signal_type": "entry", "status": "matured",
+            "raw_return": 0.01, "maximum_adverse_excursion": -0.002,
+            "evidence": {"attribution": {"model_version": "eac-v4", "stage": "acceptance",
+                                            "market_state": "risk_on", "sector_linkage": "peer_confirmed"}},
+        }], focus_exchange_date="2026-08-11")
+        self.assertEqual(result["policy_update"], "disabled")
+        self.assertEqual(result["validation_gate"]["status"], "accumulating")
+        self.assertEqual(result["action_values"][0]["status"], "descriptive_only")
+        self.assertNotIn("mean_directional_reward_bps", result["action_values"][0])
+
+    def test_offline_policy_learning_only_exposes_values_after_full_gate(self):
+        rows = []
+        for index in range(200):
+            rows.append({
+                "exchange_date": f"2026-06-{index % 60 + 1:02d}", "signal_type": "entry", "status": "matured",
+                "raw_return": 0.01, "maximum_adverse_excursion": -0.002,
+                "evidence": {"attribution": {"model_version": "eac-v4", "stage": "acceptance",
+                                                "market_state": "risk_on", "sector_linkage": "peer_confirmed"}},
+            })
+        result = contextual_bandit_policy_review(rows, focus_exchange_date="2026-06-01")
+        action = result["action_values"][0]
+        self.assertEqual(result["validation_gate"]["status"], "ready_for_offline_policy_review")
+        self.assertEqual(action["status"], "reviewable_offline_only")
+        self.assertEqual(action["mean_directional_reward_bps"], 100.0)
 
 
 if __name__ == "__main__":
