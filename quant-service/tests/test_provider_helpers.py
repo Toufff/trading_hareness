@@ -2863,6 +2863,26 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(row["cumulative_amount"], 1_020_000.0)
         self.assertEqual(row["bids"][0], {"price": 10.19, "size": 100.0})
 
+    def test_tencent_order_book_decoder_preserves_a_limit_up_seal_with_empty_asks(self):
+        values = [""] * 36
+        values[1], values[3], values[4] = "涨停样本", "10.99", "9.99"
+        values[6], values[7], values[8] = "1000", "610", "390"
+        values[9], values[10] = "10.99", "557769"
+        for level in range(1, 5):
+            values[9 + level * 2], values[10 + level * 2] = "0.00", "0"
+        for level in range(5):
+            values[19 + level * 2], values[20 + level * 2] = "0.00", "0"
+        values[30], values[35] = "20260812130000", "10.99/1000/1099000"
+        row = _tencent_order_book_row("000001.SZ", values)
+        self.assertIsNotNone(row)
+        self.assertTrue(row["one_sided_book"])
+        self.assertEqual(row["book_side"], "bid_only")
+        self.assertEqual(row["seal_volume_lot"], 557769.0)
+        observed = order_book_observation(row)
+        self.assertEqual(observed["qi1"], 1.0)
+        self.assertEqual(observed["qi5"], 1.0)
+        self.assertEqual(observed["seal_volume_lot"], 557769.0)
+
     def test_order_book_observation_never_turns_counter_reset_into_negative_turnover(self):
         observed = order_book_observation(
             {"bids": [{"price": 10, "size": 10}], "asks": [{"price": 10.01, "size": 10}],
@@ -2873,6 +2893,38 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(observed["cumulative_volume_delta_lot"], 0.0)
         self.assertEqual(observed["cumulative_amount_delta"], 0.0)
         self.assertIsNone(observed["interval_vwap"])
+
+    def test_order_book_levels_preserve_empty_intermediate_positions_for_qi_weights(self):
+        observed = order_book_observation({
+            "bids": [{"price": 10, "size": 100}, {"price": 0, "size": 0}, {"price": 9.98, "size": 100}],
+            "asks": [{"price": 10.01, "size": 100}, {"price": 10.02, "size": 100}, {"price": 10.03, "size": 100}],
+        })
+        # If the invalid bid2 were compacted out, bid3 would wrongly receive
+        # the bid2 weight (0.6065), rather than its true bid3 weight (0.3679).
+        self.assertAlmostEqual(observed["bid_depth_lot"], 136.79, places=2)
+
+    def test_order_book_observation_does_not_fabricate_zero_vwap_when_amount_did_not_move(self):
+        observed = order_book_observation(
+            {"bids": [{"price": 10, "size": 10}], "asks": [{"price": 10.01, "size": 10}],
+             "cumulative_volume_lot": 11, "cumulative_amount": 1000},
+            {"bids": [{"price": 10, "size": 10}], "asks": [{"price": 10.01, "size": 10}],
+             "cumulative_volume_lot": 10, "cumulative_amount": 1000},
+        )
+        self.assertEqual(observed["cumulative_volume_delta_lot"], 1.0)
+        self.assertEqual(observed["cumulative_amount_delta"], 0.0)
+        self.assertIsNone(observed["interval_vwap"])
+
+    def test_smart_money_q_uses_the_same_rolling_window_vwap_and_volume_share(self):
+        rows = []
+        for index in range(30):
+            close = 10.0 + index * 0.01
+            volume = 100 if index < 29 else 1000
+            rows.append({"time": f"10{index:02d}", "close": close, "volume_lot": volume,
+                         "amount": close * volume * 100, "vwap": 9.0})
+        features = intraday_minute_features(rows)
+        self.assertIsNotNone(features)
+        self.assertGreaterEqual(features["smart_money_selected_volume_share_30m"], 0.2)
+        self.assertNotEqual(features["smart_money_window_vwap_30m"], 9.0)
 
     def test_outcome_decomposition_keeps_overnight_separate_from_intraday_return(self):
         result = a_share_return_decomposition(Decimal("10"), 1, Decimal("10.5"), Decimal("10.2"), Decimal("10.8"))

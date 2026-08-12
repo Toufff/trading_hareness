@@ -307,6 +307,9 @@ def _tencent_order_book_row(symbol: str, values: list[str]) -> dict[str, Any] | 
         cumulative_amount = float(values[35].split("/")[-1]) if len(values) > 35 and "/" in values[35] and re.fullmatch(r"-?\d+(?:\.\d+)?", values[35].split("/")[-1]) else None
     except (TypeError, ValueError):
         return None
+    # Preserve all five positions, including a zero/empty side at a limit-up
+    # or limit-down.  A sealed limit book is the most important observation to
+    # retain for later seal/erosion research, not an invalid quote to discard.
     bids: list[dict[str, float]] = []
     asks: list[dict[str, float]] = []
     try:
@@ -314,19 +317,24 @@ def _tencent_order_book_row(symbol: str, values: list[str]) -> dict[str, Any] | 
             bid_offset, ask_offset = 9 + level * 2, 19 + level * 2
             bid_price, bid_size = float(values[bid_offset]), float(values[bid_offset + 1])
             ask_price, ask_size = float(values[ask_offset]), float(values[ask_offset + 1])
-            if bid_price > 0 and bid_size >= 0:
-                bids.append({"price": bid_price, "size": bid_size})
-            if ask_price > 0 and ask_size >= 0:
-                asks.append({"price": ask_price, "size": ask_size})
+            bids.append({"price": bid_price, "size": bid_size})
+            asks.append({"price": ask_price, "size": ask_size})
     except (TypeError, ValueError):
         return None
-    if not bids or not asks or price <= 0 or pre_close <= 0:
+    valid_bids = [row for row in bids if row["price"] > 0 and row["size"] >= 0]
+    valid_asks = [row for row in asks if row["price"] > 0 and row["size"] >= 0]
+    if (not valid_bids and not valid_asks) or price <= 0 or pre_close <= 0:
         return None
     return {
         "ts_code": symbol, "name": values[1], "price": price, "pre_close": pre_close,
         "cumulative_volume_lot": cumulative_volume, "cumulative_amount": cumulative_amount,
         "outer_volume_lot": outer_volume, "inner_volume_lot": inner_volume,
-        "bids": bids, "asks": asks, "trade_time": values[30] if len(values) > 30 else None,
+        "bids": bids, "asks": asks,
+        "one_sided_book": bool(valid_bids) != bool(valid_asks),
+        "book_side": "bid_only" if valid_bids and not valid_asks else "ask_only" if valid_asks and not valid_bids else "two_sided",
+        "seal_volume_lot": (valid_bids[0]["size"] if valid_bids and not valid_asks else
+                            valid_asks[0]["size"] if valid_asks and not valid_bids else None),
+        "trade_time": values[30] if len(values) > 30 else None,
         "raw_fields": values[:40], "source": "tencent_order_book",
     }
 

@@ -2885,15 +2885,25 @@ def intraday_minute_features(rows: list[dict[str, Any]], *, lookback: int = 20,
         price_volume_corr = round(covariance / math.sqrt(price_variance * volume_variance), 6) if price_variance and volume_variance else None
     else:
         price_volume_corr = None
+    window_amount = sum(float(intraday_number(row.get("amount")) or 0) for row in window)
+    window_volume = sum(float(intraday_number(row.get("volume_lot", row.get("vol")) or 0) * 100) for row in window)
+    window_vwap = window_amount / window_volume if window_amount > 0 and window_volume > 0 else None
     smart_rows = [(abs(math.log(float(row.get("close")) / float(previous.get("close")))) / math.sqrt(max(float(row.get("volume_lot", row.get("vol")) or 0), 1.0)), row)
-                  for previous, row in zip(rows[-min(len(rows), 30):-1], rows[-min(len(rows), 30)+1:], strict=True)
+                  for previous, row in zip(window[:-1], window[1:], strict=True)
                   if intraday_number(row.get("close")) and intraday_number(previous.get("close")) and intraday_number(row.get("volume_lot", row.get("vol"))) is not None]
     smart_rows.sort(key=lambda item: item[0], reverse=True)
-    smart_count = max(1, math.ceil(len(smart_rows) * 0.2)) if smart_rows else 0
-    smart_amount = sum(float(intraday_number(row.get("amount")) or 0) for _, row in smart_rows[:smart_count])
-    smart_volume = sum(float(intraday_number(row.get("volume_lot", row.get("vol"))) or 0) * 100 for _, row in smart_rows[:smart_count])
+    target_smart_volume = window_volume * 0.2
+    selected_smart_rows: list[dict[str, Any]] = []
+    selected_smart_volume = 0.0
+    for _, row in smart_rows:
+        selected_smart_rows.append(row)
+        selected_smart_volume += float(intraday_number(row.get("volume_lot", row.get("vol")) or 0) * 100)
+        if selected_smart_volume >= target_smart_volume:
+            break
+    smart_amount = sum(float(intraday_number(row.get("amount")) or 0) for row in selected_smart_rows)
+    smart_volume = sum(float(intraday_number(row.get("volume_lot", row.get("vol")) or 0) * 100) for row in selected_smart_rows)
     smart_vwap = smart_amount / smart_volume if smart_amount > 0 and smart_volume > 0 else None
-    q_smart_money = round(smart_vwap / vwap, 6) if smart_vwap and vwap and vwap > 0 else None
+    q_smart_money = round(smart_vwap / window_vwap, 6) if smart_vwap and window_vwap and window_vwap > 0 else None
     return {
         "time": current.get("time"), "price": price, "is_complete": bool(current.get("is_complete")),
         "return_1m_pct": past_return(1), "return_3m_pct": past_return(3), "return_5m_pct": past_return(5),
@@ -2916,6 +2926,8 @@ def intraday_minute_features(rows: list[dict[str, Any]], *, lookback: int = 20,
         "price_log_volume_corr_30m": price_volume_corr,
         "smart_money_q_30m": q_smart_money,
         "smart_money_vwap_30m": round(smart_vwap, 6) if smart_vwap else None,
+        "smart_money_window_vwap_30m": round(window_vwap, 6) if window_vwap else None,
+        "smart_money_selected_volume_share_30m": round(smart_volume / window_volume, 6) if smart_volume and window_volume else None,
         "source": source,
     }
 
@@ -4531,24 +4543,45 @@ def intraday_order_book_interval_seconds() -> float:
         return 3.0
 
 
+def intraday_order_book_retention_days() -> int:
+    """Keep high-frequency depth evidence bounded independently of rt_k."""
+    try:
+        return max(1, min(30, int(os.getenv("INTRADAY_ORDER_BOOK_RETENTION_DAYS", "7"))))
+    except ValueError:
+        return 7
+
+
 def persist_intraday_order_book_observations(observed_at: datetime, rows: list[dict[str, Any]], latency_ms: int) -> int:
     """Persist raw order-book evidence plus derived observational features."""
     stored = 0
+    previous_cutoff = observed_at - timedelta(seconds=15)
+    china_observed_at = observed_at.astimezone(ZoneInfo("Asia/Shanghai"))
+    session_start = china_observed_at.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    symbols = sorted({str(row.get("ts_code") or "") for row in rows if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(row.get("ts_code") or ""))})
     with db.transaction() as connection:
+        # One source-qualified lookup for the entire batch.  The partial index
+        # prevents rt_k rows from expanding this high-frequency query.
+        previous_rows = connection.execute(
+            """SELECT DISTINCT ON(symbol) symbol,observed_at,raw
+                 FROM quant.intraday_quote_observations
+                WHERE symbol=ANY(%s) AND source_name='tencent_order_book'
+                  AND observed_at>=%s AND observed_at<%s
+                ORDER BY symbol,observed_at DESC""",
+            (symbols, session_start, observed_at),
+        ).fetchall() if symbols else []
+        previous_by_symbol = {str(item["symbol"]): dict(item) for item in previous_rows}
         for row in rows:
             symbol = str(row.get("ts_code") or "")
             if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
                 continue
-            previous = connection.execute(
-                """SELECT raw FROM quant.intraday_quote_observations
-                     WHERE symbol=%s AND source_name='tencent_order_book'
-                     ORDER BY observed_at DESC LIMIT 1""",
-                (symbol,),
-            ).fetchone()
-            previous_raw = dict(previous["raw"] or {}) if previous else None
+            previous = previous_by_symbol.get(symbol)
+            previous_is_fresh = bool(previous and previous["observed_at"] >= previous_cutoff)
+            previous_raw = dict(previous["raw"] or {}) if previous_is_fresh else None
             features = order_book_observation(row, previous_raw)
+            if previous and not previous_is_fresh:
+                features["delta_status"] = "stale_previous"
             raw = {**row, "order_book_features": features}
-            connection.execute(
+            inserted = connection.execute(
                 """INSERT INTO quant.intraday_quote_observations(
                        scan_id,symbol,observed_at,source_name,price,pct_change,volume_ratio,turnover_rate,main_net_inflow,raw
                    ) VALUES(NULL,%s,%s,'tencent_order_book',%s,%s,NULL,NULL,NULL,%s)
@@ -4557,7 +4590,7 @@ def persist_intraday_order_book_observations(observed_at: datetime, rows: list[d
                  ((float(row["price"]) / float(row["pre_close"])) - 1) * 100 if row.get("pre_close") else None,
                  Json(strategy_json_safe(raw))),
             )
-            stored += 1
+            stored += int(inserted.rowcount > 0)
         record_provider_success(connection, "tencent_free", "order_book_quote", stored, latency_ms)
     return stored
 
@@ -4591,6 +4624,7 @@ async def capture_intraday_order_book_snapshot(symbols: list[str]) -> dict[str, 
 
 async def intraday_order_book_loop() -> None:
     """Observe watchlist depth at a bounded cadence; never derive an order."""
+    pruned_on: date | None = None
     while True:
         active, _ = await realtime_market_session_async()
         if active:
@@ -4604,6 +4638,18 @@ async def intraday_order_book_loop() -> None:
                         "SELECT symbol FROM quant.intraday_watchlists WHERE enabled ORDER BY updated_at DESC,symbol LIMIT 20"
                     ).fetchall()
             rows = await run_database_blocking(load_watches)
+            local_date = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date()
+            if pruned_on != local_date:
+                cutoff = datetime.now(timezone.utc) - timedelta(days=intraday_order_book_retention_days())
+                def prune() -> None:
+                    with db.transaction() as connection:
+                        connection.execute(
+                            "DELETE FROM quant.intraday_quote_observations "
+                            "WHERE source_name='tencent_order_book' AND observed_at<%s",
+                            (cutoff,),
+                        )
+                await run_database_blocking(prune)
+                pruned_on = local_date
             result = await capture_intraday_order_book_snapshot([str(row["symbol"]) for row in rows])
             if result.get("status") == "failed":
                 print(f"intraday order-book capture failed: {result.get('reason', '')[:300]}")

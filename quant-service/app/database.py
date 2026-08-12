@@ -440,6 +440,9 @@ CREATE TABLE IF NOT EXISTS quant.intraday_quote_observations (
     UNIQUE(symbol, source_name, observed_at)
 );
 CREATE INDEX IF NOT EXISTS intraday_quote_lookup_idx ON quant.intraday_quote_observations(symbol, observed_at DESC);
+CREATE INDEX IF NOT EXISTS intraday_order_book_recent_idx
+ON quant.intraday_quote_observations(symbol, observed_at DESC)
+WHERE source_name='tencent_order_book';
 
 CREATE TABLE IF NOT EXISTS quant.intraday_signal_events (
     signal_event_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
