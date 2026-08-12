@@ -139,6 +139,8 @@ from .routers.provider_status import build_provider_status_router
 from .routers.research_readiness import build_research_readiness_router
 from .routers.intraday_status import build_intraday_status_router
 from .routers.analyst_reads import build_analyst_reads_router
+from .routers.analyst_trade_action_reads import build_analyst_trade_action_reads_router
+from .routers.analyst_skill_reads import build_analyst_skill_reads_router
 from .routers.event_reads import build_event_reads_router
 from .routers.strategy_reads import build_strategy_reads_router
 from .routers.strategy_pattern_reads import build_strategy_pattern_reads_router
@@ -202,6 +204,8 @@ from .request_models import (
     UniverseUpdateRequest,
 )
 from .remote_archive import classify_remote_text, import_remote_report, remote_report_list_state, reprocess_remote_reports
+from .analyst_trade_action_read_model import anqiang_trade_action_replay
+from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .telemetry import (
     CONTENT_TYPE_LATEST,
     db_pool_connections,
@@ -8307,6 +8311,8 @@ app.include_router(build_research_readiness_router(
     db, historical_estimate_from_db, feature_readiness_state, historical_replay_readiness,
 ))
 app.include_router(build_analyst_reads_router(db, remote_report_list_state, analyst_text_factor_summary))
+app.include_router(build_analyst_trade_action_reads_router(db, anqiang_trade_action_replay))
+app.include_router(build_analyst_skill_reads_router(db, analyst_skill_profiles))
 app.include_router(build_event_reads_router(db))
 app.include_router(build_strategy_reads_router(db, STRATEGY_DECISION_MODEL_VERSION))
 app.include_router(build_strategy_pattern_reads_router(

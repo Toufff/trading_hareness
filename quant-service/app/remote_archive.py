@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from psycopg.types.json import Json
 
 from .analysis import EXTRACTOR_VERSION, direction_source, extract_signals
+from .analyst_trade_actions import sync_anqiang_trade_actions
+from .analyst_skill_models import rebuild_analyst_skill_profile
 from .database import Database
 
 
@@ -259,8 +262,14 @@ def import_remote_report(db: Database, report: dict[str, Any], force_reprocess: 
         )
         changed = (previous is None or previous["remote_version"] != version or previous["content_hash"] != content_hash
                    or sanitized_content_changed)
+        # This is a review-only ledger.  It preserves the author-stated
+        # intraday timestamp separately from ``available_at`` and never
+        # changes the normal stock/theme claim factor path.
+        trade_actions = sync_anqiang_trade_actions(connection, report, available_at=available_at)
+        rebuild_analyst_skill_profile(connection, analyst_id, report_date)
         if not changed and not force_reprocess:
-            return {"status": "unchanged", "remote_report_id": report_id, "evidence": 0, "claims": 0}
+            return {"status": "unchanged", "remote_report_id": report_id, "evidence": 0, "claims": 0,
+                    "trade_actions": trade_actions}
         if force_reprocess or sanitized_content_changed:
             connection.execute(
                 """DELETE FROM quant.analyst_claims c
@@ -330,7 +339,8 @@ def import_remote_report(db: Database, report: dict[str, Any], force_reprocess: 
                     ).fetchone()
                     persist_claim_revision(connection, analyst_id, scope, subject_key, direction, row["evidence_id"], claim["claim_id"])
                     claims_count += 1
-    return {"status": "updated", "remote_report_id": report_id, "evidence": evidence_count, "claims": claims_count}
+    return {"status": "updated", "remote_report_id": report_id, "evidence": evidence_count, "claims": claims_count,
+            "trade_actions": trade_actions}
 
 
 def reprocess_remote_reports(db: Database, limit: int = 100) -> dict[str, Any]:
@@ -340,12 +350,17 @@ def reprocess_remote_reports(db: Database, limit: int = 100) -> dict[str, Any]:
             (max(1, min(limit, 500)),),
         ).fetchall()
     results = [import_remote_report(db, dict(row["payload"]), force_reprocess=True) for row in rows]
+    with db.transaction() as connection:
+        skill_profiles = rebuild_all_analyst_skill_profiles(
+            connection, datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+        )
     return {
         "status": "completed",
         "reports": len(results),
         "evidence": sum(int(item.get("evidence", 0)) for item in results),
         "claims": sum(int(item.get("claims", 0)) for item in results),
         "items": results,
+        "skill_profiles": len(skill_profiles["profiles"]),
     }
 
 

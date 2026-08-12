@@ -43,6 +43,8 @@ from app.routers.strategy_pattern_reads import build_strategy_pattern_reads_rout
 from app.routers.research_readiness import build_research_readiness_router, training_roadmap_payload
 from app.routers.intraday_status import build_intraday_status_router
 from app.routers.analyst_reads import build_analyst_reads_router
+from app.routers.analyst_trade_action_reads import build_analyst_trade_action_reads_router
+from app.routers.analyst_skill_reads import build_analyst_skill_reads_router
 from app.routers.event_reads import build_event_reads_router
 from app.routers.strategy_reads import build_strategy_reads_router
 from app.routers.board_rotation_reads import build_board_rotation_reads_router
@@ -681,6 +683,13 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(methods_by_path["/api/v1/analyst-claims"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/analyst-factors"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/claim-review"], {"GET"})
+        action_router = build_analyst_trade_action_reads_router(MagicMock(), lambda _database, _date, _limit: {})
+        self.assertEqual(
+            {route.path: route.methods for route in action_router.routes}["/api/v1/analysts/anqiang/trade-actions"],
+            {"GET"},
+        )
+        skill_router = build_analyst_skill_reads_router(MagicMock(), lambda _database, _analyst, _limit: {})
+        self.assertEqual({route.path: route.methods for route in skill_router.routes}["/api/v1/analyst-skills"], {"GET"})
 
     def test_event_reads_router_keeps_announcements_and_lhb_as_get_only(self):
         router = build_event_reads_router(MagicMock())
