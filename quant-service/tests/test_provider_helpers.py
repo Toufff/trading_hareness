@@ -12,7 +12,7 @@ import httpx
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app.main import ConceptMemberSyncRequest, DailyBar, EastmoneyBoardMemberSyncRequest, IntradayScanRequest, IntradaySectorReportRequest, MarketSnapshotRequest, OfflineMinuteImportRequest, SectorCatalogSyncRequest, StrategyPatternMiningRequest, TushareFetchRequest, UniverseUpdateRequest, annotate_intraday_flow_percentiles, baostock_code, build_market_snapshot, call_tushare_api, china_equity_session, china_futures_session, cn_today, eastmoney_member_symbol, historical_capacity_plan, intraday_board_curve_clock_session, intraday_board_display_slots, intraday_board_flow_curve_items, intraday_board_refresh_interval_seconds, intraday_board_rotation_retention_days, intraday_eac_acceptance_assessment, intraday_effective_scan_interval_seconds, intraday_fast_quote_confirmation, intraday_fast_quote_retention_days, intraday_high_frequency_window, intraday_minute_features, intraday_next_monitor_delay_seconds, intraday_next_realtime_validation_offset, intraday_outcome_attribution_summary, intraday_peer_context, intraday_point_in_time_market_context_batch, intraday_quote_from_tencent, intraday_runtime_service_state, intraday_sector_report, intraday_signal_attribution, intraday_signal_event_state, intraday_signal_rules, intraday_super_get_fast_interval_seconds, intraday_super_get_fast_max_in_flight, legacy_schema_bootstrap_enabled, looks_like_response_header, market_snapshot_public_quote_settings, normalize_tushare_rows, offline_minute_row, open_provider_capabilities, persist_ths_sector_members, provider_error_availability, provider_global_rate_limit_max_wait_seconds, realtime_rows_are_current, record_provider_failure, reserve_tushare_provider_request_slot, resolve_sync_symbols, resolve_sync_symbols_async, run_strategy_pattern_mining, sse_calendar_open_async, strategy_index_regime, strategy_intraday_candidates, strategy_market_regime, strategy_market_state, strategy_rank, technical_summary, tencent_snapshot_quotes, ths_concept_top_stocks, ths_taxonomy_key, write_access_allowed
+from app.main import ConceptMemberSyncRequest, DailyBar, EastmoneyBoardMemberSyncRequest, IntradayScanRequest, IntradaySectorReportRequest, MarketSnapshotRequest, OfflineMinuteImportRequest, SectorCatalogSyncRequest, StrategyPatternMiningRequest, TushareFetchRequest, UniverseUpdateRequest, annotate_intraday_flow_percentiles, baostock_code, build_market_snapshot, call_tushare_api, china_equity_session, china_futures_session, cn_today, eastmoney_member_symbol, historical_capacity_plan, intraday_board_curve_clock_session, intraday_board_display_slots, intraday_board_flow_curve_items, intraday_board_refresh_interval_seconds, intraday_board_rotation_retention_days, intraday_eac_acceptance_assessment, intraday_effective_scan_interval_seconds, intraday_fast_quote_confirmation, intraday_fast_quote_retention_days, intraday_high_frequency_window, intraday_minute_features, intraday_next_monitor_delay_seconds, intraday_next_realtime_validation_offset, intraday_outcome_attribution_summary, intraday_peer_context, intraday_point_in_time_market_context_batch, intraday_quote_from_tencent, intraday_runtime_service_state, intraday_sector_report, intraday_signal_attribution, intraday_signal_event_state, intraday_signal_rules, intraday_super_get_fast_interval_seconds, intraday_super_get_fast_max_in_flight, legacy_schema_bootstrap_enabled, looks_like_response_header, market_snapshot_public_quote_settings, normalize_tushare_rows, offline_minute_row, open_provider_capabilities, persist_ths_sector_members, provider_error_availability, provider_global_rate_limit_max_wait_seconds, realtime_rows_are_current, record_provider_failure, reserve_tushare_provider_request_slot, resolve_sync_symbols, resolve_sync_symbols_async, retry_pending_board_rotation_alerts, run_strategy_pattern_mining, sse_calendar_open_async, strategy_index_regime, strategy_intraday_candidates, strategy_market_regime, strategy_market_state, strategy_rank, technical_summary, tencent_snapshot_quotes, ths_concept_top_stocks, ths_taxonomy_key, write_access_allowed
 from app.factor_lab import factor_at
 from app.market_rules import a_share_limit_ratio, is_st_security_name
 from app.intraday_alerts import daily_strategy_summary_text, delivery_health_recovery_text, intraday_alert_text
@@ -1335,7 +1335,7 @@ class ProviderHelperTests(unittest.TestCase):
             ["persist_delivery_attempt", "persist_health_event_attempt"],
         )
 
-    def test_board_rotation_alert_queues_before_external_delivery(self):
+    def test_board_rotation_alert_is_frontend_only(self):
         event = {
             "rotation_event_id": uuid.uuid4(), "last_observed_at": datetime(2026, 8, 12, 1, 32, tzinfo=timezone.utc),
             "conditions": {"taxonomy_key": "eastmoney_concept", "sector_key": "CROSS", "label": "交叉概念",
@@ -1344,17 +1344,31 @@ class ProviderHelperTests(unittest.TestCase):
         }
 
         async def check() -> tuple[dict[str, object], AsyncMock]:
-            blocking = AsyncMock(side_effect=[uuid.uuid4(), None])
+            blocking = AsyncMock()
             with patch("app.main.run_database_blocking", new=blocking), \
-                 patch("app.main.post_feishu_alert_text", new=AsyncMock(return_value={"status": "disabled", "reason": "not configured"})):
+                 patch("app.main.post_feishu_alert_text", new=AsyncMock()) as outbound:
                 result = await deliver_board_rotation_alert(event)
-            return result, blocking
+            return result, blocking, outbound
 
-        result, blocking = asyncio.run(check())
-        self.assertEqual(result["status"], "disabled")
-        self.assertEqual([call.args[0].__name__ for call in blocking.await_args_list], ["queue_delivery", "persist_attempt"])
+        result, blocking, outbound = asyncio.run(check())
+        self.assertEqual(result["status"], "suppressed")
+        self.assertEqual(blocking.await_count, 0)
+        outbound.assert_not_awaited()
 
-    def test_daily_summary_queues_before_the_external_delivery_attempt(self):
+    def test_legacy_board_rotation_outbox_is_suppressed_without_feishu_retry(self):
+        async def check() -> tuple[dict[str, object], AsyncMock]:
+            blocking = AsyncMock(return_value=2)
+            with patch("app.main.run_database_blocking", new=blocking), \
+                 patch("app.main.post_feishu_alert_text", new=AsyncMock()) as outbound:
+                result = await retry_pending_board_rotation_alerts()
+            return result, outbound
+
+        result, outbound = asyncio.run(check())
+        self.assertEqual(result["suppressed"], 2)
+        self.assertEqual(result["sent"], 0)
+        outbound.assert_not_awaited()
+
+    def test_daily_summary_is_persisted_for_frontend_without_external_delivery(self):
         summary = {
             "exchange_date": "2026-08-11", "signal_counts": {}, "outcome_counts": {},
             "post_close": {"status": "completed", "candidates": []},
@@ -1362,17 +1376,18 @@ class ProviderHelperTests(unittest.TestCase):
         }
 
         async def check() -> tuple[dict[str, object], AsyncMock]:
-            blocking = AsyncMock(side_effect=[summary, {"action": "deliver", "summary_id": uuid.uuid4()}, None])
+            blocking = AsyncMock(side_effect=[summary, None])
             with patch("app.main.run_database_blocking", new=blocking), \
-                 patch("app.main.post_feishu_alert_text", new=AsyncMock(return_value={"status": "disabled", "reason": "not configured"})):
+                 patch("app.main.post_feishu_alert_text", new=AsyncMock()) as outbound:
                 result = await run_daily_strategy_summary(date(2026, 8, 11))
-            return result, blocking
+            return result, blocking, outbound
 
-        result, blocking = asyncio.run(check())
-        self.assertEqual(result["status"], "disabled")
+        result, blocking, outbound = asyncio.run(check())
+        self.assertEqual(result["status"], "suppressed")
+        outbound.assert_not_awaited()
         self.assertEqual(
             [call.args[0].__name__ for call in blocking.await_args_list],
-            ["build_daily_strategy_summary", "queue_summary", "persist_attempt"],
+            ["build_daily_strategy_summary", "persist_frontend_only"],
         )
 
     def test_minute_session_capture_persists_in_database_executor(self):

@@ -50,27 +50,13 @@ def load_intraday_runtime_evidence(database: Any, max_alert_attempts: int) -> di
                  FROM quant.intraday_board_flow_snapshots ORDER BY observed_at DESC LIMIT 1"""
         ).fetchone()
         latest_delivery = connection.execute(
-            """SELECT kind,status,sent_at,created_at,error_message FROM (
-                   SELECT 'signal' AS kind,status,sent_at,created_at,error_message FROM quant.intraday_alert_deliveries
-                   UNION ALL
-                   SELECT 'board' AS kind,status,sent_at,created_at,error_message FROM quant.intraday_board_report_deliveries
-                   UNION ALL
-                   SELECT 'board_rotation' AS kind,status,sent_at,created_at,error_message FROM quant.intraday_board_rotation_deliveries
-                   UNION ALL
-                   SELECT 'daily_summary' AS kind,delivery_status AS status,sent_at,updated_at AS created_at,error_message
-                     FROM quant.strategy_day_summaries
-               ) delivery ORDER BY created_at DESC LIMIT 1"""
+            """SELECT 'signal' AS kind,status,sent_at,created_at,error_message
+                 FROM quant.intraday_alert_deliveries
+                ORDER BY created_at DESC LIMIT 1"""
         ).fetchone()
         delivery_history = connection.execute(
-            """SELECT status FROM (
-                   SELECT status,created_at FROM quant.intraday_alert_deliveries
-                   UNION ALL
-                   SELECT status,created_at FROM quant.intraday_board_report_deliveries
-                   UNION ALL
-                   SELECT status,created_at FROM quant.intraday_board_rotation_deliveries
-                   UNION ALL
-                   SELECT delivery_status AS status,updated_at AS created_at FROM quant.strategy_day_summaries
-               ) delivery ORDER BY created_at DESC LIMIT 20"""
+            """SELECT status FROM quant.intraday_alert_deliveries
+                ORDER BY created_at DESC LIMIT 20"""
         ).fetchall()
         pending_delivery_count = connection.execute(
             """SELECT count(*)::int AS count FROM quant.intraday_alert_deliveries

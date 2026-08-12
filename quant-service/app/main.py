@@ -77,7 +77,7 @@ from .free_market_providers import (
 from .order_book_features import aggregate_order_book_observations, order_book_observation
 from .market_snapshots import snapshot_status, summarize_quotes
 from .intraday_alerts import daily_strategy_summary_text, delivery_health_recovery_text, intraday_alert_text
-from .board_rotation import board_rotation_alert_text, board_rotation_candidates, board_rotation_still_directional
+from .board_rotation import board_rotation_candidates, board_rotation_still_directional
 from .board_stock_mining import board_stock_mining_candidates
 from .board_stock_mining_repository import persist_board_stock_mining_run
 from .limit_linkage_mining import limit_linkage_candidates
@@ -5347,10 +5347,13 @@ async def capture_intraday_board_flow_curve() -> dict[str, Any]:
         evaluate_intraday_board_rotation_events, snapshot_minute, observed_at,
     )
     retry_summary = await retry_pending_board_rotation_alerts()
-    rotation_deliveries: list[dict[str, Any]] = []
-    for event in rotation_events:
-        delivery = await deliver_board_rotation_alert(event)
-        rotation_deliveries.append({"rotation_event_id": str(event["rotation_event_id"]), "delivery": delivery})
+    # Rotation events remain first-class frontend evidence; they are not an
+    # explicit-watchlist stock signal and therefore never go to Feishu.
+    rotation_deliveries = [
+        {"rotation_event_id": str(event["rotation_event_id"]),
+         "delivery": {"status": "suppressed", "reason": "frontend evidence only"}}
+        for event in rotation_events
+    ]
     return {"status": status, "observed_at": observed_at.isoformat(), "snapshot_minute": snapshot_minute.isoformat(),
             "coverage": coverage, "items": len(items), "circuit_skips": circuit_skips, "capacity_blocks": capacity_blocks,
             "rotation": {"confirmed": len(rotation_events), "deliveries": rotation_deliveries, "retry": retry_summary},
@@ -5435,84 +5438,24 @@ def evaluate_intraday_board_rotation_events(snapshot_minute: datetime, observed_
     return confirmed
 
 
-def board_rotation_message(event: dict[str, Any]) -> str:
-    conditions = dict(event.get("conditions") or {})
-    local = event["last_observed_at"].astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
-    return board_rotation_alert_text({**conditions, "observed_at_shanghai": local})
-
-
-async def attempt_board_rotation_alert_delivery(delivery_id: uuid.UUID, rotation_event_id: uuid.UUID, text: str) -> dict[str, Any]:
-    """Deliver one rotation outbox row and mark its event only after receipt."""
-    outcome = await post_feishu_alert_text(text)
-
-    def persist_attempt() -> None:
-        with db.transaction() as connection:
-            connection.execute(
-                """UPDATE quant.intraday_board_rotation_deliveries
-                      SET status=%s,response=%s,error_message=%s,sent_at=%s,
-                          attempt_count=attempt_count+1,
-                          next_attempt_at=CASE WHEN %s='failed' AND attempt_count+1<3
-                                               THEN now()+interval '60 seconds' ELSE NULL END
-                    WHERE delivery_id=%s""",
-                (outcome["status"], Json(strategy_json_safe(outcome.get("response", {}))),
-                 outcome.get("error") or outcome.get("reason"),
-                 datetime.now(timezone.utc) if outcome["status"] == "sent" else None,
-                 outcome["status"], delivery_id),
-            )
-            if outcome["status"] == "sent":
-                connection.execute(
-                    "UPDATE quant.intraday_board_rotation_events SET state='alerted',updated_at=now() WHERE rotation_event_id=%s",
-                    (rotation_event_id,),
-                )
-    await run_database_blocking(persist_attempt)
-    return outcome
-
-
 async def deliver_board_rotation_alert(event: dict[str, Any]) -> dict[str, Any]:
-    """Queue before external I/O so one-minute rotations survive a brief outage."""
-    text = board_rotation_message(event)
-
-    def queue_delivery() -> uuid.UUID | None:
-        with db.transaction() as connection:
-            row = connection.execute(
-                """INSERT INTO quant.intraday_board_rotation_deliveries(
-                       rotation_event_id,channel,status,message_text,next_attempt_at
-                   ) VALUES(%s,'feishu_adapter','pending',%s,now())
-                   ON CONFLICT(rotation_event_id,channel) DO NOTHING
-                   RETURNING delivery_id""",
-                (event["rotation_event_id"], text),
-            ).fetchone()
-        return row["delivery_id"] if row else None
-    delivery_id = await run_database_blocking(queue_delivery)
-    if delivery_id is None:
-        return {"status": "suppressed", "reason": "rotation event already has a delivery record"}
-    return await attempt_board_rotation_alert_delivery(delivery_id, event["rotation_event_id"], text)
+    """Keep board rotation evidence in-app; never emit a chat notification."""
+    return {"status": "suppressed", "reason": "Feishu is reserved for watched-stock strategy signals"}
 
 
 async def retry_pending_board_rotation_alerts(limit: int = 3) -> dict[str, int]:
-    """Retry persisted rotation notifications independently of the next flow move."""
-    def load_due() -> list[dict[str, Any]]:
+    """Suppress legacy board-rotation outbox rows without external delivery."""
+    def suppress_legacy() -> int:
         with db.transaction() as connection:
-            rows = connection.execute(
-                """SELECT delivery_id,rotation_event_id,message_text
-                     FROM quant.intraday_board_rotation_deliveries
-                    WHERE channel='feishu_adapter' AND status IN ('pending','failed')
-                      AND attempt_count<3 AND coalesce(next_attempt_at,created_at)<=now()
-                    ORDER BY created_at LIMIT %s""",
-                (max(1, min(limit, 10)),),
-            ).fetchall()
-        return [dict(row) for row in rows]
-    rows = await run_database_blocking(load_due)
-    sent = failed = disabled = 0
-    for row in rows:
-        outcome = await attempt_board_rotation_alert_delivery(row["delivery_id"], row["rotation_event_id"], str(row["message_text"]))
-        if outcome["status"] == "sent":
-            sent += 1
-        elif outcome["status"] == "failed":
-            failed += 1
-        else:
-            disabled += 1
-    return {"loaded": len(rows), "sent": sent, "failed": failed, "disabled": disabled}
+            result = connection.execute(
+                """UPDATE quant.intraday_board_rotation_deliveries
+                      SET status='suppressed',error_message='suppressed: Feishu is reserved for watched-stock strategy signals',
+                          next_attempt_at=NULL
+                    WHERE channel='feishu_adapter' AND status IN ('pending','failed')""",
+            )
+        return int(result.rowcount or 0)
+    suppressed = await run_database_blocking(suppress_legacy)
+    return {"loaded": suppressed, "sent": 0, "failed": 0, "disabled": 0, "suppressed": suppressed}
 
 
 async def intraday_board_flow_curve_loop() -> None:
@@ -5720,54 +5663,24 @@ def build_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
 
 
 async def run_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
-    """Persist and deliver one bounded end-of-day summary with retry metadata."""
+    """Persist the daily summary for the frontend without external delivery."""
     summary = await run_database_blocking(build_daily_strategy_summary, exchange_date)
     dashboard_url = (os.getenv("QUANT_DASHBOARD_PUBLIC_URL") or "").strip().rstrip("/") or None
     text = daily_strategy_summary_text(summary, dashboard_url)
 
-    def queue_summary() -> dict[str, Any]:
-        with db.transaction() as connection:
-            existing = connection.execute(
-                "SELECT summary_id,delivery_status,attempt_count,next_attempt_at FROM quant.strategy_day_summaries WHERE exchange_date=%s",
-                (exchange_date,),
-            ).fetchone()
-            if existing and existing["delivery_status"] in {"sent", "disabled", "suppressed"}:
-                return {"action": "already_terminal", **dict(existing)}
-            if existing and int(existing["attempt_count"] or 0) >= INTRADAY_ALERT_MAX_ATTEMPTS:
-                return {"action": "attempts_exhausted", **dict(existing)}
-            if existing and existing["next_attempt_at"] and existing["next_attempt_at"] > datetime.now(timezone.utc):
-                return {"action": "deferred", **dict(existing)}
-            row = connection.execute(
-                """INSERT INTO quant.strategy_day_summaries(exchange_date,payload,message_text,delivery_status,next_attempt_at)
-                   VALUES(%s,%s,%s,'pending',now())
-                   ON CONFLICT(exchange_date) DO UPDATE SET payload=EXCLUDED.payload,message_text=EXCLUDED.message_text,
-                       delivery_status='pending',next_attempt_at=now(),updated_at=now()
-                   RETURNING summary_id,delivery_status,attempt_count""",
-                (exchange_date, Json(strategy_json_safe(summary)), text),
-            ).fetchone()
-        return {"action": "deliver", **dict(row)}
-
-    queued = await run_database_blocking(queue_summary)
-    if queued["action"] != "deliver":
-        return {"status": queued["action"], "exchange_date": str(exchange_date), "summary": summary}
-    outcome = await post_feishu_alert_text(text)
-
-    def persist_attempt() -> None:
+    def persist_frontend_only() -> None:
         with db.transaction() as connection:
             connection.execute(
-                """UPDATE quant.strategy_day_summaries
-                      SET delivery_status=%s,attempt_count=attempt_count+1,error_message=%s,
-                          sent_at=%s,next_attempt_at=CASE WHEN %s='failed' AND attempt_count+1<%s
-                                                           THEN now()+interval '60 seconds' ELSE NULL END,
-                          updated_at=now()
-                    WHERE summary_id=%s""",
-                (outcome["status"], outcome.get("error") or outcome.get("reason"),
-                 datetime.now(timezone.utc) if outcome["status"] == "sent" else None,
-                 outcome["status"], INTRADAY_ALERT_MAX_ATTEMPTS, queued["summary_id"]),
+                """INSERT INTO quant.strategy_day_summaries(exchange_date,payload,message_text,delivery_status,error_message)
+                   VALUES(%s,%s,%s,'suppressed','suppressed: Feishu is reserved for watched-stock strategy signals')
+                   ON CONFLICT(exchange_date) DO UPDATE SET payload=EXCLUDED.payload,message_text=EXCLUDED.message_text,
+                       delivery_status='suppressed',next_attempt_at=NULL,
+                       error_message=EXCLUDED.error_message,updated_at=now()""",
+                (exchange_date, Json(strategy_json_safe(summary)), text),
             )
-    await run_database_blocking(persist_attempt)
-    return {"status": outcome["status"], "exchange_date": str(exchange_date), "summary": summary, "delivery": outcome}
-
+    await run_database_blocking(persist_frontend_only)
+    return {"status": "suppressed", "exchange_date": str(exchange_date), "summary": summary,
+            "reason": "Feishu is reserved for watched-stock strategy signals"}
 
 async def daily_strategy_summary_loop() -> None:
     """Deliver one compact review after the post-close candidate retry window."""
@@ -5778,7 +5691,7 @@ async def daily_strategy_summary_loop() -> None:
                 and time(19, 15) <= local.time() < time(19, 30)):
             try:
                 result = await run_daily_strategy_summary(local.date())
-                if result["status"] in {"sent", "disabled", "already_terminal", "attempts_exhausted"}:
+                if result["status"] in {"sent", "disabled", "suppressed", "already_terminal", "attempts_exhausted"}:
                     completed.add(local.date())
             except Exception as error:  # noqa: BLE001 - bounded retry window records the next attempt
                 print(f"daily strategy summary failed: {str(error)[:300]}")
@@ -5819,10 +5732,10 @@ async def intraday_monitor_loop(interval_seconds: int) -> None:
                 jobs = [run_intraday_watchlist_scan(scan_request)]
                 if loop.time() >= next_board_refresh_at:
                     next_board_refresh_at = loop.time() + intraday_board_refresh_interval_seconds(local)
-                    # This is the single authoritative five-minute delivery
-                    # path.  The legacy n8n schedule is disabled so it cannot
-                    # duplicate the same scan and signal notifications.
-                    jobs.append(run_intraday_board_report(deliver=True))
+                    # This five-minute job refreshes the frontend research
+                    # surface only.  Feishu stays exclusive to confirmed
+                    # strategy signals on explicit watchlist stocks.
+                    jobs.append(run_intraday_board_report(deliver=False))
                 results = await asyncio.gather(*jobs, return_exceptions=True)
                 for result in results:
                     if isinstance(result, Exception):
@@ -5980,8 +5893,12 @@ def intraday_flow_label(value: Any) -> str:
     return f"{number_value:+.2f}"
 
 
-async def run_intraday_board_report(*, deliver: bool = True) -> dict[str, Any]:
-    """Persist an evidence-labelled sector brief, optionally delivering it."""
+async def run_intraday_board_report(*, deliver: bool = False) -> dict[str, Any]:
+    """Persist an evidence-labelled sector/mining brief for the frontend.
+
+    ``deliver`` remains only for compatible callers; board and linkage mining
+    never publish to Feishu under the watched-stock-only policy.
+    """
     observed_at = datetime.now(timezone.utc)
     # Persist the full bounded Top10 requested by the close-review surface.
     # ``quoted_members`` remains visible so sparse public quote coverage is not
@@ -6043,9 +5960,8 @@ async def run_intraday_board_report(*, deliver: bool = True) -> dict[str, Any]:
                   "summary": mining_summary, "coverage": mining_coverage}
     limit_anchor_refresh = await refresh_intraday_limit_up_anchors(observed_at)
     linkage = await run_limit_linkage_mining(observed_at, runtime_quotes)
-    # Keep the board brief and linkage candidates in one Feishu delivery per
-    # scheduled pass.  This is intentionally a compact batch, never a per-
-    # symbol notification stream.
+    # Keep the board brief and linkage candidates in persistent frontend
+    # evidence, never an outbound notification stream.
     linkage_candidates = linkage.get("candidates") or []
     if linkage.get("status") == "completed" and linkage_candidates:
         rendered = "；".join(
@@ -6060,20 +5976,7 @@ async def run_intraday_board_report(*, deliver: bool = True) -> dict[str, Any]:
         f"【盘中板块与关联挖掘快报｜{local_time}】", *sections,
         "来源：东财实时板块资金流、东财涨停池、同花顺精确概念成员、腾讯全 A 行情；关联候选仅供研究，须经分钟承接确认，不构成买卖指令。",
     ])
-    delivery = {"status": "skipped", "reason": "checkpoint review stores evidence without a duplicate board alert"}
-    if deliver:
-        delivery = await post_feishu_alert_text(text)
-        def persist_delivery() -> None:
-            with db.transaction() as connection:
-                connection.execute(
-                    """INSERT INTO quant.intraday_board_report_deliveries(
-                           board_report_id,channel,status,response,error_message,sent_at
-                       ) VALUES(%s,'feishu_adapter',%s,%s,%s,%s)""",
-                    (report_id, delivery["status"], Json(strategy_json_safe(delivery.get("response", {}))),
-                     delivery.get("error") or delivery.get("reason"),
-                     datetime.now(timezone.utc) if delivery["status"] == "sent" else None),
-                )
-        await run_database_blocking(persist_delivery)
+    delivery = {"status": "suppressed", "reason": "Feishu is reserved for watched-stock strategy signals"}
     return {"status": "completed", "board_report_id": str(report_id), "summary": summary,
             "mining": mining, "limit_anchor_refresh": limit_anchor_refresh,
             "limit_linkage_mining": linkage, "delivery": delivery}

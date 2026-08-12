@@ -646,7 +646,7 @@ onBeforeUnmount(() => {
                 </template>
               </el-card>
               <el-card shadow="never" class="section-gap">
-                <template #header><div class="card-header"><div><span>板块流向个股挖掘</span><small class="realtime-refresh-time">随五分钟板块快报自动更新；只使用精确成分映射完整且腾讯同刻报价齐全的板块。</small></div><el-tag :type="boardStockMining.run?.status === 'completed' ? 'success' : 'info'">{{ boardStockMining.run?.status ?? '等待快照' }}</el-tag></div></template>
+                <template #header><div class="card-header"><div><span>板块流向个股挖掘</span><small class="realtime-refresh-time">随五分钟板块快报自动更新；只使用精确成分映射完整且腾讯同刻报价齐全的板块。仅展示在研究台，不发送飞书。</small></div><el-tag :type="boardStockMining.run?.status === 'completed' ? 'success' : 'info'">{{ boardStockMining.run?.status ?? '等待快照' }}</el-tag></div></template>
                 <el-alert :title="boardStockMining.notice ?? '研究候选由板块资金、个股主力流、量比、换手和价格结构共同筛出；不是买卖指令。'" type="info" :closable="false" show-icon/>
                 <el-descriptions v-if="boardStockMining.run" :column="mobileLayout ? 1 : 4" border size="small" class="section-gap"><el-descriptions-item label="观测时间">{{ chinaDateTime(boardStockMining.run.observed_at) }}</el-descriptions-item><el-descriptions-item label="完整板块">{{ boardStockMining.run.coverage?.exact_complete_boards ?? 0 }}</el-descriptions-item><el-descriptions-item label="流入 / 流出">{{ boardStockMining.run.summary?.inflow_candidates ?? 0 }} / {{ boardStockMining.run.summary?.outflow_candidates ?? 0 }}</el-descriptions-item><el-descriptions-item label="跳过不完整映射">{{ boardStockMining.run.coverage?.partial_or_unmapped_boards_skipped ?? 0 }}</el-descriptions-item></el-descriptions>
                 <el-tabs type="border-card" class="section-gap">
@@ -655,7 +655,7 @@ onBeforeUnmount(() => {
                 </el-tabs>
               </el-card>
               <el-card shadow="never" class="section-gap">
-                <template #header><div class="card-header"><div><span>涨停关联股挖掘</span><small class="realtime-refresh-time">涨停事实 → 同花顺精确概念关联 → 腾讯同刻量价；已排除接近涨停的追板对象。</small></div><el-tag :type="limitLinkageMining.run?.status === 'completed' ? 'success' : 'info'">{{ limitLinkageMining.run?.status ?? '等待涨停池' }}</el-tag></div></template>
+                <template #header><div class="card-header"><div><span>涨停关联股挖掘</span><small class="realtime-refresh-time">涨停事实 → 同花顺精确概念关联 → 腾讯同刻量价；已排除接近涨停的追板对象。仅展示在研究台，不发送飞书。</small></div><el-tag :type="limitLinkageMining.run?.status === 'completed' ? 'success' : 'info'">{{ limitLinkageMining.run?.status ?? '等待涨停池' }}</el-tag></div></template>
                 <el-alert :title="limitLinkageMining.notice ?? '仅做板块内关联研究；必须再经分钟级承接确认，不能替代交易决策。'" type="warning" :closable="false" show-icon/>
                 <el-descriptions v-if="limitLinkageMining.run" :column="mobileLayout ? 1 : 4" border size="small" class="section-gap"><el-descriptions-item label="观测时间">{{ chinaDateTime(limitLinkageMining.run.observed_at) }}</el-descriptions-item><el-descriptions-item label="涨停锚点">{{ limitLinkageMining.run.summary?.anchors ?? 0 }}</el-descriptions-item><el-descriptions-item label="精确关联">{{ limitLinkageMining.run.summary?.exact_relation_rows ?? 0 }}</el-descriptions-item><el-descriptions-item label="候选数">{{ limitLinkageMining.run.summary?.candidate_count ?? 0 }}</el-descriptions-item></el-descriptions>
                 <el-empty v-if="!(limitLinkageMining.items?.length)" description="等待同一交易日涨停池与同刻行情同时满足严格条件" :image-size="52" class="section-gap"/>

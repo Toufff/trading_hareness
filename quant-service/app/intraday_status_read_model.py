@@ -191,7 +191,7 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies) -> dict[s
     unresolved_delivery_outage = health_event.get("event_type") == "failure_streak" and health_event.get("delivery_status") == "observed"
     feishu_state = "disabled" if not alert_configured else "degraded" if (consecutive_delivery_failures or unresolved_delivery_outage) else "ready"
     items.append({
-        "key": "feishu_alert", "label": "飞书策略提醒", "role": "确认个股信号、确认后的一分钟板块轮动与五分钟综合快报投递",
+        "key": "feishu_alert", "label": "飞书策略提醒", "role": "仅投递显式观察池中已确认的个股策略信号",
         "state": feishu_state, "configured": alert_configured, "expected_active": True, "cadence": "事件触发",
         "max_age_seconds": None, "last_observed_at": delivery.get("sent_at") or delivery.get("created_at"),
         "age_seconds": round(max(0.0, (observed_at - (delivery.get("sent_at") or delivery.get("created_at"))).total_seconds()), 1)
@@ -202,6 +202,7 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies) -> dict[s
         "details": {"latest_delivery_kind": delivery.get("kind"), "latest_delivery_status": delivery.get("status"),
                     "pending_retry_count": int(pending_delivery_count or 0) + int(pending_rotation_delivery_count or 0),
                     "pending_rotation_retry_count": int(pending_rotation_delivery_count or 0),
+                    "notification_scope": "watched_stock_signals_only",
                     "meta_alert_state": (
                         "out_of_band_attention_required" if unresolved_delivery_outage else
                         "recovery_receipt_sent" if health_event.get("event_type") == "recovered" and health_event.get("delivery_status") == "sent" else
@@ -212,8 +213,8 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies) -> dict[s
     summary_delivery = dict(latest_daily_summary) if latest_daily_summary else {}
     summary_expected = deps.daily_summary_automation_enabled() and time(19, 15) <= local_now.time() < time(19, 30)
     summary_item = runtime_item(
-        key="daily_strategy_summary", label="日终研究摘要", role="汇总盘中提醒、已保存结算、盘后候选与数据门禁",
-        configured=deps.daily_summary_automation_enabled() and alert_configured, expected_active=summary_expected,
+        key="daily_strategy_summary", label="日终研究摘要", role="保存盘中结算、策略学习、盘后候选与数据门禁到研究台",
+        configured=deps.daily_summary_automation_enabled(), expected_active=summary_expected,
         last_observed_at=summary_delivery.get("sent_at") or summary_delivery.get("updated_at"), max_age_seconds=15 * 60.0,
         cadence="交易日 19:15–19:30；失败至多重试 3 次",
         details={"latest_exchange_date": str(summary_delivery.get("exchange_date") or "") or None,
@@ -225,9 +226,6 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies) -> dict[s
     if not deps.daily_summary_automation_enabled():
         summary_item["state"] = "disabled"
         summary_item["last_error"] = "DAILY_SUMMARY_AUTOMATION_ENABLED is disabled"
-    elif not alert_configured:
-        summary_item["state"] = "disabled"
-        summary_item["last_error"] = "飞书提醒目标或内部鉴权未配置；摘要仍不会向外投递"
     elif summary_delivery.get("delivery_status") == "failed":
         summary_item["state"] = "degraded"
         summary_item["last_error"] = summary_delivery.get("error_message") or "日终摘要最近一次投递失败"
