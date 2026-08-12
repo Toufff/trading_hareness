@@ -2,8 +2,9 @@ import unittest
 from datetime import date, datetime, timezone
 
 from app.analyst_trade_actions import parse_anqiang_trade_actions
+from app.analyst_expert_research import EXPERT_DEFAULTS, HORIZONS
 from app.analyst_skill_models import PROMPT_VARIANTS, _variant_payload
-from app.remote_archive import classify_remote_text, evidence_fragments, extract_topics, horizon_days, labels, normalize_topic_key, report_topic_labels, text_hash, text_only_remote_report
+from app.remote_archive import classify_remote_text, evidence_fragments, explicitness, extract_topics, horizon_days, is_market_opinion, labels, normalize_topic_key, report_topic_labels, text_hash, text_only_remote_report
 
 
 class RemoteArchiveNormalizationTests(unittest.TestCase):
@@ -79,6 +80,16 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         payload = _variant_payload(PROMPT_VARIANTS[0], [{"report_id": "x"}], [{"symbol": "600000.SH", "action_type": "buy", "stated_at": "x"}])
         self.assertEqual(payload["evaluation_status"], "collecting_point_in_time_outcomes")
         self.assertIn("manual_approval", payload["promotion"])
+
+    def test_market_scope_requires_direction_and_explicitness_is_bounded(self):
+        self.assertTrue(is_market_opinion("大盘看多，建议加仓"))
+        self.assertFalse(is_market_opinion("大盘今天成交活跃"))
+        self.assertGreater(explicitness("大盘若突破则看多", scope="market"), 0.5)
+        self.assertEqual(explicitness("普通评论", scope="market"), 0.0)
+
+    def test_expert_research_uses_fixed_defaults_and_required_horizons(self):
+        self.assertEqual(HORIZONS, (1, 2, 3, 5, 10, 20, 40, 60))
+        self.assertEqual(EXPERT_DEFAULTS, {"gamma": 0.99, "eta": 0.4, "alpha": 0.01, "kappa": 100})
 
 
 if __name__ == "__main__":

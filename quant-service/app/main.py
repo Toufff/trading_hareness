@@ -141,6 +141,7 @@ from .routers.intraday_status import build_intraday_status_router
 from .routers.analyst_reads import build_analyst_reads_router
 from .routers.analyst_trade_action_reads import build_analyst_trade_action_reads_router
 from .routers.analyst_skill_reads import build_analyst_skill_reads_router
+from .routers.analyst_research_reads import build_analyst_research_reads_router
 from .routers.event_reads import build_event_reads_router
 from .routers.strategy_reads import build_strategy_reads_router
 from .routers.strategy_pattern_reads import build_strategy_pattern_reads_router
@@ -206,6 +207,7 @@ from .request_models import (
 from .remote_archive import classify_remote_text, import_remote_report, remote_report_list_state, reprocess_remote_reports
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
+from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
 from .telemetry import (
     CONTENT_TYPE_LATEST,
     db_pool_connections,
@@ -877,10 +879,11 @@ def analyst_text_factor_summary(connection: Any, as_of_date: date, lookback_days
     with connection.cursor() as cursor:
         cursor.execute(
             """SELECT r.remote_analyst_id,r.remote_report_id,r.summary,r.sections,
-                      coalesce(r.remote_updated_at,r.remote_created_at,r.synced_at) AS available_at
+                      r.first_synced_at AS available_at,
+                      coalesce(r.remote_published_at,r.remote_updated_at,r.remote_created_at) AS published_at
                  FROM quant.remote_reports r
-                WHERE coalesce(r.remote_updated_at,r.remote_created_at,r.synced_at)::date BETWEEN %s AND %s
-                  AND (%s::timestamptz IS NULL OR coalesce(r.remote_updated_at,r.remote_created_at,r.synced_at)<=%s)
+                WHERE r.first_synced_at::date BETWEEN %s AND %s
+                  AND (%s::timestamptz IS NULL OR r.first_synced_at<=%s)
                 ORDER BY available_at DESC""",
             (earliest, as_of_date, available_before, available_before),
         )
@@ -7572,6 +7575,7 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
         await stage("close_review", lambda: run_database_blocking(_persist_close_review, trade_date))
         await stage("analyst_outcomes", lambda: run_database_blocking(recompute_outcomes, trade_date))
         await stage("analyst_scorecards", lambda: run_database_blocking(recompute_scorecards, trade_date))
+        await stage("analyst_expert_research", lambda: run_database_blocking(rebuild_analyst_research, trade_date))
         await stage("post_close_strategy", lambda: run_database_blocking(
             run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date)
         ))
@@ -8313,6 +8317,7 @@ app.include_router(build_research_readiness_router(
 app.include_router(build_analyst_reads_router(db, remote_report_list_state, analyst_text_factor_summary))
 app.include_router(build_analyst_trade_action_reads_router(db, anqiang_trade_action_replay))
 app.include_router(build_analyst_skill_reads_router(db, analyst_skill_profiles))
+app.include_router(build_analyst_research_reads_router(db, analyst_research_status))
 app.include_router(build_event_reads_router(db))
 app.include_router(build_strategy_reads_router(db, STRATEGY_DECISION_MODEL_VERSION))
 app.include_router(build_strategy_pattern_reads_router(

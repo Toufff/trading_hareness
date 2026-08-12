@@ -45,6 +45,7 @@ from app.routers.intraday_status import build_intraday_status_router
 from app.routers.analyst_reads import build_analyst_reads_router
 from app.routers.analyst_trade_action_reads import build_analyst_trade_action_reads_router
 from app.routers.analyst_skill_reads import build_analyst_skill_reads_router
+from app.routers.analyst_research_reads import build_analyst_research_reads_router
 from app.routers.event_reads import build_event_reads_router
 from app.routers.strategy_reads import build_strategy_reads_router
 from app.routers.board_rotation_reads import build_board_rotation_reads_router
@@ -690,6 +691,10 @@ class ProviderHelperTests(unittest.TestCase):
         )
         skill_router = build_analyst_skill_reads_router(MagicMock(), lambda _database, _analyst, _limit: {})
         self.assertEqual({route.path: route.methods for route in skill_router.routes}["/api/v1/analyst-skills"], {"GET"})
+        research_router = build_analyst_research_reads_router(MagicMock(), lambda _database, _as_of: {})
+        self.assertEqual(
+            {route.path: route.methods for route in research_router.routes}["/api/v1/analyst-research/status"], {"GET"},
+        )
 
     def test_event_reads_router_keeps_announcements_and_lhb_as_get_only(self):
         router = build_event_reads_router(MagicMock())

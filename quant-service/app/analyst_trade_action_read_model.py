@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -67,11 +67,13 @@ def anqiang_trade_action_replay(database: Any, as_of_date: date | None, limit: i
         else:
             item["same_session_return_pct"] = None
             item["evaluation_quality"] = "awaiting_market_data"
-        item["factor_eligible"] = False
-        item["factor_exclusion_reason"] = "author_stated_time differs from report availability; review-only until independently received live"
+        delay = item["available_at"] - item["stated_at"] if item.get("available_at") and item.get("stated_at") else None
+        item["availability_delay_seconds"] = int(delay.total_seconds()) if delay else None
+        item["factor_eligible"] = bool(delay is not None and timedelta(0) <= delay <= timedelta(minutes=5))
+        item["factor_exclusion_reason"] = None if item["factor_eligible"] else "returns start at first local receipt; delayed archive action is replay-only"
         items.append(item)
     return {
         "analyst_id": "anqiang-touzi-riji", "as_of_date": str(as_of_date) if as_of_date else None,
         "items": items, "limit": limit,
-        "data_boundary": "author-stated timestamps are replay evidence; only report available_at is point-in-time factor eligible",
+        "data_boundary": "author-stated timestamps are replay evidence; any return starts at first local receipt",
     }

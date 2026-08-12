@@ -11,7 +11,8 @@ from psycopg.types.json import Json
 
 from .analysis import EXTRACTOR_VERSION, direction_source, extract_signals
 from .analyst_trade_actions import sync_anqiang_trade_actions
-from .analyst_skill_models import rebuild_analyst_skill_profile
+from .analyst_skill_models import rebuild_all_analyst_skill_profiles, rebuild_analyst_skill_profile
+from .analyst_expert_research import rebuild_analyst_research
 from .database import Database
 
 
@@ -23,6 +24,9 @@ TOPIC_TERMS = (
     "金属钨", "AI应用", "人工智能应用", "硬件科技", "有色金属",
     "黄金", "金矿", "反制概念",
 )
+
+_MARKET_SCOPE_TERMS = ("大盘", "市场", "指数", "上证", "沪指", "深成", "创业板", "行情")
+_EXPLICIT_ACTION_TERMS = ("买入", "卖出", "加仓", "减仓", "开仓", "止损", "回避", "看多", "看空", "看好")
 
 REMOTE_TEXT_FIELDS = (
     "analyst", "analyst_id", "report_id", "date", "title", "summary", "version", "content_hash",
@@ -107,6 +111,21 @@ def classify_remote_text(text: str) -> tuple[int, float, float]:
     if negative > positive:
         return -1, min(0.95, 0.55 + negative * 0.1), min(0.9, 0.55 + negative * 0.08)
     return 0, 0.5, 0.4
+
+
+def explicitness(text: str, *, scope: str) -> float:
+    """Score explicit opinions without turning generic prose into a signal."""
+    cue_count = sum(term in text for term in _EXPLICIT_ACTION_TERMS)
+    conditional = sum(term in text for term in ("如果", "若", "只有", "不破", "跌破", "突破"))
+    scoped = any(term in text for term in _MARKET_SCOPE_TERMS) if scope == "market" else True
+    if not scoped:
+        return 0.0
+    return min(1.0, round(0.25 + cue_count * 0.16 + conditional * 0.06, 4))
+
+
+def is_market_opinion(text: str) -> bool:
+    direction, _, _ = classify_remote_text(text)
+    return direction != 0 and any(term in text for term in _MARKET_SCOPE_TERMS)
 
 
 def evidence_fragments(report: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
@@ -219,7 +238,7 @@ def import_remote_report(db: Database, report: dict[str, Any], force_reprocess: 
     content_hash = str(report.get("content_hash") or "").strip()
     if not analyst_id or not report_id or not report_date or not version or not content_hash:
         raise ValueError("remote report requires analyst_id, report_id, date, version and content_hash")
-    available_at = parse_timestamp(report.get("updated_at") or report.get("created_at"))
+    published_at = parse_timestamp(report.get("updated_at") or report.get("created_at"))
     markdown = str(report.get("raw_markdown") or "")
     evidence_count = 0
     claims_count = 0
@@ -230,31 +249,37 @@ def import_remote_report(db: Database, report: dict[str, Any], force_reprocess: 
                ON CONFLICT(remote_analyst_id) DO UPDATE SET name=EXCLUDED.name,organization=EXCLUDED.organization,
                description=EXCLUDED.description,remote_updated_at=EXCLUDED.remote_updated_at,remote_metadata=EXCLUDED.remote_metadata,synced_at=now()""",
             (analyst_id, str(analyst.get("name") or analyst_id), str(analyst.get("organization") or ""),
-             str(analyst.get("description") or ""), available_at, Json(analyst)),
+             str(analyst.get("description") or ""), published_at, Json(analyst)),
         )
         previous = connection.execute(
             "SELECT remote_version,content_hash,raw_markdown,sections,materials FROM quant.remote_reports WHERE remote_report_id=%s", (report_id,)
         ).fetchone()
         connection.execute(
             """INSERT INTO quant.remote_reports(remote_report_id,remote_analyst_id,report_date,title,summary,source_url,remote_version,content_hash,
-                 remote_created_at,remote_updated_at,raw_markdown,sections,materials,mentioned_stocks,mentioned_sectors,predictions,payload,synced_at)
-               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())
+                 remote_created_at,remote_updated_at,remote_published_at,raw_markdown,sections,materials,mentioned_stocks,mentioned_sectors,predictions,payload,synced_at)
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())
                ON CONFLICT(remote_report_id) DO UPDATE SET remote_analyst_id=EXCLUDED.remote_analyst_id,report_date=EXCLUDED.report_date,
                  title=EXCLUDED.title,summary=EXCLUDED.summary,source_url=EXCLUDED.source_url,remote_version=EXCLUDED.remote_version,
-                 content_hash=EXCLUDED.content_hash,remote_updated_at=EXCLUDED.remote_updated_at,raw_markdown=EXCLUDED.raw_markdown,
+                 content_hash=EXCLUDED.content_hash,remote_updated_at=EXCLUDED.remote_updated_at,remote_published_at=EXCLUDED.remote_published_at,raw_markdown=EXCLUDED.raw_markdown,
                  sections=EXCLUDED.sections,materials=EXCLUDED.materials,mentioned_stocks=EXCLUDED.mentioned_stocks,
-                 mentioned_sectors=EXCLUDED.mentioned_sectors,predictions=EXCLUDED.predictions,payload=EXCLUDED.payload,synced_at=now()""",
+                 mentioned_sectors=EXCLUDED.mentioned_sectors,predictions=EXCLUDED.predictions,payload=EXCLUDED.payload,synced_at=now()
+               RETURNING first_synced_at""",
             (report_id, analyst_id, report_date, str(report.get("title") or ""), str(report.get("summary") or ""), report.get("source_url"),
-             version, content_hash, parse_timestamp(report.get("created_at")), available_at, markdown, Json(report.get("sections") or {}),
+             version, content_hash, parse_timestamp(report.get("created_at")), published_at, published_at, markdown, Json(report.get("sections") or {}),
              Json(report.get("materials") or []), Json(report.get("mentioned_stocks") or []), Json(report.get("mentioned_sectors") or []),
              Json(report.get("predictions") or []), Json(report)),
-        )
-        connection.execute(
+        ).fetchone()
+        version_row = connection.execute(
             """INSERT INTO quant.remote_report_versions(remote_report_id,remote_version,content_hash,payload)
                VALUES(%s,%s,%s,%s)
-               ON CONFLICT(remote_report_id,remote_version,content_hash) DO UPDATE SET last_seen_at=now(),payload=EXCLUDED.payload""",
+               ON CONFLICT(remote_report_id,remote_version,content_hash) DO UPDATE SET last_seen_at=now(),payload=EXCLUDED.payload
+               RETURNING first_seen_at""",
             (report_id, version, content_hash, Json(report)),
-        )
+        ).fetchone()
+        # A correction/version is not usable before that exact version was
+        # first acquired locally.  For an original report this equals the
+        # report's first_synced_at; for a later edit it is deliberately later.
+        available_at = version_row["first_seen_at"]
         sanitized_content_changed = previous is not None and (
             str(previous["raw_markdown"] or "") != markdown
             or dict(previous["sections"] or {}) != dict(report.get("sections") or {})
@@ -295,13 +320,15 @@ def import_remote_report(db: Database, report: dict[str, Any], force_reprocess: 
                 )
                 claim = connection.execute(
                     """INSERT INTO quant.analyst_claims(evidence_id,remote_analyst_id,scope,subject_key,subject_label,direction,strength,horizon_days,
-                         extraction_confidence,extractor_version,available_at,raw)
-                       VALUES(%s,%s,'stock',%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         extraction_confidence,extractor_version,published_at,available_at,explicitness,raw)
+                       VALUES(%s,%s,'stock',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                        ON CONFLICT(evidence_id,scope,subject_key,horizon_days,extractor_version) DO UPDATE SET direction=EXCLUDED.direction,
-                         strength=EXCLUDED.strength,extraction_confidence=EXCLUDED.extraction_confidence,raw=EXCLUDED.raw
+                         strength=EXCLUDED.strength,extraction_confidence=EXCLUDED.extraction_confidence,published_at=EXCLUDED.published_at,
+                         available_at=EXCLUDED.available_at,explicitness=EXCLUDED.explicitness,raw=EXCLUDED.raw
                        RETURNING claim_id""",
                     (row["evidence_id"], analyst_id, signal.symbol, signal.symbol, signal.direction, signal.strength, signal.horizon_days,
-                     signal.extraction_confidence, REMOTE_EXTRACTOR_VERSION, available_at, Json({
+                     signal.extraction_confidence, REMOTE_EXTRACTOR_VERSION, published_at, available_at,
+                     explicitness(signal.evidence_text, scope="stock"), Json({
                          "remote_report_id": report_id, "evidence_key": evidence_key,
                          "direction_source": direction_source(signal.evidence_text),
                          "evidence_text": signal.evidence_text,
@@ -329,16 +356,32 @@ def import_remote_report(db: Database, report: dict[str, Any], force_reprocess: 
                         subject_key = normalize_topic_key(label)
                     claim = connection.execute(
                         """INSERT INTO quant.analyst_claims(evidence_id,remote_analyst_id,scope,subject_key,subject_label,direction,strength,horizon_days,
-                         extraction_confidence,extractor_version,available_at,raw)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         extraction_confidence,extractor_version,published_at,available_at,explicitness,raw)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                        ON CONFLICT(evidence_id,scope,subject_key,horizon_days,extractor_version) DO UPDATE SET direction=EXCLUDED.direction,
-                         strength=EXCLUDED.strength,raw=EXCLUDED.raw RETURNING claim_id""",
+                         strength=EXCLUDED.strength,published_at=EXCLUDED.published_at,available_at=EXCLUDED.available_at,
+                         explicitness=EXCLUDED.explicitness,raw=EXCLUDED.raw RETURNING claim_id""",
                         (row["evidence_id"], analyst_id, scope, subject_key, label, direction, strength, horizon_days(body), confidence,
-                         REMOTE_TOPIC_EXTRACTOR_VERSION if scope == "theme" else REMOTE_EXTRACTOR_VERSION, available_at,
+                         REMOTE_TOPIC_EXTRACTOR_VERSION if scope == "theme" else REMOTE_EXTRACTOR_VERSION, published_at, available_at,
+                         explicitness(body, scope=scope),
                          Json({"remote_report_id": report_id, "evidence_key": evidence_key, "source_label": label})),
                     ).fetchone()
                     persist_claim_revision(connection, analyst_id, scope, subject_key, direction, row["evidence_id"], claim["claim_id"])
                     claims_count += 1
+            if is_market_opinion(body):
+                claim = connection.execute(
+                    """INSERT INTO quant.analyst_claims(evidence_id,remote_analyst_id,scope,subject_key,subject_label,direction,strength,horizon_days,
+                         extraction_confidence,extractor_version,published_at,available_at,explicitness,raw)
+                       VALUES(%s,%s,'market','CN_A_MARKET','A股整体',%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       ON CONFLICT(evidence_id,scope,subject_key,horizon_days,extractor_version) DO UPDATE SET
+                         direction=EXCLUDED.direction,strength=EXCLUDED.strength,published_at=EXCLUDED.published_at,
+                         available_at=EXCLUDED.available_at,explicitness=EXCLUDED.explicitness,raw=EXCLUDED.raw RETURNING claim_id""",
+                    (row["evidence_id"], analyst_id, direction, strength, horizon_days(body), confidence,
+                     "remote-market-normalizer-v1", published_at, available_at, explicitness(body, scope="market"),
+                     Json({"remote_report_id": report_id, "evidence_key": evidence_key, "evidence_text": body})),
+                ).fetchone()
+                persist_claim_revision(connection, analyst_id, "market", "CN_A_MARKET", direction, row["evidence_id"], claim["claim_id"])
+                claims_count += 1
     return {"status": "updated", "remote_report_id": report_id, "evidence": evidence_count, "claims": claims_count,
             "trade_actions": trade_actions}
 
@@ -354,6 +397,7 @@ def reprocess_remote_reports(db: Database, limit: int = 100) -> dict[str, Any]:
         skill_profiles = rebuild_all_analyst_skill_profiles(
             connection, datetime.now(ZoneInfo("Asia/Shanghai")).date(),
         )
+        research = rebuild_analyst_research(connection, datetime.now(ZoneInfo("Asia/Shanghai")).date())
     return {
         "status": "completed",
         "reports": len(results),
@@ -361,6 +405,7 @@ def reprocess_remote_reports(db: Database, limit: int = 100) -> dict[str, Any]:
         "claims": sum(int(item.get("claims", 0)) for item in results),
         "items": results,
         "skill_profiles": len(skill_profiles["profiles"]),
+        "research": research,
     }
 
 

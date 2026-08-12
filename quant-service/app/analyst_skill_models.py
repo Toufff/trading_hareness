@@ -9,7 +9,7 @@ prompt winner changes a live alert or trade rule.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from psycopg.types.json import Json
@@ -78,7 +78,7 @@ def _variant_payload(variant: dict[str, str], reports: list[dict[str, Any]], act
 def rebuild_analyst_skill_profile(connection: Any, analyst_id: str, as_of_date: date) -> dict[str, Any]:
     """Materialize a research-only language skill card for one analyst."""
     reports = [dict(row) for row in connection.execute(
-        """SELECT remote_report_id,report_date,summary,sections,remote_updated_at,remote_created_at,synced_at
+        """SELECT remote_report_id,report_date,summary,sections,remote_published_at,remote_updated_at,remote_created_at,first_synced_at
              FROM quant.remote_reports WHERE remote_analyst_id=%s AND report_date<=%s
              ORDER BY report_date DESC,remote_updated_at DESC LIMIT 60""",
         (analyst_id, as_of_date),
@@ -97,10 +97,13 @@ def rebuild_analyst_skill_profile(connection: Any, analyst_id: str, as_of_date: 
     stance = _stance(text)
     action_counts = Counter(str(action["action_type"]) for action in actions)
     action_dates = {action["stated_at"].date() for action in actions if action.get("stated_at")}
-    # A report compiled after the source timestamp is excellent for replay but
-    # unavailable to a contemporaneous system.  Count it explicitly rather
-    # than letting it leak into an apparent online learning sample.
-    factor_eligible = [action for action in actions if action.get("available_at") and action.get("stated_at") and action["available_at"] <= action["stated_at"]]
+    # All returns must start from local receipt, never the author's stated
+    # time.  A delayed archive can still be useful for replay, but it is not a
+    # prompt/skill training example for live inference.
+    factor_eligible = [
+        action for action in actions if action.get("available_at") and action.get("stated_at")
+        and action["available_at"] <= action["stated_at"] + timedelta(minutes=5)
+    ]
     profile = {
         "model_version": SKILL_MODEL_VERSION,
         "analyst_id": analyst_id,
@@ -115,7 +118,7 @@ def rebuild_analyst_skill_profile(connection: Any, analyst_id: str, as_of_date: 
         },
         "point_in_time_integrity": {
             "factor_eligible_actions": len(factor_eligible), "replay_only_actions": len(actions) - len(factor_eligible),
-            "rule": "author-stated timestamps are not factor eligible unless the system received the message no later than that timestamp",
+            "rule": "returns begin at first local receipt; author-timed actions delayed by more than five minutes remain replay-only",
         },
         "skill_score": {
             "status": "insufficient_mature_point_in_time_samples",
