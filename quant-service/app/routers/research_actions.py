@@ -14,6 +14,7 @@ from uuid import UUID
 from fastapi import APIRouter
 
 from ..request_models import (
+    AnalystResearchProfileRequest,
     ClaimReviewRequest,
     FactorEvaluationRequest,
     FetchRunReconcileRequest,
@@ -38,6 +39,7 @@ class ResearchActionDependencies:
     backtest: Callable[[StrategyBacktestRequest], Awaitable[dict[str, Any]]]
     reconcile_fetch_runs: Callable[[FetchRunReconcileRequest], Awaitable[dict[str, Any]]]
     build_snapshot: Callable[[SnapshotRequest], Awaitable[dict[str, Any]]]
+    update_analyst_research_profile: Callable[[str, AnalystResearchProfileRequest], Awaitable[dict[str, Any]]]
 
 
 def build_research_actions_router(deps: ResearchActionDependencies) -> APIRouter:
@@ -83,6 +85,10 @@ def build_research_actions_router(deps: ResearchActionDependencies) -> APIRouter
     @router.post("/api/v1/data-snapshots/build")
     async def build_snapshot(payload: SnapshotRequest) -> dict[str, Any]:
         return await deps.build_snapshot(payload)
+
+    @router.put("/api/v1/analyst-research/profiles/{analyst_id}")
+    async def update_analyst_research_profile(analyst_id: str, payload: AnalystResearchProfileRequest) -> dict[str, Any]:
+        return await deps.update_analyst_research_profile(analyst_id, payload)
 
     return router
 

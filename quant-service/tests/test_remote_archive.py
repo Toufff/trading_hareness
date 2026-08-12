@@ -2,7 +2,7 @@ import unittest
 from datetime import date, datetime, timezone
 
 from app.analyst_trade_actions import parse_anqiang_trade_actions
-from app.analyst_expert_research import EXPERT_DEFAULTS, HORIZONS
+from app.analyst_expert_research import EXPERT_DEFAULTS, HORIZONS, _clustered_mean, _pearson, _softmax_weights
 from app.analyst_skill_models import PROMPT_VARIANTS, _variant_payload
 from app.remote_archive import classify_remote_text, evidence_fragments, explicitness, extract_topics, horizon_days, is_market_opinion, labels, normalize_topic_key, report_topic_labels, text_hash, text_only_remote_report
 
@@ -90,6 +90,18 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
     def test_expert_research_uses_fixed_defaults_and_required_horizons(self):
         self.assertEqual(HORIZONS, (1, 2, 3, 5, 10, 20, 40, 60))
         self.assertEqual(EXPERT_DEFAULTS, {"gamma": 0.99, "eta": 0.4, "alpha": 0.01, "kappa": 100})
+
+    def test_expert_weights_use_fixed_share_and_independence_as_explicit_prior(self):
+        weights = _softmax_weights({"independent": 0.0, "promotional": 0.0}, {
+            "independent": {"independence_class": "independent"},
+            "promotional": {"independence_class": "promotional"},
+        })
+        self.assertAlmostEqual(sum(weights.values()), 1.0)
+        self.assertGreater(weights["independent"], weights["promotional"])
+
+    def test_clustered_statistics_only_count_date_clusters(self):
+        self.assertEqual(_clustered_mean([])["clusters"], 0)
+        self.assertAlmostEqual(_pearson([(1.0, 1.0), (2.0, 2.0)]) or 0.0, 1.0)
 
 
 if __name__ == "__main__":

@@ -246,6 +246,7 @@ class ProviderHelperTests(unittest.TestCase):
             analyse_ingestion=action, import_remote_report=action, reprocess_remote_reports=action,
             review_claim=action, update_universe=action, build_features=action,
             evaluate_factors=action, backtest=action, reconcile_fetch_runs=action, build_snapshot=action,
+            update_analyst_research_profile=action,
         ))
         methods_by_path = {route.path: route.methods for route in router.routes}
         for path in (
@@ -256,8 +257,9 @@ class ProviderHelperTests(unittest.TestCase):
             "/api/v1/universes/members", "/api/v1/features/build",
             "/api/v1/factors/evaluate", "/api/v1/strategies/backtest",
             "/api/v1/operations/fetch-runs/reconcile-stale", "/api/v1/data-snapshots/build",
+            "/api/v1/analyst-research/profiles/{analyst_id}",
         ):
-            self.assertEqual(methods_by_path[path], {"POST"})
+            self.assertEqual(methods_by_path[path], {"PUT"} if path.endswith("/{analyst_id}") else {"POST"})
 
     def test_ingestion_actions_router_has_explicit_bounded_write_contracts(self):
         action = AsyncMock(return_value={"status": "ok"})
@@ -694,6 +696,9 @@ class ProviderHelperTests(unittest.TestCase):
         research_router = build_analyst_research_reads_router(MagicMock(), lambda _database, _as_of: {})
         self.assertEqual(
             {route.path: route.methods for route in research_router.routes}["/api/v1/analyst-research/status"], {"GET"},
+        )
+        self.assertEqual(
+            {route.path: route.methods for route in research_router.routes}["/api/v1/analyst-research/profiles"], {"GET"},
         )
 
     def test_event_reads_router_keeps_announcements_and_lhb_as_get_only(self):

@@ -326,6 +326,13 @@ class RemoteReportReprocessRequest(BaseModel):
     limit: int = Field(default=100, ge=1, le=500)
 
 
+class AnalystResearchProfileRequest(BaseModel):
+    independence_class: Literal["unknown", "independent", "institutional", "promotional"] = "unknown"
+    audience_size: int | None = Field(default=None, ge=0)
+    audience_as_of: datetime | None = None
+    evidence: str = Field(default="", max_length=1000)
+
+
 class SnapshotRequest(BaseModel):
     as_of_date: date | None = None
     knowledge_cutoff: datetime | None = None

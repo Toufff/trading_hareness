@@ -164,6 +164,7 @@ from .routers.ingestion_actions import IngestionActionDependencies, build_ingest
 from .market_rules import a_share_limit_ratio, china_equity_session, china_futures_session, cn_today, is_st_security_name
 from .request_models import (
     AkShareProbeRequest,
+    AnalystResearchProfileRequest,
     AnnouncementSyncRequest,
     AllBoardMemberBackfillRequest,
     BarsImport,
@@ -8694,6 +8695,25 @@ def reprocess_remote_archive_reports(payload: RemoteReportReprocessRequest) -> d
     return reprocess_remote_reports(db, payload.limit)
 
 
+def update_analyst_research_profile(analyst_id: str, payload: AnalystResearchProfileRequest) -> dict[str, Any]:
+    with db.transaction() as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM quant.remote_analysts WHERE remote_analyst_id=%s", (analyst_id,)
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail="remote analyst not found")
+        connection.execute(
+            """INSERT INTO quant.analyst_research_profiles(remote_analyst_id,independence_class,audience_size,audience_as_of,evidence)
+               VALUES(%s,%s,%s,%s,%s)
+               ON CONFLICT(remote_analyst_id) DO UPDATE SET independence_class=EXCLUDED.independence_class,
+                 audience_size=EXCLUDED.audience_size,audience_as_of=EXCLUDED.audience_as_of,evidence=EXCLUDED.evidence,updated_at=now()""",
+            (analyst_id, payload.independence_class, payload.audience_size, payload.audience_as_of, payload.evidence),
+        )
+        result = rebuild_analyst_research(connection, cn_today())
+    return {"analyst_id": analyst_id, "status": "updated", "research_status": result["sleeping_experts"]["status"],
+            "boundary": "manual provenance prior; no live strategy effect"}
+
+
 def review_claim(review_id: uuid.UUID, payload: ClaimReviewRequest) -> dict[str, Any]:
     with db.transaction() as connection:
         item = connection.execute(
@@ -8942,6 +8962,10 @@ async def build_snapshot_endpoint(payload: SnapshotRequest) -> dict[str, Any]:
     return await run_database_blocking(build_snapshot, payload, timeout_seconds=30)
 
 
+async def update_analyst_research_profile_endpoint(analyst_id: str, payload: AnalystResearchProfileRequest) -> dict[str, Any]:
+    return await run_database_blocking(update_analyst_research_profile, analyst_id, payload, timeout_seconds=30)
+
+
 app.include_router(build_research_actions_router(ResearchActionDependencies(
     analyse_ingestion=analyse_ingestion_endpoint,
     import_remote_report=import_remote_archive_report_endpoint,
@@ -8953,6 +8977,7 @@ app.include_router(build_research_actions_router(ResearchActionDependencies(
     backtest=backtest_strategy_endpoint,
     reconcile_fetch_runs=reconcile_stale_fetch_runs_endpoint,
     build_snapshot=build_snapshot_endpoint,
+    update_analyst_research_profile=update_analyst_research_profile_endpoint,
 )))
 
 

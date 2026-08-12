@@ -102,7 +102,7 @@ def rebuild_analyst_skill_profile(connection: Any, analyst_id: str, as_of_date: 
     # prompt/skill training example for live inference.
     factor_eligible = [
         action for action in actions if action.get("available_at") and action.get("stated_at")
-        and action["available_at"] <= action["stated_at"] + timedelta(minutes=5)
+        and timedelta(0) <= action["available_at"] - action["stated_at"] <= timedelta(minutes=5)
     ]
     profile = {
         "model_version": SKILL_MODEL_VERSION,

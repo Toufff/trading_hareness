@@ -10,7 +10,7 @@ def remote_reports(database: Any, limit: int, offset: int) -> dict[str, Any]:
     with database.transaction() as connection:
         rows = connection.execute(
             """SELECT r.remote_report_id,r.remote_analyst_id,a.name analyst_name,r.report_date,r.title,r.summary,r.remote_version,
-                      r.content_hash,r.remote_updated_at,r.synced_at,r.mentioned_stocks,r.mentioned_sectors,r.predictions
+                      r.content_hash,r.remote_published_at,r.first_synced_at,r.remote_updated_at,r.synced_at,r.mentioned_stocks,r.mentioned_sectors,r.predictions
                FROM quant.remote_reports r JOIN quant.remote_analysts a ON a.remote_analyst_id=r.remote_analyst_id
                ORDER BY r.report_date DESC,r.remote_updated_at DESC LIMIT %s OFFSET %s""", (limit, offset),
         ).fetchall()
@@ -24,7 +24,7 @@ def analyst_claims(database: Any, limit: int, offset: int) -> dict[str, Any]:
     with database.transaction() as connection:
         rows = connection.execute(
             """SELECT c.claim_id,c.remote_analyst_id,a.name analyst_name,c.scope,c.subject_key,c.subject_label,c.direction,c.strength,
-                      c.horizon_days,c.extraction_confidence,c.available_at,e.remote_report_id,e.evidence_key,
+                      c.horizon_days,c.extraction_confidence,c.explicitness,c.published_at,c.available_at,e.remote_report_id,e.evidence_key,
                       c.raw->>'direction_source' direction_source,left(e.body,500) evidence
                FROM quant.analyst_claims c JOIN quant.remote_analysts a ON a.remote_analyst_id=c.remote_analyst_id
                JOIN quant.analyst_evidence e ON e.evidence_id=c.evidence_id
