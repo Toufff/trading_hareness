@@ -312,6 +312,27 @@ def _audience_profile_map(connection: Any) -> dict[str, dict[str, Any]]:
     ).fetchall()}
 
 
+def _herding_effective_sample(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Estimate effective independent experts from overlapping daily opinions."""
+    daily: defaultdict[tuple[date, str, str], dict[str, int]] = defaultdict(dict)
+    for row in rows:
+        daily[(row["opinion_date"], str(row["scope"]), str(row["subject_key"]))][str(row["remote_analyst_id"])] = int(row["direction"])
+    pairs: defaultdict[tuple[str, str], list[float]] = defaultdict(list)
+    for opinions in daily.values():
+        ids = sorted(opinions)
+        for index, left in enumerate(ids):
+            for right in ids[index + 1:]:
+                pairs[(left, right)].append(float(opinions[left] * opinions[right]))
+    correlations = [mean(values) for values in pairs.values() if values]
+    analyst_count = len({str(row["remote_analyst_id"]) for row in rows})
+    average_corr = mean(correlations) if correlations else None
+    effective = analyst_count / (1 + (analyst_count - 1) * average_corr) if analyst_count and average_corr is not None else None
+    return {"analyst_count": analyst_count, "overlap_pairs": len(correlations),
+            "average_pair_sign_correlation": round(average_corr, 6) if average_corr is not None else None,
+            "effective_independent_analysts": round(effective, 4) if effective is not None else None,
+            "method": "N_eff=N/(1+(N-1)*mean_pair_sign_correlation)"}
+
+
 def equal_weight_baseline(connection: Any) -> dict[str, Any]:
     rows = _mature_outcome_rows(connection)
     by_horizon: dict[int, list[dict[str, Any]]] = defaultdict(list)
@@ -363,9 +384,20 @@ def equal_weight_baseline(connection: Any) -> dict[str, Any]:
             bucket = "large" if int(size) >= 100000 else "small"
             audience_values[bucket].append(_number(row["directional_return"]))
     audience_status = "completed" if len(audience_values) >= 2 else "unavailable"
+    direction_values: defaultdict[int, list[float]] = defaultdict(list)
+    regime_values: defaultdict[str, list[float]] = defaultdict(list)
+    regimes = _market_regimes(connection, {row["opinion_date"] for row in rows})
+    for row in rows:
+        direction_values[int(row["direction"])].append(_number(row["directional_return"]))
+        regime_values[regimes.get(row["opinion_date"], "unknown")].append(_number(row["directional_return"]))
+    crossing = next((point["horizon_days"] for point in curves if (point["mean_directional_residual"] or 0.0) < 0), None)
     return {"model": "equal_weight_baseline_v2", "status": "research_only", "horizon_curve": curves,
-            "drift_reversal": {"car_turning_horizon": reversal, "increments": increments,
-                                 "interpretation": "first horizon where mean directional residual CAR weakens"},
+            "drift_reversal": {"car_turning_horizon": reversal, "first_negative_car_horizon": crossing, "increments": increments,
+                                 "direction_asymmetry": {"long_mean": round(mean(direction_values[1]), 6) if direction_values[1] else None,
+                                                           "short_mean": round(mean(direction_values[-1]), 6) if direction_values[-1] else None},
+                                 "market_regime_interaction": {regime: {"observations": len(values), "mean": round(mean(values), 6)}
+                                                               for regime, values in sorted(regime_values.items())},
+                                 "interpretation": "term structure, sign crossing, direction asymmetry, and pre-specified market-regime interaction"},
             "analyst_stratification": {"analysts": analyst_rows, "top_vs_rest": {"status": "completed" if ranked else "insufficient_samples",
                 "top_mean": round(mean(top_values), 6) if top_values else None, "rest_mean": round(mean(rest_values), 6) if rest_values else None,
                 "eligible_analysts": len(ranked)}},
@@ -373,6 +405,7 @@ def equal_weight_baseline(connection: Any) -> dict[str, Any]:
                 "small_mean": round(mean(audience_values["small"]), 6) if audience_values["small"] else None,
                 "large_mean": round(mean(audience_values["large"]), 6) if audience_values["large"] else None,
                 "reason": None if audience_status == "completed" else "no reviewed point-in-time audience-size profiles"},
+            "herding_adjustment": _herding_effective_sample(rows),
             "go_no_go": {"status": "go" if any((point["t_stat"] or 0) >= 1.96 and (point["ic"] or 0) > 0 for point in curves) else "stop_or_collect",
                          "rule": "advance only if positive IC is significant using date-cluster standard errors"}}
 

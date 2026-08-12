@@ -2,7 +2,7 @@ import unittest
 from datetime import date, datetime, timezone
 
 from app.analyst_trade_actions import parse_anqiang_trade_actions
-from app.analyst_expert_research import EXPERT_DEFAULTS, HORIZONS, _clustered_mean, _pearson, _softmax_weights
+from app.analyst_expert_research import EXPERT_DEFAULTS, HORIZONS, _clustered_mean, _herding_effective_sample, _pearson, _softmax_weights
 from app.analyst_skill_models import PROMPT_VARIANTS, _variant_payload
 from app.remote_archive import classify_remote_text, evidence_fragments, explicitness, extract_topics, horizon_days, is_market_opinion, labels, normalize_topic_key, report_topic_labels, text_hash, text_only_remote_report
 
@@ -102,6 +102,14 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
     def test_clustered_statistics_only_count_date_clusters(self):
         self.assertEqual(_clustered_mean([])["clusters"], 0)
         self.assertAlmostEqual(_pearson([(1.0, 1.0), (2.0, 2.0)]) or 0.0, 1.0)
+
+    def test_herding_diagnostic_reduces_effective_expert_count_for_same_sign_overlap(self):
+        rows = [
+            {"opinion_date": date(2026, 8, 10), "scope": "theme", "subject_key": "x", "remote_analyst_id": "a", "direction": 1},
+            {"opinion_date": date(2026, 8, 10), "scope": "theme", "subject_key": "x", "remote_analyst_id": "b", "direction": 1},
+        ]
+        report = _herding_effective_sample(rows)
+        self.assertEqual(report["effective_independent_analysts"], 1.0)
 
 
 if __name__ == "__main__":
