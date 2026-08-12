@@ -4,6 +4,15 @@
 !.env.example
 certs/
 
+# Local n8n exports and workflow generators retain private endpoints and
+# credential bindings.  They remain available for local operations but must
+# never be added to the public source repository.
+workflows/managed/
+scripts/build-*-workflow.mjs
+scripts/fix-native-reserve.mjs
+scripts/patch-feishu-workflow.mjs
+scripts/reconcile-text-item-workflow.mjs
+
 # Runtime state, local backups and generated logs
 backups/
 logs/
