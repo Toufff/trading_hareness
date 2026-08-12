@@ -2,7 +2,7 @@ import asyncio
 import threading
 import unittest
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,7 +20,7 @@ from app.board_rotation import board_rotation_alert_text, board_rotation_candida
 from app.board_stock_mining import board_stock_mining_candidates
 from app.limit_linkage_mining import limit_linkage_candidates
 from app.free_market_providers import _tencent_order_book_row
-from app.order_book_features import order_book_observation
+from app.order_book_features import aggregate_order_book_observations, order_book_observation
 from app.intraday_outcomes import a_share_return_decomposition
 from app.board_curve_read_model import board_display_slots, intraday_board_flow_curves as read_intraday_board_flow_curves, latest_close_sector_review_report as read_latest_close_sector_review_report
 from app.research_catalog_read_model import data_quality_issues as read_data_quality_issues, factor_evaluations as read_factor_evaluations, latest_features as read_latest_features, strategy_experiments as read_strategy_experiments
@@ -2914,6 +2914,18 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(observed["cumulative_amount_delta"], 0.0)
         self.assertIsNone(observed["interval_vwap"])
 
+    def test_order_book_aggregate_uses_windows_not_a_single_noisy_frame(self):
+        at = datetime(2026, 8, 12, 5, 5, tzinfo=timezone.utc)
+        rows = [
+            {"observed_at": at - timedelta(seconds=offset), "raw": {"order_book_features": {"ofi_best_level": value}}}
+            for offset, value in ((3, 2), (6, 3), (9, -1), (70, 9), (310, 99))
+        ]
+        aggregate = aggregate_order_book_observations(rows, at)
+        self.assertEqual(aggregate["ofi_30s"], 4.0)
+        self.assertEqual(aggregate["ofi_30s_sample_count"], 3)
+        self.assertEqual(aggregate["ofi_1m"], 4.0)
+        self.assertEqual(aggregate["ofi_5m"], 13.0)
+
     def test_smart_money_q_uses_the_same_rolling_window_vwap_and_volume_share(self):
         rows = []
         for index in range(30):
@@ -2936,10 +2948,12 @@ class ProviderHelperTests(unittest.TestCase):
     def test_intraday_attribution_labels_microstructure_as_observational(self):
         attribution = intraday_signal_attribution(
             "000001.SZ:watch:test", "watch", {},
-            {"tencent_order_book": {"features": {"status": "observed", "delta_status": "ready", "qi5": 0.4, "ofi_best_level": 3}},
+            {"tencent_order_book": {"status": "observed", "latest_features": {"status": "observed", "delta_status": "ready", "qi5": 0.4},
+                                      "ofi_30s": 3, "ofi_30s_sample_count": 3},
              "tencent_minute": {"price_log_volume_corr_30m": -0.4, "smart_money_q_30m": 0.99}},
         )
-        self.assertEqual(attribution["microstructure_state"], "observed_bid_heavy_positive_ofi")
+        self.assertEqual(attribution["microstructure_state"], "observed_bid_heavy_positive_ofi_30s")
+        self.assertEqual(attribution["ofi_attribution_window"], "30s")
         self.assertEqual(attribution["price_volume_state"], "negative_corr")
         self.assertEqual(attribution["smart_money_state"], "below_session_vwap")
 

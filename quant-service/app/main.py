@@ -74,7 +74,7 @@ from .free_market_providers import (
     tencent_intraday_minutes,
     tencent_order_book_quotes,
 )
-from .order_book_features import order_book_observation
+from .order_book_features import aggregate_order_book_observations, order_book_observation
 from .market_snapshots import snapshot_status, summarize_quotes
 from .intraday_alerts import daily_strategy_summary_text, delivery_health_recovery_text, intraday_alert_text
 from .board_rotation import board_rotation_alert_text, board_rotation_candidates, board_rotation_still_directional
@@ -1171,14 +1171,22 @@ def intraday_signal_attribution(signal_key: str, signal_type: str,
         volume_baseline = "not_applicable"
     market_state = str(market_context.get("market_state") or "unknown")
     order_book = evidence.get("tencent_order_book") if isinstance(evidence.get("tencent_order_book"), dict) else {}
-    microstructure = order_book.get("features") if isinstance(order_book.get("features"), dict) else {}
+    microstructure = order_book.get("latest_features") if isinstance(order_book.get("latest_features"), dict) else \
+        order_book.get("features") if isinstance(order_book.get("features"), dict) else {}
     qi5 = intraday_number(microstructure.get("qi5"))
-    ofi = intraday_number(microstructure.get("ofi_best_level"))
-    if microstructure.get("delta_status") == "ready":
+    ofi_window = next(((label, intraday_number(order_book.get(f"ofi_{label}")))
+                       for label in ("30s", "1m", "5m")
+                       if int(order_book.get(f"ofi_{label}_sample_count") or 0) >= 3
+                       and intraday_number(order_book.get(f"ofi_{label}")) is not None), (None, None))
+    ofi_label, ofi = ofi_window
+    if microstructure.get("delta_status") == "ready" or order_book.get("status") == "observed":
         microstructure_state = "observed_bid_heavy" if qi5 is not None and qi5 >= 0.2 else \
                                "observed_ask_heavy" if qi5 is not None and qi5 <= -0.2 else "observed_balanced"
-        if ofi is not None:
+        if ofi is not None and ofi_label:
             microstructure_state += "_positive_ofi" if ofi > 0 else "_negative_ofi" if ofi < 0 else "_flat_ofi"
+            microstructure_state += f"_{ofi_label}"
+        elif order_book.get("status") == "observed":
+            microstructure_state += "_ofi_window_insufficient"
     elif microstructure.get("status") == "observed":
         microstructure_state = "first_snapshot_only"
     else:
@@ -1196,7 +1204,8 @@ def intraday_signal_attribution(signal_key: str, signal_type: str,
             "available_peer_count": available_peers, "board_top10_match_count": len(board_matches),
             "board_snapshot_age_seconds": market_context.get("board_snapshot_age_seconds"),
             "microstructure_state": microstructure_state, "price_volume_state": price_volume_state,
-            "smart_money_state": smart_money_state}
+            "smart_money_state": smart_money_state,
+            "ofi_attribution_window": ofi_label}
 
 
 def intraday_outcome_attribution_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -4921,8 +4930,21 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             """INSERT INTO quant.intraday_scan_runs(scan_id,observed_at,status,requested_symbols,source_status,summary)
                VALUES(%s,%s,'completed',%s,%s,%s)""",
             (scan_id, observed_at, Json(selected_symbols), Json(strategy_json_safe(source_status)),
-             Json({"watched": len(watches)})),
+            Json({"watched": len(watches)})),
         )
+        session_start = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        ).astimezone(timezone.utc)
+        order_book_rows = connection.execute(
+            """SELECT symbol,observed_at,raw FROM quant.intraday_quote_observations
+                 WHERE symbol=ANY(%s) AND source_name='tencent_order_book'
+                   AND observed_at>=%s AND observed_at<%s
+                 ORDER BY symbol,observed_at DESC""",
+            (selected_symbols, max(session_start, observed_at - timedelta(minutes=5)), observed_at),
+        ).fetchall()
+        order_book_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for item in order_book_rows:
+            order_book_by_symbol.setdefault(str(item["symbol"]), []).append(dict(item))
         for watch in watches:
             symbol = str(watch["symbol"])
             quote = quotes.get(symbol)
@@ -4941,6 +4963,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             daily_factors = watchlist_daily_factors(symbol, connection)
             minute_feature = (tushare_minutes.get(symbol) or {}).get("feature") or surge_features.get(symbol)
             minute_feature = attach_intraday_volume_time_profile(symbol, minute_feature, observed_at, connection)
+            order_book_feature = aggregate_order_book_observations(order_book_by_symbol.get(symbol, []), observed_at)
             peer_context = peer_contexts.get(symbol)
             previous_quote = dict(previous) if previous else None
             generated_signals = intraday_signal_rules(watch, quote, previous_quote, daily_factors,
@@ -5008,7 +5031,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 )
                 if state == "confirmed" and fast_confirmation.get("status") == "mismatch":
                     state = "confirming"
-                evidence = {"tencent": quote, "tencent_minute": minute_feature,
+                evidence = {"tencent": quote, "tencent_order_book": order_book_feature, "tencent_minute": minute_feature,
                             "peer_context": peer_context, "tushare_rt_min": tushare_minutes.get(symbol),
                             "tushare_rt_k_fast": fast_confirmation,
                             "daily_factors": daily_factors, "market_context": market_context}

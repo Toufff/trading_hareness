@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime, timedelta
 
 
 def _number(value: Any) -> float | None:
@@ -88,4 +89,31 @@ def order_book_observation(current: dict[str, Any], previous: dict[str, Any] | N
         ),
         "seal_volume_delta_lot": current_seal - previous_seal if current_seal is not None and previous_seal is not None and book_side == previous_side and book_side != "two_sided" else None,
     })
+    return result
+
+
+def aggregate_order_book_observations(rows: list[dict[str, Any]], observed_at: datetime) -> dict[str, Any]:
+    """Aggregate only already-persisted, same-session OFI observations.
+
+    A three-second best-level imbalance is deliberately too noisy to label a
+    signal.  The output retains 30-second, one-minute and five-minute sums;
+    callers choose a label only when at least three valid snapshots exist.
+    """
+    ordered = sorted((row for row in rows if isinstance(row.get("observed_at"), datetime)
+                      and isinstance(row.get("raw"), dict)), key=lambda row: row["observed_at"], reverse=True)
+    latest = dict(ordered[0]["raw"].get("order_book_features") or {}) if ordered else {}
+    result: dict[str, Any] = {"status": "missing", "latest_features": latest,
+                              "feature_version": "tencent-order-book-aggregate-v1"}
+    for label, seconds in (("30s", 30), ("1m", 60), ("5m", 300)):
+        cutoff = observed_at - timedelta(seconds=seconds)
+        features = [dict(row["raw"].get("order_book_features") or {}) for row in ordered if row["observed_at"] >= cutoff]
+        values = [_number(feature.get("ofi_best_level")) for feature in features]
+        valid_values = [value for value in values if value is not None]
+        result[f"ofi_{label}"] = round(sum(valid_values), 4) if valid_values else None
+        result[f"ofi_{label}_sample_count"] = len(valid_values)
+        result[f"one_sided_{label}_count"] = sum(bool(feature.get("one_sided_book")) for feature in features)
+    if ordered:
+        result["status"] = "observed"
+        result["latest_observed_at"] = ordered[0]["observed_at"].isoformat()
+        result["latest_age_seconds"] = round(max(0.0, (observed_at - ordered[0]["observed_at"]).total_seconds()), 3)
     return result
