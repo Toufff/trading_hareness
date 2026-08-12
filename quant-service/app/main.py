@@ -1349,8 +1349,8 @@ def recompute_intraday_signal_outcomes(as_of_date: date | None = None) -> dict[s
                      daily_exit["available_at"] if daily_exit else None, daily_exit["close"] if daily_exit else None,
                      metrics["raw_return"] if metrics else None, metrics["maximum_favorable_excursion"] if metrics else None,
                      metrics["maximum_adverse_excursion"] if metrics else None, status,
-                     Json({"entry": "signal_evidence.tencent.price", "exit": "canonical_daily_close", "cutoff": cutoff.isoformat(),
-                           "return_decomposition": decomposition})),
+                     Json(strategy_json_safe({"entry": "signal_evidence.tencent.price", "exit": "canonical_daily_close", "cutoff": cutoff.isoformat(),
+                                              "return_decomposition": decomposition}))),
                 )
                 if status == "matured":
                     matured += 1

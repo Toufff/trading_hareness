@@ -778,6 +778,14 @@ class ProviderHelperTests(unittest.TestCase):
         parameters = connection.execute.call_args.args[1]
         self.assertNotIn("credential-value", parameters[-1])
 
+    def test_intraday_outcome_decomposition_is_json_safe_before_persistence(self):
+        from app.main import strategy_json_safe
+        decomposition = a_share_return_decomposition(
+            Decimal("10"), 1, Decimal("10.5"), Decimal("10.2"), Decimal("10.8"),
+        )
+        persisted = strategy_json_safe({"return_decomposition": decomposition})
+        self.assertIsInstance(persisted["return_decomposition"]["overnight"], str)
+
     def test_capability_circuit_lookup_returns_only_open_entries(self):
         async def check() -> set[str]:
             with patch("app.main.run_database_blocking", new=AsyncMock(return_value=[{"capability": "intraday_board_flow_concept"}])):
