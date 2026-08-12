@@ -776,7 +776,7 @@ class ProviderHelperTests(unittest.TestCase):
         connection = MagicMock()
         record_provider_failure(connection, "test", "daily", "Authorization: credential-value")
         parameters = connection.execute.call_args.args[1]
-        self.assertNotIn("sensitive-token", parameters[-1])
+        self.assertNotIn("credential-value", parameters[-1])
 
     def test_capability_circuit_lookup_returns_only_open_entries(self):
         async def check() -> set[str]:

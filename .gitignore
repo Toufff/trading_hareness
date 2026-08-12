@@ -10,6 +10,7 @@ certs/
 workflows/managed/
 scripts/build-*-workflow.mjs
 scripts/fix-native-reserve.mjs
+scripts/harden-text-submit-workflow.mjs
 scripts/patch-feishu-workflow.mjs
 scripts/reconcile-text-item-workflow.mjs
 
