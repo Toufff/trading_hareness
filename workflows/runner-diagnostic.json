@@ -1,0 +1,56 @@
+[
+  {
+    "id": "runnerdiag123456",
+    "name": "诊断：Webhook 原生节点",
+    "active": false,
+    "nodes": [
+      {
+        "id": "0bc9b8d6-97a4-43ca-a05e-cba0ed453f9c",
+        "name": "Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2.1,
+        "position": [0, 0],
+        "webhookId": "43ee35f2-2f20-4b2a-af63-9438ae4f49e9",
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "runner-diagnostic",
+          "responseMode": "lastNode",
+          "responseData": "firstEntryJson",
+          "options": {}
+        }
+      },
+      {
+        "id": "38c6a850-44b0-437d-b0c3-26d0ae9b581f",
+        "name": "Set result",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.4,
+        "position": [240, 0],
+        "parameters": {
+          "assignments": {
+            "assignments": [
+              {
+                "id": "24d5a421-bebd-41eb-bf97-bfbfea3d7e8b",
+                "name": "ok",
+                "value": true,
+                "type": "boolean"
+              },
+              {
+                "id": "ae472652-8d13-43b8-bfec-cab8326e8b89",
+                "name": "source",
+                "value": "native-node",
+                "type": "string"
+              }
+            ]
+          },
+          "options": {}
+        }
+      }
+    ],
+    "connections": {
+      "Webhook": {
+        "main": [[{"node": "Set result", "type": "main", "index": 0}]]
+      }
+    },
+    "settings": {"executionOrder": "v1"}
+  }
+]

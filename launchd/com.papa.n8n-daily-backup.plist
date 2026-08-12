@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.papa.n8n-daily-backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/papa/codebase/n8n/scripts/backup-postgres-and-workflows.sh</string>
+  </array>
+  <!-- Host runs in America/Los_Angeles: 04:00 is after the Shanghai close
+       in both PDT and PST.  A calendar schedule avoids a new backup whenever
+       the LaunchAgent is reloaded or the user logs in. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>4</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>/Users/papa/codebase/n8n</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/papa/codebase/n8n/logs/daily-backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/papa/codebase/n8n/logs/daily-backup.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

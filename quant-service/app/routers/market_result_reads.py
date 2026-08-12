@@ -1,0 +1,55 @@
+"""Read-only routes for materialized market/research results."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Callable, Iterable
+
+from fastapi import APIRouter
+
+from .. import market_result_read_model as read_model
+
+
+def build_market_result_reads_router(
+    database: Any,
+    catalog: Iterable[str],
+    current_data_coverage_fn: Callable[..., dict[str, Any]],
+    feature_readiness_fn: Callable[..., dict[str, Any]],
+    history_estimate_fn: Callable[[], dict[str, Any]],
+    offline_root_fn: Callable[[], Path],
+    analyst_scorecard_readiness_fn: Callable[..., dict[str, Any]],
+) -> APIRouter:
+    router = APIRouter(tags=["market-result-reads"])
+
+    @router.get("/api/v1/providers/tushare/raw")
+    def raw(api_name: str, provider: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        return read_model.tushare_raw(database, api_name, provider, limit, offset, catalog)
+
+    @router.get("/api/v1/research/overview")
+    def overview() -> dict[str, Any]:
+        return read_model.research_overview(
+            database, current_data_coverage_fn=current_data_coverage_fn, feature_readiness_fn=feature_readiness_fn,
+            history_estimate_fn=history_estimate_fn,
+        )
+
+    @router.get("/api/v1/market/snapshots")
+    def snapshots(limit: int = 20) -> dict[str, Any]:
+        return read_model.market_snapshots(database, limit)
+
+    @router.get("/api/v1/market/minute/imports")
+    def minute_imports(limit: int = 30) -> dict[str, Any]:
+        return read_model.offline_minute_imports(database, limit, str(offline_root_fn()))
+
+    @router.get("/api/v1/analyst-scorecards")
+    def scorecards(limit: int = 200) -> dict[str, Any]:
+        return read_model.analyst_scorecards(database, limit, analyst_scorecard_readiness_fn)
+
+    @router.get("/api/v1/recommendations/latest")
+    def recommendations() -> dict[str, Any]:
+        return read_model.latest_recommendations(database)
+
+    @router.get("/api/v1/metrics")
+    def metric_counts() -> Any:
+        return read_model.metrics(database)
+
+    return router

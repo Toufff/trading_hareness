@@ -1,0 +1,62 @@
+[
+  {
+    "id": "quantIntradayAlerts123",
+    "name": "市场研究：盘中观察池异常提醒",
+    "active": false,
+    "nodes": [
+      {
+        "id": "d45a2c40-3a8f-4b69-8a11-000000000001",
+        "name": "上午连续竞价每分钟",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 0],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "*/1 9-11 * * 1-5"}]}}
+      },
+      {
+        "id": "d45a2c40-3a8f-4b69-8a11-000000000002",
+        "name": "下午连续竞价每分钟",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 180],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "*/1 13-14 * * 1-5"}]}}
+      },
+      {
+        "id": "d45a2c40-3a8f-4b69-8a11-000000000003",
+        "name": "扫描显式观察池",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [300, 90],
+        "parameters": {"url": "http://quant-research:8000/api/v1/intraday/scan", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"realtime_validation_limit\":4}", "options": {"timeout": 90000}}
+      },
+      {
+        "id": "d45a2c40-3a8f-4b69-8a11-000000000004",
+        "name": "上午板块快报每五分钟",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 360],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "*/5 9-11 * * 1-5"}]}}
+      },
+      {
+        "id": "d45a2c40-3a8f-4b69-8a11-000000000005",
+        "name": "下午板块快报每五分钟",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 540],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "*/5 13-14 * * 1-5"}]}}
+      },
+      {
+        "id": "d45a2c40-3a8f-4b69-8a11-000000000006",
+        "name": "生成并推送板块五分钟快报",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [300, 450],
+        "parameters": {"url": "http://quant-research:8000/api/v1/intraday/board-report/run", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 90000}}
+      }
+    ],
+    "connections": {
+      "上午板块快报每五分钟": {"main": [[{"node": "生成并推送板块五分钟快报", "type": "main", "index": 0}]]},
+      "下午板块快报每五分钟": {"main": [[{"node": "生成并推送板块五分钟快报", "type": "main", "index": 0}]]}
+    },
+    "settings": {"executionOrder": "v1", "timezone": "Asia/Shanghai"}
+  }
+]

@@ -1,0 +1,46 @@
+{
+  "version": 2,
+  "default_topic_key": "market",
+  "routes": [
+    {
+      "tag": "liwei",
+      "label": "立伟",
+      "topic_key": "market",
+      "publisher_key": "liwei",
+      "remote_analyst_id": "liwei",
+      "enabled": true
+    },
+    {
+      "tag": "liuzi",
+      "label": "抖音六子",
+      "topic_key": "market",
+      "publisher_key": "douyin-liuzi",
+      "remote_analyst_id": "douyin-liuzi",
+      "enabled": true
+    },
+    {
+      "tag": "xiaolan",
+      "label": "杨宁",
+      "topic_key": "market",
+      "publisher_key": "yang-ning",
+      "remote_analyst_id": "yang-ning",
+      "enabled": true
+    },
+    {
+      "tag": "anqiang",
+      "label": "安强投资日记",
+      "topic_key": "market",
+      "publisher_key": "anqiang-touzi-riji",
+      "remote_analyst_id": "anqiang-touzi-riji",
+      "enabled": true
+    },
+    {
+      "tag": "quanneng",
+      "label": "全能野人",
+      "topic_key": "market",
+      "publisher_key": "quanneng-yeren",
+      "remote_analyst_id": "quanneng-yeren",
+      "enabled": true
+    }
+  ]
+}

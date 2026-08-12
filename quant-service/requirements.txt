@@ -1,0 +1,11 @@
+fastapi==0.115.12
+akshare==1.18.83
+alembic==1.16.5
+baostock==0.8.9
+httpx==0.28.1
+requests>=2.31,<3
+SQLAlchemy==2.0.43
+psycopg[binary]==3.2.6
+psycopg-pool==3.2.6
+prometheus-client==0.22.1
+uvicorn[standard]==0.34.2

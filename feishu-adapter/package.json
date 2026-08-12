@@ -1,0 +1,10 @@
+{
+  "name": "n8n-feishu-adapter",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "1.72.0",
+    "busboy": "1.6.0",
+    "pg": "8.16.3"
+  }
+}

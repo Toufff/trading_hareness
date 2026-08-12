@@ -1,0 +1,28 @@
+[
+  {
+    "id": "codeDiag12345678",
+    "name": "诊断：Webhook Code 节点",
+    "active": false,
+    "nodes": [
+      {
+        "id": "ea87a868-8324-4a9d-8c7f-532c3a16ed6e",
+        "name": "Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2.1,
+        "position": [0, 0],
+        "webhookId": "6b665bb3-2f1e-40a8-a1ed-0a4ea5c5b861",
+        "parameters": {"httpMethod": "POST", "path": "runner-code-diagnostic", "responseMode": "lastNode", "responseData": "firstEntryJson", "options": {}}
+      },
+      {
+        "id": "bf2f8637-8a3d-45e4-bcf0-52c4a24b4216",
+        "name": "Code",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [240, 0],
+        "parameters": {"jsCode": "return [{ json: { ok: true, source: 'code-node' } }];"}
+      }
+    ],
+    "connections": {"Webhook": {"main": [[{"node": "Code", "type": "main", "index": 0}]]}},
+    "settings": {"executionOrder": "v1"}
+  }
+]

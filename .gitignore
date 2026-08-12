@@ -1,0 +1,33 @@
+# Private runtime configuration and credentials
+.env
+.env.*
+!.env.example
+certs/
+
+# Runtime state, local backups and generated logs
+backups/
+logs/
+state/
+quant-service/reports/
+*.dump
+*.manifest
+*.log
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node artifacts
+node_modules/
+dist/
+.vite/
+coverage/
+
+# OS/editor noise
+.DS_Store
+.claude/
+.idea/
+.vscode/

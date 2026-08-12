@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.papa.wechat-image-relay</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/papa/codebase/.venv/bin/python</string>
+    <string>/Users/papa/codebase/n8n/scripts/wechat-image-relay.py</string>
+    <string>--tag</string>
+    <string>xiaolan</string>
+    <string>--source-label</string>
+    <string>微信小蓝炒股会媒体监控</string>
+    <string>--chat-dir-id</string>
+    <string>71345daa03ac00d81e0f824bb580d85e</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/papa/codebase/n8n/logs/wechat-image-relay.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/papa/codebase/n8n/logs/wechat-image-relay.err.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/papa/codebase</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

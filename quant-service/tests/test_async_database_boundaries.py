@@ -1,0 +1,191 @@
+"""Guard the event loop from accidental direct synchronous DB transactions."""
+
+from __future__ import annotations
+
+import ast
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import unittest
+
+from app.runtime_executors import BlockingExecutorBoundary, ExecutorSaturatedError
+
+
+class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self._async_stack: list[str] = []
+        self._bounded_call_depth = 0
+        self.hits: list[tuple[str, int, str]] = []
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._async_stack.append(node.name)
+        self.generic_visit(node)
+        self._async_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        # A synchronous closure inside an async service is allowed only when the
+        # caller submits it to the bounded database executor; it is not an
+        # event-loop transaction itself.
+        if self._async_stack:
+            return
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if self._async_stack and isinstance(node.func, ast.Attribute) and node.func.attr == "transaction":
+            base = node.func.value
+            if isinstance(base, ast.Name) and base.id in {"db", "database"}:
+                self.hits.append((self._async_stack[-1], node.lineno, ast.unparse(node.func)))
+        is_bounded_database_call = isinstance(node.func, ast.Name) and node.func.id == "run_database_blocking"
+        if is_bounded_database_call:
+            self._bounded_call_depth += 1
+        self.generic_visit(node)
+        if is_bounded_database_call:
+            self._bounded_call_depth -= 1
+
+
+class _DirectAsyncRepositoryCallVisitor(ast.NodeVisitor):
+    """Prevent known synchronous repository entrypoints from blocking loops."""
+
+    _SYNC_REPOSITORY_CALLS = {
+        "build_snapshot", "generate_recommendations", "recompute_outcomes",
+        "recompute_scorecards", "recompute_intraday_signal_outcomes", "run_post_close_strategy",
+        "resolve_sync_symbols", "ensure_catalog_capabilities", "watchlist_daily_factors", "stock_window_readiness",
+        "strategy_event_context", "strategy_tushare_lhb_context", "strategy_source_readiness",
+        "persist_daily_bar_batch",
+    }
+
+    def __init__(self) -> None:
+        self._async_stack: list[str] = []
+        self._bounded_call_depth = 0
+        self.hits: list[tuple[str, int, str]] = []
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._async_stack.append(node.name)
+        self.generic_visit(node)
+        self._async_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        if self._async_stack:
+            return
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        is_bounded_database_call = isinstance(node.func, ast.Name) and node.func.id == "run_database_blocking"
+        if is_bounded_database_call:
+            self._bounded_call_depth += 1
+        if (self._async_stack and not self._bounded_call_depth and isinstance(node.func, ast.Name)
+                and node.func.id in self._SYNC_REPOSITORY_CALLS):
+            self.hits.append((self._async_stack[-1], node.lineno, node.func.id))
+        self.generic_visit(node)
+        if is_bounded_database_call:
+            self._bounded_call_depth -= 1
+
+
+class AsyncDatabaseBoundaryTests(unittest.TestCase):
+    def test_async_functions_do_not_open_sync_database_transactions_directly(self) -> None:
+        app_root = Path(__file__).resolve().parents[1] / "app"
+        hits: list[str] = []
+        for path in sorted(app_root.rglob("*.py")):
+            visitor = _DirectAsyncDbTransactionVisitor()
+            visitor.visit(ast.parse(path.read_text()))
+            hits.extend(f"{path.relative_to(app_root)}:{line}:{function}:{call}" for function, line, call in visitor.hits)
+        self.assertEqual(hits, [], "async DB transactions must use run_database_blocking: " + ", ".join(hits))
+
+    def test_async_functions_offload_known_synchronous_repository_operations(self) -> None:
+        app_root = Path(__file__).resolve().parents[1] / "app"
+        hits: list[str] = []
+        for path in sorted(app_root.rglob("*.py")):
+            visitor = _DirectAsyncRepositoryCallVisitor()
+            visitor.visit(ast.parse(path.read_text()))
+            hits.extend(f"{path.relative_to(app_root)}:{line}:{function}:{call}" for function, line, call in visitor.hits)
+        self.assertEqual(hits, [], "async repository work must use run_database_blocking: " + ", ".join(hits))
+
+
+class MainRouterBoundaryTests(unittest.TestCase):
+    def test_main_keeps_only_operational_control_routes(self) -> None:
+        """Prevent business endpoints from drifting back into the monolith.
+
+        All provider, research, market, intraday, sector and strategy HTTP
+        contracts belong to ``app/routers``.  The three allowed direct routes
+        are intentionally operational: health, metrics and an opt-in legacy
+        bootstrap guard.
+        """
+        main_path = Path(__file__).resolve().parents[1] / "app" / "main.py"
+        tree = ast.parse(main_path.read_text())
+        direct_routes: set[tuple[str, str]] = set()
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
+                    continue
+                target, method = decorator.func.value, decorator.func.attr
+                if not isinstance(target, ast.Name) or target.id != "app" or method not in {"get", "post", "put", "patch", "delete"}:
+                    continue
+                if decorator.args and isinstance(decorator.args[0], ast.Constant) and isinstance(decorator.args[0].value, str):
+                    direct_routes.add((method.upper(), decorator.args[0].value))
+        self.assertEqual(direct_routes, {
+            ("GET", "/health"),
+            ("GET", "/metrics"),
+            ("POST", "/api/v1/bootstrap"),
+        })
+
+
+class BlockingExecutorBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timeout_keeps_the_slot_until_the_thread_has_really_finished(self) -> None:
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-boundary")
+        boundary = BlockingExecutorBoundary("test_timeout_boundary", workers=1, queue_capacity=0)
+        started, release = threading.Event(), threading.Event()
+
+        def slow() -> str:
+            started.set()
+            release.wait(1)
+            return "finished"
+
+        try:
+            with self.assertRaises(asyncio.TimeoutError):
+                await boundary.run(executor, slow, timeout_seconds=0.01)
+            self.assertTrue(started.is_set())
+            self.assertEqual(boundary.status()["occupied"], 1)
+            with self.assertRaises(ExecutorSaturatedError):
+                await boundary.run(executor, lambda: "should not queue", timeout_seconds=0.1)
+            release.set()
+            for _ in range(50):
+                if boundary.status()["occupied"] == 0:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(boundary.status()["occupied"], 0)
+            self.assertEqual(await boundary.run(executor, lambda: "recovered", timeout_seconds=0.2), "recovered")
+        finally:
+            release.set()
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    async def test_queue_capacity_is_explicitly_bounded(self) -> None:
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-queue")
+        boundary = BlockingExecutorBoundary("test_queue_boundary", workers=1, queue_capacity=1)
+        started, release = threading.Event(), threading.Event()
+
+        def slow() -> str:
+            started.set()
+            release.wait(1)
+            return "finished"
+
+        try:
+            first = asyncio.create_task(boundary.run(executor, slow, timeout_seconds=1))
+            while not started.is_set():
+                await asyncio.sleep(0.001)
+            second = asyncio.create_task(boundary.run(executor, lambda: "queued", timeout_seconds=1))
+            for _ in range(50):
+                if boundary.status()["occupied"] == 2:
+                    break
+                await asyncio.sleep(0.001)
+            self.assertEqual(boundary.status()["occupied"], 2)
+            with self.assertRaises(ExecutorSaturatedError):
+                await boundary.run(executor, lambda: "rejected", timeout_seconds=0.1)
+            release.set()
+            self.assertEqual(await first, "finished")
+            self.assertEqual(await second, "queued")
+        finally:
+            release.set()
+            executor.shutdown(wait=True, cancel_futures=True)

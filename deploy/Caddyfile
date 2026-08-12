@@ -1,0 +1,18 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$N8N_DOMAIN} {
+	encode zstd gzip
+	@metrics path /metrics
+	respond @metrics 403
+	reverse_proxy n8n:5678
+}
+
+{$RELAY_DOMAIN} {
+	encode zstd gzip
+	basic_auth {
+		{$RELAY_BASIC_AUTH_USER} {$RELAY_BASIC_AUTH_HASH}
+	}
+	reverse_proxy feishu-adapter:3000
+}

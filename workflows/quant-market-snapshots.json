@@ -1,0 +1,182 @@
+[
+  {
+    "id": "quantMarketSnapshots123",
+    "name": "市场研究：全市场午盘与收盘快照",
+    "active": true,
+    "nodes": [
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d001",
+        "name": "盘前工作日 09:05",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, -180],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "5 9 * * 1-5"}]}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d002",
+        "name": "刷新全市场股票池",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [280, -180],
+        "parameters": {"url": "http://quant-research:8000/api/v1/market/universe/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 180000}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d003",
+        "name": "午盘工作日 11:35",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 0],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "35 11 * * 1-5"}]}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d011",
+        "name": "板块目录工作日 09:10",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, -90],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "10 9 * * 1-5"}]}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d012",
+        "name": "同步同花顺板块目录",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [280, -90],
+        "parameters": {"url": "http://quant-research:8000/api/v1/market/sectors/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"all_types\":true,\"sync_members\":false}", "options": {"timeout": 90000}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d009",
+        "name": "实时探针工作日 10:00",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, -10],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "0 10 * * 1-5"}]}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d010",
+        "name": "验证主源和超级源全套实时接口",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [280, -10],
+        "parameters": {"url": "http://quant-research:8000/api/v1/providers/realtime/probe", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"symbols\":[\"000636.SZ\"],\"frequency\":\"1MIN\",\"etf_symbol\":\"159919.SZ\",\"index_symbol\":\"000300.SH\",\"sw_symbol\":\"801080.SI\"}", "options": {"timeout": 180000}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d004",
+        "name": "生成午盘全市场快照",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [280, 0],
+        "parameters": {"url": "http://quant-research:8000/api/v1/market/snapshots/run", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"session\":\"midday\",\"universe_key\":\"all_a\",\"refresh_public_quotes\":true}", "options": {"timeout": 180000}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d005",
+        "name": "收盘工作日 15:10",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 180],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "10 15 * * 1-5"}]}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d006",
+        "name": "生成收盘全市场快照",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [280, 180],
+        "parameters": {"url": "http://quant-research:8000/api/v1/market/snapshots/run", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"session\":\"close\",\"universe_key\":\"all_a\",\"refresh_public_quotes\":true}", "options": {"timeout": 180000}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d007",
+        "name": "收盘工作日 18:10",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 360],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "10 18 * * 1-5"}]}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d008",
+        "name": "同步全市场收盘日线",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [280, 360],
+        "parameters": {"url": "http://quant-research:8000/api/v1/market/sync/full-daily", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 180000}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d013",
+        "name": "行业资金流工作日 18:20",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 450],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "20 18 * * 1-5"}]}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d014",
+        "name": "同步同花顺行业资金流",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [280, 450],
+        "parameters": {"url": "http://quant-research:8000/api/v1/market/sectors/flows/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 45000}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d015",
+        "name": "概念资金流工作日 18:25",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 540],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "25 18 * * 1-5"}]}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d016",
+        "name": "同步概念资金流和涨停强度",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [280, 540],
+        "parameters": {"url": "http://quant-research:8000/api/v1/market/sectors/concepts/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 90000}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d017",
+        "name": "涨停候选工作日 18:35",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 630],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "35 18 * * 1-5"}]}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d018",
+        "name": "生成概念涨停候选",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [280, 630],
+        "parameters": {"url": "http://quant-research:8000/api/v1/market/sectors/concepts/candidates/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"top_concepts\":8,\"leaders_per_concept\":3}", "options": {"timeout": 180000}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d019",
+        "name": "公告巡检工作日 18:45",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 720],
+        "parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "45 18 * * 1-5"}]}}
+      },
+      {
+        "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d020",
+        "name": "同步核心股票池巨潮公告",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [280, 720],
+        "parameters": {"url": "http://quant-research:8000/api/v1/events/cninfo/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"universe_key\":\"core\",\"lookback_days\":45,\"max_pages_per_symbol\":1}", "options": {"timeout": 180000}}
+      }
+    ],
+    "connections": {
+      "盘前工作日 09:05": {"main": [[{"node": "刷新全市场股票池", "type": "main", "index": 0}]]},
+      "板块目录工作日 09:10": {"main": [[{"node": "同步同花顺板块目录", "type": "main", "index": 0}]]},
+      "实时探针工作日 10:00": {"main": [[{"node": "验证主源和超级源全套实时接口", "type": "main", "index": 0}]]},
+      "午盘工作日 11:35": {"main": [[{"node": "生成午盘全市场快照", "type": "main", "index": 0}]]},
+      "收盘工作日 15:10": {"main": [[{"node": "生成收盘全市场快照", "type": "main", "index": 0}]]},
+      "收盘工作日 18:10": {"main": [[{"node": "同步全市场收盘日线", "type": "main", "index": 0}]]},
+      "行业资金流工作日 18:20": {"main": [[{"node": "同步同花顺行业资金流", "type": "main", "index": 0}]]},
+      "概念资金流工作日 18:25": {"main": [[{"node": "同步概念资金流和涨停强度", "type": "main", "index": 0}]]},
+      "涨停候选工作日 18:35": {"main": [[{"node": "生成概念涨停候选", "type": "main", "index": 0}]]},
+      "公告巡检工作日 18:45": {"main": [[{"node": "同步核心股票池巨潮公告", "type": "main", "index": 0}]]}
+    },
+    "settings": {"executionOrder": "v1", "timezone": "Asia/Shanghai"}
+  }
+]
