@@ -83,7 +83,7 @@ from app.provider_rate_limits import provider_request_spacing_seconds, reserve_p
 from app.akshare_provider import AkShareProviderError, _retry_call
 from app.market_snapshots import snapshot_status, summarize_quotes
 from app.tushare_official import HISTORICAL_MINUTE_APIS, REALTIME_MARKET_HOURS_APIS, default_probe_params
-from app.tushare_providers import SUPER_GET_VERIFIED_APIS, ProviderCallError, ProviderRateLimiter, _decode_rows, _filter_requested_realtime_rows, _normalize_ths_member_rows, _super_get_session, acquire_provider_request_slot, call_with_fallback, configure_provider_request_reserver, provider_candidates, provider_configs, provider_http_request, provider_request_reservation_status, provider_status, safe_error_detail, super_get_executor_status
+from app.tushare_providers import SUPER_GET_VERIFIED_APIS, SUPER_SDK_DELAYED_CONTEXT_APIS, SUPER_SDK_REALTIME_APIS, ProviderCallError, ProviderRateLimiter, _decode_rows, _filter_requested_realtime_rows, _normalize_ths_member_rows, _super_get_session, acquire_provider_request_slot, call_with_fallback, configure_provider_request_reserver, provider_candidates, provider_configs, provider_http_request, provider_request_reservation_status, provider_status, safe_error_detail, super_get_executor_status
 from app.main import attach_intraday_volume_time_profile, daily_base_structure, intraday_limit_lift_pattern, intraday_signal_direction, intraday_signal_outcome_metrics, intraday_volume_time_profile, limit_board_count, merge_limit_pool_sources, persist_daily_bar_batch, persist_free_daily, persist_tushare_fetch_cancel, post_close_forming_structure, post_close_fresh_start_structure, post_close_limit_daily_features, strategy_pattern_review_score, watchlist_daily_factors
 from app.main import StrategyDecisionRequest, run_strategy_decision
 from app.main import intraday_board_curve_session, intraday_board_curve_session_async, realtime_market_session, realtime_market_session_async
@@ -432,6 +432,24 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(failed["state"], "degraded")
         self.assertEqual(unconfigured["state"], "unconfigured")
         self.assertEqual(provider_health_summary([circuit, failed, unconfigured])["degraded"], 1)
+
+    def test_city_rt_k_is_delayed_context_not_verified_realtime(self):
+        self.assertNotIn("rt_k", SUPER_SDK_REALTIME_APIS)
+        self.assertIn("rt_k", SUPER_SDK_DELAYED_CONTEXT_APIS)
+        configs = provider_configs({
+            "TUSHARE_SUPER_SDK_TOKEN": "sdk", "TUSHARE_SUPER_SDK_API_URL": "https://city.example",
+            "TUSHARE_SUPER_GET_API_KEY": "get", "TUSHARE_SUPER_GET_API_URL": "https://get.example",
+        })
+        self.assertEqual([provider.name for provider in provider_candidates("rt_k", "super", environ={
+            "TUSHARE_SUPER_SDK_TOKEN": "sdk", "TUSHARE_SUPER_SDK_API_URL": "https://city.example",
+            "TUSHARE_SUPER_GET_API_KEY": "get", "TUSHARE_SUPER_GET_API_URL": "https://get.example",
+        })], ["super_get"])
+        city = next(item for item in provider_status(environ={
+            "TUSHARE_SUPER_SDK_TOKEN": "sdk", "TUSHARE_SUPER_SDK_API_URL": "https://city.example",
+            "TUSHARE_SUPER_GET_API_KEY": "get", "TUSHARE_SUPER_GET_API_URL": "https://get.example",
+        }) if item["name"] == "super_sdk")
+        self.assertIn("rt_k", city["delayed_context_apis"])
+        self.assertNotIn("rt_k", city["realtime_apis"])
 
     def test_provider_health_snapshot_reads_only_stored_evidence(self):
         connection = MagicMock()

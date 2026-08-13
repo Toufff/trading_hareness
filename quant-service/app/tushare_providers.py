@@ -50,9 +50,14 @@ SUPER_GET_REALTIME_APIS = frozenset({
     "rt_k", "rt_min", "rt_min_daily", "rt_etf_k", "rt_idx_k", "rt_sw_k",
     "rt_fut_min", "rt_fut_min_daily",
 })
+# City ``rt_k`` supplies only a trading date and was observed unchanged across
+# repeated intraday samples on 2026-08-13.  It is retained as delayed
+# cumulative quote context for research, but excluded from this verified
+# realtime set so it cannot become a confirmation/trigger source by routing.
 SUPER_SDK_REALTIME_APIS = frozenset({
-    "rt_k", "rt_min", "rt_etf_k", "rt_etf_min", "rt_idx_k", "rt_idx_min", "rt_sw_k",
+    "rt_min", "rt_etf_min", "rt_idx_min", "rt_sw_k",
 })
+SUPER_SDK_DELAYED_CONTEXT_APIS = frozenset({"rt_k", "rt_etf_k", "rt_idx_k"})
 SUPER_GET_BOUNDED_ONLY_APIS = frozenset({"ths_member", "ths_index"})
 # The GET reference snapshot is callable and unbounded, but the same-day
 # primary stock_basic cross-section contained nine additional active symbols.
@@ -67,7 +72,10 @@ SUPER_GET_EXCLUSIVE_APIS = frozenset({"daily", "rt_min_daily", "rt_fut_min", "rt
 # it is faster, timestamped, or demonstrably more complete; GET wins when City
 # is empty, unavailable, or ignores the requested scope.
 SUPER_REALTIME_PROVIDER_ORDER: dict[str, tuple[ProviderName, ...]] = {
-    "rt_k": ("super_sdk", "super_get"),
+    # City rt_k is excluded by ``supports`` above.  GET remains an optional
+    # context feed only; high-frequency strategy confirmation uses Tencent
+    # plus timestamped rt_min, never an un-stamped rt_k quote.
+    "rt_k": ("super_get",),
     "rt_min": ("super_sdk", "super_get"),
     "rt_min_daily": ("super_get",),
     "rt_etf_k": ("super_sdk", "super_get"),
@@ -116,7 +124,7 @@ class TushareProvider:
         if self.name == "super_get":
             return api_name in SUPER_GET_VERIFIED_APIS
         if self.name == "super_sdk" and api_name in REALTIME_MARKET_HOURS_APIS:
-            return api_name in SUPER_SDK_REALTIME_APIS
+            return api_name in SUPER_SDK_REALTIME_APIS or api_name in SUPER_SDK_DELAYED_CONTEXT_APIS
         if self.name == "primary" and api_name in REALTIME_MARKET_HOURS_APIS:
             return False
         return True
@@ -374,7 +382,7 @@ def provider_status(*, environ: Mapping[str, str] | None = None) -> list[dict[st
         if provider.name == "super_get" and provider.configured:
             return ("verified_partial", "Verified GET realtime: stock, ETF/index/SW snapshots and stock/futures minute subsets; unsupported live families remain excluded.", sorted(SUPER_GET_REALTIME_APIS))
         if provider.name == "super_sdk" and provider.configured:
-            return ("verified_partial", "Verified City realtime: timestamped stock/ETF/index snapshots and single-minute routes plus SW snapshots; *_min_daily routes remain unavailable.", sorted(SUPER_SDK_REALTIME_APIS))
+            return ("verified_partial", "Verified City minute routes are timestamped. rt_k/rt_etf_k/rt_idx_k are delayed cumulative context only because no exchange timestamp was returned; *_min_daily routes remain unavailable.", sorted(SUPER_SDK_REALTIME_APIS))
         return ("not_applicable", "No realtime route is configured for this provider.", [])
 
     entries: list[dict[str, Any]] = []
@@ -396,6 +404,7 @@ def provider_status(*, environ: Mapping[str, str] | None = None) -> list[dict[st
             "realtime_coverage": realtime_coverage,
             "realtime_note": realtime_note,
             "realtime_apis": verified_get_apis,
+            "delayed_context_apis": sorted(SUPER_SDK_DELAYED_CONTEXT_APIS) if provider.name == "super_sdk" else [],
             "super_alias_first_apis": sorted(sdk_first_apis) if provider.name == "super_sdk"
                                       else sorted(get_first_apis) if provider.name == "super_get" else [],
             "get_apis": sorted(SUPER_GET_VERIFIED_APIS) if provider.name == "super_get" else verified_get_apis,
