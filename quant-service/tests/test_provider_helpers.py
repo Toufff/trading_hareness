@@ -2616,7 +2616,7 @@ class ProviderHelperTests(unittest.TestCase):
         }
         self.assertEqual(importers, {
             "alert_transport.py", "free_market_providers.py", "http_clients.py",
-            "main.py", "remote_archive_transport.py", "tushare_providers.py",
+            "main.py", "remote_archive_sync.py", "remote_archive_transport.py", "tushare_providers.py",
         })
         self.assertNotIn("AsyncClient(", (app_dir / "free_market_providers.py").read_text(encoding="utf-8"))
         self.assertIn("public_http_client()", (app_dir / "free_market_providers.py").read_text(encoding="utf-8"))

@@ -282,6 +282,7 @@ from .request_models import (
 from .remote_archive import (analyst_global_sync_cursor, analyst_sync_cursor, classify_remote_text, import_remote_analyst_message, import_remote_report, parse_optional_timestamp,
                              remote_report_list_state, reprocess_remote_messages, reprocess_remote_reports)
 from .remote_archive_transport import RemoteArchiveTransport
+from .remote_archive_sync import RemoteArchiveSyncService
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -7580,6 +7581,7 @@ def remote_archive_sync_settings() -> dict[str, Any]:
 _remote_archive_sync_lock = asyncio.Lock()
 _remote_archive_sync_last_started = 0.0
 _remote_archive_transport = RemoteArchiveTransport()
+_remote_archive_sync_service: RemoteArchiveSyncService | None = None
 
 
 def _remote_archive_message_cursor_state() -> dict[str, Any]:
@@ -7693,30 +7695,20 @@ async def _sync_remote_archive_reports(client: httpx.AsyncClient, maximum: int) 
 
 
 async def sync_remote_archive(payload: RemoteArchiveSyncRequest, authorization: str | None = None) -> dict[str, Any]:
-    """Synchronize bounded remote analyst text without media or history fetches."""
-    settings = remote_archive_sync_settings()
-    bearer = str(authorization or "").strip()
-    if bearer.lower().startswith("bearer "):
-        bearer = bearer[7:].strip()
-    if not settings["base_url"] or not bearer:
-        raise HTTPException(status_code=503, detail="remote analyst archive sync is not configured")
-    maximum = min(payload.max_items, int(settings["max_items"]))
-    global _remote_archive_sync_last_started
-    async with _remote_archive_sync_lock:
-        elapsed = monotonic() - _remote_archive_sync_last_started
-        if _remote_archive_sync_last_started and elapsed < float(settings["minimum_interval_seconds"]):
-            raise HTTPException(status_code=429, detail="remote analyst archive sync is rate limited locally")
-        _remote_archive_sync_last_started = monotonic()
-        transport: dict[str, Any] = {"timeout": httpx.Timeout(30.0), "trust_env": False,
-            "headers": {"Authorization": f"Bearer {bearer}"},
-            "limits": httpx.Limits(max_connections=2, max_keepalive_connections=1, keepalive_expiry=20.0)}
-        if settings["ca_file"]:
-            transport["verify"] = settings["ca_file"]
-        async with httpx.AsyncClient(base_url=str(settings["base_url"]), **transport) as client:
-            results: dict[str, Any] = {}
-            for stream in payload.streams:
-                results[stream] = await (_sync_remote_archive_messages(client, maximum) if stream == "messages" else _sync_remote_archive_reports(client, maximum))
-        return {"status": "completed", "streams": results, "text_only": True, "history_fetch": False}
+    """Synchronize bounded remote analyst text through the isolated service."""
+    global _remote_archive_sync_service
+    if _remote_archive_sync_service is None:
+        _remote_archive_sync_service = RemoteArchiveSyncService(
+            settings=remote_archive_sync_settings, transport=_remote_archive_transport, database=db,
+            run_database_blocking=run_database_blocking,
+            message_cursor_state=_remote_archive_message_cursor_state,
+            report_cursor_state=_remote_archive_report_cursor_state,
+            import_message=import_remote_analyst_message, import_report=import_remote_report,
+            update_global_cursor=update_analyst_global_sync_cursor, update_report_cursor=update_analyst_sync_cursor,
+            message_cursor_update=AnalystSyncGlobalCursorUpdate, report_cursor_update=AnalystSyncCursorUpdate,
+            parse_timestamp=parse_optional_timestamp, sleep=asyncio.sleep,
+        )
+    return await _remote_archive_sync_service.sync(payload, authorization)
 
 
 def update_analyst_sync_cursor(payload: AnalystSyncCursorUpdate) -> dict[str, Any]:
