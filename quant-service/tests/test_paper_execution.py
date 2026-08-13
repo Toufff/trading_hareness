@@ -91,6 +91,29 @@ class PaperExecutionTests(unittest.TestCase):
         self.assertAlmostEqual(snapshot["sector_exposure"]["bank"], 0.5)
         self.assertAlmostEqual(snapshot["sector_exposure"]["large_cap"], 0.5)
 
+    def test_portfolio_sector_membership_is_point_in_time(self):
+        from app.paper_portfolio import persist_portfolio_snapshot
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params=None):
+                self.calls.append((sql, params))
+                class Result:
+                    def fetchall(self):
+                        return []
+                return Result()
+
+        connection = Connection()
+        persist_portfolio_snapshot(
+            connection, as_of=datetime(2026, 8, 14, 0, 30, tzinfo=timezone.utc),
+            quotes={}, cash=1000,
+        )
+        membership_sql, params = connection.calls[0]
+        self.assertIn("effective_from<=%s", membership_sql)
+        self.assertEqual(params, (datetime(2026, 8, 14).date(), datetime(2026, 8, 14).date()))
+
 
 if __name__ == "__main__":
     unittest.main()
