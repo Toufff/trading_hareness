@@ -7,6 +7,7 @@ from typing import Any, Literal
 from fastapi import APIRouter
 
 from ..strategy_read_model import latest_post_close_strategy, latest_strategy_decision, latest_strategy_review
+from ..strategy_ablation import latest_strategy_ablation
 
 
 def build_strategy_reads_router(database: Any, decision_model_version: str) -> APIRouter:
@@ -23,5 +24,9 @@ def build_strategy_reads_router(database: Any, decision_model_version: str) -> A
     @router.get("/api/v1/strategy/post-close/latest")
     def post_close() -> dict[str, Any]:
         return latest_post_close_strategy(database)
+
+    @router.get("/api/v1/strategy/ablation/latest")
+    def ablation(limit: int = 200) -> dict[str, Any]:
+        return latest_strategy_ablation(database, limit)
 
     return router

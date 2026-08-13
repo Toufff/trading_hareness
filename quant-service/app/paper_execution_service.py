@@ -25,8 +25,10 @@ def configure_paper_account(connection: Any, *, account_key: str, initial_cash: 
     existing = connection.execute(
         "SELECT cash FROM quant.paper_accounts WHERE account_key=%s FOR UPDATE", (account_key,)
     ).fetchone()
-    if existing is not None and _number(existing["cash"]) != 0:
-        raise ValueError("paper account has activity; cash reset requires an audited new account key")
+    if existing is not None:
+        filled = connection.execute("SELECT EXISTS(SELECT 1 FROM quant.paper_order_fills)").fetchone()
+        if bool(filled and (filled.get("exists") if hasattr(filled, "get") else filled[0])):
+            raise ValueError("paper account has filled activity; cash reset is blocked")
     row = connection.execute(
         """INSERT INTO quant.paper_accounts(account_key,initial_cash,cash,configured_by,metadata)
            VALUES(%s,%s,%s,%s,%s)

@@ -28,6 +28,9 @@ function build(kind, id, name, streamNames) {
   };
 }
 
+const reportDeltaCode = source.nodes?.find((node) => node.name === 'Select changed report details')?.parameters?.jsCode ?? '';
+if (!reportDeltaCode.includes('report_versions: versions')) throw new Error('report delta must advance a complete version snapshot');
+
 writeFileSync(outputPath, JSON.stringify([
   build('reports', 'remoteArchiveReports123', '市场研究：同步远端分析师报告（报告流）', reportNames),
   build('messages', 'remoteArchiveMessages123', '市场研究：同步远端分析师消息（消息流）', messageNames),

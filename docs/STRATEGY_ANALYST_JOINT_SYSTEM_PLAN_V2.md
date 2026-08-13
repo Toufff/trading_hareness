@@ -554,6 +554,9 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 新增 `20260814_0027` 纸面账户/成交回执账本：手动接受才会模拟成交，报价必须来自本地已落库 Tencent/Super GET 证据；账户、费用、滑点、持仓和 T+1 日界切换均可追溯。
 - 新增 `20260814_0028` Prompt Lab 与分析师盘中结果账本：三种确定性 challenger 变体、人工金标、离线 precision/方向准确率、5/15/30/60 分钟结果均为 append-only；没有人工金标或样本外门禁时状态只能 collecting/insufficient_labels，实时影响恒为 none。
 - 前端新增 Prompt Lab、纸面账户/订单状态和门禁显示；Feishu adapter 增加纸面账户、动态接受、Prompt Lab 标注/评估的安全代理，所有写请求仍要求 `X-Quant-Write-Key`。
-- 验收：quant-service 全量 262 项 Python 测试通过，前端 Vite build 通过；健康接口为 `ok`，迁移为 `20260814_0028`，Prompt Lab 当前无候选且 live_effect=none（符合历史不回填和数据门禁）。
+- 新增 `20260814_0029` 策略消融账本：并行记录 market-only、固定 10% analyst-shadow 和实际 applied 分数；shadow 只用于离线比较，promotion registry 未批准前实际分析师权重仍为 0。
+- 盘口研究证据扩展到 30 秒/1 分钟/5 分钟封单侵蚀、Kyle λ/VPIN/CORD 代理，全部标记为未校准 research-only，不进入实时阈值。
+- 报告/消息同步工作流已拆分；报告差量游标在一次运行中使用完整版本快照，避免分页造成重复详情请求；两条流独立限速、可独立告警。
+- 验收：quant-service 全量 263 项 Python 测试通过，前端 Vite build 通过；健康接口为 `ok`，迁移为 `20260814_0029`，Prompt Lab 当前无候选且 live_effect=none（符合历史不回填和数据门禁）。
 
 仍明确未完成：历史数据回填（按要求暂停）、分钟回放、60 日/200 信号验证、样本外分析师 champion/challenger 晋级和 RL。纸面成交撮合仅支持“已有本地报价证据 + 人工确认”的研究模拟，不是经纪商成交。上述项目继续保持 `research_only`，不会改变实时规则或阈值。

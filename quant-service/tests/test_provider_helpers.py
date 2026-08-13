@@ -3025,6 +3025,23 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(aggregate["ofi_1m"], 4.0)
         self.assertEqual(aggregate["ofi_5m"], 13.0)
 
+    def test_order_book_aggregate_exposes_research_only_microstructure_proxies(self):
+        at = datetime(2026, 8, 12, 5, 5, tzinfo=timezone.utc)
+        rows = []
+        for offset, mid, flow, seal in ((3, 10.00, 5, 100), (6, 10.02, 4, 80),
+                                        (9, 10.01, -3, 60), (12, 10.03, 2, 40)):
+            rows.append({"observed_at": at - timedelta(seconds=offset), "raw": {"order_book_features": {
+                "ofi_best_level": flow, "book_mid": mid, "qi5": 0.25,
+                "bid_depth_lot": 100, "ask_depth_lot": 100,
+                "outer_inner_delta_lot": flow, "seal_volume_delta_lot": seal - 100,
+            }}})
+        aggregate = aggregate_order_book_observations(rows, at)
+        self.assertIsNotNone(aggregate["kyle_lambda_proxy_5m"])
+        self.assertEqual(aggregate["kyle_lambda_proxy_sample_count_5m"], 3)
+        self.assertIsNotNone(aggregate["vpin_proxy_5m"])
+        self.assertIsNotNone(aggregate["cord_sign_alignment_5m"])
+        self.assertEqual(aggregate["seal_erosion_sample_count_5m"], 4)
+
     def test_smart_money_q_uses_the_same_rolling_window_vwap_and_volume_share(self):
         rows = []
         for index in range(30):

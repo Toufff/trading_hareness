@@ -144,6 +144,7 @@ from .analyst_prompt_lab import (
     materialize_prompt_candidates,
 )
 from .strategy_contracts import LabelSpec
+from .strategy_ablation import ablation_scores
 from .episode_lifecycle import clear_stale_signal_episodes, ensure_signal_episode
 from .runtime_resources import runtime_resource_status
 from .health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
@@ -1248,7 +1249,12 @@ def intraday_signal_attribution(signal_key: str, signal_type: str,
             "board_snapshot_age_seconds": market_context.get("board_snapshot_age_seconds"),
             "microstructure_state": microstructure_state, "price_volume_state": price_volume_state,
             "smart_money_state": smart_money_state,
-            "ofi_attribution_window": ofi_label}
+            "ofi_attribution_window": ofi_label,
+            "microstructure_research_only": {key: order_book.get(key) for key in (
+                "seal_erosion_ratio_5m", "seal_erosion_sample_count_5m", "kyle_lambda_proxy_5m",
+                "kyle_lambda_proxy_sample_count_5m", "vpin_proxy_5m", "vpin_proxy_sample_count_5m",
+                "cord_sign_alignment_5m", "cord_sample_count_5m")},
+            "microstructure_notice": "CORD/VPIN/Kyle/seal erosion are uncalibrated evidence proxies; no live threshold effect"}
 
 
 def intraday_outcome_attribution_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1559,12 +1565,18 @@ def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
             quant_signal = trend + 0.25 * math.tanh(return_5 * 12) + 0.25 * math.tanh(return_20 * 7) + 0.15 * math.tanh(flow_rate / 3)
             analyst_signal = consensus * max(0.4, min(0.8, skill + 0.2))
             applied_analyst_weight = analyst_weight if analyst.get("claim_count") else 0.0
-            signal = (1 - applied_analyst_weight) * quant_signal + applied_analyst_weight * analyst_signal
+            has_analyst_evidence = bool(analyst.get("claim_count"))
             if analyst.get("claim_count") and not applied_analyst_weight:
                 flags.append("analyst_research_only")
-            if regime == "risk_off" and signal > 0:
-                signal -= 0.08
+            risk_penalty = 0.08 if regime == "risk_off" and quant_signal > 0 else 0.0
+            if risk_penalty:
                 flags.append("risk_off_regime")
+            ablation = ablation_scores(market_signal=quant_signal,
+                                       analyst_signal=analyst_signal if consensus is not None else None,
+                                       has_analyst_evidence=has_analyst_evidence,
+                                       applied_weight=applied_analyst_weight,
+                                       risk_penalty=risk_penalty)
+            signal = ((ablation["applied_score"] - 50.0) / 50.0)
             hard_flags = {"ST", "suspended", "missing_market_data", "insufficient_history_20",
                           "adj_factor_missing", "corporate_action_unresolved"}
             penalty = min(0.35, 0.07 * len(set(flags)))
@@ -1582,6 +1594,9 @@ def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
             candidates.append({"symbol": item["symbol"], "score": round(score, 2), "decision": decision, "direction": direction,
                 "confidence": round(confidence, 3), "flags": sorted(set(flags)), "quant_signal": round(quant_signal, 5),
                 "analyst_consensus": consensus, "analyst_skill": skill, "analyst_weight": applied_analyst_weight,
+                "analyst_signal": round(analyst_signal, 5) if consensus is not None else None,
+                "market_only_score": round(max(0.0, min(100.0, ablation["market_only_score"] - 100 * penalty)), 2),
+                "analyst_shadow_score": round(max(0.0, min(100.0, ablation["analyst_shadow_score"] - 100 * penalty)), 2),
                 "momentum_5": return_5, "momentum_20": return_20,
                 "moneyflow_net_amount_rate": flow_rate, "evidence": analyst.get("evidence", []),
                 "signal_count": analyst.get("claim_count", 0), "trading_date": feature.get("market_data_date"), "invalidation": invalidation})
@@ -1607,6 +1622,23 @@ def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
                 (run_id, rank, candidate["symbol"], candidate["decision"], candidate["score"], Json(breakdown),
                  Json(explanation), Json(candidate["flags"]), candidate["direction"], request.horizon_days, candidate["confidence"],
                  as_of_date + timedelta(days=request.horizon_days), Json(candidate["invalidation"])),
+            )
+            connection.execute(
+                """INSERT INTO quant.strategy_ablation_observations(
+                     run_id,symbol,market_only_score,analyst_shadow_score,applied_score,market_signal,
+                     analyst_signal,analyst_delta,applied_analyst_weight,analyst_execution_status,evidence)
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT(run_id,symbol) DO UPDATE SET market_only_score=EXCLUDED.market_only_score,
+                     analyst_shadow_score=EXCLUDED.analyst_shadow_score,applied_score=EXCLUDED.applied_score,
+                     market_signal=EXCLUDED.market_signal,analyst_signal=EXCLUDED.analyst_signal,
+                     analyst_delta=EXCLUDED.analyst_delta,applied_analyst_weight=EXCLUDED.applied_analyst_weight,
+                     analyst_execution_status=EXCLUDED.analyst_execution_status,evidence=EXCLUDED.evidence""",
+                (run_id, candidate["symbol"], candidate["market_only_score"], candidate["analyst_shadow_score"],
+                 candidate["score"], candidate["quant_signal"], candidate["analyst_signal"],
+                 round(candidate["analyst_shadow_score"] - candidate["market_only_score"], 5), candidate["analyst_weight"],
+                 str(analyst_context.get("status") or "disabled"),
+                 Json({"execution_eligible": bool(analyst_context.get("execution_eligible")),
+                       "analyst_claim_count": candidate["signal_count"], "live_effect": "none"})),
             )
     return {"run_id": str(run_id), "as_of_date": str(as_of_date), "market_regime": regime, "snapshot_key": materialized["snapshot_key"],
             "recommendations": candidates[:request.limit]}

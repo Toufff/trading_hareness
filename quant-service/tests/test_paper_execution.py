@@ -3,11 +3,18 @@ from decimal import Decimal
 import unittest
 
 from app.paper_execution import estimate_cost, paper_tradability, round_lot, triple_barrier_label
+from app.strategy_ablation import ablation_scores
 from app.paper_portfolio import paper_risk_gate
 from app.strategy_contracts import EvidenceRef, SignalSpec, contract_payload
 
 
 class PaperExecutionTests(unittest.TestCase):
+    def test_analyst_shadow_is_bounded_and_live_zero(self):
+        scores = ablation_scores(market_signal=0.4, analyst_signal=-0.4,
+                                 has_analyst_evidence=True, applied_weight=0.0)
+        self.assertLess(scores["analyst_shadow_score"], scores["market_only_score"])
+        self.assertEqual(scores["applied_score"], scores["market_only_score"])
+        self.assertEqual(scores["shadow_weight"], 0.1)
     def test_round_lot_and_t_plus_one_are_conservative(self):
         self.assertEqual(round_lot(249), 200)
         result = paper_tradability(side="sell", requested_quantity=100, quote={"price": 10},

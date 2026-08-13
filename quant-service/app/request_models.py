@@ -354,14 +354,16 @@ class AnalystResearchProfileRequest(BaseModel):
 
 
 class PaperAccountConfigureRequest(BaseModel):
-    account_key: str = Field(default="default", pattern=r"^[a-z][a-z0-9_-]{0,48}$")
+    # Paper positions are intentionally one shared ledger until account scope
+    # is modelled on orders, fills, and positions as well.
+    account_key: Literal["default"] = "default"
     initial_cash: float = Field(gt=0, le=100_000_000)
     configured_by: str = Field(min_length=1, max_length=120)
 
 
 class PaperDecisionAcceptRequest(BaseModel):
     quantity: int = Field(ge=100, le=10_000_000)
-    account_key: str = Field(default="default", pattern=r"^[a-z][a-z0-9_-]{0,48}$")
+    account_key: Literal["default"] = "default"
 
 
 class AnalystPromptGoldLabelRequest(BaseModel):

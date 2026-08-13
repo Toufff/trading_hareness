@@ -112,6 +112,56 @@ def aggregate_order_book_observations(rows: list[dict[str, Any]], observed_at: d
         result[f"ofi_{label}"] = round(sum(valid_values), 4) if valid_values else None
         result[f"ofi_{label}_sample_count"] = len(valid_values)
         result[f"one_sided_{label}_count"] = sum(bool(feature.get("one_sided_book")) for feature in features)
+        result[f"seal_erosion_{label}_lot"] = round(sum(float(feature.get("seal_volume_delta_lot") or 0.0)
+                                                       for feature in features), 4)
+    # Descriptive microstructure factors.  They are deliberately calculated
+    # from the same persisted window and never alter signal thresholds.
+    recent = [dict(row["raw"].get("order_book_features") or {}) for row in ordered
+              if row["observed_at"] >= observed_at - timedelta(seconds=300)]
+    seal_deltas = [float(item["seal_volume_delta_lot"]) for item in recent
+                   if item.get("seal_volume_delta_lot") is not None]
+    positive = [value for value in seal_deltas if value > 0]
+    negative = [value for value in seal_deltas if value < 0]
+    result["seal_erosion_ratio_5m"] = round(abs(sum(negative)) / max(abs(sum(positive)) + abs(sum(negative)), 1.0), 6) if seal_deltas else None
+    result["seal_erosion_sample_count_5m"] = len(seal_deltas)
+    # A two-sided order-book Kyle-lambda proxy: price return per net depth
+    # imbalance.  It is not a calibrated impact coefficient and is labelled
+    # proxy to prevent accidental use as a trading signal.
+    impact_pairs: list[float] = []
+    for previous, current in zip(ordered[1:], ordered[:-1], strict=True):
+        previous_raw = dict(previous["raw"].get("order_book_features") or {})
+        current_raw = dict(current["raw"].get("order_book_features") or {})
+        previous_mid, current_mid = _number(previous_raw.get("book_mid")), _number(current_raw.get("book_mid"))
+        bid_depth = _number(previous_raw.get("bid_depth_lot"))
+        ask_depth = _number(previous_raw.get("ask_depth_lot"))
+        depth = bid_depth + ask_depth if bid_depth is not None and ask_depth is not None else None
+        qi = _number(current_raw.get("qi5"))
+        if previous_mid and current_mid and depth and qi is not None and abs(qi) > 1e-9:
+            impact_pairs.append(((current_mid / previous_mid) - 1.0) / qi)
+    result["kyle_lambda_proxy_5m"] = round(sum(impact_pairs) / len(impact_pairs), 10) if impact_pairs else None
+    result["kyle_lambda_proxy_sample_count_5m"] = len(impact_pairs)
+    # VPIN-style absolute signed-volume imbalance over available frames. The
+    # provider exposes cumulative inner/outer lots; this is a bounded proxy,
+    # not an exchange-level classification of informed trades.
+    signed = []
+    for item in recent:
+        outer, inner = _number(item.get("outer_inner_delta_lot")), None
+        if outer is not None:
+            signed.append(abs(outer))
+    result["vpin_proxy_5m"] = round(sum(signed) / max(len(signed), 1), 6) if signed else None
+    result["vpin_proxy_sample_count_5m"] = len(signed)
+    # CORD-style causal divergence: correlation of return signs and signed
+    # volume signs in the same available five-minute window.
+    paired_signs = []
+    for previous, current in zip(ordered[1:], ordered[:-1], strict=True):
+        previous_raw = dict(previous["raw"].get("order_book_features") or {})
+        current_raw = dict(current["raw"].get("order_book_features") or {})
+        prev_mid, curr_mid = _number(previous_raw.get("book_mid")), _number(current_raw.get("book_mid"))
+        signed_flow = _number(current_raw.get("outer_inner_delta_lot"))
+        if prev_mid and curr_mid and signed_flow is not None and curr_mid != prev_mid and signed_flow != 0:
+            paired_signs.append((1 if curr_mid > prev_mid else -1, 1 if signed_flow > 0 else -1))
+    result["cord_sign_alignment_5m"] = round(sum(price == flow for price, flow in paired_signs) / len(paired_signs), 6) if paired_signs else None
+    result["cord_sample_count_5m"] = len(paired_signs)
     if ordered:
         result["status"] = "observed"
         result["latest_observed_at"] = ordered[0]["observed_at"].isoformat()
