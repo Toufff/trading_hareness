@@ -2409,6 +2409,7 @@ async def sync_ths_sector_catalog(request: SectorCatalogSyncRequest) -> dict[str
     await run_database_blocking(persist_catalog)
 
     member_results: list[dict[str, Any]] = []
+    member_code_rows = [row for row in valid_rows if re.fullmatch(r"\d{6}\.TI", str(row["ts_code"]))]
     if request.resume:
         def select_incomplete() -> list[dict[str, Any]]:
             with db.transaction() as connection:
@@ -2419,9 +2420,9 @@ async def sync_ths_sector_catalog(request: SectorCatalogSyncRequest) -> dict[str
                 ).fetchall()
                 return [dict(row) for row in rows]
         active = {str(row["sector_key"]) for row in await run_database_blocking(select_incomplete) if int(row["members"] or 0) > 0}
-        selected = [row for row in sorted(valid_rows, key=lambda row: str(row["ts_code"])) if str(row["ts_code"]) not in active][:request.member_limit]
+        selected = [row for row in sorted(member_code_rows, key=lambda row: str(row["ts_code"])) if str(row["ts_code"]) not in active][:request.member_limit]
     else:
-        selected = sorted(valid_rows, key=lambda row: str(row["ts_code"]))[request.member_offset:request.member_offset + request.member_limit]
+        selected = sorted(member_code_rows, key=lambda row: str(row["ts_code"]))[request.member_offset:request.member_offset + request.member_limit]
     if request.sync_members:
         for sector in selected:
             sector_key = str(sector["ts_code"])
@@ -2460,10 +2461,12 @@ async def sync_ths_sector_catalog(request: SectorCatalogSyncRequest) -> dict[str
     failed = [item for item in member_results if item["status"] == "failed"]
     blocked = [item for item in member_results if item["status"] in {"blocked", "circuit_open"}]
     status = "blocked" if blocked and not successful and not failed else "partial" if failed or blocked else "completed"
+    skipped_non_member_codes = sum(1 for row in valid_rows if not re.fullmatch(r"\d{6}\.TI", str(row["ts_code"])))
     return {"status": status, "taxonomy_key": taxonomy_key, "index_type": request.index_type,
             "sectors": len(valid_rows), "provider": provider_key, "request_key": outcome["request_key"],
             "member_offset": request.member_offset, "resume": request.resume, "member_results": member_results,
-            "next_member_offset": request.member_offset + len(selected) if request.sync_members and request.member_offset + len(selected) < len(valid_rows) else None}
+            "skipped_non_member_codes": skipped_non_member_codes,
+            "next_member_offset": request.member_offset + len(selected) if request.sync_members and request.member_offset + len(selected) < len(member_code_rows) else None}
 
 
 async def sync_all_ths_sector_catalogs() -> dict[str, Any]:

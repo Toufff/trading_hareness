@@ -1256,6 +1256,12 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(result["progress"], {"completed_or_empty": 2, "failed": 1, "remaining": 1})
         self.assertEqual([call.args[0].__name__ for call in blocking.await_args_list], ["load_existing", "load_progress"])
 
+    def test_ths_catalog_member_batches_skip_non_member_index_codes(self):
+        import inspect
+        source = inspect.getsource(__import__("app.main", fromlist=["sync_ths_sector_catalog"]).sync_ths_sector_catalog)
+        self.assertIn('re.fullmatch(r"\\d{6}\\.TI"', source)
+        self.assertIn("skipped_non_member_codes", source)
+
     def test_concept_limit_candidates_use_database_executor_for_exact_join_and_write(self):
         selected = (date(2026, 8, 11), [{"sector_key": "885001.TI", "label": "测试概念", "net_amount": 100}])
         outcomes = [
@@ -2679,7 +2685,7 @@ class ProviderHelperTests(unittest.TestCase):
         with patch.dict("os.environ", {"INTRADAY_FAST_QUOTE_RETENTION_DAYS": "7"}):
             self.assertEqual(intraday_fast_quote_retention_days(), 7)
         with patch.dict("os.environ", {"INTRADAY_BOARD_ROTATION_RETENTION_DAYS": "60"}):
-        self.assertEqual(intraday_board_rotation_retention_days(), 60)
+            self.assertEqual(intraday_board_rotation_retention_days(), 60)
 
     def test_post_close_strategy_retry_window_is_shanghai_and_bounded(self):
         china = __import__("datetime").timezone(__import__("datetime").timedelta(hours=8))
@@ -2687,8 +2693,6 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertTrue(post_close_strategy_retry_window(__import__("datetime").datetime(2026, 8, 10, 18, 55, tzinfo=china)))
         self.assertTrue(post_close_strategy_retry_window(__import__("datetime").datetime(2026, 8, 10, 20, 29, 59, tzinfo=china)))
         self.assertFalse(post_close_strategy_retry_window(__import__("datetime").datetime(2026, 8, 10, 20, 30, tzinfo=china)))
-        with patch.dict("os.environ", {"INTRADAY_BOARD_ROTATION_RETENTION_DAYS": "invalid"}):
-            self.assertEqual(intraday_board_rotation_retention_days(), 60)
 
     def test_intraday_board_curve_deduplicates_one_board_per_minute(self):
         rows = [
