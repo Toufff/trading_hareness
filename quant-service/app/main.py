@@ -3369,11 +3369,19 @@ def run_post_close_strategy(request: PostCloseStrategyRequest) -> dict[str, Any]
         connection.execute("DELETE FROM quant.post_close_strategy_candidates WHERE run_id=%s", (run["run_id"],))
         for rank, candidate in enumerate(result.get("candidates", []), start=1):
             connection.execute(
-                """INSERT INTO quant.post_close_strategy_candidates(run_id,rank,symbol,candidate_type,score,structure,board_context,risk_flags)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                """INSERT INTO quant.post_close_strategy_candidates(
+                           run_id,rank,symbol,candidate_type,score,structure,board_context,risk_flags,
+                           discovered_at,expires_at,reason_codes,source_snapshot)
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,now(),%s,%s,%s)""",
                 (run["run_id"], rank, candidate["symbol"], candidate["candidate_type"], candidate["score"],
                  Json(strategy_json_safe(candidate["structure"])), Json(strategy_json_safe(candidate["board_context"])),
-                 Json(candidate["risk_flags"])),
+                 Json(candidate["risk_flags"]), as_of_date + timedelta(days=1),
+                 Json(candidate["risk_flags"]), Json(strategy_json_safe({
+                     "as_of_date": str(as_of_date), "model_version": POST_CLOSE_STRATEGY_MODEL_VERSION,
+                     "daily_bars": result.get("source_status", {}).get("daily_bars"),
+                     "daily_symbols": result.get("source_status", {}).get("daily_symbols"),
+                     "exact_board_context_symbols": result.get("source_status", {}).get("exact_board_context_symbols"),
+                 }))),
             )
     return {**result, "run_id": str(run["run_id"]), "run_key": run_key, "model_version": POST_CLOSE_STRATEGY_MODEL_VERSION}
 

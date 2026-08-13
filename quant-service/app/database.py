@@ -946,6 +946,10 @@ CREATE TABLE IF NOT EXISTS quant.post_close_strategy_candidates (
     structure jsonb NOT NULL DEFAULT '{}'::jsonb,
     board_context jsonb NOT NULL DEFAULT '{}'::jsonb,
     risk_flags jsonb NOT NULL DEFAULT '[]'::jsonb,
+    discovered_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz,
+    reason_codes jsonb NOT NULL DEFAULT '[]'::jsonb,
+    source_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
     PRIMARY KEY(run_id,symbol),
     UNIQUE(run_id,rank)
 );

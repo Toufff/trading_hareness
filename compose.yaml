@@ -54,6 +54,10 @@ services:
       N8N_RUNNERS_TASK_TIMEOUT: ${N8N_RUNNERS_TASK_TIMEOUT:-300}
       N8N_RUNNERS_AUTH_TOKEN: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
       N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+      # The managed analyst-sync workflows read only the injected archive base
+      # URL and quant write key by expression.  Credentials remain n8n
+      # references; the values are never exported to the repository.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
       N8N_PAYLOAD_SIZE_MAX: ${N8N_PAYLOAD_SIZE_MAX:-512}
       N8N_FORMDATA_FILE_SIZE_MAX: ${N8N_FORMDATA_FILE_SIZE_MAX:-512}
       NODE_EXTRA_CA_CERTS: /opt/n8n-certs/market-review-api.pem
@@ -78,6 +82,12 @@ services:
     environment:
       N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
       N8N_RUNNERS_AUTH_TOKEN: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
+      # HTTP/Code expressions in external runners read these injected values
+      # for the managed analyst-sync workflows. They are not exported into
+      # workflow JSON or logged as credentials.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      REMOTE_ANALYST_ARCHIVE_BASE_URL: ${REMOTE_ANALYST_ARCHIVE_BASE_URL:-}
+      QUANT_WRITE_API_KEY: ${QUANT_WRITE_API_KEY:?Set QUANT_WRITE_API_KEY in .env}
       TZ: Asia/Shanghai
     volumes:
       - n8n_data:/home/node/.n8n

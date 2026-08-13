@@ -41,7 +41,8 @@ def latest_post_close_strategy(database: Any) -> dict[str, Any]:
         if not run:
             return {"run": None, "latest_attempt": latest_attempt, "candidates": [], "notice": "尚未得到可用的盘后蓄势/首动研究。"}
         rows = connection.execute(
-            """SELECT c.rank,c.symbol,i.name,c.candidate_type,c.score,c.structure,c.board_context,c.risk_flags
+            """SELECT c.rank,c.symbol,i.name,c.candidate_type,c.score,c.structure,c.board_context,c.risk_flags,
+                          c.discovered_at,c.expires_at,c.reason_codes,c.source_snapshot
                  FROM quant.post_close_strategy_candidates c LEFT JOIN quant.instruments i ON i.symbol=c.symbol
                 WHERE c.run_id=%s ORDER BY c.rank""", (run["run_id"],),
         ).fetchall()
