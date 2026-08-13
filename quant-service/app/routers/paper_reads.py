@@ -23,6 +23,15 @@ def build_paper_reads_router(database: Any) -> APIRouter:
                 """SELECT symbol,quantity,sellable_quantity,average_cost,buy_date,realized_pnl,updated_at
                      FROM quant.paper_positions ORDER BY symbol"""
             ).fetchall()
+            orders = connection.execute(
+                """SELECT o.order_id,o.decision_id,o.symbol,o.side,o.requested_quantity,o.accepted_quantity,o.filled_quantity,
+                          o.average_fill_price,o.status,o.fees,o.slippage,o.submitted_at,o.filled_at,o.metadata
+                     FROM quant.paper_orders o ORDER BY o.submitted_at DESC LIMIT %s""", (bounded,)
+            ).fetchall()
+            accounts = connection.execute(
+                """SELECT account_key,initial_cash,cash,configured_by,configured_at,updated_at,metadata
+                     FROM quant.paper_accounts ORDER BY account_key"""
+            ).fetchall()
             latest = connection.execute(
                 """SELECT snapshot_id,as_of,cash,equity,gross_exposure,net_exposure,drawdown,payload
                      FROM quant.paper_portfolio_snapshots ORDER BY as_of DESC LIMIT 1"""
@@ -42,6 +51,8 @@ def build_paper_reads_router(database: Any) -> APIRouter:
             "live_orders": False,
             "decisions": [dict(row) for row in decisions],
             "positions": [dict(row) for row in positions],
+            "orders": [dict(row) for row in orders],
+            "accounts": [dict(row) for row in accounts],
             "latest_portfolio": dict(latest) if latest else None,
             "risk_events": [dict(row) for row in risks],
             "barrier_outcomes": [dict(row) for row in barriers],

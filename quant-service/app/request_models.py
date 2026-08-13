@@ -353,6 +353,30 @@ class AnalystResearchProfileRequest(BaseModel):
     evidence: str = Field(default="", max_length=1000)
 
 
+class PaperAccountConfigureRequest(BaseModel):
+    account_key: str = Field(default="default", pattern=r"^[a-z][a-z0-9_-]{0,48}$")
+    initial_cash: float = Field(gt=0, le=100_000_000)
+    configured_by: str = Field(min_length=1, max_length=120)
+
+
+class PaperDecisionAcceptRequest(BaseModel):
+    quantity: int = Field(ge=100, le=10_000_000)
+    account_key: str = Field(default="default", pattern=r"^[a-z][a-z0-9_-]{0,48}$")
+
+
+class AnalystPromptGoldLabelRequest(BaseModel):
+    label: Literal["supported", "unsupported", "ambiguous"]
+    direction_correct: bool | None = None
+    action_executable: bool | None = None
+    reviewer: str = Field(min_length=1, max_length=120)
+    notes: str = Field(default="", max_length=2000)
+
+
+class AnalystPromptEvaluateRequest(BaseModel):
+    cutoff_at: datetime | None = None
+    minimum_labels: int = Field(default=30, ge=10, le=1000)
+
+
 class SnapshotRequest(BaseModel):
     as_of_date: date | None = None
     knowledge_cutoff: datetime | None = None

@@ -136,6 +136,13 @@ from .intraday_outcomes import (
 from .contextual_policy_learning import contextual_bandit_policy_review
 from .paper_execution import paper_decision_payload, persist_barrier_outcome, persist_paper_decision, triple_barrier_label
 from .paper_portfolio import paper_risk_gate, persist_portfolio_snapshot
+from .paper_execution_service import accept_paper_decision, configure_paper_account, roll_paper_positions_sellable
+from .analyst_prompt_lab import (
+    evaluate_prompt_variant,
+    label_prompt_candidate,
+    materialize_intraday_analyst_outcomes,
+    materialize_prompt_candidates,
+)
 from .strategy_contracts import LabelSpec
 from .episode_lifecycle import clear_stale_signal_episodes, ensure_signal_episode
 from .runtime_resources import runtime_resource_status
@@ -152,6 +159,8 @@ from .routers.analyst_research_reads import build_analyst_research_reads_router
 from .routers.event_reads import build_event_reads_router
 from .routers.strategy_reads import build_strategy_reads_router
 from .routers.paper_reads import build_paper_reads_router
+from .routers.paper_actions import build_paper_actions_router
+from .routers.analyst_prompt_lab import build_analyst_prompt_lab_router
 from .routers.strategy_pattern_reads import build_strategy_pattern_reads_router
 from .routers.board_rotation_reads import build_board_rotation_reads_router
 from .routers.board_stock_mining_reads import build_board_stock_mining_reads_router
@@ -626,6 +635,9 @@ def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
                   (SELECT bx.close FROM quant.canonical_bars_daily bx WHERE bx.symbol=e.symbol AND bx.trading_date >= e.entry_date
                     AND bx.trading_date <= %s
                     ORDER BY bx.trading_date OFFSET (e.horizon_days - 1) LIMIT 1) AS exit_close,
+                  (SELECT bx.trading_date FROM quant.canonical_bars_daily bx WHERE bx.symbol=e.symbol AND bx.trading_date >= e.entry_date
+                    AND bx.trading_date <= %s
+                    ORDER BY bx.trading_date OFFSET (e.horizon_days - 1) LIMIT 1) AS exit_date,
                   benchmark_entry.close AS benchmark_entry_close, benchmark_exit.close AS benchmark_exit_close
                 FROM entry_exit e
                 LEFT JOIN quant.canonical_bars_daily be ON be.symbol=e.symbol AND be.trading_date=e.entry_date
@@ -636,7 +648,7 @@ def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
                   ORDER BY bx.trading_date OFFSET (e.horizon_days - 1) LIMIT 1
                 ) benchmark_exit ON true
               ), measured AS (
-                SELECT analyst_id,horizon_days,direction,strength,
+                SELECT analyst_id,horizon_days,direction,strength,exit_date,
                   ((exit_close / NULLIF(entry_close,0))-1) AS raw_return,
                   ((benchmark_exit_close / NULLIF(benchmark_entry_close,0))-1) AS benchmark_return
                 FROM priced WHERE entry_close IS NOT NULL AND exit_close IS NOT NULL
@@ -646,8 +658,8 @@ def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
                  avg(raw_return - coalesce(benchmark_return,0)) mean_excess_return,
                  avg(direction*raw_return) mean_directional_return,
                  avg(1-abs(strength - CASE WHEN direction*raw_return > 0 THEN 1 ELSE 0 END)) calibration_score
-              FROM measured GROUP BY analyst_id,horizon_days""",
-            (as_of_date, as_of_date, as_of_date, as_of_date),
+              FROM measured WHERE exit_date IS NOT NULL AND exit_date<=%s GROUP BY analyst_id,horizon_days""",
+            (as_of_date, as_of_date, as_of_date, as_of_date, as_of_date, as_of_date),
         ).fetchall()
         for row in rows:
             connection.execute(
@@ -896,7 +908,7 @@ def analyst_text_factor_summary(connection: Any, as_of_date: date, lookback_days
                       r.first_synced_at AS available_at,
                       coalesce(r.remote_published_at,r.remote_updated_at,r.remote_created_at) AS published_at
                  FROM quant.remote_reports r
-                WHERE r.first_synced_at::date BETWEEN %s AND %s
+                WHERE (r.first_synced_at AT TIME ZONE 'Asia/Shanghai')::date BETWEEN %s AND %s
                   AND (%s::timestamptz IS NULL OR r.first_synced_at<=%s)
                 ORDER BY available_at DESC""",
             (earliest, as_of_date, available_before, available_before),
@@ -906,7 +918,7 @@ def analyst_text_factor_summary(connection: Any, as_of_date: date, lookback_days
             """SELECT c.remote_analyst_id,c.subject_key,c.subject_label,c.direction,c.strength,c.extraction_confidence,
                       c.available_at,e.remote_report_id,e.evidence_key
                  FROM quant.analyst_claims c JOIN quant.analyst_evidence e ON e.evidence_id=c.evidence_id
-                WHERE c.scope='theme' AND c.available_at::date BETWEEN %s AND %s
+                WHERE c.scope='theme' AND (c.available_at AT TIME ZONE 'Asia/Shanghai')::date BETWEEN %s AND %s
                   AND (%s::timestamptz IS NULL OR c.available_at<=%s)
                   AND e.evidence_key = ANY(%s)""",
             (earliest, as_of_date, available_before, available_before,
@@ -916,7 +928,8 @@ def analyst_text_factor_summary(connection: Any, as_of_date: date, lookback_days
         topic_claims = [dict(row) for row in cursor.fetchall()]
 
     def recency_weight(available_at: datetime | None) -> float:
-        age = max(0, (as_of_date - (available_at.date() if available_at else as_of_date)).days)
+        local_date = available_at.astimezone(ZoneInfo("Asia/Shanghai")).date() if available_at else as_of_date
+        age = max(0, (as_of_date - local_date).days)
         return math.exp(-math.log(2) * age / 3.0)
 
     analyst_reports: dict[str, list[tuple[float, float]]] = {}
@@ -5110,6 +5123,8 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
     """
     signals: list[dict[str, Any]] = []
     with db.transaction() as connection:
+        local_trade_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+        roll_paper_positions_sellable(connection, trading_date=local_trade_date)
         record_provider_success(connection, "tencent_free", "realtime_quote", len(tencent_rows), quote_latency_ms)
         connection.execute(
             """INSERT INTO quant.intraday_scan_runs(scan_id,observed_at,status,requested_symbols,source_status,summary)
@@ -5117,15 +5132,18 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             (scan_id, observed_at, Json(selected_symbols), Json(strategy_json_safe(source_status)),
             Json({"watched": len(watches)})),
         )
+        account = connection.execute(
+            "SELECT cash FROM quant.paper_accounts WHERE account_key='default'"
+        ).fetchone()
         prior_snapshot = connection.execute(
             "SELECT equity,payload FROM quant.paper_portfolio_snapshots ORDER BY as_of DESC LIMIT 1"
         ).fetchone()
         prior_payload = dict(prior_snapshot["payload"] or {}) if prior_snapshot else {}
-        # Cash is a paper configuration value only; zero is an honest empty
-        # portfolio, never an inferred account balance.
+        # Cash is only an explicit paper account value; never infer it from
+        # quotes or an unconfigured portfolio snapshot.
         persist_portfolio_snapshot(
             connection, as_of=observed_at, quotes=quotes,
-            cash=float(prior_payload.get("cash") or 0),
+            cash=float(account["cash"]) if account is not None else 0,
             previous_equity=float(prior_snapshot["equity"]) if prior_snapshot and prior_snapshot["equity"] is not None else None,
             previous_close_equity=float(prior_payload.get("previous_close_equity") or 0) or None,
         )
@@ -8604,6 +8622,11 @@ app.include_router(build_analyst_research_reads_router(db, analyst_research_stat
 app.include_router(build_event_reads_router(db))
 app.include_router(build_strategy_reads_router(db, STRATEGY_DECISION_MODEL_VERSION))
 app.include_router(build_paper_reads_router(db))
+app.include_router(build_paper_actions_router(db, configure_paper_account, accept_paper_decision))
+app.include_router(build_analyst_prompt_lab_router(
+    db, materialize_prompt_candidates, label_prompt_candidate, evaluate_prompt_variant,
+    materialize_intraday_analyst_outcomes,
+))
 app.include_router(build_strategy_pattern_reads_router(
     db, merge_limit_pool_sources, limit_board_count, strategy_json_safe,
     post_close_limit_daily_features, post_close_exact_board_context, post_close_tushare_lhb_context,

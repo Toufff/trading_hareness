@@ -549,6 +549,11 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 前端已展示策略漏斗、episode、纸面账本、分析师观察、同步游标、晋级和策略合约状态；新增只读治理接口。
 - 新增 A 股纸面约束：100 股整手、T+1 可卖量、停牌、涨停买入/跌停卖出 non-fill 风险、最低佣金、卖出印花税、滑点和 triple-barrier 纯函数标签。
 - 新增只读接口 `/api/v1/paper/status`、`/api/v1/strategy/contracts`，并通过 Feishu adapter 映射到前端；前端新增“纸面策略账本”卡片。
-- 验收：quant-service 全量 257 项 Python 测试通过，前端 `vue-tsc --noEmit` 通过；健康接口为 `ok`，纸面状态 `live_orders=false`，数据库迁移已到 `20260814_0026`。
+- 分析师同步已拆成报告流与消息流两个独立工作流；旧合并流停用。报告和消息不再互相拖累，部署脚本会保留前后快照并校验发布版本。新消息仍只取已提取文字，不跟随媒体 URL。
+- 分析师研究的上海日期和 `exit_date<=as_of_date` 已统一；`recompute_scorecards` 已在真实本地数据库调用通过，未来成熟结果不会污染历史快照。
+- 新增 `20260814_0027` 纸面账户/成交回执账本：手动接受才会模拟成交，报价必须来自本地已落库 Tencent/Super GET 证据；账户、费用、滑点、持仓和 T+1 日界切换均可追溯。
+- 新增 `20260814_0028` Prompt Lab 与分析师盘中结果账本：三种确定性 challenger 变体、人工金标、离线 precision/方向准确率、5/15/30/60 分钟结果均为 append-only；没有人工金标或样本外门禁时状态只能 collecting/insufficient_labels，实时影响恒为 none。
+- 前端新增 Prompt Lab、纸面账户/订单状态和门禁显示；Feishu adapter 增加纸面账户、动态接受、Prompt Lab 标注/评估的安全代理，所有写请求仍要求 `X-Quant-Write-Key`。
+- 验收：quant-service 全量 262 项 Python 测试通过，前端 Vite build 通过；健康接口为 `ok`，迁移为 `20260814_0028`，Prompt Lab 当前无候选且 live_effect=none（符合历史不回填和数据门禁）。
 
-仍明确未完成：历史数据回填（按要求暂停）、分钟回放、60 日/200 信号验证、真实纸面成交撮合、分析师 champion/challenger 晋级和 RL。它们继续保持 `research_only`，不会因本轮纸面账本落地而改变实时规则或阈值。
+仍明确未完成：历史数据回填（按要求暂停）、分钟回放、60 日/200 信号验证、样本外分析师 champion/challenger 晋级和 RL。纸面成交撮合仅支持“已有本地报价证据 + 人工确认”的研究模拟，不是经纪商成交。上述项目继续保持 `research_only`，不会改变实时规则或阈值。

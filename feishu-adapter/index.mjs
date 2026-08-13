@@ -747,7 +747,9 @@ const researchPaths = new Map([
 	['/api/research/analyst-scorecards', '/api/v1/analyst-scorecards'],
 	['/api/research/analyst-research/observations', '/api/v1/analyst-research/observations'],
 	['/api/research/analyst-research/sync-health', '/api/v1/analyst-research/sync-health'],
+	['/api/research/analyst-prompt-lab/status', '/api/v1/analyst-prompt-lab/status'],
 	['/api/research/strategy/governance', '/api/v1/strategy/governance'],
+	['/api/research/paper/accounts', '/api/v1/paper/accounts'],
 	['/api/research/events/announcements', '/api/v1/events/announcements'],
 	['/api/research/events/lhb', '/api/v1/events/lhb'],
 ]);
@@ -783,6 +785,8 @@ const researchActions = new Map([
 	['/api/research/providers/realtime/probe', '/api/v1/providers/realtime/probe'],
 	['/api/research/providers/akshare/probe', '/api/v1/providers/akshare/probe'],
 	['/api/research/operations/fetch-runs/reconcile-stale', '/api/v1/operations/fetch-runs/reconcile-stale'],
+	['/api/research/analyst-prompt-lab/materialize', '/api/v1/analyst-prompt-lab/materialize'],
+	['/api/research/analyst-intraday-outcomes/recompute', '/api/v1/analyst-intraday-outcomes/recompute'],
 ]);
 
 async function proxyResearch(path, search, response) {
@@ -793,7 +797,7 @@ async function proxyResearch(path, search, response) {
 	response.end(body);
 }
 
-async function proxyResearchAction(path, request, response) {
+async function proxyResearchAction(path, request, response, method = 'POST') {
 	if (!quantServiceUrl) throw new Error('量化研究服务未配置');
 	const chunks = []; let size = 0;
 	for await (const chunk of request) {
@@ -804,7 +808,8 @@ async function proxyResearchAction(path, request, response) {
 	const longRunning = path.includes('/market/') || path.includes('/tushare/audit') || path.includes('/realtime/probe') || path.includes('/akshare/probe') || path.includes('/strategy/post-close/run') || path.includes('/strategy/pattern-mining/run');
 	const timeoutMs = path.includes('/market/post-close/refresh') ? 360_000 : longRunning ? 180_000 : 45_000;
 	const upstream = await fetch(`${quantServiceUrl}${path}`, {
-		method: 'POST', headers: {
+		method,
+		headers: {
 			'content-type': 'application/json', accept: 'application/json',
 			...(quantWriteApiKey ? { 'X-Quant-Write-Key': quantWriteApiKey } : {}),
 		},
@@ -828,6 +833,37 @@ const dashboard = createServer((request, response) => {
 	const researchAction = researchActions.get(url.pathname);
 	if (researchAction && request.method === 'POST') {
 		void proxyResearchAction(researchAction, request, response).catch((error) => {
+			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
+		});
+		return;
+	}
+	if (url.pathname === '/api/research/paper/accounts' && request.method === 'PUT') {
+		void proxyResearchAction('/api/v1/paper/accounts', request, response, 'PUT').catch((error) => {
+			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
+		});
+		return;
+	}
+	const paperDecisionAccept = /^\/api\/research\/paper\/decisions\/([0-9a-f-]{36})\/accept$/i.exec(url.pathname);
+	if (paperDecisionAccept && request.method === 'POST') {
+		void proxyResearchAction(`/api/v1/paper/decisions/${paperDecisionAccept[1]}/accept`, request, response).catch((error) => {
+			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
+		});
+		return;
+	}
+	const promptLabel = /^\/api\/research\/analyst-prompt-lab\/candidates\/([0-9a-f-]{36})\/label$/i.exec(url.pathname);
+	if (promptLabel && request.method === 'POST') {
+		void proxyResearchAction(`/api/v1/analyst-prompt-lab/candidates/${promptLabel[1]}/label`, request, response).catch((error) => {
+			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
+		});
+		return;
+	}
+	const promptEvaluate = /^\/api\/research\/analyst-prompt-lab\/evaluate\/(strict_action|scenario_context|risk_first)$/i.exec(url.pathname);
+	if (promptEvaluate && request.method === 'POST') {
+		void proxyResearchAction(`/api/v1/analyst-prompt-lab/evaluate/${promptEvaluate[1]}`, request, response).catch((error) => {
 			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
 			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
 		});

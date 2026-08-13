@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import date, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
 
@@ -94,8 +95,8 @@ def rebuild_analyst_skill_profile(connection: Any, analyst_id: str, as_of_date: 
     actions = [dict(row) for row in connection.execute(
         """SELECT action_id,remote_report_id,remote_message_id,symbol,label,action_type,direction,stated_at,available_at,target_price,evidence,raw
              FROM quant.analyst_trade_actions WHERE remote_analyst_id=%s
-               AND (stated_at AT TIME ZONE 'Asia/Shanghai')::date<=%s
-             ORDER BY stated_at DESC LIMIT 500""",
+               AND (available_at AT TIME ZONE 'Asia/Shanghai')::date<=%s
+             ORDER BY available_at DESC LIMIT 500""",
         (analyst_id, as_of_date),
     ).fetchall()]
     report_text = "\n".join(
@@ -106,7 +107,7 @@ def rebuild_analyst_skill_profile(connection: Any, analyst_id: str, as_of_date: 
     text = "\n".join(value for value in (report_text, message_text) if value)
     stance = _stance(text)
     action_counts = Counter(str(action["action_type"]) for action in actions)
-    action_dates = {action["stated_at"].date() for action in actions if action.get("stated_at")}
+    action_dates = {action["available_at"].astimezone(ZoneInfo("Asia/Shanghai")).date() for action in actions if action.get("available_at")}
     # All returns must start from local receipt, never the author's stated
     # time.  A delayed archive can still be useful for replay, but it is not a
     # prompt/skill training example for live inference.

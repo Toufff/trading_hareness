@@ -172,10 +172,10 @@ def rebuild_analyst_opinions(
             "materialization": "stable_identity_incremental_v1"}
 
 
-def _next_dates(connection: Any, after_date: date, horizon: int) -> tuple[date | None, date | None]:
+def _next_dates(connection: Any, after_date: date, horizon: int, as_of_date: date) -> tuple[date | None, date | None]:
     rows = connection.execute(
         """SELECT trading_date FROM quant.canonical_bars_daily WHERE symbol='000001.SH' AND trading_date>%s
-             ORDER BY trading_date LIMIT %s""", (after_date, horizon)
+             AND trading_date<=%s ORDER BY trading_date LIMIT %s""", (after_date, as_of_date, horizon)
     ).fetchall()
     if len(rows) < horizon:
         return (date(rows[0]["trading_date"].year, rows[0]["trading_date"].month, rows[0]["trading_date"].day) if rows else None, None)
@@ -275,7 +275,7 @@ def recompute_analyst_opinion_outcomes(connection: Any, as_of_date: date) -> dic
     for opinion in opinions:
         symbols = _basket_symbols(connection, opinion) if opinion["factor_status"] == "eligible" else []
         for horizon in HORIZONS:
-            entry_date, exit_date = _next_dates(connection, _cn_date(opinion["available_at"]), horizon)
+            entry_date, exit_date = _next_dates(connection, _cn_date(opinion["available_at"]), horizon, as_of_date)
             status = "pending" if exit_date is None else "matured"
             raw_return = benchmark_return = residual_return = directional_return = None
             basket_size = 0
