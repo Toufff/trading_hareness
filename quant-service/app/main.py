@@ -177,6 +177,7 @@ from . import research_capacity
 from .feature_read_repository import analyst_feature as read_analyst_feature
 from .feature_read_repository import latest_tushare_row as read_latest_tushare_row
 from .feature_read_repository import market_regime as read_market_regime
+from .analyst_text_features import analyst_text_factor_summary as read_analyst_text_factor_summary
 from .intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload, intraday_services_status_payload_async as read_intraday_services_status_payload_async
 from .routers.provider_status import build_provider_status_router
 from .routers.research_readiness import build_research_readiness_router
@@ -810,8 +811,8 @@ def analyst_feature(connection: Any, symbol: str, as_of_date: date) -> dict[str,
     return read_analyst_feature(connection, symbol, as_of_date, number)
 
 
-def analyst_text_factor_summary(connection: Any, as_of_date: date, lookback_days: int = 7,
-                                available_before: datetime | None = None) -> dict[str, Any]:
+def _legacy_analyst_text_factor_summary(connection: Any, as_of_date: date, lookback_days: int = 7,
+                                        available_before: datetime | None = None) -> dict[str, Any]:
     """Aggregate textual analyst views without duplicating one report per section.
 
     Each analyst first receives one time-decayed vote per report, then the
@@ -906,8 +907,21 @@ def analyst_text_factor_summary(connection: Any, as_of_date: date, lookback_days
                        "agreement": round(abs(sum(1 if score > 0 else -1 if score < 0 else 0 for score in votes)) / len(votes), 5),
                        "analyst_votes": [{"analyst_id": analyst_id, "score": round(score, 5)} for analyst_id, score in sorted(values)]})
     topics.sort(key=lambda item: (-abs(float(item["consensus"])) * max(1, int(item["analyst_count"])), item["label"]))
-    return {"factor_version": ANALYST_TEXT_FACTOR_VERSION, "as_of_date": str(as_of_date), "lookback_days": lookback_days,
-            "market": market, "themes": topics, "data_boundary": "text-only remote report fields; report-level and analyst-level deduplication"}
+    return read_analyst_text_factor_summary(
+        connection, as_of_date, classify_text=classify_remote_text,
+        factor_version=ANALYST_TEXT_FACTOR_VERSION, lookback_days=lookback_days,
+        available_before=available_before,
+    )
+
+
+def analyst_text_factor_summary(connection: Any, as_of_date: date, lookback_days: int = 7,
+                                available_before: datetime | None = None) -> dict[str, Any]:
+    """Compatibility export backed by the isolated deterministic aggregator."""
+    return read_analyst_text_factor_summary(
+        connection, as_of_date, classify_text=classify_remote_text,
+        factor_version=ANALYST_TEXT_FACTOR_VERSION, lookback_days=lookback_days,
+        available_before=available_before,
+    )
 
 
 def build_feature_snapshot(as_of_date: date, universe_key: str = "core") -> dict[str, Any]:

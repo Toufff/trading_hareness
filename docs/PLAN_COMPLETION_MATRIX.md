@@ -29,7 +29,7 @@
 | 存储/备份/恢复前校验 | 已完成 | 20 GiB 研究预算、保留策略、`pg_restore -l` manifest 校验 |
 | 纸面组合展示与风险阻断 | 已完成 | 前端展示净值、总/净暴露、回撤、可卖量、板块暴露和风险事件；成员按观察日点时映射；新 entry 受日亏/回撤/集中度限制 |
 | 原生 async repository | 部分完成 | 策略决策/复盘/盘后候选、策略健康、策略消融、纸面研究、事件/龙虎榜、涨停/连板模式、研究目录，以及市场快照/原始 Tushare/分钟导入/最新推荐/指标计数、研究总览、分析师成绩单和研究就绪度 GET 等只读投影已使用 `AsyncDatabase`；历史容量估算与 replay readiness 的兼容服务调用经有界数据库执行器运行，其他读写仓储仍经有界同步执行器，健康页显示异步池水位 |
-| `main.py` 完全拆分 | 工程余项 | router/read-model/纯规则已拆出；容量/覆盖度/就绪度投影与特征读取已迁至 `app/research_capacity.py`、`app/feature_read_repository.py` 并删除主文件重复实现，当前主文件 9,961 行，仍有大量写服务和策略编排兼容函数待机械迁移 |
+| `main.py` 完全拆分 | 工程余项 | router/read-model/纯规则已拆出；容量/覆盖度/就绪度投影、特征读取和分析师文本聚合已迁至 `app/research_capacity.py`、`app/feature_read_repository.py`、`app/analyst_text_features.py`，当前主文件约 9,992 行（仍含待删除的旧分析师聚合回滚实现），仍有大量写服务和策略编排兼容函数待机械迁移 |
 
 ## P2 数据地基与 P3 验证
 
