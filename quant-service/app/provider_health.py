@@ -20,7 +20,9 @@ def record_provider_success(connection: Any, provider: str, capability: str, row
         """INSERT INTO quant.provider_health(provider_key,capability,market,consecutive_failures,last_success_at,last_latency_ms,last_row_count)
            VALUES(%s,%s,'cn',0,now(),%s,%s)
            ON CONFLICT(provider_key,capability,market) DO UPDATE SET consecutive_failures=0,circuit_open_until=null,
-             last_success_at=now(),last_error=null,last_latency_ms=EXCLUDED.last_latency_ms,last_row_count=EXCLUDED.last_row_count,updated_at=now()""",
+             last_success_at=now(),last_error=null,
+             last_latency_ms=COALESCE(EXCLUDED.last_latency_ms,quant.provider_health.last_latency_ms),
+             last_row_count=EXCLUDED.last_row_count,updated_at=now()""",
         (provider, capability, latency_ms, rows),
     )
 

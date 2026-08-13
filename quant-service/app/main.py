@@ -1752,13 +1752,20 @@ async def sync_tushare(request: TushareSyncRequest) -> dict[str, Any]:
     local_capacity_failures: list[str] = []
     provider_failures: list[tuple[str, str]] = []
     providers_used: set[str] = set()
+    provider_latency_ms: dict[str, int] = {}
+    sync_started_at = asyncio.get_running_loop().time()
     for symbol in symbols:
+        provider_started_at = asyncio.get_running_loop().time()
         try:
             result = await call_tushare_api(
                 tushare_daily_api(symbol), {"ts_code": symbol, **date_params},
                 "ts_code,trade_date,open,high,low,close,pre_close,vol,amount",
             )
+            elapsed_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
             provider_failures.extend(result.failed_providers)
+            for provider_key, _ in result.failed_providers:
+                provider_latency_ms[provider_key] = elapsed_ms
+            provider_latency_ms[result.provider.key] = elapsed_ms
             if not result.rows:
                 failures.append(f"{symbol}: provider returned no daily bars")
                 continue
@@ -1785,6 +1792,7 @@ async def sync_tushare(request: TushareSyncRequest) -> dict[str, Any]:
     status = "blocked" if local_capacity_failures and imported == 0 and not failures else (
         "completed" if not failures else "partial" if imported else "failed"
     )
+    finalize_latency_ms = round((asyncio.get_running_loop().time() - sync_started_at) * 1000)
     def finalize_run() -> None:
         with db.transaction() as connection:
             connection.execute(
@@ -1794,11 +1802,12 @@ async def sync_tushare(request: TushareSyncRequest) -> dict[str, Any]:
                  request_key),
             )
             for provider_key, error in provider_failures:
-                record_provider_failure(connection, provider_key, "daily_bar", error)
+                record_provider_failure(connection, provider_key, "daily_bar", error, provider_latency_ms.get(provider_key, finalize_latency_ms))
             for provider_key in providers_used:
-                record_provider_success(connection, provider_key, "daily_bar", imported)
+                record_provider_success(connection, provider_key, "daily_bar", imported, provider_latency_ms.get(provider_key, finalize_latency_ms))
             if failures and not providers_used:
-                record_provider_failure(connection, provider_keys[0], "daily_bar", " | ".join(failures))
+                record_provider_failure(connection, provider_keys[0], "daily_bar", " | ".join(failures),
+                                        provider_latency_ms.get(provider_keys[0], finalize_latency_ms))
 
     await run_database_blocking(finalize_run)
     return {"status": status, "trade_date": str(trade_date), "date_params": date_params, "imported": imported,
@@ -1859,6 +1868,7 @@ async def sync_baostock(request: TushareSyncRequest) -> dict[str, Any]:
     unchanged = await run_database_blocking(prepare_run)
     if unchanged:
         return unchanged
+    provider_started_at = asyncio.get_running_loop().time()
     try:
         rows, failures = await run_akshare_blocking(fetch_baostock_rows, symbols, trade_date, timeout_seconds=30)
     except ExecutorSaturatedError as error:
@@ -1903,6 +1913,7 @@ async def sync_baostock(request: TushareSyncRequest) -> dict[str, Any]:
     if imported == 0 and not failures:
         failures.append("provider returned no daily bars")
     status = "completed" if not failures else "partial" if imported else "failed"
+    finalize_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
     def finalize_run() -> None:
         with db.transaction() as connection:
             connection.execute(
@@ -1910,9 +1921,11 @@ async def sync_baostock(request: TushareSyncRequest) -> dict[str, Any]:
                 (status, imported, "provider_error" if failures else None, " | ".join(failures)[:1000] if failures else None, request_key),
             )
             if failures:
-                record_provider_failure(connection, "baostock", "daily_bar", " | ".join(failures))
+                record_provider_failure(connection, "baostock", "daily_bar", " | ".join(failures),
+                                        finalize_latency_ms)
             else:
-                record_provider_success(connection, "baostock", "daily_bar", imported)
+                record_provider_success(connection, "baostock", "daily_bar", imported,
+                                         finalize_latency_ms)
 
     await run_database_blocking(finalize_run)
     return {"status": status, "trade_date": str(trade_date), "imported": imported, "failures": failures, "request_key": request_key}
@@ -2270,6 +2283,7 @@ async def sync_market_universe(request: MarketUniverseSyncRequest) -> dict[str, 
     unchanged = await run_database_blocking(prepare_run)
     if unchanged:
         return unchanged
+    provider_started_at = asyncio.get_running_loop().time()
     try:
         # The audited providers return the active-list cross-section in one
         # stock_basic response.  Their gateways ignore offset when limit is
@@ -2287,6 +2301,7 @@ async def sync_market_universe(request: MarketUniverseSyncRequest) -> dict[str, 
         if len(valid_rows) < request.minimum_rows:
             raise ProviderCallError(f"stock_basic returned {len(valid_rows)} valid active symbols; expected at least {request.minimum_rows}")
         observed_at = datetime.now(timezone.utc)
+        provider_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
         def persist_result() -> int:
             with db.transaction() as connection:
                 normalized = persist_tushare_rows(connection, "stock_basic", request_key, valid_rows, result.provider.key, observed_at)
@@ -2305,10 +2320,10 @@ async def sync_market_universe(request: MarketUniverseSyncRequest) -> dict[str, 
                     (request.universe_key, [str(row["ts_code"]).upper() for row in valid_rows]),
                 )
                 connection.execute("UPDATE quant.fetch_runs SET status='completed',row_count=%s,finished_at=now() WHERE request_key=%s", (len(valid_rows), request_key))
-                record_provider_success(connection, result.provider.key, "stock_basic_all_a", len(valid_rows))
+                record_provider_success(connection, result.provider.key, "stock_basic_all_a", len(valid_rows), provider_latency_ms)
                 record_provider_api_capability(connection, result.provider.key, "stock_basic", "verified", len(valid_rows), "Full active A-share reference universe refreshed.")
                 for provider_key, error in result.failed_providers:
-                    record_provider_failure(connection, provider_key, "stock_basic", error)
+                    record_provider_failure(connection, provider_key, "stock_basic", error, provider_latency_ms)
                     record_provider_api_capability(connection, provider_key, "stock_basic", "failed", note=error)
             return normalized
 
@@ -2320,11 +2335,13 @@ async def sync_market_universe(request: MarketUniverseSyncRequest) -> dict[str, 
         return {"status": "blocked", "universe_key": request.universe_key,
                 "reason": safe_error_detail(str(error), 500), "request_key": request_key}
     except Exception as error:  # noqa: BLE001
+        failure_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
         def persist_failure() -> None:
             with db.transaction() as connection:
                 detail = safe_error_detail(str(error), 1000)
                 connection.execute("UPDATE quant.fetch_runs SET status='failed',finished_at=now(),error_class='provider_error',error_message=%s WHERE request_key=%s", (detail, request_key))
-                record_provider_failure(connection, candidates[0].key, "stock_basic_all_a", detail)
+                record_provider_failure(connection, candidates[0].key, "stock_basic_all_a", detail,
+                                        failure_latency_ms)
                 record_provider_api_capability(connection, candidates[0].key, "stock_basic", "failed", note=detail)
 
         await run_database_blocking(persist_failure)
@@ -2355,6 +2372,7 @@ async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[st
     unchanged = await run_database_blocking(prepare_run)
     if unchanged:
         return unchanged
+    provider_started_at = asyncio.get_running_loop().time()
     result = None
     try:
         # One trade_date response is the provider's documented full daily
@@ -2375,14 +2393,15 @@ async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[st
         if len(valid_rows) < request.minimum_rows:
             raise ProviderCallError(f"daily returned {len(valid_rows)} valid A-share rows; expected at least {request.minimum_rows}")
         observed_at = datetime.now(timezone.utc)
+        provider_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
         def persist_result() -> int:
             with db.transaction() as connection:
                 normalized = persist_tushare_rows(connection, "daily", request_key, valid_rows, result.provider.key, observed_at)
                 connection.execute("UPDATE quant.fetch_runs SET status='completed',row_count=%s,finished_at=now() WHERE request_key=%s", (len(valid_rows), request_key))
-                record_provider_success(connection, result.provider.key, "daily_all_a", len(valid_rows))
+                record_provider_success(connection, result.provider.key, "daily_all_a", len(valid_rows), provider_latency_ms)
                 record_provider_api_capability(connection, result.provider.key, "daily", "verified", len(valid_rows), "Full-market post-close daily bars refreshed.")
                 for provider_key, error in result.failed_providers:
-                    record_provider_failure(connection, provider_key, "daily", error)
+                    record_provider_failure(connection, provider_key, "daily", error, provider_latency_ms)
                     record_provider_api_capability(connection, provider_key, "daily", "failed", note=error)
             return normalized
 
@@ -2395,6 +2414,7 @@ async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[st
                 "reason": safe_error_detail(str(error), 500), "request_key": request_key}
     except Exception as error:  # noqa: BLE001
         empty_providers = list(result.empty_providers) if result is not None and not result.rows else []
+        failure_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
         def persist_failure() -> None:
             with db.transaction() as connection:
                 connection.execute(
@@ -2410,7 +2430,8 @@ async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[st
                         )
                 else:
                     detail = safe_error_detail(str(error), 1000)
-                    record_provider_failure(connection, candidates[0].key, "daily_all_a", detail)
+                    record_provider_failure(connection, candidates[0].key, "daily_all_a", detail,
+                                            failure_latency_ms)
                     record_provider_api_capability(connection, candidates[0].key, "daily", "failed", note=detail)
 
         await run_database_blocking(persist_failure)
@@ -3411,7 +3432,8 @@ def persist_tencent_intraday_minute_health(completed: int, errors: list[str], la
         if completed:
             record_provider_success(connection, "tencent_free", TENCENT_INTRADAY_MINUTE_CAPABILITY, completed, latency_ms)
         elif errors:
-            record_provider_failure(connection, "tencent_free", TENCENT_INTRADAY_MINUTE_CAPABILITY, " | ".join(errors)[:500])
+            record_provider_failure(connection, "tencent_free", TENCENT_INTRADAY_MINUTE_CAPABILITY,
+                                    " | ".join(errors)[:500], latency_ms)
 
 
 def limit_board_count(tag: Any) -> int:
@@ -5653,12 +5675,13 @@ async def capture_intraday_board_flow_curve() -> dict[str, Any]:
     circuit_skips = 0
     capacity_blocks = 0
 
-    def record_outcome(capability: str, rows: int, error: str | None = None) -> None:
+    def record_outcome(capability: str, rows: int, error: str | None = None,
+                       latency_ms: int | None = None) -> None:
         with db.transaction() as connection:
             if error:
-                record_provider_failure(connection, "eastmoney_free", capability, error)
+                record_provider_failure(connection, "eastmoney_free", capability, error, latency_ms)
             else:
-                record_provider_success(connection, "eastmoney_free", capability, rows)
+                record_provider_success(connection, "eastmoney_free", capability, rows, latency_ms)
 
     for kind in kinds:
         capability = capability_for_kind[kind]
@@ -5678,13 +5701,15 @@ async def capture_intraday_board_flow_curve() -> dict[str, Any]:
             coverage[kind] = {"flow_boards": 0}
             detail = safe_error_detail(str(result), 300)
             source_status[kind] = {"status": "failed", "error": detail}
-            await run_database_blocking(record_outcome, capability, 0, detail)
+            await run_database_blocking(record_outcome, capability, 0, detail,
+                                        round((asyncio.get_running_loop().time() - started_at) * 1000))
             continue
         normalized = intraday_board_flow_curve_items(kind, result)
         items.extend(normalized)
         coverage[kind] = {"flow_boards": len(normalized)}
         source_status[kind] = {"status": "completed", "upstream_rows": len(result), "stored_boards": len(normalized)}
-        await run_database_blocking(record_outcome, capability, len(normalized))
+        await run_database_blocking(record_outcome, capability, len(normalized), None,
+                                    round((asyncio.get_running_loop().time() - started_at) * 1000))
     status = ("blocked" if circuit_skips + capacity_blocks == len(kinds) else
               "partial" if circuit_skips or capacity_blocks or failures == 1 else
               "completed" if failures == 0 else "failed")
@@ -6159,9 +6184,9 @@ def persist_intraday_super_get_fast_quote(symbol: str, observed_at: datetime, pr
         record_provider_success(connection, provider_key, "realtime_quote", 1, latency_ms)
 
 
-def record_intraday_super_get_fast_quote_failure(error: str) -> None:
+def record_intraday_super_get_fast_quote_failure(error: str, latency_ms: int | None = None) -> None:
     with db.transaction() as connection:
-        record_provider_failure(connection, "tushare_super_get", "realtime_quote", error)
+        record_provider_failure(connection, "tushare_super_get", "realtime_quote", error, latency_ms)
 
 
 async def capture_intraday_super_get_fast_quote(symbol: str) -> dict[str, Any]:
@@ -6194,7 +6219,8 @@ async def capture_intraday_super_get_fast_quote(symbol: str) -> dict[str, Any]:
         if isinstance(error, HTTPException) and is_circuit_open_http_error(error):
             return {"status": "circuit_open", "symbol": symbol, "observed_at": observed_at.isoformat(),
                     "error": detail}
-        await run_database_blocking(record_intraday_super_get_fast_quote_failure, detail)
+        latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
+        await run_database_blocking(record_intraday_super_get_fast_quote_failure, detail, latency_ms)
         return {"status": "failed", "symbol": symbol, "observed_at": observed_at.isoformat(),
                 "error": detail}
 
@@ -7531,11 +7557,11 @@ def snapshot_universe_symbols(universe_key: str) -> list[str]:
     return [str(row["symbol"]) for row in rows]
 
 
-def persist_public_quote_batch(provider: str, quotes: list[dict[str, Any]]) -> int:
+def persist_public_quote_batch(provider: str, quotes: list[dict[str, Any]], latency_ms: int | None = None) -> int:
     """Persist one bounded public quote batch and its health outcome off-loop."""
     stored = persist_free_quotes(provider, quotes)
     with db.transaction() as connection:
-        record_provider_success(connection, provider, "realtime_quote", stored)
+        record_provider_success(connection, provider, "realtime_quote", stored, latency_ms)
     return stored
 
 
@@ -7645,7 +7671,8 @@ async def build_market_snapshot(request: MarketSnapshotRequest) -> dict[str, Any
             started_at = asyncio.get_running_loop().time()
             raw_tencent_rows = await run_akshare_blocking(akshare_tencent_all_a_spot, timeout_seconds=25)
             stored = await run_database_blocking(
-                persist_public_quote_batch, "tencent_free", tencent_snapshot_quotes(raw_tencent_rows, exchange_date), timeout_seconds=60,
+                persist_public_quote_batch, "tencent_free", tencent_snapshot_quotes(raw_tencent_rows, exchange_date),
+                round((asyncio.get_running_loop().time() - started_at) * 1000), timeout_seconds=60,
             )
             tencent_status = {"enabled": True, "status": "completed", "upstream_rows": len(raw_tencent_rows), "stored": stored,
                               "session_date_inferred": True}
@@ -7674,7 +7701,10 @@ async def build_market_snapshot(request: MarketSnapshotRequest) -> dict[str, Any
                 batch_size=int(public_quote_settings["batch_size"]),
                 concurrency=int(public_quote_settings["concurrency"]),
             )
-            await run_database_blocking(persist_public_quote_batch, "sina_free", fetched, timeout_seconds=60)
+            await run_database_blocking(
+                persist_public_quote_batch, "sina_free", fetched,
+                round((asyncio.get_running_loop().time() - started_at) * 1000), timeout_seconds=60,
+            )
         except Exception as error:  # noqa: BLE001
             refresh_error = safe_error_detail(str(error), 500)
             latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
@@ -7698,14 +7728,15 @@ def announcement_symbols(request: AnnouncementSyncRequest) -> list[str]:
     return [str(row["symbol"]) for row in rows]
 
 
-def persist_announcement_provider_health(status: str, stored: int, failures: list[str]) -> None:
+def persist_announcement_provider_health(status: str, stored: int, failures: list[str],
+                                         latency_ms: int | None = None) -> None:
     with db.transaction() as connection:
         if status == "failed":
-            record_provider_failure(connection, "cninfo_free", "announcement", " | ".join(failures))
+            record_provider_failure(connection, "cninfo_free", "announcement", " | ".join(failures), latency_ms)
         else:
-            record_provider_success(connection, "cninfo_free", "announcement", stored)
+            record_provider_success(connection, "cninfo_free", "announcement", stored, latency_ms)
             if failures:
-                record_provider_failure(connection, "cninfo_free", "announcement", " | ".join(failures))
+                record_provider_failure(connection, "cninfo_free", "announcement", " | ".join(failures), latency_ms)
 
 
 async def sync_cninfo_announcements(request: AnnouncementSyncRequest) -> dict[str, Any]:
@@ -7723,6 +7754,7 @@ async def sync_cninfo_announcements(request: AnnouncementSyncRequest) -> dict[st
                 "provider": "cninfo_free", "request_key": request_key, "symbols": symbols,
                 "start_date": str(start), "end_date": str(end), "received": 0, "stored": 0,
                 "failures": [], "decision_eligible": False}
+    started_at = asyncio.get_running_loop().time()
     stored = 0
     received = 0
     failures: list[str] = []
@@ -7734,7 +7766,10 @@ async def sync_cninfo_announcements(request: AnnouncementSyncRequest) -> dict[st
         except Exception as error:  # noqa: BLE001
             failures.append(f"{symbol}: {str(error)[:180]}")
     status = "completed" if not failures else "partial" if stored or received else "failed"
-    await run_database_blocking(persist_announcement_provider_health, status, stored, failures)
+    await run_database_blocking(
+        persist_announcement_provider_health, status, stored, failures,
+        round((asyncio.get_running_loop().time() - started_at) * 1000),
+    )
     return {"status": status, "provider": "cninfo_free", "request_key": request_key, "symbols": symbols,
             "start_date": str(start), "end_date": str(end), "received": received, "stored": stored,
             "failures": failures, "decision_eligible": False}
@@ -8191,13 +8226,14 @@ async def stock_study_fetch(label: str, request: TushareFetchRequest) -> tuple[d
                  "status": status, "received": 0, "stored": 0, "error": str(error.detail)}, [])
 
 
-def persist_stock_study_free_result(provider: str, capability: str, payload: Any, symbol: str) -> int:
+def persist_stock_study_free_result(provider: str, capability: str, payload: Any, symbol: str,
+                                    latency_ms: int | None = None) -> int:
     if isinstance(payload, list):
         stored = persist_free_daily(provider, payload) if capability == "daily_bar" else len(payload)
     else:
         stored = persist_free_quote(provider, symbol, payload) if capability == "realtime_quote" else int(bool(payload))
     with db.transaction() as connection:
-        record_provider_success(connection, provider, capability, stored)
+        record_provider_success(connection, provider, capability, stored, latency_ms)
     return stored
 
 
@@ -8225,7 +8261,10 @@ async def stock_study_free_fetch(label: str, provider: str, capability: str, fet
             received = len(payload)
         else:
             received = int(bool(payload))
-        stored = await run_database_blocking(persist_stock_study_free_result, provider, capability, payload, symbol, timeout_seconds=60)
+        latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
+        stored = await run_database_blocking(
+            persist_stock_study_free_result, provider, capability, payload, symbol, latency_ms, timeout_seconds=60,
+        )
         return ({"source": label, "api_name": capability, "provider": provider, "status": "completed" if received else "empty",
                  "received": received, "stored": stored}, payload)
     except ExecutorSaturatedError as error:
@@ -8405,15 +8444,22 @@ async def build_stock_study(symbol: str, request: StockStudyRequest) -> dict[str
         baostock = {"status": "failed", "imported": 0, "failures": ["study source exceeded 15 second budget"]}
     sources.append({"source": "Baostock 日线", "api_name": "daily_bar", "provider": "baostock", "status": baostock["status"],
                     "received": baostock.get("imported", 0), "stored": baostock.get("imported", 0), "failures": baostock.get("failures", [])})
+    announcement_started_at = asyncio.get_running_loop().time()
     try:
         announcement_rows = await asyncio.wait_for(cninfo_announcements(symbol, datetime.strptime(start, "%Y%m%d").date(), market_date, max_pages=1), timeout=12)
         announcement_stored = await run_database_blocking(persist_market_events, "cninfo_free", announcement_rows, timeout_seconds=60)
-        await run_database_blocking(persist_announcement_provider_health, "completed", announcement_stored, [])
+        await run_database_blocking(
+            persist_announcement_provider_health, "completed", announcement_stored, [],
+            round((asyncio.get_running_loop().time() - announcement_started_at) * 1000),
+        )
         sources.append({"source": "巨潮公开公告", "api_name": "announcement", "provider": "cninfo_free",
                         "status": "completed" if announcement_rows else "empty", "received": len(announcement_rows), "stored": announcement_stored})
     except Exception as error:  # noqa: BLE001
         announcement_rows = []
-        await run_database_blocking(persist_announcement_provider_health, "failed", 0, [str(error)])
+        await run_database_blocking(
+            persist_announcement_provider_health, "failed", 0, [str(error)],
+            round((asyncio.get_running_loop().time() - announcement_started_at) * 1000),
+        )
         sources.append({"source": "巨潮公开公告", "api_name": "announcement", "provider": "cninfo_free",
                         "status": "failed", "received": 0, "stored": 0, "error": str(error)[:300]})
     daily_rows = data["主 Tushare 日线"] or data["超级源日线"]
@@ -8733,7 +8779,8 @@ def bootstrap() -> dict[str, Any]:
     return {"status": "ok", "catalog": catalog_counts()}
 
 
-def persist_akshare_probe_result(capability: str, rows: list[dict[str, Any]], symbol: str) -> int:
+def persist_akshare_probe_result(capability: str, rows: list[dict[str, Any]], symbol: str,
+                                 latency_ms: int | None = None) -> int:
     """Persist one bounded AKShare probe result and its health in a DB worker."""
     event_capabilities = {"lhb_event", "strong_pool", "limit_pool"}
     if capability == "daily_bar":
@@ -8746,7 +8793,7 @@ def persist_akshare_probe_result(capability: str, rows: list[dict[str, Any]], sy
     else:
         stored = persist_public_observations("akshare", capability, rows[:1_000], symbol)
     with db.transaction() as connection:
-        record_provider_success(connection, "akshare", capability, stored)
+        record_provider_success(connection, "akshare", capability, stored, latency_ms)
     return stored
 
 
@@ -8769,7 +8816,10 @@ async def akshare_probe(payload: AkShareProbeRequest) -> dict[str, Any]:
         try:
             started_at = asyncio.get_running_loop().time()
             rows = await run_akshare_blocking(action, timeout_seconds=45)
-            stored = await run_database_blocking(persist_akshare_probe_result, capability, rows, payload.symbol, timeout_seconds=60)
+            latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
+            stored = await run_database_blocking(
+                persist_akshare_probe_result, capability, rows, payload.symbol, latency_ms, timeout_seconds=60,
+            )
             results.append({"source": label, "provider": "akshare", "capability": capability,
                             "status": "completed" if rows else "empty", "received": len(rows), "stored": stored})
         except ExecutorSaturatedError as error:

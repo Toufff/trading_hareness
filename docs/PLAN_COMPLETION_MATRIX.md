@@ -24,7 +24,7 @@
 | 项目 | 状态 | 当前证据 |
 | --- | --- | --- |
 | provider registry、共享限频、有限重试、熔断 | 已完成 | Tushare/公共源独立 client、Retry-After、跨副本预约和 health |
-| 成功/失败延迟与错误脱敏 | 已完成主要路径 | `provider_health.py`；Tushare、腾讯、Sina、AKShare 失败耗时进入 health/Prometheus |
+| 成功/失败延迟与错误脱敏 | 已完成主要路径 | `provider_health.py`；Tushare、腾讯、Sina、东财、AKShare、巨潮公告、BaoStock、Super GET 主要路径耗时进入 health/Prometheus；兼容路径允许延迟缺省且不覆盖已有值 |
 | 盘中调度、租约、outbox、飞书恢复 | 已完成 | 开盘预检、`runtime_leases`、投递回执和连续失败治理 |
 | 存储/备份/恢复前校验 | 已完成 | 20 GiB 研究预算、保留策略、`pg_restore -l` manifest 校验 |
 | 纸面组合展示与风险阻断 | 已完成 | 前端展示净值、总/净暴露、回撤、可卖量、板块暴露和风险事件；成员按观察日点时映射；新 entry 受日亏/回撤/集中度限制 |

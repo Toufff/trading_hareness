@@ -1010,6 +1010,19 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(parameters[-1], 123)
         self.assertIn("last_latency_ms", connection.execute.call_args.args[0])
 
+    def test_provider_success_keeps_last_latency_when_sample_has_no_latency(self):
+        connection = MagicMock()
+        record_provider_success(connection, "test", "daily", 1)
+        sql = connection.execute.call_args.args[0]
+        self.assertIn("COALESCE(EXCLUDED.last_latency_ms", sql)
+        self.assertIn("quant.provider_health.last_latency_ms", sql)
+
+    def test_provider_failure_keeps_last_latency_when_sample_has_no_latency(self):
+        connection = MagicMock()
+        record_provider_failure(connection, "test", "daily", "temporary")
+        sql = connection.execute.call_args.args[0]
+        self.assertIn("COALESCE(EXCLUDED.last_latency_ms", sql)
+
     def test_intraday_outcome_decomposition_is_json_safe_before_persistence(self):
         from app.main import strategy_json_safe
         decomposition = a_share_return_decomposition(
