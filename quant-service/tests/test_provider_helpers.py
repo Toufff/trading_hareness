@@ -143,6 +143,16 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(lhb["000001.SZ"]["institution_records"], 1)
         self.assertEqual(lhb["000001.SZ"]["institution_net_buy"], 6.0)
 
+    def test_intraday_outcome_settlement_entry_delegates_to_isolated_repository(self):
+        import app.main as main_module
+        sentinel = {"status": "settled"}
+        with patch("app.main.persist_intraday_outcome_settlement", return_value=sentinel) as settle:
+            with patch("app.main.intraday_outcome_cutoff") as cutoff:
+                cutoff.return_value = datetime(2026, 8, 13, tzinfo=timezone.utc)
+                result = main_module.recompute_intraday_signal_outcomes(date(2026, 8, 13))
+        self.assertIs(result, sentinel)
+        settle.assert_called_once()
+
     def test_post_close_candidate_screen_is_pure_and_fail_closed_on_coverage(self):
         blocked = screen_candidates(
             date(2026, 8, 13), 10, 3, 2, [], {},

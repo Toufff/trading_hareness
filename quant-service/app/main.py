@@ -87,6 +87,7 @@ from .post_close_candidate_screen import screen_candidates as pure_post_close_sc
 from .post_close_pattern_candidates import select_candidates as pure_post_close_pattern_candidates
 from .post_close_evidence import exact_board_context as pure_exact_board_context, lhb_context as pure_lhb_context
 from .strategy_pattern_read_model import latest_strategy_pattern_mining as read_latest_strategy_pattern_mining
+from .intraday_outcome_settlement import settle as persist_intraday_outcome_settlement
 from .tushare_normalization import normalize_rows as pure_normalize_tushare_rows
 from .market_regimes import (
     strategy_index_regime as pure_strategy_index_regime,
@@ -936,7 +937,7 @@ def intraday_outcome_attribution_summary(items: list[dict[str, Any]]) -> dict[st
     return pure_outcome_attribution_summary(items, number=intraday_number)
 
 
-def recompute_intraday_signal_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
+def recompute_intraday_signal_outcomes_legacy(as_of_date: date | None = None) -> dict[str, Any]:
     """Settle confirmed alerts only from quotes/bars that arrived afterwards.
 
     Suppressed scans are intentionally excluded: they are diagnostics, not a
@@ -1068,6 +1069,19 @@ def recompute_intraday_signal_outcomes(as_of_date: date | None = None) -> dict[s
     return {"as_of_date": str(as_of_date) if as_of_date else None, "signals": len(signals),
             "outcome_rows": sum(horizon_counts.values()) + len(signals) * 2,
             "matured": matured, "pending": pending, "intraday_horizons": horizon_counts}
+
+
+def recompute_intraday_signal_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
+    """Settle confirmed alerts from persisted evidence through the shared repository."""
+    cutoff = intraday_outcome_cutoff(as_of_date)
+    with db.transaction() as connection:
+        return persist_intraday_outcome_settlement(
+            connection, as_of_date, cutoff=cutoff, horizons=INTRADAY_OUTCOME_HORIZONS,
+            direction_for=intraday_signal_direction, metrics_for=intraday_signal_outcome_metrics,
+            decimal_or_none=decimal_or_none, barrier_spec_type=LabelSpec,
+            triple_barrier_label=triple_barrier_label, persist_barrier_outcome=persist_barrier_outcome,
+            return_decomposition=a_share_return_decomposition, json_safe=strategy_json_safe,
+        )
 
 
 def recompute_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
