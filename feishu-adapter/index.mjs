@@ -703,6 +703,7 @@ async function renderMetrics() {
 }
 
 const researchPaths = new Map([
+	['/api/research/runtime/health', '/health'],
 	['/api/research/overview', '/api/v1/research/overview'],
 	['/api/research/reports', '/api/v1/remote-archive/reports'],
 	['/api/research/claims', '/api/v1/analyst-claims'],
