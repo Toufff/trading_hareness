@@ -3358,6 +3358,23 @@ class ProviderHelperTests(unittest.TestCase):
             last_symbol_watch_alerted_at=now - timedelta(minutes=1),
         ), "confirmed")
 
+    def test_intraday_same_episode_realerts_only_after_material_change(self):
+        now = datetime(2026, 8, 10, 14, 30, tzinfo=timezone.utc)
+        signal = {"signal_type": "watch", "hard": False, "score": 70,
+                  "conditions": {"price": 10.0, "volume_ratio": 2.0, "main_net_inflow": 100}}
+        prior = {"score": 65, "conditions": {"price": 10.0, "volume_ratio": 2.0, "main_net_inflow": 100}}
+        self.assertEqual(intraday_signal_event_state(
+            signal, observed_at=now, latest_event_at=now - timedelta(seconds=30),
+            last_key_alerted_at=now - timedelta(minutes=20), last_symbol_watch_alerted_at=None,
+            last_key_alert=prior,
+        ), "suppressed")
+        signal["conditions"] = {**signal["conditions"], "price": 10.2}
+        self.assertEqual(intraday_signal_event_state(
+            signal, observed_at=now, latest_event_at=now - timedelta(seconds=30),
+            last_key_alerted_at=now - timedelta(minutes=20), last_symbol_watch_alerted_at=None,
+            last_key_alert=prior,
+        ), "confirmed")
+
     def test_live_policy_gate_blocks_new_entry_during_broad_risk_off(self):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(

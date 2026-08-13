@@ -2822,9 +2822,38 @@ INTRADAY_ALERT_MAX_ATTEMPTS = 3
 _intraday_tencent_minute_cache: dict[str, tuple[float, dict[str, Any] | None, str | None]] = {}
 
 
+def intraday_signal_material_change(signal: dict[str, Any], prior_alert: dict[str, Any] | None) -> bool:
+    """Whether a persistent setup has earned a fresh human interruption.
+
+    A fixed cooldown lets an unchanged extreme-flow condition re-alert every
+    ten minutes.  We instead retain one episode unless score, price, volume or
+    flow materially changes, or a rule explicitly marks a new stage.
+    """
+    if signal.get("stage_upgrade") or prior_alert is None:
+        return bool(signal.get("stage_upgrade"))
+    previous_conditions = prior_alert.get("conditions") if isinstance(prior_alert.get("conditions"), dict) else {}
+    current_conditions = signal.get("conditions") if isinstance(signal.get("conditions"), dict) else {}
+    previous_score = intraday_number(prior_alert.get("score"))
+    current_score = intraday_number(signal.get("score"))
+    if previous_score is not None and current_score is not None and current_score - previous_score >= 10:
+        return True
+    previous_price = intraday_number(previous_conditions.get("price"))
+    current_price = intraday_number(current_conditions.get("price"))
+    if previous_price and current_price and abs(current_price / previous_price - 1) >= 0.01:
+        return True
+    previous_volume = intraday_number(previous_conditions.get("volume_ratio"))
+    current_volume = intraday_number(current_conditions.get("volume_ratio"))
+    if previous_volume is not None and current_volume is not None and current_volume - previous_volume >= 0.8:
+        return True
+    previous_flow = intraday_number(previous_conditions.get("main_net_inflow"))
+    current_flow = intraday_number(current_conditions.get("main_net_inflow"))
+    return bool(previous_flow is not None and current_flow is not None and previous_flow * current_flow < 0)
+
+
 def intraday_signal_event_state(signal: dict[str, Any], *, observed_at: datetime,
                                 latest_event_at: datetime | None, last_key_alerted_at: datetime | None,
-                                last_symbol_watch_alerted_at: datetime | None) -> str:
+                                last_symbol_watch_alerted_at: datetime | None,
+                                last_key_alert: dict[str, Any] | None = None) -> str:
     """Keep event confirmation distinct from alert de-duplication.
 
     A suppressed row is still useful proof that the condition persists, but it
@@ -2832,7 +2861,10 @@ def intraday_signal_event_state(signal: dict[str, Any], *, observed_at: datetime
     additionally share a symbol-level cooldown so a changing public-provider
     label cannot produce a new notification every scan.
     """
-    key_duplicate = last_key_alerted_at is not None and observed_at - last_key_alerted_at <= INTRADAY_ALERT_COOLDOWN
+    material_change = intraday_signal_material_change(signal, last_key_alert)
+    # Same-key events remain in the same episode for this market session.  A
+    # new stage or a defined material change can intentionally pierce it.
+    key_duplicate = last_key_alerted_at is not None and not material_change
     symbol_watch_duplicate = (signal["signal_type"] == "watch" and not signal.get("stage_upgrade")
                               and last_symbol_watch_alerted_at is not None
                               and observed_at - last_symbol_watch_alerted_at <= INTRADAY_ALERT_COOLDOWN)
@@ -5061,8 +5093,10 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     (signal["signal_key"],),
                 ).fetchone()
                 last_key_alerted = connection.execute(
-                    "SELECT observed_at FROM quant.intraday_signal_events WHERE signal_key=%s AND state='alerted' ORDER BY observed_at DESC LIMIT 1",
-                    (signal["signal_key"],),
+                    """SELECT observed_at,score,conditions FROM quant.intraday_signal_events
+                         WHERE signal_key=%s AND state='alerted' AND observed_at>=%s
+                         ORDER BY observed_at DESC LIMIT 1""",
+                    (signal["signal_key"], session_start),
                 ).fetchone()
                 last_symbol_watch_alerted = connection.execute(
                     """SELECT observed_at FROM quant.intraday_signal_events
@@ -5075,6 +5109,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     latest_event_at=latest["observed_at"] if latest else None,
                     last_key_alerted_at=last_key_alerted["observed_at"] if last_key_alerted else None,
                     last_symbol_watch_alerted_at=last_symbol_watch_alerted["observed_at"] if last_symbol_watch_alerted else None,
+                    last_key_alert=dict(last_key_alerted) if last_key_alerted else None,
                 )
                 if state == "confirmed" and fast_confirmation.get("status") == "mismatch":
                     state = "confirming"
