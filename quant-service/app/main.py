@@ -5996,6 +5996,13 @@ async def capture_intraday_super_get_fast_quote(symbol: str) -> dict[str, Any]:
         return {"status": "completed", "symbol": symbol, "observed_at": observed_at.isoformat(), "price": price}
     except Exception as error:  # noqa: BLE001 - the next one-second slot remains useful
         detail = safe_error_detail(str(error), 300)
+        # A circuit-open response means the request was deliberately not sent
+        # upstream.  Do not turn local protection into another provider
+        # failure, otherwise the five-minute window is extended every second
+        # and the route can never recover on its own.
+        if isinstance(error, HTTPException) and is_circuit_open_http_error(error):
+            return {"status": "circuit_open", "symbol": symbol, "observed_at": observed_at.isoformat(),
+                    "error": detail}
         await run_database_blocking(record_intraday_super_get_fast_quote_failure, detail)
         return {"status": "failed", "symbol": symbol, "observed_at": observed_at.isoformat(),
                 "error": detail}

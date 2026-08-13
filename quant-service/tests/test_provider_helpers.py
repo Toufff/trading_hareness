@@ -90,7 +90,7 @@ from app.main import intraday_board_curve_session, intraday_board_curve_session_
 from app.main import AnnouncementSyncRequest, sync_cninfo_announcements
 from app.main import AkShareProbeRequest, akshare_probe, TushareCapabilityAuditRequest, audit_tushare_capabilities
 from app.main import stock_study_free_fetch
-from app.main import intraday_tencent_surge_context
+from app.main import capture_intraday_super_get_fast_quote, intraday_tencent_surge_context
 from app.main import stock_study_fetch
 from app.main import is_circuit_open_http_error, is_local_capacity_http_error
 from app.main import fetch_tushare_catalog
@@ -3428,6 +3428,19 @@ class ProviderHelperTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"], "risk_alert_only")
         self.assertTrue(result["allow_confirmation"])
+
+    def test_super_get_fast_loop_does_not_extend_circuit_on_local_skip(self):
+        async def check() -> tuple[dict[str, object], AsyncMock]:
+            blocking = AsyncMock()
+            with patch("app.main.call_tushare_api", new=AsyncMock(
+                side_effect=HTTPException(status_code=503, detail="provider circuit-open until later"),
+            )), patch("app.main.run_database_blocking", new=blocking):
+                result = await capture_intraday_super_get_fast_quote("000001.SZ")
+            return result, blocking
+
+        result, blocking = asyncio.run(check())
+        self.assertEqual(result["status"], "circuit_open")
+        blocking.assert_not_awaited()
 
     def test_intraday_outcome_metrics_keep_direction_and_adverse_path(self):
         prices = [Decimal("10.10"), Decimal("9.80"), Decimal("10.40")]
