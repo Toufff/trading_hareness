@@ -65,6 +65,12 @@ from .factor_lab import evaluate_factor, run_multi_factor_strategy
 from .analyst_promotion import analyst_live_promotion
 from .research_prices import adjusted_bars
 from .live_policy import live_policy_gate
+from .market_regimes import (
+    strategy_index_regime as pure_strategy_index_regime,
+    strategy_market_regime as pure_strategy_market_regime,
+    strategy_market_state as pure_strategy_market_state,
+    strategy_rank as pure_strategy_rank,
+)
 from .free_market_providers import (
     FreeProviderError,
     cninfo_announcements,
@@ -6482,157 +6488,13 @@ def strategy_json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
 
-def strategy_rank(values: list[float | None]) -> dict[int, float]:
-    """Return cross-sectional ranks without comparing provider display units.
-
-    Eastmoney flow values are only comparable within one taxonomy.  Ranking
-    keeps the model robust if an upstream display unit changes, while the raw
-    values remain in the decision evidence.
-    """
-    known = [(index, value) for index, value in enumerate(values) if value is not None]
-    if not known:
-        return {}
-    ordered = sorted(known, key=lambda item: item[1])
-    if len(ordered) == 1:
-        return {ordered[0][0]: 1.0 if ordered[0][1] > 0 else 0.0}
-    return {index: rank / (len(ordered) - 1) for rank, (index, _) in enumerate(ordered)}
-
-
-def strategy_market_regime(items: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
-    flows = [intraday_number(item.get("net_inflow")) for item in items]
-    changes = [intraday_number(item.get("change_pct")) for item in items]
-    known_flows = [value for value in flows if value is not None]
-    known_changes = sorted(value for value in changes if value is not None)
-    if not known_flows:
-        return "blocked", {"known_board_flows": 0, "reason": "no usable board-flow values"}
-    positive_share = sum(value > 0 for value in known_flows) / len(known_flows)
-    median_change = known_changes[len(known_changes) // 2] if known_changes else None
-    if positive_share >= 0.58 and (median_change is None or median_change >= 0):
-        regime = "risk_on"
-    elif positive_share <= 0.42 and (median_change is None or median_change <= 0):
-        regime = "risk_off"
-    else:
-        regime = "neutral"
-    return regime, {"known_board_flows": len(known_flows), "positive_flow_share": round(positive_share, 3),
-                    "median_board_change_pct": median_change}
-
-
-TECHNOLOGY_BOARD_TERMS = ("芯片", "半导体", "通信", "元件", "CPO", "AIDC", "数据中心", "光模块", "华为", "AI", "人工智能", "电子")
-# These are deliberately narrow labels.  In particular, broad words such as
-# "消费" and "金属" are omitted: "消费电子" and "小金属" otherwise become
-# contradictory evidence in both rotation buckets.
-DEFENSIVE_BOARD_TERMS = ("贵金属", "黄金", "银行", "白酒", "高股息", "猪肉", "养殖", "医药商业", "农业种植", "生态农业", "食品饮料", "中药")
-
-
-def strategy_market_state(items: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
-    """Describe rotation without treating one board's display unit as universal.
-
-    Board-flow units may differ by taxonomy, so the state relies on the sign
-    and breadth of named board groups, while preserving raw values in the
-    review evidence.  It is a risk gate, never a direction forecast.
-    """
-    base_regime, base_metrics = strategy_market_regime(items)
-
-    def grouped(terms: tuple[str, ...], *, exclude_technology: bool = False) -> tuple[list[str], list[str]]:
-        positive, nonpositive = [], []
-        for item in items:
-            label = str(item.get("label") or "")
-            flow = intraday_number(item.get("net_inflow"))
-            lowered = label.lower()
-            if flow is None or not any(term.lower() in lowered for term in terms):
-                continue
-            if exclude_technology and any(term.lower() in lowered for term in TECHNOLOGY_BOARD_TERMS):
-                continue
-            (positive if flow > 0 else nonpositive).append(label)
-        return sorted(set(positive)), sorted(set(nonpositive))
-
-    technology_in, technology_out = grouped(TECHNOLOGY_BOARD_TERMS)
-    defensive_in, defensive_out = grouped(DEFENSIVE_BOARD_TERMS, exclude_technology=True)
-    if len(defensive_in) >= 2 and len(technology_out) >= 2:
-        state = "rotation_defensive"
-    elif len(technology_in) >= 2 and len(defensive_out) >= 2:
-        state = "rotation_technology"
-    elif base_regime == "risk_on":
-        state = "broad_risk_on"
-    elif base_regime == "risk_off":
-        state = "broad_risk_off"
-    else:
-        state = "mixed_or_neutral"
-    return state, {**base_metrics, "technology_inflow_boards": technology_in,
-                    "technology_outflow_boards": technology_out,
-                    "defensive_inflow_boards": defensive_in,
-                    "defensive_outflow_boards": defensive_out}
-
-
-STRATEGY_INDEX_SYMBOLS = ("000001.SH", "000300.SH", "399001.SZ", "399006.SZ")
-
-
-def strategy_index_regime(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Classify a multi-index rebound without pretending to know an Elliott count.
-
-    The factor measures where each close sits inside its own recent high/low
-    range.  ``corrective_rebound`` is therefore a falsifiable price state: a
-    material rebound after a drawdown that has not recovered the prior high.
-    Analysts may call that a B wave, but their label is retained separately and
-    never substitutes for this calculation.
-    """
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        grouped.setdefault(str(row.get("symbol")), []).append(row)
-    items: list[dict[str, Any]] = []
-    for symbol in STRATEGY_INDEX_SYMBOLS:
-        ordered = sorted(grouped.get(symbol, []), key=lambda row: str(row.get("trading_date")))
-        if len(ordered) < 15:
-            continue
-        window = ordered[-30:]
-        closes = [intraday_number(row.get("close")) for row in window]
-        highs = [intraday_number(row.get("high")) for row in window]
-        lows = [intraday_number(row.get("low")) for row in window]
-        if any(value is None or value <= 0 for value in closes + highs + lows):
-            continue
-        close_values = [float(value) for value in closes if value is not None]
-        high_value = max(float(value) for value in highs if value is not None)
-        low_value = min(float(value) for value in lows if value is not None)
-        latest = close_values[-1]
-        range_value = high_value - low_value
-        retracement = (latest - low_value) / range_value if range_value > 0 else None
-        drawdown_from_high = (low_value / high_value - 1) * 100 if high_value > 0 else None
-        versus_high = (latest / high_value - 1) * 100 if high_value > 0 else None
-        rebound_from_low = (latest / low_value - 1) * 100 if low_value > 0 else None
-        returns_5 = (latest / close_values[-6] - 1) * 100 if len(close_values) >= 6 and close_values[-6] > 0 else None
-        sma5 = mean(close_values[-5:])
-        sma20 = mean(close_values[-20:]) if len(close_values) >= 20 else mean(close_values)
-        volumes = [intraday_number(row.get("volume")) for row in window]
-        recent_volumes = [float(value) for value in volumes[-5:] if value is not None and value > 0]
-        prior_volumes = [float(value) for value in volumes[-20:-5] if value is not None and value > 0]
-        volume_ratio = mean(recent_volumes) / mean(prior_volumes) if recent_volumes and prior_volumes and mean(prior_volumes) else None
-        items.append({"symbol": symbol, "trading_date": str(window[-1].get("trading_date")), "close": latest,
-                      "period_high": high_value, "period_low": low_value,
-                      "drawdown_high_to_low_pct": round(drawdown_from_high, 3) if drawdown_from_high is not None else None,
-                      "rebound_from_low_pct": round(rebound_from_low, 3) if rebound_from_low is not None else None,
-                      "versus_period_high_pct": round(versus_high, 3) if versus_high is not None else None,
-                      "range_retracement": round(retracement, 4) if retracement is not None else None,
-                      "return_5_sessions_pct": round(returns_5, 3) if returns_5 is not None else None,
-                      "above_sma5": latest >= sma5, "above_sma20": latest >= sma20,
-                      "volume_ratio_5_vs_prior15": round(volume_ratio, 4) if volume_ratio is not None else None})
-    retracements = [float(item["range_retracement"]) for item in items if item.get("range_retracement") is not None]
-    materially_drawn = [item for item in items if float(item.get("drawdown_high_to_low_pct") or 0) <= -8]
-    below_high = [item for item in items if float(item.get("versus_period_high_pct") or 0) <= -3]
-    rising = [item for item in items if float(item.get("return_5_sessions_pct") or 0) > 0]
-    if len(items) < 3:
-        state = "insufficient_index_history"
-    elif len(materially_drawn) >= 3 and len(below_high) >= 3 and len(rising) >= 3 and 0.25 <= median(retracements) <= 0.80:
-        state = "corrective_rebound"
-    elif sum(bool(item["above_sma20"]) for item in items) >= 3 and median(retracements) > 0.80:
-        state = "trend_recovery"
-    elif len(rising) <= 1 and median(retracements) < 0.35:
-        state = "weak_or_declining"
-    else:
-        state = "mixed_transition"
-    return {"model_version": "multi-index-corrective-regime-v1", "state": state,
-            "index_count": len(items), "median_range_retracement": round(median(retracements), 4) if retracements else None,
-            "items": items,
-            "interpretation": "B-wave is an analyst scenario label only" if state == "corrective_rebound" else "no Elliott-wave label inferred"}
+# Compatibility names remain in the composition root for existing routers and
+# tests, while the live implementation is now the I/O-free market_regimes
+# module shared by review and future replay.
+strategy_rank = pure_strategy_rank
+strategy_market_regime = pure_strategy_market_regime
+strategy_market_state = pure_strategy_market_state
+strategy_index_regime = pure_strategy_index_regime
 
 
 async def sync_strategy_index_context(as_of_date: date) -> dict[str, Any]:
