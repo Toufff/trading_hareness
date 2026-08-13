@@ -31,11 +31,20 @@ docker compose cp "n8n:${container_before}" "$backup_dir/before.json"
 # secret—is reused.  The new JSON remains in /tmp and is never committed.
 node scripts/build-remote-archive-sync-workflow.mjs "$backup_dir/before.json" "$backup_dir/combined.json"
 node scripts/split-remote-archive-sync-workflows.mjs "$backup_dir/combined.json" "$backup_dir/candidate.json"
+# The cursor endpoints return ``remote_analyst_id``.  Keep this defensive
+# normalization in the tracked convergence path as well as the local
+# generator: older ignored generator copies must not recreate
+# `/analysts/undefined/...` on a future deployment.
+jq 'map(.nodes |= map(if .name == "Read latest report page" or .name == "Read message pages" then .parameters.url |= sub("\\$json\\.analyst_id"; "$json.remote_analyst_id") else . end))' \
+  "$backup_dir/candidate.json" > "$backup_dir/candidate.normalized.json"
+mv "$backup_dir/candidate.normalized.json" "$backup_dir/candidate.json"
 jq -e '
   type == "array" and length == 2 and
   ([.[].id] | sort == ["remoteArchiveMessages123", "remoteArchiveReports123"]) and
   ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.name == "Read report cursor")] | length == 1) and
   ([.[] | select(.id == "remoteArchiveMessages123") | .nodes[] | select(.name == "Select message delta to watermark")] | length == 1) and
+  ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.name == "Read latest report page") | .parameters.url | contains("remote_analyst_id")] | all) and
+  ([.[] | select(.id == "remoteArchiveMessages123") | .nodes[] | select(.name == "Read message pages") | .parameters.url | contains("remote_analyst_id")] | all) and
   ([.[] | .nodes[] | select(.name == "交易时段与盘后同步远端报告") | .parameters.rule.interval[].expression] | unique | sort == ["*/15 9-11,13-14 * * 1-5", "20 18 * * 1-5"])
 ' "$backup_dir/candidate.json" >/dev/null
 
