@@ -6,10 +6,10 @@ const document = JSON.parse(readFileSync(inputPath, 'utf8'));
 const source = Array.isArray(document) ? document[0] : document;
 const commonNames = new Set(['交易时段与盘后同步远端报告', 'Read remote analysts', 'Fan out analysts']);
 const reportNames = new Set(['Read report cursor', 'Read latest report page', 'Select changed report details', 'Read changed report detail', 'Import changed report', 'Advance report cursor']);
-const messageNames = new Set(['Read global message cursor', 'Read message updates', 'Select global message delta', 'Read remote message detail', 'Import remote message', 'Advance global message cursor']);
+const messageNames = new Set(['Read global message cursor', 'Read message updates', 'Select global message delta', 'Read remote message detail', 'Import remote message', 'Aggregate imported global message page', 'Advance global message cursor']);
 
 function build(kind, id, name, streamNames) {
-  const names = new Set([...commonNames, ...streamNames]);
+  const names = kind === 'messages' ? new Set(['交易时段与盘后同步远端报告', ...streamNames]) : new Set([...commonNames, ...streamNames]);
   const nodes = (source.nodes ?? []).filter((node) => names.has(node.name));
   const connections = {};
   for (const [from, value] of Object.entries(source.connections ?? {})) {

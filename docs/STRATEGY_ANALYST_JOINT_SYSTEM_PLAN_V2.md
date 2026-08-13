@@ -558,12 +558,13 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 盘口研究证据扩展到 30 秒/1 分钟/5 分钟封单侵蚀、Kyle λ/VPIN/CORD 代理，全部标记为未校准 research-only，不进入实时阈值。
 - 报告/消息同步工作流已拆分；报告差量游标在一次运行中使用完整版本快照，避免分页造成重复详情请求；两条流独立限速、可独立告警。
 - 盘后自动候选增加 `discovered_at`、`expires_at`、`reason_codes` 与 `source_snapshot`；读取模型和前端同时展示有效期、理由和当次数据覆盖。候选仍只做前端研究，不会自动入观察池。
-- n8n 主进程和外置 runner 都显式注入分析师同步必需的非持久化运行环境；旧合并流仍停用，报告流与消息流保持独立。健康页同时读取工作流 active/published、最近执行状态和本地游标；当前最近执行仍为旧错误，消息流为 `never_succeeded`。下一交易时段仍须完成连续 10 轮的实际同步验收，才可关闭 429/TLS 风险项。
+- n8n 主进程和外置 runner 都显式注入分析师同步必需的非持久化运行环境；JavaScript runner 空闲保持时间固定为 900 秒，避免含 Code 节点的同步流在 15 分钟调度间隔中失去 JS task offer。旧合并流仍停用，报告流与消息流保持独立。健康页同时读取工作流 active/published、最近执行状态和本地游标；下一交易时段仍须完成连续 10 轮的实际同步验收，才可关闭 429/TLS 风险项。
 - 2026-08-13 盘后实测：同日盘后候选任务完成且返回 0（严格门槛，不回退到旧交易日）；涨停池两源去重并集 85、连板梯队 24、分钟形态样本 20、精选 10，均已在研究台展示。
 - 2026-08-13 盘后同步修复：远端 `/analysts/{analyst_id}/messages` 真实 Bearer 请求对安强返回 2 条、其余分析师返回合法空集；n8n 失败执行的实际 URI 为 `/analysts/undefined/messages`，根因为游标返回 `remote_analyst_id` 而工作流使用 `$json.analyst_id`。已恢复原 15 分钟交易时段调度并重新发布两条独立流；当前等待下一正式调度验证本地游标推进。
 - 2026-08-13 后续同步加固：远端 `/messages/updates` 增量接口已用真实 Bearer 请求验证，返回安强 2 条消息与 `next_cursor=null`；新增 `analyst_global_sync_cursors` 迁移和有歧义路径避让，正式消息流已确认无 pagination 配置、单页上限 100，详情全部导入后才写回游标。
+- 2026-08-14 runner 验收发现：外部 runner 默认约 60 秒空闲退出，下一次同步触发时会出现 `No matching task offer ... type javascript`，造成执行停留在触发节点。已将 `N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT` 显式设为 900 秒，并在重启后重新观察两条流的实际执行；该项在连续 10 轮成功验收前仍保持待验证。
 - 新增只读 `/api/v1/strategy/health` 与前端“策略健康与漂移”卡：展示 7 日触发频率、独立 episode、30 分钟成熟结果、报价新鲜度及 200 信号/60 交易日门禁。它只做研究监控，明确 `live_effect=none`，不会在线调参、晋级策略或改变分析师权重。
 - 新增研究存储水位治理：健康接口和前端显示量化热库/受管研究空间用量；默认热库 8 GiB、总研究空间 20 GiB，达到 80% 仅告警，达到 90% 暂停盘口、1 秒 `rt_k`、分钟档案和板块曲线等非必要高频原始证据。观察池报价、风险提醒、outbox 与结算不受影响，也不自动删除证据。当前实测热库约 1.32 GiB（16.5%），总受管空间约 1.32 GiB（6.6%），状态 healthy。
-- 验收：quant-service 全量 267 项 Python 测试通过，前端 typecheck/Vite build 通过；健康接口为 `ok`，迁移为 `20260815_0030`，Prompt Lab 当前无候选且 live_effect=none（符合历史不回填和数据门禁）。
+- 验收：quant-service 全量 272 项 Python 测试通过，前端 typecheck/Vite build 通过；健康接口为 `ok`，迁移为 `20260815_0031`，Prompt Lab 当前无候选且 live_effect=none（符合历史不回填和数据门禁）。
 
 仍明确未完成或待运行窗口验收：分析师消息流真实连续 10 轮无 429、历史数据回填（按要求暂停）、分钟回放、60 日/200 信号验证、样本外分析师 champion/challenger 晋级和 RL。纸面成交撮合仅支持“已有本地报价证据 + 人工确认”的研究模拟，不是经纪商成交。上述项目继续保持 `research_only`，不会改变实时规则或阈值。

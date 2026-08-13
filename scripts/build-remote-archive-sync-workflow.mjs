@@ -72,12 +72,28 @@ return items.filter((message) => message.message_id && message.analyst_id).map((
 }));` } };
 const messageDetail = http('Read remote message detail', [1120, 330], { url: remoteUrl("'/analysts/' + encodeURIComponent($json.analyst_id) + '/messages/' + encodeURIComponent($json.message_id)"), method: 'GET' });
 const messageImport = local('Import remote message', [1340, 330], { url: `${quant}/remote-archive/messages/import`, method: 'POST', sendBody: true, contentType: 'json', specifyBody: 'json', jsonBody: '={{ JSON.stringify({ message: $json }) }}', sendHeaders: true, headerParameters: { parameters: [{ name: 'X-Quant-Write-Key', value: '={{ $env.QUANT_WRITE_API_KEY }}' }] } });
-const messageCursorWrite = local('Advance global message cursor', [1560, 330], { url: `${quant}/remote-archive/sync-cursors-global`, method: 'PUT', sendBody: true, contentType: 'json', specifyBody: 'json', jsonBody: '={{ JSON.stringify({ stream_key: "message_updates", cursor: $("Select global message delta").first().json.next_cursor, received_after: $("Select global message delta").last().json.cursor_received_at, terminal: $("Select global message delta").last().json.terminal, message_ids: $("Select global message delta").last().json.page_message_ids }) }}', sendHeaders: true, headerParameters: { parameters: [{ name: 'X-Quant-Write-Key', value: '={{ $env.QUANT_WRITE_API_KEY }}' }] } });
+// Advance the durable cursor only after every detail in the page has been
+// imported. A partial page must be retried on the next run, never skipped.
+const messagePageReady = { id: randomUUID(), name: 'Aggregate imported global message page', type: 'n8n-nodes-base.code', typeVersion: 2, position: [1560, 330], parameters: { mode: 'runOnceForAllItems', jsCode: `
+const imported = $input.all();
+const delta = $('Select global message delta').all();
+if (!delta.length) return [];
+const expected = new Set(delta.map((item) => item.json.message_id).filter(Boolean));
+// The local HTTP node returns the import result rather than the original
+// request body, so count is the stable completion contract here. Any detail
+// or import error aborts the branch before this node runs.
+if (imported.length !== expected.size) {
+  throw new Error('global message page did not import every detail; cursor not advanced');
+}
+const tail = delta[delta.length - 1].json;
+return [{ json: { stream_key: 'message_updates', cursor: tail.next_cursor, received_after: tail.cursor_received_at,
+  terminal: tail.terminal, message_ids: [...expected] } }];` } };
+const messageCursorWrite = local('Advance global message cursor', [1780, 330], { url: `${quant}/remote-archive/sync-cursors-global`, method: 'PUT', sendBody: true, contentType: 'json', specifyBody: 'json', jsonBody: '={{ JSON.stringify($json) }}', sendHeaders: true, headerParameters: { parameters: [{ name: 'X-Quant-Write-Key', value: '={{ $env.QUANT_WRITE_API_KEY }}' }] } });
 
 const workflow = { id: 'remoteArchiveSync123', name: '市场研究：同步远端分析师报告', active: true,
-  nodes: [schedule, analysts, fanout, reportCursor, reports, reportDelta, reportDetail, reportImport, reportCursorWrite, messageCursor, messages, messageDelta, messageDetail, messageImport, messageCursorWrite],
+  nodes: [schedule, analysts, fanout, reportCursor, reports, reportDelta, reportDetail, reportImport, reportCursorWrite, messageCursor, messages, messageDelta, messageDetail, messageImport, messagePageReady, messageCursorWrite],
   connections: {
-    [schedule.name]: { main: [[{ node: analysts.name, type: 'main', index: 0 }], [{ node: messageCursor.name, type: 'main', index: 0 }]] },
+    [schedule.name]: { main: [[{ node: analysts.name, type: 'main', index: 0 }, { node: messageCursor.name, type: 'main', index: 0 }]] },
     [analysts.name]: { main: [[{ node: fanout.name, type: 'main', index: 0 }]] },
     [fanout.name]: { main: [[{ node: reportCursor.name, type: 'main', index: 0 }]] },
     [reportCursor.name]: { main: [[{ node: reports.name, type: 'main', index: 0 }]] },
@@ -89,7 +105,8 @@ const workflow = { id: 'remoteArchiveSync123', name: '市场研究：同步远�
     [messages.name]: { main: [[{ node: messageDelta.name, type: 'main', index: 0 }]] },
     [messageDelta.name]: { main: [[{ node: messageDetail.name, type: 'main', index: 0 }]] },
     [messageDetail.name]: { main: [[{ node: messageImport.name, type: 'main', index: 0 }]] },
-    [messageImport.name]: { main: [[{ node: messageCursorWrite.name, type: 'main', index: 0 }]] },
+    [messageImport.name]: { main: [[{ node: messagePageReady.name, type: 'main', index: 0 }]] },
+    [messagePageReady.name]: { main: [[{ node: messageCursorWrite.name, type: 'main', index: 0 }]] },
   },
   settings: { executionOrder: 'v1', timezone: 'Asia/Shanghai' },
 };

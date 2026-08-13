@@ -52,6 +52,10 @@ services:
       N8N_METRICS: ${N8N_METRICS:-true}
       N8N_RUNNERS_MODE: external
       N8N_RUNNERS_TASK_TIMEOUT: ${N8N_RUNNERS_TASK_TIMEOUT:-300}
+      # Keep the JavaScript runner registered between the 15-minute analyst
+      # sync ticks. The default 60s idle shutdown can leave the broker with
+      # only the Python offer, while these workflows contain Code nodes.
+      N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: ${N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT:-900}
       N8N_RUNNERS_AUTH_TOKEN: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
       N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
       # The managed analyst-sync workflows read only the injected archive base
@@ -82,6 +86,7 @@ services:
     environment:
       N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
       N8N_RUNNERS_AUTH_TOKEN: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
+      N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: ${N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT:-900}
       # HTTP/Code expressions in external runners read these injected values
       # for the managed analyst-sync workflows. They are not exported into
       # workflow JSON or logged as credentials.

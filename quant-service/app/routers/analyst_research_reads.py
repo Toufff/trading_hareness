@@ -59,6 +59,10 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 """SELECT stream_key,remote_analyst_id,received_at,message_ids,report_versions,updated_at
                      FROM quant.analyst_sync_cursors ORDER BY updated_at DESC"""
             ).fetchall()
+            global_cursors = connection.execute(
+                """SELECT stream_key,remote_cursor,received_after,updated_at
+                     FROM quant.analyst_global_sync_cursors ORDER BY stream_key"""
+            ).fetchall()
             promotion = connection.execute(
                 """SELECT promotion_key,methodology_version,status,max_live_weight,approved_by,approved_at,reason,updated_at
                      FROM quant.analyst_promotion_registry ORDER BY promotion_key"""
@@ -97,6 +101,8 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
         stream_health: list[dict[str, Any]] = []
         for stream_key in ("reports", "messages"):
             stream_rows = [dict(row) for row in cursors if row["stream_key"] == stream_key]
+            if stream_key == "messages":
+                stream_rows.extend(dict(row) for row in global_cursors if row["stream_key"] == "message_updates")
             latest = max((row.get("updated_at") for row in stream_rows if row.get("updated_at")), default=None)
             age_seconds = None
             if latest is not None:

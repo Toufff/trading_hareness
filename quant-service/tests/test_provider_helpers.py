@@ -757,6 +757,8 @@ class ProviderHelperTests(unittest.TestCase):
                         "received_at": None, "message_ids": [], "report_versions": {},
                         "updated_at": datetime.now(timezone.utc),
                     }]))
+                if "analyst_global_sync_cursors" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[]))
                 if "workflow_entity" in sql:
                     return MagicMock(fetchall=MagicMock(return_value=[]))
                 return MagicMock(fetchall=MagicMock(return_value=[{
@@ -773,6 +775,35 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(health["messages"]["status"], "never_succeeded")
         self.assertEqual(payload["runtime_verification"], "pending_next_scheduled_execution")
         self.assertEqual(payload["workflow_health"], [])
+
+    def test_analyst_sync_health_uses_global_message_cursor(self):
+        class _Transaction:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, _params=()):
+                if "analyst_sync_cursors" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[]))
+                if "analyst_global_sync_cursors" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[{
+                        "stream_key": "message_updates", "remote_cursor": None,
+                        "received_after": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+                    }]))
+                if "workflow_entity" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[]))
+                return MagicMock(fetchall=MagicMock(return_value=[]))
+
+        database = MagicMock()
+        database.transaction.return_value = _Transaction()
+        router = build_analyst_research_reads_router(database, lambda _database, _as_of: {})
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-research/sync-health")
+        payload = endpoint()
+        health = {item["stream_key"]: item for item in payload["stream_health"]}
+        self.assertEqual(health["messages"]["status"], "ready")
+        self.assertEqual(health["messages"]["cursor_count"], 1)
 
     def test_event_reads_router_keeps_announcements_and_lhb_as_get_only(self):
         router = build_event_reads_router(MagicMock())
