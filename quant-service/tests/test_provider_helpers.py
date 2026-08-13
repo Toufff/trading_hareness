@@ -778,6 +778,38 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(payload["runtime_verification"], "pending_next_scheduled_execution")
         self.assertEqual(payload["workflow_health"], [])
 
+    def test_analyst_sync_health_uses_fresh_service_cursor_over_stale_n8n_error(self):
+        class _Transaction:
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def execute(self, sql, _params=()):
+                if "analyst_sync_cursors" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[{
+                        "stream_key": "reports", "remote_analyst_id": "a",
+                        "received_at": None, "message_ids": [], "report_versions": {},
+                        "updated_at": datetime.now(timezone.utc),
+                    }]))
+                if "analyst_global_sync_cursors" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[{
+                        "stream_key": "message_updates", "remote_cursor": None,
+                        "received_after": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+                    }]))
+                if "workflow_entity" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[{
+                        "id": "remoteArchiveSync123", "active": True, "published": True,
+                        "latest_execution_status": "error", "latest_started_at": None, "latest_stopped_at": None,
+                    }]))
+                return MagicMock(fetchall=MagicMock(return_value=[]))
+
+        database = MagicMock()
+        database.transaction.return_value = _Transaction()
+        router = build_analyst_research_reads_router(database, lambda _database, _as_of: {})
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-research/sync-health")
+        payload = endpoint()
+        self.assertEqual(payload["workflow_health"][0]["status"], "ready")
+        self.assertEqual(payload["workflow_health"][0]["execution_evidence"], "service_cursor")
+        self.assertEqual(payload["runtime_verification"], "verified_recent_execution")
+
     def test_analyst_sync_health_uses_global_message_cursor(self):
         class _Transaction:
             def __enter__(self):

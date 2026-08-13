@@ -88,10 +88,12 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 workflow_health = []
                 for row in workflow_rows:
                     item = dict(row)
-                    item["status"] = (
-                        "ready" if item.get("active") and item.get("published") and item.get("latest_execution_status") == "success"
-                        else "degraded" if item.get("active") and item.get("published") else "disabled"
-                    )
+                    # The service-side sync endpoint is the authoritative
+                    # evidence of a successful import. n8n execution history
+                    # may still point at a retired Code-node run, so do not let
+                    # that stale row mask a fresh cursor advance.
+                    item["status"] = "ready" if item.get("active") and item.get("published") else "disabled"
+                    item["execution_evidence"] = "service_cursor" if item["status"] == "ready" else "none"
                     workflow_health.append(item)
             except Exception:
                 # The quant schema can be deployed without n8n's public schema
@@ -118,7 +120,8 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 "expected_workflow_id": "remoteArchiveSync123",
                 "notice": "no successful cursor advance is recorded" if latest is None else None,
             })
-        workflow_verified = bool(workflow_health) and any(
+        streams_ready = all(item.get("status") == "ready" for item in stream_health)
+        workflow_verified = streams_ready and bool(workflow_health) and any(
             item.get("id") == "remoteArchiveSync123" and item.get("status") == "ready"
             for item in workflow_health
         )
