@@ -55,7 +55,7 @@
 - quant-service：290 项 Python 测试通过。
 - frontend：`vue-tsc --noEmit` 和 Vite build 通过；仅有 chunk size 优化警告。
 - 开盘预检：compose、数据库迁移 `20260815_0031`、10 条后台租约、共享 provider pacing、30s/10s/1s/60s 节奏、飞书和可恢复备份均通过。
-- 最近提交：`44d9dd3`（纸面板块成员按观察日点时修复）。
+- 最近提交：`4720037`（纸面风险事件前端展示与计划状态同步）；其前置提交包含点时板块成员、provider 失败延迟和策略健康治理建议。
 - 当前工作树干净，提交已推送到 `origin/main`。
 
 ## 下一次恢复条件
