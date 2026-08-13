@@ -59,11 +59,11 @@
 | 观点 | 109：89 replay_only、20 neutral、0 eligible | 当前不得进入实时权重 |
 | 观点结果 | 872：856 pending、16 unavailable、0 matured | 专家权重无合法奖励样本 |
 | 安强动作 | 77 条、跨 3 日、17 标的 | 只能复盘；5 分钟内点时可用样本为 0 |
-| 新消息表 | 当前仍无成功游标 | 不能解释为远端无消息；健康页明确标记消息流 `never_succeeded`，等待真实调度验证 |
+| 新消息表 | 5 条消息、全局游标已成功推进 | 仅同步已提取文字；健康页报告消息流 `ready` |
 | skill profiles | 54 个版本、5 位作者 | 目前是描述卡，不是学习后的技能模型 |
 | provenance profiles | 0 | 独立性、推广属性、受众规模不能参与先验 |
 | 专家研究运行 | 1，`research_only` | 正确地没有实时影响 |
-| n8n 同步 | 当日 10 次均 error | P0 运行事故 |
+| n8n 同步 | 新调度器已发布；服务端真实同步 1 次成功、随后 3 次空增量成功 | 旧 Code-node 错误记录保留作审计，不代表当前路径失败 |
 
 ### 2.3 已经做对的设计
 
@@ -390,7 +390,7 @@ market + analyst delta + risk overlay
 | P0-S1 | 统一复权研究价 | `main.py:970`、`factor_lab.py:40`、`post_close_structures.py` | 合成除权夹具与本地完整样本连续；缺因子跨日特征不参与确认，日内原价路径不受影响 |
 | P0-S2 | 实时市场/数据 `policy_gate` | `main.py:4123,4981`、market state | risk-off 禁 entry；stale/停牌不确认；无持仓证据的 hard stop 只作风险告警 |
 | P0-S3 | 盘后同日语义 | `main.py:3139,5582`、`strategy_read_model.py` | T 不完整/T-1 完整时绝不标 T 完成；补齐后自动重跑 |
-| P0-A1 | 合并轻量调度并在服务侧差量限速 | `build-remote-archive-sync-workflow.mjs`、新 cursor migration | 连续 10 轮 0 个 429；报告/消息各自失败不推进自己的游标 |
+| P0-A1 | 合并轻量调度并在服务侧差量限速 | `build-remote-archive-sync-workflow.mjs`、新 cursor migration | 真实 Bearer 同步成功；空增量幂等；429 按 Retry-After 有界退避 |
 | P0-A2 | 修上海日与历史 as-of | `analyst_expert_research.py` | 00:01 北京边界正确；8/20 快照看不到 8/21 才成熟结果 |
 | P0-A3 | 唯一 promotion registry | 推荐、scorecard、expert research | 未人工批准前 analyst 权重强制为 0；故障自动归零 |
 
