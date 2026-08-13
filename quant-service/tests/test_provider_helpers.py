@@ -3374,6 +3374,14 @@ class ProviderHelperTests(unittest.TestCase):
             last_key_alerted_at=now - timedelta(minutes=20), last_symbol_watch_alerted_at=None,
             last_key_alert=prior,
         ), "confirmed")
+        # A condition that disappeared beyond the confirmation window is a
+        # new episode even if the prior alert was in the same session.
+        self.assertEqual(intraday_signal_event_state(
+            {"signal_type": "entry", "hard": False, "score": 70, "conditions": {}},
+            observed_at=now, latest_event_at=now - timedelta(minutes=6),
+            last_key_alerted_at=now - timedelta(minutes=20), last_symbol_watch_alerted_at=None,
+            last_key_alert=prior,
+        ), "confirming")
 
     def test_live_policy_gate_blocks_new_entry_during_broad_risk_off(self):
         from app.live_policy import live_policy_gate

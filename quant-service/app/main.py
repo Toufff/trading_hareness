@@ -2861,14 +2861,14 @@ def intraday_signal_event_state(signal: dict[str, Any], *, observed_at: datetime
     additionally share a symbol-level cooldown so a changing public-provider
     label cannot produce a new notification every scan.
     """
+    recent = latest_event_at is not None and observed_at - latest_event_at <= INTRADAY_CONFIRMATION_WINDOW
     material_change = intraday_signal_material_change(signal, last_key_alert)
     # Same-key events remain in the same episode for this market session.  A
     # new stage or a defined material change can intentionally pierce it.
-    key_duplicate = last_key_alerted_at is not None and not material_change
+    key_duplicate = last_key_alerted_at is not None and recent and not material_change
     symbol_watch_duplicate = (signal["signal_type"] == "watch" and not signal.get("stage_upgrade")
                               and last_symbol_watch_alerted_at is not None
                               and observed_at - last_symbol_watch_alerted_at <= INTRADAY_ALERT_COOLDOWN)
-    recent = latest_event_at is not None and observed_at - latest_event_at <= INTRADAY_CONFIRMATION_WINDOW
     if key_duplicate or symbol_watch_duplicate:
         return "suppressed"
     if signal.get("alert_on_first_observation") and latest_event_at is None:
