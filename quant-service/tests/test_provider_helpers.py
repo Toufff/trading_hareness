@@ -78,6 +78,7 @@ from app.replay_readiness import (
     replay_readiness_payload,
 )
 from app.strategy_pattern_read_model import latest_strategy_pattern_mining as read_latest_strategy_pattern_mining
+from app.strategy_read_model import latest_post_close_strategy as read_latest_post_close_strategy
 from app.post_close_structures import (
     daily_base_structure as pure_daily_base_structure,
     post_close_forming_structure as pure_post_close_forming_structure,
@@ -3438,6 +3439,16 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(contexts[(second_signal, "600000.SH")]["board_report_id"], "second")
         self.assertEqual(contexts[(second_signal, "000001.SZ")]["board_report_id"], "second")
 
+    def test_intraday_scan_source_has_batched_board_and_paper_reads(self):
+        source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("market_contexts = intraday_point_in_time_market_context_batch", source)
+        self.assertIn("WHERE symbol=ANY(%s)", source)
+        self.assertIn("market_contexts.get((observed_at, symbol), {})", source)
+
+    def test_intraday_scan_does_not_claim_tencent_completed_when_no_watch_quote_matches(self):
+        source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn('tencent_status = "completed" if matched_watch_quotes else "partial" if fresh_watch_rows or sina_watch_rows else "unavailable"', source)
+
     def test_intraday_attribution_summary_keeps_small_cohorts_descriptive(self):
         observed = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)
         base = {"horizon_key": "5m", "status": "matured", "observed_at": observed,
@@ -3488,6 +3499,23 @@ class ProviderHelperTests(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
         self.assertIn("discovered_at,expires_at,reason_codes,source_snapshot", source)
         self.assertIn("as_of_date + timedelta(days=1)", source)
+
+    def test_post_close_read_model_keeps_blocked_attempt_separate_from_last_completed(self):
+        connection = MagicMock()
+        attempt = {"run_id": "attempt", "as_of_date": date(2026, 8, 13), "status": "blocked"}
+        completed = {"run_id": "completed", "as_of_date": date(2026, 8, 12), "status": "completed"}
+        connection.execute.side_effect = [
+            MagicMock(fetchone=MagicMock(return_value=attempt)),
+            MagicMock(fetchone=MagicMock(return_value=completed)),
+            MagicMock(fetchall=MagicMock(return_value=[{"symbol": "000636.SZ", "rank": 1}])),
+        ]
+        database = MagicMock()
+        database.transaction.return_value.__enter__.return_value = connection
+        result = read_latest_post_close_strategy(database)
+        self.assertEqual(result["latest_attempt"]["status"], "blocked")
+        self.assertEqual(result["run"]["status"], "completed")
+        self.assertEqual(result["run"]["as_of_date"], date(2026, 8, 12))
+        self.assertEqual(result["candidates"][0]["symbol"], "000636.SZ")
 
     def test_limit_ladder_and_ground_to_sky_replay_keep_causal_checkpoints(self):
         self.assertEqual(limit_board_count("首板"), 1)

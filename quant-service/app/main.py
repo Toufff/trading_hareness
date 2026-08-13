@@ -5220,6 +5220,22 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
         for item in order_book_rows:
             order_book_by_symbol.setdefault(str(item["symbol"]), []).append(dict(item))
         clear_stale_signal_episodes(connection, selected_symbols, observed_at)
+        market_contexts = intraday_point_in_time_market_context_batch(
+            connection, [(observed_at, symbol) for symbol in selected_symbols],
+        )
+        paper_positions = {
+            str(row["symbol"]): dict(row)
+            for row in connection.execute(
+                "SELECT symbol,quantity,sellable_quantity,average_cost FROM quant.paper_positions WHERE symbol=ANY(%s)",
+                (selected_symbols,),
+            ).fetchall()
+        }
+        paper_snapshot = connection.execute(
+            "SELECT drawdown,payload FROM quant.paper_portfolio_snapshots ORDER BY as_of DESC LIMIT 1",
+        ).fetchone()
+        snapshot_payload = dict(paper_snapshot["payload"] or {}) if paper_snapshot else {}
+        if paper_snapshot:
+            snapshot_payload["drawdown"] = paper_snapshot["drawdown"]
         for watch in watches:
             symbol = str(watch["symbol"])
             quote = quotes.get(symbol)
@@ -5282,21 +5298,11 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 signal["conditions"] = {**signal["conditions"], "realtime_cross_check": fast_confirmation}
                 if fast_confirmation.get("status") == "mismatch":
                     signal["risk_flags"] = [*signal["risk_flags"], "realtime_cross_source_price_mismatch"]
-            market_context = intraday_point_in_time_market_context(connection, observed_at, symbol) if generated_signals else {}
-            paper_position = connection.execute(
-                "SELECT symbol,quantity,sellable_quantity,average_cost FROM quant.paper_positions WHERE symbol=%s",
-                (symbol,),
-            ).fetchone() if generated_signals else None
-            paper_snapshot = connection.execute(
-                "SELECT drawdown,payload FROM quant.paper_portfolio_snapshots ORDER BY as_of DESC LIMIT 1",
-            ).fetchone() if generated_signals else None
-            snapshot_payload = dict(paper_snapshot["payload"] or {}) if paper_snapshot else {}
-            if paper_snapshot:
-                snapshot_payload["drawdown"] = paper_snapshot["drawdown"]
+            market_context = market_contexts.get((observed_at, symbol), {}) if generated_signals else {}
             for signal in generated_signals:
                 portfolio_gate = paper_risk_gate(
                     signal_type=signal["signal_type"], symbol=symbol,
-                    position=dict(paper_position) if paper_position else None,
+                    position=paper_positions.get(symbol),
                     snapshot=snapshot_payload,
                 )
                 portfolio_risk = {"allowed": portfolio_gate.allowed, "target_weight": portfolio_gate.target_weight,
@@ -5470,7 +5476,9 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
         status = str(item.get("status") or "unknown")
         fast_status_counts[status] = fast_status_counts.get(status, 0) + 1
     board_cache_evidence = await intraday_board_cache_evidence(observed_at)
-    source_status = {"tencent": {"status": "completed", "rows": len(tencent_rows), "matched": sum(symbol in quotes for symbol in selected_symbols),
+    matched_watch_quotes = sum(symbol in quotes for symbol in selected_symbols)
+    tencent_status = "completed" if matched_watch_quotes else "partial" if fresh_watch_rows or sina_watch_rows else "unavailable"
+    source_status = {"tencent": {"status": tencent_status, "rows": len(tencent_rows), "matched": matched_watch_quotes,
                                          "all_a_snapshot": all_a_snapshot_status,
                                          "fresh_watch_quote_rows": len(fresh_watch_rows),
                                          "sina_watch_quote_rows": len(sina_watch_rows)},
