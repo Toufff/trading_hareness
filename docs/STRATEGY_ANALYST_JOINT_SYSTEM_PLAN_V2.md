@@ -12,7 +12,7 @@
 当前瓶颈也不是“因子太少”，而是下面四件事还没有闭环：
 
 1. **复权研究视图与实时准入已完成止血，但覆盖门禁仍在。** 生产推荐、盘后结构和 factor lab 共用显式复权研究价；缺 `adj_factor` 的跨日特征会标记为质量阻断，实时风险由 `policy_gate` 在事件确认前再次裁决。真实全市场控制面覆盖仍不足，不能据短样本晋级。
-2. **分析师同步已拆流并完成配置修复，消息流尚未有成功游标。** 报告流按版本/哈希差量；消息流改用远端签名的全局 `/messages/updates` 增量流，每轮最多 100 条，不再使用 n8n 内置分页，成功导入整页后才推进不透明 cursor。此前验证发现游标字段名与远端列表 URL 不一致，导致请求落到 `/analysts/undefined/messages`；又发现旧分页节点有 OOM 风险，均已修复并于 2026-08-13 盘后重新发布。n8n 主进程与外置 runner 已注入所需运行环境，但连续 10 轮 0 个 429 的验收仍待下一调度窗口。
+2. **分析师同步已收敛为一个轻量 n8n 调度器，消息流尚未有新的成功游标。** n8n 只用加密 Bearer credential 调用本地 `/remote-archive/sync`；quant-research 固定远端地址，按报告版本/哈希和消息全局 cursor 差量拉取，每轮最多 100 条，成功导入整页后才推进不透明 cursor。这样不再依赖 Code Runner，也不在 n8n 中请求媒体或历史详情。连续 10 轮 0 个 429 的验收仍待下一调度窗口。
 3. **统计门禁在正确地阻止晋级。** 本地只有 16/732 个完整横截面日、0/60 个历史分钟回放日、154/200 个确认事件；109 条已成熟信号记录只跨 3 个交易日，且尚未经过 episode 去重，不能称作独立样本。分析师则是 0 个 eligible 观点、0 个成熟观点结果。
 4. **从信号到组合仍缺一层。** 目前系统能发现、提醒、结算，但还没有统一的纸面订单、仓位、行业暴露、T+1 可卖量、组合回撤和策略预算模型。
 
@@ -112,12 +112,12 @@ T+1 可卖量、整手、单票/板块/策略暴露、日内亏损和组合回�
 
 当前 `scripts/build-remote-archive-sync-workflow.mjs:25-40` 每轮翻全量报告，再逐份请求详情；报告与消息在同一工作流分叉，报告支路失败会使整体执行失败。处理：
 
-- 报告同步与消息同步拆成两条工作流；
+- n8n 仅保留一个合并调度工作流；报告与消息在 quant-research 内串行、独立记录结果；
 - 报告按 `(report_id, version, content_hash)` 差量拉详情；
 - 每分析师串行、尊重 `Retry-After`、有界指数退避；
 - 消息 cursor 持久化到 PostgreSQL，不依赖 n8n staticData；
 - 分页扫到 cursor，处理 100+ 突发和同时间戳多消息；
-- 任一支路故障不阻断另一支路，健康页分别显示。
+- 任一流失败不推进自己的游标，健康页分别显示报告/消息流状态。
 
 #### P0-A2 分析师时区与历史 as-of 泄漏（已完成）
 
@@ -385,7 +385,7 @@ market + analyst delta + risk overlay
 | P0-S1 | 统一复权研究价 | `main.py:970`、`factor_lab.py:40`、`post_close_structures.py` | 合成除权夹具与本地完整样本连续；缺因子跨日特征不参与确认，日内原价路径不受影响 |
 | P0-S2 | 实时市场/数据 `policy_gate` | `main.py:4123,4981`、market state | risk-off 禁 entry；stale/停牌不确认；无持仓证据的 hard stop 只作风险告警 |
 | P0-S3 | 盘后同日语义 | `main.py:3139,5582`、`strategy_read_model.py` | T 不完整/T-1 完整时绝不标 T 完成；补齐后自动重跑 |
-| P0-A1 | 拆分析师同步并差量限速 | `build-remote-archive-sync-workflow.mjs`、新 cursor migration | 连续 10 轮 0 个 429；报告故障不阻断消息 |
+| P0-A1 | 合并轻量调度并在服务侧差量限速 | `build-remote-archive-sync-workflow.mjs`、新 cursor migration | 连续 10 轮 0 个 429；报告/消息各自失败不推进自己的游标 |
 | P0-A2 | 修上海日与历史 as-of | `analyst_expert_research.py` | 00:01 北京边界正确；8/20 快照看不到 8/21 才成熟结果 |
 | P0-A3 | 唯一 promotion registry | 推荐、scorecard、expert research | 未人工批准前 analyst 权重强制为 0；故障自动归零 |
 
@@ -549,20 +549,20 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 前端已展示策略漏斗、episode、纸面账本、分析师观察、同步游标、晋级和策略合约状态；新增只读治理接口。
 - 新增 A 股纸面约束：100 股整手、T+1 可卖量、停牌、涨停买入/跌停卖出 non-fill 风险、最低佣金、卖出印花税、滑点和 triple-barrier 纯函数标签。
 - 新增只读接口 `/api/v1/paper/status`、`/api/v1/strategy/contracts`，并通过 Feishu adapter 映射到前端；前端新增“纸面策略账本”卡片。
-- 分析师同步已拆成报告流与消息流两个独立工作流；旧合并流停用。报告和消息不再互相拖累，部署脚本会保留前后快照并校验发布版本。新消息仍只取已提取文字，不跟随媒体 URL。
+- 分析师同步已收敛为一个轻量 n8n 调度工作流；报告与消息在 quant-research 内按各自游标串行处理，旧 Code-node 分叉流停用。部署脚本会保留前后快照并校验发布版本。新消息仍只取已提取文字，不跟随媒体 URL。
 - 分析师研究的上海日期和 `exit_date<=as_of_date` 已统一；`recompute_scorecards` 已在真实本地数据库调用通过，未来成熟结果不会污染历史快照。
 - 新增 `20260814_0027` 纸面账户/成交回执账本：手动接受才会模拟成交，报价必须来自本地已落库 Tencent/Super GET 证据；账户、费用、滑点、持仓和 T+1 日界切换均可追溯。
 - 新增 `20260814_0028` Prompt Lab 与分析师盘中结果账本：三种确定性 challenger 变体、人工金标、离线 precision/方向准确率、5/15/30/60 分钟结果均为 append-only；没有人工金标或样本外门禁时状态只能 collecting/insufficient_labels，实时影响恒为 none。
 - 前端新增 Prompt Lab、纸面账户/订单状态和门禁显示；Feishu adapter 增加纸面账户、动态接受、Prompt Lab 标注/评估的安全代理，所有写请求仍要求 `X-Quant-Write-Key`。
 - 新增 `20260814_0029` 策略消融账本：并行记录 market-only、固定 10% analyst-shadow 和实际 applied 分数；shadow 只用于离线比较，promotion registry 未批准前实际分析师权重仍为 0。
 - 盘口研究证据扩展到 30 秒/1 分钟/5 分钟封单侵蚀、Kyle λ/VPIN/CORD 代理，全部标记为未校准 research-only，不进入实时阈值。
-- 报告/消息同步工作流已拆分；报告差量游标在一次运行中使用完整版本快照，避免分页造成重复详情请求；两条流独立限速、可独立告警。
+- 报告/消息同步已迁移到 quant-research 的 bounded text-only service；n8n 只负责定时携带加密 Bearer 调用本地端点。报告差量游标和消息全局 cursor 均在 PostgreSQL 持久化，整页导入成功后才推进，避免分页重复和跳过。
 - 盘后自动候选增加 `discovered_at`、`expires_at`、`reason_codes` 与 `source_snapshot`；读取模型和前端同时展示有效期、理由和当次数据覆盖。候选仍只做前端研究，不会自动入观察池。
-- n8n 主进程和外置 runner 都显式注入分析师同步必需的非持久化运行环境；JavaScript runner 空闲保持时间固定为 900 秒，避免含 Code 节点的同步流在 15 分钟调度间隔中失去 JS task offer。旧合并流仍停用，报告流与消息流保持独立。健康页同时读取工作流 active/published、最近执行状态和本地游标；下一交易时段仍须完成连续 10 轮的实际同步验收，才可关闭 429/TLS 风险项。
+- n8n 主进程和外置 runner 保留兼容环境，但同步工作流已移除 Code 节点，不再依赖 JS task offer。健康页读取单一工作流 active/published、最近执行状态和本地报告/消息游标；下一交易时段仍须完成连续 10 轮的实际同步验收，才可关闭 429/TLS 风险项。
 - 2026-08-13 盘后实测：同日盘后候选任务完成且返回 0（严格门槛，不回退到旧交易日）；涨停池两源去重并集 85、连板梯队 24、分钟形态样本 20、精选 10，均已在研究台展示。
-- 2026-08-13 盘后同步修复：远端 `/analysts/{analyst_id}/messages` 真实 Bearer 请求对安强返回 2 条、其余分析师返回合法空集；n8n 失败执行的实际 URI 为 `/analysts/undefined/messages`，根因为游标返回 `remote_analyst_id` 而工作流使用 `$json.analyst_id`。已恢复原 15 分钟交易时段调度并重新发布两条独立流；当前等待下一正式调度验证本地游标推进。
+- 2026-08-13 盘后同步修复：远端 `/analysts/{analyst_id}/messages` 真实 Bearer 请求对安强返回 2 条、其余分析师返回合法空集；旧 n8n 失败执行的实际 URI 为 `/analysts/undefined/messages`，根因为游标返回 `remote_analyst_id` 而工作流使用 `$json.analyst_id`。现已改为单一 n8n 本地触发器，避免在编排层拼接远端 URL；当前等待下一正式调度验证本地游标推进。
 - 2026-08-13 后续同步加固：远端 `/messages/updates` 增量接口已用真实 Bearer 请求验证，返回安强 2 条消息与 `next_cursor=null`；新增 `analyst_global_sync_cursors` 迁移和有歧义路径避让，正式消息流已确认无 pagination 配置、单页上限 100，详情全部导入后才写回游标。
-- 2026-08-14 runner 验收发现：外部 runner 默认约 60 秒空闲退出，下一次同步触发时会出现 `No matching task offer ... type javascript`，造成执行停留在触发节点。已将 `N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT` 显式设为 900 秒，并在重启后重新观察两条流的实际执行；该项在连续 10 轮成功验收前仍保持待验证。
+- 2026-08-14 runner 验收发现：外部 runner 默认约 60 秒空闲退出，旧 Code-node 同步流会出现 `No matching task offer ... type javascript`。现行同步流无 Code 节点，已从该运行时依赖中移除；`N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT=900` 仅保留给其他工作流。连续 10 轮成功验收仍保持待验证。
 - 新增只读 `/api/v1/strategy/health` 与前端“策略健康与漂移”卡：展示 7 日触发频率、独立 episode、30 分钟成熟结果、报价新鲜度及 200 信号/60 交易日门禁。它只做研究监控，明确 `live_effect=none`，不会在线调参、晋级策略或改变分析师权重。
 - 新增研究存储水位治理：健康接口和前端显示量化热库/受管研究空间用量；默认热库 8 GiB、总研究空间 20 GiB，达到 80% 仅告警，达到 90% 暂停盘口、1 秒 `rt_k`、分钟档案和板块曲线等非必要高频原始证据。观察池报价、风险提醒、outbox 与结算不受影响，也不自动删除证据。当前实测热库约 1.32 GiB（16.5%），总受管空间约 1.32 GiB（6.6%），状态 healthy。
 - 验收：quant-service 全量 272 项 Python 测试通过，前端 typecheck/Vite build 通过；健康接口为 `ok`，迁移为 `20260815_0031`，Prompt Lab 当前无候选且 live_effect=none（符合历史不回填和数据门禁）。

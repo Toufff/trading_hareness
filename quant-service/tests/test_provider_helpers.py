@@ -98,7 +98,7 @@ from app.main import intraday_board_curve_session, intraday_board_curve_session_
 from app.main import AnnouncementSyncRequest, sync_cninfo_announcements
 from app.main import AkShareProbeRequest, akshare_probe, TushareCapabilityAuditRequest, audit_tushare_capabilities
 from app.main import stock_study_free_fetch
-from app.main import capture_intraday_super_get_fast_quote, intraday_tencent_surge_context
+from app.main import capture_intraday_super_get_fast_quote, intraday_tencent_surge_context, remote_archive_sync_bearer_allowed
 from app.main import stock_study_fetch
 from app.main import is_circuit_open_http_error, is_local_capacity_http_error
 from app.main import fetch_tushare_catalog
@@ -258,6 +258,7 @@ class ProviderHelperTests(unittest.TestCase):
             update_analyst_research_profile=action,
             update_analyst_sync_cursor=action,
             update_analyst_global_sync_cursor=action,
+            sync_remote_archive=action,
         ))
         methods_by_path = {route.path: route.methods for route in router.routes}
         for path in (
@@ -266,6 +267,7 @@ class ProviderHelperTests(unittest.TestCase):
             "/api/v1/remote-archive/reports/reprocess",
             "/api/v1/remote-archive/messages/import",
             "/api/v1/remote-archive/messages/reprocess",
+            "/api/v1/remote-archive/sync",
             "/api/v1/claim-review/{review_id}",
             "/api/v1/universes/members", "/api/v1/features/build",
             "/api/v1/factors/evaluate", "/api/v1/strategies/backtest",
@@ -923,6 +925,18 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertFalse(write_access_allowed("POST", None, "configured"))
         self.assertFalse(write_access_allowed("DELETE", "wrong", "configured"))
         self.assertTrue(write_access_allowed("PATCH", "configured", "configured"))
+
+    def test_remote_archive_sync_accepts_only_a_bearer_shaped_trigger(self):
+        from starlette.requests import Request
+
+        def request(path: str, authorization: str | None) -> Request:
+            headers = [] if authorization is None else [(b"authorization", authorization.encode())]
+            return Request({"type": "http", "method": "POST", "path": path, "headers": headers})
+
+        self.assertTrue(remote_archive_sync_bearer_allowed(request("/api/v1/remote-archive/sync", "Bearer " + "a" * 32)))
+        self.assertFalse(remote_archive_sync_bearer_allowed(request("/api/v1/remote-archive/sync", None)))
+        self.assertFalse(remote_archive_sync_bearer_allowed(request("/api/v1/remote-archive/sync", "Bearer too-short")))
+        self.assertFalse(remote_archive_sync_bearer_allowed(request("/api/v1/remote-archive/messages/import", "Bearer " + "a" * 32)))
 
     def test_provider_failure_recording_redacts_credentials(self):
         connection = MagicMock()

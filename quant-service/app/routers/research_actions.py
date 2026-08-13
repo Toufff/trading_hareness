@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from ..request_models import (
     AnalystResearchProfileRequest,
@@ -24,6 +24,7 @@ from ..request_models import (
     RemoteReportImport,
     RemoteReportReprocessRequest,
     RemoteAnalystMessageImport,
+    RemoteArchiveSyncRequest,
     RemoteMessageReprocessRequest,
     SnapshotRequest,
     StrategyBacktestRequest,
@@ -48,6 +49,7 @@ class ResearchActionDependencies:
     update_analyst_research_profile: Callable[[str, AnalystResearchProfileRequest], Awaitable[dict[str, Any]]]
     update_analyst_sync_cursor: Callable[[AnalystSyncCursorUpdate], Awaitable[dict[str, Any]]]
     update_analyst_global_sync_cursor: Callable[[AnalystSyncGlobalCursorUpdate], Awaitable[dict[str, Any]]]
+    sync_remote_archive: Callable[[RemoteArchiveSyncRequest, str | None], Awaitable[dict[str, Any]]]
 
 
 def build_research_actions_router(deps: ResearchActionDependencies) -> APIRouter:
@@ -73,6 +75,13 @@ def build_research_actions_router(deps: ResearchActionDependencies) -> APIRouter
     @router.post("/api/v1/remote-archive/messages/reprocess")
     async def reprocess_remote_messages(payload: RemoteMessageReprocessRequest) -> dict[str, Any]:
         return await deps.reprocess_remote_messages(payload)
+
+    @router.post("/api/v1/remote-archive/sync")
+    async def sync_remote_archive(payload: RemoteArchiveSyncRequest, request: Request) -> dict[str, Any]:
+        # n8n uses its existing encrypted archive bearer credential only for
+        # this local trigger. The service forwards it in-memory to the remote
+        # text API and never persists or echoes it.
+        return await deps.sync_remote_archive(payload, request.headers.get("Authorization"))
 
     @router.post("/api/v1/claim-review/{review_id}")
     async def review_claim(review_id: UUID, payload: ClaimReviewRequest) -> dict[str, Any]:

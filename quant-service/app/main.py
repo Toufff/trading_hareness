@@ -220,6 +220,7 @@ from .request_models import (
     RemoteReportImport,
     RemoteReportReprocessRequest,
     RemoteAnalystMessageImport,
+    RemoteArchiveSyncRequest,
     RemoteMessageReprocessRequest,
     SnapshotRequest,
     StockStudyRequest,
@@ -234,7 +235,7 @@ from .request_models import (
     TushareSyncRequest,
     UniverseUpdateRequest,
 )
-from .remote_archive import (analyst_global_sync_cursor, analyst_sync_cursor, classify_remote_text, import_remote_analyst_message, import_remote_report,
+from .remote_archive import (analyst_global_sync_cursor, analyst_sync_cursor, classify_remote_text, import_remote_analyst_message, import_remote_report, parse_optional_timestamp,
                              remote_report_list_state, reprocess_remote_messages, reprocess_remote_reports)
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
@@ -8798,11 +8799,19 @@ def write_access_allowed(method: str, supplied_key: str | None, configured_key: 
     return bool(supplied_key) and secrets.compare_digest(supplied_key, configured_key)
 
 
+def remote_archive_sync_bearer_allowed(request: Request) -> bool:
+    """Accept only a bounded bearer-shaped trigger for text-only sync."""
+    if request.method.upper() != "POST" or request.url.path != "/api/v1/remote-archive/sync":
+        return False
+    authorization = request.headers.get("Authorization", "").strip()
+    return bool(re.fullmatch(r"Bearer\s+[A-Za-z0-9._~+/-]{24,512}", authorization, flags=re.IGNORECASE))
+
+
 @app.middleware("http")
 async def require_quant_write_key(request: Request, call_next: Any) -> Any:
     configured_key = os.getenv("QUANT_WRITE_API_KEY", "").strip()
     supplied_key = request.headers.get("X-Quant-Write-Key")
-    if not write_access_allowed(request.method, supplied_key, configured_key):
+    if not write_access_allowed(request.method, supplied_key, configured_key) and not remote_archive_sync_bearer_allowed(request):
         return JSONResponse(status_code=401, content={"detail": "valid X-Quant-Write-Key is required for write operations"})
     return await call_next(request)
 
@@ -9148,6 +9157,171 @@ def reprocess_remote_archive_reports(payload: RemoteReportReprocessRequest) -> d
 
 def reprocess_remote_archive_messages(payload: RemoteMessageReprocessRequest) -> dict[str, Any]:
     return reprocess_remote_messages(db, payload.limit)
+
+
+def remote_archive_sync_settings() -> dict[str, Any]:
+    """Read local-only archive transport settings without exposing credentials."""
+    base_url = os.getenv("REMOTE_ANALYST_ARCHIVE_BASE_URL", "").strip().rstrip("/")
+    ca_file = os.getenv("REMOTE_ANALYST_ARCHIVE_CA_FILE", "").strip()
+    try:
+        configured_max_items = int(os.getenv("REMOTE_ANALYST_SYNC_MAX_ITEMS", "100"))
+    except ValueError:
+        configured_max_items = 100
+    try:
+        minimum_interval_seconds = float(os.getenv("REMOTE_ANALYST_SYNC_MIN_INTERVAL_SECONDS", "15"))
+    except ValueError:
+        minimum_interval_seconds = 15.0
+    return {
+        "base_url": base_url,
+        "ca_file": ca_file if ca_file and Path(ca_file).is_file() else None,
+        "max_items": min(100, max(1, configured_max_items)),
+        "minimum_interval_seconds": min(300.0, max(1.0, minimum_interval_seconds)),
+    }
+
+
+_remote_archive_sync_lock = asyncio.Lock()
+_remote_archive_sync_last_started = 0.0
+
+
+def _remote_archive_message_cursor_state() -> dict[str, Any]:
+    return analyst_global_sync_cursor(db, "message_updates").get("cursor") or {}
+
+
+def _remote_archive_report_cursor_state(analyst_id: str) -> dict[str, Any]:
+    return analyst_sync_cursor(db, "reports", analyst_id).get("cursor") or {}
+
+
+async def _remote_archive_get(client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    response = await client.get(path, params=params)
+    if response.is_error:
+        detail = response.text.strip().replace("\n", " ")[:160]
+        raise HTTPException(status_code=502, detail=f"remote analyst archive HTTP {response.status_code}: {detail or response.reason_phrase}")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="remote analyst archive returned an invalid JSON envelope")
+    return payload
+
+
+async def _sync_remote_archive_messages(client: httpx.AsyncClient, maximum: int) -> dict[str, Any]:
+    cursor_state = await run_database_blocking(_remote_archive_message_cursor_state, timeout_seconds=15)
+    params: dict[str, Any] = {"limit": maximum}
+    if cursor_state.get("remote_cursor"):
+        params["cursor"] = str(cursor_state["remote_cursor"])
+    elif cursor_state.get("received_after"):
+        value = cursor_state["received_after"]
+        params["received_after"] = value.isoformat() if isinstance(value, datetime) else str(value)
+    else:
+        # No implicit historical backfill. The initial page is bounded to the
+        # recent day until an operator has a successful cursor.
+        params["received_after"] = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    envelope = await _remote_archive_get(client, "/messages/updates", params=params)
+    summaries = envelope.get("items") or []
+    if not isinstance(summaries, list) or not all(isinstance(item, dict) for item in summaries):
+        raise HTTPException(status_code=502, detail="remote analyst message update page has an invalid items shape")
+    summaries = summaries[:maximum]
+    imported: list[dict[str, Any]] = []
+    for summary in summaries:
+        analyst_id = str(summary.get("analyst_id") or "").strip()
+        message_id = str(summary.get("message_id") or "").strip()
+        if not analyst_id or not message_id:
+            raise HTTPException(status_code=502, detail="remote analyst message update is missing analyst_id or message_id")
+        detail = await _remote_archive_get(client, f"/analysts/{analyst_id}/messages/{message_id}")
+        # Text-only import intentionally rejects media URLs/material fields.
+        result = await run_database_blocking(import_remote_analyst_message, db, detail, timeout_seconds=30)
+        imported.append(result)
+    # A cursor is committed only after every page item has been imported.
+    if summaries:
+        tail_received_at = summaries[-1].get("received_at")
+        received_after = parse_optional_timestamp(tail_received_at)
+        if received_after is None:
+            raise HTTPException(status_code=502, detail="remote analyst message update is missing received_at")
+        next_cursor = envelope.get("next_cursor")
+        await run_database_blocking(
+            update_analyst_global_sync_cursor,
+            AnalystSyncGlobalCursorUpdate(
+                stream_key="message_updates", cursor=str(next_cursor) if next_cursor else None,
+                received_after=received_after, terminal=next_cursor is None,
+                message_ids=[str(item.get("message_id")) for item in summaries if item.get("message_id")],
+            ),
+            timeout_seconds=20,
+        )
+    return {"status": "completed", "items": len(summaries), "imported": len(imported),
+            "terminal": envelope.get("next_cursor") is None, "source": "remote_text_messages"}
+
+
+async def _sync_remote_archive_reports(client: httpx.AsyncClient, maximum: int) -> dict[str, Any]:
+    catalog = await _remote_archive_get(client, "/analysts")
+    analysts = catalog.get("items") or []
+    if not isinstance(analysts, list) or not all(isinstance(item, dict) for item in analysts):
+        raise HTTPException(status_code=502, detail="remote analyst catalog has an invalid items shape")
+    imported = 0
+    changed = 0
+    scanned = 0
+    remaining = maximum
+    for analyst in analysts:
+        if remaining <= 0:
+            break
+        analyst_id = str(analyst.get("analyst_id") or "").strip()
+        if not analyst_id:
+            continue
+        cursor_state = await run_database_blocking(_remote_archive_report_cursor_state, analyst_id, timeout_seconds=15)
+        known_versions = dict(cursor_state.get("report_versions") or {})
+        listing = await _remote_archive_get(client, f"/analysts/{analyst_id}/reports", params={"limit": min(100, remaining), "offset": 0})
+        reports = listing.get("items") or []
+        if not isinstance(reports, list) or not all(isinstance(item, dict) for item in reports):
+            raise HTTPException(status_code=502, detail="remote analyst report page has an invalid items shape")
+        versions: dict[str, str] = {}
+        for report in reports[:remaining]:
+            report_date = str(report.get("date") or "")
+            stamp = f"{report.get('version') or ''}:{report.get('content_hash') or ''}"
+            if not report_date or stamp == ":":
+                continue
+            versions[report_date] = stamp
+            scanned += 1
+            if known_versions.get(report_date) == stamp:
+                continue
+            detail = await _remote_archive_get(client, f"/analysts/{analyst_id}/reports/{report_date}")
+            await run_database_blocking(import_remote_report, db, detail, timeout_seconds=30)
+            imported += 1
+            changed += 1
+        # Full known page version snapshot is safe to persist only after all
+        # changed details for this analyst succeeded.
+        if versions:
+            await run_database_blocking(
+                update_analyst_sync_cursor,
+                AnalystSyncCursorUpdate(stream_key="reports", analyst_id=analyst_id, report_versions=versions),
+                timeout_seconds=20,
+            )
+        remaining -= len(reports[:remaining])
+    return {"status": "completed", "analysts": len(analysts), "scanned": scanned,
+            "changed": changed, "imported": imported, "source": "remote_text_reports"}
+
+
+async def sync_remote_archive(payload: RemoteArchiveSyncRequest, authorization: str | None = None) -> dict[str, Any]:
+    """Synchronize bounded remote analyst text without media or history fetches."""
+    settings = remote_archive_sync_settings()
+    bearer = str(authorization or "").strip()
+    if bearer.lower().startswith("bearer "):
+        bearer = bearer[7:].strip()
+    if not settings["base_url"] or not bearer:
+        raise HTTPException(status_code=503, detail="remote analyst archive sync is not configured")
+    maximum = min(payload.max_items, int(settings["max_items"]))
+    global _remote_archive_sync_last_started
+    async with _remote_archive_sync_lock:
+        elapsed = monotonic() - _remote_archive_sync_last_started
+        if _remote_archive_sync_last_started and elapsed < float(settings["minimum_interval_seconds"]):
+            raise HTTPException(status_code=429, detail="remote analyst archive sync is rate limited locally")
+        _remote_archive_sync_last_started = monotonic()
+        transport: dict[str, Any] = {"timeout": httpx.Timeout(30.0), "trust_env": False,
+            "headers": {"Authorization": f"Bearer {bearer}"},
+            "limits": httpx.Limits(max_connections=2, max_keepalive_connections=1, keepalive_expiry=20.0)}
+        if settings["ca_file"]:
+            transport["verify"] = settings["ca_file"]
+        async with httpx.AsyncClient(base_url=str(settings["base_url"]), **transport) as client:
+            results: dict[str, Any] = {}
+            for stream in payload.streams:
+                results[stream] = await (_sync_remote_archive_messages(client, maximum) if stream == "messages" else _sync_remote_archive_reports(client, maximum))
+        return {"status": "completed", "streams": results, "text_only": True, "history_fetch": False}
 
 
 def update_analyst_sync_cursor(payload: AnalystSyncCursorUpdate) -> dict[str, Any]:
@@ -9503,6 +9677,10 @@ async def update_analyst_global_sync_cursor_endpoint(payload: AnalystSyncGlobalC
     return await run_database_blocking(update_analyst_global_sync_cursor, payload, timeout_seconds=30)
 
 
+async def sync_remote_archive_endpoint(payload: RemoteArchiveSyncRequest, authorization: str | None) -> dict[str, Any]:
+    return await sync_remote_archive(payload, authorization)
+
+
 app.include_router(build_research_actions_router(ResearchActionDependencies(
     analyse_ingestion=analyse_ingestion_endpoint,
     import_remote_report=import_remote_archive_report_endpoint,
@@ -9519,6 +9697,7 @@ app.include_router(build_research_actions_router(ResearchActionDependencies(
     update_analyst_research_profile=update_analyst_research_profile_endpoint,
     update_analyst_sync_cursor=update_analyst_sync_cursor_endpoint,
     update_analyst_global_sync_cursor=update_analyst_global_sync_cursor_endpoint,
+    sync_remote_archive=sync_remote_archive_endpoint,
 )))
 
 

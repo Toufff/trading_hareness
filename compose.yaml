@@ -215,6 +215,13 @@ services:
       QUANT_ALERT_WEBHOOK_TOKEN: ${QUANT_ALERT_WEBHOOK_TOKEN:-}
       QUANT_DASHBOARD_PUBLIC_URL: ${QUANT_DASHBOARD_PUBLIC_URL:-}
       QUANT_WRITE_API_KEY: ${QUANT_WRITE_API_KEY:?Set QUANT_WRITE_API_KEY in .env}
+      # This credential is intentionally injected only from ignored local
+      # environment configuration. The service reads extracted text endpoints
+      # only; it never dereferences archive media URLs.
+      REMOTE_ANALYST_ARCHIVE_BASE_URL: ${REMOTE_ANALYST_ARCHIVE_BASE_URL:-}
+      REMOTE_ANALYST_ARCHIVE_CA_FILE: /opt/market-review-api.pem
+      REMOTE_ANALYST_SYNC_MAX_ITEMS: ${REMOTE_ANALYST_SYNC_MAX_ITEMS:-100}
+      REMOTE_ANALYST_SYNC_MIN_INTERVAL_SECONDS: ${REMOTE_ANALYST_SYNC_MIN_INTERVAL_SECONDS:-15}
       INTRADAY_SCAN_INTERVAL_SECONDS: ${INTRADAY_SCAN_INTERVAL_SECONDS:-30}
       INTRADAY_SUPER_GET_FAST_INTERVAL_SECONDS: ${INTRADAY_SUPER_GET_FAST_INTERVAL_SECONDS:-1}
       INTRADAY_SUPER_GET_FAST_MAX_IN_FLIGHT: ${INTRADAY_SUPER_GET_FAST_MAX_IN_FLIGHT:-20}
@@ -241,6 +248,7 @@ services:
       NO_PROXY: "*"
     volumes:
       - quant_data:/var/lib/quant
+      - ./certs/market-review-api.pem:/opt/market-review-api.pem:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
       interval: 15s

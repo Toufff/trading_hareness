@@ -334,6 +334,23 @@ class RemoteMessageReprocessRequest(BaseModel):
     limit: int = Field(default=100, ge=1, le=500)
 
 
+class RemoteArchiveSyncRequest(BaseModel):
+    """Bound one remote text-only incremental sync request.
+
+    The caller never supplies an archive URL, bearer value, media URL, or a
+    history range. Configuration remains process-local and the service only
+    requests current report/message metadata plus extracted text details.
+    """
+
+    streams: list[Literal["reports", "messages"]] = Field(default_factory=lambda: ["reports", "messages"], min_length=1, max_length=2)
+    max_items: int = Field(default=100, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def normalize_streams(self) -> "RemoteArchiveSyncRequest":
+        self.streams = list(dict.fromkeys(self.streams))
+        return self
+
+
 class AnalystSyncCursorUpdate(BaseModel):
     """Advance one remote sync watermark only after local import succeeded."""
 

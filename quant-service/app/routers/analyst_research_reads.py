@@ -82,7 +82,7 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                              WHERE "workflowId"=w.id AND "deletedAt" IS NULL
                              ORDER BY "startedAt" DESC NULLS LAST,id DESC LIMIT 1
                         ) e ON TRUE
-                            WHERE w.id IN ('remoteArchiveReports123','remoteArchiveMessages123')
+                            WHERE w.id = 'remoteArchiveSync123'
                             ORDER BY w.id"""
                 ).fetchall()
                 workflow_health = []
@@ -115,11 +115,12 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 "cursor_count": len(stream_rows),
                 "latest_cursor_at": latest,
                 "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
-                "expected_workflow_id": "remoteArchiveReports123" if stream_key == "reports" else "remoteArchiveMessages123",
+                "expected_workflow_id": "remoteArchiveSync123",
                 "notice": "no successful cursor advance is recorded" if latest is None else None,
             })
-        workflow_verified = bool(workflow_health) and len(workflow_health) == 2 and all(
-            item.get("status") == "ready" for item in workflow_health
+        workflow_verified = bool(workflow_health) and any(
+            item.get("id") == "remoteArchiveSync123" and item.get("status") == "ready"
+            for item in workflow_health
         )
         return {"cursors": [dict(row) for row in cursors], "stream_health": stream_health,
                 "workflow_health": workflow_health,
