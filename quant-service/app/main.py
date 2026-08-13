@@ -83,6 +83,7 @@ from .intraday_breakout import upside_research_assessment as pure_upside_researc
 from .intraday_signal_rules import signal_rules as pure_intraday_signal_rules
 from .intraday_outcome_attribution import outcome_attribution_summary as pure_outcome_attribution_summary
 from .post_close_pattern_score import review_score as pure_pattern_review_score
+from .tushare_normalization import normalize_rows as pure_normalize_tushare_rows
 from .market_regimes import (
     strategy_index_regime as pure_strategy_index_regime,
     strategy_market_regime as pure_strategy_market_regime,
@@ -1700,116 +1701,14 @@ def import_offline_minute_csv(request: OfflineMinuteImportRequest) -> dict[str, 
 
 def normalize_tushare_rows(connection: Any, api_name: str, rows: list[dict[str, Any]], available_at: datetime,
                            provider_key: str = "tushare") -> int:
-    """Promote a small, deterministic subset of raw rows to query tables."""
-    if api_name not in CORE_NORMALIZED_APIS:
-        return 0
-    normalized = 0
-    for row in rows:
-        try:
-            if api_name == "trade_cal":
-                calendar_date = tushare_date(row.get("cal_date"))
-                if not calendar_date:
-                    raise ValueError("trade_cal row has no cal_date")
-                connection.execute(
-                    """INSERT INTO quant.market_trade_calendar(exchange,calendar_date,is_open,pretrade_date,provider,available_at,raw)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s)
-                       ON CONFLICT(exchange,calendar_date) DO UPDATE SET is_open=EXCLUDED.is_open,pretrade_date=EXCLUDED.pretrade_date,
-                         available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
-                    (str(row.get("exchange") or "SSE"), calendar_date, str(row.get("is_open")) == "1", tushare_date(row.get("pretrade_date")), provider_key, available_at, Json(row)),
-                )
-            elif api_name == "stock_basic":
-                symbol = str(row.get("ts_code") or "").upper()
-                if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
-                    raise ValueError("stock_basic row has invalid ts_code")
-                connection.execute(
-                    """INSERT INTO quant.instruments(symbol,exchange,name,industry,list_date,delist_date,is_st,source)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
-                       ON CONFLICT(symbol) DO UPDATE SET exchange=EXCLUDED.exchange,name=coalesce(EXCLUDED.name,quant.instruments.name),
-                         industry=coalesce(EXCLUDED.industry,quant.instruments.industry),list_date=coalesce(EXCLUDED.list_date,quant.instruments.list_date),
-                         delist_date=coalesce(EXCLUDED.delist_date,quant.instruments.delist_date),is_st=EXCLUDED.is_st,
-                         source=EXCLUDED.source,updated_at=now()""",
-                    (symbol, str(row.get("exchange") or exchange_for(symbol)), row.get("name"), row.get("industry"),
-                     tushare_date(row.get("list_date")), tushare_date(row.get("delist_date")), is_st_security_name(row.get("name")), provider_key),
-                )
-            elif api_name == "suspend_d":
-                symbol = str(row.get("ts_code") or "").upper()
-                suspend_date = tushare_date(row.get("trade_date") or row.get("suspend_date"))
-                if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) or not suspend_date:
-                    raise ValueError("suspend_d row needs ts_code and trade_date")
-                ensure_tushare_instrument(connection, symbol)
-                resume_date = tushare_date(row.get("resume_date"))
-                connection.execute(
-                    """INSERT INTO quant.security_suspensions(symbol,suspend_date,resume_date,suspend_reason,provider,available_at,raw) VALUES(%s,%s,%s,%s,%s,%s,%s)
-                       ON CONFLICT(symbol,suspend_date,provider) DO UPDATE SET resume_date=EXCLUDED.resume_date,suspend_reason=EXCLUDED.suspend_reason,
-                         available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
-                    (symbol, suspend_date, resume_date, row.get("suspend_timing") or row.get("suspend_reason"), provider_key, available_at, Json(row)),
-                )
-                # A daily bar source normally has no suspension flag.  Carry
-                # the explicit event into the canonical execution controls;
-                # resume_date is the first tradable date and is not marked.
-                connection.execute(
-                    """UPDATE quant.canonical_bars_daily SET is_suspended=true,canonicalized_at=now()
-                         WHERE symbol=%s AND trading_date >= %s AND (%s IS NULL OR trading_date < %s)""",
-                    (symbol, suspend_date, resume_date, resume_date),
-                )
-            else:
-                symbol = str(row.get("ts_code") or "").upper()
-                trading_date = tushare_date(row.get("trade_date"))
-                if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) or not trading_date:
-                    raise ValueError(f"{api_name} row needs ts_code and trade_date")
-                ensure_tushare_instrument(connection, symbol)
-                if api_name in {"daily", "index_daily"}:
-                    upsert_bar(connection, DailyBar(
-                        symbol=symbol, trading_date=trading_date, open=decimal_or_none(row.get("open")), high=decimal_or_none(row.get("high")),
-                        low=decimal_or_none(row.get("low")), close=decimal_or_none(row.get("close")), pre_close=decimal_or_none(row.get("pre_close")),
-                        volume=decimal_or_none(row.get("vol")), amount=decimal_or_none(row.get("amount")), source=provider_key, available_at=available_at,
-                    ))
-                elif api_name == "adj_factor":
-                    adj_factor = decimal_or_none(row.get("adj_factor"))
-                    if adj_factor is None:
-                        raise ValueError("adj_factor row has no positive adj_factor")
-                    connection.execute(
-                        """INSERT INTO quant.daily_adjustment_factors(symbol,trading_date,adj_factor,provider,available_at,raw) VALUES(%s,%s,%s,%s,%s,%s)
-                           ON CONFLICT(symbol,trading_date,provider) DO UPDATE SET adj_factor=EXCLUDED.adj_factor,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
-                        (symbol, trading_date, adj_factor, provider_key, available_at, Json(row)),
-                    )
-                    connection.execute(
-                        """UPDATE quant.canonical_bars_daily SET adj_factor=%s,canonicalized_at=now()
-                           WHERE symbol=%s AND trading_date=%s""",
-                        (adj_factor, symbol, trading_date),
-                    )
-                elif api_name == "daily_basic":
-                    connection.execute(
-                        """INSERT INTO quant.daily_fundamentals(symbol,trading_date,close,turnover_rate,volume_ratio,pe,pb,total_share,float_share,total_mv,circ_mv,provider,available_at,raw)
-                           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                           ON CONFLICT(symbol,trading_date,provider) DO UPDATE SET close=EXCLUDED.close,turnover_rate=EXCLUDED.turnover_rate,
-                             volume_ratio=EXCLUDED.volume_ratio,pe=EXCLUDED.pe,pb=EXCLUDED.pb,total_share=EXCLUDED.total_share,float_share=EXCLUDED.float_share,
-                             total_mv=EXCLUDED.total_mv,circ_mv=EXCLUDED.circ_mv,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
-                        (symbol, trading_date, decimal_or_none(row.get("close")), decimal_or_none(row.get("turnover_rate")), decimal_or_none(row.get("volume_ratio")),
-                         decimal_or_none(row.get("pe")), decimal_or_none(row.get("pb")), decimal_or_none(row.get("total_share")), decimal_or_none(row.get("float_share")),
-                         decimal_or_none(row.get("total_mv")), decimal_or_none(row.get("circ_mv")), provider_key, available_at, Json(row)),
-                    )
-                elif api_name == "stk_limit":
-                    connection.execute(
-                        """INSERT INTO quant.daily_trade_limits(symbol,trading_date,limit_up,limit_down,provider,available_at,raw) VALUES(%s,%s,%s,%s,%s,%s,%s)
-                           ON CONFLICT(symbol,trading_date,provider) DO UPDATE SET limit_up=EXCLUDED.limit_up,limit_down=EXCLUDED.limit_down,
-                             available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
-                        (symbol, trading_date, decimal_or_none(row.get("up_limit")), decimal_or_none(row.get("down_limit")), provider_key, available_at, Json(row)),
-                    )
-                    connection.execute(
-                        """UPDATE quant.canonical_bars_daily SET limit_up=%s,limit_down=%s,canonicalized_at=now()
-                           WHERE symbol=%s AND trading_date=%s""",
-                        (decimal_or_none(row.get("up_limit")), decimal_or_none(row.get("down_limit")), symbol, trading_date),
-                    )
-            normalized += 1
-        except Exception as error:  # noqa: BLE001 - raw data remains available for inspection
-            connection.execute(
-                """INSERT INTO quant.data_quality_issues(capability,severity,code,message,details)
-                   VALUES(%s,'warning','tushare_normalization_failed',%s,%s)""",
-                (api_name, safe_error_detail(str(error), 500), Json({"row": row})),
-            )
-    return normalized
-
+    """Compatibility export backed by the isolated Tushare normalizer."""
+    return pure_normalize_tushare_rows(
+        connection, api_name, rows, available_at,
+        core_apis=CORE_NORMALIZED_APIS, date_parser=tushare_date, exchange_for=exchange_for,
+        is_st_security_name=is_st_security_name, ensure_instrument=ensure_tushare_instrument,
+        upsert_bar=upsert_bar, daily_bar_type=DailyBar, decimal_or_none=decimal_or_none,
+        safe_error_detail=safe_error_detail, provider_key=provider_key,
+    )
 
 def persist_tushare_rows(connection: Any, api_name: str, request_key: str, rows: list[dict[str, Any]],
                          provider_key: str, available_at: datetime) -> int:

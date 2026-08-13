@@ -575,5 +575,6 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 2026-08-14 组合风险补强：纸面组合快照按当前精确板块成员拆分暴露，新 entry 会经过 20% 板块集中度门禁；前端展示净值、总/净暴露、回撤、板块暴露和风险事件。组合级自动熔断和策略健康自动降级仍受 P3 样本门禁约束。
 - 2026-08-14 点时修复：纸面快照和盘中候选的板块成员查询均按 `effective_from/effective_to` 对齐观察日，避免成员变更后用未来映射解释旧证据；新增回归覆盖上海日期边界。
 - 2026-08-14 工程拆分继续：盘中突破评估/确认、盘中信号规则、盘中 outcome 归因、盘中 attribution 标签和盘后模式评分分别迁至 `app/intraday_breakout.py`、`app/intraday_signal_rules.py`、`app/intraday_outcome_attribution.py`、`app/intraday_attribution.py`、`app/post_close_pattern_score.py`；`main.py` 仅保留兼容入口，实时与未来回放可复用相同纯函数。新增兼容等价回归后 quant-service 全量为 312 项，前端 typecheck/Vite build 与开盘预检均通过；未改变策略阈值、历史范围或 provider 调用。
+- 2026-08-14 数据边界拆分：Tushare raw→control-plane 归一化已迁至 `app/tushare_normalization.py`，保留逐行质量告警、ST/停牌/复权/涨跌停控制字段和原有事务调用顺序；`main.py` 仅保留兼容入口。312 项回归通过，未扩大历史数据请求。
 
 仍明确未完成：历史数据回填（按要求暂停）、分钟回放、60 日/200 信号验证、样本外分析师 champion/challenger 晋级和 RL。分析师同步的代码、部署和 10 轮真实链路验收已完成；正式交易时段继续观察供应商配额。纸面成交撮合仅支持“已有本地报价证据 + 人工确认”的研究模拟，不是经纪商成交。上述研究项目继续保持 `research_only`，不会改变实时规则或阈值。
