@@ -71,6 +71,7 @@ from .intraday_clock import feature_clock as pure_intraday_feature_clock
 from .intraday_clock import minute_bucket as pure_intraday_minute_bucket
 from .intraday_features import minute_features as pure_intraday_minute_features
 from .intraday_features import peer_context as pure_intraday_peer_context
+from .post_close_limit_features import limit_daily_features as pure_limit_daily_features
 from .market_regimes import (
     strategy_index_regime as pure_strategy_index_regime,
     strategy_market_regime as pure_strategy_market_regime,
@@ -3122,44 +3123,7 @@ def limit_board_count(tag: Any) -> int:
 
 def post_close_limit_daily_features(bars: list[dict[str, Any]]) -> dict[str, Any]:
     """Describe the selected limit-up session against only earlier daily bars."""
-    if not bars:
-        return {"status": "missing_daily_bar"}
-    ordered = sorted(bars, key=lambda item: str(item.get("trading_date") or ""))
-    current = ordered[-1]
-    previous_close = intraday_number(current.get("pre_close"))
-    if previous_close is None and len(ordered) >= 2:
-        previous_close = intraday_number(ordered[-2].get("close"))
-    opened = intraday_number(current.get("open"))
-    high = intraday_number(current.get("high"))
-    low = intraday_number(current.get("low"))
-    close = intraday_number(current.get("close"))
-    exact_limit_up = intraday_number(current.get("limit_up"))
-    exact_limit_down = intraday_number(current.get("limit_down"))
-    limit_ratio = a_share_limit_ratio(str(current.get("symbol") or ""), bool(current.get("is_st")))
-    implied_limit_pct = round((exact_limit_up / previous_close - 1) * 100, 4) if exact_limit_up and previous_close else limit_ratio * 100
-    volume = intraday_number(current.get("volume"))
-    prior_volumes = [intraday_number(row.get("volume")) for row in ordered[:-1]]
-    valid_prior_5 = [float(value) for value in prior_volumes[-5:] if value is not None and value > 0]
-    valid_prior_20 = [float(value) for value in prior_volumes[-20:] if value is not None and value > 0]
-    pct = lambda value: round((value / previous_close - 1) * 100, 4) if value is not None and previous_close and previous_close > 0 else None
-    close_location = ((close - low) / (high - low)) if close is not None and low is not None and high is not None and high > low else None
-    low_pct, high_pct, close_pct = pct(low), pct(high), pct(close)
-    deep_reversal = bool(low_pct is not None and low_pct <= -implied_limit_pct * 0.85
-                         and close_pct is not None and close_pct >= implied_limit_pct * 0.95)
-    return {
-        "status": "completed", "trading_date": str(current.get("trading_date")),
-        "selected_provider": current.get("selected_provider"), "bar_count": len(ordered),
-        "open": opened, "high": high, "low": low, "close": close, "pre_close": previous_close,
-        "limit_up": exact_limit_up, "limit_down": exact_limit_down, "limit_pct": implied_limit_pct,
-        "open_pct": pct(opened), "high_pct": high_pct, "low_pct": low_pct, "close_pct": close_pct,
-        "intraday_range_pct": round((high / low - 1) * 100, 4) if high and low and low > 0 else None,
-        "close_location": round(close_location, 4) if close_location is not None else None,
-        "volume": volume,
-        "volume_multiple_5d": round(volume / mean(valid_prior_5), 4) if volume and valid_prior_5 and mean(valid_prior_5) else None,
-        "volume_multiple_20d": round(volume / mean(valid_prior_20), 4) if volume and valid_prior_20 and mean(valid_prior_20) else None,
-        "ground_to_sky_daily_shape": deep_reversal,
-    }
-
+    return pure_limit_daily_features(bars, number=intraday_number, limit_ratio=a_share_limit_ratio)
 
 def _strategy_session_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep continuous-auction minutes and one value per minute."""

@@ -87,6 +87,7 @@ from app.analyst_text_features import analyst_text_factor_summary as isolated_an
 from app.numeric_utils import decimal_or_none as pure_decimal_or_none, intraday_number as pure_intraday_number
 from app.intraday_clock import eac_window as pure_eac_window, feature_clock as pure_feature_clock, minute_bucket as pure_minute_bucket
 from app.intraday_features import minute_features as pure_minute_features, peer_context as pure_peer_context
+from app.post_close_limit_features import limit_daily_features as pure_limit_daily_features
 from app.post_close_structures import (
     daily_base_structure as pure_daily_base_structure,
     post_close_forming_structure as pure_post_close_forming_structure,
@@ -3574,6 +3575,15 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIsNot(main_module.intraday_minute_features, pure_minute_features)
         self.assertIsNot(main_module.intraday_peer_context, pure_peer_context)
         self.assertEqual(main_module.intraday_peer_context([], {}), pure_peer_context([], {}))
+
+    def test_limit_daily_features_runtime_uses_extracted_module(self):
+        import app.main as main_module
+
+        bars = [{"trading_date": "20260812", "close": "10", "volume": "100"},
+                {"trading_date": "20260813", "pre_close": "10", "open": "10", "high": "11", "low": "9", "close": "11", "volume": "200", "symbol": "000001.SZ"}]
+        self.assertEqual(main_module.post_close_limit_daily_features(bars), pure_limit_daily_features(
+            bars, number=main_module.intraday_number, limit_ratio=main_module.a_share_limit_ratio,
+        ))
 
     def test_intraday_attribution_summary_keeps_small_cohorts_descriptive(self):
         observed = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)
