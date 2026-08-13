@@ -8002,7 +8002,7 @@ def persist_tushare_fetch_success(
              f"response exceeded local cap of {request.max_rows} rows" if truncated else None, request_key),
         )
         for provider_key, error in result.failed_providers:
-            record_provider_failure(connection, provider_key, request.api_name, error)
+            record_provider_failure(connection, provider_key, request.api_name, error, provider_latency_ms)
             record_provider_api_capability(connection, provider_key, request.api_name, provider_error_availability(error), note=error)
         for provider_key in result.empty_providers:
             if provider_key != result.provider.key:
@@ -8034,7 +8034,8 @@ def persist_tushare_fetch_cancel(request_key: str, api_name: str, candidate_keys
         )
 
 
-def persist_tushare_fetch_failure(request_key: str, api_name: str, candidate_keys: list[str], error: Exception) -> None:
+def persist_tushare_fetch_failure(request_key: str, api_name: str, candidate_keys: list[str], error: Exception,
+                                  provider_latency_ms: int | None = None) -> None:
     safe_error = safe_error_detail(str(error), 1000)
     with db.transaction() as connection:
         connection.execute(
@@ -8046,7 +8047,7 @@ def persist_tushare_fetch_failure(request_key: str, api_name: str, candidate_key
         )
         for provider_key, provider_error in provider_failures:
             safe_provider_error = safe_error_detail(str(provider_error))
-            record_provider_failure(connection, provider_key, api_name, safe_provider_error)
+            record_provider_failure(connection, provider_key, api_name, safe_provider_error, provider_latency_ms)
             record_provider_api_capability(connection, provider_key, api_name,
                                            provider_error_availability(safe_provider_error), note=safe_provider_error)
 
@@ -8145,7 +8146,10 @@ async def fetch_tushare_catalog(request: TushareFetchRequest) -> dict[str, Any]:
             detail=LOCAL_CAPACITY_HTTP_DETAIL,
         ) from error
     except Exception as error:  # noqa: BLE001 - store an actionable, token-free failure
-        await run_database_blocking(persist_tushare_fetch_failure, request_key, request.api_name, candidate_keys, error)
+        provider_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
+        await run_database_blocking(
+            persist_tushare_fetch_failure, request_key, request.api_name, candidate_keys, error, provider_latency_ms,
+        )
         raise HTTPException(status_code=502, detail=f"Tushare {request.api_name} request failed") from error
 
 

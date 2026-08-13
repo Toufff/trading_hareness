@@ -989,9 +989,11 @@ class ProviderHelperTests(unittest.TestCase):
 
     def test_provider_failure_recording_redacts_credentials(self):
         connection = MagicMock()
-        record_provider_failure(connection, "test", "daily", "Authorization: credential-value")
+        record_provider_failure(connection, "test", "daily", "Authorization: credential-value", latency_ms=123)
         parameters = connection.execute.call_args.args[1]
-        self.assertNotIn("credential-value", parameters[-1])
+        self.assertNotIn("credential-value", parameters[-2])
+        self.assertEqual(parameters[-1], 123)
+        self.assertIn("last_latency_ms", connection.execute.call_args.args[0])
 
     def test_intraday_outcome_decomposition_is_json_safe_before_persistence(self):
         from app.main import strategy_json_safe

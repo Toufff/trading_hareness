@@ -25,16 +25,20 @@ def record_provider_success(connection: Any, provider: str, capability: str, row
     )
 
 
-def record_provider_failure(connection: Any, provider: str, capability: str, error: str) -> None:
+def record_provider_failure(connection: Any, provider: str, capability: str, error: str,
+                           latency_ms: int | None = None) -> None:
     provider_requests_total.labels(provider, capability, "failure").inc()
+    if latency_ms is not None and latency_ms >= 0:
+        provider_latency_seconds.labels(provider, capability).observe(latency_ms / 1000)
     connection.execute(
-        """INSERT INTO quant.provider_health(provider_key,capability,market,consecutive_failures,last_failure_at,last_error,circuit_open_until)
-           VALUES(%s,%s,'cn',1,now(),%s,null)
+        """INSERT INTO quant.provider_health(provider_key,capability,market,consecutive_failures,last_failure_at,last_error,last_latency_ms,circuit_open_until)
+           VALUES(%s,%s,'cn',1,now(),%s,%s,null)
            ON CONFLICT(provider_key,capability,market) DO UPDATE SET consecutive_failures=quant.provider_health.consecutive_failures+1,
              last_failure_at=now(),last_error=EXCLUDED.last_error,
+             last_latency_ms=COALESCE(EXCLUDED.last_latency_ms,quant.provider_health.last_latency_ms),
              circuit_open_until=CASE WHEN quant.provider_health.consecutive_failures+1 >= 3 THEN now()+interval '5 minutes' ELSE null END,
              updated_at=now()""",
-        (provider, capability, safe_error_detail(error, 500)),
+        (provider, capability, safe_error_detail(error, 500), latency_ms),
     )
 
 

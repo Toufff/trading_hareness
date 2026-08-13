@@ -68,7 +68,7 @@
 - 公共 HTTP 适配器新增 AST 回归门禁：`free_market_providers.py` 中除 `_request_with_retry` 外不得直接执行 `client.get/post/request` 等网络调用，防止未来绕过一次有界重试的统一边界。
 - 公共行情/公告 HTTP 现在复用 FastAPI 生命周期内的受限 keep-alive 客户端（最大 12 个连接、8 个空闲连接、30 秒空闲回收）；每个请求仍保留原有的来源 Referer/User-Agent、超时和一次临时失败重试。飞书内部投递另有独立的 4 连接小池，不能被公共源挤占；外层 durable outbox 的重试语义不变。服务关闭会确定释放连接；脱离服务生命周期的单元调用使用临时小池，不会把跨 event-loop 的全局会话带入测试。`/health.http_clients` 仅展示池的拥有状态与容量，不触发外部请求。
 - 主源、City SDK 和 REST 备用的非 Super-GET Tushare 请求也按物理 provider 与代理 URL 隔离复用生命周期 HTTP 池（每池最多 4 连接）；凭据仍按请求传递，代理变更绝不会复用旧连接。Super GET 保持原有“每 worker thread 一个 requests 代理会话”的已验证实现。`/health.http_clients.tushare_provider` 只显示活跃池数，不泄露端点、代理或凭据。
-- Tushare 通用目录的成功健康证据现在记录从实际上游调用开始至返回可持久化行的端到端毫秒耗时，因此主源、City、Super GET 与备用源都进入同一 `quant_provider_latency_seconds{provider,capability}` 观测；缓存命中不伪造网络延迟，失败仍单独计入失败计数与熔断。
+- Tushare 通用目录的成功与失败健康证据现在记录从实际上游调用开始至返回/失败的端到端毫秒耗时，因此主源、City、Super GET 与备用源都进入同一 `quant_provider_latency_seconds{provider,capability}` 观测；缓存命中不伪造网络延迟，失败仍单独计入失败计数与熔断。
 - 东财行业/概念资金曲线已在每个 SSE 观察分钟增量写入。新增板块轮动检测只比较相邻的同日、至多相隔两分钟的同源快照：同分类绝对净流变化取前 5% 且不低于 2.0 亿、当前绝对净流至少 1.0 亿；跨零与单方向急剧加速都要由下一分钟保留方向后才确认。确认事件先写独立 outbox，飞书失败最多重试 3 次；同一方向键在 10 分钟内不重复提醒。
 - 板块轮动的事件、确认状态与飞书投递回执已移至 `app/board_rotation_read_model.py` 和 `app/routers/board_rotation_reads.py` 的只读 URL `/api/v1/intraday/board-rotations/latest`；飞书前端代理公开其等价路径 `/api/research/intraday/board-rotations/latest`。两者只读取本地事件/outbox，不会拉取东财或行情。
 - 前端分钟资金曲线下方现展示最近轮动事件及其确认、飞书投递回执，并与曲线按一分钟增量刷新。此卡片只读取本地事件证据；它明确区分“每分钟轮动检测”与仍按较低频率发送的综合板块快报，避免把后者误认为轮动监测频率。
@@ -154,6 +154,6 @@
 
 ## 仍待完成
 
-- 仍需把少数 provider 专项路径的熔断/有限重试策略和延迟/成功率标签进一步统一；现有高频与写入路径已覆盖。
+- Tushare 成功与失败路径现统一记录端到端延迟、成功/失败计数和熔断证据；Super GET 仍保持实时单采样、参考查询有限重试。少数公共源专项路径的失败延迟标签仍待后续统一，不影响当前盘中门禁。
 - 旧 psycopg 仓储实现仍是同步的，但所有 async 调用点已由有界执行器隔离；后续可渐进替换为原生 async repository，而非冒险机械重写。
 - `main.py` 的其余路由/服务/策略层仍待继续机械拆分；本轮已将板块/指数状态纯计算移至 `app/market_regimes.py` 并保留兼容导出。Alembic 基线与基础 Prometheus 指标已完成，后续按新迁移和新增指标扩展。
