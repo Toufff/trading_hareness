@@ -98,9 +98,9 @@
 - 板块目录/精确成员、东财成员补全、盘中板块快报、行业/概念资金流、概念成员回填、候选池和板块研究九条写入路由已移至 `app/routers/sector_actions.py`。它只拥有 URL 与请求契约，实际服务继续保留 capability 熔断、本地容量背压、raw-first 证据、精确成员映射与限频语义；没有因路由拆分而扩大外部请求范围。
 - 策略决策、午间/收盘复盘、盘后候选、形态挖掘、分析师/盘中结算、推荐生成和日流水线九条写入路由已移至 `app/routers/strategy_actions.py`。收盘复盘循环和日流水线中原先直跑的同步结算、成绩单、快照与候选生成全部改为有界数据库执行器；新增 AST 门禁禁止这些已知同步仓储入口重新在 async 协程中直调。
 - 市场快照、离线分钟 CSV 导入、Tushare/BaoStock 受控同步及核心日线同步五条写入路由已移至 `app/routers/ingestion_actions.py`；离线导入也不再占用框架默认线程池。主服务现仅保留 `/health`、`/metrics` 与显式禁用的 legacy `/api/v1/bootstrap` HTTP 装配，其他业务路由均由独立 router 以显式依赖注册。
-- 该条为阶段性历史快照：当时全量 187 项测试通过，其中包含研究治理、策略与行情导入 router 契约，以及日流水线同步仓储阶段的有界执行器顺序验证。当前回归基线已扩展为 285 项，详见本文“验证”章节。
+- 该条为阶段性历史快照：当时全量 187 项测试通过，其中包含研究治理、策略与行情导入 router 契约，以及日流水线同步仓储阶段的有界执行器顺序验证。当前回归基线已扩展为 286 项，详见本文“验证”章节。
 - 盘后 30 日蓄势、15 日形成和首动结构已移至 `app/post_close_structures.py`。模块没有数据库、provider 或时钟依赖，`main.py` 继续兼容导出同名函数；这让 P2 分钟回放与 P3 验证可复用生产中的同一规则实现。最新全量回归为 188 项通过。
-- `sync_tushare`、`sync_baostock` 与核心日线同步在未传入显式股票列表时，现通过 `resolve_sync_symbols_async` 进入有界数据库执行器解析 core 股票池/分析师声明；不会再在 async 协程内直接开同步事务。同步兼容解析函数仍保留给已有测试和非 async 调用。该条的 189 项为当时阶段性回归快照，当前为 285 项通过。
+- `sync_tushare`、`sync_baostock` 与核心日线同步在未传入显式股票列表时，现通过 `resolve_sync_symbols_async` 进入有界数据库执行器解析 core 股票池/分析师声明；不会再在 async 协程内直接开同步事务。同步兼容解析函数仍保留给已有测试和非 async 调用。该条的 189 项为当时阶段性回归快照，当前为 286 项通过。
 - `app/provider_health.py` 现统一承担 provider 成功/失败记录、token 脱敏、短时熔断阈值与能力审计的权限/参数错误分类；策略、同步、探针和前端读取仍通过主服务兼容导入调用同一套证据写入规则。
 - 单股研究的东财、腾讯、Sina 与 AKShare 补充源改为惰性请求工厂：先读 provider 熔断状态，若已打开则不创建协程、不产生外呼，直接返回 `circuit_open` 证据；未熔断时保持原有 10 秒预算和结果持久化。
 - 腾讯一分钟带（盘中同题材确认、盘后涨停/地天板形态研究）现独立记录为 `tencent_free/intraday_minute` capability：每个有界批次只写一条聚合成功/失败与端到端延迟，不按股票放大健康写入；熔断期生成 `circuit_open`/`blocked` 的本地研究证据，不创建腾讯分钟请求。45 秒小缓存、12 只显式同题材上限和盘后候选上限均保持不变。
@@ -118,7 +118,7 @@
 - P2/P3 可复用的盘中结算基础规则已移至 `app/intraday_outcomes.py`：观察期、信号方向、路径 MFE/MAE 与按中国交易日构造的结算截止时间均为无副作用函数，研究结算仍只读取 alert 之后已持久化的报价/分钟证据。
 - Tushare 目录聚合和跨 provider 能力矩阵已移至 `app/provider_catalog.py`。该层只连接已声明接口与本地已持久化的每-provider 观测，明确保留 GET/City SDK 的分离状态；前端读取不会触发能力探测或市场数据请求。
 - 最新备份按恢复前校验流程验证：`pg_restore -l` 重新生成的目录与随归档保存的 manifest 一致，12 个 n8n 工作流导出均可被 `jq` 解析为含 `nodes` 数组的对象。此校验不向生产数据库执行 restore；实际恢复仍须在隔离数据库中进行。
-- 新增 `scripts/quant-opening-preflight.sh` 作为开盘前唯一的只读控制面预检：它断言 compose 核心服务、Alembic 版本、后台租约、数据库池、三类有界执行器、`30s/10s/1s` 特别时段节流、`60s` 板块曲线、飞书 ready 和最近 30 小时可恢复备份；脚本显式不调用市场 provider、不刷新行情，也不发送测试提醒。2026-08-11 已在本机通过。
+- 新增 `scripts/quant-opening-preflight.sh` 作为开盘前唯一的只读控制面预检：它断言 compose 核心服务、Alembic 版本、后台租约、数据库池、三类有界执行器、`30s/10s/1s` 特别时段节流、`60s` 板块曲线、飞书 ready 和最近 30 小时可恢复备份；脚本显式不调用市场 provider、不刷新行情，也不发送测试提醒。租约判定为“未过期 + 5 秒时钟宽限”，兼容 60 秒循环/120 秒租约在续租边界的正常状态。2026-08-11 已在本机通过。
 - 开盘预检不再只数租约数量，而是逐个验证八条必须的 `background_loop:*` 租约名称，防止某个关键循环缺失却被无关租约数量掩盖。
 - 观察池注册后的日因子、策略决策的事件/龙虎榜/源健康上下文，以及单股研究的本地窗口就绪度，现全部通过有界数据库执行器读取。盘中扫描仍维持原有单事务；板块点时上下文、纸面持仓和组合快照改为每轮批量读取，避免按标的/信号重复开查询。板块/指数状态计算已移至无 I/O 的 `app/market_regimes.py`，供实时复盘和未来回放共用。FastAPI 启动时的目录能力登记同样移出事件循环。AST 门禁扩展覆盖这些同步仓储入口；最新全量回归为 286 项通过。
 - 受控 Tushare 日线同步现在按“单个上游响应一笔数据库事务”批量保存日线，而非按每根 K 线分别提交；这保留原有 raw→canonical 的写入顺序和单标的失败语义，同时在 45 天允许窗口内显著降低连接/认证争用。新增批写次数与事务边界回归；最新全量回归为 193 项通过。
@@ -131,18 +131,18 @@
 - 共享限流的运行代价现通过 `quant_provider_shared_rate_limit_wait_seconds{provider}` 和 `quant_provider_shared_rate_limit_rejections_total{provider}` 暴露：启动即为所有已配置物理 provider 注册零值时间序列，故 scrape 不必等到真实请求才可发现配置/指标漂移。该指标只记录本地预约，不会增加任何上游调用。
 - 共享限流迁移后已生成并验证新的可恢复归档 `20260812-071013-daily`：约 76MB PostgreSQL archive 包含 `20260811_0008` 和 `quant.provider_rate_limit_slots` 的 schema/data，12 个工作流 JSON 均可解析。备份脚本现显式把 `workflows/` 子目录设为 `700`（此前 Docker copy 会将其生成为 `755`），归档目录/子目录为 `700`、dump/manifest/workflow 文件均为 `600`。未发现超过 14 天会触发保留策略删除的目录。
 - 本轮运行检查曾发现旧进程留下的八条已过期 `background_loop:*` 租约，量化服务已受控重启接管；首个续租窗口后八条租约的 `updated_at` 均已推进、`expires_at` 已延长，开盘预检重新通过。该恢复未触发行情请求或提醒。
-- `/health.runtime_leases` 现回显生效的 `background_loop_lease_seconds`；开盘预检除验证八条 lease 存在外，也要求每条 `updated_at` 未超过该周期的 75%，防止“尚未过期但续租已停”被误报为就绪。2026-08-11 已跨越一个实际续租窗口复验，八条 lease 均再次推进；最新全量回归仍为 202 项通过。
+- `/health.runtime_leases` 现回显生效的 `background_loop_lease_seconds`；开盘预检除验证必需 lease 存在外，也要求更新时间未超过租约期限（附 5 秒时钟宽限），防止过期 lease 被误报为就绪，同时不把 60 秒循环/120 秒租约的正常续租边界误报为故障。
 - 日线 canonical/raw 仓储已从 `main.py` 抽至 `app/daily_bar_repository.py`（108 行），`main.py` 保留 `upsert_bar` 兼容入口和既有批事务边界。模块仅接收 caller-owned transaction，不依赖 HTTP、provider client 或主服务；腾讯前复权拒绝、复权/停牌/ST 的 SQL `coalesce`/`CASE` 保护、来源优先级、质量冲突记录和原始证据写入完全复用原实现。真实 PostgreSQL `upsert_bar` 回归仍经兼容入口覆盖，新增静态边界测试；`main.py` 由 9066 行降至 8985 行，最新全量回归为 203 项通过。
 - 受限单股研究的 `asyncio.wait_for` 超时现会将通用 Tushare ledger 收口为 `blocked/caller_cancelled`，而不会把“调用方的 12 秒本地预算到期”误记为 provider failure 或 capability failure；回归同时断言没有错误打开熔断。公开源 quote/raw evidence/公告事件的本地读写已抽至 `app/public_market_repository.py`，模块不依赖 router、HTTP 客户端或主服务，`main.py` 保留兼容入口与原有单事务边界。`main.py` 现为 8928 行；最新全量回归为 206 项通过。
 - HTTP 传输所有权现在有静态回归门禁：除生命周期池、公共源、Tushare、飞书投递和仅用于异常分类的主服务外，其他 `app/*.py` 不得导入 `httpx` 或自行创建客户端；公共源必须取得 `public_http_client()`、Tushare 必须取得 `provider_http_client()`、飞书必须取得 `alert_http_client()`。这防止后续策略或路由分支绕过连接复用、proxy 隔离和有限重试。最新全量回归为 207 项通过。
-- `/metrics` 现在会独立刷新数据库池水位与 `quant_provider_circuit_open`：Prometheus 只抓 `/metrics` 时也不会依赖有人恰好访问 `/health` 才得到熔断数。该控制面读取以 5 秒 TTL 合并并发 scrape，完全不访问行情 provider；本地数据库暂时不可用时仍返回既有指标。该处 208 项为历史回归快照，当前全量回归为 285 项通过。
+- `/metrics` 现在会独立刷新数据库池水位与 `quant_provider_circuit_open`：Prometheus 只抓 `/metrics` 时也不会依赖有人恰好访问 `/health` 才得到熔断数。该控制面读取以 5 秒 TTL 合并并发 scrape，完全不访问行情 provider；本地数据库暂时不可用时仍返回既有指标。该处 208 项为历史回归快照，当前全量回归为 286 项通过。
 - 开盘预检的备份门禁已从“最新目录存在且未过期”升级为可恢复性前验证：在 PostgreSQL 容器中重新执行 `pg_restore -l` 并逐字节比对归档 manifest，验证 dump/manifest/workflow 目录和 workflow 文件权限为 `600/600/700/600`，并逐份 `jq` 解析 n8n workflow（必须包含 `nodes` 数组）。2026-08-12 对 `20260812-071013-daily` 的真实只读验证通过（12 份工作流）；不 restore、不写数据库、不访问市场 provider。
 - 备份生产脚本也在原子发布 `*-daily` 前强制逐份校验 workflow JSON；空导出或不含 `nodes` 数组的文件会使 staging 失败并由 trap 清理，避免将坏归档留给明早的预检才发现。当前归档的等价验证通过（12 份文件），本轮没有额外创建备份或清理既有归档。
 - n8n 的 `市场研究：收盘后候选池` 已完成调度收敛：18:50 只触发一次 `/api/v1/pipeline/daily`。该服务端流水线本身已覆盖同步、特征物化、到期结算、评分和推荐；此前串行连接的四个重复 HTTP 节点已断开并禁用，防止重复写入与重复占用 provider/数据库容量。`scripts/converge-n8n-quant-daily-workflow.sh` 会先导出并校验单工作流回滚副本，再执行受限拓扑更新；2026-08-12 已重启 n8n 加载并以数据库拓扑复核。此流程不调用任何市场 provider。
 
 ## 验证
 
-- 全量 285 项测试通过，覆盖熔断候选跳过、公共行情/公告 circuit 实际跳过外呼、Tushare/BaoStock/全市场日线/股票池/板块资金流/概念成员/涨停候选同步的数据库执行器隔离、东财成员有界线程池、观察池因子/告警/分钟会话/写入端点隔离、盘后跨实例租约冲突、Tushare ledger 缓存命中不外呼及成功/失败/本地容量阻塞结算事务隔离、通用目录熔断查询、同步/异步交易日历 fail-closed 门禁、公告、AKShare 探针、个股/板块研究、盘后模式挖掘、市场快照与策略决策持久化、AKShare 默认单次重试与公共 HTTP 有界重试、归一化控制面、legacy bootstrap 门禁、公共日线单事务批写与 provider 错误脱敏。另覆盖真实 PostgreSQL `upsert_bar` 保护、ASGI 鉴权、腾讯前复权隔离、分析师同步 429/Retry-After、服务游标覆盖旧 n8n 错误、盘中 episode 显式 symbol 与历史事件链接修复、纯确认去重模块、实时质量/组合风险门禁、批量点时上下文/纸面读取、盘后 latest attempt/complete 分离和上一报价 15 秒/当日边界，以及全部盘中/纸面/前端只读边界。
+- 全量 286 项测试通过，覆盖熔断候选跳过、公共行情/公告 circuit 实际跳过外呼、Tushare/BaoStock/全市场日线/股票池/板块资金流/概念成员/涨停候选同步的数据库执行器隔离、东财成员有界线程池、观察池因子/告警/分钟会话/写入端点隔离、盘后跨实例租约冲突、Tushare ledger 缓存命中不外呼及成功/失败/本地容量阻塞结算事务隔离、通用目录熔断查询、同步/异步交易日历 fail-closed 门禁、公告、AKShare 探针、个股/板块研究、盘后模式挖掘、市场快照与策略决策持久化、AKShare 默认单次重试与公共 HTTP 有界重试、归一化控制面、legacy bootstrap 门禁、公共日线单事务批写与 provider 错误脱敏。另覆盖真实 PostgreSQL `upsert_bar` 保护、ASGI 鉴权、腾讯前复权隔离、分析师同步 429/Retry-After、服务游标覆盖旧 n8n 错误、盘中 episode 显式 symbol 与历史事件链接修复、纯确认去重模块、实时质量/组合风险门禁、批量点时上下文/纸面读取、盘后 latest attempt/complete 分离和上一报价 15 秒/当日边界，以及全部盘中/纸面/前端只读边界。
 - 容器编译检查通过；健康接口显示连接池 `pool_size=2`、`waiting=0`（始终不超过最大 12）。
 - `/metrics` 实测返回数据库池 `size=2`、`available=2`、`waiting=0`、`provider_circuit_open=0`，以及 Super GET `8/0`、公共源 `4/0` 的容量/在途指标。
 - `/metrics` 还会在服务启动时显式产生八个 `quant_background_loop_restarts_total{loop=...}=0` 样本；已实测当前全部为 0。

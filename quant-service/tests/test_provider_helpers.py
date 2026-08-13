@@ -3463,6 +3463,11 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIs(main_module.strategy_market_state, pure_strategy_market_state)
         self.assertIs(main_module.strategy_index_regime, pure_strategy_index_regime)
 
+    def test_opening_preflight_allows_lease_at_normal_renewal_boundary(self):
+        script = (Path(__file__).resolve().parents[2] / "scripts" / "quant-opening-preflight.sh").read_text(encoding="utf-8")
+        self.assertIn("<= ($lease_seconds + 5)", script)
+        self.assertNotIn("$lease_seconds * 0.75", script)
+
     def test_intraday_attribution_summary_keeps_small_cohorts_descriptive(self):
         observed = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)
         base = {"horizon_key": "5m", "status": "matured", "observed_at": observed,

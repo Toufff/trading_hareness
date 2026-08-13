@@ -55,7 +55,11 @@ jq -e '
   .runtime_leases.background_loop_lease_seconds <= 600 and
   (.runtime_leases.background_loop_lease_seconds as $lease_seconds |
     ([.runtime_leases.background_loops[] |
-      (now - (.updated_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) <= ($lease_seconds * 0.75)
+      # A board-flow loop intentionally runs every 60 seconds while its lease
+      # is 120 seconds.  The opening gate must reject an expired lease, but a
+      # healthy loop can legitimately be near the lease boundary between
+      # renewals; a 75% cutoff therefore creates false negatives.
+      (now - (.updated_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)) <= ($lease_seconds + 5)
     ] | all)) and
   .provider_rate_limits.process_local_limiter == true and
   .provider_rate_limits.shared_database_reservation == true and
