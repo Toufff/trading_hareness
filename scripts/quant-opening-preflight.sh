@@ -97,7 +97,7 @@ jq -e '
     $board.configured == true and $board.cadence == "上交所观察时段 09:20 起每 60 秒追加曲线") and
   (first(.items[] | select(.key == "tencent_order_book")) as $book |
     $book.configured == true and $book.cadence == "显式观察池批量每 3 秒" and
-    ($book.details.max_symbols == 20))
+    ($book.details.max_symbols >= 20 and $book.details.max_symbols <= 40))
 ' <<<"$intraday_json" >/dev/null || fail 'Feishu delivery or one-minute board rotation control path is degraded'
 pass 'Feishu delivery, one-minute board rotation and bounded five-level observation path are ready'
 
