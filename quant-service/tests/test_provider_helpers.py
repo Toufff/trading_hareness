@@ -25,7 +25,7 @@ from app.intraday_outcomes import a_share_return_decomposition
 from app.board_curve_read_model import board_display_slots, intraday_board_flow_curves as read_intraday_board_flow_curves, latest_close_sector_review_report as read_latest_close_sector_review_report
 from app.research_catalog_read_model import data_quality_issues as read_data_quality_issues, factor_evaluations as read_factor_evaluations, latest_features as read_latest_features, strategy_experiments as read_strategy_experiments
 from app.intraday_outcome_read_model import latest_intraday_outcomes as read_latest_intraday_outcomes
-from app.strategy_health_read_model import latest_strategy_health
+from app.strategy_health_read_model import health_recommendation, latest_strategy_health
 from app.sector_read_model import market_sectors as read_market_sectors, sector_members as read_sector_members
 from app.intraday_evidence_read_model import latest_scan as read_latest_intraday_scan
 from app.market_result_read_model import market_snapshots as read_market_snapshots, tushare_raw as read_tushare_raw
@@ -883,6 +883,21 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(payload["trigger_frequency"]["drift_status"], "stable")
         self.assertEqual(payload["validation_gate"]["status"], "accumulating")
         self.assertEqual(payload["validation_gate"]["live_effect"], "none")
+        self.assertEqual(payload["governance_recommendation"]["action"], "keep_descriptive_only")
+        self.assertEqual(payload["governance_recommendation"]["live_effect"], "none")
+
+    def test_strategy_health_recommendation_freezes_only_on_stale_quotes(self):
+        stale = health_recommendation(
+            drift_status="stable", quote_status="stale_or_missing",
+            gate_status="ready_for_formal_validation", matured=200, trading_days=60,
+        )
+        self.assertEqual(stale["action"], "freeze_new_entries")
+        self.assertEqual(stale["live_effect"], "none")
+        review = health_recommendation(
+            drift_status="warning", quote_status="fresh",
+            gate_status="accumulating", matured=8, trading_days=3,
+        )
+        self.assertEqual(review["action"], "manual_review")
 
     def test_intraday_alert_text_keeps_strategy_evidence_and_disclaimer(self):
         text = intraday_alert_text(

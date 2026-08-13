@@ -18,6 +18,39 @@ def _age_seconds(value: Any, now: datetime) -> float | None:
     return max(0.0, (now - observed).total_seconds())
 
 
+def health_recommendation(*, drift_status: str, quote_status: str, gate_status: str,
+                          matured: int, trading_days: int) -> dict[str, Any]:
+    """Translate read-only health facts into an auditable, non-mutating action.
+
+    This is deliberately not a circuit breaker: live policy and promotion
+    registry remain the only authorities that can block a signal or apply an
+    analyst weight.  The returned action is for operators and the dashboard.
+    """
+    flags: list[str] = []
+    if quote_status != "fresh":
+        flags.append("quote_freshness_degraded")
+    if drift_status == "warning":
+        flags.append("trigger_frequency_drift")
+    if gate_status != "ready_for_formal_validation":
+        flags.append("validation_sample_insufficient")
+    if quote_status != "fresh":
+        action = "freeze_new_entries"
+    elif drift_status == "warning":
+        action = "manual_review"
+    elif gate_status != "ready_for_formal_validation":
+        action = "keep_descriptive_only"
+    else:
+        action = "monitor"
+    return {
+        "action": action,
+        "flags": flags,
+        "matured_signals": int(matured),
+        "trading_days": int(trading_days),
+        "live_effect": "none",
+        "notice": "仅生成运营建议；不会在线调参、晋级策略或改变分析师权重。",
+    }
+
+
 def latest_strategy_health(database: Any, *, now: datetime | None = None) -> dict[str, Any]:
     """Return bounded live-evidence health without any upstream call."""
     now = now or datetime.now(timezone.utc)
@@ -76,6 +109,10 @@ def latest_strategy_health(database: Any, *, now: datetime | None = None) -> dic
     quote_status = "fresh" if quote_age is not None and quote_age <= 90 else "stale_or_missing"
     rows = int((outcomes or {}).get("rows") or 0)
     positive = int((outcomes or {}).get("positive") or 0)
+    recommendation = health_recommendation(
+        drift_status=drift_status, quote_status=quote_status, gate_status=gate_status,
+        matured=matured, trading_days=trading_days,
+    )
     return {
         "status": "research_only",
         "observed_at": now,
@@ -103,8 +140,9 @@ def latest_strategy_health(database: Any, *, now: datetime | None = None) -> dic
             "status": gate_status, "required_matured_signals": 200,
             "required_trading_days": 60, "live_effect": "none",
         },
+        "governance_recommendation": recommendation,
         "notice": "健康/漂移只用于研究监控；不会在线调参、晋级或改变分析师权重。",
     }
 
 
-__all__ = ["latest_strategy_health"]
+__all__ = ["health_recommendation", "latest_strategy_health"]
