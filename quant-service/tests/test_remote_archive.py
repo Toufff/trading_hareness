@@ -8,6 +8,7 @@ from app.analyst_promotion import analyst_live_promotion
 from app.remote_archive import (classify_remote_text, evidence_fragments, explicitness, extract_topics, horizon_days,
                                 is_market_opinion, labels, normalize_topic_key, parse_optional_timestamp,
                                 report_topic_labels, text_hash, text_only_remote_message, text_only_remote_report)
+from app.analyst_observations import observation_action, observation_status
 
 
 class RemoteArchiveNormalizationTests(unittest.TestCase):
@@ -150,6 +151,14 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
                                                        "reason": "approved", "methodology_version": "x", "evidence": {}}), date(2026, 8, 12))
         self.assertTrue(approved["execution_eligible"])
         self.assertEqual(approved["weight"], 0.1)
+
+    def test_unified_observation_keeps_delayed_author_time_replay_only(self):
+        received = datetime(2026, 8, 12, 2, 0, tzinfo=timezone.utc)
+        stated = received - __import__("datetime").timedelta(minutes=6)
+        self.assertEqual(observation_action(1, {"direction_source": "explicit_action_positive"}), "watch")
+        self.assertEqual(observation_status(scope="stock", subject_key="000001.SZ", direction=1,
+                                            confidence=0.9, source_kind="message", stated_at=stated,
+                                            available_at=received), "replay_only")
 
 
 if __name__ == "__main__":

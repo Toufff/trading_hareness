@@ -17,6 +17,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.analyst_expert_research import rebuild_analyst_opinions
+from app.episode_lifecycle import ensure_signal_episode
+from app.analyst_observations import persist_extraction_run, persist_observations_for_evidence
 from app.main import DailyBar, app, db, executor_saturated_response, upsert_bar
 from app.runtime_executors import ExecutorSaturatedError
 
@@ -192,5 +194,99 @@ class AnalystOpinionMaterializationSqlIntegrationTests(unittest.TestCase):
             self.assertEqual(first["opinion_id"], second["opinion_id"])
             self.assertEqual(result["invalidated_outcomes"], 1)
             self.assertEqual(remaining, 0)
+        finally:
+            self._cleanup()
+
+
+@unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
+class Phase1LedgerSqlIntegrationTests(unittest.TestCase):
+    """Verify append-only analyst facts and episode continuity in PostgreSQL."""
+
+    analyst_id = "phase1-ledger-test"
+    report_id = "phase1-ledger-report"
+    symbol = "999997.SZ"
+
+    def _cleanup(self) -> None:
+        with db.transaction() as connection:
+            connection.execute("DELETE FROM quant.analyst_observations WHERE analyst_id=%s", (self.analyst_id,))
+            connection.execute("DELETE FROM quant.analyst_extraction_runs WHERE analyst_id=%s", (self.analyst_id,))
+            connection.execute("DELETE FROM quant.intraday_signal_episodes WHERE symbol=%s", (self.symbol,))
+            connection.execute("DELETE FROM quant.instruments WHERE symbol=%s", (self.symbol,))
+            connection.execute("DELETE FROM quant.remote_reports WHERE remote_report_id=%s", (self.report_id,))
+            connection.execute("DELETE FROM quant.remote_analysts WHERE remote_analyst_id=%s", (self.analyst_id,))
+
+    def test_episode_reuses_same_pulse_then_rearms_after_gap(self) -> None:
+        self._cleanup()
+        first_at = datetime(2099, 1, 2, 1, 0, tzinfo=timezone.utc)
+        try:
+            with db.transaction() as connection:
+                connection.execute("INSERT INTO quant.instruments(symbol,exchange,name) VALUES(%s,'SZ','Phase1')", (self.symbol,))
+                signal = {"symbol": self.symbol, "signal_key": f"{self.symbol}:watch:green_reclaim_research_v1",
+                          "signal_type": "watch", "conditions": {"setup": "green_reclaim_price_volume_vwap", "price": 10.0, "volume_ratio": 2.0}}
+                one = ensure_signal_episode(connection, signal, first_at, "confirmed")
+                two = ensure_signal_episode(connection, {**signal, "conditions": {**signal["conditions"], "price": 10.001}},
+                                             first_at + __import__("datetime").timedelta(minutes=1), "suppressed")
+                three = ensure_signal_episode(connection, signal, first_at + __import__("datetime").timedelta(minutes=7), "confirmed")
+                count = connection.execute("SELECT count(*)::int count FROM quant.intraday_signal_episodes WHERE symbol=%s", (self.symbol,)).fetchone()["count"]
+            self.assertEqual(one["episode_id"], two["episode_id"])
+            self.assertNotEqual(one["episode_id"], three["episode_id"])
+            self.assertEqual(count, 2)
+        finally:
+            self._cleanup()
+
+    def test_observation_is_append_only_for_same_source_key(self) -> None:
+        self._cleanup()
+        available_at = datetime(2099, 1, 2, 1, 0, tzinfo=timezone.utc)
+        try:
+            with db.transaction() as connection:
+                connection.execute("INSERT INTO quant.remote_analysts(remote_analyst_id,name) VALUES(%s,'Phase1')", (self.analyst_id,))
+                connection.execute(
+                    """INSERT INTO quant.remote_reports(remote_report_id,remote_analyst_id,report_date,title,remote_version,content_hash)
+                       VALUES(%s,%s,%s,'Phase1','v1,%s')""".replace("'v1,%s'", "'v1',%s"),
+                    (self.report_id, self.analyst_id, date(2099, 1, 2), "e" * 64),
+                )
+                evidence = connection.execute(
+                    """INSERT INTO quant.analyst_evidence(remote_report_id,evidence_key,evidence_type,body,content_sha256,available_at)
+                       VALUES(%s,'p1','paragraph','看好','c'::text,%s) RETURNING evidence_id""", (self.report_id, available_at),
+                ).fetchone()
+                connection.execute(
+                    """INSERT INTO quant.analyst_claims(evidence_id,remote_analyst_id,scope,subject_key,subject_label,direction,strength,horizon_days,
+                         extraction_confidence,explicitness,extractor_version,available_at)
+                       VALUES(%s,%s,'stock',%s,'Phase1',1,0.8,5,0.9,1.0,'p1',%s)""",
+                    (evidence["evidence_id"], self.analyst_id, self.symbol, available_at),
+                )
+                run = persist_extraction_run(connection, analyst_id=self.analyst_id, source_kind="report", source_id=self.report_id,
+                                              source_version="v1", content_hash="d" * 64)
+                first = persist_observations_for_evidence(connection, evidence_id=evidence["evidence_id"], extraction_run_id=run,
+                    analyst_id=self.analyst_id, source_kind="report", source_id=self.report_id, source_version="v1", content_hash="d" * 64,
+                    received_at=available_at, strategy_available_at=available_at, published_at=None, edited_at=None, stated_at=None, stated_precision=None)
+                second = persist_observations_for_evidence(connection, evidence_id=evidence["evidence_id"], extraction_run_id=run,
+                    analyst_id=self.analyst_id, source_kind="report", source_id=self.report_id, source_version="v1", content_hash="d" * 64,
+                    received_at=available_at, strategy_available_at=available_at, published_at=None, edited_at=None, stated_at=None, stated_precision=None)
+            self.assertEqual(first, 1)
+            self.assertEqual(second, 0)
+        finally:
+            with db.transaction() as connection:
+                connection.execute("DELETE FROM quant.analyst_claims WHERE remote_analyst_id=%s", (self.analyst_id,))
+                connection.execute("DELETE FROM quant.analyst_evidence WHERE remote_report_id=%s", (self.report_id,))
+            self._cleanup()
+
+    def test_extraction_runs_are_immutable_attempts(self) -> None:
+        self._cleanup()
+        try:
+            with db.transaction() as connection:
+                connection.execute("INSERT INTO quant.remote_analysts(remote_analyst_id,name) VALUES(%s,'Phase1')", (self.analyst_id,))
+                first = persist_extraction_run(connection, analyst_id=self.analyst_id, source_kind="message",
+                                                source_id="msg-run-1", source_version="v1", content_hash="h" * 64,
+                                                candidate_count=1, accepted_count=0)
+                second = persist_extraction_run(connection, analyst_id=self.analyst_id, source_kind="message",
+                                                 source_id="msg-run-1", source_version="v1", content_hash="h" * 64,
+                                                 candidate_count=2, accepted_count=1)
+                rows = connection.execute(
+                    "SELECT candidate_count,accepted_count FROM quant.analyst_extraction_runs "
+                    "WHERE source_id='msg-run-1' ORDER BY candidate_count"
+                ).fetchall()
+            self.assertNotEqual(first, second)
+            self.assertEqual([(row["candidate_count"], row["accepted_count"]) for row in rows], [(1, 0), (2, 1)])
         finally:
             self._cleanup()

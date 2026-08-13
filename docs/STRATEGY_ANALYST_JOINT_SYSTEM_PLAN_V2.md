@@ -543,8 +543,12 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 新增 `strategy_contracts.py`，统一 `SignalSpec`、`EvidenceRef`、`PolicyDecision` 和 `LabelSpec` 的可序列化契约，供实时、纸面和未来回放共用。
 - 新增版本化 Alembic 迁移 `20260814_0020_paper_research_ledger`：策略试验/契约、纸面决策、纸面订单、持仓、组合快照和风险事件均为 append-only/可审计实体。
 - 已确认的盘中信号只生成 `paper_decisions` 研究提案；明确写入 `paper_only`、`manual_review_required`，没有任何 broker client 或真实委托路径。
+- 新增 `intraday_signal_episodes` 生命周期：按策略族/方向/分钟级物化状态复用 episode，清除后才允许 rearm；每个 signal event 保存 episode、阶段和物化状态哈希。
+- 新增统一 `analyst_extraction_runs` / `analyst_observations` 事实链；报告与消息均记录 PIT 时间、来源版本、内容哈希和抽取版本，实时上下文只读取 `eligible`，晋级注册表默认 disabled/权重 0。
+- 新增预注册 triple-barrier 纸面标签、组合快照与 fail-closed 风险门禁；快照按分钟桶合并，watch 不产生虚拟仓位，所有结果保持 paper-only。
+- 前端已展示策略漏斗、episode、纸面账本、分析师观察、同步游标、晋级和策略合约状态；新增只读治理接口。
 - 新增 A 股纸面约束：100 股整手、T+1 可卖量、停牌、涨停买入/跌停卖出 non-fill 风险、最低佣金、卖出印花税、滑点和 triple-barrier 纯函数标签。
 - 新增只读接口 `/api/v1/paper/status`、`/api/v1/strategy/contracts`，并通过 Feishu adapter 映射到前端；前端新增“纸面策略账本”卡片。
-- 验收：quant-service 全量 251 项 Python 测试通过，前端 `vue-tsc --noEmit` 通过；健康接口为 `ok`，纸面状态 `live_orders=false`。
+- 验收：quant-service 全量 257 项 Python 测试通过，前端 `vue-tsc --noEmit` 通过；健康接口为 `ok`，纸面状态 `live_orders=false`，数据库迁移已到 `20260814_0026`。
 
-仍明确未完成：历史数据回填、分钟回放、60 日/200 信号验证、组合级实时仓位与回撤熔断、分析师 champion/challenger 晋级和 RL。它们继续保持 `research_only`，不会因本轮纸面账本落地而改变实时规则或阈值。
+仍明确未完成：历史数据回填（按要求暂停）、分钟回放、60 日/200 信号验证、真实纸面成交撮合、分析师 champion/challenger 晋级和 RL。它们继续保持 `research_only`，不会因本轮纸面账本落地而改变实时规则或阈值。

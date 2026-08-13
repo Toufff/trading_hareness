@@ -3,6 +3,7 @@ from decimal import Decimal
 import unittest
 
 from app.paper_execution import estimate_cost, paper_tradability, round_lot, triple_barrier_label
+from app.paper_portfolio import paper_risk_gate
 from app.strategy_contracts import EvidenceRef, SignalSpec, contract_payload
 
 
@@ -36,6 +37,11 @@ class PaperExecutionTests(unittest.TestCase):
         payload = contract_payload(signal)
         self.assertEqual(payload["symbol"], "000001.SZ")
         self.assertEqual(payload["evidence"][0]["observed_at"], observed.isoformat())
+
+    def test_watch_is_not_a_virtual_position(self):
+        decision = paper_risk_gate(signal_type="watch", symbol="000001.SZ")
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.target_weight, 0.0)
 
 
 if __name__ == "__main__":

@@ -134,7 +134,10 @@ from .intraday_outcomes import (
     a_share_return_decomposition,
 )
 from .contextual_policy_learning import contextual_bandit_policy_review
-from .paper_execution import paper_decision_payload, persist_paper_decision
+from .paper_execution import paper_decision_payload, persist_barrier_outcome, persist_paper_decision, triple_barrier_label
+from .paper_portfolio import paper_risk_gate, persist_portfolio_snapshot
+from .strategy_contracts import LabelSpec
+from .episode_lifecycle import clear_stale_signal_episodes, ensure_signal_episode
 from .runtime_resources import runtime_resource_status
 from .health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
 from .replay_readiness import historical_replay_readiness
@@ -851,23 +854,24 @@ def latest_tushare_row(connection: Any, api_name: str, symbol: str, as_of_date: 
 
 def analyst_feature(connection: Any, symbol: str, as_of_date: date) -> dict[str, Any]:
     rows = connection.execute(
-        """SELECT c.remote_analyst_id,c.direction,c.strength,c.extraction_confidence,c.horizon_days,
-                  left(e.body,220) evidence
-           FROM quant.analyst_claims c JOIN quant.analyst_evidence e ON e.evidence_id=c.evidence_id
-           WHERE c.scope='stock' AND c.subject_key=%s
-             AND (c.available_at AT TIME ZONE 'Asia/Shanghai')::date<=%s
-           ORDER BY c.available_at DESC,c.created_at DESC LIMIT 50""",
+        """SELECT o.analyst_id AS remote_analyst_id,o.direction,o.strength,o.confidence AS extraction_confidence,
+                  o.horizon_days,left(o.evidence_span,220) evidence
+           FROM quant.analyst_observations o
+           WHERE o.scope='stock' AND o.subject_key=%s AND o.status='eligible'
+             AND (o.strategy_available_at AT TIME ZONE 'Asia/Shanghai')::date<=%s
+           ORDER BY o.strategy_available_at DESC,o.created_at DESC LIMIT 50""",
         (symbol, as_of_date),
     ).fetchall()
     if not rows:
-        return {"consensus": 0.0, "claim_count": 0, "analyst_skill": 0.5, "evidence": []}
+        return {"consensus": 0.0, "claim_count": 0, "analyst_skill": 0.5, "evidence": [],
+                "status": "research_only_no_eligible_observation"}
     weighted = [number(row["direction"]) * number(row["strength"]) * number(row["extraction_confidence"]) for row in rows]
     weights = [number(row["strength"]) * number(row["extraction_confidence"]) for row in rows]
     return {
         "consensus": round(sum(weighted) / sum(weights), 5) if sum(weights) else 0.0,
         # Scorecards are strictly descriptive until the one promotion
         # registry explicitly approves an analyst delta.
-        "claim_count": len(rows), "analyst_skill": 0.5,
+        "claim_count": len(rows), "analyst_skill": 0.5, "status": "eligible_observation_context_only",
         "evidence": [{"analyst_id": row["remote_analyst_id"], "direction": row["direction"],
                       "strength": row["strength"], "horizon_days": row["horizon_days"], "evidence": row["evidence"]}
                      for row in rows[:8]],
@@ -1307,6 +1311,26 @@ def recompute_intraday_signal_outcomes(as_of_date: date | None = None) -> dict[s
                     entry_price, entry_observed_at = Decimal(entry_quote["price"]), entry_quote["observed_at"]
             if entry_price is None or direction is None:
                 continue
+            # A preregistered barrier is evaluated only over locally persisted
+            # quote observations. No provider call or historical backfill is
+            # performed by settlement.
+            barrier_spec = LabelSpec()
+            barrier_rows = connection.execute(
+                """SELECT observed_at,price FROM quant.intraday_quote_observations
+                     WHERE symbol=%s AND source_name='tencent_free' AND observed_at>%s AND observed_at<=%s AND price>0
+                     ORDER BY observed_at""",
+                (signal["symbol"], signal["observed_at"], min(cutoff, signal["observed_at"] + timedelta(minutes=barrier_spec.max_horizon_minutes))),
+            ).fetchall()
+            barrier_result = triple_barrier_label(
+                [dict(row) for row in barrier_rows], entry_price=entry_price,
+                entry_at=entry_observed_at, spec=barrier_spec,
+            )
+            persist_barrier_outcome(
+                connection, signal["signal_event_id"], spec=barrier_spec,
+                entry_at=entry_observed_at, entry_price=entry_price,
+                result=barrier_result,
+                source_status={"path": "local_tencent_free", "cutoff": cutoff.isoformat()},
+            )
             for horizon_key, minutes in INTRADAY_OUTCOME_HORIZONS:
                 exit_quote = connection.execute(
                     """SELECT observed_at,price FROM quant.intraday_quote_observations
@@ -5093,6 +5117,18 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             (scan_id, observed_at, Json(selected_symbols), Json(strategy_json_safe(source_status)),
             Json({"watched": len(watches)})),
         )
+        prior_snapshot = connection.execute(
+            "SELECT equity,payload FROM quant.paper_portfolio_snapshots ORDER BY as_of DESC LIMIT 1"
+        ).fetchone()
+        prior_payload = dict(prior_snapshot["payload"] or {}) if prior_snapshot else {}
+        # Cash is a paper configuration value only; zero is an honest empty
+        # portfolio, never an inferred account balance.
+        persist_portfolio_snapshot(
+            connection, as_of=observed_at, quotes=quotes,
+            cash=float(prior_payload.get("cash") or 0),
+            previous_equity=float(prior_snapshot["equity"]) if prior_snapshot and prior_snapshot["equity"] is not None else None,
+            previous_close_equity=float(prior_payload.get("previous_close_equity") or 0) or None,
+        )
         session_start = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).replace(
             hour=0, minute=0, second=0, microsecond=0,
         ).astimezone(timezone.utc)
@@ -5106,6 +5142,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
         order_book_by_symbol: dict[str, list[dict[str, Any]]] = {}
         for item in order_book_rows:
             order_book_by_symbol.setdefault(str(item["symbol"]), []).append(dict(item))
+        clear_stale_signal_episodes(connection, selected_symbols, observed_at)
         for watch in watches:
             symbol = str(watch["symbol"])
             quote = quotes.get(symbol)
@@ -5200,6 +5237,10 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     state = "confirming"
                 if state == "confirmed" and not policy["allow_confirmation"]:
                     state = "confirming"
+                episode = None if signal["signal_type"] == "data_issue" else ensure_signal_episode(
+                    connection, signal, observed_at, state,
+                )
+                signal["conditions"] = {**signal["conditions"], "episode": episode or {"state": "not_applicable"}}
                 evidence = {"tencent": quote, "tencent_order_book": order_book_feature, "tencent_minute": minute_feature,
                             "peer_context": peer_context, "tushare_rt_min": tushare_minutes.get(symbol),
                             "tushare_rt_k_fast": fast_confirmation,
@@ -5208,19 +5249,52 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     signal["signal_key"], signal["signal_type"], signal["conditions"], evidence, market_context,
                 )
                 event = connection.execute(
-                    """INSERT INTO quant.intraday_signal_events(scan_id,symbol,signal_key,signal_type,severity,state,score,observed_at,expires_at,conditions,evidence,risk_flags)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING signal_event_id""",
+                    """INSERT INTO quant.intraday_signal_events(
+                         scan_id,symbol,signal_key,signal_type,severity,state,score,observed_at,expires_at,
+                         conditions,evidence,risk_flags,episode_id,material_state_hash,stage)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING signal_event_id""",
                     (scan_id, symbol, signal["signal_key"], signal["signal_type"], signal["severity"], state,
                      signal["score"], observed_at, observed_at + INTRADAY_CONFIRMATION_WINDOW,
-                     Json(signal["conditions"]), Json(evidence), Json(signal["risk_flags"])),
+                     Json(signal["conditions"]), Json(evidence), Json(signal["risk_flags"]),
+                     episode["episode_id"] if episode else None,
+                     episode["material_state_hash"] if episode else None,
+                     episode["stage"] if episode else "data_issue"),
                 ).fetchone()
                 # Confirmed signals create an auditable paper proposal only.
                 # No broker client or live order path is reachable here.
                 if state == "confirmed":
-                    persist_paper_decision(
-                        connection, event["signal_event_id"],
-                        paper_decision_payload(signal, state, policy),
+                    paper_position = connection.execute(
+                        "SELECT symbol,quantity,sellable_quantity,average_cost FROM quant.paper_positions WHERE symbol=%s",
+                        (symbol,),
+                    ).fetchone()
+                    paper_snapshot = connection.execute(
+                        "SELECT drawdown,payload FROM quant.paper_portfolio_snapshots ORDER BY as_of DESC LIMIT 1",
+                    ).fetchone()
+                    snapshot_payload = dict(paper_snapshot["payload"] or {}) if paper_snapshot else {}
+                    if paper_snapshot:
+                        snapshot_payload["drawdown"] = paper_snapshot["drawdown"]
+                    portfolio_gate = paper_risk_gate(
+                        signal_type=signal["signal_type"], symbol=symbol,
+                        position=dict(paper_position) if paper_position else None,
+                        snapshot=snapshot_payload,
                     )
+                    paper_payload = paper_decision_payload(
+                        signal, state, policy,
+                        {"allowed": portfolio_gate.allowed, "target_weight": portfolio_gate.target_weight,
+                         "reasons": portfolio_gate.reasons, "risk_flags": portfolio_gate.risk_flags},
+                    )
+                    persist_paper_decision(
+                        connection, event["signal_event_id"], paper_payload,
+                    )
+                    if not portfolio_gate.allowed:
+                        connection.execute(
+                            """INSERT INTO quant.paper_risk_events(decision_id,symbol,event_type,severity,message,occurred_at,details)
+                               SELECT decision_id,%s,'portfolio_limit','block',%s,%s,%s::jsonb
+                                 FROM quant.paper_decisions
+                                WHERE signal_event_id=%s ORDER BY created_at DESC LIMIT 1""",
+                            (symbol, "; ".join(portfolio_gate.reasons), observed_at,
+                             Json({"risk_flags": list(portfolio_gate.risk_flags)}), event["signal_event_id"]),
+                        )
                 signals.append({"signal_event_id": event["signal_event_id"], "symbol": symbol, "state": state,
                                 **signal, "observed_at": observed_at, "quote": quote,
                                 "minute": (tushare_minutes.get(symbol) or {}).get("latest"),

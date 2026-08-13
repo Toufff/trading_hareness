@@ -13,6 +13,7 @@ from .analysis import EXTRACTOR_VERSION, direction_source, extract_signals
 from .analyst_trade_actions import sync_anqiang_message_trade_actions, sync_anqiang_trade_actions
 from .analyst_skill_models import rebuild_all_analyst_skill_profiles, rebuild_analyst_skill_profile
 from .analyst_expert_research import rebuild_analyst_research
+from .analyst_observations import persist_extraction_run, persist_observations_for_evidence
 from .database import Database
 
 
@@ -371,13 +372,26 @@ def import_remote_analyst_message(db: Database, message: dict[str, Any]) -> dict
         ).fetchone()
         claims = _materialize_message_claims(connection, evidence_id=evidence["evidence_id"], analyst_id=analyst_id,
                                              message_id=message_id, body=body, published_at=published_at, available_at=received_at)
+        extraction_run_id = persist_extraction_run(
+            connection, analyst_id=analyst_id, source_kind="message", source_id=message_id,
+            source_version=version, content_hash=content_hash, candidate_count=claims,
+            accepted_count=claims,
+        )
+        observations = persist_observations_for_evidence(
+            connection, evidence_id=evidence["evidence_id"], extraction_run_id=extraction_run_id,
+            analyst_id=analyst_id, source_kind="message", source_id=message_id,
+            source_version=version, content_hash=content_hash, received_at=received_at,
+            strategy_available_at=received_at, published_at=published_at, edited_at=edited_at,
+            stated_at=stated_at, stated_precision=stated_precision,
+        )
         trade_actions = sync_anqiang_message_trade_actions(connection, message, available_at=received_at, stated_at=stated_at)
         # A message is a first-class text-only evidence source.  Refresh the
         # analyst's descriptive skill card from the unified report+message
         # corpus; it still has no authority over live strategy weights.
         rebuild_analyst_skill_profile(connection, analyst_id, received_at.astimezone(ZoneInfo("Asia/Shanghai")).date())
     return {"status": "unchanged" if previous is not None else "updated", "remote_message_id": message_id, "evidence": 1,
-            "claims": claims, "trade_actions": trade_actions, "strategy_available_at": received_at.isoformat()}
+            "claims": claims, "observations": observations, "trade_actions": trade_actions,
+            "strategy_available_at": received_at.isoformat()}
 
 
 def import_remote_report(db: Database, report: dict[str, Any], force_reprocess: bool = False) -> dict[str, Any]:
@@ -455,6 +469,11 @@ def import_remote_report(db: Database, report: dict[str, Any], force_reprocess: 
                 (report_id,),
             )
             connection.execute("DELETE FROM quant.analyst_evidence WHERE remote_report_id=%s", (report_id,))
+        extraction_run_id = persist_extraction_run(
+            connection, analyst_id=analyst_id, source_kind="report", source_id=report_id,
+            source_version=version, content_hash=content_hash, status="completed",
+        )
+        observations_count = 0
         for evidence_key, body, location in evidence_fragments(report):
             row = connection.execute(
                 """INSERT INTO quant.analyst_evidence(remote_report_id,evidence_key,evidence_type,body,location,content_sha256,available_at)
@@ -534,8 +553,16 @@ def import_remote_report(db: Database, report: dict[str, Any], force_reprocess: 
                 ).fetchone()
                 persist_claim_revision(connection, analyst_id, "market", "CN_A_MARKET", direction, row["evidence_id"], claim["claim_id"])
                 claims_count += 1
+            observations_count += persist_observations_for_evidence(
+                connection, evidence_id=row["evidence_id"], extraction_run_id=extraction_run_id,
+                analyst_id=analyst_id, source_kind="report", source_id=report_id,
+                source_version=version, content_hash=content_hash, received_at=available_at,
+                strategy_available_at=available_at, published_at=published_at,
+                edited_at=parse_optional_timestamp(report.get("edited_at")), stated_at=None,
+                stated_precision=None,
+            )
     return {"status": "updated", "remote_report_id": report_id, "evidence": evidence_count, "claims": claims_count,
-            "trade_actions": trade_actions}
+            "observations": observations_count, "trade_actions": trade_actions}
 
 
 def reprocess_remote_reports(db: Database, limit: int = 100) -> dict[str, Any]:

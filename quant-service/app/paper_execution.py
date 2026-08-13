@@ -14,6 +14,8 @@ from typing import Any, Iterable
 
 from psycopg.types.json import Json
 
+from .episode_lifecycle import strategy_family
+
 
 LOT_SIZE = 100
 DEFAULT_COMMISSION_RATE = Decimal("0.0003")
@@ -100,26 +102,29 @@ def triple_barrier_label(path: Iterable[dict[str, Any]], *, entry_price: Decimal
             "return": float(close / entry - 1)}
 
 
-def paper_decision_payload(signal: dict[str, Any], state: str, policy: dict[str, Any]) -> dict[str, Any]:
+def paper_decision_payload(signal: dict[str, Any], state: str, policy: dict[str, Any],
+                           portfolio_gate: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build a research proposal; this function has no broker side effects."""
     signal_type = str(signal.get("signal_type") or "watch")
     direction = 1 if signal_type == "entry" else -1 if signal_type in {"reduce", "exit"} else 0
     key = str(signal.get("signal_key") or "unknown")
-    parts = key.split(":")
-    strategy_key = ":".join(parts[1:]) if len(parts) > 1 else key
+    strategy_key = strategy_family(key)
     policy_flags = tuple(str(item) for item in policy.get("risk_flags", ()))
+    portfolio_gate = portfolio_gate if isinstance(portfolio_gate, dict) else {}
+    blocked = state != "confirmed" or not policy.get("allow_confirmation") or not portfolio_gate.get("allowed", True)
     return {
         "strategy_key": strategy_key,
         "strategy_version": "live-research-contract-v1",
         "symbol": str(signal["symbol"]),
         "direction": direction,
-        "status": "proposed" if state == "confirmed" and policy.get("allow_confirmation") else "blocked",
+        "status": "proposed" if not blocked else "blocked",
         "decision_at": signal.get("observed_at"),
         "target_quantity": 0,
-        "target_weight": 0,
+        "target_weight": float(portfolio_gate.get("target_weight") or 0),
         "evidence": {"signal": signal.get("conditions", {}), "state": state,
                       "boundary": "paper_only_no_automatic_order"},
         "risk_flags": list(dict.fromkeys([*signal.get("risk_flags", ()), *policy_flags,
+                                           *portfolio_gate.get("risk_flags", ()),
                                            "paper_only", "manual_review_required"])),
     }
 
@@ -137,3 +142,26 @@ def persist_paper_decision(connection: Any, signal_event_id: Any, payload: dict[
          payload["target_weight"], Json(payload["evidence"]), Json(payload["risk_flags"])),
     ).fetchone()
     return row is not None
+
+
+def persist_barrier_outcome(connection: Any, signal_event_id: Any, *, spec: Any,
+                            entry_at: datetime, entry_price: Decimal | float,
+                            result: dict[str, Any], source_status: dict[str, Any] | None = None) -> None:
+    exit_at = result.get("exit_at") or result.get("last_at")
+    exit_price = result.get("exit_price") or result.get("last_price")
+    connection.execute(
+        """INSERT INTO quant.paper_barrier_outcomes(
+             signal_event_id,label_key,upper_return,lower_return,max_horizon_minutes,entry_observed_at,entry_price,
+             exit_observed_at,exit_price,label,raw_return,maximum_favorable_excursion,maximum_adverse_excursion,
+             status,source_status)
+           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT(signal_event_id) DO UPDATE SET exit_observed_at=EXCLUDED.exit_observed_at,
+             exit_price=EXCLUDED.exit_price,label=EXCLUDED.label,raw_return=EXCLUDED.raw_return,
+             maximum_favorable_excursion=EXCLUDED.maximum_favorable_excursion,
+             maximum_adverse_excursion=EXCLUDED.maximum_adverse_excursion,status=EXCLUDED.status,
+             source_status=EXCLUDED.source_status,calculated_at=now()""",
+        (signal_event_id, str(spec.label_key), spec.upper_return, spec.lower_return, spec.max_horizon_minutes,
+         entry_at, entry_price, exit_at, exit_price, result.get("label"), result.get("return"),
+         result.get("maximum_favorable_excursion"), result.get("maximum_adverse_excursion"),
+         str(result.get("status") or "unavailable"), Json(source_status or {})),
+    )
