@@ -84,7 +84,7 @@ from app.strategy_pattern_read_model import latest_strategy_pattern_mining as re
 from app.strategy_read_model import latest_post_close_strategy as read_latest_post_close_strategy
 from app.market_regimes import strategy_index_regime as pure_strategy_index_regime, strategy_market_regime as pure_strategy_market_regime, strategy_market_state as pure_strategy_market_state, strategy_rank as pure_strategy_rank
 from app.analyst_text_features import analyst_text_factor_summary as isolated_analyst_text_factor_summary
-from app.numeric_utils import intraday_number as pure_intraday_number
+from app.numeric_utils import decimal_or_none as pure_decimal_or_none, intraday_number as pure_intraday_number
 from app.post_close_structures import (
     daily_base_structure as pure_daily_base_structure,
     post_close_forming_structure as pure_post_close_forming_structure,
@@ -3549,6 +3549,13 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIs(main_module.intraday_number, pure_intraday_number)
         self.assertEqual(main_module.intraday_number("1,234.5%"), 1234.5)
         self.assertIsNone(main_module.intraday_number("—"))
+
+    def test_decimal_normalizer_runtime_uses_extracted_numeric_module(self):
+        import app.main as main_module
+
+        self.assertIs(main_module.decimal_or_none, pure_decimal_or_none)
+        self.assertEqual(main_module.decimal_or_none("1234.50"), Decimal("1234.50"))
+        self.assertIsNone(main_module.decimal_or_none(""))
 
     def test_intraday_attribution_summary_keeps_small_cohorts_descriptive(self):
         observed = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)

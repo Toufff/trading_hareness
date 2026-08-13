@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 
@@ -13,4 +14,9 @@ def intraday_number(value: Any) -> float | None:
         return None
 
 
-__all__ = ["intraday_number"]
+def decimal_or_none(value: Any) -> Decimal | None:
+    """Convert provider scalar values for PostgreSQL numeric fields."""
+    return Decimal(str(value)) if value is not None and value != "" else None
+
+
+__all__ = ["decimal_or_none", "intraday_number"]

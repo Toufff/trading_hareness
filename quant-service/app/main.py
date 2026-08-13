@@ -65,7 +65,7 @@ from .factor_lab import evaluate_factor, run_multi_factor_strategy
 from .analyst_promotion import analyst_live_promotion
 from .research_prices import adjusted_bars
 from .live_policy import live_policy_gate
-from .numeric_utils import intraday_number
+from .numeric_utils import decimal_or_none, intraday_number
 from .market_regimes import (
     strategy_index_regime as pure_strategy_index_regime,
     strategy_market_regime as pure_strategy_market_regime,
@@ -399,10 +399,6 @@ async def reserve_tushare_provider_request_slot(provider_key: str, rate_limit_pe
 
 def ths_taxonomy_key(index_type: str) -> str:
     return f"ths_index_{index_type.lower()}"
-
-
-def decimal_or_none(value: Any) -> Decimal | None:
-    return Decimal(str(value)) if value is not None and value != "" else None
 
 
 def _normalize_sync_symbols(values: list[str]) -> list[str]:
