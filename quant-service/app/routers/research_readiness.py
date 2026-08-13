@@ -7,6 +7,8 @@ from typing import Any, Callable
 from fastapi import APIRouter
 
 from ..request_models import HistoricalCoverageEstimateRequest
+from ..async_research_readiness_repository import frameworks, feature_readiness as async_feature_readiness
+from ..runtime_executors import run_database_blocking
 
 
 def training_roadmap_payload() -> dict[str, Any]:
@@ -29,37 +31,49 @@ def build_research_readiness_router(
     historical_estimate_fn: Callable[[HistoricalCoverageEstimateRequest], dict[str, Any]],
     feature_readiness_fn: Callable[[Any], dict[str, Any]],
     replay_readiness_fn: Callable[[Any], dict[str, Any]],
+    async_database: Any | None = None,
 ) -> APIRouter:
     """Build read-only routes with explicit repository/service dependencies."""
     router = APIRouter(tags=["research-readiness"])
 
     @router.get("/api/v1/research-frameworks")
-    def research_frameworks() -> dict[str, Any]:
-        with database.transaction() as connection:
-            rows = connection.execute(
-                "SELECT framework_key,label,role,integration_mode,status,license_note,prerequisites,metadata,updated_at FROM quant.research_frameworks ORDER BY framework_key"
-            ).fetchall()
-        return {"items": rows}
+    async def research_frameworks() -> dict[str, Any]:
+        if async_database:
+            return await frameworks(async_database)
+        def read_sync() -> dict[str, Any]:
+            with database.transaction() as connection:
+                rows = connection.execute(
+                    "SELECT framework_key,label,role,integration_mode,status,license_note,prerequisites,metadata,updated_at FROM quant.research_frameworks ORDER BY framework_key"
+                ).fetchall()
+            return {"items": rows}
+        return await run_database_blocking(read_sync)
 
     @router.get("/api/v1/training/roadmap")
     def training_roadmap() -> dict[str, Any]:
         return training_roadmap_payload()
 
     @router.get("/api/v1/data-readiness/history-estimate")
-    def historical_data_estimate(
+    async def historical_data_estimate(
         years: int = 3, include_minute: bool = False, universe_symbols: int | None = None,
     ) -> dict[str, Any]:
-        return historical_estimate_fn(HistoricalCoverageEstimateRequest(
+        request = HistoricalCoverageEstimateRequest(
             years=years, include_minute=include_minute, universe_symbols=universe_symbols,
-        ))
+        )
+        return await run_database_blocking(historical_estimate_fn, request, timeout_seconds=15) if async_database else historical_estimate_fn(request)
 
     @router.get("/api/v1/data-readiness/features")
-    def feature_readiness() -> dict[str, Any]:
-        with database.transaction() as connection:
-            return feature_readiness_fn(connection)
+    async def feature_readiness() -> dict[str, Any]:
+        if async_database:
+            return await async_feature_readiness(async_database)
+        return await run_database_blocking(lambda: _sync_feature_readiness(database, feature_readiness_fn))
 
     @router.get("/api/v1/data-readiness/replay")
-    def replay_readiness() -> dict[str, Any]:
-        return replay_readiness_fn(database)
+    async def replay_readiness() -> dict[str, Any]:
+        return await run_database_blocking(replay_readiness_fn, database, timeout_seconds=15) if async_database else replay_readiness_fn(database)
 
     return router
+
+
+def _sync_feature_readiness(database: Any, feature_readiness_fn: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
+    with database.transaction() as connection:
+        return feature_readiness_fn(connection)

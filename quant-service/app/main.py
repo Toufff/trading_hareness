@@ -8600,7 +8600,7 @@ async def executor_saturated_response(_: Request, __: ExecutorSaturatedError) ->
 
 app.include_router(build_provider_status_router(db, provider_status, free_provider_status))
 app.include_router(build_research_readiness_router(
-    db, historical_estimate_from_db, feature_readiness_state, historical_replay_readiness,
+    db, historical_estimate_from_db, feature_readiness_state, historical_replay_readiness, async_db,
 ))
 app.include_router(build_analyst_reads_router(db, remote_report_list_state, analyst_text_factor_summary))
 app.include_router(build_analyst_trade_action_reads_router(db, anqiang_trade_action_replay))
