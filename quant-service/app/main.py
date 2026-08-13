@@ -5747,15 +5747,24 @@ async def post_close_strategy_loop() -> None:
 
     The loop reads only persisted daily bars and exact board mappings.  If the
     upstream daily workflow did not create a complete cross-section, it keeps a
-    blocked audit row and retries in the small 18:55--19:10 window instead of
-    inventing a post-close candidate list.
+    blocked audit row and retries through the durable evening window instead of
+    inventing a post-close candidate list.  Completion is read back from the
+    run table, so a process restart cannot turn an older complete date into a
+    false completion for today.
     """
     completed: set[date] = set()
     while True:
         local = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
-        if (local.date() not in completed and await sse_calendar_open_async(local.date())
-                and time(18, 55) <= local.time() < time(19, 10)):
+        if (local.date() not in completed and post_close_strategy_retry_window(local)
+                and await sse_calendar_open_async(local.date())):
             try:
+                already_completed = await run_database_blocking(
+                    post_close_strategy_completed_for_date, local.date(), timeout_seconds=10,
+                )
+                if already_completed:
+                    completed.add(local.date())
+                    await asyncio.sleep(60)
+                    continue
                 result = await run_database_blocking(
                     run_post_close_strategy, PostCloseStrategyRequest(as_of_date=local.date()), timeout_seconds=60,
                 )
@@ -5764,6 +5773,28 @@ async def post_close_strategy_loop() -> None:
             except Exception as error:  # noqa: BLE001 - retry while the bounded post-close window remains open
                 print(f"post-close strategy run failed: {str(error)[:300]}")
         await asyncio.sleep(60)
+
+
+def post_close_strategy_retry_window(value: datetime) -> bool:
+    """Return whether the same-day post-close materialization may retry.
+
+    The result is deliberately Shanghai-clock based.  It is a local database
+    read, not a new historical provider pull, so allowing the later window
+    gives delayed daily ingestion time to finish without violating the data
+    boundary.
+    """
+    local = value.astimezone(ZoneInfo("Asia/Shanghai"))
+    return time(18, 55) <= local.time() < time(20, 30)
+
+
+def post_close_strategy_completed_for_date(as_of_date: date) -> bool:
+    """Check the persisted result for exactly one exchange date and model."""
+    run_key = hashlib.sha256(f"{POST_CLOSE_STRATEGY_MODEL_VERSION}:{as_of_date}".encode()).hexdigest()
+    with db.transaction() as connection:
+        row = connection.execute(
+            "SELECT status FROM quant.post_close_strategy_runs WHERE run_key=%s", (run_key,),
+        ).fetchone()
+    return bool(row and row["status"] in {"completed", "partial"})
 
 
 def build_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
