@@ -13,7 +13,7 @@ import os
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from .intraday_runtime_status import load_intraday_runtime_evidence
+from .intraday_runtime_status import load_intraday_runtime_evidence, load_intraday_runtime_evidence_async
 
 
 @dataclass(frozen=True)
@@ -37,19 +37,21 @@ class IntradayStatusDependencies:
     order_book_max_symbols: Callable[[], int]
 
 
-def intraday_services_status_payload(deps: IntradayStatusDependencies) -> dict[str, Any]:
+def intraday_services_status_payload(deps: IntradayStatusDependencies, *, evidence: dict[str, Any] | None = None,
+                                     session: tuple[bool, str] | None = None,
+                                     board_session: tuple[bool, str] | None = None) -> dict[str, Any]:
     """Build the local decision-path status payload without provider I/O."""
     observed_at = datetime.now(timezone.utc)
     local_now = observed_at.astimezone(ZoneInfo("Asia/Shanghai"))
-    session_active, session_reason = deps.realtime_market_session()
-    board_session_active, board_session_reason = deps.board_curve_session()
+    session_active, session_reason = session or deps.realtime_market_session()
+    board_session_active, board_session_reason = board_session or deps.board_curve_session()
     special_window = deps.high_frequency_window(local_now)
     normal_interval = deps.scan_interval_seconds()
     configs = {item["name"]: item for item in deps.provider_status()}
     super_configured = bool((configs.get("super_get") or {}).get("configured"))
     alert_configured = bool((os.getenv("QUANT_ALERT_WEBHOOK_URL") or "").strip()
                             and (os.getenv("QUANT_ALERT_WEBHOOK_TOKEN") or "").strip())
-    evidence = load_intraday_runtime_evidence(deps.database, deps.alert_max_attempts)
+    evidence = evidence or load_intraday_runtime_evidence(deps.database, deps.alert_max_attempts)
     health_rows = evidence["health_rows"]
     quote_rows = evidence["quote_rows"]
     raw_rows = evidence["raw_rows"]
@@ -252,4 +254,15 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies) -> dict[s
     }
 
 
-__all__ = ["IntradayStatusDependencies", "intraday_services_status_payload"]
+async def intraday_services_status_payload_async(
+    deps: IntradayStatusDependencies, async_database: Any,
+    realtime_session: Any, board_session: Any,
+) -> dict[str, Any]:
+    """Build the same status contract with native async local reads."""
+    evidence = await load_intraday_runtime_evidence_async(async_database, deps.alert_max_attempts)
+    session = await realtime_session()
+    board = await board_session()
+    return intraday_services_status_payload(deps, evidence=evidence, session=session, board_session=board)
+
+
+__all__ = ["IntradayStatusDependencies", "intraday_services_status_payload", "intraday_services_status_payload_async"]

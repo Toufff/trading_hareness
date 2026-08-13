@@ -173,7 +173,7 @@ from .runtime_resources import (
 )
 from .health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
 from .replay_readiness import historical_replay_readiness
-from .intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload
+from .intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload, intraday_services_status_payload_async as read_intraday_services_status_payload_async
 from .routers.provider_status import build_provider_status_router
 from .routers.research_readiness import build_research_readiness_router
 from .routers.intraday_status import build_intraday_status_router
@@ -8728,7 +8728,32 @@ def intraday_services_status_payload() -> dict[str, Any]:
     ))
 
 
-app.include_router(build_intraday_status_router(intraday_services_status_payload))
+def _intraday_status_dependencies() -> IntradayStatusDependencies:
+    return IntradayStatusDependencies(
+        database=db, alert_max_attempts=INTRADAY_ALERT_MAX_ATTEMPTS,
+        realtime_market_session=realtime_market_session, board_curve_session=intraday_board_curve_session,
+        high_frequency_window=intraday_high_frequency_window, scan_interval_seconds=intraday_scan_interval_seconds,
+        provider_status=provider_status, runtime_service_state=intraday_runtime_service_state,
+        json_safe=strategy_json_safe, super_get_fast_interval_seconds=intraday_super_get_fast_interval_seconds,
+        super_get_fast_max_in_flight=intraday_super_get_fast_max_in_flight,
+        fast_quote_retention_days=intraday_fast_quote_retention_days, board_curve_enabled=intraday_board_curve_enabled,
+        board_curve_retention_days=intraday_board_curve_retention_days,
+        board_rotation_retention_days=intraday_board_rotation_retention_days,
+        daily_summary_automation_enabled=daily_summary_automation_enabled,
+        order_book_max_symbols=intraday_order_book_max_symbols,
+    )
+
+
+async def intraday_services_status_payload_async() -> dict[str, Any]:
+    return await read_intraday_services_status_payload_async(
+        _intraday_status_dependencies(), async_db,
+        realtime_market_session_async, intraday_board_curve_session_async,
+    )
+
+
+app.include_router(build_intraday_status_router(
+    intraday_services_status_payload, intraday_services_status_payload_async,
+))
 
 
 @app.post("/api/v1/bootstrap")

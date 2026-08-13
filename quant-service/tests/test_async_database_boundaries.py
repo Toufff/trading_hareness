@@ -11,6 +11,7 @@ import unittest
 
 from app.runtime_executors import BlockingExecutorBoundary, ExecutorSaturatedError
 from app.async_strategy_read_repository import latest_strategy_decision
+from app.routers.intraday_status import build_intraday_status_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -238,3 +239,16 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["recommendations"][0]["symbol"], "600000.SH")
         self.assertEqual(len(database.connection.calls), 2)
         self.assertIn("recommendations", database.connection.calls[1][0])
+
+    async def test_intraday_status_router_prefers_async_projection_when_configured(self) -> None:
+        calls = []
+
+        async def async_status():
+            calls.append("async")
+            return {"summary": {"states": {"standby": 1}}}
+
+        router = build_intraday_status_router(lambda: {"summary": {"states": {"ready": 1}}}, async_status)
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/intraday/services/status")
+        payload = await endpoint()
+        self.assertEqual(payload["summary"]["states"], {"standby": 1})
+        self.assertEqual(calls, ["async"])
