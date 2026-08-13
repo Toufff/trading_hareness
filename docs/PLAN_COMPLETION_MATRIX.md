@@ -52,7 +52,7 @@
 
 ## 当前验收证据
 
-- quant-service：301 项 Python 测试通过（含事件/龙虎榜与涨停/连板模式异步只读路由回归）。
+- quant-service：303 项 Python 测试通过（含事件/龙虎榜与涨停/连板模式异步只读路由、容量/特征读取和分析师文本 PIT 回归）。
 - frontend：`vue-tsc --noEmit` 和 Vite build 通过；仅有 chunk size 优化警告。
 - 开盘预检：compose、数据库迁移 `20260815_0031`、10 条后台租约、共享 provider pacing、30s/10s/1s/60s 节奏、飞书和可恢复备份均通过。
 - 最近提交：`1628235`（盘中终态仓储与交易日历门禁拆分）；本轮未改变策略阈值或历史数据范围，已推送到 `origin/main`。

@@ -83,6 +83,7 @@ from app.replay_readiness import (
 from app.strategy_pattern_read_model import latest_strategy_pattern_mining as read_latest_strategy_pattern_mining
 from app.strategy_read_model import latest_post_close_strategy as read_latest_post_close_strategy
 from app.market_regimes import strategy_index_regime as pure_strategy_index_regime, strategy_market_regime as pure_strategy_market_regime, strategy_market_state as pure_strategy_market_state, strategy_rank as pure_strategy_rank
+from app.analyst_text_features import analyst_text_factor_summary as isolated_analyst_text_factor_summary
 from app.numeric_utils import intraday_number as pure_intraday_number
 from app.post_close_structures import (
     daily_base_structure as pure_daily_base_structure,
@@ -4045,6 +4046,32 @@ class ProviderHelperTests(unittest.TestCase):
         summary = technical_summary(rows)
         self.assertEqual(summary["status"], "ready")
         self.assertIsNotNone(summary["sma_20"])
+
+    def test_analyst_text_feature_projection_keeps_pit_window_and_empty_contract(self):
+        class Cursor:
+            def __init__(self):
+                self.calls = []
+                self.index = 0
+            def execute(self, sql, params):
+                self.calls.append((sql, params))
+                self.index += 1
+            def fetchall(self):
+                return []
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+        class Connection:
+            def __init__(self): self.cursor_instance = Cursor()
+            def cursor(self): return self.cursor_instance
+        connection = Connection()
+        payload = isolated_analyst_text_factor_summary(
+            connection, date(2026, 8, 13), classify_text=lambda _text: (1, 1.0, 1.0),
+            factor_version="test-v1", lookback_days=7,
+        )
+        self.assertEqual(payload["factor_version"], "test-v1")
+        self.assertEqual(payload["market"]["report_count"], 0)
+        self.assertEqual(payload["themes"], [])
+        self.assertIn("Asia/Shanghai", connection.cursor_instance.calls[0][0])
+        self.assertEqual(connection.cursor_instance.calls[0][1][0], date(2026, 8, 7))
 
 
 if __name__ == "__main__":

@@ -89,6 +89,14 @@ class _DirectAsyncRepositoryCallVisitor(ast.NodeVisitor):
 
 
 class AsyncDatabaseBoundaryTests(unittest.TestCase):
+    def test_async_read_repositories_use_native_database_parameter_names(self) -> None:
+        app_root = Path(__file__).resolve().parents[1] / "app"
+        for module_name in ("async_market_result_read_repository.py", "async_research_catalog_read_repository.py", "async_research_readiness_repository.py"):
+            tree = ast.parse((app_root / module_name).read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.AsyncFunctionDef):
+                    self.assertNotIn("db", [argument.arg for argument in node.args.args], module_name)
+
     def test_async_functions_do_not_open_sync_database_transactions_directly(self) -> None:
         app_root = Path(__file__).resolve().parents[1] / "app"
         hits: list[str] = []
