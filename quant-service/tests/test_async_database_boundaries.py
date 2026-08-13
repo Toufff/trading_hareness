@@ -11,6 +11,7 @@ import unittest
 
 from app.runtime_executors import BlockingExecutorBoundary, ExecutorSaturatedError
 from app.async_strategy_read_repository import latest_strategy_decision
+from app.async_strategy_health_repository import latest_strategy_health
 from app.routers.intraday_status import build_intraday_status_router
 
 
@@ -252,3 +253,37 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         payload = await endpoint()
         self.assertEqual(payload["summary"]["states"], {"standby": 1})
         self.assertEqual(calls, ["async"])
+
+    async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
+        class Result:
+            def __init__(self, row=None, rows=None):
+                self.row, self.rows = row, rows or []
+            async def fetchone(self):
+                return self.row
+            async def fetchall(self):
+                return self.rows
+
+        class Connection:
+            async def execute(self, sql, _params=()):
+                if "signal_key AS strategy_key" in sql:
+                    return Result(rows=[])
+                if "avg(raw_return)" in sql:
+                    return Result({"rows": 0, "positive": 0, "avg_return": None})
+                if "latest_quote_at" in sql:
+                    return Result({"latest_quote_at": None, "fresh_quote_rows": 0})
+                return Result({"signals_7d": 0, "signals_prior_7d": 0, "episodes_7d": 0,
+                                "matured_30m_7d": 0, "matured_days_7d": 0})
+
+        class Tx:
+            async def __aenter__(self):
+                return Connection()
+            async def __aexit__(self, *_args):
+                return False
+
+        class Database:
+            def transaction(self):
+                return Tx()
+
+        payload = await latest_strategy_health(Database())
+        self.assertEqual(payload["status"], "research_only")
+        self.assertEqual(payload["validation_gate"]["live_effect"], "none")

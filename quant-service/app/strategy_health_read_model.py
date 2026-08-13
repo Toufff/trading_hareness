@@ -96,6 +96,12 @@ def latest_strategy_health(database: Any, *, now: datetime | None = None) -> dic
                 GROUP BY strategy_key ORDER BY signals DESC,strategy_key"""
         ).fetchall()
 
+    return strategy_health_payload_from_rows(counts, outcomes, latest_quotes, strategy_rows, now=now)
+
+
+def strategy_health_payload_from_rows(counts: Any, outcomes: Any, latest_quotes: Any,
+                                      strategy_rows: list[Any], *, now: datetime) -> dict[str, Any]:
+    """Assemble the control-plane response from already-read local rows."""
     signals_7d = int((counts or {}).get("signals_7d") or 0)
     signals_prior = int((counts or {}).get("signals_prior_7d") or 0)
     drift_ratio = signals_7d / signals_prior if signals_prior else None
@@ -145,4 +151,4 @@ def latest_strategy_health(database: Any, *, now: datetime | None = None) -> dic
     }
 
 
-__all__ = ["health_recommendation", "latest_strategy_health"]
+__all__ = ["health_recommendation", "latest_strategy_health", "strategy_health_payload_from_rows"]
