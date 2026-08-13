@@ -2869,6 +2869,22 @@ def merge_intraday_watch_quote_prices(quotes: dict[str, dict[str, Any]], depth_r
     return quotes
 
 
+def merge_intraday_sina_watch_quotes(quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Use Sina only as a price fallback; do not invent Tencent flow fields."""
+    for row in rows:
+        symbol = str(row.get("ts_code") or "")
+        price, pre_close = intraday_number(row.get("close")), intraday_number(row.get("pre_close"))
+        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) or price is None or price <= 0:
+            continue
+        existing = dict(quotes.get(symbol) or {"symbol": symbol, "name": row.get("name"), "raw": {}})
+        existing["price"] = price
+        existing["pct_change"] = round((price / pre_close - 1) * 100, 5) if pre_close and pre_close > 0 else existing.get("pct_change")
+        existing["price_source"] = "sina_batched_watch_quote"
+        existing["raw"] = {**(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}), "sina_watch_quote": row}
+        quotes[symbol] = existing
+    return quotes
+
+
 def intraday_signal_material_change(signal: dict[str, Any], prior_alert: dict[str, Any] | None) -> bool:
     """Whether a persistent setup has earned a fresh human interruption.
 
@@ -5226,6 +5242,10 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
     except (httpx.HTTPError, FreeProviderError, ValueError):
         fresh_watch_rows = []
     try:
+        sina_watch_rows = await sina_quotes(selected_symbols) if not fresh_watch_rows else []
+    except (httpx.HTTPError, FreeProviderError, ValueError):
+        sina_watch_rows = []
+    try:
         # A fresh all-A snapshot is valuable for flow percentiles, but never
         # allowed to delay the explicit watchlist beyond this small budget.
         tencent_rows, all_a_snapshot_status = await asyncio.wait_for(asyncio.shield(all_a_task), timeout=2.0)
@@ -5240,6 +5260,7 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
     # One batch refreshes all explicit watches each scan while the slower all-A
     # cross-section is reused only for percentile normalization.
     merge_intraday_watch_quote_prices(quotes, fresh_watch_rows)
+    merge_intraday_sina_watch_quotes(quotes, sina_watch_rows)
     surge_features, surge_source = await intraday_tencent_surge_context(watches)
     peer_contexts: dict[str, dict[str, Any]] = {}
     for watch in watches:
@@ -5267,7 +5288,8 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
     board_cache_evidence = await intraday_board_cache_evidence(observed_at)
     source_status = {"tencent": {"status": "completed", "rows": len(tencent_rows), "matched": sum(symbol in quotes for symbol in selected_symbols),
                                          "all_a_snapshot": all_a_snapshot_status,
-                                         "fresh_watch_quote_rows": len(fresh_watch_rows)},
+                                         "fresh_watch_quote_rows": len(fresh_watch_rows),
+                                         "sina_watch_quote_rows": len(sina_watch_rows)},
                      "tencent_minute_context": surge_source,
                      "tushare_rt_min": {"requested": priority_symbols, "items": {symbol: item["source"] for symbol, item in tushare_minutes.items()}},
                      "tushare_rt_k_fast": {"status_counts": fast_status_counts, "max_age_seconds": 30,
