@@ -65,6 +65,7 @@ from .factor_lab import evaluate_factor, run_multi_factor_strategy
 from .analyst_promotion import analyst_live_promotion
 from .research_prices import adjusted_bars
 from .live_policy import live_policy_gate
+from .numeric_utils import intraday_number
 from .market_regimes import (
     strategy_index_regime as pure_strategy_index_regime,
     strategy_market_regime as pure_strategy_market_regime,
@@ -2733,13 +2734,6 @@ async def record_sector_member_sync_failure(taxonomy_key: str, sector_key: str, 
                 (taxonomy_key, sector_key, observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date(), detail, provider_key),
             )
     await run_database_blocking(persist)
-
-
-def intraday_number(value: Any) -> float | None:
-    try:
-        return float(str(value).replace(",", "").replace("%", "").strip())
-    except (TypeError, ValueError):
-        return None
 
 
 async def hydrate_eastmoney_live_board_members(kind: str, flows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:

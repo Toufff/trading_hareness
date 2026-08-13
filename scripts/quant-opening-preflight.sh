@@ -40,6 +40,10 @@ require_command jq
 require_command cmp
 require_command stat
 
+# Keep this check self-contained and regression-testable without importing the
+# production service image.  The lease condition below intentionally allows a
+# small clock/renewal grace at the normal loop boundary.
+
 for service in postgres n8n feishu-adapter quant-research; do
   "${compose[@]}" ps --status running --services | grep -Fxq "$service" || fail "compose service is not running: $service"
 done

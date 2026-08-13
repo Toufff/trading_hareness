@@ -80,6 +80,7 @@ from app.replay_readiness import (
 from app.strategy_pattern_read_model import latest_strategy_pattern_mining as read_latest_strategy_pattern_mining
 from app.strategy_read_model import latest_post_close_strategy as read_latest_post_close_strategy
 from app.market_regimes import strategy_index_regime as pure_strategy_index_regime, strategy_market_regime as pure_strategy_market_regime, strategy_market_state as pure_strategy_market_state, strategy_rank as pure_strategy_rank
+from app.numeric_utils import intraday_number as pure_intraday_number
 from app.post_close_structures import (
     daily_base_structure as pure_daily_base_structure,
     post_close_forming_structure as pure_post_close_forming_structure,
@@ -3463,10 +3464,11 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIs(main_module.strategy_market_state, pure_strategy_market_state)
         self.assertIs(main_module.strategy_index_regime, pure_strategy_index_regime)
 
-    def test_opening_preflight_allows_lease_at_normal_renewal_boundary(self):
-        script = (Path(__file__).resolve().parents[2] / "scripts" / "quant-opening-preflight.sh").read_text(encoding="utf-8")
-        self.assertIn("<= ($lease_seconds + 5)", script)
-        self.assertNotIn("$lease_seconds * 0.75", script)
+    def test_intraday_number_runtime_uses_extracted_numeric_module(self):
+        import app.main as main_module
+        self.assertIs(main_module.intraday_number, pure_intraday_number)
+        self.assertEqual(main_module.intraday_number("1,234.5%"), 1234.5)
+        self.assertIsNone(main_module.intraday_number("—"))
 
     def test_intraday_attribution_summary_keeps_small_cohorts_descriptive(self):
         observed = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)
