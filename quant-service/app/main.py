@@ -8623,7 +8623,7 @@ app.include_router(build_board_rotation_reads_router(db))
 app.include_router(build_board_stock_mining_reads_router(db))
 app.include_router(build_limit_linkage_mining_reads_router(db))
 app.include_router(build_board_curve_reads_router(db, intraday_board_curve_retention_days, intraday_board_rotation_retention_days))
-app.include_router(build_research_catalog_reads_router(db))
+app.include_router(build_research_catalog_reads_router(db, async_db))
 app.include_router(build_intraday_outcome_reads_router(
     db, intraday_point_in_time_market_context_batch, intraday_signal_attribution, intraday_outcome_attribution_summary,
 ))
@@ -8632,7 +8632,7 @@ app.include_router(build_intraday_evidence_reads_router(db, intraday_decision_ca
 app.include_router(build_market_result_reads_router(
     db, TUSHARE_CATALOG, current_data_coverage, feature_readiness_state,
     lambda: historical_estimate_from_db(HistoricalCoverageEstimateRequest(years=3, include_minute=False)),
-    offline_data_root, analyst_scorecard_readiness,
+    offline_data_root, analyst_scorecard_readiness, async_db,
 ))
 
 

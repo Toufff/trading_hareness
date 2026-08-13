@@ -12,6 +12,8 @@ import unittest
 from app.runtime_executors import BlockingExecutorBoundary, ExecutorSaturatedError
 from app.async_strategy_read_repository import latest_strategy_decision
 from app.async_strategy_health_repository import latest_strategy_health
+from app.async_research_catalog_read_repository import factor_registry as async_factor_registry
+from app.async_market_result_read_repository import market_snapshots as async_market_snapshots
 from app.routers.intraday_status import build_intraday_status_router
 from app.routers.event_reads import build_event_reads_router
 
@@ -196,6 +198,34 @@ class BlockingExecutorBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_catalog_and_market_result_projections_use_native_async_connection(self) -> None:
+        class Result:
+            def __init__(self, rows=None):
+                self.rows = rows or []
+            async def fetchall(self):
+                return self.rows
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+            async def execute(self, sql, _params=()):
+                self.calls.append(sql)
+                return Result([{"factor_key": "momentum"}] if "factor_registry" in sql else [{"status": "completed"}])
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        db = Database()
+        self.assertEqual((await async_factor_registry(db))["items"][0]["factor_key"], "momentum")
+        self.assertEqual((await async_market_snapshots(db, 10))["items"][0]["status"], "completed")
+        self.assertEqual(len(db.connection.calls), 2)
+
     async def test_strategy_projection_uses_native_async_execute_and_fetch(self) -> None:
         class Result:
             def __init__(self, row=None, rows=None):
