@@ -146,7 +146,15 @@ from .analyst_prompt_lab import (
 from .strategy_contracts import LabelSpec
 from .strategy_ablation import ablation_scores
 from .episode_lifecycle import clear_stale_signal_episodes, ensure_signal_episode
-from .runtime_resources import runtime_resource_status
+from .runtime_resources import (
+    DEFAULT_HOT_DATABASE_SOFT_BYTES,
+    DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+    bounded_storage_budget_bytes,
+    bounded_storage_ratio,
+    managed_directory_bytes,
+    research_storage_governance,
+    runtime_resource_status,
+)
 from .health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
 from .replay_readiness import historical_replay_readiness
 from .intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload
@@ -276,6 +284,53 @@ from .tushare_providers import (
 
 
 db = Database()
+_research_storage_admission_cache: tuple[float, dict[str, Any]] | None = None
+
+
+def local_research_storage_governance(database: Database = db) -> dict[str, Any]:
+    """Measure managed research storage without mutating or pruning evidence."""
+    with database.transaction() as connection:
+        row = connection.execute(
+            """SELECT coalesce(sum(pg_total_relation_size(c.oid)),0)::bigint AS bytes
+                 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                WHERE n.nspname='quant' AND c.relkind IN ('r','m','p')""",
+        ).fetchone()
+    data_dir = Path(os.getenv("QUANT_DATA_DIR", "/var/lib/quant"))
+    warning_ratio = bounded_storage_ratio(os.getenv("QUANT_RESEARCH_STORAGE_WARNING_RATIO"), 0.80)
+    return research_storage_governance(
+        hot_database_bytes=int((row or {}).get("bytes") or 0),
+        artifact_bytes=managed_directory_bytes(data_dir),
+        research_budget_bytes=bounded_storage_budget_bytes(
+            os.getenv("QUANT_RESEARCH_STORAGE_SOFT_BYTES"), DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+        ),
+        hot_database_budget_bytes=bounded_storage_budget_bytes(
+            os.getenv("QUANT_HOT_DATABASE_SOFT_BYTES"), DEFAULT_HOT_DATABASE_SOFT_BYTES,
+        ),
+        warning_ratio=warning_ratio,
+        stop_ratio=max(
+            bounded_storage_ratio(os.getenv("QUANT_RESEARCH_STORAGE_STOP_RATIO"), 0.90), warning_ratio,
+        ),
+    )
+
+
+async def nonessential_high_frequency_capture_allowed() -> tuple[bool, dict[str, Any]]:
+    """Use a cached, local-only budget decision to protect finite research storage.
+
+    This deliberately gates only optional raw evidence (depth, one-second
+    cross-checks and board curves).  Watchlist price evaluation, risk alerts,
+    outcomes and durable delivery keep running even at the stop watermark.
+    """
+    global _research_storage_admission_cache
+    now = asyncio.get_running_loop().time()
+    cached = _research_storage_admission_cache
+    if cached is None or now - cached[0] >= 60.0:
+        status = await run_database_blocking(local_research_storage_governance, timeout_seconds=10)
+        _research_storage_admission_cache = (now, status)
+    else:
+        status = cached[1]
+    return bool(status.get("allow_nonessential_high_frequency", True)), status
+
+
 # The one-click post-close refresh has several write-heavy, ordered phases.
 # A durable PostgreSQL lease serializes browser clicks and separate service
 # instances without relying on one process's asyncio state.
@@ -4907,6 +4962,11 @@ async def intraday_order_book_loop() -> None:
                         )
                 await run_database_blocking(prune)
                 pruned_on = local_date
+            allowed, storage = await nonessential_high_frequency_capture_allowed()
+            if not allowed:
+                print(f"intraday order-book capture skipped by storage guard: {storage.get('state')}")
+                await asyncio.sleep(intraday_order_book_interval_seconds())
+                continue
             result = await capture_intraday_order_book_snapshot([str(row["symbol"]) for row in rows])
             if result.get("status") == "failed":
                 print(f"intraday order-book capture failed: {result.get('reason', '')[:300]}")
@@ -5810,6 +5870,11 @@ async def intraday_board_flow_curve_loop() -> None:
                         )
                 await run_database_blocking(prune)
                 pruned_on = local.date()
+            allowed, storage = await nonessential_high_frequency_capture_allowed()
+            if not allowed:
+                print(f"intraday board curve skipped by storage guard: {storage.get('state')}")
+                completed_minute = minute
+                continue
             try:
                 await capture_intraday_board_flow_curve()
             except Exception as error:  # noqa: BLE001 - the next minute is an independent snapshot
@@ -6199,6 +6264,12 @@ async def intraday_super_get_fast_quote_loop() -> None:
                         )
                 await run_database_blocking(prune)
                 pruned_on = local.date()
+            allowed, _storage = await nonessential_high_frequency_capture_allowed()
+            if not allowed:
+                # Keep watched-price/risk scans alive; pause only this optional
+                # one-second raw cross-check until capacity recovers.
+                next_started_at = loop.time() + intraday_super_get_fast_interval_seconds()
+                continue
             if symbols and len(in_flight) < intraday_super_get_fast_max_in_flight():
                 symbol = symbols[cursor % len(symbols)]
                 cursor += 1
@@ -6238,6 +6309,12 @@ async def intraday_minute_profile_capture_loop() -> None:
             rows = await run_database_blocking(load_watches)
             symbols = [str(row["symbol"]) for row in sorted((dict(row) for row in rows), key=intraday_watch_priority_key)]
             if symbols:
+                allowed, storage = await nonessential_high_frequency_capture_allowed()
+                if not allowed:
+                    print(f"intraday minute-profile capture skipped by storage guard: {storage.get('state')}")
+                    completed.add(local.date())
+                    await asyncio.sleep(30)
+                    continue
                 try:
                     result = await capture_intraday_minute_sessions(symbols)
                     if result["status"] in {"completed", "partial"}:
@@ -8759,6 +8836,7 @@ def health() -> dict[str, Any]:
             board_curve_retention_days=intraday_board_curve_retention_days,
             board_rotation_retention_days=intraday_board_rotation_retention_days,
             set_db_pool_gauge=set_db_pool_gauge, set_open_circuit_gauge=provider_circuit_open.set,
+            research_storage_governance=local_research_storage_governance,
         ))
     except DatabaseUnavailableError as error:
         raise HTTPException(status_code=503, detail=f"database unavailable: {error}") from error

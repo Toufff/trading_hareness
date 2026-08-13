@@ -9,6 +9,8 @@ from typing import Any
 
 
 GIB = 1024 ** 3
+DEFAULT_RESEARCH_STORAGE_SOFT_BYTES = 20 * GIB
+DEFAULT_HOT_DATABASE_SOFT_BYTES = 8 * GIB
 
 
 def bounded_min_free_bytes(value: str | None) -> int:
@@ -23,6 +25,22 @@ def bounded_memory_ratio(value: str | None) -> float:
         return max(0.5, min(0.98, float(value or "0.85")))
     except ValueError:
         return 0.85
+
+
+def bounded_storage_budget_bytes(value: str | None, default: int) -> int:
+    """Read a bounded research-storage budget without accepting a tiny floor."""
+    try:
+        return max(GIB, min(200 * GIB, int(value or default)))
+    except ValueError:
+        return default
+
+
+def bounded_storage_ratio(value: str | None, default: float) -> float:
+    """Keep warning/stop watermarks ordered and operationally meaningful."""
+    try:
+        return max(0.5, min(0.98, float(value or default)))
+    except ValueError:
+        return default
 
 
 def cgroup_memory_limit_bytes() -> int | None:
@@ -53,6 +71,62 @@ def runtime_resource_state(*, disk_free_bytes: int, min_free_bytes: int,
         if rss_bytes / memory_limit_bytes >= max_memory_ratio:
             reasons.append("process RSS is above the configured cgroup memory ratio")
     return ("degraded" if reasons else "healthy"), reasons
+
+
+def research_storage_governance(*, hot_database_bytes: int, artifact_bytes: int,
+                                research_budget_bytes: int, hot_database_budget_bytes: int,
+                                warning_ratio: float, stop_ratio: float) -> dict[str, Any]:
+    """Classify bounded research storage without deleting any evidence.
+
+    The hot PostgreSQL schema is the scarce path for high-frequency evidence,
+    so it has its own smaller budget.  The aggregate budget includes it plus
+    locally managed research artifacts.  At the stop watermark callers must
+    skip *nonessential* high-frequency capture, never delete records or stop
+    watched-price/risk evaluation.
+    """
+    used_bytes = max(0, int(hot_database_bytes)) + max(0, int(artifact_bytes))
+    hot_ratio = hot_database_bytes / hot_database_budget_bytes if hot_database_budget_bytes else 1.0
+    total_ratio = used_bytes / research_budget_bytes if research_budget_bytes else 1.0
+    warning = hot_ratio >= warning_ratio or total_ratio >= warning_ratio
+    stop = hot_ratio >= stop_ratio or total_ratio >= stop_ratio
+    reasons: list[str] = []
+    if hot_ratio >= stop_ratio:
+        reasons.append("quant hot database reached the high-frequency stop watermark")
+    elif hot_ratio >= warning_ratio:
+        reasons.append("quant hot database reached the warning watermark")
+    if total_ratio >= stop_ratio:
+        reasons.append("managed research storage reached the stop watermark")
+    elif total_ratio >= warning_ratio:
+        reasons.append("managed research storage reached the warning watermark")
+    return {
+        "state": "stop_nonessential_high_frequency" if stop else "warning" if warning else "healthy",
+        "reasons": reasons,
+        "allow_nonessential_high_frequency": not stop,
+        "hot_database": {"used_bytes": int(hot_database_bytes), "budget_bytes": int(hot_database_budget_bytes),
+                         "ratio": round(hot_ratio, 6)},
+        "artifacts": {"used_bytes": int(artifact_bytes)},
+        "managed": {"used_bytes": used_bytes, "budget_bytes": int(research_budget_bytes),
+                    "ratio": round(total_ratio, 6), "warning_ratio": warning_ratio, "stop_ratio": stop_ratio},
+    }
+
+
+def managed_directory_bytes(storage_path: Path) -> int:
+    """Return regular-file bytes below the local research directory, bounded to local files.
+
+    Symlinks and disappearing files are ignored deliberately: this metric is
+    only a conservative admission control signal, not a filesystem inventory.
+    """
+    total = 0
+    try:
+        for entry in storage_path.rglob("*"):
+            try:
+                if entry.is_file() and not entry.is_symlink():
+                    total += entry.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return 0
+    return total
 
 
 def runtime_resource_status(storage_path: Path) -> dict[str, Any]:

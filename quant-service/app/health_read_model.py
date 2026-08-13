@@ -42,6 +42,7 @@ class HealthDependencies:
     board_rotation_retention_days: Callable[[], int]
     set_db_pool_gauge: Callable[[dict[str, Any]], None]
     set_open_circuit_gauge: Callable[[int], None]
+    research_storage_governance: Callable[[Any], dict[str, Any]] | None = None
 
 
 def health_payload(deps: HealthDependencies) -> dict[str, Any]:
@@ -72,9 +73,12 @@ def health_payload(deps: HealthDependencies) -> dict[str, Any]:
                  ORDER BY lease_key"""
         ).fetchall()
     deps.set_open_circuit_gauge(int(open_circuits))
+    resources = deps.resource_status(deps.data_directory())
+    if deps.research_storage_governance is not None:
+        resources["research_storage"] = deps.research_storage_governance(deps.database)
     return {
         "status": "ok", "service": "quant-research", "database_pool": pool,
-        "resources": deps.resource_status(deps.data_directory()),
+        "resources": resources,
         "runtime_leases": {
             "background_loop_lease_seconds": loop_lease_seconds,
             "post_close_refresh": {

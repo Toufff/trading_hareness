@@ -36,7 +36,14 @@ from app.health_read_model import DatabaseUnavailableError, HealthDependencies, 
 from app.alert_transport import post_feishu_alert_text
 from app.provider_observability import provider_health_item, provider_health_snapshot, provider_health_summary
 from app.runtime_tasks import observe_completed_task, supervise_leased_loop, supervise_loop
-from app.runtime_resources import bounded_memory_ratio, bounded_min_free_bytes, runtime_resource_state
+from app.runtime_resources import (
+    DEFAULT_HOT_DATABASE_SOFT_BYTES,
+    DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+    bounded_memory_ratio,
+    bounded_min_free_bytes,
+    research_storage_governance,
+    runtime_resource_state,
+)
 from app.runtime_executors import ExecutorSaturatedError
 from app.provider_catalog import tushare_catalog_snapshot
 from app.routers.provider_status import build_provider_status_router
@@ -2002,6 +2009,32 @@ class ProviderHelperTests(unittest.TestCase):
         )
         self.assertEqual(state, "degraded")
         self.assertEqual(len(reasons), 2)
+
+    def test_research_storage_governance_warns_then_stops_only_nonessential_capture(self):
+        healthy = research_storage_governance(
+            hot_database_bytes=1, artifact_bytes=1,
+            research_budget_bytes=DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+            hot_database_budget_bytes=DEFAULT_HOT_DATABASE_SOFT_BYTES,
+            warning_ratio=0.8, stop_ratio=0.9,
+        )
+        self.assertEqual(healthy["state"], "healthy")
+        self.assertTrue(healthy["allow_nonessential_high_frequency"])
+        warning = research_storage_governance(
+            hot_database_bytes=int(DEFAULT_HOT_DATABASE_SOFT_BYTES * 0.85), artifact_bytes=0,
+            research_budget_bytes=DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+            hot_database_budget_bytes=DEFAULT_HOT_DATABASE_SOFT_BYTES,
+            warning_ratio=0.8, stop_ratio=0.9,
+        )
+        self.assertEqual(warning["state"], "warning")
+        self.assertTrue(warning["allow_nonessential_high_frequency"])
+        stopped = research_storage_governance(
+            hot_database_bytes=int(DEFAULT_HOT_DATABASE_SOFT_BYTES * 0.95), artifact_bytes=0,
+            research_budget_bytes=DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+            hot_database_budget_bytes=DEFAULT_HOT_DATABASE_SOFT_BYTES,
+            warning_ratio=0.8, stop_ratio=0.9,
+        )
+        self.assertEqual(stopped["state"], "stop_nonessential_high_frequency")
+        self.assertFalse(stopped["allow_nonessential_high_frequency"])
 
     def test_provider_catalog_snapshot_keeps_get_and_sdk_observations_separate(self):
         connection = MagicMock()
