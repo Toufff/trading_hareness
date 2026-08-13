@@ -84,6 +84,7 @@ from .intraday_signal_rules import signal_rules as pure_intraday_signal_rules
 from .intraday_outcome_attribution import outcome_attribution_summary as pure_outcome_attribution_summary
 from .post_close_pattern_score import review_score as pure_pattern_review_score
 from .post_close_candidate_screen import screen_candidates as pure_post_close_screen_candidates
+from .post_close_pattern_candidates import select_candidates as pure_post_close_pattern_candidates
 from .tushare_normalization import normalize_rows as pure_normalize_tushare_rows
 from .market_regimes import (
     strategy_index_regime as pure_strategy_index_regime,
@@ -2863,162 +2864,47 @@ def merge_limit_pool_sources(ths_rows: list[dict[str, Any]], eastmoney_rows: lis
 
 def strategy_pattern_sample_candidates(as_of_date: date, max_symbols: int, per_cohort: int,
                                        focus_symbols: list[str] | None = None) -> dict[str, Any]:
-    """Select unique daily samples across boards, leaders, streaks and first boards."""
+    """Read persisted sample inputs, then delegate deterministic ranking."""
     stamp = as_of_date.strftime("%Y%m%d")
     with db.transaction() as connection:
         limit_rows = connection.execute(
             """SELECT DISTINCT ON(row_data->>'ts_code') row_data,provider_key,available_at
-                 FROM quant.tushare_raw_records
-                WHERE api_name='limit_list_ths' AND row_data->>'trade_date'=%s
-                  AND row_data->>'limit_type'='涨停池'
+                 FROM quant.tushare_raw_records WHERE api_name='limit_list_ths'
+                  AND row_data->>'trade_date'=%s AND row_data->>'limit_type'='涨停池'
                 ORDER BY row_data->>'ts_code',available_at DESC""", (stamp,),
         ).fetchall()
         step_rows = connection.execute(
             """SELECT DISTINCT ON(row_data->>'ts_code') row_data,available_at
-                 FROM quant.tushare_raw_records
-                WHERE api_name='limit_step' AND row_data->>'trade_date'=%s
+                 FROM quant.tushare_raw_records WHERE api_name='limit_step' AND row_data->>'trade_date'=%s
                 ORDER BY row_data->>'ts_code',available_at DESC""", (stamp,),
         ).fetchall()
         prior_date_row = connection.execute(
             """SELECT max(row_data->>'trade_date') prior_date FROM quant.tushare_raw_records
-                 WHERE api_name='limit_list_ths' AND row_data->>'trade_date'<%s""", (stamp,),
+                WHERE api_name='limit_list_ths' AND row_data->>'trade_date'<%s""", (stamp,),
         ).fetchone()
         prior_stamp = prior_date_row["prior_date"] if prior_date_row else None
         prior_limit_rows = connection.execute(
             """SELECT DISTINCT ON(row_data->>'ts_code') row_data
-                 FROM quant.tushare_raw_records
-                WHERE api_name='limit_list_ths' AND row_data->>'trade_date'=%s
-                  AND row_data->>'limit_type'='涨停池'
+                 FROM quant.tushare_raw_records WHERE api_name='limit_list_ths'
+                  AND row_data->>'trade_date'=%s AND row_data->>'limit_type'='涨停池'
                 ORDER BY row_data->>'ts_code',available_at DESC""", (prior_stamp,),
         ).fetchall() if prior_stamp else []
         symbols = [str(row["row_data"].get("ts_code") or "").upper() for row in limit_rows]
         daily_rows = connection.execute(
             """WITH ranked AS (
                    SELECT b.*,row_number() OVER(PARTITION BY b.symbol ORDER BY b.trading_date DESC) rn
-                     FROM quant.canonical_bars_daily b
-                    WHERE b.symbol=ANY(%s) AND b.trading_date<=%s AND b.trading_date>=%s
+                     FROM quant.canonical_bars_daily b WHERE b.symbol=ANY(%s)
+                      AND b.trading_date<=%s AND b.trading_date>=%s
                  ) SELECT * FROM ranked WHERE rn<=21 ORDER BY symbol,trading_date""",
             (symbols, as_of_date, as_of_date - timedelta(days=60)),
         ).fetchall() if symbols else []
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for row in daily_rows:
-        grouped.setdefault(str(row["symbol"]), []).append(dict(row))
-    steps = {str(row["row_data"].get("ts_code") or "").upper(): int(row["row_data"].get("nums") or 0) for row in step_rows}
-    prior_ranked = sorted(
-        (dict(row["row_data"] or {}) for row in prior_limit_rows),
-        key=lambda raw: (-limit_board_count(raw.get("tag")), -float(raw.get("limit_amount") or 0),
-                         -float(raw.get("turnover_rate") or 0), str(raw.get("ts_code") or "")),
+    return pure_post_close_pattern_candidates(
+        as_of_date, max_symbols, per_cohort, [dict(row) for row in limit_rows],
+        [dict(row["row_data"] or {}) for row in step_rows], [dict(row["row_data"] or {}) for row in prior_limit_rows],
+        [dict(row) for row in daily_rows], post_close_exact_board_context(as_of_date),
+        post_close_tushare_lhb_context(as_of_date), focus_symbols,
+        limit_daily_features=post_close_limit_daily_features, board_count=limit_board_count,
     )
-    prior_context = {
-        str(raw.get("ts_code") or "").upper(): {**raw, "preopen_limit_pool_rank": rank, "trade_date": prior_stamp}
-        for rank, raw in enumerate(prior_ranked, start=1)
-    }
-    boards = post_close_exact_board_context(as_of_date)
-    lhb_by_symbol = post_close_tushare_lhb_context(as_of_date)
-    items: list[dict[str, Any]] = []
-    for stored in limit_rows:
-        raw = dict(stored["row_data"] or {})
-        symbol = str(raw.get("ts_code") or "").upper()
-        if symbol not in grouped:
-            continue
-        daily = post_close_limit_daily_features(grouped[symbol])
-        board = boards.get(symbol) or {"exact_member_mapping": False}
-        lhb_context = lhb_by_symbol.get(symbol)
-        streak = max(steps.get(symbol, 0), limit_board_count(raw.get("tag")))
-        cohorts: list[str] = []
-        if daily.get("ground_to_sky_daily_shape"):
-            cohorts.append("ground_to_sky")
-        if float(board.get("net_amount") or 0) > 0:
-            cohorts.append("board_leader")
-        if streak >= 2:
-            cohorts.append("consecutive_limit")
-        if str(raw.get("tag") or "") == "首板":
-            cohorts.append("first_board")
-        if not cohorts:
-            continue
-        limit_amount = float(raw.get("limit_amount") or 0)
-        turnover = float(raw.get("turnover_rate") or 0)
-        selection_score = streak * 20 + float(board.get("flow_percentile") or 0) * 18 + min(18, math.log10(max(1, limit_amount)) * 2)
-        if daily.get("ground_to_sky_daily_shape"):
-            selection_score += 35
-        if lhb_context and float(lhb_context.get("institution_net_buy") or 0) > 0:
-            selection_score += 10
-        elif lhb_context and float(lhb_context.get("institution_net_buy") or 0) < 0:
-            selection_score -= 4
-        risk_flags = []
-        if str(raw.get("status") or "") == "一字板":
-            risk_flags.append("one_word_board_not_intraday_entry_sample")
-        if turnover >= 35:
-            risk_flags.append("extreme_turnover")
-        if daily.get("ground_to_sky_daily_shape"):
-            risk_flags.append("deep_reversal_extreme_volatility")
-        if not board.get("exact_member_mapping"):
-            risk_flags.append("no_exact_ths_concept_mapping")
-        elif float(board.get("net_amount") or 0) <= 0:
-            risk_flags.append("nonpositive_exact_board_flow")
-        if lhb_context and float(lhb_context.get("institution_net_buy") or 0) < 0:
-            risk_flags.append("lhb_institution_net_sell")
-        selection_reasons = []
-        if streak >= 2:
-            selection_reasons.append(f"{streak}板梯队")
-        if daily.get("ground_to_sky_daily_shape"):
-            selection_reasons.append("深水反转日线")
-        if float(daily.get("volume_multiple_5d") or 0) >= 1.5:
-            selection_reasons.append(f"5日量能{float(daily['volume_multiple_5d']):.2f}倍")
-        if float(board.get("net_amount") or 0) > 0:
-            selection_reasons.append(f"{board.get('label') or '精确板块'}资金为正")
-        if lhb_context:
-            direction = "净买" if float(lhb_context.get("institution_net_buy") or 0) > 0 else "净卖"
-            selection_reasons.append(f"龙虎榜机构{direction}{abs(float(lhb_context.get('institution_net_buy') or 0)) / 10_000:.0f}万")
-        items.append({"symbol": symbol, "name": raw.get("name"), "cohorts": cohorts, "board_context": board,
-                      "limit_context": {**raw, "provider_key": stored["provider_key"], "streak_count": streak,
-                                        "preopen_context": prior_context.get(symbol),
-                                        "preopen_limit_pool_rank": (prior_context.get(symbol) or {}).get("preopen_limit_pool_rank"),
-                                        "lhb_context": lhb_context, "selection_reasons": selection_reasons},
-                      "daily_features": daily, "selection_score": round(selection_score, 3), "risk_flags": risk_flags})
-
-    focus_set = set(focus_symbols or [])
-    for item in items:
-        if item["symbol"] in focus_set:
-            item["cohorts"].append("focus")
-        if int(item["limit_context"].get("preopen_limit_pool_rank") or 10_000) <= 10:
-            item["cohorts"].append("preopen_market_leader")
-
-    market_leaders = sorted(
-        (item for item in items if int(item["limit_context"].get("streak_count") or 0) >= 2),
-        key=lambda item: (-int(item["limit_context"].get("streak_count") or 0),
-                          -float(item["selection_score"]), item["symbol"]),
-    )
-    for market_rank, item in enumerate(market_leaders, start=1):
-        item["limit_context"]["limit_pool_market_rank"] = market_rank
-        if market_rank <= 10:
-            item["cohorts"].append("market_leader")
-
-    cohort_order = ("focus", "ground_to_sky", "preopen_market_leader", "market_leader", "board_leader", "consecutive_limit", "first_board")
-    selected: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for cohort in cohort_order:
-        ranked = sorted((item for item in items if cohort in item["cohorts"]),
-                        key=lambda item: (-float(item["selection_score"]), item["symbol"]))
-        for item in ranked[:per_cohort]:
-            if item["symbol"] in seen:
-                continue
-            selected.append({**item, "primary_cohort": cohort})
-            seen.add(item["symbol"])
-            if len(selected) >= max_symbols:
-                break
-        if len(selected) >= max_symbols:
-            break
-    if len(selected) < max_symbols:
-        for item in sorted(items, key=lambda item: (-float(item["selection_score"]), item["symbol"])):
-            if item["symbol"] not in seen:
-                selected.append({**item, "primary_cohort": item["cohorts"][0]})
-                seen.add(item["symbol"])
-            if len(selected) >= max_symbols:
-                break
-    return {"status": "completed" if selected else "blocked", "as_of_date": str(as_of_date),
-            "limit_pool_rows": len(limit_rows), "limit_step_rows": len(step_rows), "candidates": selected,
-            "cohort_counts": {cohort: sum(cohort in item["cohorts"] for item in items) for cohort in cohort_order}}
 
 
 def strategy_pattern_review_score(item: dict[str, Any], pattern: dict[str, Any], risk_flags: list[str]) -> dict[str, Any]:
