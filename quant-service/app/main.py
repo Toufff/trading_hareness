@@ -4854,9 +4854,9 @@ def persist_intraday_order_book_observations(observed_at: datetime, rows: list[d
     return stored
 
 
-def persist_intraday_order_book_failure(error: str) -> None:
+def persist_intraday_order_book_failure(error: str, latency_ms: int | None = None) -> None:
     with db.transaction() as connection:
-        record_provider_failure(connection, "tencent_free", "order_book_quote", error)
+        record_provider_failure(connection, "tencent_free", "order_book_quote", error, latency_ms)
 
 
 async def capture_intraday_order_book_snapshot(symbols: list[str]) -> dict[str, Any]:
@@ -4877,7 +4877,8 @@ async def capture_intraday_order_book_snapshot(symbols: list[str]) -> dict[str, 
                 "stored": stored, "observed_at": observed_at.isoformat(), "latency_ms": latency_ms,
                 "source": "tencent_single_quote_order_book"}
     except (httpx.HTTPError, FreeProviderError, ValueError, ExecutorSaturatedError, asyncio.TimeoutError) as error:
-        await run_database_blocking(persist_intraday_order_book_failure, str(error)[:300])
+        latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
+        await run_database_blocking(persist_intraday_order_book_failure, str(error)[:300], latency_ms)
         return {"status": "failed", "requested": len(selected), "stored": 0,
                 "reason": safe_error_detail(str(error), 300)}
 
@@ -7537,9 +7538,9 @@ def persist_public_quote_batch(provider: str, quotes: list[dict[str, Any]]) -> i
     return stored
 
 
-def persist_public_quote_failure(provider: str, detail: str) -> None:
+def persist_public_quote_failure(provider: str, detail: str, latency_ms: int | None = None) -> None:
     with db.transaction() as connection:
-        record_provider_failure(connection, provider, "realtime_quote", detail)
+        record_provider_failure(connection, provider, "realtime_quote", detail, latency_ms)
 
 
 def finalize_market_snapshot(
@@ -7640,6 +7641,7 @@ async def build_market_snapshot(request: MarketSnapshotRequest) -> dict[str, Any
         tencent_status = {"enabled": True, "status": "circuit_open", "notice": "provider health circuit is open; upstream request skipped"}
     elif request.refresh_public_quotes and market_snapshot_tencent_enabled() and len(symbols) >= minimum_universe:
         try:
+            started_at = asyncio.get_running_loop().time()
             raw_tencent_rows = await run_akshare_blocking(akshare_tencent_all_a_spot, timeout_seconds=25)
             stored = await run_database_blocking(
                 persist_public_quote_batch, "tencent_free", tencent_snapshot_quotes(raw_tencent_rows, exchange_date), timeout_seconds=60,
@@ -7655,7 +7657,8 @@ async def build_market_snapshot(request: MarketSnapshotRequest) -> dict[str, Any
         except (asyncio.TimeoutError, AkShareProviderError, ValueError) as error:
             detail = safe_error_detail(str(error), 500)
             tencent_status = {"enabled": True, "status": "failed", "error": detail}
-            await run_database_blocking(persist_public_quote_failure, "tencent_free", detail)
+            latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
+            await run_database_blocking(persist_public_quote_failure, "tencent_free", detail, latency_ms)
     elif request.refresh_public_quotes and not market_snapshot_tencent_enabled() and not public_quote_settings["enabled"]:
         refresh_skipped = "public_quote_batch_disabled"
     elif request.refresh_public_quotes and len(symbols) < minimum_universe:
@@ -7664,6 +7667,7 @@ async def build_market_snapshot(request: MarketSnapshotRequest) -> dict[str, Any
         refresh_skipped = "sina_realtime_quote_circuit_open"
     elif request.refresh_public_quotes and tencent_status["status"] != "completed" and public_quote_settings["enabled"]:
         try:
+            started_at = asyncio.get_running_loop().time()
             fetched = await sina_quotes(
                 symbols,
                 batch_size=int(public_quote_settings["batch_size"]),
@@ -7672,7 +7676,8 @@ async def build_market_snapshot(request: MarketSnapshotRequest) -> dict[str, Any
             await run_database_blocking(persist_public_quote_batch, "sina_free", fetched, timeout_seconds=60)
         except Exception as error:  # noqa: BLE001
             refresh_error = safe_error_detail(str(error), 500)
-            await run_database_blocking(persist_public_quote_failure, "sina_free", refresh_error)
+            latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
+            await run_database_blocking(persist_public_quote_failure, "sina_free", refresh_error, latency_ms)
     return await run_database_blocking(
         finalize_market_snapshot, request, observed_at, exchange_date, symbols, minimum_universe, minimum_coverage,
         licensed_providers, public_quote_settings, planned_public_requests, refresh_error, refresh_skipped, tencent_status,
@@ -8195,9 +8200,10 @@ def persist_stock_study_free_result(provider: str, capability: str, payload: Any
     return stored
 
 
-def persist_stock_study_free_failure(provider: str, capability: str, error: str) -> None:
+def persist_stock_study_free_failure(provider: str, capability: str, error: str,
+                                     latency_ms: int | None = None) -> None:
     with db.transaction() as connection:
-        record_provider_failure(connection, provider, capability, error)
+        record_provider_failure(connection, provider, capability, error, latency_ms)
 
 
 async def stock_study_free_fetch(label: str, provider: str, capability: str, fetcher: Any, symbol: str) -> tuple[dict[str, Any], Any]:
@@ -8209,6 +8215,7 @@ async def stock_study_free_fetch(label: str, provider: str, capability: str, fet
             [] if capability == "daily_bar" else None,
         )
     try:
+        started_at = asyncio.get_running_loop().time()
         # Accept a factory instead of an already-created coroutine.  This is
         # essential for circuit-open calls: no coroutine/HTTP request exists
         # until the durable provider-health check allows it.
@@ -8224,7 +8231,11 @@ async def stock_study_free_fetch(label: str, provider: str, capability: str, fet
         return ({"source": label, "api_name": capability, "provider": provider, "status": "blocked", "received": 0,
                  "stored": 0, "error": safe_error_detail(str(error), 300)}, [] if capability == "daily_bar" else None)
     except (asyncio.TimeoutError, httpx.HTTPError, FreeProviderError, AkShareProviderError, ValueError) as error:
-        await run_database_blocking(persist_stock_study_free_failure, provider, capability, str(error) or "public provider request timed out")
+        latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
+        await run_database_blocking(
+            persist_stock_study_free_failure, provider, capability,
+            str(error) or "public provider request timed out", latency_ms,
+        )
         return ({"source": label, "api_name": capability, "provider": provider, "status": "failed", "received": 0, "stored": 0,
                  "error": str(error) or "public provider request timed out"}, [] if capability == "daily_bar" else None)
 
@@ -8738,9 +8749,9 @@ def persist_akshare_probe_result(capability: str, rows: list[dict[str, Any]], sy
     return stored
 
 
-def persist_akshare_probe_failure(capability: str, error: str) -> None:
+def persist_akshare_probe_failure(capability: str, error: str, latency_ms: int | None = None) -> None:
     with db.transaction() as connection:
-        record_provider_failure(connection, "akshare", capability, error)
+        record_provider_failure(connection, "akshare", capability, error, latency_ms)
 
 
 async def akshare_probe(payload: AkShareProbeRequest) -> dict[str, Any]:
@@ -8755,6 +8766,7 @@ async def akshare_probe(payload: AkShareProbeRequest) -> dict[str, Any]:
                             "error": "provider health circuit is open; upstream request skipped"})
             return
         try:
+            started_at = asyncio.get_running_loop().time()
             rows = await run_akshare_blocking(action, timeout_seconds=45)
             stored = await run_database_blocking(persist_akshare_probe_result, capability, rows, payload.symbol, timeout_seconds=60)
             results.append({"source": label, "provider": "akshare", "capability": capability,
@@ -8764,7 +8776,8 @@ async def akshare_probe(payload: AkShareProbeRequest) -> dict[str, Any]:
                             "status": "blocked", "received": 0, "stored": 0,
                             "error": safe_error_detail(str(error), 300)})
         except (asyncio.TimeoutError, AkShareProviderError, ValueError) as error:
-            await run_database_blocking(persist_akshare_probe_failure, capability, str(error) or "AKShare request failed")
+            latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
+            await run_database_blocking(persist_akshare_probe_failure, capability, str(error) or "AKShare request failed", latency_ms)
             results.append({"source": label, "provider": "akshare", "capability": capability,
                             "status": "failed", "received": 0, "stored": 0, "error": str(error)[:300]})
 
