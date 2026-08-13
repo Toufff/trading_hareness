@@ -3646,11 +3646,24 @@ class ProviderHelperTests(unittest.TestCase):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
             {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10},
-            {"trade_constraints": {}}, {"market_state": "broad_risk_off", "board_snapshot_age_seconds": 30},
+            {"status": "completed", "trade_constraints": {}},
+            {"status": "available", "market_state": "broad_risk_off", "board_snapshot_age_seconds": 30},
             {"status": "confirmed"},
         )
         self.assertFalse(result["allow_confirmation"])
         self.assertIn("broad_risk_off_blocks_new_entry", result["reason_codes"])
+
+    def test_live_policy_gate_blocks_entry_when_daily_or_board_context_is_not_usable(self):
+        from app.live_policy import live_policy_gate
+        result = live_policy_gate(
+            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10},
+            {"status": "data_quality_blocked", "trade_constraints": {}},
+            {"status": "missing", "market_state": "unknown"},
+            {"status": "missing"},
+        )
+        self.assertFalse(result["allow_confirmation"])
+        self.assertIn("daily_factor_quality_blocked", result["reason_codes"])
+        self.assertIn("market_context_missing", result["reason_codes"])
 
     def test_live_policy_gate_keeps_unsellable_hard_stop_as_risk_alert(self):
         from app.live_policy import live_policy_gate
@@ -3660,6 +3673,19 @@ class ProviderHelperTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"], "risk_alert_only")
         self.assertTrue(result["allow_confirmation"])
+
+    def test_live_policy_gate_blocks_entry_on_paper_portfolio_limit(self):
+        from app.live_policy import live_policy_gate
+        result = live_policy_gate(
+            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10},
+            {"status": "completed", "trade_constraints": {}},
+            {"status": "available", "market_state": "mixed_or_neutral", "board_snapshot_age_seconds": 30},
+            {"status": "confirmed"},
+            {"allowed": False, "reasons": ["gross_exposure_limit"], "risk_flags": ["paper_gross_exposure_block"]},
+        )
+        self.assertFalse(result["allow_confirmation"])
+        self.assertIn("gross_exposure_limit", result["reason_codes"])
+        self.assertIn("policy_portfolio_risk", result["risk_flags"])
 
     def test_super_get_fast_loop_does_not_extend_circuit_on_local_skip(self):
         async def check() -> tuple[dict[str, object], AsyncMock]:

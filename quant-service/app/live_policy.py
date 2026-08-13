@@ -19,7 +19,8 @@ def _number(value: Any) -> float | None:
 
 def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[str, Any] | None,
                      daily_factors: dict[str, Any] | None, market_context: dict[str, Any] | None,
-                     fast_confirmation: dict[str, Any] | None) -> dict[str, Any]:
+                     fast_confirmation: dict[str, Any] | None,
+                     portfolio_risk: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return an explainable fail-closed policy decision.
 
     P0 intentionally only consumes inputs already in the live scan.  Position
@@ -34,6 +35,7 @@ def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[
     market_context = market_context if isinstance(market_context, dict) else {}
     factors = daily_factors if isinstance(daily_factors, dict) else {}
     fast = fast_confirmation if isinstance(fast_confirmation, dict) else {}
+    portfolio = portfolio_risk if isinstance(portfolio_risk, dict) else {}
     price = _number((quote or {}).get("price"))
     if price is None or price <= 0:
         reasons.append("missing_live_price")
@@ -41,6 +43,10 @@ def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[
 
     market_state = str(market_context.get("market_state") or "unknown")
     board_age = _number(market_context.get("board_snapshot_age_seconds"))
+    market_context_status = str(market_context.get("status") or "missing")
+    if entry_like and market_context_status != "available":
+        reasons.append("market_context_missing")
+        flags.append("policy_market_context_missing")
     if entry_like and market_state == "broad_risk_off":
         reasons.append("broad_risk_off_blocks_new_entry")
         flags.append("policy_market_risk_off")
@@ -65,6 +71,17 @@ def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[
         reasons.append("cross_source_price_mismatch")
         flags.append("policy_quote_mismatch")
 
+    daily_status = str(factors.get("status") or "missing")
+    if entry_like and daily_status in {"missing", "data_quality_blocked", "insufficient_history", "stale"}:
+        reasons.append("daily_factor_quality_blocked")
+        flags.append("policy_daily_factor_quality")
+    if entry_like and portfolio.get("allowed") is False:
+        portfolio_reasons = portfolio.get("reasons") if isinstance(portfolio.get("reasons"), list) else []
+        reasons.extend(str(item) for item in portfolio_reasons if str(item))
+        portfolio_flags = portfolio.get("risk_flags") if isinstance(portfolio.get("risk_flags"), list) else []
+        flags.extend(str(item) for item in portfolio_flags if str(item))
+        flags.append("policy_portfolio_risk")
+
     available_quantity = int(watch.get("available_quantity") or 0)
     risk_alert_only = bool(exit_like and watch.get("entry_price") is not None and available_quantity <= 0)
     if risk_alert_only:
@@ -81,6 +98,7 @@ def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[
         "market_state": market_state,
         "board_snapshot_age_seconds": board_age,
         "available_quantity": available_quantity,
+        "portfolio_risk": portfolio,
         "scope": "P0 market/data/static-tradability only; portfolio risk awaits paper ledger",
     }
 

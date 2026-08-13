@@ -98,11 +98,11 @@
 当前规则先生成信号，市场状态更多用于归因。P0 先在“规则命中”和“事件确认”之间增加不依赖持仓账本的纯函数 `policy_gate`：
 
 - 市场状态：广泛风险关闭时禁止新增 entry，但保留 watch 证据；
-- 数据新鲜度：任一关键输入 stale 时降级；
+- 数据新鲜度与质量：缺板块快照、缺复权完整的日线因子、stale/不可用上下文均不得确认新增 entry；
 - 静态可交易性：停牌、当时涨跌停状态和交易时段；
 - 微观结构：只作为确认/拒绝证据，不越权决定方向。
 
-T+1 可卖量、整手、单票/板块/策略暴露、日内亏损和组合回撤依赖真实的 paper position/portfolio ledger，随 Phase 2 一起实现。P0 的 `hard_stop` 若没有可卖量证据，只能写成风险告警，不能伪装成可执行卖出。
+T+1 可卖量、整手、单票/板块/策略暴露、日内亏损和组合回撤依赖真实的 paper position/portfolio ledger；当前已将已有纸面组合快照的暴露、日亏和回撤结果接入 `policy_gate`，但它仍是研究模拟，不是券商账户。P0 的 `hard_stop` 若没有可卖量证据，只能写成风险告警，不能伪装成可执行卖出。
 
 #### P0-S3 盘后任务“当天完成”语义不严（已完成）
 
@@ -388,7 +388,7 @@ market + analyst delta + risk overlay
 | ID | 任务 | 代码落点 | 验收 |
 |---|---|---|---|
 | P0-S1 | 统一复权研究价 | `main.py:970`、`factor_lab.py:40`、`post_close_structures.py` | 合成除权夹具与本地完整样本连续；缺因子跨日特征不参与确认，日内原价路径不受影响 |
-| P0-S2 | 实时市场/数据 `policy_gate` | `main.py:4123,4981`、market state | risk-off 禁 entry；stale/停牌不确认；无持仓证据的 hard stop 只作风险告警 |
+| P0-S2 | 实时市场/数据 `policy_gate` | `main.py:5304`、`app/live_policy.py`、market state、paper ledger | risk-off、缺板块/日线质量、停牌/涨跌停或纸面组合风险禁止新增 entry；无可卖量的 hard stop 只作风险告警 |
 | P0-S3 | 盘后同日语义 | `main.py:3139,5582`、`strategy_read_model.py` | T 不完整/T-1 完整时绝不标 T 完成；补齐后自动重跑 |
 | P0-A1 | 合并轻量调度并在服务侧差量限速 | `build-remote-archive-sync-workflow.mjs`、新 cursor migration | 真实 Bearer 同步成功；10 次连续空增量无 429；429 按 Retry-After 有界退避 |
 | P0-A2 | 修上海日与历史 as-of | `analyst_expert_research.py` | 00:01 北京边界正确；8/20 快照看不到 8/21 才成熟结果 |
@@ -570,7 +570,7 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 2026-08-14 runner 验收发现：外部 runner 默认约 60 秒空闲退出，旧 Code-node 同步流会出现 `No matching task offer ... type javascript`。现行同步流无 Code 节点，已从该运行时依赖中移除；`N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT=900` 仅保留给其他工作流。同步服务另有共享请求间隔、`Retry-After` 和 3 次有界重试；随后完成 10 次连续空增量成功验收。
 - 新增只读 `/api/v1/strategy/health` 与前端“策略健康与漂移”卡：展示 7 日触发频率、独立 episode、30 分钟成熟结果、报价新鲜度及 200 信号/60 交易日门禁。它只做研究监控，明确 `live_effect=none`，不会在线调参、晋级策略或改变分析师权重。
 - 新增研究存储水位治理：健康接口和前端显示量化热库/受管研究空间用量；默认热库 8 GiB、总研究空间 20 GiB，达到 80% 仅告警，达到 90% 暂停盘口、1 秒 `rt_k`、分钟档案和板块曲线等非必要高频原始证据。观察池报价、风险提醒、outbox 与结算不受影响，也不自动删除证据。当前实测热库约 1.32 GiB（16.5%），总受管空间约 1.32 GiB（6.6%），状态 healthy。
-- 验收：quant-service 全量 279 项 Python 测试通过，前端 typecheck/Vite build 通过；开盘预检通过，健康接口为 `ok`，迁移为 `20260815_0031`，Prompt Lab 当前无候选且 live_effect=none（符合历史不回填和数据门禁）。
+- 验收：quant-service 全量 281 项 Python 测试通过，前端 typecheck/Vite build 通过；开盘预检通过，健康接口为 `ok`，迁移为 `20260815_0031`，Prompt Lab 当前无候选且 live_effect=none（符合历史不回填和数据门禁）。
 - 2026-08-14 本地修复：盘中纯确认/去重策略已移至 `app/intraday_signal_policy.py`；历史事件 episode 链接修复后，3,460 条事件中非 `data_issue` 均有 episode，策略健康页显示 61 个独立 episode。该修复不访问 provider、不改变阈值。
 
 仍明确未完成：历史数据回填（按要求暂停）、分钟回放、60 日/200 信号验证、样本外分析师 champion/challenger 晋级和 RL。分析师同步的代码、部署和 10 轮真实链路验收已完成；正式交易时段继续观察供应商配额。纸面成交撮合仅支持“已有本地报价证据 + 人工确认”的研究模拟，不是经纪商成交。上述研究项目继续保持 `research_only`，不会改变实时规则或阈值。

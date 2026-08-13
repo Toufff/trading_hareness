@@ -5283,8 +5283,26 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 if fast_confirmation.get("status") == "mismatch":
                     signal["risk_flags"] = [*signal["risk_flags"], "realtime_cross_source_price_mismatch"]
             market_context = intraday_point_in_time_market_context(connection, observed_at, symbol) if generated_signals else {}
+            paper_position = connection.execute(
+                "SELECT symbol,quantity,sellable_quantity,average_cost FROM quant.paper_positions WHERE symbol=%s",
+                (symbol,),
+            ).fetchone() if generated_signals else None
+            paper_snapshot = connection.execute(
+                "SELECT drawdown,payload FROM quant.paper_portfolio_snapshots ORDER BY as_of DESC LIMIT 1",
+            ).fetchone() if generated_signals else None
+            snapshot_payload = dict(paper_snapshot["payload"] or {}) if paper_snapshot else {}
+            if paper_snapshot:
+                snapshot_payload["drawdown"] = paper_snapshot["drawdown"]
             for signal in generated_signals:
-                policy = live_policy_gate(signal, watch, quote, daily_factors, market_context, fast_confirmation)
+                portfolio_gate = paper_risk_gate(
+                    signal_type=signal["signal_type"], symbol=symbol,
+                    position=dict(paper_position) if paper_position else None,
+                    snapshot=snapshot_payload,
+                )
+                portfolio_risk = {"allowed": portfolio_gate.allowed, "target_weight": portfolio_gate.target_weight,
+                                  "reasons": list(portfolio_gate.reasons), "risk_flags": list(portfolio_gate.risk_flags)}
+                policy = live_policy_gate(signal, watch, quote, daily_factors, market_context, fast_confirmation,
+                                          portfolio_risk)
                 signal["conditions"] = {**signal["conditions"], "policy_gate": policy}
                 signal["risk_flags"] = [*signal["risk_flags"], *policy["risk_flags"]]
                 latest = connection.execute(
@@ -5340,21 +5358,6 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 # Confirmed signals create an auditable paper proposal only.
                 # No broker client or live order path is reachable here.
                 if state == "confirmed":
-                    paper_position = connection.execute(
-                        "SELECT symbol,quantity,sellable_quantity,average_cost FROM quant.paper_positions WHERE symbol=%s",
-                        (symbol,),
-                    ).fetchone()
-                    paper_snapshot = connection.execute(
-                        "SELECT drawdown,payload FROM quant.paper_portfolio_snapshots ORDER BY as_of DESC LIMIT 1",
-                    ).fetchone()
-                    snapshot_payload = dict(paper_snapshot["payload"] or {}) if paper_snapshot else {}
-                    if paper_snapshot:
-                        snapshot_payload["drawdown"] = paper_snapshot["drawdown"]
-                    portfolio_gate = paper_risk_gate(
-                        signal_type=signal["signal_type"], symbol=symbol,
-                        position=dict(paper_position) if paper_position else None,
-                        snapshot=snapshot_payload,
-                    )
                     paper_payload = paper_decision_payload(
                         signal, state, policy,
                         {"allowed": portfolio_gate.allowed, "target_weight": portfolio_gate.target_weight,
