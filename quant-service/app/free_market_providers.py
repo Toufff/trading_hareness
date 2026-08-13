@@ -339,18 +339,21 @@ def _tencent_order_book_row(symbol: str, values: list[str]) -> dict[str, Any] | 
     }
 
 
-async def tencent_order_book_quotes(symbols: list[str]) -> list[dict[str, Any]]:
+async def tencent_order_book_quotes(symbols: list[str], *, max_symbols: int = 20) -> list[dict[str, Any]]:
     """Fetch one bounded Tencent depth snapshot for explicit watchlist symbols.
 
     A single comma-separated request is used for the whole watchlist.  This is
-    deliberately capped at 20; it is a research observation stream, not a
+    The caller supplies a bounded cap. Depth collection uses 20; the live
+    watch quote path may use 40 in the same batched request. Neither is a
     general market-depth scraper.
     """
     normalized = list(dict.fromkeys(str(symbol).upper() for symbol in symbols if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(symbol).upper())))
     if not normalized:
         return []
-    if len(normalized) > 20:
-        raise ValueError("Tencent order-book observations are capped at 20 watchlist symbols")
+    if max_symbols < 1 or max_symbols > 80:
+        raise ValueError("Tencent quote batch cap must be between 1 and 80")
+    if len(normalized) > max_symbols:
+        raise ValueError(f"Tencent order-book observations are capped at {max_symbols} watchlist symbols")
     keys = [tencent_symbol(symbol) for symbol in normalized]
     by_key = {key.lower(): symbol for key, symbol in zip(keys, normalized, strict=True)}
     async with public_http_client() as client:

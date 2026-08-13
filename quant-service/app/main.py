@@ -2820,6 +2820,44 @@ INTRADAY_ALERT_MAX_ATTEMPTS = 3
 # This process-local cache contains only the current explicit watch/peer
 # basket.  Entries expire quickly and are pruned in ``intraday_tencent_surge_context``.
 _intraday_tencent_minute_cache: dict[str, tuple[float, dict[str, Any] | None, str | None]] = {}
+_intraday_all_a_snapshot_cache: tuple[float, list[dict[str, Any]]] | None = None
+INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS = 30.0
+
+
+async def intraday_all_a_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return one shared, explicitly aged all-A flow cross-section.
+
+    It is used only for cross-sectional flow percentiles. Per-watch prices
+    are refreshed independently from Tencent's batched quote path, so a slow
+    all-A response cannot make a 10-second watch scan pretend its price is
+    fresh. The age is carried into the scan evidence.
+    """
+    global _intraday_all_a_snapshot_cache
+    now = asyncio.get_running_loop().time()
+    cached = _intraday_all_a_snapshot_cache
+    if cached is not None and now - cached[0] <= INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS:
+        return cached[1], {"status": "cached", "age_seconds": round(now - cached[0], 3),
+                           "ttl_seconds": INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS}
+    rows = await run_akshare_blocking(akshare_tencent_all_a_spot, timeout_seconds=20)
+    _intraday_all_a_snapshot_cache = (now, rows)
+    return rows, {"status": "fresh", "age_seconds": 0.0, "ttl_seconds": INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS}
+
+
+def merge_intraday_watch_quote_prices(quotes: dict[str, dict[str, Any]], depth_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Overlay fresh batched watch prices without inventing flow fields."""
+    for row in depth_rows:
+        symbol = str(row.get("ts_code") or "")
+        price, pre_close = intraday_number(row.get("price")), intraday_number(row.get("pre_close"))
+        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) or price is None or price <= 0:
+            continue
+        existing = dict(quotes.get(symbol) or {"symbol": symbol, "name": row.get("name"), "raw": {}})
+        existing["price"] = price
+        existing["pct_change"] = round((price / pre_close - 1) * 100, 5) if pre_close and pre_close > 0 else existing.get("pct_change")
+        existing["price_source"] = "tencent_batched_watch_quote"
+        existing["price_observed_from_depth"] = True
+        existing["raw"] = {**(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}), "watch_quote": row}
+        quotes[symbol] = existing
+    return quotes
 
 
 def intraday_signal_material_change(signal: dict[str, Any], prior_alert: dict[str, Any] | None) -> bool:
@@ -5172,25 +5210,27 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
         return finish({"status": "completed", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(), "alerts": [],
                        "notice": "没有启用的观察/持仓标的；先通过 watchlists API 显式添加。"})
     quote_started_at = asyncio.get_running_loop().time()
+    all_a_task = asyncio.create_task(intraday_all_a_snapshot())
+    watch_quote_task = asyncio.create_task(tencent_order_book_quotes(selected_symbols, max_symbols=40))
     try:
-        tencent_rows = await run_akshare_blocking(akshare_tencent_all_a_spot, timeout_seconds=20)
+        fresh_watch_rows = await watch_quote_task
+    except (httpx.HTTPError, FreeProviderError, ValueError):
+        fresh_watch_rows = []
+    try:
+        # A fresh all-A snapshot is valuable for flow percentiles, but never
+        # allowed to delay the explicit watchlist beyond this small budget.
+        tencent_rows, all_a_snapshot_status = await asyncio.wait_for(asyncio.shield(all_a_task), timeout=2.0)
     except ExecutorSaturatedError as error:
         detail = safe_error_detail(str(error), 300)
-        await run_database_blocking(
-            persist_intraday_scan_terminal, scan_id, observed_at, "blocked", selected_symbols,
-            {"tencent": "local_capacity", "error": detail}, {"watched": len(watches)},
-        )
-        return finish({"status": "blocked", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(),
-                       "reason": detail, "alerts": []})
+        tencent_rows, all_a_snapshot_status = [], {"status": "unavailable", "error": detail}
     except (asyncio.TimeoutError, AkShareProviderError, ValueError) as error:
         detail = safe_error_detail(str(error), 300)
-        await run_database_blocking(
-            persist_intraday_scan_terminal, scan_id, observed_at, "failed", selected_symbols,
-            {"tencent": "failed", "error": detail}, {"watched": len(watches)}, detail,
-        )
-        return finish({"status": "failed", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(), "reason": "Tencent live quote unavailable", "alerts": []})
+        tencent_rows, all_a_snapshot_status = [], {"status": "unavailable", "error": detail}
     quotes = {item["symbol"]: item for row in tencent_rows if (item := intraday_quote_from_tencent(row)) is not None}
     annotate_intraday_flow_percentiles(quotes)
+    # One batch refreshes all explicit watches each scan while the slower all-A
+    # cross-section is reused only for percentile normalization.
+    merge_intraday_watch_quote_prices(quotes, fresh_watch_rows)
     surge_features, surge_source = await intraday_tencent_surge_context(watches)
     peer_contexts: dict[str, dict[str, Any]] = {}
     for watch in watches:
@@ -5216,7 +5256,9 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
         status = str(item.get("status") or "unknown")
         fast_status_counts[status] = fast_status_counts.get(status, 0) + 1
     board_cache_evidence = await intraday_board_cache_evidence(observed_at)
-    source_status = {"tencent": {"status": "completed", "rows": len(tencent_rows), "matched": sum(symbol in quotes for symbol in selected_symbols)},
+    source_status = {"tencent": {"status": "completed", "rows": len(tencent_rows), "matched": sum(symbol in quotes for symbol in selected_symbols),
+                                         "all_a_snapshot": all_a_snapshot_status,
+                                         "fresh_watch_quote_rows": len(fresh_watch_rows)},
                      "tencent_minute_context": surge_source,
                      "tushare_rt_min": {"requested": priority_symbols, "items": {symbol: item["source"] for symbol, item in tushare_minutes.items()}},
                      "tushare_rt_k_fast": {"status_counts": fast_status_counts, "max_age_seconds": 30,
