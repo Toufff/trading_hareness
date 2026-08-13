@@ -535,3 +535,16 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 结果包含 A 股可交易性和净成本，不把观察价格当成交价格；
 - 自动演化只生成 challenger，不直接改 champion；
 - 数据不足时系统清楚地说“不知道”，而不是用更复杂的模型掩盖样本不足。
+
+## 13. 2026-08-13 执行记录（不含历史回填）
+
+本轮在不拉取历史行情、不连接券商的前提下完成了第一批可运行闭环：
+
+- 新增 `strategy_contracts.py`，统一 `SignalSpec`、`EvidenceRef`、`PolicyDecision` 和 `LabelSpec` 的可序列化契约，供实时、纸面和未来回放共用。
+- 新增版本化 Alembic 迁移 `20260814_0020_paper_research_ledger`：策略试验/契约、纸面决策、纸面订单、持仓、组合快照和风险事件均为 append-only/可审计实体。
+- 已确认的盘中信号只生成 `paper_decisions` 研究提案；明确写入 `paper_only`、`manual_review_required`，没有任何 broker client 或真实委托路径。
+- 新增 A 股纸面约束：100 股整手、T+1 可卖量、停牌、涨停买入/跌停卖出 non-fill 风险、最低佣金、卖出印花税、滑点和 triple-barrier 纯函数标签。
+- 新增只读接口 `/api/v1/paper/status`、`/api/v1/strategy/contracts`，并通过 Feishu adapter 映射到前端；前端新增“纸面策略账本”卡片。
+- 验收：quant-service 全量 251 项 Python 测试通过，前端 `vue-tsc --noEmit` 通过；健康接口为 `ok`，纸面状态 `live_orders=false`。
+
+仍明确未完成：历史数据回填、分钟回放、60 日/200 信号验证、组合级实时仓位与回撤熔断、分析师 champion/challenger 晋级和 RL。它们继续保持 `research_only`，不会因本轮纸面账本落地而改变实时规则或阈值。

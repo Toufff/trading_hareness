@@ -134,6 +134,7 @@ from .intraday_outcomes import (
     a_share_return_decomposition,
 )
 from .contextual_policy_learning import contextual_bandit_policy_review
+from .paper_execution import paper_decision_payload, persist_paper_decision
 from .runtime_resources import runtime_resource_status
 from .health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
 from .replay_readiness import historical_replay_readiness
@@ -147,6 +148,7 @@ from .routers.analyst_skill_reads import build_analyst_skill_reads_router
 from .routers.analyst_research_reads import build_analyst_research_reads_router
 from .routers.event_reads import build_event_reads_router
 from .routers.strategy_reads import build_strategy_reads_router
+from .routers.paper_reads import build_paper_reads_router
 from .routers.strategy_pattern_reads import build_strategy_pattern_reads_router
 from .routers.board_rotation_reads import build_board_rotation_reads_router
 from .routers.board_stock_mining_reads import build_board_stock_mining_reads_router
@@ -5212,6 +5214,13 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                      signal["score"], observed_at, observed_at + INTRADAY_CONFIRMATION_WINDOW,
                      Json(signal["conditions"]), Json(evidence), Json(signal["risk_flags"])),
                 ).fetchone()
+                # Confirmed signals create an auditable paper proposal only.
+                # No broker client or live order path is reachable here.
+                if state == "confirmed":
+                    persist_paper_decision(
+                        connection, event["signal_event_id"],
+                        paper_decision_payload(signal, state, policy),
+                    )
                 signals.append({"signal_event_id": event["signal_event_id"], "symbol": symbol, "state": state,
                                 **signal, "observed_at": observed_at, "quote": quote,
                                 "minute": (tushare_minutes.get(symbol) or {}).get("latest"),
@@ -8520,6 +8529,7 @@ app.include_router(build_analyst_skill_reads_router(db, analyst_skill_profiles))
 app.include_router(build_analyst_research_reads_router(db, analyst_research_status))
 app.include_router(build_event_reads_router(db))
 app.include_router(build_strategy_reads_router(db, STRATEGY_DECISION_MODEL_VERSION))
+app.include_router(build_paper_reads_router(db))
 app.include_router(build_strategy_pattern_reads_router(
     db, merge_limit_pool_sources, limit_board_count, strategy_json_safe,
     post_close_limit_daily_features, post_close_exact_board_context, post_close_tushare_lhb_context,

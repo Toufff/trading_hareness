@@ -740,6 +740,8 @@ const researchPaths = new Map([
 	['/api/research/strategy/post-close/latest', '/api/v1/strategy/post-close/latest'],
 	['/api/research/strategy/pattern-mining/latest', '/api/v1/strategy/pattern-mining/latest'],
 	['/api/research/intraday/outcomes/latest', '/api/v1/intraday/outcomes/latest'],
+	['/api/research/paper/status', '/api/v1/paper/status'],
+	['/api/research/strategy/contracts', '/api/v1/strategy/contracts'],
 	['/api/research/intraday/services/status', '/api/v1/intraday/services/status'],
 	['/api/research/analyst-scorecards', '/api/v1/analyst-scorecards'],
 	['/api/research/events/announcements', '/api/v1/events/announcements'],
