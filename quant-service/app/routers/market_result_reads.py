@@ -9,6 +9,7 @@ from fastapi import APIRouter
 
 from .. import market_result_read_model as read_model
 from .. import async_market_result_read_repository as async_read_model
+from ..runtime_executors import run_database_blocking
 
 
 def build_market_result_reads_router(
@@ -28,7 +29,10 @@ def build_market_result_reads_router(
         return await async_read_model.tushare_raw(async_database, api_name, provider, limit, offset, catalog) if async_database else read_model.tushare_raw(database, api_name, provider, limit, offset, catalog)
 
     @router.get("/api/v1/research/overview")
-    def overview() -> dict[str, Any]:
+    async def overview() -> dict[str, Any]:
+        if async_database:
+            history_estimate = await run_database_blocking(history_estimate_fn, timeout_seconds=15)
+            return await async_read_model.research_overview(async_database, history_estimate)
         return read_model.research_overview(
             database, current_data_coverage_fn=current_data_coverage_fn, feature_readiness_fn=feature_readiness_fn,
             history_estimate_fn=history_estimate_fn,
@@ -43,7 +47,9 @@ def build_market_result_reads_router(
         return await async_read_model.offline_minute_imports(async_database, limit, str(offline_root_fn())) if async_database else read_model.offline_minute_imports(database, limit, str(offline_root_fn()))
 
     @router.get("/api/v1/analyst-scorecards")
-    def scorecards(limit: int = 200) -> dict[str, Any]:
+    async def scorecards(limit: int = 200) -> dict[str, Any]:
+        if async_database:
+            return await async_read_model.analyst_scorecards(async_database, limit)
         return read_model.analyst_scorecards(database, limit, analyst_scorecard_readiness_fn)
 
     @router.get("/api/v1/recommendations/latest")

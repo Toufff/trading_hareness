@@ -9,8 +9,8 @@ def _limit(value: int, maximum: int) -> int:
     return max(1, min(value, maximum))
 
 
-async def universe_members(db: Any, universe_key: str) -> dict[str, Any]:
-    async with db.transaction() as conn:
+async def universe_members(async_database: Any, universe_key: str) -> dict[str, Any]:
+    async with async_database.transaction() as conn:
         result = await conn.execute(
             """SELECT m.universe_key,m.symbol,m.enabled,m.priority,m.source,m.metadata,m.added_at,m.updated_at,
                       i.name,i.industry,i.is_st FROM quant.universe_members m JOIN quant.instruments i ON i.symbol=m.symbol
@@ -19,8 +19,8 @@ async def universe_members(db: Any, universe_key: str) -> dict[str, Any]:
     return {"universe_key": universe_key, "items": rows}
 
 
-async def latest_features(db: Any, universe_key: str, limit: int) -> dict[str, Any]:
-    async with db.transaction() as conn:
+async def latest_features(async_database: Any, universe_key: str, limit: int) -> dict[str, Any]:
+    async with async_database.transaction() as conn:
         result = await conn.execute(
             """SELECT f.snapshot_key,f.as_of_date,f.feature_version,max(f.created_at) created_at
                FROM quant.feature_snapshots f JOIN quant.universe_members m ON m.symbol=f.symbol
@@ -37,15 +37,15 @@ async def latest_features(db: Any, universe_key: str, limit: int) -> dict[str, A
     return {"snapshot": snapshot, "items": rows}
 
 
-async def factor_registry(db: Any) -> dict[str, Any]:
-    async with db.transaction() as conn:
+async def factor_registry(async_database: Any) -> dict[str, Any]:
+    async with async_database.transaction() as conn:
         result = await conn.execute("SELECT factor_key,label,category,implementation,inputs,formula,framework_tags,version,status,metadata,updated_at FROM quant.factor_registry ORDER BY category,factor_key")
         rows = await result.fetchall()
     return {"items": rows}
 
 
-async def factor_evaluations(db: Any, universe_key: str, limit: int) -> dict[str, Any]:
-    async with db.transaction() as conn:
+async def factor_evaluations(async_database: Any, universe_key: str, limit: int) -> dict[str, Any]:
+    async with async_database.transaction() as conn:
         result = await conn.execute(
             """SELECT e.evaluation_id,e.factor_key,f.label,e.universe_key,e.start_date,e.end_date,e.horizon_days,e.engine,e.status,
                       e.observations,e.cross_section_days,e.metrics,e.artifact,e.created_at
@@ -56,15 +56,15 @@ async def factor_evaluations(db: Any, universe_key: str, limit: int) -> dict[str
     return {"items": rows}
 
 
-async def strategy_registry(db: Any) -> dict[str, Any]:
-    async with db.transaction() as conn:
+async def strategy_registry(async_database: Any) -> dict[str, Any]:
+    async with async_database.transaction() as conn:
         result = await conn.execute("SELECT strategy_key,label,engine,version,configuration,status,updated_at FROM quant.strategy_registry ORDER BY strategy_key")
         rows = await result.fetchall()
     return {"items": rows}
 
 
-async def strategy_experiments(db: Any, universe_key: str, limit: int) -> dict[str, Any]:
-    async with db.transaction() as conn:
+async def strategy_experiments(async_database: Any, universe_key: str, limit: int) -> dict[str, Any]:
+    async with async_database.transaction() as conn:
         result = await conn.execute(
             """SELECT e.strategy_experiment_id,e.strategy_key,s.label,e.universe_key,e.start_date,e.end_date,e.status,e.parameters,
                       e.metrics,e.equity_curve,e.trades,e.created_at
@@ -75,9 +75,8 @@ async def strategy_experiments(db: Any, universe_key: str, limit: int) -> dict[s
     return {"items": rows}
 
 
-async def data_quality_issues(db: Any, limit: int) -> dict[str, Any]:
-    async with db.transaction() as conn:
+async def data_quality_issues(async_database: Any, limit: int) -> dict[str, Any]:
+    async with async_database.transaction() as conn:
         result = await conn.execute("SELECT * FROM quant.data_quality_issues WHERE resolved_at IS NULL ORDER BY created_at DESC LIMIT %s", (_limit(limit, 500),))
         rows = await result.fetchall()
     return {"items": rows}
-
