@@ -69,15 +69,16 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
             ).fetchall()
             try:
                 workflow_rows = connection.execute(
-                    """SELECT w.id,w.active,
+                    """SELECT w.id,w.active,w."activeVersionId" AS active_version_id,
                                   (w."activeVersionId" IS NOT NULL
                                    AND w."activeVersionId"=p."publishedVersionId") AS published,
                                   e.status AS latest_execution_status,e."startedAt" AS latest_started_at,
-                                  e."stoppedAt" AS latest_stopped_at
+                                  e."stoppedAt" AS latest_stopped_at,
+                                  e."workflowVersionId" AS latest_execution_version_id
                              FROM public.workflow_entity w
                         LEFT JOIN public.workflow_published_version p ON p."workflowId"=w.id
                         LEFT JOIN LATERAL (
-                            SELECT status,"startedAt","stoppedAt"
+                            SELECT status,"startedAt","stoppedAt","workflowVersionId"
                               FROM public.execution_entity
                              WHERE "workflowId"=w.id AND "deletedAt" IS NULL
                              ORDER BY "startedAt" DESC NULLS LAST,id DESC LIMIT 1
@@ -88,12 +89,30 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 workflow_health = []
                 for row in workflow_rows:
                     item = dict(row)
-                    # The service-side sync endpoint is the authoritative
-                    # evidence of a successful import. n8n execution history
-                    # may still point at a retired Code-node run, so do not let
-                    # that stale row mask a fresh cursor advance.
-                    item["status"] = "ready" if item.get("active") and item.get("published") else "disabled"
-                    item["execution_evidence"] = "service_cursor" if item["status"] == "ready" else "none"
+                    active_current = bool(item.get("active") and item.get("published"))
+                    execution_matches_active = bool(
+                        item.get("latest_execution_version_id")
+                        and item.get("latest_execution_version_id") == item.get("active_version_id")
+                    )
+                    execution_succeeded = execution_matches_active and item.get("latest_execution_status") == "success"
+                    if not active_current:
+                        item["status"] = "disabled"
+                        item["execution_evidence"] = "none"
+                        item["notice"] = "workflow is not active and published"
+                    elif execution_succeeded:
+                        item["status"] = "ready"
+                        item["execution_evidence"] = "current_workflow_execution"
+                        item["notice"] = None
+                    elif execution_matches_active:
+                        item["status"] = "degraded"
+                        item["execution_evidence"] = "current_workflow_execution_failed"
+                        item["notice"] = "current published workflow has not completed successfully"
+                    else:
+                        # Existing cursors prove prior service imports, but a
+                        # retired execution cannot validate the current graph.
+                        item["status"] = "pending_first_current_execution"
+                        item["execution_evidence"] = "service_cursor_prior_version"
+                        item["notice"] = "awaiting the first successful execution of the current published workflow"
                     workflow_health.append(item)
             except Exception:
                 # The quant schema can be deployed without n8n's public schema
