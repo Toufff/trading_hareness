@@ -7,7 +7,10 @@ from typing import Any, Callable
 from fastapi import APIRouter
 
 from ..request_models import HistoricalCoverageEstimateRequest
-from ..async_research_readiness_repository import frameworks, feature_readiness as async_feature_readiness
+from ..async_research_readiness_repository import (
+    frameworks, feature_readiness as async_feature_readiness,
+    replay_readiness as async_replay_readiness,
+)
 from ..runtime_executors import run_database_blocking
 
 
@@ -69,7 +72,9 @@ def build_research_readiness_router(
 
     @router.get("/api/v1/data-readiness/replay")
     async def replay_readiness() -> dict[str, Any]:
-        return await run_database_blocking(replay_readiness_fn, database, timeout_seconds=15) if async_database else replay_readiness_fn(database)
+        if async_database:
+            return await async_replay_readiness(async_database)
+        return replay_readiness_fn(database)
 
     return router
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .replay_readiness import replay_readiness_payload
+
 
 async def frameworks(async_database: Any) -> dict[str, Any]:
     async with async_database.transaction() as connection:
@@ -47,3 +49,36 @@ async def feature_readiness(async_database: Any) -> dict[str, Any]:
     blockers = [row["feature"] for row in items if row["status"] != "ready"]
     return {"universe_key": "all_a", "universe_symbols": universe_size, "items": items,
             "decision_ready": not blockers, "blockers": blockers}
+
+
+async def replay_readiness(async_database: Any) -> dict[str, Any]:
+    """Read bounded replay gates using the native async connection."""
+    async with async_database.transaction() as connection:
+        result = await connection.execute(
+            """WITH universe AS (
+                    SELECT greatest(1,count(*)::int) symbols
+                      FROM quant.universe_members
+                     WHERE universe_key='all_a' AND enabled
+                 ), daily_counts AS (
+                    SELECT trading_date,count(DISTINCT symbol)::int symbols
+                      FROM quant.canonical_bars_daily
+                     WHERE symbol<>'000300.SH'
+                     GROUP BY trading_date
+                 )
+                SELECT
+                  (SELECT min(trading_date) FROM daily_counts) first_daily_date,
+                  (SELECT max(trading_date) FROM daily_counts) latest_daily_date,
+                  (SELECT count(*)::int FROM daily_counts d,universe u
+                    WHERE d.symbols>=least(u.symbols*0.8,1000)) full_cross_section_days,
+                  (SELECT count(DISTINCT (bar_time AT TIME ZONE 'Asia/Shanghai')::date)::int
+                     FROM quant.market_bars_minute) offline_minute_trading_days,
+                  (SELECT count(DISTINCT symbol)::int FROM quant.market_bars_minute) offline_minute_symbols,
+                  (SELECT count(*)::int FROM quant.market_bars_minute) offline_minute_bars,
+                  (SELECT count(*)::int FROM quant.offline_imports WHERE status IN ('completed','partial')) completed_offline_imports,
+                  (SELECT count(*)::int FROM quant.intraday_signal_events
+                    WHERE state IN ('confirmed','alerted')) confirmed_signal_events,
+                  (SELECT count(DISTINCT signal_event_id)::int FROM quant.intraday_signal_outcomes
+                    WHERE status='matured') matured_signal_events"""
+        )
+        row = await result.fetchone()
+    return replay_readiness_payload(dict(row or {}))

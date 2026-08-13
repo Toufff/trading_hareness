@@ -14,8 +14,10 @@ from app.async_strategy_read_repository import latest_strategy_decision
 from app.async_strategy_health_repository import latest_strategy_health
 from app.async_research_catalog_read_repository import factor_registry as async_factor_registry
 from app.async_market_result_read_repository import market_snapshots as async_market_snapshots
+from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.routers.intraday_status import build_intraday_status_router
 from app.routers.event_reads import build_event_reads_router
+from app.routers.research_readiness import build_research_readiness_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -326,6 +328,71 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         payload = await latest_strategy_health(Database())
         self.assertEqual(payload["status"], "research_only")
         self.assertEqual(payload["validation_gate"]["live_effect"], "none")
+
+    async def test_replay_readiness_projection_uses_native_async_connection(self) -> None:
+        class Result:
+            async def fetchone(self):
+                return {
+                    "full_cross_section_days": 0, "offline_minute_trading_days": 0,
+                    "offline_minute_symbols": 0, "offline_minute_bars": 0,
+                    "completed_offline_imports": 0, "confirmed_signal_events": 0,
+                    "matured_signal_events": 0,
+                }
+
+        class Connection:
+            def __init__(self): self.calls = []
+            async def execute(self, sql, _params=()):
+                self.calls.append(sql)
+                return Result()
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        database = Database()
+        payload = await async_replay_readiness(database)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(len(database.connection.calls), 1)
+        self.assertIn("canonical_bars_daily", database.connection.calls[0])
+
+    async def test_research_readiness_router_prefers_async_replay_projection(self) -> None:
+        calls = []
+
+        class Result:
+            async def fetchone(self):
+                return {"full_cross_section_days": 0, "offline_minute_trading_days": 0,
+                        "offline_minute_symbols": 0, "offline_minute_bars": 0,
+                        "completed_offline_imports": 0, "confirmed_signal_events": 0,
+                        "matured_signal_events": 0}
+
+        class Connection:
+            async def execute(self, _sql, _params=()):
+                calls.append("async")
+                return Result()
+
+        class Tx:
+            async def __aenter__(self): return Connection()
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def transaction(self): return Tx()
+
+        def must_not_run(_database):
+            raise AssertionError("sync replay readiness path was selected")
+
+        router = build_research_readiness_router(
+            object(), lambda _request: {}, lambda _database: {}, must_not_run,
+            async_database=Database(),
+        )
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/data-readiness/replay")
+        payload = await endpoint()
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(calls, ["async"])
 
     async def test_event_router_prefers_async_local_projection(self) -> None:
         async def announcements(*_args, **_kwargs):
