@@ -25,6 +25,7 @@ from app.intraday_outcomes import a_share_return_decomposition
 from app.board_curve_read_model import board_display_slots, intraday_board_flow_curves as read_intraday_board_flow_curves, latest_close_sector_review_report as read_latest_close_sector_review_report
 from app.research_catalog_read_model import data_quality_issues as read_data_quality_issues, factor_evaluations as read_factor_evaluations, latest_features as read_latest_features, strategy_experiments as read_strategy_experiments
 from app.intraday_outcome_read_model import latest_intraday_outcomes as read_latest_intraday_outcomes
+from app.strategy_health_read_model import latest_strategy_health
 from app.sector_read_model import market_sectors as read_market_sectors, sector_members as read_sector_members
 from app.intraday_evidence_read_model import latest_scan as read_latest_intraday_scan
 from app.market_result_read_model import market_snapshots as read_market_snapshots, tushare_raw as read_tushare_raw
@@ -775,6 +776,35 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(methods_by_path["/api/v1/strategy/decisions/latest"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/strategy/reviews/latest"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/strategy/post-close/latest"], {"GET"})
+        self.assertEqual(methods_by_path["/api/v1/strategy/health"], {"GET"})
+
+    def test_strategy_health_is_read_only_and_keeps_validation_gate(self):
+        class _Transaction:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, _params=()):
+                if "signals_7d" in sql:
+                    return MagicMock(fetchone=MagicMock(return_value={
+                        "signals_7d": 12, "signals_prior_7d": 4, "episodes_7d": 5,
+                        "matured_30m_7d": 8, "matured_days_7d": 3,
+                    }))
+                if "avg(raw_return)" in sql:
+                    return MagicMock(fetchone=MagicMock(return_value={"rows": 8, "positive": 5, "avg_return": 0.003}))
+                if "latest_quote_at" in sql:
+                    return MagicMock(fetchone=MagicMock(return_value={"latest_quote_at": datetime.now(timezone.utc), "fresh_quote_rows": 2}))
+                return MagicMock(fetchall=MagicMock(return_value=[{"strategy_key": "watchlist_confirmation_v4", "signals": 12, "episodes": 5}]))
+
+        database = MagicMock()
+        database.transaction.return_value = _Transaction()
+        payload = latest_strategy_health(database, now=datetime.now(timezone.utc))
+        self.assertEqual(payload["status"], "research_only")
+        self.assertEqual(payload["trigger_frequency"]["drift_status"], "stable")
+        self.assertEqual(payload["validation_gate"]["status"], "accumulating")
+        self.assertEqual(payload["validation_gate"]["live_effect"], "none")
 
     def test_intraday_alert_text_keeps_strategy_evidence_and_disclaimer(self):
         text = intraday_alert_text(
