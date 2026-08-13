@@ -27,7 +27,7 @@
 | 成功/失败延迟与错误脱敏 | 已完成主要路径 | `provider_health.py`；Tushare、腾讯、Sina、AKShare 失败耗时进入 health/Prometheus |
 | 盘中调度、租约、outbox、飞书恢复 | 已完成 | 开盘预检、`runtime_leases`、投递回执和连续失败治理 |
 | 存储/备份/恢复前校验 | 已完成 | 20 GiB 研究预算、保留策略、`pg_restore -l` manifest 校验 |
-| 纸面组合展示 | 已完成 | 前端展示净值、总/净暴露、回撤、可卖量和板块暴露；成员按观察日点时映射 |
+| 纸面组合展示与风险阻断 | 已完成 | 前端展示净值、总/净暴露、回撤、可卖量和板块暴露；成员按观察日点时映射；新 entry 受日亏/回撤/集中度限制 |
 | 原生 async repository | 工程余项 | 当前同步 psycopg 已全部经有界执行器隔离；后续逐模块替换 |
 | `main.py` 完全拆分 | 工程余项 | router/read-model/纯规则已拆出，剩余服务函数继续机械迁移 |
 

@@ -81,6 +81,15 @@ class PaperExecutionTests(unittest.TestCase):
         self.assertIn("sector_exposure_limit", decision.reasons)
         self.assertIn("paper_sector_exposure_block", decision.risk_flags)
 
+    def test_drawdown_and_daily_loss_block_new_entry(self):
+        decision = paper_risk_gate(
+            signal_type="entry", symbol="000001.SZ",
+            snapshot={"drawdown": -0.10, "daily_return": -0.04},
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("portfolio_drawdown_limit", decision.reasons)
+        self.assertIn("paper_daily_loss_limit", decision.reasons)
+
     def test_mark_to_market_splits_sector_exposure(self):
         from app.paper_portfolio import mark_to_market
         snapshot = mark_to_market(
