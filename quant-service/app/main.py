@@ -52,7 +52,7 @@ from .akshare_provider import (
 )
 from .analysis import EXTRACTOR_VERSION, as_utc, extract_signals, keywords, normalize_symbol
 from .capability_registry import api_capability
-from .database import Database
+from .database import AsyncDatabase, Database
 from .daily_bar_repository import exchange_for, provider_priority, upsert_daily_bar
 from .public_market_repository import (
     persist_free_quote as _persist_free_quote,
@@ -301,6 +301,7 @@ from .tushare_providers import (
 
 
 db = Database()
+async_db = AsyncDatabase(db)
 _research_storage_admission_cache: tuple[float, dict[str, Any]] | None = None
 
 
@@ -8482,6 +8483,7 @@ async def sync_tushare_daily_core(as_of_date: date, requested_symbols: list[str]
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.open()
+    await async_db.open()
     configure_provider_request_reserver(
         reserve_tushare_provider_request_slot,
         max_wait_seconds=provider_global_rate_limit_max_wait_seconds(),
@@ -8538,6 +8540,7 @@ async def lifespan(_: FastAPI):
         shutdown_runtime_executors()
         await close_http_clients()
         configure_provider_request_reserver(None)
+        await async_db.close()
         db.close()
 
 
@@ -8604,7 +8607,7 @@ app.include_router(build_analyst_trade_action_reads_router(db, anqiang_trade_act
 app.include_router(build_analyst_skill_reads_router(db, analyst_skill_profiles))
 app.include_router(build_analyst_research_reads_router(db, analyst_research_status))
 app.include_router(build_event_reads_router(db))
-app.include_router(build_strategy_reads_router(db, STRATEGY_DECISION_MODEL_VERSION))
+app.include_router(build_strategy_reads_router(db, STRATEGY_DECISION_MODEL_VERSION, async_db))
 app.include_router(build_paper_reads_router(db))
 app.include_router(build_paper_actions_router(db, configure_paper_account, accept_paper_decision))
 app.include_router(build_analyst_prompt_lab_router(
@@ -8680,6 +8683,7 @@ def health() -> dict[str, Any]:
             alert_http_client_status=alert_http_client_status, provider_http_client_status=provider_http_client_status,
             provider_request_reservation_status=provider_request_reservation_status,
             runtime_executor_status=runtime_executor_status, super_get_executor_status=super_get_executor_status,
+            async_database_pool_status=async_db.pool_status,
             provider_status=provider_status, free_provider_status=free_provider_status,
             realtime_market_session=realtime_market_session, board_curve_session=intraday_board_curve_session,
             scan_interval_seconds=intraday_scan_interval_seconds,

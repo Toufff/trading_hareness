@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
-from typing import Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
+from typing import AsyncIterator, Iterator, Mapping
 
 import psycopg
-from psycopg_pool import ConnectionPool
+from psycopg_pool import AsyncConnectionPool, ConnectionPool
 from psycopg.rows import dict_row
 
 
@@ -1444,3 +1444,63 @@ class Database:
     def ping(self) -> None:
         with self.transaction() as connection:
             connection.execute("SELECT 1")
+
+
+class AsyncDatabase:
+    """Native async read repository pool for event-loop-facing projections.
+
+    The legacy ``Database`` remains the write/migration authority for now.
+    This separate pool is intentionally small and read-oriented: it lets
+    async FastAPI projections use psycopg's native awaitable connection rather
+    than consuming a bounded thread slot for every dashboard refresh.
+    """
+
+    def __init__(self, source: Database | None = None) -> None:
+        source = source or Database()
+        self._connect_kwargs = {**source._connect_kwargs}
+        self._pool_settings = dict(source._pool_settings)
+        try:
+            async_min = max(1, min(4, int(os.getenv("QUANT_ASYNC_READ_POOL_MIN_SIZE", "1"))))
+            async_max = max(async_min, min(8, int(os.getenv("QUANT_ASYNC_READ_POOL_MAX_SIZE", "4"))))
+        except ValueError:
+            async_min, async_max = 1, 4
+        self._pool_settings["min_size"] = async_min
+        self._pool_settings["max_size"] = async_max
+        self._pool = AsyncConnectionPool(
+            conninfo="", kwargs=self._connect_kwargs, open=False,
+            min_size=self._pool_settings["min_size"], max_size=self._pool_settings["max_size"],
+            timeout=self._pool_settings["timeout_seconds"], max_waiting=64,
+        )
+        self._opened = False
+
+    async def open(self) -> None:
+        if not self._opened:
+            await self._pool.open(wait=True, timeout=self._pool_settings["timeout_seconds"])
+            self._opened = True
+
+    async def close(self) -> None:
+        if self._opened:
+            await self._pool.close()
+            self._opened = False
+
+    def pool_status(self) -> dict[str, int | bool]:
+        stats = self._pool.get_stats()
+        return {
+            "open": self._opened,
+            "min_size": self._pool_settings["min_size"],
+            "max_size": self._pool_settings["max_size"],
+            "pool_size": int(stats.get("pool_size", 0)),
+            "available": int(stats.get("pool_available", 0)),
+            "waiting": int(stats.get("requests_waiting", 0)),
+        }
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[psycopg.AsyncConnection]:
+        await self.open()
+        async with self._pool.connection() as connection:
+            async with connection.transaction():
+                yield connection
+
+    async def ping(self) -> None:
+        async with self.transaction() as connection:
+            await connection.execute("SELECT 1")

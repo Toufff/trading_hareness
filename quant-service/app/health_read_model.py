@@ -42,6 +42,7 @@ class HealthDependencies:
     board_rotation_retention_days: Callable[[], int]
     set_db_pool_gauge: Callable[[dict[str, Any]], None]
     set_open_circuit_gauge: Callable[[int], None]
+    async_database_pool_status: Callable[[], dict[str, Any]] | None = None
     research_storage_governance: Callable[[Any], dict[str, Any]] | None = None
 
 
@@ -78,6 +79,7 @@ def health_payload(deps: HealthDependencies) -> dict[str, Any]:
         resources["research_storage"] = deps.research_storage_governance(deps.database)
     return {
         "status": "ok", "service": "quant-research", "database_pool": pool,
+        "async_database_pool": deps.async_database_pool_status() if deps.async_database_pool_status else None,
         "resources": resources,
         "runtime_leases": {
             "background_loop_lease_seconds": loop_lease_seconds,

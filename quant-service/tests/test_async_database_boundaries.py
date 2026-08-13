@@ -10,6 +10,7 @@ from pathlib import Path
 import unittest
 
 from app.runtime_executors import BlockingExecutorBoundary, ExecutorSaturatedError
+from app.async_strategy_read_repository import latest_strategy_decision
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -189,3 +190,51 @@ class BlockingExecutorBoundaryTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             executor.shutdown(wait=True, cancel_futures=True)
+
+
+class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_strategy_projection_uses_native_async_execute_and_fetch(self) -> None:
+        class Result:
+            def __init__(self, row=None, rows=None):
+                self.row = row
+                self.rows = rows or []
+
+            async def fetchone(self):
+                return self.row
+
+            async def fetchall(self):
+                return self.rows
+
+        class CursorConnection:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "recommendation_runs" in sql:
+                    return Result({"run_id": "run-1", "model_version": "model"})
+                return Result(rows=[{"symbol": "600000.SH", "rank": 1}])
+
+        class Transaction:
+            def __init__(self, connection):
+                self.connection = connection
+
+            async def __aenter__(self):
+                return self.connection
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Database:
+            def __init__(self):
+                self.connection = CursorConnection()
+
+            def transaction(self):
+                return Transaction(self.connection)
+
+        database = Database()
+        payload = await latest_strategy_decision(database, "model")
+        self.assertEqual(payload["run"]["run_id"], "run-1")
+        self.assertEqual(payload["recommendations"][0]["symbol"], "600000.SH")
+        self.assertEqual(len(database.connection.calls), 2)
+        self.assertIn("recommendations", database.connection.calls[1][0])
