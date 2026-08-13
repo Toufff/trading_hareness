@@ -173,6 +173,7 @@ from .runtime_resources import (
 )
 from .health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
 from .replay_readiness import historical_replay_readiness
+from . import research_capacity
 from .intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload, intraday_services_status_payload_async as read_intraday_services_status_payload_async
 from .routers.provider_status import build_provider_status_router
 from .routers.research_readiness import build_research_readiness_router
@@ -825,7 +826,7 @@ def historical_capacity_plan(
     }
 
 
-def current_data_coverage(connection: Any) -> dict[str, Any]:
+def _legacy_current_data_coverage(connection: Any) -> dict[str, Any]:
     row = connection.execute(
         """WITH daily_counts AS (
              SELECT trading_date,count(DISTINCT symbol)::int symbols
@@ -845,7 +846,7 @@ def current_data_coverage(connection: Any) -> dict[str, Any]:
     return dict(row or {})
 
 
-def feature_readiness_state(connection: Any) -> dict[str, Any]:
+def _legacy_feature_readiness_state(connection: Any) -> dict[str, Any]:
     rows = connection.execute(
         """WITH universe AS (
              SELECT count(*)::int symbols FROM quant.universe_members WHERE universe_key='all_a' AND enabled
@@ -886,7 +887,7 @@ def feature_readiness_state(connection: Any) -> dict[str, Any]:
             "decision_ready": not blockers, "blockers": blockers}
 
 
-def historical_estimate_from_db(request: HistoricalCoverageEstimateRequest) -> dict[str, Any]:
+def _legacy_historical_estimate_from_db(request: HistoricalCoverageEstimateRequest) -> dict[str, Any]:
     with db.transaction() as connection:
         universe_symbols = request.universe_symbols or connection.execute(
             """SELECT coalesce(nullif((SELECT count(*)::int FROM quant.universe_members WHERE universe_key='all_a' AND enabled),0),
@@ -901,7 +902,7 @@ def historical_estimate_from_db(request: HistoricalCoverageEstimateRequest) -> d
             (["daily", "adj_factor", "daily_basic", "stk_limit", "moneyflow_dc", "moneyflow", "cyq_perf", "cyq_chips", "stk_factor_pro", "suspend_d"],),
         ).fetchall()
         sector_count = connection.execute("SELECT count(*)::int total FROM quant.sectors").fetchone()["total"]
-        coverage = current_data_coverage(connection)
+        coverage = _legacy_current_data_coverage(connection)
     return {
         **historical_capacity_plan(request.years, int(universe_symbols), request.trading_days_per_year,
                                    request.include_minute, {row["api_name"]: row["avg_bytes"] for row in samples},
@@ -913,6 +914,21 @@ def historical_estimate_from_db(request: HistoricalCoverageEstimateRequest) -> d
             "minute_policy": "not included unless include_minute=true; historical minute remains offline-file only",
         },
     }
+
+
+def historical_estimate_from_db(request: HistoricalCoverageEstimateRequest) -> dict[str, Any]:
+    """Compatibility export backed by the isolated capacity repository."""
+    return research_capacity.historical_estimate_from_db(db, request)
+
+
+def current_data_coverage(connection: Any) -> dict[str, Any]:
+    """Compatibility export for the isolated research-capacity projection."""
+    return research_capacity.current_data_coverage(connection)
+
+
+def feature_readiness_state(connection: Any) -> dict[str, Any]:
+    """Compatibility export for the isolated research-capacity projection."""
+    return research_capacity.feature_readiness_state(connection)
 
 
 def market_regime(connection: Any, as_of_date: date) -> str:
