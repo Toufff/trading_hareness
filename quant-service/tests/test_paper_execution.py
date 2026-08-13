@@ -70,6 +70,27 @@ class PaperExecutionTests(unittest.TestCase):
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.target_weight, 0.0)
 
+    def test_sector_concentration_blocks_new_entry(self):
+        decision = paper_risk_gate(
+            signal_type="entry", symbol="000001.SZ",
+            snapshot={"sector_exposure": {"semiconductor": 0.19}},
+            candidate_sector_keys=["semiconductor"], max_target_weight=0.05,
+            max_sector_exposure=0.20,
+        )
+        self.assertFalse(decision.allowed)
+        self.assertIn("sector_exposure_limit", decision.reasons)
+        self.assertIn("paper_sector_exposure_block", decision.risk_flags)
+
+    def test_mark_to_market_splits_sector_exposure(self):
+        from app.paper_portfolio import mark_to_market
+        snapshot = mark_to_market(
+            positions=[{"symbol": "000001.SZ", "quantity": 100, "average_cost": 10,
+                        "sector_keys": ["bank", "large_cap"]}],
+            quotes={"000001.SZ": {"price": 10}}, cash=0,
+        )
+        self.assertAlmostEqual(snapshot["sector_exposure"]["bank"], 0.5)
+        self.assertAlmostEqual(snapshot["sector_exposure"]["large_cap"], 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

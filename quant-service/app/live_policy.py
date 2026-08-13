@@ -23,9 +23,10 @@ def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[
                      portfolio_risk: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return an explainable fail-closed policy decision.
 
-    P0 intentionally only consumes inputs already in the live scan.  Position
-    concentration, daily loss and drawdown require the Phase-2 paper ledger;
-    they are not faked from a watchlist row here.
+    P0 consumes inputs already in the live scan plus the read-only paper
+    ledger risk snapshot.  It still does not authorize a broker order;
+    portfolio drawdown/strategy-health promotion remains a later research
+    gate.
     """
     signal_type = str(signal.get("signal_type") or "watch")
     entry_like = signal_type == "entry"
@@ -99,7 +100,7 @@ def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[
         "board_snapshot_age_seconds": board_age,
         "available_quantity": available_quantity,
         "portfolio_risk": portfolio,
-        "scope": "P0 market/data/static-tradability only; portfolio risk awaits paper ledger",
+        "scope": "P0 market/data/static-tradability plus paper-ledger concentration risk; no broker order",
     }
 
 

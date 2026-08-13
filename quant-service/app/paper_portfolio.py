@@ -30,7 +30,8 @@ def _number(value: Any, default: float = 0.0) -> float:
 def paper_risk_gate(*, signal_type: str, symbol: str, position: dict[str, Any] | None = None,
                     snapshot: dict[str, Any] | None = None, max_target_weight: float = 0.05,
                     max_gross_exposure: float = 0.80, max_drawdown: float = -0.08,
-                    max_daily_loss: float = -0.03) -> PaperRiskDecision:
+                    max_daily_loss: float = -0.03, candidate_sector_keys: Iterable[str] | None = None,
+                    max_sector_exposure: float = 0.20) -> PaperRiskDecision:
     """Apply deterministic paper limits; no market data is fetched here."""
     position = position or {}
     snapshot = snapshot or {}
@@ -52,6 +53,18 @@ def paper_risk_gate(*, signal_type: str, symbol: str, position: dict[str, Any] |
     if gross >= max_gross_exposure:
         reasons.append("gross_exposure_limit")
         flags.append("paper_gross_exposure_block")
+    sector_exposure = snapshot.get("sector_exposure") if isinstance(snapshot.get("sector_exposure"), dict) else {}
+    candidate_sectors = tuple(dict.fromkeys(str(item) for item in (candidate_sector_keys or ()) if str(item)))
+    if signal_type == "entry" and candidate_sectors and sector_exposure:
+        # A position may belong to several exact taxonomies.  Count the full
+        # proposed weight against each mapped bucket rather than diluting it
+        # across labels; this is a conservative concentration guard.
+        projected_increment = max_target_weight
+        exceeded = [key for key in candidate_sectors
+                    if _number(sector_exposure.get(key), 0.0) + projected_increment > max(0.0, max_sector_exposure)]
+        if exceeded:
+            reasons.append("sector_exposure_limit")
+            flags.append("paper_sector_exposure_block")
     current_weight = _number(position.get("target_weight"), 0.0)
     if current_weight >= max_target_weight:
         reasons.append("single_symbol_exposure_limit")
@@ -74,7 +87,8 @@ def mark_to_market(*, positions: Iterable[dict[str, Any]], quotes: dict[str, Any
         price = _number((quotes.get(symbol) or {}).get("price"), _number(position.get("average_cost")))
         value = quantity * price
         market_value += value
-        rows.append({"symbol": symbol, "quantity": quantity, "price": price, "market_value": round(value, 4)})
+        rows.append({"symbol": symbol, "quantity": quantity, "price": price, "market_value": round(value, 4),
+                     "sector_keys": list(position.get("sector_keys") or ())})
     equity = float(cash) + market_value
     peak = max(float(previous_equity or equity), equity)
     drawdown = equity / peak - 1 if peak else 0.0
@@ -83,7 +97,22 @@ def mark_to_market(*, positions: Iterable[dict[str, Any]], quotes: dict[str, Any
             "gross_exposure": round(market_value / equity, 6) if equity else 0.0,
             "net_exposure": round(market_value / equity, 6) if equity else 0.0,
             "drawdown": round(drawdown, 6), "daily_return": round(daily_return, 6),
-            "positions": rows}
+            "sector_exposure": _sector_exposure(rows, equity), "positions": rows}
+
+
+def _sector_exposure(rows: list[dict[str, Any]], equity: float) -> dict[str, float]:
+    """Split each position's marked value across its point-in-time sectors."""
+    if equity <= 0:
+        return {}
+    totals: dict[str, float] = {}
+    for row in rows:
+        keys = tuple(dict.fromkeys(str(item) for item in row.get("sector_keys", ()) if str(item)))
+        if not keys:
+            continue
+        share = float(row.get("market_value") or 0.0) / equity / len(keys)
+        for key in keys:
+            totals[key] = totals.get(key, 0.0) + share
+    return {key: round(value, 6) for key, value in sorted(totals.items())}
 
 
 def persist_portfolio_snapshot(connection: Any, *, as_of: Any, quotes: dict[str, Any],
@@ -95,7 +124,13 @@ def persist_portfolio_snapshot(connection: Any, *, as_of: Any, quotes: dict[str,
     if hasattr(as_of, "replace"):
         as_of = as_of.replace(second=0, microsecond=0)
     positions = [dict(row) for row in connection.execute(
-        "SELECT symbol,quantity,sellable_quantity,average_cost,buy_date,realized_pnl FROM quant.paper_positions"
+        """SELECT p.symbol,p.quantity,p.sellable_quantity,p.average_cost,p.buy_date,p.realized_pnl,
+                       COALESCE(array_agg(DISTINCT m.sector_key) FILTER (WHERE m.sector_key IS NOT NULL), '{}') AS sector_keys
+                  FROM quant.paper_positions p
+             LEFT JOIN quant.sector_membership_history m
+                    ON m.symbol=p.symbol AND m.effective_to IS NULL
+                   AND m.taxonomy_key IN ('ths_concept_flow','ths_index_n','ths_industry')
+                 GROUP BY p.symbol,p.quantity,p.sellable_quantity,p.average_cost,p.buy_date,p.realized_pnl"""
     ).fetchall()]
     snapshot = mark_to_market(positions=positions, quotes=quotes, cash=cash,
                               previous_equity=previous_equity,

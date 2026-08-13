@@ -5230,6 +5230,15 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 (selected_symbols,),
             ).fetchall()
         }
+        sector_rows = connection.execute(
+            """SELECT symbol,sector_key FROM quant.sector_membership_history
+                WHERE symbol=ANY(%s) AND effective_to IS NULL
+                  AND taxonomy_key IN ('ths_concept_flow','ths_index_n','ths_industry')""",
+            (selected_symbols,),
+        ).fetchall() if selected_symbols else []
+        candidate_sector_keys: dict[str, list[str]] = {}
+        for row in sector_rows:
+            candidate_sector_keys.setdefault(str(row["symbol"]), []).append(str(row["sector_key"]))
         paper_snapshot = connection.execute(
             "SELECT drawdown,payload FROM quant.paper_portfolio_snapshots ORDER BY as_of DESC LIMIT 1",
         ).fetchone()
@@ -5307,6 +5316,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     signal_type=signal["signal_type"], symbol=symbol,
                     position=paper_positions.get(symbol),
                     snapshot=snapshot_payload,
+                    candidate_sector_keys=candidate_sector_keys.get(symbol, ()),
                 )
                 portfolio_risk = {"allowed": portfolio_gate.allowed, "target_weight": portfolio_gate.target_weight,
                                   "reasons": list(portfolio_gate.reasons), "risk_flags": list(portfolio_gate.risk_flags)}
