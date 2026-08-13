@@ -101,6 +101,7 @@ from app.post_close_structures import (
 )
 from app.post_close_candidate_screen import screen_candidates
 from app.post_close_evidence import exact_board_context, lhb_context
+from app.post_close_refresh import run_refresh
 from app.database import pool_settings
 from app.tushare_catalog import AUDITED_ADDITIONS_CATALOG, SUPPLIER_109_CATALOG, TUSHARE_CATALOG, catalog_counts
 from app.free_market_providers import _request_with_retry, classify_announcement_title, cninfo_stock_param, eastmoney_secid, free_provider_status, parse_sina_quote_batch, tencent_symbol
@@ -129,6 +130,34 @@ from app.main import sync_runtime_provider_rate_limits
 
 
 class ProviderHelperTests(unittest.TestCase):
+    def test_post_close_refresh_orchestrator_continues_after_stage_failure_and_releases_lease(self):
+        calls: list[str] = []
+        lease = AsyncMock(side_effect=[True, True, True, True])
+        release = AsyncMock()
+        blocking = AsyncMock(side_effect=[True, True, True, True, True, True, True])
+
+        async def failing_stage() -> dict[str, object]:
+            calls.append("failed")
+            raise RuntimeError("provider unavailable")
+
+        async def later_stage() -> dict[str, object]:
+            calls.append("later")
+            return {"status": "completed", "value": 1}
+
+        async def check() -> dict[str, object]:
+            return await run_refresh(
+                object(), db=object(), lease_key="post-close", lease_seconds=lambda: 30,
+                run_database_blocking=blocking, acquire_lease=lambda *_args: True,
+                renew_lease=lambda *_args: True, release_lease=lambda *_args: None,
+                actions={"failed": failing_stage, "later": later_stage}, stage_order=("failed", "later"),
+                trade_date=date(2026, 8, 14), safe_error_detail=lambda value, _limit: value,
+                json_safe=lambda value: value,
+            )
+
+        result = asyncio.run(check())
+        self.assertEqual(calls, ["failed", "later"])
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["deferred_stages"], ["failed"])
     def test_post_close_evidence_aggregation_keeps_exact_board_and_deduplicates_lhb(self):
         boards = exact_board_context([
             {"symbol": "000001.SZ", "net_amount": 10, "label": "A"},

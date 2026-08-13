@@ -283,6 +283,7 @@ from .remote_archive import (analyst_global_sync_cursor, analyst_sync_cursor, cl
                              remote_report_list_state, reprocess_remote_messages, reprocess_remote_reports)
 from .remote_archive_transport import RemoteArchiveTransport
 from .remote_archive_sync import RemoteArchiveSyncService
+from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -6244,7 +6245,7 @@ async def sync_cninfo_announcements(request: AnnouncementSyncRequest) -> dict[st
             "failures": failures, "decision_eligible": False}
 
 
-async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, Any]:
+async def run_post_close_refresh_legacy(request: PostCloseRefreshRequest) -> dict[str, Any]:
     """Refresh all bounded post-close evidence in dependency order.
 
     This deliberately does not manufacture a green result when a provider has
@@ -6377,6 +6378,75 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
             await run_database_blocking(release_runtime_lease, db, POST_CLOSE_REFRESH_LEASE_KEY, lease_holder_id)
         except Exception as error:  # noqa: BLE001 - lease expiry remains a safe recovery path
             print(f"post-close refresh lease release failed: {safe_error_detail(str(error), 300)}")
+
+
+async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, Any]:
+    """Compatibility entry point backed by the isolated refresh orchestrator."""
+    trade_date = request.trade_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    core_symbols: list[str] = []
+
+    def load_core_symbols() -> list[Any]:
+        with db.transaction() as connection:
+            return connection.execute(
+                "SELECT symbol FROM quant.universe_members WHERE universe_key='core' AND enabled "
+                "ORDER BY priority,symbol LIMIT %s", (request.announcement_limit,)
+            ).fetchall()
+
+    async def akshare_stage() -> dict[str, Any]:
+        nonlocal core_symbols
+        rows = await run_database_blocking(load_core_symbols)
+        core_symbols = [str(row["symbol"]) for row in rows]
+        probe_symbol = core_symbols[0] if core_symbols else "000636.SZ"
+        return await akshare_probe(AkShareProbeRequest(
+            symbol=probe_symbol, trade_date=trade_date,
+            include_macro_cross_asset=request.include_macro_cross_asset, board_limit=30,
+        ))
+
+    async def announcements_stage() -> dict[str, Any]:
+        if not request.include_announcements or not core_symbols:
+            return {"status": "skipped", "reason": "disabled or core universe is empty"}
+        return await sync_cninfo_announcements(AnnouncementSyncRequest(
+            symbols=core_symbols, universe_key="core", start_date=trade_date - timedelta(days=45),
+            end_date=trade_date, max_pages_per_symbol=1,
+        ))
+
+    actions: dict[str, Callable[[], Any]] = {
+        "stale_fetch_runs": lambda: run_database_blocking(reconcile_stale_fetch_runs, FetchRunReconcileRequest(max_age_minutes=90)),
+        "analyst_text": lambda: run_database_blocking(reprocess_remote_reports, db, 500),
+        "all_a_universe": lambda: sync_market_universe(MarketUniverseSyncRequest()),
+        "full_market_daily": lambda: sync_full_market_daily(FullMarketDailySyncRequest(trade_date=trade_date)),
+        "index_context": lambda: sync_strategy_index_context(trade_date),
+        "close_market_snapshot": lambda: build_market_snapshot(MarketSnapshotRequest(session="close", universe_key="all_a", refresh_public_quotes=True)),
+        "akshare_supplements": akshare_stage,
+        "ths_industry_flow": lambda: sync_ths_industry_moneyflow(SectorFlowSyncRequest(trade_date=trade_date, provider="super")),
+        "ths_concept_flow_and_limit_strength": lambda: sync_ths_concept_signals(SectorFlowSyncRequest(trade_date=trade_date, provider="super")),
+        "limit_ladder": lambda: refresh_strategy_pattern_sources(trade_date),
+        "limit_lift_pattern_mining": lambda: run_strategy_pattern_mining(StrategyPatternMiningRequest(as_of_date=trade_date, refresh_limit_sources=False)),
+        "core_daily_controls": lambda: {"status": "skipped"},
+        "cninfo_announcements": announcements_stage,
+        "board_review": lambda: run_intraday_board_report(deliver=False),
+        "close_strategy_decision": lambda: run_strategy_decision(StrategyDecisionRequest(session="close", kind="all", limit=20, validate_tushare_realtime=False)),
+        "close_review": lambda: run_database_blocking(_persist_close_review, trade_date),
+        "analyst_outcomes": lambda: run_database_blocking(recompute_outcomes, trade_date),
+        "analyst_scorecards": lambda: run_database_blocking(recompute_scorecards, trade_date),
+        "analyst_expert_research": lambda: run_database_blocking(rebuild_analyst_research_for_date, trade_date),
+        "post_close_strategy": lambda: run_database_blocking(run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date)),
+        "research_snapshot": lambda: run_database_blocking(build_snapshot, SnapshotRequest(as_of_date=trade_date)),
+    }
+    return await run_post_close_refresh_orchestrated(
+        request, db=db, lease_key=POST_CLOSE_REFRESH_LEASE_KEY,
+        lease_seconds=post_close_refresh_lease_seconds, run_database_blocking=run_database_blocking,
+        acquire_lease=acquire_runtime_lease, renew_lease=renew_runtime_lease, release_lease=release_runtime_lease,
+        actions=actions, stage_order=(
+            "stale_fetch_runs", "analyst_text", "all_a_universe", "full_market_daily", "index_context",
+            "close_market_snapshot", "akshare_supplements", "ths_industry_flow", "ths_concept_flow_and_limit_strength",
+            "limit_ladder", "limit_lift_pattern_mining", "core_daily_controls", "cninfo_announcements",
+            "board_review", "close_strategy_decision", "close_review", "analyst_outcomes", "analyst_scorecards",
+            "analyst_expert_research", "post_close_strategy", "research_snapshot",
+        ), timeout_overrides={"akshare_supplements": 240.0, "limit_lift_pattern_mining": 120.0},
+        trade_date=trade_date,
+        safe_error_detail=safe_error_detail, json_safe=strategy_json_safe,
+    )
 
 
 def _persist_close_review(as_of_date: date) -> dict[str, Any]:
