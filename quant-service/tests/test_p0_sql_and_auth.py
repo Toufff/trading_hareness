@@ -15,9 +15,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from psycopg.types.json import Json
 
 from app.analyst_expert_research import rebuild_analyst_opinions
-from app.episode_lifecycle import ensure_signal_episode
+from app.episode_lifecycle import backfill_signal_event_episode_links, ensure_signal_episode
 from app.analyst_observations import persist_extraction_run, persist_observations_for_evidence
 from app.main import DailyBar, app, db, executor_saturated_response, upsert_bar
 from app.runtime_executors import ExecutorSaturatedError
@@ -231,6 +232,42 @@ class Phase1LedgerSqlIntegrationTests(unittest.TestCase):
             self.assertEqual(one["episode_id"], two["episode_id"])
             self.assertNotEqual(one["episode_id"], three["episode_id"])
             self.assertEqual(count, 2)
+        finally:
+            self._cleanup()
+
+    def test_episode_accepts_live_rule_payload_with_explicit_symbol(self) -> None:
+        """Live signal rule payloads need not repeat the enclosing watch symbol."""
+        self._cleanup()
+        first_at = datetime(2099, 1, 2, 1, 0, tzinfo=timezone.utc)
+        try:
+            with db.transaction() as connection:
+                connection.execute("INSERT INTO quant.instruments(symbol,exchange,name) VALUES(%s,'SZ','Phase1')", (self.symbol,))
+                signal = {"signal_key": f"{self.symbol}:watch:volume_anomaly", "signal_type": "watch",
+                          "conditions": {"price": 10.0, "volume_ratio": 2.0}}
+                episode = ensure_signal_episode(connection, signal, first_at, "confirming", symbol=self.symbol)
+            self.assertTrue(episode["episode_id"])
+        finally:
+            self._cleanup()
+
+    def test_backfill_links_legacy_event_without_external_io(self) -> None:
+        self._cleanup()
+        first_at = datetime(2099, 1, 2, 1, 0, tzinfo=timezone.utc)
+        event_id = None
+        try:
+            with db.transaction() as connection:
+                connection.execute("INSERT INTO quant.instruments(symbol,exchange,name) VALUES(%s,'SZ','Phase1')", (self.symbol,))
+                event_id = connection.execute(
+                    """INSERT INTO quant.intraday_signal_events(symbol,signal_key,signal_type,severity,state,score,observed_at,conditions,evidence,risk_flags)
+                       VALUES(%s,%s,'watch','info','confirming',1,%s,%s,%s,%s) RETURNING signal_event_id""",
+                    (self.symbol, f"{self.symbol}:watch:volume_anomaly", first_at,
+                     Json({"price": 10.0, "volume_ratio": 2.0}), Json({}), Json([])),
+                ).fetchone()["signal_event_id"]
+                result = backfill_signal_event_episode_links(connection, limit=10, symbols=[self.symbol])
+                linked = connection.execute(
+                    "SELECT episode_id FROM quant.intraday_signal_events WHERE signal_event_id=%s", (event_id,)
+                ).fetchone()["episode_id"]
+            self.assertEqual(result["linked"], 1)
+            self.assertIsNotNone(linked)
         finally:
             self._cleanup()
 

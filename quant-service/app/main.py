@@ -5367,7 +5367,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 if state == "confirmed" and not policy["allow_confirmation"]:
                     state = "confirming"
                 episode = None if signal["signal_type"] == "data_issue" else ensure_signal_episode(
-                    connection, signal, observed_at, state,
+                    connection, signal, observed_at, state, symbol=symbol,
                 )
                 signal["conditions"] = {**signal["conditions"], "episode": episode or {"state": "not_applicable"}}
                 evidence = {"tencent": quote, "tencent_order_book": order_book_feature, "tencent_minute": minute_feature,

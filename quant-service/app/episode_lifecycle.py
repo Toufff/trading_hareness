@@ -89,8 +89,18 @@ def session_date(observed_at: datetime) -> date:
 
 
 def ensure_signal_episode(connection: Any, signal: dict[str, Any], observed_at: datetime,
-                          event_state: str) -> dict[str, Any]:
-    symbol = str(signal["symbol"])
+                          event_state: str, *, symbol: str | None = None) -> dict[str, Any]:
+    """Attach a live/replay signal to its durable episode.
+
+    Live rule functions deliberately return strategy payloads without
+    duplicating the enclosing watch symbol.  Callers may therefore pass the
+    symbol explicitly; replay callers can continue using the historical
+    ``signal["symbol"]`` shape.  Keeping this boundary tolerant prevents a
+    missing presentation field from silently disabling episode persistence.
+    """
+    symbol = str(symbol or signal.get("symbol") or "")
+    if not symbol:
+        raise ValueError("signal episode requires a symbol")
     family = strategy_family(str(signal.get("signal_key") or ""))
     version = str(signal.get("strategy_version") or "live-research-contract-v1")
     direction = signal_direction(signal)
@@ -146,5 +156,54 @@ def clear_stale_signal_episodes(connection: Any, symbols: list[str], observed_at
     return len(row.fetchall())
 
 
-__all__ = ["EPISODE_CONTINUITY", "clear_stale_signal_episodes", "ensure_signal_episode",
+def backfill_signal_event_episode_links(connection: Any, *, limit: int = 10000,
+                                        symbols: list[str] | None = None) -> dict[str, int]:
+    """Repair event rows written before live callers passed their symbol.
+
+    This is a local evidence repair only: it reads existing event payloads,
+    creates/reuses the same deterministic episodes, and updates the foreign
+    key plus materialized stage/hash.  It never calls a provider and leaves
+    the original event conditions/evidence untouched.  The bounded limit
+    makes accidental invocation safe on a large database.
+    """
+    maximum = max(1, min(int(limit), 10000))
+    if symbols:
+        rows = connection.execute(
+            """SELECT signal_event_id,symbol,signal_key,signal_type,state,observed_at,conditions
+                 FROM quant.intraday_signal_events
+                WHERE episode_id IS NULL AND signal_type <> 'data_issue' AND symbol=ANY(%s)
+                ORDER BY observed_at ASC,created_at ASC
+                LIMIT %s""",
+            (symbols, maximum),
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """SELECT signal_event_id,symbol,signal_key,signal_type,state,observed_at,conditions
+                 FROM quant.intraday_signal_events
+                WHERE episode_id IS NULL AND signal_type <> 'data_issue'
+                ORDER BY observed_at ASC,created_at ASC
+                LIMIT %s""",
+            (maximum,),
+        ).fetchall()
+    linked = 0
+    created_or_reused: set[str] = set()
+    for raw_row in rows:
+        row = dict(raw_row)
+        signal = {"signal_key": str(row["signal_key"]), "signal_type": str(row["signal_type"]),
+                  "conditions": dict(row.get("conditions") or {})}
+        episode = ensure_signal_episode(connection, signal, row["observed_at"], str(row["state"]),
+                                        symbol=str(row["symbol"]))
+        connection.execute(
+            """UPDATE quant.intraday_signal_events
+                  SET episode_id=%s,material_state_hash=%s,stage=%s
+                WHERE signal_event_id=%s AND episode_id IS NULL""",
+            (episode["episode_id"], episode["material_state_hash"], episode["stage"], row["signal_event_id"]),
+        )
+        linked += 1
+        created_or_reused.add(str(episode["episode_id"]))
+    return {"examined": len(rows), "linked": linked, "episodes_touched": len(created_or_reused),
+            "remaining": max(0, len(rows) - linked) if len(rows) < maximum else -1}
+
+
+__all__ = ["EPISODE_CONTINUITY", "backfill_signal_event_episode_links", "clear_stale_signal_episodes", "ensure_signal_episode",
            "material_state_hash", "material_state_payload", "session_date", "signal_stage", "strategy_family"]
