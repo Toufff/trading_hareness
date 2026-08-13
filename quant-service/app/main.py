@@ -140,6 +140,11 @@ from .intraday_outcomes import (
     intraday_signal_outcome_metrics,
     a_share_return_decomposition,
 )
+from .intraday_scan_repository import persist_intraday_scan_terminal
+from .market_session_repository import (
+    realtime_market_session as read_realtime_market_session,
+    realtime_market_session_async as read_realtime_market_session_async,
+)
 from .intraday_signal_policy import (
     signal_event_state as intraday_signal_event_state,
     signal_material_change as intraday_signal_material_change,
@@ -5174,22 +5179,6 @@ async def latest_intraday_fast_quote_confirmations(symbols: list[str], quotes: d
             for symbol in symbols}
 
 
-def persist_intraday_scan_terminal(scan_id: uuid.UUID, observed_at: datetime, status: str,
-                                   requested_symbols: list[str], source_status: dict[str, Any],
-                                   summary: dict[str, Any], provider_failure: str | None = None) -> None:
-    """Write a terminal scan state from the bounded database executor."""
-    with db.transaction() as connection:
-        if provider_failure:
-            record_provider_failure(connection, "tencent_free", "realtime_quote", provider_failure)
-        connection.execute(
-            """INSERT INTO quant.intraday_scan_runs(
-                   scan_id,observed_at,status,requested_symbols,source_status,summary
-               ) VALUES(%s,%s,%s,%s,%s,%s)""",
-            (scan_id, observed_at, status, Json(requested_symbols),
-             Json(strategy_json_safe(source_status)), Json(summary)),
-        )
-
-
 def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, selected_symbols: list[str],
                                   source_status: dict[str, Any], watches: list[dict[str, Any]],
                                   quotes: dict[str, dict[str, Any]], tencent_rows: list[dict[str, Any]],
@@ -5448,14 +5437,14 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
     scan_id = uuid.uuid4()
     if not active:
         await run_database_blocking(
-            persist_intraday_scan_terminal, scan_id, observed_at, "blocked", request.symbols,
+            persist_intraday_scan_terminal, db, scan_id, observed_at, "blocked", request.symbols,
             {"session": reason}, {"watched": len(watches)},
         )
         return finish({"status": "blocked", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(), "reason": reason, "alerts": []})
     retry_summary = await retry_pending_intraday_alerts()
     if not watches:
         await run_database_blocking(
-            persist_intraday_scan_terminal, scan_id, observed_at, "completed", request.symbols,
+            persist_intraday_scan_terminal, db, scan_id, observed_at, "completed", request.symbols,
             {"tencent": "skipped"}, {"watched": 0},
         )
         return finish({"status": "completed", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(), "alerts": [],
@@ -7504,43 +7493,11 @@ def tencent_snapshot_quotes(rows: list[dict[str, Any]], exchange_date: date) -> 
 
 
 def realtime_market_session(api_name: str | None = None, now: datetime | None = None) -> tuple[bool, str]:
-    active, reason = china_futures_session(now) if api_name == "rt_fut_min" else china_equity_session(now)
-    if not active:
-        return active, reason
-    today = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("Asia/Shanghai")).date()
-    with db.transaction() as connection:
-        calendar = connection.execute(
-            "SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s", (today,)
-        ).fetchone()
-    if calendar is None:
-        return False, "SSE trade calendar has no entry for today; fail closed"
-    if not calendar["is_open"]:
-        return False, "SSE trade calendar marks today closed"
-    return True, reason
+    return read_realtime_market_session(db, api_name, now)
 
 
 async def realtime_market_session_async(api_name: str | None = None, now: datetime | None = None) -> tuple[bool, str]:
-    """Async-loop-safe exchange calendar gate for live provider paths."""
-    active, reason = china_futures_session(now) if api_name == "rt_fut_min" else china_equity_session(now)
-    if not active:
-        return active, reason
-    today = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("Asia/Shanghai")).date()
-
-    def load_calendar() -> Any:
-        with db.transaction() as connection:
-            return connection.execute(
-                "SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s", (today,)
-            ).fetchone()
-
-    try:
-        calendar = await run_database_blocking(load_calendar)
-    except ExecutorSaturatedError as error:
-        return False, f"local calendar capacity unavailable; fail closed: {safe_error_detail(str(error), 180)}"
-    if calendar is None:
-        return False, "SSE trade calendar has no entry for today; fail closed"
-    if not calendar["is_open"]:
-        return False, "SSE trade calendar marks today closed"
-    return True, reason
+    return await read_realtime_market_session_async(db, api_name, now, database_runner=run_database_blocking)
 
 
 def quote_is_for_exchange_date(quote: dict[str, Any], exchange_date: date) -> bool:

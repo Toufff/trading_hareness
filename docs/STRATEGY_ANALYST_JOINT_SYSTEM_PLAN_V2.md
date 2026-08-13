@@ -570,7 +570,7 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 2026-08-14 runner 验收发现：外部 runner 默认约 60 秒空闲退出，旧 Code-node 同步流会出现 `No matching task offer ... type javascript`。现行同步流无 Code 节点，已从该运行时依赖中移除；`N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT=900` 仅保留给其他工作流。同步服务另有共享请求间隔、`Retry-After` 和 3 次有界重试；随后完成 10 次连续空增量成功验收。
 - 新增只读 `/api/v1/strategy/health` 与前端“策略健康与漂移”卡：展示 7 日触发频率、独立 episode、30 分钟成熟结果、报价新鲜度及 200 信号/60 交易日门禁。它只做研究监控，明确 `live_effect=none`，不会在线调参、晋级策略或改变分析师权重。
 - 新增研究存储水位治理：健康接口和前端显示量化热库/受管研究空间用量；默认热库 8 GiB、总研究空间 20 GiB，达到 80% 仅告警，达到 90% 暂停盘口、1 秒 `rt_k`、分钟档案和板块曲线等非必要高频原始证据。观察池报价、风险提醒、outbox 与结算不受影响，也不自动删除证据。当前实测热库约 1.32 GiB（16.5%），总受管空间约 1.32 GiB（6.6%），状态 healthy。
-- 验收：quant-service 全量 294 项 Python 测试通过，前端 typecheck/Vite build 通过；开盘预检通过，健康接口为 `ok`，迁移为 `20260815_0031`，Prompt Lab 当前无候选且 live_effect=none（符合历史不回填和数据门禁）。
+- 验收：quant-service 全量 297 项 Python 测试通过，前端 typecheck/Vite build 通过；开盘预检通过，健康接口为 `ok`，迁移为 `20260815_0031`，Prompt Lab 当前无候选且 live_effect=none（符合历史不回填和数据门禁）。
 - 2026-08-14 本地修复：盘中纯确认/去重策略已移至 `app/intraday_signal_policy.py`；历史事件 episode 链接修复后，3,460 条事件中非 `data_issue` 均有 episode，策略健康页显示 61 个独立 episode。该修复不访问 provider、不改变阈值。
 - 2026-08-14 组合风险补强：纸面组合快照按当前精确板块成员拆分暴露，新 entry 会经过 20% 板块集中度门禁；前端展示净值、总/净暴露、回撤、板块暴露和风险事件。组合级自动熔断和策略健康自动降级仍受 P3 样本门禁约束。
 - 2026-08-14 点时修复：纸面快照和盘中候选的板块成员查询均按 `effective_from/effective_to` 对齐观察日，避免成员变更后用未来映射解释旧证据；新增回归覆盖上海日期边界。

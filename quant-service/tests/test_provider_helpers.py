@@ -31,6 +31,8 @@ from app.intraday_evidence_read_model import latest_scan as read_latest_intraday
 from app.market_result_read_model import market_snapshots as read_market_snapshots, tushare_raw as read_tushare_raw
 from app.http_clients import alert_http_client, alert_http_client_status, close_http_clients, provider_http_client, provider_http_client_status, public_http_client, public_http_client_status, start_http_clients
 from app.intraday_runtime_status import load_intraday_runtime_evidence
+from app.intraday_scan_repository import persist_intraday_scan_terminal
+from app.market_session_repository import realtime_market_session as read_market_session, realtime_market_session_async as read_market_session_async
 from app.intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload
 from app.health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
 from app.alert_transport import post_feishu_alert_text
@@ -115,6 +117,52 @@ from app.main import sync_runtime_provider_rate_limits
 
 
 class ProviderHelperTests(unittest.TestCase):
+    def test_intraday_terminal_repository_records_failure_latency(self):
+        connection = MagicMock()
+        database = MagicMock()
+        database.transaction.return_value.__enter__.return_value = connection
+        scan_id = uuid.uuid4()
+
+        with patch("app.intraday_scan_repository.record_provider_failure") as record_failure:
+            persist_intraday_scan_terminal(
+                database, scan_id, datetime(2026, 8, 13, 3, tzinfo=timezone.utc), "completed",
+                ["600000.SH"], {"tencent": "unavailable"}, {"watched": 1},
+                provider_failure="upstream timeout", provider_latency_ms=234,
+            )
+
+        record_failure.assert_called_once_with(
+            connection, "tencent_free", "realtime_quote", "upstream timeout", 234,
+        )
+        sql = connection.execute.call_args.args[0]
+        self.assertIn("INSERT INTO quant.intraday_scan_runs", sql)
+        self.assertEqual(connection.execute.call_args.args[1][0], scan_id)
+
+    def test_market_session_repository_fails_closed_without_calendar_row(self):
+        connection = MagicMock()
+        connection.execute.return_value.fetchone.return_value = None
+        database = MagicMock()
+        database.transaction.return_value.__enter__.return_value = connection
+        active, reason = read_market_session(
+            database, now=datetime(2026, 8, 13, 2, 0, tzinfo=timezone.utc),
+        )
+        self.assertFalse(active)
+        self.assertIn("no entry", reason)
+        self.assertEqual(connection.execute.call_args.args[1], (date(2026, 8, 13),))
+
+    async def _run_market_session_async(self):
+        database = MagicMock()
+        database.transaction.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {"is_open": True}
+        async def runner(action, *args, **kwargs):
+            return action(*args)
+        active, reason = await read_market_session_async(
+            database, now=datetime(2026, 8, 13, 2, 0, tzinfo=timezone.utc), database_runner=runner,
+        )
+        self.assertTrue(active)
+        self.assertIn("session", reason)
+
+    def test_market_session_repository_async_keeps_calendar_offload_contract(self):
+        asyncio.run(self._run_market_session_async())
+
     def test_runtime_tushare_rate_limits_are_mirrored_without_secrets(self):
         connection = MagicMock()
         primary = MagicMock(key="tushare_primary", rate_limit_per_minute=61)
