@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+import math
 from typing import Any, Callable
 
 
@@ -55,7 +56,7 @@ def select_candidates(
             continue
         limit_amount = float(raw.get("limit_amount") or 0)
         turnover = float(raw.get("turnover_rate") or 0)
-        selection_score = streak * 20 + float(board.get("flow_percentile") or 0) * 18 + min(18, __import__("math").log10(max(1, limit_amount)) * 2)
+        selection_score = streak * 20 + float(board.get("flow_percentile") or 0) * 18 + min(18, math.log10(max(1, limit_amount)) * 2)
         if daily.get("ground_to_sky_daily_shape"):
             selection_score += 35
         if lhb_context and float(lhb_context.get("institution_net_buy") or 0) > 0:
