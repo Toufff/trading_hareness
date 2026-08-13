@@ -2825,6 +2825,22 @@ _intraday_all_a_snapshot_inflight: asyncio.Task[list[dict[str, Any]]] | None = N
 INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS = 30.0
 
 
+def consume_background_task_exception(task: asyncio.Task[Any]) -> None:
+    """Observe a detached task failure without changing await semantics.
+
+    A watch scan has a two-second budget for the optional all-A percentile
+    snapshot.  That task is intentionally allowed to finish in the background;
+    consuming an eventual exception prevents an unobserved-task warning while
+    a later scan may still await the same shared task normally.
+    """
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        return
+
+
 async def intraday_all_a_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Return one shared, explicitly aged all-A flow cross-section.
 
@@ -2843,6 +2859,7 @@ async def intraday_all_a_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any
         _intraday_all_a_snapshot_inflight = asyncio.create_task(
             run_akshare_blocking(akshare_tencent_all_a_spot, timeout_seconds=20),
         )
+        _intraday_all_a_snapshot_inflight.add_done_callback(consume_background_task_exception)
     try:
         rows = await asyncio.shield(_intraday_all_a_snapshot_inflight)
     finally:
@@ -5236,6 +5253,7 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
                        "notice": "没有启用的观察/持仓标的；先通过 watchlists API 显式添加。"})
     quote_started_at = asyncio.get_running_loop().time()
     all_a_task = asyncio.create_task(intraday_all_a_snapshot())
+    all_a_task.add_done_callback(consume_background_task_exception)
     watch_quote_task = asyncio.create_task(tencent_order_book_quotes(selected_symbols, max_symbols=40))
     try:
         fresh_watch_rows = await watch_quote_task
