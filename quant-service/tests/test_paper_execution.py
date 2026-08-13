@@ -3,6 +3,7 @@ from decimal import Decimal
 import unittest
 
 from app.paper_execution import estimate_cost, paper_tradability, round_lot, triple_barrier_label
+from app.paper_execution_service import configure_paper_account
 from app.strategy_ablation import ablation_scores
 from app.paper_portfolio import paper_risk_gate
 from app.strategy_contracts import EvidenceRef, SignalSpec, contract_payload
@@ -15,6 +16,25 @@ class PaperExecutionTests(unittest.TestCase):
         self.assertLess(scores["analyst_shadow_score"], scores["market_only_score"])
         self.assertEqual(scores["applied_score"], scores["market_only_score"])
         self.assertEqual(scores["shadow_weight"], 0.1)
+
+    def test_filled_shared_paper_ledger_cannot_reset_cash(self):
+        class FilledConnection:
+            def execute(self, sql, params=None):
+                class Result:
+                    def __init__(self, row):
+                        self.row = row
+
+                    def fetchone(self):
+                        return self.row
+                if "SELECT cash FROM quant.paper_accounts" in sql:
+                    return Result({"cash": Decimal("10000")})
+                if "SELECT EXISTS(SELECT 1 FROM quant.paper_order_fills)" in sql:
+                    return Result({"exists": True})
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+        with self.assertRaisesRegex(ValueError, "filled activity"):
+            configure_paper_account(FilledConnection(), account_key="default",
+                                    initial_cash=Decimal("1000"), configured_by="test")
     def test_round_lot_and_t_plus_one_are_conservative(self):
         self.assertEqual(round_lot(249), 200)
         result = paper_tradability(side="sell", requested_quantity=100, quote={"price": 10},
