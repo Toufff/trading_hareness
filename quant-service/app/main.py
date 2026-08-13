@@ -2821,6 +2821,7 @@ INTRADAY_ALERT_MAX_ATTEMPTS = 3
 # basket.  Entries expire quickly and are pruned in ``intraday_tencent_surge_context``.
 _intraday_tencent_minute_cache: dict[str, tuple[float, dict[str, Any] | None, str | None]] = {}
 _intraday_all_a_snapshot_cache: tuple[float, list[dict[str, Any]]] | None = None
+_intraday_all_a_snapshot_inflight: asyncio.Task[list[dict[str, Any]]] | None = None
 INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS = 30.0
 
 
@@ -2832,13 +2833,21 @@ async def intraday_all_a_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any
     all-A response cannot make a 10-second watch scan pretend its price is
     fresh. The age is carried into the scan evidence.
     """
-    global _intraday_all_a_snapshot_cache
+    global _intraday_all_a_snapshot_cache, _intraday_all_a_snapshot_inflight
     now = asyncio.get_running_loop().time()
     cached = _intraday_all_a_snapshot_cache
     if cached is not None and now - cached[0] <= INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS:
         return cached[1], {"status": "cached", "age_seconds": round(now - cached[0], 3),
                            "ttl_seconds": INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS}
-    rows = await run_akshare_blocking(akshare_tencent_all_a_spot, timeout_seconds=20)
+    if _intraday_all_a_snapshot_inflight is None or _intraday_all_a_snapshot_inflight.done():
+        _intraday_all_a_snapshot_inflight = asyncio.create_task(
+            run_akshare_blocking(akshare_tencent_all_a_spot, timeout_seconds=20),
+        )
+    try:
+        rows = await asyncio.shield(_intraday_all_a_snapshot_inflight)
+    finally:
+        if _intraday_all_a_snapshot_inflight is not None and _intraday_all_a_snapshot_inflight.done():
+            _intraday_all_a_snapshot_inflight = None
     _intraday_all_a_snapshot_cache = (now, rows)
     return rows, {"status": "fresh", "age_seconds": 0.0, "ttl_seconds": INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS}
 
