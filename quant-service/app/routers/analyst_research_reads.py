@@ -53,6 +53,7 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
 
     @router.get("/api/v1/analyst-research/sync-health")
     def sync_health() -> dict[str, Any]:
+        workflow_health: list[dict[str, Any]] = []
         with database.transaction() as connection:
             cursors = connection.execute(
                 """SELECT stream_key,remote_analyst_id,received_at,message_ids,report_versions,updated_at
@@ -62,6 +63,29 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 """SELECT promotion_key,methodology_version,status,max_live_weight,approved_by,approved_at,reason,updated_at
                      FROM quant.analyst_promotion_registry ORDER BY promotion_key"""
             ).fetchall()
+            try:
+                workflow_rows = connection.execute(
+                    """SELECT w.id,w.active,
+                                  (w."activeVersionId" IS NOT NULL
+                                   AND w."activeVersionId"=p."publishedVersionId") AS published,
+                                  e.status AS latest_execution_status,e."startedAt" AS latest_started_at,
+                                  e."stoppedAt" AS latest_stopped_at
+                             FROM public.workflow_entity w
+                        LEFT JOIN public.workflow_published_version p ON p."workflowId"=w.id
+                        LEFT JOIN LATERAL (
+                            SELECT status,"startedAt","stoppedAt"
+                              FROM public.execution_entity
+                             WHERE "workflowId"=w.id AND "deletedAt" IS NULL
+                             ORDER BY "startedAt" DESC NULLS LAST,id DESC LIMIT 1
+                        ) e ON TRUE
+                            WHERE w.id IN ('remoteArchiveReports123','remoteArchiveMessages123')
+                            ORDER BY w.id"""
+                ).fetchall()
+                workflow_health = [dict(row) for row in workflow_rows]
+            except Exception:
+                # The quant schema can be deployed without n8n's public schema
+                # in an isolated environment; sync evidence remains usable.
+                workflow_health = []
         now = datetime.now(timezone.utc)
         stream_health: list[dict[str, Any]] = []
         for stream_key in ("reports", "messages"):
@@ -82,6 +106,7 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 "notice": "no successful cursor advance is recorded" if latest is None else None,
             })
         return {"cursors": [dict(row) for row in cursors], "stream_health": stream_health,
+                "workflow_health": workflow_health,
                 "promotion_registry": [dict(row) for row in promotion],
                 "live_effect": "none_until_explicit_approval", "boundary": "remote sync health is read-only",
                 "runtime_verification": "pending_next_scheduled_execution"}
