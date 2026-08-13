@@ -1,0 +1,63 @@
+# 量化与分析师联合系统计划完成矩阵
+
+更新时间：2026-08-14。本文是四份主计划的当前状态索引，不把历史数据、回放样本或统计晋级缺口伪装成完成。
+
+## 状态定义
+
+- **已完成**：代码、测试和运行态均有直接证据。
+- **研究中**：在线证据已落库，但统计门禁尚未满足；不影响实时规则、不自动调参。
+- **暂停**：需要用户明确授权或外部资源，当前不执行。
+- **工程余项**：不改变策略结论的工程加固，允许继续渐进推进。
+
+## P0 数据与因果正确性
+
+| 项目 | 状态 | 当前证据 |
+| --- | --- | --- |
+| 复权研究价与原始执行价分离 | 已完成止血 | `app/research_prices.py`；生产特征、盘后结构和 factor lab 使用 `research_*`；缺因子显式阻断 |
+| ST、停牌、涨跌停和时区门禁 | 已完成 | `P0_DATA_CORRECTNESS_STATUS.md`；四种涨跌停规则、上海日期和 `upsert_bar` SQL 回归 |
+| 实时市场/数据/纸面风险 gate | 已完成 | `app/live_policy.py`、`app/paper_portfolio.py`；risk-off、质量、T+1、日亏、回撤、单票和板块集中度均可解释阻断 |
+| 盘后同日完成语义 | 已完成 | latest-attempt/latest-completed 分离及回归测试 |
+| 分析师唯一 promotion registry | 已完成（默认零权重） | `app/analyst_promotion.py`；未人工批准永远 `weight=0` |
+
+## P1 运行工程
+
+| 项目 | 状态 | 当前证据 |
+| --- | --- | --- |
+| provider registry、共享限频、有限重试、熔断 | 已完成 | Tushare/公共源独立 client、Retry-After、跨副本预约和 health |
+| 成功/失败延迟与错误脱敏 | 已完成主要路径 | `provider_health.py`；Tushare、腾讯、Sina、AKShare 失败耗时进入 health/Prometheus |
+| 盘中调度、租约、outbox、飞书恢复 | 已完成 | 开盘预检、`runtime_leases`、投递回执和连续失败治理 |
+| 存储/备份/恢复前校验 | 已完成 | 20 GiB 研究预算、保留策略、`pg_restore -l` manifest 校验 |
+| 纸面组合展示 | 已完成 | 前端展示净值、总/净暴露、回撤、可卖量和板块暴露；成员按观察日点时映射 |
+| 原生 async repository | 工程余项 | 当前同步 psycopg 已全部经有界执行器隔离；后续逐模块替换 |
+| `main.py` 完全拆分 | 工程余项 | router/read-model/纯规则已拆出，剩余服务函数继续机械迁移 |
+
+## P2 数据地基与 P3 验证
+
+| 项目 | 状态 | 准入条件 |
+| --- | --- | --- |
+| 3–5 年日线、复权、停牌、涨跌停、退市点时成员 | 暂停 | 用户授权范围、provider 预算和存储预算 |
+| 历史分钟回放 | 暂停 | 本地离线分钟文件或明确回填授权；策略必须复用 live `SignalSpec` |
+| T+1/涨跌停/停牌/费用/滑点回放撮合 | 研究中 | P2 数据先就绪，再跑事件时钟回放 |
+| purged walk-forward、embargo、DSR/PBO | 暂停 | 至少 60 aligned days、200 独立成熟信号、每 cohort 30 条 |
+| 盘中阈值重校准 | 禁止启动 | P3 样本门禁通过且样本外胜出规则基线 |
+
+## 分析师与模型演化
+
+| 项目 | 状态 | 当前边界 |
+| --- | --- | --- |
+| 报告/消息差量同步、`received_at`、版本和文字证据 | 已完成 | 不下载远端图片、音视频或媒体 URL；报告与消息支路独立 |
+| 分析师观点 outcome 与专家画像 | 研究中 | 当前成熟 outcome/eligible 样本不足，权重保持零 |
+| Prompt Lab champion/challenger | 暂停 | 先需要人工金标、200 成熟动作/60 日和固定时间切分 |
+| RL / contextual bandit | 暂停 | 只能在 Phase 0–5 通过后离线 challenger，不得改 live champion |
+
+## 当前验收证据
+
+- quant-service：290 项 Python 测试通过。
+- frontend：`vue-tsc --noEmit` 和 Vite build 通过；仅有 chunk size 优化警告。
+- 开盘预检：compose、数据库迁移 `20260815_0031`、10 条后台租约、共享 provider pacing、30s/10s/1s/60s 节奏、飞书和可恢复备份均通过。
+- 最近提交：`44d9dd3`（纸面板块成员按观察日点时修复）。
+- 当前工作树干净，提交已推送到 `origin/main`。
+
+## 下一次恢复条件
+
+在用户明确授权历史数据之前，只继续做不改变研究结论的工程余项；一旦授权，先执行 P2 数据就绪审计，再开启分钟回放，最后才允许 P3 统计验证。任何未通过项继续保持 `research_only` / `descriptive_only`，不得写入 live 阈值或分析师权重。
