@@ -4790,6 +4790,14 @@ def intraday_order_book_retention_days() -> int:
         return 7
 
 
+def intraday_order_book_max_symbols() -> int:
+    """Bound a single Tencent depth batch without silently losing watches."""
+    try:
+        return max(1, min(80, int(os.getenv("INTRADAY_ORDER_BOOK_MAX_SYMBOLS", "40"))))
+    except ValueError:
+        return 40
+
+
 def persist_intraday_order_book_observations(observed_at: datetime, rows: list[dict[str, Any]], latency_ms: int) -> int:
     """Persist raw order-book evidence plus derived observational features."""
     stored = 0
@@ -4841,13 +4849,14 @@ def persist_intraday_order_book_failure(error: str) -> None:
 
 async def capture_intraday_order_book_snapshot(symbols: list[str]) -> dict[str, Any]:
     """Capture one pooled, bounded depth snapshot for the explicit watchlist."""
-    selected = list(dict.fromkeys(str(symbol).upper() for symbol in symbols if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(symbol).upper())))[:20]
+    max_symbols = intraday_order_book_max_symbols()
+    selected = list(dict.fromkeys(str(symbol).upper() for symbol in symbols if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(symbol).upper())))[:max_symbols]
     if not selected:
         return {"status": "completed", "requested": 0, "stored": 0}
     started_at = asyncio.get_running_loop().time()
     observed_at = datetime.now(timezone.utc)
     try:
-        rows = await tencent_order_book_quotes(selected)
+        rows = await tencent_order_book_quotes(selected, max_symbols=max_symbols)
         latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
         stored = await run_database_blocking(
             persist_intraday_order_book_observations, observed_at, rows, latency_ms,
@@ -4874,7 +4883,8 @@ async def intraday_order_book_loop() -> None:
             def load_watches() -> list[Any]:
                 with db.transaction() as connection:
                     return connection.execute(
-                        "SELECT symbol FROM quant.intraday_watchlists WHERE enabled ORDER BY updated_at DESC,symbol LIMIT 20"
+                        "SELECT symbol FROM quant.intraday_watchlists WHERE enabled ORDER BY updated_at DESC,symbol LIMIT %s",
+                        (intraday_order_book_max_symbols(),),
                     ).fetchall()
             rows = await run_database_blocking(load_watches)
             local_date = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date()
@@ -7896,7 +7906,8 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
         ), timeout_seconds=120.0)
         if request.include_announcements and core_symbols:
             await stage("cninfo_announcements", lambda: sync_cninfo_announcements(AnnouncementSyncRequest(
-                symbols=core_symbols, universe_key="core", end_date=trade_date, lookback_days=45, max_pages_per_symbol=1,
+                symbols=core_symbols, universe_key="core", start_date=trade_date - timedelta(days=45),
+                end_date=trade_date, max_pages_per_symbol=1,
             )), timeout_seconds=120.0)
         else:
             stages["cninfo_announcements"] = {"status": "skipped", "reason": "disabled or core universe is empty", "latency_ms": 0}
@@ -7908,7 +7919,9 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
         await stage("close_review", lambda: run_database_blocking(_persist_close_review, trade_date))
         await stage("analyst_outcomes", lambda: run_database_blocking(recompute_outcomes, trade_date))
         await stage("analyst_scorecards", lambda: run_database_blocking(recompute_scorecards, trade_date))
-        await stage("analyst_expert_research", lambda: run_database_blocking(rebuild_analyst_research, trade_date))
+        await stage("analyst_expert_research", lambda: run_database_blocking(
+            rebuild_analyst_research_for_date, trade_date,
+        ))
         await stage("post_close_strategy", lambda: run_database_blocking(
             run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date)
         ))
@@ -7945,6 +7958,12 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
 def _persist_close_review(as_of_date: date) -> dict[str, Any]:
     with db.transaction() as connection:
         return strategy_review_payload(connection, StrategyReviewRequest(session="close", as_of_date=as_of_date, persist=True))
+
+
+def rebuild_analyst_research_for_date(as_of_date: date) -> dict[str, Any]:
+    """Run analyst research inside the service's durable DB transaction."""
+    with db.transaction() as connection:
+        return rebuild_analyst_research(connection, as_of_date)
 
 
 async def run_board_research(request: BoardResearchRunRequest) -> dict[str, Any]:
@@ -8759,6 +8778,7 @@ def intraday_services_status_payload() -> dict[str, Any]:
         board_curve_retention_days=intraday_board_curve_retention_days,
         board_rotation_retention_days=intraday_board_rotation_retention_days,
         daily_summary_automation_enabled=daily_summary_automation_enabled,
+        order_book_max_symbols=intraday_order_book_max_symbols,
     ))
 
 

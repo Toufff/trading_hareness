@@ -34,6 +34,7 @@ class IntradayStatusDependencies:
     board_curve_retention_days: Callable[[], int]
     board_rotation_retention_days: Callable[[], int]
     daily_summary_automation_enabled: Callable[[], bool]
+    order_book_max_symbols: Callable[[], int]
 
 
 def intraday_services_status_payload(deps: IntradayStatusDependencies) -> dict[str, Any]:
@@ -128,9 +129,9 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies) -> dict[s
             cadence="显式观察池批量每 3 秒", health_row=order_book_health,
             details={"persisted_rows": int(order_book_quote.get("rows") or 0),
                      "enabled_watch_count": int(watch_row["enabled"] or 0),
-                     "max_symbols": 20,
-                     "uncovered_watch_count": max(0, int(watch_row["enabled"] or 0) - 20),
-                     "scope": "最多 20 只观察池；特征仅观测，不改变触发阈值"},
+                     "max_symbols": deps.order_book_max_symbols(),
+                     "uncovered_watch_count": max(0, int(watch_row["enabled"] or 0) - deps.order_book_max_symbols()),
+                     "scope": "单个腾讯批量请求覆盖观察池；特征仅观测，不改变触发阈值"},
             startup_grace_seconds=20.0,
         ),
         runtime_item(

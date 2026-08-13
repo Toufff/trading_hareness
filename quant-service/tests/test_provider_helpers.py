@@ -337,6 +337,7 @@ class ProviderHelperTests(unittest.TestCase):
             fast_quote_retention_days=lambda: 7, board_curve_enabled=lambda: True,
             board_curve_retention_days=lambda: 60, board_rotation_retention_days=lambda: 60,
             daily_summary_automation_enabled=lambda: True,
+            order_book_max_symbols=lambda: 40,
         )
         with patch("app.intraday_status_read_model.load_intraday_runtime_evidence", return_value=evidence):
             payload = read_intraday_services_status_payload(dependencies)
@@ -344,6 +345,9 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(payload["timezone"], "Asia/Shanghai")
         self.assertEqual([item["key"] for item in payload["items"]][-1], "primary_realtime")
         self.assertEqual(next(item for item in payload["items"] if item["key"] == "primary_realtime")["state"], "unavailable")
+        order_book = next(item for item in payload["items"] if item["key"] == "tencent_order_book")
+        self.assertEqual(order_book["details"]["max_symbols"], 40)
+        self.assertEqual(order_book["details"]["uncovered_watch_count"], 0)
         database.transaction.assert_not_called()
 
     def test_health_read_model_uses_only_injected_local_dependencies(self):
@@ -1707,6 +1711,12 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual([call.args[0].__name__ for call in blocking.await_args_list], [
             "persist_market_events", "persist_announcement_provider_health",
         ])
+
+    def test_post_close_refresh_constructs_a_valid_cninfo_date_range_and_research_wrapper(self):
+        source = Path("app/main.py").read_text()
+        self.assertIn('start_date=trade_date - timedelta(days=45)', source)
+        self.assertIn('rebuild_analyst_research_for_date, trade_date', source)
+        self.assertIn('def rebuild_analyst_research_for_date(as_of_date: date)', source)
 
     def test_akshare_probe_persists_each_probe_step_in_database_executor(self):
         async def check() -> tuple[dict[str, object], AsyncMock]:
