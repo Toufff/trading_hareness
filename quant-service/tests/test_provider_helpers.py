@@ -98,7 +98,7 @@ from app.main import intraday_board_curve_session, intraday_board_curve_session_
 from app.main import AnnouncementSyncRequest, sync_cninfo_announcements
 from app.main import AkShareProbeRequest, akshare_probe, TushareCapabilityAuditRequest, audit_tushare_capabilities
 from app.main import stock_study_free_fetch
-from app.main import capture_intraday_super_get_fast_quote, intraday_tencent_surge_context, remote_archive_sync_bearer_allowed
+from app.main import capture_intraday_super_get_fast_quote, _remote_archive_get, intraday_tencent_surge_context, remote_archive_sync_bearer_allowed
 from app.main import stock_study_fetch
 from app.main import is_circuit_open_http_error, is_local_capacity_http_error
 from app.main import fetch_tushare_catalog
@@ -937,6 +937,20 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertFalse(remote_archive_sync_bearer_allowed(request("/api/v1/remote-archive/sync", None)))
         self.assertFalse(remote_archive_sync_bearer_allowed(request("/api/v1/remote-archive/sync", "Bearer too-short")))
         self.assertFalse(remote_archive_sync_bearer_allowed(request("/api/v1/remote-archive/messages/import", "Bearer " + "a" * 32)))
+
+    def test_remote_archive_get_honors_bounded_retry_after_for_429(self):
+        responses = [
+            httpx.Response(429, headers={"Retry-After": "1"}, text='{"error":"rate_limited"}'),
+            httpx.Response(503, text='{"error":"busy"}'),
+            httpx.Response(200, json={"items": []}),
+        ]
+        client = MagicMock()
+        client.get = AsyncMock(side_effect=responses)
+        settings = {"request_interval_seconds": 0.0}
+        with patch("app.main.remote_archive_sync_settings", return_value=settings), patch("app.main.asyncio.sleep", new=AsyncMock()):
+            result = asyncio.run(_remote_archive_get(client, "/messages/updates"))
+        self.assertEqual(result, {"items": []})
+        self.assertEqual(client.get.await_count, 3)
 
     def test_provider_failure_recording_redacts_credentials(self):
         connection = MagicMock()
