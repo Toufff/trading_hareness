@@ -281,6 +281,7 @@ from .request_models import (
 )
 from .remote_archive import (analyst_global_sync_cursor, analyst_sync_cursor, classify_remote_text, import_remote_analyst_message, import_remote_report, parse_optional_timestamp,
                              remote_report_list_state, reprocess_remote_messages, reprocess_remote_reports)
+from .remote_archive_transport import RemoteArchiveTransport
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -7578,8 +7579,7 @@ def remote_archive_sync_settings() -> dict[str, Any]:
 
 _remote_archive_sync_lock = asyncio.Lock()
 _remote_archive_sync_last_started = 0.0
-_remote_archive_request_lock = asyncio.Lock()
-_remote_archive_last_request_started = 0.0
+_remote_archive_transport = RemoteArchiveTransport()
 
 
 def _remote_archive_message_cursor_state() -> dict[str, Any]:
@@ -7591,43 +7591,10 @@ def _remote_archive_report_cursor_state(analyst_id: str) -> dict[str, Any]:
 
 
 async def _remote_archive_get(client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    """GET one remote text endpoint with a shared spacing gate and bounded retry.
-
-    The archive service applies a provider-wide quota rather than a per-route
-    quota. Keeping the gate outside the per-stream loops prevents a reports
-    catalog fanout from immediately starving the message cursor. Retry-After
-    is honored but bounded so a bad upstream cannot pin the background loop.
-    """
-    settings = remote_archive_sync_settings()
-    global _remote_archive_last_request_started
-    for attempt in range(4):
-        async with _remote_archive_request_lock:
-            elapsed = monotonic() - _remote_archive_last_request_started
-            spacing = float(settings["request_interval_seconds"]) - elapsed
-            if spacing > 0:
-                await asyncio.sleep(spacing)
-            _remote_archive_last_request_started = monotonic()
-            response = await client.get(path, params=params)
-        if not response.is_error:
-            try:
-                payload = response.json()
-            except ValueError as error:
-                raise HTTPException(status_code=502, detail="remote analyst archive returned invalid JSON") from error
-            if not isinstance(payload, dict):
-                raise HTTPException(status_code=502, detail="remote analyst archive returned an invalid JSON envelope")
-            return payload
-        retryable = response.status_code in {429, 500, 502, 503, 504}
-        if retryable and attempt < 3:
-            retry_after = response.headers.get("Retry-After", "")
-            try:
-                delay = float(retry_after)
-            except ValueError:
-                delay = 2.0 ** attempt
-            await asyncio.sleep(min(30.0, max(1.0, delay)))
-            continue
-        detail = response.text.strip().replace("\n", " ")[:160]
-        raise HTTPException(status_code=502, detail=f"remote analyst archive HTTP {response.status_code}: {detail or response.reason_phrase}")
-    raise HTTPException(status_code=502, detail="remote analyst archive request exhausted retries")
+    """Compatibility entry point backed by the shared archive transport."""
+    return await _remote_archive_transport.get(
+        client, path, params=params, settings=remote_archive_sync_settings(), sleep=asyncio.sleep,
+    )
 
 
 async def _sync_remote_archive_messages(client: httpx.AsyncClient, maximum: int) -> dict[str, Any]:
