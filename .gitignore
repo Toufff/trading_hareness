@@ -9,6 +9,7 @@ certs/
 # never be added to the public source repository.
 workflows/managed/
 scripts/build-*-workflow.mjs
+!scripts/build-remote-archive-sync-workflow.mjs
 scripts/fix-native-reserve.mjs
 scripts/harden-text-submit-workflow.mjs
 scripts/patch-feishu-workflow.mjs

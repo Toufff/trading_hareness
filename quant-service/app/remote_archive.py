@@ -634,3 +634,25 @@ def analyst_sync_cursor(db: Database, stream_key: str, analyst_id: str) -> dict[
     # Keep a top-level copy for n8n expressions.  The nested form stays for
     # callers that already treat this as a read-model envelope.
     return {"cursor": cursor, **cursor}
+
+
+def analyst_global_sync_cursor(db: Database, stream_key: str) -> dict[str, Any]:
+    """Read one opaque remote change-feed cursor without inferring its value.
+
+    The remote archive signs and owns the cursor.  On the first request the
+    caller instead supplies a bounded ``received_after`` bootstrap timestamp;
+    on every later request it sends only this stored token.
+    """
+    if stream_key != "message_updates":
+        raise ValueError("stream_key must be message_updates")
+    with db.transaction() as connection:
+        row = connection.execute(
+            """SELECT stream_key,remote_cursor,received_after,updated_at
+                 FROM quant.analyst_global_sync_cursors WHERE stream_key=%s""",
+            (stream_key,),
+        ).fetchone()
+    cursor = dict(row) if row else {
+        "stream_key": stream_key, "remote_cursor": None,
+        "received_after": None, "updated_at": None,
+    }
+    return {"cursor": cursor, **cursor}

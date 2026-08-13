@@ -191,7 +191,7 @@ from .market_rules import a_share_limit_ratio, china_equity_session, china_futur
 from .request_models import (
     AkShareProbeRequest,
     AnalystResearchProfileRequest,
-    AnalystSyncCursorUpdate,
+    AnalystSyncCursorUpdate, AnalystSyncGlobalCursorUpdate,
     AnnouncementSyncRequest,
     AllBoardMemberBackfillRequest,
     BarsImport,
@@ -234,7 +234,7 @@ from .request_models import (
     TushareSyncRequest,
     UniverseUpdateRequest,
 )
-from .remote_archive import (analyst_sync_cursor, classify_remote_text, import_remote_analyst_message, import_remote_report,
+from .remote_archive import (analyst_global_sync_cursor, analyst_sync_cursor, classify_remote_text, import_remote_analyst_message, import_remote_report,
                              remote_report_list_state, reprocess_remote_messages, reprocess_remote_reports)
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
@@ -9188,6 +9188,34 @@ def update_analyst_sync_cursor(payload: AnalystSyncCursorUpdate) -> dict[str, An
             "message_ids": len(message_ids), "report_versions": len(report_versions)}
 
 
+def update_analyst_global_sync_cursor(payload: AnalystSyncGlobalCursorUpdate) -> dict[str, Any]:
+    """Commit a remote change-feed page only after every item imported locally."""
+    with db.transaction() as connection:
+        current = connection.execute(
+            """SELECT remote_cursor,received_after FROM quant.analyst_global_sync_cursors
+                 WHERE stream_key=%s FOR UPDATE""",
+            (payload.stream_key,),
+        ).fetchone()
+        # A non-terminal page must preserve its signed next cursor.  A
+        # terminal page deliberately clears it and restarts next time from
+        # the page's final received_at (the remote contract is strict `>`),
+        # rather than replaying the final page forever.
+        remote_cursor = None if payload.terminal else (payload.cursor or (current["remote_cursor"] if current else None))
+        received_after = payload.received_after or (current["received_after"] if current else None)
+        connection.execute(
+            """INSERT INTO quant.analyst_global_sync_cursors(stream_key,remote_cursor,received_after,updated_at)
+               VALUES(%s,%s,%s,now())
+               ON CONFLICT(stream_key) DO UPDATE SET remote_cursor=EXCLUDED.remote_cursor,
+                 received_after=EXCLUDED.received_after,updated_at=now()""",
+            (payload.stream_key, remote_cursor, received_after),
+        )
+    return {
+        "status": "updated", "stream_key": payload.stream_key,
+        "has_cursor": bool(remote_cursor),
+        "received_after": received_after.isoformat() if received_after else None,
+    }
+
+
 def update_analyst_research_profile(analyst_id: str, payload: AnalystResearchProfileRequest) -> dict[str, Any]:
     with db.transaction() as connection:
         exists = connection.execute(
@@ -9471,8 +9499,8 @@ async def update_analyst_sync_cursor_endpoint(payload: AnalystSyncCursorUpdate) 
     return await run_database_blocking(update_analyst_sync_cursor, payload, timeout_seconds=30)
 
 
-async def update_analyst_sync_cursor_endpoint(payload: AnalystSyncCursorUpdate) -> dict[str, Any]:
-    return await run_database_blocking(update_analyst_sync_cursor, payload, timeout_seconds=30)
+async def update_analyst_global_sync_cursor_endpoint(payload: AnalystSyncGlobalCursorUpdate) -> dict[str, Any]:
+    return await run_database_blocking(update_analyst_global_sync_cursor, payload, timeout_seconds=30)
 
 
 app.include_router(build_research_actions_router(ResearchActionDependencies(
@@ -9490,6 +9518,7 @@ app.include_router(build_research_actions_router(ResearchActionDependencies(
     build_snapshot=build_snapshot_endpoint,
     update_analyst_research_profile=update_analyst_research_profile_endpoint,
     update_analyst_sync_cursor=update_analyst_sync_cursor_endpoint,
+    update_analyst_global_sync_cursor=update_analyst_global_sync_cursor_endpoint,
 )))
 
 

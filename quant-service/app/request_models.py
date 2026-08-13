@@ -344,6 +344,22 @@ class AnalystSyncCursorUpdate(BaseModel):
     report_versions: dict[str, str] = Field(default_factory=dict, max_length=500)
 
 
+class AnalystSyncGlobalCursorUpdate(BaseModel):
+    """Advance the opaque remote change-feed cursor after a fully imported page.
+
+    This intentionally differs from the per-analyst report/message watermarks:
+    remote ``/messages/updates`` owns pagination and returns a signed cursor.
+    Keeping it opaque prevents a local clock or offset from skipping equal-time
+    messages during a burst.
+    """
+
+    stream_key: Literal["message_updates"]
+    cursor: str | None = Field(default=None, max_length=4096)
+    received_after: datetime | None = None
+    terminal: bool = False
+    message_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
 class AnalystResearchProfileRequest(BaseModel):
     independence_class: Literal["unknown", "independent", "institutional", "promotional"] = "unknown"
     audience_size: int | None = Field(default=None, ge=0)

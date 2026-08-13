@@ -257,6 +257,7 @@ class ProviderHelperTests(unittest.TestCase):
             evaluate_factors=action, backtest=action, reconcile_fetch_runs=action, build_snapshot=action,
             update_analyst_research_profile=action,
             update_analyst_sync_cursor=action,
+            update_analyst_global_sync_cursor=action,
         ))
         methods_by_path = {route.path: route.methods for route in router.routes}
         for path in (
@@ -272,6 +273,7 @@ class ProviderHelperTests(unittest.TestCase):
             "/api/v1/analyst-research/profiles/{analyst_id}",
         ):
             self.assertEqual(methods_by_path[path], {"PUT"} if path.endswith("/{analyst_id}") else {"POST"})
+        self.assertEqual(methods_by_path["/api/v1/remote-archive/sync-cursors-global"], {"PUT"})
 
     def test_ingestion_actions_router_has_explicit_bounded_write_contracts(self):
         action = AsyncMock(return_value={"status": "ok"})
@@ -718,6 +720,7 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(methods_by_path["/api/v1/remote-archive/state"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/remote-archive/reports"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/remote-archive/messages"], {"GET"})
+        self.assertEqual(methods_by_path["/api/v1/remote-archive/sync-cursors-global/{stream_key}"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/analyst-claims"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/analyst-factors"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/claim-review"], {"GET"})

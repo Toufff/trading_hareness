@@ -1,17 +1,28 @@
 import unittest
 from datetime import date, datetime, timezone
+from unittest.mock import MagicMock
 
 from app.analyst_trade_actions import parse_anqiang_trade_actions
 from app.analyst_expert_research import EXPERT_DEFAULTS, HORIZONS, _clustered_mean, _cn_date, _herding_effective_sample, _pearson, _softmax_weights
 from app.analyst_skill_models import PROMPT_VARIANTS, _variant_payload
 from app.analyst_promotion import analyst_live_promotion
-from app.remote_archive import (classify_remote_text, evidence_fragments, explicitness, extract_topics, horizon_days,
+from app.remote_archive import (analyst_global_sync_cursor, classify_remote_text, evidence_fragments, explicitness, extract_topics, horizon_days,
                                 is_market_opinion, labels, normalize_topic_key, parse_optional_timestamp,
                                 report_topic_labels, text_hash, text_only_remote_message, text_only_remote_report)
 from app.analyst_observations import observation_action, observation_status
 
 
 class RemoteArchiveNormalizationTests(unittest.TestCase):
+    def test_global_message_cursor_defaults_to_an_opaque_empty_cursor(self):
+        connection = MagicMock()
+        connection.execute.return_value.fetchone.return_value = None
+        database = MagicMock()
+        database.transaction.return_value.__enter__.return_value = connection
+        cursor = analyst_global_sync_cursor(database, "message_updates")
+        self.assertEqual(cursor["stream_key"], "message_updates")
+        self.assertIsNone(cursor["remote_cursor"])
+        self.assertIsNone(cursor["received_after"])
+
     def test_horizon_and_sentiment_are_deterministic(self):
         self.assertEqual(horizon_days("明日关注"), 1)
         self.assertEqual(horizon_days("中线布局"), 20)

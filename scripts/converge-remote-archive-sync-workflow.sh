@@ -42,9 +42,9 @@ jq -e '
   type == "array" and length == 2 and
   ([.[].id] | sort == ["remoteArchiveMessages123", "remoteArchiveReports123"]) and
   ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.name == "Read report cursor")] | length == 1) and
-  ([.[] | select(.id == "remoteArchiveMessages123") | .nodes[] | select(.name == "Select message delta to watermark")] | length == 1) and
+  ([.[] | select(.id == "remoteArchiveMessages123") | .nodes[] | select(.name == "Select global message delta")] | length == 1) and
   ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.name == "Read latest report page") | .parameters.url | contains("remote_analyst_id")] | all) and
-  ([.[] | select(.id == "remoteArchiveMessages123") | .nodes[] | select(.name == "Read message pages") | .parameters.url | contains("remote_analyst_id")] | all) and
+  ([.[] | select(.id == "remoteArchiveMessages123") | .nodes[] | select(.name == "Read message updates") | .parameters.url | contains("/messages/updates")] | all) and
   ([.[] | .nodes[] | select(.name == "交易时段与盘后同步远端报告") | .parameters.rule.interval[].expression] | unique | sort == ["*/15 9-11,13-14 * * 1-5", "20 18 * * 1-5"])
 ' "$backup_dir/candidate.json" >/dev/null
 
