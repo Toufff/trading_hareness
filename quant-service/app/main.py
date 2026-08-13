@@ -284,6 +284,7 @@ from .remote_archive import (analyst_global_sync_cursor, analyst_sync_cursor, cl
 from .remote_archive_transport import RemoteArchiveTransport
 from .remote_archive_sync import RemoteArchiveSyncService
 from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrated
+from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -8524,23 +8525,14 @@ async def recommendations(payload: GenerateRequest) -> dict[str, Any]:
 
 
 async def run_daily_pipeline(payload: GenerateRequest) -> dict[str, Any]:
-    primary = await sync_tushare(TushareSyncRequest(trade_date=payload.as_of_date))
-    fallback = None
-    if primary["status"] in {"disabled", "partial", "failed"}:
-        fallback = await sync_baostock(TushareSyncRequest(trade_date=payload.as_of_date))
-    core = await sync_tushare_daily_core(payload.as_of_date or cn_today()) if primary["status"] in {"completed", "unchanged", "partial"} else None
-    sync = {"primary": primary, "fallback": fallback, "core": core}
-    snapshot = await run_database_blocking(
-        build_snapshot, SnapshotRequest(as_of_date=payload.as_of_date), timeout_seconds=30,
+    return await run_daily_pipeline_orchestrated(
+        payload, sync_tushare=sync_tushare, sync_baostock=sync_baostock,
+        sync_tushare_daily_core=sync_tushare_daily_core, tushare_request=TushareSyncRequest,
+        snapshot_request=lambda as_of: SnapshotRequest(as_of_date=as_of), build_snapshot=build_snapshot,
+        recompute_outcomes=recompute_outcomes, recompute_scorecards=recompute_scorecards,
+        generate_recommendations=generate_recommendations, run_database_blocking=run_database_blocking,
+        cn_today=cn_today,
     )
-    if snapshot["status"] != "ready":
-        return {"status": "blocked", "market_sync": sync, "snapshot": snapshot,
-                "reason": "行情数据或质量门禁未满足；没有生成候选池"}
-    outcomes = await run_database_blocking(recompute_outcomes, payload.as_of_date, timeout_seconds=60)
-    scorecard = await run_database_blocking(recompute_scorecards, payload.as_of_date, timeout_seconds=30)
-    result = await run_database_blocking(generate_recommendations, payload, timeout_seconds=30)
-    return {"status": "completed", "market_sync": sync, "snapshot": snapshot, "outcomes": outcomes,
-            "scorecards": scorecard, "recommendations": result}
 
 
 app.include_router(build_strategy_actions_router(StrategyActionDependencies(

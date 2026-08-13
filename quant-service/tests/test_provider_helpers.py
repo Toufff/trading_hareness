@@ -102,6 +102,7 @@ from app.post_close_structures import (
 from app.post_close_candidate_screen import screen_candidates
 from app.post_close_evidence import exact_board_context, lhb_context
 from app.post_close_refresh import run_refresh
+from app.daily_pipeline import run_pipeline
 from app.database import pool_settings
 from app.tushare_catalog import AUDITED_ADDITIONS_CATALOG, SUPPLIER_109_CATALOG, TUSHARE_CATALOG, catalog_counts
 from app.free_market_providers import _request_with_retry, classify_announcement_title, cninfo_stock_param, eastmoney_secid, free_provider_status, parse_sina_quote_batch, tencent_symbol
@@ -158,6 +159,25 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(calls, ["failed", "later"])
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["deferred_stages"], ["failed"])
+
+    def test_daily_pipeline_blocks_before_outcomes_when_snapshot_quality_is_not_ready(self):
+        async def sync(_payload):
+            return {"status": "completed"}
+
+        blocking = AsyncMock(return_value={"status": "blocked"})
+
+        async def check() -> dict[str, object]:
+            return await run_pipeline(
+                GenerateRequest(), sync_tushare=sync, sync_baostock=sync,
+                sync_tushare_daily_core=AsyncMock(return_value={"status": "completed"}),
+                tushare_request=TushareSyncRequest, snapshot_request=lambda as_of: {"as_of_date": as_of},
+                build_snapshot=MagicMock(), recompute_outcomes=MagicMock(), recompute_scorecards=MagicMock(),
+                generate_recommendations=MagicMock(), run_database_blocking=blocking, cn_today=lambda: date(2026, 8, 14),
+            )
+
+        result = asyncio.run(check())
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(blocking.await_count, 1)
     def test_post_close_evidence_aggregation_keeps_exact_board_and_deduplicates_lhb(self):
         boards = exact_board_context([
             {"symbol": "000001.SZ", "net_amount": 10, "label": "A"},
