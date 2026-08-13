@@ -248,6 +248,7 @@ class ProviderHelperTests(unittest.TestCase):
             review_claim=action, update_universe=action, build_features=action,
             evaluate_factors=action, backtest=action, reconcile_fetch_runs=action, build_snapshot=action,
             update_analyst_research_profile=action,
+            update_analyst_sync_cursor=action,
         ))
         methods_by_path = {route.path: route.methods for route in router.routes}
         for path in (
@@ -1306,7 +1307,7 @@ class ProviderHelperTests(unittest.TestCase):
             def fetchall(self):
                 return [{
                     "trading_date": date(2026, 7, day), "high": 10.5 + day / 10,
-                    "low": 9.5 + day / 10, "close": 10 + day / 10, "volume": 1000 + day,
+                    "low": 9.5 + day / 10, "close": 10 + day / 10, "volume": 1000 + day, "adj_factor": 1.0,
                 } for day in range(1, 26)]
 
         class VolumeConnection:
@@ -3206,7 +3207,7 @@ class ProviderHelperTests(unittest.TestCase):
         for index in range(15):
             close = 10.0 + (index % 3) * 0.05
             bars.append({"high": close + 0.08, "low": close - 0.08, "close": close,
-                         "volume": 100 if index < 12 else 60})
+                         "volume": 100 if index < 12 else 60, "adj_factor": 1.0})
         forming = post_close_forming_structure(bars)
         self.assertIn(forming["status"], {"forming", "not_ready"})
         self.assertEqual(forming["bar_count"], 15)
@@ -3220,6 +3221,14 @@ class ProviderHelperTests(unittest.TestCase):
         started = post_close_fresh_start_structure(fresh)
         self.assertEqual(started["status"], "started")
         self.assertGreaterEqual(started["metrics"]["volume_multiple_5d"], 1.5)
+
+    def test_post_close_structures_refuse_mixed_adjustment_basis(self):
+        bars = [{"high": 10.2, "low": 9.8, "close": 10.0, "volume": 100, "adj_factor": 1.0}
+                for _ in range(30)]
+        bars[-1].pop("adj_factor")
+        result = daily_base_structure(bars)
+        self.assertEqual(result["status"], "data_quality_blocked")
+        self.assertIn("adj_factor_missing", result["quality_flags"])
 
     def test_limit_ladder_and_ground_to_sky_replay_keep_causal_checkpoints(self):
         self.assertEqual(limit_board_count("首板"), 1)
@@ -3316,7 +3325,7 @@ class ProviderHelperTests(unittest.TestCase):
             narrow = index >= 15
             bars.append({"close": close, "high": 10.4 if narrow else close + 0.2,
                          "low": 9.6 if narrow and index % 5 == 0 else close - (0.08 if narrow else 0.2),
-                         "volume": 50 if index >= 25 else 70 if narrow else 120})
+                         "volume": 50 if index >= 25 else 70 if narrow else 120, "adj_factor": 1.0})
         structure = daily_base_structure(bars)
         self.assertEqual(structure["status"], "ready")
         self.assertTrue(structure["components"]["volume_dry_up"])
@@ -3348,6 +3357,25 @@ class ProviderHelperTests(unittest.TestCase):
             entry, observed_at=now, latest_event_at=None, last_key_alerted_at=None,
             last_symbol_watch_alerted_at=now - timedelta(minutes=1),
         ), "confirmed")
+
+    def test_live_policy_gate_blocks_new_entry_during_broad_risk_off(self):
+        from app.live_policy import live_policy_gate
+        result = live_policy_gate(
+            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10},
+            {"trade_constraints": {}}, {"market_state": "broad_risk_off", "board_snapshot_age_seconds": 30},
+            {"status": "confirmed"},
+        )
+        self.assertFalse(result["allow_confirmation"])
+        self.assertIn("broad_risk_off_blocks_new_entry", result["reason_codes"])
+
+    def test_live_policy_gate_keeps_unsellable_hard_stop_as_risk_alert(self):
+        from app.live_policy import live_policy_gate
+        result = live_policy_gate(
+            {"signal_type": "exit"}, {"entry_price": 10, "available_quantity": 0}, {"price": 9},
+            {"trade_constraints": {"limit_down": 8}}, {"market_state": "mixed_or_neutral"}, {"status": "confirmed"},
+        )
+        self.assertEqual(result["decision"], "risk_alert_only")
+        self.assertTrue(result["allow_confirmation"])
 
     def test_intraday_outcome_metrics_keep_direction_and_adverse_path(self):
         prices = [Decimal("10.10"), Decimal("9.80"), Decimal("10.40")]

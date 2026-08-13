@@ -25,6 +25,7 @@ def intraday_alert_text(
     }[signal["signal_type"]]
     if conditions.get("setup") == "eac_acceptance_confirmed" and signal["signal_type"] == "watch":
         title = "承接观察确认"
+    policy = conditions.get("policy_gate") if isinstance(conditions.get("policy_gate"), dict) else {}
     name = str(quote.get("name") or watch.get("label") or signal["symbol"])
     lines = [
         f"【盘中提醒｜{title}】",
@@ -77,6 +78,10 @@ def intraday_alert_text(
         lines.append(f"决策卡（已保存证据）：{decision_card_url}")
     else:
         lines.append("决策卡：未配置可从飞书访问的研究台地址；可在本地研究台按代码打开。")
+    if policy.get("decision") == "risk_alert_only":
+        lines.append("执行约束：未确认可卖数量，此为风险告警，不表示当前可卖出。")
+    elif policy.get("reason_codes"):
+        lines.append(f"策略门禁：{policy.get('decision')}｜{','.join(str(item) for item in policy.get('reason_codes') or [])}")
     lines.append("仅为人工复核提醒，不构成交易指令；请结合盘口、板块、仓位和风险预算确认。")
     return "\n".join(lines)
 

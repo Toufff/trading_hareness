@@ -13,6 +13,7 @@ from datetime import date
 from typing import Any
 
 from .market_rules import a_share_limit_ratio
+from .research_prices import adjusted_value
 
 
 FACTOR_DIRECTIONS = {
@@ -44,11 +45,7 @@ def adjusted_price(row: dict[str, Any], field: str = "close") -> float | None:
     Factor/return calculations use this explicit view so an ex-right date does
     not become a false momentum, volatility, or moving-average event.
     """
-    raw = value(row.get(field))
-    factor = value(row.get("adj_factor"))
-    if raw is None:
-        return None
-    return raw * factor if factor is not None and factor > 0 else raw
+    return adjusted_value(row, field)
 
 
 def standard_deviation(values: list[float]) -> float | None:

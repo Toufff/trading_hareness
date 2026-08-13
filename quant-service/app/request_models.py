@@ -336,6 +336,16 @@ class RemoteMessageReprocessRequest(BaseModel):
     limit: int = Field(default=100, ge=1, le=500)
 
 
+class AnalystSyncCursorUpdate(BaseModel):
+    """Advance one remote sync watermark only after local import succeeded."""
+
+    stream_key: Literal["messages", "reports"]
+    analyst_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{1,120}$")
+    received_at: datetime | None = None
+    message_ids: list[str] = Field(default_factory=list, max_length=500)
+    report_versions: dict[str, str] = Field(default_factory=dict, max_length=500)
+
+
 class AnalystResearchProfileRequest(BaseModel):
     independence_class: Literal["unknown", "independent", "institutional", "promotional"] = "unknown"
     audience_size: int | None = Field(default=None, ge=0)

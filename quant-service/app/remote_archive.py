@@ -372,6 +372,10 @@ def import_remote_analyst_message(db: Database, message: dict[str, Any]) -> dict
         claims = _materialize_message_claims(connection, evidence_id=evidence["evidence_id"], analyst_id=analyst_id,
                                              message_id=message_id, body=body, published_at=published_at, available_at=received_at)
         trade_actions = sync_anqiang_message_trade_actions(connection, message, available_at=received_at, stated_at=stated_at)
+        # A message is a first-class text-only evidence source.  Refresh the
+        # analyst's descriptive skill card from the unified report+message
+        # corpus; it still has no authority over live strategy weights.
+        rebuild_analyst_skill_profile(connection, analyst_id, received_at.astimezone(ZoneInfo("Asia/Shanghai")).date())
     return {"status": "unchanged" if previous is not None else "updated", "remote_message_id": message_id, "evidence": 1,
             "claims": claims, "trade_actions": trade_actions, "strategy_available_at": received_at.isoformat()}
 
@@ -566,9 +570,13 @@ def reprocess_remote_messages(db: Database, limit: int = 100) -> dict[str, Any]:
         ).fetchall()
     results = [import_remote_analyst_message(db, dict(row["payload"])) for row in rows]
     with db.transaction() as connection:
+        skill_profiles = rebuild_all_analyst_skill_profiles(
+            connection, datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+        )
         research = rebuild_analyst_research(connection, datetime.now(ZoneInfo("Asia/Shanghai")).date())
     return {"status": "completed", "messages": len(results), "evidence": sum(int(item.get("evidence", 0)) for item in results),
-            "claims": sum(int(item.get("claims", 0)) for item in results), "items": results, "research": research}
+            "claims": sum(int(item.get("claims", 0)) for item in results), "items": results,
+            "skill_profiles": len(skill_profiles["profiles"]), "research": research}
 
 
 def remote_report_list_state(db: Database) -> dict[str, Any]:
@@ -583,3 +591,19 @@ def remote_report_list_state(db: Database) -> dict[str, Any]:
                 GROUP BY a.remote_analyst_id ORDER BY a.remote_analyst_id"""
         ).fetchall()
     return {"analysts": rows}
+
+
+def analyst_sync_cursor(db: Database, stream_key: str, analyst_id: str) -> dict[str, Any]:
+    if stream_key not in {"messages", "reports"}:
+        raise ValueError("stream_key must be messages or reports")
+    with db.transaction() as connection:
+        row = connection.execute(
+            """SELECT stream_key,remote_analyst_id,received_at,message_ids,report_versions,updated_at
+                 FROM quant.analyst_sync_cursors WHERE stream_key=%s AND remote_analyst_id=%s""",
+            (stream_key, analyst_id),
+        ).fetchone()
+    cursor = dict(row) if row else {"stream_key": stream_key, "remote_analyst_id": analyst_id,
+                                    "received_at": None, "message_ids": [], "report_versions": {}, "updated_at": None}
+    # Keep a top-level copy for n8n expressions.  The nested form stays for
+    # callers that already treat this as a read-model envelope.
+    return {"cursor": cursor, **cursor}

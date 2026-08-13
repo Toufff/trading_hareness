@@ -62,6 +62,9 @@ from .public_market_repository import (
     recent_market_events as _recent_market_events,
 )
 from .factor_lab import evaluate_factor, run_multi_factor_strategy
+from .analyst_promotion import analyst_live_promotion
+from .research_prices import adjusted_bars
+from .live_policy import live_policy_gate
 from .free_market_providers import (
     FreeProviderError,
     cninfo_announcements,
@@ -165,6 +168,7 @@ from .market_rules import a_share_limit_ratio, china_equity_session, china_futur
 from .request_models import (
     AkShareProbeRequest,
     AnalystResearchProfileRequest,
+    AnalystSyncCursorUpdate,
     AnnouncementSyncRequest,
     AllBoardMemberBackfillRequest,
     BarsImport,
@@ -207,7 +211,7 @@ from .request_models import (
     TushareSyncRequest,
     UniverseUpdateRequest,
 )
-from .remote_archive import (classify_remote_text, import_remote_analyst_message, import_remote_report,
+from .remote_archive import (analyst_sync_cursor, classify_remote_text, import_remote_analyst_message, import_remote_report,
                              remote_report_list_state, reprocess_remote_messages, reprocess_remote_reports)
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
@@ -604,13 +608,18 @@ def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
               ), entry_exit AS (
                 SELECT s.analyst_id,s.horizon_days,s.direction,s.strength,
                   (SELECT b.trading_date FROM quant.canonical_bars_daily b
-                    WHERE b.symbol=s.symbol AND b.trading_date > s.available_at::date AND b.trading_date <= %s
+                    WHERE b.symbol=s.symbol
+                      AND b.trading_date > (s.available_at AT TIME ZONE 'Asia/Shanghai')::date
+                      AND b.trading_date <= %s
                     ORDER BY b.trading_date LIMIT 1) AS entry_date,
                   s.symbol
-                FROM signal_source s WHERE s.available_at::date <= %s AND s.direction <> 0
+                FROM signal_source s
+                WHERE (s.available_at AT TIME ZONE 'Asia/Shanghai')::date <= %s
+                  AND s.direction <> 0
               ), priced AS (
                 SELECT e.*, be.close AS entry_close,
                   (SELECT bx.close FROM quant.canonical_bars_daily bx WHERE bx.symbol=e.symbol AND bx.trading_date >= e.entry_date
+                    AND bx.trading_date <= %s
                     ORDER BY bx.trading_date OFFSET (e.horizon_days - 1) LIMIT 1) AS exit_close,
                   benchmark_entry.close AS benchmark_entry_close, benchmark_exit.close AS benchmark_exit_close
                 FROM entry_exit e
@@ -618,6 +627,7 @@ def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
                 LEFT JOIN quant.canonical_bars_daily benchmark_entry ON benchmark_entry.symbol='000300.SH' AND benchmark_entry.trading_date=e.entry_date
                 LEFT JOIN LATERAL (
                   SELECT close FROM quant.canonical_bars_daily bx WHERE bx.symbol='000300.SH' AND bx.trading_date >= e.entry_date
+                    AND bx.trading_date <= %s
                   ORDER BY bx.trading_date OFFSET (e.horizon_days - 1) LIMIT 1
                 ) benchmark_exit ON true
               ), measured AS (
@@ -632,7 +642,7 @@ def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
                  avg(direction*raw_return) mean_directional_return,
                  avg(1-abs(strength - CASE WHEN direction*raw_return > 0 THEN 1 ELSE 0 END)) calibration_score
               FROM measured GROUP BY analyst_id,horizon_days""",
-            (as_of_date, as_of_date),
+            (as_of_date, as_of_date, as_of_date, as_of_date),
         ).fetchall()
         for row in rows:
             connection.execute(
@@ -651,7 +661,7 @@ def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
             "notice": "仅有方向明确且未来价格路径已结算的股票观点会进入成绩单；主题和中性观点保留为研究上下文。"}
 
 
-FEATURE_VERSION = "multi-source-feature-v2"
+FEATURE_VERSION = "multi-source-feature-v3"
 MODEL_VERSION = "multi-source-direction-v1"
 ANALYST_TEXT_FACTOR_VERSION = "analyst-text-consensus-v1"
 
@@ -842,7 +852,8 @@ def analyst_feature(connection: Any, symbol: str, as_of_date: date) -> dict[str,
         """SELECT c.remote_analyst_id,c.direction,c.strength,c.extraction_confidence,c.horizon_days,
                   left(e.body,220) evidence
            FROM quant.analyst_claims c JOIN quant.analyst_evidence e ON e.evidence_id=c.evidence_id
-           WHERE c.scope='stock' AND c.subject_key=%s AND c.available_at::date<=%s
+           WHERE c.scope='stock' AND c.subject_key=%s
+             AND (c.available_at AT TIME ZONE 'Asia/Shanghai')::date<=%s
            ORDER BY c.available_at DESC,c.created_at DESC LIMIT 50""",
         (symbol, as_of_date),
     ).fetchall()
@@ -850,18 +861,11 @@ def analyst_feature(connection: Any, symbol: str, as_of_date: date) -> dict[str,
         return {"consensus": 0.0, "claim_count": 0, "analyst_skill": 0.5, "evidence": []}
     weighted = [number(row["direction"]) * number(row["strength"]) * number(row["extraction_confidence"]) for row in rows]
     weights = [number(row["strength"]) * number(row["extraction_confidence"]) for row in rows]
-    analysts = sorted({str(row["remote_analyst_id"]) for row in rows})
-    skills: list[float] = []
-    for analyst_id in analysts:
-        score = connection.execute(
-            """SELECT hit_rate,observations FROM quant.analyst_scorecards
-               WHERE analyst_id=%s AND as_of_date<=%s ORDER BY as_of_date DESC LIMIT 1""",
-            (analyst_id, as_of_date),
-        ).fetchone()
-        skills.append(number(score["hit_rate"], 0.5) if score and int(score["observations"] or 0) >= 5 else 0.5)
     return {
         "consensus": round(sum(weighted) / sum(weights), 5) if sum(weights) else 0.0,
-        "claim_count": len(rows), "analyst_skill": round(mean(skills), 5),
+        # Scorecards are strictly descriptive until the one promotion
+        # registry explicitly approves an analyst delta.
+        "claim_count": len(rows), "analyst_skill": 0.5,
         "evidence": [{"analyst_id": row["remote_analyst_id"], "direction": row["direction"],
                       "strength": row["strength"], "horizon_days": row["horizon_days"], "evidence": row["evidence"]}
                      for row in rows[:8]],
@@ -984,7 +988,7 @@ def build_feature_snapshot(as_of_date: date, universe_key: str = "core") -> dict
         for member in members:
             symbol = str(member["symbol"])
             bars = connection.execute(
-                """SELECT trading_date,close,high,low,volume,amount,is_suspended,limit_up,limit_down,selected_provider
+                """SELECT trading_date,close,high,low,volume,amount,adj_factor,is_suspended,limit_up,limit_down,selected_provider
                    FROM quant.canonical_bars_daily WHERE symbol=%s AND trading_date<=%s
                    ORDER BY trading_date DESC LIMIT 60""",
                 (symbol, as_of_date),
@@ -997,6 +1001,8 @@ def build_feature_snapshot(as_of_date: date, universe_key: str = "core") -> dict
                 flags.append("missing_market_data")
                 features = {"symbol": symbol, "name": member["name"], "market_data_date": None, "bar_count": 0}
             else:
+                research_bars, adjustment_flags = adjusted_bars([dict(bar) for bar in bars])
+                flags.extend(adjustment_flags)
                 closes = [number(bar["close"]) for bar in bars]
                 volumes = [number(bar["volume"]) for bar in bars]
                 latest = bars[-1]
@@ -1009,15 +1015,21 @@ def build_feature_snapshot(as_of_date: date, universe_key: str = "core") -> dict
                     flags.append("ST")
                 if latest["limit_up"] is not None and number(latest["close"]) >= number(latest["limit_up"]):
                     flags.append("limit_up_may_be_unbuyable")
-                sma5 = mean(closes[-5:]) if len(closes) >= 5 else None
-                sma20 = mean(closes[-20:]) if len(closes) >= 20 else None
-                return_5 = closes[-1] / closes[-6] - 1 if len(closes) >= 6 and closes[-6] else None
-                return_20 = closes[-1] / closes[-21] - 1 if len(closes) >= 21 and closes[-21] else None
+                research_closes = ([number(bar["research_close"]) for bar in research_bars]
+                                   if research_bars is not None else [])
+                has_research_price = bool(research_bars) and all(value > 0 for value in research_closes)
+                sma5 = mean(research_closes[-5:]) if has_research_price and len(research_closes) >= 5 else None
+                sma20 = mean(research_closes[-20:]) if has_research_price and len(research_closes) >= 20 else None
+                return_5 = (research_closes[-1] / research_closes[-6] - 1
+                            if has_research_price and len(research_closes) >= 6 and research_closes[-6] else None)
+                return_20 = (research_closes[-1] / research_closes[-21] - 1
+                             if has_research_price and len(research_closes) >= 21 and research_closes[-21] else None)
                 volume_ratio = volumes[-1] / mean(volumes[-20:]) if len(volumes) >= 20 and mean(volumes[-20:]) else None
                 features = {
                     "symbol": symbol, "name": member["name"], "industry": member["industry"],
                     "market_data_date": str(latest_date), "bar_count": len(bars), "close": closes[-1],
                     "sma_5": sma5, "sma_20": sma20, "return_5": return_5, "return_20": return_20,
+                    "research_price_status": "complete" if has_research_price else "blocked",
                     "volume_ratio": volume_ratio, "selected_provider": latest["selected_provider"],
                 }
             fundamental = connection.execute(
@@ -1495,7 +1507,7 @@ def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
         # stock.  Before independent scorecards mature, it is explanation
         # only and contributes exactly zero to the candidate score.
         analyst_context = analyst_execution_context(connection, as_of_date)
-        analyst_weight = 0.10 if analyst_context["execution_eligible"] else 0.0
+        analyst_weight = float(analyst_context.get("max_live_weight") or 0.0) if analyst_context["execution_eligible"] else 0.0
         for item in materialized["items"]:
             feature = item["features"]
             flags = list(item["quality_flags"])
@@ -1514,7 +1526,8 @@ def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
             if regime == "risk_off" and signal > 0:
                 signal -= 0.08
                 flags.append("risk_off_regime")
-            hard_flags = {"ST", "suspended", "missing_market_data", "insufficient_history_20"}
+            hard_flags = {"ST", "suspended", "missing_market_data", "insufficient_history_20",
+                          "adj_factor_missing", "corporate_action_unresolved"}
             penalty = min(0.35, 0.07 * len(set(flags)))
             score = max(0.0, min(100.0, 50 + 50 * signal - 100 * penalty))
             direction = 1 if signal >= 0.14 else -1 if signal <= -0.14 else 0
@@ -3074,13 +3087,13 @@ def post_close_strategy_candidates(as_of_date: date, limit: int, minimum_full_ma
                     "source_status": {"daily_symbols": int(coverage["symbols"] or 0), "minimum_full_market_symbols": minimum_full_market_symbols}}
         rows = connection.execute(
             """WITH ranked AS (
-                   SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.volume,i.name,
+                   SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.volume,b.adj_factor,i.name,
                           row_number() OVER (PARTITION BY b.symbol ORDER BY b.trading_date DESC) AS rn
                      FROM quant.canonical_bars_daily b
                      LEFT JOIN quant.instruments i ON i.symbol=b.symbol
                     WHERE b.symbol<>'000300.SH' AND b.trading_date<=%s
                       AND b.trading_date>=%s AND b.quality_status IN ('fresh','partial')
-                 ) SELECT symbol,trading_date,high,low,close,volume,name FROM ranked WHERE rn<=30 ORDER BY symbol,trading_date""",
+                 ) SELECT symbol,trading_date,high,low,close,volume,adj_factor,name FROM ranked WHERE rn<=30 ORDER BY symbol,trading_date""",
             (as_of_date, as_of_date - timedelta(days=70)),
         ).fetchall()
     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -3101,6 +3114,7 @@ def post_close_strategy_candidates(as_of_date: date, limit: int, minimum_full_ma
             risk_flags.append("nonpositive_exact_board_flow")
         if len(bars) >= 30:
             structure = daily_base_structure(bars[-30:])
+            risk_flags = [*risk_flags, *list(structure.get("quality_flags") or [])]
             if structure.get("status") == "ready":
                 strict_ready += 1
                 score = min(100.0, float(structure["score"]) * 0.88 + board_bonus)
@@ -3108,6 +3122,7 @@ def post_close_strategy_candidates(as_of_date: date, limit: int, minimum_full_ma
                                      "structure": structure, "board_context": board or {"exact_member_mapping": False}, "risk_flags": risk_flags}
         elif len(bars) >= 15:
             structure = post_close_forming_structure(bars)
+            risk_flags = [*risk_flags, *list(structure.get("quality_flags") or [])]
             if structure.get("status") == "forming":
                 provisional_ready += 1
                 score = min(100.0, float(structure["score"]) * 0.82 + board_bonus)
@@ -3116,6 +3131,7 @@ def post_close_strategy_candidates(as_of_date: date, limit: int, minimum_full_ma
                                      "risk_flags": [*risk_flags, "provisional_15_session_structure"]}
         if len(bars) >= 15:
             started = post_close_fresh_start_structure(bars)
+            risk_flags = [*risk_flags, *list(started.get("quality_flags") or [])]
             if started.get("status") == "started":
                 fresh_started += 1
                 score = min(100.0, float(started["score"]) * 0.78 + board_bonus)
@@ -3144,6 +3160,10 @@ def run_post_close_strategy(request: PostCloseStrategyRequest) -> dict[str, Any]
                  GROUP BY trading_date HAVING count(DISTINCT symbol)>=%s ORDER BY trading_date DESC LIMIT 1""",
             (request.minimum_full_market_symbols,),
         ).fetchone()
+    # An explicit date means exactly that date.  The automated loop supplies
+    # Shanghai "today" so yesterday's complete cross-section cannot be marked
+    # as a successful run for today.  Manual requests without a date retain
+    # the useful "latest complete" convenience.
     as_of_date = request.as_of_date or (latest["trading_date"] if latest else None)
     if as_of_date is None:
         result = {"status": "blocked", "as_of_date": None, "candidates": [], "reason": "no full-market daily bar set is stored"}
@@ -3836,14 +3856,21 @@ def watchlist_daily_factors(symbol: str, connection: Any | None = None) -> dict[
         with db.transaction() as owned_connection:
             return watchlist_daily_factors(symbol, owned_connection)
     rows = connection.execute(
-            """SELECT trading_date,high,low,close,volume FROM quant.canonical_bars_daily
+            """SELECT trading_date,high,low,close,volume,adj_factor,is_suspended,limit_up,limit_down FROM quant.canonical_bars_daily
                  WHERE symbol=%s ORDER BY trading_date DESC LIMIT 61""", (symbol,)
     ).fetchall()
     bars = list(reversed([dict(row) for row in rows]))
-    closes = [intraday_number(row.get("close")) for row in bars]
+    research_bars, adjustment_flags = adjusted_bars(bars)
+    closes = [intraday_number(row.get("research_close")) for row in research_bars] if research_bars is not None else []
     volumes = [intraday_number(row.get("volume")) for row in bars]
+    trade_constraints = ({"is_suspended": bool(bars[-1].get("is_suspended")), "limit_up": bars[-1].get("limit_up"),
+                          "limit_down": bars[-1].get("limit_down")} if bars else {})
+    if research_bars is None:
+        return {"status": "data_quality_blocked", "bar_count": len(bars), "quality_flags": adjustment_flags,
+                "trade_constraints": trade_constraints}
     if len(closes) < 21 or any(value is None for value in closes):
-        return {"status": "insufficient_history", "bar_count": len(bars)}
+        return {"status": "insufficient_history", "bar_count": len(bars), "quality_flags": adjustment_flags,
+                "trade_constraints": trade_constraints}
     close_values = [float(value) for value in closes if value is not None]
     sma5, sma20 = mean(close_values[-5:]), mean(close_values[-20:])
     gains, losses = [], []
@@ -3862,7 +3889,8 @@ def watchlist_daily_factors(symbol: str, connection: Any | None = None) -> dict[
             "sma20": round(sma20, 4), "ma_trend": "bullish" if close_values[-1] > sma5 > sma20 else "bearish" if close_values[-1] < sma5 < sma20 else "mixed",
             "rsi14": round(rsi14, 2), "volatility20": round(volatility20, 5) if volatility20 is not None else None,
             "volume_ratio20": round(volume_ratio20, 3) if volume_ratio20 is not None else None,
-            "base_structure": base_structure, "base_structure_ready": base_structure.get("status") == "ready"}
+            "base_structure": base_structure, "base_structure_ready": base_structure.get("status") == "ready",
+            "quality_flags": adjustment_flags, "trade_constraints": trade_constraints}
 
 
 def intraday_feature_clock(value: Any) -> time | None:
@@ -4096,6 +4124,7 @@ async def hydrate_watchlist_history(watchlist_id: uuid.UUID, symbol: str) -> dic
     dated = {"ts_code": symbol, "start_date": start_date.strftime("%Y%m%d"), "end_date": end_date.strftime("%Y%m%d")}
     daily_result = await sync_tushare(TushareSyncRequest(symbols=[symbol], start_date=start_date, end_date=end_date))
     supplemental = await asyncio.gather(
+        stock_study_fetch("watchlist_adj_factor", TushareFetchRequest(api_name="adj_factor", params=dated, max_rows=60)),
         stock_study_fetch("watchlist_daily_basic", TushareFetchRequest(api_name="daily_basic", params=dated, max_rows=60)),
         stock_study_fetch("watchlist_moneyflow", TushareFetchRequest(api_name="moneyflow", params=dated, max_rows=60)),
         stock_study_fetch("watchlist_moneyflow_dc", TushareFetchRequest(api_name="moneyflow_dc", params=dated, max_rows=60)),
@@ -4156,9 +4185,12 @@ def intraday_signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
               "peer_context": peer_context or {"status": "not_available"}}
     hard_stop = intraday_number(watch.get("hard_stop"))
     if holding and bool(watch.get("alert_on_exit")) and hard_stop is not None and price <= hard_stop:
+        sellable = int(watch.get("available_quantity") or 0) > 0
         signals.append({"signal_key": f"{symbol}:exit:hard_stop", "signal_type": "exit", "severity": "critical",
-                        "score": 100, "hard": True, "conditions": {**common, "hard_stop": hard_stop},
-                        "risk_flags": ["hard_stop_triggered", "manual_review_required"]})
+                        "score": 100, "hard": True, "conditions": {**common, "hard_stop": hard_stop,
+                                                                             "sellable_quantity_confirmed": sellable},
+                        "risk_flags": ["hard_stop_triggered", "manual_review_required",
+                                       *( [] if sellable else ["no_confirmed_sellable_quantity_risk_alert_only"])]})
     strategy = (watch.get("metadata") or {}).get("surge_strategy") if isinstance(watch.get("metadata"), dict) else None
     minute_return_1m = intraday_number((minute_features or {}).get("return_1m_pct"))
     minute_return_3m = intraday_number((minute_features or {}).get("return_3m_pct"))
@@ -5021,6 +5053,9 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     signal["risk_flags"] = [*signal["risk_flags"], "realtime_cross_source_price_mismatch"]
             market_context = intraday_point_in_time_market_context(connection, observed_at, symbol) if generated_signals else {}
             for signal in generated_signals:
+                policy = live_policy_gate(signal, watch, quote, daily_factors, market_context, fast_confirmation)
+                signal["conditions"] = {**signal["conditions"], "policy_gate": policy}
+                signal["risk_flags"] = [*signal["risk_flags"], *policy["risk_flags"]]
                 latest = connection.execute(
                     "SELECT observed_at FROM quant.intraday_signal_events WHERE signal_key=%s ORDER BY observed_at DESC LIMIT 1",
                     (signal["signal_key"],),
@@ -5042,6 +5077,8 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     last_symbol_watch_alerted_at=last_symbol_watch_alerted["observed_at"] if last_symbol_watch_alerted else None,
                 )
                 if state == "confirmed" and fast_confirmation.get("status") == "mismatch":
+                    state = "confirming"
+                if state == "confirmed" and not policy["allow_confirmation"]:
                     state = "confirming"
                 evidence = {"tencent": quote, "tencent_order_book": order_book_feature, "tencent_minute": minute_feature,
                             "peer_context": peer_context, "tushare_rt_min": tushare_minutes.get(symbol),
@@ -5593,7 +5630,9 @@ async def post_close_strategy_loop() -> None:
         if (local.date() not in completed and await sse_calendar_open_async(local.date())
                 and time(18, 55) <= local.time() < time(19, 10)):
             try:
-                result = await run_database_blocking(run_post_close_strategy, PostCloseStrategyRequest(), timeout_seconds=60)
+                result = await run_database_blocking(
+                    run_post_close_strategy, PostCloseStrategyRequest(as_of_date=local.date()), timeout_seconds=60,
+                )
                 if result["status"] in {"completed", "partial"}:
                     completed.add(local.date())
             except Exception as error:  # noqa: BLE001 - retry while the bounded post-close window remains open
@@ -6260,23 +6299,13 @@ async def sync_strategy_index_context(as_of_date: date) -> dict[str, Any]:
 def analyst_execution_context(connection: Any, as_of_date: date, observed_at: datetime | None = None) -> dict[str, Any]:
     """Expose analyst text as a gated prior rather than a trade instruction."""
     summary = analyst_text_factor_summary(connection, as_of_date, available_before=observed_at)
-    score_rows = connection.execute(
-        """SELECT analyst_id,max(observations)::int observations,max(as_of_date) latest_score_date
-             FROM quant.analyst_scorecards WHERE as_of_date<=%s GROUP BY analyst_id""",
-        (as_of_date,),
-    ).fetchall()
-    observations = {str(row["analyst_id"]): int(row["observations"] or 0) for row in score_rows}
-    mature_analysts = sorted(analyst_id for analyst_id, count in observations.items() if count >= 30)
-    market = summary["market"]
-    eligible_themes = [item["label"] for item in summary["themes"]
-                       if int(item["analyst_count"]) >= 2 and float(item["agreement"]) >= 0.67]
-    eligible = len(mature_analysts) >= 2 and int(market["analyst_count"]) >= 2 and float(market["agreement"]) >= 0.67
-    return {"factor_version": summary["factor_version"], "market": market, "themes": summary["themes"],
-            "mature_analysts": mature_analysts, "eligible_themes": eligible_themes,
+    promotion = analyst_live_promotion(connection, as_of_date)
+    return {"factor_version": summary["factor_version"], "market": summary["market"], "themes": summary["themes"],
+            "mature_analysts": [], "eligible_themes": [],
             "scorecard_readiness": analyst_scorecard_readiness(connection),
-            "execution_eligible": eligible,
-            "role": "small_prior" if eligible else "research_context_only",
-            "reason": "requires two independent mature scorecards and high agreement" if not eligible else "mature scorecards and agreement gate passed",
+            "execution_eligible": promotion["execution_eligible"], "max_live_weight": promotion["weight"],
+            "role": "small_prior" if promotion["execution_eligible"] else "research_context_only",
+            "reason": promotion["reason"], "promotion": promotion,
             "data_boundary": summary["data_boundary"]}
 
 
@@ -8709,6 +8738,44 @@ def reprocess_remote_archive_messages(payload: RemoteMessageReprocessRequest) ->
     return reprocess_remote_messages(db, payload.limit)
 
 
+def update_analyst_sync_cursor(payload: AnalystSyncCursorUpdate) -> dict[str, Any]:
+    """Persist a successful remote stream watermark for n8n's next delta run."""
+    with db.transaction() as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM quant.remote_analysts WHERE remote_analyst_id=%s", (payload.analyst_id,)
+        ).fetchone()
+        if not exists:
+            raise HTTPException(status_code=404, detail="remote analyst not found")
+        current = connection.execute(
+            """SELECT received_at,message_ids,report_versions FROM quant.analyst_sync_cursors
+                 WHERE stream_key=%s AND remote_analyst_id=%s FOR UPDATE""",
+            (payload.stream_key, payload.analyst_id),
+        ).fetchone()
+        received_at = payload.received_at
+        message_ids = list(dict.fromkeys(str(value) for value in payload.message_ids if str(value)))
+        report_versions = {str(key): str(value) for key, value in payload.report_versions.items() if str(key) and str(value)}
+        if current and payload.stream_key == "messages":
+            previous_at = current["received_at"]
+            if previous_at is not None and received_at is not None and received_at < previous_at:
+                received_at, message_ids = previous_at, list(current["message_ids"] or [])
+            elif previous_at is not None and received_at == previous_at:
+                message_ids = list(dict.fromkeys([*(current["message_ids"] or []), *message_ids]))[:500]
+        if current and payload.stream_key == "reports":
+            report_versions = {**dict(current["report_versions"] or {}), **report_versions}
+            if len(report_versions) > 500:
+                report_versions = dict(sorted(report_versions.items())[-500:])
+        connection.execute(
+            """INSERT INTO quant.analyst_sync_cursors(stream_key,remote_analyst_id,received_at,message_ids,report_versions,updated_at)
+               VALUES(%s,%s,%s,%s,%s,now())
+               ON CONFLICT(stream_key,remote_analyst_id) DO UPDATE SET received_at=EXCLUDED.received_at,
+                 message_ids=EXCLUDED.message_ids,report_versions=EXCLUDED.report_versions,updated_at=now()""",
+            (payload.stream_key, payload.analyst_id, received_at, Json(message_ids), Json(report_versions)),
+        )
+    return {"status": "updated", "stream_key": payload.stream_key, "analyst_id": payload.analyst_id,
+            "received_at": received_at.isoformat() if received_at else None,
+            "message_ids": len(message_ids), "report_versions": len(report_versions)}
+
+
 def update_analyst_research_profile(analyst_id: str, payload: AnalystResearchProfileRequest) -> dict[str, Any]:
     with db.transaction() as connection:
         exists = connection.execute(
@@ -8988,6 +9055,14 @@ async def update_analyst_research_profile_endpoint(analyst_id: str, payload: Ana
     return await run_database_blocking(update_analyst_research_profile, analyst_id, payload, timeout_seconds=30)
 
 
+async def update_analyst_sync_cursor_endpoint(payload: AnalystSyncCursorUpdate) -> dict[str, Any]:
+    return await run_database_blocking(update_analyst_sync_cursor, payload, timeout_seconds=30)
+
+
+async def update_analyst_sync_cursor_endpoint(payload: AnalystSyncCursorUpdate) -> dict[str, Any]:
+    return await run_database_blocking(update_analyst_sync_cursor, payload, timeout_seconds=30)
+
+
 app.include_router(build_research_actions_router(ResearchActionDependencies(
     analyse_ingestion=analyse_ingestion_endpoint,
     import_remote_report=import_remote_archive_report_endpoint,
@@ -9002,6 +9077,7 @@ app.include_router(build_research_actions_router(ResearchActionDependencies(
     reconcile_fetch_runs=reconcile_stale_fetch_runs_endpoint,
     build_snapshot=build_snapshot_endpoint,
     update_analyst_research_profile=update_analyst_research_profile_endpoint,
+    update_analyst_sync_cursor=update_analyst_sync_cursor_endpoint,
 )))
 
 

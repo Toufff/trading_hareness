@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter
 
 from ..analyst_read_model import analyst_claims, claim_review_queue, remote_messages, remote_reports
+from ..remote_archive import analyst_sync_cursor
 
 
 def build_analyst_reads_router(
@@ -29,6 +30,10 @@ def build_analyst_reads_router(
     @router.get("/api/v1/remote-archive/messages")
     def remote_archive_messages(analyst_id: str | None = None, limit: int = 30, offset: int = 0) -> dict[str, Any]:
         return remote_messages(database, analyst_id, limit, offset)
+
+    @router.get("/api/v1/remote-archive/sync-cursors/{stream_key}/{analyst_id}")
+    def sync_cursor(stream_key: str, analyst_id: str) -> dict[str, Any]:
+        return analyst_sync_cursor(database, stream_key, analyst_id)
 
     @router.get("/api/v1/analyst-claims")
     def analyst_claims_route(limit: int = 100, offset: int = 0) -> dict[str, Any]:

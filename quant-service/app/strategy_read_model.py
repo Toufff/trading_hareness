@@ -29,16 +29,21 @@ def latest_strategy_review(database: Any, session: str | None) -> dict[str, Any]
 
 def latest_post_close_strategy(database: Any) -> dict[str, Any]:
     with database.transaction() as connection:
-        run = connection.execute(
+        latest_attempt = connection.execute(
             """SELECT run_id,run_key,as_of_date,model_version,status,source_status,summary,created_at,updated_at
                  FROM quant.post_close_strategy_runs ORDER BY as_of_date DESC,updated_at DESC LIMIT 1"""
         ).fetchone()
+        run = connection.execute(
+            """SELECT run_id,run_key,as_of_date,model_version,status,source_status,summary,created_at,updated_at
+                 FROM quant.post_close_strategy_runs WHERE status IN ('completed','partial')
+                 ORDER BY as_of_date DESC,updated_at DESC LIMIT 1"""
+        ).fetchone()
         if not run:
-            return {"run": None, "candidates": [], "notice": "尚未运行盘后蓄势/首动研究。"}
+            return {"run": None, "latest_attempt": latest_attempt, "candidates": [], "notice": "尚未得到可用的盘后蓄势/首动研究。"}
         rows = connection.execute(
             """SELECT c.rank,c.symbol,i.name,c.candidate_type,c.score,c.structure,c.board_context,c.risk_flags
                  FROM quant.post_close_strategy_candidates c LEFT JOIN quant.instruments i ON i.symbol=c.symbol
                 WHERE c.run_id=%s ORDER BY c.rank""", (run["run_id"],),
         ).fetchall()
-    return {"run": run, "candidates": rows,
+    return {"run": run, "latest_attempt": latest_attempt, "candidates": rows,
             "notice": "候选用于次日人工观察；未自动加入盘中观察池，也不会自动下单。"}

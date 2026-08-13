@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .research_prices import adjusted_bars
+
 
 POST_CLOSE_STRATEGY_MODEL_VERSION = "post-close-base-start-v1"
 
@@ -29,13 +31,17 @@ def daily_base_structure(bars: list[dict[str, Any]]) -> dict[str, Any]:
     """Describe a 30-session contraction base without predicting a breakout."""
     if len(bars) < 30:
         return {"status": "insufficient_history", "bar_count": len(bars), "score": 0}
-    window = bars[-30:]
-    closes = [_number(row.get("close")) for row in window]
+    window, quality_flags = adjusted_bars(bars[-30:])
+    if window is None:
+        return {"status": "data_quality_blocked", "bar_count": len(bars[-30:]), "score": 0,
+                "quality_flags": quality_flags,
+                "notice": "复权因子不完整；跨日蓄势结构不使用原始价格替代。"}
+    closes = [_number(row.get("research_close")) for row in window]
     if any(value is None or value <= 0 for value in closes):
         return {"status": "invalid_prices", "bar_count": len(window), "score": 0}
     close_values = [float(value) for value in closes if value is not None]
-    highs = [float(_number(row.get("high")) or close_values[index]) for index, row in enumerate(window)]
-    lows = [float(_number(row.get("low")) or close_values[index]) for index, row in enumerate(window)]
+    highs = [float(_number(row.get("research_high")) or close_values[index]) for index, row in enumerate(window)]
+    lows = [float(_number(row.get("research_low")) or close_values[index]) for index, row in enumerate(window)]
     volumes = [_number(row.get("volume")) for row in window]
 
     def realized_volatility(values: list[float]) -> float | None:
@@ -71,7 +77,7 @@ def daily_base_structure(bars: list[dict[str, Any]]) -> dict[str, Any]:
     ready_core = ("horizontal_base", "volatility_contracting", "volume_dry_up", "support_tested", "near_resistance", "above_base_mean")
     status = "ready" if score >= 74 and all(components[key] for key in ready_core) else "forming" if score >= 45 else "not_ready"
     return {
-        "status": status, "score": score, "bar_count": len(window), "components": components,
+        "status": status, "score": score, "bar_count": len(window), "components": components, "quality_flags": quality_flags,
         "metrics": {"base_range_pct": round(base_range_pct, 3) if base_range_pct is not None else None,
                     "recent_range_pct": round(recent_range_pct, 3) if recent_range_pct is not None else None,
                     "old_volatility": round(old_volatility, 6) if old_volatility is not None else None,
@@ -89,13 +95,17 @@ def post_close_forming_structure(bars: list[dict[str, Any]]) -> dict[str, Any]:
     """Return only a provisional 15-session forming observation."""
     if len(bars) < 15:
         return {"status": "insufficient_history", "bar_count": len(bars), "score": 0}
-    window = bars[-15:]
-    closes = [_number(row.get("close")) for row in window]
+    window, quality_flags = adjusted_bars(bars[-15:])
+    if window is None:
+        return {"status": "data_quality_blocked", "bar_count": len(bars[-15:]), "score": 0,
+                "quality_flags": quality_flags,
+                "notice": "复权因子不完整；跨日形成结构不使用原始价格替代。"}
+    closes = [_number(row.get("research_close")) for row in window]
     if any(value is None or value <= 0 for value in closes):
         return {"status": "invalid_prices", "bar_count": len(window), "score": 0}
     values = [float(value) for value in closes if value is not None]
-    highs = [float(_number(row.get("high")) or values[index]) for index, row in enumerate(window)]
-    lows = [float(_number(row.get("low")) or values[index]) for index, row in enumerate(window)]
+    highs = [float(_number(row.get("research_high")) or values[index]) for index, row in enumerate(window)]
+    lows = [float(_number(row.get("research_low")) or values[index]) for index, row in enumerate(window)]
     volumes = [_number(row.get("volume")) for row in window]
     base_low, base_high = min(lows), max(highs)
     range_pct = (base_high / base_low - 1) * 100 if base_low > 0 else None
@@ -122,7 +132,7 @@ def post_close_forming_structure(bars: list[dict[str, Any]]) -> dict[str, Any]:
                "support_tested": 14, "near_resistance": 14, "above_mean": 8}
     score = sum(weight for key, weight in weights.items() if components[key])
     status = "forming" if score >= 70 and all(components[key] for key in ("horizontal_range", "volume_dry_up", "support_tested", "near_resistance", "above_mean")) else "not_ready"
-    return {"status": status, "score": score, "bar_count": len(window), "components": components,
+    return {"status": status, "score": score, "bar_count": len(window), "components": components, "quality_flags": quality_flags,
             "metrics": {"base_range_pct": round(range_pct, 3) if range_pct is not None else None,
                         "volume_dry_up_ratio": round(dry_up_ratio, 3) if dry_up_ratio is not None else None,
                         "support_price": round(support, 4), "support_tests": support_tests,
@@ -137,8 +147,12 @@ def post_close_fresh_start_structure(bars: list[dict[str, Any]]) -> dict[str, An
     """Identify an early expansion after a short consolidation, post-close only."""
     if len(bars) < 15:
         return {"status": "insufficient_history", "bar_count": len(bars), "score": 0}
-    window = bars[-15:]
-    closes = [_number(row.get("close")) for row in window]
+    window, quality_flags = adjusted_bars(bars[-15:])
+    if window is None:
+        return {"status": "data_quality_blocked", "bar_count": len(bars[-15:]), "score": 0,
+                "quality_flags": quality_flags,
+                "notice": "复权因子不完整；跨日首动结构不使用原始价格替代。"}
+    closes = [_number(row.get("research_close")) for row in window]
     volumes = [_number(row.get("volume")) for row in window]
     if any(value is None or value <= 0 for value in closes):
         return {"status": "invalid_prices", "bar_count": len(window), "score": 0}
@@ -159,7 +173,7 @@ def post_close_fresh_start_structure(bars: list[dict[str, Any]]) -> dict[str, An
     weights = {"controlled_first_day": 30, "short_momentum": 28, "volume_expansion": 26, "new_five_day_high": 16}
     score = sum(weight for key, weight in weights.items() if components[key])
     return {"status": "started" if score >= 84 and all(components.values()) else "not_ready", "score": score,
-            "bar_count": len(window), "components": components,
+            "bar_count": len(window), "components": components, "quality_flags": quality_flags,
             "metrics": {"return_1d_pct": round(return_1d, 3), "return_3d_pct": round(return_3d, 3),
                         "return_5d_pct": round(return_5d, 3), "volume_multiple_5d": round(volume_multiple, 3) if volume_multiple is not None else None},
             "notice": "收盘后首动观察，不追认同日盘中买点；次日仅在EAC扩张、承接与风险门禁齐备时继续观察。"}

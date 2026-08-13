@@ -6,7 +6,8 @@ from app.factor_lab import factor_at, max_drawdown, pearson, rank
 class FactorLabTests(unittest.TestCase):
     def setUp(self):
         self.bars = [
-            {"close": 10 + index * 0.2, "high": 10.3 + index * 0.2, "low": 9.8 + index * 0.2, "volume": 100 + index}
+            {"close": 10 + index * 0.2, "high": 10.3 + index * 0.2, "low": 9.8 + index * 0.2,
+             "volume": 100 + index, "adj_factor": 1.0}
             for index in range(25)
         ]
 
@@ -21,6 +22,14 @@ class FactorLabTests(unittest.TestCase):
         self.assertGreater(factor_at(self.bars, 20, "sma_gap_20d") or 0, 0)
         self.assertIsNotNone(factor_at(self.bars, 20, "volatility_20d"))
         self.assertAlmostEqual(max_drawdown([1.0, 1.2, 0.9, 1.1]), -0.25)
+
+    def test_cross_session_factors_refuse_raw_price_when_adjustment_is_missing(self):
+        bars = [dict(item) for item in self.bars]
+        # The missing factor is inside the lookback used by the calculation,
+        # not merely a later row outside the requested factor window.
+        bars[20].pop("adj_factor")
+        self.assertIsNone(factor_at(bars, 20, "momentum_5d"))
+        self.assertIsNone(factor_at(bars, 20, "sma_gap_20d"))
 
 
 if __name__ == "__main__":

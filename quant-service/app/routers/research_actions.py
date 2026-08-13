@@ -15,6 +15,7 @@ from fastapi import APIRouter
 
 from ..request_models import (
     AnalystResearchProfileRequest,
+    AnalystSyncCursorUpdate,
     ClaimReviewRequest,
     FactorEvaluationRequest,
     FetchRunReconcileRequest,
@@ -44,6 +45,7 @@ class ResearchActionDependencies:
     reconcile_fetch_runs: Callable[[FetchRunReconcileRequest], Awaitable[dict[str, Any]]]
     build_snapshot: Callable[[SnapshotRequest], Awaitable[dict[str, Any]]]
     update_analyst_research_profile: Callable[[str, AnalystResearchProfileRequest], Awaitable[dict[str, Any]]]
+    update_analyst_sync_cursor: Callable[[AnalystSyncCursorUpdate], Awaitable[dict[str, Any]]]
 
 
 def build_research_actions_router(deps: ResearchActionDependencies) -> APIRouter:
@@ -101,6 +103,10 @@ def build_research_actions_router(deps: ResearchActionDependencies) -> APIRouter
     @router.put("/api/v1/analyst-research/profiles/{analyst_id}")
     async def update_analyst_research_profile(analyst_id: str, payload: AnalystResearchProfileRequest) -> dict[str, Any]:
         return await deps.update_analyst_research_profile(analyst_id, payload)
+
+    @router.put("/api/v1/remote-archive/sync-cursors")
+    async def update_analyst_sync_cursor(payload: AnalystSyncCursorUpdate) -> dict[str, Any]:
+        return await deps.update_analyst_sync_cursor(payload)
 
     return router
 

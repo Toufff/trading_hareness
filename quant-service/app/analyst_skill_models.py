@@ -83,6 +83,14 @@ def rebuild_analyst_skill_profile(connection: Any, analyst_id: str, as_of_date: 
              ORDER BY report_date DESC,remote_updated_at DESC LIMIT 60""",
         (analyst_id, as_of_date),
     ).fetchall()]
+    messages = [dict(row) for row in connection.execute(
+        """SELECT remote_message_id,received_at,content,source_type,remote_version
+             FROM quant.remote_analyst_messages
+            WHERE remote_analyst_id=%s
+              AND (received_at AT TIME ZONE 'Asia/Shanghai')::date<=%s
+            ORDER BY received_at DESC LIMIT 500""",
+        (analyst_id, as_of_date),
+    ).fetchall()]
     actions = [dict(row) for row in connection.execute(
         """SELECT action_id,remote_report_id,remote_message_id,symbol,label,action_type,direction,stated_at,available_at,target_price,evidence,raw
              FROM quant.analyst_trade_actions WHERE remote_analyst_id=%s
@@ -90,10 +98,12 @@ def rebuild_analyst_skill_profile(connection: Any, analyst_id: str, as_of_date: 
              ORDER BY stated_at DESC LIMIT 500""",
         (analyst_id, as_of_date),
     ).fetchall()]
-    text = "\n".join(
+    report_text = "\n".join(
         "\n".join(str(value) for value in (report.get("summary"), *(dict(report.get("sections") or {}).values())) if value)
         for report in reports
     )
+    message_text = "\n".join(str(message.get("content") or "") for message in messages)
+    text = "\n".join(value for value in (report_text, message_text) if value)
     stance = _stance(text)
     action_counts = Counter(str(action["action_type"]) for action in actions)
     action_dates = {action["stated_at"].date() for action in actions if action.get("stated_at")}
@@ -110,7 +120,7 @@ def rebuild_analyst_skill_profile(connection: Any, analyst_id: str, as_of_date: 
         "as_of_date": str(as_of_date),
         "mode": "offline_language_distillation_research_only",
         "language_style": {
-            "report_count": len(reports), "stance_tokens": stance,
+            "report_count": len(reports), "message_count": len(messages), "stance_tokens": stance,
             "conditionality_ratio": round(stance["conditional"] / max(1, stance["positive"] + stance["negative"] + stance["conditional"]), 4),
             "action_mix": dict(action_counts), "unique_action_symbols": len({action["symbol"] for action in actions}),
             "author_timed_actions": len(actions), "author_timed_days": len(action_dates),
@@ -125,7 +135,7 @@ def rebuild_analyst_skill_profile(connection: Any, analyst_id: str, as_of_date: 
             "reason": "language profile is descriptive until 200 mature actions across 60 trading days",
             "mature_actions": 0, "required_actions": 200, "trading_days": len(action_dates), "required_trading_days": 60,
         },
-        "prompt_lab": [_variant_payload(variant, reports, actions) for variant in PROMPT_VARIANTS],
+        "prompt_lab": [_variant_payload(variant, [*reports, *messages], actions) for variant in PROMPT_VARIANTS],
     }
     connection.execute(
         """INSERT INTO quant.analyst_skill_profiles(remote_analyst_id,as_of_date,model_version,status,profile)

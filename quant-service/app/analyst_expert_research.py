@@ -43,6 +43,11 @@ def _cn_date(value: Any) -> date:
     return value.astimezone(ZoneInfo("Asia/Shanghai")).date() if hasattr(value, "astimezone") else value
 
 
+def _cn_day_sql(column: str) -> str:
+    """Return the one exchange-day expression used by PIT research SQL."""
+    return f"({column} AT TIME ZONE 'Asia/Shanghai')::date"
+
+
 def seed_exact_theme_aliases(connection: Any) -> int:
     """Seed only reviewed exact labels; unresolved themes stay unmapped."""
     rows = (
@@ -91,7 +96,7 @@ def rebuild_analyst_opinions(connection: Any, as_of_date: date) -> dict[str, Any
         """SELECT claim_id,remote_analyst_id,scope,subject_key,subject_label,direction,strength,
                      horizon_days,extraction_confidence,explicitness,published_at,available_at
                FROM quant.analyst_claims
-              WHERE available_at::date<=%s
+              WHERE (available_at AT TIME ZONE 'Asia/Shanghai')::date<=%s
               ORDER BY available_at,claim_id""", (as_of_date,)
     ).fetchall()]
     grouped: dict[tuple[str, date, str, str, int], list[dict[str, Any]]] = defaultdict(list)
@@ -234,13 +239,13 @@ def _industry_size_benchmark_return(connection: Any, opinion: dict[str, Any], en
 
 def recompute_analyst_opinion_outcomes(connection: Any, as_of_date: date) -> dict[str, Any]:
     opinions = [dict(row) for row in connection.execute(
-        "SELECT * FROM quant.analyst_opinions WHERE available_at::date<=%s", (as_of_date,)
+        "SELECT * FROM quant.analyst_opinions WHERE (available_at AT TIME ZONE 'Asia/Shanghai')::date<=%s", (as_of_date,)
     ).fetchall()]
     result: defaultdict[str, int] = defaultdict(int)
     for opinion in opinions:
         symbols = _basket_symbols(connection, opinion) if opinion["factor_status"] == "eligible" else []
         for horizon in HORIZONS:
-            entry_date, exit_date = _next_dates(connection, opinion["available_at"].date(), horizon)
+            entry_date, exit_date = _next_dates(connection, _cn_date(opinion["available_at"]), horizon)
             status = "pending" if exit_date is None else "matured"
             raw_return = benchmark_return = residual_return = directional_return = None
             basket_size = 0
@@ -297,7 +302,7 @@ def _pearson(pairs: list[tuple[float, float]]) -> float | None:
 def _mature_outcome_rows(connection: Any, as_of_date: date | None = None) -> list[dict[str, Any]]:
     predicate, params = "", [OUTCOME_VERSION]
     if as_of_date is not None:
-        predicate, params = "AND p.opinion_date<=%s", [OUTCOME_VERSION, as_of_date]
+        predicate, params = "AND p.opinion_date<=%s AND o.exit_date<=%s", [OUTCOME_VERSION, as_of_date, as_of_date]
     return [dict(row) for row in connection.execute(
         f"""SELECT o.horizon_days,o.entry_date,o.exit_date,o.residual_return,o.directional_return,o.normalized_reward,o.volatility,
                     p.opinion_date,p.remote_analyst_id,p.scope,p.subject_key,p.direction,p.strength,p.explicitness
@@ -333,8 +338,8 @@ def _herding_effective_sample(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "method": "N_eff=N/(1+(N-1)*mean_pair_sign_correlation)"}
 
 
-def equal_weight_baseline(connection: Any) -> dict[str, Any]:
-    rows = _mature_outcome_rows(connection)
+def equal_weight_baseline(connection: Any, as_of_date: date | None = None) -> dict[str, Any]:
+    rows = _mature_outcome_rows(connection, as_of_date)
     by_horizon: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         by_horizon[int(row["horizon_days"])].append(row)
@@ -427,7 +432,7 @@ def _active_opinion_scores(connection: Any, as_of_date: date, weights: dict[str,
     rows = [dict(row) for row in connection.execute(
         """SELECT remote_analyst_id,scope,subject_key,subject_label,direction,explicitness,strength,horizon_days,available_at
              FROM quant.analyst_opinions
-            WHERE factor_status='eligible' AND available_at::date<=%s
+            WHERE factor_status='eligible' AND (available_at AT TIME ZONE 'Asia/Shanghai')::date<=%s
               AND opinion_date + horizon_days >= %s AND direction<>0
             ORDER BY available_at DESC""", (as_of_date, as_of_date),
     ).fetchall()]
@@ -593,7 +598,7 @@ def _market_regimes(connection: Any, dates: set[date]) -> dict[date, str]:
 def rebuild_analyst_research(connection: Any, as_of_date: date) -> dict[str, Any]:
     opinions = rebuild_analyst_opinions(connection, as_of_date)
     outcomes = recompute_analyst_opinion_outcomes(connection, as_of_date)
-    baseline = equal_weight_baseline(connection)
+    baseline = equal_weight_baseline(connection, as_of_date)
     experts = sleeping_experts_fixed_share(connection, as_of_date)
     phase_3 = conditional_selection_and_pairwise_ranking(connection, as_of_date)
     result = {"as_of_date": str(as_of_date), "opinions": opinions, "outcomes": outcomes, "equal_weight": baseline,

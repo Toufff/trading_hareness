@@ -2,8 +2,9 @@ import unittest
 from datetime import date, datetime, timezone
 
 from app.analyst_trade_actions import parse_anqiang_trade_actions
-from app.analyst_expert_research import EXPERT_DEFAULTS, HORIZONS, _clustered_mean, _herding_effective_sample, _pearson, _softmax_weights
+from app.analyst_expert_research import EXPERT_DEFAULTS, HORIZONS, _clustered_mean, _cn_date, _herding_effective_sample, _pearson, _softmax_weights
 from app.analyst_skill_models import PROMPT_VARIANTS, _variant_payload
+from app.analyst_promotion import analyst_live_promotion
 from app.remote_archive import (classify_remote_text, evidence_fragments, explicitness, extract_topics, horizon_days,
                                 is_market_opinion, labels, normalize_topic_key, parse_optional_timestamp,
                                 report_topic_labels, text_hash, text_only_remote_message, text_only_remote_report)
@@ -126,6 +127,29 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         ]
         report = _herding_effective_sample(rows)
         self.assertEqual(report["effective_independent_analysts"], 1.0)
+
+    def test_cn_day_is_not_the_utc_calendar_day(self):
+        value = datetime(2026, 8, 12, 16, 30, tzinfo=timezone.utc)
+        self.assertEqual(_cn_date(value), date(2026, 8, 13))
+
+    def test_only_explicit_approved_registry_can_enable_analyst_weight(self):
+        class Connection:
+            def __init__(self, row): self.row = row
+            def execute(self, *_args, **_kwargs):
+                class Result:
+                    def __init__(self, row): self.row = row
+                    def fetchone(self): return self.row
+                return Result(self.row)
+
+        blocked = analyst_live_promotion(Connection({"status": "eligible_for_review", "max_live_weight": 0.1,
+                                                      "approved_by": None, "approved_at": None, "reason": "not approved",
+                                                      "methodology_version": "x", "evidence": {}}), date(2026, 8, 12))
+        self.assertFalse(blocked["execution_eligible"])
+        approved = analyst_live_promotion(Connection({"status": "approved", "max_live_weight": 0.5,
+                                                       "approved_by": "reviewer", "approved_at": datetime.now(timezone.utc),
+                                                       "reason": "approved", "methodology_version": "x", "evidence": {}}), date(2026, 8, 12))
+        self.assertTrue(approved["execution_eligible"])
+        self.assertEqual(approved["weight"], 0.1)
 
 
 if __name__ == "__main__":

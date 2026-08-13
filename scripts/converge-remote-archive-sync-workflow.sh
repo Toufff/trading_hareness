@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # Safely replace the remote-report sync schedule with the generated PIT-safe
 # 15-minute intraday workflow. Credentials remain inside n8n; no bearer value
-# is written into this repository or the generated artifact.
+# is written into this repository or the generated artifact.  The remote base
+# URL is injected from the ignored .env file into n8n as
+# REMOTE_ANALYST_ARCHIVE_BASE_URL.
 set -euo pipefail
 
 workflow_id="remoteArchiveSync123"
+if ! grep -q '^REMOTE_ANALYST_ARCHIVE_BASE_URL=https://' .env 2>/dev/null; then
+  echo 'REMOTE_ANALYST_ARCHIVE_BASE_URL must be configured in the ignored .env file' >&2
+  exit 2
+fi
 timestamp="$(date -u +%Y%m%d-%H%M%S)"
 backup_dir="backups/workflow-changes/${timestamp}-remote-archive-sync"
 container_before="/tmp/${workflow_id}-${timestamp}-before.json"
@@ -24,8 +30,9 @@ node scripts/build-remote-archive-sync-workflow.mjs "$backup_dir/before.json" "$
 jq -e '
   type == "array" and length == 1 and .[0].id == "remoteArchiveSync123" and .[0].active == true and
   ([.[0].nodes[] | select(.name == "交易时段与盘后同步远端报告")] | length == 1) and
-  ([.[0].nodes[] | select(.name == "Read latest message summaries")] | length == 1) and
-  ([.[0].nodes[] | select(.name == "Fan out new message details")] | length == 1) and
+  ([.[0].nodes[] | select(.name == "Read latest message summaries")] | length == 0) and
+  ([.[0].nodes[] | select(.name == "Select message delta to watermark")] | length == 1) and
+  ([.[0].nodes[] | select(.name == "Read report cursor")] | length == 1) and
   ([.[0].nodes[] | select(.name == "交易时段与盘后同步远端报告") | .parameters.rule.interval[].expression] | sort == ["*/15 9-11,13-14 * * 1-5", "20 18 * * 1-5"])
 ' "$backup_dir/candidate.json" >/dev/null
 
@@ -71,6 +78,6 @@ docker compose exec -T -u root n8n rm -f "$container_after"
 docker compose exec -T n8n n8n export:workflow --id="$workflow_id" --output="$container_after"
 docker compose cp "n8n:${container_after}" "$backup_dir/after.json"
 docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U n8n -d n8n -Atqc "SELECT w.active AND w.\"activeVersionId\"=p.\"publishedVersionId\" FROM workflow_entity w JOIN workflow_published_version p ON p.\"workflowId\"=w.id WHERE w.id='${workflow_id}'" | grep -qx 't'
-jq -e '.[0].active == true and ([.[0].nodes[] | select(.name == "交易时段与盘后同步远端报告")] | length == 1) and ([.[0].nodes[] | select(.name == "Read latest message summaries")] | length == 1)' "$backup_dir/after.json" >/dev/null
+jq -e '.[0].active == true and ([.[0].nodes[] | select(.name == "交易时段与盘后同步远端报告")] | length == 1) and ([.[0].nodes[] | select(.name == "Select message delta to watermark")] | length == 1) and ([.[0].nodes[] | select(.name == "Read report cursor")] | length == 1)' "$backup_dir/after.json" >/dev/null
 rm -f "$backup_dir/candidate.json"
 echo "remote archive schedule converged; rollback export: ${backup_dir}/before.json"

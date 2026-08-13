@@ -1,0 +1,88 @@
+"""Pure pre-confirmation safety gate for intraday research signals.
+
+The gate may suppress/downgrade a signal but never creates one.  It is kept
+separate from setup rules so live scanning and future event replay use the
+same market/data/tradability semantics.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def _number(value: Any) -> float | None:
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[str, Any] | None,
+                     daily_factors: dict[str, Any] | None, market_context: dict[str, Any] | None,
+                     fast_confirmation: dict[str, Any] | None) -> dict[str, Any]:
+    """Return an explainable fail-closed policy decision.
+
+    P0 intentionally only consumes inputs already in the live scan.  Position
+    concentration, daily loss and drawdown require the Phase-2 paper ledger;
+    they are not faked from a watchlist row here.
+    """
+    signal_type = str(signal.get("signal_type") or "watch")
+    entry_like = signal_type == "entry"
+    exit_like = signal_type in {"exit", "reduce"}
+    reasons: list[str] = []
+    flags: list[str] = []
+    market_context = market_context if isinstance(market_context, dict) else {}
+    factors = daily_factors if isinstance(daily_factors, dict) else {}
+    fast = fast_confirmation if isinstance(fast_confirmation, dict) else {}
+    price = _number((quote or {}).get("price"))
+    if price is None or price <= 0:
+        reasons.append("missing_live_price")
+        flags.append("policy_data_unavailable")
+
+    market_state = str(market_context.get("market_state") or "unknown")
+    board_age = _number(market_context.get("board_snapshot_age_seconds"))
+    if entry_like and market_state == "broad_risk_off":
+        reasons.append("broad_risk_off_blocks_new_entry")
+        flags.append("policy_market_risk_off")
+    if entry_like and board_age is not None and board_age > 360:
+        reasons.append("market_context_stale")
+        flags.append("policy_market_context_stale")
+
+    constraints = factors.get("trade_constraints") if isinstance(factors.get("trade_constraints"), dict) else {}
+    if bool(constraints.get("is_suspended")):
+        reasons.append("suspended_security")
+        flags.append("policy_suspended")
+    limit_up = _number(constraints.get("limit_up"))
+    limit_down = _number(constraints.get("limit_down"))
+    if entry_like and price is not None and limit_up is not None and price >= limit_up:
+        reasons.append("limit_up_may_be_unbuyable")
+        flags.append("policy_limit_up")
+    if exit_like and price is not None and limit_down is not None and price <= limit_down:
+        reasons.append("limit_down_may_be_unsellable")
+        flags.append("policy_limit_down")
+
+    if fast.get("status") == "mismatch":
+        reasons.append("cross_source_price_mismatch")
+        flags.append("policy_quote_mismatch")
+
+    available_quantity = int(watch.get("available_quantity") or 0)
+    risk_alert_only = bool(exit_like and watch.get("entry_price") is not None and available_quantity <= 0)
+    if risk_alert_only:
+        reasons.append("no_confirmed_sellable_quantity")
+        flags.append("policy_risk_alert_only")
+
+    blocks_confirmation = bool(reasons) and not risk_alert_only
+    return {
+        "version": "live-policy-gate-v1",
+        "decision": "risk_alert_only" if risk_alert_only else "watch_only" if blocks_confirmation else "pass",
+        "allow_confirmation": not blocks_confirmation,
+        "reason_codes": reasons,
+        "risk_flags": flags,
+        "market_state": market_state,
+        "board_snapshot_age_seconds": board_age,
+        "available_quantity": available_quantity,
+        "scope": "P0 market/data/static-tradability only; portfolio risk awaits paper ledger",
+    }
+
+
+__all__ = ["live_policy_gate"]
