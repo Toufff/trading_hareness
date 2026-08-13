@@ -174,6 +174,9 @@ from .runtime_resources import (
 from .health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
 from .replay_readiness import historical_replay_readiness
 from . import research_capacity
+from .feature_read_repository import analyst_feature as read_analyst_feature
+from .feature_read_repository import latest_tushare_row as read_latest_tushare_row
+from .feature_read_repository import market_regime as read_market_regime
 from .intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload, intraday_services_status_payload_async as read_intraday_services_status_payload_async
 from .routers.provider_status import build_provider_status_router
 from .routers.research_readiness import build_research_readiness_router
@@ -795,52 +798,16 @@ def feature_readiness_state(connection: Any) -> dict[str, Any]:
 
 
 def market_regime(connection: Any, as_of_date: date) -> str:
-    rows = connection.execute(
-        """SELECT close FROM quant.canonical_bars_daily WHERE symbol='000300.SH' AND trading_date<=%s
-           ORDER BY trading_date DESC LIMIT 21""",
-        (as_of_date,),
-    ).fetchall()
-    if len(rows) < 20:
-        return "unknown"
-    return "risk_on" if number(rows[0]["close"]) >= number(rows[-1]["close"]) else "risk_off"
+    """Compatibility export for the isolated feature read repository."""
+    return read_market_regime(connection, as_of_date, number)
 
 
 def latest_tushare_row(connection: Any, api_name: str, symbol: str, as_of_date: date) -> dict[str, Any] | None:
-    """Read persisted raw evidence; feature construction never calls providers."""
-    rows = connection.execute(
-        """SELECT row_data FROM quant.tushare_raw_records
-           WHERE api_name=%s AND row_data->>'ts_code'=%s
-             AND coalesce(row_data->>'trade_date','')<=%s
-           ORDER BY coalesce(row_data->>'trade_date','') DESC,available_at DESC LIMIT 1""",
-        (api_name, symbol, as_of_date.strftime("%Y%m%d")),
-    ).fetchall()
-    return dict(rows[0]["row_data"]) if rows else None
+    return read_latest_tushare_row(connection, api_name, symbol, as_of_date)
 
 
 def analyst_feature(connection: Any, symbol: str, as_of_date: date) -> dict[str, Any]:
-    rows = connection.execute(
-        """SELECT o.analyst_id AS remote_analyst_id,o.direction,o.strength,o.confidence AS extraction_confidence,
-                  o.horizon_days,left(o.evidence_span,220) evidence
-           FROM quant.analyst_observations o
-           WHERE o.scope='stock' AND o.subject_key=%s AND o.status='eligible'
-             AND (o.strategy_available_at AT TIME ZONE 'Asia/Shanghai')::date<=%s
-           ORDER BY o.strategy_available_at DESC,o.created_at DESC LIMIT 50""",
-        (symbol, as_of_date),
-    ).fetchall()
-    if not rows:
-        return {"consensus": 0.0, "claim_count": 0, "analyst_skill": 0.5, "evidence": [],
-                "status": "research_only_no_eligible_observation"}
-    weighted = [number(row["direction"]) * number(row["strength"]) * number(row["extraction_confidence"]) for row in rows]
-    weights = [number(row["strength"]) * number(row["extraction_confidence"]) for row in rows]
-    return {
-        "consensus": round(sum(weighted) / sum(weights), 5) if sum(weights) else 0.0,
-        # Scorecards are strictly descriptive until the one promotion
-        # registry explicitly approves an analyst delta.
-        "claim_count": len(rows), "analyst_skill": 0.5, "status": "eligible_observation_context_only",
-        "evidence": [{"analyst_id": row["remote_analyst_id"], "direction": row["direction"],
-                      "strength": row["strength"], "horizon_days": row["horizon_days"], "evidence": row["evidence"]}
-                     for row in rows[:8]],
-    }
+    return read_analyst_feature(connection, symbol, as_of_date, number)
 
 
 def analyst_text_factor_summary(connection: Any, as_of_date: date, lookback_days: int = 7,
