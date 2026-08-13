@@ -88,6 +88,10 @@ from app.numeric_utils import decimal_or_none as pure_decimal_or_none, intraday_
 from app.intraday_clock import eac_window as pure_eac_window, feature_clock as pure_feature_clock, minute_bucket as pure_minute_bucket
 from app.intraday_features import minute_features as pure_minute_features, peer_context as pure_peer_context
 from app.intraday_features import strategy_session_rows as pure_strategy_session_rows
+from app.intraday_attribution import signal_attribution as isolated_signal_attribution
+from app.intraday_breakout import eac_acceptance_assessment as isolated_eac_acceptance_assessment, upside_research_assessment as isolated_upside_assessment
+from app.intraday_outcome_attribution import outcome_attribution_summary as isolated_outcome_attribution_summary
+from app.intraday_signal_rules import signal_rules as isolated_signal_rules
 from app.post_close_limit_features import limit_daily_features as pure_limit_daily_features
 from app.post_close_limit_features import board_count as pure_board_count
 from app.post_close_structures import (
@@ -3370,6 +3374,27 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(attribution["ofi_attribution_window"], "30s")
         self.assertEqual(attribution["price_volume_state"], "negative_corr")
         self.assertEqual(attribution["smart_money_state"], "below_session_vwap")
+
+    def test_extracted_intraday_modules_match_compatibility_exports(self):
+        evidence = {"tencent_order_book": {"status": "observed", "latest_features": {"status": "observed", "delta_status": "ready", "qi5": 0.4}, "ofi_30s": 3, "ofi_30s_sample_count": 3}}
+        self.assertEqual(
+            intraday_signal_attribution("000001.SZ:watch:test", "watch", {}, evidence),
+            isolated_signal_attribution("000001.SZ:watch:test", "watch", {}, evidence,
+                                        number=pure_intraday_number, signal_model_version="watchlist-confirmation-v4"),
+        )
+        watch = {"symbol": "000001.SZ", "entry_price": None, "available_quantity": 0, "alert_on_entry": True, "alert_on_exit": True}
+        quote = {"price": 10.2, "pct_change": 2.0, "volume_ratio": 2.0, "turnover_rate": 4.0, "main_net_inflow": 100, "main_flow_percentile": 0.95}
+        self.assertEqual(
+            intraday_signal_rules(watch, quote, {"price": 10.1}),
+            isolated_signal_rules(watch, quote, {"price": 10.1}, number=pure_intraday_number,
+                                   upside_assessment_fn=lambda q, d, m, p: isolated_upside_assessment(q, d, m, p, number=pure_intraday_number, eac_window=pure_eac_window),
+                                   model_version="watchlist-confirmation-v4"),
+        )
+        items = [{"signal_event_id": "s1", "status": "matured", "raw_return": 0.01,
+                  "maximum_favorable_excursion": 0.02, "maximum_adverse_excursion": -0.005,
+                  "observed_at": datetime(2026, 8, 13, 2, 0, tzinfo=timezone.utc),
+                  "attribution": {"model_version": "v1"}, "horizon_key": "5m"}]
+        self.assertEqual(intraday_outcome_attribution_summary(items), isolated_outcome_attribution_summary(items, number=pure_intraday_number))
 
     def test_green_reclaim_research_rule_requires_price_volume_vwap_and_flow_confirmation(self):
         rows = []
