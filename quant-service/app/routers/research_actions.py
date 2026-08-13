@@ -21,6 +21,8 @@ from ..request_models import (
     GenerateRequest,
     RemoteReportImport,
     RemoteReportReprocessRequest,
+    RemoteAnalystMessageImport,
+    RemoteMessageReprocessRequest,
     SnapshotRequest,
     StrategyBacktestRequest,
     UniverseUpdateRequest,
@@ -31,7 +33,9 @@ from ..request_models import (
 class ResearchActionDependencies:
     analyse_ingestion: Callable[[UUID], Awaitable[dict[str, Any]]]
     import_remote_report: Callable[[RemoteReportImport], Awaitable[dict[str, Any]]]
+    import_remote_message: Callable[[RemoteAnalystMessageImport], Awaitable[dict[str, Any]]]
     reprocess_remote_reports: Callable[[RemoteReportReprocessRequest], Awaitable[dict[str, Any]]]
+    reprocess_remote_messages: Callable[[RemoteMessageReprocessRequest], Awaitable[dict[str, Any]]]
     review_claim: Callable[[UUID, ClaimReviewRequest], Awaitable[dict[str, Any]]]
     update_universe: Callable[[UniverseUpdateRequest], Awaitable[dict[str, Any]]]
     build_features: Callable[[GenerateRequest], Awaitable[dict[str, Any]]]
@@ -54,9 +58,17 @@ def build_research_actions_router(deps: ResearchActionDependencies) -> APIRouter
     async def import_remote_report(payload: RemoteReportImport) -> dict[str, Any]:
         return await deps.import_remote_report(payload)
 
+    @router.post("/api/v1/remote-archive/messages/import")
+    async def import_remote_message(payload: RemoteAnalystMessageImport) -> dict[str, Any]:
+        return await deps.import_remote_message(payload)
+
     @router.post("/api/v1/remote-archive/reports/reprocess")
     async def reprocess_remote_reports(payload: RemoteReportReprocessRequest) -> dict[str, Any]:
         return await deps.reprocess_remote_reports(payload)
+
+    @router.post("/api/v1/remote-archive/messages/reprocess")
+    async def reprocess_remote_messages(payload: RemoteMessageReprocessRequest) -> dict[str, Any]:
+        return await deps.reprocess_remote_messages(payload)
 
     @router.post("/api/v1/claim-review/{review_id}")
     async def review_claim(review_id: UUID, payload: ClaimReviewRequest) -> dict[str, Any]:

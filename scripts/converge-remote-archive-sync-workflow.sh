@@ -24,6 +24,8 @@ node scripts/build-remote-archive-sync-workflow.mjs "$backup_dir/before.json" "$
 jq -e '
   type == "array" and length == 1 and .[0].id == "remoteArchiveSync123" and .[0].active == true and
   ([.[0].nodes[] | select(.name == "交易时段与盘后同步远端报告")] | length == 1) and
+  ([.[0].nodes[] | select(.name == "Read latest message summaries")] | length == 1) and
+  ([.[0].nodes[] | select(.name == "Fan out new message details")] | length == 1) and
   ([.[0].nodes[] | select(.name == "交易时段与盘后同步远端报告") | .parameters.rule.interval[].expression] | sort == ["*/15 9-11,13-14 * * 1-5", "20 18 * * 1-5"])
 ' "$backup_dir/candidate.json" >/dev/null
 
@@ -32,11 +34,33 @@ docker compose cp "$backup_dir/candidate.json" "n8n:${container_after}"
 # credential reference intact.  The workflow has no active execution during
 # this configuration-only update.
 docker compose exec -T n8n n8n import:workflow --input="$container_after"
-# In this single-main n8n deployment the CLI intentionally cannot activate on
-# import.  Stop the process before the narrow DB state change so its in-memory
-# copy cannot overwrite the verified schedule on restart.
+# n8n 2.x schedules only a *published* version.  `import:workflow` updates the
+# editable entity but deliberately clears its published snapshot, so merely
+# toggling `active=true` leaves a workflow that looks active in SQL yet never
+# appears in n8n's active-trigger list.  Make a history snapshot and publish it
+# atomically while n8n is stopped.  Credentials remain references in `nodes`.
 docker compose stop n8n
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U n8n -d n8n -c "UPDATE workflow_entity SET active=true WHERE id='${workflow_id}' AND nodes::jsonb @> '[{\"name\":\"交易时段与盘后同步远端报告\"}]'::jsonb;"
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U n8n -d n8n <<SQL
+BEGIN;
+WITH revision AS (
+  INSERT INTO workflow_history("versionId","workflowId",authors,nodes,connections,name,description,"nodeGroups")
+  SELECT gen_random_uuid()::text,id,'codex-sync',nodes,connections,name,description,"nodeGroups"
+    FROM workflow_entity
+   WHERE id='${workflow_id}'
+     AND nodes::jsonb @> '[{"name":"交易时段与盘后同步远端报告"}]'::jsonb
+  RETURNING "versionId","workflowId"
+), published AS (
+  INSERT INTO workflow_published_version("workflowId","publishedVersionId")
+  SELECT "workflowId","versionId" FROM revision
+  ON CONFLICT("workflowId") DO UPDATE SET "publishedVersionId"=EXCLUDED."publishedVersionId", "updatedAt"=now()
+  RETURNING "workflowId","publishedVersionId"
+)
+UPDATE workflow_entity w
+   SET active=true, "activeVersionId"=p."publishedVersionId", "updatedAt"=now()
+  FROM published p
+ WHERE w.id=p."workflowId";
+COMMIT;
+SQL
 docker compose start n8n
 for _ in {1..15}; do
   curl -fsS --max-time 2 http://127.0.0.1:5678/healthz >/dev/null && break
@@ -46,6 +70,7 @@ curl -fsS --max-time 2 http://127.0.0.1:5678/healthz >/dev/null
 docker compose exec -T -u root n8n rm -f "$container_after"
 docker compose exec -T n8n n8n export:workflow --id="$workflow_id" --output="$container_after"
 docker compose cp "n8n:${container_after}" "$backup_dir/after.json"
-jq -e '.[0].active == true and ([.[0].nodes[] | select(.name == "交易时段与盘后同步远端报告")] | length == 1)' "$backup_dir/after.json" >/dev/null
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U n8n -d n8n -Atqc "SELECT w.active AND w.\"activeVersionId\"=p.\"publishedVersionId\" FROM workflow_entity w JOIN workflow_published_version p ON p.\"workflowId\"=w.id WHERE w.id='${workflow_id}'" | grep -qx 't'
+jq -e '.[0].active == true and ([.[0].nodes[] | select(.name == "交易时段与盘后同步远端报告")] | length == 1) and ([.[0].nodes[] | select(.name == "Read latest message summaries")] | length == 1)' "$backup_dir/after.json" >/dev/null
 rm -f "$backup_dir/candidate.json"
 echo "remote archive schedule converged; rollback export: ${backup_dir}/before.json"

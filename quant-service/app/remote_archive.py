@@ -10,7 +10,7 @@ from typing import Any
 from psycopg.types.json import Json
 
 from .analysis import EXTRACTOR_VERSION, direction_source, extract_signals
-from .analyst_trade_actions import sync_anqiang_trade_actions
+from .analyst_trade_actions import sync_anqiang_message_trade_actions, sync_anqiang_trade_actions
 from .analyst_skill_models import rebuild_all_analyst_skill_profiles, rebuild_analyst_skill_profile
 from .analyst_expert_research import rebuild_analyst_research
 from .database import Database
@@ -31,6 +31,12 @@ _EXPLICIT_ACTION_TERMS = ("买入", "卖出", "加仓", "减仓", "开仓", "止
 REMOTE_TEXT_FIELDS = (
     "analyst", "analyst_id", "report_id", "date", "title", "summary", "version", "content_hash",
     "created_at", "updated_at", "mentioned_stocks", "mentioned_sectors", "predictions",
+)
+
+REMOTE_MESSAGE_TEXT_FIELDS = (
+    "message_id", "analyst_id", "source_item_id", "source_message_id", "source_entry_id", "received_at",
+    "strategy_available_at", "published_at", "edited_at", "stated_at", "stated_precision", "time_evidence",
+    "type", "content", "source_ref", "version", "content_hash",
 )
 
 
@@ -74,6 +80,20 @@ def text_only_remote_report(report: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def text_only_remote_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Persist only a remote message's already-extracted text and timing proof.
+
+    The remote API may describe an OCR/audio/video source, but this boundary
+    never follows its media reference.  ``content`` is the remote service's
+    extracted prose, and is the sole material available to this service.
+    """
+    normalized = {key: text_only_value(message.get(key)) for key in REMOTE_MESSAGE_TEXT_FIELDS if key in message}
+    normalized["content"] = strip_media_references(str(message.get("content") or ""))
+    normalized["time_evidence"] = text_only_value(message.get("time_evidence") or {})
+    normalized["source_ref"] = str(message.get("source_ref") or "")
+    return normalized
+
+
 def parse_timestamp(value: Any) -> datetime:
     if isinstance(value, datetime):
         return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -84,6 +104,20 @@ def parse_timestamp(value: Any) -> datetime:
         except ValueError:
             pass
     return datetime.now(timezone.utc)
+
+
+def parse_optional_timestamp(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
 
 
 def text_hash(value: str) -> str:
@@ -226,6 +260,120 @@ def persist_claim_revision(connection: Any, analyst_id: str, scope: str, subject
         "INSERT INTO quant.claim_revisions(prior_claim_id,claim_id,revision_type) VALUES(%s,%s,%s) ON CONFLICT(claim_id,revision_type) DO NOTHING",
         (prior_claim_id, claim_id, kind),
     )
+
+
+def _insert_message_claim(connection: Any, *, evidence_id: Any, analyst_id: str, message_id: str, scope: str,
+                          subject_key: str, subject_label: str, direction: int, strength: float, horizon: int,
+                          confidence: float, extractor_version: str, body: str, published_at: datetime | None,
+                          available_at: datetime) -> None:
+    claim = connection.execute(
+        """INSERT INTO quant.analyst_claims(evidence_id,remote_analyst_id,scope,subject_key,subject_label,direction,strength,horizon_days,
+             extraction_confidence,extractor_version,published_at,available_at,explicitness,raw)
+           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT(evidence_id,scope,subject_key,horizon_days,extractor_version) DO UPDATE SET direction=EXCLUDED.direction,
+             strength=EXCLUDED.strength,extraction_confidence=EXCLUDED.extraction_confidence,published_at=EXCLUDED.published_at,
+             available_at=EXCLUDED.available_at,explicitness=EXCLUDED.explicitness,raw=EXCLUDED.raw RETURNING claim_id""",
+        (evidence_id, analyst_id, scope, subject_key, subject_label, direction, strength, horizon, confidence,
+         extractor_version, published_at, available_at, explicitness(body, scope=scope),
+         Json({"remote_message_id": message_id, "direction_source": direction_source(body), "evidence_text": body})),
+    ).fetchone()
+    persist_claim_revision(connection, analyst_id, scope, subject_key, direction, evidence_id, claim["claim_id"])
+
+
+def _materialize_message_claims(connection: Any, *, evidence_id: Any, analyst_id: str, message_id: str,
+                                body: str, published_at: datetime | None, available_at: datetime) -> int:
+    """Only explicit codes and reviewed topic terms may become message claims."""
+    direction, strength, confidence = classify_remote_text(body)
+    count = 0
+    for signal in extract_signals(body):
+        connection.execute("INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,'remote-message') ON CONFLICT(symbol) DO NOTHING",
+                           (signal.symbol, signal.exchange))
+        _insert_message_claim(connection, evidence_id=evidence_id, analyst_id=analyst_id, message_id=message_id,
+                              scope="stock", subject_key=signal.symbol, subject_label=signal.symbol, direction=signal.direction,
+                              strength=signal.strength, horizon=signal.horizon_days, confidence=signal.extraction_confidence,
+                              extractor_version="remote-message-normalizer-v1", body=signal.evidence_text,
+                              published_at=published_at, available_at=available_at)
+        count += 1
+    for label in extract_topics(body):
+        _insert_message_claim(connection, evidence_id=evidence_id, analyst_id=analyst_id, message_id=message_id,
+                              scope="theme", subject_key=normalize_topic_key(label), subject_label=label, direction=direction,
+                              strength=strength, horizon=horizon_days(body), confidence=confidence,
+                              extractor_version="remote-message-topic-normalizer-v1", body=body,
+                              published_at=published_at, available_at=available_at)
+        count += 1
+    if is_market_opinion(body):
+        _insert_message_claim(connection, evidence_id=evidence_id, analyst_id=analyst_id, message_id=message_id,
+                              scope="market", subject_key="CN_A_MARKET", subject_label="A股整体", direction=direction,
+                              strength=strength, horizon=horizon_days(body), confidence=confidence,
+                              extractor_version="remote-message-market-normalizer-v1", body=body,
+                              published_at=published_at, available_at=available_at)
+        count += 1
+    return count
+
+
+def import_remote_analyst_message(db: Database, message: dict[str, Any]) -> dict[str, Any]:
+    """Import remote extracted text; never retrieve the referenced media.
+
+    ``received_at`` is validated against the remote compatibility field and is
+    persisted as the claim's one and only strategy availability timestamp.
+    A later content version is retained in the version ledger but intentionally
+    does not rewrite previously usable evidence or its point-in-time claims.
+    """
+    message = text_only_remote_message(message)
+    message_id = str(message.get("message_id") or "").strip()
+    analyst_id = str(message.get("analyst_id") or "").strip()
+    source_item_id = str(message.get("source_item_id") or "").strip()
+    version = str(message.get("version") or "").strip()
+    content_hash = str(message.get("content_hash") or "").strip()
+    received_at = parse_optional_timestamp(message.get("received_at"))
+    strategy_available_at = parse_optional_timestamp(message.get("strategy_available_at"))
+    if not message_id or not analyst_id or not source_item_id or not version or not content_hash or received_at is None:
+        raise ValueError("remote message requires message_id, analyst_id, source_item_id, received_at, version and content_hash")
+    if strategy_available_at is None or strategy_available_at != received_at:
+        raise ValueError("remote message strategy_available_at must equal immutable received_at")
+    source_type = str(message.get("type") or "text")
+    if source_type not in {"text", "url", "image_ocr", "audio", "video"}:
+        raise ValueError("remote message has an invalid type")
+    published_at = parse_optional_timestamp(message.get("published_at"))
+    edited_at = parse_optional_timestamp(message.get("edited_at"))
+    stated_at = parse_optional_timestamp(message.get("stated_at"))
+    stated_precision = message.get("stated_precision")
+    if stated_precision not in (None, "minute", "second"):
+        raise ValueError("remote message has an invalid stated_precision")
+    body = str(message.get("content") or "")
+    with db.transaction() as connection:
+        previous = connection.execute("SELECT content_hash,received_at FROM quant.remote_analyst_messages WHERE remote_message_id=%s", (message_id,)).fetchone()
+        if previous is not None and previous["received_at"] != received_at:
+            raise ValueError("remote message received_at changed after first receipt")
+        connection.execute("INSERT INTO quant.remote_analysts(remote_analyst_id,name,remote_metadata,synced_at) VALUES(%s,%s,%s,now()) ON CONFLICT(remote_analyst_id) DO UPDATE SET synced_at=now()",
+                           (analyst_id, analyst_id, Json({"source": "remote_messages"})))
+        if previous is not None and str(previous["content_hash"]) != content_hash:
+            connection.execute("INSERT INTO quant.remote_analyst_message_versions(remote_message_id,remote_version,content_hash,payload) VALUES(%s,%s,%s,%s) ON CONFLICT(remote_message_id,remote_version,content_hash) DO UPDATE SET last_seen_at=now(),payload=EXCLUDED.payload",
+                               (message_id, version, content_hash, Json(message)))
+            return {"status": "versioned_replay_only", "remote_message_id": message_id, "evidence": 0, "claims": 0}
+        connection.execute(
+            """INSERT INTO quant.remote_analyst_messages(remote_message_id,remote_analyst_id,source_item_id,source_message_id,source_entry_id,source_type,source_ref,
+                   content,content_hash,remote_version,received_at,strategy_available_at,source_published_at,source_edited_at,stated_at,stated_precision,time_evidence,payload,synced_at)
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now()) ON CONFLICT(remote_message_id) DO UPDATE SET synced_at=now()""",
+            (message_id, analyst_id, source_item_id, message.get("source_message_id"), message.get("source_entry_id"), source_type,
+             str(message.get("source_ref") or ""), body, content_hash, version, received_at, received_at, published_at, edited_at,
+             stated_at, stated_precision, Json(message.get("time_evidence") or {}), Json(message)),
+        )
+        connection.execute("INSERT INTO quant.remote_analyst_message_versions(remote_message_id,remote_version,content_hash,payload) VALUES(%s,%s,%s,%s) ON CONFLICT(remote_message_id,remote_version,content_hash) DO UPDATE SET last_seen_at=now(),payload=EXCLUDED.payload",
+                           (message_id, version, content_hash, Json(message)))
+        evidence = connection.execute(
+            """INSERT INTO quant.analyst_evidence(remote_message_id,evidence_key,evidence_type,body,location,content_sha256,available_at)
+               VALUES(%s,'content','message',%s,%s,%s,%s) ON CONFLICT(remote_message_id,evidence_key,content_sha256) WHERE remote_message_id IS NOT NULL
+               DO UPDATE SET available_at=EXCLUDED.available_at RETURNING evidence_id""",
+            (message_id, body, Json({"source_type": source_type, "source_ref": str(message.get("source_ref") or ""),
+                                     "stated_at": stated_at.isoformat() if stated_at else None,
+                                     "time_evidence": message.get("time_evidence") or {}}), text_hash(body), received_at),
+        ).fetchone()
+        claims = _materialize_message_claims(connection, evidence_id=evidence["evidence_id"], analyst_id=analyst_id,
+                                             message_id=message_id, body=body, published_at=published_at, available_at=received_at)
+        trade_actions = sync_anqiang_message_trade_actions(connection, message, available_at=received_at, stated_at=stated_at)
+    return {"status": "unchanged" if previous is not None else "updated", "remote_message_id": message_id, "evidence": 1,
+            "claims": claims, "trade_actions": trade_actions, "strategy_available_at": received_at.isoformat()}
 
 
 def import_remote_report(db: Database, report: dict[str, Any], force_reprocess: bool = False) -> dict[str, Any]:
@@ -409,9 +557,29 @@ def reprocess_remote_reports(db: Database, limit: int = 100) -> dict[str, Any]:
     }
 
 
+def reprocess_remote_messages(db: Database, limit: int = 100) -> dict[str, Any]:
+    """Rebuild message claims from stored text only; no remote fetch or media I/O."""
+    with db.transaction() as connection:
+        rows = connection.execute(
+            "SELECT payload FROM quant.remote_analyst_messages ORDER BY received_at DESC LIMIT %s",
+            (max(1, min(limit, 500)),),
+        ).fetchall()
+    results = [import_remote_analyst_message(db, dict(row["payload"])) for row in rows]
+    with db.transaction() as connection:
+        research = rebuild_analyst_research(connection, datetime.now(ZoneInfo("Asia/Shanghai")).date())
+    return {"status": "completed", "messages": len(results), "evidence": sum(int(item.get("evidence", 0)) for item in results),
+            "claims": sum(int(item.get("claims", 0)) for item in results), "items": results, "research": research}
+
+
 def remote_report_list_state(db: Database) -> dict[str, Any]:
     with db.transaction() as connection:
         rows = connection.execute(
-            "SELECT remote_analyst_id,count(*)::int reports,max(report_date) latest_report_date,max(synced_at) last_synced_at FROM quant.remote_reports GROUP BY remote_analyst_id ORDER BY remote_analyst_id"
+            """SELECT a.remote_analyst_id,
+                      count(DISTINCT r.remote_report_id)::int reports,max(r.report_date) latest_report_date,max(r.synced_at) last_report_synced_at,
+                      count(DISTINCT m.remote_message_id)::int messages,max(m.received_at) latest_message_received_at,max(m.synced_at) last_message_synced_at
+                 FROM quant.remote_analysts a
+                 LEFT JOIN quant.remote_reports r ON r.remote_analyst_id=a.remote_analyst_id
+                 LEFT JOIN quant.remote_analyst_messages m ON m.remote_analyst_id=a.remote_analyst_id
+                GROUP BY a.remote_analyst_id ORDER BY a.remote_analyst_id"""
         ).fetchall()
     return {"analysts": rows}

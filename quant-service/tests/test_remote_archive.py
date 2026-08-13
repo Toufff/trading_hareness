@@ -4,7 +4,9 @@ from datetime import date, datetime, timezone
 from app.analyst_trade_actions import parse_anqiang_trade_actions
 from app.analyst_expert_research import EXPERT_DEFAULTS, HORIZONS, _clustered_mean, _herding_effective_sample, _pearson, _softmax_weights
 from app.analyst_skill_models import PROMPT_VARIANTS, _variant_payload
-from app.remote_archive import classify_remote_text, evidence_fragments, explicitness, extract_topics, horizon_days, is_market_opinion, labels, normalize_topic_key, report_topic_labels, text_hash, text_only_remote_report
+from app.remote_archive import (classify_remote_text, evidence_fragments, explicitness, extract_topics, horizon_days,
+                                is_market_opinion, labels, normalize_topic_key, parse_optional_timestamp,
+                                report_topic_labels, text_hash, text_only_remote_message, text_only_remote_report)
 
 
 class RemoteArchiveNormalizationTests(unittest.TestCase):
@@ -34,6 +36,20 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         self.assertIsNone(normalized["source_url"])
         self.assertNotIn("https://", normalized["raw_markdown"])
         self.assertEqual(normalized["sections"]["market_view"], "视频见\n谨慎追高")
+
+    def test_message_ingress_preserves_received_time_but_never_keeps_media_links(self):
+        message = {
+            "message_id": "a" * 64, "analyst_id": "anqiang-touzi-riji", "source_item_id": "post-1",
+            "received_at": "2026-08-12T09:31:00+08:00", "strategy_available_at": "2026-08-12T09:31:00+08:00",
+            "published_at": "2026-08-12T09:30:00+08:00", "edited_at": None, "stated_at": "2026-08-12T09:29:00+08:00",
+            "stated_precision": "minute", "time_evidence": {"time_text": "09:29"}, "type": "image_ocr",
+            "content": "![图](https://remote.example/image.jpg)\n看好 000001.SZ", "source_ref": "releases/x",
+            "version": "0.3.22", "content_hash": "b" * 64,
+        }
+        normalized = text_only_remote_message(message)
+        self.assertNotIn("https://", normalized["content"])
+        self.assertEqual(parse_optional_timestamp(normalized["received_at"]), parse_optional_timestamp(normalized["strategy_available_at"]))
+        self.assertEqual(normalized["stated_at"], "2026-08-12T09:29:00+08:00")
 
     def test_labels_accept_remote_string_and_object_forms(self):
         self.assertEqual(labels(["白酒", {"name": "半导体"}, {"label": "白酒"}, ""]), ["白酒", "半导体"])

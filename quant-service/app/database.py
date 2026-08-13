@@ -806,9 +806,49 @@ CREATE TABLE IF NOT EXISTS quant.remote_report_versions (
 );
 CREATE INDEX IF NOT EXISTS remote_report_versions_seen_idx ON quant.remote_report_versions(last_seen_at DESC);
 
+-- Message-level archive records are deliberately independent of reports.
+-- ``received_at`` is supplied by the remote service as its immutable first
+-- receipt timestamp and is the only strategy availability timestamp.
+CREATE TABLE IF NOT EXISTS quant.remote_analyst_messages (
+    remote_message_id text PRIMARY KEY,
+    remote_analyst_id text NOT NULL REFERENCES quant.remote_analysts(remote_analyst_id),
+    source_item_id text NOT NULL,
+    source_message_id text,
+    source_entry_id text,
+    source_type text NOT NULL CHECK (source_type IN ('text','url','image_ocr','audio','video')),
+    source_ref text NOT NULL DEFAULT '',
+    content text NOT NULL,
+    content_hash text NOT NULL,
+    remote_version text NOT NULL,
+    received_at timestamptz NOT NULL,
+    strategy_available_at timestamptz NOT NULL,
+    source_published_at timestamptz,
+    source_edited_at timestamptz,
+    stated_at timestamptz,
+    stated_precision text CHECK (stated_precision IN ('minute','second')),
+    time_evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+    payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+    first_synced_at timestamptz NOT NULL DEFAULT now(),
+    synced_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (strategy_available_at = received_at)
+);
+CREATE INDEX IF NOT EXISTS remote_analyst_messages_analyst_received_idx ON quant.remote_analyst_messages(remote_analyst_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS remote_analyst_messages_received_idx ON quant.remote_analyst_messages(received_at DESC);
+
+CREATE TABLE IF NOT EXISTS quant.remote_analyst_message_versions (
+    remote_message_id text NOT NULL REFERENCES quant.remote_analyst_messages(remote_message_id) ON DELETE CASCADE,
+    remote_version text NOT NULL,
+    content_hash text NOT NULL,
+    payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+    first_seen_at timestamptz NOT NULL DEFAULT now(),
+    last_seen_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (remote_message_id, remote_version, content_hash)
+);
+
 CREATE TABLE IF NOT EXISTS quant.analyst_evidence (
     evidence_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    remote_report_id text NOT NULL REFERENCES quant.remote_reports(remote_report_id) ON DELETE CASCADE,
+    remote_report_id text REFERENCES quant.remote_reports(remote_report_id) ON DELETE CASCADE,
+    remote_message_id text REFERENCES quant.remote_analyst_messages(remote_message_id) ON DELETE CASCADE,
     evidence_key text NOT NULL,
     evidence_type text NOT NULL,
     body text NOT NULL,
@@ -816,9 +856,13 @@ CREATE TABLE IF NOT EXISTS quant.analyst_evidence (
     content_sha256 text NOT NULL,
     available_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE(remote_report_id, evidence_key, content_sha256)
+    UNIQUE(remote_report_id, evidence_key, content_sha256),
+    CHECK ((remote_report_id IS NOT NULL)::integer + (remote_message_id IS NOT NULL)::integer = 1)
 );
 CREATE INDEX IF NOT EXISTS analyst_evidence_report_idx ON quant.analyst_evidence(remote_report_id);
+CREATE INDEX IF NOT EXISTS analyst_evidence_message_idx ON quant.analyst_evidence(remote_message_id);
+CREATE UNIQUE INDEX IF NOT EXISTS analyst_evidence_message_unique_idx
+    ON quant.analyst_evidence(remote_message_id,evidence_key,content_sha256) WHERE remote_message_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS quant.analyst_claims (
     claim_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

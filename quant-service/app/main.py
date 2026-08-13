@@ -192,6 +192,8 @@ from .request_models import (
     RealtimeProbeRequest,
     RemoteReportImport,
     RemoteReportReprocessRequest,
+    RemoteAnalystMessageImport,
+    RemoteMessageReprocessRequest,
     SnapshotRequest,
     StockStudyRequest,
     SectorCatalogSyncRequest,
@@ -205,7 +207,8 @@ from .request_models import (
     TushareSyncRequest,
     UniverseUpdateRequest,
 )
-from .remote_archive import classify_remote_text, import_remote_report, remote_report_list_state, reprocess_remote_reports
+from .remote_archive import (classify_remote_text, import_remote_analyst_message, import_remote_report,
+                             remote_report_list_state, reprocess_remote_messages, reprocess_remote_reports)
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -8691,8 +8694,19 @@ def import_remote_archive_report(payload: RemoteReportImport) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 
+def import_remote_archive_message(payload: RemoteAnalystMessageImport) -> dict[str, Any]:
+    try:
+        return import_remote_analyst_message(db, payload.message)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 def reprocess_remote_archive_reports(payload: RemoteReportReprocessRequest) -> dict[str, Any]:
     return reprocess_remote_reports(db, payload.limit)
+
+
+def reprocess_remote_archive_messages(payload: RemoteMessageReprocessRequest) -> dict[str, Any]:
+    return reprocess_remote_messages(db, payload.limit)
 
 
 def update_analyst_research_profile(analyst_id: str, payload: AnalystResearchProfileRequest) -> dict[str, Any]:
@@ -8930,8 +8944,16 @@ async def import_remote_archive_report_endpoint(payload: RemoteReportImport) -> 
     return await run_database_blocking(import_remote_archive_report, payload, timeout_seconds=30)
 
 
+async def import_remote_archive_message_endpoint(payload: RemoteAnalystMessageImport) -> dict[str, Any]:
+    return await run_database_blocking(import_remote_archive_message, payload, timeout_seconds=30)
+
+
 async def reprocess_remote_archive_reports_endpoint(payload: RemoteReportReprocessRequest) -> dict[str, Any]:
     return await run_database_blocking(reprocess_remote_archive_reports, payload, timeout_seconds=60)
+
+
+async def reprocess_remote_archive_messages_endpoint(payload: RemoteMessageReprocessRequest) -> dict[str, Any]:
+    return await run_database_blocking(reprocess_remote_archive_messages, payload, timeout_seconds=60)
 
 
 async def review_claim_endpoint(review_id: uuid.UUID, payload: ClaimReviewRequest) -> dict[str, Any]:
@@ -8969,7 +8991,9 @@ async def update_analyst_research_profile_endpoint(analyst_id: str, payload: Ana
 app.include_router(build_research_actions_router(ResearchActionDependencies(
     analyse_ingestion=analyse_ingestion_endpoint,
     import_remote_report=import_remote_archive_report_endpoint,
+    import_remote_message=import_remote_archive_message_endpoint,
     reprocess_remote_reports=reprocess_remote_archive_reports_endpoint,
+    reprocess_remote_messages=reprocess_remote_archive_messages_endpoint,
     review_claim=review_claim_endpoint,
     update_universe=update_universe_members_endpoint,
     build_features=build_features_endpoint,

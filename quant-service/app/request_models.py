@@ -322,7 +322,17 @@ class RemoteReportImport(BaseModel):
     report: dict[str, Any]
 
 
+class RemoteAnalystMessageImport(BaseModel):
+    """A text payload obtained from the remote analyst message detail API."""
+
+    message: dict[str, Any]
+
+
 class RemoteReportReprocessRequest(BaseModel):
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class RemoteMessageReprocessRequest(BaseModel):
     limit: int = Field(default=100, ge=1, le=500)
 
 

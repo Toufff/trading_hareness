@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter
 
-from ..analyst_read_model import analyst_claims, claim_review_queue, remote_reports
+from ..analyst_read_model import analyst_claims, claim_review_queue, remote_messages, remote_reports
 
 
 def build_analyst_reads_router(
@@ -25,6 +25,10 @@ def build_analyst_reads_router(
     @router.get("/api/v1/remote-archive/reports")
     def remote_archive_reports(limit: int = 30, offset: int = 0) -> dict[str, Any]:
         return remote_reports(database, limit, offset)
+
+    @router.get("/api/v1/remote-archive/messages")
+    def remote_archive_messages(analyst_id: str | None = None, limit: int = 30, offset: int = 0) -> dict[str, Any]:
+        return remote_messages(database, analyst_id, limit, offset)
 
     @router.get("/api/v1/analyst-claims")
     def analyst_claims_route(limit: int = 100, offset: int = 0) -> dict[str, Any]:

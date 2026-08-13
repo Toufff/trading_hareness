@@ -145,6 +145,43 @@ def parse_anqiang_trade_actions(report_date: date, raw_content: str, *, availabl
     return actions
 
 
+def parse_anqiang_message_trade_actions(stated_at: datetime, raw_content: str, *, available_at: datetime) -> list[dict[str, Any]]:
+    """Parse a single remote message using its supplied replay-only timestamp.
+
+    Unlike compiled reports, message details already carry a source-evidenced
+    ``stated_at``.  It is retained for replay; the caller must keep
+    ``available_at`` at the immutable remote receipt time.
+    """
+    actions: list[dict[str, Any]] = []
+    for sentence in re.split(r"[。；;！!？?\n]+", raw_content):
+        sentence = " ".join(sentence.split()).strip()
+        if not sentence or "不做实盘买入依据" in sentence:
+            continue
+        pending: list[tuple[str, str, str, float | None, str]] = []
+        for fragment in (item.strip() for item in re.split(r"[，,、]", sentence) if item.strip()):
+            aliases = _aliases(fragment)
+            operation = _operation(fragment)
+            price_match = _PRICE.search(fragment) or _BARE_PRICE.search(fragment)
+            target_price = float(price_match.group(1)) if price_match else None
+            if operation is None:
+                pending.extend((alias, symbol, label, target_price, fragment) for alias, symbol, label in aliases)
+                continue
+            action_type, direction = operation
+            targets = [*pending, *((alias, symbol, label, target_price, fragment) for alias, symbol, label in aliases)]
+            pending = []
+            for alias, symbol, label, local_target_price, evidence in targets:
+                fingerprint = hashlib.sha256(
+                    f"message|{stated_at.isoformat()}|{symbol}|{action_type}|{evidence}".encode("utf-8")
+                ).hexdigest()
+                actions.append({
+                    "symbol": symbol, "label": label, "action_type": action_type, "direction": direction,
+                    "stated_at": stated_at, "available_at": available_at, "target_price": local_target_price,
+                    "evidence": evidence, "raw": {"alias": alias, "timing_status": "remote_stated_replay_only"},
+                    "content_sha256": fingerprint,
+                })
+    return actions
+
+
 def sync_anqiang_trade_actions(connection: Any, report: dict[str, Any], *, available_at: datetime) -> int:
     """Replace one report's reconstructed actions atomically and idempotently."""
     analyst = report.get("analyst") if isinstance(report.get("analyst"), dict) else {}
@@ -165,6 +202,27 @@ def sync_anqiang_trade_actions(connection: Any, report: dict[str, Any], *, avail
                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT(remote_report_id,content_sha256) DO NOTHING""",
             (report_id, analyst_id, action["symbol"], action["label"], action["action_type"], action["direction"],
+             action["stated_at"], action["available_at"], action["target_price"], action["evidence"],
+             Json(action["raw"]), action["content_sha256"]),
+        )
+    return len(actions)
+
+
+def sync_anqiang_message_trade_actions(connection: Any, message: dict[str, Any], *, available_at: datetime,
+                                       stated_at: datetime | None) -> int:
+    """Persist review-only actions from a message without promoting author time."""
+    analyst_id = str(message.get("analyst_id") or "")
+    if analyst_id != ANQIANG_ANALYST_ID or stated_at is None:
+        return 0
+    message_id = str(message.get("message_id") or "")
+    actions = parse_anqiang_message_trade_actions(stated_at, str(message.get("content") or ""), available_at=available_at)
+    connection.execute("DELETE FROM quant.analyst_trade_actions WHERE remote_message_id=%s", (message_id,))
+    for action in actions:
+        connection.execute(
+            """INSERT INTO quant.analyst_trade_actions(remote_message_id,remote_analyst_id,symbol,label,action_type,direction,stated_at,available_at,
+                   target_price,evidence,raw,content_sha256) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT(remote_message_id,content_sha256) WHERE remote_message_id IS NOT NULL DO NOTHING""",
+            (message_id, analyst_id, action["symbol"], action["label"], action["action_type"], action["direction"],
              action["stated_at"], action["available_at"], action["target_price"], action["evidence"],
              Json(action["raw"]), action["content_sha256"]),
         )

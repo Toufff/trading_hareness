@@ -84,7 +84,7 @@ def rebuild_analyst_skill_profile(connection: Any, analyst_id: str, as_of_date: 
         (analyst_id, as_of_date),
     ).fetchall()]
     actions = [dict(row) for row in connection.execute(
-        """SELECT action_id,remote_report_id,symbol,label,action_type,direction,stated_at,available_at,target_price,evidence,raw
+        """SELECT action_id,remote_report_id,remote_message_id,symbol,label,action_type,direction,stated_at,available_at,target_price,evidence,raw
              FROM quant.analyst_trade_actions WHERE remote_analyst_id=%s
                AND (stated_at AT TIME ZONE 'Asia/Shanghai')::date<=%s
              ORDER BY stated_at DESC LIMIT 500""",

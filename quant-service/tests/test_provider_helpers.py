@@ -243,7 +243,8 @@ class ProviderHelperTests(unittest.TestCase):
     def test_research_actions_router_has_only_local_write_contracts(self):
         action = AsyncMock(return_value={"status": "ok"})
         router = build_research_actions_router(ResearchActionDependencies(
-            analyse_ingestion=action, import_remote_report=action, reprocess_remote_reports=action,
+            analyse_ingestion=action, import_remote_report=action, import_remote_message=action,
+            reprocess_remote_reports=action, reprocess_remote_messages=action,
             review_claim=action, update_universe=action, build_features=action,
             evaluate_factors=action, backtest=action, reconcile_fetch_runs=action, build_snapshot=action,
             update_analyst_research_profile=action,
@@ -253,6 +254,8 @@ class ProviderHelperTests(unittest.TestCase):
             "/api/v1/analysis/jobs/{analysis_id}/run",
             "/api/v1/remote-archive/reports/import",
             "/api/v1/remote-archive/reports/reprocess",
+            "/api/v1/remote-archive/messages/import",
+            "/api/v1/remote-archive/messages/reprocess",
             "/api/v1/claim-review/{review_id}",
             "/api/v1/universes/members", "/api/v1/features/build",
             "/api/v1/factors/evaluate", "/api/v1/strategies/backtest",
@@ -683,6 +686,7 @@ class ProviderHelperTests(unittest.TestCase):
         methods_by_path = {route.path: route.methods for route in router.routes}
         self.assertEqual(methods_by_path["/api/v1/remote-archive/state"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/remote-archive/reports"], {"GET"})
+        self.assertEqual(methods_by_path["/api/v1/remote-archive/messages"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/analyst-claims"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/analyst-factors"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/claim-review"], {"GET"})
