@@ -83,6 +83,7 @@ from .intraday_breakout import upside_research_assessment as pure_upside_researc
 from .intraday_signal_rules import signal_rules as pure_intraday_signal_rules
 from .intraday_outcome_attribution import outcome_attribution_summary as pure_outcome_attribution_summary
 from .post_close_pattern_score import review_score as pure_pattern_review_score
+from .post_close_candidate_screen import screen_candidates as pure_post_close_screen_candidates
 from .tushare_normalization import normalize_rows as pure_normalize_tushare_rows
 from .market_regimes import (
     strategy_index_regime as pure_strategy_index_regime,
@@ -2668,78 +2669,24 @@ def post_close_strategy_candidates(as_of_date: date, limit: int, minimum_full_ma
     with db.transaction() as connection:
         coverage = connection.execute(
             """SELECT count(DISTINCT symbol)::int AS symbols
-                 FROM quant.canonical_bars_daily WHERE trading_date=%s AND symbol<>'000300.SH'""",
-            (as_of_date,),
+                 FROM quant.canonical_bars_daily WHERE trading_date=%s AND symbol<>'000300.SH'""", (as_of_date,)
         ).fetchone()
-        if int(coverage["symbols"] or 0) < minimum_full_market_symbols:
-            return {"status": "blocked", "as_of_date": str(as_of_date), "candidates": [],
-                    "reason": f"only {int(coverage['symbols'] or 0)} symbols have saved daily bars; need {minimum_full_market_symbols}",
-                    "source_status": {"daily_symbols": int(coverage["symbols"] or 0), "minimum_full_market_symbols": minimum_full_market_symbols}}
         rows = connection.execute(
             """WITH ranked AS (
                    SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.volume,b.adj_factor,i.name,
                           row_number() OVER (PARTITION BY b.symbol ORDER BY b.trading_date DESC) AS rn
-                     FROM quant.canonical_bars_daily b
-                     LEFT JOIN quant.instruments i ON i.symbol=b.symbol
-                    WHERE b.symbol<>'000300.SH' AND b.trading_date<=%s
-                      AND b.trading_date>=%s AND b.quality_status IN ('fresh','partial')
-                 ) SELECT symbol,trading_date,high,low,close,volume,adj_factor,name FROM ranked WHERE rn<=30 ORDER BY symbol,trading_date""",
-            (as_of_date, as_of_date - timedelta(days=70)),
+                     FROM quant.canonical_bars_daily b LEFT JOIN quant.instruments i ON i.symbol=b.symbol
+                    WHERE b.symbol<>'000300.SH' AND b.trading_date<=%s AND b.trading_date>=%s
+                      AND b.quality_status IN ('fresh','partial')
+                 ) SELECT symbol,trading_date,high,low,close,volume,adj_factor,name
+                    FROM ranked WHERE rn<=30 ORDER BY symbol,trading_date""", (as_of_date, as_of_date - timedelta(days=70)),
         ).fetchall()
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    names: dict[str, str | None] = {}
-    for row in rows:
-        item = dict(row)
-        grouped.setdefault(str(item["symbol"]), []).append(item)
-        names[str(item["symbol"])] = item.get("name")
-    board_contexts = post_close_exact_board_context(as_of_date)
-    proposals: dict[str, dict[str, Any]] = {}
-    strict_ready = provisional_ready = fresh_started = 0
-    for symbol, bars in grouped.items():
-        board = board_contexts.get(symbol)
-        board_positive = bool(board and float(board.get("net_amount") or 0) > 0)
-        board_bonus = (12 * float((board or {}).get("flow_percentile") or 0)) if board_positive else (-12 if board else 0)
-        risk_flags = [] if board else ["no_exact_ths_concept_mapping"]
-        if board and not board_positive:
-            risk_flags.append("nonpositive_exact_board_flow")
-        if len(bars) >= 30:
-            structure = daily_base_structure(bars[-30:])
-            risk_flags = [*risk_flags, *list(structure.get("quality_flags") or [])]
-            if structure.get("status") == "ready":
-                strict_ready += 1
-                score = min(100.0, float(structure["score"]) * 0.88 + board_bonus)
-                proposals[symbol] = {"symbol": symbol, "name": names.get(symbol), "candidate_type": "base_ready_30d", "score": round(score, 2),
-                                     "structure": structure, "board_context": board or {"exact_member_mapping": False}, "risk_flags": risk_flags}
-        elif len(bars) >= 15:
-            structure = post_close_forming_structure(bars)
-            risk_flags = [*risk_flags, *list(structure.get("quality_flags") or [])]
-            if structure.get("status") == "forming":
-                provisional_ready += 1
-                score = min(100.0, float(structure["score"]) * 0.82 + board_bonus)
-                proposals[symbol] = {"symbol": symbol, "name": names.get(symbol), "candidate_type": "base_forming_15d", "score": round(score, 2),
-                                     "structure": structure, "board_context": board or {"exact_member_mapping": False},
-                                     "risk_flags": [*risk_flags, "provisional_15_session_structure"]}
-        if len(bars) >= 15:
-            started = post_close_fresh_start_structure(bars)
-            risk_flags = [*risk_flags, *list(started.get("quality_flags") or [])]
-            if started.get("status") == "started":
-                fresh_started += 1
-                score = min(100.0, float(started["score"]) * 0.78 + board_bonus)
-                proposed = {"symbol": symbol, "name": names.get(symbol), "candidate_type": "fresh_start_15d", "score": round(score, 2),
-                            "structure": started, "board_context": board or {"exact_member_mapping": False},
-                            "risk_flags": [*risk_flags, "provisional_15_session_structure"]}
-                existing = proposals.get(symbol)
-                if existing is None or float(proposed["score"]) > float(existing["score"]):
-                    proposals[symbol] = proposed
-    candidates = sorted(proposals.values(), key=lambda item: (item["candidate_type"] != "base_ready_30d", -float(item["score"]), item["symbol"]))[:limit]
-    return {"status": "completed", "as_of_date": str(as_of_date), "candidates": candidates,
-            "source_status": {"daily_symbols": int(coverage["symbols"] or 0), "daily_bars": len(rows),
-                              "symbols_with_30_sessions": sum(1 for bars in grouped.values() if len(bars) >= 30),
-                              "symbols_with_15_sessions": sum(1 for bars in grouped.values() if len(bars) >= 15),
-                              "exact_board_context_symbols": len(board_contexts)},
-            "summary": {"base_ready_30d": strict_ready, "base_forming_15d": provisional_ready, "fresh_start_15d": fresh_started,
-                        "returned": len(candidates)},
-            "notice": "盘后研究候选池：不自动加观察、不自动下单；15日结构仅为历史尚在积累期的暂定观察。"}
+    return pure_post_close_screen_candidates(
+        as_of_date, limit, minimum_full_market_symbols, int(coverage["symbols"] or 0),
+        [dict(row) for row in rows], post_close_exact_board_context(as_of_date),
+        daily_base_structure=daily_base_structure, forming_structure=post_close_forming_structure,
+        fresh_start_structure=post_close_fresh_start_structure,
+    )
 
 
 def run_post_close_strategy(request: PostCloseStrategyRequest) -> dict[str, Any]:

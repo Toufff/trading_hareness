@@ -99,6 +99,7 @@ from app.post_close_structures import (
     post_close_forming_structure as pure_post_close_forming_structure,
     post_close_fresh_start_structure as pure_post_close_fresh_start_structure,
 )
+from app.post_close_candidate_screen import screen_candidates
 from app.database import pool_settings
 from app.tushare_catalog import AUDITED_ADDITIONS_CATALOG, SUPPLIER_109_CATALOG, TUSHARE_CATALOG, catalog_counts
 from app.free_market_providers import _request_with_retry, classify_announcement_title, cninfo_stock_param, eastmoney_secid, free_provider_status, parse_sina_quote_batch, tencent_symbol
@@ -127,6 +128,28 @@ from app.main import sync_runtime_provider_rate_limits
 
 
 class ProviderHelperTests(unittest.TestCase):
+    def test_post_close_candidate_screen_is_pure_and_fail_closed_on_coverage(self):
+        blocked = screen_candidates(
+            date(2026, 8, 13), 10, 3, 2, [], {},
+            daily_base_structure=lambda rows: {}, forming_structure=lambda rows: {},
+            fresh_start_structure=lambda rows: {},
+        )
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["candidates"], [])
+
+    def test_post_close_candidate_screen_prefers_ready_base_and_keeps_provisional_flag(self):
+        rows = [{"symbol": symbol, "name": name, "close": 10}
+                for symbol, name in (("000001.SZ", "A"), ("000002.SZ", "B")) for _ in range(30)]
+        result = screen_candidates(
+            date(2026, 8, 13), 10, 2, 2, rows,
+            {"000001.SZ": {"net_amount": 1, "flow_percentile": 1}},
+            daily_base_structure=lambda rows: {"status": "ready", "score": 80, "quality_flags": []},
+            forming_structure=lambda rows: {"status": "forming", "score": 70, "quality_flags": []},
+            fresh_start_structure=lambda rows: {"status": "not_ready", "score": 0, "quality_flags": []},
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["candidates"][0]["candidate_type"], "base_ready_30d")
+        self.assertEqual(result["summary"]["base_ready_30d"], 2)
     def test_intraday_terminal_repository_records_failure_latency(self):
         connection = MagicMock()
         database = MagicMock()
