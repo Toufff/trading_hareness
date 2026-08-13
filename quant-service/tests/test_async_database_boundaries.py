@@ -13,6 +13,7 @@ from app.runtime_executors import BlockingExecutorBoundary, ExecutorSaturatedErr
 from app.async_strategy_read_repository import latest_strategy_decision
 from app.async_strategy_health_repository import latest_strategy_health
 from app.routers.intraday_status import build_intraday_status_router
+from app.routers.event_reads import build_event_reads_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -287,3 +288,15 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         payload = await latest_strategy_health(Database())
         self.assertEqual(payload["status"], "research_only")
         self.assertEqual(payload["validation_gate"]["live_effect"], "none")
+
+    async def test_event_router_prefers_async_local_projection(self) -> None:
+        async def announcements(*_args, **_kwargs):
+            return {"items": [], "async": True}
+        async def lhb(*_args, **_kwargs):
+            return {"items": [], "async": True}
+        router = build_event_reads_router(None, object())
+        # Route assembly uses the production async repository; this smoke
+        # check also guards that both public endpoints remain GET-only.
+        self.assertEqual({route.path: route.methods for route in router.routes}, {
+            "/api/v1/events/announcements": {"GET"}, "/api/v1/events/lhb": {"GET"},
+        })

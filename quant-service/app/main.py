@@ -8606,7 +8606,7 @@ app.include_router(build_analyst_reads_router(db, remote_report_list_state, anal
 app.include_router(build_analyst_trade_action_reads_router(db, anqiang_trade_action_replay))
 app.include_router(build_analyst_skill_reads_router(db, analyst_skill_profiles))
 app.include_router(build_analyst_research_reads_router(db, analyst_research_status))
-app.include_router(build_event_reads_router(db))
+app.include_router(build_event_reads_router(db, async_db))
 app.include_router(build_strategy_reads_router(db, STRATEGY_DECISION_MODEL_VERSION, async_db))
 app.include_router(build_paper_reads_router(db, async_db))
 app.include_router(build_paper_actions_router(db, configure_paper_account, accept_paper_decision))
@@ -8616,7 +8616,8 @@ app.include_router(build_analyst_prompt_lab_router(
 ))
 app.include_router(build_strategy_pattern_reads_router(
     db, merge_limit_pool_sources, limit_board_count, strategy_json_safe,
-    post_close_limit_daily_features, post_close_exact_board_context, post_close_tushare_lhb_context,
+    post_close_limit_daily_features, post_close_exact_board_context, post_close_tushare_lhb_context, async_db,
+    run_database_blocking,
 ))
 app.include_router(build_board_rotation_reads_router(db))
 app.include_router(build_board_stock_mining_reads_router(db))
