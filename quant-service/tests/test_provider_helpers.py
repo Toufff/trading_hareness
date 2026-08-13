@@ -100,6 +100,7 @@ from app.post_close_structures import (
     post_close_fresh_start_structure as pure_post_close_fresh_start_structure,
 )
 from app.post_close_candidate_screen import screen_candidates
+from app.post_close_evidence import exact_board_context, lhb_context
 from app.database import pool_settings
 from app.tushare_catalog import AUDITED_ADDITIONS_CATALOG, SUPPLIER_109_CATALOG, TUSHARE_CATALOG, catalog_counts
 from app.free_market_providers import _request_with_retry, classify_announcement_title, cninfo_stock_param, eastmoney_secid, free_provider_status, parse_sina_quote_batch, tencent_symbol
@@ -128,6 +129,20 @@ from app.main import sync_runtime_provider_rate_limits
 
 
 class ProviderHelperTests(unittest.TestCase):
+    def test_post_close_evidence_aggregation_keeps_exact_board_and_deduplicates_lhb(self):
+        boards = exact_board_context([
+            {"symbol": "000001.SZ", "net_amount": 10, "label": "A"},
+            {"symbol": "000001.SZ", "net_amount": 20, "label": "B"},
+        ], json_safe=lambda value: value)
+        self.assertEqual(boards["000001.SZ"]["label"], "B")
+        rows = [{"api_name": "top_inst", "provider_key": "tushare", "available_at": None,
+                 "row_data": {"ts_code": "000001.SZ", "exalter": "机构", "buy": 10, "sell": 4}},
+                {"api_name": "top_inst", "provider_key": "tushare", "available_at": None,
+                 "row_data": {"ts_code": "000001.SZ", "exalter": "机构", "buy": 10, "sell": 4}}]
+        lhb = lhb_context(rows, number=lambda value: float(value or 0))
+        self.assertEqual(lhb["000001.SZ"]["institution_records"], 1)
+        self.assertEqual(lhb["000001.SZ"]["institution_net_buy"], 6.0)
+
     def test_post_close_candidate_screen_is_pure_and_fail_closed_on_coverage(self):
         blocked = screen_candidates(
             date(2026, 8, 13), 10, 3, 2, [], {},

@@ -85,6 +85,7 @@ from .intraday_outcome_attribution import outcome_attribution_summary as pure_ou
 from .post_close_pattern_score import review_score as pure_pattern_review_score
 from .post_close_candidate_screen import screen_candidates as pure_post_close_screen_candidates
 from .post_close_pattern_candidates import select_candidates as pure_post_close_pattern_candidates
+from .post_close_evidence import exact_board_context as pure_exact_board_context, lhb_context as pure_lhb_context
 from .tushare_normalization import normalize_rows as pure_normalize_tushare_rows
 from .market_regimes import (
     strategy_index_regime as pure_strategy_index_regime,
@@ -2587,22 +2588,7 @@ def post_close_exact_board_context(as_of_date: date) -> dict[str, dict[str, Any]
                   AND flow.taxonomy_key='ths_concept_flow' AND flow.trading_date=%s""",
             (as_of_date,),
         ).fetchall()
-    contexts: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        item = strategy_json_safe(dict(row))
-        symbol = str(item["symbol"])
-        current = contexts.get(symbol)
-        # A stock can belong to multiple concepts.  Choose the strongest
-        # positive exact-flow context for presentation, retaining no guessed
-        # label when no member mapping exists.
-        if current is None or float(item.get("net_amount") or 0) > float(current.get("net_amount") or 0):
-            contexts[symbol] = {**item, "exact_member_mapping": True}
-    positive_flows = sorted({float(item.get("net_amount") or 0) for item in contexts.values() if float(item.get("net_amount") or 0) > 0})
-    denominator = max(1, len(positive_flows) - 1)
-    for item in contexts.values():
-        flow = float(item.get("net_amount") or 0)
-        item["flow_percentile"] = round(positive_flows.index(flow) / denominator, 4) if flow > 0 else 0.0
-    return contexts
+    return pure_exact_board_context([dict(row) for row in rows], json_safe=strategy_json_safe)
 
 
 def post_close_tushare_lhb_context(as_of_date: date) -> dict[str, dict[str, Any]]:
@@ -2615,48 +2601,7 @@ def post_close_tushare_lhb_context(as_of_date: date) -> dict[str, dict[str, Any]
                 WHERE api_name IN ('top_list','top_inst') AND row_data->>'trade_date'=%s
                 ORDER BY available_at DESC""", (stamp,),
         ).fetchall()
-    contexts: dict[str, dict[str, Any]] = {}
-    seen_inst: set[tuple[str, str, float, float, float]] = set()
-    seen_list: set[tuple[str, str]] = set()
-    for stored in rows:
-        raw = dict(stored["row_data"] or {})
-        symbol = str(raw.get("ts_code") or "").upper()
-        if not symbol:
-            continue
-        context = contexts.setdefault(symbol, {
-            "trade_date": stamp, "top_list_rows": 0, "institution_records": 0,
-            "institution_buy": 0.0, "institution_sell": 0.0, "institution_net_buy": 0.0,
-            "institutions": [], "reasons": [], "providers": [], "available_at": stored["available_at"],
-        })
-        context["providers"] = list(dict.fromkeys([*context["providers"], str(stored["provider_key"])]))
-        reason = str(raw.get("reason") or "").strip()
-        if reason:
-            context["reasons"] = list(dict.fromkeys([*context["reasons"], reason]))
-        if stored["api_name"] == "top_inst":
-            institution = str(raw.get("exalter") or "机构席位").strip()
-            buy = float(intraday_number(raw.get("buy")) or 0)
-            sell = float(intraday_number(raw.get("sell")) or 0)
-            net_buy = float(intraday_number(raw.get("net_buy")) or (buy - sell))
-            key = (symbol, institution, buy, sell, net_buy)
-            if key in seen_inst:
-                continue
-            seen_inst.add(key)
-            context["institution_records"] += 1
-            context["institution_buy"] += buy
-            context["institution_sell"] += sell
-            context["institution_net_buy"] += net_buy
-            context["institutions"] = list(dict.fromkeys([*context["institutions"], institution]))
-        else:
-            key = (symbol, reason)
-            if key in seen_list:
-                continue
-            seen_list.add(key)
-            context["top_list_rows"] += 1
-    for context in contexts.values():
-        for key in ("institution_buy", "institution_sell", "institution_net_buy"):
-            context[key] = round(float(context[key]), 2)
-        context["institution_count"] = len(context["institutions"])
-    return contexts
+    return pure_lhb_context([dict(row) for row in rows], number=intraday_number)
 
 
 def post_close_strategy_candidates(as_of_date: date, limit: int, minimum_full_market_symbols: int) -> dict[str, Any]:
