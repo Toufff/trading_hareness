@@ -85,6 +85,7 @@ from app.strategy_read_model import latest_post_close_strategy as read_latest_po
 from app.market_regimes import strategy_index_regime as pure_strategy_index_regime, strategy_market_regime as pure_strategy_market_regime, strategy_market_state as pure_strategy_market_state, strategy_rank as pure_strategy_rank
 from app.analyst_text_features import analyst_text_factor_summary as isolated_analyst_text_factor_summary
 from app.numeric_utils import decimal_or_none as pure_decimal_or_none, intraday_number as pure_intraday_number
+from app.intraday_clock import eac_window as pure_eac_window, feature_clock as pure_feature_clock, minute_bucket as pure_minute_bucket
 from app.post_close_structures import (
     daily_base_structure as pure_daily_base_structure,
     post_close_forming_structure as pure_post_close_forming_structure,
@@ -3556,6 +3557,15 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIs(main_module.decimal_or_none, pure_decimal_or_none)
         self.assertEqual(main_module.decimal_or_none("1234.50"), Decimal("1234.50"))
         self.assertIsNone(main_module.decimal_or_none(""))
+
+    def test_intraday_clock_runtime_uses_extracted_module(self):
+        import app.main as main_module
+
+        self.assertIs(main_module.intraday_feature_clock, pure_feature_clock)
+        self.assertIs(main_module.intraday_eac_window, pure_eac_window)
+        self.assertIs(main_module.intraday_minute_bucket, pure_minute_bucket)
+        self.assertEqual(main_module.intraday_eac_window("2026-08-13 09:45:00"), "morning")
+        self.assertEqual(main_module.intraday_minute_bucket("13:05"), "13:05")
 
     def test_intraday_attribution_summary_keeps_small_cohorts_descriptive(self):
         observed = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)

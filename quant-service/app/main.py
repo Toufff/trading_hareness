@@ -66,6 +66,9 @@ from .analyst_promotion import analyst_live_promotion
 from .research_prices import adjusted_bars
 from .live_policy import live_policy_gate
 from .numeric_utils import decimal_or_none, intraday_number
+from .intraday_clock import eac_window as pure_intraday_eac_window
+from .intraday_clock import feature_clock as pure_intraday_feature_clock
+from .intraday_clock import minute_bucket as pure_intraday_minute_bucket
 from .market_regimes import (
     strategy_index_regime as pure_strategy_index_regime,
     strategy_market_regime as pure_strategy_market_regime,
@@ -3872,32 +3875,9 @@ def watchlist_daily_factors(symbol: str, connection: Any | None = None) -> dict[
             "quality_flags": adjustment_flags, "trade_constraints": trade_constraints}
 
 
-def intraday_feature_clock(value: Any) -> time | None:
-    """Return a China-session clock from either ``HH:MM`` or provider timestamps."""
-    matched = re.search(r"(?:T|\s|^)(\d{2}):?(\d{2})(?::\d{2})?(?:\D|$)", str(value or ""))
-    if not matched:
-        return None
-    try:
-        return time(int(matched.group(1)), int(matched.group(2)))
-    except ValueError:
-        return None
-
-
-def intraday_eac_window(value: Any) -> str:
-    """Classify a minute without treating a late-session spike as fresh momentum."""
-    clock = intraday_feature_clock(value)
-    if clock is None:
-        return "unknown"
-    if time(9, 40) <= clock <= time(10, 45):
-        return "morning"
-    if time(13, 0) <= clock <= time(14, 20):
-        return "afternoon"
-    return "late_or_opening"
-
-
-def intraday_minute_bucket(value: Any) -> str | None:
-    clock = intraday_feature_clock(value)
-    return clock.strftime("%H:%M") if clock is not None else None
+intraday_feature_clock = pure_intraday_feature_clock
+intraday_eac_window = pure_intraday_eac_window
+intraday_minute_bucket = pure_intraday_minute_bucket
 
 
 def intraday_volume_time_profile(symbol: str, minute_time: Any, as_of_date: date,
