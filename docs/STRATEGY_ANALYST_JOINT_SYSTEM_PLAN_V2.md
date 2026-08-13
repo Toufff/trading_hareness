@@ -120,9 +120,9 @@ T+1 可卖量、整手、单票/板块/策略暴露、日内亏损和组合回�
 - 任一流失败不推进自己的游标，健康页分别显示报告/消息流状态。
 
 真实验收：通过 n8n 加密 Bearer 凭据触发一次报告+消息同步，远端返回 200，结果为
-`text_only=true`、`history_fetch=false`；随后连续 3 次消息增量空页均返回 200，游标
-保持终态且没有重复导入。健康页以服务端游标作为当前执行证据，不会被旧 Code-node
-执行记录的 `error` 状态遮蔽。
+`text_only=true`、`history_fetch=false`；随后连续 10 次消息增量空页均返回 200、0 次
+429，游标保持终态且没有重复导入。健康页以服务端游标作为当前执行证据，不会被旧
+Code-node 执行记录的 `error` 状态遮蔽。
 
 #### P0-A2 分析师时区与历史 as-of 泄漏（已完成）
 
@@ -390,7 +390,7 @@ market + analyst delta + risk overlay
 | P0-S1 | 统一复权研究价 | `main.py:970`、`factor_lab.py:40`、`post_close_structures.py` | 合成除权夹具与本地完整样本连续；缺因子跨日特征不参与确认，日内原价路径不受影响 |
 | P0-S2 | 实时市场/数据 `policy_gate` | `main.py:4123,4981`、market state | risk-off 禁 entry；stale/停牌不确认；无持仓证据的 hard stop 只作风险告警 |
 | P0-S3 | 盘后同日语义 | `main.py:3139,5582`、`strategy_read_model.py` | T 不完整/T-1 完整时绝不标 T 完成；补齐后自动重跑 |
-| P0-A1 | 合并轻量调度并在服务侧差量限速 | `build-remote-archive-sync-workflow.mjs`、新 cursor migration | 真实 Bearer 同步成功；空增量幂等；429 按 Retry-After 有界退避 |
+| P0-A1 | 合并轻量调度并在服务侧差量限速 | `build-remote-archive-sync-workflow.mjs`、新 cursor migration | 真实 Bearer 同步成功；10 次连续空增量无 429；429 按 Retry-After 有界退避 |
 | P0-A2 | 修上海日与历史 as-of | `analyst_expert_research.py` | 00:01 北京边界正确；8/20 快照看不到 8/21 才成熟结果 |
 | P0-A3 | 唯一 promotion registry | 推荐、scorecard、expert research | 未人工批准前 analyst 权重强制为 0；故障自动归零 |
 
@@ -563,13 +563,13 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 盘口研究证据扩展到 30 秒/1 分钟/5 分钟封单侵蚀、Kyle λ/VPIN/CORD 代理，全部标记为未校准 research-only，不进入实时阈值。
 - 报告/消息同步已迁移到 quant-research 的 bounded text-only service；n8n 只负责定时携带加密 Bearer 调用本地端点。报告差量游标和消息全局 cursor 均在 PostgreSQL 持久化，整页导入成功后才推进，避免分页重复和跳过。
 - 盘后自动候选增加 `discovered_at`、`expires_at`、`reason_codes` 与 `source_snapshot`；读取模型和前端同时展示有效期、理由和当次数据覆盖。候选仍只做前端研究，不会自动入观察池。
-- n8n 主进程和外置 runner 保留兼容环境，但同步工作流已移除 Code 节点，不再依赖 JS task offer。健康页读取单一工作流 active/published、服务端最近执行状态和本地报告/消息游标；真实同步已完成 1 次成功和 3 次连续空增量验收，正式交易时段继续观察供应商配额。
+- n8n 主进程和外置 runner 保留兼容环境，但同步工作流已移除 Code 节点，不再依赖 JS task offer。健康页读取单一工作流 active/published、服务端最近执行状态和本地报告/消息游标；真实同步已完成 1 次报告+消息成功和 10 次连续空增量验收，正式交易时段继续观察供应商配额。
 - 2026-08-13 盘后实测：同日盘后候选任务完成且返回 0（严格门槛，不回退到旧交易日）；涨停池两源去重并集 85、连板梯队 24、分钟形态样本 20、精选 10，均已在研究台展示。
 - 2026-08-13 盘后同步修复：远端 `/analysts/{analyst_id}/messages` 真实 Bearer 请求对安强返回 2 条、其余分析师返回合法空集；旧 n8n 失败执行的实际 URI 为 `/analysts/undefined/messages`，根因为游标返回 `remote_analyst_id` 而工作流使用 `$json.analyst_id`。现已改为单一 n8n 本地触发器，避免在编排层拼接远端 URL；当前等待下一正式调度验证本地游标推进。
 - 2026-08-13 后续同步加固：远端 `/messages/updates` 增量接口已用真实 Bearer 请求验证，返回安强 2 条消息与 `next_cursor=null`；新增 `analyst_global_sync_cursors` 迁移和有歧义路径避让，正式消息流已确认无 pagination 配置、单页上限 100，详情全部导入后才写回游标。
-- 2026-08-14 runner 验收发现：外部 runner 默认约 60 秒空闲退出，旧 Code-node 同步流会出现 `No matching task offer ... type javascript`。现行同步流无 Code 节点，已从该运行时依赖中移除；`N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT=900` 仅保留给其他工作流。同步服务另有共享请求间隔、`Retry-After` 和 3 次有界重试。
+- 2026-08-14 runner 验收发现：外部 runner 默认约 60 秒空闲退出，旧 Code-node 同步流会出现 `No matching task offer ... type javascript`。现行同步流无 Code 节点，已从该运行时依赖中移除；`N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT=900` 仅保留给其他工作流。同步服务另有共享请求间隔、`Retry-After` 和 3 次有界重试；随后完成 10 次连续空增量成功验收。
 - 新增只读 `/api/v1/strategy/health` 与前端“策略健康与漂移”卡：展示 7 日触发频率、独立 episode、30 分钟成熟结果、报价新鲜度及 200 信号/60 交易日门禁。它只做研究监控，明确 `live_effect=none`，不会在线调参、晋级策略或改变分析师权重。
 - 新增研究存储水位治理：健康接口和前端显示量化热库/受管研究空间用量；默认热库 8 GiB、总研究空间 20 GiB，达到 80% 仅告警，达到 90% 暂停盘口、1 秒 `rt_k`、分钟档案和板块曲线等非必要高频原始证据。观察池报价、风险提醒、outbox 与结算不受影响，也不自动删除证据。当前实测热库约 1.32 GiB（16.5%），总受管空间约 1.32 GiB（6.6%），状态 healthy。
 - 验收：quant-service 全量 272 项 Python 测试通过，前端 typecheck/Vite build 通过；健康接口为 `ok`，迁移为 `20260815_0031`，Prompt Lab 当前无候选且 live_effect=none（符合历史不回填和数据门禁）。
 
-仍明确未完成：历史数据回填（按要求暂停）、分钟回放、60 日/200 信号验证、样本外分析师 champion/challenger 晋级和 RL。分析师同步的代码、部署和真实链路验收已完成；正式交易时段继续观察供应商配额。纸面成交撮合仅支持“已有本地报价证据 + 人工确认”的研究模拟，不是经纪商成交。上述研究项目继续保持 `research_only`，不会改变实时规则或阈值。
+仍明确未完成：历史数据回填（按要求暂停）、分钟回放、60 日/200 信号验证、样本外分析师 champion/challenger 晋级和 RL。分析师同步的代码、部署和 10 轮真实链路验收已完成；正式交易时段继续观察供应商配额。纸面成交撮合仅支持“已有本地报价证据 + 人工确认”的研究模拟，不是经纪商成交。上述研究项目继续保持 `research_only`，不会改变实时规则或阈值。
