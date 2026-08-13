@@ -11,6 +11,7 @@ from ..strategy_read_model import latest_strategy_decision as sync_latest_strate
 from ..strategy_read_model import latest_strategy_review as sync_latest_strategy_review
 from ..async_strategy_read_repository import latest_post_close_strategy, latest_strategy_decision, latest_strategy_review
 from ..strategy_ablation import latest_strategy_ablation
+from ..async_strategy_ablation_repository import latest_strategy_ablation as async_latest_strategy_ablation
 from ..strategy_health_read_model import latest_strategy_health
 from ..async_strategy_health_repository import latest_strategy_health as async_latest_strategy_health
 
@@ -37,7 +38,9 @@ def build_strategy_reads_router(database: Any, decision_model_version: str, asyn
         return sync_latest_post_close_strategy(database)
 
     @router.get("/api/v1/strategy/ablation/latest")
-    def ablation(limit: int = 200) -> dict[str, Any]:
+    async def ablation(limit: int = 200) -> dict[str, Any]:
+        if async_database is not None:
+            return await async_latest_strategy_ablation(async_database, limit)
         return latest_strategy_ablation(database, limit)
 
     @router.get("/api/v1/strategy/health")
