@@ -16,6 +16,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from app.analyst_expert_research import rebuild_analyst_opinions
 from app.main import DailyBar, app, db, executor_saturated_response, upsert_bar
 from app.runtime_executors import ExecutorSaturatedError
 
@@ -118,5 +119,78 @@ class UpsertBarSqlIntegrationTests(unittest.TestCase):
             self.assertTrue(market["is_suspended"])
             self.assertEqual(Decimal(canonical["adj_factor"]), Decimal("1.25"))
             self.assertTrue(canonical["is_suspended"])
+        finally:
+            self._cleanup()
+
+
+@unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
+class AnalystOpinionMaterializationSqlIntegrationTests(unittest.TestCase):
+    """Ensure one corrected source only invalidates its own derived outcome."""
+
+    analyst_id = "p2-opinion-materialization-test"
+    report_id = "p2-opinion-materialization-report"
+    subject = "999998.SZ"
+    as_of_date = date(2099, 1, 2)
+
+    def _cleanup(self) -> None:
+        with db.transaction() as connection:
+            connection.execute(
+                """DELETE FROM quant.analyst_opinion_outcomes o USING quant.analyst_opinions p
+                     WHERE o.opinion_id=p.opinion_id AND p.remote_analyst_id=%s""",
+                (self.analyst_id,),
+            )
+            connection.execute("DELETE FROM quant.analyst_opinions WHERE remote_analyst_id=%s", (self.analyst_id,))
+            connection.execute("DELETE FROM quant.analyst_claims WHERE remote_analyst_id=%s", (self.analyst_id,))
+            connection.execute("DELETE FROM quant.analyst_evidence WHERE remote_report_id=%s", (self.report_id,))
+            connection.execute("DELETE FROM quant.remote_reports WHERE remote_report_id=%s", (self.report_id,))
+            connection.execute("DELETE FROM quant.remote_analysts WHERE remote_analyst_id=%s", (self.analyst_id,))
+
+    def test_source_change_keeps_identity_and_invalidates_only_its_outcome(self) -> None:
+        self._cleanup()
+        available_at = datetime(2099, 1, 2, 1, 0, tzinfo=timezone.utc)
+        try:
+            with db.transaction() as connection:
+                connection.execute(
+                    """INSERT INTO quant.remote_analysts(remote_analyst_id,name)
+                       VALUES(%s,%s)""", (self.analyst_id, "P2 materialization test"),
+                )
+                connection.execute(
+                    """INSERT INTO quant.remote_reports(remote_report_id,remote_analyst_id,report_date,title,remote_version,content_hash)
+                       VALUES(%s,%s,%s,%s,%s,%s)""",
+                    (self.report_id, self.analyst_id, self.as_of_date, "test", "v1", "a" * 64),
+                )
+                evidence = connection.execute(
+                    """INSERT INTO quant.analyst_evidence(remote_report_id,evidence_key,evidence_type,body,content_sha256,available_at)
+                       VALUES(%s,%s,%s,%s,%s,%s) RETURNING evidence_id""",
+                    (self.report_id, "claim-1", "paragraph", "test claim", "b" * 64, available_at),
+                ).fetchone()
+                claim = connection.execute(
+                    """INSERT INTO quant.analyst_claims(evidence_id,remote_analyst_id,scope,subject_key,subject_label,direction,strength,
+                              horizon_days,extraction_confidence,explicitness,extractor_version,available_at,published_at)
+                       VALUES(%s,%s,'stock',%s,%s,1,0.80,5,0.90,1.0,'p2-test',%s,%s) RETURNING claim_id""",
+                    (evidence["evidence_id"], self.analyst_id, self.subject, "P2 test stock", available_at, available_at),
+                ).fetchone()
+
+                rebuild_analyst_opinions(connection, self.as_of_date, self.analyst_id)
+                first = connection.execute(
+                    "SELECT opinion_id FROM quant.analyst_opinions WHERE remote_analyst_id=%s", (self.analyst_id,)
+                ).fetchone()
+                connection.execute(
+                    """INSERT INTO quant.analyst_opinion_outcomes(opinion_id,horizon_days,status,methodology_version)
+                       VALUES(%s,5,'pending','p2-sql-test')""", (first["opinion_id"],),
+                )
+                connection.execute("UPDATE quant.analyst_claims SET strength=0.30 WHERE claim_id=%s", (claim["claim_id"],))
+
+                result = rebuild_analyst_opinions(connection, self.as_of_date, self.analyst_id)
+                second = connection.execute(
+                    "SELECT opinion_id FROM quant.analyst_opinions WHERE remote_analyst_id=%s", (self.analyst_id,)
+                ).fetchone()
+                remaining = connection.execute(
+                    "SELECT count(*)::int count FROM quant.analyst_opinion_outcomes WHERE opinion_id=%s", (second["opinion_id"],)
+                ).fetchone()["count"]
+
+            self.assertEqual(first["opinion_id"], second["opinion_id"])
+            self.assertEqual(result["invalidated_outcomes"], 1)
+            self.assertEqual(remaining, 0)
         finally:
             self._cleanup()

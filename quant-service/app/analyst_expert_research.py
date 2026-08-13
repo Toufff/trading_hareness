@@ -8,6 +8,8 @@ and is settled only against data that occurs afterwards.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections import defaultdict
 from datetime import date
@@ -85,19 +87,24 @@ def seed_exact_theme_aliases(connection: Any) -> int:
     return inserted
 
 
-def rebuild_analyst_opinions(connection: Any, as_of_date: date) -> dict[str, Any]:
-    """Fold repeated fragments into one analyst × availability-day × subject view."""
+def rebuild_analyst_opinions(
+    connection: Any, as_of_date: date, analyst_id: str | None = None,
+) -> dict[str, Any]:
+    """Fold claims into stable opinion identities with source-change invalidation.
+
+    ``analyst_id`` is intentionally available for isolated, transactional
+    rebuilds.  Production calls continue to materialize the full corpus; the
+    narrow form lets a source correction be validated without mutating an
+    unrelated analyst's evidence ledger.
+    """
     seed_exact_theme_aliases(connection)
-    # This is a deterministic materialization, not an append-only signal log.
-    # Remove stale folds before rebuilding so a corrected report, mapping or
-    # latency classification cannot leave an obsolete eligible opinion behind.
-    connection.execute("DELETE FROM quant.analyst_opinions")
     claims = [dict(row) for row in connection.execute(
         """SELECT claim_id,remote_analyst_id,scope,subject_key,subject_label,direction,strength,
                      horizon_days,extraction_confidence,explicitness,published_at,available_at
                FROM quant.analyst_claims
               WHERE (available_at AT TIME ZONE 'Asia/Shanghai')::date<=%s
-              ORDER BY available_at,claim_id""", (as_of_date,)
+                AND (%s::text IS NULL OR remote_analyst_id=%s)
+              ORDER BY available_at,claim_id""", (as_of_date, analyst_id, analyst_id)
     ).fetchall()]
     grouped: dict[tuple[str, date, str, str, int], list[dict[str, Any]]] = defaultdict(list)
     for claim in claims:
@@ -105,6 +112,8 @@ def rebuild_analyst_opinions(connection: Any, as_of_date: date) -> dict[str, Any
                str(claim["subject_key"]), int(claim["horizon_days"]))
         grouped[key].append(claim)
     statuses: defaultdict[str, int] = defaultdict(int)
+    source_fingerprints: list[str] = []
+    invalidated_outcomes = 0
     for (analyst, opinion_date, scope, subject_key, horizon), items in grouped.items():
         score = sum(_number(item["direction"]) * _number(item["strength"]) * _number(item["extraction_confidence"]) * _number(item["explicitness"]) for item in items)
         direction = _sign(score)
@@ -125,7 +134,20 @@ def rebuild_analyst_opinions(connection: Any, as_of_date: date) -> dict[str, Any
         timely = latency is not None and 0 <= latency <= TIMELY_LATENCY_SECONDS
         factor_status = "neutral" if direction == 0 else ("replay_only" if not timely else ("unmapped" if not mapped else "eligible"))
         label = next((str(item.get("subject_label") or "") for item in items if item.get("subject_label")), subject_key)
-        connection.execute(
+        source_fingerprint = hashlib.sha256(json.dumps([
+            {"claim_id": str(item["claim_id"]), "direction": _number(item["direction"]), "strength": _number(item["strength"]),
+             "confidence": _number(item["extraction_confidence"]), "explicitness": _number(item["explicitness"]),
+             "available_at": item["available_at"].isoformat(), "published_at": item["published_at"].isoformat() if item.get("published_at") else None}
+            for item in items
+        ], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        source_fingerprints.append(source_fingerprint)
+        previous = connection.execute(
+            """SELECT opinion_id,metadata->>'source_fingerprint' source_fingerprint
+                 FROM quant.analyst_opinions
+                WHERE remote_analyst_id=%s AND opinion_date=%s AND scope=%s AND subject_key=%s AND horizon_days=%s""",
+            (analyst, opinion_date, scope, subject_key, horizon),
+        ).fetchone()
+        opinion = connection.execute(
             """INSERT INTO quant.analyst_opinions(remote_analyst_id,opinion_date,scope,subject_key,subject_label,direction,strength,explicitness,
                     horizon_days,published_at,available_at,latency_seconds,factor_status,source_claim_ids,evidence_count,metadata)
                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
@@ -133,13 +155,21 @@ def rebuild_analyst_opinions(connection: Any, as_of_date: date) -> dict[str, Any
                  subject_label=EXCLUDED.subject_label,direction=EXCLUDED.direction,strength=EXCLUDED.strength,
                  explicitness=EXCLUDED.explicitness,published_at=EXCLUDED.published_at,available_at=EXCLUDED.available_at,
                  latency_seconds=EXCLUDED.latency_seconds,factor_status=EXCLUDED.factor_status,source_claim_ids=EXCLUDED.source_claim_ids,
-                 evidence_count=EXCLUDED.evidence_count,metadata=EXCLUDED.metadata,updated_at=now()""",
+                 evidence_count=EXCLUDED.evidence_count,metadata=EXCLUDED.metadata,updated_at=now()
+               RETURNING opinion_id""",
             (analyst, opinion_date, scope, subject_key, label, direction, strength, explicit, horizon, published_at, available_at,
              latency, factor_status, Json([str(item["claim_id"]) for item in items]), len(items),
-             Json({"fold": "analyst_x_local_availability_day_x_scope_x_subject", "claim_count": len(items)})),
-        )
+             Json({"fold": "analyst_x_local_availability_day_x_scope_x_subject", "claim_count": len(items),
+                   "source_fingerprint": source_fingerprint, "materialized_as_of": str(as_of_date)})),
+        ).fetchone()
+        if previous is not None and previous["source_fingerprint"] != source_fingerprint:
+            deleted = connection.execute("DELETE FROM quant.analyst_opinion_outcomes WHERE opinion_id=%s", (opinion["opinion_id"],))
+            invalidated_outcomes += int(deleted.rowcount or 0)
         statuses[factor_status] += 1
-    return {"opinions": len(grouped), "factor_status": dict(statuses), "horizons": list(HORIZONS)}
+    materialization_fingerprint = hashlib.sha256("|".join(sorted(source_fingerprints)).encode()).hexdigest()
+    return {"opinions": len(grouped), "factor_status": dict(statuses), "horizons": list(HORIZONS),
+            "source_fingerprint": materialization_fingerprint, "invalidated_outcomes": invalidated_outcomes,
+            "materialization": "stable_identity_incremental_v1"}
 
 
 def _next_dates(connection: Any, after_date: date, horizon: int) -> tuple[date | None, date | None]:
