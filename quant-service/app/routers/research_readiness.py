@@ -9,7 +9,7 @@ from fastapi import APIRouter
 from ..request_models import HistoricalCoverageEstimateRequest
 from ..async_research_readiness_repository import (
     frameworks, feature_readiness as async_feature_readiness,
-    replay_readiness as async_replay_readiness,
+    replay_readiness as async_replay_readiness, historical_estimate as async_historical_estimate,
 )
 from ..runtime_executors import run_database_blocking
 
@@ -62,7 +62,9 @@ def build_research_readiness_router(
         request = HistoricalCoverageEstimateRequest(
             years=years, include_minute=include_minute, universe_symbols=universe_symbols,
         )
-        return await run_database_blocking(historical_estimate_fn, request, timeout_seconds=15) if async_database else historical_estimate_fn(request)
+        if async_database:
+            return await async_historical_estimate(async_database, request)
+        return historical_estimate_fn(request)
 
     @router.get("/api/v1/data-readiness/features")
     async def feature_readiness() -> dict[str, Any]:

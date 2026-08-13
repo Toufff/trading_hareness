@@ -15,6 +15,8 @@ from app.async_strategy_health_repository import latest_strategy_health
 from app.async_research_catalog_read_repository import factor_registry as async_factor_registry
 from app.async_market_result_read_repository import market_snapshots as async_market_snapshots
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
+from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
+from app.request_models import HistoricalCoverageEstimateRequest
 from app.routers.intraday_status import build_intraday_status_router
 from app.routers.event_reads import build_event_reads_router
 from app.routers.research_readiness import build_research_readiness_router
@@ -393,6 +395,37 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         payload = await endpoint()
         self.assertEqual(payload["status"], "blocked")
         self.assertEqual(calls, ["async"])
+
+    async def test_historical_estimate_projection_uses_native_async_connection(self) -> None:
+        class Result:
+            def __init__(self, row=None, rows=None): self.row, self.rows = row, rows or []
+            async def fetchone(self): return self.row
+            async def fetchall(self): return self.rows
+
+        class Connection:
+            def __init__(self): self.calls = []
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "quant.sectors" in sql: return Result({"total": 0})
+                if "canonical_bars_daily" in sql: return Result({"first_bar_date": None, "latest_bar_date": None,
+                    "bar_days": 0, "full_cross_section_days": 0, "max_symbols_on_day": 0,
+                    "fundamental_symbols": 0, "limit_symbols": 0, "minute_symbols": 0})
+                if "tushare_raw_records" in sql: return Result(rows=[])
+                return Result({"symbols": 5500})
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        database = Database()
+        payload = await async_historical_estimate(database, HistoricalCoverageEstimateRequest())
+        self.assertEqual(payload["current_coverage"]["bar_days"], 0)
+        self.assertEqual(len(database.connection.calls), 4)
 
     async def test_event_router_prefers_async_local_projection(self) -> None:
         async def announcements(*_args, **_kwargs):
