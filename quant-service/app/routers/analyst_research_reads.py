@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from fastapi import APIRouter
@@ -62,7 +62,28 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 """SELECT promotion_key,methodology_version,status,max_live_weight,approved_by,approved_at,reason,updated_at
                      FROM quant.analyst_promotion_registry ORDER BY promotion_key"""
             ).fetchall()
-        return {"cursors": [dict(row) for row in cursors], "promotion_registry": [dict(row) for row in promotion],
-                "live_effect": "none_until_explicit_approval", "boundary": "remote sync health is read-only"}
+        now = datetime.now(timezone.utc)
+        stream_health: list[dict[str, Any]] = []
+        for stream_key in ("reports", "messages"):
+            stream_rows = [dict(row) for row in cursors if row["stream_key"] == stream_key]
+            latest = max((row.get("updated_at") for row in stream_rows if row.get("updated_at")), default=None)
+            age_seconds = None
+            if latest is not None:
+                latest_at = latest if latest.tzinfo else latest.replace(tzinfo=timezone.utc)
+                age_seconds = max(0.0, (now - latest_at).total_seconds())
+            status = "never_succeeded" if latest is None else "stale" if age_seconds > 24 * 3600 else "ready"
+            stream_health.append({
+                "stream_key": stream_key,
+                "status": status,
+                "cursor_count": len(stream_rows),
+                "latest_cursor_at": latest,
+                "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+                "expected_workflow_id": "remoteArchiveReports123" if stream_key == "reports" else "remoteArchiveMessages123",
+                "notice": "no successful cursor advance is recorded" if latest is None else None,
+            })
+        return {"cursors": [dict(row) for row in cursors], "stream_health": stream_health,
+                "promotion_registry": [dict(row) for row in promotion],
+                "live_effect": "none_until_explicit_approval", "boundary": "remote sync health is read-only",
+                "runtime_verification": "pending_next_scheduled_execution"}
 
     return router

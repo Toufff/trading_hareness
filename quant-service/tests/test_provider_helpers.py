@@ -727,6 +727,38 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(
             {route.path: route.methods for route in research_router.routes}["/api/v1/analyst-research/profiles"], {"GET"},
         )
+        self.assertEqual(
+            {route.path: route.methods for route in research_router.routes}["/api/v1/analyst-research/sync-health"], {"GET"},
+        )
+
+    def test_analyst_sync_health_distinguishes_never_succeeded_stream(self):
+        class _Transaction:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def execute(self, sql, _params=()):
+                if "analyst_sync_cursors" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[{
+                        "stream_key": "reports", "remote_analyst_id": "anqiang-touzi-riji",
+                        "received_at": None, "message_ids": [], "report_versions": {},
+                        "updated_at": datetime.now(timezone.utc),
+                    }]))
+                return MagicMock(fetchall=MagicMock(return_value=[{
+                    "promotion_key": "analyst_delta", "status": "disabled", "max_live_weight": 0,
+                }]))
+
+        database = MagicMock()
+        database.transaction.return_value = _Transaction()
+        router = build_analyst_research_reads_router(database, lambda _database, _as_of: {})
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-research/sync-health")
+        payload = endpoint()
+        health = {item["stream_key"]: item for item in payload["stream_health"]}
+        self.assertEqual(health["reports"]["status"], "ready")
+        self.assertEqual(health["messages"]["status"], "never_succeeded")
+        self.assertEqual(payload["runtime_verification"], "pending_next_scheduled_execution")
 
     def test_event_reads_router_keeps_announcements_and_lhb_as_get_only(self):
         router = build_event_reads_router(MagicMock())
