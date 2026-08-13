@@ -5874,11 +5874,11 @@ async def intraday_board_flow_curve_loop() -> None:
             if not allowed:
                 print(f"intraday board curve skipped by storage guard: {storage.get('state')}")
                 completed_minute = minute
-                continue
-            try:
-                await capture_intraday_board_flow_curve()
-            except Exception as error:  # noqa: BLE001 - the next minute is an independent snapshot
-                print(f"intraday board curve capture failed: {str(error)[:300]}")
+            else:
+                try:
+                    await capture_intraday_board_flow_curve()
+                except Exception as error:  # noqa: BLE001 - the next minute is an independent snapshot
+                    print(f"intraday board curve capture failed: {str(error)[:300]}")
             completed_minute = minute
         # Wake near the next minute boundary; never replay missed minutes.
         next_minute = (local + timedelta(minutes=1)).replace(second=1, microsecond=0)
