@@ -746,6 +746,8 @@ class ProviderHelperTests(unittest.TestCase):
                         "received_at": None, "message_ids": [], "report_versions": {},
                         "updated_at": datetime.now(timezone.utc),
                     }]))
+                if "workflow_entity" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[]))
                 return MagicMock(fetchall=MagicMock(return_value=[{
                     "promotion_key": "analyst_delta", "status": "disabled", "max_live_weight": 0,
                 }]))
@@ -759,6 +761,7 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(health["reports"]["status"], "ready")
         self.assertEqual(health["messages"]["status"], "never_succeeded")
         self.assertEqual(payload["runtime_verification"], "pending_next_scheduled_execution")
+        self.assertEqual(payload["workflow_health"], [])
 
     def test_event_reads_router_keeps_announcements_and_lhb_as_get_only(self):
         router = build_event_reads_router(MagicMock())

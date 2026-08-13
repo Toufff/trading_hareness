@@ -81,7 +81,14 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                             WHERE w.id IN ('remoteArchiveReports123','remoteArchiveMessages123')
                             ORDER BY w.id"""
                 ).fetchall()
-                workflow_health = [dict(row) for row in workflow_rows]
+                workflow_health = []
+                for row in workflow_rows:
+                    item = dict(row)
+                    item["status"] = (
+                        "ready" if item.get("active") and item.get("published") and item.get("latest_execution_status") == "success"
+                        else "degraded" if item.get("active") and item.get("published") else "disabled"
+                    )
+                    workflow_health.append(item)
             except Exception:
                 # The quant schema can be deployed without n8n's public schema
                 # in an isolated environment; sync evidence remains usable.
@@ -105,10 +112,13 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 "expected_workflow_id": "remoteArchiveReports123" if stream_key == "reports" else "remoteArchiveMessages123",
                 "notice": "no successful cursor advance is recorded" if latest is None else None,
             })
+        workflow_verified = bool(workflow_health) and len(workflow_health) == 2 and all(
+            item.get("status") == "ready" for item in workflow_health
+        )
         return {"cursors": [dict(row) for row in cursors], "stream_health": stream_health,
                 "workflow_health": workflow_health,
                 "promotion_registry": [dict(row) for row in promotion],
                 "live_effect": "none_until_explicit_approval", "boundary": "remote sync health is read-only",
-                "runtime_verification": "pending_next_scheduled_execution"}
+                "runtime_verification": "verified_recent_execution" if workflow_verified else "pending_next_scheduled_execution"}
 
     return router
