@@ -2365,6 +2365,14 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(call.call_count, 2)
         sleep.assert_called_once_with(0.35)
 
+    def test_akshare_default_retry_is_one_retry_not_three_attempts(self):
+        with patch("app.akshare_provider._call", side_effect=[AkShareProviderError("temporary disconnect"), AkShareProviderError("still unavailable")]) as call, \
+             patch("app.akshare_provider.time.sleep") as sleep:
+            with self.assertRaises(AkShareProviderError):
+                _retry_call("test", lambda _ak: None)
+        self.assertEqual(call.call_count, 2)
+        sleep.assert_called_once_with(0.35)
+
     def test_public_http_retry_only_retries_a_transient_server_failure_once(self):
         calls = 0
 

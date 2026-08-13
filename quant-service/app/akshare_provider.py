@@ -78,8 +78,8 @@ def _call(name: str, invoke: Callable[[Any], Any]) -> list[dict[str, Any]]:
         raise AkShareProviderError(f"{name} request failed: {str(error)[:240]}") from error
 
 
-def _retry_call(name: str, invoke: Callable[[Any], Any], attempts: int = 3) -> list[dict[str, Any]]:
-    """Retry short-lived public quote disconnects without widening request scope."""
+def _retry_call(name: str, invoke: Callable[[Any], Any], attempts: int = 2) -> list[dict[str, Any]]:
+    """Allow one bounded retry for transient public-source failures."""
     error: AkShareProviderError | None = None
     for attempt in range(attempts):
         try:
