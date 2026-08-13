@@ -87,7 +87,9 @@ from app.analyst_text_features import analyst_text_factor_summary as isolated_an
 from app.numeric_utils import decimal_or_none as pure_decimal_or_none, intraday_number as pure_intraday_number
 from app.intraday_clock import eac_window as pure_eac_window, feature_clock as pure_feature_clock, minute_bucket as pure_minute_bucket
 from app.intraday_features import minute_features as pure_minute_features, peer_context as pure_peer_context
+from app.intraday_features import strategy_session_rows as pure_strategy_session_rows
 from app.post_close_limit_features import limit_daily_features as pure_limit_daily_features
+from app.post_close_limit_features import board_count as pure_board_count
 from app.post_close_structures import (
     daily_base_structure as pure_daily_base_structure,
     post_close_forming_structure as pure_post_close_forming_structure,
@@ -3584,6 +3586,10 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(main_module.post_close_limit_daily_features(bars), pure_limit_daily_features(
             bars, number=main_module.intraday_number, limit_ratio=main_module.a_share_limit_ratio,
         ))
+        self.assertEqual(main_module.limit_board_count("8天6板"), pure_board_count("8天6板"))
+        rows = [{"time": "09:30", "close": "10"}, {"time": "09:30", "close": "11"},
+                {"time": "12:00", "close": "12"}, {"time": "13:01", "close": "13"}]
+        self.assertEqual(main_module._strategy_session_rows(rows), pure_strategy_session_rows(rows, number=main_module.intraday_number))
 
     def test_intraday_attribution_summary_keeps_small_cohorts_descriptive(self):
         observed = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)

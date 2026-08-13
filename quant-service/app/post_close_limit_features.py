@@ -5,6 +5,17 @@ from __future__ import annotations
 from statistics import mean
 from typing import Any, Callable
 
+import re
+
+
+def board_count(tag: Any) -> int:
+    """Extract the number of successful boards without overstating continuity."""
+    text = str(tag or "").strip()
+    if text == "首板":
+        return 1
+    matched = re.search(r"(\d+)天(\d+)板", text)
+    return int(matched.group(2)) if matched else 0
+
 
 def limit_daily_features(bars: list[dict[str, Any]], *, number: Callable[[Any], float | None],
                          limit_ratio: Callable[[str, bool], float]) -> dict[str, Any]:
@@ -44,4 +55,4 @@ def limit_daily_features(bars: list[dict[str, Any]], *, number: Callable[[Any], 
     }
 
 
-__all__ = ["limit_daily_features"]
+__all__ = ["board_count", "limit_daily_features"]

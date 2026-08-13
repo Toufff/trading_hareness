@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from statistics import mean, median
 from typing import Any, Callable
 
@@ -105,4 +106,20 @@ def peer_context(peer_symbols: list[str], features: dict[str, dict[str, Any]]) -
     }
 
 
-__all__ = ["minute_features", "peer_context"]
+def strategy_session_rows(rows: list[dict[str, Any]], *, number: Callable[[Any], float | None]) -> list[dict[str, Any]]:
+    """Keep continuous-auction minutes and one value per minute."""
+    selected: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        minute = str(row.get("time") or "").replace(":", "")[:4]
+        if not re.fullmatch(r"\d{4}", minute):
+            continue
+        if not ("0930" <= minute <= "1130" or "1300" <= minute <= "1500"):
+            continue
+        price = number(row.get("close"))
+        if price is None or price <= 0:
+            continue
+        selected[minute] = {**row, "time": minute, "close": price}
+    return [selected[key] for key in sorted(selected)]
+
+
+__all__ = ["minute_features", "peer_context", "strategy_session_rows"]

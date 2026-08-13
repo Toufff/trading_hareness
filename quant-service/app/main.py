@@ -71,7 +71,9 @@ from .intraday_clock import feature_clock as pure_intraday_feature_clock
 from .intraday_clock import minute_bucket as pure_intraday_minute_bucket
 from .intraday_features import minute_features as pure_intraday_minute_features
 from .intraday_features import peer_context as pure_intraday_peer_context
+from .intraday_features import strategy_session_rows as pure_strategy_session_rows
 from .post_close_limit_features import limit_daily_features as pure_limit_daily_features
+from .post_close_limit_features import board_count as pure_limit_board_count
 from .market_regimes import (
     strategy_index_regime as pure_strategy_index_regime,
     strategy_market_regime as pure_strategy_market_regime,
@@ -3114,11 +3116,7 @@ def persist_tencent_intraday_minute_health(completed: int, errors: list[str], la
 
 def limit_board_count(tag: Any) -> int:
     """Extract the number of successful boards without overstating continuity."""
-    text = str(tag or "").strip()
-    if text == "首板":
-        return 1
-    matched = re.search(r"(\d+)天(\d+)板", text)
-    return int(matched.group(2)) if matched else 0
+    return pure_limit_board_count(tag)
 
 
 def post_close_limit_daily_features(bars: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3127,18 +3125,7 @@ def post_close_limit_daily_features(bars: list[dict[str, Any]]) -> dict[str, Any
 
 def _strategy_session_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep continuous-auction minutes and one value per minute."""
-    selected: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        minute = str(row.get("time") or "").replace(":", "")[:4]
-        if not re.fullmatch(r"\d{4}", minute):
-            continue
-        if not ("0930" <= minute <= "1130" or "1300" <= minute <= "1500"):
-            continue
-        price = intraday_number(row.get("close"))
-        if price is None or price <= 0:
-            continue
-        selected[minute] = {**row, "time": minute, "close": price}
-    return [selected[key] for key in sorted(selected)]
+    return pure_strategy_session_rows(rows, number=intraday_number)
 
 
 def intraday_limit_lift_pattern(rows: list[dict[str, Any]], daily: dict[str, Any]) -> dict[str, Any]:
