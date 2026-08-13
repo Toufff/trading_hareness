@@ -75,6 +75,7 @@ from .intraday_features import strategy_session_rows as pure_strategy_session_ro
 from .post_close_limit_features import limit_daily_features as pure_limit_daily_features
 from .post_close_limit_features import board_count as pure_limit_board_count
 from .watchlist_daily_factors import watchlist_daily_factors as pure_watchlist_daily_factors
+from .feature_snapshot_repository import materialize_feature_snapshot
 from .market_regimes import (
     strategy_index_regime as pure_strategy_index_regime,
     strategy_market_regime as pure_strategy_market_regime,
@@ -829,104 +830,14 @@ def analyst_text_factor_summary(connection: Any, as_of_date: date, lookback_days
 def build_feature_snapshot(as_of_date: date, universe_key: str = "core") -> dict[str, Any]:
     """Materialize deterministic, source-labelled features for the active universe."""
     with db.transaction() as connection:
-        members = connection.execute(
-            """SELECT m.symbol,i.name,i.industry,i.is_st FROM quant.universe_members m
-               JOIN quant.instruments i ON i.symbol=m.symbol
-               WHERE m.universe_key=%s AND m.enabled ORDER BY m.priority,m.symbol""",
-            (universe_key,),
-        ).fetchall()
-        if not members:
-            raise HTTPException(status_code=422, detail=f"universe {universe_key} has no enabled symbols")
-        regime = market_regime(connection, as_of_date)
-        analyst_context = analyst_text_factor_summary(connection, as_of_date)
-        items: list[dict[str, Any]] = []
-        for member in members:
-            symbol = str(member["symbol"])
-            bars = connection.execute(
-                """SELECT trading_date,close,high,low,volume,amount,adj_factor,is_suspended,limit_up,limit_down,selected_provider
-                   FROM quant.canonical_bars_daily WHERE symbol=%s AND trading_date<=%s
-                   ORDER BY trading_date DESC LIMIT 60""",
-                (symbol, as_of_date),
-            ).fetchall()
-            bars = list(reversed(bars))
-            flags: list[str] = []
-            if len(bars) < 21:
-                flags.append("insufficient_history_20")
-            if not bars:
-                flags.append("missing_market_data")
-                features = {"symbol": symbol, "name": member["name"], "market_data_date": None, "bar_count": 0}
-            else:
-                research_bars, adjustment_flags = adjusted_bars([dict(bar) for bar in bars])
-                flags.extend(adjustment_flags)
-                closes = [number(bar["close"]) for bar in bars]
-                volumes = [number(bar["volume"]) for bar in bars]
-                latest = bars[-1]
-                latest_date = latest["trading_date"]
-                if (as_of_date - latest_date).days > 5:
-                    flags.append("stale_market_data")
-                if latest["is_suspended"]:
-                    flags.append("suspended")
-                if member["is_st"]:
-                    flags.append("ST")
-                if latest["limit_up"] is not None and number(latest["close"]) >= number(latest["limit_up"]):
-                    flags.append("limit_up_may_be_unbuyable")
-                research_closes = ([number(bar["research_close"]) for bar in research_bars]
-                                   if research_bars is not None else [])
-                has_research_price = bool(research_bars) and all(value > 0 for value in research_closes)
-                sma5 = mean(research_closes[-5:]) if has_research_price and len(research_closes) >= 5 else None
-                sma20 = mean(research_closes[-20:]) if has_research_price and len(research_closes) >= 20 else None
-                return_5 = (research_closes[-1] / research_closes[-6] - 1
-                            if has_research_price and len(research_closes) >= 6 and research_closes[-6] else None)
-                return_20 = (research_closes[-1] / research_closes[-21] - 1
-                             if has_research_price and len(research_closes) >= 21 and research_closes[-21] else None)
-                volume_ratio = volumes[-1] / mean(volumes[-20:]) if len(volumes) >= 20 and mean(volumes[-20:]) else None
-                features = {
-                    "symbol": symbol, "name": member["name"], "industry": member["industry"],
-                    "market_data_date": str(latest_date), "bar_count": len(bars), "close": closes[-1],
-                    "sma_5": sma5, "sma_20": sma20, "return_5": return_5, "return_20": return_20,
-                    "research_price_status": "complete" if has_research_price else "blocked",
-                    "volume_ratio": volume_ratio, "selected_provider": latest["selected_provider"],
-                }
-            fundamental = connection.execute(
-                """SELECT turnover_rate,volume_ratio,pe,pb,total_mv,circ_mv FROM quant.daily_fundamentals
-                   WHERE symbol=%s AND trading_date<=%s ORDER BY trading_date DESC LIMIT 1""",
-                (symbol, as_of_date),
-            ).fetchone()
-            if fundamental:
-                features["fundamentals"] = {key: number(fundamental[key]) for key in fundamental.keys()}
-            else:
-                flags.append("missing_fundamentals")
-            moneyflow = latest_tushare_row(connection, "moneyflow_dc", symbol, as_of_date)
-            if moneyflow:
-                features["moneyflow_dc"] = {
-                    "trade_date": moneyflow.get("trade_date"), "net_amount": number(moneyflow.get("net_amount")),
-                    "net_amount_rate": number(moneyflow.get("net_amount_rate")),
-                    "buy_elg_amount": number(moneyflow.get("buy_elg_amount")), "buy_sm_amount": number(moneyflow.get("buy_sm_amount")),
-                }
-            else:
-                flags.append("missing_moneyflow_dc")
-            standard_flow = latest_tushare_row(connection, "moneyflow", symbol, as_of_date)
-            if standard_flow:
-                features["moneyflow"] = {"trade_date": standard_flow.get("trade_date"),
-                    "net_mf_amount": number(standard_flow.get("net_mf_amount")),
-                    "net_mf_vol": number(standard_flow.get("net_mf_vol"))}
-            analyst = analyst_feature(connection, symbol, as_of_date)
-            features["analyst"] = analyst
-            # It is recorded for review but deliberately not mixed into the
-            # stock ranking until report-derived factors have scorecard evidence.
-            features["analyst_market_context"] = analyst_context["market"]
-            features["market_regime"] = regime
-            items.append({"symbol": symbol, "features": features, "quality_flags": sorted(set(flags))})
-        stable = json.dumps(items, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
-        snapshot_key = hashlib.sha256(f"{FEATURE_VERSION}:{universe_key}:{as_of_date}:{stable}".encode()).hexdigest()
-        for item in items:
-            connection.execute(
-                """INSERT INTO quant.feature_snapshots(snapshot_key,symbol,as_of_date,feature_version,features,quality_flags)
-                   VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(snapshot_key,symbol,feature_version) DO NOTHING""",
-                (snapshot_key, item["symbol"], as_of_date, FEATURE_VERSION, Json(item["features"]), Json(item["quality_flags"])),
+        try:
+            return materialize_feature_snapshot(
+                connection, as_of_date, universe_key, feature_version=FEATURE_VERSION, number=number,
+                market_regime=market_regime, analyst_text_factor_summary=analyst_text_factor_summary,
+                latest_tushare_row=latest_tushare_row, analyst_feature=analyst_feature,
             )
-    return {"snapshot_key": snapshot_key, "as_of_date": str(as_of_date), "universe_key": universe_key,
-            "feature_version": FEATURE_VERSION, "market_regime": regime, "items": items}
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 def intraday_market_context_from_board_report(row: Any, observed_at: datetime,
