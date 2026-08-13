@@ -3449,6 +3449,12 @@ class ProviderHelperTests(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
         self.assertIn('tencent_status = "completed" if matched_watch_quotes else "partial" if fresh_watch_rows or sina_watch_rows else "unavailable"', source)
 
+    def test_intraday_previous_quote_has_session_and_fifteen_second_freshness_bounds(self):
+        source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("observed_at<%s AND observed_at>=%s", source)
+        self.assertIn("observed_at - timedelta(seconds=15)", source)
+        self.assertIn("max(session_start, observed_at - timedelta(seconds=15))", source)
+
     def test_intraday_attribution_summary_keeps_small_cohorts_descriptive(self):
         observed = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)
         base = {"horizon_key": "5m", "status": "matured", "observed_at": observed,

@@ -5240,8 +5240,11 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             symbol = str(watch["symbol"])
             quote = quotes.get(symbol)
             previous = connection.execute(
-                "SELECT price,observed_at FROM quant.intraday_quote_observations WHERE symbol=%s AND source_name='tencent_free' ORDER BY observed_at DESC LIMIT 1",
-                (symbol,),
+                """SELECT price,observed_at FROM quant.intraday_quote_observations
+                    WHERE symbol=%s AND source_name='tencent_free'
+                      AND observed_at<%s AND observed_at>=%s
+                    ORDER BY observed_at DESC LIMIT 1""",
+                (symbol, observed_at, max(session_start, observed_at - timedelta(seconds=15))),
             ).fetchone()
             if quote:
                 connection.execute(
