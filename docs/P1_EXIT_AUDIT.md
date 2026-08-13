@@ -1,6 +1,6 @@
 # P1 工程加固退出审计
 
-更新时间：2026-08-13。此文档是 P1 当前可验证状态的交接清单，不把 P2 的历史回填、分钟回放或策略阈值校准提前宣称为完成。
+更新时间：2026-08-14。此文档是 P1 当前可验证状态的交接清单，不把 P2 的历史回填、分钟回放或策略阈值校准提前宣称为完成。
 
 ## 已验证的运行边界
 
@@ -26,6 +26,7 @@
 - 收盘复盘循环和日流水线的同步本地结算/特征快照/推荐生成已显式交给有界数据库执行器；AST 门禁同时阻止这些已知同步仓储函数在 async 服务中绕开该边界。
 - 所有常规业务 HTTP 路由现位于 `app/routers/`：研究治理、策略、行情导入、市场、盘中、板块与 provider 均使用显式依赖装配。`main.py` 只保留健康/指标和默认关闭的 legacy schema bootstrap 控制面，便于后续以仓储和服务层继续渐进拆分。
 - `app/post_close_structures.py` 提供无 I/O 的盘后结构规则，供现有盘后服务、未来 P2 回放和 P3 验证共同调用；其 30 日完整门槛和 15 日仅观察的语义未改变。
+- `app/intraday_signal_policy.py` 提供无 I/O 的盘中确认、去重和冷却规则；实时扫描与未来回放共享同一纯函数契约，历史事件已完成 episode 外键修复。
 - `app/daily_bar_repository.py` 承担日线 raw→canonical 选择、控制面字段保护与质量冲突记录；它仅接收事务，不能创建 HTTP/provider 客户端。主服务的 `upsert_bar` 仍是兼容入口，故现有同步、离线导入与真实 SQL 回归不改变。
 - `app/public_market_repository.py` 承担公开 quote/raw evidence/公告事件的本地 SQL 读写；它没有 router、HTTP 或 provider client 依赖。主服务保留兼容函数，故公开 URL、单事务边界和既有调用顺序不变。受限研究请求超时会显式记录为 `blocked/caller_cancelled`，不会污染 provider health 或 capability 矩阵。
 - 同步入口的默认股票池解析已有 `resolve_sync_symbols_async` 边界：任何 async 日线同步在未指定 symbols 时均经有界数据库执行器读取本地 core/分析师证据，而非阻塞事件循环。

@@ -133,6 +133,10 @@ from .intraday_outcomes import (
     intraday_signal_outcome_metrics,
     a_share_return_decomposition,
 )
+from .intraday_signal_policy import (
+    signal_event_state as intraday_signal_event_state,
+    signal_material_change as intraday_signal_material_change,
+)
 from .contextual_policy_learning import contextual_bandit_policy_review
 from .paper_execution import paper_decision_payload, persist_barrier_outcome, persist_paper_decision, triple_barrier_label
 from .paper_portfolio import paper_risk_gate, persist_portfolio_snapshot
@@ -3030,62 +3034,6 @@ def merge_intraday_sina_watch_quotes(quotes: dict[str, dict[str, Any]], rows: li
         existing["raw"] = {**(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}), "sina_watch_quote": row}
         quotes[symbol] = existing
     return quotes
-
-
-def intraday_signal_material_change(signal: dict[str, Any], prior_alert: dict[str, Any] | None) -> bool:
-    """Whether a persistent setup has earned a fresh human interruption.
-
-    A fixed cooldown lets an unchanged extreme-flow condition re-alert every
-    ten minutes.  We instead retain one episode unless score, price, volume or
-    flow materially changes, or a rule explicitly marks a new stage.
-    """
-    if signal.get("stage_upgrade") or prior_alert is None:
-        return bool(signal.get("stage_upgrade"))
-    previous_conditions = prior_alert.get("conditions") if isinstance(prior_alert.get("conditions"), dict) else {}
-    current_conditions = signal.get("conditions") if isinstance(signal.get("conditions"), dict) else {}
-    previous_score = intraday_number(prior_alert.get("score"))
-    current_score = intraday_number(signal.get("score"))
-    if previous_score is not None and current_score is not None and current_score - previous_score >= 10:
-        return True
-    previous_price = intraday_number(previous_conditions.get("price"))
-    current_price = intraday_number(current_conditions.get("price"))
-    if previous_price and current_price and abs(current_price / previous_price - 1) >= 0.01:
-        return True
-    previous_volume = intraday_number(previous_conditions.get("volume_ratio"))
-    current_volume = intraday_number(current_conditions.get("volume_ratio"))
-    if previous_volume is not None and current_volume is not None and current_volume - previous_volume >= 0.8:
-        return True
-    previous_flow = intraday_number(previous_conditions.get("main_net_inflow"))
-    current_flow = intraday_number(current_conditions.get("main_net_inflow"))
-    return bool(previous_flow is not None and current_flow is not None and previous_flow * current_flow < 0)
-
-
-def intraday_signal_event_state(signal: dict[str, Any], *, observed_at: datetime,
-                                latest_event_at: datetime | None, last_key_alerted_at: datetime | None,
-                                last_symbol_watch_alerted_at: datetime | None,
-                                last_key_alert: dict[str, Any] | None = None) -> str:
-    """Keep event confirmation distinct from alert de-duplication.
-
-    A suppressed row is still useful proof that the condition persists, but it
-    must never hide the most recent successful delivery.  Watch-class signals
-    additionally share a symbol-level cooldown so a changing public-provider
-    label cannot produce a new notification every scan.
-    """
-    recent = latest_event_at is not None and observed_at - latest_event_at <= INTRADAY_CONFIRMATION_WINDOW
-    material_change = intraday_signal_material_change(signal, last_key_alert)
-    # Same-key events remain in the same episode for this market session.  A
-    # new stage or a defined material change can intentionally pierce it.
-    key_duplicate = last_key_alerted_at is not None and recent and not material_change
-    symbol_watch_duplicate = (signal["signal_type"] == "watch" and not signal.get("stage_upgrade")
-                              and last_symbol_watch_alerted_at is not None
-                              and observed_at - last_symbol_watch_alerted_at <= INTRADAY_ALERT_COOLDOWN)
-    if key_duplicate or symbol_watch_duplicate:
-        return "suppressed"
-    if signal.get("alert_on_first_observation") and latest_event_at is None:
-        return "confirmed"
-    if signal["hard"] or signal.get("independent_confirmation") or recent:
-        return "confirmed"
-    return "confirming"
 
 
 def intraday_quote_from_tencent(row: dict[str, Any]) -> dict[str, Any] | None:
