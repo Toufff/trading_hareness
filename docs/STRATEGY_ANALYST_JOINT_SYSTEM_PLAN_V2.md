@@ -128,6 +128,8 @@ T+1 可卖量、整手、单票/板块/策略暴露、日内亏损和组合回�
 
 SQL 过滤使用 UTC date，而折叠日使用上海日；`_mature_outcome_rows(as_of_date)` 也没有保证 `exit_date <= as_of_date`。统一使用上海交易日或已冻结的 `opinion_date`，历史研究快照必须只看到当时已经成熟的 outcome。
 
+当前 `rebuild_analyst_opinions` 已按“分析师 × 上海可用日 × 范围 × 对象 × horizon”保留稳定 opinion identity，并以 source fingerprint 仅使内容变更的单条 opinion outcome 失效；不会通过全表删除重写研究事实。研究运行仍以 methodology/as-of 快照落库，未达到门禁时保持 `research_only`。
+
 #### P0-A3 新旧分析师门禁双轨（已完成，默认零权重）
 
 旧推荐链有“两人各 30 条即可给 10%”的 scorecard 门禁，新研究链则要求 60 日期簇并有 5,000 outcome 的后续门禁。必须建立唯一的 `promotion_registry`：
