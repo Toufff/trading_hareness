@@ -47,7 +47,8 @@ jq -e '
   ([.[] | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.url] | all(. == "http://quant-research:8000/api/v1/remote-archive/sync")) and
   ([.[] | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .credentials.httpBearerAuth] | all(.id != null and .name != null)) and
   ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("=\\{\\{ JSON.stringify")) and all(test("reports"))) and
-  ([.[] | select(.id == "remoteArchiveMessages123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("=\\{\\{ JSON.stringify")) and all(test("messages")))
+  ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("max_items: 25"))) and
+  ([.[] | select(.id == "remoteArchiveMessages123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("=\\{\\{ JSON.stringify")) and all(test("messages")) and all(test("max_items: 20")))
 ' "$backup_dir/candidate.json" >/dev/null
 
 "$DOCKER" compose cp "$backup_dir/candidate.json" "n8n:${container_after}"

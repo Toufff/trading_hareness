@@ -19,7 +19,7 @@ if (credentialId) {
 // The bearer value and remote URL are deliberately not versioned. n8n keeps
 // the bearer in its encrypted credential store; the node only calls the local
 // quant service, which forwards the header in memory to its fixed local URL.
-function syncTrigger({ name, stream, y }) {
+function syncTrigger({ name, stream, maxItems, y }) {
   return {
   id: randomUUID(),
   name,
@@ -37,7 +37,7 @@ function syncTrigger({ name, stream, y }) {
     // n8n's JSON-body field requires an expression wrapper.  Without the
     // leading `={{ ... }}` it attempts to parse the literal `=JSON...` and
     // fails before the local service is called.
-    jsonBody: `={{ JSON.stringify({ streams: ["${stream}"], max_items: 100 }) }}`,
+    jsonBody: `={{ JSON.stringify({ streams: ["${stream}"], max_items: ${maxItems} }) }}`,
     options: { timeout: 120000, response: { includeInputData: true } },
   },
   credentials,
@@ -58,8 +58,8 @@ function schedule({ name, intervals, y }) {
   };
 }
 
-function workflow({ id, name, triggerName, stream, intervals, y }) {
-  const trigger = syncTrigger({ name: triggerName, stream, y });
+function workflow({ id, name, triggerName, stream, maxItems, intervals, y }) {
+  const trigger = syncTrigger({ name: triggerName, stream, maxItems, y });
   const clock = schedule({ name: `${name} 定时`, intervals, y });
   return {
     id, name, active: true, nodes: [clock, trigger],
@@ -74,11 +74,16 @@ const workflows = [
   workflow({
     id: 'remoteArchiveReports123', name: '市场研究：同步远端分析师报告',
     triggerName: '同步远端分析师报告文字', stream: 'reports',
+    maxItems: 25,
     intervals: ['*/15 9-11,13-14 * * 1-5', '20 18 * * 1-5'], y: 0,
   }),
   workflow({
     id: 'remoteArchiveMessages123', name: '市场研究：同步远端分析师消息',
     triggerName: '同步远端分析师消息文字', stream: 'messages',
+    // A 20-item page is bounded to roughly 40 seconds at the shared 2s
+    // pacing. The durable remote cursor drains a >100-message burst over
+    // subsequent runs instead of holding an n8n execution open for minutes.
+    maxItems: 20,
     intervals: ['2-59/15 9-11,13-14 * * 1-5', '22 18 * * 1-5'], y: 160,
   }),
 ];
