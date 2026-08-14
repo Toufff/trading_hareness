@@ -289,6 +289,7 @@ from .recommendation_generation import generate as generate_recommendations_isol
 from .tushare_daily_sync import sync as sync_tushare_isolated
 from .baostock_daily_sync import fetch_rows as fetch_baostock_rows_isolated, sync as sync_baostock_isolated
 from .market_universe_sync import sync as sync_market_universe_isolated
+from .full_market_daily_sync import sync as sync_full_market_daily_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -1916,7 +1917,7 @@ async def sync_market_universe(request: MarketUniverseSyncRequest) -> dict[str, 
     )
 
 
-async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[str, Any]:
+async def sync_full_market_daily_legacy(request: FullMarketDailySyncRequest) -> dict[str, Any]:
     """Promote one post-close all-market daily response into canonical bars."""
     candidates = provider_candidates("daily", request.provider)
     if not candidates:
@@ -2005,6 +2006,28 @@ async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[st
         await run_database_blocking(persist_failure)
         return {"status": "blocked", "trade_date": str(trade_date), "reason": safe_error_detail(str(error), 500),
                 "fallback_empty_providers": empty_providers, "request_key": request_key}
+
+
+async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[str, Any]:
+    """Compatibility entry point backed by isolated full-market sync."""
+    return await sync_full_market_daily_isolated(
+        request,
+        provider_candidates=provider_candidates,
+        cn_date=cn_today,
+        call_tushare_api=call_tushare_api,
+        looks_like_response_header=looks_like_response_header,
+        tushare_date=tushare_date,
+        persist_tushare_rows=persist_tushare_rows,
+        run_database_blocking=run_database_blocking,
+        persist_tushare_fetch_blocked=persist_tushare_fetch_blocked,
+        db=db,
+        safe_error_detail=safe_error_detail,
+        provider_call_error=ProviderCallError,
+        executor_saturated_error=ExecutorSaturatedError,
+        record_provider_success=record_provider_success,
+        record_provider_failure=record_provider_failure,
+        record_provider_api_capability=record_provider_api_capability,
+    )
 
 
 def upsert_sector_taxonomy(connection: Any, taxonomy_key: str, label: str, provider_key: str, metadata: dict[str, Any]) -> None:
