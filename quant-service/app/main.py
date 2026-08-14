@@ -3991,6 +3991,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 if acceptance["status"] in {"candidate", "attention_only"}:
                     entry_class = acceptance["status"] == "candidate"
                     generated_signals.append({
+                        "symbol": symbol,
                         "signal_key": (f"{symbol}:entry:upside_acceptance_eac_v4" if entry_class
                                        else f"{symbol}:watch:upside_acceptance_attention_v4"),
                         "signal_type": "entry" if entry_class else "watch",
@@ -4011,6 +4012,12 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                                        *acceptance.get("risk_flags", [])],
                     })
             for signal in generated_signals:
+                # Signal rules historically identify the symbol in signal_key;
+                # normalize the outer symbol before paper/audit persistence so
+                # every rule (including EAC acceptance) satisfies the payload
+                # contract.
+                signal.setdefault("symbol", symbol)
+                signal.setdefault("observed_at", observed_at)
                 signal["conditions"] = {**signal["conditions"], "realtime_cross_check": fast_confirmation}
                 if fast_confirmation.get("status") == "mismatch":
                     signal["risk_flags"] = [*signal["risk_flags"], "realtime_cross_source_price_mismatch"]
