@@ -290,6 +290,7 @@ from .tushare_daily_sync import sync as sync_tushare_isolated
 from .baostock_daily_sync import fetch_rows as fetch_baostock_rows_isolated, sync as sync_baostock_isolated
 from .market_universe_sync import sync as sync_market_universe_isolated
 from .full_market_daily_sync import sync as sync_full_market_daily_isolated
+from .sector_catalog_sync import sync_all as sync_all_sector_catalogs_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -2220,20 +2221,14 @@ async def sync_ths_sector_catalog(request: SectorCatalogSyncRequest) -> dict[str
 
 
 async def sync_all_ths_sector_catalogs() -> dict[str, Any]:
-    """Refresh every documented THS index taxonomy sequentially and bounded."""
-    results: list[dict[str, Any]] = []
-    for index_type in ("N", "I", "R", "S", "ST", "BB"):
-        try:
-            results.append(await sync_ths_sector_catalog(SectorCatalogSyncRequest(index_type=index_type)))
-        except HTTPException as error:
-            item_status = "blocked" if is_local_capacity_http_error(error) else "circuit_open" if is_circuit_open_http_error(error) else "failed"
-            results.append({"status": item_status, "index_type": index_type, "reason": str(error.detail), "sectors": 0})
-    successful = [item for item in results if item["status"] in {"completed", "unchanged"}]
-    failed = [item for item in results if item["status"] == "failed"]
-    blocked = [item for item in results if item["status"] in {"blocked", "circuit_open"}]
-    status = "blocked" if blocked and not successful and not failed else "partial" if failed or blocked else "completed"
-    return {"status": status, "types": results,
-            "sectors": sum(int(item.get("sectors", 0)) for item in results)}
+    """Compatibility entry point backed by bounded catalog orchestration."""
+    return await sync_all_sector_catalogs_isolated(
+        sync_one=sync_ths_sector_catalog,
+        request_type=SectorCatalogSyncRequest,
+        http_exception=HTTPException,
+        is_local_capacity_error=is_local_capacity_http_error,
+        is_circuit_open_error=is_circuit_open_http_error,
+    )
 
 
 async def sync_eastmoney_board_members(request: EastmoneyBoardMemberSyncRequest) -> dict[str, Any]:
