@@ -294,6 +294,7 @@ from .sector_catalog_sync import sync_all as sync_all_sector_catalogs_isolated
 from .ths_sector_catalog_sync import sync as sync_ths_sector_catalog_isolated
 from .eastmoney_sector_members_sync import sync as sync_eastmoney_sector_members_isolated
 from .eastmoney_live_hydration import hydrate as hydrate_eastmoney_live_isolated
+from .ths_sector_flows import sync_industry as sync_ths_industry_isolated, sync_concept_signals as sync_ths_concept_signals_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -5618,7 +5619,7 @@ async def run_strategy_decision(request: StrategyDecisionRequest) -> dict[str, A
             "recommendations": candidates, "notice": "研究候选池，不构成自动交易指令；龙虎榜仅作为下一交易日背景。"}
 
 
-async def sync_ths_industry_moneyflow(request: SectorFlowSyncRequest) -> dict[str, Any]:
+async def sync_ths_industry_moneyflow_legacy(request: SectorFlowSyncRequest) -> dict[str, Any]:
     """Persist one post-close THS industry moneyflow cross-section."""
     trade_date = request.trade_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
     stamp = trade_date.strftime("%Y%m%d")
@@ -5656,7 +5657,7 @@ async def sync_ths_industry_moneyflow(request: SectorFlowSyncRequest) -> dict[st
             "sectors": len(valid_rows), "provider": provider_key, "request_key": outcome["request_key"]}
 
 
-async def sync_ths_concept_signals(request: SectorFlowSyncRequest) -> dict[str, Any]:
+async def sync_ths_concept_signals_legacy(request: SectorFlowSyncRequest) -> dict[str, Any]:
     """Persist THS concept flow and limit-up strength as separate source facts."""
     trade_date = request.trade_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
     stamp = trade_date.strftime("%Y%m%d")
@@ -5725,6 +5726,26 @@ async def sync_ths_concept_signals(request: SectorFlowSyncRequest) -> dict[str, 
         results["limit_strength"] = {"status": "failed", "taxonomy_key": "ths_limit_strength", "sectors": 0, "error": str(error.detail)}
     status = "completed" if all(item["status"] in {"completed", "partial", "unchanged", "empty"} for item in results.values()) else "partial"
     return {"status": status, "trade_date": str(trade_date), "sources": results}
+
+
+async def sync_ths_industry_moneyflow(request: SectorFlowSyncRequest) -> dict[str, Any]:
+    """Compatibility entry point backed by isolated THS industry flow sync."""
+    return await sync_ths_industry_isolated(
+        request, trade_date=cn_today, fetch_catalog=fetch_tushare_catalog, fetch_request=TushareFetchRequest,
+        load_rows=lambda request_key: run_database_blocking(tushare_rows_for_request, request_key),
+        run_database_blocking=run_database_blocking, db=db, upsert_taxonomy=upsert_sector_taxonomy, upsert_sector=upsert_sector,
+        decimal_or_none=decimal_or_none, json_value=Json, observed_at=lambda: datetime.now(timezone.utc),
+    )
+
+
+async def sync_ths_concept_signals(request: SectorFlowSyncRequest) -> dict[str, Any]:
+    """Compatibility entry point backed by isolated THS concept flow sync."""
+    return await sync_ths_concept_signals_isolated(
+        request, trade_date=cn_today, fetch_catalog=fetch_tushare_catalog, fetch_request=TushareFetchRequest,
+        load_rows=lambda request_key: run_database_blocking(tushare_rows_for_request, request_key),
+        run_database_blocking=run_database_blocking, db=db, upsert_taxonomy=upsert_sector_taxonomy, upsert_sector=upsert_sector,
+        decimal_or_none=decimal_or_none, json_value=Json, observed_at=lambda: datetime.now(timezone.utc), http_exception=HTTPException,
+    )
 
 
 async def sync_ths_concept_members(request: ConceptMemberSyncRequest) -> dict[str, Any]:
