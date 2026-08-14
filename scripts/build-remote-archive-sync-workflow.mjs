@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
-const [sourcePath, outputPath] = process.argv.slice(2);
+const [sourcePath, outputPath, credentialId = '', credentialName = ''] = process.argv.slice(2);
 if (!sourcePath || !outputPath) {
   throw new Error('usage: build-remote-archive-sync-workflow.mjs SOURCE_TEXT_WORKFLOW OUTPUT');
 }
@@ -11,6 +11,9 @@ const sourceWorkflow = Array.isArray(source) ? source[0] : source;
 const credentials = sourceWorkflow.nodes?.find((node) => node.credentials?.httpBearerAuth)?.credentials;
 if (!credentials?.httpBearerAuth) {
   throw new Error('source workflow has no httpBearerAuth credential');
+}
+if (credentialId) {
+  credentials.httpBearerAuth = { id: credentialId, name: credentialName || credentials.httpBearerAuth.name };
 }
 
 // The bearer value and remote URL are deliberately not versioned. n8n keeps
@@ -31,7 +34,10 @@ function syncTrigger({ name, stream, y }) {
     sendBody: true,
     contentType: 'json',
     specifyBody: 'json',
-    jsonBody: `=JSON.stringify({ streams: ["${stream}"], max_items: 100 })`,
+    // n8n's JSON-body field requires an expression wrapper.  Without the
+    // leading `={{ ... }}` it attempts to parse the literal `=JSON...` and
+    // fails before the local service is called.
+    jsonBody: `={{ JSON.stringify({ streams: ["${stream}"], max_items: 100 }) }}`,
     options: { timeout: 120000, response: { includeInputData: true } },
   },
   credentials,

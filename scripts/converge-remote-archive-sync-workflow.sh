@@ -8,6 +8,8 @@ set -euo pipefail
 DOCKER="${DOCKER:-docker}"
 legacy_workflow_id="remoteArchiveSync123"
 workflow_ids=("remoteArchiveReports123" "remoteArchiveMessages123")
+local_credential_id="remoteArchiveLocalBearer123"
+local_credential_name="Bearer Auth account (quant-local)"
 if ! grep -q '^REMOTE_ANALYST_ARCHIVE_BASE_URL=https://' .env 2>/dev/null; then
   echo 'REMOTE_ANALYST_ARCHIVE_BASE_URL must be configured in the ignored .env file' >&2
   exit 2
@@ -36,7 +38,7 @@ fi
 "$DOCKER" compose exec -T n8n n8n export:workflow --id="$source_workflow_id" --output="$container_before"
 "$DOCKER" compose cp "n8n:${container_before}" "$backup_dir/before.json"
 
-node scripts/build-remote-archive-sync-workflow.mjs "$backup_dir/before.json" "$backup_dir/combined.json"
+node scripts/build-remote-archive-sync-workflow.mjs "$backup_dir/before.json" "$backup_dir/combined.json" "$local_credential_id" "$local_credential_name"
 node scripts/split-remote-archive-sync-workflows.mjs "$backup_dir/combined.json" "$backup_dir/candidate.json"
 jq -e '
   type == "array" and length == 2 and
@@ -44,8 +46,8 @@ jq -e '
   (all(.[]; (.nodes | length == 2))) and
   ([.[] | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.url] | all(. == "http://quant-research:8000/api/v1/remote-archive/sync")) and
   ([.[] | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .credentials.httpBearerAuth] | all(.id != null and .name != null)) and
-  ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("reports"))) and
-  ([.[] | select(.id == "remoteArchiveMessages123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("messages")))
+  ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("=\\{\\{ JSON.stringify")) and all(test("reports"))) and
+  ([.[] | select(.id == "remoteArchiveMessages123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("=\\{\\{ JSON.stringify")) and all(test("messages")))
 ' "$backup_dir/candidate.json" >/dev/null
 
 "$DOCKER" compose cp "$backup_dir/candidate.json" "n8n:${container_after}"
