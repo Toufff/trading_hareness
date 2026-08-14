@@ -298,6 +298,7 @@ from .ths_sector_flows import sync_industry as sync_ths_industry_isolated, sync_
 from .outcome_recomputation import recompute as recompute_outcomes_isolated
 from .ths_concept_members_sync import sync as sync_ths_concept_members_isolated
 from .analyst_scorecards import recompute as recompute_scorecards_isolated
+from .claim_review_service import review_claim as review_claim_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -8080,12 +8081,14 @@ def update_analyst_research_profile(analyst_id: str, payload: AnalystResearchPro
             "boundary": "manual provenance prior; no live strategy effect"}
 
 
-def review_claim(review_id: uuid.UUID, payload: ClaimReviewRequest) -> dict[str, Any]:
+def review_claim_legacy(review_id: uuid.UUID, payload: ClaimReviewRequest) -> dict[str, Any]:
     with db.transaction() as connection:
         item = connection.execute(
-            """SELECT q.*,r.remote_analyst_id FROM quant.claim_review_queue q
+            """SELECT q.*,e.available_at,COALESCE(r.remote_analyst_id,m.remote_analyst_id) AS remote_analyst_id
+               FROM quant.claim_review_queue q
                JOIN quant.analyst_evidence e ON e.evidence_id=q.evidence_id
-               JOIN quant.remote_reports r ON r.remote_report_id=e.remote_report_id
+               LEFT JOIN quant.remote_reports r ON r.remote_report_id=e.remote_report_id
+               LEFT JOIN quant.remote_analyst_messages m ON m.remote_message_id=e.remote_message_id
                WHERE q.review_id=%s FOR UPDATE""",
             (review_id,),
         ).fetchone()
@@ -8104,17 +8107,24 @@ def review_claim(review_id: uuid.UUID, payload: ClaimReviewRequest) -> dict[str,
             connection.execute(
                 """INSERT INTO quant.analyst_claims(evidence_id,remote_analyst_id,scope,subject_key,subject_label,direction,strength,
                       horizon_days,extraction_confidence,extractor_version,available_at,raw)
-                   VALUES(%s,%s,'stock',%s,%s,%s,%s,%s,%s,'manual-claim-review-v1',now(),%s)
+                   VALUES(%s,%s,'stock',%s,%s,%s,%s,%s,%s,'manual-claim-review-v1',%s,%s)
                    ON CONFLICT(evidence_id,scope,subject_key,horizon_days,extractor_version) DO UPDATE SET direction=EXCLUDED.direction,
-                      strength=EXCLUDED.strength,extraction_confidence=EXCLUDED.extraction_confidence""",
+                      strength=EXCLUDED.strength,extraction_confidence=EXCLUDED.extraction_confidence,
+                      available_at=EXCLUDED.available_at""",
                 (item["evidence_id"], item["remote_analyst_id"], symbol, item["suggested_label"], item["direction"], item["strength"],
-                 item["horizon_days"], item["extraction_confidence"], Json({"review_id": str(review_id), "reviewer_note": payload.reviewer_note})),
+                 item["horizon_days"], item["extraction_confidence"], item["available_at"],
+                 Json({"review_id": str(review_id), "reviewer_note": payload.reviewer_note})),
             )
         connection.execute(
             "UPDATE quant.claim_review_queue SET status=%s,reviewed_at=now(),reviewer_note=%s WHERE review_id=%s",
             (payload.status, payload.reviewer_note, review_id),
         )
     return {"review_id": str(review_id), "status": payload.status}
+
+
+def review_claim(review_id: uuid.UUID, payload: ClaimReviewRequest) -> dict[str, Any]:
+    """Compatibility entry point for point-in-time safe claim review."""
+    return review_claim_isolated(review_id, payload, database=db, exchange_for=exchange_for)
 
 
 def universe_members(universe_key: str) -> dict[str, Any]:

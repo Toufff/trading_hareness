@@ -11,6 +11,7 @@ from app.remote_archive import (analyst_global_sync_cursor, classify_remote_text
                                 report_topic_labels, text_hash, text_only_remote_message, text_only_remote_report)
 from app.analyst_observations import observation_action, observation_status
 from app.remote_archive_sync import RemoteArchiveSyncService
+from app.claim_review_service import review_claim
 
 
 class RemoteArchiveNormalizationTests(unittest.TestCase):
@@ -184,6 +185,28 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         service._last_started["messages"] = 0.0
         self.assertIn("reports", service._last_started)
         self.assertNotIn("message", service._last_started)
+
+    def test_message_evidence_review_preserves_immutable_availability(self):
+        available_at = datetime(2026, 8, 12, 2, 1, tzinfo=timezone.utc)
+        item = {
+            "status": "pending", "evidence_id": "evidence", "remote_analyst_id": "anqiang",
+            "available_at": available_at, "suggested_symbol": "000001.SZ", "suggested_label": "平安银行",
+            "direction": 1, "strength": 0.7, "horizon_days": 1, "extraction_confidence": 0.8,
+        }
+
+        class Result:
+            def fetchone(self): return item
+
+        connection = MagicMock()
+        connection.execute.side_effect = lambda sql, *_args: Result() if "FOR UPDATE" in sql else MagicMock()
+        database = MagicMock()
+        database.transaction.return_value.__enter__.return_value = connection
+        payload = type("Payload", (), {"status": "approved", "symbol": None, "reviewer_note": "verified"})()
+        result = review_claim("review", payload, database=database, exchange_for=lambda _symbol: "SZ")
+        self.assertEqual(result["status"], "approved")
+        insert_call = next(call for call in connection.execute.call_args_list if "manual-claim-review-v1" in call.args[0])
+        self.assertEqual(insert_call.args[1][-2], available_at)
+        self.assertIn("remote_analyst_messages", connection.execute.call_args_list[0].args[0])
 
 
 if __name__ == "__main__":
