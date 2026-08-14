@@ -50,7 +50,11 @@ services:
       EXECUTIONS_DATA_SAVE_ON_SUCCESS: ${EXECUTIONS_DATA_SAVE_ON_SUCCESS:-none}
       EXECUTIONS_DATA_SAVE_ON_ERROR: ${EXECUTIONS_DATA_SAVE_ON_ERROR:-all}
       N8N_METRICS: ${N8N_METRICS:-true}
-      N8N_RUNNERS_MODE: external
+      # The active research workflows use HTTP nodes only.  Allow the local
+      # deployment to use n8n's in-process JS runner when the external broker
+      # leaves executions in `running`; production can explicitly set
+      # N8N_RUNNERS_MODE=external after a broker SLO has been verified.
+      N8N_RUNNERS_MODE: ${N8N_RUNNERS_MODE:-internal}
       N8N_RUNNERS_TASK_TIMEOUT: ${N8N_RUNNERS_TASK_TIMEOUT:-300}
       # Keep the JavaScript runner registered between the 15-minute analyst
       # sync ticks. The default 60s idle shutdown can leave the broker with
