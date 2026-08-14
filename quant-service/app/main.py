@@ -297,6 +297,7 @@ from .eastmoney_live_hydration import hydrate as hydrate_eastmoney_live_isolated
 from .ths_sector_flows import sync_industry as sync_ths_industry_isolated, sync_concept_signals as sync_ths_concept_signals_isolated
 from .outcome_recomputation import recompute as recompute_outcomes_isolated
 from .ths_concept_members_sync import sync as sync_ths_concept_members_isolated
+from .analyst_scorecards import recompute as recompute_scorecards_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -723,7 +724,7 @@ def analyst_scorecard_readiness(connection: Any) -> list[dict[str, Any]]:
     return result
 
 
-def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
+def recompute_scorecards_legacy(as_of_date: date | None = None) -> dict[str, Any]:
     as_of_date = as_of_date or cn_today()
     methodology = "excess-return-v1"
     with db.transaction() as connection:
@@ -790,6 +791,11 @@ def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
     return {"as_of_date": str(as_of_date), "scorecards": len(rows), "methodology_version": methodology,
             "readiness": readiness,
             "notice": "仅有方向明确且未来价格路径已结算的股票观点会进入成绩单；主题和中性观点保留为研究上下文。"}
+
+
+def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
+    """Compatibility entry point backed by local-only analyst scorecards."""
+    return recompute_scorecards_isolated(as_of_date, cn_today=cn_today, db=db, readiness=analyst_scorecard_readiness)
 
 
 FEATURE_VERSION = "multi-source-feature-v3"

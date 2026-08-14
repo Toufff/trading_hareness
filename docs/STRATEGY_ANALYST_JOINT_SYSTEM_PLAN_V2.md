@@ -601,5 +601,6 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 2026-08-14 THS 资金流物化拆分：`moneyflow_ind_ths` 行业流、`moneyflow_cnt_ths` 概念流及 `limit_cpt_list` 概念涨停强度的 raw→sector observation 写入已迁至 `app/ths_sector_flows.py`；保持同日、同源、独立强度事实和失败降级边界。
 - 2026-08-14 盘后 outcome 重算拆分：分析师 claims、推荐候选和本地 canonical 日线的 T+1/基准/MFE/MAE 结算已迁至 `app/outcome_recomputation.py`；不拉取历史、不调用 provider，主服务保留兼容入口。
 - 2026-08-14 THS 概念成员分页拆分：资金流目录选择、resume/offset、`super_get` 禁止、3000 行截断保护和成员状态写入已迁至 `app/ths_concept_members_sync.py`；主服务保留兼容入口，未将不完整响应纳入 Top10 分母。
+- 2026-08-14 分析师 scorecard 重算拆分：本地 claims/推荐/日线结算后的 scorecard materialization 已迁至 `app/analyst_scorecards.py`；保留上海日期与 `exit_date<=as_of_date` 的防未来函数约束，未改变分析师 live 权重（当前仍为 `live_strategy_effect=none`）。
 
 仍明确未完成：历史数据回填（按要求暂停）、分钟回放、60 日/200 信号验证、样本外分析师 champion/challenger 晋级和 RL。分析师同步代码已通过一次真实 text-only 差量同步，报告/消息游标均推进；n8n 当前发布图仍需下一次调度成功执行作为运行证据。纸面成交撮合仅支持“已有本地报价证据 + 人工确认”的研究模拟，不是经纪商成交。上述研究项目继续保持 `research_only`，不会改变实时规则或阈值。
