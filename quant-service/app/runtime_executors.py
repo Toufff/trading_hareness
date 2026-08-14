@@ -9,6 +9,7 @@ it to FastAPI routes or strategy rules.
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 import functools
 import os
 import threading
@@ -139,14 +140,19 @@ db_blocking_tasks.labels("queue_capacity").set(database_executor_queue_capacity)
 db_blocking_tasks.labels("inflight").set(0)
 
 
-async def run_akshare_blocking(action: Any, *args: Any, timeout_seconds: float) -> Any:
+async def run_akshare_blocking(action: Any, *args: Any, timeout_seconds: float, **action_kwargs: Any) -> Any:
     """Run a public-source client in the bounded executor.
 
     The metric tracks worker occupancy rather than coroutine wait time, so an
     upstream timeout remains visible until the underlying synchronous request
     actually returns.
     """
-    return await public_source_boundary.run(public_source_executor, action, *args, timeout_seconds=timeout_seconds)
+    # Keep keyword arguments inside the bounded worker boundary.  BaoStock's
+    # isolated synchronizer needs the symbol converter as a keyword; passing it
+    # to this wrapper previously raised before the provider call and falsely
+    # marked the fallback as failed.
+    callable_action = partial(action, **action_kwargs) if action_kwargs else action
+    return await public_source_boundary.run(public_source_executor, callable_action, *args, timeout_seconds=timeout_seconds)
 
 
 async def run_database_blocking(action: Any, *args: Any, timeout_seconds: float = 10) -> Any:

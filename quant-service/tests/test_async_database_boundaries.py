@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import unittest
 
-from app.runtime_executors import BlockingExecutorBoundary, ExecutorSaturatedError
+from app.runtime_executors import BlockingExecutorBoundary, ExecutorSaturatedError, run_akshare_blocking
 from app.async_strategy_read_repository import latest_strategy_decision
 from app.async_strategy_health_repository import latest_strategy_health
 from app.async_research_catalog_read_repository import factor_registry as async_factor_registry
@@ -151,6 +151,15 @@ class MainRouterBoundaryTests(unittest.TestCase):
 
 
 class BlockingExecutorBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_source_boundary_forwards_action_keywords(self) -> None:
+        result = await run_akshare_blocking(
+            lambda value, *, converter: converter(value),
+            "000001.SZ",
+            converter=lambda value: value.replace(".", "_"),
+            timeout_seconds=1,
+        )
+        self.assertEqual(result, "000001_SZ")
+
     async def test_timeout_keeps_the_slot_until_the_thread_has_really_finished(self) -> None:
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-boundary")
         boundary = BlockingExecutorBoundary("test_timeout_boundary", workers=1, queue_capacity=0)
