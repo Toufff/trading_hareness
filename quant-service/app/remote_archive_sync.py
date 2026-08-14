@@ -48,7 +48,12 @@ class RemoteArchiveSyncService:
         self._parse_timestamp = parse_timestamp
         self._sleep = sleep
         self._lock = asyncio.Lock()
-        self._last_started = 0.0
+        # Report catalogs can take materially longer than one message delta.
+        # Keep duplicate calls for one stream serialized, but never let a
+        # report retry prevent a separately scheduled message sync from
+        # acquiring the shared HTTP pacing gate.
+        self._stream_locks = {"reports": asyncio.Lock(), "messages": asyncio.Lock()}
+        self._last_started: dict[str, float] = {}
 
     async def _get(self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return await self._transport.get(
@@ -151,22 +156,31 @@ class RemoteArchiveSyncService:
         maximum = min(payload.max_items, int(settings["max_items"]))
         async with self._lock:
             now = asyncio.get_running_loop().time()
-            elapsed = now - self._last_started
-            if self._last_started and elapsed < float(settings["minimum_interval_seconds"]):
-                raise HTTPException(status_code=429, detail="remote analyst archive sync is rate limited locally")
-            self._last_started = now
-            transport: dict[str, Any] = {
-                "timeout": httpx.Timeout(30.0), "trust_env": False,
-                "headers": {"Authorization": f"Bearer {bearer}"},
-                "limits": httpx.Limits(max_connections=2, max_keepalive_connections=1, keepalive_expiry=20.0),
-            }
-            if settings["ca_file"]:
-                transport["verify"] = settings["ca_file"]
-            async with httpx.AsyncClient(base_url=str(settings["base_url"]), **transport) as client:
-                results: dict[str, Any] = {}
-                for stream in payload.streams:
-                    results[stream] = await (self._messages(client, maximum) if stream == "messages" else self._reports(client, maximum))
-            return {"status": "completed", "streams": results, "text_only": True, "history_fetch": False}
+            minimum_interval = float(settings["minimum_interval_seconds"])
+            for stream in payload.streams:
+                elapsed = now - self._last_started.get(stream, 0.0)
+                if self._last_started.get(stream) and elapsed < minimum_interval:
+                    raise HTTPException(status_code=429, detail=f"remote analyst archive {stream} sync is rate limited locally")
+            for stream in payload.streams:
+                self._last_started[stream] = now
+        transport: dict[str, Any] = {
+            "timeout": httpx.Timeout(30.0), "trust_env": False,
+            "headers": {"Authorization": f"Bearer {bearer}"},
+            "limits": httpx.Limits(max_connections=2, max_keepalive_connections=1, keepalive_expiry=20.0),
+        }
+        if settings["ca_file"]:
+            transport["verify"] = settings["ca_file"]
+        async with httpx.AsyncClient(base_url=str(settings["base_url"]), **transport) as client:
+            results: dict[str, Any] = {}
+            for stream in payload.streams:
+                # A one-stream n8n workflow owns this lock for only its own
+                # cursor mutation.  RemoteArchiveTransport still serializes
+                # individual requests and respects upstream Retry-After.
+                async with self._stream_locks[stream]:
+                    results[stream] = await (
+                        self._messages(client, maximum) if stream == "messages" else self._reports(client, maximum)
+                    )
+        return {"status": "completed", "streams": results, "text_only": True, "history_fetch": False}
 
 
 __all__ = ["RemoteArchiveSyncService"]

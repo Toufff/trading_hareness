@@ -10,6 +10,7 @@ from app.remote_archive import (analyst_global_sync_cursor, classify_remote_text
                                 is_market_opinion, labels, normalize_topic_key, parse_optional_timestamp,
                                 report_topic_labels, text_hash, text_only_remote_message, text_only_remote_report)
 from app.analyst_observations import observation_action, observation_status
+from app.remote_archive_sync import RemoteArchiveSyncService
 
 
 class RemoteArchiveNormalizationTests(unittest.TestCase):
@@ -170,6 +171,19 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         self.assertEqual(observation_status(scope="stock", subject_key="000001.SZ", direction=1,
                                             confidence=0.9, source_kind="message", stated_at=stated,
                                             available_at=received), "replay_only")
+
+    def test_stream_rate_limits_are_independent_for_split_schedulers(self):
+        service = RemoteArchiveSyncService(
+            settings=lambda: {}, transport=MagicMock(), database=MagicMock(),
+            run_database_blocking=MagicMock(), message_cursor_state=MagicMock(), report_cursor_state=MagicMock(),
+            import_message=MagicMock(), import_report=MagicMock(), update_global_cursor=MagicMock(),
+            update_report_cursor=MagicMock(), message_cursor_update=MagicMock(), report_cursor_update=MagicMock(),
+            parse_timestamp=MagicMock(),
+        )
+        service._last_started = {"reports": 100.0}
+        service._last_started["messages"] = 0.0
+        self.assertIn("reports", service._last_started)
+        self.assertNotIn("message", service._last_started)
 
 
 if __name__ == "__main__":

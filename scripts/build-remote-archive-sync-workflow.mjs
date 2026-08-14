@@ -16,12 +16,13 @@ if (!credentials?.httpBearerAuth) {
 // The bearer value and remote URL are deliberately not versioned. n8n keeps
 // the bearer in its encrypted credential store; the node only calls the local
 // quant service, which forwards the header in memory to its fixed local URL.
-const syncTrigger = {
+function syncTrigger({ name, stream, y }) {
+  return {
   id: randomUUID(),
-  name: '同步远端分析师文字',
+  name,
   type: 'n8n-nodes-base.httpRequest',
   typeVersion: 4.4,
-  position: [220, 0],
+  position: [220, y],
   parameters: {
     authentication: 'genericCredentialType',
     genericAuthType: 'httpBearerAuth',
@@ -30,35 +31,49 @@ const syncTrigger = {
     sendBody: true,
     contentType: 'json',
     specifyBody: 'json',
-    jsonBody: '=JSON.stringify({ streams: ["reports", "messages"], max_items: 100 })',
+    jsonBody: `=JSON.stringify({ streams: ["${stream}"], max_items: 100 })`,
     options: { timeout: 120000, response: { includeInputData: true } },
   },
   credentials,
   retryOnFail: true,
   maxTries: 3,
   waitBetweenTries: 5000,
-};
+  };
+}
 
-const schedule = {
+function schedule({ name, intervals, y }) {
+  return {
   id: randomUUID(),
-  name: '交易时段与盘后同步远端报告',
+  name,
   type: 'n8n-nodes-base.scheduleTrigger',
   typeVersion: 1.2,
-  position: [0, 0],
-  parameters: { rule: { interval: [
-    { field: 'cronExpression', expression: '*/15 9-11,13-14 * * 1-5' },
-    { field: 'cronExpression', expression: '20 18 * * 1-5' },
-  ] } },
-};
+  position: [0, y],
+  parameters: { rule: { interval: intervals.map((expression) => ({ field: 'cronExpression', expression })) } },
+  };
+}
 
-const workflow = {
-  id: 'remoteArchiveSync123',
-  name: '市场研究：同步远端分析师文字',
-  active: true,
-  nodes: [schedule, syncTrigger],
-  connections: {
-    [schedule.name]: { main: [[{ node: syncTrigger.name, type: 'main', index: 0 }]] },
-  },
-  settings: { executionOrder: 'v1', timezone: 'Asia/Shanghai' },
-};
-writeFileSync(outputPath, JSON.stringify([workflow], null, 2) + '\n');
+function workflow({ id, name, triggerName, stream, intervals, y }) {
+  const trigger = syncTrigger({ name: triggerName, stream, y });
+  const clock = schedule({ name: `${name} 定时`, intervals, y });
+  return {
+    id, name, active: true, nodes: [clock, trigger],
+    connections: { [clock.name]: { main: [[{ node: trigger.name, type: 'main', index: 0 }]] } },
+    settings: { executionOrder: 'v1', timezone: 'Asia/Shanghai' },
+  };
+}
+
+// Messages are deliberately offset from reports.  A 429 or slow catalog
+// request can never make the fresh text stream miss its own scheduled run.
+const workflows = [
+  workflow({
+    id: 'remoteArchiveReports123', name: '市场研究：同步远端分析师报告',
+    triggerName: '同步远端分析师报告文字', stream: 'reports',
+    intervals: ['*/15 9-11,13-14 * * 1-5', '20 18 * * 1-5'], y: 0,
+  }),
+  workflow({
+    id: 'remoteArchiveMessages123', name: '市场研究：同步远端分析师消息',
+    triggerName: '同步远端分析师消息文字', stream: 'messages',
+    intervals: ['2-59/15 9-11,13-14 * * 1-5', '22 18 * * 1-5'], y: 160,
+  }),
+];
+writeFileSync(outputPath, JSON.stringify(workflows, null, 2) + '\n');

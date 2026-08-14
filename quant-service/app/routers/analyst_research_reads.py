@@ -83,7 +83,7 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                              WHERE "workflowId"=w.id AND "deletedAt" IS NULL
                              ORDER BY "startedAt" DESC NULLS LAST,id DESC LIMIT 1
                         ) e ON TRUE
-                            WHERE w.id = 'remoteArchiveSync123'
+                            WHERE w.id IN ('remoteArchiveReports123','remoteArchiveMessages123')
                             ORDER BY w.id"""
                 ).fetchall()
                 workflow_health = []
@@ -136,14 +136,12 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 "cursor_count": len(stream_rows),
                 "latest_cursor_at": latest,
                 "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
-                "expected_workflow_id": "remoteArchiveSync123",
+                "expected_workflow_id": "remoteArchiveMessages123" if stream_key == "messages" else "remoteArchiveReports123",
                 "notice": "no successful cursor advance is recorded" if latest is None else None,
             })
         streams_ready = all(item.get("status") == "ready" for item in stream_health)
-        workflow_verified = streams_ready and bool(workflow_health) and any(
-            item.get("id") == "remoteArchiveSync123" and item.get("status") == "ready"
-            for item in workflow_health
-        )
+        ready_workflows = {str(item.get("id")) for item in workflow_health if item.get("status") == "ready"}
+        workflow_verified = streams_ready and {"remoteArchiveReports123", "remoteArchiveMessages123"}.issubset(ready_workflows)
         return {"cursors": [dict(row) for row in cursors], "stream_health": stream_health,
                 "workflow_health": workflow_health,
                 "promotion_registry": [dict(row) for row in promotion],

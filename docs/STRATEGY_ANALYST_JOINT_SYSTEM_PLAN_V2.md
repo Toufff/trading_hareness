@@ -112,7 +112,7 @@ T+1 可卖量、整手、单票/板块/策略暴露、日内亏损和组合回�
 
 当前 `scripts/build-remote-archive-sync-workflow.mjs:25-40` 每轮翻全量报告，再逐份请求详情；报告与消息在同一工作流分叉，报告支路失败会使整体执行失败。处理：
 
-- n8n 仅保留一个合并调度工作流；报告与消息在 quant-research 内串行、独立记录结果；
+- n8n 发布两条独立调度工作流（报告、消息）；报告与消息由 quant-research 独立处理、独立记录结果，报告 429 不会阻断消息的下一轮调度；
 - 报告按 `(report_id, version, content_hash)` 差量拉详情；
 - 每分析师串行、尊重 `Retry-After`、有界指数退避；
 - 消息 cursor 持久化到 PostgreSQL，不依赖 n8n staticData；
@@ -121,8 +121,8 @@ T+1 可卖量、整手、单票/板块/策略暴露、日内亏损和组合回�
 
 真实验收：通过 n8n 加密 Bearer 凭据触发一次报告+消息同步，远端返回 200，结果为
 `text_only=true`、`history_fetch=false`；随后连续 10 次消息增量空页均返回 200、0 次
-429，游标保持终态且没有重复导入。健康页以服务端游标作为当前执行证据，不会被旧
-Code-node 执行记录的 `error` 状态遮蔽。
+429，游标保持终态且没有重复导入。健康页以服务端游标及各自当前发布版本的执行记录
+作为证据，不会被旧 Code-node 或合并工作流的 `error` 状态遮蔽。
 
 #### P0-A2 分析师时区与历史 as-of 泄漏（已完成）
 
@@ -602,5 +602,6 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 2026-08-14 盘后 outcome 重算拆分：分析师 claims、推荐候选和本地 canonical 日线的 T+1/基准/MFE/MAE 结算已迁至 `app/outcome_recomputation.py`；不拉取历史、不调用 provider，主服务保留兼容入口。
 - 2026-08-14 THS 概念成员分页拆分：资金流目录选择、resume/offset、`super_get` 禁止、3000 行截断保护和成员状态写入已迁至 `app/ths_concept_members_sync.py`；主服务保留兼容入口，未将不完整响应纳入 Top10 分母。
 - 2026-08-14 分析师 scorecard 重算拆分：本地 claims/推荐/日线结算后的 scorecard materialization 已迁至 `app/analyst_scorecards.py`；保留上海日期与 `exit_date<=as_of_date` 的防未来函数约束，未改变分析师 live 权重（当前仍为 `live_strategy_effect=none`）。
+- 2026-08-14 分析师同步可靠性收敛：`remoteArchiveReports123` 与 `remoteArchiveMessages123` 已作为独立 n8n 调度发布，分别只请求 `reports` / `messages`；服务侧限频也按流独立，HTTP 请求仍共享 keep-alive 与 `Retry-After` 节流。旧 `remoteArchiveSync123` 已停用并保留历史。全量 321 项回归通过；未请求媒体或历史文本。
 
 仍明确未完成：历史数据回填（按要求暂停）、分钟回放、60 日/200 信号验证、样本外分析师 champion/challenger 晋级和 RL。分析师同步代码已通过一次真实 text-only 差量同步，报告/消息游标均推进；n8n 当前发布图仍需下一次调度成功执行作为运行证据。纸面成交撮合仅支持“已有本地报价证据 + 人工确认”的研究模拟，不是经纪商成交。上述研究项目继续保持 `research_only`，不会改变实时规则或阈值。

@@ -103,7 +103,7 @@ curl -X POST http://127.0.0.1:5681/api/v1/pipeline/daily \
 node scripts/build-quant-daily-workflow.mjs /tmp/quant-daily-workflow.json
 ```
 
-该工作流在 `Asia/Shanghai` 工作日收盘后依次调用内部的行情同步与质量门禁、多源特征快照、到期结果归因、分析师评分卡和方向推荐接口。远端报告同步使用单独生成器，Bearer 凭据复用 n8n 已有凭据且不会出现在工作流 JSON：
+该工作流在 `Asia/Shanghai` 工作日收盘后依次调用内部的行情同步与质量门禁、多源特征快照、到期结果归因、分析师评分卡和方向推荐接口。远端分析师文字同步使用单独生成器，生成两条独立工作流（报告与消息）；Bearer 凭据复用 n8n 已有凭据且不会出现在工作流 JSON。消息工作流与报告工作流错峰运行，因此报告限流不会阻断下一轮消息同步：
 
 ```bash
 node scripts/build-remote-archive-sync-workflow.mjs /tmp/text-workflow.json /tmp/remote-archive-sync.json

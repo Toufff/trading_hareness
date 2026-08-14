@@ -956,7 +956,7 @@ class ProviderHelperTests(unittest.TestCase):
                     }]))
                 if "workflow_entity" in sql:
                     return MagicMock(fetchall=MagicMock(return_value=[{
-                        "id": "remoteArchiveSync123", "active": True, "published": True,
+                        "id": "remoteArchiveReports123", "active": True, "published": True,
                         "latest_execution_status": "error", "latest_started_at": None, "latest_stopped_at": None,
                         "active_version_id": "current", "latest_execution_version_id": "retired",
                     }]))
@@ -988,12 +988,20 @@ class ProviderHelperTests(unittest.TestCase):
                         "received_after": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
                     }]))
                 if "workflow_entity" in sql:
-                    return MagicMock(fetchall=MagicMock(return_value=[{
-                        "id": "remoteArchiveSync123", "active": True, "published": True,
-                        "active_version_id": "current", "latest_execution_version_id": "current",
-                        "latest_execution_status": "success", "latest_started_at": datetime.now(timezone.utc),
-                        "latest_stopped_at": datetime.now(timezone.utc),
-                    }]))
+                    return MagicMock(fetchall=MagicMock(return_value=[
+                        {
+                            "id": "remoteArchiveReports123", "active": True, "published": True,
+                            "active_version_id": "current", "latest_execution_version_id": "current",
+                            "latest_execution_status": "success", "latest_started_at": datetime.now(timezone.utc),
+                            "latest_stopped_at": datetime.now(timezone.utc),
+                        },
+                        {
+                            "id": "remoteArchiveMessages123", "active": True, "published": True,
+                            "active_version_id": "current", "latest_execution_version_id": "current",
+                            "latest_execution_status": "success", "latest_started_at": datetime.now(timezone.utc),
+                            "latest_stopped_at": datetime.now(timezone.utc),
+                        },
+                    ]))
                 return MagicMock(fetchall=MagicMock(return_value=[]))
 
         database = MagicMock()
@@ -1004,6 +1012,8 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(payload["workflow_health"][0]["status"], "ready")
         self.assertEqual(payload["workflow_health"][0]["execution_evidence"], "current_workflow_execution")
         self.assertEqual(payload["runtime_verification"], "verified_recent_execution")
+        expected = {item["stream_key"]: item["expected_workflow_id"] for item in payload["stream_health"]}
+        self.assertEqual(expected, {"reports": "remoteArchiveReports123", "messages": "remoteArchiveMessages123"})
 
     def test_analyst_sync_health_uses_global_message_cursor(self):
         class _Transaction:
