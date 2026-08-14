@@ -286,6 +286,7 @@ from .remote_archive_sync import RemoteArchiveSyncService
 from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrated
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
 from .recommendation_generation import generate as generate_recommendations_isolated
+from .tushare_daily_sync import sync as sync_tushare_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -1314,7 +1315,7 @@ def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
     )
 
 
-async def sync_tushare(request: TushareSyncRequest) -> dict[str, Any]:
+async def sync_tushare_legacy(request: TushareSyncRequest) -> dict[str, Any]:
     symbols = await resolve_sync_symbols_async(request.symbols)
     configured = provider_candidates("daily", "auto")
     if not configured or not symbols:
@@ -1416,6 +1417,27 @@ async def sync_tushare(request: TushareSyncRequest) -> dict[str, Any]:
     return {"status": status, "trade_date": str(trade_date), "date_params": date_params, "imported": imported,
             "providers_used": sorted(providers_used), "failures": failures,
             "local_capacity_failures": local_capacity_failures, "request_key": request_key}
+
+
+async def sync_tushare(request: TushareSyncRequest) -> dict[str, Any]:
+    """Compatibility entry point backed by the isolated daily synchronizer."""
+    return await sync_tushare_isolated(
+        request,
+        resolve_symbols=resolve_sync_symbols_async,
+        provider_candidates=provider_candidates,
+        cn_today=cn_today,
+        tushare_daily_api=tushare_daily_api,
+        call_tushare_api=call_tushare_api,
+        decimal_or_none=decimal_or_none,
+        daily_bar_type=DailyBar,
+        persist_daily_bar_batch=persist_daily_bar_batch,
+        run_database_blocking=run_database_blocking,
+        db=db,
+        record_provider_failure=record_provider_failure,
+        record_provider_success=record_provider_success,
+        safe_error_detail=safe_error_detail,
+        executor_saturated_error=ExecutorSaturatedError,
+    )
 
 
 def fetch_baostock_rows(symbols: list[str], trade_date: date) -> tuple[list[dict[str, str]], list[str]]:
