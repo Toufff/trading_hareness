@@ -77,7 +77,7 @@ WITH revision AS (
   RETURNING "workflowId","publishedVersionId"
 )
 UPDATE workflow_entity w
-   SET active=true, "activeVersionId"=p."publishedVersionId", "updatedAt"=now()
+   SET active=true, "activeVersionId"=p."publishedVersionId", "versionId"=p."publishedVersionId", "updatedAt"=now()
   FROM published p
  WHERE w.id=p."workflowId";
 COMMIT;

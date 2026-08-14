@@ -298,8 +298,26 @@ const boardFlowChartOption = computed(() => {
   };
 });
 
-async function getJson<T>(path: string): Promise<T> { const response = await fetch(path); if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); }
-async function postJson<T>(path: string, body: Record<string, unknown> = {}): Promise<T> { const response = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error((data as { detail?: string; message?: string }).detail ?? (data as { message?: string }).message ?? `HTTP ${response.status}`); return data as T; }
+async function decodeJson<T>(response: Response, path: string): Promise<T> {
+  const text = await response.text();
+  const contentType = response.headers.get('content-type') ?? '';
+  let data: unknown;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    const preview = text.trim().replace(/\s+/g, ' ').slice(0, 120);
+    throw new Error(`${path} 返回了非 JSON 响应（${contentType || '无 content-type'}）：${preview || '空响应'}`);
+  }
+  if (!response.ok) {
+    const payload = data as { detail?: string; message?: string };
+    throw new Error(payload.detail ?? payload.message ?? `HTTP ${response.status}`);
+  }
+  return data as T;
+}
+async function getJson<T>(path: string): Promise<T> { return decodeJson<T>(await fetch(path, { headers: { accept: 'application/json' }, cache: 'no-store' }), path); }
+async function postJson<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
+  return decodeJson<T>(await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body) }), path);
+}
 async function loadConfig() { const data = await getJson<{ routes?: Route[] }>('/api/config'); routes.value = data.routes ?? []; relayTag.value ||= routes.value[0]?.tag ?? ''; }
 async function loadBoardFlowCurves(reset = false) {
   if (boardFlowLoading.value) return;
