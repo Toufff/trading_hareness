@@ -285,6 +285,7 @@ from .remote_archive_transport import RemoteArchiveTransport
 from .remote_archive_sync import RemoteArchiveSyncService
 from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrated
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
+from .recommendation_generation import generate as generate_recommendations_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -1198,7 +1199,7 @@ def recompute_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
             "intraday_signal_outcomes": intraday}
 
 
-def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
+def generate_recommendations_legacy(request: GenerateRequest) -> dict[str, Any]:
     as_of_date = request.as_of_date or cn_today()
     run_id = uuid.uuid4()
     materialized = build_feature_snapshot(as_of_date, request.universe_key)
@@ -1301,6 +1302,16 @@ def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
             )
     return {"run_id": str(run_id), "as_of_date": str(as_of_date), "market_regime": regime, "snapshot_key": materialized["snapshot_key"],
             "recommendations": candidates[:request.limit]}
+
+
+def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
+    """Compatibility entry point backed by the isolated scorer/materializer."""
+    return generate_recommendations_isolated(
+        request, cn_today=cn_today, build_feature_snapshot=build_feature_snapshot,
+        analyst_execution_context=analyst_execution_context, ablation_scores=ablation_scores,
+        number=number, db=db, model_version=MODEL_VERSION, feature_version=FEATURE_VERSION,
+        json_safe=strategy_json_safe,
+    )
 
 
 async def sync_tushare(request: TushareSyncRequest) -> dict[str, Any]:
