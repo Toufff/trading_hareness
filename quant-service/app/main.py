@@ -295,6 +295,7 @@ from .ths_sector_catalog_sync import sync as sync_ths_sector_catalog_isolated
 from .eastmoney_sector_members_sync import sync as sync_eastmoney_sector_members_isolated
 from .eastmoney_live_hydration import hydrate as hydrate_eastmoney_live_isolated
 from .ths_sector_flows import sync_industry as sync_ths_industry_isolated, sync_concept_signals as sync_ths_concept_signals_isolated
+from .outcome_recomputation import recompute as recompute_outcomes_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -1098,7 +1099,7 @@ def recompute_intraday_signal_outcomes(as_of_date: date | None = None) -> dict[s
         )
 
 
-def recompute_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
+def recompute_outcomes_legacy(as_of_date: date | None = None) -> dict[str, Any]:
     """Close only claims whose required future bars are already observable."""
     as_of_date = as_of_date or cn_today()
     with db.transaction() as connection:
@@ -1206,6 +1207,16 @@ def recompute_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
     return {"as_of_date": str(as_of_date), "outcomes": len(rows) + recommendation_outcomes + intraday["outcome_rows"],
             "claim_outcomes": len(rows), "recommendation_outcomes": recommendation_outcomes,
             "intraday_signal_outcomes": intraday}
+
+
+def recompute_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
+    """Compatibility entry point backed by local-only outcome recomputation."""
+    return recompute_outcomes_isolated(
+        as_of_date,
+        cn_today=cn_today,
+        db=db,
+        recompute_intraday_signal_outcomes=recompute_intraday_signal_outcomes,
+    )
 
 
 def generate_recommendations_legacy(request: GenerateRequest) -> dict[str, Any]:
