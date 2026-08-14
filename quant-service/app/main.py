@@ -296,6 +296,7 @@ from .eastmoney_sector_members_sync import sync as sync_eastmoney_sector_members
 from .eastmoney_live_hydration import hydrate as hydrate_eastmoney_live_isolated
 from .ths_sector_flows import sync_industry as sync_ths_industry_isolated, sync_concept_signals as sync_ths_concept_signals_isolated
 from .outcome_recomputation import recompute as recompute_outcomes_isolated
+from .ths_concept_members_sync import sync as sync_ths_concept_members_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -5759,7 +5760,7 @@ async def sync_ths_concept_signals(request: SectorFlowSyncRequest) -> dict[str, 
     )
 
 
-async def sync_ths_concept_members(request: ConceptMemberSyncRequest) -> dict[str, Any]:
+async def sync_ths_concept_members_legacy(request: ConceptMemberSyncRequest) -> dict[str, Any]:
     """Persist one bounded page of members for the concept-flow taxonomy.
 
     The flow table is deliberately the catalog here: it prevents membership
@@ -5889,6 +5890,23 @@ async def sync_ths_concept_members(request: ConceptMemberSyncRequest) -> dict[st
         "member_results": results,
         "next_member_offset": next_offset if next_offset < total else None,
     }
+
+
+async def sync_ths_concept_members(request: ConceptMemberSyncRequest) -> dict[str, Any]:
+    """Compatibility entry point backed by isolated concept-member sync."""
+    return await sync_ths_concept_members_isolated(
+        request,
+        sync_flow_catalog=sync_ths_concept_signals,
+        flow_request=SectorFlowSyncRequest,
+        run_database_blocking=run_database_blocking,
+        db=db,
+        fetch_catalog=fetch_tushare_catalog,
+        catalog_request=TushareFetchRequest,
+        load_rows=lambda request_key: run_database_blocking(tushare_rows_for_request, request_key),
+        persist_members=persist_ths_sector_members,
+        observed_at=lambda: datetime.now(timezone.utc),
+        http_exception=HTTPException,
+    )
 
 
 def ths_concept_member_backfill_enabled() -> bool:
