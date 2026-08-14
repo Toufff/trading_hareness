@@ -291,6 +291,7 @@ from .baostock_daily_sync import fetch_rows as fetch_baostock_rows_isolated, syn
 from .market_universe_sync import sync as sync_market_universe_isolated
 from .full_market_daily_sync import sync as sync_full_market_daily_isolated
 from .sector_catalog_sync import sync_all as sync_all_sector_catalogs_isolated
+from .ths_sector_catalog_sync import sync as sync_ths_sector_catalog_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -2137,7 +2138,7 @@ def persist_eastmoney_sector_members(connection: Any, taxonomy_key: str, sector_
     return stored
 
 
-async def sync_ths_sector_catalog(request: SectorCatalogSyncRequest) -> dict[str, Any]:
+async def sync_ths_sector_catalog_legacy(request: SectorCatalogSyncRequest) -> dict[str, Any]:
     """Sync one THS board directory and, optionally, a bounded member page."""
     taxonomy_key = ths_taxonomy_key(request.index_type)
     outcome = await fetch_tushare_catalog(TushareFetchRequest(
@@ -2218,6 +2219,29 @@ async def sync_ths_sector_catalog(request: SectorCatalogSyncRequest) -> dict[str
             "member_offset": request.member_offset, "resume": request.resume, "member_results": member_results,
             "skipped_non_member_codes": skipped_non_member_codes,
             "next_member_offset": request.member_offset + len(selected) if request.sync_members and request.member_offset + len(selected) < len(member_code_rows) else None}
+
+
+async def sync_ths_sector_catalog(request: SectorCatalogSyncRequest) -> dict[str, Any]:
+    """Compatibility entry point backed by isolated THS catalog sync."""
+    # The isolated module keeps the exact member-code guard: re.fullmatch(r"\d{6}\.TI", code)
+    # and returns skipped_non_member_codes for audit visibility.
+    return await sync_ths_sector_catalog_isolated(
+        request,
+        taxonomy_key=ths_taxonomy_key,
+        fetch_catalog=fetch_tushare_catalog,
+        catalog_request=TushareFetchRequest,
+        load_rows=lambda request_key: run_database_blocking(tushare_rows_for_request, request_key),
+        run_database_blocking=run_database_blocking,
+        db=db,
+        upsert_taxonomy=upsert_sector_taxonomy,
+        upsert_sector=upsert_sector,
+        ths_member_persist=persist_ths_sector_members,
+        member_sync_failure=record_sector_member_sync_failure,
+        is_local_capacity_error=is_local_capacity_http_error,
+        is_circuit_open_error=is_circuit_open_http_error,
+        http_exception=HTTPException,
+        observed_at=lambda: datetime.now(timezone.utc),
+    )
 
 
 async def sync_all_ths_sector_catalogs() -> dict[str, Any]:
