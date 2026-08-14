@@ -288,6 +288,7 @@ from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
 from .recommendation_generation import generate as generate_recommendations_isolated
 from .tushare_daily_sync import sync as sync_tushare_isolated
 from .baostock_daily_sync import fetch_rows as fetch_baostock_rows_isolated, sync as sync_baostock_isolated
+from .market_universe_sync import sync as sync_market_universe_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -1803,7 +1804,7 @@ def persist_tushare_rows(connection: Any, api_name: str, request_key: str, rows:
     return normalize_tushare_rows(connection, api_name, rows, available_at, provider_key)
 
 
-async def sync_market_universe(request: MarketUniverseSyncRequest) -> dict[str, Any]:
+async def sync_market_universe_legacy(request: MarketUniverseSyncRequest) -> dict[str, Any]:
     """Refresh `all_a` from one bounded stock_basic response, never from browser data."""
     candidates = provider_candidates("stock_basic", request.provider)
     if not candidates:
@@ -1892,6 +1893,27 @@ async def sync_market_universe(request: MarketUniverseSyncRequest) -> dict[str, 
 
         await run_database_blocking(persist_failure)
         return {"status": "blocked", "universe_key": request.universe_key, "reason": safe_error_detail(str(error), 500), "request_key": request_key}
+
+
+async def sync_market_universe(request: MarketUniverseSyncRequest) -> dict[str, Any]:
+    """Compatibility entry point backed by the isolated universe synchronizer."""
+    return await sync_market_universe_isolated(
+        request,
+        provider_candidates=provider_candidates,
+        cn_date=cn_today,
+        call_tushare_api=call_tushare_api,
+        looks_like_response_header=looks_like_response_header,
+        persist_tushare_rows=persist_tushare_rows,
+        run_database_blocking=run_database_blocking,
+        persist_tushare_fetch_blocked=persist_tushare_fetch_blocked,
+        db=db,
+        safe_error_detail=safe_error_detail,
+        provider_call_error=ProviderCallError,
+        executor_saturated_error=ExecutorSaturatedError,
+        record_provider_success=record_provider_success,
+        record_provider_failure=record_provider_failure,
+        record_provider_api_capability=record_provider_api_capability,
+    )
 
 
 async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[str, Any]:
