@@ -293,6 +293,7 @@ from .full_market_daily_sync import sync as sync_full_market_daily_isolated
 from .sector_catalog_sync import sync_all as sync_all_sector_catalogs_isolated
 from .ths_sector_catalog_sync import sync as sync_ths_sector_catalog_isolated
 from .eastmoney_sector_members_sync import sync as sync_eastmoney_sector_members_isolated
+from .eastmoney_live_hydration import hydrate as hydrate_eastmoney_live_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -2396,6 +2397,21 @@ async def hydrate_eastmoney_live_board_members(kind: str, flows: list[dict[str, 
     This bounded path avoids an all-board scrape and writes only exact same-
     source memberships under the live board code.
     """
+    return await hydrate_eastmoney_live_isolated(
+        kind, flows, limit,
+        run_database_blocking=run_database_blocking,
+        run_public_blocking=run_akshare_blocking,
+        board_members=akshare_eastmoney_board_members,
+        upsert_taxonomy=upsert_sector_taxonomy,
+        upsert_sector=upsert_sector,
+        persist_members=persist_eastmoney_sector_members,
+        db=db,
+        intraday_number=intraday_number,
+        executor_saturated_error=ExecutorSaturatedError,
+        provider_error=AkShareProviderError,
+        safe_error_detail=safe_error_detail,
+    )
+    """legacy implementation retained below for source-compatible snapshot."""
     if not limit:
         return []
     taxonomy_key = f"eastmoney_{kind}"
