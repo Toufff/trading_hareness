@@ -287,6 +287,7 @@ from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrat
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
 from .recommendation_generation import generate as generate_recommendations_isolated
 from .tushare_daily_sync import sync as sync_tushare_isolated
+from .baostock_daily_sync import fetch_rows as fetch_baostock_rows_isolated, sync as sync_baostock_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -1440,7 +1441,7 @@ async def sync_tushare(request: TushareSyncRequest) -> dict[str, Any]:
     )
 
 
-def fetch_baostock_rows(symbols: list[str], trade_date: date) -> tuple[list[dict[str, str]], list[str]]:
+def fetch_baostock_rows_legacy(symbols: list[str], trade_date: date) -> tuple[list[dict[str, str]], list[str]]:
     """Blocking BaoStock client dispatched through the bounded public-source pool."""
     import baostock as bs
 
@@ -1465,7 +1466,7 @@ def fetch_baostock_rows(symbols: list[str], trade_date: date) -> tuple[list[dict
     return rows, failures
 
 
-async def sync_baostock(request: TushareSyncRequest) -> dict[str, Any]:
+async def sync_baostock_legacy(request: TushareSyncRequest) -> dict[str, Any]:
     symbols = await resolve_sync_symbols_async(request.symbols)
     if not symbols:
         return {"status": "disabled", "reason": "QUANT_UNIVERSE or explicit remote stock claims is not configured", "imported": 0}
@@ -1554,6 +1555,28 @@ async def sync_baostock(request: TushareSyncRequest) -> dict[str, Any]:
 
     await run_database_blocking(finalize_run)
     return {"status": status, "trade_date": str(trade_date), "imported": imported, "failures": failures, "request_key": request_key}
+
+
+async def sync_baostock(request: TushareSyncRequest) -> dict[str, Any]:
+    """Compatibility entry point backed by the isolated BaoStock synchronizer."""
+    return await sync_baostock_isolated(
+        request,
+        resolve_symbols=resolve_sync_symbols_async,
+        cn_today=cn_today,
+        open_provider_capabilities=open_provider_capabilities,
+        run_database_blocking=run_database_blocking,
+        run_public_blocking=run_akshare_blocking,
+        fetch_rows=fetch_baostock_rows_isolated,
+        baostock_code=baostock_code,
+        daily_bar_type=DailyBar,
+        decimal_or_none=decimal_or_none,
+        persist_daily_bar_batch=persist_daily_bar_batch,
+        db=db,
+        safe_error_detail=safe_error_detail,
+        record_provider_failure=record_provider_failure,
+        record_provider_success=record_provider_success,
+        executor_saturated_error=ExecutorSaturatedError,
+    )
 
 
 async def call_tushare_api(api_name: str, params: dict[str, Any], fields: str | None,
