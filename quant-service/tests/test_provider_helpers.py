@@ -33,6 +33,7 @@ from app.http_clients import alert_http_client, alert_http_client_status, close_
 from app.intraday_runtime_status import load_intraday_runtime_evidence
 from app.intraday_scan_repository import persist_intraday_scan_terminal
 from app.market_session_repository import realtime_market_session as read_market_session, realtime_market_session_async as read_market_session_async
+from app.sector_catalog_sync import sync_all as isolated_sync_all_sector_catalogs
 from app.intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload
 from app.health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
 from app.alert_transport import post_feishu_alert_text
@@ -1489,6 +1490,27 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(member_result["member_results"][0]["status"], "blocked")
         self.assertEqual(catalog_result["status"], "blocked")
         self.assertTrue(all(item["status"] == "blocked" for item in catalog_result["types"]))
+
+    def test_isolated_sector_catalog_orchestrator_preserves_sequential_statuses(self):
+        async def check():
+            calls = []
+            async def sync_one(request):
+                calls.append(request.index_type)
+                if request.index_type == "R":
+                    raise HTTPException(status_code=503, detail="circuit open")
+                return {"status": "completed", "sectors": 2}
+            result = await isolated_sync_all_sector_catalogs(
+                sync_one=sync_one, request_type=SectorCatalogSyncRequest,
+                http_exception=HTTPException,
+                is_local_capacity_error=lambda error: False,
+                is_circuit_open_error=lambda error: "circuit" in str(error.detail),
+            )
+            return calls, result
+        calls, result = asyncio.run(check())
+        self.assertEqual(calls, ["N", "I", "R", "S", "ST", "BB"])
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["sectors"], 10)
+        self.assertEqual(result["types"][2]["status"], "circuit_open")
 
     def test_eastmoney_board_members_use_bounded_akshare_and_database_executors(self):
         catalog = [{"板块代码": "BK001", "板块名称": "测试概念"}]
