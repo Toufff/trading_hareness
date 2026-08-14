@@ -292,6 +292,7 @@ from .market_universe_sync import sync as sync_market_universe_isolated
 from .full_market_daily_sync import sync as sync_full_market_daily_isolated
 from .sector_catalog_sync import sync_all as sync_all_sector_catalogs_isolated
 from .ths_sector_catalog_sync import sync as sync_ths_sector_catalog_isolated
+from .eastmoney_sector_members_sync import sync as sync_eastmoney_sector_members_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
 from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
@@ -2255,7 +2256,7 @@ async def sync_all_ths_sector_catalogs() -> dict[str, Any]:
     )
 
 
-async def sync_eastmoney_board_members(request: EastmoneyBoardMemberSyncRequest) -> dict[str, Any]:
+async def sync_eastmoney_board_members_legacy(request: EastmoneyBoardMemberSyncRequest) -> dict[str, Any]:
     """Synchronize an exact, bounded page of boards matching live EM flows."""
     taxonomy_key = f"eastmoney_{request.kind}"
     try:
@@ -2349,6 +2350,26 @@ async def sync_eastmoney_board_members(request: EastmoneyBoardMemberSyncRequest)
     return {"status": "partial" if failures else "completed", "taxonomy_key": taxonomy_key, "kind": request.kind,
             "total_boards": len(boards), "member_offset": request.member_offset, "member_limit": request.member_limit, "resume": request.resume,
             "member_results": results, "next_member_offset": next_offset if next_offset < len(boards) else None}
+
+
+async def sync_eastmoney_board_members(request: EastmoneyBoardMemberSyncRequest) -> dict[str, Any]:
+    """Compatibility entry point backed by isolated Eastmoney member sync."""
+    return await sync_eastmoney_sector_members_isolated(
+        request,
+        board_catalog=akshare_eastmoney_board_catalog,
+        board_members=akshare_eastmoney_board_members,
+        run_public_blocking=run_akshare_blocking,
+        run_database_blocking=run_database_blocking,
+        db=db,
+        upsert_taxonomy=upsert_sector_taxonomy,
+        upsert_sector=upsert_sector,
+        persist_members=persist_eastmoney_sector_members,
+        record_failure=record_sector_member_sync_failure,
+        safe_error_detail=safe_error_detail,
+        executor_saturated_error=ExecutorSaturatedError,
+        provider_error=AkShareProviderError,
+        observed_at=datetime.now(timezone.utc),
+    )
 
 
 async def record_sector_member_sync_failure(taxonomy_key: str, sector_key: str, observed_at: datetime,
