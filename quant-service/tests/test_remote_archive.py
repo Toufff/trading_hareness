@@ -160,6 +160,17 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         held = {item["symbol"] for item in actions if item["stated_at"].hour == 9 and item["action_type"] == "hold"}
         self.assertTrue({"300604.SZ", "002428.SZ", "300666.SZ", "301018.SZ"}.issubset(held))
 
+    def test_anqiang_message_last_explicit_verb_controls_reentry_vs_reduce(self):
+        from app.analyst_trade_actions import parse_anqiang_message_trade_actions
+
+        stated = datetime(2026, 8, 13, 10, 46, 52, tzinfo=timezone.utc)
+        actions = parse_anqiang_message_trade_actions(
+            stated, "致尚把昨天下午接回的资金减仓出去。", available_at=stated,
+        )
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["action_type"], "reduce")
+        self.assertEqual(actions[0]["direction"], -1)
+
     def test_skill_prompt_variants_are_fixed_research_contracts(self):
         self.assertEqual(len(PROMPT_VARIANTS), 3)
         payload = _variant_payload(PROMPT_VARIANTS[0], [{"report_id": "x"}], [{"symbol": "600000.SH", "action_type": "buy", "stated_at": "x"}])

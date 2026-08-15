@@ -69,9 +69,8 @@ def _operation(text: str) -> tuple[str, int] | None:
     # offset: ``加仓做T`` is an add-with-T action rather than a neutral trade.
     if any(action_type == "add_t" for _, action_type, _ in matches):
         return ("add_t", 1)
-    # Re-entry must win a historical reduce in ``上午减仓的资金现在接回``.
-    if any(action_type == "buy" for _, action_type, _ in matches):
-        return ("buy", 1)
+    # A re-entry wins only when it is the *last* explicit action.  Conversely,
+    # ``昨天下午接回的资金减仓出去`` is a current reduce, not a new buy.
     _, action_type, direction = max(matches, key=lambda item: item[0])
     return action_type, direction
 
