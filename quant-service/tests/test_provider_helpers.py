@@ -339,12 +339,13 @@ class ProviderHelperTests(unittest.TestCase):
         router = build_market_actions_router(MarketActionDependencies(
             import_bars=MagicMock(return_value={"imported": 0}), sync_universe=action,
             sync_full_daily=action, post_close_refresh=action, sync_announcements=action,
+            rebuild_market_flow_features=action,
         ))
         methods_by_path = {route.path: route.methods for route in router.routes}
         for path in (
             "/api/v1/market/bars/import", "/api/v1/market/universe/sync",
             "/api/v1/market/sync/full-daily", "/api/v1/market/post-close/refresh",
-            "/api/v1/events/cninfo/sync",
+            "/api/v1/events/cninfo/sync", "/api/v1/market/flow/features/rebuild",
         ):
             self.assertEqual(methods_by_path[path], {"POST"})
 
@@ -1597,7 +1598,7 @@ class ProviderHelperTests(unittest.TestCase):
 
     def test_minute_board_capture_records_local_capacity_without_provider_failure(self):
         async def check() -> tuple[dict[str, object], AsyncMock]:
-            blocking = AsyncMock(side_effect=[None, []])
+            blocking = AsyncMock(side_effect=[None, {"status": "insufficient", "state": "insufficient"}, []])
             with patch("app.main.open_provider_capabilities", new=AsyncMock(return_value=set())), \
                  patch("app.main.run_akshare_blocking", new=AsyncMock(side_effect=ExecutorSaturatedError("public_source blocking executor is saturated"))), \
                  patch("app.main.run_database_blocking", new=blocking), \
@@ -1610,7 +1611,7 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(result["capacity_blocks"], 2)
         self.assertEqual(result["circuit_skips"], 0)
         self.assertEqual([call.args[0].__name__ for call in blocking.await_args_list], [
-            "persist_snapshot", "evaluate_intraday_board_rotation_events",
+            "persist_snapshot", "persist_intraday_market_flow_feature", "evaluate_intraday_board_rotation_events",
         ])
 
     def test_ths_industry_moneyflow_uses_database_executor_for_rows_and_persistence(self):

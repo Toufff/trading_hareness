@@ -32,6 +32,9 @@ type BoardFlowPoint = { observed_at: string; net_inflow: number; change_pct?: nu
 type BoardFlowSeries = { taxonomy_key: string; sector_key: string; label: string; points: BoardFlowPoint[] };
 type BoardFlowSnapshot = { observed_at: string; coverage: number; source: string };
 type BoardFlowResponse = { trade_date: string; taxonomy: 'industry' | 'concept'; items: BoardFlowSeries[]; snapshots: BoardFlowSnapshot[]; cursor?: string | null; cadence_seconds: number; retention_days: number; notice: string; exchange_clock_observed_at: string; is_exchange_today: boolean; display_slots: string[]; display_start?: string | null; display_end?: string | null };
+type MarketFlowFeature = { feature_key: string; exchange_date: string; cadence: 'minute' | 'midday' | 'close'; observed_at: string; source_snapshot_minute?: string | null; status: 'ready' | 'partial' | 'insufficient'; market_state: string; concept_count: number; concept_positive_ratio?: number | null; concept_median_flow?: number | null; concept_mean_change_pct?: number | null; five_minute_positive_ratio_delta?: number | null; session_positive_ratio_delta?: number | null; afternoon_repair_strength?: number | null; market_amount?: number | null; market_volume?: number | null; amount_change_pct?: number | null; volume_change_pct?: number | null; advancer_ratio?: number | null; quality_flags?: string[]; features?: Record<string, unknown> };
+type SectorFlowDailyFeature = { trading_date: string; sector_key: string; label: string; provider_key: string; status: string; transition: string; net_amount?: number | null; previous_net_amount?: number | null; net_change_amount?: number | null; net_acceleration?: number | null; rank_percentile?: number | null; flow_sign_streak: number; change_pct?: number | null; price_flow_divergence?: string | null; lhb_stock_count: number; lhb_net_amount?: number | null; lhb_negative_count: number; lhb_sell_pressure_ratio?: number | null; limit_up_count: number; quality_flags?: string[] };
+type MarketFlowResponse = { trade_date: string; timezone: string; items: MarketFlowFeature[]; latest?: MarketFlowFeature | null; daily?: MarketFlowFeature[]; sector_daily?: SectorFlowDailyFeature[]; state_counts?: Record<string, number>; research_gate?: { status: string; minimum_trading_days: number; minimum_independent_events: number; live_strategy_effect: string }; notice?: string };
 type BoardRotationEvent = { rotation_event_id: string; taxonomy_key: string; sector_key: string; label: string; event_type: 'cross_zero' | 'flow_surge'; direction: 'inflow' | 'outflow'; state: 'confirming' | 'confirmed' | 'alerted' | 'expired'; first_observed_at: string; last_observed_at: string; conditions?: { previous_net_inflow?: number; current_net_inflow?: number; delta_net_inflow?: number; dynamic_threshold?: number; change_pct?: number | null }; delivery_status?: 'pending' | 'sent' | 'failed' | null; sent_at?: string | null; error_message?: string | null };
 type BoardStockMiningCandidate = { rank: number; direction: 'inflow' | 'outflow'; setup_key: string; symbol: string; name?: string; label: string; score: number; board_net_inflow?: number; main_net_inflow?: number; volume_ratio?: number; turnover_rate?: number; pct_change?: number; risk_flags?: string[] };
 type BoardStockMining = { run?: { observed_at?: string; status?: string; coverage?: { exact_complete_boards?: number; quoted_exact_members?: number; partial_or_unmapped_boards_skipped?: number }; summary?: { returned?: number; inflow_candidates?: number; outflow_candidates?: number; notice?: string } } | null; inflow?: BoardStockMiningCandidate[]; outflow?: BoardStockMiningCandidate[]; notice?: string };
@@ -130,6 +133,7 @@ const universeText = ref(''); const universePriority = ref(100); const reviewSym
 const chinaMinute = (value?: string | null) => value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) : '-';
 const chinaDateTime = (value?: string | null) => value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) : '-';
 const boardFlowTaxonomy = ref<'industry' | 'concept'>('industry'); const boardFlowDate = ref(''); const boardFlowSeries = ref<Record<string, BoardFlowSeries>>({}); const boardFlowSnapshots = ref<BoardFlowSnapshot[]>([]); const boardFlowCursor = ref<string | null>(null); const boardFlowLoading = ref(false); const boardFlowError = ref(''); const boardFlowNotice = ref(''); const boardFlowFocus = ref<string[]>([]); const boardFlowDisplaySlots = ref<string[]>([]); const boardFlowIsExchangeToday = ref(false); const boardRotationEvents = ref<BoardRotationEvent[]>([]); const boardStockMining = ref<BoardStockMining>({}); const limitLinkageMining = ref<LimitLinkageMining>({});
+const marketFlow = ref<MarketFlowResponse>({ trade_date: '', timezone: 'Asia/Shanghai', items: [] }); const marketFlowError = ref('');
 const selectedFactors = ref<string[]>([]); const factorHorizon = ref(5); const backtestForm = ref({ rebalance_days: 5, hold_days: 5, top_n: 20, total_cost_bps: 18 });
 let retryTimer: number | undefined; let realtimeTimer: number | undefined; let boardFlowTimer: number | undefined; let retryDelay = 1000; let eventSource: EventSource | undefined;
 
@@ -215,6 +219,45 @@ const indexLabel = (symbol: string) => ({ '000001.SH': '上证指数', '000300.S
 const equityChartOption = computed(() => ({
   tooltip: { trigger: 'axis' }, grid: { left: 48, right: 18, top: 24, bottom: 40 }, xAxis: { type: 'category', data: latestExperiment.value?.equity_curve.map((item) => item.date) ?? [] }, yAxis: { type: 'value', name: '净值', scale: true }, series: [{ type: 'line', smooth: true, showSymbol: false, data: latestExperiment.value?.equity_curve.map((item) => item.equity) ?? [], lineStyle: { width: 2, color: '#00897b' }, areaStyle: { color: 'rgba(0,137,123,0.12)' } }],
 }));
+const marketFlowLatest = computed(() => marketFlow.value.latest ?? marketFlow.value.items.at(-1) ?? null);
+const marketFlowSectorHighlights = computed(() => [...(marketFlow.value.sector_daily ?? [])]
+  .sort((left, right) => {
+    const priority = (row: SectorFlowDailyFeature) => ['reversal_in', 'reversal_out', 'acceleration_in', 'acceleration_out'].includes(row.transition) ? 1 : 0;
+    return priority(right) - priority(left)
+      || Math.abs(Number(right.net_change_amount ?? 0)) - Math.abs(Number(left.net_change_amount ?? 0))
+      || Number(right.lhb_stock_count ?? 0) - Number(left.lhb_stock_count ?? 0);
+  }).slice(0, 20));
+const marketFlowStateLabel = (value?: string | null) => ({
+  flow_expansion: '资金扩张', flow_risk_off: '资金退潮', late_repair: '尾盘修复',
+  flow_acceleration: '流入加速', flow_deterioration: '流入恶化', mixed_rotation: '轮动混合',
+  risk_expansion: '放量扩张', distribution: '放量派发', weak_repair: '缩量修复',
+  passive_decline: '缩量走弱', neutral_rotation: '中性轮动', insufficient: '数据不足',
+}[value ?? ''] ?? value ?? '等待特征');
+const marketFlowStateType = (value?: string | null): 'success' | 'warning' | 'danger' | 'info' => (
+  ['flow_expansion', 'flow_acceleration', 'risk_expansion'].includes(value ?? '') ? 'success'
+    : ['flow_risk_off', 'flow_deterioration', 'distribution', 'passive_decline'].includes(value ?? '') ? 'danger'
+      : ['late_repair', 'weak_repair', 'mixed_rotation', 'neutral_rotation'].includes(value ?? '') ? 'warning' : 'info'
+);
+const sectorFlowTransitionLabel = (value?: string | null) => ({ reversal_in: '流出转流入', reversal_out: '流入转流出', acceleration_in: '流入加速', acceleration_out: '流出加速', persistent_in: '持续流入', persistent_out: '持续流出', flat: '平稳', insufficient: '证据不足' }[value ?? ''] ?? value ?? '-');
+const sectorFlowTransitionType = (value?: string | null): 'success' | 'warning' | 'danger' | 'info' => value === 'reversal_in' || value === 'acceleration_in' ? 'success' : value === 'reversal_out' || value === 'acceleration_out' ? 'danger' : value === 'persistent_out' ? 'warning' : 'info';
+const marketFlowChartOption = computed(() => {
+  const rows = marketFlow.value.items.filter((item) => item.cadence === 'minute');
+  return {
+    animation: false,
+    tooltip: { trigger: 'axis' },
+    grid: { left: 58, right: 54, top: 34, bottom: 46 },
+    xAxis: { type: 'category', data: rows.map((item) => chinaMinute(item.observed_at)), boundaryGap: false },
+    yAxis: [
+      { type: 'value', name: '流入广度%', min: 0, max: 100 },
+      { type: 'value', name: '资金中位数', scale: true },
+    ],
+    dataZoom: [{ type: 'inside', filterMode: 'none' }],
+    series: [
+      { name: '概念流入广度', type: 'line', showSymbol: false, smooth: true, data: rows.map((item) => item.concept_positive_ratio == null ? null : Number(item.concept_positive_ratio) * 100), lineStyle: { color: '#b71c1c', width: 2 }, areaStyle: { color: 'rgba(183,28,28,0.08)' } },
+      { name: '概念资金中位数', type: 'line', yAxisIndex: 1, showSymbol: false, data: rows.map((item) => item.concept_median_flow ?? null), lineStyle: { color: '#1565c0', width: 1.5 } },
+    ],
+  };
+});
 const boardFlowSeriesRows = computed(() => Object.values(boardFlowSeries.value).sort((left, right) => left.label.localeCompare(right.label, 'zh-CN')));
 const boardFlowLatestSnapshot = computed(() => boardFlowSnapshots.value.at(-1) ?? null);
 const boardFlowLatestValues = computed(() => {
@@ -247,8 +290,8 @@ const boardRotationKind = (item: BoardRotationEvent) => item.event_type === 'cro
   ? (item.direction === 'inflow' ? '流出转流入' : '流入转流出')
   : (item.direction === 'inflow' ? '流入加速' : '流出加速');
 const boardRotationStateType = (value: BoardRotationEvent['state']): 'success' | 'warning' | 'danger' | 'info' => value === 'alerted' ? 'success' : value === 'confirmed' || value === 'confirming' ? 'warning' : value === 'expired' ? 'info' : 'danger';
-const boardRotationStateText = (value: BoardRotationEvent['state']) => ({ confirming: '待下一分钟确认', confirmed: '已确认待投递', alerted: '飞书已送达', expired: '方向未延续' }[value] ?? value);
-const boardRotationDeliveryText = (item: BoardRotationEvent) => item.delivery_status === 'sent' ? '已送达' : item.delivery_status === 'failed' ? '投递失败待重试' : item.delivery_status === 'pending' ? '待投递' : '尚未入队';
+const boardRotationStateText = (value: BoardRotationEvent['state']) => ({ confirming: '待下一分钟确认', confirmed: '已确认', alerted: '已记录', expired: '方向未延续' }[value] ?? value);
+const boardRotationDeliveryText = (_item: BoardRotationEvent) => '仅前端证据';
 const boardFlowChartOption = computed(() => {
   const focus = new Set(boardFlowFocus.value);
   const slots = boardFlowDisplaySlots.value;
@@ -349,6 +392,18 @@ async function loadBoardFlowCurves(reset = false) {
     boardFlowError.value = error instanceof Error ? error.message : String(error);
   } finally { boardFlowLoading.value = false; }
 }
+async function loadMarketFlowFeatures() {
+  marketFlowError.value = '';
+  try {
+    const params = new URLSearchParams();
+    if (boardFlowDate.value) params.set('trade_date', boardFlowDate.value);
+    const result = await getJson<MarketFlowResponse>(`/api/research/market/flow/features?${params.toString()}`);
+    marketFlow.value = result;
+    if (!boardFlowDate.value) boardFlowDate.value = result.trade_date;
+  } catch (error) {
+    marketFlowError.value = error instanceof Error ? error.message : String(error);
+  }
+}
 async function loadBoardRotationEvents() {
   try {
     const result = await getJson<{ items?: BoardRotationEvent[] }>('/api/research/intraday/board-rotations/latest?limit=20');
@@ -367,7 +422,7 @@ async function loadLimitLinkageMining() {
     // The rest of the board dashboard remains usable before the migration lands.
   }
 }
-function resetBoardFlowCurves() { void loadBoardFlowCurves(true); }
+function resetBoardFlowCurves() { void loadBoardFlowCurves(true); void loadMarketFlowFeatures(); }
 async function loadRealtimeServices() {
   realtimeLoading.value = true; realtimeError.value = '';
   try {
@@ -558,8 +613,8 @@ function submitRelay() {
 onMounted(() => {
   mobileMediaQuery.addEventListener('change', syncMobileLayout); loadConfig().catch(() => {}); connectEvents(); loadResearch();
   void loadRealtimeServices(); realtimeTimer = window.setInterval(() => { void loadRealtimeServices(); }, 15_000);
-  void loadBoardFlowCurves(true); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining(); boardFlowTimer = window.setInterval(() => {
-    if (document.visibilityState === 'visible' && boardFlowIsExchangeToday.value) { void loadBoardFlowCurves(false); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining(); }
+  void loadBoardFlowCurves(true); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining(); boardFlowTimer = window.setInterval(() => {
+    if (document.visibilityState === 'visible' && boardFlowIsExchangeToday.value) { void loadBoardFlowCurves(false); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining(); }
   }, 60_000);
 });
 onBeforeUnmount(() => {
@@ -676,6 +731,47 @@ onBeforeUnmount(() => {
                 <el-col :md="4" :xs="12"><el-card shadow="never" class="metric-card"><span>本次回填完成</span><strong>{{ completedBackfillBoards }}</strong></el-card></el-col>
                 <el-col :md="4" :xs="12"><el-card shadow="never" class="metric-card"><span>板块报告时间</span><strong class="review-metric">{{ closeBoardReport ? dateText(closeBoardReport.observed_at) : '待保存' }}</strong></el-card></el-col>
               </el-row>
+              <el-card shadow="never" class="board-flow-card">
+                <template #header><div class="card-header"><div><span>市场量能与资金状态</span><small class="realtime-refresh-time">分钟东财板块流、腾讯全A量能与盘后Tushare资金流分层保存；当前只进入研究证据，不影响飞书策略阈值。</small></div><el-tag :type="marketFlowStateType(marketFlowLatest?.market_state)">{{ marketFlowStateLabel(marketFlowLatest?.market_state) }}</el-tag></div></template>
+                <el-alert v-if="marketFlowError" :title="`量能资金特征读取失败：${marketFlowError}`" type="error" :closable="false" show-icon/>
+                <template v-else>
+                  <el-row :gutter="12">
+                    <el-col :md="4" :xs="12"><el-statistic title="概念覆盖" :value="marketFlowLatest?.concept_count ?? 0"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="流入广度%" :value="marketFlowLatest?.concept_positive_ratio == null ? 0 : Math.round(Number(marketFlowLatest.concept_positive_ratio) * 1000) / 10"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="5分钟变化pct" :value="marketFlowLatest?.five_minute_positive_ratio_delta == null ? 0 : Math.round(Number(marketFlowLatest.five_minute_positive_ratio_delta) * 1000) / 10"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="日内漂移pct" :value="marketFlowLatest?.session_positive_ratio_delta == null ? 0 : Math.round(Number(marketFlowLatest.session_positive_ratio_delta) * 1000) / 10"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="成交额变化%" :value="marketFlowLatest?.amount_change_pct ?? 0"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="成交量变化%" :value="marketFlowLatest?.volume_change_pct ?? 0"/></el-col>
+                  </el-row>
+                  <el-space wrap class="section-gap"><el-tag :type="marketFlowLatest?.status === 'ready' ? 'success' : 'warning'">{{ marketFlowLatest?.status ?? '等待采样' }}</el-tag><el-tag v-for="flag in marketFlowLatest?.quality_flags ?? []" :key="flag" type="warning" size="small">{{ flag }}</el-tag><el-tag type="info">晋级门禁 {{ marketFlow.research_gate?.minimum_trading_days ?? 60 }}日 / {{ marketFlow.research_gate?.minimum_independent_events ?? 200 }}事件</el-tag></el-space>
+                  <el-empty v-if="!marketFlow.items.length" description="所选日期尚无量能资金特征；原始板块曲线仍可单独查看" :image-size="54"/>
+                  <v-chart v-else :option="marketFlowChartOption" autoresize class="market-flow-state-chart"/>
+                  <el-table v-if="marketFlow.daily?.length" :data="marketFlow.daily" max-height="220" size="small" class="section-gap">
+                    <el-table-column prop="exchange_date" label="交易日" width="105"/>
+                    <el-table-column label="状态" width="105"><template #default="{ row }"><el-tag size="small" :type="marketFlowStateType(row.market_state)">{{ marketFlowStateLabel(row.market_state) }}</el-tag></template></el-table-column>
+                    <el-table-column label="上涨广度" width="95"><template #default="{ row }">{{ row.advancer_ratio == null ? '-' : `${(Number(row.advancer_ratio) * 100).toFixed(1)}%` }}</template></el-table-column>
+                    <el-table-column label="板块流入广度" width="110"><template #default="{ row }">{{ row.concept_positive_ratio == null ? '-' : `${(Number(row.concept_positive_ratio) * 100).toFixed(1)}%` }}</template></el-table-column>
+                    <el-table-column label="成交额变化" width="100"><template #default="{ row }">{{ row.amount_change_pct == null ? '-' : `${Number(row.amount_change_pct).toFixed(1)}%` }}</template></el-table-column>
+                    <el-table-column label="成交量变化" width="100"><template #default="{ row }">{{ row.volume_change_pct == null ? '-' : `${Number(row.volume_change_pct).toFixed(1)}%` }}</template></el-table-column>
+                    <el-table-column label="质量" min-width="180"><template #default="{ row }"><el-space wrap><el-tag v-for="flag in row.quality_flags ?? []" :key="flag" size="small" type="warning">{{ flag }}</el-tag></el-space></template></el-table-column>
+                  </el-table>
+                  <el-divider content-position="left">跨日板块资金迁移与龙虎榜联动 Top20</el-divider>
+                  <el-empty v-if="!marketFlowSectorHighlights.length" description="该日尚无收盘同花顺资金流特征；缺失不会补零" :image-size="48"/>
+                  <el-table v-else :data="marketFlowSectorHighlights" max-height="340" size="small">
+                    <el-table-column prop="label" label="概念板块" min-width="145"/>
+                    <el-table-column label="迁移" width="105"><template #default="{ row }"><el-tag size="small" :type="sectorFlowTransitionType(row.transition)">{{ sectorFlowTransitionLabel(row.transition) }}</el-tag></template></el-table-column>
+                    <el-table-column label="当日净流" width="105"><template #default="{ row }">{{ displayValue(row.net_amount) }}</template></el-table-column>
+                    <el-table-column label="较前日变化" width="110"><template #default="{ row }">{{ displayValue(row.net_change_amount) }}</template></el-table-column>
+                    <el-table-column label="连续方向" width="88"><template #default="{ row }">{{ row.flow_sign_streak > 0 ? `流入${row.flow_sign_streak}日` : row.flow_sign_streak < 0 ? `流出${Math.abs(row.flow_sign_streak)}日` : '-' }}</template></el-table-column>
+                    <el-table-column label="板块涨跌" width="90"><template #default="{ row }">{{ row.change_pct == null ? '-' : `${Number(row.change_pct).toFixed(2)}%` }}</template></el-table-column>
+                    <el-table-column prop="lhb_stock_count" label="龙虎榜股" width="82"/>
+                    <el-table-column label="龙虎净买" width="105"><template #default="{ row }">{{ displayValue(row.lhb_net_amount) }}</template></el-table-column>
+                    <el-table-column prop="limit_up_count" label="涨停数" width="72"/>
+                    <el-table-column label="证据" width="135"><template #default="{ row }"><el-tag size="small" type="info">{{ row.provider_key }}</el-tag></template></el-table-column>
+                  </el-table>
+                  <el-text type="info" class="review-note">{{ marketFlow.notice }}</el-text>
+                </template>
+              </el-card>
               <el-card shadow="never" class="board-flow-card" v-loading="boardFlowLoading">
                 <template #header><div class="card-header"><div><span>盘中板块资金分钟曲线</span><small class="realtime-refresh-time">每 60 秒自动增量刷新并检测轮动；红/绿突出当前净流入/净流出各前 10，其余板块仍完整显示。完整 Top10 快报另按五分钟节流。</small></div><el-space wrap><el-date-picker v-model="boardFlowDate" type="date" value-format="YYYY-MM-DD" size="small" class="board-flow-date" @change="resetBoardFlowCurves"/><el-radio-group v-model="boardFlowTaxonomy" size="small" @change="resetBoardFlowCurves"><el-radio-button value="industry">行业</el-radio-button><el-radio-button value="concept">概念</el-radio-button></el-radio-group><el-button :icon="Refresh" size="small" @click="loadBoardFlowCurves(false)">增量刷新</el-button></el-space></div></template>
                 <el-alert v-if="boardFlowError" :title="`板块曲线读取失败：${boardFlowError}`" type="error" :closable="false" show-icon/>
@@ -685,7 +781,7 @@ onBeforeUnmount(() => {
                   <v-chart v-else :option="boardFlowChartOption" autoresize class="board-flow-chart"/>
                   <el-text type="info" class="review-note">{{ boardFlowNotice || '时间轴以 Asia/Shanghai 交易所时钟生成；缺失分钟沿用最近真实值，悬浮时会标记为补点。' }}</el-text>
                   <el-divider content-position="left">一分钟资金轮动事件</el-divider>
-                  <el-alert title="每 60 秒比较相邻同源快照：同类板块资金变化进入前 5%、变化不少于 2 亿元且当前净流绝对值不少于 1 亿元时入队；流出转流入、流入转流出和单向急剧加速均需下一分钟方向保持，才推送飞书。" type="info" :closable="false" show-icon/>
+                  <el-alert title="每 60 秒比较相邻同源快照：同类板块资金变化进入前 5%、变化不少于 2 亿元且当前净流绝对值不少于 1 亿元时入队；流出转流入、流入转流出和单向急剧加速均需下一分钟方向保持。事件只进入前端研究证据，不发送飞书。" type="info" :closable="false" show-icon/>
                   <el-empty v-if="!boardRotationEvents.length" description="本交易日尚无满足阈值的板块轮动事件" :image-size="52" class="section-gap"/>
                   <el-table v-else :data="boardRotationEvents" max-height="300" size="small" class="section-gap">
                     <el-table-column label="观测时间" width="132"><template #default="{ row }">{{ chinaDateTime(row.last_observed_at) }}</template></el-table-column>
@@ -693,7 +789,7 @@ onBeforeUnmount(() => {
                     <el-table-column label="轮动" width="105"><template #default="{ row }"><el-tag size="small" :type="row.direction === 'inflow' ? 'success' : 'danger'">{{ boardRotationKind(row) }}</el-tag></template></el-table-column>
                     <el-table-column label="一分钟净流变化" width="130"><template #default="{ row }">{{ Number(row.conditions?.previous_net_inflow ?? 0).toFixed(2) }} → {{ Number(row.conditions?.current_net_inflow ?? 0).toFixed(2) }} 亿</template></el-table-column>
                     <el-table-column label="状态" width="122"><template #default="{ row }"><el-tag size="small" :type="boardRotationStateType(row.state)">{{ boardRotationStateText(row.state) }}</el-tag></template></el-table-column>
-                    <el-table-column label="飞书" width="112"><template #default="{ row }"><el-tag size="small" :type="row.delivery_status === 'sent' ? 'success' : row.delivery_status === 'failed' ? 'danger' : 'info'">{{ boardRotationDeliveryText(row) }}</el-tag></template></el-table-column>
+                    <el-table-column label="通知范围" width="120"><template #default="{ row }"><el-tag size="small" type="info">{{ boardRotationDeliveryText(row) }}</el-tag></template></el-table-column>
                   </el-table>
                 </template>
               </el-card>

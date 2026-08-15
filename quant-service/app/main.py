@@ -109,6 +109,11 @@ from .free_market_providers import (
 )
 from .order_book_features import aggregate_order_book_observations, order_book_observation
 from .market_snapshots import snapshot_status, summarize_quotes
+from .market_flow_repository import (
+    persist_intraday_market_flow_feature,
+    persist_market_snapshot_flow_feature,
+    rebuild_stored_market_flow_features,
+)
 from .intraday_alerts import daily_strategy_summary_text, delivery_health_recovery_text, intraday_alert_text
 from .board_rotation import board_rotation_candidates, board_rotation_still_directional
 from .board_stock_mining import board_stock_mining_candidates
@@ -224,6 +229,7 @@ from .routers.intraday_outcome_reads import build_intraday_outcome_reads_router
 from .routers.sector_reads import build_sector_reads_router
 from .routers.intraday_evidence_reads import build_intraday_evidence_reads_router
 from .routers.market_result_reads import build_market_result_reads_router
+from .routers.market_flow_reads import build_market_flow_reads_router
 from .routers.provider_actions import ProviderActionDependencies, build_provider_actions_router
 from .routers.market_actions import MarketActionDependencies, build_market_actions_router
 from .routers.intraday_actions import IntradayActionDependencies, build_intraday_actions_router
@@ -255,6 +261,7 @@ from .request_models import (
     IntradaySectorReportRequest,
     IntradayWatchlistRequest,
     MarketSnapshotRequest,
+    MarketFlowFeatureRebuildRequest,
     MarketUniverseSyncRequest,
     MinuteSessionCaptureRequest,
     OfflineMinuteImportRequest,
@@ -4418,6 +4425,9 @@ async def capture_intraday_board_flow_curve() -> dict[str, Any]:
                 (snapshot_minute, observed_at, status, Json(coverage), Json(source_status), Json(payload)),
             )
     await run_database_blocking(persist_snapshot)
+    market_flow_feature = await run_database_blocking(
+        persist_intraday_market_flow_feature, db, snapshot_minute, observed_at,
+    )
     rotation_events = await run_database_blocking(
         evaluate_intraday_board_rotation_events, snapshot_minute, observed_at,
     )
@@ -4431,6 +4441,7 @@ async def capture_intraday_board_flow_curve() -> dict[str, Any]:
     ]
     return {"status": status, "observed_at": observed_at.isoformat(), "snapshot_minute": snapshot_minute.isoformat(),
             "coverage": coverage, "items": len(items), "circuit_skips": circuit_skips, "capacity_blocks": capacity_blocks,
+            "market_flow_feature": market_flow_feature,
             "rotation": {"confirmed": len(rotation_events), "deliveries": rotation_deliveries, "retry": retry_summary},
             "latency_ms": round((asyncio.get_running_loop().time() - started_at) * 1000)}
 
@@ -6329,10 +6340,15 @@ def finalize_market_snapshot(
             (snapshot_key, request.session, exchange_date, observed_at, request.universe_key, len(symbols), len(quotes),
              Decimal(str(round(coverage, 6))), status, decision_eligible, Json(source_summary), Json(summary), Json(sorted(set(flags)))),
         )
+        market_flow_feature = persist_market_snapshot_flow_feature(
+            connection, session=request.session, exchange_date=exchange_date,
+            observed_at=observed_at, summary=summary,
+        )
     return {"status": status, "session": request.session, "exchange_date": str(exchange_date), "observed_at": observed_at,
             "universe_key": request.universe_key, "universe_count": len(symbols), "quote_count": len(quotes),
             "coverage": round(coverage, 6), "decision_eligible": decision_eligible, "summary": summary,
-            "source_summary": source_summary, "quality_flags": sorted(set(flags))}
+            "source_summary": source_summary, "quality_flags": sorted(set(flags)),
+            "market_flow_feature": market_flow_feature}
 
 
 async def build_market_snapshot(request: MarketSnapshotRequest) -> dict[str, Any]:
@@ -6642,6 +6658,9 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
         "akshare_supplements": akshare_stage,
         "ths_industry_flow": lambda: sync_ths_industry_moneyflow(SectorFlowSyncRequest(trade_date=trade_date, provider="super")),
         "ths_concept_flow_and_limit_strength": lambda: sync_ths_concept_signals(SectorFlowSyncRequest(trade_date=trade_date, provider="super")),
+        "market_flow_features": lambda: run_database_blocking(
+            rebuild_stored_market_flow_features, db, trade_date, trade_date, timeout_seconds=90,
+        ),
         "limit_ladder": lambda: refresh_strategy_pattern_sources(trade_date),
         "limit_lift_pattern_mining": lambda: run_strategy_pattern_mining(StrategyPatternMiningRequest(as_of_date=trade_date, refresh_limit_sources=False)),
         "core_daily_controls": lambda: {"status": "skipped"},
@@ -6662,7 +6681,7 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
         actions=actions, stage_order=(
             "stale_fetch_runs", "analyst_text", "all_a_universe", "full_market_daily", "index_context",
             "close_market_snapshot", "akshare_supplements", "ths_industry_flow", "ths_concept_flow_and_limit_strength",
-            "limit_ladder", "limit_lift_pattern_mining", "core_daily_controls", "cninfo_announcements",
+            "market_flow_features", "limit_ladder", "limit_lift_pattern_mining", "core_daily_controls", "cninfo_announcements",
             "board_review", "close_strategy_decision", "close_review", "analyst_outcomes", "analyst_scorecards",
             "analyst_expert_research", "post_close_strategy", "research_snapshot",
         ), timeout_overrides={"akshare_supplements": 240.0, "limit_lift_pattern_mining": 120.0},
@@ -7426,6 +7445,7 @@ app.include_router(build_board_rotation_reads_router(db))
 app.include_router(build_board_stock_mining_reads_router(db))
 app.include_router(build_limit_linkage_mining_reads_router(db))
 app.include_router(build_board_curve_reads_router(db, intraday_board_curve_retention_days, intraday_board_rotation_retention_days))
+app.include_router(build_market_flow_reads_router(db))
 app.include_router(build_research_catalog_reads_router(db, async_db))
 app.include_router(build_intraday_outcome_reads_router(
     db, intraday_point_in_time_market_context_batch, intraday_signal_attribution, intraday_outcome_attribution_summary,
@@ -8420,12 +8440,23 @@ async def sync_cninfo_events_endpoint(payload: AnnouncementSyncRequest) -> dict[
     return await sync_cninfo_announcements(payload)
 
 
+async def rebuild_market_flow_features_endpoint(payload: MarketFlowFeatureRebuildRequest) -> dict[str, Any]:
+    return await run_database_blocking(
+        rebuild_stored_market_flow_features,
+        db,
+        payload.start_date,
+        payload.end_date,
+        timeout_seconds=90,
+    )
+
+
 app.include_router(build_market_actions_router(MarketActionDependencies(
     import_bars=import_bars,
     sync_universe=sync_market_universe_endpoint,
     sync_full_daily=sync_full_market_daily_endpoint,
     post_close_refresh=post_close_refresh_endpoint,
     sync_announcements=sync_cninfo_events_endpoint,
+    rebuild_market_flow_features=rebuild_market_flow_features_endpoint,
 )))
 
 

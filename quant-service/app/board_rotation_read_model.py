@@ -22,5 +22,5 @@ def latest_board_rotation_events(database: Any, limit: int = 30) -> dict[str, An
         ).fetchall()
     return {
         "items": [dict(row) for row in rows],
-        "notice": "仅为已保存的东财相邻分钟资金流证据；confirmed 表示已通过下一分钟方向确认，alerted 表示飞书回执成功。",
+        "notice": "仅为已保存的东财相邻分钟资金流证据；confirmed 表示已通过下一分钟方向确认。板块挖掘只进入前端研究台，不发送飞书。",
     }

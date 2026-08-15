@@ -55,9 +55,12 @@ CREATE TABLE IF NOT EXISTS quant.market_events (
     body text,
     url text,
     content_sha256 text UNIQUE,
+    event_identity_key text,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS market_events_symbol_time_idx ON quant.market_events(symbol, available_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS market_events_identity_unique_idx
+    ON quant.market_events(event_identity_key) WHERE event_identity_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS quant.analyst_signals (
     signal_id uuid PRIMARY KEY,
@@ -627,6 +630,72 @@ CREATE TABLE IF NOT EXISTS quant.market_snapshot_runs (
 );
 CREATE INDEX IF NOT EXISTS market_snapshot_runs_time_idx
     ON quant.market_snapshot_runs(exchange_date DESC, session, observed_at DESC);
+
+-- Derived market-flow states preserve the raw/source boundary: minute rows are
+-- based on Eastmoney board breadth, while midday/close rows add the separately
+-- labelled Tencent whole-market amount/volume snapshot.  They remain research
+-- evidence and never mutate live strategy thresholds.
+CREATE TABLE IF NOT EXISTS quant.market_flow_feature_snapshots (
+    feature_key text PRIMARY KEY,
+    exchange_date date NOT NULL,
+    cadence text NOT NULL CHECK (cadence IN ('minute','midday','close')),
+    observed_at timestamptz NOT NULL,
+    source_snapshot_minute timestamptz,
+    status text NOT NULL CHECK (status IN ('ready','partial','insufficient')),
+    market_state text NOT NULL,
+    concept_count integer NOT NULL DEFAULT 0 CHECK (concept_count >= 0),
+    concept_positive_ratio numeric,
+    concept_median_flow numeric,
+    concept_mean_change_pct numeric,
+    five_minute_positive_ratio_delta numeric,
+    session_positive_ratio_delta numeric,
+    afternoon_repair_strength numeric,
+    market_amount numeric,
+    market_volume numeric,
+    amount_change_pct numeric,
+    volume_change_pct numeric,
+    advancer_ratio numeric,
+    features jsonb NOT NULL DEFAULT '{}'::jsonb,
+    quality_flags jsonb NOT NULL DEFAULT '[]'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS market_flow_feature_time_idx
+    ON quant.market_flow_feature_snapshots(exchange_date DESC, cadence, observed_at DESC);
+
+-- Close-only THS sector migration is kept separate from Eastmoney's minute
+-- curve. LHB/limit counts use exact point-in-time THS membership and are
+-- descriptive research evidence only.
+CREATE TABLE IF NOT EXISTS quant.sector_flow_daily_features (
+    taxonomy_key text NOT NULL,
+    sector_key text NOT NULL,
+    trading_date date NOT NULL,
+    provider_key text NOT NULL REFERENCES quant.providers(provider_key) ON DELETE RESTRICT,
+    available_at timestamptz NOT NULL,
+    status text NOT NULL CHECK (status IN ('ready','partial','insufficient')),
+    transition text NOT NULL,
+    net_amount numeric,
+    previous_net_amount numeric,
+    net_change_amount numeric,
+    net_acceleration numeric,
+    rank_percentile numeric,
+    flow_sign_streak integer NOT NULL DEFAULT 0,
+    change_pct numeric,
+    price_flow_divergence text,
+    lhb_stock_count integer NOT NULL DEFAULT 0,
+    lhb_net_amount numeric,
+    lhb_negative_count integer NOT NULL DEFAULT 0,
+    lhb_sell_pressure_ratio numeric,
+    limit_up_count integer NOT NULL DEFAULT 0,
+    features jsonb NOT NULL DEFAULT '{}'::jsonb,
+    quality_flags jsonb NOT NULL DEFAULT '[]'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY(taxonomy_key,sector_key,trading_date),
+    FOREIGN KEY(taxonomy_key,sector_key) REFERENCES quant.sectors(taxonomy_key,sector_key) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS sector_flow_daily_feature_rank_idx
+    ON quant.sector_flow_daily_features(trading_date DESC,rank_percentile DESC);
 
 -- Sector memberships are point-in-time and many-to-many. A concept board is
 -- not forced into an industry taxonomy, which keeps source semantics intact.

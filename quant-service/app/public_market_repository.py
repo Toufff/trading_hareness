@@ -14,11 +14,13 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
 
 from .analysis import as_utc
 from .daily_bar_repository import exchange_for
+from .market_flow_features import market_event_identity_key
 
 
 def persist_free_quote(database: Any, provider: str, symbol: str, quote: dict[str, Any] | None) -> int:
@@ -90,18 +92,38 @@ def persist_market_events(database: Any, provider: str, rows: list[dict[str, Any
             published_at = as_utc(datetime.fromisoformat(str(row["published_at"]))) if row.get("published_at") else datetime.now(timezone.utc)
             payload = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
             content_sha256 = hashlib.sha256(payload.encode()).hexdigest()
+            event_type = str(row.get("event_type") or "announcement")
+            occurred_date = published_at.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+            identity_key = market_event_identity_key(provider, event_type, symbol, occurred_date)
             connection.execute(
                 "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,%s) ON CONFLICT(symbol) DO NOTHING",
                 (symbol, exchange_for(symbol), provider),
             )
-            connection.execute(
-                """INSERT INTO quant.market_events(event_id,symbol,event_type,occurred_at,available_at,source,title,body,url,content_sha256)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT(content_sha256) DO UPDATE SET available_at=LEAST(quant.market_events.available_at,EXCLUDED.available_at),
-                     title=EXCLUDED.title,body=EXCLUDED.body,url=EXCLUDED.url""",
-                (uuid.uuid4(), symbol, str(row.get("event_type") or "announcement"), published_at, published_at,
-                 provider, title, json.dumps(row.get("raw") or row, ensure_ascii=False, default=str), url, content_sha256),
+            values = (
+                uuid.uuid4(), symbol, event_type, published_at, published_at, provider, title,
+                json.dumps(row.get("raw") or row, ensure_ascii=False, default=str), url, content_sha256, identity_key,
             )
+            if identity_key is not None:
+                connection.execute(
+                    """INSERT INTO quant.market_events(
+                           event_id,symbol,event_type,occurred_at,available_at,source,title,body,url,content_sha256,event_identity_key)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       ON CONFLICT(event_identity_key) WHERE event_identity_key IS NOT NULL DO UPDATE SET
+                         available_at=LEAST(quant.market_events.available_at,EXCLUDED.available_at),
+                         title=EXCLUDED.title,body=EXCLUDED.body,url=EXCLUDED.url,
+                         content_sha256=EXCLUDED.content_sha256""",
+                    values,
+                )
+            else:
+                connection.execute(
+                    """INSERT INTO quant.market_events(
+                           event_id,symbol,event_type,occurred_at,available_at,source,title,body,url,content_sha256,event_identity_key)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       ON CONFLICT(content_sha256) DO UPDATE SET
+                         available_at=LEAST(quant.market_events.available_at,EXCLUDED.available_at),
+                         title=EXCLUDED.title,body=EXCLUDED.body,url=EXCLUDED.url""",
+                    values,
+                )
             stored += 1
     return stored
 

@@ -49,6 +49,21 @@ class BarsImport(BaseModel):
     bars: list[DailyBar] = Field(min_length=1, max_length=10000)
 
 
+class MarketFlowFeatureRebuildRequest(BaseModel):
+    """Bounded local-evidence rebuild; it never authorizes provider history."""
+
+    start_date: date
+    end_date: date
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> "MarketFlowFeatureRebuildRequest":
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must not be before start_date")
+        if (self.end_date - self.start_date).days > 45:
+            raise ValueError("stored feature rebuild is capped at 45 calendar days")
+        return self
+
+
 class TushareSyncRequest(BaseModel):
     trade_date: date | None = None
     start_date: date | None = None
