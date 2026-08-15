@@ -53,6 +53,20 @@ def market_flow_features(
                 LIMIT 500""",
             (selected_date,),
         ).fetchall()
+        outcome_rows = connection.execute(
+            """SELECT transition,horizon_days,count(*) FILTER (WHERE status='matured') AS matured,
+                      avg(directional_return) FILTER (WHERE status='matured') AS avg_directional_return,
+                      avg(cross_section_excess_return) FILTER (WHERE status='matured') AS avg_excess_return,
+                      avg((directional_return>0)::int) FILTER (WHERE status='matured') AS directional_hit_rate
+                 FROM quant.sector_flow_daily_outcomes
+                GROUP BY transition,horizon_days
+                ORDER BY horizon_days,transition"""
+        ).fetchall()
+        readiness = connection.execute(
+            """SELECT (SELECT count(DISTINCT trading_date) FROM quant.sector_flow_daily_features) AS trading_days,
+                      count(DISTINCT (sector_key,signal_date)) FILTER (WHERE status='matured') AS matured_events
+                 FROM quant.sector_flow_daily_outcomes"""
+        ).fetchone()
     items = [dict(row) for row in rows]
     state_counts: dict[str, int] = {}
     for item in items:
@@ -65,9 +79,12 @@ def market_flow_features(
         "latest": items[-1] if items else None,
         "daily": [dict(row) for row in daily_rows],
         "sector_daily": [dict(row) for row in sector_rows],
+        "sector_outcome_summary": [dict(row) for row in outcome_rows],
         "state_counts": state_counts,
         "research_gate": {
-            "status": "accumulating",
+            "status": "eligible_for_review" if int(readiness["trading_days"] or 0) >= 60 and int(readiness["matured_events"] or 0) >= 200 else "accumulating",
+            "observed_trading_days": int(readiness["trading_days"] or 0),
+            "matured_independent_events": int(readiness["matured_events"] or 0),
             "minimum_trading_days": 60,
             "minimum_independent_events": 200,
             "live_strategy_effect": "none",

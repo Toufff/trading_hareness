@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.sector_flow_features import sector_flow_feature
+from app.sector_flow_features import sector_flow_feature, sector_flow_outcome
 
 
 class SectorFlowFeatureTests(unittest.TestCase):
@@ -28,6 +28,19 @@ class SectorFlowFeatureTests(unittest.TestCase):
         self.assertEqual(result["transition"], "reversal_out")
         self.assertEqual(result["price_flow_divergence"], "price_up_flow_out")
         self.assertIsNone(result["net_acceleration"])
+
+    def test_outcome_is_directional_and_cross_section_adjusted(self):
+        result = sector_flow_outcome(
+            "reversal_out", 100, 95, cross_section_median_return=-0.02,
+        )
+        self.assertEqual(result["status"], "matured")
+        self.assertAlmostEqual(result["raw_return"], -0.05)
+        self.assertAlmostEqual(result["excess_return"], -0.03)
+        self.assertAlmostEqual(result["directional_return"], 0.05)
+
+    def test_outcome_fails_closed_for_missing_price(self):
+        result = sector_flow_outcome("reversal_in", None, 101)
+        self.assertEqual(result["status"], "unavailable")
 
 
 if __name__ == "__main__":

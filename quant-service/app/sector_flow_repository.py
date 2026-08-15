@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, timedelta
+from statistics import median
 from typing import Any
 
 from psycopg.types.json import Json
 
-from .sector_flow_features import sector_flow_feature
+from .sector_flow_features import sector_flow_feature, sector_flow_outcome
 
 
 def _sign(value: Any) -> int:
@@ -147,11 +148,104 @@ def rebuild_sector_flow_daily_features(database: Any, start_date: date, end_date
                 )
                 stored += 1
                 transitions[feature["transition"]] = transitions.get(feature["transition"], 0) + 1
+    outcomes = materialize_sector_flow_daily_outcomes(database, end_date)
     return {
         "status": "completed", "start_date": str(start_date), "end_date": str(end_date),
         "stored": stored, "transition_counts": transitions, "source": "stored_evidence_only",
-        "provider_calls": 0, "decision_eligible": False,
+        "provider_calls": 0, "outcomes": outcomes, "decision_eligible": False,
     }
 
 
-__all__ = ["rebuild_sector_flow_daily_features"]
+def materialize_sector_flow_daily_outcomes(database: Any, as_of_date: date) -> dict[str, Any]:
+    """Settle 1/3/5-observation close responses using only stored daily rows."""
+    with database.transaction() as connection:
+        feature_rows = connection.execute(
+            """SELECT taxonomy_key,sector_key,trading_date,transition
+                 FROM quant.sector_flow_daily_features
+                WHERE taxonomy_key='ths_concept_flow' AND trading_date<=%s
+                ORDER BY sector_key,trading_date""",
+            (as_of_date,),
+        ).fetchall()
+        price_rows = connection.execute(
+            """SELECT DISTINCT ON(trading_date,sector_key) trading_date,sector_key,close,available_at
+                 FROM quant.sector_market_observations
+                WHERE taxonomy_key='ths_concept_flow' AND trading_date<=%s AND close>0
+                ORDER BY trading_date,sector_key,
+                         CASE provider_key WHEN 'tushare_super_sdk' THEN 0
+                                           WHEN 'tushare_super_get' THEN 1 ELSE 2 END,
+                         available_at DESC""",
+            (as_of_date,),
+        ).fetchall()
+    prices: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for raw in price_rows:
+        prices[str(raw["sector_key"])].append(dict(raw))
+    for rows in prices.values():
+        rows.sort(key=lambda row: row["trading_date"])
+    provisional: list[dict[str, Any]] = []
+    horizons = (1, 3, 5)
+    for raw in feature_rows:
+        feature = dict(raw)
+        series = prices.get(str(feature["sector_key"]), [])
+        position = next((index for index, row in enumerate(series) if row["trading_date"] == feature["trading_date"]), None)
+        for horizon in horizons:
+            item = {
+                **feature, "horizon_days": horizon, "entry_date": feature["trading_date"],
+                "entry_close": series[position]["close"] if position is not None else None,
+                "exit_date": None, "exit_close": None, "outcome_available_at": None,
+            }
+            if position is not None and position + horizon < len(series):
+                exit_row = series[position + horizon]
+                item.update(exit_date=exit_row["trading_date"], exit_close=exit_row["close"],
+                            outcome_available_at=exit_row["available_at"])
+                item.update(sector_flow_outcome(feature["transition"], item["entry_close"], item["exit_close"]))
+            elif position is None:
+                item.update(status="unavailable", raw_return=None, excess_return=None, directional_return=None,
+                            expected_direction=0)
+            else:
+                item.update(status="pending", raw_return=None, excess_return=None, directional_return=None,
+                            expected_direction=0)
+            provisional.append(item)
+    medians: dict[tuple[date, int], float] = {}
+    groups: dict[tuple[date, int], list[float]] = defaultdict(list)
+    for item in provisional:
+        if item["status"] == "matured" and item["raw_return"] is not None:
+            groups[(item["trading_date"], item["horizon_days"])].append(float(item["raw_return"]))
+    for key, values in groups.items():
+        medians[key] = median(values)
+    status_counts: dict[str, int] = {}
+    with database.transaction() as connection:
+        for item in provisional:
+            if item["status"] == "matured":
+                benchmark = medians.get((item["trading_date"], item["horizon_days"]))
+                evaluated = sector_flow_outcome(
+                    item["transition"], item["entry_close"], item["exit_close"],
+                    cross_section_median_return=benchmark,
+                )
+                item.update(evaluated)
+            connection.execute(
+                """INSERT INTO quant.sector_flow_daily_outcomes(
+                       taxonomy_key,sector_key,signal_date,horizon_days,transition,status,
+                       entry_date,exit_date,entry_close,exit_close,raw_return,cross_section_excess_return,
+                       directional_return,outcome_available_at,quality_flags)
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT(taxonomy_key,sector_key,signal_date,horizon_days) DO UPDATE SET
+                     transition=EXCLUDED.transition,status=EXCLUDED.status,entry_date=EXCLUDED.entry_date,
+                     exit_date=EXCLUDED.exit_date,entry_close=EXCLUDED.entry_close,exit_close=EXCLUDED.exit_close,
+                     raw_return=EXCLUDED.raw_return,cross_section_excess_return=EXCLUDED.cross_section_excess_return,
+                     directional_return=EXCLUDED.directional_return,
+                     outcome_available_at=EXCLUDED.outcome_available_at,quality_flags=EXCLUDED.quality_flags,
+                     updated_at=now()""",
+                (
+                    item["taxonomy_key"],item["sector_key"],item["trading_date"],item["horizon_days"],
+                    item["transition"],item["status"],item["entry_date"],item["exit_date"],item["entry_close"],
+                    item["exit_close"],item.get("raw_return"),item.get("excess_return"),
+                    item.get("directional_return"),item["outcome_available_at"],Json([]),
+                ),
+            )
+            status_counts[item["status"]] = status_counts.get(item["status"], 0) + 1
+    return {"status": "completed", "as_of_date": str(as_of_date), "rows": len(provisional),
+            "status_counts": status_counts, "horizons": list(horizons), "response_type": "close_to_later_close",
+            "decision_eligible": False}
+
+
+__all__ = ["rebuild_sector_flow_daily_features", "materialize_sector_flow_daily_outcomes"]

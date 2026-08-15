@@ -75,4 +75,29 @@ def sector_flow_feature(
     }
 
 
-__all__ = ["sector_flow_feature"]
+def sector_flow_outcome(
+    transition: str,
+    entry_close: Any,
+    exit_close: Any,
+    *,
+    cross_section_median_return: float | None = None,
+) -> dict[str, Any]:
+    """Evaluate a saved close state after a later close; never an entry fill."""
+    entry = _number(entry_close)
+    exit_value = _number(exit_close)
+    if entry is None or exit_value is None or entry <= 0:
+        return {"status": "unavailable", "raw_return": None, "excess_return": None, "directional_return": None}
+    raw_return = exit_value / entry - 1.0
+    direction = 1 if transition in {"reversal_in", "acceleration_in", "persistent_in"} else -1 if transition in {
+        "reversal_out", "acceleration_out", "persistent_out",
+    } else 0
+    return {
+        "status": "matured",
+        "raw_return": raw_return,
+        "excess_return": raw_return - cross_section_median_return if cross_section_median_return is not None else None,
+        "directional_return": raw_return * direction if direction else None,
+        "expected_direction": direction,
+    }
+
+
+__all__ = ["sector_flow_feature", "sector_flow_outcome"]
