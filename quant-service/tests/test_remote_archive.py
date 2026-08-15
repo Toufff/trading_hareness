@@ -1,6 +1,6 @@
 import unittest
 from datetime import date, datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from app.analyst_trade_actions import parse_anqiang_trade_actions
 from app.analyst_expert_research import EXPERT_DEFAULTS, HORIZONS, _clustered_mean, _cn_date, _herding_effective_sample, _pearson, _softmax_weights
@@ -8,7 +8,8 @@ from app.analyst_skill_models import PROMPT_VARIANTS, _variant_payload
 from app.analyst_promotion import analyst_live_promotion
 from app.remote_archive import (analyst_global_sync_cursor, classify_remote_text, evidence_fragments, explicitness, extract_topics, horizon_days,
                                 is_market_opinion, labels, normalize_topic_key, parse_optional_timestamp,
-                                report_topic_labels, text_hash, text_only_remote_message, text_only_remote_report)
+                                report_topic_labels, text_hash, text_only_remote_message, text_only_remote_report,
+                                body_stated_timestamp, import_remote_analyst_message)
 from app.analyst_observations import observation_action, observation_status
 from app.remote_archive_sync import RemoteArchiveSyncService
 from app.claim_review_service import review_claim
@@ -65,6 +66,59 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         self.assertNotIn("https://", normalized["content"])
         self.assertEqual(parse_optional_timestamp(normalized["received_at"]), parse_optional_timestamp(normalized["strategy_available_at"]))
         self.assertEqual(normalized["stated_at"], "2026-08-12T09:29:00+08:00")
+
+    def test_message_resync_hydrates_missing_source_time_without_rewriting_availability(self):
+        """A later remote metadata upgrade may enrich an unchanged message.
+
+        It is deliberately limited to provenance: ``received_at`` remains the
+        sole live-strategy timestamp even when a source publication time is
+        later discovered.
+        """
+        message = {
+            "message_id": "m" * 64, "analyst_id": "anqiang-touzi-riji", "source_item_id": "post-1",
+            "source_message_id": "upstream-1", "received_at": "2026-08-12T09:31:00+08:00",
+            "strategy_available_at": "2026-08-12T09:31:00+08:00", "published_at": "2026-08-12T09:30:00+08:00",
+            "stated_at": "2026-08-12T09:29:30+08:00", "stated_precision": "second",
+            "time_evidence": {"source": "upstream_message", "time_text": "09:29:30"}, "type": "text",
+            "content": "云南锗业持股", "version": "0.3.22", "content_hash": "h" * 64,
+        }
+        connection = MagicMock()
+
+        def execute(sql, *_args):
+            result = MagicMock()
+            if "SELECT content_hash,received_at" in sql:
+                result.fetchone.return_value = {"content_hash": "h" * 64,
+                                                  "received_at": datetime(2026, 8, 12, 1, 31, tzinfo=timezone.utc)}
+            elif "INSERT INTO quant.analyst_evidence" in sql:
+                result.fetchone.return_value = {"evidence_id": "evidence-1"}
+            return result
+
+        connection.execute.side_effect = execute
+        database = MagicMock()
+        database.transaction.return_value.__enter__.return_value = connection
+        with patch("app.remote_archive._materialize_message_claims", return_value=0), \
+             patch("app.remote_archive.persist_extraction_run", return_value="run-1"), \
+             patch("app.remote_archive.persist_observations_for_evidence", return_value=0), \
+             patch("app.remote_archive.sync_anqiang_message_trade_actions", return_value=0), \
+             patch("app.remote_archive.rebuild_analyst_skill_profile"):
+            result = import_remote_analyst_message(database, message)
+
+        self.assertEqual(result["strategy_available_at"], "2026-08-12T01:31:00+00:00")
+        upsert_sql = next(call.args[0] for call in connection.execute.call_args_list
+                          if "INSERT INTO quant.remote_analyst_messages" in call.args[0])
+        self.assertIn("source_published_at=COALESCE", upsert_sql)
+        self.assertIn("stated_at=COALESCE", upsert_sql)
+        self.assertNotIn("strategy_available_at=EXCLUDED", upsert_sql)
+
+    def test_dated_body_timestamp_is_author_replay_time_only(self):
+        received = datetime(2026, 8, 14, 2, 49, 59, tzinfo=timezone.utc)
+        parsed = body_stated_timestamp("8-14 09:50:26\n云南锗业持股", received_at=received)
+        self.assertIsNotNone(parsed)
+        stated_at, precision, evidence = parsed
+        self.assertEqual(stated_at, datetime(2026, 8, 14, 1, 50, 26, tzinfo=timezone.utc))
+        self.assertEqual(precision, "second")
+        self.assertEqual(evidence["usage"], "author_time_replay_only")
+        self.assertIsNone(body_stated_timestamp("09:50:26 云南锗业持股", received_at=received))
 
     def test_labels_accept_remote_string_and_object_forms(self):
         self.assertEqual(labels(["白酒", {"name": "半导体"}, {"label": "白酒"}, ""]), ["白酒", "半导体"])

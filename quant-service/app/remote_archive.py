@@ -40,6 +40,15 @@ REMOTE_MESSAGE_TEXT_FIELDS = (
     "type", "content", "source_ref", "version", "content_hash",
 )
 
+# Some source adapters preserve the original bot timestamp in the first text
+# line but, on older archive versions, did not emit it as ``stated_at``.  The
+# timestamp is only accepted when it includes a calendar date; a bare "10:30"
+# in prose is not sufficiently unambiguous to turn into a replay timestamp.
+_MESSAGE_BODY_TIMESTAMP = re.compile(
+    r"(?m)^\s*(?:(?P<year>20\d{2})[-/.])?(?P<month>\d{1,2})-(?P<day>\d{1,2})\s+"
+    r"(?P<hour>[01]?\d|2[0-3]):(?P<minute>[0-5]\d)(?::(?P<second>[0-5]\d))?\b"
+)
+
 
 def strip_media_references(value: str) -> str:
     """Keep extracted prose while removing remote media and transcript links.
@@ -119,6 +128,36 @@ def parse_optional_timestamp(value: Any) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+def body_stated_timestamp(value: str, *, received_at: datetime) -> tuple[datetime, str, dict[str, Any]] | None:
+    """Recover a source-preserved message timestamp for author-time replay.
+
+    This is deliberately *not* a strategy-availability fallback.  The caller
+    keeps ``received_at`` immutable for live policy, while this value feeds the
+    separately labelled author-timestamp evaluation ledger.  Remote structured
+    ``stated_at`` still takes precedence whenever supplied.
+    """
+    match = _MESSAGE_BODY_TIMESTAMP.search(value)
+    if match is None:
+        return None
+    local_received = received_at.astimezone(ZoneInfo("Asia/Shanghai"))
+    try:
+        stated = datetime(
+            int(match.group("year") or local_received.year), int(match.group("month")), int(match.group("day")),
+            int(match.group("hour")), int(match.group("minute")), int(match.group("second") or 0),
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ).astimezone(timezone.utc)
+    except ValueError:
+        return None
+    raw = match.group(0).strip()
+    precision = "second" if match.group("second") is not None else "minute"
+    return stated, precision, {
+        "source": "remote_content_timestamp",
+        "time_text": raw,
+        "parser": "remote-message-body-time-v1",
+        "usage": "author_time_replay_only",
+    }
 
 
 def text_hash(value: str) -> str:
@@ -342,6 +381,15 @@ def import_remote_analyst_message(db: Database, message: dict[str, Any]) -> dict
     if stated_precision not in (None, "minute", "second"):
         raise ValueError("remote message has an invalid stated_precision")
     body = str(message.get("content") or "")
+    time_evidence = dict(message.get("time_evidence") or {})
+    # Structured remote timestamps take precedence.  Legacy records can carry
+    # a dated event timestamp in their text body; retain it only as author-time
+    # replay evidence, never as the live strategy availability time.
+    if stated_at is None:
+        recovered = body_stated_timestamp(body, received_at=received_at)
+        if recovered is not None:
+            stated_at, stated_precision, recovered_evidence = recovered
+            time_evidence = {**recovered_evidence, **time_evidence}
     with db.transaction() as connection:
         previous = connection.execute("SELECT content_hash,received_at FROM quant.remote_analyst_messages WHERE remote_message_id=%s", (message_id,)).fetchone()
         if previous is not None and previous["received_at"] != received_at:
@@ -352,13 +400,29 @@ def import_remote_analyst_message(db: Database, message: dict[str, Any]) -> dict
             connection.execute("INSERT INTO quant.remote_analyst_message_versions(remote_message_id,remote_version,content_hash,payload) VALUES(%s,%s,%s,%s) ON CONFLICT(remote_message_id,remote_version,content_hash) DO UPDATE SET last_seen_at=now(),payload=EXCLUDED.payload",
                                (message_id, version, content_hash, Json(message)))
             return {"status": "versioned_replay_only", "remote_message_id": message_id, "evidence": 0, "claims": 0}
+        # The remote archive can add source timestamp evidence after an older
+        # client has first imported a message (for example, after a source
+        # adapter learns the upstream message id or publish time).  Preserve
+        # the immutable receipt/strategy time, but hydrate previously-missing
+        # provenance fields on a later identical-content sync.  In particular
+        # this must never backdate ``strategy_available_at``: source author
+        # time is usable for a separate replay ledger, not for live signals.
         connection.execute(
             """INSERT INTO quant.remote_analyst_messages(remote_message_id,remote_analyst_id,source_item_id,source_message_id,source_entry_id,source_type,source_ref,
                    content,content_hash,remote_version,received_at,strategy_available_at,source_published_at,source_edited_at,stated_at,stated_precision,time_evidence,payload,synced_at)
-               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now()) ON CONFLICT(remote_message_id) DO UPDATE SET synced_at=now()""",
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now()) ON CONFLICT(remote_message_id) DO UPDATE SET
+                   synced_at=now(),
+                   source_message_id=COALESCE(quant.remote_analyst_messages.source_message_id, EXCLUDED.source_message_id),
+                   source_entry_id=COALESCE(quant.remote_analyst_messages.source_entry_id, EXCLUDED.source_entry_id),
+                   source_published_at=COALESCE(quant.remote_analyst_messages.source_published_at, EXCLUDED.source_published_at),
+                   source_edited_at=COALESCE(quant.remote_analyst_messages.source_edited_at, EXCLUDED.source_edited_at),
+                   stated_at=COALESCE(quant.remote_analyst_messages.stated_at, EXCLUDED.stated_at),
+                   stated_precision=COALESCE(quant.remote_analyst_messages.stated_precision, EXCLUDED.stated_precision),
+                   time_evidence=quant.remote_analyst_messages.time_evidence || EXCLUDED.time_evidence,
+                   payload=EXCLUDED.payload""",
             (message_id, analyst_id, source_item_id, message.get("source_message_id"), message.get("source_entry_id"), source_type,
              str(message.get("source_ref") or ""), body, content_hash, version, received_at, received_at, published_at, edited_at,
-             stated_at, stated_precision, Json(message.get("time_evidence") or {}), Json(message)),
+             stated_at, stated_precision, Json(time_evidence), Json(message)),
         )
         connection.execute("INSERT INTO quant.remote_analyst_message_versions(remote_message_id,remote_version,content_hash,payload) VALUES(%s,%s,%s,%s) ON CONFLICT(remote_message_id,remote_version,content_hash) DO UPDATE SET last_seen_at=now(),payload=EXCLUDED.payload",
                            (message_id, version, content_hash, Json(message)))
@@ -368,7 +432,7 @@ def import_remote_analyst_message(db: Database, message: dict[str, Any]) -> dict
                DO UPDATE SET available_at=EXCLUDED.available_at RETURNING evidence_id""",
             (message_id, body, Json({"source_type": source_type, "source_ref": str(message.get("source_ref") or ""),
                                      "stated_at": stated_at.isoformat() if stated_at else None,
-                                     "time_evidence": message.get("time_evidence") or {}}), text_hash(body), received_at),
+                                     "time_evidence": time_evidence}), text_hash(body), received_at),
         ).fetchone()
         claims = _materialize_message_claims(connection, evidence_id=evidence["evidence_id"], analyst_id=analyst_id,
                                              message_id=message_id, body=body, published_at=published_at, available_at=received_at)
