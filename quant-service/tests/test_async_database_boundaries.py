@@ -14,6 +14,7 @@ from app.async_strategy_read_repository import latest_strategy_decision
 from app.async_strategy_health_repository import latest_strategy_health
 from app.async_research_catalog_read_repository import factor_registry as async_factor_registry
 from app.async_market_result_read_repository import market_snapshots as async_market_snapshots
+from app.async_intraday_outcome_read_repository import latest_intraday_outcomes as async_latest_intraday_outcomes
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -219,6 +220,46 @@ class BlockingExecutorBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_intraday_outcome_projection_uses_native_async_connection(self) -> None:
+        observed_at = __import__("datetime").datetime(2026, 8, 14, 2, 0, tzinfo=__import__("datetime").timezone.utc)
+
+        class Result:
+            def __init__(self, rows): self.rows = rows
+            async def fetchall(self): return self.rows
+
+        class Connection:
+            def __init__(self): self.calls = []
+            async def execute(self, sql, _params=()):
+                self.calls.append(sql)
+                if "JOIN quant.intraday_signal_events" in sql:
+                    return Result([{
+                        "signal_event_id": "event-1", "symbol": "000001.SZ", "signal_key": "entry-v1",
+                        "signal_type": "entry", "observed_at": observed_at, "conditions": {}, "evidence": {},
+                    }])
+                if "FROM quant.intraday_board_reports" in sql:
+                    return Result([])
+                return Result([{"horizon_key": "30m", "status": "matured", "rows": 1}])
+
+        class Transaction:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Transaction(self.connection)
+
+        database = Database()
+        payload = await async_latest_intraday_outcomes(
+            database, 1000,
+            market_context_from_board_report_fn=lambda *_args: {"status": "available"},
+            attribution_fn=lambda *_args: {"stage": "generic"},
+            attribution_summary_fn=lambda _rows: {"items": [], "validation_gate": {"status": "accumulating"}},
+        )
+        self.assertEqual(payload["items"][0]["attribution"]["stage"], "generic")
+        self.assertEqual(payload["summary"][0]["rows"], 1)
+        self.assertEqual(len(database.connection.calls), 3)
+
     async def test_catalog_and_market_result_projections_use_native_async_connection(self) -> None:
         class Result:
             def __init__(self, rows=None):
