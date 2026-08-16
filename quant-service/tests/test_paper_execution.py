@@ -3,6 +3,7 @@ from decimal import Decimal
 import unittest
 
 from app.paper_execution import estimate_cost, paper_tradability, round_lot, triple_barrier_label
+from app.ashare_reality import price_limit_state
 from app.paper_execution_service import configure_paper_account
 from app.strategy_ablation import ablation_scores
 from app.paper_portfolio import paper_risk_gate
@@ -49,6 +50,25 @@ class PaperExecutionTests(unittest.TestCase):
         costs = estimate_cost(side="sell", quantity=100, price=Decimal("10"))
         self.assertEqual(costs["notional"], Decimal("1000"))
         self.assertGreater(costs["total_cost"], Decimal("5"))
+
+    def test_board_and_st_limit_fallback_uses_the_correct_price_band(self):
+        self.assertTrue(paper_tradability(
+            side="buy", requested_quantity=100, symbol="300001.SZ", quote={"pct_change": 20.0, "price": 10},
+        ).allowed is False)
+        self.assertTrue(paper_tradability(
+            side="buy", requested_quantity=100, symbol="300001.SZ", quote={"pct_change": 10.0, "price": 10},
+        ).allowed)
+        self.assertFalse(paper_tradability(
+            side="buy", requested_quantity=100, symbol="830001.BJ", quote={"pct_change": 30.0, "price": 10},
+        ).allowed)
+        self.assertFalse(paper_tradability(
+            side="buy", requested_quantity=100, symbol="600001.SH", quote={"pct_change": 5.0, "price": 10, "is_st": True},
+        ).allowed)
+
+    def test_exact_limit_price_precedes_percent_fallback(self):
+        state = price_limit_state(symbol="300001.SZ", quote={"price": 12, "pct_change": 10, "limit_up": 12, "limit_down": 8})
+        self.assertTrue(state["at_limit_up"])
+        self.assertFalse(state["at_limit_down"])
 
     def test_triple_barrier_is_point_in_time_and_matures(self):
         start = datetime(2026, 8, 14, 1, 30, tzinfo=timezone.utc)

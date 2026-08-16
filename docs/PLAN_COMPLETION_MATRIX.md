@@ -43,7 +43,7 @@
 | 3–5 年日线、复权、停牌、涨跌停、退市点时成员 | 暂停 | 用户授权范围、provider 预算和存储预算 |
 | 历史分钟回放 | 暂停 | 本地离线分钟文件或明确回填授权；策略必须复用 live `SignalSpec` |
 | 本地已录制信号事件生命周期 replay | 已完成（非价格回测） | `/api/v1/strategies/intraday/replay-recorded-events` 只读 `intraday_signal_events`；按 availability 时钟写入幂等 `input_hash`/`trace_hash`，不请求 provider、不拉历史、不拟合阈值、不生成订单 |
-| T+1/涨跌停/停牌/费用/滑点回放撮合 | 研究中 | P2 数据先就绪，再跑事件时钟回放 |
+| T+1/涨跌停/停牌/费用/滑点回放撮合 | 基础契约已完成，验证暂停 | `ashare_reality.py` 是实时风险、纸面成交和未来回放共用的整手、T+1、停牌、不同板块/ST 涨跌停、佣金/印花税/滑点及 non-fill 纯模型；尚无获授权历史路径，故不运行历史撮合或把它当策略验证 |
 | purged walk-forward、embargo、DSR/PBO | 暂停 | 至少 60 aligned days、200 独立成熟信号、每 cohort 30 条 |
 | 盘中阈值重校准 | 禁止启动 | P3 样本门禁通过且样本外胜出规则基线 |
 

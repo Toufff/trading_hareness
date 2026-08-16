@@ -7,66 +7,47 @@ fill simulation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from typing import Any, Iterable
 
 from psycopg.types.json import Json
 
 from .episode_lifecycle import strategy_family
+from .ashare_reality import (
+    AshareTradability,
+    DEFAULT_COMMISSION_RATE,
+    DEFAULT_SLIPPAGE_BPS,
+    DEFAULT_STAMP_TAX_RATE,
+    LOT_SIZE,
+    assess_tradability,
+    estimate_trade_cost,
+    round_board_lot,
+)
 
-
-LOT_SIZE = 100
-DEFAULT_COMMISSION_RATE = Decimal("0.0003")
-DEFAULT_STAMP_TAX_RATE = Decimal("0.001")
-DEFAULT_SLIPPAGE_BPS = Decimal("5")
-
-
-@dataclass(frozen=True)
-class PaperTradability:
-    allowed: bool
-    reasons: tuple[str, ...] = ()
+# Backward-compatible name for callers that imported the paper-only type.
+PaperTradability = AshareTradability
 
 
 def round_lot(quantity: int | float | Decimal, lot_size: int = LOT_SIZE) -> int:
-    value = Decimal(str(quantity or 0))
-    return int((value / lot_size).to_integral_value(rounding=ROUND_DOWN) * lot_size)
+    return round_board_lot(quantity, lot_size)
 
 
 def paper_tradability(*, side: str, requested_quantity: int, quote: dict[str, Any] | None,
-                      position: dict[str, Any] | None = None) -> PaperTradability:
-    quote = quote or {}
-    reasons: list[str] = []
-    if requested_quantity <= 0:
-        reasons.append("non_positive_quantity")
-    if quote.get("is_suspended"):
-        reasons.append("suspended")
-    if side == "sell" and int((position or {}).get("sellable_quantity") or 0) < requested_quantity:
-        reasons.append("t_plus_one_or_insufficient_sellable_quantity")
-    pct = float(quote.get("pct_change") or 0)
-    if side == "buy" and bool(quote.get("at_limit_up")):
-        reasons.append("limit_up_non_fill_risk")
-    if side == "sell" and bool(quote.get("at_limit_down")):
-        reasons.append("limit_down_non_fill_risk")
-    # Explicit flags take precedence; percent is only a conservative fallback.
-    if side == "buy" and pct >= 9.8 and not quote.get("allow_limit_fill"):
-        reasons.append("limit_up_non_fill_risk")
-    if side == "sell" and pct <= -9.8 and not quote.get("allow_limit_fill"):
-        reasons.append("limit_down_non_fill_risk")
-    return PaperTradability(not reasons, tuple(dict.fromkeys(reasons)))
+                      position: dict[str, Any] | None = None, symbol: str | None = None) -> PaperTradability:
+    return assess_tradability(
+        side=side, requested_quantity=requested_quantity, quote=quote, position=position, symbol=symbol,
+    )
 
 
 def estimate_cost(*, side: str, quantity: int, price: Decimal | float,
                   commission_rate: Decimal = DEFAULT_COMMISSION_RATE,
                   stamp_tax_rate: Decimal = DEFAULT_STAMP_TAX_RATE,
                   slippage_bps: Decimal = DEFAULT_SLIPPAGE_BPS) -> dict[str, Decimal]:
-    notional = Decimal(str(price)) * Decimal(max(0, quantity))
-    commission = max(Decimal("5"), notional * commission_rate) if notional else Decimal("0")
-    stamp = notional * stamp_tax_rate if side.lower() == "sell" else Decimal("0")
-    slippage = notional * slippage_bps / Decimal("10000")
-    return {"notional": notional, "commission": commission, "stamp_tax": stamp, "slippage": slippage,
-            "total_cost": commission + stamp + slippage}
+    return estimate_trade_cost(
+        side=side, quantity=quantity, price=price, commission_rate=commission_rate,
+        stamp_tax_rate=stamp_tax_rate, slippage_bps=slippage_bps,
+    )
 
 
 def triple_barrier_label(path: Iterable[dict[str, Any]], *, entry_price: Decimal | float,

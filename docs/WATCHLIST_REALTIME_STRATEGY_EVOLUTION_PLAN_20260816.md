@@ -63,10 +63,10 @@ data_blocked -> observe -> setup -> confirming -> entry_watch
 
 验收：每个 entry 都有机器可判定 invalidation；每一类策略均可输出“不推进”的原因；新策略只写 evidence、episode 和 outcome，不进入 live 加分。
 
-### P2：确定性回放与 A 股现实模型（暂停，需历史数据授权）
+### P2：确定性回放与 A 股现实模型（回放暂停，需历史数据授权）
 
 1. 用已录制的行情事件建立虚拟交易时钟，不在回放时访问供应商；live 与 replay 调用同一策略纯函数。
-2. 收敛 `AshareRealityModel`：交易日历、午休、T+1、100 股整手、停牌、不同板块涨跌停、费用、滑点、不可成交。
+2. `AshareRealityModel` 基础契约已收敛至 `app/ashare_reality.py`：交易日历/午休继续使用既有时段规则，且 T+1、100 股整手、停牌、不同板块/ST 涨跌停、费用、滑点、不可成交已由实时风险与纸面成交共用；只缺获授权历史路径上的回放验证。
 3. 建立黄金交易日：信号、抑制、风险原因码、策略/概率版本均哈希比对。
 4. 用 point-in-time 观察池和板块成员消除选择偏差；不使用当天最终 VWAP、修订成分、收盘资金流或未来复权信息。
 

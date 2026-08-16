@@ -92,7 +92,10 @@ def accept_paper_decision(connection: Any, *, decision_id: Any, quantity: int,
         (decision["symbol"],),
     ).fetchone()
     position_dict = dict(position) if position else {"sellable_quantity": 0, "quantity": 0, "average_cost": 0}
-    tradability = paper_tradability(side=side, requested_quantity=requested, quote=quote or {}, position=position_dict)
+    tradability = paper_tradability(
+        side=side, requested_quantity=requested, quote=quote or {}, position=position_dict,
+        symbol=str(decision["symbol"]),
+    )
     account = connection.execute("SELECT account_key,cash FROM quant.paper_accounts WHERE account_key=%s FOR UPDATE", (account_key,)).fetchone()
     reasons = list(tradability.reasons)
     quote_price = _number((quote or {}).get("price"))
