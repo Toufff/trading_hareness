@@ -45,6 +45,7 @@ from app.runtime_resources import (
     DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
     bounded_memory_ratio,
     bounded_min_free_bytes,
+    bounded_storage_budget_bytes,
     research_storage_governance,
     runtime_resource_state,
 )
@@ -2468,6 +2469,20 @@ class ProviderHelperTests(unittest.TestCase):
     def test_runtime_resource_thresholds_are_bounded_and_explain_degradation(self):
         self.assertEqual(bounded_min_free_bytes("invalid"), 1024 ** 3)
         self.assertEqual(bounded_memory_ratio("2"), 0.98)
+        self.assertEqual(
+            bounded_storage_budget_bytes(
+                str(200 * 1024 ** 3), DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+                DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+            ),
+            DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+        )
+        self.assertEqual(
+            bounded_storage_budget_bytes(
+                str(40 * 1024 ** 3), DEFAULT_HOT_DATABASE_SOFT_BYTES,
+                DEFAULT_HOT_DATABASE_SOFT_BYTES,
+            ),
+            DEFAULT_HOT_DATABASE_SOFT_BYTES,
+        )
         state, reasons = runtime_resource_state(
             disk_free_bytes=10, min_free_bytes=100, rss_bytes=90, memory_limit_bytes=100, max_memory_ratio=0.85,
         )

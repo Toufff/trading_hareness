@@ -32,12 +32,19 @@ def bounded_memory_ratio(value: str | None) -> float:
         return 0.85
 
 
-def bounded_storage_budget_bytes(value: str | None, default: int) -> int:
-    """Read a bounded research-storage budget without accepting a tiny floor."""
+def bounded_storage_budget_bytes(value: str | None, default: int, maximum: int) -> int:
+    """Read a storage budget inside the operator-approved allocation.
+
+    A configuration value is an admission-control preference, not permission
+    to grow the research estate past its approved capacity.  In particular,
+    callers must pass the total or hot-database allocation as ``maximum`` so a
+    stale environment file cannot silently turn the 40 GiB plan into an
+    unbounded collection job.
+    """
     try:
-        return max(GIB, min(200 * GIB, int(value or default)))
+        return max(GIB, min(int(maximum), int(value or default)))
     except ValueError:
-        return default
+        return min(int(default), int(maximum))
 
 
 def bounded_storage_ratio(value: str | None, default: float) -> float:

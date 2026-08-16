@@ -406,9 +406,11 @@ def local_research_storage_governance(database: Database = db) -> dict[str, Any]
         artifact_bytes=managed_directory_bytes(data_dir),
         research_budget_bytes=bounded_storage_budget_bytes(
             os.getenv("QUANT_RESEARCH_STORAGE_SOFT_BYTES"), DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+            DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
         ),
         hot_database_budget_bytes=bounded_storage_budget_bytes(
             os.getenv("QUANT_HOT_DATABASE_SOFT_BYTES"), DEFAULT_HOT_DATABASE_SOFT_BYTES,
+            DEFAULT_HOT_DATABASE_SOFT_BYTES,
         ),
         warning_ratio=warning_ratio,
         stop_ratio=max(
