@@ -182,7 +182,7 @@ from .intraday_schedule import (
     intraday_watchlist_capacity,
 )
 from .intraday_monitor_service import run_intraday_monitor_loop
-from .intraday_fast_quote_service import run_intraday_fast_quote_loop
+from .intraday_fast_quote_service import cross_source_confirmation, run_intraday_fast_quote_loop
 from .study_realtime import _row_trade_date, _row_trade_datetime, looks_like_response_header, realtime_rows_are_current
 from .provider_health import (
     provider_error_availability,
@@ -3842,23 +3842,10 @@ def intraday_fast_quote_confirmation(quote: dict[str, Any] | None, fast_quote: d
     fresh material disagreement does, preventing a bad cross-source quote from
     reaching Feishu as a confirmed strategy alert.
     """
-    if not fast_quote:
-        return {"status": "missing", "max_age_seconds": max_age_seconds}
-    fast_observed_at = fast_quote.get("observed_at")
-    if not isinstance(fast_observed_at, datetime):
-        return {"status": "invalid", "max_age_seconds": max_age_seconds}
-    age_seconds = max(0.0, (observed_at - fast_observed_at).total_seconds())
-    fast_price = intraday_number(fast_quote.get("price"))
-    tencent_price = intraday_number((quote or {}).get("price"))
-    base = {"observed_at": fast_observed_at.isoformat(), "age_seconds": round(age_seconds, 2),
-            "max_age_seconds": max_age_seconds, "super_get_price": fast_price, "tencent_price": tencent_price}
-    if age_seconds > max_age_seconds:
-        return {**base, "status": "stale"}
-    if fast_price is None or fast_price <= 0 or tencent_price is None or tencent_price <= 0:
-        return {**base, "status": "invalid"}
-    gap_pct = ((fast_price / tencent_price) - 1) * 100
-    return {**base, "status": "confirmed" if abs(gap_pct) <= 0.8 else "mismatch",
-            "gap_pct": round(gap_pct, 4), "allowed_gap_pct": 0.8}
+    return cross_source_confirmation(
+        quote, fast_quote, observed_at, max_age_seconds,
+        number=intraday_number,
+    )
 
 
 async def latest_intraday_fast_quote_confirmations(symbols: list[str], quotes: dict[str, dict[str, Any]],

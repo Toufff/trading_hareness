@@ -2,14 +2,32 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import unittest
 
 from app.intraday_features import annotate_flow_snapshot_provenance, mapped_watchlist_peers
 from app.intraday_factor_contracts import contracts_for_signal
+from app.intraday_fast_quote_service import cross_source_confirmation
 from app.intraday_state_machine import classify_setup_state
 
 
 class MappedWatchlistPeerTests(unittest.TestCase):
+    def test_cross_source_confirmation_is_pure_and_fails_closed_for_bad_inputs(self) -> None:
+        observed_at = datetime(2026, 8, 14, 2, 0, tzinfo=timezone.utc)
+        number = lambda value: float(value) if value not in (None, "") else None
+        self.assertEqual(cross_source_confirmation(
+            {"price": "10.00"}, {"price": "10.05", "observed_at": observed_at}, observed_at,
+            number=number,
+        )["status"], "confirmed")
+        self.assertEqual(cross_source_confirmation(
+            {"price": "10.00"}, {"price": "10.90", "observed_at": observed_at}, observed_at,
+            number=number,
+        )["status"], "mismatch")
+        self.assertEqual(cross_source_confirmation(
+            {"price": "10.00"}, {"price": "10.00", "observed_at": "not-a-time"}, observed_at,
+            number=number,
+        )["status"], "invalid")
+
     def test_flow_provenance_applies_only_to_quotes_that_consume_public_flow(self) -> None:
         quotes = {
             "000001.SZ": {"main_net_inflow": 100},
