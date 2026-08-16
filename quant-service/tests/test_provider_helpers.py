@@ -12,7 +12,7 @@ import httpx
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app.main import ConceptMemberSyncRequest, DailyBar, EastmoneyBoardMemberSyncRequest, IntradayScanRequest, IntradaySectorReportRequest, MarketSnapshotRequest, OfflineMinuteImportRequest, SectorCatalogSyncRequest, StrategyPatternMiningRequest, TushareFetchRequest, UniverseUpdateRequest, annotate_intraday_flow_percentiles, baostock_code, build_market_snapshot, call_tushare_api, china_equity_session, china_futures_session, cn_today, eastmoney_member_symbol, historical_capacity_plan, intraday_board_curve_clock_session, intraday_board_display_slots, intraday_board_flow_curve_items, intraday_board_refresh_interval_seconds, intraday_board_rotation_retention_days, intraday_eac_acceptance_assessment, intraday_effective_scan_interval_seconds, intraday_fast_quote_confirmation, intraday_fast_quote_retention_days, intraday_high_frequency_window, intraday_minute_features, intraday_next_monitor_delay_seconds, intraday_next_realtime_validation_offset, intraday_outcome_attribution_summary, intraday_peer_context, intraday_point_in_time_market_context_batch, intraday_quote_from_tencent, intraday_runtime_service_state, intraday_sector_report, intraday_signal_attribution, intraday_signal_event_state, intraday_signal_rules, intraday_super_get_fast_interval_seconds, intraday_super_get_fast_max_in_flight, intraday_super_get_fast_max_symbols, legacy_schema_bootstrap_enabled, looks_like_response_header, market_snapshot_public_quote_settings, merge_intraday_sina_watch_quotes, merge_intraday_watch_quote_prices, normalize_tushare_rows, offline_minute_row, open_provider_capabilities, persist_ths_sector_members, provider_error_availability, provider_global_rate_limit_max_wait_seconds, post_close_strategy_retry_window, realtime_rows_are_current, record_provider_failure, record_provider_success, reserve_tushare_provider_request_slot, resolve_sync_symbols, resolve_sync_symbols_async, retry_pending_board_rotation_alerts, run_strategy_pattern_mining, sse_calendar_open_async, strategy_index_regime, strategy_intraday_candidates, strategy_market_regime, strategy_market_state, strategy_rank, technical_summary, tencent_snapshot_quotes, ths_concept_top_stocks, ths_taxonomy_key, write_access_allowed
+from app.main import ConceptMemberSyncRequest, DailyBar, EastmoneyBoardMemberSyncRequest, IntradayScanRequest, IntradaySectorReportRequest, MarketSnapshotRequest, OfflineMinuteImportRequest, SectorCatalogSyncRequest, StrategyPatternMiningRequest, TushareFetchRequest, UniverseUpdateRequest, annotate_intraday_flow_percentiles, baostock_code, build_market_snapshot, call_tushare_api, china_equity_session, china_futures_session, cn_today, eastmoney_member_symbol, historical_capacity_plan, intraday_board_curve_clock_session, intraday_board_display_slots, intraday_board_flow_curve_items, intraday_board_refresh_interval_seconds, intraday_board_rotation_retention_days, intraday_eac_acceptance_assessment, intraday_effective_scan_interval_seconds, intraday_fast_quote_confirmation, intraday_fast_quote_retention_days, intraday_high_frequency_window, intraday_minute_features, intraday_next_monitor_delay_seconds, intraday_next_realtime_validation_offset, intraday_outcome_attribution_summary, intraday_peer_context, intraday_point_in_time_market_context_batch, intraday_quote_exchange_time_status, intraday_quote_from_tencent, intraday_quote_observation_source, intraday_runtime_service_state, intraday_sector_report, intraday_signal_attribution, intraday_signal_event_state, intraday_signal_rules, intraday_super_get_fast_interval_seconds, intraday_super_get_fast_max_in_flight, intraday_super_get_fast_max_symbols, legacy_schema_bootstrap_enabled, looks_like_response_header, market_snapshot_public_quote_settings, merge_intraday_sina_watch_quotes, merge_intraday_watch_quote_prices, normalize_tushare_rows, offline_minute_row, open_provider_capabilities, persist_ths_sector_members, provider_error_availability, provider_global_rate_limit_max_wait_seconds, post_close_strategy_retry_window, realtime_rows_are_current, record_provider_failure, record_provider_success, reserve_tushare_provider_request_slot, resolve_sync_symbols, resolve_sync_symbols_async, retry_pending_board_rotation_alerts, run_strategy_pattern_mining, sse_calendar_open_async, strategy_index_regime, strategy_intraday_candidates, strategy_market_regime, strategy_market_state, strategy_rank, technical_summary, tencent_snapshot_quotes, ths_concept_top_stocks, ths_taxonomy_key, write_access_allowed
 from app.factor_lab import factor_at
 from app.market_rules import a_share_limit_ratio, is_st_security_name
 from app.intraday_alerts import daily_strategy_summary_text, delivery_health_recovery_text, intraday_alert_text
@@ -3427,18 +3427,53 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(merged["000001.SZ"]["price"], 10.2)
         self.assertEqual(merged["000001.SZ"]["main_net_inflow"], 123.0)
         self.assertEqual(merged["000001.SZ"]["price_source"], "tencent_batched_watch_quote")
+        self.assertEqual(intraday_quote_observation_source(merged["000001.SZ"]), "tencent_free")
+
+    def test_quote_exchange_timestamp_requires_one_current_shanghai_frame(self):
+        observed_at = datetime(2026, 8, 12, 5, 0, 10, tzinfo=timezone.utc)
+        self.assertEqual(intraday_quote_exchange_time_status(
+            {"price_trade_time": "20260812130000"}, observed_at, 20,
+        )["status"], "fresh")
+        self.assertEqual(intraday_quote_exchange_time_status(
+            {"price_trade_date": "2026-08-12", "price_trade_time": "12:59:00"}, observed_at, 20,
+        )["status"], "stale_timestamp")
+        self.assertEqual(intraday_quote_exchange_time_status({}, observed_at, 20)["status"], "missing_timestamp")
 
     def test_sina_watch_fallback_keeps_flow_fields_absent(self):
         merged = merge_intraday_sina_watch_quotes({}, [{"ts_code": "000001.SZ", "name": "平安银行", "close": 10.2, "pre_close": 10.0}])
         self.assertEqual(merged["000001.SZ"]["price"], 10.2)
         self.assertNotIn("main_net_inflow", merged["000001.SZ"])
         self.assertEqual(merged["000001.SZ"]["price_source"], "sina_batched_watch_quote")
+        self.assertEqual(intraday_quote_observation_source(merged["000001.SZ"]), "sina_free")
         watch = {"symbol": "000001.SZ", "entry_price": 10, "available_quantity": 0, "alert_on_entry": False, "alert_on_exit": True}
         quote = {"price": 9.8, "pct_change": -2, "volume_ratio": 2, "turnover_rate": 5, "main_net_inflow": -900, "main_flow_percentile": 0.0}
         self.assertEqual(intraday_signal_rules(watch, quote, {"price": 10})[0]["signal_key"], "000001.SZ:reduce:extreme_flow_sell")
         extension_watch = {"symbol": "002842.SZ", "entry_price": None, "available_quantity": 0, "alert_on_entry": True, "alert_on_exit": True}
         extension_quote = {"price": 40.89, "pct_change": 6.54, "volume_ratio": 1.45, "turnover_rate": 20.21, "main_net_inflow": 6850, "main_flow_percentile": 0.97108}
         self.assertEqual(intraday_signal_rules(extension_watch, extension_quote, {"price": 40.80})[0]["signal_key"], "002842.SZ:watch:price_extension")
+
+    def test_live_policy_keeps_sina_fallback_as_evidence_not_a_confirmed_alert(self):
+        from app.live_policy import live_policy_gate
+        result = live_policy_gate(
+            {"signal_type": "entry"}, {"available_quantity": 0},
+            {"price": 10, "price_source": "sina_batched_watch_quote"},
+            {"status": "completed", "trade_constraints": {}},
+            {"status": "available", "market_state": "mixed_or_neutral", "board_snapshot_age_seconds": 30},
+            {"status": "confirmed"},
+        )
+        self.assertFalse(result["allow_confirmation"])
+        self.assertIn("quote_source_not_decision_eligible", result["reason_codes"])
+
+    def test_live_policy_allows_current_tencent_watch_batch_after_other_gates_pass(self):
+        from app.live_policy import live_policy_gate
+        result = live_policy_gate(
+            {"signal_type": "entry"}, {"available_quantity": 0},
+            {"price": 10, "price_source": "tencent_batched_watch_quote", "price_freshness": {"status": "fresh"}},
+            {"status": "completed", "trade_constraints": {}},
+            {"status": "available", "market_state": "mixed_or_neutral", "board_snapshot_age_seconds": 30},
+            {"status": "confirmed"},
+        )
+        self.assertTrue(result["allow_confirmation"])
 
     def test_ths_concept_top_stocks_requires_exact_concept_code_membership(self):
         flows = [{"sector_key": "885001.TI", "label": "精确概念", "net_amount": 321, "change_pct": 2.1, "trading_date": date(2026, 8, 10)}]
@@ -3830,7 +3865,9 @@ class ProviderHelperTests(unittest.TestCase):
 
     def test_intraday_scan_does_not_claim_tencent_completed_when_no_watch_quote_matches(self):
         source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
-        self.assertIn('tencent_status = "completed" if matched_watch_quotes else "partial" if fresh_watch_rows or sina_watch_rows else "unavailable"', source)
+        self.assertIn('tencent_status = ("completed" if fresh_direct_watch_count == len(selected_symbols) else', source)
+        self.assertIn('"decision_eligible_watch_quote_symbols": fresh_direct_watch_count', source)
+        self.assertIn('"stale_or_unstamped_direct_watch_quote_symbols": direct_watch_count - fresh_direct_watch_count', source)
 
     def test_intraday_previous_quote_has_session_and_fifteen_second_freshness_bounds(self):
         source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
@@ -4111,7 +4148,7 @@ class ProviderHelperTests(unittest.TestCase):
     def test_live_policy_gate_blocks_new_entry_during_broad_risk_off(self):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
-            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10},
+            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10, "price_source": "tencent_batched_watch_quote"},
             {"status": "completed", "trade_constraints": {}},
             {"status": "available", "market_state": "broad_risk_off", "board_snapshot_age_seconds": 30},
             {"status": "confirmed"},
@@ -4122,7 +4159,7 @@ class ProviderHelperTests(unittest.TestCase):
     def test_live_policy_gate_blocks_entry_when_daily_or_board_context_is_not_usable(self):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
-            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10},
+            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10, "price_source": "tencent_batched_watch_quote"},
             {"status": "data_quality_blocked", "trade_constraints": {}},
             {"status": "missing", "market_state": "unknown"},
             {"status": "missing"},
@@ -4134,7 +4171,7 @@ class ProviderHelperTests(unittest.TestCase):
     def test_live_policy_gate_keeps_unsellable_hard_stop_as_risk_alert(self):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
-            {"signal_type": "exit"}, {"entry_price": 10, "available_quantity": 0}, {"price": 9},
+            {"signal_type": "exit"}, {"entry_price": 10, "available_quantity": 0}, {"price": 9, "price_source": "tencent_batched_watch_quote"},
             {"trade_constraints": {"limit_down": 8}}, {"market_state": "mixed_or_neutral"}, {"status": "confirmed"},
         )
         self.assertEqual(result["decision"], "risk_alert_only")
@@ -4143,7 +4180,7 @@ class ProviderHelperTests(unittest.TestCase):
     def test_live_policy_gate_blocks_entry_on_paper_portfolio_limit(self):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
-            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10},
+            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10, "price_source": "tencent_batched_watch_quote"},
             {"status": "completed", "trade_constraints": {}},
             {"status": "available", "market_state": "mixed_or_neutral", "board_snapshot_age_seconds": 30},
             {"status": "confirmed"},

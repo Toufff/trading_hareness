@@ -41,6 +41,19 @@ def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[
     if price is None or price <= 0:
         reasons.append("missing_live_price")
         flags.append("policy_data_unavailable")
+    # Sina and the cross-sectional Tencent snapshot remain valuable evidence,
+    # but only the same-scan Tencent watch batch has the explicit per-symbol
+    # freshness contract used by a human-facing confirmation.  Do not let a
+    # fallback silently become a decision source merely because it has a price.
+    quote_source = str((quote or {}).get("price_source") or "unknown")
+    quote_freshness = (quote or {}).get("price_freshness")
+    quote_freshness = quote_freshness if isinstance(quote_freshness, dict) else {}
+    if quote_source != "tencent_batched_watch_quote":
+        reasons.append("quote_source_not_decision_eligible")
+        flags.append("policy_quote_source_not_decision_eligible")
+    elif str(quote_freshness.get("status") or "missing_timestamp") != "fresh":
+        reasons.append("quote_source_timestamp_not_fresh")
+        flags.append("policy_quote_timestamp_not_fresh")
 
     market_state = str(market_context.get("market_state") or "unknown")
     board_age = _number(market_context.get("board_snapshot_age_seconds"))
@@ -98,6 +111,7 @@ def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[
         "risk_flags": flags,
         "market_state": market_state,
         "board_snapshot_age_seconds": board_age,
+        "quote_source": quote_source,
         "available_quantity": available_quantity,
         "portfolio_risk": portfolio,
         "scope": "P0 market/data/static-tradability plus paper-ledger concentration risk; no broker order",

@@ -2779,6 +2779,7 @@ def merge_intraday_watch_quote_prices(quotes: dict[str, dict[str, Any]], depth_r
         existing["pct_change"] = round((price / pre_close - 1) * 100, 5) if pre_close and pre_close > 0 else existing.get("pct_change")
         existing["price_source"] = "tencent_batched_watch_quote"
         existing["price_observed_from_depth"] = True
+        existing["price_trade_time"] = row.get("trade_time")
         existing["raw"] = {**(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}), "watch_quote": row}
         quotes[symbol] = existing
     return quotes
@@ -2795,9 +2796,59 @@ def merge_intraday_sina_watch_quotes(quotes: dict[str, dict[str, Any]], rows: li
         existing["price"] = price
         existing["pct_change"] = round((price / pre_close - 1) * 100, 5) if pre_close and pre_close > 0 else existing.get("pct_change")
         existing["price_source"] = "sina_batched_watch_quote"
+        existing["price_trade_date"] = row.get("trade_date")
+        existing["price_trade_time"] = row.get("trade_time")
         existing["raw"] = {**(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}), "sina_watch_quote": row}
         quotes[symbol] = existing
     return quotes
+
+
+def intraday_quote_observation_source(quote: dict[str, Any] | None) -> str:
+    """Return the actual provider used for one persisted watch-price frame.
+
+    The watch scan may use a same-request Tencent depth quote, an all-A
+    Tencent snapshot, or a Sina fallback.  They must never be stored under the
+    same provider label: a later return calculation or freshness review needs
+    to know exactly which source produced the price.
+    """
+    source = str((quote or {}).get("price_source") or "")
+    if source == "sina_batched_watch_quote":
+        return "sina_free"
+    if source in {"tencent_batched_watch_quote", "tencent_all_a_snapshot"}:
+        return "tencent_free"
+    return "unknown_realtime_source"
+
+
+def intraday_quote_exchange_time_status(quote: dict[str, Any] | None, observed_at: datetime,
+                                        max_age_seconds: float) -> dict[str, Any]:
+    """Classify an upstream quote timestamp against one Shanghai-clock SLO.
+
+    Tencent emits one compact ``YYYYmmddHHMMSS`` field in its watch-depth
+    adapter; Sina emits date/time separately.  Parsing is deliberately strict:
+    a missing or malformed source timestamp cannot masquerade as a freshly
+    fetched quote for an alert confirmation.
+    """
+    payload = quote or {}
+    compact = "".join(re.findall(r"\d", str(payload.get("price_trade_time") or "")))
+    date_part = "".join(re.findall(r"\d", str(payload.get("price_trade_date") or "")))
+    if len(compact) >= 14:
+        candidate = compact[:14]
+    elif len(date_part) == 8 and len(compact) >= 6:
+        candidate = f"{date_part}{compact[:6]}"
+    else:
+        return {"status": "missing_timestamp", "max_age_seconds": max_age_seconds}
+    try:
+        exchange_at = datetime.strptime(candidate, "%Y%m%d%H%M%S").replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    except ValueError:
+        return {"status": "invalid_timestamp", "max_age_seconds": max_age_seconds}
+    age_seconds = (observed_at - exchange_at.astimezone(timezone.utc)).total_seconds()
+    result = {"observed_trade_time": exchange_at.isoformat(), "age_seconds": round(age_seconds, 3),
+              "max_age_seconds": max_age_seconds}
+    if age_seconds < -5:
+        return {**result, "status": "future_timestamp"}
+    if age_seconds > max_age_seconds:
+        return {**result, "status": "stale_timestamp"}
+    return {**result, "status": "fresh"}
 
 
 def intraday_quote_from_tencent(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -2815,6 +2866,9 @@ def intraday_quote_from_tencent(row: dict[str, Any]) -> dict[str, Any] | None:
         "pct_change": intraday_number(row.get("zdf")), "volume_ratio": intraday_number(row.get("lb")),
         "turnover_rate": intraday_number(row.get("hsl")), "main_net_inflow": intraday_number(row.get("zljlr")),
         "turnover": intraday_number(row.get("turnover")), "raw": dict(row),
+        # This is a shared cross-sectional snapshot, not the dedicated batch
+        # quote that confirms an alert for one explicit watchlist symbol.
+        "price_source": "tencent_all_a_snapshot", "price_observed_from_depth": False,
     }
 
 
@@ -3975,7 +4029,15 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
     with db.transaction() as connection:
         local_trade_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
         roll_paper_positions_sellable(connection, trading_date=local_trade_date)
-        record_provider_success(connection, "tencent_free", "realtime_quote", len(tencent_rows), quote_latency_ms)
+        # This health capability describes the all-A cross-section.  Never
+        # record a timeout/empty snapshot as a successful Tencent full-market
+        # poll merely because a separate watch-price fallback kept the scan
+        # alive.
+        if tencent_rows:
+            record_provider_success(connection, "tencent_free", "realtime_quote", len(tencent_rows), quote_latency_ms)
+        else:
+            record_provider_failure(connection, "tencent_free", "realtime_quote",
+                                    "all-A Tencent snapshot unavailable during watch scan", quote_latency_ms)
         connection.execute(
             """INSERT INTO quant.intraday_scan_runs(scan_id,observed_at,status,requested_symbols,source_status,summary)
                VALUES(%s,%s,'completed',%s,%s,%s)""",
@@ -4043,20 +4105,24 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
         for watch in watches:
             symbol = str(watch["symbol"])
             quote = quotes.get(symbol)
+            quote_source_name = intraday_quote_observation_source(quote)
             previous = connection.execute(
                 """SELECT price,observed_at FROM quant.intraday_quote_observations
-                    WHERE symbol=%s AND source_name='tencent_free'
+                    WHERE symbol=%s AND source_name=%s
                       AND observed_at<%s AND observed_at>=%s
                     ORDER BY observed_at DESC LIMIT 1""",
-                (symbol, observed_at, max(session_start, observed_at - timedelta(seconds=15))),
+                (symbol, quote_source_name, observed_at, max(session_start, observed_at - timedelta(seconds=15))),
             ).fetchone()
             if quote:
+                quote_raw = dict(quote.get("raw") or {})
+                quote_raw["_observation_source"] = quote_source_name
+                quote_raw["_price_source"] = quote.get("price_source")
                 connection.execute(
                     """INSERT INTO quant.intraday_quote_observations(scan_id,symbol,observed_at,source_name,price,pct_change,volume_ratio,turnover_rate,main_net_inflow,raw)
-                       VALUES(%s,%s,%s,'tencent_free',%s,%s,%s,%s,%s,%s)""",
-                    (scan_id, symbol, observed_at, quote.get("price"), quote.get("pct_change"),
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (scan_id, symbol, observed_at, quote_source_name, quote.get("price"), quote.get("pct_change"),
                      quote.get("volume_ratio"), quote.get("turnover_rate"), quote.get("main_net_inflow"),
-                     Json(quote["raw"])),
+                     Json(strategy_json_safe(quote_raw))),
                 )
             daily_factors = watchlist_daily_factors(symbol, connection)
             minute_feature = (tushare_minutes.get(symbol) or {}).get("feature") or surge_features.get(symbol)
@@ -4331,6 +4397,11 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
     # cross-section is reused only for percentile normalization.
     merge_intraday_watch_quote_prices(quotes, fresh_watch_rows)
     merge_intraday_sina_watch_quotes(quotes, sina_watch_rows)
+    quote_timestamp_slo_seconds = 20.0 if intraday_high_frequency_window(observed_at) else 45.0
+    for quote in quotes.values():
+        quote["price_freshness"] = intraday_quote_exchange_time_status(
+            quote, observed_at, quote_timestamp_slo_seconds,
+        )
     surge_features, surge_source = await intraday_tencent_surge_context(watches, mapped_peers=mapped_peer_groups)
     surge_source["exact_watchlist_peer_mapping"] = {
         "status": "completed", "membership_rows": len(membership_rows),
@@ -4371,11 +4442,36 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
         status = str(item.get("status") or "unknown")
         fast_status_counts[status] = fast_status_counts.get(status, 0) + 1
     board_cache_evidence = await intraday_board_cache_evidence(observed_at)
-    matched_watch_quotes = sum(symbol in quotes for symbol in selected_symbols)
-    tencent_status = "completed" if matched_watch_quotes else "partial" if fresh_watch_rows or sina_watch_rows else "unavailable"
-    source_status = {"tencent": {"status": tencent_status, "rows": len(tencent_rows), "matched": matched_watch_quotes,
+    direct_watch_symbols = {
+        str(row.get("ts_code") or "") for row in fresh_watch_rows
+        if str(row.get("ts_code") or "") in selected_symbols
+    }
+    sina_watch_symbols = {
+        str(row.get("ts_code") or "") for row in sina_watch_rows
+        if str(row.get("ts_code") or "") in selected_symbols
+    }
+    all_a_watch_symbols = {
+        symbol for symbol in selected_symbols
+        if (quotes.get(symbol) or {}).get("price_source") == "tencent_all_a_snapshot"
+    }
+    direct_watch_count = len(direct_watch_symbols)
+    fresh_direct_watch_count = sum(
+        1 for symbol in direct_watch_symbols
+        if ((quotes.get(symbol) or {}).get("price_freshness") or {}).get("status") == "fresh"
+    )
+    tencent_status = ("completed" if fresh_direct_watch_count == len(selected_symbols) else
+                      "partial" if direct_watch_count or tencent_rows else "unavailable")
+    source_status = {"tencent": {"status": tencent_status, "rows": len(tencent_rows),
+                                         "matched": sum(symbol in quotes for symbol in selected_symbols),
                                          "all_a_snapshot": all_a_snapshot_status,
                                          "fresh_watch_quote_rows": len(fresh_watch_rows),
+                                         "fresh_watch_quote_symbols": direct_watch_count,
+                                         "decision_eligible_watch_quote_symbols": fresh_direct_watch_count,
+                                         "stale_or_unstamped_direct_watch_quote_symbols": direct_watch_count - fresh_direct_watch_count,
+                                         "quote_timestamp_slo_seconds": quote_timestamp_slo_seconds,
+                                         "all_a_only_watch_quote_symbols": len(all_a_watch_symbols),
+                                         "sina_fallback_watch_quote_symbols": len(sina_watch_symbols),
+                                         "missing_direct_watch_quote_symbols": len(selected_symbols) - direct_watch_count,
                                          "sina_watch_quote_rows": len(sina_watch_rows)},
                      "tencent_minute_context": surge_source,
                      "tushare_rt_min": {"requested": priority_symbols, "items": {symbol: item["source"] for symbol, item in tushare_minutes.items()}},
