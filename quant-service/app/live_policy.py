@@ -88,10 +88,16 @@ def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[
     # Exact ``stk_limit`` prices are authoritative when available. Public
     # intraday quotes often lack them, so use the same board/ST-aware fallback
     # as paper execution rather than silently applying a main-board-only rule.
+    limit_quote = dict(quote or {})
+    # A same-scan quote/raw payload may carry exact exchange limits.  Daily
+    # factors are only a backfill: never replace a present intraday exact
+    # value with ``None`` from a sparse daily row.
+    for key in ("limit_up", "limit_down", "is_st"):
+        if limit_quote.get(key) in (None, "") and constraints.get(key) not in (None, ""):
+            limit_quote[key] = constraints[key]
     limit_state = price_limit_state(
         symbol=str(watch.get("symbol") or (quote or {}).get("symbol") or ""),
-        quote={**(quote or {}), "is_st": constraints.get("is_st"),
-               "limit_up": constraints.get("limit_up"), "limit_down": constraints.get("limit_down")},
+        quote=limit_quote,
     )
     if entry_like and bool(limit_state["at_limit_up"]):
         reasons.append("limit_up_may_be_unbuyable")

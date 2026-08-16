@@ -4325,6 +4325,19 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertFalse(st_limit["allow_confirmation"])
         self.assertEqual(st_limit["price_limit_state"]["limit_ratio"], 0.05)
 
+    def test_live_policy_keeps_realtime_exact_limit_when_daily_constraint_is_missing(self):
+        from app.live_policy import live_policy_gate
+        result = live_policy_gate(
+            {"signal_type": "entry"}, {"symbol": "600001.SH", "available_quantity": 0},
+            {"price": 10.0, "limit_up": 10.0, "pct_change": 3.0,
+             "price_source": "tencent_batched_watch_quote", "price_freshness": {"status": "fresh"}},
+            {"status": "completed", "trade_constraints": {"is_st": False, "limit_up": None, "limit_down": None}},
+            {"status": "available", "market_state": "mixed_or_neutral", "board_snapshot_age_seconds": 30},
+            {"status": "confirmed"},
+        )
+        self.assertFalse(result["allow_confirmation"])
+        self.assertEqual(result["price_limit_state"]["limit_up"], 10.0)
+
     def test_live_policy_gate_blocks_entry_on_paper_portfolio_limit(self):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
