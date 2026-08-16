@@ -51,6 +51,11 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
                 self.assertEqual(client.post("/api/v1/market/bars/import", json={}).status_code, 401)
                 self.assertEqual(client.post("/api/v1/market/bars/import", json={}, headers={"X-Quant-Write-Key": "wrong"}).status_code, 401)
                 self.assertEqual(client.post("/api/v1/market/bars/import", json={}, headers={"X-Quant-Write-Key": "test-write-key"}).status_code, 422)
+                # New replay writes are protected by the identical app-wide
+                # gate.  An intentionally invalid payload proves passage with
+                # the valid key without invoking its DB-backed replay runner.
+                self.assertEqual(client.post("/api/v1/strategies/intraday/replay-recorded-inputs", json={"max_rows": 0}).status_code, 401)
+                self.assertEqual(client.post("/api/v1/strategies/intraday/replay-recorded-inputs", json={"max_rows": 0}, headers={"X-Quant-Write-Key": "test-write-key"}).status_code, 422)
         finally:
             app.router.lifespan_context = original_lifespan
             if previous is None:
