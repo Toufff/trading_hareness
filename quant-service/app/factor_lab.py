@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from .market_rules import a_share_limit_ratio
 from .research_prices import adjusted_value
+from .universe_history import point_in_time_membership_predicate
 
 
 FACTOR_DIRECTIONS = {
@@ -25,6 +26,17 @@ FACTOR_DIRECTIONS = {
     "volume_ratio_20d": 1.0,
     "intraday_strength": 1.0,
 }
+
+# The public factor routes use ``factor_sql_lab`` where ranks and windows stay
+# in PostgreSQL.  This older, pure-Python evaluator is retained for small
+# parity checks only; materialising an all-A history as Python dictionaries can
+# exhaust the API worker before it can return an honest ``insufficient``
+# result.
+MAX_LEGACY_UNIVERSE_SYMBOLS = 250
+
+
+class LegacyFactorEngineLimitError(ValueError):
+    """Raised before the compatibility evaluator can exhaust worker memory."""
 
 
 def value(raw: Any) -> float | None:
@@ -89,16 +101,45 @@ def max_drawdown(equity: list[float]) -> float:
     return result
 
 
-def load_universe_bars(connection: Any, universe_key: str, end_date: date) -> dict[str, list[dict[str, Any]]]:
+def load_universe_bars(connection: Any, universe_key: str, start_date: date, end_date: date) -> dict[str, list[dict[str, Any]]]:
+    """Load only the factor window, never every canonical bar before ``end_date``.
+
+    The compatibility evaluator computes at most a 20-trading-day lookback,
+    so a 120-calendar-day warmup safely covers holidays without materializing
+    multi-year full-market history in the API process.  The SQL evaluator is
+    the preferred production research path; this bound keeps the legacy
+    helper safe for small diagnostics and parity tests.
+    """
+    warmup_start = start_date - timedelta(days=120)
+    membership_count = connection.execute(
+        """SELECT count(DISTINCT membership.symbol)::int AS count
+             FROM quant.universe_membership_history membership
+            WHERE membership.universe_key=%s
+              AND membership.effective_from<=%s
+              AND (membership.effective_to IS NULL OR membership.effective_to>=%s)""",
+        (universe_key, end_date, warmup_start),
+    ).fetchone()
+    symbol_count = int((membership_count or {}).get("count") or 0)
+    if symbol_count > MAX_LEGACY_UNIVERSE_SYMBOLS:
+        raise LegacyFactorEngineLimitError(
+            f"legacy factor engine is limited to {MAX_LEGACY_UNIVERSE_SYMBOLS} symbols; "
+            "use the bounded SQL factor engine for a broad universe"
+        )
+
+    membership_predicate = point_in_time_membership_predicate("membership", "b")
     rows = connection.execute(
         """SELECT b.symbol,b.trading_date,b.open,b.high,b.low,b.close,b.pre_close,b.volume,b.adj_factor,b.is_suspended,b.limit_up,b.limit_down,
                   i.is_st
            FROM quant.canonical_bars_daily b
-           JOIN quant.universe_members u ON u.symbol=b.symbol
+           JOIN quant.universe_membership_history membership
+             ON membership.universe_key=%s AND membership.symbol=b.symbol
+            AND """ + membership_predicate + """
            JOIN quant.instruments i ON i.symbol=b.symbol
-           WHERE u.universe_key=%s AND u.enabled AND b.trading_date<=%s
+           WHERE b.trading_date BETWEEN %s AND %s
+             AND (i.list_date IS NULL OR i.list_date<=b.trading_date)
+             AND (i.delist_date IS NULL OR i.delist_date>=b.trading_date)
            ORDER BY b.symbol,b.trading_date""",
-        (universe_key, end_date),
+        (universe_key, warmup_start, end_date),
     ).fetchall()
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -147,8 +188,9 @@ def factor_at(bars: list[dict[str, Any]], index: int, factor_key: str) -> float 
     return None
 
 
-def historical_factor_panel(connection: Any, universe_key: str, end_date: date, factor_keys: list[str]) -> tuple[dict[date, dict[str, dict[str, float]]], dict[str, list[dict[str, Any]]]]:
-    bars_by_symbol = load_universe_bars(connection, universe_key, end_date)
+def historical_factor_panel(connection: Any, universe_key: str, start_date: date, end_date: date,
+                            factor_keys: list[str]) -> tuple[dict[date, dict[str, dict[str, float]]], dict[str, list[dict[str, Any]]]]:
+    bars_by_symbol = load_universe_bars(connection, universe_key, start_date, end_date)
     panel: dict[date, dict[str, dict[str, float]]] = defaultdict(dict)
     for symbol, bars in bars_by_symbol.items():
         for index, bar in enumerate(bars):
@@ -158,7 +200,7 @@ def historical_factor_panel(connection: Any, universe_key: str, end_date: date, 
 
 
 def evaluate_factor(connection: Any, factor_key: str, universe_key: str, start_date: date, end_date: date, horizon_days: int) -> dict[str, Any]:
-    panel, bars_by_symbol = historical_factor_panel(connection, universe_key, end_date, [factor_key])
+    panel, bars_by_symbol = historical_factor_panel(connection, universe_key, start_date, end_date, [factor_key])
     index_by_date = {symbol: {row["trading_date"]: index for index, row in enumerate(bars)} for symbol, bars in bars_by_symbol.items()}
     daily_ic: list[float] = []
     daily_ic_points: list[dict[str, Any]] = []
@@ -212,7 +254,7 @@ def run_multi_factor_strategy(connection: Any, universe_key: str, start_date: da
     hold_days = max(1, int(parameters.get("hold_days", 5)))
     top_n = max(1, int(parameters.get("top_n", 20)))
     total_cost_bps = max(0.0, float(parameters.get("total_cost_bps", 18.0)))
-    panel, bars_by_symbol = historical_factor_panel(connection, universe_key, end_date, factor_keys)
+    panel, bars_by_symbol = historical_factor_panel(connection, universe_key, start_date, end_date, factor_keys)
     index_by_date = {symbol: {row["trading_date"]: index for index, row in enumerate(bars)} for symbol, bars in bars_by_symbol.items()}
     curve: list[dict[str, Any]] = []
     trades: list[dict[str, Any]] = []

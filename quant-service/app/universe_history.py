@@ -64,11 +64,16 @@ def sync_universe_membership_history(
     }
 
 
-def point_in_time_membership_predicate(alias: str = "membership") -> str:
-    """Return the shared ordered-date interval predicate for repository SQL."""
+def point_in_time_membership_predicate(alias: str = "membership", bar_alias: str = "bar") -> str:
+    """Return the shared ordered-date interval predicate for repository SQL.
+
+    Repository queries use both ``bar`` and the shorter ``b`` alias.  Make the
+    bar alias explicit rather than duplicating a subtly different temporal
+    predicate in each evaluator.
+    """
     return (
-        f"{alias}.effective_from<=bar.trading_date AND "
-        f"({alias}.effective_to IS NULL OR {alias}.effective_to>=bar.trading_date)"
+        f"{alias}.effective_from<={bar_alias}.trading_date AND "
+        f"({alias}.effective_to IS NULL OR {alias}.effective_to>={bar_alias}.trading_date)"
     )
 
 

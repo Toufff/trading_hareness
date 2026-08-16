@@ -144,6 +144,8 @@ def prepare_factor_panel(connection: Any, universe_key: str, start_date: date, e
                  LEFT JOIN quant.daily_fundamentals fundamental
                    ON fundamental.symbol=bar.symbol AND fundamental.trading_date=bar.trading_date
                 WHERE bar.adj_factor>0 AND bar.close>0
+                  AND (instrument.list_date IS NULL OR instrument.list_date<=bar.trading_date)
+                  AND (instrument.delist_date IS NULL OR instrument.delist_date>=bar.trading_date)
            ), returns AS (
                SELECT source.*,
                       CASE WHEN trading_index-lag(trading_index) OVER(PARTITION BY symbol ORDER BY trading_date)=1

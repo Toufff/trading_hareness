@@ -4,10 +4,17 @@ import unittest
 from datetime import date
 from unittest.mock import MagicMock
 
-from app.universe_history import sync_universe_membership_history
+from app.universe_history import point_in_time_membership_predicate, sync_universe_membership_history
 
 
 class UniverseHistoryTests(unittest.TestCase):
+    def test_point_in_time_predicate_accepts_repository_bar_alias(self):
+        self.assertEqual(
+            point_in_time_membership_predicate("membership", "b"),
+            "membership.effective_from<=b.trading_date AND "
+            "(membership.effective_to IS NULL OR membership.effective_to>=b.trading_date)",
+        )
+
     def test_sync_closes_missing_and_opens_new_members(self):
         connection = MagicMock()
         connection.execute.side_effect = [MagicMock(rowcount=1), MagicMock(rowcount=2), MagicMock(rowcount=3)]

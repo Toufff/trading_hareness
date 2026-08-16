@@ -65,6 +65,8 @@ class FactorSqlLabTests(unittest.TestCase):
         create_sql = next(sql for sql, _ in connection.calls if "CREATE TEMP TABLE factor_sql_panel" in sql)
         self.assertIn("quant.universe_membership_history", create_sql)
         self.assertNotIn("quant.universe_members u", create_sql)
+        self.assertIn("instrument.list_date IS NULL OR instrument.list_date<=bar.trading_date", create_sql)
+        self.assertIn("instrument.delist_date IS NULL OR instrument.delist_date>=bar.trading_date", create_sql)
         self.assertIn("trading_index-index_20d_ago=20", create_sql)
         self.assertIn("bar.close*bar.adj_factor", create_sql)
 
