@@ -171,6 +171,7 @@ from .intraday_schedule import (
     intraday_super_get_fast_interval_seconds,
     intraday_super_get_fast_max_in_flight,
     intraday_super_get_fast_max_symbols,
+    intraday_watchlist_capacity,
 )
 from .study_realtime import _row_trade_date, _row_trade_datetime, looks_like_response_header, realtime_rows_are_current
 from .provider_health import (
@@ -4246,11 +4247,24 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
         with db.transaction() as connection:
             if request.symbols:
                 return connection.execute("SELECT * FROM quant.intraday_watchlists WHERE enabled AND symbol=ANY(%s) ORDER BY symbol", (request.symbols,)).fetchall()
-            return connection.execute("SELECT * FROM quant.intraday_watchlists WHERE enabled ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT 40").fetchall()
+            # Fetch one extra row only to detect overflow.  It is unsafe to
+            # quietly scan the first 40 while presenting the result as a full
+            # watchlist decision.
+            return connection.execute("SELECT * FROM quant.intraday_watchlists WHERE enabled ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT 41").fetchall()
     rows = await run_database_blocking(load_watches)
     watches = [dict(row) for row in rows]
     selected_symbols = [str(row["symbol"]) for row in watches]
     scan_id = uuid.uuid4()
+    capacity = intraday_watchlist_capacity(len(watches))
+    if capacity["blocked"]:
+        await run_database_blocking(
+            persist_intraday_scan_terminal, db, scan_id, observed_at, "blocked", request.symbols,
+            {"watchlist_capacity": capacity}, {"watched": len(watches)},
+        )
+        return finish({
+            "status": "blocked", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(),
+            "reason": capacity["reason"], "watchlist_capacity": capacity, "alerts": [],
+        })
     if not active:
         await run_database_blocking(
             persist_intraday_scan_terminal, db, scan_id, observed_at, "blocked", request.symbols,

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
+INTRADAY_WATCHLIST_MAX_SYMBOLS = 40
 
 
 def intraday_scan_interval_seconds() -> int:
@@ -29,6 +30,22 @@ def intraday_effective_scan_interval_seconds(normal_interval_seconds: int, now: 
     if normal_interval_seconds <= 0:
         return 0
     return 10 if intraday_high_frequency_window(now) else normal_interval_seconds
+
+
+def intraday_watchlist_capacity(symbol_count: int, *, max_symbols: int = INTRADAY_WATCHLIST_MAX_SYMBOLS) -> dict[str, int | bool | str]:
+    """Fail closed rather than silently scanning only a prefix of a watchlist."""
+    requested = max(0, int(symbol_count))
+    capacity = max(1, int(max_symbols))
+    blocked = requested > capacity
+    return {
+        "requested_symbols": requested,
+        "max_symbols": capacity,
+        "blocked": blocked,
+        "reason": (
+            f"enabled watchlist exceeds the audited {capacity}-symbol realtime coverage cap"
+            if blocked else "within audited realtime coverage cap"
+        ),
+    }
 
 
 def intraday_next_realtime_validation_offset(current_offset: int, step: int, slots: int = 20) -> int:
