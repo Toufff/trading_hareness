@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from app.annual_daily_backfill import (
     CORE_DAILY_SPECS,
     SECTOR_EVENT_SPECS,
+    _persist_sector_flow,
     request_key,
     valid_rows,
     validate_range,
@@ -47,6 +48,25 @@ class AnnualDailyBackfillTests(unittest.TestCase):
         self.assertIn("total_amount_kcny", source)
         self.assertIn("total_volume_lots", source)
         self.assertNotIn("rt_min", source)
+
+    def test_sector_promotion_preserves_eight_digit_regex_in_sql(self):
+        class RecordingConnection:
+            def __init__(self): self.calls = []
+            def execute(self, sql, params=None):
+                self.calls.append((sql, params))
+
+        connection = RecordingConnection()
+        _persist_sector_flow(
+            connection, "tushare_super_sdk",
+            datetime.now(timezone.utc),
+            kind="industry_flow",
+        )
+        observation_sql = next(sql for sql, _ in connection.calls if "sector_market_observations" in sql)
+        self.assertIn(r"^\d{8}$", observation_sql)
+
+    def test_raw_bulk_insert_deduplicates_supplier_duplicates(self):
+        source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
+        self.assertIn("SELECT DISTINCT ON(record_key,content_sha256)", source)
 
 
 if __name__ == "__main__":

@@ -128,18 +128,26 @@ def _persist_raw(
     connection: Any, provider_key: str, api_name: str, key: str, available_at: datetime,
 ) -> None:
     connection.execute(
-        """INSERT INTO quant.tushare_raw_records(
-               provider_key,api_name,request_key,record_index,record_key,content_sha256,row_data,available_at)
-           SELECT %s,%s,%s,record_index,
+        """WITH prepared AS (
+               SELECT record_index,
                   concat_ws(':',%s::text,
                     coalesce(row_data->>'ts_code',row_data->>'con_code',row_data->>'cal_date','row'),
                     coalesce(row_data->>'trade_date',row_data->>'ann_date',row_data->>'cal_date','na'),
-                    coalesce(row_data->>'exalter',row_data->>'name',row_data->>'reason',record_index::text)),
-                  encode(digest(row_data::text,'sha256'),'hex'),row_data,%s
+                    coalesce(row_data->>'exalter',row_data->>'name',row_data->>'reason',record_index::text)) AS record_key,
+                  encode(digest(row_data::text,'sha256'),'hex') AS content_sha256,row_data
              FROM annual_daily_stage
+             ), deduplicated AS (
+               SELECT DISTINCT ON(record_key,content_sha256)
+                      record_index,record_key,content_sha256,row_data
+                 FROM prepared ORDER BY record_key,content_sha256,record_index
+             )
+           INSERT INTO quant.tushare_raw_records(
+               provider_key,api_name,request_key,record_index,record_key,content_sha256,row_data,available_at)
+           SELECT %s,%s,%s,record_index,record_key,content_sha256,row_data,%s
+             FROM deduplicated
            ON CONFLICT(provider_key,api_name,record_key,content_sha256) DO UPDATE
              SET available_at=EXCLUDED.available_at,request_key=EXCLUDED.request_key""",
-        (provider_key, api_name, key, api_name, available_at),
+        (api_name, provider_key, api_name, key, available_at),
     )
 
 
@@ -401,7 +409,7 @@ def _persist_sector_flow(
         (taxonomy_key, label, provider_key, Json({"backfill": "annual_daily_backfill_v1"})),
     )
     connection.execute(
-        f"""INSERT INTO quant.sectors(taxonomy_key,sector_key,label,metadata)
+        """INSERT INTO quant.sectors(taxonomy_key,sector_key,label,metadata)
             SELECT %s,row_data->>'ts_code',row_data->>%s::text,
                    jsonb_build_object(%s::text,row_data->>%s::text)
               FROM annual_daily_stage
@@ -425,7 +433,7 @@ def _persist_sector_flow(
         )
         return
     connection.execute(
-        f"""INSERT INTO quant.sector_market_observations(
+        """INSERT INTO quant.sector_market_observations(
                taxonomy_key,sector_key,trading_date,provider_key,available_at,close,change_pct,
                net_amount,net_buy_amount,net_sell_amount,constituent_count,leading_label,raw)
            SELECT %s,row_data->>'ts_code',to_date(row_data->>'trade_date','YYYYMMDD'),%s,%s,
@@ -665,6 +673,49 @@ class AnnualDailyBackfill:
                     (self.start_date, self.end_date),
                 )
 
+    def promote_stored_sector_flows(self) -> dict[str, int]:
+        """Repair/materialize sector rows from retained raw evidence only.
+
+        Fetch checkpoints and canonical promotion are deliberately separate:
+        a corrected promotion rule must be able to rebuild without spending a
+        provider request or rewriting the immutable raw evidence.
+        """
+        mappings = (
+            ("moneyflow_ind_ths", "industry_flow"),
+            ("moneyflow_cnt_ths", "concept_flow"),
+            ("limit_cpt_list", "limit_strength"),
+        )
+        counts: dict[str, int] = {}
+        for api_name, kind in mappings:
+            with self.db.transaction() as connection:
+                raw_rows = connection.execute(
+                    """SELECT DISTINCT ON(row_data->>'trade_date',row_data->>'ts_code') row_data,available_at
+                         FROM quant.tushare_raw_records
+                        WHERE provider_key='tushare_super_sdk' AND api_name=%s
+                          AND row_data->>'ts_code' LIKE '%%.TI'
+                          AND row_data->>'trade_date' ~ '^[0-9]{8}$'
+                          AND to_date(row_data->>'trade_date','YYYYMMDD') BETWEEN %s AND %s
+                        ORDER BY row_data->>'trade_date',row_data->>'ts_code',available_at DESC""",
+                    (api_name, self.start_date, self.end_date),
+                ).fetchall()
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            available_by_date: dict[str, datetime] = {}
+            for raw in raw_rows:
+                row = dict(raw["row_data"])
+                stamp = str(row.get("trade_date") or "")
+                grouped.setdefault(stamp, []).append(row)
+                available_by_date[stamp] = max(
+                    available_by_date.get(stamp, raw["available_at"]), raw["available_at"],
+                )
+            for stamp, rows in grouped.items():
+                with self.db.transaction() as connection:
+                    _stage_rows(connection, rows)
+                    _persist_sector_flow(
+                        connection, "tushare_super_sdk", available_by_date[stamp], kind=kind,
+                    )
+            counts[api_name] = len(raw_rows)
+        return counts
+
     def materialize_daily_market_aggregates(self) -> dict[str, Any]:
         """Build close-only breadth and volume using explicit Tushare units."""
         with self.db.transaction() as connection:
@@ -731,6 +782,7 @@ class AnnualDailyBackfill:
         }), flush=True)
         await asyncio.gather(self.core_lane(days), self.sector_lane(days), self.index_lane())
         self.reconcile_suspensions()
+        sector_promotions = self.promote_stored_sector_flows()
         market_aggregates = self.materialize_daily_market_aggregates()
         feature_result = self.rebuild_sector_features()
         with self.db.transaction() as connection:
@@ -749,6 +801,7 @@ class AnnualDailyBackfill:
             "start_date": str(self.start_date), "end_date": str(self.end_date),
             "open_days": len(days), "minute_data": False, "row_counts": self.counts,
             "coverage": dict(coverage), "market_aggregates": market_aggregates,
+            "sector_promotions": sector_promotions,
             "sector_features": feature_result,
             "failure_count": len(self.failures), "failures": self.failures[:50],
         }
