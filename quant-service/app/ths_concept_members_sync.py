@@ -6,6 +6,15 @@ from datetime import datetime, date
 from typing import Any, Awaitable, Callable
 
 
+# A member snapshot that failed only because every provider circuit was open is
+# not a data-quality verdict.  Once the circuit cools down it must become
+# eligible for one bounded, normal resume attempt; otherwise a transient
+# outage permanently leaves a board outside the exact-membership universe.
+# Other failures retain the three-attempt cap below so we do not turn malformed
+# or capped responses into an unbounded retry loop.
+TRANSIENT_CIRCUIT_OPEN_FAILURE_PREFIX = "all configured providers are temporarily circuit-open"
+
+
 async def sync(
     request: Any,
     *,
@@ -44,9 +53,10 @@ async def sync(
                         WHERE o.taxonomy_key='ths_concept_flow' AND o.trading_date=%s
                           AND (state.state IS NULL OR (state.state='failed' AND
                                (state.attempts < 3 OR state.provider_key='tushare_super' OR
-                                state.last_error='member response reached the 3000-row safety cap')))
+                                state.last_error='member response reached the 3000-row safety cap' OR
+                                state.last_error LIKE %s)))
                         ORDER BY o.net_amount DESC NULLS LAST,o.sector_key LIMIT %s""",
-                    (selected_date, request.member_limit),
+                    (selected_date, f"{TRANSIENT_CIRCUIT_OPEN_FAILURE_PREFIX}%", request.member_limit),
                 ).fetchall()
             else:
                 concepts = connection.execute(
@@ -129,4 +139,4 @@ async def sync(
             "next_member_offset": next_offset if next_offset < total else None}
 
 
-__all__ = ["sync"]
+__all__ = ["TRANSIENT_CIRCUIT_OPEN_FAILURE_PREFIX", "sync"]
