@@ -81,6 +81,12 @@ from .watchlist_main_wave_v2 import (
     main_wave_v2_shadow_signal,
     run_watchlist_main_wave_v2_research,
 )
+from .watchlist_countertrend_rebound import (
+    STRATEGY_KEY as WATCHLIST_REBOUND_STRATEGY_KEY,
+    countertrend_rebound_shadow_signal,
+    latest_rebound_priors,
+    run_countertrend_rebound_research,
+)
 from .feature_snapshot_repository import materialize_feature_snapshot
 from .intraday_limit_lift import intraday_limit_lift_pattern as pure_intraday_limit_lift_pattern
 from .intraday_attribution import signal_attribution as pure_signal_attribution
@@ -3965,6 +3971,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
         if paper_snapshot:
             snapshot_payload["drawdown"] = paper_snapshot["drawdown"]
         shadow_priors = latest_shadow_priors_v2(connection)
+        rebound_priors = latest_rebound_priors(connection)
         for watch in watches:
             symbol = str(watch["symbol"])
             quote = quotes.get(symbol)
@@ -3996,6 +4003,11 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             )
             if shadow_signal is not None:
                 generated_signals.append(shadow_signal)
+            rebound_signal = countertrend_rebound_shadow_signal(
+                watch, quote, minute_feature, peer_context, rebound_priors.get(symbol),
+            )
+            if rebound_signal is not None:
+                generated_signals.append(rebound_signal)
             fast_confirmation = fast_confirmations.get(symbol, {"status": "missing", "max_age_seconds": 30})
             first_eac = connection.execute(
                 """SELECT observed_at,conditions FROM quant.intraday_signal_events
@@ -4742,15 +4754,15 @@ def post_close_strategy_completed_for_date(as_of_date: date) -> bool:
 
 
 def watchlist_main_wave_completed_for_date(as_of_date: date) -> bool:
-    """Return whether the same-date daily prior has been materialized."""
+    """Return whether both same-date daily watchlist priors were materialized."""
     with db.transaction() as connection:
         row = connection.execute(
-            """SELECT 1 FROM quant.strategy_experiments
-                WHERE strategy_key=%s AND universe_key='watchlist'
-                  AND end_date=%s AND status='completed' LIMIT 1""",
-            (WATCHLIST_MAIN_WAVE_STRATEGY_KEY, as_of_date),
+            """SELECT count(DISTINCT strategy_key)::int AS completed FROM quant.strategy_experiments
+                WHERE strategy_key=ANY(%s) AND universe_key='watchlist'
+                  AND end_date=%s AND status='completed'""",
+            ([WATCHLIST_MAIN_WAVE_STRATEGY_KEY, WATCHLIST_REBOUND_STRATEGY_KEY], as_of_date),
         ).fetchone()
-    return bool(row)
+    return bool(row and int(row["completed"] or 0) == 2)
 
 
 def build_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
@@ -8558,23 +8570,33 @@ async def run_strategy_pattern_mining_endpoint(payload: StrategyPatternMiningReq
 
 
 def persist_watchlist_main_wave_research(payload: WatchlistMainWaveResearchRequest) -> dict[str, Any]:
-    """Fit and persist one reproducible shadow model from stored daily bars."""
+    """Fit and persist breakout plus counter-trend watchlist shadow models."""
     with db.transaction() as connection:
         result = run_watchlist_main_wave_v2_research(connection, payload.as_of_date)
-        row = connection.execute(
-            """INSERT INTO quant.strategy_experiments(
-                   strategy_key,universe_key,start_date,end_date,status,parameters,metrics,equity_curve,trades)
-               VALUES(%s,'watchlist',%s,%s,%s,%s,%s,%s,%s)
-               RETURNING strategy_experiment_id,created_at""",
-            (WATCHLIST_MAIN_WAVE_STRATEGY_KEY, result.get("start_date") or payload.as_of_date or cn_today(),
-             result.get("end_date") or payload.as_of_date or cn_today(), result["status"],
-             Json(strategy_json_safe(result.get("parameters", {}))),
-             Json(strategy_json_safe(result.get("metrics", {}))),
-             Json(strategy_json_safe(result.get("equity_curve", []))),
-             Json(strategy_json_safe(result.get("trades", [])))),
-        ).fetchone()
-    return {**result, "strategy_experiment_id": str(row["strategy_experiment_id"]),
-            "created_at": row["created_at"]}
+        rebound_result = run_countertrend_rebound_research(connection, payload.as_of_date)
+        persisted = {}
+        for model_result in (result, rebound_result):
+            row = connection.execute(
+                """INSERT INTO quant.strategy_experiments(
+                       strategy_key,universe_key,start_date,end_date,status,parameters,metrics,equity_curve,trades)
+                   VALUES(%s,'watchlist',%s,%s,%s,%s,%s,%s,%s)
+                   RETURNING strategy_experiment_id,created_at""",
+                (model_result["strategy_key"],
+                 model_result.get("start_date") or payload.as_of_date or cn_today(),
+                 model_result.get("end_date") or payload.as_of_date or cn_today(), model_result["status"],
+                 Json(strategy_json_safe(model_result.get("parameters", {}))),
+                 Json(strategy_json_safe(model_result.get("metrics", {}))),
+                 Json(strategy_json_safe(model_result.get("equity_curve", []))),
+                 Json(strategy_json_safe(model_result.get("trades", [])))),
+            ).fetchone()
+            persisted[model_result["strategy_key"]] = {
+                **model_result, "strategy_experiment_id": str(row["strategy_experiment_id"]),
+                "created_at": row["created_at"],
+            }
+    return {
+        **persisted[WATCHLIST_MAIN_WAVE_STRATEGY_KEY],
+        "countertrend_rebound": persisted[WATCHLIST_REBOUND_STRATEGY_KEY],
+    }
 
 
 async def run_watchlist_main_wave_endpoint(payload: WatchlistMainWaveResearchRequest) -> dict[str, Any]:

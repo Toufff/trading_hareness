@@ -219,7 +219,8 @@ const factorChartOption = computed(() => ({
   ],
 }));
 const latestExperiment = computed(() => strategyExperiments.value[0] ?? null);
-const latestMainWaveExperiment = computed(() => mainWaveExperiments.value[0] ?? null);
+const latestMainWaveExperiment = computed(() => mainWaveExperiments.value.find((item) => item.strategy_key === 'watchlist_main_wave_shadow_v2') ?? null);
+const latestReboundExperiment = computed(() => mainWaveExperiments.value.find((item) => item.strategy_key === 'watchlist_countertrend_rebound_shadow_v1') ?? null);
 const mainWaveCurrentScores = computed<Record<string, unknown>[]>(() => {
   const value = nestedValue(latestMainWaveExperiment.value?.metrics, 'current_scores');
   return Array.isArray(value) ? value as Record<string, unknown>[] : [];
@@ -230,6 +231,14 @@ const mainWaveQualification = computed(() => {
 });
 const mainWaveFailedChecks = computed(() => {
   const value = nestedValue(latestMainWaveExperiment.value?.metrics, 'promotion_gate.checks');
+  return value && typeof value === 'object' ? Object.entries(value as Record<string, unknown>).filter(([, passed]) => passed !== true).map(([key]) => key) : [];
+});
+const reboundCurrentScores = computed<Record<string, unknown>[]>(() => {
+  const value = nestedValue(latestReboundExperiment.value?.metrics, 'current_scores');
+  return Array.isArray(value) ? value as Record<string, unknown>[] : [];
+});
+const reboundFailedChecks = computed(() => {
+  const value = nestedValue(latestReboundExperiment.value?.metrics, 'promotion_gate.checks');
   return value && typeof value === 'object' ? Object.entries(value as Record<string, unknown>).filter(([, passed]) => passed !== true).map(([key]) => key) : [];
 });
 const reviewConceptBoards = computed(() => (closeBoardReport.value?.payload?.items ?? [])
@@ -956,6 +965,30 @@ onBeforeUnmount(() => {
                     <el-table-column label="形态强度" width="95"><template #default="{ row }">{{ (Number(row.model_score) * 100).toFixed(1) }}%</template></el-table-column>
                     <el-table-column label="池内分位" width="90"><template #default="{ row }">{{ (Number(row.percentile) * 100).toFixed(1) }}%</template></el-table-column>
                     <el-table-column label="影子状态" min-width="130"><template #default="{ row }"><el-tag size="small" :type="row.state === 'shadow_confirmed' ? 'warning' : row.state === 'shadow_forming' ? 'success' : 'info'">{{ row.state === 'shadow_confirmed' ? '形态确认待盘中' : row.state === 'shadow_forming' ? '蓄势观察' : '普通观察' }}</el-tag></template></el-table-column>
+                  </el-table>
+                </template>
+              </el-card>
+              <el-card shadow="never" class="section-gap">
+                <template #header><div class="card-header"><div><span>科技下跌浪 · 恐慌耗竭与B浪反弹</span><small class="realtime-refresh-time">恐慌只观察；单日普涨只算试探；连续市场广度与科技组均线修复后才确认。</small></div><el-tag type="warning">shadow-only</el-tag></div></template>
+                <el-alert v-if="!latestReboundExperiment" title="尚未生成逆势反弹研究结果，点击上方重新训练会同时运行。" type="info" :closable="false" show-icon/>
+                <template v-else>
+                  <el-alert :title="`当前门禁：${nestedValue(latestReboundExperiment.metrics,'promotion_gate.status')}。恐慌与试探阶段不构成买点，确认阶段仍不发飞书。`" type="warning" :closable="false" show-icon/>
+                  <el-row :gutter="12" class="metric-row section-gap">
+                    <el-col :md="4" :xs="12"><el-statistic title="科技样本" :value="Number(nestedValue(latestReboundExperiment.metrics,'sample_rows') || 0)"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="测试确认日" :value="Number(nestedValue(latestReboundExperiment.metrics,'walk_forward.test.selected_dates') || 0)"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="确认命中" :value="Number(nestedValue(latestReboundExperiment.metrics,'walk_forward.test.selected_precision') || 0) * 100" suffix="%" :precision="1"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="相对基准Lift" :value="Number(nestedValue(latestReboundExperiment.metrics,'walk_forward.test.selected_lift') || 0)" :precision="2"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="确认后5日净值" :value="Number(nestedValue(latestReboundExperiment.metrics,'walk_forward.test.selected_net_terminal_return') || 0) * 100" suffix="%" :precision="2"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="恐慌期MFE" :value="Number(nestedValue(latestReboundExperiment.metrics,'walk_forward.test.panic_mfe') || 0) * 100" suffix="%" :precision="2"/></el-col>
+                  </el-row>
+                  <el-divider content-position="left">尚未通过的研究门禁</el-divider>
+                  <el-space wrap><el-tag v-for="key in reboundFailedChecks" :key="key" type="warning">{{ key }}</el-tag></el-space>
+                  <el-divider content-position="left">最新科技观察状态</el-divider>
+                  <el-table :data="reboundCurrentScores.slice(0, 19)" max-height="360" size="small">
+                    <el-table-column prop="rank" label="#" width="46"/><el-table-column prop="symbol" label="代码" width="105"/><el-table-column prop="name" label="名称" min-width="95"/>
+                    <el-table-column label="状态" min-width="145"><template #default="{ row }"><el-tag size="small" :type="row.state === 'shadow_confirmed' ? 'success' : row.state === 'shadow_panic' ? 'danger' : row.state === 'shadow_probe' ? 'warning' : 'info'">{{ row.pattern?.label ?? row.state }}</el-tag></template></el-table-column>
+                    <el-table-column label="强度" width="85"><template #default="{ row }">{{ (Number(row.model_score) * 100).toFixed(1) }}%</template></el-table-column>
+                    <el-table-column label="纪律" min-width="210"><template #default="{ row }">{{ row.pattern?.discipline ?? '-' }}</template></el-table-column>
                   </el-table>
                 </template>
               </el-card>
