@@ -208,6 +208,13 @@ class IntradayEventReplayRequest(BaseModel):
     max_events: int = Field(default=5_000, ge=1, le=10_000)
 
 
+class IntradayRuleInputReplayRequest(BaseModel):
+    """Re-evaluate one recorded Shanghai day without provider access or fitting."""
+
+    as_of_date: date | None = None
+    max_rows: int = Field(default=50_000, ge=1, le=50_000)
+
+
 class WatchlistMainWaveResearchRequest(BaseModel):
     """Run the preregistered one-year watchlist shadow-model workflow."""
 
