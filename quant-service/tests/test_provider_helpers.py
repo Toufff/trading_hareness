@@ -786,6 +786,7 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertFalse(blocked["p2_data_foundation_ready"])
         self.assertFalse(blocked["p3_strategy_validation_ready"])
         self.assertIn("does not call providers", blocked["policy"])
+        self.assertEqual(blocked["forward_capture"]["status"], "accumulating")
 
         unclocked_minutes = replay_readiness_payload({
             "full_cross_section_days": P2_MIN_FULL_CROSS_SECTION_DAYS,
@@ -805,12 +806,15 @@ class ProviderHelperTests(unittest.TestCase):
             "offline_minute_symbols": 10, "offline_minute_bars": 10_000,
             "offline_minute_source_clock_bars": 10_000,
             "offline_minute_source_clock_days": P3_MIN_REPLAY_DAYS,
+            "forward_rule_input_days": P3_MIN_REPLAY_DAYS,
+            "forward_rule_input_rows": 100_000,
             "completed_offline_imports": 1, "confirmed_signal_events": P3_MIN_SIGNAL_EVENTS,
             "matured_signal_events": P3_MIN_SIGNAL_EVENTS,
         })
         self.assertEqual(ready["status"], "ready")
         self.assertTrue(ready["p2_data_foundation_ready"])
         self.assertTrue(ready["p3_strategy_validation_ready"])
+        self.assertEqual(ready["forward_capture"]["status"], "ready")
 
     def test_research_catalog_read_model_and_router_bound_local_result_sets(self):
         connection = MagicMock()

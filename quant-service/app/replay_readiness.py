@@ -22,6 +22,8 @@ def replay_readiness_payload(metrics: Mapping[str, Any]) -> dict[str, Any]:
     minute_bars = int(metrics.get("offline_minute_bars") or 0)
     minute_clock_bars = int(metrics.get("offline_minute_source_clock_bars") or 0)
     minute_clock_days = int(metrics.get("offline_minute_source_clock_days") or 0)
+    forward_rule_input_days = int(metrics.get("forward_rule_input_days") or 0)
+    forward_rule_input_rows = int(metrics.get("forward_rule_input_rows") or 0)
     imports = int(metrics.get("completed_offline_imports") or 0)
     confirmed_signals = int(metrics.get("confirmed_signal_events") or 0)
     matured_signals = int(metrics.get("matured_signal_events") or 0)
@@ -64,7 +66,18 @@ def replay_readiness_payload(metrics: Mapping[str, Any]) -> dict[str, Any]:
         "evidence": {
             **dict(metrics), "offline_minute_symbols": minute_symbols,
             "offline_minute_bars": minute_bars, "offline_minute_source_clock_bars": minute_clock_bars,
-            "offline_minute_source_clock_days": minute_clock_days, "matured_signal_events": matured_signals,
+            "offline_minute_source_clock_days": minute_clock_days,
+            "forward_rule_input_days": forward_rule_input_days,
+            "forward_rule_input_rows": forward_rule_input_rows, "matured_signal_events": matured_signals,
+        },
+        "forward_capture": {
+            "status": "ready" if forward_rule_input_days >= P3_MIN_REPLAY_DAYS else "accumulating",
+            "observed_days": forward_rule_input_days, "observed_rows": forward_rule_input_rows,
+            "required_days": P3_MIN_REPLAY_DAYS,
+            "notice": (
+                "Forward-only core-rule reproducibility evidence. It is reported separately and does not "
+                "substitute for the point-in-time historical minute/replay gates."
+            ),
         },
         "policy": "Read-only local evidence check: it does not call providers, download history, or change strategy thresholds.",
     }
@@ -96,6 +109,9 @@ def historical_replay_readiness(database: Any) -> dict[str, Any]:
                   (SELECT count(*)::int FROM quant.market_bars_minute WHERE source_available_at IS NOT NULL) offline_minute_source_clock_bars,
                   (SELECT count(DISTINCT (source_available_at AT TIME ZONE 'Asia/Shanghai')::date)::int
                      FROM quant.market_bars_minute WHERE source_available_at IS NOT NULL) offline_minute_source_clock_days,
+                  (SELECT count(DISTINCT (observed_at AT TIME ZONE 'Asia/Shanghai')::date)::int
+                     FROM quant.intraday_rule_input_snapshots) forward_rule_input_days,
+                  (SELECT count(*)::int FROM quant.intraday_rule_input_snapshots) forward_rule_input_rows,
                   (SELECT count(*)::int FROM quant.offline_imports WHERE status IN ('completed','partial')) completed_offline_imports,
                   (SELECT count(*)::int FROM quant.intraday_signal_events
                     WHERE state IN ('confirmed','alerted')) confirmed_signal_events,

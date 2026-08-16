@@ -78,6 +78,9 @@ async def replay_readiness(async_database: Any) -> dict[str, Any]:
                   (SELECT count(*)::int FROM quant.market_bars_minute WHERE source_available_at IS NOT NULL) offline_minute_source_clock_bars,
                   (SELECT count(DISTINCT (source_available_at AT TIME ZONE 'Asia/Shanghai')::date)::int
                      FROM quant.market_bars_minute WHERE source_available_at IS NOT NULL) offline_minute_source_clock_days,
+                  (SELECT count(DISTINCT (observed_at AT TIME ZONE 'Asia/Shanghai')::date)::int
+                     FROM quant.intraday_rule_input_snapshots) forward_rule_input_days,
+                  (SELECT count(*)::int FROM quant.intraday_rule_input_snapshots) forward_rule_input_rows,
                   (SELECT count(*)::int FROM quant.offline_imports WHERE status IN ('completed','partial')) completed_offline_imports,
                   (SELECT count(*)::int FROM quant.intraday_signal_events
                     WHERE state IN ('confirmed','alerted')) confirmed_signal_events,
