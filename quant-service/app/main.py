@@ -84,6 +84,7 @@ from .intraday_factor_contracts import (
 from .post_close_limit_features import limit_daily_features as pure_limit_daily_features
 from .post_close_limit_features import board_count as pure_limit_board_count
 from .watchlist_daily_factors import watchlist_daily_factors as pure_watchlist_daily_factors
+from .watchlist_daily_factors import watchlist_daily_factors_by_symbol as pure_watchlist_daily_factors_by_symbol
 from .watchlist_main_wave_v2 import (
     STRATEGY_KEY as WATCHLIST_MAIN_WAVE_STRATEGY_KEY,
     latest_shadow_priors_v2,
@@ -3962,6 +3963,9 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
         shadow_priors = latest_shadow_priors_v2(connection)
         rebound_priors = latest_rebound_priors(connection)
         probability_profiles = load_intraday_probability_profiles(connection)
+        daily_factors_by_symbol = pure_watchlist_daily_factors_by_symbol(
+            selected_symbols, connection, number=intraday_number,
+        )
         quote_sources = {
             str(watch["symbol"]): intraday_quote_observation_source(quotes.get(str(watch["symbol"])))
             for watch in watches
@@ -3991,7 +3995,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                      quote.get("volume_ratio"), quote.get("turnover_rate"), quote.get("main_net_inflow"),
                      Json(strategy_json_safe(quote_raw))),
                 )
-            daily_factors = watchlist_daily_factors(symbol, connection)
+            daily_factors = daily_factors_by_symbol.get(symbol, {"status": "insufficient_history", "bar_count": 0})
             minute_feature = (tushare_minutes.get(symbol) or {}).get("feature") or surge_features.get(symbol)
             minute_feature = attach_intraday_volume_time_profile(symbol, minute_feature, observed_at, connection)
             order_book_feature = aggregate_order_book_observations(order_book_by_symbol.get(symbol, []), observed_at)

@@ -3,22 +3,16 @@
 from __future__ import annotations
 
 from statistics import mean
-from typing import Any, Callable
+from collections import defaultdict
+from typing import Any, Callable, Iterable
 
 from .post_close_structures import daily_base_structure
 from .research_prices import adjusted_bars
 
 
-def watchlist_daily_factors(symbol: str, connection: Any, *, number: Callable[[Any], float | None]) -> dict[str, Any]:
-    """Compute bounded adjusted factors from a caller-owned transaction."""
-    rows = connection.execute(
-        """SELECT b.trading_date,b.high,b.low,b.close,b.volume,b.adj_factor,b.is_suspended,b.limit_up,b.limit_down,
-                  i.is_st
-             FROM quant.canonical_bars_daily b
-             JOIN quant.instruments i ON i.symbol=b.symbol
-             WHERE b.symbol=%s ORDER BY b.trading_date DESC LIMIT 61""", (symbol,)
-    ).fetchall()
-    bars = list(reversed([dict(row) for row in rows]))
+def daily_factors_from_rows(rows: Iterable[dict[str, Any]], *, number: Callable[[Any], float | None]) -> dict[str, Any]:
+    """Compute one symbol's bounded adjusted factors from already-loaded bars."""
+    bars = list(rows)
     research_bars, adjustment_flags = adjusted_bars(bars)
     closes = [number(row.get("research_close")) for row in research_bars] if research_bars is not None else []
     volumes = [number(row.get("volume")) for row in bars]
@@ -53,4 +47,50 @@ def watchlist_daily_factors(symbol: str, connection: Any, *, number: Callable[[A
             "quality_flags": adjustment_flags, "trade_constraints": trade_constraints}
 
 
-__all__ = ["watchlist_daily_factors"]
+def watchlist_daily_factors(symbol: str, connection: Any, *, number: Callable[[Any], float | None]) -> dict[str, Any]:
+    """Compute bounded adjusted factors from a caller-owned transaction."""
+    rows = connection.execute(
+        """SELECT b.trading_date,b.high,b.low,b.close,b.volume,b.adj_factor,b.is_suspended,b.limit_up,b.limit_down,
+                  i.is_st
+             FROM quant.canonical_bars_daily b
+             JOIN quant.instruments i ON i.symbol=b.symbol
+             WHERE b.symbol=%s ORDER BY b.trading_date DESC LIMIT 61""", (symbol,)
+    ).fetchall()
+    return daily_factors_from_rows((dict(row) for row in reversed(rows)), number=number)
+
+
+def watchlist_daily_factors_by_symbol(
+    symbols: Iterable[str], connection: Any, *, number: Callable[[Any], float | None],
+) -> dict[str, dict[str, Any]]:
+    """Compute factors for an explicit watch basket with one bounded SQL read.
+
+    The live scanner already owns a single transaction.  Pulling 61 bars per
+    symbol through a ranked query preserves the single-symbol factor semantics
+    while avoiding a query per watch on every 10/30-second scan.
+    """
+    requested = sorted({str(symbol) for symbol in symbols if str(symbol)})
+    if not requested:
+        return {}
+    rows = connection.execute(
+        """WITH ranked AS (
+               SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.volume,b.adj_factor,b.is_suspended,b.limit_up,b.limit_down,
+                      i.is_st,row_number() OVER(PARTITION BY b.symbol ORDER BY b.trading_date DESC) AS row_number
+                 FROM quant.canonical_bars_daily b
+                 JOIN quant.instruments i ON i.symbol=b.symbol
+                WHERE b.symbol=ANY(%s)
+           )
+           SELECT symbol,trading_date,high,low,close,volume,adj_factor,is_suspended,limit_up,limit_down,is_st
+             FROM ranked WHERE row_number<=61 ORDER BY symbol,trading_date ASC""",
+        (requested,),
+    ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        payload = dict(row)
+        grouped[str(payload.pop("symbol"))].append(payload)
+    return {
+        symbol: daily_factors_from_rows(grouped.get(symbol, ()), number=number)
+        for symbol in requested
+    }
+
+
+__all__ = ["daily_factors_from_rows", "watchlist_daily_factors", "watchlist_daily_factors_by_symbol"]

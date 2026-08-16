@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import unittest
 from unittest.mock import MagicMock
 
 from app.intraday_scan_repository import first_eac_breakout_events, previous_quote_frames
+from app.watchlist_daily_factors import watchlist_daily_factors_by_symbol
 
 
 class IntradayScanRepositoryTests(unittest.TestCase):
@@ -50,6 +51,28 @@ class IntradayScanRepositoryTests(unittest.TestCase):
         self.assertEqual(previous_quote_frames(connection, {}, not_before=now, observed_at=now), {})
         self.assertEqual(first_eac_breakout_events(connection, [], not_before=now), {})
         connection.execute.assert_not_called()
+
+    def test_daily_factors_for_watch_basket_use_one_ranked_query(self) -> None:
+        rows = []
+        for symbol, offset in (("000001.SZ", 0.0), ("600000.SH", 10.0)):
+            for day in range(1, 26):
+                close = offset + 10.0 + day / 10
+                rows.append({
+                    "symbol": symbol, "trading_date": date(2026, 7, day), "high": close * 1.02,
+                    "low": close * 0.98, "close": close, "volume": 1000 + day, "adj_factor": 1.0,
+                    "is_suspended": False, "limit_up": close * 1.1, "limit_down": close * 0.9, "is_st": False,
+                })
+        connection = MagicMock()
+        connection.execute.return_value.fetchall.return_value = rows
+        factors = watchlist_daily_factors_by_symbol(
+            ["000001.SZ", "600000.SH"], connection,
+            number=lambda value: float(value) if value is not None else None,
+        )
+        self.assertEqual(connection.execute.call_count, 1)
+        self.assertEqual(factors["000001.SZ"]["status"], "completed")
+        self.assertEqual(factors["600000.SH"]["status"], "completed")
+        self.assertGreater(factors["600000.SH"]["latest_daily_close"], factors["000001.SZ"]["latest_daily_close"])
+        self.assertIn("row_number() OVER(PARTITION BY b.symbol", connection.execute.call_args.args[0])
 
 
 if __name__ == "__main__":
