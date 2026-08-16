@@ -16,6 +16,31 @@ from zoneinfo import ZoneInfo
 from .intraday_runtime_status import load_intraday_runtime_evidence, load_intraday_runtime_evidence_async
 
 
+PUBLIC_FLOW_SNAPSHOT_MAX_AGE_SECONDS = 45.0
+
+
+def _public_flow_snapshot_readiness(snapshot: Any) -> tuple[dict[str, Any] | None, bool | None]:
+    """Project the all-A flow snapshot into the same bounded decision contract.
+
+    Individual direct Tencent quotes remain the primary price evidence.  This
+    function only describes whether the accompanying all-A flow fields are
+    fresh enough to support a *new* flow-dependent entry, so the dashboard
+    cannot accidentally represent cached flow as live confirmation.
+    """
+    if not isinstance(snapshot, dict) or not snapshot:
+        return None, None
+    projected = dict(snapshot)
+    try:
+        age_seconds = float(projected.get("age_seconds"))
+    except (TypeError, ValueError):
+        age_seconds = None
+    status = str(projected.get("status") or "unknown")
+    eligible = status in {"fresh", "cached"} and age_seconds is not None and age_seconds <= PUBLIC_FLOW_SNAPSHOT_MAX_AGE_SECONDS
+    projected["max_decision_age_seconds"] = PUBLIC_FLOW_SNAPSHOT_MAX_AGE_SECONDS
+    projected["decision_eligible"] = eligible
+    return projected, eligible
+
+
 @dataclass(frozen=True)
 class IntradayStatusDependencies:
     database: Any
@@ -73,6 +98,9 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
     completed_scan = dict(latest_completed_scan or {})
     completed_scan_source_status = dict(completed_scan.get("source_status") or {})
     latest_watch_quote_status = dict(completed_scan_source_status.get("tencent") or {})
+    public_flow_snapshot, public_flow_snapshot_eligible = _public_flow_snapshot_readiness(
+        latest_watch_quote_status.get("all_a_snapshot")
+    )
 
     def most_recent_health(keys: tuple[str, ...], capabilities: tuple[str, ...]) -> dict[str, Any]:
         candidates = [health[(key, capability)] for key in keys for capability in capabilities if (key, capability) in health]
@@ -129,7 +157,9 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
                      "latest_watch_quote_coverage": deps.json_safe(latest_watch_quote_status) if latest_watch_quote_status else None,
                      "decision_eligible_watch_quote_symbols": int(latest_watch_quote_status.get("decision_eligible_watch_quote_symbols") or 0),
                      "sina_fallback_watch_quote_symbols": int(latest_watch_quote_status.get("sina_fallback_watch_quote_symbols") or 0),
-                     "all_a_only_watch_quote_symbols": int(latest_watch_quote_status.get("all_a_only_watch_quote_symbols") or 0)},
+                     "all_a_only_watch_quote_symbols": int(latest_watch_quote_status.get("all_a_only_watch_quote_symbols") or 0),
+                     "public_flow_snapshot": deps.json_safe(public_flow_snapshot) if public_flow_snapshot else None,
+                     "public_flow_snapshot_decision_eligible": public_flow_snapshot_eligible},
         ),
         runtime_item(
             key="tencent_order_book", label="腾讯观察池五档盘口", role="QI、OFI 近似、内外盘差分与区间 VWAP 的研究证据",
@@ -197,6 +227,13 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
         tencent_item["last_error"] = (
             f"fresh direct Tencent watch quotes cover {confirmed_watch_quotes}/{required_watch_quotes}; "
             "fallback/all-A evidence cannot confirm alerts"
+        )
+    if session_active and public_flow_snapshot_eligible is False:
+        tencent_item = items[1]
+        tencent_item["state"] = "degraded"
+        flow_error = "public all-A flow snapshot is stale or unavailable; new flow-dependent entries are blocked"
+        tencent_item["last_error"] = "; ".join(
+            part for part in (str(tencent_item.get("last_error") or "").strip(), flow_error) if part
         )
     latest_board_feed = latest_board_curve or latest_board
     if board_session_active and latest_board_feed and latest_board_feed["status"] not in {"completed", "partial"}:

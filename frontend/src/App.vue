@@ -160,6 +160,10 @@ const groupRelayStateText = (state?: string) => ({ healthy: '正常监听', star
 const groupRelayMessageText = (status?: string | null) => ({ sent: '已转发', skipped_bootstrap: '历史基线', processing: '转发中', failed: '转发失败', unsupported: '不支持' }[status ?? ''] ?? '暂无消息');
 const realtimeDeliveryDetail = (service: RealtimeService) => {
   const details = service.details ?? {};
+  if (service.key === 'tencent_realtime' && details.public_flow_snapshot) {
+    const snapshot = details.public_flow_snapshot as { status?: string; age_seconds?: number; max_decision_age_seconds?: number; decision_eligible?: boolean };
+    return `资金流 ${snapshot.status ?? '未知'}；${snapshot.decision_eligible ? '可用于新入场确认' : '仅展示，禁止资金流确认'}；${ageText(snapshot.age_seconds)} / ${ageText(snapshot.max_decision_age_seconds)}`;
+  }
   if (service.key === 'feishu_alert') return `最近 ${details.latest_delivery_kind ?? '无'} / ${details.latest_delivery_status ?? '无'}；待重试 ${details.pending_retry_count ?? 0}；带外关注 ${details.meta_alert_state ?? 'normal'}`;
   if (service.key === 'daily_strategy_summary') return `最近交易日 ${details.latest_exchange_date ?? '尚无'}；投递 ${details.latest_delivery_status ?? '尚无'}；尝试 ${details.attempt_count ?? 0}/3`;
   return '';
