@@ -85,8 +85,8 @@ export function createLedger(connectionString) {
 				ON CONFLICT(source_key) DO UPDATE SET chat_id=EXCLUDED.chat_id,cursor_create_time=GREATEST(feishu_group_relay_sources.cursor_create_time,EXCLUDED.cursor_create_time),updated_at=now()`, [sourceKey, chatId, cursorCreateTime]);
 		},
 		async skipRelayMessage(record) {
-			await pool.query(`INSERT INTO feishu_group_relay_messages(source_message_id,source_key,source_chat_id,source_create_time,target_chat_id,route_tag,message,status)
-				VALUES($1,$2,$3,$4,$5,$6,$7,'skipped_bootstrap') ON CONFLICT(source_message_id) DO NOTHING`, [record.sourceMessageId, record.sourceKey, record.sourceChatId, record.sourceCreateTime, record.targetChatId, record.routeTag, record.message]);
+			await pool.query(`INSERT INTO feishu_group_relay_messages(source_message_id,source_key,source_chat_id,source_create_time,target_chat_id,route_tag,message,status,source_update_time,source_deleted)
+				VALUES($1,$2,$3,$4,$5,$6,$7,'skipped_bootstrap',$8,$9) ON CONFLICT(source_message_id) DO NOTHING`, [record.sourceMessageId, record.sourceKey, record.sourceChatId, record.sourceCreateTime, record.targetChatId, record.routeTag, record.message, record.sourceUpdateTime ?? null, Boolean(record.message?.deleted)]);
 		},
 		async claimRelayMessage(record) {
 			const { rows } = await pool.query(`INSERT INTO feishu_group_relay_messages(source_message_id,source_key,source_chat_id,source_create_time,target_chat_id,route_tag,message,status,attempt_count,source_update_time)

@@ -183,6 +183,7 @@ export function createFeishuWorkbench({ appId, appSecret, larkClient, ledger, us
 		if (!record) return null;
 		if (deleted) {
 			const targetIds = [...new Set([...(Array.isArray(record.target_message_ids) ? record.target_message_ids : []), record.action_card_message_id].filter(Boolean))];
+			if (!targetIds.length) return record;
 			for (const messageId of targetIds) {
 				await tenantRequest(`/im/v1/messages/${encodeURIComponent(messageId)}`, { method: 'DELETE' }).catch((error) => logger.warn(`撤回汇总群同步消息失败：${error.message}`));
 			}
