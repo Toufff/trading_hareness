@@ -196,6 +196,18 @@ class StrategyPatternMiningRequest(BaseModel):
         return self
 
 
+class IntradayEventReplayRequest(BaseModel):
+    """Replay one Shanghai trading date from already-recorded signal events.
+
+    This request does not accept a provider, URL, raw file or time range.  It
+    deliberately cannot widen itself into historical ingestion or invoke a
+    live data source.
+    """
+
+    as_of_date: date | None = None
+    max_events: int = Field(default=5_000, ge=1, le=10_000)
+
+
 class WatchlistMainWaveResearchRequest(BaseModel):
     """Run the preregistered one-year watchlist shadow-model workflow."""
 

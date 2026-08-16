@@ -40,6 +40,7 @@
 | --- | --- | --- |
 | 3–5 年日线、复权、停牌、涨跌停、退市点时成员 | 暂停 | 用户授权范围、provider 预算和存储预算 |
 | 历史分钟回放 | 暂停 | 本地离线分钟文件或明确回填授权；策略必须复用 live `SignalSpec` |
+| 本地已录制信号事件生命周期 replay | 已完成（非价格回测） | `/api/v1/strategies/intraday/replay-recorded-events` 只读 `intraday_signal_events`；按 availability 时钟写入幂等 `input_hash`/`trace_hash`，不请求 provider、不拉历史、不拟合阈值、不生成订单 |
 | T+1/涨跌停/停牌/费用/滑点回放撮合 | 研究中 | P2 数据先就绪，再跑事件时钟回放 |
 | purged walk-forward、embargo、DSR/PBO | 暂停 | 至少 60 aligned days、200 独立成熟信号、每 cohort 30 条 |
 | 盘中阈值重校准 | 禁止启动 | P3 样本门禁通过且样本外胜出规则基线 |
@@ -55,7 +56,7 @@
 
 ## 当前验收证据
 
-- quant-service：393 项 Python 测试通过（包含盘中连续竞价结算、分析师 received-at 与 author-stated 双时钟、零项同步 liveness 回执、JSON 数值归一化、时间外金标留出回归）。
+- quant-service：397 项 Python 测试通过（包含盘中连续竞价结算、分析师 received-at 与 author-stated 双时钟、零项同步 liveness 回执、事件生命周期回放确定性与幂等、JSON 数值归一化、时间外金标留出回归）。
 - frontend：`vue-tsc --noEmit` 和 Vite build 通过；仅有 chunk size 优化警告。
 - 开盘预检：compose、数据库迁移 `20260816_0046`、10 条后台租约、共享 provider pacing、30s/10s/1s/60s 节奏、飞书和可恢复备份均通过。
 - 最近提交：见当前仓库最新提交；本轮未改变策略阈值或历史数据范围，推荐生成、Tushare/BaoStock/全市场同步、THS 板块目录编排、盘中归因/规则/结算拆分、分析师同步健康校验、远端文本 transport/差量同步拆分、盘后一键刷新/日流水线编排拆分、盘后模式评分/候选筛选/证据聚合/读模型委托、竞价时段整理和研究就绪度门禁已通过 320 项回归。

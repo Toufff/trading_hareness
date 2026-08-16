@@ -426,6 +426,7 @@ class ProviderHelperTests(unittest.TestCase):
             update_analyst_sync_cursor=action,
             update_analyst_global_sync_cursor=action,
             sync_remote_archive=action,
+            replay_recorded_intraday_events=action,
         ))
         methods_by_path = {route.path: route.methods for route in router.routes}
         for path in (
@@ -435,6 +436,7 @@ class ProviderHelperTests(unittest.TestCase):
             "/api/v1/remote-archive/messages/import",
             "/api/v1/remote-archive/messages/reprocess",
             "/api/v1/remote-archive/sync",
+            "/api/v1/strategies/intraday/replay-recorded-events",
             "/api/v1/claim-review/{review_id}",
             "/api/v1/universes/members", "/api/v1/features/build",
             "/api/v1/factors/evaluate", "/api/v1/strategies/backtest",

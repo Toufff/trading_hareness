@@ -285,6 +285,7 @@ from .request_models import (
     FetchRunReconcileRequest,
     FullMarketDailySyncRequest,
     GenerateRequest,
+    IntradayEventReplayRequest,
     HistoricalCoverageEstimateRequest,
     IntradayScanRequest,
     IntradaySectorReportRequest,
@@ -320,6 +321,7 @@ from .remote_archive import (analyst_global_sync_cursor, analyst_sync_cursor, cl
                              record_analyst_sync_attempt, remote_report_list_state, reprocess_remote_messages, reprocess_remote_reports)
 from .remote_archive_transport import RemoteArchiveTransport
 from .remote_archive_sync import RemoteArchiveSyncService
+from .intraday_event_replay_runner import run_recorded_signal_lifecycle_replay
 from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrated
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
 from .recommendation_generation import generate as generate_recommendations_isolated
@@ -8600,6 +8602,17 @@ async def sync_remote_archive_endpoint(payload: RemoteArchiveSyncRequest, author
     return await sync_remote_archive(payload, authorization)
 
 
+def replay_recorded_intraday_events(payload: IntradayEventReplayRequest) -> dict[str, Any]:
+    with db.transaction() as connection:
+        return run_recorded_signal_lifecycle_replay(
+            connection, as_of_date=payload.as_of_date, max_events=payload.max_events,
+        )
+
+
+async def replay_recorded_intraday_events_endpoint(payload: IntradayEventReplayRequest) -> dict[str, Any]:
+    return await run_database_blocking(replay_recorded_intraday_events, payload, timeout_seconds=60)
+
+
 app.include_router(build_research_actions_router(ResearchActionDependencies(
     analyse_ingestion=analyse_ingestion_endpoint,
     import_remote_report=import_remote_archive_report_endpoint,
@@ -8617,6 +8630,7 @@ app.include_router(build_research_actions_router(ResearchActionDependencies(
     update_analyst_sync_cursor=update_analyst_sync_cursor_endpoint,
     update_analyst_global_sync_cursor=update_analyst_global_sync_cursor_endpoint,
     sync_remote_archive=sync_remote_archive_endpoint,
+    replay_recorded_intraday_events=replay_recorded_intraday_events_endpoint,
 )))
 
 

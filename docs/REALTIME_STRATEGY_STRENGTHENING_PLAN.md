@@ -58,6 +58,9 @@
 
 为每个 `FactorSpec` 声明：版本、输入、频率、最小预热、`event_time`、`available_at`、质量门禁、适用（learn/infer）层和 hash。以 `available_at, source_sequence, event_id` 稳定排序；回放只读本地事件，不请求供应商。
 
+已交付第一条可执行链路：`POST /api/v1/strategies/intraday/replay-recorded-events` 只读取
+`quant.intraday_signal_events`，按已记录的 `observed_at`（可用时钟）、持久化 source sequence（无该字段时按不可变 event id）回放 episode 生命周期，并把 `input_hash`、`trace_hash`、聚合指标和数据边界写入 `intraday_replay_runs`。相同输入与引擎版本会复用既有 run，避免重复占用存储。它是黄金事件回放和时序审计，不是价格回测、更不是阈值拟合；完整价格/分钟重放仍等待授权数据。
+
 最小可用因子集：
 
 - 个股：1/3/5/15 分钟残差收益、同交易时刻量能 Z 分数、VWAP 距离与斜率、日内高低位、价量背离。

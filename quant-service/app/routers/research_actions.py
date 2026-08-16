@@ -21,6 +21,7 @@ from ..request_models import (
     FactorEvaluationRequest,
     FetchRunReconcileRequest,
     GenerateRequest,
+    IntradayEventReplayRequest,
     RemoteReportImport,
     RemoteReportReprocessRequest,
     RemoteAnalystMessageImport,
@@ -50,6 +51,7 @@ class ResearchActionDependencies:
     update_analyst_sync_cursor: Callable[[AnalystSyncCursorUpdate], Awaitable[dict[str, Any]]]
     update_analyst_global_sync_cursor: Callable[[AnalystSyncGlobalCursorUpdate], Awaitable[dict[str, Any]]]
     sync_remote_archive: Callable[[RemoteArchiveSyncRequest, str | None], Awaitable[dict[str, Any]]]
+    replay_recorded_intraday_events: Callable[[IntradayEventReplayRequest], Awaitable[dict[str, Any]]]
 
 
 def build_research_actions_router(deps: ResearchActionDependencies) -> APIRouter:
@@ -82,6 +84,10 @@ def build_research_actions_router(deps: ResearchActionDependencies) -> APIRouter
         # this local trigger. The service forwards it in-memory to the remote
         # text API and never persists or echoes it.
         return await deps.sync_remote_archive(payload, request.headers.get("Authorization"))
+
+    @router.post("/api/v1/strategies/intraday/replay-recorded-events")
+    async def replay_recorded_intraday_events(payload: IntradayEventReplayRequest) -> dict[str, Any]:
+        return await deps.replay_recorded_intraday_events(payload)
 
     @router.post("/api/v1/claim-review/{review_id}")
     async def review_claim(review_id: UUID, payload: ClaimReviewRequest) -> dict[str, Any]:
