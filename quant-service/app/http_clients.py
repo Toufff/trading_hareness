@@ -18,6 +18,7 @@ import httpx
 _public_client: httpx.AsyncClient | None = None
 _alert_client: httpx.AsyncClient | None = None
 _provider_clients: dict[tuple[str, str], httpx.AsyncClient] = {}
+_remote_archive_clients: dict[tuple[str, str], httpx.AsyncClient] = {}
 
 
 async def start_http_clients() -> None:
@@ -48,6 +49,10 @@ async def close_http_clients() -> None:
     provider_clients = list(_provider_clients.values())
     _provider_clients.clear()
     for client in provider_clients:
+        await client.aclose()
+    archive_clients = list(_remote_archive_clients.values())
+    _remote_archive_clients.clear()
+    for client in archive_clients:
         await client.aclose()
     if _public_client is not None:
         await _public_client.aclose()
@@ -114,6 +119,36 @@ async def provider_http_client(provider_key: str, proxy_url: str) -> AsyncIterat
         yield temporary_client
 
 
+@asynccontextmanager
+async def remote_archive_http_client(base_url: str, ca_file: str | None) -> AsyncIterator[httpx.AsyncClient]:
+    """Yield a small keep-alive pool for the fixed remote analyst archive.
+
+    The archive is deliberately isolated from public-market capacity because
+    a report-detail fanout must never delay watchlist quotes or Feishu.  Its
+    key includes the endpoint and custom CA path so a configuration change
+    cannot reuse a connection with a different TLS trust policy.  Bearer
+    credentials are *not* client defaults: callers must attach them per
+    request to avoid retaining a rotated credential in process memory.
+    """
+    key = (str(base_url).rstrip("/"), str(ca_file or ""))
+    options: dict[str, object] = {
+        "timeout": httpx.Timeout(30.0), "trust_env": False,
+        "limits": httpx.Limits(max_connections=2, max_keepalive_connections=1, keepalive_expiry=20.0),
+    }
+    if ca_file:
+        options["verify"] = ca_file
+    lifecycle_active = _public_client is not None and not _public_client.is_closed
+    if lifecycle_active:
+        client = _remote_archive_clients.get(key)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(**options)
+            _remote_archive_clients[key] = client
+        yield client
+        return
+    async with httpx.AsyncClient(**options) as temporary_client:
+        yield temporary_client
+
+
 def public_http_client_status() -> dict[str, int | bool]:
     """Expose only pool configuration/ownership, never provider traffic."""
     client = _public_client
@@ -141,7 +176,15 @@ def provider_http_client_status() -> dict[str, int | bool]:
             "active_provider_pools": active, "max_connections_per_pool": 4}
 
 
+def remote_archive_http_client_status() -> dict[str, int | bool]:
+    """Expose pool ownership/count without leaking archive addresses or tokens."""
+    active = sum(1 for client in _remote_archive_clients.values() if not client.is_closed)
+    return {"lifecycle_owned": _public_client is not None and not _public_client.is_closed,
+            "active_archive_pools": active, "max_connections_per_pool": 2}
+
+
 __all__ = [
     "alert_http_client", "alert_http_client_status", "close_http_clients",
-    "provider_http_client", "provider_http_client_status", "public_http_client", "public_http_client_status", "start_http_clients",
+    "provider_http_client", "provider_http_client_status", "public_http_client", "public_http_client_status",
+    "remote_archive_http_client", "remote_archive_http_client_status", "start_http_clients",
 ]

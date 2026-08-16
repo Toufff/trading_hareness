@@ -24,6 +24,7 @@ class HealthDependencies:
     public_http_client_status: Callable[[], dict[str, Any]]
     alert_http_client_status: Callable[[], dict[str, Any]]
     provider_http_client_status: Callable[[], dict[str, Any]]
+    remote_archive_http_client_status: Callable[[], dict[str, Any]]
     provider_request_reservation_status: Callable[[], dict[str, Any]]
     runtime_executor_status: Callable[[], dict[str, Any]]
     super_get_executor_status: Callable[[], dict[str, Any]]
@@ -93,6 +94,7 @@ def health_payload(deps: HealthDependencies) -> dict[str, Any]:
         "http_clients": {
             "public_market": deps.public_http_client_status(), "feishu_alert": deps.alert_http_client_status(),
             "tushare_provider": deps.provider_http_client_status(),
+            "remote_analyst_archive": deps.remote_archive_http_client_status(),
         },
         "provider_rate_limits": deps.provider_request_reservation_status(),
         "blocking_executors": {**deps.runtime_executor_status(), "super_get": deps.super_get_executor_status()},

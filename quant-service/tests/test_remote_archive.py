@@ -1,4 +1,5 @@
 import unittest
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -11,11 +12,33 @@ from app.remote_archive import (analyst_global_sync_cursor, classify_remote_text
                                 report_topic_labels, text_hash, text_only_remote_message, text_only_remote_report,
                                 body_stated_timestamp, import_remote_analyst_message)
 from app.analyst_observations import observation_action, observation_status
-from app.remote_archive_sync import RemoteArchiveSyncService
+from app.remote_archive_sync import RemoteArchiveSyncService, _AuthorizedArchiveClient
 from app.claim_review_service import review_claim
 
 
 class RemoteArchiveNormalizationTests(unittest.TestCase):
+    def test_archive_authorization_is_request_scoped_not_client_default(self):
+        calls = []
+
+        class Client:
+            async def get(self, url, **kwargs):
+                calls.append((url, kwargs))
+                return MagicMock()
+
+        async def invoke():
+            pooled = Client()
+            first = _AuthorizedArchiveClient(pooled, base_url="https://archive.example/", bearer="first-token")
+            second = _AuthorizedArchiveClient(pooled, base_url="https://archive.example/", bearer="rotated-token")
+            await first.get("/messages/updates", headers={"Accept": "application/json"})
+            await second.get("analysts/a/messages/m")
+            return pooled
+
+        pooled = __import__("asyncio").run(invoke())
+        self.assertEqual(calls[0][0], "https://archive.example/messages/updates")
+        self.assertEqual(calls[0][1]["headers"], {"Accept": "application/json", "Authorization": "Bearer first-token"})
+        self.assertEqual(calls[1][1]["headers"], {"Authorization": "Bearer rotated-token"})
+        self.assertFalse(hasattr(pooled, "headers"))
+
     def test_global_message_cursor_defaults_to_an_opaque_empty_cursor(self):
         connection = MagicMock()
         connection.execute.return_value.fetchone.return_value = None
@@ -276,10 +299,14 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
             max_items = 20
 
         class Client:
-            async def __aenter__(self): return self
-            async def __aexit__(self, *_args): return False
+            async def get(self, *_args, **_kwargs):
+                raise AssertionError("empty-delta test must not issue an HTTP request")
 
-        with patch("app.remote_archive_sync.httpx.AsyncClient", return_value=Client()):
+        @asynccontextmanager
+        async def client_context(*_args, **_kwargs):
+            yield Client()
+
+        with patch("app.remote_archive_sync.remote_archive_http_client", client_context):
             result = __import__("asyncio").run(service.sync(Payload(), "Bearer " + "a" * 32))
         self.assertEqual(result["streams"]["messages"]["items"], 0)
         self.assertEqual(len(recorded), 1)

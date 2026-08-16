@@ -25,7 +25,7 @@
 
 | 项目 | 状态 | 当前证据 |
 | --- | --- | --- |
-| provider registry、共享限频、有限重试、熔断 | 已完成 | Tushare/公共源独立 client、Retry-After、跨副本预约和 health |
+| provider registry、共享限频、有限重试、熔断 | 已完成 | Tushare/公共源/远端分析师文本源均使用生命周期 HTTP client；远端每次触发只短暂附加 Bearer，不在连接池、日志或状态中保留凭据；Retry-After、跨副本预约和 health 均已接入 |
 | 成功/失败延迟与错误脱敏 | 已完成主要路径 | `provider_health.py`；Tushare、腾讯、Sina、东财、AKShare、巨潮公告、BaoStock、Super GET 主要路径耗时进入 health/Prometheus；兼容路径允许延迟缺省且不覆盖已有值 |
 | 盘中调度、租约、outbox、飞书恢复 | 已完成 | 开盘预检、`runtime_leases`、投递回执和连续失败治理 |
 | 存储/备份/恢复前校验 | 已完成 | 总研究空间**硬上限** 40 GiB、热库**硬上限** 28 GiB；80% 预警、90% 暂停非必要高频采集，配合保留策略和 `pg_restore -l` manifest 校验 |

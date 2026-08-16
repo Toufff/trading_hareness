@@ -160,7 +160,8 @@ from . import sector_read_model as sector_reads
 from . import intraday_evidence_read_model as intraday_evidence_reads
 from . import market_result_read_model as market_result_reads
 from .intraday_outcome_read_model import latest_intraday_outcomes as read_latest_intraday_outcomes
-from .http_clients import alert_http_client_status, close_http_clients, provider_http_client_status, public_http_client_status, start_http_clients
+from .http_clients import (alert_http_client_status, close_http_clients, provider_http_client_status,
+                           public_http_client_status, remote_archive_http_client_status, start_http_clients)
 from .alert_transport import post_feishu_alert_text
 from .intraday_schedule import (
     intraday_board_curve_clock_session,
@@ -7668,6 +7669,7 @@ def health() -> dict[str, Any]:
             data_directory=lambda: Path(os.getenv("QUANT_DATA_DIR", "/var/lib/quant")),
             resource_status=runtime_resource_status, public_http_client_status=public_http_client_status,
             alert_http_client_status=alert_http_client_status, provider_http_client_status=provider_http_client_status,
+            remote_archive_http_client_status=remote_archive_http_client_status,
             provider_request_reservation_status=provider_request_reservation_status,
             runtime_executor_status=runtime_executor_status, super_get_executor_status=super_get_executor_status,
             async_database_pool_status=async_db.pool_status,

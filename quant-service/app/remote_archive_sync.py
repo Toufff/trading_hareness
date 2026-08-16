@@ -9,7 +9,29 @@ from typing import Any, Awaitable, Callable
 import httpx
 from fastapi import HTTPException
 
+from .http_clients import remote_archive_http_client
 from .remote_archive_transport import RemoteArchiveTransport
+
+
+class _AuthorizedArchiveClient:
+    """Attach one trigger's credential without retaining it in the HTTP pool.
+
+    The underlying client is process-owned by ``remote_archive_http_client`` and is
+    therefore eligible for keep-alive reuse across the separate reports and
+    messages workflows.  The short-lived wrapper holds the inbound bearer
+    only for this one sync invocation, prefixes the configured fixed archive
+    URL, and never exposes either value to persistence or status endpoints.
+    """
+
+    def __init__(self, client: httpx.AsyncClient, *, base_url: str, bearer: str) -> None:
+        self._client = client
+        self._base_url = base_url.rstrip("/")
+        self._authorization = f"Bearer {bearer}"
+
+    async def get(self, path: str, **kwargs: Any) -> httpx.Response:
+        headers = dict(kwargs.pop("headers", {}) or {})
+        headers["Authorization"] = self._authorization
+        return await self._client.get(f"{self._base_url}/{str(path).lstrip('/')}", headers=headers, **kwargs)
 
 
 async def remote_archive_get(
@@ -197,14 +219,13 @@ class RemoteArchiveSyncService:
                     raise HTTPException(status_code=429, detail=f"remote analyst archive {stream} sync is rate limited locally")
             for stream in payload.streams:
                 self._last_started[stream] = now
-        transport: dict[str, Any] = {
-            "timeout": httpx.Timeout(30.0), "trust_env": False,
-            "headers": {"Authorization": f"Bearer {bearer}"},
-            "limits": httpx.Limits(max_connections=2, max_keepalive_connections=1, keepalive_expiry=20.0),
-        }
-        if settings["ca_file"]:
-            transport["verify"] = settings["ca_file"]
-        async with httpx.AsyncClient(base_url=str(settings["base_url"]), **transport) as client:
+        # Keep the expensive TCP/TLS client process-owned. Authorization is
+        # deliberately attached by the short-lived wrapper below, rather than
+        # to the pooled client, so a rotated n8n credential can never leak
+        # into a later request. The pool key also includes an optional custom
+        # CA path, preserving the existing archive TLS contract.
+        async with remote_archive_http_client(str(settings["base_url"]), settings.get("ca_file")) as pooled_client:
+            client = _AuthorizedArchiveClient(pooled_client, base_url=str(settings["base_url"]), bearer=bearer)
             results: dict[str, Any] = {}
             for stream in payload.streams:
                 # A one-stream n8n workflow owns this lock for only its own

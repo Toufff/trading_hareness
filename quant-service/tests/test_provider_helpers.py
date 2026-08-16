@@ -32,7 +32,9 @@ from app.strategy_health_read_model import health_recommendation, latest_strateg
 from app.sector_read_model import market_sectors as read_market_sectors, sector_members as read_sector_members
 from app.intraday_evidence_read_model import latest_scan as read_latest_intraday_scan
 from app.market_result_read_model import market_snapshots as read_market_snapshots, tushare_raw as read_tushare_raw
-from app.http_clients import alert_http_client, alert_http_client_status, close_http_clients, provider_http_client, provider_http_client_status, public_http_client, public_http_client_status, start_http_clients
+from app.http_clients import (alert_http_client, alert_http_client_status, close_http_clients, provider_http_client,
+                              provider_http_client_status, public_http_client, public_http_client_status,
+                              remote_archive_http_client, remote_archive_http_client_status, start_http_clients)
 from app.intraday_runtime_status import load_intraday_runtime_evidence
 from app.intraday_scan_repository import persist_intraday_scan_terminal
 from app.market_session_repository import realtime_market_session as read_market_session, realtime_market_session_async as read_market_session_async
@@ -623,6 +625,7 @@ class ProviderHelperTests(unittest.TestCase):
             background_loop_lease_seconds=lambda: 120,
             resource_status=lambda _: {"state": "healthy"}, public_http_client_status=lambda: {"active": True},
             alert_http_client_status=lambda: {"active": True}, provider_http_client_status=lambda: {"active": True},
+            remote_archive_http_client_status=lambda: {"active": True},
             provider_request_reservation_status=lambda: {"shared_database_reservation": True},
             runtime_executor_status=lambda: {"database": {"occupied": 0}}, super_get_executor_status=lambda: {"occupied": 0},
             provider_status=lambda: [{"name": "super_get"}], free_provider_status=lambda: [{"name": "tencent"}],
@@ -647,7 +650,7 @@ class ProviderHelperTests(unittest.TestCase):
             read_health_payload(dependencies)
 
     def test_http_clients_are_reused_only_inside_the_service_lifecycle(self):
-        async def check() -> tuple[bool, bool, bool, bool, bool, int]:
+        async def check() -> tuple[bool, bool, bool, bool, bool, bool, int, int, bool]:
             await close_http_clients()
             await start_http_clients()
             async with public_http_client() as first, public_http_client() as second:
@@ -657,23 +660,32 @@ class ProviderHelperTests(unittest.TestCase):
             async with provider_http_client("tushare_super_sdk", "http://proxy.example:8080") as first_provider, \
                     provider_http_client("tushare_super_sdk", "http://proxy.example:8080") as second_provider:
                 provider_reused = first_provider is second_provider
+            async with remote_archive_http_client("https://archive.example", None) as first_archive, \
+                    remote_archive_http_client("https://archive.example", None) as second_archive:
+                archive_reused = first_archive is second_archive
             active_before_close = bool(public_http_client_status()["lifecycle_owned"])
             alert_active_before_close = bool(alert_http_client_status()["lifecycle_owned"])
             active_provider_pools = int(provider_http_client_status()["active_provider_pools"])
+            active_archive_pools = int(remote_archive_http_client_status()["active_archive_pools"])
             await close_http_clients()
             active_after_close = bool(public_http_client_status()["lifecycle_owned"])
-            return reused, alert_reused, provider_reused, active_before_close, alert_active_before_close, active_provider_pools, active_after_close
+            return (reused, alert_reused, provider_reused, archive_reused, active_before_close, alert_active_before_close,
+                    active_provider_pools, active_archive_pools, active_after_close)
 
-        reused, alert_reused, provider_reused, active_before_close, alert_active_before_close, active_provider_pools, active_after_close = asyncio.run(check())
+        (reused, alert_reused, provider_reused, archive_reused, active_before_close, alert_active_before_close,
+         active_provider_pools, active_archive_pools, active_after_close) = asyncio.run(check())
         self.assertTrue(reused)
         self.assertTrue(alert_reused)
         self.assertTrue(provider_reused)
+        self.assertTrue(archive_reused)
         self.assertTrue(active_before_close)
         self.assertTrue(alert_active_before_close)
         self.assertEqual(active_provider_pools, 1)
+        self.assertEqual(active_archive_pools, 1)
         self.assertFalse(active_after_close)
         self.assertFalse(alert_http_client_status()["lifecycle_owned"])
         self.assertEqual(provider_http_client_status()["active_provider_pools"], 0)
+        self.assertEqual(remote_archive_http_client_status()["active_archive_pools"], 0)
 
     def test_provider_health_presentation_distinguishes_configuration_circuit_and_failure(self):
         observed_at = datetime(2026, 8, 11, 3, tzinfo=timezone.utc)
