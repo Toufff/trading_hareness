@@ -12,6 +12,27 @@ from fastapi import HTTPException
 from .remote_archive_transport import RemoteArchiveTransport
 
 
+async def remote_archive_get(
+    client: httpx.AsyncClient,
+    path: str,
+    *,
+    settings: Callable[[], dict[str, Any]],
+    params: dict[str, Any] | None = None,
+    transport: RemoteArchiveTransport | None = None,
+    sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+) -> dict[str, Any]:
+    """Use the bounded archive transport without recreating HTTP policy.
+
+    This small adapter is shared by the service and its transport regression
+    test.  It deliberately takes configuration and the transport as injected
+    dependencies, so callers cannot bypass the request-spacing and retry
+    contract by importing a legacy helper from the application singleton.
+    """
+    return await (transport or RemoteArchiveTransport()).get(
+        client, path, params=params, settings=settings(), sleep=sleep,
+    )
+
+
 class RemoteArchiveSyncService:
     """Coordinate bounded message/report deltas without media or backfill."""
 
@@ -68,8 +89,9 @@ class RemoteArchiveSyncService:
         )
 
     async def _get(self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return await self._transport.get(
-            client, path, params=params, settings=self._settings(), sleep=self._sleep,
+        return await remote_archive_get(
+            client, path, params=params, settings=self._settings,
+            transport=self._transport, sleep=self._sleep,
         )
 
     async def _messages(self, client: httpx.AsyncClient, maximum: int) -> dict[str, Any]:
@@ -205,4 +227,4 @@ class RemoteArchiveSyncService:
         return {"status": "completed", "streams": results, "text_only": True, "history_fetch": False}
 
 
-__all__ = ["RemoteArchiveSyncService"]
+__all__ = ["RemoteArchiveSyncService", "remote_archive_get"]
