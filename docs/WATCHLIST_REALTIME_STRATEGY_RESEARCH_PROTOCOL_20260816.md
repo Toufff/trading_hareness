@@ -262,7 +262,7 @@ residual_return_h = stock_return_h
 现有总研究空间上限 40 GiB、热库上限 28 GiB。策略挖掘按以下优先级存储：
 
 1. 永久/长期：事件摘要、输入 hash、SignalSpec、episode、outcome、决策和质量码；
-2. 有界热数据：规则最小输入快照与同源观察池报价 60--120 天（默认 90），板块曲线 60 天，盘口/秒级交叉确认更短；
+2. 有界热数据：规则最小输入快照与同源观察池报价 60--120 天（默认 90），板块曲线 60 天，盘口/秒级交叉确认更短；重复的 `suppressed/confirming` 信号只保留 90 天，且只有无投递、无 outcome 的行才可删除；
 3. 不长期保存：重复 provider 原文、未使用的全量原始媒体、临时响应、过期缓存；
 4. 到 80% 预警、90% 停止非必要高频采集；先减非必要 raw，再不破坏证据链。
 
@@ -286,4 +286,3 @@ residual_return_h = stock_return_h
 - vn.py 的行情录制、回测与前置风控：[官方文档](https://www.vnpy.org/pages/document.html)。
 - 概率校准的独立校准集和 reliability curve：[scikit-learn calibration](https://scikit-learn.org/stable/modules/calibration.html)。
 - 多重试验选择偏差：[Deflated Sharpe Ratio](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551)、[White Reality Check](https://onlinelibrary.wiley.com/doi/10.1111/1468-0262.00152)。
-

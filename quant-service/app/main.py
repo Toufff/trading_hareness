@@ -218,6 +218,7 @@ from .intraday_scan_repository import (
     previous_quote_frames,
 )
 from .intraday_rule_snapshot_repository import persist_rule_input_snapshot, prune_rule_input_evidence
+from .intraday_event_retention import ephemeral_signal_retention_days, prune_ephemeral_signal_events
 from .market_session_repository import (
     realtime_market_session as read_realtime_market_session,
     realtime_market_session_async as read_realtime_market_session_async,
@@ -4206,16 +4207,23 @@ intraday_rule_input_pruned_on: date | None = None
 
 
 async def prune_intraday_rule_input_evidence_if_due(observed_at: datetime) -> None:
-    """Run one bounded retention pass per China trading date before scanning."""
+    """Run one bounded evidence-retention pass per China trading date.
+
+    Frozen core inputs are retained for replay, while repeated non-confirmed
+    signal rows are retained for the same conservative window and then safely
+    removed only when they have neither an alert delivery nor an outcome.
+    """
     global intraday_rule_input_pruned_on
     local_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
     if intraday_rule_input_pruned_on == local_date:
         return
-    cutoff = observed_at - timedelta(days=intraday_rule_input_retention_days())
+    rule_input_cutoff = observed_at - timedelta(days=intraday_rule_input_retention_days())
+    event_cutoff = observed_at - timedelta(days=ephemeral_signal_retention_days())
 
     def prune() -> None:
         with db.transaction() as connection:
-            prune_rule_input_evidence(connection, cutoff=cutoff)
+            prune_rule_input_evidence(connection, cutoff=rule_input_cutoff)
+            prune_ephemeral_signal_events(connection, cutoff=event_cutoff)
 
     await run_database_blocking(prune)
     intraday_rule_input_pruned_on = local_date

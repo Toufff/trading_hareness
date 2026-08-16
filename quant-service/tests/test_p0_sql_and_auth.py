@@ -21,6 +21,7 @@ from app.analyst_expert_research import rebuild_analyst_opinions
 from app.episode_lifecycle import backfill_signal_event_episode_links, ensure_signal_episode
 from app.analyst_observations import persist_extraction_run, persist_observations_for_evidence
 from app.feature_snapshot_repository import materialize_feature_snapshot
+from app.intraday_event_retention import prune_ephemeral_signal_events
 from app.main import DailyBar, app, db, executor_saturated_response, upsert_bar
 from app.runtime_executors import ExecutorSaturatedError
 
@@ -180,6 +181,69 @@ class UpsertBarSqlIntegrationTests(unittest.TestCase):
             self.assertTrue(market["is_suspended"])
             self.assertEqual(Decimal(canonical["adj_factor"]), Decimal("1.25"))
             self.assertTrue(canonical["is_suspended"])
+        finally:
+            self._cleanup()
+
+
+@unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
+class EphemeralIntradayEventRetentionSqlIntegrationTests(unittest.TestCase):
+    """Prove cleanup cannot remove user-facing or settlement-backed events."""
+
+    symbol = "999996.SZ"
+    # A historical reserved timestamp keeps the test cutoff strictly before
+    # any production event. Never use a far-future cutoff here: the retention
+    # SQL intentionally has no symbol filter in production.
+    observed_at = datetime(2000, 1, 2, 1, 0, tzinfo=timezone.utc)
+
+    def _cleanup(self) -> None:
+        with db.transaction() as connection:
+            connection.execute("DELETE FROM quant.intraday_signal_events WHERE symbol=%s", (self.symbol,))
+            connection.execute("DELETE FROM quant.instruments WHERE symbol=%s", (self.symbol,))
+
+    def _event(self, connection, state: str) -> str:
+        row = connection.execute(
+            """INSERT INTO quant.intraday_signal_events(
+                   symbol,signal_key,signal_type,severity,state,score,observed_at,conditions,evidence,risk_flags
+               ) VALUES(%s,%s,'watch','info',%s,1,%s,%s,%s,%s)
+               RETURNING signal_event_id""",
+            (self.symbol, f"{self.symbol}:watch:{state}", state, self.observed_at, Json({}), Json({}), Json([])),
+        ).fetchone()
+        return str(row["signal_event_id"])
+
+    def test_only_unreferenced_ephemeral_event_is_deleted(self) -> None:
+        self._cleanup()
+        try:
+            with db.transaction() as connection:
+                connection.execute("INSERT INTO quant.instruments(symbol,exchange,name) VALUES(%s,'SZ','Retention')", (self.symbol,))
+                removable = self._event(connection, "suppressed")
+                delivered = self._event(connection, "confirming")
+                outcome_backed = self._event(connection, "suppressed")
+                preserved = self._event(connection, "confirmed")
+                connection.execute(
+                    """INSERT INTO quant.intraday_alert_deliveries(signal_event_id,channel,status)
+                       VALUES(%s,'retention-test','suppressed')""",
+                    (delivered,),
+                )
+                connection.execute(
+                    """INSERT INTO quant.intraday_signal_outcomes(
+                           signal_event_id,horizon_key,direction,entry_observed_at,entry_price,status,tradability,source_status
+                       ) VALUES(%s,'5m',1,%s,10,'unavailable','observed_quote_only','{}'::jsonb)""",
+                    (outcome_backed, self.observed_at),
+                )
+                result = prune_ephemeral_signal_events(
+                    connection, cutoff=datetime(2001, 1, 1, tzinfo=timezone.utc),
+                )
+                remaining = {
+                    str(row["signal_event_id"])
+                    for row in connection.execute(
+                        "SELECT signal_event_id FROM quant.intraday_signal_events WHERE symbol=%s", (self.symbol,)
+                    ).fetchall()
+                }
+            self.assertEqual(result["total"], 1)
+            self.assertNotIn(removable, remaining)
+            self.assertIn(delivered, remaining)
+            self.assertIn(outcome_backed, remaining)
+            self.assertIn(preserved, remaining)
         finally:
             self._cleanup()
 
