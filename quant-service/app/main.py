@@ -75,11 +75,11 @@ from .intraday_features import strategy_session_rows as pure_strategy_session_ro
 from .post_close_limit_features import limit_daily_features as pure_limit_daily_features
 from .post_close_limit_features import board_count as pure_limit_board_count
 from .watchlist_daily_factors import watchlist_daily_factors as pure_watchlist_daily_factors
-from .watchlist_main_wave import (
+from .watchlist_main_wave_v2 import (
     STRATEGY_KEY as WATCHLIST_MAIN_WAVE_STRATEGY_KEY,
-    latest_shadow_priors,
-    main_wave_shadow_signal,
-    run_watchlist_main_wave_research,
+    latest_shadow_priors_v2,
+    main_wave_v2_shadow_signal,
+    run_watchlist_main_wave_v2_research,
 )
 from .feature_snapshot_repository import materialize_feature_snapshot
 from .intraday_limit_lift import intraday_limit_lift_pattern as pure_intraday_limit_lift_pattern
@@ -3964,7 +3964,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
         snapshot_payload = dict(paper_snapshot["payload"] or {}) if paper_snapshot else {}
         if paper_snapshot:
             snapshot_payload["drawdown"] = paper_snapshot["drawdown"]
-        shadow_priors = latest_shadow_priors(connection)
+        shadow_priors = latest_shadow_priors_v2(connection)
         for watch in watches:
             symbol = str(watch["symbol"])
             quote = quotes.get(symbol)
@@ -3991,7 +3991,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             previous_quote = dict(previous) if previous else None
             generated_signals = intraday_signal_rules(watch, quote, previous_quote, daily_factors,
                                                        minute_feature, peer_context)
-            shadow_signal = main_wave_shadow_signal(
+            shadow_signal = main_wave_v2_shadow_signal(
                 watch, quote, minute_feature, peer_context, shadow_priors.get(symbol),
             )
             if shadow_signal is not None:
@@ -8560,7 +8560,7 @@ async def run_strategy_pattern_mining_endpoint(payload: StrategyPatternMiningReq
 def persist_watchlist_main_wave_research(payload: WatchlistMainWaveResearchRequest) -> dict[str, Any]:
     """Fit and persist one reproducible shadow model from stored daily bars."""
     with db.transaction() as connection:
-        result = run_watchlist_main_wave_research(connection, payload.as_of_date)
+        result = run_watchlist_main_wave_v2_research(connection, payload.as_of_date)
         row = connection.execute(
             """INSERT INTO quant.strategy_experiments(
                    strategy_key,universe_key,start_date,end_date,status,parameters,metrics,equity_curve,trades)

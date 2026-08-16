@@ -1480,6 +1480,8 @@ INSERT INTO quant.strategy_registry(strategy_key,label,engine,version,configurat
      '{"status":"research_only","lookback_days":30,"base_range_pct":[4,18],"recent_volatility_max_ratio":0.85,"recent_volume_max_ratio":0.80,"near_resistance_pct_max":3.0,"requires":"subsequent_eac_breakout_confirmation","no_automatic_order":true}', 'experimental')
     ,('watchlist_main_wave_shadow_v1','观察池主升启动影子模型','qlib-aligned-native-logistic','research-v1',
      '{"status":"shadow_only","history_calendar_days":365,"lookback_trading_days":60,"horizon_trading_days":10,"entry":"next_session_open","selection":"daily_top_quintile","no_feishu_alert":true,"no_automatic_order":true}', 'experimental')
+    ,('watchlist_main_wave_shadow_v2','观察池主升启动可空仓影子模型','qlib-aligned-causal-pattern','research-v2',
+     '{"status":"shadow_only","history_calendar_days":365,"lookback_trading_days":60,"horizon_trading_days":10,"entry":"next_session_open","selection":"qualified_only_max_3_per_day_may_abstain","test_reuse_policy":"diagnostic_only","no_feishu_alert":true,"no_automatic_order":true}', 'experimental')
 ON CONFLICT(strategy_key) DO NOTHING;
 
 INSERT INTO quant.research_frameworks(framework_key,label,role,integration_mode,status,license_note,prerequisites,metadata) VALUES
