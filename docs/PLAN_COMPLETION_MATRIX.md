@@ -18,6 +18,7 @@
 | 实时市场/数据/纸面风险 gate | 已完成 | `app/live_policy.py`、`app/paper_portfolio.py`；risk-off、质量、T+1、日亏、回撤、单票和板块集中度均可解释阻断 |
 | 盘后同日完成语义 | 已完成 | latest-attempt/latest-completed 分离及回归测试 |
 | 分析师唯一 promotion registry | 已完成（默认零权重） | `app/analyst_promotion.py`；未人工批准永远 `weight=0` |
+| 分析师交易日时钟统一 | 已完成 | claim outcome 入场日、研究容量与异步读模型均以 `available_at AT TIME ZONE 'Asia/Shanghai'` 取交易日；`received_at` 保持唯一 live 时钟，安强 `stated_at` 仍仅进入独立作者时点复盘 |
 | 分析师报告差量同步公平性 | 已完成止血 | 每个分析师每轮均检查一页最多 100 条的**文字元数据**；`max_items` 仅限制已变化报告正文的导入数。超出预算的变化不推进游标，后续轮次必重试；不请求图片、视频或媒体 URL |
 | 盘中固定期限结算 | 已完成修复 | 5/15/30m 只读同一连续竞价段、目标后 90 秒内的本地腾讯报价；盘后重算仍读取原始有界窗口，午休/隔夜明确 unavailable |
 | 安强作者时点动作复盘 | 已完成（仅 replay） | `author-stated-local-quote-session-bounded-replay-v1` 独立账本；不进入 live 因子、权重或飞书决策 |
@@ -86,6 +87,8 @@
 - 运行态复核：所有服务容器健康；实时服务在非连续竞价时正确 `standby`，并保留 36 只启用观察股的 30 秒/特别窗口 10 秒/盘口 3 秒/板块曲线 60 秒节奏。主 Tushare 明确标为无实时能力；Super SDK 与 Super GET 均按已验证协议分工，代理连接池和 Super GET 线程内 `requests.Session` 复用已启用。
 - 存储治理复核：量化 schema 13.39 GB，占 40 GiB 总研究预算 31.2%、28 GiB 热库预算 44.5%；7 天盘口与秒级交叉确认、60 天板块曲线/轮动、90 天分钟剖面及 60–120 天（默认 90）规则输入/观察池报价均有留存边界。未删除原始证据，也未启动历史回填。
 - 订单簿数据只作为 `attribution_only`：`qi5`、窗口聚合 order-flow proxy、封单侵蚀等已入 SignalSpec 证据引用；不改变实时评分、阈值或提醒资格。
+- 分析师链复核：报告与消息流各自拥有持久 cursor 与 45 天 liveness receipt；最近的服务端文字-only 增量均已完成。当前 n8n 当前发布版还在等待下一个工作日的首个 `trigger/success` 运行，健康页明确显示该状态，不把旧版或 CLI 执行行当作正式调度成功。
+- 上海日期回归：对晚 UTC 的分析师消息，结算入场必须发生在其对应的上海交易日之后；该语义已覆盖 local-only outcome recomputation，容量/readiness 投影与兼容实现，并有回归测试。
 
 ## 下一次恢复条件
 
