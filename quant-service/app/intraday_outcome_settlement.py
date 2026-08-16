@@ -99,7 +99,13 @@ def settle(
                 tolerance_seconds=INTRADAY_EXIT_QUOTE_TOLERANCE_SECONDS,
             )
             exit_quote = None
-            if window.get("status") != "unavailable" and window.get("query_end") >= window.get("query_start"):
+            # ``unavailable`` after the quote-delay tolerance has elapsed is
+            # not permission to skip the original bounded interval.  The
+            # quote may already be in the local ledger when a post-close
+            # recompute runs.  Only a session-crossing window has no query
+            # bounds and must never borrow lunch/overnight data.
+            if (window.get("query_start") is not None and window.get("query_end") is not None
+                    and window["query_end"] >= window["query_start"]):
                 exit_quote = connection.execute(
                     """SELECT observed_at,price FROM quant.intraday_quote_observations
                          WHERE symbol=%s AND source_name='tencent_free' AND observed_at>=%s AND observed_at<=%s AND price>0

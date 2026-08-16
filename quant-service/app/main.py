@@ -213,6 +213,7 @@ from .analyst_prompt_lab import (
     materialize_intraday_analyst_outcomes,
     materialize_prompt_candidates,
 )
+from .analyst_action_outcomes import materialize_anqiang_action_replay_outcomes
 from .strategy_contracts import LabelSpec
 from .strategy_ablation import ablation_scores
 from .episode_lifecycle import clear_stale_signal_episodes, ensure_signal_episode
@@ -238,6 +239,7 @@ from .routers.research_readiness import build_research_readiness_router
 from .routers.intraday_status import build_intraday_status_router
 from .routers.analyst_reads import build_analyst_reads_router
 from .routers.analyst_trade_action_reads import build_analyst_trade_action_reads_router
+from .routers.analyst_action_outcomes import build_analyst_action_outcomes_router
 from .routers.analyst_skill_reads import build_analyst_skill_reads_router
 from .routers.analyst_research_reads import build_analyst_research_reads_router
 from .routers.event_reads import build_event_reads_router
@@ -7602,6 +7604,7 @@ app.include_router(build_research_readiness_router(
 ))
 app.include_router(build_analyst_reads_router(db, remote_report_list_state, analyst_text_factor_summary))
 app.include_router(build_analyst_trade_action_reads_router(db, anqiang_trade_action_replay))
+app.include_router(build_analyst_action_outcomes_router(db, materialize_anqiang_action_replay_outcomes))
 app.include_router(build_analyst_skill_reads_router(db, analyst_skill_profiles))
 app.include_router(build_analyst_research_reads_router(db, analyst_research_status))
 app.include_router(build_event_reads_router(db, async_db))

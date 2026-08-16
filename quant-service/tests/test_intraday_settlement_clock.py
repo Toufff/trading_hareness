@@ -112,6 +112,56 @@ class IntradaySettlementClockTests(unittest.TestCase):
         self.assertEqual(outcome_insert[10], "unavailable")
         self.assertEqual(persist_barrier.call_args.kwargs["result"]["status"], "unavailable")
 
+    def test_post_close_recompute_uses_a_persisted_quote_inside_the_original_tolerance(self) -> None:
+        signal_at = datetime(2026, 8, 11, 2, 0, tzinfo=timezone.utc)  # 10:00 Shanghai.
+        exit_at = datetime(2026, 8, 11, 2, 5, 20, tzinfo=timezone.utc)
+        signal = {
+            "signal_event_id": "signal-2", "symbol": "000001.SZ", "signal_type": "entry",
+            "observed_at": signal_at, "evidence": {"tencent": {"price": "10.00"}},
+        }
+
+        class Result:
+            def __init__(self, *, rows=None, row=None):
+                self.rows, self.row = rows or [], row
+
+            def fetchall(self):
+                return self.rows
+
+            def fetchone(self):
+                return self.row
+
+        inserts: list[tuple[object, ...]] = []
+
+        class Connection:
+            def execute(self, query, params=None):
+                text = str(query)
+                if "FROM quant.intraday_signal_events" in text:
+                    return Result(rows=[signal])
+                if "source_name='tencent_free' AND observed_at>=%s AND observed_at<=%s" in text:
+                    return Result(row={"observed_at": exit_at, "price": "10.20"})
+                if "SELECT price FROM quant.intraday_quote_observations" in text:
+                    return Result(rows=[{"price": "10.00"}, {"price": "10.20"}])
+                if "FROM quant.canonical_bars_daily" in text:
+                    return Result(row=None)
+                if "INSERT INTO quant.intraday_signal_outcomes" in text:
+                    inserts.append(tuple(params))
+                return Result()
+
+        result = settle(
+            Connection(), date(2026, 8, 11), cutoff=datetime(2026, 8, 11, 2, 10, tzinfo=timezone.utc),
+            horizons=(("5m", 5),), direction_for=lambda _signal_type: 1,
+            metrics_for=intraday_signal_outcome_metrics,
+            decimal_or_none=lambda value: Decimal(str(value)) if value is not None else None,
+            barrier_spec_type=LabelSpec, triple_barrier_label=triple_barrier_label,
+            persist_barrier_outcome=MagicMock(), return_decomposition=a_share_return_decomposition,
+            json_safe=lambda value: value,
+        )
+
+        self.assertEqual(result["matured"], 1)
+        intraday_insert = next(params for params in inserts if params[1] == "5m")
+        self.assertEqual(intraday_insert[10], "matured")
+        self.assertEqual(intraday_insert[5], exit_at)
+
 
 if __name__ == "__main__":
     unittest.main()

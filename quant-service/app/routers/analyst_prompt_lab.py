@@ -35,8 +35,11 @@ def build_analyst_prompt_lab_router(database: Any, materialize_fn: Callable[...,
                      FROM quant.analyst_prompt_evaluation_runs ORDER BY cutoff_at DESC LIMIT %s""", (bounded,)
             ).fetchall()
             outcomes = connection.execute(
-                """SELECT horizon_minutes,status,count(*)::int count,avg(directional_return) avg_directional_return
-                     FROM quant.analyst_intraday_outcomes GROUP BY horizon_minutes,status ORDER BY horizon_minutes,status"""
+                """SELECT methodology_version,horizon_minutes,status,count(*)::int count,
+                          avg(directional_return) avg_directional_return
+                     FROM quant.analyst_intraday_outcomes
+                    GROUP BY methodology_version,horizon_minutes,status
+                    ORDER BY methodology_version,horizon_minutes,status"""
             ).fetchall()
         return {"candidates": [dict(row) for row in candidates], "evaluations": [dict(row) for row in evaluations],
                 "intraday_outcomes": [dict(row) for row in outcomes], "live_effect": "none",
