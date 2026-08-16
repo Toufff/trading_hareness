@@ -40,7 +40,16 @@ def strategy_governance(database: Any) -> dict[str, Any]:
     with database.transaction() as c:
         trials = c.execute("SELECT trial_id,strategy_key,strategy_version,status,hypothesis,data_boundary,parameters,approved_by,approved_at,created_at,updated_at FROM quant.strategy_trials ORDER BY updated_at DESC").fetchall()
         contracts = c.execute("SELECT strategy_key,strategy_version,status,trial_id,approved_by,approved_at,updated_at FROM quant.strategy_contracts ORDER BY strategy_key,strategy_version").fetchall()
-    return {"trials": trials, "contracts": contracts, "live_effect":"none", "promotion_boundary":"research_only_until_replay_and_human_approval"}
+        replay_runs = c.execute(
+            "SELECT replay_run_id,engine_version,strategy_key,strategy_version,start_available_at,end_available_at,status,input_hash,trace_hash,data_boundary,metrics,error_message,created_at "
+            "FROM quant.intraday_replay_runs ORDER BY created_at DESC LIMIT 100"
+        ).fetchall()
+        calibrations = c.execute(
+            "SELECT calibration_id,calibration_version,strategy_family,signal_type,horizon_key,market_state,setup_state,status,start_date,end_date,input_hash,metrics,approved_by,approved_at,created_at "
+            "FROM quant.intraday_probability_calibrations ORDER BY created_at DESC LIMIT 100"
+        ).fetchall()
+    return {"trials": trials, "contracts": contracts, "replay_runs": replay_runs, "probability_calibrations": calibrations,
+            "live_effect":"none", "promotion_boundary":"research_only_until_replay_and_human_approval"}
 
 
 __all__ = ["paper_status", "strategy_funnel", "strategy_contracts", "strategy_governance"]

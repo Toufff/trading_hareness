@@ -5,7 +5,11 @@ from __future__ import annotations
 import math
 import re
 from statistics import mean, median
-from typing import Any, Callable
+from collections import defaultdict
+from typing import Any, Callable, Iterable
+
+
+_SYMBOL_PATTERN = re.compile(r"\d{6}\.(?:SH|SZ|BJ)")
 
 
 def minute_features(rows: list[dict[str, Any]], *, lookback: int = 20,
@@ -106,6 +110,48 @@ def peer_context(peer_symbols: list[str], features: dict[str, dict[str, Any]]) -
     }
 
 
+def mapped_watchlist_peers(
+    watch_symbols: Iterable[str], memberships: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Return bounded peers from exact, point-in-time membership rows.
+
+    This deliberately considers only symbols that are already in the explicit
+    watchlist.  It therefore never turns a live confirmation request into an
+    unbounded sector-member scrape, and it never joins labels from different
+    taxonomies.  A peer exists only when target and peer share the *same*
+    ``(taxonomy_key, sector_key)`` relation supplied by the database.
+    """
+    selected = {
+        str(symbol).upper() for symbol in watch_symbols
+        if _SYMBOL_PATTERN.fullmatch(str(symbol).upper())
+    }
+    groups: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for row in memberships:
+        symbol = str(row.get("symbol") or "").upper()
+        taxonomy = str(row.get("taxonomy_key") or "").strip()
+        sector = str(row.get("sector_key") or "").strip()
+        if symbol in selected and taxonomy and sector:
+            groups[(taxonomy, sector)].add(symbol)
+
+    result: dict[str, dict[str, Any]] = {
+        symbol: {"peer_symbols": [], "groups": []} for symbol in sorted(selected)
+    }
+    for (taxonomy, sector), symbols in sorted(groups.items()):
+        if len(symbols) < 2:
+            continue
+        group_symbols = sorted(symbols)
+        for symbol in group_symbols:
+            peers = [item for item in group_symbols if item != symbol]
+            result[symbol]["peer_symbols"] = sorted(set(result[symbol]["peer_symbols"]) | set(peers))
+            result[symbol]["groups"].append({
+                "taxonomy_key": taxonomy,
+                "sector_key": sector,
+                "watchlist_member_count": len(group_symbols),
+                "peer_symbols": peers,
+            })
+    return result
+
+
 def strategy_session_rows(rows: list[dict[str, Any]], *, number: Callable[[Any], float | None]) -> list[dict[str, Any]]:
     """Keep continuous-auction minutes and one value per minute."""
     selected: dict[str, dict[str, Any]] = {}
@@ -122,4 +168,4 @@ def strategy_session_rows(rows: list[dict[str, Any]], *, number: Callable[[Any],
     return [selected[key] for key in sorted(selected)]
 
 
-__all__ = ["minute_features", "peer_context", "strategy_session_rows"]
+__all__ = ["mapped_watchlist_peers", "minute_features", "peer_context", "strategy_session_rows"]

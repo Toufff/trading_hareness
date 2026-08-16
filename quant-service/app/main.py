@@ -70,8 +70,14 @@ from .intraday_clock import eac_window as pure_intraday_eac_window
 from .intraday_clock import feature_clock as pure_intraday_feature_clock
 from .intraday_clock import minute_bucket as pure_intraday_minute_bucket
 from .intraday_features import minute_features as pure_intraday_minute_features
+from .intraday_features import mapped_watchlist_peers as pure_mapped_watchlist_peers
 from .intraday_features import peer_context as pure_intraday_peer_context
 from .intraday_features import strategy_session_rows as pure_strategy_session_rows
+from .intraday_state_machine import classify_setup_state as classify_intraday_setup_state
+from .intraday_factor_contracts import (
+    INTRADAY_FACTOR_CONTRACT_VERSION,
+    contracts_for_signal as intraday_factor_contracts_for_signal,
+)
 from .post_close_limit_features import limit_daily_features as pure_limit_daily_features
 from .post_close_limit_features import board_count as pure_limit_board_count
 from .watchlist_daily_factors import watchlist_daily_factors as pure_watchlist_daily_factors
@@ -83,12 +89,14 @@ from .watchlist_main_wave_v2 import (
 )
 from .watchlist_countertrend_rebound import (
     STRATEGY_KEY as WATCHLIST_REBOUND_STRATEGY_KEY,
+    countertrend_rebound_failure_reduce_signal,
     countertrend_rebound_realtime_signal,
     latest_rebound_priors,
     run_countertrend_rebound_research,
 )
 from .intraday_decision_context import (
     decision_context as intraday_decision_context,
+    invalidate_intraday_probability_profiles,
     load_intraday_probability_profiles,
     probability_for_signal as intraday_probability_for_signal,
 )
@@ -162,6 +170,7 @@ from .intraday_schedule import (
     intraday_scan_interval_seconds,
     intraday_super_get_fast_interval_seconds,
     intraday_super_get_fast_max_in_flight,
+    intraday_super_get_fast_max_symbols,
 )
 from .study_realtime import _row_trade_date, _row_trade_datetime, looks_like_response_header, realtime_rows_are_current
 from .provider_health import (
@@ -986,6 +995,36 @@ def intraday_outcome_attribution_summary(items: list[dict[str, Any]]) -> dict[st
     return pure_outcome_attribution_summary(items, number=intraday_number)
 
 
+def refresh_intraday_signal_attributions(connection: Any, *, cutoff: datetime) -> int:
+    """Backfill deterministic attribution after a classifier correction.
+
+    Signal evidence is immutable, but attribution is a derived research label.
+    Rebuilding it in the same transaction as outcome settlement prevents old
+    EAC labels from contaminating subsequent offline policy reviews.
+    """
+    rows = connection.execute(
+        """SELECT signal_event_id,signal_key,signal_type,conditions,evidence
+             FROM quant.intraday_signal_events WHERE observed_at<=%s""",
+        (cutoff,),
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        evidence = dict(row["evidence"] or {})
+        attribution = intraday_signal_attribution(
+            str(row["signal_key"]), str(row["signal_type"]),
+            dict(row["conditions"] or {}), evidence,
+        )
+        if evidence.get("attribution") == attribution:
+            continue
+        evidence["attribution"] = attribution
+        connection.execute(
+            "UPDATE quant.intraday_signal_events SET evidence=%s WHERE signal_event_id=%s",
+            (Json(strategy_json_safe(evidence)), row["signal_event_id"]),
+        )
+        changed += 1
+    return changed
+
+
 def recompute_intraday_signal_outcomes_legacy(as_of_date: date | None = None) -> dict[str, Any]:
     """Settle confirmed alerts only from quotes/bars that arrived afterwards.
 
@@ -1124,13 +1163,16 @@ def recompute_intraday_signal_outcomes(as_of_date: date | None = None) -> dict[s
     """Settle confirmed alerts from persisted evidence through the shared repository."""
     cutoff = intraday_outcome_cutoff(as_of_date)
     with db.transaction() as connection:
-        return persist_intraday_outcome_settlement(
+        attribution_backfilled = refresh_intraday_signal_attributions(connection, cutoff=cutoff)
+        result = persist_intraday_outcome_settlement(
             connection, as_of_date, cutoff=cutoff, horizons=INTRADAY_OUTCOME_HORIZONS,
             direction_for=intraday_signal_direction, metrics_for=intraday_signal_outcome_metrics,
             decimal_or_none=decimal_or_none, barrier_spec_type=LabelSpec,
             triple_barrier_label=triple_barrier_label, persist_barrier_outcome=persist_barrier_outcome,
             return_decomposition=a_share_return_decomposition, json_safe=strategy_json_safe,
         )
+    invalidate_intraday_probability_profiles()
+    return {**result, "attribution_backfilled": attribution_backfilled}
 
 
 def recompute_outcomes_legacy(as_of_date: date | None = None) -> dict[str, Any]:
@@ -1270,7 +1312,10 @@ def generate_recommendations_legacy(request: GenerateRequest) -> dict[str, Any]:
         for item in materialized["items"]:
             feature = item["features"]
             flags = list(item["quality_flags"])
-            close, sma20 = number(feature.get("close")), number(feature.get("sma_20"))
+            # Cross-session trend and momentum are both calculated on the
+            # strict adjusted research view.  ``close`` remains in the
+            # snapshot for execution/audit only and must not be mixed here.
+            close, sma20 = number(feature.get("research_close")), number(feature.get("sma_20"))
             return_5, return_20 = number(feature.get("return_5")), number(feature.get("return_20"))
             flow_rate = number((feature.get("moneyflow_dc") or {}).get("net_amount_rate"))
             analyst = feature.get("analyst") or {}
@@ -3756,21 +3801,29 @@ async def capture_intraday_minute_sessions(symbols: list[str]) -> dict[str, Any]
             "notice": "仅保存显式观察池的盘末分钟剖面，用于历史同刻量能基线；不构成全市场分钟归档。"}
 
 
-async def intraday_tencent_surge_context(watches: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+async def intraday_tencent_surge_context(
+    watches: list[dict[str, Any]], *, mapped_peers: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Fetch a small opt-in target/peer basket for research peer breadth."""
     requested: list[str] = []
+    mapped_peers = mapped_peers or {}
     for watch in watches:
+        watch_symbol = str(watch["symbol"]).upper()
         metadata = watch.get("metadata") if isinstance(watch.get("metadata"), dict) else {}
         configurations = [metadata.get(key) for key in ("surge_strategy", "reversal_research", "upside_research")
                           if isinstance(metadata.get(key), dict) and metadata[key].get("enabled")]
-        if not configurations:
+        mapped_values = (mapped_peers.get(watch_symbol) or {}).get("peer_symbols") or []
+        if not configurations and not mapped_values:
             continue
-        values = [str(watch["symbol"]), *(value for strategy in configurations for value in (strategy.get("peer_symbols") or []))]
+        values = [watch_symbol, *mapped_values,
+                  *(value for strategy in configurations for value in (strategy.get("peer_symbols") or []))]
         for value in values:
             symbol = str(value).upper()
             if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) and symbol not in requested:
                 requested.append(symbol)
     # A public minute endpoint is corroborating evidence, not a broad scanner.
+    # Preserve the full intent in source status, then retain a strict cap.
+    requested_total = len(requested)
     requested = requested[:12]
     # One-minute bars do not gain information every ten seconds.  Keep a tiny,
     # expiring cache so the high-frequency quote loop does not turn a bounded
@@ -3797,7 +3850,9 @@ async def intraday_tencent_surge_context(watches: list[dict[str, Any]]) -> tuple
         "tencent_free", [TENCENT_INTRADAY_MINUTE_CAPABILITY],
     ):
         errors = {**cached_errors, **{symbol: "provider health circuit is open; upstream request skipped" for symbol in missing}}
-        return cached_features, {"requested": requested, "completed": sorted(cached_features), "errors": errors,
+        return cached_features, {"requested": requested, "requested_total": requested_total,
+                                 "truncated": requested_total > len(requested),
+                                 "completed": sorted(cached_features), "errors": errors,
                                  "cached_symbols": sorted(cached_features), "cache_ttl_seconds": cache_ttl_seconds,
                                  "provider_status": "circuit_open"}
     semaphore = asyncio.Semaphore(4)
@@ -3827,7 +3882,9 @@ async def intraday_tencent_surge_context(watches: list[dict[str, Any]]) -> tuple
             persist_tencent_intraday_minute_health, fresh_completed, fresh_errors,
             round((asyncio.get_running_loop().time() - started_at) * 1000),
         )
-    return features, {"requested": requested, "completed": sorted(features), "errors": errors,
+    return features, {"requested": requested, "requested_total": requested_total,
+                      "truncated": requested_total > len(requested),
+                      "completed": sorted(features), "errors": errors,
                       "cached_symbols": sorted(cached_features), "cache_ttl_seconds": cache_ttl_seconds,
                       "provider_status": "completed" if fresh_completed else "failed" if fresh_errors else "cached"}
 
@@ -4014,6 +4071,11 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             )
             if rebound_signal is not None:
                 generated_signals.append(rebound_signal)
+            rebound_failure_signal = countertrend_rebound_failure_reduce_signal(
+                watch, quote, minute_feature, peer_context, rebound_priors.get(symbol),
+            )
+            if rebound_failure_signal is not None:
+                generated_signals.append(rebound_failure_signal)
             fast_confirmation = fast_confirmations.get(symbol, {"status": "missing", "max_age_seconds": 30})
             first_eac = connection.execute(
                 """SELECT observed_at,conditions FROM quant.intraday_signal_events
@@ -4072,7 +4134,15 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                                   "reasons": list(portfolio_gate.reasons), "risk_flags": list(portfolio_gate.risk_flags)}
                 policy = live_policy_gate(signal, watch, quote, daily_factors, market_context, fast_confirmation,
                                           portfolio_risk)
-                signal["conditions"] = {**signal["conditions"], "policy_gate": policy}
+                setup_state = classify_intraday_setup_state(
+                    watch, quote, minute_feature, peer_context, policy,
+                )
+                signal["conditions"] = {
+                    **signal["conditions"], "policy_gate": policy,
+                    "setup_state": setup_state,
+                    "factor_contract_version": INTRADAY_FACTOR_CONTRACT_VERSION,
+                    "factor_contracts": intraday_factor_contracts_for_signal(signal),
+                }
                 signal["risk_flags"] = [*signal["risk_flags"], *policy["risk_flags"]]
                 probability = intraday_probability_for_signal(signal, probability_profiles)
                 signal["conditions"] = {
@@ -4193,6 +4263,28 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
         )
         return finish({"status": "completed", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(), "alerts": [],
                        "notice": "没有启用的观察/持仓标的；先通过 watchlists API 显式添加。"})
+
+    def load_exact_watchlist_memberships() -> list[dict[str, Any]]:
+        """Load only point-in-time relations for the explicit watchlist.
+
+        The peer helper groups these rows by the exact taxonomy/sector pair;
+        no human-readable label matching and no full-sector enumeration occur
+        on the live scan path.
+        """
+        local_trade_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+        with db.transaction() as connection:
+            rows = connection.execute(
+                """SELECT taxonomy_key,sector_key,symbol
+                     FROM quant.sector_membership_history
+                    WHERE symbol=ANY(%s) AND effective_from<=%s
+                      AND (effective_to IS NULL OR effective_to>=%s)
+                      AND taxonomy_key IN ('ths_concept_flow','ths_index_n','ths_industry')""",
+                (selected_symbols, local_trade_date, local_trade_date),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    membership_rows = await run_database_blocking(load_exact_watchlist_memberships)
+    mapped_peer_groups = pure_mapped_watchlist_peers(selected_symbols, membership_rows)
     quote_started_at = asyncio.get_running_loop().time()
     all_a_task = asyncio.create_task(intraday_all_a_snapshot())
     all_a_task.add_done_callback(consume_background_task_exception)
@@ -4221,17 +4313,32 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
     # cross-section is reused only for percentile normalization.
     merge_intraday_watch_quote_prices(quotes, fresh_watch_rows)
     merge_intraday_sina_watch_quotes(quotes, sina_watch_rows)
-    surge_features, surge_source = await intraday_tencent_surge_context(watches)
+    surge_features, surge_source = await intraday_tencent_surge_context(watches, mapped_peers=mapped_peer_groups)
+    surge_source["exact_watchlist_peer_mapping"] = {
+        "status": "completed", "membership_rows": len(membership_rows),
+        "symbols_with_mapped_peers": sum(bool(item.get("peer_symbols")) for item in mapped_peer_groups.values()),
+        "taxonomy_scope": ["ths_concept_flow", "ths_index_n", "ths_industry"],
+        "notice": "仅以同一 taxonomy_key + sector_key 的观察池成员确认；不按名称猜板块关联。",
+    }
     peer_contexts: dict[str, dict[str, Any]] = {}
     for watch in watches:
+        symbol = str(watch["symbol"]).upper()
         metadata = watch.get("metadata") if isinstance(watch.get("metadata"), dict) else {}
         configurations = [metadata.get(key) for key in ("surge_strategy", "reversal_research", "upside_research")
                           if isinstance(metadata.get(key), dict) and metadata[key].get("enabled")]
-        if not configurations:
-            continue
-        peers = [str(value).upper() for strategy in configurations for value in strategy.get("peer_symbols") or []
-                 if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(value).upper()) and str(value).upper() != str(watch["symbol"])]
-        peer_contexts[str(watch["symbol"])] = intraday_peer_context(peers, surge_features)
+        configured_peers = [
+            str(value).upper() for strategy in configurations for value in strategy.get("peer_symbols") or []
+            if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(value).upper()) and str(value).upper() != symbol
+        ]
+        mapped = mapped_peer_groups.get(symbol) or {"peer_symbols": [], "groups": []}
+        peers = sorted(set(configured_peers) | set(mapped.get("peer_symbols") or []))
+        context = intraday_peer_context(peers, surge_features)
+        peer_contexts[symbol] = {
+            **context,
+            "configured_peer_symbols": sorted(set(configured_peers)),
+            "mapped_peer_symbols": list(mapped.get("peer_symbols") or []),
+            "exact_membership_groups": list(mapped.get("groups") or []),
+        }
     ordered_priority_symbols = [str(row["symbol"]) for row in sorted(watches, key=intraday_watch_priority_key)]
     if ordered_priority_symbols and request.realtime_validation_limit:
         start = request.realtime_validation_offset % len(ordered_priority_symbols)
@@ -4913,7 +5020,7 @@ async def intraday_monitor_loop(interval_seconds: int) -> None:
                 scan_request = IntradayScanRequest(realtime_validation_limit=minute_limit,
                                                     realtime_validation_offset=realtime_rotation_offset)
                 realtime_rotation_offset = intraday_next_realtime_validation_offset(
-                    realtime_rotation_offset, minute_limit,
+                    realtime_rotation_offset, minute_limit, slots=40,
                 )
                 jobs = [run_intraday_watchlist_scan(scan_request)]
                 if loop.time() >= next_board_refresh_at:
@@ -5007,7 +5114,8 @@ async def intraday_super_get_fast_quote_loop() -> None:
                     with db.transaction() as connection:
                         return connection.execute(
                             "SELECT * FROM quant.intraday_watchlists WHERE enabled "
-                            "ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT 20"
+                            "ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT %s",
+                            (intraday_super_get_fast_max_symbols(),),
                         ).fetchall()
                 rows = await run_database_blocking(load_watches)
                 symbols = [str(row["symbol"]) for row in sorted((dict(row) for row in rows), key=intraday_watch_priority_key)]

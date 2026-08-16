@@ -32,7 +32,10 @@ def intraday_effective_scan_interval_seconds(normal_interval_seconds: int, now: 
 
 
 def intraday_next_realtime_validation_offset(current_offset: int, step: int, slots: int = 20) -> int:
-    bounded_slots = max(1, min(20, slots))
+    # The scanner itself has a 40-symbol explicit-watch bound.  Do not silently
+    # fold a larger enabled basket back to the first 20 symbols: callers pass
+    # their audited coverage cap and expose any remaining truncation.
+    bounded_slots = max(1, min(100, slots))
     return (max(0, current_offset) + max(0, step)) % bounded_slots
 
 
@@ -48,6 +51,18 @@ def intraday_super_get_fast_max_in_flight() -> int:
         return max(1, min(20, int(os.getenv("INTRADAY_SUPER_GET_FAST_MAX_IN_FLIGHT", "20"))))
     except ValueError:
         return 20
+
+
+def intraday_super_get_fast_max_symbols() -> int:
+    """Cap only the explicitly configured fast-validation basket.
+
+    A full watch scan remains capped elsewhere.  Keeping this configurable
+    lets service health report when a user intentionally chose lower coverage.
+    """
+    try:
+        return max(1, min(40, int(os.getenv("INTRADAY_SUPER_GET_FAST_MAX_SYMBOLS", "40"))))
+    except ValueError:
+        return 40
 
 
 def intraday_fast_quote_retention_days() -> int:

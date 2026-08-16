@@ -5,6 +5,9 @@ import { open, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { createLedger } from './ledger.mjs';
+import { createGroupRelay } from './group-relay.mjs';
+import { createFeishuUserOauth } from './feishu-user-oauth.mjs';
+import { createFeishuWorkbench } from './feishu-workbench.mjs';
 import Busboy from 'busboy';
 
 const required = ['FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'N8N_TEXT_WEBHOOK_URL', 'N8N_MEDIA_PART_WEBHOOK_URL', 'N8N_MEDIA_FINALIZE_WEBHOOK_URL'];
@@ -60,6 +63,58 @@ const ingestionStorageDir = process.env.INGESTION_STORAGE_DIR ?? '/var/lib/adapt
 mkdirSync(ingestionStorageDir, { recursive: true });
 const ledger = createLedger(process.env.INGESTION_DATABASE_URL || undefined);
 await ledger.init(sourceRegistry);
+const feishuUserOauth = createFeishuUserOauth({
+	appId, appSecret, ledger, redirectUri: String(process.env.FEISHU_USER_OAUTH_REDIRECT_URI ?? 'http://localhost:8080/callback').trim(),
+});
+const groupRelayIntervalSeconds = Number(process.env.FEISHU_GROUP_RELAY_INTERVAL_SECONDS ?? 10);
+if (!Number.isFinite(groupRelayIntervalSeconds) || groupRelayIntervalSeconds < 10 || groupRelayIntervalSeconds > 30) {
+	throw new Error('FEISHU_GROUP_RELAY_INTERVAL_SECONDS must be between 10 and 30');
+}
+const groupRelayHistoryLookbackSeconds = Number(process.env.FEISHU_GROUP_RELAY_HISTORY_LOOKBACK_SECONDS ?? 300);
+if (!Number.isFinite(groupRelayHistoryLookbackSeconds) || groupRelayHistoryLookbackSeconds < 60 || groupRelayHistoryLookbackSeconds > 3600) {
+	throw new Error('FEISHU_GROUP_RELAY_HISTORY_LOOKBACK_SECONDS must be between 60 and 3600');
+}
+const groupRelayBootstrapMode = String(process.env.FEISHU_GROUP_RELAY_BOOTSTRAP_MODE ?? 'skip_existing').trim();
+if (!['skip_existing', 'forward_existing'].includes(groupRelayBootstrapMode)) {
+	throw new Error('FEISHU_GROUP_RELAY_BOOTSTRAP_MODE must be skip_existing or forward_existing');
+}
+const groupRelayConfig = {
+	enabled: String(process.env.FEISHU_GROUP_RELAY_ENABLED ?? 'true').toLowerCase() !== 'false',
+	targetChatId: String(process.env.FEISHU_GROUP_RELAY_TARGET_CHAT_ID ?? '').trim(),
+	intervalSeconds: groupRelayIntervalSeconds,
+	historyLookbackSeconds: groupRelayHistoryLookbackSeconds,
+	overlapSeconds: Math.min(120, Math.max(30, Math.floor(groupRelayIntervalSeconds * 3))),
+	reconcileEverySeconds: Math.max(3600, Number(process.env.FEISHU_GROUP_RELAY_RECONCILE_SECONDS ?? 21_600)),
+	reconcileLookbackSeconds: Math.max(300, Number(process.env.FEISHU_GROUP_RELAY_RECONCILE_LOOKBACK_SECONDS ?? 86_400)),
+	bootstrapMode: groupRelayBootstrapMode,
+	sources: [
+		{ key: 'anqiang', tag: 'anqiang', chatId: String(process.env.FEISHU_GROUP_RELAY_ANQIANG_CHAT_ID ?? 'oc_1de6464db12c43bf60985f7131e6334a').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_ANQIANG_CHAT_NAME ?? '马安强 (1)').trim() },
+		{ key: 'liwei', tag: 'liwei', chatId: String(process.env.FEISHU_GROUP_RELAY_LIWEI_CHAT_ID ?? 'oc_4ed9fdb72a152bc921b2d34bd4a1df14').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_LIWEI_CHAT_NAME ?? '消息更新群').trim() },
+		{ key: 'quanneng', tag: 'quanneng', chatId: String(process.env.FEISHU_GROUP_RELAY_QUANNENG_CHAT_ID ?? 'oc_d6a89890c3a62517116a2c63f015e0a0').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_QUANNENG_CHAT_NAME ?? '新野人哥会员群【禁言】').trim() },
+	],
+};
+await ledger.initializeRelayRoutes(groupRelayConfig.sources);
+const feishuWorkbench = createFeishuWorkbench({
+	appId, appSecret, larkClient, ledger, userRequest: feishuUserOauth.userRequest,
+	config: {
+		targetChatId: groupRelayConfig.targetChatId,
+		publicBaseUrl: String(process.env.FEISHU_WORKBENCH_PUBLIC_BASE_URL ?? '').trim(),
+		driveFolderToken: String(process.env.FEISHU_WORKBENCH_DRIVE_FOLDER_TOKEN ?? '').trim(),
+		wikiSpaceId: String(process.env.FEISHU_WORKBENCH_WIKI_SPACE_ID ?? '').trim(),
+		tasklistGuid: String(process.env.FEISHU_WORKBENCH_TASKLIST_GUID ?? '').trim(),
+		baseAppToken: String(process.env.FEISHU_WORKBENCH_BASE_APP_TOKEN ?? '').trim(),
+		baseTableId: String(process.env.FEISHU_WORKBENCH_BASE_TABLE_ID ?? '').trim(),
+		calendarId: String(process.env.FEISHU_WORKBENCH_CALENDAR_ID ?? '').trim(),
+		approvalCode: String(process.env.FEISHU_WORKBENCH_APPROVAL_CODE ?? '').trim(),
+		ailyAppId: String(process.env.FEISHU_WORKBENCH_AILY_APP_ID ?? '').trim(),
+	},
+});
+const groupRelay = createGroupRelay({
+	larkClient, sourceApi: feishuUserOauth.sourceApi, ledger, workbench: feishuWorkbench,
+	config: { ...groupRelayConfig, sourcesProvider: () => ledger.relayRoutes() },
+});
+setInterval(() => { void groupRelay.tick(); }, groupRelayIntervalSeconds * 1000).unref();
+void groupRelay.tick();
 const reconcileSeconds = Math.max(30, Number(process.env.INGESTION_RECONCILE_SECONDS ?? 300));
 const ledgerRetentionDays = Math.max(7, Number(process.env.INGESTION_LEDGER_RETENTION_DAYS ?? 90));
 let lastLedgerPruneAt = 0;
@@ -592,6 +647,26 @@ async function handleQuantAlert(request, response) {
 	}
 }
 
+async function handleFeishuUserOauth(request, response) {
+	if (!quantWriteApiKey || request.headers['x-quant-write-key'] !== quantWriteApiKey) {
+		response.writeHead(401, { 'content-type': 'application/json' });
+		response.end(JSON.stringify({ status: 'unauthorized' }));
+		return;
+	}
+	try {
+		const payload = await readJsonBody(request, 16 * 1024);
+		const token = payload.refresh_token
+			? await feishuUserOauth.bootstrapRefreshToken(payload.refresh_token)
+			: await feishuUserOauth.exchangeAuthorizationCode(payload.authorization_code, payload.redirect_uri);
+		response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+		response.end(JSON.stringify({ status: 'stored', ...token }));
+	} catch (error) {
+		console.error(`飞书用户 OAuth 授权失败：${error instanceof Error ? error.message : String(error)}`);
+		response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+		response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
+	}
+}
+
 function readMultipartBody(request) {
 	return new Promise((resolve, reject) => {
 		let parser;
@@ -700,6 +775,96 @@ async function renderMetrics() {
 	lines.push('# HELP ingestion_duplicate_ratio Completed or duplicate jobs that were duplicates', '# TYPE ingestion_duplicate_ratio gauge', `ingestion_duplicate_ratio ${(Number(summary.duplicates ?? 0) / Math.max(1, Number(summary.completed ?? 0) + Number(summary.duplicates ?? 0))).toFixed(6)}`);
 	lines.push('# HELP ingestion_failed_jobs Durable failed jobs', '# TYPE ingestion_failed_jobs gauge', `ingestion_failed_jobs ${summary.failed ?? 0}`);
 	return `${lines.join('\n')}\n`;
+}
+
+function asIsoString(value) {
+	if (!value) return null;
+	const timestamp = new Date(value).getTime();
+	return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+async function groupRelayDashboardStatus() {
+	const [persistedSources, routes, oauth] = await Promise.all([ledger.relayStatus(), ledger.relayRoutes(), feishuUserOauth.status()]);
+	const runtime = groupRelay.status();
+	const persistedByKey = new Map(persistedSources.map((source) => [source.source_key, source]));
+	const runtimeByKey = new Map(runtime.sources.map((source) => [source.key, source]));
+	const staleAfterSeconds = Math.max(45, groupRelayConfig.intervalSeconds * 3);
+	const now = Date.now();
+	const sources = routes.map((source) => {
+		const persisted = persistedByKey.get(source.key);
+		const current = runtimeByKey.get(source.key);
+		const lastPolledAt = asIsoString(persisted?.last_polled_at);
+		const pollAgeSeconds = lastPolledAt ? Math.max(0, Math.floor((now - Date.parse(lastPolledAt)) / 1000)) : null;
+		const failedCount = Number(persisted?.failed_count ?? 0);
+		let state = 'healthy';
+		if (!groupRelayConfig.enabled || source.enabled === false) state = 'disabled';
+		else if (!oauth.configured) state = 'not_configured';
+		else if (current?.state === 'error' || current?.state === 'unavailable') state = current.state;
+		else if (!persisted || pollAgeSeconds === null) state = 'starting';
+		else if (pollAgeSeconds > staleAfterSeconds) state = 'delayed';
+		else if (failedCount > 0) state = 'degraded';
+		return {
+			key: source.key, tag: source.tag, chat_name: source.chatName, enabled: source.enabled !== false,
+			state, last_polled_at: lastPolledAt, poll_age_seconds: pollAgeSeconds,
+			last_source_message_at: asIsoString(persisted?.last_source_message_at),
+			last_forwarded_at: asIsoString(persisted?.last_forwarded_at),
+			last_reconciled_at: current?.last_reconciled_at ?? null,
+			last_message_status: persisted?.last_message_status ?? null,
+			failed_count: failedCount,
+			last_error: current?.last_error ?? persisted?.latest_failure_error ?? null,
+		};
+	});
+	const overall = !groupRelayConfig.enabled ? 'disabled'
+		: sources.every((source) => source.state === 'healthy') ? 'healthy'
+		: sources.some((source) => ['error', 'unavailable', 'delayed', 'degraded', 'not_configured'].includes(source.state)) ? 'degraded'
+		: 'starting';
+	return {
+		status: overall, observed_at: new Date(now).toISOString(), enabled: groupRelayConfig.enabled,
+		interval_seconds: groupRelayConfig.intervalSeconds, stale_after_seconds: staleAfterSeconds,
+		user_oauth_configured: Boolean(oauth.configured), target_configured: Boolean(groupRelayConfig.targetChatId),
+		last_tick_started_at: runtime.last_tick_started_at, last_tick_completed_at: runtime.last_tick_completed_at,
+		last_tick_error: runtime.last_tick_error, sources,
+	};
+}
+
+function publicRelayRoute(route) {
+	return { key: route.key, chat_name: route.chatName, tag: route.tag, enabled: route.enabled !== false, created_at: asIsoString(route.created_at), updated_at: asIsoString(route.updated_at) };
+}
+
+function relayRouteTag(value) {
+	const tag = String(value ?? '').trim().replace(/^#/, '').toLowerCase();
+	if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(tag)) throw new Error('标签必须为 1–32 位小写字母、数字、- 或 _，且不能以符号开头');
+	return tag;
+}
+
+async function resolveRelayRouteInput(payload, current = null) {
+	const chatName = String(payload?.chat_name ?? current?.chatName ?? '').trim();
+	if (!chatName || chatName.length > 120) throw new Error('请填写 1–120 字的源群名称');
+	const tag = relayRouteTag(payload?.tag ?? current?.tag);
+	const enabled = payload?.enabled === undefined ? current?.enabled !== false : payload.enabled !== false;
+	const requestedChatId = String(payload?.chat_id ?? '').trim();
+	if (requestedChatId && !/^oc_[A-Za-z0-9]+$/.test(requestedChatId)) throw new Error('chat_id 格式无效');
+	if (current && chatName === current.chatName && !requestedChatId) return { chatId: current.chatId, chatName, tag, enabled };
+	const result = await feishuUserOauth.sourceApi.chatSearch(chatName);
+	const exact = (result.data?.items ?? []).filter((chat) => chat.name === chatName);
+	if (!exact.length && !requestedChatId) throw new Error(`未找到可读取的群“${chatName}”`);
+	if (requestedChatId) {
+		const matched = exact.find((chat) => chat.chat_id === requestedChatId);
+		return { chatId: requestedChatId, chatName: matched?.name ?? chatName, tag, enabled };
+	}
+	if (exact.length > 1) throw new Error(`找到多个同名群“${chatName}”，请填写 chat_id 后再保存`);
+	return { chatId: exact[0].chat_id, chatName: exact[0].name, tag, enabled };
+}
+
+async function createRelayRoute(payload) {
+	const route = await resolveRelayRouteInput(payload);
+	return ledger.createRelayRoute({ sourceKey: `relay_${randomUUID().replaceAll('-', '')}`, ...route });
+}
+
+async function updateRelayRoute(sourceKey, payload) {
+	const current = (await ledger.relayRoutes()).find((route) => route.key === sourceKey);
+	if (!current) return null;
+	return ledger.updateRelayRoute(sourceKey, await resolveRelayRouteInput(payload, current));
 }
 
 const researchPaths = new Map([
@@ -915,6 +1080,109 @@ const dashboard = createServer((request, response) => {
 		void ledger.retryJob(jobId).then((job) => { if (!job) { response.writeHead(409, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: '只有失败、重复或卡住的排队任务可以手动重试' })); return; } response.writeHead(202, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'queued', job_id: job.job_id, message: '已进入本地重试队列；不会自动创建重复远端请求' })); }).catch((error) => response.writeHead(503).end(String(error)));
 		return;
 	}
+	if (url.pathname === '/api/group-relay/status' && request.method === 'GET') {
+		void groupRelayDashboardStatus().then((status) => {
+			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify(status));
+		}).catch((error) => {
+			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
+		});
+		return;
+	}
+	if (url.pathname === '/api/group-relay/routes' && request.method === 'GET') {
+		void ledger.relayRoutes().then((routes) => {
+			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ routes: routes.map(publicRelayRoute) }));
+		}).catch((error) => response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/group-relay/routes' && request.method === 'POST') {
+		void readJsonBody(request, 16 * 1024).then(createRelayRoute).then((route) => {
+			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ route: publicRelayRoute(route) }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	const relayRouteMatch = /^\/api\/group-relay\/routes\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
+	if (relayRouteMatch && request.method === 'PUT') {
+		void readJsonBody(request, 16 * 1024).then((payload) => updateRelayRoute(relayRouteMatch[1], payload)).then((route) => {
+			if (!route) { response.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: '源群不存在' })); return; }
+			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ route: publicRelayRoute(route) }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (relayRouteMatch && request.method === 'DELETE') {
+		void ledger.deleteRelayRoute(relayRouteMatch[1]).then((deleted) => {
+			if (!deleted) { response.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: '源群不存在' })); return; }
+			response.writeHead(204, { 'cache-control': 'no-store' }).end();
+		}).catch((error) => response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/status' && request.method === 'GET') {
+		void Promise.all([feishuWorkbench.status(), feishuUserOauth.status()]).then(([workbench, oauth]) => {
+			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ ...workbench, user_oauth_configured: Boolean(oauth.configured), user_oauth_scopes: oauth.scopes ?? '' }));
+		}).catch((error) => response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/messages' && request.method === 'GET') {
+		const limit = Number(url.searchParams.get('limit') ?? 50);
+		void ledger.recentRelayMessages(limit).then((items) => {
+			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ items }));
+		}).catch((error) => response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/actions' && request.method === 'POST') {
+		void readJsonBody(request, 32 * 1024).then((payload) => feishuWorkbench.performAction({
+			sourceMessageId: String(payload?.source_message_id ?? ''), action: String(payload?.action ?? ''),
+			operatorOpenId: String(payload?.operator_open_id ?? ''), operatorName: String(payload?.operator_name ?? ''),
+		})).then((result) => {
+			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ status: 'ok', record: result.record, external: result.external ?? null }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/documents' && request.method === 'POST') {
+		void readJsonBody(request, 64 * 1024).then((payload) => feishuWorkbench.createDocument(payload ?? {})).then((result) => {
+			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/base-records' && request.method === 'POST') {
+		void readJsonBody(request, 128 * 1024).then((payload) => feishuWorkbench.createBaseRecord(payload ?? {})).then((result) => {
+			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/calendar-events' && request.method === 'POST') {
+		void readJsonBody(request, 64 * 1024).then((payload) => feishuWorkbench.createCalendarEvent(payload ?? {})).then((result) => {
+			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/approvals' && request.method === 'POST') {
+		void readJsonBody(request, 128 * 1024).then((payload) => feishuWorkbench.createApproval(payload ?? {})).then((result) => {
+			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/message-search' && request.method === 'POST') {
+		void readJsonBody(request, 16 * 1024).then((payload) => feishuWorkbench.searchMessages(payload ?? {})).then((result) => {
+			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'ok', result }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	// API paths must never fall through to the SPA.  A missing API route used to
+	// return index.html (200), which surfaced in the dashboard as the misleading
+	// "Unexpected token '<'" JSON parse error instead of an actionable 404.
+	if (url.pathname.startsWith('/api/')) {
+		response.writeHead(404, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+		response.end(JSON.stringify({ status: 'not_found', message: `未知 API：${url.pathname}` }));
+		return;
+	}
 	if (frontendMode === 'spa' && request.method === 'GET' && !['/health', '/events', '/metrics', '/jobs', '/analysis/jobs'].includes(url.pathname)) {
 		const requested = url.pathname === '/relay' ? 'index.html' : url.pathname.slice(1);
 		const assetPath = join(frontendDist, requested.includes('.') ? requested : 'index.html');
@@ -928,6 +1196,10 @@ const dashboard = createServer((request, response) => {
 	}
 	if (url.pathname === '/internal/quant-alert' && request.method === 'POST') {
 		void handleQuantAlert(request, response);
+		return;
+	}
+	if (url.pathname === '/internal/feishu-user-oauth' && request.method === 'POST') {
+		void handleFeishuUserOauth(request, response);
 		return;
 	}
 	if (url.pathname === '/metrics') {
@@ -1212,6 +1484,59 @@ async function processFeishuEvent(data) {
 	}
 }
 
+function cardActionInput(data) {
+	const value = data?.event?.action?.value ?? data?.action?.value ?? data?.event?.action?.form_value ?? {};
+	if (typeof value === 'string') { try { return JSON.parse(value); } catch { return {}; } }
+	return value && typeof value === 'object' ? value : {};
+}
+
+async function processFeishuCardAction(data) {
+	const input = cardActionInput(data);
+	const action = String(input.action ?? '');
+	const sourceMessageId = String(input.source_message_id ?? '');
+	if (!action || !sourceMessageId) return { toast: { type: 'warning', content: '无效的行动卡片参数' } };
+	const operator = data?.event?.operator ?? data?.operator ?? {};
+	try {
+		await feishuWorkbench.performAction({
+			sourceMessageId, action,
+			operatorOpenId: String(operator?.open_id ?? operator?.operator_id?.open_id ?? ''),
+			operatorName: String(operator?.name ?? ''),
+		});
+		return { toast: { type: 'success', content: '已更新协作状态' } };
+	} catch (error) {
+		console.error(`飞书行动卡片处理失败：${error instanceof Error ? error.message : String(error)}`);
+		return { toast: { type: 'error', content: error instanceof Error ? error.message.slice(0, 80) : '操作失败' } };
+	}
+}
+
+async function processFeishuReaction(data) {
+	const event = data?.event ?? data ?? {};
+	const messageId = String(event?.message_id ?? event?.reaction?.message_id ?? '');
+	const emoji = String(event?.reaction?.reaction_type?.emoji_type ?? event?.reaction_type?.emoji_type ?? '').toUpperCase();
+	const action = ({ THUMBSUP: 'research', EYES: 'focus', CHECK_MARK: 'task', CROSS_MARK: 'ignore' })[emoji];
+	if (!messageId || !action) return;
+	const record = await ledger.getRelayMessageByActionCard(messageId);
+	if (!record) return;
+	const operator = event?.operator ?? event?.user ?? {};
+	await feishuWorkbench.performAction({ sourceMessageId: record.source_message_id, action, operatorOpenId: String(operator?.open_id ?? operator?.operator_id?.open_id ?? ''), operatorName: String(operator?.name ?? '') });
+}
+
+async function processBotMenuEvent(data) {
+	const event = data?.event ?? data ?? {};
+	const eventKey = String(event?.event_key ?? event?.key ?? '');
+	if (eventKey !== 'workbench') return;
+	const h5Base = String(process.env.FEISHU_WORKBENCH_PUBLIC_BASE_URL ?? '').replace(/\/$/, '');
+	const openId = event?.operator?.open_id ?? event?.operator_id?.open_id;
+	if (!h5Base || !openId) return;
+	const result = await larkClient.im.v1.message.create({ params: { receive_id_type: 'open_id' }, data: {
+		receive_id: openId, msg_type: 'interactive', content: JSON.stringify({
+			config: { wide_screen_mode: true }, header: { title: { tag: 'plain_text', content: '分析师工作台' }, template: 'blue' },
+			elements: [{ tag: 'div', text: { tag: 'lark_md', content: '打开工作台查看群监听健康、协作行动与已配置能力。' } }, { tag: 'action', actions: [{ tag: 'button', type: 'primary', text: { tag: 'plain_text', content: '打开工作台' }, url: `${h5Base}/workbench` }] }],
+		}),
+	} });
+	if (result.code && result.code !== 0) throw new Error(`发送工作台菜单回复失败：${result.msg ?? result.code}`);
+}
+
 const eventDispatcher = new Lark.EventDispatcher({ loggerLevel: Lark.LoggerLevel.info }).register({
 	'im.message.receive_v1': async (data) => {
 		const keys = feishuDedupeKeys(data);
@@ -1236,6 +1561,9 @@ const eventDispatcher = new Lark.EventDispatcher({ loggerLevel: Lark.LoggerLevel
 			throw error;
 		}
 	},
+	'card.action.trigger': processFeishuCardAction,
+	'im.message.reaction.created_v1': processFeishuReaction,
+	'application.bot.menu_v6': processBotMenuEvent,
 });
 
 const wsClient = new Lark.WSClient({

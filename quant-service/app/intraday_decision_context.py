@@ -14,6 +14,7 @@ from time import monotonic
 from typing import Any, Iterable
 
 from .episode_lifecycle import strategy_family
+from .probability_calibration import shrunk_probability_interval
 
 
 PROBABILITY_PRIOR_STRENGTH = 20.0
@@ -21,6 +22,12 @@ PROBABILITY_PRIOR_RATE = 0.50
 PROBABILITY_PROFILE_CACHE_SECONDS = 60.0
 _PROFILE_CACHE_LOCK = Lock()
 _PROFILE_CACHE: dict[str, Any] = {"loaded_at": 0.0, "profiles": {}}
+
+
+def invalidate_intraday_probability_profiles() -> None:
+    """Drop derived profiles after an outcome/attribution backfill."""
+    with _PROFILE_CACHE_LOCK:
+        _PROFILE_CACHE.update({"loaded_at": 0.0, "profiles": {}})
 
 
 def _number(value: Any) -> float | None:
@@ -49,6 +56,10 @@ def shrunk_probability(
         "preliminary" if rows >= 30 and days >= 10 else
         "low" if rows else "unavailable"
     )
+    interval = shrunk_probability_interval(
+        raw_positive_rate=rate, independent_days=days,
+        prior_rate=prior_rate, prior_strength=prior_strength,
+    )
     return {
         "estimated_probability": round(estimate, 4) if estimate is not None else None,
         "raw_positive_rate": round(rate, 4) if rate is not None else None,
@@ -65,6 +76,10 @@ def shrunk_probability(
         "method": "beta_shrinkage_with_trading_day_effective_sample_size",
         "prior_rate": prior_rate,
         "prior_strength": prior_strength,
+        "confidence_interval_lower": interval["lower"],
+        "confidence_interval_upper": interval["upper"],
+        "confidence_interval_method": interval["method"],
+        "confidence_interval_effective_trials": interval["effective_trials"],
         "notice": "研究概率，不是确定胜率；评分不参与概率换算。",
     }
 
@@ -162,6 +177,7 @@ def decision_context(signal: dict[str, Any], probability: dict[str, Any]) -> dic
     signal_type = str(signal.get("signal_type") or "watch")
     minute = conditions.get("minute_features") if isinstance(conditions.get("minute_features"), dict) else {}
     peers = conditions.get("peer_context") if isinstance(conditions.get("peer_context"), dict) else {}
+    setup_state = conditions.get("setup_state") if isinstance(conditions.get("setup_state"), dict) else {}
     reasons: list[str] = []
     if setup == "countertrend_rebound_confirmed_plus_intraday_acceptance":
         reasons.append("日线已进入B浪反弹确认态，而不是恐慌或单日试探")
@@ -173,6 +189,16 @@ def decision_context(signal: dict[str, Any], probability: dict[str, Any]) -> dic
             f"量能倍数 {max(_number(conditions.get('volume_ratio')) or 0, _number(minute.get('minute_volume_multiple')) or 0):.2f}，"
             f"同板块确认 {peers.get('confirming_peer_count', 0)} 只，资金流 {conditions.get('main_net_inflow', '—')}"
         )
+    elif setup == "countertrend_rebound_intraday_acceptance_failure":
+        reasons.append("反弹未能维持VWAP承接，短周期动量已转弱")
+        reasons.append(
+            f"3分钟动量 {minute.get('return_3m_pct', '—')}%，VWAP偏离 {minute.get('above_vwap_pct', '—')}%，"
+            f"相对持仓成本 {conditions.get('return_since_entry_pct', '—')}%"
+        )
+        if conditions.get("peer_confirmation_lost"):
+            reasons.append("同源精确板块观察池中未见同向确认，原共振已消失")
+        if conditions.get("cost_risk_lost"):
+            reasons.append("回撤已触及反弹仓位的风险复核阈值")
     elif setup == "minute_price_volume_plus_sector_breadth":
         reasons.append("分钟价量突破与板块成分股同步上行")
     elif setup == "leader_minute_burst":
@@ -189,6 +215,8 @@ def decision_context(signal: dict[str, Any], probability: dict[str, Any]) -> dic
         reasons.append("从日内低点回收、翻红并重新站上VWAP")
     if conditions.get("hard_stop") is not None:
         reasons.append(f"现价已触及硬止损 {conditions.get('hard_stop')}")
+    if setup_state.get("state") in {"policy_constrained", "data_blocked", "evidence_incomplete"}:
+        reasons.append(f"实时状态为 {setup_state.get('state')}：{'、'.join(str(item) for item in setup_state.get('reasons') or [])}")
     if conditions.get("flow_extreme") == "bottom_1pct":
         reasons.append("主力流指标跌入全市场后1%，且量能放大")
     elif conditions.get("flow_extreme") == "top_1pct":
@@ -224,6 +252,6 @@ def decision_context(signal: dict[str, Any], probability: dict[str, Any]) -> dic
 
 
 __all__ = [
-    "decision_context", "load_intraday_probability_profiles", "probability_for_signal",
+    "decision_context", "invalidate_intraday_probability_profiles", "load_intraday_probability_profiles", "probability_for_signal",
     "probability_profiles_from_rows", "shrunk_probability",
 ]

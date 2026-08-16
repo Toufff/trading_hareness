@@ -75,6 +75,12 @@ type RealtimeService = { key: string; label: string; role: string; state: Realti
 type RealtimeServiceStatus = { observed_at?: string; timezone?: string; session_active?: boolean; session_reason?: string; special_window_active?: boolean; summary?: { states?: Record<string, number>; enabled_watch_count?: number; decision_path_degraded?: boolean }; items?: RealtimeService[] };
 type ResearchStorage = { state?: string; allow_nonessential_high_frequency?: boolean; hot_database?: { used_bytes?: number; budget_bytes?: number }; managed?: { used_bytes?: number; budget_bytes?: number } };
 type AdapterHealth = { status?: string; quant_alert_configured?: boolean; events?: number; resources?: { research_storage?: ResearchStorage } };
+type GroupRelaySourceStatus = { key: string; tag: string; chat_name: string; enabled?: boolean; state: string; last_polled_at?: string | null; poll_age_seconds?: number | null; last_source_message_at?: string | null; last_forwarded_at?: string | null; last_reconciled_at?: string | null; last_message_status?: string | null; failed_count?: number; last_error?: string | null };
+type GroupRelayStatus = { status?: string; observed_at?: string; enabled?: boolean; interval_seconds?: number; stale_after_seconds?: number; user_oauth_configured?: boolean; target_configured?: boolean; last_tick_started_at?: string | null; last_tick_completed_at?: string | null; last_tick_error?: string | null; sources?: GroupRelaySourceStatus[] };
+type GroupRelayRouteForm = { key: string; chat_name: string; chat_id: string; tag: string; enabled: boolean };
+type FeishuCapability = { key: string; label: string; category: string; enabled: boolean; configured: boolean; requires: string[]; note: string };
+type FeishuWorkbenchStatus = { target_configured?: boolean; public_h5_url?: string | null; user_oauth_configured?: boolean; user_oauth_scopes?: string; capabilities?: FeishuCapability[] };
+type FeishuWorkbenchMessage = { source_message_id: string; route_tag: string; source_chat_name?: string | null; message?: { msg_type?: string; body?: { content?: string } }; status: string; workflow_state?: string; workflow_note?: string | null; source_deleted?: boolean; source_create_time?: number; forwarded_at?: string | null; updated_at?: string | null; action_card_message_id?: string | null };
 type RemoteReport = { remote_report_id: string; analyst_name: string; report_date: string; title: string; summary: string; remote_version?: string };
 type RemoteMessage = { remote_message_id: string; remote_analyst_id: string; analyst_name: string; source_type: string; received_at: string; strategy_available_at?: string; source_published_at?: string | null; stated_at?: string | null; stated_precision?: string | null; content: string };
 type AnalystSkillProfile = { remote_analyst_id: string; as_of_date: string; status: string; profile?: { language_style?: { report_count?: number; message_count?: number; author_timed_actions?: number }; skill_score?: { status?: string; mature_actions?: number; required_actions?: number; trading_days?: number; required_trading_days?: number }; point_in_time_integrity?: { factor_eligible_actions?: number; replay_only_actions?: number } } };
@@ -103,14 +109,14 @@ type TrainingRoadmap = { status: string; policy: string; stages: { stage: string
 type PaperPortfolio = { as_of?: string; equity?: number; gross_exposure?: number; net_exposure?: number; drawdown?: number; payload?: { sector_exposure?: Record<string, number> } };
 type PaperStatus = { mode?: string; live_orders?: boolean; decisions?: Record<string, unknown>[]; positions?: Record<string, unknown>[]; latest_portfolio?: PaperPortfolio | null; risk_events?: Record<string, unknown>[]; boundary?: string };
 type StrategyFunnel = { funnel?: Record<string, number>; episodes?: Record<string, unknown>[]; boundary?: string };
-type StrategyGovernance = { trials?: Record<string, unknown>[]; contracts?: Record<string, unknown>[]; live_effect?: string; promotion_boundary?: string };
+type StrategyGovernance = { trials?: Record<string, unknown>[]; contracts?: Record<string, unknown>[]; replay_runs?: Record<string, unknown>[]; probability_calibrations?: Record<string, unknown>[]; live_effect?: string; promotion_boundary?: string };
 type StrategyHealth = { status?: string; trigger_frequency?: { signals_7d?: number; signals_prior_7d?: number; episodes_7d?: number; drift_ratio?: number | null; drift_status?: string }; outcomes_30m?: { matured?: number; trading_days?: number; rows?: number; positive_rate?: number | null; avg_directional_return?: number | null }; data_freshness?: { status?: string; quote_age_seconds?: number | null; fresh_quote_rows?: number }; validation_gate?: { status?: string; required_matured_signals?: number; required_trading_days?: number; live_effect?: string }; governance_recommendation?: { action?: string; flags?: string[]; live_effect?: string; notice?: string }; strategy_breakdown?: { strategy_key: string; signals: number; episodes: number }[]; notice?: string };
 
 const initialPath = window.location.pathname;
 const mobileMediaQuery = window.matchMedia('(max-width: 760px)');
 const mobileLayout = ref(mobileMediaQuery.matches);
 const syncMobileLayout = (event: MediaQueryListEvent) => { mobileLayout.value = event.matches; };
-const activeSection = ref(initialPath === '/relay' ? 'relay' : initialPath === '/monitor' ? 'monitor' : 'research');
+const activeSection = ref(initialPath === '/relay' ? 'relay' : initialPath === '/monitor' ? 'monitor' : initialPath === '/workbench' ? 'workbench' : 'research');
 const sharedResearchParams = new URLSearchParams(window.location.search);
 const sharedResearchSymbol = (sharedResearchParams.get('symbol') || '').toUpperCase();
 const sharedResearchTab = sharedResearchParams.get('tab');
@@ -120,6 +126,9 @@ const relayTag = ref(''); const relaySource = ref(''); const relayText = ref('')
 const loading = ref(false); const actionLoading = ref(''); const researchError = ref('');
 const overview = ref<ResearchOverview>({}); const reports = ref<RemoteReport[]>([]); const remoteMessages = ref<RemoteMessage[]>([]); const analystSkills = ref<AnalystSkillProfile[]>([]); const analystResearchStatus = ref<AnalystResearchStatus>({}); const claims = ref<AnalystClaim[]>([]); const providerHealth = ref<ProviderHealth[]>([]); const providerApiCapabilities = ref<ProviderApiCapability[]>([]); const marketSnapshots = ref<MarketSnapshot[]>([]); const sectors = ref<Sector[]>([]); const sectorFlows = ref<SectorFlow[]>([]); const conceptSignals = ref<ConceptSignal[]>([]); const conceptCandidates = ref<ConceptCandidate[]>([]); const announcements = ref<Announcement[]>([]); const lhbEvents = ref<Announcement[]>([]); const closeBoardReport = ref<BoardReviewReport | null>(null); const conceptBackfill = ref<ConceptBackfill>({ total_concepts: 0, mapped_concepts: 0, states: [] }); const closeStrategyReview = ref<StrategyReview | null>(null); const postCloseStrategyRun = ref<PostCloseStrategyRun | null>(null); const postCloseCandidates = ref<PostCloseCandidate[]>([]); const strategyPatternRun = ref<StrategyPatternRun | null>(null); const strategyLimitPool = ref<LimitPoolRow[]>([]); const strategyLimitLadder = ref<LimitLadderRow[]>([]); const strategyPoolCoverage = ref<LimitPoolCoverage>({}); const strategyPatternPicks = ref<StrategyPatternSample[]>([]); const strategyPatternSamples = ref<StrategyPatternSample[]>([]); const postCloseRefresh = ref<PostCloseRefresh | null>(null); const intradayOutcomes = ref<IntradayOutcome[]>([]); const intradayOutcomeSummary = ref<IntradayOutcomeSummary[]>([]); const intradayAttributionSummary = ref<IntradayAttributionSummary[]>([]); const attributionValidationGate = ref<AttributionValidationGate>({ status: 'accumulating', matured_unique_signals: 0, trading_days: 0, required_unique_signals: 200, required_trading_days: 60 }); const analystReadiness = ref<AnalystReadiness[]>([]); const analystScorecards = ref<AnalystScorecard[]>([]); const selectedReviewBoardKey = ref(''); const catalog = ref<{ count?: number; counts?: CatalogCounts; items?: CatalogItem[]; providers?: ProviderConfig[]; online_range_max_days?: number; historical_minute_policy?: string; realtime_minute_policy?: string; coverage_rule?: string }>({}); const recommendations = ref<Recommendation[]>([]); const universe = ref<UniverseMember[]>([]); const featureItems = ref<FeatureItem[]>([]); const claimReviews = ref<ClaimReview[]>([]); const factors = ref<Factor[]>([]); const factorEvaluations = ref<FactorEvaluation[]>([]); const strategies = ref<Strategy[]>([]); const strategyExperiments = ref<StrategyExperiment[]>([]); const mainWaveExperiments = ref<StrategyExperiment[]>([]); const frameworks = ref<Framework[]>([]); const trainingRoadmap = ref<TrainingRoadmap>({ status: 'planned', policy: '', stages: [] }); const qualityIssues = ref<QualityIssue[]>([]); const minuteImports = ref<MinuteImport[]>([]); const minuteDirectory = ref('');
 const realtimeServices = ref<RealtimeServiceStatus>({ items: [] }); const adapterHealth = ref<AdapterHealth>({}); const runtimeHealth = ref<{ resources?: { research_storage?: ResearchStorage } }>({}); const realtimeLoading = ref(false); const realtimeError = ref('');
+const groupRelayStatus = ref<GroupRelayStatus>({ sources: [] }); const groupRelayLoading = ref(false); const groupRelayError = ref('');
+const groupRelayRouteDialog = ref(false); const groupRelayRouteSaving = ref(false); const groupRelayRouteForm = ref<GroupRelayRouteForm>({ key: '', chat_name: '', chat_id: '', tag: '', enabled: true });
+const feishuWorkbench = ref<FeishuWorkbenchStatus>({ capabilities: [] }); const feishuWorkbenchMessages = ref<FeishuWorkbenchMessage[]>([]); const feishuWorkbenchLoading = ref(false); const feishuWorkbenchError = ref(''); const feishuWorkbenchAction = ref(''); const workbenchSearch = ref(''); const workbenchSearchResult = ref<unknown>(null); const workbenchIntegrationDialog = ref(false); const workbenchIntegration = ref({ kind: 'documents', title: '新建飞书文档', payloadText: '{\n  "title": "群消息研究笔记"\n}' });
 const paperStatus = ref<PaperStatus>({});
 const analystObservations = ref<AnalystObservation[]>([]);
 const strategyFunnel = ref<StrategyFunnel>({});
@@ -136,7 +145,7 @@ const chinaDateTime = (value?: string | null) => value ? new Intl.DateTimeFormat
 const boardFlowTaxonomy = ref<'industry' | 'concept'>('industry'); const boardFlowDate = ref(''); const boardFlowSeries = ref<Record<string, BoardFlowSeries>>({}); const boardFlowSnapshots = ref<BoardFlowSnapshot[]>([]); const boardFlowCursor = ref<string | null>(null); const boardFlowLoading = ref(false); const boardFlowError = ref(''); const boardFlowNotice = ref(''); const boardFlowFocus = ref<string[]>([]); const boardFlowDisplaySlots = ref<string[]>([]); const boardFlowIsExchangeToday = ref(false); const boardRotationEvents = ref<BoardRotationEvent[]>([]); const boardStockMining = ref<BoardStockMining>({}); const limitLinkageMining = ref<LimitLinkageMining>({});
 const marketFlow = ref<MarketFlowResponse>({ trade_date: '', timezone: 'Asia/Shanghai', items: [] }); const marketFlowError = ref('');
 const selectedFactors = ref<string[]>([]); const factorHorizon = ref(5); const backtestForm = ref({ rebalance_days: 5, hold_days: 5, top_n: 20, total_cost_bps: 18 });
-let retryTimer: number | undefined; let realtimeTimer: number | undefined; let boardFlowTimer: number | undefined; let retryDelay = 1000; let eventSource: EventSource | undefined;
+let retryTimer: number | undefined; let realtimeTimer: number | undefined; let groupRelayTimer: number | undefined; let workbenchTimer: number | undefined; let boardFlowTimer: number | undefined; let retryDelay = 1000; let eventSource: EventSource | undefined;
 
 const visibleEvents = computed(() => eventFilter.value === 'all' ? events.value : events.value.filter((item) => item.n8n_status === eventFilter.value));
 const catalogGroups = computed(() => ['all', ...Array.from(new Set((catalog.value.items ?? []).map((item) => item.group)))]);
@@ -146,6 +155,9 @@ const dateText = (value?: string | null) => value ? new Date(value).toLocaleStri
 const healthState = (provider: ProviderHealth) => provider.circuit_open_until ? 'danger' : provider.last_error ? 'warning' : provider.last_success_at ? 'success' : 'info';
 const realtimeStateType = (state?: RealtimeServiceState): 'success' | 'warning' | 'danger' | 'info' => state === 'healthy' || state === 'ready' ? 'success' : state === 'starting' || state === 'standby' ? 'warning' : state === 'degraded' || state === 'disabled' ? 'danger' : 'info';
 const realtimeStateText = (state?: RealtimeServiceState) => ({ healthy: '运行正常', ready: '投递就绪', standby: '待命', starting: '启动中', degraded: '降级/延迟', disabled: '未配置', unavailable: '明确不可用' }[state ?? 'disabled']);
+const groupRelayStateType = (state?: string): 'success' | 'warning' | 'danger' | 'info' => state === 'healthy' ? 'success' : ['starting', 'delayed'].includes(state ?? '') ? 'warning' : ['error', 'unavailable', 'degraded', 'not_configured'].includes(state ?? '') ? 'danger' : 'info';
+const groupRelayStateText = (state?: string) => ({ healthy: '正常监听', starting: '建立基线中', delayed: '轮询延迟', degraded: '有失败待重试', error: '读取异常', unavailable: '群不可读', not_configured: '授权未配置', disabled: '已停用' }[state ?? 'starting'] ?? state ?? '未知');
+const groupRelayMessageText = (status?: string | null) => ({ sent: '已转发', skipped_bootstrap: '历史基线', processing: '转发中', failed: '转发失败', unsupported: '不支持' }[status ?? ''] ?? '暂无消息');
 const realtimeDeliveryDetail = (service: RealtimeService) => {
   const details = service.details ?? {};
   if (service.key === 'feishu_alert') return `最近 ${details.latest_delivery_kind ?? '无'} / ${details.latest_delivery_status ?? '无'}；待重试 ${details.pending_retry_count ?? 0}；带外关注 ${details.meta_alert_state ?? 'normal'}`;
@@ -477,6 +489,115 @@ async function loadRealtimeServices() {
     realtimeError.value = error instanceof Error ? error.message : String(error);
   } finally { realtimeLoading.value = false; }
 }
+async function loadGroupRelayStatus() {
+  groupRelayLoading.value = true; groupRelayError.value = '';
+  try { groupRelayStatus.value = await getJson<GroupRelayStatus>('/api/group-relay/status'); }
+  catch (error) { groupRelayError.value = error instanceof Error ? error.message : String(error); }
+  finally { groupRelayLoading.value = false; }
+}
+async function loadFeishuWorkbench() {
+  feishuWorkbenchLoading.value = true; feishuWorkbenchError.value = '';
+  try {
+    const [status, messages] = await Promise.all([
+      getJson<FeishuWorkbenchStatus>('/api/feishu-workbench/status'),
+      getJson<{ items?: FeishuWorkbenchMessage[] }>('/api/feishu-workbench/messages?limit=80'),
+    ]);
+    feishuWorkbench.value = status; feishuWorkbenchMessages.value = messages.items ?? [];
+  } catch (error) { feishuWorkbenchError.value = error instanceof Error ? error.message : String(error); }
+  finally { feishuWorkbenchLoading.value = false; }
+}
+function workbenchMessageText(item: FeishuWorkbenchMessage) {
+  try {
+    const content = item.message?.body?.content ? JSON.parse(item.message.body.content) : {};
+    return String(content.text ?? content.title ?? `[${item.message?.msg_type ?? '消息'}]`).slice(0, 160);
+  } catch { return `[${item.message?.msg_type ?? '消息'}]`; }
+}
+const workbenchWorkflowText = (state?: string) => ({ new: '待处理', research: '纳入研究', focus: '重点关注', task: '已建任务', ignored: '已忽略', recalled: '已撤回' }[state ?? 'new'] ?? state ?? '待处理');
+async function runWorkbenchAction(item: FeishuWorkbenchMessage, action: string) {
+  feishuWorkbenchAction.value = `${item.source_message_id}:${action}`;
+  try {
+    const path = '/api/feishu-workbench/actions';
+    await decodeJson(await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ source_message_id: item.source_message_id, action }) }), path);
+    ElMessage.success('协作状态已更新'); await loadFeishuWorkbench();
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : String(error)); }
+  finally { feishuWorkbenchAction.value = ''; }
+}
+async function searchFeishuMessages() {
+  if (!workbenchSearch.value.trim()) return;
+  feishuWorkbenchAction.value = 'search';
+  try {
+    const path = '/api/feishu-workbench/message-search';
+    workbenchSearchResult.value = await decodeJson(await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ query: workbenchSearch.value.trim() }) }), path);
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : String(error)); }
+  finally { feishuWorkbenchAction.value = ''; }
+}
+function openWorkbenchIntegration(kind: 'documents' | 'base-records' | 'calendar-events' | 'approvals') {
+  const presets = {
+    documents: { title: '新建飞书文档', payloadText: '{\n  "title": "群消息研究笔记"\n}' },
+    'base-records': { title: '写入 Base 研究台账', payloadText: '{\n  "fields": {\n    "标题": "群消息跟进",\n    "状态": "待处理"\n  }\n}' },
+    'calendar-events': { title: '创建日历提醒', payloadText: `{\n  "summary": "群消息跟进",\n  "description": "",\n  "startTime": "${new Date(Date.now() + 3600_000).toISOString()}",\n  "endTime": "${new Date(Date.now() + 7200_000).toISOString()}"\n}` },
+    approvals: { title: '发起审批', payloadText: '{\n  "form": {}\n}' },
+  };
+  workbenchIntegration.value = { kind, ...presets[kind] }; workbenchIntegrationDialog.value = true;
+}
+async function submitWorkbenchIntegration() {
+  let payload: Record<string, unknown>;
+  try { payload = JSON.parse(workbenchIntegration.value.payloadText) as Record<string, unknown>; } catch { ElMessage.error('请输入有效 JSON'); return; }
+  const path = `/api/feishu-workbench/${workbenchIntegration.value.kind}`;
+  feishuWorkbenchAction.value = `integration:${workbenchIntegration.value.kind}`;
+  try {
+    await decodeJson(await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(payload) }), path);
+    ElMessage.success('已提交到飞书'); workbenchIntegrationDialog.value = false;
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : String(error)); }
+  finally { feishuWorkbenchAction.value = ''; }
+}
+function openCreateGroupRelayRoute() {
+  groupRelayRouteForm.value = { key: '', chat_name: '', chat_id: '', tag: '', enabled: true };
+  groupRelayRouteDialog.value = true;
+}
+function openEditGroupRelayRoute(route: GroupRelaySourceStatus) {
+  groupRelayRouteForm.value = { key: route.key, chat_name: route.chat_name, chat_id: '', tag: route.tag, enabled: route.enabled !== false };
+  groupRelayRouteDialog.value = true;
+}
+async function saveGroupRelayRoute() {
+  const form = groupRelayRouteForm.value;
+  groupRelayRouteSaving.value = true;
+  try {
+    const path = form.key ? `/api/group-relay/routes/${encodeURIComponent(form.key)}` : '/api/group-relay/routes';
+    const response = await fetch(path, {
+      method: form.key ? 'PUT' : 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ chat_name: form.chat_name, chat_id: form.chat_id || undefined, tag: form.tag, enabled: form.enabled }),
+    });
+    await decodeJson<{ route: GroupRelaySourceStatus }>(response, path);
+    groupRelayRouteDialog.value = false;
+    ElMessage.success(form.key ? '源群配置已更新，将在下一次轮询生效' : '源群已注册，将在下一次轮询建立基线');
+    await loadGroupRelayStatus();
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : String(error)); }
+  finally { groupRelayRouteSaving.value = false; }
+}
+async function setGroupRelayRouteEnabled(route: GroupRelaySourceStatus, enabled: boolean) {
+  const path = `/api/group-relay/routes/${encodeURIComponent(route.key)}`;
+  try {
+    await decodeJson(await fetch(path, { method: 'PUT', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ chat_name: route.chat_name, tag: route.tag, enabled }) }), path);
+    ElMessage.success(enabled ? '已启用，下一次轮询生效' : '已停用该源群');
+    await loadGroupRelayStatus();
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : String(error)); }
+}
+async function deleteGroupRelayRoute(route: GroupRelaySourceStatus) {
+  try {
+    await ElMessageBox.confirm(`确认停止监听“${route.chat_name}”并删除其注册信息？已有转发记录会保留。`, '删除源群', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
+    const path = `/api/group-relay/routes/${encodeURIComponent(route.key)}`;
+    const response = await fetch(path, { method: 'DELETE', headers: { accept: 'application/json' } });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({})) as { message?: string };
+      throw new Error(payload.message ?? `HTTP ${response.status}`);
+    }
+    ElMessage.success('源群已删除，下一次轮询起停止监听');
+    await loadGroupRelayStatus();
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : String(error));
+  }
+}
 async function loadResearch() {
   loading.value = true; researchError.value = '';
   try {
@@ -651,13 +772,15 @@ function submitRelay() {
 onMounted(() => {
   mobileMediaQuery.addEventListener('change', syncMobileLayout); loadConfig().catch(() => {}); connectEvents(); loadResearch();
   void loadRealtimeServices(); realtimeTimer = window.setInterval(() => { void loadRealtimeServices(); }, 15_000);
+  void loadGroupRelayStatus(); groupRelayTimer = window.setInterval(() => { void loadGroupRelayStatus(); }, 10_000);
+	void loadFeishuWorkbench(); workbenchTimer = window.setInterval(() => { void loadFeishuWorkbench(); }, 10_000);
   void loadBoardFlowCurves(true); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining(); boardFlowTimer = window.setInterval(() => {
     if (document.visibilityState === 'visible' && boardFlowIsExchangeToday.value) { void loadBoardFlowCurves(false); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining(); }
   }, 60_000);
 });
 onBeforeUnmount(() => {
   mobileMediaQuery.removeEventListener('change', syncMobileLayout); eventSource?.close();
-  if (retryTimer) clearTimeout(retryTimer); if (realtimeTimer) clearInterval(realtimeTimer); if (boardFlowTimer) clearInterval(boardFlowTimer);
+  if (retryTimer) clearTimeout(retryTimer); if (realtimeTimer) clearInterval(realtimeTimer); if (groupRelayTimer) clearInterval(groupRelayTimer); if (workbenchTimer) clearInterval(workbenchTimer); if (boardFlowTimer) clearInterval(boardFlowTimer);
 });
 </script>
 
@@ -668,12 +791,13 @@ onBeforeUnmount(() => {
       <el-menu :default-active="activeSection" class="menu" @select="(value: string) => activeSection = value">
         <el-menu-item index="research"><el-icon><DataAnalysis /></el-icon><span>量化研究台</span></el-menu-item>
         <el-menu-item index="monitor"><el-icon><Operation /></el-icon><span>导入监控</span></el-menu-item>
+		<el-menu-item index="workbench"><el-icon><Document /></el-icon><span>飞书工作台</span></el-menu-item>
         <el-menu-item index="relay"><el-icon><UploadFilled /></el-icon><span>手动投递</span></el-menu-item>
       </el-menu>
       <div class="side-state"><el-tag :type="connected ? 'success' : 'warning'" effect="plain">{{ connected ? '事件流已连接' : '事件流重连中' }}</el-tag></div>
     </el-aside>
     <el-container>
-      <el-header class="topbar"><div><h1>{{ activeSection === 'research' ? '量化研究台' : activeSection === 'monitor' ? '导入监控' : '手动投递' }}</h1><span>{{ activeSection === 'research' ? '分析师证据、市场数据与研究候选池' : '本地持久化导入链路' }}</span></div><el-button :icon="Refresh" :loading="loading" @click="loadResearch">刷新数据</el-button></el-header>
+      <el-header class="topbar"><div><h1>{{ activeSection === 'research' ? '量化研究台' : activeSection === 'monitor' ? '导入监控' : activeSection === 'workbench' ? '飞书工作台' : '手动投递' }}</h1><span>{{ activeSection === 'research' ? '分析师证据、市场数据与研究候选池' : activeSection === 'workbench' ? '汇总群协作闭环、可用能力与授权状态' : '本地持久化导入链路' }}</span></div><el-button :icon="Refresh" :loading="activeSection === 'workbench' ? feishuWorkbenchLoading : loading" @click="activeSection === 'workbench' ? loadFeishuWorkbench() : loadResearch()">刷新数据</el-button></el-header>
       <el-main class="content">
         <template v-if="activeSection === 'research'">
           <el-alert v-if="researchError" :title="researchError" type="error" show-icon :closable="false" class="section-gap" />
@@ -1086,6 +1210,10 @@ onBeforeUnmount(() => {
                 <el-table v-if="paperStatus.risk_events?.length" :data="paperStatus.risk_events" max-height="220" size="small" class="section-gap"><el-table-column prop="occurred_at" label="时间" width="165"><template #default="{ row }">{{ chinaDateTime(row.occurred_at) }}</template></el-table-column><el-table-column prop="symbol" label="标的" width="100"/><el-table-column prop="event_type" label="事件" width="180"/><el-table-column prop="severity" label="级别" width="85"/><el-table-column prop="message" label="说明" show-overflow-tooltip/></el-table>
                 <el-divider content-position="left">策略决策漏斗（最近一日）</el-divider>
                 <el-descriptions :column="mobileLayout ? 1 : 6" border size="small"><el-descriptions-item label="报价证据">{{ strategyFunnel.funnel?.quote_observations ?? 0 }}</el-descriptions-item><el-descriptions-item label="信号事件">{{ strategyFunnel.funnel?.signal_events ?? 0 }}</el-descriptions-item><el-descriptions-item label="独立 episode">{{ strategyFunnel.funnel?.episodes ?? 0 }}</el-descriptions-item><el-descriptions-item label="活跃 episode">{{ strategyFunnel.funnel?.active_episodes ?? 0 }}</el-descriptions-item><el-descriptions-item label="纸面提案">{{ strategyFunnel.funnel?.paper_proposals ?? 0 }}</el-descriptions-item><el-descriptions-item label="风险阻断">{{ strategyFunnel.funnel?.blocked_proposals ?? 0 }}</el-descriptions-item></el-descriptions>
+                <el-divider content-position="left">事件回放与概率校准门禁</el-divider>
+                <el-alert :title="`回放 ${strategyGovernance.replay_runs?.length ?? 0} 次｜校准 ${strategyGovernance.probability_calibrations?.length ?? 0} 次。${strategyGovernance.promotion_boundary ?? '未通过回放和人工批准前保持研究模式。'}`" type="warning" :closable="false" show-icon/>
+                <el-table :data="strategyGovernance.replay_runs ?? []" max-height="160" size="small" class="section-gap"><el-table-column prop="created_at" label="回放时间" width="165"><template #default="{ row }">{{ chinaDateTime(String(row.created_at ?? '')) }}</template></el-table-column><el-table-column prop="strategy_key" label="策略" min-width="180"/><el-table-column prop="status" label="状态" width="100"/><el-table-column prop="trace_hash" label="可复算哈希" min-width="200" show-overflow-tooltip/></el-table>
+                <el-table :data="strategyGovernance.probability_calibrations ?? []" max-height="160" size="small" class="section-gap"><el-table-column prop="strategy_family" label="策略族" min-width="160"/><el-table-column prop="signal_type" label="动作" width="90"/><el-table-column prop="horizon_key" label="期限" width="90"/><el-table-column prop="status" label="校准状态" min-width="150"/><el-table-column prop="created_at" label="生成时间" width="165"><template #default="{ row }">{{ chinaDateTime(String(row.created_at ?? '')) }}</template></el-table-column></el-table>
               </el-card>
             </el-tab-pane>
             <el-tab-pane label="接口与原始数据" name="catalog">
@@ -1125,11 +1253,62 @@ onBeforeUnmount(() => {
             </el-tab-pane>
           </el-tabs>
         </template>
-        <template v-else-if="activeSection === 'monitor'"><el-card shadow="never"><template #header><div class="card-header"><span>导入事件</span><el-select v-model="eventFilter" size="small" class="event-filter"><el-option label="全部状态" value="all"/><el-option label="已完成" value="已完成"/><el-option label="失败" value="失败"/><el-option label="处理中" value="已接收，处理中"/></el-select></div></template><el-empty v-if="!visibleEvents.length" description="暂无事件"/><el-timeline v-else><el-timeline-item v-for="event in visibleEvents" :key="event.event_id" :timestamp="dateText(event.received_at)" :type="event.n8n_status === '失败' ? 'danger' : 'primary'"><el-card shadow="never"><div class="event-title"><strong>{{ event.message_type || 'message' }}</strong><el-tag size="small">{{ event.n8n_status || '未知' }}</el-tag></div><p v-if="event.text">{{ event.text }}</p><el-text type="info">{{ event.source_label || '无来源备注' }}{{ event.n8n_error ? ` · ${event.n8n_error}` : '' }}</el-text></el-card></el-timeline-item></el-timeline></el-card></template>
+        <template v-else-if="activeSection === 'monitor'">
+          <el-card shadow="never" class="group-relay-status-panel">
+            <template #header><div class="card-header"><div><span>群消息转发状态</span><small class="realtime-refresh-time">每 10 秒自动刷新；“最近源消息”与“最近成功轮询”分开显示。</small></div><el-space><el-button size="small" :icon="Refresh" :loading="groupRelayLoading" @click="loadGroupRelayStatus">刷新</el-button><el-button size="small" type="primary" @click="openCreateGroupRelayRoute">新增源群</el-button></el-space></div></template>
+            <el-alert v-if="groupRelayError" :title="groupRelayError" type="error" :closable="false" show-icon />
+            <template v-else>
+              <el-descriptions :column="mobileLayout ? 1 : 4" border size="small">
+                <el-descriptions-item label="整体状态"><el-tag :type="groupRelayStateType(groupRelayStatus.status)">{{ groupRelayStateText(groupRelayStatus.status) }}</el-tag></el-descriptions-item>
+                <el-descriptions-item label="轮询间隔">{{ groupRelayStatus.interval_seconds ?? '-' }} 秒</el-descriptions-item>
+                <el-descriptions-item label="用户读取授权"><el-tag :type="groupRelayStatus.user_oauth_configured ? 'success' : 'danger'">{{ groupRelayStatus.user_oauth_configured ? '已配置' : '未配置' }}</el-tag></el-descriptions-item>
+                <el-descriptions-item label="最近全局轮询">{{ dateText(groupRelayStatus.last_tick_completed_at) }}</el-descriptions-item>
+              </el-descriptions>
+              <el-table :data="groupRelayStatus.sources ?? []" size="small" max-height="360" class="section-gap group-relay-table">
+                <el-table-column prop="chat_name" label="源群" min-width="190" show-overflow-tooltip/>
+                <el-table-column label="标签" width="110"><template #default="{ row }"><el-tag size="small" effect="plain">#{{ row.tag }}</el-tag></template></el-table-column>
+                <el-table-column label="监听状态" width="118"><template #default="{ row }"><el-tag size="small" :type="groupRelayStateType(row.state)">{{ groupRelayStateText(row.state) }}</el-tag></template></el-table-column>
+                <el-table-column label="最近成功轮询" min-width="155"><template #default="{ row }"><div>{{ dateText(row.last_polled_at) }}</div><small class="group-relay-age">{{ ageText(row.poll_age_seconds) }} 前</small></template></el-table-column>
+                <el-table-column label="最近源消息" min-width="155"><template #default="{ row }"><div>{{ dateText(row.last_source_message_at) }}</div><small class="group-relay-age">{{ groupRelayMessageText(row.last_message_status) }}</small></template></el-table-column>
+                <el-table-column label="最近转发" min-width="155"><template #default="{ row }">{{ dateText(row.last_forwarded_at) }}</template></el-table-column>
+                <el-table-column label="编辑/撤回对账" min-width="155"><template #default="{ row }">{{ dateText(row.last_reconciled_at) }}</template></el-table-column>
+                <el-table-column label="失败待重试" width="105"><template #default="{ row }"><el-tag size="small" :type="row.failed_count ? 'danger' : 'success'">{{ row.failed_count ?? 0 }}</el-tag></template></el-table-column>
+                <el-table-column label="最近错误" min-width="190" show-overflow-tooltip><template #default="{ row }">{{ row.last_error || '-' }}</template></el-table-column>
+                <el-table-column label="管理" width="170" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="openEditGroupRelayRoute(row)">编辑</el-button><el-button link :type="row.enabled === false ? 'success' : 'warning'" @click="setGroupRelayRouteEnabled(row, row.enabled === false)">{{ row.enabled === false ? '启用' : '停用' }}</el-button><el-button link type="danger" @click="deleteGroupRelayRoute(row)">删除</el-button></template></el-table-column>
+              </el-table>
+            </template>
+          </el-card>
+          <el-card shadow="never"><template #header><div class="card-header"><span>导入事件</span><el-select v-model="eventFilter" size="small" class="event-filter"><el-option label="全部状态" value="all"/><el-option label="已完成" value="已完成"/><el-option label="失败" value="失败"/><el-option label="处理中" value="已接收，处理中"/></el-select></div></template><el-empty v-if="!visibleEvents.length" description="暂无事件"/><el-timeline v-else><el-timeline-item v-for="event in visibleEvents" :key="event.event_id" :timestamp="dateText(event.received_at)" :type="event.n8n_status === '失败' ? 'danger' : 'primary'"><el-card shadow="never"><div class="event-title"><strong>{{ event.message_type || 'message' }}</strong><el-tag size="small">{{ event.n8n_status || '未知' }}</el-tag></div><p v-if="event.text">{{ event.text }}</p><el-text type="info">{{ event.source_label || '无来源备注' }}{{ event.n8n_error ? ` · ${event.n8n_error}` : '' }}</el-text></el-card></el-timeline-item></el-timeline></el-card>
+        </template>
+        <template v-else-if="activeSection === 'workbench'">
+          <el-alert v-if="feishuWorkbenchError" :title="feishuWorkbenchError" type="error" show-icon :closable="false" class="section-gap"/>
+          <el-card shadow="never" class="group-relay-status-panel">
+            <template #header><div class="card-header"><div><span>飞书分析师工作台</span><small class="realtime-refresh-time">与群监听状态同时每 10 秒刷新；实际按钮只在汇总群内由机器人执行。</small></div><el-button size="small" :icon="Refresh" :loading="feishuWorkbenchLoading" @click="loadFeishuWorkbench">刷新</el-button></div></template>
+            <el-descriptions :column="mobileLayout ? 1 : 3" border size="small"><el-descriptions-item label="汇总群"><el-tag :type="feishuWorkbench.target_configured ? 'success' : 'danger'">{{ feishuWorkbench.target_configured ? '已配置' : '未配置' }}</el-tag></el-descriptions-item><el-descriptions-item label="用户读取授权"><el-tag :type="feishuWorkbench.user_oauth_configured ? 'success' : 'danger'">{{ feishuWorkbench.user_oauth_configured ? '已配置' : '未配置' }}</el-tag></el-descriptions-item><el-descriptions-item label="H5 工作台"><el-link v-if="feishuWorkbench.public_h5_url" :href="feishuWorkbench.public_h5_url" target="_blank" type="primary">打开 H5</el-link><span v-else>待配置公网 HTTPS 地址</span></el-descriptions-item></el-descriptions>
+          </el-card>
+          <el-row :gutter="14"><el-col :xs="24" :lg="14"><el-card shadow="never" header="最近汇总消息 · 协作状态"><el-empty v-if="!feishuWorkbenchMessages.length" description="暂无群消息记录"/><el-table v-else :data="feishuWorkbenchMessages" size="small" max-height="560"><el-table-column label="来源" min-width="120"><template #default="{ row }"><el-tag size="small" effect="plain">#{{ row.route_tag }}</el-tag><div class="workbench-source">{{ row.source_chat_name || row.source_key }}</div></template></el-table-column><el-table-column label="内容" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ workbenchMessageText(row) }}</template></el-table-column><el-table-column label="状态" width="112"><template #default="{ row }"><el-tag size="small" :type="row.workflow_state === 'focus' ? 'warning' : row.workflow_state === 'ignored' || row.source_deleted ? 'info' : 'success'">{{ workbenchWorkflowText(row.workflow_state) }}</el-tag></template></el-table-column><el-table-column label="更新时间" min-width="145"><template #default="{ row }">{{ dateText(row.updated_at) }}</template></el-table-column><el-table-column label="协作" width="222" fixed="right"><template #default="{ row }"><el-button link type="primary" :loading="feishuWorkbenchAction === `${row.source_message_id}:research`" @click="runWorkbenchAction(row, 'research')">研究</el-button><el-button link type="warning" :loading="feishuWorkbenchAction === `${row.source_message_id}:focus`" @click="runWorkbenchAction(row, 'focus')">关注</el-button><el-button link :loading="feishuWorkbenchAction === `${row.source_message_id}:task`" @click="runWorkbenchAction(row, 'task')">任务</el-button><el-button link type="info" :loading="feishuWorkbenchAction === `${row.source_message_id}:ignore`" @click="runWorkbenchAction(row, 'ignore')">忽略</el-button></template></el-table-column></el-table></el-card></el-col>
+            <el-col :xs="24" :lg="10"><el-card shadow="never" header="消息检索（用户权限）"><el-input v-model="workbenchSearch" placeholder="搜索可访问的飞书消息" clearable @keyup.enter="searchFeishuMessages"><template #append><el-button :loading="feishuWorkbenchAction === 'search'" @click="searchFeishuMessages">搜索</el-button></template></el-input><el-alert title="搜索不会把结果自动转发；仅用已保存的用户 OAuth 权限执行。" type="info" :closable="false" class="section-gap"/><el-divider content-position="left">内容沉淀与协作</el-divider><el-space wrap><el-button size="small" @click="openWorkbenchIntegration('documents')">新建文档</el-button><el-button size="small" @click="openWorkbenchIntegration('base-records')">写入 Base</el-button><el-button size="small" @click="openWorkbenchIntegration('calendar-events')">创建提醒</el-button><el-button size="small" @click="openWorkbenchIntegration('approvals')">发起审批</el-button></el-space><pre v-if="workbenchSearchResult" class="workbench-result">{{ JSON.stringify(workbenchSearchResult, null, 2) }}</pre></el-card></el-col></el-row>
+          <el-card shadow="never" header="已挖掘能力与接入状态"><el-table :data="feishuWorkbench.capabilities ?? []" size="small" max-height="540"><el-table-column prop="category" label="分类" width="105"/><el-table-column prop="label" label="能力" min-width="190"/><el-table-column label="状态" width="100"><template #default="{ row }"><el-tag size="small" :type="row.configured ? 'success' : 'warning'">{{ row.configured ? '可配置' : '待配置' }}</el-tag></template></el-table-column><el-table-column label="所需权限/产品" min-width="220"><template #default="{ row }"><el-tag v-for="scope in row.requires" :key="scope" size="small" effect="plain" class="workbench-scope">{{ scope }}</el-tag></template></el-table-column><el-table-column prop="note" label="边界与下一步" min-width="300" show-overflow-tooltip/></el-table></el-card>
+        </template>
         <template v-else><el-card shadow="never" header="手动投递"><el-form label-position="top"><el-row :gutter="14"><el-col :md="12" :xs="24"><el-form-item label="来源"><el-select v-model="relayTag" class="full-width"><el-option v-for="route in routes" :key="route.tag" :label="`#${route.tag} · ${route.label}`" :value="route.tag"/></el-select></el-form-item></el-col><el-col :md="12" :xs="24"><el-form-item label="来源备注"><el-input v-model="relaySource"/></el-form-item></el-col><el-col :md="12" :xs="24"><el-form-item label="日期"><el-date-picker v-model="relayDate" value-format="YYYY-MM-DD" type="date" class="full-width"/></el-form-item></el-col><el-col :md="12" :xs="24"><el-form-item label="时间"><el-time-picker v-model="relayTime" value-format="HH:mm" format="HH:mm" class="full-width"/></el-form-item></el-col></el-row><el-form-item label="正文"><el-input v-model="relayText" type="textarea" :rows="8"/></el-form-item><el-form-item label="媒体"><el-upload drag :auto-upload="false" :show-file-list="false" :on-change="(file: { raw?: File }) => file.raw && addFiles([file.raw])"><el-icon class="upload-icon"><UploadFilled /></el-icon><div>选择文件或拖入此处</div></el-upload><el-space wrap class="section-gap"><el-tag v-for="file in relayFiles" :key="file.name + file.size" closable @close="relayFiles = relayFiles.filter((item) => item !== file)">{{ file.name }}</el-tag></el-space></el-form-item><el-progress v-if="relayXhr" :percentage="relayProgress"/><el-alert v-if="relayState" :title="relayState" type="info" :closable="false" class="section-gap"/><el-button type="primary" :loading="!!relayXhr" @click="submitRelay">开始投递</el-button><el-button v-if="relayXhr" @click="relayXhr?.abort(); relayXhr = null">取消</el-button></el-form></el-card></template>
       </el-main>
     </el-container>
   </el-container>
   <el-dialog v-model="fetchDialogOpen" title="受控数据读取" width="680px" destroy-on-close><el-form label-position="top"><el-row :gutter="14"><el-col :span="12"><el-form-item label="API"><el-input v-model="fetchForm.api_name"/></el-form-item></el-col><el-col :span="12"><el-form-item label="来源"><el-select v-model="fetchForm.provider" class="full-width"><el-option label="自动回退" value="auto"/><el-option label="主 Tushare 源" value="primary"/><el-option label="Super 聚合兼容路由" value="super"/><el-option label="Super SDK 完整路径" value="super_sdk"/><el-option label="Super GET 已验证路径" value="super_get"/><el-option label="REST 备用源" value="backup"/></el-select></el-form-item></el-col></el-row><el-alert title="完整 ths_member 请选自动、Super 聚合或 Super SDK；Super GET 对大板块会被上游截断。" type="warning" :closable="false" class="section-gap"/><el-form-item label="参数 JSON"><el-input v-model="fetchForm.paramsText" type="textarea" :rows="8" class="mono"/></el-form-item><el-row :gutter="14"><el-col :span="16"><el-form-item label="字段"><el-input v-model="fetchForm.fields"/></el-form-item></el-col><el-col :span="8"><el-form-item label="最大行数"><el-input-number v-model="fetchForm.max_rows" :min="1" :max="10000" class="full-width"/></el-form-item></el-col></el-row></el-form><template #footer><el-button @click="fetchDialogOpen = false">取消</el-button><el-button type="primary" :loading="actionLoading === 'fetch'" @click="executeFetch">读取并保存证据</el-button></template></el-dialog>
+  <el-dialog v-model="groupRelayRouteDialog" :title="groupRelayRouteForm.key ? '编辑源群' : '新增源群'" width="520px" destroy-on-close>
+    <el-form label-position="top" @submit.prevent="saveGroupRelayRoute">
+      <el-alert title="保存时会用用户读取权限精确搜索群名；新增群首次只建立历史基线，之后才转发新消息。" type="info" :closable="false" show-icon class="section-gap"/>
+      <el-form-item label="源群名称" required><el-input v-model="groupRelayRouteForm.chat_name" maxlength="120" placeholder="例如：新野人哥会员群【禁言】"/></el-form-item>
+      <el-form-item label="转发标签" required><el-input v-model="groupRelayRouteForm.tag" maxlength="32" placeholder="例如：quanneng"><template #prepend>#</template></el-input></el-form-item>
+      <el-form-item label="群 chat_id（可选，仅同名群时需要）"><el-input v-model="groupRelayRouteForm.chat_id" placeholder="oc_xxx"/></el-form-item>
+      <el-form-item label="状态"><el-switch v-model="groupRelayRouteForm.enabled" active-text="启用监听" inactive-text="停用监听"/></el-form-item>
+    </el-form>
+    <template #footer><el-button @click="groupRelayRouteDialog = false">取消</el-button><el-button type="primary" :loading="groupRelayRouteSaving" @click="saveGroupRelayRoute">保存</el-button></template>
+  </el-dialog>
+  <el-dialog v-model="workbenchIntegrationDialog" :title="workbenchIntegration.title" width="620px" destroy-on-close>
+    <el-alert title="此操作会真实调用飞书 API；仅在上方能力状态显示“可配置”且飞书后台权限已发布后提交。" type="warning" :closable="false" show-icon class="section-gap"/>
+    <el-form label-position="top"><el-form-item label="请求 JSON"><el-input v-model="workbenchIntegration.payloadText" type="textarea" :rows="12" class="mono"/></el-form-item></el-form>
+    <template #footer><el-button @click="workbenchIntegrationDialog = false">取消</el-button><el-button type="primary" :loading="feishuWorkbenchAction.startsWith('integration:')" @click="submitWorkbenchIntegration">提交</el-button></template>
+  </el-dialog>
   <el-dialog v-model="fetchResultOpen" title="读取结果" width="620px"><el-descriptions :column="2" border><el-descriptions-item v-for="(value, key) in fetchResult" :key="String(key)" :label="String(key)"><span class="result-value">{{ typeof value === 'object' ? JSON.stringify(value) : value }}</span></el-descriptions-item></el-descriptions></el-dialog>
 </template>

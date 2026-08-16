@@ -40,16 +40,18 @@ def latest_intraday_outcomes(
         attribution_cache: dict[str, dict[str, Any]] = {}
         for item in raw_items:
             evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
-            attribution = evidence.get("attribution") if isinstance(evidence.get("attribution"), dict) else None
+            # Attribution is a deterministic projection of immutable signal
+            # evidence.  Recompute it instead of trusting legacy embedded
+            # labels, so a corrected classifier immediately fixes research
+            # views even before the optional write-side backfill has run.
+            event_key = str(item["signal_event_id"])
+            attribution = attribution_cache.get(event_key)
             if attribution is None:
-                event_key = str(item["signal_event_id"])
-                attribution = attribution_cache.get(event_key)
-                if attribution is None:
-                    attribution = attribution_fn(
-                        str(item["signal_key"]), str(item["signal_type"]), item.get("conditions"), evidence,
-                        market_contexts.get((item["observed_at"], str(item["symbol"])), missing_context),
-                    )
-                    attribution_cache[event_key] = attribution
+                attribution = attribution_fn(
+                    str(item["signal_key"]), str(item["signal_type"]), item.get("conditions"), evidence,
+                    market_contexts.get((item["observed_at"], str(item["symbol"])), missing_context),
+                )
+                attribution_cache[event_key] = attribution
             item["attribution"] = attribution
             item.pop("evidence", None)
             rows.append(item)

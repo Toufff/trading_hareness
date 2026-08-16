@@ -31,6 +31,47 @@ class SignalSpec:
     evidence: tuple[EvidenceRef, ...] = ()
     risk_flags: tuple[str, ...] = ()
     conditions: dict[str, Any] = field(default_factory=dict)
+    horizon_key: str | None = None
+    valid_until: datetime | None = None
+    expected_return: float | None = None
+    probability_profile_id: str | None = None
+    invalidation_codes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FactorSpec:
+    """Versioned, causal factor definition for live and replay use.
+
+    The contract names the evidence and time semantics; it intentionally does
+    not embed a free-form expression language.  The implementation remains a
+    reviewed Python/SQL function, which keeps live and replay behaviour
+    inspectable and deterministic.
+    """
+
+    factor_key: str
+    version: str
+    frequency: str
+    inputs: tuple[str, ...]
+    availability_clock: str
+    minimum_history: int = 0
+    quality_flags: tuple[str, ...] = ()
+    live_use: str = "evidence_only"
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class MarketEvent:
+    """Immutable event envelope for deterministic, provider-free replay."""
+
+    event_id: str
+    schema_version: str
+    source: str
+    symbol: str | None
+    event_time: datetime | None
+    available_at: datetime
+    ingested_at: datetime
+    payload_hash: str
+    quality_flags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

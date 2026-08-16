@@ -69,8 +69,13 @@ def materialize_feature_snapshot(
             return_20 = (research_closes[-1] / research_closes[-21] - 1
                          if has_research_price and len(research_closes) >= 21 and research_closes[-21] else None)
             volume_ratio = volumes[-1] / mean(volumes[-20:]) if len(volumes) >= 20 and mean(volumes[-20:]) else None
+            # Keep raw ``close`` for audit/execution facts, but publish the
+            # explicitly named research basis beside it.  Consumers must not
+            # compare a raw close with an adjusted moving average across an
+            # ex-rights date.
             features = {"symbol": symbol, "name": member["name"], "industry": member["industry"],
                         "market_data_date": str(latest_date), "bar_count": len(bars), "close": closes[-1],
+                        "research_close": research_closes[-1] if has_research_price else None,
                         "sma_5": sma5, "sma_20": sma20, "return_5": return_5, "return_20": return_20,
                         "research_price_status": "complete" if has_research_price else "blocked",
                         "volume_ratio": volume_ratio, "selected_provider": latest["selected_provider"]}

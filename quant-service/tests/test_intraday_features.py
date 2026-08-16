@@ -1,0 +1,70 @@
+"""Pure-source safeguards for live peer breadth features."""
+
+from __future__ import annotations
+
+import unittest
+
+from app.intraday_features import mapped_watchlist_peers
+from app.intraday_factor_contracts import contracts_for_signal
+from app.intraday_state_machine import classify_setup_state
+
+
+class MappedWatchlistPeerTests(unittest.TestCase):
+    def test_peers_require_the_same_taxonomy_and_exact_sector_key(self) -> None:
+        mapping = mapped_watchlist_peers(
+            ["000001.SZ", "000002.SZ", "600000.SH", "300001.SZ"],
+            [
+                {"symbol": "000001.SZ", "taxonomy_key": "ths_concept_flow", "sector_key": "C001"},
+                {"symbol": "000002.SZ", "taxonomy_key": "ths_concept_flow", "sector_key": "C001"},
+                # Same display-like code but a different source taxonomy is
+                # intentionally not a peer relation.
+                {"symbol": "600000.SH", "taxonomy_key": "ths_industry", "sector_key": "C001"},
+                {"symbol": "300001.SZ", "taxonomy_key": "ths_concept_flow", "sector_key": "C002"},
+            ],
+        )
+        self.assertEqual(mapping["000001.SZ"]["peer_symbols"], ["000002.SZ"])
+        self.assertEqual(mapping["000002.SZ"]["peer_symbols"], ["000001.SZ"])
+        self.assertEqual(mapping["600000.SH"]["peer_symbols"], [])
+        self.assertEqual(mapping["300001.SZ"]["peer_symbols"], [])
+        self.assertEqual(mapping["000001.SZ"]["groups"][0]["taxonomy_key"], "ths_concept_flow")
+
+    def test_state_machine_is_descriptive_and_requires_acceptance_evidence(self) -> None:
+        continuation = classify_setup_state(
+            {"symbol": "000001.SZ"},
+            {"price": 11, "volume_ratio": 2.0, "main_net_inflow": 1},
+            {"return_3m_pct": 1.0, "above_vwap_pct": 0.2, "minute_volume_multiple": 2.2},
+            {"available_peer_count": 3, "confirming_peer_count": 2},
+        )
+        self.assertEqual(continuation["state"], "continuation_acceptance")
+        self.assertIn("no_order", continuation["scope"])
+        failure = classify_setup_state(
+            {"symbol": "000001.SZ", "entry_price": 10},
+            {"price": 9.7, "volume_ratio": 2.0, "main_net_inflow": -1},
+            {"return_3m_pct": -0.8, "above_vwap_pct": -0.3, "minute_volume_multiple": 2.2},
+            {"available_peer_count": 3, "confirming_peer_count": 0},
+        )
+        self.assertEqual(failure["state"], "acceptance_failure")
+        constrained = classify_setup_state(
+            {"symbol": "000001.SZ"}, {"price": 10}, {}, {},
+            {"decision": "watch_only", "reason_codes": ["market_context_stale"]},
+        )
+        self.assertEqual(constrained["state"], "policy_constrained")
+
+    def test_factor_contracts_declare_timing_without_changing_signal_score(self) -> None:
+        contracts = contracts_for_signal({
+            "score": 82,
+            "conditions": {
+                "minute_features": {"return_3m_pct": 1.2},
+                "peer_context": {"requested_peer_count": 2},
+                "daily_rebound_state": {"state": "shadow_confirmed"},
+            },
+        })
+        self.assertEqual([item["factor_key"] for item in contracts], [
+            "daily_rebound_state", "exact_watchlist_peer_breadth", "minute_return_3m",
+            "minute_volume_multiple", "public_flow_proxy", "vwap_distance",
+        ])
+        self.assertTrue(all(item["live_use"] == "evidence_only" for item in contracts))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -9,6 +9,11 @@ from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
 
+from .intraday_clock import continuous_auction_bounds, intraday_outcome_window
+
+
+INTRADAY_EXIT_QUOTE_TOLERANCE_SECONDS = 90
+
 
 def settle(
     connection: Any, as_of_date: date | None, *, cutoff: datetime,
@@ -33,37 +38,75 @@ def settle(
         entry_price = decimal_or_none((evidence.get("tencent") or {}).get("price"))
         entry_observed_at = signal["observed_at"]
         if entry_price is None:
-            entry_quote = connection.execute(
-                """SELECT observed_at,price FROM quant.intraday_quote_observations
-                     WHERE symbol=%s AND source_name='tencent_free' AND observed_at<=%s AND price>0
-                     ORDER BY observed_at DESC LIMIT 1""", (signal["symbol"], signal["observed_at"]),
-            ).fetchone()
+            signal_bounds = continuous_auction_bounds(signal["observed_at"])
+            entry_quote = None
+            if signal_bounds is not None:
+                session_start, _ = signal_bounds
+                entry_quote = connection.execute(
+                    """SELECT observed_at,price FROM quant.intraday_quote_observations
+                         WHERE symbol=%s AND source_name='tencent_free' AND observed_at<=%s AND observed_at>=%s
+                           AND price>0 ORDER BY observed_at DESC LIMIT 1""",
+                    (signal["symbol"], signal["observed_at"], max(session_start, signal["observed_at"] - timedelta(seconds=90))),
+                ).fetchone()
             if entry_quote:
                 entry_price, entry_observed_at = Decimal(entry_quote["price"]), entry_quote["observed_at"]
         if entry_price is None or direction is None:
             continue
         barrier_spec = barrier_spec_type()
-        barrier_rows = connection.execute(
-            """SELECT observed_at,price FROM quant.intraday_quote_observations
-                 WHERE symbol=%s AND source_name='tencent_free' AND observed_at>%s AND observed_at<=%s AND price>0
-                 ORDER BY observed_at""",
-            (signal["symbol"], signal["observed_at"], min(cutoff, signal["observed_at"] + timedelta(minutes=barrier_spec.max_horizon_minutes))),
-        ).fetchall()
+        barrier_bounds = continuous_auction_bounds(entry_observed_at)
+        barrier_deadline = entry_observed_at + timedelta(minutes=barrier_spec.max_horizon_minutes)
+        if barrier_bounds is None:
+            barrier_result: dict[str, Any] = {
+                "status": "unavailable", "label": None, "reason": "entry_outside_continuous_auction",
+            }
+            barrier_rows: list[Any] = []
+        else:
+            _, session_end = barrier_bounds
+            barrier_end = min(cutoff, session_end, barrier_deadline)
+            barrier_rows = connection.execute(
+                """SELECT observed_at,price FROM quant.intraday_quote_observations
+                     WHERE symbol=%s AND source_name='tencent_free' AND observed_at>%s AND observed_at<=%s AND price>0
+                     ORDER BY observed_at""",
+                (signal["symbol"], entry_observed_at, barrier_end),
+            ).fetchall()
+            barrier_result = triple_barrier_label(
+                [dict(row) for row in barrier_rows], entry_price=entry_price,
+                entry_at=entry_observed_at, spec=barrier_spec,
+            )
+            # The generic labeler deliberately knows no exchange sessions.  A
+            # truncated 60-minute path must not sit pending forever or borrow
+            # the afternoon/next-day path on a later settlement run.
+            if (barrier_result.get("status") == "pending" and session_end < barrier_deadline
+                    and cutoff >= session_end):
+                barrier_result = {
+                    "status": "unavailable", "label": None,
+                    "reason": "barrier_horizon_crosses_continuous_session_boundary",
+                    **{key: barrier_result[key] for key in ("last_at", "last_price") if key in barrier_result},
+                }
         persist_barrier_outcome(
             connection, signal["signal_event_id"], spec=barrier_spec, entry_at=entry_observed_at,
-            entry_price=entry_price,
-            result=triple_barrier_label([dict(row) for row in barrier_rows], entry_price=entry_price,
-                                         entry_at=entry_observed_at, spec=barrier_spec),
-            source_status={"path": "local_tencent_free", "cutoff": cutoff.isoformat()},
+            entry_price=entry_price, result=barrier_result,
+            source_status={
+                "path": "local_tencent_free", "cutoff": cutoff.isoformat(),
+                "session_bounded": True,
+                "row_count": len(barrier_rows),
+                "reason": barrier_result.get("reason"),
+            },
         )
         for horizon_key, minutes in horizons:
-            exit_quote = connection.execute(
-                """SELECT observed_at,price FROM quant.intraday_quote_observations
-                     WHERE symbol=%s AND source_name='tencent_free' AND observed_at>=%s AND observed_at<=%s AND price>0
-                     ORDER BY observed_at LIMIT 1""",
-                (signal["symbol"], signal["observed_at"] + timedelta(minutes=minutes), cutoff),
-            ).fetchone()
-            status = "matured" if exit_quote else "pending"
+            window = intraday_outcome_window(
+                entry_observed_at, horizon_minutes=minutes, cutoff=cutoff,
+                tolerance_seconds=INTRADAY_EXIT_QUOTE_TOLERANCE_SECONDS,
+            )
+            exit_quote = None
+            if window.get("status") != "unavailable" and window.get("query_end") >= window.get("query_start"):
+                exit_quote = connection.execute(
+                    """SELECT observed_at,price FROM quant.intraday_quote_observations
+                         WHERE symbol=%s AND source_name='tencent_free' AND observed_at>=%s AND observed_at<=%s AND price>0
+                         ORDER BY observed_at LIMIT 1""",
+                    (signal["symbol"], window["query_start"], window["query_end"]),
+                ).fetchone()
+            status = "matured" if exit_quote else str(window["status"])
             if exit_quote:
                 path = connection.execute(
                     """SELECT price FROM quant.intraday_quote_observations
@@ -75,7 +118,8 @@ def settle(
                 matured += 1
             else:
                 outcome = None
-                pending += 1
+                if status == "pending":
+                    pending += 1
             connection.execute(
                 """INSERT INTO quant.intraday_signal_outcomes(signal_event_id,horizon_key,direction,entry_observed_at,entry_price,
                      exit_observed_at,exit_price,raw_return,maximum_favorable_excursion,maximum_adverse_excursion,status,tradability,source_status)
@@ -89,7 +133,13 @@ def settle(
                  exit_quote["observed_at"] if exit_quote else None, exit_quote["price"] if exit_quote else None,
                  outcome["raw_return"] if outcome else None, outcome["maximum_favorable_excursion"] if outcome else None,
                  outcome["maximum_adverse_excursion"] if outcome else None, status,
-                 Json({"entry": "signal_evidence.tencent.price", "exit": "tencent_free", "cutoff": cutoff.isoformat()})),
+                 Json({
+                     "entry": "signal_evidence.tencent.price", "exit": "tencent_free",
+                     "cutoff": cutoff.isoformat(), "settlement_window": {
+                         key: value.isoformat() if isinstance(value, datetime) else value
+                         for key, value in window.items()
+                     },
+                 })),
             )
             horizon_counts[horizon_key] += 1
         signal_date = signal["observed_at"].astimezone(ZoneInfo("Asia/Shanghai")).date()

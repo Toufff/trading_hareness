@@ -20,6 +20,7 @@ from psycopg.types.json import Json
 from app.analyst_expert_research import rebuild_analyst_opinions
 from app.episode_lifecycle import backfill_signal_event_episode_links, ensure_signal_episode
 from app.analyst_observations import persist_extraction_run, persist_observations_for_evidence
+from app.feature_snapshot_repository import materialize_feature_snapshot
 from app.main import DailyBar, app, db, executor_saturated_response, upsert_bar
 from app.runtime_executors import ExecutorSaturatedError
 
@@ -61,6 +62,58 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
         response = __import__("asyncio").run(executor_saturated_response(None, ExecutorSaturatedError("full")))
         self.assertEqual(response.status_code, 503)
         self.assertIn(b"temporarily saturated", response.body)
+
+    def test_feature_snapshot_keeps_raw_close_separate_from_adjusted_research_close(self) -> None:
+        """A recommender must never compare raw close with adjusted SMA."""
+        class Result:
+            def __init__(self, *, rows=None, row=None):
+                self._rows, self._row = rows or [], row
+
+            def fetchall(self):
+                return self._rows
+
+            def fetchone(self):
+                return self._row
+
+        class Connection:
+            def __init__(self):
+                self.writes = []
+                ascending = [
+                    {
+                        "trading_date": date(2026, 1, index + 1), "close": 10 + index,
+                        "high": 10 + index, "low": 10 + index, "volume": 100,
+                        "amount": 1000, "adj_factor": 2.0, "is_suspended": False,
+                        "limit_up": None, "limit_down": None, "selected_provider": "super_sdk",
+                    }
+                    for index in range(21)
+                ]
+                self.bars_descending = list(reversed(ascending))
+
+            def execute(self, sql, _params):
+                if "FROM quant.universe_members" in sql:
+                    return Result(rows=[{"symbol": "000001.SZ", "name": "Test", "industry": "Test", "is_st": False}])
+                if "FROM quant.canonical_bars_daily" in sql:
+                    return Result(rows=self.bars_descending)
+                if "FROM quant.daily_fundamentals" in sql:
+                    return Result(row=None)
+                if "INSERT INTO quant.feature_snapshots" in sql:
+                    self.writes.append(sql)
+                    return Result()
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+        connection = Connection()
+        result = materialize_feature_snapshot(
+            connection, date(2026, 1, 21), "core", feature_version="p0-test",
+            number=float, market_regime=lambda *_: "neutral",
+            analyst_text_factor_summary=lambda *_: {"market": {}},
+            latest_tushare_row=lambda *_: None, analyst_feature=lambda *_: {},
+        )
+        feature = result["items"][0]["features"]
+        self.assertEqual(feature["close"], 30.0)
+        self.assertEqual(feature["research_close"], 60.0)
+        self.assertEqual(feature["sma_20"], 41.0)
+        self.assertNotIn("adj_factor_missing", result["items"][0]["quality_flags"])
+        self.assertEqual(len(connection.writes), 1)
 
 
 @unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")

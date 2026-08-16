@@ -23,15 +23,32 @@ def signal_attribution(signal_key: str, signal_type: str, conditions: dict[str, 
     elif nonpositive_board: sector_linkage = "board_top10_nonpositive"
     elif available_peers >= 2: sector_linkage = "peers_not_confirmed"
     else: sector_linkage = "unobserved"
-    if "countertrend_rebound" in signal_key or conditions.get("setup") == "countertrend_rebound_confirmed_plus_intraday_acceptance": stage, model_version = "acceptance", "countertrend-rebound-v1"
-    elif "upside_acceptance_eac_v4" in signal_key or conditions.get("setup") == "eac_acceptance_confirmed": stage, model_version = "acceptance", "eac-v4"
-    elif "upside_breakout_eac_v3" in signal_key or isinstance(conditions.get("upside_research_assessment"), dict): stage, model_version = "expansion", "eac-v3"
-    elif signal_type in {"reduce", "exit"}: stage, model_version = "risk_exit", signal_model_version
-    elif "price_extension" in signal_key or "extreme_flow" in signal_key: stage, model_version = "extension_watch", "legacy-unversioned"
+    setup = str(conditions.get("setup") or "")
+    is_eac = (
+        "upside_acceptance_eac_v4" in signal_key
+        or "upside_breakout_eac_v3" in signal_key
+        or setup in {"eac_acceptance_confirmed", "eac_first_intraday_high"}
+    )
+    if "countertrend_rebound" in signal_key or setup == "countertrend_rebound_confirmed_plus_intraday_acceptance":
+        stage, model_version = "acceptance", "countertrend-rebound-v1"
+    elif "upside_acceptance_eac_v4" in signal_key or setup == "eac_acceptance_confirmed":
+        stage, model_version = "acceptance", "eac-v4"
+    elif "upside_breakout_eac_v3" in signal_key or setup == "eac_first_intraday_high":
+        stage, model_version = "expansion", "eac-v3"
+    elif signal_type in {"reduce", "exit"}:
+        stage, model_version = "risk_exit", signal_model_version
+    elif "price_extension" in signal_key or "extreme_flow" in signal_key:
+        stage, model_version = "extension_watch", "legacy-unversioned"
     else:
         match = re.search(r"watchlist-confirmation-v\d+", signal_key)
         stage, model_version = "generic", match.group(0) if match else "legacy-unversioned"
-    assessment = conditions.get("eac_acceptance_assessment") if isinstance(conditions.get("eac_acceptance_assessment"), dict) else conditions.get("upside_research_assessment") if isinstance(conditions.get("upside_research_assessment"), dict) else {}
+    assessment = (
+        conditions.get("eac_acceptance_assessment")
+        if is_eac and isinstance(conditions.get("eac_acceptance_assessment"), dict)
+        else conditions.get("upside_research_assessment")
+        if is_eac and isinstance(conditions.get("upside_research_assessment"), dict)
+        else {}
+    )
     risk_flags = conditions.get("risk_flags") if isinstance(conditions.get("risk_flags"), list) else []
     assessment_status = str(assessment.get("status") or "")
     volume_baseline = "ready" if assessment_status == "candidate" else "insufficient" if assessment_status == "attention_only" or "time_bucket_volume_baseline_insufficient" in risk_flags else "not_applicable"

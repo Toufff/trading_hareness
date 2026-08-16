@@ -529,6 +529,65 @@ def countertrend_rebound_realtime_signal(
     }
 
 
+def countertrend_rebound_failure_reduce_signal(
+    watch: dict[str, Any], quote: dict[str, Any] | None,
+    minute_features: dict[str, Any] | None, peer_context: dict[str, Any] | None,
+    prior: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Flag a failed intraday rebound for an existing position.
+
+    This is deliberately a *reduce* review, not an automatic stop.  It needs
+    a loss of VWAP acceptance and negative short-horizon momentum together
+    with either negative flow or a loss of exact-peer breadth.  The condition
+    avoids treating a normal one-minute pullback as an exit signal, while
+    keeping T+1/can-sell enforcement in the common live-policy gate.
+    """
+    entry_price = _finite(watch.get("entry_price"))
+    if not quote or entry_price is None or entry_price <= 0 or not bool(watch.get("alert_on_exit")):
+        return None
+    price = _finite(quote.get("price"))
+    return_3m = _finite((minute_features or {}).get("return_3m_pct"))
+    above_vwap = _finite((minute_features or {}).get("above_vwap_pct"))
+    flow = _finite(quote.get("main_net_inflow"))
+    available_peers = int((peer_context or {}).get("available_peer_count") or 0)
+    confirming_peers = int((peer_context or {}).get("confirming_peer_count") or 0)
+    if price is None or return_3m is None or above_vwap is None:
+        return None
+    return_since_entry = (price / entry_price - 1) * 100
+    peer_confirmation_lost = available_peers >= 2 and confirming_peers == 0
+    vwap_acceptance_lost = above_vwap <= -0.15 and return_3m <= -0.50
+    cost_risk_lost = return_since_entry <= -2.5 and (above_vwap < 0 or return_3m < 0)
+    if not ((vwap_acceptance_lost and (flow is None or flow <= 0 or peer_confirmation_lost)) or cost_risk_lost):
+        return None
+    symbol = str(watch["symbol"])
+    return {
+        "signal_key": f"{symbol}:reduce:countertrend_rebound_failure_v1",
+        "signal_type": "reduce", "severity": "warning",
+        "score": round(float((prior or {}).get("model_score") or 0.0) * 100, 2),
+        "hard": False, "strategy_version": MODEL_VERSION,
+        "independent_confirmation": peer_confirmation_lost,
+        "conditions": {
+            "setup": "countertrend_rebound_intraday_acceptance_failure",
+            "daily_rebound_state": prior or {"status": "not_available"},
+            "entry_price": entry_price, "price": price,
+            "return_since_entry_pct": round(return_since_entry, 4),
+            "pct_change": _finite(quote.get("pct_change")),
+            "volume_ratio": _finite(quote.get("volume_ratio")),
+            "turnover_rate": _finite(quote.get("turnover_rate")),
+            "main_net_inflow": flow,
+            "minute_features": minute_features or {"status": "not_available"},
+            "peer_context": peer_context or {"status": "not_available"},
+            "vwap_acceptance_lost": vwap_acceptance_lost,
+            "peer_confirmation_lost": peer_confirmation_lost,
+            "cost_risk_lost": cost_risk_lost,
+        },
+        "risk_flags": [
+            "countertrend_rebound_acceptance_failed", "manual_review_required",
+            "no_automatic_order", "t_plus_one_and_limit_down_policy_checked_separately",
+        ],
+    }
+
+
 def countertrend_rebound_shadow_signal(
     watch: dict[str, Any], quote: dict[str, Any] | None,
     minute_features: dict[str, Any] | None, peer_context: dict[str, Any] | None,
@@ -541,7 +600,8 @@ def countertrend_rebound_shadow_signal(
 __all__ = [
     "HORIZON_DAYS", "MODEL_VERSION", "STRATEGY_KEY", "TECH_INDUSTRIES",
     "build_rebound_examples", "chronological_rebound_splits",
-    "countertrend_rebound_realtime_signal", "countertrend_rebound_shadow_signal", "evaluate_rebound_split",
+    "countertrend_rebound_failure_reduce_signal", "countertrend_rebound_realtime_signal",
+    "countertrend_rebound_shadow_signal", "evaluate_rebound_split",
     "latest_rebound_priors", "rebound_state", "research_from_rows",
     "run_countertrend_rebound_research",
 ]

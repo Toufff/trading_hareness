@@ -38,6 +38,33 @@
 
 适配器按 `event_id` 和 `message_id` 做 10 分钟幂等去重；飞书重复投递会复用第一次处理结果，不会重复下载或创建目标媒体上传。n8n 执行历史已开启自动清理：保留 72 小时、最多 1000 条；成功执行不保存二进制，失败执行保留用于排错。历史执行产生的旧文件会由 n8n 后台清理周期逐步回收，不要直接删除 Docker volume 或 `storage` 子目录。
 
+### 外部群消息汇集
+
+`feishu-adapter` 另有一个独立的 10 秒轮询器：以用户 access token 从“马安强 (1)”读取的新消息前置 `#anqiang`，从“消息更新群”读取的新消息前置 `#liwei`，从“新野人哥会员群【禁言】”读取的新消息前置 `#quanneng`，再以机器人身份发送到“分析师发送汇总群”。它使用消息 ID 作为 PostgreSQL 主键；首次看见一个源群时只建立历史基线，之后才转发新消息。文本、图片、视频、文件和富文本均支持，且一个源消息只创建一个汇总群气泡：图片和视频以“标签 + 媒体”的同一条富文本消息发送；飞书富文本不支持通用文件标签，故普通文件以单条文件消息发送，标签写入文件名。媒体会先从源消息资源下载、再上传到机器人名下后发送；单图最大 10 MiB，单文件最大 30 MiB，超过飞书上传限制的消息会留在 `unsupported` 状态而不会静默丢失。默认群仅在首次启动时写入 PostgreSQL 注册表；之后在 Vue 的“导入监控 → 群消息转发状态”中可新增、编辑、启停或删除源群。保存群名会用用户授权精确发现群 ID，配置会在下一次轮询生效。
+
+默认配置在 `compose.yaml`，可用 `.env` 覆盖 `FEISHU_GROUP_RELAY_*`。外部源群通过用户 OAuth 读取：授权码或已取得的 refresh token 仅经本机受保护的 `/internal/feishu-user-oauth` 入口一次性保存；access/refresh token 以 AES-GCM 密文持久化在 PostgreSQL，access token 过期前自动滚动刷新。机器人不需要在源外部群内，但授权用户必须可见这些群并具有 `im:chat:readonly`、`im:message` / `im:message.group_msg` 与 `offline_access` 权限。成功和失败状态在 `feishu_group_relay_messages` 表中可审计。
+
+### 飞书分析师工作台与协作闭环
+
+访问 `http://localhost:5680/workbench`（或侧栏“飞书工作台”）可以看到已经挂接到适配器的能力、用户授权状态、最近转发消息及各个源群的实时健康信息。前端使用项目现有的 Vue 3、TypeScript 和 Element Plus 组件库；页面每 10 秒刷新，但不会在页面刷新时触发外部写操作。
+
+- 每条成功汇总的消息会追加一张机器人行动卡片。卡片可“纳入研究 / 重点关注 / 创建任务 / 忽略”；重点关注后可置顶或加急。所有动作和线程回复都限定在机器人已加入的汇总群，绝不假定机器人能在外部源群执行按钮、事件或已读回执。
+- 轮询按消息 ID 去重；另外每 6 小时在最近 24 小时窗口中对账源群编辑和撤回。编辑会更新行动卡片并在卡片线程提示，撤回会撤回机器人发出的汇总群副本。可用 `FEISHU_GROUP_RELAY_RECONCILE_SECONDS`、`FEISHU_GROUP_RELAY_RECONCILE_LOOKBACK_SECONDS` 调整窗口。
+- 工作台提供文档、Base、日历和审批的受控创建入口，以及用户权限的消息检索。它们在缺少环境标识或权限时会显示“待配置”并拒绝执行，不会伪造成功。
+
+在飞书开放平台发布下列权限/产品后再使用相应动作（实际名称以控制台当前显示为准）：
+
+| 能力 | 至少需要的权限或后台配置 | 环境变量 |
+| --- | --- | --- |
+| 行动卡片、线程回复、反应、置顶、已读 | 消息发送/读取、卡片回调；订阅 `card.action.trigger`、消息反应事件 | 无 |
+| 外部源群读取、消息搜索 | 用户 OAuth 的群聊/群消息读取、消息搜索和 `offline_access` | 无 |
+| 文档、Drive、Wiki | 云文档/云空间、知识库权限 | `FEISHU_WORKBENCH_DRIVE_FOLDER_TOKEN`、`FEISHU_WORKBENCH_WIKI_SPACE_ID` |
+| Task、Base、Calendar、Approval | 相应产品权限及管理员/应用可见范围 | `FEISHU_WORKBENCH_TASKLIST_GUID`、`FEISHU_WORKBENCH_BASE_*`、`FEISHU_WORKBENCH_CALENDAR_ID`、`FEISHU_WORKBENCH_APPROVAL_CODE` |
+| H5 工作台、机器人菜单、群 Tab | 在开发者后台登记 HTTPS 域名、配置菜单事件 key `workbench`、启用群能力 | `FEISHU_WORKBENCH_PUBLIC_BASE_URL` |
+| OCR、语音/视频转写、翻译、Aily、开放搜索 | 相应 AI/搜索权限和可能的企业套餐 | `FEISHU_WORKBENCH_AILY_APP_ID`（Aily） |
+
+`FEISHU_WORKBENCH_PUBLIC_BASE_URL` 只能填已登记到飞书开发者后台的公网 HTTPS 地址；`http://localhost:5680` 只用于本机管理，不能作为飞书 H5 域名。不要把 App Secret、用户 access token 或 refresh token 填入这些变量，更不要提交到 Git。用户曾在聊天中暴露过凭据时，应在飞书开放平台轮换应用密钥并重新完成 OAuth 授权。
+
 每个媒体只在首个分片创建 batch/upload 会话；后续分片复用相同会话。多个媒体会逐个 finalize，并在最后一个媒体完成后只 submit 一次 batch。重试时先通过状态核验读取远端 `received_parts`，只补传缺失分片。大文件按 8 MiB 分片，n8n 不把整文件交给 Code 节点。若需重新生成原始工作流，先备份数据库，再执行导入脚本并重新发布上述工作流。
 
 导入时间默认采用适配器收到飞书事件时的 `Asia/Shanghai` 时间。要覆盖它，请在路由标签后的首行写 `@YYYY-MM-DD HH:mm`；这一行不会写入正文。例如：

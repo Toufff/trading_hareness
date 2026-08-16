@@ -8,6 +8,7 @@ from app.intraday_decision_context import (
     probability_profiles_from_rows,
     shrunk_probability,
 )
+from app.probability_calibration import out_of_fold_calibration_diagnostics
 
 
 class IntradayDecisionContextTests(unittest.TestCase):
@@ -20,6 +21,8 @@ class IntradayDecisionContextTests(unittest.TestCase):
         self.assertAlmostEqual(profile["estimated_probability"], 12 / 22, places=4)
         self.assertEqual(profile["confidence_tier"], "low")
         self.assertEqual(profile["sample_rows"], 10)
+        self.assertLess(profile["confidence_interval_lower"], profile["estimated_probability"])
+        self.assertGreater(profile["confidence_interval_upper"], profile["estimated_probability"])
 
     def test_live_profiles_collapse_correlated_rows_by_day(self) -> None:
         rows = [
@@ -57,6 +60,13 @@ class IntradayDecisionContextTests(unittest.TestCase):
         }, probability)
         self.assertEqual(exit_context["action"], "离场复核")
         self.assertIn("硬止损", exit_context["reasons"][0])
+
+    def test_calibration_refuses_to_fit_below_independent_day_gate(self) -> None:
+        result = out_of_fold_calibration_diagnostics([
+            {"probability": 0.7, "outcome": 1, "exchange_date": "2026-08-10"},
+        ])
+        self.assertEqual(result["status"], "insufficient_oof_evidence")
+        self.assertEqual(result["required_trading_days"], 60)
 
 
 if __name__ == "__main__":

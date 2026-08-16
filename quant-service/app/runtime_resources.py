@@ -9,8 +9,13 @@ from typing import Any
 
 
 GIB = 1024 ** 3
-DEFAULT_RESEARCH_STORAGE_SOFT_BYTES = 20 * GIB
-DEFAULT_HOT_DATABASE_SOFT_BYTES = 8 * GIB
+# The operator reserved 40 GiB for the complete research estate.  Keep a
+# separate hot-database budget so the system can still protect the SSD before
+# artifacts or raw evidence consume the whole allocation.  Retention jobs keep
+# their existing bounded windows; these values are admission-control limits,
+# not permission for unbounded collection.
+DEFAULT_RESEARCH_STORAGE_SOFT_BYTES = 40 * GIB
+DEFAULT_HOT_DATABASE_SOFT_BYTES = 28 * GIB
 
 
 def bounded_min_free_bytes(value: str | None) -> int:

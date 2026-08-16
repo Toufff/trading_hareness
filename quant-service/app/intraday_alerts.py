@@ -27,6 +27,8 @@ def intraday_alert_text(
         title = "承接观察确认"
     if conditions.get("setup") == "countertrend_rebound_confirmed_plus_intraday_acceptance":
         title = "B浪反弹入场复核"
+    if conditions.get("setup") == "countertrend_rebound_intraday_acceptance_failure":
+        title = "B浪反弹承接失效"
     policy = conditions.get("policy_gate") if isinstance(conditions.get("policy_gate"), dict) else {}
     decision = conditions.get("decision_context") if isinstance(conditions.get("decision_context"), dict) else {}
     name = str(quote.get("name") or watch.get("label") or signal["symbol"])
@@ -115,9 +117,14 @@ def _probability_text(value: Any) -> str:
     raw_text = f"｜原始 {float(raw) * 100:.1f}%" if raw is not None else ""
     average = profile.get("average_directional_return")
     average_text = f"｜平均方向收益 {float(average) * 100:.2f}%" if average is not None else ""
+    lower, upper = profile.get("confidence_interval_lower"), profile.get("confidence_interval_upper")
+    interval_text = (
+        f"｜不确定区间 {float(lower) * 100:.1f}%–{float(upper) * 100:.1f}%"
+        if lower is not None and upper is not None else ""
+    )
     return (
         f"研究概率（{profile.get('horizon', '—')}方向兑现）：{float(estimate) * 100:.1f}%（{confidence}）"
-        f"{raw_text}{average_text}｜样本 {int(profile.get('sample_rows') or 0)} 条/"
+        f"{interval_text}{raw_text}{average_text}｜样本 {int(profile.get('sample_rows') or 0)} 条/"
         f"{int(profile.get('independent_trading_days') or 0)} 个独立交易日。"
     )
 

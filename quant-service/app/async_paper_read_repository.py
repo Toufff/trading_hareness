@@ -76,7 +76,14 @@ async def strategy_governance(async_database: Any) -> dict[str, Any]:
                           approved_by,approved_at,created_at,updated_at FROM quant.strategy_trials ORDER BY updated_at DESC""")
         contracts = await _fetchall(connection, """SELECT strategy_key,strategy_version,status,trial_id,approved_by,approved_at,updated_at
                      FROM quant.strategy_contracts ORDER BY strategy_key,strategy_version""")
-    return {"trials": trials, "contracts": contracts, "live_effect": "none",
+        replay_runs = await _fetchall(connection, """SELECT replay_run_id,engine_version,strategy_key,strategy_version,
+                          start_available_at,end_available_at,status,input_hash,trace_hash,data_boundary,metrics,error_message,created_at
+                     FROM quant.intraday_replay_runs ORDER BY created_at DESC LIMIT 100""")
+        calibrations = await _fetchall(connection, """SELECT calibration_id,calibration_version,strategy_family,signal_type,horizon_key,
+                          market_state,setup_state,status,start_date,end_date,input_hash,metrics,approved_by,approved_at,created_at
+                     FROM quant.intraday_probability_calibrations ORDER BY created_at DESC LIMIT 100""")
+    return {"trials": trials, "contracts": contracts, "replay_runs": replay_runs,
+            "probability_calibrations": calibrations, "live_effect": "none",
             "promotion_boundary": "research_only_until_replay_and_human_approval"}
 
 

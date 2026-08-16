@@ -5,6 +5,7 @@ from datetime import date, timedelta
 
 from app.watchlist_countertrend_rebound import (
     build_rebound_examples,
+    countertrend_rebound_failure_reduce_signal,
     countertrend_rebound_realtime_signal,
     evaluate_rebound_split,
     rebound_state,
@@ -92,6 +93,27 @@ class CountertrendReboundTests(unittest.TestCase):
         ))
         self.assertIsNone(countertrend_rebound_realtime_signal(
             {"symbol": "000001.SZ", "alert_on_entry": True, "entry_price": 9.5}, quote, minute, {}, prior,
+        ))
+
+    def test_rebound_failure_requires_vwap_momentum_and_flow_or_peer_loss(self) -> None:
+        watch = {"symbol": "000001.SZ", "entry_price": 10.0, "alert_on_exit": True}
+        quote = {"price": 9.85, "pct_change": -1.5, "volume_ratio": 1.8, "main_net_inflow": -100}
+        failure = countertrend_rebound_failure_reduce_signal(
+            watch, quote, {"return_3m_pct": -0.8, "above_vwap_pct": -0.3},
+            {"available_peer_count": 3, "confirming_peer_count": 0}, {"model_score": 0.7},
+        )
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure["signal_type"], "reduce")
+        self.assertTrue(failure["conditions"]["vwap_acceptance_lost"])
+        self.assertTrue(failure["conditions"]["peer_confirmation_lost"])
+        self.assertIsNone(countertrend_rebound_failure_reduce_signal(
+            watch, {**quote, "main_net_inflow": 100},
+            {"return_3m_pct": -0.2, "above_vwap_pct": -0.1},
+            {"available_peer_count": 3, "confirming_peer_count": 2}, {},
+        ))
+        self.assertIsNone(countertrend_rebound_failure_reduce_signal(
+            {**watch, "alert_on_exit": False}, quote,
+            {"return_3m_pct": -0.8, "above_vwap_pct": -0.3}, {}, {},
         ))
 
     def test_next_session_suspension_is_not_treated_as_fillable_entry(self) -> None:
