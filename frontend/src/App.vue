@@ -969,10 +969,10 @@ onBeforeUnmount(() => {
                 </template>
               </el-card>
               <el-card shadow="never" class="section-gap">
-                <template #header><div class="card-header"><div><span>科技下跌浪 · 恐慌耗竭与B浪反弹</span><small class="realtime-refresh-time">恐慌只观察；单日普涨只算试探；连续市场广度与科技组均线修复后才确认。</small></div><el-tag type="warning">shadow-only</el-tag></div></template>
+                <template #header><div class="card-header"><div><span>科技下跌浪 · 恐慌耗竭与B浪反弹</span><small class="realtime-refresh-time">恐慌只观察；单日普涨只算试探；收盘确认后仍需盘中量价承接，才给观察池发研究提醒。</small></div><el-tag type="warning">research-alert</el-tag></div></template>
                 <el-alert v-if="!latestReboundExperiment" title="尚未生成逆势反弹研究结果，点击上方重新训练会同时运行。" type="info" :closable="false" show-icon/>
                 <template v-else>
-                  <el-alert :title="`当前门禁：${nestedValue(latestReboundExperiment.metrics,'promotion_gate.status')}。恐慌与试探阶段不构成买点，确认阶段仍不发飞书。`" type="warning" :closable="false" show-icon/>
+                  <el-alert :title="`当前门禁：${nestedValue(latestReboundExperiment.metrics,'promotion_gate.status')}。恐慌与试探阶段不提醒；确认后只对显式观察池发送带原因、失效条件和低置信度研究概率的人工复核卡。`" type="warning" :closable="false" show-icon/>
                   <el-row :gutter="12" class="metric-row section-gap">
                     <el-col :md="4" :xs="12"><el-statistic title="科技样本" :value="Number(nestedValue(latestReboundExperiment.metrics,'sample_rows') || 0)"/></el-col>
                     <el-col :md="4" :xs="12"><el-statistic title="测试确认日" :value="Number(nestedValue(latestReboundExperiment.metrics,'walk_forward.test.selected_dates') || 0)"/></el-col>

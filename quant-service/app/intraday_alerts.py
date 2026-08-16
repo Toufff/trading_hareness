@@ -25,7 +25,10 @@ def intraday_alert_text(
     }[signal["signal_type"]]
     if conditions.get("setup") == "eac_acceptance_confirmed" and signal["signal_type"] == "watch":
         title = "承接观察确认"
+    if conditions.get("setup") == "countertrend_rebound_confirmed_plus_intraday_acceptance":
+        title = "B浪反弹入场复核"
     policy = conditions.get("policy_gate") if isinstance(conditions.get("policy_gate"), dict) else {}
+    decision = conditions.get("decision_context") if isinstance(conditions.get("decision_context"), dict) else {}
     name = str(quote.get("name") or watch.get("label") or signal["symbol"])
     lines = [
         f"【盘中提醒｜{title}】",
@@ -34,6 +37,14 @@ def intraday_alert_text(
         f"现价 {conditions.get('price', '—')}｜涨跌 {conditions.get('pct_change', '—')}%｜量比 {conditions.get('volume_ratio', '—')}｜换手 {conditions.get('turnover_rate', '—')}%",
         f"腾讯主力净流入指标 {conditions.get('main_net_inflow', '—')}（公开源估算）",
     ]
+    if decision:
+        lines.append(f"建议方向：{decision.get('action', '人工复核')}（系统不自动下单）")
+        for index, reason in enumerate(decision.get("reasons") or [], start=1):
+            lines.append(f"触发原因{index}：{reason}")
+        lines.append(_probability_text(decision.get("probability")))
+        invalidations = "；".join(str(item) for item in decision.get("invalidations") or [] if str(item))
+        if invalidations:
+            lines.append(f"失效/反证条件：{invalidations}")
     if conditions.get("setup") == "minute_price_volume_plus_sector_breadth":
         minute = conditions.get("minute_features") or {}
         peers = conditions.get("peer_context") or {}
@@ -84,6 +95,31 @@ def intraday_alert_text(
         lines.append(f"策略门禁：{policy.get('decision')}｜{','.join(str(item) for item in policy.get('reason_codes') or [])}")
     lines.append("仅为人工复核提醒，不构成交易指令；请结合盘口、板块、仓位和风险预算确认。")
     return "\n".join(lines)
+
+
+def _probability_text(value: Any) -> str:
+    profile = value if isinstance(value, dict) else {}
+    estimate = profile.get("estimated_probability")
+    if estimate is None:
+        return (
+            f"研究概率：暂不可估（匹配成熟样本 {int(profile.get('sample_rows') or 0)}；"
+            "策略评分不是概率）。"
+        )
+    confidence = {
+        "low": "低置信度", "preliminary": "初步", "validated": "达到样本门槛",
+        "unavailable": "不可用",
+    }.get(str(profile.get("confidence_tier") or ""), str(profile.get("confidence_tier") or "未分级"))
+    raw = profile.get("raw_event_positive_rate")
+    if raw is None:
+        raw = profile.get("raw_positive_rate")
+    raw_text = f"｜原始 {float(raw) * 100:.1f}%" if raw is not None else ""
+    average = profile.get("average_directional_return")
+    average_text = f"｜平均方向收益 {float(average) * 100:.2f}%" if average is not None else ""
+    return (
+        f"研究概率（{profile.get('horizon', '—')}方向兑现）：{float(estimate) * 100:.1f}%（{confidence}）"
+        f"{raw_text}{average_text}｜样本 {int(profile.get('sample_rows') or 0)} 条/"
+        f"{int(profile.get('independent_trading_days') or 0)} 个独立交易日。"
+    )
 
 
 def _shanghai_time(value: Any) -> str:

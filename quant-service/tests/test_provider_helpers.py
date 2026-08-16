@@ -1115,6 +1115,14 @@ class ProviderHelperTests(unittest.TestCase):
                     "time_bucket_volume_surprise": 2.5,
                 }},
                 "realtime_cross_check": {"status": "confirmed", "super_get_price": 12.3, "tencent_price": 12.29, "gap_pct": 0.08},
+                "decision_context": {
+                    "action": "入场复核", "reasons": ["首突破后量价同步"],
+                    "invalidations": ["跌回VWAP"],
+                    "probability": {"estimated_probability": 0.54, "raw_positive_rate": 0.6,
+                                    "sample_rows": 25, "independent_trading_days": 3,
+                                    "average_directional_return": 0.002, "horizon": "30m",
+                                    "confidence_tier": "low"},
+                },
             }},
             {"label": "浦发银行"}, {"name": "浦发银行"}, {"time": "2026-08-11 10:00:00", "close": 12.3},
             decision_card_url="https://research.example/?section=research&tab=stock-study&symbol=600000.SH",
@@ -1123,7 +1131,27 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIn("秒级价格交叉确认", text)
         self.assertIn("信号观测时间（上海）", text)
         self.assertIn("决策卡（已保存证据）", text)
+        self.assertIn("建议方向：入场复核", text)
+        self.assertIn("触发原因1：首突破后量价同步", text)
+        self.assertIn("研究概率（30m方向兑现）：54.0%（低置信度）", text)
+        self.assertIn("样本 25 条/3 个独立交易日", text)
+        self.assertIn("失效/反证条件：跌回VWAP", text)
         self.assertIn("仅为人工复核提醒", text)
+
+    def test_intraday_alert_text_never_turns_score_into_probability(self):
+        text = intraday_alert_text(
+            {"symbol": "600000.SH", "signal_type": "exit", "score": 100, "conditions": {
+                "price": 9.4, "pct_change": -4, "volume_ratio": 2, "turnover_rate": 3,
+                "main_net_inflow": -100, "decision_context": {
+                    "action": "离场复核", "reasons": ["触发硬止损"],
+                    "invalidations": ["核对可卖数量"],
+                    "probability": {"estimated_probability": None, "sample_rows": 0},
+                },
+            }}, {"label": "样本"}, {"name": "样本"}, None,
+        )
+        self.assertIn("研究概率：暂不可估", text)
+        self.assertIn("策略评分不是概率", text)
+        self.assertNotIn("100.0%", text)
 
     def test_daily_strategy_summary_keeps_data_gate_and_avoids_small_sample_win_rate(self):
         text = daily_strategy_summary_text({

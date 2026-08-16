@@ -15,6 +15,7 @@ from datetime import date, timedelta
 import math
 from typing import Any, Iterable
 
+from .intraday_decision_context import shrunk_probability
 from .watchlist_main_wave import FEATURE_KEYS, LOOKBACK_DAYS, _feature_row, normalize_bars
 
 
@@ -285,6 +286,12 @@ def evaluate_rebound_split(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], 
     panic = [item for item in rows if item["pattern"]["state"] == "panic"]
     base_rate = _average(item["label"] for item in rows)
     precision = _average(item["label"] for item in selected)
+    selected_by_date: dict[date, list[dict[str, Any]]] = defaultdict(list)
+    for item in selected:
+        selected_by_date[item["signal_date"]].append(item)
+    selected_date_positive_rate = _average(
+        _average(item["label"] for item in items) for items in selected_by_date.values()
+    )
     return {
         "rows": len(rows), "dates": len({item["signal_date"] for item in rows}),
         "symbols": len({item["symbol"] for item in rows}), "base_rate": base_rate,
@@ -293,6 +300,7 @@ def evaluate_rebound_split(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], 
         "selected_symbols": len({item["symbol"] for item in selected}),
         "selected_positive_rows": sum(item["label"] for item in selected),
         "selected_precision": precision, "selected_lift": precision / base_rate if base_rate else None,
+        "selected_date_positive_rate": selected_date_positive_rate,
         "selected_terminal_return": _average(item["terminal_return"] for item in selected),
         "selected_net_terminal_return": _average(item.get("net_terminal_return", item["terminal_return"]) for item in selected),
         "selected_mfe": _average(item["maximum_favorable_excursion"] for item in selected),
@@ -372,7 +380,8 @@ def research_from_rows(
             "selection": f"confirmed_only_max_{MAX_DAILY_CANDIDATES}_per_day",
             "one_way_cost_bps": int(ONE_WAY_COST_RATE * 10_000),
             "panic_policy": "observation_only_never_direct_entry",
-            "live_effect": "shadow_evidence_only", "alert_eligible": False,
+            "live_effect": "explicit_watchlist_research_alert_only", "alert_eligible": True,
+            "probability_contract": "shrunk_research_probability_with_effective_trading_days",
             "test_reuse_policy": "diagnostic_only_after_july_august_were_observed",
         },
         "metrics": {
@@ -442,23 +451,41 @@ def latest_rebound_priors(connection: Any) -> dict[str, dict[str, Any]]:
     if not row:
         return {}
     parameters, metrics = dict(row["parameters"] or {}), dict(row["metrics"] or {})
+    test = ((metrics.get("walk_forward") or {}).get("test") or {})
+    selected_date_rate = test.get("selected_date_positive_rate")
+    if selected_date_rate is None:
+        selected_date_rate = test.get("selected_precision")
+    base_rate = _finite(test.get("base_rate"))
+    probability = shrunk_probability(
+        raw_positive_rate=_finite(selected_date_rate),
+        sample_rows=int(test.get("selected_rows") or 0),
+        independent_days=int(test.get("selected_dates") or 0),
+        average_directional_return=_finite(test.get("selected_net_terminal_return")),
+        horizon="5d", source="countertrend_rebound_july_august_diagnostic",
+        prior_rate=base_rate if base_rate is not None else 0.50,
+        outcome_definition="MFE>=8%, terminal>=3%, MAE>=-6% after T+1 open",
+    )
     return {
         str(item["symbol"]): {
             **item, "model_version": parameters.get("model_version"),
             "live_effect": parameters.get("live_effect"),
+            "research_probability": probability,
             "trained_at": row["created_at"].isoformat() if row["created_at"] else None,
         }
         for item in metrics.get("current_scores") or [] if item.get("symbol")
     }
 
 
-def countertrend_rebound_shadow_signal(
+def countertrend_rebound_realtime_signal(
     watch: dict[str, Any], quote: dict[str, Any] | None,
     minute_features: dict[str, Any] | None, peer_context: dict[str, Any] | None,
     prior: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """Write only confirmed close-state plus live confirmation as shadow evidence."""
-    if not quote or not prior or prior.get("state") != "shadow_confirmed":
+    """Alert an explicit watch only after close-state and intraday confirmation."""
+    if (
+        not quote or not prior or prior.get("state") != "shadow_confirmed"
+        or not bool(watch.get("alert_on_entry")) or watch.get("entry_price") is not None
+    ):
         return None
     price_change = _finite(quote.get("pct_change"))
     quote_volume = _finite(quote.get("volume_ratio")) or 0.0
@@ -477,31 +504,44 @@ def countertrend_rebound_shadow_signal(
         return None
     symbol = str(watch["symbol"])
     return {
-        "signal_key": f"{symbol}:watch:countertrend_rebound_shadow_v1",
-        "signal_type": "watch", "severity": "info",
+        "signal_key": f"{symbol}:entry:countertrend_rebound_v1",
+        "signal_type": "entry", "severity": "warning",
         "score": round(float(prior["model_score"]) * 100, 2),
-        "hard": False, "shadow_only": True,
+        "hard": False, "strategy_version": MODEL_VERSION,
+        "independent_confirmation": confirming_peers >= 2,
         "conditions": {
             "setup": "countertrend_rebound_confirmed_plus_intraday_acceptance",
             "daily_rebound_state": prior,
-            "pct_change": price_change, "quote_volume_ratio": quote_volume,
+            "price": _finite(quote.get("price")),
+            "pct_change": price_change, "volume_ratio": quote_volume,
+            "turnover_rate": _finite(quote.get("turnover_rate")),
             "main_net_inflow": flow,
             "minute_features": minute_features or {"status": "not_available"},
             "peer_context": peer_context or {"status": "not_available"},
+            "research_probability": prior.get("research_probability"),
         },
         "risk_flags": [
-            "countertrend_not_main_wave", "shadow_challenger_not_promoted",
+            "countertrend_not_main_wave", "research_alert_only_not_strategy_promotion",
             "panic_stage_is_not_entry", "reused_test_window_diagnostic_only",
-            "watchlist_selection_bias", "no_feishu_alert", "manual_review_required",
+            "low_confidence_probability", "watchlist_selection_bias", "manual_review_required",
             "no_automatic_order",
         ],
     }
 
 
+def countertrend_rebound_shadow_signal(
+    watch: dict[str, Any], quote: dict[str, Any] | None,
+    minute_features: dict[str, Any] | None, peer_context: dict[str, Any] | None,
+    prior: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Compatibility alias for callers deployed before the alert-only upgrade."""
+    return countertrend_rebound_realtime_signal(watch, quote, minute_features, peer_context, prior)
+
+
 __all__ = [
     "HORIZON_DAYS", "MODEL_VERSION", "STRATEGY_KEY", "TECH_INDUSTRIES",
     "build_rebound_examples", "chronological_rebound_splits",
-    "countertrend_rebound_shadow_signal", "evaluate_rebound_split",
+    "countertrend_rebound_realtime_signal", "countertrend_rebound_shadow_signal", "evaluate_rebound_split",
     "latest_rebound_priors", "rebound_state", "research_from_rows",
     "run_countertrend_rebound_research",
 ]

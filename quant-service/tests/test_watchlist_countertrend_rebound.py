@@ -5,7 +5,7 @@ from datetime import date, timedelta
 
 from app.watchlist_countertrend_rebound import (
     build_rebound_examples,
-    countertrend_rebound_shadow_signal,
+    countertrend_rebound_realtime_signal,
     evaluate_rebound_split,
     rebound_state,
 )
@@ -64,20 +64,35 @@ class CountertrendReboundTests(unittest.TestCase):
         self.assertEqual(metrics["panic_rows"], 1)
 
     def test_live_shadow_requires_confirmed_daily_state(self) -> None:
-        watch = {"symbol": "000636.SZ"}
-        quote = {"pct_change": 2.0, "volume_ratio": 1.8, "main_net_inflow": 1_000_000}
+        watch = {"symbol": "000636.SZ", "alert_on_entry": True, "entry_price": None}
+        quote = {"price": 58.0, "pct_change": 2.0, "volume_ratio": 1.8, "turnover_rate": 3.2,
+                 "main_net_inflow": 1_000_000}
         minute = {"return_3m_pct": 0.8, "minute_volume_multiple": 2.0, "above_vwap_pct": 0.3}
-        self.assertIsNone(countertrend_rebound_shadow_signal(
+        self.assertIsNone(countertrend_rebound_realtime_signal(
             watch, quote, minute, {"confirming_peer_count": 0},
             {"state": "shadow_panic", "model_score": 0.8},
         ))
-        signal = countertrend_rebound_shadow_signal(
+        signal = countertrend_rebound_realtime_signal(
             watch, quote, minute, {"confirming_peer_count": 0},
-            {"state": "shadow_confirmed", "model_score": 0.8},
+            {"state": "shadow_confirmed", "model_score": 0.8,
+             "research_probability": {"estimated_probability": 0.31}},
         )
         self.assertIsNotNone(signal)
-        self.assertTrue(signal["shadow_only"])
+        self.assertEqual(signal["signal_type"], "entry")
+        self.assertNotIn("shadow_only", signal)
+        self.assertEqual(signal["conditions"]["research_probability"]["estimated_probability"], 0.31)
         self.assertIn("panic_stage_is_not_entry", signal["risk_flags"])
+
+    def test_live_rebound_respects_explicit_watch_alert_and_existing_position(self) -> None:
+        quote = {"price": 10, "pct_change": 2.0, "volume_ratio": 1.8, "main_net_inflow": 1}
+        minute = {"return_3m_pct": 0.8, "minute_volume_multiple": 2.0, "above_vwap_pct": 0.3}
+        prior = {"state": "shadow_confirmed", "model_score": 0.8}
+        self.assertIsNone(countertrend_rebound_realtime_signal(
+            {"symbol": "000001.SZ", "alert_on_entry": False}, quote, minute, {}, prior,
+        ))
+        self.assertIsNone(countertrend_rebound_realtime_signal(
+            {"symbol": "000001.SZ", "alert_on_entry": True, "entry_price": 9.5}, quote, minute, {}, prior,
+        ))
 
     def test_next_session_suspension_is_not_treated_as_fillable_entry(self) -> None:
         start = date(2026, 1, 1)

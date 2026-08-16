@@ -23,7 +23,8 @@ def signal_attribution(signal_key: str, signal_type: str, conditions: dict[str, 
     elif nonpositive_board: sector_linkage = "board_top10_nonpositive"
     elif available_peers >= 2: sector_linkage = "peers_not_confirmed"
     else: sector_linkage = "unobserved"
-    if "upside_acceptance_eac_v4" in signal_key or conditions.get("setup") == "eac_acceptance_confirmed": stage, model_version = "acceptance", "eac-v4"
+    if "countertrend_rebound" in signal_key or conditions.get("setup") == "countertrend_rebound_confirmed_plus_intraday_acceptance": stage, model_version = "acceptance", "countertrend-rebound-v1"
+    elif "upside_acceptance_eac_v4" in signal_key or conditions.get("setup") == "eac_acceptance_confirmed": stage, model_version = "acceptance", "eac-v4"
     elif "upside_breakout_eac_v3" in signal_key or isinstance(conditions.get("upside_research_assessment"), dict): stage, model_version = "expansion", "eac-v3"
     elif signal_type in {"reduce", "exit"}: stage, model_version = "risk_exit", signal_model_version
     elif "price_extension" in signal_key or "extreme_flow" in signal_key: stage, model_version = "extension_watch", "legacy-unversioned"

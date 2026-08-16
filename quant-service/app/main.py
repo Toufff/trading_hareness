@@ -83,9 +83,14 @@ from .watchlist_main_wave_v2 import (
 )
 from .watchlist_countertrend_rebound import (
     STRATEGY_KEY as WATCHLIST_REBOUND_STRATEGY_KEY,
-    countertrend_rebound_shadow_signal,
+    countertrend_rebound_realtime_signal,
     latest_rebound_priors,
     run_countertrend_rebound_research,
+)
+from .intraday_decision_context import (
+    decision_context as intraday_decision_context,
+    load_intraday_probability_profiles,
+    probability_for_signal as intraday_probability_for_signal,
 )
 from .feature_snapshot_repository import materialize_feature_snapshot
 from .intraday_limit_lift import intraday_limit_lift_pattern as pure_intraday_limit_lift_pattern
@@ -3972,6 +3977,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             snapshot_payload["drawdown"] = paper_snapshot["drawdown"]
         shadow_priors = latest_shadow_priors_v2(connection)
         rebound_priors = latest_rebound_priors(connection)
+        probability_profiles = load_intraday_probability_profiles(connection)
         for watch in watches:
             symbol = str(watch["symbol"])
             quote = quotes.get(symbol)
@@ -4003,7 +4009,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             )
             if shadow_signal is not None:
                 generated_signals.append(shadow_signal)
-            rebound_signal = countertrend_rebound_shadow_signal(
+            rebound_signal = countertrend_rebound_realtime_signal(
                 watch, quote, minute_feature, peer_context, rebound_priors.get(symbol),
             )
             if rebound_signal is not None:
@@ -4068,6 +4074,11 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                                           portfolio_risk)
                 signal["conditions"] = {**signal["conditions"], "policy_gate": policy}
                 signal["risk_flags"] = [*signal["risk_flags"], *policy["risk_flags"]]
+                probability = intraday_probability_for_signal(signal, probability_profiles)
+                signal["conditions"] = {
+                    **signal["conditions"],
+                    "decision_context": intraday_decision_context(signal, probability),
+                }
                 latest = connection.execute(
                     "SELECT observed_at FROM quant.intraday_signal_events WHERE signal_key=%s ORDER BY observed_at DESC LIMIT 1",
                     (signal["signal_key"],),
