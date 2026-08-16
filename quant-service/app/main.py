@@ -73,6 +73,7 @@ from .intraday_features import minute_features as pure_intraday_minute_features
 from .intraday_features import mapped_watchlist_peers as pure_mapped_watchlist_peers
 from .intraday_features import peer_context as pure_intraday_peer_context
 from .intraday_features import strategy_session_rows as pure_strategy_session_rows
+from .intraday_minute_provider_service import fetch_bounded_minute_context
 from .intraday_state_machine import classify_setup_state as classify_intraday_setup_state
 from .intraday_factor_contracts import (
     INTRADAY_FACTOR_CONTRACT_VERSION,
@@ -3518,38 +3519,15 @@ async def retry_pending_intraday_alerts(limit: int = 3) -> dict[str, int]:
 
 async def intraday_tushare_minutes(symbols: list[str]) -> dict[str, dict[str, Any]]:
     """Get a bounded minute feature window through the verified super GET path."""
-    def normalize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        ordered = sorted(rows, key=lambda row: str(row.get("time") or row.get("updated_at") or ""))
-        cumulative_volume, cumulative_amount = 0.0, 0.0
-        normalized: list[dict[str, Any]] = []
-        for row in ordered:
-            volume = intraday_number(row.get("vol"))
-            amount = intraday_number(row.get("amount"))
-            close = intraday_number(row.get("close"))
-            if volume is None or volume < 0 or amount is None or amount < 0 or close is None or close <= 0:
-                continue
-            cumulative_volume += volume
-            cumulative_amount += amount
-            normalized.append({**row, "volume_lot": volume, "amount": amount,
-                               "vwap": cumulative_amount / cumulative_volume if cumulative_volume else None,
-                               "is_complete": True})
-        return normalized
-
-    async def fetch_one(symbol: str) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
+    async def fetch_rows(symbol: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         source, rows = await stock_study_fetch("tushare_rt_min", TushareFetchRequest(
             api_name="rt_min", provider="super", params={"ts_code": symbol, "freq": "1MIN"}, max_rows=30, force_refresh=True,
         ))
-        normalized = normalize(rows)
-        feature = intraday_minute_features(normalized, source="tushare_super_get_rt_min") if normalized else None
-        return symbol, ({"latest": normalized[-1], "feature": feature} if normalized else None), source
-    results = await asyncio.gather(*(fetch_one(symbol) for symbol in symbols), return_exceptions=True)
-    output: dict[str, dict[str, Any]] = {}
-    for result in results:
-        if isinstance(result, Exception):
-            continue
-        symbol, payload, source = result
-        output[symbol] = {**(payload or {}), "source": source}
-    return output
+        return source, rows
+
+    return await fetch_bounded_minute_context(
+        symbols, fetch_rows=fetch_rows, feature_builder=intraday_minute_features, number=intraday_number,
+    )
 
 
 def intraday_minute_profile_capture_enabled() -> bool:
