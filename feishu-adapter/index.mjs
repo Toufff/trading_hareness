@@ -719,6 +719,7 @@ const researchPaths = new Map([
 	['/api/research/factor-evaluations', '/api/v1/factors/evaluations'],
 	['/api/research/strategies', '/api/v1/strategies'],
 	['/api/research/strategy-experiments', '/api/v1/strategies/experiments'],
+	['/api/research/strategy-experiments-watchlist', '/api/v1/strategies/experiments'],
 	['/api/research/frameworks', '/api/v1/research-frameworks'],
 	['/api/research/training/roadmap', '/api/v1/training/roadmap'],
 	['/api/research/data-readiness/history-estimate', '/api/v1/data-readiness/history-estimate'],
@@ -777,6 +778,7 @@ const researchActions = new Map([
 	['/api/research/strategies/backtest', '/api/v1/strategies/backtest'],
 	['/api/research/strategy/post-close/run', '/api/v1/strategy/post-close/run'],
 	['/api/research/strategy/pattern-mining/run', '/api/v1/strategy/pattern-mining/run'],
+	['/api/research/strategy/watchlist-main-wave/run', '/api/v1/strategy/watchlist-main-wave/run'],
 	['/api/research/market/universe/sync', '/api/v1/market/universe/sync'],
 	['/api/research/market/full-daily/sync', '/api/v1/market/sync/full-daily'],
 	['/api/research/market/post-close/refresh', '/api/v1/market/post-close/refresh'],
@@ -813,7 +815,7 @@ async function proxyResearchAction(path, request, response, method = 'POST') {
 		if (size > 64 * 1024) throw new Error('研究操作请求超过 64 KiB 上限');
 		chunks.push(chunk);
 	}
-	const longRunning = path.includes('/market/') || path.includes('/tushare/audit') || path.includes('/realtime/probe') || path.includes('/akshare/probe') || path.includes('/strategy/post-close/run') || path.includes('/strategy/pattern-mining/run');
+	const longRunning = path.includes('/market/') || path.includes('/tushare/audit') || path.includes('/realtime/probe') || path.includes('/akshare/probe') || path.includes('/strategy/post-close/run') || path.includes('/strategy/pattern-mining/run') || path.includes('/strategy/watchlist-main-wave/run');
 	const timeoutMs = path.includes('/market/post-close/refresh') ? 360_000 : longRunning ? 180_000 : 45_000;
 	const upstream = await fetch(`${quantServiceUrl}${path}`, {
 		method,

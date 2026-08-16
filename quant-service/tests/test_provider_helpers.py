@@ -396,6 +396,7 @@ class ProviderHelperTests(unittest.TestCase):
         action = AsyncMock(return_value={"status": "ok"})
         router = build_strategy_actions_router(StrategyActionDependencies(
             decision=action, review=action, post_close=action, pattern_mining=action,
+            watchlist_main_wave=action,
             recompute_scorecards=action, recompute_outcomes=action,
             recompute_intraday_outcomes=action, generate_recommendations=action, daily_pipeline=action,
         ))
@@ -403,6 +404,7 @@ class ProviderHelperTests(unittest.TestCase):
         for path in (
             "/api/v1/strategy/decisions/run", "/api/v1/strategy/reviews/run",
             "/api/v1/strategy/post-close/run", "/api/v1/strategy/pattern-mining/run",
+            "/api/v1/strategy/watchlist-main-wave/run",
             "/api/v1/analyst-scorecards/recompute", "/api/v1/outcomes/recompute",
             "/api/v1/intraday/outcomes/recompute", "/api/v1/recommendations/generate",
             "/api/v1/pipeline/daily",

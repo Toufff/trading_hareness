@@ -75,6 +75,12 @@ from .intraday_features import strategy_session_rows as pure_strategy_session_ro
 from .post_close_limit_features import limit_daily_features as pure_limit_daily_features
 from .post_close_limit_features import board_count as pure_limit_board_count
 from .watchlist_daily_factors import watchlist_daily_factors as pure_watchlist_daily_factors
+from .watchlist_main_wave import (
+    STRATEGY_KEY as WATCHLIST_MAIN_WAVE_STRATEGY_KEY,
+    latest_shadow_priors,
+    main_wave_shadow_signal,
+    run_watchlist_main_wave_research,
+)
 from .feature_snapshot_repository import materialize_feature_snapshot
 from .intraday_limit_lift import intraday_limit_lift_pattern as pure_intraday_limit_lift_pattern
 from .intraday_attribution import signal_attribution as pure_signal_attribution
@@ -281,6 +287,7 @@ from .request_models import (
     StrategyDecisionRequest,
     StrategyPatternMiningRequest,
     StrategyReviewRequest,
+    WatchlistMainWaveResearchRequest,
     TushareFetchRequest,
     TushareCapabilityAuditRequest,
     TushareSyncRequest,
@@ -3957,6 +3964,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
         snapshot_payload = dict(paper_snapshot["payload"] or {}) if paper_snapshot else {}
         if paper_snapshot:
             snapshot_payload["drawdown"] = paper_snapshot["drawdown"]
+        shadow_priors = latest_shadow_priors(connection)
         for watch in watches:
             symbol = str(watch["symbol"])
             quote = quotes.get(symbol)
@@ -3983,6 +3991,11 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             previous_quote = dict(previous) if previous else None
             generated_signals = intraday_signal_rules(watch, quote, previous_quote, daily_factors,
                                                        minute_feature, peer_context)
+            shadow_signal = main_wave_shadow_signal(
+                watch, quote, minute_feature, peer_context, shadow_priors.get(symbol),
+            )
+            if shadow_signal is not None:
+                generated_signals.append(shadow_signal)
             fast_confirmation = fast_confirmations.get(symbol, {"status": "missing", "max_age_seconds": 30})
             first_eac = connection.execute(
                 """SELECT observed_at,conditions FROM quant.intraday_signal_events
@@ -4066,6 +4079,8 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     last_symbol_watch_alerted_at=last_symbol_watch_alerted["observed_at"] if last_symbol_watch_alerted else None,
                     last_key_alert=dict(last_key_alerted) if last_key_alerted else None,
                 )
+                if signal.get("shadow_only"):
+                    state = "suppressed"
                 if state == "confirmed" and fast_confirmation.get("status") == "mismatch":
                     state = "confirming"
                 if state == "confirmed" and not policy["allow_confirmation"]:
@@ -4676,17 +4691,28 @@ async def post_close_strategy_loop() -> None:
         if (local.date() not in completed and post_close_strategy_retry_window(local)
                 and await sse_calendar_open_async(local.date())):
             try:
-                already_completed = await run_database_blocking(
+                strategy_completed = await run_database_blocking(
                     post_close_strategy_completed_for_date, local.date(), timeout_seconds=10,
                 )
-                if already_completed:
+                main_wave_completed = await run_database_blocking(
+                    watchlist_main_wave_completed_for_date, local.date(), timeout_seconds=10,
+                )
+                if strategy_completed and main_wave_completed:
                     completed.add(local.date())
                     await asyncio.sleep(60)
                     continue
-                result = await run_database_blocking(
-                    run_post_close_strategy, PostCloseStrategyRequest(as_of_date=local.date()), timeout_seconds=60,
-                )
-                if result["status"] in {"completed", "partial"}:
+                if not strategy_completed:
+                    result = await run_database_blocking(
+                        run_post_close_strategy, PostCloseStrategyRequest(as_of_date=local.date()), timeout_seconds=60,
+                    )
+                    strategy_completed = result["status"] in {"completed", "partial"}
+                if strategy_completed and not main_wave_completed:
+                    model_result = await run_database_blocking(
+                        persist_watchlist_main_wave_research,
+                        WatchlistMainWaveResearchRequest(as_of_date=local.date()), timeout_seconds=90,
+                    )
+                    main_wave_completed = model_result["status"] == "completed"
+                if strategy_completed and main_wave_completed:
                     completed.add(local.date())
             except Exception as error:  # noqa: BLE001 - retry while the bounded post-close window remains open
                 print(f"post-close strategy run failed: {str(error)[:300]}")
@@ -4713,6 +4739,18 @@ def post_close_strategy_completed_for_date(as_of_date: date) -> bool:
             "SELECT status FROM quant.post_close_strategy_runs WHERE run_key=%s", (run_key,),
         ).fetchone()
     return bool(row and row["status"] in {"completed", "partial"})
+
+
+def watchlist_main_wave_completed_for_date(as_of_date: date) -> bool:
+    """Return whether the same-date daily prior has been materialized."""
+    with db.transaction() as connection:
+        row = connection.execute(
+            """SELECT 1 FROM quant.strategy_experiments
+                WHERE strategy_key=%s AND universe_key='watchlist'
+                  AND end_date=%s AND status='completed' LIMIT 1""",
+            (WATCHLIST_MAIN_WAVE_STRATEGY_KEY, as_of_date),
+        ).fetchone()
+    return bool(row)
 
 
 def build_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
@@ -6589,6 +6627,9 @@ async def run_post_close_refresh_legacy(request: PostCloseRefreshRequest) -> dic
         await stage("post_close_strategy", lambda: run_database_blocking(
             run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date)
         ))
+        await stage("watchlist_main_wave", lambda: run_database_blocking(
+            persist_watchlist_main_wave_research, WatchlistMainWaveResearchRequest(as_of_date=trade_date),
+        ))
         await stage("research_snapshot", lambda: run_database_blocking(build_snapshot, SnapshotRequest(as_of_date=trade_date)))
 
         # Availability is explicit: Xinhua has no provisioned contract and Sina is
@@ -6673,6 +6714,9 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
         "analyst_scorecards": lambda: run_database_blocking(recompute_scorecards, trade_date),
         "analyst_expert_research": lambda: run_database_blocking(rebuild_analyst_research_for_date, trade_date),
         "post_close_strategy": lambda: run_database_blocking(run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date)),
+        "watchlist_main_wave": lambda: run_database_blocking(
+            persist_watchlist_main_wave_research, WatchlistMainWaveResearchRequest(as_of_date=trade_date),
+        ),
         "research_snapshot": lambda: run_database_blocking(build_snapshot, SnapshotRequest(as_of_date=trade_date)),
     }
     return await run_post_close_refresh_orchestrated(
@@ -6684,7 +6728,7 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
             "close_market_snapshot", "akshare_supplements", "ths_industry_flow", "ths_concept_flow_and_limit_strength",
             "market_flow_features", "limit_ladder", "limit_lift_pattern_mining", "core_daily_controls", "cninfo_announcements",
             "board_review", "close_strategy_decision", "close_review", "analyst_outcomes", "analyst_scorecards",
-            "analyst_expert_research", "post_close_strategy", "research_snapshot",
+            "analyst_expert_research", "post_close_strategy", "watchlist_main_wave", "research_snapshot",
         ), timeout_overrides={"akshare_supplements": 240.0, "limit_lift_pattern_mining": 120.0},
         trade_date=trade_date,
         safe_error_detail=safe_error_detail, json_safe=strategy_json_safe,
@@ -8513,6 +8557,30 @@ async def run_strategy_pattern_mining_endpoint(payload: StrategyPatternMiningReq
     return await run_strategy_pattern_mining(payload)
 
 
+def persist_watchlist_main_wave_research(payload: WatchlistMainWaveResearchRequest) -> dict[str, Any]:
+    """Fit and persist one reproducible shadow model from stored daily bars."""
+    with db.transaction() as connection:
+        result = run_watchlist_main_wave_research(connection, payload.as_of_date)
+        row = connection.execute(
+            """INSERT INTO quant.strategy_experiments(
+                   strategy_key,universe_key,start_date,end_date,status,parameters,metrics,equity_curve,trades)
+               VALUES(%s,'watchlist',%s,%s,%s,%s,%s,%s,%s)
+               RETURNING strategy_experiment_id,created_at""",
+            (WATCHLIST_MAIN_WAVE_STRATEGY_KEY, result.get("start_date") or payload.as_of_date or cn_today(),
+             result.get("end_date") or payload.as_of_date or cn_today(), result["status"],
+             Json(strategy_json_safe(result.get("parameters", {}))),
+             Json(strategy_json_safe(result.get("metrics", {}))),
+             Json(strategy_json_safe(result.get("equity_curve", []))),
+             Json(strategy_json_safe(result.get("trades", [])))),
+        ).fetchone()
+    return {**result, "strategy_experiment_id": str(row["strategy_experiment_id"]),
+            "created_at": row["created_at"]}
+
+
+async def run_watchlist_main_wave_endpoint(payload: WatchlistMainWaveResearchRequest) -> dict[str, Any]:
+    return await run_database_blocking(persist_watchlist_main_wave_research, payload, timeout_seconds=90)
+
+
 def latest_strategy_pattern_mining() -> dict[str, Any]:
     """Compatibility export; HTTP reads use the isolated read model."""
     return read_latest_strategy_pattern_mining(
@@ -8820,6 +8888,7 @@ app.include_router(build_strategy_actions_router(StrategyActionDependencies(
     review=run_strategy_review,
     post_close=run_post_close_strategy_endpoint,
     pattern_mining=run_strategy_pattern_mining_endpoint,
+    watchlist_main_wave=run_watchlist_main_wave_endpoint,
     recompute_scorecards=scorecards,
     recompute_outcomes=outcomes,
     recompute_intraday_outcomes=intraday_outcomes,

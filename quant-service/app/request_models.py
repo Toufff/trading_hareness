@@ -196,6 +196,12 @@ class StrategyPatternMiningRequest(BaseModel):
         return self
 
 
+class WatchlistMainWaveResearchRequest(BaseModel):
+    """Run the preregistered one-year watchlist shadow-model workflow."""
+
+    as_of_date: date | None = None
+
+
 class IntradayWatchlistRequest(BaseModel):
     symbol: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
     label: str | None = Field(default=None, max_length=120)

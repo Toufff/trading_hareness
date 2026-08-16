@@ -1478,6 +1478,8 @@ INSERT INTO quant.strategy_registry(strategy_key,label,engine,version,configurat
      '{"status":"research_only","entry_window_pct":[1.0,6.5],"return_1m_pct_min":0.25,"return_3m_pct":[1.2,3.5],"minute_volume_multiple":[2.5,20.0],"time_bucket_volume_surprise_min":2.0,"time_bucket_minimum_sample_days":8,"above_vwap_pct":[0.2,5.5],"time_windows":["09:40-10:45","13:00-14:20"],"requires":"new_high_and_flow_or_two_peers_then_second_scan_acceptance_and_same_clock_volume_baseline","baseline_unavailable_policy":"attention_only","outlier_policy":"relative_volume_over_20_attention_only","no_automatic_order":true}', 'experimental')
     ,('post_close_base_contraction_v1','盘后横盘收敛蓄势研究','native-a-share-simulator','research-v1',
      '{"status":"research_only","lookback_days":30,"base_range_pct":[4,18],"recent_volatility_max_ratio":0.85,"recent_volume_max_ratio":0.80,"near_resistance_pct_max":3.0,"requires":"subsequent_eac_breakout_confirmation","no_automatic_order":true}', 'experimental')
+    ,('watchlist_main_wave_shadow_v1','观察池主升启动影子模型','qlib-aligned-native-logistic','research-v1',
+     '{"status":"shadow_only","history_calendar_days":365,"lookback_trading_days":60,"horizon_trading_days":10,"entry":"next_session_open","selection":"daily_top_quintile","no_feishu_alert":true,"no_automatic_order":true}', 'experimental')
 ON CONFLICT(strategy_key) DO NOTHING;
 
 INSERT INTO quant.research_frameworks(framework_key,label,role,integration_mode,status,license_note,prerequisites,metadata) VALUES

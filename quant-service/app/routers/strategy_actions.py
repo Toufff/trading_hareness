@@ -19,6 +19,7 @@ from ..request_models import (
     StrategyDecisionRequest,
     StrategyPatternMiningRequest,
     StrategyReviewRequest,
+    WatchlistMainWaveResearchRequest,
 )
 
 
@@ -28,6 +29,7 @@ class StrategyActionDependencies:
     review: Callable[[StrategyReviewRequest], Awaitable[dict[str, Any]]]
     post_close: Callable[[PostCloseStrategyRequest], Awaitable[dict[str, Any]]]
     pattern_mining: Callable[[StrategyPatternMiningRequest], Awaitable[dict[str, Any]]]
+    watchlist_main_wave: Callable[[WatchlistMainWaveResearchRequest], Awaitable[dict[str, Any]]]
     recompute_scorecards: Callable[[date | None], Awaitable[dict[str, Any]]]
     recompute_outcomes: Callable[[date | None], Awaitable[dict[str, Any]]]
     recompute_intraday_outcomes: Callable[[date | None], Awaitable[dict[str, Any]]]
@@ -54,6 +56,10 @@ def build_strategy_actions_router(deps: StrategyActionDependencies) -> APIRouter
     @router.post("/api/v1/strategy/pattern-mining/run")
     async def pattern_mining(payload: StrategyPatternMiningRequest) -> dict[str, Any]:
         return await deps.pattern_mining(payload)
+
+    @router.post("/api/v1/strategy/watchlist-main-wave/run")
+    async def watchlist_main_wave(payload: WatchlistMainWaveResearchRequest) -> dict[str, Any]:
+        return await deps.watchlist_main_wave(payload)
 
     @router.post("/api/v1/analyst-scorecards/recompute")
     async def scorecards(as_of_date: date | None = None) -> dict[str, Any]:
