@@ -170,7 +170,7 @@ from .intraday_schedule import (
     intraday_fast_quote_retention_days,
     intraday_high_frequency_window,
     intraday_next_monitor_delay_seconds,
-    intraday_next_realtime_validation_offset,
+    intraday_realtime_validation_slice,
     intraday_runtime_service_state,
     intraday_scan_interval_seconds,
     intraday_super_get_fast_interval_seconds,
@@ -4375,12 +4375,11 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
             "exact_membership_groups": list(mapped.get("groups") or []),
         }
     ordered_priority_symbols = [str(row["symbol"]) for row in sorted(watches, key=intraday_watch_priority_key)]
-    if ordered_priority_symbols and request.realtime_validation_limit:
-        start = request.realtime_validation_offset % len(ordered_priority_symbols)
-        rotated_symbols = ordered_priority_symbols[start:] + ordered_priority_symbols[:start]
-        priority_symbols = rotated_symbols[:request.realtime_validation_limit]
-    else:
-        priority_symbols = []
+    priority_symbols, next_realtime_validation_offset = intraday_realtime_validation_slice(
+        ordered_priority_symbols,
+        request.realtime_validation_offset,
+        request.realtime_validation_limit,
+    )
     tushare_minutes = await intraday_tushare_minutes(priority_symbols) if priority_symbols else {}
     fast_confirmations = await latest_intraday_fast_quote_confirmations(selected_symbols, quotes, observed_at)
     fast_status_counts: dict[str, int] = {}
@@ -4420,7 +4419,16 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
                                          "missing_direct_watch_quote_symbols": len(selected_symbols) - direct_watch_count,
                                          "sina_watch_quote_rows": len(sina_watch_rows)},
                      "tencent_minute_context": surge_source,
-                     "tushare_rt_min": {"requested": priority_symbols, "items": {symbol: item["source"] for symbol, item in tushare_minutes.items()}},
+                     "tushare_rt_min": {
+                         "requested": priority_symbols,
+                         "items": {symbol: item["source"] for symbol, item in tushare_minutes.items()},
+                         "rotation_pool_size": len(ordered_priority_symbols),
+                         "rotation_start_offset": (
+                             request.realtime_validation_offset % len(ordered_priority_symbols)
+                             if ordered_priority_symbols else 0
+                         ),
+                         "next_rotation_offset": next_realtime_validation_offset,
+                     },
                      "tushare_rt_k_fast": {"status_counts": fast_status_counts, "max_age_seconds": 30,
                                              "cadence": "one request start per second in selected windows"},
                      "eastmoney_board_flow": board_cache_evidence,
@@ -4446,6 +4454,11 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
                        "severity": signal["severity"], "delivery": delivery})
     return finish({"status": "completed", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(), "source_status": source_status,
                    "signals": [{key: value for key, value in signal.items() if key not in {"watch", "quote"}} for signal in signals], "alerts": alerts,
+                   "realtime_validation": {
+                       "pool_size": len(ordered_priority_symbols),
+                       "requested_symbols": priority_symbols,
+                       "next_offset": next_realtime_validation_offset,
+                   },
                    "delivery_retry": retry_summary,
                    "notice": "仅为人工复核提醒，不构成交易指令；系统不会自动下单。"})
 
@@ -5064,9 +5077,6 @@ async def intraday_monitor_loop(interval_seconds: int) -> None:
                 minute_limit = 0 if high_frequency else 4
                 scan_request = IntradayScanRequest(realtime_validation_limit=minute_limit,
                                                     realtime_validation_offset=realtime_rotation_offset)
-                realtime_rotation_offset = intraday_next_realtime_validation_offset(
-                    realtime_rotation_offset, minute_limit, slots=40,
-                )
                 jobs = [run_intraday_watchlist_scan(scan_request)]
                 if loop.time() >= next_board_refresh_at:
                     next_board_refresh_at = loop.time() + intraday_board_refresh_interval_seconds(local)
@@ -5075,6 +5085,12 @@ async def intraday_monitor_loop(interval_seconds: int) -> None:
                     # strategy signals on explicit watchlist stocks.
                     jobs.append(run_intraday_board_report(deliver=False))
                 results = await asyncio.gather(*jobs, return_exceptions=True)
+                scan_result = results[0] if results else None
+                if isinstance(scan_result, dict):
+                    validation = scan_result.get("realtime_validation")
+                    next_offset = validation.get("next_offset") if isinstance(validation, dict) else None
+                    if isinstance(next_offset, int) and 0 <= next_offset <= 40:
+                        realtime_rotation_offset = next_offset
                 for result in results:
                     if isinstance(result, Exception):
                         print(f"intraday monitor source pass failed: {str(result)[:300]}")

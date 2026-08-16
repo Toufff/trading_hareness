@@ -12,10 +12,11 @@ import httpx
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app.main import ConceptMemberSyncRequest, DailyBar, EastmoneyBoardMemberSyncRequest, IntradayScanRequest, IntradaySectorReportRequest, MarketSnapshotRequest, OfflineMinuteImportRequest, SectorCatalogSyncRequest, StrategyPatternMiningRequest, TushareFetchRequest, UniverseUpdateRequest, annotate_intraday_flow_percentiles, baostock_code, build_market_snapshot, call_tushare_api, china_equity_session, china_futures_session, cn_today, eastmoney_member_symbol, historical_capacity_plan, intraday_board_curve_clock_session, intraday_board_display_slots, intraday_board_flow_curve_items, intraday_board_refresh_interval_seconds, intraday_board_rotation_retention_days, intraday_eac_acceptance_assessment, intraday_effective_scan_interval_seconds, intraday_fast_quote_confirmation, intraday_fast_quote_retention_days, intraday_high_frequency_window, intraday_minute_features, intraday_next_monitor_delay_seconds, intraday_next_realtime_validation_offset, intraday_outcome_attribution_summary, intraday_peer_context, intraday_point_in_time_market_context_batch, intraday_quote_exchange_time_status, intraday_quote_from_tencent, intraday_quote_observation_source, intraday_runtime_service_state, intraday_sector_report, intraday_signal_attribution, intraday_signal_event_state, intraday_signal_rules, intraday_super_get_fast_interval_seconds, intraday_super_get_fast_max_in_flight, intraday_super_get_fast_max_symbols, legacy_schema_bootstrap_enabled, looks_like_response_header, market_snapshot_public_quote_settings, merge_intraday_sina_watch_quotes, merge_intraday_watch_quote_prices, normalize_tushare_rows, offline_minute_row, open_provider_capabilities, persist_ths_sector_members, provider_error_availability, provider_global_rate_limit_max_wait_seconds, post_close_strategy_retry_window, realtime_rows_are_current, record_provider_failure, record_provider_success, reserve_tushare_provider_request_slot, resolve_sync_symbols, resolve_sync_symbols_async, retry_pending_board_rotation_alerts, run_strategy_pattern_mining, sse_calendar_open_async, strategy_index_regime, strategy_intraday_candidates, strategy_market_regime, strategy_market_state, strategy_rank, technical_summary, tencent_snapshot_quotes, ths_concept_top_stocks, ths_taxonomy_key, write_access_allowed
+from app.main import ConceptMemberSyncRequest, DailyBar, EastmoneyBoardMemberSyncRequest, IntradayScanRequest, IntradaySectorReportRequest, MarketSnapshotRequest, OfflineMinuteImportRequest, SectorCatalogSyncRequest, StrategyPatternMiningRequest, TushareFetchRequest, UniverseUpdateRequest, annotate_intraday_flow_percentiles, baostock_code, build_market_snapshot, call_tushare_api, china_equity_session, china_futures_session, cn_today, eastmoney_member_symbol, historical_capacity_plan, intraday_board_curve_clock_session, intraday_board_display_slots, intraday_board_flow_curve_items, intraday_board_refresh_interval_seconds, intraday_board_rotation_retention_days, intraday_eac_acceptance_assessment, intraday_effective_scan_interval_seconds, intraday_fast_quote_confirmation, intraday_fast_quote_retention_days, intraday_high_frequency_window, intraday_minute_features, intraday_next_monitor_delay_seconds, intraday_outcome_attribution_summary, intraday_peer_context, intraday_point_in_time_market_context_batch, intraday_quote_exchange_time_status, intraday_quote_from_tencent, intraday_quote_observation_source, intraday_runtime_service_state, intraday_sector_report, intraday_signal_attribution, intraday_signal_event_state, intraday_signal_rules, intraday_super_get_fast_interval_seconds, intraday_super_get_fast_max_in_flight, intraday_super_get_fast_max_symbols, legacy_schema_bootstrap_enabled, looks_like_response_header, market_snapshot_public_quote_settings, merge_intraday_sina_watch_quotes, merge_intraday_watch_quote_prices, normalize_tushare_rows, offline_minute_row, open_provider_capabilities, persist_ths_sector_members, provider_error_availability, provider_global_rate_limit_max_wait_seconds, post_close_strategy_retry_window, realtime_rows_are_current, record_provider_failure, record_provider_success, reserve_tushare_provider_request_slot, resolve_sync_symbols, resolve_sync_symbols_async, retry_pending_board_rotation_alerts, run_strategy_pattern_mining, sse_calendar_open_async, strategy_index_regime, strategy_intraday_candidates, strategy_market_regime, strategy_market_state, strategy_rank, technical_summary, tencent_snapshot_quotes, ths_concept_top_stocks, ths_taxonomy_key, write_access_allowed
 from app.factor_lab import factor_at
 from app.market_rules import a_share_limit_ratio, is_st_security_name
 from app.intraday_alerts import daily_strategy_summary_text, delivery_health_recovery_text, intraday_alert_text
+from app.intraday_schedule import intraday_next_realtime_validation_offset, intraday_realtime_validation_slice
 from app.board_rotation import board_rotation_alert_text, board_rotation_candidates, board_rotation_still_directional
 from app.board_stock_mining import board_stock_mining_candidates
 from app.limit_linkage_mining import limit_linkage_candidates
@@ -3290,6 +3291,18 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertTrue(all(0 <= offset < 20 for offset in offsets))
         self.assertEqual(intraday_next_realtime_validation_offset(12, 0), 12)
         self.assertEqual(intraday_next_realtime_validation_offset(36, 4, slots=40), 0)
+        symbols = [f"{index:06d}.SH" for index in range(36)]
+        offset = 0
+        requested: list[str] = []
+        for _ in range(9):
+            selected, offset = intraday_realtime_validation_slice(symbols, offset, 4)
+            self.assertEqual(len(selected), 4)
+            requested.extend(selected)
+        self.assertEqual(set(requested), set(symbols))
+        self.assertEqual(len(requested), len(symbols))
+        self.assertEqual(offset, 0)
+        self.assertEqual(intraday_realtime_validation_slice(symbols, 35, 0), ([], 35))
+        self.assertEqual(intraday_realtime_validation_slice([], 3, 4), ([], 0))
         self.assertEqual(intraday_board_refresh_interval_seconds(high), 60)
         self.assertEqual(intraday_board_refresh_interval_seconds(normal), 300)
         pre_open = __import__("datetime").datetime(2026, 8, 10, 9, 29, 50, tzinfo=china)

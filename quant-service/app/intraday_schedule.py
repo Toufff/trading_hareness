@@ -56,6 +56,27 @@ def intraday_next_realtime_validation_offset(current_offset: int, step: int, slo
     return (max(0, current_offset) + max(0, step)) % bounded_slots
 
 
+def intraday_realtime_validation_slice(symbols: list[str], current_offset: int,
+                                       limit: int) -> tuple[list[str], int]:
+    """Return one fair, bounded Super GET minute-validation slice.
+
+    The rotation has to use the *actual* explicit watchlist size.  Advancing
+    against a fixed capacity (for example 40 slots for a 36-symbol basket)
+    skips its tail forever.  A zero limit intentionally preserves the cursor
+    during the special windows, where the dedicated ``rt_k`` loop owns the
+    Super GET budget.
+    """
+    if not symbols:
+        return [], 0
+    size = len(symbols)
+    start = max(0, current_offset) % size
+    bounded_limit = max(0, min(int(limit), size))
+    if bounded_limit == 0:
+        return [], start
+    rotated = symbols[start:] + symbols[:start]
+    return rotated[:bounded_limit], (start + bounded_limit) % size
+
+
 def intraday_super_get_fast_interval_seconds() -> float:
     try:
         return max(1.0, min(10.0, float(os.getenv("INTRADAY_SUPER_GET_FAST_INTERVAL_SECONDS", "1"))))
