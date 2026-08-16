@@ -85,7 +85,13 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                         LEFT JOIN LATERAL (
                             SELECT status,"startedAt","stoppedAt","workflowVersionId"
                               FROM public.execution_entity
+                             -- CLI runs are useful smoke diagnostics, but
+                             -- n8n 2.33 can leave their audit row in
+                             -- ``running`` after the child process exits.
+                             -- They cannot prove that the resident scheduler
+                             -- executed the published graph.
                              WHERE "workflowId"=w.id AND "deletedAt" IS NULL
+                               AND mode='trigger'
                              ORDER BY "startedAt" DESC NULLS LAST,id DESC LIMIT 1
                         ) e ON TRUE
                             WHERE w.id IN ('remoteArchiveReports123','remoteArchiveMessages123')

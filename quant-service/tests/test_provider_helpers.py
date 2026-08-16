@@ -1066,10 +1066,13 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(payload["runtime_verification"], "service_reachable_pending_scheduled_execution")
 
     def test_analyst_sync_health_requires_success_from_current_published_version(self):
+        statements = []
+
         class _Transaction:
             def __enter__(self): return self
             def __exit__(self, *_args): return False
             def execute(self, sql, _params=()):
+                statements.append(str(sql))
                 if "analyst_sync_cursors" in sql:
                     return MagicMock(fetchall=MagicMock(return_value=[{
                         "stream_key": "reports", "remote_analyst_id": "a",
@@ -1108,6 +1111,8 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(payload["runtime_verification"], "verified_recent_execution")
         expected = {item["stream_key"]: item["expected_workflow_id"] for item in payload["stream_health"]}
         self.assertEqual(expected, {"reports": "remoteArchiveReports123", "messages": "remoteArchiveMessages123"})
+        workflow_query = next(statement for statement in statements if "execution_entity" in statement)
+        self.assertIn("AND mode='trigger'", workflow_query)
 
     def test_analyst_sync_health_uses_global_message_cursor(self):
         class _Transaction:

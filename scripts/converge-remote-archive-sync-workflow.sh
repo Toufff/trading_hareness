@@ -43,7 +43,9 @@ node scripts/split-remote-archive-sync-workflows.mjs "$backup_dir/combined.json"
 jq -e '
   type == "array" and length == 2 and
   ([.[].id] | sort == ["remoteArchiveMessages123", "remoteArchiveReports123"]) and
-  (all(.[]; (.nodes | length == 2))) and
+  (all(.[]; (.nodes | length == 3))) and
+  (all(.[]; ([.nodes[] | select(.type == "n8n-nodes-base.scheduleTrigger")] | length == 1))) and
+  (all(.[]; ([.nodes[] | select(.type == "n8n-nodes-base.manualTrigger")] | length == 1))) and
   ([.[] | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.url] | all(. == "http://quant-research:8000/api/v1/remote-archive/sync")) and
   ([.[] | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .credentials.httpBearerAuth] | all(.id != null and .name != null)) and
   ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("=\\{\\{ JSON.stringify")) and all(test("reports"))) and
@@ -98,6 +100,6 @@ curl -fsS --max-time 2 http://127.0.0.1:5678/healthz >/dev/null
   JOIN workflow_published_version p ON p.\"workflowId\"=w.id
   WHERE w.id IN ('${workflow_ids[0]}','${workflow_ids[1]}') AND w.active AND w.\"activeVersionId\"=p.\"publishedVersionId\"
 " | grep -qx '2'
-jq -e 'type == "object" and .id == "remoteArchiveReports123" and (.nodes | length == 2)' "$backup_dir/reports-after.json" >/dev/null
-jq -e 'type == "object" and .id == "remoteArchiveMessages123" and (.nodes | length == 2)' "$backup_dir/messages-after.json" >/dev/null
+jq -e 'type == "object" and .id == "remoteArchiveReports123" and ([.nodes[] | select(.type == "n8n-nodes-base.scheduleTrigger")] | length == 1) and ([.nodes[] | select(.type == "n8n-nodes-base.manualTrigger")] | length == 1)' "$backup_dir/reports-after.json" >/dev/null
+jq -e 'type == "object" and .id == "remoteArchiveMessages123" and ([.nodes[] | select(.type == "n8n-nodes-base.scheduleTrigger")] | length == 1) and ([.nodes[] | select(.type == "n8n-nodes-base.manualTrigger")] | length == 1)' "$backup_dir/messages-after.json" >/dev/null
 echo "remote archive split schedules converged; rollback export: ${backup_dir}/before.json"

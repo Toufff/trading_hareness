@@ -58,12 +58,31 @@ function schedule({ name, intervals, y }) {
   };
 }
 
+// Schedule Trigger workflows cannot be started by the n8n CLI.  Keep an
+// explicit manual trigger alongside the schedule so an operator can exercise
+// the exact published graph during a market-closed maintenance window.  It is
+// not connected to any schedule and does not change production cadence.
+function manualTrigger({ name, y }) {
+  return {
+    id: randomUUID(),
+    name: `${name} 手动验证`,
+    type: 'n8n-nodes-base.manualTrigger',
+    typeVersion: 1,
+    position: [0, y + 120],
+    parameters: {},
+  };
+}
+
 function workflow({ id, name, triggerName, stream, maxItems, intervals, y }) {
   const trigger = syncTrigger({ name: triggerName, stream, maxItems, y });
   const clock = schedule({ name: `${name} 定时`, intervals, y });
+  const manual = manualTrigger({ name, y });
   return {
-    id, name, active: true, nodes: [clock, trigger],
-    connections: { [clock.name]: { main: [[{ node: trigger.name, type: 'main', index: 0 }]] } },
+    id, name, active: true, nodes: [clock, manual, trigger],
+    connections: {
+      [clock.name]: { main: [[{ node: trigger.name, type: 'main', index: 0 }]] },
+      [manual.name]: { main: [[{ node: trigger.name, type: 'main', index: 0 }]] },
+    },
     settings: { executionOrder: 'v1', timezone: 'Asia/Shanghai' },
   };
 }
