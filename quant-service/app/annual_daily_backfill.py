@@ -518,8 +518,19 @@ class AnnualDailyBackfill:
         if skip:
             return "skipped"
         try:
-            rows = await call_provider(provider, spec.api_name, params, None)
-            filtered = valid_rows(spec.api_name, rows, day) if row_filter else [dict(row) for row in rows]
+            filtered: list[dict[str, Any]] = []
+            # The audited SDK gateway occasionally returns a transient empty
+            # body for a known full cross-section.  A coverage threshold makes
+            # that distinguishable from legal-empty event APIs, so retry the
+            # former in-place instead of committing a false zero-day gap.
+            attempts = 3 if spec.minimum_rows else 1
+            for attempt in range(attempts):
+                rows = await call_provider(provider, spec.api_name, params, None)
+                filtered = valid_rows(spec.api_name, rows, day) if row_filter else [dict(row) for row in rows]
+                if len(filtered) >= spec.minimum_rows:
+                    break
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(float(2 ** attempt))
             if len(filtered) < spec.minimum_rows:
                 raise ProviderCallError(
                     f"{spec.api_name} returned {len(filtered)} valid rows; expected at least {spec.minimum_rows}"
