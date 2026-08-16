@@ -615,16 +615,28 @@ class AnnualDailyBackfill:
     async def core_lane(self, days: list[date]) -> None:
         for index, day in enumerate(days, start=1):
             stamp = day.strftime("%Y%m%d")
-            for spec in CORE_DAILY_SPECS:
-                await self.fetch_one(spec, {"trade_date": stamp}, day=day)
+            # The primary contract is audited at 60 requests/minute.  Five
+            # independent cross-sections can be fetched concurrently; the
+            # shared limiter still enforces the supplier window, while final
+            # control reconciliation removes any canonical write-order race.
+            await asyncio.gather(*(
+                self.fetch_one(spec, {"trade_date": stamp}, day=day)
+                for spec in CORE_DAILY_SPECS
+            ))
             if index == 1 or index % 10 == 0 or index == len(days):
                 print(json.dumps({"lane": "core", "day": str(day), "progress": f"{index}/{len(days)}", "failures": len(self.failures)}), flush=True)
 
     async def sector_lane(self, days: list[date]) -> None:
         for index, day in enumerate(days, start=1):
             stamp = day.strftime("%Y%m%d")
-            for spec in SECTOR_EVENT_SPECS:
-                await self.fetch_one(spec, {"trade_date": stamp}, day=day)
+            # The City/SDK route is slower and audited at 30 requests/minute.
+            # Keep concurrency to three; the provider limiter provides the
+            # rolling-window backpressure across batches and dates.
+            for offset in range(0, len(SECTOR_EVENT_SPECS), 3):
+                await asyncio.gather(*(
+                    self.fetch_one(spec, {"trade_date": stamp}, day=day)
+                    for spec in SECTOR_EVENT_SPECS[offset:offset + 3]
+                ))
             if index == 1 or index % 10 == 0 or index == len(days):
                 print(json.dumps({"lane": "sector", "day": str(day), "progress": f"{index}/{len(days)}", "failures": len(self.failures)}), flush=True)
 
@@ -655,9 +667,26 @@ class AnnualDailyBackfill:
                 self.failures.append({"api_name": "index_daily", "symbol": symbol, "error": safe_error_detail(str(error), 300)})
 
     def reconcile_suspensions(self) -> None:
-        """Repair historical open-ended marks after all daily suspension rows exist."""
+        """Rejoin daily controls after concurrent source materialization."""
         with self.db.transaction() as connection:
             for table in ("market_bars_daily", "canonical_bars_daily"):
+                connection.execute(
+                    f"""UPDATE quant.{table} bar SET adj_factor=factor.adj_factor
+                          FROM quant.daily_adjustment_factors factor
+                         WHERE factor.provider='tushare_primary'
+                           AND factor.trading_date BETWEEN %s AND %s
+                           AND bar.symbol=factor.symbol AND bar.trading_date=factor.trading_date""",
+                    (self.start_date, self.end_date),
+                )
+                connection.execute(
+                    f"""UPDATE quant.{table} bar
+                           SET limit_up=limits.limit_up,limit_down=limits.limit_down
+                          FROM quant.daily_trade_limits limits
+                         WHERE limits.provider='tushare_primary'
+                           AND limits.trading_date BETWEEN %s AND %s
+                           AND bar.symbol=limits.symbol AND bar.trading_date=limits.trading_date""",
+                    (self.start_date, self.end_date),
+                )
                 connection.execute(
                     f"UPDATE quant.{table} SET is_suspended=false WHERE trading_date BETWEEN %s AND %s",
                     (self.start_date, self.end_date),

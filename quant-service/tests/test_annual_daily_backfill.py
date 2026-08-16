@@ -68,6 +68,12 @@ class AnnualDailyBackfillTests(unittest.TestCase):
         source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
         self.assertIn("SELECT DISTINCT ON(record_key,content_sha256)", source)
 
+    def test_concurrent_core_lane_has_final_control_reconciliation(self):
+        source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
+        self.assertIn("await asyncio.gather", source)
+        self.assertIn("FROM quant.daily_adjustment_factors factor", source)
+        self.assertIn("FROM quant.daily_trade_limits limits", source)
+
 
 if __name__ == "__main__":
     unittest.main()
