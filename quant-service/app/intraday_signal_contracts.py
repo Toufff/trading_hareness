@@ -80,6 +80,17 @@ def _evidence_refs(conditions: dict[str, Any], observed_at: datetime) -> tuple[E
             fields=("available_peer_count", "confirming_peer_count", "confirming_breadth"),
             quality="available" if int(peers.get("available_peer_count") or 0) else "mapping_or_peer_missing",
         ))
+    order_book = _mapping(conditions.get("order_book_proxy"))
+    if str(order_book.get("status") or "") == "observed":
+        age = order_book.get("latest_age_seconds")
+        quality = "attribution_only"
+        if isinstance(age, (int, float)) and age > 15:
+            quality = "stale_attribution_only"
+        refs.append(EvidenceRef(
+            source="tencent_order_book_snapshot", observed_at=observed_at, available_at=observed_at,
+            fields=("qi5", "ofi_30s", "ofi_1m", "seal_erosion_ratio_5m", "book_spread"),
+            quality=quality,
+        ))
     if isinstance(conditions.get("daily_rebound_state"), dict):
         refs.append(EvidenceRef(
             source="prior_completed_daily_rebound_state", observed_at=observed_at, available_at=observed_at,

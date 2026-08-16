@@ -84,6 +84,12 @@ def contracts_for_signal(signal: dict[str, Any]) -> list[dict[str, Any]]:
     peers = conditions.get("peer_context")
     if isinstance(peers, dict) and int(peers.get("requested_peer_count") or 0) > 0:
         keys.add("exact_watchlist_peer_breadth")
+    order_book = conditions.get("order_book_proxy")
+    # A snapshot proxy is evidence only.  Declare it whenever the scan has a
+    # recorded observation, including a one-sided seal, so replay can explain
+    # why it was observational rather than silently omitting that source.
+    if isinstance(order_book, dict) and str(order_book.get("status") or "") == "observed":
+        keys.add("order_book_proxy")
     if isinstance(conditions.get("daily_rebound_state"), dict):
         keys.add("daily_rebound_state")
     return factor_contracts(keys)

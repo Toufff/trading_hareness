@@ -18,6 +18,8 @@ class IntradaySignalContractTests(unittest.TestCase):
                 "main_net_inflow": 1200,
                 "minute_features": {"status": "ready", "return_3m_pct": 1.2},
                 "peer_context": {"requested_peer_count": 2, "available_peer_count": 2, "confirming_peer_count": 2},
+                "order_book_proxy": {"status": "observed", "latest_age_seconds": 3.0,
+                                     "ofi_30s": 1.0, "qi5": 0.2},
                 "daily_rebound_state": {"state": "shadow_confirmed"},
                 "policy_gate": {"version": "live-policy-gate-v1", "allow_confirmation": True,
                                 "quote_source": "tencent_batched_watch_quote"},
@@ -33,8 +35,11 @@ class IntradaySignalContractTests(unittest.TestCase):
         self.assertIn("vwap_loss_with_negative_momentum", contract["invalidation_codes"])
         self.assertEqual([item["source"] for item in contract["evidence"]], [
             "tencent_batched_watch_quote", "public_flow_proxy", "intraday_minute_session",
-            "point_in_time_watchlist_membership", "prior_completed_daily_rebound_state",
+            "point_in_time_watchlist_membership", "tencent_order_book_snapshot",
+            "prior_completed_daily_rebound_state",
         ])
+        order_book = next(item for item in contract["evidence"] if item["source"] == "tencent_order_book_snapshot")
+        self.assertEqual(order_book["quality"], "attribution_only")
         self.assertEqual(signal["score"], 82.5)
 
     def test_data_issue_has_no_return_horizon(self) -> None:

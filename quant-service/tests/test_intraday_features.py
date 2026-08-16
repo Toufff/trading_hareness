@@ -86,14 +86,17 @@ class MappedWatchlistPeerTests(unittest.TestCase):
             "conditions": {
                 "minute_features": {"return_3m_pct": 1.2},
                 "peer_context": {"requested_peer_count": 2},
+                "order_book_proxy": {"status": "observed", "one_sided_30s_count": 1},
                 "daily_rebound_state": {"state": "shadow_confirmed"},
             },
         })
         self.assertEqual([item["factor_key"] for item in contracts], [
             "daily_rebound_state", "exact_watchlist_peer_breadth", "minute_return_3m",
-            "minute_volume_multiple", "public_flow_proxy", "vwap_distance",
+            "minute_volume_multiple", "order_book_proxy", "public_flow_proxy", "vwap_distance",
         ])
-        self.assertTrue(all(item["live_use"] == "evidence_only" for item in contracts))
+        self.assertEqual(next(item for item in contracts if item["factor_key"] == "order_book_proxy")["live_use"],
+                         "attribution_only")
+        self.assertTrue(all(item["live_use"] in {"evidence_only", "attribution_only"} for item in contracts))
         self.assertTrue(all(item["inference_permitted"] for item in contracts))
         self.assertTrue(all(not item["training_permitted"] for item in contracts))
         self.assertTrue(all(item["deprecated_at"] is None for item in contracts))

@@ -4080,6 +4080,11 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 signal["conditions"] = {
                     **signal["conditions"], "policy_gate": policy,
                     "setup_state": setup_state,
+                    # Persist the bounded aggregate rather than raw book
+                    # frames.  Its registered contract is attribution-only:
+                    # this records a one-sided seal/queue observation for
+                    # later replay without changing a live score or entry.
+                    "order_book_proxy": order_book_feature,
                     "factor_contract_version": INTRADAY_FACTOR_CONTRACT_VERSION,
                     "factor_contracts": intraday_factor_contracts_for_signal(signal),
                 }
