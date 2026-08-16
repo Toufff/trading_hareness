@@ -6,9 +6,11 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 compose=(docker compose -f "$repo_root/compose.yaml")
 quant_health_url="${QUANT_HEALTH_URL:-http://127.0.0.1:5681/health}"
 intraday_status_url="${QUANT_INTRADAY_STATUS_URL:-http://127.0.0.1:5681/api/v1/intraday/services/status}"
+analyst_sync_health_url="${QUANT_ANALYST_SYNC_HEALTH_URL:-http://127.0.0.1:5681/api/v1/analyst-research/sync-health}"
 adapter_health_url="${FEISHU_ADAPTER_HEALTH_URL:-http://127.0.0.1:5680/health}"
 backup_root="${QUANT_BACKUP_DIR:-$repo_root/backups}"
 require_backup=true
+warnings=0
 
 usage() {
   cat <<'EOF'
@@ -32,6 +34,7 @@ done
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$*"; }
+warn() { printf 'WARN: %s\n' "$*" >&2; warnings="$((warnings + 1))"; }
 require_command() { command -v "$1" >/dev/null 2>&1 || fail "required command unavailable: $1"; }
 
 require_command docker
@@ -105,9 +108,27 @@ jq -e '
     $board.configured == true and $board.cadence == "上交所观察时段 09:20 起每 60 秒追加曲线") and
   (first(.items[] | select(.key == "tencent_order_book")) as $book |
     $book.configured == true and $book.cadence == "显式观察池批量每 3 秒" and
-    ($book.details.max_symbols >= 20 and $book.details.max_symbols <= 40))
+    $book.details.max_symbols == 40 and $book.details.uncovered_watch_count == 0)
 ' <<<"$intraday_json" >/dev/null || fail 'Feishu delivery or one-minute board rotation control path is degraded'
 pass 'Feishu delivery, one-minute board rotation and bounded five-level observation path are ready'
+
+# Analyst evidence is deliberately not part of the live strategy/alert gate
+# until an approved promotion exists.  Still surface a current-workflow failure
+# at opening so a stale text context is never mistaken for a verified feed.
+if analyst_sync_json="$(curl --fail --silent --show-error --max-time 5 "$analyst_sync_health_url")"; then
+  if jq -e '
+    .runtime_verification == "verified_recent_execution" and
+    ([.stream_health[] | .status == "ready"] | all) and
+    ([.workflow_health[] | .status == "ready"] | all)
+  ' <<<"$analyst_sync_json" >/dev/null; then
+    pass 'analyst report/message sync has current published-workflow success evidence'
+  else
+    verification="$(jq -r '.runtime_verification // "unknown"' <<<"$analyst_sync_json")"
+    warn "analyst report/message sync lacks current-workflow success evidence (${verification}); analyst live weight remains zero"
+  fi
+else
+  warn 'analyst sync-health endpoint is unavailable; analyst live weight must remain zero'
+fi
 
 adapter_json="$(curl --fail --silent --show-error --max-time 5 "$adapter_health_url")" || fail 'Feishu adapter health endpoint is unavailable'
 jq -e '.status == "ok" and .quant_alert_configured == true' <<<"$adapter_json" >/dev/null || fail 'Feishu adapter is not configured for quant alerts'
@@ -142,4 +163,8 @@ if [[ "$require_backup" == true ]]; then
   pass "recent recoverable backup validated: $latest_path ($workflow_count workflows)"
 fi
 
-printf 'Opening preflight passed. No market provider was called and no alert was sent.\n'
+if ((warnings > 0)); then
+  printf 'Opening preflight passed with %s non-blocking warning(s). No market provider was called and no alert was sent.\n' "$warnings"
+else
+  printf 'Opening preflight passed. No market provider was called and no alert was sent.\n'
+fi
