@@ -108,9 +108,14 @@ from .intraday_breakout import upside_research_assessment as pure_upside_researc
 from .intraday_signal_rules import signal_rules as pure_intraday_signal_rules
 from .intraday_outcome_attribution import outcome_attribution_summary as pure_outcome_attribution_summary
 from .post_close_pattern_score import review_score as pure_pattern_review_score
-from .post_close_candidate_screen import screen_candidates as pure_post_close_screen_candidates
 from .post_close_pattern_candidates import select_candidates as pure_post_close_pattern_candidates
 from .post_close_evidence import exact_board_context as pure_exact_board_context, lhb_context as pure_lhb_context
+from .post_close_strategy_service import (
+    candidates as persisted_post_close_strategy_candidates,
+    completed_for_date as persisted_post_close_strategy_completed_for_date,
+    retry_window as post_close_strategy_retry_window,
+    run as persisted_run_post_close_strategy,
+)
 from .strategy_pattern_read_model import latest_strategy_pattern_mining as read_latest_strategy_pattern_mining
 from .intraday_outcome_settlement import settle as persist_intraday_outcome_settlement
 from .tushare_normalization import normalize_rows as pure_normalize_tushare_rows
@@ -2933,82 +2938,21 @@ def post_close_tushare_lhb_context(as_of_date: date) -> dict[str, dict[str, Any]
 
 
 def post_close_strategy_candidates(as_of_date: date, limit: int, minimum_full_market_symbols: int) -> dict[str, Any]:
-    """Screen stored daily bars into next-session research candidates.
-
-    This routine performs no provider call.  It is safe to schedule after the
-    daily ingestion workflow and remains reproducible if a source is later
-    corrected.  A 15-session result is explicitly provisional; only the
-    30-session structure is a ready base.
-    """
-    with db.transaction() as connection:
-        coverage = connection.execute(
-            """SELECT count(DISTINCT symbol)::int AS symbols
-                 FROM quant.canonical_bars_daily WHERE trading_date=%s AND symbol<>'000300.SH'""", (as_of_date,)
-        ).fetchone()
-        rows = connection.execute(
-            """WITH ranked AS (
-                   SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.volume,b.adj_factor,i.name,
-                          row_number() OVER (PARTITION BY b.symbol ORDER BY b.trading_date DESC) AS rn
-                     FROM quant.canonical_bars_daily b LEFT JOIN quant.instruments i ON i.symbol=b.symbol
-                    WHERE b.symbol<>'000300.SH' AND b.trading_date<=%s AND b.trading_date>=%s
-                      AND b.quality_status IN ('fresh','partial')
-                 ) SELECT symbol,trading_date,high,low,close,volume,adj_factor,name
-                    FROM ranked WHERE rn<=30 ORDER BY symbol,trading_date""", (as_of_date, as_of_date - timedelta(days=70)),
-        ).fetchall()
-    return pure_post_close_screen_candidates(
-        as_of_date, limit, minimum_full_market_symbols, int(coverage["symbols"] or 0),
-        [dict(row) for row in rows], post_close_exact_board_context(as_of_date),
+    """Compatibility entry point for the isolated persisted-only service."""
+    return persisted_post_close_strategy_candidates(
+        db, as_of_date, limit, minimum_full_market_symbols,
+        board_context=post_close_exact_board_context, screen=pure_post_close_screen_candidates,
         daily_base_structure=daily_base_structure, forming_structure=post_close_forming_structure,
         fresh_start_structure=post_close_fresh_start_structure,
     )
 
 
 def run_post_close_strategy(request: PostCloseStrategyRequest) -> dict[str, Any]:
-    """Persist the latest deterministic post-close screen, including blocked runs."""
-    with db.transaction() as connection:
-        latest = connection.execute(
-            """SELECT trading_date FROM quant.canonical_bars_daily WHERE symbol<>'000300.SH'
-                 GROUP BY trading_date HAVING count(DISTINCT symbol)>=%s ORDER BY trading_date DESC LIMIT 1""",
-            (request.minimum_full_market_symbols,),
-        ).fetchone()
-    # An explicit date means exactly that date.  The automated loop supplies
-    # Shanghai "today" so yesterday's complete cross-section cannot be marked
-    # as a successful run for today.  Manual requests without a date retain
-    # the useful "latest complete" convenience.
-    as_of_date = request.as_of_date or (latest["trading_date"] if latest else None)
-    if as_of_date is None:
-        result = {"status": "blocked", "as_of_date": None, "candidates": [], "reason": "no full-market daily bar set is stored"}
-        return result
-    result = post_close_strategy_candidates(as_of_date, request.limit, request.minimum_full_market_symbols)
-    run_key = hashlib.sha256(f"{POST_CLOSE_STRATEGY_MODEL_VERSION}:{as_of_date}".encode()).hexdigest()
-    with db.transaction() as connection:
-        run = connection.execute(
-            """INSERT INTO quant.post_close_strategy_runs(run_key,as_of_date,model_version,status,source_status,summary)
-               VALUES(%s,%s,%s,%s,%s,%s)
-               ON CONFLICT(run_key) DO UPDATE SET status=EXCLUDED.status,source_status=EXCLUDED.source_status,
-                   summary=EXCLUDED.summary,updated_at=now()
-               RETURNING run_id""",
-            (run_key, as_of_date, POST_CLOSE_STRATEGY_MODEL_VERSION, result["status"],
-             Json(strategy_json_safe(result.get("source_status", {}))), Json(strategy_json_safe({**result.get("summary", {}), "reason": result.get("reason")}))),
-        ).fetchone()
-        connection.execute("DELETE FROM quant.post_close_strategy_candidates WHERE run_id=%s", (run["run_id"],))
-        for rank, candidate in enumerate(result.get("candidates", []), start=1):
-            connection.execute(
-                """INSERT INTO quant.post_close_strategy_candidates(
-                           run_id,rank,symbol,candidate_type,score,structure,board_context,risk_flags,
-                           discovered_at,expires_at,reason_codes,source_snapshot)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,now(),%s,%s,%s)""",
-                (run["run_id"], rank, candidate["symbol"], candidate["candidate_type"], candidate["score"],
-                 Json(strategy_json_safe(candidate["structure"])), Json(strategy_json_safe(candidate["board_context"])),
-                 Json(candidate["risk_flags"]), as_of_date + timedelta(days=1),
-                 Json(candidate["risk_flags"]), Json(strategy_json_safe({
-                     "as_of_date": str(as_of_date), "model_version": POST_CLOSE_STRATEGY_MODEL_VERSION,
-                     "daily_bars": result.get("source_status", {}).get("daily_bars"),
-                     "daily_symbols": result.get("source_status", {}).get("daily_symbols"),
-                     "exact_board_context_symbols": result.get("source_status", {}).get("exact_board_context_symbols"),
-                 }))),
-            )
-    return {**result, "run_id": str(run["run_id"]), "run_key": run_key, "model_version": POST_CLOSE_STRATEGY_MODEL_VERSION}
+    """Compatibility entry point for the isolated persisted-only service."""
+    return persisted_run_post_close_strategy(
+        db, request, model_version=POST_CLOSE_STRATEGY_MODEL_VERSION,
+        candidate_loader=post_close_strategy_candidates, json_safe=strategy_json_safe,
+    )
 
 
 STRATEGY_PATTERN_MODEL_VERSION = "post-close-limit-lift-pattern-v4"
@@ -4965,26 +4909,11 @@ async def post_close_strategy_loop() -> None:
         await asyncio.sleep(60)
 
 
-def post_close_strategy_retry_window(value: datetime) -> bool:
-    """Return whether the same-day post-close materialization may retry.
-
-    The result is deliberately Shanghai-clock based.  It is a local database
-    read, not a new historical provider pull, so allowing the later window
-    gives delayed daily ingestion time to finish without violating the data
-    boundary.
-    """
-    local = value.astimezone(ZoneInfo("Asia/Shanghai"))
-    return time(18, 55) <= local.time() < time(20, 30)
-
-
 def post_close_strategy_completed_for_date(as_of_date: date) -> bool:
     """Check the persisted result for exactly one exchange date and model."""
-    run_key = hashlib.sha256(f"{POST_CLOSE_STRATEGY_MODEL_VERSION}:{as_of_date}".encode()).hexdigest()
-    with db.transaction() as connection:
-        row = connection.execute(
-            "SELECT status FROM quant.post_close_strategy_runs WHERE run_key=%s", (run_key,),
-        ).fetchone()
-    return bool(row and row["status"] in {"completed", "partial"})
+    return persisted_post_close_strategy_completed_for_date(
+        db, as_of_date, model_version=POST_CLOSE_STRATEGY_MODEL_VERSION,
+    )
 
 
 def watchlist_main_wave_completed_for_date(as_of_date: date) -> bool:

@@ -4018,7 +4018,7 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIn("adj_factor_missing", result["quality_flags"])
 
     def test_post_close_candidate_lifecycle_contract_is_persisted(self):
-        source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1] / "app" / "post_close_strategy_service.py").read_text(encoding="utf-8")
         self.assertIn("discovered_at,expires_at,reason_codes,source_snapshot", source)
         self.assertIn("as_of_date + timedelta(days=1)", source)
 
