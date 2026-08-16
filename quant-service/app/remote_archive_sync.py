@@ -162,45 +162,58 @@ class RemoteArchiveSyncService:
         analysts = catalog.get("items") or []
         if not isinstance(analysts, list) or not all(isinstance(item, dict) for item in analysts):
             raise HTTPException(status_code=502, detail="remote analyst catalog has an invalid items shape")
-        imported = changed = scanned = 0
+        # ``maximum`` intentionally bounds only changed *detail* documents.
+        # Every analyst still gets one small, text-only catalog check.  Counting
+        # unchanged catalog rows against this budget used to let an early
+        # analyst with a long history starve all later analysts indefinitely.
+        imported = changed = deferred = scanned = 0
         remaining = maximum
         for analyst in analysts:
-            if remaining <= 0:
-                break
             analyst_id = str(analyst.get("analyst_id") or "").strip()
             if not analyst_id:
                 continue
             cursor_state = await self._run_database_blocking(self._report_cursor_state, analyst_id, timeout_seconds=15)
             known_versions = dict(cursor_state.get("report_versions") or {})
             reports = (await self._get(
-                client, f"/analysts/{analyst_id}/reports", params={"limit": min(100, remaining), "offset": 0}
+                # Metadata is bounded independently of changed-detail imports.
+                # The archive exposes text report headers only on this route;
+                # media links are neither requested nor followed by this sync.
+                client, f"/analysts/{analyst_id}/reports", params={"limit": 100, "offset": 0}
             )).get("items") or []
             if not isinstance(reports, list) or not all(isinstance(item, dict) for item in reports):
                 raise HTTPException(status_code=502, detail="remote analyst report page has an invalid items shape")
             versions: dict[str, str] = {}
-            page = reports[:remaining]
-            for report in page:
+            for report in reports[:100]:
                 report_date = str(report.get("date") or "")
                 stamp = f"{report.get('version') or ''}:{report.get('content_hash') or ''}"
                 if not report_date or stamp == ":":
                     continue
-                versions[report_date] = stamp
                 scanned += 1
                 if known_versions.get(report_date) == stamp:
+                    versions[report_date] = stamp
+                    continue
+                changed += 1
+                if remaining <= 0:
+                    # Do not advance this version in the cursor: a future run
+                    # must still import its text body.  Known versions can be
+                    # merged safely, but deferred changes may never be marked
+                    # complete without a successful local import.
+                    deferred += 1
                     continue
                 detail = await self._get(client, f"/analysts/{analyst_id}/reports/{report_date}")
                 await self._run_database_blocking(self._import_report, self._database, detail, timeout_seconds=30)
                 imported += 1
-                changed += 1
+                remaining -= 1
+                versions[report_date] = stamp
             if versions:
                 await self._run_database_blocking(
                     self._update_report_cursor,
                     self._report_cursor_update(stream_key="reports", analyst_id=analyst_id, report_versions=versions),
                     timeout_seconds=20,
                 )
-            remaining -= len(page)
         return {"status": "completed", "analysts": len(analysts), "scanned": scanned,
-                "changed": changed, "imported": imported, "source": "remote_text_reports"}
+                "changed": changed, "imported": imported, "deferred": deferred,
+                "source": "remote_text_reports"}
 
     async def sync(self, payload: Any, authorization: str | None = None) -> dict[str, Any]:
         settings = self._settings()

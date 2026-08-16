@@ -313,6 +313,56 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         self.assertIn("reports", service._last_started)
         self.assertNotIn("message", service._last_started)
 
+    def test_report_catalog_scan_is_fair_and_defers_unimported_versions(self):
+        """Unchanged early catalogs must not consume another analyst's body budget."""
+        catalog_calls, detail_calls, cursor_updates = [], [], []
+
+        async def run_database(action, *args, timeout_seconds):
+            return action(*args)
+
+        known = {
+            "early": {"report_versions": {"2026-08-10": "v1:early"}},
+            "late": {"report_versions": {}},
+        }
+        service = RemoteArchiveSyncService(
+            settings=lambda: {}, transport=MagicMock(), database=MagicMock(),
+            run_database_blocking=run_database, message_cursor_state=MagicMock(),
+            report_cursor_state=lambda analyst_id: known[analyst_id],
+            import_message=MagicMock(), import_report=lambda _database, detail: detail_calls.append(detail),
+            update_global_cursor=MagicMock(),
+            update_report_cursor=lambda payload: cursor_updates.append(payload),
+            message_cursor_update=MagicMock(),
+            report_cursor_update=lambda **kwargs: type("Cursor", (), kwargs)(),
+            parse_timestamp=MagicMock(),
+        )
+
+        async def fake_get(_client, path, *, params=None):
+            if path == "/analysts":
+                return {"items": [{"analyst_id": "early"}, {"analyst_id": "late"}]}
+            if path == "/analysts/early/reports":
+                catalog_calls.append((path, params))
+                return {"items": [{"date": "2026-08-10", "version": "v1", "content_hash": "early"}]}
+            if path == "/analysts/late/reports":
+                catalog_calls.append((path, params))
+                return {"items": [
+                    {"date": "2026-08-11", "version": "v1", "content_hash": "first"},
+                    {"date": "2026-08-12", "version": "v1", "content_hash": "deferred"},
+                ]}
+            if path == "/analysts/late/reports/2026-08-11":
+                return {"report_id": "late-first"}
+            raise AssertionError(f"unexpected remote path: {path}")
+
+        service._get = fake_get
+        result = __import__("asyncio").run(service._reports(MagicMock(), maximum=1))
+
+        self.assertEqual([call[0] for call in catalog_calls], ["/analysts/early/reports", "/analysts/late/reports"])
+        self.assertTrue(all(call[1] == {"limit": 100, "offset": 0} for call in catalog_calls))
+        self.assertEqual(detail_calls, [{"report_id": "late-first"}])
+        self.assertEqual((result["scanned"], result["changed"], result["imported"], result["deferred"]), (3, 2, 1, 1))
+        late_update = next(item for item in cursor_updates if item.analyst_id == "late")
+        self.assertEqual(late_update.report_versions, {"2026-08-11": "v1:first"})
+        self.assertNotIn("2026-08-12", late_update.report_versions)
+
     def test_sync_service_records_successful_empty_delta_as_liveness(self):
         recorded = []
 

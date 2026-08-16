@@ -18,6 +18,7 @@
 | 实时市场/数据/纸面风险 gate | 已完成 | `app/live_policy.py`、`app/paper_portfolio.py`；risk-off、质量、T+1、日亏、回撤、单票和板块集中度均可解释阻断 |
 | 盘后同日完成语义 | 已完成 | latest-attempt/latest-completed 分离及回归测试 |
 | 分析师唯一 promotion registry | 已完成（默认零权重） | `app/analyst_promotion.py`；未人工批准永远 `weight=0` |
+| 分析师报告差量同步公平性 | 已完成止血 | 每个分析师每轮均检查一页最多 100 条的**文字元数据**；`max_items` 仅限制已变化报告正文的导入数。超出预算的变化不推进游标，后续轮次必重试；不请求图片、视频或媒体 URL |
 | 盘中固定期限结算 | 已完成修复 | 5/15/30m 只读同一连续竞价段、目标后 90 秒内的本地腾讯报价；盘后重算仍读取原始有界窗口，午休/隔夜明确 unavailable |
 | 安强作者时点动作复盘 | 已完成（仅 replay） | `author-stated-local-quote-session-bounded-replay-v1` 独立账本；不进入 live 因子、权重或飞书决策 |
 

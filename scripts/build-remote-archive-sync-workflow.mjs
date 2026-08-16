@@ -93,6 +93,8 @@ const workflows = [
   workflow({
     id: 'remoteArchiveReports123', name: '市场研究：同步远端分析师报告',
     triggerName: '同步远端分析师报告文字', stream: 'reports',
+    // The service checks every analyst's bounded text-only catalog each run;
+    // this budget limits changed report bodies, not catalog headers.
     maxItems: 25,
     intervals: ['*/15 9-11,13-14 * * 1-5', '20 18 * * 1-5'], y: 0,
   }),
