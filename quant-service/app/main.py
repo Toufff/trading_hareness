@@ -330,6 +330,7 @@ from .request_models import (
 from .remote_archive import classify_remote_text, remote_report_list_state, reprocess_remote_reports
 from .remote_archive_actions import RemoteArchiveActions
 from .market_snapshot_actions import MarketSnapshotActions
+from .cninfo_announcement_actions import CninfoAnnouncementActions
 from .intraday_event_replay_runner import run_recorded_signal_lifecycle_replay
 from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrated
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
@@ -404,6 +405,7 @@ _remote_archive_actions = RemoteArchiveActions(
     report_cursor_update=AnalystSyncCursorUpdate,
 )
 _market_snapshot_actions = MarketSnapshotActions(db)
+_cninfo_announcement_actions = CninfoAnnouncementActions(db)
 _research_storage_admission_cache: tuple[float, dict[str, Any]] | None = None
 
 
@@ -6435,62 +6437,24 @@ async def build_market_snapshot(request: MarketSnapshotRequest) -> dict[str, Any
 
 
 def announcement_symbols(request: AnnouncementSyncRequest) -> list[str]:
-    if request.symbols:
-        return request.symbols
-    with db.transaction() as connection:
-        rows = connection.execute(
-            """SELECT symbol FROM quant.universe_members
-               WHERE universe_key=%s AND enabled ORDER BY priority,symbol LIMIT 50""",
-            (request.universe_key,),
-        ).fetchall()
-    return [str(row["symbol"]) for row in rows]
+    return _cninfo_announcement_actions.symbols(request)
 
 
 def persist_announcement_provider_health(status: str, stored: int, failures: list[str],
                                          latency_ms: int | None = None) -> None:
-    with db.transaction() as connection:
-        if status == "failed":
-            record_provider_failure(connection, "cninfo_free", "announcement", " | ".join(failures), latency_ms)
-        else:
-            record_provider_success(connection, "cninfo_free", "announcement", stored, latency_ms)
-            if failures:
-                record_provider_failure(connection, "cninfo_free", "announcement", " | ".join(failures), latency_ms)
+    _cninfo_announcement_actions.persist_provider_health(status, stored, failures, latency_ms)
 
 
 async def sync_cninfo_announcements(request: AnnouncementSyncRequest) -> dict[str, Any]:
-    end = request.end_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    start = request.start_date or end - timedelta(days=request.lookback_days)
-    symbols = request.symbols or await run_database_blocking(announcement_symbols, request)
-    if not symbols:
-        return {"status": "blocked", "reason": "no symbols supplied and universe is empty", "provider": "cninfo_free"}
-    request_key = hashlib.sha256(json.dumps({
-        "provider": "cninfo_free", "symbols": symbols, "start": str(start), "end": str(end),
-        "pages": request.max_pages_per_symbol,
-    }, sort_keys=True).encode()).hexdigest()
-    if "announcement" in await open_provider_capabilities("cninfo_free", ["announcement"]):
-        return {"status": "blocked", "reason": "provider health circuit is open; upstream request skipped",
-                "provider": "cninfo_free", "request_key": request_key, "symbols": symbols,
-                "start_date": str(start), "end_date": str(end), "received": 0, "stored": 0,
-                "failures": [], "decision_eligible": False}
-    started_at = asyncio.get_running_loop().time()
-    stored = 0
-    received = 0
-    failures: list[str] = []
-    for symbol in symbols:
-        try:
-            rows = await cninfo_announcements(symbol, start, end, max_pages=request.max_pages_per_symbol)
-            received += len(rows)
-            stored += await run_database_blocking(persist_market_events, "cninfo_free", rows, timeout_seconds=60)
-        except Exception as error:  # noqa: BLE001
-            failures.append(f"{symbol}: {str(error)[:180]}")
-    status = "completed" if not failures else "partial" if stored or received else "failed"
-    await run_database_blocking(
-        persist_announcement_provider_health, status, stored, failures,
-        round((asyncio.get_running_loop().time() - started_at) * 1000),
+    return await _cninfo_announcement_actions.sync(
+        request,
+        run_database=run_database_blocking,
+        provider_capabilities=open_provider_capabilities,
+        symbols=announcement_symbols,
+        fetch_announcements=cninfo_announcements,
+        persist_events=persist_market_events,
+        persist_health=persist_announcement_provider_health,
     )
-    return {"status": status, "provider": "cninfo_free", "request_key": request_key, "symbols": symbols,
-            "start_date": str(start), "end_date": str(end), "received": received, "stored": stored,
-            "failures": failures, "decision_eligible": False}
 
 
 async def run_post_close_refresh_legacy(request: PostCloseRefreshRequest) -> dict[str, Any]:
