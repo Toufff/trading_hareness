@@ -67,6 +67,7 @@ class AnnualDailyBackfillTests(unittest.TestCase):
     def test_raw_bulk_insert_deduplicates_supplier_duplicates(self):
         source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
         self.assertIn("SELECT DISTINCT ON(record_key,content_sha256)", source)
+        self.assertIn("SELECT DISTINCT ON(upper(row_data->>'ts_code'),row_data->>'trade_date')", source)
 
     def test_concurrent_core_lane_has_final_control_reconciliation(self):
         source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")

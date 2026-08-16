@@ -331,11 +331,15 @@ def _persist_suspend_d(connection: Any, provider_key: str, available_at: datetim
     connection.execute(
         """INSERT INTO quant.security_suspensions(
                symbol,suspend_date,resume_date,suspend_reason,provider,available_at,raw)
-           SELECT upper(row_data->>'ts_code'),to_date(row_data->>'trade_date','YYYYMMDD'),
-                  CASE WHEN row_data->>'resume_date' ~ '^\\d{8}$'
-                       THEN to_date(row_data->>'resume_date','YYYYMMDD') END,
-                  coalesce(row_data->>'suspend_timing',row_data->>'suspend_reason'),%s,%s,row_data
-             FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{8}$'
+           SELECT upper(stage.row_data->>'ts_code'),to_date(stage.row_data->>'trade_date','YYYYMMDD'),
+                  CASE WHEN stage.row_data->>'resume_date' ~ '^\\d{8}$'
+                       THEN to_date(stage.row_data->>'resume_date','YYYYMMDD') END,
+                  coalesce(stage.row_data->>'suspend_timing',stage.row_data->>'suspend_reason'),%s,%s,stage.row_data
+             FROM (
+               SELECT DISTINCT ON(upper(row_data->>'ts_code'),row_data->>'trade_date') row_data
+                 FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{8}$'
+                ORDER BY upper(row_data->>'ts_code'),row_data->>'trade_date',record_index
+             ) stage
            ON CONFLICT(symbol,suspend_date,provider) DO UPDATE SET
              resume_date=EXCLUDED.resume_date,suspend_reason=EXCLUDED.suspend_reason,
              available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
