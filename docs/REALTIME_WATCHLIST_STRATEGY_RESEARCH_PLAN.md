@@ -84,7 +84,7 @@
 
 1. `FactorSpec` 注册表已记录名称、版本、输入列、频率、预热天数、因果说明、质量门禁、训练/推理许可和弃用日期；所有当前盘中因子均为 `training_permitted=false`，只能记录为证据。不要引入通用字符串 DSL，先使用可测试的 Python 纯函数。
 2. 将现有 VWAP、量能、板块共振、订单簿代理、B 浪和主升模型接入同一输入/输出契约；新因子只进入 evidence 与 shadow attribution。
-3. 每个 `Insight` 记录 `horizon_key`、`valid_until`、`expected_return`（若有）、`invalidation_codes`、`factor_set_version`、`policy_version` 和数据质量旗标。静态极值在同一 episode 只提醒一次；只有条件清除后重现或指标实质升级才重发。
+3. 每个 `Insight` 已以持久化前的 `SignalSpec` 记录 `horizon_key`、`valid_until`、`expected_return`（当前为 `null`）、`invalidation_codes`、`factor_set_version`、`policy_version` 和数据质量旗标。静态极值在同一 episode 只提醒一次；只有条件清除后重现或指标实质升级才重发。
 4. 前端展示候选的“推进因素 / 阻断因素 / 失效条件 / 数据新鲜度 / 覆盖率”；飞书仅展示观察池已确认信号，并附决策卡链接。
 
 验收：同一市场事件序列的实时与本地重放输出完全一致；36 只观察股在 SLA 内全部轮到跨源确认；全 A 失败时观察池仍可评估，但流依赖的入场会降级。

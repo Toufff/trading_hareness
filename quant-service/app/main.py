@@ -84,6 +84,7 @@ from .intraday_factor_contracts import (
     INTRADAY_FACTOR_CONTRACT_VERSION,
     contracts_for_signal as intraday_factor_contracts_for_signal,
 )
+from .intraday_signal_contracts import signal_contract as intraday_signal_contract
 from .post_close_limit_features import limit_daily_features as pure_limit_daily_features
 from .post_close_limit_features import board_count as pure_limit_board_count
 from .watchlist_daily_factors import watchlist_daily_factors as pure_watchlist_daily_factors
@@ -4087,6 +4088,10 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 signal["conditions"] = {
                     **signal["conditions"],
                     "decision_context": intraday_decision_context(signal, probability),
+                }
+                signal["conditions"] = {
+                    **signal["conditions"],
+                    "signal_contract": intraday_signal_contract(signal, observed_at),
                 }
                 latest = connection.execute(
                     "SELECT observed_at FROM quant.intraday_signal_events WHERE signal_key=%s ORDER BY observed_at DESC LIMIT 1",
