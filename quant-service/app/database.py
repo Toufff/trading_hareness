@@ -1166,6 +1166,27 @@ CREATE TABLE IF NOT EXISTS quant.universe_members (
 );
 CREATE INDEX IF NOT EXISTS universe_members_active_idx ON quant.universe_members(universe_key, priority, symbol) WHERE enabled;
 
+-- The live universe above is a control-plane snapshot.  Historical research
+-- must join these dated intervals so symbols that later delist are not erased
+-- from earlier cross-sections.
+CREATE TABLE IF NOT EXISTS quant.universe_membership_history (
+    universe_key text NOT NULL,
+    symbol text NOT NULL REFERENCES quant.instruments(symbol),
+    effective_from date NOT NULL,
+    effective_to date,
+    source text NOT NULL,
+    priority integer NOT NULL DEFAULT 100,
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY(universe_key,symbol,effective_from),
+    CHECK(effective_to IS NULL OR effective_to>=effective_from)
+);
+CREATE INDEX IF NOT EXISTS universe_membership_history_date_idx
+    ON quant.universe_membership_history(universe_key,effective_from,effective_to,symbol);
+CREATE UNIQUE INDEX IF NOT EXISTS universe_membership_history_open_idx
+    ON quant.universe_membership_history(universe_key,symbol) WHERE effective_to IS NULL;
+
 -- Features are immutable for a specific data cutoff.  A scoring run reads one
 -- version instead of recomputing against whatever provider data arrived later.
 CREATE TABLE IF NOT EXISTS quant.feature_snapshots (

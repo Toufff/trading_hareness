@@ -11,6 +11,8 @@ from typing import Any, Awaitable, Callable
 
 from psycopg.types.json import Json
 
+from .universe_history import sync_universe_membership_history
+
 
 async def sync(
     request: Any,
@@ -88,6 +90,10 @@ async def sync(
                          WHERE universe_key=%s AND source='stock-basic-all-a' AND enabled
                            AND NOT symbol = ANY(%s)""",
                     (request.universe_key, [str(row["ts_code"]).upper() for row in valid_rows]),
+                )
+                sync_universe_membership_history(
+                    connection, request.universe_key, exchange_date, valid_by_symbol,
+                    source=f"stock-basic-all-a:{result.provider.key}", priority=1000,
                 )
                 connection.execute("UPDATE quant.fetch_runs SET status='completed',row_count=%s,finished_at=now() WHERE request_key=%s", (len(valid_rows), request_key))
                 record_provider_success(connection, result.provider.key, "stock_basic_all_a", len(valid_rows), provider_latency_ms)

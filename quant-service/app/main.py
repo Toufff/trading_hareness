@@ -61,7 +61,7 @@ from .public_market_repository import (
     persist_public_observations as _persist_public_observations,
     recent_market_events as _recent_market_events,
 )
-from .factor_lab import evaluate_factor, run_multi_factor_strategy
+from .factor_sql_lab import evaluate_factor_set, run_multi_factor_strategy_sql
 from .analyst_promotion import analyst_live_promotion
 from .research_prices import adjusted_bars
 from .live_policy import live_policy_gate
@@ -351,6 +351,7 @@ from .tushare_providers import (
     super_get_executor_status,
     shutdown_super_get_executor,
 )
+from .universe_history import sync_universe_membership_history
 
 
 db = Database()
@@ -8172,7 +8173,16 @@ def update_universe_members(payload: UniverseUpdateRequest) -> dict[str, Any]:
                    priority=EXCLUDED.priority,source=EXCLUDED.source,updated_at=now()""",
                 (payload.universe_key, symbol, payload.enabled, payload.priority),
             )
-    return {"universe_key": payload.universe_key, "updated": len(payload.symbols), "enabled": payload.enabled}
+        active = connection.execute(
+            "SELECT symbol FROM quant.universe_members WHERE universe_key=%s AND enabled ORDER BY symbol",
+            (payload.universe_key,),
+        ).fetchall()
+        history = sync_universe_membership_history(
+            connection, payload.universe_key, cn_today(),
+            [str(row["symbol"]) for row in active], source="universe-members-api", priority=payload.priority,
+        )
+    return {"universe_key": payload.universe_key, "updated": len(payload.symbols), "enabled": payload.enabled,
+            "history": history}
 
 
 def build_features(payload: GenerateRequest) -> dict[str, Any]:
@@ -8187,7 +8197,9 @@ def latest_features(universe_key: str = "core", limit: int = 200) -> dict[str, A
 def research_window(connection: Any, universe_key: str, start_date: date | None, end_date: date | None) -> tuple[date, date]:
     bounds = connection.execute(
         """SELECT min(b.trading_date) earliest,max(b.trading_date) latest FROM quant.canonical_bars_daily b
-           JOIN quant.universe_members u ON u.symbol=b.symbol WHERE u.universe_key=%s AND u.enabled""",
+           JOIN quant.universe_membership_history membership ON membership.symbol=b.symbol
+            AND membership.universe_key=%s AND membership.effective_from<=b.trading_date
+            AND (membership.effective_to IS NULL OR membership.effective_to>=b.trading_date)""",
         (universe_key,),
     ).fetchone()
     if not bounds or not bounds["latest"]:
@@ -8208,19 +8220,23 @@ def evaluate_factors(payload: FactorEvaluationRequest) -> dict[str, Any]:
     with db.transaction() as connection:
         start, end = research_window(connection, payload.universe_key, payload.start_date, payload.end_date)
         rows = connection.execute(
-            "SELECT factor_key FROM quant.factor_registry WHERE implementation='native' AND status<>'disabled' ORDER BY factor_key"
+            "SELECT factor_key FROM quant.factor_registry WHERE implementation='native_sql' AND status<>'disabled' ORDER BY factor_key"
         ).fetchall()
         enabled = {str(row["factor_key"]) for row in rows}
         requested = payload.factor_keys or sorted(enabled)
         unknown = sorted(set(requested) - enabled)
         if unknown:
             raise HTTPException(status_code=422, detail=f"unknown or disabled factors: {', '.join(unknown)}")
+        try:
+            evaluated = evaluate_factor_set(connection, requested, payload.universe_key, start, end, payload.horizon_days)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         results = []
-        for factor_key in requested:
-            result = evaluate_factor(connection, factor_key, payload.universe_key, start, end, payload.horizon_days)
+        for result in evaluated:
+            factor_key = str(result["factor_key"])
             row = connection.execute(
                 """INSERT INTO quant.factor_evaluations(factor_key,universe_key,start_date,end_date,horizon_days,engine,status,observations,
-                    cross_section_days,metrics,artifact) VALUES(%s,%s,%s,%s,%s,'native_factor_lab',%s,%s,%s,%s,%s) RETURNING evaluation_id""",
+                    cross_section_days,metrics,artifact) VALUES(%s,%s,%s,%s,%s,'native_factor_sql_v2',%s,%s,%s,%s,%s) RETURNING evaluation_id""",
                 (factor_key, payload.universe_key, start, end, payload.horizon_days, result["status"], result["observations"],
                  result["cross_section_days"], Json(result["metrics"]), Json(result["artifact"])),
             ).fetchone()
@@ -8250,7 +8266,10 @@ def backtest_strategy(payload: StrategyBacktestRequest) -> dict[str, Any]:
         start, end = research_window(connection, payload.universe_key, payload.start_date, payload.end_date)
         parameters = {**dict(registry["configuration"]), "rebalance_days": payload.rebalance_days, "hold_days": payload.hold_days,
                       "top_n": payload.top_n, "total_cost_bps": payload.total_cost_bps, "factors": payload.factors}
-        result = run_multi_factor_strategy(connection, payload.universe_key, start, end, parameters)
+        try:
+            result = run_multi_factor_strategy_sql(connection, payload.universe_key, start, end, parameters)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         row = connection.execute(
             """INSERT INTO quant.strategy_experiments(strategy_key,universe_key,start_date,end_date,status,parameters,metrics,equity_curve,trades)
                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING strategy_experiment_id""",
@@ -8358,11 +8377,11 @@ async def build_features_endpoint(payload: GenerateRequest) -> dict[str, Any]:
 
 
 async def evaluate_factors_endpoint(payload: FactorEvaluationRequest) -> dict[str, Any]:
-    return await run_database_blocking(evaluate_factors, payload, timeout_seconds=60)
+    return await run_database_blocking(evaluate_factors, payload, timeout_seconds=300)
 
 
 async def backtest_strategy_endpoint(payload: StrategyBacktestRequest) -> dict[str, Any]:
-    return await run_database_blocking(backtest_strategy, payload, timeout_seconds=60)
+    return await run_database_blocking(backtest_strategy, payload, timeout_seconds=300)
 
 
 async def reconcile_stale_fetch_runs_endpoint(payload: FetchRunReconcileRequest) -> dict[str, Any]:
