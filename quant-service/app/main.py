@@ -180,6 +180,7 @@ from .intraday_schedule import (
     intraday_high_frequency_window,
     intraday_next_monitor_delay_seconds,
     intraday_realtime_validation_slice,
+    intraday_rule_input_retention_days,
     intraday_runtime_service_state,
     intraday_scan_interval_seconds,
     intraday_super_get_fast_interval_seconds,
@@ -216,6 +217,7 @@ from .intraday_scan_repository import (
     persist_intraday_scan_terminal,
     previous_quote_frames,
 )
+from .intraday_rule_snapshot_repository import persist_rule_input_snapshot, prune_rule_input_evidence
 from .market_session_repository import (
     realtime_market_session as read_realtime_market_session,
     realtime_market_session_async as read_realtime_market_session_async,
@@ -4020,6 +4022,11 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             order_book_feature = aggregate_order_book_observations(order_book_by_symbol.get(symbol, []), observed_at)
             peer_context = peer_contexts.get(symbol)
             previous_quote = dict(previous) if previous else None
+            persist_rule_input_snapshot(
+                connection, scan_id=scan_id, observed_at=observed_at, watch=watch, quote=quote,
+                previous_quote=previous_quote, daily_factors=daily_factors, minute_features=minute_feature,
+                peer_context=peer_context, model_version=INTRADAY_SIGNAL_MODEL_VERSION,
+            )
             generated_signals = intraday_signal_rules(watch, quote, previous_quote, daily_factors,
                                                        minute_feature, peer_context)
             shadow_signal = main_wave_v2_shadow_signal(
@@ -4193,6 +4200,25 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
     return signals
 
 
+intraday_rule_input_pruned_on: date | None = None
+
+
+async def prune_intraday_rule_input_evidence_if_due(observed_at: datetime) -> None:
+    """Run one bounded retention pass per China trading date before scanning."""
+    global intraday_rule_input_pruned_on
+    local_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+    if intraday_rule_input_pruned_on == local_date:
+        return
+    cutoff = observed_at - timedelta(days=intraday_rule_input_retention_days())
+
+    def prune() -> None:
+        with db.transaction() as connection:
+            prune_rule_input_evidence(connection, cutoff=cutoff)
+
+    await run_database_blocking(prune)
+    intraday_rule_input_pruned_on = local_date
+
+
 async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str, Any]:
     """Persist a bounded live scan.  The endpoint does not submit orders."""
     scan_started_at = asyncio.get_running_loop().time()
@@ -4233,6 +4259,7 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
             {"session": reason}, {"watched": len(watches)},
         )
         return finish({"status": "blocked", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(), "reason": reason, "alerts": []})
+    await prune_intraday_rule_input_evidence_if_due(observed_at)
     retry_summary = await retry_pending_intraday_alerts()
     if not watches:
         await run_database_blocking(

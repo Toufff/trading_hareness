@@ -476,6 +476,23 @@ CREATE INDEX IF NOT EXISTS intraday_order_book_recent_idx
 ON quant.intraday_quote_observations(symbol, observed_at DESC)
 WHERE source_name='tencent_order_book';
 
+-- Every live scan freezes the minimal causal inputs used by the pure rule
+-- function, including no-signal rows.  It excludes raw provider payloads;
+-- those stay in intraday_quote_observations under their own retention policy.
+CREATE TABLE IF NOT EXISTS quant.intraday_rule_input_snapshots (
+    rule_input_snapshot_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    scan_id uuid NOT NULL REFERENCES quant.intraday_scan_runs(scan_id) ON DELETE CASCADE,
+    symbol text NOT NULL REFERENCES quant.instruments(symbol) ON DELETE CASCADE,
+    observed_at timestamptz NOT NULL,
+    model_version text NOT NULL,
+    input_hash text NOT NULL,
+    inputs jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE(scan_id,symbol,model_version)
+);
+CREATE INDEX IF NOT EXISTS intraday_rule_input_snapshot_time_idx
+    ON quant.intraday_rule_input_snapshots(observed_at DESC, symbol);
+
 CREATE TABLE IF NOT EXISTS quant.intraday_signal_events (
     signal_event_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     scan_id uuid REFERENCES quant.intraday_scan_runs(scan_id) ON DELETE SET NULL,

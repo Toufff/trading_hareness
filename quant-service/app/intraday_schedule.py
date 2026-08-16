@@ -110,6 +110,15 @@ def intraday_fast_quote_retention_days() -> int:
         return 7
 
 
+def intraday_rule_input_retention_days() -> int:
+    """Keep enough frozen live inputs for the 60-day replay gate, bounded by SSD policy."""
+    try:
+        value = int(os.getenv("INTRADAY_RULE_INPUT_RETENTION_DAYS", "90"))
+    except ValueError:
+        value = 90
+    return min(120, max(60, value))
+
+
 def intraday_session_elapsed_seconds(now: datetime) -> float | None:
     local = now.astimezone(CN_TZ)
     clock = local.time()
