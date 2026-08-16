@@ -373,11 +373,18 @@ CREATE TABLE IF NOT EXISTS quant.market_bars_minute (
     amount numeric,
     source_name text NOT NULL,
     import_id uuid NOT NULL REFERENCES quant.offline_imports(import_id) ON DELETE RESTRICT,
+    -- ``available_at`` is when this service imported the row.  A historical
+    -- replay must instead use the vendor's recorded availability clock below;
+    -- it stays NULL when a file cannot prove that clock.
+    source_available_at timestamptz,
     available_at timestamptz NOT NULL,
     raw jsonb NOT NULL DEFAULT '{}'::jsonb,
     PRIMARY KEY(symbol, bar_time, source_name)
 );
 CREATE INDEX IF NOT EXISTS market_bars_minute_time_idx ON quant.market_bars_minute(symbol, bar_time DESC);
+CREATE INDEX IF NOT EXISTS market_bars_minute_source_availability_idx
+    ON quant.market_bars_minute(source_available_at, bar_time)
+    WHERE source_available_at IS NOT NULL;
 
 -- Verified live-minute captures are deliberately separate from offline files.
 -- They form a small per-watchlist, point-in-time baseline for time-of-day

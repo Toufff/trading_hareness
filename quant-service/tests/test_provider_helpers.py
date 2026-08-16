@@ -785,10 +785,24 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertFalse(blocked["p3_strategy_validation_ready"])
         self.assertIn("does not call providers", blocked["policy"])
 
+        unclocked_minutes = replay_readiness_payload({
+            "full_cross_section_days": P2_MIN_FULL_CROSS_SECTION_DAYS,
+            "offline_minute_trading_days": P3_MIN_REPLAY_DAYS,
+            "offline_minute_symbols": 10, "offline_minute_bars": 10_000,
+            "completed_offline_imports": 1, "confirmed_signal_events": P3_MIN_SIGNAL_EVENTS,
+            "matured_signal_events": P3_MIN_SIGNAL_EVENTS,
+        })
+        availability_gate = next(item for item in unclocked_minutes["gates"]
+                                 if item["key"] == "p2_offline_minute_availability_clock")
+        self.assertEqual(availability_gate["status"], "insufficient")
+        self.assertFalse(unclocked_minutes["p2_data_foundation_ready"])
+
         ready = replay_readiness_payload({
             "full_cross_section_days": P2_MIN_FULL_CROSS_SECTION_DAYS,
             "offline_minute_trading_days": P3_MIN_REPLAY_DAYS,
             "offline_minute_symbols": 10, "offline_minute_bars": 10_000,
+            "offline_minute_source_clock_bars": 10_000,
+            "offline_minute_source_clock_days": P3_MIN_REPLAY_DAYS,
             "completed_offline_imports": 1, "confirmed_signal_events": P3_MIN_SIGNAL_EVENTS,
             "matured_signal_events": P3_MIN_SIGNAL_EVENTS,
         })
@@ -4557,6 +4571,13 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(parsed["symbol"], "600519.SH")
         self.assertEqual(parsed["bar_time"].isoformat(), "2026-08-04T01:31:00+00:00")
         self.assertEqual(str(parsed["volume"]), "10")
+        self.assertIsNone(parsed["source_available_at"])
+        source_clock = offline_minute_row({
+            "ts_code": "600519.SH", "datetime": "2026-08-04 09:31:00",
+            "source_available_at": "2026-08-04 09:31:05", "open": "1400", "high": "1402",
+            "low": "1399", "close": "1401", "vol": "10",
+        })
+        self.assertEqual(source_clock["source_available_at"].isoformat(), "2026-08-04T01:31:05+00:00")
         with self.assertRaises(ValueError):
             offline_minute_row({"symbol": "600519.SH", "datetime": "2026-08-04 09:31:00", "open": "10", "high": "9", "low": "8", "close": "10"})
         with self.assertRaises(ValidationError):

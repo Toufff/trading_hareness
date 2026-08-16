@@ -1815,6 +1815,21 @@ def offline_minute_timestamp(value: Any) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def offline_minute_source_available_at(row: dict[str, Any]) -> datetime | None:
+    """Return a vendor-recorded availability clock without manufacturing one.
+
+    ``bar_time`` says when a bar closed, not when a caller could have seen it.
+    CSV producers may provide an explicit source/provider availability or
+    receive timestamp.  Missing or blank values intentionally remain NULL so
+    the file cannot be admitted to causal strategy replay by accident.
+    """
+    for key in ("source_available_at", "provider_available_at", "received_at", "available_at"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return offline_minute_timestamp(value)
+    return None
+
+
 def offline_minute_row(row: dict[str, Any]) -> dict[str, Any]:
     """Validate one CSV row before it reaches the database."""
     symbol = str(row.get("ts_code") or row.get("symbol") or "").upper().strip()
@@ -1834,7 +1849,8 @@ def offline_minute_row(row: dict[str, Any]) -> dict[str, Any]:
     if volume is not None and volume < 0 or amount is not None and amount < 0:
         raise ValueError("minute volume and amount must not be negative")
     return {"symbol": symbol, "bar_time": bar_time, "open": open_price, "high": high, "low": low,
-            "close": close, "volume": volume, "amount": amount, "raw": row}
+            "close": close, "volume": volume, "amount": amount,
+            "source_available_at": offline_minute_source_available_at(row), "raw": row}
 
 
 def ensure_offline_instrument(connection: Any, symbol: str) -> None:
@@ -1872,13 +1888,13 @@ def import_offline_minute_csv(request: OfflineMinuteImportRequest) -> dict[str, 
             for item in items:
                 ensure_offline_instrument(connection, item["symbol"])
                 connection.execute(
-                    """INSERT INTO quant.market_bars_minute(symbol,bar_time,open,high,low,close,volume,amount,source_name,import_id,available_at,raw)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),%s)
+                    """INSERT INTO quant.market_bars_minute(symbol,bar_time,open,high,low,close,volume,amount,source_name,import_id,source_available_at,available_at,raw)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),%s)
                        ON CONFLICT(symbol,bar_time,source_name) DO UPDATE SET open=EXCLUDED.open,high=EXCLUDED.high,low=EXCLUDED.low,
                          close=EXCLUDED.close,volume=EXCLUDED.volume,amount=EXCLUDED.amount,import_id=EXCLUDED.import_id,
-                         available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
+                         source_available_at=EXCLUDED.source_available_at,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
                     (item["symbol"], item["bar_time"], item["open"], item["high"], item["low"], item["close"], item["volume"],
-                     item["amount"], request.source_name, import_id, Json(item["raw"])),
+                     item["amount"], request.source_name, import_id, item["source_available_at"], Json(item["raw"])),
                 )
 
     try:

@@ -20,6 +20,8 @@ def replay_readiness_payload(metrics: Mapping[str, Any]) -> dict[str, Any]:
     minute_days = int(metrics.get("offline_minute_trading_days") or 0)
     minute_symbols = int(metrics.get("offline_minute_symbols") or 0)
     minute_bars = int(metrics.get("offline_minute_bars") or 0)
+    minute_clock_bars = int(metrics.get("offline_minute_source_clock_bars") or 0)
+    minute_clock_days = int(metrics.get("offline_minute_source_clock_days") or 0)
     imports = int(metrics.get("completed_offline_imports") or 0)
     confirmed_signals = int(metrics.get("confirmed_signal_events") or 0)
     matured_signals = int(metrics.get("matured_signal_events") or 0)
@@ -40,6 +42,10 @@ def replay_readiness_payload(metrics: Mapping[str, Any]) -> dict[str, Any]:
             "Historical minute data is accepted only through the mounted offline import path; this check never fetches it.",
         ),
         gate(
+            "p2_offline_minute_availability_clock", "P2", minute_clock_bars, 1, "bars_with_source_available_at",
+            "Minute replay needs a vendor-recorded source_available_at; local import time and bar-close time are not substitutes.",
+        ),
+        gate(
             "p3_replay_window", "P3", min(full_days, minute_days), P3_MIN_REPLAY_DAYS, "aligned_daily_and_minute_days",
             "Strategy replay requires at least 60 locally available daily and offline-minute trading days before threshold calibration.",
         ),
@@ -57,7 +63,8 @@ def replay_readiness_payload(metrics: Mapping[str, Any]) -> dict[str, Any]:
         "gates": gates,
         "evidence": {
             **dict(metrics), "offline_minute_symbols": minute_symbols,
-            "offline_minute_bars": minute_bars, "matured_signal_events": matured_signals,
+            "offline_minute_bars": minute_bars, "offline_minute_source_clock_bars": minute_clock_bars,
+            "offline_minute_source_clock_days": minute_clock_days, "matured_signal_events": matured_signals,
         },
         "policy": "Read-only local evidence check: it does not call providers, download history, or change strategy thresholds.",
     }
@@ -86,6 +93,9 @@ def historical_replay_readiness(database: Any) -> dict[str, Any]:
                      FROM quant.market_bars_minute) offline_minute_trading_days,
                   (SELECT count(DISTINCT symbol)::int FROM quant.market_bars_minute) offline_minute_symbols,
                   (SELECT count(*)::int FROM quant.market_bars_minute) offline_minute_bars,
+                  (SELECT count(*)::int FROM quant.market_bars_minute WHERE source_available_at IS NOT NULL) offline_minute_source_clock_bars,
+                  (SELECT count(DISTINCT (source_available_at AT TIME ZONE 'Asia/Shanghai')::date)::int
+                     FROM quant.market_bars_minute WHERE source_available_at IS NOT NULL) offline_minute_source_clock_days,
                   (SELECT count(*)::int FROM quant.offline_imports WHERE status IN ('completed','partial')) completed_offline_imports,
                   (SELECT count(*)::int FROM quant.intraday_signal_events
                     WHERE state IN ('confirmed','alerted')) confirmed_signal_events,
