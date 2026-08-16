@@ -1,7 +1,7 @@
 import unittest
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.analyst_trade_actions import parse_anqiang_trade_actions
 from app.analyst_expert_research import EXPERT_DEFAULTS, HORIZONS, _clustered_mean, _cn_date, _herding_effective_sample, _pearson, _softmax_weights
@@ -13,10 +13,49 @@ from app.remote_archive import (analyst_global_sync_cursor, classify_remote_text
                                 body_stated_timestamp, import_remote_analyst_message)
 from app.analyst_observations import observation_action, observation_status
 from app.remote_archive_sync import RemoteArchiveSyncService, _AuthorizedArchiveClient
+from app.remote_archive_actions import RemoteArchiveActions
 from app.claim_review_service import review_claim
 
 
 class RemoteArchiveNormalizationTests(unittest.TestCase):
+    def test_action_settings_are_bounded_and_do_not_contain_a_bearer(self):
+        with patch.dict("os.environ", {
+            "REMOTE_ANALYST_ARCHIVE_BASE_URL": "https://archive.example/",
+            "REMOTE_ANALYST_SYNC_MAX_ITEMS": "10000",
+            "REMOTE_ANALYST_SYNC_MIN_INTERVAL_SECONDS": "-1",
+            "REMOTE_ANALYST_SYNC_REQUEST_INTERVAL_SECONDS": "99",
+        }, clear=False):
+            settings = RemoteArchiveActions.sync_settings()
+        self.assertEqual(settings["base_url"], "https://archive.example")
+        self.assertEqual(settings["max_items"], 100)
+        self.assertEqual(settings["minimum_interval_seconds"], 1.0)
+        self.assertEqual(settings["request_interval_seconds"], 30.0)
+        self.assertNotIn("bearer", settings)
+
+    def test_action_terminal_global_cursor_clears_next_cursor_after_import(self):
+        connection = MagicMock()
+        connection.execute.return_value.fetchone.return_value = {
+            "remote_cursor": "prior-signed-cursor",
+            "received_after": datetime(2026, 8, 12, 1, 0, tzinfo=timezone.utc),
+        }
+        database = MagicMock()
+        database.transaction.return_value.__enter__.return_value = connection
+        actions = RemoteArchiveActions(
+            database=database,
+            run_database_blocking=AsyncMock(),
+            message_cursor_update=MagicMock(),
+            report_cursor_update=MagicMock(),
+        )
+        payload = MagicMock(
+            stream_key="message_updates", terminal=True, cursor="new-signed-cursor",
+            received_after=datetime(2026, 8, 12, 2, 0, tzinfo=timezone.utc),
+        )
+        result = actions.update_global_cursor(payload)
+        self.assertFalse(result["has_cursor"])
+        self.assertEqual(result["received_after"], "2026-08-12T02:00:00+00:00")
+        parameters = connection.execute.call_args_list[-1].args[1]
+        self.assertEqual(parameters[1], None)
+
     def test_archive_authorization_is_request_scoped_not_client_default(self):
         calls = []
 

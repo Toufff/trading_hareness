@@ -327,10 +327,8 @@ from .request_models import (
     TushareSyncRequest,
     UniverseUpdateRequest,
 )
-from .remote_archive import (analyst_global_sync_cursor, analyst_sync_cursor, classify_remote_text, import_remote_analyst_message, import_remote_report, parse_optional_timestamp,
-                             record_analyst_sync_attempt, remote_report_list_state, reprocess_remote_messages, reprocess_remote_reports)
-from .remote_archive_transport import RemoteArchiveTransport
-from .remote_archive_sync import RemoteArchiveSyncService
+from .remote_archive import classify_remote_text, remote_report_list_state, reprocess_remote_reports
+from .remote_archive_actions import RemoteArchiveActions
 from .intraday_event_replay_runner import run_recorded_signal_lifecycle_replay
 from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrated
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
@@ -398,6 +396,12 @@ from .universe_history import sync_universe_membership_history
 
 db = Database()
 async_db = AsyncDatabase(db)
+_remote_archive_actions = RemoteArchiveActions(
+    database=db,
+    run_database_blocking=run_database_blocking,
+    message_cursor_update=AnalystSyncGlobalCursorUpdate,
+    report_cursor_update=AnalystSyncCursorUpdate,
+)
 _research_storage_admission_cache: tuple[float, dict[str, Any]] | None = None
 
 
@@ -8009,145 +8013,35 @@ def analyse_ingestion(analysis_id: uuid.UUID) -> dict[str, Any]:
 
 
 def import_remote_archive_report(payload: RemoteReportImport) -> dict[str, Any]:
-    try:
-        return import_remote_report(db, payload.report)
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
+    return _remote_archive_actions.import_report(payload)
 
 
 def import_remote_archive_message(payload: RemoteAnalystMessageImport) -> dict[str, Any]:
-    try:
-        return import_remote_analyst_message(db, payload.message)
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
+    return _remote_archive_actions.import_message(payload)
 
 
 def reprocess_remote_archive_reports(payload: RemoteReportReprocessRequest) -> dict[str, Any]:
-    return reprocess_remote_reports(db, payload.limit)
+    return _remote_archive_actions.reprocess_reports(payload)
 
 
 def reprocess_remote_archive_messages(payload: RemoteMessageReprocessRequest) -> dict[str, Any]:
-    return reprocess_remote_messages(db, payload.limit)
+    return _remote_archive_actions.reprocess_messages(payload)
 
 
 def remote_archive_sync_settings() -> dict[str, Any]:
-    """Read local-only archive transport settings without exposing credentials."""
-    base_url = os.getenv("REMOTE_ANALYST_ARCHIVE_BASE_URL", "").strip().rstrip("/")
-    ca_file = os.getenv("REMOTE_ANALYST_ARCHIVE_CA_FILE", "").strip()
-    try:
-        configured_max_items = int(os.getenv("REMOTE_ANALYST_SYNC_MAX_ITEMS", "100"))
-    except ValueError:
-        configured_max_items = 100
-    try:
-        minimum_interval_seconds = float(os.getenv("REMOTE_ANALYST_SYNC_MIN_INTERVAL_SECONDS", "15"))
-    except ValueError:
-        minimum_interval_seconds = 15.0
-    try:
-        request_interval_seconds = float(os.getenv("REMOTE_ANALYST_SYNC_REQUEST_INTERVAL_SECONDS", "2"))
-    except ValueError:
-        request_interval_seconds = 2.0
-    return {
-        "base_url": base_url,
-        "ca_file": ca_file if ca_file and Path(ca_file).is_file() else None,
-        "max_items": min(100, max(1, configured_max_items)),
-        "minimum_interval_seconds": min(300.0, max(1.0, minimum_interval_seconds)),
-        "request_interval_seconds": min(30.0, max(0.0, request_interval_seconds)),
-    }
-
-
-_remote_archive_transport = RemoteArchiveTransport()
-_remote_archive_sync_service: RemoteArchiveSyncService | None = None
-
-
-def _remote_archive_message_cursor_state() -> dict[str, Any]:
-    return analyst_global_sync_cursor(db, "message_updates").get("cursor") or {}
-
-
-def _remote_archive_report_cursor_state(analyst_id: str) -> dict[str, Any]:
-    return analyst_sync_cursor(db, "reports", analyst_id).get("cursor") or {}
+    return _remote_archive_actions.sync_settings()
 
 
 async def sync_remote_archive(payload: RemoteArchiveSyncRequest, authorization: str | None = None) -> dict[str, Any]:
-    """Synchronize bounded remote analyst text through the isolated service."""
-    global _remote_archive_sync_service
-    if _remote_archive_sync_service is None:
-        _remote_archive_sync_service = RemoteArchiveSyncService(
-            settings=remote_archive_sync_settings, transport=_remote_archive_transport, database=db,
-            run_database_blocking=run_database_blocking,
-            message_cursor_state=_remote_archive_message_cursor_state,
-            report_cursor_state=_remote_archive_report_cursor_state,
-            import_message=import_remote_analyst_message, import_report=import_remote_report,
-            update_global_cursor=update_analyst_global_sync_cursor, update_report_cursor=update_analyst_sync_cursor,
-            message_cursor_update=AnalystSyncGlobalCursorUpdate, report_cursor_update=AnalystSyncCursorUpdate,
-            parse_timestamp=parse_optional_timestamp, record_attempt=record_analyst_sync_attempt, sleep=asyncio.sleep,
-        )
-    return await _remote_archive_sync_service.sync(payload, authorization)
+    return await _remote_archive_actions.sync(payload, authorization)
 
 
 def update_analyst_sync_cursor(payload: AnalystSyncCursorUpdate) -> dict[str, Any]:
-    """Persist a successful remote stream watermark for n8n's next delta run."""
-    with db.transaction() as connection:
-        exists = connection.execute(
-            "SELECT 1 FROM quant.remote_analysts WHERE remote_analyst_id=%s", (payload.analyst_id,)
-        ).fetchone()
-        if not exists:
-            raise HTTPException(status_code=404, detail="remote analyst not found")
-        current = connection.execute(
-            """SELECT received_at,message_ids,report_versions FROM quant.analyst_sync_cursors
-                 WHERE stream_key=%s AND remote_analyst_id=%s FOR UPDATE""",
-            (payload.stream_key, payload.analyst_id),
-        ).fetchone()
-        received_at = payload.received_at
-        message_ids = list(dict.fromkeys(str(value) for value in payload.message_ids if str(value)))
-        report_versions = {str(key): str(value) for key, value in payload.report_versions.items() if str(key) and str(value)}
-        if current and payload.stream_key == "messages":
-            previous_at = current["received_at"]
-            if previous_at is not None and received_at is not None and received_at < previous_at:
-                received_at, message_ids = previous_at, list(current["message_ids"] or [])
-            elif previous_at is not None and received_at == previous_at:
-                message_ids = list(dict.fromkeys([*(current["message_ids"] or []), *message_ids]))[:500]
-        if current and payload.stream_key == "reports":
-            report_versions = {**dict(current["report_versions"] or {}), **report_versions}
-            if len(report_versions) > 500:
-                report_versions = dict(sorted(report_versions.items())[-500:])
-        connection.execute(
-            """INSERT INTO quant.analyst_sync_cursors(stream_key,remote_analyst_id,received_at,message_ids,report_versions,updated_at)
-               VALUES(%s,%s,%s,%s,%s,now())
-               ON CONFLICT(stream_key,remote_analyst_id) DO UPDATE SET received_at=EXCLUDED.received_at,
-                 message_ids=EXCLUDED.message_ids,report_versions=EXCLUDED.report_versions,updated_at=now()""",
-            (payload.stream_key, payload.analyst_id, received_at, Json(message_ids), Json(report_versions)),
-        )
-    return {"status": "updated", "stream_key": payload.stream_key, "analyst_id": payload.analyst_id,
-            "received_at": received_at.isoformat() if received_at else None,
-            "message_ids": len(message_ids), "report_versions": len(report_versions)}
+    return _remote_archive_actions.update_cursor(payload)
 
 
 def update_analyst_global_sync_cursor(payload: AnalystSyncGlobalCursorUpdate) -> dict[str, Any]:
-    """Commit a remote change-feed page only after every item imported locally."""
-    with db.transaction() as connection:
-        current = connection.execute(
-            """SELECT remote_cursor,received_after FROM quant.analyst_global_sync_cursors
-                 WHERE stream_key=%s FOR UPDATE""",
-            (payload.stream_key,),
-        ).fetchone()
-        # A non-terminal page must preserve its signed next cursor.  A
-        # terminal page deliberately clears it and restarts next time from
-        # the page's final received_at (the remote contract is strict `>`),
-        # rather than replaying the final page forever.
-        remote_cursor = None if payload.terminal else (payload.cursor or (current["remote_cursor"] if current else None))
-        received_after = payload.received_after or (current["received_after"] if current else None)
-        connection.execute(
-            """INSERT INTO quant.analyst_global_sync_cursors(stream_key,remote_cursor,received_after,updated_at)
-               VALUES(%s,%s,%s,now())
-               ON CONFLICT(stream_key) DO UPDATE SET remote_cursor=EXCLUDED.remote_cursor,
-                 received_after=EXCLUDED.received_after,updated_at=now()""",
-            (payload.stream_key, remote_cursor, received_after),
-        )
-    return {
-        "status": "updated", "stream_key": payload.stream_key,
-        "has_cursor": bool(remote_cursor),
-        "received_after": received_after.isoformat() if received_after else None,
-    }
+    return _remote_archive_actions.update_global_cursor(payload)
 
 
 def update_analyst_research_profile(analyst_id: str, payload: AnalystResearchProfileRequest) -> dict[str, Any]:
