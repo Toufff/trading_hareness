@@ -1923,8 +1923,8 @@ class ProviderHelperTests(unittest.TestCase):
                 self.executions += 1
                 return self
 
-            def fetchone(self):
-                return {"sample_days": 8, "median_volume": 200}
+            def fetchall(self):
+                return [{"symbol": "000001.SZ", "minute_bucket": "10:00", "sample_days": 8, "median_volume": 200}]
 
         daily_connection, volume_connection = DailyConnection(), VolumeConnection()
         with patch("app.main.db.transaction", side_effect=AssertionError("must reuse caller connection")):

@@ -75,6 +75,9 @@ from .intraday_features import mapped_watchlist_peers as pure_mapped_watchlist_p
 from .intraday_features import peer_context as pure_intraday_peer_context
 from .intraday_features import strategy_session_rows as pure_strategy_session_rows
 from .intraday_decision_card_read_model import decision_card as read_intraday_decision_card
+from .intraday_volume_profiles import attach_volume_time_profile as pure_attach_volume_time_profile
+from .intraday_volume_profiles import volume_time_profile as pure_intraday_volume_time_profile
+from .intraday_volume_profiles import volume_time_profiles as pure_intraday_volume_time_profiles
 from .intraday_minute_provider_service import fetch_bounded_minute_context
 from .intraday_state_machine import classify_setup_state as classify_intraday_setup_state
 from .intraday_factor_contracts import (
@@ -3290,26 +3293,13 @@ intraday_minute_bucket = pure_intraday_minute_bucket
 def intraday_volume_time_profile(symbol: str, minute_time: Any, as_of_date: date,
                                  connection: Any | None = None) -> dict[str, Any]:
     """Build a strictly prior-day, same-minute volume baseline for one symbol."""
-    bucket = intraday_minute_bucket(minute_time)
-    if bucket is None:
-        return {"status": "invalid_minute_bucket", "sample_days": 0}
     if connection is None:
         with db.transaction() as owned_connection:
             return intraday_volume_time_profile(symbol, minute_time, as_of_date, owned_connection)
-    row = connection.execute(
-            """SELECT count(DISTINCT trading_date)::int AS sample_days,
-                      percentile_cont(0.5) WITHIN GROUP (ORDER BY volume) AS median_volume
-                 FROM quant.intraday_minute_sessions
-                WHERE symbol=%s AND minute_bucket=%s AND trading_date<%s
-                  AND source_name IN ('tushare_super_get_rt_min_daily','tushare_super_rt_min_daily','tencent_intraday_minutes')
-                  AND volume IS NOT NULL AND volume>0""",
-            (symbol, bucket, as_of_date),
-    ).fetchone()
-    sample_days = int(row["sample_days"] or 0)
-    median_volume = intraday_number(row["median_volume"])
-    return {"status": "ready" if sample_days >= 8 and median_volume else "insufficient_history",
-            "minute_bucket": bucket, "sample_days": sample_days, "median_volume": median_volume,
-            "minimum_sample_days": 8}
+    return pure_intraday_volume_time_profile(
+        symbol, minute_time, as_of_date, connection,
+        minute_bucket_fn=intraday_minute_bucket, number=intraday_number,
+    )
 
 
 def attach_intraday_volume_time_profile(symbol: str, minute_feature: dict[str, Any] | None,
@@ -3320,12 +3310,7 @@ def attach_intraday_volume_time_profile(symbol: str, minute_feature: dict[str, A
     profile = intraday_volume_time_profile(
         symbol, minute_feature.get("time"), observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date(), connection,
     )
-    current_volume = intraday_number(minute_feature.get("minute_volume_lot"))
-    if profile.get("status") == "ready" and current_volume is not None and profile.get("median_volume"):
-        profile["volume_surprise"] = round(current_volume / float(profile["median_volume"]), 4)
-    else:
-        profile["volume_surprise"] = None
-    return {**minute_feature, "time_bucket_volume_profile": profile}
+    return pure_attach_volume_time_profile(minute_feature, profile, number=intraday_number)
 
 
 def intraday_upside_research_assessment(quote: dict[str, Any] | None, daily_factors: dict[str, Any] | None,
@@ -3966,6 +3951,21 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
         daily_factors_by_symbol = pure_watchlist_daily_factors_by_symbol(
             selected_symbols, connection, number=intraday_number,
         )
+        raw_minute_features_by_symbol = {
+            symbol: (tushare_minutes.get(symbol) or {}).get("feature") or surge_features.get(symbol)
+            for symbol in selected_symbols
+        }
+        minute_volume_profiles_by_symbol = pure_intraday_volume_time_profiles(
+            {
+                symbol: (feature or {}).get("time")
+                for symbol, feature in raw_minute_features_by_symbol.items()
+                if feature is not None
+            },
+            local_trade_date,
+            connection,
+            minute_bucket_fn=intraday_minute_bucket,
+            number=intraday_number,
+        )
         quote_sources = {
             str(watch["symbol"]): intraday_quote_observation_source(quotes.get(str(watch["symbol"])))
             for watch in watches
@@ -3996,8 +3996,10 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                      Json(strategy_json_safe(quote_raw))),
                 )
             daily_factors = daily_factors_by_symbol.get(symbol, {"status": "insufficient_history", "bar_count": 0})
-            minute_feature = (tushare_minutes.get(symbol) or {}).get("feature") or surge_features.get(symbol)
-            minute_feature = attach_intraday_volume_time_profile(symbol, minute_feature, observed_at, connection)
+            minute_feature = pure_attach_volume_time_profile(
+                raw_minute_features_by_symbol.get(symbol), minute_volume_profiles_by_symbol.get(symbol),
+                number=intraday_number,
+            )
             order_book_feature = aggregate_order_book_observations(order_book_by_symbol.get(symbol, []), observed_at)
             peer_context = peer_contexts.get(symbol)
             previous_quote = dict(previous) if previous else None
