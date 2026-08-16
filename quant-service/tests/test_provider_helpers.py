@@ -17,6 +17,7 @@ from app.factor_lab import factor_at
 from app.market_rules import a_share_limit_ratio, is_st_security_name
 from app.intraday_alerts import daily_strategy_summary_text, delivery_health_recovery_text, intraday_alert_text
 from app.intraday_schedule import intraday_next_realtime_validation_offset, intraday_realtime_validation_slice
+from app.intraday_monitor_service import next_rotation_offset_from_scan
 from app.board_rotation import board_rotation_alert_text, board_rotation_candidates, board_rotation_still_directional
 from app.board_stock_mining import board_stock_mining_candidates
 from app.limit_linkage_mining import limit_linkage_candidates
@@ -3303,6 +3304,10 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(offset, 0)
         self.assertEqual(intraday_realtime_validation_slice(symbols, 35, 0), ([], 35))
         self.assertEqual(intraday_realtime_validation_slice([], 3, 4), ([], 0))
+        self.assertEqual(next_rotation_offset_from_scan({"realtime_validation": {"next_offset": 8}}, 4), 8)
+        self.assertEqual(next_rotation_offset_from_scan(RuntimeError("upstream unavailable"), 4), 4)
+        self.assertEqual(next_rotation_offset_from_scan({"realtime_validation": {"next_offset": 41}}, 4), 4)
+        self.assertEqual(next_rotation_offset_from_scan({"realtime_validation": {"next_offset": True}}, 4), 4)
         self.assertEqual(intraday_board_refresh_interval_seconds(high), 60)
         self.assertEqual(intraday_board_refresh_interval_seconds(normal), 300)
         pre_open = __import__("datetime").datetime(2026, 8, 10, 9, 29, 50, tzinfo=china)

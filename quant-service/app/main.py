@@ -178,6 +178,7 @@ from .intraday_schedule import (
     intraday_super_get_fast_max_symbols,
     intraday_watchlist_capacity,
 )
+from .intraday_monitor_service import run_intraday_monitor_loop
 from .study_realtime import _row_trade_date, _row_trade_datetime, looks_like_response_header, realtime_rows_are_current
 from .provider_health import (
     provider_error_availability,
@@ -5050,52 +5051,20 @@ async def daily_strategy_summary_loop() -> None:
 
 
 async def intraday_monitor_loop(interval_seconds: int) -> None:
-    """Run only during continuous auction with a bounded adaptive cadence.
-
-    Tencent's full-A quote supplies every enabled watch on each pass.  Super
-    GET minute validation is rotated in the 10-second windows.  Tencent covers
-    the complete enabled watchlist every pass; Super GET confirms only a small
-    configurable subset so proxy latency cannot block broad quote coverage.
-    """
-    loop = asyncio.get_running_loop()
-    next_started_at = loop.time()
-    next_board_refresh_at = loop.time()
-    realtime_rotation_offset = 0
-    while True:
-        await asyncio.sleep(max(0.0, next_started_at - loop.time()))
-        local = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
-        # If a provider pass took longer than its target interval, do not run
-        # a burst of catch-up passes.  Freshness is preferable to stale backlog.
-        next_started_at = loop.time() + intraday_next_monitor_delay_seconds(interval_seconds, local)
-        try:
-            active, _ = await realtime_market_session_async()
-            if active:
-                high_frequency = intraday_high_frequency_window(local)
-                # The dedicated rt_k loop owns Super GET capacity in special
-                # windows.  This broader scan still evaluates every watched
-                # symbol from Tencent without duplicating provider requests.
-                minute_limit = 0 if high_frequency else 4
-                scan_request = IntradayScanRequest(realtime_validation_limit=minute_limit,
-                                                    realtime_validation_offset=realtime_rotation_offset)
-                jobs = [run_intraday_watchlist_scan(scan_request)]
-                if loop.time() >= next_board_refresh_at:
-                    next_board_refresh_at = loop.time() + intraday_board_refresh_interval_seconds(local)
-                    # This five-minute job refreshes the frontend research
-                    # surface only.  Feishu stays exclusive to confirmed
-                    # strategy signals on explicit watchlist stocks.
-                    jobs.append(run_intraday_board_report(deliver=False))
-                results = await asyncio.gather(*jobs, return_exceptions=True)
-                scan_result = results[0] if results else None
-                if isinstance(scan_result, dict):
-                    validation = scan_result.get("realtime_validation")
-                    next_offset = validation.get("next_offset") if isinstance(validation, dict) else None
-                    if isinstance(next_offset, int) and 0 <= next_offset <= 40:
-                        realtime_rotation_offset = next_offset
-                for result in results:
-                    if isinstance(result, Exception):
-                        print(f"intraday monitor source pass failed: {str(result)[:300]}")
-        except Exception as error:  # noqa: BLE001 - a later interval may recover a public source
-            print(f"intraday monitor iteration failed: {str(error)[:300]}")
+    """Run only during continuous auction with a bounded adaptive cadence."""
+    await run_intraday_monitor_loop(
+        interval_seconds,
+        realtime_session=realtime_market_session_async,
+        high_frequency_window=intraday_high_frequency_window,
+        next_delay_seconds=intraday_next_monitor_delay_seconds,
+        make_scan_request=lambda limit, offset: IntradayScanRequest(
+            realtime_validation_limit=limit,
+            realtime_validation_offset=offset,
+        ),
+        scan_watchlist=run_intraday_watchlist_scan,
+        board_refresh_interval_seconds=intraday_board_refresh_interval_seconds,
+        run_board_report=run_intraday_board_report,
+    )
 
 
 def persist_intraday_super_get_fast_quote(symbol: str, observed_at: datetime, price: float,
