@@ -179,6 +179,7 @@ from .intraday_schedule import (
     intraday_watchlist_capacity,
 )
 from .intraday_monitor_service import run_intraday_monitor_loop
+from .intraday_fast_quote_service import run_intraday_fast_quote_loop
 from .study_realtime import _row_trade_date, _row_trade_datetime, looks_like_response_header, realtime_rows_are_current
 from .provider_health import (
     provider_error_availability,
@@ -5123,68 +5124,40 @@ async def capture_intraday_super_get_fast_quote(symbol: str) -> dict[str, Any]:
 
 
 async def intraday_super_get_fast_quote_loop() -> None:
-    """Start at most one rotated rt_k request per second in special windows."""
-    loop = asyncio.get_running_loop()
-    next_started_at = loop.time()
-    refresh_at = 0.0
-    symbols: list[str] = []
-    cursor = 0
-    in_flight: set[asyncio.Task[dict[str, Any]]] = set()
-    pruned_on: date | None = None
-    try:
-        while True:
-            await asyncio.sleep(max(0.0, next_started_at - loop.time()))
-            local = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
-            active, _ = await realtime_market_session_async()
-            if not active or not intraday_high_frequency_window(local):
-                next_started_at = loop.time() + 1.0
-                continue
-            if loop.time() >= refresh_at:
-                def load_watches() -> list[Any]:
-                    with db.transaction() as connection:
-                        return connection.execute(
-                            "SELECT * FROM quant.intraday_watchlists WHERE enabled "
-                            "ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT %s",
-                            (intraday_super_get_fast_max_symbols(),),
-                        ).fetchall()
-                rows = await run_database_blocking(load_watches)
-                symbols = [str(row["symbol"]) for row in sorted((dict(row) for row in rows), key=intraday_watch_priority_key)]
-                refresh_at = loop.time() + 30.0
-                if symbols:
-                    cursor %= len(symbols)
-            if pruned_on != local.date():
-                cutoff = datetime.now(timezone.utc) - timedelta(days=intraday_fast_quote_retention_days())
-                def prune() -> None:
-                    with db.transaction() as connection:
-                        connection.execute(
-                            "DELETE FROM quant.intraday_quote_observations "
-                            "WHERE source_name='tushare_super_get_rt_k' AND observed_at<%s",
-                            (cutoff,),
-                        )
-                await run_database_blocking(prune)
-                pruned_on = local.date()
-            allowed, _storage = await nonessential_high_frequency_capture_allowed()
-            if not allowed:
-                # Keep watched-price/risk scans alive; pause only this optional
-                # one-second raw cross-check until capacity recovers.
-                next_started_at = loop.time() + intraday_super_get_fast_interval_seconds()
-                continue
-            if symbols and len(in_flight) < intraday_super_get_fast_max_in_flight():
-                symbol = symbols[cursor % len(symbols)]
-                cursor += 1
-                task = asyncio.create_task(capture_intraday_super_get_fast_quote(symbol))
-                in_flight.add(task)
-                task.add_done_callback(
-                    lambda completed: observe_completed_task(completed, in_flight, "intraday Super GET fast quote")
+    """Run the optional one-second rt_k cross-check in special windows."""
+    async def load_symbols() -> list[str]:
+        def load_watches() -> list[Any]:
+            with db.transaction() as connection:
+                return connection.execute(
+                    "SELECT * FROM quant.intraday_watchlists WHERE enabled "
+                    "ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT %s",
+                    (intraday_super_get_fast_max_symbols(),),
+                ).fetchall()
+        rows = await run_database_blocking(load_watches)
+        return [str(row["symbol"]) for row in sorted((dict(row) for row in rows), key=intraday_watch_priority_key)]
+
+    async def prune_before(cutoff: datetime) -> None:
+        def prune() -> None:
+            with db.transaction() as connection:
+                connection.execute(
+                    "DELETE FROM quant.intraday_quote_observations "
+                    "WHERE source_name='tushare_super_get_rt_k' AND observed_at<%s",
+                    (cutoff,),
                 )
-            # Never catch up missed slots: proxy latency should reduce load,
-            # not create a burst after the network recovers.
-            next_started_at = loop.time() + intraday_super_get_fast_interval_seconds()
-    finally:
-        for task in in_flight:
-            task.cancel()
-        if in_flight:
-            await asyncio.gather(*in_flight, return_exceptions=True)
+        await run_database_blocking(prune)
+
+    await run_intraday_fast_quote_loop(
+        realtime_session=realtime_market_session_async,
+        high_frequency_window=intraday_high_frequency_window,
+        load_symbols=load_symbols,
+        prune_before=prune_before,
+        storage_allowed=nonessential_high_frequency_capture_allowed,
+        capture_quote=capture_intraday_super_get_fast_quote,
+        observe_completed=observe_completed_task,
+        interval_seconds=intraday_super_get_fast_interval_seconds,
+        max_in_flight=intraday_super_get_fast_max_in_flight,
+        retention_days=intraday_fast_quote_retention_days,
+    )
 
 
 async def intraday_minute_profile_capture_loop() -> None:
