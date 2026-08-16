@@ -51,8 +51,17 @@ def normalize_rows(
                 connection.execute("""INSERT INTO quant.security_suspensions(symbol,suspend_date,resume_date,suspend_reason,provider,available_at,raw) VALUES(%s,%s,%s,%s,%s,%s,%s)
                        ON CONFLICT(symbol,suspend_date,provider) DO UPDATE SET resume_date=EXCLUDED.resume_date,suspend_reason=EXCLUDED.suspend_reason, available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
                     (symbol, suspend_date, resume_date, row.get("suspend_timing") or row.get("suspend_reason"), provider_key, available_at, Json(row)))
-                connection.execute("""UPDATE quant.canonical_bars_daily SET is_suspended=true,canonicalized_at=now()
-                         WHERE symbol=%s AND trading_date >= %s AND (%s IS NULL OR trading_date < %s)""", (symbol, suspend_date, resume_date, resume_date))
+                if resume_date:
+                    connection.execute("""UPDATE quant.canonical_bars_daily SET is_suspended=true,canonicalized_at=now()
+                             WHERE symbol=%s AND trading_date >= %s AND trading_date < %s""",
+                        (symbol, suspend_date, resume_date))
+                else:
+                    # Daily cross-section responses normally describe one
+                    # suspended trading day and omit ``resume_date``.  Treating
+                    # that omission as an open-ended interval would mark every
+                    # later bar as suspended during a historical backfill.
+                    connection.execute("""UPDATE quant.canonical_bars_daily SET is_suspended=true,canonicalized_at=now()
+                             WHERE symbol=%s AND trading_date=%s""", (symbol, suspend_date))
             else:
                 symbol = str(row.get("ts_code") or "").upper()
                 trading_date = date_parser(row.get("trade_date"))

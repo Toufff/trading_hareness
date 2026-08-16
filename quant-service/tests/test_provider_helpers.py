@@ -2730,6 +2730,28 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIn("SET adj_factor=%s", sql)
         self.assertIn("SET limit_up=%s,limit_down=%s", sql)
 
+    def test_daily_suspension_without_resume_date_marks_only_that_day(self):
+        class RecordingConnection:
+            def __init__(self): self.calls = []
+            def execute(self, sql, params=None):
+                self.calls.append((" ".join(sql.split()), params))
+                return MagicMock()
+
+        connection = RecordingConnection()
+        observed = datetime(2026, 8, 11, 4, 0, tzinfo=timezone.utc)
+        self.assertEqual(normalize_tushare_rows(
+            connection, "suspend_d",
+            [{"ts_code": "600001.SH", "trade_date": "20260810", "suspend_timing": "全天"}],
+            observed,
+        ), 1)
+        update = next(
+            (sql, params) for sql, params in connection.calls
+            if "UPDATE quant.canonical_bars_daily" in sql
+        )
+        self.assertIn("trading_date=%s", update[0])
+        self.assertNotIn("trading_date >=", update[0])
+        self.assertEqual(update[1], ("600001.SH", date(2026, 8, 10)))
+
     def test_adjustment_factor_removes_ex_right_price_jump_from_factor_returns(self):
         bars = [{"close": 10.0, "adj_factor": 1.0} for _ in range(5)]
         bars.append({"close": 5.0, "adj_factor": 2.0})
