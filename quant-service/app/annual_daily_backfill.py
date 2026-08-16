@@ -665,6 +665,52 @@ class AnnualDailyBackfill:
                     (self.start_date, self.end_date),
                 )
 
+    def materialize_daily_market_aggregates(self) -> dict[str, Any]:
+        """Build close-only breadth and volume using explicit Tushare units."""
+        with self.db.transaction() as connection:
+            connection.execute(
+                """WITH stock_bars AS (
+                       SELECT trading_date,close,pre_close,amount,volume,available_at,
+                              CASE WHEN pre_close>0 THEN (close/pre_close-1)*100 END AS change_pct
+                         FROM quant.canonical_bars_daily
+                        WHERE trading_date BETWEEN %s AND %s
+                          AND symbol ~ '^(?:(?:60[0135]|68[89])[0-9]{3}\\.SH|(?:000|001|002|003|300|301)[0-9]{3}\\.SZ|[489][0-9]{5}\\.BJ)$'
+                     ), aggregate AS (
+                       SELECT trading_date,count(*)::integer AS stock_count,
+                              count(*) FILTER (WHERE change_pct>0)::integer AS advancers,
+                              count(*) FILTER (WHERE change_pct<0)::integer AS decliners,
+                              count(*) FILTER (WHERE change_pct=0)::integer AS unchanged,
+                              percentile_cont(0.5) WITHIN GROUP (ORDER BY change_pct)
+                                FILTER (WHERE change_pct IS NOT NULL) AS median_change_pct,
+                              avg(change_pct) FILTER (WHERE change_pct IS NOT NULL) AS mean_change_pct,
+                              sum(amount) AS total_amount_kcny,sum(volume) AS total_volume_lots,
+                              max(available_at) AS available_at
+                         FROM stock_bars GROUP BY trading_date
+                     )
+                   INSERT INTO quant.daily_market_aggregates(
+                       trading_date,stock_count,advancers,decliners,unchanged,median_change_pct,
+                       mean_change_pct,total_amount_kcny,total_volume_lots,source_provider,available_at,quality_flags)
+                   SELECT trading_date,stock_count,advancers,decliners,unchanged,median_change_pct,
+                          mean_change_pct,total_amount_kcny,total_volume_lots,'tushare_primary',available_at,
+                          CASE WHEN stock_count<4800 THEN '["stock_coverage_below_4800"]'::jsonb ELSE '[]'::jsonb END
+                     FROM aggregate
+                   ON CONFLICT(trading_date) DO UPDATE SET
+                     stock_count=EXCLUDED.stock_count,advancers=EXCLUDED.advancers,
+                     decliners=EXCLUDED.decliners,unchanged=EXCLUDED.unchanged,
+                     median_change_pct=EXCLUDED.median_change_pct,mean_change_pct=EXCLUDED.mean_change_pct,
+                     total_amount_kcny=EXCLUDED.total_amount_kcny,total_volume_lots=EXCLUDED.total_volume_lots,
+                     source_provider=EXCLUDED.source_provider,available_at=EXCLUDED.available_at,
+                     quality_flags=EXCLUDED.quality_flags,updated_at=now()""",
+                (self.start_date, self.end_date),
+            )
+            row = connection.execute(
+                """SELECT count(*)::int rows,min(trading_date) start_date,max(trading_date) end_date,
+                          count(*) FILTER (WHERE quality_flags='[]'::jsonb)::int complete_days
+                     FROM quant.daily_market_aggregates WHERE trading_date BETWEEN %s AND %s""",
+                (self.start_date, self.end_date),
+            ).fetchone()
+        return dict(row)
+
     def rebuild_sector_features(self) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
         cursor = self.start_date
@@ -685,6 +731,7 @@ class AnnualDailyBackfill:
         }), flush=True)
         await asyncio.gather(self.core_lane(days), self.sector_lane(days), self.index_lane())
         self.reconcile_suspensions()
+        market_aggregates = self.materialize_daily_market_aggregates()
         feature_result = self.rebuild_sector_features()
         with self.db.transaction() as connection:
             coverage = connection.execute(
@@ -701,7 +748,8 @@ class AnnualDailyBackfill:
             "status": "partial" if self.failures else "completed",
             "start_date": str(self.start_date), "end_date": str(self.end_date),
             "open_days": len(days), "minute_data": False, "row_counts": self.counts,
-            "coverage": dict(coverage), "sector_features": feature_result,
+            "coverage": dict(coverage), "market_aggregates": market_aggregates,
+            "sector_features": feature_result,
             "failure_count": len(self.failures), "failures": self.failures[:50],
         }
 

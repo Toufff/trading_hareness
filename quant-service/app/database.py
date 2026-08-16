@@ -326,6 +326,28 @@ CREATE TABLE IF NOT EXISTS quant.security_suspensions (
     PRIMARY KEY(symbol, suspend_date, provider)
 );
 
+-- Close-only whole-market aggregates use the supplier's documented daily
+-- units.  Separate column names prevent Tushare's thousand-CNY / lot values
+-- from being silently mixed with realtime quote yuan / share snapshots.
+CREATE TABLE IF NOT EXISTS quant.daily_market_aggregates (
+    trading_date date PRIMARY KEY,
+    stock_count integer NOT NULL CHECK (stock_count >= 0),
+    advancers integer NOT NULL CHECK (advancers >= 0),
+    decliners integer NOT NULL CHECK (decliners >= 0),
+    unchanged integer NOT NULL CHECK (unchanged >= 0),
+    median_change_pct numeric,
+    mean_change_pct numeric,
+    total_amount_kcny numeric,
+    total_volume_lots numeric,
+    source_provider text NOT NULL,
+    available_at timestamptz NOT NULL,
+    quality_flags jsonb NOT NULL DEFAULT '[]'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS daily_market_aggregates_date_idx
+    ON quant.daily_market_aggregates(trading_date DESC);
+
 CREATE TABLE IF NOT EXISTS quant.offline_imports (
     import_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     source_name text NOT NULL,

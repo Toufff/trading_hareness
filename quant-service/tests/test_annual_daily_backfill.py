@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import date
+from pathlib import Path
 
 from app.annual_daily_backfill import (
     CORE_DAILY_SPECS,
@@ -40,6 +41,12 @@ class AnnualDailyBackfillTests(unittest.TestCase):
         validate_range(date(2025, 8, 15), date(2026, 8, 14))
         with self.assertRaisesRegex(ValueError, "capped"):
             validate_range(date(2025, 1, 1), date(2026, 8, 14))
+
+    def test_daily_aggregate_contract_keeps_tushare_units_explicit(self):
+        source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
+        self.assertIn("total_amount_kcny", source)
+        self.assertIn("total_volume_lots", source)
+        self.assertNotIn("rt_min", source)
 
 
 if __name__ == "__main__":
