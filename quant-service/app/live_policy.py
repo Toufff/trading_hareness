@@ -55,6 +55,17 @@ def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[
         reasons.append("quote_source_timestamp_not_fresh")
         flags.append("policy_quote_timestamp_not_fresh")
 
+    # The direct Tencent watch batch refreshes price only.  If the signal uses
+    # the all-A public-flow proxy inherited from a separate snapshot, reject a
+    # new entry when that snapshot is stale or unavailable instead of silently
+    # treating a current price as current capital flow.
+    flow_value = _number((quote or {}).get("main_net_inflow"))
+    flow_snapshot = (quote or {}).get("flow_snapshot")
+    if entry_like and flow_value is not None and isinstance(flow_snapshot, dict):
+        if flow_snapshot.get("decision_eligible") is not True:
+            reasons.append("public_flow_snapshot_not_fresh")
+            flags.append("policy_public_flow_snapshot_stale")
+
     market_state = str(market_context.get("market_state") or "unknown")
     board_age = _number(market_context.get("board_snapshot_age_seconds"))
     market_context_status = str(market_context.get("status") or "missing")

@@ -110,6 +110,35 @@ def peer_context(peer_symbols: list[str], features: dict[str, dict[str, Any]]) -
     }
 
 
+def annotate_flow_snapshot_provenance(
+    quotes: dict[str, dict[str, Any]], snapshot_status: dict[str, Any], *, max_age_seconds: float = 45.0,
+) -> None:
+    """Attach the all-A flow snapshot's freshness to quotes that consume it.
+
+    Tencent's public ``zljlr`` is a cross-sectional proxy, not a per-watch
+    exchange feed.  It must therefore carry the age of the all-A snapshot all
+    the way into a signal's persisted evidence.  A direct watch quote may
+    refresh price independently, but it does not make its inherited flow
+    proxy fresh.
+    """
+    status = str(snapshot_status.get("status") or "unknown")
+    try:
+        age = float(snapshot_status.get("age_seconds"))
+    except (TypeError, ValueError):
+        age = None
+    decision_eligible = status in {"fresh", "cached"} and age is not None and age <= max_age_seconds
+    provenance = {
+        "status": status,
+        "age_seconds": round(age, 3) if age is not None else None,
+        "max_age_seconds": max_age_seconds,
+        "decision_eligible": decision_eligible,
+        "semantics": "all_a_public_flow_proxy_not_exchange_order_flow",
+    }
+    for quote in quotes.values():
+        if quote.get("main_net_inflow") is not None:
+            quote["flow_snapshot"] = dict(provenance)
+
+
 def mapped_watchlist_peers(
     watch_symbols: Iterable[str], memberships: Iterable[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -168,4 +197,7 @@ def strategy_session_rows(rows: list[dict[str, Any]], *, number: Callable[[Any],
     return [selected[key] for key in sorted(selected)]
 
 
-__all__ = ["mapped_watchlist_peers", "minute_features", "peer_context", "strategy_session_rows"]
+__all__ = [
+    "annotate_flow_snapshot_provenance", "mapped_watchlist_peers", "minute_features",
+    "peer_context", "strategy_session_rows",
+]

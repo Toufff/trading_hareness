@@ -70,6 +70,7 @@ from .intraday_clock import eac_window as pure_intraday_eac_window
 from .intraday_clock import feature_clock as pure_intraday_feature_clock
 from .intraday_clock import minute_bucket as pure_intraday_minute_bucket
 from .intraday_features import minute_features as pure_intraday_minute_features
+from .intraday_features import annotate_flow_snapshot_provenance as pure_annotate_flow_snapshot_provenance
 from .intraday_features import mapped_watchlist_peers as pure_mapped_watchlist_peers
 from .intraday_features import peer_context as pure_intraday_peer_context
 from .intraday_features import strategy_session_rows as pure_strategy_session_rows
@@ -2773,7 +2774,10 @@ async def intraday_all_a_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any
     finally:
         if _intraday_all_a_snapshot_inflight is not None and _intraday_all_a_snapshot_inflight.done():
             _intraday_all_a_snapshot_inflight = None
-    _intraday_all_a_snapshot_cache = (now, rows)
+    # The cache age starts when the local process has received the snapshot,
+    # not before a potentially slow public-provider request began.
+    received_at = asyncio.get_running_loop().time()
+    _intraday_all_a_snapshot_cache = (received_at, rows)
     return rows, {"status": "fresh", "age_seconds": 0.0, "ttl_seconds": INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS}
 
 
@@ -4319,6 +4323,7 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
         tencent_rows, all_a_snapshot_status = [], {"status": "unavailable", "error": detail}
     quotes = {item["symbol"]: item for row in tencent_rows if (item := intraday_quote_from_tencent(row)) is not None}
     annotate_intraday_flow_percentiles(quotes)
+    pure_annotate_flow_snapshot_provenance(quotes, all_a_snapshot_status)
     # One batch refreshes all explicit watches each scan while the slower all-A
     # cross-section is reused only for percentile normalization.
     merge_intraday_watch_quote_prices(quotes, fresh_watch_rows)

@@ -3543,6 +3543,20 @@ class ProviderHelperTests(unittest.TestCase):
         )
         self.assertTrue(result["allow_confirmation"])
 
+    def test_live_policy_blocks_new_entry_when_public_flow_snapshot_is_stale(self):
+        from app.live_policy import live_policy_gate
+        result = live_policy_gate(
+            {"signal_type": "entry"}, {"available_quantity": 0},
+            {"price": 10, "price_source": "tencent_batched_watch_quote", "price_freshness": {"status": "fresh"},
+             "main_net_inflow": 1, "flow_snapshot": {"status": "cached", "age_seconds": 46,
+                                                        "decision_eligible": False}},
+            {"status": "completed", "trade_constraints": {}},
+            {"status": "available", "market_state": "mixed_or_neutral", "board_snapshot_age_seconds": 30},
+            {"status": "confirmed"},
+        )
+        self.assertFalse(result["allow_confirmation"])
+        self.assertIn("public_flow_snapshot_not_fresh", result["reason_codes"])
+
     def test_ths_concept_top_stocks_requires_exact_concept_code_membership(self):
         flows = [{"sector_key": "885001.TI", "label": "精确概念", "net_amount": 321, "change_pct": 2.1, "trading_date": date(2026, 8, 10)}]
         members = [{"sector_key": "885001.TI", "symbol": "000001.SZ"}, {"sector_key": "885001.TI", "symbol": "000002.SZ"},

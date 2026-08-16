@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import unittest
 
-from app.intraday_features import mapped_watchlist_peers
+from app.intraday_features import annotate_flow_snapshot_provenance, mapped_watchlist_peers
 from app.intraday_factor_contracts import contracts_for_signal
 from app.intraday_state_machine import classify_setup_state
 
 
 class MappedWatchlistPeerTests(unittest.TestCase):
+    def test_flow_provenance_applies_only_to_quotes_that_consume_public_flow(self) -> None:
+        quotes = {
+            "000001.SZ": {"main_net_inflow": 100},
+            "000002.SZ": {"main_net_inflow": None},
+        }
+        annotate_flow_snapshot_provenance(quotes, {"status": "cached", "age_seconds": 30}, max_age_seconds=45)
+        self.assertTrue(quotes["000001.SZ"]["flow_snapshot"]["decision_eligible"])
+        self.assertEqual(quotes["000001.SZ"]["flow_snapshot"]["age_seconds"], 30.0)
+        self.assertNotIn("flow_snapshot", quotes["000002.SZ"])
+        annotate_flow_snapshot_provenance(quotes, {"status": "cached", "age_seconds": 46}, max_age_seconds=45)
+        self.assertFalse(quotes["000001.SZ"]["flow_snapshot"]["decision_eligible"])
+
     def test_peers_require_the_same_taxonomy_and_exact_sector_key(self) -> None:
         mapping = mapped_watchlist_peers(
             ["000001.SZ", "000002.SZ", "600000.SH", "300001.SZ"],
