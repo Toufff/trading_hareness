@@ -7194,7 +7194,9 @@ app.include_router(build_intraday_outcome_reads_router(
     market_context_from_board_report_fn=intraday_market_context_from_board_report,
 ))
 app.include_router(build_sector_reads_router(db, ths_concept_member_backfill_enabled, ths_concept_member_backfill_batch_size))
-app.include_router(build_intraday_evidence_reads_router(db, intraday_decision_card))
+app.include_router(build_intraday_evidence_reads_router(
+    db, intraday_decision_card, async_database=async_db,
+))
 app.include_router(build_market_result_reads_router(
     db, TUSHARE_CATALOG, current_data_coverage, feature_readiness_state,
     lambda: historical_estimate_from_db(HistoricalCoverageEstimateRequest(years=3, include_minute=False)),

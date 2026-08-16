@@ -15,6 +15,8 @@ from app.async_strategy_health_repository import latest_strategy_health
 from app.async_research_catalog_read_repository import factor_registry as async_factor_registry
 from app.async_market_result_read_repository import market_snapshots as async_market_snapshots
 from app.async_intraday_outcome_read_repository import latest_intraday_outcomes as async_latest_intraday_outcomes
+from app.async_intraday_evidence_read_repository import latest_scan as async_latest_intraday_scan
+from app.async_intraday_evidence_read_repository import watchlists as async_watchlists
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -98,6 +100,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
         app_root = Path(__file__).resolve().parents[1] / "app"
         for module_name in (
             "async_intraday_outcome_read_repository.py",
+            "async_intraday_evidence_read_repository.py",
             "async_market_result_read_repository.py",
             "async_research_catalog_read_repository.py",
             "async_research_readiness_repository.py",
@@ -225,6 +228,49 @@ class BlockingExecutorBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_intraday_evidence_lists_use_native_async_connection(self) -> None:
+        class Result:
+            def __init__(self, row=None, rows=None):
+                self.row, self.rows = row, rows or []
+
+            async def fetchone(self):
+                return self.row
+
+            async def fetchall(self):
+                return self.rows
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "intraday_watchlists" in sql:
+                    return Result(rows=[{"symbol": "600176.SH"}])
+                if "intraday_scan_runs" in sql:
+                    return Result(row={"scan_id": "scan-1"})
+                if "intraday_signal_events WHERE" in sql:
+                    return Result(rows=[{"signal_event_id": "signal-1"}])
+                return Result(rows=[{"delivery_id": "delivery-1"}])
+
+        class Transaction:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Transaction(self.connection)
+
+        database = Database()
+        self.assertEqual((await async_watchlists(database))["items"][0]["symbol"], "600176.SH")
+        payload = await async_latest_intraday_scan(database, limit=10_000)
+        self.assertEqual(payload["scan"]["scan_id"], "scan-1")
+        self.assertEqual(payload["signals"][0]["signal_event_id"], "signal-1")
+        self.assertEqual(payload["deliveries"][0]["delivery_id"], "delivery-1")
+        self.assertEqual(database.connection.calls[-2][1], ("scan-1", 200))
+        self.assertEqual(database.connection.calls[-1][1], ("scan-1", 200))
+
     async def test_intraday_outcome_projection_uses_native_async_connection(self) -> None:
         observed_at = __import__("datetime").datetime(2026, 8, 14, 2, 0, tzinfo=__import__("datetime").timezone.utc)
 
