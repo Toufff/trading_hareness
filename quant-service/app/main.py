@@ -333,6 +333,7 @@ from .market_snapshot_actions import MarketSnapshotActions
 from .cninfo_announcement_actions import CninfoAnnouncementActions
 from .board_flow_capture_actions import BoardFlowCaptureActions
 from .board_rotation_repository import BoardRotationRepository
+from .intraday_minute_capture_actions import IntradayMinuteCaptureActions
 from .intraday_event_replay_runner import run_recorded_signal_lifecycle_replay
 from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrated
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
@@ -410,6 +411,7 @@ _market_snapshot_actions = MarketSnapshotActions(db)
 _cninfo_announcement_actions = CninfoAnnouncementActions(db)
 _board_flow_capture_actions = BoardFlowCaptureActions(db)
 _board_rotation_repository = BoardRotationRepository(db)
+_intraday_minute_capture_actions = IntradayMinuteCaptureActions(db)
 _research_storage_admission_cache: tuple[float, dict[str, Any]] | None = None
 
 
@@ -3715,92 +3717,15 @@ async def intraday_order_book_loop() -> None:
 
 
 async def capture_intraday_minute_sessions(symbols: list[str]) -> dict[str, Any]:
-    """Persist one current-session minute profile per bounded watchlist symbol.
-
-    Tencent's minute tape is captured only while continuous auction is open
-    and written separately from imported offline minute files.  This makes the
-    same-clock median used by EAC v3 reconstructible without creating a broad,
-    unbounded live-minute archive.
-    """
-    active, reason = await realtime_market_session_async()
-    if not active:
-        return {"status": "blocked", "reason": reason, "stored": 0, "symbols": symbols}
-    local_now = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
-    trading_date = local_now.date()
-
-    async def fetch_one(symbol: str) -> tuple[str, list[dict[str, Any]], dict[str, Any] | None, str | None]:
-        try:
-            rows = await tencent_intraday_minutes(symbol)
-            return symbol, rows, {"provider": "tencent_free", "api_name": "minute/query", "status": "completed"}, None
-        except (FreeProviderError, ValueError, httpx.HTTPError) as error:
-            return symbol, [], None, str(error)[:300]
-
-    results = await asyncio.gather(*(fetch_one(symbol) for symbol in symbols), return_exceptions=True)
-    retention_start = trading_date - timedelta(days=intraday_minute_profile_retention_days())
-    def persist_sessions() -> tuple[dict[str, int], dict[str, str], dict[str, Any]]:
-        stored_by_symbol: dict[str, int] = {}
-        errors: dict[str, str] = {}
-        source_status: dict[str, Any] = {}
-        with db.transaction() as connection:
-            for result in results:
-                if isinstance(result, Exception):
-                    errors["unknown"] = str(result)[:300]
-                    continue
-                symbol, rows, source, error = result
-                if error:
-                    errors[symbol] = error
-                    continue
-                source_status[symbol] = source
-                ensure_offline_instrument(connection, symbol)
-                stored = 0
-                for raw_row in rows:
-                    try:
-                        minute_clock = str(raw_row.get("time") or "")
-                        if re.fullmatch(r"\d{4}", minute_clock):
-                            minute_clock = f"{minute_clock[:2]}:{minute_clock[2:]}"
-                        # Tencent exposes a minute tape with close and
-                        # cumulative turnover, not true minute OHLC.  Model it
-                        # as a flat close bar solely for same-clock volume
-                        # profiling; the raw row preserves that limitation.
-                        row = offline_minute_row({
-                            **raw_row, "ts_code": symbol,
-                            "datetime": f"{trading_date.isoformat()} {minute_clock}",
-                            "open": raw_row.get("close"), "high": raw_row.get("close"), "low": raw_row.get("close"),
-                        })
-                        local_bar_time = row["bar_time"].astimezone(ZoneInfo("Asia/Shanghai"))
-                        if local_bar_time.date() != trading_date:
-                            continue
-                        bucket = local_bar_time.strftime("%H:%M")
-                        connection.execute(
-                        """INSERT INTO quant.intraday_minute_sessions(
-                               symbol,trading_date,minute_bucket,bar_time,open,high,low,close,volume,amount,source_name,available_at,raw
-                           ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'tencent_intraday_minutes',%s,%s)
-                           ON CONFLICT(symbol,trading_date,minute_bucket,source_name) DO UPDATE SET
-                               bar_time=EXCLUDED.bar_time,open=EXCLUDED.open,high=EXCLUDED.high,low=EXCLUDED.low,
-                               close=EXCLUDED.close,volume=EXCLUDED.volume,amount=EXCLUDED.amount,
-                               available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
-                            (symbol, trading_date, bucket, row["bar_time"], row["open"], row["high"], row["low"], row["close"],
-                             row["volume"], row["amount"], datetime.now(timezone.utc), Json(row["raw"])),
-                        )
-                        stored += 1
-                    except (ValueError, TypeError) as validation_error:
-                        errors.setdefault(symbol, f"invalid minute row: {str(validation_error)[:200]}")
-                stored_by_symbol[symbol] = stored
-                connection.execute(
-                    """DELETE FROM quant.intraday_minute_sessions
-                         WHERE symbol=%s AND trading_date<%s
-                           AND source_name IN ('tushare_super_get_rt_min_daily','tushare_super_rt_min_daily','tencent_intraday_minutes')""",
-                    (symbol, retention_start),
-                )
-        return stored_by_symbol, errors, source_status
-
-    stored_by_symbol, errors, source_status = await run_database_blocking(persist_sessions, timeout_seconds=60)
-    stored_total = sum(stored_by_symbol.values())
-    status = "completed" if stored_total and not errors else "partial" if stored_total else "failed"
-    return {"status": status, "trading_date": str(trading_date), "symbols": symbols, "stored": stored_total,
-            "stored_by_symbol": stored_by_symbol, "errors": errors, "source_status": source_status,
-            "retention_days": intraday_minute_profile_retention_days(),
-            "notice": "仅保存显式观察池的盘末分钟剖面，用于历史同刻量能基线；不构成全市场分钟归档。"}
+    return await _intraday_minute_capture_actions.capture(
+        symbols,
+        realtime_session=realtime_market_session_async,
+        fetch_minutes=tencent_intraday_minutes,
+        run_database=run_database_blocking,
+        parse_minute=offline_minute_row,
+        ensure_instrument=ensure_offline_instrument,
+        retention_days=intraday_minute_profile_retention_days,
+    )
 
 
 async def intraday_tencent_surge_context(
