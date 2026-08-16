@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from .episode_lifecycle import strategy_family
+
 
 def _age_seconds(value: Any, now: datetime) -> float | None:
     if value is None:
@@ -51,6 +53,36 @@ def health_recommendation(*, drift_status: str, quote_status: str, gate_status: 
     }
 
 
+def strategy_family_breakdown(rows: list[Any]) -> list[dict[str, Any]]:
+    """Collapse symbol-level signal keys into auditable strategy families.
+
+    Health is intended to reveal rule-level trigger drift.  Returning one row
+    per watched symbol turns that signal into a long stock list and can double
+    count lifecycle episodes.  The database provides exact distinct ids for
+    production reads; the numeric fallback keeps compatibility projections and
+    focused unit fixtures tolerant of older result shapes.
+    """
+    grouped: dict[str, dict[str, Any]] = {}
+    for raw in rows:
+        row = dict(raw)
+        family = strategy_family(str(row.get("strategy_key") or ""))
+        item = grouped.setdefault(family, {"strategy_key": family, "strategy_family": family,
+                                           "signals": 0, "_episode_ids": set(), "_episode_fallback": 0})
+        item["signals"] += int(row.get("signals") or 0)
+        ids = row.get("episode_ids")
+        if isinstance(ids, (list, tuple, set)):
+            item["_episode_ids"].update(str(value) for value in ids if value is not None)
+        else:
+            item["_episode_fallback"] += int(row.get("episodes") or 0)
+    result = []
+    for item in grouped.values():
+        exact = len(item.pop("_episode_ids"))
+        fallback = int(item.pop("_episode_fallback"))
+        item["episodes"] = exact if exact else fallback
+        result.append(item)
+    return sorted(result, key=lambda item: (-int(item["signals"]), str(item["strategy_key"])))
+
+
 def latest_strategy_health(database: Any, *, now: datetime | None = None) -> dict[str, Any]:
     """Return bounded live-evidence health without any upstream call."""
     now = now or datetime.now(timezone.utc)
@@ -90,7 +122,7 @@ def latest_strategy_health(database: Any, *, now: datetime | None = None) -> dic
         ).fetchone()
         strategy_rows = connection.execute(
             """SELECT signal_key AS strategy_key,count(*)::int AS signals,
-                      count(DISTINCT episode_id)::int AS episodes
+                      array_agg(DISTINCT episode_id) FILTER (WHERE episode_id IS NOT NULL) AS episode_ids
                  FROM quant.intraday_signal_events
                 WHERE observed_at >= now()-interval '7 days'
                 GROUP BY strategy_key ORDER BY signals DESC,strategy_key"""
@@ -141,7 +173,7 @@ def strategy_health_payload_from_rows(counts: Any, outcomes: Any, latest_quotes:
             "fresh_quote_rows": int((latest_quotes or {}).get("fresh_quote_rows") or 0),
             "status": quote_status,
         },
-        "strategy_breakdown": [dict(row) for row in strategy_rows],
+        "strategy_breakdown": strategy_family_breakdown(strategy_rows),
         "validation_gate": {
             "status": gate_status, "required_matured_signals": 200,
             "required_trading_days": 60, "live_effect": "none",
@@ -151,4 +183,4 @@ def strategy_health_payload_from_rows(counts: Any, outcomes: Any, latest_quotes:
     }
 
 
-__all__ = ["health_recommendation", "latest_strategy_health", "strategy_health_payload_from_rows"]
+__all__ = ["health_recommendation", "latest_strategy_health", "strategy_family_breakdown", "strategy_health_payload_from_rows"]

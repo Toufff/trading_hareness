@@ -34,7 +34,8 @@ async def latest_strategy_health(async_database: Any, *, now: datetime | None = 
                  FROM quant.intraday_quote_observations"""
         )
         strategy_result = await connection.execute(
-            """SELECT signal_key AS strategy_key,count(*)::int AS signals,count(DISTINCT episode_id)::int AS episodes
+            """SELECT signal_key AS strategy_key,count(*)::int AS signals,
+                      array_agg(DISTINCT episode_id) FILTER (WHERE episode_id IS NOT NULL) AS episode_ids
                  FROM quant.intraday_signal_events WHERE observed_at >= now()-interval '7 days'
                  GROUP BY strategy_key ORDER BY signals DESC,strategy_key"""
         )

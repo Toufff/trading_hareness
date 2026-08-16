@@ -25,7 +25,7 @@ from app.intraday_outcomes import a_share_return_decomposition
 from app.board_curve_read_model import board_display_slots, intraday_board_flow_curves as read_intraday_board_flow_curves, latest_close_sector_review_report as read_latest_close_sector_review_report
 from app.research_catalog_read_model import data_quality_issues as read_data_quality_issues, factor_evaluations as read_factor_evaluations, latest_features as read_latest_features, strategy_experiments as read_strategy_experiments
 from app.intraday_outcome_read_model import latest_intraday_outcomes as read_latest_intraday_outcomes
-from app.strategy_health_read_model import health_recommendation, latest_strategy_health
+from app.strategy_health_read_model import health_recommendation, latest_strategy_health, strategy_family_breakdown
 from app.sector_read_model import market_sectors as read_market_sectors, sector_members as read_sector_members
 from app.intraday_evidence_read_model import latest_scan as read_latest_intraday_scan
 from app.market_result_read_model import market_snapshots as read_market_snapshots, tushare_raw as read_tushare_raw
@@ -1142,6 +1142,18 @@ class ProviderHelperTests(unittest.TestCase):
             gate_status="accumulating", matured=8, trading_days=3,
         )
         self.assertEqual(review["action"], "manual_review")
+
+    def test_strategy_health_rolls_symbol_signal_keys_up_to_strategy_families(self):
+        rows = [
+            {"strategy_key": "000001.SZ:watch:extreme_flow_buy", "signals": 5, "episode_ids": ["a", "b"]},
+            {"strategy_key": "000002.SZ:reduce:extreme_flow_sell", "signals": 4, "episode_ids": ["c"]},
+            {"strategy_key": "000003.SZ:entry:watchlist-confirmation-v4", "signals": 3, "episode_ids": ["d"]},
+        ]
+        breakdown = strategy_family_breakdown(rows)
+        self.assertEqual(breakdown[0], {
+            "strategy_key": "extreme_flow", "strategy_family": "extreme_flow", "signals": 9, "episodes": 3,
+        })
+        self.assertEqual(breakdown[1]["strategy_key"], "watchlist-confirmation-v4")
 
     def test_intraday_alert_text_keeps_strategy_evidence_and_disclaimer(self):
         text = intraday_alert_text(
