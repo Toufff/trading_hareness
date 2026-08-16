@@ -531,6 +531,38 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(order_book["details"]["uncovered_watch_count"], 0)
         database.transaction.assert_not_called()
 
+    def test_intraday_status_degrades_when_fresh_direct_watch_quotes_do_not_cover_pool(self):
+        observed_at = datetime.now(timezone.utc)
+        evidence = {
+            "health_rows": [], "quote_rows": [{"source_name": "tencent_free", "last_observed_at": observed_at, "rows": 5}], "raw_rows": [],
+            "minute_profile": {"last_observed_at": None, "rows": 0, "latest_trading_date": None},
+            "latest_scan": {"status": "completed", "observed_at": observed_at, "source_status": {}, "summary": {}},
+            "latest_completed_scan": {"status": "completed", "observed_at": observed_at, "summary": {}, "source_status": {
+                "tencent": {"decision_eligible_watch_quote_symbols": 1, "all_a_only_watch_quote_symbols": 1,
+                            "sina_fallback_watch_quote_symbols": 0, "quote_timestamp_slo_seconds": 20},
+            }},
+            "latest_board": None, "latest_board_curve": None, "latest_delivery": None, "delivery_history": [],
+            "pending_delivery_count": 0, "pending_rotation_delivery_count": 0, "latest_daily_summary": None,
+            "latest_health_event": None, "watch_row": {"enabled": 2},
+        }
+        dependencies = IntradayStatusDependencies(
+            database=MagicMock(), alert_max_attempts=3,
+            realtime_market_session=lambda: (True, "open"), board_curve_session=lambda: (True, "open"),
+            high_frequency_window=lambda _: True, scan_interval_seconds=lambda: 30,
+            provider_status=lambda: [{"name": "primary", "configured": True}, {"name": "super_get", "configured": True}],
+            runtime_service_state=lambda **_: ("healthy", 1.0), json_safe=lambda value: value,
+            super_get_fast_interval_seconds=lambda: 1.0, super_get_fast_max_in_flight=lambda: 20,
+            fast_quote_retention_days=lambda: 7, board_curve_enabled=lambda: True,
+            board_curve_retention_days=lambda: 60, board_rotation_retention_days=lambda: 60,
+            daily_summary_automation_enabled=lambda: True, order_book_max_symbols=lambda: 40,
+        )
+        payload = read_intraday_services_status_payload(dependencies, evidence=evidence, session=(True, "open"), board_session=(True, "open"))
+        tencent = next(item for item in payload["items"] if item["key"] == "tencent_realtime")
+        self.assertEqual(tencent["state"], "degraded")
+        self.assertEqual(tencent["details"]["decision_eligible_watch_quote_symbols"], 1)
+        self.assertIn("1/2", tencent["last_error"])
+        self.assertTrue(payload["summary"]["decision_path_degraded"])
+
     def test_health_read_model_uses_only_injected_local_dependencies(self):
         database = MagicMock()
         database.pool_status.return_value = {"pool_size": 2, "available": 1, "waiting": 0}

@@ -70,6 +70,9 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
     health = {(str(row["provider_key"]), str(row["capability"])): dict(row) for row in health_rows}
     quotes = {str(row["source_name"]): dict(row) for row in quote_rows}
     raw = {str(row["api_name"]): dict(row) for row in raw_rows}
+    completed_scan = dict(latest_completed_scan or {})
+    completed_scan_source_status = dict(completed_scan.get("source_status") or {})
+    latest_watch_quote_status = dict(completed_scan_source_status.get("tencent") or {})
 
     def most_recent_health(keys: tuple[str, ...], capabilities: tuple[str, ...]) -> dict[str, Any]:
         candidates = [health[(key, capability)] for key in keys for capability in capabilities if (key, capability) in health]
@@ -122,7 +125,11 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
             last_observed_at=tencent_quote.get("last_observed_at") or scan_observed_at,
             max_age_seconds=25.0 if special_window else max(45.0, normal_interval * 1.8),
             cadence="特别窗口 10 秒；其他连续竞价 30 秒", health_row=tencent_health,
-            details={"persisted_rows": int(tencent_quote.get("rows") or 0)},
+            details={"persisted_rows": int(tencent_quote.get("rows") or 0),
+                     "latest_watch_quote_coverage": deps.json_safe(latest_watch_quote_status) if latest_watch_quote_status else None,
+                     "decision_eligible_watch_quote_symbols": int(latest_watch_quote_status.get("decision_eligible_watch_quote_symbols") or 0),
+                     "sina_fallback_watch_quote_symbols": int(latest_watch_quote_status.get("sina_fallback_watch_quote_symbols") or 0),
+                     "all_a_only_watch_quote_symbols": int(latest_watch_quote_status.get("all_a_only_watch_quote_symbols") or 0)},
         ),
         runtime_item(
             key="tencent_order_book", label="腾讯观察池五档盘口", role="QI、OFI 近似、内外盘差分与区间 VWAP 的研究证据",
@@ -178,6 +185,19 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
             startup_grace_seconds=90.0,
         ),
     ]
+    # A recent full-market snapshot alone must not paint the decision path
+    # green.  At least one current scan must contain a fresh direct Tencent
+    # watch quote for every enabled symbol before a human-facing alert can be
+    # confirmed; Sina/all-A evidence remains visible in the details instead.
+    required_watch_quotes = int(watch_row["enabled"] or 0)
+    confirmed_watch_quotes = int(latest_watch_quote_status.get("decision_eligible_watch_quote_symbols") or 0)
+    if session_active and required_watch_quotes and confirmed_watch_quotes < required_watch_quotes:
+        tencent_item = items[1]
+        tencent_item["state"] = "degraded"
+        tencent_item["last_error"] = (
+            f"fresh direct Tencent watch quotes cover {confirmed_watch_quotes}/{required_watch_quotes}; "
+            "fallback/all-A evidence cannot confirm alerts"
+        )
     latest_board_feed = latest_board_curve or latest_board
     if board_session_active and latest_board_feed and latest_board_feed["status"] not in {"completed", "partial"}:
         board_summary = latest_board["summary"] if latest_board and isinstance(latest_board["summary"], dict) else {}
