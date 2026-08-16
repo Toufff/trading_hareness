@@ -331,6 +331,7 @@ from .remote_archive import classify_remote_text, remote_report_list_state, repr
 from .remote_archive_actions import RemoteArchiveActions
 from .market_snapshot_actions import MarketSnapshotActions
 from .cninfo_announcement_actions import CninfoAnnouncementActions
+from .board_flow_capture_actions import BoardFlowCaptureActions
 from .intraday_event_replay_runner import run_recorded_signal_lifecycle_replay
 from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrated
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
@@ -406,6 +407,7 @@ _remote_archive_actions = RemoteArchiveActions(
 )
 _market_snapshot_actions = MarketSnapshotActions(db)
 _cninfo_announcement_actions = CninfoAnnouncementActions(db)
+_board_flow_capture_actions = BoardFlowCaptureActions(db)
 _research_storage_admission_cache: tuple[float, dict[str, Any]] | None = None
 
 
@@ -4561,102 +4563,16 @@ def intraday_board_flow_curve_items(kind: str, flows: list[dict[str, Any]]) -> l
 
 
 async def capture_intraday_board_flow_curve() -> dict[str, Any]:
-    """Append one lightweight industry/concept flow point for the live chart."""
-    observed_at = datetime.now(timezone.utc)
-    local = observed_at.astimezone(ZoneInfo("Asia/Shanghai"))
-    snapshot_minute = local.replace(second=0, microsecond=0).astimezone(timezone.utc)
-    started_at = asyncio.get_running_loop().time()
-    kinds = ("concept", "industry")
-    capability_for_kind = {kind: f"intraday_board_flow_{kind}" for kind in kinds}
-    open_capabilities = await open_provider_capabilities("eastmoney_free", list(capability_for_kind.values()))
-    requested_kinds = [kind for kind in kinds if capability_for_kind[kind] not in open_capabilities]
-    requested_results = await asyncio.gather(
-        *(run_akshare_blocking(akshare_eastmoney_board_flow, kind, timeout_seconds=20) for kind in requested_kinds),
-        return_exceptions=True,
+    """Capture one same-source flow point through the isolated action service."""
+    return await _board_flow_capture_actions.capture(
+        run_database=run_database_blocking,
+        run_akshare=run_akshare_blocking,
+        provider_capabilities=open_provider_capabilities,
+        normalize_items=intraday_board_flow_curve_items,
+        persist_feature=persist_intraday_market_flow_feature,
+        evaluate_rotation=evaluate_intraday_board_rotation_events,
+        retry_rotation_deliveries=retry_pending_board_rotation_alerts,
     )
-    results = dict(zip(requested_kinds, requested_results, strict=True))
-    items: list[dict[str, Any]] = []
-    coverage: dict[str, dict[str, int]] = {}
-    source_status: dict[str, dict[str, Any]] = {}
-    failures = 0
-    circuit_skips = 0
-    capacity_blocks = 0
-
-    def record_outcome(capability: str, rows: int, error: str | None = None,
-                       latency_ms: int | None = None) -> None:
-        with db.transaction() as connection:
-            if error:
-                record_provider_failure(connection, "eastmoney_free", capability, error, latency_ms)
-            else:
-                record_provider_success(connection, "eastmoney_free", capability, rows, latency_ms)
-
-    for kind in kinds:
-        capability = capability_for_kind[kind]
-        if capability in open_capabilities:
-            circuit_skips += 1
-            coverage[kind] = {"flow_boards": 0}
-            source_status[kind] = {"status": "circuit_open", "notice": "provider health circuit is open; upstream request skipped"}
-            continue
-        result = results[kind]
-        if isinstance(result, ExecutorSaturatedError):
-            capacity_blocks += 1
-            coverage[kind] = {"flow_boards": 0}
-            source_status[kind] = {"status": "local_capacity", "notice": safe_error_detail(str(result), 300)}
-            continue
-        if isinstance(result, Exception):
-            failures += 1
-            coverage[kind] = {"flow_boards": 0}
-            detail = safe_error_detail(str(result), 300)
-            source_status[kind] = {"status": "failed", "error": detail}
-            await run_database_blocking(record_outcome, capability, 0, detail,
-                                        round((asyncio.get_running_loop().time() - started_at) * 1000))
-            continue
-        normalized = intraday_board_flow_curve_items(kind, result)
-        items.extend(normalized)
-        coverage[kind] = {"flow_boards": len(normalized)}
-        source_status[kind] = {"status": "completed", "upstream_rows": len(result), "stored_boards": len(normalized)}
-        await run_database_blocking(record_outcome, capability, len(normalized), None,
-                                    round((asyncio.get_running_loop().time() - started_at) * 1000))
-    status = ("blocked" if circuit_skips + capacity_blocks == len(kinds) else
-              "partial" if circuit_skips or capacity_blocks or failures == 1 else
-              "completed" if failures == 0 else "failed")
-    payload = {"items": items, "rank_by": "eastmoney_net_inflow", "unit": "100m_cny",
-               "missing_value_policy": "missing_is_not_zero"}
-    def persist_snapshot() -> None:
-        with db.transaction() as connection:
-            connection.execute(
-            """INSERT INTO quant.intraday_board_flow_snapshots(
-                     snapshot_minute,observed_at,status,coverage,source_status,payload)
-               VALUES(%s,%s,%s,%s,%s,%s)
-               ON CONFLICT(snapshot_minute) DO UPDATE SET
-                 observed_at=EXCLUDED.observed_at,status=EXCLUDED.status,coverage=EXCLUDED.coverage,
-                 source_status=EXCLUDED.source_status,payload=EXCLUDED.payload
-               WHERE coalesce((EXCLUDED.coverage->'concept'->>'flow_boards')::int,0)
-                       +coalesce((EXCLUDED.coverage->'industry'->>'flow_boards')::int,0)
-                     >=coalesce((quant.intraday_board_flow_snapshots.coverage->'concept'->>'flow_boards')::int,0)
-                       +coalesce((quant.intraday_board_flow_snapshots.coverage->'industry'->>'flow_boards')::int,0)""",
-                (snapshot_minute, observed_at, status, Json(coverage), Json(source_status), Json(payload)),
-            )
-    await run_database_blocking(persist_snapshot)
-    market_flow_feature = await run_database_blocking(
-        persist_intraday_market_flow_feature, db, snapshot_minute, observed_at,
-    )
-    rotation_events = await run_database_blocking(
-        evaluate_intraday_board_rotation_events, snapshot_minute, observed_at,
-    )
-    retry_summary = await retry_pending_board_rotation_alerts()
-    # Rotation events remain first-class frontend evidence; they are not an
-    # explicit-watchlist stock signal and therefore never go to Feishu.
-    rotation_deliveries = [
-        {"rotation_event_id": str(event["rotation_event_id"]),
-         "delivery": {"status": "suppressed", "reason": "frontend evidence only"}}
-        for event in rotation_events
-    ]
-    return {"status": status, "observed_at": observed_at.isoformat(), "snapshot_minute": snapshot_minute.isoformat(),
-            "coverage": coverage, "items": len(items), "circuit_skips": circuit_skips, "capacity_blocks": capacity_blocks,
-            "market_flow_feature": market_flow_feature,
-            "rotation": {"confirmed": len(rotation_events), "deliveries": rotation_deliveries, "retry": retry_summary},
-            "latency_ms": round((asyncio.get_running_loop().time() - started_at) * 1000)}
 
 
 def evaluate_intraday_board_rotation_events(snapshot_minute: datetime, observed_at: datetime) -> list[dict[str, Any]]:
