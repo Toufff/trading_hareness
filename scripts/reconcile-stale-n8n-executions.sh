@@ -13,19 +13,28 @@ if ! [[ "$seconds" =~ ^[0-9]+$ ]] || (( seconds < 60 || seconds > 86400 )); then
   exit 2
 fi
 
+query="SELECT id,\"workflowId\",\"startedAt\" FROM execution_entity
+       WHERE status='running' AND \"startedAt\" < now() - interval '${seconds} seconds'
+       ORDER BY \"startedAt\""
+candidate_count="$($DOCKER compose exec -T postgres psql -v ON_ERROR_STOP=1 -U n8n -d n8n -Atqc "
+  SELECT count(*) FROM execution_entity
+   WHERE status='running' AND \"startedAt\" < now() - interval '${seconds} seconds'
+")"
+if [[ "$candidate_count" == "0" ]]; then
+  echo "no stale executions"
+  exit 0
+fi
+
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 backup_dir="backups/workflow-changes/${stamp}-stale-n8n-executions"
 mkdir -p "$backup_dir"
 chmod 700 "$backup_dir"
-query="SELECT id,\"workflowId\",\"startedAt\" FROM execution_entity
-       WHERE status='running' AND \"startedAt\" < now() - interval '${seconds} seconds'
-       ORDER BY \"startedAt\""
 "$DOCKER" compose exec -T postgres psql -v ON_ERROR_STOP=1 -U n8n -d n8n -At -F $'\t' -c "$query" \
   > "$backup_dir/before.tsv"
 chmod 600 "$backup_dir/before.tsv"
 count="$(wc -l < "$backup_dir/before.tsv" | tr -d ' ')"
 if (( count == 0 )); then
-  echo "no stale executions; audit: $backup_dir/before.tsv"
+  echo "no stale executions after candidate check; audit: $backup_dir/before.tsv"
   exit 0
 fi
 "$DOCKER" compose exec -T postgres psql -v ON_ERROR_STOP=1 -U n8n -d n8n -Atqc "
