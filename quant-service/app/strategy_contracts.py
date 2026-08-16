@@ -56,6 +56,13 @@ class FactorSpec:
     minimum_history: int = 0
     quality_flags: tuple[str, ...] = ()
     live_use: str = "evidence_only"
+    # These permissions are intentionally separate from ``live_use``:
+    # recording a factor as live evidence is not permission to fit it into a
+    # model or let it change a decision score.  Any promotion therefore has
+    # an explicit, serialised review boundary.
+    training_permitted: bool = False
+    inference_permitted: bool = True
+    deprecated_at: str | None = None
     description: str = ""
 
 

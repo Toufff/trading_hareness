@@ -94,6 +94,9 @@ class MappedWatchlistPeerTests(unittest.TestCase):
             "minute_volume_multiple", "public_flow_proxy", "vwap_distance",
         ])
         self.assertTrue(all(item["live_use"] == "evidence_only" for item in contracts))
+        self.assertTrue(all(item["inference_permitted"] for item in contracts))
+        self.assertTrue(all(not item["training_permitted"] for item in contracts))
+        self.assertTrue(all(item["deprecated_at"] is None for item in contracts))
 
 
 if __name__ == "__main__":
