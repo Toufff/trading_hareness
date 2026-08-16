@@ -12,12 +12,37 @@ from app.remote_archive import (analyst_global_sync_cursor, classify_remote_text
                                 report_topic_labels, text_hash, text_only_remote_message, text_only_remote_report,
                                 body_stated_timestamp, import_remote_analyst_message)
 from app.analyst_observations import observation_action, observation_status
+from app.outcome_recomputation import recompute as recompute_outcomes
 from app.remote_archive_sync import RemoteArchiveSyncService, _AuthorizedArchiveClient
 from app.remote_archive_actions import RemoteArchiveActions
 from app.claim_review_service import review_claim
 
 
 class RemoteArchiveNormalizationTests(unittest.TestCase):
+    def test_claim_outcome_entry_uses_shanghai_exchange_day(self):
+        """A late-UTC message must enter after its Shanghai, not UTC, day."""
+        statements = []
+
+        class Result:
+            def fetchall(self):
+                return []
+
+        class Connection:
+            def execute(self, sql, *_args):
+                statements.append(sql)
+                return Result()
+
+        database = MagicMock()
+        database.transaction.return_value.__enter__.return_value = Connection()
+        result = recompute_outcomes(
+            date(2026, 8, 13), cn_today=lambda: date(2026, 8, 13), db=database,
+            recompute_intraday_signal_outcomes=lambda _as_of: {"outcome_rows": 0},
+        )
+        claim_query = next(sql for sql in statements if "WITH eligible AS" in sql)
+        self.assertIn("(c.available_at AT TIME ZONE 'Asia/Shanghai')::date", claim_query)
+        self.assertNotIn("c.available_at::date", claim_query)
+        self.assertEqual(result["claim_outcomes"], 0)
+
     def test_action_settings_are_bounded_and_do_not_contain_a_bearer(self):
         with patch.dict("os.environ", {
             "REMOTE_ANALYST_ARCHIVE_BASE_URL": "https://archive.example/",

@@ -86,7 +86,8 @@ async def _feature_readiness(conn: Any) -> dict[str, Any]:
              FROM quant.tushare_raw_records WHERE api_name='stk_factor_pro'
            UNION ALL SELECT 'sector_flow',count(DISTINCT sector_key)::int,count(*)::int,max(trading_date),'P1' FROM quant.sector_market_observations
            UNION ALL SELECT 'announcements',count(DISTINCT symbol)::int,count(*)::int,max(occurred_at::date),'P1' FROM quant.market_events
-           UNION ALL SELECT 'analyst_claims',count(DISTINCT subject_key)::int,count(*)::int,max(available_at::date),'P1' FROM quant.analyst_claims""")
+           UNION ALL SELECT 'analyst_claims',count(DISTINCT subject_key)::int,count(*)::int,
+              max((available_at AT TIME ZONE 'Asia/Shanghai')::date),'P1' FROM quant.analyst_claims""")
     rows = await result.fetchall()
     result = await conn.execute("SELECT greatest(1,count(*)::int) symbols FROM quant.universe_members WHERE universe_key='all_a' AND enabled")
     universe_size = int((await result.fetchone())["symbols"])

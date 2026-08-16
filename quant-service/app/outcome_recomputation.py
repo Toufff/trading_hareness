@@ -20,7 +20,9 @@ def recompute(
             r"""WITH eligible AS (
                 SELECT c.claim_id,c.subject_key symbol,c.horizon_days,c.direction,
                   (SELECT b.trading_date FROM quant.canonical_bars_daily b
-                   WHERE b.symbol=c.subject_key AND b.trading_date>c.available_at::date AND b.trading_date<=%s
+                   WHERE b.symbol=c.subject_key
+                     AND b.trading_date>(c.available_at AT TIME ZONE 'Asia/Shanghai')::date
+                     AND b.trading_date<=%s
                    ORDER BY b.trading_date LIMIT 1) entry_date
                 FROM quant.analyst_claims c
                 WHERE c.scope='stock' AND c.subject_key ~ '^\\d{6}\\.(SH|SZ|BJ)$' AND c.direction<>0
