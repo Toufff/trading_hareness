@@ -131,11 +131,25 @@ exit:  P(未来 H 分钟先触发风险失效 | 当前持仓和可交易性)
 - 不把行业 lead-lag 固化为规则；只在本地时点一致样本中滚动验证。
 - 不以当前人工观察池回放结果宣称无选择偏差。
 
+## 研究依据到本系统的落点
+
+| 依据 | 可以借鉴的部分 | 本系统的边界 |
+| --- | --- | --- |
+| Qlib Data Handler | 数据、处理器和因子定义版本化，训练与推理使用同一已登记输入 | 只导出通过 PIT/覆盖率门禁的本地快照；不因安装 Qlib 而自动下载历史数据 |
+| LEAN Algorithm Framework | `Insight -> target -> risk -> execution` 职责分离 | 当前只到 `Insight -> risk gate -> alert`；无券商执行或自动下单路径 |
+| NautilusTrader 双时钟 | 同时保留外部事件时间与本地接收/初始化时间，回放按可得时间稳定排序 | 对报价和分析师文本分别保留 `event/observed_at` 与 `available/ingested_at`；分析师实时决策只用 `received_at` |
+| Cont--Kukanov--Stoikov | 真正 OFI 包含限价单、市价单、撤单等逐事件数据，且影响受盘口深度制约 | 当前仅有五档快照，故 QI/差分只记为订单流代理，不参与 entry 加分 |
+| 概率校准与 DSR | 概率必须用样本外预测校准并审计 Brier/LogLoss；大量规则试验需要处理选择偏差 | P2 前没有任何“买入成功概率”；所有阈值保持既有值，策略仅输出证据与 `descriptive_only` 结论 |
+
+因此，后续“RL/evolve”只能是离线、冻结样本上的 challenger 研究：先固定标签与时间切分，再比较候选策略，最后人工批准。它不会在盘中用刚发生的盈亏自动改写当前规则。
+
 ## 参考实现与文献
 
 - Qlib data/handler 的因子、处理和数据健康分层：https://qlib.readthedocs.io/en/latest/component/data.html
 - LEAN 的 Insight 生命周期与风险、组合、执行分层：https://www.quantconnect.com/docs/v2/writing-algorithms/algorithm-framework/alpha/key-concepts
 - NautilusTrader 的 event 与 init 双时钟：https://nautilustrader.io/docs/latest/concepts/data/
 - scikit-learn 的概率校准与小样本限制：https://scikit-learn.org/stable/modules/calibration.html
+- Cont、Kukanov、Stoikov 的订单簿事件与 OFI 原始研究：https://arxiv.org/abs/1011.6402
+- Bailey、López de Prado 的 Deflated Sharpe Ratio（多重试验/选择偏差）：https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551
 - 中国市场日内动量/反转研究：https://www.sciencedirect.com/science/article/abs/pii/S1544612318307414
 - 订单不平衡对中国股票收益的研究：https://www.sciencedirect.com/science/article/pii/S0927538X15300056
