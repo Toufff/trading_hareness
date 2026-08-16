@@ -108,6 +108,16 @@
 
 VPIN、Kyle lambda、CORD 等仅放在 P2 压力/背离实验池。尤其 VPIN 有明显的研究反证，不能在缺少成交量时间与逐笔数据时充当方向或胜率因子。
 
+### 5.1 盘中状态机的研究约束（新增）
+
+- [A 股日内动量与反转研究](https://www.sciencedirect.com/science/article/abs/pii/S1544612318307414) 指向开盘、午前、午后和尾盘应分别评估：不能把开盘短时反转与尾盘延续混成一个阈值或一条“上涨概率”。
+- [订单不平衡对中国股票收益的研究](https://www.sciencedirect.com/science/article/pii/S0927538X15300056) 说明订单不平衡可作为短期候选特征，但仍受内生性、持续性和横截面相关影响。现有五档快照因此仅用于**订单流代理/降级证据**，不是可声称稳定 Alpha 的真实 OFI。
+- [Order Book Events 的价格冲击研究](https://academic.oup.com/jfec/article-abstract/12/1/47/816163) 的口径要求真 OFI 包含盘口事件、成交和撤单变化；当前没有逐事件撤单/成交方向，P2 以前不得将五档快照命名为 OFI 或作为 entry 加分。
+- [VPIN 的原始流动性压力观点](https://academic.oup.com/rfs/article-abstract/25/5/1457/1569929) 与其 [Flash Crash 反证](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=1881731) 相互制约：只把 VPIN 保留为未来的压力 veto 实验，且必须相对简单波动/成交强度基准证明增益。
+- [行业信息扩散](https://academic.oup.com/rfs/article-abstract/20/4/1113/1615954) 与后续 [重新检验](https://www.sciencedirect.com/science/article/pii/S0927539815001012) 的结论并不一致。因此“涨停龙头 → 同板块滞后股”只可作为点时同源映射下的候选挖掘，必须在本地滚动样本外检验；不可按中文板块名连边或固定写进提醒规则。
+
+概率的统计契约也随之收紧：小样本先用 [Beta calibration](https://proceedings.mlr.press/v54/kull17a) 或保守 sigmoid，校准器只能在按完整交易日切分的 OOF 预测上拟合；同时记录 Brier、log loss、可靠性曲线、独立交易日和事件数。多窗口/多阈值试验须登记并在 P3 采用 [stepwise data-snooping 校正](https://onlinelibrary.wiley.com/doi/10.1111/j.1468-0262.2005.00615.x)。在这些条件未满足前，飞书中的数值只能叫“历史条件基准率”，不能称为事件条件概率。
+
 ## 6. 晋级与暂停条件
 
 ```text
