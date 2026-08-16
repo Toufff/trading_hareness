@@ -6,9 +6,11 @@ checkpoint for every provider/API/date, and promotes only schema-backed daily
 datasets.  Specialty per-stock datasets (chip distributions, factor packs and
 stock money-flow histories) are intentionally outside this bounded baseline.
 
-Run inside the quant container, for example::
+Run inside the quant container only after an operator has explicitly approved
+the historical provider traffic, for example::
 
-    python -m app.annual_daily_backfill --start-date 2025-08-15 --end-date 2026-08-14
+    python -m app.annual_daily_backfill --start-date 2025-08-15 --end-date 2026-08-14 \
+      --confirm-historical-backfill I_CONFIRM_HISTORICAL_BACKFILL
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ INDEX_CODES = (
     "000852.SH", "000905.SH", "000688.SH",
 )
 MAX_CALENDAR_DAYS = 370
+HISTORICAL_BACKFILL_CONFIRMATION = "I_CONFIRM_HISTORICAL_BACKFILL"
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,22 @@ def validate_range(start_date: date, end_date: date) -> None:
         raise ValueError("end-date must not be before start-date")
     if (end_date - start_date).days > MAX_CALENDAR_DAYS:
         raise ValueError(f"daily backfill is capped at {MAX_CALENDAR_DAYS} calendar days")
+
+
+def validate_historical_backfill_confirmation(value: str | None) -> None:
+    """Refuse a costly historical pull unless the CLI explicitly acknowledges it.
+
+    The normal service never calls this module.  This guard exists because the
+    command can otherwise turn a copied one-line example into hundreds of
+    provider requests and several GiB of raw evidence.  It is deliberately a
+    CLI acknowledgement rather than an environment default so a stale compose
+    file or inherited shell variable cannot silently authorize a backfill.
+    """
+    if value != HISTORICAL_BACKFILL_CONFIRMATION:
+        raise ValueError(
+            "historical backfill is disabled by default; pass "
+            f"--confirm-historical-backfill {HISTORICAL_BACKFILL_CONFIRMATION} after approval"
+        )
 
 
 def valid_rows(api_name: str, rows: list[dict[str, Any]], trade_date: date | None = None) -> list[dict[str, Any]]:
@@ -844,11 +863,20 @@ def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(description="Backfill one bounded year of non-minute China market data")
     command.add_argument("--start-date", required=True, type=parse_iso_date)
     command.add_argument("--end-date", required=True, type=parse_iso_date)
+    command.add_argument(
+        "--confirm-historical-backfill", default=None,
+        help="required explicit acknowledgement before any historical provider request",
+    )
     return command
 
 
 async def async_main() -> int:
-    args = parser().parse_args()
+    command = parser()
+    args = command.parse_args()
+    try:
+        validate_historical_backfill_confirmation(args.confirm_historical_backfill)
+    except ValueError as error:
+        command.error(str(error))
     database = Database()
     try:
         result = await AnnualDailyBackfill(database, args.start_date, args.end_date).run()
@@ -868,5 +896,6 @@ if __name__ == "__main__":
 
 __all__ = [
     "ApiSpec", "AnnualDailyBackfill", "CORE_DAILY_SPECS", "SECTOR_EVENT_SPECS",
-    "INDEX_CODES", "request_key", "valid_rows", "validate_range",
+    "HISTORICAL_BACKFILL_CONFIRMATION", "INDEX_CODES", "request_key", "valid_rows",
+    "validate_historical_backfill_confirmation", "validate_range",
 ]

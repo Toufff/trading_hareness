@@ -6,9 +6,11 @@ from pathlib import Path
 
 from app.annual_daily_backfill import (
     CORE_DAILY_SPECS,
+    HISTORICAL_BACKFILL_CONFIRMATION,
     SECTOR_EVENT_SPECS,
     _persist_sector_flow,
     request_key,
+    validate_historical_backfill_confirmation,
     valid_rows,
     validate_range,
 )
@@ -42,6 +44,11 @@ class AnnualDailyBackfillTests(unittest.TestCase):
         validate_range(date(2025, 8, 15), date(2026, 8, 14))
         with self.assertRaisesRegex(ValueError, "capped"):
             validate_range(date(2025, 1, 1), date(2026, 8, 14))
+
+    def test_historical_backfill_requires_explicit_operator_acknowledgement(self):
+        with self.assertRaisesRegex(ValueError, "disabled by default"):
+            validate_historical_backfill_confirmation(None)
+        validate_historical_backfill_confirmation(HISTORICAL_BACKFILL_CONFIRMATION)
 
     def test_daily_aggregate_contract_keeps_tushare_units_explicit(self):
         source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
