@@ -79,6 +79,7 @@ from .intraday_volume_profiles import attach_volume_time_profile as pure_attach_
 from .intraday_volume_profiles import volume_time_profile as pure_intraday_volume_time_profile
 from .intraday_volume_profiles import volume_time_profiles as pure_intraday_volume_time_profiles
 from .intraday_minute_provider_service import fetch_bounded_minute_context
+from .intraday_cross_section import SharedAsyncSnapshot
 from .intraday_state_machine import classify_setup_state as classify_intraday_setup_state
 from .intraday_factor_contracts import (
     INTRADAY_FACTOR_CONTRACT_VERSION,
@@ -2777,9 +2778,19 @@ INTRADAY_ALERT_MAX_ATTEMPTS = 3
 # This process-local cache contains only the current explicit watch/peer
 # basket.  Entries expire quickly and are pruned in ``intraday_tencent_surge_context``.
 _intraday_tencent_minute_cache: dict[str, tuple[float, dict[str, Any] | None, str | None]] = {}
-_intraday_all_a_snapshot_cache: tuple[float, list[dict[str, Any]]] | None = None
-_intraday_all_a_snapshot_inflight: asyncio.Task[list[dict[str, Any]]] | None = None
 INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS = 30.0
+
+
+async def _fetch_intraday_all_a_snapshot_rows() -> list[dict[str, Any]]:
+    """Fetch the broad Tencent cross section in its bounded provider executor."""
+    return await run_akshare_blocking(akshare_tencent_all_a_spot, timeout_seconds=20)
+
+
+_intraday_all_a_snapshots = SharedAsyncSnapshot(
+    _fetch_intraday_all_a_snapshot_rows,
+    ttl_seconds=INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS,
+    clock=lambda: asyncio.get_running_loop().time(),
+)
 
 
 def consume_background_task_exception(task: asyncio.Task[Any]) -> None:
@@ -2806,27 +2817,7 @@ async def intraday_all_a_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any
     all-A response cannot make a 10-second watch scan pretend its price is
     fresh. The age is carried into the scan evidence.
     """
-    global _intraday_all_a_snapshot_cache, _intraday_all_a_snapshot_inflight
-    now = asyncio.get_running_loop().time()
-    cached = _intraday_all_a_snapshot_cache
-    if cached is not None and now - cached[0] <= INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS:
-        return cached[1], {"status": "cached", "age_seconds": round(now - cached[0], 3),
-                           "ttl_seconds": INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS}
-    if _intraday_all_a_snapshot_inflight is None or _intraday_all_a_snapshot_inflight.done():
-        _intraday_all_a_snapshot_inflight = asyncio.create_task(
-            run_akshare_blocking(akshare_tencent_all_a_spot, timeout_seconds=20),
-        )
-        _intraday_all_a_snapshot_inflight.add_done_callback(consume_background_task_exception)
-    try:
-        rows = await asyncio.shield(_intraday_all_a_snapshot_inflight)
-    finally:
-        if _intraday_all_a_snapshot_inflight is not None and _intraday_all_a_snapshot_inflight.done():
-            _intraday_all_a_snapshot_inflight = None
-    # The cache age starts when the local process has received the snapshot,
-    # not before a potentially slow public-provider request began.
-    received_at = asyncio.get_running_loop().time()
-    _intraday_all_a_snapshot_cache = (received_at, rows)
-    return rows, {"status": "fresh", "age_seconds": 0.0, "ttl_seconds": INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS}
+    return await _intraday_all_a_snapshots.get()
 
 
 def merge_intraday_watch_quote_prices(quotes: dict[str, dict[str, Any]], depth_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
