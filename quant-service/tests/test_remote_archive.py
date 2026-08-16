@@ -251,6 +251,40 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         self.assertIn("reports", service._last_started)
         self.assertNotIn("message", service._last_started)
 
+    def test_sync_service_records_successful_empty_delta_as_liveness(self):
+        recorded = []
+
+        async def run_database(action, *args, timeout_seconds):
+            return action(*args)
+
+        async def fake_messages(_client, _maximum):
+            return {"status": "completed", "items": 0, "imported": 0, "terminal": True,
+                    "source": "remote_text_messages"}
+
+        service = RemoteArchiveSyncService(
+            settings=lambda: {"base_url": "https://archive.example", "ca_file": None, "max_items": 20,
+                              "minimum_interval_seconds": 1}, transport=MagicMock(), database=MagicMock(),
+            run_database_blocking=run_database, message_cursor_state=MagicMock(), report_cursor_state=MagicMock(),
+            import_message=MagicMock(), import_report=MagicMock(), update_global_cursor=MagicMock(),
+            update_report_cursor=MagicMock(), message_cursor_update=MagicMock(), report_cursor_update=MagicMock(),
+            parse_timestamp=MagicMock(), record_attempt=lambda *_args: recorded.append(_args),
+        )
+        service._messages = fake_messages
+
+        class Payload:
+            streams = ["messages"]
+            max_items = 20
+
+        class Client:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_args): return False
+
+        with patch("app.remote_archive_sync.httpx.AsyncClient", return_value=Client()):
+            result = __import__("asyncio").run(service.sync(Payload(), "Bearer " + "a" * 32))
+        self.assertEqual(result["streams"]["messages"]["items"], 0)
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0][1:3], ("messages", "completed"))
+
     def test_message_evidence_review_preserves_immutable_availability(self):
         available_at = datetime(2026, 8, 12, 2, 1, tzinfo=timezone.utc)
         item = {

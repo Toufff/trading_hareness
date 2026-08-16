@@ -317,7 +317,7 @@ from .request_models import (
     UniverseUpdateRequest,
 )
 from .remote_archive import (analyst_global_sync_cursor, analyst_sync_cursor, classify_remote_text, import_remote_analyst_message, import_remote_report, parse_optional_timestamp,
-                             remote_report_list_state, reprocess_remote_messages, reprocess_remote_reports)
+                             record_analyst_sync_attempt, remote_report_list_state, reprocess_remote_messages, reprocess_remote_reports)
 from .remote_archive_transport import RemoteArchiveTransport
 from .remote_archive_sync import RemoteArchiveSyncService
 from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrated
@@ -8211,7 +8211,7 @@ async def sync_remote_archive(payload: RemoteArchiveSyncRequest, authorization: 
             import_message=import_remote_analyst_message, import_report=import_remote_report,
             update_global_cursor=update_analyst_global_sync_cursor, update_report_cursor=update_analyst_sync_cursor,
             message_cursor_update=AnalystSyncGlobalCursorUpdate, report_cursor_update=AnalystSyncCursorUpdate,
-            parse_timestamp=parse_optional_timestamp, sleep=asyncio.sleep,
+            parse_timestamp=parse_optional_timestamp, record_attempt=record_analyst_sync_attempt, sleep=asyncio.sleep,
         )
     return await _remote_archive_sync_service.sync(payload, authorization)
 

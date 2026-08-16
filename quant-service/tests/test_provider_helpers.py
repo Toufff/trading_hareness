@@ -976,7 +976,7 @@ class ProviderHelperTests(unittest.TestCase):
         payload = endpoint()
         self.assertEqual(payload["workflow_health"][0]["status"], "pending_first_current_execution")
         self.assertEqual(payload["workflow_health"][0]["execution_evidence"], "service_cursor_prior_version")
-        self.assertEqual(payload["runtime_verification"], "pending_next_scheduled_execution")
+        self.assertEqual(payload["runtime_verification"], "service_reachable_pending_scheduled_execution")
 
     def test_analyst_sync_health_requires_success_from_current_published_version(self):
         class _Transaction:
@@ -1050,6 +1050,39 @@ class ProviderHelperTests(unittest.TestCase):
         health = {item["stream_key"]: item for item in payload["stream_health"]}
         self.assertEqual(health["messages"]["status"], "ready")
         self.assertEqual(health["messages"]["cursor_count"], 1)
+
+    def test_analyst_sync_health_accepts_recent_zero_item_attempt_without_advancing_cursor(self):
+        class _Transaction:
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def execute(self, sql, _params=()):
+                if "analyst_sync_cursors" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[]))
+                if "analyst_global_sync_cursors" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[]))
+                if "analyst_sync_attempts" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[
+                        {"stream_key": "reports", "status": "completed", "started_at": datetime.now(timezone.utc),
+                         "completed_at": datetime.now(timezone.utc), "error_code": None,
+                         "summary": {"items": 0, "source": "remote_text_reports"}},
+                        {"stream_key": "messages", "status": "completed", "started_at": datetime.now(timezone.utc),
+                         "completed_at": datetime.now(timezone.utc), "error_code": None,
+                         "summary": {"items": 0, "source": "remote_text_messages"}},
+                    ]))
+                if "workflow_entity" in sql:
+                    return MagicMock(fetchall=MagicMock(return_value=[]))
+                return MagicMock(fetchall=MagicMock(return_value=[]))
+
+        database = MagicMock()
+        database.transaction.return_value = _Transaction()
+        router = build_analyst_research_reads_router(database, lambda _database, _as_of: {})
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-research/sync-health")
+        payload = endpoint()
+        health = {item["stream_key"]: item for item in payload["stream_health"]}
+        self.assertEqual(health["reports"]["status"], "ready")
+        self.assertEqual(health["messages"]["status"], "ready")
+        self.assertEqual(health["messages"]["cursor_count"], 0)
+        self.assertEqual(payload["runtime_verification"], "service_reachable_pending_scheduled_execution")
 
     def test_event_reads_router_keeps_announcements_and_lhb_as_get_only(self):
         router = build_event_reads_router(MagicMock())

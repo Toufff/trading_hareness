@@ -55,17 +55,17 @@
 
 ## 当前验收证据
 
-- quant-service：390 项 Python 测试通过（包含盘中连续竞价结算、分析师 received-at 与 author-stated 双时钟、JSON 数值归一化、时间外金标留出回归）。
+- quant-service：393 项 Python 测试通过（包含盘中连续竞价结算、分析师 received-at 与 author-stated 双时钟、零项同步 liveness 回执、JSON 数值归一化、时间外金标留出回归）。
 - frontend：`vue-tsc --noEmit` 和 Vite build 通过；仅有 chunk size 优化警告。
-- 开盘预检：compose、数据库迁移 `20260815_0031`、10 条后台租约、共享 provider pacing、30s/10s/1s/60s 节奏、飞书和可恢复备份均通过。
+- 开盘预检：compose、数据库迁移 `20260816_0046`、10 条后台租约、共享 provider pacing、30s/10s/1s/60s 节奏、飞书和可恢复备份均通过。
 - 最近提交：见当前仓库最新提交；本轮未改变策略阈值或历史数据范围，推荐生成、Tushare/BaoStock/全市场同步、THS 板块目录编排、盘中归因/规则/结算拆分、分析师同步健康校验、远端文本 transport/差量同步拆分、盘后一键刷新/日流水线编排拆分、盘后模式评分/候选筛选/证据聚合/读模型委托、竞价时段整理和研究就绪度门禁已通过 320 项回归。
-- 当前工作树干净，提交已推送到 `origin/main`。
+- 策略实现提交均已推送到 `origin/main`；工作树中可能并行存在未纳入本轮策略提交的前端/飞书适配改动，提交时必须按文件路径精确暂存，避免将凭据或未验收改动混入。
 
 ## 2026-08-14 运行与前端收口记录
 
 - 盘中实时监控已恢复为 quant-service 内置租约循环单点运行；旧 `quantIntradayAlerts123` n8n Cron 保持取消发布，避免与服务内扫描重复。该工作流保留带 `X-Quant-Write-Key` 的手动/故障恢复图。盘中扫描落纸面决策前已补齐 `symbol`、`observed_at` 契约；开盘预检通过，量化服务 322 项测试通过。
 - n8n 本地默认使用内置 JavaScript runner（`N8N_RUNNERS_MODE` 可显式改回 `external`）；现有分析师同步图只有 HTTP 节点，Python runner 缺失警告不影响其节点。当前仍需一次“当前发布版本 + success”的正式运行证据，未把 HTTP 200 但 execution 未终态化误记为完成。
-- 分析师报告/消息工作流已经拆分、凭据域名和 JSON Body 已修复；本轮又将 `workflow_entity.versionId` 与发布版本对齐并重启 n8n。外置 runner 曾出现定时触发后未领取 HTTP 节点任务，旧执行只保留为审计并由 `scripts/reconcile-stale-n8n-executions.sh` 收口；当前仍需一次“当前发布版本 + success”的正式运行证据，故 P0-A1 不标为完全验收。
+- 分析师报告/消息工作流已经拆分、凭据域名和 JSON Body 已修复；本轮又将 `workflow_entity.versionId` 与发布版本对齐并重启 n8n。2026-08-16 已从 n8n 容器用现有凭据对报告/消息流各做一次等价的有界直接请求，均返回 HTTP 200。零项消息轮询也会记录独立的 45 日 liveness 回执，而不伪造内容游标推进；健康页因此能准确给出“服务可达、等待当前发布版工作流执行”的状态。外置 runner 曾出现定时触发后未领取 HTTP 节点任务，旧执行只保留为审计并由 `scripts/reconcile-stale-n8n-executions.sh` 收口；当前仍需一次“当前发布版本 + success”的正式运行证据，故 P0-A1 不标为完全验收。
 - 前端 `Unexpected token '<'` 已修复：adapter 补齐 `/api/research/remote-archive/messages`、`/api/research/analyst-skills`、`/api/research/analyst-research/status` 三个缺失代理，前端 JSON 解码器现在会检查非 JSON 响应并给出接口路径/状态提示，不再把 SPA HTML 当 JSON 解析。三个代理真实返回 `Content-Type: application/json`；`vue-tsc --noEmit` 与 Vite build 均通过。
 - 盘后一键刷新修复验证：BaoStock 隔离同步此前因 `baostock_code` 关键字无法穿过公共源有界执行器而必然失败，现已在执行器内用 `partial` 安全转发关键字，并补充回归测试。2026-08-14 重试时 Super GET `daily_all` 成功写入 5,540 条日线，盘后策略同日完成（5,540 日线标的、5,521 个具备 15 日窗口，严格 30 日结构门槛下候选 0）；未拉取历史数据。
 - 仍未完成且保持原边界：历史数据回填、分钟回放、60 日/200 signal episode 样本外验证、Prompt Lab champion/challenger 晋级、RL/contextual bandit、组合自动熔断和策略自动降级。上述项目没有因本次实时修复而改变阈值或分析师 live 权重。

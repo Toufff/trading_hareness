@@ -31,6 +31,7 @@ class RemoteArchiveSyncService:
         message_cursor_update: Callable[..., Any],
         report_cursor_update: Callable[..., Any],
         parse_timestamp: Callable[[Any], datetime | None],
+        record_attempt: Callable[..., Any] | None = None,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
     ) -> None:
         self._settings = settings
@@ -46,6 +47,7 @@ class RemoteArchiveSyncService:
         self._message_cursor_update = message_cursor_update
         self._report_cursor_update = report_cursor_update
         self._parse_timestamp = parse_timestamp
+        self._record_attempt = record_attempt
         self._sleep = sleep
         self._lock = asyncio.Lock()
         # Report catalogs can take materially longer than one message delta.
@@ -54,6 +56,16 @@ class RemoteArchiveSyncService:
         # acquiring the shared HTTP pacing gate.
         self._stream_locks = {"reports": asyncio.Lock(), "messages": asyncio.Lock()}
         self._last_started: dict[str, float] = {}
+
+    async def _record(self, stream: str, status: str, started_at: datetime,
+                      completed_at: datetime, error_code: str | None,
+                      summary: dict[str, Any] | None = None) -> None:
+        if self._record_attempt is None:
+            return
+        await self._run_database_blocking(
+            self._record_attempt, self._database, stream, status, started_at,
+            completed_at, error_code, summary or {}, timeout_seconds=20,
+        )
 
     async def _get(self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return await self._transport.get(
@@ -176,10 +188,20 @@ class RemoteArchiveSyncService:
                 # A one-stream n8n workflow owns this lock for only its own
                 # cursor mutation.  RemoteArchiveTransport still serializes
                 # individual requests and respects upstream Retry-After.
-                async with self._stream_locks[stream]:
-                    results[stream] = await (
-                        self._messages(client, maximum) if stream == "messages" else self._reports(client, maximum)
+                started_at = datetime.now(timezone.utc)
+                try:
+                    async with self._stream_locks[stream]:
+                        result = await (
+                            self._messages(client, maximum) if stream == "messages" else self._reports(client, maximum)
+                        )
+                except Exception as error:
+                    error_code = (
+                        f"http_{error.status_code}" if isinstance(error, HTTPException) else type(error).__name__
                     )
+                    await self._record(stream, "failed", started_at, datetime.now(timezone.utc), error_code)
+                    raise
+                await self._record(stream, "completed", started_at, datetime.now(timezone.utc), None, result)
+                results[stream] = result
         return {"status": "completed", "streams": results, "text_only": True, "history_fetch": False}
 
 

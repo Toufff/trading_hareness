@@ -63,6 +63,11 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 """SELECT stream_key,remote_cursor,received_after,updated_at
                      FROM quant.analyst_global_sync_cursors ORDER BY stream_key"""
             ).fetchall()
+            attempts = connection.execute(
+                """SELECT DISTINCT ON (stream_key) stream_key,status,started_at,completed_at,error_code,summary
+                     FROM quant.analyst_sync_attempts
+                    ORDER BY stream_key,completed_at DESC,attempt_id DESC"""
+            ).fetchall()
             promotion = connection.execute(
                 """SELECT promotion_key,methodology_version,status,max_live_weight,approved_by,approved_at,reason,updated_at
                      FROM quant.analyst_promotion_registry ORDER BY promotion_key"""
@@ -120,6 +125,11 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 workflow_health = []
         now = datetime.now(timezone.utc)
         stream_health: list[dict[str, Any]] = []
+        latest_attempts = {
+            str(item.get("stream_key")): item
+            for item in (dict(row) for row in attempts)
+            if str(item.get("stream_key") or "") in {"reports", "messages"}
+        }
         for stream_key in ("reports", "messages"):
             stream_rows = [dict(row) for row in cursors if row["stream_key"] == stream_key]
             if stream_key == "messages":
@@ -129,23 +139,55 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
             if latest is not None:
                 latest_at = latest if latest.tzinfo else latest.replace(tzinfo=timezone.utc)
                 age_seconds = max(0.0, (now - latest_at).total_seconds())
-            status = "never_succeeded" if latest is None else "stale" if age_seconds > 24 * 3600 else "ready"
+            attempt = latest_attempts.get(stream_key)
+            attempt_at = attempt.get("completed_at") if attempt else None
+            attempt_age_seconds = None
+            if attempt_at is not None:
+                attempt_timestamp = attempt_at if attempt_at.tzinfo else attempt_at.replace(tzinfo=timezone.utc)
+                attempt_age_seconds = max(0.0, (now - attempt_timestamp).total_seconds())
+            attempt_is_recent_success = bool(
+                attempt and attempt.get("status") == "completed"
+                and attempt_age_seconds is not None and attempt_age_seconds <= 24 * 3600
+            )
+            # A cursor is an evidence watermark, not a liveness probe.  A
+            # zero-item delta should therefore be healthy when its compact
+            # receipt is recent, while the watermark remains untouched.
+            status = (
+                "ready" if attempt_is_recent_success else
+                "never_succeeded" if latest is None else
+                "stale" if age_seconds > 24 * 3600 else "ready"
+            )
+            notice = None
+            if attempt and not attempt_is_recent_success and attempt.get("status") == "failed":
+                notice = f"latest sync attempt failed: {str(attempt.get('error_code') or 'unknown')}"
+            elif latest is None and not attempt_is_recent_success:
+                notice = "no successful cursor advance or recent completed sync is recorded"
             stream_health.append({
                 "stream_key": stream_key,
                 "status": status,
                 "cursor_count": len(stream_rows),
                 "latest_cursor_at": latest,
                 "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+                "latest_attempt_at": attempt_at,
+                "attempt_age_seconds": round(attempt_age_seconds, 1) if attempt_age_seconds is not None else None,
+                "latest_attempt_status": attempt.get("status") if attempt else None,
+                "latest_attempt_error_code": attempt.get("error_code") if attempt else None,
                 "expected_workflow_id": "remoteArchiveMessages123" if stream_key == "messages" else "remoteArchiveReports123",
-                "notice": "no successful cursor advance is recorded" if latest is None else None,
+                "notice": notice,
             })
         streams_ready = all(item.get("status") == "ready" for item in stream_health)
         ready_workflows = {str(item.get("id")) for item in workflow_health if item.get("status") == "ready"}
         workflow_verified = streams_ready and {"remoteArchiveReports123", "remoteArchiveMessages123"}.issubset(ready_workflows)
+        if workflow_verified:
+            runtime_verification = "verified_recent_execution"
+        elif streams_ready:
+            runtime_verification = "service_reachable_pending_scheduled_execution"
+        else:
+            runtime_verification = "pending_next_scheduled_execution"
         return {"cursors": [dict(row) for row in cursors], "stream_health": stream_health,
                 "workflow_health": workflow_health,
                 "promotion_registry": [dict(row) for row in promotion],
                 "live_effect": "none_until_explicit_approval", "boundary": "remote sync health is read-only",
-                "runtime_verification": "verified_recent_execution" if workflow_verified else "pending_next_scheduled_execution"}
+                "runtime_verification": runtime_verification}
 
     return router

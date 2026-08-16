@@ -130,6 +130,39 @@ def parse_optional_timestamp(value: Any) -> datetime | None:
     return None
 
 
+def record_analyst_sync_attempt(db: Database, stream_key: str, status: str, started_at: datetime,
+                                completed_at: datetime, error_code: str | None,
+                                summary: dict[str, Any] | None = None) -> None:
+    """Persist compact liveness evidence without advancing a content cursor.
+
+    Zero-item deltas are successful polling events, not a reason to mutate a
+    message/report watermark.  Storing a bounded, sanitised receipt lets the
+    health page distinguish that state from a broken scheduler or transport.
+    No remote response body or authorization data is retained here.
+    """
+    if stream_key not in {"reports", "messages"}:
+        raise ValueError("analyst sync attempt has an invalid stream")
+    if status not in {"completed", "failed"}:
+        raise ValueError("analyst sync attempt has an invalid status")
+    compact_summary = {
+        str(key): value for key, value in dict(summary or {}).items()
+        if str(key) in {"status", "items", "imported", "analysts", "scanned", "changed", "terminal", "source"}
+        and isinstance(value, (str, int, float, bool, type(None)))
+    }
+    with db.transaction() as connection:
+        connection.execute(
+            """INSERT INTO quant.analyst_sync_attempts(
+                    stream_key,status,started_at,completed_at,error_code,summary)
+                 VALUES(%s,%s,%s,%s,%s,%s)""",
+            (stream_key, status, started_at, completed_at, error_code, Json(compact_summary)),
+        )
+        # This operational ledger must remain bounded even when the remote
+        # archive has no new text for an extended period.
+        connection.execute(
+            "DELETE FROM quant.analyst_sync_attempts WHERE completed_at < now() - interval '45 days'"
+        )
+
+
 def body_stated_timestamp(value: str, *, received_at: datetime) -> tuple[datetime, str, dict[str, Any]] | None:
     """Recover a source-preserved message timestamp for author-time replay.
 

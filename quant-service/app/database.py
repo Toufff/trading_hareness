@@ -951,6 +951,23 @@ CREATE TABLE IF NOT EXISTS quant.remote_analyst_messages (
 CREATE INDEX IF NOT EXISTS remote_analyst_messages_analyst_received_idx ON quant.remote_analyst_messages(remote_analyst_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS remote_analyst_messages_received_idx ON quant.remote_analyst_messages(received_at DESC);
 
+-- A successful delta request may legitimately import zero items.  Keep that
+-- liveness evidence separate from the content cursor: the cursor advances
+-- only after a durable import, while this compact ledger proves that the
+-- scheduler/transport actually reached the remote text-only endpoint.
+CREATE TABLE IF NOT EXISTS quant.analyst_sync_attempts (
+    attempt_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    stream_key text NOT NULL CHECK (stream_key IN ('reports','messages')),
+    status text NOT NULL CHECK (status IN ('completed','failed')),
+    started_at timestamptz NOT NULL,
+    completed_at timestamptz NOT NULL,
+    error_code text,
+    summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS analyst_sync_attempts_stream_completed_idx
+    ON quant.analyst_sync_attempts(stream_key,completed_at DESC);
+
 CREATE TABLE IF NOT EXISTS quant.remote_analyst_message_versions (
     remote_message_id text NOT NULL REFERENCES quant.remote_analyst_messages(remote_message_id) ON DELETE CASCADE,
     remote_version text NOT NULL,
