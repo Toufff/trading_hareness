@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .ashare_reality import price_limit_state
+
 
 def _number(value: Any) -> float | None:
     try:
@@ -83,12 +85,18 @@ def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[
     if bool(constraints.get("is_suspended")):
         reasons.append("suspended_security")
         flags.append("policy_suspended")
-    limit_up = _number(constraints.get("limit_up"))
-    limit_down = _number(constraints.get("limit_down"))
-    if entry_like and price is not None and limit_up is not None and price >= limit_up:
+    # Exact ``stk_limit`` prices are authoritative when available. Public
+    # intraday quotes often lack them, so use the same board/ST-aware fallback
+    # as paper execution rather than silently applying a main-board-only rule.
+    limit_state = price_limit_state(
+        symbol=str(watch.get("symbol") or (quote or {}).get("symbol") or ""),
+        quote={**(quote or {}), "is_st": constraints.get("is_st"),
+               "limit_up": constraints.get("limit_up"), "limit_down": constraints.get("limit_down")},
+    )
+    if entry_like and bool(limit_state["at_limit_up"]):
         reasons.append("limit_up_may_be_unbuyable")
         flags.append("policy_limit_up")
-    if exit_like and price is not None and limit_down is not None and price <= limit_down:
+    if exit_like and bool(limit_state["at_limit_down"]):
         reasons.append("limit_down_may_be_unsellable")
         flags.append("policy_limit_down")
 
@@ -123,6 +131,7 @@ def live_policy_gate(signal: dict[str, Any], watch: dict[str, Any], quote: dict[
         "market_state": market_state,
         "board_snapshot_age_seconds": board_age,
         "quote_source": quote_source,
+        "price_limit_state": limit_state,
         "available_quantity": available_quantity,
         "portfolio_risk": portfolio,
         "scope": "P0 market/data/static-tradability plus paper-ledger concentration risk; no broker order",

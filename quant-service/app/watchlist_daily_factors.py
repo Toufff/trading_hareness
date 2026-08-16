@@ -12,15 +12,18 @@ from .research_prices import adjusted_bars
 def watchlist_daily_factors(symbol: str, connection: Any, *, number: Callable[[Any], float | None]) -> dict[str, Any]:
     """Compute bounded adjusted factors from a caller-owned transaction."""
     rows = connection.execute(
-        """SELECT trading_date,high,low,close,volume,adj_factor,is_suspended,limit_up,limit_down
-             FROM quant.canonical_bars_daily WHERE symbol=%s ORDER BY trading_date DESC LIMIT 61""", (symbol,)
+        """SELECT b.trading_date,b.high,b.low,b.close,b.volume,b.adj_factor,b.is_suspended,b.limit_up,b.limit_down,
+                  i.is_st
+             FROM quant.canonical_bars_daily b
+             JOIN quant.instruments i ON i.symbol=b.symbol
+             WHERE b.symbol=%s ORDER BY b.trading_date DESC LIMIT 61""", (symbol,)
     ).fetchall()
     bars = list(reversed([dict(row) for row in rows]))
     research_bars, adjustment_flags = adjusted_bars(bars)
     closes = [number(row.get("research_close")) for row in research_bars] if research_bars is not None else []
     volumes = [number(row.get("volume")) for row in bars]
-    trade_constraints = ({"is_suspended": bool(bars[-1].get("is_suspended")), "limit_up": bars[-1].get("limit_up"),
-                          "limit_down": bars[-1].get("limit_down")} if bars else {})
+    trade_constraints = ({"is_suspended": bool(bars[-1].get("is_suspended")), "is_st": bool(bars[-1].get("is_st")),
+                          "limit_up": bars[-1].get("limit_up"), "limit_down": bars[-1].get("limit_down")} if bars else {})
     if research_bars is None:
         return {"status": "data_quality_blocked", "bar_count": len(bars), "quality_flags": adjustment_flags,
                 "trade_constraints": trade_constraints}

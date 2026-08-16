@@ -4297,6 +4297,34 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(result["decision"], "risk_alert_only")
         self.assertTrue(result["allow_confirmation"])
 
+    def test_live_policy_uses_shared_board_and_st_limit_fallbacks(self):
+        from app.live_policy import live_policy_gate
+        context = {"status": "available", "market_state": "mixed_or_neutral", "board_snapshot_age_seconds": 30}
+        fresh_quote = {"price": 11, "pct_change": 10, "price_source": "tencent_batched_watch_quote",
+                       "price_freshness": {"status": "fresh"}}
+        growth_board = live_policy_gate(
+            {"signal_type": "entry"}, {"symbol": "300001.SZ", "available_quantity": 0}, fresh_quote,
+            {"status": "completed", "trade_constraints": {"is_st": False}}, context, {"status": "confirmed"},
+        )
+        self.assertTrue(growth_board["allow_confirmation"])
+        self.assertFalse(growth_board["price_limit_state"]["at_limit_up"])
+
+        growth_limit = live_policy_gate(
+            {"signal_type": "entry"}, {"symbol": "300001.SZ", "available_quantity": 0},
+            {**fresh_quote, "pct_change": 20},
+            {"status": "completed", "trade_constraints": {"is_st": False}}, context, {"status": "confirmed"},
+        )
+        self.assertFalse(growth_limit["allow_confirmation"])
+        self.assertIn("policy_limit_up", growth_limit["risk_flags"])
+
+        st_limit = live_policy_gate(
+            {"signal_type": "entry"}, {"symbol": "600001.SH", "available_quantity": 0},
+            {**fresh_quote, "pct_change": 5},
+            {"status": "completed", "trade_constraints": {"is_st": True}}, context, {"status": "confirmed"},
+        )
+        self.assertFalse(st_limit["allow_confirmation"])
+        self.assertEqual(st_limit["price_limit_state"]["limit_ratio"], 0.05)
+
     def test_live_policy_gate_blocks_entry_on_paper_portfolio_limit(self):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
