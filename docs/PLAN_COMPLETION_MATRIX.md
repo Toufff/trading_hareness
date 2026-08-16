@@ -58,7 +58,7 @@
 
 ## 当前验收证据
 
-- quant-service：398 项 Python 测试通过（包含盘中连续竞价结算、分析师 received-at 与 author-stated 双时钟、零项同步 liveness 回执、事件生命周期回放确定性与幂等、策略族健康聚合、JSON 数值归一化、时间外金标留出回归）。
+- quant-service：402 项 Python 测试通过（包含盘中连续竞价结算、分析师 received-at 与 author-stated 双时钟、零项同步 liveness 回执、事件生命周期回放确定性与幂等、策略族健康聚合、JSON 数值归一化、时间外金标留出回归，以及研究/热库硬上限）。
 - frontend：`vue-tsc --noEmit` 和 Vite build 通过；仅有 chunk size 优化警告。
 - 开盘预检：compose、数据库迁移 `20260816_0046`、10 条后台租约、共享 provider pacing、30s/10s/1s/60s 节奏、飞书和可恢复备份均通过。
 - 最近提交：见当前仓库最新提交；本轮未改变策略阈值或历史数据范围，推荐生成、Tushare/BaoStock/全市场同步、THS 板块目录编排、盘中归因/规则/结算拆分、分析师同步健康校验、远端文本 transport/差量同步拆分、盘后一键刷新/日流水线编排拆分、盘后模式评分/候选筛选/证据聚合/读模型委托、竞价时段整理和研究就绪度门禁已通过 320 项回归。
