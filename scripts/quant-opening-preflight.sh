@@ -133,8 +133,9 @@ fi
 # The analyst workflows deliberately use small independent pages.  A large
 # page turns unchanged report-detail checks into a multi-minute n8n request
 # and recreates the timeout/429 failure mode before the service-side durable
-# cursor can do its work.  This verifies the *published* local graph only; it
-# neither calls the archive nor exposes the encrypted Bearer credential.
+# cursor can do its work.  It reads the published history revision rather
+# than the editable workflow draft, and neither calls the archive nor exposes
+# the encrypted Bearer credential.
 analyst_sync_page_count="$("${compose[@]}" exec -T postgres psql -U n8n -d n8n -Atqc "
   WITH http_nodes AS (
     SELECT w.id,w.active,
@@ -142,7 +143,8 @@ analyst_sync_page_count="$("${compose[@]}" exec -T postgres psql -U n8n -d n8n -
            n.node->'parameters'->>'jsonBody' AS json_body
       FROM public.workflow_entity w
       JOIN public.workflow_published_version p ON p.\"workflowId\"=w.id
-      CROSS JOIN LATERAL jsonb_array_elements(w.nodes::jsonb) AS n(node)
+      JOIN public.workflow_history h ON h.\"workflowId\"=w.id AND h.\"versionId\"=w.\"activeVersionId\"
+      CROSS JOIN LATERAL jsonb_array_elements(h.nodes::jsonb) AS n(node)
      WHERE w.id IN ('remoteArchiveReports123','remoteArchiveMessages123')
        AND n.node->>'type'='n8n-nodes-base.httpRequest'
   )
