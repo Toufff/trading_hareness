@@ -100,7 +100,8 @@ class CountertrendReboundTests(unittest.TestCase):
         quote = {"price": 9.85, "pct_change": -1.5, "volume_ratio": 1.8, "main_net_inflow": -100}
         failure = countertrend_rebound_failure_reduce_signal(
             watch, quote, {"return_3m_pct": -0.8, "above_vwap_pct": -0.3},
-            {"available_peer_count": 3, "confirming_peer_count": 0}, {"model_score": 0.7},
+            {"available_peer_count": 3, "confirming_peer_count": 0},
+            {"state": "shadow_confirmed", "model_score": 0.7},
         )
         self.assertIsNotNone(failure)
         self.assertEqual(failure["signal_type"], "reduce")
@@ -113,7 +114,17 @@ class CountertrendReboundTests(unittest.TestCase):
         ))
         self.assertIsNone(countertrend_rebound_failure_reduce_signal(
             {**watch, "alert_on_exit": False}, quote,
-            {"return_3m_pct": -0.8, "above_vwap_pct": -0.3}, {}, {},
+            {"return_3m_pct": -0.8, "above_vwap_pct": -0.3}, {},
+            {"state": "shadow_confirmed", "model_score": 0.7},
+        ))
+
+    def test_rebound_failure_does_not_mislabel_an_unrelated_position(self) -> None:
+        watch = {"symbol": "000001.SZ", "entry_price": 10.0, "alert_on_exit": True}
+        quote = {"price": 9.70, "main_net_inflow": -100}
+        self.assertIsNone(countertrend_rebound_failure_reduce_signal(
+            watch, quote, {"return_3m_pct": -0.9, "above_vwap_pct": -0.4},
+            {"available_peer_count": 3, "confirming_peer_count": 0},
+            {"state": "shadow_decline", "model_score": 0.7},
         ))
 
     def test_next_session_suspension_is_not_treated_as_fillable_entry(self) -> None:

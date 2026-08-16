@@ -542,6 +542,14 @@ def countertrend_rebound_failure_reduce_signal(
     avoids treating a normal one-minute pullback as an exit signal, while
     keeping T+1/can-sell enforcement in the common live-policy gate.
     """
+    # This is a lifecycle transition for a *confirmed counter-trend rebound*,
+    # not a generic position stop.  Without the prior daily state, every
+    # losing enabled position could be mislabelled as a B-wave failure merely
+    # because it traded below VWAP for a few minutes.  Generic risk rules keep
+    # their own signal keys and remain responsible for those positions.
+    prior_state = str((prior or {}).get("state") or "")
+    if prior_state not in {"shadow_confirmed", "shadow_extended"}:
+        return None
     entry_price = _finite(watch.get("entry_price"))
     if not quote or entry_price is None or entry_price <= 0 or not bool(watch.get("alert_on_exit")):
         return None
@@ -563,12 +571,12 @@ def countertrend_rebound_failure_reduce_signal(
     return {
         "signal_key": f"{symbol}:reduce:countertrend_rebound_failure_v1",
         "signal_type": "reduce", "severity": "warning",
-        "score": round(float((prior or {}).get("model_score") or 0.0) * 100, 2),
+        "score": round(float(prior.get("model_score") or 0.0) * 100, 2),
         "hard": False, "strategy_version": MODEL_VERSION,
         "independent_confirmation": peer_confirmation_lost,
         "conditions": {
             "setup": "countertrend_rebound_intraday_acceptance_failure",
-            "daily_rebound_state": prior or {"status": "not_available"},
+            "daily_rebound_state": prior,
             "entry_price": entry_price, "price": price,
             "return_since_entry_pct": round(return_since_entry, 4),
             "pct_change": _finite(quote.get("pct_change")),
