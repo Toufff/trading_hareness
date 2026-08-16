@@ -206,7 +206,11 @@ from .intraday_outcomes import (
     intraday_signal_outcome_metrics,
     a_share_return_decomposition,
 )
-from .intraday_scan_repository import persist_intraday_scan_terminal
+from .intraday_scan_repository import (
+    first_eac_breakout_events,
+    persist_intraday_scan_terminal,
+    previous_quote_frames,
+)
 from .market_session_repository import (
     realtime_market_session as read_realtime_market_session,
     realtime_market_session_async as read_realtime_market_session_async,
@@ -3958,17 +3962,24 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
         shadow_priors = latest_shadow_priors_v2(connection)
         rebound_priors = latest_rebound_priors(connection)
         probability_profiles = load_intraday_probability_profiles(connection)
+        quote_sources = {
+            str(watch["symbol"]): intraday_quote_observation_source(quotes.get(str(watch["symbol"])))
+            for watch in watches
+        }
+        previous_by_symbol = previous_quote_frames(
+            connection, quote_sources,
+            not_before=max(session_start, observed_at - timedelta(seconds=15)),
+            observed_at=observed_at,
+        )
+        first_eac_by_symbol = first_eac_breakout_events(
+            connection, selected_symbols,
+            not_before=observed_at - INTRADAY_CONFIRMATION_WINDOW,
+        )
         for watch in watches:
             symbol = str(watch["symbol"])
             quote = quotes.get(symbol)
             quote_source_name = intraday_quote_observation_source(quote)
-            previous = connection.execute(
-                """SELECT price,observed_at FROM quant.intraday_quote_observations
-                    WHERE symbol=%s AND source_name=%s
-                      AND observed_at<%s AND observed_at>=%s
-                    ORDER BY observed_at DESC LIMIT 1""",
-                (symbol, quote_source_name, observed_at, max(session_start, observed_at - timedelta(seconds=15))),
-            ).fetchone()
+            previous = previous_by_symbol.get(symbol)
             if quote:
                 quote_raw = dict(quote.get("raw") or {})
                 quote_raw["_observation_source"] = quote_source_name
@@ -4004,12 +4015,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             if rebound_failure_signal is not None:
                 generated_signals.append(rebound_failure_signal)
             fast_confirmation = fast_confirmations.get(symbol, {"status": "missing", "max_age_seconds": 30})
-            first_eac = connection.execute(
-                """SELECT observed_at,conditions FROM quant.intraday_signal_events
-                     WHERE symbol=%s AND signal_key=%s AND observed_at>=%s
-                     ORDER BY observed_at ASC LIMIT 1""",
-                (symbol, f"{symbol}:watch:upside_breakout_eac_v3", observed_at - INTRADAY_CONFIRMATION_WINDOW),
-            ).fetchone()
+            first_eac = first_eac_by_symbol.get(symbol)
             if first_eac is not None:
                 acceptance = intraday_eac_acceptance_assessment(
                     dict(first_eac["conditions"] or {}), first_observed_at=first_eac["observed_at"],

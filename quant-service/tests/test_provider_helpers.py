@@ -4007,10 +4007,12 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIn('"stale_or_unstamped_direct_watch_quote_symbols": direct_watch_count - fresh_direct_watch_count', source)
 
     def test_intraday_previous_quote_has_session_and_fifteen_second_freshness_bounds(self):
-        source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
-        self.assertIn("observed_at<%s AND observed_at>=%s", source)
-        self.assertIn("observed_at - timedelta(seconds=15)", source)
-        self.assertIn("max(session_start, observed_at - timedelta(seconds=15))", source)
+        main_source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+        repository_source = (Path(__file__).resolve().parents[1] / "app" / "intraday_scan_repository.py").read_text(encoding="utf-8")
+        self.assertIn("not_before=max(session_start, observed_at - timedelta(seconds=15))", main_source)
+        self.assertIn("o.observed_at<%s AND o.observed_at>=%s", repository_source)
+        self.assertIn("DISTINCT ON(o.symbol,o.source_name)", repository_source)
+        self.assertIn("first_eac_by_symbol = first_eac_breakout_events", main_source)
 
     def test_market_regime_runtime_uses_io_free_extracted_module(self):
         import app.main as main_module
