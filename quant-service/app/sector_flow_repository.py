@@ -35,12 +35,16 @@ def rebuild_sector_flow_daily_features(database: Any, start_date: date, end_date
             (context_start, end_date),
         ).fetchall()
         lhb_rows = connection.execute(
-            """WITH lhb_candidates AS (
-                   SELECT (occurred_at AT TIME ZONE 'Asia/Shanghai')::date AS day,symbol,
-                          COALESCE(NULLIF(body::jsonb->>'龙虎榜净买额','')::numeric,0) AS net_amount,
-                          COALESCE(NULLIF(body::jsonb->>'龙虎榜成交额','')::numeric,0) AS lhb_amount,
-                          1 AS source_priority,available_at
+            """WITH event_json AS (
+                   SELECT occurred_at,symbol,available_at,
+                          CASE WHEN body IS JSON THEN body::jsonb END AS payload
                      FROM quant.market_events WHERE event_type='lhb_event'
+               ), lhb_candidates AS (
+                   SELECT (occurred_at AT TIME ZONE 'Asia/Shanghai')::date AS day,symbol,
+                          COALESCE(NULLIF(payload->>'龙虎榜净买额','')::numeric,0) AS net_amount,
+                          COALESCE(NULLIF(payload->>'龙虎榜成交额','')::numeric,0) AS lhb_amount,
+                          1 AS source_priority,available_at
+                     FROM event_json WHERE payload IS NOT NULL
                    UNION ALL
                    SELECT to_date(row_data->>'trade_date','YYYYMMDD') AS day,row_data->>'ts_code' AS symbol,
                           COALESCE(NULLIF(row_data->>'net_amount','')::numeric,0) AS net_amount,
