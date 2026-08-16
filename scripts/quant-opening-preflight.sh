@@ -9,6 +9,7 @@ intraday_status_url="${QUANT_INTRADAY_STATUS_URL:-http://127.0.0.1:5681/api/v1/i
 analyst_sync_health_url="${QUANT_ANALYST_SYNC_HEALTH_URL:-http://127.0.0.1:5681/api/v1/analyst-research/sync-health}"
 adapter_health_url="${FEISHU_ADAPTER_HEALTH_URL:-http://127.0.0.1:5680/health}"
 backup_root="${QUANT_BACKUP_DIR:-$repo_root/backups}"
+backup_max_bytes="${QUANT_BACKUP_MAX_BYTES:-8589934592}"
 require_backup=true
 warnings=0
 
@@ -20,6 +21,7 @@ Checks only the local control plane. It does not refresh quotes, fetch market
 data, or issue an alert. A recent (< 30 hours) daily PostgreSQL/workflow
 backup is required unless --skip-backup is given. The newest archive must
 also have a matching ``pg_restore -l`` manifest and parseable workflow JSON.
+Completed daily archives must remain within ``QUANT_BACKUP_MAX_BYTES``.
 EOF
 }
 
@@ -42,6 +44,24 @@ require_command curl
 require_command jq
 require_command cmp
 require_command stat
+require_command du
+
+[[ "$backup_max_bytes" =~ ^[0-9]+$ ]] && ((backup_max_bytes >= 1073741824 && backup_max_bytes <= 8589934592)) || {
+  fail 'QUANT_BACKUP_MAX_BYTES must be an integer from 1073741824 to 8589934592'
+}
+
+daily_backup_bytes() {
+  local candidate kib total_kib=0
+  shopt -s nullglob
+  for candidate in "$backup_root"/????????-??????-daily; do
+    [[ -d "$candidate" ]] || continue
+    kib="$(du -sk "$candidate" | awk 'NR == 1 { print $1 }')"
+    [[ "$kib" =~ ^[0-9]+$ ]] || fail "could not measure daily backup: $candidate"
+    total_kib="$((total_kib + kib))"
+  done
+  shopt -u nullglob
+  printf '%s\n' "$((total_kib * 1024))"
+}
 
 # Keep this check self-contained and regression-testable without importing the
 # production service image.  The lease condition below intentionally allows a
@@ -187,7 +207,10 @@ if [[ "$require_backup" == true ]]; then
     workflow_count="$((workflow_count + 1))"
   done < <(find "$latest_path/workflows" -type f -name '*.json' -print0)
   ((workflow_count > 0)) || fail "latest backup has no workflow exports: $latest_path"
+  backup_bytes="$(daily_backup_bytes)"
+  ((backup_bytes <= backup_max_bytes)) || fail "completed daily backups exceed QUANT_BACKUP_MAX_BYTES: $backup_bytes > $backup_max_bytes"
   pass "recent recoverable backup validated: $latest_path ($workflow_count workflows)"
+  pass "completed daily backups are within capacity: $backup_bytes / $backup_max_bytes bytes"
 fi
 
 if ((warnings > 0)); then
