@@ -1259,10 +1259,10 @@ class ProviderHelperTests(unittest.TestCase):
                 "decision_context": {
                     "action": "入场复核", "reasons": ["首突破后量价同步"],
                     "invalidations": ["跌回VWAP"],
-                    "probability": {"estimated_probability": 0.54, "raw_positive_rate": 0.6,
+                    "probability": {"estimated_probability": None, "historical_condition_baseline": 0.54, "raw_positive_rate": 0.6,
                                     "sample_rows": 25, "independent_trading_days": 3,
                                     "average_directional_return": 0.002, "horizon": "30m",
-                                    "confidence_tier": "low"},
+                                    "confidence_tier": "uncalibrated"},
                 },
             }},
             {"label": "浦发银行"}, {"name": "浦发银行"}, {"time": "2026-08-11 10:00:00", "close": 12.3},
@@ -1274,8 +1274,9 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIn("决策卡（已保存证据）", text)
         self.assertIn("建议方向：入场复核", text)
         self.assertIn("触发原因1：首突破后量价同步", text)
-        self.assertIn("研究概率（30m方向兑现）：54.0%（低置信度）", text)
-        self.assertIn("样本 25 条/3 个独立交易日", text)
+        self.assertIn("研究概率：暂不可估", text)
+        self.assertIn("历史条件基准 54.0%（未校准，不作为概率或仓位依据）", text)
+        self.assertIn("匹配成熟样本 25", text)
         self.assertIn("失效/反证条件：跌回VWAP", text)
         self.assertIn("仅为人工复核提醒", text)
 

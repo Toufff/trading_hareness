@@ -20,6 +20,13 @@ from .probability_calibration import shrunk_probability_interval
 PROBABILITY_PRIOR_STRENGTH = 20.0
 PROBABILITY_PRIOR_RATE = 0.50
 PROBABILITY_PROFILE_CACHE_SECONDS = 60.0
+# A raw hit rate, even after beta shrinkage, is not a calibrated forecast.
+# These gates match the live strategy promotion gate.  Until P3 supplies an
+# out-of-fold calibration artifact, the number is kept as a *historical
+# conditional baseline* rather than exposed as a probability in a Feishu
+# decision card.
+MIN_CALIBRATED_PROBABILITY_ROWS = 200
+MIN_CALIBRATED_PROBABILITY_DAYS = 60
 _PROFILE_CACHE_LOCK = Lock()
 _PROFILE_CACHE: dict[str, Any] = {"loaded_at": 0.0, "profiles": {}}
 
@@ -51,17 +58,17 @@ def shrunk_probability(
     estimate = None
     if rows and days and rate is not None:
         estimate = (prior_rate * prior_strength + rate * days) / (prior_strength + days)
-    confidence = (
-        "validated" if rows >= 200 and days >= 60 else
-        "preliminary" if rows >= 30 and days >= 10 else
-        "low" if rows else "unavailable"
-    )
+    # This function deliberately has no access to an out-of-fold calibration
+    # artifact.  Do not let a small (or even merely large) in-sample outcome
+    # ledger masquerade as a calibrated event probability.
+    confidence = "unavailable" if not rows else "uncalibrated"
     interval = shrunk_probability_interval(
         raw_positive_rate=rate, independent_days=days,
         prior_rate=prior_rate, prior_strength=prior_strength,
     )
     return {
-        "estimated_probability": round(estimate, 4) if estimate is not None else None,
+        "estimated_probability": None,
+        "historical_condition_baseline": round(estimate, 4) if estimate is not None else None,
         "raw_positive_rate": round(rate, 4) if rate is not None else None,
         "sample_rows": rows,
         "independent_trading_days": days,
@@ -72,6 +79,13 @@ def shrunk_probability(
         "horizon": horizon,
         "source": source,
         "confidence_tier": confidence,
+        "calibration_status": "not_run",
+        "display_eligible": False,
+        "probability_gate": {
+            "required_rows": MIN_CALIBRATED_PROBABILITY_ROWS,
+            "required_independent_trading_days": MIN_CALIBRATED_PROBABILITY_DAYS,
+            "requires": "out_of_fold_calibration_artifact",
+        },
         "outcome_definition": outcome_definition,
         "method": "beta_shrinkage_with_trading_day_effective_sample_size",
         "prior_rate": prior_rate,
@@ -80,8 +94,42 @@ def shrunk_probability(
         "confidence_interval_upper": interval["upper"],
         "confidence_interval_method": interval["method"],
         "confidence_interval_effective_trials": interval["effective_trials"],
-        "notice": "研究概率，不是确定胜率；评分不参与概率换算。",
+        "notice": "历史条件基准，不是已校准概率；评分不参与概率换算。",
     }
+
+
+def _govern_probability_display(profile: dict[str, Any]) -> dict[str, Any]:
+    """Keep uncalibrated numeric estimates out of human-facing probabilities.
+
+    Some strategy experiments persist a prior ``research_probability``.  The
+    scanner must apply the same gate to those rows as to its live outcome
+    profile; otherwise a diagnostic value could bypass the shared policy.
+    """
+    result = dict(profile)
+    rows = max(0, int(result.get("sample_rows") or 0))
+    days = max(0, int(result.get("independent_trading_days") or 0))
+    calibration_status = str(result.get("calibration_status") or "not_run")
+    candidate = _number(result.get("estimated_probability"))
+    if result.get("historical_condition_baseline") is None and candidate is not None:
+        result["historical_condition_baseline"] = round(candidate, 4)
+    eligible = bool(
+        calibration_status == "validated"
+        and rows >= MIN_CALIBRATED_PROBABILITY_ROWS
+        and days >= MIN_CALIBRATED_PROBABILITY_DAYS
+        and candidate is not None
+    )
+    result["display_eligible"] = eligible
+    if not eligible:
+        result["estimated_probability"] = None
+        result["confidence_tier"] = "unavailable" if not rows else "uncalibrated"
+        result["calibration_status"] = calibration_status
+        result["probability_gate"] = {
+            "required_rows": MIN_CALIBRATED_PROBABILITY_ROWS,
+            "required_independent_trading_days": MIN_CALIBRATED_PROBABILITY_DAYS,
+            "requires": "out_of_fold_calibration_artifact",
+        }
+        result["notice"] = "暂不展示概率：历史条件基准尚未通过时间外校准和样本门禁。"
+    return result
 
 
 def probability_profiles_from_rows(rows: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -160,14 +208,15 @@ def probability_for_signal(
     conditions = signal.get("conditions") if isinstance(signal.get("conditions"), dict) else {}
     preregistered = conditions.get("research_probability")
     if isinstance(preregistered, dict):
-        return preregistered
+        return _govern_probability_display(preregistered)
     family = strategy_family(str(signal.get("signal_key") or ""))
     key = f"{family}:{signal.get('signal_type') or 'watch'}"
-    return profiles.get(key) or shrunk_probability(
+    profile = profiles.get(key) or shrunk_probability(
         raw_positive_rate=None, sample_rows=0, independent_days=0,
         average_directional_return=None, horizon="30m",
         source="no_matching_matured_outcomes",
     )
+    return _govern_probability_display(profile)
 
 
 def decision_context(signal: dict[str, Any], probability: dict[str, Any]) -> dict[str, Any]:

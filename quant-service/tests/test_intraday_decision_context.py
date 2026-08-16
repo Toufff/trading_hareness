@@ -18,11 +18,12 @@ class IntradayDecisionContextTests(unittest.TestCase):
             average_directional_return=0.10, horizon="5d",
             source="countertrend_rebound_diagnostic",
         )
-        self.assertAlmostEqual(profile["estimated_probability"], 12 / 22, places=4)
-        self.assertEqual(profile["confidence_tier"], "low")
+        self.assertIsNone(profile["estimated_probability"])
+        self.assertAlmostEqual(profile["historical_condition_baseline"], 12 / 22, places=4)
+        self.assertEqual(profile["confidence_tier"], "uncalibrated")
         self.assertEqual(profile["sample_rows"], 10)
-        self.assertLess(profile["confidence_interval_lower"], profile["estimated_probability"])
-        self.assertGreater(profile["confidence_interval_upper"], profile["estimated_probability"])
+        self.assertLess(profile["confidence_interval_lower"], profile["historical_condition_baseline"])
+        self.assertGreater(profile["confidence_interval_upper"], profile["historical_condition_baseline"])
 
     def test_live_profiles_collapse_correlated_rows_by_day(self) -> None:
         rows = [
@@ -39,7 +40,21 @@ class IntradayDecisionContextTests(unittest.TestCase):
         expected = {"estimated_probability": 0.31, "sample_rows": 10}
         signal = {"signal_key": "000001.SZ:entry:countertrend_rebound_v1", "signal_type": "entry",
                   "conditions": {"research_probability": expected}}
-        self.assertEqual(probability_for_signal(signal, {}), expected)
+        profile = probability_for_signal(signal, {})
+        self.assertIsNone(profile["estimated_probability"])
+        self.assertAlmostEqual(profile["historical_condition_baseline"], 0.31)
+        self.assertFalse(profile["display_eligible"])
+
+    def test_only_validated_oof_profile_can_display_a_probability(self) -> None:
+        expected = {
+            "estimated_probability": 0.61, "sample_rows": 220,
+            "independent_trading_days": 64, "calibration_status": "validated",
+        }
+        signal = {"signal_key": "000001.SZ:entry:countertrend_rebound_v1", "signal_type": "entry",
+                  "conditions": {"research_probability": expected}}
+        profile = probability_for_signal(signal, {})
+        self.assertTrue(profile["display_eligible"])
+        self.assertEqual(profile["estimated_probability"], 0.61)
 
     def test_entry_and_exit_contexts_explain_reason_and_invalidation(self) -> None:
         probability = {"estimated_probability": None, "sample_rows": 0}

@@ -103,9 +103,14 @@ def _probability_text(value: Any) -> str:
     profile = value if isinstance(value, dict) else {}
     estimate = profile.get("estimated_probability")
     if estimate is None:
+        baseline = profile.get("historical_condition_baseline")
+        baseline_text = (
+            f"历史条件基准 {float(baseline) * 100:.1f}%（未校准，不作为概率或仓位依据）。"
+            if baseline is not None else ""
+        )
         return (
             f"研究概率：暂不可估（匹配成熟样本 {int(profile.get('sample_rows') or 0)}；"
-            "策略评分不是概率）。"
+            f"策略评分不是概率）。{baseline_text}"
         )
     confidence = {
         "low": "低置信度", "preliminary": "初步", "validated": "达到样本门槛",
