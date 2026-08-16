@@ -130,6 +130,31 @@ else
   warn 'analyst sync-health endpoint is unavailable; analyst live weight must remain zero'
 fi
 
+# The analyst workflows deliberately use small independent pages.  A large
+# page turns unchanged report-detail checks into a multi-minute n8n request
+# and recreates the timeout/429 failure mode before the service-side durable
+# cursor can do its work.  This verifies the *published* local graph only; it
+# neither calls the archive nor exposes the encrypted Bearer credential.
+analyst_sync_page_count="$("${compose[@]}" exec -T postgres psql -U n8n -d n8n -Atqc "
+  WITH http_nodes AS (
+    SELECT w.id,w.active,
+           (w.\"activeVersionId\" IS NOT NULL AND w.\"activeVersionId\"=p.\"publishedVersionId\") AS published,
+           n.node->'parameters'->>'jsonBody' AS json_body
+      FROM public.workflow_entity w
+      JOIN public.workflow_published_version p ON p.\"workflowId\"=w.id
+      CROSS JOIN LATERAL jsonb_array_elements(w.nodes::jsonb) AS n(node)
+     WHERE w.id IN ('remoteArchiveReports123','remoteArchiveMessages123')
+       AND n.node->>'type'='n8n-nodes-base.httpRequest'
+  )
+  SELECT count(*) FROM http_nodes
+   WHERE active AND published AND (
+     (id='remoteArchiveReports123' AND json_body LIKE '%streams: [\"reports\"]%' AND json_body LIKE '%max_items: 25%') OR
+     (id='remoteArchiveMessages123' AND json_body LIKE '%streams: [\"messages\"]%' AND json_body LIKE '%max_items: 20%')
+   )
+")"
+[[ "$analyst_sync_page_count" == "2" ]] || fail 'published analyst sync workflows are missing their bounded 25/20 text-only pages'
+pass 'published analyst report/message workflows use bounded 25/20 text-only pages'
+
 adapter_json="$(curl --fail --silent --show-error --max-time 5 "$adapter_health_url")" || fail 'Feishu adapter health endpoint is unavailable'
 jq -e '.status == "ok" and .quant_alert_configured == true' <<<"$adapter_json" >/dev/null || fail 'Feishu adapter is not configured for quant alerts'
 pass 'Feishu adapter health is ready'
