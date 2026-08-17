@@ -9,13 +9,12 @@ from typing import Any
 
 
 GIB = 1024 ** 3
-# The operator reserved 40 GiB for the complete research estate.  Keep a
-# separate hot-database budget so the system can still protect the SSD before
-# artifacts or raw evidence consume the whole allocation.  Retention jobs keep
-# their existing bounded windows; these values are admission-control limits,
-# not permission for unbounded collection.
+# The operator reserved 40 GiB for the complete research estate.  Daily P2
+# history is a database-resident evidence ledger, so reserve 36 GiB for that
+# hot path and 4 GiB for bounded artifacts/exports.  The total 40 GiB cap is
+# still absolute; retention jobs keep their existing bounded windows.
 DEFAULT_RESEARCH_STORAGE_SOFT_BYTES = 40 * GIB
-DEFAULT_HOT_DATABASE_SOFT_BYTES = 28 * GIB
+DEFAULT_HOT_DATABASE_SOFT_BYTES = 36 * GIB
 
 
 def bounded_min_free_bytes(value: str | None) -> int:

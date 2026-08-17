@@ -5,7 +5,8 @@ import unittest
 from datetime import date
 
 from app.factor_sql_lab import (
-    _bh_q_values, _materialize_evaluation_rows, _materialize_factor_scores,
+    MIN_FORMAL_HISTORY_CALENDAR_SPAN_DAYS, _bh_q_values, _formal_history_blockers, _formal_history_metrics,
+    _materialize_evaluation_rows, _materialize_factor_scores,
     _split_rows, evaluable_factor_keys, prepare_factor_panel, run_multi_factor_strategy_sql,
 )
 
@@ -58,6 +59,16 @@ class FactorSqlLabTests(unittest.TestCase):
                 None, "all_a", 1, 2,
                 {"factors": ["momentum_20d"], "rebalance_days": 1, "hold_days": 5},
             )
+
+    def test_formal_history_requires_calendar_span_as_well_as_trading_day_count(self):
+        class Connection:
+            def execute(self, _sql, _params):
+                return RecordingResult({"days": 720, "first_date": date(2025, 1, 1), "last_date": date(2025, 12, 31)})
+
+        history = _formal_history_metrics(Connection(), date(2025, 1, 1), date(2025, 12, 31))
+        self.assertEqual(history["days"], 720)
+        self.assertLess(history["calendar_span_days"], MIN_FORMAL_HISTORY_CALENDAR_SPAN_DAYS)
+        self.assertIn("less_than_three_calendar_year_span", _formal_history_blockers(history))
 
     def test_panel_uses_point_in_time_membership_and_continuous_windows(self):
         connection = RecordingConnection()

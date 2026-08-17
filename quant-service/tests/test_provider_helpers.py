@@ -82,6 +82,7 @@ from app.routers.research_actions import ResearchActionDependencies, build_resea
 from app.routers.ingestion_actions import IngestionActionDependencies, build_ingestion_actions_router
 from app.board_rotation_read_model import latest_board_rotation_events
 from app.replay_readiness import (
+    P2_MIN_DAILY_CALENDAR_SPAN_DAYS,
     P2_MIN_FULL_CROSS_SECTION_DAYS,
     P3_MIN_REPLAY_DAYS,
     P3_MIN_SIGNAL_EVENTS,
@@ -790,6 +791,7 @@ class ProviderHelperTests(unittest.TestCase):
 
         unclocked_minutes = replay_readiness_payload({
             "full_cross_section_days": P2_MIN_FULL_CROSS_SECTION_DAYS,
+            "first_full_cross_section_date": "2023-08-15", "latest_full_cross_section_date": "2026-08-14",
             "offline_minute_trading_days": P3_MIN_REPLAY_DAYS,
             "offline_minute_symbols": 10, "offline_minute_bars": 10_000,
             "completed_offline_imports": 1, "confirmed_signal_events": P3_MIN_SIGNAL_EVENTS,
@@ -802,6 +804,7 @@ class ProviderHelperTests(unittest.TestCase):
 
         ready = replay_readiness_payload({
             "full_cross_section_days": P2_MIN_FULL_CROSS_SECTION_DAYS,
+            "first_full_cross_section_date": "2023-08-15", "latest_full_cross_section_date": "2026-08-14",
             "offline_minute_trading_days": P3_MIN_REPLAY_DAYS,
             "offline_minute_symbols": 10, "offline_minute_bars": 10_000,
             "offline_minute_source_clock_bars": 10_000,
@@ -815,6 +818,14 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertTrue(ready["p2_data_foundation_ready"])
         self.assertTrue(ready["p3_strategy_validation_ready"])
         self.assertEqual(ready["forward_capture"]["status"], "ready")
+
+        short_span = replay_readiness_payload({
+            "full_cross_section_days": P2_MIN_FULL_CROSS_SECTION_DAYS,
+            "first_full_cross_section_date": "2025-01-01", "latest_full_cross_section_date": "2025-12-31",
+        })
+        span_gate = next(item for item in short_span["gates"] if item["key"] == "p2_daily_calendar_span")
+        self.assertEqual(span_gate["required"], P2_MIN_DAILY_CALENDAR_SPAN_DAYS)
+        self.assertEqual(span_gate["status"], "insufficient")
 
     def test_research_catalog_read_model_and_router_bound_local_result_sets(self):
         connection = MagicMock()

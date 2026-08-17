@@ -31,7 +31,7 @@
 | 成功/失败延迟与错误脱敏 | 已完成主要路径 | `provider_health.py`；Tushare、腾讯、Sina、东财、AKShare、巨潮公告、BaoStock、Super GET 主要路径耗时进入 health/Prometheus；兼容路径允许延迟缺省且不覆盖已有值 |
 | 盘中调度、租约、outbox、飞书恢复 | 已完成 | 开盘预检、`runtime_leases`、投递回执和连续失败治理；观察池上一同源报价、EAC 首次确认、最近 61 根复权日线因子及 `标的×分钟桶` 历史量能基线均按一轮批量读取，避免随标的数线性增加小查询。当前 36 只启用观察股的批量/原单标的日因子逐项只读对照一致 |
 | n8n 孤儿执行审计收口 | 已完成 | `scripts/reconcile-stale-n8n-executions.sh` 只标记超过 10 分钟仍为 `running` 的记录为 `crashed`，绝不删除执行证据；LaunchAgent 每 15 分钟运行一次。无候选时脚本不再创建备份目录，避免运行日志/审计目录无界累积 |
-| 存储/备份/恢复前校验 | 已完成 | 总研究空间**硬上限** 40 GiB、热库**硬上限** 28 GiB；80% 预警、90% 暂停非必要高频采集。每日 PostgreSQL/workflow 备份除 14 天保留和同日去重外，另有 8 GiB 容量上限，只会回收严格命名的旧完成日备份；开盘预检同时校验该容量、`pg_restore -l` manifest 和 workflow JSON |
+| 存储/备份/恢复前校验 | 已完成 | 总研究空间**硬上限** 40 GiB、日频 P2 证据热库**硬上限** 36 GiB（为受限历史保留 4 GiB artifact 余量）；80% 预警、90% 暂停非必要高频采集。每日 PostgreSQL/workflow 备份除 14 天保留和同日去重外，另有 8 GiB 容量上限，只会回收严格命名的旧完成日备份；开盘预检同时校验该容量、`pg_restore -l` manifest 和 workflow JSON |
 | 纸面组合展示与风险阻断 | 已完成 | 前端展示净值、总/净暴露、回撤、可卖量、板块暴露和风险事件；成员按观察日点时映射；新 entry 受日亏/回撤/集中度限制 |
 | 策略族级健康/漂移投影 | 已完成（研究监控） | `/api/v1/strategy/health` 按策略族聚合事件和去重 episode；仅显示门禁/运营建议，不调阈值、不变更分析师权重 |
 | 版本化 FactorSpec 与 episode 契约 | 已完成（证据/shadow） | `strategy_contracts.py` / `intraday_factor_contracts.py`；每个已登记盘中因子携带版本、输入、时钟、质量门禁、训练/推理许可和弃用日期。当前 `training_permitted=false`，只能进证据和归因，不能接入实时评分 |
@@ -48,7 +48,7 @@
 
 | 项目 | 状态 | 准入条件 |
 | --- | --- | --- |
-| 一年日线、复权、停牌、涨跌停与日频板块/龙虎榜证据 | 已完成（保守 PIT 时钟） | 2025-08-15 至 2026-08-14 共 242 个交易日；`daily`、`adj_factor`、`daily_basic`、`stk_limit`、`suspend_d`、行业/概念资金流和指数日线均由已留存 raw 记录本地重投影，零 provider 请求。每条日频事实保留 `ingested_at`，策略 `available_at` 明确标为 `assumed_eod_1700_asia_shanghai_v1`，不是供应商发布时间。3–5 年、退市点时成员仍暂停 |
+| 三年日线、复权、停牌、涨跌停与日频板块/龙虎榜证据 | 日线 P2 执行中；板块/龙虎榜历史待独立覆盖审计 | 2024-08-15 至 2026-08-14 已有 481 个全市场横截面日；2025-06-13 至 2025-08-14 的 45 日 City 修复和 2024-08-15 至 2025-08-14 的 242 日缺口审计均已完成。2023-08-15 至 2024-08-14 正按 Super SDK 限频持续回填，只含 `daily`、`adj_factor`、`daily_basic`、`stk_limit`、`suspend_d`。每条日频事实保留 `ingested_at`，策略 `available_at` 明确标为 `assumed_eod_1700_asia_shanghai_v1`，不是供应商发布时间。历史行业/概念资金流、龙虎榜和指数仍不因缺失而伪报完成。 |
 | 因子研究的点时成分与内存边界 | 已完成逻辑地基 | SQL 因子面板按 `universe_membership_history`、上市/退市日期过滤；兼容 Python 引擎仅允许不超过 250 个成分的诊断，广义全 A 在读取前 fail-closed，必须走数据库内的有界 SQL 引擎。当前历史覆盖尚未回填，故不能将该地基误作完整历史验证 |
 | 历史分钟回放 | 因果时间合同已完成；价格路径回放暂停 | 本地分钟行现区分 `bar_time`（K 线收盘时刻）、`source_available_at`（供应商记录的可用时刻）和本地 `available_at`（导入时刻）。没有前者的文件不得进入回放；`offline_minute_bar` 只构造按来源可用时间排序的确定性事件，不会伪造同刻报价/板块/因子输入或重跑价格规则。仍需具备来源可用时钟的本地文件或明确回填授权，以及复用 live `SignalSpec` 的完整冻结证据包 |
 | 未来盘中规则回放证据 | 已完成采证与一致性重放基础，验证未开始 | `intraday_rule_input_snapshots` 的 `intraday-rule-input-v1` 与输入哈希可通过 `/api/v1/strategies/intraday/replay-recorded-inputs` 重放同一核心纯 `signal_rules`，每次写入幂等 `input_hash`/`trace_hash`；`/api/v1/data-readiness/replay` 将前向采证日数单列展示，绝不将其混作历史分钟样本。路由无 provider、历史导入、阈值拟合或订单能力，并明确排除 policy gate、纸面执行和收益结论。数据有 60–120 天有界留存，只从本次上线后的真实扫描累积，不改变既有事件、不可替代获授权的历史分钟数据或完整市场横截面 |
@@ -91,6 +91,13 @@
 - 分析师链复核：报告与消息流各自拥有持久 cursor 与 45 天 liveness receipt；最近的服务端文字-only 增量均已完成。当前 n8n 当前发布版还在等待下一个工作日的首个 `trigger/success` 运行，健康页明确显示该状态，不把旧版或 CLI 执行行当作正式调度成功。
 - 上海日期回归：对晚 UTC 的分析师消息，结算入场必须发生在其对应的上海交易日之后；该语义已覆盖 local-only outcome recomputation，容量/readiness 投影与兼容实现，并有回归测试。
 
+## 2026-08-16 P2 日频执行记录
+
+- 先以真实 provider 结果修复 2025-06-13 至 2025-08-14 的 45 个开市日：45/45 完成、0 逻辑失败。`daily` 243,081 行、`adj_factor` 242,646 行、涨跌停 242,766 行；最小单日股票覆盖 5,384，复权平均覆盖 99.95%，涨跌停平均覆盖 100%。旧主源 DNS/TLS 失败没有被标成完成，City/Super SDK 的成功记录按日期写入并参与 canonical 控制回填。
+- 随后对 2024-08-15 至 2025-08-14 完成 242/242 缺口审计，0 逻辑失败，并补齐旧批次少量缺失的日线控制截面。复权/涨跌停重联现按 `tushare_super_sdk → tushare_super_get → tushare_primary` 的已验证记录选择，且限制目标交易日，避免旧主源硬编码或年度检查扫描全库。
+- 当前 `canonical_bars_daily` 覆盖 2024-08-15 至 2026-08-14、481 个全市场横截面日；P2 仍被明确阻断：需要 720 个全横截面日、1,090 个日历跨度，以及带供应商 `source_available_at` 的离线分钟数据。第三年日频任务正在运行；绝不把本地导入时间冒充分钟来源可用时钟，也不因此改变实时策略阈值。
+- 日频回填遵守 40 GiB 总研究空间 / 36 GiB 热库硬上限。启动第三年时数据库约 23 GiB（热库约 64%）；80% 预警或 90% 暂停会优先保护实时服务和已有证据。
+
 ## 下一次恢复条件
 
-已按授权范围完成一年日频的本地 PIT 修复；在用户明确授权扩展至 3–5 年、取得带来源可用时钟的分钟数据并通过 P2 数据就绪审计之前，不开启分钟回放或 P3 统计验证。任何未通过项继续保持 `research_only` / `descriptive_only`，不得写入 live 阈值或分析师权重。
+第三年日频任务已按明确授权启动，可从 `quant.fetch_runs` 的 `annual:*` 完成检查点续跑；完成后必须重查 720 日/1,090 日 P2 门禁和 80% 存储预警。仍需取得带来源可用时钟的分钟数据并通过 P2 数据就绪审计，才可能开启分钟回放或 P3 统计验证。任何未通过项继续保持 `research_only` / `descriptive_only`，不得写入 live 阈值或分析师权重。

@@ -50,7 +50,7 @@ async def _current_data_coverage(conn: Any) -> dict[str, Any]:
            SELECT (SELECT min(trading_date) FROM quant.canonical_bars_daily) first_bar_date,
                   (SELECT max(trading_date) FROM quant.canonical_bars_daily) latest_bar_date,
                   (SELECT count(*)::int FROM daily_counts) bar_days,
-                  (SELECT count(*)::int FROM daily_counts,universe WHERE daily_counts.symbols>=least(universe.symbols*0.8,1000)) full_cross_section_days,
+                  (SELECT count(*)::int FROM daily_counts,universe WHERE daily_counts.symbols>=greatest(ceil(universe.symbols*0.8)::int,1000)) full_cross_section_days,
                   (SELECT max(symbols) FROM daily_counts) max_symbols_on_day,
                   (SELECT count(DISTINCT symbol)::int FROM quant.daily_fundamentals) fundamental_symbols,
                   (SELECT count(DISTINCT symbol)::int FROM quant.daily_trade_limits) limit_symbols,

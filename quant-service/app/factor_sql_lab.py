@@ -12,6 +12,8 @@ from datetime import date, timedelta
 from statistics import mean, stdev
 from typing import Any, Iterable
 
+from .replay_readiness import P2_MIN_DAILY_CALENDAR_SPAN_DAYS, P2_MIN_FULL_CROSS_SECTION_DAYS
+
 
 SQL_FACTOR_COLUMNS = {
     "momentum_5d": "momentum_5d",
@@ -31,11 +33,37 @@ FACTOR_DIRECTIONS = {
     "volume_ratio_20d": 1.0,
     "intraday_strength": 1.0,
 }
-MIN_FORMAL_HISTORY_DAYS = 3 * 244
+# Keep the formal factor gate aligned with the replay control plane.  The
+# separate P2 calendar-span gate prevents a short but unusually dense sample
+# from being mistaken for three years of history.
+MIN_FORMAL_HISTORY_DAYS = P2_MIN_FULL_CROSS_SECTION_DAYS
+MIN_FORMAL_HISTORY_CALENDAR_SPAN_DAYS = P2_MIN_DAILY_CALENDAR_SPAN_DAYS
 
 
 def evaluable_factor_keys() -> frozenset[str]:
     return frozenset(SQL_FACTOR_COLUMNS)
+
+
+def _formal_history_metrics(connection: Any, start_date: date, end_date: date) -> dict[str, int]:
+    """Read the same three-year evidence contract used by replay readiness."""
+    row = connection.execute(
+        """SELECT count(DISTINCT trading_date)::int AS days,min(trading_date) AS first_date,max(trading_date) AS last_date
+             FROM quant.daily_market_aggregates
+            WHERE trading_date BETWEEN %s AND %s AND quality_flags='[]'::jsonb""",
+        (start_date, end_date),
+    ).fetchone() or {}
+    first_date, last_date = row.get("first_date"), row.get("last_date")
+    span = max(0, (last_date - first_date).days) if first_date and last_date else 0
+    return {"days": int(row.get("days") or 0), "calendar_span_days": span}
+
+
+def _formal_history_blockers(history: dict[str, int]) -> list[str]:
+    return [
+        blocker for blocker, blocked in (
+            ("less_than_three_years_of_full_cross_sections", history["days"] < MIN_FORMAL_HISTORY_DAYS),
+            ("less_than_three_calendar_year_span", history["calendar_span_days"] < MIN_FORMAL_HISTORY_CALENDAR_SPAN_DAYS),
+        ) if blocked
+    ]
 
 
 def _average(values: Iterable[float | None]) -> float | None:
@@ -317,11 +345,7 @@ def evaluate_factor_from_panel(connection: Any, factor_key: str, universe_key: s
     }
     observations = sum(int(row.get("observations") or 0) for row in daily)
     neutral_metrics = _series_metrics(daily, "neutral_rank_ic")
-    full_days = connection.execute(
-        """SELECT count(DISTINCT trading_date)::int AS days FROM quant.daily_market_aggregates
-            WHERE trading_date BETWEEN %s AND %s AND quality_flags='[]'::jsonb""",
-        (start_date, end_date),
-    ).fetchone()["days"]
+    history = _formal_history_metrics(connection, start_date, end_date)
     inferred_members = connection.execute(
         """SELECT count(*)::int AS count FROM quant.universe_membership_history
             WHERE universe_key=%s AND metadata->>'delist_date_quality'='inferred'
@@ -329,7 +353,7 @@ def evaluate_factor_from_panel(connection: Any, factor_key: str, universe_key: s
         (universe_key, end_date, start_date),
     ).fetchone()["count"]
     point_in_time_industry_ready = False
-    promotion_ready = int(full_days or 0) >= MIN_FORMAL_HISTORY_DAYS and point_in_time_industry_ready
+    promotion_ready = not _formal_history_blockers(history) and point_in_time_industry_ready
     status = "completed" if len(daily) >= 20 and observations >= 50 else "insufficient_history"
     return {
         "factor_key": factor_key, "universe_key": universe_key,
@@ -345,15 +369,15 @@ def evaluate_factor_from_panel(connection: Any, factor_key: str, universe_key: s
             "sample_gate": {"minimum_cross_section_days": 20, "minimum_observations": 50},
             "promotion_gate": {
                 "status": "eligible_for_review" if promotion_ready else "research_only",
-                "full_cross_section_days": int(full_days or 0),
+                "full_cross_section_days": history["days"],
                 "required_full_cross_section_days": MIN_FORMAL_HISTORY_DAYS,
+                "calendar_span_days": history["calendar_span_days"],
+                "required_calendar_span_days": MIN_FORMAL_HISTORY_CALENDAR_SPAN_DAYS,
                 "point_in_time_industry_history_ready": point_in_time_industry_ready,
                 "required_point_in_time_industry_history": True,
                 "blockers": [
-                    blocker for blocker, blocked in (
-                        ("less_than_three_years_of_full_cross_sections", int(full_days or 0) < MIN_FORMAL_HISTORY_DAYS),
-                        ("point_in_time_industry_history_missing", not point_in_time_industry_ready),
-                    ) if blocked
+                    *_formal_history_blockers(history),
+                    *( ["point_in_time_industry_history_missing"] if not point_in_time_industry_ready else [] ),
                 ],
                 "live_strategy_effect": "none",
             },
@@ -514,12 +538,9 @@ def run_multi_factor_strategy_sql(connection: Any, universe_key: str, start_date
     return_std = _sample_std(returns)
     annualized_volatility = return_std * math.sqrt(252 / rebalance_days) if return_std else None
     annualized_return = equity ** (252 / max(1, len(period_rows) * rebalance_days)) - 1 if period_rows else None
-    full_days = int(connection.execute(
-        """SELECT count(DISTINCT trading_date)::int AS days FROM quant.daily_market_aggregates
-            WHERE trading_date BETWEEN %s AND %s AND quality_flags='[]'::jsonb""", (start_date, end_date)
-    ).fetchone()["days"] or 0)
+    history = _formal_history_metrics(connection, start_date, end_date)
     point_in_time_industry_ready = False
-    promotion_ready = full_days >= MIN_FORMAL_HISTORY_DAYS and point_in_time_industry_ready
+    promotion_ready = not _formal_history_blockers(history) and point_in_time_industry_ready
     metrics = {
         "total_return": equity - 1 if period_rows else None,
         "annualized_return": annualized_return,
@@ -531,15 +552,15 @@ def run_multi_factor_strategy_sql(connection: Any, universe_key: str, start_date
         "periods": len(period_rows), "trades": trade_count,
         "promotion_gate": {
             "status": "eligible_for_review" if promotion_ready else "research_only",
-            "full_cross_section_days": full_days,
+            "full_cross_section_days": history["days"],
             "required_full_cross_section_days": MIN_FORMAL_HISTORY_DAYS,
+            "calendar_span_days": history["calendar_span_days"],
+            "required_calendar_span_days": MIN_FORMAL_HISTORY_CALENDAR_SPAN_DAYS,
             "point_in_time_industry_history_ready": point_in_time_industry_ready,
             "required_point_in_time_industry_history": True,
             "blockers": [
-                blocker for blocker, blocked in (
-                    ("less_than_three_years_of_full_cross_sections", full_days < MIN_FORMAL_HISTORY_DAYS),
-                    ("point_in_time_industry_history_missing", not point_in_time_industry_ready),
-                ) if blocked
+                *_formal_history_blockers(history),
+                *( ["point_in_time_industry_history_missing"] if not point_in_time_industry_ready else [] ),
             ],
             "live_strategy_effect": "none",
         },

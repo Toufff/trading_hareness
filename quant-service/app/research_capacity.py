@@ -10,6 +10,13 @@ from __future__ import annotations
 from typing import Any
 
 
+# These are the only full-universe inputs required for the present daily
+# research baseline.  P1 sources (flows, chips, announcements and analyst
+# claims) enrich a candidate or block a source-dependent rule, but their
+# partial coverage must not falsely report the whole P0 baseline as unusable.
+CORE_DECISION_FEATURES = frozenset({"daily_bars", "daily_basic", "trade_limits"})
+
+
 def number(value: Any, default: float = 0.0) -> float:
     try:
         return float(value) if value not in (None, "") else default
@@ -19,6 +26,41 @@ def number(value: Any, default: float = 0.0) -> float:
 
 def bytes_to_gib(value: int | float) -> float:
     return round(float(value) / (1024 ** 3), 3)
+
+
+def feature_readiness_projection(rows: list[dict[str, Any]], universe_size: int) -> dict[str, Any]:
+    """Normalize feature readiness identically for sync and async readers.
+
+    This is deliberately a pure projection: both database adapters supply the
+    same aggregate rows, then share the hard-blocker definition.  A P1
+    enrichment may remain ``partial`` without making the P0 daily decision
+    baseline unavailable.
+    """
+    normalized: list[dict[str, Any]] = []
+    size = max(1, int(universe_size or 1))
+    for source in rows:
+        row = dict(source)
+        feature = str(row.get("feature") or "")
+        row_count = int(row.get("rows") or 0)
+        symbol_count = int(row.get("symbols") or 0)
+        coverage = (
+            min(1.0, symbol_count / size)
+            if feature not in {"sector_flow", "analyst_claims"}
+            else None
+        )
+        coverage_ready = symbol_count >= min(int(size * 0.8), 1000)
+        status = "ready" if feature in CORE_DECISION_FEATURES and coverage_ready else "partial"
+        if feature != "daily_bars" and row_count == 0:
+            status = "missing"
+        normalized.append({**row, "coverage": coverage, "status": status})
+    blockers = [item["feature"] for item in normalized
+                if item["feature"] in CORE_DECISION_FEATURES and item["status"] != "ready"]
+    return {
+        "universe_key": "all_a", "universe_symbols": size, "items": normalized,
+        "decision_ready": not blockers, "blockers": blockers,
+        "supplementary_partial": [item["feature"] for item in normalized
+                                  if item["feature"] not in CORE_DECISION_FEATURES and item["status"] != "ready"],
+    }
 
 
 def historical_capacity_plan(years: int, universe_symbols: int, trading_days_per_year: int = 244,
@@ -70,7 +112,7 @@ def current_data_coverage(connection: Any) -> dict[str, Any]:
            SELECT (SELECT min(trading_date) FROM quant.canonical_bars_daily) first_bar_date,
                   (SELECT max(trading_date) FROM quant.canonical_bars_daily) latest_bar_date,
                   (SELECT count(*)::int FROM daily_counts) bar_days,
-                  (SELECT count(*)::int FROM daily_counts,universe WHERE daily_counts.symbols>=least(universe.symbols*0.8,1000)) full_cross_section_days,
+                  (SELECT count(*)::int FROM daily_counts,universe WHERE daily_counts.symbols>=greatest(ceil(universe.symbols*0.8)::int,1000)) full_cross_section_days,
                   (SELECT max(symbols) FROM daily_counts) max_symbols_on_day,
                   (SELECT count(DISTINCT symbol)::int FROM quant.daily_fundamentals) fundamental_symbols,
                   (SELECT count(DISTINCT symbol)::int FROM quant.daily_trade_limits) limit_symbols,
@@ -93,17 +135,7 @@ def feature_readiness_state(connection: Any) -> dict[str, Any]:
            UNION ALL SELECT 'analyst_claims',count(DISTINCT subject_key)::int,count(*)::int,
               max((available_at AT TIME ZONE 'Asia/Shanghai')::date),'P1' FROM quant.analyst_claims""").fetchall()
     universe_size = connection.execute("SELECT greatest(1,count(*)::int) symbols FROM quant.universe_members WHERE universe_key='all_a' AND enabled").fetchone()["symbols"]
-    items = []
-    for row in rows:
-        row = dict(row)
-        coverage = min(1.0, number(row["symbols"]) / max(1, int(universe_size))) if row["feature"] not in {"sector_flow", "analyst_claims"} else None
-        coverage_ready = number(row["symbols"]) >= min(int(universe_size) * 0.8, 1000)
-        status = "ready" if row["feature"] in {"daily_bars", "daily_basic", "trade_limits"} and coverage_ready else "partial"
-        if row["feature"] != "daily_bars" and int(row["rows"] or 0) == 0: status = "missing"
-        items.append({**row, "coverage": coverage, "status": status})
-    blockers = [item["feature"] for item in items if item["feature"] in {"daily_bars", "daily_basic", "trade_limits"} and item["status"] != "ready"]
-    return {"universe_key": "all_a", "universe_symbols": universe_size, "items": items,
-            "decision_ready": not blockers, "blockers": blockers}
+    return feature_readiness_projection([dict(row) for row in rows], int(universe_size))
 
 
 def historical_estimate_from_db(database: Any, request: Any) -> dict[str, Any]:

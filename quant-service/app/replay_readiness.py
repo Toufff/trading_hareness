@@ -6,10 +6,17 @@ job: inspecting these gates must never create provider requests or downloads.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Mapping
 
 
-P2_MIN_FULL_CROSS_SECTION_DAYS = 3 * 244
+# A-share calendars normally have about 240--244 trading days in a year.
+# Requiring 3 * 244 made a correctly collected three-calendar-year dataset
+# impossible to admit in a normal year.  Keep both a conservative trading-day
+# floor and a calendar-span floor, rather than silently lowering the evidence
+# requirement to an arbitrary row count.
+P2_MIN_FULL_CROSS_SECTION_DAYS = 720
+P2_MIN_DAILY_CALENDAR_SPAN_DAYS = 1090
 P3_MIN_REPLAY_DAYS = 60
 P3_MIN_SIGNAL_EVENTS = 200
 
@@ -27,6 +34,12 @@ def replay_readiness_payload(metrics: Mapping[str, Any]) -> dict[str, Any]:
     imports = int(metrics.get("completed_offline_imports") or 0)
     confirmed_signals = int(metrics.get("confirmed_signal_events") or 0)
     matured_signals = int(metrics.get("matured_signal_events") or 0)
+    first_full_date = _as_date(metrics.get("first_full_cross_section_date"))
+    latest_full_date = _as_date(metrics.get("latest_full_cross_section_date"))
+    calendar_span_days = (
+        max(0, (latest_full_date - first_full_date).days)
+        if first_full_date and latest_full_date else 0
+    )
 
     def gate(key: str, stage: str, observed: int, required: int, unit: str, notice: str) -> dict[str, Any]:
         return {
@@ -38,6 +51,11 @@ def replay_readiness_payload(metrics: Mapping[str, Any]) -> dict[str, Any]:
         gate(
             "p2_daily_point_in_time_history", "P2", full_days, P2_MIN_FULL_CROSS_SECTION_DAYS, "full_cross_section_days",
             "Requires delisting-aware, point-in-time daily/control-plane history before factor or replay claims.",
+        ),
+        gate(
+            "p2_daily_calendar_span", "P2", calendar_span_days, P2_MIN_DAILY_CALENDAR_SPAN_DAYS,
+            "calendar_days_between_first_and_latest_full_cross_section",
+            "The full cross-sections must span roughly three calendar years; a dense but short backfill cannot satisfy P2.",
         ),
         gate(
             "p2_offline_minute_source", "P2", imports, 1, "completed_offline_imports",
@@ -64,7 +82,10 @@ def replay_readiness_payload(metrics: Mapping[str, Any]) -> dict[str, Any]:
         "p3_strategy_validation_ready": p3_ready,
         "gates": gates,
         "evidence": {
-            **dict(metrics), "offline_minute_symbols": minute_symbols,
+            **dict(metrics), "first_full_cross_section_date": str(first_full_date) if first_full_date else None,
+            "latest_full_cross_section_date": str(latest_full_date) if latest_full_date else None,
+            "full_cross_section_calendar_span_days": calendar_span_days,
+            "offline_minute_symbols": minute_symbols,
             "offline_minute_bars": minute_bars, "offline_minute_source_clock_bars": minute_clock_bars,
             "offline_minute_source_clock_days": minute_clock_days,
             "forward_rule_input_days": forward_rule_input_days,
@@ -83,6 +104,18 @@ def replay_readiness_payload(metrics: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _as_date(value: Any) -> date | None:
+    """Accept database date/datetime values without trusting a local timezone."""
+    if isinstance(value, date):
+        return value
+    if value in (None, ""):
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
 def historical_replay_readiness(database: Any) -> dict[str, Any]:
     """Read bounded local coverage metrics for P2/P3 admission."""
     with database.transaction() as connection:
@@ -96,12 +129,16 @@ def historical_replay_readiness(database: Any) -> dict[str, Any]:
                       FROM quant.canonical_bars_daily
                      WHERE symbol<>'000300.SH'
                      GROUP BY trading_date
+                 ), full_dates AS (
+                    SELECT d.trading_date FROM daily_counts d,universe u
+                     WHERE d.symbols>=greatest(ceil(u.symbols*0.8)::int,1000)
                  )
                 SELECT
                   (SELECT min(trading_date) FROM daily_counts) first_daily_date,
                   (SELECT max(trading_date) FROM daily_counts) latest_daily_date,
-                  (SELECT count(*)::int FROM daily_counts d,universe u
-                    WHERE d.symbols>=least(u.symbols*0.8,1000)) full_cross_section_days,
+                  (SELECT min(trading_date) FROM full_dates) first_full_cross_section_date,
+                  (SELECT max(trading_date) FROM full_dates) latest_full_cross_section_date,
+                  (SELECT count(*)::int FROM full_dates) full_cross_section_days,
                   (SELECT count(DISTINCT (bar_time AT TIME ZONE 'Asia/Shanghai')::date)::int
                      FROM quant.market_bars_minute) offline_minute_trading_days,
                   (SELECT count(DISTINCT symbol)::int FROM quant.market_bars_minute) offline_minute_symbols,
@@ -122,6 +159,6 @@ def historical_replay_readiness(database: Any) -> dict[str, Any]:
 
 
 __all__ = [
-    "P2_MIN_FULL_CROSS_SECTION_DAYS", "P3_MIN_REPLAY_DAYS", "P3_MIN_SIGNAL_EVENTS",
+    "P2_MIN_FULL_CROSS_SECTION_DAYS", "P2_MIN_DAILY_CALENDAR_SPAN_DAYS", "P3_MIN_REPLAY_DAYS", "P3_MIN_SIGNAL_EVENTS",
     "historical_replay_readiness", "replay_readiness_payload",
 ]

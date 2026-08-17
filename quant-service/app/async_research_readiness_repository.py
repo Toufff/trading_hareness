@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .replay_readiness import replay_readiness_payload
-from .research_capacity import historical_capacity_plan
+from .research_capacity import feature_readiness_projection, historical_capacity_plan
 
 
 async def frameworks(async_database: Any) -> dict[str, Any]:
@@ -39,18 +39,7 @@ async def feature_readiness(async_database: Any) -> dict[str, Any]:
         rows = await result.fetchall()
         result = await connection.execute("SELECT greatest(1,count(*)::int) symbols FROM quant.universe_members WHERE universe_key='all_a' AND enabled")
         universe_size = int((await result.fetchone())["symbols"])
-    items = []
-    for row in rows:
-        row = dict(row)
-        coverage = min(1.0, float(row["symbols"] or 0) / max(1, universe_size)) if row["feature"] not in {"sector_flow", "analyst_claims"} else None
-        ready = row["feature"] in {"daily_bars", "daily_basic", "trade_limits"} and coverage >= 0.8
-        status = "ready" if ready else "partial"
-        if row["feature"] not in {"daily_bars"} and int(row["rows"] or 0) == 0:
-            status = "missing"
-        items.append({**row, "coverage": coverage, "status": status})
-    blockers = [row["feature"] for row in items if row["status"] != "ready"]
-    return {"universe_key": "all_a", "universe_symbols": universe_size, "items": items,
-            "decision_ready": not blockers, "blockers": blockers}
+    return feature_readiness_projection([dict(row) for row in rows], universe_size)
 
 
 async def replay_readiness(async_database: Any) -> dict[str, Any]:
@@ -66,12 +55,16 @@ async def replay_readiness(async_database: Any) -> dict[str, Any]:
                       FROM quant.canonical_bars_daily
                      WHERE symbol<>'000300.SH'
                      GROUP BY trading_date
+                 ), full_dates AS (
+                    SELECT d.trading_date FROM daily_counts d,universe u
+                     WHERE d.symbols>=greatest(ceil(u.symbols*0.8)::int,1000)
                  )
                 SELECT
                   (SELECT min(trading_date) FROM daily_counts) first_daily_date,
                   (SELECT max(trading_date) FROM daily_counts) latest_daily_date,
-                  (SELECT count(*)::int FROM daily_counts d,universe u
-                    WHERE d.symbols>=least(u.symbols*0.8,1000)) full_cross_section_days,
+                  (SELECT min(trading_date) FROM full_dates) first_full_cross_section_date,
+                  (SELECT max(trading_date) FROM full_dates) latest_full_cross_section_date,
+                  (SELECT count(*)::int FROM full_dates) full_cross_section_days,
                   (SELECT count(DISTINCT (bar_time AT TIME ZONE 'Asia/Shanghai')::date)::int
                      FROM quant.market_bars_minute) offline_minute_trading_days,
                   (SELECT count(DISTINCT symbol)::int FROM quant.market_bars_minute) offline_minute_symbols,
@@ -127,7 +120,7 @@ async def historical_estimate(async_database: Any, request: Any) -> dict[str, An
                       (SELECT max(trading_date) FROM quant.canonical_bars_daily) latest_bar_date,
                       (SELECT count(*)::int FROM daily_counts) bar_days,
                       (SELECT count(*)::int FROM daily_counts,universe
-                        WHERE daily_counts.symbols>=least(universe.symbols*0.8,1000)) full_cross_section_days,
+                        WHERE daily_counts.symbols>=greatest(ceil(universe.symbols*0.8)::int,1000)) full_cross_section_days,
                       (SELECT max(symbols) FROM daily_counts) max_symbols_on_day,
                       (SELECT count(DISTINCT symbol)::int FROM quant.daily_fundamentals) fundamental_symbols,
                       (SELECT count(DISTINCT symbol)::int FROM quant.daily_trade_limits) limit_symbols,

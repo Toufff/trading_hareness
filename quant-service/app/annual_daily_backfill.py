@@ -30,6 +30,7 @@ from psycopg.types.json import Json, Jsonb
 from .database import Database
 from .sector_flow_repository import rebuild_sector_flow_daily_features
 from .tushare_providers import ProviderCallError, call_provider, provider_configs, safe_error_detail
+from .universe_history import rebuild_historical_membership_from_canonical
 
 
 # Exchange suffix alone is not enough: stk_limit also returns funds and other
@@ -59,14 +60,26 @@ class ApiSpec:
     minimum_rows: int = 0
     legal_empty: bool = False
     promote: str = "raw"
+    fallback_provider_name: str | None = None
+    fallback_provider_names: tuple[str, ...] = ()
+
+    @property
+    def provider_names(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(
+            name for name in (self.provider_name, self.fallback_provider_name, *self.fallback_provider_names) if name
+        ))
 
 
 CORE_DAILY_SPECS = (
-    ApiSpec("daily", "primary", 4_800, promote="daily"),
-    ApiSpec("adj_factor", "primary", 4_800, promote="adj_factor"),
-    ApiSpec("daily_basic", "primary", 4_800, promote="daily_basic"),
-    ApiSpec("stk_limit", "primary", 4_800, promote="stk_limit"),
-    ApiSpec("suspend_d", "primary", legal_empty=True, promote="suspend_d"),
+    # The verified Super GET route is the canonical daily-price gateway.  A
+    # full primary response remains a per-request fallback, rather than a
+    # reason to silently move daily bars back to the old SDK/primary path.
+    ApiSpec("daily", "super_get", 4_800, promote="daily", fallback_provider_name="super_sdk",
+            fallback_provider_names=("primary",)),
+    ApiSpec("adj_factor", "super_sdk", 4_800, promote="adj_factor", fallback_provider_name="primary"),
+    ApiSpec("daily_basic", "super_sdk", 4_800, promote="daily_basic", fallback_provider_name="primary"),
+    ApiSpec("stk_limit", "super_sdk", 4_800, promote="stk_limit", fallback_provider_name="primary"),
+    ApiSpec("suspend_d", "super_sdk", legal_empty=True, promote="suspend_d", fallback_provider_name="primary"),
 )
 
 SECTOR_EVENT_SPECS = (
@@ -565,14 +578,25 @@ PROMOTERS: dict[str, Callable[..., None]] = {
 
 
 class AnnualDailyBackfill:
-    def __init__(self, database: Database, start_date: date, end_date: date) -> None:
+    def __init__(
+        self, database: Database, start_date: date, end_date: date, *, include_sector_events: bool = True,
+        include_index: bool = True,
+    ) -> None:
         validate_range(start_date, end_date)
         self.db = database
         self.start_date = start_date
         self.end_date = end_date
+        self.include_sector_events = bool(include_sector_events)
+        self.include_index = bool(include_index)
         self.providers = provider_configs()
         self.failures: list[dict[str, Any]] = []
         self.counts: dict[str, int] = {}
+        # A backfill is a bounded batch, not a live retry loop.  Once a
+        # provider/API route has failed, retain that first durable failure but
+        # let the audited fallback serve its remaining dates.  This prevents a
+        # dead proxy from adding a timeout per day while preserving the normal
+        # live preference for Super GET in a fresh batch.
+        self._batch_suppressed_candidates: dict[tuple[str, str], str] = {}
 
     def _prepare_run(self, provider_key: str, api_name: str, params: dict[str, Any], day: date | None) -> tuple[str, bool]:
         key = request_key(provider_key, api_name, params)
@@ -609,6 +633,37 @@ class AnnualDailyBackfill:
                 (type(error).__name__, detail, key),
             )
 
+    def _completed_equivalent_exists(self, api_name: str, day: date | None) -> bool:
+        """Do not refetch a completed date just to prefer a newer provider."""
+        if day is None:
+            return False
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                """SELECT 1 FROM quant.fetch_runs
+                     WHERE capability=%s AND trade_date=%s AND status='completed'
+                     LIMIT 1""",
+                (f"annual:{api_name}", day),
+            ).fetchone()
+        return bool(row)
+
+    def _completed_reference_equivalent_exists(self, api_name: str, params: dict[str, Any]) -> bool:
+        """Reuse a completed range-level reference request from any provider.
+
+        Unlike daily cross-sections, these tables have no per-day checkpoint.
+        Their exact parameter object includes the date range or list status, so
+        a completed physical source is sufficient evidence for this bounded
+        bootstrap request and avoids needlessly retriggering a known-bad proxy.
+        """
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                """SELECT 1 FROM quant.fetch_runs
+                     WHERE capability=%s AND status='completed'
+                       AND metadata @> %s::jsonb
+                     LIMIT 1""",
+                (f"annual:{api_name}", Json({"params": params})),
+            ).fetchone()
+        return bool(row)
+
     @staticmethod
     def _promote_staged(
         connection: Any, provider_key: str, promote: str, available_at: datetime,
@@ -638,86 +693,135 @@ class AnnualDailyBackfill:
         self, spec: ApiSpec, params: dict[str, Any], *, day: date | None = None,
         row_filter: bool = True,
     ) -> str:
-        provider = self.providers[spec.provider_name]
-        key, skip = self._prepare_run(provider.key, spec.api_name, params, day)
-        if skip:
+        if self._completed_equivalent_exists(spec.api_name, day):
             return "skipped"
-        try:
-            filtered: list[dict[str, Any]] = []
-            # The audited SDK gateway occasionally returns a transient empty
-            # body for a known full cross-section.  A coverage threshold makes
-            # that distinguishable from legal-empty event APIs, so retry the
-            # former in-place instead of committing a false zero-day gap.
-            attempts = 3 if spec.minimum_rows else 1
-            for attempt in range(attempts):
-                rows = await call_provider(provider, spec.api_name, params, None)
-                filtered = valid_rows(spec.api_name, rows, day) if row_filter else [dict(row) for row in rows]
-                if len(filtered) >= spec.minimum_rows:
-                    break
-                if attempt + 1 < attempts:
-                    await asyncio.sleep(float(2 ** attempt))
-            if len(filtered) < spec.minimum_rows:
-                raise ProviderCallError(
-                    f"{spec.api_name} returned {len(filtered)} valid rows; expected at least {spec.minimum_rows}"
+        candidate_errors: list[dict[str, Any]] = []
+        for provider_name in spec.provider_names:
+            provider = self.providers[provider_name]
+            suppressed = self._batch_suppressed_candidates.get((spec.api_name, provider.key))
+            # Sanitisation can intentionally erase a provider error's text;
+            # an empty string still means the route failed and must not be
+            # retried for every later date in this bounded batch.
+            if suppressed is not None:
+                candidate_errors.append({
+                    "provider": provider.key,
+                    "error": f"batch-local failover active: {suppressed or 'detail redacted'}",
+                })
+                continue
+            key, skip = self._prepare_run(provider.key, spec.api_name, params, day)
+            if skip:
+                return "skipped"
+            try:
+                filtered: list[dict[str, Any]] = []
+                # A coverage threshold makes transient empty cross-sections
+                # distinguishable from legal-empty event APIs. Retry the same
+                # physical source first; only then use the declared fallback.
+                attempts = 3 if spec.minimum_rows else 1
+                for attempt in range(attempts):
+                    rows = await call_provider(provider, spec.api_name, params, None)
+                    filtered = valid_rows(spec.api_name, rows, day) if row_filter else [dict(row) for row in rows]
+                    if len(filtered) >= spec.minimum_rows:
+                        break
+                    if attempt + 1 < attempts:
+                        await asyncio.sleep(float(2 ** attempt))
+                if len(filtered) < spec.minimum_rows:
+                    raise ProviderCallError(
+                        f"{spec.api_name} returned {len(filtered)} valid rows; expected at least {spec.minimum_rows}"
+                    )
+                if not filtered and not spec.legal_empty and spec.minimum_rows == 0:
+                    raise ProviderCallError(f"{spec.api_name} returned an unexpected empty response")
+                self._store(provider.key, spec.api_name, key, filtered, spec.promote, trade_date=day)
+                self._finish_run(key, len(filtered))
+                self.counts[spec.api_name] = self.counts.get(spec.api_name, 0) + len(filtered)
+                return "completed"
+            except Exception as error:  # noqa: BLE001 - durable failure ledger is intentional
+                self._fail_run(key, error)
+                self._batch_suppressed_candidates[(spec.api_name, provider.key)] = safe_error_detail(
+                    str(error), 180,
                 )
-            if not filtered and not spec.legal_empty and spec.minimum_rows == 0:
-                raise ProviderCallError(f"{spec.api_name} returned an unexpected empty response")
-            self._store(provider.key, spec.api_name, key, filtered, spec.promote, trade_date=day)
-            self._finish_run(key, len(filtered))
-            self.counts[spec.api_name] = self.counts.get(spec.api_name, 0) + len(filtered)
-            return "completed"
-        except Exception as error:  # noqa: BLE001 - durable failure ledger is intentional
-            self._fail_run(key, error)
-            self.failures.append({
-                "api_name": spec.api_name, "trade_date": str(day) if day else None,
-                "provider": provider.key, "error": safe_error_detail(str(error), 300),
-            })
-            return "failed"
+                candidate_errors.append({
+                    "provider": provider.key, "error": safe_error_detail(str(error), 300),
+                })
+        self.failures.append({
+            "api_name": spec.api_name, "trade_date": str(day) if day else None,
+            "provider_attempts": candidate_errors,
+        })
+        return "failed"
+
+    async def _bootstrap_reference(
+        self,
+        api_name: str,
+        params: dict[str, Any],
+        *,
+        provider_names: tuple[str, ...],
+        minimum_rows: int,
+        normalize_rows: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
+        persist: Callable[[Any, str, datetime], None],
+    ) -> None:
+        """Fetch a range-level control table through audited provider fallbacks.
+
+        Range-level reference tables have no per-trading-day checkpoint, so the
+        provider fallback must be explicit here as well as in ``fetch_one``.
+        A failed legacy route is retained in ``fetch_runs`` for audit, but may
+        not prevent a verified provider from completing the same request.
+        """
+        candidate_errors: list[dict[str, str]] = []
+        if self._completed_reference_equivalent_exists(api_name, params):
+            return
+        for provider_name in provider_names:
+            provider = self.providers[provider_name]
+            key, skip = self._prepare_run(provider.key, api_name, params, None)
+            if skip:
+                return
+            try:
+                rows = normalize_rows(await call_provider(provider, api_name, params, None))
+                if len(rows) < minimum_rows:
+                    raise ProviderCallError(
+                        f"{api_name} returned only {len(rows)} rows; expected at least {minimum_rows}"
+                    )
+                available_at = datetime.now(timezone.utc)
+                with self.db.transaction() as connection:
+                    _stage_rows(connection, rows)
+                    _persist_raw(connection, provider.key, api_name, key, available_at, available_at,
+                                 INGESTED_AVAILABILITY_BASIS)
+                    persist(connection, provider.key, available_at)
+                self._finish_run(key, len(rows))
+                return
+            except Exception as error:  # noqa: BLE001 - preserve each provider failure durably
+                self._fail_run(key, error)
+                candidate_errors.append({
+                    "provider": provider.key,
+                    "error": safe_error_detail(str(error), 300),
+                })
+        raise ProviderCallError(f"{api_name} failed through every declared provider: {candidate_errors}")
 
     async def bootstrap(self) -> list[date]:
-        primary = self.providers["primary"]
         calendar_params = {
             "exchange": "SSE", "start_date": self.start_date.strftime("%Y%m%d"),
             "end_date": self.end_date.strftime("%Y%m%d"),
         }
-        calendar_spec = ApiSpec("trade_cal", "primary", 300, promote="raw")
-        key, skip = self._prepare_run(primary.key, "trade_cal", calendar_params, None)
-        if not skip:
-            try:
-                rows = await call_provider(primary, "trade_cal", calendar_params, None)
-                if len(rows) < calendar_spec.minimum_rows:
-                    raise ProviderCallError(f"trade_cal returned only {len(rows)} rows")
-                available_at = datetime.now(timezone.utc)
-                with self.db.transaction() as connection:
-                    _stage_rows(connection, rows)
-                    _persist_raw(connection, primary.key, "trade_cal", key, available_at, available_at,
-                                 INGESTED_AVAILABILITY_BASIS)
-                    _persist_trade_calendar(connection, primary.key, available_at)
-                self._finish_run(key, len(rows))
-            except Exception as error:
-                self._fail_run(key, error)
-                raise
+        expected_calendar_rows = (self.end_date - self.start_date).days + 1
+        await self._bootstrap_reference(
+            "trade_cal", calendar_params,
+            provider_names=("super_sdk", "primary"),
+            minimum_rows=expected_calendar_rows,
+            normalize_rows=lambda rows: [dict(row) for row in rows],
+            persist=_persist_trade_calendar,
+        )
 
         for status in ("L", "D", "P"):
             params = {"exchange": "", "list_status": status}
-            stock_key, stock_skip = self._prepare_run(primary.key, "stock_basic", params, None)
-            if stock_skip:
-                continue
-            try:
-                rows = await call_provider(primary, "stock_basic", params, None)
-                rows = [dict(row, _list_status=status) for row in rows if STOCK_CODE.fullmatch(str(row.get("ts_code") or "").upper())]
-                if status == "L" and len(rows) < 4_800:
-                    raise ProviderCallError(f"stock_basic active universe returned only {len(rows)} rows")
-                available_at = datetime.now(timezone.utc)
-                with self.db.transaction() as connection:
-                    _stage_rows(connection, rows)
-                    _persist_raw(connection, primary.key, "stock_basic", stock_key, available_at, available_at,
-                                 INGESTED_AVAILABILITY_BASIS)
-                    _persist_stock_basic(connection, primary.key)
-                self._finish_run(stock_key, len(rows))
-            except Exception as error:
-                self._fail_run(stock_key, error)
-                raise
+            await self._bootstrap_reference(
+                "stock_basic", params,
+                provider_names=("super_sdk", "primary"),
+                minimum_rows=4_800 if status == "L" else 0,
+                normalize_rows=lambda rows, status=status: [
+                    dict(row, _list_status=status)
+                    for row in rows
+                    if STOCK_CODE.fullmatch(str(row.get("ts_code") or "").upper())
+                ],
+                persist=_persist_stock_basic,
+            )
 
         with self.db.transaction() as connection:
             rows = connection.execute(
@@ -727,8 +831,12 @@ class AnnualDailyBackfill:
                 (self.start_date, self.end_date),
             ).fetchall()
         days = [row["calendar_date"] for row in rows]
-        if len(days) < 220:
-            raise RuntimeError(f"calendar produced only {len(days)} open days")
+        # ``trade_cal`` above has already verified every calendar date in the
+        # requested range.  A focused repair window legitimately contains far
+        # fewer than a year's roughly 240 open days; require only that it is
+        # not an all-holiday/malformed response.
+        if not days:
+            raise RuntimeError("calendar produced no open days for the requested range")
         return days
 
     async def core_lane(self, days: list[date]) -> None:
@@ -801,20 +909,46 @@ class AnnualDailyBackfill:
             for table in ("market_bars_daily", "canonical_bars_daily"):
                 connection.execute(
                     f"""UPDATE quant.{table} bar SET adj_factor=factor.adj_factor
-                          FROM quant.daily_adjustment_factors factor
-                         WHERE factor.provider='tushare_primary'
-                           AND factor.trading_date BETWEEN %s AND %s
+                          FROM (
+                              SELECT DISTINCT ON(symbol,trading_date)
+                                     symbol,trading_date,adj_factor
+                                FROM quant.daily_adjustment_factors
+                               WHERE trading_date BETWEEN %s AND %s
+                               ORDER BY symbol,trading_date,
+                                        CASE provider
+                                          WHEN 'tushare_super_sdk' THEN 0
+                                          WHEN 'tushare_super_get' THEN 1
+                                          WHEN 'tushare_primary' THEN 2
+                                          ELSE 9 END,
+                                        available_at DESC
+                          ) factor
+                         WHERE factor.trading_date BETWEEN %s AND %s
+                           AND bar.trading_date BETWEEN %s AND %s
                            AND bar.symbol=factor.symbol AND bar.trading_date=factor.trading_date""",
-                    (self.start_date, self.end_date),
+                    (self.start_date, self.end_date, self.start_date, self.end_date,
+                     self.start_date, self.end_date),
                 )
                 connection.execute(
                     f"""UPDATE quant.{table} bar
                            SET limit_up=limits.limit_up,limit_down=limits.limit_down
-                          FROM quant.daily_trade_limits limits
-                         WHERE limits.provider='tushare_primary'
-                           AND limits.trading_date BETWEEN %s AND %s
+                          FROM (
+                              SELECT DISTINCT ON(symbol,trading_date)
+                                     symbol,trading_date,limit_up,limit_down
+                                FROM quant.daily_trade_limits
+                               WHERE trading_date BETWEEN %s AND %s
+                               ORDER BY symbol,trading_date,
+                                        CASE provider
+                                          WHEN 'tushare_super_sdk' THEN 0
+                                          WHEN 'tushare_super_get' THEN 1
+                                          WHEN 'tushare_primary' THEN 2
+                                          ELSE 9 END,
+                                        available_at DESC
+                          ) limits
+                         WHERE limits.trading_date BETWEEN %s AND %s
+                           AND bar.trading_date BETWEEN %s AND %s
                            AND bar.symbol=limits.symbol AND bar.trading_date=limits.trading_date""",
-                    (self.start_date, self.end_date),
+                    (self.start_date, self.end_date, self.start_date, self.end_date,
+                     self.start_date, self.end_date),
                 )
                 connection.execute(
                     f"UPDATE quant.{table} SET is_suspended=false WHERE trading_date BETWEEN %s AND %s",
@@ -900,7 +1034,7 @@ class AnnualDailyBackfill:
                        trading_date,stock_count,advancers,decliners,unchanged,median_change_pct,
                        mean_change_pct,total_amount_kcny,total_volume_lots,source_provider,available_at,quality_flags)
                    SELECT trading_date,stock_count,advancers,decliners,unchanged,median_change_pct,
-                          mean_change_pct,total_amount_kcny,total_volume_lots,'tushare_primary',available_at,
+                          mean_change_pct,total_amount_kcny,total_volume_lots,'canonical_daily_multi_provider',available_at,
                           CASE WHEN stock_count<4800 THEN '["stock_coverage_below_4800"]'::jsonb ELSE '[]'::jsonb END
                      FROM aggregate
                    ON CONFLICT(trading_date) DO UPDATE SET
@@ -1008,10 +1142,20 @@ class AnnualDailyBackfill:
             "open_days": len(days), "minute_data": False, "reproject_only": reproject_only,
         }), flush=True)
         if not reproject_only:
-            await asyncio.gather(self.core_lane(days), self.sector_lane(days), self.index_lane())
+            lanes = [self.core_lane(days)]
+            if self.include_index:
+                lanes.append(self.index_lane())
+            if self.include_sector_events:
+                lanes.append(self.sector_lane(days))
+            await asyncio.gather(*lanes)
         self.reconcile_suspensions()
-        sector_promotions = self.promote_stored_sector_flows()
+        sector_promotions = (
+            self.promote_stored_sector_flows()
+            if self.include_sector_events else {"status": "explicitly_skipped_for_this_range"}
+        )
         market_aggregates = self.materialize_daily_market_aggregates()
+        with self.db.transaction() as connection:
+            universe_membership = rebuild_historical_membership_from_canonical(connection, "all_a")
         feature_result = self.rebuild_sector_features()
         with self.db.transaction() as connection:
             coverage = connection.execute(
@@ -1029,7 +1173,10 @@ class AnnualDailyBackfill:
             "start_date": str(self.start_date), "end_date": str(self.end_date),
             "open_days": len(days), "minute_data": False, "row_counts": self.counts,
             "reproject_only": reproject_only, "reprojected_row_counts": reprojection_counts,
+            "sector_events": "included" if self.include_sector_events else "explicitly_skipped_for_this_range",
+            "index_daily": "included" if self.include_index else "explicitly_skipped_for_this_range",
             "coverage": dict(coverage), "market_aggregates": market_aggregates,
+            "universe_membership": universe_membership,
             "sector_promotions": sector_promotions,
             "sector_features": feature_result,
             "failure_count": len(self.failures), "failures": self.failures[:50],
@@ -1048,6 +1195,15 @@ def parser() -> argparse.ArgumentParser:
         "--confirm-historical-backfill", default=None,
         help="required explicit acknowledgement before any historical provider request",
     )
+    command.add_argument(
+        "--skip-sector-events", action="store_true",
+        help=("backfill only P2 daily/control-plane data for this range; records the sector-flow history gap "
+              "instead of repeatedly treating an unavailable historical upstream response as complete"),
+    )
+    command.add_argument(
+        "--skip-index", action="store_true",
+        help="skip index_daily for a targeted daily/control-plane repair without altering existing index evidence",
+    )
     return command
 
 
@@ -1061,7 +1217,10 @@ async def async_main() -> int:
             command.error(str(error))
     database = Database()
     try:
-        result = await AnnualDailyBackfill(database, args.start_date, args.end_date).run(
+        result = await AnnualDailyBackfill(
+            database, args.start_date, args.end_date, include_sector_events=not args.skip_sector_events,
+            include_index=not args.skip_index,
+        ).run(
             reproject_only=args.reproject_only,
         )
         print(json.dumps(result, ensure_ascii=False, default=str), flush=True)
