@@ -1,6 +1,6 @@
 # 量化与分析师联合系统计划完成矩阵
 
-更新时间：2026-08-16。本文是四份主计划的当前状态索引，不把历史数据、回放样本或统计晋级缺口伪装成完成。
+更新时间：2026-08-17。本文是四份主计划的当前状态索引，不把历史数据、回放样本或统计晋级缺口伪装成完成。
 
 ## 状态定义
 
@@ -51,7 +51,7 @@
 | 三年日线、复权、停牌、涨跌停与日频板块/龙虎榜证据 | 日线 P2 已暂停；板块/龙虎榜历史待独立覆盖审计 | 截至 2026-08-17，`daily`、`adj_factor`、`daily_basic`、`stk_limit`、`suspend_d` 有 505 个完整全市场横截面日，覆盖 2023-08-15 至 2026-08-14（1,095 个日历日）。为优先保护盘中观察，第三年历史任务已暂停且仅保留完成检查点；不得由服务或 n8n 自动恢复。还差 215 个完整日频截面，且仍缺带供应商 `source_available_at` 的离线分钟证据。每条日频事实保留 `ingested_at`，策略 `available_at` 明确标为 `assumed_eod_1700_asia_shanghai_v1`，不是供应商发布时间。历史行业/概念资金流、龙虎榜和指数仍不因缺失而伪报完成。 |
 | 因子研究的点时成分与内存边界 | 已完成逻辑地基 | SQL 因子面板按 `universe_membership_history`、上市/退市日期过滤；兼容 Python 引擎仅允许不超过 250 个成分的诊断，广义全 A 在读取前 fail-closed，必须走数据库内的有界 SQL 引擎。当前历史覆盖尚未回填，故不能将该地基误作完整历史验证 |
 | 历史分钟回放 | 因果时间合同已完成；价格路径回放暂停 | 本地分钟行现区分 `bar_time`（K 线收盘时刻）、`source_available_at`（供应商记录的可用时刻）和本地 `available_at`（导入时刻）。没有前者的文件不得进入回放；`offline_minute_bar` 只构造按来源可用时间排序的确定性事件，不会伪造同刻报价/板块/因子输入或重跑价格规则。仍需具备来源可用时钟的本地文件或明确回填授权，以及复用 live `SignalSpec` 的完整冻结证据包 |
-| 未来盘中规则回放证据 | 已完成采证与一致性重放基础，验证未开始 | `intraday_rule_input_snapshots` 的 `intraday-rule-input-v1` 与输入哈希可通过 `/api/v1/strategies/intraday/replay-recorded-inputs` 重放同一核心纯 `signal_rules`，每次写入幂等 `input_hash`/`trace_hash`；`/api/v1/data-readiness/replay` 将前向采证日数单列展示，绝不将其混作历史分钟样本。路由无 provider、历史导入、阈值拟合或订单能力，并明确排除 policy gate、纸面执行和收益结论。数据有 60–120 天有界留存，只从本次上线后的真实扫描累积，不改变既有事件、不可替代获授权的历史分钟数据或完整市场横截面 |
+| 未来盘中规则回放证据 | 已完成采证与一致性重放基础，验证未开始 | `intraday_rule_input_snapshots` 的 v2 合同冻结核心规则与同刻 policy/risk gate 输入；旧 v1 仅兼容 core-only。`/api/v1/strategies/intraday/replay-recorded-inputs` 无 provider、历史导入、阈值拟合或订单能力，并明确排除 event state、执行和收益结论。数据有 60–120 天有界留存，只从上线后的真实扫描累积，不改变既有事件、不可替代获授权的历史分钟数据或完整市场横截面 |
 | 本地已录制信号事件生命周期 replay | 已完成（非价格回测） | `/api/v1/strategies/intraday/replay-recorded-events` 只读 `intraday_signal_events`；按 availability 时钟写入幂等 `input_hash`/`trace_hash`，不请求 provider、不拉历史、不拟合阈值、不生成订单 |
 | T+1/涨跌停/停牌/费用/滑点回放撮合 | 基础契约已完成，验证暂停 | `ashare_reality.py` 是实时风险、纸面成交和未来回放共用的整手、T+1、停牌、不同板块/ST 涨跌停、佣金/印花税/滑点及 non-fill 纯模型；尚无获授权历史路径，故不运行历史撮合或把它当策略验证 |
 | purged walk-forward、embargo、DSR/PBO | 暂停 | 至少 60 aligned days、200 独立成熟信号、每 cohort 30 条 |
@@ -68,7 +68,7 @@
 
 ## 当前验收证据
 
-- quant-service：全量 **453** 项 Python 回归通过（包含盘中连续竞价结算、分析师 received-at 与 author-stated 双时钟、零项同步 liveness 回执、事件生命周期回放确定性与幂等、策略族健康聚合、JSON 数值归一化、时间外金标留出回归、研究/热库硬上限、全 A 共享快照并发去重与失败不缓存、资金流快照新鲜度与实际观察池长度的 `rt_min` 轮转覆盖）。
+- quant-service：全量 **485** 项 Python 回归通过（另含 v2 盘中规则输入、policy/risk gate 重放与 v1 兼容边界；并覆盖盘中连续竞价结算、分析师 received-at 与 author-stated 双时钟、零项同步 liveness 回执、事件生命周期回放确定性与幂等、策略族健康聚合、JSON 数值归一化、时间外金标留出回归、研究/热库硬上限、全 A 共享快照并发去重与失败不缓存、资金流快照新鲜度与实际观察池长度的 `rt_min` 轮转覆盖）。
 - frontend：`vue-tsc --noEmit` 和 Vite build 通过；仅有 chunk size 优化警告。
 - 开盘预检：compose、数据库迁移 `20260816_0046`、10 条后台租约、共享 provider pacing、30s/10s/1s/60s 节奏、飞书和可恢复备份均通过。
 - 最近提交：见当前仓库最新提交；本轮未改变策略阈值或历史数据范围，推荐生成、Tushare/BaoStock/全市场同步、THS 板块目录编排、盘中归因/规则/结算与跨源价格确认拆分、分析师同步健康校验、远端文本 transport/差量同步拆分、盘后一键刷新/日流水线编排拆分、盘后模式评分/候选筛选/证据聚合/读模型委托、竞价时段整理和研究就绪度门禁，以及点时因子成分/内存边界均已通过 **453** 项 Python 回归。
