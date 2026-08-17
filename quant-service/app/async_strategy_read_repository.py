@@ -40,24 +40,36 @@ async def latest_post_close_strategy(async_database: Any) -> dict[str, Any]:
                  FROM quant.post_close_strategy_runs ORDER BY as_of_date DESC,updated_at DESC LIMIT 1"""
         )
         latest_attempt = await attempt_result.fetchone()
-        run_result = await connection.execute(
+        completed_result = await connection.execute(
             """SELECT run_id,run_key,as_of_date,model_version,status,source_status,summary,created_at,updated_at
                  FROM quant.post_close_strategy_runs WHERE status IN ('completed','partial')
                  ORDER BY as_of_date DESC,updated_at DESC LIMIT 1"""
         )
-        run = await run_result.fetchone()
-        if not run:
-            return {"run": None, "latest_attempt": latest_attempt, "candidates": [],
-                    "notice": "尚未得到可用的盘后蓄势/首动研究。"}
+        latest_completed = await completed_result.fetchone()
+        if not latest_completed:
+            return {
+                "run": latest_attempt,
+                "latest_attempt": latest_attempt,
+                "latest_completed": None,
+                "candidate_run": None,
+                "candidates": [],
+                "notice": "尚未得到可用的盘后蓄势/首动研究。",
+            }
         candidates_result = await connection.execute(
             """SELECT c.rank,c.symbol,i.name,c.candidate_type,c.score,c.structure,c.board_context,c.risk_flags,
                           c.discovered_at,c.expires_at,c.reason_codes,c.source_snapshot
                  FROM quant.post_close_strategy_candidates c LEFT JOIN quant.instruments i ON i.symbol=c.symbol
-                WHERE c.run_id=%s ORDER BY c.rank""", (run["run_id"],),
+                WHERE c.run_id=%s ORDER BY c.rank""", (latest_completed["run_id"],),
         )
         rows = await candidates_result.fetchall()
-    return {"run": run, "latest_attempt": latest_attempt, "candidates": rows,
-            "notice": "候选用于次日人工观察；未自动加入盘中观察池，也不会自动下单。"}
+    return {
+        "run": latest_attempt,
+        "latest_attempt": latest_attempt,
+        "latest_completed": latest_completed,
+        "candidate_run": latest_completed,
+        "candidates": rows,
+        "notice": "候选用于次日人工观察；未自动加入盘中观察池，也不会自动下单。",
+    }
 
 
 __all__ = ["latest_strategy_decision", "latest_strategy_review", "latest_post_close_strategy"]

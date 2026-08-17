@@ -4205,8 +4205,10 @@ class ProviderHelperTests(unittest.TestCase):
         database.transaction.return_value.__enter__.return_value = connection
         result = read_latest_post_close_strategy(database)
         self.assertEqual(result["latest_attempt"]["status"], "blocked")
-        self.assertEqual(result["run"]["status"], "completed")
-        self.assertEqual(result["run"]["as_of_date"], date(2026, 8, 12))
+        self.assertEqual(result["run"]["status"], "blocked")
+        self.assertEqual(result["run"]["as_of_date"], date(2026, 8, 13))
+        self.assertEqual(result["latest_completed"]["status"], "completed")
+        self.assertEqual(result["candidate_run"]["as_of_date"], date(2026, 8, 12))
         self.assertEqual(result["candidates"][0]["symbol"], "000636.SZ")
 
     def test_limit_ladder_and_ground_to_sky_replay_keep_causal_checkpoints(self):
