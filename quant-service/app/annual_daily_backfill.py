@@ -21,8 +21,9 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json, Jsonb
 
@@ -43,6 +44,12 @@ INDEX_CODES = (
 )
 MAX_CALENDAR_DAYS = 370
 HISTORICAL_BACKFILL_CONFIRMATION = "I_CONFIRM_HISTORICAL_BACKFILL"
+# Exact vendor publication time is not reconstructible from a later bulk
+# download. Use a conservative, explicit post-close assumption for close-daily
+# facts; preserve the actual import time separately. No minute replay may call
+# this a vendor-recorded availability timestamp.
+HISTORICAL_DAILY_AVAILABILITY_BASIS = "assumed_eod_1700_asia_shanghai_v1"
+INGESTED_AVAILABILITY_BASIS = "provider_received_at_import_v1"
 
 
 @dataclass(frozen=True)
@@ -100,6 +107,11 @@ def validate_historical_backfill_confirmation(value: str | None) -> None:
         )
 
 
+def historical_daily_strategy_available_at(trade_date: date) -> datetime:
+    """Return the declared conservative strategy clock for daily observations."""
+    return datetime.combine(trade_date, time(17, 0), tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
+
+
 def valid_rows(api_name: str, rows: list[dict[str, Any]], trade_date: date | None = None) -> list[dict[str, Any]]:
     """Apply only deterministic shape/date filters; never invent missing rows."""
     stamp = trade_date.strftime("%Y%m%d") if trade_date else None
@@ -145,6 +157,7 @@ def _stage_rows(connection: Any, rows: list[dict[str, Any]]) -> None:
 
 def _persist_raw(
     connection: Any, provider_key: str, api_name: str, key: str, available_at: datetime,
+    ingested_at: datetime, availability_basis: str,
 ) -> None:
     connection.execute(
         """WITH prepared AS (
@@ -161,12 +174,15 @@ def _persist_raw(
                  FROM prepared ORDER BY record_key,content_sha256,record_index
              )
            INSERT INTO quant.tushare_raw_records(
-               provider_key,api_name,request_key,record_index,record_key,content_sha256,row_data,available_at)
-           SELECT %s,%s,%s,record_index,record_key,content_sha256,row_data,%s
+               provider_key,api_name,request_key,record_index,record_key,content_sha256,row_data,available_at,
+               ingested_at,availability_basis)
+           SELECT %s,%s,%s,record_index,record_key,content_sha256,row_data,%s,%s,%s
              FROM deduplicated
            ON CONFLICT(provider_key,api_name,record_key,content_sha256) DO UPDATE
-             SET available_at=EXCLUDED.available_at,request_key=EXCLUDED.request_key""",
-        (api_name, provider_key, api_name, key, available_at),
+             SET available_at=least(quant.tushare_raw_records.available_at,EXCLUDED.available_at),
+                 ingested_at=coalesce(quant.tushare_raw_records.ingested_at,quant.tushare_raw_records.available_at),
+                 availability_basis=EXCLUDED.availability_basis""",
+        (api_name, provider_key, api_name, key, available_at, ingested_at, availability_basis),
     )
 
 
@@ -184,7 +200,8 @@ def _persist_instruments_from_stage(connection: Any, provider_key: str) -> None:
     )
 
 
-def _persist_daily(connection: Any, provider_key: str, available_at: datetime, *, index_mode: bool = False) -> None:
+def _persist_daily(connection: Any, provider_key: str, available_at: datetime, ingested_at: datetime,
+                   availability_basis: str, *, index_mode: bool = False) -> None:
     if index_mode:
         connection.execute(
             """INSERT INTO quant.instruments(symbol,exchange,source)
@@ -199,20 +216,33 @@ def _persist_daily(connection: Any, provider_key: str, available_at: datetime, *
         _persist_instruments_from_stage(connection, provider_key)
     capability = "index_daily" if index_mode else "daily"
     connection.execute(
-        """INSERT INTO quant.raw_market_observations(
-               provider_key,capability,symbol,effective_at,available_at,payload_sha256,normalized,payload)
+        """WITH stage AS (
+               SELECT DISTINCT ON(
+                          upper(row_data->>'ts_code'),row_data->>'trade_date',
+                          encode(digest(row_data::text,'sha256'),'hex')
+                      ) row_data
+                 FROM annual_daily_stage
+                WHERE row_data->>'trade_date' ~ '^\\d{8}$'
+                ORDER BY upper(row_data->>'ts_code'),row_data->>'trade_date',
+                         encode(digest(row_data::text,'sha256'),'hex'),record_index DESC
+           ) INSERT INTO quant.raw_market_observations(
+               provider_key,capability,symbol,effective_at,available_at,ingested_at,availability_basis,
+               payload_sha256,normalized,payload)
            SELECT %s,%s,upper(row_data->>'ts_code'),
                   (to_date(row_data->>'trade_date','YYYYMMDD') + time '15:00') AT TIME ZONE 'Asia/Shanghai',
-                  %s,encode(digest(row_data::text,'sha256'),'hex'),row_data,row_data
-             FROM annual_daily_stage
-            WHERE row_data->>'trade_date' ~ '^\\d{8}$'
+                  %s,%s,%s,encode(digest(row_data::text,'sha256'),'hex'),row_data,row_data
+             FROM stage
            ON CONFLICT(provider_key,capability,market,symbol,effective_at,payload_sha256) DO UPDATE
-             SET available_at=EXCLUDED.available_at,normalized=EXCLUDED.normalized,payload=EXCLUDED.payload""",
-        (provider_key, capability, available_at),
+             SET available_at=least(quant.raw_market_observations.available_at,EXCLUDED.available_at),
+                 ingested_at=coalesce(quant.raw_market_observations.ingested_at,quant.raw_market_observations.created_at),
+                 availability_basis=EXCLUDED.availability_basis,
+                 normalized=EXCLUDED.normalized,payload=EXCLUDED.payload""",
+        (provider_key, capability, available_at, ingested_at, availability_basis),
     )
     connection.execute(
         """WITH parsed AS (
-               SELECT upper(s.row_data->>'ts_code') symbol,
+               SELECT DISTINCT ON (upper(s.row_data->>'ts_code'),to_date(s.row_data->>'trade_date','YYYYMMDD'))
+                      upper(s.row_data->>'ts_code') symbol,
                       to_date(s.row_data->>'trade_date','YYYYMMDD') trading_date,
                       nullif(s.row_data->>'open','')::numeric open,
                       nullif(s.row_data->>'high','')::numeric high,
@@ -225,8 +255,14 @@ def _persist_daily(connection: Any, provider_key: str, available_at: datetime, *
                  FROM annual_daily_stage s
                 WHERE s.row_data->>'trade_date' ~ '^\\d{8}$'
                   AND nullif(s.row_data->>'close','') IS NOT NULL
+                -- Historical gateway repairs can retain an older, shorter
+                -- copy plus a later enriched copy of the same exchange bar.
+                -- Raw evidence keeps both payload hashes; the canonical bar
+                -- must deterministically select one so an UPSERT never
+                -- attempts to affect the same (symbol, date) twice.
+                ORDER BY upper(s.row_data->>'ts_code'),to_date(s.row_data->>'trade_date','YYYYMMDD'),s.record_index DESC
              ), with_observation AS (
-               SELECT p.*,o.observation_id
+               SELECT p.*,o.observation_id,o.available_at
                  FROM parsed p JOIN quant.raw_market_observations o
                    ON o.provider_key=%s AND o.capability=%s AND o.symbol=p.symbol
                   AND o.effective_at=(p.trading_date + time '15:00') AT TIME ZONE 'Asia/Shanghai'
@@ -234,17 +270,18 @@ def _persist_daily(connection: Any, provider_key: str, available_at: datetime, *
              )
            INSERT INTO quant.market_bars_daily(
                symbol,trading_date,open,high,low,close,pre_close,volume,amount,source,available_at)
-           SELECT symbol,trading_date,open,high,low,close,pre_close,volume,amount,%s,%s
+           SELECT symbol,trading_date,open,high,low,close,pre_close,volume,amount,%s,available_at
              FROM with_observation
            ON CONFLICT(symbol,trading_date) DO UPDATE SET
              open=EXCLUDED.open,high=EXCLUDED.high,low=EXCLUDED.low,close=EXCLUDED.close,
              pre_close=EXCLUDED.pre_close,volume=EXCLUDED.volume,amount=EXCLUDED.amount,
              source=EXCLUDED.source,available_at=EXCLUDED.available_at""",
-        (provider_key, capability, provider_key, available_at),
+        (provider_key, capability, provider_key),
     )
     connection.execute(
         """WITH parsed AS (
-               SELECT upper(s.row_data->>'ts_code') symbol,
+               SELECT DISTINCT ON (upper(s.row_data->>'ts_code'),to_date(s.row_data->>'trade_date','YYYYMMDD'))
+                      upper(s.row_data->>'ts_code') symbol,
                       to_date(s.row_data->>'trade_date','YYYYMMDD') trading_date,
                       nullif(s.row_data->>'open','')::numeric open,
                       nullif(s.row_data->>'high','')::numeric high,
@@ -257,8 +294,9 @@ def _persist_daily(connection: Any, provider_key: str, available_at: datetime, *
                  FROM annual_daily_stage s
                 WHERE s.row_data->>'trade_date' ~ '^\\d{8}$'
                   AND nullif(s.row_data->>'close','') IS NOT NULL
+                ORDER BY upper(s.row_data->>'ts_code'),to_date(s.row_data->>'trade_date','YYYYMMDD'),s.record_index DESC
              ), with_observation AS (
-               SELECT p.*,o.observation_id
+               SELECT p.*,o.observation_id,o.available_at
                  FROM parsed p JOIN quant.raw_market_observations o
                    ON o.provider_key=%s AND o.capability=%s AND o.symbol=p.symbol
                   AND o.effective_at=(p.trading_date + time '15:00') AT TIME ZONE 'Asia/Shanghai'
@@ -268,7 +306,7 @@ def _persist_daily(connection: Any, provider_key: str, available_at: datetime, *
                symbol,trading_date,open,high,low,close,pre_close,volume,amount,selected_provider,
                source_observation_ids,quality_status,available_at)
            SELECT symbol,trading_date,open,high,low,close,pre_close,volume,amount,%s,
-                  array[observation_id],'fresh',%s
+                  array[observation_id],'fresh',available_at
              FROM with_observation
            ON CONFLICT(symbol,trading_date) DO UPDATE SET
              open=EXCLUDED.open,high=EXCLUDED.high,low=EXCLUDED.low,close=EXCLUDED.close,
@@ -276,35 +314,48 @@ def _persist_daily(connection: Any, provider_key: str, available_at: datetime, *
              selected_provider=EXCLUDED.selected_provider,
              source_observation_ids=EXCLUDED.source_observation_ids,
              quality_status='fresh',available_at=EXCLUDED.available_at,canonicalized_at=now()""",
-        (provider_key, capability, provider_key, available_at),
+        (provider_key, capability, provider_key),
     )
 
 
-def _persist_adj_factor(connection: Any, provider_key: str, available_at: datetime) -> None:
+def _persist_adj_factor(connection: Any, provider_key: str, available_at: datetime, _ingested_at: datetime,
+                        _availability_basis: str) -> None:
     _persist_instruments_from_stage(connection, provider_key)
     connection.execute(
-        """INSERT INTO quant.daily_adjustment_factors(symbol,trading_date,adj_factor,provider,available_at,raw)
+        """WITH stage AS (
+               SELECT DISTINCT ON(upper(row_data->>'ts_code'),row_data->>'trade_date') row_data
+                 FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{8}$'
+                ORDER BY upper(row_data->>'ts_code'),row_data->>'trade_date',record_index DESC
+           ) INSERT INTO quant.daily_adjustment_factors(symbol,trading_date,adj_factor,provider,available_at,raw)
            SELECT upper(row_data->>'ts_code'),to_date(row_data->>'trade_date','YYYYMMDD'),
                   nullif(row_data->>'adj_factor','')::numeric,%s,%s,row_data
-             FROM annual_daily_stage
-            WHERE row_data->>'trade_date' ~ '^\\d{8}$' AND nullif(row_data->>'adj_factor','') IS NOT NULL
+             FROM stage WHERE nullif(row_data->>'adj_factor','') IS NOT NULL
            ON CONFLICT(symbol,trading_date,provider) DO UPDATE SET
              adj_factor=EXCLUDED.adj_factor,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
         (provider_key, available_at),
     )
     for table in ("market_bars_daily", "canonical_bars_daily"):
         connection.execute(
-            f"""UPDATE quant.{table} bar SET adj_factor=nullif(stage.row_data->>'adj_factor','')::numeric
-                  FROM annual_daily_stage stage
+            f"""WITH stage AS (
+                   SELECT DISTINCT ON(upper(row_data->>'ts_code'),row_data->>'trade_date') row_data
+                     FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{{8}}$'
+                    ORDER BY upper(row_data->>'ts_code'),row_data->>'trade_date',record_index DESC
+               ) UPDATE quant.{table} bar SET adj_factor=nullif(stage.row_data->>'adj_factor','')::numeric
+                  FROM stage
                  WHERE bar.symbol=upper(stage.row_data->>'ts_code')
                    AND bar.trading_date=to_date(stage.row_data->>'trade_date','YYYYMMDD')"""
         )
 
 
-def _persist_daily_basic(connection: Any, provider_key: str, available_at: datetime) -> None:
+def _persist_daily_basic(connection: Any, provider_key: str, available_at: datetime, _ingested_at: datetime,
+                         _availability_basis: str) -> None:
     _persist_instruments_from_stage(connection, provider_key)
     connection.execute(
-        """INSERT INTO quant.daily_fundamentals(
+        """WITH stage AS (
+               SELECT DISTINCT ON(upper(row_data->>'ts_code'),row_data->>'trade_date') row_data
+                 FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{8}$'
+                ORDER BY upper(row_data->>'ts_code'),row_data->>'trade_date',record_index DESC
+           ) INSERT INTO quant.daily_fundamentals(
                symbol,trading_date,close,turnover_rate,volume_ratio,pe,pb,total_share,float_share,total_mv,circ_mv,
                provider,available_at,raw)
            SELECT upper(row_data->>'ts_code'),to_date(row_data->>'trade_date','YYYYMMDD'),
@@ -313,7 +364,7 @@ def _persist_daily_basic(connection: Any, provider_key: str, available_at: datet
                   nullif(row_data->>'pb','')::numeric,nullif(row_data->>'total_share','')::numeric,
                   nullif(row_data->>'float_share','')::numeric,nullif(row_data->>'total_mv','')::numeric,
                   nullif(row_data->>'circ_mv','')::numeric,%s,%s,row_data
-             FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{8}$'
+             FROM stage
            ON CONFLICT(symbol,trading_date,provider) DO UPDATE SET
              close=EXCLUDED.close,turnover_rate=EXCLUDED.turnover_rate,volume_ratio=EXCLUDED.volume_ratio,
              pe=EXCLUDED.pe,pb=EXCLUDED.pb,total_share=EXCLUDED.total_share,float_share=EXCLUDED.float_share,
@@ -322,13 +373,18 @@ def _persist_daily_basic(connection: Any, provider_key: str, available_at: datet
     )
 
 
-def _persist_stk_limit(connection: Any, provider_key: str, available_at: datetime) -> None:
+def _persist_stk_limit(connection: Any, provider_key: str, available_at: datetime, _ingested_at: datetime,
+                       _availability_basis: str) -> None:
     _persist_instruments_from_stage(connection, provider_key)
     connection.execute(
-        """INSERT INTO quant.daily_trade_limits(symbol,trading_date,limit_up,limit_down,provider,available_at,raw)
+        """WITH stage AS (
+               SELECT DISTINCT ON(upper(row_data->>'ts_code'),row_data->>'trade_date') row_data
+                 FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{8}$'
+                ORDER BY upper(row_data->>'ts_code'),row_data->>'trade_date',record_index DESC
+           ) INSERT INTO quant.daily_trade_limits(symbol,trading_date,limit_up,limit_down,provider,available_at,raw)
            SELECT upper(row_data->>'ts_code'),to_date(row_data->>'trade_date','YYYYMMDD'),
                   nullif(row_data->>'up_limit','')::numeric,nullif(row_data->>'down_limit','')::numeric,%s,%s,row_data
-             FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{8}$'
+             FROM stage
            ON CONFLICT(symbol,trading_date,provider) DO UPDATE SET
              limit_up=EXCLUDED.limit_up,limit_down=EXCLUDED.limit_down,
              available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
@@ -336,16 +392,21 @@ def _persist_stk_limit(connection: Any, provider_key: str, available_at: datetim
     )
     for table in ("market_bars_daily", "canonical_bars_daily"):
         connection.execute(
-            f"""UPDATE quant.{table} bar
+            f"""WITH stage AS (
+                   SELECT DISTINCT ON(upper(row_data->>'ts_code'),row_data->>'trade_date') row_data
+                     FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{{8}}$'
+                    ORDER BY upper(row_data->>'ts_code'),row_data->>'trade_date',record_index DESC
+               ) UPDATE quant.{table} bar
                    SET limit_up=nullif(stage.row_data->>'up_limit','')::numeric,
                        limit_down=nullif(stage.row_data->>'down_limit','')::numeric
-                  FROM annual_daily_stage stage
+                  FROM stage
                  WHERE bar.symbol=upper(stage.row_data->>'ts_code')
                    AND bar.trading_date=to_date(stage.row_data->>'trade_date','YYYYMMDD')"""
         )
 
 
-def _persist_suspend_d(connection: Any, provider_key: str, available_at: datetime) -> None:
+def _persist_suspend_d(connection: Any, provider_key: str, available_at: datetime, _ingested_at: datetime,
+                       _availability_basis: str) -> None:
     _persist_instruments_from_stage(connection, provider_key)
     connection.execute(
         """INSERT INTO quant.security_suspensions(
@@ -357,7 +418,7 @@ def _persist_suspend_d(connection: Any, provider_key: str, available_at: datetim
              FROM (
                SELECT DISTINCT ON(upper(row_data->>'ts_code'),row_data->>'trade_date') row_data
                  FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{8}$'
-                ORDER BY upper(row_data->>'ts_code'),row_data->>'trade_date',record_index
+                ORDER BY upper(row_data->>'ts_code'),row_data->>'trade_date',record_index DESC
              ) stage
            ON CONFLICT(symbol,suspend_date,provider) DO UPDATE SET
              resume_date=EXCLUDED.resume_date,suspend_reason=EXCLUDED.suspend_reason,
@@ -365,8 +426,12 @@ def _persist_suspend_d(connection: Any, provider_key: str, available_at: datetim
         (provider_key, available_at),
     )
     connection.execute(
-        """UPDATE quant.canonical_bars_daily bar SET is_suspended=true,canonicalized_at=now()
-              FROM annual_daily_stage stage
+        """WITH stage AS (
+               SELECT DISTINCT ON(upper(row_data->>'ts_code'),row_data->>'trade_date') row_data
+                 FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{8}$'
+                ORDER BY upper(row_data->>'ts_code'),row_data->>'trade_date',record_index DESC
+           ) UPDATE quant.canonical_bars_daily bar SET is_suspended=true,canonicalized_at=now()
+              FROM stage
              WHERE bar.symbol=upper(stage.row_data->>'ts_code')
                AND ((stage.row_data->>'resume_date' ~ '^\\d{8}$'
                      AND bar.trading_date>=to_date(stage.row_data->>'trade_date','YYYYMMDD')
@@ -416,7 +481,8 @@ def _persist_stock_basic(connection: Any, provider_key: str) -> None:
 
 
 def _persist_sector_flow(
-    connection: Any, provider_key: str, available_at: datetime, *, kind: str,
+    connection: Any, provider_key: str, available_at: datetime, _ingested_at: datetime | None = None,
+    _availability_basis: str | None = None, *, kind: str,
 ) -> None:
     if kind == "industry_flow":
         taxonomy_key, label, name_field, close_field = "ths_industry", "同花顺行业", "industry", "close"
@@ -432,23 +498,33 @@ def _persist_sector_flow(
         (taxonomy_key, label, provider_key, Json({"backfill": "annual_daily_backfill_v1"})),
     )
     connection.execute(
-        """INSERT INTO quant.sectors(taxonomy_key,sector_key,label,metadata)
+        """WITH stage AS (
+               SELECT DISTINCT ON(row_data->>'ts_code') row_data
+                 FROM annual_daily_stage
+                WHERE row_data->>'ts_code' LIKE '%%.TI'
+                ORDER BY row_data->>'ts_code',record_index DESC
+           ) INSERT INTO quant.sectors(taxonomy_key,sector_key,label,metadata)
             SELECT %s,row_data->>'ts_code',row_data->>%s::text,
                    jsonb_build_object(%s::text,row_data->>%s::text)
-              FROM annual_daily_stage
-             WHERE row_data->>'ts_code' LIKE '%%.TI' AND nullif(row_data->>%s::text,'') IS NOT NULL
+              FROM stage
+             WHERE nullif(row_data->>%s::text,'') IS NOT NULL
             ON CONFLICT(taxonomy_key,sector_key) DO UPDATE SET
               label=EXCLUDED.label,metadata=EXCLUDED.metadata,updated_at=now()""",
         (taxonomy_key, name_field, name_field, name_field, name_field),
     )
     if kind == "limit_strength":
         connection.execute(
-            """INSERT INTO quant.sector_market_observations(
+            """WITH stage AS (
+                   SELECT DISTINCT ON(row_data->>'ts_code',row_data->>'trade_date') row_data
+                     FROM annual_daily_stage
+                    WHERE row_data->>'trade_date' ~ '^\\d{8}$' AND row_data->>'ts_code' LIKE '%%.TI'
+                    ORDER BY row_data->>'ts_code',row_data->>'trade_date',record_index DESC
+               ) INSERT INTO quant.sector_market_observations(
                    taxonomy_key,sector_key,trading_date,provider_key,available_at,change_pct,constituent_count,raw)
                SELECT %s,row_data->>'ts_code',to_date(row_data->>'trade_date','YYYYMMDD'),%s,%s,
                       nullif(row_data->>'pct_chg','')::numeric,
                       nullif(row_data->>'cons_nums','')::integer,row_data
-                 FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{8}$'
+                 FROM stage
                ON CONFLICT(taxonomy_key,sector_key,trading_date,provider_key) DO UPDATE SET
                  available_at=EXCLUDED.available_at,change_pct=EXCLUDED.change_pct,
                  constituent_count=EXCLUDED.constituent_count,raw=EXCLUDED.raw""",
@@ -456,7 +532,12 @@ def _persist_sector_flow(
         )
         return
     connection.execute(
-        """INSERT INTO quant.sector_market_observations(
+        """WITH stage AS (
+               SELECT DISTINCT ON(row_data->>'ts_code',row_data->>'trade_date') row_data
+                 FROM annual_daily_stage
+                WHERE row_data->>'trade_date' ~ '^\\d{8}$' AND row_data->>'ts_code' LIKE '%%.TI'
+                ORDER BY row_data->>'ts_code',row_data->>'trade_date',record_index DESC
+           ) INSERT INTO quant.sector_market_observations(
                taxonomy_key,sector_key,trading_date,provider_key,available_at,close,change_pct,
                net_amount,net_buy_amount,net_sell_amount,constituent_count,leading_label,raw)
            SELECT %s,row_data->>'ts_code',to_date(row_data->>'trade_date','YYYYMMDD'),%s,%s,
@@ -464,7 +545,7 @@ def _persist_sector_flow(
                   nullif(row_data->>'net_amount','')::numeric,nullif(row_data->>'net_buy_amount','')::numeric,
                   nullif(row_data->>'net_sell_amount','')::numeric,
                   nullif(row_data->>'company_num','')::integer,row_data->>'lead_stock',row_data
-             FROM annual_daily_stage WHERE row_data->>'trade_date' ~ '^\\d{8}$'
+             FROM stage
            ON CONFLICT(taxonomy_key,sector_key,trading_date,provider_key) DO UPDATE SET
              available_at=EXCLUDED.available_at,close=EXCLUDED.close,change_pct=EXCLUDED.change_pct,
              net_amount=EXCLUDED.net_amount,net_buy_amount=EXCLUDED.net_buy_amount,
@@ -528,17 +609,30 @@ class AnnualDailyBackfill:
                 (type(error).__name__, detail, key),
             )
 
+    @staticmethod
+    def _promote_staged(
+        connection: Any, provider_key: str, promote: str, available_at: datetime,
+        ingested_at: datetime, availability_basis: str,
+    ) -> None:
+        """Materialize derived facts from the caller's staged rows only."""
+        if promote == "index_daily":
+            _persist_daily(connection, provider_key, available_at, ingested_at, availability_basis, index_mode=True)
+        elif promote in PROMOTERS:
+            PROMOTERS[promote](connection, provider_key, available_at, ingested_at, availability_basis)
+        elif promote in {"industry_flow", "concept_flow", "limit_strength"}:
+            _persist_sector_flow(connection, provider_key, available_at, ingested_at, availability_basis, kind=promote)
+
     def _store(
         self, provider_key: str, api_name: str, key: str, rows: list[dict[str, Any]], promote: str,
+        *, trade_date: date | None = None,
     ) -> None:
-        available_at = datetime.now(timezone.utc)
+        ingested_at = datetime.now(timezone.utc)
+        available_at = historical_daily_strategy_available_at(trade_date) if trade_date else ingested_at
+        availability_basis = HISTORICAL_DAILY_AVAILABILITY_BASIS if trade_date else INGESTED_AVAILABILITY_BASIS
         with self.db.transaction() as connection:
             _stage_rows(connection, rows)
-            _persist_raw(connection, provider_key, api_name, key, available_at)
-            if promote in PROMOTERS:
-                PROMOTERS[promote](connection, provider_key, available_at)
-            elif promote in {"industry_flow", "concept_flow", "limit_strength"}:
-                _persist_sector_flow(connection, provider_key, available_at, kind=promote)
+            _persist_raw(connection, provider_key, api_name, key, available_at, ingested_at, availability_basis)
+            self._promote_staged(connection, provider_key, promote, available_at, ingested_at, availability_basis)
 
     async def fetch_one(
         self, spec: ApiSpec, params: dict[str, Any], *, day: date | None = None,
@@ -568,7 +662,7 @@ class AnnualDailyBackfill:
                 )
             if not filtered and not spec.legal_empty and spec.minimum_rows == 0:
                 raise ProviderCallError(f"{spec.api_name} returned an unexpected empty response")
-            self._store(provider.key, spec.api_name, key, filtered, spec.promote)
+            self._store(provider.key, spec.api_name, key, filtered, spec.promote, trade_date=day)
             self._finish_run(key, len(filtered))
             self.counts[spec.api_name] = self.counts.get(spec.api_name, 0) + len(filtered)
             return "completed"
@@ -596,7 +690,8 @@ class AnnualDailyBackfill:
                 available_at = datetime.now(timezone.utc)
                 with self.db.transaction() as connection:
                     _stage_rows(connection, rows)
-                    _persist_raw(connection, primary.key, "trade_cal", key, available_at)
+                    _persist_raw(connection, primary.key, "trade_cal", key, available_at, available_at,
+                                 INGESTED_AVAILABILITY_BASIS)
                     _persist_trade_calendar(connection, primary.key, available_at)
                 self._finish_run(key, len(rows))
             except Exception as error:
@@ -616,7 +711,8 @@ class AnnualDailyBackfill:
                 available_at = datetime.now(timezone.utc)
                 with self.db.transaction() as connection:
                     _stage_rows(connection, rows)
-                    _persist_raw(connection, primary.key, "stock_basic", stock_key, available_at)
+                    _persist_raw(connection, primary.key, "stock_basic", stock_key, available_at, available_at,
+                                 INGESTED_AVAILABILITY_BASIS)
                     _persist_stock_basic(connection, primary.key)
                 self._finish_run(stock_key, len(rows))
             except Exception as error:
@@ -678,11 +774,21 @@ class AnnualDailyBackfill:
                 rows = await call_provider(provider, "index_daily", params, None)
                 if len(rows) < spec.minimum_rows:
                     raise ProviderCallError(f"index_daily {symbol} returned only {len(rows)} rows")
-                available_at = datetime.now(timezone.utc)
-                with self.db.transaction() as connection:
-                    _stage_rows(connection, rows)
-                    _persist_raw(connection, provider.key, "index_daily", key, available_at)
-                    _persist_daily(connection, provider.key, available_at, index_mode=True)
+                # The response spans a year. Project one daily availability
+                # clock per bar instead of stamping every past index close with
+                # the range request's final import time.
+                by_day: dict[date, list[dict[str, Any]]] = {}
+                for row in rows:
+                    stamp = str(row.get("trade_date") or "")
+                    try:
+                        row_day = datetime.strptime(stamp, "%Y%m%d").date()
+                    except ValueError:
+                        continue
+                    by_day.setdefault(row_day, []).append(dict(row))
+                if not by_day:
+                    raise ProviderCallError(f"index_daily {symbol} returned no dated rows")
+                for row_day, day_rows in by_day.items():
+                    self._store(provider.key, "index_daily", key, day_rows, "index_daily", trade_date=row_day)
                 self._finish_run(key, len(rows))
                 self.counts["index_daily"] = self.counts.get("index_daily", 0) + len(rows)
             except Exception as error:
@@ -826,13 +932,83 @@ class AnnualDailyBackfill:
             "last_outcomes": results[-1].get("outcomes") if results else None,
         }
 
-    async def run(self) -> dict[str, Any]:
-        days = await self.bootstrap()
+    def reproject_stored_historical_clocks(self) -> tuple[list[date], dict[str, int]]:
+        """Promote retained daily raw rows with the declared PIT clock only.
+
+        This repairs the one-year baseline created before the dual-clock
+        contract without calling a provider or changing raw row content. The
+        original receipt timestamp remains recoverable as ``ingested_at`` on
+        the facts being reprojected.
+        """
+        specs = (*CORE_DAILY_SPECS, *SECTOR_EVENT_SPECS, ApiSpec("index_daily", "primary", promote="index_daily"))
+        api_names = [item.api_name for item in specs]
+        with self.db.transaction() as connection:
+            day_rows = connection.execute(
+                """SELECT DISTINCT to_date(row_data->>'trade_date','YYYYMMDD') AS trading_date
+                     FROM quant.tushare_raw_records
+                    WHERE api_name=ANY(%s) AND row_data->>'trade_date' ~ '^\\d{8}$'
+                      AND to_date(row_data->>'trade_date','YYYYMMDD') BETWEEN %s AND %s
+                    ORDER BY trading_date""",
+                (api_names, self.start_date, self.end_date),
+            ).fetchall()
+        days = [row["trading_date"] for row in day_rows]
+        counts: dict[str, int] = {}
+        for day in days:
+            stamp = day.strftime("%Y%m%d")
+            available_at = historical_daily_strategy_available_at(day)
+            for spec in specs:
+                provider_key = self.providers[spec.provider_name].key
+                with self.db.transaction() as connection:
+                    rows = connection.execute(
+                        """SELECT row_data FROM quant.tushare_raw_records
+                             WHERE provider_key=%s AND api_name=%s AND row_data->>'trade_date'=%s
+                             ORDER BY record_index""",
+                        (provider_key, spec.api_name, stamp),
+                    ).fetchall()
+                payload = valid_rows(spec.api_name, [dict(row["row_data"]) for row in rows], day)
+                if not payload:
+                    continue
+                # This is a local correction of facts that already exist.  Do
+                # not route through ``_persist_raw``: legacy receipts use a
+                # different stable record-key convention, and doing so would
+                # create duplicate raw rows even though the content is known.
+                # Preserve the old availability value as the actual local
+                # receipt clock before assigning the declared strategy clock.
+                with self.db.transaction() as connection:
+                    connection.execute(
+                        """UPDATE quant.tushare_raw_records
+                              SET ingested_at=coalesce(ingested_at,available_at),
+                                  available_at=least(available_at,%s),
+                                  availability_basis=%s
+                            WHERE provider_key=%s AND api_name=%s AND row_data->>'trade_date'=%s""",
+                        (available_at, HISTORICAL_DAILY_AVAILABILITY_BASIS, provider_key, spec.api_name, stamp),
+                    )
+                    _stage_rows(connection, payload)
+                    self._promote_staged(
+                        connection, provider_key, spec.promote, available_at,
+                        datetime.now(timezone.utc), HISTORICAL_DAILY_AVAILABILITY_BASIS,
+                    )
+                counts[spec.api_name] = counts.get(spec.api_name, 0) + len(payload)
+        return days, counts
+
+    async def run(self, *, reproject_only: bool = False) -> dict[str, Any]:
+        if reproject_only:
+            days, reprojection_counts = self.reproject_stored_historical_clocks()
+            if not days:
+                raise RuntimeError("no stored dated annual raw rows exist in the requested range")
+            print(json.dumps({
+                "status": "reprojecting", "start_date": str(self.start_date), "end_date": str(self.end_date),
+                "open_days": len(days), "provider_requests": 0,
+            }), flush=True)
+        else:
+            days = await self.bootstrap()
+            reprojection_counts = {}
         print(json.dumps({
             "status": "started", "start_date": str(self.start_date), "end_date": str(self.end_date),
-            "open_days": len(days), "minute_data": False,
+            "open_days": len(days), "minute_data": False, "reproject_only": reproject_only,
         }), flush=True)
-        await asyncio.gather(self.core_lane(days), self.sector_lane(days), self.index_lane())
+        if not reproject_only:
+            await asyncio.gather(self.core_lane(days), self.sector_lane(days), self.index_lane())
         self.reconcile_suspensions()
         sector_promotions = self.promote_stored_sector_flows()
         market_aggregates = self.materialize_daily_market_aggregates()
@@ -852,6 +1028,7 @@ class AnnualDailyBackfill:
             "status": "partial" if self.failures else "completed",
             "start_date": str(self.start_date), "end_date": str(self.end_date),
             "open_days": len(days), "minute_data": False, "row_counts": self.counts,
+            "reproject_only": reproject_only, "reprojected_row_counts": reprojection_counts,
             "coverage": dict(coverage), "market_aggregates": market_aggregates,
             "sector_promotions": sector_promotions,
             "sector_features": feature_result,
@@ -864,6 +1041,10 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--start-date", required=True, type=parse_iso_date)
     command.add_argument("--end-date", required=True, type=parse_iso_date)
     command.add_argument(
+        "--reproject-only", action="store_true",
+        help="use already retained rows to repair strategy availability clocks; makes no provider request",
+    )
+    command.add_argument(
         "--confirm-historical-backfill", default=None,
         help="required explicit acknowledgement before any historical provider request",
     )
@@ -873,13 +1054,16 @@ def parser() -> argparse.ArgumentParser:
 async def async_main() -> int:
     command = parser()
     args = command.parse_args()
-    try:
-        validate_historical_backfill_confirmation(args.confirm_historical_backfill)
-    except ValueError as error:
-        command.error(str(error))
+    if not args.reproject_only:
+        try:
+            validate_historical_backfill_confirmation(args.confirm_historical_backfill)
+        except ValueError as error:
+            command.error(str(error))
     database = Database()
     try:
-        result = await AnnualDailyBackfill(database, args.start_date, args.end_date).run()
+        result = await AnnualDailyBackfill(database, args.start_date, args.end_date).run(
+            reproject_only=args.reproject_only,
+        )
         print(json.dumps(result, ensure_ascii=False, default=str), flush=True)
         return 0 if result["status"] == "completed" else 2
     finally:

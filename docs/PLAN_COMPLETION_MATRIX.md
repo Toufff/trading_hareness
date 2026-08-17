@@ -48,7 +48,7 @@
 
 | 项目 | 状态 | 准入条件 |
 | --- | --- | --- |
-| 3–5 年日线、复权、停牌、涨跌停、退市点时成员 | 暂停 | 用户授权范围、provider 预算和存储预算 |
+| 一年日线、复权、停牌、涨跌停与日频板块/龙虎榜证据 | 已完成（保守 PIT 时钟） | 2025-08-15 至 2026-08-14 共 242 个交易日；`daily`、`adj_factor`、`daily_basic`、`stk_limit`、`suspend_d`、行业/概念资金流和指数日线均由已留存 raw 记录本地重投影，零 provider 请求。每条日频事实保留 `ingested_at`，策略 `available_at` 明确标为 `assumed_eod_1700_asia_shanghai_v1`，不是供应商发布时间。3–5 年、退市点时成员仍暂停 |
 | 因子研究的点时成分与内存边界 | 已完成逻辑地基 | SQL 因子面板按 `universe_membership_history`、上市/退市日期过滤；兼容 Python 引擎仅允许不超过 250 个成分的诊断，广义全 A 在读取前 fail-closed，必须走数据库内的有界 SQL 引擎。当前历史覆盖尚未回填，故不能将该地基误作完整历史验证 |
 | 历史分钟回放 | 因果时间合同已完成；价格路径回放暂停 | 本地分钟行现区分 `bar_time`（K 线收盘时刻）、`source_available_at`（供应商记录的可用时刻）和本地 `available_at`（导入时刻）。没有前者的文件不得进入回放；`offline_minute_bar` 只构造按来源可用时间排序的确定性事件，不会伪造同刻报价/板块/因子输入或重跑价格规则。仍需具备来源可用时钟的本地文件或明确回填授权，以及复用 live `SignalSpec` 的完整冻结证据包 |
 | 未来盘中规则回放证据 | 已完成采证与一致性重放基础，验证未开始 | `intraday_rule_input_snapshots` 的 `intraday-rule-input-v1` 与输入哈希可通过 `/api/v1/strategies/intraday/replay-recorded-inputs` 重放同一核心纯 `signal_rules`，每次写入幂等 `input_hash`/`trace_hash`；`/api/v1/data-readiness/replay` 将前向采证日数单列展示，绝不将其混作历史分钟样本。路由无 provider、历史导入、阈值拟合或订单能力，并明确排除 policy gate、纸面执行和收益结论。数据有 60–120 天有界留存，只从本次上线后的真实扫描累积，不改变既有事件、不可替代获授权的历史分钟数据或完整市场横截面 |
@@ -81,7 +81,7 @@
 - 分析师报告/消息工作流已经拆分、凭据域名和 JSON Body 已修复；本轮又将 `workflow_entity.versionId` 与发布版本对齐并重启 n8n。两条图均保留独立 Schedule Trigger，并新增不参与定时的 Manual Trigger，供运行中 n8n 的 UI 受控验收。2026-08-16 已用现有凭据对报告/消息流各做一次有界文字-only同步，服务端均返回 `completed`；但 n8n 2.33 的隔离 CLI 进程会把自身执行行遗留为 `mode=cli/running`，即使 HTTP 节点返回成功。因此健康页只接受 `mode=trigger` 且版本等于当前发布版的终态成功，CLI 冒烟不再误报为失败或定时验收；孤儿 CLI 行仍由 `scripts/reconcile-stale-n8n-executions.sh` 保留审计后收口。零项消息轮询会记录独立的 45 日 liveness 回执，而不伪造内容游标推进。当前仍需一次“当前发布版本 + trigger success”的正式运行证据，故 P0-A1 不标为完全验收。
 - 前端 `Unexpected token '<'` 已修复：adapter 补齐 `/api/research/remote-archive/messages`、`/api/research/analyst-skills`、`/api/research/analyst-research/status` 三个缺失代理，前端 JSON 解码器现在会检查非 JSON 响应并给出接口路径/状态提示，不再把 SPA HTML 当 JSON 解析。三个代理真实返回 `Content-Type: application/json`；`vue-tsc --noEmit` 与 Vite build 均通过。
 - 盘后一键刷新修复验证：BaoStock 隔离同步此前因 `baostock_code` 关键字无法穿过公共源有界执行器而必然失败，现已在执行器内用 `partial` 安全转发关键字，并补充回归测试。2026-08-14 重试时 Super GET `daily_all` 成功写入 5,540 条日线，盘后策略同日完成（5,540 日线标的、5,521 个具备 15 日窗口，严格 30 日结构门槛下候选 0）；未拉取历史数据。
-- 仍未完成且保持原边界：历史数据回填、分钟回放、60 日/200 signal episode 样本外验证、Prompt Lab champion/challenger 晋级、RL/contextual bandit、组合自动熔断和策略自动降级。上述项目没有因本次实时修复而改变阈值或分析师 live 权重。
+- 仍未完成且保持原边界：3–5 年扩展历史、分钟路径回放、60 日/200 signal episode 样本外验证、Prompt Lab champion/challenger 晋级、RL/contextual bandit、组合自动熔断和策略自动降级。一年日频 PIT 修复不构成分钟回放或阈值调参授权，也没有改变分析师 live 权重。
 
 ## 2026-08-16 收口记录
 
@@ -93,4 +93,4 @@
 
 ## 下一次恢复条件
 
-在用户明确授权历史数据之前，只继续做不改变研究结论的工程余项；一旦授权，先执行 P2 数据就绪审计，再开启分钟回放，最后才允许 P3 统计验证。任何未通过项继续保持 `research_only` / `descriptive_only`，不得写入 live 阈值或分析师权重。
+已按授权范围完成一年日频的本地 PIT 修复；在用户明确授权扩展至 3–5 年、取得带来源可用时钟的分钟数据并通过 P2 数据就绪审计之前，不开启分钟回放或 P3 统计验证。任何未通过项继续保持 `research_only` / `descriptive_only`，不得写入 live 阈值或分析师权重。

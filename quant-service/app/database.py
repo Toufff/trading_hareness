@@ -204,6 +204,8 @@ CREATE TABLE IF NOT EXISTS quant.raw_market_observations (
     symbol text,
     effective_at timestamptz NOT NULL,
     available_at timestamptz NOT NULL,
+    ingested_at timestamptz,
+    availability_basis text,
     payload_sha256 text NOT NULL,
     normalized jsonb NOT NULL DEFAULT '{}'::jsonb,
     payload jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -226,6 +228,8 @@ CREATE TABLE IF NOT EXISTS quant.tushare_raw_records (
     content_sha256 text NOT NULL,
     row_data jsonb NOT NULL,
     available_at timestamptz NOT NULL,
+    ingested_at timestamptz,
+    availability_basis text,
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE(api_name, record_key, content_sha256)
 );
