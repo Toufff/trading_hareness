@@ -64,6 +64,13 @@ class AnnualDailyBackfillTests(unittest.TestCase):
         self.assertIn("CORE_DAILY_SPECS[3:]", source)
         self.assertIn("await asyncio.sleep(HISTORICAL_SUPER_SDK_GROUP_COOLDOWN_SECONDS)", source)
 
+    def test_historical_backfill_enforces_the_same_hot_database_budget_as_runtime_health(self):
+        source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
+        self.assertIn("def _enforce_hot_storage_budget", source)
+        self.assertIn("QUANT_HOT_DATABASE_SOFT_BYTES", source)
+        self.assertIn("hot_database_above_80_percent", source)
+        self.assertIn("historical backfill stopped at hot database budget", source)
+
     def test_stock_cross_section_filters_non_a_codes_and_wrong_dates(self):
         rows = valid_rows("stk_limit", [
             {"ts_code": "600000.SH", "trade_date": "20260814"},

@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
@@ -28,6 +29,7 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Json, Jsonb
 
 from .database import Database
+from .runtime_resources import DEFAULT_HOT_DATABASE_SOFT_BYTES, bounded_storage_budget_bytes
 from .sector_flow_repository import rebuild_sector_flow_daily_features
 from .tushare_providers import ProviderCallError, call_provider, provider_configs, safe_error_detail
 from .universe_history import rebuild_historical_membership_from_canonical
@@ -596,6 +598,7 @@ class AnnualDailyBackfill:
         self.providers = provider_configs()
         self.failures: list[dict[str, Any]] = []
         self.counts: dict[str, int] = {}
+        self._storage_warning_emitted = False
         # A backfill is a bounded batch, not a live retry loop.  Once a
         # provider/API route has failed, retain that first durable failure but
         # let the audited fallback serve its remaining dates.  This prevents a
@@ -668,6 +671,38 @@ class AnnualDailyBackfill:
                 (f"annual:{api_name}", Json({"params": params})),
             ).fetchone()
         return bool(row)
+
+    def _enforce_hot_storage_budget(self) -> None:
+        """Stop a future historical write before it exceeds the hot-data cap.
+
+        The status endpoint reports the same cap, but a long-running CLI batch
+        must enforce it at its own write boundary.  The command is resumable:
+        stopping here leaves completed days intact and the next execution can
+        continue once space is available or the approved budget changes.
+        """
+        budget = bounded_storage_budget_bytes(
+            os.getenv("QUANT_HOT_DATABASE_SOFT_BYTES"), DEFAULT_HOT_DATABASE_SOFT_BYTES,
+            DEFAULT_HOT_DATABASE_SOFT_BYTES,
+        )
+        with self.db.transaction() as connection:
+            row = connection.execute(
+                """SELECT coalesce(sum(pg_total_relation_size(c.oid)),0)::bigint AS bytes
+                     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                    WHERE n.nspname='quant' AND c.relkind IN ('r','m','p')""",
+            ).fetchone()
+        used = int((row or {}).get("bytes") or 0)
+        ratio = used / budget if budget else 1.0
+        if used >= budget:
+            raise RuntimeError(
+                f"historical backfill stopped at hot database budget: used={used} budget={budget}; "
+                "completed checkpoints remain resumable"
+            )
+        if ratio >= 0.80 and not self._storage_warning_emitted:
+            self._storage_warning_emitted = True
+            print(json.dumps({
+                "storage_warning": "hot_database_above_80_percent", "used_bytes": used,
+                "budget_bytes": budget, "ratio": round(ratio, 4),
+            }), flush=True)
 
     @staticmethod
     def _promote_staged(
@@ -847,6 +882,7 @@ class AnnualDailyBackfill:
 
     async def core_lane(self, days: list[date]) -> None:
         for index, day in enumerate(days, start=1):
+            self._enforce_hot_storage_budget()
             stamp = day.strftime("%Y%m%d")
             # City/Super SDK accepts three mixed full-market requests per
             # observed rolling window.  Split the five independent control
