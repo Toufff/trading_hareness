@@ -116,6 +116,24 @@ class RemoteArchiveSyncService:
             transport=self._transport, sleep=self._sleep,
         )
 
+    async def _wait_for_stream_slot(self, stream: str, minimum_interval: float) -> None:
+        """Serialize duplicate local triggers instead of returning a local 429.
+
+        The caller owns ``_stream_locks[stream]``.  That establishes a single
+        writer for this stream's cursor, while the tiny shared lock protects
+        the timing ledger from a concurrent reports/messages invocation.  A
+        workflow retry can therefore wait for the remainder of the interval
+        inside its HTTP timeout instead of creating an avoidable n8n error.
+        """
+        async with self._lock:
+            now = asyncio.get_running_loop().time()
+            last_started = self._last_started.get(stream)
+            remaining = max(0.0, minimum_interval - (now - last_started)) if last_started else 0.0
+        if remaining:
+            await self._sleep(remaining)
+        async with self._lock:
+            self._last_started[stream] = asyncio.get_running_loop().time()
+
     async def _messages(self, client: httpx.AsyncClient, maximum: int) -> dict[str, Any]:
         cursor_state = await self._run_database_blocking(self._message_cursor_state, timeout_seconds=15)
         params: dict[str, Any] = {"limit": maximum}
@@ -223,15 +241,7 @@ class RemoteArchiveSyncService:
         if not settings["base_url"] or not bearer:
             raise HTTPException(status_code=503, detail="remote analyst archive sync is not configured")
         maximum = min(payload.max_items, int(settings["max_items"]))
-        async with self._lock:
-            now = asyncio.get_running_loop().time()
-            minimum_interval = float(settings["minimum_interval_seconds"])
-            for stream in payload.streams:
-                elapsed = now - self._last_started.get(stream, 0.0)
-                if self._last_started.get(stream) and elapsed < minimum_interval:
-                    raise HTTPException(status_code=429, detail=f"remote analyst archive {stream} sync is rate limited locally")
-            for stream in payload.streams:
-                self._last_started[stream] = now
+        minimum_interval = float(settings["minimum_interval_seconds"])
         # Keep the expensive TCP/TLS client process-owned. Authorization is
         # deliberately attached by the short-lived wrapper below, rather than
         # to the pooled client, so a rotated n8n credential can never leak
@@ -241,23 +251,24 @@ class RemoteArchiveSyncService:
             client = _AuthorizedArchiveClient(pooled_client, base_url=str(settings["base_url"]), bearer=bearer)
             results: dict[str, Any] = {}
             for stream in payload.streams:
-                # A one-stream n8n workflow owns this lock for only its own
-                # cursor mutation.  RemoteArchiveTransport still serializes
-                # individual requests and respects upstream Retry-After.
-                started_at = datetime.now(timezone.utc)
-                try:
-                    async with self._stream_locks[stream]:
+                # A one-stream n8n workflow owns this lock for its cursor
+                # mutation and local pacing.  RemoteArchiveTransport still
+                # serializes individual remote requests and honors Retry-After.
+                async with self._stream_locks[stream]:
+                    await self._wait_for_stream_slot(stream, minimum_interval)
+                    started_at = datetime.now(timezone.utc)
+                    try:
                         result = await (
                             self._messages(client, maximum) if stream == "messages" else self._reports(client, maximum)
                         )
-                except Exception as error:
-                    error_code = (
-                        f"http_{error.status_code}" if isinstance(error, HTTPException) else type(error).__name__
-                    )
-                    await self._record(stream, "failed", started_at, datetime.now(timezone.utc), error_code)
-                    raise
-                await self._record(stream, "completed", started_at, datetime.now(timezone.utc), None, result)
-                results[stream] = result
+                    except Exception as error:
+                        error_code = (
+                            f"http_{error.status_code}" if isinstance(error, HTTPException) else type(error).__name__
+                        )
+                        await self._record(stream, "failed", started_at, datetime.now(timezone.utc), error_code)
+                        raise
+                    await self._record(stream, "completed", started_at, datetime.now(timezone.utc), None, result)
+                    results[stream] = result
         return {"status": "completed", "streams": results, "text_only": True, "history_fetch": False}
 
 

@@ -426,6 +426,52 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         self.assertEqual(len(recorded), 1)
         self.assertEqual(recorded[0][1:3], ("messages", "completed"))
 
+    def test_duplicate_same_stream_sync_waits_instead_of_returning_local_rate_limit(self):
+        import asyncio
+
+        recorded = []
+
+        async def run_database(action, *args, timeout_seconds):
+            return action(*args)
+
+        async def fake_messages(_client, _maximum):
+            await asyncio.sleep(0.002)
+            return {"status": "completed", "items": 0, "imported": 0, "terminal": True}
+
+        service = RemoteArchiveSyncService(
+            settings=lambda: {"base_url": "https://archive.example", "ca_file": None, "max_items": 20,
+                              "minimum_interval_seconds": 0.01}, transport=MagicMock(), database=MagicMock(),
+            run_database_blocking=run_database, message_cursor_state=MagicMock(), report_cursor_state=MagicMock(),
+            import_message=MagicMock(), import_report=MagicMock(), update_global_cursor=MagicMock(),
+            update_report_cursor=MagicMock(), message_cursor_update=MagicMock(), report_cursor_update=MagicMock(),
+            parse_timestamp=MagicMock(), record_attempt=lambda *_args: recorded.append(_args),
+        )
+        service._messages = fake_messages
+
+        class Payload:
+            streams = ["messages"]
+            max_items = 20
+
+        class Client:
+            async def get(self, *_args, **_kwargs):
+                raise AssertionError("duplicate-pacing test must not issue a remote request")
+
+        @asynccontextmanager
+        async def client_context(*_args, **_kwargs):
+            yield Client()
+
+        async def run_duplicates():
+            return await asyncio.gather(
+                service.sync(Payload(), "Bearer " + "a" * 32),
+                service.sync(Payload(), "Bearer " + "a" * 32),
+            )
+
+        with patch("app.remote_archive_sync.remote_archive_http_client", client_context):
+            first, second = asyncio.run(run_duplicates())
+        self.assertEqual(first["status"], "completed")
+        self.assertEqual(second["status"], "completed")
+        self.assertEqual([record[2] for record in recorded], ["completed", "completed"])
+
     def test_message_evidence_review_preserves_immutable_availability(self):
         available_at = datetime(2026, 8, 12, 2, 1, tzinfo=timezone.utc)
         item = {
