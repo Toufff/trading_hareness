@@ -126,6 +126,7 @@ from .post_close_strategy_service import (
     run as persisted_run_post_close_strategy,
 )
 from .post_close_scheduler import PostCloseSchedulerDependencies, post_close_strategy_scheduler
+from .strategy_review_scheduler import StrategyReviewSchedulerDependencies, strategy_review_scheduler
 from .strategy_pattern_read_model import latest_strategy_pattern_mining as read_latest_strategy_pattern_mining
 from .intraday_outcome_settlement import settle as persist_intraday_outcome_settlement
 from .tushare_normalization import normalize_rows as pure_normalize_tushare_rows
@@ -4670,36 +4671,43 @@ async def sse_calendar_open_async(calendar_date: date) -> bool:
 
 
 async def strategy_review_loop() -> None:
-    """Capture a point-in-time noon and close review once per SSE open day."""
-    completed: set[tuple[date, str]] = set()
-    checkpoints = (("midday", time(11, 31)), ("close", time(15, 5)))
-    while True:
-        local = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
-        if await sse_calendar_open_async(local.date()):
-            for session, checkpoint in checkpoints:
-                key = (local.date(), session)
-                checkpoint_end = (datetime.combine(local.date(), checkpoint) + timedelta(minutes=2)).time()
-                if key in completed or not (checkpoint <= local.time() < checkpoint_end):
-                    continue
-                try:
-                    if session == "close":
-                        await sync_strategy_index_context(local.date())
-                    await build_market_snapshot(MarketSnapshotRequest(session=session, refresh_public_quotes=True))
-                    await run_intraday_board_report(deliver=False)
-                    if session == "close":
-                        # All settlement reads only persisted quotes/bars, so
-                        # the close checkpoint cannot alter a signal or pull a
-                        # fresh provider response into its historical result.
-                        await run_database_blocking(recompute_outcomes, local.date(), timeout_seconds=60)
-                        await run_database_blocking(recompute_scorecards, local.date(), timeout_seconds=30)
-                    def persist_review() -> None:
-                        with db.transaction() as connection:
-                            strategy_review_payload(connection, StrategyReviewRequest(session=session, as_of_date=local.date(), persist=True))
-                    await run_database_blocking(persist_review, timeout_seconds=30)
-                    completed.add(key)
-                except Exception as error:  # noqa: BLE001 - retry while inside the two-minute checkpoint window
-                    print(f"strategy review checkpoint {session} failed: {str(error)[:300]}")
-        await asyncio.sleep(15)
+    """Compose the isolated checkpoint scheduler with production side effects."""
+    async def build_snapshot(exchange_date: date, session: str) -> dict[str, Any]:
+        # ``MarketSnapshotRequest`` has no date override: this callback runs
+        # only at the scheduler's current Shanghai checkpoint, exactly as the
+        # legacy loop did.  ``exchange_date`` remains explicit in the
+        # scheduler contract for the other persisted operations.
+        _ = exchange_date
+        return await build_market_snapshot(MarketSnapshotRequest(session=session, refresh_public_quotes=True))
+
+    async def build_board_report() -> dict[str, Any]:
+        return await run_intraday_board_report(deliver=False)
+
+    async def settle_outcomes(exchange_date: date) -> dict[str, Any]:
+        return await run_database_blocking(recompute_outcomes, exchange_date, timeout_seconds=60)
+
+    async def settle_scorecards(exchange_date: date) -> dict[str, Any]:
+        return await run_database_blocking(recompute_scorecards, exchange_date, timeout_seconds=30)
+
+    async def persist_review(exchange_date: date, session: str) -> None:
+        def persist() -> None:
+            with db.transaction() as connection:
+                strategy_review_payload(
+                    connection,
+                    StrategyReviewRequest(session=session, as_of_date=exchange_date, persist=True),
+                )
+        await run_database_blocking(persist, timeout_seconds=30)
+
+    await strategy_review_scheduler(StrategyReviewSchedulerDependencies(
+        calendar_open=sse_calendar_open_async,
+        sync_index_context=sync_strategy_index_context,
+        build_market_snapshot=build_snapshot,
+        build_board_report=build_board_report,
+        recompute_outcomes=settle_outcomes,
+        recompute_scorecards=settle_scorecards,
+        persist_review=persist_review,
+        now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
+    ))
 
 
 async def post_close_strategy_loop() -> None:
