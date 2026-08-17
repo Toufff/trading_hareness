@@ -118,6 +118,7 @@ from .intraday_signal_rules import signal_rules as pure_intraday_signal_rules
 from .intraday_outcome_attribution import outcome_attribution_summary as pure_outcome_attribution_summary
 from .post_close_pattern_score import review_score as pure_pattern_review_score
 from .post_close_pattern_candidates import select_candidates as pure_post_close_pattern_candidates
+from .post_close_candidate_screen import screen_candidates as pure_post_close_screen_candidates
 from .post_close_evidence import exact_board_context as pure_exact_board_context, lhb_context as pure_lhb_context
 from .post_close_strategy_service import (
     candidates as persisted_post_close_strategy_candidates,
@@ -131,6 +132,7 @@ from .strategy_pattern_read_model import latest_strategy_pattern_mining as read_
 from .intraday_outcome_settlement import settle as persist_intraday_outcome_settlement
 from .tushare_normalization import normalize_rows as pure_normalize_tushare_rows
 from .market_regimes import (
+    STRATEGY_INDEX_SYMBOLS,
     strategy_index_regime as pure_strategy_index_regime,
     strategy_market_regime as pure_strategy_market_regime,
     strategy_market_state as pure_strategy_market_state,

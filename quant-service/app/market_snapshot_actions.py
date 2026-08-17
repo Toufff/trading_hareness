@@ -104,7 +104,7 @@ class MarketSnapshotActions:
 
     def persist_public_quote_batch(self, provider: str, quotes: list[dict[str, Any]], latency_ms: int | None = None) -> int:
         """Persist one bounded public quote batch and its health outcome off-loop."""
-        stored = persist_free_quotes(provider, quotes)
+        stored = persist_free_quotes(self._database, provider, quotes)
         with self._database.transaction() as connection:
             record_provider_success(connection, provider, "realtime_quote", stored, latency_ms)
         return stored
