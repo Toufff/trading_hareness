@@ -50,6 +50,14 @@ SUPER_GET_REALTIME_APIS = frozenset({
     "rt_k", "rt_min", "rt_min_daily", "rt_etf_k", "rt_idx_k", "rt_sw_k",
     "rt_fut_min", "rt_fut_min_daily",
 })
+# ProMax uses the same GET + X-API-Key wire contract but is an independent
+# gateway.  Do not inherit the legacy gateway's broad allow-list merely because
+# the URL shape matches: only these APIs were probed successfully against
+# ProMax on 2026-08-17.
+PROMAX_VERIFIED_APIS = frozenset({
+    "daily", "daily_basic", "moneyflow", "rt_k", "rt_min", "rt_min_daily",
+})
+PROMAX_REALTIME_APIS = frozenset({"rt_k", "rt_min", "rt_min_daily"})
 # City ``rt_k`` supplies only a trading date and was observed unchanged across
 # repeated intraday samples on 2026-08-13.  It is retained as delayed
 # cumulative quote context for research, but excluded from this verified
@@ -113,6 +121,7 @@ class TushareProvider:
     rate_limit_per_minute: int = 1
     fallback_credential: str = ""
     min_interval_seconds: float = 0.0
+    get_gateway_mode: Literal["legacy", "promax"] = "legacy"
 
     @property
     def configured(self) -> bool:
@@ -122,7 +131,7 @@ class TushareProvider:
         if self.name == "backup":
             return api_name == "stock_basic"
         if self.name == "super_get":
-            return api_name in SUPER_GET_VERIFIED_APIS
+            return api_name in self.get_verified_apis
         if self.name == "super_sdk" and api_name in REALTIME_MARKET_HOURS_APIS:
             return api_name in SUPER_SDK_REALTIME_APIS or api_name in SUPER_SDK_DELAYED_CONTEXT_APIS
         if self.name == "primary" and api_name in REALTIME_MARKET_HOURS_APIS:
@@ -130,7 +139,15 @@ class TushareProvider:
         return True
 
     def uses_super_get(self, api_name: str) -> bool:
-        return self.protocol == "get_x_api_key" and api_name in SUPER_GET_VERIFIED_APIS
+        return self.protocol == "get_x_api_key" and api_name in self.get_verified_apis
+
+    @property
+    def get_verified_apis(self) -> frozenset[str]:
+        return PROMAX_VERIFIED_APIS if self.get_gateway_mode == "promax" else SUPER_GET_VERIFIED_APIS
+
+    @property
+    def get_realtime_apis(self) -> frozenset[str]:
+        return PROMAX_REALTIME_APIS if self.get_gateway_mode == "promax" else SUPER_GET_REALTIME_APIS
 
 
 class ProviderRateLimiter:
@@ -322,10 +339,21 @@ def provider_configs(environ: Mapping[str, str] | None = None) -> dict[ProviderN
     super_token = (env.get("TUSHARE_SUPER_SDK_TOKEN") or env.get("TUSHARE_SUPER_TOKEN") or "").strip()
     super_url = (env.get("TUSHARE_SUPER_SDK_API_URL") or env.get("TUSHARE_SUPER_API_URL") or "").strip().rstrip("/")
     super_proxy_url = (env.get("TUSHARE_SUPER_SDK_PROXY_URL") or env.get("TUSHARE_SUPER_PROXY_URL") or "").strip()
-    super_realtime_key = (env.get("TUSHARE_SUPER_GET_API_KEY") or env.get("TUSHARE_SUPER_REALTIME_API_KEY") or "").strip()
-    super_realtime_fallback_key = (env.get("TUSHARE_SUPER_GET_FALLBACK_API_KEY") or env.get("TUSHARE_SUPER_REALTIME_FALLBACK_API_KEY") or "").strip()
-    super_realtime_url = (env.get("TUSHARE_SUPER_GET_API_URL") or env.get("TUSHARE_SUPER_REALTIME_API_URL") or "").strip().rstrip("/")
-    super_realtime_proxy_url = (env.get("TUSHARE_SUPER_GET_PROXY_URL") or env.get("TUSHARE_SUPER_REALTIME_PROXY_URL") or "").strip()
+    super_get_mode = (env.get("TUSHARE_SUPER_GET_MODE") or "legacy").strip().lower()
+    if super_get_mode not in {"legacy", "promax"}:
+        super_get_mode = "legacy"
+    if super_get_mode == "promax":
+        # ProMax is direct HTTPS.  In particular, an intentionally blank GET
+        # proxy must not silently fall back to the legacy gateway proxy.
+        super_realtime_key = (env.get("TUSHARE_SUPER_GET_API_KEY") or "").strip()
+        super_realtime_fallback_key = (env.get("TUSHARE_SUPER_GET_FALLBACK_API_KEY") or "").strip()
+        super_realtime_url = (env.get("TUSHARE_SUPER_GET_API_URL") or "").strip().rstrip("/")
+        super_realtime_proxy_url = (env.get("TUSHARE_SUPER_GET_PROXY_URL") or "").strip()
+    else:
+        super_realtime_key = (env.get("TUSHARE_SUPER_GET_API_KEY") or env.get("TUSHARE_SUPER_REALTIME_API_KEY") or "").strip()
+        super_realtime_fallback_key = (env.get("TUSHARE_SUPER_GET_FALLBACK_API_KEY") or env.get("TUSHARE_SUPER_REALTIME_FALLBACK_API_KEY") or "").strip()
+        super_realtime_url = (env.get("TUSHARE_SUPER_GET_API_URL") or env.get("TUSHARE_SUPER_REALTIME_API_URL") or "").strip().rstrip("/")
+        super_realtime_proxy_url = (env.get("TUSHARE_SUPER_GET_PROXY_URL") or env.get("TUSHARE_SUPER_REALTIME_PROXY_URL") or "").strip()
     backup_key = (env.get("TUSHARE_BACKUP_API_KEY") or "").strip()
     backup_url = (env.get("TUSHARE_BACKUP_API_URL") or "").strip().rstrip("/")
     return {
@@ -335,10 +363,12 @@ def provider_configs(environ: Mapping[str, str] | None = None) -> dict[ProviderN
             super_proxy_url, bounded_rate_limit(env.get("TUSHARE_SUPER_SDK_REQUESTS_PER_MINUTE") or env.get("TUSHARE_SUPER_REQUESTS_PER_MINUTE"), 30),
         ),
         "super_get": TushareProvider(
-            "super_get", "tushare_super_get", "Tushare 超级 GET 网关", super_realtime_url, super_realtime_key,
+            "super_get", "tushare_super_get",
+            "Tushare ProMax GET 网关" if super_get_mode == "promax" else "Tushare 超级 GET 网关",
+            super_realtime_url, super_realtime_key,
             "get_x_api_key", super_realtime_proxy_url,
             bounded_rate_limit(env.get("TUSHARE_SUPER_GET_REQUESTS_PER_MINUTE") or env.get("TUSHARE_SUPER_REALTIME_REQUESTS_PER_MINUTE"), 60),
-            super_realtime_fallback_key, bounded_interval(env.get("TUSHARE_SUPER_GET_MIN_INTERVAL_SECONDS"), 1.0),
+            super_realtime_fallback_key, bounded_interval(env.get("TUSHARE_SUPER_GET_MIN_INTERVAL_SECONDS"), 1.0), super_get_mode,
         ),
         "backup": TushareProvider("backup", "tushare_backup", "Tushare REST 备用源", backup_url, backup_key, "backup_rest", "", bounded_rate_limit(env.get("TUSHARE_BACKUP_REQUESTS_PER_MINUTE"), 6)),
     }
@@ -380,7 +410,9 @@ def provider_status(*, environ: Mapping[str, str] | None = None) -> list[dict[st
             # configured token alone.
             return ("unavailable", "No verified realtime capability; live-family requests were unpurchased or rate-limited.", [])
         if provider.name == "super_get" and provider.configured:
-            return ("verified_partial", "Verified GET realtime: stock, ETF/index/SW snapshots and stock/futures minute subsets; unsupported live families remain excluded.", sorted(SUPER_GET_REALTIME_APIS))
+            if provider.get_gateway_mode == "promax":
+                return ("verified_partial", "ProMax GET verification passed for rt_k, rt_min and rt_min_daily; all other routes remain excluded until separately tested.", sorted(provider.get_realtime_apis))
+            return ("verified_partial", "Verified GET realtime: stock, ETF/index/SW snapshots and stock/futures minute subsets; unsupported live families remain excluded.", sorted(provider.get_realtime_apis))
         if provider.name == "super_sdk" and provider.configured:
             return ("verified_partial", "Verified City minute routes are timestamped. rt_k/rt_etf_k/rt_idx_k are delayed cumulative context only because no exchange timestamp was returned; *_min_daily routes remain unavailable.", sorted(SUPER_SDK_REALTIME_APIS))
         return ("not_applicable", "No realtime route is configured for this provider.", [])
@@ -389,12 +421,13 @@ def provider_status(*, environ: Mapping[str, str] | None = None) -> list[dict[st
     sdk_first_apis = SUPER_CITY_FIRST_APIS | frozenset(
         api_name for api_name, order in SUPER_REALTIME_PROVIDER_ORDER.items() if order[0] == "super_sdk"
     )
-    get_first_apis = (
-        SUPER_GET_VERIFIED_APIS - SUPER_CITY_FIRST_APIS - frozenset(SUPER_REALTIME_PROVIDER_ORDER)
-    ) | frozenset(
-        api_name for api_name, order in SUPER_REALTIME_PROVIDER_ORDER.items() if order[0] == "super_get"
-    )
     for provider in provider_configs(environ).values():
+        get_first_apis = (
+            provider.get_verified_apis - SUPER_CITY_FIRST_APIS - frozenset(SUPER_REALTIME_PROVIDER_ORDER)
+        ) | frozenset(
+            api_name for api_name, order in SUPER_REALTIME_PROVIDER_ORDER.items()
+            if order[0] == "super_get" and api_name in provider.get_verified_apis
+        )
         realtime_coverage, realtime_note, verified_get_apis = realtime_summary(provider)
         entries.append({
             "name": provider.name, "provider_key": provider.key, "label": provider.label, "configured": provider.configured,
@@ -407,10 +440,11 @@ def provider_status(*, environ: Mapping[str, str] | None = None) -> list[dict[st
             "delayed_context_apis": sorted(SUPER_SDK_DELAYED_CONTEXT_APIS) if provider.name == "super_sdk" else [],
             "super_alias_first_apis": sorted(sdk_first_apis) if provider.name == "super_sdk"
                                       else sorted(get_first_apis) if provider.name == "super_get" else [],
-            "get_apis": sorted(SUPER_GET_VERIFIED_APIS) if provider.name == "super_get" else verified_get_apis,
-            "complete_query_apis": sorted(SUPER_GET_VERIFIED_APIS - SUPER_GET_BOUNDED_ONLY_APIS - SUPER_GET_RECONCILIATION_APIS) if provider.name == "super_get" else [],
-            "bounded_only_apis": sorted(SUPER_GET_BOUNDED_ONLY_APIS) if provider.name == "super_get" else [],
-            "reconciliation_required_apis": sorted(SUPER_GET_RECONCILIATION_APIS) if provider.name == "super_get" else [],
+            "get_gateway_mode": provider.get_gateway_mode if provider.name == "super_get" else None,
+            "get_apis": sorted(provider.get_verified_apis) if provider.name == "super_get" else verified_get_apis,
+            "complete_query_apis": sorted(provider.get_verified_apis - SUPER_GET_BOUNDED_ONLY_APIS - SUPER_GET_RECONCILIATION_APIS) if provider.name == "super_get" else [],
+            "bounded_only_apis": sorted(provider.get_verified_apis & SUPER_GET_BOUNDED_ONLY_APIS) if provider.name == "super_get" else [],
+            "reconciliation_required_apis": sorted(provider.get_verified_apis & SUPER_GET_RECONCILIATION_APIS) if provider.name == "super_get" else [],
             "rate_limit_per_minute": provider.rate_limit_per_minute,
             "min_interval_seconds": provider.min_interval_seconds,
         })
@@ -460,12 +494,17 @@ async def call_provider(provider: TushareProvider, api_name: str, params: dict[s
         credentials = [provider.credential]
         if provider.fallback_credential and provider.fallback_credential != provider.credential:
             credentials.append(provider.fallback_credential)
-        realtime_request = api_name in SUPER_GET_REALTIME_APIS
+        realtime_request = api_name in provider.get_realtime_apis
         # A stale realtime request is less useful than a skipped sample. Try
         # each configured credential once with a short timeout, while keeping
         # the more tolerant retry contract for daily/reference queries.
         attempts_per_credential = 1 if realtime_request else 2
-        request_timeout = 8 if realtime_request else 15
+        # ProMax accepted the same contract but its upstream account pool can
+        # respond more slowly than the legacy proxy.  It is kept out of the
+        # high-concurrency fast loop by deployment pacing, so allow a bounded
+        # 20-second realtime probe rather than misclassifying slow valid rows
+        # as a transport failure.
+        request_timeout = 20 if realtime_request and provider.get_gateway_mode == "promax" else 8 if realtime_request else 15
         failures: list[str] = []
         for credential in credentials:
             for attempt in range(attempts_per_credential):
@@ -496,7 +535,7 @@ async def call_provider(provider: TushareProvider, api_name: str, params: dict[s
                     failures.append(type(error).__name__)
                 if attempt + 1 < attempts_per_credential:
                     await asyncio.sleep(retry_delay_seconds(response_headers, 0.8))
-        raise ProviderCallError("super GET gateway failed with configured credentials: " + "; ".join(failures))
+        raise ProviderCallError(f"{provider.label} failed with configured credentials: " + "; ".join(failures))
 
     async with provider_http_client(provider.key, provider.proxy_url) as client:
         if provider.protocol == "backup_rest":

@@ -3168,6 +3168,31 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIn("rt_min_daily", status["super_get"]["super_alias_first_apis"])
         self.assertNotIn("stock_basic", status["super_get"]["complete_query_apis"])
 
+    def test_promax_get_is_fail_closed_to_its_verified_subset(self):
+        env = {
+            "TUSHARE_PRIMARY_TOKEN": "primary", "TUSHARE_PRIMARY_API_URL": "https://primary.example",
+            "TUSHARE_SUPER_GET_MODE": "promax",
+            "TUSHARE_SUPER_GET_API_KEY": "promax", "TUSHARE_SUPER_GET_API_URL": "https://promax.example",
+            "TUSHARE_SUPER_REALTIME_API_KEY": "legacy", "TUSHARE_SUPER_REALTIME_PROXY_URL": "http://legacy-proxy.example",
+        }
+        promax = provider_configs(env)["super_get"]
+        self.assertEqual(promax.label, "Tushare ProMax GET 网关")
+        self.assertEqual(promax.credential, "promax")
+        self.assertEqual(promax.proxy_url, "")
+        self.assertTrue(promax.supports("daily"))
+        self.assertTrue(promax.supports("rt_min_daily"))
+        self.assertTrue(promax.supports("moneyflow"))
+        self.assertFalse(promax.supports("ths_member"))
+        self.assertFalse(promax.supports("rt_fut_min"))
+        self.assertEqual([item.key for item in provider_candidates("daily", environ=env)],
+                         ["tushare_super_get", "tushare_primary"])
+        self.assertEqual([item.key for item in provider_candidates("rt_min_daily", environ=env)],
+                         ["tushare_super_get"])
+        status = {item["name"]: item for item in provider_status(environ=env)}["super_get"]
+        self.assertEqual(status["get_gateway_mode"], "promax")
+        self.assertEqual(status["get_apis"],
+                         ["daily", "daily_basic", "moneyflow", "rt_k", "rt_min", "rt_min_daily"])
+
     def test_realtime_cross_section_is_filtered_to_requested_symbol(self):
         rows = [
             {"ts_code": "801010.SI", "name": "农林牧渔"},
