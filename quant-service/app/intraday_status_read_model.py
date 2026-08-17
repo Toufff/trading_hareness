@@ -83,6 +83,7 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
     minute_profile = dict(evidence["minute_profile"] or {})
     latest_scan = evidence["latest_scan"]
     latest_completed_scan = evidence["latest_completed_scan"]
+    rule_input_snapshots = dict(evidence.get("rule_input_snapshots") or {})
     latest_board = evidence["latest_board"]
     latest_board_curve = evidence["latest_board_curve"]
     latest_delivery = evidence["latest_delivery"]
@@ -145,7 +146,8 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
             max_age_seconds=25.0 if special_window else max(45.0, normal_interval * 1.8),
             cadence="特别窗口 10 秒；其他连续竞价 30 秒",
             details={"latest_run": deps.json_safe(dict(latest_scan)) if latest_scan else None,
-                     "enabled_watch_count": int(watch_row["enabled"] or 0)},
+                     "enabled_watch_count": int(watch_row["enabled"] or 0),
+                     "rule_input_snapshots": deps.json_safe(rule_input_snapshots)},
         ),
         runtime_item(
             key="tencent_realtime", label="腾讯全 A 实时行情", role="观察池全覆盖报价、量比、换手与主力流",

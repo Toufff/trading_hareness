@@ -42,6 +42,13 @@ def load_intraday_runtime_evidence(database: Any, max_alert_attempts: int) -> di
         latest_completed_scan = connection.execute(
             "SELECT status,observed_at,source_status,summary FROM quant.intraday_scan_runs WHERE status='completed' ORDER BY observed_at DESC LIMIT 1"
         ).fetchone()
+        rule_input_snapshots = connection.execute(
+            """SELECT count(*)::int AS total,
+                      count(*) FILTER (WHERE inputs->>'schema_version'='intraday-rule-input-v2')::int AS v2,
+                      count(*) FILTER (WHERE inputs->>'schema_version'='intraday-rule-input-v1')::int AS v1,
+                      max(observed_at) AS latest_observed_at
+                 FROM quant.intraday_rule_input_snapshots"""
+        ).fetchone()
         latest_board = connection.execute(
             "SELECT status,observed_at,source_status,summary FROM quant.intraday_board_reports ORDER BY observed_at DESC LIMIT 1"
         ).fetchone()
@@ -88,6 +95,7 @@ def load_intraday_runtime_evidence(database: Any, max_alert_attempts: int) -> di
     return {
         "health_rows": health_rows, "quote_rows": quote_rows, "raw_rows": raw_rows, "minute_profile": minute_profile,
         "latest_scan": latest_scan, "latest_completed_scan": latest_completed_scan,
+        "rule_input_snapshots": rule_input_snapshots,
         "latest_board": latest_board, "latest_board_curve": latest_board_curve,
         "latest_delivery": latest_delivery, "delivery_history": delivery_history,
         "pending_delivery_count": pending_delivery_count, "pending_rotation_delivery_count": pending_rotation_delivery_count,
@@ -136,6 +144,13 @@ async def load_intraday_runtime_evidence_async(async_database: Any, max_alert_at
         )
         latest_scan = await one_row("SELECT status,observed_at,source_status,summary FROM quant.intraday_scan_runs ORDER BY observed_at DESC LIMIT 1")
         latest_completed_scan = await one_row("SELECT status,observed_at,source_status,summary FROM quant.intraday_scan_runs WHERE status='completed' ORDER BY observed_at DESC LIMIT 1")
+        rule_input_snapshots = await one_row(
+            """SELECT count(*)::int AS total,
+                      count(*) FILTER (WHERE inputs->>'schema_version'='intraday-rule-input-v2')::int AS v2,
+                      count(*) FILTER (WHERE inputs->>'schema_version'='intraday-rule-input-v1')::int AS v1,
+                      max(observed_at) AS latest_observed_at
+                 FROM quant.intraday_rule_input_snapshots"""
+        )
         latest_board = await one_row("SELECT status,observed_at,source_status,summary FROM quant.intraday_board_reports ORDER BY observed_at DESC LIMIT 1")
         latest_board_curve = await one_row(
             """SELECT status,observed_at,source_status,coverage
@@ -172,6 +187,7 @@ async def load_intraday_runtime_evidence_async(async_database: Any, max_alert_at
     return {
         "health_rows": health_rows, "quote_rows": quote_rows, "raw_rows": raw_rows, "minute_profile": minute_profile,
         "latest_scan": latest_scan, "latest_completed_scan": latest_completed_scan,
+        "rule_input_snapshots": rule_input_snapshots,
         "latest_board": latest_board, "latest_board_curve": latest_board_curve,
         "latest_delivery": latest_delivery, "delivery_history": delivery_history,
         "pending_delivery_count": int((pending_delivery or {}).get("count") or 0),

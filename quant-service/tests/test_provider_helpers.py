@@ -486,6 +486,7 @@ class ProviderHelperTests(unittest.TestCase):
             MagicMock(fetchone=MagicMock(return_value={"last_observed_at": None, "rows": 0, "latest_trading_date": None})),
             MagicMock(fetchone=MagicMock(return_value=None)),
             MagicMock(fetchone=MagicMock(return_value=None)),
+            MagicMock(fetchone=MagicMock(return_value={"total": 0, "v2": 0, "v1": 0, "latest_observed_at": None})),
             MagicMock(fetchone=MagicMock(return_value=None)),
             MagicMock(fetchone=MagicMock(return_value=None)),
             MagicMock(fetchone=MagicMock(return_value=None)),
@@ -504,9 +505,9 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(evidence["pending_rotation_delivery_count"], 0)
         self.assertEqual(evidence["watch_row"], {"enabled": 2})
         self.assertIsNone(evidence["latest_health_event"])
-        self.assertEqual(connection.execute.call_count, 15)
+        self.assertEqual(connection.execute.call_count, 16)
         self.assertEqual(evidence["minute_profile"]["rows"], 0)
-        self.assertIn("attempt_count<%s", connection.execute.call_args_list[10].args[0])
+        self.assertIn("attempt_count<%s", connection.execute.call_args_list[11].args[0])
 
     def test_intraday_status_read_model_is_local_and_dependency_injected(self):
         evidence = {
