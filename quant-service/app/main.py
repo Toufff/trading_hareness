@@ -125,6 +125,7 @@ from .post_close_strategy_service import (
     retry_window as post_close_strategy_retry_window,
     run as persisted_run_post_close_strategy,
 )
+from .post_close_scheduler import PostCloseSchedulerDependencies, post_close_strategy_scheduler
 from .strategy_pattern_read_model import latest_strategy_pattern_mining as read_latest_strategy_pattern_mining
 from .intraday_outcome_settlement import settle as persist_intraday_outcome_settlement
 from .tushare_normalization import normalize_rows as pure_normalize_tushare_rows
@@ -4702,47 +4703,39 @@ async def strategy_review_loop() -> None:
 
 
 async def post_close_strategy_loop() -> None:
-    """Run after the existing 18:50 daily ingestion workflow has had time to finish.
+    """Compose the independent same-date post-close scheduler.
 
-    The loop reads only persisted daily bars and exact board mappings.  If the
-    upstream daily workflow did not create a complete cross-section, it keeps a
-    blocked audit row and retries through the durable evening window instead of
-    inventing a post-close candidate list.  Completion is read back from the
-    run table, so a process restart cannot turn an older complete date into a
-    false completion for today.
+    Persistence and provider boundaries remain here; the scheduler module owns
+    only retry-window and completion semantics, so it can be tested without
+    the service database or wall clock.
     """
-    completed: set[date] = set()
-    while True:
-        local = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
-        if (local.date() not in completed and post_close_strategy_retry_window(local)
-                and await sse_calendar_open_async(local.date())):
-            try:
-                strategy_completed = await run_database_blocking(
-                    post_close_strategy_completed_for_date, local.date(), timeout_seconds=10,
-                )
-                main_wave_completed = await run_database_blocking(
-                    watchlist_main_wave_completed_for_date, local.date(), timeout_seconds=10,
-                )
-                if strategy_completed and main_wave_completed:
-                    completed.add(local.date())
-                    await asyncio.sleep(60)
-                    continue
-                if not strategy_completed:
-                    result = await run_database_blocking(
-                        run_post_close_strategy, PostCloseStrategyRequest(as_of_date=local.date()), timeout_seconds=60,
-                    )
-                    strategy_completed = result["status"] in {"completed", "partial"}
-                if strategy_completed and not main_wave_completed:
-                    model_result = await run_database_blocking(
-                        persist_watchlist_main_wave_research,
-                        WatchlistMainWaveResearchRequest(as_of_date=local.date()), timeout_seconds=90,
-                    )
-                    main_wave_completed = model_result["status"] == "completed"
-                if strategy_completed and main_wave_completed:
-                    completed.add(local.date())
-            except Exception as error:  # noqa: BLE001 - retry while the bounded post-close window remains open
-                print(f"post-close strategy run failed: {str(error)[:300]}")
-        await asyncio.sleep(60)
+    async def completed_for_date(exchange_date: date) -> tuple[bool, bool]:
+        return (
+            await run_database_blocking(post_close_strategy_completed_for_date, exchange_date, timeout_seconds=10),
+            await run_database_blocking(watchlist_main_wave_completed_for_date, exchange_date, timeout_seconds=10),
+        )
+
+    async def run_strategy(exchange_date: date) -> str:
+        result = await run_database_blocking(
+            run_post_close_strategy, PostCloseStrategyRequest(as_of_date=exchange_date), timeout_seconds=60,
+        )
+        return str(result.get("status") or "failed")
+
+    async def run_main_wave(exchange_date: date) -> str:
+        result = await run_database_blocking(
+            persist_watchlist_main_wave_research,
+            WatchlistMainWaveResearchRequest(as_of_date=exchange_date), timeout_seconds=90,
+        )
+        return str(result.get("status") or "failed")
+
+    await post_close_strategy_scheduler(PostCloseSchedulerDependencies(
+        calendar_open=sse_calendar_open_async,
+        retry_window=post_close_strategy_retry_window,
+        completed_for_date=completed_for_date,
+        run_strategy=run_strategy,
+        run_main_wave=run_main_wave,
+        now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
+    ))
 
 
 def post_close_strategy_completed_for_date(as_of_date: date) -> bool:
