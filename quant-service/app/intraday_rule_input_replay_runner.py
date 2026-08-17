@@ -1,10 +1,12 @@
-"""Deterministically re-evaluate frozen core intraday rule inputs.
+"""Deterministically re-evaluate frozen intraday rules and policy inputs.
 
 This is deliberately not a price backtest.  It verifies that the exact pure
 ``signal_rules`` implementation produces the same decision candidates from
-the minimal live input bundle recorded at scan time.  Policy gates, paper
-portfolio logic, fast cross-source confirmation, shadow models and orders are
-outside this narrow replay boundary and remain separately auditable.
+the local input bundle recorded at scan time.  V2 snapshots also replay the
+same pure policy and paper-risk gate.  Legacy V1 snapshots remain reproducible
+at the core-rule boundary but are explicitly not presented as policy replay.
+Shadow models, event state, orders and performance remain outside this narrow
+reproducibility boundary.
 """
 
 from __future__ import annotations
@@ -22,11 +24,12 @@ from .intraday_rule_inputs import intraday_rule_input_hash, intraday_rule_replay
 from .strategy_contracts import MarketEvent
 
 
-ENGINE_VERSION = "intraday-rule-input-replay-v1"
-STRATEGY_KEY = "intraday_signal_rules_core"
+ENGINE_VERSION = "intraday-rule-input-replay-v2"
+STRATEGY_KEY = "intraday_signal_rules_with_policy"
 MAX_REPLAY_ROWS = 50_000
 
 RuleEvaluator = Callable[[dict[str, Any]], list[dict[str, Any]]]
+PolicyEvaluator = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 
 
 def _signal_projection(signal: dict[str, Any]) -> dict[str, Any]:
@@ -59,24 +62,61 @@ def _event_from_snapshot(row: dict[str, Any]) -> tuple[MarketEvent, int, dict[st
     return event, 0, payload
 
 
+def _policy_projection(policy: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(policy, dict):
+        return None
+    return {
+        "version": policy.get("version"), "decision": policy.get("decision"),
+        "allow_confirmation": bool(policy.get("allow_confirmation")),
+        "reason_codes": list(policy.get("reason_codes") or ()),
+        "risk_flags": list(policy.get("risk_flags") or ()),
+        "market_state": policy.get("market_state"),
+        "price_limit_state": dict(policy.get("price_limit_state") or {}),
+        "available_quantity": policy.get("available_quantity"),
+    }
+
+
 def replay_recorded_rule_inputs(rows: Iterable[dict[str, Any]], *, evaluate: RuleEvaluator,
-                                expected_model_version: str) -> dict[str, Any]:
-    """Replay frozen core-rule inputs using an injected current pure evaluator."""
+                                expected_model_version: str,
+                                evaluate_policy: PolicyEvaluator | None = None) -> dict[str, Any]:
+    """Replay frozen core rules and, for V2 evidence, their pure policy gate."""
     adapted = [_event_from_snapshot(dict(row)) for row in rows]
 
     def transition(state: dict[str, Any], _event: MarketEvent,
                    payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         inputs = intraday_rule_replay_inputs(payload, expected_model_version=expected_model_version)
-        signals = [_signal_projection(item) for item in evaluate(inputs)]
+        signals: list[dict[str, Any]] = []
+        policy_evaluated = 0
+        policy_blocked = 0
+        for candidate in evaluate(inputs):
+            item = _signal_projection(candidate)
+            if inputs.get("policy_replayable") and evaluate_policy is not None:
+                policy = _policy_projection(evaluate_policy(candidate, inputs))
+                item["policy_gate"] = policy
+                policy_evaluated += 1
+                policy_blocked += int(bool(policy) and not bool(policy.get("allow_confirmation")))
+            signals.append(item)
         next_state = {
             "evaluated": int(state.get("evaluated") or 0) + 1,
             "emitted": int(state.get("emitted") or 0) + len(signals),
+            "policy_evaluated": int(state.get("policy_evaluated") or 0) + policy_evaluated,
+            "policy_blocked": int(state.get("policy_blocked") or 0) + policy_blocked,
         }
-        return next_state, {"model_version": inputs["model_version"], "signals": signals}
+        return next_state, {
+            "model_version": inputs["model_version"], "schema_version": inputs["schema_version"],
+            "policy_replayable": bool(inputs.get("policy_replayable")), "signals": signals,
+        }
 
-    replay = replay_events(adapted, transition, initial_state={"evaluated": 0, "emitted": 0})
+    replay = replay_events(adapted, transition, initial_state={
+        "evaluated": 0, "emitted": 0, "policy_evaluated": 0, "policy_blocked": 0,
+    })
     outputs = [item.get("output") or {} for item in replay["trace"]]
     emitted = [signal for output in outputs for signal in output.get("signals") or []]
+    schema_counts = Counter(str(output.get("schema_version") or "unknown") for output in outputs)
+    policy_replayable = sum(int(bool(output.get("policy_replayable"))) for output in outputs)
+    policy_evaluated = sum(1 for signal in emitted if signal.get("policy_gate") is not None)
+    policy_blocked = sum(1 for signal in emitted if isinstance(signal.get("policy_gate"), dict)
+                         and not bool(signal["policy_gate"].get("allow_confirmation")))
     return {
         **replay,
         "engine_version": ENGINE_VERSION,
@@ -84,16 +124,23 @@ def replay_recorded_rule_inputs(rows: Iterable[dict[str, Any]], *, evaluate: Rul
             "snapshots": replay["events"], "emitted_signals": len(emitted),
             "symbols": len({event.symbol for event, _sequence, _payload in adapted if event.symbol}),
             "signal_keys": dict(sorted(Counter(str(signal.get("signal_key") or "unknown") for signal in emitted).items())),
+            "input_schema_versions": dict(sorted(schema_counts.items())),
+            "policy_replayable_snapshots": policy_replayable,
+            "policy_evaluated_signals": policy_evaluated,
+            "policy_blocked_signals": policy_blocked,
         },
         "data_boundary": {
             "source": "quant.intraday_rule_input_snapshots",
             "availability_clock": "observed_at",
-            "input_contract": "intraday-rule-input-v1",
+            "input_contract": "intraday-rule-input-v2 (v1 core-only compatible)",
             "provider_access": "none",
             "historical_ingestion": "none",
             "threshold_fitting": "none",
             "orders": "none",
-            "interpretation": "core signal-rule reproducibility only; excludes policy, execution and performance claims",
+            "interpretation": (
+                "v2 reproduces pure core-rule plus policy/risk gate from frozen local inputs; "
+                "legacy v1 rows reproduce core rules only; excludes event state, execution and performance claims"
+            ),
         },
     }
 
@@ -111,7 +158,8 @@ def _input_hash(rows: Iterable[dict[str, Any]]) -> str:
 
 def run_recorded_rule_input_replay(connection: Any, *, as_of_date: date | None,
                                    max_rows: int, model_version: str,
-                                   evaluate: RuleEvaluator) -> dict[str, Any]:
+                                   evaluate: RuleEvaluator,
+                                   evaluate_policy: PolicyEvaluator | None = None) -> dict[str, Any]:
     """Persist one bounded, idempotent reproducibility result from local snapshots."""
     maximum = max(1, min(int(max_rows), MAX_REPLAY_ROWS))
     if as_of_date is None:
@@ -153,7 +201,9 @@ def run_recorded_rule_input_replay(connection: Any, *, as_of_date: date | None,
                 "as_of_date": str(as_of_date), "snapshots": len(rows), "input_hash": input_hash,
                 "trace_hash": str(existing["trace_hash"] or ""), "metrics": dict(existing["metrics"] or {}),
                 "data_boundary": dict(existing["data_boundary"] or boundary)}
-    replay = replay_recorded_rule_inputs(rows, evaluate=evaluate, expected_model_version=model_version)
+    replay = replay_recorded_rule_inputs(
+        rows, evaluate=evaluate, expected_model_version=model_version, evaluate_policy=evaluate_policy,
+    )
     replay.pop("trace")
     persisted = connection.execute(
         """INSERT INTO quant.intraday_replay_runs(

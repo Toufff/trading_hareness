@@ -117,7 +117,34 @@ class RecordedRuleInputReplayTests(unittest.TestCase):
         self.assertEqual(first["metrics"]["snapshots"], 2)
         self.assertEqual(first["metrics"]["emitted_signals"], 2)
         self.assertEqual(first["data_boundary"]["provider_access"], "none")
-        self.assertIn("excludes policy", first["data_boundary"]["interpretation"])
+        self.assertEqual(first["metrics"]["policy_replayable_snapshots"], 2)
+        self.assertEqual(first["metrics"]["policy_evaluated_signals"], 0)
+        self.assertIn("policy/risk gate", first["data_boundary"]["interpretation"])
+
+    def test_v2_snapshot_replays_frozen_policy_gate_without_database_state(self):
+        start = datetime(2026, 8, 14, 1, 30, tzinfo=UTC)
+        row = rule_input("one", start)
+        policy_calls = []
+
+        def evaluate(_inputs):
+            return [{"signal_key": "000001.SZ:entry:replayed", "signal_type": "entry", "severity": "warning",
+                     "score": 80, "conditions": {}, "risk_flags": []}]
+
+        def evaluate_policy(signal, inputs):
+            policy_calls.append((signal["signal_type"], inputs["portfolio_context"]))
+            return {"version": "live-policy-gate-v1", "decision": "watch_only", "allow_confirmation": False,
+                    "reason_codes": ["market_context_missing"], "risk_flags": ["policy_market_context_missing"],
+                    "market_state": "unknown", "price_limit_state": {}, "available_quantity": 0}
+
+        replay = replay_recorded_rule_inputs(
+            [row], evaluate=evaluate, evaluate_policy=evaluate_policy,
+            expected_model_version="watchlist-confirmation-v4",
+        )
+
+        self.assertEqual(policy_calls, [("entry", {"position": {}, "snapshot": {}, "candidate_sector_keys": []})])
+        self.assertEqual(replay["metrics"]["policy_evaluated_signals"], 1)
+        self.assertEqual(replay["metrics"]["policy_blocked_signals"], 1)
+        self.assertFalse(replay["trace"][0]["output"]["signals"][0]["policy_gate"]["allow_confirmation"])
 
     def test_rejects_tampered_input_hash_and_reuses_persisted_result(self):
         start = datetime(2026, 8, 14, 1, 30, tzinfo=UTC)

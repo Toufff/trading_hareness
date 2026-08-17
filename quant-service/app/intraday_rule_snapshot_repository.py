@@ -17,11 +17,16 @@ def persist_rule_input_snapshot(connection: Any, *, scan_id: uuid.UUID, observed
                                 daily_factors: dict[str, Any] | None,
                                 minute_features: dict[str, Any] | None,
                                 peer_context: dict[str, Any] | None,
-                                model_version: str) -> str:
-    """Store one minimal replay input for every scanned watch, even no-signal rows."""
+                                model_version: str,
+                                market_context: dict[str, Any] | None = None,
+                                fast_confirmation: dict[str, Any] | None = None,
+                                portfolio_context: dict[str, Any] | None = None) -> str:
+    """Store one bounded replay input for every scanned watch, even no-signal rows."""
     payload = intraday_rule_input_payload(
         watch=watch, quote=quote, previous_quote=previous_quote, daily_factors=daily_factors,
         minute_features=minute_features, peer_context=peer_context, model_version=model_version,
+        market_context=market_context, fast_confirmation=fast_confirmation,
+        portfolio_context=portfolio_context,
     )
     input_hash = intraday_rule_input_hash(payload)
     connection.execute(

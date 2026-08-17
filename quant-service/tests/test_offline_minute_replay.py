@@ -9,6 +9,7 @@ import unittest
 from app.intraday_replay import replay_events
 from app.intraday_rule_inputs import (
     INTRADAY_RULE_INPUT_SCHEMA_VERSION,
+    LEGACY_INTRADAY_RULE_INPUT_SCHEMA_VERSION,
     intraday_rule_input_hash,
     intraday_rule_input_payload,
     intraday_rule_replay_inputs,
@@ -88,12 +89,24 @@ class IntradayRuleInputSnapshotTests(unittest.TestCase):
         payload = intraday_rule_input_payload(
             watch=watch, quote=quote, previous_quote=previous, daily_factors=daily,
             minute_features=minute, peer_context=peers, model_version="test-v1",
+            market_context={"status": "available", "market_state": "range", "board_snapshot_age_seconds": 30},
+            fast_confirmation={"status": "matched", "max_age_seconds": 30},
+            portfolio_context={
+                "position": {"symbol": "000001.SZ", "target_weight": 0.02},
+                "snapshot": {"drawdown": -0.01, "daily_return": 0.001, "gross_exposure": 0.2,
+                             "sector_exposure": {"886001.TI": 0.03}},
+                "candidate_sector_keys": ["886001.TI"],
+            },
         )
         self.assertEqual(payload["schema_version"], INTRADAY_RULE_INPUT_SCHEMA_VERSION)
         self.assertNotIn("raw", payload["quote"])
         self.assertNotIn("raw", payload["watch"])
+        self.assertNotIn("raw", payload["portfolio_context"])
         self.assertEqual(intraday_rule_input_hash(payload), intraday_rule_input_hash(dict(payload)))
         restored = intraday_rule_replay_inputs(payload, expected_model_version="test-v1")
+        self.assertTrue(restored["policy_replayable"])
+        self.assertEqual(restored["market_context"]["market_state"], "range")
+        self.assertEqual(restored["portfolio_context"]["candidate_sector_keys"], ["886001.TI"])
 
         def assessment(_quote, _daily, _minute, _peers):
             return {"status": "not_confirmed", "score": 0, "components": {}, "risk_flags": []}
@@ -106,6 +119,20 @@ class IntradayRuleInputSnapshotTests(unittest.TestCase):
                                 number=lambda value: float(value) if value is not None else None,
                                 upside_assessment_fn=assessment, model_version=restored["model_version"])
         self.assertEqual([item["signal_key"] for item in replayed], [item["signal_key"] for item in original])
+
+    def test_legacy_v1_snapshot_remains_core_replay_only(self) -> None:
+        payload = intraday_rule_input_payload(
+            watch={"symbol": "000001.SZ"}, quote=None, previous_quote=None,
+            daily_factors={}, minute_features={}, peer_context={}, model_version="test-v1",
+        )
+        for key in ("market_context", "fast_confirmation", "portfolio_context"):
+            payload.pop(key)
+        payload["schema_version"] = LEGACY_INTRADAY_RULE_INPUT_SCHEMA_VERSION
+
+        restored = intraday_rule_replay_inputs(payload, expected_model_version="test-v1")
+
+        self.assertFalse(restored["policy_replayable"])
+        self.assertNotIn("portfolio_context", restored)
 
     def test_snapshot_version_mismatch_and_retention_are_explicit(self) -> None:
         payload = intraday_rule_input_payload(

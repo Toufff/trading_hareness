@@ -88,6 +88,7 @@
 - 运行态复核：所有服务容器健康；实时服务在非连续竞价时正确 `standby`，并保留 36 只启用观察股的 30 秒/特别窗口 10 秒/盘口 3 秒/板块曲线 60 秒节奏。主 Tushare 明确标为无实时能力；Super SDK 与 Super GET 均按已验证协议分工，代理连接池和 Super GET 线程内 `requests.Session` 复用已启用。
 - 存储治理复核：量化 schema 13.39 GB，占 40 GiB 总研究预算 31.2%、28 GiB 热库预算 44.5%；7 天盘口与秒级交叉确认、60 天板块曲线/轮动、90 天分钟剖面及 60–120 天（默认 90）规则输入/观察池报价均有留存边界。未删除原始证据，也未启动历史回填。
 - 订单簿数据只作为 `attribution_only`：`qi5`、窗口聚合 order-flow proxy、封单侵蚀等已入 SignalSpec 证据引用；不改变实时评分、阈值或提醒资格。
+- 盘中规则输入回放已升级为 `intraday-rule-input-replay-v2`：新扫描冻结市场状态、Super/Tencent 交叉确认、纸面仓位与组合风险上下文，回放可调用同一纯函数 policy/risk gate；旧 v1 快照明确标记为 `core-only`，不会伪装成完整门禁回放。当前 2026-08-17 已存 3,996 条快照均来自 v2 部署前，故本次回放的 `policy_replayable_snapshots=0`；下一交易时段才会产生可验证的 v2 样本。
 - 分析师链复核：报告与消息流各自拥有持久 cursor 与 45 天 liveness receipt；最近的服务端文字-only 增量均已完成。当前 n8n 当前发布版还在等待下一个工作日的首个 `trigger/success` 运行，健康页明确显示该状态，不把旧版或 CLI 执行行当作正式调度成功。
 - 上海日期回归：对晚 UTC 的分析师消息，结算入场必须发生在其对应的上海交易日之后；该语义已覆盖 local-only outcome recomputation，容量/readiness 投影与兼容实现，并有回归测试。
 

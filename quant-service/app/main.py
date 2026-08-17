@@ -4020,10 +4020,23 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             order_book_feature = aggregate_order_book_observations(order_book_by_symbol.get(symbol, []), observed_at)
             peer_context = peer_contexts.get(symbol)
             previous_quote = dict(previous) if previous else None
+            # Freeze all pre-confirmation inputs before rules emit.  This
+            # lets future replay evaluate the exact same policy/risk gate from
+            # local evidence, without consulting the then-current board,
+            # quote or paper ledger.
+            fast_confirmation = fast_confirmations.get(symbol, {"status": "missing", "max_age_seconds": 30})
+            market_context = market_contexts.get((observed_at, symbol), {})
+            portfolio_context = {
+                "position": paper_positions.get(symbol) or {},
+                "snapshot": snapshot_payload,
+                "candidate_sector_keys": candidate_sector_keys.get(symbol, ()),
+            }
             persist_rule_input_snapshot(
                 connection, scan_id=scan_id, observed_at=observed_at, watch=watch, quote=quote,
                 previous_quote=previous_quote, daily_factors=daily_factors, minute_features=minute_feature,
                 peer_context=peer_context, model_version=INTRADAY_SIGNAL_MODEL_VERSION,
+                market_context=market_context, fast_confirmation=fast_confirmation,
+                portfolio_context=portfolio_context,
             )
             generated_signals = intraday_signal_rules(watch, quote, previous_quote, daily_factors,
                                                        minute_feature, peer_context)
@@ -4042,7 +4055,6 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             )
             if rebound_failure_signal is not None:
                 generated_signals.append(rebound_failure_signal)
-            fast_confirmation = fast_confirmations.get(symbol, {"status": "missing", "max_age_seconds": 30})
             first_eac = first_eac_by_symbol.get(symbol)
             if first_eac is not None:
                 acceptance = intraday_eac_acceptance_assessment(
@@ -4083,7 +4095,6 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 signal["conditions"] = {**signal["conditions"], "realtime_cross_check": fast_confirmation}
                 if fast_confirmation.get("status") == "mismatch":
                     signal["risk_flags"] = [*signal["risk_flags"], "realtime_cross_source_price_mismatch"]
-            market_context = market_contexts.get((observed_at, symbol), {}) if generated_signals else {}
             for signal in generated_signals:
                 portfolio_gate = paper_risk_gate(
                     signal_type=signal["signal_type"], symbol=symbol,
@@ -7985,10 +7996,37 @@ def replay_recorded_intraday_rule_inputs(payload: IntradayRuleInputReplayRequest
             inputs["watch"], inputs["quote"], inputs["previous_quote"], inputs["daily_factors"],
             inputs["minute_features"], inputs["peer_context"],
         )
+
+    def evaluate_policy(signal: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
+        """Replay the same pure risk/policy gate from snapshot-local inputs.
+
+        V1 snapshots never call this function because they did not capture the
+        required point-in-time market and portfolio values.  The generic
+        replay runner labels them core-rule-only instead of reading current
+        database state.
+        """
+        portfolio_context = dict(inputs.get("portfolio_context") or {})
+        portfolio_gate = paper_risk_gate(
+            signal_type=str(signal.get("signal_type") or "watch"),
+            symbol=str(inputs["watch"]["symbol"]),
+            position=dict(portfolio_context.get("position") or {}),
+            snapshot=dict(portfolio_context.get("snapshot") or {}),
+            candidate_sector_keys=list(portfolio_context.get("candidate_sector_keys") or ()),
+        )
+        portfolio_risk = {
+            "allowed": portfolio_gate.allowed, "target_weight": portfolio_gate.target_weight,
+            "reasons": list(portfolio_gate.reasons), "risk_flags": list(portfolio_gate.risk_flags),
+        }
+        return live_policy_gate(
+            signal, inputs["watch"], inputs["quote"], inputs["daily_factors"],
+            dict(inputs.get("market_context") or {}), dict(inputs.get("fast_confirmation") or {}),
+            portfolio_risk,
+        )
+
     with db.transaction() as connection:
         return run_recorded_rule_input_replay(
             connection, as_of_date=payload.as_of_date, max_rows=payload.max_rows,
-            model_version=INTRADAY_SIGNAL_MODEL_VERSION, evaluate=evaluate,
+            model_version=INTRADAY_SIGNAL_MODEL_VERSION, evaluate=evaluate, evaluate_policy=evaluate_policy,
         )
 
 
