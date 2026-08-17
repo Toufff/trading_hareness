@@ -188,6 +188,48 @@ async def eastmoney_quote(symbol: str) -> dict[str, Any] | None:
             "change": price("f169"), "pct_chg": price("f170")}
 
 
+async def eastmoney_watch_flow_quotes(symbols: list[str], *, max_symbols: int = 40) -> list[dict[str, Any]]:
+    """Return one bounded Eastmoney watch-basket flow snapshot.
+
+    This is deliberately *not* an all-A replacement: it supplies current
+    volume ratio, turnover and indicative main flow for explicitly watched
+    names when Tencent's slow all-A cross-section misses its scan budget.
+    Callers must not derive cross-sectional percentiles from this small basket.
+    """
+    normalized = [symbol.upper() for symbol in symbols if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol.upper())]
+    ordered = list(dict.fromkeys(normalized))[:max(1, max_symbols)]
+    if not ordered:
+        return []
+    by_code = {symbol[:6]: symbol for symbol in ordered}
+    params = {
+        "fltt": "2", "invt": "2", "fields": "f2,f3,f8,f10,f12,f14,f62,f184",
+        "secids": ",".join(eastmoney_secid(symbol) for symbol in ordered),
+    }
+    async with public_http_client() as client:
+        response = await _request_with_retry(
+            client, "GET", "https://push2.eastmoney.com/api/qt/ulist.np/get",
+            params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=8,
+        )
+    payload = response.json()
+    rows = ((payload.get("data") or {}).get("diff") or [])
+    if not isinstance(rows, list):
+        raise FreeProviderError("Eastmoney returned an invalid watch-flow payload")
+    result: list[dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        symbol = by_code.get(str(item.get("f12") or "").zfill(6))
+        if not symbol:
+            continue
+        result.append({
+            "ts_code": symbol, "name": item.get("f14"), "price": item.get("f2"),
+            "pct_change": item.get("f3"), "turnover_rate": item.get("f8"),
+            "volume_ratio": item.get("f10"), "main_net_inflow": item.get("f62"),
+            "main_net_inflow_ratio": item.get("f184"), "raw": dict(item),
+        })
+    return result
+
+
 async def tencent_daily(symbol: str, start: str, end: str) -> list[dict[str, Any]]:
     # Tencent's public endpoint accepts a bounded count. Filter locally by the
     # caller's allowed dates because its explicit date parameters are not

@@ -141,6 +141,7 @@ from .free_market_providers import (
     cninfo_announcements,
     eastmoney_daily,
     eastmoney_quote,
+    eastmoney_watch_flow_quotes,
     free_provider_status,
     sina_quote,
     sina_quotes,
@@ -2858,6 +2859,29 @@ def merge_intraday_sina_watch_quotes(quotes: dict[str, dict[str, Any]], rows: li
     return quotes
 
 
+def merge_intraday_eastmoney_watch_flows(quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Overlay bounded Eastmoney watch-basket flow without changing price source.
+
+    The direct Tencent depth batch remains the only decision-eligible price
+    confirmation.  Eastmoney here only fills same-scan flow/turnover features
+    after the all-A Tencent percentile snapshot is unavailable.
+    """
+    for row in rows:
+        symbol = str(row.get("ts_code") or "")
+        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
+            continue
+        existing = dict(quotes.get(symbol) or {"symbol": symbol, "name": row.get("name"), "raw": {}})
+        for key in ("volume_ratio", "turnover_rate", "main_net_inflow", "main_net_inflow_ratio"):
+            value = intraday_number(row.get(key))
+            if value is not None:
+                existing[key] = value
+        existing["main_flow_percentile"] = None
+        existing["raw"] = {**(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}),
+                           "eastmoney_watch_flow": row.get("raw") if isinstance(row.get("raw"), dict) else row}
+        quotes[symbol] = existing
+    return quotes
+
+
 def intraday_quote_observation_source(quote: dict[str, Any] | None) -> str:
     """Return the actual provider used for one persisted watch-price frame.
 
@@ -4329,7 +4353,25 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
         detail = safe_error_detail(str(error), 300)
         tencent_rows, all_a_snapshot_status = [], {"status": "unavailable", "error": detail}
     quotes = {item["symbol"]: item for row in tencent_rows if (item := intraday_quote_from_tencent(row)) is not None}
-    annotate_intraday_flow_percentiles(quotes)
+    eastmoney_watch_flow_rows: list[dict[str, Any]] = []
+    if not tencent_rows:
+        try:
+            eastmoney_watch_flow_rows = await eastmoney_watch_flow_quotes(selected_symbols, max_symbols=40)
+        except (httpx.HTTPError, FreeProviderError, ValueError) as error:
+            all_a_snapshot_status = {**all_a_snapshot_status, "eastmoney_watch_fallback_error": safe_error_detail(str(error), 300)}
+        else:
+            if eastmoney_watch_flow_rows:
+                merge_intraday_eastmoney_watch_flows(quotes, eastmoney_watch_flow_rows)
+                all_a_snapshot_status = {
+                    "status": "fresh", "age_seconds": 0.0,
+                    "source": "eastmoney_watch_flow_batch", "scope": "explicit_watchlist_only",
+                    "cross_sectional": False,
+                    "semantics": "watchlist_public_flow_proxy_not_exchange_order_flow",
+                    "fallback_from": "tencent_all_a_snapshot",
+                    "matched_symbols": len(eastmoney_watch_flow_rows),
+                }
+    if all_a_snapshot_status.get("cross_sectional", True):
+        annotate_intraday_flow_percentiles(quotes)
     pure_annotate_flow_snapshot_provenance(quotes, all_a_snapshot_status)
     # One batch refreshes all explicit watches each scan while the slower all-A
     # cross-section is reused only for percentile normalization.
@@ -4410,6 +4452,10 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
                                          "sina_fallback_watch_quote_symbols": len(sina_watch_symbols),
                                          "missing_direct_watch_quote_symbols": len(selected_symbols) - direct_watch_count,
                                          "sina_watch_quote_rows": len(sina_watch_rows)},
+                     "eastmoney_watch_flow": {"status": "completed" if eastmoney_watch_flow_rows else "not_used",
+                                                "rows": len(eastmoney_watch_flow_rows),
+                                                "scope": "explicit_watchlist_only",
+                                                "percentiles": "not_computed"},
                      "tencent_minute_context": surge_source,
                      "tushare_rt_min": {
                          "requested": priority_symbols,

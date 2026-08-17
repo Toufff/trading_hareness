@@ -12,7 +12,7 @@ import httpx
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app.main import ConceptMemberSyncRequest, DailyBar, EastmoneyBoardMemberSyncRequest, IntradayScanRequest, IntradaySectorReportRequest, MarketSnapshotRequest, OfflineMinuteImportRequest, SectorCatalogSyncRequest, StrategyPatternMiningRequest, TushareFetchRequest, UniverseUpdateRequest, annotate_intraday_flow_percentiles, baostock_code, build_market_snapshot, call_tushare_api, china_equity_session, china_futures_session, cn_today, eastmoney_member_symbol, historical_capacity_plan, intraday_board_curve_clock_session, intraday_board_display_slots, intraday_board_flow_curve_items, intraday_board_refresh_interval_seconds, intraday_board_rotation_retention_days, intraday_eac_acceptance_assessment, intraday_effective_scan_interval_seconds, intraday_fast_quote_confirmation, intraday_fast_quote_retention_days, intraday_high_frequency_window, intraday_minute_features, intraday_next_monitor_delay_seconds, intraday_outcome_attribution_summary, intraday_peer_context, intraday_point_in_time_market_context_batch, intraday_quote_exchange_time_status, intraday_quote_from_tencent, intraday_quote_observation_source, intraday_runtime_service_state, intraday_sector_report, intraday_signal_attribution, intraday_signal_event_state, intraday_signal_rules, intraday_super_get_fast_interval_seconds, intraday_super_get_fast_max_in_flight, intraday_super_get_fast_max_symbols, legacy_schema_bootstrap_enabled, looks_like_response_header, market_snapshot_public_quote_settings, merge_intraday_sina_watch_quotes, merge_intraday_watch_quote_prices, normalize_tushare_rows, offline_minute_row, open_provider_capabilities, persist_ths_sector_members, provider_error_availability, provider_global_rate_limit_max_wait_seconds, post_close_strategy_retry_window, realtime_rows_are_current, record_provider_failure, record_provider_success, reserve_tushare_provider_request_slot, resolve_sync_symbols, resolve_sync_symbols_async, retry_pending_board_rotation_alerts, run_strategy_pattern_mining, sse_calendar_open_async, strategy_index_regime, strategy_intraday_candidates, strategy_market_regime, strategy_market_state, strategy_rank, technical_summary, tencent_snapshot_quotes, ths_concept_top_stocks, ths_taxonomy_key, write_access_allowed
+from app.main import ConceptMemberSyncRequest, DailyBar, EastmoneyBoardMemberSyncRequest, IntradayScanRequest, IntradaySectorReportRequest, MarketSnapshotRequest, OfflineMinuteImportRequest, SectorCatalogSyncRequest, StrategyPatternMiningRequest, TushareFetchRequest, UniverseUpdateRequest, annotate_intraday_flow_percentiles, baostock_code, build_market_snapshot, call_tushare_api, china_equity_session, china_futures_session, cn_today, eastmoney_member_symbol, historical_capacity_plan, intraday_board_curve_clock_session, intraday_board_display_slots, intraday_board_flow_curve_items, intraday_board_refresh_interval_seconds, intraday_board_rotation_retention_days, intraday_eac_acceptance_assessment, intraday_effective_scan_interval_seconds, intraday_fast_quote_confirmation, intraday_fast_quote_retention_days, intraday_high_frequency_window, intraday_minute_features, intraday_next_monitor_delay_seconds, intraday_outcome_attribution_summary, intraday_peer_context, intraday_point_in_time_market_context_batch, intraday_quote_exchange_time_status, intraday_quote_from_tencent, intraday_quote_observation_source, intraday_runtime_service_state, intraday_sector_report, intraday_signal_attribution, intraday_signal_event_state, intraday_signal_rules, intraday_super_get_fast_interval_seconds, intraday_super_get_fast_max_in_flight, intraday_super_get_fast_max_symbols, legacy_schema_bootstrap_enabled, looks_like_response_header, market_snapshot_public_quote_settings, merge_intraday_eastmoney_watch_flows, merge_intraday_sina_watch_quotes, merge_intraday_watch_quote_prices, normalize_tushare_rows, offline_minute_row, open_provider_capabilities, persist_ths_sector_members, provider_error_availability, provider_global_rate_limit_max_wait_seconds, post_close_strategy_retry_window, realtime_rows_are_current, record_provider_failure, record_provider_success, reserve_tushare_provider_request_slot, resolve_sync_symbols, resolve_sync_symbols_async, retry_pending_board_rotation_alerts, run_strategy_pattern_mining, sse_calendar_open_async, strategy_index_regime, strategy_intraday_candidates, strategy_market_regime, strategy_market_state, strategy_rank, technical_summary, tencent_snapshot_quotes, ths_concept_top_stocks, ths_taxonomy_key, write_access_allowed
 from app.factor_lab import factor_at
 from app.market_rules import a_share_limit_ratio, is_st_security_name
 from app.intraday_alerts import daily_strategy_summary_text, delivery_health_recovery_text, intraday_alert_text
@@ -94,7 +94,7 @@ from app.market_regimes import strategy_index_regime as pure_strategy_index_regi
 from app.analyst_text_features import analyst_text_factor_summary as isolated_analyst_text_factor_summary
 from app.numeric_utils import decimal_or_none as pure_decimal_or_none, intraday_number as pure_intraday_number
 from app.intraday_clock import eac_window as pure_eac_window, feature_clock as pure_feature_clock, minute_bucket as pure_minute_bucket
-from app.intraday_features import minute_features as pure_minute_features, peer_context as pure_peer_context
+from app.intraday_features import annotate_flow_snapshot_provenance, minute_features as pure_minute_features, peer_context as pure_peer_context
 from app.intraday_features import strategy_session_rows as pure_strategy_session_rows
 from app.intraday_attribution import signal_attribution as isolated_signal_attribution
 from app.intraday_breakout import eac_acceptance_assessment as isolated_eac_acceptance_assessment, upside_research_assessment as isolated_upside_assessment
@@ -3609,6 +3609,26 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(merged["000001.SZ"]["main_net_inflow"], 123.0)
         self.assertEqual(merged["000001.SZ"]["price_source"], "tencent_batched_watch_quote")
         self.assertEqual(intraday_quote_observation_source(merged["000001.SZ"]), "tencent_free")
+
+    def test_eastmoney_watch_flow_fallback_keeps_price_and_omits_small_basket_percentile(self):
+        quotes = {"000001.SZ": {"symbol": "000001.SZ", "price": 10.2,
+                                  "price_source": "tencent_batched_watch_quote", "raw": {}}}
+        merged = merge_intraday_eastmoney_watch_flows(
+            quotes, [{"ts_code": "000001.SZ", "volume_ratio": 2.4, "turnover_rate": 5.1,
+                      "main_net_inflow": 123_000, "main_net_inflow_ratio": 1.8, "raw": {"f62": 123_000}}],
+        )
+        self.assertEqual(merged["000001.SZ"]["price"], 10.2)
+        self.assertEqual(merged["000001.SZ"]["price_source"], "tencent_batched_watch_quote")
+        self.assertEqual(merged["000001.SZ"]["volume_ratio"], 2.4)
+        self.assertEqual(merged["000001.SZ"]["main_net_inflow"], 123_000)
+        self.assertIsNone(merged["000001.SZ"]["main_flow_percentile"])
+        annotate_flow_snapshot_provenance(merged, {
+            "status": "fresh", "age_seconds": 0, "source": "eastmoney_watch_flow_batch",
+            "scope": "explicit_watchlist_only", "cross_sectional": False,
+            "semantics": "watchlist_public_flow_proxy_not_exchange_order_flow",
+        })
+        self.assertTrue(merged["000001.SZ"]["flow_snapshot"]["decision_eligible"])
+        self.assertFalse(merged["000001.SZ"]["flow_snapshot"]["cross_sectional"])
 
     def test_quote_exchange_timestamp_requires_one_current_shanghai_frame(self):
         observed_at = datetime(2026, 8, 12, 5, 0, 10, tzinfo=timezone.utc)

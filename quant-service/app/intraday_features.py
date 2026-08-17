@@ -132,7 +132,10 @@ def annotate_flow_snapshot_provenance(
         "age_seconds": round(age, 3) if age is not None else None,
         "max_age_seconds": max_age_seconds,
         "decision_eligible": decision_eligible,
-        "semantics": "all_a_public_flow_proxy_not_exchange_order_flow",
+        "source": str(snapshot_status.get("source") or "tencent_all_a_snapshot"),
+        "scope": str(snapshot_status.get("scope") or "all_a_cross_section"),
+        "cross_sectional": bool(snapshot_status.get("cross_sectional", True)),
+        "semantics": str(snapshot_status.get("semantics") or "all_a_public_flow_proxy_not_exchange_order_flow"),
     }
     for quote in quotes.values():
         if quote.get("main_net_inflow") is not None:
