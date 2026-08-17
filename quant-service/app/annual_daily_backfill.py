@@ -45,6 +45,11 @@ INDEX_CODES = (
 )
 MAX_CALENDAR_DAYS = 370
 HISTORICAL_BACKFILL_CONFIRMATION = "I_CONFIRM_HISTORICAL_BACKFILL"
+# City/Super SDK advertises a higher nominal rate, but a real 2023 full-market
+# probe resets the fourth/fifth mixed control request in one burst.  Keep
+# history repair below the observed three-request window; this does not alter
+# realtime scheduling or the shared provider limiter used by the service.
+HISTORICAL_SUPER_SDK_GROUP_COOLDOWN_SECONDS = 61
 # Exact vendor publication time is not reconstructible from a later bulk
 # download. Use a conservative, explicit post-close assumption for close-daily
 # facts; preserve the actual import time separately. No minute replay may call
@@ -736,9 +741,10 @@ class AnnualDailyBackfill:
                 return "completed"
             except Exception as error:  # noqa: BLE001 - durable failure ledger is intentional
                 self._fail_run(key, error)
-                self._batch_suppressed_candidates[(spec.api_name, provider.key)] = safe_error_detail(
-                    str(error), 180,
-                )
+                if provider.uses_super_get(spec.api_name):
+                    self._batch_suppressed_candidates[(spec.api_name, provider.key)] = safe_error_detail(
+                        str(error), 180,
+                    )
                 candidate_errors.append({
                     "provider": provider.key, "error": safe_error_detail(str(error), 300),
                 })
@@ -842,13 +848,20 @@ class AnnualDailyBackfill:
     async def core_lane(self, days: list[date]) -> None:
         for index, day in enumerate(days, start=1):
             stamp = day.strftime("%Y%m%d")
-            # The primary contract is audited at 60 requests/minute.  Five
-            # independent cross-sections can be fetched concurrently; the
-            # shared limiter still enforces the supplier window, while final
-            # control reconciliation removes any canonical write-order race.
+            # City/Super SDK accepts three mixed full-market requests per
+            # observed rolling window.  Split the five independent control
+            # cross-sections into 3+2: it avoids a reset on ``stk_limit`` and
+            # ``suspend_d`` without slowing realtime routes or re-fetching a
+            # day whose cross-sections were already checkpointed.
+            first_results = await asyncio.gather(*(
+                self.fetch_one(spec, {"trade_date": stamp}, day=day)
+                for spec in CORE_DAILY_SPECS[:3]
+            ))
+            if any(result != "skipped" for result in first_results):
+                await asyncio.sleep(HISTORICAL_SUPER_SDK_GROUP_COOLDOWN_SECONDS)
             await asyncio.gather(*(
                 self.fetch_one(spec, {"trade_date": stamp}, day=day)
-                for spec in CORE_DAILY_SPECS
+                for spec in CORE_DAILY_SPECS[3:]
             ))
             if index == 1 or index % 10 == 0 or index == len(days):
                 print(json.dumps({"lane": "core", "day": str(day), "progress": f"{index}/{len(days)}", "failures": len(self.failures)}), flush=True)

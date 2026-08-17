@@ -54,7 +54,15 @@ class AnnualDailyBackfillTests(unittest.TestCase):
         self.assertIn("self._batch_suppressed_candidates", source)
         self.assertIn("batch-local failover active", source)
         self.assertIn("if suppressed is not None", source)
+        self.assertIn("if provider.uses_super_get(spec.api_name):", source)
         self.assertIn("live preference for Super GET in a fresh batch", source)
+
+    def test_historical_city_core_requests_are_split_at_the_observed_burst_boundary(self):
+        source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
+        self.assertIn("HISTORICAL_SUPER_SDK_GROUP_COOLDOWN_SECONDS = 61", source)
+        self.assertIn("CORE_DAILY_SPECS[:3]", source)
+        self.assertIn("CORE_DAILY_SPECS[3:]", source)
+        self.assertIn("await asyncio.sleep(HISTORICAL_SUPER_SDK_GROUP_COOLDOWN_SECONDS)", source)
 
     def test_stock_cross_section_filters_non_a_codes_and_wrong_dates(self):
         rows = valid_rows("stk_limit", [
