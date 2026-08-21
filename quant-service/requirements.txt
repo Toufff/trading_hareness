@@ -1,5 +1,5 @@
 fastapi==0.115.12
-akshare==1.18.83
+akshare==1.18.93
 alembic==1.16.5
 baostock==0.8.9
 httpx==0.28.1

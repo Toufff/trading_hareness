@@ -361,9 +361,12 @@ def akshare_block_trade_supplements(trade_date: date) -> list[dict[str, Any]]:
     return _collect_public([
         ("stock_dzjy_mrmx", "eastmoney", "block_trade_detail", lambda ak: ak.stock_dzjy_mrmx(symbol="A股", start_date=stamp, end_date=stamp), 300),
         ("stock_dzjy_mrtj", "eastmoney", "block_trade_daily_stat", lambda ak: ak.stock_dzjy_mrtj(start_date=stamp, end_date=stamp), 200),
-        ("stock_dzjy_sctj", "eastmoney", "block_trade_market_stat", lambda ak: ak.stock_dzjy_sctj(start_date=stamp, end_date=stamp), 200),
-        ("stock_dzjy_yybph", "eastmoney", "block_trade_seat_rank", lambda ak: ak.stock_dzjy_yybph(start_date=stamp, end_date=stamp), 200),
-        ("stock_dzjy_hygtj", "eastmoney", "block_trade_industry_stat", lambda ak: ak.stock_dzjy_hygtj(start_date=stamp, end_date=stamp), 200),
+        # AKShare 1.18.93 exposes these aggregate views without date ranges.
+        # Keep the date-bounded detail/statistic calls above, but do not pass
+        # obsolete keyword arguments to the aggregate endpoints.
+        ("stock_dzjy_sctj", "eastmoney", "block_trade_market_stat", lambda ak: ak.stock_dzjy_sctj(), 200),
+        ("stock_dzjy_yybph", "eastmoney", "block_trade_seat_rank", lambda ak: ak.stock_dzjy_yybph(symbol="近一月"), 200),
+        ("stock_dzjy_hygtj", "eastmoney", "block_trade_industry_stat", lambda ak: ak.stock_dzjy_hygtj(symbol="近一月"), 200),
     ], "block_trade_supplement")
 
 

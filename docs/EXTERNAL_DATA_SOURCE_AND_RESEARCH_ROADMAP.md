@@ -52,9 +52,9 @@ AkShare 的官方数据字典表明其覆盖面很广，但它汇聚上游站点
 
 ### AkShare 适配结论
 
-AkShare 当前可作为“公开源聚合补充层”接入，但不能替代主 Tushare 源、超级源或未来商业授权源。项目本身是 MIT 许可的 Python 库，最新 PyPI 版本为 1.18.83，要求 Python 3.9+；但其数据声明明确定位为学术研究和参考用途，并提示部分接口可能因不可控因素被移除。因此接入时必须把 `akshare` 拆成 `provider_key='akshare'` 和真实 `upstream_site` 两层 provenance，不得把网页聚合结果直接标记为授权生产数据。
+AkShare 当前可作为“公开源聚合补充层”接入，但不能替代主 Tushare 源、超级源或未来商业授权源。项目本身是 MIT 许可的 Python 库，当前锁定版本为 1.18.93，要求 Python 3.9+；但其数据声明明确定位为学术研究和参考用途，并提示部分接口可能因不可控因素被移除。因此接入时必须把 `akshare` 拆成 `provider_key='akshare'` 和真实 `upstream_site` 两层 provenance，不得把网页聚合结果直接标记为授权生产数据。
 
-当前 `quant-research` 镜像已安装 `akshare==1.18.83`，连接器仍受 `AKSHARE_ENABLED` 控制。导入失败、字段漂移或上游限流必须降级为交叉验证失败，不能阻塞主源/super 的单票按需补齐。完整缺口矩阵和新增补充包见 [AKShare 能力缺口与互补接入分析](AKSHARE_CAPABILITY_GAP_ANALYSIS.md)。
+当前 `quant-research` 镜像已安装 `akshare==1.18.93`，连接器仍受 `AKSHARE_ENABLED` 控制。导入失败、字段漂移或上游限流必须降级为交叉验证失败，不能阻塞主源/super 的单票按需补齐。完整缺口矩阵和新增补充包见 [AKShare 能力缺口与互补接入分析](AKSHARE_CAPABILITY_GAP_ANALYSIS.md)。
 
 优先可扩展的数据：
 
@@ -75,7 +75,7 @@ AkShare 当前可作为“公开源聚合补充层”接入，但不能替代主
 
 已完成首批接入：
 
-1. 新增 `quant-service/app/akshare_provider.py`，镜像安装 `akshare==1.18.83`；连接器受 `AKSHARE_ENABLED` 控制，导入失败时降级为未配置。
+1. 新增 `quant-service/app/akshare_provider.py`，镜像安装 `akshare==1.18.93`；连接器受 `AKSHARE_ENABLED` 控制，导入失败时降级为未配置。
 2. 实现 4 个受控能力：`daily_bar`、`market_summary`、`lhb_event`、`strong_pool`。AkShare 日线东财路径失败时会 fallback 到 AkShare 的腾讯日线路径，并在 row 里保留 `upstream_site` 与 `ak_function`。
 3. 新增 `POST /api/v1/providers/akshare/probe` 和前端代理 `/api/research/providers/akshare/probe`。单次 probe 对龙虎榜最多入库 100 条、强势股池最多入库 200 条。
 4. 单票研究 `POST /api/v1/stocks/{symbol}/study` 已加入 `AKShare公开日线`，仅作为交叉验证源；不参与 P0 readiness，也不会覆盖主源/super。
