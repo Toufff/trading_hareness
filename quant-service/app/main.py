@@ -211,7 +211,7 @@ from .post_close_structures import (
     post_close_forming_structure,
     post_close_fresh_start_structure,
 )
-from .runtime_tasks import observe_completed_task, supervise_leased_loop, supervise_loop
+from .runtime_tasks import LoopRuntimeRegistry, observe_completed_task, supervise_leased_loop, supervise_loop
 from .intraday_outcomes import (
     INTRADAY_OUTCOME_HORIZONS,
     intraday_outcome_cutoff,
@@ -5614,7 +5614,10 @@ async def lifespan(_: FastAPI):
             return await run_database_blocking(renew_runtime_lease, db, lease_key, lease_holder_id, lease_seconds)
         async def release() -> None:
             await run_database_blocking(release_runtime_lease, db, lease_key, lease_holder_id)
-        await supervise_leased_loop(label, factory, acquire, renew, release, lease_seconds)
+        await supervise_leased_loop(
+            label, factory, acquire, renew, release, lease_seconds,
+            on_state=background_loop_registry.mark,
+        )
 
     monitor_task = asyncio.create_task(leased_background_loop("intraday_monitor", lambda: intraday_monitor_loop(interval_seconds))) if interval_seconds >= 30 else None
     fast_quote_task = asyncio.create_task(leased_background_loop("super_get_fast_quote", intraday_super_get_fast_quote_loop)) if interval_seconds >= 30 else None
@@ -5656,6 +5659,7 @@ app = FastAPI(title="Market Research Service", version="0.1.0", lifespan=lifespa
 _METRICS_CONTROL_PLANE_REFRESH_SECONDS = 5.0
 _metrics_control_plane_lock = threading.Lock()
 _metrics_control_plane_refreshed_at = 0.0
+background_loop_registry = LoopRuntimeRegistry()
 
 
 def refresh_metrics_control_plane(*, now: float | None = None) -> bool:
@@ -5789,6 +5793,7 @@ def health() -> dict[str, Any]:
             board_rotation_retention_days=intraday_board_rotation_retention_days,
             set_db_pool_gauge=set_db_pool_gauge, set_open_circuit_gauge=provider_circuit_open.set,
             research_storage_governance=local_research_storage_governance,
+            background_loop_status=background_loop_registry.snapshot,
         ))
     except DatabaseUnavailableError as error:
         raise HTTPException(status_code=503, detail=f"database unavailable: {error}") from error

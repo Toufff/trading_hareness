@@ -40,6 +40,7 @@ def repository_agent_context() -> dict[str, Any]:
             "strategy_rules": "quant-service/app/*_rules.py and *_research.py",
             "api_routers": "quant-service/app/routers/",
             "network_resilience": "quant-service/app/network_health.py + app/runtime_tasks.py",
+            "background_loop_lifecycle": "quant-service/app/runtime_tasks.py + /health.runtime_loops",
             "intraday_sector_report": "quant-service/app/intraday_sector_report_orchestrator.py + app/intraday_sector_report_service.py",
         },
         "contracts": {

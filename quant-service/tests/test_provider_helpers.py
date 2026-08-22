@@ -44,7 +44,7 @@ from app.health_read_model import DatabaseUnavailableError, HealthDependencies, 
 from app.alert_transport import post_feishu_alert_text
 from app.provider_observability import provider_health_item, provider_health_snapshot, provider_health_summary
 from app.provider_health import record_provider_success
-from app.runtime_tasks import observe_completed_task, supervise_leased_loop, supervise_loop
+from app.runtime_tasks import LoopRuntimeRegistry, observe_completed_task, supervise_leased_loop, supervise_loop
 from app.runtime_resources import (
     DEFAULT_HOT_DATABASE_SOFT_BYTES,
     DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
@@ -641,12 +641,14 @@ class ProviderHelperTests(unittest.TestCase):
             board_curve_enabled=lambda: True, board_curve_retention_days=lambda: 60,
             board_rotation_retention_days=lambda: 60, set_db_pool_gauge=pool_updates.append,
             set_open_circuit_gauge=circuit_updates.append,
+            background_loop_status=lambda: {"intraday_monitor": {"state": "running", "updated_at": "now", "last_error": None}},
         )
         payload = read_health_payload(dependencies)
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["runtime_leases"]["background_loop_lease_seconds"], 120)
         self.assertTrue(payload["provider_rate_limits"]["shared_database_reservation"])
         self.assertEqual(payload["runtime_leases"]["background_loops"][0]["lease_key"], "background_loop:test")
+        self.assertEqual(payload["runtime_loops"]["intraday_monitor"]["state"], "running")
         self.assertEqual(pool_updates, [{"pool_size": 2, "available": 1, "waiting": 0}])
         self.assertEqual(circuit_updates, [2])
 
@@ -2443,15 +2445,28 @@ class ProviderHelperTests(unittest.TestCase):
                 second_started.set()
                 await asyncio.Event().wait()
 
-            task = asyncio.create_task(supervise_loop("test_loop", loop, restart_delay_seconds=0.01))
+            registry = LoopRuntimeRegistry()
+            task = asyncio.create_task(supervise_loop("test_loop", loop, restart_delay_seconds=0.01, on_state=registry.mark))
             await asyncio.wait_for(second_started.wait(), timeout=1)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
-            return starts
+            return starts, registry.snapshot()
 
         with patch("builtins.print"):
-            self.assertEqual(asyncio.run(check()), 2)
+            starts, states = asyncio.run(check())
+        self.assertEqual(starts, 2)
+        self.assertEqual(states["test_loop"]["state"], "stopped")
+        self.assertIsNone(states["test_loop"]["last_error"])
+
+    def test_loop_registry_keeps_only_bounded_local_lifecycle_details(self):
+        registry = LoopRuntimeRegistry()
+        registry.mark("test", "failed", "x" * 500)
+        registry.mark("test", "running")
+        item = registry.snapshot()["test"]
+        self.assertEqual(item["state"], "running")
+        self.assertIsNone(item["last_error"])
+        self.assertIn("updated_at", item)
 
     def test_loop_supervisor_keeps_restarting_after_more_than_one_failure(self):
         async def check() -> int:
