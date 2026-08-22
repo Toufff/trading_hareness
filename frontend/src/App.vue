@@ -47,7 +47,19 @@ type ConceptBackfill = { trade_date?: string | null; total_concepts: number; map
 type IndexRegimeItem = { symbol: string; trading_date?: string; close?: number; drawdown_high_to_low_pct?: number; rebound_from_low_pct?: number; versus_period_high_pct?: number; range_retracement?: number; return_5_sessions_pct?: number; volume_ratio_5_vs_prior15?: number };
 type MultiIndexRegime = { state?: string; index_count?: number; median_range_retracement?: number; interpretation?: string; items?: IndexRegimeItem[] };
 type IndexBreadthContext = Record<string, unknown> & { multi_index_regime?: MultiIndexRegime; quality_flags?: string[] };
-type StrategyReview = { exchange_date?: string; session?: string; observed_at?: string; market_state?: string; report?: { index_breadth_context?: IndexBreadthContext; analyst_context?: Record<string, unknown>; data_boundary?: Record<string, unknown> } };
+type ShortTermReview = {
+  status?: string;
+  methodology?: string;
+  market_emotion?: { state?: string; limit_up_count?: number; limit_down_count?: number; previous_limit_count?: number; previous_limit_positive_ratio?: number | null; previous_limit_average_change_pct?: number | null; interpretation?: string };
+  ladder?: { highest_board_count?: number | null; distribution?: Array<{ board_count?: number; count?: number }>; gaps_below_highest?: number[]; ladder_state?: string; interpretation?: string };
+  sector_structure?: { inflow_leaders?: Array<Record<string, unknown>>; outflow_leaders?: Array<Record<string, unknown>>; candidate_mainlines?: Array<Record<string, unknown>>; complete_board_count?: number; coverage_note?: string };
+  capital_and_lhb?: { top_amount_advancers?: number; top_amount_decliners?: number; top_amount_average_change_pct?: number | null; lhb_stock_count?: number; lhb_positive_net_count?: number; lhb_negative_net_count?: number; top_amount_symbols?: Array<Record<string, unknown>> };
+  loss_effect?: { negative_daily_count?: number; risk_flags?: string[]; largest_losses?: Array<Record<string, unknown>> };
+  wind_flags?: Array<{ symbol?: string; name?: string; type?: string; board_count?: number; reason?: string }>;
+  next_session_plan?: { participation?: string; triggers?: string[]; invalidations?: string[]; symbols?: string[]; decision_eligible?: boolean };
+  notice?: string;
+};
+type StrategyReview = { exchange_date?: string; session?: string; observed_at?: string; market_state?: string; report?: { index_breadth_context?: IndexBreadthContext; analyst_context?: Record<string, unknown>; data_boundary?: Record<string, unknown>; short_term_review?: ShortTermReview } };
 type PostCloseCandidate = { rank: number; symbol: string; name?: string; candidate_type: 'base_ready_30d' | 'base_forming_15d' | 'fresh_start_15d'; score: number; structure: { status?: string; score?: number; bar_count?: number; metrics?: Record<string, unknown>; notice?: string }; board_context: { label?: string; net_amount?: number; change_pct?: number; exact_member_mapping?: boolean }; risk_flags: string[]; discovered_at?: string; expires_at?: string | null; reason_codes?: string[]; source_snapshot?: { as_of_date?: string; model_version?: string; daily_symbols?: number; exact_board_context_symbols?: number } };
 type PostCloseStrategyRun = { run_id?: string; as_of_date?: string; model_version?: string; status?: string; source_status?: Record<string, unknown>; summary?: Record<string, unknown>; updated_at?: string };
 type LhbContext = { top_list_rows?: number; institution_records?: number; institution_count?: number; institution_buy?: number; institution_sell?: number; institution_net_buy?: number; institutions?: string[]; reasons?: string[] };
@@ -279,6 +291,7 @@ const selectedReviewBoard = computed(() => reviewConceptBoards.value.find((item)
 const selectedReviewBoardStocks = computed(() => selectedReviewBoard.value?.top_stocks ?? []);
 const completedBackfillBoards = computed(() => conceptBackfill.value.states.filter((item) => item.state === 'completed' || item.state === 'empty').reduce((total, item) => total + Number(item.boards || 0), 0));
 const closeIndexRegime = computed(() => closeStrategyReview.value?.report?.index_breadth_context?.multi_index_regime ?? null);
+const closeShortTermReview = computed(() => closeStrategyReview.value?.report?.short_term_review ?? null);
 const indexRegimeLabel = computed(() => ({
   corrective_rebound: '纠错反弹情景', trend_recovery: '趋势修复', weak_or_declining: '弱势/下行', mixed_transition: '混合过渡', insufficient_index_history: '历史不足',
 }[closeIndexRegime.value?.state ?? ''] ?? closeIndexRegime.value?.state ?? '待生成'));
@@ -1009,6 +1022,31 @@ onBeforeUnmount(() => {
                 <el-col :md="4" :xs="12"><el-card shadow="never" class="metric-card"><span>本次回填完成</span><strong>{{ completedBackfillBoards }}</strong></el-card></el-col>
                 <el-col :md="4" :xs="12"><el-card shadow="never" class="metric-card"><span>板块报告时间</span><strong class="review-metric">{{ closeBoardReport ? dateText(closeBoardReport.observed_at) : '待保存' }}</strong></el-card></el-col>
               </el-row>
+              <el-card shadow="never" class="section-gap">
+                <template #header><div class="card-header"><div><span>短线交易七步复盘</span><small class="realtime-refresh-time">情绪 → 连板梯队 → 板块结构 → 资金/龙虎榜 → 亏钱效应 → 风向标 → 次日预案；只读取收盘前已保存证据。</small></div><el-tag :type="closeShortTermReview?.status === 'completed' ? 'success' : 'warning'">{{ closeShortTermReview?.methodology ?? '待生成' }}</el-tag></div></template>
+                <el-alert v-if="!closeShortTermReview" title="尚未生成七步复盘；请先保存收盘板块复盘。" type="warning" :closable="false" show-icon/>
+                <template v-else>
+                  <el-row :gutter="12">
+                    <el-col :md="4" :xs="12"><el-statistic title="短线情绪" :value="closeShortTermReview.market_emotion?.state ?? '-'"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="涨停 / 跌停" :value="`${closeShortTermReview.market_emotion?.limit_up_count ?? 0} / ${closeShortTermReview.market_emotion?.limit_down_count ?? 0}`"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="昨日涨停溢价" :value="closeShortTermReview.market_emotion?.previous_limit_average_change_pct ?? 0" suffix="%" :precision="2"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="最高连板" :value="closeShortTermReview.ladder?.highest_board_count ?? 0" suffix="板"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="成交额前20上涨" :value="closeShortTermReview.capital_and_lhb?.top_amount_advancers ?? 0"/></el-col>
+                    <el-col :md="4" :xs="12"><el-statistic title="成交额前20下跌" :value="closeShortTermReview.capital_and_lhb?.top_amount_decliners ?? 0"/></el-col>
+                  </el-row>
+                  <el-alert class="section-gap" :title="closeShortTermReview.market_emotion?.interpretation ?? '情绪证据不足'" :type="closeShortTermReview.market_emotion?.state === 'risk_on' ? 'success' : closeShortTermReview.market_emotion?.state === 'risk_off' ? 'warning' : 'info'" :closable="false" show-icon/>
+                  <el-row :gutter="14" class="section-gap">
+                    <el-col :md="8" :xs="24"><el-card shadow="never" header="连板梯队"><el-space wrap><el-tag v-for="gap in closeShortTermReview.ladder?.gaps_below_highest ?? []" :key="gap" type="warning">缺 {{ gap }} 板</el-tag><el-tag v-if="!(closeShortTermReview.ladder?.gaps_below_highest?.length)" type="success">无明显断层</el-tag></el-space><el-table :data="closeShortTermReview.ladder?.distribution ?? []" size="small" class="section-gap"><el-table-column prop="board_count" label="高度"/><el-table-column prop="count" label="数量"/></el-table></el-card></el-col>
+                    <el-col :md="8" :xs="24"><el-card shadow="never" header="板块主攻与覆盖"><el-table :data="closeShortTermReview.sector_structure?.candidate_mainlines ?? []" size="small" max-height="210"><el-table-column prop="label" label="板块" min-width="105"/><el-table-column prop="net_inflow" label="净流" width="90"/><el-table-column prop="limit_like_top_stock_count" label="强势数" width="72"/><el-table-column prop="mapped_members" label="成员" width="62"/></el-table><el-text type="info">完整板块 {{ closeShortTermReview.sector_structure?.complete_board_count ?? 0 }} 个；未映射板块不推断涨停结构。</el-text></el-card></el-col>
+                    <el-col :md="8" :xs="24"><el-card shadow="never" header="龙虎榜与亏钱效应"><el-descriptions :column="1" border size="small"><el-descriptions-item label="龙虎榜股票">{{ closeShortTermReview.capital_and_lhb?.lhb_stock_count ?? 0 }}</el-descriptions-item><el-descriptions-item label="净买 / 净卖">{{ closeShortTermReview.capital_and_lhb?.lhb_positive_net_count ?? 0 }} / {{ closeShortTermReview.capital_and_lhb?.lhb_negative_net_count ?? 0 }}</el-descriptions-item><el-descriptions-item label="全市场下跌数">{{ closeShortTermReview.loss_effect?.negative_daily_count ?? 0 }}</el-descriptions-item></el-descriptions><el-space wrap class="section-gap"><el-tag v-for="flag in closeShortTermReview.loss_effect?.risk_flags ?? []" :key="flag" type="warning">{{ flag }}</el-tag></el-space></el-card></el-col>
+                  </el-row>
+                  <el-divider content-position="left">风向标与次日计划</el-divider>
+                  <el-table :data="closeShortTermReview.wind_flags ?? []" size="small" max-height="260"><el-table-column prop="symbol" label="代码" width="100"/><el-table-column prop="name" label="名称" width="100"/><el-table-column prop="type" label="类型" width="125"/><el-table-column prop="board_count" label="连板" width="65"/><el-table-column prop="reason" label="观察理由" min-width="340" show-overflow-tooltip/></el-table>
+                  <el-alert class="section-gap" :title="closeShortTermReview.next_session_plan?.participation ?? '等待次日预案'" type="info" :closable="false" show-icon/>
+                  <el-space wrap><el-tag v-for="trigger in closeShortTermReview.next_session_plan?.triggers ?? []" :key="trigger" type="success">触发：{{ trigger }}</el-tag><el-tag v-for="invalid in closeShortTermReview.next_session_plan?.invalidations ?? []" :key="invalid" type="warning">失效：{{ invalid }}</el-tag></el-space>
+                  <el-alert class="section-gap" title="七步复盘仅生成研究清单，不自动加入观察池、不改变盘中阈值、不生成订单。" type="warning" :closable="false" show-icon/>
+                </template>
+              </el-card>
               <el-card shadow="never" class="board-flow-card">
                 <template #header><div class="card-header"><div><span>市场量能与资金状态</span><small class="realtime-refresh-time">分钟东财板块流、腾讯全A量能与盘后Tushare资金流分层保存；当前只进入研究证据，不影响飞书策略阈值。</small></div><el-tag :type="marketFlowStateType(marketFlowLatest?.market_state)">{{ marketFlowStateLabel(marketFlowLatest?.market_state) }}</el-tag></div></template>
                 <el-alert v-if="marketFlowError" :title="`量能资金特征读取失败：${marketFlowError}`" type="error" :closable="false" show-icon/>

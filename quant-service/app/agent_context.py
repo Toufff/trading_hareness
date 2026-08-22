@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-CONTEXT_VERSION = "2026-08-22.v4"
+CONTEXT_VERSION = "2026-08-22.v5"
 
 
 def repository_agent_context() -> dict[str, Any]:
@@ -30,6 +30,8 @@ def repository_agent_context() -> dict[str, Any]:
             "daily_strategy_summary": "quant-service/app/daily_strategy_summary_service.py",
             "strategy_decision": "quant-service/app/strategy_decision_service.py",
             "strategy_review": "quant-service/app/strategy_review_service.py",
+            "board_research": "quant-service/app/board_research_service.py",
+            "short_term_review": "quant-service/app/short_term_review.py",
             "analyst_review": "quant-service/app/analyst_market_review.py",
             "strategy_rules": "quant-service/app/*_rules.py and *_research.py",
             "api_routers": "quant-service/app/routers/",
@@ -57,6 +59,20 @@ def repository_agent_context() -> dict[str, Any]:
             "verify the mounted OpenAPI and runtime health before handoff",
         ],
         "evidence_flow": ["raw", "canonical", "features", "signals", "outcomes"],
+        "post_close_review": {
+            "method": "short-term-review-v1",
+            "steps": [
+                "market_emotion: limit-up/down breadth and previous-limit premium",
+                "ladder: highest board and consecutive-board gaps",
+                "sector_structure: exact saved-member/quote coverage only",
+                "capital_and_lhb: top-20 amount leaders and LHB net direction",
+                "loss_effect: broad and concentrated drawdown flags",
+                "wind_flags: bounded first-board, consecutive and repair samples",
+                "next_session_plan: triggers and invalidations, research-only",
+            ],
+            "decision_eligible": False,
+            "missing_data_policy": "fail_closed",
+        },
         "research_boundaries": [
             "stated_at is replay evidence; strategy_available_at is eligibility time",
             "missing/stale/incomplete provider data fails closed",

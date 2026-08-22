@@ -367,6 +367,7 @@ from .intraday_event_replay_runner import run_recorded_signal_lifecycle_replay
 from .intraday_rule_input_replay_runner import run_recorded_rule_input_replay
 from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrated
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
+from .board_research_service import run as run_board_research_isolated
 from .recommendation_generation import generate as generate_recommendations_isolated
 from .tushare_daily_sync import sync as sync_tushare_isolated
 from .baostock_daily_sync import fetch_rows as fetch_baostock_rows_isolated, sync as sync_baostock_isolated
@@ -5039,65 +5040,16 @@ def recompute_analyst_intraday_outcomes_for_date(as_of_date: date) -> dict[str, 
 
 
 async def run_board_research(request: BoardResearchRunRequest) -> dict[str, Any]:
-    signal_result = await sync_ths_concept_signals(SectorFlowSyncRequest(trade_date=request.trade_date, provider=request.provider))
-    candidate_result = await sync_concept_limit_candidates(ConceptCandidateSyncRequest(
-        trade_date=request.trade_date, provider=request.provider, top_concepts=request.top_concepts,
-        leaders_per_concept=request.leaders_per_concept,
-    ))
-    selected_date = candidate_result.get("trade_date")
-    studies: list[dict[str, Any]] = []
-    announcements: dict[str, Any] | None = None
-    result_concept_keys = [str(item["sector_key"]) for item in candidate_result.get("concepts", []) if item.get("sector_key")]
-    def load_candidates() -> list[Any]:
-        if not selected_date or not result_concept_keys:
-            return []
-        with db.transaction() as connection:
-            return connection.execute(
-                """SELECT c.symbol,c.name,c.sector_key,s.label concept_label,c.limit_tag,c.limit_amount,
-                          flow.net_amount board_net_amount
-                     FROM quant.sector_limit_candidates c
-                     JOIN quant.sectors s ON s.taxonomy_key=c.taxonomy_key AND s.sector_key=c.sector_key
-                LEFT JOIN quant.sector_market_observations flow ON flow.taxonomy_key='ths_concept_flow' AND flow.sector_key=c.sector_key
-                          AND flow.trading_date=c.trading_date
-                    WHERE c.taxonomy_key='ths_concept_flow' AND c.trading_date=%s AND c.sector_key = ANY(%s)
-                    ORDER BY flow.net_amount DESC NULLS LAST,c.limit_amount DESC NULLS LAST,c.symbol
-                    LIMIT %s""",
-                (selected_date, result_concept_keys, request.max_stock_studies * 2),
-            ).fetchall()
-    rows = await run_database_blocking(load_candidates)
-    unique_rows: list[dict[str, Any]] = []
-    seen_symbols: set[str] = set()
-    for row in rows:
-        symbol = str(row["symbol"])
-        if symbol in seen_symbols:
-            continue
-        unique_rows.append(dict(row))
-        seen_symbols.add(symbol)
-        if len(unique_rows) >= request.max_stock_studies:
-            break
-    symbols = [str(row["symbol"]) for row in unique_rows]
-    if request.sync_announcements and symbols:
-        announcement_end = tushare_date(str(selected_date)) if selected_date else datetime.now(ZoneInfo("Asia/Shanghai")).date()
-        announcements = await sync_cninfo_announcements(AnnouncementSyncRequest(
-            symbols=symbols, start_date=announcement_end - timedelta(days=45), end_date=announcement_end,
-            max_pages_per_symbol=1,
-        ))
-    for row in unique_rows:
-        study = await build_stock_study(str(row["symbol"]), StockStudyRequest(
-            as_of_date=tushare_date(str(selected_date)) if selected_date else None,
-            lookback_days=request.study_lookback_days,
-        ))
-        studies.append({"candidate": dict(row), "study": {
-            "symbol": study["symbol"], "as_of_date": study["as_of_date"],
-            "technical": study["technical"], "analyst": study["analyst"]["summary"],
-            "combined": study["combined"], "sources": study["sources"],
-            "announcements": study.get("events", {}).get("announcements", []),
-        }})
-    failed_sources = [source for item in studies for source in item["study"]["sources"] if source.get("status") == "failed"]
-    status = "partial" if candidate_result.get("status") == "partial" or failed_sources else "completed"
-    return {"status": status, "trade_date": selected_date, "signals": signal_result, "candidates": candidate_result,
-            "announcements": announcements, "studies": studies, "decision_eligible": False,
-            "notice": "板块到个股链路用于研究扫描；免费公告源只作事件补充。"}
+    return await run_board_research_isolated(
+        request,
+        database=db,
+        run_database=run_database_blocking,
+        sync_concept_signals=sync_ths_concept_signals,
+        sync_concept_limit_candidates=sync_concept_limit_candidates,
+        sync_announcements=sync_cninfo_announcements,
+        build_stock_study=build_stock_study,
+        date_for=tushare_date,
+    )
 
 
 def prepare_tushare_fetch_run(

@@ -8,15 +8,21 @@ from app.strategy_review_service import build
 
 
 class _Result:
-    def __init__(self, row):
+    def __init__(self, row=None, rows=None):
         self._row = row
+        self._rows = rows or []
 
     def fetchone(self):
         return self._row
 
+    def fetchall(self):
+        return self._rows
+
 
 class _Connection:
     def execute(self, statement, params=()):
+        if "FROM quant.market_events" in statement or "FROM quant.canonical_bars_daily" in statement:
+            return _Result(rows=[])
         return _Result({
             "observed_at": datetime(2026, 8, 21, 7, 30, tzinfo=timezone.utc),
             "summary": {"priced_symbols": 2},

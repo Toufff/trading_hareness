@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
 
+from .short_term_review import build_short_term_review
+
 
 def build(
     connection: Any,
@@ -39,11 +41,37 @@ def build(
     breadth = index_breadth_context(connection, as_of_date, request.session, observed_at)
     analyst = analyst_context(connection, as_of_date, observed_at)
     board_summary = dict(row["summary"] or {})
+    event_rows = connection.execute(
+        """SELECT event_type,symbol,occurred_at,available_at,source,title,body
+             FROM quant.market_events
+            WHERE (occurred_at AT TIME ZONE 'Asia/Shanghai')::date=%s
+              AND available_at<=%s
+              AND event_type = ANY(%s)
+            ORDER BY occurred_at,symbol""",
+        (as_of_date, observed_at, ["limit_up_pool", "limit_down_pool", "previous_limit_pool", "lhb_event"]),
+    ).fetchall()
+    daily_rows = connection.execute(
+        """SELECT b.symbol,i.name,b.amount,
+                      CASE WHEN b.pre_close IS NOT NULL AND b.pre_close<>0
+                           THEN (b.close/b.pre_close-1)*100 ELSE NULL END AS pct_chg
+                 FROM quant.canonical_bars_daily b
+            LEFT JOIN quant.instruments i ON i.symbol=b.symbol
+                WHERE b.trading_date=%s
+                ORDER BY b.amount DESC NULLS LAST""",
+        (as_of_date,),
+    ).fetchall()
+    short_term_review = build_short_term_review(
+        event_rows=[dict(item) for item in event_rows],
+        daily_rows=[dict(item) for item in daily_rows],
+        board_summary=board_summary,
+        observed_at=observed_at.isoformat(),
+    )
     review = {
         "status": "completed", "review_version": review_version, "session": request.session,
         "as_of_date": str(as_of_date), "observed_at": observed_at.isoformat(),
         "market_state": current_market_state, "market_state_metrics": state_metrics,
         "index_breadth_context": breadth, "board_flow": board_summary, "analyst_context": analyst,
+        "short_term_review": short_term_review,
         "playbook": {
             "entry": "only research candidates aligned with market state, board flow and two-scan price/volume confirmation",
             "exit": "hard stop first; then reduce on confirmed price/VWAP and flow reversal",
