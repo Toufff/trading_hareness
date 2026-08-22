@@ -376,6 +376,10 @@ from .post_close_refresh import record_stage_with_receipt, run_refresh as run_po
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
 from .board_research_service import run as run_board_research_isolated
 from .akshare_probe_service import run as run_akshare_probe_isolated
+from .provider_probe_service import (
+    audit_tushare_capabilities as audit_tushare_capabilities_isolated,
+    probe_realtime as probe_realtime_sources_isolated,
+)
 from .recommendation_generation import generate as generate_recommendations_isolated
 from .tushare_daily_sync import sync as sync_tushare_isolated
 from .baostock_daily_sync import fetch_rows as fetch_baostock_rows_isolated, sync as sync_baostock_isolated
@@ -5906,139 +5910,58 @@ async def akshare_probe(payload: AkShareProbeRequest) -> dict[str, Any]:
 
 
 async def probe_realtime_sources(payload: RealtimeProbeRequest) -> dict[str, Any]:
-    """Probe live families while exposing unavailable physical routes."""
-    matrix = realtime_probe_matrix(
-        symbol=payload.symbols[0], frequency=payload.frequency, etf_symbol=payload.etf_symbol,
-        index_symbol=payload.index_symbol, sw_symbol=payload.sw_symbol,
-        futures_symbol=payload.futures_symbol,
+    """Compatibility wrapper for the isolated bounded realtime probe service."""
+    return await probe_realtime_sources_isolated(
+        payload,
+        realtime_probe_matrix=realtime_probe_matrix,
+        default_probe_params=default_probe_params,
+        realtime_market_session=realtime_market_session_async,
+        provider_candidates=provider_candidates,
+        fetch=stock_study_fetch,
     )
-    for symbol in payload.symbols[1:]:
-        for api_name in ("rt_k", "rt_min", "rt_min_daily"):
-            params = default_probe_params(api_name, symbol=symbol, frequency=payload.frequency)
-            if params is not None:
-                matrix.append((api_name, params))
-
-    runnable: list[tuple[str, str, dict[str, Any], TushareFetchRequest]] = []
-    results: list[dict[str, Any]] = []
-    for api_name, params in matrix:
-        active, reason = await realtime_market_session_async(api_name)
-        for provider in ("primary", "super_sdk", "super_get"):
-            if not provider_candidates(api_name, provider):
-                results.append({"provider": provider, "api_name": api_name, "params": params,
-                                "status": "skipped", "availability": "unsupported",
-                                "reason": "physical provider has no verified route for this realtime API"})
-                continue
-            if not active:
-                results.append({"provider": provider, "api_name": api_name, "params": params,
-                                "status": "skipped", "availability": "declared", "reason": reason})
-                continue
-            runnable.append((provider, api_name, params, TushareFetchRequest(
-                api_name=api_name, provider=provider, params=params,
-                max_rows=260 if api_name.endswith("_daily") else 10, force_refresh=True,
-            )))
-
-    semaphore = asyncio.Semaphore(4)
-
-    async def run_probe(provider: str, api_name: str, params: dict[str, Any], request: TushareFetchRequest) -> dict[str, Any]:
-        async with semaphore:
-            result, _ = await stock_study_fetch(f"{provider} {api_name}", request)
-        return {"provider": provider, "api_name": api_name, "params": params, **result}
-
-    if runnable:
-        results.extend(await asyncio.gather(*(run_probe(*item) for item in runnable)))
-    completed = [item for item in results if item["status"] in {"completed", "partial", "unchanged", "empty"}]
-    failed = [item for item in results if item["status"] == "failed"]
-    status = "skipped" if not runnable else "completed" if not failed else "partial" if completed else "failed"
-    return {"status": status, "symbols": payload.symbols, "frequency": payload.frequency,
-            "api_count": len({item["api_name"] for item in results}), "results": results}
 
 
 async def audit_tushare_capabilities(payload: TushareCapabilityAuditRequest) -> dict[str, Any]:
-    """Run bounded, explicit provider probes without treating catalog entries as proof."""
-    results: list[dict[str, Any]] = []
-    as_of = payload.as_of_date or datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date()
-    for api_name in payload.api_names:
-        contract = api_capability(api_name)
-        params = default_probe_params(api_name, symbol=payload.symbol, as_of=as_of)
-        for provider in payload.providers:
-            if api_name in HISTORICAL_MINUTE_APIS:
-                results.append({"api_name": api_name, "provider": provider, "status": "skipped",
-                                "availability": "declared", "reason": "offline_files_only"})
-                continue
-            if api_name in REALTIME_MARKET_HOURS_APIS:
-                active, reason = await realtime_market_session_async(api_name)
-                if not active:
-                    results.append({"api_name": api_name, "provider": provider, "status": "skipped",
-                                    "availability": "declared", "reason": reason})
-                    continue
-            if params is None:
-                results.append({"api_name": api_name, "provider": provider, "status": "skipped",
-                                "availability": "declared", "reason": "manual_parameters_required"})
-                continue
-            try:
-                outcome = await asyncio.wait_for(
-                    fetch_tushare_catalog(TushareFetchRequest(
-                        api_name=api_name, provider=provider, params=params,
-                        max_rows=payload.max_rows, force_refresh=True,
-                    )),
-                    timeout=25,
+    """Compatibility wrapper for the isolated capability-audit service."""
+    async def record_timeout(provider: str, api_name: str) -> None:
+        provider_key = f"tushare_{provider}"
+
+        def persist() -> None:
+            with db.transaction() as connection:
+                record_provider_api_capability(
+                    connection, provider_key, api_name, "failed",
+                    note="Capability audit timed out after 25 seconds.",
                 )
-                availability = "verified" if int(outcome.get("stored", 0)) > 0 else "empty"
-                results.append({"api_name": api_name, "provider": provider, "params": params,
-                                "status": outcome["status"], "availability": availability,
-                                "received": outcome.get("received", 0), "stored": outcome.get("stored", 0),
-                                "request_key": outcome.get("request_key")})
-            except TimeoutError:
-                provider_key = f"tushare_{provider}"
-                def record_timeout() -> None:
-                    with db.transaction() as connection:
-                        record_provider_api_capability(
-                            connection, provider_key, api_name, "failed",
-                            note="Capability audit timed out after 25 seconds.",
-                        )
 
-                await run_database_blocking(record_timeout)
-                results.append({"api_name": api_name, "provider": provider, "params": params,
-                                "status": "failed", "availability": "failed", "reason": "audit_timeout_25s",
-                                "contract_status": contract.status})
-            except HTTPException as error:
-                if is_local_capacity_http_error(error):
-                    # A fetch may be rejected by the bounded local proxy/DB
-                    # executor.  It is not a provider capability failure and
-                    # must remain distinguishable in a capability audit.
-                    results.append({"api_name": api_name, "provider": provider, "params": params,
-                                    "status": "blocked", "availability": "local_capacity",
-                                    "reason": str(error.detail), "contract_status": contract.status})
-                    continue
-                if is_circuit_open_http_error(error):
-                    results.append({"api_name": api_name, "provider": provider, "params": params,
-                                    "status": "circuit_open", "availability": "circuit_open",
-                                    "reason": str(error.detail), "contract_status": contract.status})
-                    continue
-                provider_key = f"tushare_{provider}"
-                def load_observation() -> Any:
-                    with db.transaction() as connection:
-                        return connection.execute(
-                            "SELECT availability,note FROM quant.provider_api_capabilities WHERE provider_key=%s AND api_name=%s",
-                            (provider_key, api_name),
-                        ).fetchone()
+        await run_database_blocking(persist)
 
-                observation = await run_database_blocking(load_observation)
-                results.append({"api_name": api_name, "provider": provider, "params": params,
-                                "status": "failed", "availability": observation["availability"] if observation else "failed",
-                                "reason": str(error.detail), "contract_status": contract.status})
-    attempted = [item for item in results if item["status"] != "skipped"]
-    completed = [item for item in attempted if item["status"] in {"completed", "partial", "unchanged", "empty"}]
-    failures = [item for item in attempted if item["status"] == "failed"]
-    blocked = [item for item in attempted if item["status"] in {"blocked", "circuit_open"}]
-    status = (
-        "skipped" if not attempted else
-        "blocked" if blocked and not completed and not failures else
-        "completed" if completed and not failures and not blocked else
-        "partial" if completed or blocked else "failed"
+    async def load_observation(provider: str, api_name: str) -> dict[str, Any] | None:
+        provider_key = f"tushare_{provider}"
+
+        def load() -> Any:
+            with db.transaction() as connection:
+                return connection.execute(
+                    "SELECT availability,note FROM quant.provider_api_capabilities WHERE provider_key=%s AND api_name=%s",
+                    (provider_key, api_name),
+                ).fetchone()
+
+        observation = await run_database_blocking(load)
+        return dict(observation) if observation else None
+
+    return await audit_tushare_capabilities_isolated(
+        payload,
+        today=cn_today,
+        api_capability=api_capability,
+        default_probe_params=default_probe_params,
+        historical_minute_apis=HISTORICAL_MINUTE_APIS,
+        realtime_market_hours_apis=REALTIME_MARKET_HOURS_APIS,
+        realtime_market_session=realtime_market_session_async,
+        fetch_catalog=fetch_tushare_catalog,
+        record_timeout=record_timeout,
+        load_observation=load_observation,
+        is_local_capacity_error=is_local_capacity_http_error,
+        is_circuit_open_error=is_circuit_open_http_error,
     )
-    return {"status": status, "as_of_date": str(as_of), "symbol": payload.symbol,
-            "requested_apis": payload.api_names, "requested_providers": payload.providers, "results": results}
 
 
 async def tushare_fetch(payload: TushareFetchRequest) -> dict[str, Any]:
