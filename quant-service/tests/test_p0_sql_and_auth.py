@@ -26,6 +26,7 @@ from app.main import DailyBar, app, db, executor_saturated_response, upsert_bar
 from app.runtime_executors import ExecutorSaturatedError
 from app.automation_run_repository import fail_run, finish_run, start_or_resume_run, start_run
 from app.strategy_review_service import completed_for_checkpoint
+from app.daily_strategy_summary_service import terminal_for_exchange_date
 
 
 class WriteAuthenticationMiddlewareTests(unittest.TestCase):
@@ -301,6 +302,35 @@ class StrategyReviewCheckpointSqlIntegrationTests(unittest.TestCase):
                     (Json({"status": "completed", "nested": {"checkpoint": True}}), self.review_key),
                 )
                 self.assertTrue(completed_for_checkpoint(connection, self.exchange_date, "close"))
+        finally:
+            self._cleanup()
+
+
+@unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
+class DailyStrategySummaryReceiptSqlIntegrationTests(unittest.TestCase):
+    """Only terminal delivery states suppress a restarted daily-summary loop."""
+
+    exchange_date = date(2099, 1, 4)
+
+    def _cleanup(self) -> None:
+        with db.transaction() as connection:
+            connection.execute("DELETE FROM quant.strategy_day_summaries WHERE exchange_date=%s", (self.exchange_date,))
+
+    def test_suppressed_is_terminal_but_failed_is_retryable(self) -> None:
+        self._cleanup()
+        try:
+            with db.transaction() as connection:
+                connection.execute(
+                    """INSERT INTO quant.strategy_day_summaries(exchange_date,payload,message_text,delivery_status)
+                       VALUES(%s,%s,'test','failed')""",
+                    (self.exchange_date, Json({"stage": "test"})),
+                )
+                self.assertFalse(terminal_for_exchange_date(connection, self.exchange_date))
+                connection.execute(
+                    "UPDATE quant.strategy_day_summaries SET delivery_status='suppressed' WHERE exchange_date=%s",
+                    (self.exchange_date,),
+                )
+                self.assertTrue(terminal_for_exchange_date(connection, self.exchange_date))
         finally:
             self._cleanup()
 

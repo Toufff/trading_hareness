@@ -66,4 +66,15 @@ def build_daily_strategy_summary(database: Any, exchange_date: date, *, readines
     }
 
 
-__all__ = ["build_daily_strategy_summary"]
+def terminal_for_exchange_date(connection: Any, exchange_date: date) -> bool:
+    """Whether the persisted day summary is a restart-safe terminal receipt."""
+    row = connection.execute(
+        """SELECT 1 FROM quant.strategy_day_summaries
+             WHERE exchange_date=%s AND delivery_status=ANY(%s)
+             LIMIT 1""",
+        (exchange_date, ["sent", "disabled", "suppressed"]),
+    ).fetchone()
+    return row is not None
+
+
+__all__ = ["build_daily_strategy_summary", "terminal_for_exchange_date"]

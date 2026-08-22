@@ -30,6 +30,7 @@ def repository_agent_context() -> dict[str, Any]:
             "post_close_stage_receipts": "quant-service/app/post_close_refresh.py + app/automation_run_repository.py",
             "akshare_probe": "quant-service/app/akshare_probe_service.py",
             "daily_strategy_summary": "quant-service/app/daily_strategy_summary_service.py",
+            "daily_strategy_summary_scheduler": "quant-service/app/daily_strategy_summary_scheduler.py",
             "strategy_decision": "quant-service/app/strategy_decision_service.py",
             "strategy_review": "quant-service/app/strategy_review_service.py",
             "strategy_review_scheduler": "quant-service/app/strategy_review_scheduler.py",

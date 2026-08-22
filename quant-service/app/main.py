@@ -276,7 +276,14 @@ from .routers.analyst_research_reads import build_analyst_research_reads_router
 from .routers.automation_reads import build_automation_reads_router
 from .security import remote_archive_sync_bearer_allowed, write_access_allowed
 from .automation_run_repository import run_recorded
-from .daily_strategy_summary_service import build_daily_strategy_summary as build_daily_strategy_summary_projection
+from .daily_strategy_summary_service import (
+    build_daily_strategy_summary as build_daily_strategy_summary_projection,
+    terminal_for_exchange_date as daily_summary_terminal_isolated,
+)
+from .daily_strategy_summary_scheduler import (
+    DailyStrategySummarySchedulerDependencies,
+    daily_strategy_summary_scheduler,
+)
 from .strategy_decision_service import run as run_strategy_decision_isolated
 from .strategy_review_service import build as build_strategy_review_isolated, completed_for_checkpoint as review_checkpoint_completed_isolated
 from .routers.event_reads import build_event_reads_router
@@ -3839,18 +3846,17 @@ async def run_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
 
 async def daily_strategy_summary_loop() -> None:
     """Deliver one compact review after the post-close candidate retry window."""
-    completed: set[date] = set()
-    while True:
-        local = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
-        if (local.date() not in completed and await sse_calendar_open_async(local.date())
-                and time(19, 15) <= local.time() < time(19, 30)):
-            try:
-                result = await run_daily_strategy_summary(local.date())
-                if result["status"] in {"sent", "disabled", "suppressed", "already_terminal", "attempts_exhausted"}:
-                    completed.add(local.date())
-            except Exception as error:  # noqa: BLE001 - bounded retry window records the next attempt
-                print(f"daily strategy summary failed: {str(error)[:300]}")
-        await asyncio.sleep(60)
+    async def terminal_for_date(exchange_date: date) -> bool:
+        def load() -> bool:
+            with db.transaction() as connection:
+                return daily_summary_terminal_isolated(connection, exchange_date)
+        return await run_database_blocking(load, timeout_seconds=10)
+    await daily_strategy_summary_scheduler(DailyStrategySummarySchedulerDependencies(
+        calendar_open=sse_calendar_open_async,
+        terminal_for_date=terminal_for_date,
+        run_summary=run_daily_strategy_summary,
+        now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
+    ))
 
 
 async def intraday_monitor_loop(interval_seconds: int) -> None:

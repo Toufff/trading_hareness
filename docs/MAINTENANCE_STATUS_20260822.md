@@ -29,6 +29,7 @@
 - 盘后一键刷新阶段回执现在支持跨进程恢复：每个 `post-close-refresh:{stage}:{trade_date}` 先读取唯一 `automation_runs` 回执，已 `completed` 的阶段直接返回 `resumed_from_receipt=true`，不重复请求 provider 或写入；`partial`、`blocked`、`failed` 才会重开同一行重试。租约、超时与失败脱敏边界不变，并有真实 PostgreSQL JSONB/时间戳契约测试覆盖。
 - AKShare 探针编排已从 `main.py` 移至 `akshare_probe_service.py`：每个 capability 仍保持独立熔断、45 秒有界执行、数据库健康回执、失败脱敏与 `decision_eligible=false`；主文件仅注入已存在的 provider 函数和执行器，不改变接口参数或采集范围。
 - 午盘/收盘复盘调度补齐了重启恢复：策略复盘表中同一交易日、同一 session 已有 `report.status=completed` 时，调度器将该检查点写入本进程完成集而不重复刷新、结算或持久化；没有完成回执的检查点仍只在原两分钟窗口内重试。
+- 日终研究摘要循环同样改为读取 `strategy_day_summaries` 的终态回执：`sent`、`disabled`、`suppressed` 可跨重启防重；`pending` 与 `failed` 保持可重试。窗口/恢复语义已抽至 `daily_strategy_summary_scheduler.py` 并有独立回归；摘要仍只保存前端研究内容，飞书继续只用于观察股的盘中策略提醒。
 
 ## 继续迭代顺序
 
