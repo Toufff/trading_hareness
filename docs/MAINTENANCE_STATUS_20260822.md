@@ -24,7 +24,7 @@
 - 共享全 A 快照增加生命周期取消接口；盘中超时后允许有限缓存任务完成供下一轮复用，但服务关闭时会显式取消 in-flight 任务，避免 detached task 越过 HTTP/线程池关闭边界。BaoStock 旧兼容函数也已改为隔离模块转发。
 - 网络状态同时暴露 Prometheus 指标：`quant_network_reachability`（状态 one-hot）、连续失败数和恢复计数；监控抓取只读本地状态，不主动探测外网。
 - 小杰分析师链路已登记：远端 `POST /api/v1/imports/analysts` 已按 OpenAPI 契约创建名称为“小杰”的幂等注册任务（请求 ID 由远端返回，当前状态 `queued`，等待远端 Worker 完成后才会出现在公开分析师目录）。本地 `source-registry.json` 已注册 `#xiaojie` → `remote_analyst_id=xiaojie`，Feishu 群监听源为“小杰夜报～”，内容聚合发送到现有分析师汇总群；群 ID 留空时由用户 OAuth 精确按群名解析。配置路由初始化改为幂等补齐新来源，不覆盖前端已编辑的旧路由。
-- 盘后复盘新增 `short-term-review-v1` 七步证据投影：市场情绪（涨停/跌停及昨日涨停溢价）、连板梯队、板块结构、成交额前 20 与龙虎榜、亏钱效应、风向标和次日预案。它只读取当日已落库且满足 `available_at <= observed_at` 的事件/日线/板块证据；板块主线必须有精确成员与报价覆盖，缺失时明确标记，不按中文名称猜归属。
+- 盘后复盘升级为 `short-term-review-v2` 七步证据投影：市场情绪（涨停/跌停及昨日涨停溢价）、连板梯队、板块结构、成交额前 20 与龙虎榜、亏钱效应、风向标和次日预案。新增成交额前 20 的集中度、已保存 Tushare 机构席位汇总、昨日涨停深跌、炸板、冲高回落和逐只风向标的触发/失效条件；成交额前 20 只有本地 A 股日线达到 3,000 只时才可解释为全市场，否则显式降级为局部样本。它只读取当日已落库且满足 `available_at <= observed_at` 的事件/日线/板块证据。板块主线必须有精确成员与报价覆盖，缺失时明确标记，不按中文名称猜归属或中军身份。
 - 收盘复盘前端新增“短线交易七步复盘”卡片，展示证据、覆盖度、风向标、参与条件和失效条件。输出强制 `decision_eligible=false`，不会自动加入观察池、改变阈值或产生订单；这套框架把“情绪—梯队—主线—资金—亏钱效应—风向标—次日计划”固定成可回放清单。
 - 盘后一键刷新阶段回执现在支持跨进程恢复：每个 `post-close-refresh:{stage}:{trade_date}` 先读取唯一 `automation_runs` 回执，已 `completed` 的阶段直接返回 `resumed_from_receipt=true`，不重复请求 provider 或写入；`partial`、`blocked`、`failed` 才会重开同一行重试。租约、超时与失败脱敏边界不变，并有真实 PostgreSQL JSONB/时间戳契约测试覆盖。
 - AKShare 探针编排已从 `main.py` 移至 `akshare_probe_service.py`：每个 capability 仍保持独立熔断、45 秒有界执行、数据库健康回执、失败脱敏与 `decision_eligible=false`；主文件仅注入已存在的 provider 函数和执行器，不改变接口参数或采集范围。

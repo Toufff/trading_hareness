@@ -9,7 +9,15 @@ from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
 
+from .post_close_evidence import lhb_context
 from .short_term_review import build_short_term_review
+
+
+def _number(value: Any) -> float | None:
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def build(
@@ -48,22 +56,40 @@ def build(
               AND available_at<=%s
               AND event_type = ANY(%s)
             ORDER BY occurred_at,symbol""",
-        (as_of_date, observed_at, ["limit_up_pool", "limit_down_pool", "previous_limit_pool", "lhb_event"]),
+        (as_of_date, observed_at, ["limit_up_pool", "limit_down_pool", "previous_limit_pool", "limit_open_pool", "lhb_event"]),
     ).fetchall()
     daily_rows = connection.execute(
-        """SELECT b.symbol,i.name,b.amount,
+        """SELECT b.symbol,i.name,b.open,b.high,b.low,b.close,b.pre_close,b.amount,
                       CASE WHEN b.pre_close IS NOT NULL AND b.pre_close<>0
                            THEN (b.close/b.pre_close-1)*100 ELSE NULL END AS pct_chg
                  FROM quant.canonical_bars_daily b
             LEFT JOIN quant.instruments i ON i.symbol=b.symbol
                 WHERE b.trading_date=%s
+                  AND (
+                    b.symbol ~ '^(600|601|603|605|688|689|900)[0-9]{3}\\.SH$'
+                    OR b.symbol ~ '^(000|001|002|003|300|301)[0-9]{3}\\.SZ$'
+                    OR b.symbol ~ '^[489][0-9]{5}\\.BJ$'
+                  )
                 ORDER BY b.amount DESC NULLS LAST""",
         (as_of_date,),
     ).fetchall()
+    lhb_raw_rows = connection.execute(
+        """SELECT api_name,row_data,provider_key,available_at
+             FROM quant.tushare_raw_records
+            WHERE api_name IN ('top_list','top_inst')
+              AND row_data->>'trade_date'=%s AND available_at<=%s
+            ORDER BY available_at DESC,record_index""",
+        (as_of_date.strftime("%Y%m%d"), observed_at),
+    ).fetchall()
+    tushare_lhb = lhb_context(
+        [dict(item) for item in lhb_raw_rows],
+        number=_number,
+    )
     short_term_review = build_short_term_review(
         event_rows=[dict(item) for item in event_rows],
         daily_rows=[dict(item) for item in daily_rows],
         board_summary=board_summary,
+        tushare_lhb_context=tushare_lhb,
         observed_at=observed_at.isoformat(),
     )
     review = {

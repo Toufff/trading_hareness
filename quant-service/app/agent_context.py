@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-CONTEXT_VERSION = "2026-08-22.v5"
+CONTEXT_VERSION = "2026-08-22.v6"
 
 
 def repository_agent_context() -> dict[str, Any]:
@@ -65,15 +65,15 @@ def repository_agent_context() -> dict[str, Any]:
         ],
         "evidence_flow": ["raw", "canonical", "features", "signals", "outcomes"],
         "post_close_review": {
-            "method": "short-term-review-v1",
+            "method": "short-term-review-v2",
             "steps": [
                 "market_emotion: limit-up/down breadth and previous-limit premium",
-                "ladder: highest board and consecutive-board gaps",
-                "sector_structure: exact saved-member/quote coverage only",
-                "capital_and_lhb: top-20 amount leaders and LHB net direction",
-                "loss_effect: broad and concentrated drawdown flags",
-                "wind_flags: bounded first-board, consecutive and repair samples",
-                "next_session_plan: triggers and invalidations, research-only",
+                "ladder: highest board, multi-board breadth and consecutive-board gaps",
+                "sector_structure: exact saved-member/quote coverage only; do not infer a mid-cap anchor",
+                "capital_and_lhb: top-20 amount concentration, LHB direction and persisted Tushare institution seats",
+                "loss_effect: broad drawdown, previous-limit deep losses, opened-limit supply and close reversal flags",
+                "wind_flags: bounded first-board, consecutive, repair and broad-pullback resilience samples",
+                "next_session_plan: per-symbol triggers and invalidations, research-only",
             ],
             "decision_eligible": False,
             "missing_data_policy": "fail_closed",

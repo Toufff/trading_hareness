@@ -67,6 +67,15 @@ def _limit_ratio(symbol: str) -> float:
     return 10.0
 
 
+def _bar_change_pct(row: dict[str, Any], field: str) -> float | None:
+    """Return a same-session price change without inferring a missing price."""
+    price = _number(row.get(field))
+    pre_close = _number(row.get("pre_close"))
+    if price is None or pre_close is None or pre_close == 0:
+        return None
+    return (price / pre_close - 1) * 100
+
+
 def _market_emotion(limit_ups: list[dict[str, Any]], limit_downs: list[dict[str, Any]], previous: list[dict[str, Any]]) -> dict[str, Any]:
     changes = [_limit_value(_event_payload(row), "涨跌幅", "pct_chg", "pct_change") for row in previous]
     changes = [value for value in changes if value is not None]
@@ -116,6 +125,7 @@ def _ladder(limit_ups: list[dict[str, Any]]) -> dict[str, Any]:
     gaps = [height for height in range(1, highest + 1) if height not in counts] if highest else []
     return {
         "highest_board_count": highest,
+        "multi_board_count": sum(count for height, count in counts.items() if height >= 2),
         "distribution": [{"board_count": height, "count": counts[height]} for height in heights],
         "gaps_below_highest": gaps,
         "highest_symbols": symbols_by_height.get(highest, [])[:10] if highest else [],
@@ -136,6 +146,15 @@ def _sector_structure(board_summary: dict[str, Any]) -> dict[str, Any]:
                     continue
                 stocks = [stock for stock in item.get("top_stocks") or [] if isinstance(stock, dict)]
                 limit_like = sum(1 for stock in stocks if (_number(stock.get("pct_change")) or 0) >= _limit_ratio(str(stock.get("symbol") or "")) - 0.3)
+                rising = sum(1 for stock in stocks if (_number(stock.get("pct_change")) or 0) > 0)
+                if limit_like >= 3:
+                    structure_state = "limit_cluster"
+                elif limit_like >= 1 and rising >= 3:
+                    structure_state = "leader_with_followers"
+                elif limit_like >= 1:
+                    structure_state = "isolated_leader"
+                else:
+                    structure_state = "unconfirmed"
                 target.append({
                     "taxonomy_key": taxonomy,
                     "sector_key": item.get("sector_key"),
@@ -144,6 +163,8 @@ def _sector_structure(board_summary: dict[str, Any]) -> dict[str, Any]:
                     "change_pct": item.get("change_pct"),
                     "top_stock_count": len(stocks),
                     "limit_like_top_stock_count": limit_like,
+                    "rising_top_stock_count": rising,
+                    "structure_state": structure_state,
                     "mapped_members": item.get("mapped_members", 0),
                     "quoted_members": item.get("quoted_members", 0),
                 })
@@ -156,13 +177,26 @@ def _sector_structure(board_summary: dict[str, Any]) -> dict[str, Any]:
         "candidate_mainlines": [item for item in complete if item["limit_like_top_stock_count"] >= 3][:10],
         "complete_board_count": len(complete),
         "evidence_status": "completed" if positive or negative else "missing",
-        "coverage_note": "板块强度只使用已保存的成分/报价字段；未映射板块不推断涨停数量。",
+        "coverage_note": "板块强度只使用已保存的成分/报价字段；未映射板块不推断涨停数量。候选主线要求至少三只涨停样本；中军身份需要市值/机构持仓证据，当前不猜测。",
     }
 
 
-def _capital_and_loss(daily_rows: list[dict[str, Any]], lhb_rows: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _capital_and_loss(
+    daily_rows: list[dict[str, Any]],
+    lhb_rows: list[dict[str, Any]],
+    tushare_lhb_context: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
     ranked = sorted(daily_rows, key=lambda row: _number(row.get("amount")) or float("-inf"), reverse=True)
     top20 = ranked[:20]
+    daily_symbol_count = len(daily_rows)
+    market_amount = sum(max(0.0, _number(row.get("amount")) or 0.0) for row in daily_rows)
+    top20_amount = sum(max(0.0, _number(row.get("amount")) or 0.0) for row in top20)
+    raw_top20_share = top20_amount / market_amount if market_amount else None
+    # This is a data-quality bound, not a strategy threshold.  When only 20
+    # rows account for half of an ostensibly all-A total, the saved amount
+    # field is incomplete or has an incompatible unit and cannot support a
+    # market-wide concentration conclusion.
+    full_market_daily = daily_symbol_count >= 3000 and raw_top20_share is not None and raw_top20_share <= 0.5
     changes = [_number(row.get("pct_chg", row.get("pct_change"))) for row in top20]
     changes = [value for value in changes if value is not None]
     lhb_net: list[float] = []
@@ -171,44 +205,112 @@ def _capital_and_loss(daily_rows: list[dict[str, Any]], lhb_rows: list[dict[str,
         value = _limit_value(payload, "龙虎榜净买额", "net_amount", "net_buy_amount", "净买额")
         if value is not None:
             lhb_net.append(value)
-    largest_losses = sorted(
-        [dict(row) for row in daily_rows if (_number(row.get("pct_chg", row.get("pct_change"))) or 0) < 0],
-        key=lambda row: _number(row.get("pct_chg", row.get("pct_change"))) or 0,
-    )[:10]
+    institution_records = sum(int(item.get("institution_records") or 0) for item in tushare_lhb_context.values())
+    institution_net_buy = sum(_number(item.get("institution_net_buy")) or 0.0 for item in tushare_lhb_context.values())
     capital = {
         "top_amount_count": len(top20),
         "top_amount_advancers": sum(value > 0 for value in changes),
         "top_amount_decliners": sum(value < 0 for value in changes),
         "top_amount_average_change_pct": round(mean(changes), 4) if changes else None,
+        "daily_symbol_count": daily_symbol_count,
+        "top_amount_evidence_status": "completed" if full_market_daily else "partial",
+        "top_amount_quality_flags": [] if full_market_daily else [
+            "insufficient_all_a_daily_coverage" if daily_symbol_count < 3000 else "amount_distribution_anomaly"
+        ],
+        "market_amount": round(market_amount, 4) if market_amount and full_market_daily else None,
+        "top20_amount_share": round(raw_top20_share, 4) if raw_top20_share is not None and full_market_daily else None,
         "top_amount_symbols": [{"symbol": row.get("symbol"), "name": row.get("name"), "amount": row.get("amount"), "pct_change": row.get("pct_chg", row.get("pct_change"))} for row in top20],
         "lhb_stock_count": len(lhb_rows),
         "lhb_net_amount_sum": round(sum(lhb_net), 4) if lhb_net else None,
         "lhb_positive_net_count": sum(value > 0 for value in lhb_net),
         "lhb_negative_net_count": sum(value < 0 for value in lhb_net),
+        "tushare_lhb_symbol_count": len(tushare_lhb_context),
+        "tushare_institution_records": institution_records,
+        "tushare_institution_net_buy": round(institution_net_buy, 4) if institution_records else None,
+        "lhb_seat_evidence_status": "completed" if tushare_lhb_context else "missing",
+        "coverage_note": "成交额前20只有在至少 3,000 只本地 A 股日线可用、且前20成交额占比通过分布合理性检查时才代表全市场；否则只保留局部研究样本，不解读集中度。",
     }
+    return capital
+
+
+def _loss_effect(
+    daily_rows: list[dict[str, Any]],
+    previous: list[dict[str, Any]],
+    limit_opens: list[dict[str, Any]],
+    capital: dict[str, Any],
+) -> dict[str, Any]:
+    largest_losses = sorted(
+        [dict(row) for row in daily_rows if (_number(row.get("pct_chg", row.get("pct_change"))) or 0) < 0],
+        key=lambda row: _number(row.get("pct_chg", row.get("pct_change"))) or 0,
+    )[:10]
+    previous_deep_losses: list[dict[str, Any]] = []
+    for row in previous:
+        payload = _event_payload(row)
+        change = _limit_value(payload, "涨跌幅", "pct_chg", "pct_change")
+        if change is not None and change <= -5:
+            previous_deep_losses.append({"symbol": row.get("symbol"), "name": payload.get("名称") or payload.get("name"), "pct_change": round(change, 4)})
+    intraday_reversals: list[dict[str, Any]] = []
+    for row in daily_rows:
+        high_change = _bar_change_pct(row, "high")
+        close_change = _number(row.get("pct_chg", row.get("pct_change")))
+        if high_change is None or close_change is None:
+            continue
+        if high_change >= 5 and high_change - close_change >= 7 and close_change <= 0:
+            intraday_reversals.append({"symbol": row.get("symbol"), "name": row.get("name"),
+                                       "high_change_pct": round(high_change, 4), "close_change_pct": round(close_change, 4)})
+    intraday_reversals.sort(key=lambda item: item["high_change_pct"] - item["close_change_pct"], reverse=True)
     loss = {
         "largest_losses": [{"symbol": row.get("symbol"), "name": row.get("name"), "pct_change": row.get("pct_chg", row.get("pct_change"))} for row in largest_losses],
         "negative_daily_count": sum((_number(row.get("pct_chg", row.get("pct_change"))) or 0) < 0 for row in daily_rows),
+        "previous_limit_deep_loss_count": len(previous_deep_losses),
+        "previous_limit_deep_losses": previous_deep_losses[:10],
+        "limit_open_count": len(limit_opens),
+        "intraday_reversal_count": len(intraday_reversals),
+        "intraday_reversals": intraday_reversals[:10],
         "risk_flags": [],
     }
     if loss["negative_daily_count"] and loss["negative_daily_count"] > max(1, len(daily_rows) * 0.6):
         loss["risk_flags"].append("broad_loss_effect")
     if capital["top_amount_decliners"] > capital["top_amount_advancers"]:
         loss["risk_flags"].append("large_capital_leaders_weak")
-    return capital, loss
+    if len(previous_deep_losses) >= max(2, round(len(previous) * 0.25)):
+        loss["risk_flags"].append("previous_limit_deep_loss_cluster")
+    if len(limit_opens) >= 3:
+        loss["risk_flags"].append("limit_open_supply_pressure")
+    if len(intraday_reversals) >= max(5, round(len(daily_rows) * 0.005)):
+        loss["risk_flags"].append("intraday_reversal_cluster")
+    return loss
 
 
-def _watch_flags(limit_ups: list[dict[str, Any]], previous: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _watch_flags(
+    limit_ups: list[dict[str, Any]],
+    previous: list[dict[str, Any]],
+    daily_rows: list[dict[str, Any]],
+    loss: dict[str, Any],
+) -> list[dict[str, Any]]:
     flags: list[dict[str, Any]] = []
     for row in limit_ups:
         payload = _event_payload(row)
         board_count = _limit_value(payload, "连板数", "board_count") or 1
-        flags.append({"symbol": row.get("symbol"), "name": payload.get("名称") or payload.get("name"), "type": "consecutive_limit" if board_count >= 2 else "first_board", "board_count": int(board_count), "reason": "涨停池/连板梯队风向标，次日需竞价和板块承接确认"})
+        flag_type = "consecutive_limit" if board_count >= 2 else "first_board"
+        flags.append({"symbol": row.get("symbol"), "name": payload.get("名称") or payload.get("name"), "type": flag_type, "board_count": int(board_count), "reason": "涨停池/连板梯队风向标，次日需竞价和板块承接确认",
+                      "next_session_trigger": "竞价不显著弱于同梯队，开盘后板块保持正向承接", "invalidation": "快速跌破前收且同梯队/板块同步走弱"})
     for row in previous:
         payload = _event_payload(row)
         change = _limit_value(payload, "涨跌幅", "pct_chg", "pct_change")
         if change is not None and change > 2:
-            flags.append({"symbol": row.get("symbol"), "name": payload.get("名称") or payload.get("name"), "type": "previous_limit_repair", "board_count": _limit_value(payload, "昨日连板数", "board_count"), "reason": "昨日强势样本仍有正溢价，作为修复观察而非直接追涨"})
+            flags.append({"symbol": row.get("symbol"), "name": payload.get("名称") or payload.get("name"), "type": "previous_limit_repair", "board_count": _limit_value(payload, "昨日连板数", "board_count"), "reason": "昨日强势样本仍有正溢价，作为修复观察而非直接追涨",
+                          "next_session_trigger": "开盘后保持前收上方并出现二次承接", "invalidation": "低开后无法收复前收，且昨日涨停样本转弱"})
+    if "broad_loss_effect" in set(loss.get("risk_flags") or []):
+        resilient = sorted(
+            [row for row in daily_rows if (_number(row.get("pct_chg", row.get("pct_change"))) or 0) >= 3],
+            key=lambda row: _number(row.get("pct_chg", row.get("pct_change"))) or 0,
+            reverse=True,
+        )
+        for row in resilient[:3]:
+            flags.append({"symbol": row.get("symbol"), "name": row.get("name"), "type": "resilient_in_broad_pullback", "board_count": None,
+                          "reason": "全市场亏钱效应下仍显著走强，作为相对强度风向标",
+                          "next_session_trigger": "竞价和开盘维持相对市场强度，且所属板块未转弱", "invalidation": "相对强度消失并跌回前收下方"})
     unique: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in flags:
@@ -222,16 +324,25 @@ def _watch_flags(limit_ups: list[dict[str, Any]], previous: list[dict[str, Any]]
     return unique
 
 
-def build_short_term_review(*, event_rows: list[dict[str, Any]], daily_rows: list[dict[str, Any]], board_summary: dict[str, Any], observed_at: str | None = None) -> dict[str, Any]:
+def build_short_term_review(
+    *,
+    event_rows: list[dict[str, Any]],
+    daily_rows: list[dict[str, Any]],
+    board_summary: dict[str, Any],
+    tushare_lhb_context: dict[str, dict[str, Any]] | None = None,
+    observed_at: str | None = None,
+) -> dict[str, Any]:
     limit_ups = _event_rows(event_rows, "limit_up_pool")
     limit_downs = _event_rows(event_rows, "limit_down_pool")
     previous = _event_rows(event_rows, "previous_limit_pool")
+    limit_opens = _event_rows(event_rows, "limit_open_pool")
     lhb_rows = _event_rows(event_rows, "lhb_event")
     emotion = _market_emotion(limit_ups, limit_downs, previous)
     ladder = _ladder(limit_ups)
     sectors = _sector_structure(board_summary)
-    capital, loss = _capital_and_loss(daily_rows, lhb_rows)
-    wind_flags = _watch_flags(limit_ups, previous)
+    capital = _capital_and_loss(daily_rows, lhb_rows, tushare_lhb_context or {})
+    loss = _loss_effect(daily_rows, previous, limit_opens, capital)
+    wind_flags = _watch_flags(limit_ups, previous, daily_rows, loss)
     if emotion["state"] == "risk_off":
         participation = "观望/只做已有底仓的风险管理，等待亏钱效应收敛"
         triggers = ["昨日涨停整体转正", "最高板不再断层", "主线板块至少出现龙头与中军同步"]
@@ -244,7 +355,7 @@ def build_short_term_review(*, event_rows: list[dict[str, Any]], daily_rows: lis
     return {
         "status": "completed" if event_rows or daily_rows or board_summary else "partial",
         "observed_at": observed_at,
-        "methodology": "short-term-review-v1",
+        "methodology": "short-term-review-v2",
         "market_emotion": emotion,
         "ladder": ladder,
         "sector_structure": sectors,
@@ -256,6 +367,7 @@ def build_short_term_review(*, event_rows: list[dict[str, Any]], daily_rows: lis
             "triggers": triggers,
             "invalidations": ["集合竞价/开盘快速跌破关键价位", "板块资金由流入转持续流出", "昨日强势股批量低开走弱"],
             "symbols": [item["symbol"] for item in wind_flags],
+            "symbol_plans": [{key: item.get(key) for key in ("symbol", "name", "type", "reason", "next_session_trigger", "invalidation")} for item in wind_flags],
             "decision_eligible": False,
         },
         "notice": "七步复盘是证据整理和次日预案，不是自动交易信号；缺失数据不会被网络观点补齐。",
