@@ -41,6 +41,14 @@
       "publisher_key": "quanneng-yeren",
       "remote_analyst_id": "quanneng-yeren",
       "enabled": true
+    },
+    {
+      "tag": "xiaojie",
+      "label": "小杰",
+      "topic_key": "market",
+      "publisher_key": "xiaojie",
+      "remote_analyst_id": "xiaojie",
+      "enabled": true
     }
   ]
 }

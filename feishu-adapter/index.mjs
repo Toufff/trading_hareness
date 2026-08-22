@@ -130,6 +130,9 @@ const groupRelayConfig = {
 		{ key: 'anqiang', tag: 'anqiang', chatId: String(process.env.FEISHU_GROUP_RELAY_ANQIANG_CHAT_ID ?? 'oc_1de6464db12c43bf60985f7131e6334a').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_ANQIANG_CHAT_NAME ?? '马安强 (1)').trim() },
 		{ key: 'liwei', tag: 'liwei', chatId: String(process.env.FEISHU_GROUP_RELAY_LIWEI_CHAT_ID ?? 'oc_4ed9fdb72a152bc921b2d34bd4a1df14').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_LIWEI_CHAT_NAME ?? '消息更新群').trim(), targetChatIds: String(process.env.FEISHU_GROUP_RELAY_LIWEI_TARGET_CHAT_IDS ?? '').split(',').map((value) => value.trim()).filter(Boolean) },
 		{ key: 'quanneng', tag: 'quanneng', chatId: String(process.env.FEISHU_GROUP_RELAY_QUANNENG_CHAT_ID ?? 'oc_d6a89890c3a62517116a2c63f015e0a0').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_QUANNENG_CHAT_NAME ?? '新野人哥会员群【禁言】').trim() },
+		// 小杰夜报～ 由用户 OAuth 按群名解析；拿到稳定 chat_id 后可通过
+		// FEISHU_GROUP_RELAY_XIAOJIE_CHAT_ID 固定，避免同名群误匹配。
+		{ key: 'xiaojie', tag: 'xiaojie', chatId: String(process.env.FEISHU_GROUP_RELAY_XIAOJIE_CHAT_ID ?? '').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_XIAOJIE_CHAT_NAME ?? '小杰夜报～').trim() },
 	],
 };
 const summaryListenerIntervalSeconds = Number(process.env.FEISHU_SUMMARY_LISTENER_INTERVAL_SECONDS ?? groupRelayIntervalSeconds);

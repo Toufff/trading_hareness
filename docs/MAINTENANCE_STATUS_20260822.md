@@ -23,6 +23,7 @@
 - 板块盘中报告已拆为“外部快照编排”和“数据库成员精确 join”两个模块；外部失败 fail-closed，数据库 join 通过独立契约测试验证，并保留 `main.py` 兼容入口。
 - 共享全 A 快照增加生命周期取消接口；盘中超时后允许有限缓存任务完成供下一轮复用，但服务关闭时会显式取消 in-flight 任务，避免 detached task 越过 HTTP/线程池关闭边界。BaoStock 旧兼容函数也已改为隔离模块转发。
 - 网络状态同时暴露 Prometheus 指标：`quant_network_reachability`（状态 one-hot）、连续失败数和恢复计数；监控抓取只读本地状态，不主动探测外网。
+- 小杰分析师链路已登记：远端 `POST /api/v1/imports/analysts` 已按 OpenAPI 契约创建名称为“小杰”的幂等注册任务（请求 ID 由远端返回，当前状态 `queued`，等待远端 Worker 完成后才会出现在公开分析师目录）。本地 `source-registry.json` 已注册 `#xiaojie` → `remote_analyst_id=xiaojie`，Feishu 群监听源为“小杰夜报～”，内容聚合发送到现有分析师汇总群；群 ID 留空时由用户 OAuth 精确按群名解析。配置路由初始化改为幂等补齐新来源，不覆盖前端已编辑的旧路由。
 
 ## 继续迭代顺序
 

@@ -71,11 +71,13 @@ export function createLedger(connectionString) {
 				ON CONFLICT(listener_key) DO UPDATE SET chat_id=EXCLUDED.chat_id,cursor_create_time=GREATEST(feishu_summary_listener_state.cursor_create_time,EXCLUDED.cursor_create_time),last_source_create_time=CASE WHEN EXCLUDED.last_source_create_time IS NULL THEN feishu_summary_listener_state.last_source_create_time ELSE GREATEST(coalesce(feishu_summary_listener_state.last_source_create_time,0),EXCLUDED.last_source_create_time) END,updated_at=now()`, [listenerKey, chatId, cursorCreateTime, lastSourceCreateTime]);
 		},
 		async initializeRelayRoutes(routes) {
-			const claimed = await pool.query(`INSERT INTO feishu_group_relay_route_state(state_key) VALUES('initialized') ON CONFLICT DO NOTHING RETURNING state_key`);
-			if (claimed.rowCount) {
-				for (const route of routes) {
-					await pool.query(`INSERT INTO feishu_group_relay_routes(source_key,chat_id,chat_name,route_tag,enabled,target_chat_ids) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(source_key) DO NOTHING`, [route.key, route.chatId, route.chatName, route.tag, route.enabled !== false, JSON.stringify(route.targetChatIds ?? [])]);
-				}
+			// Keep this operation idempotent, but do not gate it on a one-time
+			// initialization marker. New config-declared sources (for example a
+			// group that is currently only known by name) must be materialized after
+			// an upgrade without overwriting routes edited in the dashboard.
+			await pool.query(`INSERT INTO feishu_group_relay_route_state(state_key) VALUES('initialized') ON CONFLICT DO NOTHING`);
+			for (const route of routes) {
+				await pool.query(`INSERT INTO feishu_group_relay_routes(source_key,chat_id,chat_name,route_tag,enabled,target_chat_ids) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(source_key) DO NOTHING`, [route.key, route.chatId, route.chatName, route.tag, route.enabled !== false, JSON.stringify(route.targetChatIds ?? [])]);
 			}
 			return this.relayRoutes();
 		},
