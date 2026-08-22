@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import date
 
-from app.post_close_refresh import run_refresh
+from app.post_close_refresh import record_stage_with_receipt, run_refresh
 
 
 class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
@@ -31,6 +31,40 @@ class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["status"], "completed")
         self.assertEqual(seen, ["one:2026-08-21"])
+
+    async def test_completed_stage_receipt_skips_action_after_restart(self):
+        class Result:
+            def fetchone(self):
+                return {"run_id": "receipt-1", "status": "completed", "output_summary": {"status": "completed"}}
+
+        class Connection:
+            def execute(self, *_args, **_kwargs):
+                return Result()
+
+        class Database:
+            def transaction(self):
+                class Context:
+                    def __enter__(self): return Connection()
+                    def __exit__(self, *_args): return False
+                return Context()
+
+        async def run_db(action, *args, **_kwargs):
+            result = action(*args)
+            return await result if hasattr(result, "__await__") else result
+
+        called = False
+
+        def action():
+            nonlocal called
+            called = True
+            return {"status": "completed"}
+
+        result = await record_stage_with_receipt(
+            "daily", date(2026, 8, 21), action, db=Database(),
+            run_database_blocking=run_db, safe_error_detail=lambda value, _limit: value,
+        )
+        self.assertFalse(called)
+        self.assertTrue(result["resumed_from_receipt"])
 
 
 if __name__ == "__main__":

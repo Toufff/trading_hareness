@@ -4,7 +4,7 @@ import unittest
 from datetime import date
 
 from app.agent_context import CONTEXT_VERSION, repository_agent_context
-from app.automation_run_repository import finish_run, latest_runs, run_recorded, start_run
+from app.automation_run_repository import finish_run, latest_runs, run_recorded, start_or_resume_run, start_run
 
 
 class Result:
@@ -24,6 +24,8 @@ class Connection:
 
     def execute(self, sql, params=()):
         self.calls.append((sql, params))
+        if "RETURNING run_id,status,output_summary" in sql:
+            return Result({"run_id": "run-1", "status": "completed", "output_summary": {"status": "completed"}})
         if "RETURNING run_id" in sql:
             return Result({"run_id": "run-1"})
         if "SELECT run_id,task_key" in sql:
@@ -68,6 +70,17 @@ class AutomationRunRepositoryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "boom"):
             run_recorded(database, task_key="test", run_key="test:failure", operation=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
         self.assertTrue(any("status='failed'" in sql for sql, _ in database.connection.calls))
+
+    def test_completed_receipt_is_preserved_for_restart_resume(self):
+        connection = Connection()
+        receipt = start_or_resume_run(
+            connection, task_key="post_close_refresh.stage", run_key="post-close-refresh:daily:2026-08-21",
+            cadence="daily", as_of_date=date(2026, 8, 21), input_summary={"stage": "daily"},
+        )
+        self.assertEqual(receipt["status"], "completed")
+        self.assertEqual(receipt["output_summary"], {"status": "completed"})
+        sql = connection.calls[0][0]
+        self.assertIn("CASE WHEN quant.automation_runs.status='completed' THEN 'completed' ELSE 'running' END", sql)
 
 
 if __name__ == "__main__":

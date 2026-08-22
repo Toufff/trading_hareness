@@ -22,6 +22,32 @@ def start_run(connection: Any, *, task_key: str, run_key: str, cadence: str | No
     return str(row["run_id"])
 
 
+def start_or_resume_run(connection: Any, *, task_key: str, run_key: str, cadence: str | None = None,
+                        as_of_date: date | None = None, methodology_version: str | None = None,
+                        input_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Start a durable run, preserving a completed receipt across retries.
+
+    A process restart or a recovered network must not repeat a stage whose
+    side effects were already committed.  Failed/partial runs are reopened;
+    completed runs remain completed and return their bounded output summary.
+    The unique ``run_key`` makes this safe for the stage-level idempotency
+    keys used by the post-close orchestrator.
+    """
+    row = connection.execute(
+        """INSERT INTO quant.automation_runs(task_key,run_key,cadence,as_of_date,status,methodology_version,input_summary)
+             VALUES(%s,%s,%s,%s,'running',%s,%s)
+        ON CONFLICT(run_key) DO UPDATE SET
+             status=CASE WHEN quant.automation_runs.status='completed' THEN 'completed' ELSE 'running' END,
+             error_class=CASE WHEN quant.automation_runs.status='completed' THEN quant.automation_runs.error_class ELSE NULL END,
+             error_message=CASE WHEN quant.automation_runs.status='completed' THEN quant.automation_runs.error_message ELSE NULL END,
+             finished_at=CASE WHEN quant.automation_runs.status='completed' THEN quant.automation_runs.finished_at ELSE NULL END,
+             updated_at=now(), input_summary=EXCLUDED.input_summary
+        RETURNING run_id,status,output_summary""",
+        (task_key, run_key, cadence, as_of_date, methodology_version, Json(input_summary or {})),
+    ).fetchone()
+    return {"run_id": str(row["run_id"]), "status": str(row["status"]), "output_summary": row.get("output_summary") or {}}
+
+
 def finish_run(connection: Any, run_id: str, *, status: str = "completed",
                output_summary: dict[str, Any] | None = None) -> None:
     connection.execute(
@@ -73,4 +99,4 @@ def run_recorded(database: Any, *, task_key: str, run_key: str, operation: Any,
     return result
 
 
-__all__ = ["start_run", "finish_run", "fail_run", "latest_runs", "run_recorded"]
+__all__ = ["start_run", "start_or_resume_run", "finish_run", "fail_run", "latest_runs", "run_recorded"]

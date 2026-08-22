@@ -26,13 +26,14 @@
 - 小杰分析师链路已登记：远端 `POST /api/v1/imports/analysts` 已按 OpenAPI 契约创建名称为“小杰”的幂等注册任务（请求 ID 由远端返回，当前状态 `queued`，等待远端 Worker 完成后才会出现在公开分析师目录）。本地 `source-registry.json` 已注册 `#xiaojie` → `remote_analyst_id=xiaojie`，Feishu 群监听源为“小杰夜报～”，内容聚合发送到现有分析师汇总群；群 ID 留空时由用户 OAuth 精确按群名解析。配置路由初始化改为幂等补齐新来源，不覆盖前端已编辑的旧路由。
 - 盘后复盘新增 `short-term-review-v1` 七步证据投影：市场情绪（涨停/跌停及昨日涨停溢价）、连板梯队、板块结构、成交额前 20 与龙虎榜、亏钱效应、风向标和次日预案。它只读取当日已落库且满足 `available_at <= observed_at` 的事件/日线/板块证据；板块主线必须有精确成员与报价覆盖，缺失时明确标记，不按中文名称猜归属。
 - 收盘复盘前端新增“短线交易七步复盘”卡片，展示证据、覆盖度、风向标、参与条件和失效条件。输出强制 `decision_eligible=false`，不会自动加入观察池、改变阈值或产生订单；这套框架把“情绪—梯队—主线—资金—亏钱效应—风向标—次日计划”固定成可回放清单。
+- 盘后一键刷新阶段回执现在支持跨进程恢复：每个 `post-close-refresh:{stage}:{trade_date}` 先读取唯一 `automation_runs` 回执，已 `completed` 的阶段直接返回 `resumed_from_receipt=true`，不重复请求 provider 或写入；`partial`、`blocked`、`failed` 才会重开同一行重试。租约、超时与失败脱敏边界不变，并有真实 PostgreSQL JSONB/时间戳契约测试覆盖。
 
 ## 继续迭代顺序
 
 1. 将 `main.py` 中剩余的组合逻辑按“同步任务、市场快照、报告生成”继续抽出；每次只迁移一个调用链，保留兼容导入。
 2. 继续扩展 PostgreSQL 契约测试，重点覆盖 Decimal/JSONB、时区边界、盘后阶段回执和清理策略。
 3. 将 `automation_runs` 的阶段回执接入板块刷新、盘后候选和周度因子评估，并统一前端任务状态卡片。
-4. 为网络恢复场景补充跨进程/重启后的 durable retry receipt（当前进程内网络状态是观测层，持久化任务账本和同步游标是恢复真源）。
+4. 将同样的 completed-receipt 恢复语义逐步接入板块刷新、盘后候选和周度因子评估；当前盘后一键刷新已经具备该语义，网络状态仍只是被动观测层。
 5. 完成连接池/线程池指标和任务锁治理后，再评估是否需要 Temporal/Celery；当前不引入第二套调度真源。
 
 所有策略与分析师回归继续保持 `live_effect=none`，直到既定样本门禁和样本外验证通过。

@@ -275,7 +275,7 @@ from .routers.analyst_skill_reads import build_analyst_skill_reads_router
 from .routers.analyst_research_reads import build_analyst_research_reads_router
 from .routers.automation_reads import build_automation_reads_router
 from .security import remote_archive_sync_bearer_allowed, write_access_allowed
-from .automation_run_repository import fail_run, finish_run, run_recorded, start_run
+from .automation_run_repository import run_recorded
 from .daily_strategy_summary_service import build_daily_strategy_summary as build_daily_strategy_summary_projection
 from .strategy_decision_service import run as run_strategy_decision_isolated
 from .strategy_review_service import build as build_strategy_review_isolated
@@ -365,7 +365,7 @@ from .board_rotation_repository import BoardRotationRepository
 from .intraday_minute_capture_actions import IntradayMinuteCaptureActions
 from .intraday_event_replay_runner import run_recorded_signal_lifecycle_replay
 from .intraday_rule_input_replay_runner import run_recorded_rule_input_replay
-from .post_close_refresh import run_refresh as run_post_close_refresh_orchestrated
+from .post_close_refresh import record_stage_with_receipt, run_refresh as run_post_close_refresh_orchestrated
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
 from .board_research_service import run as run_board_research_isolated
 from .recommendation_generation import generate as generate_recommendations_isolated
@@ -4974,33 +4974,11 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
     }
 
     async def record_refresh_stage(name: str, stage_date: date, action: Callable[[], Any]) -> Any:
-        """Persist one-click stage lifecycle without changing stage semantics."""
-        run_key = f"post-close-refresh:{name}:{stage_date}"
-        def begin() -> str:
-            with db.transaction() as connection:
-                return start_run(
-                    connection, task_key="post_close_refresh.stage", run_key=run_key,
-                    cadence="daily", as_of_date=stage_date, methodology_version="post-close-refresh-v1",
-                    input_summary={"stage": name},
-                )
-        run_id = await run_database_blocking(begin, timeout_seconds=10)
-        try:
-            result = action()
-            if hasattr(result, "__await__"):
-                result = await result
-        except Exception as error:
-            await run_database_blocking(lambda: _fail_automation_run(run_id, error), timeout_seconds=10)
-            raise
-        await run_database_blocking(lambda: _finish_automation_run(run_id, result), timeout_seconds=10)
-        return result
-
-    def _fail_automation_run(run_id: str, error: BaseException) -> None:
-        with db.transaction() as connection:
-            fail_run(connection, run_id, error)
-
-    def _finish_automation_run(run_id: str, result: Any) -> None:
-        with db.transaction() as connection:
-            finish_run(connection, run_id, output_summary={"status": result.get("status")} if isinstance(result, dict) else {})
+        """Persist and resume one stage without duplicating completed work."""
+        return await record_stage_with_receipt(
+            name, stage_date, action, db=db, run_database_blocking=run_database_blocking,
+            safe_error_detail=safe_error_detail,
+        )
 
     return await run_post_close_refresh_orchestrated(
         request, db=db, lease_key=POST_CLOSE_REFRESH_LEASE_KEY,

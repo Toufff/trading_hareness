@@ -24,7 +24,7 @@ from app.feature_snapshot_repository import materialize_feature_snapshot
 from app.intraday_event_retention import prune_ephemeral_signal_events
 from app.main import DailyBar, app, db, executor_saturated_response, upsert_bar
 from app.runtime_executors import ExecutorSaturatedError
-from app.automation_run_repository import fail_run, finish_run, start_run
+from app.automation_run_repository import fail_run, finish_run, start_or_resume_run, start_run
 
 
 class WriteAuthenticationMiddlewareTests(unittest.TestCase):
@@ -197,10 +197,11 @@ class AutomationRunLedgerSqlIntegrationTests(unittest.TestCase):
     """Verify durable task idempotency and terminal status updates in PostgreSQL."""
 
     run_key = "p0-automation-run-contract"
+    resume_run_key = "p0-automation-run-resume-contract"
 
     def _cleanup(self) -> None:
         with db.transaction() as connection:
-            connection.execute("DELETE FROM quant.automation_runs WHERE run_key=%s", (self.run_key,))
+            connection.execute("DELETE FROM quant.automation_runs WHERE run_key = ANY(%s)", ([self.run_key, self.resume_run_key],))
 
     def test_same_run_key_reuses_row_and_failure_is_visible(self) -> None:
         self._cleanup()
@@ -222,11 +223,13 @@ class AutomationRunLedgerSqlIntegrationTests(unittest.TestCase):
                 ).fetchone()
                 self.assertEqual(row["status"], "partial")
                 self.assertEqual(row["items"], "0")
-                # A retry reopens the same durable row, then a failure is
-                # observable without requiring a second run record.
-                retry = start_run(connection, task_key="p0_contract", run_key=self.run_key)
-                self.assertEqual(retry, first)
-                fail_run(connection, retry, RuntimeError("contract failure"))
+                # Partial work is deliberately reopened, unlike the completed
+                # receipt in the adjacent test.  It must still use the same
+                # durable row and expose the subsequent failure.
+                retry_receipt = start_or_resume_run(connection, task_key="p0_contract", run_key=self.run_key)
+                self.assertEqual(retry_receipt["run_id"], first)
+                self.assertEqual(retry_receipt["status"], "running")
+                fail_run(connection, retry_receipt["run_id"], RuntimeError("contract failure"))
                 failed = connection.execute(
                     "SELECT status,error_class,error_message FROM quant.automation_runs WHERE run_key=%s",
                     (self.run_key,),
@@ -234,6 +237,36 @@ class AutomationRunLedgerSqlIntegrationTests(unittest.TestCase):
             self.assertEqual(failed["status"], "failed")
             self.assertEqual(failed["error_class"], "task_error")
             self.assertEqual(failed["error_message"], "contract failure")
+        finally:
+            self._cleanup()
+
+    def test_completed_json_receipt_survives_restart_resume_without_reopening(self) -> None:
+        self._cleanup()
+        try:
+            with db.transaction() as connection:
+                run_id = start_run(
+                    connection, task_key="p0_contract", run_key=self.resume_run_key,
+                    cadence="test", methodology_version="contract-v1",
+                    input_summary={"stage": "daily", "nested": {"retry": False}},
+                )
+                finish_run(connection, run_id, output_summary={"status": "completed", "rows": 42, "nested": {"source": "super"}})
+                before = connection.execute(
+                    "SELECT started_at,finished_at FROM quant.automation_runs WHERE run_key=%s", (self.resume_run_key,)
+                ).fetchone()
+                receipt = start_or_resume_run(
+                    connection, task_key="p0_contract", run_key=self.resume_run_key,
+                    cadence="test", methodology_version="contract-v1", input_summary={"stage": "daily", "retry": True},
+                )
+                after = connection.execute(
+                    "SELECT status,started_at,finished_at,output_summary FROM quant.automation_runs WHERE run_key=%s", (self.resume_run_key,)
+                ).fetchone()
+            self.assertEqual(receipt["run_id"], run_id)
+            self.assertEqual(receipt["status"], "completed")
+            self.assertEqual(receipt["output_summary"]["nested"]["source"], "super")
+            self.assertEqual(after["status"], "completed")
+            self.assertEqual(after["started_at"], before["started_at"])
+            self.assertEqual(after["finished_at"], before["finished_at"])
+            self.assertEqual(after["output_summary"]["rows"], 42)
         finally:
             self._cleanup()
 

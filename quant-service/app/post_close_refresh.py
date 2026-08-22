@@ -9,6 +9,69 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException
 
+from .automation_run_repository import fail_run, finish_run, start_or_resume_run
+
+
+async def record_stage_with_receipt(
+    name: str,
+    trade_date: date,
+    action: Callable[[], Any],
+    *,
+    db: Any,
+    run_database_blocking: Callable[..., Awaitable[Any]],
+    safe_error_detail: Callable[[str, int], str],
+) -> Any:
+    """Run one stage only when its durable receipt is not already complete."""
+    run_key = f"post-close-refresh:{name}:{trade_date}"
+
+    def begin() -> dict[str, Any]:
+        with db.transaction() as connection:
+            return start_or_resume_run(
+                connection, task_key="post_close_refresh.stage", run_key=run_key,
+                cadence="daily", as_of_date=trade_date,
+                methodology_version="post-close-refresh-v1", input_summary={"stage": name},
+            )
+
+    receipt = await run_database_blocking(begin, timeout_seconds=10)
+    if receipt.get("status") == "completed":
+        summary = dict(receipt.get("output_summary") or {})
+        summary.setdefault("status", "completed")
+        summary["resumed_from_receipt"] = True
+        return summary
+
+    run_id = receipt["run_id"]
+    try:
+        result = action()
+        if hasattr(result, "__await__"):
+            result = await result
+    except Exception as error:
+        await run_database_blocking(
+            lambda: _fail_stage_receipt(db, run_id, error, safe_error_detail), timeout_seconds=10,
+        )
+        raise
+
+    status = result.get("status") if isinstance(result, dict) else "completed"
+    if status not in {"completed", "partial", "blocked", "failed"}:
+        status = "completed"
+    await run_database_blocking(
+        lambda: _finish_stage_receipt(db, run_id, status, result), timeout_seconds=10,
+    )
+    return result
+
+
+def _fail_stage_receipt(db: Any, run_id: str, error: BaseException,
+                        safe_error_detail: Callable[[str, int], str]) -> None:
+    with db.transaction() as connection:
+        fail_run(connection, run_id, RuntimeError(safe_error_detail(str(error), 500)))
+
+
+def _finish_stage_receipt(db: Any, run_id: str, status: str, result: Any) -> None:
+    with db.transaction() as connection:
+        finish_run(
+            connection, run_id, status=status,
+            output_summary={"status": result.get("status")} if isinstance(result, dict) else {},
+        )
+
 
 async def run_refresh(
     request: Any,
@@ -102,4 +165,4 @@ async def run_refresh(
             print(f"post-close refresh lease release failed: {safe_error_detail(str(error), 300)}")
 
 
-__all__ = ["run_refresh"]
+__all__ = ["record_stage_with_receipt", "run_refresh"]
