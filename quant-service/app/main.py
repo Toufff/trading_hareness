@@ -357,6 +357,8 @@ from .request_models import (
 from .remote_archive import classify_remote_text, remote_report_list_state, reprocess_remote_reports
 from .remote_archive_actions import RemoteArchiveActions
 from .market_snapshot_actions import MarketSnapshotActions
+from .intraday_sector_report_service import build_intraday_sector_report_from_membership as build_intraday_sector_report_from_membership_isolated
+from .intraday_sector_report_orchestrator import run as run_intraday_sector_report_isolated
 from .cninfo_announcement_actions import CninfoAnnouncementActions
 from .board_flow_capture_actions import BoardFlowCaptureActions
 from .board_rotation_repository import BoardRotationRepository
@@ -1089,28 +1091,8 @@ async def sync_tushare(request: TushareSyncRequest) -> dict[str, Any]:
 
 
 def fetch_baostock_rows_legacy(symbols: list[str], trade_date: date) -> tuple[list[dict[str, str]], list[str]]:
-    """Blocking BaoStock client dispatched through the bounded public-source pool."""
-    import baostock as bs
-
-    login = bs.login()
-    if str(login.error_code) != "0":
-        return [], [f"login: {login.error_msg}"]
-    rows: list[dict[str, str]] = []
-    failures: list[str] = []
-    fields = "date,code,open,high,low,close,preclose,volume,amount,isST"
-    try:
-        for symbol in symbols:
-            result = bs.query_history_k_data_plus(
-                baostock_code(symbol), fields, start_date=str(trade_date), end_date=str(trade_date), frequency="d", adjustflag="3",
-            )
-            if str(result.error_code) != "0":
-                failures.append(f"{symbol}: {result.error_msg}")
-                continue
-            while result.next():
-                rows.append(dict(zip(result.fields, result.get_row_data(), strict=True)))
-    finally:
-        bs.logout()
-    return rows, failures
+    """Deprecated compatibility alias; use the isolated BaoStock fetcher."""
+    return fetch_baostock_rows_isolated(symbols, trade_date, baostock_code=baostock_code)
 
 
 async def sync_baostock_legacy(request: TushareSyncRequest) -> dict[str, Any]:
@@ -1636,62 +1618,6 @@ async def hydrate_eastmoney_live_board_members(kind: str, flows: list[dict[str, 
         provider_error=AkShareProviderError,
         safe_error_detail=safe_error_detail,
     )
-    """legacy implementation retained below for source-compatible snapshot."""
-    if not limit:
-        return []
-    taxonomy_key = f"eastmoney_{kind}"
-    boards = []
-    for flow in flows:
-        label = str(flow.get("行业") or flow.get("板块名称") or "").strip()
-        sector_key = str(flow.get("行业代码") or flow.get("板块代码") or label).strip()
-        if label and sector_key:
-            boards.append((sector_key, label, flow))
-    if not boards:
-        return []
-    def load_mapped_rows() -> list[Any]:
-        with db.transaction() as connection:
-            return connection.execute(
-                """SELECT DISTINCT sector_key FROM quant.sector_membership_history
-                     WHERE taxonomy_key=%s AND effective_to IS NULL""",
-                (taxonomy_key,),
-            ).fetchall()
-
-    mapped_rows = await run_database_blocking(load_mapped_rows)
-    mapped = {str(row["sector_key"]) for row in mapped_rows}
-    def flow_priority(item: tuple[str, str, dict[str, Any]]) -> float:
-        inflow, outflow = intraday_number(item[2].get("流入资金")), intraday_number(item[2].get("流出资金"))
-        net = inflow - outflow if inflow is not None and outflow is not None else intraday_number(item[2].get("净额"))
-        return -(net if net is not None else -float("inf"))
-
-    selected = sorted((item for item in boards if item[0] not in mapped), key=flow_priority)[:limit]
-    observed_at = datetime.now(timezone.utc)
-    results: list[dict[str, Any]] = []
-    for sector_key, label, _ in selected:
-        try:
-            rows = await run_akshare_blocking(akshare_eastmoney_board_members, kind, label, timeout_seconds=12)
-            if not rows:
-                results.append({"sector_key": sector_key, "label": label, "status": "empty", "members": 0})
-                continue
-            def persist_members() -> int:
-                with db.transaction() as connection:
-                    upsert_sector_taxonomy(connection, taxonomy_key, f"东方财富{ '概念' if kind == 'concept' else '行业' }板块", "akshare",
-                                           {"source": "eastmoney", "kind": kind, "member_endpoint": "akshare_live_flow"})
-                    upsert_sector(connection, taxonomy_key, sector_key, label, {"source": "eastmoney_live_flow", "label": label})
-                    return persist_eastmoney_sector_members(connection, taxonomy_key, sector_key, rows, observed_at)
-
-            stored = await run_database_blocking(persist_members)
-            results.append({"sector_key": sector_key, "label": label, "status": "completed", "members": stored})
-        except ExecutorSaturatedError as error:
-            results.append({"sector_key": sector_key, "label": label, "status": "blocked", "members": 0,
-                            "error": safe_error_detail(str(error), 300)})
-        except asyncio.TimeoutError:
-            results.append({"sector_key": sector_key, "label": label, "status": "failed", "members": 0,
-                            "error": "Eastmoney member request exceeded 12 second budget"})
-        except (AkShareProviderError, ValueError) as error:
-            results.append({"sector_key": sector_key, "label": label, "status": "failed", "members": 0, "error": str(error)[:300]})
-    return results
-
-
 def ths_concept_top_stocks(flow_rows: list[dict[str, Any]], member_rows: list[dict[str, Any]],
                            quotes: dict[str, dict[str, Any]], top_stocks: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Join Tushare concept flows and members by their common THS ``ts_code``.
@@ -1729,115 +1655,32 @@ def build_intraday_sector_report_from_membership(
     top_stocks: int,
     exchange_date: date,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[Any], list[Any], list[Any]]:
-    """Build local membership joins and source-context reads in one DB worker.
-
-    The caller has already acquired bounded external snapshots.  Keeping this
-    synchronous psycopg work together preserves its point-in-time transaction
-    while avoiding a five-minute board report blocking the asyncio loop.
-    """
-    report: list[dict[str, Any]] = []
-    coverage: dict[str, Any] = {}
-    with db.transaction() as connection:
-        for kind, flows in zip(kinds, flow_parts, strict=True):
-            taxonomy_key = f"eastmoney_{kind}"
-            rows = connection.execute("SELECT m.sector_key,m.symbol,s.label FROM quant.sector_membership_history m JOIN quant.sectors s ON s.taxonomy_key=m.taxonomy_key AND s.sector_key=m.sector_key WHERE m.taxonomy_key=%s AND m.effective_to IS NULL", (taxonomy_key,)).fetchall()
-            by_sector: dict[str, list[str]] = {}
-            key_by_label: dict[str, str] = {}
-            for row in rows:
-                by_sector.setdefault(str(row["sector_key"]), []).append(str(row["symbol"]))
-                key_by_label[str(row["label"])] = str(row["sector_key"])
-            covered = 0
-            for flow in flows:
-                label = str(flow.get("行业") or flow.get("板块名称") or "").strip()
-                sector_key = str(flow.get("行业代码") or flow.get("板块代码") or key_by_label.get(label) or label).strip()
-                stocks = [quotes[symbol] for symbol in by_sector.get(sector_key, []) if symbol in quotes]
-                stocks.sort(key=lambda item: (item["main_net_inflow"] is None, -(item["main_net_inflow"] or 0), -(item["turnover"] or 0)))
-                covered += int(bool(by_sector.get(sector_key)))
-                inflow, outflow = intraday_number(flow.get("流入资金")), intraday_number(flow.get("流出资金"))
-                report.append({"taxonomy_key": taxonomy_key, "sector_key": sector_key, "label": label,
-                               "net_inflow": inflow - outflow if inflow is not None and outflow is not None else intraday_number(flow.get("净额")),
-                               "change_pct": intraday_number(flow.get("行业-涨跌幅")), "mapped_members": len(by_sector.get(sector_key, [])),
-                               "quoted_members": len(stocks), "top_stocks": stocks[:top_stocks],
-                               "member_quotes": stocks})
-            coverage[kind] = {"flow_boards": len(flows), "boards_with_members": covered}
-        ths_flows = connection.execute(
-            """SELECT o.sector_key,s.label,o.net_amount,o.change_pct,o.trading_date
-                 FROM quant.sector_market_observations o
-                 JOIN quant.sectors s ON s.taxonomy_key=o.taxonomy_key AND s.sector_key=o.sector_key
-                WHERE o.taxonomy_key='ths_concept_flow' AND o.trading_date=%s
-                ORDER BY o.net_amount DESC NULLS LAST,o.sector_key""",
-            (exchange_date,),
-        ).fetchall()
-        ths_members = connection.execute(
-            """SELECT sector_key,symbol FROM quant.sector_membership_history
-                 WHERE taxonomy_key='ths_concept_flow' AND effective_to IS NULL"""
-        ).fetchall()
-        ths_items, coverage["ths_concept"] = ths_concept_top_stocks(
-            [dict(row) for row in ths_flows], [dict(row) for row in ths_members], quotes, top_stocks,
-        )
-        report.extend(ths_items)
-        tushare_sector_context = connection.execute(
-            """SELECT taxonomy_key,max(trading_date) AS latest_trade_date,count(*)::int AS rows
-                 FROM quant.sector_market_observations
-                WHERE taxonomy_key IN ('ths_industry','ths_concept_flow')
-                GROUP BY taxonomy_key ORDER BY taxonomy_key"""
-        ).fetchall()
-        tushare_stock_context = connection.execute(
-            """SELECT api_name,max(NULLIF(row_data->>'trade_date','')) AS latest_trade_date,
-                      count(DISTINCT row_data->>'ts_code')::int AS symbols,count(*)::int AS rows
-                 FROM quant.tushare_raw_records
-                WHERE api_name IN ('moneyflow','moneyflow_ths','moneyflow_dc')
-                GROUP BY api_name ORDER BY api_name"""
-        ).fetchall()
-        tushare_realtime_context = connection.execute(
-            """SELECT api_name,max(available_at) AS latest_available_at,count(*)::int AS rows
-                 FROM quant.tushare_raw_records WHERE api_name IN ('rt_k','rt_min','rt_min_daily')
-                GROUP BY api_name ORDER BY api_name"""
-        ).fetchall()
-    return report, coverage, tushare_sector_context, tushare_stock_context, tushare_realtime_context
+    """Compatibility wrapper around the isolated point-in-time SQL join."""
+    return build_intraday_sector_report_from_membership_isolated(
+        db, kinds, flow_parts, quotes, top_stocks, exchange_date,
+        number=intraday_number, ths_top_stocks=ths_concept_top_stocks,
+    )
 
 
 async def intraday_sector_report(request: IntradaySectorReportRequest) -> dict[str, Any]:
     """Return same-source board flow with per-board Tencent main-flow leaders."""
-    kinds = ("concept", "industry") if request.kind == "all" else (request.kind,)
-    try:
-        collected = await asyncio.gather(
-            *(run_akshare_blocking(akshare_eastmoney_board_flow, kind, timeout_seconds=20) for kind in kinds),
-            run_akshare_blocking(akshare_tencent_all_a_spot, timeout_seconds=20),
-        )
-        *flow_parts, quote_rows = collected
-    except ExecutorSaturatedError as error:
-        return {"status": "blocked", "reason": safe_error_detail(str(error), 300),
-                "sources": {"eastmoney": "not_started", "tencent": "not_started"}}
-    except asyncio.TimeoutError:
-        return {"status": "blocked", "reason": "Eastmoney/Tencent live request exceeded 20 second budget", "sources": {"eastmoney": "attempted", "tencent": "attempted"}}
-    except (AkShareProviderError, ValueError) as error:
-        return {"status": "blocked", "reason": safe_error_detail(str(error), 500), "sources": {"eastmoney": "attempted", "tencent": "attempted"}}
-    quotes: dict[str, dict[str, Any]] = {}
-    for row in quote_rows:
-        symbol = eastmoney_member_symbol({"代码": str(row.get("code") or "")[2:]})
-        if symbol:
-            quotes[symbol] = {"symbol": symbol, "name": row.get("name"), "pct_change": intraday_number(row.get("zdf")),
-                              "volume_ratio": intraday_number(row.get("lb")), "turnover_rate": intraday_number(row.get("hsl")),
-                              "main_net_inflow": intraday_number(row.get("zljlr")), "turnover": intraday_number(row.get("turnover"))}
-    hydration: dict[str, list[dict[str, Any]]] = {}
-    if request.hydrate_top_boards:
-        for kind, flows in zip(kinds, flow_parts, strict=True):
-            hydration[kind] = await hydrate_eastmoney_live_board_members(kind, flows, request.hydrate_top_boards)
-    exchange_date = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date()
-    report, coverage, tushare_sector_context, tushare_stock_context, tushare_realtime_context = await run_database_blocking(
-        build_intraday_sector_report_from_membership, kinds, list(flow_parts), quotes, request.top_stocks, exchange_date,
+    result = await run_intraday_sector_report_isolated(
+        request,
+        run_public_blocking=run_akshare_blocking,
+        board_flow=akshare_eastmoney_board_flow,
+        all_a_spot=akshare_tencent_all_a_spot,
+        build_membership_report=lambda kinds, flows, quotes, top_n, exchange_date: run_database_blocking(
+            build_intraday_sector_report_from_membership, kinds, flows, quotes, top_n, exchange_date,
+        ),
+        hydrate_members=hydrate_eastmoney_live_board_members,
+        member_symbol=eastmoney_member_symbol,
+        number=intraday_number,
+        exchange_date=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date(),
+        safe_error=safe_error_detail,
+        executor_saturated_error=ExecutorSaturatedError,
+        provider_error=AkShareProviderError,
     )
-    report.sort(key=lambda item: (item["taxonomy_key"], -(item["net_inflow"] or 0), item["label"]))
-    return {"status": "completed", "observed_at": datetime.now(timezone.utc).isoformat(), "rank_by": "tencent_main_net_inflow",
-            "decision_eligible": False, "coverage": coverage, "items": report,
-            # Runtime-only cross section: used by bounded downstream miners in
-            # this process, removed before an HTTP response or database write.
-            "_runtime_quotes": quotes,
-            "membership_hydration": hydration,
-            "tushare_context": {"sector_close_flow": tushare_sector_context, "stock_daily_flow": tushare_stock_context,
-                                 "realtime_probe": tushare_realtime_context,
-                                 "semantics": "Tushare sector/stock flow is close-daily context; rt_* is a bounded candidate validation source, not a full-market scan."}}
+    return {"observed_at": datetime.now(timezone.utc).isoformat(), **result}
 
 
 INTRADAY_SIGNAL_MODEL_VERSION = "watchlist-confirmation-v5"
@@ -5852,6 +5695,7 @@ async def lifespan(_: FastAPI):
                 await task
             except asyncio.CancelledError:
                 pass
+        await _intraday_all_a_snapshots.cancel_inflight()
         shutdown_super_get_executor()
         shutdown_runtime_executors()
         await close_http_clients()
@@ -6375,44 +6219,8 @@ def update_analyst_research_profile(analyst_id: str, payload: AnalystResearchPro
 
 
 def review_claim_legacy(review_id: uuid.UUID, payload: ClaimReviewRequest) -> dict[str, Any]:
-    with db.transaction() as connection:
-        item = connection.execute(
-            """SELECT q.*,e.available_at,COALESCE(r.remote_analyst_id,m.remote_analyst_id) AS remote_analyst_id
-               FROM quant.claim_review_queue q
-               JOIN quant.analyst_evidence e ON e.evidence_id=q.evidence_id
-               LEFT JOIN quant.remote_reports r ON r.remote_report_id=e.remote_report_id
-               LEFT JOIN quant.remote_analyst_messages m ON m.remote_message_id=e.remote_message_id
-               WHERE q.review_id=%s FOR UPDATE""",
-            (review_id,),
-        ).fetchone()
-        if not item:
-            raise HTTPException(status_code=404, detail="review item not found")
-        if item["status"] != "pending":
-            raise HTTPException(status_code=409, detail="review item was already decided")
-        if payload.status == "approved":
-            symbol = (payload.symbol or item["suggested_symbol"] or "").upper()
-            if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
-                raise HTTPException(status_code=422, detail="approving a stock claim requires a Tushare symbol")
-            connection.execute(
-                "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,'claim-review') ON CONFLICT(symbol) DO NOTHING",
-                (symbol, exchange_for(symbol)),
-            )
-            connection.execute(
-                """INSERT INTO quant.analyst_claims(evidence_id,remote_analyst_id,scope,subject_key,subject_label,direction,strength,
-                      horizon_days,extraction_confidence,extractor_version,available_at,raw)
-                   VALUES(%s,%s,'stock',%s,%s,%s,%s,%s,%s,'manual-claim-review-v1',%s,%s)
-                   ON CONFLICT(evidence_id,scope,subject_key,horizon_days,extractor_version) DO UPDATE SET direction=EXCLUDED.direction,
-                      strength=EXCLUDED.strength,extraction_confidence=EXCLUDED.extraction_confidence,
-                      available_at=EXCLUDED.available_at""",
-                (item["evidence_id"], item["remote_analyst_id"], symbol, item["suggested_label"], item["direction"], item["strength"],
-                 item["horizon_days"], item["extraction_confidence"], item["available_at"],
-                 Json({"review_id": str(review_id), "reviewer_note": payload.reviewer_note})),
-            )
-        connection.execute(
-            "UPDATE quant.claim_review_queue SET status=%s,reviewed_at=now(),reviewer_note=%s WHERE review_id=%s",
-            (payload.status, payload.reviewer_note, review_id),
-        )
-    return {"review_id": str(review_id), "status": payload.status}
+    """Deprecated compatibility alias; use the isolated claim-review service."""
+    return review_claim(review_id, payload)
 
 
 def review_claim(review_id: uuid.UUID, payload: ClaimReviewRequest) -> dict[str, Any]:

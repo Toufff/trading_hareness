@@ -167,6 +167,7 @@ class MainRouterBoundaryTests(unittest.TestCase):
             "sync_full_market_daily_legacy", "sync_ths_sector_catalog_legacy",
             "sync_eastmoney_board_members_legacy", "sync_ths_industry_moneyflow_legacy",
             "sync_ths_concept_signals_legacy", "sync_ths_concept_members_legacy",
+            "review_claim_legacy",
         }
         found = {}
         for node in tree.body:

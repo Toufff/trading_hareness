@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-CONTEXT_VERSION = "2026-08-22.v3"
+CONTEXT_VERSION = "2026-08-22.v4"
 
 
 def repository_agent_context() -> dict[str, Any]:
@@ -34,6 +34,7 @@ def repository_agent_context() -> dict[str, Any]:
             "strategy_rules": "quant-service/app/*_rules.py and *_research.py",
             "api_routers": "quant-service/app/routers/",
             "network_resilience": "quant-service/app/network_health.py + app/runtime_tasks.py",
+            "intraday_sector_report": "quant-service/app/intraday_sector_report_orchestrator.py + app/intraday_sector_report_service.py",
         },
         "contracts": {
             "openapi_source": "http://127.0.0.1:5681/openapi.json",

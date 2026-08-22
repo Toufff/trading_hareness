@@ -53,3 +53,20 @@ class SharedAsyncSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 2)
         self.assertEqual(rows, [2])
         self.assertEqual(status["status"], "fresh")
+
+    async def test_lifecycle_can_cancel_a_detached_fetch(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fetch() -> list[int]:
+            started.set()
+            await release.wait()
+            return [1]
+
+        snapshot = SharedAsyncSnapshot(fetch, ttl_seconds=30.0, clock=lambda: 1.0)
+        task = asyncio.create_task(snapshot.get())
+        await started.wait()
+        await snapshot.cancel_inflight()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        release.set()

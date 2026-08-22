@@ -70,5 +70,21 @@ class SharedAsyncSnapshot(Generic[RowT]):
         self._cached = (received_at, value)
         return value, SnapshotStatus("fresh", 0.0, self._ttl_seconds).as_dict()
 
+    async def cancel_inflight(self) -> None:
+        """Cancel a detached fetch during application shutdown.
+
+        Callers may shield a broad snapshot past their request deadline so a
+        later scan can reuse it.  The lifecycle still owns that task and must
+        explicitly cancel it before closing executors and HTTP pools.
+        """
+        task = self._inflight
+        if task is None or task.done():
+            self._inflight = None
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if self._inflight is task:
+            self._inflight = None
+
 
 __all__ = ["SharedAsyncSnapshot", "SnapshotStatus"]
