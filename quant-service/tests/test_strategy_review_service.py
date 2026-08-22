@@ -4,7 +4,7 @@ import unittest
 from datetime import date, datetime, timezone
 
 from app.request_models import StrategyReviewRequest
-from app.strategy_review_service import build
+from app.strategy_review_service import build, completed_for_checkpoint
 
 
 class _Result:
@@ -45,6 +45,19 @@ class StrategyReviewServiceTests(unittest.TestCase):
         self.assertEqual(review["market_state"], "mixed")
         self.assertNotIn("review_key", review)
         self.assertEqual(review["data_boundary"]["automation"], "no broker order submission")
+
+    def test_completed_checkpoint_requires_completed_persisted_report(self):
+        class Connection:
+            def __init__(self, row): self.row = row
+            def execute(self, statement, params=()):
+                self.statement, self.params = statement, params
+                return _Result(self.row)
+
+        completed = Connection({"?column?": 1})
+        self.assertTrue(completed_for_checkpoint(completed, date(2026, 8, 21), "close"))
+        self.assertIn("report->>'status'='completed'", completed.statement)
+        self.assertEqual(completed.params, (date(2026, 8, 21), "close"))
+        self.assertFalse(completed_for_checkpoint(Connection(None), date(2026, 8, 21), "close"))
 
 
 if __name__ == "__main__":

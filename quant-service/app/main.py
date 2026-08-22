@@ -278,7 +278,7 @@ from .security import remote_archive_sync_bearer_allowed, write_access_allowed
 from .automation_run_repository import run_recorded
 from .daily_strategy_summary_service import build_daily_strategy_summary as build_daily_strategy_summary_projection
 from .strategy_decision_service import run as run_strategy_decision_isolated
-from .strategy_review_service import build as build_strategy_review_isolated
+from .strategy_review_service import build as build_strategy_review_isolated, completed_for_checkpoint as review_checkpoint_completed_isolated
 from .routers.event_reads import build_event_reads_router
 from .routers.strategy_reads import build_strategy_reads_router
 from .routers.paper_reads import build_paper_reads_router
@@ -3721,6 +3721,12 @@ async def strategy_review_loop() -> None:
                 )
         await run_database_blocking(persist, timeout_seconds=30)
 
+    async def review_completed_for_checkpoint(exchange_date: date, session: str) -> bool:
+        def load() -> bool:
+            with db.transaction() as connection:
+                return review_checkpoint_completed_isolated(connection, exchange_date, session)
+        return await run_database_blocking(load, timeout_seconds=10)
+
     async def build_analyst_review(cadence: str, exchange_date: date) -> dict[str, Any]:
         return await run_database_blocking(
             build_recorded_analyst_market_review, db, cadence, exchange_date, timeout_seconds=90,
@@ -3736,6 +3742,7 @@ async def strategy_review_loop() -> None:
         recompute_scorecards=settle_scorecards,
         build_analyst_market_review=build_analyst_review,
         persist_review=persist_review,
+        completed_for_checkpoint=review_completed_for_checkpoint,
         now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
     ))
 

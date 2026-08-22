@@ -31,6 +31,7 @@ class StrategyReviewSchedulerDependencies:
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
     report_error: Callable[[str], None] = print
     build_analyst_market_review: Callable[[str, date], Awaitable[Any]] | None = None
+    completed_for_checkpoint: Callable[[date, str], Awaitable[bool]] | None = None
 
 
 async def strategy_review_scheduler_step(
@@ -52,6 +53,15 @@ async def strategy_review_scheduler_step(
         key = (exchange_date, session)
         checkpoint_end = (datetime.combine(exchange_date, checkpoint) + timedelta(minutes=2)).time()
         if key in completed or not (checkpoint <= local.time() < checkpoint_end):
+            continue
+        # A process-local set only prevents repeats while this instance lives.
+        # On restart, reuse the persisted completed review for the exact
+        # exchange date/session instead of repeating source refreshes and
+        # outcome settlement inside the two-minute checkpoint window.
+        if (dependencies.completed_for_checkpoint is not None
+                and await dependencies.completed_for_checkpoint(exchange_date, session)):
+            completed.add(key)
+            completed_now.append(session)
             continue
         try:
             if session == "close":

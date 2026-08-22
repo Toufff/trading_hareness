@@ -85,6 +85,26 @@ class StrategyReviewSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed, set())
         self.assertEqual([name for name, _ in calls], ["calendar", "snapshot", "board"])
 
+    async def test_restart_reuses_completed_checkpoint_without_repeating_side_effects(self):
+        dependencies, calls = self._dependencies()
+        receipt_calls: list[tuple[object, str]] = []
+
+        async def completed_for_checkpoint(day, session):
+            receipt_calls.append((day, session))
+            return session == "midday"
+
+        dependencies = dependencies.__class__(**{
+            **dependencies.__dict__, "completed_for_checkpoint": completed_for_checkpoint,
+        })
+        completed: set[tuple[object, str]] = set()
+        result = await strategy_review_scheduler_step(
+            completed, dependencies, local=datetime(2026, 8, 14, 11, 31, 30, tzinfo=CN),
+        )
+        self.assertEqual(result, ("midday",))
+        self.assertEqual(receipt_calls, [(datetime(2026, 8, 14, tzinfo=CN).date(), "midday")])
+        self.assertEqual([name for name, _ in calls], ["calendar"])
+        self.assertIn((datetime(2026, 8, 14, tzinfo=CN).date(), "midday"), completed)
+
     async def test_close_generates_daily_and_friday_weekly_analyst_reviews(self):
         dependencies, calls = self._dependencies()
         analyst_reviews: list[tuple[str, object]] = []

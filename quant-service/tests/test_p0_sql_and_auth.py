@@ -25,6 +25,7 @@ from app.intraday_event_retention import prune_ephemeral_signal_events
 from app.main import DailyBar, app, db, executor_saturated_response, upsert_bar
 from app.runtime_executors import ExecutorSaturatedError
 from app.automation_run_repository import fail_run, finish_run, start_or_resume_run, start_run
+from app.strategy_review_service import completed_for_checkpoint
 
 
 class WriteAuthenticationMiddlewareTests(unittest.TestCase):
@@ -270,6 +271,38 @@ class AutomationRunLedgerSqlIntegrationTests(unittest.TestCase):
         finally:
             self._cleanup()
 
+
+@unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
+class StrategyReviewCheckpointSqlIntegrationTests(unittest.TestCase):
+    """A restart may reuse only an explicitly completed point-in-time review."""
+
+    review_key = "p0-strategy-review-checkpoint-contract"
+    exchange_date = date(2099, 1, 3)
+
+    def _cleanup(self) -> None:
+        with db.transaction() as connection:
+            connection.execute("DELETE FROM quant.strategy_review_runs WHERE review_key=%s", (self.review_key,))
+
+    def test_completed_json_status_is_required_for_checkpoint_reuse(self) -> None:
+        self._cleanup()
+        try:
+            with db.transaction() as connection:
+                self.assertFalse(completed_for_checkpoint(connection, self.exchange_date, "close"))
+                connection.execute(
+                    """INSERT INTO quant.strategy_review_runs(
+                           review_key,exchange_date,session,observed_at,market_state,data_boundary,report
+                       ) VALUES(%s,%s,'close',%s,'test',%s,%s)""",
+                    (self.review_key, self.exchange_date, datetime(2099, 1, 3, 7, 0, tzinfo=timezone.utc),
+                     Json({}), Json({"status": "blocked"})),
+                )
+                self.assertFalse(completed_for_checkpoint(connection, self.exchange_date, "close"))
+                connection.execute(
+                    "UPDATE quant.strategy_review_runs SET report=%s WHERE review_key=%s",
+                    (Json({"status": "completed", "nested": {"checkpoint": True}}), self.review_key),
+                )
+                self.assertTrue(completed_for_checkpoint(connection, self.exchange_date, "close"))
+        finally:
+            self._cleanup()
 
 @unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
 class EphemeralIntradayEventRetentionSqlIntegrationTests(unittest.TestCase):

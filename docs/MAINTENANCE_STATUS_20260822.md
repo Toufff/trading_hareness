@@ -28,6 +28,7 @@
 - 收盘复盘前端新增“短线交易七步复盘”卡片，展示证据、覆盖度、风向标、参与条件和失效条件。输出强制 `decision_eligible=false`，不会自动加入观察池、改变阈值或产生订单；这套框架把“情绪—梯队—主线—资金—亏钱效应—风向标—次日计划”固定成可回放清单。
 - 盘后一键刷新阶段回执现在支持跨进程恢复：每个 `post-close-refresh:{stage}:{trade_date}` 先读取唯一 `automation_runs` 回执，已 `completed` 的阶段直接返回 `resumed_from_receipt=true`，不重复请求 provider 或写入；`partial`、`blocked`、`failed` 才会重开同一行重试。租约、超时与失败脱敏边界不变，并有真实 PostgreSQL JSONB/时间戳契约测试覆盖。
 - AKShare 探针编排已从 `main.py` 移至 `akshare_probe_service.py`：每个 capability 仍保持独立熔断、45 秒有界执行、数据库健康回执、失败脱敏与 `decision_eligible=false`；主文件仅注入已存在的 provider 函数和执行器，不改变接口参数或采集范围。
+- 午盘/收盘复盘调度补齐了重启恢复：策略复盘表中同一交易日、同一 session 已有 `report.status=completed` 时，调度器将该检查点写入本进程完成集而不重复刷新、结算或持久化；没有完成回执的检查点仍只在原两分钟窗口内重试。
 
 ## 继续迭代顺序
 

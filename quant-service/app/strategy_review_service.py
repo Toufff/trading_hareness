@@ -100,4 +100,15 @@ def build(
     return review
 
 
-__all__ = ["build"]
+def completed_for_checkpoint(connection: Any, exchange_date: Any, session: str) -> bool:
+    """Return whether a persisted completed review is the durable checkpoint receipt."""
+    row = connection.execute(
+        """SELECT 1 FROM quant.strategy_review_runs
+             WHERE exchange_date=%s AND session=%s AND report->>'status'='completed'
+             LIMIT 1""",
+        (exchange_date, session),
+    ).fetchone()
+    return row is not None
+
+
+__all__ = ["build", "completed_for_checkpoint"]
