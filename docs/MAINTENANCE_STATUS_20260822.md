@@ -22,6 +22,7 @@
 - 增加被动式网络韧性边界：真实外呼会记录 `unknown/degraded/offline/recovering/online` 状态；区分网络传输失败与 403/参数等 provider 错误，不做额外探测、不消耗供应商配额。后台监督循环在持续失败时指数退避（上限 60 秒），网络恢复后沿用原 `run_key`/游标继续，健康页和前端数据源 Doctor 展示最近来源、失败次数、恢复次数和脱敏错误。
 - 板块盘中报告已拆为“外部快照编排”和“数据库成员精确 join”两个模块；外部失败 fail-closed，数据库 join 通过独立契约测试验证，并保留 `main.py` 兼容入口。
 - 共享全 A 快照增加生命周期取消接口；盘中超时后允许有限缓存任务完成供下一轮复用，但服务关闭时会显式取消 in-flight 任务，避免 detached task 越过 HTTP/线程池关闭边界。BaoStock 旧兼容函数也已改为隔离模块转发。
+- 网络状态同时暴露 Prometheus 指标：`quant_network_reachability`（状态 one-hot）、连续失败数和恢复计数；监控抓取只读本地状态，不主动探测外网。
 
 ## 继续迭代顺序
 

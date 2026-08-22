@@ -42,6 +42,18 @@ class NetworkStateTracker:
     _last_error: str | None = None
     _recovery_count: int = 0
 
+    def __post_init__(self) -> None:
+        self._update_metrics()
+
+    def _update_metrics(self) -> None:
+        # Lazy import keeps this pure state object usable in provider/unit
+        # tests without forcing Prometheus collection during module import.
+        from .telemetry import network_consecutive_failures, network_reachability
+        states = ("unknown", "degraded", "offline", "recovering", "online")
+        for state in states:
+            network_reachability.labels(state).set(1 if self._state == state else 0)
+        network_consecutive_failures.set(self._consecutive_failures)
+
     def record_success(self, source: str, latency_ms: int | None = None) -> None:
         with self._lock:
             was_offline = self._state == "offline"
@@ -53,6 +65,9 @@ class NetworkStateTracker:
             if was_offline:
                 self._recovery_count += 1
                 self._changed_at = self._last_success_at
+                from .telemetry import network_recoveries_total
+                network_recoveries_total.inc()
+            self._update_metrics()
 
     def record_failure(self, source: str, error: str, *, transient: bool = True) -> None:
         if not transient:
@@ -67,6 +82,7 @@ class NetworkStateTracker:
             if next_state != self._state:
                 self._changed_at = now
             self._state = next_state
+            self._update_metrics()
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:

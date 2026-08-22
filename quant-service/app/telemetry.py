@@ -62,6 +62,19 @@ intraday_scan_duration_seconds = Histogram(
     "End-to-end duration of one bounded intraday watchlist scan.",
     ["outcome"],
 )
+network_reachability = Gauge(
+    "quant_network_reachability",
+    "Current passive outbound reachability state (one-hot).",
+    ["state"],
+)
+network_consecutive_failures = Gauge(
+    "quant_network_consecutive_failures",
+    "Consecutive transient outbound failures observed by the process.",
+)
+network_recoveries_total = Counter(
+    "quant_network_recoveries_total",
+    "Completed transitions from offline to reachable.",
+)
 
 __all__ = [
     "CONTENT_TYPE_LATEST",
@@ -72,6 +85,9 @@ __all__ = [
     "db_pool_connections",
     "generate_latest",
     "intraday_scan_duration_seconds",
+    "network_consecutive_failures",
+    "network_reachability",
+    "network_recoveries_total",
     "provider_circuit_open",
     "provider_latency_seconds",
     "provider_requests_total",
