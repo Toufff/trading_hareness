@@ -24,6 +24,7 @@ from app.feature_snapshot_repository import materialize_feature_snapshot
 from app.intraday_event_retention import prune_ephemeral_signal_events
 from app.main import DailyBar, app, db, executor_saturated_response, upsert_bar
 from app.runtime_executors import ExecutorSaturatedError
+from app.automation_run_repository import fail_run, finish_run, start_run
 
 
 class WriteAuthenticationMiddlewareTests(unittest.TestCase):
@@ -49,6 +50,10 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
             app.router.lifespan_context = no_lifespan
             with TestClient(app) as client:
                 self.assertEqual(client.get("/openapi.json").status_code, 200)
+                context_response = client.get("/api/v1/agent/context")
+                self.assertEqual(context_response.status_code, 200)
+                self.assertEqual(context_response.json()["service_boundary"], "research_only_no_orders")
+                self.assertEqual(client.get("/api/v1/automation/runs").status_code, 200)
                 self.assertEqual(client.post("/api/v1/market/bars/import", json={}).status_code, 401)
                 self.assertEqual(client.post("/api/v1/market/bars/import", json={}, headers={"X-Quant-Write-Key": "wrong"}).status_code, 401)
                 self.assertEqual(client.post("/api/v1/market/bars/import", json={}, headers={"X-Quant-Write-Key": "test-write-key"}).status_code, 422)
@@ -57,6 +62,8 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
                 # the valid key without invoking its DB-backed replay runner.
                 self.assertEqual(client.post("/api/v1/strategies/intraday/replay-recorded-inputs", json={"max_rows": 0}).status_code, 401)
                 self.assertEqual(client.post("/api/v1/strategies/intraday/replay-recorded-inputs", json={"max_rows": 0}, headers={"X-Quant-Write-Key": "test-write-key"}).status_code, 422)
+                self.assertEqual(client.post("/api/v1/analyst-research/reviews/run", json={}).status_code, 401)
+                self.assertEqual(client.post("/api/v1/analyst-research/reviews/run", json={"cadence": "bad"}, headers={"X-Quant-Write-Key": "test-write-key"}).status_code, 422)
         finally:
             app.router.lifespan_context = original_lifespan
             if previous is None:
@@ -181,6 +188,52 @@ class UpsertBarSqlIntegrationTests(unittest.TestCase):
             self.assertTrue(market["is_suspended"])
             self.assertEqual(Decimal(canonical["adj_factor"]), Decimal("1.25"))
             self.assertTrue(canonical["is_suspended"])
+        finally:
+            self._cleanup()
+
+
+@unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
+class AutomationRunLedgerSqlIntegrationTests(unittest.TestCase):
+    """Verify durable task idempotency and terminal status updates in PostgreSQL."""
+
+    run_key = "p0-automation-run-contract"
+
+    def _cleanup(self) -> None:
+        with db.transaction() as connection:
+            connection.execute("DELETE FROM quant.automation_runs WHERE run_key=%s", (self.run_key,))
+
+    def test_same_run_key_reuses_row_and_failure_is_visible(self) -> None:
+        self._cleanup()
+        try:
+            with db.transaction() as connection:
+                first = start_run(
+                    connection, task_key="p0_contract", run_key=self.run_key,
+                    cadence="test", methodology_version="contract-v1", input_summary={"bounded": True},
+                )
+                second = start_run(
+                    connection, task_key="p0_contract", run_key=self.run_key,
+                    cadence="test", methodology_version="contract-v1", input_summary={"retry": True},
+                )
+                self.assertEqual(first, second)
+                finish_run(connection, first, status="partial", output_summary={"items": 0})
+                row = connection.execute(
+                    "SELECT status,output_summary->>'items' AS items FROM quant.automation_runs WHERE run_key=%s",
+                    (self.run_key,),
+                ).fetchone()
+                self.assertEqual(row["status"], "partial")
+                self.assertEqual(row["items"], "0")
+                # A retry reopens the same durable row, then a failure is
+                # observable without requiring a second run record.
+                retry = start_run(connection, task_key="p0_contract", run_key=self.run_key)
+                self.assertEqual(retry, first)
+                fail_run(connection, retry, RuntimeError("contract failure"))
+                failed = connection.execute(
+                    "SELECT status,error_class,error_message FROM quant.automation_runs WHERE run_key=%s",
+                    (self.run_key,),
+                ).fetchone()
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["error_class"], "task_error")
+            self.assertEqual(failed["error_message"], "contract failure")
         finally:
             self._cleanup()
 

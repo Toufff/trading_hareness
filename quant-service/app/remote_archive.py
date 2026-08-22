@@ -146,9 +146,20 @@ def record_analyst_sync_attempt(db: Database, stream_key: str, status: str, star
         raise ValueError("analyst sync attempt has an invalid status")
     compact_summary = {
         str(key): value for key, value in dict(summary or {}).items()
-        if str(key) in {"status", "items", "imported", "analysts", "scanned", "changed", "terminal", "source"}
+        if str(key) in {"status", "items", "imported", "analysts", "scanned", "changed", "terminal", "source", "workflow_id"}
         and isinstance(value, (str, int, float, bool, type(None)))
     }
+    transport = summary.get("transport") if isinstance(summary, dict) else None
+    if isinstance(transport, dict):
+        counts = transport.get("status_counts")
+        compact_summary["transport"] = {
+            "requests": int(transport.get("requests") or 0),
+            "retries": int(transport.get("retries") or 0),
+            "status_counts": {
+                str(code): int(count) for code, count in dict(counts or {}).items()
+                if str(code).isdigit() and int(count or 0) >= 0
+            },
+        }
     with db.transaction() as connection:
         connection.execute(
             """INSERT INTO quant.analyst_sync_attempts(

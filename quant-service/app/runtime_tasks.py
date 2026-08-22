@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any, Awaitable
 
 from .telemetry import background_loop_restarts_total
+from .network_health import network_state
 
 
 def observe_completed_task(task: asyncio.Task[Any], in_flight: set[asyncio.Task[Any]], label: str) -> None:
@@ -25,6 +26,7 @@ async def supervise_loop(label: str, factory: Callable[[], Awaitable[None]], res
     # Materialize the zero-value sample at startup so dashboards can distinguish
     # a healthy loop with zero restarts from a metric that was never registered.
     background_loop_restarts_total.labels(label)
+    failure_streak = 0
     while True:
         try:
             await factory()
@@ -32,11 +34,17 @@ async def supervise_loop(label: str, factory: Callable[[], Awaitable[None]], res
             raise
         except Exception as error:  # noqa: BLE001 - one loop must not silently die for the process lifetime
             background_loop_restarts_total.labels(label).inc()
+            failure_streak += 1
             print(f"{label} loop failed; restarting: {str(error)[:300]}")
         else:
             background_loop_restarts_total.labels(label).inc()
+            failure_streak = 0
             print(f"{label} loop exited unexpectedly; restarting")
-        await asyncio.sleep(max(0.1, restart_delay_seconds))
+        network = network_state.snapshot()
+        backoff = restart_delay_seconds * (2 ** min(max(failure_streak - 1, 0), 4))
+        if network["state"] == "offline":
+            backoff = max(backoff, 30.0)
+        await asyncio.sleep(min(60.0, max(0.1, backoff)))
 
 
 async def supervise_leased_loop(

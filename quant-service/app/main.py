@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import asyncio
 from bisect import bisect_right
 import csv
@@ -128,6 +127,7 @@ from .post_close_strategy_service import (
 )
 from .post_close_scheduler import PostCloseSchedulerDependencies, post_close_strategy_scheduler
 from .strategy_review_scheduler import StrategyReviewSchedulerDependencies, strategy_review_scheduler
+from .analyst_market_review import build_recorded_analyst_market_review
 from .strategy_pattern_read_model import latest_strategy_pattern_mining as read_latest_strategy_pattern_mining
 from .intraday_outcome_settlement import settle as persist_intraday_outcome_settlement
 from .tushare_normalization import normalize_rows as pure_normalize_tushare_rows
@@ -174,6 +174,7 @@ from . import market_result_read_model as market_result_reads
 from .intraday_outcome_read_model import latest_intraday_outcomes as read_latest_intraday_outcomes
 from .http_clients import (alert_http_client_status, close_http_clients, provider_http_client_status,
                            public_http_client_status, remote_archive_http_client_status, start_http_clients)
+from .network_health import network_state
 from .alert_transport import post_feishu_alert_text
 from .intraday_schedule import (
     intraday_board_curve_clock_session,
@@ -272,6 +273,12 @@ from .routers.analyst_trade_action_reads import build_analyst_trade_action_reads
 from .routers.analyst_action_outcomes import build_analyst_action_outcomes_router
 from .routers.analyst_skill_reads import build_analyst_skill_reads_router
 from .routers.analyst_research_reads import build_analyst_research_reads_router
+from .routers.automation_reads import build_automation_reads_router
+from .security import remote_archive_sync_bearer_allowed, write_access_allowed
+from .automation_run_repository import fail_run, finish_run, run_recorded, start_run
+from .daily_strategy_summary_service import build_daily_strategy_summary as build_daily_strategy_summary_projection
+from .strategy_decision_service import run as run_strategy_decision_isolated
+from .strategy_review_service import build as build_strategy_review_isolated
 from .routers.event_reads import build_event_reads_router
 from .routers.strategy_reads import build_strategy_reads_router
 from .routers.paper_reads import build_paper_reads_router
@@ -813,74 +820,8 @@ def analyst_scorecard_readiness(connection: Any) -> list[dict[str, Any]]:
 
 
 def recompute_scorecards_legacy(as_of_date: date | None = None) -> dict[str, Any]:
-    as_of_date = as_of_date or cn_today()
-    methodology = "excess-return-v1"
-    with db.transaction() as connection:
-        rows = connection.execute(
-            """WITH signal_source AS (
-                SELECT analyst_id,symbol,direction,strength,horizon_days,available_at FROM quant.analyst_signals
-                UNION ALL
-                SELECT remote_analyst_id,subject_key,direction,strength,horizon_days,available_at FROM quant.analyst_claims
-                WHERE scope='stock' AND subject_key ~ '^\\d{6}\\.(SH|SZ|BJ)$'
-              ), entry_exit AS (
-                SELECT s.analyst_id,s.horizon_days,s.direction,s.strength,
-                  (SELECT b.trading_date FROM quant.canonical_bars_daily b
-                    WHERE b.symbol=s.symbol
-                      AND b.trading_date > (s.available_at AT TIME ZONE 'Asia/Shanghai')::date
-                      AND b.trading_date <= %s
-                    ORDER BY b.trading_date LIMIT 1) AS entry_date,
-                  s.symbol
-                FROM signal_source s
-                WHERE (s.available_at AT TIME ZONE 'Asia/Shanghai')::date <= %s
-                  AND s.direction <> 0
-              ), priced AS (
-                SELECT e.*, be.close AS entry_close,
-                  (SELECT bx.close FROM quant.canonical_bars_daily bx WHERE bx.symbol=e.symbol AND bx.trading_date >= e.entry_date
-                    AND bx.trading_date <= %s
-                    ORDER BY bx.trading_date OFFSET (e.horizon_days - 1) LIMIT 1) AS exit_close,
-                  (SELECT bx.trading_date FROM quant.canonical_bars_daily bx WHERE bx.symbol=e.symbol AND bx.trading_date >= e.entry_date
-                    AND bx.trading_date <= %s
-                    ORDER BY bx.trading_date OFFSET (e.horizon_days - 1) LIMIT 1) AS exit_date,
-                  benchmark_entry.close AS benchmark_entry_close, benchmark_exit.close AS benchmark_exit_close
-                FROM entry_exit e
-                LEFT JOIN quant.canonical_bars_daily be ON be.symbol=e.symbol AND be.trading_date=e.entry_date
-                LEFT JOIN quant.canonical_bars_daily benchmark_entry ON benchmark_entry.symbol='000300.SH' AND benchmark_entry.trading_date=e.entry_date
-                LEFT JOIN LATERAL (
-                  SELECT close FROM quant.canonical_bars_daily bx WHERE bx.symbol='000300.SH' AND bx.trading_date >= e.entry_date
-                    AND bx.trading_date <= %s
-                  ORDER BY bx.trading_date OFFSET (e.horizon_days - 1) LIMIT 1
-                ) benchmark_exit ON true
-              ), measured AS (
-                SELECT analyst_id,horizon_days,direction,strength,exit_date,
-                  ((exit_close / NULLIF(entry_close,0))-1) AS raw_return,
-                  ((benchmark_exit_close / NULLIF(benchmark_entry_close,0))-1) AS benchmark_return
-                FROM priced WHERE entry_close IS NOT NULL AND exit_close IS NOT NULL
-              )
-              SELECT analyst_id,horizon_days,count(*)::int observations,
-                 avg(CASE WHEN direction*raw_return > 0 THEN 1.0 ELSE 0.0 END) hit_rate,
-                 avg(raw_return - coalesce(benchmark_return,0)) mean_excess_return,
-                 avg(direction*raw_return) mean_directional_return,
-                 avg(1-abs(strength - CASE WHEN direction*raw_return > 0 THEN 1 ELSE 0 END)) calibration_score
-              FROM measured WHERE exit_date IS NOT NULL AND exit_date<=%s GROUP BY analyst_id,horizon_days""",
-            (as_of_date, as_of_date, as_of_date, as_of_date, as_of_date, as_of_date),
-        ).fetchall()
-        for row in rows:
-            connection.execute(
-                """INSERT INTO quant.analyst_scorecards(analyst_id,horizon_days,as_of_date,observations,hit_rate,mean_excess_return,
-                   mean_directional_return,calibration_score,methodology_version)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT(analyst_id,horizon_days,as_of_date,methodology_version) DO UPDATE SET observations=EXCLUDED.observations,
-                   hit_rate=EXCLUDED.hit_rate,mean_excess_return=EXCLUDED.mean_excess_return,
-                   mean_directional_return=EXCLUDED.mean_directional_return,calibration_score=EXCLUDED.calibration_score""",
-                (row["analyst_id"], row["horizon_days"], as_of_date, row["observations"], row["hit_rate"],
-                 row["mean_excess_return"], row["mean_directional_return"], row["calibration_score"], methodology),
-            )
-        readiness = analyst_scorecard_readiness(connection)
-    return {"as_of_date": str(as_of_date), "scorecards": len(rows), "methodology_version": methodology,
-            "readiness": readiness,
-            "notice": "仅有方向明确且未来价格路径已结算的股票观点会进入成绩单；主题和中性观点保留为研究上下文。"}
-
-
+    """Deprecated compatibility alias; use the isolated scorecard service."""
+    return recompute_scorecards(as_of_date)
 def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
     """Compatibility entry point backed by local-only analyst scorecards."""
     return recompute_scorecards_isolated(as_of_date, cn_today=cn_today, db=db, readiness=analyst_scorecard_readiness)
@@ -1078,139 +1019,8 @@ def refresh_intraday_signal_attributions(connection: Any, *, cutoff: datetime) -
 
 
 def recompute_intraday_signal_outcomes_legacy(as_of_date: date | None = None) -> dict[str, Any]:
-    """Settle confirmed alerts only from quotes/bars that arrived afterwards.
-
-    Suppressed scans are intentionally excluded: they are diagnostics, not a
-    distinct human-facing hypothesis.  A missing subsequent quote stays
-    ``pending`` rather than being converted into a zero return.
-    """
-    cutoff = intraday_outcome_cutoff(as_of_date)
-    horizon_counts = {key: 0 for key, _ in INTRADAY_OUTCOME_HORIZONS}
-    matured = pending = 0
-    with db.transaction() as connection:
-        signals = connection.execute(
-            """SELECT signal_event_id,symbol,signal_type,observed_at,evidence
-                 FROM quant.intraday_signal_events
-                WHERE state IN ('confirmed','alerted') AND signal_type IN ('entry','watch','reduce','exit')
-                  AND observed_at<=%s
-                ORDER BY observed_at""",
-            (cutoff,),
-        ).fetchall()
-        for signal in signals:
-            direction = intraday_signal_direction(str(signal["signal_type"]))
-            evidence = signal["evidence"] if isinstance(signal["evidence"], dict) else {}
-            entry_price = decimal_or_none((evidence.get("tencent") or {}).get("price"))
-            entry_observed_at = signal["observed_at"]
-            if entry_price is None:
-                entry_quote = connection.execute(
-                    """SELECT observed_at,price FROM quant.intraday_quote_observations
-                         WHERE symbol=%s AND source_name='tencent_free' AND observed_at<=%s AND price>0
-                         ORDER BY observed_at DESC LIMIT 1""",
-                    (signal["symbol"], signal["observed_at"]),
-                ).fetchone()
-                if entry_quote:
-                    entry_price, entry_observed_at = Decimal(entry_quote["price"]), entry_quote["observed_at"]
-            if entry_price is None or direction is None:
-                continue
-            # A preregistered barrier is evaluated only over locally persisted
-            # quote observations. No provider call or historical backfill is
-            # performed by settlement.
-            barrier_spec = LabelSpec()
-            barrier_rows = connection.execute(
-                """SELECT observed_at,price FROM quant.intraday_quote_observations
-                     WHERE symbol=%s AND source_name='tencent_free' AND observed_at>%s AND observed_at<=%s AND price>0
-                     ORDER BY observed_at""",
-                (signal["symbol"], signal["observed_at"], min(cutoff, signal["observed_at"] + timedelta(minutes=barrier_spec.max_horizon_minutes))),
-            ).fetchall()
-            barrier_result = triple_barrier_label(
-                [dict(row) for row in barrier_rows], entry_price=entry_price,
-                entry_at=entry_observed_at, spec=barrier_spec,
-            )
-            persist_barrier_outcome(
-                connection, signal["signal_event_id"], spec=barrier_spec,
-                entry_at=entry_observed_at, entry_price=entry_price,
-                result=barrier_result,
-                source_status={"path": "local_tencent_free", "cutoff": cutoff.isoformat()},
-            )
-            for horizon_key, minutes in INTRADAY_OUTCOME_HORIZONS:
-                exit_quote = connection.execute(
-                    """SELECT observed_at,price FROM quant.intraday_quote_observations
-                         WHERE symbol=%s AND source_name='tencent_free' AND observed_at>=%s AND observed_at<=%s AND price>0
-                         ORDER BY observed_at LIMIT 1""",
-                    (signal["symbol"], signal["observed_at"] + timedelta(minutes=minutes), cutoff),
-                ).fetchone()
-                status = "matured" if exit_quote else "pending"
-                if exit_quote:
-                    path = connection.execute(
-                        """SELECT price FROM quant.intraday_quote_observations
-                             WHERE symbol=%s AND source_name='tencent_free' AND observed_at>=%s AND observed_at<=%s AND price>0
-                             ORDER BY observed_at""",
-                        (signal["symbol"], signal["observed_at"], exit_quote["observed_at"]),
-                    ).fetchall()
-                    metrics = intraday_signal_outcome_metrics(entry_price, direction, [Decimal(row["price"]) for row in path])
-                    matured += 1
-                else:
-                    metrics = None
-                    pending += 1
-                connection.execute(
-                    """INSERT INTO quant.intraday_signal_outcomes(signal_event_id,horizon_key,direction,entry_observed_at,entry_price,
-                         exit_observed_at,exit_price,raw_return,maximum_favorable_excursion,maximum_adverse_excursion,status,tradability,source_status)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'observed_quote_only',%s)
-                       ON CONFLICT(signal_event_id,horizon_key) DO UPDATE SET exit_observed_at=EXCLUDED.exit_observed_at,
-                         exit_price=EXCLUDED.exit_price,raw_return=EXCLUDED.raw_return,
-                         maximum_favorable_excursion=EXCLUDED.maximum_favorable_excursion,
-                         maximum_adverse_excursion=EXCLUDED.maximum_adverse_excursion,status=EXCLUDED.status,
-                         tradability=EXCLUDED.tradability,source_status=EXCLUDED.source_status,calculated_at=now()""",
-                    (signal["signal_event_id"], horizon_key, direction, entry_observed_at, entry_price,
-                     exit_quote["observed_at"] if exit_quote else None, exit_quote["price"] if exit_quote else None,
-                     metrics["raw_return"] if metrics else None, metrics["maximum_favorable_excursion"] if metrics else None,
-                     metrics["maximum_adverse_excursion"] if metrics else None, status,
-                     Json({"entry": "signal_evidence.tencent.price", "exit": "tencent_free", "cutoff": cutoff.isoformat()})),
-                )
-                horizon_counts[horizon_key] += 1
-            signal_date = signal["observed_at"].astimezone(ZoneInfo("Asia/Shanghai")).date()
-            same_day_close: Decimal | None = None
-            for horizon_key, date_operator in (("close", "="), ("next_close", ">")):
-                daily_exit = connection.execute(
-                    f"""SELECT trading_date,available_at,open,close FROM quant.canonical_bars_daily
-                         WHERE symbol=%s AND trading_date {date_operator} %s AND available_at>%s AND available_at<=%s
-                         ORDER BY trading_date LIMIT 1""",
-                    (signal["symbol"], signal_date, signal["observed_at"], cutoff),
-                ).fetchone()
-                status = "matured" if daily_exit else "pending"
-                metrics = intraday_signal_outcome_metrics(entry_price, direction, [Decimal(daily_exit["close"])]) if daily_exit else None
-                if horizon_key == "close" and daily_exit:
-                    same_day_close = Decimal(daily_exit["close"])
-                decomposition = a_share_return_decomposition(
-                    entry_price, direction, same_day_close,
-                    Decimal(daily_exit["open"]) if horizon_key == "next_close" and daily_exit and daily_exit["open"] else None,
-                    Decimal(daily_exit["close"]) if horizon_key == "next_close" and daily_exit else None,
-                ) if horizon_key == "next_close" else None
-                connection.execute(
-                    """INSERT INTO quant.intraday_signal_outcomes(signal_event_id,horizon_key,direction,entry_observed_at,entry_price,
-                         exit_observed_at,exit_price,raw_return,maximum_favorable_excursion,maximum_adverse_excursion,status,tradability,source_status)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'daily_close_reference',%s)
-                       ON CONFLICT(signal_event_id,horizon_key) DO UPDATE SET exit_observed_at=EXCLUDED.exit_observed_at,
-                         exit_price=EXCLUDED.exit_price,raw_return=EXCLUDED.raw_return,
-                         maximum_favorable_excursion=EXCLUDED.maximum_favorable_excursion,
-                         maximum_adverse_excursion=EXCLUDED.maximum_adverse_excursion,status=EXCLUDED.status,
-                         tradability=EXCLUDED.tradability,source_status=EXCLUDED.source_status,calculated_at=now()""",
-                    (signal["signal_event_id"], horizon_key, direction, entry_observed_at, entry_price,
-                     daily_exit["available_at"] if daily_exit else None, daily_exit["close"] if daily_exit else None,
-                     metrics["raw_return"] if metrics else None, metrics["maximum_favorable_excursion"] if metrics else None,
-                     metrics["maximum_adverse_excursion"] if metrics else None, status,
-                     Json(strategy_json_safe({"entry": "signal_evidence.tencent.price", "exit": "canonical_daily_close", "cutoff": cutoff.isoformat(),
-                                              "return_decomposition": decomposition}))),
-                )
-                if status == "matured":
-                    matured += 1
-                else:
-                    pending += 1
-    return {"as_of_date": str(as_of_date) if as_of_date else None, "signals": len(signals),
-            "outcome_rows": sum(horizon_counts.values()) + len(signals) * 2,
-            "matured": matured, "pending": pending, "intraday_horizons": horizon_counts}
-
-
+    """Deprecated compatibility alias; use the isolated outcome service."""
+    return recompute_intraday_signal_outcomes(as_of_date)
 def recompute_intraday_signal_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
     """Settle confirmed alerts from persisted evidence through the shared repository."""
     cutoff = intraday_outcome_cutoff(as_of_date)
@@ -1228,117 +1038,8 @@ def recompute_intraday_signal_outcomes(as_of_date: date | None = None) -> dict[s
 
 
 def recompute_outcomes_legacy(as_of_date: date | None = None) -> dict[str, Any]:
-    """Close only claims whose required future bars are already observable."""
-    as_of_date = as_of_date or cn_today()
-    with db.transaction() as connection:
-        rows = connection.execute(
-            """WITH eligible AS (
-                SELECT c.claim_id,c.subject_key symbol,c.horizon_days,c.direction,
-                  (SELECT b.trading_date FROM quant.canonical_bars_daily b
-                   WHERE b.symbol=c.subject_key
-                     AND b.trading_date>(c.available_at AT TIME ZONE 'Asia/Shanghai')::date
-                     AND b.trading_date<=%s
-                   ORDER BY b.trading_date LIMIT 1) entry_date
-                FROM quant.analyst_claims c
-                WHERE c.scope='stock' AND c.subject_key ~ '^\\d{6}\\.(SH|SZ|BJ)$' AND c.direction<>0
-              ), priced AS (
-                SELECT e.*, entry.close entry_close,
-                  (SELECT close FROM quant.canonical_bars_daily b WHERE b.symbol=e.symbol AND b.trading_date>=e.entry_date
-                   ORDER BY b.trading_date OFFSET (e.horizon_days-1) LIMIT 1) exit_close,
-                  benchmark_entry.close benchmark_entry_close,
-                  (SELECT close FROM quant.canonical_bars_daily b WHERE b.symbol='000300.SH' AND b.trading_date>=e.entry_date
-                   ORDER BY b.trading_date OFFSET (e.horizon_days-1) LIMIT 1) benchmark_exit_close
-                FROM eligible e
-                JOIN quant.canonical_bars_daily entry ON entry.symbol=e.symbol AND entry.trading_date=e.entry_date
-                LEFT JOIN quant.canonical_bars_daily benchmark_entry ON benchmark_entry.symbol='000300.SH' AND benchmark_entry.trading_date=e.entry_date
-              )
-              SELECT * FROM priced WHERE exit_close IS NOT NULL AND entry_close IS NOT NULL""",
-            (as_of_date,),
-        ).fetchall()
-        for row in rows:
-            direction = int(row["direction"])
-            raw_return = Decimal(row["exit_close"]) / Decimal(row["entry_close"]) - 1
-            benchmark_return = (Decimal(row["benchmark_exit_close"]) / Decimal(row["benchmark_entry_close"]) - 1
-                                if row["benchmark_exit_close"] and row["benchmark_entry_close"] else None)
-            path = connection.execute(
-                """SELECT high,low,close FROM quant.canonical_bars_daily
-                     WHERE symbol=%s AND trading_date>=%s AND trading_date<=%s
-                     ORDER BY trading_date""",
-                (row["symbol"], row["entry_date"],
-                 connection.execute(
-                     """SELECT trading_date FROM quant.canonical_bars_daily WHERE symbol=%s AND trading_date>=%s
-                          ORDER BY trading_date OFFSET %s LIMIT 1""",
-                     (row["symbol"], row["entry_date"], int(row["horizon_days"]) - 1),
-                 ).fetchone()["trading_date"]),
-            ).fetchall()
-            highs = [Decimal(bar["high"] or bar["close"]) for bar in path]
-            lows = [Decimal(bar["low"] or bar["close"]) for bar in path]
-            entry_close = Decimal(row["entry_close"])
-            maximum_favorable_excursion = (max(highs) / entry_close - 1) if direction > 0 else (entry_close / min(lows) - 1)
-            maximum_adverse_excursion = (min(lows) / entry_close - 1) if direction > 0 else (entry_close / max(highs) - 1)
-            connection.execute(
-                """INSERT INTO quant.outcomes(claim_id,symbol,entry_date,horizon_days,entry_close,exit_close,raw_return,benchmark_return,excess_return,
-                      maximum_favorable_excursion,maximum_adverse_excursion,tradability,direction)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'observed',%s)
-                   ON CONFLICT(claim_id,symbol,entry_date,horizon_days) DO UPDATE SET exit_close=EXCLUDED.exit_close,raw_return=EXCLUDED.raw_return,
-                     benchmark_return=EXCLUDED.benchmark_return,excess_return=EXCLUDED.excess_return,
-                     maximum_favorable_excursion=EXCLUDED.maximum_favorable_excursion,
-                     maximum_adverse_excursion=EXCLUDED.maximum_adverse_excursion,direction=EXCLUDED.direction,calculated_at=now()""",
-                (row["claim_id"], row["symbol"], row["entry_date"], row["horizon_days"], row["entry_close"], row["exit_close"],
-                 raw_return, benchmark_return, raw_return - benchmark_return if benchmark_return is not None else None,
-                 maximum_favorable_excursion, maximum_adverse_excursion, direction),
-            )
-        recommendation_rows = connection.execute(
-            """SELECT r.run_id,r.as_of_date run_date,x.symbol,x.direction,x.horizon_days
-               FROM quant.recommendation_runs r JOIN quant.recommendations x ON x.run_id=r.run_id
-               WHERE r.as_of_date<=%s AND x.direction<>0""",
-            (as_of_date,),
-        ).fetchall()
-        recommendation_outcomes = 0
-        for recommendation in recommendation_rows:
-            bars = connection.execute(
-                """SELECT trading_date,close,high,low FROM quant.canonical_bars_daily
-                   WHERE symbol=%s AND trading_date>%s AND trading_date<=%s
-                   ORDER BY trading_date LIMIT %s""",
-                (recommendation["symbol"], recommendation["run_date"], as_of_date, recommendation["horizon_days"]),
-            ).fetchall()
-            if len(bars) < int(recommendation["horizon_days"]):
-                continue
-            entry, exit_bar = bars[0], bars[-1]
-            entry_close, exit_close = Decimal(entry["close"]), Decimal(exit_bar["close"])
-            direction = int(recommendation["direction"])
-            raw_return = (exit_close / entry_close - 1) * direction
-            benchmark = connection.execute(
-                """SELECT close FROM quant.canonical_bars_daily WHERE symbol='000300.SH' AND trading_date>=%s
-                   ORDER BY trading_date LIMIT %s""",
-                (entry["trading_date"], recommendation["horizon_days"]),
-            ).fetchall()
-            benchmark_return = None
-            if len(benchmark) == int(recommendation["horizon_days"]):
-                benchmark_return = (Decimal(benchmark[-1]["close"]) / Decimal(benchmark[0]["close"]) - 1) * direction
-            highs = [Decimal(bar["high"] or bar["close"]) for bar in bars]
-            lows = [Decimal(bar["low"] or bar["close"]) for bar in bars]
-            mfe = (max(highs) / entry_close - 1) if direction > 0 else (entry_close / min(lows) - 1)
-            mae = (min(lows) / entry_close - 1) if direction > 0 else (entry_close / max(highs) - 1)
-            connection.execute(
-                """INSERT INTO quant.outcomes(recommendation_run_id,symbol,entry_date,horizon_days,entry_close,exit_close,raw_return,
-                      benchmark_return,excess_return,maximum_favorable_excursion,maximum_adverse_excursion,tradability,direction)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'observed',%s)
-                   ON CONFLICT (recommendation_run_id,symbol,entry_date,horizon_days) WHERE recommendation_run_id IS NOT NULL
-                   DO UPDATE SET exit_close=EXCLUDED.exit_close,raw_return=EXCLUDED.raw_return,benchmark_return=EXCLUDED.benchmark_return,
-                     excess_return=EXCLUDED.excess_return,maximum_favorable_excursion=EXCLUDED.maximum_favorable_excursion,
-                     maximum_adverse_excursion=EXCLUDED.maximum_adverse_excursion,calculated_at=now()""",
-                (recommendation["run_id"], recommendation["symbol"], entry["trading_date"], recommendation["horizon_days"], entry_close,
-                 exit_close, raw_return, benchmark_return, raw_return - benchmark_return if benchmark_return is not None else None,
-                 mfe, mae, direction),
-            )
-            recommendation_outcomes += 1
-    intraday = recompute_intraday_signal_outcomes(as_of_date)
-    return {"as_of_date": str(as_of_date), "outcomes": len(rows) + recommendation_outcomes + intraday["outcome_rows"],
-            "claim_outcomes": len(rows), "recommendation_outcomes": recommendation_outcomes,
-            "intraday_signal_outcomes": intraday}
-
-
+    """Deprecated compatibility alias; use the isolated outcome service."""
+    return recompute_outcomes(as_of_date)
 def recompute_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
     """Compatibility entry point backed by local-only outcome recomputation."""
     return recompute_outcomes_isolated(
@@ -1350,113 +1051,8 @@ def recompute_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
 
 
 def generate_recommendations_legacy(request: GenerateRequest) -> dict[str, Any]:
-    as_of_date = request.as_of_date or cn_today()
-    run_id = uuid.uuid4()
-    materialized = build_feature_snapshot(as_of_date, request.universe_key)
-    model_version = MODEL_VERSION
-    regime = str(materialized["market_regime"])
-    candidates: list[dict[str, Any]] = []
-    with db.transaction() as connection:
-        # Analyst text remains a small, maturity-gated prior.  It must not
-        # outweigh price, volume and flow merely because a report mentioned a
-        # stock.  Before independent scorecards mature, it is explanation
-        # only and contributes exactly zero to the candidate score.
-        analyst_context = analyst_execution_context(connection, as_of_date)
-        analyst_weight = float(analyst_context.get("max_live_weight") or 0.0) if analyst_context["execution_eligible"] else 0.0
-        for item in materialized["items"]:
-            feature = item["features"]
-            flags = list(item["quality_flags"])
-            # Cross-session trend and momentum are both calculated on the
-            # strict adjusted research view.  ``close`` remains in the
-            # snapshot for execution/audit only and must not be mixed here.
-            close, sma20 = number(feature.get("research_close")), number(feature.get("sma_20"))
-            return_5, return_20 = number(feature.get("return_5")), number(feature.get("return_20"))
-            flow_rate = number((feature.get("moneyflow_dc") or {}).get("net_amount_rate"))
-            analyst = feature.get("analyst") or {}
-            consensus, skill = number(analyst.get("consensus")), number(analyst.get("analyst_skill"), 0.5)
-            trend = 0.35 if sma20 and close > sma20 else -0.35 if sma20 else 0.0
-            quant_signal = trend + 0.25 * math.tanh(return_5 * 12) + 0.25 * math.tanh(return_20 * 7) + 0.15 * math.tanh(flow_rate / 3)
-            analyst_signal = consensus * max(0.4, min(0.8, skill + 0.2))
-            applied_analyst_weight = analyst_weight if analyst.get("claim_count") else 0.0
-            has_analyst_evidence = bool(analyst.get("claim_count"))
-            if analyst.get("claim_count") and not applied_analyst_weight:
-                flags.append("analyst_research_only")
-            risk_penalty = 0.08 if regime == "risk_off" and quant_signal > 0 else 0.0
-            if risk_penalty:
-                flags.append("risk_off_regime")
-            ablation = ablation_scores(market_signal=quant_signal,
-                                       analyst_signal=analyst_signal if consensus is not None else None,
-                                       has_analyst_evidence=has_analyst_evidence,
-                                       applied_weight=applied_analyst_weight,
-                                       risk_penalty=risk_penalty)
-            signal = ((ablation["applied_score"] - 50.0) / 50.0)
-            hard_flags = {"ST", "suspended", "missing_market_data", "insufficient_history_20",
-                          "adj_factor_missing", "corporate_action_unresolved"}
-            penalty = min(0.35, 0.07 * len(set(flags)))
-            score = max(0.0, min(100.0, 50 + 50 * signal - 100 * penalty))
-            direction = 1 if signal >= 0.14 else -1 if signal <= -0.14 else 0
-            decision = "research_candidate" if direction > 0 and score >= 58 and not hard_flags.intersection(flags) else "watch"
-            if direction < 0 or hard_flags.intersection(flags):
-                decision = "no_trade" if direction < 0 or {"ST", "suspended", "missing_market_data"}.intersection(flags) else "watch"
-            coverage = min(1.0, number(feature.get("bar_count")) / 21)
-            source_count = 1 + int("fundamentals" in feature) + int("moneyflow_dc" in feature) + int("moneyflow" in feature)
-            confidence = max(0.0, min(1.0, 0.35 + 0.35 * coverage + 0.08 * source_count + 0.08 * min(1, number(analyst.get("claim_count")))))
-            invalidation = ["close_below_sma_20", "data_stale", "suspended_or_ST"]
-            if analyst.get("claim_count"):
-                invalidation.append("analyst_consensus_reverses")
-            candidates.append({"symbol": item["symbol"], "score": round(score, 2), "decision": decision, "direction": direction,
-                "confidence": round(confidence, 3), "flags": sorted(set(flags)), "quant_signal": round(quant_signal, 5),
-                "analyst_consensus": consensus, "analyst_skill": skill, "analyst_weight": applied_analyst_weight,
-                "analyst_signal": round(analyst_signal, 5) if consensus is not None else None,
-                "market_only_score": round(max(0.0, min(100.0, ablation["market_only_score"] - 100 * penalty)), 2),
-                "analyst_shadow_score": round(max(0.0, min(100.0, ablation["analyst_shadow_score"] - 100 * penalty)), 2),
-                "momentum_5": return_5, "momentum_20": return_20,
-                "moneyflow_net_amount_rate": flow_rate, "evidence": analyst.get("evidence", []),
-                "signal_count": analyst.get("claim_count", 0), "trading_date": feature.get("market_data_date"), "invalidation": invalidation})
-        candidates.sort(key=lambda item: (item["decision"] != "research_candidate", -item["score"], item["symbol"]))
-        connection.execute(
-            """INSERT INTO quant.recommendation_runs(run_id,as_of_date,model_version,market_regime,source_status,snapshot_key,status,model_metadata)
-               VALUES(%s,%s,%s,%s,%s,%s,'completed',%s)""",
-            (run_id, as_of_date, model_version, regime, Json({"candidate_inputs": len(candidates), "universe_key": request.universe_key}),
-             materialized["snapshot_key"], Json({"feature_version": FEATURE_VERSION, "horizon_days": request.horizon_days,
-                                                  "analyst_execution_context": analyst_context, "analyst_weight_cap": analyst_weight})),
-        )
-        for rank, candidate in enumerate(candidates[:request.limit], start=1):
-            breakdown = {"quant_signal": candidate["quant_signal"], "analyst_consensus": candidate["analyst_consensus"],
-                         "analyst_skill": candidate["analyst_skill"], "analyst_weight": candidate["analyst_weight"], "momentum_5": candidate["momentum_5"],
-                         "momentum_20": candidate["momentum_20"], "moneyflow_net_amount_rate": candidate["moneyflow_net_amount_rate"]}
-            explanation = {"signal_count": candidate["signal_count"], "evidence": candidate["evidence"],
-                           "market_data_date": candidate["trading_date"],
-                           "notice": "研究候选池，不构成自动交易指令"}
-            connection.execute(
-                """INSERT INTO quant.recommendations(run_id,rank,symbol,decision,score,score_breakdown,explanation,risk_flags,
-                      direction,horizon_days,confidence,valid_until,invalidation)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (run_id, rank, candidate["symbol"], candidate["decision"], candidate["score"], Json(breakdown),
-                 Json(explanation), Json(candidate["flags"]), candidate["direction"], request.horizon_days, candidate["confidence"],
-                 as_of_date + timedelta(days=request.horizon_days), Json(candidate["invalidation"])),
-            )
-            connection.execute(
-                """INSERT INTO quant.strategy_ablation_observations(
-                     run_id,symbol,market_only_score,analyst_shadow_score,applied_score,market_signal,
-                     analyst_signal,analyst_delta,applied_analyst_weight,analyst_execution_status,evidence)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT(run_id,symbol) DO UPDATE SET market_only_score=EXCLUDED.market_only_score,
-                     analyst_shadow_score=EXCLUDED.analyst_shadow_score,applied_score=EXCLUDED.applied_score,
-                     market_signal=EXCLUDED.market_signal,analyst_signal=EXCLUDED.analyst_signal,
-                     analyst_delta=EXCLUDED.analyst_delta,applied_analyst_weight=EXCLUDED.applied_analyst_weight,
-                     analyst_execution_status=EXCLUDED.analyst_execution_status,evidence=EXCLUDED.evidence""",
-                (run_id, candidate["symbol"], candidate["market_only_score"], candidate["analyst_shadow_score"],
-                 candidate["score"], candidate["quant_signal"], candidate["analyst_signal"],
-                 round(candidate["analyst_shadow_score"] - candidate["market_only_score"], 5), candidate["analyst_weight"],
-                 str(analyst_context.get("status") or "disabled"),
-                 Json({"execution_eligible": bool(analyst_context.get("execution_eligible")),
-                       "analyst_claim_count": candidate["signal_count"], "live_effect": "none"})),
-            )
-    return {"run_id": str(run_id), "as_of_date": str(as_of_date), "market_regime": regime, "snapshot_key": materialized["snapshot_key"],
-            "recommendations": candidates[:request.limit]}
-
-
+    """Deprecated compatibility alias; use the isolated recommendation service."""
+    return generate_recommendations(request)
 def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
     """Compatibility entry point backed by the isolated scorer/materializer."""
     return generate_recommendations_isolated(
@@ -1468,108 +1064,8 @@ def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
 
 
 async def sync_tushare_legacy(request: TushareSyncRequest) -> dict[str, Any]:
-    symbols = await resolve_sync_symbols_async(request.symbols)
-    configured = provider_candidates("daily", "auto")
-    if not configured or not symbols:
-        return {"status": "disabled", "reason": "a Tushare market provider or QUANT_UNIVERSE is not configured", "imported": 0}
-    trade_date = request.trade_date or request.end_date or cn_today()
-    date_params = ({"trade_date": trade_date.strftime("%Y%m%d")} if request.start_date is None else {
-        "start_date": request.start_date.strftime("%Y%m%d"), "end_date": request.end_date.strftime("%Y%m%d"),
-    })
-    provider_keys = [provider.key for provider in configured]
-    request_key = hashlib.sha256(f"tushare:{','.join(provider_keys)}:daily_bar:{date_params}:{','.join(sorted(symbols))}".encode()).hexdigest()
-    def prepare_run() -> dict[str, Any] | None:
-        with db.transaction() as connection:
-            prior = connection.execute("SELECT status,row_count FROM quant.fetch_runs WHERE request_key=%s", (request_key,)).fetchone()
-            if prior and prior["status"] == "completed":
-                range_start = request.start_date or trade_date
-                range_end = request.end_date or trade_date
-                coverage = connection.execute(
-                    """SELECT count(DISTINCT symbol)::int covered FROM quant.canonical_bars_daily
-                       WHERE symbol=ANY(%s) AND trading_date BETWEEN %s AND %s""",
-                    (symbols, range_start, range_end),
-                ).fetchone()["covered"]
-                if coverage == len(symbols):
-                    return {"status": "unchanged", "trade_date": str(trade_date), "imported": prior["row_count"], "request_key": request_key}
-            connection.execute(
-                """INSERT INTO quant.fetch_runs(provider_key,capability,trade_date,request_key,status,attempt_count,started_at,metadata)
-                   VALUES(%s,'daily_bar',%s,%s,'running',1,now(),%s)
-                   ON CONFLICT(request_key) DO UPDATE SET status='running',attempt_count=quant.fetch_runs.attempt_count+1,
-                     started_at=now(),finished_at=null,error_class=null,error_message=null""",
-                (provider_keys[0], trade_date, request_key, Json({"symbols": sorted(symbols), "provider_candidates": provider_keys, **date_params})),
-            )
-        return None
-
-    unchanged = await run_database_blocking(prepare_run)
-    if unchanged:
-        return unchanged
-    imported = 0
-    failures: list[str] = []
-    local_capacity_failures: list[str] = []
-    provider_failures: list[tuple[str, str]] = []
-    providers_used: set[str] = set()
-    provider_latency_ms: dict[str, int] = {}
-    sync_started_at = asyncio.get_running_loop().time()
-    for symbol in symbols:
-        provider_started_at = asyncio.get_running_loop().time()
-        try:
-            result = await call_tushare_api(
-                tushare_daily_api(symbol), {"ts_code": symbol, **date_params},
-                "ts_code,trade_date,open,high,low,close,pre_close,vol,amount",
-            )
-            elapsed_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
-            provider_failures.extend(result.failed_providers)
-            for provider_key, _ in result.failed_providers:
-                provider_latency_ms[provider_key] = elapsed_ms
-            provider_latency_ms[result.provider.key] = elapsed_ms
-            if not result.rows:
-                failures.append(f"{symbol}: provider returned no daily bars")
-                continue
-            providers_used.add(result.provider.key)
-            bars: list[DailyBar] = []
-            for data in result.rows:
-                bars.append(DailyBar(
-                    symbol=data["ts_code"], trading_date=datetime.strptime(data["trade_date"], "%Y%m%d").date(),
-                    open=decimal_or_none(data.get("open")), high=decimal_or_none(data.get("high")),
-                    low=decimal_or_none(data.get("low")), close=decimal_or_none(data.get("close")),
-                    pre_close=decimal_or_none(data.get("pre_close")), volume=decimal_or_none(data.get("vol")),
-                    amount=decimal_or_none(data.get("amount")), source=result.provider.key,
-                ))
-            imported += await run_database_blocking(persist_daily_bar_batch, bars, timeout_seconds=60)
-        except ExecutorSaturatedError as error:
-            # Shared provider pacing and local workers may reject before any
-            # upstream request starts.  Keep that operational pressure out of
-            # provider-health circuits and fetch capability evidence.
-            local_capacity_failures.append(f"{symbol}: {safe_error_detail(str(error), 180)}")
-        except Exception as error:  # noqa: BLE001 - retain per-symbol sync failures
-            failures.append(f"{symbol}: {str(error)[:180]}")
-    if imported == 0 and not failures and not local_capacity_failures:
-        failures.append("provider returned no daily bars")
-    status = "blocked" if local_capacity_failures and imported == 0 and not failures else (
-        "completed" if not failures else "partial" if imported else "failed"
-    )
-    finalize_latency_ms = round((asyncio.get_running_loop().time() - sync_started_at) * 1000)
-    def finalize_run() -> None:
-        with db.transaction() as connection:
-            connection.execute(
-                """UPDATE quant.fetch_runs SET status=%s,row_count=%s,finished_at=now(),error_class=%s,error_message=%s WHERE request_key=%s""",
-                (status, imported, "local_capacity" if status == "blocked" else "provider_error" if failures else None,
-                 " | ".join(local_capacity_failures if status == "blocked" else failures)[:1000] if (failures or local_capacity_failures) else None,
-                 request_key),
-            )
-            for provider_key, error in provider_failures:
-                record_provider_failure(connection, provider_key, "daily_bar", error, provider_latency_ms.get(provider_key, finalize_latency_ms))
-            for provider_key in providers_used:
-                record_provider_success(connection, provider_key, "daily_bar", imported, provider_latency_ms.get(provider_key, finalize_latency_ms))
-            if failures and not providers_used:
-                record_provider_failure(connection, provider_keys[0], "daily_bar", " | ".join(failures),
-                                        provider_latency_ms.get(provider_keys[0], finalize_latency_ms))
-
-    await run_database_blocking(finalize_run)
-    return {"status": status, "trade_date": str(trade_date), "date_params": date_params, "imported": imported,
-            "providers_used": sorted(providers_used), "failures": failures,
-            "local_capacity_failures": local_capacity_failures, "request_key": request_key}
-
+    """Deprecated compatibility alias; use the isolated synchronizer."""
+    return await sync_tushare(request)
 
 async def sync_tushare(request: TushareSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by the isolated daily synchronizer."""
@@ -1618,95 +1114,8 @@ def fetch_baostock_rows_legacy(symbols: list[str], trade_date: date) -> tuple[li
 
 
 async def sync_baostock_legacy(request: TushareSyncRequest) -> dict[str, Any]:
-    symbols = await resolve_sync_symbols_async(request.symbols)
-    if not symbols:
-        return {"status": "disabled", "reason": "QUANT_UNIVERSE or explicit remote stock claims is not configured", "imported": 0}
-    trade_date = request.trade_date or cn_today()
-    request_key = hashlib.sha256(f"baostock:daily_bar:{trade_date}:{','.join(symbols)}".encode()).hexdigest()
-    if "daily_bar" in await open_provider_capabilities("baostock", ["daily_bar"]):
-        return {
-            "status": "blocked", "reason": "provider health circuit is open; upstream request skipped",
-            "trade_date": str(trade_date), "imported": 0, "failures": [], "request_key": request_key,
-        }
-    def prepare_run() -> dict[str, Any] | None:
-        with db.transaction() as connection:
-            prior = connection.execute("SELECT status,row_count FROM quant.fetch_runs WHERE request_key=%s", (request_key,)).fetchone()
-            if prior and prior["status"] == "completed":
-                return {"status": "unchanged", "trade_date": str(trade_date), "imported": prior["row_count"], "request_key": request_key}
-            connection.execute(
-                """INSERT INTO quant.fetch_runs(provider_key,capability,trade_date,request_key,status,attempt_count,started_at,metadata)
-                   VALUES('baostock','daily_bar',%s,%s,'running',1,now(),%s)
-                   ON CONFLICT(request_key) DO UPDATE SET status='running',attempt_count=quant.fetch_runs.attempt_count+1,
-                     started_at=now(),finished_at=null,error_class=null,error_message=null""",
-                (trade_date, request_key, Json({"symbols": symbols})),
-            )
-        return None
-
-    unchanged = await run_database_blocking(prepare_run)
-    if unchanged:
-        return unchanged
-    provider_started_at = asyncio.get_running_loop().time()
-    try:
-        rows, failures = await run_akshare_blocking(fetch_baostock_rows, symbols, trade_date, timeout_seconds=30)
-    except ExecutorSaturatedError as error:
-        detail = safe_error_detail(str(error), 300)
-
-        def block_run() -> None:
-            with db.transaction() as connection:
-                connection.execute(
-                    """UPDATE quant.fetch_runs SET status='blocked',row_count=0,finished_at=now(),
-                       error_class='local_capacity',error_message=%s WHERE request_key=%s""",
-                    (detail, request_key),
-                )
-
-        await run_database_blocking(block_run)
-        return {"status": "blocked", "trade_date": str(trade_date), "imported": 0,
-                "failures": [], "reason": detail, "request_key": request_key}
-    except Exception as error:  # noqa: BLE001 - provider errors become observable state
-        rows, failures = [], [f"client: {str(error)[:300]}"]
-    valid_bars: list[DailyBar] = []
-    for item in rows:
-        try:
-            code = str(item.get("code") or "")
-            exchange, raw_code = code.split(".", 1)
-            suffix = {"sh": "SH", "sz": "SZ", "bj": "BJ"}.get(exchange.lower())
-            if not suffix:
-                raise ValueError(f"unsupported code {code}")
-            valid_bars.append(DailyBar(
-                symbol=f"{raw_code}.{suffix}", trading_date=datetime.strptime(str(item["date"]), "%Y-%m-%d").date(),
-                open=decimal_or_none(item.get("open")), high=decimal_or_none(item.get("high")), low=decimal_or_none(item.get("low")),
-                close=decimal_or_none(item.get("close")), pre_close=decimal_or_none(item.get("preclose")),
-                volume=decimal_or_none(item.get("volume")), amount=decimal_or_none(item.get("amount")),
-                is_st=str(item.get("isST", "0")) == "1", source="baostock",
-            ))
-        except Exception as error:  # noqa: BLE001
-            failures.append(f"row: {str(error)[:180]}")
-    imported = 0
-    if valid_bars:
-        try:
-            imported = await run_database_blocking(persist_daily_bar_batch, valid_bars, timeout_seconds=60)
-        except Exception as error:  # noqa: BLE001 - all validated rows share one atomic write unit
-            failures.append(f"storage: {safe_error_detail(str(error), 180)}")
-    if imported == 0 and not failures:
-        failures.append("provider returned no daily bars")
-    status = "completed" if not failures else "partial" if imported else "failed"
-    finalize_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
-    def finalize_run() -> None:
-        with db.transaction() as connection:
-            connection.execute(
-                """UPDATE quant.fetch_runs SET status=%s,row_count=%s,finished_at=now(),error_class=%s,error_message=%s WHERE request_key=%s""",
-                (status, imported, "provider_error" if failures else None, " | ".join(failures)[:1000] if failures else None, request_key),
-            )
-            if failures:
-                record_provider_failure(connection, "baostock", "daily_bar", " | ".join(failures),
-                                        finalize_latency_ms)
-            else:
-                record_provider_success(connection, "baostock", "daily_bar", imported,
-                                         finalize_latency_ms)
-
-    await run_database_blocking(finalize_run)
-    return {"status": status, "trade_date": str(trade_date), "imported": imported, "failures": failures, "request_key": request_key}
-
+    """Deprecated compatibility alias; use the isolated BaoStock synchronizer."""
+    return await sync_baostock(request)
 
 async def sync_baostock(request: TushareSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by the isolated BaoStock synchronizer."""
@@ -1971,95 +1380,8 @@ def persist_tushare_rows(connection: Any, api_name: str, request_key: str, rows:
 
 
 async def sync_market_universe_legacy(request: MarketUniverseSyncRequest) -> dict[str, Any]:
-    """Refresh `all_a` from one bounded stock_basic response, never from browser data."""
-    candidates = provider_candidates("stock_basic", request.provider)
-    if not candidates:
-        return {"status": "blocked", "reason": "no configured provider supports stock_basic", "universe_key": request.universe_key}
-    exchange_date = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    params = {"exchange": "", "list_status": "L"}
-    fields = "ts_code,symbol,name,area,industry,market,list_date,delist_date,exchange,is_hs"
-    request_key = hashlib.sha256(json.dumps({"capability": "stock_basic_all_a", "date": str(exchange_date), "provider": request.provider}, sort_keys=True).encode()).hexdigest()
-    def prepare_run() -> dict[str, Any] | None:
-        with db.transaction() as connection:
-            prior = connection.execute("SELECT status,row_count FROM quant.fetch_runs WHERE request_key=%s", (request_key,)).fetchone()
-            if prior and prior["status"] == "completed":
-                return {"status": "unchanged", "universe_key": request.universe_key, "imported": prior["row_count"], "request_key": request_key}
-            connection.execute(
-                """INSERT INTO quant.fetch_runs(provider_key,capability,trade_date,request_key,status,attempt_count,started_at,metadata)
-                   VALUES(%s,'stock_basic_all_a',%s,%s,'running',1,now(),%s)
-                   ON CONFLICT(request_key) DO UPDATE SET status='running',attempt_count=quant.fetch_runs.attempt_count+1,
-                     started_at=now(),finished_at=null,error_class=null,error_message=null""",
-                (candidates[0].key, exchange_date, request_key, Json({"universe_key": request.universe_key, "minimum_rows": request.minimum_rows})),
-            )
-        return None
-
-    unchanged = await run_database_blocking(prepare_run)
-    if unchanged:
-        return unchanged
-    provider_started_at = asyncio.get_running_loop().time()
-    try:
-        # The audited providers return the active-list cross-section in one
-        # stock_basic response.  Their gateways ignore offset when limit is
-        # supplied, so completeness is guarded by the universe-size threshold
-        # and unique symbol validation instead of fake pagination.
-        result = await call_tushare_api("stock_basic", params, fields, request.provider)
-        rows = result.rows
-        if looks_like_response_header(rows):
-            raise ProviderCallError("provider returned a header row instead of market reference data")
-        valid_by_symbol = {
-            str(row["ts_code"]).upper(): row for row in rows
-            if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(row.get("ts_code") or "").upper())
-        }
-        valid_rows = list(valid_by_symbol.values())
-        if len(valid_rows) < request.minimum_rows:
-            raise ProviderCallError(f"stock_basic returned {len(valid_rows)} valid active symbols; expected at least {request.minimum_rows}")
-        observed_at = datetime.now(timezone.utc)
-        provider_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
-        def persist_result() -> int:
-            with db.transaction() as connection:
-                normalized = persist_tushare_rows(connection, "stock_basic", request_key, valid_rows, result.provider.key, observed_at)
-                for row in valid_rows:
-                    symbol = str(row["ts_code"]).upper()
-                    connection.execute(
-                        """INSERT INTO quant.universe_members(universe_key,symbol,enabled,priority,source,metadata,updated_at)
-                           VALUES(%s,%s,true,1000,'stock-basic-all-a',%s,now())
-                           ON CONFLICT(universe_key,symbol) DO UPDATE SET enabled=true,source=EXCLUDED.source,metadata=EXCLUDED.metadata,updated_at=now()""",
-                        (request.universe_key, symbol, Json({"provider": result.provider.key, "reference_date": str(exchange_date)})),
-                    )
-                connection.execute(
-                    """UPDATE quant.universe_members SET enabled=false,updated_at=now()
-                         WHERE universe_key=%s AND source='stock-basic-all-a' AND enabled
-                           AND NOT symbol = ANY(%s)""",
-                    (request.universe_key, [str(row["ts_code"]).upper() for row in valid_rows]),
-                )
-                connection.execute("UPDATE quant.fetch_runs SET status='completed',row_count=%s,finished_at=now() WHERE request_key=%s", (len(valid_rows), request_key))
-                record_provider_success(connection, result.provider.key, "stock_basic_all_a", len(valid_rows), provider_latency_ms)
-                record_provider_api_capability(connection, result.provider.key, "stock_basic", "verified", len(valid_rows), "Full active A-share reference universe refreshed.")
-                for provider_key, error in result.failed_providers:
-                    record_provider_failure(connection, provider_key, "stock_basic", error, provider_latency_ms)
-                    record_provider_api_capability(connection, provider_key, "stock_basic", "failed", note=error)
-            return normalized
-
-        normalized = await run_database_blocking(persist_result)
-        return {"status": "completed", "universe_key": request.universe_key, "imported": len(valid_rows), "normalized_rows": normalized,
-                "provider": result.provider.key, "request_key": request_key}
-    except ExecutorSaturatedError as error:
-        await run_database_blocking(persist_tushare_fetch_blocked, request_key, error)
-        return {"status": "blocked", "universe_key": request.universe_key,
-                "reason": safe_error_detail(str(error), 500), "request_key": request_key}
-    except Exception as error:  # noqa: BLE001
-        failure_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
-        def persist_failure() -> None:
-            with db.transaction() as connection:
-                detail = safe_error_detail(str(error), 1000)
-                connection.execute("UPDATE quant.fetch_runs SET status='failed',finished_at=now(),error_class='provider_error',error_message=%s WHERE request_key=%s", (detail, request_key))
-                record_provider_failure(connection, candidates[0].key, "stock_basic_all_a", detail,
-                                        failure_latency_ms)
-                record_provider_api_capability(connection, candidates[0].key, "stock_basic", "failed", note=detail)
-
-        await run_database_blocking(persist_failure)
-        return {"status": "blocked", "universe_key": request.universe_key, "reason": safe_error_detail(str(error), 500), "request_key": request_key}
-
+    """Deprecated compatibility alias; use the isolated universe synchronizer."""
+    return await sync_market_universe(request)
 
 async def sync_market_universe(request: MarketUniverseSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by the isolated universe synchronizer."""
@@ -2083,95 +1405,8 @@ async def sync_market_universe(request: MarketUniverseSyncRequest) -> dict[str, 
 
 
 async def sync_full_market_daily_legacy(request: FullMarketDailySyncRequest) -> dict[str, Any]:
-    """Promote one post-close all-market daily response into canonical bars."""
-    candidates = provider_candidates("daily", request.provider)
-    if not candidates:
-        return {"status": "blocked", "reason": "no configured provider supports daily"}
-    trade_date = request.trade_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    request_key = hashlib.sha256(json.dumps({"capability": "daily_all_a", "trade_date": str(trade_date), "provider": request.provider}, sort_keys=True).encode()).hexdigest()
-    def prepare_run() -> dict[str, Any] | None:
-        with db.transaction() as connection:
-            prior = connection.execute("SELECT status,row_count FROM quant.fetch_runs WHERE request_key=%s", (request_key,)).fetchone()
-            if prior and prior["status"] == "completed":
-                return {"status": "unchanged", "trade_date": str(trade_date), "imported": prior["row_count"], "request_key": request_key}
-            connection.execute(
-                """INSERT INTO quant.fetch_runs(provider_key,capability,trade_date,request_key,status,attempt_count,started_at,metadata)
-                   VALUES(%s,'daily_all_a',%s,%s,'running',1,now(),%s)
-                   ON CONFLICT(request_key) DO UPDATE SET status='running',attempt_count=quant.fetch_runs.attempt_count+1,
-                     started_at=now(),finished_at=null,error_class=null,error_message=null""",
-                (candidates[0].key, trade_date, request_key, Json({"minimum_rows": request.minimum_rows})),
-            )
-        return None
-
-    unchanged = await run_database_blocking(prepare_run)
-    if unchanged:
-        return unchanged
-    provider_started_at = asyncio.get_running_loop().time()
-    result = None
-    try:
-        # One trade_date response is the provider's documented full daily
-        # cross-section (currently below its single-call row ceiling).
-        result = await call_tushare_api(
-            "daily", {"trade_date": trade_date.strftime("%Y%m%d")},
-            "ts_code,trade_date,open,high,low,close,pre_close,vol,amount", request.provider,
-        )
-        rows = result.rows
-        if looks_like_response_header(rows):
-            raise ProviderCallError("provider returned a header row instead of market daily data")
-        valid_by_symbol = {
-            str(row["ts_code"]).upper(): row for row in rows
-            if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(row.get("ts_code") or "").upper())
-            and tushare_date(row.get("trade_date")) == trade_date
-        }
-        valid_rows = list(valid_by_symbol.values())
-        if len(valid_rows) < request.minimum_rows:
-            raise ProviderCallError(f"daily returned {len(valid_rows)} valid A-share rows; expected at least {request.minimum_rows}")
-        observed_at = datetime.now(timezone.utc)
-        provider_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
-        def persist_result() -> int:
-            with db.transaction() as connection:
-                normalized = persist_tushare_rows(connection, "daily", request_key, valid_rows, result.provider.key, observed_at)
-                connection.execute("UPDATE quant.fetch_runs SET status='completed',row_count=%s,finished_at=now() WHERE request_key=%s", (len(valid_rows), request_key))
-                record_provider_success(connection, result.provider.key, "daily_all_a", len(valid_rows), provider_latency_ms)
-                record_provider_api_capability(connection, result.provider.key, "daily", "verified", len(valid_rows), "Full-market post-close daily bars refreshed.")
-                for provider_key, error in result.failed_providers:
-                    record_provider_failure(connection, provider_key, "daily", error, provider_latency_ms)
-                    record_provider_api_capability(connection, provider_key, "daily", "failed", note=error)
-            return normalized
-
-        normalized = await run_database_blocking(persist_result)
-        return {"status": "completed", "trade_date": str(trade_date), "imported": len(valid_rows), "normalized_rows": normalized,
-                "provider": result.provider.key, "request_key": request_key}
-    except ExecutorSaturatedError as error:
-        await run_database_blocking(persist_tushare_fetch_blocked, request_key, error)
-        return {"status": "blocked", "trade_date": str(trade_date),
-                "reason": safe_error_detail(str(error), 500), "request_key": request_key}
-    except Exception as error:  # noqa: BLE001
-        empty_providers = list(result.empty_providers) if result is not None and not result.rows else []
-        failure_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
-        def persist_failure() -> None:
-            with db.transaction() as connection:
-                connection.execute(
-                    "UPDATE quant.fetch_runs SET status='failed',finished_at=now(),error_class=%s,error_message=%s WHERE request_key=%s",
-                    ("source_empty" if empty_providers else "provider_error", safe_error_detail(str(error), 1000), request_key),
-                )
-                if empty_providers:
-                    for provider_key in empty_providers:
-                        record_provider_success(connection, provider_key, "daily_all_a", 0)
-                        record_provider_api_capability(
-                            connection, provider_key, "daily", "empty", 0,
-                            "Valid empty full-market response; post-close data is not published yet.",
-                        )
-                else:
-                    detail = safe_error_detail(str(error), 1000)
-                    record_provider_failure(connection, candidates[0].key, "daily_all_a", detail,
-                                            failure_latency_ms)
-                    record_provider_api_capability(connection, candidates[0].key, "daily", "failed", note=detail)
-
-        await run_database_blocking(persist_failure)
-        return {"status": "blocked", "trade_date": str(trade_date), "reason": safe_error_detail(str(error), 500),
-                "fallback_empty_providers": empty_providers, "request_key": request_key}
-
+    """Deprecated compatibility alias; use the isolated full-market synchronizer."""
+    return await sync_full_market_daily(request)
 
 async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by isolated full-market sync."""
@@ -2302,87 +1537,8 @@ def persist_eastmoney_sector_members(connection: Any, taxonomy_key: str, sector_
 
 
 async def sync_ths_sector_catalog_legacy(request: SectorCatalogSyncRequest) -> dict[str, Any]:
-    """Sync one THS board directory and, optionally, a bounded member page."""
-    taxonomy_key = ths_taxonomy_key(request.index_type)
-    outcome = await fetch_tushare_catalog(TushareFetchRequest(
-        api_name="ths_index", provider="super", params={"exchange": "A", "type": request.index_type}, max_rows=3000,
-        paginate=True, page_size=1000, require_complete=True,
-    ))
-    rows = await run_database_blocking(tushare_rows_for_request, str(outcome["request_key"]))
-    valid_rows = [row for row in rows if str(row.get("ts_code") or "").endswith(".TI") and row.get("name")]
-    if not valid_rows:
-        return {"status": "blocked", "taxonomy_key": taxonomy_key, "reason": "ths_index returned no valid board rows", "request_key": outcome["request_key"]}
-    provider_key = str(outcome["provider"])
-    observed_at = datetime.now(timezone.utc)
-    def persist_catalog() -> None:
-        with db.transaction() as connection:
-            upsert_sector_taxonomy(connection, taxonomy_key, f"同花顺 {request.index_type} 类板块", provider_key,
-                                   {"api_name": "ths_index", "index_type": request.index_type})
-            for row in valid_rows:
-                upsert_sector(connection, taxonomy_key, str(row["ts_code"]), str(row["name"]), row)
-
-    await run_database_blocking(persist_catalog)
-
-    member_results: list[dict[str, Any]] = []
-    member_code_rows = [row for row in valid_rows if re.fullmatch(r"\d{6}\.TI", str(row["ts_code"]))]
-    if request.resume:
-        def select_incomplete() -> list[dict[str, Any]]:
-            with db.transaction() as connection:
-                rows = connection.execute(
-                    """SELECT sector_key,count(*)::int members FROM quant.sector_membership_history
-                         WHERE taxonomy_key=%s AND effective_to IS NULL GROUP BY sector_key""",
-                    (taxonomy_key,),
-                ).fetchall()
-                return [dict(row) for row in rows]
-        active = {str(row["sector_key"]) for row in await run_database_blocking(select_incomplete) if int(row["members"] or 0) > 0}
-        selected = [row for row in sorted(member_code_rows, key=lambda row: str(row["ts_code"])) if str(row["ts_code"]) not in active][:request.member_limit]
-    else:
-        selected = sorted(member_code_rows, key=lambda row: str(row["ts_code"]))[request.member_offset:request.member_offset + request.member_limit]
-    if request.sync_members:
-        for sector in selected:
-            sector_key = str(sector["ts_code"])
-            try:
-                member_outcome = await fetch_tushare_catalog(TushareFetchRequest(
-                    api_name="ths_member", provider="super", params={"ts_code": sector_key}, max_rows=10_000,
-                    paginate=True, page_size=1000, max_pages=10, require_complete=True,
-                ))
-                member_rows = await run_database_blocking(tushare_rows_for_request, str(member_outcome["request_key"]))
-                member_provider = str(member_outcome["provider"])
-                def persist_members() -> int:
-                    with db.transaction() as connection:
-                        stored = persist_ths_sector_members(connection, taxonomy_key, sector_key, member_rows, member_provider, observed_at)
-                        connection.execute(
-                            """INSERT INTO quant.sector_member_sync_state(taxonomy_key,sector_key,trading_date,state,attempts,member_count,last_error,provider_key,updated_at)
-                               VALUES(%s,%s,%s,%s,1,%s,null,%s,now())
-                               ON CONFLICT(taxonomy_key,sector_key,trading_date) DO UPDATE SET state=EXCLUDED.state,
-                                 attempts=quant.sector_member_sync_state.attempts+1,member_count=EXCLUDED.member_count,
-                                 last_error=null,provider_key=EXCLUDED.provider_key,updated_at=now()""",
-                            (taxonomy_key, sector_key, observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date(),
-                             "completed" if stored else "empty", stored, member_provider),
-                        )
-                        return stored
-
-                stored = await run_database_blocking(persist_members)
-                member_results.append({"sector_key": sector_key, "label": sector["name"], "status": member_outcome["status"],
-                                       "received": member_outcome.get("received", member_outcome.get("stored", 0)), "members": stored,
-                                       "provider": member_provider})
-            except HTTPException as error:
-                member_status = "blocked" if is_local_capacity_http_error(error) else "circuit_open" if is_circuit_open_http_error(error) else "failed"
-                if member_status == "failed":
-                    await record_sector_member_sync_failure(taxonomy_key, sector_key, observed_at, str(error.detail)[:300], "tushare_super_sdk")
-                member_results.append({"sector_key": sector_key, "label": sector["name"], "status": member_status,
-                                       "members": 0, "error": str(error.detail)})
-    successful = [item for item in member_results if item["status"] in {"completed", "unchanged", "empty"}]
-    failed = [item for item in member_results if item["status"] == "failed"]
-    blocked = [item for item in member_results if item["status"] in {"blocked", "circuit_open"}]
-    status = "blocked" if blocked and not successful and not failed else "partial" if failed or blocked else "completed"
-    skipped_non_member_codes = sum(1 for row in valid_rows if not re.fullmatch(r"\d{6}\.TI", str(row["ts_code"])))
-    return {"status": status, "taxonomy_key": taxonomy_key, "index_type": request.index_type,
-            "sectors": len(valid_rows), "provider": provider_key, "request_key": outcome["request_key"],
-            "member_offset": request.member_offset, "resume": request.resume, "member_results": member_results,
-            "skipped_non_member_codes": skipped_non_member_codes,
-            "next_member_offset": request.member_offset + len(selected) if request.sync_members and request.member_offset + len(selected) < len(member_code_rows) else None}
-
+    """Deprecated compatibility alias; use the isolated THS catalog synchronizer."""
+    return await sync_ths_sector_catalog(request)
 
 async def sync_ths_sector_catalog(request: SectorCatalogSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by isolated THS catalog sync."""
@@ -2419,100 +1575,8 @@ async def sync_all_ths_sector_catalogs() -> dict[str, Any]:
 
 
 async def sync_eastmoney_board_members_legacy(request: EastmoneyBoardMemberSyncRequest) -> dict[str, Any]:
-    """Synchronize an exact, bounded page of boards matching live EM flows."""
-    taxonomy_key = f"eastmoney_{request.kind}"
-    try:
-        catalog = await run_akshare_blocking(akshare_eastmoney_board_catalog, request.kind, timeout_seconds=12)
-    except (asyncio.TimeoutError, ExecutorSaturatedError, AkShareProviderError, ValueError) as error:
-        return {"status": "blocked", "taxonomy_key": taxonomy_key, "reason": safe_error_detail(str(error), 500)}
-
-    boards = [
-        (str(row.get("板块代码") or row.get("板块名称") or "").strip(), str(row.get("板块名称") or row.get("名称") or "").strip(), row)
-        for row in catalog
-    ]
-    boards = [item for item in boards if item[0] and item[1]]
-    boards.sort(key=lambda item: item[0])
-    if not boards:
-        return {"status": "blocked", "taxonomy_key": taxonomy_key, "reason": "Eastmoney board directory returned no valid board keys"}
-
-    observed_at = datetime.now(timezone.utc)
-    def persist_catalog() -> None:
-        with db.transaction() as connection:
-            upsert_sector_taxonomy(connection, taxonomy_key, f"东方财富{ '概念' if request.kind == 'concept' else '行业' }板块", "akshare",
-                                   {"source": "eastmoney", "kind": request.kind, "member_endpoint": "akshare"})
-            for sector_key, label, raw in boards:
-                upsert_sector(connection, taxonomy_key, sector_key, label, raw)
-
-    await run_database_blocking(persist_catalog)
-
-    if request.resume:
-        def select_incomplete() -> list[Any]:
-            with db.transaction() as connection:
-                active_rows = connection.execute(
-                    """SELECT sector_key,count(*)::int members FROM quant.sector_membership_history
-                         WHERE taxonomy_key=%s AND effective_to IS NULL GROUP BY sector_key""",
-                    (taxonomy_key,),
-                ).fetchall()
-                failed_rows = connection.execute(
-                    """SELECT sector_key,attempts FROM quant.sector_member_sync_state
-                         WHERE taxonomy_key=%s AND trading_date=%s AND state='failed'""",
-                    (taxonomy_key, observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()),
-                ).fetchall()
-            active = {str(row["sector_key"]) for row in active_rows if int(row["members"] or 0) > 0}
-            retryable = {str(row["sector_key"]) for row in failed_rows if int(row["attempts"] or 0) < 3}
-            return [board for board in boards if board[0] not in active and (board[0] not in {str(row["sector_key"]) for row in failed_rows} or board[0] in retryable)][:request.member_limit]
-        selected = await run_database_blocking(select_incomplete)
-    else:
-        selected = boards[request.member_offset:request.member_offset + request.member_limit]
-    results: list[dict[str, Any]] = []
-    for sector_key, label, _ in selected:
-        try:
-            rows = await run_akshare_blocking(akshare_eastmoney_board_members, request.kind, label, timeout_seconds=12)
-            # Empty public responses are not authoritative membership snapshots.
-            if not rows:
-                def persist_empty_state() -> None:
-                    with db.transaction() as connection:
-                        connection.execute(
-                            """INSERT INTO quant.sector_member_sync_state(taxonomy_key,sector_key,trading_date,state,attempts,member_count,last_error,provider_key,updated_at)
-                               VALUES(%s,%s,%s,'failed',1,0,%s,'akshare',now())
-                               ON CONFLICT(taxonomy_key,sector_key,trading_date) DO UPDATE SET state='failed',
-                                 attempts=quant.sector_member_sync_state.attempts+1,last_error=EXCLUDED.last_error,updated_at=now()""",
-                            (taxonomy_key, sector_key, observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date(), "Eastmoney member response was empty"),
-                        )
-                await run_database_blocking(persist_empty_state)
-                results.append({"sector_key": sector_key, "label": label, "status": "failed", "members": 0,
-                                "error": "Eastmoney member response was empty"})
-                continue
-            def persist_members() -> int:
-                with db.transaction() as connection:
-                    stored = persist_eastmoney_sector_members(connection, taxonomy_key, sector_key, rows, observed_at)
-                    state = "completed" if stored else "failed"
-                    connection.execute(
-                        """INSERT INTO quant.sector_member_sync_state(taxonomy_key,sector_key,trading_date,state,attempts,member_count,last_error,provider_key,updated_at)
-                           VALUES(%s,%s,%s,%s,1,%s,%s,'akshare',now())
-                           ON CONFLICT(taxonomy_key,sector_key,trading_date) DO UPDATE SET state=EXCLUDED.state,
-                             attempts=quant.sector_member_sync_state.attempts+1,member_count=EXCLUDED.member_count,
-                             last_error=EXCLUDED.last_error,provider_key=EXCLUDED.provider_key,updated_at=now()""",
-                        (taxonomy_key, sector_key, observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date(), state, stored,
-                         None if stored else "Eastmoney response contained no recognizable A-share members"),
-                    )
-                    return stored
-
-            stored = await run_database_blocking(persist_members)
-            results.append({"sector_key": sector_key, "label": label, "status": "completed", "members": stored})
-        except ExecutorSaturatedError as error:
-            await record_sector_member_sync_failure(taxonomy_key, sector_key, observed_at, safe_error_detail(str(error), 300), "akshare")
-            results.append({"sector_key": sector_key, "label": label, "status": "blocked", "members": 0,
-                            "error": safe_error_detail(str(error), 300)})
-        except (asyncio.TimeoutError, AkShareProviderError, ValueError) as error:
-            await record_sector_member_sync_failure(taxonomy_key, sector_key, observed_at, str(error)[:300], "akshare")
-            results.append({"sector_key": sector_key, "label": label, "status": "failed", "members": 0, "error": str(error)[:300]})
-    failures = [item for item in results if item["status"] not in {"completed", "empty"}]
-    next_offset = request.member_offset + len(selected)
-    return {"status": "partial" if failures else "completed", "taxonomy_key": taxonomy_key, "kind": request.kind,
-            "total_boards": len(boards), "member_offset": request.member_offset, "member_limit": request.member_limit, "resume": request.resume,
-            "member_results": results, "next_member_offset": next_offset if next_offset < len(boards) else None}
-
+    """Deprecated compatibility alias; use the isolated Eastmoney member synchronizer."""
+    return await sync_eastmoney_board_members(request)
 
 async def sync_eastmoney_board_members(request: EastmoneyBoardMemberSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by isolated Eastmoney member sync."""
@@ -2776,7 +1840,7 @@ async def intraday_sector_report(request: IntradaySectorReportRequest) -> dict[s
                                  "semantics": "Tushare sector/stock flow is close-daily context; rt_* is a bounded candidate validation source, not a full-market scan."}}
 
 
-INTRADAY_SIGNAL_MODEL_VERSION = "watchlist-confirmation-v4"
+INTRADAY_SIGNAL_MODEL_VERSION = "watchlist-confirmation-v5"
 INTRADAY_CONFIRMATION_WINDOW = timedelta(minutes=5)
 INTRADAY_ALERT_COOLDOWN = timedelta(minutes=10)
 INTRADAY_ALERT_MAX_ATTEMPTS = 3
@@ -3029,7 +2093,7 @@ def run_post_close_strategy(request: PostCloseStrategyRequest) -> dict[str, Any]
     )
 
 
-STRATEGY_PATTERN_MODEL_VERSION = "post-close-limit-lift-pattern-v4"
+STRATEGY_PATTERN_MODEL_VERSION = "post-close-limit-lift-pattern-v6"
 TENCENT_INTRADAY_MINUTE_CAPABILITY = "intraday_minute"
 LOCAL_CAPACITY_HTTP_DETAIL = "local processing capacity is temporarily saturated; retry shortly"
 
@@ -3299,7 +2363,8 @@ async def run_strategy_pattern_mining(request: StrategyPatternMiningRequest) -> 
     picks = [item for item in samples if item.get("limit_context", {}).get("review_tier") != "research_sample"][:10]
     summary = {"selected": len(samples), "picks": len(picks), "minute_completed": len(samples) - len(failed), "minute_failed": len(failed),
                "cohort_counts": selection.get("cohort_counts", {}), "pattern_counts": pattern_counts,
-               "limit_pool_rows": selection.get("limit_pool_rows", 0), "limit_step_rows": selection.get("limit_step_rows", 0)}
+               "limit_pool_rows": selection.get("limit_pool_rows", 0), "limit_step_rows": selection.get("limit_step_rows", 0),
+               "dragon_leader_market_context": selection.get("dragon_leader_market_context", {})}
     source_status = {"daily": "canonical_bars_daily", "limit_sources": limit_sources,
                      "minute": {"provider": "tencent_free", "status": "circuit_open" if minute_circuit_open else status,
                                 "completed": len(samples) - len(failed),
@@ -3421,10 +2486,15 @@ def intraday_signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
                            minute_features: dict[str, Any] | None = None,
                            peer_context: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Compatibility export backed by the pure live/replay signal rules."""
+    observed_at = (quote or {}).get("_scan_observed_at") if isinstance(quote, dict) else None
+    opening_gap_window = (
+        isinstance(observed_at, datetime)
+        and time(9, 30) <= observed_at.astimezone(ZoneInfo("Asia/Shanghai")).time() < time(9, 40)
+    )
     return pure_intraday_signal_rules(
         watch, quote, previous_quote, daily_factors, minute_features, peer_context,
         number=intraday_number, upside_assessment_fn=intraday_upside_research_assessment,
-        model_version=INTRADAY_SIGNAL_MODEL_VERSION,
+        model_version=INTRADAY_SIGNAL_MODEL_VERSION, opening_gap_window=opening_gap_window,
     )
 
 
@@ -3768,24 +2838,40 @@ async def intraday_tencent_surge_context(
     """Fetch a small opt-in target/peer basket for research peer breadth."""
     requested: list[str] = []
     mapped_peers = mapped_peers or {}
+    # The capped minute basket is decision evidence, not an alphabetical
+    # sample.  Strategy targets and their explicit peer contracts must be
+    # scheduled before passive watches and inferred member relations.
+    configured_targets: list[str] = []
+    configured_peers: list[str] = []
+    passive_watches: list[str] = []
+    mapped_peer_symbols: list[str] = []
+    def append_unique(bucket: list[str], value: Any) -> None:
+        symbol = str(value).upper()
+        if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) and symbol not in bucket:
+            bucket.append(symbol)
     for watch in watches:
         watch_symbol = str(watch["symbol"]).upper()
         metadata = watch.get("metadata") if isinstance(watch.get("metadata"), dict) else {}
         configurations = [metadata.get(key) for key in ("surge_strategy", "reversal_research", "upside_research")
                           if isinstance(metadata.get(key), dict) and metadata[key].get("enabled")]
+        if configurations:
+            append_unique(configured_targets, watch_symbol)
+        else:
+            append_unique(passive_watches, watch_symbol)
         mapped_values = (mapped_peers.get(watch_symbol) or {}).get("peer_symbols") or []
-        if not configurations and not mapped_values:
-            continue
-        values = [watch_symbol, *mapped_values,
-                  *(value for strategy in configurations for value in (strategy.get("peer_symbols") or []))]
-        for value in values:
-            symbol = str(value).upper()
-            if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) and symbol not in requested:
+        for strategy in configurations:
+            for value in strategy.get("peer_symbols") or []:
+                append_unique(configured_peers, value)
+        for value in mapped_values:
+            append_unique(mapped_peer_symbols, value)
+    for bucket in (configured_targets, configured_peers, passive_watches, mapped_peer_symbols):
+        for symbol in bucket:
+            if symbol not in requested:
                 requested.append(symbol)
     # A public minute endpoint is corroborating evidence, not a broad scanner.
-    # Preserve the full intent in source status, then retain a strict cap.
+    # The cap is the audited explicit-watch capacity, never an implicit prefix.
     requested_total = len(requested)
-    requested = requested[:12]
+    requested = requested[:intraday_minute_profile_max_symbols()]
     # One-minute bars do not gain information every ten seconds.  Keep a tiny,
     # expiring cache so the high-frequency quote loop does not turn a bounded
     # research basket into repeated public-provider scraping.  It contains at
@@ -3816,16 +2902,36 @@ async def intraday_tencent_surge_context(
                                  "completed": sorted(cached_features), "errors": errors,
                                  "cached_symbols": sorted(cached_features), "cache_ttl_seconds": cache_ttl_seconds,
                                  "provider_status": "circuit_open"}
-    semaphore = asyncio.Semaphore(4)
+    semaphore = asyncio.Semaphore(8)
     async def fetch_one(symbol: str) -> tuple[str, dict[str, Any] | None, str | None]:
         try:
             async with semaphore:
-                rows = await asyncio.wait_for(tencent_intraday_minutes(symbol), timeout=10)
+                rows = await asyncio.wait_for(tencent_intraday_minutes(symbol), timeout=6)
             return symbol, intraday_minute_features(rows, source="tencent_free_minute"), None
         except (asyncio.TimeoutError, httpx.HTTPError, FreeProviderError, ValueError) as error:
             return symbol, None, str(error)[:240]
     started_at = asyncio.get_running_loop().time()
-    results = await asyncio.gather(*(fetch_one(symbol) for symbol in missing))
+    # A slow public minute endpoint must not stretch the 10/30-second quote
+    # loop.  Persist completed partial evidence, cancel only the unfinished
+    # coroutines, and mark the omission explicitly in the scan provenance.
+    tasks: dict[asyncio.Task[tuple[str, dict[str, Any] | None, str | None]], str] = {}
+    pending: set[asyncio.Task[tuple[str, dict[str, Any] | None, str | None]]] = set()
+    results: list[tuple[str, dict[str, Any] | None, str | None]] = []
+    if missing:
+        tasks = {asyncio.create_task(fetch_one(symbol)): symbol for symbol in missing}
+        done, pending = await asyncio.wait(tasks, timeout=6.5)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            if task.cancelled():
+                continue
+            try:
+                results.append(task.result())
+            except Exception as error:  # noqa: BLE001 - converted into per-symbol evidence
+                results.append((tasks[task], None, safe_error_detail(str(error), 240)))
+        results.extend((tasks[task], None, "minute_context_deadline_exceeded") for task in pending)
     features = dict(cached_features)
     errors = dict(cached_errors)
     fresh_errors: list[str] = []
@@ -3847,6 +2953,11 @@ async def intraday_tencent_surge_context(
                       "truncated": requested_total > len(requested),
                       "completed": sorted(features), "errors": errors,
                       "cached_symbols": sorted(cached_features), "cache_ttl_seconds": cache_ttl_seconds,
+                      "priority": {"configured_targets": configured_targets,
+                                   "configured_peers": configured_peers,
+                                   "passive_watches": passive_watches,
+                                   "mapped_peers": mapped_peer_symbols},
+                      "deadline_exceeded_symbols": sorted(tasks[task] for task in pending),
                       "provider_status": "completed" if fresh_completed else "failed" if fresh_errors else "cached"}
 
 
@@ -4064,7 +3175,8 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 market_context=market_context, fast_confirmation=fast_confirmation,
                 portfolio_context=portfolio_context,
             )
-            generated_signals = intraday_signal_rules(watch, quote, previous_quote, daily_factors,
+            rule_quote = {**quote, "_scan_observed_at": observed_at} if quote else None
+            generated_signals = intraday_signal_rules(watch, rule_quote, previous_quote, daily_factors,
                                                        minute_feature, peer_context)
             shadow_signal = main_wave_v2_shadow_signal(
                 watch, quote, minute_feature, peer_context, shadow_priors.get(symbol),
@@ -4358,8 +3470,10 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
     eastmoney_watch_flow_rows: list[dict[str, Any]] = []
     if not tencent_rows:
         try:
-            eastmoney_watch_flow_rows = await eastmoney_watch_flow_quotes(selected_symbols, max_symbols=40)
-        except (httpx.HTTPError, FreeProviderError, ValueError) as error:
+            eastmoney_watch_flow_rows = await asyncio.wait_for(
+                eastmoney_watch_flow_quotes(selected_symbols, max_symbols=40), timeout=2.0,
+            )
+        except (asyncio.TimeoutError, httpx.HTTPError, FreeProviderError, ValueError) as error:
             all_a_snapshot_status = {**all_a_snapshot_status, "eastmoney_watch_fallback_error": safe_error_detail(str(error), 300)}
         else:
             if eastmoney_watch_flow_rows:
@@ -4745,6 +3859,11 @@ async def strategy_review_loop() -> None:
     async def settle_outcomes(exchange_date: date) -> dict[str, Any]:
         return await run_database_blocking(recompute_outcomes, exchange_date, timeout_seconds=60)
 
+    async def settle_analyst_intraday_outcomes(exchange_date: date) -> dict[str, Any]:
+        return await run_database_blocking(
+            recompute_analyst_intraday_outcomes_for_date, exchange_date, timeout_seconds=90,
+        )
+
     async def settle_scorecards(exchange_date: date) -> dict[str, Any]:
         return await run_database_blocking(recompute_scorecards, exchange_date, timeout_seconds=30)
 
@@ -4757,13 +3876,20 @@ async def strategy_review_loop() -> None:
                 )
         await run_database_blocking(persist, timeout_seconds=30)
 
+    async def build_analyst_review(cadence: str, exchange_date: date) -> dict[str, Any]:
+        return await run_database_blocking(
+            build_recorded_analyst_market_review, db, cadence, exchange_date, timeout_seconds=90,
+        )
+
     await strategy_review_scheduler(StrategyReviewSchedulerDependencies(
         calendar_open=sse_calendar_open_async,
         sync_index_context=sync_strategy_index_context,
         build_market_snapshot=build_snapshot,
         build_board_report=build_board_report,
         recompute_outcomes=settle_outcomes,
+        recompute_analyst_intraday_outcomes=settle_analyst_intraday_outcomes,
         recompute_scorecards=settle_scorecards,
+        build_analyst_market_review=build_analyst_review,
         persist_review=persist_review,
         now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
     ))
@@ -4783,16 +3909,23 @@ async def post_close_strategy_loop() -> None:
         )
 
     async def run_strategy(exchange_date: date) -> str:
-        result = await run_database_blocking(
-            run_post_close_strategy, PostCloseStrategyRequest(as_of_date=exchange_date), timeout_seconds=60,
-        )
+        result = await run_database_blocking(functools.partial(
+            run_recorded, db, task_key="post_close_strategy",
+            run_key=f"post-close-strategy:{exchange_date}",
+            operation=functools.partial(run_post_close_strategy, PostCloseStrategyRequest(as_of_date=exchange_date)),
+            cadence="daily", as_of_date=exchange_date, methodology_version=POST_CLOSE_STRATEGY_MODEL_VERSION,
+            input_summary={"data_boundary": "same_date_close"},
+        ), timeout_seconds=60)
         return str(result.get("status") or "failed")
 
     async def run_main_wave(exchange_date: date) -> str:
-        result = await run_database_blocking(
-            persist_watchlist_main_wave_research,
-            WatchlistMainWaveResearchRequest(as_of_date=exchange_date), timeout_seconds=90,
-        )
+        result = await run_database_blocking(functools.partial(
+            run_recorded, db, task_key="watchlist_main_wave",
+            run_key=f"watchlist-main-wave:{exchange_date}",
+            operation=functools.partial(persist_watchlist_main_wave_research, WatchlistMainWaveResearchRequest(as_of_date=exchange_date)),
+            cadence="daily", as_of_date=exchange_date, methodology_version="watchlist-main-wave-v2",
+            input_summary={"universe": "watchlist"},
+        ), timeout_seconds=90)
         return str(result.get("status") or "failed")
 
     await post_close_strategy_scheduler(PostCloseSchedulerDependencies(
@@ -4825,75 +3958,11 @@ def watchlist_main_wave_completed_for_date(as_of_date: date) -> bool:
 
 
 def build_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
-    """Read only stored daily evidence; this function never reaches providers."""
-    with db.transaction() as connection:
-        signal_rows = connection.execute(
-            """SELECT state,count(*)::int AS count FROM quant.intraday_signal_events
-                 WHERE observed_at AT TIME ZONE 'Asia/Shanghai' >= %s
-                   AND observed_at AT TIME ZONE 'Asia/Shanghai' < %s
-                 GROUP BY state""",
-            (exchange_date, exchange_date + timedelta(days=1)),
-        ).fetchall()
-        outcome_rows = connection.execute(
-            """SELECT horizon_key,status,count(*)::int AS count FROM quant.intraday_signal_outcomes
-                 WHERE entry_observed_at AT TIME ZONE 'Asia/Shanghai' >= %s
-                   AND entry_observed_at AT TIME ZONE 'Asia/Shanghai' < %s
-                 GROUP BY horizon_key,status""",
-            (exchange_date, exchange_date + timedelta(days=1)),
-        ).fetchall()
-        # The daily learner consumes only alerts actually delivered to the
-        # human.  It is intentionally tied to the outcome ledger's mature 30m
-        # result: no live quote is fetched and no threshold is updated here.
-        learning_rows = connection.execute(
-            """SELECT s.signal_event_id,s.signal_type,s.observed_at,s.evidence,
-                      (s.observed_at AT TIME ZONE 'Asia/Shanghai')::date AS exchange_date,
-                      o.status,o.raw_return,o.maximum_favorable_excursion,o.maximum_adverse_excursion
-                 FROM quant.intraday_signal_events s
-                 LEFT JOIN quant.intraday_signal_outcomes o
-                   ON o.signal_event_id=s.signal_event_id AND o.horizon_key='30m'
-                WHERE s.state='alerted' AND s.signal_type IN ('entry','watch','reduce','exit')
-                ORDER BY s.observed_at""",
-        ).fetchall()
-        post_close_run = connection.execute(
-            """SELECT run_id,status,summary FROM quant.post_close_strategy_runs
-                 WHERE as_of_date=%s ORDER BY updated_at DESC LIMIT 1""",
-            (exchange_date,),
-        ).fetchone()
-        candidates = []
-        if post_close_run:
-            candidates = connection.execute(
-                """SELECT c.symbol,i.name,c.candidate_type,c.score FROM quant.post_close_strategy_candidates c
-                     LEFT JOIN quant.instruments i ON i.symbol=c.symbol
-                    WHERE c.run_id=%s ORDER BY c.rank LIMIT 5""",
-                (post_close_run["run_id"],),
-            ).fetchall()
-        close_review = connection.execute(
-            """SELECT market_state,data_boundary FROM quant.strategy_review_runs
-                 WHERE exchange_date=%s AND session='close' ORDER BY observed_at DESC LIMIT 1""",
-            (exchange_date,),
-        ).fetchone()
-        readiness = feature_readiness_state(connection)
-    signal_counts = {str(row["state"]): int(row["count"] or 0) for row in signal_rows}
-    outcome_counts: dict[str, dict[str, int]] = {}
-    for row in outcome_rows:
-        outcome_counts.setdefault(str(row["horizon_key"]), {})[str(row["status"])] = int(row["count"] or 0)
-    learning_input = [
-        {**strategy_json_safe(dict(row)), "exchange_date": str(exchange_date)}
-        for row in learning_rows
-    ]
-    policy_learning = contextual_bandit_policy_review(learning_input, focus_exchange_date=str(exchange_date))
-    return {
-        "exchange_date": str(exchange_date), "signal_counts": signal_counts,
-        "outcome_counts": outcome_counts,
-        "post_close": {
-            "status": post_close_run["status"] if post_close_run else "missing",
-            "reason": ((post_close_run["summary"] or {}).get("reason") if post_close_run else "post-close strategy has not produced a run"),
-            "candidates": [dict(row) for row in candidates],
-        },
-        "close_review": strategy_json_safe(dict(close_review)) if close_review else None,
-        "readiness": readiness,
-        "offline_policy_learning": policy_learning,
-    }
+    """Compatibility wrapper; projection logic lives outside the composition root."""
+    return build_daily_strategy_summary_projection(
+        db, exchange_date, readiness=feature_readiness_state,
+        json_safe=strategy_json_safe, policy_review=contextual_bandit_policy_review,
+    )
 
 
 async def run_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
@@ -5371,48 +4440,15 @@ def strategy_index_breadth_context(connection: Any, as_of_date: date, session: s
 
 
 def strategy_review_payload(connection: Any, request: StrategyReviewRequest) -> dict[str, Any]:
-    """Create a reproducible noon/close review from saved snapshots only."""
-    as_of_date = request.as_of_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    time_filter = "" if request.session == "close" else "AND (observed_at AT TIME ZONE 'Asia/Shanghai')::time <= time '11:30'"
-    row = connection.execute(
-        f"""SELECT observed_at,summary,payload,source_status FROM quant.intraday_board_reports
-             WHERE status='completed' AND (observed_at AT TIME ZONE 'Asia/Shanghai')::date=%s {time_filter}
-             ORDER BY observed_at DESC LIMIT 1""",
-        (as_of_date,),
-    ).fetchone()
-    if not row:
-        return {"status": "blocked", "session": request.session, "as_of_date": str(as_of_date),
-                "reason": "no persisted board snapshot for the requested checkpoint; no provider was called"}
-    observed_at = row["observed_at"]
-    payload = dict(row["payload"] or {})
-    board_items = list(payload.get("items") or [])
-    market_state, state_metrics = strategy_market_state(board_items)
-    index_breadth = strategy_index_breadth_context(connection, as_of_date, request.session, observed_at)
-    analyst = analyst_execution_context(connection, as_of_date, observed_at)
-    board_summary = dict(row["summary"] or {})
-    review = {"status": "completed", "review_version": "strategy-loop-v1", "session": request.session,
-              "as_of_date": str(as_of_date), "observed_at": observed_at.isoformat(), "market_state": market_state,
-              "market_state_metrics": state_metrics, "index_breadth_context": index_breadth,
-              "board_flow": board_summary, "analyst_context": analyst,
-              "playbook": {
-                  "entry": "only research candidates aligned with market state, board flow and two-scan price/volume confirmation",
-                  "exit": "hard stop first; then reduce on confirmed price/VWAP and flow reversal",
-                  "next_session": "龙虎榜、公告和新闻 are context only; they never revise same-day intraday evidence",
-              },
-              "data_boundary": {"board_flow": "persisted Eastmoney/Tencent snapshot", "index_breadth": "saved Tencent all-A breadth plus point-in-time SSE/CSI300/SZSE/ChiNext close-daily context",
-                                "tushare": "daily flow is close-context; rt_min is stock validation only",
-                                "analyst": "text-only reports available no later than observed_at", "automation": "no broker order submission"}}
-    if request.persist:
-        review_key = hashlib.sha256(f"strategy-loop-v1:{request.session}:{as_of_date}:{observed_at.isoformat()}".encode()).hexdigest()
-        connection.execute(
-            """INSERT INTO quant.strategy_review_runs(review_key,exchange_date,session,observed_at,market_state,data_boundary,report)
-               VALUES(%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT(review_key) DO UPDATE SET market_state=EXCLUDED.market_state,data_boundary=EXCLUDED.data_boundary,report=EXCLUDED.report""",
-            (review_key, as_of_date, request.session, observed_at, market_state, Json(strategy_json_safe(review["data_boundary"])), Json(strategy_json_safe(review))),
-        )
-        review["review_key"] = review_key
-    return review
-
+    """Compatibility wrapper for the isolated persisted review projection."""
+    return build_strategy_review_isolated(
+        connection,
+        request,
+        market_state=strategy_market_state,
+        index_breadth_context=strategy_index_breadth_context,
+        analyst_context=analyst_execution_context,
+        json_safe=strategy_json_safe,
+    )
 
 def intraday_decision_card(connection: Any, symbol: str) -> dict[str, Any]:
     """Compatibility facade for the isolated local-only decision-card projection."""
@@ -5594,189 +4630,26 @@ async def strategy_tushare_realtime_validation(symbols: list[str], enabled: bool
 
 
 async def run_strategy_decision(request: StrategyDecisionRequest) -> dict[str, Any]:
-    """Persist a reproducible, non-executable intraday/close decision snapshot."""
-    observed_at = datetime.now(timezone.utc)
-    report = await intraday_sector_report(IntradaySectorReportRequest(kind=request.kind, top_stocks=10, hydrate_top_boards=3))
-    china_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
-    run_id = uuid.uuid4()
-    if report.get("status") != "completed":
-        def persist_blocked() -> None:
-            with db.transaction() as connection:
-                connection.execute(
-                    """INSERT INTO quant.recommendation_runs(run_id,as_of_date,model_version,market_regime,source_status,status,model_metadata)
-                       VALUES(%s,%s,%s,'blocked',%s,'blocked',%s)""",
-                    (run_id, china_date, STRATEGY_DECISION_MODEL_VERSION,
-                     Json(strategy_json_safe({"intraday_report": report.get("sources", {}), "reason": report.get("reason")})),
-                     Json({"session": request.session, "decision_eligible": False})),
-                )
-        await run_database_blocking(persist_blocked)
-        return {"status": "blocked", "run_id": str(run_id), "observed_at": observed_at.isoformat(),
-                "decision_eligible": False, "reason": report.get("reason", "intraday source unavailable")}
-
-    regime, regime_metrics = strategy_market_regime(report["items"])
-    candidates = strategy_intraday_candidates(report["items"], request.limit)
-    symbols = [candidate["symbol"] for candidate in candidates]
-    events, tushare_lhb, readiness = await asyncio.gather(
-        run_database_blocking(strategy_event_context, symbols, observed_at),
-        run_database_blocking(strategy_tushare_lhb_context, symbols, observed_at),
-        run_database_blocking(strategy_source_readiness, observed_at),
+    """Compatibility wrapper for the isolated evidence-only decision service."""
+    return await run_strategy_decision_isolated(
+        request,
+        db=db,
+        run_database_blocking=run_database_blocking,
+        build_intraday_report=intraday_sector_report,
+        market_regime=strategy_market_regime,
+        select_candidates=strategy_intraday_candidates,
+        event_context=strategy_event_context,
+        tushare_lhb_context=strategy_tushare_lhb_context,
+        source_readiness=strategy_source_readiness,
+        tushare_realtime_validation=strategy_tushare_realtime_validation,
+        exchange_for=exchange_for,
+        json_safe=strategy_json_safe,
+        model_version=STRATEGY_DECISION_MODEL_VERSION,
     )
-    realtime = await strategy_tushare_realtime_validation(symbols, request.validate_tushare_realtime)
-    coverage = report.get("coverage", {})
-    mapped_boards = sum(int(item.get("boards_with_members") or 0) for item in coverage.values())
-    flow_boards = sum(int(item.get("flow_boards") or 0) for item in coverage.values())
-    coverage_complete = flow_boards > 0 and mapped_boards >= flow_boards
-    source_status = {
-        "eastmoney_board_flow": "completed", "tencent_quote": "completed", "tushare_close_context": report.get("tushare_context", {}),
-        "tushare_realtime_validation": realtime, "mapping": {"mapped_boards": mapped_boards, "flow_boards": flow_boards,
-                                                                     "complete": coverage_complete},
-        "akshare_and_cninfo_event_context": "next_session_context_only", "tushare_lhb_context": "next_session_context_only",
-        "source_readiness": readiness, "decision_eligible": False,
-    }
-    def persist_completed() -> None:
-        with db.transaction() as connection:
-            connection.execute(
-            """INSERT INTO quant.recommendation_runs(run_id,as_of_date,model_version,market_regime,source_status,status,model_metadata)
-               VALUES(%s,%s,%s,%s,%s,'completed',%s)""",
-            (run_id, china_date, STRATEGY_DECISION_MODEL_VERSION, regime, Json(strategy_json_safe(source_status)),
-             Json({"session": request.session, "observed_at": observed_at.isoformat(), "regime_metrics": regime_metrics,
-                   "decision_eligible": False, "notice": "研究候选池，不构成自动交易指令"})),
-            )
-            for rank, candidate in enumerate(candidates, start=1):
-                flags = list(candidate["risk_flags"])
-                if not coverage_complete:
-                    flags.append("incomplete_board_mapping")
-                event_context = events.get(candidate["symbol"], [])
-                connection.execute("INSERT INTO quant.instruments(symbol,exchange,name,source) VALUES(%s,%s,%s,'strategy_decision') ON CONFLICT(symbol) DO NOTHING",
-                                   (candidate["symbol"], exchange_for(candidate["symbol"]), candidate.get("name")))
-                connection.execute(
-                """INSERT INTO quant.recommendations(run_id,rank,symbol,decision,score,score_breakdown,explanation,risk_flags,
-                      direction,horizon_days,confidence,valid_until,invalidation)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s)""",
-                (run_id, rank, candidate["symbol"], candidate["decision"], candidate["score"],
-                 Json({key: candidate[key] for key in ("board_score", "board_net_inflow", "board_change_pct", "main_net_inflow", "volume_ratio", "turnover_rate", "pct_change")}),
-                 Json({"sector": {key: candidate[key] for key in ("taxonomy_key", "sector_key", "sector_label")},
-                       "post_close_context": strategy_json_safe(event_context[:5]),
-                       "tushare_lhb_context": strategy_json_safe(tushare_lhb.get(candidate["symbol"], [])[:5]),
-                       "notice": "龙虎榜和涨停池仅作下一交易日背景，不参与盘中打分"}),
-                 Json(sorted(set(flags))), 1 if candidate["decision"] == "research_candidate" else 0, candidate["confidence"],
-                 china_date, Json(["data_stale", "board_flow_reverses", "main_net_inflow_reverses", "price_extension"])),
-                )
-    await run_database_blocking(persist_completed, timeout_seconds=60)
-    return {"status": "completed", "run_id": str(run_id), "observed_at": observed_at.isoformat(), "as_of_date": str(china_date),
-            "market_regime": regime, "regime_metrics": regime_metrics, "decision_eligible": False,
-            "coverage": source_status["mapping"], "tushare_realtime_validation": realtime,
-            "recommendations": candidates, "notice": "研究候选池，不构成自动交易指令；龙虎榜仅作为下一交易日背景。"}
-
 
 async def sync_ths_industry_moneyflow_legacy(request: SectorFlowSyncRequest) -> dict[str, Any]:
-    """Persist one post-close THS industry moneyflow cross-section."""
-    trade_date = request.trade_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    stamp = trade_date.strftime("%Y%m%d")
-    outcome = await fetch_tushare_catalog(TushareFetchRequest(
-        api_name="moneyflow_ind_ths", provider=request.provider, params={"trade_date": stamp}, max_rows=1000,
-    ))
-    rows = await run_database_blocking(tushare_rows_for_request, str(outcome["request_key"]))
-    valid_rows = [row for row in rows if str(row.get("ts_code") or "").endswith(".TI") and row.get("industry")]
-    if not valid_rows:
-        return {"status": "blocked", "trade_date": str(trade_date), "reason": "moneyflow_ind_ths returned no valid industry rows", "request_key": outcome["request_key"]}
-    provider_key = str(outcome["provider"])
-    observed_at = datetime.now(timezone.utc)
-    taxonomy_key = "ths_industry"
-    def persist_industry_flow() -> None:
-        with db.transaction() as connection:
-            upsert_sector_taxonomy(connection, taxonomy_key, "同花顺行业", provider_key, {"api_name": "moneyflow_ind_ths"})
-            for row in valid_rows:
-                sector_key, label = str(row["ts_code"]), str(row["industry"])
-                upsert_sector(connection, taxonomy_key, sector_key, label, {"industry": label})
-                connection.execute(
-                """INSERT INTO quant.sector_market_observations(taxonomy_key,sector_key,trading_date,provider_key,available_at,close,change_pct,
-                         net_amount,net_buy_amount,net_sell_amount,constituent_count,leading_symbol,leading_label,raw)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,null,%s,%s)
-                   ON CONFLICT(taxonomy_key,sector_key,trading_date,provider_key) DO UPDATE SET available_at=EXCLUDED.available_at,
-                     close=EXCLUDED.close,change_pct=EXCLUDED.change_pct,net_amount=EXCLUDED.net_amount,net_buy_amount=EXCLUDED.net_buy_amount,
-                     net_sell_amount=EXCLUDED.net_sell_amount,constituent_count=EXCLUDED.constituent_count,leading_label=EXCLUDED.leading_label,raw=EXCLUDED.raw""",
-                    (taxonomy_key, sector_key, trade_date, provider_key, observed_at, decimal_or_none(row.get("close")),
-                     decimal_or_none(row.get("pct_change")), decimal_or_none(row.get("net_amount")), decimal_or_none(row.get("net_buy_amount")),
-                     decimal_or_none(row.get("net_sell_amount")), int(row["company_num"]) if row.get("company_num") not in (None, "") else None,
-                     row.get("lead_stock"), Json(row)),
-                )
-
-    await run_database_blocking(persist_industry_flow)
-    return {"status": outcome["status"], "trade_date": str(trade_date), "taxonomy_key": taxonomy_key,
-            "sectors": len(valid_rows), "provider": provider_key, "request_key": outcome["request_key"]}
-
-
-async def sync_ths_concept_signals_legacy(request: SectorFlowSyncRequest) -> dict[str, Any]:
-    """Persist THS concept flow and limit-up strength as separate source facts."""
-    trade_date = request.trade_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    stamp = trade_date.strftime("%Y%m%d")
-    results: dict[str, dict[str, Any]] = {}
-
-    concept_outcome = await fetch_tushare_catalog(TushareFetchRequest(
-        api_name="moneyflow_cnt_ths", provider=request.provider, params={"trade_date": stamp}, max_rows=1000,
-    ))
-    concept_rows = await run_database_blocking(tushare_rows_for_request, str(concept_outcome["request_key"]))
-    concept_rows = [row for row in concept_rows if str(row.get("ts_code") or "").endswith(".TI") and row.get("name")]
-    concept_provider = str(concept_outcome["provider"])
-    observed_at = datetime.now(timezone.utc)
-    def persist_concept_flow() -> None:
-        with db.transaction() as connection:
-            upsert_sector_taxonomy(connection, "ths_concept_flow", "同花顺概念资金流", concept_provider,
-                                   {"api_name": "moneyflow_cnt_ths", "semantic": "concept_flow"})
-            for row in concept_rows:
-                sector_key, label = str(row["ts_code"]), str(row["name"])
-                upsert_sector(connection, "ths_concept_flow", sector_key, label, {"name": label})
-                connection.execute(
-                """INSERT INTO quant.sector_market_observations(taxonomy_key,sector_key,trading_date,provider_key,available_at,close,change_pct,
-                         net_amount,net_buy_amount,net_sell_amount,constituent_count,leading_symbol,leading_label,raw)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,null,%s,%s)
-                   ON CONFLICT(taxonomy_key,sector_key,trading_date,provider_key) DO UPDATE SET available_at=EXCLUDED.available_at,
-                     close=EXCLUDED.close,change_pct=EXCLUDED.change_pct,net_amount=EXCLUDED.net_amount,net_buy_amount=EXCLUDED.net_buy_amount,
-                     net_sell_amount=EXCLUDED.net_sell_amount,constituent_count=EXCLUDED.constituent_count,leading_label=EXCLUDED.leading_label,raw=EXCLUDED.raw""",
-                    ("ths_concept_flow", sector_key, trade_date, concept_provider, observed_at,
-                     decimal_or_none(row.get("industry_index")), decimal_or_none(row.get("pct_change")),
-                     decimal_or_none(row.get("net_amount")), decimal_or_none(row.get("net_buy_amount")),
-                     decimal_or_none(row.get("net_sell_amount")), int(row["company_num"]) if row.get("company_num") not in (None, "") else None,
-                     row.get("lead_stock"), Json(row)),
-                )
-
-    await run_database_blocking(persist_concept_flow)
-    results["concept_flow"] = {"status": concept_outcome["status"], "taxonomy_key": "ths_concept_flow",
-                               "sectors": len(concept_rows), "provider": concept_provider, "request_key": concept_outcome["request_key"]}
-
-    try:
-        strength_outcome = await fetch_tushare_catalog(TushareFetchRequest(
-            api_name="limit_cpt_list", provider=request.provider, params={"trade_date": stamp}, max_rows=1000,
-        ))
-        strength_rows = await run_database_blocking(tushare_rows_for_request, str(strength_outcome["request_key"]))
-        strength_rows = [row for row in strength_rows if str(row.get("ts_code") or "").endswith(".TI") and row.get("name")]
-        strength_provider = str(strength_outcome["provider"])
-        def persist_limit_strength() -> None:
-            with db.transaction() as connection:
-                upsert_sector_taxonomy(connection, "ths_limit_strength", "同花顺概念涨停强度", strength_provider,
-                                       {"api_name": "limit_cpt_list", "semantic": "limit_up_strength"})
-                for row in strength_rows:
-                    sector_key, label = str(row["ts_code"]), str(row["name"])
-                    upsert_sector(connection, "ths_limit_strength", sector_key, label, {"name": label})
-                    connection.execute(
-                    """INSERT INTO quant.sector_market_observations(taxonomy_key,sector_key,trading_date,provider_key,available_at,close,change_pct,
-                             net_amount,net_buy_amount,net_sell_amount,constituent_count,leading_symbol,leading_label,raw)
-                       VALUES(%s,%s,%s,%s,%s,null,%s,null,null,null,%s,null,null,%s)
-                       ON CONFLICT(taxonomy_key,sector_key,trading_date,provider_key) DO UPDATE SET available_at=EXCLUDED.available_at,
-                         change_pct=EXCLUDED.change_pct,constituent_count=EXCLUDED.constituent_count,raw=EXCLUDED.raw""",
-                        ("ths_limit_strength", sector_key, trade_date, strength_provider, observed_at,
-                         decimal_or_none(row.get("pct_chg")), int(row["cons_nums"]) if row.get("cons_nums") not in (None, "") else None, Json(row)),
-                    )
-
-        await run_database_blocking(persist_limit_strength)
-        results["limit_strength"] = {"status": strength_outcome["status"], "taxonomy_key": "ths_limit_strength",
-                                     "sectors": len(strength_rows), "provider": strength_provider, "request_key": strength_outcome["request_key"]}
-    except HTTPException as error:
-        results["limit_strength"] = {"status": "failed", "taxonomy_key": "ths_limit_strength", "sectors": 0, "error": str(error.detail)}
-    status = "completed" if all(item["status"] in {"completed", "partial", "unchanged", "empty"} for item in results.values()) else "partial"
-    return {"status": status, "trade_date": str(trade_date), "sources": results}
-
+    """Deprecated compatibility alias; use the isolated THS flow synchronizer."""
+    return await sync_ths_industry_moneyflow(request)
 
 async def sync_ths_industry_moneyflow(request: SectorFlowSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by isolated THS industry flow sync."""
@@ -5786,6 +4659,11 @@ async def sync_ths_industry_moneyflow(request: SectorFlowSyncRequest) -> dict[st
         run_database_blocking=run_database_blocking, db=db, upsert_taxonomy=upsert_sector_taxonomy, upsert_sector=upsert_sector,
         decimal_or_none=decimal_or_none, json_value=Json, observed_at=lambda: datetime.now(timezone.utc),
     )
+
+
+async def sync_ths_concept_signals_legacy(request: SectorFlowSyncRequest) -> dict[str, Any]:
+    """Deprecated compatibility alias; use the isolated THS concept synchronizer."""
+    return await sync_ths_concept_signals(request)
 
 
 async def sync_ths_concept_signals(request: SectorFlowSyncRequest) -> dict[str, Any]:
@@ -5799,136 +4677,8 @@ async def sync_ths_concept_signals(request: SectorFlowSyncRequest) -> dict[str, 
 
 
 async def sync_ths_concept_members_legacy(request: ConceptMemberSyncRequest) -> dict[str, Any]:
-    """Persist one bounded page of members for the concept-flow taxonomy.
-
-    The flow table is deliberately the catalog here: it prevents membership
-    scans of THS boards that cannot appear in the concept-flow report, and its
-    stable ``.TI`` codes avoid an unsafe name-based cross-provider join.
-    """
-    if request.provider == "super_get":
-        return {"status": "blocked", "reason": "complete ths_member snapshots require provider=super, super_sdk, or auto"}
-    if request.refresh_flow_catalog:
-        refreshed = await sync_ths_concept_signals(SectorFlowSyncRequest(
-            trade_date=request.trade_date, provider=request.provider,
-        ))
-        if refreshed.get("sources", {}).get("concept_flow", {}).get("status") not in {"completed", "partial", "unchanged", "empty"}:
-            return {"status": "blocked", "reason": "unable to refresh THS concept-flow catalog", "refresh": refreshed}
-
-    def select_concepts() -> tuple[date | None, list[Any], int]:
-        with db.transaction() as connection:
-            selected_date = request.trade_date or connection.execute(
-                "SELECT max(trading_date) latest FROM quant.sector_market_observations WHERE taxonomy_key='ths_concept_flow'"
-            ).fetchone()["latest"]
-            if selected_date is None:
-                return None, [], 0
-            if request.resume:
-                concepts = connection.execute(
-                    """SELECT o.sector_key,s.label
-                         FROM quant.sector_market_observations o
-                         JOIN quant.sectors s ON s.taxonomy_key=o.taxonomy_key AND s.sector_key=o.sector_key
-                         LEFT JOIN quant.sector_member_sync_state state
-                           ON state.taxonomy_key=o.taxonomy_key AND state.sector_key=o.sector_key AND state.trading_date=o.trading_date
-                        WHERE o.taxonomy_key='ths_concept_flow' AND o.trading_date=%s
-                          AND (state.state IS NULL OR (state.state='failed' AND
-                               (state.attempts < 3 OR state.provider_key='tushare_super' OR
-                                state.last_error='member response reached the 3000-row safety cap')))
-                        ORDER BY o.net_amount DESC NULLS LAST,o.sector_key
-                        LIMIT %s""",
-                    (selected_date, request.member_limit),
-                ).fetchall()
-            else:
-                concepts = connection.execute(
-                    """SELECT o.sector_key,s.label
-                         FROM quant.sector_market_observations o
-                         JOIN quant.sectors s ON s.taxonomy_key=o.taxonomy_key AND s.sector_key=o.sector_key
-                        WHERE o.taxonomy_key='ths_concept_flow' AND o.trading_date=%s
-                        ORDER BY o.sector_key
-                        LIMIT %s OFFSET %s""",
-                    (selected_date, request.member_limit, request.member_offset),
-                ).fetchall()
-            total = connection.execute(
-                "SELECT count(*)::int total FROM quant.sector_market_observations WHERE taxonomy_key='ths_concept_flow' AND trading_date=%s",
-                (selected_date,),
-            ).fetchone()["total"]
-        return selected_date, concepts, total
-
-    selected_date, concepts, total = await run_database_blocking(select_concepts)
-    if selected_date is None:
-        return {"status": "blocked", "reason": "sync THS concept flow before synchronizing concept members"}
-
-    observed_at = datetime.now(timezone.utc)
-    results: list[dict[str, Any]] = []
-    for concept in concepts:
-        sector_key, label = str(concept["sector_key"]), str(concept["label"])
-        try:
-            outcome = await fetch_tushare_catalog(TushareFetchRequest(
-                api_name="ths_member", provider=request.provider, params={"ts_code": sector_key}, max_rows=10_000,
-                paginate=True, page_size=1000, max_pages=10, require_complete=True,
-            ))
-            rows = await run_database_blocking(tushare_rows_for_request, str(outcome["request_key"]))
-            provider_key = str(outcome["provider"])
-            # A capped ``ths_member`` response is not a membership snapshot.
-            # Do not let it close historical members or create a misleading
-            # Top-10 denominator; this board needs a documented paging method.
-            if outcome["status"] == "partial":
-                def persist_capped_state() -> None:
-                    with db.transaction() as connection:
-                        connection.execute(
-                        """INSERT INTO quant.sector_member_sync_state(taxonomy_key,sector_key,trading_date,state,attempts,member_count,last_error,provider_key,updated_at)
-                           VALUES('ths_concept_flow',%s,%s,'failed',1,0,%s,%s,now())
-                           ON CONFLICT(taxonomy_key,sector_key,trading_date) DO UPDATE SET state='failed',
-                             attempts=quant.sector_member_sync_state.attempts+1,last_error=EXCLUDED.last_error,
-                             provider_key=EXCLUDED.provider_key,updated_at=now()""",
-                            (sector_key, selected_date, "member response reached the 3000-row safety cap", provider_key),
-                        )
-
-                await run_database_blocking(persist_capped_state)
-                results.append({"sector_key": sector_key, "label": label, "status": "partial", "members": 0,
-                                "received": len(rows), "provider": provider_key, "request_key": outcome["request_key"],
-                                "reason": "member response reached the 3000-row safety cap"})
-                continue
-            def persist_member_snapshot() -> int:
-                with db.transaction() as connection:
-                    stored = persist_ths_sector_members(connection, "ths_concept_flow", sector_key, rows, provider_key, observed_at)
-                    connection.execute(
-                    """INSERT INTO quant.sector_member_sync_state(taxonomy_key,sector_key,trading_date,state,attempts,member_count,last_error,provider_key,updated_at)
-                       VALUES('ths_concept_flow',%s,%s,%s,1,%s,null,%s,now())
-                       ON CONFLICT(taxonomy_key,sector_key,trading_date) DO UPDATE SET state=EXCLUDED.state,
-                         attempts=quant.sector_member_sync_state.attempts+1,member_count=EXCLUDED.member_count,
-                         last_error=null,provider_key=EXCLUDED.provider_key,updated_at=now()""",
-                        (sector_key, selected_date, "completed" if rows else "empty", stored, provider_key),
-                    )
-                return stored
-
-            stored = await run_database_blocking(persist_member_snapshot)
-            results.append({"sector_key": sector_key, "label": label, "status": outcome["status"], "members": stored,
-                            "provider": provider_key, "request_key": outcome["request_key"]})
-        except HTTPException as error:
-            detail = str(error.detail)[:500]
-
-            def persist_failed_state() -> None:
-                with db.transaction() as connection:
-                    connection.execute(
-                    """INSERT INTO quant.sector_member_sync_state(taxonomy_key,sector_key,trading_date,state,attempts,member_count,last_error,updated_at)
-                       VALUES('ths_concept_flow',%s,%s,'failed',1,0,%s,now())
-                       ON CONFLICT(taxonomy_key,sector_key,trading_date) DO UPDATE SET state='failed',
-                         attempts=quant.sector_member_sync_state.attempts+1,last_error=EXCLUDED.last_error,updated_at=now()""",
-                        (sector_key, selected_date, detail),
-                    )
-
-            await run_database_blocking(persist_failed_state)
-            results.append({"sector_key": sector_key, "label": label, "status": "failed", "members": 0, "error": str(error.detail)})
-
-    failures = [item for item in results if item["status"] not in {"completed", "unchanged", "empty"}]
-    next_offset = request.member_offset + len(concepts)
-    return {
-        "status": "partial" if failures else "completed", "trade_date": str(selected_date),
-        "taxonomy_key": "ths_concept_flow", "total_concepts": total,
-        "member_offset": request.member_offset, "member_limit": request.member_limit, "resume": request.resume,
-        "member_results": results,
-        "next_member_offset": next_offset if next_offset < total else None,
-    }
-
+    """Deprecated compatibility alias; use the isolated THS member synchronizer."""
+    return await sync_ths_concept_members(request)
 
 async def sync_ths_concept_members(request: ConceptMemberSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by isolated concept-member sync."""
@@ -6306,146 +5056,17 @@ async def sync_cninfo_announcements(request: AnnouncementSyncRequest) -> dict[st
 
 
 async def run_post_close_refresh_legacy(request: PostCloseRefreshRequest) -> dict[str, Any]:
-    """Refresh all bounded post-close evidence in dependency order.
-
-    This deliberately does not manufacture a green result when a provider has
-    not yet published its close data.  Each phase is durable and idempotent on
-    its own request key; the response is therefore also a useful retry ledger.
-    """
-    lease_holder_id = uuid.uuid4()
-    acquired = await run_database_blocking(
-        acquire_runtime_lease, db, POST_CLOSE_REFRESH_LEASE_KEY, lease_holder_id, post_close_refresh_lease_seconds(),
-    )
-    if not acquired:
-        raise HTTPException(status_code=409, detail="a post-close refresh is already running in another service instance")
-
-    trade_date = request.trade_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    started_at = datetime.now(timezone.utc)
-    stages: dict[str, dict[str, Any]] = {}
-
-    async def stage(name: str, action: Any, timeout_seconds: float = 90.0) -> dict[str, Any]:
-        phase_started = asyncio.get_running_loop().time()
-        try:
-            result = action()
-            if hasattr(result, "__await__"):
-                result = await asyncio.wait_for(result, timeout=timeout_seconds)
-            payload = dict(result) if isinstance(result, dict) else {"result": result}
-            payload.setdefault("status", "completed")
-        except asyncio.TimeoutError:
-            payload = {"status": "failed", "error": f"stage exceeded its {int(timeout_seconds)}s budget; retry later"}
-        except Exception as error:  # noqa: BLE001 - later evidence remains useful
-            payload = {"status": "failed", "error": safe_error_detail(str(error), 500)}
-        payload["latency_ms"] = round((asyncio.get_running_loop().time() - phase_started) * 1000)
-        stages[name] = strategy_json_safe(payload)
-        lease_renewed = await run_database_blocking(
-            renew_runtime_lease, db, POST_CLOSE_REFRESH_LEASE_KEY, lease_holder_id, post_close_refresh_lease_seconds(),
-        )
-        if not lease_renewed:
-            raise RuntimeError("post-close refresh lease was lost; remaining stages were not run")
-        return payload
-
-    try:
-        await stage("stale_fetch_runs", lambda: run_database_blocking(
-            reconcile_stale_fetch_runs, FetchRunReconcileRequest(max_age_minutes=90)
-        ))
-        await stage("analyst_text", lambda: run_database_blocking(reprocess_remote_reports, db, 500))
-        await stage("all_a_universe", lambda: sync_market_universe(MarketUniverseSyncRequest()))
-        daily = await stage("full_market_daily", lambda: sync_full_market_daily(FullMarketDailySyncRequest(trade_date=trade_date)))
-        # daily_basic/adj_factor/stk_limit/suspend_d are per-symbol control
-        # plane reads.  They remain on the normal watched-stock refresh path;
-        # running dozens of serial proxy calls here would make an ostensibly
-        # one-click close update take tens of minutes without improving the
-        # full-market close review.
-        stages["core_daily_controls"] = {
-            "status": "skipped",
-            "reason": "per-symbol control-plane sync remains in the watched-stock workflow; full-market daily is authoritative here",
-            "latency_ms": 0,
-        }
-        await stage("index_context", lambda: sync_strategy_index_context(trade_date))
-        await stage("close_market_snapshot", lambda: build_market_snapshot(
-            MarketSnapshotRequest(session="close", universe_key="all_a", refresh_public_quotes=True)
-        ))
-
-        def load_core_symbols() -> list[Any]:
-            with db.transaction() as connection:
-                return connection.execute(
-                    "SELECT symbol FROM quant.universe_members WHERE universe_key='core' AND enabled "
-                    "ORDER BY priority,symbol LIMIT %s", (request.announcement_limit,)
-                ).fetchall()
-        rows = await run_database_blocking(load_core_symbols)
-        core_symbols = [str(row["symbol"]) for row in rows]
-        probe_symbol = core_symbols[0] if core_symbols else "000636.SZ"
-        await stage("akshare_supplements", lambda: akshare_probe(AkShareProbeRequest(
-            symbol=probe_symbol, trade_date=trade_date, include_macro_cross_asset=request.include_macro_cross_asset,
-            board_limit=30,
-        )), timeout_seconds=240.0)
-        await stage("ths_industry_flow", lambda: sync_ths_industry_moneyflow(
-            SectorFlowSyncRequest(trade_date=trade_date, provider="super")
-        ))
-        await stage("ths_concept_flow_and_limit_strength", lambda: sync_ths_concept_signals(
-            SectorFlowSyncRequest(trade_date=trade_date, provider="super")
-        ))
-        await stage("limit_ladder", lambda: refresh_strategy_pattern_sources(trade_date))
-        await stage("limit_lift_pattern_mining", lambda: run_strategy_pattern_mining(
-            StrategyPatternMiningRequest(as_of_date=trade_date, refresh_limit_sources=False)
-        ), timeout_seconds=120.0)
-        if request.include_announcements and core_symbols:
-            await stage("cninfo_announcements", lambda: sync_cninfo_announcements(AnnouncementSyncRequest(
-                symbols=core_symbols, universe_key="core", start_date=trade_date - timedelta(days=45),
-                end_date=trade_date, max_pages_per_symbol=1,
-            )), timeout_seconds=120.0)
-        else:
-            stages["cninfo_announcements"] = {"status": "skipped", "reason": "disabled or core universe is empty", "latency_ms": 0}
-
-        await stage("board_review", lambda: run_intraday_board_report(deliver=False))
-        await stage("close_strategy_decision", lambda: run_strategy_decision(StrategyDecisionRequest(
-            session="close", kind="all", limit=20, validate_tushare_realtime=False,
-        )))
-        await stage("close_review", lambda: run_database_blocking(_persist_close_review, trade_date))
-        await stage("analyst_outcomes", lambda: run_database_blocking(recompute_outcomes, trade_date))
-        await stage("analyst_scorecards", lambda: run_database_blocking(recompute_scorecards, trade_date))
-        await stage("analyst_expert_research", lambda: run_database_blocking(
-            rebuild_analyst_research_for_date, trade_date,
-        ))
-        await stage("post_close_strategy", lambda: run_database_blocking(
-            run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date)
-        ))
-        await stage("watchlist_main_wave", lambda: run_database_blocking(
-            persist_watchlist_main_wave_research, WatchlistMainWaveResearchRequest(as_of_date=trade_date),
-        ))
-        await stage("research_snapshot", lambda: run_database_blocking(build_snapshot, SnapshotRequest(as_of_date=trade_date)))
-
-        # Availability is explicit: Xinhua has no provisioned contract and Sina is
-        # not a full-market close source when the persisted Tencent snapshot exists.
-        sources = {
-            "tushare_super": "requested through daily, THS flow, limit ladder, specialty and index phases",
-            "akshare_eastmoney": "requested through supplements and board review",
-            "tencent": "requested through the close all-A snapshot and board review",
-            "cninfo": stages["cninfo_announcements"]["status"],
-            "sina": "not used for full-market close; bounded stock-study fallback only",
-            "xinhua_finance": "skipped: no licensed endpoint/authentication configured",
-        }
-        deferred = [name for name, item in stages.items() if item.get("status") in {"blocked", "failed"}]
-        daily_ready = daily.get("status") in {"completed", "unchanged"}
-        return {
-            "status": "completed" if not deferred else "partial",
-            "trade_date": str(trade_date), "started_at": started_at.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat(),
-            "daily_ready": daily_ready,
-            "deferred_stages": deferred,
-            "retry_hint": None if daily_ready else "收盘日线尚未发布时，可稍后再次点击；自动盘后任务也会在18:55-19:10重试策略筛选。",
-            "sources": sources, "stages": stages,
-            "notice": "一键更新只保存研究证据和候选，不会自动下单或发送交易指令。",
-        }
-    finally:
-        try:
-            await run_database_blocking(release_runtime_lease, db, POST_CLOSE_REFRESH_LEASE_KEY, lease_holder_id)
-        except Exception as error:  # noqa: BLE001 - lease expiry remains a safe recovery path
-            print(f"post-close refresh lease release failed: {safe_error_detail(str(error), 300)}")
-
-
+    """Deprecated compatibility alias; use the lease-aware orchestrator."""
+    return await run_post_close_refresh(request)
 async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, Any]:
     """Compatibility entry point backed by the isolated refresh orchestrator."""
     trade_date = request.trade_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    full_market_daily_provider = (
+        "super_get"
+        if (provider := provider_configs().get("super_get"))
+        and provider.configured and provider.get_gateway_mode == "promax" and provider.supports("daily")
+        else "auto"
+    )
     core_symbols: list[str] = []
 
     def load_core_symbols() -> list[Any]:
@@ -6477,7 +5098,9 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
         "stale_fetch_runs": lambda: run_database_blocking(reconcile_stale_fetch_runs, FetchRunReconcileRequest(max_age_minutes=90)),
         "analyst_text": lambda: run_database_blocking(reprocess_remote_reports, db, 500),
         "all_a_universe": lambda: sync_market_universe(MarketUniverseSyncRequest()),
-        "full_market_daily": lambda: sync_full_market_daily(FullMarketDailySyncRequest(trade_date=trade_date)),
+        "full_market_daily": lambda: sync_full_market_daily(
+            FullMarketDailySyncRequest(trade_date=trade_date, provider=full_market_daily_provider)
+        ),
         "index_context": lambda: sync_strategy_index_context(trade_date),
         "close_market_snapshot": lambda: build_market_snapshot(MarketSnapshotRequest(session="close", universe_key="all_a", refresh_public_quotes=True)),
         "akshare_supplements": akshare_stage,
@@ -6494,6 +5117,9 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
         "close_strategy_decision": lambda: run_strategy_decision(StrategyDecisionRequest(session="close", kind="all", limit=20, validate_tushare_realtime=False)),
         "close_review": lambda: run_database_blocking(_persist_close_review, trade_date),
         "analyst_outcomes": lambda: run_database_blocking(recompute_outcomes, trade_date),
+        "analyst_intraday_outcomes": lambda: run_database_blocking(
+            recompute_analyst_intraday_outcomes_for_date, trade_date, timeout_seconds=90,
+        ),
         "analyst_scorecards": lambda: run_database_blocking(recompute_scorecards, trade_date),
         "analyst_expert_research": lambda: run_database_blocking(rebuild_analyst_research_for_date, trade_date),
         "post_close_strategy": lambda: run_database_blocking(run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date)),
@@ -6502,6 +5128,36 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
         ),
         "research_snapshot": lambda: run_database_blocking(build_snapshot, SnapshotRequest(as_of_date=trade_date)),
     }
+
+    async def record_refresh_stage(name: str, stage_date: date, action: Callable[[], Any]) -> Any:
+        """Persist one-click stage lifecycle without changing stage semantics."""
+        run_key = f"post-close-refresh:{name}:{stage_date}"
+        def begin() -> str:
+            with db.transaction() as connection:
+                return start_run(
+                    connection, task_key="post_close_refresh.stage", run_key=run_key,
+                    cadence="daily", as_of_date=stage_date, methodology_version="post-close-refresh-v1",
+                    input_summary={"stage": name},
+                )
+        run_id = await run_database_blocking(begin, timeout_seconds=10)
+        try:
+            result = action()
+            if hasattr(result, "__await__"):
+                result = await result
+        except Exception as error:
+            await run_database_blocking(lambda: _fail_automation_run(run_id, error), timeout_seconds=10)
+            raise
+        await run_database_blocking(lambda: _finish_automation_run(run_id, result), timeout_seconds=10)
+        return result
+
+    def _fail_automation_run(run_id: str, error: BaseException) -> None:
+        with db.transaction() as connection:
+            fail_run(connection, run_id, error)
+
+    def _finish_automation_run(run_id: str, result: Any) -> None:
+        with db.transaction() as connection:
+            finish_run(connection, run_id, output_summary={"status": result.get("status")} if isinstance(result, dict) else {})
+
     return await run_post_close_refresh_orchestrated(
         request, db=db, lease_key=POST_CLOSE_REFRESH_LEASE_KEY,
         lease_seconds=post_close_refresh_lease_seconds, run_database_blocking=run_database_blocking,
@@ -6510,9 +5166,10 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
             "stale_fetch_runs", "analyst_text", "all_a_universe", "full_market_daily", "index_context",
             "close_market_snapshot", "akshare_supplements", "ths_industry_flow", "ths_concept_flow_and_limit_strength",
             "market_flow_features", "limit_ladder", "limit_lift_pattern_mining", "core_daily_controls", "cninfo_announcements",
-            "board_review", "close_strategy_decision", "close_review", "analyst_outcomes", "analyst_scorecards",
+            "board_review", "close_strategy_decision", "close_review", "analyst_outcomes", "analyst_intraday_outcomes", "analyst_scorecards",
             "analyst_expert_research", "post_close_strategy", "watchlist_main_wave", "research_snapshot",
         ), timeout_overrides={"akshare_supplements": 240.0, "limit_lift_pattern_mining": 120.0},
+        record_stage=record_refresh_stage,
         trade_date=trade_date,
         safe_error_detail=safe_error_detail, json_safe=strategy_json_safe,
     )
@@ -6527,6 +5184,15 @@ def rebuild_analyst_research_for_date(as_of_date: date) -> dict[str, Any]:
     """Run analyst research inside the service's durable DB transaction."""
     with db.transaction() as connection:
         return rebuild_analyst_research(connection, as_of_date)
+
+
+def recompute_analyst_intraday_outcomes_for_date(as_of_date: date) -> dict[str, Any]:
+    """Settle analyst observations only through the same-day close boundary."""
+    cutoff = datetime.combine(
+        as_of_date, time(15, 5), tzinfo=ZoneInfo("Asia/Shanghai"),
+    ).astimezone(timezone.utc)
+    with db.transaction() as connection:
+        return materialize_intraday_analyst_outcomes(connection, cutoff_at=cutoff)
 
 
 async def run_board_research(request: BoardResearchRunRequest) -> dict[str, Any]:
@@ -7257,6 +5923,7 @@ app.include_router(build_analyst_trade_action_reads_router(db, anqiang_trade_act
 app.include_router(build_analyst_action_outcomes_router(db, materialize_anqiang_action_replay_outcomes))
 app.include_router(build_analyst_skill_reads_router(db, analyst_skill_profiles))
 app.include_router(build_analyst_research_reads_router(db, analyst_research_status))
+app.include_router(build_automation_reads_router(db))
 app.include_router(build_event_reads_router(db, async_db))
 app.include_router(build_strategy_reads_router(db, STRATEGY_DECISION_MODEL_VERSION, async_db))
 app.include_router(build_paper_reads_router(db, async_db))
@@ -7292,28 +5959,6 @@ app.include_router(build_market_result_reads_router(
 ))
 
 
-def write_access_allowed(method: str, supplied_key: str | None, configured_key: str | None) -> bool:
-    """Apply one explicit boundary to every mutating HTTP route.
-
-    Empty configuration remains permissive only for migration/test environments.
-    Compose production configuration always supplies the key; keeping this pure
-    makes the fail-closed behavior independently testable.
-    """
-    if method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
-        return True
-    if not configured_key:
-        return True
-    return bool(supplied_key) and secrets.compare_digest(supplied_key, configured_key)
-
-
-def remote_archive_sync_bearer_allowed(request: Request) -> bool:
-    """Accept only a bounded bearer-shaped trigger for text-only sync."""
-    if request.method.upper() != "POST" or request.url.path != "/api/v1/remote-archive/sync":
-        return False
-    authorization = request.headers.get("Authorization", "").strip()
-    return bool(re.fullmatch(r"Bearer\s+[A-Za-z0-9._~+/-]{24,512}", authorization, flags=re.IGNORECASE))
-
-
 @app.middleware("http")
 async def require_quant_write_key(request: Request, call_next: Any) -> Any:
     configured_key = os.getenv("QUANT_WRITE_API_KEY", "").strip()
@@ -7339,6 +5984,7 @@ def health() -> dict[str, Any]:
             resource_status=runtime_resource_status, public_http_client_status=public_http_client_status,
             alert_http_client_status=alert_http_client_status, provider_http_client_status=provider_http_client_status,
             remote_archive_http_client_status=remote_archive_http_client_status,
+            network_status=network_state.snapshot,
             provider_request_reservation_status=provider_request_reservation_status,
             runtime_executor_status=runtime_executor_status, super_get_executor_status=super_get_executor_status,
             async_database_pool_status=async_db.pool_status,
@@ -7939,9 +6585,25 @@ def build_snapshot(payload: SnapshotRequest) -> dict[str, Any]:
             """SELECT (SELECT count(*)::int FROM quant.canonical_bars_daily WHERE trading_date<=%s) bars,
                       (SELECT count(*)::int FROM quant.remote_reports WHERE remote_updated_at<=%s) remote_reports,
                       (SELECT count(*)::int FROM quant.canonical_bars_daily WHERE symbol='000300.SH' AND trading_date<=%s) benchmark_bars,
-                      (SELECT count(DISTINCT symbol)::int FROM quant.canonical_bars_daily WHERE trading_date=%s AND symbol<>'000300.SH') equity_symbols,
-                      (SELECT count(DISTINCT symbol)::int FROM quant.daily_fundamentals WHERE trading_date=%s) fundamental_symbols,
-                      (SELECT count(DISTINCT symbol)::int FROM quant.daily_trade_limits WHERE trading_date=%s) limit_symbols,
+                      -- Canonical bars also retain benchmark indexes.  Snapshot
+                      -- control coverage must be measured against the actual
+                      -- A-share code space, otherwise index bars make a fully
+                      -- covered stock cross-section look incomplete.
+                      (SELECT count(DISTINCT symbol)::int FROM quant.canonical_bars_daily
+                        WHERE trading_date=%s
+                          AND symbol ~ '^(?:(?:60[0135]|68[0-9])[0-9]{3}\\.SH|(?:000|001|002|003|300|301|302)[0-9]{3}\\.SZ|[489][0-9]{5}\\.BJ)$') equity_symbols,
+                      (SELECT count(DISTINCT basic.symbol)::int
+                         FROM quant.canonical_bars_daily bar
+                         JOIN quant.daily_fundamentals basic
+                           ON basic.symbol=bar.symbol AND basic.trading_date=bar.trading_date
+                        WHERE bar.trading_date=%s
+                          AND bar.symbol ~ '^(?:(?:60[0135]|68[0-9])[0-9]{3}\\.SH|(?:000|001|002|003|300|301|302)[0-9]{3}\\.SZ|[489][0-9]{5}\\.BJ)$') fundamental_symbols,
+                      (SELECT count(DISTINCT limits.symbol)::int
+                         FROM quant.canonical_bars_daily bar
+                         JOIN quant.daily_trade_limits limits
+                           ON limits.symbol=bar.symbol AND limits.trading_date=bar.trading_date
+                        WHERE bar.trading_date=%s
+                          AND bar.symbol ~ '^(?:(?:60[0135]|68[0-9])[0-9]{3}\\.SH|(?:000|001|002|003|300|301|302)[0-9]{3}\\.SZ|[489][0-9]{5}\\.BJ)$') limit_symbols,
                       (SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s) exchange_open,
                       (SELECT count(*)::int FROM quant.data_quality_issues WHERE resolved_at IS NULL AND severity IN ('error','blocking')) blocking_issues""",
             (as_of, cutoff, as_of, as_of, as_of, as_of, as_of),
@@ -7996,7 +6658,16 @@ async def build_features_endpoint(payload: GenerateRequest) -> dict[str, Any]:
 
 
 async def evaluate_factors_endpoint(payload: FactorEvaluationRequest) -> dict[str, Any]:
-    return await run_database_blocking(evaluate_factors, payload, timeout_seconds=300)
+    run_key = "factor-evaluate:{universe}:{start}:{end}:{horizon}".format(
+        universe=payload.universe_key, start=payload.start_date or "auto",
+        end=payload.end_date or "auto", horizon=payload.horizon_days,
+    )
+    return await run_database_blocking(functools.partial(
+        run_recorded, db, task_key="factor_evaluation", run_key=run_key,
+        operation=functools.partial(evaluate_factors, payload), cadence="manual",
+        methodology_version="native_factor_sql_v2",
+        input_summary={"universe_key": payload.universe_key, "horizon_days": payload.horizon_days},
+    ), timeout_seconds=300)
 
 
 async def backtest_strategy_endpoint(payload: StrategyBacktestRequest) -> dict[str, Any]:

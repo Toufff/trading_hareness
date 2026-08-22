@@ -10,6 +10,7 @@ from app.analyst_prompt_lab import (
     PROMPT_VARIANTS,
     _candidate_payload,
     _chronological_label_split,
+    intraday_path_metrics,
     materialize_intraday_analyst_outcomes,
 )
 from app.analyst_action_outcomes import (
@@ -28,6 +29,15 @@ class AnalystPromptLabContractTests(unittest.TestCase):
             "horizon_days": 3, "strength": 0.8, "confidence": 0.9, "conditions": {},
             "evidence_span": "明确关注", "status": "eligible",
         }
+
+    def test_directional_path_metrics_are_side_aware(self) -> None:
+        long_path = intraday_path_metrics("10", 1, "9.8", "10.5", 8)
+        short_path = intraday_path_metrics("10", -1, "9.8", "10.5", 8)
+        self.assertAlmostEqual(long_path["mfe"], 0.05)
+        self.assertAlmostEqual(long_path["mae"], -0.02)
+        self.assertAlmostEqual(short_path["mfe"], 10 / 9.8 - 1)
+        self.assertAlmostEqual(short_path["mae"], 10 / 10.5 - 1)
+        self.assertIsNone(intraday_path_metrics("0", 1, "9", "11", 3))
 
     def test_all_variants_share_source_contract_and_never_gain_live_effect(self) -> None:
         for variant in PROMPT_VARIANTS:

@@ -25,6 +25,7 @@ class HealthDependencies:
     alert_http_client_status: Callable[[], dict[str, Any]]
     provider_http_client_status: Callable[[], dict[str, Any]]
     remote_archive_http_client_status: Callable[[], dict[str, Any]]
+    network_status: Callable[[], dict[str, Any]]
     provider_request_reservation_status: Callable[[], dict[str, Any]]
     runtime_executor_status: Callable[[], dict[str, Any]]
     super_get_executor_status: Callable[[], dict[str, Any]]
@@ -96,6 +97,7 @@ def health_payload(deps: HealthDependencies) -> dict[str, Any]:
             "tushare_provider": deps.provider_http_client_status(),
             "remote_analyst_archive": deps.remote_archive_http_client_status(),
         },
+        "network": deps.network_status(),
         "provider_rate_limits": deps.provider_request_reservation_status(),
         "blocking_executors": {**deps.runtime_executor_status(), "super_get": deps.super_get_executor_status()},
         "market_providers": [*deps.provider_status(), *deps.free_provider_status()],

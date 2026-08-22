@@ -26,6 +26,7 @@ from requests.adapters import HTTPAdapter
 from .capability_registry import provider_order
 from .http_clients import provider_http_client
 from .http_retry import retry_delay_seconds
+from .network_health import network_state
 from .runtime_executors import BlockingExecutorBoundary, bounded_queue_size
 from .tushare_official import REALTIME_MARKET_HOURS_APIS
 
@@ -265,7 +266,13 @@ async def provider_http_request(provider: TushareProvider, operation: Any) -> ht
         try:
             response = await operation()
             response_headers = response.headers
+            source = f"tushare:{provider.key}"
+            if 200 <= response.status_code < 400:
+                network_state.record_success(source)
+            elif response.status_code in transient:
+                network_state.record_failure(source, f"HTTP {response.status_code}", transient=True)
         except httpx.HTTPError as error:
+            network_state.record_failure(f"tushare:{provider.key}", str(error), transient=True)
             last_error = error
             if attempt == 1:
                 raise
@@ -525,13 +532,21 @@ async def call_provider(provider: TushareProvider, api_name: str, params: dict[s
                         _super_get_executor, proxy_http_get, timeout_seconds=request_timeout + 2,
                     )
                     response_headers = response.headers
+                    source = f"tushare:{provider.key}:{provider.get_gateway_mode or 'get'}"
+                    if response.ok:
+                        network_state.record_success(source)
+                    elif response.status_code in {408, 429, 500, 502, 503, 504}:
+                        network_state.record_failure(source, f"HTTP {response.status_code}", transient=True)
                     if response.ok:
                         return _filter_requested_realtime_rows(api_name, params, _decode_rows(response.json()))
                     detail = safe_error_detail(response.text, 180)
                     failures.append(f"HTTP {response.status_code}: {detail or response.reason}")
                     if response.status_code not in {429, 500, 502, 503, 504}:
                         break
-                except (requests.RequestException, ValueError) as error:
+                except requests.RequestException as error:
+                    network_state.record_failure(f"tushare:{provider.key}:{provider.get_gateway_mode or 'get'}", str(error), transient=True)
+                    failures.append(type(error).__name__)
+                except ValueError as error:
                     failures.append(type(error).__name__)
                 if attempt + 1 < attempts_per_credential:
                     await asyncio.sleep(retry_delay_seconds(response_headers, 0.8))

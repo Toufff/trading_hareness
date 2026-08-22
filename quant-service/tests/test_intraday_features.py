@@ -101,6 +101,39 @@ class MappedWatchlistPeerTests(unittest.TestCase):
         self.assertTrue(all(not item["training_permitted"] for item in contracts))
         self.assertTrue(all(item["deprecated_at"] is None for item in contracts))
 
+    def test_minute_features_excludes_impossible_same_session_vwap(self) -> None:
+        from app.intraday_features import minute_features
+
+        rows = [
+            {"time": f"09:{30 + index:02d}", "close": 200 + index,
+             "volume_lot": 100 + index, "amount": (200 + index) * (100 + index) * 100,
+             "vwap": 2.0}
+            for index in range(6)
+        ]
+        feature = minute_features(rows, number=lambda value: float(value) if value not in (None, "") else None)
+        self.assertIsNotNone(feature)
+        self.assertIsNone(feature["vwap"])
+        self.assertIsNone(feature["above_vwap_pct"])
+        self.assertIn("vwap_price_scale_mismatch", feature["quality_flags"])
+
+    def test_minute_features_does_not_bridge_cumulative_reset_segments(self) -> None:
+        from app.intraday_features import minute_features
+
+        rows = [
+            {"time": "1129", "close": 10.0, "volume_lot": 1_000, "amount": 1_000_000,
+             "vwap": 10.0, "cumulative_segment": 0},
+            *[
+                {"time": f"13{index:02d}", "close": 20.0 + index / 100, "volume_lot": 100 + index,
+                 "amount": (20.0 + index / 100) * (100 + index) * 100,
+                 "vwap": 20.0, "cumulative_segment": 1}
+                for index in range(6)
+            ],
+        ]
+        feature = minute_features(rows, number=lambda value: float(value) if value not in (None, "") else None)
+        self.assertIsNotNone(feature)
+        self.assertEqual(feature["cumulative_segment"], 1)
+        self.assertEqual(feature["return_1m_pct"], 0.0499)
+
 
 if __name__ == "__main__":
     unittest.main()

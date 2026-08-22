@@ -6,8 +6,10 @@ import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { createLedger } from './ledger.mjs';
 import { createGroupRelay } from './group-relay.mjs';
+import { createSummaryListener } from './summary-listener.mjs';
 import { createFeishuUserOauth } from './feishu-user-oauth.mjs';
 import { createFeishuWorkbench } from './feishu-workbench.mjs';
+import { isSystemRelayPlaceholder } from './message-filter.mjs';
 import Busboy from 'busboy';
 
 const required = ['FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'N8N_TEXT_WEBHOOK_URL', 'N8N_MEDIA_PART_WEBHOOK_URL', 'N8N_MEDIA_FINALIZE_WEBHOOK_URL'];
@@ -52,6 +54,42 @@ const larkClient = new Lark.Client({ appId, appSecret, domain: Lark.Domain.Feish
 const recentEvents = [];
 const eventStreams = new Set();
 const maxRecentEvents = 200;
+const workbenchEventHandlers = new Map([
+	['card.action.trigger', { label: '行动卡片回调', required_for: '可选行动卡片' }],
+	['im.message.reaction.created_v1', { label: '表情协作回调', required_for: '可选行动卡片表情' }],
+	['application.bot.menu_v6', { label: '机器人菜单回调', required_for: 'H5 工作台菜单' }],
+]);
+function noteWorkbenchEvent(eventType) {
+	const current = workbenchEventHandlers.get(eventType);
+	if (!current) return;
+	workbenchEventHandlers.set(eventType, { ...current, received_count: Number(current.received_count ?? 0) + 1, last_received_at: new Date().toISOString() });
+}
+function workbenchEventStatus() {
+	return [...workbenchEventHandlers.entries()].map(([event_type, value]) => ({
+		event_type, ...value, handler_registered: true,
+		state: value.last_received_at ? 'received' : 'awaiting_callback',
+	}));
+}
+
+function annotateWorkbenchCapabilities(capabilities, oauth, applicationInspection) {
+	const granted = new Set(oauth?.scope_audit?.granted_scopes ?? []);
+	return (capabilities ?? []).map((capability) => {
+		if (capability.key === 'application_inspection') {
+			return {
+				...capability,
+				authorization_status: applicationInspection?.status === 'verified' ? 'verified' : applicationInspection?.status === 'missing_inspection_scope' ? 'missing' : 'awaiting_verification',
+				missing_tenant_scopes: applicationInspection?.status === 'missing_inspection_scope' ? ['application:application:self_manage'] : [],
+			};
+		}
+		if (capability.authorization_subject !== 'user') return capability;
+		const missing = (capability.requires ?? []).filter((scope) => !granted.has(scope));
+		return {
+			...capability,
+			authorization_status: granted.size ? (missing.length ? 'missing' : 'verified') : 'unknown',
+			missing_user_scopes: missing,
+		};
+	});
+}
 const relayDrafts = new Map();
 const feishuDedupeTtlMs = Number(process.env.FEISHU_DEDUPE_TTL_MS ?? 10 * 60 * 1000);
 if (!Number.isFinite(feishuDedupeTtlMs) || feishuDedupeTtlMs < 0) {
@@ -82,6 +120,7 @@ const groupRelayConfig = {
 	enabled: String(process.env.FEISHU_GROUP_RELAY_ENABLED ?? 'true').toLowerCase() !== 'false',
 	targetChatId: String(process.env.FEISHU_GROUP_RELAY_TARGET_CHAT_ID ?? '').trim(),
 	intervalSeconds: groupRelayIntervalSeconds,
+	actionCardsEnabled: String(process.env.FEISHU_GROUP_RELAY_ACTION_CARDS_ENABLED ?? 'false').toLowerCase() === 'true',
 	historyLookbackSeconds: groupRelayHistoryLookbackSeconds,
 	overlapSeconds: Math.min(120, Math.max(30, Math.floor(groupRelayIntervalSeconds * 3))),
 	reconcileEverySeconds: Math.max(3600, Number(process.env.FEISHU_GROUP_RELAY_RECONCILE_SECONDS ?? 21_600)),
@@ -89,32 +128,61 @@ const groupRelayConfig = {
 	bootstrapMode: groupRelayBootstrapMode,
 	sources: [
 		{ key: 'anqiang', tag: 'anqiang', chatId: String(process.env.FEISHU_GROUP_RELAY_ANQIANG_CHAT_ID ?? 'oc_1de6464db12c43bf60985f7131e6334a').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_ANQIANG_CHAT_NAME ?? '马安强 (1)').trim() },
-		{ key: 'liwei', tag: 'liwei', chatId: String(process.env.FEISHU_GROUP_RELAY_LIWEI_CHAT_ID ?? 'oc_4ed9fdb72a152bc921b2d34bd4a1df14').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_LIWEI_CHAT_NAME ?? '消息更新群').trim() },
+		{ key: 'liwei', tag: 'liwei', chatId: String(process.env.FEISHU_GROUP_RELAY_LIWEI_CHAT_ID ?? 'oc_4ed9fdb72a152bc921b2d34bd4a1df14').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_LIWEI_CHAT_NAME ?? '消息更新群').trim(), targetChatIds: String(process.env.FEISHU_GROUP_RELAY_LIWEI_TARGET_CHAT_IDS ?? '').split(',').map((value) => value.trim()).filter(Boolean) },
 		{ key: 'quanneng', tag: 'quanneng', chatId: String(process.env.FEISHU_GROUP_RELAY_QUANNENG_CHAT_ID ?? 'oc_d6a89890c3a62517116a2c63f015e0a0').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_QUANNENG_CHAT_NAME ?? '新野人哥会员群【禁言】').trim() },
 	],
 };
+const summaryListenerIntervalSeconds = Number(process.env.FEISHU_SUMMARY_LISTENER_INTERVAL_SECONDS ?? groupRelayIntervalSeconds);
+if (!Number.isFinite(summaryListenerIntervalSeconds) || summaryListenerIntervalSeconds < 10 || summaryListenerIntervalSeconds > 30) {
+	throw new Error('FEISHU_SUMMARY_LISTENER_INTERVAL_SECONDS must be between 10 and 30');
+}
+const summaryListenerHistoryLookbackSeconds = Number(process.env.FEISHU_SUMMARY_LISTENER_HISTORY_LOOKBACK_SECONDS ?? 3600);
+if (!Number.isFinite(summaryListenerHistoryLookbackSeconds) || summaryListenerHistoryLookbackSeconds < 60 || summaryListenerHistoryLookbackSeconds > 3600) {
+	throw new Error('FEISHU_SUMMARY_LISTENER_HISTORY_LOOKBACK_SECONDS must be between 60 and 3600');
+}
+const summaryListenerBootstrapMode = String(process.env.FEISHU_SUMMARY_LISTENER_BOOTSTRAP_MODE ?? 'forward_existing').trim();
+if (!['skip_existing', 'forward_existing'].includes(summaryListenerBootstrapMode)) {
+	throw new Error('FEISHU_SUMMARY_LISTENER_BOOTSTRAP_MODE must be skip_existing or forward_existing');
+}
+const summaryListenerConfig = {
+	enabled: String(process.env.FEISHU_SUMMARY_LISTENER_ENABLED ?? 'true').toLowerCase() !== 'false',
+	key: 'summary-group', chatId: groupRelayConfig.targetChatId,
+	intervalSeconds: summaryListenerIntervalSeconds, historyLookbackSeconds: summaryListenerHistoryLookbackSeconds,
+	overlapSeconds: Math.min(120, Math.max(30, Math.floor(summaryListenerIntervalSeconds * 3))),
+	bootstrapMode: summaryListenerBootstrapMode, sourceLabel: '分析师发送汇总群',
+};
 await ledger.initializeRelayRoutes(groupRelayConfig.sources);
 const feishuWorkbench = createFeishuWorkbench({
-	appId, appSecret, larkClient, ledger, userRequest: feishuUserOauth.userRequest,
+	appId, appSecret, larkClient, ledger, userRequest: feishuUserOauth.userRequest, sourceApi: feishuUserOauth.sourceApi,
 	config: {
 		targetChatId: groupRelayConfig.targetChatId,
 		publicBaseUrl: String(process.env.FEISHU_WORKBENCH_PUBLIC_BASE_URL ?? '').trim(),
 		driveFolderToken: String(process.env.FEISHU_WORKBENCH_DRIVE_FOLDER_TOKEN ?? '').trim(),
+		driveMaxFileBytes: Math.max(30 * 1024 * 1024, Number(process.env.FEISHU_WORKBENCH_DRIVE_MAX_FILE_BYTES ?? 524_288_000)),
 		wikiSpaceId: String(process.env.FEISHU_WORKBENCH_WIKI_SPACE_ID ?? '').trim(),
+		wikiParentNodeToken: String(process.env.FEISHU_WORKBENCH_WIKI_PARENT_NODE_TOKEN ?? '').trim(),
 		tasklistGuid: String(process.env.FEISHU_WORKBENCH_TASKLIST_GUID ?? '').trim(),
 		baseAppToken: String(process.env.FEISHU_WORKBENCH_BASE_APP_TOKEN ?? '').trim(),
 		baseTableId: String(process.env.FEISHU_WORKBENCH_BASE_TABLE_ID ?? '').trim(),
 		calendarId: String(process.env.FEISHU_WORKBENCH_CALENDAR_ID ?? '').trim(),
 		approvalCode: String(process.env.FEISHU_WORKBENCH_APPROVAL_CODE ?? '').trim(),
 		ailyAppId: String(process.env.FEISHU_WORKBENCH_AILY_APP_ID ?? '').trim(),
+		asrEngineType: String(process.env.FEISHU_WORKBENCH_ASR_ENGINE_TYPE ?? '16k_auto').trim(),
+		actionCardsEnabled: groupRelayConfig.actionCardsEnabled,
 	},
 });
 const groupRelay = createGroupRelay({
 	larkClient, sourceApi: feishuUserOauth.sourceApi, ledger, workbench: feishuWorkbench,
 	config: { ...groupRelayConfig, sourcesProvider: () => ledger.relayRoutes() },
 });
+const summaryListener = createSummaryListener({
+	sourceApi: feishuUserOauth.sourceApi, ledger, processMessage: processSummaryGroupMessage,
+	config: summaryListenerConfig,
+});
 setInterval(() => { void groupRelay.tick(); }, groupRelayIntervalSeconds * 1000).unref();
 void groupRelay.tick();
+setInterval(() => { void summaryListener.tick(); }, summaryListenerIntervalSeconds * 1000).unref();
+void summaryListener.tick();
 const reconcileSeconds = Math.max(30, Number(process.env.INGESTION_RECONCILE_SECONDS ?? 300));
 const ledgerRetentionDays = Math.max(7, Number(process.env.INGESTION_LEDGER_RETENTION_DAYS ?? 90));
 let lastLedgerPruneAt = 0;
@@ -227,8 +295,9 @@ function extractPostPayload(content) {
 	const text = [];
 	const resources = [];
 	for (const line of blocks) {
+		const lineText = [];
 		for (const element of Array.isArray(line) ? line : []) {
-			if (element?.tag === 'text' && typeof element.text === 'string') text.push(element.text);
+			if (element?.tag === 'text' && typeof element.text === 'string') lineText.push(element.text);
 			if (element?.tag === 'img' && element.image_key) {
 				resources.push({ key: element.image_key, resource_type: 'image' });
 			}
@@ -236,8 +305,9 @@ function extractPostPayload(content) {
 				resources.push({ key: element.file_key, resource_type: 'file' });
 			}
 		}
+		if (lineText.length) text.push(lineText.join(''));
 	}
-	return { text: text.join(''), resources };
+	return { text: text.join('\n'), resources };
 }
 
 function extractMessagePayload(message) {
@@ -246,7 +316,11 @@ function extractMessagePayload(message) {
 	const resources = [];
 	if (content.image_key) resources.push({ key: content.image_key, resource_type: 'image' });
 	if (content.file_key) resources.push({ key: content.file_key, resource_type: 'file' });
-	return { text: content.text ?? content.raw ?? null, resources };
+	// Native file messages cannot carry a text paragraph. Group relay preserves
+	// their source route in the filename (`#tag original-file`), so recover it
+	// here before deciding whether the message is importable.
+	const fileRoute = typeof content.file_name === 'string' ? content.file_name.match(/^(#[a-z0-9-]+)(?=\s|$)/i)?.[1] : null;
+	return { text: content.text ?? fileRoute ?? content.raw ?? null, resources };
 }
 
 function summarizeEvent(data) {
@@ -403,15 +477,6 @@ function filenameFromHeaders(headers, fallback) {
 	return match ? decodeURIComponent(match[1].replace(/\"/g, '')).replace(/[^\w.-]+/g, '_') : fallback;
 }
 
-function formatImportDateTime(instant) {
-	const parts = new Intl.DateTimeFormat('en-CA', {
-		timeZone: importTimeZone,
-		year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-	}).formatToParts(new Date(instant));
-	const values = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
-	return { content_date: `${values.year}-${values.month}-${values.day}`, content_time: `${values.hour}:${values.minute}` };
-}
-
 function isValidDateTime(date, time) {
 	if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return false;
 	const [year, month, day] = date.split('-').map(Number);
@@ -421,20 +486,23 @@ function isValidDateTime(date, time) {
 		value.getUTCHours() === hour && value.getUTCMinutes() === minute;
 }
 
-function extractImportContent(messageText, receivedAt) {
+function extractImportContent(messageText) {
 	const routeTag = messageText.match(/^#([a-z0-9-]+)\s*(?:\r?\n)?/i);
-	const defaultDateTime = formatImportDateTime(receivedAt);
-	if (!routeTag) return { content: '', ...defaultDateTime };
+	// `content_date` / `content_time` have a strong remote meaning: they are an
+	// explicit user-supplied timestamp.  Do not manufacture them from Feishu
+	// receipt time.  For analyst messages the remote worker must be able to
+	// recover a second-precision `stated_at` from the retained body instead.
+	if (!routeTag) return { content: '' };
 	let content = messageText.slice(routeTag[0].length).trim();
 	const override = content.match(/^@(\d{4}-\d{2}-\d{2})[ \t]+(\d{2}:\d{2})(?:[ \t]*(?:\r?\n)?)/);
-	if (!override) return { content, ...defaultDateTime };
+	if (!override) return { content };
 	if (!isValidDateTime(override[1], override[2])) {
 		throw new Error('指定时间无效，请使用 @YYYY-MM-DD HH:mm，例如 @2026-07-31 14:30');
 	}
 	return { content: content.slice(override[0].length).trim(), content_date: override[1], content_time: override[2] };
 }
 
-async function downloadMedia(data) {
+async function downloadMedia(data, messageResourceApi = null) {
 	const message = data.message ?? {};
 	const { resources } = extractMessagePayload(message);
 	if (!resources.length) return [];
@@ -442,13 +510,18 @@ async function downloadMedia(data) {
 	return Promise.all(resources.map(async (resource, index) => {
 		let response;
 		try {
-			// Official Feishu message-resource API. It authorizes against the app's
-			// im:message:readonly (or broader) application scope.
-			response = await larkClient.im.v1.messageResource.get({
-				path: { message_id: message.message_id, file_key: resource.key },
-				params: { type: resource.resource_type },
-			});
+			if (messageResourceApi) {
+				response = await messageResourceApi.messageResourceGet({ messageId: message.message_id, fileKey: resource.key, type: resource.resource_type });
+			} else {
+				// Official Feishu message-resource API. It authorizes against the app's
+				// im:message:readonly (or broader) application scope.
+				response = await larkClient.im.v1.messageResource.get({
+					path: { message_id: message.message_id, file_key: resource.key },
+					params: { type: resource.resource_type },
+				});
+			}
 		} catch (error) {
+			if (messageResourceApi) throw new Error(`汇总群媒体读取失败：${error instanceof Error ? error.message : String(error)}`);
 			if (error?.response?.status === 400) {
 				throw new Error('飞书媒体下载被拒绝：请在开放平台申请并发布 im:message:readonly 权限');
 			}
@@ -655,9 +728,11 @@ async function handleFeishuUserOauth(request, response) {
 	}
 	try {
 		const payload = await readJsonBody(request, 16 * 1024);
-		const token = payload.refresh_token
-			? await feishuUserOauth.bootstrapRefreshToken(payload.refresh_token)
-			: await feishuUserOauth.exchangeAuthorizationCode(payload.authorization_code, payload.redirect_uri);
+		const token = payload.force_refresh
+			? await feishuUserOauth.forceRefresh()
+			: payload.refresh_token
+				? await feishuUserOauth.bootstrapRefreshToken(payload.refresh_token)
+				: await feishuUserOauth.exchangeAuthorizationCode(payload.authorization_code, payload.redirect_uri);
 		response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
 		response.end(JSON.stringify({ status: 'stored', ...token }));
 	} catch (error) {
@@ -784,10 +859,12 @@ function asIsoString(value) {
 }
 
 async function groupRelayDashboardStatus() {
-	const [persistedSources, routes, oauth] = await Promise.all([ledger.relayStatus(), ledger.relayRoutes(), feishuUserOauth.status()]);
+	const [persistedSources, routes, oauth, ingestionSources] = await Promise.all([ledger.relayStatus(), ledger.relayRoutes(), feishuUserOauth.status(), ledger.ingestionStatusBySource()]);
 	const runtime = groupRelay.status();
+	const listenerRuntime = summaryListener.status();
 	const persistedByKey = new Map(persistedSources.map((source) => [source.source_key, source]));
 	const runtimeByKey = new Map(runtime.sources.map((source) => [source.key, source]));
+	const ingestionByTag = new Map(ingestionSources.map((source) => [source.source_tag, source]));
 	const staleAfterSeconds = Math.max(45, groupRelayConfig.intervalSeconds * 3);
 	const now = Date.now();
 	const sources = routes.map((source) => {
@@ -796,39 +873,78 @@ async function groupRelayDashboardStatus() {
 		const lastPolledAt = asIsoString(persisted?.last_polled_at);
 		const pollAgeSeconds = lastPolledAt ? Math.max(0, Math.floor((now - Date.parse(lastPolledAt)) / 1000)) : null;
 		const failedCount = Number(persisted?.failed_count ?? 0);
+		const ingestionRecord = ingestionByTag.get(source.tag) ?? null;
+		const ingestionLastUpdatedAt = asIsoString(ingestionRecord?.last_updated_at);
+		const ingestionAgeSeconds = ingestionLastUpdatedAt ? Math.max(0, Math.floor((now - Date.parse(ingestionLastUpdatedAt)) / 1000)) : null;
+		const ingestionState = !ingestionRecord ? 'awaiting_message'
+			: ingestionRecord.latest_status === 'filtered' ? 'filtered'
+			: ingestionRecord.latest_status === 'completed' ? 'completed'
+			: ['failed', 'retryable_failed'].includes(ingestionRecord.latest_status) ? 'failed'
+			: ingestionAgeSeconds !== null && ingestionAgeSeconds > Math.max(120, summaryListenerConfig.intervalSeconds * 12) ? 'stalled'
+			: 'processing';
+		const ingestionFailed = ['failed', 'stalled'].includes(ingestionState);
+		const lastForwardedAt = asIsoString(persisted?.last_forwarded_at);
 		let state = 'healthy';
 		if (!groupRelayConfig.enabled || source.enabled === false) state = 'disabled';
 		else if (!oauth.configured) state = 'not_configured';
+		else if (oauth.scope_audit?.verified === false) state = 'not_authorized';
 		else if (current?.state === 'error' || current?.state === 'unavailable') state = current.state;
 		else if (!persisted || pollAgeSeconds === null) state = 'starting';
 		else if (pollAgeSeconds > staleAfterSeconds) state = 'delayed';
-		else if (failedCount > 0) state = 'degraded';
+		else if (failedCount > 0 || ingestionFailed) state = 'degraded';
 		return {
-			key: source.key, tag: source.tag, chat_name: source.chatName, enabled: source.enabled !== false,
+			key: source.key, tag: source.tag, chat_name: source.chatName, target_chat_ids: source.targetChatIds ?? [], enabled: source.enabled !== false,
 			state, last_polled_at: lastPolledAt, poll_age_seconds: pollAgeSeconds,
 			last_source_message_at: asIsoString(persisted?.last_source_message_at),
-			last_forwarded_at: asIsoString(persisted?.last_forwarded_at),
+			last_forwarded_at: lastForwardedAt,
+			// Polling proves source readability. A real delivery is separately
+			// visible so a quiet source group is never mistaken for a send test.
+			delivery_state: failedCount > 0 ? 'failed' : lastForwardedAt ? 'verified' : 'awaiting_message',
 			last_reconciled_at: current?.last_reconciled_at ?? null,
 			last_message_status: persisted?.last_message_status ?? null,
 			failed_count: failedCount,
-			last_error: current?.last_error ?? persisted?.latest_failure_error ?? null,
+			ingestion: ingestionRecord ? {
+				job_count: Number(ingestionRecord.job_count ?? 0), completed_count: Number(ingestionRecord.completed_count ?? 0), failed_count: Number(ingestionRecord.failed_count ?? 0),
+				state: ingestionState, latest_status: ingestionRecord.latest_status, latest_stage: ingestionRecord.latest_stage, remote_batch_id: ingestionRecord.remote_batch_id ?? null,
+				last_updated_at: ingestionLastUpdatedAt, error_class: ingestionRecord.error_class ?? null, error_message: ingestionRecord.error_message ?? null,
+			} : null,
+			last_error: current?.last_error ?? persisted?.latest_failure_error ?? (ingestionState === 'filtered' ? null : ingestionRecord?.error_message ?? null),
 		};
 	});
+	const listenerLastSuccessAt = asIsoString(listenerRuntime.last_success_at);
+	const listenerPollAgeSeconds = listenerLastSuccessAt ? Math.max(0, Math.floor((now - Date.parse(listenerLastSuccessAt)) / 1000)) : null;
+	const listenerState = !listenerRuntime.enabled ? 'disabled'
+		: !oauth.configured ? 'not_configured'
+		: oauth.scope_audit?.verified === false ? 'not_authorized'
+		: listenerRuntime.state === 'error' ? 'error'
+		: listenerPollAgeSeconds === null ? 'starting'
+		: listenerPollAgeSeconds > Math.max(45, summaryListenerConfig.intervalSeconds * 3) ? 'delayed'
+		: 'healthy';
 	const overall = !groupRelayConfig.enabled ? 'disabled'
 		: sources.every((source) => source.state === 'healthy') ? 'healthy'
-		: sources.some((source) => ['error', 'unavailable', 'delayed', 'degraded', 'not_configured'].includes(source.state)) ? 'degraded'
+		: sources.some((source) => ['error', 'unavailable', 'delayed', 'degraded', 'not_configured', 'not_authorized'].includes(source.state)) ? 'degraded'
+		: 'starting';
+	const combinedOverall = listenerState === 'healthy' && overall === 'healthy' ? 'healthy'
+		: listenerState === 'disabled' && overall === 'disabled' ? 'disabled'
+		: ['error', 'delayed', 'not_configured', 'not_authorized'].includes(listenerState) || overall === 'degraded' ? 'degraded'
 		: 'starting';
 	return {
-		status: overall, observed_at: new Date(now).toISOString(), enabled: groupRelayConfig.enabled,
+		status: combinedOverall, observed_at: new Date(now).toISOString(), enabled: groupRelayConfig.enabled,
 		interval_seconds: groupRelayConfig.intervalSeconds, stale_after_seconds: staleAfterSeconds,
 		user_oauth_configured: Boolean(oauth.configured), target_configured: Boolean(groupRelayConfig.targetChatId),
+		user_oauth_scope_audit: oauth.scope_audit ?? null,
+		delivery_verified: sources.filter((source) => source.enabled).every((source) => source.delivery_state === 'verified'),
 		last_tick_started_at: runtime.last_tick_started_at, last_tick_completed_at: runtime.last_tick_completed_at,
 		last_tick_error: runtime.last_tick_error, sources,
+		summary_listener: {
+			...listenerRuntime, state: listenerState, last_success_at: listenerLastSuccessAt,
+			poll_age_seconds: listenerPollAgeSeconds,
+		},
 	};
 }
 
 function publicRelayRoute(route) {
-	return { key: route.key, chat_name: route.chatName, tag: route.tag, enabled: route.enabled !== false, created_at: asIsoString(route.created_at), updated_at: asIsoString(route.updated_at) };
+	return { key: route.key, chat_name: route.chatName, tag: route.tag, target_chat_ids: route.targetChatIds ?? [], enabled: route.enabled !== false, created_at: asIsoString(route.created_at), updated_at: asIsoString(route.updated_at) };
 }
 
 function relayRouteTag(value) {
@@ -844,16 +960,62 @@ async function resolveRelayRouteInput(payload, current = null) {
 	const enabled = payload?.enabled === undefined ? current?.enabled !== false : payload.enabled !== false;
 	const requestedChatId = String(payload?.chat_id ?? '').trim();
 	if (requestedChatId && !/^oc_[A-Za-z0-9]+$/.test(requestedChatId)) throw new Error('chat_id 格式无效');
-	if (current && chatName === current.chatName && !requestedChatId) return { chatId: current.chatId, chatName, tag, enabled };
-	const result = await feishuUserOauth.sourceApi.chatSearch(chatName);
-	const exact = (result.data?.items ?? []).filter((chat) => chat.name === chatName);
-	if (!exact.length && !requestedChatId) throw new Error(`未找到可读取的群“${chatName}”`);
-	if (requestedChatId) {
-		const matched = exact.find((chat) => chat.chat_id === requestedChatId);
-		return { chatId: requestedChatId, chatName: matched?.name ?? chatName, tag, enabled };
+	const rawTargets = payload?.target_chat_ids === undefined ? current?.targetChatIds ?? [] : payload.target_chat_ids;
+	if (!Array.isArray(rawTargets) || rawTargets.length > 8) throw new Error('目标群必须是至多 8 个 chat_id 的数组');
+	const targetChatIds = [...new Set(rawTargets.map((value) => String(value ?? '').trim()).filter(Boolean))];
+	if (targetChatIds.some((value) => !/^oc_[A-Za-z0-9]+$/.test(value))) throw new Error('目标群 chat_id 格式无效');
+	const rawTargetNames = payload?.target_chat_names === undefined ? [] : payload.target_chat_names;
+	if (!Array.isArray(rawTargetNames) || rawTargetNames.length > 8) throw new Error('目标群名称必须是至多 8 个群名的数组');
+	const targetChatNames = [...new Set(rawTargetNames.map((value) => String(value ?? '').trim()).filter(Boolean))];
+	if (targetChatNames.some((value) => value.length > 120)) throw new Error('目标群名称不能超过 120 字');
+	async function resolveChatName(name) {
+		let exact = [];
+		try {
+			const result = await feishuUserOauth.sourceApi.chatSearch(name);
+			exact = (result.data?.items ?? []).filter((chat) => chat.name === name);
+		} catch {
+			// Fall through to the paginated chat list when search is restricted.
+		}
+		if (!exact.length) {
+			let pageToken = '';
+			for (let page = 0; page < 20; page++) {
+				const result = await feishuUserOauth.sourceApi.chatList({ ...(pageToken ? { page_token: pageToken } : {}) });
+				exact.push(...(result.data?.items ?? []).filter((chat) => chat.name === name));
+				if (!result.data?.has_more || !result.data?.page_token || exact.length) break;
+				pageToken = result.data.page_token;
+			}
+		}
+		if (!exact.length) throw new Error(`未找到可读取的群“${name}”；请确认用户 OAuth 能看到该群`);
+		if (exact.length > 1) throw new Error(`找到多个同名群“${name}”，请改用 chat_id`);
+		return exact[0].chat_id;
 	}
+	for (const name of targetChatNames) targetChatIds.push(await resolveChatName(name));
+	const uniqueTargetChatIds = [...new Set(targetChatIds)];
+	if (uniqueTargetChatIds.length > 8) throw new Error('目标群总数不能超过 8 个');
+	if (current && chatName === current.chatName && !requestedChatId) return { chatId: current.chatId, chatName, tag, targetChatIds: uniqueTargetChatIds, enabled };
+	// A known chat ID is authoritative. Do not require source group search first:
+	// user OAuth can read a particular external chat while search/list visibility
+	// is administratively restricted.
+	if (requestedChatId) return { chatId: requestedChatId, chatName, tag, targetChatIds: uniqueTargetChatIds, enabled };
+	let exact = [];
+	try {
+		const result = await feishuUserOauth.sourceApi.chatSearch(chatName);
+		exact = (result.data?.items ?? []).filter((chat) => chat.name === chatName);
+	} catch {
+		// Try the granted chat-list permission below before reporting a route error.
+	}
+	if (!exact.length) {
+		let pageToken = '';
+		for (let page = 0; page < 20; page++) {
+			const result = await feishuUserOauth.sourceApi.chatList({ ...(pageToken ? { page_token: pageToken } : {}) });
+			exact.push(...(result.data?.items ?? []).filter((chat) => chat.name === chatName));
+			if (!result.data?.has_more || !result.data?.page_token || exact.length) break;
+			pageToken = result.data.page_token;
+		}
+	}
+	if (!exact.length) throw new Error(`未找到可读取的群“${chatName}”；可填写已知 chat_id 直接注册`);
 	if (exact.length > 1) throw new Error(`找到多个同名群“${chatName}”，请填写 chat_id 后再保存`);
-	return { chatId: exact[0].chat_id, chatName: exact[0].name, tag, enabled };
+	return { chatId: exact[0].chat_id, chatName: exact[0].name, tag, targetChatIds: uniqueTargetChatIds, enabled };
 }
 
 async function createRelayRoute(payload) {
@@ -920,6 +1082,13 @@ const researchPaths = new Map([
 	['/api/research/analyst-research/status', '/api/v1/analyst-research/status'],
 	['/api/research/analyst-skills', '/api/v1/analyst-skills'],
 	['/api/research/analyst-research/sync-health', '/api/v1/analyst-research/sync-health'],
+	['/api/research/analyst-research/market-evaluation', '/api/v1/analyst-research/market-evaluation'],
+	['/api/research/analyst-research/stock-timeline', '/api/v1/analyst-research/stock-timeline'],
+	['/api/research/analyst-research/reviews', '/api/v1/analyst-research/reviews'],
+	['/api/research/analyst-research/reviews/latest', '/api/v1/analyst-research/reviews/latest'],
+	['/api/research/analyst-research/reviews/run', '/api/v1/analyst-research/reviews/run'],
+	['/api/research/agent/context', '/api/v1/agent/context'],
+	['/api/research/automation/runs', '/api/v1/automation/runs'],
 	['/api/research/analyst-prompt-lab/status', '/api/v1/analyst-prompt-lab/status'],
 	['/api/research/strategy/governance', '/api/v1/strategy/governance'],
 	['/api/research/paper/accounts', '/api/v1/paper/accounts'],
@@ -962,6 +1131,7 @@ const researchActions = new Map([
 	['/api/research/operations/fetch-runs/reconcile-stale', '/api/v1/operations/fetch-runs/reconcile-stale'],
 	['/api/research/analyst-prompt-lab/materialize', '/api/v1/analyst-prompt-lab/materialize'],
 	['/api/research/analyst-intraday-outcomes/recompute', '/api/v1/analyst-intraday-outcomes/recompute'],
+	['/api/research/analyst-research/reviews/run', '/api/v1/analyst-research/reviews/run'],
 ]);
 
 async function proxyResearch(path, search, response) {
@@ -1123,7 +1293,14 @@ const dashboard = createServer((request, response) => {
 	if (url.pathname === '/api/feishu-workbench/status' && request.method === 'GET') {
 		void Promise.all([feishuWorkbench.status(), feishuUserOauth.status()]).then(([workbench, oauth]) => {
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-			response.end(JSON.stringify({ ...workbench, user_oauth_configured: Boolean(oauth.configured), user_oauth_scopes: oauth.scopes ?? '' }));
+			response.end(JSON.stringify({ ...workbench, capabilities: annotateWorkbenchCapabilities(workbench.capabilities, oauth, workbench.application_inspection), user_oauth_configured: Boolean(oauth.configured), user_oauth_scopes: oauth.scopes ?? '', user_oauth_scope_audit: oauth.scope_audit ?? null, event_subscriptions: workbenchEventStatus() }));
+		}).catch((error) => response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/application-inspection' && request.method === 'POST') {
+		void feishuWorkbench.inspectApplication().then((inspection) => {
+			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ inspection }));
 		}).catch((error) => response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
 		return;
 	}
@@ -1153,6 +1330,43 @@ const dashboard = createServer((request, response) => {
 	}
 	if (url.pathname === '/api/feishu-workbench/base-records' && request.method === 'POST') {
 		void readJsonBody(request, 128 * 1024).then((payload) => feishuWorkbench.createBaseRecord(payload ?? {})).then((result) => {
+			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/base-records' && request.method === 'GET') {
+		void feishuWorkbench.listBaseRecords({ pageSize: url.searchParams.get('page_size'), pageToken: url.searchParams.get('page_token') ?? '' }).then((result) => {
+			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'ok', result }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	const baseRecordMatch = url.pathname.match(/^\/api\/feishu-workbench\/base-records\/([^/]+)$/);
+	if (baseRecordMatch && request.method === 'PUT') {
+		void readJsonBody(request, 128 * 1024).then((payload) => feishuWorkbench.updateBaseRecord({ ...(payload ?? {}), recordId: decodeURIComponent(baseRecordMatch[1]) })).then((result) => {
+			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'ok', result }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (baseRecordMatch && request.method === 'DELETE') {
+		void feishuWorkbench.deleteBaseRecord({ recordId: decodeURIComponent(baseRecordMatch[1]) }).then((result) => {
+			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'ok', result }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/wiki-documents' && request.method === 'POST') {
+		void readJsonBody(request, 64 * 1024).then((payload) => feishuWorkbench.createWikiDocument(payload ?? {})).then((result) => {
+			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/digests' && request.method === 'POST') {
+		void readJsonBody(request, 8 * 1024).then((payload) => feishuWorkbench.publishDigest(payload ?? {})).then((result) => {
+			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
+		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/feishu-workbench/group-tabs' && request.method === 'POST') {
+		void readJsonBody(request, 8 * 1024).then((payload) => feishuWorkbench.ensureWorkbenchTab(payload ?? {})).then((result) => {
 			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
 		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
 		return;
@@ -1306,11 +1520,16 @@ const dashboard = createServer((request, response) => {
 });
 
 async function forwardToN8n(data, manual = null) {
-	const resources = manual?.resources ?? await downloadMedia(data);
 	const messageText = manual?.messageText ?? String(extractMessagePayload(data.message ?? {}).text ?? '').trim();
 	const route = routeFromMessageText(messageText);
 	const receivedAt = manual?.receivedAt ?? new Date().toISOString();
-	const importContent = manual?.importContent ?? extractImportContent(messageText, receivedAt);
+	const importContent = manual?.importContent ?? extractImportContent(messageText);
+	const messageId = data?.message?.message_id ?? null;
+	if (!manual?.replayJobId) {
+		const existing = await ledger.getJobByMessageId(messageId);
+		if (existing) return { jobId: existing.job_id, duplicate: true, batchId: existing.remote_batch_id };
+	}
+	const resources = manual?.resources ?? await downloadMedia(data, manual?.messageResourceApi ?? null);
 	const payload = {
 			source: manual?.source ?? (manual ? 'manual-relay' : 'feishu'),
 			source_label: manual?.sourceLabel ? String(manual.sourceLabel).slice(0, 120) : null,
@@ -1318,8 +1537,7 @@ async function forwardToN8n(data, manual = null) {
 			event: data,
 			message_text: messageText,
 			import_content: importContent.content,
-			content_date: importContent.content_date,
-			content_time: importContent.content_time,
+		...(importContent.content_date ? { content_date: importContent.content_date, content_time: importContent.content_time } : {}),
 			text_content_sha256: importContent.content ? createHash('sha256').update(importContent.content).digest('hex') : null,
 		resources: resources.map(({ data: _data, path: _path, ...metadata }) => metadata),
 			topic_key: route.topic_key ?? sourceRegistry.default_topic_key ?? 'general',
@@ -1328,7 +1546,7 @@ async function forwardToN8n(data, manual = null) {
 	};
 	const { job, duplicate } = await ledger.getOrCreateJob({
 		jobId: randomUUID(), eventId: payload.event?.event_id, messageId: payload.event?.message?.message_id,
-		route, payload: { source: payload.source, source_label: payload.source_label, receivedAt, event: payload.event, message_text: messageText, import_content: importContent.content, content_date: importContent.content_date, content_time: importContent.content_time, resources: payload.resources }, contentSha256: payload.text_content_sha256,
+		route, payload: { source: payload.source, source_label: payload.source_label, receivedAt, event: payload.event, message_text: messageText, import_content: importContent.content, ...(importContent.content_date ? { content_date: importContent.content_date, content_time: importContent.content_time } : {}), resources: payload.resources }, contentSha256: payload.text_content_sha256,
 	});
 	if (duplicate && !manual?.replayJobId) return { jobId: job.job_id, duplicate: true, batchId: job.remote_batch_id };
 	if (payload.import_content) await ledger.recordContentItem(job.job_id, { content_type: 'text', content_sha256: payload.text_content_sha256, content_date: importContent.content_date, content_time: importContent.content_time, body: importContent.content });
@@ -1393,8 +1611,14 @@ async function forwardToN8n(data, manual = null) {
 						});
 						throw new Error(`n8n media part webhook returned HTTP ${response.status}: ${remoteText.slice(0, 240)}`);
 					}
-					lastUpload = await response.json();
-					if (!lastUpload?.batch_id || !lastUpload?.upload_id) throw new Error('n8n 未返回媒体批次或 upload_id');
+					try { lastUpload = await response.json(); } catch (error) {
+						await ledger.updateJob(job.job_id, { status: 'retryable_failed', stage: 'upload_part', last_http_status: response.status, error_class: 'n8n_protocol', error_message: `n8n 媒体分片响应不是 JSON：${error instanceof Error ? error.message : String(error)}` });
+						throw error;
+					}
+					if (!lastUpload?.batch_id || !lastUpload?.upload_id) {
+						await ledger.updateJob(job.job_id, { status: 'retryable_failed', stage: 'upload_part', last_http_status: response.status, error_class: 'n8n_protocol', error_message: `n8n 未返回媒体批次或 upload_id：${JSON.stringify(lastUpload).slice(0, 300)}` });
+						throw new Error('n8n 未返回媒体批次或 upload_id');
+					}
 					batchId = lastUpload.batch_id;
 					await ledger.updateJob(job.job_id, { remote_batch_id: batchId, status: 'uploading', stage: 'uploading_parts' });
 					await ledger.updateAssetSession(assetIds[resources.indexOf(resource)], 'uploading', lastUpload.upload_id);
@@ -1441,6 +1665,35 @@ async function forwardToN8n(data, manual = null) {
 		return { jobId: job.job_id };
 	} finally {
 		clearTimeout(timer);
+	}
+}
+
+async function processSummaryGroupMessage(data) {
+	const messageText = String(extractMessagePayload(data.message ?? {}).text ?? '').trim();
+	const tag = messageText.match(/^#([a-z0-9-]+)(?=\s|$)/i)?.[1]?.toLowerCase();
+	// All human and bot traffic is observed. Only registered tags are safe to
+	// attribute to a remote analyst, so unrelated group chatter is ignored.
+	if (!tag || !sourceRoutes.get(tag)?.enabled) return { ignored: true, reason: 'missing_or_unregistered_route_tag' };
+	if (isSystemRelayPlaceholder(messageText, tag)) return { ignored: true, reason: 'system_message_filtered' };
+	const eventId = data.event_id;
+	addEvent(data);
+	const hasMedia = extractMessagePayload(data.message ?? {}).resources.length > 0;
+	updateEvent(eventId, { n8n_status: hasMedia ? '汇总群媒体转发中' : '汇总群文字转发中' });
+	try {
+		const result = await forwardToN8n(data, {
+			source: 'summary-group-poll', sourceLabel: data.source_label,
+			messageResourceApi: feishuUserOauth.sourceApi,
+		});
+		updateEvent(eventId, {
+			n8n_status: result?.duplicate ? '重复已跳过' : '已接收，处理中',
+			target_status: result?.duplicate ? '本地幂等去重，未重复请求远端' : null,
+			target_batch_id: result?.batchId ?? null,
+		});
+		return result;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		updateEvent(eventId, { n8n_status: '失败', n8n_error: message });
+		throw error;
 	}
 }
 
@@ -1561,9 +1814,9 @@ const eventDispatcher = new Lark.EventDispatcher({ loggerLevel: Lark.LoggerLevel
 			throw error;
 		}
 	},
-	'card.action.trigger': processFeishuCardAction,
-	'im.message.reaction.created_v1': processFeishuReaction,
-	'application.bot.menu_v6': processBotMenuEvent,
+	'card.action.trigger': async (data) => { noteWorkbenchEvent('card.action.trigger'); return processFeishuCardAction(data); },
+	'im.message.reaction.created_v1': async (data) => { noteWorkbenchEvent('im.message.reaction.created_v1'); return processFeishuReaction(data); },
+	'application.bot.menu_v6': async (data) => { noteWorkbenchEvent('application.bot.menu_v6'); return processBotMenuEvent(data); },
 });
 
 const wsClient = new Lark.WSClient({

@@ -1,4 +1,5 @@
 import unittest
+import httpx
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,11 +15,39 @@ from app.remote_archive import (analyst_global_sync_cursor, classify_remote_text
 from app.analyst_observations import observation_action, observation_status
 from app.outcome_recomputation import recompute as recompute_outcomes
 from app.remote_archive_sync import RemoteArchiveSyncService, _AuthorizedArchiveClient
+from app.remote_archive_transport import RemoteArchiveTransport
 from app.remote_archive_actions import RemoteArchiveActions
 from app.claim_review_service import review_claim
 
 
 class RemoteArchiveNormalizationTests(unittest.TestCase):
+    def test_archive_transport_records_retryable_statuses_without_credentials(self):
+        import asyncio
+
+        class Client:
+            def __init__(self):
+                self.calls = 0
+
+            async def get(self, _path, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return httpx.Response(429, headers={"Retry-After": "1"}, text="rate limited")
+                return httpx.Response(200, json={"items": []})
+
+        async def no_sleep(_seconds):
+            return None
+
+        transport = RemoteArchiveTransport()
+        payload = asyncio.run(transport.get(
+            Client(), "/messages/updates", settings={"request_interval_seconds": 0}, sleep=no_sleep,
+        ))
+        self.assertEqual(payload, {"items": []})
+        stats = transport.stats()
+        self.assertEqual(stats["requests"], 2)
+        self.assertEqual(stats["retries"], 1)
+        self.assertEqual(stats["status_counts"]["429"], 1)
+        self.assertNotIn("Bearer", str(stats))
+
     def test_claim_outcome_entry_uses_shanghai_exchange_day(self):
         """A late-UTC message must enter after its Shanghai, not UTC, day."""
         statements = []
@@ -112,6 +141,31 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         self.assertEqual(cursor["stream_key"], "message_updates")
         self.assertIsNone(cursor["remote_cursor"])
         self.assertIsNone(cursor["received_after"])
+
+    def test_message_continuation_sends_opaque_cursor_without_limit(self):
+        """v0.3.22 rejects cursor requests that include any other query field."""
+        calls = []
+
+        async def run_database(action, *args, timeout_seconds):
+            return action(*args)
+
+        service = RemoteArchiveSyncService(
+            settings=lambda: {}, transport=MagicMock(), database=MagicMock(),
+            run_database_blocking=run_database,
+            message_cursor_state=lambda: {"remote_cursor": "signed-next-page"},
+            report_cursor_state=MagicMock(), import_message=MagicMock(), import_report=MagicMock(),
+            update_global_cursor=MagicMock(), update_report_cursor=MagicMock(),
+            message_cursor_update=MagicMock(), report_cursor_update=MagicMock(),
+            parse_timestamp=MagicMock(),
+        )
+
+        async def fake_get(_client, path, *, params=None):
+            calls.append((path, params))
+            return {"items": [], "next_cursor": None}
+
+        service._get = fake_get
+        __import__("asyncio").run(service._messages(MagicMock(), maximum=20))
+        self.assertEqual(calls, [("/messages/updates", {"cursor": "signed-next-page"})])
 
     def test_horizon_and_sentiment_are_deterministic(self):
         self.assertEqual(horizon_days("明日关注"), 1)

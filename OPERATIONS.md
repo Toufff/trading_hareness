@@ -40,17 +40,20 @@
 
 ### 外部群消息汇集
 
-`feishu-adapter` 另有一个独立的 10 秒轮询器：以用户 access token 从“马安强 (1)”读取的新消息前置 `#anqiang`，从“消息更新群”读取的新消息前置 `#liwei`，从“新野人哥会员群【禁言】”读取的新消息前置 `#quanneng`，再以机器人身份发送到“分析师发送汇总群”。它使用消息 ID 作为 PostgreSQL 主键；首次看见一个源群时只建立历史基线，之后才转发新消息。文本、图片、视频、文件和富文本均支持，且一个源消息只创建一个汇总群气泡：图片和视频以“标签 + 媒体”的同一条富文本消息发送；飞书富文本不支持通用文件标签，故普通文件以单条文件消息发送，标签写入文件名。媒体会先从源消息资源下载、再上传到机器人名下后发送；单图最大 10 MiB，单文件最大 30 MiB，超过飞书上传限制的消息会留在 `unsupported` 状态而不会静默丢失。默认群仅在首次启动时写入 PostgreSQL 注册表；之后在 Vue 的“导入监控 → 群消息转发状态”中可新增、编辑、启停或删除源群。保存群名会用用户授权精确发现群 ID，配置会在下一次轮询生效。
+`feishu-adapter` 另有一个独立的 10 秒轮询器：以用户 access token 从“马安强 (1)”读取的新消息前置 `#anqiang`，从“消息更新群”读取的新消息前置 `#liwei`，从“新野人哥会员群【禁言】”读取的新消息前置 `#quanneng`，再以机器人身份发送到“分析师发送汇总群”。它使用消息 ID 作为 PostgreSQL 主键；首次看见一个源群时只建立历史基线，之后才转发新消息。文本、图片、视频、文件和富文本均支持，且默认严格遵守“一个源消息一个汇总群气泡”：图片和视频以“标签 + 媒体”的同一条富文本消息发送；飞书富文本不支持通用文件标签，故普通文件以单条文件消息发送，标签写入文件名。媒体会先从源消息资源下载、再上传到机器人名下后发送；单图最大 10 MiB，单文件最大 30 MiB。若配置 `FEISHU_WORKBENCH_DRIVE_FOLDER_TOKEN`，响应头提供文件大小且媒体超过该限制时，会以 4 MiB 分片流式归档到该 Drive 文件夹，再在汇总群留下带标签的归档提示和 file token；未配置时仍会明确标成 `unsupported`，不会静默丢失。需要机器人行动卡片时可显式设 `FEISHU_GROUP_RELAY_ACTION_CARDS_ENABLED=true`，它会作为第二条协作消息追加。默认群仅在首次启动时写入 PostgreSQL 注册表；之后在 Vue 的“导入监控 → 群消息转发状态”中可新增、编辑、启停或删除源群。保存时优先用用户授权发现群 ID；若企业限制群搜索或群列表但已知 `chat_id`，可直接填写它注册，配置会在下一次轮询生效。
 
 默认配置在 `compose.yaml`，可用 `.env` 覆盖 `FEISHU_GROUP_RELAY_*`。外部源群通过用户 OAuth 读取：授权码或已取得的 refresh token 仅经本机受保护的 `/internal/feishu-user-oauth` 入口一次性保存；access/refresh token 以 AES-GCM 密文持久化在 PostgreSQL，access token 过期前自动滚动刷新。机器人不需要在源外部群内，但授权用户必须可见这些群并具有 `im:chat:readonly`、`im:message` / `im:message.group_msg` 与 `offline_access` 权限。成功和失败状态在 `feishu_group_relay_messages` 表中可审计。
 
+汇总群另有独立的 `FEISHU_SUMMARY_LISTENER_*` 轮询器。它用同一用户 OAuth 每 10 秒读取“分析师发送汇总群”的历史，因此**用户手动发送**和**机器人自动转发**都会被观察；不依赖 `im.message.receive_v1`（该事件不覆盖机器人自己的普通群消息）。只有首行带已登记来源标签的消息才会交给 n8n 和远端导入，未带标签或未知标签的群消息会被安全忽略，不会被错误归因。监听使用汇总群消息 ID 建立 `ingestion_jobs` 幂等键；首次启动默认受控回补最近 1 小时，可用 `FEISHU_SUMMARY_LISTENER_BOOTSTRAP_MODE=skip_existing` 只建立基线。外部源群的媒体资源也由同一用户 OAuth 读取后再上传到汇总群；授权链接必须显式请求 `im:resource`，飞书对资源可见性仍会按消息与授权状态单独校验。
+
 ### 飞书分析师工作台与协作闭环
 
-访问 `http://localhost:5680/workbench`（或侧栏“飞书工作台”）可以看到已经挂接到适配器的能力、用户授权状态、最近转发消息及各个源群的实时健康信息。前端使用项目现有的 Vue 3、TypeScript 和 Element Plus 组件库；页面每 10 秒刷新，但不会在页面刷新时触发外部写操作。
+访问 `http://localhost:5680/workbench`（或侧栏“飞书工作台”）可以看到已经挂接到适配器的能力、用户授权状态、最近转发消息及各个源群的实时健康信息。前端使用项目现有的 Vue 3、TypeScript 和 Element Plus 组件库；页面每 10 秒刷新，但不会在页面刷新时触发外部写操作。工作台明确分开展示“接口已接入、资源已配置、权限已验收”：用户 OAuth 依据保存的 scopes 自动核验；应用身份权限与资源权限必须在飞书后台发布并通过首次真实调用才会被视为已验收。
 
-- 每条成功汇总的消息会追加一张机器人行动卡片。卡片可“纳入研究 / 重点关注 / 创建任务 / 忽略”；重点关注后可置顶或加急。所有动作和线程回复都限定在机器人已加入的汇总群，绝不假定机器人能在外部源群执行按钮、事件或已读回执。
-- 轮询按消息 ID 去重；另外每 6 小时在最近 24 小时窗口中对账源群编辑和撤回。编辑会更新行动卡片并在卡片线程提示，撤回会撤回机器人发出的汇总群副本。可用 `FEISHU_GROUP_RELAY_RECONCILE_SECONDS`、`FEISHU_GROUP_RELAY_RECONCILE_LOOKBACK_SECONDS` 调整窗口。
-- 工作台提供文档、Base、日历和审批的受控创建入口，以及用户权限的消息检索。它们在缺少环境标识或权限时会显示“待配置”并拒绝执行，不会伪造成功。
+- 默认不发送行动卡片，确保每个源消息只有一个汇总群气泡；显式设置 `FEISHU_GROUP_RELAY_ACTION_CARDS_ENABLED=true` 后，才会在转发消息后追加一张机器人行动卡片。卡片可“纳入研究 / 重点关注 / 创建任务 / 忽略”；重点关注后可置顶或加急。所有动作和线程回复都限定在机器人已加入的汇总群，绝不假定机器人能在外部源群执行按钮、事件或已读回执。
+- 轮询按消息 ID 去重；另外每 6 小时在最近 24 小时窗口中对账源群编辑和撤回。编辑会更新原汇总消息；行动卡片开启时会同步更新卡片并在其线程提示。撤回会撤回机器人发出的汇总群副本。可用 `FEISHU_GROUP_RELAY_RECONCILE_SECONDS`、`FEISHU_GROUP_RELAY_RECONCILE_LOOKBACK_SECONDS` 调整窗口。
+- 工作台提供 Markdown/HTML 文档创建并真实写入文档块、可选 Wiki 归档、Base 记录 CRUD、日历和审批的受控入口，以及用户权限的消息检索。行动卡片里的“翻译 / 图片 OCR / 音频转写 / 沉淀文档”会在卡片线程中回写结果；沉淀文档会携带已产生的智能结果。音频转写只接受 Opus、MP3、WAV、M4A，且飞书文件 ASR 适用于不超过 60 秒的音频；视频仍会被原样转发，但不会被错误地送去音频 API。它们在缺少环境标识或权限时会显示“待配置”并拒绝执行，不会伪造成功。
+- “生成摘要”会把近期未忽略的汇总消息实际合并成一条 `#digest` 文本发往汇总群；“创建群 Tab”会把已登记的公网 H5 工作台作为 URL Tab 加入汇总群，且同一 URL 不会重复创建。
 
 在飞书开放平台发布下列权限/产品后再使用相应动作（实际名称以控制台当前显示为准）：
 
@@ -58,10 +61,10 @@
 | --- | --- | --- |
 | 行动卡片、线程回复、反应、置顶、已读 | 消息发送/读取、卡片回调；订阅 `card.action.trigger`、消息反应事件 | 无 |
 | 外部源群读取、消息搜索 | 用户 OAuth 的群聊/群消息读取、消息搜索和 `offline_access` | 无 |
-| 文档、Drive、Wiki | 云文档/云空间、知识库权限 | `FEISHU_WORKBENCH_DRIVE_FOLDER_TOKEN`、`FEISHU_WORKBENCH_WIKI_SPACE_ID` |
-| Task、Base、Calendar、Approval | 相应产品权限及管理员/应用可见范围 | `FEISHU_WORKBENCH_TASKLIST_GUID`、`FEISHU_WORKBENCH_BASE_*`、`FEISHU_WORKBENCH_CALENDAR_ID`、`FEISHU_WORKBENCH_APPROVAL_CODE` |
+| 文档、Drive、Wiki | “创建及编辑新版文档”、`drive:file:upload`、`wiki:wiki`；还须把应用加入目标文件夹/知识空间或授予对应资源权限 | `FEISHU_WORKBENCH_DRIVE_FOLDER_TOKEN`、`FEISHU_WORKBENCH_WIKI_SPACE_ID`、`FEISHU_WORKBENCH_WIKI_PARENT_NODE_TOKEN`（可选父节点） |
+| Task、Base、Calendar、Approval | `task:task:write`、Base 的 `base:record:create/retrieve/update/delete`、`calendar:calendar`、`approval:approval`；还须具备对应资源可见范围 | `FEISHU_WORKBENCH_TASKLIST_GUID`、`FEISHU_WORKBENCH_BASE_*`、`FEISHU_WORKBENCH_CALENDAR_ID`、`FEISHU_WORKBENCH_APPROVAL_CODE` |
 | H5 工作台、机器人菜单、群 Tab | 在开发者后台登记 HTTPS 域名、配置菜单事件 key `workbench`、启用群能力 | `FEISHU_WORKBENCH_PUBLIC_BASE_URL` |
-| OCR、语音/视频转写、翻译、Aily、开放搜索 | 相应 AI/搜索权限和可能的企业套餐 | `FEISHU_WORKBENCH_AILY_APP_ID`（Aily） |
+| OCR、音频转写、翻译、Aily、开放搜索 | `optical_char_recognition:image`、`speech_to_text:speech`、`translation:text`、`search:message` 等相应 AI/搜索权限和可能的企业套餐 | `FEISHU_WORKBENCH_AILY_APP_ID`（Aily） |
 
 `FEISHU_WORKBENCH_PUBLIC_BASE_URL` 只能填已登记到飞书开发者后台的公网 HTTPS 地址；`http://localhost:5680` 只用于本机管理，不能作为飞书 H5 域名。不要把 App Secret、用户 access token 或 refresh token 填入这些变量，更不要提交到 Git。用户曾在聊天中暴露过凭据时，应在飞书开放平台轮换应用密钥并重新完成 OAuth 授权。
 
@@ -97,13 +100,22 @@
 | n8n | `n8n` | 编辑和执行自动化工作流 | http://localhost:5678 |
 | 飞书适配器 | `n8n-feishu-adapter` | 官方 SDK 长连接、转发事件、消息监控 | http://localhost:5680 |
 | 量化研究 | `n8n-quant-research` | 分析师信号、行情日线、候选池和回测基础数据 | http://localhost:5681 |
+
+分析师文字同步验收：适配器的 `/api/research/analyst-research/sync-health` 同时显示数据库同步水位、远端传输统计和 n8n 当前发布版本状态。周末或维护窗口可用以下命令对当前发布图做一次受控 smoke（不会拉取媒体；消息/报告仍受各自页大小限制）：
+
+```bash
+docker compose run --rm --no-deps n8n execute --id=remoteArchiveMessages123 --rawOutput
+docker compose run --rm --no-deps n8n execute --id=remoteArchiveReports123 --rawOutput
+```
+
+返回的 `status=success` 证明当前图和凭据可执行；同步回执会持久化 `workflow_id`，因此健康页即使在 n8n 清理 CLI execution 后仍能显示当前图已验证。下一个交易日仍可观察 schedule trigger 的实际时间和耗时。
 | PostgreSQL | `n8n-postgres` | n8n 的工作流、凭据与执行数据 | 无宿主机端口 |
 
 监控页通过 Server-Sent Events 实时显示当前适配器进程收到的最近 200 条事件。它显示文本、消息/群聊/发送者 ID、图片或文件 key、完整原始 JSON，以及“已接收 → n8n 执行中/完成/失败 → 目标导入队列状态”。重启 `feishu-adapter` 后该页面的内存记录会清空，不影响 n8n 的执行历史。
 
 本机 relay/monitor 页面由 `frontend/` 中的 Vue 3 + Vite + TypeScript 构建产物提供。relay 使用 multipart，不再把媒体编码为 Base64；浏览器显示上传进度并支持取消。适配器提供 `/api/config`、`/jobs`、`/metrics`，其中 job/asset/part 状态持久化在 PostgreSQL，临时媒体文件存放在 `adapter_ingestion_data` volume，由本地对账定时清理。
 
-幂等规则：同一 `event_id` 或 `message_id` 永远复用本地 job；已完成过的相同媒体 SHA256 会标记为 `duplicate_media`，不会再次调用远端 reserve。批次、正文和媒体上传键均为确定性 idempotency key；远端 HTTP 409 会分类为 `remote_conflict`，保留 job 和临时分片供人工检查；只有通过 `POST /api/jobs/{job_id}/retry` 明确重试，才会重新进入本地队列。
+幂等规则：同一 `event_id` 或 `message_id` 永远复用本地 job；已完成过的相同媒体 SHA256 会标记为 `duplicate_media`，不会再次调用远端 reserve。批次、正文和媒体上传键均为确定性 idempotency key；远端 HTTP 409 会分类为 `remote_conflict`，保留 job 和临时分片供人工检查；只有通过 `POST /api/jobs/{job_id}/retry` 明确重试，才会重新进入本地队列。源群的飞书 `system` 消息（入群、退群、群设置变更）会在转发前标为 `filtered_system`，汇总群的历史 `[system]` 占位消息也不会送入 n8n。
 
 错误与分析：n8n 的统一错误工作流 `统一错误记录：本地 ingestion` 会把执行错误写入 `ingestion_errors`。本地队列对账现在由 `feishu-adapter` 内部定时器执行，覆盖显式重试队列、分析队列和孤儿临时文件清理；历史 n8n workflow `本地队列：定时对账` 保留为可选手动入口但默认停用，避免制造卡住的 execution 状态。`analysis_jobs` 在本地只记录“已送远端档案”的状态；量化观点唯一由远端 47 的已解析报告同步工作流写入。因而本机不运行 OCR、ASR、视频帧抽取或第二套媒体/文本观点抽取，也不会保存一份本地媒体副本用于量化。量化 API、Tushare 配置和服务器暴露方式见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 

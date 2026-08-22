@@ -172,6 +172,13 @@ class StrategyReviewRequest(BaseModel):
     persist: bool = True
 
 
+class AnalystMarketReviewRequest(BaseModel):
+    """Materialize the evidence-only analyst daily or weekly review."""
+
+    cadence: Literal["daily", "weekly"] = "daily"
+    as_of_date: date | None = None
+
+
 class PostCloseStrategyRequest(BaseModel):
     as_of_date: date | None = None
     limit: int = Field(default=20, ge=1, le=100)
@@ -384,6 +391,7 @@ class RemoteArchiveSyncRequest(BaseModel):
 
     streams: list[Literal["reports", "messages"]] = Field(default_factory=lambda: ["reports", "messages"], min_length=1, max_length=2)
     max_items: int = Field(default=100, ge=1, le=100)
+    workflow_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,120}$")
 
     @model_validator(mode="after")
     def normalize_streams(self) -> "RemoteArchiveSyncRequest":

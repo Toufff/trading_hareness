@@ -19,6 +19,8 @@ from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
 
+from .analyst_calibration import chronological_calibration
+
 
 HORIZONS = (1, 2, 3, 5, 10, 20, 40, 60)
 OUTCOME_VERSION = "analyst-pit-basket-v1"
@@ -631,8 +633,18 @@ def rebuild_analyst_research(connection: Any, as_of_date: date) -> dict[str, Any
     baseline = equal_weight_baseline(connection, as_of_date)
     experts = sleeping_experts_fixed_share(connection, as_of_date)
     phase_3 = conditional_selection_and_pairwise_ranking(connection, as_of_date)
+    calibration_rows = connection.execute(
+        """SELECT p.opinion_date event_date,
+                         p.direction * p.strength * p.explicitness score,
+                         CASE WHEN o.directional_return>0 THEN 1 ELSE 0 END label
+              FROM quant.analyst_opinion_outcomes o
+              JOIN quant.analyst_opinions p ON p.opinion_id=o.opinion_id
+             WHERE o.status='matured' AND o.horizon_days=5
+               AND p.factor_status='eligible' AND o.exit_date<=%s""", (as_of_date,)
+    ).fetchall()
+    calibration = chronological_calibration([dict(row) for row in calibration_rows])
     result = {"as_of_date": str(as_of_date), "opinions": opinions, "outcomes": outcomes, "equal_weight": baseline,
-              "sleeping_experts": experts, "phase_3": phase_3, "live_strategy_effect": "none"}
+              "sleeping_experts": experts, "phase_3": phase_3, "calibration": calibration, "live_strategy_effect": "none"}
     status = "eligible_for_review" if experts["status"] == "eligible_for_review" and phase_3["status"] != "disabled" else "research_only"
     connection.execute(
         """INSERT INTO quant.analyst_research_runs(as_of_date,methodology_version,status,result) VALUES(%s,%s,%s,%s)

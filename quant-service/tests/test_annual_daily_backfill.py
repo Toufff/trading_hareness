@@ -35,8 +35,9 @@ class AnnualDailyBackfillTests(unittest.TestCase):
 
     def test_daily_controls_prefer_the_verified_city_path_before_primary(self):
         by_api = {spec.api_name: spec for spec in CORE_DAILY_SPECS}
-        for api_name in ("daily_basic", "adj_factor", "stk_limit", "suspend_d"):
+        for api_name in ("adj_factor", "stk_limit", "suspend_d"):
             self.assertEqual(by_api[api_name].provider_names, ("super_sdk", "primary"))
+        self.assertEqual(by_api["daily_basic"].provider_names, ("super_get", "super_sdk", "primary"))
 
     def test_completed_day_is_shared_across_provider_routes(self):
         source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")

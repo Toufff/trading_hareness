@@ -6,6 +6,9 @@ from datetime import date
 import math
 from typing import Any, Callable
 
+from .limit_continuation_research import continuation_watch
+from .dragon_leader_research import enrich_dragon_leader_watches
+
 
 def select_candidates(
     as_of_date: date, max_symbols: int, per_cohort: int,
@@ -43,6 +46,11 @@ def select_candidates(
         board = boards.get(symbol) or {"exact_member_mapping": False}
         lhb_context = lhb_by_symbol.get(symbol)
         streak = max(steps.get(symbol, 0), board_count(raw.get("tag")))
+        continuation = continuation_watch(
+            {**raw, "streak_count": streak, "sources": ["tushare_limit_list_ths"]},
+            number=lambda value: float(value) if value is not None else None,
+            board_count=board_count,
+        )
         cohorts: list[str] = []
         if daily.get("ground_to_sky_daily_shape"):
             cohorts.append("ground_to_sky")
@@ -52,6 +60,8 @@ def select_candidates(
             cohorts.append("consecutive_limit")
         if str(raw.get("tag") or "") == "首板":
             cohorts.append("first_board")
+        if continuation.get("eligible"):
+            cohorts.append("limit_continuation_watch")
         if not cohorts:
             continue
         limit_amount = float(raw.get("limit_amount") or 0)
@@ -63,6 +73,8 @@ def select_candidates(
             selection_score += 10
         elif lhb_context and float(lhb_context.get("institution_net_buy") or 0) < 0:
             selection_score -= 4
+        if continuation.get("eligible"):
+            selection_score += 12
         risk_flags: list[str] = []
         if str(raw.get("status") or "") == "一字板":
             risk_flags.append("one_word_board_not_intraday_entry_sample")
@@ -79,6 +91,8 @@ def select_candidates(
         selection_reasons: list[str] = []
         if streak >= 2:
             selection_reasons.append(f"{streak}板梯队")
+        if continuation.get("eligible"):
+            selection_reasons.append("连板+封单强度下一交易日复核")
         if daily.get("ground_to_sky_daily_shape"):
             selection_reasons.append("深水反转日线")
         if float(daily.get("volume_multiple_5d") or 0) >= 1.5:
@@ -90,10 +104,18 @@ def select_candidates(
             selection_reasons.append(f"龙虎榜机构{direction}{abs(float(lhb_context.get('institution_net_buy') or 0)) / 10_000:.0f}万")
         items.append({"symbol": symbol, "name": raw.get("name"), "cohorts": cohorts, "board_context": board,
                       "limit_context": {**raw, "provider_key": stored.get("provider_key"), "streak_count": streak,
+                                        "continuation_watch": continuation,
                                         "preopen_context": prior_context.get(symbol),
                                         "preopen_limit_pool_rank": (prior_context.get(symbol) or {}).get("preopen_limit_pool_rank"),
                                         "lhb_context": lhb_context, "selection_reasons": selection_reasons},
                       "daily_features": daily, "selection_score": round(selection_score, 3), "risk_flags": risk_flags})
+
+    leader_market_context = enrich_dragon_leader_watches(items)
+    for item in items:
+        leader = item.get("dragon_leader_watch") or {}
+        item["limit_context"]["dragon_leader_watch"] = leader
+        if leader.get("eligible"):
+            item["cohorts"].append("dragon_leader_watch")
 
     focus_set = set(focus_symbols or [])
     for item in items:
@@ -109,7 +131,7 @@ def select_candidates(
         item["limit_context"]["limit_pool_market_rank"] = market_rank
         if market_rank <= 10:
             item["cohorts"].append("market_leader")
-    cohort_order = ("focus", "ground_to_sky", "preopen_market_leader", "market_leader", "board_leader", "consecutive_limit", "first_board")
+    cohort_order = ("focus", "dragon_leader_watch", "limit_continuation_watch", "ground_to_sky", "preopen_market_leader", "market_leader", "board_leader", "consecutive_limit", "first_board")
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
     for cohort in cohort_order:
@@ -132,7 +154,8 @@ def select_candidates(
                 break
     return {"status": "completed" if selected else "blocked", "as_of_date": str(as_of_date),
             "limit_pool_rows": len(limit_rows), "limit_step_rows": len(step_rows), "candidates": selected,
-            "cohort_counts": {cohort: sum(cohort in item["cohorts"] for item in items) for cohort in cohort_order}}
+            "cohort_counts": {cohort: sum(cohort in item["cohorts"] for item in items) for cohort in cohort_order},
+            "dragon_leader_market_context": leader_market_context}
 
 
 __all__ = ["select_candidates"]

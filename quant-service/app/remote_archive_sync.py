@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
@@ -11,6 +12,7 @@ from fastapi import HTTPException
 
 from .http_clients import remote_archive_http_client
 from .remote_archive_transport import RemoteArchiveTransport
+from .automation_run_repository import fail_run, finish_run, start_run
 
 
 class _AuthorizedArchiveClient:
@@ -110,6 +112,25 @@ class RemoteArchiveSyncService:
             completed_at, error_code, summary or {}, timeout_seconds=20,
         )
 
+    def _start_automation_run(self, stream: str, run_key: str, maximum: int) -> str:
+        with self._database.transaction() as connection:
+            return start_run(
+                connection, task_key="remote_archive_sync", run_key=run_key,
+                cadence=stream, methodology_version="remote-archive-sync-v1",
+                input_summary={"stream": stream, "max_items": maximum, "text_only": True},
+            )
+
+    def _finish_automation_run(self, run_id: str, result: dict[str, Any]) -> None:
+        with self._database.transaction() as connection:
+            finish_run(connection, run_id, output_summary={
+                "status": result.get("status"), "items": result.get("items"),
+                "imported": result.get("imported"), "changed": result.get("changed"),
+            })
+
+    def _fail_automation_run(self, run_id: str, error: BaseException) -> None:
+        with self._database.transaction() as connection:
+            fail_run(connection, run_id, error)
+
     async def _get(self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return await remote_archive_get(
             client, path, params=params, settings=self._settings,
@@ -136,17 +157,44 @@ class RemoteArchiveSyncService:
 
     async def _messages(self, client: httpx.AsyncClient, maximum: int) -> dict[str, Any]:
         cursor_state = await self._run_database_blocking(self._message_cursor_state, timeout_seconds=15)
-        params: dict[str, Any] = {"limit": maximum}
+        # The remote change-feed contract is strict: the initial request may
+        # carry ``received_after`` and ``limit``; a continuation request must
+        # carry the opaque cursor alone.  Sending ``cursor`` together with
+        # ``limit`` is rejected as invalid_request by the v0.3.22 archive.
+        params: dict[str, Any]
         if cursor_state.get("remote_cursor"):
-            params["cursor"] = str(cursor_state["remote_cursor"])
-        elif cursor_state.get("received_after"):
-            value = cursor_state["received_after"]
-            params["received_after"] = value.isoformat() if isinstance(value, datetime) else str(value)
+            params = {"cursor": str(cursor_state["remote_cursor"])}
         else:
-            # Initial sync is deliberately bounded to the recent day. There is
-            # no implicit historical archive download.
-            params["received_after"] = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-        envelope = await self._get(client, "/messages/updates", params=params)
+            params = {"limit": maximum}
+            if cursor_state.get("received_after"):
+                value = cursor_state["received_after"]
+                params["received_after"] = value.isoformat() if isinstance(value, datetime) else str(value)
+            else:
+                # Initial sync is deliberately bounded to the recent day. There is
+                # no implicit historical archive download.
+                params["received_after"] = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        try:
+            envelope = await self._get(client, "/messages/updates", params=params)
+        except HTTPException as error:
+            if error.status_code != 409 or not cursor_state.get("remote_cursor"):
+                raise
+            # The archive invalidates a cursor when its content release changes
+            # during pagination. Everything before the durable timestamp has
+            # already been imported idempotently, so clear only the opaque
+            # cursor and restart from that timestamp. This avoids both skipping
+            # equal-time messages and retrying a permanently stale cursor.
+            restart_at = cursor_state.get("received_after")
+            await self._run_database_blocking(
+                self._update_global_cursor,
+                self._message_cursor_update(
+                    stream_key="message_updates", cursor=None, received_after=restart_at,
+                    terminal=True, message_ids=[],
+                ), timeout_seconds=20,
+            )
+            restart_params: dict[str, Any] = {"limit": maximum}
+            if restart_at is not None:
+                restart_params["received_after"] = restart_at.isoformat() if isinstance(restart_at, datetime) else str(restart_at)
+            envelope = await self._get(client, "/messages/updates", params=restart_params)
         summaries = envelope.get("items") or []
         if not isinstance(summaries, list) or not all(isinstance(item, dict) for item in summaries):
             raise HTTPException(status_code=502, detail="remote analyst message update page has an invalid items shape")
@@ -257,17 +305,35 @@ class RemoteArchiveSyncService:
                 async with self._stream_locks[stream]:
                     await self._wait_for_stream_slot(stream, minimum_interval)
                     started_at = datetime.now(timezone.utc)
+                    run_id = await self._run_database_blocking(
+                        self._start_automation_run, stream,
+                        f"remote-archive-sync:{stream}:{uuid.uuid4()}", maximum,
+                        timeout_seconds=20,
+                    )
                     try:
                         result = await (
                             self._messages(client, maximum) if stream == "messages" else self._reports(client, maximum)
                         )
                     except Exception as error:
+                        await self._run_database_blocking(self._fail_automation_run, run_id, error, timeout_seconds=20)
                         error_code = (
                             f"http_{error.status_code}" if isinstance(error, HTTPException) else type(error).__name__
                         )
-                        await self._record(stream, "failed", started_at, datetime.now(timezone.utc), error_code)
+                        await self._record(
+                            stream, "failed", started_at, datetime.now(timezone.utc), error_code,
+                            {"transport": self._transport.stats(), "error_type": type(error).__name__},
+                        )
                         raise
+                    result = {**result, "transport": self._transport.stats()}
+                    workflow_id = str(getattr(payload, "workflow_id", "") or "").strip()
+                    if workflow_id:
+                        # This is an internal graph identifier, not a secret.
+                        # Persisting it with the compact receipt lets health
+                        # checks prove the exact published graph even after
+                        # n8n prunes its execution row.
+                        result["workflow_id"] = workflow_id
                     await self._record(stream, "completed", started_at, datetime.now(timezone.utc), None, result)
+                    await self._run_database_blocking(self._finish_automation_run, run_id, result, timeout_seconds=20)
                     results[stream] = result
         return {"status": "completed", "streams": results, "text_only": True, "history_fetch": False}
 

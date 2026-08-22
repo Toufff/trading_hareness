@@ -26,6 +26,7 @@ async def run_refresh(
     safe_error_detail: Callable[[str, int], str],
     json_safe: Callable[[Any], Any],
     timeout_overrides: dict[str, float] | None = None,
+    record_stage: Callable[[str, date, Callable[[], Any]], Awaitable[Any]] | None = None,
 ) -> dict[str, Any]:
     """Run durable post-close stages in their existing dependency order.
 
@@ -46,7 +47,10 @@ async def run_refresh(
         phase_started = asyncio.get_running_loop().time()
         timeout_seconds = float(limits.get(name, 90.0))
         try:
-            result = actions[name]()
+            if record_stage is not None:
+                result = record_stage(name, trade_date, actions[name])
+            else:
+                result = actions[name]()
             if hasattr(result, "__await__"):
                 result = await asyncio.wait_for(result, timeout=timeout_seconds)
             payload = dict(result) if isinstance(result, dict) else {"result": result}

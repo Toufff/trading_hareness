@@ -143,10 +143,29 @@ def historical_estimate_from_db(database: Any, request: Any) -> dict[str, Any]:
         universe_symbols = request.universe_symbols or connection.execute(
             """SELECT coalesce(nullif((SELECT count(*)::int FROM quant.universe_members WHERE universe_key='all_a' AND enabled),0),
                               nullif((SELECT count(*)::int FROM quant.instruments WHERE symbol ~ '^\\d{6}\\.(SH|SZ|BJ)$'),0),5500) symbols""").fetchone()["symbols"]
+        # Capacity is a display-only estimate.  Do not scan every raw record
+        # on each dashboard refresh: the three full-universe daily sources
+        # alone contain millions of JSON rows.  A small, newest-first sample
+        # per API preserves a representative payload size and keeps the
+        # overview endpoint bounded.
+        sample_api_names = ["daily", "adj_factor", "daily_basic", "stk_limit", "moneyflow_dc", "moneyflow", "cyq_perf", "cyq_chips", "stk_factor_pro", "suspend_d"]
         samples = connection.execute(
-            """SELECT api_name,ceil(avg(pg_column_size(row_data)))::int avg_bytes FROM quant.tushare_raw_records
-                WHERE api_name = ANY(%s) GROUP BY api_name""",
-            (["daily", "adj_factor", "daily_basic", "stk_limit", "moneyflow_dc", "moneyflow", "cyq_perf", "cyq_chips", "stk_factor_pro", "suspend_d"],),
+            """WITH requested(api_name) AS (SELECT unnest(%s::text[])),
+                     sampled AS (
+                         SELECT requested.api_name, raw.row_data
+                           FROM requested
+                           CROSS JOIN LATERAL (
+                               SELECT row_data
+                                 FROM quant.tushare_raw_records
+                                WHERE api_name=requested.api_name
+                                ORDER BY available_at DESC
+                                LIMIT 256
+                           ) raw
+                     )
+                SELECT api_name,ceil(avg(pg_column_size(row_data)))::int avg_bytes
+                  FROM sampled
+                 GROUP BY api_name""",
+            (sample_api_names,),
         ).fetchall()
         sector_count = connection.execute("SELECT count(*)::int total FROM quant.sectors").fetchone()["total"]
         coverage = current_data_coverage(connection)

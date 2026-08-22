@@ -85,6 +85,12 @@ def replay_recorded_rule_inputs(rows: Iterable[dict[str, Any]], *, evaluate: Rul
     def transition(state: dict[str, Any], _event: MarketEvent,
                    payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         inputs = intraday_rule_replay_inputs(payload, expected_model_version=expected_model_version)
+        # ``observed_at`` is immutable event metadata, rather than a provider
+        # field in the frozen quote payload.  Surface it to pure rules so a
+        # session-bound rule (for example an opening-gap watch) gets exactly
+        # the same Shanghai clock during a provider-free replay.
+        if isinstance(inputs.get("quote"), dict):
+            inputs["quote"] = {**inputs["quote"], "_scan_observed_at": _event.available_at}
         signals: list[dict[str, Any]] = []
         policy_evaluated = 0
         policy_blocked = 0

@@ -18,6 +18,7 @@ import httpx
 
 from .http_clients import public_http_client
 from .http_retry import retry_delay_seconds
+from .network_health import network_state
 
 
 class FreeProviderError(RuntimeError):
@@ -35,6 +36,11 @@ async def _request_with_retry(
     for attempt in range(2):
         try:
             response = await client.request(method, url, **kwargs)
+            source = f"public:{url.split('/', 3)[2] if '://' in url else 'unknown'}"
+            if 200 <= response.status_code < 400:
+                network_state.record_success(source)
+            elif response.status_code == 429 or response.status_code >= 500:
+                network_state.record_failure(source, f"HTTP {response.status_code}", transient=True)
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt == 0:
                     await asyncio.sleep(retry_delay_seconds(response.headers, 0.4))
@@ -43,6 +49,7 @@ async def _request_with_retry(
             response.raise_for_status()
             return response
         except (httpx.TimeoutException, httpx.TransportError) as error:
+            network_state.record_failure(f"public:{url.split('/', 3)[2] if '://' in url else 'unknown'}", str(error), transient=True)
             last_error = error
             if attempt == 0:
                 await asyncio.sleep(retry_delay_seconds(None, 0.4))
@@ -285,6 +292,26 @@ def parse_sina_quote_batch(payload: str, symbols_by_key: dict[str, str]) -> list
     return rows
 
 
+def tencent_minute_amount_scale(*, price: float, cumulative_volume_lot: int,
+                                cumulative_amount: float) -> float:
+    """Return the audited Tencent minute amount unit multiplier.
+
+    Most Tencent minute feeds encode cumulative amount in yuan, but a subset
+    of symbols has been observed with the amount scaled down by 100.  That
+    made a perfectly ordinary 293-yuan stock appear to trade at a 2.93-yuan
+    VWAP and could therefore create a false ``above_vwap`` confirmation.
+    Infer only the exact, two-order-of-magnitude variant from the implied
+    VWAP; do not attempt to "correct" arbitrary provider values.
+    """
+    if price <= 0 or cumulative_volume_lot <= 0 or cumulative_amount <= 0:
+        return 1.0
+    raw_vwap = cumulative_amount / (cumulative_volume_lot * 100)
+    if raw_vwap <= 0:
+        return 1.0
+    ratio = price / raw_vwap
+    return 100.0 if 80.0 <= ratio <= 120.0 else 1.0
+
+
 async def tencent_intraday_minutes(symbol: str) -> list[dict[str, Any]]:
     """Return today's Tencent minute tape with non-look-ahead volume deltas.
 
@@ -303,6 +330,8 @@ async def tencent_intraday_minutes(symbol: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     previous_volume = 0
     previous_amount = 0.0
+    amount_scale: float | None = None
+    segment = 0
     for value in values:
         parts = str(value).split()
         if len(parts) != 4 or not re.fullmatch(r"\d{4}", parts[0]):
@@ -311,16 +340,30 @@ async def tencent_intraday_minutes(symbol: str) -> list[dict[str, Any]]:
             price, cumulative_volume, cumulative_amount = float(parts[1]), int(parts[2]), float(parts[3])
         except ValueError:
             continue
-        if cumulative_volume < previous_volume or cumulative_amount < previous_amount:
-            raise FreeProviderError("Tencent intraday cumulative values moved backwards")
+        if amount_scale is None:
+            amount_scale = tencent_minute_amount_scale(
+                price=price, cumulative_volume_lot=cumulative_volume,
+                cumulative_amount=cumulative_amount,
+            )
+        normalized_amount = cumulative_amount * amount_scale
+        # Tencent occasionally begins a new cumulative segment after the
+        # midday break.  It is not valid to manufacture a negative minute;
+        # reset the delta origin and label the boundary so downstream returns
+        # and baselines never bridge the two segments.
+        cumulative_reset = cumulative_volume < previous_volume or normalized_amount < previous_amount
+        if cumulative_reset:
+            segment += 1
+            previous_volume, previous_amount = 0, 0.0
         rows.append({
             "ts_code": symbol, "time": parts[0], "close": price,
-            "cumulative_volume_lot": cumulative_volume, "cumulative_amount": cumulative_amount,
-            "volume_lot": cumulative_volume - previous_volume, "amount": cumulative_amount - previous_amount,
-            "vwap": cumulative_amount / (cumulative_volume * 100) if cumulative_volume else None,
+            "cumulative_volume_lot": cumulative_volume, "cumulative_amount": normalized_amount,
+            "amount_unit_scale": amount_scale,
+            "volume_lot": cumulative_volume - previous_volume, "amount": normalized_amount - previous_amount,
+            "vwap": normalized_amount / (cumulative_volume * 100) if cumulative_volume else None,
+            "cumulative_segment": segment, "cumulative_reset": cumulative_reset,
             "source": "tencent_free",
         })
-        previous_volume, previous_amount = cumulative_volume, cumulative_amount
+        previous_volume, previous_amount = cumulative_volume, normalized_amount
     if rows:
         now = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%H%M")
         for row in rows:

@@ -22,7 +22,7 @@ from app.intraday_fast_quote_service import fast_quote_rotation_slot
 from app.board_rotation import board_rotation_alert_text, board_rotation_candidates, board_rotation_still_directional
 from app.board_stock_mining import board_stock_mining_candidates
 from app.limit_linkage_mining import limit_linkage_candidates
-from app.free_market_providers import _tencent_order_book_row
+from app.free_market_providers import _tencent_order_book_row, tencent_minute_amount_scale
 from app.order_book_features import aggregate_order_book_observations, order_book_observation
 from app.intraday_outcomes import a_share_return_decomposition
 from app.board_curve_read_model import board_display_slots, intraday_board_flow_curves as read_intraday_board_flow_curves, latest_close_sector_review_report as read_latest_close_sector_review_report
@@ -630,6 +630,7 @@ class ProviderHelperTests(unittest.TestCase):
             resource_status=lambda _: {"state": "healthy"}, public_http_client_status=lambda: {"active": True},
             alert_http_client_status=lambda: {"active": True}, provider_http_client_status=lambda: {"active": True},
             remote_archive_http_client_status=lambda: {"active": True},
+            network_status=lambda: {"state": "online"},
             provider_request_reservation_status=lambda: {"shared_database_reservation": True},
             runtime_executor_status=lambda: {"database": {"occupied": 0}}, super_get_executor_status=lambda: {"occupied": 0},
             provider_status=lambda: [{"name": "super_get"}], free_provider_status=lambda: [{"name": "tencent"}],
@@ -3589,6 +3590,71 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(exit_signal[0]["signal_type"], "exit")
         self.assertTrue(exit_signal[0]["hard"])
 
+    def test_opening_gap_creates_watch_not_entry_when_minutes_are_not_ready(self):
+        watch = {"symbol": "600176.SH", "available_quantity": 0, "alert_on_entry": True, "alert_on_exit": True}
+        quote = {
+            "symbol": "600176.SH", "price": 43.20, "pct_change": 4.2,
+            "price_source": "tencent_batched_watch_quote", "price_freshness": {"status": "fresh"},
+            "_scan_observed_at": datetime(2026, 8, 17, 1, 32, tzinfo=timezone.utc),
+        }
+        signals = intraday_signal_rules(watch, quote, None)
+        self.assertEqual(signals[0]["signal_key"], "600176.SH:watch:opening_gap_continuation_v1")
+        self.assertEqual(signals[0]["signal_type"], "watch")
+        self.assertIn("watch_only_not_entry", signals[0]["risk_flags"])
+
+    def test_intraday_minute_context_includes_unconfigured_explicit_watches(self):
+        watches = [{"symbol": "000001.SZ", "metadata": {}}, {"symbol": "000002.SZ", "metadata": {}}]
+        rows = [
+            {"time": f"09:{30 + index:02d}", "close": 10 + index / 100,
+             "vol": 100 + index, "amount": (100 + index) * (10 + index / 100) * 100}
+            for index in range(6)
+        ]
+
+        async def check() -> tuple[dict[str, object], dict[str, object], AsyncMock]:
+            minute_fetch = AsyncMock(return_value=rows)
+            with patch("app.main.open_provider_capabilities", new=AsyncMock(return_value=set())), \
+                 patch("app.main.tencent_intraday_minutes", new=minute_fetch), \
+                 patch("app.main._intraday_tencent_minute_cache", new={}):
+                features, source = await intraday_tencent_surge_context(watches)
+            return features, source, minute_fetch
+
+        features, source, minute_fetch = asyncio.run(check())
+        self.assertEqual(source["requested"], ["000001.SZ", "000002.SZ"])
+        self.assertEqual(sorted(features), ["000001.SZ", "000002.SZ"])
+        self.assertEqual(minute_fetch.await_count, 2)
+
+    def test_intraday_minute_context_prioritizes_configured_targets_and_peers(self):
+        watches = [
+            {"symbol": "000001.SZ", "metadata": {}},
+            {"symbol": "000002.SZ", "metadata": {}},
+            {"symbol": "000003.SZ", "metadata": {"surge_strategy": {
+                "enabled": True, "peer_symbols": ["000004.SZ", "000005.SZ"],
+            }}},
+        ]
+        rows = [
+            {"time": f"09:{30 + index:02d}", "close": 10 + index / 100,
+             "vol": 100 + index, "amount": (100 + index) * (10 + index / 100) * 100}
+            for index in range(6)
+        ]
+
+        async def check() -> tuple[dict[str, object], AsyncMock]:
+            minute_fetch = AsyncMock(return_value=rows)
+            with patch("app.main.open_provider_capabilities", new=AsyncMock(return_value=set())), \
+                 patch("app.main.tencent_intraday_minutes", new=minute_fetch), \
+                 patch("app.main.intraday_minute_profile_max_symbols", return_value=3), \
+                 patch("app.main._intraday_tencent_minute_cache", new={}):
+                _, source = await intraday_tencent_surge_context(watches)
+            return source, minute_fetch
+
+        source, minute_fetch = asyncio.run(check())
+        self.assertEqual(source["requested"], ["000003.SZ", "000004.SZ", "000005.SZ"])
+        self.assertTrue(source["truncated"])
+        self.assertEqual(minute_fetch.await_count, 3)
+
+    def test_tencent_minute_amount_scale_corrects_only_audited_hundredfold_variant(self):
+        self.assertEqual(tencent_minute_amount_scale(price=293.0, cumulative_volume_lot=1000, cumulative_amount=293_000.0), 100.0)
+        self.assertEqual(tencent_minute_amount_scale(price=29.3, cumulative_volume_lot=1000, cumulative_amount=2_930_000.0), 1.0)
+
     def test_cross_sectional_flow_extremes_are_unit_independent(self):
         quotes = {
             "000001.SZ": {"main_net_inflow": -900, "volume_ratio": 2.0},
@@ -3901,7 +3967,7 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(
             intraday_signal_attribution("000001.SZ:watch:test", "watch", {}, evidence),
             isolated_signal_attribution("000001.SZ:watch:test", "watch", {}, evidence,
-                                        number=pure_intraday_number, signal_model_version="watchlist-confirmation-v4"),
+                                        number=pure_intraday_number, signal_model_version="watchlist-confirmation-v5"),
         )
         watch = {"symbol": "000001.SZ", "entry_price": None, "available_quantity": 0, "alert_on_entry": True, "alert_on_exit": True}
         quote = {"price": 10.2, "pct_change": 2.0, "volume_ratio": 2.0, "turnover_rate": 4.0, "main_net_inflow": 100, "main_flow_percentile": 0.95}
@@ -3909,7 +3975,7 @@ class ProviderHelperTests(unittest.TestCase):
             intraday_signal_rules(watch, quote, {"price": 10.1}),
             isolated_signal_rules(watch, quote, {"price": 10.1}, number=pure_intraday_number,
                                    upside_assessment_fn=lambda q, d, m, p: isolated_upside_assessment(q, d, m, p, number=pure_intraday_number, eac_window=pure_eac_window),
-                                   model_version="watchlist-confirmation-v4"),
+                                   model_version="watchlist-confirmation-v5"),
         )
         items = [{"signal_event_id": "s1", "status": "matured", "raw_return": 0.01,
                   "maximum_favorable_excursion": 0.02, "maximum_adverse_excursion": -0.005,

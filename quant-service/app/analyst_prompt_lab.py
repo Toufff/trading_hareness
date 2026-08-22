@@ -52,6 +52,33 @@ def _json_compatible(value: Any) -> Any:
     return value
 
 
+def intraday_path_metrics(entry_price: Any, direction: int, minimum_price: Any, maximum_price: Any,
+                          quote_count: Any) -> dict[str, Any] | None:
+    """Return directional MFE/MAE over a bounded same-session quote path.
+
+    ``mfe`` is the best unrealised directional return and ``mae`` the worst.
+    A path without both extrema is deliberately unavailable rather than
+    substituted with a later/lunch/overnight quote.
+    """
+    try:
+        entry = Decimal(str(entry_price))
+        minimum = Decimal(str(minimum_price))
+        maximum = Decimal(str(maximum_price))
+        count = int(quote_count or 0)
+    except Exception:  # noqa: BLE001 - values are third-party persisted evidence
+        return None
+    if entry <= 0 or minimum <= 0 or maximum <= 0 or count <= 0 or direction not in {-1, 1}:
+        return None
+    if direction > 0:
+        mfe = maximum / entry - 1
+        mae = minimum / entry - 1
+    else:
+        mfe = entry / minimum - 1
+        mae = entry / maximum - 1
+    return {"mfe": float(mfe), "mae": float(mae), "path_quote_count": count,
+            "minimum_price": float(minimum), "maximum_price": float(maximum)}
+
+
 def _candidate_payload(row: dict[str, Any], variant_key: str) -> dict[str, Any]:
     """A common schema, with transparent deterministic variant constraints."""
     base = {
@@ -264,6 +291,22 @@ def materialize_intraday_analyst_outcomes(connection: Any, *, cutoff_at: datetim
             directional_return = None
             if status == "matured" and entry is not None and exit_row is not None:
                 directional_return = (Decimal(str(exit_row["price"])) / Decimal(str(entry["price"])) - 1) * int(row["direction"])
+                path = connection.execute(
+                    """SELECT count(*)::int path_quote_count,min(price) minimum_price,max(price) maximum_price
+                         FROM quant.intraday_quote_observations
+                        WHERE symbol=%s AND source_name=%s AND observed_at>=%s AND observed_at<=%s AND price>0""",
+                    (row["subject_key"], entry["source_name"], entry["observed_at"], exit_row["observed_at"]),
+                ).fetchone()
+                metrics = intraday_path_metrics(
+                    entry["price"], int(row["direction"]),
+                    path.get("minimum_price") if path else None,
+                    path.get("maximum_price") if path else None,
+                    path.get("path_quote_count") if path else None,
+                )
+                if metrics is None:
+                    settlement["path"] = {"status": "unavailable", "reason": "bounded_path_extrema_missing"}
+                else:
+                    settlement["path"] = {"status": "matured", **metrics}
             connection.execute(
                 """INSERT INTO quant.analyst_intraday_outcomes(
                      observation_id,methodology_version,horizon_minutes,status,entry_at,entry_price,exit_at,exit_price,
@@ -285,4 +328,4 @@ def materialize_intraday_analyst_outcomes(connection: Any, *, cutoff_at: datetim
 
 __all__ = ["INTRADAY_HORIZONS", "INTRADAY_METHODOLOGY_VERSION", "PROMPT_VARIANTS",
            "evaluate_prompt_variant", "label_prompt_candidate", "materialize_intraday_analyst_outcomes",
-           "materialize_prompt_candidates"]
+           "materialize_prompt_candidates", "intraday_path_metrics"]

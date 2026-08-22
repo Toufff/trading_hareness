@@ -158,6 +158,24 @@ class MainRouterBoundaryTests(unittest.TestCase):
             ("POST", "/api/v1/bootstrap"),
         })
 
+    def test_legacy_sync_names_are_thin_compatibility_aliases(self) -> None:
+        """Prevent removed provider implementations from returning to main.py."""
+        main_path = Path(__file__).resolve().parents[1] / "app" / "main.py"
+        tree = ast.parse(main_path.read_text())
+        names = {
+            "sync_tushare_legacy", "sync_baostock_legacy", "sync_market_universe_legacy",
+            "sync_full_market_daily_legacy", "sync_ths_sector_catalog_legacy",
+            "sync_eastmoney_board_members_legacy", "sync_ths_industry_moneyflow_legacy",
+            "sync_ths_concept_signals_legacy", "sync_ths_concept_members_legacy",
+        }
+        found = {}
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
+                found[node.name] = node
+        self.assertEqual(set(found), names)
+        for name, node in found.items():
+            self.assertLessEqual(len(node.body), 4, name)
+
 
 class BlockingExecutorBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_public_source_boundary_forwards_action_keywords(self) -> None:

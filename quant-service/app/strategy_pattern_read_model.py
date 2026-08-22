@@ -5,6 +5,9 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, Callable
 
+from .limit_continuation_research import continuation_watch, rank_continuation_candidates
+from .dragon_leader_research import enrich_dragon_leader_watches, rank_dragon_leader_candidates
+
 
 def latest_strategy_pattern_mining(
     database: Any,
@@ -22,7 +25,7 @@ def latest_strategy_pattern_mining(
                  FROM quant.strategy_pattern_runs ORDER BY as_of_date DESC,updated_at DESC LIMIT 1"""
         ).fetchone()
         if not run:
-            return {"run": None, "limit_pool": [], "limit_ladder": [], "pool_coverage": {}, "picks": [], "samples": [],
+            return {"run": None, "limit_pool": [], "limit_ladder": [], "continuation_candidates": [], "dragon_leader_candidates": [], "dragon_leader_market_context": {}, "pool_coverage": {}, "picks": [], "samples": [],
                     "notice": "尚未运行涨停梯队与分钟拉升形态挖掘。"}
         rows = connection.execute(
             """SELECT rank,symbol,name,primary_cohort,cohorts,board_context,limit_context,daily_features,
@@ -73,6 +76,11 @@ def latest_strategy_pattern_mining(
         item.update({"daily_features": daily, "volume_multiple_5d": daily.get("volume_multiple_5d"),
                      "volume_multiple_20d": daily.get("volume_multiple_20d"), "low_pct": daily.get("low_pct"),
                      "board_context": board_contexts.get(symbol), "lhb_context": lhb_contexts.get(symbol)})
+        item["continuation_watch"] = continuation_watch(
+            item, number=lambda value: float(value) if value is not None else None,
+            board_count=limit_board_count_fn,
+        )
+    dragon_leader_market_context = enrich_dragon_leader_watches(pool)
     pool_by_symbol = {str(item.get("ts_code") or ""): item for item in pool}
     limit_pool = [{**item, "rank": rank} for rank, item in enumerate(pool, start=1)]
     ladder_by_symbol: dict[str, dict[str, Any]] = {}
@@ -98,10 +106,14 @@ def latest_strategy_pattern_mining(
     ladder = list(ladder_by_symbol.values())
     ladder.sort(key=lambda item: (-int(item.get("nums") or 0), -float(item.get("limit_amount") or 0), str(item.get("ts_code") or "")))
     limit_ladder = [{**item, "rank": rank} for rank, item in enumerate(ladder, start=1)]
+    continuation_candidates = rank_continuation_candidates(pool)
+    dragon_leader_candidates = rank_dragon_leader_candidates(pool)
     union["coverage"].update({"limit_step_count": len(ladder_records), "multi_board_union_count": len(limit_ladder)})
     sample_items = [dict(row) for row in rows]
     picks = [item for item in sample_items if (item.get("limit_context") or {}).get("review_tier") != "research_sample"][:10]
-    return {"run": run, "limit_pool": limit_pool, "limit_ladder": limit_ladder, "pool_coverage": union["coverage"],
+    return {"run": run, "limit_pool": limit_pool, "limit_ladder": limit_ladder,
+            "continuation_candidates": continuation_candidates, "dragon_leader_candidates": dragon_leader_candidates,
+            "dragon_leader_market_context": dragon_leader_market_context, "pool_coverage": union["coverage"],
             "picks": picks, "samples": sample_items,
             "notice": "地天板、龙头、连板和首板均为盘后研究样本；实时阶段仍需点时量价、板块联动与承接确认。"}
 

@@ -121,6 +121,21 @@ class RecordedRuleInputReplayTests(unittest.TestCase):
         self.assertEqual(first["metrics"]["policy_evaluated_signals"], 0)
         self.assertIn("policy/risk gate", first["data_boundary"]["interpretation"])
 
+    def test_replay_provides_immutable_snapshot_clock_to_pure_rules(self):
+        observed_at = datetime(2026, 8, 14, 1, 31, tzinfo=UTC)
+        seen = []
+
+        def evaluate(inputs):
+            seen.append(inputs["quote"]["_scan_observed_at"])
+            return []
+
+        replay_recorded_rule_inputs(
+            [rule_input("one", observed_at)], evaluate=evaluate,
+            expected_model_version="watchlist-confirmation-v4",
+        )
+
+        self.assertEqual(seen, [observed_at])
+
     def test_v2_snapshot_replays_frozen_policy_gate_without_database_state(self):
         start = datetime(2026, 8, 14, 1, 30, tzinfo=UTC)
         row = rule_input("one", start)

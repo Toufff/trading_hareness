@@ -24,11 +24,13 @@ class StrategyReviewSchedulerDependencies:
     build_market_snapshot: Callable[[date, str], Awaitable[Any]]
     build_board_report: Callable[[], Awaitable[Any]]
     recompute_outcomes: Callable[[date], Awaitable[Any]]
+    recompute_analyst_intraday_outcomes: Callable[[date], Awaitable[Any]]
     recompute_scorecards: Callable[[date], Awaitable[Any]]
     persist_review: Callable[[date, str], Awaitable[Any]]
     now: Callable[[], datetime]
     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep
     report_error: Callable[[str], None] = print
+    build_analyst_market_review: Callable[[str, date], Awaitable[Any]] | None = None
 
 
 async def strategy_review_scheduler_step(
@@ -60,7 +62,15 @@ async def strategy_review_scheduler_step(
                 # Settlement reads persisted data only; it cannot add a live
                 # provider response to an already-recorded checkpoint.
                 await dependencies.recompute_outcomes(exchange_date)
+                # Analyst action outcomes are a separate, research-only ledger;
+                # settle them at the same close checkpoint so the next review
+                # sees both daily and bounded 5/15/30/60-minute paths.
+                await dependencies.recompute_analyst_intraday_outcomes(exchange_date)
                 await dependencies.recompute_scorecards(exchange_date)
+                if dependencies.build_analyst_market_review is not None:
+                    await dependencies.build_analyst_market_review("daily", exchange_date)
+                    if exchange_date.weekday() == 4:
+                        await dependencies.build_analyst_market_review("weekly", exchange_date)
             await dependencies.persist_review(exchange_date, session)
             completed.add(key)
             completed_now.append(session)

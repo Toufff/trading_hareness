@@ -9,7 +9,8 @@ from typing import Any, Callable
 
 def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
                            previous_quote: dict[str, Any] | None, daily_factors: dict[str, Any] | None = None,
-                           minute_features: dict[str, Any] | None = None, peer_context: dict[str, Any] | None = None, *, number: Callable[[Any], float | None], upside_assessment_fn: Callable[..., dict[str, Any]], model_version: str) -> list[dict[str, Any]]:
+                           minute_features: dict[str, Any] | None = None, peer_context: dict[str, Any] | None = None, *, number: Callable[[Any], float | None], upside_assessment_fn: Callable[..., dict[str, Any]], model_version: str,
+                           opening_gap_window: bool = False) -> list[dict[str, Any]]:
     """Return explainable, non-executable signal conditions for one symbol.
 
     Entry signals deliberately require a second scan.  A configured hard stop
@@ -23,9 +24,15 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
                  "conditions": {"quote_available": False}, "risk_flags": ["missing_tencent_quote"]}]
     price = float(quote["price"])
     pct_change = float(quote.get("pct_change") or 0)
-    volume_ratio = float(quote.get("volume_ratio") or 0)
-    turnover_rate = float(quote.get("turnover_rate") or 0)
-    main_net_inflow = float(quote.get("main_net_inflow") or 0)
+    volume_ratio_value = number(quote.get("volume_ratio"))
+    turnover_rate_value = number(quote.get("turnover_rate"))
+    main_net_inflow_value = number(quote.get("main_net_inflow"))
+    # Missing public cross-sectional flow is an availability state, not a
+    # numeric zero.  Preserve it in frozen evidence so a quiet scan can be
+    # diagnosed without silently turning a provider outage into "no inflow".
+    volume_ratio = volume_ratio_value if volume_ratio_value is not None else 0.0
+    turnover_rate = turnover_rate_value if turnover_rate_value is not None else 0.0
+    main_net_inflow = main_net_inflow_value if main_net_inflow_value is not None else 0.0
     main_flow_percentile = number(quote.get("main_flow_percentile"))
     previous_price = number((previous_quote or {}).get("price"))
     # Cost is the explicit position marker.  Sellable quantity is optional
@@ -34,9 +41,15 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
     # because the user has not entered a share count.
     holding = watch.get("entry_price") is not None
     signals: list[dict[str, Any]] = []
-    common = {"price": price, "pct_change": pct_change, "volume_ratio": volume_ratio,
-              "turnover_rate": turnover_rate, "main_net_inflow": main_net_inflow,
+    missing_public_fields = [name for name, value in (
+        ("volume_ratio", volume_ratio_value), ("turnover_rate", turnover_rate_value),
+        ("main_net_inflow", main_net_inflow_value),
+    ) if value is None]
+    common = {"price": price, "pct_change": pct_change, "volume_ratio": volume_ratio_value,
+              "turnover_rate": turnover_rate_value, "main_net_inflow": main_net_inflow_value,
               "main_flow_percentile": main_flow_percentile, "price_above_previous_scan": previous_price is None or price > previous_price,
+              "data_availability": {"missing_public_flow_fields": missing_public_fields,
+                                    "public_flow_available": not missing_public_fields},
               "daily_factors": daily_factors or {"status": "not_available"},
               "minute_features": minute_features or {"status": "not_available"},
               "peer_context": peer_context or {"status": "not_available"}}
@@ -48,6 +61,24 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
                                                                              "sellable_quantity_confirmed": sellable},
                         "risk_flags": ["hard_stop_triggered", "manual_review_required",
                                        *( [] if sellable else ["no_confirmed_sellable_quantity_risk_alert_only"])]})
+    # A material opening gap can finish before six causal minute bars exist.
+    # Record a research watch on a fresh direct quote, then leave every later
+    # entry upgrade to the normal minute/flow confirmation rules.
+    freshness = quote.get("price_freshness") if isinstance(quote.get("price_freshness"), dict) else {}
+    opening_gap_watch = (
+        opening_gap_window and not holding and bool(watch.get("alert_on_entry"))
+        and 3.0 <= pct_change <= 6.5
+        and str(quote.get("price_source") or "") == "tencent_batched_watch_quote"
+        and str(freshness.get("status") or "") == "fresh"
+    )
+    if opening_gap_watch and not signals:
+        signals.append({"signal_key": f"{symbol}:watch:opening_gap_continuation_v1", "signal_type": "watch",
+                        "severity": "warning", "score": min(80, round(42 + pct_change * 6, 2)), "hard": False,
+                        "alert_on_first_observation": True,
+                        "conditions": {**common, "setup": "opening_gap_requires_minute_follow_through",
+                                       "opening_gap_window": True, "minute_confirmation": "pending"},
+                        "risk_flags": ["opening_gap_unconfirmed", "watch_only_not_entry", "manual_review_required",
+                                       "no_automatic_order"]})
     strategy = (watch.get("metadata") or {}).get("surge_strategy") if isinstance(watch.get("metadata"), dict) else None
     minute_return_1m = number((minute_features or {}).get("return_1m_pct"))
     minute_return_3m = number((minute_features or {}).get("return_3m_pct"))
@@ -238,4 +269,3 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
 
 
 __all__ = ["signal_rules"]
-

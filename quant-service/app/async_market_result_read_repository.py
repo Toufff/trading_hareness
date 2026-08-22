@@ -41,19 +41,25 @@ async def offline_minute_imports(async_database: Any, limit: int, offline_direct
 
 async def _current_data_coverage(conn: Any) -> dict[str, Any]:
     result = await conn.execute(
-        """WITH daily_counts AS (
-             SELECT trading_date,count(DISTINCT symbol)::int symbols
-               FROM quant.canonical_bars_daily WHERE symbol<>'000300.SH' GROUP BY trading_date
-           ), universe AS (
-             SELECT greatest(1,(SELECT count(*)::int FROM quant.universe_members WHERE universe_key='all_a' AND enabled)) AS symbols
-           )
-           SELECT (SELECT min(trading_date) FROM quant.canonical_bars_daily) first_bar_date,
-                  (SELECT max(trading_date) FROM quant.canonical_bars_daily) latest_bar_date,
-                  (SELECT count(*)::int FROM daily_counts) bar_days,
-                  (SELECT count(*)::int FROM daily_counts,universe WHERE daily_counts.symbols>=greatest(ceil(universe.symbols*0.8)::int,1000)) full_cross_section_days,
-                  (SELECT max(symbols) FROM daily_counts) max_symbols_on_day,
-                  (SELECT count(DISTINCT symbol)::int FROM quant.daily_fundamentals) fundamental_symbols,
-                  (SELECT count(DISTINCT symbol)::int FROM quant.daily_trade_limits) limit_symbols,
+        """WITH universe AS (
+                 SELECT greatest(1,(SELECT count(*)::int FROM quant.universe_members WHERE universe_key='all_a' AND enabled)) AS symbols
+             ), latest_bar AS (
+                 SELECT trading_date FROM quant.canonical_bars_daily
+                  ORDER BY trading_date DESC LIMIT 1
+             ), latest_snapshot AS (
+                 SELECT as_of_date,manifest FROM quant.data_snapshots
+                  ORDER BY created_at DESC LIMIT 1
+             )
+           SELECT (SELECT trading_date FROM quant.canonical_bars_daily ORDER BY trading_date ASC LIMIT 1) first_bar_date,
+                  (SELECT trading_date FROM latest_bar) latest_bar_date,
+                  (SELECT count(*)::int FROM quant.daily_market_aggregates) bar_days,
+                  (SELECT count(*)::int FROM quant.daily_market_aggregates,universe
+                    WHERE stock_count>=greatest(ceil(universe.symbols*0.8)::int,1000)) full_cross_section_days,
+                  (SELECT max(stock_count) FROM quant.daily_market_aggregates) max_symbols_on_day,
+                  (SELECT count(DISTINCT symbol)::int FROM quant.canonical_bars_daily
+                    WHERE trading_date=(SELECT trading_date FROM latest_bar) AND symbol<>'000300.SH') latest_bar_symbols,
+                  coalesce((SELECT (manifest->>'fundamental_symbols')::int FROM latest_snapshot),0) fundamental_symbols,
+                  coalesce((SELECT (manifest->>'limit_symbols')::int FROM latest_snapshot),0) limit_symbols,
                   (SELECT count(DISTINCT symbol)::int FROM quant.market_bars_minute) minute_symbols""")
     return dict(await result.fetchone() or {})
 
@@ -67,27 +73,37 @@ def _number(value: Any, default: float = 0.0) -> float:
 
 async def _feature_readiness(conn: Any) -> dict[str, Any]:
     result = await conn.execute(
-        """WITH universe AS (
-             SELECT count(*)::int symbols FROM quant.universe_members WHERE universe_key='all_a' AND enabled
-           )
-           SELECT 'daily_bars' feature,count(DISTINCT symbol)::int symbols,count(*)::int rows,max(trading_date) latest_date,'P0' priority
-             FROM quant.canonical_bars_daily WHERE symbol<>'000300.SH'
-           UNION ALL SELECT 'daily_basic',count(DISTINCT symbol)::int,count(*)::int,max(trading_date),'P0' FROM quant.daily_fundamentals
-           UNION ALL SELECT 'trade_limits',count(DISTINCT symbol)::int,count(*)::int,max(trading_date),'P0' FROM quant.daily_trade_limits
-           UNION ALL SELECT 'moneyflow_dc',count(DISTINCT row_data->>'ts_code')::int,count(*)::int,max(to_date(NULLIF(row_data->>'trade_date',''),'YYYYMMDD')),'P0'
-             FROM quant.tushare_raw_records WHERE api_name='moneyflow_dc'
-           UNION ALL SELECT 'moneyflow',count(DISTINCT row_data->>'ts_code')::int,count(*)::int,max(to_date(NULLIF(row_data->>'trade_date',''),'YYYYMMDD')),'P1'
-             FROM quant.tushare_raw_records WHERE api_name='moneyflow'
-           UNION ALL SELECT 'cyq_perf',count(DISTINCT row_data->>'ts_code')::int,count(*)::int,max(to_date(NULLIF(row_data->>'trade_date',''),'YYYYMMDD')),'P1'
-             FROM quant.tushare_raw_records WHERE api_name='cyq_perf'
-           UNION ALL SELECT 'cyq_chips',count(DISTINCT row_data->>'ts_code')::int,count(*)::int,max(to_date(NULLIF(row_data->>'trade_date',''),'YYYYMMDD')),'P1'
-             FROM quant.tushare_raw_records WHERE api_name='cyq_chips'
-           UNION ALL SELECT 'stk_factor_pro',count(DISTINCT row_data->>'ts_code')::int,count(*)::int,max(to_date(NULLIF(row_data->>'trade_date',''),'YYYYMMDD')),'P1'
-             FROM quant.tushare_raw_records WHERE api_name='stk_factor_pro'
-           UNION ALL SELECT 'sector_flow',count(DISTINCT sector_key)::int,count(*)::int,max(trading_date),'P1' FROM quant.sector_market_observations
-           UNION ALL SELECT 'announcements',count(DISTINCT symbol)::int,count(*)::int,max(occurred_at::date),'P1' FROM quant.market_events
-           UNION ALL SELECT 'analyst_claims',count(DISTINCT subject_key)::int,count(*)::int,
-              max((available_at AT TIME ZONE 'Asia/Shanghai')::date),'P1' FROM quant.analyst_claims""")
+        """WITH latest_bar AS (
+                 SELECT trading_date FROM quant.canonical_bars_daily
+                  ORDER BY trading_date DESC LIMIT 1
+             ), latest_snapshot AS (
+                 SELECT as_of_date,manifest FROM quant.data_snapshots
+                  ORDER BY created_at DESC LIMIT 1
+             ), table_estimates AS (
+                 SELECT relname,coalesce(n_live_tup,0)::int rows
+                   FROM pg_stat_all_tables
+                  WHERE schemaname='quant' AND relname=ANY(ARRAY[
+                      'canonical_bars_daily','daily_fundamentals','daily_trade_limits',
+                      'sector_market_observations','market_events','analyst_claims'
+                  ])
+             )
+           SELECT 'daily_bars' feature,
+                  (SELECT count(DISTINCT symbol)::int FROM quant.canonical_bars_daily
+                    WHERE trading_date=(SELECT trading_date FROM latest_bar) AND symbol<>'000300.SH') symbols,
+                  coalesce((SELECT rows FROM table_estimates WHERE relname='canonical_bars_daily'),0) rows,
+                  (SELECT trading_date FROM latest_bar) latest_date,'P0' priority
+           UNION ALL SELECT 'daily_basic',coalesce((SELECT (manifest->>'fundamental_symbols')::int FROM latest_snapshot),0),
+                  coalesce((SELECT rows FROM table_estimates WHERE relname='daily_fundamentals'),0),
+                  (SELECT as_of_date FROM latest_snapshot),'P0'
+           UNION ALL SELECT 'trade_limits',coalesce((SELECT (manifest->>'limit_symbols')::int FROM latest_snapshot),0),
+                  coalesce((SELECT rows FROM table_estimates WHERE relname='daily_trade_limits'),0),
+                  (SELECT as_of_date FROM latest_snapshot),'P0'
+           UNION ALL SELECT 'sector_flow',0,coalesce((SELECT rows FROM table_estimates WHERE relname='sector_market_observations'),0),
+                  (SELECT max(trading_date) FROM quant.sector_market_observations),'P1'
+           UNION ALL SELECT 'announcements',0,coalesce((SELECT rows FROM table_estimates WHERE relname='market_events'),0),
+                  (SELECT max(occurred_at::date) FROM quant.market_events),'P1'
+           UNION ALL SELECT 'analyst_claims',0,coalesce((SELECT rows FROM table_estimates WHERE relname='analyst_claims'),0),
+                  (SELECT max((available_at AT TIME ZONE 'Asia/Shanghai')::date) FROM quant.analyst_claims),'P1'""")
     rows = await result.fetchall()
     result = await conn.execute("SELECT greatest(1,count(*)::int) symbols FROM quant.universe_members WHERE universe_key='all_a' AND enabled")
     universe_size = int((await result.fetchone())["symbols"])
@@ -108,20 +124,29 @@ async def _feature_readiness(conn: Any) -> dict[str, Any]:
 async def research_overview(async_database: Any, history_estimate: dict[str, Any]) -> dict[str, Any]:
     async with async_database.transaction() as conn:
         result = await conn.execute(
-            """SELECT (SELECT count(*)::int FROM quant.remote_reports) remote_reports,
+            """WITH table_estimates AS (
+                     SELECT relname,coalesce(n_live_tup,0)::int rows
+                       FROM pg_stat_all_tables
+                      WHERE schemaname='quant' AND relname=ANY(ARRAY[
+                          'canonical_bars_daily','tushare_raw_records','daily_fundamentals',
+                          'daily_trade_limits','sector_membership_history',
+                          'sector_market_observations','market_events'
+                      ])
+                 )
+                SELECT (SELECT count(*)::int FROM quant.remote_reports) remote_reports,
                       (SELECT count(*)::int FROM quant.analyst_claims) claims,
-                      (SELECT count(*)::int FROM quant.canonical_bars_daily) canonical_bars,
-                      (SELECT count(*)::int FROM quant.tushare_raw_records) tushare_raw_records,
+                      coalesce((SELECT rows FROM table_estimates WHERE relname='canonical_bars_daily'),0) canonical_bars,
+                      coalesce((SELECT rows FROM table_estimates WHERE relname='tushare_raw_records'),0) tushare_raw_records,
                       (SELECT count(*)::int FROM quant.market_trade_calendar) calendar_days,
-                      (SELECT count(*)::int FROM quant.daily_fundamentals) fundamentals,
-                      (SELECT count(*)::int FROM quant.daily_trade_limits) trade_limits,
+                      coalesce((SELECT rows FROM table_estimates WHERE relname='daily_fundamentals'),0) fundamentals,
+                      coalesce((SELECT rows FROM table_estimates WHERE relname='daily_trade_limits'),0) trade_limits,
                       (SELECT count(*)::int FROM quant.market_bars_minute) offline_minute_bars,
                       (SELECT count(*)::int FROM quant.market_snapshot_runs) market_snapshot_runs,
-                      (SELECT count(*)::int FROM quant.market_events) market_events,
+                      coalesce((SELECT rows FROM table_estimates WHERE relname='market_events'),0) market_events,
                       (SELECT count(*)::int FROM quant.universe_members WHERE universe_key='all_a' AND enabled) all_a_symbols,
                       (SELECT count(*)::int FROM quant.sectors) sectors,
-                      (SELECT count(*)::int FROM quant.sector_membership_history WHERE effective_to IS NULL) active_sector_memberships,
-                      (SELECT count(*)::int FROM quant.sector_market_observations) sector_market_observations,
+                      coalesce((SELECT rows FROM table_estimates WHERE relname='sector_membership_history'),0) active_sector_memberships,
+                      coalesce((SELECT rows FROM table_estimates WHERE relname='sector_market_observations'),0) sector_market_observations,
                       (SELECT count(*)::int FROM quant.offline_imports WHERE status IN ('completed','partial')) offline_imports,
                       (SELECT count(*)::int FROM quant.fetch_runs WHERE status='running') running_fetch_runs,
                       (SELECT count(*)::int FROM quant.fetch_runs WHERE status='running' AND coalesce(started_at,created_at)<now()-interval '90 minutes') stale_fetch_runs,
@@ -135,7 +160,8 @@ async def research_overview(async_database: Any, history_estimate: dict[str, Any
         latest_market_snapshot = await result.fetchone()
         coverage = await _current_data_coverage(conn)
         readiness = await _feature_readiness(conn)
-    return {"counts": counts, "latest_snapshot": last_snapshot, "latest_market_snapshot": latest_market_snapshot,
+    return {"counts": counts, "count_estimates": ["canonical_bars", "tushare_raw_records", "fundamentals", "trade_limits", "market_events", "active_sector_memberships", "sector_market_observations"],
+            "latest_snapshot": last_snapshot, "latest_market_snapshot": latest_market_snapshot,
             "latest_recommendation_run": latest_run, "data_coverage": coverage, "history_estimate": history_estimate,
             "feature_readiness": readiness}
 

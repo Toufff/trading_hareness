@@ -19,7 +19,8 @@ export function createLedger(connectionString) {
 				CREATE TABLE IF NOT EXISTS feishu_group_relay_messages (source_message_id text PRIMARY KEY, source_key text NOT NULL, source_chat_id text NOT NULL, source_create_time bigint NOT NULL, target_chat_id text NOT NULL, route_tag text NOT NULL, message jsonb NOT NULL, status text NOT NULL, attempt_count integer NOT NULL DEFAULT 0, target_message_ids jsonb NOT NULL DEFAULT '[]'::jsonb, error_message text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), forwarded_at timestamptz);
 				CREATE TABLE IF NOT EXISTS feishu_group_relay_actions (action_id uuid PRIMARY KEY DEFAULT gen_random_uuid(), source_message_id text NOT NULL REFERENCES feishu_group_relay_messages(source_message_id) ON DELETE CASCADE, action text NOT NULL, actor_open_id text, created_at timestamptz NOT NULL DEFAULT now());
 				CREATE TABLE IF NOT EXISTS feishu_group_relay_routes (source_key text PRIMARY KEY, chat_id text NOT NULL, chat_name text NOT NULL, route_tag text NOT NULL UNIQUE, enabled boolean NOT NULL DEFAULT true, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
-				CREATE TABLE IF NOT EXISTS feishu_group_relay_route_state (state_key text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());
+			CREATE TABLE IF NOT EXISTS feishu_group_relay_route_state (state_key text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());
+			CREATE TABLE IF NOT EXISTS feishu_summary_listener_state (listener_key text PRIMARY KEY, chat_id text NOT NULL, cursor_create_time bigint NOT NULL, last_source_create_time bigint, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
 				CREATE TABLE IF NOT EXISTS feishu_user_oauth_tokens (token_key text PRIMARY KEY, access_ciphertext text NOT NULL, refresh_ciphertext text NOT NULL, access_expires_at timestamptz NOT NULL, refresh_expires_at timestamptz NOT NULL, scopes text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT now());
 				CREATE INDEX IF NOT EXISTS feishu_group_relay_messages_status_idx ON feishu_group_relay_messages(status, updated_at);
 				CREATE INDEX IF NOT EXISTS feishu_group_relay_actions_message_idx ON feishu_group_relay_actions(source_message_id, created_at DESC);
@@ -32,6 +33,10 @@ export function createLedger(connectionString) {
 				ALTER TABLE feishu_group_relay_messages ADD COLUMN IF NOT EXISTS source_update_time bigint;
 				ALTER TABLE feishu_group_relay_messages ADD COLUMN IF NOT EXISTS source_deleted boolean NOT NULL DEFAULT false;
 				ALTER TABLE feishu_group_relay_messages ADD COLUMN IF NOT EXISTS reconciled_at timestamptz;
+				ALTER TABLE feishu_group_relay_routes ADD COLUMN IF NOT EXISTS target_chat_ids jsonb NOT NULL DEFAULT '[]'::jsonb;
+				ALTER TABLE feishu_group_relay_messages ADD COLUMN IF NOT EXISTS target_chat_ids jsonb NOT NULL DEFAULT '[]'::jsonb;
+			ALTER TABLE feishu_group_relay_messages ADD COLUMN IF NOT EXISTS intelligence jsonb NOT NULL DEFAULT '{}'::jsonb;
+			ALTER TABLE feishu_summary_listener_state ADD COLUMN IF NOT EXISTS last_source_create_time bigint;
 				CREATE INDEX IF NOT EXISTS ingestion_assets_sha256_idx ON ingestion_assets(content_sha256);
 			`);
 			for (const route of registry.routes ?? []) {
@@ -49,35 +54,45 @@ export function createLedger(connectionString) {
 				VALUES($1,$2,$3,$4,$5,$6,$7,$8,'queued','received',$9) RETURNING *`, [jobId, eventId ?? null, messageId ?? null, route.tag, route.topic_key, route.publisher_key, route.remote_analyst_id, contentSha256 ?? null, payload]);
 			return { job: result.rows[0], duplicate: false };
 		},
+		async getJobByMessageId(messageId) {
+			if (!messageId) return null;
+			const { rows } = await pool.query('SELECT * FROM ingestion_jobs WHERE message_id=$1', [messageId]);
+			return rows[0] ?? null;
+		},
 		async getFeishuUserOauthToken() { const { rows } = await pool.query("SELECT * FROM feishu_user_oauth_tokens WHERE token_key='default'"); return rows[0] ?? null; },
 		async saveFeishuUserOauthToken({ accessCiphertext, refreshCiphertext, accessExpiresAt, refreshExpiresAt, scopes }) {
 			await pool.query(`INSERT INTO feishu_user_oauth_tokens(token_key,access_ciphertext,refresh_ciphertext,access_expires_at,refresh_expires_at,scopes)
 				VALUES('default',$1,$2,$3,$4,$5) ON CONFLICT(token_key) DO UPDATE SET access_ciphertext=EXCLUDED.access_ciphertext,refresh_ciphertext=EXCLUDED.refresh_ciphertext,access_expires_at=EXCLUDED.access_expires_at,refresh_expires_at=EXCLUDED.refresh_expires_at,scopes=EXCLUDED.scopes,updated_at=now()`, [accessCiphertext, refreshCiphertext, accessExpiresAt, refreshExpiresAt, scopes]);
 		},
 		async relaySourceState(sourceKey) { const { rows } = await pool.query('SELECT * FROM feishu_group_relay_sources WHERE source_key=$1', [sourceKey]); return rows[0] ?? null; },
+		async summaryListenerState(listenerKey) { const { rows } = await pool.query('SELECT * FROM feishu_summary_listener_state WHERE listener_key=$1', [listenerKey]); return rows[0] ?? null; },
+		async saveSummaryListenerCursor({ listenerKey, chatId, cursorCreateTime, lastSourceCreateTime = null }) {
+			await pool.query(`INSERT INTO feishu_summary_listener_state(listener_key,chat_id,cursor_create_time,last_source_create_time) VALUES($1,$2,$3,$4)
+				ON CONFLICT(listener_key) DO UPDATE SET chat_id=EXCLUDED.chat_id,cursor_create_time=GREATEST(feishu_summary_listener_state.cursor_create_time,EXCLUDED.cursor_create_time),last_source_create_time=CASE WHEN EXCLUDED.last_source_create_time IS NULL THEN feishu_summary_listener_state.last_source_create_time ELSE GREATEST(coalesce(feishu_summary_listener_state.last_source_create_time,0),EXCLUDED.last_source_create_time) END,updated_at=now()`, [listenerKey, chatId, cursorCreateTime, lastSourceCreateTime]);
+		},
 		async initializeRelayRoutes(routes) {
 			const claimed = await pool.query(`INSERT INTO feishu_group_relay_route_state(state_key) VALUES('initialized') ON CONFLICT DO NOTHING RETURNING state_key`);
 			if (claimed.rowCount) {
 				for (const route of routes) {
-					await pool.query(`INSERT INTO feishu_group_relay_routes(source_key,chat_id,chat_name,route_tag,enabled) VALUES($1,$2,$3,$4,$5) ON CONFLICT(source_key) DO NOTHING`, [route.key, route.chatId, route.chatName, route.tag, route.enabled !== false]);
+					await pool.query(`INSERT INTO feishu_group_relay_routes(source_key,chat_id,chat_name,route_tag,enabled,target_chat_ids) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(source_key) DO NOTHING`, [route.key, route.chatId, route.chatName, route.tag, route.enabled !== false, JSON.stringify(route.targetChatIds ?? [])]);
 				}
 			}
 			return this.relayRoutes();
 		},
 		async relayRoutes() {
-			const { rows } = await pool.query(`SELECT source_key,chat_id,chat_name,route_tag,enabled,created_at,updated_at FROM feishu_group_relay_routes ORDER BY created_at,source_key`);
-			return rows.map((row) => ({ key: row.source_key, chatId: row.chat_id, chatName: row.chat_name, tag: row.route_tag, enabled: row.enabled !== false, created_at: row.created_at, updated_at: row.updated_at }));
+			const { rows } = await pool.query(`SELECT source_key,chat_id,chat_name,route_tag,enabled,target_chat_ids,created_at,updated_at FROM feishu_group_relay_routes ORDER BY created_at,source_key`);
+			return rows.map((row) => ({ key: row.source_key, chatId: row.chat_id, chatName: row.chat_name, tag: row.route_tag, targetChatIds: Array.isArray(row.target_chat_ids) ? row.target_chat_ids : [], enabled: row.enabled !== false, created_at: row.created_at, updated_at: row.updated_at }));
 		},
-		async createRelayRoute({ sourceKey, chatId, chatName, tag, enabled = true }) {
-			const { rows } = await pool.query(`INSERT INTO feishu_group_relay_routes(source_key,chat_id,chat_name,route_tag,enabled) VALUES($1,$2,$3,$4,$5) RETURNING source_key,chat_id,chat_name,route_tag,enabled,created_at,updated_at`, [sourceKey, chatId, chatName, tag, enabled]);
+		async createRelayRoute({ sourceKey, chatId, chatName, tag, targetChatIds = [], enabled = true }) {
+			const { rows } = await pool.query(`INSERT INTO feishu_group_relay_routes(source_key,chat_id,chat_name,route_tag,enabled,target_chat_ids) VALUES($1,$2,$3,$4,$5,$6) RETURNING source_key,chat_id,chat_name,route_tag,enabled,target_chat_ids,created_at,updated_at`, [sourceKey, chatId, chatName, tag, enabled, JSON.stringify(targetChatIds)]);
 			const row = rows[0];
-			return { key: row.source_key, chatId: row.chat_id, chatName: row.chat_name, tag: row.route_tag, enabled: row.enabled !== false, created_at: row.created_at, updated_at: row.updated_at };
+			return { key: row.source_key, chatId: row.chat_id, chatName: row.chat_name, tag: row.route_tag, targetChatIds: row.target_chat_ids, enabled: row.enabled !== false, created_at: row.created_at, updated_at: row.updated_at };
 		},
-		async updateRelayRoute(sourceKey, { chatId, chatName, tag, enabled }) {
-			const { rows } = await pool.query(`UPDATE feishu_group_relay_routes SET chat_id=$2,chat_name=$3,route_tag=$4,enabled=$5,updated_at=now() WHERE source_key=$1 RETURNING source_key,chat_id,chat_name,route_tag,enabled,created_at,updated_at`, [sourceKey, chatId, chatName, tag, enabled]);
+		async updateRelayRoute(sourceKey, { chatId, chatName, tag, targetChatIds = [], enabled }) {
+			const { rows } = await pool.query(`UPDATE feishu_group_relay_routes SET chat_id=$2,chat_name=$3,route_tag=$4,enabled=$5,target_chat_ids=$6,updated_at=now() WHERE source_key=$1 RETURNING source_key,chat_id,chat_name,route_tag,enabled,target_chat_ids,created_at,updated_at`, [sourceKey, chatId, chatName, tag, enabled, JSON.stringify(targetChatIds)]);
 			if (!rows[0]) return null;
 			const row = rows[0];
-			return { key: row.source_key, chatId: row.chat_id, chatName: row.chat_name, tag: row.route_tag, enabled: row.enabled !== false, created_at: row.created_at, updated_at: row.updated_at };
+			return { key: row.source_key, chatId: row.chat_id, chatName: row.chat_name, tag: row.route_tag, targetChatIds: row.target_chat_ids, enabled: row.enabled !== false, created_at: row.created_at, updated_at: row.updated_at };
 		},
 		async deleteRelayRoute(sourceKey) { const { rowCount } = await pool.query('DELETE FROM feishu_group_relay_routes WHERE source_key=$1', [sourceKey]); return rowCount === 1; },
 		async saveRelaySourceCursor({ sourceKey, chatId, cursorCreateTime }) {
@@ -88,11 +103,17 @@ export function createLedger(connectionString) {
 			await pool.query(`INSERT INTO feishu_group_relay_messages(source_message_id,source_key,source_chat_id,source_create_time,target_chat_id,route_tag,message,status,source_update_time,source_deleted)
 				VALUES($1,$2,$3,$4,$5,$6,$7,'skipped_bootstrap',$8,$9) ON CONFLICT(source_message_id) DO NOTHING`, [record.sourceMessageId, record.sourceKey, record.sourceChatId, record.sourceCreateTime, record.targetChatId, record.routeTag, record.message, record.sourceUpdateTime ?? null, Boolean(record.message?.deleted)]);
 		},
+		async filterRelayMessage(record, reason) {
+			await pool.query(`INSERT INTO feishu_group_relay_messages(source_message_id,source_key,source_chat_id,source_create_time,target_chat_id,route_tag,message,status,source_update_time,source_deleted,error_message)
+				VALUES($1,$2,$3,$4,$5,$6,$7,'filtered_system',$8,$9,$10)
+				ON CONFLICT(source_message_id) DO UPDATE SET source_key=EXCLUDED.source_key,source_chat_id=EXCLUDED.source_chat_id,source_create_time=EXCLUDED.source_create_time,target_chat_id=EXCLUDED.target_chat_id,route_tag=EXCLUDED.route_tag,message=EXCLUDED.message,status='filtered_system',source_update_time=coalesce(EXCLUDED.source_update_time,feishu_group_relay_messages.source_update_time),source_deleted=EXCLUDED.source_deleted,error_message=EXCLUDED.error_message,updated_at=now()`, [record.sourceMessageId ?? record.source_message_id, record.sourceKey ?? record.source_key, record.sourceChatId ?? record.source_chat_id, record.sourceCreateTime ?? record.source_create_time, record.targetChatId ?? record.target_chat_id, record.routeTag ?? record.route_tag, record.message, record.sourceUpdateTime ?? record.source_update_time ?? null, Boolean(record.message?.deleted), reason]);
+		},
 		async claimRelayMessage(record) {
 			const { rows } = await pool.query(`INSERT INTO feishu_group_relay_messages(source_message_id,source_key,source_chat_id,source_create_time,target_chat_id,route_tag,message,status,attempt_count,source_update_time)
 				VALUES($1,$2,$3,$4,$5,$6,$7,'processing',1,$8)
 				ON CONFLICT(source_message_id) DO UPDATE SET source_key=EXCLUDED.source_key,source_chat_id=EXCLUDED.source_chat_id,source_create_time=EXCLUDED.source_create_time,target_chat_id=EXCLUDED.target_chat_id,route_tag=EXCLUDED.route_tag,message=EXCLUDED.message,source_update_time=coalesce(EXCLUDED.source_update_time,feishu_group_relay_messages.source_update_time),status='processing',attempt_count=feishu_group_relay_messages.attempt_count+1,error_message=null,updated_at=now()
-				WHERE feishu_group_relay_messages.status='failed' OR (feishu_group_relay_messages.status='processing' AND feishu_group_relay_messages.updated_at < now() - interval '5 minutes')
+				WHERE (feishu_group_relay_messages.status='failed' AND feishu_group_relay_messages.updated_at <= now() - interval '10 seconds' * power(2, least(greatest(feishu_group_relay_messages.attempt_count - 1, 0), 5)))
+					OR (feishu_group_relay_messages.status='processing' AND feishu_group_relay_messages.updated_at < now() - interval '5 minutes')
 				RETURNING *`, [record.sourceMessageId ?? record.source_message_id, record.sourceKey ?? record.source_key, record.sourceChatId ?? record.source_chat_id, record.sourceCreateTime ?? record.source_create_time, record.targetChatId ?? record.target_chat_id, record.routeTag ?? record.route_tag, record.message, record.sourceUpdateTime ?? record.source_update_time ?? null]);
 			return rows[0] ?? null;
 		},
@@ -130,9 +151,17 @@ export function createLedger(connectionString) {
 			const result = await pool.query(`SELECT message.*, route.chat_name AS source_chat_name FROM feishu_group_relay_messages message LEFT JOIN feishu_group_relay_routes route ON route.source_key=message.source_key WHERE message.source_message_id=$1`, [sourceMessageId]);
 			return result.rows[0];
 		},
-		async relayRetryQueue(limit = 20) { const { rows } = await pool.query(`SELECT * FROM feishu_group_relay_messages WHERE status='failed' ORDER BY updated_at ASC LIMIT $1`, [Math.max(1, Math.min(100, Number(limit) || 20))]); return rows; },
+		async recordRelayIntelligence(sourceMessageId, kind, value) {
+			const { rows } = await pool.query(`UPDATE feishu_group_relay_messages
+				SET intelligence=coalesce(intelligence, '{}'::jsonb) || jsonb_build_object($2::text, $3::jsonb), updated_at=now()
+				WHERE source_message_id=$1 RETURNING *`, [sourceMessageId, kind, JSON.stringify(value)]);
+			if (!rows[0]) return null;
+			const result = await pool.query(`SELECT message.*, route.chat_name AS source_chat_name FROM feishu_group_relay_messages message LEFT JOIN feishu_group_relay_routes route ON route.source_key=message.source_key WHERE message.source_message_id=$1`, [sourceMessageId]);
+			return result.rows[0] ?? null;
+		},
+		async relayRetryQueue(limit = 20) { const { rows } = await pool.query(`SELECT * FROM feishu_group_relay_messages WHERE status='failed' AND updated_at <= now() - interval '10 seconds' * power(2, least(greatest(attempt_count - 1, 0), 5)) ORDER BY updated_at ASC LIMIT $1`, [Math.max(1, Math.min(100, Number(limit) || 20))]); return rows; },
 		async recentRelayMessages(limit = 50) {
-			const { rows } = await pool.query(`SELECT message.source_message_id,message.source_key,message.source_chat_id,message.source_create_time,message.target_chat_id,message.route_tag,message.message,message.status,message.target_message_ids,message.error_message,message.forwarded_at,message.updated_at,message.action_card_message_id,message.workflow_state,message.workflow_note,message.source_deleted,message.source_update_time,route.chat_name AS source_chat_name
+			const { rows } = await pool.query(`SELECT message.source_message_id,message.source_key,message.source_chat_id,message.source_create_time,message.target_chat_id,message.route_tag,message.message,message.status,message.target_message_ids,message.error_message,message.forwarded_at,message.updated_at,message.action_card_message_id,message.workflow_state,message.workflow_note,message.source_deleted,message.source_update_time,message.intelligence,route.chat_name AS source_chat_name
 				FROM feishu_group_relay_messages message
 				LEFT JOIN feishu_group_relay_routes route ON route.source_key=message.source_key
 				ORDER BY message.updated_at DESC LIMIT $1`, [Math.max(1, Math.min(200, Number(limit) || 50))]);
@@ -227,6 +256,24 @@ export function createLedger(connectionString) {
 				(SELECT coalesce(sum(declared_bytes),0)::bigint FROM ingestion_assets WHERE state='completed') AS completed_media_bytes,
 				(SELECT coalesce(avg(extract(epoch FROM updated_at-created_at)),0)::float FROM ingestion_jobs WHERE status='completed') AS completed_seconds`);
 			return rows[0];
+		},
+		async ingestionStatusBySource() {
+			const { rows } = await pool.query(`
+				WITH counts AS (
+					SELECT source_tag,
+						count(*)::int AS job_count,
+						count(*) FILTER (WHERE status='completed')::int AS completed_count,
+						count(*) FILTER (WHERE status IN ('failed','retryable_failed'))::int AS failed_count,
+						max(updated_at) AS last_updated_at
+					FROM ingestion_jobs GROUP BY source_tag
+				), latest AS (
+					SELECT DISTINCT ON (source_tag) source_tag,status,stage,remote_batch_id,error_class,error_message,updated_at
+					FROM ingestion_jobs ORDER BY source_tag,updated_at DESC,created_at DESC
+				)
+				SELECT counts.*,latest.status AS latest_status,latest.stage AS latest_stage,latest.remote_batch_id,latest.error_class,latest.error_message
+				FROM counts JOIN latest USING(source_tag) ORDER BY counts.source_tag
+			`);
+			return rows;
 		},
 		async pendingJobs() { const { rows } = await pool.query(`SELECT * FROM ingestion_jobs WHERE status IN ('queued','retryable_failed','uploading') ORDER BY updated_at ASC LIMIT 100`); return rows; },
 		async referencedStoragePaths() { const { rows } = await pool.query(`SELECT storage_path FROM ingestion_assets WHERE storage_path IS NOT NULL AND state IN ('pending','uploading','retryable_failed')`); return new Set(rows.map((row) => row.storage_path)); },

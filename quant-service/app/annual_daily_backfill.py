@@ -84,7 +84,12 @@ CORE_DAILY_SPECS = (
     ApiSpec("daily", "super_get", 4_800, promote="daily", fallback_provider_name="super_sdk",
             fallback_provider_names=("primary",)),
     ApiSpec("adj_factor", "super_sdk", 4_800, promote="adj_factor", fallback_provider_name="primary"),
-    ApiSpec("daily_basic", "super_sdk", 4_800, promote="daily_basic", fallback_provider_name="primary"),
+    # ProMax was verified for the complete same-day daily_basic cross-section
+    # on 2026-08-17.  Prefer it over the City SDK so the control-plane repair
+    # exercises the current GET protocol; retain the previously verified SDK
+    # and primary routes as explicit fallbacks.
+    ApiSpec("daily_basic", "super_get", 4_800, promote="daily_basic", fallback_provider_name="super_sdk",
+            fallback_provider_names=("primary",)),
     ApiSpec("stk_limit", "super_sdk", 4_800, promote="stk_limit", fallback_provider_name="primary"),
     ApiSpec("suspend_d", "super_sdk", legal_empty=True, promote="suspend_d", fallback_provider_name="primary"),
 )

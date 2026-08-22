@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isSystemMessage } from './message-filter.mjs';
 
 const DEFAULT_HISTORY_LOOKBACK_SECONDS = 5 * 60;
 const MAX_HISTORY_PAGES = 20;
@@ -25,8 +26,8 @@ function asEpochSeconds(value) {
 	return String(Math.max(0, Math.floor(asCreateTimeMs(value) / 1000)));
 }
 
-function deterministicUuid(messageId, component) {
-	const value = createHash('sha256').update(`feishu-group-relay:${messageId}:${component}`).digest('hex');
+function deterministicUuid(messageId, component, targetChatId) {
+	const value = createHash('sha256').update(`feishu-group-relay:${messageId}:${component}:${targetChatId}`).digest('hex');
 	return `${value.slice(0, 8)}-${value.slice(8, 12)}-4${value.slice(13, 16)}-a${value.slice(17, 20)}-${value.slice(20, 32)}`;
 }
 
@@ -106,13 +107,19 @@ function rewritePostResourceKeys(value, replacements) {
 function prependTagToPost(content, tag) {
 	const output = cloneJson(content);
 	const line = [{ tag: 'text', text: `#${tag}` }];
-	if (Array.isArray(output.content)) {
-		output.content.unshift(line);
+	if (output.zh_cn && typeof output.zh_cn === 'object' && Array.isArray(output.zh_cn.content)) {
+		output.zh_cn.content.unshift(line);
 		return output;
 	}
-	if (Array.isArray(output.content_v2)) {
-		output.content_v2.unshift(line);
+	if (output.en_us && typeof output.en_us === 'object' && Array.isArray(output.en_us.content)) {
+		output.en_us.content.unshift(line);
 		return output;
+	}
+	if (Array.isArray(output.content)) {
+		return { zh_cn: { title: typeof output.title === 'string' ? output.title : '', content: [line, ...output.content] } };
+	}
+	if (Array.isArray(output.content_v2)) {
+		return { zh_cn: { title: typeof output.title === 'string' ? output.title : '', content: [line, ...output.content_v2] } };
 	}
 	for (const localized of Object.values(output)) {
 		if (localized && typeof localized === 'object' && Array.isArray(localized.content)) {
@@ -120,7 +127,7 @@ function prependTagToPost(content, tag) {
 			return output;
 		}
 	}
-	return { title: '', content: [line, [{ tag: 'text', text: JSON.stringify(output) }]] };
+	return { zh_cn: { title: '', content: [line, [{ tag: 'text', text: JSON.stringify(output) }]] } };
 }
 
 function resourceFromDirectMessage(message) {
@@ -132,6 +139,20 @@ function resourceFromDirectMessage(message) {
 
 function sourceFromRecord(record) {
 	return typeof record.message === 'string' ? parseJson(record.message) : record.message;
+}
+
+function uploadErrorMessage(resource, error) {
+	const payload = error?.response?.data;
+	const apiMessage = String(payload?.msg ?? '');
+	// Do not persist the platform's authorization URL: it contains application
+	// metadata and does not help an operator fix the relay.  Keep the actionable
+	// permission name instead.
+	if (apiMessage.includes('im:resource:upload') || apiMessage.includes('im:resource')) {
+		return `${resource}失败：机器人应用缺少 im:resource:upload（或 im:resource）应用身份权限`;
+	}
+	const detail = apiMessage || String(error?.message ?? '未知错误');
+	const code = payload?.code ? `（飞书错误 ${payload.code}）` : '';
+	return `${resource}失败${code}：${detail}`;
 }
 
 export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = null, config, logger = console }) {
@@ -168,7 +189,7 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 	async function sendMessage({ targetChatId, messageId, component, msgType, content }) {
 		const result = await larkClient.im.v1.message.create({
 			params: { receive_id_type: 'chat_id' },
-			data: { receive_id: targetChatId, msg_type: msgType, content: JSON.stringify(content), uuid: deterministicUuid(messageId, component) },
+			data: { receive_id: targetChatId, msg_type: msgType, content: JSON.stringify(content), uuid: deterministicUuid(messageId, component, targetChatId) },
 		});
 		if (result.code && result.code !== 0) throw new Error(`飞书发送失败：${result.msg ?? result.code}`);
 		if (!result.data?.message_id) throw new Error('飞书发送未返回 message_id');
@@ -184,20 +205,38 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 		}
 		const contentType = String(headerValue(response.headers, 'content-type')).split(';')[0];
 		const filename = filenameFromHeaders(response.headers, `${descriptor.kind}-${descriptor.key}`);
+		const declaredBytes = Number(headerValue(response.headers, 'content-length'));
+		if (Number.isFinite(declaredBytes) && declaredBytes > MAX_SOURCE_FILE_BYTES) {
+			if (!workbench?.uploadToDrive) throw new RelayUnsupportedError(`消息资源超过 ${Math.floor(MAX_SOURCE_FILE_BYTES / 1024 / 1024)} MiB 转发上限；未配置云空间归档`);
+			const archived = await workbench.uploadToDrive({ readable: response.getReadableStream(), fileName: filename, size: declaredBytes });
+			return { ...archived, contentType };
+		}
 		const bytes = await readableToBuffer(response.getReadableStream(), MAX_SOURCE_FILE_BYTES);
 		if (descriptor.kind === 'image' && bytes.length <= MAX_SOURCE_IMAGE_BYTES) {
-			const uploaded = await larkClient.im.v1.image.create({ data: { image_type: 'message', image: bytes } });
-			if (!uploaded?.image_key) throw new Error('飞书图片上传未返回 image_key');
-			return { kind: 'image', key: uploaded.image_key, filename };
+			let uploaded;
+			try {
+				uploaded = await larkClient.im.v1.image.create({ data: { image_type: 'message', image: bytes } });
+			} catch (error) {
+				throw new Error(uploadErrorMessage('飞书图片上传', error));
+			}
+			const imageKey = uploaded?.image_key ?? uploaded?.data?.image_key;
+			if (!imageKey) throw new Error('飞书图片上传未返回 image_key');
+			return { kind: 'image', key: imageKey, filename };
 		}
-		const uploaded = await larkClient.im.v1.file.create({
-			data: { file_type: fileType(filename, contentType), file_name: filename, file: bytes },
-		});
-		if (!uploaded?.file_key) throw new Error('飞书文件上传未返回 file_key');
-		return { kind: 'file', key: uploaded.file_key, filename };
+		let uploaded;
+		try {
+			uploaded = await larkClient.im.v1.file.create({
+				data: { file_type: fileType(filename, contentType), file_name: filename, file: bytes },
+			});
+		} catch (error) {
+			throw new Error(uploadErrorMessage('飞书文件上传', error));
+		}
+		const fileKey = uploaded?.file_key ?? uploaded?.data?.file_key;
+		if (!fileKey) throw new Error('飞书文件上传未返回 file_key');
+		return { kind: 'file', key: fileKey, filename };
 	}
 
-	async function relayPost(message, source) {
+	async function relayPostContent(message, source) {
 		const sourceContent = parseJson(message?.body?.content);
 		const resources = collectPostResources(sourceContent);
 		const replacements = { image: new Map(), file: new Map() };
@@ -210,61 +249,77 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 			replacements[resource.kind].set(resource.key, uploaded.key);
 		}
 		const content = prependTagToPost(rewritePostResourceKeys(sourceContent, replacements), source.tag);
-		return [await sendMessage({ targetChatId: source.targetChatId, messageId: message.message_id, component: 'post', msgType: 'post', content })];
+		return { component: 'post', msgType: 'post', content };
 	}
 
-	async function relayDirectResource(message, source, descriptor) {
+	async function relayDirectResourceContent(message, source, descriptor) {
 		const uploaded = await downloadAndUpload(message, descriptor);
+		if (uploaded.kind === 'drive') {
+			return { component: 'drive-archive', msgType: 'text', content: { text: taggedText(source.tag, `大文件已归档至配置的飞书云空间文件夹：${uploaded.filename}\n文件 token：${uploaded.fileToken}`) } };
+		}
 		if (message.msg_type !== 'media' || uploaded.kind !== 'file') {
 			if (uploaded.kind === 'image') {
-				return [await sendMessage({
-					targetChatId: source.targetChatId, messageId: message.message_id, component: 'image-post', msgType: 'post',
-					content: { title: '', content: [[{ tag: 'text', text: `#${source.tag}` }], [{ tag: 'img', image_key: uploaded.key }]] },
-				})];
+				return { component: 'image-post', msgType: 'post', content: { zh_cn: { title: '', content: [[{ tag: 'text', text: `#${source.tag}` }], [{ tag: 'img', image_key: uploaded.key }]] } } };
 			}
-			return [await sendMessage({
-				targetChatId: source.targetChatId, messageId: message.message_id, component: 'file', msgType: 'file',
-				content: { file_key: uploaded.key, file_name: taggedFilename(source.tag, uploaded.filename) },
-			})];
+			return { component: 'file', msgType: 'file', content: { file_key: uploaded.key, file_name: taggedFilename(source.tag, uploaded.filename) } };
 		}
-		return [await sendMessage({
-			targetChatId: source.targetChatId, messageId: message.message_id, component: 'resource-post', msgType: 'post',
-			content: {
-				title: '',
-				content: [[{ tag: 'text', text: `#${source.tag}` }], [{ tag: 'media', file_key: uploaded.key }]],
-			},
-		})];
+		return {
+			component: 'resource-post', msgType: 'post',
+			content: { zh_cn: { title: '', content: [[{ tag: 'text', text: `#${source.tag}` }], [{ tag: 'media', file_key: uploaded.key }]] } },
+		};
 	}
 
-	async function relayOne(message, source) {
+	async function relayPayload(message, source) {
 		if (!message?.message_id) throw new RelayUnsupportedError('源消息没有 message_id');
-		if (message.msg_type === 'post') return relayPost(message, source);
+		if (message.msg_type === 'post') return relayPostContent(message, source);
 		const directResource = resourceFromDirectMessage(message);
-		if (directResource) return relayDirectResource(message, source, directResource);
+		if (directResource) return relayDirectResourceContent(message, source, directResource);
 		if (message.msg_type === 'text') {
-			return [await sendMessage({
-				targetChatId: source.targetChatId, messageId: message.message_id, component: 'text', msgType: 'text',
-				content: { text: taggedText(source.tag, messageText(message?.body?.content)) },
-			})];
+			return { component: 'text', msgType: 'text', content: { text: taggedText(source.tag, messageText(message?.body?.content)) } };
 		}
 		// Interactive cards, stickers, shared cards and merged forwards are not
 		// portable across tenants. Preserve their type and payload summary in one
 		// tagged text bubble, while the following action card keeps a durable
 		// source reference for analyst follow-up.
 		if (['interactive', 'sticker', 'share_chat', 'share_user', 'merge_forward', 'audio', 'system'].includes(message.msg_type)) {
-			return [await sendMessage({
-				targetChatId: source.targetChatId, messageId: message.message_id, component: 'portable-summary', msgType: 'text',
-				content: { text: taggedText(source.tag, `[${message.msg_type}]　${messageText(message?.body?.content).slice(0, 3_000) || '此消息类型无法跨租户保持原组件，已保留协作卡片。'}`) },
-			})];
+			return { component: 'portable-summary', msgType: 'text', content: { text: taggedText(source.tag, `[${message.msg_type}]　${messageText(message?.body?.content).slice(0, 3_000) || '此消息类型无法跨租户保持原组件。'}`) } };
 		}
 		throw new RelayUnsupportedError(`暂不支持的飞书消息类型：${message.msg_type ?? 'unknown'}`);
+	}
+
+	async function relayOne(message, source) {
+		const payload = await relayPayload(message, source);
+		return Promise.all(source.targetChatIds.map(async (targetChatId) => ({
+			targetChatId,
+			messageId: await sendMessage({ targetChatId, messageId: message.message_id, ...payload }),
+		})));
+	}
+
+	async function updateRelayedMessage(message, source, record) {
+		const targetIds = Array.isArray(record?.target_message_ids) ? record.target_message_ids : record?.targetMessageIds;
+		const targetMessages = Array.isArray(targetIds) ? targetIds : [];
+		if (!targetMessages.length) return false;
+		const payload = await relayPayload(message, source);
+		if (!['text', 'post'].includes(payload.msgType)) return false;
+		await Promise.all(targetMessages.map(async (entry) => {
+			const targetMessageId = typeof entry === 'string' ? entry : entry?.messageId;
+			if (!targetMessageId) return;
+			const result = await larkClient.im.v1.message.update({
+				path: { message_id: targetMessageId }, data: { msg_type: payload.msgType, content: JSON.stringify(payload.content) },
+			});
+			if (result?.code && result.code !== 0) throw new Error(`更新目标群消息失败：${result.msg ?? result.code}`);
+		}));
+		return true;
 	}
 
 	async function processClaimed(message, source) {
 		try {
 			const targetMessageIds = await relayOne(message, source);
 			await ledger.markRelayMessage(message.message_id, { status: 'sent', targetMessageIds, errorMessage: null });
-			if (workbench) {
+			// The relay contract is one source message -> one summary bubble.  An
+			// action card is useful, but is deliberately opt-in so it never splits
+			// the tagged original message by default.
+			if (workbench && config.actionCardsEnabled === true) {
 				const record = await ledger.getRelayMessage(message.message_id);
 				await workbench.publishActionCard(record, source).catch((error) => logger.warn(`行动卡片创建失败：${source.key} ${message.message_id}：${error.message}`));
 			}
@@ -279,7 +334,11 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 	}
 
 	async function resolveSource(source) {
-		const resolvedSource = { ...source, targetChatId: source.targetChatId ?? config.targetChatId };
+		// Every route retains the main summary group; route-specific targets are
+		// additional fan-out destinations (for example, the dedicated #liwei group).
+		const requestedTargets = [config.targetChatId, ...(Array.isArray(source.targetChatIds) ? source.targetChatIds : []), source.targetChatId].filter(Boolean);
+		const targetChatIds = [...new Set(requestedTargets.map((value) => String(value ?? '').trim()).filter(Boolean))];
+		const resolvedSource = { ...source, targetChatIds, targetChatId: targetChatIds[0] };
 		if (resolvedSource.chatId) return { ...resolvedSource, resolvedChatId: resolvedSource.chatId };
 		if (!resolvedSource.chatName) return null;
 		const result = await sourceApi.chatSearch(resolvedSource.chatName);
@@ -293,7 +352,7 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 			const source = sourcesByKey.get(record.source_key);
 			if (!source || !source.resolvedChatId || source.resolvedChatId !== record.source_chat_id) continue;
 			const claimed = await ledger.claimRelayMessage({
-				...record, sourceChatId: source.resolvedChatId, targetChatId: source.targetChatId,
+				...record, sourceChatId: source.resolvedChatId, targetChatId: source.targetChatId, targetChatIds: source.targetChatIds,
 				routeTag: source.tag, message: sourceFromRecord(record),
 			});
 			if (claimed) await processClaimed(sourceFromRecord(record), source);
@@ -301,7 +360,7 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 	}
 
 	async function pollSource(source) {
-		if (source.resolvedChatId === source.targetChatId) {
+		if (source.targetChatIds.includes(source.resolvedChatId)) {
 			logger.error(`群消息转发已跳过：源群 ${source.key} 与汇集群相同，避免循环`);
 			return;
 		}
@@ -329,8 +388,14 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 				const sourceUpdateTime = message.update_time ? asCreateTimeMs(message.update_time, createTime) : null;
 				const record = {
 					sourceMessageId: message.message_id, sourceKey: source.key, sourceChatId: source.resolvedChatId,
-					sourceCreateTime: createTime, sourceUpdateTime, targetChatId: source.targetChatId, routeTag: source.tag, message,
+					sourceCreateTime: createTime, sourceUpdateTime, targetChatId: source.targetChatId, targetChatIds: source.targetChatIds, routeTag: source.tag, message,
 				};
+				// Group membership, join/leave and other system notices have no
+				// analyst content. Never convert them into tagged placeholder text.
+				if (isSystemMessage(message)) {
+					await ledger.filterRelayMessage(record, '系统消息已过滤（如入群、退群或群设置变更）');
+					continue;
+				}
 				const existing = await ledger.getRelayMessage(message.message_id);
 				if (bootstrap && config.bootstrapMode === 'skip_existing') {
 					await ledger.skipRelayMessage(record);
@@ -344,8 +409,11 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 					continue;
 				}
 				if (existing && (message.updated === true || (sourceUpdateTime && (!existing.source_update_time || sourceUpdateTime > Number(existing.source_update_time))))) {
+					let originalSynced = false;
+					try { originalSynced = await updateRelayedMessage(message, source, existing); }
+					catch (error) { logger.warn(`同步源消息编辑失败：${source.key} ${message.message_id}：${error instanceof Error ? error.message : String(error)}`); }
 					const changed = await ledger.updateRelaySourceMessage(message.message_id, { message, sourceUpdateTime, sourceDeleted: false });
-					await workbench?.syncSourceChange(changed, { deleted: false });
+					await workbench?.syncSourceChange(changed, { deleted: false, originalSynced });
 					continue;
 				}
 				if (reconciling && !existing && createTime < normalFrom) {

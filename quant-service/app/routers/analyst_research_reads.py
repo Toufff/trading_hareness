@@ -7,6 +7,14 @@ from typing import Any, Callable
 
 from fastapi import APIRouter
 
+from ..analyst_market_evaluation import analyst_market_evaluation
+from ..analyst_stock_timeline import analyst_stock_timeline
+from ..analyst_market_review import (
+    build_recorded_analyst_market_review, latest_analyst_market_review,
+    list_analyst_market_reviews,
+)
+from ..request_models import AnalystMarketReviewRequest
+
 
 def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any, date | None], dict[str, Any]]) -> APIRouter:
     router = APIRouter(tags=["analyst-research-reads"])
@@ -51,6 +59,49 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
         return {"items": [dict(row) for row in rows], "health": [dict(row) for row in health],
                 "live_effect": "none", "boundary": "append_only text-derived observations; promotion registry remains zero by default"}
 
+    @router.get("/api/v1/analyst-research/market-evaluation")
+    def market_evaluation(
+        start_date: date | None = None,
+        end_date: date | None = None,
+        analyst_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Align analyst events with same-day market and sector-flow context.
+
+        This is intentionally a read-only research projection.  It uses the
+        immutable observation ledger and never writes or changes live weights.
+        """
+        return analyst_market_evaluation(database, start_date, end_date, analyst_id)
+
+    @router.get("/api/v1/analyst-research/reviews")
+    def reviews(cadence: str | None = None, limit: int = 20) -> dict[str, Any]:
+        if cadence is not None and cadence not in {"daily", "weekly"}:
+            raise ValueError("cadence must be daily or weekly")
+        return list_analyst_market_reviews(database, cadence, limit)
+
+    @router.get("/api/v1/analyst-research/reviews/latest")
+    def latest_review(cadence: str = "daily") -> dict[str, Any]:
+        if cadence not in {"daily", "weekly"}:
+            raise ValueError("cadence must be daily or weekly")
+        return latest_analyst_market_review(database, cadence)
+
+    @router.post("/api/v1/analyst-research/reviews/run")
+    def run_review(request: AnalystMarketReviewRequest) -> dict[str, Any]:
+        return {"review": build_recorded_analyst_market_review(database, request.cadence, request.as_of_date)}
+
+    @router.get("/api/v1/analyst-research/stock-timeline")
+    def stock_timeline(
+        symbol: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        analyst_id: str | None = None,
+        limit: int = 1500,
+    ) -> dict[str, Any]:
+        """Return minute K-lines with point-in-time analyst action markers."""
+        return analyst_stock_timeline(
+            database, symbol=symbol, start_date=start_date, end_date=end_date,
+            analyst_id=analyst_id, limit=limit,
+        )
+
     @router.get("/api/v1/analyst-research/sync-health")
     def sync_health() -> dict[str, Any]:
         workflow_health: list[dict[str, Any]] = []
@@ -79,7 +130,10 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                                    AND w."activeVersionId"=p."publishedVersionId") AS published,
                                   e.status AS latest_execution_status,e."startedAt" AS latest_started_at,
                                   e."stoppedAt" AS latest_stopped_at,
-                                  e."workflowVersionId" AS latest_execution_version_id
+                                  e."workflowVersionId" AS latest_execution_version_id,
+                                  smoke.status AS smoke_execution_status,
+                                  smoke."stoppedAt" AS smoke_execution_at,
+                                  smoke."workflowVersionId" AS smoke_execution_version_id
                              FROM public.workflow_entity w
                         LEFT JOIN public.workflow_published_version p ON p."workflowId"=w.id
                         LEFT JOIN LATERAL (
@@ -94,6 +148,14 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                                AND mode='trigger'
                              ORDER BY "startedAt" DESC NULLS LAST,id DESC LIMIT 1
                         ) e ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT status,"stoppedAt","workflowVersionId"
+                              FROM public.execution_entity
+                             WHERE "workflowId"=w.id
+                               AND mode='cli' AND status='success' AND finished=true
+                               AND "workflowVersionId"=w."activeVersionId"
+                             ORDER BY "stoppedAt" DESC NULLS LAST,id DESC LIMIT 1
+                        ) smoke ON TRUE
                             WHERE w.id IN ('remoteArchiveReports123','remoteArchiveMessages123')
                             ORDER BY w.id"""
                 ).fetchall()
@@ -118,6 +180,14 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                         item["status"] = "degraded"
                         item["execution_evidence"] = "current_workflow_execution_failed"
                         item["notice"] = "current published workflow has not completed successfully"
+                    elif item.get("smoke_execution_version_id") == item.get("active_version_id"):
+                        # The UI already renders ``degraded`` as a warning. Keep
+                        # the explicit scheduler distinction in evidence/notice
+                        # while avoiding the false ``未启用`` label used for an
+                        # unknown workflow state.
+                        item["status"] = "degraded"
+                        item["execution_evidence"] = "current_workflow_cli_smoke"
+                        item["notice"] = "current graph passed CLI smoke; awaiting the first scheduled trigger"
                     else:
                         # Existing cursors prove prior service imports, but a
                         # retired execution cannot validate the current graph.
@@ -136,6 +206,24 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
             for item in (dict(row) for row in attempts)
             if str(item.get("stream_key") or "") in {"reports", "messages"}
         }
+        # The compact sync receipt survives n8n execution pruning and carries
+        # the graph id injected by the published workflow.  It is stronger
+        # than a generic cursor advance: it proves this exact graph reached
+        # the local service successfully.
+        for item in workflow_health:
+            stream_key = "messages" if str(item.get("id")) == "remoteArchiveMessages123" else "reports"
+            attempt = latest_attempts.get(stream_key) or {}
+            summary = attempt.get("summary") if isinstance(attempt.get("summary"), dict) else {}
+            if (
+                item.get("active") and item.get("published")
+                and attempt.get("status") == "completed"
+                and summary.get("workflow_id") == item.get("id")
+            ):
+                item["status"] = "ready"
+                item["execution_evidence"] = "current_workflow_sync_receipt"
+                item["smoke_execution_status"] = "success"
+                item["smoke_execution_at"] = attempt.get("completed_at")
+                item["notice"] = None
         for stream_key in ("reports", "messages"):
             stream_rows = [dict(row) for row in cursors if row["stream_key"] == stream_key]
             if stream_key == "messages":
@@ -178,14 +266,18 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
                 "attempt_age_seconds": round(attempt_age_seconds, 1) if attempt_age_seconds is not None else None,
                 "latest_attempt_status": attempt.get("status") if attempt else None,
                 "latest_attempt_error_code": attempt.get("error_code") if attempt else None,
+                "latest_attempt_summary": attempt.get("summary") if attempt else None,
                 "expected_workflow_id": "remoteArchiveMessages123" if stream_key == "messages" else "remoteArchiveReports123",
                 "notice": notice,
             })
         streams_ready = all(item.get("status") == "ready" for item in stream_health)
         ready_workflows = {str(item.get("id")) for item in workflow_health if item.get("status") == "ready"}
+        smoke_workflows = {str(item.get("id")) for item in workflow_health if item.get("execution_evidence") == "current_workflow_cli_smoke"}
         workflow_verified = streams_ready and {"remoteArchiveReports123", "remoteArchiveMessages123"}.issubset(ready_workflows)
         if workflow_verified:
             runtime_verification = "verified_recent_execution"
+        elif streams_ready and {"remoteArchiveReports123", "remoteArchiveMessages123"}.issubset(smoke_workflows):
+            runtime_verification = "verified_cli_smoke_pending_scheduled_execution"
         elif streams_ready:
             runtime_verification = "service_reachable_pending_scheduled_execution"
         else:

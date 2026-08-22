@@ -30,6 +30,7 @@ class StrategyReviewSchedulerTests(unittest.IsolatedAsyncioTestCase):
             build_market_snapshot=lambda day, session: operation("snapshot", day, session),
             build_board_report=lambda: operation("board"),
             recompute_outcomes=lambda day: operation("outcomes", day),
+            recompute_analyst_intraday_outcomes=lambda day: operation("analyst_intraday_outcomes", day),
             recompute_scorecards=lambda day: operation("scorecards", day),
             persist_review=lambda day, session: operation("persist", day, session),
             now=lambda: datetime(2026, 8, 14, 11, 31, tzinfo=CN),
@@ -68,7 +69,7 @@ class StrategyReviewSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, ("close",))
         self.assertEqual(
             [name for name, _ in calls],
-            ["calendar", "index", "snapshot", "board", "outcomes", "scorecards", "persist"],
+            ["calendar", "index", "snapshot", "board", "outcomes", "analyst_intraday_outcomes", "scorecards", "persist"],
         )
         self.assertIn((datetime(2026, 8, 14, tzinfo=CN).date(), "close"), completed)
 
@@ -83,6 +84,22 @@ class StrategyReviewSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, ())
         self.assertEqual(completed, set())
         self.assertEqual([name for name, _ in calls], ["calendar", "snapshot", "board"])
+
+    async def test_close_generates_daily_and_friday_weekly_analyst_reviews(self):
+        dependencies, calls = self._dependencies()
+        analyst_reviews: list[tuple[str, object]] = []
+
+        async def build_review(cadence, day):
+            analyst_reviews.append((cadence, day))
+
+        dependencies = dependencies.__class__(**{
+            **dependencies.__dict__, "build_analyst_market_review": build_review,
+        })
+        completed: set[tuple[object, str]] = set()
+        await strategy_review_scheduler_step(
+            completed, dependencies, local=datetime(2026, 8, 14, 15, 5, 30, tzinfo=CN),
+        )
+        self.assertEqual([cadence for cadence, _ in analyst_reviews], ["daily", "weekly"])
 
 
 if __name__ == "__main__":

@@ -16,6 +16,14 @@ def minute_features(rows: list[dict[str, Any]], *, lookback: int = 20,
                     source: str = "tencent_free",
                     number: Callable[[Any], float | None]) -> dict[str, Any] | None:
     """Build a causal price/volume burst feature from normalized minute rows."""
+    # Do not bridge a provider-declared cumulative reset (normally its
+    # morning/afternoon segmentation).  Comparing 13:01 with 11:29 would
+    # fabricate a multi-hour "one-minute" return and contaminate volume
+    # baselines.
+    if rows:
+        current_segment = rows[-1].get("cumulative_segment")
+        if current_segment is not None:
+            rows = [row for row in rows if row.get("cumulative_segment") == current_segment]
     if len(rows) < 6:
         return None
     current = rows[-1]
@@ -32,6 +40,13 @@ def minute_features(rows: list[dict[str, Any]], *, lookback: int = 20,
     baseline = median(valid_prior) if len(valid_prior) >= 5 else None
     current_volume = number(current.get("volume_lot", current.get("vol")))
     vwap = number(current.get("vwap"))
+    quality_flags: list[str] = []
+    # A same-session VWAP cannot legitimately be orders of magnitude away
+    # from the current price.  Keep the raw minute rows for audit, but make a
+    # malformed unit incapable of satisfying a live VWAP confirmation.
+    if vwap is not None and vwap > 0 and abs(price / vwap - 1) > 0.5:
+        quality_flags.append("vwap_price_scale_mismatch")
+        vwap = None
     session_prices = [number(row.get("close")) for row in rows]
     valid_session_prices = [float(value) for value in session_prices if value is not None and value > 0]
     session_low = min(valid_session_prices) if valid_session_prices else None
@@ -74,11 +89,13 @@ def minute_features(rows: list[dict[str, Any]], *, lookback: int = 20,
     q_smart_money = round(smart_vwap / window_vwap, 6) if smart_vwap and window_vwap and window_vwap > 0 else None
     return {
         "time": current.get("time"), "price": price, "is_complete": bool(current.get("is_complete")),
+        "cumulative_segment": current.get("cumulative_segment"),
         "return_1m_pct": past_return(1), "return_3m_pct": past_return(3), "return_5m_pct": past_return(5),
         "minute_volume_lot": current_volume, "minute_amount": number(current.get("amount")),
         "volume_baseline_lot": round(baseline, 2) if baseline is not None else None,
         "minute_volume_multiple": round(current_volume / baseline, 4) if current_volume is not None and baseline else None,
         "vwap": vwap, "above_vwap_pct": round((price / vwap - 1) * 100, 4) if vwap and vwap > 0 else None,
+        "quality_flags": quality_flags,
         "session_low_price": session_low, "session_high_price": session_high,
         "recovery_from_session_low_pct": round((price / session_low - 1) * 100, 4) if session_low else None,
         "return_from_open_pct": round((price / opening_price - 1) * 100, 4) if opening_price and opening_price > 0 else None,

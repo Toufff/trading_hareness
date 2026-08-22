@@ -16,10 +16,10 @@ if (credentialId) {
   credentials.httpBearerAuth = { id: credentialId, name: credentialName || credentials.httpBearerAuth.name };
 }
 
-// The bearer value and remote URL are deliberately not versioned. n8n keeps
-// the bearer in its encrypted credential store; the node only calls the local
-// quant service, which forwards the header in memory to its fixed local URL.
-function syncTrigger({ name, stream, maxItems, y }) {
+// The local write key is injected by n8n at execution time.  Do not attach the
+// remote analyst bearer credential in source control. n8n keeps it encrypted;
+// the service requires both this local write key and the upstream bearer.
+function syncTrigger({ name, stream, maxItems, workflowId, y }) {
   return {
   id: randomUUID(),
   name,
@@ -29,6 +29,11 @@ function syncTrigger({ name, stream, maxItems, y }) {
   parameters: {
     authentication: 'genericCredentialType',
     genericAuthType: 'httpBearerAuth',
+    sendHeaders: true,
+    specifyHeaders: 'fields',
+    headerParameters: {
+      parameters: [{ name: 'X-Quant-Write-Key', value: '={{ $env.QUANT_WRITE_API_KEY }}' }],
+    },
     url: 'http://quant-research:8000/api/v1/remote-archive/sync',
     method: 'POST',
     sendBody: true,
@@ -37,7 +42,7 @@ function syncTrigger({ name, stream, maxItems, y }) {
     // n8n's JSON-body field requires an expression wrapper.  Without the
     // leading `={{ ... }}` it attempts to parse the literal `=JSON...` and
     // fails before the local service is called.
-    jsonBody: `={{ JSON.stringify({ streams: ["${stream}"], max_items: ${maxItems} }) }}`,
+    jsonBody: `={{ JSON.stringify({ streams: ["${stream}"], max_items: ${maxItems}, workflow_id: "${workflowId}" }) }}`,
     options: { timeout: 120000, response: { includeInputData: true } },
   },
   credentials,
@@ -74,7 +79,7 @@ function manualTrigger({ name, y }) {
 }
 
 function workflow({ id, name, triggerName, stream, maxItems, intervals, y }) {
-  const trigger = syncTrigger({ name: triggerName, stream, maxItems, y });
+  const trigger = syncTrigger({ name: triggerName, stream, maxItems, workflowId: id, y });
   const clock = schedule({ name: `${name} 定时`, intervals, y });
   const manual = manualTrigger({ name, y });
   return {
