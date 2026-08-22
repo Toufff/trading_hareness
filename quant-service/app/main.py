@@ -368,6 +368,7 @@ from .intraday_rule_input_replay_runner import run_recorded_rule_input_replay
 from .post_close_refresh import record_stage_with_receipt, run_refresh as run_post_close_refresh_orchestrated
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
 from .board_research_service import run as run_board_research_isolated
+from .akshare_probe_service import run as run_akshare_probe_isolated
 from .recommendation_generation import generate as generate_recommendations_isolated
 from .tushare_daily_sync import sync as sync_tushare_isolated
 from .baostock_daily_sync import fetch_rows as fetch_baostock_rows_isolated, sync as sync_baostock_isolated
@@ -5867,67 +5868,23 @@ def persist_akshare_probe_failure(capability: str, error: str, latency_ms: int |
 
 
 async def akshare_probe(payload: AkShareProbeRequest) -> dict[str, Any]:
-    as_of = payload.trade_date or cn_today()
-    start = as_of - timedelta(days=payload.lookback_days + 12)
-    results: list[dict[str, Any]] = []
-
-    async def run_step(label: str, capability: str, action: Any) -> None:
-        if capability in await open_provider_capabilities("akshare", [capability]):
-            results.append({"source": label, "provider": "akshare", "capability": capability,
-                            "status": "circuit_open", "received": 0, "stored": 0,
-                            "error": "provider health circuit is open; upstream request skipped"})
-            return
-        try:
-            started_at = asyncio.get_running_loop().time()
-            rows = await run_akshare_blocking(action, timeout_seconds=45)
-            latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
-            stored = await run_database_blocking(
-                persist_akshare_probe_result, capability, rows, payload.symbol, latency_ms, timeout_seconds=60,
-            )
-            results.append({"source": label, "provider": "akshare", "capability": capability,
-                            "status": "completed" if rows else "empty", "received": len(rows), "stored": stored})
-        except ExecutorSaturatedError as error:
-            results.append({"source": label, "provider": "akshare", "capability": capability,
-                            "status": "blocked", "received": 0, "stored": 0,
-                            "error": safe_error_detail(str(error), 300)})
-        except (asyncio.TimeoutError, AkShareProviderError, ValueError) as error:
-            latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
-            await run_database_blocking(persist_akshare_probe_failure, capability, str(error) or "AKShare request failed", latency_ms)
-            results.append({"source": label, "provider": "akshare", "capability": capability,
-                            "status": "failed", "received": 0, "stored": 0, "error": str(error)[:300]})
-
-    await run_step("AKShare公开日线", "daily_bar", lambda: akshare_daily(payload.symbol, start.strftime("%Y%m%d"), as_of.strftime("%Y%m%d")))
-    if payload.include_market_summary:
-        await run_step("AKShare上交所市场总貌", "market_summary", akshare_market_summary)
-    if payload.include_lhb:
-        await run_step("AKShare龙虎榜事件", "lhb_event", lambda: akshare_lhb_events(start, as_of))
-    if payload.include_strong_pool:
-        await run_step("AKShare强势股池", "strong_pool", lambda: akshare_strong_pool_events(as_of))
-    if payload.include_supplements:
-        await run_step("AKShare市场宽度补充", "market_breadth", lambda: akshare_market_breadth(as_of))
-        if payload.include_board_taxonomy:
-            await run_step("AKShare板块/行业/成分补充", "board_taxonomy", lambda: akshare_board_supplements(payload.board_limit))
-        if payload.include_moneyflow:
-            await run_step("AKShare资金流补充", "moneyflow_supplement", lambda: akshare_moneyflow_supplements(payload.symbol))
-        if payload.include_limit_pools:
-            await run_step("AKShare涨跌停情绪池补充", "limit_pool", lambda: akshare_limit_pool_events(as_of))
-        if payload.include_lhb_supplements:
-            await run_step("AKShare龙虎榜席位统计补充", "lhb_supplement", lambda: akshare_lhb_supplements(start, as_of))
-        if payload.include_block_trades:
-            await run_step("AKShare大宗交易补充", "block_trade_supplement", lambda: akshare_block_trade_supplements(as_of))
-        if payload.include_corporate_risk:
-            await run_step("AKShare公司事件风险补充", "corporate_risk_supplement", lambda: akshare_corporate_risk_supplements(payload.symbol, start, as_of))
-        if payload.include_analyst_heat:
-            await run_step("AKShare分析师/热度/新闻补充", "analyst_heat_supplement", lambda: akshare_analyst_heat_supplements(payload.symbol, as_of.year))
-        if payload.include_index_fund:
-            await run_step("AKShare指数成分/基金持仓补充", "index_fund_supplement", akshare_index_fund_supplements)
-        if payload.include_macro_cross_asset:
-            await run_step("AKShare宏观/商品/衍生品补充", "macro_cross_asset_supplement", lambda: akshare_macro_cross_asset_supplements(as_of))
-    overall_status = "completed" if any(item["status"] in {"completed", "empty"} for item in results) \
-        else "blocked" if results and all(item["status"] in {"circuit_open", "blocked"} for item in results) else "failed"
-    return {"status": overall_status,
-            "provider": akshare_status(), "symbol": payload.symbol, "as_of_date": str(as_of), "results": results,
-            "decision_eligible": False}
+    return await run_akshare_probe_isolated(
+        payload, today=cn_today, run_akshare=run_akshare_blocking, run_database=run_database_blocking,
+        open_provider_capabilities=open_provider_capabilities, persist_result=persist_akshare_probe_result,
+        persist_failure=persist_akshare_probe_failure, safe_error_detail=safe_error_detail,
+        provider_status=akshare_status,
+        sources={
+            "daily": akshare_daily, "market_summary": akshare_market_summary, "lhb_events": akshare_lhb_events,
+            "strong_pool": akshare_strong_pool_events, "market_breadth": akshare_market_breadth,
+            "board_supplements": akshare_board_supplements, "moneyflow_supplements": akshare_moneyflow_supplements,
+            "limit_pool_events": akshare_limit_pool_events, "lhb_supplements": akshare_lhb_supplements,
+            "block_trade_supplements": akshare_block_trade_supplements,
+            "corporate_risk_supplements": akshare_corporate_risk_supplements,
+            "analyst_heat_supplements": akshare_analyst_heat_supplements,
+            "index_fund_supplements": akshare_index_fund_supplements,
+            "macro_cross_asset_supplements": akshare_macro_cross_asset_supplements,
+        },
+    )
 
 
 async def probe_realtime_sources(payload: RealtimeProbeRequest) -> dict[str, Any]:

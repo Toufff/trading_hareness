@@ -27,6 +27,7 @@
 - 盘后复盘新增 `short-term-review-v1` 七步证据投影：市场情绪（涨停/跌停及昨日涨停溢价）、连板梯队、板块结构、成交额前 20 与龙虎榜、亏钱效应、风向标和次日预案。它只读取当日已落库且满足 `available_at <= observed_at` 的事件/日线/板块证据；板块主线必须有精确成员与报价覆盖，缺失时明确标记，不按中文名称猜归属。
 - 收盘复盘前端新增“短线交易七步复盘”卡片，展示证据、覆盖度、风向标、参与条件和失效条件。输出强制 `decision_eligible=false`，不会自动加入观察池、改变阈值或产生订单；这套框架把“情绪—梯队—主线—资金—亏钱效应—风向标—次日计划”固定成可回放清单。
 - 盘后一键刷新阶段回执现在支持跨进程恢复：每个 `post-close-refresh:{stage}:{trade_date}` 先读取唯一 `automation_runs` 回执，已 `completed` 的阶段直接返回 `resumed_from_receipt=true`，不重复请求 provider 或写入；`partial`、`blocked`、`failed` 才会重开同一行重试。租约、超时与失败脱敏边界不变，并有真实 PostgreSQL JSONB/时间戳契约测试覆盖。
+- AKShare 探针编排已从 `main.py` 移至 `akshare_probe_service.py`：每个 capability 仍保持独立熔断、45 秒有界执行、数据库健康回执、失败脱敏与 `decision_eligible=false`；主文件仅注入已存在的 provider 函数和执行器，不改变接口参数或采集范围。
 
 ## 继续迭代顺序
 
