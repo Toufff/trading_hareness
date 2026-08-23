@@ -21,6 +21,7 @@ from ..analyst_market_review import (
     list_analyst_market_reviews,
 )
 from ..request_models import AnalystMarketReviewRequest
+from ..runtime_executors import run_database_blocking
 
 
 def _profiles_sync(database: Any) -> dict[str, Any]:
@@ -146,8 +147,14 @@ def build_analyst_research_reads_router(
             analyst_id=analyst_id, limit=limit,
         )
 
-    @router.get("/api/v1/analyst-research/sync-health")
-    def sync_health() -> dict[str, Any]:
+    def _sync_health_payload() -> dict[str, Any]:
+        """Read cross-schema sync evidence within the bounded DB executor.
+
+        The n8n execution audit still lives in ``public`` rather than the
+        quant async repository boundary.  Keep this compatibility projection
+        synchronous, but never let a dashboard request consume an unbounded
+        FastAPI worker thread.
+        """
         workflow_health: list[dict[str, Any]] = []
         with database.transaction() as connection:
             cursors = connection.execute(
@@ -331,5 +338,9 @@ def build_analyst_research_reads_router(
                 "promotion_registry": [dict(row) for row in promotion],
                 "live_effect": "none_until_explicit_approval", "boundary": "remote sync health is read-only",
                 "runtime_verification": runtime_verification}
+
+    @router.get("/api/v1/analyst-research/sync-health")
+    async def sync_health() -> dict[str, Any]:
+        return await run_database_blocking(_sync_health_payload, timeout_seconds=30)
 
     return router

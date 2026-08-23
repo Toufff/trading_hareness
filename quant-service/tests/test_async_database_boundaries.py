@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from app.runtime_executors import BlockingExecutorBoundary, ExecutorSaturatedError, run_akshare_blocking
 from app.async_strategy_read_repository import latest_strategy_decision
@@ -240,14 +241,13 @@ class MainRouterBoundaryTests(unittest.TestCase):
 class RouterReadBoundaryTests(unittest.TestCase):
     """Keep local dashboard reads off accidental synchronous DB routes.
 
-    The exceptions are deliberately narrow: two static payloads, the
-    compatibility branch of the injected intraday status router, and analyst
-    sync health, which joins n8n's public audit schema until that operational
-    boundary is separately isolated.
+    The exceptions are deliberately narrow: two static payloads and the
+    compatibility branch of the injected intraday status router.  The analyst
+    sync-health projection still joins n8n's public audit schema, but its
+    async route now uses the bounded database executor.
     """
 
     _SYNC_GET_EXCEPTIONS = {
-        ("analyst_research_reads.py", "sync_health"),
         ("automation_reads.py", "agent_context"),
         ("intraday_status.py", "intraday_services_status"),
         ("research_readiness.py", "training_roadmap"),
@@ -269,6 +269,23 @@ class RouterReadBoundaryTests(unittest.TestCase):
                 ):
                     sync_gets.add((path.name, node.name))
         self.assertEqual(sync_gets, self._SYNC_GET_EXCEPTIONS)
+
+    def test_sync_health_uses_bounded_database_executor(self) -> None:
+        calls: list[tuple[object, dict[str, object]]] = []
+
+        async def bounded(action, *args, **kwargs):
+            calls.append((action, kwargs))
+            return {"runtime_verification": "bounded"}
+
+        with patch("app.routers.analyst_research_reads.run_database_blocking", new=bounded):
+            router = build_analyst_research_reads_router(object(), lambda _database, _as_of: {})
+            endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-research/sync-health")
+            payload = asyncio.run(endpoint())
+
+        self.assertEqual(payload["runtime_verification"], "bounded")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0].__name__, "_sync_health_payload")
+        self.assertEqual(calls[0][1], {"timeout_seconds": 30})
 
 
 class BlockingExecutorBoundaryTests(unittest.IsolatedAsyncioTestCase):
