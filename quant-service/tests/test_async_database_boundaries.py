@@ -6,6 +6,7 @@ import ast
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timezone
 from pathlib import Path
 import unittest
 
@@ -22,6 +23,8 @@ from app.async_analyst_research_read_repository import observations as async_ana
 from app.async_analyst_research_read_repository import profiles as async_analyst_research_profiles
 from app.async_analyst_archive_read_repository import remote_messages as async_remote_messages
 from app.async_analyst_archive_read_repository import remote_reports as async_remote_reports
+from app.async_board_curve_read_repository import intraday_board_flow_curves as async_board_flow_curves
+from app.async_board_curve_read_repository import latest_close_sector_review_report as async_latest_board_review
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -31,6 +34,7 @@ from app.routers.research_readiness import build_research_readiness_router
 from app.routers.analyst_skill_reads import build_analyst_skill_reads_router
 from app.routers.analyst_research_reads import build_analyst_research_reads_router
 from app.routers.analyst_reads import build_analyst_reads_router
+from app.routers.board_curve_reads import build_board_curve_reads_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -115,6 +119,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_analyst_skill_read_repository.py",
             "async_analyst_research_read_repository.py",
             "async_analyst_archive_read_repository.py",
+            "async_board_curve_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -625,6 +630,89 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages["offset"], 0)
         self.assertEqual(database.connection.calls[0][1], (100, 0))
         self.assertEqual(database.connection.calls[2][1], ("anqiang", "anqiang", 100, 0))
+
+    async def test_board_curve_router_prefers_async_persisted_projection(self) -> None:
+        calls = []
+
+        async def curves(_database, trade_date, taxonomy, since, **kwargs):
+            calls.append((trade_date, taxonomy, since, kwargs))
+            return {"items": [], "taxonomy": taxonomy}
+
+        async def review(_database):
+            calls.append("review")
+            return {"report": None}
+
+        router = build_board_curve_reads_router(
+            object(), lambda: 60, lambda: 60, async_database=object(),
+            async_curves_fn=curves, async_latest_review_fn=review,
+        )
+        endpoints = {route.path: route.endpoint for route in router.routes}
+        payload = await endpoints["/api/v1/market/sectors/intraday/curves"](None, "concept", None)
+        review_payload = await endpoints["/api/v1/market/sectors/review/report/latest"]()
+        self.assertEqual(payload["taxonomy"], "concept")
+        self.assertIsNone(review_payload["report"])
+        self.assertEqual(calls[0][1], "concept")
+        self.assertEqual(calls[0][3], {"curve_retention_days": 60, "rotation_retention_days": 60})
+        self.assertEqual(calls[1], "review")
+
+    async def test_board_curve_repository_uses_native_async_rows_and_shared_projection(self) -> None:
+        observed_at = datetime(2026, 8, 10, 1, 21, tzinfo=timezone.utc)
+
+        class Result:
+            def __init__(self, row=None, rows=None):
+                self.row, self.rows = row, rows or []
+
+            async def fetchone(self):
+                return self.row
+
+            async def fetchall(self):
+                return self.rows
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "board_reports ORDER BY" in sql:
+                    return Result({"board_report_id": "report-1"})
+                if "intraday_board_flow_snapshots" in sql:
+                    return Result(rows=[{
+                        "observed_at": observed_at, "status": "completed",
+                        "coverage": {"concept": {"flow_boards": 1}},
+                        "payload": {"items": [{
+                            "taxonomy_key": "eastmoney_concept", "sector_key": "BK1", "label": "芯片",
+                            "net_inflow": 2.5, "change_pct": 1.0,
+                        }]}, "source": "minute_curve",
+                    }])
+                return Result(rows=[])
+
+        class Transaction:
+            def __init__(self, connection):
+                self.connection = connection
+
+            async def __aenter__(self):
+                return self.connection
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Database:
+            def __init__(self):
+                self.connection = Connection()
+
+            def transaction(self):
+                return Transaction(self.connection)
+
+        database = Database()
+        review = await async_latest_board_review(database)
+        curves = await async_board_flow_curves(
+            database, date(2026, 8, 10), "concept", None,
+            curve_retention_days=60, rotation_retention_days=60, now=observed_at,
+        )
+        self.assertEqual(review["report"]["board_report_id"], "report-1")
+        self.assertEqual(curves["items"][0]["label"], "芯片")
+        self.assertEqual(len(database.connection.calls), 3)
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:

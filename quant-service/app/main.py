@@ -4489,7 +4489,9 @@ app.include_router(build_strategy_pattern_reads_router(
 app.include_router(build_board_rotation_reads_router(db))
 app.include_router(build_board_stock_mining_reads_router(db))
 app.include_router(build_limit_linkage_mining_reads_router(db))
-app.include_router(build_board_curve_reads_router(db, intraday_board_curve_retention_days, intraday_board_rotation_retention_days))
+app.include_router(build_board_curve_reads_router(
+    db, intraday_board_curve_retention_days, intraday_board_rotation_retention_days, async_database=async_db,
+))
 app.include_router(build_market_flow_reads_router(db))
 app.include_router(build_research_catalog_reads_router(db, async_db))
 app.include_router(build_intraday_outcome_reads_router(

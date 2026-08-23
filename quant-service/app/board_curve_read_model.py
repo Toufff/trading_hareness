@@ -55,6 +55,11 @@ def latest_close_sector_review_report(database: Any) -> dict[str, Any]:
             """SELECT board_report_id,observed_at,status,source_status,summary,payload,created_at
                  FROM quant.intraday_board_reports ORDER BY observed_at DESC LIMIT 1"""
         ).fetchone()
+    return project_latest_close_sector_review_report(row)
+
+
+def project_latest_close_sector_review_report(row: Any) -> dict[str, Any]:
+    """Project one already-read board review without a database dependency."""
     return {
         "report": row,
         "notice": "板块 Top10 是同花顺精确成员与同一腾讯横截面的已保存复盘证据。",
@@ -79,7 +84,6 @@ def intraday_board_flow_curves(
     window_end = datetime.combine(selected_date, time(15, 1), tzinfo=china).astimezone(timezone.utc)
     if since is not None:
         since = since.replace(tzinfo=timezone.utc) if since.tzinfo is None else since.astimezone(timezone.utc)
-    taxonomy_key = f"eastmoney_{taxonomy}"
     values: tuple[Any, ...] = (window_start, window_end, since, since)
     with database.transaction() as connection:
         curve_rows = connection.execute(
@@ -98,6 +102,28 @@ def intraday_board_flow_curves(
                 ORDER BY observed_at LIMIT 720""",
             values,
         ).fetchall()
+    return project_intraday_board_flow_curves(
+        curve_rows, legacy_rows, trade_date=trade_date, taxonomy=taxonomy, since=since,
+        curve_retention_days=curve_retention_days, rotation_retention_days=rotation_retention_days, now=exchange_now,
+    )
+
+
+def project_intraday_board_flow_curves(
+    curve_rows: list[Any],
+    legacy_rows: list[Any],
+    *,
+    trade_date: date | None,
+    taxonomy: Literal["industry", "concept"],
+    since: datetime | None,
+    curve_retention_days: int,
+    rotation_retention_days: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Project bounded stored board rows; callers own all database I/O."""
+    exchange_now = now or datetime.now(timezone.utc)
+    china = ZoneInfo("Asia/Shanghai")
+    selected_date = trade_date or exchange_now.astimezone(china).date()
+    taxonomy_key = f"eastmoney_{taxonomy}"
 
     selected_by_minute: dict[datetime, dict[str, Any]] = {}
     all_rows: list[dict[str, Any]] = []
@@ -158,4 +184,7 @@ def intraday_board_flow_curves(
     }
 
 
-__all__ = ["board_display_slots", "intraday_board_flow_curves", "latest_close_sector_review_report"]
+__all__ = [
+    "board_display_slots", "intraday_board_flow_curves", "latest_close_sector_review_report",
+    "project_intraday_board_flow_curves", "project_latest_close_sector_review_report",
+]
