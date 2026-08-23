@@ -71,6 +71,15 @@ from .intraday_features import annotate_flow_snapshot_provenance as pure_annotat
 from .intraday_features import mapped_watchlist_peers as pure_mapped_watchlist_peers
 from .intraday_features import peer_context as pure_intraday_peer_context
 from .intraday_features import strategy_session_rows as pure_strategy_session_rows
+from .intraday_quote_normalization import (
+    annotate_flow_percentiles as annotate_intraday_flow_percentiles_pure,
+    exchange_time_status as intraday_quote_exchange_time_status_pure,
+    merge_eastmoney_watch_flows as merge_intraday_eastmoney_watch_flows_pure,
+    merge_sina_watch_quotes as merge_intraday_sina_watch_quotes_pure,
+    merge_watch_quote_prices as merge_intraday_watch_quote_prices_pure,
+    observation_source as intraday_quote_observation_source_pure,
+    quote_from_tencent as intraday_quote_from_tencent_pure,
+)
 from .intraday_decision_card_read_model import decision_card as read_intraday_decision_card
 from .intraday_volume_profiles import attach_volume_time_profile as pure_attach_volume_time_profile
 from .intraday_volume_profiles import volume_time_profile as pure_intraday_volume_time_profile
@@ -1690,38 +1699,12 @@ async def intraday_all_a_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any
 
 def merge_intraday_watch_quote_prices(quotes: dict[str, dict[str, Any]], depth_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Overlay fresh batched watch prices without inventing flow fields."""
-    for row in depth_rows:
-        symbol = str(row.get("ts_code") or "")
-        price, pre_close = intraday_number(row.get("price")), intraday_number(row.get("pre_close"))
-        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) or price is None or price <= 0:
-            continue
-        existing = dict(quotes.get(symbol) or {"symbol": symbol, "name": row.get("name"), "raw": {}})
-        existing["price"] = price
-        existing["pct_change"] = round((price / pre_close - 1) * 100, 5) if pre_close and pre_close > 0 else existing.get("pct_change")
-        existing["price_source"] = "tencent_batched_watch_quote"
-        existing["price_observed_from_depth"] = True
-        existing["price_trade_time"] = row.get("trade_time")
-        existing["raw"] = {**(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}), "watch_quote": row}
-        quotes[symbol] = existing
-    return quotes
+    return merge_intraday_watch_quote_prices_pure(quotes, depth_rows, number=intraday_number)
 
 
 def merge_intraday_sina_watch_quotes(quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Use Sina only as a price fallback; do not invent Tencent flow fields."""
-    for row in rows:
-        symbol = str(row.get("ts_code") or "")
-        price, pre_close = intraday_number(row.get("close")), intraday_number(row.get("pre_close"))
-        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) or price is None or price <= 0:
-            continue
-        existing = dict(quotes.get(symbol) or {"symbol": symbol, "name": row.get("name"), "raw": {}})
-        existing["price"] = price
-        existing["pct_change"] = round((price / pre_close - 1) * 100, 5) if pre_close and pre_close > 0 else existing.get("pct_change")
-        existing["price_source"] = "sina_batched_watch_quote"
-        existing["price_trade_date"] = row.get("trade_date")
-        existing["price_trade_time"] = row.get("trade_time")
-        existing["raw"] = {**(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}), "sina_watch_quote": row}
-        quotes[symbol] = existing
-    return quotes
+    return merge_intraday_sina_watch_quotes_pure(quotes, rows, number=intraday_number)
 
 
 def merge_intraday_eastmoney_watch_flows(quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -1731,20 +1714,7 @@ def merge_intraday_eastmoney_watch_flows(quotes: dict[str, dict[str, Any]], rows
     confirmation.  Eastmoney here only fills same-scan flow/turnover features
     after the all-A Tencent percentile snapshot is unavailable.
     """
-    for row in rows:
-        symbol = str(row.get("ts_code") or "")
-        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
-            continue
-        existing = dict(quotes.get(symbol) or {"symbol": symbol, "name": row.get("name"), "raw": {}})
-        for key in ("volume_ratio", "turnover_rate", "main_net_inflow", "main_net_inflow_ratio"):
-            value = intraday_number(row.get(key))
-            if value is not None:
-                existing[key] = value
-        existing["main_flow_percentile"] = None
-        existing["raw"] = {**(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}),
-                           "eastmoney_watch_flow": row.get("raw") if isinstance(row.get("raw"), dict) else row}
-        quotes[symbol] = existing
-    return quotes
+    return merge_intraday_eastmoney_watch_flows_pure(quotes, rows, number=intraday_number)
 
 
 def intraday_quote_observation_source(quote: dict[str, Any] | None) -> str:
@@ -1755,12 +1725,7 @@ def intraday_quote_observation_source(quote: dict[str, Any] | None) -> str:
     same provider label: a later return calculation or freshness review needs
     to know exactly which source produced the price.
     """
-    source = str((quote or {}).get("price_source") or "")
-    if source == "sina_batched_watch_quote":
-        return "sina_free"
-    if source in {"tencent_batched_watch_quote", "tencent_all_a_snapshot"}:
-        return "tencent_free"
-    return "unknown_realtime_source"
+    return intraday_quote_observation_source_pure(quote)
 
 
 def intraday_quote_exchange_time_status(quote: dict[str, Any] | None, observed_at: datetime,
@@ -1772,27 +1737,7 @@ def intraday_quote_exchange_time_status(quote: dict[str, Any] | None, observed_a
     a missing or malformed source timestamp cannot masquerade as a freshly
     fetched quote for an alert confirmation.
     """
-    payload = quote or {}
-    compact = "".join(re.findall(r"\d", str(payload.get("price_trade_time") or "")))
-    date_part = "".join(re.findall(r"\d", str(payload.get("price_trade_date") or "")))
-    if len(compact) >= 14:
-        candidate = compact[:14]
-    elif len(date_part) == 8 and len(compact) >= 6:
-        candidate = f"{date_part}{compact[:6]}"
-    else:
-        return {"status": "missing_timestamp", "max_age_seconds": max_age_seconds}
-    try:
-        exchange_at = datetime.strptime(candidate, "%Y%m%d%H%M%S").replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-    except ValueError:
-        return {"status": "invalid_timestamp", "max_age_seconds": max_age_seconds}
-    age_seconds = (observed_at - exchange_at.astimezone(timezone.utc)).total_seconds()
-    result = {"observed_trade_time": exchange_at.isoformat(), "age_seconds": round(age_seconds, 3),
-              "max_age_seconds": max_age_seconds}
-    if age_seconds < -5:
-        return {**result, "status": "future_timestamp"}
-    if age_seconds > max_age_seconds:
-        return {**result, "status": "stale_timestamp"}
-    return {**result, "status": "fresh"}
+    return intraday_quote_exchange_time_status_pure(quote, observed_at, max_age_seconds)
 
 
 def intraday_quote_from_tencent(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -1801,19 +1746,9 @@ def intraday_quote_from_tencent(row: dict[str, Any]) -> dict[str, Any] | None:
     This keeps the raw public row alongside normalized values.  ``zljlr`` is
     provider-labelled indicative main-flow data, not exchange order flow.
     """
-    code = str(row.get("code") or "").strip()
-    symbol = eastmoney_member_symbol({"代码": code[-6:]})
-    if not symbol:
-        return None
-    return {
-        "symbol": symbol, "name": row.get("name"), "price": intraday_number(row.get("zxj")),
-        "pct_change": intraday_number(row.get("zdf")), "volume_ratio": intraday_number(row.get("lb")),
-        "turnover_rate": intraday_number(row.get("hsl")), "main_net_inflow": intraday_number(row.get("zljlr")),
-        "turnover": intraday_number(row.get("turnover")), "raw": dict(row),
-        # This is a shared cross-sectional snapshot, not the dedicated batch
-        # quote that confirms an alert for one explicit watchlist symbol.
-        "price_source": "tencent_all_a_snapshot", "price_observed_from_depth": False,
-    }
+    return intraday_quote_from_tencent_pure(
+        row, symbol_from_code=eastmoney_member_symbol, number=intraday_number,
+    )
 
 
 def annotate_intraday_flow_percentiles(quotes: dict[str, dict[str, Any]]) -> None:
@@ -1824,13 +1759,7 @@ def annotate_intraday_flow_percentiles(quotes: dict[str, dict[str, Any]]) -> Non
     threshold.  This is the cross-sectional normalization pattern used by
     factor research systems, applied only to the observed universe.
     """
-    ranked = sorted((quote for quote in quotes.values() if quote.get("main_net_inflow") is not None),
-                    key=lambda quote: float(quote["main_net_inflow"]))
-    denominator = max(1, len(ranked) - 1)
-    for index, quote in enumerate(ranked):
-        quote["main_flow_percentile"] = round(index / denominator, 5)
-        quote["main_flow_rank"] = index + 1
-        quote["main_flow_universe"] = len(ranked)
+    annotate_intraday_flow_percentiles_pure(quotes)
 
 
 def intraday_minute_features(rows: list[dict[str, Any]], *, lookback: int = 20,
