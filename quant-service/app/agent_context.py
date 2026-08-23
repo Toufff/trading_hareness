@@ -34,6 +34,7 @@ def repository_agent_context() -> dict[str, Any]:
             "daily_strategy_summary_scheduler": "quant-service/app/daily_strategy_summary_scheduler.py",
             "strategy_decision": "quant-service/app/strategy_decision_service.py",
             "strategy_review": "quant-service/app/strategy_review_service.py",
+            "strategy_context_reads": "quant-service/app/strategy_context_read_model.py",
             "strategy_review_scheduler": "quant-service/app/strategy_review_scheduler.py",
             "board_research": "quant-service/app/board_research_service.py",
             "short_term_review": "quant-service/app/short_term_review.py",
