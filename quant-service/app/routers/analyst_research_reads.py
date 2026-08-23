@@ -14,6 +14,7 @@ from ..async_analyst_market_review_read_repository import list_reviews as async_
 from ..async_analyst_market_evaluation_read_repository import market_evaluation as async_market_evaluation
 from ..async_analyst_stock_timeline_read_repository import stock_timeline as async_stock_timeline
 from ..async_analyst_research_status_read_repository import status as async_research_status
+from ..async_analyst_sync_health_repository import sync_health as async_sync_health
 from ..analyst_market_evaluation import analyst_market_evaluation
 from ..analyst_stock_timeline import analyst_stock_timeline
 from ..analyst_market_review import (
@@ -72,6 +73,7 @@ def build_analyst_research_reads_router(
     async_market_evaluation_fn: Callable[[Any, date | None, date | None, str | None], Awaitable[dict[str, Any]]] | None = None,
     async_stock_timeline_fn: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     async_status_fn: Callable[[Any, date | None], Awaitable[dict[str, Any]]] | None = None,
+    async_sync_health_fn: Callable[[Any], Awaitable[dict[str, Any]]] | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["analyst-research-reads"])
 
@@ -341,6 +343,8 @@ def build_analyst_research_reads_router(
 
     @router.get("/api/v1/analyst-research/sync-health")
     async def sync_health() -> dict[str, Any]:
+        if async_database is not None:
+            return await (async_sync_health_fn or async_sync_health)(async_database)
         return await run_database_blocking(_sync_health_payload, timeout_seconds=30)
 
     return router

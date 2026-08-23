@@ -42,6 +42,7 @@ from app.async_analyst_market_review_read_repository import list_reviews as asyn
 from app.async_analyst_market_evaluation_read_repository import market_evaluation as async_market_evaluation
 from app.async_analyst_stock_timeline_read_repository import stock_timeline as async_stock_timeline
 from app.async_analyst_research_status_read_repository import status as async_research_status
+from app.async_analyst_sync_health_repository import sync_health as async_analyst_sync_health
 from app.async_analyst_archive_read_repository import analyst_sync_cursor as async_archive_sync_cursor
 from app.async_analyst_archive_read_repository import remote_report_list_state as async_archive_state
 from app.async_provider_status_read_repository import provider_health as async_provider_health
@@ -162,6 +163,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_analyst_market_evaluation_read_repository.py",
             "async_analyst_stock_timeline_read_repository.py",
             "async_analyst_research_status_read_repository.py",
+            "async_analyst_sync_health_repository.py",
             "async_provider_status_read_repository.py",
             "async_analyst_text_feature_read_repository.py",
         ):
@@ -286,6 +288,20 @@ class RouterReadBoundaryTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0].__name__, "_sync_health_payload")
         self.assertEqual(calls[0][1], {"timeout_seconds": 30})
+
+    def test_sync_health_prefers_native_async_repository_when_available(self) -> None:
+        async def native(database):
+            self.assertEqual(database, "async-db")
+            return {"runtime_verification": "native"}
+
+        router = build_analyst_research_reads_router(
+            object(), lambda _database, _as_of: {}, async_database="async-db", async_sync_health_fn=native,
+        )
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-research/sync-health")
+
+        payload = asyncio.run(endpoint())
+
+        self.assertEqual(payload["runtime_verification"], "native")
 
 
 class BlockingExecutorBoundaryTests(unittest.IsolatedAsyncioTestCase):
