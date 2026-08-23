@@ -31,7 +31,7 @@
 | 成功/失败延迟与错误脱敏 | 已完成主要路径 | `provider_health.py`；Tushare、腾讯、Sina、东财、AKShare、巨潮公告、BaoStock、Super GET 主要路径耗时进入 health/Prometheus；兼容路径允许延迟缺省且不覆盖已有值 |
 | 盘中调度、租约、outbox、飞书恢复 | 已完成 | 开盘预检、`runtime_leases`、投递回执和连续失败治理；观察池上一同源报价、EAC 首次确认、最近 61 根复权日线因子及 `标的×分钟桶` 历史量能基线均按一轮批量读取，避免随标的数线性增加小查询。当前 36 只启用观察股的批量/原单标的日因子逐项只读对照一致。同步/异步 SSE 日历门禁共用 repository，周末、日历缺口和本地执行器饱和均 fail-closed |
 | n8n 孤儿执行审计收口 | 已完成 | `scripts/reconcile-stale-n8n-executions.sh` 只标记超过 10 分钟仍为 `running` 的记录为 `crashed`，绝不删除执行证据；LaunchAgent 每 15 分钟运行一次。无候选时脚本不再创建备份目录，避免运行日志/审计目录无界累积 |
-| 盘后一键刷新跨进程恢复回执 | 已完成 | `post-close-refresh:{stage}:{trade_date}` 通过唯一 `automation_runs` 回执恢复：完成阶段不重跑且返回 `resumed_from_receipt`，partial/blocked/failed 才重试同一行；真实 PostgreSQL JSONB、终态时间戳与 partial 重开均有契约测试 |
+| 盘后一键刷新跨进程恢复回执 | 已完成 | `post-close-refresh:{stage}:{trade_date}` 通过唯一 `automation_runs` 回执恢复：完成阶段不重跑且返回 `resumed_from_receipt`，partial/blocked/failed 才重试同一行；真实 PostgreSQL JSONB、终态时间戳与 partial 重开均有契约测试。阶段装配已独立至 `post_close_refresh_service.py`，控制面缺失会阻断依赖策略但不阻断独立证据阶段 |
 | 午盘/收盘复盘重启恢复 | 已完成 | `strategy_review_runs` 的同交易日/session 且 `report.status=completed` 作为 durable checkpoint receipt；重启后检查点不重复刷新行情、结算或评分，未完成记录仍在原两分钟窗口内重试 |
 | 日终研究摘要重启恢复 | 已完成 | `strategy_day_summaries` 的 `sent`/`disabled`/`suppressed` 是终态回执，重启后不重建摘要；`pending`/`failed` 仍在原 19:15–19:30 窗口重试，且不向飞书推送候选池 |
 | 常驻循环锁与生命周期可观测性 | 已完成 | durable `runtime_leases` 继续作为跨进程持锁真源；`/health.runtime_loops` 增加本进程 worker 的 running/waiting/lease-lost/backoff/error 生命周期状态，解释未启动/交接/异常退出而不把它冒充为业务心跳，也不记录 provider payload 或凭据。应用生命周期以唯一标签注册命名 task，关闭时统一取消并等待，重复 loop label 在启动前 fail-closed |
@@ -46,7 +46,7 @@
 | 全 A 横截面并发缓存 | 已完成 | `SharedAsyncSnapshot` 将腾讯全 A 资金流横截面限定为 30 秒 TTL：并发扫描只共用一条在途上游请求，失败不写成新鲜缓存；观察池仍独立走 40 只以内腾讯批量报价，避免慢横截面拖慢 10 秒窗口 |
 | THS 概念精确成员恢复 | 已完成 | 成员同步仅接受 `ths_member` 的精确代码关系；“全部 provider 临时熔断”失败在线路冷却后可受限恢复，格式/截断等失败仍保留三次上限。2026-08-16 对 2026-08-14 的唯一遗留 `885338.TI` 恢复成功，概念覆盖为 **387/387**、成员为 70,998；未做中文名称猜测 |
 | 原生 async repository | 部分完成 | 策略决策/复盘/盘后候选、策略健康、策略消融、纸面研究、事件/龙虎榜、涨停/连板模式、研究目录，以及市场快照/原始 Tushare/分钟导入/最新推荐/指标计数、研究总览、**Agent 自动化回执、市场资金流特征、全部板块/概念/精确成员证据、涨停联动候选、Prompt Lab 状态、已落库分析师市场复盘、有界市场评测、分钟时间轴、分析师研究状态及归档游标/总览、提供者目录/能力/健康、PIT 文本因子、跨 n8n public schema 的分析师同步健康**等 GET 已使用 `AsyncDatabase`；AST 回归要求其余面板 GET 不能回退为同步 DB 路径。保留的 3 个同步 GET 是明确运维例外：静态 Agent/路线图、注入式盘中状态兼容分支。其余读写仓储仍经有界同步执行器，健康页显示异步池水位 |
-| `main.py` 完全拆分 | 工程余项 | router/read-model/纯规则已拆出；盘中侧现进一步分离了观察池报价采集、扫描总编排、单事务信号持久化、观察池配置/受限历史补水、全板块成员批次与 THS 概念成员恢复。容量/覆盖度/就绪度、单股窗口/claim 证据、单股多源研究、特征读取、分析师文本/成绩单门禁、概念涨停候选持久化、日线/板块同步、盘后编排、盘口/分钟/板块曲线、远端文字同步、本地研究实验/快照、Tushare fetch ledger、研究维护写入、研究存储准入及盘后形态样本事务均有独立模块；旧 n8n 直写分析师信号入口已删除。主文件当前约 5,000 行；仍保留明确的 composition root、兼容入口和少量写服务，旧兼容快照待获授权的回放验证后再删除。 |
+| `main.py` 完全拆分 | 工程余项 | router/read-model/纯规则已拆出；盘中侧现进一步分离了观察池报价采集、扫描总编排、单事务信号持久化、观察池配置/受限历史补水、全板块成员批次与 THS 概念成员恢复。容量/覆盖度/就绪度、单股窗口/claim 证据、单股多源研究、特征读取、分析师文本/成绩单门禁、概念涨停候选持久化、日线/板块同步、盘后阶段装配、盘口/分钟/板块曲线、远端文字同步、本地研究实验/快照、Tushare fetch ledger、研究维护写入、研究存储准入及盘后形态样本事务均有独立模块；旧 n8n 直写分析师信号入口已删除。主文件当前约 4,900 行；仍保留明确的 composition root、兼容入口和少量写服务，旧兼容快照待获授权的回放验证后再删除。 |
 
 ## P2 数据地基与 P3 验证
 
@@ -72,7 +72,7 @@
 
 ## 当前验收证据
 
-- quant-service：当前构建后的全量 **696** 项 Python 回归通过。除历史的 v2 规则输入、policy/risk gate 与作者时点回放边界外，新增覆盖观察池报价的直连/兜底边界、扫描总编排的闭市零外呼和确认投递、单事务信号证据顺序、THS/东财精确成员批次失败隔离、概念目录不可用时成员恢复 fail-closed、概念/涨停池精确代码 join，以及原生异步自动化回执、市场资金流、板块/概念/精确成员、涨停联动、Prompt Lab、已落库分析师市场复盘、有界市场评测、分钟时间轴、分析师研究状态、归档总览/游标、提供者目录/能力/健康、PIT 文本因子、路由 async 边界、真实 `upsert_bar` SQL 集成、单股窗口/claim 就绪度、决策卡、板块曲线/复盘/轮动/挖掘、分析师操作回放/outcome、技能/研究/归档证据读取，以及本地研究窗口/因子拒绝、快照控制面阻断、Tushare ledger 缓存/取消、研究维护、远端 claim 唯一成绩单来源、原生 async 同步健康、观察池维护、研究存储准入、生命周期 task、交易日日历与盘后形态样本仓储边界。
+- quant-service：当前构建后的全量 **697** 项 Python 回归通过。除历史的 v2 规则输入、policy/risk gate 与作者时点回放边界外，新增覆盖观察池报价的直连/兜底边界、扫描总编排的闭市零外呼和确认投递、单事务信号证据顺序、THS/东财精确成员批次失败隔离、概念目录不可用时成员恢复 fail-closed、概念/涨停池精确代码 join，以及原生异步自动化回执、市场资金流、板块/概念/精确成员、涨停联动、Prompt Lab、已落库分析师市场复盘、有界市场评测、分钟时间轴、分析师研究状态、归档总览/游标、提供者目录/能力/健康、PIT 文本因子、路由 async 边界、真实 `upsert_bar` SQL 集成、单股窗口/claim 就绪度、决策卡、板块曲线/复盘/轮动/挖掘、分析师操作回放/outcome、技能/研究/归档证据读取，以及本地研究窗口/因子拒绝、快照控制面阻断、Tushare ledger 缓存/取消、研究维护、远端 claim 唯一成绩单来源、原生 async 同步健康、观察池维护、研究存储准入、生命周期 task、交易日日历、盘后形态样本仓储与盘后一键刷新装配边界。
 - frontend：2026-08-22 已重新执行 `npm run api:check`、`vue-tsc --noEmit` 与 Vite production build，均通过；概念成员卡现在区分有效精确映射覆盖和同日同步回执，避免显示层掩盖证据差异。生成 API 类型仍与 OpenAPI 一致。构建仅保留 charts/element-plus 大于 500 kB 的优化警告，不影响功能或接口契约。
 - 开盘预检：compose、数据库迁移 `20260822_0055`、必需后台租约、共享 provider pacing、30s/10s/1s/60s 节奏、飞书、当前发布版分析师文字同步以及可恢复备份均通过；预检是只读的，不请求市场 provider 或发送提醒。
 - 最近提交：见当前仓库最新提交；本轮未改变策略阈值、live 权重或历史数据范围。所有新增拆分均保持既有 provider、数据库事务和告警边界。

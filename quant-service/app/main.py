@@ -442,6 +442,10 @@ from .intraday_minute_capture_actions import IntradayMinuteCaptureActions
 from .intraday_event_replay_runner import run_recorded_signal_lifecycle_replay
 from .intraday_rule_input_replay_runner import run_recorded_rule_input_replay
 from .post_close_refresh import record_stage_with_receipt, run_refresh as run_post_close_refresh_orchestrated
+from .post_close_refresh_service import (
+    PostCloseRefreshDependencies,
+    run_post_close_refresh as run_post_close_refresh_isolated,
+)
 from .daily_pipeline import run_pipeline as run_daily_pipeline_orchestrated
 from .board_research_service import run as run_board_research_isolated
 from .akshare_probe_service import run as run_akshare_probe_isolated
@@ -3530,118 +3534,46 @@ async def sync_cninfo_announcements(request: AnnouncementSyncRequest) -> dict[st
 async def run_post_close_refresh_legacy(request: PostCloseRefreshRequest) -> dict[str, Any]:
     """Deprecated compatibility alias; use the lease-aware orchestrator."""
     return await run_post_close_refresh(request)
-async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, Any]:
-    """Compatibility entry point backed by the isolated refresh orchestrator."""
-    trade_date = request.trade_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    full_market_daily_provider = (
-        "super_get"
-        if (provider := provider_configs().get("super_get"))
-        and provider.configured and provider.get_gateway_mode == "promax" and provider.supports("daily")
-        else "auto"
-    )
-    core_symbols: list[str] = []
 
-    def load_core_symbols() -> list[Any]:
+
+async def _post_close_core_symbols(limit: int) -> list[str]:
+    def load() -> list[Any]:
         with db.transaction() as connection:
             return connection.execute(
                 "SELECT symbol FROM quant.universe_members WHERE universe_key='core' AND enabled "
-                "ORDER BY priority,symbol LIMIT %s", (request.announcement_limit,)
+                "ORDER BY priority,symbol LIMIT %s", (limit,),
             ).fetchall()
+    return [str(row["symbol"]) for row in await run_database_blocking(load)]
 
-    async def akshare_stage() -> dict[str, Any]:
-        nonlocal core_symbols
-        rows = await run_database_blocking(load_core_symbols)
-        core_symbols = [str(row["symbol"]) for row in rows]
-        probe_symbol = core_symbols[0] if core_symbols else "000636.SZ"
-        return await akshare_probe(AkShareProbeRequest(
-            symbol=probe_symbol, trade_date=trade_date,
-            include_macro_cross_asset=request.include_macro_cross_asset, board_limit=30,
-        ))
 
-    async def announcements_stage() -> dict[str, Any]:
-        if not request.include_announcements or not core_symbols:
-            return {"status": "skipped", "reason": "disabled or core universe is empty"}
-        return await sync_cninfo_announcements(AnnouncementSyncRequest(
-            symbols=core_symbols, universe_key="core", start_date=trade_date - timedelta(days=45),
-            end_date=trade_date, max_pages_per_symbol=1,
-        ))
-
-    actions: dict[str, Callable[[], Any]] = {
-        "stale_fetch_runs": lambda: run_database_blocking(reconcile_stale_fetch_runs, FetchRunReconcileRequest(max_age_minutes=90)),
-        "analyst_text": lambda: run_database_blocking(reprocess_remote_reports, db, 500),
-        "all_a_universe": lambda: sync_market_universe(MarketUniverseSyncRequest()),
-        "full_market_daily": lambda: sync_full_market_daily(
-            FullMarketDailySyncRequest(trade_date=trade_date, provider=full_market_daily_provider)
-        ),
-        "index_context": lambda: sync_strategy_index_context(trade_date),
-        "close_market_snapshot": lambda: build_market_snapshot(MarketSnapshotRequest(session="close", universe_key="all_a", refresh_public_quotes=True)),
-        "akshare_supplements": akshare_stage,
-        "ths_industry_flow": lambda: sync_ths_industry_moneyflow(SectorFlowSyncRequest(trade_date=trade_date, provider="super")),
-        "ths_concept_flow_and_limit_strength": lambda: sync_ths_concept_signals(SectorFlowSyncRequest(trade_date=trade_date, provider="super")),
-        "market_flow_features": lambda: run_database_blocking(
-            rebuild_stored_market_flow_features, db, trade_date, trade_date, timeout_seconds=90,
-        ),
-        "limit_ladder": lambda: refresh_strategy_pattern_sources(trade_date),
-        "limit_lift_pattern_mining": lambda: run_strategy_pattern_mining(StrategyPatternMiningRequest(as_of_date=trade_date, refresh_limit_sources=False)),
-        "core_daily_controls": lambda: sync_full_market_daily_controls(trade_date),
-        "cninfo_announcements": announcements_stage,
-        "board_review": lambda: run_intraday_board_report(deliver=False),
-        "close_strategy_decision": lambda: run_strategy_decision(StrategyDecisionRequest(session="close", kind="all", limit=20, validate_tushare_realtime=False)),
-        "close_review": lambda: run_database_blocking(_persist_close_review, trade_date),
-        "analyst_outcomes": lambda: run_database_blocking(recompute_outcomes, trade_date),
-        "analyst_intraday_outcomes": lambda: run_database_blocking(
-            recompute_analyst_intraday_outcomes_for_date, trade_date, timeout_seconds=90,
-        ),
-        "analyst_scorecards": lambda: run_database_blocking(recompute_scorecards, trade_date),
-        "analyst_expert_research": lambda: run_database_blocking(rebuild_analyst_research_for_date, trade_date),
-        "post_close_strategy": lambda: run_database_blocking(run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date)),
-        "watchlist_main_wave": lambda: run_database_blocking(
-            persist_watchlist_main_wave_research, WatchlistMainWaveResearchRequest(as_of_date=trade_date),
-        ),
-        "research_snapshot": lambda: run_database_blocking(build_snapshot, SnapshotRequest(as_of_date=trade_date)),
-    }
-
-    async def record_refresh_stage(name: str, stage_date: date, action: Callable[[], Any]) -> Any:
-        """Persist and resume one stage without duplicating completed work."""
-        return await record_stage_with_receipt(
-            name, stage_date, action, db=db, run_database_blocking=run_database_blocking,
-            safe_error_detail=safe_error_detail,
-        )
-
-    return await run_post_close_refresh_orchestrated(
-        request, db=db, lease_key=POST_CLOSE_REFRESH_LEASE_KEY,
-        lease_seconds=post_close_refresh_lease_seconds, run_database_blocking=run_database_blocking,
-        acquire_lease=acquire_runtime_lease, renew_lease=renew_runtime_lease, release_lease=release_runtime_lease,
-        actions=actions, stage_order=(
-            "stale_fetch_runs", "analyst_text", "all_a_universe", "full_market_daily", "core_daily_controls", "index_context",
-            "close_market_snapshot", "akshare_supplements", "ths_industry_flow", "ths_concept_flow_and_limit_strength",
-            "market_flow_features", "limit_ladder", "limit_lift_pattern_mining", "cninfo_announcements",
-            "board_review", "close_strategy_decision", "close_review", "analyst_outcomes", "analyst_intraday_outcomes", "analyst_scorecards",
-            "analyst_expert_research", "post_close_strategy", "watchlist_main_wave", "research_snapshot",
-        ), timeout_overrides={
-            "akshare_supplements": 240.0,
-            "limit_lift_pattern_mining": 120.0,
-            # Four bounded full-market control APIs run sequentially so an
-            # individual provider's shared limiter remains authoritative.
-            "core_daily_controls": 240.0,
-        }, stage_dependencies={
-            # Daily controls are correctness prerequisites: downstream
-            # strategy stages must not reason over missing adjustment, limit
-            # or suspension fields. Independent source evidence may still
-            # finish and remains useful for diagnosis.
-            "index_context": ("core_daily_controls",),
-            "limit_ladder": ("core_daily_controls",),
-            "limit_lift_pattern_mining": ("core_daily_controls", "limit_ladder"),
-            "close_strategy_decision": ("core_daily_controls",),
-            "close_review": ("core_daily_controls",),
-            "post_close_strategy": ("core_daily_controls",),
-            "watchlist_main_wave": ("core_daily_controls",),
-            "research_snapshot": ("core_daily_controls",),
-        },
-        record_stage=record_refresh_stage,
-        trade_date=trade_date,
+def _post_close_refresh_dependencies() -> PostCloseRefreshDependencies:
+    """Compose the local-only boundaries of the post-close application service."""
+    return PostCloseRefreshDependencies(
+        database=db, china_today=cn_today, provider_configs=provider_configs, run_database=run_database_blocking,
+        reconcile_stale_fetch_runs=reconcile_stale_fetch_runs, reprocess_remote_reports=reprocess_remote_reports,
+        sync_market_universe=sync_market_universe, sync_full_market_daily=sync_full_market_daily,
+        sync_strategy_index_context=sync_strategy_index_context, build_market_snapshot=build_market_snapshot,
+        load_core_symbols=_post_close_core_symbols, akshare_probe=akshare_probe,
+        sync_ths_industry_flow=sync_ths_industry_moneyflow, sync_ths_concept_flow=sync_ths_concept_signals,
+        rebuild_market_flow_features=rebuild_stored_market_flow_features,
+        refresh_pattern_sources=refresh_strategy_pattern_sources, run_pattern_mining=run_strategy_pattern_mining,
+        sync_daily_controls=sync_full_market_daily_controls, sync_cninfo_announcements=sync_cninfo_announcements,
+        run_board_report=run_intraday_board_report, run_strategy_decision=run_strategy_decision,
+        persist_close_review=_persist_close_review, recompute_outcomes=recompute_outcomes,
+        recompute_intraday_outcomes=recompute_analyst_intraday_outcomes_for_date,
+        recompute_scorecards=recompute_scorecards, rebuild_analyst_research=rebuild_analyst_research_for_date,
+        run_post_close_strategy=run_post_close_strategy, persist_watchlist_main_wave=persist_watchlist_main_wave_research,
+        build_research_snapshot=build_snapshot, run_orchestrator=run_post_close_refresh_orchestrated,
+        record_stage=record_stage_with_receipt, lease_key=POST_CLOSE_REFRESH_LEASE_KEY,
+        lease_seconds=post_close_refresh_lease_seconds, acquire_lease=acquire_runtime_lease,
+        renew_lease=renew_runtime_lease, release_lease=release_runtime_lease,
         safe_error_detail=safe_error_detail, json_safe=strategy_json_safe,
     )
+
+
+async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, Any]:
+    """Compatibility entry point for the isolated same-date refresh assembly."""
+    return await run_post_close_refresh_isolated(request, _post_close_refresh_dependencies())
 
 
 def _persist_close_review(as_of_date: date) -> dict[str, Any]:
