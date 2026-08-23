@@ -50,6 +50,8 @@ from .akshare_provider import (
 from .analysis import as_utc
 from .capability_registry import api_capability
 from .database import AsyncDatabase, Database
+from .async_provider_circuit_repository import open_capabilities as read_async_open_provider_capabilities
+from .async_provider_circuit_repository import open_provider_keys as read_async_open_provider_keys
 from .daily_bar_repository import exchange_for, provider_priority, upsert_daily_bar
 from .public_market_repository import (
     persist_free_daily as _persist_free_daily,
@@ -1128,20 +1130,7 @@ async def call_tushare_api(api_name: str, params: dict[str, Any], fields: str | 
 async def circuit_open_provider_keys_async(capability: str, candidates: list[Any]) -> set[str]:
     """Async-loop-safe provider circuit lookup for generic catalog calls."""
     keys = [item.key for item in candidates]
-    if not keys:
-        return set()
-
-    def load() -> list[Any]:
-        with db.transaction() as connection:
-            return connection.execute(
-                """SELECT provider_key FROM quant.provider_health
-                     WHERE capability=%s AND market='cn' AND provider_key=ANY(%s)
-                       AND circuit_open_until IS NOT NULL AND circuit_open_until > now()""",
-                (capability, keys),
-            ).fetchall()
-
-    rows = await run_database_blocking(load)
-    return {str(row["provider_key"]) for row in rows}
+    return await read_async_open_provider_keys(async_db, capability, keys)
 
 
 def tushare_record_key(row: dict[str, Any], request_key: str, index: int) -> str:
@@ -2466,19 +2455,7 @@ async def intraday_board_curve_session_async(now: datetime | None = None) -> tup
 
 async def open_provider_capabilities(provider_key: str, capabilities: list[str]) -> set[str]:
     """Read active circuit-breaker entries without issuing an upstream request."""
-    if not capabilities:
-        return set()
-
-    def load() -> list[Any]:
-        with db.transaction() as connection:
-            return connection.execute(
-                """SELECT capability FROM quant.provider_health
-                     WHERE provider_key=%s AND market='cn' AND capability=ANY(%s)
-                       AND circuit_open_until IS NOT NULL AND circuit_open_until > now()""",
-                (provider_key, capabilities),
-            ).fetchall()
-    rows = await run_database_blocking(load)
-    return {str(row["capability"]) for row in rows}
+    return await read_async_open_provider_capabilities(async_db, provider_key, capabilities)
 
 
 def intraday_board_display_slots(selected_date: date, now: datetime | None = None) -> list[datetime]:

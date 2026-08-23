@@ -1520,17 +1520,17 @@ class ProviderHelperTests(unittest.TestCase):
 
     def test_capability_circuit_lookup_returns_only_open_entries(self):
         async def check() -> set[str]:
-            with patch("app.main.run_database_blocking", new=AsyncMock(return_value=[{"capability": "intraday_board_flow_concept"}])):
+            with patch("app.main.read_async_open_provider_capabilities", new=AsyncMock(return_value={"intraday_board_flow_concept"})):
                 return await open_provider_capabilities(
                     "eastmoney_free", ["intraday_board_flow_concept", "intraday_board_flow_industry"],
                 )
         self.assertEqual(asyncio.run(check()), {"intraday_board_flow_concept"})
 
-    def test_generic_provider_circuit_lookup_uses_database_executor(self):
+    def test_generic_provider_circuit_lookup_uses_native_async_repository(self):
         providers = [MagicMock(key="tushare_primary"), MagicMock(key="tushare_super_sdk")]
 
         async def check() -> set[str]:
-            with patch("app.main.run_database_blocking", new=AsyncMock(return_value=[{"provider_key": "tushare_super_sdk"}])):
+            with patch("app.main.read_async_open_provider_keys", new=AsyncMock(return_value={"tushare_super_sdk"})):
                 return await circuit_open_provider_keys_async("daily", providers)
 
         self.assertEqual(asyncio.run(check()), {"tushare_super_sdk"})
