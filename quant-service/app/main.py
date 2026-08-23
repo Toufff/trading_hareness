@@ -431,6 +431,7 @@ from .eastmoney_live_hydration import hydrate as hydrate_eastmoney_live_isolated
 from .ths_sector_flows import sync_industry as sync_ths_industry_isolated, sync_concept_signals as sync_ths_concept_signals_isolated
 from .outcome_recomputation import recompute as recompute_outcomes_isolated
 from .ths_concept_members_sync import sync as sync_ths_concept_members_isolated
+from .analyst_scorecards import readiness as analyst_scorecard_readiness
 from .analyst_scorecards import recompute as recompute_scorecards_isolated
 from .claim_review_service import review_claim as review_claim_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
@@ -874,36 +875,6 @@ def run_analysis_job(analysis_id: uuid.UUID) -> dict[str, Any]:
         "extractor_version": EXTRACTOR_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
-
-
-def analyst_scorecard_readiness(connection: Any) -> list[dict[str, Any]]:
-    """Show why an analyst is or is not allowed to influence a model weight."""
-    rows = connection.execute(
-        """SELECT a.remote_analyst_id,a.name,
-                  count(DISTINCT c.claim_id)::int stock_claims,
-                  count(DISTINCT c.claim_id) FILTER (WHERE c.direction<>0)::int directional_stock_claims,
-                  count(DISTINCT c.claim_id) FILTER (WHERE c.direction=0)::int neutral_stock_claims,
-                  count(DISTINCT o.outcome_id)::int settled_stock_outcomes,
-                  max(c.available_at) latest_claim_at
-             FROM quant.remote_analysts a
-             LEFT JOIN quant.analyst_claims c ON c.remote_analyst_id=a.remote_analyst_id AND c.scope='stock'
-             LEFT JOIN quant.outcomes o ON o.claim_id=c.claim_id
-             GROUP BY a.remote_analyst_id,a.name
-             ORDER BY a.name,a.remote_analyst_id"""
-    ).fetchall()
-    result: list[dict[str, Any]] = []
-    for row in rows:
-        item = dict(row)
-        directional = int(item["directional_stock_claims"] or 0)
-        settled = int(item["settled_stock_outcomes"] or 0)
-        if directional == 0:
-            reason = "no_directional_stock_claims"
-        elif settled < 30:
-            reason = "fewer_than_30_settled_stock_outcomes"
-        else:
-            reason = "eligible_for_scorecard_review"
-        result.append({**item, "mature": settled >= 30, "reason": reason})
-    return result
 
 
 def recompute_scorecards_legacy(as_of_date: date | None = None) -> dict[str, Any]:
