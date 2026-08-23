@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter
 
+from ..async_analyst_archive_read_repository import analyst_claims as async_analyst_claims
+from ..async_analyst_archive_read_repository import claim_review_queue as async_claim_review_queue
+from ..async_analyst_archive_read_repository import remote_messages as async_remote_messages
+from ..async_analyst_archive_read_repository import remote_reports as async_remote_reports
 from ..analyst_read_model import analyst_claims, claim_review_queue, remote_messages, remote_reports
 from ..remote_archive import analyst_global_sync_cursor, analyst_sync_cursor
 
@@ -16,6 +20,12 @@ def build_analyst_reads_router(
     database: Any,
     remote_state_fn: Callable[[Any], dict[str, Any]],
     factor_summary_fn: Callable[[Any, date, int], dict[str, Any]],
+    *,
+    async_database: Any | None = None,
+    async_remote_reports_fn: Callable[[Any, int, int], Awaitable[dict[str, Any]]] | None = None,
+    async_remote_messages_fn: Callable[[Any, str | None, int, int], Awaitable[dict[str, Any]]] | None = None,
+    async_analyst_claims_fn: Callable[[Any, int, int], Awaitable[dict[str, Any]]] | None = None,
+    async_claim_review_queue_fn: Callable[[Any, str, int], Awaitable[dict[str, Any]]] | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["analyst-reads"])
 
@@ -24,11 +34,15 @@ def build_analyst_reads_router(
         return remote_state_fn(database)
 
     @router.get("/api/v1/remote-archive/reports")
-    def remote_archive_reports(limit: int = 30, offset: int = 0) -> dict[str, Any]:
+    async def remote_archive_reports(limit: int = 30, offset: int = 0) -> dict[str, Any]:
+        if async_database is not None:
+            return await (async_remote_reports_fn or async_remote_reports)(async_database, limit, offset)
         return remote_reports(database, limit, offset)
 
     @router.get("/api/v1/remote-archive/messages")
-    def remote_archive_messages(analyst_id: str | None = None, limit: int = 30, offset: int = 0) -> dict[str, Any]:
+    async def remote_archive_messages(analyst_id: str | None = None, limit: int = 30, offset: int = 0) -> dict[str, Any]:
+        if async_database is not None:
+            return await (async_remote_messages_fn or async_remote_messages)(async_database, analyst_id, limit, offset)
         return remote_messages(database, analyst_id, limit, offset)
 
     @router.get("/api/v1/remote-archive/sync-cursors/{stream_key}/{analyst_id}")
@@ -40,7 +54,9 @@ def build_analyst_reads_router(
         return analyst_global_sync_cursor(database, stream_key)
 
     @router.get("/api/v1/analyst-claims")
-    def analyst_claims_route(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    async def analyst_claims_route(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        if async_database is not None:
+            return await (async_analyst_claims_fn or async_analyst_claims)(async_database, limit, offset)
         return analyst_claims(database, limit, offset)
 
     @router.get("/api/v1/analyst-factors")
@@ -49,7 +65,9 @@ def build_analyst_reads_router(
             return factor_summary_fn(connection, as_of_date or datetime.now(ZoneInfo("Asia/Shanghai")).date(), lookback_days)
 
     @router.get("/api/v1/claim-review")
-    def claim_review_queue_route(status: Literal["pending", "approved", "rejected"] = "pending", limit: int = 100) -> dict[str, Any]:
+    async def claim_review_queue_route(status: Literal["pending", "approved", "rejected"] = "pending", limit: int = 100) -> dict[str, Any]:
+        if async_database is not None:
+            return await (async_claim_review_queue_fn or async_claim_review_queue)(async_database, status, limit)
         return claim_review_queue(database, status, limit)
 
     return router

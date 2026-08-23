@@ -20,6 +20,8 @@ from app.async_intraday_evidence_read_repository import watchlists as async_watc
 from app.async_analyst_skill_read_repository import profiles as async_analyst_skill_profiles
 from app.async_analyst_research_read_repository import observations as async_analyst_observations
 from app.async_analyst_research_read_repository import profiles as async_analyst_research_profiles
+from app.async_analyst_archive_read_repository import remote_messages as async_remote_messages
+from app.async_analyst_archive_read_repository import remote_reports as async_remote_reports
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -28,6 +30,7 @@ from app.routers.event_reads import build_event_reads_router
 from app.routers.research_readiness import build_research_readiness_router
 from app.routers.analyst_skill_reads import build_analyst_skill_reads_router
 from app.routers.analyst_research_reads import build_analyst_research_reads_router
+from app.routers.analyst_reads import build_analyst_reads_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -111,6 +114,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_research_readiness_repository.py",
             "async_analyst_skill_read_repository.py",
             "async_analyst_research_read_repository.py",
+            "async_analyst_archive_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -539,6 +543,88 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(profile_payload["items"][0]["remote_analyst_id"], "anqiang")
         self.assertEqual(observation_payload["health"][0]["observations"], 1)
         self.assertEqual(database.connection.calls[-2][1], ("anqiang", "anqiang", 500))
+
+    async def test_analyst_archive_router_prefers_async_text_only_pages(self) -> None:
+        calls = []
+
+        async def reports(_database, limit, offset):
+            calls.append(("reports", limit, offset))
+            return {"items": [], "total": 0}
+
+        async def messages(_database, analyst_id, limit, offset):
+            calls.append(("messages", analyst_id, limit, offset))
+            return {"items": [], "total": 0}
+
+        async def claims(_database, limit, offset):
+            calls.append(("claims", limit, offset))
+            return {"items": [], "total": 0}
+
+        async def review(_database, status, limit):
+            calls.append(("review", status, limit))
+            return {"items": [], "status": status}
+
+        router = build_analyst_reads_router(
+            object(), lambda *_args: {}, lambda *_args: {}, async_database=object(),
+            async_remote_reports_fn=reports, async_remote_messages_fn=messages,
+            async_analyst_claims_fn=claims, async_claim_review_queue_fn=review,
+        )
+        endpoints = {route.path: route.endpoint for route in router.routes}
+        await endpoints["/api/v1/remote-archive/reports"](7, 2)
+        await endpoints["/api/v1/remote-archive/messages"]("anqiang", 8, 3)
+        await endpoints["/api/v1/analyst-claims"](9, 4)
+        await endpoints["/api/v1/claim-review"]("approved", 10)
+        self.assertEqual(calls, [
+            ("reports", 7, 2), ("messages", "anqiang", 8, 3),
+            ("claims", 9, 4), ("review", "approved", 10),
+        ])
+
+    async def test_analyst_archive_pagination_is_bounded_in_native_async_repository(self) -> None:
+        class Result:
+            def __init__(self, row=None, rows=None):
+                self.row, self.rows = row, rows or []
+
+            async def fetchone(self):
+                return self.row
+
+            async def fetchall(self):
+                return self.rows
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "count(*)" in sql:
+                    return Result({"total": 1})
+                return Result(rows=[{"remote_report_id": "r-1"}])
+
+        class Transaction:
+            def __init__(self, connection):
+                self.connection = connection
+
+            async def __aenter__(self):
+                return self.connection
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Database:
+            def __init__(self):
+                self.connection = Connection()
+
+            def transaction(self):
+                return Transaction(self.connection)
+
+        database = Database()
+        reports = await async_remote_reports(database, 1000, -2)
+        messages = await async_remote_messages(database, "anqiang", 1000, -3)
+        self.assertEqual(reports["limit"], 100)
+        self.assertEqual(reports["offset"], 0)
+        self.assertEqual(messages["limit"], 100)
+        self.assertEqual(messages["offset"], 0)
+        self.assertEqual(database.connection.calls[0][1], (100, 0))
+        self.assertEqual(database.connection.calls[2][1], ("anqiang", "anqiang", 100, 0))
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:
