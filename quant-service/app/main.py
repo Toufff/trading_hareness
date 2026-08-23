@@ -303,14 +303,9 @@ from .strategy_contracts import LabelSpec
 from .strategy_ablation import ablation_scores
 from .episode_lifecycle import clear_stale_signal_episodes, ensure_signal_episode
 from .runtime_resources import (
-    DEFAULT_HOT_DATABASE_SOFT_BYTES,
-    DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
-    bounded_storage_budget_bytes,
-    bounded_storage_ratio,
-    managed_directory_bytes,
-    research_storage_governance,
     runtime_resource_status,
 )
+from .research_storage_admission import ResearchStorageAdmission, governance as research_storage_governance_isolated
 from .health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
 from .replay_readiness import historical_replay_readiness
 from . import research_capacity
@@ -561,35 +556,16 @@ _cninfo_announcement_actions = CninfoAnnouncementActions(db)
 _board_flow_capture_actions = BoardFlowCaptureActions(db)
 _board_rotation_repository = BoardRotationRepository(db)
 _intraday_minute_capture_actions = IntradayMinuteCaptureActions(db)
-_research_storage_admission_cache: tuple[float, dict[str, Any]] | None = None
 
 
 def local_research_storage_governance(database: Database = db) -> dict[str, Any]:
-    """Measure managed research storage without mutating or pruning evidence."""
-    with database.transaction() as connection:
-        row = connection.execute(
-            """SELECT coalesce(sum(pg_total_relation_size(c.oid)),0)::bigint AS bytes
-                 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                WHERE n.nspname='quant' AND c.relkind IN ('r','m','p')""",
-        ).fetchone()
-    data_dir = Path(os.getenv("QUANT_DATA_DIR", "/var/lib/quant"))
-    warning_ratio = bounded_storage_ratio(os.getenv("QUANT_RESEARCH_STORAGE_WARNING_RATIO"), 0.80)
-    return research_storage_governance(
-        hot_database_bytes=int((row or {}).get("bytes") or 0),
-        artifact_bytes=managed_directory_bytes(data_dir),
-        research_budget_bytes=bounded_storage_budget_bytes(
-            os.getenv("QUANT_RESEARCH_STORAGE_SOFT_BYTES"), DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
-            DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
-        ),
-        hot_database_budget_bytes=bounded_storage_budget_bytes(
-            os.getenv("QUANT_HOT_DATABASE_SOFT_BYTES"), DEFAULT_HOT_DATABASE_SOFT_BYTES,
-            DEFAULT_HOT_DATABASE_SOFT_BYTES,
-        ),
-        warning_ratio=warning_ratio,
-        stop_ratio=max(
-            bounded_storage_ratio(os.getenv("QUANT_RESEARCH_STORAGE_STOP_RATIO"), 0.90), warning_ratio,
-        ),
-    )
+    """Compatibility entrypoint for the isolated local storage projection."""
+    return research_storage_governance_isolated(database)
+
+
+_research_storage_admission = ResearchStorageAdmission(
+    status_fn=local_research_storage_governance, run_database=run_database_blocking,
+)
 
 
 async def nonessential_high_frequency_capture_allowed() -> tuple[bool, dict[str, Any]]:
@@ -599,15 +575,7 @@ async def nonessential_high_frequency_capture_allowed() -> tuple[bool, dict[str,
     cross-checks and board curves).  Watchlist price evaluation, risk alerts,
     outcomes and durable delivery keep running even at the stop watermark.
     """
-    global _research_storage_admission_cache
-    now = asyncio.get_running_loop().time()
-    cached = _research_storage_admission_cache
-    if cached is None or now - cached[0] >= 60.0:
-        status = await run_database_blocking(local_research_storage_governance, timeout_seconds=10)
-        _research_storage_admission_cache = (now, status)
-    else:
-        status = cached[1]
-    return bool(status.get("allow_nonessential_high_frequency", True)), status
+    return await _research_storage_admission.optional_high_frequency_allowed()
 
 
 # The one-click post-close refresh has several write-heavy, ordered phases.
