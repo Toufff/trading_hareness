@@ -257,6 +257,7 @@ from .board_stock_mining_repository import persist_board_stock_mining_run
 from .limit_linkage_mining import limit_linkage_candidates
 from .limit_linkage_mining_repository import persist_limit_linkage_mining_run
 from .limit_linkage_mining_service import LimitLinkageMiningDependencies, run as run_limit_linkage_mining_isolated
+from .async_limit_linkage_relation_repository import relations as read_async_limit_linkage_relations
 from .board_curve_read_model import board_display_slots as _board_display_slots
 from .board_curve_read_model import intraday_board_flow_curves as read_intraday_board_flow_curves
 from .board_curve_read_model import latest_close_sector_review_report as read_latest_close_sector_review_report
@@ -2760,47 +2761,10 @@ async def refresh_intraday_limit_up_anchors(observed_at: datetime) -> dict[str, 
         return {"status": "failed", "reason": safe_error_detail(str(error), 300)}
 
 
-def limit_linkage_relations_from_database(trade_date: date) -> list[dict[str, Any]]:
-    """Return exact THS-concept peers of same-date Eastmoney limit-up facts."""
-    with db.transaction() as connection:
-        rows = connection.execute(
-            """WITH anchors AS (
-                   SELECT DISTINCT event.symbol,coalesce(instrument.name,event.symbol) AS name
-                     FROM quant.market_events event
-                LEFT JOIN quant.instruments instrument ON instrument.symbol=event.symbol
-                    WHERE event.event_type='limit_up_pool'
-                      AND (event.occurred_at AT TIME ZONE 'Asia/Shanghai')::date=%s
-                 ), eligible_concepts AS (
-                   SELECT sector_key
-                     FROM quant.sector_membership_history
-                    WHERE taxonomy_key='ths_concept_flow' AND effective_to IS NULL
-                    GROUP BY sector_key
-                   HAVING count(*) BETWEEN 2 AND 200
-                 ), shared AS (
-                   SELECT candidate.symbol,anchor.symbol AS leader_symbol,anchor.name AS leader_name,
-                          leader.sector_key,sector.label
-                     FROM anchors anchor
-                     JOIN quant.sector_membership_history leader
-                       ON leader.symbol=anchor.symbol AND leader.taxonomy_key='ths_concept_flow' AND leader.effective_to IS NULL
-                     JOIN eligible_concepts eligible ON eligible.sector_key=leader.sector_key
-                     JOIN quant.sector_membership_history candidate
-                       ON candidate.taxonomy_key=leader.taxonomy_key AND candidate.sector_key=leader.sector_key
-                      AND candidate.effective_to IS NULL AND candidate.symbol<>anchor.symbol
-                      AND candidate.symbol NOT IN (SELECT symbol FROM anchors)
-                     JOIN quant.sectors sector ON sector.taxonomy_key=leader.taxonomy_key AND sector.sector_key=leader.sector_key
-                 )
-                 SELECT symbol,array_agg(DISTINCT sector_key) AS concept_keys,array_agg(DISTINCT label) AS concept_labels,
-                        array_agg(DISTINCT leader_symbol) AS leader_symbols,array_agg(DISTINCT leader_name) AS leader_names
-                   FROM shared GROUP BY symbol""",
-            (trade_date,),
-        ).fetchall()
-    return [{**dict(row), "shared_concepts": len(row["concept_keys"] or [])} for row in rows]
-
-
 async def run_limit_linkage_mining(observed_at: datetime, quote_by_symbol: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Mine non-limit peers without another all-market quote request."""
     async def load_relations(trade_date: date) -> list[dict[str, Any]]:
-        return await run_database_blocking(limit_linkage_relations_from_database, trade_date)
+        return await read_async_limit_linkage_relations(async_db, trade_date)
 
     async def persist(observed: datetime, trade_date: date, candidates: list[dict[str, Any]], summary: dict[str, Any]) -> str:
         def write() -> str:
