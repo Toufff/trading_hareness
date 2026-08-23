@@ -461,6 +461,7 @@ from .intraday_scan_preparation import (
     IntradayScanPreparationDependencies,
     prepare_intraday_scan_inputs,
 )
+from .intraday_scan_source_status import build_scan_source_status
 from .tushare_official import (
     AUDIT_FOCUS_APIS,
     HISTORICAL_MINUTE_APIS,
@@ -2697,61 +2698,19 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
     )
     tushare_minutes = await intraday_tushare_minutes(priority_symbols) if priority_symbols else {}
     fast_confirmations = await latest_intraday_fast_quote_confirmations(selected_symbols, quotes, observed_at)
-    fast_status_counts: dict[str, int] = {}
-    for item in fast_confirmations.values():
-        status = str(item.get("status") or "unknown")
-        fast_status_counts[status] = fast_status_counts.get(status, 0) + 1
     board_cache_evidence = await intraday_board_cache_evidence(observed_at)
-    direct_watch_symbols = {
-        str(row.get("ts_code") or "") for row in fresh_watch_rows
-        if str(row.get("ts_code") or "") in selected_symbols
-    }
-    sina_watch_symbols = {
-        str(row.get("ts_code") or "") for row in sina_watch_rows
-        if str(row.get("ts_code") or "") in selected_symbols
-    }
-    all_a_watch_symbols = {
-        symbol for symbol in selected_symbols
-        if (quotes.get(symbol) or {}).get("price_source") == "tencent_all_a_snapshot"
-    }
-    direct_watch_count = len(direct_watch_symbols)
-    fresh_direct_watch_count = sum(
-        1 for symbol in direct_watch_symbols
-        if ((quotes.get(symbol) or {}).get("price_freshness") or {}).get("status") == "fresh"
+    source_status = build_scan_source_status(
+        selected_symbols=selected_symbols, quotes=quotes, tencent_rows=tencent_rows,
+        fresh_watch_rows=fresh_watch_rows, sina_watch_rows=sina_watch_rows,
+        eastmoney_watch_flow_rows=eastmoney_watch_flow_rows, all_a_snapshot_status=all_a_snapshot_status,
+        surge_source=surge_source, priority_symbols=priority_symbols,
+        rotation_pool_size=len(ordered_priority_symbols),
+        rotation_start_offset=(request.realtime_validation_offset % len(ordered_priority_symbols)
+                               if ordered_priority_symbols else 0),
+        next_rotation_offset=next_realtime_validation_offset, tushare_minutes=tushare_minutes,
+        fast_confirmations=fast_confirmations, board_cache_evidence=board_cache_evidence,
+        quote_timestamp_slo_seconds=quote_timestamp_slo_seconds,
     )
-    tencent_status = ("completed" if fresh_direct_watch_count == len(selected_symbols) else
-                      "partial" if direct_watch_count or tencent_rows else "unavailable")
-    source_status = {"tencent": {"status": tencent_status, "rows": len(tencent_rows),
-                                         "matched": sum(symbol in quotes for symbol in selected_symbols),
-                                         "all_a_snapshot": all_a_snapshot_status,
-                                         "fresh_watch_quote_rows": len(fresh_watch_rows),
-                                         "fresh_watch_quote_symbols": direct_watch_count,
-                                         "decision_eligible_watch_quote_symbols": fresh_direct_watch_count,
-                                         "stale_or_unstamped_direct_watch_quote_symbols": direct_watch_count - fresh_direct_watch_count,
-                                         "quote_timestamp_slo_seconds": quote_timestamp_slo_seconds,
-                                         "all_a_only_watch_quote_symbols": len(all_a_watch_symbols),
-                                         "sina_fallback_watch_quote_symbols": len(sina_watch_symbols),
-                                         "missing_direct_watch_quote_symbols": len(selected_symbols) - direct_watch_count,
-                                         "sina_watch_quote_rows": len(sina_watch_rows)},
-                     "eastmoney_watch_flow": {"status": "completed" if eastmoney_watch_flow_rows else "not_used",
-                                                "rows": len(eastmoney_watch_flow_rows),
-                                                "scope": "explicit_watchlist_only",
-                                                "percentiles": "not_computed"},
-                     "tencent_minute_context": surge_source,
-                     "tushare_rt_min": {
-                         "requested": priority_symbols,
-                         "items": {symbol: item["source"] for symbol, item in tushare_minutes.items()},
-                         "rotation_pool_size": len(ordered_priority_symbols),
-                         "rotation_start_offset": (
-                             request.realtime_validation_offset % len(ordered_priority_symbols)
-                             if ordered_priority_symbols else 0
-                         ),
-                         "next_rotation_offset": next_realtime_validation_offset,
-                     },
-                     "tushare_rt_k_fast": {"status_counts": fast_status_counts, "max_age_seconds": 30,
-                                             "cadence": "one request start per second in selected windows"},
-                     "eastmoney_board_flow": board_cache_evidence,
-                     "post_close_lhb_cninfo": "context only; never used in same-day intraday signal"}
     quote_latency_ms = round((asyncio.get_running_loop().time() - quote_started_at) * 1000)
     signals = await run_database_blocking(
         persist_intraday_scan_signals, scan_id, observed_at, selected_symbols, source_status, watches,
