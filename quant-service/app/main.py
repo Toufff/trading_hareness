@@ -450,6 +450,7 @@ from .runtime_leases import (
     renew_runtime_lease,
 )
 from .tushare_catalog import CORE_NORMALIZED_APIS, TUSHARE_CATALOG, catalog_counts, catalog_items
+from .tushare_catalog_fetch_service import CatalogFetchDependencies, fetch_catalog as run_catalog_fetch
 from .tushare_official import (
     AUDIT_FOCUS_APIS,
     HISTORICAL_MINUTE_APIS,
@@ -4392,93 +4393,29 @@ def persist_tushare_fetch_blocked(request_key: str, error: Exception) -> None:
 
 
 async def fetch_tushare_catalog(request: TushareFetchRequest) -> dict[str, Any]:
-    if request.api_name in REALTIME_MARKET_HOURS_APIS:
-        active, reason = await realtime_market_session_async(request.api_name)
-        if not active:
-            raise HTTPException(status_code=409, detail=f"{request.api_name} probe skipped: {reason}")
-    canonical_params = json.loads(json.dumps(request.params, ensure_ascii=False, sort_keys=True, default=str))
-    candidates = provider_candidates(request.api_name, request.provider)
-    if not candidates:
-        raise HTTPException(status_code=503, detail=f"no configured provider supports {request.api_name} for {request.provider}")
-    blocked_provider_keys = await circuit_open_provider_keys_async(request.api_name, candidates)
-    candidates = [provider for provider in candidates if provider.key not in blocked_provider_keys]
-    if not candidates:
-        raise HTTPException(status_code=503, detail=f"all configured providers are temporarily circuit-open for {request.api_name}")
-    candidate_keys = [provider.key for provider in candidates]
-    request_identity: dict[str, Any] = {"api_name": request.api_name, "provider": request.provider,
-                                        "provider_candidates": candidate_keys, "params": canonical_params,
-                                        "fields": request.fields, "paginate": request.paginate,
-                                        "page_size": request.page_size, "max_pages": request.max_pages,
-                                        "require_complete": request.require_complete}
-    if request.force_refresh:
-        request_identity["audit_nonce"] = uuid.uuid4().hex
-    request_key = hashlib.sha256(json.dumps(request_identity, sort_keys=True).encode()).hexdigest()
-    cached = await run_database_blocking(
-        prepare_tushare_fetch_run, request, request_key, candidate_keys, canonical_params, timeout_seconds=60,
+    return await run_catalog_fetch(
+        request,
+        CatalogFetchDependencies(
+            realtime_market_hours_apis=REALTIME_MARKET_HOURS_APIS,
+            realtime_market_session=realtime_market_session_async,
+            provider_candidates=provider_candidates,
+            circuit_open_provider_keys=circuit_open_provider_keys_async,
+            run_database=run_database_blocking,
+            prepare_run=prepare_tushare_fetch_run,
+            persist_success=persist_tushare_fetch_success,
+            persist_cancel=persist_tushare_fetch_cancel,
+            persist_failure=persist_tushare_fetch_failure,
+            persist_blocked=persist_tushare_fetch_blocked,
+            call_api=call_tushare_api,
+            looks_like_response_header=looks_like_response_header,
+            realtime_rows_are_current=realtime_rows_are_current,
+            catalog=TUSHARE_CATALOG,
+            normalized_apis=CORE_NORMALIZED_APIS,
+            provider_call_error=ProviderCallError,
+            executor_saturated_error=ExecutorSaturatedError,
+            local_capacity_detail=LOCAL_CAPACITY_HTTP_DETAIL,
+        ),
     )
-    if cached is not None:
-        return cached
-    provider_started_at = asyncio.get_running_loop().time()
-    try:
-        result = await call_tushare_api(
-            request.api_name, canonical_params, request.fields, request.provider,
-            paginate=request.paginate, page_size=request.page_size,
-            max_rows=request.max_rows, max_pages=request.max_pages,
-            require_complete=request.require_complete, blocked_provider_keys=blocked_provider_keys,
-        )
-        rows = result.rows
-        if looks_like_response_header(rows):
-            raise ProviderCallError("provider returned a header row instead of market data")
-        if not realtime_rows_are_current(request.api_name, rows):
-            raise ProviderCallError(f"provider returned stale realtime rows for {request.api_name}")
-        if request.api_name.endswith("_min") or request.api_name.endswith("_min_daily"):
-            # Some verified gateways return intraday bars from open to now.
-            # Keep the newest bounded rows so short UI/study requests never
-            # accidentally retain only the 09:31 opening bars.
-            rows = sorted(rows, key=lambda row: str(
-                row.get("time") or row.get("updated_at") or row.get("trade_time")
-                or row.get("datetime") or ""
-            ), reverse=True)
-        truncated = len(rows) > request.max_rows or not result.complete
-        if request.require_complete and truncated:
-            raise ProviderCallError(
-                f"{result.provider.key} did not reach a terminal page for {request.api_name} "
-                f"within {request.max_pages} pages/{request.max_rows} rows"
-            )
-        bounded_rows = rows[:request.max_rows]
-        provider_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
-        status, normalized_rows = await run_database_blocking(
-            persist_tushare_fetch_success, request, request_key, bounded_rows, truncated, result, provider_latency_ms,
-            timeout_seconds=60,
-        )
-        return {"status": status, "api_name": request.api_name, "group": TUSHARE_CATALOG[request.api_name],
-                "normalized": request.api_name in CORE_NORMALIZED_APIS, "received": len(rows), "stored": len(bounded_rows),
-                "provider": result.provider.key, "fallback_failures": [{"provider": key, "error": error} for key, error in result.failed_providers],
-                "fallback_empty_providers": list(result.empty_providers),
-                "normalized_rows": normalized_rows, "truncated": truncated, "complete": not truncated,
-                "pages": result.pages, "request_key": request_key}
-    except asyncio.CancelledError:
-        # A bounded study/probe may cancel this coroutine while a provider is
-        # still waiting on the network.  Do not leave the durable run looking
-        # active: that would incorrectly make an operational timeout appear
-        # as an in-flight market-data fetch.
-        await run_database_blocking(persist_tushare_fetch_cancel, request_key, request.api_name, candidate_keys)
-        raise
-    except ExecutorSaturatedError as error:
-        # The Super GET proxy worker and local DB work are deliberately bounded.
-        # A rejected local submission is neither an upstream failure nor evidence
-        # that a provider capability is bad, so it must not advance its circuit.
-        await run_database_blocking(persist_tushare_fetch_blocked, request_key, error)
-        raise HTTPException(
-            status_code=503,
-            detail=LOCAL_CAPACITY_HTTP_DETAIL,
-        ) from error
-    except Exception as error:  # noqa: BLE001 - store an actionable, token-free failure
-        provider_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
-        await run_database_blocking(
-            persist_tushare_fetch_failure, request_key, request.api_name, candidate_keys, error, provider_latency_ms,
-        )
-        raise HTTPException(status_code=502, detail=f"Tushare {request.api_name} request failed") from error
 
 
 def tushare_rows_for_request(request_key: str) -> list[dict[str, Any]]:
