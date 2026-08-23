@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
+from psycopg.types.json import Json
+
 
 @dataclass(frozen=True)
 class StrategyPatternSampleInputs:
@@ -63,4 +65,47 @@ def load_strategy_pattern_sample_inputs(database: Any, as_of_date: date) -> Stra
     )
 
 
-__all__ = ["StrategyPatternSampleInputs", "load_strategy_pattern_sample_inputs"]
+def persist_strategy_pattern_run(
+    database: Any,
+    run_key: str,
+    as_of_date: date,
+    status: str,
+    source_status: dict[str, Any],
+    summary: dict[str, Any],
+    samples: list[dict[str, Any]],
+    *,
+    model_version: str,
+    json_safe: Any,
+) -> Any:
+    """Replace one bounded post-close pattern run atomically.
+
+    Inputs are already selected and minute-replayed by the caller.  This
+    repository never fetches providers or ranks samples, so persistence cannot
+    accidentally widen the replay/data-collection boundary.
+    """
+    with database.transaction() as connection:
+        run = connection.execute(
+            """INSERT INTO quant.strategy_pattern_runs(run_key,as_of_date,model_version,status,source_status,summary)
+               VALUES(%s,%s,%s,%s,%s,%s)
+               ON CONFLICT(run_key) DO UPDATE SET status=EXCLUDED.status,source_status=EXCLUDED.source_status,
+                 summary=EXCLUDED.summary,updated_at=now() RETURNING run_id""",
+            (run_key, as_of_date, model_version, status,
+             Json(json_safe(source_status)), Json(json_safe(summary))),
+        ).fetchone()
+        connection.execute("DELETE FROM quant.strategy_pattern_samples WHERE run_id=%s", (run["run_id"],))
+        for rank, sample in enumerate(samples, start=1):
+            connection.execute(
+                """INSERT INTO quant.strategy_pattern_samples(run_id,rank,symbol,name,primary_cohort,cohorts,board_context,
+                       limit_context,daily_features,intraday_pattern,minute_source,risk_flags)
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (run["run_id"], rank, sample["symbol"], sample.get("name"), sample["primary_cohort"], Json(sample["cohorts"]),
+                 Json(json_safe(sample["board_context"])), Json(json_safe(sample["limit_context"])),
+                 Json(json_safe(sample["daily_features"])), Json(json_safe(sample["intraday_pattern"])),
+                 sample.get("minute_source"), Json(sample["risk_flags"])),
+            )
+    return run["run_id"]
+
+
+__all__ = [
+    "StrategyPatternSampleInputs", "load_strategy_pattern_sample_inputs", "persist_strategy_pattern_run",
+]

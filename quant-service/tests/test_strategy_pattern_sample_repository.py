@@ -4,7 +4,10 @@ from contextlib import contextmanager
 from datetime import date
 import unittest
 
-from app.strategy_pattern_sample_repository import load_strategy_pattern_sample_inputs
+from app.strategy_pattern_sample_repository import (
+    load_strategy_pattern_sample_inputs,
+    persist_strategy_pattern_run,
+)
 
 
 class StrategyPatternSampleRepositoryTests(unittest.TestCase):
@@ -76,6 +79,40 @@ class StrategyPatternSampleRepositoryTests(unittest.TestCase):
         self.assertEqual(inputs.limit_rows, [])
         self.assertEqual(inputs.prior_limit_rows, [])
         self.assertEqual(inputs.daily_rows, [])
+
+    def test_persist_replaces_one_bounded_run_without_fetching_or_reranking(self) -> None:
+        class Result:
+            def fetchone(self):
+                return {"run_id": "run-1"}
+
+        class Database:
+            def __init__(self):
+                self.calls = []
+
+            @contextmanager
+            def transaction(self):
+                yield self
+
+            def execute(self, sql, params=None):
+                self.calls.append((str(sql), params))
+                return Result()
+
+        database = Database()
+        run_id = persist_strategy_pattern_run(
+            database, "key", date(2026, 8, 17), "completed", {"minute": "completed"}, {"selected": 1},
+            [{
+                "symbol": "000001.SZ", "primary_cohort": "limit_pool", "cohorts": ["limit_pool"],
+                "board_context": {}, "limit_context": {}, "daily_features": {},
+                "intraday_pattern": {"status": "completed"}, "risk_flags": [],
+            }],
+            model_version="test-v1", json_safe=lambda value: value,
+        )
+
+        self.assertEqual(run_id, "run-1")
+        self.assertEqual(len(database.calls), 3)
+        self.assertIn("INSERT INTO quant.strategy_pattern_runs", database.calls[0][0])
+        self.assertIn("DELETE FROM quant.strategy_pattern_samples", database.calls[1][0])
+        self.assertIn("INSERT INTO quant.strategy_pattern_samples", database.calls[2][0])
 
 
 if __name__ == "__main__":

@@ -159,7 +159,10 @@ from .post_close_pattern_candidates import select_candidates as pure_post_close_
 from .post_close_candidate_screen import screen_candidates as pure_post_close_screen_candidates
 from .post_close_evidence import exact_board_context as pure_exact_board_context, lhb_context as pure_lhb_context
 from .limit_pool_merge import merge_limit_pool_sources as merge_persisted_limit_pool_sources
-from .strategy_pattern_sample_repository import load_strategy_pattern_sample_inputs
+from .strategy_pattern_sample_repository import (
+    load_strategy_pattern_sample_inputs,
+    persist_strategy_pattern_run as persist_strategy_pattern_run_isolated,
+)
 from .post_close_strategy_service import (
     candidates as persisted_post_close_strategy_candidates,
     completed_for_date as persisted_post_close_strategy_completed_for_date,
@@ -1863,28 +1866,11 @@ def persist_strategy_pattern_run(
     summary: dict[str, Any],
     samples: list[dict[str, Any]],
 ) -> Any:
-    """Replace one bounded pattern-mining run atomically in a DB worker."""
-    with db.transaction() as connection:
-        run = connection.execute(
-            """INSERT INTO quant.strategy_pattern_runs(run_key,as_of_date,model_version,status,source_status,summary)
-               VALUES(%s,%s,%s,%s,%s,%s)
-               ON CONFLICT(run_key) DO UPDATE SET status=EXCLUDED.status,source_status=EXCLUDED.source_status,
-                 summary=EXCLUDED.summary,updated_at=now() RETURNING run_id""",
-            (run_key, as_of_date, STRATEGY_PATTERN_MODEL_VERSION, status,
-             Json(strategy_json_safe(source_status)), Json(strategy_json_safe(summary))),
-        ).fetchone()
-        connection.execute("DELETE FROM quant.strategy_pattern_samples WHERE run_id=%s", (run["run_id"],))
-        for rank, sample in enumerate(samples, start=1):
-            connection.execute(
-                """INSERT INTO quant.strategy_pattern_samples(run_id,rank,symbol,name,primary_cohort,cohorts,board_context,
-                       limit_context,daily_features,intraday_pattern,minute_source,risk_flags)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (run["run_id"], rank, sample["symbol"], sample.get("name"), sample["primary_cohort"], Json(sample["cohorts"]),
-                 Json(strategy_json_safe(sample["board_context"])), Json(strategy_json_safe(sample["limit_context"])),
-                 Json(strategy_json_safe(sample["daily_features"])), Json(strategy_json_safe(sample["intraday_pattern"])),
-                 sample.get("minute_source"), Json(sample["risk_flags"])),
-            )
-    return run["run_id"]
+    """Compatibility entry point for bounded pattern-run persistence."""
+    return persist_strategy_pattern_run_isolated(
+        db, run_key, as_of_date, status, source_status, summary, samples,
+        model_version=STRATEGY_PATTERN_MODEL_VERSION, json_safe=strategy_json_safe,
+    )
 
 
 async def run_strategy_pattern_mining(request: StrategyPatternMiningRequest) -> dict[str, Any]:
