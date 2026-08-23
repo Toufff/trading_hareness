@@ -25,6 +25,17 @@ def tushare_catalog_snapshot(
                FROM quant.provider_api_capabilities
                WHERE provider_key IN ('tushare_primary','tushare_super_sdk','tushare_super_get','tushare_backup')"""
         ).fetchall()
+    return project_tushare_catalog(
+        items=items, rows=[dict(row) for row in rows], counts=dict(catalog_counts_fn()),
+        providers=[*provider_status_fn(), *free_provider_status_fn()],
+    )
+
+
+def project_tushare_catalog(
+    *, items: list[dict[str, Any]], rows: list[dict[str, Any]], counts: dict[str, Any],
+    providers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply one capability-evidence projection for sync and async local reads."""
     observations: dict[str, dict[str, Any]] = {}
     for row in rows:
         observations.setdefault(str(row["api_name"]), {})[str(row["provider_key"])] = {
@@ -43,7 +54,7 @@ def tushare_catalog_snapshot(
             item["super_get_availability"] if str(item["api_name"]) in SUPER_GET_VERIFIED_APIS
             else item["super_sdk_availability"]
         )
-    counts = dict(catalog_counts_fn())
+    counts = dict(counts)
     for prefix, key in (("primary", "primary_availability"), ("super", "super_availability"),
                         ("super_get", "super_get_availability"), ("super_sdk", "super_sdk_availability")):
         counts[f"{prefix}_verified"] = sum(item[key] == "verified" for item in items)
@@ -53,7 +64,7 @@ def tushare_catalog_snapshot(
         "historical_minute_policy": "offline_files_only",
         "realtime_minute_policy": "market_hours_single_symbol_probe_before_decision_use",
         "coverage_rule": "catalog declaration != provider verification; only non-header market rows produce verified",
-        "providers": [*provider_status_fn(), *free_provider_status_fn()],
+        "providers": providers,
     }
 
 

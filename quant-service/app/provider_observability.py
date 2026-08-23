@@ -54,6 +54,11 @@ def provider_health_snapshot(database: Any, provider_configs: list[Mapping[str, 
                LEFT JOIN quant.provider_health h ON h.provider_key=c.provider_key AND h.capability=c.capability AND h.market=c.market
                ORDER BY c.capability,p.provider_key"""
         ).fetchall()
+    return project_provider_health([dict(row) for row in rows], provider_configs, observed_at)
+
+
+def project_provider_health(rows: list[Mapping[str, Any]], provider_configs: list[Mapping[str, Any]],
+                            observed_at: datetime) -> dict[str, Any]:
     configured = {str(item["provider_key"]): bool(item.get("configured")) for item in provider_configs}
     items = [provider_health_item(row, configured=configured.get(str(row["provider_key"])), observed_at=observed_at) for row in rows]
     return {"observed_at": observed_at, "summary": provider_health_summary(items), "items": items}

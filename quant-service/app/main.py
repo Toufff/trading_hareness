@@ -4463,7 +4463,7 @@ async def executor_saturated_response(_: Request, __: ExecutorSaturatedError) ->
     )
 
 
-app.include_router(build_provider_status_router(db, provider_status, free_provider_status))
+app.include_router(build_provider_status_router(db, provider_status, free_provider_status, async_database=async_db))
 app.include_router(build_research_readiness_router(
     db, historical_estimate_from_db, feature_readiness_state, historical_replay_readiness, async_db,
 ))

@@ -43,6 +43,7 @@ from app.async_analyst_stock_timeline_read_repository import stock_timeline as a
 from app.async_analyst_research_status_read_repository import status as async_research_status
 from app.async_analyst_archive_read_repository import analyst_sync_cursor as async_archive_sync_cursor
 from app.async_analyst_archive_read_repository import remote_report_list_state as async_archive_state
+from app.async_provider_status_read_repository import provider_health as async_provider_health
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -62,6 +63,7 @@ from app.routers.market_flow_reads import build_market_flow_reads_router
 from app.routers.sector_reads import build_sector_reads_router
 from app.routers.limit_linkage_mining_reads import build_limit_linkage_mining_reads_router
 from app.routers.analyst_prompt_lab import build_analyst_prompt_lab_router
+from app.routers.provider_status import build_provider_status_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -158,6 +160,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_analyst_market_evaluation_read_repository.py",
             "async_analyst_stock_timeline_read_repository.py",
             "async_analyst_research_status_read_repository.py",
+            "async_provider_status_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -1404,6 +1407,48 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         direct = await async_archive_sync_cursor(database, "messages", "anqiang-touzi-riji")
         self.assertEqual(direct["remote_analyst_id"], "anqiang-touzi-riji")
         self.assertEqual(database.connection.calls[-1][1], ("messages", "anqiang-touzi-riji"))
+
+    async def test_provider_health_prefers_native_async_local_evidence(self) -> None:
+        calls = []
+
+        async def health(_database, configs, observed_at):
+            calls.append((configs, observed_at))
+            return {"summary": {"healthy": 1}, "items": []}
+
+        router = build_provider_status_router(
+            object(), lambda: [{"provider_key": "tushare_super_get", "configured": True}], lambda: [],
+            async_database=object(), async_provider_health_fn=health,
+        )
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/providers/health")
+        self.assertEqual((await endpoint())["summary"]["healthy"], 1)
+        self.assertEqual(calls[0][0][0]["provider_key"], "tushare_super_get")
+
+        class Result:
+            def __init__(self, rows): self.rows = rows
+            async def fetchall(self): return self.rows
+
+        class Connection:
+            def __init__(self): self.calls = []
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                return Result([{"provider_key": "tushare_super_get", "enabled": True, "capability": "rt_k", "market": "cn",
+                                "circuit_open_until": None, "last_success_at": None, "last_failure_at": None}])
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        database = Database()
+        direct = await async_provider_health(
+            database, [{"provider_key": "tushare_super_get", "configured": True}], datetime(2026, 8, 22, tzinfo=timezone.utc),
+        )
+        self.assertEqual(direct["items"][0]["state"], "unknown")
+        self.assertEqual(len(database.connection.calls), 1)
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:
