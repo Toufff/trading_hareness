@@ -41,6 +41,7 @@ from app.market_session_repository import (
     realtime_market_session as read_market_session,
     realtime_market_session_async as read_market_session_async,
     sse_calendar_open_async as read_sse_calendar_open_async,
+    sse_calendar_status_async as read_sse_calendar_status_async,
 )
 from app.sector_catalog_sync import sync_all as isolated_sync_all_sector_catalogs
 from app.intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload
@@ -305,6 +306,21 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertFalse(asyncio.run(read_sse_calendar_open_async(
             database, date(2026, 8, 13), database_runner=saturated,
         )))
+
+    def test_sse_calendar_status_exposes_the_same_fail_closed_reason_to_all_consumers(self):
+        database = MagicMock()
+
+        async def missing(_action, *args, **kwargs):
+            return None
+
+        async def saturated(_action, *args, **kwargs):
+            raise ExecutorSaturatedError("database blocking executor is saturated")
+
+        gap = asyncio.run(read_sse_calendar_status_async(database, date(2026, 8, 13), database_runner=missing))
+        pressure = asyncio.run(read_sse_calendar_status_async(database, date(2026, 8, 13), database_runner=saturated))
+        self.assertEqual(gap, (False, "SSE trade calendar has no entry for today; fail closed"))
+        self.assertFalse(pressure[0])
+        self.assertIn("local calendar capacity unavailable", pressure[1])
 
     def test_runtime_tushare_rate_limits_are_mirrored_without_secrets(self):
         connection = MagicMock()

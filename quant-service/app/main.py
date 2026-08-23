@@ -296,6 +296,8 @@ from .market_session_repository import (
     realtime_market_session_async as read_realtime_market_session_async,
     sse_calendar_open as read_sse_calendar_open,
     sse_calendar_open_async as read_sse_calendar_open_async,
+    sse_calendar_status as read_sse_calendar_status,
+    sse_calendar_status_async as read_sse_calendar_status_async,
 )
 from .intraday_signal_policy import (
     signal_event_state as intraday_signal_event_state,
@@ -2449,15 +2451,9 @@ def intraday_board_curve_session(now: datetime | None = None) -> tuple[bool, str
     if not active:
         return active, reason
     exchange_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
-    with db.transaction() as connection:
-        calendar = connection.execute(
-            "SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s",
-            (exchange_date,),
-        ).fetchone()
-    if calendar is None:
-        return False, "SSE trade calendar has no entry for today; fail closed"
-    if not calendar["is_open"]:
-        return False, "SSE trade calendar marks today closed"
+    calendar_open, calendar_reason = read_sse_calendar_status(db, exchange_date)
+    if not calendar_open:
+        return False, calendar_reason
     return True, reason
 
 
@@ -2468,21 +2464,11 @@ async def intraday_board_curve_session_async(now: datetime | None = None) -> tup
     if not active:
         return active, reason
     exchange_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
-
-    def load_calendar() -> Any:
-        with db.transaction() as connection:
-            return connection.execute(
-                "SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s",
-                (exchange_date,),
-            ).fetchone()
-    try:
-        calendar = await run_database_blocking(load_calendar)
-    except ExecutorSaturatedError as error:
-        return False, f"local calendar capacity unavailable; fail closed: {safe_error_detail(str(error), 180)}"
-    if calendar is None:
-        return False, "SSE trade calendar has no entry for today; fail closed"
-    if not calendar["is_open"]:
-        return False, "SSE trade calendar marks today closed"
+    calendar_open, calendar_reason = await read_sse_calendar_status_async(
+        db, exchange_date, database_runner=run_database_blocking,
+    )
+    if not calendar_open:
+        return False, calendar_reason
     return True, reason
 
 
