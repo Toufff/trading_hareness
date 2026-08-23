@@ -209,6 +209,10 @@ from .order_book_features import aggregate_order_book_observations
 from . import intraday_order_book_service as order_book_service
 from . import intraday_order_book_runner
 from . import intraday_minute_profile_runner
+from .intraday_minute_profile_runtime import (
+    IntradayMinuteProfileRuntimeDependencies,
+    run_intraday_minute_profile_runtime_loop,
+)
 from . import intraday_board_curve_runner
 from . import intraday_fast_quote_capture_service
 from .market_snapshots import snapshot_status, summarize_quotes
@@ -2785,21 +2789,12 @@ async def intraday_minute_profile_capture_loop() -> None:
     window. A failed fetch may retry during the short 14:55--14:59 window; a
     completed or partial capture is never repeated that day.
     """
-    async def load_symbols() -> list[str]:
-        def load_watches() -> list[Any]:
-            with db.transaction() as connection:
-                return connection.execute(
-                    "SELECT * FROM quant.intraday_watchlists WHERE enabled ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT %s",
-                    (intraday_minute_profile_max_symbols(),),
-                ).fetchall()
-        rows = await run_database_blocking(load_watches)
-        return [str(row["symbol"]) for row in sorted((dict(row) for row in rows), key=intraday_watch_priority_key)]
-
-    await intraday_minute_profile_runner.run_loop(
-        sleep_seconds=30, calendar_open=sse_calendar_open_async, load_symbols=load_symbols,
-        storage_allowed=nonessential_high_frequency_capture_allowed,
-        capture=capture_intraday_minute_sessions,
-    )
+    await run_intraday_minute_profile_runtime_loop(IntradayMinuteProfileRuntimeDependencies(
+        database=db, run_database=run_database_blocking,
+        max_symbols=intraday_minute_profile_max_symbols, watch_priority_key=intraday_watch_priority_key,
+        calendar_open=sse_calendar_open_async, storage_allowed=nonessential_high_frequency_capture_allowed,
+        capture=capture_intraday_minute_sessions, run_loop=intraday_minute_profile_runner.run_loop,
+    ))
 
 
 def intraday_flow_label(value: Any) -> str:
