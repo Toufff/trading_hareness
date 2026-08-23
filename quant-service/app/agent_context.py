@@ -45,7 +45,7 @@ def repository_agent_context() -> dict[str, Any]:
             "background_loop_lifecycle": "quant-service/app/runtime_tasks.py + /health.runtime_loops",
             "intraday_sector_report": "quant-service/app/intraday_sector_report_orchestrator.py + app/intraday_sector_report_service.py",
             "intraday_order_book_capture": "quant-service/app/intraday_order_book_service.py + app/order_book_features.py",
-            "offline_minute_import": "quant-service/app/main.py import_offline_minute_csv + app/offline_minute_replay.py",
+            "offline_minute_import": "quant-service/app/offline_minute_import_service.py + app/offline_minute_replay.py",
         },
         "contracts": {
             "openapi_source": "http://127.0.0.1:5681/openapi.json",

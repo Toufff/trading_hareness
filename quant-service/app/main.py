@@ -1,7 +1,6 @@
 from __future__ import annotations
 import asyncio
 from bisect import bisect_right
-import csv
 import functools
 import hashlib
 import json
@@ -78,6 +77,7 @@ from .intraday_volume_profiles import attach_volume_time_profile as pure_attach_
 from .intraday_volume_profiles import volume_time_profile as pure_intraday_volume_time_profile
 from .intraday_volume_profiles import volume_time_profiles as pure_intraday_volume_time_profiles
 from .intraday_minute_provider_service import fetch_bounded_minute_context
+from . import offline_minute_import_service
 from .intraday_cross_section import SharedAsyncSnapshot
 from .intraday_state_machine import classify_setup_state as classify_intraday_setup_state
 from .intraday_factor_contracts import (
@@ -1203,40 +1203,20 @@ def ensure_tushare_instrument(connection: Any, symbol: str) -> None:
 
 def offline_data_root() -> Path:
     """Return the sole directory from which offline imports may be read."""
-    root = Path(os.getenv("OFFLINE_DATA_DIR", "/var/lib/quant/offline")).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    return offline_minute_import_service.data_root()
 
 
 def offline_import_path(file_name: str) -> Path:
-    root = offline_data_root()
-    path = (root / file_name).resolve()
-    if path.parent != root or not path.is_file():
-        raise ValueError("offline CSV file does not exist in the configured offline directory")
-    return path
+    return offline_minute_import_service.import_path(file_name, root=offline_data_root())
 
 
 def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return offline_minute_import_service.sha256_file(path)
 
 
 def offline_minute_timestamp(value: Any) -> datetime:
     """Parse vendor local timestamps; naive input is Shanghai exchange time."""
-    text = str(value or "").strip()
-    if not text:
-        raise ValueError("minute row has no datetime")
-    normalized = text.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as error:
-        raise ValueError("datetime must be ISO-8601 or YYYY-MM-DD HH:MM:SS") from error
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-    return parsed.astimezone(timezone.utc)
+    return offline_minute_import_service.minute_timestamp(value)
 
 
 def offline_minute_source_available_at(row: dict[str, Any]) -> datetime | None:
@@ -1247,164 +1227,36 @@ def offline_minute_source_available_at(row: dict[str, Any]) -> datetime | None:
     receive timestamp.  Missing or blank values intentionally remain NULL so
     the file cannot be admitted to causal strategy replay by accident.
     """
-    for key in ("source_available_at", "provider_available_at", "received_at", "available_at"):
-        value = row.get(key)
-        if value not in (None, ""):
-            return offline_minute_timestamp(value)
-    return None
+    return offline_minute_import_service.source_available_at(row)
 
 
 def offline_minute_row(row: dict[str, Any]) -> dict[str, Any]:
     """Validate one CSV row before it reaches the database."""
-    symbol = str(row.get("ts_code") or row.get("symbol") or "").upper().strip()
-    if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
-        raise ValueError("minute row needs ts_code or symbol in 000001.SZ form")
-    bar_time = offline_minute_timestamp(row.get("datetime") or row.get("bar_time") or row.get("time"))
-    open_price = decimal_or_none(row.get("open"))
-    high = decimal_or_none(row.get("high"))
-    low = decimal_or_none(row.get("low"))
-    close = decimal_or_none(row.get("close"))
-    if any(value is None for value in (open_price, high, low, close)) or min(open_price, high, low, close) <= 0:
-        raise ValueError("minute row needs positive open, high, low and close")
-    if high < max(open_price, low, close) or low > min(open_price, high, close):
-        raise ValueError("minute OHLC values are inconsistent")
-    volume = decimal_or_none(row.get("volume") if row.get("volume") not in (None, "") else row.get("vol"))
-    amount = decimal_or_none(row.get("amount"))
-    if volume is not None and volume < 0 or amount is not None and amount < 0:
-        raise ValueError("minute volume and amount must not be negative")
-    return {"symbol": symbol, "bar_time": bar_time, "open": open_price, "high": high, "low": low,
-            "close": close, "volume": volume, "amount": amount,
-            "source_available_at": offline_minute_source_available_at(row), "raw": row}
+    return offline_minute_import_service.minute_row(row, decimal_or_none=decimal_or_none)
 
 
 def ensure_offline_instrument(connection: Any, symbol: str) -> None:
-    connection.execute(
-        "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,'offline-import') ON CONFLICT(symbol) DO NOTHING",
-        (symbol, exchange_for(symbol)),
-    )
+    offline_minute_import_service.ensure_instrument(connection, symbol, exchange_for=exchange_for)
 
 
 def offline_minute_import_stale_seconds(environ: Mapping[str, str] | None = None) -> int:
     """Bound the recovery wait before a crashed local CSV import can resume."""
-    values = os.environ if environ is None else environ
-    try:
-        return max(60, min(86_400, int(values.get("OFFLINE_MINUTE_IMPORT_STALE_SECONDS", "900"))))
-    except ValueError:
-        return 900
+    return offline_minute_import_service.stale_seconds(environ)
 
 
 def offline_import_recovery_action(existing: Mapping[str, Any] | None, *, now: datetime,
                                    stale_seconds: int) -> str:
     """Classify an idempotent local-file import without trusting client state."""
-    if existing is None:
-        return "create"
-    status = str(existing.get("status") or "")
-    if status in {"completed", "partial"}:
-        return "unchanged"
-    if status == "failed":
-        return "resume_failed"
-    started_at = existing.get("started_at")
-    if status == "running" and isinstance(started_at, datetime):
-        started = started_at.replace(tzinfo=timezone.utc) if started_at.tzinfo is None else started_at.astimezone(timezone.utc)
-        if now.astimezone(timezone.utc) - started < timedelta(seconds=stale_seconds):
-            return "in_progress"
-    return "resume_stale_running"
+    return offline_minute_import_service.recovery_action(existing, now=now, stale_after_seconds=stale_seconds)
 
 
 def import_offline_minute_csv(request: OfflineMinuteImportRequest) -> dict[str, Any]:
     """Stream a locally mounted minute CSV into PostgreSQL in bounded batches."""
-    path = offline_import_path(request.file_name)
-    file_sha256 = sha256_file(path)
-    started_at = datetime.now(timezone.utc)
-    with db.transaction() as connection:
-        # A file hash is the import idempotency key.  Serialize contenders
-        # before the first SELECT so two API requests cannot both observe an
-        # absent row and race the unique constraint.
-        connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (file_sha256,))
-        existing = connection.execute(
-            """SELECT import_id,source_name,file_name,status,row_count,rejected_rows,error_message,started_at
-                 FROM quant.offline_imports WHERE file_sha256=%s FOR UPDATE""",
-            (file_sha256,),
-        ).fetchone()
-        existing_row = dict(existing) if existing else None
-        action = offline_import_recovery_action(
-            existing_row, now=started_at, stale_seconds=offline_minute_import_stale_seconds(),
-        )
-        if action == "unchanged":
-            return {"status": "unchanged", "import_id": str(existing["import_id"]), "stored": existing["row_count"],
-                    "rejected_rows": existing["rejected_rows"], "file_name": request.file_name}
-        if action == "in_progress":
-            return {"status": "running", "import_id": str(existing["import_id"]), "stored": existing["row_count"],
-                    "rejected_rows": existing["rejected_rows"], "file_name": request.file_name,
-                    "notice": "an active local import already owns this file hash; retry after its stale window"}
-        if existing and str(existing["source_name"]) != request.source_name:
-            raise ValueError("offline CSV hash already belongs to a different source_name")
-        if existing:
-            import_id = connection.execute(
-                """UPDATE quant.offline_imports SET status='running',row_count=0,rejected_rows=0,error_message=NULL,
-                       started_at=now(),finished_at=NULL WHERE import_id=%s RETURNING import_id""",
-                (existing["import_id"],),
-            ).fetchone()["import_id"]
-        else:
-            import_id = connection.execute(
-                """INSERT INTO quant.offline_imports(source_name,file_name,file_sha256,dataset_kind,status)
-                   VALUES(%s,%s,%s,'minute_bar','running') RETURNING import_id""",
-                (request.source_name, request.file_name, file_sha256),
-            ).fetchone()["import_id"]
-
-    accepted = 0
-    rejected = 0
-    batch: list[dict[str, Any]] = []
-
-    def write_batch(items: list[dict[str, Any]]) -> None:
-        if not items:
-            return
-        with db.transaction() as connection:
-            for item in items:
-                ensure_offline_instrument(connection, item["symbol"])
-                connection.execute(
-                    """INSERT INTO quant.market_bars_minute(symbol,bar_time,open,high,low,close,volume,amount,source_name,import_id,source_available_at,available_at,raw)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),%s)
-                       ON CONFLICT(symbol,bar_time,source_name) DO UPDATE SET open=EXCLUDED.open,high=EXCLUDED.high,low=EXCLUDED.low,
-                         close=EXCLUDED.close,volume=EXCLUDED.volume,amount=EXCLUDED.amount,import_id=EXCLUDED.import_id,
-                         source_available_at=EXCLUDED.source_available_at,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
-                    (item["symbol"], item["bar_time"], item["open"], item["high"], item["low"], item["close"], item["volume"],
-                     item["amount"], request.source_name, import_id, item["source_available_at"], Json(item["raw"])),
-                )
-
-    try:
-        with path.open("r", encoding="utf-8-sig", newline="") as stream:
-            reader = csv.DictReader(stream)
-            if not reader.fieldnames:
-                raise ValueError("offline CSV needs a header row")
-            for line_number, row in enumerate(reader, start=2):
-                if line_number - 1 > request.max_rows:
-                    raise ValueError(f"offline CSV exceeds the {request.max_rows} row safety cap")
-                try:
-                    batch.append(offline_minute_row(dict(row)))
-                    accepted += 1
-                except (ValueError, ArithmeticError):
-                    rejected += 1
-                if len(batch) >= 1000:
-                    write_batch(batch)
-                    batch.clear()
-            write_batch(batch)
-        status = "completed" if rejected == 0 else "partial"
-        with db.transaction() as connection:
-            connection.execute(
-                """UPDATE quant.offline_imports SET status=%s,row_count=%s,rejected_rows=%s,finished_at=now() WHERE import_id=%s""",
-                (status, accepted, rejected, import_id),
-            )
-        return {"status": status, "import_id": str(import_id), "stored": accepted, "rejected_rows": rejected,
-                "file_name": request.file_name, "file_sha256": file_sha256,
-                "recovery_action": action}
-    except Exception as error:
-        with db.transaction() as connection:
-            connection.execute(
-                "UPDATE quant.offline_imports SET status='failed',row_count=%s,rejected_rows=%s,error_message=%s,finished_at=now() WHERE import_id=%s",
-                (accepted, rejected, safe_error_detail(str(error), 1000), import_id),
-            )
-        raise
+    return offline_minute_import_service.import_csv(
+        db, request, root=offline_data_root(), exchange_for=exchange_for,
+        decimal_or_none=decimal_or_none, safe_error=safe_error_detail,
+        stale_after_seconds=offline_minute_import_stale_seconds(),
+    )
 
 
 def normalize_tushare_rows(connection: Any, api_name: str, rows: list[dict[str, Any]], available_at: datetime,
