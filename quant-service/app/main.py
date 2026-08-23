@@ -475,6 +475,10 @@ from .all_board_member_backfill_service import (
     AllBoardMemberBackfillDependencies,
     run as run_all_board_member_backfill_isolated,
 )
+from .ths_concept_member_backfill_service import (
+    ThsConceptMemberBackfillDependencies,
+    run as run_ths_concept_member_backfill_isolated,
+)
 from .tushare_official import (
     AUDIT_FOCUS_APIS,
     HISTORICAL_MINUTE_APIS,
@@ -3451,30 +3455,18 @@ async def all_board_member_backfill_loop() -> None:
 
 
 async def run_ths_concept_member_backfill_batch(request: ConceptMemberBackfillRequest) -> dict[str, Any]:
-    """Refresh daily THS flow once, then resume exact member hydration."""
-    trade_date = request.trade_date or datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    def load_existing() -> Any:
+    """Compatibility entry point for a fail-closed exact member batch."""
+    def load_existing(trade_date: date) -> Any:
         with db.transaction() as connection:
             return connection.execute(
                 "SELECT count(*)::int rows FROM quant.sector_market_observations WHERE taxonomy_key='ths_concept_flow' AND trading_date=%s",
                 (trade_date,),
             ).fetchone()
 
-    existing = await run_database_blocking(load_existing)
-    refreshed: dict[str, Any] | None = None
-    if request.refresh_flow_catalog or not int(existing["rows"]):
-        refreshed = await sync_ths_concept_signals(SectorFlowSyncRequest(trade_date=trade_date, provider=request.provider))
-        flow_status = (refreshed.get("sources", {}).get("concept_flow", {}) or {}).get("status")
-        if flow_status not in {"completed", "partial", "unchanged", "empty"}:
-            return {"status": "blocked", "trade_date": str(trade_date), "refresh": refreshed,
-                    "reason": "THS concept flow is unavailable; member mapping was not guessed"}
-    result = await sync_ths_concept_members(ConceptMemberSyncRequest(
-        trade_date=trade_date, provider=request.provider, member_limit=request.batch_size, resume=True,
-    ))
-    if result.get("status") == "blocked":
-        return {**result, "trade_date": str(trade_date), "refresh": refreshed,
-                "progress": {"completed_or_empty": 0, "failed": 0, "remaining": None}}
-    def load_progress() -> Any:
+    async def existing(trade_date: date) -> Any:
+        return await run_database_blocking(load_existing, trade_date)
+
+    def load_progress(trade_date: date) -> Any:
         with db.transaction() as connection:
             return connection.execute(
                 """SELECT count(*) FILTER (WHERE state IN ('completed','empty'))::int done,
@@ -3484,10 +3476,18 @@ async def run_ths_concept_member_backfill_batch(request: ConceptMemberBackfillRe
                 (trade_date,),
             ).fetchone()
 
-    progress = await run_database_blocking(load_progress)
-    return {**result, "refresh": refreshed,
-            "progress": {"completed_or_empty": int(progress["done"]), "failed": int(progress["failed"]),
-                         "remaining": max(0, int(result["total_concepts"]) - int(progress["done"]))}}
+    async def progress(trade_date: date) -> Any:
+        return await run_database_blocking(load_progress, trade_date)
+
+    return await run_ths_concept_member_backfill_isolated(
+        request,
+        ThsConceptMemberBackfillDependencies(
+            china_today=lambda: datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+            load_existing_flow=existing, sync_flow_catalog=sync_ths_concept_signals,
+            flow_request=SectorFlowSyncRequest, sync_members=sync_ths_concept_members,
+            member_request=ConceptMemberSyncRequest, load_progress=progress,
+        ),
+    )
 
 
 async def ths_concept_member_backfill_loop() -> None:
