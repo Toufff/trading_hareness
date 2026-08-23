@@ -29,6 +29,7 @@ from app.async_board_research_read_repository import latest_board_rotation_event
 from app.async_board_research_read_repository import latest_board_stock_mining as async_board_stock_mining
 from app.async_analyst_action_read_repository import anqiang_trade_action_outcomes as async_action_outcomes
 from app.async_analyst_action_read_repository import anqiang_trade_action_replay as async_action_replay
+from app.async_automation_run_read_repository import latest_runs as async_automation_runs
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -43,6 +44,7 @@ from app.routers.board_rotation_reads import build_board_rotation_reads_router
 from app.routers.board_stock_mining_reads import build_board_stock_mining_reads_router
 from app.routers.analyst_trade_action_reads import build_analyst_trade_action_reads_router
 from app.routers.analyst_action_outcomes import build_analyst_action_outcomes_router
+from app.routers.automation_reads import build_automation_reads_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -130,6 +132,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_board_curve_read_repository.py",
             "async_board_research_read_repository.py",
             "async_analyst_action_read_repository.py",
+            "async_automation_run_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -864,6 +867,54 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replay["items"][0]["factor_eligible"])
         self.assertEqual(outcomes["outcomes"][0]["count"], 1)
         self.assertEqual(database.connection.calls[0][1], (date(2026, 8, 10), 200))
+
+    async def test_automation_run_router_prefers_async_receipts(self) -> None:
+        calls = []
+
+        async def latest(_database, task_key, limit):
+            calls.append((task_key, limit))
+            return [{"task_key": task_key, "status": "completed"}]
+
+        router = build_automation_reads_router(object(), async_database=object(), async_latest_runs_fn=latest)
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/automation/runs")
+        payload = await endpoint("post_close", 1000)
+        self.assertEqual(payload["items"][0]["status"], "completed")
+        self.assertEqual(calls, [("post_close", 100)])
+
+    async def test_automation_run_repository_uses_native_async_bounded_query(self) -> None:
+        class Result:
+            async def fetchall(self):
+                return [{"run_id": "run-1", "status": "completed"}]
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                return Result()
+
+        class Transaction:
+            def __init__(self, connection):
+                self.connection = connection
+
+            async def __aenter__(self):
+                return self.connection
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Database:
+            def __init__(self):
+                self.connection = Connection()
+
+            def transaction(self):
+                return Transaction(self.connection)
+
+        database = Database()
+        rows = await async_automation_runs(database, "post_close", 1000)
+        self.assertEqual(rows[0]["run_id"], "run-1")
+        self.assertEqual(database.connection.calls[0][1], ("post_close", "post_close", 100))
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:

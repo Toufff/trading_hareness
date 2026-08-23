@@ -4474,7 +4474,7 @@ app.include_router(build_analyst_action_outcomes_router(
 ))
 app.include_router(build_analyst_skill_reads_router(db, analyst_skill_profiles, async_database=async_db))
 app.include_router(build_analyst_research_reads_router(db, analyst_research_status, async_database=async_db))
-app.include_router(build_automation_reads_router(db))
+app.include_router(build_automation_reads_router(db, async_database=async_db))
 app.include_router(build_event_reads_router(db, async_db))
 app.include_router(build_strategy_reads_router(db, STRATEGY_DECISION_MODEL_VERSION, async_db))
 app.include_router(build_paper_reads_router(db, async_db))

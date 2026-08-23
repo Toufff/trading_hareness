@@ -8,6 +8,19 @@ from typing import Any
 from psycopg.types.json import Json
 
 
+LATEST_RUNS_SQL = """SELECT run_id,task_key,run_key,cadence,as_of_date,status,methodology_version,
+                      input_summary,output_summary,error_class,error_message,started_at,finished_at,updated_at
+                 FROM quant.automation_runs
+                WHERE (%s::text IS NULL OR task_key=%s)
+                ORDER BY started_at DESC LIMIT %s"""
+
+
+def latest_runs_params(task_key: str | None, limit: int) -> tuple[tuple[Any, ...], int]:
+    """Bound the shared automation receipt query for sync and async readers."""
+    bounded = max(1, min(int(limit), 100))
+    return (task_key, task_key, bounded), bounded
+
+
 def start_run(connection: Any, *, task_key: str, run_key: str, cadence: str | None = None,
               as_of_date: date | None = None, methodology_version: str | None = None,
               input_summary: dict[str, Any] | None = None) -> str:
@@ -68,14 +81,8 @@ def fail_run(connection: Any, run_id: str, error: BaseException, *, error_class:
 
 
 def latest_runs(connection: Any, *, task_key: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
-    bounded = max(1, min(int(limit), 100))
-    rows = connection.execute(
-        """SELECT run_id,task_key,run_key,cadence,as_of_date,status,methodology_version,
-                      input_summary,output_summary,error_class,error_message,started_at,finished_at,updated_at
-                 FROM quant.automation_runs
-                WHERE (%s::text IS NULL OR task_key=%s)
-                ORDER BY started_at DESC LIMIT %s""", (task_key, task_key, bounded),
-    ).fetchall()
+    params, _ = latest_runs_params(task_key, limit)
+    rows = connection.execute(LATEST_RUNS_SQL, params).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -99,4 +106,7 @@ def run_recorded(database: Any, *, task_key: str, run_key: str, operation: Any,
     return result
 
 
-__all__ = ["start_run", "start_or_resume_run", "finish_run", "fail_run", "latest_runs", "run_recorded"]
+__all__ = [
+    "LATEST_RUNS_SQL", "start_run", "start_or_resume_run", "finish_run", "fail_run",
+    "latest_runs", "latest_runs_params", "run_recorded",
+]
