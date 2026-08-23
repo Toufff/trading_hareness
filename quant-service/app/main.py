@@ -117,6 +117,8 @@ from .intraday_decision_card_read_model import decision_card as read_intraday_de
 from .async_intraday_decision_card_repository import decision_card as read_async_intraday_decision_card
 from .async_intraday_scan_preflight_repository import latest_board_report as read_async_latest_board_report
 from .async_intraday_scan_preflight_repository import latest_fast_quotes as read_async_latest_fast_quotes
+from .async_intraday_scan_inputs_repository import exact_memberships as read_async_exact_watchlist_memberships
+from .async_intraday_scan_inputs_repository import watchlists as read_async_intraday_scan_watchlists
 from .intraday_volume_profiles import attach_volume_time_profile as pure_attach_volume_time_profile
 from .intraday_volume_profiles import volume_time_profile as pure_intraday_volume_time_profile
 from .intraday_volume_profiles import volume_time_profiles as pure_intraday_volume_time_profiles
@@ -2348,15 +2350,10 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
         return payload
 
     async def load_watches(requested_symbols: list[str]) -> list[dict[str, Any]]:
-        def load() -> list[Any]:
-            with db.transaction() as connection:
-                if requested_symbols:
-                    return connection.execute("SELECT * FROM quant.intraday_watchlists WHERE enabled AND symbol=ANY(%s) ORDER BY symbol", (requested_symbols,)).fetchall()
-                # Fetch one extra row only to detect overflow.  It is unsafe to
-                # quietly scan the first 40 while presenting the result as a full
-                # watchlist decision.
-                return connection.execute("SELECT * FROM quant.intraday_watchlists WHERE enabled ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT 41").fetchall()
-        return [dict(row) for row in await run_database_blocking(load)]
+        # Fetch one extra row only to detect overflow.  It is unsafe to quietly
+        # scan the first 40 while presenting the result as a full decision.
+        capacity = int(intraday_watchlist_capacity(0)["max_symbols"])
+        return await read_async_intraday_scan_watchlists(async_db, requested_symbols, max_symbols=capacity)
 
     async def persist_terminal(
         scan_id: uuid.UUID, observed_at: datetime, status: str, requested_symbols: list[str],
@@ -2367,24 +2364,8 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
             source_status, summary,
         )
 
-    def load_exact_watchlist_memberships(symbols: list[str], observed_at: datetime) -> list[dict[str, Any]]:
-        with db.transaction() as connection:
-            # The peer helper groups these rows by the exact taxonomy/sector
-            # pair; no human-readable label matching/full-sector enumeration
-            # occurs on the live scan path.
-            local_trade_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
-            rows = connection.execute(
-                """SELECT taxonomy_key,sector_key,symbol
-                     FROM quant.sector_membership_history
-                    WHERE symbol=ANY(%s) AND effective_from<=%s
-                      AND (effective_to IS NULL OR effective_to>=%s)
-                      AND taxonomy_key IN ('ths_concept_flow','ths_index_n','ths_industry')""",
-                (symbols, local_trade_date, local_trade_date),
-            ).fetchall()
-        return [dict(row) for row in rows]
-
     async def memberships(symbols: list[str], observed_at: datetime) -> list[dict[str, Any]]:
-        return await run_database_blocking(load_exact_watchlist_memberships, symbols, observed_at)
+        return await read_async_exact_watchlist_memberships(async_db, symbols, observed_at)
 
     async def capture_quotes(symbols: list[str], observed_at: datetime, quote_timestamp_slo_seconds: float) -> Any:
         return await capture_watch_quotes(
