@@ -1,6 +1,5 @@
 from __future__ import annotations
 import asyncio
-from bisect import bisect_right
 import functools
 import hashlib
 import json
@@ -232,6 +231,11 @@ from .intraday_scan_repository import (
     first_eac_breakout_events,
     persist_intraday_scan_terminal,
     previous_quote_frames,
+)
+from .intraday_market_context_repository import (
+    market_context_from_board_report as read_market_context_from_board_report,
+    point_in_time_market_context as read_point_in_time_market_context,
+    point_in_time_market_context_batch as read_point_in_time_market_context_batch,
 )
 from .intraday_rule_snapshot_repository import persist_rule_input_snapshot, prune_rule_input_evidence
 from .intraday_event_retention import ephemeral_signal_retention_days, prune_ephemeral_signal_events
@@ -938,35 +942,17 @@ def build_feature_snapshot(as_of_date: date, universe_key: str = "core") -> dict
 def intraday_market_context_from_board_report(row: Any, observed_at: datetime,
                                               symbol: str | None = None) -> dict[str, Any]:
     """Describe a signal using one already-selected, point-in-time board report."""
-    if row is None:
-        return {"status": "missing", "market_state": "unknown", "board_snapshot_age_seconds": None,
-                "symbol_board_matches": [], "notice": "no board snapshot existed before the signal"}
-    items = list((row["payload"] or {}).get("items") or [])
-    market_state, metrics = strategy_market_state(items) if items else ("unknown", {"known_board_flows": 0})
-    matches: list[dict[str, Any]] = []
-    if symbol:
-        for item in items:
-            if any(str(stock.get("symbol") or "") == symbol for stock in item.get("top_stocks") or []):
-                matches.append({key: item.get(key) for key in
-                                ("taxonomy_key", "sector_key", "label", "net_inflow", "change_pct")})
-    matches.sort(key=lambda item: float(intraday_number(item.get("net_inflow")) or -math.inf), reverse=True)
-    return {"status": "available", "board_report_id": str(row["board_report_id"]),
-            "board_observed_at": row["observed_at"].isoformat(),
-            "board_snapshot_age_seconds": round(max(0.0, (observed_at - row["observed_at"]).total_seconds()), 1),
-            "market_state": market_state, "market_state_metrics": metrics,
-            "symbol_board_matches": matches[:8],
-            "match_semantics": "saved board Top10 occurrence; not full membership coverage"}
+    return read_market_context_from_board_report(
+        row, observed_at, symbol, strategy_market_state=strategy_market_state, number=intraday_number,
+    )
 
 
 def intraday_point_in_time_market_context(connection: Any, observed_at: datetime,
                                           symbol: str | None = None) -> dict[str, Any]:
     """Describe only the latest board snapshot known when a signal fired."""
-    row = connection.execute(
-        """SELECT board_report_id,observed_at,payload FROM quant.intraday_board_reports
-             WHERE status='completed' AND observed_at<=%s ORDER BY observed_at DESC LIMIT 1""",
-        (observed_at,),
-    ).fetchone()
-    return intraday_market_context_from_board_report(row, observed_at, symbol)
+    return read_point_in_time_market_context(
+        connection, observed_at, symbol, context_from_board_report=intraday_market_context_from_board_report,
+    )
 
 
 def intraday_point_in_time_market_context_batch(
@@ -979,28 +965,9 @@ def intraday_point_in_time_market_context_batch(
     the earliest signal plus all reports through the latest signal is enough to
     reproduce the same "latest report at or before signal time" rule.
     """
-    normalized = [(observed_at, str(symbol)) for observed_at, symbol in observations if isinstance(observed_at, datetime)]
-    if not normalized:
-        return {}
-    earliest, latest = min(item[0] for item in normalized), max(item[0] for item in normalized)
-    rows = connection.execute(
-        """SELECT board_report_id,observed_at,payload FROM quant.intraday_board_reports
-             WHERE status='completed' AND observed_at<=%s
-               AND (observed_at>=%s OR observed_at=(
-                   SELECT max(observed_at) FROM quant.intraday_board_reports
-                    WHERE status='completed' AND observed_at<%s
-               ))
-             ORDER BY observed_at""",
-        (latest, earliest, earliest),
-    ).fetchall()
-    reports = [dict(row) for row in rows]
-    report_times = [row["observed_at"] for row in reports]
-    contexts: dict[tuple[datetime, str], dict[str, Any]] = {}
-    for observed_at, symbol in normalized:
-        position = bisect_right(report_times, observed_at) - 1
-        report = reports[position] if position >= 0 else None
-        contexts[(observed_at, symbol)] = intraday_market_context_from_board_report(report, observed_at, symbol)
-    return contexts
+    return read_point_in_time_market_context_batch(
+        connection, observations, context_from_board_report=intraday_market_context_from_board_report,
+    )
 
 
 def intraday_signal_attribution(signal_key: str, signal_type: str,
