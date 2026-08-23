@@ -12,6 +12,7 @@ from ..async_analyst_research_read_repository import profiles as async_profiles
 from ..async_analyst_market_review_read_repository import latest_review as async_latest_review
 from ..async_analyst_market_review_read_repository import list_reviews as async_list_reviews
 from ..async_analyst_market_evaluation_read_repository import market_evaluation as async_market_evaluation
+from ..async_analyst_stock_timeline_read_repository import stock_timeline as async_stock_timeline
 from ..analyst_market_evaluation import analyst_market_evaluation
 from ..analyst_stock_timeline import analyst_stock_timeline
 from ..analyst_market_review import (
@@ -67,6 +68,7 @@ def build_analyst_research_reads_router(
     async_list_reviews_fn: Callable[[Any, str | None, int], Awaitable[dict[str, Any]]] | None = None,
     async_latest_review_fn: Callable[[Any, str], Awaitable[dict[str, Any]]] | None = None,
     async_market_evaluation_fn: Callable[[Any, date | None, date | None, str | None], Awaitable[dict[str, Any]]] | None = None,
+    async_stock_timeline_fn: Callable[..., Awaitable[dict[str, Any]]] | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["analyst-research-reads"])
 
@@ -122,7 +124,7 @@ def build_analyst_research_reads_router(
         return {"review": build_recorded_analyst_market_review(database, request.cadence, request.as_of_date)}
 
     @router.get("/api/v1/analyst-research/stock-timeline")
-    def stock_timeline(
+    async def stock_timeline(
         symbol: str,
         start_date: date | None = None,
         end_date: date | None = None,
@@ -130,6 +132,11 @@ def build_analyst_research_reads_router(
         limit: int = 1500,
     ) -> dict[str, Any]:
         """Return minute K-lines with point-in-time analyst action markers."""
+        if async_database is not None:
+            return await (async_stock_timeline_fn or async_stock_timeline)(
+                async_database, symbol=symbol, start_date=start_date, end_date=end_date,
+                analyst_id=analyst_id, limit=limit,
+            )
         return analyst_stock_timeline(
             database, symbol=symbol, start_date=start_date, end_date=end_date,
             analyst_id=analyst_id, limit=limit,

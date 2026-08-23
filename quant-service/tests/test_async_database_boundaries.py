@@ -39,6 +39,7 @@ from app.async_limit_linkage_mining_read_repository import latest_limit_linkage_
 from app.async_analyst_prompt_lab_read_repository import status as async_prompt_lab_status
 from app.async_analyst_market_review_read_repository import list_reviews as async_market_reviews
 from app.async_analyst_market_evaluation_read_repository import market_evaluation as async_market_evaluation
+from app.async_analyst_stock_timeline_read_repository import stock_timeline as async_stock_timeline
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -152,6 +153,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_analyst_prompt_lab_read_repository.py",
             "async_analyst_market_review_read_repository.py",
             "async_analyst_market_evaluation_read_repository.py",
+            "async_analyst_stock_timeline_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -1267,6 +1269,47 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(direct["quality_gate"]["live_strategy_effect"], "none")
         self.assertEqual(len(database.connection.calls), 8)
         self.assertEqual(database.connection.calls[0][1], (start, end, "anqiang-touzi-riji", "anqiang-touzi-riji"))
+
+    async def test_analyst_stock_timeline_prefers_native_async_local_evidence(self) -> None:
+        calls = []
+
+        async def timeline(_database, **kwargs):
+            calls.append(kwargs)
+            return {"symbol": kwargs["symbol"], "bar_count": 0, "boundary": "no media is fetched"}
+
+        router = build_analyst_research_reads_router(
+            object(), lambda *_args: {}, async_database=object(), async_stock_timeline_fn=timeline,
+        )
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-research/stock-timeline")
+        payload = await endpoint("600000.SH", date(2026, 8, 21), date(2026, 8, 21), "anqiang-touzi-riji", 9999)
+        self.assertEqual(payload["symbol"], "600000.SH")
+        self.assertEqual(calls[0]["limit"], 9999)
+
+        class Result:
+            def __init__(self, row=None, rows=None): self.row, self.rows = row, rows or []
+            async def fetchone(self): return self.row
+            async def fetchall(self): return self.rows
+
+        class Connection:
+            def __init__(self): self.calls = []
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "max(trading_date)" in sql: return Result({"latest_date": date(2026, 8, 21)})
+                return Result(rows=[])
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        database = Database()
+        direct = await async_stock_timeline(database, symbol="600000.SH", start_date=date(2026, 8, 21), limit=9999)
+        self.assertEqual(direct["bar_count"], 0)
+        self.assertEqual(database.connection.calls[1][1][-1], 3000)
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:

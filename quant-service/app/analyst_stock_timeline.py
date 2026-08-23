@@ -39,6 +39,34 @@ def _nearest_bar(event_at: datetime | None, bars: list[dict[str, Any]]) -> dict[
     }
 
 
+def project_analyst_stock_timeline(
+    *, symbol: str, start: date, end: date, bars: list[dict[str, Any]],
+    bar_source: str, actions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the shared point-in-time projection after a bounded local read."""
+    action_markers: list[dict[str, Any]] = []
+    for row in actions:
+        event_at = row.get("event_time")
+        marker = {
+            "event_id": row.get("event_id"), "analyst_id": row.get("analyst_id"),
+            "symbol": row.get("symbol"), "label": row.get("label") or symbol,
+            "action": row.get("action"), "direction": row.get("direction"),
+            "event_time": _json_time(event_at), "stated_at": _json_time(row.get("stated_at")),
+            "available_at": _json_time(row.get("available_at")), "evidence": row.get("evidence"),
+            "source_kind": row.get("source_kind"), "replay_only": bool(row.get("replay_only")),
+            "time_basis": "stated_at" if row.get("stated_at") is not None else "strategy_available_at",
+        }
+        marker.update(_nearest_bar(event_at, bars))
+        action_markers.append(marker)
+    return {
+        "symbol": symbol, "start_date": str(start), "end_date": str(end), "timezone": "Asia/Shanghai",
+        "bar_source": bar_source, "bar_count": len(bars), "action_count": len(action_markers),
+        "bars": [{**row, "bar_time": _json_time(row.get("bar_time")), "available_at": _json_time(row.get("available_at"))} for row in bars],
+        "actions": action_markers,
+        "boundary": "actions use stated_at when present; strategy_available_at is retained for point-in-time audit; no media is fetched",
+    }
+
+
 def analyst_stock_timeline(
     database: Any,
     *,
@@ -102,27 +130,9 @@ def analyst_stock_timeline(
                 ORDER BY event_time,event_id""",
             (symbol, start, end, analyst_id, analyst_id, symbol, start, end, analyst_id, analyst_id),
         ).fetchall()]
-    action_markers: list[dict[str, Any]] = []
-    for row in actions:
-        event_at = row.get("event_time")
-        marker = {
-            "event_id": row.get("event_id"), "analyst_id": row.get("analyst_id"),
-            "symbol": row.get("symbol"), "label": row.get("label") or symbol,
-            "action": row.get("action"), "direction": row.get("direction"),
-            "event_time": _json_time(event_at), "stated_at": _json_time(row.get("stated_at")),
-            "available_at": _json_time(row.get("available_at")), "evidence": row.get("evidence"),
-            "source_kind": row.get("source_kind"), "replay_only": bool(row.get("replay_only")),
-            "time_basis": "stated_at" if row.get("stated_at") is not None else "strategy_available_at",
-        }
-        marker.update(_nearest_bar(event_at, bars))
-        action_markers.append(marker)
-    return {
-        "symbol": symbol, "start_date": str(start), "end_date": str(end), "timezone": "Asia/Shanghai",
-        "bar_source": bar_source, "bar_count": len(bars), "action_count": len(action_markers),
-        "bars": [{**row, "bar_time": _json_time(row.get("bar_time")), "available_at": _json_time(row.get("available_at"))} for row in bars],
-        "actions": action_markers,
-        "boundary": "actions use stated_at when present; strategy_available_at is retained for point-in-time audit; no media is fetched",
-    }
+    return project_analyst_stock_timeline(
+        symbol=symbol, start=start, end=end, bars=bars, bar_source=bar_source, actions=actions,
+    )
 
 
-__all__ = ["analyst_stock_timeline"]
+__all__ = ["analyst_stock_timeline", "project_analyst_stock_timeline"]
