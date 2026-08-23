@@ -208,6 +208,10 @@ from .free_market_providers import (
 from .order_book_features import aggregate_order_book_observations
 from . import intraday_order_book_service as order_book_service
 from . import intraday_order_book_runner
+from .intraday_order_book_runtime import (
+    IntradayOrderBookRuntimeDependencies,
+    run_intraday_order_book_runtime_loop,
+)
 from . import intraday_minute_profile_runner
 from .intraday_minute_profile_runtime import (
     IntradayMinuteProfileRuntimeDependencies,
@@ -2169,36 +2173,13 @@ async def capture_intraday_order_book_snapshot(symbols: list[str]) -> dict[str, 
 
 async def intraday_order_book_loop() -> None:
     """Observe watchlist depth at a bounded cadence; never derive an order."""
-    async def load_symbols() -> list[str]:
-        def load_watches() -> list[Any]:
-            with db.transaction() as connection:
-                return connection.execute(
-                    "SELECT symbol FROM quant.intraday_watchlists WHERE enabled ORDER BY updated_at DESC,symbol LIMIT %s",
-                    (intraday_order_book_max_symbols(),),
-                ).fetchall()
-        rows = await run_database_blocking(load_watches)
-        return [str(row["symbol"]) for row in rows]
-
-    async def prune_before(now: datetime, retention_days: int) -> None:
-        cutoff = now - timedelta(days=retention_days)
-
-        def prune() -> None:
-            with db.transaction() as connection:
-                connection.execute(
-                    "DELETE FROM quant.intraday_quote_observations "
-                    "WHERE source_name='tencent_order_book' AND observed_at<%s",
-                    (cutoff,),
-                )
-        await run_database_blocking(prune)
-
-    await intraday_order_book_runner.run_loop(
+    await run_intraday_order_book_runtime_loop(IntradayOrderBookRuntimeDependencies(
+        database=db, run_database=run_database_blocking, max_symbols=intraday_order_book_max_symbols,
         realtime_session=realtime_market_session_async, open_capabilities=open_provider_capabilities,
-        load_symbols=load_symbols, prune_before=prune_before,
-        storage_allowed=nonessential_high_frequency_capture_allowed,
-        capture=capture_intraday_order_book_snapshot,
-        interval_seconds=intraday_order_book_interval_seconds,
-        retention_days=intraday_order_book_retention_days,
-    )
+        storage_allowed=nonessential_high_frequency_capture_allowed, capture=capture_intraday_order_book_snapshot,
+        interval_seconds=intraday_order_book_interval_seconds, retention_days=intraday_order_book_retention_days,
+        run_loop=intraday_order_book_runner.run_loop,
+    ))
 
 
 async def capture_intraday_minute_sessions(symbols: list[str]) -> dict[str, Any]:
