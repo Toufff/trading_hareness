@@ -10,22 +10,15 @@ from zoneinfo import ZoneInfo
 _CN = ZoneInfo("Asia/Shanghai")
 
 
-def anqiang_trade_action_replay(database: Any, as_of_date: date | None, limit: int) -> dict[str, Any]:
-    """Return actions with only evidence that was actually persisted locally.
-
-    Intraday returns are present only when our Tencent watch/order-book capture
-    has a nearest observation within five minutes.  Otherwise the caller gets
-    the same-day official daily bar, not a fabricated minute replay.
-    """
-    limit = max(1, min(int(limit), 200))
-    with database.transaction() as connection:
-        params: list[Any] = []
-        predicate = ""
-        if as_of_date is not None:
-            predicate = "AND (a.stated_at AT TIME ZONE 'Asia/Shanghai')::date=%s"
-            params.append(as_of_date)
-        rows = connection.execute(
-            f"""SELECT a.action_id,a.remote_report_id,a.symbol,a.label,a.action_type,a.direction,a.stated_at,a.available_at,
+def anqiang_trade_action_replay_query(as_of_date: date | None, limit: int) -> tuple[str, tuple[Any, ...], int]:
+    """Build the shared bounded local-only query for sync and async readers."""
+    bounded_limit = max(1, min(int(limit), 200))
+    params: list[Any] = []
+    predicate = ""
+    if as_of_date is not None:
+        predicate = "AND (a.stated_at AT TIME ZONE 'Asia/Shanghai')::date=%s"
+        params.append(as_of_date)
+    query = f"""SELECT a.action_id,a.remote_report_id,a.symbol,a.label,a.action_type,a.direction,a.stated_at,a.available_at,
                        a.target_price,a.evidence,a.raw,
                        near.observed_at AS quote_observed_at,near.price AS quote_price,close_quote.price AS session_close_price,
                        daily.open AS daily_open,daily.high AS daily_high,daily.low AS daily_low,daily.close AS daily_close,
@@ -48,10 +41,17 @@ def anqiang_trade_action_replay(database: Any, as_of_date: date | None, limit: i
                   LEFT JOIN quant.canonical_bars_daily daily
                     ON daily.symbol=a.symbol AND daily.trading_date=(a.stated_at AT TIME ZONE 'Asia/Shanghai')::date
                  WHERE a.remote_analyst_id='anqiang-touzi-riji' {predicate}
-                 ORDER BY a.stated_at DESC,a.created_at DESC LIMIT %s""",
-            (*params, limit),
-        ).fetchall()
+                 ORDER BY a.stated_at DESC,a.created_at DESC LIMIT %s"""
+    return query, (*params, bounded_limit), bounded_limit
 
+
+def project_anqiang_trade_action_replay(rows: list[Any], as_of_date: date | None, limit: int) -> dict[str, Any]:
+    """Project local action evidence without a DB or provider.
+
+    Intraday returns are present only when our Tencent watch/order-book capture
+    has a nearest observation within five minutes.  Otherwise the caller gets
+    the same-day official daily bar, not a fabricated minute replay.
+    """
     items: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
@@ -77,3 +77,16 @@ def anqiang_trade_action_replay(database: Any, as_of_date: date | None, limit: i
         "items": items, "limit": limit,
         "data_boundary": "author-stated timestamps are replay evidence; any return starts at first local receipt",
     }
+
+
+def anqiang_trade_action_replay(database: Any, as_of_date: date | None, limit: int) -> dict[str, Any]:
+    """Return actions with only evidence that was actually persisted locally.
+
+    Intraday returns are present only when our Tencent watch/order-book capture
+    has a nearest observation within five minutes.  Otherwise the caller gets
+    the same-day official daily bar, not a fabricated minute replay.
+    """
+    query, params, bounded_limit = anqiang_trade_action_replay_query(as_of_date, limit)
+    with database.transaction() as connection:
+        rows = connection.execute(query, params).fetchall()
+    return project_anqiang_trade_action_replay(rows, as_of_date, bounded_limit)

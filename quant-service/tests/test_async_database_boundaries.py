@@ -27,6 +27,8 @@ from app.async_board_curve_read_repository import intraday_board_flow_curves as 
 from app.async_board_curve_read_repository import latest_close_sector_review_report as async_latest_board_review
 from app.async_board_research_read_repository import latest_board_rotation_events as async_board_rotations
 from app.async_board_research_read_repository import latest_board_stock_mining as async_board_stock_mining
+from app.async_analyst_action_read_repository import anqiang_trade_action_outcomes as async_action_outcomes
+from app.async_analyst_action_read_repository import anqiang_trade_action_replay as async_action_replay
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -39,6 +41,8 @@ from app.routers.analyst_reads import build_analyst_reads_router
 from app.routers.board_curve_reads import build_board_curve_reads_router
 from app.routers.board_rotation_reads import build_board_rotation_reads_router
 from app.routers.board_stock_mining_reads import build_board_stock_mining_reads_router
+from app.routers.analyst_trade_action_reads import build_analyst_trade_action_reads_router
+from app.routers.analyst_action_outcomes import build_analyst_action_outcomes_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -125,6 +129,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_analyst_archive_read_repository.py",
             "async_board_curve_read_repository.py",
             "async_board_research_read_repository.py",
+            "async_analyst_action_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -788,6 +793,77 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mining["inflow"][0]["symbol"], "600000.SH")
         self.assertEqual(mining["outflow"][0]["symbol"], "000001.SZ")
         self.assertEqual(database.connection.calls[0][1], (100,))
+
+    async def test_analyst_action_routers_prefer_async_persisted_evidence(self) -> None:
+        calls = []
+
+        async def replay(_database, as_of_date, limit):
+            calls.append(("replay", as_of_date, limit))
+            return {"items": [], "limit": limit}
+
+        async def outcomes(_database):
+            calls.append(("outcomes",))
+            return {"outcomes": []}
+
+        action_router = build_analyst_trade_action_reads_router(
+            object(), lambda *_args: {}, async_database=object(), async_replay_fn=replay,
+        )
+        outcome_router = build_analyst_action_outcomes_router(
+            object(), lambda *_args, **_kwargs: {}, async_database=object(), async_outcomes_fn=outcomes,
+        )
+        action = await action_router.routes[0].endpoint(date(2026, 8, 10), 201)
+        outcome = await outcome_router.routes[0].endpoint()
+        self.assertEqual(action["limit"], 201)
+        self.assertEqual(outcome["outcomes"], [])
+        self.assertEqual(calls, [("replay", date(2026, 8, 10), 201), ("outcomes",)])
+
+    async def test_analyst_action_repositories_use_native_async_local_evidence(self) -> None:
+        stated_at = datetime(2026, 8, 10, 2, tzinfo=timezone.utc)
+
+        class Result:
+            def __init__(self, rows=None):
+                self.rows = rows or []
+
+            async def fetchall(self):
+                return self.rows
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "analyst_action_intraday_outcomes" in sql:
+                    return Result([{"methodology_version": "v1", "count": 1}])
+                return Result([{
+                    "action_id": "action-1", "stated_at": stated_at, "available_at": stated_at,
+                    "quote_price": 10.0, "session_close_price": 10.2, "daily_close": 10.2,
+                }])
+
+        class Transaction:
+            def __init__(self, connection):
+                self.connection = connection
+
+            async def __aenter__(self):
+                return self.connection
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Database:
+            def __init__(self):
+                self.connection = Connection()
+
+            def transaction(self):
+                return Transaction(self.connection)
+
+        database = Database()
+        replay = await async_action_replay(database, date(2026, 8, 10), 1000)
+        outcomes = await async_action_outcomes(database)
+        self.assertEqual(replay["items"][0]["evaluation_quality"], "persisted_intraday_quote")
+        self.assertTrue(replay["items"][0]["factor_eligible"])
+        self.assertEqual(outcomes["outcomes"][0]["count"], 1)
+        self.assertEqual(database.connection.calls[0][1], (date(2026, 8, 10), 200))
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:
