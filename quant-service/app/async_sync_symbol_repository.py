@@ -22,6 +22,19 @@ async def core_symbols(async_database: Any) -> list[str]:
     return [str(row["symbol"]) for row in rows]
 
 
+async def limited_core_symbols(async_database: Any, limit: int) -> list[str]:
+    """Return a bounded priority-ordered core basket for post-close supplements."""
+    async with async_database.transaction() as connection:
+        result = await connection.execute(
+            """SELECT symbol FROM quant.universe_members
+                 WHERE universe_key='core' AND enabled
+                 ORDER BY priority,symbol LIMIT %s""",
+            (max(1, int(limit)),),
+        )
+        rows = await result.fetchall()
+    return [str(row["symbol"]) for row in rows]
+
+
 async def analyst_claim_symbols(async_database: Any) -> list[str]:
     """Return only syntactically valid stock subjects from local analyst claims."""
     async with async_database.transaction() as connection:
@@ -33,4 +46,4 @@ async def analyst_claim_symbols(async_database: Any) -> list[str]:
     return [str(row["subject_key"]) for row in rows]
 
 
-__all__ = ["analyst_claim_symbols", "core_symbols"]
+__all__ = ["analyst_claim_symbols", "core_symbols", "limited_core_symbols"]

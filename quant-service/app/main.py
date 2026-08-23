@@ -123,6 +123,7 @@ from .async_ths_concept_member_backfill_repository import existing_flow_rows as 
 from .async_ths_concept_member_backfill_repository import member_progress as read_async_ths_concept_member_progress
 from .async_sync_symbol_repository import analyst_claim_symbols as read_async_analyst_claim_symbols
 from .async_sync_symbol_repository import core_symbols as read_async_core_symbols
+from .async_sync_symbol_repository import limited_core_symbols as read_async_limited_core_symbols
 from .async_runtime_lease_repository import acquire as acquire_background_runtime_lease
 from .async_runtime_lease_repository import release as release_background_runtime_lease
 from .async_runtime_lease_repository import renew as renew_background_runtime_lease
@@ -3268,13 +3269,7 @@ async def run_post_close_refresh_legacy(request: PostCloseRefreshRequest) -> dic
 
 
 async def _post_close_core_symbols(limit: int) -> list[str]:
-    def load() -> list[Any]:
-        with db.transaction() as connection:
-            return connection.execute(
-                "SELECT symbol FROM quant.universe_members WHERE universe_key='core' AND enabled "
-                "ORDER BY priority,symbol LIMIT %s", (limit,),
-            ).fetchall()
-    return [str(row["symbol"]) for row in await run_database_blocking(load)]
+    return await read_async_limited_core_symbols(async_db, limit)
 
 
 def _post_close_refresh_dependencies() -> PostCloseRefreshDependencies:

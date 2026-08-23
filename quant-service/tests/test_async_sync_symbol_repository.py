@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.async_sync_symbol_repository import analyst_claim_symbols, core_symbols
+from app.async_sync_symbol_repository import analyst_claim_symbols, core_symbols, limited_core_symbols
 
 
 class _Result:
@@ -19,6 +19,8 @@ class _Connection:
 
     async def execute(self, query, params=None):
         self.calls.append((query, params))
+        if "LIMIT %s" in query:
+            return _Result([{"symbol": "000001.SZ"}])
         if "universe_members" in query:
             return _Result([{"symbol": "000001.SZ"}, {"symbol": "600519.SH"}])
         return _Result([{"subject_key": "300750.SZ"}])
@@ -59,6 +61,16 @@ class AsyncSyncSymbolRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("scope='stock'", claims_query)
         self.assertIn("subject_key ~", claims_query)
         self.assertIsNone(claims_params)
+
+    async def test_bounds_post_close_core_basket_in_sql(self) -> None:
+        database = _Database()
+
+        symbols = await limited_core_symbols(database, 5)
+
+        self.assertEqual(symbols, ["000001.SZ"])
+        query, params = database.connection.calls[0]
+        self.assertIn("ORDER BY priority,symbol LIMIT %s", query)
+        self.assertEqual(params, (5,))
 
 
 if __name__ == "__main__":
