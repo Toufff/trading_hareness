@@ -167,6 +167,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_analyst_sync_health_repository.py",
             "async_provider_status_read_repository.py",
             "async_provider_circuit_repository.py",
+            "async_market_session_repository.py",
             "async_analyst_text_feature_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())

@@ -52,6 +52,9 @@ from .capability_registry import api_capability
 from .database import AsyncDatabase, Database
 from .async_provider_circuit_repository import open_capabilities as read_async_open_provider_capabilities
 from .async_provider_circuit_repository import open_provider_keys as read_async_open_provider_keys
+from .async_market_session_repository import realtime_market_session as read_async_realtime_market_session
+from .async_market_session_repository import sse_calendar_open as read_async_sse_calendar_open
+from .async_market_session_repository import sse_calendar_status as read_async_sse_calendar_status
 from .daily_bar_repository import exchange_for, provider_priority, upsert_daily_bar
 from .public_market_repository import (
     persist_free_daily as _persist_free_daily,
@@ -2445,9 +2448,7 @@ async def intraday_board_curve_session_async(now: datetime | None = None) -> tup
     if not active:
         return active, reason
     exchange_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
-    calendar_open, calendar_reason = await read_sse_calendar_status_async(
-        db, exchange_date, database_runner=run_database_blocking,
-    )
+    calendar_open, calendar_reason = await read_async_sse_calendar_status(async_db, exchange_date)
     if not calendar_open:
         return False, calendar_reason
     return True, reason
@@ -2571,7 +2572,7 @@ def sse_calendar_open(calendar_date: date) -> bool:
 
 async def sse_calendar_open_async(calendar_date: date) -> bool:
     """Compatibility entry point for the isolated async persisted SSE gate."""
-    return await read_sse_calendar_open_async(db, calendar_date, database_runner=run_database_blocking)
+    return await read_async_sse_calendar_open(async_db, calendar_date)
 
 
 async def strategy_review_loop() -> None:
@@ -3224,7 +3225,7 @@ def realtime_market_session(api_name: str | None = None, now: datetime | None = 
 
 
 async def realtime_market_session_async(api_name: str | None = None, now: datetime | None = None) -> tuple[bool, str]:
-    return await read_realtime_market_session_async(db, api_name, now, database_runner=run_database_blocking)
+    return await read_async_realtime_market_session(async_db, api_name, now)
 
 
 def quote_is_for_exchange_date(quote: dict[str, Any], exchange_date: date) -> bool:

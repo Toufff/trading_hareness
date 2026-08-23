@@ -2228,7 +2228,7 @@ class ProviderHelperTests(unittest.TestCase):
 
     def test_async_sse_calendar_gate_fails_closed_when_local_calendar_is_missing(self):
         async def check() -> tuple[bool, bool]:
-            with patch("app.main.run_database_blocking", new=AsyncMock(side_effect=[None, {"is_open": True}])):
+            with patch("app.main.read_async_sse_calendar_open", new=AsyncMock(side_effect=[False, True])):
                 return (
                     await sse_calendar_open_async(date(2026, 8, 11)),
                     await sse_calendar_open_async(date(2026, 8, 12)),
@@ -2250,11 +2250,14 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIn("fail closed", realtime_reason)
         self.assertIn("fail closed", board_reason)
 
-    def test_async_realtime_session_gate_uses_database_executor_and_fails_closed(self):
+    def test_async_realtime_session_gate_uses_native_async_calendar_and_fails_closed(self):
         during_continuous_auction = datetime(2026, 8, 11, 2, 0, tzinfo=timezone.utc)
 
         async def check() -> tuple[tuple[bool, str], tuple[bool, str]]:
-            with patch("app.main.run_database_blocking", new=AsyncMock(side_effect=[None, {"is_open": True}])):
+            with patch("app.main.read_async_realtime_market_session", new=AsyncMock(side_effect=[
+                (False, "SSE trade calendar has no entry for today; fail closed"),
+                (True, "SSE continuous auction session"),
+            ])):
                 return (
                     await realtime_market_session_async(now=during_continuous_auction),
                     await realtime_market_session_async(now=during_continuous_auction),
@@ -2270,8 +2273,10 @@ class ProviderHelperTests(unittest.TestCase):
         during_board_observation = datetime(2026, 8, 11, 1, 25, tzinfo=timezone.utc)
 
         async def check() -> tuple[bool, tuple[bool, str], tuple[bool, str]]:
-            saturated = ExecutorSaturatedError("database blocking executor is saturated")
-            with patch("app.main.run_database_blocking", new=AsyncMock(side_effect=[saturated, saturated, saturated])):
+            reason = "local calendar unavailable; fail closed: database pool unavailable"
+            with patch("app.main.read_async_sse_calendar_open", new=AsyncMock(return_value=False)), \
+                 patch("app.main.read_async_realtime_market_session", new=AsyncMock(return_value=(False, reason))), \
+                 patch("app.main.read_async_sse_calendar_status", new=AsyncMock(return_value=(False, reason))):
                 return (
                     await sse_calendar_open_async(date(2026, 8, 11)),
                     await realtime_market_session_async(now=during_continuous_auction),
@@ -2281,9 +2286,9 @@ class ProviderHelperTests(unittest.TestCase):
         calendar_open, realtime, board = asyncio.run(check())
         self.assertFalse(calendar_open)
         self.assertFalse(realtime[0])
-        self.assertIn("local calendar capacity", realtime[1])
+        self.assertIn("local calendar unavailable", realtime[1])
         self.assertFalse(board[0])
-        self.assertIn("local calendar capacity", board[1])
+        self.assertIn("local calendar unavailable", board[1])
 
     def test_intraday_sector_report_runs_local_membership_join_in_database_executor(self):
         local_report = [{"taxonomy_key": "eastmoney_concept", "sector_key": "BK001", "label": "测试概念",
