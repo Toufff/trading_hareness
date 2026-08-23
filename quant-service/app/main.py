@@ -153,6 +153,7 @@ from .free_market_providers import (
 )
 from .order_book_features import aggregate_order_book_observations
 from . import intraday_order_book_service as order_book_service
+from . import intraday_order_book_runner
 from .market_snapshots import snapshot_status, summarize_quotes
 from .market_flow_repository import (
     persist_intraday_market_flow_feature,
@@ -2399,42 +2400,36 @@ async def capture_intraday_order_book_snapshot(symbols: list[str]) -> dict[str, 
 
 async def intraday_order_book_loop() -> None:
     """Observe watchlist depth at a bounded cadence; never derive an order."""
-    pruned_on: date | None = None
-    while True:
-        active, _ = await realtime_market_session_async()
-        if active:
-            circuit_open = "order_book_quote" in await open_provider_capabilities("tencent_free", ["order_book_quote"])
-            if circuit_open:
-                await asyncio.sleep(max(15.0, intraday_order_book_interval_seconds()))
-                continue
-            def load_watches() -> list[Any]:
-                with db.transaction() as connection:
-                    return connection.execute(
-                        "SELECT symbol FROM quant.intraday_watchlists WHERE enabled ORDER BY updated_at DESC,symbol LIMIT %s",
-                        (intraday_order_book_max_symbols(),),
-                    ).fetchall()
-            rows = await run_database_blocking(load_watches)
-            local_date = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date()
-            if pruned_on != local_date:
-                cutoff = datetime.now(timezone.utc) - timedelta(days=intraday_order_book_retention_days())
-                def prune() -> None:
-                    with db.transaction() as connection:
-                        connection.execute(
-                            "DELETE FROM quant.intraday_quote_observations "
-                            "WHERE source_name='tencent_order_book' AND observed_at<%s",
-                            (cutoff,),
-                        )
-                await run_database_blocking(prune)
-                pruned_on = local_date
-            allowed, storage = await nonessential_high_frequency_capture_allowed()
-            if not allowed:
-                print(f"intraday order-book capture skipped by storage guard: {storage.get('state')}")
-                await asyncio.sleep(intraday_order_book_interval_seconds())
-                continue
-            result = await capture_intraday_order_book_snapshot([str(row["symbol"]) for row in rows])
-            if result.get("status") == "failed":
-                print(f"intraday order-book capture failed: {result.get('reason', '')[:300]}")
-        await asyncio.sleep(intraday_order_book_interval_seconds())
+    async def load_symbols() -> list[str]:
+        def load_watches() -> list[Any]:
+            with db.transaction() as connection:
+                return connection.execute(
+                    "SELECT symbol FROM quant.intraday_watchlists WHERE enabled ORDER BY updated_at DESC,symbol LIMIT %s",
+                    (intraday_order_book_max_symbols(),),
+                ).fetchall()
+        rows = await run_database_blocking(load_watches)
+        return [str(row["symbol"]) for row in rows]
+
+    async def prune_before(now: datetime, retention_days: int) -> None:
+        cutoff = now - timedelta(days=retention_days)
+
+        def prune() -> None:
+            with db.transaction() as connection:
+                connection.execute(
+                    "DELETE FROM quant.intraday_quote_observations "
+                    "WHERE source_name='tencent_order_book' AND observed_at<%s",
+                    (cutoff,),
+                )
+        await run_database_blocking(prune)
+
+    await intraday_order_book_runner.run_loop(
+        realtime_session=realtime_market_session_async, open_capabilities=open_provider_capabilities,
+        load_symbols=load_symbols, prune_before=prune_before,
+        storage_allowed=nonessential_high_frequency_capture_allowed,
+        capture=capture_intraday_order_book_snapshot,
+        interval_seconds=intraday_order_book_interval_seconds,
+        retention_days=intraday_order_book_retention_days,
+    )
 
 
 async def capture_intraday_minute_sessions(symbols: list[str]) -> dict[str, Any]:
