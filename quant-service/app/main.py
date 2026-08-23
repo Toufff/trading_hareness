@@ -459,6 +459,7 @@ from .runtime_leases import (
 from .tushare_catalog import CORE_NORMALIZED_APIS, TUSHARE_CATALOG, catalog_counts, catalog_items
 from .tushare_catalog_fetch_service import CatalogFetchDependencies, fetch_catalog as run_catalog_fetch
 from .stock_study_tushare_service import StockStudyTushareDependencies, fetch_stock_study_input
+from .stock_study_service import StockStudyDependencies, build as build_stock_study_isolated
 from .intraday_signal_generation import IntradaySignalGenerationDependencies, generate_intraday_signals
 from .intraday_signal_event_persistence import (
     IntradaySignalEventPersistenceDependencies,
@@ -4046,106 +4047,21 @@ def stock_study_claims(symbol: str) -> tuple[list[dict[str, Any]], dict[str, Any
 
 
 async def build_stock_study(symbol: str, request: StockStudyRequest) -> dict[str, Any]:
-    as_of = request.as_of_date or cn_today()
-    market_date = as_of - timedelta(days=2) if as_of.weekday() == 6 else as_of - timedelta(days=1) if as_of.weekday() == 5 else as_of
-    # The requested window is in trading days. Calendar slack covers weekends
-    # and preserves enough observations for the SMA20 calculation.
-    calendar_span = min(45, max(request.lookback_days + 12, 32))
-    start = (market_date - timedelta(days=calendar_span)).strftime("%Y%m%d")
-    end = market_date.strftime("%Y%m%d")
-    dated = {"ts_code": symbol, "start_date": start, "end_date": end}
-    fetches = [
-        ("主 Tushare 日线", TushareFetchRequest(api_name="daily", provider="primary", params=dated, fields="ts_code,trade_date,open,high,low,close,pre_close,vol,amount", max_rows=60)),
-        ("超级源日线", TushareFetchRequest(api_name="daily", provider="super", params=dated, fields="ts_code,trade_date,open,high,low,close,pre_close,vol,amount", max_rows=60)),
-        ("REST 备用基础信息", TushareFetchRequest(api_name="stock_basic", provider="backup", params={"ts_code": symbol, "limit": 3}, max_rows=3)),
-        ("复权因子", TushareFetchRequest(api_name="adj_factor", params=dated, max_rows=60)),
-        ("每日估值指标", TushareFetchRequest(api_name="daily_basic", params=dated, max_rows=60)),
-        ("涨跌停价格", TushareFetchRequest(api_name="stk_limit", params=dated, max_rows=60)),
-        ("个股资金流", TushareFetchRequest(api_name="moneyflow", params=dated, max_rows=60)),
-        ("同花顺个股资金流", TushareFetchRequest(api_name="moneyflow_ths", params=dated, max_rows=60)),
-        ("东财个股资金流", TushareFetchRequest(api_name="moneyflow_dc", params=dated, max_rows=60)),
-        ("筹码及胜率", TushareFetchRequest(api_name="cyq_perf", params=dated, max_rows=60)),
-        ("筹码分布", TushareFetchRequest(api_name="cyq_chips", params=dated, max_rows=500)),
-        ("技术因子专业版", TushareFetchRequest(api_name="stk_factor_pro", params=dated, max_rows=60)),
-    ]
-    realtime_active, realtime_reason = await realtime_market_session_async()
-    if realtime_active:
-        fetches.extend([
-            ("主源实时分钟", TushareFetchRequest(api_name="rt_min", provider="primary", params={"ts_code": symbol, "freq": "1MIN"}, max_rows=3)),
-            ("超级源实时分钟", TushareFetchRequest(api_name="rt_min", provider="super", params={"ts_code": symbol, "freq": "1MIN"}, max_rows=3)),
-        ])
-    # The inputs are independent and each adapter has its own timeout.  Run the
-    # bounded probes concurrently so one slow enrichment cannot consume the UI
-    # request budget for the whole study.
-    baostock_task = asyncio.create_task(sync_baostock(TushareSyncRequest(trade_date=market_date, symbols=[symbol])))
-    results = await asyncio.gather(*(stock_study_fetch(label, payload) for label, payload in fetches))
-    free_results = await asyncio.gather(
-        stock_study_free_fetch("东方财富公开日线", "eastmoney_free", "daily_bar", lambda: eastmoney_daily(symbol, start, end), symbol),
-        stock_study_free_fetch("东方财富公开报价", "eastmoney_free", "realtime_quote", lambda: eastmoney_quote(symbol), symbol),
-        stock_study_free_fetch("AKShare公开日线", "akshare", "daily_bar", lambda: run_akshare_blocking(akshare_daily, symbol, start, end, timeout_seconds=12), symbol),
-        stock_study_free_fetch("腾讯财经公开日线", "tencent_free", "daily_bar", lambda: tencent_daily(symbol, start, end), symbol),
-        stock_study_free_fetch("新浪财经公开报价", "sina_free", "realtime_quote", lambda: sina_quote(symbol), symbol),
+    return await build_stock_study_isolated(
+        symbol, request,
+        StockStudyDependencies(
+            china_today=cn_today, tushare_request=TushareFetchRequest, daily_sync_request=TushareSyncRequest,
+            fetch_tushare=stock_study_fetch, realtime_market_session=realtime_market_session_async,
+            sync_baostock=sync_baostock, free_fetch=stock_study_free_fetch,
+            eastmoney_daily=eastmoney_daily, eastmoney_quote=eastmoney_quote,
+            run_akshare=run_akshare_blocking, akshare_daily=akshare_daily,
+            tencent_daily=tencent_daily, sina_quote=sina_quote, cninfo_announcements=cninfo_announcements,
+            run_database=run_database_blocking, persist_market_events=persist_market_events,
+            persist_announcement_health=persist_announcement_provider_health, technical_summary=technical_summary,
+            analyst_claims=stock_study_claims, recent_events=recent_market_events,
+            window_readiness=stock_window_readiness, latest_row=latest_study_row,
+        ),
     )
-    sources = [result[0] for result in results]
-    if not realtime_active:
-        sources.extend([
-            {"source": "主源实时分钟", "api_name": "rt_min", "provider": "primary", "status": "skipped", "received": 0, "stored": 0, "error": realtime_reason},
-            {"source": "超级源实时分钟", "api_name": "rt_min", "provider": "super", "status": "skipped", "received": 0, "stored": 0, "error": realtime_reason},
-        ])
-    sources.extend(result[0] for result in free_results)
-    data = {label: rows for (label, _), (_, rows) in zip(fetches, results, strict=True)}
-    free_data = {result[0]["source"]: result[1] for result in free_results}
-    try:
-        baostock = await asyncio.wait_for(baostock_task, timeout=15)
-    except asyncio.TimeoutError:
-        baostock = {"status": "failed", "imported": 0, "failures": ["study source exceeded 15 second budget"]}
-    sources.append({"source": "Baostock 日线", "api_name": "daily_bar", "provider": "baostock", "status": baostock["status"],
-                    "received": baostock.get("imported", 0), "stored": baostock.get("imported", 0), "failures": baostock.get("failures", [])})
-    announcement_started_at = asyncio.get_running_loop().time()
-    try:
-        announcement_rows = await asyncio.wait_for(cninfo_announcements(symbol, datetime.strptime(start, "%Y%m%d").date(), market_date, max_pages=1), timeout=12)
-        announcement_stored = await run_database_blocking(persist_market_events, "cninfo_free", announcement_rows, timeout_seconds=60)
-        await run_database_blocking(
-            persist_announcement_provider_health, "completed", announcement_stored, [],
-            round((asyncio.get_running_loop().time() - announcement_started_at) * 1000),
-        )
-        sources.append({"source": "巨潮公开公告", "api_name": "announcement", "provider": "cninfo_free",
-                        "status": "completed" if announcement_rows else "empty", "received": len(announcement_rows), "stored": announcement_stored})
-    except Exception as error:  # noqa: BLE001
-        announcement_rows = []
-        await run_database_blocking(
-            persist_announcement_provider_health, "failed", 0, [str(error)],
-            round((asyncio.get_running_loop().time() - announcement_started_at) * 1000),
-        )
-        sources.append({"source": "巨潮公开公告", "api_name": "announcement", "provider": "cninfo_free",
-                        "status": "failed", "received": 0, "stored": 0, "error": str(error)[:300]})
-    daily_rows = data["主 Tushare 日线"] or data["超级源日线"]
-    technical = technical_summary(daily_rows)
-    claims, analyst = await run_database_blocking(stock_study_claims, symbol)
-    announcements = await run_database_blocking(recent_market_events, symbol, 20)
-    technical_component = ((technical["score"] - 50) / 50) if technical.get("score") is not None else 0.0
-    combined_score = round(max(0, min(100, 50 + technical_component * 25 + analyst["score"] * 25)), 1)
-    stance = "research_positive" if combined_score >= 62 else "research_negative" if combined_score <= 38 else "mixed_or_insufficient"
-    profile = latest_study_row(data["REST 备用基础信息"])
-    readiness = await run_database_blocking(
-        stock_window_readiness, symbol, datetime.strptime(start, "%Y%m%d").date(), market_date,
-    )
-    return {"symbol": symbol, "as_of_date": str(market_date), "lookback_days": request.lookback_days, "sources": sources,
-            "on_demand_readiness": readiness,
-            "market": {"daily_bars": daily_rows[-45:], "latest_realtime": latest_study_row(data.get("主源实时分钟", []) or data.get("超级源实时分钟", [])),
-                       "eastmoney_quote": free_data["东方财富公开报价"], "eastmoney_daily_bars": free_data["东方财富公开日线"],
-                       "akshare_daily_bars": free_data["AKShare公开日线"],
-                       "tencent_daily_bars": free_data["腾讯财经公开日线"], "sina_quote": free_data["新浪财经公开报价"],
-                       "latest_adj_factor": latest_study_row(data["复权因子"]), "latest_limit": latest_study_row(data["涨跌停价格"]),
-                       "latest_daily_basic": latest_study_row(data["每日估值指标"]), "latest_moneyflow": latest_study_row(data["个股资金流"]),
-                       "latest_ths_moneyflow": latest_study_row(data["同花顺个股资金流"]),
-                       "latest_dc_moneyflow": latest_study_row(data["东财个股资金流"]),
-                       "latest_chip": latest_study_row(data["筹码及胜率"]), "latest_chip_distribution": latest_study_row(data["筹码分布"]),
-                       "latest_factor": latest_study_row(data["技术因子专业版"]), "profile": profile},
-            "events": {"announcements": announcements, "provider": "cninfo_free", "decision_eligible": False},
-            "technical": technical, "analyst": {"summary": analyst, "claims": claims},
-            "combined": {"score": combined_score, "stance": stance, "notice": "研究结论基于当前可得数据与远端分析师证据，不构成交易指令。",
-                         "reasons": [*technical.get("reasons", [])[:3], f"远端分析师有效观点 {analyst['claim_count']} 条，聚合方向为 {analyst['direction']}"]}}
 
 
 async def sync_tushare_daily_core(as_of_date: date, requested_symbols: list[str] | None = None) -> dict[str, Any]:
