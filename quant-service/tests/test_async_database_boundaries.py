@@ -205,10 +205,9 @@ class MainRouterBoundaryTests(unittest.TestCase):
     def test_main_keeps_only_operational_control_routes(self) -> None:
         """Prevent business endpoints from drifting back into the monolith.
 
-        All provider, research, market, intraday, sector and strategy HTTP
-        contracts belong to ``app/routers``.  The three allowed direct routes
-        are intentionally operational: health, metrics and an opt-in legacy
-        bootstrap guard.
+        All HTTP contracts, including health, metrics and the opt-in legacy
+        bootstrap guard, belong to ``app/routers``.  The composition root only
+        injects local runtime dependencies.
         """
         main_path = Path(__file__).resolve().parents[1] / "app" / "main.py"
         tree = ast.parse(main_path.read_text())
@@ -224,11 +223,7 @@ class MainRouterBoundaryTests(unittest.TestCase):
                     continue
                 if decorator.args and isinstance(decorator.args[0], ast.Constant) and isinstance(decorator.args[0].value, str):
                     direct_routes.add((method.upper(), decorator.args[0].value))
-        self.assertEqual(direct_routes, {
-            ("GET", "/health"),
-            ("GET", "/metrics"),
-            ("POST", "/api/v1/bootstrap"),
-        })
+        self.assertEqual(direct_routes, set())
 
     def test_legacy_sync_names_are_thin_compatibility_aliases(self) -> None:
         """Prevent removed provider implementations from returning to main.py."""
@@ -263,6 +258,10 @@ class RouterReadBoundaryTests(unittest.TestCase):
         ("automation_reads.py", "agent_context"),
         ("intraday_status.py", "intraday_services_status"),
         ("research_readiness.py", "training_roadmap"),
+        # Health probes the strict synchronous local database control plane;
+        # Prometheus must remain scrapeable even while that probe is degraded.
+        ("system_control.py", "health"),
+        ("system_control.py", "prometheus_metrics"),
     }
 
     def test_router_gets_are_async_or_explicit_operational_exceptions(self) -> None:

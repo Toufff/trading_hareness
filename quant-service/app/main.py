@@ -432,6 +432,7 @@ from .routers.sector_actions import SectorActionDependencies, build_sector_actio
 from .routers.strategy_actions import StrategyActionDependencies, build_strategy_actions_router
 from .routers.research_actions import ResearchActionDependencies, build_research_actions_router
 from .routers.ingestion_actions import IngestionActionDependencies, build_ingestion_actions_router
+from .routers.system_control import SystemControlDependencies, build_system_control_router
 from .market_rules import a_share_limit_ratio, china_equity_session, china_futures_session, cn_today, is_st_security_name
 from .request_models import (
     AkShareProbeRequest,
@@ -3698,16 +3699,14 @@ async def require_quant_write_key(request: Request, call_next: Any) -> Any:
     return await call_next(request)
 
 
-@app.get("/health")
-def health() -> dict[str, Any]:
-    """Expose local runtime evidence without touching market providers."""
+def _health_payload() -> dict[str, Any]:
+    """Build local runtime evidence without touching market providers."""
     def set_db_pool_gauge(pool: dict[str, Any]) -> None:
         db_pool_connections.labels("size").set(pool["pool_size"])
         db_pool_connections.labels("available").set(pool["available"])
         db_pool_connections.labels("waiting").set(pool["waiting"])
 
-    try:
-        return read_health_payload(HealthDependencies(
+    return read_health_payload(HealthDependencies(
             database=db, post_close_lease_key=POST_CLOSE_REFRESH_LEASE_KEY,
             background_loop_lease_seconds=background_loop_lease_seconds,
             data_directory=lambda: Path(os.getenv("QUANT_DATA_DIR", "/var/lib/quant")),
@@ -3737,14 +3736,11 @@ def health() -> dict[str, Any]:
                 "background_loop:all_board_member_backfill": all_board_member_backfill_enabled(),
             },
             daily_control_plane_status=full_market_daily_control_status,
-        ))
-    except DatabaseUnavailableError as error:
-        raise HTTPException(status_code=503, detail=f"database unavailable: {error}") from error
+    ))
 
 
-@app.get("/metrics", include_in_schema=False)
-def metrics() -> Response:
-    """Local Prometheus scrape endpoint; service remains loopback-bound."""
+def _metrics_response() -> Response:
+    """Local Prometheus scrape response; service remains loopback-bound."""
     refresh_metrics_control_plane()
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
@@ -3796,13 +3792,20 @@ app.include_router(build_intraday_status_router(
 ))
 
 
-@app.post("/api/v1/bootstrap")
-def bootstrap() -> dict[str, Any]:
+def _legacy_schema_bootstrap() -> dict[str, Any]:
     if not legacy_schema_bootstrap_enabled():
         raise HTTPException(status_code=409, detail="legacy schema bootstrap is disabled; use versioned Alembic migrations")
     db.migrate()
     ensure_catalog_capabilities()
     return {"status": "ok", "catalog": catalog_counts()}
+
+
+app.include_router(build_system_control_router(SystemControlDependencies(
+    health_payload=_health_payload,
+    database_unavailable_error=DatabaseUnavailableError,
+    metrics_response=_metrics_response,
+    legacy_bootstrap=_legacy_schema_bootstrap,
+)))
 
 
 def persist_akshare_probe_result(capability: str, rows: list[dict[str, Any]], symbol: str,

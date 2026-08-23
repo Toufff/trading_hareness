@@ -25,7 +25,7 @@
 
 - `app/routers/`：provider/市场/盘中/板块写入操作、provider 状态、研究就绪度、盘中状态、分析师文本、公告/龙虎榜和策略结果读取。盘中与板块 router 不拥有行情 client 或调度器，仍通过显式服务依赖保留时段、限流、熔断、精确成员与 outbox 边界。
 - 收盘复盘循环和日流水线的同步本地结算/特征快照/推荐生成已显式交给有界数据库执行器；AST 门禁同时阻止这些已知同步仓储函数在 async 服务中绕开该边界。
-- 所有常规业务 HTTP 路由现位于 `app/routers/`：研究治理、策略、行情导入、市场、盘中、板块与 provider 均使用显式依赖装配。`main.py` 只保留健康/指标和默认关闭的 legacy schema bootstrap 控制面，便于后续以仓储和服务层继续渐进拆分。
+- 所有 HTTP 路由现位于 `app/routers/`：研究治理、策略、行情导入、市场、盘中、板块、provider 以及健康/指标/默认关闭的 legacy schema bootstrap 均使用显式依赖装配。`main.py` 仅保留应用生命周期、写鉴权和本地运行依赖组合，便于后续以仓储和服务层继续渐进拆分。
 - `app/post_close_structures.py` 提供无 I/O 的盘后结构规则，供现有盘后服务、未来 P2 回放和 P3 验证共同调用；其 30 日完整门槛和 15 日仅观察的语义未改变。
 - `app/intraday_signal_policy.py` 提供无 I/O 的盘中确认、去重和冷却规则；实时扫描与未来回放共享同一纯函数契约，历史事件已完成 episode 外键修复。
 - `app/daily_bar_repository.py` 承担日线 raw→canonical 选择、控制面字段保护与质量冲突记录；它仅接收事务，不能创建 HTTP/provider 客户端。主服务的 `upsert_bar` 仍是兼容入口，故现有同步、离线导入与真实 SQL 回归不改变。
