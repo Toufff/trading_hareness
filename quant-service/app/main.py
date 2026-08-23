@@ -66,6 +66,14 @@ from .research_experiment_service import (
     evaluate_factors as evaluate_factors_isolated,
     research_window as research_window_isolated,
 )
+from .tushare_fetch_ledger import (
+    TushareFetchLedgerDependencies,
+    persist_blocked as persist_tushare_fetch_blocked_isolated,
+    persist_cancel as persist_tushare_fetch_cancel_isolated,
+    persist_failure as persist_tushare_fetch_failure_isolated,
+    persist_success as persist_tushare_fetch_success_isolated,
+    prepare_run as prepare_tushare_fetch_run_isolated,
+)
 from .analyst_promotion import MAX_APPROVED_WEIGHT, PROMOTION_KEY, analyst_live_promotion
 from .research_prices import adjusted_bars
 from .live_policy import live_policy_gate
@@ -3797,125 +3805,44 @@ async def run_board_research(request: BoardResearchRunRequest) -> dict[str, Any]
     )
 
 
-def prepare_tushare_fetch_run(
-    request: TushareFetchRequest,
-    request_key: str,
-    candidate_keys: list[str],
-    canonical_params: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Atomically reuse valid raw evidence or mark a bounded fetch as running."""
-    with db.transaction() as connection:
-        existing = connection.execute("SELECT status,row_count FROM quant.fetch_runs WHERE request_key=%s", (request_key,)).fetchone()
-        if existing and existing["status"] == "completed":
-            saved_rows = connection.execute(
-                "SELECT provider_key,row_data FROM quant.tushare_raw_records WHERE request_key=%s ORDER BY record_index", (request_key,)
-            ).fetchall()
-            # Do not reuse a completed ledger entry whose deduplicated raw
-            # evidence has later been replaced by a forced refresh.
-            if len(saved_rows) == int(existing["row_count"] or 0):
-                saved_provider = str(saved_rows[0]["provider_key"]) if saved_rows else candidate_keys[0]
-                cached_rows = [dict(row["row_data"]) for row in saved_rows]
-                if looks_like_response_header(cached_rows):
-                    return {"status": "invalid_response", "api_name": request.api_name, "request_key": request_key,
-                            "provider": saved_provider, "stored": existing["row_count"], "normalized_rows": 0,
-                            "error": "cached provider response is a header row, not market data"}
-                normalized_rows = normalize_tushare_rows(connection, request.api_name, cached_rows, datetime.now(timezone.utc), saved_provider)
-                return {"status": "unchanged", "api_name": request.api_name, "request_key": request_key,
-                        "provider": saved_provider, "stored": existing["row_count"], "normalized_rows": normalized_rows,
-                        "complete": True}
-        connection.execute(
-            """INSERT INTO quant.fetch_runs(provider_key,capability,request_key,status,attempt_count,started_at,metadata)
-               VALUES(%s,%s,%s,'running',1,now(),%s)
-               ON CONFLICT(request_key) DO UPDATE SET status='running',attempt_count=quant.fetch_runs.attempt_count+1,
-                 started_at=now(),finished_at=null,error_class=null,error_message=null""",
-            (candidate_keys[0], request.api_name, request_key,
-             Json({"provider": request.provider, "provider_candidates": candidate_keys, "params": canonical_params,
-                   "fields": request.fields, "max_rows": request.max_rows, "paginate": request.paginate,
-                   "page_size": request.page_size, "max_pages": request.max_pages,
-                   "require_complete": request.require_complete})),
-        )
-    return None
+def _tushare_fetch_ledger_dependencies() -> TushareFetchLedgerDependencies:
+    return TushareFetchLedgerDependencies(
+        database=db, json_value=Json, looks_like_response_header=looks_like_response_header,
+        normalize_cached_rows=normalize_tushare_rows, persist_rows=persist_tushare_rows,
+        record_provider_failure=record_provider_failure, record_provider_success=record_provider_success,
+        record_provider_capability=record_provider_api_capability,
+        provider_error_availability=provider_error_availability, provider_call_error=ProviderCallError,
+        safe_error_detail=safe_error_detail,
+    )
 
 
-def persist_tushare_fetch_success(
-    request: TushareFetchRequest,
-    request_key: str,
-    bounded_rows: list[dict[str, Any]],
-    truncated: bool,
-    result: Any,
-    provider_latency_ms: int | None = None,
-) -> tuple[str, int]:
-    """Atomically persist bounded raw evidence, canonical rows and health."""
-    with db.transaction() as connection:
-        normalized_rows = persist_tushare_rows(
-            connection, request.api_name, request_key, bounded_rows, result.provider.key, datetime.now(timezone.utc),
-        )
-        status = "partial" if truncated else "completed"
-        connection.execute(
-            """UPDATE quant.fetch_runs SET status=%s,row_count=%s,finished_at=now(),error_class=%s,error_message=%s WHERE request_key=%s""",
-            (status, len(bounded_rows), "row_cap" if truncated else None,
-             f"response exceeded local cap of {request.max_rows} rows" if truncated else None, request_key),
-        )
-        for provider_key, error in result.failed_providers:
-            record_provider_failure(connection, provider_key, request.api_name, error, provider_latency_ms)
-            record_provider_api_capability(connection, provider_key, request.api_name, provider_error_availability(error), note=error)
-        for provider_key in result.empty_providers:
-            if provider_key != result.provider.key:
-                record_provider_api_capability(
-                    connection, provider_key, request.api_name, "empty", 0,
-                    "Valid empty response; the next audited provider was tried without merging sources.",
-                )
-        record_provider_success(
-            connection, result.provider.key, request.api_name, len(bounded_rows), provider_latency_ms,
-        )
-        capability_note = "Provider returned real rows; local storage kept a bounded prefix." if truncated else ""
-        record_provider_api_capability(connection, result.provider.key, request.api_name,
-                                       "verified" if bounded_rows else "empty", len(bounded_rows), capability_note)
-    return status, normalized_rows
+def prepare_tushare_fetch_run(request: TushareFetchRequest, request_key: str, candidate_keys: list[str],
+                              canonical_params: dict[str, Any]) -> dict[str, Any] | None:
+    return prepare_tushare_fetch_run_isolated(
+        request, request_key, candidate_keys, canonical_params, _tushare_fetch_ledger_dependencies(),
+    )
+
+
+def persist_tushare_fetch_success(request: TushareFetchRequest, request_key: str, bounded_rows: list[dict[str, Any]],
+                                  truncated: bool, result: Any, provider_latency_ms: int | None = None) -> tuple[str, int]:
+    return persist_tushare_fetch_success_isolated(
+        request, request_key, bounded_rows, truncated, result, _tushare_fetch_ledger_dependencies(), provider_latency_ms,
+    )
 
 
 def persist_tushare_fetch_cancel(request_key: str, api_name: str, candidate_keys: list[str]) -> None:
-    """Close a caller-cancelled fetch without blaming an upstream provider.
-
-    ``asyncio.wait_for`` is used by bounded study/UI workflows.  Its timeout
-    cancels our coroutine before a provider result is known, so recording a
-    provider failure here would turn local latency budget pressure into a
-    false circuit-open event.
-    """
-    with db.transaction() as connection:
-        connection.execute(
-            "UPDATE quant.fetch_runs SET status='blocked',finished_at=now(),error_class='caller_cancelled',error_message='Request cancelled by the caller timeout before provider outcome' WHERE request_key=%s",
-            (request_key,),
-        )
+    return persist_tushare_fetch_cancel_isolated(request_key, api_name, candidate_keys, _tushare_fetch_ledger_dependencies())
 
 
 def persist_tushare_fetch_failure(request_key: str, api_name: str, candidate_keys: list[str], error: Exception,
                                   provider_latency_ms: int | None = None) -> None:
-    safe_error = safe_error_detail(str(error), 1000)
-    with db.transaction() as connection:
-        connection.execute(
-            "UPDATE quant.fetch_runs SET status='failed',finished_at=now(),error_class='provider_error',error_message=%s WHERE request_key=%s",
-            (safe_error, request_key),
-        )
-        provider_failures = error.failures if isinstance(error, ProviderCallError) and error.failures else tuple(
-            (provider_key, safe_error_detail(str(error))) for provider_key in candidate_keys
-        )
-        for provider_key, provider_error in provider_failures:
-            safe_provider_error = safe_error_detail(str(provider_error))
-            record_provider_failure(connection, provider_key, api_name, safe_provider_error, provider_latency_ms)
-            record_provider_api_capability(connection, provider_key, api_name,
-                                           provider_error_availability(safe_provider_error), note=safe_provider_error)
+    return persist_tushare_fetch_failure_isolated(
+        request_key, api_name, candidate_keys, error, _tushare_fetch_ledger_dependencies(), provider_latency_ms,
+    )
 
 
 def persist_tushare_fetch_blocked(request_key: str, error: Exception) -> None:
-    """Close a ledger row for local backpressure without blaming a provider."""
-    detail = safe_error_detail(str(error), 300)
-    with db.transaction() as connection:
-        connection.execute(
-            """UPDATE quant.fetch_runs SET status='blocked',finished_at=now(),
-               error_class='local_capacity',error_message=%s WHERE request_key=%s""",
-            (detail, request_key),
-        )
+    return persist_tushare_fetch_blocked_isolated(request_key, error, _tushare_fetch_ledger_dependencies())
 
 
 async def fetch_tushare_catalog(request: TushareFetchRequest) -> dict[str, Any]:

@@ -147,6 +147,7 @@
 
 ## 验证
 
+- 2026-08-22：通用 Tushare 目录 fetch 的本地 ledger 状态迁至 `app/tushare_fetch_ledger.py`。缓存复用、原始/规范化证据、provider 健康与能力结算仍在同一数据库事务内；传输、候选选择、限频和重试仍留在既有编排层。新增“缓存响应头拒绝复用”和“调用方取消不惩罚 provider”服务级回归；容器定向回归通过。
 - 2026-08-22：因子评估、原生多因子回测记录和数据质量快照的本地事务已从 `main.py` 收敛到 `app/research_experiment_service.py`。服务只读取既有 canonical/PIT 成员与控制面，保留未知/禁用因子拒绝和日线控制面缺失即 `blocked` 的边界；不访问 provider、不启动历史拉取、不调策略阈值或分析师权重。新增点时研究窗口、未知因子短路与控制面阻断快照回归；容器定向回归通过。
 - 2026-08-22：单股多源研究编排已从 `main.py` 收敛到 `app/stock_study_service.py`。主/超级日线、资金流/筹码、Baostock、东财/AKShare/腾讯/新浪公开证据、巨潮公告和本地分析师 claim 均保持独立来源标签与原有预算；闭市实时分钟明确 `skipped`，开市才增加两个实时适配器。该服务只产出 research 结论，仍不产生交易指令。新增闭市/连续竞价路径回归；容器定向回归通过。
 - 2026-08-22：概念资金流到涨停候选的本地 SQL 适配层已收敛到 `app/concept_limit_candidate_repository.py`。它只在同一交易日按精确 `ths_member` 代码 join 已保存的概念流和涨停池；成员快照、候选替换和写入仍通过有界数据库执行器，未增加 provider 请求、名称猜测或实时策略评分。新增请求日期选择与成员来源 provenance 回归；容器定向回归通过。
