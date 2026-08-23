@@ -35,6 +35,7 @@ from app.async_sector_read_repository import concept_sector_signals as async_con
 from app.async_sector_read_repository import market_sectors as async_market_sectors
 from app.async_sector_read_repository import sector_members as async_sector_members
 from app.sector_read_model import project_concept_member_backfill_status
+from app.async_limit_linkage_mining_read_repository import latest_limit_linkage_mining as async_limit_linkage_mining
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -52,6 +53,7 @@ from app.routers.analyst_action_outcomes import build_analyst_action_outcomes_ro
 from app.routers.automation_reads import build_automation_reads_router
 from app.routers.market_flow_reads import build_market_flow_reads_router
 from app.routers.sector_reads import build_sector_reads_router
+from app.routers.limit_linkage_mining_reads import build_limit_linkage_mining_reads_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -142,6 +144,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_automation_run_read_repository.py",
             "async_market_flow_read_repository.py",
             "async_sector_read_repository.py",
+            "async_limit_linkage_mining_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -1091,6 +1094,48 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["mapped_concepts"], 387)
         self.assertEqual(payload["receipt_mapped_concepts"], 0)
         self.assertEqual(payload["states"][0]["state"], "active_exact_mapping")
+
+    async def test_limit_linkage_router_prefers_async_exact_relation_evidence(self) -> None:
+        calls = []
+
+        async def linkage(_database, limit):
+            calls.append(limit)
+            return {"items": [{"symbol": "600000.SH"}]}
+
+        router = build_limit_linkage_mining_reads_router(
+            object(), async_database=object(), async_linkage_fn=linkage,
+        )
+        payload = await router.routes[0].endpoint(51)
+        self.assertEqual(payload["items"][0]["symbol"], "600000.SH")
+        self.assertEqual(calls, [51])
+
+    async def test_limit_linkage_repository_uses_native_async_bounded_rows(self) -> None:
+        class Result:
+            def __init__(self, row=None, rows=None): self.row, self.rows = row, rows or []
+            async def fetchone(self): return self.row
+            async def fetchall(self): return self.rows
+
+        class Connection:
+            def __init__(self): self.calls = []
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "mining_runs" in sql:
+                    return Result({"linkage_run_id": "run-1"})
+                return Result(rows=[{"symbol": "600000.SH"}])
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        database = Database()
+        payload = await async_limit_linkage_mining(database, 1000)
+        self.assertEqual(payload["items"][0]["symbol"], "600000.SH")
+        self.assertEqual(database.connection.calls[1][1], ("run-1", 50))
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:
