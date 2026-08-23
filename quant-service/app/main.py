@@ -4481,7 +4481,7 @@ app.include_router(build_paper_reads_router(db, async_db))
 app.include_router(build_paper_actions_router(db, configure_paper_account, accept_paper_decision))
 app.include_router(build_analyst_prompt_lab_router(
     db, materialize_prompt_candidates, label_prompt_candidate, evaluate_prompt_variant,
-    materialize_intraday_analyst_outcomes,
+    materialize_intraday_analyst_outcomes, async_database=async_db,
 ))
 app.include_router(build_strategy_pattern_reads_router(
     db, merge_limit_pool_sources, limit_board_count, strategy_json_safe,

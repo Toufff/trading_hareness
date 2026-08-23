@@ -36,6 +36,7 @@ from app.async_sector_read_repository import market_sectors as async_market_sect
 from app.async_sector_read_repository import sector_members as async_sector_members
 from app.sector_read_model import project_concept_member_backfill_status
 from app.async_limit_linkage_mining_read_repository import latest_limit_linkage_mining as async_limit_linkage_mining
+from app.async_analyst_prompt_lab_read_repository import status as async_prompt_lab_status
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -54,6 +55,7 @@ from app.routers.automation_reads import build_automation_reads_router
 from app.routers.market_flow_reads import build_market_flow_reads_router
 from app.routers.sector_reads import build_sector_reads_router
 from app.routers.limit_linkage_mining_reads import build_limit_linkage_mining_reads_router
+from app.routers.analyst_prompt_lab import build_analyst_prompt_lab_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -145,6 +147,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_market_flow_read_repository.py",
             "async_sector_read_repository.py",
             "async_limit_linkage_mining_read_repository.py",
+            "async_analyst_prompt_lab_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -1136,6 +1139,51 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         payload = await async_limit_linkage_mining(database, 1000)
         self.assertEqual(payload["items"][0]["symbol"], "600000.SH")
         self.assertEqual(database.connection.calls[1][1], ("run-1", 50))
+
+    async def test_prompt_lab_status_router_prefers_async_research_only_projection(self) -> None:
+        calls = []
+
+        async def status(_database, limit):
+            calls.append(limit)
+            return {"candidates": [], "live_effect": "none"}
+
+        router = build_analyst_prompt_lab_router(
+            object(), lambda *_args, **_kwargs: {}, lambda *_args, **_kwargs: {},
+            lambda *_args, **_kwargs: {}, lambda *_args, **_kwargs: {},
+            async_database=object(), async_status_fn=status,
+        )
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-prompt-lab/status")
+        payload = await endpoint(1000)
+        self.assertEqual(payload["live_effect"], "none")
+        self.assertEqual(calls, [1000])
+
+    async def test_prompt_lab_status_uses_native_async_bounded_evidence(self) -> None:
+        class Result:
+            def __init__(self, rows): self.rows = rows
+            async def fetchall(self): return self.rows
+
+        class Connection:
+            def __init__(self): self.calls = []
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "prompt_candidates" in sql: return Result([{"candidate_id": "candidate-1"}])
+                if "evaluation_runs" in sql: return Result([{"evaluation_id": "evaluation-1"}])
+                return Result([{"methodology_version": "v1", "count": 1}])
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        database = Database()
+        payload = await async_prompt_lab_status(database, 1000)
+        self.assertEqual(payload["candidates"][0]["candidate_id"], "candidate-1")
+        self.assertEqual(payload["evaluations"][0]["evaluation_id"], "evaluation-1")
+        self.assertEqual(database.connection.calls[0][1], (500,))
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:
