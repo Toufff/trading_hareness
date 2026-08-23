@@ -81,8 +81,8 @@
 ## 2026-08-14 运行与前端收口记录
 
 - 盘中实时监控已恢复为 quant-service 内置租约循环单点运行；旧 `quantIntradayAlerts123` n8n Cron 保持取消发布，避免与服务内扫描重复。该工作流保留带 `X-Quant-Write-Key` 的手动/故障恢复图。盘中扫描落纸面决策前已补齐 `symbol`、`observed_at` 契约；开盘预检通过，量化服务 322 项测试通过。
-- n8n 本地默认使用内置 JavaScript runner（`N8N_RUNNERS_MODE` 可显式改回 `external`）；现有分析师同步图只有 HTTP 节点，Python runner 缺失警告不影响其节点。当前仍需一次“当前发布版本 + success”的正式运行证据，未把 HTTP 200 但 execution 未终态化误记为完成。
-- 分析师报告/消息工作流已经拆分、凭据域名和 JSON Body 已修复；本轮又将 `workflow_entity.versionId` 与发布版本对齐并重启 n8n。两条图均保留独立 Schedule Trigger，并新增不参与定时的 Manual Trigger，供运行中 n8n 的 UI 受控验收。2026-08-16 已用现有凭据对报告/消息流各做一次有界文字-only同步，服务端均返回 `completed`；但 n8n 2.33 的隔离 CLI 进程会把自身执行行遗留为 `mode=cli/running`，即使 HTTP 节点返回成功。因此健康页只接受 `mode=trigger` 且版本等于当前发布版的终态成功，CLI 冒烟不再误报为失败或定时验收；孤儿 CLI 行仍由 `scripts/reconcile-stale-n8n-executions.sh` 保留审计后收口。零项消息轮询会记录独立的 45 日 liveness 回执，而不伪造内容游标推进。当前仍需一次“当前发布版本 + trigger success”的正式运行证据，故 P0-A1 不标为完全验收。
+- n8n 本地默认使用内置 JavaScript runner（`N8N_RUNNERS_MODE` 可显式改回 `external`）；现有分析师同步图只有 HTTP 节点，Python runner 缺失警告不影响其节点。2026-08-22 的服务端 completed receipt 已提供当前发布工作流的正式运行证据；不会把单纯 HTTP 200、旧版或 CLI execution 行误记为完成。
+- 分析师报告/消息工作流已经拆分、凭据域名和 JSON Body 已修复；`workflow_entity.versionId` 已与发布版本对齐。两条图均保留独立 Schedule Trigger，并新增不参与定时的 Manual Trigger，供运行中 n8n 的 UI 受控验收。服务健康只要求当前 `workflow_id` 的可审计 completed receipt；2026-08-22 两条流均已满足并返回 `verified_recent_execution`。n8n 历史 execution 表仍可能留有旧错误或 CLI 行，它们不会覆盖当前 receipt；零项消息轮询继续记录独立的 45 日 liveness receipt，而不伪造内容游标推进。
 - 前端 `Unexpected token '<'` 已修复：adapter 补齐 `/api/research/remote-archive/messages`、`/api/research/analyst-skills`、`/api/research/analyst-research/status` 三个缺失代理，前端 JSON 解码器现在会检查非 JSON 响应并给出接口路径/状态提示，不再把 SPA HTML 当 JSON 解析。三个代理真实返回 `Content-Type: application/json`；`vue-tsc --noEmit` 与 Vite build 均通过。
 - 盘后一键刷新修复验证：BaoStock 隔离同步此前因 `baostock_code` 关键字无法穿过公共源有界执行器而必然失败，现已在执行器内用 `partial` 安全转发关键字，并补充回归测试。2026-08-14 重试时 Super GET `daily_all` 成功写入 5,540 条日线，盘后策略同日完成（5,540 日线标的、5,521 个具备 15 日窗口，严格 30 日结构门槛下候选 0）；未拉取历史数据。
 - 仍未完成且保持原边界：3–5 年扩展历史、分钟路径回放、60 日/200 signal episode 样本外验证、Prompt Lab champion/challenger 晋级、RL/contextual bandit、组合自动熔断和策略自动降级。一年日频 PIT 修复不构成分钟回放或阈值调参授权，也没有改变分析师 live 权重。
@@ -93,7 +93,7 @@
 - 存储治理复核：量化 schema 13.39 GB，占 40 GiB 总研究预算 31.2%、28 GiB 热库预算 44.5%；7 天盘口与秒级交叉确认、60 天板块曲线/轮动、90 天分钟剖面及 60–120 天（默认 90）规则输入/观察池报价均有留存边界。未删除原始证据，也未启动历史回填。
 - 订单簿数据只作为 `attribution_only`：`qi5`、窗口聚合 order-flow proxy、封单侵蚀等已入 SignalSpec 证据引用；不改变实时评分、阈值或提醒资格。
 - 盘中规则输入回放已升级为 `intraday-rule-input-replay-v2`：新扫描冻结市场状态、Super/Tencent 交叉确认、纸面仓位与组合风险上下文，回放可调用同一纯函数 policy/risk gate；旧 v1 快照明确标记为 `core-only`，不会伪装成完整门禁回放。当前 2026-08-17 已存 3,996 条快照均来自 v2 部署前，故本次回放的 `policy_replayable_snapshots=0`；下一交易时段才会产生可验证的 v2 样本。
-- 分析师链复核：报告与消息流各自拥有持久 cursor 与 45 天 liveness receipt；最近的服务端文字-only 增量均已完成。当前 n8n 当前发布版还在等待下一个工作日的首个 `trigger/success` 运行，健康页明确显示该状态，不把旧版或 CLI 执行行当作正式调度成功。
+- 分析师链复核：报告与消息流各自拥有持久 cursor 与 45 天 liveness receipt；当前 active/published 版本一致，2026-08-22 的服务端文字-only completed receipt 已使 `/analyst-research/sync-health` 返回 `verified_recent_execution`。n8n 历史 execution 行仍可能保留旧错误，健康页刻意以当前 workflow ID 的可审计同步回执而非旧 CLI/执行行判定，不把二者混同。
 - 上海日期回归：对晚 UTC 的分析师消息，结算入场必须发生在其对应的上海交易日之后；该语义已覆盖 local-only outcome recomputation，容量/readiness 投影与兼容实现，并有回归测试。
 
 ## 2026-08-16 P2 日频执行记录
