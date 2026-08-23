@@ -131,13 +131,6 @@ async def run_refresh(
 
     try:
         for name in stage_order:
-            if name == "core_daily_controls":
-                stages[name] = {
-                    "status": "skipped",
-                    "reason": "per-symbol control-plane sync remains in the watched-stock workflow; full-market daily is authoritative here",
-                    "latency_ms": 0,
-                }
-                continue
             await stage(name)
         sources = {
             "tushare_super": "requested through daily, THS flow, limit ladder, specialty and index phases",

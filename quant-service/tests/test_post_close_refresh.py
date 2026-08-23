@@ -32,6 +32,23 @@ class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(seen, ["one:2026-08-21"])
 
+    async def test_core_daily_controls_is_a_real_post_close_stage(self):
+        calls: list[str] = []
+
+        async def run_db(action, *args, **_kwargs):
+            return action(*args)
+
+        result = await run_refresh(
+            object(), db=object(), lease_key="lease", lease_seconds=lambda: 60,
+            run_database_blocking=run_db, acquire_lease=lambda *_: True,
+            renew_lease=lambda *_: True, release_lease=lambda *_: None,
+            actions={"core_daily_controls": lambda: calls.append("controls") or {"status": "completed"}},
+            stage_order=("core_daily_controls",), trade_date=date(2026, 8, 21),
+            safe_error_detail=lambda value, _limit: value, json_safe=lambda value: value,
+        )
+        self.assertEqual(calls, ["controls"])
+        self.assertEqual(result["stages"]["core_daily_controls"]["status"], "completed")
+
     async def test_completed_stage_receipt_skips_action_after_restart(self):
         class Result:
             def fetchone(self):

@@ -398,6 +398,7 @@ from .tushare_daily_sync import sync as sync_tushare_isolated
 from .baostock_daily_sync import fetch_rows as fetch_baostock_rows_isolated, sync as sync_baostock_isolated
 from .market_universe_sync import sync as sync_market_universe_isolated
 from .full_market_daily_sync import sync as sync_full_market_daily_isolated
+from .full_market_daily_controls_sync import sync as sync_full_market_daily_controls_isolated
 from .sector_catalog_sync import sync_all as sync_all_sector_catalogs_isolated
 from .ths_sector_catalog_sync import sync as sync_ths_sector_catalog_isolated
 from .eastmoney_sector_members_sync import sync as sync_eastmoney_sector_members_isolated
@@ -1335,6 +1336,34 @@ async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[st
         db=db,
         safe_error_detail=safe_error_detail,
         provider_call_error=ProviderCallError,
+        executor_saturated_error=ExecutorSaturatedError,
+        record_provider_success=record_provider_success,
+        record_provider_failure=record_provider_failure,
+        record_provider_api_capability=record_provider_api_capability,
+    )
+
+
+def full_market_daily_row_count(trade_date: date) -> int:
+    """Current-date daily universe size; controls never bootstrap a date alone."""
+    with db.transaction() as connection:
+        row = connection.execute(
+            "SELECT count(*) AS count FROM quant.canonical_bars_daily WHERE trading_date=%s", (trade_date,),
+        ).fetchone()
+    return int(row["count"] if row else 0)
+
+
+async def sync_full_market_daily_controls(trade_date: date) -> dict[str, Any]:
+    """Fill same-date adjustment, limit and suspension controls after daily sync."""
+    return await sync_full_market_daily_controls_isolated(
+        trade_date,
+        expected_daily_rows=full_market_daily_row_count,
+        call_tushare_api=call_tushare_api,
+        parse_date=tushare_date,
+        persist_tushare_rows=persist_tushare_rows,
+        persist_blocked=persist_tushare_fetch_blocked,
+        run_database_blocking=run_database_blocking,
+        db=db,
+        safe_error_detail=safe_error_detail,
         executor_saturated_error=ExecutorSaturatedError,
         record_provider_success=record_provider_success,
         record_provider_failure=record_provider_failure,
@@ -4513,7 +4542,7 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
         ),
         "limit_ladder": lambda: refresh_strategy_pattern_sources(trade_date),
         "limit_lift_pattern_mining": lambda: run_strategy_pattern_mining(StrategyPatternMiningRequest(as_of_date=trade_date, refresh_limit_sources=False)),
-        "core_daily_controls": lambda: {"status": "skipped"},
+        "core_daily_controls": lambda: sync_full_market_daily_controls(trade_date),
         "cninfo_announcements": announcements_stage,
         "board_review": lambda: run_intraday_board_report(deliver=False),
         "close_strategy_decision": lambda: run_strategy_decision(StrategyDecisionRequest(session="close", kind="all", limit=20, validate_tushare_realtime=False)),
@@ -4548,7 +4577,13 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
             "market_flow_features", "limit_ladder", "limit_lift_pattern_mining", "core_daily_controls", "cninfo_announcements",
             "board_review", "close_strategy_decision", "close_review", "analyst_outcomes", "analyst_intraday_outcomes", "analyst_scorecards",
             "analyst_expert_research", "post_close_strategy", "watchlist_main_wave", "research_snapshot",
-        ), timeout_overrides={"akshare_supplements": 240.0, "limit_lift_pattern_mining": 120.0},
+        ), timeout_overrides={
+            "akshare_supplements": 240.0,
+            "limit_lift_pattern_mining": 120.0,
+            # Four bounded full-market control APIs run sequentially so an
+            # individual provider's shared limiter remains authoritative.
+            "core_daily_controls": 240.0,
+        },
         record_stage=record_refresh_stage,
         trade_date=trade_date,
         safe_error_detail=safe_error_detail, json_safe=strategy_json_safe,

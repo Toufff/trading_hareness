@@ -1,6 +1,6 @@
 # P1 工程加固退出审计
 
-更新时间：2026-08-14。此文档是 P1 当前可验证状态的交接清单，不把 P2 的历史回填、分钟回放或策略阈值校准提前宣称为完成。
+更新时间：2026-08-22。此文档是 P1 当前可验证状态的交接清单，不把 P2 的历史回填、分钟回放或策略阈值校准提前宣称为完成。
 
 ## 已验证的运行边界
 
@@ -14,7 +14,7 @@
 | Prometheus 控制面 | `/metrics` 自行以 5 秒 TTL 刷新本地连接池水位和当前 provider 熔断数；数据库异常不使 scrape 失败 | metrics-control-plane 回归，208 项全量测试 |
 | 盘中扫描 | 腾讯失败、空池、闭市门禁、正常完成均写可审计终态；无观察池命中时不再伪报 Tencent `completed`；板块上下文、纸面持仓和组合快照按扫描批量读取 | `quant_intraday_scan_duration_seconds`；闭市真实调用为 `blocked` |
 | 调度收敛 | n8n 18:50 日流水线只有服务端 `/pipeline/daily` 一个入口；端点内已执行特征、结算、评分与推荐，避免工作流后续节点重复计算 | `scripts/converge-n8n-quant-daily-workflow.sh` 的工作流导出回滚副本、受限更新与数据库拓扑复核 |
-| 飞书投递 | 个股信号与一分钟板块轮动均先落独立 outbox；失败有界重试，成功才进入冷却；日终摘要独立持久化；连续三次失败本地留痕，首次恢复正常投递会发送运维回执；可重建的板块轮动事件/回执 60 天后有界清理 | alert delivery、板块 rotation outbox、恢复回执与日终摘要测试；服务状态页 |
+| 飞书投递 | 观察池个股信号先落独立 outbox；失败有界重试，成功才进入冷却；日终摘要独立持久化；连续三次失败本地留痕，首次恢复正常投递会发送运维回执。板块轮动/挖掘只落前端证据，不单独发飞书；可重建事件/回执 60 天后有界清理 | alert delivery、恢复回执与日终摘要测试；服务状态页 |
 | 数据传输 | 巨潮公告、来源页与附件 URL 为 HTTPS；不下载附件或远端分析师媒体 | `test_cninfo_announcement_transport_is_https_only` |
 | 可恢复性 | Alembic 迁移受 advisory lock 保护；开盘预检会重建 PostgreSQL archive listing 并比对 manifest，校验备份权限和每份 workflow JSON；不执行 restore | `scripts/quant-opening-preflight.sh`、真实 12 workflow 验收与 `P1_RUNTIME_HARDENING_STATUS.md` |
 | 备份原子发布 | 只有 archive manifest 与 workflow 导出完成且每份 JSON 含 `nodes` 后才发布；失败 staging 自动清理 | `scripts/backup-postgres-and-workflows.sh` 语法与 12 workflow 等价验证 |
