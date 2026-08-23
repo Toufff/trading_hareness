@@ -48,30 +48,45 @@ async def application_lifespan(
     executor.  The function never performs a market request itself; provider
     work begins only inside the separately leased background loops.
     """
-    dependencies.open_database()
-    await dependencies.open_async_database()
-    dependencies.configure_request_reserver(
-        dependencies.request_reserver,
-        max_wait_seconds=dependencies.max_reservation_wait_seconds,
-    )
-    dependencies.initialize_provider_metrics()
-    await dependencies.start_http_clients()
-    if dependencies.legacy_schema_bootstrap_enabled():
-        dependencies.migrate_database()
-    dependencies.verify_versioned_schema()
-    await dependencies.run_database(dependencies.ensure_catalog_capabilities, timeout_seconds=30)
-    background_tasks = dependencies.start_background_tasks()
+    database_open = False
+    async_database_open = False
+    reserver_configured = False
+    http_clients_started = False
+    background_tasks: dict[str, Any] | None = None
     try:
+        dependencies.open_database()
+        database_open = True
+        await dependencies.open_async_database()
+        async_database_open = True
+        dependencies.configure_request_reserver(
+            dependencies.request_reserver,
+            max_wait_seconds=dependencies.max_reservation_wait_seconds,
+        )
+        reserver_configured = True
+        dependencies.initialize_provider_metrics()
+        await dependencies.start_http_clients()
+        http_clients_started = True
+        if dependencies.legacy_schema_bootstrap_enabled():
+            dependencies.migrate_database()
+        dependencies.verify_versioned_schema()
+        await dependencies.run_database(dependencies.ensure_catalog_capabilities, timeout_seconds=30)
+        background_tasks = dependencies.start_background_tasks()
         yield
     finally:
-        await dependencies.cancel_background_tasks(background_tasks)
-        await dependencies.cancel_shared_snapshots()
-        dependencies.shutdown_super_get_executor()
-        dependencies.shutdown_runtime_executors()
-        await dependencies.close_http_clients()
-        dependencies.configure_request_reserver(None)
-        await dependencies.close_async_database()
-        dependencies.close_database()
+        if background_tasks is not None:
+            await dependencies.cancel_background_tasks(background_tasks)
+            await dependencies.cancel_shared_snapshots()
+        if async_database_open:
+            dependencies.shutdown_super_get_executor()
+            dependencies.shutdown_runtime_executors()
+        if http_clients_started:
+            await dependencies.close_http_clients()
+        if reserver_configured:
+            dependencies.configure_request_reserver(None)
+        if async_database_open:
+            await dependencies.close_async_database()
+        if database_open:
+            dependencies.close_database()
 
 
 __all__ = ["ApplicationLifecycleDependencies", "application_lifespan"]

@@ -124,6 +124,55 @@ class ApplicationLifecycleTests(unittest.TestCase):
         asyncio.run(exercise())
         self.assertEqual(events, [])
 
+    def test_startup_failure_releases_only_resources_already_acquired(self) -> None:
+        events: list[str] = []
+
+        async def open_async_database():
+            events.append("async_db:open")
+
+        async def start_http_clients():
+            events.append("http:start")
+            raise RuntimeError("local HTTP pool bootstrap failed")
+
+        async def close_async_database():
+            events.append("async_db:close")
+
+        dependencies = ApplicationLifecycleDependencies(
+            open_database=lambda: events.append("db:open"),
+            open_async_database=open_async_database,
+            configure_request_reserver=lambda reserver, **_kwargs: events.append(
+                "configure:on" if reserver is not None else "configure:off",
+            ),
+            request_reserver=lambda *_args, **_kwargs: None,
+            max_reservation_wait_seconds=1.0,
+            initialize_provider_metrics=lambda: events.append("metrics:init"),
+            start_http_clients=start_http_clients,
+            legacy_schema_bootstrap_enabled=lambda: False,
+            migrate_database=lambda: events.append("migrate"),
+            verify_versioned_schema=lambda: events.append("verify"),
+            ensure_catalog_capabilities=lambda: events.append("catalog"),
+            run_database=lambda *_args, **_kwargs: None,
+            start_background_tasks=lambda: events.append("tasks:start") or {},
+            cancel_background_tasks=lambda _tasks: None,
+            cancel_shared_snapshots=lambda: None,
+            shutdown_super_get_executor=lambda: events.append("super_get:shutdown"),
+            shutdown_runtime_executors=lambda: events.append("executors:shutdown"),
+            close_http_clients=lambda: None,
+            close_async_database=close_async_database,
+            close_database=lambda: events.append("db:close"),
+        )
+
+        async def exercise() -> None:
+            with self.assertRaisesRegex(RuntimeError, "HTTP pool bootstrap"):
+                async with application_lifespan(dependencies):
+                    self.fail("startup failure must not yield")
+
+        asyncio.run(exercise())
+        self.assertEqual(events, [
+            "db:open", "async_db:open", "configure:on", "metrics:init", "http:start",
+            "super_get:shutdown", "executors:shutdown", "configure:off", "async_db:close", "db:close",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
