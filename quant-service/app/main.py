@@ -1284,22 +1284,73 @@ def ensure_offline_instrument(connection: Any, symbol: str) -> None:
     )
 
 
+def offline_minute_import_stale_seconds(environ: Mapping[str, str] | None = None) -> int:
+    """Bound the recovery wait before a crashed local CSV import can resume."""
+    values = os.environ if environ is None else environ
+    try:
+        return max(60, min(86_400, int(values.get("OFFLINE_MINUTE_IMPORT_STALE_SECONDS", "900"))))
+    except ValueError:
+        return 900
+
+
+def offline_import_recovery_action(existing: Mapping[str, Any] | None, *, now: datetime,
+                                   stale_seconds: int) -> str:
+    """Classify an idempotent local-file import without trusting client state."""
+    if existing is None:
+        return "create"
+    status = str(existing.get("status") or "")
+    if status in {"completed", "partial"}:
+        return "unchanged"
+    if status == "failed":
+        return "resume_failed"
+    started_at = existing.get("started_at")
+    if status == "running" and isinstance(started_at, datetime):
+        started = started_at.replace(tzinfo=timezone.utc) if started_at.tzinfo is None else started_at.astimezone(timezone.utc)
+        if now.astimezone(timezone.utc) - started < timedelta(seconds=stale_seconds):
+            return "in_progress"
+    return "resume_stale_running"
+
+
 def import_offline_minute_csv(request: OfflineMinuteImportRequest) -> dict[str, Any]:
     """Stream a locally mounted minute CSV into PostgreSQL in bounded batches."""
     path = offline_import_path(request.file_name)
     file_sha256 = sha256_file(path)
+    started_at = datetime.now(timezone.utc)
     with db.transaction() as connection:
+        # A file hash is the import idempotency key.  Serialize contenders
+        # before the first SELECT so two API requests cannot both observe an
+        # absent row and race the unique constraint.
+        connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (file_sha256,))
         existing = connection.execute(
-            "SELECT import_id,status,row_count,rejected_rows FROM quant.offline_imports WHERE file_sha256=%s", (file_sha256,)
+            """SELECT import_id,source_name,file_name,status,row_count,rejected_rows,error_message,started_at
+                 FROM quant.offline_imports WHERE file_sha256=%s FOR UPDATE""",
+            (file_sha256,),
         ).fetchone()
-        if existing:
+        existing_row = dict(existing) if existing else None
+        action = offline_import_recovery_action(
+            existing_row, now=started_at, stale_seconds=offline_minute_import_stale_seconds(),
+        )
+        if action == "unchanged":
             return {"status": "unchanged", "import_id": str(existing["import_id"]), "stored": existing["row_count"],
                     "rejected_rows": existing["rejected_rows"], "file_name": request.file_name}
-        import_id = connection.execute(
-            """INSERT INTO quant.offline_imports(source_name,file_name,file_sha256,dataset_kind,status)
-               VALUES(%s,%s,%s,'minute_bar','running') RETURNING import_id""",
-            (request.source_name, request.file_name, file_sha256),
-        ).fetchone()["import_id"]
+        if action == "in_progress":
+            return {"status": "running", "import_id": str(existing["import_id"]), "stored": existing["row_count"],
+                    "rejected_rows": existing["rejected_rows"], "file_name": request.file_name,
+                    "notice": "an active local import already owns this file hash; retry after its stale window"}
+        if existing and str(existing["source_name"]) != request.source_name:
+            raise ValueError("offline CSV hash already belongs to a different source_name")
+        if existing:
+            import_id = connection.execute(
+                """UPDATE quant.offline_imports SET status='running',row_count=0,rejected_rows=0,error_message=NULL,
+                       started_at=now(),finished_at=NULL WHERE import_id=%s RETURNING import_id""",
+                (existing["import_id"],),
+            ).fetchone()["import_id"]
+        else:
+            import_id = connection.execute(
+                """INSERT INTO quant.offline_imports(source_name,file_name,file_sha256,dataset_kind,status)
+                   VALUES(%s,%s,%s,'minute_bar','running') RETURNING import_id""",
+                (request.source_name, request.file_name, file_sha256),
+            ).fetchone()["import_id"]
 
     accepted = 0
     rejected = 0
@@ -1345,7 +1396,8 @@ def import_offline_minute_csv(request: OfflineMinuteImportRequest) -> dict[str, 
                 (status, accepted, rejected, import_id),
             )
         return {"status": status, "import_id": str(import_id), "stored": accepted, "rejected_rows": rejected,
-                "file_name": request.file_name, "file_sha256": file_sha256}
+                "file_name": request.file_name, "file_sha256": file_sha256,
+                "recovery_action": action}
     except Exception as error:
         with db.transaction() as connection:
             connection.execute(
