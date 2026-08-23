@@ -291,6 +291,10 @@ from .feature_read_repository import analyst_feature as read_analyst_feature
 from .feature_read_repository import latest_tushare_row as read_latest_tushare_row
 from .feature_read_repository import market_regime as read_market_regime
 from .analyst_text_features import DEFAULT_FACTOR_VERSION, analyst_text_factor_summary as read_analyst_text_factor_summary
+from .stock_study_readiness_repository import (
+    raw_api_window_summary as read_raw_api_window_summary,
+    stock_window_readiness as read_stock_window_readiness,
+)
 from .intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload, intraday_services_status_payload_async as read_intraday_services_status_payload_async
 from .routers.provider_status import build_provider_status_router
 from .routers.research_readiness import build_research_readiness_router
@@ -4114,75 +4118,13 @@ def latest_study_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def raw_api_window_summary(connection: Any, api_name: str, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
-    row = connection.execute(
-        """SELECT count(*)::int rows,max(row_data->>'trade_date') latest_date
-             FROM quant.tushare_raw_records
-            WHERE api_name=%s AND row_data->>'ts_code'=%s
-              AND row_data->>'trade_date' BETWEEN %s AND %s""",
-        (api_name, symbol, start_date.strftime("%Y%m%d"), end_date.strftime("%Y%m%d")),
-    ).fetchone()
-    return {"rows": int(row["rows"] or 0), "latest_date": row["latest_date"]}
+    """Compatibility export for the isolated stock-study readiness repository."""
+    return read_raw_api_window_summary(connection, api_name, symbol, start_date, end_date)
 
 
 def stock_window_readiness(symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
-    """Report whether one stock has enough recent evidence for on-demand study."""
-    specs = [
-        ("daily", "日线行情", "P0"),
-        ("daily_basic", "估值与换手", "P0"),
-        ("stk_limit", "涨跌停价格", "P0"),
-        ("moneyflow_dc", "东财主力/散户资金", "P0"),
-        ("adj_factor", "复权因子", "P1"),
-        ("moneyflow", "Tushare资金流", "P1"),
-        ("moneyflow_ths", "同花顺资金流", "P1"),
-        ("cyq_perf", "筹码胜率摘要", "P1"),
-        ("cyq_chips", "筹码分布明细", "P1"),
-        ("stk_factor_pro", "专业技术因子", "P1"),
-    ]
-    with db.transaction() as connection:
-        items: list[dict[str, Any]] = []
-        for api_name, label, priority in specs:
-            if api_name == "daily":
-                row = connection.execute(
-                    """SELECT count(*)::int rows,max(trading_date) latest_date
-                         FROM quant.canonical_bars_daily
-                        WHERE symbol=%s AND trading_date BETWEEN %s AND %s""",
-                    (symbol, start_date, end_date),
-                ).fetchone()
-                rows, latest_date = int(row["rows"] or 0), row["latest_date"]
-            elif api_name == "daily_basic":
-                row = connection.execute(
-                    """SELECT count(*)::int rows,max(trading_date) latest_date
-                         FROM quant.daily_fundamentals
-                        WHERE symbol=%s AND trading_date BETWEEN %s AND %s""",
-                    (symbol, start_date, end_date),
-                ).fetchone()
-                rows, latest_date = int(row["rows"] or 0), row["latest_date"]
-            elif api_name == "stk_limit":
-                row = connection.execute(
-                    """SELECT count(*)::int rows,max(trading_date) latest_date
-                         FROM quant.daily_trade_limits
-                        WHERE symbol=%s AND trading_date BETWEEN %s AND %s""",
-                    (symbol, start_date, end_date),
-                ).fetchone()
-                rows, latest_date = int(row["rows"] or 0), row["latest_date"]
-            elif api_name == "adj_factor":
-                row = connection.execute(
-                    """SELECT count(*)::int rows,max(trading_date) latest_date
-                         FROM quant.daily_adjustment_factors
-                        WHERE symbol=%s AND trading_date BETWEEN %s AND %s""",
-                    (symbol, start_date, end_date),
-                ).fetchone()
-                rows, latest_date = int(row["rows"] or 0), row["latest_date"]
-            else:
-                summary = raw_api_window_summary(connection, api_name, symbol, start_date, end_date)
-                rows, latest_date = summary["rows"], summary["latest_date"]
-            status = "ready" if rows > 0 else "missing"
-            items.append({"api_name": api_name, "label": label, "priority": priority, "rows": rows,
-                          "latest_date": str(latest_date) if latest_date else None, "status": status})
-    blockers = [item["api_name"] for item in items if item["priority"] == "P0" and item["status"] != "ready"]
-    return {"symbol": symbol, "window_start": str(start_date), "window_end": str(end_date),
-            "mode": "on_demand_single_stock_window", "decision_ready": not blockers,
-            "blockers": blockers, "items": items}
+    """Compatibility export for the isolated stock-study readiness repository."""
+    return read_stock_window_readiness(db, symbol, start_date, end_date)
 
 
 def stock_study_claims(symbol: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
