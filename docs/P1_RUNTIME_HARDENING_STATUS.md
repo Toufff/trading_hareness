@@ -172,6 +172,7 @@
 - 2026-08-23：手动分钟会话采集在未指定股票时的 enabled-watch 读取移至 `app/async_intraday_scan_inputs_repository.py`。读取仍严格限制为分钟画像上限（默认 40）并保留原有研究优先级排序；采集、行情请求和落库路径未变。新增精确 LIMIT 回归，避免该 HTTP 路径占用同步数据库执行器。
 - 2026-08-23：被动网络状态改为需要至少两个独立 outbound source 的连续瞬时失败才进入 `offline`；同一供应商、代理或 API 的连续故障只展示为 `degraded`，不再全局放慢所有租约循环。`/health.network` 同时展示本轮失败来源及阈值；任一真实成功仍清空该 epoch 并留下可审计恢复计数。
 - 2026-08-23：每日归档脚本的 `--dry-run` 现为真正无副作用的下一次备份预演：只输出容量预留、潜在旧归档回收和将创建归档的标志，不再生成 dump、导出 workflow 或创建 staging。`--prune-only --dry-run` 仍只预演常规保留清理。
+- 2026-08-23：开盘预检除校验最新 PostgreSQL/workflow 归档的可恢复性与当前 8 GiB 容量外，还必须通过下一份归档的无副作用容量预演；临界容量而无法安全腾挪时会 fail-closed，而不是等到夜间备份才发现问题。
 - 2026-08-22：盘后涨停/地天板分钟形态挖掘的选择、4 路有界回放、熔断降级、结果聚合已从 `main.py` 收敛到 `app/strategy_pattern_mining_service.py`。没有日线即 blocked；腾讯分钟 circuit-open 时不发起上游请求，只写 `minute_replay_circuit_open` 研究证据；该流程仍不补历史、不调阈值、不自动下单。新增无日线与熔断零外呼回归；重建后的全量回归为 699 项通过，开盘前只读预检通过。
 - 2026-08-22：盘后一键刷新阶段装配已从 `main.py` 收敛到 `app/post_close_refresh_service.py`。固定的阶段顺序、超时预算和“日线控制面完成前阻断策略阶段”依赖现在与租约/回执编排分离；服务只接收本地动作，不自建 provider client 或历史回放。扩展服务级阶段顺序、日线 `auto`/promax source 选择、核心股/公告 45 日窗口及控制面依赖回归；重建后的全量回归为 697 项通过，开盘前只读预检通过。
 - 2026-08-22：盘后涨停/地天板形态挖掘的 run/sample 替换事务已归入 `app/strategy_pattern_sample_repository.py`。仓储仅接受已选择、已回放的有界样本，原子替换旧 run 样本，不拥有 provider、候选排序或实时策略评分。新增直接事务顺序回归；重建后的全量回归为 696 项通过，开盘前只读预检通过。

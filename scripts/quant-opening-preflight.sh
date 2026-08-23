@@ -22,6 +22,8 @@ data, or issue an alert. A recent (< 30 hours) daily PostgreSQL/workflow
 backup is required unless --skip-backup is given. The newest archive must
 also have a matching ``pg_restore -l`` manifest and parseable workflow JSON.
 Completed daily archives must remain within ``QUANT_BACKUP_MAX_BYTES``.
+The normal check also performs a non-mutating capacity preview for the next
+daily archive.
 EOF
 }
 
@@ -214,8 +216,15 @@ if [[ "$require_backup" == true ]]; then
   ((workflow_count > 0)) || fail "latest backup has no workflow exports: $latest_path"
   backup_bytes="$(daily_backup_bytes)"
   ((backup_bytes <= backup_max_bytes)) || fail "completed daily backups exceed QUANT_BACKUP_MAX_BYTES: $backup_bytes > $backup_max_bytes"
+  if ! backup_capacity_preview="$(QUANT_BACKUP_DIR="$backup_root" QUANT_BACKUP_MAX_BYTES="$backup_max_bytes" \
+      "$repo_root/scripts/backup-postgres-and-workflows.sh" --dry-run)"; then
+    fail 'next daily backup cannot reserve managed capacity'
+  fi
+  grep -Fqx 'would_create_daily_backup=true' <<<"$backup_capacity_preview" >/dev/null \
+    || fail 'next daily backup capacity preview did not complete'
   pass "recent recoverable backup validated: $latest_path ($workflow_count workflows)"
   pass "completed daily backups are within capacity: $backup_bytes / $backup_max_bytes bytes"
+  pass 'next daily backup capacity reservation is feasible (non-mutating preview)'
 fi
 
 if ((warnings > 0)); then
