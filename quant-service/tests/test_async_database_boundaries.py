@@ -237,6 +237,40 @@ class MainRouterBoundaryTests(unittest.TestCase):
             self.assertLessEqual(len(node.body), 4, name)
 
 
+class RouterReadBoundaryTests(unittest.TestCase):
+    """Keep local dashboard reads off accidental synchronous DB routes.
+
+    The exceptions are deliberately narrow: two static payloads, the
+    compatibility branch of the injected intraday status router, and analyst
+    sync health, which joins n8n's public audit schema until that operational
+    boundary is separately isolated.
+    """
+
+    _SYNC_GET_EXCEPTIONS = {
+        ("analyst_research_reads.py", "sync_health"),
+        ("automation_reads.py", "agent_context"),
+        ("intraday_status.py", "intraday_services_status"),
+        ("research_readiness.py", "training_roadmap"),
+    }
+
+    def test_router_gets_are_async_or_explicit_operational_exceptions(self) -> None:
+        routers = Path(__file__).resolve().parents[1] / "app" / "routers"
+        sync_gets: set[tuple[str, str]] = set()
+        for path in sorted(routers.glob("*.py")):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                if any(
+                    isinstance(decorator, ast.Call)
+                    and isinstance(decorator.func, ast.Attribute)
+                    and decorator.func.attr == "get"
+                    for decorator in node.decorator_list
+                ):
+                    sync_gets.add((path.name, node.name))
+        self.assertEqual(sync_gets, self._SYNC_GET_EXCEPTIONS)
+
+
 class BlockingExecutorBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_public_source_boundary_forwards_action_keywords(self) -> None:
         result = await run_akshare_blocking(
