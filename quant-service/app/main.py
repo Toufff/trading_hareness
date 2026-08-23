@@ -121,6 +121,7 @@ from .post_close_pattern_candidates import select_candidates as pure_post_close_
 from .post_close_candidate_screen import screen_candidates as pure_post_close_screen_candidates
 from .post_close_evidence import exact_board_context as pure_exact_board_context, lhb_context as pure_lhb_context
 from .limit_pool_merge import merge_limit_pool_sources as merge_persisted_limit_pool_sources
+from .strategy_pattern_sample_repository import load_strategy_pattern_sample_inputs
 from .post_close_strategy_service import (
     candidates as persisted_post_close_strategy_candidates,
     completed_for_date as persisted_post_close_strategy_completed_for_date,
@@ -1964,43 +1965,11 @@ def merge_limit_pool_sources(ths_rows: list[dict[str, Any]], eastmoney_rows: lis
 def strategy_pattern_sample_candidates(as_of_date: date, max_symbols: int, per_cohort: int,
                                        focus_symbols: list[str] | None = None) -> dict[str, Any]:
     """Read persisted sample inputs, then delegate deterministic ranking."""
-    stamp = as_of_date.strftime("%Y%m%d")
-    with db.transaction() as connection:
-        limit_rows = connection.execute(
-            """SELECT DISTINCT ON(row_data->>'ts_code') row_data,provider_key,available_at
-                 FROM quant.tushare_raw_records WHERE api_name='limit_list_ths'
-                  AND row_data->>'trade_date'=%s AND row_data->>'limit_type'='涨停池'
-                ORDER BY row_data->>'ts_code',available_at DESC""", (stamp,),
-        ).fetchall()
-        step_rows = connection.execute(
-            """SELECT DISTINCT ON(row_data->>'ts_code') row_data,available_at
-                 FROM quant.tushare_raw_records WHERE api_name='limit_step' AND row_data->>'trade_date'=%s
-                ORDER BY row_data->>'ts_code',available_at DESC""", (stamp,),
-        ).fetchall()
-        prior_date_row = connection.execute(
-            """SELECT max(row_data->>'trade_date') prior_date FROM quant.tushare_raw_records
-                WHERE api_name='limit_list_ths' AND row_data->>'trade_date'<%s""", (stamp,),
-        ).fetchone()
-        prior_stamp = prior_date_row["prior_date"] if prior_date_row else None
-        prior_limit_rows = connection.execute(
-            """SELECT DISTINCT ON(row_data->>'ts_code') row_data
-                 FROM quant.tushare_raw_records WHERE api_name='limit_list_ths'
-                  AND row_data->>'trade_date'=%s AND row_data->>'limit_type'='涨停池'
-                ORDER BY row_data->>'ts_code',available_at DESC""", (prior_stamp,),
-        ).fetchall() if prior_stamp else []
-        symbols = [str(row["row_data"].get("ts_code") or "").upper() for row in limit_rows]
-        daily_rows = connection.execute(
-            """WITH ranked AS (
-                   SELECT b.*,row_number() OVER(PARTITION BY b.symbol ORDER BY b.trading_date DESC) rn
-                     FROM quant.canonical_bars_daily b WHERE b.symbol=ANY(%s)
-                      AND b.trading_date<=%s AND b.trading_date>=%s
-                 ) SELECT * FROM ranked WHERE rn<=21 ORDER BY symbol,trading_date""",
-            (symbols, as_of_date, as_of_date - timedelta(days=60)),
-        ).fetchall() if symbols else []
+    inputs = load_strategy_pattern_sample_inputs(db, as_of_date)
     return pure_post_close_pattern_candidates(
-        as_of_date, max_symbols, per_cohort, [dict(row) for row in limit_rows],
-        [dict(row["row_data"] or {}) for row in step_rows], [dict(row["row_data"] or {}) for row in prior_limit_rows],
-        [dict(row) for row in daily_rows], post_close_exact_board_context(as_of_date),
+        as_of_date, max_symbols, per_cohort, inputs.limit_rows,
+        inputs.step_rows, inputs.prior_limit_rows,
+        inputs.daily_rows, post_close_exact_board_context(as_of_date),
         post_close_tushare_lhb_context(as_of_date), focus_symbols,
         limit_daily_features=post_close_limit_daily_features, board_count=limit_board_count,
     )
