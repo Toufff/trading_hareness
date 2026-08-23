@@ -156,6 +156,7 @@ from . import intraday_order_book_service as order_book_service
 from . import intraday_order_book_runner
 from . import intraday_minute_profile_runner
 from . import intraday_board_curve_runner
+from . import intraday_fast_quote_capture_service
 from .market_snapshots import snapshot_status, summarize_quotes
 from .market_flow_repository import (
     persist_intraday_market_flow_feature,
@@ -3647,38 +3648,13 @@ def record_intraday_super_get_fast_quote_failure(error: str, latency_ms: int | N
 
 async def capture_intraday_super_get_fast_quote(symbol: str) -> dict[str, Any]:
     """Persist one lightweight rt_k cross-check without creating fetch-run churn."""
-    observed_at = datetime.now(timezone.utc)
-    started_at = asyncio.get_running_loop().time()
-    try:
-        result = await call_tushare_api("rt_k", {"ts_code": symbol}, None, "super_get")
-        row = next((item for item in result.rows if str(item.get("ts_code") or "").upper() == symbol),
-                   result.rows[0] if result.rows else None)
-        if row is None:
-            return {"status": "empty", "symbol": symbol, "observed_at": observed_at.isoformat()}
-        price = intraday_number(row.get("close"))
-        previous_close = intraday_number(row.get("pre_close"))
-        if price is None or price <= 0:
-            raise ProviderCallError("rt_k returned no valid positive close")
-        pct_change = ((price / previous_close) - 1) * 100 if previous_close and previous_close > 0 else None
-        latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
-        await run_database_blocking(
-            persist_intraday_super_get_fast_quote, symbol, observed_at, price, pct_change,
-            row, result.provider.key, latency_ms,
-        )
-        return {"status": "completed", "symbol": symbol, "observed_at": observed_at.isoformat(), "price": price}
-    except Exception as error:  # noqa: BLE001 - the next one-second slot remains useful
-        detail = safe_error_detail(str(error), 300)
-        # A circuit-open response means the request was deliberately not sent
-        # upstream.  Do not turn local protection into another provider
-        # failure, otherwise the five-minute window is extended every second
-        # and the route can never recover on its own.
-        if isinstance(error, HTTPException) and is_circuit_open_http_error(error):
-            return {"status": "circuit_open", "symbol": symbol, "observed_at": observed_at.isoformat(),
-                    "error": detail}
-        latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
-        await run_database_blocking(record_intraday_super_get_fast_quote_failure, detail, latency_ms)
-        return {"status": "failed", "symbol": symbol, "observed_at": observed_at.isoformat(),
-                "error": detail}
+    return await intraday_fast_quote_capture_service.capture(
+        symbol, call_provider=call_tushare_api, run_database=run_database_blocking,
+        persist_quote=persist_intraday_super_get_fast_quote,
+        persist_failure=record_intraday_super_get_fast_quote_failure,
+        number=intraday_number, safe_error=safe_error_detail,
+        is_circuit_open=lambda error: isinstance(error, HTTPException) and is_circuit_open_http_error(error),
+    )
 
 
 async def intraday_super_get_fast_quote_loop() -> None:
