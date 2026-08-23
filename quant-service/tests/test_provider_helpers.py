@@ -2129,8 +2129,8 @@ class ProviderHelperTests(unittest.TestCase):
 
     def test_legacy_board_rotation_outbox_is_suppressed_without_feishu_retry(self):
         async def check() -> tuple[dict[str, object], AsyncMock]:
-            blocking = AsyncMock(return_value=2)
-            with patch("app.main.run_database_blocking", new=blocking), \
+            suppress = AsyncMock(return_value=2)
+            with patch("app.main.suppress_async_legacy_board_rotation_deliveries", new=suppress), \
                  patch("app.main.post_feishu_alert_text", new=AsyncMock()) as outbound:
                 result = await retry_pending_board_rotation_alerts()
             return result, outbound

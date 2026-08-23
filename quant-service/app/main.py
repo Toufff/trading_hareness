@@ -258,6 +258,7 @@ from .limit_linkage_mining import limit_linkage_candidates
 from .limit_linkage_mining_repository import persist_limit_linkage_mining_run
 from .limit_linkage_mining_service import LimitLinkageMiningDependencies, run as run_limit_linkage_mining_isolated
 from .async_limit_linkage_relation_repository import relations as read_async_limit_linkage_relations
+from .async_board_rotation_outbox_repository import suppress_legacy_deliveries as suppress_async_legacy_board_rotation_deliveries
 from .board_curve_read_model import board_display_slots as _board_display_slots
 from .board_curve_read_model import intraday_board_flow_curves as read_intraday_board_flow_curves
 from .board_curve_read_model import latest_close_sector_review_report as read_latest_close_sector_review_report
@@ -2503,16 +2504,7 @@ async def deliver_board_rotation_alert(event: dict[str, Any]) -> dict[str, Any]:
 
 async def retry_pending_board_rotation_alerts(limit: int = 3) -> dict[str, int]:
     """Suppress legacy board-rotation outbox rows without external delivery."""
-    def suppress_legacy() -> int:
-        with db.transaction() as connection:
-            result = connection.execute(
-                """UPDATE quant.intraday_board_rotation_deliveries
-                      SET status='suppressed',error_message='suppressed: Feishu is reserved for watched-stock strategy signals',
-                          next_attempt_at=NULL
-                    WHERE channel='feishu_adapter' AND status IN ('pending','failed')""",
-            )
-        return int(result.rowcount or 0)
-    suppressed = await run_database_blocking(suppress_legacy)
+    suppressed = await suppress_async_legacy_board_rotation_deliveries(async_db)
     return {"loaded": suppressed, "sent": 0, "failed": 0, "disabled": 0, "suppressed": suppressed}
 
 
