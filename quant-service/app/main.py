@@ -218,6 +218,10 @@ from .intraday_minute_profile_runtime import (
     run_intraday_minute_profile_runtime_loop,
 )
 from . import intraday_board_curve_runner
+from .intraday_board_curve_runtime import (
+    IntradayBoardCurveRuntimeDependencies,
+    run_intraday_board_curve_runtime_loop,
+)
 from . import intraday_fast_quote_capture_service
 from .market_snapshots import snapshot_status, summarize_quotes
 from .market_flow_repository import (
@@ -2575,29 +2579,13 @@ async def retry_pending_board_rotation_alerts(limit: int = 3) -> dict[str, int]:
 
 async def intraday_board_flow_curve_loop() -> None:
     """Capture once per SSE board-observation minute without catch-up bursts."""
-    async def prune_before(now: datetime, curve_days: int, rotation_days: int) -> None:
-        cutoff = now - timedelta(days=curve_days)
-        rotation_cutoff = now - timedelta(days=rotation_days)
-
-        def prune() -> None:
-            with db.transaction() as connection:
-                connection.execute("DELETE FROM quant.intraday_board_flow_snapshots WHERE observed_at<%s", (cutoff,))
-                # Rotation events are derived from adjacent source snapshots.
-                # Delivery receipts cascade with the event; raw snapshots,
-                # daily bars, and research evidence remain outside this cleanup.
-                connection.execute(
-                    "DELETE FROM quant.intraday_board_rotation_events WHERE last_observed_at<%s",
-                    (rotation_cutoff,),
-                )
-        await run_database_blocking(prune)
-
-    await intraday_board_curve_runner.run_loop(
-        board_session=intraday_board_curve_session_async, prune_before=prune_before,
-        storage_allowed=nonessential_high_frequency_capture_allowed,
-        capture=capture_intraday_board_flow_curve,
+    await run_intraday_board_curve_runtime_loop(IntradayBoardCurveRuntimeDependencies(
+        database=db, run_database=run_database_blocking, board_session=intraday_board_curve_session_async,
+        storage_allowed=nonessential_high_frequency_capture_allowed, capture=capture_intraday_board_flow_curve,
         curve_retention_days=intraday_board_curve_retention_days,
         rotation_retention_days=intraday_board_rotation_retention_days,
-    )
+        run_loop=intraday_board_curve_runner.run_loop,
+    ))
 
 
 def strategy_review_automation_enabled() -> bool:
