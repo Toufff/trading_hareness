@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 import unittest
 
-from app.stock_study_readiness_repository import stock_window_readiness
+from app.stock_study_readiness_repository import stock_study_claims, stock_window_readiness
 
 
 class StockStudyReadinessRepositoryTests(unittest.TestCase):
@@ -35,6 +35,33 @@ class StockStudyReadinessRepositoryTests(unittest.TestCase):
         self.assertEqual(result["blockers"], ["daily_basic"])
         self.assertEqual(len(result["items"]), 10)
         self.assertTrue(all("FROM quant." in sql for sql, _ in database.connection.calls))
+
+    def test_stock_claim_summary_is_text_only_and_does_not_promote_live_weight(self) -> None:
+        class Result:
+            def fetchall(self):
+                return [
+                    {"direction": 1, "strength": 0.8, "extraction_confidence": 0.5},
+                    {"direction": -1, "strength": 0.4, "extraction_confidence": 0.5},
+                ]
+
+        class Connection:
+            def execute(self, sql, params):
+                self.sql, self.params = sql, params
+                return Result()
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            def __enter__(self): return self.connection
+            def __exit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        claims, summary = stock_study_claims(Database(), "600000.SH")
+        self.assertEqual(len(claims), 2)
+        self.assertEqual(summary, {"claim_count": 2, "positive": 1, "negative": 1, "neutral": 0,
+                                   "score": 0.3333, "direction": "positive"})
 
 
 if __name__ == "__main__":

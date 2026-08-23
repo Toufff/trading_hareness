@@ -147,6 +147,7 @@
 
 ## 验证
 
+- 2026-08-22：单股研究的本地分析师 claim 查询与加权汇总也已收敛到 `app/stock_study_readiness_repository.py`。它最多读取 50 条已可用的 stock claim，仅输出研究分数/方向和文字证据计数；不修改 promotion registry 或任何 live 权重。新增正负文字 claim 加权汇总回归；重建后的全量回归为 670 项通过，开盘前只读预检通过。
 - 2026-08-22：单股研究的本地窗口证据就绪度已从 `main.py` 抽至 `app/stock_study_readiness_repository.py`。它只读取 canonical 日线、日频控制面与已保存 Tushare raw 记录，固定列出 10 类证据并在任一 P0 缺失时 `decision_ready=false`；不触发 provider、不改变多源 study 编排或评分。新增“P0 缺失即 blocker、十类本地证据”回归；重建后的全量回归为 669 项通过，开盘前只读预检通过。
 - 2026-08-22：完成 P1 路由读取边界审计并新增 AST 回归：所有普通面板 GET 必须为 async；仅保留 4 个显式运维例外（静态 Agent/训练路线图、注入式盘中状态兼容分支、跨 n8n public schema 的分析师同步健康）。同时显式运行 `UpsertBarSqlIntegrationTests`，确认 compose PostgreSQL 的真实 SQL 已覆盖控制字段空值不抹除与 Tushare 金额单位隔离；此前“仅 mock”的审计结论已过时。全量回归为 668 项通过，开盘前只读预检通过。
 - 2026-08-22：`/api/v1/analyst-factors` 已迁至原生异步只读池。报告与主题 claim 的 PIT 窗口限制为 1–30 天，异步路径与同步路径共用文本去重/衰减聚合及同一版本常量；主题空集仍保持空集，不按名称臆测映射。改造时边界测试发现 async fallback 会直接打开同步 transaction，已同时改为有界数据库执行器。实测 7 日窗口返回 16 份报告、4 位分析师的去重市场共识；全量回归为 667 项通过，开盘前只读预检通过。

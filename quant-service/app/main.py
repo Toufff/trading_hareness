@@ -293,6 +293,7 @@ from .feature_read_repository import market_regime as read_market_regime
 from .analyst_text_features import DEFAULT_FACTOR_VERSION, analyst_text_factor_summary as read_analyst_text_factor_summary
 from .stock_study_readiness_repository import (
     raw_api_window_summary as read_raw_api_window_summary,
+    stock_study_claims as read_stock_study_claims,
     stock_window_readiness as read_stock_window_readiness,
 )
 from .intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload, intraday_services_status_payload_async as read_intraday_services_status_payload_async
@@ -4128,24 +4129,8 @@ def stock_window_readiness(symbol: str, start_date: date, end_date: date) -> dic
 
 
 def stock_study_claims(symbol: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    with db.transaction() as connection:
-        rows = connection.execute(
-            """SELECT c.claim_id,a.name analyst_name,c.subject_label,c.direction,c.strength,c.horizon_days,
-                      c.extraction_confidence,c.available_at,left(e.body,500) evidence
-                 FROM quant.analyst_claims c JOIN quant.remote_analysts a ON a.remote_analyst_id=c.remote_analyst_id
-                 JOIN quant.analyst_evidence e ON e.evidence_id=c.evidence_id
-                WHERE c.scope='stock' AND c.subject_key=%s AND c.available_at<=now()
-                ORDER BY c.available_at DESC,c.created_at DESC LIMIT 50""",
-            (symbol,),
-        ).fetchall()
-    claims = [dict(row) for row in rows]
-    denominator = sum(float(row["strength"] or 0) * float(row["extraction_confidence"] or 0) for row in claims)
-    weighted = sum(float(row["direction"] or 0) * float(row["strength"] or 0) * float(row["extraction_confidence"] or 0) for row in claims)
-    normalized = round(weighted / denominator, 4) if denominator else 0.0
-    direction = "positive" if normalized >= 0.2 else "negative" if normalized <= -0.2 else "neutral"
-    return claims, {"claim_count": len(claims), "positive": sum(1 for row in claims if row["direction"] > 0),
-                    "negative": sum(1 for row in claims if row["direction"] < 0), "neutral": sum(1 for row in claims if row["direction"] == 0),
-                    "score": normalized, "direction": direction}
+    """Compatibility export for the isolated stock-study evidence repository."""
+    return read_stock_study_claims(db, symbol)
 
 
 async def build_stock_study(symbol: str, request: StockStudyRequest) -> dict[str, Any]:
