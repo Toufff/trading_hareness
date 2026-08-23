@@ -110,8 +110,13 @@ required_leases=(
   background_loop:strategy_review
   background_loop:post_close_strategy
   background_loop:daily_strategy_summary
-  background_loop:ths_member_backfill
 )
+# Membership backfills are intentionally optional: they can be disabled while
+# historical/member refresh work is paused.  The health payload is the only
+# source of truth for whether the current process was configured to own them.
+while IFS= read -r optional_lease; do
+  [[ -n "$optional_lease" ]] && required_leases+=("$optional_lease")
+done < <(jq -r '.optional_background_tasks | to_entries[] | select(.value == true) | .key' <<<"$health_json")
 for lease_key in "${required_leases[@]}"; do
   jq -e --arg lease_key "$lease_key" \
     '[.runtime_leases.background_loops[].lease_key] | index($lease_key) != null' \

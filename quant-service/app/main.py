@@ -5338,6 +5338,10 @@ def health() -> dict[str, Any]:
             set_db_pool_gauge=set_db_pool_gauge, set_open_circuit_gauge=provider_circuit_open.set,
             research_storage_governance=local_research_storage_governance,
             background_loop_status=background_loop_registry.snapshot,
+            optional_background_tasks=lambda: {
+                "background_loop:ths_member_backfill": ths_concept_member_backfill_enabled(),
+                "background_loop:all_board_member_backfill": all_board_member_backfill_enabled(),
+            },
         ))
     except DatabaseUnavailableError as error:
         raise HTTPException(status_code=503, detail=f"database unavailable: {error}") from error

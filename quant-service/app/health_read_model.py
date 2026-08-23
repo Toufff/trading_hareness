@@ -47,6 +47,7 @@ class HealthDependencies:
     async_database_pool_status: Callable[[], dict[str, Any]] | None = None
     research_storage_governance: Callable[[Any], dict[str, Any]] | None = None
     background_loop_status: Callable[[], dict[str, dict[str, Any]]] | None = None
+    optional_background_tasks: Callable[[], dict[str, bool]] | None = None
 
 
 def health_payload(deps: HealthDependencies) -> dict[str, Any]:
@@ -94,6 +95,7 @@ def health_payload(deps: HealthDependencies) -> dict[str, Any]:
             "background_loops": [dict(row) for row in background_loop_leases],
         },
         "runtime_loops": deps.background_loop_status() if deps.background_loop_status else {},
+        "optional_background_tasks": deps.optional_background_tasks() if deps.optional_background_tasks else {},
         "http_clients": {
             "public_market": deps.public_http_client_status(), "feishu_alert": deps.alert_http_client_status(),
             "tushare_provider": deps.provider_http_client_status(),
