@@ -50,6 +50,7 @@ from .akshare_provider import (
 from .analysis import as_utc
 from .capability_registry import api_capability
 from .database import AsyncDatabase, Database
+from .daily_control_plane import EQUITY_DAILY_CONTROL_STATUS_SQL, status_payload as daily_control_plane_status_payload
 from .async_provider_circuit_repository import open_capabilities as read_async_open_provider_capabilities
 from .async_provider_circuit_repository import open_provider_keys as read_async_open_provider_keys
 from .async_market_session_repository import realtime_market_session as read_async_realtime_market_session
@@ -1314,25 +1315,8 @@ def full_market_daily_row_count(trade_date: date) -> int:
 def full_market_daily_control_status() -> dict[str, Any]:
     """Expose latest daily control coverage without requesting a provider."""
     with db.transaction() as connection:
-        row = connection.execute(
-            """SELECT trading_date,count(*)::int AS daily_rows,
-                      count(*) FILTER (WHERE adj_factor IS NOT NULL)::int AS adjustment_rows,
-                      count(*) FILTER (WHERE limit_up IS NOT NULL AND limit_down IS NOT NULL)::int AS limit_rows
-                 FROM quant.canonical_bars_daily
-                WHERE trading_date=(SELECT max(trading_date) FROM quant.canonical_bars_daily)
-                GROUP BY trading_date"""
-        ).fetchone()
-    if not row:
-        return {"state": "absent", "reason": "no canonical daily bars"}
-    daily_rows = int(row["daily_rows"])
-    adjustment_rows = int(row["adjustment_rows"])
-    limit_rows = int(row["limit_rows"])
-    ready = daily_rows > 0 and adjustment_rows == daily_rows and limit_rows == daily_rows
-    return {
-        "state": "ready" if ready else "blocked", "trade_date": str(row["trading_date"]),
-        "daily_rows": daily_rows, "adjustment_rows": adjustment_rows, "limit_rows": limit_rows,
-        "reason": None if ready else "latest canonical daily bars are missing same-date adjustment or limit controls",
-    }
+        row = connection.execute(EQUITY_DAILY_CONTROL_STATUS_SQL).fetchone()
+    return daily_control_plane_status_payload(row)
 
 
 async def sync_full_market_daily_controls(trade_date: date) -> dict[str, Any]:

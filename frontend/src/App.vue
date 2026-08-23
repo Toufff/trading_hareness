@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, provide, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { DataAnalysis, Document, Operation, Refresh, UploadFilled, WarningFilled } from '@element-plus/icons-vue';
 import VChart from 'vue-echarts';
@@ -8,6 +8,10 @@ import { BarChart, CandlestickChart, LineChart, ScatterChart } from 'echarts/cha
 import { DataZoomComponent, GridComponent, LegendComponent, MarkPointComponent, TooltipComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 import type { AnalystMarketReview, AutomationRun } from './api/analyst-contract';
+import { decodeJson, getJson, postJson } from './api/http';
+import { usePolling } from './composables/usePolling';
+import RealtimeServicesPanel from './components/RealtimeServicesPanel.vue';
+import ManualRelayView from './views/ManualRelayView.vue';
 
 use([BarChart, CandlestickChart, LineChart, ScatterChart, DataZoomComponent, GridComponent, LegendComponent, MarkPointComponent, TooltipComponent, CanvasRenderer]);
 
@@ -172,7 +176,8 @@ const chinaDateTime = (value?: string | null) => value ? new Intl.DateTimeFormat
 const boardFlowTaxonomy = ref<'industry' | 'concept'>('industry'); const boardFlowDate = ref(''); const boardFlowSeries = ref<Record<string, BoardFlowSeries>>({}); const boardFlowSnapshots = ref<BoardFlowSnapshot[]>([]); const boardFlowCursor = ref<string | null>(null); const boardFlowLoading = ref(false); const boardFlowError = ref(''); const boardFlowNotice = ref(''); const boardFlowFocus = ref<string[]>([]); const boardFlowDisplaySlots = ref<string[]>([]); const boardFlowIsExchangeToday = ref(false); const boardRotationEvents = ref<BoardRotationEvent[]>([]); const boardStockMining = ref<BoardStockMining>({}); const limitLinkageMining = ref<LimitLinkageMining>({});
 const marketFlow = ref<MarketFlowResponse>({ trade_date: '', timezone: 'Asia/Shanghai', items: [] }); const marketFlowError = ref('');
 const selectedFactors = ref<string[]>([]); const factorHorizon = ref(5); const backtestForm = ref({ rebalance_days: 5, hold_days: 5, top_n: 20, total_cost_bps: 18 });
-let retryTimer: number | undefined; let realtimeTimer: number | undefined; let groupRelayTimer: number | undefined; let workbenchTimer: number | undefined; let boardFlowTimer: number | undefined; let retryDelay = 1000; let eventSource: EventSource | undefined;
+let retryTimer: number | undefined; let retryDelay = 1000; let eventSource: EventSource | undefined;
+const polling = usePolling();
 
 const visibleEvents = computed(() => eventFilter.value === 'all' ? events.value : events.value.filter((item) => item.n8n_status === eventFilter.value));
 const catalogGroups = computed(() => ['all', ...Array.from(new Set((catalog.value.items ?? []).map((item) => item.group)))]);
@@ -440,26 +445,6 @@ const boardFlowChartOption = computed(() => {
   };
 });
 
-async function decodeJson<T>(response: Response, path: string): Promise<T> {
-  const text = await response.text();
-  const contentType = response.headers.get('content-type') ?? '';
-  let data: unknown;
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    const preview = text.trim().replace(/\s+/g, ' ').slice(0, 120);
-    throw new Error(`${path} 返回了非 JSON 响应（${contentType || '无 content-type'}）：${preview || '空响应'}`);
-  }
-  if (!response.ok) {
-    const payload = data as { detail?: string; message?: string };
-    throw new Error(payload.detail ?? payload.message ?? `HTTP ${response.status}`);
-  }
-  return data as T;
-}
-async function getJson<T>(path: string): Promise<T> { return decodeJson<T>(await fetch(path, { headers: { accept: 'application/json' }, cache: 'no-store' }), path); }
-async function postJson<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
-  return decodeJson<T>(await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body) }), path);
-}
 async function loadConfig() { const data = await getJson<{ routes?: Route[] }>('/api/config'); routes.value = data.routes ?? []; relayTag.value ||= routes.value[0]?.tag ?? ''; }
 async function loadBoardFlowCurves(reset = false) {
   if (boardFlowLoading.value) return;
@@ -898,18 +883,19 @@ function submitRelay() {
   const form = new FormData(); form.append('tag', relayTag.value); form.append('text', relayText.value.trim()); form.append('source_label', relaySource.value.trim()); if (relayDate.value) form.append('content_date', relayDate.value); if (relayTime.value) form.append('content_time', relayTime.value); relayFiles.value.forEach((file) => form.append('media', file, file.name));
   const xhr = new XMLHttpRequest(); relayXhr.value = xhr; relayState.value = '上传中'; relayProgress.value = 0; xhr.open('POST', '/manual-relay'); xhr.upload.onprogress = (event) => { if (event.lengthComputable) relayProgress.value = Math.round(event.loaded / event.total * 100); }; xhr.onload = () => { try { const body = JSON.parse(xhr.responseText); if (xhr.status >= 300) throw new Error(body.message); relayState.value = `已接收 ${body.message_id}`; relayText.value = ''; relayFiles.value = []; } catch (error) { relayState.value = `失败：${error instanceof Error ? error.message : String(error)}`; } relayXhr.value = null; }; xhr.onerror = () => { relayState.value = '网络错误'; relayXhr.value = null; }; xhr.send(form);
 }
+provide('manual-relay', { routes, relayTag, relaySource, relayDate, relayTime, relayText, relayFiles, relayXhr, relayProgress, relayState, addFiles, submitRelay });
 onMounted(() => {
   mobileMediaQuery.addEventListener('change', syncMobileLayout); loadConfig().catch(() => {}); connectEvents(); loadResearch();
-  void loadRealtimeServices(); realtimeTimer = window.setInterval(() => { void loadRealtimeServices(); }, 15_000);
-  void loadGroupRelayStatus(); groupRelayTimer = window.setInterval(() => { void loadGroupRelayStatus(); }, 10_000);
-	void loadFeishuWorkbench(); workbenchTimer = window.setInterval(() => { void loadFeishuWorkbench(); }, 10_000);
-  void loadBoardFlowCurves(true); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining(); boardFlowTimer = window.setInterval(() => {
+  polling.every(15_000, () => { void loadRealtimeServices(); });
+  polling.every(10_000, () => { void loadGroupRelayStatus(); });
+  polling.every(10_000, () => { void loadFeishuWorkbench(); });
+  void loadBoardFlowCurves(true); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining(); polling.every(60_000, () => {
     if (document.visibilityState === 'visible' && boardFlowIsExchangeToday.value) { void loadBoardFlowCurves(false); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining(); }
-  }, 60_000);
+  });
 });
 onBeforeUnmount(() => {
   mobileMediaQuery.removeEventListener('change', syncMobileLayout); eventSource?.close();
-  if (retryTimer) clearTimeout(retryTimer); if (realtimeTimer) clearInterval(realtimeTimer); if (groupRelayTimer) clearInterval(groupRelayTimer); if (workbenchTimer) clearInterval(workbenchTimer); if (boardFlowTimer) clearInterval(boardFlowTimer);
+  if (retryTimer) clearTimeout(retryTimer); polling.stop();
 });
 </script>
 
@@ -1354,32 +1340,7 @@ onBeforeUnmount(() => {
               <el-card shadow="never" header="待映射分析师标的"><el-alert title="无法精确识别为股票代码的远端文本必须人工映射后才能参与股票级评分。" type="warning" :closable="false" show-icon/><el-table :data="claimReviews" max-height="560" class="section-gap"><el-table-column prop="analyst_name" label="分析师" width="120"/><el-table-column prop="suggested_label" label="原始标的"/><el-table-column label="方向" width="80"><template #default="{ row }"><el-tag :type="recommendationType(row.direction)">{{ claimDirection(row.direction) }}</el-tag></template></el-table-column><el-table-column prop="horizon_days" label="周期" width="80"/><el-table-column label="映射代码" width="160"><template #default="{ row }"><el-input v-model="reviewSymbol[row.review_id]" :placeholder="row.suggested_symbol || '000636.SZ'"/></template></el-table-column><el-table-column prop="evidence" label="证据" show-overflow-tooltip/><el-table-column label="操作" width="160"><template #default="{ row }"><el-button link type="success" @click="decideReview(row,'approved')">批准</el-button><el-button link type="danger" @click="decideReview(row,'rejected')">拒绝</el-button></template></el-table-column></el-table></el-card>
             </el-tab-pane>
             <el-tab-pane label="数据源 Doctor" name="providers">
-              <el-card shadow="never" class="realtime-health-panel">
-                <template #header><div class="card-header"><div><span>盘中实时链路与日终摘要</span><small class="realtime-refresh-time">{{ realtimeServices.session_active ? (realtimeServices.special_window_active ? '连续竞价 · 特别关注窗口' : '连续竞价 · 常规窗口') : '休市/非连续竞价 · 服务待命；日终摘要独立按 19:15 窗口运行' }} · 更新于 {{ dateText(realtimeServices.observed_at) }}</small></div><el-space><el-tag :type="adapterHealth.status === 'ok' ? 'success' : 'danger'">适配器 {{ adapterHealth.status === 'ok' ? '正常' : '异常' }}</el-tag><el-tag :type="adapterHealth.quant_alert_configured ? 'success' : 'danger'">飞书 {{ adapterHealth.quant_alert_configured ? '已配置' : '未配置' }}</el-tag><el-button :icon="Refresh" :loading="realtimeLoading" @click="loadRealtimeServices">刷新</el-button></el-space></div></template>
-                <el-alert v-if="realtimeError" :title="`实时状态读取失败：${realtimeError}`" type="error" :closable="false" show-icon/>
-                <el-alert v-else-if="runtimeHealth.network?.state === 'offline'" :title="`外网暂时不可达：${runtimeHealth.network.last_error ?? '等待恢复'}。后台任务保持运行并在网络恢复后自动续跑，连续失败 ${runtimeHealth.network.consecutive_failures ?? 0} 次。`" type="error" :closable="false" show-icon/>
-                <el-alert v-else-if="runtimeHealth.network?.state === 'degraded' || runtimeHealth.network?.state === 'recovering'" :title="`外部网络${runtimeHealth.network.state === 'recovering' ? '已恢复，正在续跑' : '不稳定'}：最近来源 ${runtimeHealth.network.last_source ?? '-'}；失败 ${runtimeHealth.network.consecutive_failures ?? 0} 次。`" type="warning" :closable="false" show-icon/>
-                <el-alert v-else-if="realtimeServices.summary?.decision_path_degraded" title="当前应运行的决策链路存在延迟或降级，请先检查对应数据源，系统不会把过期数据标记为健康。" type="error" :closable="false" show-icon/>
-                <el-alert v-else :title="realtimeServices.session_active ? `盘中链路正在按计划运行，观察池 ${realtimeServices.summary?.enabled_watch_count ?? 0} 只。` : `当前为待命状态：${realtimeServices.session_reason ?? '非交易时段'}。待命不等于故障。`" :type="realtimeServices.session_active ? 'success' : 'info'" :closable="false" show-icon/>
-                <el-alert v-if="runtimeHealth.daily_control_plane?.state === 'blocked'" class="section-gap" :title="`日线控制面待补：${runtimeHealth.daily_control_plane.trade_date ?? '最新交易日'} 的复权 ${runtimeHealth.daily_control_plane.adjustment_rows ?? 0}/${runtimeHealth.daily_control_plane.daily_rows ?? 0}、涨跌停 ${runtimeHealth.daily_control_plane.limit_rows ?? 0}/${runtimeHealth.daily_control_plane.daily_rows ?? 0}。该日期不进入依赖这些字段的策略判断。`" type="warning" :closable="false" show-icon/>
-                <el-row :gutter="12" class="realtime-service-grid">
-                  <el-col v-for="service in realtimeServices.items ?? []" :key="service.key" :xs="24" :sm="12" :lg="8">
-                    <el-card shadow="hover" class="realtime-service-card">
-                      <div class="realtime-service-head"><strong>{{ service.label }}</strong><el-tag :type="realtimeStateType(service.state)" effect="dark" size="small">{{ realtimeStateText(service.state) }}</el-tag></div>
-                      <p class="realtime-service-role">{{ service.role }}</p>
-                      <el-descriptions :column="1" size="small" border>
-                        <el-descriptions-item label="运行窗口">{{ service.expected_active ? '当前应运行' : '当前不轮询' }}</el-descriptions-item>
-                        <el-descriptions-item label="频率">{{ service.cadence }}</el-descriptions-item>
-                        <el-descriptions-item label="最新数据">{{ dateText(service.last_observed_at) }}</el-descriptions-item>
-                        <el-descriptions-item label="数据年龄">{{ ageText(service.age_seconds) }}<span v-if="service.max_age_seconds"> / 门限 {{ ageText(service.max_age_seconds) }}</span></el-descriptions-item>
-                        <el-descriptions-item label="延迟/行数">{{ service.last_latency_ms ?? '-' }} ms / {{ service.last_row_count ?? '-' }}</el-descriptions-item>
-                        <el-descriptions-item v-if="realtimeDeliveryDetail(service)" label="投递状态">{{ realtimeDeliveryDetail(service) }}</el-descriptions-item>
-                      </el-descriptions>
-                      <el-tooltip v-if="service.last_error" :content="service.last_error" placement="top"><el-text class="realtime-service-error" type="danger" truncated>最近错误：{{ service.last_error }}</el-text></el-tooltip>
-                    </el-card>
-                  </el-col>
-                </el-row>
-              </el-card>
+              <RealtimeServicesPanel :services="realtimeServices" :adapter-health="adapterHealth" :runtime-health="runtimeHealth" :loading="realtimeLoading" :error="realtimeError" :date-text="dateText" :age-text="ageText" :state-type="realtimeStateType" :state-text="realtimeStateText" :delivery-detail="realtimeDeliveryDetail" @refresh="loadRealtimeServices" />
               <el-card shadow="never" header="外部数据源"><el-table :data="catalog.providers ?? []"><el-table-column prop="label" label="来源" min-width="170"/><el-table-column prop="provider_key" label="Provider key" min-width="160"/><el-table-column prop="protocol" label="协议" width="120"/><el-table-column label="限频" width="128"><template #default="{ row }">{{ row.rate_limit_per_minute ? `${row.rate_limit_per_minute}/分` : '-' }}{{ row.min_interval_seconds ? ` · ≥${row.min_interval_seconds}秒` : '' }}</template></el-table-column><el-table-column label="实时覆盖" min-width="170"><template #default="{ row }"><el-tag size="small" :type="row.realtime_coverage === 'verified_partial' ? 'success' : row.realtime_coverage === 'unavailable' ? 'danger' : 'info'">{{ row.realtime_coverage === 'verified_partial' ? `已实测 ${row.realtime_apis?.length ?? 0} 项` : row.realtime_coverage === 'unavailable' ? '明确不可用' : row.realtime_coverage ?? '-' }}</el-tag><small class="catalog-check-time">{{ row.realtime_note ?? '' }}</small></template></el-table-column><el-table-column label="Super 路由首选" min-width="190"><template #default="{ row }"><span v-if="row.name === 'super_sdk' || row.name === 'super_get'">{{ row.super_alias_first_apis?.length ?? 0 }} 项</span><span v-else>-</span><small v-if="row.super_alias_first_apis?.length" class="catalog-check-time">{{ row.super_alias_first_apis.join(', ') }}</small></template></el-table-column><el-table-column label="完整性边界" min-width="210"><template #default="{ row }"><span v-if="row.name === 'super_get'">完整 {{ row.complete_query_apis?.length ?? 0 }} 项；受限 {{ row.bounded_only_apis?.join(', ') || '无' }}；需对账 {{ row.reconciliation_required_apis?.join(', ') || '无' }}</span><span v-else>{{ row.name === 'super_sdk' ? '广域成员/事件完整源' : row.name === 'primary' ? '全A名录基准；无实时能力' : '-' }}</span></template></el-table-column><el-table-column label="配置" width="100"><template #default="{ row }"><el-tag :type="row.configured ? 'success' : 'info'">{{ row.configured ? '已配置' : '未配置' }}</el-tag></template></el-table-column></el-table></el-card>
               <el-card shadow="never" header="能力健康"><el-table :data="providerHealth" max-height="500"><el-table-column prop="label" label="来源"/><el-table-column prop="capability" label="能力"/><el-table-column label="状态" width="110"><template #default="{ row }"><el-tag :type="healthState(row)">{{ row.circuit_open_until ? '已熔断' : row.last_error ? '异常' : row.last_success_at ? '正常' : '未运行' }}</el-tag></template></el-table-column><el-table-column label="最近成功" width="175"><template #default="{ row }">{{ dateText(row.last_success_at) }}</template></el-table-column><el-table-column prop="last_latency_ms" label="延迟 ms" width="100"/><el-table-column prop="last_row_count" label="行数" width="80"/><el-table-column prop="last_error" label="最近错误" show-overflow-tooltip/></el-table></el-card>
               <el-card shadow="never" header="研究存储水位" class="section-gap"><el-alert :title="runtimeHealth.resources?.research_storage?.state === 'stop_nonessential_high_frequency' ? '已达停止水位：系统仅暂停可选高频原始证据，观察池报价、风险提醒与结算继续运行。' : runtimeHealth.resources?.research_storage?.state === 'warning' ? '接近研究存储预算：请关注数据库与 artifact 增长。' : '存储预算健康：高频证据仍按保留期采集和清理。'" :type="runtimeHealth.resources?.research_storage?.state === 'healthy' ? 'success' : 'warning'" :closable="false" show-icon/><el-descriptions :column="mobileLayout ? 1 : 3" border size="small" class="section-gap"><el-descriptions-item label="量化热库">{{ bytesText(runtimeHealth.resources?.research_storage?.hot_database?.used_bytes) }} / {{ bytesText(runtimeHealth.resources?.research_storage?.hot_database?.budget_bytes) }}</el-descriptions-item><el-descriptions-item label="受管研究空间">{{ bytesText(runtimeHealth.resources?.research_storage?.managed?.used_bytes) }} / {{ bytesText(runtimeHealth.resources?.research_storage?.managed?.budget_bytes) }}</el-descriptions-item><el-descriptions-item label="可选高频采集">{{ runtimeHealth.resources?.research_storage?.allow_nonessential_high_frequency === false ? '已暂停' : '允许' }}</el-descriptions-item></el-descriptions></el-card>
@@ -1476,7 +1437,7 @@ onBeforeUnmount(() => {
 	            <el-col :xs="24" :lg="10"><el-card shadow="never" header="消息检索（用户权限）"><el-input v-model="workbenchSearch" placeholder="搜索可访问的飞书消息" clearable @keyup.enter="searchFeishuMessages"><template #append><el-button :loading="feishuWorkbenchAction === 'search'" @click="searchFeishuMessages">搜索</el-button></template></el-input><el-alert title="搜索不会把结果自动转发；仅用已保存的用户 OAuth 权限执行。" type="info" :closable="false" class="section-gap"/><el-divider content-position="left">内容沉淀与协作</el-divider><el-space wrap><el-button size="small" @click="openWorkbenchIntegration('documents')">新建文档</el-button><el-button size="small" @click="openWorkbenchIntegration('wiki-documents')">归档到 Wiki</el-button><el-button size="small" @click="openWorkbenchIntegration('base-records')">写入 Base</el-button><el-button size="small" @click="openWorkbenchIntegration('calendar-events')">创建提醒</el-button><el-button size="small" @click="openWorkbenchIntegration('approvals')">发起审批</el-button><el-button size="small" type="primary" :loading="feishuWorkbenchAction === 'digest'" @click="createWorkbenchDigest">生成摘要</el-button><el-button size="small" :loading="feishuWorkbenchAction === 'group-tab'" @click="createWorkbenchTab">创建群 Tab</el-button></el-space><pre v-if="workbenchSearchResult" class="workbench-result">{{ JSON.stringify(workbenchSearchResult, null, 2) }}</pre></el-card></el-col></el-row>
 	          <el-card shadow="never" header="已挖掘能力与接入状态"><el-alert title="“已接入”只证明服务端与前端入口存在；“权限验收”才反映已保存的用户 OAuth 范围或仍需飞书后台发布。应用身份权限和资源可见性需在首次真实调用后由飞书确认。" type="info" :closable="false" class="section-gap"/><el-table :data="feishuWorkbench.capabilities ?? []" size="small" max-height="540"><el-table-column prop="category" label="分类" width="105"/><el-table-column prop="label" label="能力" min-width="175"/><el-table-column label="实现" width="100"><template #default="{ row }"><el-tag size="small" :type="row.implementation_ready !== false ? 'success' : 'info'">{{ row.implementation_ready !== false ? '已接入' : '未接入' }}</el-tag></template></el-table-column><el-table-column label="资源" width="105"><template #default="{ row }"><el-tag size="small" :type="(row.resource_configured ?? row.configured) ? 'success' : 'warning'">{{ (row.resource_configured ?? row.configured) ? '已配置' : '待配置' }}</el-tag></template></el-table-column><el-table-column label="权限验收" min-width="140"><template #default="{ row }"><el-tag size="small" :type="capabilityAuthorizationTagType(row)">{{ capabilityAuthorizationLabel(row) }}</el-tag><div v-if="row.missing_user_scopes?.length" class="workbench-source">{{ row.missing_user_scopes.join('、') }}</div><div v-if="row.missing_tenant_scopes?.length" class="workbench-source">{{ row.missing_tenant_scopes.join('、') }}</div></template></el-table-column><el-table-column label="所需权限/产品" min-width="220"><template #default="{ row }"><el-tag v-for="scope in row.requires" :key="scope" size="small" effect="plain" class="workbench-scope">{{ scope }}</el-tag></template></el-table-column><el-table-column prop="note" label="边界与下一步" min-width="300" show-overflow-tooltip/></el-table></el-card>
         </template>
-        <template v-else><el-card shadow="never" header="手动投递"><el-form label-position="top"><el-row :gutter="14"><el-col :md="12" :xs="24"><el-form-item label="来源"><el-select v-model="relayTag" class="full-width"><el-option v-for="route in routes" :key="route.tag" :label="`#${route.tag} · ${route.label}`" :value="route.tag"/></el-select></el-form-item></el-col><el-col :md="12" :xs="24"><el-form-item label="来源备注"><el-input v-model="relaySource"/></el-form-item></el-col><el-col :md="12" :xs="24"><el-form-item label="日期"><el-date-picker v-model="relayDate" value-format="YYYY-MM-DD" type="date" class="full-width"/></el-form-item></el-col><el-col :md="12" :xs="24"><el-form-item label="时间"><el-time-picker v-model="relayTime" value-format="HH:mm" format="HH:mm" class="full-width"/></el-form-item></el-col></el-row><el-form-item label="正文"><el-input v-model="relayText" type="textarea" :rows="8"/></el-form-item><el-form-item label="媒体"><el-upload drag :auto-upload="false" :show-file-list="false" :on-change="(file: { raw?: File }) => file.raw && addFiles([file.raw])"><el-icon class="upload-icon"><UploadFilled /></el-icon><div>选择文件或拖入此处</div></el-upload><el-space wrap class="section-gap"><el-tag v-for="file in relayFiles" :key="file.name + file.size" closable @close="relayFiles = relayFiles.filter((item) => item !== file)">{{ file.name }}</el-tag></el-space></el-form-item><el-progress v-if="relayXhr" :percentage="relayProgress"/><el-alert v-if="relayState" :title="relayState" type="info" :closable="false" class="section-gap"/><el-button type="primary" :loading="!!relayXhr" @click="submitRelay">开始投递</el-button><el-button v-if="relayXhr" @click="relayXhr?.abort(); relayXhr = null">取消</el-button></el-form></el-card></template>
+        <ManualRelayView v-else />
       </el-main>
     </el-container>
   </el-container>

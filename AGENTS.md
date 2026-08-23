@@ -17,6 +17,11 @@ provider response directly to a live threshold or order path.
 - `quant-service/migrations/versions/`: all production schema changes (Alembic).
 - `frontend/src/App.vue`: current Vue dashboard; keep API calls typed and label
   research-only/replay-only values visibly.
+- `frontend/src/api/http.ts`: shared JSON/error transport; do not duplicate
+  browser response parsing in a feature panel.
+- `frontend/src/composables/`: lifecycle-owned polling/subscriptions.
+- `frontend/src/components/`: focused feature panels; new UI must not expand
+  the root dashboard shell.
 - `feishu-adapter/index.mjs`: browser/API proxy; route mappings need separate GET
   and POST entries.
 - `quant-service/app/security.py`: shared write-boundary primitives; keep this
@@ -46,6 +51,8 @@ provider response directly to a live threshold or order path.
    it checks the running OpenAPI document instead of trusting a source-only map.
 7. Run `cd frontend && npm run api:generate` after an intentional API contract
    change; `npm run api:check` verifies the checked-in generated type is current.
+8. Read `docs/ARCHITECTURE.md` before a cross-domain change; it is the concise
+   ownership map, while this file remains the operational checklist.
 
 ## Review automation
 

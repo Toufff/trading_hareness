@@ -1,0 +1,76 @@
+# Quant Research Platform Architecture
+
+This is a local market-research platform.  It does not connect to a broker and
+does not submit orders.  Every strategy result is research evidence until its
+separate promotion gate is satisfied.
+
+## Runtime map
+
+```text
+Feishu / n8n / browser
+        |
+        v
+feishu-adapter (proxy, relay, OAuth and media boundary)
+        |
+        v
+quant-research FastAPI
+  routers -> services/orchestrators -> repositories -> PostgreSQL
+                                      -> provider adapters -> external sources
+        |
+        +-> raw -> canonical -> features -> signals -> outcomes
+```
+
+`quant-service/app/main.py` is the composition root.  It owns application
+lifespan, dependency assembly and router registration.  New behaviour belongs
+in a focused module, then is injected from `main.py`; production modules must
+not import `app.main`.
+
+## Ownership boundaries
+
+| Concern | Location | Rule |
+|---|---|---|
+| HTTP request validation | `app/routers/` | Router functions validate and delegate; no provider crawling in a read route. |
+| Provider transport | `app/*provider*.py`, `app/http_clients.py` | Reuse lifecycle clients and record availability. |
+| Persistent projections | `app/*_repository.py`, `app/*_read_model.py` | Bound result sets; async dashboard reads use `AsyncDatabase`. |
+| Timing and recovery | `app/*_scheduler.py`, `app/runtime_tasks.py` | Durable leases, idempotent run keys and explicit retry windows. |
+| Rules and research | `app/*_rules.py`, `app/*_research.py` | Keep inputs/outputs explicit and test without HTTP or database state. |
+| Schema | `migrations/versions/` | New production schema changes use Alembic only. |
+| Legacy bootstrap | `app/database.py` | Disabled by default; only an explicit recovery operator may enable it. |
+| Frontend transport | `frontend/src/api/http.ts` | All JSON responses produce a readable non-JSON proxy error. |
+| Frontend lifecycle | `frontend/src/composables/` | Timers and subscriptions are owned and stopped by the mounting shell. |
+| Frontend feature UI | `frontend/src/components/`, `frontend/src/views/` | New dashboard surfaces must not grow `App.vue`. |
+
+## Agent entry sequence
+
+1. Read `GET /api/v1/agent/context` and the latest durable automation receipt.
+2. Read the owning router, service, repository, migration and targeted test.
+3. Preserve point-in-time boundaries: `stated_at` is replay evidence;
+   `strategy_available_at` is the only strategy eligibility time.
+4. Make one bounded change and add a focused test in the same domain.
+5. Run backend tests, adapter tests, frontend API/type/build checks and
+   `git diff --check`.
+6. Verify mounted OpenAPI and `/health`; a source-only pass is not a runtime
+   acceptance.
+
+## Data and decision gates
+
+- Missing/stale provider data, incomplete sector membership and insufficient
+  statistical samples fail closed.
+- The daily control plane applies to listed equities only.  Index benchmark
+  rows are valid market context but do not carry equity `adj_factor` or
+  `stk_limit` controls.
+- `raw -> canonical -> features -> signals -> outcomes` is append/evidence
+  oriented.  Replay outcomes never change live weights.
+- Network loss keeps local loops alive.  Durable cursors, leases and run keys
+  resume work after recovery without replaying completed work.
+
+## Current migration targets
+
+The root dashboard still owns cross-screen state.  It is being reduced through
+small, independently testable extractions: API client first, lifecycle
+composables second, then feature panels/pages.  Do not perform a broad template
+rewrite during a trading session.
+
+The legacy DDL retained in `app/database.py` is recovery-only.  It remains
+isolated behind `QUANT_LEGACY_SCHEMA_BOOTSTRAP`; new migrations must never edit
+that bootstrap SQL.

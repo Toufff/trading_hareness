@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-CONTEXT_VERSION = "2026-08-22.v7"
+CONTEXT_VERSION = "2026-08-23.v8"
 
 
 def repository_agent_context() -> dict[str, Any]:
@@ -21,6 +21,7 @@ def repository_agent_context() -> dict[str, Any]:
             "database_migrations": "quant-service/migrations/versions/",
             "frontend": "frontend/src/App.vue",
             "feishu_proxy": "feishu-adapter/index.mjs",
+            "architecture": "docs/ARCHITECTURE.md",
         },
         "module_map": {
             "security": "quant-service/app/security.py",
@@ -46,12 +47,17 @@ def repository_agent_context() -> dict[str, Any]:
             "intraday_sector_report": "quant-service/app/intraday_sector_report_orchestrator.py + app/intraday_sector_report_service.py",
             "intraday_order_book_capture": "quant-service/app/intraday_order_book_service.py + app/order_book_features.py",
             "offline_minute_import": "quant-service/app/offline_minute_import_service.py + app/offline_minute_replay.py",
+            "daily_control_plane": "quant-service/app/daily_control_plane.py + app/full_market_daily_controls_sync.py",
+            "frontend_transport": "frontend/src/api/http.ts",
+            "frontend_lifecycle": "frontend/src/composables/",
+            "frontend_feature_panels": "frontend/src/components/",
         },
         "contracts": {
             "openapi_source": "http://127.0.0.1:5681/openapi.json",
             "generated_frontend_types": "frontend/src/api/generated.ts",
             "contract_check": "node scripts/verify-api-contract.mjs",
             "type_check": "cd frontend && npm run api:check && npm run typecheck",
+            "architecture_check": "python3 scripts/verify_architecture.py",
         },
         "operational_reads": {
             "health": "/health",
