@@ -173,6 +173,55 @@ class ApplicationLifecycleTests(unittest.TestCase):
             "super_get:shutdown", "executors:shutdown", "configure:off", "async_db:close", "db:close",
         ])
 
+    def test_cleanup_failure_does_not_skip_later_resources_or_mask_startup_error(self) -> None:
+        events: list[str] = []
+
+        async def open_async_database():
+            events.append("async_db:open")
+
+        async def start_http_clients():
+            events.append("http:start")
+            raise RuntimeError("catalog startup failed")
+
+        async def close_async_database():
+            events.append("async_db:close")
+            raise RuntimeError("async close failed")
+
+        dependencies = ApplicationLifecycleDependencies(
+            open_database=lambda: events.append("db:open"),
+            open_async_database=open_async_database,
+            configure_request_reserver=lambda reserver, **_kwargs: events.append(
+                "configure:on" if reserver is not None else "configure:off",
+            ),
+            request_reserver=lambda *_args, **_kwargs: None,
+            max_reservation_wait_seconds=1.0,
+            initialize_provider_metrics=lambda: events.append("metrics:init"),
+            start_http_clients=start_http_clients,
+            legacy_schema_bootstrap_enabled=lambda: False,
+            migrate_database=lambda: self.fail("unexpected migration"),
+            verify_versioned_schema=lambda: self.fail("unexpected schema check"),
+            ensure_catalog_capabilities=lambda: self.fail("unexpected catalog registration"),
+            run_database=lambda *_args, **_kwargs: self.fail("unexpected database runner"),
+            start_background_tasks=lambda: self.fail("tasks must not start"),
+            cancel_background_tasks=lambda _tasks: self.fail("no tasks to cancel"),
+            cancel_shared_snapshots=lambda: self.fail("no snapshot to cancel"),
+            shutdown_super_get_executor=lambda: events.append("super_get:shutdown"),
+            shutdown_runtime_executors=lambda: events.append("executors:shutdown"),
+            close_http_clients=lambda: self.fail("HTTP never completed startup"),
+            close_async_database=close_async_database,
+            close_database=lambda: events.append("db:close"),
+        )
+
+        async def exercise() -> None:
+            with self.assertRaisesRegex(RuntimeError, "catalog startup failed"):
+                async with application_lifespan(dependencies):
+                    self.fail("startup failure must not yield")
+
+        asyncio.run(exercise())
+        self.assertEqual(events[-5:], [
+            "super_get:shutdown", "executors:shutdown", "configure:off", "async_db:close", "db:close",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

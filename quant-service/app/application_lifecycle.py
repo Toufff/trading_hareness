@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import sys
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 
@@ -36,6 +37,32 @@ class ApplicationLifecycleDependencies:
     close_http_clients: Callable[[], Awaitable[Any]]
     close_async_database: Callable[[], Awaitable[Any]]
     close_database: Callable[[], Any]
+
+
+async def _run_cleanup_steps(
+    steps: list[tuple[bool, Callable[[], Any]]],
+    *,
+    preserve_active_exception: bool,
+) -> None:
+    """Run every applicable shutdown step even if one local cleanup fails.
+
+    A failed task cancellation must not leave the HTTP pools or database open.
+    If application startup/request handling is already failing, its original
+    exception remains authoritative; on an otherwise normal shutdown the
+    first cleanup failure is reported after the remaining steps have run.
+    """
+    failures: list[Exception] = []
+    for enabled, callback in steps:
+        if not enabled:
+            continue
+        try:
+            result = callback()
+            if hasattr(result, "__await__"):
+                await result
+        except Exception as error:  # noqa: BLE001 - cleanup must continue for later owned resources
+            failures.append(error)
+    if failures and not preserve_active_exception:
+        raise failures[0]
 
 
 @asynccontextmanager
@@ -73,20 +100,16 @@ async def application_lifespan(
         background_tasks = dependencies.start_background_tasks()
         yield
     finally:
-        if background_tasks is not None:
-            await dependencies.cancel_background_tasks(background_tasks)
-            await dependencies.cancel_shared_snapshots()
-        if async_database_open:
-            dependencies.shutdown_super_get_executor()
-            dependencies.shutdown_runtime_executors()
-        if http_clients_started:
-            await dependencies.close_http_clients()
-        if reserver_configured:
-            dependencies.configure_request_reserver(None)
-        if async_database_open:
-            await dependencies.close_async_database()
-        if database_open:
-            dependencies.close_database()
+        await _run_cleanup_steps([
+            (background_tasks is not None, lambda: dependencies.cancel_background_tasks(background_tasks or {})),
+            (background_tasks is not None, dependencies.cancel_shared_snapshots),
+            (async_database_open, dependencies.shutdown_super_get_executor),
+            (async_database_open, dependencies.shutdown_runtime_executors),
+            (http_clients_started, dependencies.close_http_clients),
+            (reserver_configured, lambda: dependencies.configure_request_reserver(None)),
+            (async_database_open, dependencies.close_async_database),
+            (database_open, dependencies.close_database),
+        ], preserve_active_exception=sys.exc_info()[0] is not None)
 
 
 __all__ = ["ApplicationLifecycleDependencies", "application_lifespan"]
