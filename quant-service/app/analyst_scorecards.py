@@ -47,10 +47,12 @@ def recompute(
     with db.transaction() as connection:
         rows = connection.execute(
             r"""WITH signal_source AS (
-                SELECT analyst_id,symbol,direction,strength,horizon_days,available_at FROM quant.analyst_signals
-                UNION ALL
-                SELECT remote_analyst_id,subject_key,direction,strength,horizon_days,available_at FROM quant.analyst_claims
-                WHERE scope='stock' AND subject_key ~ '^\d{6}\.(SH|SZ|BJ)$'
+                -- Versioned remote archive claims are the sole analyst evidence
+                -- input.  The retired analyst_signals table is intentionally
+                -- excluded so an old local extraction cannot affect a scorecard.
+                SELECT remote_analyst_id AS analyst_id,subject_key AS symbol,direction,strength,horizon_days,available_at
+                  FROM quant.analyst_claims
+                 WHERE scope='stock' AND subject_key ~ '^\d{6}\.(SH|SZ|BJ)$'
               ), entry_exit AS (
                 SELECT s.analyst_id,s.horizon_days,s.direction,s.strength,
                   (SELECT b.trading_date FROM quant.canonical_bars_daily b
