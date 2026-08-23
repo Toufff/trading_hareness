@@ -13,7 +13,7 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
@@ -79,6 +79,53 @@ def persist_public_observations(database: Any, provider: str, capability: str,
     return accepted
 
 
+def persist_free_daily(
+    database: Any,
+    provider: str,
+    rows: list[dict[str, Any]],
+    *,
+    daily_bar_type: Any,
+    parse_trade_date: Callable[[Any], Any],
+    decimal_or_none: Callable[[Any], Any],
+    upsert_bar: Callable[[Any, Any], None],
+    persist_raw_observations: Callable[[Any, str, str, list[dict[str, Any]]], int],
+    observed_at: datetime | None = None,
+) -> int:
+    """Promote only validated unadjusted public daily rows in one transaction.
+
+    Tencent's adapter is explicitly front-adjusted.  Its short-window bars
+    remain attributable raw evidence, never a fallback for the canonical
+    unadjusted series when a licensed provider has a gap.
+    """
+    if provider == "tencent_free":
+        return persist_raw_observations(database, provider, "daily_bar", rows)
+
+    available_at = observed_at or datetime.now(timezone.utc)
+    valid_bars: list[Any] = []
+    for row in rows:
+        try:
+            trading_date = parse_trade_date(row.get("trade_date"))
+            symbol = str(row.get("ts_code") or "").upper()
+            if not trading_date or not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
+                raise ValueError("free daily row is missing a valid symbol or trading date")
+            valid_bars.append(daily_bar_type(
+                symbol=symbol, trading_date=trading_date, close=decimal_or_none(row.get("close")),
+                open=decimal_or_none(row.get("open")), high=decimal_or_none(row.get("high")),
+                low=decimal_or_none(row.get("low")), volume=decimal_or_none(row.get("vol")),
+                amount=decimal_or_none(row.get("amount")), source=provider, available_at=available_at,
+            ))
+        except Exception:
+            # The caller records source health.  A malformed public row must
+            # never displace licensed canonical data.
+            continue
+    if not valid_bars:
+        return 0
+    with database.transaction() as connection:
+        for bar in valid_bars:
+            upsert_bar(connection, bar)
+    return len(valid_bars)
+
+
 def persist_market_events(database: Any, provider: str, rows: list[dict[str, Any]]) -> int:
     """Store public event evidence without making it a hard trading signal."""
     stored = 0
@@ -139,6 +186,6 @@ def recent_market_events(database: Any, symbol: str, limit: int = 20) -> list[di
 
 
 __all__ = [
-    "persist_free_quote", "persist_free_quotes", "persist_market_events",
+    "persist_free_daily", "persist_free_quote", "persist_free_quotes", "persist_market_events",
     "persist_public_observations", "recent_market_events",
 ]

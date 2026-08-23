@@ -52,6 +52,7 @@ from .capability_registry import api_capability
 from .database import AsyncDatabase, Database
 from .daily_bar_repository import exchange_for, provider_priority, upsert_daily_bar
 from .public_market_repository import (
+    persist_free_daily as _persist_free_daily,
     persist_free_quote as _persist_free_quote,
     persist_free_quotes as _persist_free_quotes,
     persist_market_events as _persist_market_events,
@@ -749,45 +750,13 @@ def sync_runtime_provider_rate_limits(connection: Any, configs: Mapping[str, Any
 
 
 def persist_free_daily(provider: str, rows: list[dict[str, Any]]) -> int:
-    """Validate public daily rows first, then persist the valid batch once.
-
-    Public-source daily batches may contain thousands of rows.  Opening one
-    pooled transaction per row is still expensive and can starve intraday
-    writers; malformed rows are discarded before the single batch transaction.
-    """
-    # Tencent's public K-line adapter currently requests ``qfq`` (front
-    # adjusted) prices.  Canonical daily bars are deliberately unadjusted and
-    # use a separately stored adjustment factor, so promoting these rows would
-    # silently mix price bases whenever a licensed provider is absent.  Keep
-    # Tencent's short-window response as raw, attributable research evidence
-    # until an explicitly verified unadjusted adapter exists.
-    if provider == "tencent_free":
-        return persist_public_observations(provider, "daily_bar", rows)
-
-    valid_bars: list[DailyBar] = []
-    for row in rows:
-        try:
-            trading_date = tushare_date(row.get("trade_date"))
-            symbol = str(row.get("ts_code") or "").upper()
-            if not trading_date or not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
-                raise ValueError("free daily row is missing a valid symbol or trading date")
-            valid_bars.append(DailyBar(
-                symbol=symbol, trading_date=trading_date, close=decimal_or_none(row.get("close")),
-                open=decimal_or_none(row.get("open")), high=decimal_or_none(row.get("high")),
-                low=decimal_or_none(row.get("low")), volume=decimal_or_none(row.get("vol")),
-                amount=decimal_or_none(row.get("amount")), source=provider,
-                available_at=datetime.now(timezone.utc),
-            ))
-        except Exception:
-            # The caller records the source status.  A malformed public row
-            # must never displace licensed canonical data.
-            continue
-    if not valid_bars:
-        return 0
-    with db.transaction() as connection:
-        for bar in valid_bars:
-            upsert_bar(connection, bar)
-    return len(valid_bars)
+    """Compatibility entry point for public daily evidence promotion."""
+    return _persist_free_daily(
+        db, provider, rows, daily_bar_type=DailyBar, parse_trade_date=tushare_date,
+        decimal_or_none=decimal_or_none, upsert_bar=upsert_bar,
+        persist_raw_observations=lambda _database, raw_provider, capability, raw_rows:
+            persist_public_observations(raw_provider, capability, raw_rows),
+    )
 
 
 def persist_free_quote(provider: str, symbol: str, quote: dict[str, Any] | None) -> int:
