@@ -471,6 +471,10 @@ from .intraday_watchlist_scan_service import (
     IntradayWatchlistScanDependencies,
     run_watchlist_scan,
 )
+from .all_board_member_backfill_service import (
+    AllBoardMemberBackfillDependencies,
+    run as run_all_board_member_backfill_isolated,
+)
 from .tushare_official import (
     AUDIT_FOCUS_APIS,
     HISTORICAL_MINUTE_APIS,
@@ -3416,41 +3420,18 @@ def all_board_member_backfill_batch_size() -> int:
 
 
 async def run_all_board_member_backfill_batch(request: AllBoardMemberBackfillRequest) -> dict[str, Any]:
-    """Advance exact member coverage without name matching or bulk fan-out.
-
-    Each invocation has a strict batch budget.  The post-close loop repeatedly
-    calls this operation, and all sources independently retain their latest
-    completed constituent snapshot while transient upstream failures are
-    recorded for bounded retry.
-    """
-    results: list[dict[str, Any]] = []
-    if request.refresh_catalogs and request.include_ths:
-        results.append({"source": "ths_catalogs", **await sync_all_ths_sector_catalogs()})
-    if request.include_ths:
-        for index_type in ("N", "I", "R", "S", "ST", "BB"):
-            try:
-                item = await sync_ths_sector_catalog(SectorCatalogSyncRequest(
-                    index_type=index_type, sync_members=True, member_limit=request.batch_size, resume=True,
-                ))
-                results.append({"source": "ths_member", **item})
-            except HTTPException as error:
-                results.append({"source": "ths_member", "index_type": index_type, "status": "failed", "reason": str(error.detail)[:300]})
-    if request.include_eastmoney:
-        for kind in ("industry", "concept"):
-            item = await sync_eastmoney_board_members(EastmoneyBoardMemberSyncRequest(
-                kind=kind, member_limit=request.batch_size, resume=True,
-            ))
-            results.append({"source": "eastmoney_member", **item})
-    successful = [item for item in results if item.get("status") in {"completed", "partial"}]
-    failed = [item for item in results if item.get("status") in {"blocked", "failed"}]
-    return {
-        "status": "partial" if failed else "completed",
-        "batch_size": request.batch_size,
-        "results": results,
-        "notice": "本次只推进受限批次；自动任务在盘后续跑，成员关系仅来自各源的精确代码/原始成员接口。",
-        "successful_sources": len(successful),
-        "failed_sources": len(failed),
-    }
+    """Compatibility entry point for one exact member-coverage batch."""
+    return await run_all_board_member_backfill_isolated(
+        request,
+        AllBoardMemberBackfillDependencies(
+            sync_all_ths_catalogs=sync_all_ths_sector_catalogs,
+            sync_ths_catalog=sync_ths_sector_catalog,
+            ths_request=SectorCatalogSyncRequest,
+            sync_eastmoney_members=sync_eastmoney_board_members,
+            eastmoney_request=EastmoneyBoardMemberSyncRequest,
+            http_exception=HTTPException,
+        ),
+    )
 
 
 async def all_board_member_backfill_loop() -> None:
