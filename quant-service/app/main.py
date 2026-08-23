@@ -121,6 +121,8 @@ from .async_intraday_scan_inputs_repository import exact_memberships as read_asy
 from .async_intraday_scan_inputs_repository import watchlists as read_async_intraday_scan_watchlists
 from .async_ths_concept_member_backfill_repository import existing_flow_rows as read_async_ths_concept_flow_rows
 from .async_ths_concept_member_backfill_repository import member_progress as read_async_ths_concept_member_progress
+from .async_sync_symbol_repository import analyst_claim_symbols as read_async_analyst_claim_symbols
+from .async_sync_symbol_repository import core_symbols as read_async_core_symbols
 from .intraday_volume_profiles import attach_volume_time_profile as pure_attach_volume_time_profile
 from .intraday_volume_profiles import volume_time_profile as pure_intraday_volume_time_profile
 from .intraday_volume_profiles import volume_time_profiles as pure_intraday_volume_time_profiles
@@ -712,22 +714,9 @@ async def resolve_sync_symbols_async(requested: list[str]) -> list[str]:
     """Resolve the same bounded universe without blocking an async caller."""
     values = requested or [item.strip() for item in os.getenv("QUANT_UNIVERSE", "").split(",") if item.strip()]
     if not values:
-        def load_core() -> list[Any]:
-            with db.transaction() as connection:
-                return connection.execute(
-                    "SELECT symbol FROM quant.universe_members WHERE universe_key='core' AND enabled ORDER BY priority,symbol"
-                ).fetchall()
-        rows = await run_database_blocking(load_core)
-        values = [str(row["symbol"]) for row in rows]
+        values = await read_async_core_symbols(async_db)
     if not values:
-        def load_claims() -> list[Any]:
-            with db.transaction() as connection:
-                return connection.execute(
-                    """SELECT DISTINCT subject_key FROM quant.analyst_claims
-                       WHERE scope='stock' AND subject_key ~ '^\\d{6}\\.(SH|SZ|BJ)$'"""
-                ).fetchall()
-        rows = await run_database_blocking(load_claims)
-        values = [str(row["subject_key"]) for row in rows]
+        values = await read_async_analyst_claim_symbols(async_db)
     return _normalize_sync_symbols(values)
 
 

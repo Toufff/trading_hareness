@@ -148,6 +148,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_intraday_scan_preflight_repository.py",
             "async_intraday_scan_inputs_repository.py",
             "async_ths_concept_member_backfill_repository.py",
+            "async_sync_symbol_repository.py",
             "async_market_result_read_repository.py",
             "async_research_catalog_read_repository.py",
             "async_research_readiness_repository.py",

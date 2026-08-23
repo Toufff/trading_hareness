@@ -373,17 +373,17 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(methods_by_path["/api/v1/providers/tushare/fetch"], {"POST"})
         self.assertEqual(methods_by_path["/api/v1/stocks/{symbol}/study"], {"POST"})
 
-    def test_async_sync_symbol_resolution_uses_database_executor(self):
+    def test_async_sync_symbol_resolution_uses_native_async_repository(self):
         async def check() -> AsyncMock:
-            blocking = AsyncMock(side_effect=[[{"symbol": "600519.SH"}], []])
+            core_symbols = AsyncMock(return_value=["600519.SH"])
             with patch.dict("os.environ", {"QUANT_UNIVERSE": ""}, clear=False), \
-                 patch("app.main.run_database_blocking", new=blocking):
+                 patch("app.main.read_async_core_symbols", new=core_symbols):
                 symbols = await resolve_sync_symbols_async([])
             self.assertEqual(symbols, ["000300.SH", "600519.SH"])
-            return blocking
+            return core_symbols
 
-        blocking = asyncio.run(check())
-        self.assertEqual([call.args[0].__name__ for call in blocking.await_args_list], ["load_core"])
+        core_symbols = asyncio.run(check())
+        core_symbols.assert_awaited_once()
 
     def test_market_actions_router_has_explicit_write_contracts(self):
         action = AsyncMock(return_value={"status": "ok"})
