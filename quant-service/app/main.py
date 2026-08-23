@@ -72,6 +72,12 @@ from .research_maintenance_service import (
     update_analyst_profile as update_analyst_research_profile_isolated,
     update_universe_members as update_universe_members_isolated,
 )
+from .intraday_watchlist_service import (
+    IntradayWatchlistDependencies,
+    delete as delete_intraday_watchlist_isolated,
+    sync_history as sync_intraday_watchlist_history_isolated,
+    upsert as upsert_intraday_watchlist_isolated,
+)
 from .tushare_fetch_ledger import (
     TushareFetchLedgerDependencies,
     persist_blocked as persist_tushare_fetch_blocked_isolated,
@@ -4826,57 +4832,23 @@ def latest_intraday_decision_card(symbol: str) -> dict[str, Any]:
     return intraday_evidence_reads.decision_card(db, symbol, intraday_decision_card)
 
 
-async def upsert_intraday_watchlist(symbol: str, payload: IntradayWatchlistRequest) -> dict[str, Any]:
-    symbol = symbol.upper()
-    if symbol != payload.symbol.upper():
-        raise HTTPException(status_code=422, detail="path symbol must match payload symbol")
-    def persist_watchlist() -> Any:
-        with db.transaction() as connection:
-            connection.execute(
-                """INSERT INTO quant.instruments(symbol,exchange,name,source) VALUES(%s,%s,%s,'intraday_watchlist')
-                   ON CONFLICT(symbol) DO NOTHING""",
-                (symbol, exchange_for(symbol), payload.label),
-            )
-            return connection.execute(
-                """INSERT INTO quant.intraday_watchlists(symbol,label,enabled,alert_on_entry,alert_on_exit,entry_price,available_quantity,hard_stop,take_profit,metadata)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT(symbol) DO UPDATE SET label=EXCLUDED.label,enabled=EXCLUDED.enabled,alert_on_entry=EXCLUDED.alert_on_entry,
-                      alert_on_exit=EXCLUDED.alert_on_exit,entry_price=EXCLUDED.entry_price,available_quantity=EXCLUDED.available_quantity,
-                      hard_stop=EXCLUDED.hard_stop,take_profit=EXCLUDED.take_profit,metadata=EXCLUDED.metadata,updated_at=now()
-                   RETURNING *""",
-                (symbol, payload.label, payload.enabled, payload.alert_on_entry, payload.alert_on_exit, payload.entry_price,
-                 payload.available_quantity, payload.hard_stop, payload.take_profit, Json(payload.metadata)),
-            ).fetchone()
+def _intraday_watchlist_dependencies() -> IntradayWatchlistDependencies:
+    return IntradayWatchlistDependencies(
+        database=db, run_database=run_database_blocking, hydrate_history=hydrate_watchlist_history,
+        exchange_for=exchange_for, json_value=Json, http_exception=HTTPException,
+    )
 
-    row = await run_database_blocking(persist_watchlist)
-    history = await hydrate_watchlist_history(row["watchlist_id"], symbol)
-    return {"item": row, "history_hydration": history, "notice": "已更新提醒范围并拉取了受限历史；不构成交易指令，也不会自动下单。"}
+
+async def upsert_intraday_watchlist(symbol: str, payload: IntradayWatchlistRequest) -> dict[str, Any]:
+    return await upsert_intraday_watchlist_isolated(symbol, payload, _intraday_watchlist_dependencies())
 
 
 async def sync_intraday_watchlist_history(symbol: str) -> dict[str, Any]:
-    symbol = symbol.upper()
-    def load_watch() -> Any:
-        with db.transaction() as connection:
-            return connection.execute("SELECT watchlist_id,symbol FROM quant.intraday_watchlists WHERE symbol=%s", (symbol,)).fetchone()
-
-    watch = await run_database_blocking(load_watch)
-    if not watch:
-        raise HTTPException(status_code=404, detail="watchlist symbol not found")
-    return await hydrate_watchlist_history(watch["watchlist_id"], symbol)
+    return await sync_intraday_watchlist_history_isolated(symbol, _intraday_watchlist_dependencies())
 
 
 async def delete_intraday_watchlist(symbol: str) -> dict[str, Any]:
-    symbol = symbol.upper()
-    def delete_watchlist() -> Any:
-        with db.transaction() as connection:
-            return connection.execute(
-                "DELETE FROM quant.intraday_watchlists WHERE symbol=%s RETURNING watchlist_id", (symbol,)
-            ).fetchone()
-
-    row = await run_database_blocking(delete_watchlist)
-    if not row:
-        raise HTTPException(status_code=404, detail="watchlist symbol not found")
-    return {"status": "deleted", "symbol": symbol}
+    return await delete_intraday_watchlist_isolated(symbol, _intraday_watchlist_dependencies())
 
 
 async def run_intraday_watchlist_scan_endpoint(payload: IntradayScanRequest) -> dict[str, Any]:

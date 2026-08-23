@@ -147,6 +147,7 @@
 
 ## 验证
 
+- 2026-08-22：盘中观察池的 upsert、受限历史补水和删除入口已从 `main.py` 收敛到 `app/intraday_watchlist_service.py`。所有本地写入/读取仍经有界数据库执行器；路径与载荷代码不一致会在写入前拒绝，缺失标的不会触发历史补水，更新成功后保持原有的“仅研究、不自动下单”边界。新增服务级拒绝路径回归；容器定向回归通过。
 - 2026-08-22：分析师成绩单的 `signal_source` 已只读取版本化远端 `analyst_claims`；已退役的本地 `analyst_signals` 即使未来残留数据也不能再影响 scorecard、研究门禁或展示的成绩。当前库该旧表为 0 行。新增来源 SQL 回归；容器定向回归通过。
 - 2026-08-22：删除无调用方的旧 `run_analysis_job` 写入实现。该实现曾可从 n8n `public` 旧表直接生成 `analyst_signals`，与远端版本化文字归档为唯一分析师证据源的边界冲突；既有 `/api/v1/analysis/jobs/{id}/run` 兼容 URL 保持显式 no-op。新增 no-op 端点回归，防止旧直写路径复活；容器定向回归通过。
 - 2026-08-22：分析师研究资料、观察池点时成员和过期 fetch ledger 的本地维护写入已收敛到 `app/research_maintenance_service.py`。它们仍经原有有界数据库执行器调用，不访问 provider、不修改实时策略；不存在的分析师会在重建前拒绝，观察池写入保持全量 active 集历史，ledger `dry_run` 不会更新任何行。新增三项服务级回归；容器定向回归通过。
