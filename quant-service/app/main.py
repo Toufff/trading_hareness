@@ -66,6 +66,12 @@ from .research_experiment_service import (
     evaluate_factors as evaluate_factors_isolated,
     research_window as research_window_isolated,
 )
+from .research_maintenance_service import (
+    ResearchMaintenanceDependencies,
+    reconcile_stale_fetch_runs as reconcile_stale_fetch_runs_isolated,
+    update_analyst_profile as update_analyst_research_profile_isolated,
+    update_universe_members as update_universe_members_isolated,
+)
 from .tushare_fetch_ledger import (
     TushareFetchLedgerDependencies,
     persist_blocked as persist_tushare_fetch_blocked_isolated,
@@ -4481,23 +4487,16 @@ def update_analyst_global_sync_cursor(payload: AnalystSyncGlobalCursorUpdate) ->
     return _remote_archive_actions.update_global_cursor(payload)
 
 
+def _research_maintenance_dependencies() -> ResearchMaintenanceDependencies:
+    return ResearchMaintenanceDependencies(
+        database=db, china_today=cn_today, exchange_for=exchange_for,
+        rebuild_analyst_research=rebuild_analyst_research,
+        sync_universe_membership_history=sync_universe_membership_history, http_exception=HTTPException,
+    )
+
+
 def update_analyst_research_profile(analyst_id: str, payload: AnalystResearchProfileRequest) -> dict[str, Any]:
-    with db.transaction() as connection:
-        exists = connection.execute(
-            "SELECT 1 FROM quant.remote_analysts WHERE remote_analyst_id=%s", (analyst_id,)
-        ).fetchone()
-        if not exists:
-            raise HTTPException(status_code=404, detail="remote analyst not found")
-        connection.execute(
-            """INSERT INTO quant.analyst_research_profiles(remote_analyst_id,independence_class,audience_size,audience_as_of,evidence)
-               VALUES(%s,%s,%s,%s,%s)
-               ON CONFLICT(remote_analyst_id) DO UPDATE SET independence_class=EXCLUDED.independence_class,
-                 audience_size=EXCLUDED.audience_size,audience_as_of=EXCLUDED.audience_as_of,evidence=EXCLUDED.evidence,updated_at=now()""",
-            (analyst_id, payload.independence_class, payload.audience_size, payload.audience_as_of, payload.evidence),
-        )
-        result = rebuild_analyst_research(connection, cn_today())
-    return {"analyst_id": analyst_id, "status": "updated", "research_status": result["sleeping_experts"]["status"],
-            "boundary": "manual provenance prior; no live strategy effect"}
+    return update_analyst_research_profile_isolated(analyst_id, payload, _research_maintenance_dependencies())
 
 
 def review_claim_legacy(review_id: uuid.UUID, payload: ClaimReviewRequest) -> dict[str, Any]:
@@ -4516,28 +4515,7 @@ def universe_members(universe_key: str) -> dict[str, Any]:
 
 
 def update_universe_members(payload: UniverseUpdateRequest) -> dict[str, Any]:
-    with db.transaction() as connection:
-        for symbol in payload.symbols:
-            connection.execute(
-                "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,'universe') ON CONFLICT(symbol) DO NOTHING",
-                (symbol, exchange_for(symbol)),
-            )
-            connection.execute(
-                """INSERT INTO quant.universe_members(universe_key,symbol,enabled,priority,source,updated_at)
-                   VALUES(%s,%s,%s,%s,'api',now()) ON CONFLICT(universe_key,symbol) DO UPDATE SET enabled=EXCLUDED.enabled,
-                   priority=EXCLUDED.priority,source=EXCLUDED.source,updated_at=now()""",
-                (payload.universe_key, symbol, payload.enabled, payload.priority),
-            )
-        active = connection.execute(
-            "SELECT symbol FROM quant.universe_members WHERE universe_key=%s AND enabled ORDER BY symbol",
-            (payload.universe_key,),
-        ).fetchall()
-        history = sync_universe_membership_history(
-            connection, payload.universe_key, cn_today(),
-            [str(row["symbol"]) for row in active], source="universe-members-api", priority=payload.priority,
-        )
-    return {"universe_key": payload.universe_key, "updated": len(payload.symbols), "enabled": payload.enabled,
-            "history": history}
+    return update_universe_members_isolated(payload, _research_maintenance_dependencies())
 
 
 def build_features(payload: GenerateRequest) -> dict[str, Any]:
@@ -4591,25 +4569,7 @@ def strategy_experiments(universe_key: str = "core", limit: int = 50) -> dict[st
 
 
 def reconcile_stale_fetch_runs(payload: FetchRunReconcileRequest) -> dict[str, Any]:
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=payload.max_age_minutes)
-    with db.transaction() as connection:
-        rows = connection.execute(
-            """SELECT fetch_run_id,provider_key,capability,trade_date,request_key,status,started_at,created_at
-                 FROM quant.fetch_runs
-                WHERE status='running' AND coalesce(started_at,created_at)<%s
-                ORDER BY coalesce(started_at,created_at)""",
-            (cutoff,),
-        ).fetchall()
-        if not payload.dry_run and rows:
-            connection.execute(
-                """UPDATE quant.fetch_runs
-                      SET status=%s,finished_at=now(),error_class='stale_running_reconciled',
-                          error_message='Run exceeded the operational max age and was reconciled by /operations/fetch-runs/reconcile-stale'
-                    WHERE status='running' AND coalesce(started_at,created_at)<%s""",
-                (payload.terminal_status, cutoff),
-            )
-    return {"status": "dry_run" if payload.dry_run else "completed", "max_age_minutes": payload.max_age_minutes,
-            "terminal_status": payload.terminal_status, "matched": len(rows), "items": rows}
+    return reconcile_stale_fetch_runs_isolated(payload, _research_maintenance_dependencies())
 
 
 def data_quality_issues(limit: int = 100) -> dict[str, Any]:
