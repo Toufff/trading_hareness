@@ -160,6 +160,7 @@ from .market_flow_repository import (
     rebuild_stored_market_flow_features,
 )
 from .intraday_alerts import daily_strategy_summary_text, delivery_health_recovery_text, intraday_alert_text
+from . import intraday_alert_delivery_service
 from .board_rotation import board_rotation_candidates, board_rotation_still_directional
 from .board_stock_mining import board_stock_mining_candidates
 from .board_stock_mining_repository import persist_board_stock_mining_run
@@ -2274,101 +2275,19 @@ def decision_card_url(symbol: str) -> str | None:
 
 
 async def attempt_intraday_alert_delivery(delivery_id: uuid.UUID, signal_event_id: uuid.UUID, text: str) -> dict[str, Any]:
-    """Send one durable outbox item and keep failed content available for retry."""
-    outcome = await post_feishu_alert_text(text)
-
-    def persist_delivery_attempt() -> dict[str, Any] | None:
-        with db.transaction() as connection:
-            # Ignore the current pending row while calculating the preceding
-            # streak.  Include every existing Feishu delivery family so the
-            # dashboard and recovery receipt have one consistent meaning.
-            history_rows = connection.execute(
-                """SELECT status FROM (
-                       SELECT status,created_at FROM quant.intraday_alert_deliveries
-                        WHERE delivery_id<>%s
-                       UNION ALL
-                       SELECT status,created_at FROM quant.intraday_board_report_deliveries
-                       UNION ALL
-                       SELECT delivery_status AS status,updated_at AS created_at FROM quant.strategy_day_summaries
-                   ) delivery ORDER BY created_at DESC LIMIT 20""",
-                (delivery_id,),
-            ).fetchall()
-            prior_failed_streak = 0
-            for row in history_rows:
-                status = str(row["status"])
-                if status == "pending":
-                    continue
-                if status == "failed":
-                    prior_failed_streak += 1
-                    continue
-                break
-            connection.execute(
-                """UPDATE quant.intraday_alert_deliveries
-                      SET status=%s,response=%s,error_message=%s,
-                          sent_at=%s,attempt_count=attempt_count+1,
-                          next_attempt_at=CASE WHEN %s='failed' AND attempt_count+1<%s
-                                               THEN now()+interval '30 seconds' ELSE NULL END
-                    WHERE delivery_id=%s""",
-                (outcome["status"], Json(strategy_json_safe(outcome.get("response", {}))), outcome.get("error") or outcome.get("reason"),
-                 datetime.now(timezone.utc) if outcome["status"] == "sent" else None,
-                 outcome["status"], INTRADAY_ALERT_MAX_ATTEMPTS, delivery_id),
-            )
-            if outcome["status"] == "sent":
-                connection.execute("UPDATE quant.intraday_signal_events SET state='alerted' WHERE signal_event_id=%s", (signal_event_id,))
-            if outcome["status"] == "failed" and prior_failed_streak + 1 == 3:
-                event = connection.execute(
-                    """INSERT INTO quant.alert_delivery_health_events(
-                           channel,event_type,source_reference,streak_count,delivery_status,message_text
-                       ) VALUES('feishu_adapter','failure_streak',%s,%s,'observed',%s)
-                       ON CONFLICT(channel,event_type,source_reference) DO NOTHING
-                       RETURNING health_event_id,event_type,streak_count,message_text""",
-                    (str(delivery_id), prior_failed_streak + 1,
-                     f"Feishu alert delivery has failed {prior_failed_streak + 1} consecutive times"),
-                ).fetchone()
-                return dict(event) if event else None
-            if outcome["status"] == "sent" and prior_failed_streak >= 3:
-                message = delivery_health_recovery_text(prior_failed_streak)
-                event = connection.execute(
-                    """INSERT INTO quant.alert_delivery_health_events(
-                           channel,event_type,source_reference,streak_count,delivery_status,message_text
-                       ) VALUES('feishu_adapter','recovered',%s,%s,'pending',%s)
-                       ON CONFLICT(channel,event_type,source_reference) DO NOTHING
-                       RETURNING health_event_id,event_type,streak_count,message_text""",
-                    (str(delivery_id), prior_failed_streak, message),
-                ).fetchone()
-                return dict(event) if event else None
-        return None
-
-    health_event = await run_database_blocking(persist_delivery_attempt)
-    if health_event and health_event["event_type"] == "recovered":
-        health_outcome = await post_feishu_alert_text(str(health_event["message_text"]))
-
-        def persist_health_event_attempt() -> None:
-            with db.transaction() as connection:
-                connection.execute(
-                    """UPDATE quant.alert_delivery_health_events
-                          SET delivery_status=%s,response=%s,error_message=%s,sent_at=%s,updated_at=now()
-                        WHERE health_event_id=%s""",
-                    (health_outcome["status"], Json(strategy_json_safe(health_outcome.get("response", {}))),
-                     health_outcome.get("error") or health_outcome.get("reason"),
-                     datetime.now(timezone.utc) if health_outcome["status"] == "sent" else None,
-                     health_event["health_event_id"]),
-                )
-        await run_database_blocking(persist_health_event_attempt)
-    return outcome
+    """Compatibility wrapper for the durable Feishu outbox service."""
+    return await intraday_alert_delivery_service.attempt_delivery(
+        db, delivery_id, signal_event_id, text,
+        post_text=post_feishu_alert_text, run_database=run_database_blocking,
+        json_safe=strategy_json_safe, recovery_text=delivery_health_recovery_text,
+        max_attempts=INTRADAY_ALERT_MAX_ATTEMPTS,
+    )
 
 
 async def deliver_intraday_alert(signal_event_id: uuid.UUID, text: str) -> dict[str, Any]:
     """Persist before outbound I/O so a short-lived signal cannot be lost."""
     def create_pending_delivery() -> uuid.UUID:
-        with db.transaction() as connection:
-            row = connection.execute(
-                """INSERT INTO quant.intraday_alert_deliveries(
-                       signal_event_id,channel,status,message_text,next_attempt_at
-                   ) VALUES(%s,'feishu_adapter','pending',%s,now()) RETURNING delivery_id""",
-                (signal_event_id, text),
-            ).fetchone()
-        return row["delivery_id"]
+        return intraday_alert_delivery_service.create_pending_delivery(db, signal_event_id, text)
 
     delivery_id = await run_database_blocking(create_pending_delivery)
     return await attempt_intraday_alert_delivery(delivery_id, signal_event_id, text)
@@ -2377,22 +2296,7 @@ async def deliver_intraday_alert(signal_event_id: uuid.UUID, text: str) -> dict[
 async def retry_pending_intraday_alerts(limit: int = 3) -> dict[str, int]:
     """Retry bounded, unsent outbox rows even when their source signal faded."""
     def load_due() -> list[dict[str, Any]]:
-        with db.transaction() as connection:
-            rows = connection.execute(
-                """SELECT d.delivery_id,d.signal_event_id,d.message_text
-                     FROM quant.intraday_alert_deliveries d
-                    WHERE d.channel='feishu_adapter' AND d.status IN ('pending','failed')
-                      AND d.message_text IS NOT NULL AND d.message_text<>''
-                      AND d.attempt_count<%s
-                      AND coalesce(d.next_attempt_at,d.created_at)<=now()
-                      AND NOT EXISTS (
-                          SELECT 1 FROM quant.intraday_alert_deliveries sent
-                           WHERE sent.signal_event_id=d.signal_event_id AND sent.status='sent'
-                      )
-                    ORDER BY d.created_at LIMIT %s""",
-                (INTRADAY_ALERT_MAX_ATTEMPTS, max(1, min(limit, 10))),
-            ).fetchall()
-        return [dict(row) for row in rows]
+        return intraday_alert_delivery_service.load_due_deliveries(db, INTRADAY_ALERT_MAX_ATTEMPTS, limit)
 
     rows = await run_database_blocking(load_due)
     sent = failed = disabled = 0
