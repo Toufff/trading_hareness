@@ -512,8 +512,9 @@ from .intraday_scan_preparation import (
 )
 from .intraday_scan_source_status import build_scan_source_status
 from .intraday_scan_signal_persistence import (
+    IntradayScanPersistenceServiceDependencies,
     IntradayScanSignalPersistenceDependencies,
-    persist_scan_signals,
+    persist_scan_transaction,
 )
 from .intraday_watch_quote_capture import WatchQuoteCaptureDependencies, capture_watch_quotes
 from .intraday_watchlist_scan_service import (
@@ -2277,16 +2278,13 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
     original one-transaction boundary preserves the signal de-duplication and
     point-in-time context semantics while avoiding event-loop blocking.
     """
-    with db.transaction() as connection:
-        return persist_scan_signals(
-            connection, scan_id=scan_id, observed_at=observed_at, selected_symbols=selected_symbols,
-            source_status=source_status, watches=watches, quotes=quotes, tencent_rows=tencent_rows,
-            quote_latency_ms=quote_latency_ms, tushare_minutes=tushare_minutes, surge_features=surge_features,
-            peer_contexts=peer_contexts, fast_confirmations=fast_confirmations,
+    return persist_scan_transaction(
+        IntradayScanPersistenceServiceDependencies(
+            database=db,
             confirmation_window=INTRADAY_CONFIRMATION_WINDOW,
             signal_model_version=INTRADAY_SIGNAL_MODEL_VERSION,
             factor_contract_version=INTRADAY_FACTOR_CONTRACT_VERSION,
-            dependencies=IntradayScanSignalPersistenceDependencies(
+            signal_dependencies=IntradayScanSignalPersistenceDependencies(
                 prepare_inputs=prepare_intraday_scan_inputs,
                 preparation_dependencies=IntradayScanPreparationDependencies(
                     roll_positions_sellable=roll_paper_positions_sellable,
@@ -2324,7 +2322,12 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     paper_decision_payload=paper_decision_payload, persist_paper_decision=persist_paper_decision,
                 ),
             ),
-        )
+        ),
+        scan_id=scan_id, observed_at=observed_at, selected_symbols=selected_symbols,
+        source_status=source_status, watches=watches, quotes=quotes, tencent_rows=tencent_rows,
+        quote_latency_ms=quote_latency_ms, tushare_minutes=tushare_minutes, surge_features=surge_features,
+        peer_contexts=peer_contexts, fast_confirmations=fast_confirmations,
+    )
 
 
 intraday_rule_input_pruned_on: date | None = None

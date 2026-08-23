@@ -33,6 +33,68 @@ class IntradayScanSignalPersistenceDependencies:
     signal_event_persistence_dependencies: Any
 
 
+@dataclass(frozen=True)
+class IntradayScanPersistenceServiceDependencies:
+    """Application-owned collaborators for the scan persistence boundary.
+
+    ``persist_scan_signals`` deliberately receives an already-open connection
+    so it remains straightforward to unit-test.  The live service, however,
+    must never accidentally split its scan receipt, point-in-time inputs and
+    event de-duplication across transactions.  Keep that transaction boundary
+    in this small adapter rather than re-implementing it in the FastAPI
+    composition module.
+    """
+
+    database: Any
+    signal_dependencies: IntradayScanSignalPersistenceDependencies
+    confirmation_window: Any
+    signal_model_version: str
+    factor_contract_version: str
+
+
+def persist_scan_transaction(
+    dependencies: IntradayScanPersistenceServiceDependencies,
+    *,
+    scan_id: uuid.UUID,
+    observed_at: datetime,
+    selected_symbols: list[str],
+    source_status: dict[str, Any],
+    watches: list[dict[str, Any]],
+    quotes: dict[str, dict[str, Any]],
+    tencent_rows: list[dict[str, Any]],
+    quote_latency_ms: int,
+    tushare_minutes: dict[str, dict[str, Any]],
+    surge_features: dict[str, dict[str, Any]],
+    peer_contexts: dict[str, dict[str, Any]],
+    fast_confirmations: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Persist a live scan under its one required local transaction.
+
+    This function performs no provider, clock or delivery I/O.  It only owns
+    the durable transaction boundary used by the bounded database executor.
+    """
+    with dependencies.database.transaction() as connection:
+        return persist_scan_signals(
+            connection,
+            scan_id=scan_id,
+            observed_at=observed_at,
+            selected_symbols=selected_symbols,
+            source_status=source_status,
+            watches=watches,
+            quotes=quotes,
+            tencent_rows=tencent_rows,
+            quote_latency_ms=quote_latency_ms,
+            tushare_minutes=tushare_minutes,
+            surge_features=surge_features,
+            peer_contexts=peer_contexts,
+            fast_confirmations=fast_confirmations,
+            confirmation_window=dependencies.confirmation_window,
+            signal_model_version=dependencies.signal_model_version,
+            factor_contract_version=dependencies.factor_contract_version,
+            dependencies=dependencies.signal_dependencies,
+        )
+
+
 def persist_scan_signals(
     connection: Any,
     *,
@@ -128,4 +190,9 @@ def persist_scan_signals(
     return signals
 
 
-__all__ = ["IntradayScanSignalPersistenceDependencies", "persist_scan_signals"]
+__all__ = [
+    "IntradayScanPersistenceServiceDependencies",
+    "IntradayScanSignalPersistenceDependencies",
+    "persist_scan_signals",
+    "persist_scan_transaction",
+]

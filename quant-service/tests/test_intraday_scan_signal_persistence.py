@@ -4,8 +4,10 @@ import unittest
 import uuid
 
 from app.intraday_scan_signal_persistence import (
+    IntradayScanPersistenceServiceDependencies,
     IntradayScanSignalPersistenceDependencies,
     persist_scan_signals,
+    persist_scan_transaction,
 )
 
 
@@ -17,7 +19,59 @@ class _Connection:
         self.executed.append((query, params))
 
 
+class _Database:
+    def __init__(self, connection):
+        self.connection = connection
+        self.entered = 0
+        self.exited = 0
+
+    def transaction(self):
+        database = self
+
+        class _Transaction:
+            def __enter__(self):
+                database.entered += 1
+                return database.connection
+
+            def __exit__(self, *args):
+                database.exited += 1
+
+        return _Transaction()
+
+
 class IntradayScanSignalPersistenceTests(unittest.TestCase):
+    def test_live_adapter_preserves_one_transaction_for_entire_scan(self):
+        connection = _Connection()
+        database = _Database(connection)
+        observed_at = datetime(2026, 8, 22, 2, tzinfo=timezone.utc)
+        prepared = SimpleNamespace(
+            previous_by_symbol={}, daily_factors_by_symbol={}, raw_minute_features_by_symbol={},
+            minute_volume_profiles_by_symbol={}, order_book_by_symbol={}, market_contexts={},
+            paper_positions={}, snapshot_payload={}, candidate_sector_keys={}, shadow_priors={},
+            rebound_priors={}, first_eac_by_symbol={}, probability_profiles={}, session_start=observed_at,
+        )
+        signal_dependencies = IntradayScanSignalPersistenceDependencies(
+            prepare_inputs=lambda *_args, **_kwargs: prepared,
+            preparation_dependencies=object(), quote_source=lambda _: "tencent_watch_batch",
+            json_safe=lambda value: value, persist_rule_input_snapshot=lambda *_args, **_kwargs: None,
+            attach_volume_time_profile=lambda *_args, **_kwargs: None, number=lambda value: value,
+            aggregate_order_book_observations=lambda *_args, **_kwargs: None,
+            generate_signals=lambda **_kwargs: [], signal_generation_dependencies=object(),
+            load_event_state=lambda *_args, **_kwargs: {},
+            persist_generated_signals=lambda *_args, **_kwargs: [], signal_event_persistence_dependencies=object(),
+        )
+        result = persist_scan_transaction(
+            IntradayScanPersistenceServiceDependencies(
+                database=database, signal_dependencies=signal_dependencies,
+                confirmation_window=300, signal_model_version="v1", factor_contract_version="v2",
+            ),
+            scan_id=uuid.uuid4(), observed_at=observed_at, selected_symbols=["000001.SZ"],
+            source_status={}, watches=[{"symbol": "000001.SZ"}], quotes={}, tencent_rows=[],
+            quote_latency_ms=0, tushare_minutes={}, surge_features={}, peer_contexts={}, fast_confirmations={},
+        )
+        self.assertEqual(result, [])
+        self.assertEqual((database.entered, database.exited), (1, 1))
+
     def test_freezes_then_generates_and_persists_inside_caller_transaction(self):
         observed_at = datetime(2026, 8, 22, 2, tzinfo=timezone.utc)
         connection = _Connection()
