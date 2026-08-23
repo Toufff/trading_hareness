@@ -4191,10 +4191,12 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(contexts[(second_signal, "000001.SZ")]["board_report_id"], "second")
 
     def test_intraday_scan_source_has_batched_board_and_paper_reads(self):
-        source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
-        self.assertIn("market_contexts = intraday_point_in_time_market_context_batch", source)
-        self.assertIn("WHERE symbol=ANY(%s)", source)
-        self.assertIn("market_contexts.get((observed_at, symbol), {})", source)
+        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_scan_preparation.py").read_text(encoding="utf-8")
+        scanner_source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+        repository_source = (Path(__file__).resolve().parents[1] / "app" / "intraday_scan_repository.py").read_text(encoding="utf-8")
+        self.assertIn("market_contexts = dependencies.market_context_batch", source)
+        self.assertIn("WHERE symbol=ANY(%s)", repository_source)
+        self.assertIn("prepared.market_contexts.get((observed_at, symbol), {})", scanner_source)
 
     def test_intraday_scan_does_not_claim_tencent_completed_when_no_watch_quote_matches(self):
         source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
@@ -4203,12 +4205,12 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertIn('"stale_or_unstamped_direct_watch_quote_symbols": direct_watch_count - fresh_direct_watch_count', source)
 
     def test_intraday_previous_quote_has_session_and_fifteen_second_freshness_bounds(self):
-        main_source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+        preparation_source = (Path(__file__).resolve().parents[1] / "app" / "intraday_scan_preparation.py").read_text(encoding="utf-8")
         repository_source = (Path(__file__).resolve().parents[1] / "app" / "intraday_scan_repository.py").read_text(encoding="utf-8")
-        self.assertIn("not_before=max(session_start, observed_at - timedelta(seconds=15))", main_source)
+        self.assertIn("not_before=max(session_start, observed_at - timedelta(seconds=15))", preparation_source)
         self.assertIn("o.observed_at<%s AND o.observed_at>=%s", repository_source)
         self.assertIn("DISTINCT ON(o.symbol,o.source_name)", repository_source)
-        self.assertIn("first_eac_by_symbol = first_eac_breakout_events", main_source)
+        self.assertIn("first_eac_by_symbol=dependencies.first_eac_events", preparation_source)
 
     def test_market_regime_runtime_uses_io_free_extracted_module(self):
         import app.main as main_module
