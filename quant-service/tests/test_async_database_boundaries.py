@@ -37,6 +37,7 @@ from app.async_sector_read_repository import sector_members as async_sector_memb
 from app.sector_read_model import project_concept_member_backfill_status
 from app.async_limit_linkage_mining_read_repository import latest_limit_linkage_mining as async_limit_linkage_mining
 from app.async_analyst_prompt_lab_read_repository import status as async_prompt_lab_status
+from app.async_analyst_market_review_read_repository import list_reviews as async_market_reviews
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -148,6 +149,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_sector_read_repository.py",
             "async_limit_linkage_mining_read_repository.py",
             "async_analyst_prompt_lab_read_repository.py",
+            "async_analyst_market_review_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -1184,6 +1186,45 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["candidates"][0]["candidate_id"], "candidate-1")
         self.assertEqual(payload["evaluations"][0]["evaluation_id"], "evaluation-1")
         self.assertEqual(database.connection.calls[0][1], (500,))
+
+    async def test_analyst_review_reads_prefer_native_async_bounded_evidence(self) -> None:
+        calls = []
+
+        async def reviews(_database, cadence, limit):
+            calls.append((cadence, limit))
+            return {"items": [{"review_id": "review-1"}], "live_effect": "none"}
+
+        router = build_analyst_research_reads_router(
+            object(), lambda *_args: {}, async_database=object(), async_list_reviews_fn=reviews,
+        )
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-research/reviews")
+        payload = await endpoint("daily", 1000)
+        self.assertEqual(payload["items"][0]["review_id"], "review-1")
+        self.assertEqual(calls, [("daily", 1000)])
+
+        class Result:
+            def __init__(self, rows): self.rows = rows
+            async def fetchall(self): return self.rows
+
+        class Connection:
+            def __init__(self): self.calls = []
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                return Result([{"review_id": "review-1"}])
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        database = Database()
+        direct = await async_market_reviews(database, "daily", 1000)
+        self.assertEqual(direct["items"][0]["review_id"], "review-1")
+        self.assertEqual(database.connection.calls[0][1], ("daily", "daily", 100))
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:

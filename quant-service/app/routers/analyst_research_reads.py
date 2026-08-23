@@ -9,6 +9,8 @@ from fastapi import APIRouter
 
 from ..async_analyst_research_read_repository import observations as async_observations
 from ..async_analyst_research_read_repository import profiles as async_profiles
+from ..async_analyst_market_review_read_repository import latest_review as async_latest_review
+from ..async_analyst_market_review_read_repository import list_reviews as async_list_reviews
 from ..analyst_market_evaluation import analyst_market_evaluation
 from ..analyst_stock_timeline import analyst_stock_timeline
 from ..analyst_market_review import (
@@ -61,6 +63,8 @@ def build_analyst_research_reads_router(
     async_database: Any | None = None,
     async_profiles_fn: Callable[[Any], Awaitable[dict[str, Any]]] | None = None,
     async_observations_fn: Callable[[Any, str | None, int], Awaitable[dict[str, Any]]] | None = None,
+    async_list_reviews_fn: Callable[[Any, str | None, int], Awaitable[dict[str, Any]]] | None = None,
+    async_latest_review_fn: Callable[[Any, str], Awaitable[dict[str, Any]]] | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["analyst-research-reads"])
 
@@ -94,15 +98,19 @@ def build_analyst_research_reads_router(
         return analyst_market_evaluation(database, start_date, end_date, analyst_id)
 
     @router.get("/api/v1/analyst-research/reviews")
-    def reviews(cadence: str | None = None, limit: int = 20) -> dict[str, Any]:
+    async def reviews(cadence: str | None = None, limit: int = 20) -> dict[str, Any]:
         if cadence is not None and cadence not in {"daily", "weekly"}:
             raise ValueError("cadence must be daily or weekly")
+        if async_database is not None:
+            return await (async_list_reviews_fn or async_list_reviews)(async_database, cadence, limit)
         return list_analyst_market_reviews(database, cadence, limit)
 
     @router.get("/api/v1/analyst-research/reviews/latest")
-    def latest_review(cadence: str = "daily") -> dict[str, Any]:
+    async def latest_review(cadence: str = "daily") -> dict[str, Any]:
         if cadence not in {"daily", "weekly"}:
             raise ValueError("cadence must be daily or weekly")
+        if async_database is not None:
+            return await (async_latest_review_fn or async_latest_review)(async_database, cadence)
         return latest_analyst_market_review(database, cadence)
 
     @router.post("/api/v1/analyst-research/reviews/run")
