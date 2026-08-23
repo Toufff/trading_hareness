@@ -1,6 +1,6 @@
 # P1 运行时加固状态
 
-更新时间：2026-08-22。本文只记录已经部署并验证的项目；不代表 P1 全部完成。
+更新时间：2026-08-23。本文只记录已经部署并验证的项目；不代表 P1 全部完成。
 
 ## 已完成
 
@@ -160,6 +160,7 @@
 - 2026-08-22：通用 provider fallback 与盘中路径的熔断状态查询移至 `app/async_provider_circuit_repository.py`。它分别按 `capability×provider_keys` 和 `provider×capabilities` 查询有效 `circuit_open_until`，空输入不借用连接；不改变 provider 顺序、熔断期限、上游调用或错误语义。两条旧执行器回归改为显式验证异步仓储注入；重建后的全量 discovery 回归为 715 项通过，异步池 `open/available/waiting=1/1/0`，开盘前只读预检通过。
 - 2026-08-23：生产交易日历/连续竞价门禁移至 `app/async_market_session_repository.py`。旧 `market_session_repository` 仍保留 executor-injected 兼容路径及其饱和 fail-closed 契约；生产主编排的盘中扫描、秒级确认、盘口、板块曲线和盘后 scheduler 则使用异步池读取本地 SSE 日历。周末、缺日历、关闭日或异步池异常都 fail-closed，不会发起 provider 请求。新增开市/本地池异常/连续竞价复用回归；重建后的全量 discovery 回归为 717 项通过，开盘前只读预检通过。
 - 2026-08-23：盘中扫描前的显式观察池和精确板块成员读取移至 `app/async_intraday_scan_inputs_repository.py`。无指定 symbol 时固定读取上限+1 行以发现超过 40 只的危险容量，指定 symbol 时保持精确请求；成员严格按上海交易日、有效期和 `taxonomy_key + sector_key` 关系读取，空 basket 不借用连接。不改变报价请求、单事务信号持久化、策略计算或提醒语义。新增容量/请求/点时精确关系回归；重建后的全量 discovery 回归为 718 项通过，开盘前只读预检通过。
+- 2026-08-23：盘后 THS 概念成员补全在请求上游前的当日资金流存在性检查、以及成员批次后的 durable progress 读取移至 `app/async_ths_concept_member_backfill_repository.py`。两项都只读本地当日 `ths_concept_flow` 证据与精确成员同步状态；没有当日 flow 时仍按既有 fail-closed 流程刷新目录，不能按名称猜成员。未改变成员批次大小、provider 路由、状态机或盘中路径。新增原生 async SQL 与装配回归；重建后的全量 discovery 回归为 719 项通过，开盘前只读预检通过。
 - 2026-08-22：盘后涨停/地天板分钟形态挖掘的选择、4 路有界回放、熔断降级、结果聚合已从 `main.py` 收敛到 `app/strategy_pattern_mining_service.py`。没有日线即 blocked；腾讯分钟 circuit-open 时不发起上游请求，只写 `minute_replay_circuit_open` 研究证据；该流程仍不补历史、不调阈值、不自动下单。新增无日线与熔断零外呼回归；重建后的全量回归为 699 项通过，开盘前只读预检通过。
 - 2026-08-22：盘后一键刷新阶段装配已从 `main.py` 收敛到 `app/post_close_refresh_service.py`。固定的阶段顺序、超时预算和“日线控制面完成前阻断策略阶段”依赖现在与租约/回执编排分离；服务只接收本地动作，不自建 provider client 或历史回放。扩展服务级阶段顺序、日线 `auto`/promax source 选择、核心股/公告 45 日窗口及控制面依赖回归；重建后的全量回归为 697 项通过，开盘前只读预检通过。
 - 2026-08-22：盘后涨停/地天板形态挖掘的 run/sample 替换事务已归入 `app/strategy_pattern_sample_repository.py`。仓储仅接受已选择、已回放的有界样本，原子替换旧 run 样本，不拥有 provider、候选排序或实时策略评分。新增直接事务顺序回归；重建后的全量回归为 696 项通过，开盘前只读预检通过。

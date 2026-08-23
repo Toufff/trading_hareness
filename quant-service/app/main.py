@@ -119,6 +119,8 @@ from .async_intraday_scan_preflight_repository import latest_board_report as rea
 from .async_intraday_scan_preflight_repository import latest_fast_quotes as read_async_latest_fast_quotes
 from .async_intraday_scan_inputs_repository import exact_memberships as read_async_exact_watchlist_memberships
 from .async_intraday_scan_inputs_repository import watchlists as read_async_intraday_scan_watchlists
+from .async_ths_concept_member_backfill_repository import existing_flow_rows as read_async_ths_concept_flow_rows
+from .async_ths_concept_member_backfill_repository import member_progress as read_async_ths_concept_member_progress
 from .intraday_volume_profiles import attach_volume_time_profile as pure_attach_volume_time_profile
 from .intraday_volume_profiles import volume_time_profile as pure_intraday_volume_time_profile
 from .intraday_volume_profiles import volume_time_profiles as pure_intraday_volume_time_profiles
@@ -3101,28 +3103,11 @@ async def all_board_member_backfill_loop() -> None:
 
 async def run_ths_concept_member_backfill_batch(request: ConceptMemberBackfillRequest) -> dict[str, Any]:
     """Compatibility entry point for a fail-closed exact member batch."""
-    def load_existing(trade_date: date) -> Any:
-        with db.transaction() as connection:
-            return connection.execute(
-                "SELECT count(*)::int rows FROM quant.sector_market_observations WHERE taxonomy_key='ths_concept_flow' AND trading_date=%s",
-                (trade_date,),
-            ).fetchone()
-
     async def existing(trade_date: date) -> Any:
-        return await run_database_blocking(load_existing, trade_date)
-
-    def load_progress(trade_date: date) -> Any:
-        with db.transaction() as connection:
-            return connection.execute(
-                """SELECT count(*) FILTER (WHERE state IN ('completed','empty'))::int done,
-                          count(*) FILTER (WHERE state='failed')::int failed
-                     FROM quant.sector_member_sync_state
-                    WHERE taxonomy_key='ths_concept_flow' AND trading_date=%s""",
-                (trade_date,),
-            ).fetchone()
+        return await read_async_ths_concept_flow_rows(async_db, trade_date)
 
     async def progress(trade_date: date) -> Any:
-        return await run_database_blocking(load_progress, trade_date)
+        return await read_async_ths_concept_member_progress(async_db, trade_date)
 
     return await run_ths_concept_member_backfill_isolated(
         request,

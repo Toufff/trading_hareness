@@ -1953,19 +1953,22 @@ class ProviderHelperTests(unittest.TestCase):
             "select_concepts", "tushare_rows_for_request", "persist_member_snapshot",
         ])
 
-    def test_ths_concept_backfill_uses_database_executor_for_progress(self):
+    def test_ths_concept_backfill_uses_native_async_reads_for_progress(self):
         completed = {"status": "completed", "total_concepts": 3, "member_results": []}
 
-        async def check() -> tuple[dict[str, object], AsyncMock]:
-            blocking = AsyncMock(side_effect=[{"rows": 1}, {"done": 2, "failed": 1}])
+        async def check() -> tuple[dict[str, object], AsyncMock, AsyncMock]:
+            existing = AsyncMock(return_value={"rows": 1})
+            progress = AsyncMock(return_value={"done": 2, "failed": 1})
             with patch("app.main.sync_ths_concept_members", new=AsyncMock(return_value=completed)), \
-                 patch("app.main.run_database_blocking", new=blocking):
+                 patch("app.main.read_async_ths_concept_flow_rows", new=existing), \
+                 patch("app.main.read_async_ths_concept_member_progress", new=progress):
                 result = await run_ths_concept_member_backfill_batch(ConceptMemberBackfillRequest(trade_date=date(2026, 8, 11), refresh_flow_catalog=False))
-            return result, blocking
+            return result, existing, progress
 
-        result, blocking = asyncio.run(check())
+        result, existing, progress = asyncio.run(check())
         self.assertEqual(result["progress"], {"completed_or_empty": 2, "failed": 1, "remaining": 1})
-        self.assertEqual([call.args[0].__name__ for call in blocking.await_args_list], ["load_existing", "load_progress"])
+        self.assertEqual(existing.await_args.args[1], date(2026, 8, 11))
+        self.assertEqual(progress.await_args.args[1], date(2026, 8, 11))
 
     def test_ths_catalog_member_batches_skip_non_member_index_codes(self):
         import inspect
