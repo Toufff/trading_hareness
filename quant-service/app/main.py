@@ -47,7 +47,7 @@ from .akshare_provider import (
     akshare_strong_pool_events,
     akshare_tencent_all_a_spot,
 )
-from .analysis import EXTRACTOR_VERSION, as_utc, extract_signals, keywords, normalize_symbol
+from .analysis import as_utc
 from .capability_registry import api_capability
 from .database import AsyncDatabase, Database
 from .daily_bar_repository import exchange_for, provider_priority, upsert_daily_bar
@@ -855,53 +855,6 @@ def persist_daily_bar_batch(bars: list[DailyBar]) -> int:
         for bar in bars:
             upsert_bar(connection, bar)
     return len(bars)
-
-
-def run_analysis_job(analysis_id: uuid.UUID) -> dict[str, Any]:
-    with db.transaction() as connection:
-        row = connection.execute(
-            """SELECT a.analysis_id,a.job_id,j.analyst_id,j.source_tag,j.publisher_key,j.created_at,
-                      coalesce(i.body,j.payload->>'import_content',j.payload->>'message_text','') AS body
-               FROM public.analysis_jobs a
-               JOIN public.ingestion_jobs j ON j.job_id=a.job_id
-               LEFT JOIN LATERAL (
-                 SELECT body FROM public.ingestion_content_items
-                 WHERE job_id=j.job_id AND content_type='text' ORDER BY created_at LIMIT 1
-               ) i ON true WHERE a.analysis_id=%s""",
-            (analysis_id,),
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="analysis job not found")
-        text = str(row["body"] or "")
-        signals = extract_signals(text)
-        published_at = as_utc(row["created_at"])
-        for signal in signals:
-            connection.execute(
-                """INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,'signal-extraction')
-                   ON CONFLICT(symbol) DO NOTHING""",
-                (signal.symbol, signal.exchange),
-            )
-            connection.execute(
-                """INSERT INTO quant.analyst_signals(signal_id,ingestion_job_id,analyst_id,source_tag,publisher_key,symbol,direction,
-                   strength,horizon_days,published_at,available_at,evidence_text,evidence_offset,extraction_confidence,extractor_version,raw)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT(ingestion_job_id,symbol,horizon_days,extractor_version) DO UPDATE SET direction=EXCLUDED.direction,
-                     strength=EXCLUDED.strength,evidence_text=EXCLUDED.evidence_text,evidence_offset=EXCLUDED.evidence_offset,
-                     extraction_confidence=EXCLUDED.extraction_confidence,raw=EXCLUDED.raw""",
-                (uuid.uuid4(), row["job_id"], row["analyst_id"], row["source_tag"], row["publisher_key"], signal.symbol,
-                 signal.direction, signal.strength, signal.horizon_days, published_at, published_at, signal.evidence_text,
-                 signal.evidence_offset, signal.extraction_confidence, EXTRACTOR_VERSION,
-                 Json({"method": EXTRACTOR_VERSION})),
-            )
-    return {
-        "kind": "structured-signal-v1",
-        "symbols": sorted({signal.symbol for signal in signals}),
-        "keywords": keywords(text),
-        "signal_count": len(signals),
-        "content_length": len(text),
-        "extractor_version": EXTRACTOR_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
 
 
 def recompute_scorecards_legacy(as_of_date: date | None = None) -> dict[str, Any]:

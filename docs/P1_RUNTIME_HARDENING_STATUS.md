@@ -147,6 +147,7 @@
 
 ## 验证
 
+- 2026-08-22：删除无调用方的旧 `run_analysis_job` 写入实现。该实现曾可从 n8n `public` 旧表直接生成 `analyst_signals`，与远端版本化文字归档为唯一分析师证据源的边界冲突；既有 `/api/v1/analysis/jobs/{id}/run` 兼容 URL 保持显式 no-op。新增 no-op 端点回归，防止旧直写路径复活；容器定向回归通过。
 - 2026-08-22：分析师研究资料、观察池点时成员和过期 fetch ledger 的本地维护写入已收敛到 `app/research_maintenance_service.py`。它们仍经原有有界数据库执行器调用，不访问 provider、不修改实时策略；不存在的分析师会在重建前拒绝，观察池写入保持全量 active 集历史，ledger `dry_run` 不会更新任何行。新增三项服务级回归；容器定向回归通过。
 - 2026-08-22：通用 Tushare 目录 fetch 的本地 ledger 状态迁至 `app/tushare_fetch_ledger.py`。缓存复用、原始/规范化证据、provider 健康与能力结算仍在同一数据库事务内；传输、候选选择、限频和重试仍留在既有编排层。新增“缓存响应头拒绝复用”和“调用方取消不惩罚 provider”服务级回归；容器定向回归通过。
 - 2026-08-22：因子评估、原生多因子回测记录和数据质量快照的本地事务已从 `main.py` 收敛到 `app/research_experiment_service.py`。服务只读取既有 canonical/PIT 成员与控制面，保留未知/禁用因子拒绝和日线控制面缺失即 `blocked` 的边界；不访问 provider、不启动历史拉取、不调策略阈值或分析师权重。新增点时研究窗口、未知因子短路与控制面阻断快照回归；容器定向回归通过。
