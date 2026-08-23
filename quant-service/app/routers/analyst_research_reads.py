@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter
 
+from ..async_analyst_research_read_repository import observations as async_observations
+from ..async_analyst_research_read_repository import profiles as async_profiles
 from ..analyst_market_evaluation import analyst_market_evaluation
 from ..analyst_stock_timeline import analyst_stock_timeline
 from ..analyst_market_review import (
@@ -16,7 +18,50 @@ from ..analyst_market_review import (
 from ..request_models import AnalystMarketReviewRequest
 
 
-def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any, date | None], dict[str, Any]]) -> APIRouter:
+def _profiles_sync(database: Any) -> dict[str, Any]:
+    with database.transaction() as connection:
+        rows = connection.execute(
+            """SELECT a.remote_analyst_id,a.name,p.independence_class,p.audience_size,p.audience_as_of,p.evidence,p.updated_at
+                 FROM quant.remote_analysts a LEFT JOIN quant.analyst_research_profiles p USING(remote_analyst_id)
+                 ORDER BY a.remote_analyst_id"""
+        ).fetchall()
+    return {"items": [dict(row) for row in rows], "boundary": "manual provenance only; it is an explicit prior, not inferred from outcomes"}
+
+
+def _observations_sync(database: Any, analyst_id: str | None, limit: int) -> dict[str, Any]:
+    bounded = max(1, min(int(limit), 500))
+    with database.transaction() as connection:
+        rows = connection.execute(
+            """SELECT observation_id,analyst_id,source_kind,source_id,source_version,content_hash,
+                      strategy_available_at,published_at,stated_at,scope,subject_key,subject_label,
+                      action,direction,horizon_days,strength,confidence,conditions,evidence_span,
+                      extractor_version,status,created_at
+                 FROM quant.analyst_observations
+                WHERE (%s::text IS NULL OR analyst_id=%s)
+                ORDER BY strategy_available_at DESC LIMIT %s""",
+            (analyst_id, analyst_id, bounded),
+        ).fetchall()
+        health = connection.execute(
+            """SELECT analyst_id,count(*)::int observations,
+                      count(*) FILTER (WHERE status='eligible')::int eligible,
+                      count(*) FILTER (WHERE status='replay_only')::int replay_only,
+                      max(strategy_available_at) latest_available_at
+                 FROM quant.analyst_observations
+                WHERE (%s::text IS NULL OR analyst_id=%s)
+                GROUP BY analyst_id ORDER BY analyst_id""", (analyst_id, analyst_id),
+        ).fetchall()
+    return {"items": [dict(row) for row in rows], "health": [dict(row) for row in health],
+            "live_effect": "none", "boundary": "append_only text-derived observations; promotion registry remains zero by default"}
+
+
+def build_analyst_research_reads_router(
+    database: Any,
+    status_fn: Callable[[Any, date | None], dict[str, Any]],
+    *,
+    async_database: Any | None = None,
+    async_profiles_fn: Callable[[Any], Awaitable[dict[str, Any]]] | None = None,
+    async_observations_fn: Callable[[Any, str | None, int], Awaitable[dict[str, Any]]] | None = None,
+) -> APIRouter:
     router = APIRouter(tags=["analyst-research-reads"])
 
     @router.get("/api/v1/analyst-research/status")
@@ -24,40 +69,16 @@ def build_analyst_research_reads_router(database: Any, status_fn: Callable[[Any,
         return status_fn(database, as_of_date)
 
     @router.get("/api/v1/analyst-research/profiles")
-    def profiles() -> dict[str, Any]:
-        with database.transaction() as connection:
-            rows = connection.execute(
-                """SELECT a.remote_analyst_id,a.name,p.independence_class,p.audience_size,p.audience_as_of,p.evidence,p.updated_at
-                     FROM quant.remote_analysts a LEFT JOIN quant.analyst_research_profiles p USING(remote_analyst_id)
-                     ORDER BY a.remote_analyst_id"""
-            ).fetchall()
-        return {"items": [dict(row) for row in rows], "boundary": "manual provenance only; it is an explicit prior, not inferred from outcomes"}
+    async def profiles() -> dict[str, Any]:
+        if async_database is not None:
+            return await (async_profiles_fn or async_profiles)(async_database)
+        return _profiles_sync(database)
 
     @router.get("/api/v1/analyst-research/observations")
-    def observations(analyst_id: str | None = None, limit: int = 100) -> dict[str, Any]:
-        bounded = max(1, min(int(limit), 500))
-        with database.transaction() as connection:
-            rows = connection.execute(
-                """SELECT observation_id,analyst_id,source_kind,source_id,source_version,content_hash,
-                          strategy_available_at,published_at,stated_at,scope,subject_key,subject_label,
-                          action,direction,horizon_days,strength,confidence,conditions,evidence_span,
-                          extractor_version,status,created_at
-                     FROM quant.analyst_observations
-                    WHERE (%s::text IS NULL OR analyst_id=%s)
-                    ORDER BY strategy_available_at DESC LIMIT %s""",
-                (analyst_id, analyst_id, bounded),
-            ).fetchall()
-            health = connection.execute(
-                """SELECT analyst_id,count(*)::int observations,
-                          count(*) FILTER (WHERE status='eligible')::int eligible,
-                          count(*) FILTER (WHERE status='replay_only')::int replay_only,
-                          max(strategy_available_at) latest_available_at
-                     FROM quant.analyst_observations
-                    WHERE (%s::text IS NULL OR analyst_id=%s)
-                    GROUP BY analyst_id ORDER BY analyst_id""", (analyst_id, analyst_id),
-            ).fetchall()
-        return {"items": [dict(row) for row in rows], "health": [dict(row) for row in health],
-                "live_effect": "none", "boundary": "append_only text-derived observations; promotion registry remains zero by default"}
+    async def observations(analyst_id: str | None = None, limit: int = 100) -> dict[str, Any]:
+        if async_database is not None:
+            return await (async_observations_fn or async_observations)(async_database, analyst_id, limit)
+        return _observations_sync(database, analyst_id, limit)
 
     @router.get("/api/v1/analyst-research/market-evaluation")
     def market_evaluation(

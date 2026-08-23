@@ -147,6 +147,7 @@
 
 ## 验证
 
+- 2026-08-22：`/api/v1/analyst-research/profiles` 与 `/api/v1/analyst-research/observations` 已迁至原生异步只读池。前者只展示人工来源先验，后者只展示 append-only 文字观察和健康聚合；两者均不触发远端同步、不重建模型，且 live effect 保持 `none`。新增异步路由优先、本地原生连接与 500 条上限回归；真实本地 GET 分别返回 6 个档案和 3 条观察/6 组健康聚合。重建后的全量回归为 641 项通过，开盘前只读预检通过。
 - 2026-08-22：`/api/v1/analyst-skills` 已迁至原生异步只读池。它只读取已持久化的离线文本蒸馏档案，不会重建 profile、远端同步或接触行情 provider；原同步兼容路径仍可在未配置异步池时使用。新增路由优先异步与原生连接/上限回归；真实本地 GET 返回 3 条档案及明确的零 live-rule 影响边界。重建后的全量回归为 639 项通过，开盘前只读预检通过。
 - 2026-08-22：`/api/v1/intraday/decision-cards/{symbol}` 已迁至原生异步只读池。卡片的最新报价/信号/板块证据、PIT 分析师文字汇总、promotion registry 和 scorecard readiness 在同一 async transaction 中读取；纯投影与旧同步路径共用，分析师依旧默认 `research_context_only`、权重为零。新增 async 本地证据、缺报价 404 回归；真实已存证标的 `000501.SZ` GET 返回卡片、`rotation_defensive` 与零权重上下文，未请求市场 provider。重建后的全量回归为 637 项通过，开盘前只读预检通过。
 - 2026-08-22：高流入概念与涨停池的精确代码 join 编排已移至 `app/concept_limit_candidate_service.py`，并删除主服务中无调用方的旧实现，避免双实现漂移。该服务拒绝 `super_get` 作为完整成员快照来源；单概念成员失败降级为 `partial`，而涨停池失败则不写候选；仅保留当日 `limit_list_ths` 的有效“涨停池”证券代码。新增 provider fail-closed、成员失败/精确过滤与涨停池失败不写入回归。重建后的全量回归为 635 项通过，开盘前只读预检通过。
