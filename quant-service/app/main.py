@@ -356,9 +356,11 @@ from .daily_strategy_summary_service import (
     build_daily_strategy_summary as build_daily_strategy_summary_projection,
     terminal_for_exchange_date as daily_summary_terminal_isolated,
 )
-from .daily_strategy_summary_scheduler import (
-    DailyStrategySummarySchedulerDependencies,
-    daily_strategy_summary_scheduler,
+from .daily_strategy_summary_scheduler import daily_strategy_summary_scheduler
+from .daily_strategy_summary_runtime import (
+    DailyStrategySummaryRuntimeDependencies,
+    run_daily_strategy_summary as run_daily_strategy_summary_runtime,
+    run_daily_strategy_summary_loop as run_daily_strategy_summary_runtime_loop,
 )
 from .strategy_decision_service import run as run_strategy_decision_isolated
 from .strategy_review_service import build as build_strategy_review_isolated, completed_for_checkpoint as review_checkpoint_completed_isolated
@@ -2691,38 +2693,24 @@ def build_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
 
 
 async def run_daily_strategy_summary(exchange_date: date) -> dict[str, Any]:
-    """Persist the daily summary for the frontend without external delivery."""
-    summary = await run_database_blocking(build_daily_strategy_summary, exchange_date)
-    dashboard_url = (os.getenv("QUANT_DASHBOARD_PUBLIC_URL") or "").strip().rstrip("/") or None
-    text = daily_strategy_summary_text(summary, dashboard_url)
-
-    def persist_frontend_only() -> None:
-        with db.transaction() as connection:
-            connection.execute(
-                """INSERT INTO quant.strategy_day_summaries(exchange_date,payload,message_text,delivery_status,error_message)
-                   VALUES(%s,%s,%s,'suppressed','suppressed: Feishu is reserved for watched-stock strategy signals')
-                   ON CONFLICT(exchange_date) DO UPDATE SET payload=EXCLUDED.payload,message_text=EXCLUDED.message_text,
-                       delivery_status='suppressed',next_attempt_at=NULL,
-                       error_message=EXCLUDED.error_message,updated_at=now()""",
-                (exchange_date, Json(strategy_json_safe(summary)), text),
-            )
-    await run_database_blocking(persist_frontend_only)
-    return {"status": "suppressed", "exchange_date": str(exchange_date), "summary": summary,
-            "reason": "Feishu is reserved for watched-stock strategy signals"}
+    """Persist the frontend-only daily summary through its runtime adapter."""
+    return await run_daily_strategy_summary_runtime(exchange_date, _daily_strategy_summary_runtime_dependencies())
 
 async def daily_strategy_summary_loop() -> None:
-    """Deliver one compact review after the post-close candidate retry window."""
-    async def terminal_for_date(exchange_date: date) -> bool:
-        def load() -> bool:
-            with db.transaction() as connection:
-                return daily_summary_terminal_isolated(connection, exchange_date)
-        return await run_database_blocking(load, timeout_seconds=10)
-    await daily_strategy_summary_scheduler(DailyStrategySummarySchedulerDependencies(
+    """Run the frontend-only daily summary scheduler through its adapter."""
+    await run_daily_strategy_summary_runtime_loop(_daily_strategy_summary_runtime_dependencies())
+
+
+def _daily_strategy_summary_runtime_dependencies() -> DailyStrategySummaryRuntimeDependencies:
+    return DailyStrategySummaryRuntimeDependencies(
+        database=db, run_database=run_database_blocking, build_summary=build_daily_strategy_summary,
+        summary_text=daily_strategy_summary_text,
+        dashboard_url=lambda: (os.getenv("QUANT_DASHBOARD_PUBLIC_URL") or "").strip().rstrip("/") or None,
+        json_safe=strategy_json_safe, json_value=Json, terminal_for_exchange_date=daily_summary_terminal_isolated,
         calendar_open=sse_calendar_open_async,
-        terminal_for_date=terminal_for_date,
-        run_summary=run_daily_strategy_summary,
         now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
-    ))
+        scheduler=daily_strategy_summary_scheduler,
+    )
 
 
 async def intraday_monitor_loop(interval_seconds: int) -> None:
