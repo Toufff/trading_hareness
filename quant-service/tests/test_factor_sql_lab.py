@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from datetime import date
 
@@ -18,6 +19,9 @@ class RecordingResult:
     def fetchone(self):
         return self.row
 
+    def fetchall(self):
+        return []
+
 
 class RecordingConnection:
     def __init__(self):
@@ -25,6 +29,8 @@ class RecordingConnection:
 
     def execute(self, sql, params=None):
         self.calls.append((sql, params))
+        if "SELECT count(*)::int AS count FROM factor_sql_strategy_trades" in sql:
+            return RecordingResult({"count": 0})
         return RecordingResult()
 
 
@@ -59,6 +65,22 @@ class FactorSqlLabTests(unittest.TestCase):
                 None, "all_a", 1, 2,
                 {"factors": ["momentum_20d"], "rebalance_days": 1, "hold_days": 5},
             )
+
+    def test_sql_strategy_uses_shared_t_plus_one_exit_lag(self):
+        connection = RecordingConnection()
+        with patch("app.factor_sql_lab.prepare_factor_panel", return_value={}) as prepare_panel:
+            result = run_multi_factor_strategy_sql(
+                connection, "all_a", date(2026, 1, 1), date(2026, 3, 1),
+                {"factors": ["momentum_20d"], "rebalance_days": 6, "hold_days": 5},
+            )
+
+        self.assertEqual(prepare_panel.call_args.args[-1], 6)
+        self.assertEqual(result["parameters"]["effective_exit_lag"], 6)
+        trade_insert_params = next(
+            params for sql, params in connection.calls
+            if "CREATE TEMP TABLE factor_sql_strategy_trades" in sql
+        )
+        self.assertEqual(trade_insert_params[2], 6)
 
     def test_formal_history_requires_calendar_span_as_well_as_trading_day_count(self):
         class Connection:
