@@ -30,6 +30,15 @@ class IntradayScanLocalState:
     snapshot_payload: dict[str, Any]
 
 
+@dataclass
+class IntradaySignalEventState:
+    """Existing event state needed to classify one watch's signal batch."""
+
+    latest_by_key: dict[str, dict[str, Any]]
+    last_alerted_by_key: dict[str, dict[str, Any]]
+    last_symbol_watch_alerted: dict[str, Any] | None
+
+
 def previous_quote_frames(
     connection: Any,
     quote_sources: dict[str, str],
@@ -142,6 +151,50 @@ def load_intraday_scan_local_state(
     )
 
 
+def load_intraday_signal_event_state(
+    connection: Any,
+    signal_keys: list[str],
+    symbol: str,
+    *,
+    session_start: datetime,
+) -> IntradaySignalEventState:
+    """Batch the three event-state reads used by one watch's generated signals.
+
+    The first two queries preserve the prior per-key semantics with
+    ``DISTINCT ON``.  The caller updates ``latest_by_key`` after each insert
+    so duplicate keys generated in a single scan still observe the first
+    event, just as they did with the former per-signal query sequence.
+    """
+    normalized_keys = sorted({str(key) for key in signal_keys if str(key)})
+    if not normalized_keys:
+        return IntradaySignalEventState({}, {}, None)
+    latest_rows = connection.execute(
+        """SELECT DISTINCT ON(signal_key) signal_key,observed_at
+             FROM quant.intraday_signal_events
+            WHERE signal_key=ANY(%s)
+            ORDER BY signal_key,observed_at DESC""",
+        (normalized_keys,),
+    ).fetchall()
+    alerted_rows = connection.execute(
+        """SELECT DISTINCT ON(signal_key) signal_key,observed_at,score,conditions
+             FROM quant.intraday_signal_events
+            WHERE signal_key=ANY(%s) AND state='alerted' AND observed_at>=%s
+            ORDER BY signal_key,observed_at DESC""",
+        (normalized_keys, session_start),
+    ).fetchall()
+    last_symbol_watch_alerted = connection.execute(
+        """SELECT observed_at FROM quant.intraday_signal_events
+             WHERE symbol=%s AND signal_type='watch' AND state='alerted'
+             ORDER BY observed_at DESC LIMIT 1""",
+        (symbol,),
+    ).fetchone()
+    return IntradaySignalEventState(
+        latest_by_key={str(row["signal_key"]): dict(row) for row in latest_rows},
+        last_alerted_by_key={str(row["signal_key"]): dict(row) for row in alerted_rows},
+        last_symbol_watch_alerted=dict(last_symbol_watch_alerted) if last_symbol_watch_alerted else None,
+    )
+
+
 def persist_intraday_scan_terminal(
     database: Any,
     scan_id: uuid.UUID,
@@ -186,8 +239,10 @@ def persist_intraday_scan_terminal(
 
 __all__ = [
     "IntradayScanLocalState",
+    "IntradaySignalEventState",
     "first_eac_breakout_events",
     "load_intraday_scan_local_state",
+    "load_intraday_signal_event_state",
     "persist_intraday_scan_terminal",
     "previous_quote_frames",
 ]

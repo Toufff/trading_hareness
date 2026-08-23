@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 from app.intraday_scan_repository import (
     first_eac_breakout_events,
     load_intraday_scan_local_state,
+    load_intraday_signal_event_state,
     previous_quote_frames,
 )
 from app.watchlist_daily_factors import watchlist_daily_factors_by_symbol
@@ -99,6 +100,53 @@ class IntradayScanRepositoryTests(unittest.TestCase):
         membership_sql, membership_params = connection.calls[2]
         self.assertIn("effective_from<=%s", membership_sql)
         self.assertEqual(membership_params[1:], (date(2026, 8, 17), date(2026, 8, 17)))
+
+    def test_signal_state_batches_per_key_reads_and_preserves_alert_payload(self) -> None:
+        class Result:
+            def __init__(self, *, rows=None, row=None):
+                self.rows, self.row = rows or [], row
+
+            def fetchall(self):
+                return self.rows
+
+            def fetchone(self):
+                return self.row
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+                at = datetime(2026, 8, 17, 1, 0, tzinfo=timezone.utc)
+                self.results = iter([
+                    Result(rows=[{"signal_key": "000001.SZ:watch:one", "observed_at": at}]),
+                    Result(rows=[{"signal_key": "000001.SZ:watch:one", "observed_at": at, "score": 80, "conditions": {"price": 10.0}}]),
+                    Result(row={"observed_at": at}),
+                ])
+
+            def execute(self, sql, params=None):
+                self.calls.append((str(sql), params))
+                return next(self.results)
+
+        connection = Connection()
+        state = load_intraday_signal_event_state(
+            connection, ["000001.SZ:watch:one", "000001.SZ:watch:one", "000001.SZ:watch:two"],
+            "000001.SZ", session_start=datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(len(connection.calls), 3)
+        self.assertEqual(sorted(state.latest_by_key), ["000001.SZ:watch:one"])
+        self.assertEqual(state.last_alerted_by_key["000001.SZ:watch:one"]["conditions"]["price"], 10.0)
+        self.assertEqual(state.last_symbol_watch_alerted["observed_at"], datetime(2026, 8, 17, 1, 0, tzinfo=timezone.utc))
+        self.assertEqual(connection.calls[0][1], (["000001.SZ:watch:one", "000001.SZ:watch:two"],))
+        self.assertIn("DISTINCT ON(signal_key)", connection.calls[0][0])
+        self.assertIn("state='alerted'", connection.calls[1][0])
+
+    def test_empty_signal_state_does_not_query_database(self) -> None:
+        connection = MagicMock()
+        state = load_intraday_signal_event_state(
+            connection, [], "000001.SZ", session_start=datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(state.latest_by_key, {})
+        self.assertIsNone(state.last_symbol_watch_alerted)
+        connection.execute.assert_not_called()
 
     def test_daily_factors_for_watch_basket_use_one_ranked_query(self) -> None:
         rows = []

@@ -230,6 +230,7 @@ from .intraday_outcomes import (
 from .intraday_scan_repository import (
     first_eac_breakout_events,
     load_intraday_scan_local_state,
+    load_intraday_signal_event_state,
     persist_intraday_scan_terminal,
     previous_quote_frames,
 )
@@ -2735,6 +2736,10 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 signal["conditions"] = {**signal["conditions"], "realtime_cross_check": fast_confirmation}
                 if fast_confirmation.get("status") == "mismatch":
                     signal["risk_flags"] = [*signal["risk_flags"], "realtime_cross_source_price_mismatch"]
+            event_state = load_intraday_signal_event_state(
+                connection, [str(signal["signal_key"]) for signal in generated_signals], symbol,
+                session_start=session_start,
+            )
             for signal in generated_signals:
                 portfolio_gate = paper_risk_gate(
                     signal_type=signal["signal_type"], symbol=symbol,
@@ -2770,22 +2775,9 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     **signal["conditions"],
                     "signal_contract": intraday_signal_contract(signal, observed_at),
                 }
-                latest = connection.execute(
-                    "SELECT observed_at FROM quant.intraday_signal_events WHERE signal_key=%s ORDER BY observed_at DESC LIMIT 1",
-                    (signal["signal_key"],),
-                ).fetchone()
-                last_key_alerted = connection.execute(
-                    """SELECT observed_at,score,conditions FROM quant.intraday_signal_events
-                         WHERE signal_key=%s AND state='alerted' AND observed_at>=%s
-                         ORDER BY observed_at DESC LIMIT 1""",
-                    (signal["signal_key"], session_start),
-                ).fetchone()
-                last_symbol_watch_alerted = connection.execute(
-                    """SELECT observed_at FROM quant.intraday_signal_events
-                         WHERE symbol=%s AND signal_type='watch' AND state='alerted'
-                         ORDER BY observed_at DESC LIMIT 1""",
-                    (symbol,),
-                ).fetchone()
+                latest = event_state.latest_by_key.get(str(signal["signal_key"]))
+                last_key_alerted = event_state.last_alerted_by_key.get(str(signal["signal_key"]))
+                last_symbol_watch_alerted = event_state.last_symbol_watch_alerted
                 state = intraday_signal_event_state(
                     signal, observed_at=observed_at,
                     latest_event_at=latest["observed_at"] if latest else None,
@@ -2822,6 +2814,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                      episode["material_state_hash"] if episode else None,
                      episode["stage"] if episode else "data_issue"),
                 ).fetchone()
+                event_state.latest_by_key[str(signal["signal_key"])] = {"observed_at": observed_at}
                 # Confirmed signals create an auditable paper proposal only.
                 # No broker client or live order path is reachable here.
                 if state == "confirmed":
