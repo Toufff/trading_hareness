@@ -8,6 +8,7 @@ removes every row it created in ``finally``.
 from __future__ import annotations
 
 import os
+import re
 import unittest
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
@@ -67,6 +68,41 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
                 self.assertEqual(client.post("/api/v1/strategies/intraday/replay-recorded-inputs", json={"max_rows": 0}, headers={"X-Quant-Write-Key": "test-write-key"}).status_code, 422)
                 self.assertEqual(client.post("/api/v1/analyst-research/reviews/run", json={}).status_code, 401)
                 self.assertEqual(client.post("/api/v1/analyst-research/reviews/run", json={"cadence": "bad"}, headers={"X-Quant-Write-Key": "test-write-key"}).status_code, 422)
+        finally:
+            app.router.lifespan_context = original_lifespan
+            if previous is None:
+                os.environ.pop("QUANT_WRITE_API_KEY", None)
+            else:
+                os.environ["QUANT_WRITE_API_KEY"] = previous
+
+    def test_every_mounted_mutation_route_rejects_an_unsigned_request(self) -> None:
+        """Keep the app-wide write gate true as routers are added.
+
+        Middleware runs before FastAPI validates path/body parameters, so an
+        intentionally generic path parameter and empty JSON body are enough
+        to prove every mounted POST/PUT/PATCH/DELETE route is protected
+        without executing its business handler or starting market loops.
+        """
+        @asynccontextmanager
+        async def no_lifespan(_: object):
+            yield
+
+        original_lifespan = app.router.lifespan_context
+        previous = os.environ.get("QUANT_WRITE_API_KEY")
+        os.environ["QUANT_WRITE_API_KEY"] = "test-write-key"
+        try:
+            app.router.lifespan_context = no_lifespan
+            with TestClient(app) as client:
+                protected_routes = [
+                    (method, re.sub(r"\\{[^}]+\\}", "test", route.path))
+                    for route in app.routes
+                    if getattr(route, "methods", None)
+                    for method in sorted(route.methods & {"POST", "PUT", "PATCH", "DELETE"})
+                ]
+                self.assertGreater(len(protected_routes), 0)
+                for method, path in protected_routes:
+                    response = client.request(method, path, json={})
+                    self.assertEqual(response.status_code, 401, f"unsigned {method} {path}: {response.status_code}")
         finally:
             app.router.lifespan_context = original_lifespan
             if previous is None:
