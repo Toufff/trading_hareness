@@ -153,7 +153,13 @@ prune_completed_backups() {
   prune_daily_backups_to_capacity "$reserve_bytes"
 }
 
-mkdir -p "$backup_root"
+if [[ ! -d "$backup_root" ]]; then
+  if [[ "$dry_run" == true ]]; then
+    printf 'would_create_backup_root=%s\n' "$backup_root"
+    exit 0
+  fi
+  mkdir -p "$backup_root"
+fi
 if [[ "$prune_only" == true ]]; then
   prune_completed_backups
   exit 0
@@ -166,6 +172,11 @@ fi
 # This only ever prunes strictly named, completed daily bundles.
 expected_backup_bytes="$(latest_daily_backup_bytes)"
 prune_completed_backups "$expected_backup_bytes"
+if [[ "$dry_run" == true ]]; then
+  printf 'would_create_daily_backup=true\n'
+  printf 'preflight_reserved_backup_bytes=%s\n' "$expected_backup_bytes"
+  exit 0
+fi
 
 stamp="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M%S)"
 backup_dir="${backup_root}/${stamp}-daily"
