@@ -147,6 +147,7 @@
 
 ## 验证
 
+- 2026-08-22：概念资金流到涨停候选的本地 SQL 适配层已收敛到 `app/concept_limit_candidate_repository.py`。它只在同一交易日按精确 `ths_member` 代码 join 已保存的概念流和涨停池；成员快照、候选替换和写入仍通过有界数据库执行器，未增加 provider 请求、名称猜测或实时策略评分。新增请求日期选择与成员来源 provenance 回归；容器定向回归通过。
 - 2026-08-22：分析师成绩单的 maturity/readiness 投影已从 `main.py` 收敛到 `app/analyst_scorecards.py`，与同模块的本地 scorecard materialization 共置。它保留“无方向观点、少于 30 个已结算结果、可进入人工 review”三种原因码，仍只输出研究门禁，不会改变 promotion 或 live 权重。新增三类成熟度原因回归；容器定向回归通过。
 - 2026-08-22：`/api/v1/analyst-research/sync-health` 已改为 async 路由；因它仍需只读关联 n8n `public` 审计表，兼容投影暂由 30 秒有界数据库执行器承载，而非冒然复制跨 schema SQL。原有游标、最近同步回执、published workflow 证据和 isolated schema 降级语义不变。新增路由有界执行器回归；容器定向回归通过。
 - 2026-08-22：单股研究的本地分析师 claim 查询与加权汇总也已收敛到 `app/stock_study_readiness_repository.py`。它最多读取 50 条已可用的 stock claim，仅输出研究分数/方向和文字证据计数；不修改 promotion registry 或任何 live 权重。新增正负文字 claim 加权汇总回归；重建后的全量回归为 670 项通过，开盘前只读预检通过。

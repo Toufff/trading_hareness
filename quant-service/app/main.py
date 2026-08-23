@@ -490,6 +490,11 @@ from .concept_limit_candidate_service import (
     ConceptLimitCandidateDependencies,
     run as run_concept_limit_candidates_isolated,
 )
+from .concept_limit_candidate_repository import (
+    persist_candidates as persist_concept_limit_candidates,
+    persist_members as persist_concept_limit_members,
+    select_concepts as select_concept_limit_concepts,
+)
 from .tushare_official import (
     AUDIT_FOCUS_APIS,
     HISTORICAL_MINUTE_APIS,
@@ -3501,91 +3506,27 @@ async def ths_concept_member_backfill_loop() -> None:
 async def sync_concept_limit_candidates(request: ConceptCandidateSyncRequest) -> dict[str, Any]:
     """Build exact concept/limit-up candidates through the isolated service."""
     async def select_concepts(trade_date: date | None, top_concepts: int) -> tuple[date | None, list[Any]]:
-        def select_concepts() -> tuple[date | None, list[Any]]:
-            with db.transaction() as connection:
-                selected_date = trade_date or connection.execute(
-                    "SELECT max(trading_date) latest FROM quant.sector_market_observations WHERE taxonomy_key='ths_concept_flow'"
-                ).fetchone()["latest"]
-                if selected_date is None:
-                    return None, []
-                concepts = connection.execute(
-                    """SELECT o.sector_key,s.label,o.net_amount
-                         FROM quant.sector_market_observations o
-                         JOIN quant.sectors s ON s.taxonomy_key=o.taxonomy_key AND s.sector_key=o.sector_key
-                        WHERE o.taxonomy_key='ths_concept_flow' AND o.trading_date=%s AND o.net_amount IS NOT NULL
-                        ORDER BY o.net_amount DESC,s.label LIMIT %s""",
-                    (selected_date, top_concepts),
-                ).fetchall()
-            return selected_date, concepts
-        return await run_database_blocking(select_concepts)
+        return await run_database_blocking(select_concept_limit_concepts, db, trade_date, top_concepts)
 
     async def load_rows(request_key: str) -> list[dict[str, Any]]:
         return await run_database_blocking(tushare_rows_for_request, request_key)
 
     async def persist_members(sector_key: str, rows: list[dict[str, Any]], provider: str, observed_at: datetime) -> int:
-        def persist_members() -> int:
-            with db.transaction() as connection:
-                return persist_ths_sector_members(connection, "ths_concept_flow", sector_key, rows, provider, observed_at)
-        return await run_database_blocking(persist_members)
+        return await run_database_blocking(
+            persist_concept_limit_members, db, sector_key, rows, provider, observed_at,
+            persist_ths_sector_members,
+        )
 
     async def persist_candidates(
         selected_date: date, concepts: list[Any], concept_keys: list[str], limit_provider: str,
         limit_by_symbol: dict[str, dict[str, Any]], membership_status: dict[str, str], observed_at: datetime,
         leaders_per_concept: int,
     ) -> tuple[int, list[dict[str, Any]]]:
-        def persist_candidates() -> tuple[int, list[dict[str, Any]]]:
-            with db.transaction() as connection:
-                memberships = connection.execute(
-                    """SELECT sector_key,symbol,raw FROM quant.sector_membership_history
-                         WHERE taxonomy_key='ths_concept_flow' AND sector_key = ANY(%s) AND effective_from<=%s
-                           AND (effective_to IS NULL OR effective_to>=%s)""",
-                    (concept_keys, selected_date, selected_date),
-                ).fetchall()
-                members_by_sector: dict[str, list[dict[str, Any]]] = {}
-                for row in memberships:
-                    members_by_sector.setdefault(str(row["sector_key"]), []).append(dict(row))
-                connection.execute(
-                    """DELETE FROM quant.sector_limit_candidates
-                         WHERE taxonomy_key='ths_concept_flow' AND trading_date=%s AND provider_key=%s AND sector_key = ANY(%s)""",
-                    (selected_date, limit_provider, concept_keys),
-                )
-                stored = 0
-                per_concept: list[dict[str, Any]] = []
-                for concept in concepts:
-                    sector_key = str(concept["sector_key"])
-                    matches = [
-                        (member, limit_by_symbol[str(member["symbol"]).upper()])
-                        for member in members_by_sector.get(sector_key, [])
-                        if str(member["symbol"]).upper() in limit_by_symbol
-                    ]
-                    matches.sort(
-                        key=lambda item: (
-                            study_number(item[1].get("limit_amount")) or 0.0,
-                            study_number(item[1].get("pct_chg")) or 0.0,
-                        ), reverse=True,
-                    )
-                    selected = matches[:leaders_per_concept]
-                    for member, row in selected:
-                        symbol = str(member["symbol"]).upper()
-                        connection.execute(
-                            """INSERT INTO quant.sector_limit_candidates(taxonomy_key,sector_key,symbol,trading_date,provider_key,available_at,
-                                     name,limit_tag,limit_type,pct_change,price,limit_amount,turnover_rate,open_num,status,description,raw)
-                               VALUES('ths_concept_flow',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                               ON CONFLICT(taxonomy_key,sector_key,symbol,trading_date,provider_key) DO UPDATE SET available_at=EXCLUDED.available_at,
-                                 name=EXCLUDED.name,limit_tag=EXCLUDED.limit_tag,limit_type=EXCLUDED.limit_type,pct_change=EXCLUDED.pct_change,
-                                 price=EXCLUDED.price,limit_amount=EXCLUDED.limit_amount,turnover_rate=EXCLUDED.turnover_rate,open_num=EXCLUDED.open_num,
-                                 status=EXCLUDED.status,description=EXCLUDED.description,raw=EXCLUDED.raw""",
-                            (sector_key, symbol, selected_date, limit_provider, observed_at, row.get("name"), row.get("tag"), row.get("limit_type"),
-                             decimal_or_none(row.get("pct_chg")), decimal_or_none(row.get("price")), decimal_or_none(row.get("limit_amount")),
-                             decimal_or_none(row.get("turnover_rate")), decimal_or_none(row.get("open_num")), row.get("status"), row.get("lu_desc"),
-                             Json({"limit_list_ths": row, "ths_member": member["raw"],
-                                   "membership_fetch_status": membership_status.get(sector_key, "unknown")})),
-                        )
-                        stored += 1
-                    per_concept.append({"sector_key": sector_key, "label": concept["label"], "net_amount": concept["net_amount"],
-                                        "matched_limit_ups": len(matches), "stored": len(selected)})
-            return stored, per_concept
-        return await run_database_blocking(persist_candidates)
+        return await run_database_blocking(
+            persist_concept_limit_candidates, db, selected_date, concepts, concept_keys, limit_provider,
+            limit_by_symbol, membership_status, observed_at, leaders_per_concept,
+            study_number, decimal_or_none, Json,
+        )
 
     return await run_concept_limit_candidates_isolated(
         request,
