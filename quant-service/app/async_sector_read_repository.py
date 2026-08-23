@@ -1,64 +1,38 @@
-"""Bounded read-only projections for persisted sector, concept, and member evidence."""
+"""Native-async projections for persisted sector, concept and member evidence."""
 
 from __future__ import annotations
 
 from datetime import date
 from typing import Any
 
+from .sector_read_model import project_concept_member_backfill_status, project_concept_sector_signals
 
-def project_concept_member_backfill_status(
-    selected_date: date,
-    total: int,
-    receipt_mapped: int,
-    active_mapping: dict[str, Any],
-    states: list[Any],
-    *,
-    automatic_enabled: bool,
-    batch_size: int,
+
+async def _latest_date(connection: Any, table: str, taxonomy_key: str) -> date | None:
+    result = await connection.execute(
+        f"SELECT max(trading_date) latest FROM {table} WHERE taxonomy_key=%s", (taxonomy_key,),
+    )
+    row = await result.fetchone()
+    return row["latest"] if row else None
+
+
+async def concept_member_backfill_status(
+    async_database: Any, trade_date: date | None, *, automatic_enabled: bool, batch_size: int,
 ) -> dict[str, Any]:
-    """Expose actual exact-member coverage separately from sync receipts."""
-    active_mapped = int(active_mapping.get("mapped_concepts") or 0)
-    active_members = int(active_mapping.get("member_rows") or 0)
-    active_available_at = active_mapping.get("latest_available_at")
-    items = [dict(row) for row in states]
-    if active_mapped and not items:
-        items.append({
-            "state": "active_exact_mapping", "boards": active_mapped, "members": active_members,
-            "evidence_rows": active_members, "latest_updated_at": active_available_at,
-        })
-    return {
-        "trade_date": str(selected_date), "total_concepts": total, "mapped_concepts": active_mapped,
-        "complete": active_mapped == total, "states": items,
-        "receipt_mapped_concepts": receipt_mapped, "receipt_complete": receipt_mapped == total,
-        "mapping_evidence": {
-            "status": "current_active_exact" if active_mapped else "missing",
-            "latest_available_at": active_available_at,
-            "notice": "active exact mapping reflects current effective code relations; receipt coverage only reflects a same-date member-sync ledger.",
-        },
-        "automatic": {"enabled": automatic_enabled, "batch_size": batch_size},
-        "notice": "只有精确成员已完成的概念才可展示完整 Top10；mapped_concepts 使用当前有效精确代码关系，receipt_mapped_concepts 单独披露同日同步回执，二者不互相替代。",
-    }
-
-
-def concept_member_backfill_status(
-    database: Any, trade_date: date | None, *, automatic_enabled: bool, batch_size: int,
-) -> dict[str, Any]:
-    with database.transaction() as connection:
-        selected_date = trade_date or connection.execute(
-            "SELECT max(trading_date) latest FROM quant.sector_market_observations WHERE taxonomy_key='ths_concept_flow'"
-        ).fetchone()["latest"]
+    async with async_database.transaction() as connection:
+        selected_date = trade_date or await _latest_date(connection, "quant.sector_market_observations", "ths_concept_flow")
         if selected_date is None:
             return {"trade_date": None, "total_concepts": 0, "mapped_concepts": 0, "states": [], "notice": "尚未同步同花顺概念资金流。"}
-        total = connection.execute(
+        total_result = await connection.execute(
             "SELECT count(*)::int total FROM quant.sector_market_observations WHERE taxonomy_key='ths_concept_flow' AND trading_date=%s",
             (selected_date,),
-        ).fetchone()["total"]
-        receipt_mapped = connection.execute(
+        )
+        receipt_mapped_result = await connection.execute(
             """SELECT count(*)::int total FROM quant.sector_member_sync_state
                 WHERE taxonomy_key='ths_concept_flow' AND trading_date=%s AND state IN ('completed','empty')""",
             (selected_date,),
-        ).fetchone()["total"]
-        active_mapping = connection.execute(
+        )
+        active_mapping_result = await connection.execute(
             """SELECT count(DISTINCT flow.sector_key)::int AS mapped_concepts,
                       count(history.symbol)::int AS member_rows,max(history.available_at) AS latest_available_at
                  FROM quant.sector_market_observations flow
@@ -67,8 +41,8 @@ def concept_member_backfill_status(
                   AND history.effective_to IS NULL
                 WHERE flow.taxonomy_key='ths_concept_flow' AND flow.trading_date=%s""",
             (selected_date,),
-        ).fetchone()
-        states = connection.execute(
+        )
+        states_result = await connection.execute(
             """SELECT sync.state,count(*)::int boards,
                       coalesce(sum(active.member_count),0)::int members,
                       sum(sync.member_count)::int evidence_rows,
@@ -82,22 +56,23 @@ def concept_member_backfill_status(
                 WHERE sync.taxonomy_key='ths_concept_flow' AND sync.trading_date=%s
                 GROUP BY sync.state ORDER BY sync.state""",
             (selected_date,),
-        ).fetchall()
+        )
+        total = int((await total_result.fetchone())["total"] or 0)
+        receipt_mapped = int((await receipt_mapped_result.fetchone())["total"] or 0)
+        active_mapping = dict(await active_mapping_result.fetchone() or {})
+        states = [dict(row) for row in await states_result.fetchall()]
     return project_concept_member_backfill_status(
-        selected_date, int(total), int(receipt_mapped), dict(active_mapping or {}), states,
+        selected_date, total, receipt_mapped, active_mapping, states,
         automatic_enabled=automatic_enabled, batch_size=batch_size,
     )
 
 
-def concept_sector_signals(database: Any, trade_date: date | None, limit: int) -> dict[str, Any]:
-    """Return a transparent persisted THS concept scan without provider calls."""
-    with database.transaction() as connection:
-        selected_date = trade_date or connection.execute(
-            "SELECT max(trading_date) latest FROM quant.sector_market_observations WHERE taxonomy_key='ths_concept_flow'"
-        ).fetchone()["latest"]
+async def concept_sector_signals(async_database: Any, trade_date: date | None, limit: int) -> dict[str, Any]:
+    async with async_database.transaction() as connection:
+        selected_date = trade_date or await _latest_date(connection, "quant.sector_market_observations", "ths_concept_flow")
         if selected_date is None:
             return {"trade_date": None, "items": [], "scoring": {"decision_eligible": False}}
-        rows = connection.execute(
+        result = await connection.execute(
             """WITH concept AS (
                    SELECT o.sector_key,s.label,o.close,o.change_pct,o.net_amount,o.net_buy_amount,o.net_sell_amount,
                           o.constituent_count,o.leading_label,o.provider_key,o.available_at,o.raw,
@@ -114,45 +89,18 @@ def concept_sector_signals(database: Any, trade_date: date | None, limit: int) -
               LEFT JOIN quant.sector_market_observations ls
                      ON ls.taxonomy_key='ths_limit_strength' AND ls.trading_date=%s AND ls.sector_key=c.sector_key
                   ORDER BY c.net_amount DESC NULLS LAST,c.label LIMIT %s""",
-            (selected_date, selected_date, max(1, min(limit, 1000))),
-        ).fetchall()
+            (selected_date, selected_date, max(1, min(int(limit), 1000))),
+        )
+        rows = [dict(row) for row in await result.fetchall()]
     return project_concept_sector_signals(rows, selected_date)
 
 
-def project_concept_sector_signals(rows: list[Any], selected_date: date) -> dict[str, Any]:
-    """Score already-read concept rows without database or provider access."""
-    items: list[dict[str, Any]] = []
-    for row in rows:
-        item = dict(row)
-        flow_score = round(float(item["flow_percentile"] or 0) * 100, 2)
-        momentum_score = round(max(0.0, min(100.0, 50.0 + float(item["change_pct"] or 0) * 5.0)), 2)
-        if item["up_nums"] is None:
-            strength_score = None
-            aggregate_score = round(flow_score * 0.65 + momentum_score * 0.35, 2)
-        else:
-            strength_score = round(min(100.0, float(item["up_nums"]) * 10.0 + float(item["streak_days"] or 0) * 3.0), 2)
-            aggregate_score = round(flow_score * 0.50 + momentum_score * 0.30 + strength_score * 0.20, 2)
-        item.update({"flow_score": flow_score, "momentum_score": momentum_score,
-                     "strength_score": strength_score, "aggregate_score": aggregate_score})
-        item.pop("raw", None)
-        item.pop("strength_raw", None)
-        items.append(item)
-    items.sort(key=lambda item: float(item["aggregate_score"]), reverse=True)
-    return {
-        "trade_date": str(selected_date), "items": items,
-        "scoring": {"decision_eligible": False, "purpose": "board_scan_only",
-                    "weights": "flow 65% + momentum 35%; when limit-up strength exists: 50% + 30% + 20%"},
-    }
-
-
-def concept_limit_candidates(database: Any, trade_date: date | None, limit: int) -> dict[str, Any]:
-    with database.transaction() as connection:
-        selected_date = trade_date or connection.execute(
-            "SELECT max(trading_date) latest FROM quant.sector_limit_candidates WHERE taxonomy_key='ths_concept_flow'"
-        ).fetchone()["latest"]
+async def concept_limit_candidates(async_database: Any, trade_date: date | None, limit: int) -> dict[str, Any]:
+    async with async_database.transaction() as connection:
+        selected_date = trade_date or await _latest_date(connection, "quant.sector_limit_candidates", "ths_concept_flow")
         if selected_date is None:
             return {"trade_date": None, "items": [], "decision_eligible": False}
-        rows = connection.execute(
+        result = await connection.execute(
             """SELECT c.sector_key,s.label concept_label,c.symbol,c.name,c.limit_tag,c.limit_type,c.pct_change,c.price,c.limit_amount,
                       c.turnover_rate,c.open_num,c.status,c.description,c.provider_key,c.available_at,
                       coalesce(c.raw->>'membership_fetch_status','unknown') membership_status,
@@ -163,60 +111,64 @@ def concept_limit_candidates(database: Any, trade_date: date | None, limit: int)
                       AND flow.trading_date=c.trading_date
                 WHERE c.taxonomy_key='ths_concept_flow' AND c.trading_date=%s
                 ORDER BY flow.net_amount DESC NULLS LAST,c.limit_amount DESC NULLS LAST,c.symbol LIMIT %s""",
-            (selected_date, max(1, min(limit, 200))),
-        ).fetchall()
+            (selected_date, max(1, min(int(limit), 200))),
+        )
+        rows = [dict(row) for row in await result.fetchall()]
     return {"trade_date": str(selected_date), "items": rows, "decision_eligible": False,
             "matching_rule": "same-day THS concept member code equals THS limit-up-pool stock code"}
 
 
-def sector_flows(database: Any, taxonomy_key: str, trade_date: date | None, limit: int) -> dict[str, Any]:
-    with database.transaction() as connection:
-        selected_date = trade_date or connection.execute(
-            "SELECT max(trading_date) latest FROM quant.sector_market_observations WHERE taxonomy_key=%s", (taxonomy_key,)
-        ).fetchone()["latest"]
+async def sector_flows(async_database: Any, taxonomy_key: str, trade_date: date | None, limit: int) -> dict[str, Any]:
+    async with async_database.transaction() as connection:
+        selected_date = trade_date or await _latest_date(connection, "quant.sector_market_observations", taxonomy_key)
         if selected_date is None:
             return {"taxonomy_key": taxonomy_key, "trade_date": None, "items": []}
-        rows = connection.execute(
+        result = await connection.execute(
             """SELECT o.taxonomy_key,o.sector_key,s.label,o.trading_date,o.close,o.change_pct,o.net_amount,o.net_buy_amount,o.net_sell_amount,
                       o.constituent_count,o.leading_symbol,o.leading_label,o.provider_key,o.available_at
                  FROM quant.sector_market_observations o JOIN quant.sectors s ON s.taxonomy_key=o.taxonomy_key AND s.sector_key=o.sector_key
                 WHERE o.taxonomy_key=%s AND o.trading_date=%s
                 ORDER BY o.net_amount DESC NULLS LAST,s.label LIMIT %s""",
-            (taxonomy_key, selected_date, max(1, min(limit, 500))),
-        ).fetchall()
+            (taxonomy_key, selected_date, max(1, min(int(limit), 500))),
+        )
+        rows = [dict(row) for row in await result.fetchall()]
     return {"taxonomy_key": taxonomy_key, "trade_date": str(selected_date), "items": rows}
 
 
-def market_sectors(database: Any, taxonomy_key: str, limit: int, offset: int) -> dict[str, Any]:
-    bounded_limit, bounded_offset = max(1, min(limit, 1000)), max(0, offset)
-    with database.transaction() as connection:
-        rows = connection.execute(
+async def market_sectors(async_database: Any, taxonomy_key: str, limit: int, offset: int) -> dict[str, Any]:
+    bounded_limit, bounded_offset = max(1, min(int(limit), 1000)), max(0, int(offset))
+    async with async_database.transaction() as connection:
+        rows_result = await connection.execute(
             """SELECT s.taxonomy_key,s.sector_key,s.label,s.metadata,s.updated_at,count(m.symbol)::int active_members
                  FROM quant.sectors s LEFT JOIN quant.sector_membership_history m
                    ON m.taxonomy_key=s.taxonomy_key AND m.sector_key=s.sector_key AND m.effective_to IS NULL
                 WHERE s.taxonomy_key=%s GROUP BY s.taxonomy_key,s.sector_key,s.label,s.metadata,s.updated_at
                 ORDER BY s.label LIMIT %s OFFSET %s""",
             (taxonomy_key, bounded_limit, bounded_offset),
-        ).fetchall()
-        total = connection.execute("SELECT count(*)::int total FROM quant.sectors WHERE taxonomy_key=%s", (taxonomy_key,)).fetchone()["total"]
+        )
+        total_result = await connection.execute("SELECT count(*)::int total FROM quant.sectors WHERE taxonomy_key=%s", (taxonomy_key,))
+        rows = [dict(row) for row in await rows_result.fetchall()]
+        total = int((await total_result.fetchone())["total"] or 0)
     return {"taxonomy_key": taxonomy_key, "items": rows, "limit": bounded_limit, "offset": bounded_offset, "total": total,
             "next_offset": bounded_offset + len(rows) if bounded_offset + len(rows) < total else None}
 
 
-def sector_members(database: Any, sector_key: str, taxonomy_key: str, limit: int, offset: int) -> dict[str, Any]:
-    bounded_limit, bounded_offset = max(1, min(limit, 1000)), max(0, offset)
-    with database.transaction() as connection:
-        rows = connection.execute(
+async def sector_members(async_database: Any, sector_key: str, taxonomy_key: str, limit: int, offset: int) -> dict[str, Any]:
+    bounded_limit, bounded_offset = max(1, min(int(limit), 1000)), max(0, int(offset))
+    async with async_database.transaction() as connection:
+        rows_result = await connection.execute(
             """SELECT m.symbol,i.name,i.industry,m.effective_from,m.effective_to,m.provider_key,m.available_at
                  FROM quant.sector_membership_history m JOIN quant.instruments i ON i.symbol=m.symbol
                 WHERE m.taxonomy_key=%s AND m.sector_key=%s AND m.effective_to IS NULL
                 ORDER BY m.symbol LIMIT %s OFFSET %s""",
             (taxonomy_key, sector_key, bounded_limit, bounded_offset),
-        ).fetchall()
-        total = connection.execute(
+        )
+        total_result = await connection.execute(
             "SELECT count(*)::int total FROM quant.sector_membership_history WHERE taxonomy_key=%s AND sector_key=%s AND effective_to IS NULL",
             (taxonomy_key, sector_key),
-        ).fetchone()["total"]
+        )
+        rows = [dict(row) for row in await rows_result.fetchall()]
+        total = int((await total_result.fetchone())["total"] or 0)
     return {"taxonomy_key": taxonomy_key, "sector_key": sector_key, "items": rows,
             "limit": bounded_limit, "offset": bounded_offset, "total": total,
             "next_offset": bounded_offset + len(rows) if bounded_offset + len(rows) < total else None}
@@ -224,5 +176,5 @@ def sector_members(database: Any, sector_key: str, taxonomy_key: str, limit: int
 
 __all__ = [
     "concept_limit_candidates", "concept_member_backfill_status", "concept_sector_signals",
-    "market_sectors", "project_concept_member_backfill_status", "project_concept_sector_signals", "sector_flows", "sector_members",
+    "market_sectors", "sector_flows", "sector_members",
 ]

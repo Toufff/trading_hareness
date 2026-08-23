@@ -31,6 +31,10 @@ from app.async_analyst_action_read_repository import anqiang_trade_action_outcom
 from app.async_analyst_action_read_repository import anqiang_trade_action_replay as async_action_replay
 from app.async_automation_run_read_repository import latest_runs as async_automation_runs
 from app.async_market_flow_read_repository import market_flow_features as async_market_flow_features
+from app.async_sector_read_repository import concept_sector_signals as async_concept_signals
+from app.async_sector_read_repository import market_sectors as async_market_sectors
+from app.async_sector_read_repository import sector_members as async_sector_members
+from app.sector_read_model import project_concept_member_backfill_status
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -47,6 +51,7 @@ from app.routers.analyst_trade_action_reads import build_analyst_trade_action_re
 from app.routers.analyst_action_outcomes import build_analyst_action_outcomes_router
 from app.routers.automation_reads import build_automation_reads_router
 from app.routers.market_flow_reads import build_market_flow_reads_router
+from app.routers.sector_reads import build_sector_reads_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -136,6 +141,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_analyst_action_read_repository.py",
             "async_automation_run_read_repository.py",
             "async_market_flow_read_repository.py",
+            "async_sector_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -981,6 +987,110 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["items"][0]["feature_key"], "minute-1")
         self.assertEqual(payload["research_gate"]["status"], "accumulating")
         self.assertEqual(database.connection.calls[0][1], (date(2026, 8, 10), 1000))
+
+    async def test_sector_router_prefers_async_exact_evidence_projections(self) -> None:
+        calls = []
+
+        async def backfill(_database, trade_date, **kwargs):
+            calls.append(("backfill", trade_date, kwargs))
+            return {"states": []}
+
+        async def concepts(_database, trade_date, limit):
+            calls.append(("concepts", trade_date, limit))
+            return {"items": []}
+
+        async def candidates(_database, trade_date, limit):
+            calls.append(("candidates", trade_date, limit))
+            return {"items": []}
+
+        async def flows(_database, taxonomy, trade_date, limit):
+            calls.append(("flows", taxonomy, trade_date, limit))
+            return {"items": []}
+
+        async def sectors(_database, taxonomy, limit, offset):
+            calls.append(("sectors", taxonomy, limit, offset))
+            return {"items": []}
+
+        async def members(_database, sector_key, taxonomy, limit, offset):
+            calls.append(("members", sector_key, taxonomy, limit, offset))
+            return {"items": []}
+
+        router = build_sector_reads_router(
+            object(), lambda: True, lambda: 25, async_database=object(),
+            async_backfill_status_fn=backfill, async_concepts_fn=concepts, async_candidates_fn=candidates,
+            async_flows_fn=flows, async_sectors_fn=sectors, async_members_fn=members,
+        )
+        endpoints = {route.path: route.endpoint for route in router.routes}
+        await endpoints["/api/v1/market/sectors/concepts/members/backfill/status"](date(2026, 8, 10))
+        await endpoints["/api/v1/market/sectors/concepts"](None, 500)
+        await endpoints["/api/v1/market/sectors/concepts/candidates"](None, 100)
+        await endpoints["/api/v1/market/sectors/flows"]("ths_industry", None, 100)
+        await endpoints["/api/v1/market/sectors"]("ths_index_n", 500, 0)
+        await endpoints["/api/v1/market/sectors/{sector_key}/members"]("885001", "ths_index_n", 500, 0)
+        self.assertEqual(calls[0], ("backfill", date(2026, 8, 10), {"automatic_enabled": True, "batch_size": 25}))
+        self.assertEqual([call[0] for call in calls[1:]], ["concepts", "candidates", "flows", "sectors", "members"])
+
+    async def test_sector_repositories_use_native_async_bounds_and_shared_scoring(self) -> None:
+        class Result:
+            def __init__(self, row=None, rows=None):
+                self.row, self.rows = row, rows or []
+
+            async def fetchone(self):
+                return self.row
+
+            async def fetchall(self):
+                return self.rows
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "percent_rank" in sql:
+                    return Result(rows=[{
+                        "flow_percentile": 1.0, "change_pct": 2.0, "up_nums": None,
+                        "streak_days": None, "raw": {}, "strength_raw": {}, "label": "芯片",
+                    }])
+                if "count(m.symbol)" in sql:
+                    return Result(rows=[{"sector_key": "885001", "label": "半导体"}])
+                if "count(*)::int total FROM quant.sectors" in sql:
+                    return Result({"total": 2})
+                if "sector_membership_history m JOIN" in sql:
+                    return Result(rows=[{"symbol": "600000.SH"}])
+                if "effective_to IS NULL" in sql:
+                    return Result({"total": 3})
+                return Result({"latest": date(2026, 8, 10)})
+
+        class Transaction:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Transaction(self.connection)
+
+        database = Database()
+        concepts = await async_concept_signals(database, date(2026, 8, 10), 10000)
+        sectors = await async_market_sectors(database, "ths_index_n", 10000, -1)
+        members = await async_sector_members(database, "885001", "ths_index_n", 10000, -1)
+        self.assertEqual(concepts["items"][0]["aggregate_score"], 86.0)
+        self.assertEqual(sectors["limit"], 1000)
+        self.assertEqual(members["total"], 3)
+        self.assertEqual(database.connection.calls[0][1], (date(2026, 8, 10), date(2026, 8, 10), 1000))
+
+    def test_concept_mapping_status_separates_active_exact_coverage_from_receipts(self) -> None:
+        payload = project_concept_member_backfill_status(
+            date(2026, 8, 21), 387, 0,
+            {"mapped_concepts": 387, "member_rows": 70998, "latest_available_at": "2026-08-21T12:40:26+00:00"}, [],
+            automatic_enabled=False, batch_size=25,
+        )
+        self.assertTrue(payload["complete"])
+        self.assertFalse(payload["receipt_complete"])
+        self.assertEqual(payload["mapped_concepts"], 387)
+        self.assertEqual(payload["receipt_mapped_concepts"], 0)
+        self.assertEqual(payload["states"][0]["state"], "active_exact_mapping")
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:

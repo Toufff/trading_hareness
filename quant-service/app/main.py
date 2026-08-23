@@ -4501,7 +4501,9 @@ app.include_router(build_intraday_outcome_reads_router(
     async_database=async_db,
     market_context_from_board_report_fn=intraday_market_context_from_board_report,
 ))
-app.include_router(build_sector_reads_router(db, ths_concept_member_backfill_enabled, ths_concept_member_backfill_batch_size))
+app.include_router(build_sector_reads_router(
+    db, ths_concept_member_backfill_enabled, ths_concept_member_backfill_batch_size, async_database=async_db,
+))
 app.include_router(build_intraday_evidence_reads_router(
     db, intraday_decision_card, async_database=async_db,
     async_decision_card_fn=intraday_decision_card_async,
