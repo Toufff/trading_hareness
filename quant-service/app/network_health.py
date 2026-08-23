@@ -32,6 +32,7 @@ def _safe_error(value: str) -> str:
 @dataclass
 class NetworkStateTracker:
     failure_threshold: int = 3
+    independent_source_threshold: int = 2
     _lock: Lock = field(default_factory=Lock, repr=False)
     _state: str = "unknown"
     _consecutive_failures: int = 0
@@ -41,6 +42,7 @@ class NetworkStateTracker:
     _last_source: str | None = None
     _last_error: str | None = None
     _recovery_count: int = 0
+    _failure_sources: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self._update_metrics()
@@ -59,6 +61,7 @@ class NetworkStateTracker:
             was_offline = self._state == "offline"
             self._state = "recovering" if was_offline else "online"
             self._consecutive_failures = 0
+            self._failure_sources.clear()
             self._last_success_at = _now()
             self._last_source = source[:80]
             self._last_error = None
@@ -76,9 +79,19 @@ class NetworkStateTracker:
             now = _now()
             self._consecutive_failures += 1
             self._last_failure_at = now
-            self._last_source = source[:80]
+            source_key = source[:80]
+            self._last_source = source_key
             self._last_error = _safe_error(error)
-            next_state = "offline" if self._consecutive_failures >= self.failure_threshold else "degraded"
+            self._failure_sources.add(source_key)
+            # A sequence of failures from one upstream can be an API, proxy,
+            # or permission-adjacent incident.  Do not slow every leased loop
+            # as though the host lost connectivity until independently named
+            # outbound routes corroborate it.
+            offline_confirmed = (
+                self._consecutive_failures >= self.failure_threshold
+                and len(self._failure_sources) >= max(1, self.independent_source_threshold)
+            )
+            next_state = "offline" if offline_confirmed else "degraded"
             if next_state != self._state:
                 self._changed_at = now
             self._state = next_state
@@ -95,6 +108,8 @@ class NetworkStateTracker:
                 "last_source": self._last_source,
                 "last_error": self._last_error,
                 "recovery_count": self._recovery_count,
+                "consecutive_failure_sources": sorted(self._failure_sources),
+                "independent_source_threshold": self.independent_source_threshold,
                 "mode": "passive_request_observation",
             }
 

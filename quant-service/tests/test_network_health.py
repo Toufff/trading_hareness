@@ -6,17 +6,21 @@ from app.network_health import NetworkStateTracker
 
 
 class NetworkStateTrackerTests(unittest.TestCase):
-    def test_transient_failures_degrade_then_go_offline_and_recover(self) -> None:
+    def test_transient_failures_require_independent_sources_before_offline_and_recover(self) -> None:
         tracker = NetworkStateTracker(failure_threshold=2)
         tracker.record_failure("tushare:super", "ConnectTimeout token=secret")
         self.assertEqual(tracker.snapshot()["state"], "degraded")
         tracker.record_failure("tushare:super", "proxy unavailable")
+        self.assertEqual(tracker.snapshot()["state"], "degraded")
+        self.assertEqual(tracker.snapshot()["consecutive_failure_sources"], ["tushare:super"])
+        tracker.record_failure("public:tencent", "ConnectTimeout")
         self.assertEqual(tracker.snapshot()["state"], "offline")
         tracker.record_success("tushare:super")
         snapshot = tracker.snapshot()
         self.assertEqual(snapshot["state"], "recovering")
         self.assertEqual(snapshot["last_error"], None)
         self.assertEqual(snapshot["recovery_count"], 1)
+        self.assertEqual(snapshot["consecutive_failure_sources"], [])
         tracker.record_success("tushare:super")
         self.assertEqual(tracker.snapshot()["state"], "online")
 
