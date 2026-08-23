@@ -151,7 +151,8 @@ from .free_market_providers import (
     tencent_intraday_minutes,
     tencent_order_book_quotes,
 )
-from .order_book_features import aggregate_order_book_observations, order_book_observation
+from .order_book_features import aggregate_order_book_observations
+from . import intraday_order_book_service as order_book_service
 from .market_snapshots import snapshot_status, summarize_quotes
 from .market_flow_repository import (
     persist_intraday_market_flow_feature,
@@ -2543,103 +2544,48 @@ def intraday_watch_priority_key(row: dict[str, Any]) -> tuple[int, int, str]:
 
 
 def intraday_order_book_enabled() -> bool:
-    return os.getenv("INTRADAY_ORDER_BOOK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    return order_book_service.enabled()
 
 
 def intraday_order_book_interval_seconds() -> float:
-    try:
-        return max(3.0, min(30.0, float(os.getenv("INTRADAY_ORDER_BOOK_INTERVAL_SECONDS", "3"))))
-    except ValueError:
-        return 3.0
+    return order_book_service.interval_seconds()
 
 
 def intraday_order_book_retention_days() -> int:
     """Keep high-frequency depth evidence bounded independently of rt_k."""
-    try:
-        return max(1, min(30, int(os.getenv("INTRADAY_ORDER_BOOK_RETENTION_DAYS", "7"))))
-    except ValueError:
-        return 7
+    return order_book_service.retention_days()
 
 
 def intraday_order_book_max_symbols() -> int:
     """Bound a single Tencent depth batch without silently losing watches."""
-    try:
-        return max(1, min(80, int(os.getenv("INTRADAY_ORDER_BOOK_MAX_SYMBOLS", "40"))))
-    except ValueError:
-        return 40
+    return order_book_service.max_symbols()
 
 
 def persist_intraday_order_book_observations(observed_at: datetime, rows: list[dict[str, Any]], latency_ms: int) -> int:
     """Persist raw order-book evidence plus derived observational features."""
-    stored = 0
-    previous_cutoff = observed_at - timedelta(seconds=15)
-    china_observed_at = observed_at.astimezone(ZoneInfo("Asia/Shanghai"))
-    session_start = china_observed_at.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
-    symbols = sorted({str(row.get("ts_code") or "") for row in rows if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(row.get("ts_code") or ""))})
-    with db.transaction() as connection:
-        # One source-qualified lookup for the entire batch.  The partial index
-        # prevents rt_k rows from expanding this high-frequency query.
-        previous_rows = connection.execute(
-            """SELECT DISTINCT ON(symbol) symbol,observed_at,raw
-                 FROM quant.intraday_quote_observations
-                WHERE symbol=ANY(%s) AND source_name='tencent_order_book'
-                  AND observed_at>=%s AND observed_at<%s
-                ORDER BY symbol,observed_at DESC""",
-            (symbols, session_start, observed_at),
-        ).fetchall() if symbols else []
-        previous_by_symbol = {str(item["symbol"]): dict(item) for item in previous_rows}
-        for row in rows:
-            symbol = str(row.get("ts_code") or "")
-            if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
-                continue
-            previous = previous_by_symbol.get(symbol)
-            previous_is_fresh = bool(previous and previous["observed_at"] >= previous_cutoff)
-            previous_raw = dict(previous["raw"] or {}) if previous_is_fresh else None
-            features = order_book_observation(row, previous_raw)
-            if previous and not previous_is_fresh:
-                features["delta_status"] = "stale_previous"
-            raw = {**row, "order_book_features": features}
-            inserted = connection.execute(
-                """INSERT INTO quant.intraday_quote_observations(
-                       scan_id,symbol,observed_at,source_name,price,pct_change,volume_ratio,turnover_rate,main_net_inflow,raw
-                   ) VALUES(NULL,%s,%s,'tencent_order_book',%s,%s,NULL,NULL,NULL,%s)
-                   ON CONFLICT(symbol,source_name,observed_at) DO NOTHING""",
-                (symbol, observed_at, row.get("price"),
-                 ((float(row["price"]) / float(row["pre_close"])) - 1) * 100 if row.get("pre_close") else None,
-                 Json(strategy_json_safe(raw))),
-            )
-            stored += int(inserted.rowcount > 0)
-        record_provider_success(connection, "tencent_free", "order_book_quote", stored, latency_ms)
-    return stored
+    return order_book_service.persist_observations(
+        db, observed_at, rows, latency_ms,
+        json_safe=strategy_json_safe, record_success=record_provider_success,
+    )
 
 
 def persist_intraday_order_book_failure(error: str, latency_ms: int | None = None) -> None:
-    with db.transaction() as connection:
-        record_provider_failure(connection, "tencent_free", "order_book_quote", error, latency_ms)
+    order_book_service.persist_failure(
+        db, error, latency_ms, record_failure=record_provider_failure,
+    )
 
 
 async def capture_intraday_order_book_snapshot(symbols: list[str]) -> dict[str, Any]:
     """Capture one pooled, bounded depth snapshot for the explicit watchlist."""
-    max_symbols = intraday_order_book_max_symbols()
-    selected = list(dict.fromkeys(str(symbol).upper() for symbol in symbols if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(symbol).upper())))[:max_symbols]
-    if not selected:
-        return {"status": "completed", "requested": 0, "stored": 0}
-    started_at = asyncio.get_running_loop().time()
-    observed_at = datetime.now(timezone.utc)
-    try:
-        rows = await tencent_order_book_quotes(selected, max_symbols=max_symbols)
-        latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
-        stored = await run_database_blocking(
-            persist_intraday_order_book_observations, observed_at, rows, latency_ms,
-        )
-        return {"status": "completed" if rows else "empty", "requested": len(selected), "received": len(rows),
-                "stored": stored, "observed_at": observed_at.isoformat(), "latency_ms": latency_ms,
-                "source": "tencent_single_quote_order_book"}
-    except (httpx.HTTPError, FreeProviderError, ValueError, ExecutorSaturatedError, asyncio.TimeoutError) as error:
-        latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
-        await run_database_blocking(persist_intraday_order_book_failure, str(error)[:300], latency_ms)
-        return {"status": "failed", "requested": len(selected), "stored": 0,
-                "reason": safe_error_detail(str(error), 300)}
+    return await order_book_service.capture_snapshot(
+        symbols, max_symbols_value=intraday_order_book_max_symbols(),
+        fetch_quotes=tencent_order_book_quotes,
+        persist=persist_intraday_order_book_observations,
+        persist_error=persist_intraday_order_book_failure,
+        run_database=run_database_blocking,
+        safe_error=safe_error_detail,
+        handled_errors=(httpx.HTTPError, FreeProviderError, ValueError, ExecutorSaturatedError, asyncio.TimeoutError),
+    )
 
 
 async def intraday_order_book_loop() -> None:
