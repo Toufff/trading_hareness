@@ -50,6 +50,13 @@ def record_provider_api_capability(connection: Any, provider: str, api_name: str
     contract = api_capability(api_name)
     metadata = {**catalog_metadata(api_name), "last_observation": availability,
                 **({"last_row_count": rows} if rows is not None else {})}
+    if note and availability in {"failed", "empty"}:
+        # Availability answers "has this physical route ever been verified?".
+        # The latest observation is separate evidence; never overwrite the
+        # durable verification note with a transient timeout/valid empty.
+        metadata["last_observation_note"] = safe_error_detail(note, 500)
+    elif note and availability == "verified":
+        metadata["verified_note"] = note[:500]
     connection.execute(
         """INSERT INTO quant.provider_api_capabilities(provider_key,api_name,availability,frequency,decision_eligible,note,verified_at,last_checked_at,metadata)
            VALUES(%s,%s,%s,%s,%s,%s,CASE WHEN %s='verified' THEN now() ELSE null END,now(),%s)
@@ -57,7 +64,11 @@ def record_provider_api_capability(connection: Any, provider: str, api_name: str
              availability=CASE WHEN quant.provider_api_capabilities.availability='verified' AND EXCLUDED.availability IN ('failed','empty')
                                THEN quant.provider_api_capabilities.availability ELSE EXCLUDED.availability END,
              frequency=EXCLUDED.frequency,decision_eligible=EXCLUDED.decision_eligible,
-             note=CASE WHEN EXCLUDED.note<>'' THEN EXCLUDED.note ELSE quant.provider_api_capabilities.note END,
+             note=CASE WHEN quant.provider_api_capabilities.availability='verified'
+                              AND EXCLUDED.availability IN ('failed','empty')
+                           THEN quant.provider_api_capabilities.note
+                       WHEN EXCLUDED.note<>'' THEN EXCLUDED.note
+                       ELSE quant.provider_api_capabilities.note END,
              verified_at=CASE WHEN EXCLUDED.availability='verified' THEN now()
                               ELSE quant.provider_api_capabilities.verified_at END,
              last_checked_at=now(),metadata=quant.provider_api_capabilities.metadata || EXCLUDED.metadata""",
