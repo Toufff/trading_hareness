@@ -25,6 +25,8 @@ from app.async_analyst_archive_read_repository import remote_messages as async_r
 from app.async_analyst_archive_read_repository import remote_reports as async_remote_reports
 from app.async_board_curve_read_repository import intraday_board_flow_curves as async_board_flow_curves
 from app.async_board_curve_read_repository import latest_close_sector_review_report as async_latest_board_review
+from app.async_board_research_read_repository import latest_board_rotation_events as async_board_rotations
+from app.async_board_research_read_repository import latest_board_stock_mining as async_board_stock_mining
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -35,6 +37,8 @@ from app.routers.analyst_skill_reads import build_analyst_skill_reads_router
 from app.routers.analyst_research_reads import build_analyst_research_reads_router
 from app.routers.analyst_reads import build_analyst_reads_router
 from app.routers.board_curve_reads import build_board_curve_reads_router
+from app.routers.board_rotation_reads import build_board_rotation_reads_router
+from app.routers.board_stock_mining_reads import build_board_stock_mining_reads_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -120,6 +124,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_analyst_research_read_repository.py",
             "async_analyst_archive_read_repository.py",
             "async_board_curve_read_repository.py",
+            "async_board_research_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -713,6 +718,76 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(review["report"]["board_report_id"], "report-1")
         self.assertEqual(curves["items"][0]["label"], "芯片")
         self.assertEqual(len(database.connection.calls), 3)
+
+    async def test_board_rotation_and_mining_routers_prefer_async_evidence(self) -> None:
+        calls = []
+
+        async def rotations(_database, limit):
+            calls.append(("rotations", limit))
+            return {"items": [{"rotation_event_id": "event-1"}]}
+
+        async def mining(_database, limit):
+            calls.append(("mining", limit))
+            return {"run": {"mining_run_id": "run-1"}, "inflow": [], "outflow": []}
+
+        rotation_router = build_board_rotation_reads_router(object(), async_database=object(), async_events_fn=rotations)
+        mining_router = build_board_stock_mining_reads_router(object(), async_database=object(), async_mining_fn=mining)
+        rotation_endpoint = rotation_router.routes[0].endpoint
+        mining_endpoint = mining_router.routes[0].endpoint
+        self.assertEqual((await rotation_endpoint(101))["items"][0]["rotation_event_id"], "event-1")
+        self.assertEqual((await mining_endpoint(51))["run"]["mining_run_id"], "run-1")
+        self.assertEqual(calls, [("rotations", 101), ("mining", 51)])
+
+    async def test_board_rotation_and_mining_repositories_bound_local_rows(self) -> None:
+        class Result:
+            def __init__(self, row=None, rows=None):
+                self.row, self.rows = row, rows or []
+
+            async def fetchone(self):
+                return self.row
+
+            async def fetchall(self):
+                return self.rows
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "mining_runs" in sql:
+                    return Result({"mining_run_id": "run-1"})
+                if "mining_candidates" in sql:
+                    return Result(rows=[
+                        {"direction": "inflow", "symbol": "600000.SH"},
+                        {"direction": "outflow", "symbol": "000001.SZ"},
+                    ])
+                return Result(rows=[{"rotation_event_id": "event-1"}])
+
+        class Transaction:
+            def __init__(self, connection):
+                self.connection = connection
+
+            async def __aenter__(self):
+                return self.connection
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Database:
+            def __init__(self):
+                self.connection = Connection()
+
+            def transaction(self):
+                return Transaction(self.connection)
+
+        database = Database()
+        rotations = await async_board_rotations(database, 1000)
+        mining = await async_board_stock_mining(database, 1000)
+        self.assertEqual(rotations["items"][0]["rotation_event_id"], "event-1")
+        self.assertEqual(mining["inflow"][0]["symbol"], "600000.SH")
+        self.assertEqual(mining["outflow"][0]["symbol"], "000001.SZ")
+        self.assertEqual(database.connection.calls[0][1], (100,))
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:

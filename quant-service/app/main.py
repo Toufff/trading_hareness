@@ -4486,8 +4486,8 @@ app.include_router(build_strategy_pattern_reads_router(
     post_close_limit_daily_features, post_close_exact_board_context, post_close_tushare_lhb_context, async_db,
     run_database_blocking,
 ))
-app.include_router(build_board_rotation_reads_router(db))
-app.include_router(build_board_stock_mining_reads_router(db))
+app.include_router(build_board_rotation_reads_router(db, async_database=async_db))
+app.include_router(build_board_stock_mining_reads_router(db, async_database=async_db))
 app.include_router(build_limit_linkage_mining_reads_router(db))
 app.include_router(build_board_curve_reads_router(
     db, intraday_board_curve_retention_days, intraday_board_rotation_retention_days, async_database=async_db,
