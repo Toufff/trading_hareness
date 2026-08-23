@@ -462,6 +462,10 @@ from .intraday_scan_preparation import (
     prepare_intraday_scan_inputs,
 )
 from .intraday_scan_source_status import build_scan_source_status
+from .intraday_scan_signal_persistence import (
+    IntradayScanSignalPersistenceDependencies,
+    persist_scan_signals,
+)
 from .intraday_watch_quote_capture import WatchQuoteCaptureDependencies, capture_watch_quotes
 from .tushare_official import (
     AUDIT_FOCUS_APIS,
@@ -2411,97 +2415,44 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
     original one-transaction boundary preserves the signal de-duplication and
     point-in-time context semantics while avoiding event-loop blocking.
     """
-    signals: list[dict[str, Any]] = []
     with db.transaction() as connection:
-        prepared = prepare_intraday_scan_inputs(
+        return persist_scan_signals(
             connection, scan_id=scan_id, observed_at=observed_at, selected_symbols=selected_symbols,
             source_status=source_status, watches=watches, quotes=quotes, tencent_rows=tencent_rows,
             quote_latency_ms=quote_latency_ms, tushare_minutes=tushare_minutes, surge_features=surge_features,
+            peer_contexts=peer_contexts, fast_confirmations=fast_confirmations,
             confirmation_window=INTRADAY_CONFIRMATION_WINDOW,
-            dependencies=IntradayScanPreparationDependencies(
-                roll_positions_sellable=roll_paper_positions_sellable,
-                record_provider_success=record_provider_success, record_provider_failure=record_provider_failure,
-                json_safe=strategy_json_safe, persist_portfolio_snapshot=persist_portfolio_snapshot,
-                load_local_state=load_intraday_scan_local_state, clear_stale_episodes=clear_stale_signal_episodes,
-                market_context_batch=intraday_point_in_time_market_context_batch,
-                shadow_priors=latest_shadow_priors_v2, rebound_priors=latest_rebound_priors,
-                probability_profiles=load_intraday_probability_profiles,
-                daily_factors=pure_watchlist_daily_factors_by_symbol,
-                minute_volume_profiles=pure_intraday_volume_time_profiles,
-                quote_source=intraday_quote_observation_source, previous_quote_frames=previous_quote_frames,
-                first_eac_events=first_eac_breakout_events, minute_bucket=intraday_minute_bucket, number=intraday_number,
-            ),
-        )
-        for watch in watches:
-            symbol = str(watch["symbol"])
-            quote = quotes.get(symbol)
-            quote_source_name = intraday_quote_observation_source(quote)
-            previous = prepared.previous_by_symbol.get(symbol)
-            if quote:
-                quote_raw = dict(quote.get("raw") or {})
-                quote_raw["_observation_source"] = quote_source_name
-                quote_raw["_price_source"] = quote.get("price_source")
-                connection.execute(
-                    """INSERT INTO quant.intraday_quote_observations(scan_id,symbol,observed_at,source_name,price,pct_change,volume_ratio,turnover_rate,main_net_inflow,raw)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (scan_id, symbol, observed_at, quote_source_name, quote.get("price"), quote.get("pct_change"),
-                     quote.get("volume_ratio"), quote.get("turnover_rate"), quote.get("main_net_inflow"),
-                     Json(strategy_json_safe(quote_raw))),
-                )
-            daily_factors = prepared.daily_factors_by_symbol.get(symbol, {"status": "insufficient_history", "bar_count": 0})
-            minute_feature = pure_attach_volume_time_profile(
-                prepared.raw_minute_features_by_symbol.get(symbol), prepared.minute_volume_profiles_by_symbol.get(symbol),
-                number=intraday_number,
-            )
-            order_book_feature = aggregate_order_book_observations(prepared.order_book_by_symbol.get(symbol, []), observed_at)
-            peer_context = peer_contexts.get(symbol)
-            previous_quote = dict(previous) if previous else None
-            # Freeze all pre-confirmation inputs before rules emit.  This
-            # lets future replay evaluate the exact same policy/risk gate from
-            # local evidence, without consulting the then-current board,
-            # quote or paper ledger.
-            fast_confirmation = fast_confirmations.get(symbol, {"status": "missing", "max_age_seconds": 30})
-            market_context = prepared.market_contexts.get((observed_at, symbol), {})
-            portfolio_context = {
-                "position": prepared.paper_positions.get(symbol) or {},
-                "snapshot": prepared.snapshot_payload,
-                "candidate_sector_keys": prepared.candidate_sector_keys.get(symbol, ()),
-            }
-            persist_rule_input_snapshot(
-                connection, scan_id=scan_id, observed_at=observed_at, watch=watch, quote=quote,
-                previous_quote=previous_quote, daily_factors=daily_factors, minute_features=minute_feature,
-                peer_context=peer_context, model_version=INTRADAY_SIGNAL_MODEL_VERSION,
-                market_context=market_context, fast_confirmation=fast_confirmation,
-                portfolio_context=portfolio_context,
-            )
-            generated_signals = generate_intraday_signals(
-                watch=watch, symbol=symbol, quote=quote, previous_quote=previous_quote,
-                daily_factors=daily_factors, minute_features=minute_feature, peer_context=peer_context,
-                shadow_prior=prepared.shadow_priors.get(symbol), rebound_prior=prepared.rebound_priors.get(symbol),
-                first_eac=prepared.first_eac_by_symbol.get(symbol), observed_at=observed_at,
-                dependencies=IntradaySignalGenerationDependencies(
-                    base_rules=intraday_signal_rules,
-                    shadow_signal=main_wave_v2_shadow_signal,
+            signal_model_version=INTRADAY_SIGNAL_MODEL_VERSION,
+            factor_contract_version=INTRADAY_FACTOR_CONTRACT_VERSION,
+            dependencies=IntradayScanSignalPersistenceDependencies(
+                prepare_inputs=prepare_intraday_scan_inputs,
+                preparation_dependencies=IntradayScanPreparationDependencies(
+                    roll_positions_sellable=roll_paper_positions_sellable,
+                    record_provider_success=record_provider_success, record_provider_failure=record_provider_failure,
+                    json_safe=strategy_json_safe, persist_portfolio_snapshot=persist_portfolio_snapshot,
+                    load_local_state=load_intraday_scan_local_state, clear_stale_episodes=clear_stale_signal_episodes,
+                    market_context_batch=intraday_point_in_time_market_context_batch,
+                    shadow_priors=latest_shadow_priors_v2, rebound_priors=latest_rebound_priors,
+                    probability_profiles=load_intraday_probability_profiles,
+                    daily_factors=pure_watchlist_daily_factors_by_symbol,
+                    minute_volume_profiles=pure_intraday_volume_time_profiles,
+                    quote_source=intraday_quote_observation_source, previous_quote_frames=previous_quote_frames,
+                    first_eac_events=first_eac_breakout_events, minute_bucket=intraday_minute_bucket, number=intraday_number,
+                ),
+                quote_source=intraday_quote_observation_source, json_safe=strategy_json_safe,
+                persist_rule_input_snapshot=persist_rule_input_snapshot,
+                attach_volume_time_profile=pure_attach_volume_time_profile, number=intraday_number,
+                aggregate_order_book_observations=aggregate_order_book_observations,
+                generate_signals=generate_intraday_signals,
+                signal_generation_dependencies=IntradaySignalGenerationDependencies(
+                    base_rules=intraday_signal_rules, shadow_signal=main_wave_v2_shadow_signal,
                     rebound_signal=countertrend_rebound_realtime_signal,
                     rebound_failure_signal=countertrend_rebound_failure_reduce_signal,
                     eac_acceptance=intraday_eac_acceptance_assessment,
                 ),
-            )
-            event_state = load_intraday_signal_event_state(
-                connection, [str(signal["signal_key"]) for signal in generated_signals], symbol,
-                session_start=prepared.session_start,
-            )
-            signals.extend(persist_generated_signals(
-                connection, scan_id=scan_id, observed_at=observed_at, symbol=symbol, watch=watch,
-                quote=quote, daily_factors=daily_factors, minute_feature=minute_feature,
-                peer_context=peer_context, market_context=market_context, fast_confirmation=fast_confirmation,
-                order_book_feature=order_book_feature, tushare_minute=tushare_minutes.get(symbol),
-                paper_position=prepared.paper_positions.get(symbol), portfolio_snapshot=prepared.snapshot_payload,
-                candidate_sector_keys=prepared.candidate_sector_keys.get(symbol, ()), probability_profiles=prepared.probability_profiles,
-                generated_signals=generated_signals, existing_event_state=event_state,
-                confirmation_window=INTRADAY_CONFIRMATION_WINDOW,
-                factor_contract_version=INTRADAY_FACTOR_CONTRACT_VERSION,
-                dependencies=IntradaySignalEventPersistenceDependencies(
+                load_event_state=load_intraday_signal_event_state,
+                persist_generated_signals=persist_generated_signals,
+                signal_event_persistence_dependencies=IntradaySignalEventPersistenceDependencies(
                     paper_risk_gate=paper_risk_gate, live_policy_gate=live_policy_gate,
                     classify_setup_state=classify_intraday_setup_state,
                     factor_contracts=intraday_factor_contracts_for_signal,
@@ -2510,8 +2461,8 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     ensure_episode=ensure_signal_episode, attribution=intraday_signal_attribution,
                     paper_decision_payload=paper_decision_payload, persist_paper_decision=persist_paper_decision,
                 ),
-            ))
-    return signals
+            ),
+        )
 
 
 intraday_rule_input_pruned_on: date | None = None

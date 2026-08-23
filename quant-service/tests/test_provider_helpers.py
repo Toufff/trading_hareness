@@ -4192,7 +4192,7 @@ class ProviderHelperTests(unittest.TestCase):
 
     def test_intraday_scan_source_has_batched_board_and_paper_reads(self):
         source = (Path(__file__).resolve().parents[1] / "app" / "intraday_scan_preparation.py").read_text(encoding="utf-8")
-        scanner_source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+        scanner_source = (Path(__file__).resolve().parents[1] / "app" / "intraday_scan_signal_persistence.py").read_text(encoding="utf-8")
         repository_source = (Path(__file__).resolve().parents[1] / "app" / "intraday_scan_repository.py").read_text(encoding="utf-8")
         self.assertIn("market_contexts = dependencies.market_context_batch", source)
         self.assertIn("WHERE symbol=ANY(%s)", repository_source)
