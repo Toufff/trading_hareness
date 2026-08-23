@@ -123,6 +123,9 @@ from .async_ths_concept_member_backfill_repository import existing_flow_rows as 
 from .async_ths_concept_member_backfill_repository import member_progress as read_async_ths_concept_member_progress
 from .async_sync_symbol_repository import analyst_claim_symbols as read_async_analyst_claim_symbols
 from .async_sync_symbol_repository import core_symbols as read_async_core_symbols
+from .async_runtime_lease_repository import acquire as acquire_background_runtime_lease
+from .async_runtime_lease_repository import release as release_background_runtime_lease
+from .async_runtime_lease_repository import renew as renew_background_runtime_lease
 from .intraday_volume_profiles import attach_volume_time_profile as pure_attach_volume_time_profile
 from .intraday_volume_profiles import volume_time_profile as pure_intraday_volume_time_profile
 from .intraday_volume_profiles import volume_time_profiles as pure_intraday_volume_time_profiles
@@ -3570,11 +3573,11 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
     async def leased_background_loop(label: str, factory: Callable[[], Awaitable[None]]) -> None:
         lease_key = f"background_loop:{label}"
         async def acquire() -> bool:
-            return await run_database_blocking(acquire_runtime_lease, db, lease_key, lease_holder_id, lease_seconds)
+            return await acquire_background_runtime_lease(async_db, lease_key, lease_holder_id, lease_seconds)
         async def renew() -> bool:
-            return await run_database_blocking(renew_runtime_lease, db, lease_key, lease_holder_id, lease_seconds)
+            return await renew_background_runtime_lease(async_db, lease_key, lease_holder_id, lease_seconds)
         async def release() -> None:
-            await run_database_blocking(release_runtime_lease, db, lease_key, lease_holder_id)
+            await release_background_runtime_lease(async_db, lease_key, lease_holder_id)
         await supervise_leased_loop(
             label, factory, acquire, renew, release, lease_seconds,
             on_state=background_loop_registry.mark,
