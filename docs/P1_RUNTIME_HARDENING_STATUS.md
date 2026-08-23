@@ -167,6 +167,7 @@
 - `main.py` 的其余路由/服务/策略层仍待继续机械拆分；本轮已将板块/指数状态纯计算移至 `app/market_regimes.py` 并保留兼容导出。Alembic 基线与基础 Prometheus 指标已完成，后续按新迁移和新增指标扩展。
 - 2026-08-22：腾讯五档盘口的环境边界、原始盘口→观察特征持久化和单批采集已抽至 `app/intraday_order_book_service.py`；主服务仅保留兼容入口、交易时段/租约循环与 provider 注入。保留“单个腾讯批量请求、15 秒前序快照边界、7 日原始证据清理、特征仅归因不调阈值”的语义；新增服务级配置/成功/失败回归。当前 `main.py` 为约 6,700 行，后续仍按同样的兼容与验证纪律拆分。
 - 2026-08-22：离线分钟 CSV 导入按文件 SHA-256 增加事务级 advisory lock 与 `FOR UPDATE` 领取。`completed/partial` 文件保持不重跑；`failed` 或超过 15 分钟的 `running` 行可复用同一 `import_id` 幂等恢复；尚活跃的 `running` 行明确返回进行中而不并发写入。恢复仍只读取本地挂载文件，不能下载历史、制造来源可得时钟或修改实时策略阈值。
+- 2026-08-22：盘中腾讯分钟上下文（显式观察股、已配置 peer 与精确成员 peer）已移至 `app/intraday_surge_context_service.py`。服务保留原有优先级、最大观察容量、45 秒特征缓存、单标的 6 秒超时/全批 6.5 秒预算、熔断不外呼和数据库执行器健康记录；主服务只装配依赖。新增服务级回归覆盖熔断不外呼与缓存复用，`main.py` 由约 6,460 行降至约 6,363 行。
 - 同日已将离线分钟文件根目录/路径隔离、时间与 OHLC 校验、来源可得时钟、入库和恢复台账移至 `app/offline_minute_import_service.py`；主服务保留原函数名作兼容导出。真实 PostgreSQL 回归覆盖 `running` 文件拒绝并发、`failed` 文件复用 receipt、分钟行不重复写入；没有导入任何生产历史文件。
 - 同日将盘中飞书提醒的 durable outbox 状态机移至 `app/intraday_alert_delivery_service.py`：先落 `pending` 再外发、失败后 30 秒有界重试、已送达事件不重复发、连续失败后的恢复回执均保持原有语义。主服务保留兼容入口，便于既有监控/测试继续注入 Feishu transport 与数据库执行器；服务模块不持有 FastAPI 或 HTTP 客户端生命周期。
 - 同日将盘中板块快报的有界报告、Top10 证据保存、板块个股挖掘、涨停关联候选与失败隔离移至 `app/intraday_board_report_service.py`；该服务仍固定返回 `delivery=suppressed`，确保板块挖掘只在前端展示而不绕过“仅观察股策略信号可发飞书”的规则。

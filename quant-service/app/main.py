@@ -77,6 +77,7 @@ from .intraday_volume_profiles import attach_volume_time_profile as pure_attach_
 from .intraday_volume_profiles import volume_time_profile as pure_intraday_volume_time_profile
 from .intraday_volume_profiles import volume_time_profiles as pure_intraday_volume_time_profiles
 from .intraday_minute_provider_service import fetch_bounded_minute_context
+from .intraday_surge_context_service import capture as capture_intraday_surge_context
 from . import offline_minute_import_service
 from .intraday_cross_section import SharedAsyncSnapshot
 from .intraday_state_machine import classify_setup_state as classify_intraday_setup_state
@@ -2503,130 +2504,19 @@ async def capture_intraday_minute_sessions(symbols: list[str]) -> dict[str, Any]
 async def intraday_tencent_surge_context(
     watches: list[dict[str, Any]], *, mapped_peers: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Fetch a small opt-in target/peer basket for research peer breadth."""
-    requested: list[str] = []
-    mapped_peers = mapped_peers or {}
-    # The capped minute basket is decision evidence, not an alphabetical
-    # sample.  Strategy targets and their explicit peer contracts must be
-    # scheduled before passive watches and inferred member relations.
-    configured_targets: list[str] = []
-    configured_peers: list[str] = []
-    passive_watches: list[str] = []
-    mapped_peer_symbols: list[str] = []
-    def append_unique(bucket: list[str], value: Any) -> None:
-        symbol = str(value).upper()
-        if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) and symbol not in bucket:
-            bucket.append(symbol)
-    for watch in watches:
-        watch_symbol = str(watch["symbol"]).upper()
-        metadata = watch.get("metadata") if isinstance(watch.get("metadata"), dict) else {}
-        configurations = [metadata.get(key) for key in ("surge_strategy", "reversal_research", "upside_research")
-                          if isinstance(metadata.get(key), dict) and metadata[key].get("enabled")]
-        if configurations:
-            append_unique(configured_targets, watch_symbol)
-        else:
-            append_unique(passive_watches, watch_symbol)
-        mapped_values = (mapped_peers.get(watch_symbol) or {}).get("peer_symbols") or []
-        for strategy in configurations:
-            for value in strategy.get("peer_symbols") or []:
-                append_unique(configured_peers, value)
-        for value in mapped_values:
-            append_unique(mapped_peer_symbols, value)
-    for bucket in (configured_targets, configured_peers, passive_watches, mapped_peer_symbols):
-        for symbol in bucket:
-            if symbol not in requested:
-                requested.append(symbol)
-    # A public minute endpoint is corroborating evidence, not a broad scanner.
-    # The cap is the audited explicit-watch capacity, never an implicit prefix.
-    requested_total = len(requested)
-    requested = requested[:intraday_minute_profile_max_symbols()]
-    # One-minute bars do not gain information every ten seconds.  Keep a tiny,
-    # expiring cache so the high-frequency quote loop does not turn a bounded
-    # research basket into repeated public-provider scraping.  It contains at
-    # most the explicit peer basket and is pruned on every use.
-    now_monotonic = asyncio.get_running_loop().time()
-    cache_ttl_seconds = 45.0
-    for cached_symbol, cached in list(_intraday_tencent_minute_cache.items()):
-        if now_monotonic - cached[0] > cache_ttl_seconds * 4:
-            _intraday_tencent_minute_cache.pop(cached_symbol, None)
-    cached_features: dict[str, dict[str, Any]] = {}
-    cached_errors: dict[str, str] = {}
-    missing: list[str] = []
-    for symbol in requested:
-        cached = _intraday_tencent_minute_cache.get(symbol)
-        if cached is not None and now_monotonic - cached[0] <= cache_ttl_seconds:
-            if cached[1] is not None:
-                cached_features[symbol] = cached[1]
-            elif cached[2]:
-                cached_errors[symbol] = cached[2]
-        else:
-            missing.append(symbol)
-    if missing and TENCENT_INTRADAY_MINUTE_CAPABILITY in await open_provider_capabilities(
-        "tencent_free", [TENCENT_INTRADAY_MINUTE_CAPABILITY],
-    ):
-        errors = {**cached_errors, **{symbol: "provider health circuit is open; upstream request skipped" for symbol in missing}}
-        return cached_features, {"requested": requested, "requested_total": requested_total,
-                                 "truncated": requested_total > len(requested),
-                                 "completed": sorted(cached_features), "errors": errors,
-                                 "cached_symbols": sorted(cached_features), "cache_ttl_seconds": cache_ttl_seconds,
-                                 "provider_status": "circuit_open"}
-    semaphore = asyncio.Semaphore(8)
-    async def fetch_one(symbol: str) -> tuple[str, dict[str, Any] | None, str | None]:
-        try:
-            async with semaphore:
-                rows = await asyncio.wait_for(tencent_intraday_minutes(symbol), timeout=6)
-            return symbol, intraday_minute_features(rows, source="tencent_free_minute"), None
-        except (asyncio.TimeoutError, httpx.HTTPError, FreeProviderError, ValueError) as error:
-            return symbol, None, str(error)[:240]
-    started_at = asyncio.get_running_loop().time()
-    # A slow public minute endpoint must not stretch the 10/30-second quote
-    # loop.  Persist completed partial evidence, cancel only the unfinished
-    # coroutines, and mark the omission explicitly in the scan provenance.
-    tasks: dict[asyncio.Task[tuple[str, dict[str, Any] | None, str | None]], str] = {}
-    pending: set[asyncio.Task[tuple[str, dict[str, Any] | None, str | None]]] = set()
-    results: list[tuple[str, dict[str, Any] | None, str | None]] = []
-    if missing:
-        tasks = {asyncio.create_task(fetch_one(symbol)): symbol for symbol in missing}
-        done, pending = await asyncio.wait(tasks, timeout=6.5)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        for task in done:
-            if task.cancelled():
-                continue
-            try:
-                results.append(task.result())
-            except Exception as error:  # noqa: BLE001 - converted into per-symbol evidence
-                results.append((tasks[task], None, safe_error_detail(str(error), 240)))
-        results.extend((tasks[task], None, "minute_context_deadline_exceeded") for task in pending)
-    features = dict(cached_features)
-    errors = dict(cached_errors)
-    fresh_errors: list[str] = []
-    fresh_completed = 0
-    for symbol, item, error in results:
-        _intraday_tencent_minute_cache[symbol] = (now_monotonic, item, error)
-        if item is not None:
-            features[symbol] = item
-            fresh_completed += 1
-        elif error:
-            errors[symbol] = error
-            fresh_errors.append(error)
-    if missing:
-        await run_database_blocking(
-            persist_tencent_intraday_minute_health, fresh_completed, fresh_errors,
-            round((asyncio.get_running_loop().time() - started_at) * 1000),
-        )
-    return features, {"requested": requested, "requested_total": requested_total,
-                      "truncated": requested_total > len(requested),
-                      "completed": sorted(features), "errors": errors,
-                      "cached_symbols": sorted(cached_features), "cache_ttl_seconds": cache_ttl_seconds,
-                      "priority": {"configured_targets": configured_targets,
-                                   "configured_peers": configured_peers,
-                                   "passive_watches": passive_watches,
-                                   "mapped_peers": mapped_peer_symbols},
-                      "deadline_exceeded_symbols": sorted(tasks[task] for task in pending),
-                      "provider_status": "completed" if fresh_completed else "failed" if fresh_errors else "cached"}
+    """Compatibility entry point backed by the bounded minute-context service."""
+    return await capture_intraday_surge_context(
+        watches, mapped_peers=mapped_peers, cache=_intraday_tencent_minute_cache,
+        max_symbols=intraday_minute_profile_max_symbols,
+        open_capabilities=open_provider_capabilities,
+        capability=TENCENT_INTRADAY_MINUTE_CAPABILITY,
+        fetch_minutes=tencent_intraday_minutes,
+        minute_features=intraday_minute_features,
+        persist_health=persist_tencent_intraday_minute_health,
+        run_database=run_database_blocking,
+        safe_error=safe_error_detail,
+        handled_errors=(asyncio.TimeoutError, httpx.HTTPError, FreeProviderError, ValueError),
+    )
 
 
 async def intraday_board_cache_evidence(observed_at: datetime) -> dict[str, Any]:
