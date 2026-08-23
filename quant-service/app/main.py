@@ -229,6 +229,7 @@ from .intraday_outcomes import (
 )
 from .intraday_scan_repository import (
     first_eac_breakout_events,
+    load_intraday_scan_local_state,
     persist_intraday_scan_terminal,
     previous_quote_frames,
 )
@@ -2588,43 +2589,18 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
         session_start = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).replace(
             hour=0, minute=0, second=0, microsecond=0,
         ).astimezone(timezone.utc)
-        order_book_rows = connection.execute(
-            """SELECT symbol,observed_at,raw FROM quant.intraday_quote_observations
-                 WHERE symbol=ANY(%s) AND source_name='tencent_order_book'
-                   AND observed_at>=%s AND observed_at<%s
-                 ORDER BY symbol,observed_at DESC""",
-            (selected_symbols, max(session_start, observed_at - timedelta(minutes=5)), observed_at),
-        ).fetchall()
-        order_book_by_symbol: dict[str, list[dict[str, Any]]] = {}
-        for item in order_book_rows:
-            order_book_by_symbol.setdefault(str(item["symbol"]), []).append(dict(item))
+        local_state = load_intraday_scan_local_state(
+            connection, selected_symbols, observed_at=observed_at, session_start=session_start,
+            local_trade_date=local_trade_date,
+        )
+        order_book_by_symbol = local_state.order_book_by_symbol
+        paper_positions = local_state.paper_positions
+        candidate_sector_keys = local_state.candidate_sector_keys
+        snapshot_payload = local_state.snapshot_payload
         clear_stale_signal_episodes(connection, selected_symbols, observed_at)
         market_contexts = intraday_point_in_time_market_context_batch(
             connection, [(observed_at, symbol) for symbol in selected_symbols],
         )
-        paper_positions = {
-            str(row["symbol"]): dict(row)
-            for row in connection.execute(
-                "SELECT symbol,quantity,sellable_quantity,average_cost FROM quant.paper_positions WHERE symbol=ANY(%s)",
-                (selected_symbols,),
-            ).fetchall()
-        }
-        sector_rows = connection.execute(
-            """SELECT symbol,sector_key FROM quant.sector_membership_history
-                WHERE symbol=ANY(%s) AND effective_from<=%s
-                  AND (effective_to IS NULL OR effective_to>=%s)
-                  AND taxonomy_key IN ('ths_concept_flow','ths_index_n','ths_industry')""",
-            (selected_symbols, local_trade_date, local_trade_date),
-        ).fetchall() if selected_symbols else []
-        candidate_sector_keys: dict[str, list[str]] = {}
-        for row in sector_rows:
-            candidate_sector_keys.setdefault(str(row["symbol"]), []).append(str(row["sector_key"]))
-        paper_snapshot = connection.execute(
-            "SELECT drawdown,payload FROM quant.paper_portfolio_snapshots ORDER BY as_of DESC LIMIT 1",
-        ).fetchone()
-        snapshot_payload = dict(paper_snapshot["payload"] or {}) if paper_snapshot else {}
-        if paper_snapshot:
-            snapshot_payload["drawdown"] = paper_snapshot["drawdown"]
         shadow_priors = latest_shadow_priors_v2(connection)
         rebound_priors = latest_rebound_priors(connection)
         probability_profiles = load_intraday_probability_profiles(connection)

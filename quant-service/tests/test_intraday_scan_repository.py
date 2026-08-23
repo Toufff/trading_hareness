@@ -4,7 +4,11 @@ from datetime import date, datetime, timezone
 import unittest
 from unittest.mock import MagicMock
 
-from app.intraday_scan_repository import first_eac_breakout_events, previous_quote_frames
+from app.intraday_scan_repository import (
+    first_eac_breakout_events,
+    load_intraday_scan_local_state,
+    previous_quote_frames,
+)
 from app.watchlist_daily_factors import watchlist_daily_factors_by_symbol
 
 
@@ -51,6 +55,50 @@ class IntradayScanRepositoryTests(unittest.TestCase):
         self.assertEqual(previous_quote_frames(connection, {}, not_before=now, observed_at=now), {})
         self.assertEqual(first_eac_breakout_events(connection, [], not_before=now), {})
         connection.execute.assert_not_called()
+
+    def test_scan_local_state_keeps_bounded_local_reads_and_point_in_time_membership(self) -> None:
+        class Result:
+            def __init__(self, *, rows=None, row=None):
+                self.rows, self.row = rows or [], row
+
+            def fetchall(self):
+                return self.rows
+
+            def fetchone(self):
+                return self.row
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+                self.results = iter([
+                    Result(rows=[{"symbol": "000001.SZ", "observed_at": datetime(2026, 8, 17, 1, 0, tzinfo=timezone.utc), "raw": {}}]),
+                    Result(rows=[{"symbol": "000001.SZ", "quantity": 100, "sellable_quantity": 0, "average_cost": 10.0}]),
+                    Result(rows=[{"symbol": "000001.SZ", "sector_key": "pcb"}]),
+                    Result(row={"drawdown": -0.02, "payload": {"equity": 99.0}}),
+                ])
+
+            def execute(self, sql, params=None):
+                self.calls.append((str(sql), params))
+                return next(self.results)
+
+        observed_at = datetime(2026, 8, 17, 1, 5, tzinfo=timezone.utc)
+        connection = Connection()
+        state = load_intraday_scan_local_state(
+            connection, ["000001.SZ"], observed_at=observed_at,
+            session_start=datetime(2026, 8, 17, 1, 0, tzinfo=timezone.utc),
+            local_trade_date=date(2026, 8, 17),
+        )
+        self.assertEqual(len(connection.calls), 4)
+        self.assertEqual(state.order_book_by_symbol["000001.SZ"][0]["raw"], {})
+        self.assertEqual(state.paper_positions["000001.SZ"]["sellable_quantity"], 0)
+        self.assertEqual(state.candidate_sector_keys, {"000001.SZ": ["pcb"]})
+        self.assertEqual(state.snapshot_payload, {"equity": 99.0, "drawdown": -0.02})
+        order_book_sql, order_book_params = connection.calls[0]
+        self.assertIn("source_name='tencent_order_book'", order_book_sql)
+        self.assertEqual(order_book_params[1], datetime(2026, 8, 17, 1, 0, tzinfo=timezone.utc))
+        membership_sql, membership_params = connection.calls[2]
+        self.assertIn("effective_from<=%s", membership_sql)
+        self.assertEqual(membership_params[1:], (date(2026, 8, 17), date(2026, 8, 17)))
 
     def test_daily_factors_for_watch_basket_use_one_ranked_query(self) -> None:
         rows = []

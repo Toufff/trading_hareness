@@ -9,7 +9,8 @@ extraction seam.
 
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Any
 import uuid
 
@@ -17,6 +18,16 @@ from psycopg.types.json import Json
 
 from .provider_health import record_provider_failure
 from .tushare_providers import safe_error_detail
+
+
+@dataclass(frozen=True)
+class IntradayScanLocalState:
+    """Bounded local inputs used by one signal-persistence transaction."""
+
+    order_book_by_symbol: dict[str, list[dict[str, Any]]]
+    paper_positions: dict[str, dict[str, Any]]
+    candidate_sector_keys: dict[str, list[str]]
+    snapshot_payload: dict[str, Any]
 
 
 def previous_quote_frames(
@@ -75,6 +86,62 @@ def first_eac_breakout_events(
     return {str(row["symbol"]): dict(row) for row in rows}
 
 
+def load_intraday_scan_local_state(
+    connection: Any,
+    selected_symbols: list[str],
+    *,
+    observed_at: datetime,
+    session_start: datetime,
+    local_trade_date: date,
+) -> IntradayScanLocalState:
+    """Load all bounded scan-local SQL inputs without provider access.
+
+    The caller still owns its surrounding transaction and the immediately
+    preceding portfolio snapshot write.  Keeping these reads together makes
+    the scan's SQL contract testable while preserving the exact existing
+    snapshot, 5-minute order-book and point-in-time membership boundaries.
+    """
+    order_book_rows = connection.execute(
+        """SELECT symbol,observed_at,raw FROM quant.intraday_quote_observations
+             WHERE symbol=ANY(%s) AND source_name='tencent_order_book'
+               AND observed_at>=%s AND observed_at<%s
+             ORDER BY symbol,observed_at DESC""",
+        (selected_symbols, max(session_start, observed_at - timedelta(minutes=5)), observed_at),
+    ).fetchall()
+    order_book_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for item in order_book_rows:
+        order_book_by_symbol.setdefault(str(item["symbol"]), []).append(dict(item))
+    paper_positions = {
+        str(row["symbol"]): dict(row)
+        for row in connection.execute(
+            "SELECT symbol,quantity,sellable_quantity,average_cost FROM quant.paper_positions WHERE symbol=ANY(%s)",
+            (selected_symbols,),
+        ).fetchall()
+    }
+    sector_rows = connection.execute(
+        """SELECT symbol,sector_key FROM quant.sector_membership_history
+            WHERE symbol=ANY(%s) AND effective_from<=%s
+              AND (effective_to IS NULL OR effective_to>=%s)
+              AND taxonomy_key IN ('ths_concept_flow','ths_index_n','ths_industry')""",
+        (selected_symbols, local_trade_date, local_trade_date),
+    ).fetchall() if selected_symbols else []
+    candidate_sector_keys: dict[str, list[str]] = {}
+    for row in sector_rows:
+        candidate_sector_keys.setdefault(str(row["symbol"]), []).append(str(row["sector_key"]))
+    paper_snapshot = connection.execute(
+        "SELECT drawdown,payload FROM quant.paper_portfolio_snapshots ORDER BY as_of DESC LIMIT 1",
+    ).fetchone()
+    snapshot_payload = dict(paper_snapshot["payload"] or {}) if paper_snapshot else {}
+    if paper_snapshot:
+        snapshot_payload["drawdown"] = paper_snapshot["drawdown"]
+    return IntradayScanLocalState(
+        order_book_by_symbol=order_book_by_symbol,
+        paper_positions=paper_positions,
+        candidate_sector_keys=candidate_sector_keys,
+        snapshot_payload=snapshot_payload,
+    )
+
+
 def persist_intraday_scan_terminal(
     database: Any,
     scan_id: uuid.UUID,
@@ -117,4 +184,10 @@ def persist_intraday_scan_terminal(
         )
 
 
-__all__ = ["first_eac_breakout_events", "persist_intraday_scan_terminal", "previous_quote_frames"]
+__all__ = [
+    "IntradayScanLocalState",
+    "first_eac_breakout_events",
+    "load_intraday_scan_local_state",
+    "persist_intraday_scan_terminal",
+    "previous_quote_frames",
+]
