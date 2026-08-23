@@ -462,6 +462,7 @@ from .intraday_scan_preparation import (
     prepare_intraday_scan_inputs,
 )
 from .intraday_scan_source_status import build_scan_source_status
+from .intraday_watch_quote_capture import WatchQuoteCaptureDependencies, capture_watch_quotes
 from .tushare_official import (
     AUDIT_FOCUS_APIS,
     HISTORICAL_MINUTE_APIS,
@@ -2610,60 +2611,30 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
 
     membership_rows = await run_database_blocking(load_exact_watchlist_memberships)
     mapped_peer_groups = pure_mapped_watchlist_peers(selected_symbols, membership_rows)
-    quote_started_at = asyncio.get_running_loop().time()
-    all_a_task = asyncio.create_task(intraday_all_a_snapshot())
-    all_a_task.add_done_callback(consume_background_task_exception)
-    watch_quote_task = asyncio.create_task(tencent_order_book_quotes(selected_symbols, max_symbols=40))
-    try:
-        fresh_watch_rows = await watch_quote_task
-    except (httpx.HTTPError, FreeProviderError, ValueError):
-        fresh_watch_rows = []
-    try:
-        sina_watch_rows = await sina_quotes(selected_symbols) if not fresh_watch_rows else []
-    except (httpx.HTTPError, FreeProviderError, ValueError):
-        sina_watch_rows = []
-    try:
-        # A fresh all-A snapshot is valuable for flow percentiles, but never
-        # allowed to delay the explicit watchlist beyond this small budget.
-        tencent_rows, all_a_snapshot_status = await asyncio.wait_for(asyncio.shield(all_a_task), timeout=2.0)
-    except ExecutorSaturatedError as error:
-        detail = safe_error_detail(str(error), 300)
-        tencent_rows, all_a_snapshot_status = [], {"status": "unavailable", "error": detail}
-    except (asyncio.TimeoutError, AkShareProviderError, ValueError) as error:
-        detail = safe_error_detail(str(error), 300)
-        tencent_rows, all_a_snapshot_status = [], {"status": "unavailable", "error": detail}
-    quotes = {item["symbol"]: item for row in tencent_rows if (item := intraday_quote_from_tencent(row)) is not None}
-    eastmoney_watch_flow_rows: list[dict[str, Any]] = []
-    if not tencent_rows:
-        try:
-            eastmoney_watch_flow_rows = await asyncio.wait_for(
-                eastmoney_watch_flow_quotes(selected_symbols, max_symbols=40), timeout=2.0,
-            )
-        except (asyncio.TimeoutError, httpx.HTTPError, FreeProviderError, ValueError) as error:
-            all_a_snapshot_status = {**all_a_snapshot_status, "eastmoney_watch_fallback_error": safe_error_detail(str(error), 300)}
-        else:
-            if eastmoney_watch_flow_rows:
-                merge_intraday_eastmoney_watch_flows(quotes, eastmoney_watch_flow_rows)
-                all_a_snapshot_status = {
-                    "status": "fresh", "age_seconds": 0.0,
-                    "source": "eastmoney_watch_flow_batch", "scope": "explicit_watchlist_only",
-                    "cross_sectional": False,
-                    "semantics": "watchlist_public_flow_proxy_not_exchange_order_flow",
-                    "fallback_from": "tencent_all_a_snapshot",
-                    "matched_symbols": len(eastmoney_watch_flow_rows),
-                }
-    if all_a_snapshot_status.get("cross_sectional", True):
-        annotate_intraday_flow_percentiles(quotes)
-    pure_annotate_flow_snapshot_provenance(quotes, all_a_snapshot_status)
-    # One batch refreshes all explicit watches each scan while the slower all-A
-    # cross-section is reused only for percentile normalization.
-    merge_intraday_watch_quote_prices(quotes, fresh_watch_rows)
-    merge_intraday_sina_watch_quotes(quotes, sina_watch_rows)
     quote_timestamp_slo_seconds = 20.0 if intraday_high_frequency_window(observed_at) else 45.0
-    for quote in quotes.values():
-        quote["price_freshness"] = intraday_quote_exchange_time_status(
-            quote, observed_at, quote_timestamp_slo_seconds,
-        )
+    quote_capture = await capture_watch_quotes(
+        selected_symbols, observed_at, quote_timestamp_slo_seconds,
+        WatchQuoteCaptureDependencies(
+            now=asyncio.get_running_loop().time, all_a_snapshot=intraday_all_a_snapshot,
+            tencent_watch_quotes=tencent_order_book_quotes, sina_quotes=sina_quotes,
+            eastmoney_watch_flows=eastmoney_watch_flow_quotes, quote_from_tencent=intraday_quote_from_tencent,
+            merge_eastmoney_flows=merge_intraday_eastmoney_watch_flows,
+            annotate_percentiles=annotate_intraday_flow_percentiles,
+            annotate_flow_provenance=pure_annotate_flow_snapshot_provenance,
+            merge_watch_prices=merge_intraday_watch_quote_prices, merge_sina_prices=merge_intraday_sina_watch_quotes,
+            quote_freshness=intraday_quote_exchange_time_status,
+            consume_background_exception=consume_background_task_exception, safe_error=safe_error_detail,
+            executor_saturated_error=ExecutorSaturatedError,
+            watch_quote_errors=(httpx.HTTPError, FreeProviderError, ValueError),
+            all_a_snapshot_errors=(AkShareProviderError, ValueError),
+        ),
+    )
+    quotes = quote_capture.quotes
+    tencent_rows = quote_capture.tencent_rows
+    all_a_snapshot_status = quote_capture.all_a_snapshot_status
+    fresh_watch_rows = quote_capture.fresh_watch_rows
+    sina_watch_rows = quote_capture.sina_watch_rows
+    eastmoney_watch_flow_rows = quote_capture.eastmoney_watch_flow_rows
     surge_features, surge_source = await intraday_tencent_surge_context(watches, mapped_peers=mapped_peer_groups)
     surge_source["exact_watchlist_peer_mapping"] = {
         "status": "completed", "membership_rows": len(membership_rows),
@@ -2711,7 +2682,7 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
         fast_confirmations=fast_confirmations, board_cache_evidence=board_cache_evidence,
         quote_timestamp_slo_seconds=quote_timestamp_slo_seconds,
     )
-    quote_latency_ms = round((asyncio.get_running_loop().time() - quote_started_at) * 1000)
+    quote_latency_ms = quote_capture.latency_ms
     signals = await run_database_blocking(
         persist_intraday_scan_signals, scan_id, observed_at, selected_symbols, source_status, watches,
         quotes, tencent_rows, quote_latency_ms, tushare_minutes, surge_features, peer_contexts,
