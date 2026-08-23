@@ -13,6 +13,7 @@ from statistics import mean, stdev
 from typing import Any, Iterable
 
 from .replay_readiness import P2_MIN_DAILY_CALENDAR_SPAN_DAYS, P2_MIN_FULL_CROSS_SECTION_DAYS
+from .backtest_execution_rules import a_share_exit_lag
 
 
 SQL_FACTOR_COLUMNS = {
@@ -452,7 +453,7 @@ def run_multi_factor_strategy_sql(connection: Any, universe_key: str, start_date
         raise ValueError(f"strategy requires implemented sql factors{suffix}")
     rebalance_days = max(1, int(parameters.get("rebalance_days", 5)))
     hold_days = max(1, int(parameters.get("hold_days", 5)))
-    exit_lag = max(2, hold_days)
+    exit_lag = a_share_exit_lag(hold_days)
     if rebalance_days < exit_lag:
         raise ValueError(
             f"rebalance_days must be at least {exit_lag} to avoid overlapping research periods"

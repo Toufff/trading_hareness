@@ -1,9 +1,11 @@
 import unittest
 from datetime import date
+from unittest.mock import patch
 
 from app.factor_lab import (
     MAX_LEGACY_UNIVERSE_SYMBOLS, LegacyFactorEngineLimitError,
     factor_at, load_universe_bars, max_drawdown, pearson, rank,
+    run_multi_factor_strategy,
 )
 
 
@@ -81,6 +83,42 @@ class FactorLabTests(unittest.TestCase):
         with self.assertRaisesRegex(LegacyFactorEngineLimitError, "bounded SQL factor engine"):
             load_universe_bars(connection, "all_a", date(2026, 8, 1), date(2026, 8, 14))
         self.assertEqual(len(connection.calls), 1)
+
+    def test_native_strategy_holds_one_session_after_next_day_entry(self):
+        signal_day = date(2026, 8, 3)
+        entry_day = date(2026, 8, 4)
+        exit_day = date(2026, 8, 5)
+
+        def bars(first_close: float, second_open: float, third_close: float):
+            return [
+                {"trading_date": signal_day, "open": first_close, "close": first_close,
+                 "pre_close": first_close, "adj_factor": 1.0, "is_suspended": False, "is_st": False},
+                {"trading_date": entry_day, "open": second_open, "close": second_open,
+                 "pre_close": first_close, "adj_factor": 1.0, "is_suspended": False, "is_st": False},
+                {"trading_date": exit_day, "open": third_close, "close": third_close,
+                 "pre_close": second_open, "adj_factor": 1.0, "is_suspended": False, "is_st": False},
+            ]
+
+        panel = {
+            signal_day: {
+                "000001.SZ": {"momentum_20d": 2.0},
+                "000002.SZ": {"momentum_20d": 1.0},
+            }
+        }
+        bars_by_symbol = {
+            "000001.SZ": bars(10.0, 10.0, 12.0),
+            "000002.SZ": bars(10.0, 10.0, 11.0),
+        }
+        with patch("app.factor_lab.historical_factor_panel", return_value=(panel, bars_by_symbol)):
+            result = run_multi_factor_strategy(
+                connection=None, universe_key="test", start_date=signal_day, end_date=signal_day,
+                parameters={"factors": ["momentum_20d"], "rebalance_days": 1, "hold_days": 1, "top_n": 1},
+            )
+
+        self.assertEqual(result["metrics"]["assumptions"]["effective_exit_lag"], 2)
+        self.assertEqual(len(result["trades"]), 1)
+        self.assertEqual(result["trades"][0]["entry_date"], str(entry_day))
+        self.assertEqual(result["trades"][0]["exit_date"], str(exit_day))
 
 
 if __name__ == "__main__":

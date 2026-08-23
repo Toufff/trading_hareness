@@ -15,6 +15,7 @@ from typing import Any
 from .market_rules import a_share_limit_ratio
 from .research_prices import adjusted_value
 from .universe_history import point_in_time_membership_predicate
+from .backtest_execution_rules import a_share_exit_lag
 
 
 FACTOR_DIRECTIONS = {
@@ -252,6 +253,7 @@ def run_multi_factor_strategy(connection: Any, universe_key: str, start_date: da
     factor_keys = [str(item) for item in parameters.get("factors", ["momentum_20d", "sma_gap_20d", "volume_ratio_20d", "reversal_5d"])]
     rebalance_days = max(1, int(parameters.get("rebalance_days", 5)))
     hold_days = max(1, int(parameters.get("hold_days", 5)))
+    exit_lag = a_share_exit_lag(hold_days)
     top_n = max(1, int(parameters.get("top_n", 20)))
     total_cost_bps = max(0.0, float(parameters.get("total_cost_bps", 18.0)))
     panel, bars_by_symbol = historical_factor_panel(connection, universe_key, start_date, end_date, factor_keys)
@@ -281,9 +283,9 @@ def run_multi_factor_strategy(connection: Any, universe_key: str, start_date: da
         for symbol, score in selected:
             index = index_by_date[symbol].get(signal_date)
             bars = bars_by_symbol[symbol]
-            if index is None or index + hold_days >= len(bars):
+            if index is None or index + exit_lag >= len(bars):
                 continue
-            entry_bar, exit_bar = bars[index + 1], bars[index + hold_days]
+            entry_bar, exit_bar = bars[index + 1], bars[index + exit_lag]
             entry = value(entry_bar.get("open")) or value(entry_bar.get("close"))
             exit_price = value(exit_bar.get("close"))
             blocked = bool(entry_bar.get("is_suspended")) or bool(exit_bar.get("is_suspended"))
@@ -327,7 +329,8 @@ def run_multi_factor_strategy(connection: Any, universe_key: str, start_date: da
                "sharpe_zero_rf": annualized_return / annualized_volatility if annualized_return is not None and annualized_volatility else None,
                "max_drawdown": max_drawdown([item["equity"] for item in curve]), "win_rate": sum(item > 0 for item in returns) / len(returns) if returns else None,
                "periods": periods, "trades": len(trades), "assumptions": {"long_only": True, "signal_available": "close", "entry": "next trading day open or close fallback",
-               "total_cost_bps_round_trip": total_cost_bps * 2, "blocked": ["suspended", "limit_up_entry", "limit_down_exit"]}}
+               "total_cost_bps_round_trip": total_cost_bps * 2, "effective_exit_lag": exit_lag,
+               "blocked": ["suspended", "limit_up_entry", "limit_down_exit"]}}
     status = "completed" if periods >= 20 and len(trades) >= 20 else "insufficient_history"
     return {"strategy_key": "multi_factor_rank_v1", "universe_key": universe_key, "start_date": str(start_date), "end_date": str(end_date),
             "status": status, "parameters": {**parameters, "factors": factor_keys, "rebalance_days": rebalance_days, "hold_days": hold_days,
