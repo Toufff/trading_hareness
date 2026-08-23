@@ -452,6 +452,7 @@ from .runtime_leases import (
 from .tushare_catalog import CORE_NORMALIZED_APIS, TUSHARE_CATALOG, catalog_counts, catalog_items
 from .tushare_catalog_fetch_service import CatalogFetchDependencies, fetch_catalog as run_catalog_fetch
 from .stock_study_tushare_service import StockStudyTushareDependencies, fetch_stock_study_input
+from .intraday_signal_generation import IntradaySignalGenerationDependencies, generate_intraday_signals
 from .tushare_official import (
     AUDIT_FOCUS_APIS,
     HISTORICAL_MINUTE_APIS,
@@ -2525,54 +2526,19 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                 market_context=market_context, fast_confirmation=fast_confirmation,
                 portfolio_context=portfolio_context,
             )
-            rule_quote = {**quote, "_scan_observed_at": observed_at} if quote else None
-            generated_signals = intraday_signal_rules(watch, rule_quote, previous_quote, daily_factors,
-                                                       minute_feature, peer_context)
-            shadow_signal = main_wave_v2_shadow_signal(
-                watch, quote, minute_feature, peer_context, shadow_priors.get(symbol),
+            generated_signals = generate_intraday_signals(
+                watch=watch, symbol=symbol, quote=quote, previous_quote=previous_quote,
+                daily_factors=daily_factors, minute_features=minute_feature, peer_context=peer_context,
+                shadow_prior=shadow_priors.get(symbol), rebound_prior=rebound_priors.get(symbol),
+                first_eac=first_eac_by_symbol.get(symbol), observed_at=observed_at,
+                dependencies=IntradaySignalGenerationDependencies(
+                    base_rules=intraday_signal_rules,
+                    shadow_signal=main_wave_v2_shadow_signal,
+                    rebound_signal=countertrend_rebound_realtime_signal,
+                    rebound_failure_signal=countertrend_rebound_failure_reduce_signal,
+                    eac_acceptance=intraday_eac_acceptance_assessment,
+                ),
             )
-            if shadow_signal is not None:
-                generated_signals.append(shadow_signal)
-            rebound_signal = countertrend_rebound_realtime_signal(
-                watch, quote, minute_feature, peer_context, rebound_priors.get(symbol),
-            )
-            if rebound_signal is not None:
-                generated_signals.append(rebound_signal)
-            rebound_failure_signal = countertrend_rebound_failure_reduce_signal(
-                watch, quote, minute_feature, peer_context, rebound_priors.get(symbol),
-            )
-            if rebound_failure_signal is not None:
-                generated_signals.append(rebound_failure_signal)
-            first_eac = first_eac_by_symbol.get(symbol)
-            if first_eac is not None:
-                acceptance = intraday_eac_acceptance_assessment(
-                    dict(first_eac["conditions"] or {}), first_observed_at=first_eac["observed_at"],
-                    observed_at=observed_at, quote=quote, previous_quote=previous_quote,
-                    minute_features=minute_feature, peer_context=peer_context,
-                )
-                if acceptance["status"] in {"candidate", "attention_only"}:
-                    entry_class = acceptance["status"] == "candidate"
-                    generated_signals.append({
-                        "symbol": symbol,
-                        "signal_key": (f"{symbol}:entry:upside_acceptance_eac_v4" if entry_class
-                                       else f"{symbol}:watch:upside_acceptance_attention_v4"),
-                        "signal_type": "entry" if entry_class else "watch",
-                        "severity": "warning" if entry_class else "info",
-                        "score": acceptance["score"], "hard": False,
-                        "independent_confirmation": True, "stage_upgrade": True,
-                        "conditions": {"price": (quote or {}).get("price"),
-                                       "pct_change": (quote or {}).get("pct_change"),
-                                       "volume_ratio": (quote or {}).get("volume_ratio"),
-                                       "turnover_rate": (quote or {}).get("turnover_rate"),
-                                       "main_net_inflow": (quote or {}).get("main_net_inflow"),
-                                       "setup": "eac_acceptance_confirmed",
-                                       "eac_state": acceptance["status"],
-                                       "eac_acceptance_assessment": acceptance,
-                                       "minute_features": minute_feature or {"status": "not_available"},
-                                       "peer_context": peer_context or {"status": "not_available"}},
-                        "risk_flags": ["eac_timed_acceptance", "manual_review_required", "no_automatic_order",
-                                       *acceptance.get("risk_flags", [])],
-                    })
             for signal in generated_signals:
                 # Signal rules historically identify the symbol in signal_key;
                 # normalize the outer symbol before paper/audit persistence so
