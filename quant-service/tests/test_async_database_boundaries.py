@@ -38,6 +38,7 @@ from app.sector_read_model import project_concept_member_backfill_status
 from app.async_limit_linkage_mining_read_repository import latest_limit_linkage_mining as async_limit_linkage_mining
 from app.async_analyst_prompt_lab_read_repository import status as async_prompt_lab_status
 from app.async_analyst_market_review_read_repository import list_reviews as async_market_reviews
+from app.async_analyst_market_evaluation_read_repository import market_evaluation as async_market_evaluation
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -150,6 +151,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_limit_linkage_mining_read_repository.py",
             "async_analyst_prompt_lab_read_repository.py",
             "async_analyst_market_review_read_repository.py",
+            "async_analyst_market_evaluation_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -1225,6 +1227,46 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         direct = await async_market_reviews(database, "daily", 1000)
         self.assertEqual(direct["items"][0]["review_id"], "review-1")
         self.assertEqual(database.connection.calls[0][1], ("daily", "daily", 100))
+
+    async def test_analyst_market_evaluation_prefers_native_async_evidence(self) -> None:
+        calls = []
+
+        async def evaluation(_database, start, end, analyst):
+            calls.append((start, end, analyst))
+            return {"quality_gate": {"live_strategy_effect": "none"}}
+
+        router = build_analyst_research_reads_router(
+            object(), lambda *_args: {}, async_database=object(), async_market_evaluation_fn=evaluation,
+        )
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-research/market-evaluation")
+        start, end = date(2026, 8, 1), date(2026, 8, 15)
+        payload = await endpoint(start, end, "anqiang-touzi-riji")
+        self.assertEqual(payload["quality_gate"]["live_strategy_effect"], "none")
+        self.assertEqual(calls, [(start, end, "anqiang-touzi-riji")])
+
+        class Result:
+            async def fetchall(self): return []
+
+        class Connection:
+            def __init__(self): self.calls = []
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                return Result()
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        database = Database()
+        direct = await async_market_evaluation(database, start, end, "anqiang-touzi-riji")
+        self.assertEqual(direct["quality_gate"]["live_strategy_effect"], "none")
+        self.assertEqual(len(database.connection.calls), 8)
+        self.assertEqual(database.connection.calls[0][1], (start, end, "anqiang-touzi-riji", "anqiang-touzi-riji"))
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:

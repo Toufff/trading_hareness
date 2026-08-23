@@ -11,6 +11,7 @@ from ..async_analyst_research_read_repository import observations as async_obser
 from ..async_analyst_research_read_repository import profiles as async_profiles
 from ..async_analyst_market_review_read_repository import latest_review as async_latest_review
 from ..async_analyst_market_review_read_repository import list_reviews as async_list_reviews
+from ..async_analyst_market_evaluation_read_repository import market_evaluation as async_market_evaluation
 from ..analyst_market_evaluation import analyst_market_evaluation
 from ..analyst_stock_timeline import analyst_stock_timeline
 from ..analyst_market_review import (
@@ -65,6 +66,7 @@ def build_analyst_research_reads_router(
     async_observations_fn: Callable[[Any, str | None, int], Awaitable[dict[str, Any]]] | None = None,
     async_list_reviews_fn: Callable[[Any, str | None, int], Awaitable[dict[str, Any]]] | None = None,
     async_latest_review_fn: Callable[[Any, str], Awaitable[dict[str, Any]]] | None = None,
+    async_market_evaluation_fn: Callable[[Any, date | None, date | None, str | None], Awaitable[dict[str, Any]]] | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["analyst-research-reads"])
 
@@ -85,7 +87,7 @@ def build_analyst_research_reads_router(
         return _observations_sync(database, analyst_id, limit)
 
     @router.get("/api/v1/analyst-research/market-evaluation")
-    def market_evaluation(
+    async def market_evaluation(
         start_date: date | None = None,
         end_date: date | None = None,
         analyst_id: str | None = None,
@@ -95,6 +97,8 @@ def build_analyst_research_reads_router(
         This is intentionally a read-only research projection.  It uses the
         immutable observation ledger and never writes or changes live weights.
         """
+        if async_database is not None:
+            return await (async_market_evaluation_fn or async_market_evaluation)(async_database, start_date, end_date, analyst_id)
         return analyst_market_evaluation(database, start_date, end_date, analyst_id)
 
     @router.get("/api/v1/analyst-research/reviews")
