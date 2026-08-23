@@ -72,7 +72,7 @@ def repository_agent_context() -> dict[str, Any]:
                 "market_emotion: limit-up/down breadth and previous-limit premium",
                 "ladder: highest board, multi-board breadth and consecutive-board gaps",
                 "sector_structure: exact saved-member/quote coverage only; do not infer a mid-cap anchor",
-                "capital_and_lhb: top-20 amount concentration, LHB direction and persisted Tushare institution seats",
+                "capital_and_lhb: top-20 amount concentration only after daily amount-unit validation, LHB direction and persisted Tushare institution seats",
                 "loss_effect: broad drawdown, previous-limit deep losses, opened-limit supply and close reversal flags",
                 "wind_flags: bounded first-board, consecutive, repair and broad-pullback resilience samples",
                 "next_session_plan: per-symbol triggers and invalidations, research-only",

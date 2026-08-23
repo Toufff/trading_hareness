@@ -1,6 +1,6 @@
 # P0 数据正确性与备份状态
 
-更新时间：2026-08-14（上海交易日口径）
+更新时间：2026-08-22（上海交易日口径）
 
 本文件记录已实际落地并验证的 P0 项，避免把设计计划写成已完成事实。
 
@@ -10,6 +10,7 @@
 - `stock_basic` 名称仅以开头的 `ST` / `*ST` 判定 ST，并会更新 `quant.instruments.is_st`。已从 2026-08-11 的主源全市场快照回填 207 只。
 - `adj_factor` 归一化时同时回填 `canonical_bars_daily.adj_factor`；日线后续刷新会保留已有因子。因子实验室保留原始 OHLC 作执行/涨跌停判断，但对动量、均线、波动率、IC 和持有期收益显式使用 `price * adj_factor`。
 - 腾讯财经公开日线当前明确为 `qfq` 前复权口径。`tencent_free` 已被硬性限制为 raw 研究证据：`persist_free_daily` 不会把它写入 `market_bars_daily` 或 `canonical_bars_daily`，`upsert_bar` 也会拒绝该 source。版本化迁移 `20260811_0003` 已删除旧的 72 条派生行，保留 693 条 raw 证据用于溯源；健康接口显示 `canonical_promotion: false`。
+- Tushare 兼容日线的 `vol=手、amount=千元` 口径已成为显式质量契约。若原始证据的 `amount / (vol * close)` 不在保守合理区间，原始 payload 仍保存，但 `market_bars_daily` 与 `canonical_bars_daily.amount` 均置空、canonical 标为 `partial`，且写入 `daily_amount_unit_mismatch`。系统不会猜测性地除以 1,000。2026-08-21 已隔离 43 条异常行；重算后全市场成交额前 20 占比为 14.92%，盘后集中度证据恢复可用。
 - `suspend_d` 归一化时会将 `[suspend_date, resume_date)` 的已有 canonical 日线标为停牌；普通日线不会清掉该标记。
 - `stk_limit` 与 `adj_factor` 的已有控制表记录已回填：当前 canonical 日线中各有 187 条精确值。控制源缺失时，统一回退为主板 10%、创业/科创 20%、北交 30%、ST 5%；精确 `stk_limit` 仍优先。
 - 所有原 `date.today()` 默认日期已替换为 `cn_today()`，固定使用 `Asia/Shanghai`。

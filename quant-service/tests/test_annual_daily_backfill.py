@@ -138,6 +138,12 @@ class AnnualDailyBackfillTests(unittest.TestCase):
         self.assertIn("canonical_daily_multi_provider", source)
         self.assertNotIn("rt_min", source)
 
+    def test_bulk_daily_projection_applies_the_same_amount_unit_quarantine_before_commit(self):
+        source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
+        self.assertIn("quarantine_tushare_daily_amount_mismatches", source)
+        self.assertIn('if promote == "daily"', source)
+        self.assertIn('ZoneInfo("Asia/Shanghai")', source)
+
     def test_sector_promotion_preserves_eight_digit_regex_in_sql(self):
         class RecordingConnection:
             def __init__(self): self.calls = []

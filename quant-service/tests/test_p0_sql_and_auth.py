@@ -22,6 +22,7 @@ from app.episode_lifecycle import backfill_signal_event_episode_links, ensure_si
 from app.analyst_observations import persist_extraction_run, persist_observations_for_evidence
 from app.feature_snapshot_repository import materialize_feature_snapshot
 from app.intraday_event_retention import prune_ephemeral_signal_events
+from app.daily_bar_repository import daily_amount_unit_mismatch, quarantine_tushare_daily_amount_mismatches
 from app.main import DailyBar, app, db, executor_saturated_response, upsert_bar
 from app.runtime_executors import ExecutorSaturatedError
 from app.automation_run_repository import fail_run, finish_run, start_or_resume_run, start_run
@@ -130,6 +131,17 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
         self.assertNotIn("adj_factor_missing", result["items"][0]["quality_flags"])
         self.assertEqual(len(connection.writes), 1)
 
+    def test_tushare_daily_amount_guard_keeps_declared_units_and_rejects_mixed_units(self) -> None:
+        self.assertFalse(daily_amount_unit_mismatch(
+            source="tushare_super_get", amount=Decimal("1000"), volume=Decimal("100"), close=Decimal("100"),
+        ))
+        self.assertTrue(daily_amount_unit_mismatch(
+            source="tushare_super_get", amount=Decimal("1000000"), volume=Decimal("100"), close=Decimal("100"),
+        ))
+        self.assertFalse(daily_amount_unit_mismatch(
+            source="manual", amount=Decimal("1000000"), volume=Decimal("100"), close=Decimal("100"),
+        ))
+
 
 @unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
 class UpsertBarSqlIntegrationTests(unittest.TestCase):
@@ -150,8 +162,12 @@ class UpsertBarSqlIntegrationTests(unittest.TestCase):
                 (self.symbol, self.trading_date),
             )
             connection.execute(
-                "DELETE FROM quant.raw_market_observations WHERE provider_key=%s AND symbol=%s",
-                (self.source, self.symbol),
+                "DELETE FROM quant.raw_market_observations WHERE symbol=%s AND provider_key=ANY(%s)",
+                (self.symbol, [self.source, "tushare_super_get"]),
+            )
+            connection.execute(
+                "DELETE FROM quant.data_quality_issues WHERE symbol=%s AND trading_date=%s AND code='daily_amount_unit_mismatch'",
+                (self.symbol, self.trading_date),
             )
             connection.execute("DELETE FROM quant.instruments WHERE symbol=%s", (self.symbol,))
 
@@ -190,6 +206,59 @@ class UpsertBarSqlIntegrationTests(unittest.TestCase):
             self.assertTrue(market["is_suspended"])
             self.assertEqual(Decimal(canonical["adj_factor"]), Decimal("1.25"))
             self.assertTrue(canonical["is_suspended"])
+        finally:
+            self._cleanup()
+
+    def test_mixed_unit_tushare_amount_is_raw_only_and_canonical_amount_is_quarantined(self) -> None:
+        self._cleanup()
+        observed = datetime(2099, 1, 2, tzinfo=timezone.utc)
+        try:
+            with db.transaction() as connection:
+                upsert_bar(connection, DailyBar(
+                    symbol=self.symbol, trading_date=self.trading_date,
+                    open=Decimal("10"), high=Decimal("10"), low=Decimal("10"), close=Decimal("10"),
+                    volume=Decimal("100"), amount=Decimal("100000"),
+                    source="tushare_super_get", available_at=observed,
+                ))
+                # The bulk projector uses this raw-evidence repair path.  It
+                # must rediscover the same mismatch without creating a second
+                # unresolved issue, even after canonical amount is NULL.
+                self.assertEqual(
+                    quarantine_tushare_daily_amount_mismatches(
+                        connection, trading_dates=(self.trading_date,),
+                    ),
+                    1,
+                )
+                market = connection.execute(
+                    "SELECT amount FROM quant.market_bars_daily WHERE symbol=%s AND trading_date=%s",
+                    (self.symbol, self.trading_date),
+                ).fetchone()
+                canonical = connection.execute(
+                    "SELECT amount,quality_status FROM quant.canonical_bars_daily WHERE symbol=%s AND trading_date=%s",
+                    (self.symbol, self.trading_date),
+                ).fetchone()
+                raw = connection.execute(
+                    """SELECT normalized->>'amount' AS amount FROM quant.raw_market_observations
+                         WHERE provider_key='tushare_super_get' AND capability='daily_bar'
+                           AND symbol=%s ORDER BY created_at DESC LIMIT 1""",
+                    (self.symbol,),
+                ).fetchone()
+                issue = connection.execute(
+                    """SELECT code FROM quant.data_quality_issues WHERE symbol=%s AND trading_date=%s
+                         AND code='daily_amount_unit_mismatch' AND resolved_at IS NULL""",
+                    (self.symbol, self.trading_date),
+                ).fetchone()
+                issue_count = connection.execute(
+                    """SELECT count(*)::int AS rows FROM quant.data_quality_issues WHERE symbol=%s AND trading_date=%s
+                         AND code='daily_amount_unit_mismatch' AND resolved_at IS NULL""",
+                    (self.symbol, self.trading_date),
+                ).fetchone()
+            self.assertIsNone(market["amount"])
+            self.assertIsNone(canonical["amount"])
+            self.assertEqual(canonical["quality_status"], "partial")
+            self.assertEqual(raw["amount"], "100000")
+            self.assertEqual(issue["code"], "daily_amount_unit_mismatch")
+            self.assertEqual(issue_count["rows"], 1)
         finally:
             self._cleanup()
 

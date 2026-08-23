@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Json, Jsonb
 
 from .database import Database
+from .daily_bar_repository import quarantine_tushare_daily_amount_mismatches
 from .runtime_resources import DEFAULT_HOT_DATABASE_SOFT_BYTES, bounded_storage_budget_bytes
 from .sector_flow_repository import rebuild_sector_flow_daily_features
 from .tushare_providers import ProviderCallError, call_provider, provider_configs, safe_error_detail
@@ -733,6 +734,14 @@ class AnnualDailyBackfill:
             _stage_rows(connection, rows)
             _persist_raw(connection, provider_key, api_name, key, available_at, ingested_at, availability_basis)
             self._promote_staged(connection, provider_key, promote, available_at, ingested_at, availability_basis)
+            if promote == "daily":
+                # The bulk projector bypasses ``upsert_daily_bar`` for
+                # throughput.  Apply the exact same Tushare unit quarantine
+                # before the transaction commits, scoped to this one day.
+                quarantine_tushare_daily_amount_mismatches(
+                    connection,
+                    trading_dates=(available_at.astimezone(ZoneInfo("Asia/Shanghai")).date(),),
+                )
 
     async def fetch_one(
         self, spec: ApiSpec, params: dict[str, Any], *, day: date | None = None,

@@ -10,7 +10,7 @@ making the same write contract reusable by future offline replay.
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -18,6 +18,21 @@ from psycopg.types.json import Json
 
 from .analysis import as_utc
 from .request_models import DailyBar
+
+
+# Tushare's documented daily contract is ``vol`` in lots (100 shares) and
+# ``amount`` in thousand yuan.  Its implied amount/(lots * close) ratio is
+# therefore close to 0.1.  Some compatible GET responses have returned a
+# small subset of rows with ``amount`` in yuan instead, a 1,000x mixture that
+# silently corrupts liquidity ranks.  Keep the original row in immutable raw
+# evidence, but never promote an unverified amount into either daily control
+# table.
+TUSHARE_DAILY_AMOUNT_SOURCES = frozenset({
+    "tushare", "tushare_primary", "tushare_super_get", "tushare_super_sdk",
+    "tushare_super", "tushare_backup",
+})
+TUSHARE_DAILY_AMOUNT_RATIO_MIN = Decimal("0.02")
+TUSHARE_DAILY_AMOUNT_RATIO_MAX = Decimal("0.50")
 
 
 def exchange_for(symbol: str) -> str:
@@ -33,12 +48,116 @@ def provider_priority(provider: str) -> int:
     }.get(provider, 80)
 
 
+def daily_amount_unit_mismatch(*, source: str, amount: Decimal | None,
+                               volume: Decimal | None, close: Decimal | None) -> bool:
+    """Return whether a Tushare daily amount violates its declared unit contract.
+
+    A missing/zero field is not a unit conclusion.  We only quarantine a row
+    when all three values exist and its implied VWAP is impossible under the
+    documented ``amount=thousand yuan, volume=lots`` convention.  This is a
+    data-quality guard, never an inferred currency conversion.
+    """
+    if source not in TUSHARE_DAILY_AMOUNT_SOURCES:
+        return False
+    if amount is None or volume is None or close is None or amount <= 0 or volume <= 0 or close <= 0:
+        return False
+    ratio = amount / (volume * close)
+    return not TUSHARE_DAILY_AMOUNT_RATIO_MIN <= ratio <= TUSHARE_DAILY_AMOUNT_RATIO_MAX
+
+
+def _record_daily_amount_unit_issue(connection: Any, bar: DailyBar) -> None:
+    """Record one unresolved issue per symbol/date without duplicating retries."""
+    implied_ratio = bar.amount / (bar.volume * bar.close)  # caller checked non-zero fields
+    connection.execute(
+        """INSERT INTO quant.data_quality_issues(capability,symbol,trading_date,severity,code,message,details)
+           SELECT 'daily_bar',%s,%s,'warning','daily_amount_unit_mismatch',
+                  'daily amount does not match the Tushare lots/thousand-yuan contract',%s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM quant.data_quality_issues
+                 WHERE capability='daily_bar' AND symbol=%s AND trading_date=%s
+                   AND code='daily_amount_unit_mismatch' AND resolved_at IS NULL
+            )""",
+        (bar.symbol, bar.trading_date, Json({
+            "provider": bar.source,
+            "amount": str(bar.amount), "volume_lot": str(bar.volume),
+            "close": str(bar.close), "implied_amount_per_lot_close": str(implied_ratio),
+            "expected_ratio_range": [str(TUSHARE_DAILY_AMOUNT_RATIO_MIN), str(TUSHARE_DAILY_AMOUNT_RATIO_MAX)],
+            "action": "amount_quarantined_not_rescaled",
+        }), bar.symbol, bar.trading_date),
+    )
+
+
+def quarantine_tushare_daily_amount_mismatches(
+    connection: Any, *, trading_dates: tuple[date, ...] | None = None,
+) -> int:
+    """Quarantine existing mixed-unit Tushare daily amounts without fetching data.
+
+    This repair is idempotent: it only clears values that still violate the
+    documented unit contract, preserves raw observations, and emits at most
+    one unresolved issue for a symbol/date.  It intentionally does *not*
+    divide by 1,000 because the gateway response does not provide a reliable
+    per-row unit declaration.
+    """
+    date_filter = " AND trading_date=ANY(%s)" if trading_dates else ""
+    params: list[Any] = [
+        list(TUSHARE_DAILY_AMOUNT_SOURCES), TUSHARE_DAILY_AMOUNT_RATIO_MIN,
+        TUSHARE_DAILY_AMOUNT_RATIO_MAX,
+    ]
+    if trading_dates:
+        params.append(list(trading_dates))
+    rows = connection.execute(
+        """SELECT bar.symbol,bar.trading_date,bar.close,bar.selected_provider,
+                  nullif(observation.normalized->>'amount','')::numeric AS amount,
+                  nullif(observation.normalized->>'volume','')::numeric AS volume
+             FROM quant.canonical_bars_daily bar
+             JOIN LATERAL (
+                 SELECT normalized FROM quant.raw_market_observations observation
+                  WHERE observation.observation_id=ANY(bar.source_observation_ids)
+                    AND observation.provider_key=bar.selected_provider
+                  ORDER BY observation.available_at DESC,observation.created_at DESC
+                  LIMIT 1
+             ) observation ON true
+            WHERE bar.selected_provider=ANY(%s) AND bar.close>0
+              AND nullif(observation.normalized->>'amount','')::numeric>0
+              AND nullif(observation.normalized->>'volume','')::numeric>0
+              AND nullif(observation.normalized->>'amount','')::numeric /
+                  (nullif(observation.normalized->>'volume','')::numeric * bar.close)
+                  NOT BETWEEN %s AND %s""" + date_filter,
+        params,
+    ).fetchall()
+    for row in rows:
+        bar = DailyBar(
+            symbol=row["symbol"], trading_date=row["trading_date"], close=Decimal(row["close"]),
+            volume=Decimal(row["volume"]), amount=Decimal(row["amount"]),
+            source=str(row["selected_provider"]),
+        )
+        _record_daily_amount_unit_issue(connection, bar)
+        connection.execute(
+            """UPDATE quant.canonical_bars_daily
+                  SET amount=NULL,
+                      quality_status=CASE WHEN quality_status='fresh' THEN 'partial' ELSE quality_status END,
+                      canonicalized_at=now()
+                WHERE symbol=%s AND trading_date=%s""",
+            (bar.symbol, bar.trading_date),
+        )
+        connection.execute(
+            """UPDATE quant.market_bars_daily SET amount=NULL
+                WHERE symbol=%s AND trading_date=%s AND source=%s""",
+            (bar.symbol, bar.trading_date, bar.source),
+        )
+    return len(rows)
+
+
 def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
     """Persist one licensed/unadjusted daily bar and its immutable evidence."""
     if bar.source == "tencent_free":
         # Tencent's public adapter is qfq/front-adjusted.  It can be retained
         # as raw research evidence but must never enter the unadjusted series.
         raise ValueError("tencent_free front-adjusted daily rows are raw research evidence only")
+    amount_mismatch = daily_amount_unit_mismatch(
+        source=bar.source, amount=bar.amount, volume=bar.volume, close=bar.close,
+    )
+    promoted_amount = None if amount_mismatch else bar.amount
     connection.execute(
         """INSERT INTO quant.instruments(symbol,exchange,name,industry,is_st,source)
            VALUES(%s,%s,%s,%s,coalesce(%s,false),%s)
@@ -59,7 +178,7 @@ def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
              limit_up=coalesce(EXCLUDED.limit_up,quant.market_bars_daily.limit_up),
              limit_down=coalesce(EXCLUDED.limit_down,quant.market_bars_daily.limit_down),source=EXCLUDED.source,available_at=EXCLUDED.available_at""",
         (bar.symbol, bar.trading_date, bar.open, bar.high, bar.low, bar.close, bar.pre_close, bar.volume,
-         bar.amount, bar.adj_factor, bar.is_suspended, bar.limit_up, bar.limit_down, bar.source,
+         promoted_amount, bar.adj_factor, bar.is_suspended, bar.limit_up, bar.limit_down, bar.source,
          as_utc(bar.available_at), bar.is_suspended),
     )
     normalized = bar.model_dump(mode="json")
@@ -72,6 +191,8 @@ def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
         (bar.source, bar.symbol, datetime.combine(bar.trading_date, datetime.min.time(), tzinfo=timezone.utc), as_utc(bar.available_at),
          payload_sha256, Json(normalized), Json(normalized)),
     ).fetchone()
+    if amount_mismatch:
+        _record_daily_amount_unit_issue(connection, bar)
     existing = connection.execute(
         "SELECT close,selected_provider,source_observation_ids FROM quant.canonical_bars_daily WHERE symbol=%s AND trading_date=%s",
         (bar.symbol, bar.trading_date),
@@ -89,7 +210,7 @@ def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
         connection.execute(
             """INSERT INTO quant.canonical_bars_daily(symbol,trading_date,open,high,low,close,pre_close,volume,amount,adj_factor,is_suspended,limit_up,limit_down,
                  selected_provider,source_observation_ids,quality_status,available_at)
-               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,coalesce(%s,false),%s,%s,%s,%s,'fresh',%s)
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,coalesce(%s,false),%s,%s,%s,%s,%s,%s)
                ON CONFLICT(symbol,trading_date) DO UPDATE SET open=EXCLUDED.open,high=EXCLUDED.high,low=EXCLUDED.low,close=EXCLUDED.close,
                  pre_close=EXCLUDED.pre_close,volume=EXCLUDED.volume,amount=EXCLUDED.amount,
                  adj_factor=coalesce(EXCLUDED.adj_factor,quant.canonical_bars_daily.adj_factor),
@@ -97,12 +218,17 @@ def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
                  limit_up=coalesce(EXCLUDED.limit_up,quant.canonical_bars_daily.limit_up),
                  limit_down=coalesce(EXCLUDED.limit_down,quant.canonical_bars_daily.limit_down),selected_provider=EXCLUDED.selected_provider,
                  source_observation_ids=EXCLUDED.source_observation_ids,quality_status=EXCLUDED.quality_status,available_at=EXCLUDED.available_at,canonicalized_at=now()""",
-             (bar.symbol, bar.trading_date, bar.open, bar.high, bar.low, bar.close, bar.pre_close, bar.volume, bar.amount, bar.adj_factor,
-              bar.is_suspended, bar.limit_up, bar.limit_down, selected_provider, source_ids, as_utc(bar.available_at),
+             (bar.symbol, bar.trading_date, bar.open, bar.high, bar.low, bar.close, bar.pre_close, bar.volume, promoted_amount, bar.adj_factor,
+              bar.is_suspended, bar.limit_up, bar.limit_down, selected_provider, source_ids,
+              "partial" if amount_mismatch else "fresh", as_utc(bar.available_at),
               bar.is_suspended),
         )
     else:
         connection.execute("UPDATE quant.canonical_bars_daily SET source_observation_ids=%s,canonicalized_at=now() WHERE symbol=%s AND trading_date=%s", (source_ids, bar.symbol, bar.trading_date))
 
 
-__all__ = ["exchange_for", "provider_priority", "upsert_daily_bar"]
+__all__ = [
+    "TUSHARE_DAILY_AMOUNT_RATIO_MAX", "TUSHARE_DAILY_AMOUNT_RATIO_MIN",
+    "TUSHARE_DAILY_AMOUNT_SOURCES", "daily_amount_unit_mismatch", "exchange_for",
+    "provider_priority", "quarantine_tushare_daily_amount_mismatches", "upsert_daily_bar",
+]
