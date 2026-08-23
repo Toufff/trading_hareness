@@ -16,6 +16,7 @@ from app.request_models import PostCloseRefreshRequest
 class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
     async def test_service_assembles_same_date_stages_and_announcements_after_core_symbols(self):
         captured: dict[str, object] = {}
+        providers: dict[str, object] = {}
 
         async def completed(*_args, **_kwargs):
             return {"status": "completed"}
@@ -45,7 +46,7 @@ class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
             return {"status": "completed", "stages": {}}
 
         dependencies = PostCloseRefreshDependencies(
-            database=object(), china_today=lambda: date(2026, 8, 21), provider_configs=lambda: {},
+            database=object(), china_today=lambda: date(2026, 8, 21), provider_configs=lambda: providers,
             run_database=completed, reconcile_stale_fetch_runs=lambda *_: None,
             reprocess_remote_reports=lambda *_: None, sync_market_universe=completed,
             sync_full_market_daily=full_market_daily, sync_strategy_index_context=completed,
@@ -76,6 +77,20 @@ class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["probe"].symbol, "000001.SZ")
         self.assertEqual(captured["announcements"].symbols, ["000001.SZ"])
         self.assertEqual(captured["announcements"].start_date, date(2026, 7, 7))
+
+        class PromaxDaily:
+            configured = True
+            get_gateway_mode = "promax"
+
+            @staticmethod
+            def supports(api_name: str) -> bool:
+                return api_name == "daily"
+
+        providers["super_get"] = PromaxDaily()
+        await run_post_close_refresh(
+            PostCloseRefreshRequest(trade_date=date(2026, 8, 21), announcement_limit=7), dependencies,
+        )
+        self.assertEqual(captured["daily_request"].provider, "super_get")
 
     async def test_optional_stage_receipt_wrapper_is_used(self):
         seen: list[str] = []
