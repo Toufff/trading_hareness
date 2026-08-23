@@ -453,6 +453,10 @@ from .tushare_catalog import CORE_NORMALIZED_APIS, TUSHARE_CATALOG, catalog_coun
 from .tushare_catalog_fetch_service import CatalogFetchDependencies, fetch_catalog as run_catalog_fetch
 from .stock_study_tushare_service import StockStudyTushareDependencies, fetch_stock_study_input
 from .intraday_signal_generation import IntradaySignalGenerationDependencies, generate_intraday_signals
+from .intraday_signal_event_persistence import (
+    IntradaySignalEventPersistenceDependencies,
+    persist_generated_signals,
+)
 from .tushare_official import (
     AUDIT_FOCUS_APIS,
     HISTORICAL_MINUTE_APIS,
@@ -2539,119 +2543,30 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     eac_acceptance=intraday_eac_acceptance_assessment,
                 ),
             )
-            for signal in generated_signals:
-                # Signal rules historically identify the symbol in signal_key;
-                # normalize the outer symbol before paper/audit persistence so
-                # every rule (including EAC acceptance) satisfies the payload
-                # contract.
-                signal.setdefault("symbol", symbol)
-                signal.setdefault("observed_at", observed_at)
-                signal["conditions"] = {**signal["conditions"], "realtime_cross_check": fast_confirmation}
-                if fast_confirmation.get("status") == "mismatch":
-                    signal["risk_flags"] = [*signal["risk_flags"], "realtime_cross_source_price_mismatch"]
             event_state = load_intraday_signal_event_state(
                 connection, [str(signal["signal_key"]) for signal in generated_signals], symbol,
                 session_start=session_start,
             )
-            for signal in generated_signals:
-                portfolio_gate = paper_risk_gate(
-                    signal_type=signal["signal_type"], symbol=symbol,
-                    position=paper_positions.get(symbol),
-                    snapshot=snapshot_payload,
-                    candidate_sector_keys=candidate_sector_keys.get(symbol, ()),
-                )
-                portfolio_risk = {"allowed": portfolio_gate.allowed, "target_weight": portfolio_gate.target_weight,
-                                  "reasons": list(portfolio_gate.reasons), "risk_flags": list(portfolio_gate.risk_flags)}
-                policy = live_policy_gate(signal, watch, quote, daily_factors, market_context, fast_confirmation,
-                                          portfolio_risk)
-                setup_state = classify_intraday_setup_state(
-                    watch, quote, minute_feature, peer_context, policy,
-                )
-                signal["conditions"] = {
-                    **signal["conditions"], "policy_gate": policy,
-                    "setup_state": setup_state,
-                    # Persist the bounded aggregate rather than raw book
-                    # frames.  Its registered contract is attribution-only:
-                    # this records a one-sided seal/queue observation for
-                    # later replay without changing a live score or entry.
-                    "order_book_proxy": order_book_feature,
-                    "factor_contract_version": INTRADAY_FACTOR_CONTRACT_VERSION,
-                    "factor_contracts": intraday_factor_contracts_for_signal(signal),
-                }
-                signal["risk_flags"] = [*signal["risk_flags"], *policy["risk_flags"]]
-                probability = intraday_probability_for_signal(signal, probability_profiles)
-                signal["conditions"] = {
-                    **signal["conditions"],
-                    "decision_context": intraday_decision_context(signal, probability),
-                }
-                signal["conditions"] = {
-                    **signal["conditions"],
-                    "signal_contract": intraday_signal_contract(signal, observed_at),
-                }
-                latest = event_state.latest_by_key.get(str(signal["signal_key"]))
-                last_key_alerted = event_state.last_alerted_by_key.get(str(signal["signal_key"]))
-                last_symbol_watch_alerted = event_state.last_symbol_watch_alerted
-                state = intraday_signal_event_state(
-                    signal, observed_at=observed_at,
-                    latest_event_at=latest["observed_at"] if latest else None,
-                    last_key_alerted_at=last_key_alerted["observed_at"] if last_key_alerted else None,
-                    last_symbol_watch_alerted_at=last_symbol_watch_alerted["observed_at"] if last_symbol_watch_alerted else None,
-                    last_key_alert=dict(last_key_alerted) if last_key_alerted else None,
-                )
-                if signal.get("shadow_only"):
-                    state = "suppressed"
-                if state == "confirmed" and fast_confirmation.get("status") == "mismatch":
-                    state = "confirming"
-                if state == "confirmed" and not policy["allow_confirmation"]:
-                    state = "confirming"
-                episode = None if signal["signal_type"] == "data_issue" else ensure_signal_episode(
-                    connection, signal, observed_at, state, symbol=symbol,
-                )
-                signal["conditions"] = {**signal["conditions"], "episode": episode or {"state": "not_applicable"}}
-                evidence = {"tencent": quote, "tencent_order_book": order_book_feature, "tencent_minute": minute_feature,
-                            "peer_context": peer_context, "tushare_rt_min": tushare_minutes.get(symbol),
-                            "tushare_rt_k_fast": fast_confirmation,
-                            "daily_factors": daily_factors, "market_context": market_context}
-                evidence["attribution"] = intraday_signal_attribution(
-                    signal["signal_key"], signal["signal_type"], signal["conditions"], evidence, market_context,
-                )
-                event = connection.execute(
-                    """INSERT INTO quant.intraday_signal_events(
-                         scan_id,symbol,signal_key,signal_type,severity,state,score,observed_at,expires_at,
-                         conditions,evidence,risk_flags,episode_id,material_state_hash,stage)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING signal_event_id""",
-                    (scan_id, symbol, signal["signal_key"], signal["signal_type"], signal["severity"], state,
-                     signal["score"], observed_at, observed_at + INTRADAY_CONFIRMATION_WINDOW,
-                     Json(signal["conditions"]), Json(evidence), Json(signal["risk_flags"]),
-                     episode["episode_id"] if episode else None,
-                     episode["material_state_hash"] if episode else None,
-                     episode["stage"] if episode else "data_issue"),
-                ).fetchone()
-                event_state.latest_by_key[str(signal["signal_key"])] = {"observed_at": observed_at}
-                # Confirmed signals create an auditable paper proposal only.
-                # No broker client or live order path is reachable here.
-                if state == "confirmed":
-                    paper_payload = paper_decision_payload(
-                        signal, state, policy,
-                        {"allowed": portfolio_gate.allowed, "target_weight": portfolio_gate.target_weight,
-                         "reasons": portfolio_gate.reasons, "risk_flags": portfolio_gate.risk_flags},
-                    )
-                    persist_paper_decision(
-                        connection, event["signal_event_id"], paper_payload,
-                    )
-                    if not portfolio_gate.allowed:
-                        connection.execute(
-                            """INSERT INTO quant.paper_risk_events(decision_id,symbol,event_type,severity,message,occurred_at,details)
-                               SELECT decision_id,%s,'portfolio_limit','block',%s,%s,%s::jsonb
-                                 FROM quant.paper_decisions
-                                WHERE signal_event_id=%s ORDER BY created_at DESC LIMIT 1""",
-                            (symbol, "; ".join(portfolio_gate.reasons), observed_at,
-                             Json({"risk_flags": list(portfolio_gate.risk_flags)}), event["signal_event_id"]),
-                        )
-                signals.append({"signal_event_id": event["signal_event_id"], "symbol": symbol, "state": state,
-                                **signal, "observed_at": observed_at, "quote": quote,
-                                "minute": (tushare_minutes.get(symbol) or {}).get("latest"),
-                                "fast_quote_confirmation": fast_confirmation, "watch": watch})
+            signals.extend(persist_generated_signals(
+                connection, scan_id=scan_id, observed_at=observed_at, symbol=symbol, watch=watch,
+                quote=quote, daily_factors=daily_factors, minute_feature=minute_feature,
+                peer_context=peer_context, market_context=market_context, fast_confirmation=fast_confirmation,
+                order_book_feature=order_book_feature, tushare_minute=tushare_minutes.get(symbol),
+                paper_position=paper_positions.get(symbol), portfolio_snapshot=snapshot_payload,
+                candidate_sector_keys=candidate_sector_keys.get(symbol, ()), probability_profiles=probability_profiles,
+                generated_signals=generated_signals, existing_event_state=event_state,
+                confirmation_window=INTRADAY_CONFIRMATION_WINDOW,
+                factor_contract_version=INTRADAY_FACTOR_CONTRACT_VERSION,
+                dependencies=IntradaySignalEventPersistenceDependencies(
+                    paper_risk_gate=paper_risk_gate, live_policy_gate=live_policy_gate,
+                    classify_setup_state=classify_intraday_setup_state,
+                    factor_contracts=intraday_factor_contracts_for_signal,
+                    probability=intraday_probability_for_signal, decision_context=intraday_decision_context,
+                    signal_contract=intraday_signal_contract, event_state=intraday_signal_event_state,
+                    ensure_episode=ensure_signal_episode, attribution=intraday_signal_attribution,
+                    paper_decision_payload=paper_decision_payload, persist_paper_decision=persist_paper_decision,
+                ),
+            ))
     return signals
 
 
