@@ -175,6 +175,12 @@ from .post_close_strategy_service import (
 )
 from .post_close_scheduler import PostCloseSchedulerDependencies, post_close_strategy_scheduler
 from .strategy_review_scheduler import StrategyReviewSchedulerDependencies, strategy_review_scheduler
+from .strategy_runtime_runners import (
+    PostCloseStrategyRuntimeDependencies,
+    StrategyReviewRuntimeDependencies,
+    run_post_close_strategy_loop as run_post_close_strategy_runtime_loop,
+    run_strategy_review_loop as run_strategy_review_runtime_loop,
+)
 from .analyst_market_review import build_recorded_analyst_market_review
 from .strategy_pattern_read_model import latest_strategy_pattern_mining as read_latest_strategy_pattern_mining
 from .intraday_outcome_settlement import settle as persist_intraday_outcome_settlement
@@ -2626,104 +2632,34 @@ async def sse_calendar_open_async(calendar_date: date) -> bool:
 
 
 async def strategy_review_loop() -> None:
-    """Compose the isolated checkpoint scheduler with production side effects."""
-    async def build_snapshot(exchange_date: date, session: str) -> dict[str, Any]:
-        # ``MarketSnapshotRequest`` has no date override: this callback runs
-        # only at the scheduler's current Shanghai checkpoint, exactly as the
-        # legacy loop did.  ``exchange_date`` remains explicit in the
-        # scheduler contract for the other persisted operations.
-        _ = exchange_date
-        return await build_market_snapshot(MarketSnapshotRequest(session=session, refresh_public_quotes=True))
-
-    async def build_board_report() -> dict[str, Any]:
-        return await run_intraday_board_report(deliver=False)
-
-    async def settle_outcomes(exchange_date: date) -> dict[str, Any]:
-        return await run_database_blocking(recompute_outcomes, exchange_date, timeout_seconds=60)
-
-    async def settle_analyst_intraday_outcomes(exchange_date: date) -> dict[str, Any]:
-        return await run_database_blocking(
-            recompute_analyst_intraday_outcomes_for_date, exchange_date, timeout_seconds=90,
-        )
-
-    async def settle_scorecards(exchange_date: date) -> dict[str, Any]:
-        return await run_database_blocking(recompute_scorecards, exchange_date, timeout_seconds=30)
-
-    async def persist_review(exchange_date: date, session: str) -> None:
-        def persist() -> None:
-            with db.transaction() as connection:
-                strategy_review_payload(
-                    connection,
-                    StrategyReviewRequest(session=session, as_of_date=exchange_date, persist=True),
-                )
-        await run_database_blocking(persist, timeout_seconds=30)
-
-    async def review_completed_for_checkpoint(exchange_date: date, session: str) -> bool:
-        def load() -> bool:
-            with db.transaction() as connection:
-                return review_checkpoint_completed_isolated(connection, exchange_date, session)
-        return await run_database_blocking(load, timeout_seconds=10)
-
-    async def build_analyst_review(cadence: str, exchange_date: date) -> dict[str, Any]:
-        return await run_database_blocking(
-            build_recorded_analyst_market_review, db, cadence, exchange_date, timeout_seconds=90,
-        )
-
-    await strategy_review_scheduler(StrategyReviewSchedulerDependencies(
-        calendar_open=sse_calendar_open_async,
-        sync_index_context=sync_strategy_index_context,
-        build_market_snapshot=build_snapshot,
-        build_board_report=build_board_report,
-        recompute_outcomes=settle_outcomes,
-        recompute_analyst_intraday_outcomes=settle_analyst_intraday_outcomes,
-        recompute_scorecards=settle_scorecards,
-        build_analyst_market_review=build_analyst_review,
-        persist_review=persist_review,
-        completed_for_checkpoint=review_completed_for_checkpoint,
+    """Run the isolated checkpoint scheduler through the production adapter."""
+    await run_strategy_review_runtime_loop(StrategyReviewRuntimeDependencies(
+        database=db, run_database=run_database_blocking, calendar_open=sse_calendar_open_async,
+        sync_index_context=sync_strategy_index_context, build_market_snapshot=build_market_snapshot,
+        market_snapshot_request=lambda session: MarketSnapshotRequest(session=session, refresh_public_quotes=True),
+        build_board_report=run_intraday_board_report, recompute_outcomes=recompute_outcomes,
+        recompute_analyst_intraday_outcomes=recompute_analyst_intraday_outcomes_for_date,
+        recompute_scorecards=recompute_scorecards, strategy_review_payload=strategy_review_payload,
+        strategy_review_request=StrategyReviewRequest, completed_for_checkpoint=review_checkpoint_completed_isolated,
+        build_analyst_market_review=build_recorded_analyst_market_review,
         now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
+        scheduler=strategy_review_scheduler,
     ))
 
 
 async def post_close_strategy_loop() -> None:
-    """Compose the independent same-date post-close scheduler.
-
-    Persistence and provider boundaries remain here; the scheduler module owns
-    only retry-window and completion semantics, so it can be tested without
-    the service database or wall clock.
-    """
-    async def completed_for_date(exchange_date: date) -> tuple[bool, bool]:
-        return (
-            await run_database_blocking(post_close_strategy_completed_for_date, exchange_date, timeout_seconds=10),
-            await run_database_blocking(watchlist_main_wave_completed_for_date, exchange_date, timeout_seconds=10),
-        )
-
-    async def run_strategy(exchange_date: date) -> str:
-        result = await run_database_blocking(functools.partial(
-            run_recorded, db, task_key="post_close_strategy",
-            run_key=f"post-close-strategy:{exchange_date}",
-            operation=functools.partial(run_post_close_strategy, PostCloseStrategyRequest(as_of_date=exchange_date)),
-            cadence="daily", as_of_date=exchange_date, methodology_version=POST_CLOSE_STRATEGY_MODEL_VERSION,
-            input_summary={"data_boundary": "same_date_close"},
-        ), timeout_seconds=60)
-        return str(result.get("status") or "failed")
-
-    async def run_main_wave(exchange_date: date) -> str:
-        result = await run_database_blocking(functools.partial(
-            run_recorded, db, task_key="watchlist_main_wave",
-            run_key=f"watchlist-main-wave:{exchange_date}",
-            operation=functools.partial(persist_watchlist_main_wave_research, WatchlistMainWaveResearchRequest(as_of_date=exchange_date)),
-            cadence="daily", as_of_date=exchange_date, methodology_version="watchlist-main-wave-v2",
-            input_summary={"universe": "watchlist"},
-        ), timeout_seconds=90)
-        return str(result.get("status") or "failed")
-
-    await post_close_strategy_scheduler(PostCloseSchedulerDependencies(
-        calendar_open=sse_calendar_open_async,
+    """Run the same-date post-close scheduler through the production adapter."""
+    await run_post_close_strategy_runtime_loop(PostCloseStrategyRuntimeDependencies(
+        database=db, run_database=run_database_blocking, calendar_open=sse_calendar_open_async,
         retry_window=post_close_strategy_retry_window,
-        completed_for_date=completed_for_date,
-        run_strategy=run_strategy,
-        run_main_wave=run_main_wave,
+        strategy_completed_for_date=post_close_strategy_completed_for_date,
+        main_wave_completed_for_date=watchlist_main_wave_completed_for_date,
+        run_recorded=run_recorded, run_post_close_strategy=run_post_close_strategy,
+        post_close_request=PostCloseStrategyRequest, post_close_model_version=POST_CLOSE_STRATEGY_MODEL_VERSION,
+        run_main_wave_research=persist_watchlist_main_wave_research,
+        main_wave_request=WatchlistMainWaveResearchRequest,
         now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
+        scheduler=post_close_strategy_scheduler,
     ))
 
 
