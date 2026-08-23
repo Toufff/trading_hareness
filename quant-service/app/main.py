@@ -451,6 +451,7 @@ from .runtime_leases import (
 )
 from .tushare_catalog import CORE_NORMALIZED_APIS, TUSHARE_CATALOG, catalog_counts, catalog_items
 from .tushare_catalog_fetch_service import CatalogFetchDependencies, fetch_catalog as run_catalog_fetch
+from .stock_study_tushare_service import StockStudyTushareDependencies, fetch_stock_study_input
 from .tushare_official import (
     AUDIT_FOCUS_APIS,
     HISTORICAL_MINUTE_APIS,
@@ -4429,25 +4430,18 @@ def tushare_rows_for_request(request_key: str) -> list[dict[str, Any]]:
 
 
 async def stock_study_fetch(label: str, request: TushareFetchRequest) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Fetch one study input without allowing a failed enrichment to abort research."""
-    try:
-        outcome = await asyncio.wait_for(fetch_tushare_catalog(request), timeout=12)
-        rows = await run_database_blocking(tushare_rows_for_request, str(outcome["request_key"]))
-        if looks_like_response_header(rows):
-            return ({"source": label, "api_name": request.api_name, "provider": outcome.get("provider"),
-                     "status": "invalid_response", "received": 0, "stored": outcome.get("stored", 0),
-                     "error": "provider returned a header row instead of market data"}, [])
-        return ({"source": label, "api_name": request.api_name, "provider": outcome.get("provider"),
-                 "status": outcome["status"], "received": outcome.get("received", outcome.get("stored", 0)),
-                 "stored": outcome.get("stored", 0), "fallback_failures": outcome.get("fallback_failures", [])}, rows)
-    except asyncio.TimeoutError:
-        return ({"source": label, "api_name": request.api_name, "provider": request.provider,
-                 "status": "blocked", "received": 0, "stored": 0,
-                 "error": "study source exceeded 12 second local budget; provider outcome was not observed"}, [])
-    except HTTPException as error:
-        status = "blocked" if is_local_capacity_http_error(error) else "circuit_open" if is_circuit_open_http_error(error) else "failed"
-        return ({"source": label, "api_name": request.api_name, "provider": request.provider,
-                 "status": status, "received": 0, "stored": 0, "error": str(error.detail)}, [])
+    return await fetch_stock_study_input(
+        label,
+        request,
+        StockStudyTushareDependencies(
+            fetch_catalog=fetch_tushare_catalog,
+            run_database=run_database_blocking,
+            raw_rows_for_request=tushare_rows_for_request,
+            looks_like_response_header=looks_like_response_header,
+            is_local_capacity_error=is_local_capacity_http_error,
+            is_circuit_open_error=is_circuit_open_http_error,
+        ),
+    )
 
 
 def persist_stock_study_free_result(provider: str, capability: str, payload: Any, symbol: str,
