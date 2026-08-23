@@ -155,6 +155,7 @@ from .order_book_features import aggregate_order_book_observations
 from . import intraday_order_book_service as order_book_service
 from . import intraday_order_book_runner
 from . import intraday_minute_profile_runner
+from . import intraday_board_curve_runner
 from .market_snapshots import snapshot_status, summarize_quotes
 from .market_flow_repository import (
     persist_intraday_market_flow_feature,
@@ -3376,41 +3377,29 @@ async def retry_pending_board_rotation_alerts(limit: int = 3) -> dict[str, int]:
 
 async def intraday_board_flow_curve_loop() -> None:
     """Capture once per SSE board-observation minute without catch-up bursts."""
-    completed_minute: datetime | None = None
-    pruned_on: date | None = None
-    while True:
-        local = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
-        active, _ = await intraday_board_curve_session_async()
-        minute = local.replace(second=0, microsecond=0)
-        if active and minute != completed_minute:
-            if pruned_on != local.date():
-                cutoff = datetime.now(timezone.utc) - timedelta(days=intraday_board_curve_retention_days())
-                rotation_cutoff = datetime.now(timezone.utc) - timedelta(days=intraday_board_rotation_retention_days())
-                def prune() -> None:
-                    with db.transaction() as connection:
-                        connection.execute("DELETE FROM quant.intraday_board_flow_snapshots WHERE observed_at<%s", (cutoff,))
-                        # Rotation events are derived from adjacent source snapshots.
-                        # Delivery receipts cascade with the event; raw snapshots,
-                        # daily bars, and research evidence remain outside this cleanup.
-                        connection.execute(
-                            "DELETE FROM quant.intraday_board_rotation_events WHERE last_observed_at<%s",
-                            (rotation_cutoff,),
-                        )
-                await run_database_blocking(prune)
-                pruned_on = local.date()
-            allowed, storage = await nonessential_high_frequency_capture_allowed()
-            if not allowed:
-                print(f"intraday board curve skipped by storage guard: {storage.get('state')}")
-                completed_minute = minute
-            else:
-                try:
-                    await capture_intraday_board_flow_curve()
-                except Exception as error:  # noqa: BLE001 - the next minute is an independent snapshot
-                    print(f"intraday board curve capture failed: {str(error)[:300]}")
-            completed_minute = minute
-        # Wake near the next minute boundary; never replay missed minutes.
-        next_minute = (local + timedelta(minutes=1)).replace(second=1, microsecond=0)
-        await asyncio.sleep(min(30.0, max(1.0, (next_minute - local).total_seconds())))
+    async def prune_before(now: datetime, curve_days: int, rotation_days: int) -> None:
+        cutoff = now - timedelta(days=curve_days)
+        rotation_cutoff = now - timedelta(days=rotation_days)
+
+        def prune() -> None:
+            with db.transaction() as connection:
+                connection.execute("DELETE FROM quant.intraday_board_flow_snapshots WHERE observed_at<%s", (cutoff,))
+                # Rotation events are derived from adjacent source snapshots.
+                # Delivery receipts cascade with the event; raw snapshots,
+                # daily bars, and research evidence remain outside this cleanup.
+                connection.execute(
+                    "DELETE FROM quant.intraday_board_rotation_events WHERE last_observed_at<%s",
+                    (rotation_cutoff,),
+                )
+        await run_database_blocking(prune)
+
+    await intraday_board_curve_runner.run_loop(
+        board_session=intraday_board_curve_session_async, prune_before=prune_before,
+        storage_allowed=nonessential_high_frequency_capture_allowed,
+        capture=capture_intraday_board_flow_curve,
+        curve_retention_days=intraday_board_curve_retention_days,
+        rotation_retention_days=intraday_board_rotation_retention_days,
+    )
 
 
 def strategy_review_automation_enabled() -> bool:
