@@ -120,6 +120,7 @@ from .post_close_pattern_score import review_score as pure_pattern_review_score
 from .post_close_pattern_candidates import select_candidates as pure_post_close_pattern_candidates
 from .post_close_candidate_screen import screen_candidates as pure_post_close_screen_candidates
 from .post_close_evidence import exact_board_context as pure_exact_board_context, lhb_context as pure_lhb_context
+from .limit_pool_merge import merge_limit_pool_sources as merge_persisted_limit_pool_sources
 from .post_close_strategy_service import (
     candidates as persisted_post_close_strategy_candidates,
     completed_for_date as persisted_post_close_strategy_completed_for_date,
@@ -1955,63 +1956,9 @@ async def refresh_strategy_pattern_sources(as_of_date: date) -> dict[str, Any]:
 
 def merge_limit_pool_sources(ths_rows: list[dict[str, Any]], eastmoney_rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Build the complete locally observable limit-up union without truncating to replay samples."""
-    merged: dict[str, dict[str, Any]] = {}
-    ths_symbols: set[str] = set()
-    eastmoney_symbols: set[str] = set()
-    for stored in ths_rows:
-        raw = dict(stored.get("row_data") or stored)
-        symbol = str(raw.get("ts_code") or "").upper()
-        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
-            continue
-        ths_symbols.add(symbol)
-        merged[symbol] = {
-            **strategy_json_safe(raw), "ts_code": symbol,
-            "provider_key": stored.get("provider_key") or "tushare_super_sdk",
-            "available_at": stored.get("available_at"), "sources": ["tushare_limit_list_ths"],
-        }
-    for stored in eastmoney_rows:
-        symbol = str(stored.get("symbol") or "").upper()
-        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
-            continue
-        eastmoney_symbols.add(symbol)
-        body = stored.get("body") or {}
-        if isinstance(body, str):
-            try:
-                body = json.loads(body)
-            except json.JSONDecodeError:
-                body = {}
-        raw = dict(body) if isinstance(body, dict) else {}
-        board_count = int(intraday_number(raw.get("连板数")) or 1)
-        eastmoney = {
-            "ts_code": symbol, "name": raw.get("名称"), "limit_type": "涨停池",
-            "pct_chg": intraday_number(raw.get("涨跌幅")), "price": intraday_number(raw.get("最新价")),
-            "amount": intraday_number(raw.get("成交额")), "turnover_rate": intraday_number(raw.get("换手率")),
-            "limit_amount": intraday_number(raw.get("封板资金")), "first_time": raw.get("首次封板时间"),
-            "last_time": raw.get("最后封板时间"), "open_num": intraday_number(raw.get("炸板次数")),
-            "tag": "首板" if board_count <= 1 else f"{board_count}连板",
-            "lu_desc": raw.get("所属行业"), "provider_key": stored.get("source") or "akshare",
-            "available_at": stored.get("available_at"), "sources": ["eastmoney_stock_zt_pool_em"],
-        }
-        if symbol in merged:
-            for key, value in eastmoney.items():
-                if key not in {"provider_key", "available_at", "sources"} and merged[symbol].get(key) in {None, ""} and value not in {None, ""}:
-                    merged[symbol][key] = value
-            merged[symbol]["sources"] = [*merged[symbol].get("sources", []), "eastmoney_stock_zt_pool_em"]
-            merged[symbol]["eastmoney_evidence"] = strategy_json_safe(eastmoney)
-        else:
-            merged[symbol] = eastmoney
-    union_symbols = ths_symbols | eastmoney_symbols
-    return {
-        "items": list(merged.values()),
-        "coverage": {
-            "status": "two_source_union" if ths_symbols and eastmoney_symbols else "single_source_only",
-            "union_count": len(union_symbols), "intersection_count": len(ths_symbols & eastmoney_symbols),
-            "tushare_count": len(ths_symbols), "eastmoney_count": len(eastmoney_symbols),
-            "tushare_only": sorted(ths_symbols - eastmoney_symbols),
-            "eastmoney_only": sorted(eastmoney_symbols - ths_symbols), "local_truncation": False,
-            "notice": "完整表示当前已访问同花顺与东财涨停池的去重并集，不代表交易所官方全量保证。",
-        },
-    }
+    return merge_persisted_limit_pool_sources(
+        ths_rows, eastmoney_rows, json_safe=strategy_json_safe, number=intraday_number,
+    )
 
 
 def strategy_pattern_sample_candidates(as_of_date: date, max_symbols: int, per_cohort: int,
