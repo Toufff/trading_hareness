@@ -127,6 +127,8 @@ from .async_sync_symbol_repository import limited_core_symbols as read_async_lim
 from .async_runtime_lease_repository import acquire as acquire_background_runtime_lease
 from .async_runtime_lease_repository import release as release_background_runtime_lease
 from .async_runtime_lease_repository import renew as renew_background_runtime_lease
+from .async_intraday_alert_outbox_repository import create_pending as create_async_pending_intraday_alert_delivery
+from .async_intraday_alert_outbox_repository import due_deliveries as read_async_due_intraday_alert_deliveries
 from .intraday_volume_profiles import attach_volume_time_profile as pure_attach_volume_time_profile
 from .intraday_volume_profiles import volume_time_profile as pure_intraday_volume_time_profile
 from .intraday_volume_profiles import volume_time_profiles as pure_intraday_volume_time_profiles
@@ -2056,19 +2058,13 @@ async def attempt_intraday_alert_delivery(delivery_id: uuid.UUID, signal_event_i
 
 async def deliver_intraday_alert(signal_event_id: uuid.UUID, text: str) -> dict[str, Any]:
     """Persist before outbound I/O so a short-lived signal cannot be lost."""
-    def create_pending_delivery() -> uuid.UUID:
-        return intraday_alert_delivery_service.create_pending_delivery(db, signal_event_id, text)
-
-    delivery_id = await run_database_blocking(create_pending_delivery)
+    delivery_id = await create_async_pending_intraday_alert_delivery(async_db, signal_event_id, text)
     return await attempt_intraday_alert_delivery(delivery_id, signal_event_id, text)
 
 
 async def retry_pending_intraday_alerts(limit: int = 3) -> dict[str, int]:
     """Retry bounded, unsent outbox rows even when their source signal faded."""
-    def load_due() -> list[dict[str, Any]]:
-        return intraday_alert_delivery_service.load_due_deliveries(db, INTRADAY_ALERT_MAX_ATTEMPTS, limit)
-
-    rows = await run_database_blocking(load_due)
+    rows = await read_async_due_intraday_alert_deliveries(async_db, INTRADAY_ALERT_MAX_ATTEMPTS, limit)
     sent = failed = disabled = 0
     for row in rows:
         outcome = await attempt_intraday_alert_delivery(row["delivery_id"], row["signal_event_id"], str(row["message_text"]))

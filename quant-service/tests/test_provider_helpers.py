@@ -2057,15 +2057,17 @@ class ProviderHelperTests(unittest.TestCase):
 
     def test_intraday_alert_delivery_queues_before_persisting_attempt_in_database_executor(self):
         async def check() -> tuple[dict[str, object], AsyncMock]:
-            blocking = AsyncMock(side_effect=[uuid.uuid4(), None])
+            blocking = AsyncMock(return_value=None)
+            create_pending = AsyncMock(return_value=uuid.uuid4())
             with patch("app.main.post_feishu_alert_text", new=AsyncMock(return_value={"status": "disabled", "reason": "not configured"})), \
-                 patch("app.main.run_database_blocking", new=blocking):
+                 patch("app.main.run_database_blocking", new=blocking), \
+                 patch("app.main.create_async_pending_intraday_alert_delivery", new=create_pending):
                 result = await deliver_intraday_alert(uuid.uuid4(), "测试")
             return result, blocking
 
         result, blocking = asyncio.run(check())
         self.assertEqual(result["status"], "disabled")
-        self.assertEqual([call.args[0].__name__ for call in blocking.await_args_list], ["create_pending_delivery", "persist_delivery_attempt"])
+        self.assertEqual([call.args[0].__name__ for call in blocking.await_args_list], ["persist_delivery_attempt"])
 
     def test_intraday_alert_retry_keeps_failed_message_outbox_bounded(self):
         from app.main import retry_pending_intraday_alerts
@@ -2073,14 +2075,14 @@ class ProviderHelperTests(unittest.TestCase):
         due = [{"delivery_id": uuid.uuid4(), "signal_event_id": uuid.uuid4(), "message_text": "未送达提醒"}]
 
         async def check() -> tuple[dict[str, int], AsyncMock]:
-            blocking = AsyncMock(return_value=due)
-            with patch("app.main.run_database_blocking", new=blocking), \
+            load_due = AsyncMock(return_value=due)
+            with patch("app.main.read_async_due_intraday_alert_deliveries", new=load_due), \
                  patch("app.main.attempt_intraday_alert_delivery", new=AsyncMock(return_value={"status": "sent"})):
-                return await retry_pending_intraday_alerts(limit=99), blocking
+                return await retry_pending_intraday_alerts(limit=99), load_due
 
-        result, blocking = asyncio.run(check())
+        result, load_due = asyncio.run(check())
         self.assertEqual(result, {"loaded": 1, "sent": 1, "failed": 0, "disabled": 0})
-        self.assertEqual(blocking.await_args.args[0].__name__, "load_due")
+        self.assertEqual(load_due.await_args.args[1:], (3, 99))
 
     def test_alert_delivery_sends_auditable_recovery_receipt_after_normal_delivery_recovers(self):
         health_event = {
