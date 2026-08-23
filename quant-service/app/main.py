@@ -161,6 +161,7 @@ from .market_flow_repository import (
 )
 from .intraday_alerts import daily_strategy_summary_text, delivery_health_recovery_text, intraday_alert_text
 from . import intraday_alert_delivery_service
+from . import intraday_board_report_service
 from .board_rotation import board_rotation_candidates, board_rotation_still_directional
 from .board_stock_mining import board_stock_mining_candidates
 from .board_stock_mining_repository import persist_board_stock_mining_run
@@ -3788,87 +3789,19 @@ async def run_intraday_board_report(*, deliver: bool = False) -> dict[str, Any]:
     ``deliver`` remains only for compatible callers; board and linkage mining
     never publish to Feishu under the watched-stock-only policy.
     """
-    observed_at = datetime.now(timezone.utc)
-    # Persist the full bounded Top10 requested by the close-review surface.
-    # ``quoted_members`` remains visible so sparse public quote coverage is not
-    # presented as complete membership coverage.
-    report = await intraday_sector_report(IntradaySectorReportRequest(kind="all", top_stocks=10, hydrate_top_boards=0))
-    report_id = uuid.uuid4()
-    if report.get("status") != "completed":
-        def persist_blocked() -> None:
-            with db.transaction() as connection:
-                connection.execute(
-                    """INSERT INTO quant.intraday_board_reports(board_report_id,observed_at,status,source_status,summary,payload)
-                       VALUES(%s,%s,'blocked',%s,%s,%s)""",
-                    (report_id, observed_at, Json(strategy_json_safe(report.get("sources", {}))),
-                     Json({"reason": report.get("reason")}), Json(strategy_json_safe(report))),
-                )
-        await run_database_blocking(persist_blocked)
-        return {"status": "blocked", "board_report_id": str(report_id), "reason": report.get("reason")}
-    runtime_quotes = report.pop("_runtime_quotes", {})
-    mining_candidates, mining_coverage, mining_summary = board_stock_mining_candidates(report["items"])
-    # Full member quotes are runtime evidence for the miner only.  The board
-    # report remains bounded to Top10 so routine five-minute storage does not
-    # grow with every mapped constituent.
-    stored_report = {
-        **report,
-        "items": [{key: value for key, value in item.items() if key != "member_quotes"} for item in report["items"]],
-    }
-    sections: list[str] = []
-    summary: dict[str, Any] = {}
-    for taxonomy_key, label in (("eastmoney_industry", "行业"), ("eastmoney_concept", "概念")):
-        rows = [item for item in report["items"] if item.get("taxonomy_key") == taxonomy_key and item.get("net_inflow") is not None]
-        inflow = sorted(rows, key=lambda item: float(item["net_inflow"]), reverse=True)[:3]
-        outflow = sorted(rows, key=lambda item: float(item["net_inflow"]))[:3]
-        summary[taxonomy_key] = {"inflow": inflow, "outflow": outflow}
-        def render(items: list[dict[str, Any]]) -> str:
-            return "；".join(f"{item['label']} {intraday_flow_label(item['net_inflow'])}" for item in items) or "—"
-        sections.extend([f"{label}流入：{render(inflow)}", f"{label}流出：{render(outflow)}"])
-    def persist_completed() -> None:
-        with db.transaction() as connection:
-            connection.execute(
-                """INSERT INTO quant.intraday_board_reports(board_report_id,observed_at,status,source_status,summary,payload)
-                   VALUES(%s,%s,'completed',%s,%s,%s)""",
-                (report_id, observed_at,
-                 Json(strategy_json_safe({"coverage": report.get("coverage"), "tushare_context": report.get("tushare_context")})),
-                 Json(strategy_json_safe(summary)), Json(strategy_json_safe(stored_report))),
-            )
-    await run_database_blocking(persist_completed)
-    mining = {"status": "completed", "summary": mining_summary, "coverage": mining_coverage}
-    try:
-        def persist_mining() -> str:
-            with db.transaction() as connection:
-                return persist_board_stock_mining_run(
-                    connection, board_report_id=report_id, observed_at=observed_at,
-                    candidates=mining_candidates, coverage=mining_coverage, summary=mining_summary,
-                )
-        mining["mining_run_id"] = await run_database_blocking(persist_mining)
-    except Exception as error:  # The durable board report must survive a mining storage fault.
-        print(f"intraday board stock mining persistence failed: {safe_error_detail(str(error), 300)}")
-        mining = {"status": "partial", "reason": safe_error_detail(str(error), 300),
-                  "summary": mining_summary, "coverage": mining_coverage}
-    limit_anchor_refresh = await refresh_intraday_limit_up_anchors(observed_at)
-    linkage = await run_limit_linkage_mining(observed_at, runtime_quotes)
-    # Keep the board brief and linkage candidates in persistent frontend
-    # evidence, never an outbound notification stream.
-    linkage_candidates = linkage.get("candidates") or []
-    if linkage.get("status") == "completed" and linkage_candidates:
-        rendered = "；".join(
-            f"{item.get('name') or item['symbol']} {item['symbol']}（{intraday_number(item.get('pct_change')) or 0.0:+.2f}% / 量比{intraday_number(item.get('volume_ratio')) or 0.0:.2f} / 分{intraday_number(item.get('score')) or 0.0:.0f}）"
-            for item in linkage_candidates[:20]
-        )
-        sections.append(f"涨停关联候选（Top{min(20, len(linkage_candidates))}）：{rendered}")
-    elif linkage.get("status") == "completed":
-        sections.append("涨停关联候选：本轮无满足严格量价门槛的非涨停标的")
-    local_time = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%H:%M")
-    text = "\n".join([
-        f"【盘中板块与关联挖掘快报｜{local_time}】", *sections,
-        "来源：东财实时板块资金流、东财涨停池、同花顺精确概念成员、腾讯全 A 行情；关联候选仅供研究，须经分钟承接确认，不构成买卖指令。",
-    ])
-    delivery = {"status": "suppressed", "reason": "Feishu is reserved for watched-stock strategy signals"}
-    return {"status": "completed", "board_report_id": str(report_id), "summary": summary,
-            "mining": mining, "limit_anchor_refresh": limit_anchor_refresh,
-            "limit_linkage_mining": linkage, "delivery": delivery}
+    async def fetch_report() -> dict[str, Any]:
+        # Persist the full bounded Top10 requested by the close-review surface.
+        # ``quoted_members`` remains visible so sparse public quote coverage is not
+        # presented as complete membership coverage.
+        return await intraday_sector_report(IntradaySectorReportRequest(kind="all", top_stocks=10, hydrate_top_boards=0))
+
+    return await intraday_board_report_service.run(
+        database=db, fetch_report=fetch_report, board_candidates=board_stock_mining_candidates,
+        persist_mining_run=persist_board_stock_mining_run, refresh_limit_anchors=refresh_intraday_limit_up_anchors,
+        run_limit_linkage=run_limit_linkage_mining, run_database=run_database_blocking,
+        json_safe=strategy_json_safe, flow_label=intraday_flow_label, number=intraday_number,
+        safe_error=safe_error_detail,
+    )
 
 
 async def refresh_intraday_limit_up_anchors(observed_at: datetime) -> dict[str, Any]:
