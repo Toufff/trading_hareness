@@ -154,6 +154,7 @@ from .free_market_providers import (
 from .order_book_features import aggregate_order_book_observations
 from . import intraday_order_book_service as order_book_service
 from . import intraday_order_book_runner
+from . import intraday_minute_profile_runner
 from .market_snapshots import snapshot_status, summarize_quotes
 from .market_flow_repository import (
     persist_intraday_market_flow_feature,
@@ -3735,35 +3736,21 @@ async def intraday_minute_profile_capture_loop() -> None:
     window. A failed fetch may retry during the short 14:55--14:59 window; a
     completed or partial capture is never repeated that day.
     """
-    completed: set[date] = set()
-    while True:
-        local = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
-        if (local.date() not in completed and await sse_calendar_open_async(local.date())
-                and time(14, 55) <= local.time() < time(15, 0)):
-            def load_watches() -> list[Any]:
-                with db.transaction() as connection:
-                    return connection.execute(
-                        "SELECT * FROM quant.intraday_watchlists WHERE enabled ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT %s",
-                        (intraday_minute_profile_max_symbols(),),
-                    ).fetchall()
-            rows = await run_database_blocking(load_watches)
-            symbols = [str(row["symbol"]) for row in sorted((dict(row) for row in rows), key=intraday_watch_priority_key)]
-            if symbols:
-                allowed, storage = await nonessential_high_frequency_capture_allowed()
-                if not allowed:
-                    print(f"intraday minute-profile capture skipped by storage guard: {storage.get('state')}")
-                    completed.add(local.date())
-                    await asyncio.sleep(30)
-                    continue
-                try:
-                    result = await capture_intraday_minute_sessions(symbols)
-                    if result["status"] in {"completed", "partial"}:
-                        completed.add(local.date())
-                    elif result["status"] == "blocked":
-                        completed.add(local.date())
-                except Exception as error:  # noqa: BLE001 - retry while close window remains open
-                    print(f"intraday minute profile capture failed: {str(error)[:300]}")
-        await asyncio.sleep(30)
+    async def load_symbols() -> list[str]:
+        def load_watches() -> list[Any]:
+            with db.transaction() as connection:
+                return connection.execute(
+                    "SELECT * FROM quant.intraday_watchlists WHERE enabled ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT %s",
+                    (intraday_minute_profile_max_symbols(),),
+                ).fetchall()
+        rows = await run_database_blocking(load_watches)
+        return [str(row["symbol"]) for row in sorted((dict(row) for row in rows), key=intraday_watch_priority_key)]
+
+    await intraday_minute_profile_runner.run_loop(
+        sleep_seconds=30, calendar_open=sse_calendar_open_async, load_symbols=load_symbols,
+        storage_allowed=nonessential_high_frequency_capture_allowed,
+        capture=capture_intraday_minute_sessions,
+    )
 
 
 def intraday_flow_label(value: Any) -> str:
