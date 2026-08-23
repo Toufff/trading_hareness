@@ -35,7 +35,7 @@
 | 午盘/收盘复盘重启恢复 | 已完成 | `strategy_review_runs` 的同交易日/session 且 `report.status=completed` 作为 durable checkpoint receipt；重启后检查点不重复刷新行情、结算或评分，未完成记录仍在原两分钟窗口内重试 |
 | 日终研究摘要重启恢复 | 已完成 | `strategy_day_summaries` 的 `sent`/`disabled`/`suppressed` 是终态回执，重启后不重建摘要；`pending`/`failed` 仍在原 19:15–19:30 窗口重试，且不向飞书推送候选池 |
 | 常驻循环锁与生命周期可观测性 | 已完成 | durable `runtime_leases` 继续作为跨进程持锁真源；背景循环的 acquire/renew/release 均在原生 async 池执行，保留仅过期可接管及 holder 限定的原子 SQL，避免其与同步仓储争用 4 槽执行器。`/health.runtime_loops` 增加本进程 worker 的 running/waiting/lease-lost/backoff/error 生命周期状态，解释未启动/交接/异常退出而不把它冒充为业务心跳，也不记录 provider payload 或凭据。应用生命周期以唯一标签注册命名 task，关闭时统一取消并等待，重复 loop label 在启动前 fail-closed |
-| 存储/备份/恢复前校验 | 已完成 | 总研究空间**硬上限** 40 GiB、日频 P2 证据热库**硬上限** 36 GiB（为受限历史保留 4 GiB artifact 余量）；存储测量和 60 秒准入缓存已收敛至 `research_storage_admission.py`。80% 预警、90% 仅暂停非必要高频采集，观察池风险/提醒不受影响。每日 PostgreSQL/workflow 备份除 14 天保留和同日去重外，另有 8 GiB 容量上限，只会回收严格命名的旧完成日备份；开盘预检同时校验该容量、`pg_restore -l` manifest 和 workflow JSON |
+| 存储/备份/恢复前校验 | 已完成 | 总研究空间**硬上限** 40 GiB、日频 P2 证据热库**硬上限** 36 GiB（为受限历史保留 4 GiB artifact 余量）；存储测量和 60 秒准入缓存已收敛至 `research_storage_admission.py`。80% 预警、90% 仅暂停非必要高频采集，观察池风险/提醒不受影响。每日 PostgreSQL/workflow 备份除 14 天保留和同日去重外，另有 8 GiB 容量上限；创建 staging 前会按最近一份完整日备份的实测体积预留空间，只会回收严格命名的旧完成日备份。开盘预检同时校验该容量、`pg_restore -l` manifest 和 workflow JSON |
 | 纸面组合展示与风险阻断 | 已完成 | 前端展示净值、总/净暴露、回撤、可卖量、板块暴露和风险事件；成员按观察日点时映射；新 entry 受日亏/回撤/集中度限制 |
 | 策略族级健康/漂移投影 | 已完成（研究监控） | `/api/v1/strategy/health` 按策略族聚合事件和去重 episode；仅显示门禁/运营建议，不调阈值、不变更分析师权重 |
 | 版本化 FactorSpec 与 episode 契约 | 已完成（证据/shadow） | `strategy_contracts.py` / `intraday_factor_contracts.py`；每个已登记盘中因子携带版本、输入、时钟、质量门禁、训练/推理许可和弃用日期。当前 `training_permitted=false`，只能进证据和归因，不能接入实时评分 |
