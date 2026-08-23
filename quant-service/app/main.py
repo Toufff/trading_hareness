@@ -59,6 +59,13 @@ from .public_market_repository import (
     recent_market_events as _recent_market_events,
 )
 from .factor_sql_lab import evaluate_factor_set, run_multi_factor_strategy_sql
+from .research_experiment_service import (
+    ResearchExperimentDependencies,
+    backtest_strategy as backtest_strategy_isolated,
+    build_snapshot as build_snapshot_isolated,
+    evaluate_factors as evaluate_factors_isolated,
+    research_window as research_window_isolated,
+)
 from .analyst_promotion import MAX_APPROVED_WEIGHT, PROMOTION_KEY, analyst_live_promotion
 from .research_prices import adjusted_bars
 from .live_policy import live_policy_gate
@@ -4615,21 +4622,17 @@ def latest_features(universe_key: str = "core", limit: int = 200) -> dict[str, A
     return research_catalog_reads.latest_features(db, universe_key, limit)
 
 
+def _research_experiment_dependencies() -> ResearchExperimentDependencies:
+    return ResearchExperimentDependencies(
+        database=db, china_today=cn_today, as_utc=as_utc, http_exception=HTTPException,
+        evaluate_factor_set=evaluate_factor_set, run_multi_factor_strategy=run_multi_factor_strategy_sql,
+        json_value=Json,
+    )
+
+
 def research_window(connection: Any, universe_key: str, start_date: date | None, end_date: date | None) -> tuple[date, date]:
-    bounds = connection.execute(
-        """SELECT min(b.trading_date) earliest,max(b.trading_date) latest FROM quant.canonical_bars_daily b
-           JOIN quant.universe_membership_history membership ON membership.symbol=b.symbol
-            AND membership.universe_key=%s AND membership.effective_from<=b.trading_date
-            AND (membership.effective_to IS NULL OR membership.effective_to>=b.trading_date)""",
-        (universe_key,),
-    ).fetchone()
-    if not bounds or not bounds["latest"]:
-        raise HTTPException(status_code=422, detail="universe has no canonical daily bars")
-    end = min(end_date or bounds["latest"], bounds["latest"])
-    start = start_date or max(bounds["earliest"], end - timedelta(days=730))
-    if start >= end:
-        raise HTTPException(status_code=422, detail="research window must contain at least two dates")
-    return start, end
+    """Compatibility export for the isolated local experiment window."""
+    return research_window_isolated(connection, universe_key, start_date, end_date, http_exception=HTTPException)
 
 
 def factor_registry() -> dict[str, Any]:
@@ -4638,32 +4641,7 @@ def factor_registry() -> dict[str, Any]:
 
 
 def evaluate_factors(payload: FactorEvaluationRequest) -> dict[str, Any]:
-    with db.transaction() as connection:
-        start, end = research_window(connection, payload.universe_key, payload.start_date, payload.end_date)
-        rows = connection.execute(
-            "SELECT factor_key FROM quant.factor_registry WHERE implementation='native_sql' AND status<>'disabled' ORDER BY factor_key"
-        ).fetchall()
-        enabled = {str(row["factor_key"]) for row in rows}
-        requested = payload.factor_keys or sorted(enabled)
-        unknown = sorted(set(requested) - enabled)
-        if unknown:
-            raise HTTPException(status_code=422, detail=f"unknown or disabled factors: {', '.join(unknown)}")
-        try:
-            evaluated = evaluate_factor_set(connection, requested, payload.universe_key, start, end, payload.horizon_days)
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        results = []
-        for result in evaluated:
-            factor_key = str(result["factor_key"])
-            row = connection.execute(
-                """INSERT INTO quant.factor_evaluations(factor_key,universe_key,start_date,end_date,horizon_days,engine,status,observations,
-                    cross_section_days,metrics,artifact) VALUES(%s,%s,%s,%s,%s,'native_factor_sql_v2',%s,%s,%s,%s,%s) RETURNING evaluation_id""",
-                (factor_key, payload.universe_key, start, end, payload.horizon_days, result["status"], result["observations"],
-                 result["cross_section_days"], Json(result["metrics"]), Json(result["artifact"])),
-            ).fetchone()
-            result["evaluation_id"] = str(row["evaluation_id"])
-            results.append(result)
-    return {"universe_key": payload.universe_key, "start_date": str(start), "end_date": str(end), "results": results}
+    return evaluate_factors_isolated(payload, _research_experiment_dependencies())
 
 
 def factor_evaluations(universe_key: str = "core", limit: int = 100) -> dict[str, Any]:
@@ -4677,28 +4655,7 @@ def strategy_registry() -> dict[str, Any]:
 
 
 def backtest_strategy(payload: StrategyBacktestRequest) -> dict[str, Any]:
-    with db.transaction() as connection:
-        registry = connection.execute(
-            "SELECT strategy_key,configuration FROM quant.strategy_registry WHERE strategy_key=%s AND status<>'disabled'",
-            (payload.strategy_key,),
-        ).fetchone()
-        if not registry:
-            raise HTTPException(status_code=404, detail="strategy is not available")
-        start, end = research_window(connection, payload.universe_key, payload.start_date, payload.end_date)
-        parameters = {**dict(registry["configuration"]), "rebalance_days": payload.rebalance_days, "hold_days": payload.hold_days,
-                      "top_n": payload.top_n, "total_cost_bps": payload.total_cost_bps, "factors": payload.factors}
-        try:
-            result = run_multi_factor_strategy_sql(connection, payload.universe_key, start, end, parameters)
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        row = connection.execute(
-            """INSERT INTO quant.strategy_experiments(strategy_key,universe_key,start_date,end_date,status,parameters,metrics,equity_curve,trades)
-               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING strategy_experiment_id""",
-            (payload.strategy_key, payload.universe_key, start, end, result["status"], Json(result["parameters"]),
-             Json(result["metrics"]), Json(result["equity_curve"]), Json(result["trades"])),
-        ).fetchone()
-    result["strategy_experiment_id"] = str(row["strategy_experiment_id"])
-    return result
+    return backtest_strategy_isolated(payload, _research_experiment_dependencies())
 
 
 def strategy_experiments(universe_key: str = "core", limit: int = 50) -> dict[str, Any]:
@@ -4734,49 +4691,7 @@ def data_quality_issues(limit: int = 100) -> dict[str, Any]:
 
 
 def build_snapshot(payload: SnapshotRequest) -> dict[str, Any]:
-    as_of = payload.as_of_date or cn_today()
-    cutoff = as_utc(payload.knowledge_cutoff) if payload.knowledge_cutoff else datetime.now(timezone.utc)
-    with db.transaction() as connection:
-        manifest = connection.execute(
-            """SELECT (SELECT count(*)::int FROM quant.canonical_bars_daily WHERE trading_date<=%s) bars,
-                      (SELECT count(*)::int FROM quant.remote_reports WHERE remote_updated_at<=%s) remote_reports,
-                      (SELECT count(*)::int FROM quant.canonical_bars_daily WHERE symbol='000300.SH' AND trading_date<=%s) benchmark_bars,
-                      -- Canonical bars also retain benchmark indexes.  Snapshot
-                      -- control coverage must be measured against the actual
-                      -- A-share code space, otherwise index bars make a fully
-                      -- covered stock cross-section look incomplete.
-                      (SELECT count(DISTINCT symbol)::int FROM quant.canonical_bars_daily
-                        WHERE trading_date=%s
-                          AND symbol ~ '^(?:(?:60[0135]|68[0-9])[0-9]{3}\\.SH|(?:000|001|002|003|300|301|302)[0-9]{3}\\.SZ|[489][0-9]{5}\\.BJ)$') equity_symbols,
-                      (SELECT count(DISTINCT basic.symbol)::int
-                         FROM quant.canonical_bars_daily bar
-                         JOIN quant.daily_fundamentals basic
-                           ON basic.symbol=bar.symbol AND basic.trading_date=bar.trading_date
-                        WHERE bar.trading_date=%s
-                          AND bar.symbol ~ '^(?:(?:60[0135]|68[0-9])[0-9]{3}\\.SH|(?:000|001|002|003|300|301|302)[0-9]{3}\\.SZ|[489][0-9]{5}\\.BJ)$') fundamental_symbols,
-                      (SELECT count(DISTINCT limits.symbol)::int
-                         FROM quant.canonical_bars_daily bar
-                         JOIN quant.daily_trade_limits limits
-                           ON limits.symbol=bar.symbol AND limits.trading_date=bar.trading_date
-                        WHERE bar.trading_date=%s
-                          AND bar.symbol ~ '^(?:(?:60[0135]|68[0-9])[0-9]{3}\\.SH|(?:000|001|002|003|300|301|302)[0-9]{3}\\.SZ|[489][0-9]{5}\\.BJ)$') limit_symbols,
-                      (SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s) exchange_open,
-                      (SELECT count(*)::int FROM quant.data_quality_issues WHERE resolved_at IS NULL AND severity IN ('error','blocking')) blocking_issues""",
-            (as_of, cutoff, as_of, as_of, as_of, as_of, as_of),
-        ).fetchone()
-        # A zero-bar snapshot is a valid operational state but never a valid
-        # input to a recommendation run.  Make the absence explicit rather
-        # than minting a deceptively "ready" empty snapshot.
-        complete_equity_controls = manifest["equity_symbols"] > 0 and manifest["fundamental_symbols"] >= manifest["equity_symbols"] and manifest["limit_symbols"] >= manifest["equity_symbols"]
-        status = "ready" if not manifest["blocking_issues"] and manifest["benchmark_bars"] and manifest["exchange_open"] and complete_equity_controls else "blocked"
-        snapshot_key = hashlib.sha256(f"{as_of}:{cutoff.isoformat()}:{manifest['bars']}:{manifest['remote_reports']}".encode()).hexdigest()
-        connection.execute(
-            """INSERT INTO quant.data_snapshots(snapshot_key,as_of_date,knowledge_cutoff,status,manifest,content_sha256,finalized_at)
-               VALUES(%s,%s,%s,%s,%s,%s,CASE WHEN %s='ready' THEN now() ELSE null END)
-               ON CONFLICT(snapshot_key) DO NOTHING""",
-            (snapshot_key, as_of, cutoff, status, Json(manifest), snapshot_key, status),
-        )
-    return {"snapshot_key": snapshot_key, "as_of_date": str(as_of), "knowledge_cutoff": cutoff, "status": status, "manifest": manifest}
+    return build_snapshot_isolated(payload, _research_experiment_dependencies())
 
 
 async def analyse_ingestion_endpoint(analysis_id: uuid.UUID) -> dict[str, Any]:
