@@ -64,12 +64,17 @@ not import `app.main`.
 - Network loss keeps local loops alive.  Durable cursors, leases and run keys
   resume work after recovery without replaying completed work.
 
-## Current migration targets
+## Frontend ownership
 
-The root dashboard still owns cross-screen state.  It is being reduced through
-small, independently testable extractions: API client first, lifecycle
-composables second, then feature panels/pages.  Do not perform a broad template
-rewrite during a trading session.
+`frontend/src/App.vue` is the shell only: navigation, lazy view registration
+and shell-owned dialogs. `useDashboardWorkspace.ts` owns polling, SSE lifecycle
+and mutations. Research tabs are independently lazy-loaded from
+`frontend/src/views/research/`; relay monitoring and Feishu workbench are their
+own views. New UI must join one of these owners instead of growing App.vue.
+
+The frontend has unit coverage for the JSON transport and timer lifecycle, plus
+a browser smoke test for the mounted research shell. API types remain generated
+from the mounted OpenAPI contract.
 
 The legacy DDL retained in `app/database.py` is recovery-only.  It remains
 isolated behind `QUANT_LEGACY_SCHEMA_BOOTSTRAP`; new migrations must never edit

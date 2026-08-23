@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-CONTEXT_VERSION = "2026-08-23.v8"
+CONTEXT_VERSION = "2026-08-23.v9"
 
 
 def repository_agent_context() -> dict[str, Any]:
@@ -19,9 +19,10 @@ def repository_agent_context() -> dict[str, Any]:
             "api_composition": "quant-service/app/main.py",
             "http_routers": "quant-service/app/routers/",
             "database_migrations": "quant-service/migrations/versions/",
-            "frontend": "frontend/src/App.vue",
+            "frontend": "frontend/src/App.vue + frontend/src/composables/useDashboardWorkspace.ts",
             "feishu_proxy": "feishu-adapter/index.mjs",
             "architecture": "docs/ARCHITECTURE.md",
+            "architecture_index": "docs/ARCHITECTURE_INDEX.md",
         },
         "module_map": {
             "security": "quant-service/app/security.py",
@@ -50,7 +51,8 @@ def repository_agent_context() -> dict[str, Any]:
             "daily_control_plane": "quant-service/app/daily_control_plane.py + app/full_market_daily_controls_sync.py",
             "frontend_transport": "frontend/src/api/http.ts",
             "frontend_lifecycle": "frontend/src/composables/",
-            "frontend_feature_panels": "frontend/src/components/",
+            "frontend_workspace_state": "frontend/src/composables/useDashboardWorkspace.ts",
+            "frontend_feature_panels": "frontend/src/views/research/ + frontend/src/components/",
         },
         "contracts": {
             "openapi_source": "http://127.0.0.1:5681/openapi.json",
@@ -58,6 +60,7 @@ def repository_agent_context() -> dict[str, Any]:
             "contract_check": "node scripts/verify-api-contract.mjs",
             "type_check": "cd frontend && npm run api:check && npm run typecheck",
             "architecture_check": "python3 scripts/verify_architecture.py",
+            "architecture_index_check": "python3 scripts/generate_architecture_index.py --check",
         },
         "operational_reads": {
             "health": "/health",
@@ -98,7 +101,8 @@ def repository_agent_context() -> dict[str, Any]:
         "verification": {
             "backend": "docker compose exec -T quant-research python -m unittest discover -s tests -q",
             "adapter": "node --test feishu-adapter/*.test.mjs",
-            "frontend": "cd frontend && npm run typecheck && npm run build",
+            "frontend": "cd frontend && npm run typecheck && npm run build && npm test",
+            "frontend_e2e": "cd frontend && npm run test:e2e",
             "diff": "git diff --check",
         },
         "security": {

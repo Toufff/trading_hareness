@@ -1,0 +1,153 @@
+import asyncio
+import threading
+import unittest
+import uuid
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
+
+import httpx
+from fastapi import HTTPException
+from pydantic import ValidationError
+
+from app.main import ConceptMemberSyncRequest, DailyBar, EastmoneyBoardMemberSyncRequest, IntradayScanRequest, IntradaySectorReportRequest, MarketSnapshotRequest, OfflineMinuteImportRequest, SectorCatalogSyncRequest, StrategyPatternMiningRequest, TushareFetchRequest, UniverseUpdateRequest, annotate_intraday_flow_percentiles, baostock_code, build_market_snapshot, call_tushare_api, china_equity_session, china_futures_session, cn_today, eastmoney_member_symbol, historical_capacity_plan, intraday_board_curve_clock_session, intraday_board_display_slots, intraday_board_flow_curve_items, intraday_board_refresh_interval_seconds, intraday_board_rotation_retention_days, intraday_eac_acceptance_assessment, intraday_effective_scan_interval_seconds, intraday_fast_quote_confirmation, intraday_fast_quote_retention_days, intraday_high_frequency_window, intraday_minute_features, intraday_next_monitor_delay_seconds, intraday_outcome_attribution_summary, intraday_peer_context, intraday_point_in_time_market_context_batch, intraday_quote_exchange_time_status, intraday_quote_from_tencent, intraday_quote_observation_source, intraday_runtime_service_state, intraday_sector_report, intraday_signal_attribution, intraday_signal_event_state, intraday_signal_rules, intraday_super_get_fast_interval_seconds, intraday_super_get_fast_max_in_flight, intraday_super_get_fast_max_symbols, legacy_schema_bootstrap_enabled, looks_like_response_header, market_snapshot_public_quote_settings, merge_intraday_eastmoney_watch_flows, merge_intraday_sina_watch_quotes, merge_intraday_watch_quote_prices, normalize_tushare_rows, offline_minute_row, open_provider_capabilities, persist_ths_sector_members, provider_error_availability, provider_global_rate_limit_max_wait_seconds, post_close_strategy_retry_window, realtime_rows_are_current, record_provider_failure, record_provider_success, reserve_tushare_provider_request_slot, resolve_sync_symbols, resolve_sync_symbols_async, retry_pending_board_rotation_alerts, run_strategy_pattern_mining, sse_calendar_open_async, strategy_index_regime, strategy_intraday_candidates, strategy_market_regime, strategy_market_state, strategy_rank, technical_summary, tencent_snapshot_quotes, ths_concept_top_stocks, ths_taxonomy_key, write_access_allowed
+from app.factor_lab import factor_at
+from app.market_rules import a_share_limit_ratio, is_st_security_name
+from app.intraday_alerts import daily_strategy_summary_text, delivery_health_recovery_text, intraday_alert_text
+from app.intraday_schedule import intraday_next_realtime_validation_offset, intraday_realtime_validation_slice
+from app.intraday_monitor_service import next_rotation_offset_from_scan
+from app.intraday_fast_quote_service import fast_quote_rotation_slot
+from app.board_rotation import board_rotation_alert_text, board_rotation_candidates, board_rotation_still_directional
+from app.board_stock_mining import board_stock_mining_candidates
+from app.limit_linkage_mining import limit_linkage_candidates
+from app.free_market_providers import _tencent_order_book_row, tencent_minute_amount_scale
+from app.order_book_features import aggregate_order_book_observations, order_book_observation
+from app.intraday_outcomes import a_share_return_decomposition
+from app.board_curve_read_model import board_display_slots, intraday_board_flow_curves as read_intraday_board_flow_curves, latest_close_sector_review_report as read_latest_close_sector_review_report
+from app.research_catalog_read_model import data_quality_issues as read_data_quality_issues, factor_evaluations as read_factor_evaluations, latest_features as read_latest_features, strategy_experiments as read_strategy_experiments
+from app.intraday_outcome_read_model import latest_intraday_outcomes as read_latest_intraday_outcomes
+from app.strategy_health_read_model import health_recommendation, latest_strategy_health, strategy_family_breakdown
+from app.sector_read_model import market_sectors as read_market_sectors, sector_members as read_sector_members
+from app.intraday_evidence_read_model import latest_scan as read_latest_intraday_scan
+from app.market_result_read_model import market_snapshots as read_market_snapshots, tushare_raw as read_tushare_raw
+from app.http_clients import (alert_http_client, alert_http_client_status, close_http_clients, provider_http_client,
+                              provider_http_client_status, public_http_client, public_http_client_status,
+                              remote_archive_http_client, remote_archive_http_client_status, start_http_clients)
+from app.intraday_runtime_status import load_intraday_runtime_evidence
+from app.intraday_scan_repository import persist_intraday_scan_terminal
+from app.market_session_repository import (
+    realtime_market_session as read_market_session,
+    realtime_market_session_async as read_market_session_async,
+    sse_calendar_open_async as read_sse_calendar_open_async,
+    sse_calendar_status_async as read_sse_calendar_status_async,
+)
+from app.sector_catalog_sync import sync_all as isolated_sync_all_sector_catalogs
+from app.intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload
+from app.health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
+from app.alert_transport import post_feishu_alert_text
+from app.provider_observability import provider_health_item, provider_health_snapshot, provider_health_summary
+from app.provider_health import record_provider_success
+from app.runtime_tasks import (
+    BackgroundTaskSpec, LoopRuntimeRegistry, cancel_background_tasks,
+    observe_completed_task, start_leased_background_tasks, supervise_leased_loop, supervise_loop,
+)
+from app.runtime_resources import (
+    DEFAULT_HOT_DATABASE_SOFT_BYTES,
+    DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+    bounded_memory_ratio,
+    bounded_min_free_bytes,
+    bounded_storage_budget_bytes,
+    research_storage_governance,
+    runtime_resource_state,
+)
+from app.runtime_executors import ExecutorSaturatedError
+from app.provider_catalog import tushare_catalog_snapshot
+from app.routers.provider_status import build_provider_status_router
+from app.routers.strategy_pattern_reads import build_strategy_pattern_reads_router
+from app.routers.research_readiness import build_research_readiness_router, training_roadmap_payload
+from app.routers.intraday_status import build_intraday_status_router
+from app.routers.analyst_reads import build_analyst_reads_router
+from app.routers.analyst_trade_action_reads import build_analyst_trade_action_reads_router
+from app.routers.analyst_skill_reads import build_analyst_skill_reads_router
+from app.routers.analyst_research_reads import build_analyst_research_reads_router
+from app.routers.event_reads import build_event_reads_router
+from app.routers.strategy_reads import build_strategy_reads_router
+from app.routers.board_rotation_reads import build_board_rotation_reads_router
+from app.routers.board_curve_reads import build_board_curve_reads_router
+from app.routers.research_catalog_reads import build_research_catalog_reads_router
+from app.routers.intraday_outcome_reads import build_intraday_outcome_reads_router
+from app.routers.sector_reads import build_sector_reads_router
+from app.routers.intraday_evidence_reads import build_intraday_evidence_reads_router
+from app.routers.market_result_reads import build_market_result_reads_router
+from app.routers.provider_actions import ProviderActionDependencies, build_provider_actions_router
+from app.routers.market_actions import MarketActionDependencies, build_market_actions_router
+from app.routers.intraday_actions import IntradayActionDependencies, build_intraday_actions_router
+from app.routers.sector_actions import SectorActionDependencies, build_sector_actions_router
+from app.routers.strategy_actions import StrategyActionDependencies, build_strategy_actions_router
+from app.routers.research_actions import ResearchActionDependencies, build_research_actions_router
+from app.routers.ingestion_actions import IngestionActionDependencies, build_ingestion_actions_router
+from app.board_rotation_read_model import latest_board_rotation_events
+from app.replay_readiness import (
+    P2_MIN_DAILY_CALENDAR_SPAN_DAYS,
+    P2_MIN_FULL_CROSS_SECTION_DAYS,
+    P3_MIN_REPLAY_DAYS,
+    P3_MIN_SIGNAL_EVENTS,
+    replay_readiness_payload,
+)
+from app.strategy_pattern_read_model import latest_strategy_pattern_mining as read_latest_strategy_pattern_mining
+from app.strategy_read_model import latest_post_close_strategy as read_latest_post_close_strategy
+from app.market_regimes import strategy_index_regime as pure_strategy_index_regime, strategy_market_regime as pure_strategy_market_regime, strategy_market_state as pure_strategy_market_state, strategy_rank as pure_strategy_rank
+from app.analyst_text_features import analyst_text_factor_summary as isolated_analyst_text_factor_summary
+from app.numeric_utils import decimal_or_none as pure_decimal_or_none, intraday_number as pure_intraday_number
+from app.intraday_clock import eac_window as pure_eac_window, feature_clock as pure_feature_clock, minute_bucket as pure_minute_bucket
+from app.intraday_features import annotate_flow_snapshot_provenance, minute_features as pure_minute_features, peer_context as pure_peer_context
+from app.intraday_features import strategy_session_rows as pure_strategy_session_rows
+from app.intraday_attribution import signal_attribution as isolated_signal_attribution
+from app.intraday_breakout import eac_acceptance_assessment as isolated_eac_acceptance_assessment, upside_research_assessment as isolated_upside_assessment
+from app.intraday_outcome_attribution import outcome_attribution_summary as isolated_outcome_attribution_summary
+from app.intraday_signal_rules import signal_rules as isolated_signal_rules
+from app.post_close_limit_features import limit_daily_features as pure_limit_daily_features
+from app.post_close_limit_features import board_count as pure_board_count
+from app.post_close_structures import (
+    daily_base_structure as pure_daily_base_structure,
+    post_close_forming_structure as pure_post_close_forming_structure,
+    post_close_fresh_start_structure as pure_post_close_fresh_start_structure,
+)
+from app.post_close_candidate_screen import screen_candidates
+from app.post_close_evidence import exact_board_context, lhb_context
+from app.post_close_refresh import run_refresh
+from app.daily_pipeline import run_pipeline
+from app.database import pool_settings
+from app.tushare_catalog import AUDITED_ADDITIONS_CATALOG, SUPPLIER_109_CATALOG, TUSHARE_CATALOG, catalog_counts
+from app.free_market_providers import _request_with_retry, classify_announcement_title, cninfo_stock_param, eastmoney_secid, free_provider_status, parse_sina_quote_batch, tencent_symbol
+from app.http_retry import retry_delay_seconds
+from app.provider_rate_limits import provider_request_spacing_seconds, reserve_provider_rate_limit_slot
+from app.akshare_provider import AkShareProviderError, _retry_call
+from app.market_snapshots import snapshot_status, summarize_quotes
+from app.tushare_official import HISTORICAL_MINUTE_APIS, REALTIME_MARKET_HOURS_APIS, default_probe_params
+from app.tushare_providers import SUPER_GET_VERIFIED_APIS, SUPER_SDK_DELAYED_CONTEXT_APIS, SUPER_SDK_REALTIME_APIS, ProviderCallError, ProviderRateLimiter, _decode_rows, _filter_requested_realtime_rows, _normalize_ths_member_rows, _super_get_session, acquire_provider_request_slot, call_with_fallback, configure_provider_request_reserver, provider_candidates, provider_configs, provider_http_request, provider_request_reservation_status, provider_status, safe_error_detail, super_get_executor_status
+from app.main import attach_intraday_volume_time_profile, daily_base_structure, intraday_limit_lift_pattern, intraday_signal_direction, intraday_signal_outcome_metrics, intraday_volume_time_profile, limit_board_count, merge_limit_pool_sources, persist_daily_bar_batch, persist_free_daily, persist_tushare_fetch_cancel, post_close_forming_structure, post_close_fresh_start_structure, post_close_limit_daily_features, strategy_pattern_review_score, watchlist_daily_factors
+from app.main import StrategyDecisionRequest, run_strategy_decision
+from app.main import intraday_board_curve_session, intraday_board_curve_session_async, realtime_market_session, realtime_market_session_async
+from app.main import AnnouncementSyncRequest, sync_cninfo_announcements
+from app.main import AkShareProbeRequest, akshare_probe, TushareCapabilityAuditRequest, audit_tushare_capabilities
+from app.main import stock_study_free_fetch
+from app.main import capture_intraday_super_get_fast_quote, intraday_tencent_surge_context, remote_archive_sync_bearer_allowed
+from app.remote_archive_sync import remote_archive_get
+from app.main import stock_study_fetch
+from app.main import is_circuit_open_http_error, is_local_capacity_http_error
+from app.main import fetch_tushare_catalog
+from app.main import circuit_open_provider_keys_async
+from app.main import FullMarketDailySyncRequest, MarketUniverseSyncRequest, TushareSyncRequest, sync_baostock, sync_full_market_daily, sync_market_universe, sync_tushare
+from app.main import ConceptCandidateSyncRequest, ConceptMemberBackfillRequest, ConceptMemberSyncRequest, IntradayWatchlistRequest, PostCloseRefreshRequest, SectorFlowSyncRequest, attempt_intraday_alert_delivery, capture_intraday_board_flow_curve, capture_intraday_minute_sessions, delete_intraday_watchlist, deliver_board_rotation_alert, deliver_intraday_alert, hydrate_eastmoney_live_board_members, hydrate_watchlist_history, run_daily_strategy_summary, run_post_close_refresh, run_ths_concept_member_backfill_batch, sync_concept_limit_candidates, sync_eastmoney_board_members, sync_ths_concept_members, sync_ths_concept_signals, sync_ths_industry_moneyflow, sync_ths_sector_catalog, upsert_intraday_watchlist
+from app.main import sync_all_ths_sector_catalogs
+from app.main import GenerateRequest, run_daily_pipeline
+from app.main import sync_runtime_provider_rate_limits
+
+# Test modules intentionally exercise selected private transport helpers.  A
+# normal wildcard import hides underscore names, so expose the explicit shared
+# test namespace rather than duplicating the long import list in every suite.
+__all__ = [name for name in globals() if not name.startswith("__")]
+

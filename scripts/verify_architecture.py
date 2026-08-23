@@ -5,23 +5,59 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import subprocess
 import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "quant-service" / "app"
+TESTS = ROOT / "quant-service" / "tests"
+FRONTEND = ROOT / "frontend" / "src"
 
 
 def main() -> int:
     problems: list[str] = []
     if not (ROOT / "docs" / "ARCHITECTURE.md").is_file():
         problems.append("missing docs/ARCHITECTURE.md")
+    index_check = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "generate_architecture_index.py"), "--check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if index_check.returncode:
+        problems.append(index_check.stdout.strip() or "architecture index verification failed")
     for relative in (
         "frontend/src/api/http.ts", "frontend/src/composables/usePolling.ts",
+        "frontend/src/composables/useDashboardWorkspace.ts", "frontend/src/dashboard-context.ts",
         "frontend/src/components/RealtimeServicesPanel.vue", "frontend/src/views/ManualRelayView.vue",
+        "frontend/src/views/GroupRelayMonitorView.vue", "frontend/src/views/FeishuWorkbenchView.vue",
+        "frontend/src/views/research/ResearchOverviewTab.vue", "frontend/src/views/research/MarketSnapshotsTab.vue",
+        "frontend/src/views/research/CloseReviewTab.vue", "frontend/src/views/research/StrategyTab.vue",
+        "frontend/src/views/research/FactorLabTab.vue", "frontend/src/views/research/StockStudyTab.vue",
+        "frontend/src/views/research/AnalystEvidenceTab.vue", "frontend/src/views/research/ClaimReviewTab.vue",
+        "frontend/src/views/research/ProviderTab.vue", "frontend/src/views/research/CatalogTab.vue",
+        "frontend/src/views/research/QualityTab.vue",
     ):
         if not (ROOT / relative).is_file():
             problems.append(f"missing {relative}")
+
+    # Keep the decompositions from silently regressing.  App.vue is the shell;
+    # dashboard state belongs in its composable and feature UI in tab views.
+    app_vue_lines = len((FRONTEND / "App.vue").read_text().splitlines())
+    if app_vue_lines > 150:
+        problems.append(f"frontend/src/App.vue exceeds shell budget: {app_vue_lines} > 150")
+    oversized_tests = [
+        f"{path.name}:{len(path.read_text().splitlines())}"
+        for path in sorted(TESTS.glob("test_*.py"))
+        if len(path.read_text().splitlines()) > 1_500
+    ]
+    if oversized_tests:
+        problems.append("oversized focused test module(s): " + ", ".join(oversized_tests))
+    for legacy_name in ("test_provider_helpers.py",):
+        if (TESTS / legacy_name).exists():
+            problems.append(f"legacy catch-all test remains: {legacy_name}")
 
     main_path = APP / "main.py"
     main_tree = ast.parse(main_path.read_text())
