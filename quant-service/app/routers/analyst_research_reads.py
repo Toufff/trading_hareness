@@ -13,6 +13,7 @@ from ..async_analyst_market_review_read_repository import latest_review as async
 from ..async_analyst_market_review_read_repository import list_reviews as async_list_reviews
 from ..async_analyst_market_evaluation_read_repository import market_evaluation as async_market_evaluation
 from ..async_analyst_stock_timeline_read_repository import stock_timeline as async_stock_timeline
+from ..async_analyst_research_status_read_repository import status as async_research_status
 from ..analyst_market_evaluation import analyst_market_evaluation
 from ..analyst_stock_timeline import analyst_stock_timeline
 from ..analyst_market_review import (
@@ -69,11 +70,14 @@ def build_analyst_research_reads_router(
     async_latest_review_fn: Callable[[Any, str], Awaitable[dict[str, Any]]] | None = None,
     async_market_evaluation_fn: Callable[[Any, date | None, date | None, str | None], Awaitable[dict[str, Any]]] | None = None,
     async_stock_timeline_fn: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+    async_status_fn: Callable[[Any, date | None], Awaitable[dict[str, Any]]] | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["analyst-research-reads"])
 
     @router.get("/api/v1/analyst-research/status")
-    def status(as_of_date: date | None = None) -> dict[str, Any]:
+    async def status(as_of_date: date | None = None) -> dict[str, Any]:
+        if async_database is not None:
+            return await (async_status_fn or async_research_status)(async_database, as_of_date)
         return status_fn(database, as_of_date)
 
     @router.get("/api/v1/analyst-research/profiles")

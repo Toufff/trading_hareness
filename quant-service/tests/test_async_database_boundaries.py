@@ -40,6 +40,7 @@ from app.async_analyst_prompt_lab_read_repository import status as async_prompt_
 from app.async_analyst_market_review_read_repository import list_reviews as async_market_reviews
 from app.async_analyst_market_evaluation_read_repository import market_evaluation as async_market_evaluation
 from app.async_analyst_stock_timeline_read_repository import stock_timeline as async_stock_timeline
+from app.async_analyst_research_status_read_repository import status as async_research_status
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -154,6 +155,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_analyst_market_review_read_repository.py",
             "async_analyst_market_evaluation_read_repository.py",
             "async_analyst_stock_timeline_read_repository.py",
+            "async_analyst_research_status_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -1310,6 +1312,48 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         direct = await async_stock_timeline(database, symbol="600000.SH", start_date=date(2026, 8, 21), limit=9999)
         self.assertEqual(direct["bar_count"], 0)
         self.assertEqual(database.connection.calls[1][1][-1], 3000)
+
+    async def test_analyst_research_status_prefers_native_async_local_evidence(self) -> None:
+        calls = []
+
+        async def status(_database, as_of_date):
+            calls.append(as_of_date)
+            return {"approved_theme_board_aliases": 1, "boundary": "research-only"}
+
+        router = build_analyst_research_reads_router(
+            object(), lambda *_args: {}, async_database=object(), async_status_fn=status,
+        )
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-research/status")
+        as_of = date(2026, 8, 21)
+        payload = await endpoint(as_of)
+        self.assertEqual(payload["approved_theme_board_aliases"], 1)
+        self.assertEqual(calls, [as_of])
+
+        class Result:
+            def __init__(self, row=None, rows=None): self.row, self.rows = row, rows or []
+            async def fetchone(self): return self.row
+            async def fetchall(self): return self.rows
+
+        class Connection:
+            def __init__(self): self.calls = []
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "count(*)" in sql: return Result({"count": 2})
+                return Result()
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        database = Database()
+        direct = await async_research_status(database, as_of)
+        self.assertEqual(direct["approved_theme_board_aliases"], 2)
+        self.assertEqual(len(database.connection.calls), 5)
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:
