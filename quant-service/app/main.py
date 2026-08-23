@@ -256,6 +256,7 @@ from .board_stock_mining import board_stock_mining_candidates
 from .board_stock_mining_repository import persist_board_stock_mining_run
 from .limit_linkage_mining import limit_linkage_candidates
 from .limit_linkage_mining_repository import persist_limit_linkage_mining_run
+from .limit_linkage_mining_service import LimitLinkageMiningDependencies, run as run_limit_linkage_mining_isolated
 from .board_curve_read_model import board_display_slots as _board_display_slots
 from .board_curve_read_model import intraday_board_flow_curves as read_intraday_board_flow_curves
 from .board_curve_read_model import latest_close_sector_review_report as read_latest_close_sector_review_report
@@ -2798,26 +2799,25 @@ def limit_linkage_relations_from_database(trade_date: date) -> list[dict[str, An
 
 async def run_limit_linkage_mining(observed_at: datetime, quote_by_symbol: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Mine non-limit peers without another all-market quote request."""
-    trade_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
-    try:
-        relations = await run_database_blocking(limit_linkage_relations_from_database, trade_date)
-    except Exception as error:
-        # A research-only miner must never make the durable board-report path
-        # fail.  Its fault is persisted in normal logs and surfaced locally.
-        return {"status": "failed", "reason": safe_error_detail(str(error), 300), "summary": {"candidate_count": 0}}
-    candidates, summary = limit_linkage_candidates(relations, quote_by_symbol)
-    if not relations:
-        return {"status": "blocked", "reason": "no same-date Eastmoney limit-up anchors with exact THS concept membership", "summary": summary}
-    try:
-        def persist() -> str:
+    async def load_relations(trade_date: date) -> list[dict[str, Any]]:
+        return await run_database_blocking(limit_linkage_relations_from_database, trade_date)
+
+    async def persist(observed: datetime, trade_date: date, candidates: list[dict[str, Any]], summary: dict[str, Any]) -> str:
+        def write() -> str:
             with db.transaction() as connection:
                 return persist_limit_linkage_mining_run(
-                    connection, observed_at=observed_at, trade_date=trade_date, candidates=candidates, summary=summary,
+                    connection, observed_at=observed, trade_date=trade_date, candidates=candidates, summary=summary,
                 )
-        run_id = await run_database_blocking(persist)
-    except Exception as error:
-        return {"status": "partial", "reason": safe_error_detail(str(error), 300), "summary": summary}
-    return {"status": "completed", "linkage_run_id": run_id, "summary": summary, "candidates": candidates}
+        return await run_database_blocking(write)
+
+    return await run_limit_linkage_mining_isolated(
+        observed_at, quote_by_symbol,
+        LimitLinkageMiningDependencies(
+            trade_date=lambda value: value.astimezone(ZoneInfo("Asia/Shanghai")).date(),
+            load_relations=load_relations, select_candidates=limit_linkage_candidates,
+            persist=persist, safe_error=safe_error_detail,
+        ),
+    )
 
 
 STRATEGY_DECISION_MODEL_VERSION = "intraday-multisource-v1"
