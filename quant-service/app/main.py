@@ -467,6 +467,10 @@ from .intraday_scan_signal_persistence import (
     persist_scan_signals,
 )
 from .intraday_watch_quote_capture import WatchQuoteCaptureDependencies, capture_watch_quotes
+from .intraday_watchlist_scan_service import (
+    IntradayWatchlistScanDependencies,
+    run_watchlist_scan,
+)
 from .tushare_official import (
     AUDIT_FOCUS_APIS,
     HISTORICAL_MINUTE_APIS,
@@ -2501,166 +2505,85 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
         )
         return payload
 
-    observed_at = datetime.now(timezone.utc)
-    active, reason = await realtime_market_session_async()
-    def load_watches() -> list[Any]:
-        with db.transaction() as connection:
-            if request.symbols:
-                return connection.execute("SELECT * FROM quant.intraday_watchlists WHERE enabled AND symbol=ANY(%s) ORDER BY symbol", (request.symbols,)).fetchall()
-            # Fetch one extra row only to detect overflow.  It is unsafe to
-            # quietly scan the first 40 while presenting the result as a full
-            # watchlist decision.
-            return connection.execute("SELECT * FROM quant.intraday_watchlists WHERE enabled ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT 41").fetchall()
-    rows = await run_database_blocking(load_watches)
-    watches = [dict(row) for row in rows]
-    selected_symbols = [str(row["symbol"]) for row in watches]
-    scan_id = uuid.uuid4()
-    capacity = intraday_watchlist_capacity(len(watches))
-    if capacity["blocked"]:
-        await run_database_blocking(
-            persist_intraday_scan_terminal, db, scan_id, observed_at, "blocked", request.symbols,
-            {"watchlist_capacity": capacity}, {"watched": len(watches)},
-        )
-        return finish({
-            "status": "blocked", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(),
-            "reason": capacity["reason"], "watchlist_capacity": capacity, "alerts": [],
-        })
-    if not active:
-        await run_database_blocking(
-            persist_intraday_scan_terminal, db, scan_id, observed_at, "blocked", request.symbols,
-            {"session": reason}, {"watched": len(watches)},
-        )
-        return finish({"status": "blocked", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(), "reason": reason, "alerts": []})
-    await prune_intraday_rule_input_evidence_if_due(observed_at)
-    retry_summary = await retry_pending_intraday_alerts()
-    if not watches:
-        await run_database_blocking(
-            persist_intraday_scan_terminal, db, scan_id, observed_at, "completed", request.symbols,
-            {"tencent": "skipped"}, {"watched": 0},
-        )
-        return finish({"status": "completed", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(), "alerts": [],
-                       "notice": "没有启用的观察/持仓标的；先通过 watchlists API 显式添加。"})
+    async def load_watches(requested_symbols: list[str]) -> list[dict[str, Any]]:
+        def load() -> list[Any]:
+            with db.transaction() as connection:
+                if requested_symbols:
+                    return connection.execute("SELECT * FROM quant.intraday_watchlists WHERE enabled AND symbol=ANY(%s) ORDER BY symbol", (requested_symbols,)).fetchall()
+                # Fetch one extra row only to detect overflow.  It is unsafe to
+                # quietly scan the first 40 while presenting the result as a full
+                # watchlist decision.
+                return connection.execute("SELECT * FROM quant.intraday_watchlists WHERE enabled ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT 41").fetchall()
+        return [dict(row) for row in await run_database_blocking(load)]
 
-    def load_exact_watchlist_memberships() -> list[dict[str, Any]]:
-        """Load only point-in-time relations for the explicit watchlist.
+    async def persist_terminal(
+        scan_id: uuid.UUID, observed_at: datetime, status: str, requested_symbols: list[str],
+        source_status: dict[str, Any], summary: dict[str, Any],
+    ) -> None:
+        await run_database_blocking(
+            persist_intraday_scan_terminal, db, scan_id, observed_at, status, requested_symbols,
+            source_status, summary,
+        )
 
-        The peer helper groups these rows by the exact taxonomy/sector pair;
-        no human-readable label matching and no full-sector enumeration occur
-        on the live scan path.
-        """
-        local_trade_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+    def load_exact_watchlist_memberships(symbols: list[str], observed_at: datetime) -> list[dict[str, Any]]:
         with db.transaction() as connection:
+            # The peer helper groups these rows by the exact taxonomy/sector
+            # pair; no human-readable label matching/full-sector enumeration
+            # occurs on the live scan path.
+            local_trade_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
             rows = connection.execute(
                 """SELECT taxonomy_key,sector_key,symbol
                      FROM quant.sector_membership_history
                     WHERE symbol=ANY(%s) AND effective_from<=%s
                       AND (effective_to IS NULL OR effective_to>=%s)
                       AND taxonomy_key IN ('ths_concept_flow','ths_index_n','ths_industry')""",
-                (selected_symbols, local_trade_date, local_trade_date),
+                (symbols, local_trade_date, local_trade_date),
             ).fetchall()
         return [dict(row) for row in rows]
 
-    membership_rows = await run_database_blocking(load_exact_watchlist_memberships)
-    mapped_peer_groups = pure_mapped_watchlist_peers(selected_symbols, membership_rows)
-    quote_timestamp_slo_seconds = 20.0 if intraday_high_frequency_window(observed_at) else 45.0
-    quote_capture = await capture_watch_quotes(
-        selected_symbols, observed_at, quote_timestamp_slo_seconds,
-        WatchQuoteCaptureDependencies(
-            now=asyncio.get_running_loop().time, all_a_snapshot=intraday_all_a_snapshot,
-            tencent_watch_quotes=tencent_order_book_quotes, sina_quotes=sina_quotes,
-            eastmoney_watch_flows=eastmoney_watch_flow_quotes, quote_from_tencent=intraday_quote_from_tencent,
-            merge_eastmoney_flows=merge_intraday_eastmoney_watch_flows,
-            annotate_percentiles=annotate_intraday_flow_percentiles,
-            annotate_flow_provenance=pure_annotate_flow_snapshot_provenance,
-            merge_watch_prices=merge_intraday_watch_quote_prices, merge_sina_prices=merge_intraday_sina_watch_quotes,
-            quote_freshness=intraday_quote_exchange_time_status,
-            consume_background_exception=consume_background_task_exception, safe_error=safe_error_detail,
-            executor_saturated_error=ExecutorSaturatedError,
-            watch_quote_errors=(httpx.HTTPError, FreeProviderError, ValueError),
-            all_a_snapshot_errors=(AkShareProviderError, ValueError),
-        ),
-    )
-    quotes = quote_capture.quotes
-    tencent_rows = quote_capture.tencent_rows
-    all_a_snapshot_status = quote_capture.all_a_snapshot_status
-    fresh_watch_rows = quote_capture.fresh_watch_rows
-    sina_watch_rows = quote_capture.sina_watch_rows
-    eastmoney_watch_flow_rows = quote_capture.eastmoney_watch_flow_rows
-    surge_features, surge_source = await intraday_tencent_surge_context(watches, mapped_peers=mapped_peer_groups)
-    surge_source["exact_watchlist_peer_mapping"] = {
-        "status": "completed", "membership_rows": len(membership_rows),
-        "symbols_with_mapped_peers": sum(bool(item.get("peer_symbols")) for item in mapped_peer_groups.values()),
-        "taxonomy_scope": ["ths_concept_flow", "ths_index_n", "ths_industry"],
-        "notice": "仅以同一 taxonomy_key + sector_key 的观察池成员确认；不按名称猜板块关联。",
-    }
-    peer_contexts: dict[str, dict[str, Any]] = {}
-    for watch in watches:
-        symbol = str(watch["symbol"]).upper()
-        metadata = watch.get("metadata") if isinstance(watch.get("metadata"), dict) else {}
-        configurations = [metadata.get(key) for key in ("surge_strategy", "reversal_research", "upside_research")
-                          if isinstance(metadata.get(key), dict) and metadata[key].get("enabled")]
-        configured_peers = [
-            str(value).upper() for strategy in configurations for value in strategy.get("peer_symbols") or []
-            if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(value).upper()) and str(value).upper() != symbol
-        ]
-        mapped = mapped_peer_groups.get(symbol) or {"peer_symbols": [], "groups": []}
-        peers = sorted(set(configured_peers) | set(mapped.get("peer_symbols") or []))
-        context = intraday_peer_context(peers, surge_features)
-        peer_contexts[symbol] = {
-            **context,
-            "configured_peer_symbols": sorted(set(configured_peers)),
-            "mapped_peer_symbols": list(mapped.get("peer_symbols") or []),
-            "exact_membership_groups": list(mapped.get("groups") or []),
-        }
-    ordered_priority_symbols = [str(row["symbol"]) for row in sorted(watches, key=intraday_watch_priority_key)]
-    priority_symbols, next_realtime_validation_offset = intraday_realtime_validation_slice(
-        ordered_priority_symbols,
-        request.realtime_validation_offset,
-        request.realtime_validation_limit,
-    )
-    tushare_minutes = await intraday_tushare_minutes(priority_symbols) if priority_symbols else {}
-    fast_confirmations = await latest_intraday_fast_quote_confirmations(selected_symbols, quotes, observed_at)
-    board_cache_evidence = await intraday_board_cache_evidence(observed_at)
-    source_status = build_scan_source_status(
-        selected_symbols=selected_symbols, quotes=quotes, tencent_rows=tencent_rows,
-        fresh_watch_rows=fresh_watch_rows, sina_watch_rows=sina_watch_rows,
-        eastmoney_watch_flow_rows=eastmoney_watch_flow_rows, all_a_snapshot_status=all_a_snapshot_status,
-        surge_source=surge_source, priority_symbols=priority_symbols,
-        rotation_pool_size=len(ordered_priority_symbols),
-        rotation_start_offset=(request.realtime_validation_offset % len(ordered_priority_symbols)
-                               if ordered_priority_symbols else 0),
-        next_rotation_offset=next_realtime_validation_offset, tushare_minutes=tushare_minutes,
-        fast_confirmations=fast_confirmations, board_cache_evidence=board_cache_evidence,
-        quote_timestamp_slo_seconds=quote_timestamp_slo_seconds,
-    )
-    quote_latency_ms = quote_capture.latency_ms
-    signals = await run_database_blocking(
-        persist_intraday_scan_signals, scan_id, observed_at, selected_symbols, source_status, watches,
-        quotes, tencent_rows, quote_latency_ms, tushare_minutes, surge_features, peer_contexts,
-        fast_confirmations, timeout_seconds=60,
-    )
-    alerts: list[dict[str, Any]] = []
-    for signal in signals:
-        if signal["state"] != "confirmed":
-            continue
-        delivery = await deliver_intraday_alert(
-            signal["signal_event_id"],
-            intraday_alert_text(
-                signal, signal["watch"], signal["quote"] or {}, signal["minute"],
-                decision_card_url=decision_card_url(signal["symbol"]),
+    async def memberships(symbols: list[str], observed_at: datetime) -> list[dict[str, Any]]:
+        return await run_database_blocking(load_exact_watchlist_memberships, symbols, observed_at)
+
+    async def capture_quotes(symbols: list[str], observed_at: datetime, quote_timestamp_slo_seconds: float) -> Any:
+        return await capture_watch_quotes(
+            symbols, observed_at, quote_timestamp_slo_seconds,
+            WatchQuoteCaptureDependencies(
+                now=asyncio.get_running_loop().time, all_a_snapshot=intraday_all_a_snapshot,
+                tencent_watch_quotes=tencent_order_book_quotes, sina_quotes=sina_quotes,
+                eastmoney_watch_flows=eastmoney_watch_flow_quotes, quote_from_tencent=intraday_quote_from_tencent,
+                merge_eastmoney_flows=merge_intraday_eastmoney_watch_flows,
+                annotate_percentiles=annotate_intraday_flow_percentiles,
+                annotate_flow_provenance=pure_annotate_flow_snapshot_provenance,
+                merge_watch_prices=merge_intraday_watch_quote_prices, merge_sina_prices=merge_intraday_sina_watch_quotes,
+                quote_freshness=intraday_quote_exchange_time_status,
+                consume_background_exception=consume_background_task_exception, safe_error=safe_error_detail,
+                executor_saturated_error=ExecutorSaturatedError,
+                watch_quote_errors=(httpx.HTTPError, FreeProviderError, ValueError),
+                all_a_snapshot_errors=(AkShareProviderError, ValueError),
             ),
         )
-        alerts.append({"signal_event_id": str(signal["signal_event_id"]), "symbol": signal["symbol"], "signal_type": signal["signal_type"],
-                       "severity": signal["severity"], "delivery": delivery})
-    return finish({"status": "completed", "scan_id": str(scan_id), "observed_at": observed_at.isoformat(), "source_status": source_status,
-                   "signals": [{key: value for key, value in signal.items() if key not in {"watch", "quote"}} for signal in signals], "alerts": alerts,
-                   "realtime_validation": {
-                       "pool_size": len(ordered_priority_symbols),
-                       "requested_symbols": priority_symbols,
-                       "next_offset": next_realtime_validation_offset,
-                   },
-                   "delivery_retry": retry_summary,
-                   "notice": "仅为人工复核提醒，不构成交易指令；系统不会自动下单。"})
+
+    async def persist_signals(*args: Any) -> list[dict[str, Any]]:
+        return await run_database_blocking(persist_intraday_scan_signals, *args, timeout_seconds=60)
+
+    payload = await run_watchlist_scan(
+        request,
+        IntradayWatchlistScanDependencies(
+            now_utc=lambda: datetime.now(timezone.utc), new_scan_id=uuid.uuid4,
+            realtime_session=realtime_market_session_async, load_watches=load_watches,
+            watchlist_capacity=intraday_watchlist_capacity, persist_terminal=persist_terminal,
+            prune_rule_inputs=prune_intraday_rule_input_evidence_if_due, retry_pending_alerts=retry_pending_intraday_alerts,
+            load_exact_memberships=memberships, mapped_peers=pure_mapped_watchlist_peers,
+            high_frequency_window=intraday_high_frequency_window, capture_quotes=capture_quotes,
+            surge_context=intraday_tencent_surge_context, peer_context=intraday_peer_context,
+            watch_priority_key=intraday_watch_priority_key, realtime_validation_slice=intraday_realtime_validation_slice,
+            tushare_minutes=intraday_tushare_minutes, fast_confirmations=latest_intraday_fast_quote_confirmations,
+            board_cache_evidence=intraday_board_cache_evidence, build_source_status=build_scan_source_status,
+            persist_signals=persist_signals, deliver_alert=deliver_intraday_alert,
+            alert_text=intraday_alert_text, decision_card_url=decision_card_url,
+        ),
+    )
+    return finish(payload)
 
 
 def intraday_board_curve_session(now: datetime | None = None) -> tuple[bool, str]:
