@@ -550,6 +550,7 @@ from .tushare_catalog import CORE_NORMALIZED_APIS, TUSHARE_CATALOG, catalog_coun
 from .tushare_catalog_fetch_service import CatalogFetchDependencies, fetch_catalog as run_catalog_fetch
 from .stock_study_tushare_service import StockStudyTushareDependencies, fetch_stock_study_input
 from .stock_study_service import StockStudyDependencies, build as build_stock_study_isolated
+from .stock_study_public_service import StockStudyPublicDependencies, fetch as fetch_stock_study_public
 from .intraday_signal_generation import IntradaySignalGenerationDependencies, generate_intraday_signals
 from .intraday_signal_event_persistence import (
     IntradaySignalEventPersistenceDependencies,
@@ -3398,40 +3399,18 @@ def persist_stock_study_free_failure(provider: str, capability: str, error: str,
 
 
 async def stock_study_free_fetch(label: str, provider: str, capability: str, fetcher: Any, symbol: str) -> tuple[dict[str, Any], Any]:
-    """Run one token-free public probe and preserve the independent evidence."""
-    if capability in await open_provider_capabilities(provider, [capability]):
-        return (
-            {"source": label, "api_name": capability, "provider": provider, "status": "circuit_open",
-             "received": 0, "stored": 0, "error": "provider health circuit is open; upstream request skipped"},
-            [] if capability == "daily_bar" else None,
-        )
-    try:
-        started_at = asyncio.get_running_loop().time()
-        # Accept a factory instead of an already-created coroutine.  This is
-        # essential for circuit-open calls: no coroutine/HTTP request exists
-        # until the durable provider-health check allows it.
-        payload = await asyncio.wait_for(fetcher(), timeout=10)
-        if isinstance(payload, list):
-            received = len(payload)
-        else:
-            received = int(bool(payload))
-        latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
-        stored = await run_database_blocking(
-            persist_stock_study_free_result, provider, capability, payload, symbol, latency_ms, timeout_seconds=60,
-        )
-        return ({"source": label, "api_name": capability, "provider": provider, "status": "completed" if received else "empty",
-                 "received": received, "stored": stored}, payload)
-    except ExecutorSaturatedError as error:
-        return ({"source": label, "api_name": capability, "provider": provider, "status": "blocked", "received": 0,
-                 "stored": 0, "error": safe_error_detail(str(error), 300)}, [] if capability == "daily_bar" else None)
-    except (asyncio.TimeoutError, httpx.HTTPError, FreeProviderError, AkShareProviderError, ValueError) as error:
-        latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
-        await run_database_blocking(
-            persist_stock_study_free_failure, provider, capability,
-            str(error) or "public provider request timed out", latency_ms,
-        )
-        return ({"source": label, "api_name": capability, "provider": provider, "status": "failed", "received": 0, "stored": 0,
-                 "error": str(error) or "public provider request timed out"}, [] if capability == "daily_bar" else None)
+    """Compatibility adapter for the isolated bounded public-source probe."""
+    return await fetch_stock_study_public(
+        label, provider, capability, fetcher, symbol,
+        StockStudyPublicDependencies(
+            open_provider_capabilities=open_provider_capabilities,
+            run_database=run_database_blocking,
+            persist_success=persist_stock_study_free_result,
+            persist_failure=persist_stock_study_free_failure,
+            safe_error_detail=safe_error_detail,
+            request_errors=(httpx.HTTPError, FreeProviderError, AkShareProviderError, ValueError),
+        ),
+    )
 
 
 def study_number(value: Any) -> float | None:
