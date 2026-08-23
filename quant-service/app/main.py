@@ -270,6 +270,7 @@ from .runtime_tasks import (
     BackgroundTaskSpec, LoopRuntimeRegistry, cancel_background_tasks,
     observe_completed_task, start_leased_background_tasks, supervise_leased_loop, supervise_loop,
 )
+from .application_lifecycle import ApplicationLifecycleDependencies, application_lifespan
 from .intraday_outcomes import (
     INTRADAY_OUTCOME_HORIZONS,
     intraday_outcome_cutoff,
@@ -3771,25 +3772,8 @@ async def sync_tushare_daily_core(as_of_date: date, requested_symbols: list[str]
     return {"status": "completed" if not failures else "partial", "symbols": symbols, "requests": results, "failures": failures}
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    db.open()
-    await async_db.open()
-    configure_provider_request_reserver(
-        reserve_tushare_provider_request_slot,
-        max_wait_seconds=provider_global_rate_limit_max_wait_seconds(),
-    )
-    for configured_provider in provider_configs().values():
-        provider_shared_rate_limit_wait_seconds.labels(configured_provider.key)
-        provider_shared_rate_limit_rejections_total.labels(configured_provider.key)
-    await start_http_clients()
-    if legacy_schema_bootstrap_enabled():
-        db.migrate()
-    db.verify_versioned_schema()
-    # Catalog registration is bounded local database work, but FastAPI startup
-    # still runs on the event loop.  Keep it on the same executor boundary as
-    # the background loops it enables.
-    await run_database_blocking(ensure_catalog_capabilities, timeout_seconds=30)
+def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
+    """Create the uniquely-labelled leased runtime loops after local startup."""
     interval_seconds = intraday_scan_interval_seconds()
     lease_holder_id = uuid.uuid4()
     lease_seconds = background_loop_lease_seconds()
@@ -3807,7 +3791,7 @@ async def lifespan(_: FastAPI):
             on_state=background_loop_registry.mark,
         )
 
-    background_tasks = start_leased_background_tasks((
+    return start_leased_background_tasks((
         BackgroundTaskSpec("intraday_monitor", interval_seconds >= 30, lambda: intraday_monitor_loop(interval_seconds)),
         BackgroundTaskSpec("super_get_fast_quote", interval_seconds >= 30, intraday_super_get_fast_quote_loop),
         BackgroundTaskSpec("strategy_review", strategy_review_automation_enabled(), strategy_review_loop),
@@ -3819,17 +3803,43 @@ async def lifespan(_: FastAPI):
         BackgroundTaskSpec("tencent_order_book", intraday_order_book_enabled() and interval_seconds >= 30, intraday_order_book_loop),
         BackgroundTaskSpec("board_flow_curve", intraday_board_curve_enabled(), intraday_board_flow_curve_loop),
     ), leased_background_loop)
-    try:
+
+
+def _application_lifecycle_dependencies() -> ApplicationLifecycleDependencies:
+    return ApplicationLifecycleDependencies(
+        open_database=db.open,
+        open_async_database=async_db.open,
+        configure_request_reserver=configure_provider_request_reserver,
+        request_reserver=reserve_tushare_provider_request_slot,
+        max_reservation_wait_seconds=provider_global_rate_limit_max_wait_seconds(),
+        initialize_provider_metrics=_initialize_provider_metrics,
+        start_http_clients=start_http_clients,
+        legacy_schema_bootstrap_enabled=legacy_schema_bootstrap_enabled,
+        migrate_database=db.migrate,
+        verify_versioned_schema=db.verify_versioned_schema,
+        ensure_catalog_capabilities=ensure_catalog_capabilities,
+        run_database=run_database_blocking,
+        start_background_tasks=_start_application_background_tasks,
+        cancel_background_tasks=cancel_background_tasks,
+        cancel_shared_snapshots=_intraday_all_a_snapshots.cancel_inflight,
+        shutdown_super_get_executor=shutdown_super_get_executor,
+        shutdown_runtime_executors=shutdown_runtime_executors,
+        close_http_clients=close_http_clients,
+        close_async_database=async_db.close,
+        close_database=db.close,
+    )
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    async with application_lifespan(_application_lifecycle_dependencies()):
         yield
-    finally:
-        await cancel_background_tasks(background_tasks)
-        await _intraday_all_a_snapshots.cancel_inflight()
-        shutdown_super_get_executor()
-        shutdown_runtime_executors()
-        await close_http_clients()
-        configure_provider_request_reserver(None)
-        await async_db.close()
-        db.close()
+
+
+def _initialize_provider_metrics() -> None:
+    for configured_provider in provider_configs().values():
+        provider_shared_rate_limit_wait_seconds.labels(configured_provider.key)
+        provider_shared_rate_limit_rejections_total.labels(configured_provider.key)
 
 
 app = FastAPI(title="Market Research Service", version="0.1.0", lifespan=lifespan)
