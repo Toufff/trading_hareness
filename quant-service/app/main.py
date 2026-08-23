@@ -514,6 +514,7 @@ from .baostock_daily_sync import fetch_rows as fetch_baostock_rows_isolated, syn
 from .market_universe_sync import sync as sync_market_universe_isolated
 from .full_market_daily_sync import sync as sync_full_market_daily_isolated
 from .full_market_daily_controls_sync import sync as sync_full_market_daily_controls_isolated
+from .core_daily_control_sync import CoreDailyControlDependencies, sync as sync_core_daily_controls_isolated
 from .sector_catalog_sync import sync_all as sync_all_sector_catalogs_isolated
 from .ths_sector_catalog_sync import sync as sync_ths_sector_catalog_isolated
 from .eastmoney_sector_members_sync import sync as sync_eastmoney_sector_members_isolated
@@ -3462,34 +3463,15 @@ async def build_stock_study(symbol: str, request: StockStudyRequest) -> dict[str
 
 
 async def sync_tushare_daily_core(as_of_date: date, requested_symbols: list[str] | None = None) -> dict[str, Any]:
-    """Fetch only the small daily control-plane needed by the rule baseline."""
-    symbols = [symbol for symbol in await resolve_sync_symbols_async(requested_symbols or []) if symbol != "000300.SH"]
-    if not symbols:
-        return {"status": "disabled", "reason": "no explicit equity universe", "requests": []}
-    stamp = as_of_date.strftime("%Y%m%d")
-    calendar_start = date(as_of_date.year, 1, 1).strftime("%Y%m%d")
-    calendar_end = date(as_of_date.year, 12, 31).strftime("%Y%m%d")
-    requests = [TushareFetchRequest(
-        api_name="trade_cal",
-        params={"exchange": "SSE", "start_date": calendar_start, "end_date": calendar_end},
-        max_rows=400,
-    )]
-    for symbol in symbols:
-        shared = {"ts_code": symbol, "start_date": stamp, "end_date": stamp}
-        requests.extend([
-            TushareFetchRequest(api_name="daily_basic", params=shared, max_rows=10),
-            TushareFetchRequest(api_name="adj_factor", params=shared, max_rows=10),
-            TushareFetchRequest(api_name="stk_limit", params=shared, max_rows=10),
-            TushareFetchRequest(api_name="suspend_d", params={"ts_code": symbol, "trade_date": stamp}, max_rows=10),
-        ])
-    results: list[dict[str, Any]] = []
-    failures: list[str] = []
-    for request in requests:
-        try:
-            results.append(await fetch_tushare_catalog(request))
-        except HTTPException:
-            failures.append(request.api_name)
-    return {"status": "completed" if not failures else "partial", "symbols": symbols, "requests": results, "failures": failures}
+    """Compatibility adapter for explicit-symbol, same-day controls only."""
+    return await sync_core_daily_controls_isolated(
+        as_of_date, requested_symbols,
+        CoreDailyControlDependencies(
+            resolve_symbols=resolve_sync_symbols_async,
+            fetch_catalog=fetch_tushare_catalog,
+            request=TushareFetchRequest,
+        ),
+    )
 
 
 def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
