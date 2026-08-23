@@ -147,6 +147,7 @@
 
 ## 验证
 
+- 2026-08-22：盘中服务状态的 `rt_min` 健康投影已由旧 `tushare_super` 聚合身份修正为物理 `tushare_super_sdk → tushare_super_get` 候选链，同时保留旧身份仅作历史证据兼容。此前 City SDK 的新鲜成功会被 ProMax 的较旧失败掩盖；现在前端明确回显实际候选顺序和选中的健康 provider。真实本地端点已显示 `tushare_super_sdk` 的 2026-08-21 成功记录、GET 兜底顺序及无当前错误。全量回归为 619 项通过，开盘前只读预检通过。
 - 2026-08-22：盘中扫描候选在冻结输入后所经历的 policy/纸面风险门禁、状态机、episode、SignalSpec/归因证据、事件写入与确认后的纸面提案已移至 `app/intraday_signal_event_persistence.py`。调用方仍提供原有单事务连接；模块不会开启事务、外呼 provider 或投递飞书。它在同轮写入后更新 signal-key 最新时间，保持重复 key 的确认语义。新增“确认后纸面提案”和“实时跨源价差强制降级”回归；重建后的全量回归为 618 项通过，开盘前只读预检通过。
 - 2026-08-22：盘中扫描中“基础规则、主升浪 shadow、反弹、反弹失败减仓、EAC 二次确认”五类候选的纯输入组合已移至 `app/intraday_signal_generation.py`。该模块没有数据库、provider、时钟或投递状态；主扫描仍在同一事务内冻结输入、应用 live/paper 风险门禁并写入事件，因此不改变提醒资格、分数或策略阈值。新增基础/EAC candidate 与 attention-only 直接回归；重建后的全量回归为 616 项通过，开盘前只读预检通过。
 - 2026-08-22：通用 Tushare 目录请求的生命周期编排已移至 `app/tushare_catalog_fetch_service.py`。主服务只注入既有的实时交易时段门禁、候选/熔断选择、共享限频后的 provider 调用、fetch ledger 回调和响应质量规则；缓存台账、分钟行倒序、有界分页、字段名伪数据/实时陈旧拦截，以及本地容量 `503` 与真实 provider `502` 的区分均保持不变。新增服务级成功/本地容量回归；重建后的全量回归为 614 项通过，开盘前只读预检通过，未调用市场 provider、未发送提醒、未启动历史拉取。

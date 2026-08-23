@@ -134,9 +134,12 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
     fast_quote = quotes.get("tushare_super_get_rt_k", {})
     rt_k_raw = raw.get("rt_k", {})
     fast_observed_at = fast_quote.get("last_observed_at") or rt_k_raw.get("last_observed_at")
-    fast_health = most_recent_health(("tushare_super_get", "tushare_super"), ("realtime_quote", "rt_k"))
+    fast_health = most_recent_health(("tushare_super_get", "tushare_super_sdk", "tushare_super"), ("realtime_quote", "rt_k"))
     rt_min = raw.get("rt_min", {})
-    rt_min_health = most_recent_health(("tushare_super_get", "tushare_super"), ("rt_min",))
+    # ``super`` routes rt_min through timestamped City SDK first, with GET as
+    # a bounded fallback.  Include the physical SDK key here; the historical
+    # aggregate key remains solely to render pre-migration evidence.
+    rt_min_health = most_recent_health(("tushare_super_sdk", "tushare_super_get", "tushare_super"), ("rt_min",))
     board_expected_age = 90.0 if deps.board_curve_enabled() else 90.0 if special_window else 360.0
     close_profile_active = session_active and time(14, 55) <= local_now.time() < time(15, 0)
     items = [
@@ -185,11 +188,13 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
             startup_grace_seconds=45.0,
         ),
         runtime_item(
-            key="super_get_rt_min", label="Super GET 分钟 rt_min", role="分钟量价、VWAP 与首动指标验证",
+            key="super_rt_min", label="Super 分钟 rt_min", role="City SDK 优先、GET 兜底的分钟量价、VWAP 与首动指标验证",
             configured=super_configured, expected_active=session_active and not special_window,
             last_observed_at=rt_min.get("last_observed_at"), max_age_seconds=90.0,
             cadence="普通连续竞价每 30 秒轮转最多 4 只", health_row=rt_min_health,
-            details={"stored_raw_rows": int(rt_min.get("rows") or 0)}, startup_grace_seconds=90.0,
+            details={"stored_raw_rows": int(rt_min.get("rows") or 0),
+                     "provider_order": ["tushare_super_sdk", "tushare_super_get"],
+                     "health_provider_key": rt_min_health.get("provider_key")}, startup_grace_seconds=90.0,
         ),
         runtime_item(
             key="tencent_minute_profile", label="腾讯观察池分钟剖面", role="盘末保存全部显式观察池的同刻量能基线",

@@ -17,7 +17,7 @@ def load_intraday_runtime_evidence(database: Any, max_alert_attempts: int) -> di
             """SELECT provider_key,capability,consecutive_failures,circuit_open_until,last_success_at,
                       last_failure_at,last_error,last_latency_ms,last_row_count,updated_at
                  FROM quant.provider_health
-                WHERE provider_key IN ('tencent_free','tushare_super_get','tushare_super')
+                WHERE provider_key IN ('tencent_free','tushare_super_sdk','tushare_super_get','tushare_super')
                   AND capability IN ('realtime_quote','order_book_quote','rt_k','rt_min','rt_min_daily')"""
         ).fetchall()
         quote_rows = connection.execute(
@@ -123,7 +123,7 @@ async def load_intraday_runtime_evidence_async(async_database: Any, max_alert_at
             """SELECT provider_key,capability,consecutive_failures,circuit_open_until,last_success_at,
                       last_failure_at,last_error,last_latency_ms,last_row_count,updated_at
                  FROM quant.provider_health
-                WHERE provider_key IN ('tencent_free','tushare_super_get','tushare_super')
+                WHERE provider_key IN ('tencent_free','tushare_super_sdk','tushare_super_get','tushare_super')
                   AND capability IN ('realtime_quote','order_book_quote','rt_k','rt_min','rt_min_daily')"""
         )
         quote_rows = await all_rows(

@@ -542,6 +542,39 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(order_book["details"]["uncovered_watch_count"], 0)
         database.transaction.assert_not_called()
 
+    def test_intraday_status_projects_city_sdk_rt_min_health_before_legacy_identity(self):
+        observed_at = datetime.now(timezone.utc)
+        evidence = {
+            "health_rows": [
+                {"provider_key": "tushare_super_get", "capability": "rt_min", "updated_at": observed_at - timedelta(minutes=2),
+                 "last_success_at": None, "last_failure_at": observed_at - timedelta(minutes=2), "last_error": "gateway error"},
+                {"provider_key": "tushare_super_sdk", "capability": "rt_min", "updated_at": observed_at - timedelta(minutes=1),
+                 "last_success_at": observed_at - timedelta(minutes=1), "last_failure_at": None, "last_error": None},
+            ],
+            "quote_rows": [], "raw_rows": [{"api_name": "rt_min", "last_observed_at": observed_at, "rows": 3}],
+            "minute_profile": {}, "latest_scan": None, "latest_completed_scan": None,
+            "latest_board": None, "latest_board_curve": None, "latest_delivery": None, "delivery_history": [],
+            "pending_delivery_count": 0, "pending_rotation_delivery_count": 0, "latest_daily_summary": None,
+            "latest_health_event": None, "watch_row": {"enabled": 1},
+        }
+        dependencies = IntradayStatusDependencies(
+            database=MagicMock(), alert_max_attempts=3,
+            realtime_market_session=lambda: (False, "closed"), board_curve_session=lambda: (False, "closed"),
+            high_frequency_window=lambda _: False, scan_interval_seconds=lambda: 30,
+            provider_status=lambda: [{"name": "super_get", "configured": True}],
+            runtime_service_state=lambda **_: ("standby", None), json_safe=lambda value: value,
+            super_get_fast_interval_seconds=lambda: 1.0, super_get_fast_max_in_flight=lambda: 20,
+            fast_quote_retention_days=lambda: 7, board_curve_enabled=lambda: True,
+            board_curve_retention_days=lambda: 60, board_rotation_retention_days=lambda: 60,
+            daily_summary_automation_enabled=lambda: True, order_book_max_symbols=lambda: 40,
+        )
+
+        payload = read_intraday_services_status_payload(dependencies, evidence=evidence)
+        minute = next(item for item in payload["items"] if item["key"] == "super_rt_min")
+        self.assertEqual(minute["last_success_at"], observed_at - timedelta(minutes=1))
+        self.assertEqual(minute["details"]["provider_order"], ["tushare_super_sdk", "tushare_super_get"])
+        self.assertEqual(minute["details"]["health_provider_key"], "tushare_super_sdk")
+
     def test_intraday_status_degrades_when_fresh_direct_watch_quotes_do_not_cover_pool(self):
         observed_at = datetime.now(timezone.utc)
         evidence = {
