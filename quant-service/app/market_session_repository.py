@@ -17,6 +17,42 @@ def _calendar_date(now: datetime | None) -> date:
     return (now or datetime.now(timezone.utc)).astimezone(CN_TZ).date()
 
 
+def sse_calendar_open(database: Any, calendar_date: date) -> bool:
+    """Return the persisted SSE day state; weekends and gaps fail closed."""
+    if calendar_date.weekday() >= 5:
+        return False
+    with database.transaction() as connection:
+        row = connection.execute(
+            "SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s",
+            (calendar_date,),
+        ).fetchone()
+    return bool(row["is_open"]) if row is not None else False
+
+
+async def sse_calendar_open_async(
+    database: Any,
+    calendar_date: date,
+    *,
+    database_runner: Callable[..., Awaitable[Any]] = run_database_blocking,
+) -> bool:
+    """Async-safe SSE gate; local executor pressure conservatively closes it."""
+    if calendar_date.weekday() >= 5:
+        return False
+
+    def load_calendar() -> Any:
+        with database.transaction() as connection:
+            return connection.execute(
+                "SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s",
+                (calendar_date,),
+            ).fetchone()
+
+    try:
+        row = await database_runner(load_calendar)
+    except ExecutorSaturatedError:
+        return False
+    return bool(row["is_open"]) if row is not None else False
+
+
 def realtime_market_session(database: Any, api_name: str | None = None,
                             now: datetime | None = None) -> tuple[bool, str]:
     active, reason = china_futures_session(now) if api_name == "rt_fut_min" else china_equity_session(now)
@@ -60,4 +96,7 @@ async def realtime_market_session_async(database: Any, api_name: str | None = No
     return True, reason
 
 
-__all__ = ["realtime_market_session", "realtime_market_session_async"]
+__all__ = [
+    "realtime_market_session", "realtime_market_session_async",
+    "sse_calendar_open", "sse_calendar_open_async",
+]

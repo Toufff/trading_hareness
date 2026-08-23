@@ -37,7 +37,11 @@ from app.http_clients import (alert_http_client, alert_http_client_status, close
                               remote_archive_http_client, remote_archive_http_client_status, start_http_clients)
 from app.intraday_runtime_status import load_intraday_runtime_evidence
 from app.intraday_scan_repository import persist_intraday_scan_terminal
-from app.market_session_repository import realtime_market_session as read_market_session, realtime_market_session_async as read_market_session_async
+from app.market_session_repository import (
+    realtime_market_session as read_market_session,
+    realtime_market_session_async as read_market_session_async,
+    sse_calendar_open_async as read_sse_calendar_open_async,
+)
 from app.sector_catalog_sync import sync_all as isolated_sync_all_sector_catalogs
 from app.intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload
 from app.health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
@@ -285,6 +289,22 @@ class ProviderHelperTests(unittest.TestCase):
 
     def test_market_session_repository_async_keeps_calendar_offload_contract(self):
         asyncio.run(self._run_market_session_async())
+
+    def test_sse_calendar_repository_async_fails_closed_for_gap_and_executor_pressure(self):
+        database = MagicMock()
+
+        async def missing(_action, *args, **kwargs):
+            return None
+
+        async def saturated(_action, *args, **kwargs):
+            raise ExecutorSaturatedError("database blocking executor is saturated")
+
+        self.assertFalse(asyncio.run(read_sse_calendar_open_async(
+            database, date(2026, 8, 13), database_runner=missing,
+        )))
+        self.assertFalse(asyncio.run(read_sse_calendar_open_async(
+            database, date(2026, 8, 13), database_runner=saturated,
+        )))
 
     def test_runtime_tushare_rate_limits_are_mirrored_without_secrets(self):
         connection = MagicMock()

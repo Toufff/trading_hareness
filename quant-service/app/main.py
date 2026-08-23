@@ -286,6 +286,8 @@ from .intraday_event_retention import ephemeral_signal_retention_days, prune_eph
 from .market_session_repository import (
     realtime_market_session as read_realtime_market_session,
     realtime_market_session_async as read_realtime_market_session_async,
+    sse_calendar_open as read_sse_calendar_open,
+    sse_calendar_open_async as read_sse_calendar_open_async,
 )
 from .intraday_signal_policy import (
     signal_event_state as intraday_signal_event_state,
@@ -2716,34 +2718,13 @@ def daily_summary_automation_enabled() -> bool:
 
 
 def sse_calendar_open(calendar_date: date) -> bool:
-    if calendar_date.weekday() >= 5:
-        return False
-    with db.transaction() as connection:
-        row = connection.execute("SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s", (calendar_date,)).fetchone()
-    # A calendar gap must fail closed.  Treating a missing holiday row as open
-    # previously ran the full post-close/intraday automation on public
-    # holidays, creating avoidable provider traffic and misleading snapshots.
-    return bool(row["is_open"]) if row is not None else False
+    """Compatibility entry point for the isolated persisted SSE gate."""
+    return read_sse_calendar_open(db, calendar_date)
 
 
 async def sse_calendar_open_async(calendar_date: date) -> bool:
-    """Async-loop-safe exchange-calendar gate; gaps still fail closed."""
-    if calendar_date.weekday() >= 5:
-        return False
-
-    def load() -> Any:
-        with db.transaction() as connection:
-            return connection.execute(
-                "SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s",
-                (calendar_date,),
-            ).fetchone()
-    try:
-        row = await run_database_blocking(load)
-    except ExecutorSaturatedError:
-        # This bool gate is used only to decide whether background work may
-        # start. Capacity uncertainty must therefore suppress the round.
-        return False
-    return bool(row["is_open"]) if row is not None else False
+    """Compatibility entry point for the isolated async persisted SSE gate."""
+    return await read_sse_calendar_open_async(db, calendar_date, database_runner=run_database_blocking)
 
 
 async def strategy_review_loop() -> None:
