@@ -36,6 +36,46 @@ function messageText(content) {
 	return typeof value.text === 'string' ? value.text : typeof value.raw === 'string' ? value.raw : '';
 }
 
+function interactiveCardText(content) {
+	const card = typeof content === 'string' ? parseJson(content, { raw: content }) : content;
+	const chunks = [];
+	const append = (value) => {
+		if (typeof value !== 'string') return;
+		const text = value.trim();
+		if (text && !chunks.includes(text)) chunks.push(text);
+	};
+	const walk = (value) => {
+		if (Array.isArray(value)) {
+			for (const item of value) walk(item);
+			return;
+		}
+		if (!value || typeof value !== 'object') return;
+		const tag = String(value.tag ?? '').toLowerCase();
+		if (tag === 'text' || tag === 'markdown' || tag === 'plain_text') {
+			append(value.text ?? value.content);
+			return;
+		}
+		if (tag === 'a') {
+			append(value.text ?? value.content);
+			append(value.href ?? value.url);
+			return;
+		}
+		if (tag === 'button') {
+			append(typeof value.text === 'object' ? value.text?.content : value.text ?? value.content);
+			append(value.url ?? value.multi_url?.url ?? value.action?.url);
+			return;
+		}
+		if (tag === 'img') {
+			append(typeof value.alt === 'object' ? value.alt?.content : value.alt);
+			return;
+		}
+		if (Object.hasOwn(value, 'title')) append(typeof value.title === 'object' ? value.title?.content : value.title);
+		for (const key of ['header', 'body', 'elements', 'columns', 'fields', 'content', 'content_v2', 'note']) walk(value[key]);
+	};
+	walk(card);
+	return chunks.join('\n');
+}
+
 function taggedText(tag, text = '') {
 	const prefix = `#${tag}`;
 	const normalized = String(text ?? '');
@@ -277,11 +317,15 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 		if (message.msg_type === 'text') {
 			return { component: 'text', msgType: 'text', content: { text: taggedText(source.tag, messageText(message?.body?.content)) } };
 		}
-		// Interactive cards, stickers, shared cards and merged forwards are not
-		// portable across tenants. Preserve their type and payload summary in one
-		// tagged text bubble, while the following action card keeps a durable
-		// source reference for analyst follow-up.
-		if (['interactive', 'sticker', 'share_chat', 'share_user', 'merge_forward', 'audio', 'system'].includes(message.msg_type)) {
+		// Card components and callback values are tenant-bound, but their human
+		// readable text and outbound URLs are portable.  Preserve those in a
+		// normal text message so every configured source group has the same relay
+		// behavior without copying unusable actions or resource keys.
+		if (message.msg_type === 'interactive') {
+			const summary = interactiveCardText(message?.body?.content).slice(0, 3_000);
+			return { component: 'interactive-text-summary-v1', msgType: 'text', content: { text: taggedText(source.tag, `[interactive]\n${summary || '卡片未提供可转发文字内容。'}`) } };
+		}
+		if (['sticker', 'share_chat', 'share_user', 'merge_forward', 'audio', 'system'].includes(message.msg_type)) {
 			return { component: 'portable-summary', msgType: 'text', content: { text: taggedText(source.tag, `[${message.msg_type}]　${messageText(message?.body?.content).slice(0, 3_000) || '此消息类型无法跨租户保持原组件。'}`) } };
 		}
 		throw new RelayUnsupportedError(`暂不支持的飞书消息类型：${message.msg_type ?? 'unknown'}`);
@@ -316,6 +360,7 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 		try {
 			const targetMessageIds = await relayOne(message, source);
 			await ledger.markRelayMessage(message.message_id, { status: 'sent', targetMessageIds, errorMessage: null });
+			if (message.msg_type === 'interactive') await ledger.markPortableSummaryVersion?.(message.message_id, 'interactive-text-summary-v1');
 			// The relay contract is one source message -> one summary bubble.  An
 			// action card is useful, but is deliberately opt-in so it never splits
 			// the tagged original message by default.
@@ -356,6 +401,22 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 				routeTag: source.tag, message: sourceFromRecord(record),
 			});
 			if (claimed) await processClaimed(sourceFromRecord(record), source);
+		}
+	}
+
+	async function upgradePortableInteractiveSummaries(sourcesByKey) {
+		if (!ledger.portableInteractiveSummaryUpgradeQueue || !ledger.markPortableSummaryVersion) return;
+		for (const record of await ledger.portableInteractiveSummaryUpgradeQueue(20)) {
+			const source = sourcesByKey.get(record.source_key);
+			if (!source || source.resolvedChatId !== record.source_chat_id) continue;
+			try {
+				const updated = await updateRelayedMessage(sourceFromRecord(record), source, record);
+				if (!updated) throw new Error('原转发消息缺少可更新的文本目标');
+				await ledger.markPortableSummaryVersion(record.source_message_id, 'interactive-text-summary-v1');
+				logger.info(`互动卡片摘要已升级：${source.key} ${record.source_message_id}`);
+			} catch (error) {
+				logger.warn(`互动卡片摘要升级失败：${source.key} ${record.source_message_id}：${error instanceof Error ? error.message : String(error)}`);
+			}
 		}
 	}
 
@@ -465,6 +526,7 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 			}
 			const sourcesByKey = new Map(available.map((source) => [source.key, source]));
 			await retryFailed(sourcesByKey);
+			await upgradePortableInteractiveSummaries(sourcesByKey);
 			for (const source of available) {
 				try {
 					await pollSource(source);

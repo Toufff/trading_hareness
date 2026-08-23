@@ -10,6 +10,8 @@ function createHarness(messages, { imageResponse = { image_key: 'img_target' }, 
 	const updated = [];
 	const ledger = {
 		relayRetryQueue: async () => [],
+		portableInteractiveSummaryUpgradeQueue: async () => [],
+		markPortableSummaryVersion: async (id, version) => saved.set(id, { ...saved.get(id), portableSummaryVersion: version }),
 		relaySourceState: async (key) => sourceStates.get(key) ?? null,
 		saveRelaySourceCursor: async ({ sourceKey, chatId, cursorCreateTime }) => sourceStates.set(sourceKey, { chat_id: chatId, cursor_create_time: cursorCreateTime }),
 		getRelayMessage: async (id) => saved.get(id) ?? null,
@@ -145,4 +147,33 @@ test('an edited rich-text source refreshes image/video keys in its original outg
 	assert.equal(content.zh_cn.content[1][0].text, '修订版');
 	assert.equal(content.zh_cn.content[1][1].image_key, 'img_target');
 	assert.equal(content.zh_cn.content[2][0].file_key, 'file_target');
+});
+
+test('interactive cards relay their portable text and links for every configured target group', async () => {
+	const message = {
+		message_id: 'om_interactive_1', msg_type: 'interactive', create_time: String(Date.now()),
+		body: { content: JSON.stringify({ title: null, elements: [[
+			{ tag: 'text', text: '8-23 20:04:05\n通过网盘分享的文件：安强8.23回放.mp4\n链接:' },
+			{ tag: 'a', href: 'https://pan.baidu.com/s/example', text: 'https://pan.baidu.com/s/example' },
+			{ tag: 'text', text: '提取码: g6ap' },
+		]] }) },
+	};
+	const { relay, sent, saved } = createHarness([message], { targetChatIds: ['oc_anqiang_forward'] });
+	await relay.tick();
+	assert.equal(sent.length, 2);
+	assert.ok(sent.every((item) => item.msg_type === 'text'));
+	assert.deepEqual(JSON.parse(sent[0].content), { text: '#anqiang\n[interactive]\n8-23 20:04:05\n通过网盘分享的文件：安强8.23回放.mp4\n链接:\nhttps://pan.baidu.com/s/example\n提取码: g6ap' });
+	assert.equal(saved.get('om_interactive_1').portableSummaryVersion, 'interactive-text-summary-v1');
+});
+
+test('an edited interactive card updates the original portable summary instead of sending a duplicate', async () => {
+	const message = { message_id: 'om_interactive_edit_1', msg_type: 'interactive', create_time: String(Date.now()), body: { content: JSON.stringify({ elements: [[{ tag: 'text', text: '第一版卡片' }]] }) } };
+	const { relay, sent, updated } = createHarness([message]);
+	await relay.tick();
+	message.updated = true;
+	message.update_time = String(Date.now() + 1_000);
+	message.body.content = JSON.stringify({ elements: [[{ tag: 'text', text: '修订后的卡片正文' }, { tag: 'a', text: '查看详情', href: 'https://example.test/detail' }]] });
+	await relay.tick();
+	assert.equal(sent.length, 1);
+	assert.deepEqual(updated[0], { path: { message_id: 'om_target_1' }, data: { msg_type: 'text', content: JSON.stringify({ text: '#anqiang\n[interactive]\n修订后的卡片正文\n查看详情\nhttps://example.test/detail' }) } });
 });

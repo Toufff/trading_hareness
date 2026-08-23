@@ -162,6 +162,18 @@ export function createLedger(connectionString) {
 			return result.rows[0] ?? null;
 		},
 		async relayRetryQueue(limit = 20) { const { rows } = await pool.query(`SELECT * FROM feishu_group_relay_messages WHERE status='failed' AND updated_at <= now() - interval '10 seconds' * power(2, least(greatest(attempt_count - 1, 0), 5)) ORDER BY updated_at ASC LIMIT $1`, [Math.max(1, Math.min(100, Number(limit) || 20))]); return rows; },
+		async portableInteractiveSummaryUpgradeQueue(limit = 20) {
+			const { rows } = await pool.query(`SELECT * FROM feishu_group_relay_messages
+				WHERE status='sent' AND message->>'msg_type'='interactive'
+					AND coalesce(intelligence->>'portable_summary_version', '') <> 'interactive-text-summary-v1'
+				ORDER BY updated_at ASC LIMIT $1`, [Math.max(1, Math.min(100, Number(limit) || 20))]);
+			return rows;
+		},
+		async markPortableSummaryVersion(sourceMessageId, version) {
+			await pool.query(`UPDATE feishu_group_relay_messages
+				SET intelligence=jsonb_set(coalesce(intelligence, '{}'::jsonb), '{portable_summary_version}', to_jsonb($2::text), true), updated_at=now()
+				WHERE source_message_id=$1`, [sourceMessageId, version]);
+		},
 		async recentRelayMessages(limit = 50) {
 			const { rows } = await pool.query(`SELECT message.source_message_id,message.source_key,message.source_chat_id,message.source_create_time,message.target_chat_id,message.route_tag,message.message,message.status,message.target_message_ids,message.error_message,message.forwarded_at,message.updated_at,message.action_card_message_id,message.workflow_state,message.workflow_note,message.source_deleted,message.source_update_time,message.intelligence,route.chat_name AS source_chat_name
 				FROM feishu_group_relay_messages message
