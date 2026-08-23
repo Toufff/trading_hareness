@@ -290,7 +290,7 @@ from . import research_capacity
 from .feature_read_repository import analyst_feature as read_analyst_feature
 from .feature_read_repository import latest_tushare_row as read_latest_tushare_row
 from .feature_read_repository import market_regime as read_market_regime
-from .analyst_text_features import analyst_text_factor_summary as read_analyst_text_factor_summary
+from .analyst_text_features import DEFAULT_FACTOR_VERSION, analyst_text_factor_summary as read_analyst_text_factor_summary
 from .intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload, intraday_services_status_payload_async as read_intraday_services_status_payload_async
 from .routers.provider_status import build_provider_status_router
 from .routers.research_readiness import build_research_readiness_router
@@ -911,7 +911,7 @@ def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
 
 FEATURE_VERSION = "multi-source-feature-v3"
 MODEL_VERSION = "multi-source-direction-v1"
-ANALYST_TEXT_FACTOR_VERSION = "analyst-text-consensus-v1"
+ANALYST_TEXT_FACTOR_VERSION = DEFAULT_FACTOR_VERSION
 
 
 def number(value: Any, default: float = 0.0) -> float:

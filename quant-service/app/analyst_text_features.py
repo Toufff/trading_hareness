@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
+DEFAULT_FACTOR_VERSION = "analyst-text-consensus-v1"
 
 
 def summary_from_rows(

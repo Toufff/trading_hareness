@@ -44,6 +44,7 @@ from app.async_analyst_research_status_read_repository import status as async_re
 from app.async_analyst_archive_read_repository import analyst_sync_cursor as async_archive_sync_cursor
 from app.async_analyst_archive_read_repository import remote_report_list_state as async_archive_state
 from app.async_provider_status_read_repository import provider_health as async_provider_health
+from app.async_analyst_text_feature_read_repository import analyst_text_factor_summary as async_analyst_factor_summary
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -161,6 +162,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_analyst_stock_timeline_read_repository.py",
             "async_analyst_research_status_read_repository.py",
             "async_provider_status_read_repository.py",
+            "async_analyst_text_feature_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -1449,6 +1451,45 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(direct["items"][0]["state"], "unknown")
         self.assertEqual(len(database.connection.calls), 1)
+
+    async def test_analyst_factors_prefer_native_async_text_only_evidence(self) -> None:
+        calls = []
+
+        async def summary(_database, as_of_date, lookback_days):
+            calls.append((as_of_date, lookback_days))
+            return {"factor_version": "analyst-text-consensus-v1", "data_boundary": "text-only"}
+
+        router = build_analyst_reads_router(
+            object(), lambda *_args: {}, lambda *_args: {}, async_database=object(), async_factor_summary_fn=summary,
+        )
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-factors")
+        as_of = date(2026, 8, 21)
+        self.assertEqual((await endpoint(as_of, 100)) ["data_boundary"], "text-only")
+        self.assertEqual(calls, [(as_of, 100)])
+
+        class Result:
+            def __init__(self, rows): self.rows = rows
+            async def fetchall(self): return self.rows
+
+        class Connection:
+            def __init__(self): self.calls = []
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                return Result([])
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        database = Database()
+        direct = await async_analyst_factor_summary(database, as_of, 100)
+        self.assertEqual(direct["lookback_days"], 30)
+        self.assertEqual(database.connection.calls[0][1][:2], (date(2026, 7, 23), as_of))
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:
