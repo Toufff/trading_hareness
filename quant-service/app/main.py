@@ -163,6 +163,10 @@ from .strategy_pattern_sample_repository import (
     load_strategy_pattern_sample_inputs,
     persist_strategy_pattern_run as persist_strategy_pattern_run_isolated,
 )
+from .strategy_pattern_mining_service import (
+    StrategyPatternMiningDependencies,
+    run_strategy_pattern_mining as run_strategy_pattern_mining_isolated,
+)
 from .post_close_strategy_service import (
     candidates as persisted_post_close_strategy_candidates,
     completed_for_date as persisted_post_close_strategy_completed_for_date,
@@ -1877,78 +1881,23 @@ def persist_strategy_pattern_run(
     )
 
 
+def _strategy_pattern_mining_dependencies() -> StrategyPatternMiningDependencies:
+    """Compose bounded post-close minute research without owning a provider client."""
+    return StrategyPatternMiningDependencies(
+        latest_date=latest_strategy_pattern_date, refresh_sources=refresh_strategy_pattern_sources,
+        sample_candidates=strategy_pattern_sample_candidates,
+        open_provider_capabilities=open_provider_capabilities,
+        minute_capability=TENCENT_INTRADAY_MINUTE_CAPABILITY, fetch_minutes=tencent_intraday_minutes,
+        intraday_pattern=intraday_limit_lift_pattern, review_score=strategy_pattern_review_score,
+        persist_minute_health=persist_tencent_intraday_minute_health, persist_run=persist_strategy_pattern_run,
+        run_database=run_database_blocking, model_version=STRATEGY_PATTERN_MODEL_VERSION,
+        handled_errors=(asyncio.TimeoutError, httpx.HTTPError, FreeProviderError, ValueError),
+    )
+
+
 async def run_strategy_pattern_mining(request: StrategyPatternMiningRequest) -> dict[str, Any]:
-    """Fetch bounded Tencent minute tapes and persist compact replay evidence."""
-    latest = await run_database_blocking(latest_strategy_pattern_date)
-    as_of_date = request.as_of_date or latest
-    if as_of_date is None:
-        return {"status": "blocked", "reason": "no daily bars are stored", "samples": []}
-    limit_sources = await refresh_strategy_pattern_sources(as_of_date) if request.refresh_limit_sources else {"status": "skipped"}
-    selection = await run_database_blocking(
-        strategy_pattern_sample_candidates, as_of_date, request.max_symbols, request.per_cohort, request.focus_symbols,
-    )
-    candidates = selection.get("candidates", [])
-    minute_circuit_open = bool(candidates) and TENCENT_INTRADAY_MINUTE_CAPABILITY in await open_provider_capabilities(
-        "tencent_free", [TENCENT_INTRADAY_MINUTE_CAPABILITY],
-    )
-    semaphore = asyncio.Semaphore(4)
-
-    async def replay(item: dict[str, Any]) -> dict[str, Any]:
-        try:
-            async with semaphore:
-                rows = await asyncio.wait_for(tencent_intraday_minutes(item["symbol"]), timeout=10)
-            pattern = intraday_limit_lift_pattern(rows, item["daily_features"])
-            risk_flags = list(item["risk_flags"])
-            if item["daily_features"].get("ground_to_sky_daily_shape") and "ground_to_sky_reversal" not in pattern.get("pattern_tags", []):
-                risk_flags.append("daily_minute_extreme_path_mismatch")
-            review = strategy_pattern_review_score(item, pattern, risk_flags)
-            return {**item, "limit_context": {**item["limit_context"], **review},
-                    "intraday_pattern": pattern, "minute_source": "tencent_free_minute", "risk_flags": risk_flags}
-        except (asyncio.TimeoutError, httpx.HTTPError, FreeProviderError, ValueError) as error:
-            return {**item, "intraday_pattern": {"status": "failed", "error": str(error)[:240], "curve": []},
-                    "minute_source": "tencent_free_minute", "risk_flags": [*item["risk_flags"], "minute_replay_failed"]}
-
-    if minute_circuit_open:
-        samples = [{**item, "intraday_pattern": {"status": "blocked", "error": "provider health circuit is open; upstream request skipped", "curve": []},
-                    "minute_source": "tencent_free_minute", "risk_flags": [*item["risk_flags"], "minute_replay_circuit_open"]}
-                   for item in candidates]
-    else:
-        started_at = asyncio.get_running_loop().time()
-        samples = await asyncio.gather(*(replay(item) for item in candidates))
-        if candidates:
-            completed_count = sum(item["intraday_pattern"].get("status") == "completed" for item in samples)
-            errors = [str(item["intraday_pattern"].get("error") or "minute replay failed") for item in samples
-                      if item["intraday_pattern"].get("status") != "completed"]
-            await run_database_blocking(
-                persist_tencent_intraday_minute_health, completed_count, errors,
-                round((asyncio.get_running_loop().time() - started_at) * 1000),
-            )
-    samples.sort(key=lambda item: (-float(item.get("limit_context", {}).get("review_score") or 0), item["symbol"]))
-    failed = [item for item in samples if item["intraday_pattern"].get("status") != "completed"]
-    status = "blocked" if minute_circuit_open or not samples else "partial" if failed else "completed"
-    pattern_counts: dict[str, int] = {}
-    for item in samples:
-        for tag in item["intraday_pattern"].get("pattern_tags", []):
-            pattern_counts[str(tag)] = pattern_counts.get(str(tag), 0) + 1
-    picks = [item for item in samples if item.get("limit_context", {}).get("review_tier") != "research_sample"][:10]
-    summary = {"selected": len(samples), "picks": len(picks), "minute_completed": len(samples) - len(failed), "minute_failed": len(failed),
-               "cohort_counts": selection.get("cohort_counts", {}), "pattern_counts": pattern_counts,
-               "limit_pool_rows": selection.get("limit_pool_rows", 0), "limit_step_rows": selection.get("limit_step_rows", 0),
-               "dragon_leader_market_context": selection.get("dragon_leader_market_context", {})}
-    source_status = {"daily": "canonical_bars_daily", "limit_sources": limit_sources,
-                     "minute": {"provider": "tencent_free", "status": "circuit_open" if minute_circuit_open else status,
-                                "completed": len(samples) - len(failed),
-                                "failed": {item["symbol"]: item["intraday_pattern"].get("error") for item in failed}},
-                     "super_get_minute": "corroborating source when healthy; Tencent is the bounded post-close replay source"}
-    run_key = hashlib.sha256(f"{STRATEGY_PATTERN_MODEL_VERSION}:{as_of_date}".encode()).hexdigest()
-    run_id = await run_database_blocking(
-        persist_strategy_pattern_run, run_key, as_of_date, status, source_status, summary, samples, timeout_seconds=60,
-    )
-    return {"status": status, "as_of_date": str(as_of_date), "run_id": str(run_id),
-            "model_version": STRATEGY_PATTERN_MODEL_VERSION, "summary": summary, "source_status": source_status,
-            "picks": [{**item, "rank": rank} for rank, item in enumerate(picks, start=1)],
-            "samples": [{**item, "rank": rank} for rank, item in enumerate(samples, start=1)],
-            "notice": "样本用于发现可证伪的盘中形态；地天板只产生研究观察和承接检查，不自动下单。"}
+    """Compatibility entry point for bounded, research-only pattern mining."""
+    return await run_strategy_pattern_mining_isolated(request, _strategy_pattern_mining_dependencies())
 
 
 def watchlist_daily_factors(symbol: str, connection: Any | None = None) -> dict[str, Any]:

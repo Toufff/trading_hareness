@@ -147,6 +147,7 @@
 
 ## 验证
 
+- 2026-08-22：盘后涨停/地天板分钟形态挖掘的选择、4 路有界回放、熔断降级、结果聚合已从 `main.py` 收敛到 `app/strategy_pattern_mining_service.py`。没有日线即 blocked；腾讯分钟 circuit-open 时不发起上游请求，只写 `minute_replay_circuit_open` 研究证据；该流程仍不补历史、不调阈值、不自动下单。新增无日线与熔断零外呼回归；重建后的全量回归为 699 项通过，开盘前只读预检通过。
 - 2026-08-22：盘后一键刷新阶段装配已从 `main.py` 收敛到 `app/post_close_refresh_service.py`。固定的阶段顺序、超时预算和“日线控制面完成前阻断策略阶段”依赖现在与租约/回执编排分离；服务只接收本地动作，不自建 provider client 或历史回放。扩展服务级阶段顺序、日线 `auto`/promax source 选择、核心股/公告 45 日窗口及控制面依赖回归；重建后的全量回归为 697 项通过，开盘前只读预检通过。
 - 2026-08-22：盘后涨停/地天板形态挖掘的 run/sample 替换事务已归入 `app/strategy_pattern_sample_repository.py`。仓储仅接受已选择、已回放的有界样本，原子替换旧 run 样本，不拥有 provider、候选排序或实时策略评分。新增直接事务顺序回归；重建后的全量回归为 696 项通过，开盘前只读预检通过。
 - 2026-08-22：公共日线的批量验证与写入已收敛到 `app/public_market_repository.py`。有效非腾讯日线仍在单事务内 canonicalize；`tencent_free` 的前复权 K 线强制只写原始研究证据，不会在授权源缺口时混入不复权 canonical 序列。既有单事务与前复权隔离回归通过；重建后的全量回归为 695 项通过，开盘前只读预检通过。
