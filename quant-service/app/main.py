@@ -110,6 +110,8 @@ from .intraday_quote_normalization import (
 )
 from .intraday_decision_card_read_model import decision_card as read_intraday_decision_card
 from .async_intraday_decision_card_repository import decision_card as read_async_intraday_decision_card
+from .async_intraday_scan_preflight_repository import latest_board_report as read_async_latest_board_report
+from .async_intraday_scan_preflight_repository import latest_fast_quotes as read_async_latest_fast_quotes
 from .intraday_volume_profiles import attach_volume_time_profile as pure_attach_volume_time_profile
 from .intraday_volume_profiles import volume_time_profile as pure_intraday_volume_time_profile
 from .intraday_volume_profiles import volume_time_profiles as pure_intraday_volume_time_profiles
@@ -2218,13 +2220,7 @@ async def intraday_tencent_surge_context(
 
 async def intraday_board_cache_evidence(observed_at: datetime) -> dict[str, Any]:
     """Expose the latest persisted board-flow age without refetching it per quote scan."""
-    def load() -> Any:
-        with db.transaction() as connection:
-            return connection.execute(
-                """SELECT observed_at,status FROM quant.intraday_board_reports
-                     WHERE status='completed' ORDER BY observed_at DESC LIMIT 1"""
-            ).fetchone()
-    row = await run_database_blocking(load)
+    row = await read_async_latest_board_report(async_db)
     if row is None:
         return {"status": "missing", "notice": "no persisted board-flow snapshot yet"}
     age_seconds = max(0.0, (observed_at - row["observed_at"]).total_seconds())
@@ -2252,16 +2248,7 @@ async def latest_intraday_fast_quote_confirmations(symbols: list[str], quotes: d
                                                    observed_at: datetime) -> dict[str, dict[str, Any]]:
     if not symbols:
         return {}
-    def load() -> list[Any]:
-        with db.transaction() as connection:
-            return connection.execute(
-                """SELECT DISTINCT ON(symbol) symbol,observed_at,price,pct_change,raw
-                     FROM quant.intraday_quote_observations
-                    WHERE source_name='tushare_super_get_rt_k' AND symbol=ANY(%s)
-                    ORDER BY symbol,observed_at DESC""",
-                (symbols,),
-            ).fetchall()
-    rows = await run_database_blocking(load)
+    rows = await read_async_latest_fast_quotes(async_db, symbols)
     latest = {str(row["symbol"]): dict(row) for row in rows}
     return {symbol: intraday_fast_quote_confirmation(quotes.get(symbol), latest.get(symbol), observed_at)
             for symbol in symbols}
