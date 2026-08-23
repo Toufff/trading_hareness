@@ -147,6 +147,7 @@
 
 ## 验证
 
+- 2026-08-22：`/api/v1/market/flow/features` 已迁至原生异步只读池。分钟特征、近日日频汇总、概念资金流特征、outcome 聚合与研究门禁在同一有界本地 transaction 中读取，随后由共享纯投影构造响应；缺失仍不补零，`live_strategy_effect` 固定为 `none`。新增异步路由优先、1,000 行上限和 research gate 回归；真实 GET 返回 10 条日频摘要及本地门禁，未调用 provider。重建后的全量回归为 653 项通过，开盘前只读预检通过。
 - 2026-08-22：`/api/v1/automation/runs` 已迁至原生异步只读池。运行回执 SQL 与同步仓储共享同一 100 条上限/过滤参数，Agent 上下文继续是无凭据的纯本地静态投影；查询不会重跑任务或改变任何 durable receipt。新增异步路由优先和原生有界查询回归；真实本地 GET 返回 2 条已完成回执并标记 `live_effect=none`。重建后的全量回归为 651 项通过，开盘前只读预检通过。
 - 2026-08-22：`/api/v1/analysts/anqiang/trade-actions` 与 `/trade-action-outcomes` 的读取已迁至原生异步只读池。共享查询/纯投影保留 author `stated_at` 只作复盘、收益从本地 `available_at`/捕获行情开始的时点纪律；缺分钟证据仍明确为 `daily_close_only` 或 `awaiting_market_data`，不会伪造回放。重新计算 POST 继续是受控同步写路径。新增异步路由优先、查询上限和本地证据回归；真实 GET 返回 5 条操作与 8 组 outcome 汇总，均明确无 live strategy effect。重建后的全量回归为 649 项通过，开盘前只读预检通过。
 - 2026-08-22：`/api/v1/intraday/board-rotations/latest` 与 `/board-stock-mining/latest` 已迁至原生异步只读池。二者仅返回已经持久化的东财相邻分钟轮动证据和“东财资金流 + 精确成员 + 同刻腾讯横截面”的研究候选；前端挖掘保持不发飞书、绝不构成指令。新增异步路由优先与本地行数上限回归；真实本地 GET 返回 5 条轮动事件和一组各 20 条的流入/流出候选。重建后的全量回归为 647 项通过，开盘前只读预检通过。

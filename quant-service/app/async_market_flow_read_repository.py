@@ -1,4 +1,4 @@
-"""Read-only projections for persisted multiscale market-flow evidence."""
+"""Native-async projection for stored multiscale market-flow evidence."""
 
 from __future__ import annotations
 
@@ -6,18 +6,15 @@ from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .market_flow_read_model import project_market_flow_features
 
-def market_flow_features(
-    database: Any,
-    trade_date: date | None = None,
-    *,
-    limit: int = 720,
-) -> dict[str, Any]:
+
+async def market_flow_features(async_database: Any, trade_date: date | None = None, *, limit: int = 720) -> dict[str, Any]:
     china = ZoneInfo("Asia/Shanghai")
     selected_date = trade_date or datetime.now(timezone.utc).astimezone(china).date()
     bounded_limit = max(1, min(int(limit), 1000))
-    with database.transaction() as connection:
-        rows = connection.execute(
+    async with async_database.transaction() as connection:
+        rows_result = await connection.execute(
             """SELECT feature_key,exchange_date,cadence,observed_at,source_snapshot_minute,status,market_state,
                       concept_count,concept_positive_ratio,concept_median_flow,concept_mean_change_pct,
                       five_minute_positive_ratio_delta,session_positive_ratio_delta,afternoon_repair_strength,
@@ -25,10 +22,9 @@ def market_flow_features(
                       features,quality_flags,updated_at
                  FROM quant.market_flow_feature_snapshots
                 WHERE exchange_date=%s
-                ORDER BY observed_at LIMIT %s""",
-            (selected_date, bounded_limit),
-        ).fetchall()
-        daily_rows = connection.execute(
+                ORDER BY observed_at LIMIT %s""", (selected_date, bounded_limit),
+        )
+        daily_result = await connection.execute(
             """SELECT DISTINCT ON(exchange_date) feature_key,exchange_date,cadence,observed_at,status,market_state,
                       concept_count,concept_positive_ratio,market_amount,market_volume,amount_change_pct,
                       volume_change_pct,advancer_ratio,features,quality_flags
@@ -36,9 +32,9 @@ def market_flow_features(
                 WHERE cadence IN ('close','midday')
                 ORDER BY exchange_date DESC,
                          CASE cadence WHEN 'close' THEN 0 ELSE 1 END,observed_at DESC
-                LIMIT 20""",
-        ).fetchall()
-        sector_rows = connection.execute(
+                LIMIT 20"""
+        )
+        sector_result = await connection.execute(
             """SELECT feature.trading_date,feature.sector_key,sector.label,feature.provider_key,
                       feature.status,feature.transition,feature.net_amount,feature.previous_net_amount,
                       feature.net_change_amount,feature.net_acceleration,feature.rank_percentile,
@@ -50,10 +46,9 @@ def market_flow_features(
                    ON sector.taxonomy_key=feature.taxonomy_key AND sector.sector_key=feature.sector_key
                 WHERE feature.taxonomy_key='ths_concept_flow' AND feature.trading_date=%s
                 ORDER BY feature.rank_percentile DESC NULLS LAST,abs(feature.net_change_amount) DESC NULLS LAST
-                LIMIT 500""",
-            (selected_date,),
-        ).fetchall()
-        outcome_rows = connection.execute(
+                LIMIT 500""", (selected_date,),
+        )
+        outcomes_result = await connection.execute(
             """SELECT transition,horizon_days,count(*) FILTER (WHERE status='matured') AS matured,
                       avg(directional_return) FILTER (WHERE status='matured') AS avg_directional_return,
                       avg(cross_section_excess_return) FILTER (WHERE status='matured') AS avg_excess_return,
@@ -61,50 +56,18 @@ def market_flow_features(
                  FROM quant.sector_flow_daily_outcomes
                 GROUP BY transition,horizon_days
                 ORDER BY horizon_days,transition"""
-        ).fetchall()
-        readiness = connection.execute(
+        )
+        readiness_result = await connection.execute(
             """SELECT (SELECT count(DISTINCT trading_date) FROM quant.sector_flow_daily_features) AS trading_days,
                       count(DISTINCT (sector_key,signal_date)) FILTER (WHERE status='matured') AS matured_events
                  FROM quant.sector_flow_daily_outcomes"""
-        ).fetchone()
-    return project_market_flow_features(
-        rows, daily_rows, sector_rows, outcome_rows, readiness, selected_date,
-    )
+        )
+        rows = [dict(row) for row in await rows_result.fetchall()]
+        daily_rows = [dict(row) for row in await daily_result.fetchall()]
+        sector_rows = [dict(row) for row in await sector_result.fetchall()]
+        outcome_rows = [dict(row) for row in await outcomes_result.fetchall()]
+        readiness = await readiness_result.fetchone()
+    return project_market_flow_features(rows, daily_rows, sector_rows, outcome_rows, readiness or {}, selected_date)
 
 
-def project_market_flow_features(
-    rows: list[Any],
-    daily_rows: list[Any],
-    sector_rows: list[Any],
-    outcome_rows: list[Any],
-    readiness: Any,
-    selected_date: date,
-) -> dict[str, Any]:
-    """Project already-read market-flow evidence without database access."""
-    items = [dict(row) for row in rows]
-    state_counts: dict[str, int] = {}
-    for item in items:
-        state = str(item["market_state"])
-        state_counts[state] = state_counts.get(state, 0) + 1
-    return {
-        "trade_date": str(selected_date),
-        "timezone": "Asia/Shanghai",
-        "items": items,
-        "latest": items[-1] if items else None,
-        "daily": [dict(row) for row in daily_rows],
-        "sector_daily": [dict(row) for row in sector_rows],
-        "sector_outcome_summary": [dict(row) for row in outcome_rows],
-        "state_counts": state_counts,
-        "research_gate": {
-            "status": "eligible_for_review" if int(readiness["trading_days"] or 0) >= 60 and int(readiness["matured_events"] or 0) >= 200 else "accumulating",
-            "observed_trading_days": int(readiness["trading_days"] or 0),
-            "matured_independent_events": int(readiness["matured_events"] or 0),
-            "minimum_trading_days": 60,
-            "minimum_independent_events": 200,
-            "live_strategy_effect": "none",
-        },
-        "notice": "分钟东财板块流、腾讯全A量能和盘后Tushare资金流保持分层；缺失不补零，当前仅用于研究与前端复盘。",
-    }
-
-
-__all__ = ["market_flow_features", "project_market_flow_features"]
+__all__ = ["market_flow_features"]

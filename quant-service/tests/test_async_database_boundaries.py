@@ -30,6 +30,7 @@ from app.async_board_research_read_repository import latest_board_stock_mining a
 from app.async_analyst_action_read_repository import anqiang_trade_action_outcomes as async_action_outcomes
 from app.async_analyst_action_read_repository import anqiang_trade_action_replay as async_action_replay
 from app.async_automation_run_read_repository import latest_runs as async_automation_runs
+from app.async_market_flow_read_repository import market_flow_features as async_market_flow_features
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -45,6 +46,7 @@ from app.routers.board_stock_mining_reads import build_board_stock_mining_reads_
 from app.routers.analyst_trade_action_reads import build_analyst_trade_action_reads_router
 from app.routers.analyst_action_outcomes import build_analyst_action_outcomes_router
 from app.routers.automation_reads import build_automation_reads_router
+from app.routers.market_flow_reads import build_market_flow_reads_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -133,6 +135,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_board_research_read_repository.py",
             "async_analyst_action_read_repository.py",
             "async_automation_run_read_repository.py",
+            "async_market_flow_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -915,6 +918,69 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         rows = await async_automation_runs(database, "post_close", 1000)
         self.assertEqual(rows[0]["run_id"], "run-1")
         self.assertEqual(database.connection.calls[0][1], ("post_close", "post_close", 100))
+
+    async def test_market_flow_router_prefers_async_persisted_projection(self) -> None:
+        calls = []
+
+        async def features(_database, trade_date, *, limit):
+            calls.append((trade_date, limit))
+            return {"trade_date": str(trade_date), "items": []}
+
+        router = build_market_flow_reads_router(object(), async_database=object(), async_features_fn=features)
+        endpoint = router.routes[0].endpoint
+        payload = await endpoint(date(2026, 8, 10), 1001)
+        self.assertEqual(payload["trade_date"], "2026-08-10")
+        self.assertEqual(calls, [(date(2026, 8, 10), 1001)])
+
+    async def test_market_flow_repository_uses_native_async_rows_and_research_gate(self) -> None:
+        class Result:
+            def __init__(self, row=None, rows=None):
+                self.row, self.rows = row, rows or []
+
+            async def fetchone(self):
+                return self.row
+
+            async def fetchall(self):
+                return self.rows
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "DISTINCT ON(exchange_date)" in sql:
+                    return Result(rows=[])
+                if "sector_flow_daily_features feature" in sql:
+                    return Result(rows=[])
+                if "sector_flow_daily_outcomes" in sql and "GROUP BY" in sql:
+                    return Result(rows=[])
+                if "matured_events" in sql:
+                    return Result({"trading_days": 59, "matured_events": 199})
+                return Result(rows=[{"market_state": "rotation", "feature_key": "minute-1"}])
+
+        class Transaction:
+            def __init__(self, connection):
+                self.connection = connection
+
+            async def __aenter__(self):
+                return self.connection
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Database:
+            def __init__(self):
+                self.connection = Connection()
+
+            def transaction(self):
+                return Transaction(self.connection)
+
+        database = Database()
+        payload = await async_market_flow_features(database, date(2026, 8, 10), limit=5000)
+        self.assertEqual(payload["items"][0]["feature_key"], "minute-1")
+        self.assertEqual(payload["research_gate"]["status"], "accumulating")
+        self.assertEqual(database.connection.calls[0][1], (date(2026, 8, 10), 1000))
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:
