@@ -258,6 +258,10 @@ from .intraday_schedule import (
 )
 from .intraday_monitor_service import run_intraday_monitor_loop
 from .intraday_fast_quote_service import cross_source_confirmation, run_intraday_fast_quote_loop
+from .intraday_fast_quote_runtime import (
+    IntradayFastQuoteRuntimeDependencies,
+    run_intraday_fast_quote_runtime_loop,
+)
 from .study_realtime import _row_trade_date, _row_trade_datetime, looks_like_response_header, realtime_rows_are_current
 from .provider_health import (
     provider_error_availability,
@@ -2762,39 +2766,16 @@ async def capture_intraday_super_get_fast_quote(symbol: str) -> dict[str, Any]:
 
 async def intraday_super_get_fast_quote_loop() -> None:
     """Run the optional one-second rt_k cross-check in special windows."""
-    async def load_symbols() -> list[str]:
-        def load_watches() -> list[Any]:
-            with db.transaction() as connection:
-                return connection.execute(
-                    "SELECT * FROM quant.intraday_watchlists WHERE enabled "
-                    "ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT %s",
-                    (intraday_super_get_fast_max_symbols(),),
-                ).fetchall()
-        rows = await run_database_blocking(load_watches)
-        return [str(row["symbol"]) for row in sorted((dict(row) for row in rows), key=intraday_watch_priority_key)]
-
-    async def prune_before(cutoff: datetime) -> None:
-        def prune() -> None:
-            with db.transaction() as connection:
-                connection.execute(
-                    "DELETE FROM quant.intraday_quote_observations "
-                    "WHERE source_name='tushare_super_get_rt_k' AND observed_at<%s",
-                    (cutoff,),
-                )
-        await run_database_blocking(prune)
-
-    await run_intraday_fast_quote_loop(
-        realtime_session=realtime_market_session_async,
+    await run_intraday_fast_quote_runtime_loop(IntradayFastQuoteRuntimeDependencies(
+        database=db, run_database=run_database_blocking, max_symbols=intraday_super_get_fast_max_symbols,
+        watch_priority_key=intraday_watch_priority_key, realtime_session=realtime_market_session_async,
         high_frequency_window=intraday_high_frequency_window,
-        load_symbols=load_symbols,
-        prune_before=prune_before,
         storage_allowed=nonessential_high_frequency_capture_allowed,
-        capture_quote=capture_intraday_super_get_fast_quote,
-        observe_completed=observe_completed_task,
+        capture_quote=capture_intraday_super_get_fast_quote, observe_completed=observe_completed_task,
         interval_seconds=intraday_super_get_fast_interval_seconds,
         max_in_flight=intraday_super_get_fast_max_in_flight,
-        retention_days=intraday_fast_quote_retention_days,
-    )
+        retention_days=intraday_fast_quote_retention_days, run_loop=run_intraday_fast_quote_loop,
+    ))
 
 
 async def intraday_minute_profile_capture_loop() -> None:
