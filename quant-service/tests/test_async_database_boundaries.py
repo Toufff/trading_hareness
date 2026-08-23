@@ -41,6 +41,8 @@ from app.async_analyst_market_review_read_repository import list_reviews as asyn
 from app.async_analyst_market_evaluation_read_repository import market_evaluation as async_market_evaluation
 from app.async_analyst_stock_timeline_read_repository import stock_timeline as async_stock_timeline
 from app.async_analyst_research_status_read_repository import status as async_research_status
+from app.async_analyst_archive_read_repository import analyst_sync_cursor as async_archive_sync_cursor
+from app.async_analyst_archive_read_repository import remote_report_list_state as async_archive_state
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
@@ -1354,6 +1356,54 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         direct = await async_research_status(database, as_of)
         self.assertEqual(direct["approved_theme_board_aliases"], 2)
         self.assertEqual(len(database.connection.calls), 5)
+
+    async def test_analyst_archive_state_and_cursor_prefer_native_async_local_evidence(self) -> None:
+        calls = []
+
+        async def state(_database):
+            calls.append("state")
+            return {"analysts": [{"remote_analyst_id": "anqiang-touzi-riji"}]}
+
+        async def cursor(_database, stream_key, analyst_id):
+            calls.append((stream_key, analyst_id))
+            return {"stream_key": stream_key, "remote_analyst_id": analyst_id, "cursor": {}}
+
+        router = build_analyst_reads_router(
+            object(), lambda *_args: {}, lambda *_args: {}, async_database=object(),
+            async_remote_archive_state_fn=state, async_sync_cursor_fn=cursor,
+        )
+        state_endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/remote-archive/state")
+        cursor_endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/remote-archive/sync-cursors/{stream_key}/{analyst_id}")
+        self.assertEqual((await state_endpoint())["analysts"][0]["remote_analyst_id"], "anqiang-touzi-riji")
+        self.assertEqual((await cursor_endpoint("messages", "anqiang-touzi-riji"))["stream_key"], "messages")
+        self.assertEqual(calls, ["state", ("messages", "anqiang-touzi-riji")])
+
+        class Result:
+            def __init__(self, row=None, rows=None): self.row, self.rows = row, rows or []
+            async def fetchone(self): return self.row
+            async def fetchall(self): return self.rows
+
+        class Connection:
+            def __init__(self): self.calls = []
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                if "remote_analysts a" in sql: return Result(rows=[{"remote_analyst_id": "anqiang-touzi-riji"}])
+                return Result({"stream_key": "messages", "remote_analyst_id": "anqiang-touzi-riji"})
+
+        class Tx:
+            def __init__(self, connection): self.connection = connection
+            async def __aenter__(self): return self.connection
+            async def __aexit__(self, *_args): return False
+
+        class Database:
+            def __init__(self): self.connection = Connection()
+            def transaction(self): return Tx(self.connection)
+
+        database = Database()
+        self.assertEqual((await async_archive_state(database))["analysts"][0]["remote_analyst_id"], "anqiang-touzi-riji")
+        direct = await async_archive_sync_cursor(database, "messages", "anqiang-touzi-riji")
+        self.assertEqual(direct["remote_analyst_id"], "anqiang-touzi-riji")
+        self.assertEqual(database.connection.calls[-1][1], ("messages", "anqiang-touzi-riji"))
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:

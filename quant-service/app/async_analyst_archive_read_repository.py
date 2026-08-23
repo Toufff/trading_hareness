@@ -80,4 +80,52 @@ async def claim_review_queue(async_database: Any, status: str, limit: int) -> di
     return {"items": rows, "status": status}
 
 
-__all__ = ["analyst_claims", "claim_review_queue", "remote_messages", "remote_reports"]
+async def remote_report_list_state(async_database: Any) -> dict[str, Any]:
+    async with async_database.transaction() as connection:
+        result = await connection.execute(
+            """SELECT a.remote_analyst_id,
+                      count(DISTINCT r.remote_report_id)::int reports,max(r.report_date) latest_report_date,max(r.synced_at) last_report_synced_at,
+                      count(DISTINCT m.remote_message_id)::int messages,max(m.received_at) latest_message_received_at,max(m.synced_at) last_message_synced_at
+                 FROM quant.remote_analysts a
+                 LEFT JOIN quant.remote_reports r ON r.remote_analyst_id=a.remote_analyst_id
+                 LEFT JOIN quant.remote_analyst_messages m ON m.remote_analyst_id=a.remote_analyst_id
+                GROUP BY a.remote_analyst_id ORDER BY a.remote_analyst_id"""
+        )
+        rows = [dict(row) for row in await result.fetchall()]
+    return {"analysts": rows}
+
+
+async def analyst_sync_cursor(async_database: Any, stream_key: str, analyst_id: str) -> dict[str, Any]:
+    if stream_key not in {"messages", "reports"}:
+        raise ValueError("stream_key must be messages or reports")
+    async with async_database.transaction() as connection:
+        result = await connection.execute(
+            """SELECT stream_key,remote_analyst_id,received_at,message_ids,report_versions,updated_at
+                 FROM quant.analyst_sync_cursors WHERE stream_key=%s AND remote_analyst_id=%s""",
+            (stream_key, analyst_id),
+        )
+        row = await result.fetchone()
+    cursor = dict(row) if row else {"stream_key": stream_key, "remote_analyst_id": analyst_id,
+                                    "received_at": None, "message_ids": [], "report_versions": {}, "updated_at": None}
+    return {"cursor": cursor, **cursor}
+
+
+async def analyst_global_sync_cursor(async_database: Any, stream_key: str) -> dict[str, Any]:
+    if stream_key != "message_updates":
+        raise ValueError("stream_key must be message_updates")
+    async with async_database.transaction() as connection:
+        result = await connection.execute(
+            """SELECT stream_key,remote_cursor,received_after,updated_at
+                 FROM quant.analyst_global_sync_cursors WHERE stream_key=%s""", (stream_key,),
+        )
+        row = await result.fetchone()
+    cursor = dict(row) if row else {
+        "stream_key": stream_key, "remote_cursor": None, "received_after": None, "updated_at": None,
+    }
+    return {"cursor": cursor, **cursor}
+
+
+__all__ = [
+    "analyst_claims", "analyst_global_sync_cursor", "analyst_sync_cursor", "claim_review_queue",
+    "remote_messages", "remote_report_list_state", "remote_reports",
+]
