@@ -19,6 +19,7 @@
 | 可恢复性 | Alembic 迁移受 advisory lock 保护；开盘预检会重建 PostgreSQL archive listing 并比对 manifest，校验备份权限和每份 workflow JSON；不执行 restore | `scripts/quant-opening-preflight.sh`、真实 12 workflow 验收与 `P1_RUNTIME_HARDENING_STATUS.md` |
 | 备份原子发布 | 只有 archive manifest 与 workflow 导出完成且每份 JSON 含 `nodes` 后才发布；失败 staging 自动清理 | `scripts/backup-postgres-and-workflows.sh` 语法与 12 workflow 等价验证 |
 | 回放准入 | `/api/v1/data-readiness/replay` 只读取本地日线、离线分钟与确认信号证据，并将 P2/P3 缺口显式展示给前端 | 2026-08-11 实测 `blocked`；不触发历史拉取、阈值校准或行情请求 |
+| 当日控制面 | 全市场收盘日线后顺序同步同日 `adj_factor`、`daily_basic`、`stk_limit`、`suspend_d`；非停牌控制须覆盖至少 95% 的已落库日线，任一缺失则不提升任何控制字段 | `test_full_market_daily_controls_sync.py`；`/health.daily_control_plane`；不拉取历史 |
 
 ## 已拆出的稳定边界
 

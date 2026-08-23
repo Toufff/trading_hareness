@@ -32,6 +32,7 @@
 - Tushare 与 BaoStock 的日线同步入口（幂等 ledger、逐标的 canonical bar 写入和运行终态/健康度结算）也已改走数据库执行器；保留原有单标的失败隔离、幂等键和 provider 回退语义，未触发任何历史回填。
 - 全市场日线与 A 股股票池同步入口的 ledger 声明、批量 canonical/成员集替换、provider 健康结算和失败终态同样已走数据库执行器；上游 `daily`/`stock_basic` 调用、最小行数质量门禁及禁用缺失成员的逻辑不变。
 - 收盘全市场日线成功落库后，新增只针对该交易日的控制面阶段：`adj_factor`、`daily_basic`、`stk_limit` 与 `suspend_d` 必须由同一完整批次通过覆盖率门槛后才原子提升；停牌空集会先为该日建立未停牌基线，再仅回写实际停牌证券。日线尚未落库时该阶段明确 `blocked` 且不请求上游；这不是历史回填，也不会将腾讯前复权日线混入 canonical。
+- `/health.daily_control_plane` 与前端“数据源 Doctor”会展示最新日线的复权/涨跌停覆盖。缺任一控制面时明确为 `blocked`，而不是把运行中的容器或未空的日线行数误展示成可用于因子、涨跌停和停牌判断的数据。
 - THS 行业/概念资金流、概念成员状态机、概念资金流与涨停池的精确成员 join、东财板块目录/成员补全、观察池因子快照、分钟会话留存和飞书投递均已迁入数据库执行器；静态检查确认没有 async 协程直接持有 `db.transaction()`。
 - BaoStock、AKShare 日线兜底及盘后一键更新中的本地证据计算不再使用无界 `asyncio.to_thread`；它们分别进入有界公共源或数据库执行器，超时不会再产生默认线程池的无限积压。
 - primary / City SDK / backup 的 transient `429`/`5xx` 与传输错误最多重试一次，且每次尝试都受 provider 限频器约束；权限和参数类 `4xx` 不重试。

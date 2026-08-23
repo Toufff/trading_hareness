@@ -643,6 +643,7 @@ class ProviderHelperTests(unittest.TestCase):
             set_open_circuit_gauge=circuit_updates.append,
             background_loop_status=lambda: {"intraday_monitor": {"state": "running", "updated_at": "now", "last_error": None}},
             optional_background_tasks=lambda: {"background_loop:ths_member_backfill": False},
+            daily_control_plane_status=lambda: {"state": "ready", "trade_date": "2026-08-21"},
         )
         payload = read_health_payload(dependencies)
         self.assertEqual(payload["status"], "ok")
@@ -651,6 +652,7 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(payload["runtime_leases"]["background_loops"][0]["lease_key"], "background_loop:test")
         self.assertEqual(payload["runtime_loops"]["intraday_monitor"]["state"], "running")
         self.assertEqual(payload["optional_background_tasks"], {"background_loop:ths_member_backfill": False})
+        self.assertEqual(payload["daily_control_plane"]["state"], "ready")
         self.assertEqual(pool_updates, [{"pool_size": 2, "available": 1, "waiting": 0}])
         self.assertEqual(circuit_updates, [2])
 
