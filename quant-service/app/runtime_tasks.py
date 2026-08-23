@@ -4,12 +4,50 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any, Awaitable
 
 from .telemetry import background_loop_restarts_total
 from .network_health import network_state
+
+
+@dataclass(frozen=True)
+class BackgroundTaskSpec:
+    """One optional leased loop owned by the application lifespan."""
+
+    label: str
+    enabled: bool
+    factory: Callable[[], Awaitable[None]]
+
+
+def start_leased_background_tasks(
+    specs: tuple[BackgroundTaskSpec, ...],
+    run_leased: Callable[[str, Callable[[], Awaitable[None]]], Awaitable[None]],
+) -> dict[str, asyncio.Task[None]]:
+    """Start each enabled loop once and retain its task by durable lease label."""
+    labels = [spec.label for spec in specs]
+    if len(labels) != len(set(labels)):
+        raise ValueError("background task labels must be unique")
+    return {
+        spec.label: asyncio.create_task(
+            run_leased(spec.label, spec.factory), name=f"background-loop:{spec.label}",
+        )
+        for spec in specs
+        if spec.enabled
+    }
+
+
+async def cancel_background_tasks(tasks: dict[str, asyncio.Task[None]]) -> None:
+    """Cancel and await every owned loop so shutdown cannot leave orphan tasks."""
+    for task in tasks.values():
+        task.cancel()
+    for task in tasks.values():
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 class LoopRuntimeRegistry:

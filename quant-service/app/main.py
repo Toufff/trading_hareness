@@ -258,7 +258,10 @@ from .post_close_structures import (
     post_close_forming_structure,
     post_close_fresh_start_structure,
 )
-from .runtime_tasks import LoopRuntimeRegistry, observe_completed_task, supervise_leased_loop, supervise_loop
+from .runtime_tasks import (
+    BackgroundTaskSpec, LoopRuntimeRegistry, cancel_background_tasks,
+    observe_completed_task, start_leased_background_tasks, supervise_leased_loop, supervise_loop,
+)
 from .intraday_outcomes import (
     INTRADAY_OUTCOME_HORIZONS,
     intraday_outcome_cutoff,
@@ -3998,29 +4001,22 @@ async def lifespan(_: FastAPI):
             on_state=background_loop_registry.mark,
         )
 
-    monitor_task = asyncio.create_task(leased_background_loop("intraday_monitor", lambda: intraday_monitor_loop(interval_seconds))) if interval_seconds >= 30 else None
-    fast_quote_task = asyncio.create_task(leased_background_loop("super_get_fast_quote", intraday_super_get_fast_quote_loop)) if interval_seconds >= 30 else None
-    review_task = asyncio.create_task(leased_background_loop("strategy_review", strategy_review_loop)) if strategy_review_automation_enabled() else None
-    post_close_strategy_task = asyncio.create_task(leased_background_loop("post_close_strategy", post_close_strategy_loop)) if post_close_strategy_automation_enabled() else None
-    daily_summary_task = asyncio.create_task(leased_background_loop("daily_strategy_summary", daily_strategy_summary_loop)) if daily_summary_automation_enabled() else None
-    member_backfill_task = asyncio.create_task(leased_background_loop("ths_member_backfill", ths_concept_member_backfill_loop)) if ths_concept_member_backfill_enabled() else None
-    all_member_backfill_task = asyncio.create_task(leased_background_loop("all_board_member_backfill", all_board_member_backfill_loop)) if all_board_member_backfill_enabled() else None
-    minute_profile_task = asyncio.create_task(leased_background_loop("minute_profile_capture", intraday_minute_profile_capture_loop)) if intraday_minute_profile_capture_enabled() else None
-    order_book_task = asyncio.create_task(leased_background_loop("tencent_order_book", intraday_order_book_loop)) if intraday_order_book_enabled() and interval_seconds >= 30 else None
-    board_curve_task = asyncio.create_task(leased_background_loop("board_flow_curve", intraday_board_flow_curve_loop)) if intraday_board_curve_enabled() else None
+    background_tasks = start_leased_background_tasks((
+        BackgroundTaskSpec("intraday_monitor", interval_seconds >= 30, lambda: intraday_monitor_loop(interval_seconds)),
+        BackgroundTaskSpec("super_get_fast_quote", interval_seconds >= 30, intraday_super_get_fast_quote_loop),
+        BackgroundTaskSpec("strategy_review", strategy_review_automation_enabled(), strategy_review_loop),
+        BackgroundTaskSpec("post_close_strategy", post_close_strategy_automation_enabled(), post_close_strategy_loop),
+        BackgroundTaskSpec("daily_strategy_summary", daily_summary_automation_enabled(), daily_strategy_summary_loop),
+        BackgroundTaskSpec("ths_member_backfill", ths_concept_member_backfill_enabled(), ths_concept_member_backfill_loop),
+        BackgroundTaskSpec("all_board_member_backfill", all_board_member_backfill_enabled(), all_board_member_backfill_loop),
+        BackgroundTaskSpec("minute_profile_capture", intraday_minute_profile_capture_enabled(), intraday_minute_profile_capture_loop),
+        BackgroundTaskSpec("tencent_order_book", intraday_order_book_enabled() and interval_seconds >= 30, intraday_order_book_loop),
+        BackgroundTaskSpec("board_flow_curve", intraday_board_curve_enabled(), intraday_board_flow_curve_loop),
+    ), leased_background_loop)
     try:
         yield
     finally:
-        for task in (monitor_task, fast_quote_task, review_task, post_close_strategy_task, daily_summary_task, member_backfill_task, all_member_backfill_task, minute_profile_task, order_book_task, board_curve_task):
-            if task is not None:
-                task.cancel()
-        for task in (monitor_task, fast_quote_task, review_task, post_close_strategy_task, daily_summary_task, member_backfill_task, all_member_backfill_task, minute_profile_task, order_book_task, board_curve_task):
-            if task is None:
-                continue
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        await cancel_background_tasks(background_tasks)
         await _intraday_all_a_snapshots.cancel_inflight()
         shutdown_super_get_executor()
         shutdown_runtime_executors()

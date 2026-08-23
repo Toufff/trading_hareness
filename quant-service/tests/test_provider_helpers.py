@@ -44,7 +44,10 @@ from app.health_read_model import DatabaseUnavailableError, HealthDependencies, 
 from app.alert_transport import post_feishu_alert_text
 from app.provider_observability import provider_health_item, provider_health_snapshot, provider_health_summary
 from app.provider_health import record_provider_success
-from app.runtime_tasks import LoopRuntimeRegistry, observe_completed_task, supervise_leased_loop, supervise_loop
+from app.runtime_tasks import (
+    BackgroundTaskSpec, LoopRuntimeRegistry, cancel_background_tasks,
+    observe_completed_task, start_leased_background_tasks, supervise_leased_loop, supervise_loop,
+)
 from app.runtime_resources import (
     DEFAULT_HOT_DATABASE_SOFT_BYTES,
     DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
@@ -2504,6 +2507,46 @@ class ProviderHelperTests(unittest.TestCase):
         self.assertEqual(item["state"], "running")
         self.assertIsNone(item["last_error"])
         self.assertIn("updated_at", item)
+
+    def test_lifespan_task_registry_starts_only_enabled_unique_loops_and_cleans_them_up(self):
+        async def check() -> tuple[list[str], dict[str, asyncio.Task[None]]]:
+            started = asyncio.Event()
+            labels: list[str] = []
+
+            async def factory() -> None:
+                started.set()
+                await asyncio.Event().wait()
+
+            async def run_leased(label: str, loop_factory):
+                labels.append(label)
+                await loop_factory()
+
+            tasks = start_leased_background_tasks((
+                BackgroundTaskSpec("enabled", True, factory),
+                BackgroundTaskSpec("disabled", False, factory),
+            ), run_leased)
+            await asyncio.wait_for(started.wait(), timeout=1)
+            await cancel_background_tasks(tasks)
+            return labels, tasks
+
+        labels, tasks = asyncio.run(check())
+        self.assertEqual(labels, ["enabled"])
+        self.assertEqual(set(tasks), {"enabled"})
+        self.assertEqual(tasks["enabled"].get_name(), "background-loop:enabled")
+        self.assertTrue(tasks["enabled"].cancelled())
+
+    def test_lifespan_task_registry_rejects_duplicate_lease_labels_before_starting(self):
+        async def noop() -> None:
+            return None
+
+        async def run_leased(_label: str, _factory) -> None:
+            return None
+
+        with self.assertRaisesRegex(ValueError, "unique"):
+            start_leased_background_tasks((
+                BackgroundTaskSpec("duplicate", True, noop),
+                BackgroundTaskSpec("duplicate", False, noop),
+            ), run_leased)
 
     def test_loop_supervisor_keeps_restarting_after_more_than_one_failure(self):
         async def check() -> int:
