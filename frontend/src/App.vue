@@ -70,7 +70,7 @@ type DragonLeaderWatch = { model_version?: string; status?: string; eligible?: b
 type LimitPoolRow = { rank: number; ts_code: string; name?: string; tag?: string; board_count?: number; status?: string; price?: number; pct_chg?: number; turnover_rate?: number; open_num?: number; limit_amount?: number; limit_up_suc_rate?: number; lu_desc?: string; volume_multiple_5d?: number; volume_multiple_20d?: number; sources?: string[]; board_context?: { label?: string; net_amount?: number; change_pct?: number } | null; lhb_context?: LhbContext | null; continuation_watch?: ContinuationWatch; dragon_leader_watch?: DragonLeaderWatch };
 type LimitLadderRow = LimitPoolRow & { nums?: string | number; ladder_sources?: string[] };
 type LimitPoolCoverage = { status?: string; union_count?: number; intersection_count?: number; tushare_count?: number; eastmoney_count?: number; limit_step_count?: number; multi_board_union_count?: number; tushare_only?: string[]; eastmoney_only?: string[]; local_truncation?: boolean; notice?: string };
-type PostCloseRefresh = { status?: string; trade_date?: string; daily_ready?: boolean; deferred_stages?: string[]; retry_hint?: string | null; finished_at?: string };
+type PostCloseRefresh = { status?: string; trade_date?: string; daily_ready?: boolean; controls_ready?: boolean; deferred_stages?: string[]; retry_hint?: string | null; finished_at?: string };
 type IntradayAttribution = { model_version?: string; stage?: string; market_state?: string; sector_linkage?: string; volume_baseline?: string; microstructure_research_only?: Record<string, number | null>; microstructure_notice?: string };
 type IntradayOutcome = { signal_event_id: string; horizon_key: string; direction: number; entry_observed_at: string; entry_price: number; exit_observed_at?: string | null; exit_price?: number | null; raw_return?: number | null; maximum_favorable_excursion?: number | null; maximum_adverse_excursion?: number | null; status: string; tradability: string; symbol: string; signal_key: string; signal_type: string; severity: string; state: string; score: number; observed_at: string; risk_flags: string[]; attribution?: IntradayAttribution };
 type IntradayOutcomeSummary = { horizon_key: string; status: string; rows: number; avg_directional_return?: number | null; avg_mfe?: number | null; avg_mae?: number | null };
@@ -938,7 +938,7 @@ onBeforeUnmount(() => {
                 <div class="card-actions">
                   <el-button type="primary" :icon="Refresh" :loading="actionLoading === '盘后一键更新'" @click="runPostCloseRefresh">盘后一键更新</el-button>
                   <el-tag v-if="postCloseRefresh" :type="postCloseRefresh.status === 'completed' ? 'success' : 'warning'">{{ postCloseRefresh.status }}</el-tag>
-                  <el-text v-if="postCloseRefresh?.trade_date" type="info">交易日 {{ postCloseRefresh.trade_date }} · 日线{{ postCloseRefresh.daily_ready ? '已就绪' : '待发布/待重试' }}</el-text>
+                  <el-text v-if="postCloseRefresh?.trade_date" type="info">交易日 {{ postCloseRefresh.trade_date }} · 日线{{ postCloseRefresh.daily_ready ? '已就绪' : '待发布/待重试' }} · 控制面{{ postCloseRefresh.controls_ready ? '已就绪' : '待补全/策略已阻断' }}</el-text>
                   <el-text v-if="postCloseRefresh?.deferred_stages?.length" type="warning">待处理：{{ postCloseRefresh.deferred_stages.join('、') }}</el-text>
                 </div>
                 <el-text v-if="postCloseRefresh?.retry_hint" type="warning">{{ postCloseRefresh.retry_hint }}</el-text>

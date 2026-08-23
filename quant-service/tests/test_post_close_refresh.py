@@ -49,6 +49,55 @@ class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["controls"])
         self.assertEqual(result["stages"]["core_daily_controls"]["status"], "completed")
 
+    async def test_controls_execute_before_dependent_post_close_stages(self):
+        calls: list[str] = []
+
+        async def run_db(action, *args, **_kwargs):
+            return action(*args)
+
+        result = await run_refresh(
+            object(), db=object(), lease_key="lease", lease_seconds=lambda: 60,
+            run_database_blocking=run_db, acquire_lease=lambda *_: True,
+            renew_lease=lambda *_: True, release_lease=lambda *_: None,
+            actions={
+                "full_market_daily": lambda: calls.append("daily") or {"status": "completed"},
+                "core_daily_controls": lambda: calls.append("controls") or {"status": "completed"},
+                "limit_ladder": lambda: calls.append("ladder") or {"status": "completed"},
+            },
+            stage_order=("full_market_daily", "core_daily_controls", "limit_ladder"),
+            trade_date=date(2026, 8, 21), safe_error_detail=lambda value, _limit: value,
+            json_safe=lambda value: value,
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(calls, ["daily", "controls", "ladder"])
+
+    async def test_dependency_gate_preserves_evidence_but_blocks_strategy_stage(self):
+        calls: list[str] = []
+
+        async def run_db(action, *args, **_kwargs):
+            return action(*args)
+
+        result = await run_refresh(
+            object(), db=object(), lease_key="lease", lease_seconds=lambda: 60,
+            run_database_blocking=run_db, acquire_lease=lambda *_: True,
+            renew_lease=lambda *_: True, release_lease=lambda *_: None,
+            actions={
+                "full_market_daily": lambda: calls.append("daily") or {"status": "completed"},
+                "controls": lambda: calls.append("controls") or {"status": "blocked", "reason": "coverage"},
+                "strategy": lambda: calls.append("strategy") or {"status": "completed"},
+                "evidence": lambda: calls.append("evidence") or {"status": "completed"},
+            },
+            stage_order=("full_market_daily", "controls", "strategy", "evidence"),
+            stage_dependencies={"strategy": ("controls",)},
+            trade_date=date(2026, 8, 21), safe_error_detail=lambda value, _limit: value,
+            json_safe=lambda value: value,
+        )
+        self.assertEqual(calls, ["daily", "controls", "evidence"])
+        self.assertEqual(result["stages"]["strategy"]["status"], "blocked")
+        self.assertIn("controls", result["stages"]["strategy"]["reason"])
+        self.assertFalse(result["controls_ready"])
+        self.assertIn("控制面", result["retry_hint"])
+
     async def test_completed_stage_receipt_skips_action_after_restart(self):
         class Result:
             def fetchone(self):

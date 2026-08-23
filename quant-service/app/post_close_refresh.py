@@ -89,6 +89,7 @@ async def run_refresh(
     safe_error_detail: Callable[[str, int], str],
     json_safe: Callable[[Any], Any],
     timeout_overrides: dict[str, float] | None = None,
+    stage_dependencies: dict[str, tuple[str, ...]] | None = None,
     record_stage: Callable[[str, date, Callable[[], Any]], Awaitable[Any]] | None = None,
 ) -> dict[str, Any]:
     """Run durable post-close stages in their existing dependency order.
@@ -105,23 +106,34 @@ async def run_refresh(
     started_at = datetime.now(timezone.utc)
     stages: dict[str, dict[str, Any]] = {}
     limits = timeout_overrides or {}
+    dependencies = stage_dependencies or {}
 
     async def stage(name: str) -> dict[str, Any]:
         phase_started = asyncio.get_running_loop().time()
         timeout_seconds = float(limits.get(name, 90.0))
-        try:
-            if record_stage is not None:
-                result = record_stage(name, trade_date, actions[name])
-            else:
-                result = actions[name]()
-            if hasattr(result, "__await__"):
-                result = await asyncio.wait_for(result, timeout=timeout_seconds)
-            payload = dict(result) if isinstance(result, dict) else {"result": result}
-            payload.setdefault("status", "completed")
-        except asyncio.TimeoutError:
-            payload = {"status": "failed", "error": f"stage exceeded its {int(timeout_seconds)}s budget; retry later"}
-        except Exception as error:  # noqa: BLE001 - later evidence remains useful
-            payload = {"status": "failed", "error": safe_error_detail(str(error), 500)}
+        blocked_by = [
+            dependency for dependency in dependencies.get(name, ())
+            if stages.get(dependency, {}).get("status") not in {"completed", "unchanged"}
+        ]
+        if blocked_by:
+            payload = {
+                "status": "blocked",
+                "reason": f"required post-close stage unavailable: {', '.join(blocked_by)}",
+            }
+        else:
+            try:
+                if record_stage is not None:
+                    result = record_stage(name, trade_date, actions[name])
+                else:
+                    result = actions[name]()
+                if hasattr(result, "__await__"):
+                    result = await asyncio.wait_for(result, timeout=timeout_seconds)
+                payload = dict(result) if isinstance(result, dict) else {"result": result}
+                payload.setdefault("status", "completed")
+            except asyncio.TimeoutError:
+                payload = {"status": "failed", "error": f"stage exceeded its {int(timeout_seconds)}s budget; retry later"}
+            except Exception as error:  # noqa: BLE001 - later evidence remains useful
+                payload = {"status": "failed", "error": safe_error_detail(str(error), 500)}
         payload["latency_ms"] = round((asyncio.get_running_loop().time() - phase_started) * 1000)
         stages[name] = json_safe(payload)
         renewed = await run_database_blocking(renew_lease, db, lease_key, lease_holder_id, lease_seconds())
@@ -143,11 +155,19 @@ async def run_refresh(
         deferred = [name for name, item in stages.items() if item.get("status") in {"blocked", "failed"}]
         daily = stages.get("full_market_daily", {"status": "blocked"})
         daily_ready = daily.get("status") in {"completed", "unchanged"}
+        controls = stages.get("core_daily_controls", {"status": "blocked"})
+        controls_ready = controls.get("status") in {"completed", "unchanged"}
+        retry_hint = (
+            "收盘日线尚未发布时，可稍后再次点击；自动盘后任务也会在18:55-19:10重试策略筛选。"
+            if not daily_ready else
+            "日线控制面尚未完整，依赖复权、涨跌停或停牌字段的策略阶段已阻断；可稍后重试。"
+            if not controls_ready else None
+        )
         return {
             "status": "completed" if not deferred else "partial", "trade_date": str(trade_date),
             "started_at": started_at.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat(),
-            "daily_ready": daily_ready, "deferred_stages": deferred,
-            "retry_hint": None if daily_ready else "收盘日线尚未发布时，可稍后再次点击；自动盘后任务也会在18:55-19:10重试策略筛选。",
+            "daily_ready": daily_ready, "controls_ready": controls_ready, "deferred_stages": deferred,
+            "retry_hint": retry_hint,
             "sources": sources, "stages": stages,
             "notice": "一键更新只保存研究证据和候选，不会自动下单或发送交易指令。",
         }

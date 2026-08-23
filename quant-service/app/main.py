@@ -4596,9 +4596,9 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
         lease_seconds=post_close_refresh_lease_seconds, run_database_blocking=run_database_blocking,
         acquire_lease=acquire_runtime_lease, renew_lease=renew_runtime_lease, release_lease=release_runtime_lease,
         actions=actions, stage_order=(
-            "stale_fetch_runs", "analyst_text", "all_a_universe", "full_market_daily", "index_context",
+            "stale_fetch_runs", "analyst_text", "all_a_universe", "full_market_daily", "core_daily_controls", "index_context",
             "close_market_snapshot", "akshare_supplements", "ths_industry_flow", "ths_concept_flow_and_limit_strength",
-            "market_flow_features", "limit_ladder", "limit_lift_pattern_mining", "core_daily_controls", "cninfo_announcements",
+            "market_flow_features", "limit_ladder", "limit_lift_pattern_mining", "cninfo_announcements",
             "board_review", "close_strategy_decision", "close_review", "analyst_outcomes", "analyst_intraday_outcomes", "analyst_scorecards",
             "analyst_expert_research", "post_close_strategy", "watchlist_main_wave", "research_snapshot",
         ), timeout_overrides={
@@ -4607,6 +4607,19 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
             # Four bounded full-market control APIs run sequentially so an
             # individual provider's shared limiter remains authoritative.
             "core_daily_controls": 240.0,
+        }, stage_dependencies={
+            # Daily controls are correctness prerequisites: downstream
+            # strategy stages must not reason over missing adjustment, limit
+            # or suspension fields. Independent source evidence may still
+            # finish and remains useful for diagnosis.
+            "index_context": ("core_daily_controls",),
+            "limit_ladder": ("core_daily_controls",),
+            "limit_lift_pattern_mining": ("core_daily_controls", "limit_ladder"),
+            "close_strategy_decision": ("core_daily_controls",),
+            "close_review": ("core_daily_controls",),
+            "post_close_strategy": ("core_daily_controls",),
+            "watchlist_main_wave": ("core_daily_controls",),
+            "research_snapshot": ("core_daily_controls",),
         },
         record_stage=record_refresh_stage,
         trade_date=trade_date,

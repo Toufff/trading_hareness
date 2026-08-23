@@ -31,7 +31,7 @@
 - BaoStock 日线同步在创建 fetch ledger 前同样读取 `daily_bar` capability 的熔断状态；熔断时直接返回 `blocked`，不创建新的 running 台账、不开启公共源线程。通用 Tushare 调用已不再从 async 路径同步读取数据库，统一经 `circuit_open_provider_keys_async` 和数据库执行器检查候选熔断窗。
 - Tushare 与 BaoStock 的日线同步入口（幂等 ledger、逐标的 canonical bar 写入和运行终态/健康度结算）也已改走数据库执行器；保留原有单标的失败隔离、幂等键和 provider 回退语义，未触发任何历史回填。
 - 全市场日线与 A 股股票池同步入口的 ledger 声明、批量 canonical/成员集替换、provider 健康结算和失败终态同样已走数据库执行器；上游 `daily`/`stock_basic` 调用、最小行数质量门禁及禁用缺失成员的逻辑不变。
-- 收盘全市场日线成功落库后，新增只针对该交易日的控制面阶段：`adj_factor`、`daily_basic`、`stk_limit` 与 `suspend_d` 必须由同一完整批次通过覆盖率门槛后才原子提升；停牌空集会先为该日建立未停牌基线，再仅回写实际停牌证券。日线尚未落库时该阶段明确 `blocked` 且不请求上游；这不是历史回填，也不会将腾讯前复权日线混入 canonical。
+- 收盘全市场日线成功落库后，新增只针对该交易日的控制面阶段：`adj_factor`、`daily_basic`、`stk_limit` 与 `suspend_d` 必须由同一完整批次通过覆盖率门槛后才原子提升；停牌空集会先为该日建立未停牌基线，再仅回写实际停牌证券。该阶段固定在 `full_market_daily` 之后、指数/涨停梯队/形态挖掘之前；若它被阻断，依赖该控制面的指数、涨停、策略、复盘、蓄势和研究快照阶段会记录 `blocked` 而不运行，其他非依赖证据采集仍继续。日线尚未落库时该阶段明确 `blocked` 且不请求上游；这不是历史回填，也不会将腾讯前复权日线混入 canonical。
 - `/health.daily_control_plane` 与前端“数据源 Doctor”会展示最新日线的复权/涨跌停覆盖。缺任一控制面时明确为 `blocked`，而不是把运行中的容器或未空的日线行数误展示成可用于因子、涨跌停和停牌判断的数据。
 - Provider 能力矩阵现在区分“历史上已验证的物理路由”（`availability=verified`）与“最新一次观察”（`metadata.last_observation`）。瞬时失败或有效空集不再覆盖验证说明；其错误/空集文字单独留在 `last_observation_note`，避免界面出现“已验证但备注是超时/401”的自相矛盾状态。
 - THS 行业/概念资金流、概念成员状态机、概念资金流与涨停池的精确成员 join、东财板块目录/成员补全、观察池因子快照、分钟会话留存和飞书投递均已迁入数据库执行器；静态检查确认没有 async 协程直接持有 `db.transaction()`。
