@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException
 
@@ -17,6 +17,7 @@ def build_intraday_evidence_reads_router(
     decision_card_fn: Callable[[Any, str], dict[str, Any]],
     *,
     async_database: Any | None = None,
+    async_decision_card_fn: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["intraday-evidence-reads"])
 
@@ -27,10 +28,12 @@ def build_intraday_evidence_reads_router(
         return read_model.watchlists(database)
 
     @router.get("/api/v1/intraday/decision-cards/{symbol}")
-    def latest_decision_card(symbol: str) -> dict[str, Any]:
+    async def latest_decision_card(symbol: str) -> dict[str, Any]:
         normalized = symbol.upper()
         if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", normalized):
             raise HTTPException(status_code=422, detail="symbol must use the Tushare form, for example 600176.SH")
+        if async_database is not None and async_decision_card_fn is not None:
+            return await async_decision_card_fn(normalized)
         return read_model.decision_card(database, normalized, decision_card_fn)
 
     @router.get("/api/v1/intraday/scans/latest")

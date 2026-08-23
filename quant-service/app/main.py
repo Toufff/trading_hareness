@@ -59,7 +59,7 @@ from .public_market_repository import (
     recent_market_events as _recent_market_events,
 )
 from .factor_sql_lab import evaluate_factor_set, run_multi_factor_strategy_sql
-from .analyst_promotion import analyst_live_promotion
+from .analyst_promotion import MAX_APPROVED_WEIGHT, PROMOTION_KEY, analyst_live_promotion
 from .research_prices import adjusted_bars
 from .live_policy import live_policy_gate
 from .numeric_utils import decimal_or_none, intraday_number
@@ -81,6 +81,7 @@ from .intraday_quote_normalization import (
     quote_from_tencent as intraday_quote_from_tencent_pure,
 )
 from .intraday_decision_card_read_model import decision_card as read_intraday_decision_card
+from .async_intraday_decision_card_repository import decision_card as read_async_intraday_decision_card
 from .intraday_volume_profiles import attach_volume_time_profile as pure_attach_volume_time_profile
 from .intraday_volume_profiles import volume_time_profile as pure_intraday_volume_time_profile
 from .intraday_volume_profiles import volume_time_profiles as pure_intraday_volume_time_profiles
@@ -3281,6 +3282,19 @@ def intraday_decision_card(connection: Any, symbol: str) -> dict[str, Any]:
     )
 
 
+async def intraday_decision_card_async(symbol: str) -> dict[str, Any]:
+    """Native-async local decision-card path for dashboard refreshes."""
+    return await read_async_intraday_decision_card(
+        async_db, symbol,
+        strategy_market_state_fn=strategy_market_state,
+        classify_text=classify_remote_text,
+        factor_version=ANALYST_TEXT_FACTOR_VERSION,
+        promotion_key=PROMOTION_KEY,
+        max_approved_weight=MAX_APPROVED_WEIGHT,
+        json_safe_fn=strategy_json_safe,
+    )
+
+
 def strategy_intraday_candidates(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     """Turn an exact board-member join into transparent, bounded candidates.
 
@@ -4486,6 +4500,7 @@ app.include_router(build_intraday_outcome_reads_router(
 app.include_router(build_sector_reads_router(db, ths_concept_member_backfill_enabled, ths_concept_member_backfill_batch_size))
 app.include_router(build_intraday_evidence_reads_router(
     db, intraday_decision_card, async_database=async_db,
+    async_decision_card_fn=intraday_decision_card_async,
 ))
 app.include_router(build_market_result_reads_router(
     db, TUSHARE_CATALOG, current_data_coverage, feature_readiness_state,
