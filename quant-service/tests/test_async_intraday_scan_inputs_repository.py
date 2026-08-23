@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import unittest
 
-from app.async_intraday_scan_inputs_repository import exact_memberships, watchlists
+from app.async_intraday_scan_inputs_repository import enabled_watches, exact_memberships, watchlists
 
 
 class _Result:
@@ -65,6 +65,17 @@ class AsyncIntradayScanInputsRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requested_params, (["000001.SZ"],))
         self.assertIn("taxonomy_key IN", member_query)
         self.assertEqual(member_params[0], ["000001.SZ"])
+
+    async def test_enabled_watch_read_uses_exact_capture_limit_without_overflow_row(self) -> None:
+        database = _Database()
+
+        rows = await enabled_watches(database, max_symbols=40)
+
+        self.assertEqual(rows[0]["symbol"], "000001.SZ")
+        query, params = database.connection.calls[0]
+        self.assertIn("WHERE enabled", query)
+        self.assertIn("LIMIT %s", query)
+        self.assertEqual(params, (40,))
 
 
 if __name__ == "__main__":

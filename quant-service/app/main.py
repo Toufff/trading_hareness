@@ -118,6 +118,7 @@ from .async_intraday_decision_card_repository import decision_card as read_async
 from .async_intraday_scan_preflight_repository import latest_board_report as read_async_latest_board_report
 from .async_intraday_scan_preflight_repository import latest_fast_quotes as read_async_latest_fast_quotes
 from .async_intraday_scan_inputs_repository import exact_memberships as read_async_exact_watchlist_memberships
+from .async_intraday_scan_inputs_repository import enabled_watches as read_async_enabled_intraday_watches
 from .async_intraday_scan_inputs_repository import watchlists as read_async_intraday_scan_watchlists
 from .async_ths_concept_member_backfill_repository import existing_flow_rows as read_async_ths_concept_flow_rows
 from .async_ths_concept_member_backfill_repository import member_progress as read_async_ths_concept_member_progress
@@ -4378,15 +4379,10 @@ async def capture_intraday_minute_sessions_endpoint(payload: MinuteSessionCaptur
     """Manually run the same bounded in-session baseline capture as the scheduler."""
     symbols = payload.symbols
     if not symbols:
-        def load_enabled_watches() -> list[Any]:
-            with db.transaction() as connection:
-                return connection.execute(
-                    "SELECT * FROM quant.intraday_watchlists WHERE enabled ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT %s",
-                    (intraday_minute_profile_max_symbols(),),
-                ).fetchall()
-
-        rows = await run_database_blocking(load_enabled_watches)
-        symbols = [str(row["symbol"]) for row in sorted((dict(row) for row in rows), key=intraday_watch_priority_key)]
+        rows = await read_async_enabled_intraday_watches(
+            async_db, max_symbols=intraday_minute_profile_max_symbols(),
+        )
+        symbols = [str(row["symbol"]) for row in sorted(rows, key=intraday_watch_priority_key)]
     return await capture_intraday_minute_sessions(symbols)
 
 

@@ -35,6 +35,22 @@ async def watchlists(
     return [dict(row) for row in rows]
 
 
+async def enabled_watches(async_database: Any, *, max_symbols: int) -> list[dict[str, Any]]:
+    """Load the bounded enabled basket for a manual minute-profile capture.
+
+    Unlike :func:`watchlists`, this path does not need an overflow sentinel:
+    the capture itself is deliberately bounded to ``max_symbols``.
+    """
+    async with async_database.transaction() as connection:
+        result = await connection.execute(
+            "SELECT * FROM quant.intraday_watchlists WHERE enabled "
+            "ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT %s",
+            (max(1, int(max_symbols)),),
+        )
+        rows = await result.fetchall()
+    return [dict(row) for row in rows]
+
+
 async def exact_memberships(
     async_database: Any,
     symbols: list[str],
@@ -57,4 +73,4 @@ async def exact_memberships(
     return [dict(row) for row in rows]
 
 
-__all__ = ["exact_memberships", "watchlists"]
+__all__ = ["enabled_watches", "exact_memberships", "watchlists"]
