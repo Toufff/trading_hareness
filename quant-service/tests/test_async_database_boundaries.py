@@ -17,12 +17,14 @@ from app.async_market_result_read_repository import market_snapshots as async_ma
 from app.async_intraday_outcome_read_repository import latest_intraday_outcomes as async_latest_intraday_outcomes
 from app.async_intraday_evidence_read_repository import latest_scan as async_latest_intraday_scan
 from app.async_intraday_evidence_read_repository import watchlists as async_watchlists
+from app.async_analyst_skill_read_repository import profiles as async_analyst_skill_profiles
 from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
 from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
 from app.request_models import HistoricalCoverageEstimateRequest
 from app.routers.intraday_status import build_intraday_status_router
 from app.routers.event_reads import build_event_reads_router
 from app.routers.research_readiness import build_research_readiness_router
+from app.routers.analyst_skill_reads import build_analyst_skill_reads_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -104,6 +106,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_market_result_read_repository.py",
             "async_research_catalog_read_repository.py",
             "async_research_readiness_repository.py",
+            "async_analyst_skill_read_repository.py",
         ):
             tree = ast.parse((app_root / module_name).read_text())
             for node in ast.walk(tree):
@@ -416,6 +419,56 @@ class AsyncStrategyRepositoryTests(unittest.IsolatedAsyncioTestCase):
         payload = await endpoint()
         self.assertEqual(payload["summary"]["states"], {"standby": 1})
         self.assertEqual(calls, ["async"])
+
+    async def test_analyst_skill_router_prefers_async_persisted_projection(self) -> None:
+        calls = []
+
+        async def async_profiles(_database, analyst_id, limit):
+            calls.append((analyst_id, limit))
+            return {"items": [{"remote_analyst_id": "anqiang"}], "model_version": "test"}
+
+        router = build_analyst_skill_reads_router(
+            object(), lambda *_args: {"items": []}, async_database=object(), async_profiles_fn=async_profiles,
+        )
+        endpoint = next(route.endpoint for route in router.routes if route.path == "/api/v1/analyst-skills")
+        payload = await endpoint("anqiang", 7)
+        self.assertEqual(payload["items"][0]["remote_analyst_id"], "anqiang")
+        self.assertEqual(calls, [("anqiang", 7)])
+
+    async def test_analyst_skill_projection_uses_native_async_connection(self) -> None:
+        class Result:
+            async def fetchall(self):
+                return [{"remote_analyst_id": "anqiang", "profile": {}}]
+
+        class Connection:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, sql, params=()):
+                self.calls.append((sql, params))
+                return Result()
+
+        class Transaction:
+            def __init__(self, connection):
+                self.connection = connection
+
+            async def __aenter__(self):
+                return self.connection
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Database:
+            def __init__(self):
+                self.connection = Connection()
+
+            def transaction(self):
+                return Transaction(self.connection)
+
+        database = Database()
+        payload = await async_analyst_skill_profiles(database, "anqiang", 500)
+        self.assertEqual(payload["items"][0]["remote_analyst_id"], "anqiang")
+        self.assertEqual(database.connection.calls[0][1], ("anqiang", 100))
 
     async def test_strategy_health_projection_reads_all_local_rows_async(self) -> None:
         class Result:
