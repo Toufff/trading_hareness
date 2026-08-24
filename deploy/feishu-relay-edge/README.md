@@ -67,6 +67,19 @@ all four workflow versions in one transaction, and then verifies the live
 export against the committed source. It refuses an uncommitted worktree or a
 workflow containing the obsolete Docker-only callback address.
 
+The remote archive control plane has one Gunicorn worker, so a stuck upload can
+otherwise exhaust all of its request threads. Install the version-controlled
+watchdog after a release with:
+
+```bash
+bash scripts/install-edge-import-watchdog.sh --apply
+```
+
+Every minute it expects the deliberately unsupported `GET /api/v1/imports/batches`
+to return `401`, `403`, or `405`; a timeout or unexpected response restarts only
+`stock-reports-import.service`. It neither creates an import batch nor touches
+the durable relay ledger.
+
 ## Deterministic emergency failover to the workstation
 
 From the repository root, run:

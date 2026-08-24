@@ -1,0 +1,8 @@
+[Unit]
+Description=Watchdog for stock reports import control plane
+After=network-online.target stock-reports-import.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/stock-reports-import-watchdog
