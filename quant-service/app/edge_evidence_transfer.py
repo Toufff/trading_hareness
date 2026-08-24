@@ -198,6 +198,8 @@ def edge_runtime_snapshot() -> dict[str, Any]:
         "resources": {
             "state": resources.get("state") if isinstance(resources, dict) else None,
             "disk_free_bytes": disk.get("free_bytes") if isinstance(disk, dict) else None,
+            "disk_warning_free_bytes": disk.get("warning_free_bytes") if isinstance(disk, dict) else None,
+            "disk_min_free_bytes": disk.get("min_free_bytes") if isinstance(disk, dict) else None,
             "hot_database": storage.get("hot_database") if isinstance(storage, dict) else None,
             "managed": storage.get("managed") if isinstance(storage, dict) else None,
         },

@@ -43,6 +43,9 @@ mistaking an intentional standby state for a passing live acceptance. Use
 
 Required secret environment values are installed directly into
 `/etc/quant-intraday-edge.env` with mode `0640`; they are not stored here.
+The checked edge configuration uses a 10 GiB disk warning watermark and an
+8 GiB capture-protection floor. A warning is visible in the local dashboard;
+below the floor the runtime reports degraded rather than hiding the condition.
 
 ## Release identity
 

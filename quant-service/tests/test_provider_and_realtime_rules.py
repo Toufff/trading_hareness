@@ -6,6 +6,7 @@ from provider_test_support import *  # noqa: F403
 class ProviderAndRealtimeRuleTests(unittest.TestCase):
     def test_runtime_resource_thresholds_are_bounded_and_explain_degradation(self):
         self.assertEqual(bounded_min_free_bytes("invalid"), 1024 ** 3)
+        self.assertEqual(bounded_warning_free_bytes("invalid", 8 * 1024 ** 3), 10 * 1024 ** 3)
         self.assertEqual(bounded_memory_ratio("2"), 0.98)
         self.assertEqual(
             bounded_storage_budget_bytes(
@@ -26,6 +27,18 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         )
         self.assertEqual(state, "degraded")
         self.assertEqual(len(reasons), 2)
+
+    def test_runtime_resource_warns_before_the_disk_stop_floor(self):
+        state, reasons = runtime_resource_state(
+            disk_free_bytes=9 * 1024 ** 3,
+            min_free_bytes=8 * 1024 ** 3,
+            warning_free_bytes=10 * 1024 ** 3,
+            rss_bytes=10,
+            memory_limit_bytes=100,
+            max_memory_ratio=0.85,
+        )
+        self.assertEqual(state, "warning")
+        self.assertEqual(reasons, ["persistent storage free space is below the configured warning watermark"])
 
     def test_research_storage_governance_warns_then_stops_only_nonessential_capture(self):
         healthy = research_storage_governance(
