@@ -14,6 +14,7 @@ import { createFeishuUserOauth } from './feishu-user-oauth.mjs';
 import { createFeishuWorkbench } from './feishu-workbench.mjs';
 import { isSystemRelayPlaceholder } from './message-filter.mjs';
 import { extractImportContent, isValidDateTime } from './message-time.mjs';
+import { hasImportableTaggedPayload } from './summary-ingestion-filter.mjs';
 import { shouldSkipMessageForward } from './message-idempotency.mjs';
 import { shouldRedownloadRetryMedia } from './retry-media.mjs';
 import Busboy from 'busboy';
@@ -1746,15 +1747,17 @@ async function dispatchToN8n(data, manual = null) {
 }
 
 async function processSummaryGroupMessage(data) {
-	const messageText = String(extractMessagePayload(data.message ?? {}).text ?? '').trim();
+	const messagePayload = extractMessagePayload(data.message ?? {});
+	const messageText = String(messagePayload.text ?? '').trim();
 	const tag = messageText.match(/^#([a-z0-9-]+)(?=\s|$)/i)?.[1]?.toLowerCase();
 	// All human and bot traffic is observed. Only registered tags are safe to
 	// attribute to a remote analyst, so unrelated group chatter is ignored.
 	if (!tag || !sourceRoutes.get(tag)?.enabled) return { ignored: true, reason: 'missing_or_unregistered_route_tag' };
 	if (isSystemRelayPlaceholder(messageText, tag)) return { ignored: true, reason: 'system_message_filtered' };
+	const hasMedia = messagePayload.resources.length > 0;
+	if (!hasImportableTaggedPayload(messageText, { hasMedia })) return { ignored: true, reason: 'empty_tagged_payload' };
 	const eventId = data.event_id;
 	addEvent(data);
-	const hasMedia = extractMessagePayload(data.message ?? {}).resources.length > 0;
 	updateEvent(eventId, { n8n_status: hasMedia ? '汇总群媒体转发中' : '汇总群文字转发中' });
 	try {
 		const result = await forwardToN8n(data, {
