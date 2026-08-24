@@ -5,6 +5,7 @@ set -euo pipefail
 edge_host="${RELAY_EDGE_HOST:-root@47.114.113.152}"
 edge_dir="${RELAY_EDGE_DIR:-/opt/feishu-relay-edge}"
 edge_runtime_env="${RELAY_EDGE_RUNTIME_ENV:-/etc/feishu-relay-edge/runtime.env}"
+edge_secrets_env="${RELAY_EDGE_SECRETS_ENV:-/etc/feishu-relay-edge/secrets.env}"
 edge_key="${RELAY_EDGE_SSH_KEY:-/Users/papa/.ssh/feishu_relay_edge_ed25519}"
 local_adapter_container="${LOCAL_FEISHU_ADAPTER_CONTAINER:-n8n-feishu-adapter}"
 local_postgres_container="${LOCAL_N8N_POSTGRES_CONTAINER:-n8n-postgres}"
@@ -45,20 +46,23 @@ docker exec "$local_postgres_container" pg_dump -U n8n -d n8n "${pg_dump_args[@]
 rg -q 'COPY public.feishu_group_relay_messages' "$local_dump_file" || { echo "local ledger snapshot is incomplete; remote remains fenced" >&2; exit 1; }
 
 echo "[3/6] Fencing remote relay and uploading the local snapshot..."
-"${edge_ssh[@]}" "$edge_host" "EDGE_DIR='$edge_dir' EDGE_RUNTIME_ENV='$edge_runtime_env' bash -s" <<'REMOTE'
+"${edge_ssh[@]}" "$edge_host" "EDGE_DIR='$edge_dir' EDGE_RUNTIME_ENV='$edge_runtime_env' EDGE_SECRETS_ENV='$edge_secrets_env' bash -s" <<'REMOTE'
 set -euo pipefail
 cd "$EDGE_DIR"
+test -f "$EDGE_SECRETS_ENV"
+test -f "$EDGE_RUNTIME_ENV"
 sed -i -E 's/^FEISHU_GROUP_RELAY_ENABLED=.*/FEISHU_GROUP_RELAY_ENABLED=false/; s/^FEISHU_SUMMARY_LISTENER_ENABLED=.*/FEISHU_SUMMARY_LISTENER_ENABLED=false/' "$EDGE_RUNTIME_ENV"
-docker compose --env-file "$EDGE_RUNTIME_ENV" --env-file /etc/feishu-relay-edge/secrets.env up -d --force-recreate --no-deps feishu-adapter >/dev/null
+docker compose --env-file "$EDGE_RUNTIME_ENV" --env-file "$EDGE_SECRETS_ENV" up -d --force-recreate --no-deps feishu-adapter >/dev/null
 REMOTE
 "${edge_scp[@]}" "$local_dump_file" "$edge_host:$remote_dump_file"
 
 echo "[4/6] Restoring ledger and retry-media into the edge..."
 docker exec "$local_adapter_container" tar -C /var/lib/adapter-ingestion -cf - . \
   | "${edge_ssh[@]}" "$edge_host" "tar -C '$edge_dir/adapter-ingestion' -xf -"
-"${edge_ssh[@]}" "$edge_host" "EDGE_DIR='$edge_dir' EDGE_RUNTIME_ENV='$edge_runtime_env' REMOTE_DUMP='$remote_dump_file' REMOTE_WRITER_ID='$remote_writer_id' bash -s" <<'REMOTE'
+"${edge_ssh[@]}" "$edge_host" "EDGE_DIR='$edge_dir' EDGE_RUNTIME_ENV='$edge_runtime_env' EDGE_SECRETS_ENV='$edge_secrets_env' REMOTE_DUMP='$remote_dump_file' REMOTE_WRITER_ID='$remote_writer_id' bash -s" <<'REMOTE'
 set -euo pipefail
 cd "$EDGE_DIR"
+. "$EDGE_SECRETS_ENV"
 . "$EDGE_RUNTIME_ENV"
 export PGPASSWORD="$RELAY_PGPASSWORD"
 psql_args=(-h 127.0.0.1 -U "$RELAY_PGUSER" -d "$RELAY_PGDATABASE" -v ON_ERROR_STOP=1)
@@ -73,7 +77,7 @@ rm -f "$REMOTE_DUMP"
 REMOTE
 
 echo "[5/6] Promoting the edge writer and enabling its pollers..."
-"${edge_ssh[@]}" "$edge_host" "EDGE_DIR='$edge_dir' EDGE_RUNTIME_ENV='$edge_runtime_env' REMOTE_WRITER_ID='$remote_writer_id' bash -s" <<'REMOTE'
+"${edge_ssh[@]}" "$edge_host" "EDGE_DIR='$edge_dir' EDGE_RUNTIME_ENV='$edge_runtime_env' EDGE_SECRETS_ENV='$edge_secrets_env' REMOTE_WRITER_ID='$remote_writer_id' bash -s" <<'REMOTE'
 set -euo pipefail
 replace_or_append() {
   local key="$1" value="$2" file="$3"
@@ -83,7 +87,7 @@ cd "$EDGE_DIR"
 replace_or_append FEISHU_GROUP_RELAY_ENABLED true "$EDGE_RUNTIME_ENV"
 replace_or_append FEISHU_SUMMARY_LISTENER_ENABLED true "$EDGE_RUNTIME_ENV"
 replace_or_append FEISHU_RELAY_WRITER_ID "$REMOTE_WRITER_ID" "$EDGE_RUNTIME_ENV"
-docker compose --env-file "$EDGE_RUNTIME_ENV" --env-file /etc/feishu-relay-edge/secrets.env up -d --force-recreate --no-deps feishu-adapter >/dev/null
+docker compose --env-file "$EDGE_RUNTIME_ENV" --env-file "$EDGE_SECRETS_ENV" up -d --force-recreate --no-deps feishu-adapter >/dev/null
 REMOTE
 
 echo "[6/6] Verifying remote relay ownership..."
