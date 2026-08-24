@@ -18,12 +18,14 @@ apply=false
 
 source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 edge_host="${QUANT_EDGE_HOST:-root@47.114.113.152}"
+edge_key="${QUANT_EDGE_SSH_KEY:-/Users/papa/.ssh/feishu_relay_edge_ed25519}"
 edge_ssh_control_path="${QUANT_EDGE_SSH_CONTROL_PATH:-}"
 edge_root="${QUANT_EDGE_ROOT:-/opt/quant-intraday-edge}"
 release_sha="$(git -C "$source_root" rev-parse --verify "${release_ref}^{commit}")"
 release_dir="$edge_root/releases/$release_sha"
 built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-ssh_command=(ssh)
+[[ -r "$edge_key" ]] || { echo "edge SSH key is not readable: $edge_key" >&2; exit 2; }
+ssh_command=(ssh -i "$edge_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
 [[ -z "$edge_ssh_control_path" ]] || ssh_command+=(-S "$edge_ssh_control_path" -o ControlMaster=no -o BatchMode=yes)
 
 git -C "$source_root" diff --quiet --ignore-submodules -- || {

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { createLedger } from './ledger.mjs';
 import { releaseMetadata } from './release-metadata.mjs';
+import { endWritable, writeChunk } from './stream-write.mjs';
 import { createGroupRelay } from './group-relay.mjs';
 import { createSummaryListener } from './summary-listener.mjs';
 import { createFeishuUserOauth } from './feishu-user-oauth.mjs';
@@ -449,10 +450,10 @@ async function persistReadableAsset(readable, property, fallbackName, fallbackTy
 				const part = pending.subarray(0, uploadPartBytes); pending = pending.subarray(uploadPartBytes);
 				parts.push({ property: `${property}_part_${parts.length}`, bytes: part.length, sha256: createHash('sha256').update(part).digest('hex') });
 			}
-			if (!writer.write(bytes)) await new Promise((resolve, reject) => { writer.once('drain', resolve); writer.once('error', reject); });
+			await writeChunk(writer, bytes);
 		}
 		if (pending.length) parts.push({ property: `${property}_part_${parts.length}`, bytes: pending.length, sha256: createHash('sha256').update(pending).digest('hex') });
-		await new Promise((resolve, reject) => writer.end((error) => error ? reject(error) : resolve()));
+		await endWritable(writer);
 		if (!total) throw new Error('飞书资源下载为空');
 		const mediaType = contentTypeFromBytes(firstBytes, fallbackType);
 		if (!supportedMediaTypes.has(mediaType)) throw new Error(`目标导入 API 不支持媒体类型：${mediaType}`);
