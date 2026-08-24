@@ -576,6 +576,7 @@ class PlatformBoundaryTests(unittest.TestCase):
                 "background_loop:ths_member_backfill": False,
             },
             daily_control_plane_status=lambda: {"state": "ready", "trade_date": "2026-08-21"},
+            live_session_acceptance_status=lambda: {"state": "passed", "checked_at": "2026-08-24T10:00:00Z"},
             release_metadata=lambda: {"git_sha": "a1b2c3d", "release": "edge-test", "build_created_at": "2026-08-24T12:00:00Z"},
         )
         payload = read_health_payload(dependencies)
@@ -591,6 +592,7 @@ class PlatformBoundaryTests(unittest.TestCase):
             "background_loop:ths_member_backfill": False,
         })
         self.assertEqual(payload["daily_control_plane"]["state"], "ready")
+        self.assertEqual(payload["live_session_acceptance"]["state"], "passed")
         self.assertEqual(payload["build"]["git_sha"], "a1b2c3d")
         self.assertEqual(pool_updates, [{"pool_size": 2, "available": 1, "waiting": 0}])
         self.assertEqual(circuit_updates, [2])

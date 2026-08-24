@@ -195,7 +195,8 @@ def edge_runtime_snapshot() -> dict[str, Any]:
         "build": health.get("build") if isinstance(health.get("build"), dict) else {},
         "runtime_loops": health.get("runtime_loops") or {},
         "daily_control_plane": health.get("daily_control_plane") or {},
-        "live_session_acceptance": read_live_session_acceptance(),
+        "live_session_acceptance": health.get("live_session_acceptance")
+        if isinstance(health.get("live_session_acceptance"), dict) else {"state": "unavailable"},
         "resources": {
             "state": resources.get("state") if isinstance(resources, dict) else None,
             "disk_free_bytes": disk.get("free_bytes") if isinstance(disk, dict) else None,

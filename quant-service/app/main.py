@@ -406,6 +406,7 @@ from .episode_lifecycle import clear_stale_signal_episodes, ensure_signal_episod
 from .runtime_resources import (
     runtime_resource_status,
 )
+from .edge_evidence_transfer import read_live_session_acceptance
 from .research_storage_admission import ResearchStorageAdmission, governance as research_storage_governance_isolated
 from .health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
 from .release_metadata import release_metadata
@@ -3841,6 +3842,7 @@ def _health_payload() -> dict[str, Any]:
                 "background_loop:all_board_member_backfill": all_board_member_backfill_enabled(),
             },
             daily_control_plane_status=full_market_daily_control_status,
+            live_session_acceptance_status=read_live_session_acceptance,
             release_metadata=release_metadata,
     ))
 

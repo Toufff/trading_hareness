@@ -49,6 +49,7 @@ class HealthDependencies:
     background_loop_status: Callable[[], dict[str, dict[str, Any]]] | None = None
     optional_background_tasks: Callable[[], dict[str, bool]] | None = None
     daily_control_plane_status: Callable[[], dict[str, Any]] | None = None
+    live_session_acceptance_status: Callable[[], dict[str, Any]] | None = None
     release_metadata: Callable[[], dict[str, str | None]] | None = None
 
 
@@ -126,6 +127,7 @@ def health_payload(deps: HealthDependencies) -> dict[str, Any]:
         "runtime_loops": runtime_loops_with_lease_heartbeats(runtime_loops, background_leases),
         "optional_background_tasks": deps.optional_background_tasks() if deps.optional_background_tasks else {},
         "daily_control_plane": deps.daily_control_plane_status() if deps.daily_control_plane_status else {},
+        "live_session_acceptance": deps.live_session_acceptance_status() if deps.live_session_acceptance_status else {},
         "http_clients": {
             "public_market": deps.public_http_client_status(), "feishu_alert": deps.alert_http_client_status(),
             "tushare_provider": deps.provider_http_client_status(),
