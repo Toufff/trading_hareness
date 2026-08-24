@@ -16,18 +16,20 @@ edge_runtime_env="${RELAY_EDGE_RUNTIME_ENV:-/etc/feishu-relay-edge/runtime.env}"
 local_adapter_container="${LOCAL_FEISHU_ADAPTER_CONTAINER:-n8n-feishu-adapter}"
 local_postgres_container="${LOCAL_N8N_POSTGRES_CONTAINER:-n8n-postgres}"
 local_adapter_health_url="${LOCAL_FEISHU_ADAPTER_HEALTH_URL:-http://127.0.0.1:5680/health}"
+local_writer_id="${FEISHU_RELAY_WRITER_ID:-workstation}"
 
 relay_tables=(
   ingestion_topics ingestion_publishers ingestion_source_profiles ingestion_jobs
   ingestion_content_items ingestion_assets ingestion_asset_parts ingestion_errors analysis_jobs
   feishu_group_relay_sources feishu_group_relay_messages feishu_group_relay_actions
   feishu_group_relay_routes feishu_group_relay_route_state feishu_summary_listener_state
-  feishu_user_oauth_tokens
+  feishu_user_oauth_tokens feishu_relay_writer_ownership
 )
 
 for command in ssh docker mktemp curl; do
   command -v "$command" >/dev/null || { echo "missing required command: $command" >&2; exit 1; }
 done
+[[ "$local_writer_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "invalid local relay writer ID" >&2; exit 1; }
 
 workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$workspace_root"
@@ -51,7 +53,7 @@ pg_dump -h 127.0.0.1 -U "$RELAY_PGUSER" -d "$RELAY_PGDATABASE" --data-only --no-
   --table=public.ingestion_content_items --table=public.ingestion_assets --table=public.ingestion_asset_parts --table=public.ingestion_errors --table=public.analysis_jobs \
   --table=public.feishu_group_relay_sources --table=public.feishu_group_relay_messages --table=public.feishu_group_relay_actions \
   --table=public.feishu_group_relay_routes --table=public.feishu_group_relay_route_state --table=public.feishu_summary_listener_state \
-  --table=public.feishu_user_oauth_tokens
+  --table=public.feishu_user_oauth_tokens --table=public.feishu_relay_writer_ownership
 REMOTE
 
 grep -q 'COPY public.feishu_group_relay_messages' "$remote_dump_file" || {
@@ -71,6 +73,13 @@ echo "[2/5] Restoring remote ledger into local PostgreSQL transactionally..."
   cat "$remote_dump_file"
   printf 'COMMIT;\n'
 } | docker exec -i "$local_postgres_container" psql -v ON_ERROR_STOP=1 -U n8n -d n8n >/dev/null
+
+# The two hosts do not share a database, therefore this is an explicit
+# promotion record after the old remote pollers have been fenced.  The adapter
+# checks the owner before either polling loop can write or send.
+docker exec -i "$local_postgres_container" psql -v ON_ERROR_STOP=1 -U n8n -d n8n \
+  -v writer_id="$local_writer_id" \
+  -c "INSERT INTO public.feishu_relay_writer_ownership(singleton,writer_id,generation) VALUES(true, :'writer_id', 1) ON CONFLICT(singleton) DO UPDATE SET writer_id=EXCLUDED.writer_id,generation=public.feishu_relay_writer_ownership.generation+1,updated_at=now();" >/dev/null
 
 echo "[3/5] Copying any remote retry-media files to local durable storage..."
 ssh "$edge_host" "tar -C '$edge_dir/adapter-ingestion' -cf - ." \

@@ -82,6 +82,15 @@ TRANSFER_TABLES: tuple[TransferTable, ...] = (
     ),
 )
 
+CHANGE_PAGE_SIZE = 5_000
+# PostgreSQL sequences are allocated before commit. Replaying this bounded
+# tail prevents a short transaction that commits after a later sequence from
+# being skipped when a workstation advances its durable cursor.
+# It must remain smaller than one page: a page reserves room for new rows,
+# otherwise a cursor at the end of a quiet stream would export only its replay
+# tail forever and never advance through a subsequent backlog.
+CHANGE_REPLAY_WINDOW = 1_000
+
 
 def parse_checkpoint(value: str, *, now: datetime | None = None) -> datetime:
     """Validate one exact durable checkpoint without changing its meaning."""
@@ -104,6 +113,15 @@ def parse_since(value: str, *, now: datetime | None = None) -> datetime:
     # The edge already has tighter per-table retention.  This protects a lost
     # cursor from turning an incremental handoff into an unbounded export.
     return max(parsed - timedelta(minutes=5), reference - timedelta(days=30))
+
+
+def parse_sequence(value: str | int | None) -> int:
+    """Validate the monotonic edge journal position without accepting floats."""
+    if value is None or str(value).strip() == "":
+        return 0
+    if not re.fullmatch(r"[0-9]+", str(value).strip()):
+        raise ValueError("edge evidence sequence must be a non-negative integer")
+    return int(str(value).strip())
 
 
 def upsert_statement(table: TransferTable, columns: tuple[str, ...]) -> str:
@@ -169,15 +187,25 @@ def edge_runtime_snapshot() -> dict[str, Any]:
     }
 
 
+def _journal_checkpoint(connection: psycopg.Connection) -> int:
+    exists = connection.execute("SELECT to_regclass('quant.edge_evidence_changes') AS value").fetchone()["value"]
+    if not exists:
+        return 0
+    row = connection.execute("SELECT coalesce(max(sequence_id), 0)::bigint AS value FROM quant.edge_evidence_changes").fetchone()
+    return int(row["value"] or 0)
+
+
 def export_jsonl(since: datetime, output: Any = sys.stdout) -> dict[str, Any]:
     """Write one repeatable-read, bounded evidence snapshot as JSONL."""
     emitted: dict[str, int] = {}
     with psycopg.connect(row_factory=dict_row) as connection:
         connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         checkpoint = connection.execute("SELECT transaction_timestamp() AS value").fetchone()["value"]
+        journal_sequence = _journal_checkpoint(connection)
         print(json.dumps({
             "kind": "metadata", "version": 1, "since": since.isoformat(),
-            "checkpoint": checkpoint.isoformat(), "scope": "research_evidence_only",
+            "checkpoint": checkpoint.isoformat(), "journal_sequence": journal_sequence,
+            "scope": "research_evidence_only",
             "edge_runtime": edge_runtime_snapshot(),
         }, ensure_ascii=False), file=output)
         for table in TRANSFER_TABLES:
@@ -196,9 +224,58 @@ def export_jsonl(since: datetime, output: Any = sys.stdout) -> dict[str, Any]:
             emitted[table.name] = count
         print(json.dumps({
             "kind": "checkpoint", "version": 1, "value": checkpoint.isoformat(),
-            "counts": emitted,
+            "counts": emitted, "journal_sequence": journal_sequence,
         }, ensure_ascii=False, separators=(",", ":")), file=output)
-    return {"checkpoint": checkpoint.isoformat(), "counts": emitted}
+    return {"checkpoint": checkpoint.isoformat(), "counts": emitted, "journal_sequence": journal_sequence}
+
+
+def export_changes(
+    after_sequence: int,
+    *,
+    limit: int = CHANGE_PAGE_SIZE,
+    output: Any = sys.stdout,
+) -> dict[str, Any]:
+    """Export one bounded, replay-safe page from the edge change journal."""
+    requested_after = parse_sequence(after_sequence)
+    bounded_limit = max(1, min(CHANGE_PAGE_SIZE, int(limit)))
+    replay_from = max(0, requested_after - CHANGE_REPLAY_WINDOW)
+    with psycopg.connect(row_factory=dict_row) as connection:
+        connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        checkpoint = connection.execute("SELECT transaction_timestamp() AS value").fetchone()["value"]
+        if not connection.execute("SELECT to_regclass('quant.edge_evidence_changes') AS value").fetchone()["value"]:
+            raise RuntimeError("edge evidence change journal is unavailable; run the current Alembic migration first")
+        rows = connection.execute(
+            """SELECT sequence_id, table_name, record_key, row_data, changed_at
+                 FROM quant.edge_evidence_changes
+                WHERE sequence_id > %s
+                ORDER BY sequence_id
+                LIMIT %s""",
+            (replay_from, bounded_limit),
+        ).fetchall()
+        next_sequence = max((int(row["sequence_id"]) for row in rows), default=requested_after)
+        print(json.dumps({
+            "kind": "metadata", "version": 2, "mode": "change_journal",
+            "requested_after_sequence": requested_after, "replay_from_sequence": replay_from,
+            "checkpoint": checkpoint.isoformat(), "scope": "research_evidence_only",
+            "edge_runtime": edge_runtime_snapshot(),
+        }, ensure_ascii=False), file=output)
+        counts = {table.name: 0 for table in TRANSFER_TABLES}
+        for row in rows:
+            table_name = str(row["table_name"])
+            if table_name not in counts:
+                raise RuntimeError(f"edge evidence journal contains unsupported table: {table_name}")
+            print(json.dumps({
+                "kind": "record", "table": table_name, "row": row["row_data"],
+                "sequence_id": int(row["sequence_id"]), "record_key": row["record_key"],
+            }, ensure_ascii=False, default=_json_default, separators=(",", ":")), file=output)
+            counts[table_name] += 1
+        print(json.dumps({
+            "kind": "checkpoint", "version": 2, "value": checkpoint.isoformat(),
+            "sequence": next_sequence, "counts": counts,
+            "has_more": len(rows) >= bounded_limit,
+        }, ensure_ascii=False, separators=(",", ":")), file=output)
+    return {"checkpoint": checkpoint.isoformat(), "sequence": next_sequence, "counts": counts,
+            "has_more": len(rows) >= bounded_limit}
 
 
 def _cursor_path() -> Path:
@@ -208,25 +285,33 @@ def _cursor_path() -> Path:
 
 
 def read_cursor(path: Path | None = None) -> str:
+    return str(read_cursor_payload(path).get("checkpoint") or "")
+
+
+def read_cursor_payload(path: Path | None = None) -> dict[str, Any]:
     cursor_path = path or _cursor_path()
     try:
         payload = json.loads(cursor_path.read_text(encoding="utf-8"))
         value = str(payload.get("checkpoint") or "")
-        return parse_checkpoint(value).isoformat()
+        payload["checkpoint"] = parse_checkpoint(value).isoformat()
+        payload["sequence"] = parse_sequence(payload.get("sequence"))
+        return payload
     except FileNotFoundError:
-        return parse_checkpoint("").isoformat()
+        return {"checkpoint": parse_checkpoint("").isoformat(), "sequence": 0}
     except (ValueError, TypeError, json.JSONDecodeError) as error:
         raise RuntimeError(f"invalid edge evidence cursor: {error}") from error
 
 
 def _write_cursor(
-    checkpoint: str, counts: dict[str, int], edge_runtime: dict[str, Any], path: Path | None = None,
+    checkpoint: str, counts: dict[str, int], edge_runtime: dict[str, Any], *, sequence: int = 0,
+    path: Path | None = None,
 ) -> None:
     cursor_path = path or _cursor_path()
     cursor_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = cursor_path.with_suffix(cursor_path.suffix + ".tmp")
     temporary.write_text(json.dumps({
         "checkpoint": checkpoint, "counts": counts,
+        "sequence": parse_sequence(sequence),
         "imported_at": datetime.now(timezone.utc).isoformat(),
         "edge_runtime": edge_runtime,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -238,6 +323,7 @@ def import_jsonl(lines: Iterable[str], *, cursor_path: Path | None = None) -> di
     by_name = {table.name: table for table in TRANSFER_TABLES}
     counts = {table.name: 0 for table in TRANSFER_TABLES}
     checkpoint = ""
+    sequence = 0
     metadata_seen = False
     edge_runtime: dict[str, Any] = {}
     with psycopg.connect() as connection:
@@ -248,13 +334,14 @@ def import_jsonl(lines: Iterable[str], *, cursor_path: Path | None = None) -> di
                 item = json.loads(raw_line)
                 kind = item.get("kind")
                 if kind == "metadata":
-                    if metadata_seen or int(item.get("version") or 0) != 1:
+                    if metadata_seen or int(item.get("version") or 0) not in {1, 2}:
                         raise ValueError("invalid edge evidence metadata")
                     metadata_seen = True
                     edge_runtime = item.get("edge_runtime") if isinstance(item.get("edge_runtime"), dict) else {}
                     continue
                 if kind == "checkpoint":
                     checkpoint = parse_checkpoint(str(item.get("value") or "")).isoformat()
+                    sequence = parse_sequence(item.get("sequence") or item.get("journal_sequence"))
                     continue
                 if kind != "record" or not metadata_seen or checkpoint:
                     raise ValueError("invalid edge evidence stream ordering")
@@ -272,8 +359,8 @@ def import_jsonl(lines: Iterable[str], *, cursor_path: Path | None = None) -> di
                 counts[table.name] += 1
     if not metadata_seen or not checkpoint:
         raise ValueError("edge evidence stream is incomplete")
-    _write_cursor(checkpoint, counts, edge_runtime, cursor_path)
-    return {"status": "completed", "checkpoint": checkpoint, "counts": counts}
+    _write_cursor(checkpoint, counts, edge_runtime, sequence=sequence, path=cursor_path)
+    return {"status": "completed", "checkpoint": checkpoint, "sequence": sequence, "counts": counts}
 
 
 def edge_evidence_status(
@@ -293,6 +380,7 @@ def edge_evidence_status(
             "configured": True, "state": state, "last_imported_at": imported_at.isoformat(),
             "age_seconds": round(age_seconds, 1), "stale_after_seconds": stale_after_seconds,
             "checkpoint": payload.get("checkpoint"), "counts": payload.get("counts") or {},
+            "sequence": parse_sequence(payload.get("sequence")),
             "runtime": runtime,
         }
     except FileNotFoundError:
@@ -306,13 +394,20 @@ def main(argv: list[str] | None = None) -> int:
     subcommands = parser.add_subparsers(dest="command", required=True)
     export_parser = subcommands.add_parser("export")
     export_parser.add_argument("--since", default="")
+    export_parser.add_argument("--after-sequence", default="")
+    export_parser.add_argument("--limit", type=int, default=CHANGE_PAGE_SIZE)
     subcommands.add_parser("import")
-    subcommands.add_parser("cursor")
+    cursor_parser = subcommands.add_parser("cursor")
+    cursor_parser.add_argument("--json", action="store_true")
     arguments = parser.parse_args(argv)
     if arguments.command == "cursor":
-        print(read_cursor())
+        payload = read_cursor_payload()
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) if arguments.json else payload["checkpoint"])
         return 0
     if arguments.command == "export":
+        if str(arguments.after_sequence).strip():
+            export_changes(parse_sequence(arguments.after_sequence), limit=arguments.limit)
+            return 0
         export_jsonl(parse_since(arguments.since))
         return 0
     result = import_jsonl(sys.stdin)
@@ -326,5 +421,6 @@ if __name__ == "__main__":
 
 __all__ = [
     "TRANSFER_TABLES", "TransferTable", "edge_evidence_status", "edge_runtime_snapshot",
-    "export_jsonl", "import_jsonl", "parse_checkpoint", "parse_since", "read_cursor", "upsert_statement",
+    "CHANGE_PAGE_SIZE", "CHANGE_REPLAY_WINDOW", "export_changes", "export_jsonl", "import_jsonl",
+    "parse_checkpoint", "parse_sequence", "parse_since", "read_cursor", "read_cursor_payload", "upsert_statement",
 ]

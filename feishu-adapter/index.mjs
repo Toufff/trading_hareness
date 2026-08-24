@@ -145,6 +145,11 @@ const groupRelayConfig = {
 		{ key: 'xiaojie', tag: 'xiaojie', chatId: String(process.env.FEISHU_GROUP_RELAY_XIAOJIE_CHAT_ID ?? '').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_XIAOJIE_CHAT_NAME ?? '小杰夜报～').trim() },
 	],
 };
+// This guards a copied relay ledger during a deliberate failover/failback.
+// It is not presented as a cross-host distributed lock: the runbooks still
+// fence the old machine before promoting the new writer generation.
+const relayWriterId = String(process.env.FEISHU_RELAY_WRITER_ID ?? '').trim();
+const relayWriterFence = relayWriterId ? () => ledger.relayWriterFence(relayWriterId) : null;
 const summaryListenerIntervalSeconds = Number(process.env.FEISHU_SUMMARY_LISTENER_INTERVAL_SECONDS ?? groupRelayIntervalSeconds);
 if (!Number.isFinite(summaryListenerIntervalSeconds) || summaryListenerIntervalSeconds < 10 || summaryListenerIntervalSeconds > 30) {
 	throw new Error('FEISHU_SUMMARY_LISTENER_INTERVAL_SECONDS must be between 10 and 30');
@@ -186,11 +191,11 @@ const feishuWorkbench = createFeishuWorkbench({
 });
 const groupRelay = createGroupRelay({
 	larkClient, sourceApi: feishuUserOauth.sourceApi, ledger, workbench: feishuWorkbench,
-	config: { ...groupRelayConfig, sourcesProvider: () => ledger.relayRoutes() },
+	config: { ...groupRelayConfig, sourcesProvider: () => ledger.relayRoutes() }, canWrite: relayWriterFence,
 });
 const summaryListener = createSummaryListener({
 	sourceApi: feishuUserOauth.sourceApi, ledger, processMessage: processSummaryGroupMessage,
-	config: summaryListenerConfig,
+	config: summaryListenerConfig, canWrite: relayWriterFence,
 });
 setInterval(() => { void groupRelay.tick(); }, groupRelayIntervalSeconds * 1000).unref();
 void groupRelay.tick();
@@ -857,7 +862,7 @@ function asIsoString(value) {
 }
 
 async function groupRelayDashboardStatus() {
-	const [persistedSources, routes, oauth, ingestionSources] = await Promise.all([ledger.relayStatus(), ledger.relayRoutes(), feishuUserOauth.status(), ledger.ingestionStatusBySource()]);
+	const [persistedSources, routes, oauth, ingestionSources, writer] = await Promise.all([ledger.relayStatus(), ledger.relayRoutes(), feishuUserOauth.status(), ledger.ingestionStatusBySource(), ledger.relayWriterStatus()]);
 	const runtime = groupRelay.status();
 	const listenerRuntime = summaryListener.status();
 	const persistedByKey = new Map(persistedSources.map((source) => [source.source_key, source]));
@@ -933,7 +938,15 @@ async function groupRelayDashboardStatus() {
 		user_oauth_scope_audit: oauth.scope_audit ?? null,
 		delivery_verified: sources.filter((source) => source.enabled).every((source) => source.delivery_state === 'verified'),
 		last_tick_started_at: runtime.last_tick_started_at, last_tick_completed_at: runtime.last_tick_completed_at,
-		last_tick_error: runtime.last_tick_error, sources,
+		last_tick_error: runtime.last_tick_error,
+		writer: {
+			configured_id: relayWriterId || null,
+			state: runtime.writer_state,
+			owner_id: writer?.writer_id ?? null,
+			generation: writer?.generation ?? null,
+			updated_at: asIsoString(writer?.updated_at),
+		},
+		sources,
 		summary_listener: {
 			...listenerRuntime, state: listenerState, last_success_at: listenerLastSuccessAt,
 			poll_age_seconds: listenerPollAgeSeconds,

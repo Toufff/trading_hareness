@@ -1604,6 +1604,10 @@ def pool_settings(environ: Mapping[str, str] | None = None) -> dict[str, int]:
 
 class Database:
     def __init__(self) -> None:
+        # Edge-only evidence triggers use this connection-local setting.  The
+        # same migrations run on the research workstation, but its imports
+        # must never recursively append a second change journal.
+        runtime_profile = str(os.getenv("QUANT_RUNTIME_PROFILE", "full")).strip().lower() or "full"
         self._connect_kwargs = {
             "host": os.getenv("PGHOST", "postgres"),
             "port": int(os.getenv("PGPORT", "5432")),
@@ -1612,6 +1616,7 @@ class Database:
             "password": os.getenv("PGPASSWORD", ""),
             "row_factory": dict_row,
             "connect_timeout": 8,
+            "options": f"-c app.quant_runtime_profile={runtime_profile}",
         }
         self._pool_settings = pool_settings()
         # Keep construction side-effect free so import-time unit tests do not

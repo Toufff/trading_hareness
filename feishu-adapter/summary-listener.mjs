@@ -35,7 +35,7 @@ function normalizeMessage(item, chatId, sourceLabel) {
  * im.message.receive_v1: Feishu excludes a bot's own group messages from that
  * event, while this listener must see both human and bot-authored messages.
  */
-export function createSummaryListener({ sourceApi, ledger, processMessage, config, logger = console }) {
+export function createSummaryListener({ sourceApi, ledger, processMessage, config, canWrite = null, logger = console }) {
 	let running = false;
 	let lastTickStartedAt = null;
 	let lastTickCompletedAt = null;
@@ -45,9 +45,27 @@ export function createSummaryListener({ sourceApi, ledger, processMessage, confi
 	let processedCount = 0;
 	let duplicateCount = 0;
 	let ignoredCount = 0;
+	let writerState = canWrite ? 'starting' : 'not_configured';
 
 	async function tick() {
 		if (!config.enabled || running) return;
+		if (canWrite) {
+			try {
+				const fence = await canWrite();
+				writerState = fence?.allowed ? 'writer' : 'fenced';
+				if (!fence?.allowed) {
+					lastError = `relay 写入权归属 ${fence?.writer_id ?? '未知'}，当前实例仅观察`;
+					lastTickCompletedAt = new Date().toISOString();
+					return;
+				}
+			} catch (error) {
+				writerState = 'error';
+				lastError = `relay 写入围栏校验失败：${error instanceof Error ? error.message : String(error)}`;
+				lastTickCompletedAt = new Date().toISOString();
+				logger.error(lastError);
+				return;
+			}
+		}
 		if (!config.chatId) {
 			lastError = '缺少 FEISHU_SUMMARY_LISTENER_CHAT_ID';
 			logger.error(`汇总群监听未启动：${lastError}`);
@@ -115,6 +133,7 @@ export function createSummaryListener({ sourceApi, ledger, processMessage, confi
 			last_tick_started_at: lastTickStartedAt, last_tick_completed_at: lastTickCompletedAt,
 			last_success_at: lastSuccessAt, last_error: lastError, last_source_message_at: lastMessageAt,
 			processed_count: processedCount, duplicate_count: duplicateCount, ignored_count: ignoredCount,
+			writer_state: writerState,
 		}),
 	};
 }

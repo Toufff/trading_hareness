@@ -195,12 +195,13 @@ function uploadErrorMessage(resource, error) {
 	return `${resource}失败${code}：${detail}`;
 }
 
-export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = null, config, logger = console }) {
+export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = null, config, canWrite = null, logger = console }) {
 	let running = false;
 	let lastUnavailableLogAt = 0;
 	let lastTickStartedAt = null;
 	let lastTickCompletedAt = null;
 	let lastTickError = null;
+	let writerState = canWrite ? 'starting' : 'not_configured';
 	const reconcileEveryMs = Math.max(60 * 60_000, Number(config.reconcileEverySeconds ?? 6 * 3600) * 1000);
 	const reconcileLookbackMs = Math.max(5 * 60_000, Number(config.reconcileLookbackSeconds ?? 24 * 3600) * 1000);
 	const sourceRuntime = new Map(config.sources.map((source) => [source.key, { state: 'starting', last_success_at: null, last_error: null, last_reconciled_at: null }]));
@@ -500,6 +501,23 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 
 	async function tick() {
 		if (!config.enabled || running) return;
+		if (canWrite) {
+			try {
+				const fence = await canWrite();
+				writerState = fence?.allowed ? 'writer' : 'fenced';
+				if (!fence?.allowed) {
+					lastTickError = `relay 写入权归属 ${fence?.writer_id ?? '未知'}，当前实例仅观察`;
+					lastTickCompletedAt = new Date().toISOString();
+					return;
+				}
+			} catch (error) {
+				writerState = 'error';
+				lastTickError = `relay 写入围栏校验失败：${error instanceof Error ? error.message : String(error)}`;
+				lastTickCompletedAt = new Date().toISOString();
+				logger.error(lastTickError);
+				return;
+			}
+		}
 		if (!config.targetChatId) {
 			lastTickError = '缺少 FEISHU_GROUP_RELAY_TARGET_CHAT_ID';
 			logger.error('群消息转发未启动：缺少 FEISHU_GROUP_RELAY_TARGET_CHAT_ID');
@@ -550,6 +568,7 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 		tick,
 		status: () => ({
 			running, last_tick_started_at: lastTickStartedAt, last_tick_completed_at: lastTickCompletedAt, last_tick_error: lastTickError,
+			writer_state: writerState,
 			sources: [...sourceDefinitions.values()].map((source) => ({ key: source.key, tag: source.tag, chat_name: source.chatName ?? source.key, ...(sourceRuntime.get(source.key) ?? { state: 'starting', last_success_at: null, last_error: null }) })),
 		}),
 	};

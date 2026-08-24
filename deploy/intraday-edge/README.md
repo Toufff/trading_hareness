@@ -13,12 +13,16 @@ The materialization timer builds the next-session ten-day shadow pool at
 18:55/19:15/19:35 CST; repeated calls are idempotent and remain research-only.
 
 The workstation pulls retained evidence through a dedicated restricted SSH
-key and `scripts/pull-intraday-edge-evidence.sh`.  The forced remote command can
-only emit the allowlisted JSONL evidence tables.  Imports are transactional,
-upsert mutable evidence, overlap the durable cursor by five minutes, and never
-copy runtime leases, alert deliveries, recommendations, credentials or order
-state.  A local launch agent may call the script every 15 minutes; when the Mac
-is off, the remote database simply retains the evidence for the next pull.
+key and `scripts/pull-intraday-edge-evidence.sh`. The forced remote command can
+only emit the allowlisted JSONL evidence tables. New edge releases append a
+profile-gated change journal and the workstation persists its last imported
+sequence; each pull replays a bounded tail before advancing that sequence, so
+normal short transaction/connection interruptions are idempotently recovered.
+Older releases fall back once to a bounded 30-day snapshot bootstrap. Imports
+are transactional, upsert mutable evidence, and never copy runtime leases,
+alert deliveries, recommendations, credentials or order state. A local launch
+agent may call the script every 15 minutes; when the Mac is off, the remote
+database simply retains the evidence for the next pull.
 `edge_export_grants.sql` grants that account SELECT on the same explicit table
 set only; it does not receive default access to future schema additions.
 

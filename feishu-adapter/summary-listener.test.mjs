@@ -41,6 +41,22 @@ test('summary listener can establish a baseline without replaying old messages',
 	assert.equal(listener.status().ignored_count, 1);
 });
 
+test('a fenced summary listener does not poll or hand messages to the remote delivery path', async () => {
+	let polled = 0;
+	let processed = 0;
+	const listener = createSummaryListener({
+		sourceApi: { messageList: async () => { polled += 1; return { data: { items: [], has_more: false } }; } },
+		ledger: { summaryListenerState: async () => null, saveSummaryListenerCursor: async () => {} },
+		processMessage: async () => { processed += 1; return {}; }, logger: { error() {} },
+		canWrite: async () => ({ allowed: false, writer_id: 'relay-edge-47' }),
+		config: { enabled: true, key: 'summary', chatId: 'oc_summary', intervalSeconds: 10, historyLookbackSeconds: 3600, overlapSeconds: 30, bootstrapMode: 'forward_existing', sourceLabel: '分析师发送汇总群' },
+	});
+	await listener.tick();
+	assert.equal(polled, 0);
+	assert.equal(processed, 0);
+	assert.equal(listener.status().writer_state, 'fenced');
+});
+
 test('summary listener reports repeated observations as local idempotent duplicates', async () => {
 	const listener = createSummaryListener({
 		sourceApi: { messageList: async () => ({ data: { items: [{ message_id: 'om_seen', msg_type: 'text', create_time: String(Date.now()), body: { content: '{"text":"#liwei"}' } }], has_more: false } }) },

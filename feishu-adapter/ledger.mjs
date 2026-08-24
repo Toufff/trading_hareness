@@ -31,6 +31,7 @@ export function createLedger(connectionString) {
 				CREATE TABLE IF NOT EXISTS feishu_group_relay_routes (source_key text PRIMARY KEY, chat_id text NOT NULL, chat_name text NOT NULL, route_tag text NOT NULL UNIQUE, enabled boolean NOT NULL DEFAULT true, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
 			CREATE TABLE IF NOT EXISTS feishu_group_relay_route_state (state_key text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now());
 			CREATE TABLE IF NOT EXISTS feishu_summary_listener_state (listener_key text PRIMARY KEY, chat_id text NOT NULL, cursor_create_time bigint NOT NULL, last_source_create_time bigint, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+			CREATE TABLE IF NOT EXISTS feishu_relay_writer_ownership (singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton), writer_id text NOT NULL, generation bigint NOT NULL CHECK (generation > 0), updated_at timestamptz NOT NULL DEFAULT now());
 				CREATE TABLE IF NOT EXISTS feishu_user_oauth_tokens (token_key text PRIMARY KEY, access_ciphertext text NOT NULL, refresh_ciphertext text NOT NULL, access_expires_at timestamptz NOT NULL, refresh_expires_at timestamptz NOT NULL, scopes text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT now());
 				CREATE INDEX IF NOT EXISTS feishu_group_relay_messages_status_idx ON feishu_group_relay_messages(status, updated_at);
 				CREATE INDEX IF NOT EXISTS feishu_group_relay_actions_message_idx ON feishu_group_relay_actions(source_message_id, created_at DESC);
@@ -73,6 +74,20 @@ export function createLedger(connectionString) {
 		async saveFeishuUserOauthToken({ accessCiphertext, refreshCiphertext, accessExpiresAt, refreshExpiresAt, scopes }) {
 			await pool.query(`INSERT INTO feishu_user_oauth_tokens(token_key,access_ciphertext,refresh_ciphertext,access_expires_at,refresh_expires_at,scopes)
 				VALUES('default',$1,$2,$3,$4,$5) ON CONFLICT(token_key) DO UPDATE SET access_ciphertext=EXCLUDED.access_ciphertext,refresh_ciphertext=EXCLUDED.refresh_ciphertext,access_expires_at=EXCLUDED.access_expires_at,refresh_expires_at=EXCLUDED.refresh_expires_at,scopes=EXCLUDED.scopes,updated_at=now()`, [accessCiphertext, refreshCiphertext, accessExpiresAt, refreshExpiresAt, scopes]);
+		},
+		async relayWriterFence(writerId) {
+			if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(String(writerId ?? ''))) throw new Error('relay writer ID 格式无效');
+			const { rows } = await pool.query(`
+				INSERT INTO feishu_relay_writer_ownership(singleton,writer_id,generation)
+				VALUES(true,$1,1)
+				ON CONFLICT(singleton) DO UPDATE SET updated_at=feishu_relay_writer_ownership.updated_at
+				RETURNING writer_id,generation,updated_at`, [writerId]);
+			const row = rows[0];
+			return { allowed: row.writer_id === writerId, writer_id: row.writer_id, generation: Number(row.generation), updated_at: row.updated_at };
+		},
+		async relayWriterStatus() {
+			const { rows } = await pool.query('SELECT writer_id,generation,updated_at FROM feishu_relay_writer_ownership WHERE singleton=true');
+			return rows[0] ? { writer_id: rows[0].writer_id, generation: Number(rows[0].generation), updated_at: rows[0].updated_at } : null;
 		},
 		async relaySourceState(sourceKey) { const { rows } = await pool.query('SELECT * FROM feishu_group_relay_sources WHERE source_key=$1', [sourceKey]); return rows[0] ?? null; },
 		async summaryListenerState(listenerKey) { const { rows } = await pool.query('SELECT * FROM feishu_summary_listener_state WHERE listener_key=$1', [listenerKey]); return rows[0] ?? null; },

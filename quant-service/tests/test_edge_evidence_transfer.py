@@ -7,7 +7,8 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from app.edge_evidence_transfer import (
-    TRANSFER_TABLES, edge_evidence_status, parse_checkpoint, parse_since, upsert_statement,
+    CHANGE_PAGE_SIZE, CHANGE_REPLAY_WINDOW, TRANSFER_TABLES, edge_evidence_status,
+    parse_checkpoint, parse_sequence, parse_since, read_cursor_payload, upsert_statement,
 )
 
 
@@ -34,6 +35,24 @@ class EdgeEvidenceTransferTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "future"):
             parse_since("2026-08-24T10:06:00Z", now=now)
 
+    def test_change_sequence_is_integer_and_replay_window_is_bounded(self) -> None:
+        self.assertEqual(parse_sequence(None), 0)
+        self.assertEqual(parse_sequence("0042"), 42)
+        self.assertGreater(CHANGE_REPLAY_WINDOW, 0)
+        self.assertLess(CHANGE_REPLAY_WINDOW, CHANGE_PAGE_SIZE)
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            parse_sequence("4.2")
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            parse_sequence("-1")
+
+    def test_legacy_cursor_upgrades_to_a_zero_sequence(self) -> None:
+        with TemporaryDirectory() as directory:
+            cursor = Path(directory) / "cursor.json"
+            cursor.write_text(json.dumps({"checkpoint": "2026-08-24T09:50:00Z"}), encoding="utf-8")
+            payload = read_cursor_payload(cursor)
+        self.assertEqual(payload["sequence"], 0)
+        self.assertEqual(payload["checkpoint"], "2026-08-24T09:50:00+00:00")
+
     def test_upsert_uses_declared_key_and_updates_mutable_evidence(self) -> None:
         table = next(item for item in TRANSFER_TABLES if item.name == "intraday_scan_runs")
         statement = upsert_statement(table, ("scan_id", "status", "source_status"))
@@ -48,13 +67,14 @@ class EdgeEvidenceTransferTests(unittest.TestCase):
             cursor = Path(directory) / "cursor.json"
             cursor.write_text(json.dumps({
                 "checkpoint": "2026-08-24T09:50:00Z", "imported_at": "2026-08-24T09:45:00Z",
-                "counts": {"intraday_scan_runs": 1},
+                "sequence": 44, "counts": {"intraday_scan_runs": 1},
                 "edge_runtime": {"status": "ok", "runtime_profile": "intraday_edge"},
             }), encoding="utf-8")
             ready = edge_evidence_status(cursor, now=now, stale_after_seconds=1800)
             stale = edge_evidence_status(cursor, now=now, stale_after_seconds=60)
         self.assertEqual(ready["state"], "ready")
         self.assertEqual(ready["counts"]["intraday_scan_runs"], 1)
+        self.assertEqual(ready["sequence"], 44)
         self.assertEqual(stale["state"], "stale")
 
 

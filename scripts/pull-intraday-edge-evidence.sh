@@ -22,11 +22,27 @@ if ! /opt/homebrew/bin/docker compose -f "$repo_root/compose.yaml" ps --status r
   exit 1
 fi
 
-since="$({ /opt/homebrew/bin/docker compose -f "$repo_root/compose.yaml" exec -T quant-research \
-  python -m app.edge_evidence_transfer cursor; } | tail -n 1)"
+cursor_payload="$({ /opt/homebrew/bin/docker compose -f "$repo_root/compose.yaml" exec -T quant-research \
+  python -m app.edge_evidence_transfer cursor --json 2>/dev/null \
+  || /opt/homebrew/bin/docker compose -f "$repo_root/compose.yaml" exec -T quant-research \
+    python -m app.edge_evidence_transfer cursor; } | tail -n 1)"
+sequence="$(printf '%s' "$cursor_payload" | /usr/bin/sed -nE 's/.*"sequence":([0-9]+).*/\1/p')"
+# During a staged rollout, the running workstation image or edge forced
+# command may still be v1. Preserve the old bounded snapshot handoff until
+# both ends report the journal cursor instead of stopping collection.
+[[ -n "$sequence" ]] && [[ "$sequence" =~ ^[0-9]+$ ]] || sequence=0
+
+if [[ "$sequence" -gt 0 ]]; then
+  export_command="export-changes $sequence"
+else
+  # One bounded bootstrap covers the edge retention window before the local
+  # cursor moves to the new monotonic journal. Later runs use only deltas.
+  bootstrap_since="$(date -u -v-30d +%Y-%m-%dT%H:%M:%SZ)"
+  export_command="export-since $bootstrap_since"
+fi
 
 /opt/homebrew/bin/ssh -T -i "$edge_key" -o BatchMode=yes -o IdentitiesOnly=yes \
-  -o StrictHostKeyChecking=yes "$edge_target" "export-since $since" \
+  -o StrictHostKeyChecking=yes "$edge_target" "$export_command" \
   | /usr/bin/gzip -dc \
   | /opt/homebrew/bin/docker compose -f "$repo_root/compose.yaml" exec -T quant-research \
       python -m app.edge_evidence_transfer import

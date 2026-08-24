@@ -10,7 +10,10 @@ Cutover order is deliberate: start the remote adapter with both pollers
 disabled, restore the OAuth/ledger state and import the webhook-only workflows,
 disable the local pollers, then enable the remote pollers. This preserves the
 source cursors and message-ID dedupe boundary while avoiding duplicate group
-forwarding. The remote `relay.env` is mode 0640 and is not stored in git.
+forwarding. `FEISHU_RELAY_WRITER_ID` is a named writer generation recorded in
+the relay ledger; it is an operational fence after a copied ledger, not a
+cross-host lock (the two hosts have separate PostgreSQL instances). The remote
+`relay.env` is mode 0640 and is not stored in git.
 
 Only these workflows are imported: text aggregation plus media-part,
 media-finalize and media-state callbacks. Local scheduled market workflows are
@@ -45,8 +48,9 @@ bash scripts/failover-feishu-relay-to-local.sh
 
 The script deliberately fails closed. It first disables both remote pollers,
 copies the remote durable ledger (including the `source_message_id` primary-key
-dedupe rows, source cursors, OAuth refresh state and media retry state) into
-the local database in a single transaction, then starts the local pollers.
+dedupe rows, source cursors, OAuth refresh state, media retry state and writer
+generation) into the local database in a single transaction, promotes the
+local writer generation, then starts the local pollers.
 Consequently a source message already marked `sent` remotely cannot be claimed
 or sent again locally. If the server cannot be reached to take that snapshot,
 the script leaves local polling disabled instead of risking duplicate delivery.

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { Readable } from 'node:stream';
 import { createGroupRelay } from './group-relay.mjs';
 
-function createHarness(messages, { imageResponse = { image_key: 'img_target' }, imageError = null, targetChatIds = [] } = {}) {
+function createHarness(messages, { imageResponse = { image_key: 'img_target' }, imageError = null, targetChatIds = [], canWrite = null } = {}) {
 	const saved = new Map();
 	const sourceStates = new Map();
 	const sent = [];
@@ -40,6 +40,7 @@ function createHarness(messages, { imageResponse = { image_key: 'img_target' }, 
 	};
 	const relay = createGroupRelay({
 		larkClient, sourceApi, ledger, workbench: { publishActionCard: async () => { throw new Error('action card should be off by default'); } }, logger: { info() {}, error() {}, warn() {} },
+		canWrite,
 		config: {
 			enabled: true, targetChatId: 'oc_summary', intervalSeconds: 10, historyLookbackSeconds: 300, overlapSeconds: 30,
 			bootstrapMode: 'forward_existing', sources: [{ key: 'anqiang', tag: 'anqiang', chatId: 'oc_source', chatName: '马安强 (1)', targetChatIds }],
@@ -47,6 +48,15 @@ function createHarness(messages, { imageResponse = { image_key: 'img_target' }, 
 	});
 	return { relay, sent, updated, saved };
 }
+
+test('a fenced relay observes no source messages and never sends', async () => {
+	const message = { message_id: 'om_fenced', msg_type: 'text', create_time: String(Date.now()), body: { content: JSON.stringify({ text: 'must not send' }) } };
+	const { relay, sent } = createHarness([message], { canWrite: async () => ({ allowed: false, writer_id: 'relay-edge-47' }) });
+	await relay.tick();
+	assert.equal(sent.length, 0);
+	assert.equal(relay.status().writer_state, 'fenced');
+	assert.match(relay.status().last_tick_error, /relay 写入权归属/);
+});
 
 test('image is relayed once as one tagged rich-text bubble and source ID is deduplicated', async () => {
 	const message = { message_id: 'om_image_1', msg_type: 'image', create_time: String(Date.now()), body: { content: JSON.stringify({ image_key: 'img_source' }) } };

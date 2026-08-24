@@ -160,6 +160,9 @@ services:
       # Source names are resolved through the OAuth user's chat visibility.
       # The bot need not join external source chats; explicit IDs take precedence.
       FEISHU_GROUP_RELAY_ENABLED: ${FEISHU_GROUP_RELAY_ENABLED:-true}
+      # Local writer identity. The failover/failback runbooks transfer and
+      # increment the durable generation; this is not a cross-host DB lock.
+      FEISHU_RELAY_WRITER_ID: ${FEISHU_RELAY_WRITER_ID:-workstation}
       FEISHU_GROUP_RELAY_INTERVAL_SECONDS: ${FEISHU_GROUP_RELAY_INTERVAL_SECONDS:-10}
       # Off by default: preserves one source message as exactly one summary-group bubble.
       FEISHU_GROUP_RELAY_ACTION_CARDS_ENABLED: ${FEISHU_GROUP_RELAY_ACTION_CARDS_ENABLED:-false}
