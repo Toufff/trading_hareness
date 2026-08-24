@@ -85,10 +85,13 @@ the durable relay ledger.
 From the repository root, run:
 
 ```bash
+bash scripts/preflight-feishu-relay-handoff.sh
 bash scripts/failover-feishu-relay-to-local.sh
 ```
 
-The script deliberately fails closed. It first disables both remote pollers,
+The preflight is read-only: it proves the remote writer, local fenced standby,
+n8n/adapter health and minimum edge free space before a handoff. The failover
+script deliberately fails closed. It first disables both remote pollers,
 copies the remote durable ledger (including the `source_message_id` primary-key
 dedupe rows, source cursors, OAuth refresh state, media retry state and writer
 generation) into the local database in a single transaction, promotes the
