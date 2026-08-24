@@ -22,6 +22,13 @@ if ! /opt/homebrew/bin/docker compose -f "$repo_root/compose.yaml" ps --status r
   exit 1
 fi
 
+record_pull_status() {
+  local state="$1"
+  local error_message="${2:-}"
+  /opt/homebrew/bin/docker compose -f "$repo_root/compose.yaml" exec -T quant-research \
+    python -m app.edge_evidence_transfer pull-status --state "$state" --error "$error_message" >/dev/null 2>&1 || true
+}
+
 cursor_payload="$({ /opt/homebrew/bin/docker compose -f "$repo_root/compose.yaml" exec -T quant-research \
   python -m app.edge_evidence_transfer cursor --json 2>/dev/null \
   || /opt/homebrew/bin/docker compose -f "$repo_root/compose.yaml" exec -T quant-research \
@@ -37,12 +44,25 @@ if [[ "$sequence" -gt 0 ]]; then
 else
   # One bounded bootstrap covers the edge retention window before the local
   # cursor moves to the new monotonic journal. Later runs use only deltas.
-  bootstrap_since="$(date -u -v-30d +%Y-%m-%dT%H:%M:%SZ)"
+  # Use an explicit RFC 3339 UTC offset.  The forced-command parser also
+  # accepts Z, but this remains compatible with a staged edge running the
+  # earlier strict command grammar.
+  bootstrap_since="$(date -u -v-30d +%Y-%m-%dT%H:%M:%S+00:00)"
   export_command="export-since $bootstrap_since"
 fi
 
-/opt/homebrew/bin/ssh -T -i "$edge_key" -o BatchMode=yes -o IdentitiesOnly=yes \
+record_pull_status running
+set +e
+transfer_output="$(/opt/homebrew/bin/ssh -T -i "$edge_key" -o BatchMode=yes -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=yes "$edge_target" "$export_command" \
   | /usr/bin/gzip -dc \
   | /opt/homebrew/bin/docker compose -f "$repo_root/compose.yaml" exec -T quant-research \
-      python -m app.edge_evidence_transfer import
+      python -m app.edge_evidence_transfer import 2>&1)"
+transfer_status=$?
+set -e
+printf '%s\n' "$transfer_output"
+if [[ "$transfer_status" -ne 0 ]]; then
+  record_pull_status failed "$(printf '%s' "$transfer_output" | /usr/bin/tail -n 1 | /usr/bin/cut -c1-300)"
+  exit "$transfer_status"
+fi
+record_pull_status completed

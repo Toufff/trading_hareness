@@ -28,13 +28,13 @@ built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ssh_command=(ssh -i "$edge_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
 [[ -z "$edge_ssh_control_path" ]] || ssh_command+=(-S "$edge_ssh_control_path" -o ControlMaster=no -o BatchMode=yes)
 
-git -C "$source_root" diff --quiet --ignore-submodules -- || {
-  echo "refusing to deploy an uncommitted worktree; commit the release first" >&2
-  exit 1
+git -C "$source_root" diff --quiet --ignore-submodules -- quant-service deploy/intraday-edge || {
+	echo "refusing to deploy edge source with uncommitted changes; commit the edge release first" >&2
+	exit 1
 }
-git -C "$source_root" diff --cached --quiet --ignore-submodules -- || {
-  echo "refusing to deploy staged but uncommitted changes" >&2
-  exit 1
+git -C "$source_root" diff --cached --quiet --ignore-submodules -- quant-service deploy/intraday-edge || {
+	echo "refusing to deploy staged but uncommitted edge source" >&2
+	exit 1
 }
 
 for command in git ssh tar; do command -v "$command" >/dev/null || { echo "missing required command: $command" >&2; exit 127; }; done

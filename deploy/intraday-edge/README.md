@@ -23,6 +23,11 @@ are transactional, upsert mutable evidence, and never copy runtime leases,
 alert deliveries, recommendations, credentials or order state. A local launch
 agent may call the script every 15 minutes; when the Mac is off, the remote
 database simply retains the evidence for the next pull.
+
+The puller records its latest local attempt separately from the evidence
+cursor. A failed pull therefore appears as a visible warning with its last
+error and last success time; it does not change the edge collector's ownership
+or make a stale snapshot look healthy.
 `edge_export_grants.sql` grants that account SELECT on the same explicit table
 set only; it does not receive default access to future schema additions.
 

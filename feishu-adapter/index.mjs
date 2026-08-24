@@ -871,6 +871,8 @@ async function renderMetrics() {
 	lines.push('# HELP ingestion_queue_depth Durable jobs awaiting local or remote completion', '# TYPE ingestion_queue_depth gauge', `ingestion_queue_depth ${summary.queue_depth ?? 0}`);
 	lines.push('# HELP ingestion_delivery_outbox_depth Durable n8n deliveries waiting for a worker lease', '# TYPE ingestion_delivery_outbox_depth gauge', `ingestion_delivery_outbox_depth ${summary.delivery_outbox_depth ?? 0}`);
 	lines.push('# HELP ingestion_delivery_outbox_failed Terminal n8n deliveries requiring an operator retry', '# TYPE ingestion_delivery_outbox_failed gauge', `ingestion_delivery_outbox_failed ${summary.delivery_outbox_failed ?? 0}`);
+	lines.push('# HELP ingestion_delivery_outbox_paused Deliveries explicitly paused by an operator and excluded from retry', '# TYPE ingestion_delivery_outbox_paused gauge', `ingestion_delivery_outbox_paused ${summary.delivery_outbox_paused ?? 0}`);
+	lines.push('# HELP ingestion_operator_paused Explicitly paused ingestion jobs and excluded from failures', '# TYPE ingestion_operator_paused gauge', `ingestion_operator_paused ${summary.paused ?? 0}`);
 	lines.push('# HELP ingestion_completed_media_bytes Total completed media bytes', '# TYPE ingestion_completed_media_bytes counter', `ingestion_completed_media_bytes ${summary.completed_media_bytes ?? 0}`);
 	lines.push('# HELP ingestion_completed_seconds_mean Mean local completion duration in seconds', '# TYPE ingestion_completed_seconds_mean gauge', `ingestion_completed_seconds_mean ${summary.completed_seconds ?? 0}`);
 	lines.push('# HELP ingestion_duplicate_ratio Completed or duplicate jobs that were duplicates', '# TYPE ingestion_duplicate_ratio gauge', `ingestion_duplicate_ratio ${(Number(summary.duplicates ?? 0) / Math.max(1, Number(summary.completed ?? 0) + Number(summary.duplicates ?? 0))).toFixed(6)}`);
@@ -911,6 +913,10 @@ async function groupRelayDashboardStatus() {
 			: 'processing';
 		const ingestionFailed = ['failed', 'stalled'].includes(ingestionState);
 		const lastForwardedAt = asIsoString(persisted?.last_forwarded_at);
+		const activeError = current?.last_error
+			?? (ingestionFailed ? ingestionRecord?.error_message ?? null : null);
+		const resolvedError = !activeError && failedCount === 0 && persisted?.latest_failure_error
+			? persisted.latest_failure_error : null;
 		let state = 'healthy';
 		if (!groupRelayConfig.enabled || source.enabled === false) state = 'disabled';
 		else if (!oauth.configured) state = 'not_configured';
@@ -931,11 +937,13 @@ async function groupRelayDashboardStatus() {
 			last_message_status: persisted?.last_message_status ?? null,
 			failed_count: failedCount,
 			ingestion: ingestionRecord ? {
-				job_count: Number(ingestionRecord.job_count ?? 0), completed_count: Number(ingestionRecord.completed_count ?? 0), failed_count: Number(ingestionRecord.failed_count ?? 0),
+				job_count: Number(ingestionRecord.job_count ?? 0), completed_count: Number(ingestionRecord.completed_count ?? 0), failed_count: Number(ingestionRecord.failed_count ?? 0), paused_count: Number(ingestionRecord.paused_count ?? 0),
 				state: ingestionState, latest_status: ingestionRecord.latest_status, latest_stage: ingestionRecord.latest_stage, remote_batch_id: ingestionRecord.remote_batch_id ?? null,
 				last_updated_at: ingestionLastUpdatedAt, error_class: ingestionRecord.error_class ?? null, error_message: ingestionRecord.error_message ?? null,
 			} : null,
-			last_error: current?.last_error ?? persisted?.latest_failure_error ?? (['filtered', 'paused'].includes(ingestionState) ? null : ingestionRecord?.error_message ?? null),
+			last_error: activeError,
+			last_resolved_error: resolvedError,
+			last_resolved_error_at: resolvedError ? asIsoString(persisted?.latest_failure_at) : null,
 		};
 	});
 	const listenerLastSuccessAt = asIsoString(listenerRuntime.last_success_at);
@@ -973,6 +981,7 @@ async function groupRelayDashboardStatus() {
 		delivery_outbox: {
 			depth: Number(delivery?.delivery_outbox_depth ?? 0),
 			failed: Number(delivery?.delivery_outbox_failed ?? 0),
+			paused: Number(delivery?.delivery_outbox_paused ?? 0),
 		},
 		sources,
 		summary_listener: {

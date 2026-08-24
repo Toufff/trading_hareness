@@ -8,7 +8,8 @@ import unittest
 
 from app.edge_evidence_transfer import (
     CHANGE_PAGE_SIZE, CHANGE_REPLAY_WINDOW, TRANSFER_TABLES, edge_evidence_status,
-    parse_checkpoint, parse_sequence, parse_since, read_cursor_payload, upsert_statement,
+    parse_checkpoint, parse_restricted_export_command, parse_sequence, parse_since,
+    read_cursor_payload, read_pull_status, upsert_statement, write_pull_status,
 )
 
 
@@ -45,6 +46,20 @@ class EdgeEvidenceTransferTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-negative integer"):
             parse_sequence("-1")
 
+    def test_restricted_edge_export_command_accepts_both_utc_spellings(self) -> None:
+        self.assertEqual(
+            parse_restricted_export_command("export-since 2026-08-24T09:00:00Z"),
+            ("export-since", "2026-08-24T09:00:00+00:00"),
+        )
+        self.assertEqual(
+            parse_restricted_export_command("export-since 2026-08-24T09:00:00+00:00"),
+            ("export-since", "2026-08-24T09:00:00+00:00"),
+        )
+        self.assertEqual(parse_restricted_export_command("export-changes 0042"), ("export-changes", 42))
+        for value in ("", "export-since", "export-since 2026-08-24", "export-changes 4;id"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "usage|timezone-aware|non-negative"):
+                parse_restricted_export_command(value)
+
     def test_legacy_cursor_upgrades_to_a_zero_sequence(self) -> None:
         with TemporaryDirectory() as directory:
             cursor = Path(directory) / "cursor.json"
@@ -52,6 +67,22 @@ class EdgeEvidenceTransferTests(unittest.TestCase):
             payload = read_cursor_payload(cursor)
         self.assertEqual(payload["sequence"], 0)
         self.assertEqual(payload["checkpoint"], "2026-08-24T09:50:00+00:00")
+
+    def test_pull_status_keeps_last_success_and_marks_only_current_failures(self) -> None:
+        now = datetime(2026, 8, 24, 10, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            status_path = Path(directory) / "pull-status.json"
+            completed = write_pull_status("completed", path=status_path, now=now)
+            failed = write_pull_status("failed", error="forced export rejected", path=status_path, now=now + timedelta(minutes=15))
+            recovered = write_pull_status("completed", path=status_path, now=now + timedelta(minutes=30))
+            self.assertEqual(completed["state"], "completed")
+            self.assertEqual(failed["last_success_at"], now.isoformat())
+            self.assertEqual(failed["last_error"], "forced export rejected")
+            self.assertEqual(recovered["state"], "completed")
+            self.assertNotIn("last_error", recovered)
+            self.assertEqual(read_pull_status(status_path)["last_success_at"], (now + timedelta(minutes=30)).isoformat())
+        with self.assertRaisesRegex(ValueError, "invalid edge evidence pull state"):
+            write_pull_status("unknown")
 
     def test_upsert_uses_declared_key_and_updates_mutable_evidence(self) -> None:
         table = next(item for item in TRANSFER_TABLES if item.name == "intraday_scan_runs")

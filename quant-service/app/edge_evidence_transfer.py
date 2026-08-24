@@ -124,6 +124,26 @@ def parse_sequence(value: str | int | None) -> int:
     return int(str(value).strip())
 
 
+def parse_restricted_export_command(value: str) -> tuple[str, str | int]:
+    """Validate the single command accepted by the edge's forced SSH key.
+
+    The SSH server provides the complete client command as one string through
+    ``SSH_ORIGINAL_COMMAND``.  Keep the protocol parser here, next to the
+    timestamp and sequence validators, so a shell-regex change cannot silently
+    disagree with the JSONL exporter.  Both RFC 3339 ``Z`` and explicit UTC
+    offsets are accepted and normalized before the database read starts.
+    """
+    command, separator, argument = str(value or "").strip().partition(" ")
+    argument = argument.strip()
+    if not separator or not argument:
+        raise ValueError("usage: export-since ISO8601 | export-changes SEQUENCE")
+    if command == "export-since":
+        return command, parse_checkpoint(argument).isoformat()
+    if command == "export-changes":
+        return command, parse_sequence(argument)
+    raise ValueError("usage: export-since ISO8601 | export-changes SEQUENCE")
+
+
 def upsert_statement(table: TransferTable, columns: tuple[str, ...]) -> str:
     allowed = {column for column in columns}
     if (
@@ -284,6 +304,66 @@ def _cursor_path() -> Path:
     ))
 
 
+def _pull_status_path() -> Path:
+    return Path(os.getenv(
+        "QUANT_EDGE_EVIDENCE_PULL_STATUS_PATH", "/var/lib/quant/edge-evidence-pull-status.json",
+    ))
+
+
+def read_pull_status(path: Path | None = None) -> dict[str, Any]:
+    """Read the workstation-owned pull attempt status without any network I/O."""
+    status_path = path or _pull_status_path()
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (TypeError, json.JSONDecodeError) as error:
+        return {"state": "unavailable", "last_error": f"invalid pull status: {str(error)[:240]}"}
+    if not isinstance(payload, dict):
+        return {"state": "unavailable", "last_error": "invalid pull status payload"}
+    result: dict[str, Any] = {"state": str(payload.get("state") or "unknown")[:40]}
+    for key in ("last_attempt_at", "last_success_at"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            try:
+                result[key] = parse_checkpoint(value).isoformat()
+            except ValueError:
+                result["state"] = "unavailable"
+                result["last_error"] = f"invalid {key} in pull status"
+                return result
+    error = str(payload.get("last_error") or "").strip()
+    if error:
+        result["last_error"] = error[:300]
+    return result
+
+
+def write_pull_status(
+    state: str, *, error: str | None = None, path: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Atomically persist one local pull attempt outcome for the dashboard."""
+    if state not in {"running", "completed", "failed"}:
+        raise ValueError("invalid edge evidence pull state")
+    status_path = path or _pull_status_path()
+    previous = read_pull_status(status_path)
+    observed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    payload: dict[str, Any] = {
+        "state": state,
+        "last_attempt_at": observed_at,
+        "last_success_at": previous.get("last_success_at"),
+        "last_error": None,
+    }
+    if state == "completed":
+        payload["last_success_at"] = observed_at
+    elif state == "failed":
+        payload["last_error"] = str(error or "edge evidence pull failed").strip()[:300]
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = status_path.with_suffix(status_path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(status_path)
+    return read_pull_status(status_path)
+
+
 def read_cursor(path: Path | None = None) -> str:
     return str(read_cursor_payload(path).get("checkpoint") or "")
 
@@ -375,13 +455,16 @@ def edge_evidence_status(
         age_seconds = max(0.0, (observed_at - imported_at).total_seconds())
         runtime = payload.get("edge_runtime") if isinstance(payload.get("edge_runtime"), dict) else {}
         remote_ok = runtime.get("status") == "ok" and runtime.get("runtime_profile") == "intraday_edge"
+        pull = read_pull_status()
         state = "ready" if remote_ok and age_seconds <= stale_after_seconds else "stale" if runtime else "unavailable"
+        if state == "ready" and pull.get("state") == "failed":
+            state = "degraded"
         return {
             "configured": True, "state": state, "last_imported_at": imported_at.isoformat(),
             "age_seconds": round(age_seconds, 1), "stale_after_seconds": stale_after_seconds,
             "checkpoint": payload.get("checkpoint"), "counts": payload.get("counts") or {},
             "sequence": parse_sequence(payload.get("sequence")),
-            "runtime": runtime,
+            "runtime": runtime, "pull": pull,
         }
     except FileNotFoundError:
         return {"configured": False, "state": "disabled", "runtime": {}}
@@ -396,6 +479,11 @@ def main(argv: list[str] | None = None) -> int:
     export_parser.add_argument("--since", default="")
     export_parser.add_argument("--after-sequence", default="")
     export_parser.add_argument("--limit", type=int, default=CHANGE_PAGE_SIZE)
+    restricted_export_parser = subcommands.add_parser("restricted-export")
+    restricted_export_parser.add_argument("original_command")
+    pull_status_parser = subcommands.add_parser("pull-status")
+    pull_status_parser.add_argument("--state", required=True, choices=("running", "completed", "failed"))
+    pull_status_parser.add_argument("--error", default="")
     subcommands.add_parser("import")
     cursor_parser = subcommands.add_parser("cursor")
     cursor_parser.add_argument("--json", action="store_true")
@@ -410,6 +498,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         export_jsonl(parse_since(arguments.since))
         return 0
+    if arguments.command == "restricted-export":
+        mode, value = parse_restricted_export_command(arguments.original_command)
+        if mode == "export-changes":
+            export_changes(int(value))
+        else:
+            export_jsonl(parse_since(str(value)))
+        return 0
+    if arguments.command == "pull-status":
+        print(json.dumps(write_pull_status(arguments.state, error=arguments.error), ensure_ascii=False, separators=(",", ":")))
+        return 0
     result = import_jsonl(sys.stdin)
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
@@ -422,5 +520,5 @@ if __name__ == "__main__":
 __all__ = [
     "TRANSFER_TABLES", "TransferTable", "edge_evidence_status", "edge_runtime_snapshot",
     "CHANGE_PAGE_SIZE", "CHANGE_REPLAY_WINDOW", "export_changes", "export_jsonl", "import_jsonl",
-    "parse_checkpoint", "parse_sequence", "parse_since", "read_cursor", "read_cursor_payload", "upsert_statement",
+    "parse_checkpoint", "parse_restricted_export_command", "parse_sequence", "parse_since", "read_cursor", "read_cursor_payload", "read_pull_status", "upsert_statement", "write_pull_status",
 ]
