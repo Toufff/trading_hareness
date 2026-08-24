@@ -54,6 +54,7 @@ jobs:
           tags: |
             ghcr.io/${{ env.OWNER }}/trading-hareness-quant:${{ github.sha }}
             ghcr.io/${{ env.OWNER }}/trading-hareness-quant:${{ env.RELEASE }}
+          provenance: false
           build-args: |
             APP_GIT_SHA=${{ github.sha }}
             APP_RELEASE=${{ env.RELEASE }}
@@ -68,6 +69,7 @@ jobs:
           tags: |
             ghcr.io/${{ env.OWNER }}/trading-hareness-feishu-adapter:${{ github.sha }}
             ghcr.io/${{ env.OWNER }}/trading-hareness-feishu-adapter:${{ env.RELEASE }}
+          provenance: false
           build-args: |
             APP_GIT_SHA=${{ github.sha }}
             APP_RELEASE=${{ env.RELEASE }}
