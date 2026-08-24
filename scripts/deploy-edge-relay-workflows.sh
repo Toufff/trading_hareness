@@ -111,9 +111,12 @@ for workflow_id in "${workflow_ids[@]}"; do
   [[ -f "$source_file" ]] || { echo "source workflow is missing: $workflow_id" >&2; exit 1; }
   jq -e --arg id "$workflow_id" --arg remote_archive_base "$remote_archive_base" '
     walk(if type == "string" then split("__REMOTE_ANALYST_ARCHIVE_BASE_URL__") | join($remote_archive_base) else . end)
-    | type == "object" and .id == $id and .active == true and
-      (.nodes | type == "array" and length > 0) and (.connections | type == "object") and
-      ([.. | strings | select(contains("__REMOTE_ANALYST_ARCHIVE_BASE_URL__") or contains("feishu-adapter:3000"))] | length == 0)
+    | . as $workflow
+    | if (
+        $workflow | type == "object" and .id == $id and .active == true and
+        (.nodes | type == "array" and length > 0) and (.connections | type == "object") and
+        ([.. | strings | select(contains("__REMOTE_ANALYST_ARCHIVE_BASE_URL__") or contains("feishu-adapter:3000"))] | length == 0)
+      ) then $workflow else error("invalid rendered relay workflow") end
   ' "$source_file" >"$rendered_file"
 done
 
