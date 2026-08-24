@@ -15,6 +15,18 @@ the relay ledger; it is an operational fence after a copied ledger, not a
 cross-host lock (the two hosts have separate PostgreSQL instances). The remote
 `relay.env` is mode 0640 and is not stored in git.
 
+The workstation keeps a dedicated `feishu_relay_edge_ed25519` key under its
+private `.ssh` directory. Both handoff scripts use it by default; another
+operator can override it through `RELAY_EDGE_SSH_KEY` without placing a key in
+this repository.
+
+The summary-listener ingestion path is two phase: it durably stores the source
+message, parsed content and local media before writing one
+`ingestion_delivery_outbox` row. A leased worker then calls n8n. A transport
+outage therefore retains the original `message_id` for retry instead of being
+mistaken for a completed delivery. The failover snapshot includes this outbox
+and its media files.
+
 Only these workflows are imported: text aggregation plus media-part,
 media-finalize and media-state callbacks. Local scheduled market workflows are
 not copied, so this relay deployment cannot duplicate local research schedules.
@@ -54,3 +66,16 @@ local writer generation, then starts the local pollers.
 Consequently a source message already marked `sent` remotely cannot be claimed
 or sent again locally. If the server cannot be reached to take that snapshot,
 the script leaves local polling disabled instead of risking duplicate delivery.
+
+## Deliberate failback to the edge
+
+After the edge is healthy again, return ownership with:
+
+```bash
+bash scripts/failback-feishu-relay-to-remote.sh
+```
+
+It fences local polling first, copies the full ledger, outbox and retry-media
+back to the edge, increments the edge writer generation, then enables only the
+edge pollers. It is intentionally not automatic: a network partition must not
+be allowed to create two group-history writers.

@@ -218,9 +218,11 @@ async function runLocalAnalysisQueue() {
 		}
 	} catch (error) { console.error(`本地分析队列失败：${error instanceof Error ? error.message : String(error)}`); }
 }
-async function runRetryQueue() {
-	for (const queued of await ledger.retryQueue()) {
-		if (!await ledger.markRetryRunning(queued.job_id)) continue;
+const deliveryWorkerId = `feishu-adapter-${process.pid}`;
+async function runDeliveryQueue() {
+	for (const delivery of await ledger.claimDeliveries({ workerId: deliveryWorkerId, limit: 5 })) {
+		const queued = await ledger.getJobDelivery(delivery.job_id);
+		if (!queued) { await ledger.completeDelivery(delivery.delivery_id); continue; }
 		try {
 			const payload = queued.payload ?? {};
 			const replayImportContent = payload.content_date
@@ -234,7 +236,7 @@ async function runRetryQueue() {
 				last_modified: Number(originalResources[Number(asset.ordinal)]?.last_modified ?? Date.now()), part_size: uploadPartBytes,
 				part_count: parts.length, parts: parts.map((part) => ({ part_index: Number(part.part_index), property: `replay_${asset.ordinal}_part_${part.part_index}`, bytes: Number(part.bytes), sha256: part.sha256, uploaded: Boolean(part.uploaded), remote_status: part.remote_status })),
 			}));
-			const redownloadMedia = shouldRedownloadRetryMedia({
+			const redownloadMedia = Number(delivery.attempt_count) > 1 && shouldRedownloadRetryMedia({
 				expectedResourceCount: originalResources.length, event: payload.event,
 			});
 			const deliveryResources = redownloadMedia
@@ -243,20 +245,23 @@ async function runRetryQueue() {
 			if (redownloadMedia) console.info(`重试时已从飞书重新下载媒体：${queued.message_id}`);
 			if (deliveryResources.some((resource) => resource.path && !existsSync(resource.path))) throw new Error('本地重试文件已被清理，且无法从飞书恢复上传');
 			await hydrateRemotePartState(deliveryResources);
-			await forwardToN8n(payload.event, {
+			await dispatchToN8n(payload.event, {
 				resources: deliveryResources, messageText: payload.message_text, sourceLabel: payload.source_label,
 				replayJobId: queued.job_id, source: payload.source, remoteBatchId: queued.remote_batch_id,
 				receivedAt: payload.receivedAt,
 				importContent: replayImportContent,
 			});
-			} catch (error) {
+			await ledger.completeDelivery(delivery.delivery_id);
+		} catch (error) {
 				// A workflow can persist the remote status before its webhook returns 500.
 				// Keep that diagnostic instead of obscuring it as a local retry failure.
 				const current = await ledger.getJob(queued.job_id);
+				const retryable = current?.status !== 'failed';
 				if (!current || !['failed', 'retryable_failed'].includes(current.status)) {
 					await ledger.updateJob(queued.job_id, { status: 'retryable_failed', stage: 'retry_failed', error_class: 'local_retry', error_message: error instanceof Error ? error.message : String(error) });
 				}
-			}
+				await ledger.failDelivery(delivery.delivery_id, { retryable, errorMessage: error instanceof Error ? error.message : String(error) });
+		}
 	}
 }
 async function cleanupUnreferencedMedia() {
@@ -269,7 +274,7 @@ async function cleanupUnreferencedMedia() {
 	} catch (error) { console.error(`本地媒体对账失败：${error instanceof Error ? error.message : String(error)}`); }
 }
 async function reconcileNow() {
-	await runRetryQueue();
+	await runDeliveryQueue();
 	await runLocalAnalysisQueue();
 	await cleanupUnreferencedMedia();
 	if (Date.now() - lastLedgerPruneAt >= 60 * 60 * 1000) {
@@ -284,7 +289,7 @@ setInterval(() => {
 }, reconcileSeconds * 1000).unref();
 setInterval(() => { void cleanupUnreferencedMedia(); }, reconcileSeconds * 1000).unref();
 setInterval(runLocalAnalysisQueue, Math.max(30, Number(process.env.ANALYSIS_POLL_SECONDS ?? 60) * 1000)).unref();
-setInterval(() => { void runRetryQueue(); }, 30_000).unref();
+setInterval(() => { void runDeliveryQueue(); }, 10_000).unref();
 void reconcileNow().catch((error) => console.error(`启动对账失败：${error instanceof Error ? error.message : String(error)}`));
 const sourceRoutes = new Map((sourceRegistry.routes ?? []).map((route) => [String(route.tag).toLowerCase(), route]));
 const supportedMediaTypes = new Set([
@@ -848,6 +853,8 @@ async function renderMetrics() {
 	lines.push('# HELP ingestion_temp_files Temporary media files on local disk', '# TYPE ingestion_temp_files gauge', `ingestion_temp_files ${files}`);
 	lines.push('# HELP ingestion_temp_bytes Temporary media bytes on local disk', '# TYPE ingestion_temp_bytes gauge', `ingestion_temp_bytes ${bytes}`);
 	lines.push('# HELP ingestion_queue_depth Durable jobs awaiting local or remote completion', '# TYPE ingestion_queue_depth gauge', `ingestion_queue_depth ${summary.queue_depth ?? 0}`);
+	lines.push('# HELP ingestion_delivery_outbox_depth Durable n8n deliveries waiting for a worker lease', '# TYPE ingestion_delivery_outbox_depth gauge', `ingestion_delivery_outbox_depth ${summary.delivery_outbox_depth ?? 0}`);
+	lines.push('# HELP ingestion_delivery_outbox_failed Terminal n8n deliveries requiring an operator retry', '# TYPE ingestion_delivery_outbox_failed gauge', `ingestion_delivery_outbox_failed ${summary.delivery_outbox_failed ?? 0}`);
 	lines.push('# HELP ingestion_completed_media_bytes Total completed media bytes', '# TYPE ingestion_completed_media_bytes counter', `ingestion_completed_media_bytes ${summary.completed_media_bytes ?? 0}`);
 	lines.push('# HELP ingestion_completed_seconds_mean Mean local completion duration in seconds', '# TYPE ingestion_completed_seconds_mean gauge', `ingestion_completed_seconds_mean ${summary.completed_seconds ?? 0}`);
 	lines.push('# HELP ingestion_duplicate_ratio Completed or duplicate jobs that were duplicates', '# TYPE ingestion_duplicate_ratio gauge', `ingestion_duplicate_ratio ${(Number(summary.duplicates ?? 0) / Math.max(1, Number(summary.completed ?? 0) + Number(summary.duplicates ?? 0))).toFixed(6)}`);
@@ -862,7 +869,7 @@ function asIsoString(value) {
 }
 
 async function groupRelayDashboardStatus() {
-	const [persistedSources, routes, oauth, ingestionSources, writer] = await Promise.all([ledger.relayStatus(), ledger.relayRoutes(), feishuUserOauth.status(), ledger.ingestionStatusBySource(), ledger.relayWriterStatus()]);
+	const [persistedSources, routes, oauth, ingestionSources, writer, delivery] = await Promise.all([ledger.relayStatus(), ledger.relayRoutes(), feishuUserOauth.status(), ledger.ingestionStatusBySource(), ledger.relayWriterStatus(), ledger.observability()]);
 	const runtime = groupRelay.status();
 	const listenerRuntime = summaryListener.status();
 	const persistedByKey = new Map(persistedSources.map((source) => [source.source_key, source]));
@@ -945,6 +952,10 @@ async function groupRelayDashboardStatus() {
 			owner_id: writer?.writer_id ?? null,
 			generation: writer?.generation ?? null,
 			updated_at: asIsoString(writer?.updated_at),
+		},
+		delivery_outbox: {
+			depth: Number(delivery?.delivery_outbox_depth ?? 0),
+			failed: Number(delivery?.delivery_outbox_failed ?? 0),
 		},
 		sources,
 		summary_listener: {
@@ -1533,7 +1544,59 @@ const dashboard = createServer((request, response) => {
 	response.writeHead(404).end();
 });
 
+async function persistQueuedResource(resource) {
+	if (resource.path) return resource;
+	if (!resource.data || !Buffer.isBuffer(resource.data)) throw new Error(`无法持久化待投递媒体：${resource.filename ?? 'unknown'}`);
+	const path = join(ingestionStorageDir, `${randomUUID()}-accepted-media.bin`);
+	await writeFile(path, resource.data, { flag: 'wx', mode: 0o600 });
+	return { ...resource, path };
+}
+
 async function forwardToN8n(data, manual = null) {
+	// The worker re-enters the proven n8n transport below with a stable job ID.
+	// Normal Feishu/manual ingress stops here after durable acceptance, so an
+	// unavailable workflow cannot hold the group-history cursor hostage.
+	if (manual?.replayJobId) return dispatchToN8n(data, manual);
+	const messageText = manual?.messageText ?? String(extractMessagePayload(data.message ?? {}).text ?? '').trim();
+	const route = routeFromMessageText(messageText);
+	const receivedAt = manual?.receivedAt ?? new Date().toISOString();
+	const importContent = manual?.importContent ?? extractImportContent(messageText, { referenceTime: receivedAt });
+	const messageId = data?.message?.message_id ?? null;
+	const existing = await ledger.getJobByMessageId(messageId);
+	if (shouldSkipMessageForward({ existingJob: existing })) return { jobId: existing.job_id, duplicate: true, batchId: existing.remote_batch_id };
+	const downloaded = manual?.resources ?? await downloadMedia(data, manual?.messageResourceApi ?? null);
+	const resources = [];
+	let acceptedJob = null;
+	try {
+		for (const resource of downloaded) resources.push(await persistQueuedResource(resource));
+		const payload = {
+			source: manual?.source ?? (manual ? 'manual-relay' : 'feishu'),
+			source_label: manual?.sourceLabel ? String(manual.sourceLabel).slice(0, 120) : null,
+			receivedAt, event: data, message_text: messageText, import_content: importContent.content,
+			...(importContent.content_date ? { content_date: importContent.content_date, content_time: importContent.content_time } : {}),
+			text_content_sha256: importContent.content ? createHash('sha256').update(importContent.content).digest('hex') : null,
+			resources: resources.map(({ data: _data, path: _path, ...metadata }) => metadata),
+			topic_key: route.topic_key ?? sourceRegistry.default_topic_key ?? 'general', publisher_key: route.publisher_key, analyst_id: route.remote_analyst_id,
+		};
+		const { job, duplicate } = await ledger.getOrCreateJob({
+			jobId: randomUUID(), eventId: payload.event?.event_id, messageId: payload.event?.message?.message_id,
+			route, payload: { source: payload.source, source_label: payload.source_label, receivedAt, event: payload.event, message_text: messageText, import_content: importContent.content, ...(importContent.content_date ? { content_date: importContent.content_date, content_time: importContent.content_time } : {}), resources: payload.resources }, contentSha256: payload.text_content_sha256,
+		});
+		if (duplicate) return { jobId: job.job_id, duplicate: true, batchId: job.remote_batch_id };
+		acceptedJob = job;
+		if (payload.import_content) await ledger.recordContentItem(job.job_id, { content_type: 'text', content_sha256: payload.text_content_sha256, content_date: importContent.content_date, content_time: importContent.content_time, body: importContent.content });
+		for (const [ordinal, resource] of resources.entries()) await ledger.recordAsset(job.job_id, ordinal, resource);
+		await ledger.updateJob(job.job_id, { status: 'queued', stage: 'delivery_queued' });
+		await ledger.enqueueDelivery(job.job_id);
+		return { jobId: job.job_id, accepted: true };
+	} catch (error) {
+		if (acceptedJob) await ledger.updateJob(acceptedJob.job_id, { status: 'failed', stage: 'delivery_accept_failed', error_class: 'local_storage', error_message: error instanceof Error ? error.message : String(error) });
+		await Promise.all(resources.map((resource) => resource.path ? unlink(resource.path).catch(() => {}) : Promise.resolve()));
+		throw error;
+	}
+}
+
+async function dispatchToN8n(data, manual = null) {
 	const messageText = manual?.messageText ?? String(extractMessagePayload(data.message ?? {}).text ?? '').trim();
 	const route = routeFromMessageText(messageText);
 	const receivedAt = manual?.receivedAt ?? new Date().toISOString();

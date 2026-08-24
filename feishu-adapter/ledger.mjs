@@ -10,6 +10,11 @@ export function completedAssetLookupSql() {
 			AND a.content_sha256 = ANY($1::text[])`;
 }
 
+export function deliveryRetryDelaySeconds(attemptCount) {
+	const attempt = Math.max(1, Math.trunc(Number(attemptCount) || 1));
+	return Math.min(300, 10 * (2 ** Math.min(attempt - 1, 5)));
+}
+
 export function createLedger(connectionString) {
 	const pool = new Pool(connectionString ? { connectionString, max: 4, idleTimeoutMillis: 30_000 } : { max: 4, idleTimeoutMillis: 30_000 });
 	return {
@@ -20,6 +25,7 @@ export function createLedger(connectionString) {
 				CREATE TABLE IF NOT EXISTS ingestion_publishers (publisher_key text PRIMARY KEY, label text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 				CREATE TABLE IF NOT EXISTS ingestion_source_profiles (source_tag text PRIMARY KEY, topic_key text NOT NULL REFERENCES ingestion_topics(topic_key), publisher_key text NOT NULL REFERENCES ingestion_publishers(publisher_key), analyst_id text NOT NULL, label text NOT NULL, enabled boolean NOT NULL DEFAULT true, config jsonb NOT NULL DEFAULT '{}'::jsonb, updated_at timestamptz NOT NULL DEFAULT now());
 				CREATE TABLE IF NOT EXISTS ingestion_jobs (job_id uuid PRIMARY KEY, event_id text UNIQUE, message_id text UNIQUE, source_tag text NOT NULL REFERENCES ingestion_source_profiles(source_tag), topic_key text NOT NULL, publisher_key text NOT NULL, analyst_id text NOT NULL, content_sha256 text, remote_batch_id text, status text NOT NULL, stage text NOT NULL, attempt_count integer NOT NULL DEFAULT 0, last_http_status integer, error_class text, error_message text, payload jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+				CREATE TABLE IF NOT EXISTS ingestion_delivery_outbox (delivery_id uuid PRIMARY KEY DEFAULT gen_random_uuid(), job_id uuid NOT NULL UNIQUE REFERENCES ingestion_jobs(job_id) ON DELETE CASCADE, status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','processing','completed','retryable_failed','failed')), attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0), available_at timestamptz NOT NULL DEFAULT now(), lease_owner text, lease_expires_at timestamptz, last_error text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
 				CREATE TABLE IF NOT EXISTS ingestion_content_items (item_id uuid PRIMARY KEY, job_id uuid NOT NULL REFERENCES ingestion_jobs(job_id) ON DELETE CASCADE, content_type text NOT NULL, content_sha256 text, content_date date, content_time time, body text, remote_item_id text, state text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(job_id, content_type, content_sha256));
 				CREATE TABLE IF NOT EXISTS ingestion_assets (asset_id uuid PRIMARY KEY, job_id uuid NOT NULL REFERENCES ingestion_jobs(job_id) ON DELETE CASCADE, ordinal integer NOT NULL, filename text NOT NULL, media_type text NOT NULL, declared_bytes bigint NOT NULL, content_sha256 text NOT NULL, storage_path text, remote_upload_id text, state text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(job_id, ordinal), UNIQUE(content_sha256));
 				CREATE TABLE IF NOT EXISTS ingestion_asset_parts (asset_id uuid NOT NULL REFERENCES ingestion_assets(asset_id) ON DELETE CASCADE, part_index integer NOT NULL, bytes integer NOT NULL, sha256 text NOT NULL, uploaded boolean NOT NULL DEFAULT false, remote_status integer, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(asset_id, part_index));
@@ -36,6 +42,7 @@ export function createLedger(connectionString) {
 				CREATE INDEX IF NOT EXISTS feishu_group_relay_messages_status_idx ON feishu_group_relay_messages(status, updated_at);
 				CREATE INDEX IF NOT EXISTS feishu_group_relay_actions_message_idx ON feishu_group_relay_actions(source_message_id, created_at DESC);
 				CREATE INDEX IF NOT EXISTS ingestion_jobs_status_idx ON ingestion_jobs(status, updated_at);
+				CREATE INDEX IF NOT EXISTS ingestion_delivery_outbox_ready_idx ON ingestion_delivery_outbox(status, available_at, created_at);
 				ALTER TABLE ingestion_assets DROP CONSTRAINT IF EXISTS ingestion_assets_content_sha256_key;
 				ALTER TABLE feishu_group_relay_messages ADD COLUMN IF NOT EXISTS action_card_message_id text;
 				ALTER TABLE feishu_group_relay_messages ADD COLUMN IF NOT EXISTS workflow_state text NOT NULL DEFAULT 'new';
@@ -57,6 +64,12 @@ export function createLedger(connectionString) {
 					ON CONFLICT(source_tag) DO UPDATE SET topic_key=EXCLUDED.topic_key,publisher_key=EXCLUDED.publisher_key,analyst_id=EXCLUDED.analyst_id,label=EXCLUDED.label,enabled=EXCLUDED.enabled,config=EXCLUDED.config,updated_at=now()`,
 					[String(route.tag).toLowerCase(), route.topic_key ?? registry.default_topic_key ?? 'general', route.publisher_key, route.remote_analyst_id, route.label ?? route.tag, route.enabled !== false, route]);
 			}
+			// Upgrade recovery: jobs that were durably accepted by the previous
+			// synchronous implementation are eligible for one outbox delivery.
+			await pool.query(`INSERT INTO ingestion_delivery_outbox(job_id,status)
+				SELECT job_id,'queued' FROM ingestion_jobs
+				WHERE status IN ('queued','retryable_failed','uploading','submitting')
+				ON CONFLICT(job_id) DO NOTHING`);
 		},
 		async getOrCreateJob({ jobId, eventId, messageId, route, payload, contentSha256 }) {
 			const existing = await pool.query('SELECT * FROM ingestion_jobs WHERE event_id=$1 OR message_id=$2 LIMIT 1', [eventId ?? null, messageId ?? null]);
@@ -241,6 +254,10 @@ export function createLedger(connectionString) {
 			const { rows } = await pool.query(`SELECT j.*, coalesce(json_agg(a ORDER BY a.ordinal) FILTER (WHERE a.asset_id IS NOT NULL), '[]') AS assets FROM ingestion_jobs j LEFT JOIN ingestion_assets a ON a.job_id=j.job_id WHERE j.job_id=$1 GROUP BY j.job_id`, [jobId]);
 			return rows[0] ?? null;
 		},
+		async getJobDelivery(jobId) {
+			const { rows } = await pool.query(`SELECT j.*, coalesce(json_agg(json_build_object('asset',a,'parts',coalesce((SELECT json_agg(p ORDER BY p.part_index) FROM ingestion_asset_parts p WHERE p.asset_id=a.asset_id),'[]'))) FILTER (WHERE a.asset_id IS NOT NULL),'[]') AS resources FROM ingestion_jobs j LEFT JOIN ingestion_assets a ON a.job_id=j.job_id WHERE j.job_id=$1 GROUP BY j.job_id`, [jobId]);
+			return rows[0] ?? null;
+		},
 		async assetParts(assetId) { const { rows } = await pool.query(`SELECT asset_id,part_index,bytes,sha256,uploaded,remote_status,updated_at FROM ingestion_asset_parts WHERE asset_id=$1 ORDER BY part_index`, [assetId]); return rows; },
 		async findCompletedAssets(hashes) {
 			if (!hashes.length) return [];
@@ -268,9 +285,44 @@ export function createLedger(connectionString) {
 		async recordRemoteParts(assetId, receivedParts) { await pool.query('UPDATE ingestion_asset_parts SET uploaded=true,remote_status=200,updated_at=now() WHERE asset_id=$1 AND part_index = ANY($2::int[])', [assetId, receivedParts]); },
 		async updateAssetSession(assetId, state, remoteUploadId = null) { await pool.query(`UPDATE ingestion_assets SET state=$2,remote_upload_id=coalesce($3,remote_upload_id),updated_at=now() WHERE asset_id=$1`, [assetId, state, remoteUploadId]); },
 		async markAssets(jobId, state, remoteUploadId = null) { await pool.query('UPDATE ingestion_assets SET state=$2,remote_upload_id=coalesce($3,remote_upload_id),updated_at=now() WHERE job_id=$1', [jobId, state, remoteUploadId]); },
-		async retryJob(jobId) { const { rows } = await pool.query(`UPDATE ingestion_jobs SET status='queued',stage='manual_retry',error_class=null,error_message=null,updated_at=now() WHERE job_id=$1 AND status IN ('failed','retryable_failed','duplicate','queued') RETURNING *`, [jobId]); return rows[0] ?? null; },
-		async retryQueue() { const { rows } = await pool.query(`SELECT j.*, coalesce(json_agg(json_build_object('asset',a,'parts',coalesce((SELECT json_agg(p ORDER BY p.part_index) FROM ingestion_asset_parts p WHERE p.asset_id=a.asset_id),'[]'))) FILTER (WHERE a.asset_id IS NOT NULL),'[]') AS resources FROM ingestion_jobs j LEFT JOIN ingestion_assets a ON a.job_id=j.job_id WHERE j.status='queued' AND j.stage='manual_retry' GROUP BY j.job_id ORDER BY j.updated_at LIMIT 5`); return rows; },
-		async markRetryRunning(jobId) { const { rowCount } = await pool.query(`UPDATE ingestion_jobs SET status='uploading',stage='retry_running',attempt_count=attempt_count+1,updated_at=now() WHERE job_id=$1 AND status='queued' AND stage='manual_retry'`, [jobId]); return rowCount === 1; },
+		async enqueueDelivery(jobId) {
+			const { rows } = await pool.query(`INSERT INTO ingestion_delivery_outbox(job_id,status,available_at,lease_owner,lease_expires_at,last_error)
+				VALUES($1,'queued',now(),null,null,null)
+				ON CONFLICT(job_id) DO UPDATE SET status='queued',available_at=now(),lease_owner=null,lease_expires_at=null,last_error=null,updated_at=now()
+				RETURNING *`, [jobId]);
+			return rows[0];
+		},
+		async claimDeliveries({ workerId, limit = 5, leaseSeconds = 300 }) {
+			const boundedLimit = Math.max(1, Math.min(20, Number(limit) || 5));
+			const boundedLease = Math.max(30, Math.min(1800, Number(leaseSeconds) || 300));
+			const { rows } = await pool.query(`WITH candidates AS (
+					SELECT delivery_id FROM ingestion_delivery_outbox
+					WHERE (status IN ('queued','retryable_failed') AND available_at <= now())
+						OR (status='processing' AND lease_expires_at < now())
+					ORDER BY available_at,created_at
+					FOR UPDATE SKIP LOCKED LIMIT $2
+				) UPDATE ingestion_delivery_outbox outbox
+				SET status='processing',attempt_count=outbox.attempt_count+1,lease_owner=$1,lease_expires_at=now()+($3 * interval '1 second'),updated_at=now()
+				FROM candidates WHERE outbox.delivery_id=candidates.delivery_id
+				RETURNING outbox.*`, [workerId, boundedLimit, boundedLease]);
+			return rows;
+		},
+		async completeDelivery(deliveryId) { await pool.query(`UPDATE ingestion_delivery_outbox SET status='completed',lease_owner=null,lease_expires_at=null,last_error=null,updated_at=now() WHERE delivery_id=$1`, [deliveryId]); },
+		async failDelivery(deliveryId, { errorMessage, retryable }) {
+			const attempt = await pool.query('SELECT attempt_count FROM ingestion_delivery_outbox WHERE delivery_id=$1', [deliveryId]);
+			const retryDelaySeconds = deliveryRetryDelaySeconds(attempt.rows[0]?.attempt_count);
+			const { rows } = await pool.query(`UPDATE ingestion_delivery_outbox
+				SET status=CASE WHEN $2 THEN 'retryable_failed' ELSE 'failed' END,
+					available_at=CASE WHEN $2 THEN now() + ($4 * interval '1 second') ELSE available_at END,
+					lease_owner=null,lease_expires_at=null,last_error=$3,updated_at=now()
+				WHERE delivery_id=$1 RETURNING *`, [deliveryId, Boolean(retryable), String(errorMessage ?? '').slice(0, 1000), retryDelaySeconds]);
+			return rows[0] ?? null;
+		},
+		async retryJob(jobId) {
+			const { rows } = await pool.query(`UPDATE ingestion_jobs SET status='queued',stage='manual_retry',error_class=null,error_message=null,updated_at=now() WHERE job_id=$1 AND status IN ('failed','retryable_failed','duplicate','queued') RETURNING *`, [jobId]);
+			if (rows[0]) await this.enqueueDelivery(jobId);
+			return rows[0] ?? null;
+		},
 		async recordError(error) { await pool.query(`INSERT INTO ingestion_errors(job_id,execution_id,workflow_id,node_name,http_status,error_class,message,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [error.job_id ?? null, error.execution_id ?? null, error.workflow_id ?? null, error.node_name ?? null, error.http_status ?? null, error.error_class ?? 'n8n_error', error.message, error.payload ?? {}]); },
 		async queueAnalysisByMessage(messageId, batchId) {
 			await pool.query(`INSERT INTO analysis_jobs(job_id) SELECT job_id FROM ingestion_jobs WHERE message_id=$1 ON CONFLICT(job_id) DO UPDATE SET updated_at=analysis_jobs.updated_at`, [messageId]);
@@ -293,7 +345,9 @@ export function createLedger(connectionString) {
 				(SELECT count(*)::int FROM ingestion_jobs WHERE status='completed') AS completed,
 				(SELECT count(*)::int FROM ingestion_jobs WHERE status IN ('failed','retryable_failed')) AS failed,
 				(SELECT coalesce(sum(declared_bytes),0)::bigint FROM ingestion_assets WHERE state='completed') AS completed_media_bytes,
-				(SELECT coalesce(avg(extract(epoch FROM updated_at-created_at)),0)::float FROM ingestion_jobs WHERE status='completed') AS completed_seconds`);
+				(SELECT coalesce(avg(extract(epoch FROM updated_at-created_at)),0)::float FROM ingestion_jobs WHERE status='completed') AS completed_seconds,
+				(SELECT count(*)::int FROM ingestion_delivery_outbox WHERE status IN ('queued','processing','retryable_failed')) AS delivery_outbox_depth,
+				(SELECT count(*)::int FROM ingestion_delivery_outbox WHERE status='failed') AS delivery_outbox_failed`);
 			return rows[0];
 		},
 		async ingestionStatusBySource() {

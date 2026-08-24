@@ -13,13 +13,14 @@ set -euo pipefail
 edge_host="${RELAY_EDGE_HOST:-root@47.114.113.152}"
 edge_dir="${RELAY_EDGE_DIR:-/opt/feishu-relay-edge}"
 edge_runtime_env="${RELAY_EDGE_RUNTIME_ENV:-/etc/feishu-relay-edge/runtime.env}"
+edge_key="${RELAY_EDGE_SSH_KEY:-/Users/papa/.ssh/feishu_relay_edge_ed25519}"
 local_adapter_container="${LOCAL_FEISHU_ADAPTER_CONTAINER:-n8n-feishu-adapter}"
 local_postgres_container="${LOCAL_N8N_POSTGRES_CONTAINER:-n8n-postgres}"
 local_adapter_health_url="${LOCAL_FEISHU_ADAPTER_HEALTH_URL:-http://127.0.0.1:5680/health}"
 local_writer_id="${FEISHU_RELAY_WRITER_ID:-workstation}"
 
 relay_tables=(
-  ingestion_topics ingestion_publishers ingestion_source_profiles ingestion_jobs
+  ingestion_topics ingestion_publishers ingestion_source_profiles ingestion_jobs ingestion_delivery_outbox
   ingestion_content_items ingestion_assets ingestion_asset_parts ingestion_errors analysis_jobs
   feishu_group_relay_sources feishu_group_relay_messages feishu_group_relay_actions
   feishu_group_relay_routes feishu_group_relay_route_state feishu_summary_listener_state
@@ -29,7 +30,9 @@ relay_tables=(
 for command in ssh docker mktemp curl; do
   command -v "$command" >/dev/null || { echo "missing required command: $command" >&2; exit 1; }
 done
+[[ -r "$edge_key" ]] || { echo "edge SSH key is not readable: $edge_key" >&2; exit 1; }
 [[ "$local_writer_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "invalid local relay writer ID" >&2; exit 1; }
+edge_ssh=(ssh -i "$edge_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
 
 workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$workspace_root"
@@ -41,7 +44,7 @@ trap 'rm -rf "$temp_dir"' EXIT
 remote_dump_file="$temp_dir/relay-ledger.sql"
 
 echo "[1/5] Fencing remote relay and taking a durable ledger snapshot..."
-ssh "$edge_host" "EDGE_DIR='$edge_dir' EDGE_RUNTIME_ENV='$edge_runtime_env' bash -s" >"$remote_dump_file" <<'REMOTE'
+"${edge_ssh[@]}" "$edge_host" "EDGE_DIR='$edge_dir' EDGE_RUNTIME_ENV='$edge_runtime_env' bash -s" >"$remote_dump_file" <<'REMOTE'
 set -euo pipefail
 cd "$EDGE_DIR"
 sed -i -E 's/^FEISHU_GROUP_RELAY_ENABLED=.*/FEISHU_GROUP_RELAY_ENABLED=false/; s/^FEISHU_SUMMARY_LISTENER_ENABLED=.*/FEISHU_SUMMARY_LISTENER_ENABLED=false/' "$EDGE_RUNTIME_ENV"
@@ -49,7 +52,7 @@ docker compose --env-file "$EDGE_RUNTIME_ENV" --env-file /etc/feishu-relay-edge/
 . "$EDGE_RUNTIME_ENV"
 export PGPASSWORD="$RELAY_PGPASSWORD"
 pg_dump -h 127.0.0.1 -U "$RELAY_PGUSER" -d "$RELAY_PGDATABASE" --data-only --no-owner --no-privileges \
-  --table=public.ingestion_topics --table=public.ingestion_publishers --table=public.ingestion_source_profiles --table=public.ingestion_jobs \
+  --table=public.ingestion_topics --table=public.ingestion_publishers --table=public.ingestion_source_profiles --table=public.ingestion_jobs --table=public.ingestion_delivery_outbox \
   --table=public.ingestion_content_items --table=public.ingestion_assets --table=public.ingestion_asset_parts --table=public.ingestion_errors --table=public.analysis_jobs \
   --table=public.feishu_group_relay_sources --table=public.feishu_group_relay_messages --table=public.feishu_group_relay_actions \
   --table=public.feishu_group_relay_routes --table=public.feishu_group_relay_route_state --table=public.feishu_summary_listener_state \
@@ -82,7 +85,7 @@ docker exec -i "$local_postgres_container" psql -v ON_ERROR_STOP=1 -U n8n -d n8n
   -c "INSERT INTO public.feishu_relay_writer_ownership(singleton,writer_id,generation) VALUES(true, :'writer_id', 1) ON CONFLICT(singleton) DO UPDATE SET writer_id=EXCLUDED.writer_id,generation=public.feishu_relay_writer_ownership.generation+1,updated_at=now();" >/dev/null
 
 echo "[3/5] Copying any remote retry-media files to local durable storage..."
-ssh "$edge_host" "tar -C '$edge_dir/adapter-ingestion' -cf - ." \
+"${edge_ssh[@]}" "$edge_host" "tar -C '$edge_dir/adapter-ingestion' -cf - ." \
   | docker exec -i "$local_adapter_container" tar -C /var/lib/adapter-ingestion -xf -
 
 echo "[4/5] Starting local relay and summary listener..."
