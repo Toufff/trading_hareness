@@ -22,6 +22,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 release_sha="$(git -C "$repo_root" rev-parse --verify "${release_sha}^{commit}")"
 
 image_ref="${FEISHU_ADAPTER_IMAGE:-ghcr.io/woshipapa/trading-hareness-feishu-adapter:${release_sha}}"
+pull_timeout_seconds="${RELAY_EDGE_IMAGE_PULL_TIMEOUT_SECONDS:-300}"
 apply=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,6 +32,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -n "$image_ref" ]] || { echo "image reference must not be empty" >&2; exit 2; }
+[[ "$pull_timeout_seconds" =~ ^[0-9]+$ ]] && (( pull_timeout_seconds >= 30 && pull_timeout_seconds <= 1800 )) || { echo "image pull timeout must be 30-1800 seconds" >&2; exit 2; }
 
 edge_host="${RELAY_EDGE_HOST:-root@47.114.113.152}"
 edge_dir="${RELAY_EDGE_DIR:-/opt/feishu-relay-edge}"
@@ -43,14 +45,14 @@ ssh_command=(ssh -i "$edge_key" -o BatchMode=yes -o IdentitiesOnly=yes -o Strict
 [[ -z "$ssh_control_path" ]] || ssh_command+=(-S "$ssh_control_path" -o ControlMaster=no -o BatchMode=yes)
 built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-printf 'release_sha=%s\nrelease_label=%s\nimage=%s\nedge_host=%s\n' "$release_sha" "$release_label" "$image_ref" "$edge_host"
+printf 'release_sha=%s\nrelease_label=%s\nimage=%s\nedge_host=%s\npull_timeout_seconds=%s\n' "$release_sha" "$release_label" "$image_ref" "$edge_host" "$pull_timeout_seconds"
 if [[ "$apply" != true ]]; then
   echo "dry run only; append --apply after the GHCR image is published"
   exit 0
 fi
 
 "${ssh_command[@]}" "$edge_host" bash -s -- \
-  "$edge_dir" "$runtime_env" "$secrets_env" "$image_ref" "$release_sha" "$release_label" "$built_at" <<'REMOTE'
+  "$edge_dir" "$runtime_env" "$secrets_env" "$image_ref" "$release_sha" "$release_label" "$built_at" "$pull_timeout_seconds" <<'REMOTE'
 set -euo pipefail
 edge_dir="$1"
 runtime_env="$2"
@@ -59,10 +61,11 @@ image_ref="$4"
 release_sha="$5"
 release_label="$6"
 built_at="$7"
+pull_timeout_seconds="$8"
 
 test -f "$runtime_env"
 test -f "$secrets_env"
-docker pull "$image_ref"
+timeout "${pull_timeout_seconds}s" docker pull "$image_ref"
 update_env() {
   key="$1"
   value="$2"
