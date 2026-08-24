@@ -15,6 +15,12 @@ shift 2
 [[ "$release_sha" =~ ^[0-9a-fA-F]{7,64}$ ]] || { echo "git SHA must be hexadecimal" >&2; exit 2; }
 [[ "$release_label" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "release label contains unsupported characters" >&2; exit 2; }
 
+# GitHub Actions publishes immutable images under the complete commit SHA.
+# Accept a convenient abbreviated SHA at the CLI, then resolve it locally
+# before deriving the default GHCR tag or checking the health provenance.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+release_sha="$(git -C "$repo_root" rev-parse --verify "${release_sha}^{commit}")"
+
 image_ref="${FEISHU_ADAPTER_IMAGE:-ghcr.io/woshipapa/trading-hareness-feishu-adapter:${release_sha}}"
 apply=false
 while [[ $# -gt 0 ]]; do
