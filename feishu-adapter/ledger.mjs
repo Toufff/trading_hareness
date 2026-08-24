@@ -347,7 +347,7 @@ export function createLedger(connectionString) {
 				(SELECT coalesce(sum(declared_bytes),0)::bigint FROM ingestion_assets WHERE state='completed') AS completed_media_bytes,
 				(SELECT coalesce(avg(extract(epoch FROM updated_at-created_at)),0)::float FROM ingestion_jobs WHERE status='completed') AS completed_seconds,
 				(SELECT count(*)::int FROM ingestion_delivery_outbox WHERE status IN ('queued','processing','retryable_failed')) AS delivery_outbox_depth,
-				(SELECT count(*)::int FROM ingestion_delivery_outbox WHERE status='failed') AS delivery_outbox_failed`);
+				(SELECT count(*)::int FROM ingestion_delivery_outbox o JOIN ingestion_jobs j ON j.job_id=o.job_id WHERE o.status='failed' AND coalesce(j.error_class,'') <> 'operator_pause') AS delivery_outbox_failed`);
 			return rows[0];
 		},
 		async ingestionStatusBySource() {
@@ -356,7 +356,7 @@ export function createLedger(connectionString) {
 					SELECT source_tag,
 						count(*)::int AS job_count,
 						count(*) FILTER (WHERE status='completed')::int AS completed_count,
-						count(*) FILTER (WHERE status IN ('failed','retryable_failed'))::int AS failed_count,
+						count(*) FILTER (WHERE status IN ('failed','retryable_failed') AND coalesce(error_class,'') <> 'operator_pause')::int AS failed_count,
 						max(updated_at) AS last_updated_at
 					FROM ingestion_jobs GROUP BY source_tag
 				), latest AS (

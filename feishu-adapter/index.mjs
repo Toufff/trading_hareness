@@ -15,6 +15,7 @@ import { createFeishuWorkbench } from './feishu-workbench.mjs';
 import { isSystemRelayPlaceholder } from './message-filter.mjs';
 import { extractImportContent, isValidDateTime } from './message-time.mjs';
 import { hasImportableTaggedPayload } from './summary-ingestion-filter.mjs';
+import { isOperatorPausedIngestion } from './ingestion-health.mjs';
 import { shouldSkipMessageForward } from './message-idempotency.mjs';
 import { shouldRedownloadRetryMedia } from './retry-media.mjs';
 import Busboy from 'busboy';
@@ -902,6 +903,7 @@ async function groupRelayDashboardStatus() {
 		const ingestionLastUpdatedAt = asIsoString(ingestionRecord?.last_updated_at);
 		const ingestionAgeSeconds = ingestionLastUpdatedAt ? Math.max(0, Math.floor((now - Date.parse(ingestionLastUpdatedAt)) / 1000)) : null;
 		const ingestionState = !ingestionRecord ? 'awaiting_message'
+			: isOperatorPausedIngestion(ingestionRecord) ? 'paused'
 			: ingestionRecord.latest_status === 'filtered' ? 'filtered'
 			: ingestionRecord.latest_status === 'completed' ? 'completed'
 			: ['failed', 'retryable_failed'].includes(ingestionRecord.latest_status) ? 'failed'
@@ -933,7 +935,7 @@ async function groupRelayDashboardStatus() {
 				state: ingestionState, latest_status: ingestionRecord.latest_status, latest_stage: ingestionRecord.latest_stage, remote_batch_id: ingestionRecord.remote_batch_id ?? null,
 				last_updated_at: ingestionLastUpdatedAt, error_class: ingestionRecord.error_class ?? null, error_message: ingestionRecord.error_message ?? null,
 			} : null,
-			last_error: current?.last_error ?? persisted?.latest_failure_error ?? (ingestionState === 'filtered' ? null : ingestionRecord?.error_message ?? null),
+			last_error: current?.last_error ?? persisted?.latest_failure_error ?? (['filtered', 'paused'].includes(ingestionState) ? null : ingestionRecord?.error_message ?? null),
 		};
 	});
 	const listenerLastSuccessAt = asIsoString(listenerRuntime.last_success_at);
