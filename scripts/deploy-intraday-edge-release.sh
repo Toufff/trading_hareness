@@ -71,7 +71,10 @@ EOF
   install -m 0755 \"\$release_dir/deploy/intraday-edge/edge_export.sh\" /usr/local/sbin/quant-edge-export
   # The restricted export account may read only the journal and explicit
   # evidence tables. Re-apply idempotent grants with every edge release.
-  sudo -u postgres psql -v ON_ERROR_STOP=1 -d quant_intraday_edge -f \"\$release_dir/deploy/intraday-edge/edge_export_grants.sql\" >/dev/null
+  # The release directory is intentionally not traversable by postgres. Root
+  # opens the versioned SQL and streams it to psql so the database role never
+  # gains filesystem access to release contents.
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -d quant_intraday_edge < \"\$release_dir/deploy/intraday-edge/edge_export_grants.sql\" >/dev/null
   ln -sfn \"\$release_dir\" \"\$edge_root/current\"
   systemctl daemon-reload
   systemctl restart quant-intraday-edge.service
