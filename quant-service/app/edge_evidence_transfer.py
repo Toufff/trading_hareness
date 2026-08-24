@@ -189,6 +189,10 @@ def edge_runtime_snapshot() -> dict[str, Any]:
     return {
         "status": str(health.get("status") or "unknown"),
         "runtime_profile": (health.get("optional_background_tasks") or {}).get("runtime_profile"),
+        # Health already exposes this as safe, validated release metadata. Keep
+        # it with the imported snapshot so the research UI can tie every
+        # evidence cursor to the exact remote collector revision.
+        "build": health.get("build") if isinstance(health.get("build"), dict) else {},
         "runtime_loops": health.get("runtime_loops") or {},
         "daily_control_plane": health.get("daily_control_plane") or {},
         "resources": {

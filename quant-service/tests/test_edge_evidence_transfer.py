@@ -99,13 +99,14 @@ class EdgeEvidenceTransferTests(unittest.TestCase):
             cursor.write_text(json.dumps({
                 "checkpoint": "2026-08-24T09:50:00Z", "imported_at": "2026-08-24T09:45:00Z",
                 "sequence": 44, "counts": {"intraday_scan_runs": 1},
-                "edge_runtime": {"status": "ok", "runtime_profile": "intraday_edge"},
+                "edge_runtime": {"status": "ok", "runtime_profile": "intraday_edge", "build": {"git_sha": "a1b2c3d", "release": "edge-test"}},
             }), encoding="utf-8")
             ready = edge_evidence_status(cursor, now=now, stale_after_seconds=1800)
             stale = edge_evidence_status(cursor, now=now, stale_after_seconds=60)
         self.assertEqual(ready["state"], "ready")
         self.assertEqual(ready["counts"]["intraday_scan_runs"], 1)
         self.assertEqual(ready["sequence"], 44)
+        self.assertEqual(ready["runtime"]["build"]["git_sha"], "a1b2c3d")
         self.assertEqual(stale["state"], "stale")
 
 

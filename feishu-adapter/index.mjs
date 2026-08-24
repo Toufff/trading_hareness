@@ -915,8 +915,9 @@ async function groupRelayDashboardStatus() {
 		const lastForwardedAt = asIsoString(persisted?.last_forwarded_at);
 		const activeError = current?.last_error
 			?? (ingestionFailed ? ingestionRecord?.error_message ?? null : null);
-		const resolvedError = !activeError && failedCount === 0 && persisted?.latest_failure_error
-			? persisted.latest_failure_error : null;
+		const resolvedError = !activeError && failedCount === 0
+			? persisted?.latest_failure_error ?? ingestionRecord?.latest_failure_error ?? null : null;
+		const resolvedErrorAt = persisted?.latest_failure_at ?? ingestionRecord?.latest_failure_at ?? null;
 		let state = 'healthy';
 		if (!groupRelayConfig.enabled || source.enabled === false) state = 'disabled';
 		else if (!oauth.configured) state = 'not_configured';
@@ -940,10 +941,11 @@ async function groupRelayDashboardStatus() {
 				job_count: Number(ingestionRecord.job_count ?? 0), completed_count: Number(ingestionRecord.completed_count ?? 0), failed_count: Number(ingestionRecord.failed_count ?? 0), paused_count: Number(ingestionRecord.paused_count ?? 0),
 				state: ingestionState, latest_status: ingestionRecord.latest_status, latest_stage: ingestionRecord.latest_stage, remote_batch_id: ingestionRecord.remote_batch_id ?? null,
 				last_updated_at: ingestionLastUpdatedAt, error_class: ingestionRecord.error_class ?? null, error_message: ingestionRecord.error_message ?? null,
+				latest_failure_error: ingestionRecord.latest_failure_error ?? null, latest_failure_at: asIsoString(ingestionRecord.latest_failure_at),
 			} : null,
 			last_error: activeError,
 			last_resolved_error: resolvedError,
-			last_resolved_error_at: resolvedError ? asIsoString(persisted?.latest_failure_at) : null,
+			last_resolved_error_at: resolvedError ? asIsoString(resolvedErrorAt) : null,
 		};
 	});
 	const listenerLastSuccessAt = asIsoString(listenerRuntime.last_success_at);

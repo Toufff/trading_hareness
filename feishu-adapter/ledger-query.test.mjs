@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { completedAssetLookupSql, deliveryRetryDelaySeconds, observabilitySql } from './ledger.mjs';
+import { completedAssetLookupSql, deliveryRetryDelaySeconds, ingestionStatusBySourceSql, observabilitySql } from './ledger.mjs';
 
 test('only treats an asset as reusable after its parent remote batch completed', () => {
 	const sql = completedAssetLookupSql();
@@ -23,4 +23,11 @@ test('operator-paused work is reported separately from actionable failures', () 
 	assert.match(sql, /error_class='operator_pause'/);
 	assert.match(sql, /AS delivery_outbox_paused/);
 	assert.match(sql, /coalesce\(j\.error_class,''\) <> 'operator_pause'/);
+});
+
+test('a completed source can retain its latest resolved transport error without reviving it', () => {
+	const sql = ingestionStatusBySourceSql();
+	assert.match(sql, /latest_failure_error/);
+	assert.match(sql, /status IN \('failed','retryable_failed'\)/);
+	assert.match(sql, /coalesce\(error_class,''\) <> 'operator_pause'/);
 });

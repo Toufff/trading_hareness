@@ -29,6 +29,29 @@ export function observabilitySql() {
 		(SELECT count(*)::int FROM ingestion_delivery_outbox o JOIN ingestion_jobs j ON j.job_id=o.job_id WHERE o.status='failed' AND j.error_class='operator_pause') AS delivery_outbox_paused`;
 }
 
+export function ingestionStatusBySourceSql() {
+	return `WITH counts AS (
+		SELECT source_tag,
+			count(*)::int AS job_count,
+			count(*) FILTER (WHERE status='completed')::int AS completed_count,
+			count(*) FILTER (WHERE status IN ('failed','retryable_failed') AND coalesce(error_class,'') <> 'operator_pause')::int AS failed_count,
+			count(*) FILTER (WHERE status='failed' AND error_class='operator_pause')::int AS paused_count,
+			max(updated_at) AS last_updated_at
+		FROM ingestion_jobs GROUP BY source_tag
+	), latest AS (
+		SELECT DISTINCT ON (source_tag) source_tag,status,stage,remote_batch_id,error_class,error_message,updated_at
+		FROM ingestion_jobs ORDER BY source_tag,updated_at DESC,created_at DESC
+	), failures AS (
+		SELECT DISTINCT ON (source_tag) source_tag,error_message AS latest_failure_error,updated_at AS latest_failure_at
+		FROM ingestion_jobs
+		WHERE status IN ('failed','retryable_failed') AND coalesce(error_class,'') <> 'operator_pause'
+		ORDER BY source_tag,updated_at DESC,created_at DESC
+	)
+	SELECT counts.*,latest.status AS latest_status,latest.stage AS latest_stage,latest.remote_batch_id,latest.error_class,latest.error_message,
+		failures.latest_failure_error,failures.latest_failure_at
+	FROM counts JOIN latest USING(source_tag) LEFT JOIN failures USING(source_tag) ORDER BY counts.source_tag`;
+}
+
 export function createLedger(connectionString) {
 	const pool = new Pool(connectionString ? { connectionString, max: 4, idleTimeoutMillis: 30_000 } : { max: 4, idleTimeoutMillis: 30_000 });
 	return {
@@ -357,22 +380,7 @@ export function createLedger(connectionString) {
 			return rows[0];
 		},
 		async ingestionStatusBySource() {
-			const { rows } = await pool.query(`
-				WITH counts AS (
-					SELECT source_tag,
-						count(*)::int AS job_count,
-						count(*) FILTER (WHERE status='completed')::int AS completed_count,
-						count(*) FILTER (WHERE status IN ('failed','retryable_failed') AND coalesce(error_class,'') <> 'operator_pause')::int AS failed_count,
-						count(*) FILTER (WHERE status='failed' AND error_class='operator_pause')::int AS paused_count,
-						max(updated_at) AS last_updated_at
-					FROM ingestion_jobs GROUP BY source_tag
-				), latest AS (
-					SELECT DISTINCT ON (source_tag) source_tag,status,stage,remote_batch_id,error_class,error_message,updated_at
-					FROM ingestion_jobs ORDER BY source_tag,updated_at DESC,created_at DESC
-				)
-				SELECT counts.*,latest.status AS latest_status,latest.stage AS latest_stage,latest.remote_batch_id,latest.error_class,latest.error_message
-				FROM counts JOIN latest USING(source_tag) ORDER BY counts.source_tag
-			`);
+			const { rows } = await pool.query(ingestionStatusBySourceSql());
 			return rows;
 		},
 		async pendingJobs() { const { rows } = await pool.query(`SELECT * FROM ingestion_jobs WHERE status IN ('queued','retryable_failed','uploading') ORDER BY updated_at ASC LIMIT 100`); return rows; },
