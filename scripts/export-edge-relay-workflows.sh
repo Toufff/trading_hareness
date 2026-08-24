@@ -4,12 +4,14 @@
 set -euo pipefail
 
 edge_host="${RELAY_EDGE_HOST:-root@47.114.113.152}"
+edge_key="${RELAY_EDGE_SSH_KEY:-/Users/papa/.ssh/feishu_relay_edge_ed25519}"
 edge_ssh_control_path="${RELAY_EDGE_SSH_CONTROL_PATH:-}"
 source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target_root="$source_root/workflows/edge-relay"
 edge_container="${RELAY_EDGE_N8N_CONTAINER:-feishu-relay-edge-n8n}"
 ids=(mediaStateFlow123 mediaPartFlow123 mediaFinalize123 xo3AHKRr4MFXrzFA)
-ssh_command=(ssh)
+[[ -r "$edge_key" ]] || { echo "edge SSH key is not readable: $edge_key" >&2; exit 2; }
+ssh_command=(ssh -i "$edge_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
 [[ -z "$edge_ssh_control_path" ]] || ssh_command+=(-S "$edge_ssh_control_path" -o ControlMaster=no -o BatchMode=yes)
 
 for command in ssh tar jq mktemp; do command -v "$command" >/dev/null || { echo "missing required command: $command" >&2; exit 127; }; done

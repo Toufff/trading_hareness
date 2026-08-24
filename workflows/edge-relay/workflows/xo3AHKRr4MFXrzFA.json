@@ -275,7 +275,7 @@
         "method": "POST",
         "options": {},
         "sendBody": true,
-        "url": "http://feishu-adapter:3000/n8n-status"
+        "url": "http://127.0.0.1:18300/n8n-status"
       },
       "position": [
         1760,

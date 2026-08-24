@@ -3,12 +3,14 @@
 set -euo pipefail
 
 edge_host="${RELAY_EDGE_HOST:-root@47.114.113.152}"
+edge_key="${RELAY_EDGE_SSH_KEY:-/Users/papa/.ssh/feishu_relay_edge_ed25519}"
 edge_ssh_control_path="${RELAY_EDGE_SSH_CONTROL_PATH:-}"
 source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tracked_root="$source_root/workflows/edge-relay/workflows"
 edge_container="${RELAY_EDGE_N8N_CONTAINER:-feishu-relay-edge-n8n}"
 ids=(mediaStateFlow123 mediaPartFlow123 mediaFinalize123 xo3AHKRr4MFXrzFA)
-ssh_command=(ssh)
+[[ -r "$edge_key" ]] || { echo "edge SSH key is not readable: $edge_key" >&2; exit 2; }
+ssh_command=(ssh -i "$edge_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
 [[ -z "$edge_ssh_control_path" ]] || ssh_command+=(-S "$edge_ssh_control_path" -o ControlMaster=no -o BatchMode=yes)
 
 [[ -d "$tracked_root" ]] || { echo "tracked edge workflow source is missing: $tracked_root" >&2; exit 2; }
@@ -29,9 +31,18 @@ for id in "${ids[@]}"; do
   [[ -f "$input" ]] || { echo "remote export missing $id" >&2; exit 1; }
   jq -S --arg remote_archive_base "$remote_archive_base" '
     def redact_archive_base: split($remote_archive_base) | join("__REMOTE_ANALYST_ARCHIVE_BASE_URL__");
-    walk(if type == "string" then redact_archive_base else . end)
-  ' "$input" > "$stage_root/${id}.canonical.json"
-  diff -u "$tracked_root/${id}.json" "$stage_root/${id}.canonical.json" >/dev/null || {
+    def stable_definition:
+      del(.activeVersionId, .createdAt, .updatedAt, .versionCounter, .versionId,
+          .versionMetadata, .triggerCount, .staticData);
+    walk(if type == "string" then redact_archive_base else . end) | stable_definition
+  ' "$input" > "$stage_root/${id}.remote.json"
+  jq -S '
+    def stable_definition:
+      del(.activeVersionId, .createdAt, .updatedAt, .versionCounter, .versionId,
+          .versionMetadata, .triggerCount, .staticData);
+    stable_definition
+  ' "$tracked_root/${id}.json" > "$stage_root/${id}.tracked.json"
+  diff -u "$stage_root/${id}.tracked.json" "$stage_root/${id}.remote.json" >/dev/null || {
     echo "workflow drift: $id" >&2
     exit 1
   }

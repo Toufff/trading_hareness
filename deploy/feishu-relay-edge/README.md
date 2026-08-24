@@ -43,12 +43,29 @@ publish a non-secret `build` object with `git_sha`, `release`, and
 Use `scripts/export-edge-relay-workflows.sh` to refresh the redacted canonical
 workflow JSON under `workflows/edge-relay/`, then use
 `scripts/verify-edge-relay-workflows.sh` before a deployment. The latter is
-read-only and fails on workflow drift.
+read-only and fails on workflow drift. Both commands use the dedicated
+`feishu_relay_edge_ed25519` key by default (or `RELAY_EDGE_SSH_KEY` when an
+operator supplies a different key), never an interactive password prompt.
+Version IDs, execution counters, timestamps and n8n static runtime state are
+deliberately ignored by the drift comparison; node graphs, connections,
+settings and callback URLs are not.
 
 `scripts/deploy-feishu-relay-edge-release.sh <git-sha> <release-label>` is a
 dry run by default. `--apply` pulls the immutable image, updates only the
 non-secret release keys in remote runtime configuration, and recreates the
 adapter while retaining its durable PostgreSQL relay ledger and media volume.
+
+For a committed webhook workflow revision, use:
+
+```bash
+bash scripts/deploy-edge-relay-workflows.sh <git-sha> --apply
+```
+
+It exports a retained rollback copy on the edge, renders the redacted remote
+archive base URL there, stops n8n before changing its persisted graph, publishes
+all four workflow versions in one transaction, and then verifies the live
+export against the committed source. It refuses an uncommitted worktree or a
+workflow containing the obsolete Docker-only callback address.
 
 ## Deterministic emergency failover to the workstation
 
