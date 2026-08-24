@@ -62,10 +62,15 @@ services:
       N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: ${N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT:-900}
       N8N_RUNNERS_AUTH_TOKEN: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
       N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+      # Workflow HTTP nodes use this stable internal address.  Its backend can
+      # be hot-switched only after the next quant image is preflight-healthy.
+      QUANT_SERVICE_URL: http://quant-research-gateway:8000
       # The managed analyst-sync workflows read only the injected archive base
       # URL and quant write key by expression.  Credentials remain n8n
       # references; the values are never exported to the repository.
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      # paper-kb schedules run here; the workflow POSTs to the KB on the host.
+      PAPER_KB_JOBS_TOKEN: ${PAPER_KB_JOBS_TOKEN:-}
       N8N_PAYLOAD_SIZE_MAX: ${N8N_PAYLOAD_SIZE_MAX:-512}
       N8N_FORMDATA_FILE_SIZE_MAX: ${N8N_FORMDATA_FILE_SIZE_MAX:-512}
       NODE_EXTRA_CA_CERTS: /opt/n8n-certs/market-review-api.pem
@@ -97,6 +102,7 @@ services:
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
       REMOTE_ANALYST_ARCHIVE_BASE_URL: ${REMOTE_ANALYST_ARCHIVE_BASE_URL:-}
       QUANT_WRITE_API_KEY: ${QUANT_WRITE_API_KEY:?Set QUANT_WRITE_API_KEY in .env}
+      QUANT_SERVICE_URL: http://quant-research-gateway:8000
       TZ: Asia/Shanghai
     volumes:
       - n8n_data:/home/node/.n8n
@@ -105,6 +111,10 @@ services:
     build:
       context: .
       dockerfile: feishu-adapter/Dockerfile
+      args:
+        APP_GIT_SHA: ${APP_GIT_SHA:-unknown}
+        APP_RELEASE: ${APP_RELEASE:-unknown}
+        APP_BUILD_CREATED_AT: ${APP_BUILD_CREATED_AT:-unknown}
     image: n8n-feishu-adapter:local
     container_name: n8n-feishu-adapter
     user: "0:0"
@@ -112,11 +122,15 @@ services:
     depends_on:
       n8n:
         condition: service_started
-      quant-research:
+      quant-research-gateway:
         condition: service_healthy
     ports:
       - "127.0.0.1:5680:3000"
     environment:
+      # paper-kb: reading-group ingest/search commands -> n8n webhooks -> the KB on the host.
+      PAPER_KB_FEISHU_CHAT_ID: ${PAPER_KB_FEISHU_CHAT_ID:-}
+      PAPER_KB_INGEST_WEBHOOK: ${PAPER_KB_INGEST_WEBHOOK:-}
+      PAPER_KB_SEARCH_WEBHOOK: ${PAPER_KB_SEARCH_WEBHOOK:-}
       PGHOST: postgres
       PGPORT: 5432
       PGDATABASE: n8n
@@ -137,7 +151,7 @@ services:
       INGESTION_RECONCILE_SECONDS: ${INGESTION_RECONCILE_SECONDS:-300}
       INGESTION_LEDGER_RETENTION_DAYS: ${INGESTION_LEDGER_RETENTION_DAYS:-90}
       INGESTION_MAX_FILE_BYTES: ${INGESTION_MAX_FILE_BYTES:-524288000}
-      QUANT_SERVICE_URL: http://quant-research:8000
+      QUANT_SERVICE_URL: http://quant-research-gateway:8000
       QUANT_WRITE_API_KEY: ${QUANT_WRITE_API_KEY:?Set QUANT_WRITE_API_KEY in .env}
       QUANT_ALERT_WEBHOOK_TOKEN: ${QUANT_ALERT_WEBHOOK_TOKEN:-}
       FEISHU_ALERT_RECEIVE_ID: ${FEISHU_ALERT_RECEIVE_ID:-}
@@ -191,6 +205,10 @@ services:
     build:
       context: .
       dockerfile: quant-service/Dockerfile
+      args:
+        APP_GIT_SHA: ${APP_GIT_SHA:-unknown}
+        APP_RELEASE: ${APP_RELEASE:-unknown}
+        APP_BUILD_CREATED_AT: ${APP_BUILD_CREATED_AT:-unknown}
     image: n8n-quant-research:local
     container_name: n8n-quant-research
     restart: unless-stopped
@@ -218,6 +236,12 @@ services:
       QUANT_RESEARCH_STORAGE_STOP_RATIO: ${QUANT_RESEARCH_STORAGE_STOP_RATIO:-0.90}
       QUANT_LEGACY_SCHEMA_BOOTSTRAP: ${QUANT_LEGACY_SCHEMA_BOOTSTRAP:-false}
       QUANT_MIGRATION_LOCK_TIMEOUT_SECONDS: ${QUANT_MIGRATION_LOCK_TIMEOUT_SECONDS:-60}
+      # A preflight image can set this false to validate startup without
+      # acquiring collection or strategy leases. The normal service stays on.
+      QUANT_BACKGROUND_TASKS_ENABLED: ${QUANT_BACKGROUND_TASKS_ENABLED:-true}
+      # full preserves the legacy single-node runtime; production migration
+      # assigns research locally and intraday_edge to the always-on collector.
+      QUANT_RUNTIME_PROFILE: ${QUANT_RUNTIME_PROFILE:-full}
       POST_CLOSE_REFRESH_LEASE_SECONDS: ${POST_CLOSE_REFRESH_LEASE_SECONDS:-1800}
       AKSHARE_MAX_WORKERS: ${AKSHARE_MAX_WORKERS:-4}
       TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
@@ -295,6 +319,7 @@ services:
       INTRADAY_ORDER_BOOK_RETENTION_DAYS: ${INTRADAY_ORDER_BOOK_RETENTION_DAYS:-7}
       STRATEGY_REVIEW_AUTOMATION_ENABLED: ${STRATEGY_REVIEW_AUTOMATION_ENABLED:-true}
       POST_CLOSE_STRATEGY_AUTOMATION_ENABLED: ${POST_CLOSE_STRATEGY_AUTOMATION_ENABLED:-true}
+      TEN_DAY_LEADER_ROTATION_AUTOMATION_ENABLED: ${TEN_DAY_LEADER_ROTATION_AUTOMATION_ENABLED:-true}
       DAILY_SUMMARY_AUTOMATION_ENABLED: ${DAILY_SUMMARY_AUTOMATION_ENABLED:-true}
       THS_CONCEPT_MEMBER_BACKFILL_ENABLED: ${THS_CONCEPT_MEMBER_BACKFILL_ENABLED:-true}
       THS_CONCEPT_MEMBER_BACKFILL_BATCH_SIZE: ${THS_CONCEPT_MEMBER_BACKFILL_BATCH_SIZE:-25}
@@ -307,6 +332,56 @@ services:
       interval: 15s
       timeout: 5s
       retries: 8
+      start_period: 15s
+
+  # Stable, sidecar-only API entrypoint for a future blue/green quant-service
+  # handoff.  It starts as a passive proxy to the existing service so adding
+  # it cannot interrupt current n8n, adapter, or loopback traffic.
+  quant-research-gateway:
+    image: nginx:1.27-alpine
+    container_name: n8n-quant-research-gateway
+    restart: unless-stopped
+    depends_on:
+      quant-research:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${QUANT_GATEWAY_PORT:-5682}:8000"
+    volumes:
+      - ./deploy/quant-research-gateway.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/quant-research-gateway-backend.conf:/etc/nginx/conf.d/quant-research-backend.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 3 -O /dev/null http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+
+  # Explicitly opt-in preflight instance for a future handoff. It shares the
+  # database only for schema/readiness validation and never starts leased work.
+  quant-research-preflight:
+    image: n8n-quant-research:local
+    container_name: n8n-quant-research-preflight
+    profiles: ["preflight"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: n8n
+      PGUSER: n8n
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      # Health needs an existing filesystem path; no preflight output is kept.
+      QUANT_DATA_DIR: /tmp
+      QUANT_LEGACY_SCHEMA_BOOTSTRAP: "false"
+      QUANT_MIGRATION_LOCK_TIMEOUT_SECONDS: ${QUANT_MIGRATION_LOCK_TIMEOUT_SECONDS:-60}
+      QUANT_BACKGROUND_TASKS_ENABLED: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=3).read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
       start_period: 15s
 
 volumes:

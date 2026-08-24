@@ -1,0 +1,408 @@
+{
+  "active": true,
+  "activeVersionId": "97e94305-e9a5-4387-8896-233dfc50fafc",
+  "connections": {
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "HTTP Request",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Confirm submitted batch": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Verify submitted batch state",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Confirm text item in batch": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Verify text item was persisted",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "HTTP Request1",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "HTTP Request1": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Confirm text item in batch",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "HTTP Request2": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Confirm submitted batch",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Verify submitted batch state": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Notify monitor success",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Verify text item was persisted": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "HTTP Request2",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Code in JavaScript",
+            "type": "main"
+          }
+        ]
+      ]
+    }
+  },
+  "createdAt": "2026-08-04T07:05:35.201Z",
+  "description": null,
+  "id": "xo3AHKRr4MFXrzFA",
+  "isArchived": false,
+  "meta": null,
+  "name": "飞书入口：文本汇聚",
+  "nodeGroups": [],
+  "nodes": [
+    {
+      "id": "582a1996-0e31-4ac6-ab16-c9cd86a6464e",
+      "name": "Webhook",
+      "parameters": {
+        "httpMethod": "POST",
+        "options": {},
+        "path": "feishu-market-text",
+        "responseData": "firstEntryJson",
+        "responseMode": "lastNode"
+      },
+      "position": [
+        0,
+        0
+      ],
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "webhookId": "d3fa8dd6-7871-44aa-b2e7-f83fca017ac8"
+    },
+    {
+      "id": "faf91608-fa38-40fa-add9-2bf00cd1da37",
+      "name": "Code in JavaScript",
+      "parameters": {
+        "jsCode": "const inbound = $input.first();\nconst outer = inbound.json.body ?? inbound.json;\nlet payload = outer;\nif (typeof outer?.metadata === 'string') payload = JSON.parse(outer.metadata);\nelse if (outer?.metadata && typeof outer.metadata === 'object') payload = outer.metadata;\n\nconst event = payload.event ?? payload;\nconst message = event.message ?? payload.message ?? event;\nconst rawText = String(payload.message_text ?? '').trim();\nconst tagMatch = rawText.match(/^#([a-z0-9-]+)\\s*(?:\\r?\\n)?/i);\nif (!tagMatch) throw new Error('缺少首行路由标签，例如 #liwei');\n\nconst analystMap = {\n  liwei: 'liwei',\n  liuzi: 'douyin-liuzi',\n  xiaolan: 'yang-ning',\n  anqiang: 'anqiang-touzi-riji',\n  quanneng: 'quanneng-yeren',\n};\nconst sourceTag = tagMatch[1].toLowerCase();\nconst analystId = String(payload.analyst_id ?? analystMap[sourceTag] ?? '');\nif (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(analystId)) throw new Error('不支持的分析师标签：#' + sourceTag);\nconst messageId = String(message.message_id ?? payload.message_id ?? Date.now());\nconst safeId = messageId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 52).padEnd(24, '0');\nconst resources = Array.isArray(payload.resources) ? payload.resources : [];\nconst content = String(payload.import_content ?? rawText.slice(tagMatch[0].length)).trim();\n// content_date/content_time mean an explicit user timestamp to the remote worker.\n// Receipt time is provenance, so omit both for ordinary Feishu analyst messages.\nconst contentDate = payload.content_date == null ? '' : String(payload.content_date);\nconst contentTime = payload.content_time == null ? '' : String(payload.content_time);\nif ((contentDate || contentTime) && (!/^\\d{4}-\\d{2}-\\d{2}$/.test(contentDate) || !/^\\d{2}:\\d{2}$/.test(contentTime))) {\n  throw new Error('适配器提供的显式内容时间格式无效');\n}\nif (!content && !resources.length) throw new Error('标签 #' + sourceTag + ' 后没有可导入正文或媒体');\nif (content && !payload.text_content_sha256) throw new Error('适配器未提供文本 SHA-256');\n\nfor (const media of resources) {\n  const hasFullBinary = Boolean(inbound.binary?.[media.property]);\n  const hasPartBinaries = Array.isArray(media.parts) && media.parts.length > 0 && media.parts.every((part) => Boolean(inbound.binary?.[part.property]));\n  if (!hasFullBinary && !hasPartBinaries) throw new Error('飞书媒体二进制未传入 n8n：' + (media.filename ?? media.property));\n}\n\nreturn [{\n  json: {\n    analyst_id: analystId,\n    topic_key: String(payload.topic_key ?? 'general'),\n    publisher_key: String(payload.publisher_key ?? analystId),\n    source_tag: sourceTag,\n    event_id: event.event_id ?? null,\n    feishu_message_id: messageId,\n    batch_key: 'b_' + safeId,\n    item_key: 'i_' + safeId,\n    media_upload_prefix: 'u_' + safeId,\n    content: content || null,\n    content_sha256: content ? payload.text_content_sha256 : null,\n    ...(contentDate ? { content_date: contentDate, content_time: contentTime } : {}),\n    source_label: String(payload.source_label ?? (payload.source === 'manual-relay' ? '本机手动投递' : '飞书机器人')).slice(0, 120),\n    media_assets: resources,\n  },\n  binary: inbound.binary ?? {},\n}];"
+      },
+      "position": [
+        208,
+        0
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "49d5df5e-ae0d-4409-954c-ca5cddcc5a5e",
+      "maxTries": 4,
+      "name": "HTTP Request",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "analyst_id",
+              "value": "={{ $json.analyst_id }}"
+            },
+            {
+              "name": "idempotency_key",
+              "value": "={{ $json.batch_key }}"
+            }
+          ]
+        },
+        "genericAuthType": "httpBearerAuth",
+        "method": "POST",
+        "options": {
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "url": "__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/batches"
+      },
+      "position": [
+        416,
+        0
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 1000
+    },
+    {
+      "continueOnFail": true,
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "7b187d4c-ea07-493f-b7d8-19d143ae5a25",
+      "maxTries": 4,
+      "name": "HTTP Request1",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "contentType": "json",
+        "genericAuthType": "httpBearerAuth",
+        "jsonBody": "={{ JSON.stringify({\n  idempotency_key: $('Code in JavaScript').first().json.item_key,\n  content: $('Code in JavaScript').first().json.content,\n  content_sha256: $('Code in JavaScript').first().json.content_sha256,\n  ...($('Code in JavaScript').first().json.content_date ? {\n    content_date: $('Code in JavaScript').first().json.content_date,\n    content_time: $('Code in JavaScript').first().json.content_time,\n  } : {}),\n  source_label: $('Code in JavaScript').first().json.source_label,\n}) }}",
+        "method": "POST",
+        "options": {
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "={{ '__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/batches/' + $('HTTP Request').first().json.batch.id + '/items/text' }}"
+      },
+      "position": [
+        510,
+        0
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 1000
+    },
+    {
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "8f5ea189-76b4-4658-ab48-bd8ccf96c744",
+      "maxTries": 12,
+      "name": "HTTP Request2",
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "bodyParameters": {
+          "parameters": []
+        },
+        "genericAuthType": "httpBearerAuth",
+        "method": "POST",
+        "options": {
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "url": "={{ '__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/batches/' + $('HTTP Request').first().json.batch.id + '/submit' }}"
+      },
+      "position": [
+        462,
+        0
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "7a037f2f-e4cd-43e4-a803-8a7e7edc6ff0",
+      "name": "Notify monitor success",
+      "parameters": {
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "message_id",
+              "value": "={{ $('Code in JavaScript').first().json.feishu_message_id }}"
+            },
+            {
+              "name": "n8n_status",
+              "value": "已完成"
+            },
+            {
+              "name": "target_batch_id",
+              "value": "={{ $('Confirm submitted batch').first().json.batch?.id ?? $('HTTP Request').first().json.batch.id }}"
+            },
+            {
+              "name": "target_status",
+              "value": "={{ $('Confirm submitted batch').first().json.batch?.state ?? 'submitted' }}"
+            }
+          ]
+        },
+        "method": "POST",
+        "options": {},
+        "sendBody": true,
+        "url": "http://feishu-adapter:3000/n8n-status"
+      },
+      "position": [
+        1760,
+        0
+      ],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4
+    },
+    {
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "dd4bd39d-02da-4768-bc25-7e628c3f68da",
+      "maxTries": 4,
+      "name": "Confirm text item in batch",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "method": "GET",
+        "options": {
+          "timeout": 120000
+        },
+        "url": "={{ '__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/batches/' + $('HTTP Request').first().json.batch.id }}"
+      },
+      "position": [
+        760,
+        0
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 1000
+    },
+    {
+      "id": "e31d0457-7fcb-4343-8709-9fccc3ddda4c",
+      "name": "Verify text item was persisted",
+      "parameters": {
+        "jsCode": "const batch = $input.first().json;\nconst items = Array.isArray(batch.items) ? batch.items : [];\nif (!items.some((item) => item.type === 'text')) {\n  const addTextResult = $('HTTP Request1').first().json;\n  throw new Error('远端未确认文字条目：' + JSON.stringify(addTextResult).slice(0, 500));\n}\nreturn [{ json: batch }];",
+        "mode": "runOnceForAllItems"
+      },
+      "position": [
+        1010,
+        0
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "afd72ede-baa4-43ae-a292-39635770e528",
+      "maxTries": 4,
+      "name": "Confirm submitted batch",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "method": "GET",
+        "options": {
+          "timeout": 120000
+        },
+        "url": "={{ '__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/batches/' + $('HTTP Request').first().json.batch.id }}"
+      },
+      "position": [
+        1240,
+        0
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 1000
+    },
+    {
+      "id": "5f98e9c2-2aba-4d90-8f7b-1c845406070b",
+      "name": "Verify submitted batch state",
+      "parameters": {
+        "jsCode": "const result = $input.first().json;\nconst batch = result.batch ?? result;\nconst state = String(batch.state ?? '').toLowerCase();\n// The remote service exposes \"queued\" immediately after a successful submit.\n// It is a durable acceptance state, not an upload failure.\nif (!['queued', 'submitted', 'processing', 'completed', 'complete'].includes(state)) {\n  throw new Error('远端批次未进入已提交状态：' + JSON.stringify(result).slice(0, 600));\n}\nreturn [{ json: result }];",
+        "mode": "runOnceForAllItems"
+      },
+      "position": [
+        1500,
+        0
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    }
+  ],
+  "pinData": {},
+  "settings": {
+    "binaryMode": "default",
+    "executionOrder": "v1"
+  },
+  "shared": [
+    {
+      "createdAt": "2026-08-24T11:52:00.967Z",
+      "project": {
+        "createdAt": "2026-08-24T11:48:15.378Z",
+        "creatorId": "20c7734c-b850-4dd2-80ae-f3b3d2b37311",
+        "customTelemetryTags": [],
+        "description": null,
+        "icon": null,
+        "id": "NiImy1WwOIMmxF5M",
+        "name": "Unnamed Project",
+        "type": "personal",
+        "updatedAt": "2026-08-24T11:48:15.378Z"
+      },
+      "projectId": "NiImy1WwOIMmxF5M",
+      "role": "workflow:owner",
+      "updatedAt": "2026-08-24T11:52:00.967Z",
+      "workflowId": "xo3AHKRr4MFXrzFA"
+    }
+  ],
+  "sourceWorkflowId": null,
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2026-08-17T06:12:01.193Z",
+  "versionCounter": 69,
+  "versionId": "97e94305-e9a5-4387-8896-233dfc50fafc",
+  "versionMetadata": {
+    "description": null,
+    "name": null
+  }
+}

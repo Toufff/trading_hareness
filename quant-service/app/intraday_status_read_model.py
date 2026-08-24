@@ -14,6 +14,8 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from .intraday_runtime_status import load_intraday_runtime_evidence, load_intraday_runtime_evidence_async
+from .feishu_direct_alert import direct_feishu_alert_configured
+from .edge_evidence_transfer import edge_evidence_status
 
 
 PUBLIC_FLOW_SNAPSHOT_MAX_AGE_SECONDS = 45.0
@@ -74,8 +76,10 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
     normal_interval = deps.scan_interval_seconds()
     configs = {item["name"]: item for item in deps.provider_status()}
     super_configured = bool((configs.get("super_get") or {}).get("configured"))
-    alert_configured = bool((os.getenv("QUANT_ALERT_WEBHOOK_URL") or "").strip()
-                            and (os.getenv("QUANT_ALERT_WEBHOOK_TOKEN") or "").strip())
+    alert_configured = direct_feishu_alert_configured() or bool(
+        (os.getenv("QUANT_ALERT_WEBHOOK_URL") or "").strip()
+        and (os.getenv("QUANT_ALERT_WEBHOOK_TOKEN") or "").strip()
+    )
     evidence = evidence or load_intraday_runtime_evidence(deps.database, deps.alert_max_attempts)
     health_rows = evidence["health_rows"]
     quote_rows = evidence["quote_rows"]
@@ -314,6 +318,7 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
         "session_reason": session_reason, "special_window_active": special_window,
         "summary": {"states": counts, "enabled_watch_count": int(watch_row["enabled"] or 0),
                     "decision_path_degraded": any(item["state"] == "degraded" and item["expected_active"] for item in items)},
+        "edge_handoff": edge_evidence_status(),
         "items": items,
     }
 

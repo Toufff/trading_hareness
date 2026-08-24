@@ -3,12 +3,13 @@ import { defineComponent, inject } from 'vue';
 import { Refresh, WarningFilled } from '@element-plus/icons-vue';
 import VChart from 'vue-echarts';
 import { dashboardContextKey } from '../../dashboard-context';
+import TenDayLeaderRotationPanel from '../../components/TenDayLeaderRotationPanel.vue';
 
 type BoardItem = { sector_key: string };
 
 export default defineComponent({
   name: 'CloseReviewTab',
-  components: { Refresh, VChart, WarningFilled },
+  components: { Refresh, VChart, WarningFilled, TenDayLeaderRotationPanel },
   setup() {
     const dashboard = inject(dashboardContextKey);
     if (!dashboard) throw new Error('research tab requires the dashboard shell context');
@@ -164,6 +165,7 @@ export default defineComponent({
     <el-empty v-if="postCloseStrategyRun && !postCloseCandidates.length" description="当前没有满足严格门槛的候选，或日线历史仍不足" :image-size="58" class="section-gap"/>
     <el-table v-else :data="postCloseCandidates" max-height="420" size="small" class="section-gap"><el-table-column prop="rank" label="#" width="48"/><el-table-column prop="symbol" label="代码" width="104"/><el-table-column prop="name" label="名称" min-width="95"/><el-table-column label="类型" width="118"><template #default="{ row }"><el-tag size="small" :type="postCloseCandidateType(row.candidate_type)">{{ postCloseCandidateLabel(row.candidate_type) }}</el-tag></template></el-table-column><el-table-column prop="score" label="分数" width="75"/><el-table-column label="收盘结构" min-width="220"><template #default="{ row }">{{ row.structure?.notice ?? row.structure?.status ?? '-' }}</template></el-table-column><el-table-column label="精确概念" min-width="125"><template #default="{ row }">{{ row.board_context?.exact_member_mapping ? row.board_context?.label ?? '已映射' : '无精确映射' }}</template></el-table-column><el-table-column label="板块流" width="95"><template #default="{ row }">{{ displayValue(row.board_context?.net_amount) }}</template></el-table-column><el-table-column label="有效期" min-width="142"><template #default="{ row }">{{ row.expires_at ? dateText(row.expires_at) : '待人工复核' }}</template></el-table-column><el-table-column label="来源覆盖" min-width="120"><template #default="{ row }">日线 {{ row.source_snapshot?.daily_symbols ?? '-' }} / 板块 {{ row.source_snapshot?.exact_board_context_symbols ?? '-' }}</template></el-table-column><el-table-column label="风险/原因" min-width="190"><template #default="{ row }"><el-space wrap><el-tag v-for="flag in (row.reason_codes?.length ? row.reason_codes : row.risk_flags ?? [])" :key="flag" size="small" type="warning">{{ flag }}</el-tag></el-space></template></el-table-column><el-table-column label="研究" width="86" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="studyConceptCandidate(row.symbol)">技术分析</el-button></template></el-table-column></el-table>
   </el-card>
+  <TenDayLeaderRotationPanel :data="tenDayLeaderRotation" :loading="actionLoading === '重算十日排行榜影子池'" @run="runTenDayLeaderRotation"/>
   <el-card shadow="never"><template #header><div class="card-header"><span>龙头/连板/首板分钟拉升形态</span><el-space><el-tag :type="strategyPatternRun?.status === 'completed' ? 'success' : strategyPatternRun?.status === 'partial' ? 'warning' : 'info'">{{ strategyPatternRun?.status ?? '未运行' }}</el-tag><el-button type="primary" :loading="actionLoading === '挖掘涨停拉升形态'" @click="runStrategyPatternMining">运行形态挖掘</el-button></el-space></div></template>
     <el-alert title="按同花顺涨停池和连板梯队分层，连接精确概念资金流、Super 日K及腾讯分钟量价。地天板只在深跌反抽、收复昨收、承接三个阶段分别标注，不直接给出买入指令。" type="warning" :closable="false" show-icon/>
     <el-alert v-if="strategyPoolCoverage.notice" :title="strategyPoolCoverage.notice" :type="strategyPoolCoverage.status === 'two_source_union' ? 'success' : 'warning'" :closable="false" show-icon class="section-gap"/>

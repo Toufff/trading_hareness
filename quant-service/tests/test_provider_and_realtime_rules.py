@@ -364,13 +364,15 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         }
         self.assertEqual(importers, {
             "alert_transport.py", "free_market_providers.py", "http_clients.py",
-            "main.py", "remote_archive_sync.py", "remote_archive_transport.py", "tushare_providers.py",
+            "feishu_direct_alert.py", "main.py", "remote_archive_sync.py",
+            "remote_archive_transport.py", "tushare_providers.py",
         })
         self.assertNotIn("AsyncClient(", (app_dir / "free_market_providers.py").read_text(encoding="utf-8"))
         self.assertIn("public_http_client()", (app_dir / "free_market_providers.py").read_text(encoding="utf-8"))
         self.assertNotIn("AsyncClient(", (app_dir / "tushare_providers.py").read_text(encoding="utf-8"))
         self.assertIn("provider_http_client(", (app_dir / "tushare_providers.py").read_text(encoding="utf-8"))
         self.assertIn("alert_http_client()", (app_dir / "alert_transport.py").read_text(encoding="utf-8"))
+        self.assertIn("alert_http_client", (app_dir / "feishu_direct_alert.py").read_text(encoding="utf-8"))
 
     def test_legacy_schema_bootstrap_is_explicit_opt_in(self):
         self.assertFalse(legacy_schema_bootstrap_enabled({}))

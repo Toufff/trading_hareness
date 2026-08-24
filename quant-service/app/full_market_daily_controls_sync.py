@@ -16,6 +16,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable
 
 CONTROL_APIS = ("adj_factor", "daily_basic", "stk_limit", "suspend_d")
+CONTROL_PERSIST_TIMEOUT_SECONDS = 180
 _A_SHARE = re.compile(r"\d{6}\.(SH|SZ|BJ)$")
 
 
@@ -133,7 +134,11 @@ async def sync(
             )
         return normalized
 
-    normalized = await run_database_blocking(persist)
+    # Four complete all-A payloads are promoted in one transaction.  The
+    # general ten-second database budget is intentionally too small here and
+    # can make a committed write look like a failed caller.  Keep a bounded,
+    # explicit budget rather than relying on a worker that outlives its result.
+    normalized = await run_database_blocking(persist, timeout_seconds=CONTROL_PERSIST_TIMEOUT_SECONDS)
     return {
         "status": "completed", "trade_date": str(trade_date), "expected_daily_rows": expected,
         "rows": {api_name: len(rows) for api_name, rows in rows_by_api.items()}, "normalized_rows": normalized,
@@ -141,4 +146,4 @@ async def sync(
     }
 
 
-__all__ = ["CONTROL_APIS", "sync", "valid_rows"]
+__all__ = ["CONTROL_APIS", "CONTROL_PERSIST_TIMEOUT_SECONDS", "sync", "valid_rows"]

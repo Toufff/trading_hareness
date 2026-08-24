@@ -8,10 +8,10 @@
 | Item | Current value |
 |---|---:|
 | Composition root | `quant-service/app/main.py` |
-| `main.py` top-level functions | 387 |
-| Python modules under `app/` | 304 |
-| HTTP router modules | 34 |
-| Alembic migrations | 55 |
+| `main.py` top-level functions | 392 |
+| Python modules under `app/` | 314 |
+| HTTP router modules | 36 |
+| Alembic migrations | 56 |
 | Frontend source files | 26 |
 
 ## Domain naming inventory
@@ -28,6 +28,7 @@ New behaviour should be owned by an existing domain package/owner.
 | `market` | 10 |
 | `post` | 10 |
 | `board` | 9 |
+| `ten` | 8 |
 | `tushare` | 7 |
 | `daily` | 6 |
 | `limit` | 6 |
@@ -38,7 +39,6 @@ New behaviour should be owned by an existing domain package/owner.
 | `runtime` | 4 |
 | `sector` | 4 |
 | `stock` | 4 |
-| `ths` | 4 |
 
 ## Router entrypoints
 
@@ -76,6 +76,8 @@ New behaviour should be owned by an existing domain package/owner.
 - `routers/strategy_pattern_reads.py`
 - `routers/strategy_reads.py`
 - `routers/system_control.py`
+- `routers/ten_day_leader_rotation_actions.py`
+- `routers/ten_day_leader_rotation_reads.py`
 
 ## Frontend entrypoints
 

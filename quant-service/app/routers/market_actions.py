@@ -15,6 +15,7 @@ from fastapi import APIRouter
 from ..request_models import (
     AnnouncementSyncRequest,
     BarsImport,
+    FullMarketDailyControlsSyncRequest,
     FullMarketDailySyncRequest,
     MarketFlowFeatureRebuildRequest,
     MarketUniverseSyncRequest,
@@ -27,6 +28,7 @@ class MarketActionDependencies:
     import_bars: Callable[[BarsImport], dict[str, int]]
     sync_universe: Callable[[MarketUniverseSyncRequest], Awaitable[dict[str, Any]]]
     sync_full_daily: Callable[[FullMarketDailySyncRequest], Awaitable[dict[str, Any]]]
+    sync_full_daily_controls: Callable[[FullMarketDailyControlsSyncRequest], Awaitable[dict[str, Any]]]
     post_close_refresh: Callable[[PostCloseRefreshRequest], Awaitable[dict[str, Any]]]
     sync_announcements: Callable[[AnnouncementSyncRequest], Awaitable[dict[str, Any]]]
     rebuild_market_flow_features: Callable[[MarketFlowFeatureRebuildRequest], Awaitable[dict[str, Any]]]
@@ -47,6 +49,10 @@ def build_market_actions_router(deps: MarketActionDependencies) -> APIRouter:
     @router.post("/api/v1/market/sync/full-daily")
     async def sync_full_market_daily(payload: FullMarketDailySyncRequest) -> dict[str, Any]:
         return await deps.sync_full_daily(payload)
+
+    @router.post("/api/v1/market/sync/full-daily-controls")
+    async def sync_full_market_daily_controls(payload: FullMarketDailyControlsSyncRequest) -> dict[str, Any]:
+        return await deps.sync_full_daily_controls(payload)
 
     @router.post("/api/v1/market/post-close/refresh")
     async def post_close_refresh(payload: PostCloseRefreshRequest) -> dict[str, Any]:

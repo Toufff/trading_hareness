@@ -8,11 +8,14 @@ from typing import Any
 import httpx
 
 from .http_clients import alert_http_client
+from .feishu_direct_alert import direct_feishu_alert_configured, post_direct_feishu_alert_text
 from .tushare_providers import safe_error_detail
 
 
 async def post_feishu_alert_text(text: str) -> dict[str, Any]:
-    """Deliver only when the local Feishu adapter and token are configured."""
+    """Deliver through the edge-owned direct path or the local adapter."""
+    if direct_feishu_alert_configured():
+        return await post_direct_feishu_alert_text(text)
     webhook_url = (os.getenv("QUANT_ALERT_WEBHOOK_URL") or "").strip()
     webhook_token = (os.getenv("QUANT_ALERT_WEBHOOK_TOKEN") or "").strip()
     if not webhook_url or not webhook_token:

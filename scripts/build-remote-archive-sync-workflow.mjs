@@ -34,7 +34,7 @@ function syncTrigger({ name, stream, maxItems, workflowId, y }) {
     headerParameters: {
       parameters: [{ name: 'X-Quant-Write-Key', value: '={{ $env.QUANT_WRITE_API_KEY }}' }],
     },
-    url: 'http://quant-research:8000/api/v1/remote-archive/sync',
+    url: "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/remote-archive/sync",
     method: 'POST',
     sendBody: true,
     contentType: 'json',

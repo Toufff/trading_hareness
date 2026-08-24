@@ -1,9 +1,60 @@
 """Focused regression tests extracted from the legacy provider helper suite."""
 
 from provider_test_support import *  # noqa: F403
+from app.main import _start_application_background_tasks
+from app.runtime_tasks import (
+    BackgroundTaskSpec,
+    apply_background_runtime_profile,
+    background_runtime_profile,
+    background_tasks_enabled,
+)
 
 
 class IngestionAndProviderRuntimeTests(unittest.TestCase):
+    def test_background_task_preflight_flag_defaults_on_and_explicitly_disables_leases(self):
+        self.assertTrue(background_tasks_enabled({}))
+        self.assertFalse(background_tasks_enabled({"QUANT_BACKGROUND_TASKS_ENABLED": "false"}))
+        self.assertTrue(background_tasks_enabled({"QUANT_BACKGROUND_TASKS_ENABLED": "YES"}))
+
+    def test_preflight_mode_creates_no_background_loop_tasks(self):
+        with patch("app.main.background_tasks_enabled", return_value=False):
+            self.assertEqual(_start_application_background_tasks(), {})
+
+    def test_background_runtime_profile_defaults_to_full_and_rejects_unknown_values(self):
+        self.assertEqual(background_runtime_profile({}), "full")
+        self.assertEqual(background_runtime_profile({"QUANT_RUNTIME_PROFILE": "INTRADAY_EDGE"}), "intraday_edge")
+        with self.assertRaisesRegex(ValueError, "QUANT_RUNTIME_PROFILE"):
+            background_runtime_profile({"QUANT_RUNTIME_PROFILE": "typo"})
+
+    def test_intraday_edge_profile_only_keeps_network_polling_loops(self):
+        specs = tuple(BackgroundTaskSpec(label, True, AsyncMock()) for label in (
+            "intraday_monitor", "super_get_fast_quote", "minute_profile_capture",
+            "tencent_order_book", "board_flow_curve", "strategy_review",
+            "post_close_strategy", "ten_day_leader_rotation", "daily_strategy_summary",
+            "ths_member_backfill", "all_board_member_backfill",
+        ))
+        profiled = apply_background_runtime_profile(
+            specs, {"QUANT_RUNTIME_PROFILE": "intraday_edge"},
+        )
+        self.assertEqual(
+            {spec.label for spec in profiled if spec.enabled},
+            {"intraday_monitor", "super_get_fast_quote", "minute_profile_capture",
+             "tencent_order_book", "board_flow_curve"},
+        )
+
+    def test_research_profile_excludes_remote_owned_intraday_polling_loops(self):
+        specs = (
+            BackgroundTaskSpec("intraday_monitor", True, AsyncMock()),
+            BackgroundTaskSpec("tencent_order_book", True, AsyncMock()),
+            BackgroundTaskSpec("strategy_review", True, AsyncMock()),
+            BackgroundTaskSpec("post_close_strategy", False, AsyncMock()),
+        )
+        profiled = apply_background_runtime_profile(specs, {"QUANT_RUNTIME_PROFILE": "research"})
+        self.assertFalse(profiled[0].enabled)
+        self.assertFalse(profiled[1].enabled)
+        self.assertTrue(profiled[2].enabled)
+        self.assertFalse(profiled[3].enabled)
+
     def test_generic_provider_call_uses_async_circuit_lookup_before_fallback(self):
         provider = MagicMock(key="tushare_primary")
         expected = MagicMock()

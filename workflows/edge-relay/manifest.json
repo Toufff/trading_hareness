@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-24T12:53:56Z",
+  "source": "remote-edge",
+  "workflows": [
+    {
+      "id": "mediaFinalize123",
+      "name": "媒体原生：完成提交",
+      "active": true,
+      "versionId": "542d1768-f313-4388-b578-7a975728618b"
+    },
+    {
+      "id": "mediaPartFlow123",
+      "name": "媒体原生：单分片上传",
+      "active": true,
+      "versionId": "18c34f0a-3430-4f41-84c0-07a37bcea904"
+    },
+    {
+      "id": "mediaStateFlow123",
+      "name": "媒体原生：上传会话状态核验",
+      "active": true,
+      "versionId": "d3636435-b361-4498-a01c-960a7efd38f5"
+    },
+    {
+      "id": "xo3AHKRr4MFXrzFA",
+      "name": "飞书入口：文本汇聚",
+      "active": true,
+      "versionId": "97e94305-e9a5-4387-8896-233dfc50fafc"
+    }
+  ]
+}

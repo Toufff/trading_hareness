@@ -39,7 +39,7 @@ docker compose cp "n8n:${container_copy}" "$backup_dir/before.json"
 
 jq -e --arg id "$workflow_id" --arg name "$workflow_name" '
   type == "array" and length == 1 and .[0].id == $id and .[0].name == $name and .[0].active == true and
-  ([.[0].nodes[] | select(.name == "同步行情与质量门禁") | .parameters.url] == ["http://quant-research:8000/api/v1/pipeline/daily"])
+  ([.[0].nodes[] | select(.name == "同步行情与质量门禁") | .parameters.url] == ["={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/pipeline/daily"])
 ' "$backup_dir/before.json" >/dev/null || {
   echo "workflow shape does not match the audited daily pipeline; no update made" >&2
   exit 1

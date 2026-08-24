@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.quant-intraday-edge-pull</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/papa/codebase/n8n/scripts/pull-intraday-edge-evidence.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/papa/codebase/n8n</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/papa/Library/Logs/quant-intraday-edge-pull.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/papa/Library/Logs/quant-intraday-edge-pull.error.log</string>
+</dict>
+</plist>

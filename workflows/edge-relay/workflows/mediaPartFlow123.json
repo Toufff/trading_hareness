@@ -1,0 +1,589 @@
+{
+  "active": true,
+  "activeVersionId": "18c34f0a-3430-4f41-84c0-07a37bcea904",
+  "connections": {
+    "Add text item": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Reserve upload in new batch",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Attach reserved upload session": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Upload part",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Create batch": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Has text content",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Has batch session": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Reserve upload in existing batch",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Create batch",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Has text content": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Add text item",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Reserve upload in new batch",
+            "type": "main"
+          },
+          {
+            "index": 1,
+            "node": "Merge new batch session",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Has upload session": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Use existing upload session",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Has batch session",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Merge new batch session": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Attach reserved upload session",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Prepare media input": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Has upload session",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Reserve upload in existing batch": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Attach reserved upload session",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Reserve upload in new batch": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Merge new batch session",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Upload part": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Return upload state",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Use existing upload session": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Upload part",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Prepare media input",
+            "type": "main"
+          }
+        ]
+      ]
+    }
+  },
+  "createdAt": "2026-08-08T18:58:59.038Z",
+  "description": null,
+  "id": "mediaPartFlow123",
+  "isArchived": false,
+  "meta": null,
+  "name": "媒体原生：单分片上传",
+  "nodeGroups": [],
+  "nodes": [
+    {
+      "id": "e01af44a-f2ac-4c57-82b1-0cc6d1d3df47",
+      "name": "Webhook",
+      "parameters": {
+        "httpMethod": "POST",
+        "options": {},
+        "path": "feishu-media-part",
+        "responseData": "firstEntryJson",
+        "responseMode": "lastNode"
+      },
+      "position": [
+        0,
+        0
+      ],
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "webhookId": "f1a48b8b-42c1-4ce9-86d2-bd83fefae7d0"
+    },
+    {
+      "id": "98253aee-8d67-4e1e-a94c-dbe42e3bc81b",
+      "name": "Prepare media input",
+      "parameters": {
+        "jsCode": "const item = $input.first();\nreturn [{ json: item.json, binary: item.binary ?? {} }];",
+        "mode": "runOnceForAllItems"
+      },
+      "position": [
+        220,
+        120
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "306cb0a4-1090-49fa-9f9b-eee5a20bb7cb",
+      "name": "Has upload session",
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ String($json.body?.upload_id ?? '') }}",
+              "operator": {
+                "operation": "notEmpty",
+                "type": "string"
+              },
+              "rightValue": ""
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        },
+        "options": {}
+      },
+      "position": [
+        440,
+        120
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "id": "1bb36075-04c7-4784-b659-4fbe1b26b7dd",
+      "name": "Use existing upload session",
+      "parameters": {
+        "jsCode": "const inbound = $('Prepare media input').first();\nconst body = inbound.json.body ?? inbound.json;\nif (!body.batch_id || !body.upload_id) throw new Error('缺少既有上传会话');\nreturn [{ json: { batch_id: String(body.batch_id), upload_id: String(body.upload_id) }, binary: inbound.binary ?? {} }];",
+        "mode": "runOnceForAllItems"
+      },
+      "position": [
+        680,
+        0
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "6d2b7823-054d-4d0f-92ac-c02ba7349887",
+      "name": "Has batch session",
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ String($json.body?.batch_id ?? '') }}",
+              "operator": {
+                "operation": "notEmpty",
+                "type": "string"
+              },
+              "rightValue": ""
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        },
+        "options": {}
+      },
+      "position": [
+        680,
+        240
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "acb48351-9901-4065-982e-2dff0b4182fd",
+      "maxTries": 4,
+      "name": "Create batch",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "contentType": "json",
+        "genericAuthType": "httpBearerAuth",
+        "jsonBody": "={{ JSON.stringify({ analyst_id: $('Prepare media input').first().json.body.analyst_id, idempotency_key: $('Prepare media input').first().json.body.batch_key }) }}",
+        "method": "POST",
+        "options": {
+          "response": {
+            "includeInputData": true
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/batches"
+      },
+      "position": [
+        920,
+        400
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 1000
+    },
+    {
+      "id": "b7f32606-f5ec-4d18-be78-1ad07f962772",
+      "name": "Has text content",
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ String($('Prepare media input').first().json.body?.content ?? '').trim() }}",
+              "operator": {
+                "operation": "notEmpty",
+                "type": "string"
+              },
+              "rightValue": ""
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        },
+        "options": {}
+      },
+      "position": [
+        1160,
+        400
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "039c81b3-8005-44d7-bc32-5ce748df2d56",
+      "maxTries": 4,
+      "name": "Add text item",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "contentType": "json",
+        "genericAuthType": "httpBearerAuth",
+        "jsonBody": "={{ JSON.stringify({ idempotency_key: $('Prepare media input').first().json.body.item_key, content: $('Prepare media input').first().json.body.content || \"\", content_sha256: $('Prepare media input').first().json.body.content_sha256 || \"\", source_label: $('Prepare media input').first().json.body.source_label, ...($('Prepare media input').first().json.body.content_date ? { content_date: $('Prepare media input').first().json.body.content_date, content_time: $('Prepare media input').first().json.body.content_time } : {}) }) }}",
+        "method": "POST",
+        "options": {
+          "response": {
+            "includeInputData": true
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "={{ '__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/batches/' + $('Create batch').first().json.batch.id + '/items/text' }}"
+      },
+      "position": [
+        1400,
+        320
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 1000
+    },
+    {
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "6b7bc3e8-45d1-40b8-becd-31c5a2fc52b7",
+      "maxTries": 4,
+      "name": "Reserve upload in existing batch",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "contentType": "json",
+        "genericAuthType": "httpBearerAuth",
+        "jsonBody": "={{ JSON.stringify({ batch_id: $('Prepare media input').first().json.body.batch_id, filename: $('Prepare media input').first().json.body.media_filename, media_type: $('Prepare media input').first().json.body.media_type, declared_bytes: Number($('Prepare media input').first().json.body.media_bytes), last_modified: Number($('Prepare media input').first().json.body.media_last_modified), idempotency_key: $('Prepare media input').first().json.body.media_upload_key, content_sha256: $('Prepare media input').first().json.body.media_sha256, source_label: $('Prepare media input').first().json.body.source_label, ...($('Prepare media input').first().json.body.content_date ? { content_date: $('Prepare media input').first().json.body.content_date, content_time: $('Prepare media input').first().json.body.content_time } : {}) }) }}",
+        "method": "POST",
+        "options": {
+          "response": {
+            "includeInputData": true
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/uploads"
+      },
+      "position": [
+        920,
+        240
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 1000
+    },
+    {
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "6cbe0054-0dc1-4b9a-8678-a1579b798ee8",
+      "maxTries": 4,
+      "name": "Reserve upload in new batch",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "contentType": "json",
+        "genericAuthType": "httpBearerAuth",
+        "jsonBody": "={{ JSON.stringify({ batch_id: $('Create batch').first().json.batch.id, filename: $('Prepare media input').first().json.body.media_filename, media_type: $('Prepare media input').first().json.body.media_type, declared_bytes: Number($('Prepare media input').first().json.body.media_bytes), last_modified: Number($('Prepare media input').first().json.body.media_last_modified), idempotency_key: $('Prepare media input').first().json.body.media_upload_key, content_sha256: $('Prepare media input').first().json.body.media_sha256, source_label: $('Prepare media input').first().json.body.source_label, ...($('Prepare media input').first().json.body.content_date ? { content_date: $('Prepare media input').first().json.body.content_date, content_time: $('Prepare media input').first().json.body.content_time } : {}) }) }}",
+        "method": "POST",
+        "options": {
+          "response": {
+            "includeInputData": true
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/uploads"
+      },
+      "position": [
+        1640,
+        440
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 1000
+    },
+    {
+      "id": "daabf52f-44e6-4647-9267-3149b6f2bc2d",
+      "name": "Attach reserved upload session",
+      "parameters": {
+        "jsCode": "const inbound = $('Prepare media input').first();\nconst body = inbound.json.body ?? inbound.json;\nconst existing = $('Reserve upload in existing batch');\nconst reserved = existing.isExecuted ? existing.first().json : $('Reserve upload in new batch').first().json;\nif (!reserved?.upload?.id) throw new Error('reserve 未返回 upload.id');\nlet createdBatchId = null;\ntry { createdBatchId = $('Create batch').item.json.batch?.id ?? null; } catch {}\nconst batchId = body.batch_id || $json.batch?.id || createdBatchId;\nif (!batchId) throw new Error(`缺少 batch_id; create batch outputs=${JSON.stringify($('Create batch').all().map((item) => item.json?.batch?.id ?? null))}`);\nreturn [{ json: { batch_id: String(batchId), upload_id: String(reserved.upload.id) }, binary: inbound.binary ?? {} }];",
+        "mode": "runOnceForAllItems"
+      },
+      "position": [
+        1880,
+        300
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "c29f2b81-6dfa-44d4-908d-089968bbc5a7",
+      "maxTries": 4,
+      "name": "Upload part",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "contentType": "binaryData",
+        "genericAuthType": "httpBearerAuth",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/octet-stream"
+            },
+            {
+              "name": "X-Content-SHA256",
+              "value": "={{ $('Prepare media input').first().json.body.part_sha256 }}"
+            }
+          ]
+        },
+        "inputDataFieldName": "media",
+        "method": "PUT",
+        "options": {
+          "response": {
+            "includeInputData": true
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "sendHeaders": true,
+        "url": "={{ '__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/uploads/' + $json.upload_id + '/parts/' + $('Prepare media input').first().json.body.part_index }}"
+      },
+      "position": [
+        2120,
+        120
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 1000
+    },
+    {
+      "id": "5ed9ff83-ab35-4f4c-91dc-7935cb243446",
+      "name": "Return upload state",
+      "parameters": {
+        "jsCode": "const body = $('Prepare media input').first().json.body ?? {};\nconst session = $('Attach reserved upload session').first().json ?? {};\nconst batchId = body.batch_id || session.batch_id;\nconst uploadId = body.upload_id || session.upload_id;\nif (!batchId || !uploadId) throw new Error('上传会话响应不完整');\nreturn [{ json: { batch_id: String(batchId), upload_id: String(uploadId), part_index: Number(body.part_index) } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "position": [
+        2360,
+        120
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "merge-new-batch-session",
+      "name": "Merge new batch session",
+      "parameters": {
+        "combineBy": "combineByPosition",
+        "mode": "combine",
+        "options": {}
+      },
+      "position": [
+        1080,
+        680
+      ],
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2
+    }
+  ],
+  "pinData": null,
+  "settings": {
+    "binaryMode": "default",
+    "executionOrder": "v1"
+  },
+  "shared": [
+    {
+      "createdAt": "2026-08-24T11:51:39.580Z",
+      "project": {
+        "createdAt": "2026-08-24T11:48:15.378Z",
+        "creatorId": "20c7734c-b850-4dd2-80ae-f3b3d2b37311",
+        "customTelemetryTags": [],
+        "description": null,
+        "icon": null,
+        "id": "NiImy1WwOIMmxF5M",
+        "name": "Unnamed Project",
+        "type": "personal",
+        "updatedAt": "2026-08-24T11:48:15.378Z"
+      },
+      "projectId": "NiImy1WwOIMmxF5M",
+      "role": "workflow:owner",
+      "updatedAt": "2026-08-24T11:51:39.580Z",
+      "workflowId": "mediaPartFlow123"
+    }
+  ],
+  "sourceWorkflowId": null,
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2026-08-17T15:32:05.572Z",
+  "versionCounter": 19,
+  "versionId": "18c34f0a-3430-4f41-84c0-07a37bcea904",
+  "versionMetadata": {
+    "description": null,
+    "name": "媒体原生：单分片上传"
+  }
+}

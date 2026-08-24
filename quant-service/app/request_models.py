@@ -488,6 +488,17 @@ class FullMarketDailySyncRequest(BaseModel):
     minimum_rows: int = Field(default=5000, ge=100, le=10000)
 
 
+class FullMarketDailyControlsSyncRequest(BaseModel):
+    """One-date repair of the full-market daily control plane.
+
+    This endpoint deliberately cannot accept a range: callers may repair a
+    known incomplete trading date, but historical backfill remains a separate
+    operator workflow.
+    """
+
+    trade_date: date
+
+
 class MarketSnapshotRequest(BaseModel):
     session: Literal["midday", "close"]
     universe_key: str = Field(default="all_a", pattern=r"^[a-z][a-z0-9_-]{0,48}$")

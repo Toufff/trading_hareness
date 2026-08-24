@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the intraday edge baseline refresh after the A-share close
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 16:20:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=120
+Unit=quant-intraday-edge-daily.service
+
+[Install]
+WantedBy=timers.target

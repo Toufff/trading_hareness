@@ -1,0 +1,106 @@
+{
+  "active": true,
+  "activeVersionId": "d3636435-b361-4498-a01c-960a7efd38f5",
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Read remote upload state",
+            "type": "main"
+          }
+        ]
+      ]
+    }
+  },
+  "createdAt": "2026-08-09T03:48:28.485Z",
+  "description": null,
+  "id": "mediaStateFlow123",
+  "isArchived": false,
+  "meta": null,
+  "name": "媒体原生：上传会话状态核验",
+  "nodeGroups": [],
+  "nodes": [
+    {
+      "id": "3e4a7563-db69-444b-bc47-50fab11f6fa1",
+      "name": "Webhook",
+      "parameters": {
+        "httpMethod": "POST",
+        "options": {},
+        "path": "feishu-media-state",
+        "responseData": "firstEntryJson",
+        "responseMode": "lastNode"
+      },
+      "position": [
+        0,
+        0
+      ],
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2
+    },
+    {
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "f17a9fdb-1eb2-427f-9c0b-3c2f04e4c9fc",
+      "maxTries": 4,
+      "name": "Read remote upload state",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "method": "GET",
+        "options": {
+          "timeout": 120000
+        },
+        "url": "={{ '__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/uploads/' + $json.body.upload_id }}"
+      },
+      "position": [
+        260,
+        0
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 1000
+    }
+  ],
+  "pinData": null,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "shared": [
+    {
+      "createdAt": "2026-08-24T11:51:28.246Z",
+      "project": {
+        "createdAt": "2026-08-24T11:48:15.378Z",
+        "creatorId": "20c7734c-b850-4dd2-80ae-f3b3d2b37311",
+        "customTelemetryTags": [],
+        "description": null,
+        "icon": null,
+        "id": "NiImy1WwOIMmxF5M",
+        "name": "Unnamed Project",
+        "type": "personal",
+        "updatedAt": "2026-08-24T11:48:15.378Z"
+      },
+      "projectId": "NiImy1WwOIMmxF5M",
+      "role": "workflow:owner",
+      "updatedAt": "2026-08-24T11:51:28.246Z",
+      "workflowId": "mediaStateFlow123"
+    }
+  ],
+  "sourceWorkflowId": null,
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2026-08-09T03:48:29.612Z",
+  "versionCounter": 1,
+  "versionId": "d3636435-b361-4498-a01c-960a7efd38f5",
+  "versionMetadata": {
+    "description": null,
+    "name": null
+  }
+}

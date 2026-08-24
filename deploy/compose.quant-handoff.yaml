@@ -1,0 +1,15 @@
+# Compose overlay for a no-traffic quant-service release candidate.  It extends
+# the live service so provider and storage configuration are identical, but it
+# deliberately has no published port and no scheduler leases by default.
+services:
+  quant-research-handoff:
+    extends:
+      # Compose resolves extends.file from the primary compose project file.
+      file: ./compose.yaml
+      service: quant-research
+    container_name: n8n-quant-research-handoff
+    profiles: ["handoff"]
+    restart: "no"
+    ports: !reset []
+    environment:
+      QUANT_BACKGROUND_TASKS_ENABLED: ${QUANT_HANDOFF_BACKGROUND_TASKS_ENABLED:-false}

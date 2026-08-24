@@ -1,0 +1,285 @@
+{
+  "active": true,
+  "activeVersionId": "542d1768-f313-4388-b578-7a975728618b",
+  "connections": {
+    "Finalize upload": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Should submit batch",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Notify monitor": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Return submitted state",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Should submit batch": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Submit batch",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Return finalized state",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Submit batch": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Notify monitor",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Finalize upload",
+            "type": "main"
+          }
+        ]
+      ]
+    }
+  },
+  "createdAt": "2026-08-08T18:58:59.038Z",
+  "description": null,
+  "id": "mediaFinalize123",
+  "isArchived": false,
+  "meta": null,
+  "name": "媒体原生：完成提交",
+  "nodeGroups": [],
+  "nodes": [
+    {
+      "id": "f08b55f0-12c4-4ebf-9aef-73e2a9d965a1",
+      "name": "Webhook",
+      "parameters": {
+        "httpMethod": "POST",
+        "options": {},
+        "path": "feishu-media-finalize",
+        "responseData": "firstEntryJson",
+        "responseMode": "lastNode"
+      },
+      "position": [
+        0,
+        0
+      ],
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "webhookId": "0c5e3fba-51b6-4d47-81c0-2e5aabf6c6b3"
+    },
+    {
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "a3f9ae3b-40c7-4caa-90a7-2874a764ad6a",
+      "maxTries": 4,
+      "name": "Finalize upload",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "sha256",
+              "value": "={{ $('Webhook').first().json.body.media_sha256 }}"
+            }
+          ]
+        },
+        "genericAuthType": "httpBearerAuth",
+        "method": "POST",
+        "options": {
+          "response": {
+            "includeInputData": true
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "url": "={{ '__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/uploads/' + $('Webhook').first().json.body.upload_id + '/finalize' }}"
+      },
+      "position": [
+        240,
+        0
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 1000
+    },
+    {
+      "id": "5eee5341-da5a-4988-a467-edc75e69e3cb",
+      "name": "Should submit batch",
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ String($('Webhook').first().json.body.submit ?? false) }}",
+              "operator": {
+                "operation": "equals",
+                "type": "string"
+              },
+              "rightValue": "true"
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        },
+        "options": {}
+      },
+      "position": [
+        480,
+        0
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "xMKQ62bkIB1m5DZF",
+          "name": "Bearer Auth account"
+        }
+      },
+      "id": "7e46b6ac-c7e1-4de5-898c-1647aeda4f55",
+      "maxTries": 4,
+      "name": "Submit batch",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "bodyParameters": {
+          "parameters": []
+        },
+        "genericAuthType": "httpBearerAuth",
+        "method": "POST",
+        "options": {
+          "response": {
+            "includeInputData": true
+          },
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "url": "={{ '__REMOTE_ANALYST_ARCHIVE_BASE_URL__/imports/batches/' + $('Webhook').first().json.body.batch_id + '/submit' }}"
+      },
+      "position": [
+        720,
+        -100
+      ],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "waitBetweenTries": 1000
+    },
+    {
+      "id": "5386a4fb-1a0f-4c43-8b34-7d7f157f126e",
+      "name": "Notify monitor",
+      "parameters": {
+        "contentType": "json",
+        "jsonBody": "={{ JSON.stringify({ message_id: $('Webhook').first().json.body.message_id, n8n_status: '已完成', target_batch_id: $('Webhook').first().json.body.batch_id, target_status: $json.batch?.state ? $json.batch.state + '（' + $json.batch.percentage + '%）' : 'submitted' }) }}",
+        "method": "POST",
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "http://feishu-adapter:3000/n8n-status"
+      },
+      "position": [
+        960,
+        -100
+      ],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4
+    },
+    {
+      "id": "966ac66e-12fa-4543-b339-b8c6f18aced7",
+      "name": "Return finalized state",
+      "parameters": {
+        "jsCode": "const body = $('Webhook').first().json.body;\nreturn [{ json: { batch_id: String(body.batch_id), upload_id: String(body.upload_id), state: 'finalized' } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "position": [
+        720,
+        100
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "f206b1c6-b817-4b73-95e4-86cba5bb6b66",
+      "name": "Return submitted state",
+      "parameters": {
+        "jsCode": "const body = $('Webhook').first().json.body;\nreturn [{ json: { batch_id: String(body.batch_id), upload_id: String(body.upload_id), state: 'submitted' } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "position": [
+        1200,
+        -100
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    }
+  ],
+  "pinData": null,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "shared": [
+    {
+      "createdAt": "2026-08-24T11:51:50.189Z",
+      "project": {
+        "createdAt": "2026-08-24T11:48:15.378Z",
+        "creatorId": "20c7734c-b850-4dd2-80ae-f3b3d2b37311",
+        "customTelemetryTags": [],
+        "description": null,
+        "icon": null,
+        "id": "NiImy1WwOIMmxF5M",
+        "name": "Unnamed Project",
+        "type": "personal",
+        "updatedAt": "2026-08-24T11:48:15.378Z"
+      },
+      "projectId": "NiImy1WwOIMmxF5M",
+      "role": "workflow:owner",
+      "updatedAt": "2026-08-24T11:51:50.189Z",
+      "workflowId": "mediaFinalize123"
+    }
+  ],
+  "sourceWorkflowId": null,
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2026-08-10T02:36:10.677Z",
+  "versionCounter": 7,
+  "versionId": "542d1768-f313-4388-b578-7a975728618b",
+  "versionMetadata": {
+    "description": null,
+    "name": null
+  }
+}

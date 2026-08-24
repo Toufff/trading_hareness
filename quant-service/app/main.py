@@ -121,6 +121,7 @@ from .async_intraday_scan_preflight_repository import latest_fast_quotes as read
 from .async_intraday_scan_inputs_repository import exact_memberships as read_async_exact_watchlist_memberships
 from .async_intraday_scan_inputs_repository import enabled_watches as read_async_enabled_intraday_watches
 from .async_intraday_scan_inputs_repository import watchlists as read_async_intraday_scan_watchlists
+from .ten_day_leader_rotation_read_repository import latest_ten_day_leader_rotation_pool as read_async_ten_day_leader_rotation_pool
 from .async_ths_concept_member_backfill_repository import existing_flow_rows as read_async_ths_concept_flow_rows
 from .async_ths_concept_member_backfill_repository import member_progress as read_async_ths_concept_member_progress
 from .async_sync_symbol_repository import analyst_claim_symbols as read_async_analyst_claim_symbols
@@ -187,6 +188,42 @@ from .strategy_pattern_sample_repository import (
 from .strategy_pattern_mining_service import (
     StrategyPatternMiningDependencies,
     run_strategy_pattern_mining as run_strategy_pattern_mining_isolated,
+)
+from .ten_day_leader_ranking import rank_ten_day_candidates
+from .ten_day_leader_rotation_research import (
+    MODEL_VERSION as TEN_DAY_LEADER_ROTATION_MODEL_VERSION,
+    classify_ten_day_coordination,
+)
+from .ten_day_leader_rotation_repository import (
+    completed_for_date as ten_day_leader_rotation_completed_for_date,
+    latest_full_market_date as latest_ten_day_full_market_date,
+    load_ten_day_ranking_inputs,
+    persist_ten_day_rotation_run,
+)
+from .ten_day_leader_rotation_service import (
+    TenDayLeaderRotationDependencies,
+    run_ten_day_leader_rotation as run_ten_day_leader_rotation_isolated,
+)
+from .ten_day_leader_rotation_scheduler import (
+    post_close_materialization_window as ten_day_leader_rotation_ready_window,
+    ten_day_leader_rotation_scheduler,
+)
+from .ten_day_leader_rotation_runtime import (
+    TenDayLeaderRotationRuntimeDependencies,
+    run_ten_day_leader_rotation_loop as run_ten_day_leader_rotation_runtime_loop,
+)
+from .ten_day_leader_rotation_intraday_research import (
+    evaluate_intraday_rotation_candidates,
+    intraday_rotation_due as ten_day_leader_rotation_intraday_due,
+    select_intraday_rotation_slice,
+)
+from .ten_day_leader_rotation_intraday_repository import (
+    persist_intraday_rotation_observations,
+    persist_intraday_rotation_scan_status,
+)
+from .ten_day_leader_rotation_intraday_service import (
+    TenDayLeaderRotationIntradayDependencies,
+    persist_ten_day_leader_rotation_intraday,
 )
 from .post_close_strategy_service import (
     candidates as persisted_post_close_strategy_candidates,
@@ -314,7 +351,9 @@ from .post_close_structures import (
 )
 from .runtime_tasks import (
     BackgroundTaskSpec, LoopRuntimeRegistry, cancel_background_tasks,
-    observe_completed_task, start_leased_background_tasks, supervise_leased_loop, supervise_loop,
+    apply_background_runtime_profile, background_runtime_profile,
+    background_tasks_enabled, observe_completed_task, start_leased_background_tasks,
+    supervise_leased_loop, supervise_loop,
 )
 from .application_lifecycle import ApplicationLifecycleDependencies, application_lifespan
 from .intraday_outcomes import (
@@ -369,6 +408,7 @@ from .runtime_resources import (
 )
 from .research_storage_admission import ResearchStorageAdmission, governance as research_storage_governance_isolated
 from .health_read_model import DatabaseUnavailableError, HealthDependencies, health_payload as read_health_payload
+from .release_metadata import release_metadata
 from .replay_readiness import historical_replay_readiness
 from . import research_capacity
 from .feature_read_repository import analyst_feature as read_analyst_feature
@@ -416,6 +456,11 @@ from .routers.paper_reads import build_paper_reads_router
 from .routers.paper_actions import build_paper_actions_router
 from .routers.analyst_prompt_lab import build_analyst_prompt_lab_router
 from .routers.strategy_pattern_reads import build_strategy_pattern_reads_router
+from .routers.ten_day_leader_rotation_reads import build_ten_day_leader_rotation_reads_router
+from .routers.ten_day_leader_rotation_actions import (
+    TenDayLeaderRotationActionDependencies,
+    build_ten_day_leader_rotation_actions_router,
+)
 from .routers.board_rotation_reads import build_board_rotation_reads_router
 from .routers.board_stock_mining_reads import build_board_stock_mining_reads_router
 from .routers.limit_linkage_mining_reads import build_limit_linkage_mining_reads_router
@@ -451,6 +496,7 @@ from .request_models import (
     EastmoneyBoardMemberSyncRequest,
     FactorEvaluationRequest,
     FetchRunReconcileRequest,
+    FullMarketDailyControlsSyncRequest,
     FullMarketDailySyncRequest,
     GenerateRequest,
     IntradayEventReplayRequest,
@@ -486,6 +532,7 @@ from .request_models import (
     TushareSyncRequest,
     UniverseUpdateRequest,
 )
+from .ten_day_leader_rotation_contracts import TenDayLeaderRotationRunRequest
 from .remote_archive import classify_remote_text, remote_report_list_state, reprocess_remote_reports
 from .remote_archive_actions import RemoteArchiveActions
 from .market_snapshot_actions import MarketSnapshotActions
@@ -1304,12 +1351,33 @@ async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[st
 
 
 def full_market_daily_row_count(trade_date: date) -> int:
-    """Current-date daily universe size; controls never bootstrap a date alone."""
+    """Return a usable all-A daily cross-section count, otherwise fail closed.
+
+    The controls synchronizer must never make a partially fetched daily date
+    appear ready merely because its local rows have matching controls.  The
+    expected population is the point-in-time all-A membership for this date.
+    """
     with db.transaction() as connection:
         row = connection.execute(
-            "SELECT count(*) AS count FROM quant.canonical_bars_daily WHERE trading_date=%s", (trade_date,),
+            """WITH expected AS (
+                   SELECT count(DISTINCT symbol)::int AS expected_rows
+                     FROM quant.universe_membership_history
+                    WHERE universe_key='all_a' AND effective_from<=%s
+                      AND (effective_to IS NULL OR effective_to>=%s)
+               ), actual AS (
+                   SELECT count(DISTINCT bar.symbol)::int AS actual_rows
+                     FROM quant.canonical_bars_daily bar
+                     JOIN quant.universe_membership_history membership
+                       ON membership.universe_key='all_a' AND membership.symbol=bar.symbol
+                      AND membership.effective_from<=%s
+                      AND (membership.effective_to IS NULL OR membership.effective_to>=%s)
+                    WHERE bar.trading_date=%s AND bar.quality_status IN ('fresh','partial')
+               ) SELECT expected_rows,actual_rows FROM expected CROSS JOIN actual""",
+            (trade_date, trade_date, trade_date, trade_date, trade_date),
         ).fetchone()
-    return int(row["count"] if row else 0)
+    expected = int((row or {}).get("expected_rows") or 0)
+    actual = int((row or {}).get("actual_rows") or 0)
+    return actual if expected and actual >= math.ceil(expected * 0.95) else 0
 
 
 def full_market_daily_control_status() -> dict[str, Any]:
@@ -1780,6 +1848,23 @@ def run_post_close_strategy(request: PostCloseStrategyRequest) -> dict[str, Any]
         db, request, model_version=POST_CLOSE_STRATEGY_MODEL_VERSION,
         candidate_loader=post_close_strategy_candidates, json_safe=strategy_json_safe,
     )
+
+
+def _ten_day_leader_rotation_dependencies() -> TenDayLeaderRotationDependencies:
+    """Compose the feature without moving ranking or persistence into main."""
+    return TenDayLeaderRotationDependencies(
+        latest_full_market_date=lambda minimum: latest_ten_day_full_market_date(db, minimum),
+        load_inputs=lambda as_of_date: load_ten_day_ranking_inputs(db, as_of_date),
+        rank_candidates=rank_ten_day_candidates,
+        classify=classify_ten_day_coordination,
+        persist=lambda **kwargs: persist_ten_day_rotation_run(db, **kwargs),
+        json_safe=strategy_json_safe,
+    )
+
+
+def run_ten_day_leader_rotation(request: TenDayLeaderRotationRunRequest) -> dict[str, Any]:
+    """Compatibility entry point for the isolated shadow materializer."""
+    return run_ten_day_leader_rotation_isolated(request, _ten_day_leader_rotation_dependencies())
 
 
 STRATEGY_PATTERN_MODEL_VERSION = "post-close-limit-lift-pattern-v6"
@@ -2371,6 +2456,45 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
     async def persist_signals(*args: Any) -> list[dict[str, Any]]:
         return await run_database_blocking(persist_intraday_scan_signals, *args, timeout_seconds=60)
 
+    async def shadow_pool() -> dict[str, Any]:
+        return await read_async_ten_day_leader_rotation_pool(async_db)
+
+    async def capture_shadow_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+        try:
+            rows = await tencent_order_book_quotes(symbols, max_symbols=40)
+        except (httpx.HTTPError, FreeProviderError, ValueError) as error:
+            return {}, {"status": "unavailable", "error": safe_error_detail(str(error), 240), "requested": len(symbols)}
+        quotes: dict[str, dict[str, Any]] = {}
+        merge_intraday_watch_quote_prices(quotes, rows)
+        return quotes, {"status": "completed", "requested": len(symbols), "matched": len(quotes),
+                        "source": "tencent_batched_watch_quote"}
+
+    async def persist_shadow_observations(**kwargs: Any) -> dict[str, Any]:
+        return await run_database_blocking(
+            lambda: persist_ten_day_leader_rotation_intraday(
+                dependencies=TenDayLeaderRotationIntradayDependencies(
+                    database=db, quote_from_tencent=intraday_quote_from_tencent,
+                    quote_source=intraday_quote_observation_source,
+                    market_context_batch=intraday_point_in_time_market_context_batch,
+                    evaluate=evaluate_intraday_rotation_candidates,
+                    persist=persist_intraday_rotation_observations, json_safe=strategy_json_safe,
+                ),
+                **kwargs,
+            ),
+            timeout_seconds=30,
+        )
+
+    async def persist_shadow_status(scan_id: uuid.UUID, status: dict[str, Any]) -> None:
+        def write() -> None:
+            with db.transaction() as connection:
+                persist_intraday_rotation_scan_status(
+                    connection, scan_id=scan_id, status=status, json_safe=strategy_json_safe,
+                )
+        await run_database_blocking(
+            write,
+            timeout_seconds=10,
+        )
+
     payload = await run_watchlist_scan(
         request,
         IntradayWatchlistScanDependencies(
@@ -2384,7 +2508,12 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
             watch_priority_key=intraday_watch_priority_key, realtime_validation_slice=intraday_realtime_validation_slice,
             tushare_minutes=intraday_tushare_minutes, fast_confirmations=latest_intraday_fast_quote_confirmations,
             board_cache_evidence=intraday_board_cache_evidence, build_source_status=build_scan_source_status,
-            persist_signals=persist_signals, deliver_alert=deliver_intraday_alert,
+            persist_signals=persist_signals, shadow_pool=shadow_pool,
+            shadow_rotation_due=ten_day_leader_rotation_intraday_due,
+            shadow_rotation_slice=select_intraday_rotation_slice,
+            capture_shadow_quotes=capture_shadow_quotes,
+            persist_shadow_observations=persist_shadow_observations,
+            persist_shadow_status=persist_shadow_status, deliver_alert=deliver_intraday_alert,
             alert_text=intraday_alert_text, decision_card_url=decision_card_url,
         ),
     )
@@ -2515,6 +2644,10 @@ def post_close_strategy_automation_enabled() -> bool:
     return os.getenv("POST_CLOSE_STRATEGY_AUTOMATION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def ten_day_leader_rotation_automation_enabled() -> bool:
+    return os.getenv("TEN_DAY_LEADER_ROTATION_AUTOMATION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def daily_summary_automation_enabled() -> bool:
     return os.getenv("DAILY_SUMMARY_AUTOMATION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -2558,6 +2691,22 @@ async def post_close_strategy_loop() -> None:
         main_wave_request=WatchlistMainWaveResearchRequest,
         now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
         scheduler=post_close_strategy_scheduler,
+    ))
+
+
+async def ten_day_leader_rotation_loop() -> None:
+    """Run the feature's own leased, same-date post-close loop."""
+    await run_ten_day_leader_rotation_runtime_loop(TenDayLeaderRotationRuntimeDependencies(
+        database=db,
+        run_database=run_database_blocking,
+        calendar_open=sse_calendar_open_async,
+        persisted_completed_for_date=ten_day_leader_rotation_completed_for_date,
+        run_materialization=run_ten_day_leader_rotation,
+        request=TenDayLeaderRotationRunRequest,
+        model_version=TEN_DAY_LEADER_ROTATION_MODEL_VERSION,
+        ready_window=ten_day_leader_rotation_ready_window,
+        now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
+        scheduler=ten_day_leader_rotation_scheduler,
     ))
 
 
@@ -3460,6 +3609,8 @@ async def sync_tushare_daily_core(as_of_date: date, requested_symbols: list[str]
 
 def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
     """Create the uniquely-labelled leased runtime loops after local startup."""
+    if not background_tasks_enabled():
+        return {}
     interval_seconds = intraday_scan_interval_seconds()
     lease_holder_id = uuid.uuid4()
     lease_seconds = background_loop_lease_seconds()
@@ -3477,18 +3628,24 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
             on_state=background_loop_registry.mark,
         )
 
-    return start_leased_background_tasks((
+    specs = apply_background_runtime_profile((
         BackgroundTaskSpec("intraday_monitor", interval_seconds >= 30, lambda: intraday_monitor_loop(interval_seconds)),
         BackgroundTaskSpec("super_get_fast_quote", interval_seconds >= 30, intraday_super_get_fast_quote_loop),
         BackgroundTaskSpec("strategy_review", strategy_review_automation_enabled(), strategy_review_loop),
         BackgroundTaskSpec("post_close_strategy", post_close_strategy_automation_enabled(), post_close_strategy_loop),
+        BackgroundTaskSpec(
+            "ten_day_leader_rotation",
+            ten_day_leader_rotation_automation_enabled(),
+            ten_day_leader_rotation_loop,
+        ),
         BackgroundTaskSpec("daily_strategy_summary", daily_summary_automation_enabled(), daily_strategy_summary_loop),
         BackgroundTaskSpec("ths_member_backfill", ths_concept_member_backfill_enabled(), ths_concept_member_backfill_loop),
         BackgroundTaskSpec("all_board_member_backfill", all_board_member_backfill_enabled(), all_board_member_backfill_loop),
         BackgroundTaskSpec("minute_profile_capture", intraday_minute_profile_capture_enabled(), intraday_minute_profile_capture_loop),
         BackgroundTaskSpec("tencent_order_book", intraday_order_book_enabled() and interval_seconds >= 30, intraday_order_book_loop),
         BackgroundTaskSpec("board_flow_curve", intraday_board_curve_enabled(), intraday_board_flow_curve_loop),
-    ), leased_background_loop)
+    ))
+    return start_leased_background_tasks(specs, leased_background_loop)
 
 
 def _application_lifecycle_dependencies() -> ApplicationLifecycleDependencies:
@@ -3608,6 +3765,7 @@ app.include_router(build_strategy_pattern_reads_router(
     post_close_limit_daily_features, post_close_exact_board_context, post_close_tushare_lhb_context, async_db,
     run_database_blocking,
 ))
+app.include_router(build_ten_day_leader_rotation_reads_router(async_db))
 app.include_router(build_board_rotation_reads_router(db, async_database=async_db))
 app.include_router(build_board_stock_mining_reads_router(db, async_database=async_db))
 app.include_router(build_limit_linkage_mining_reads_router(db, async_database=async_db))
@@ -3677,10 +3835,13 @@ def _health_payload() -> dict[str, Any]:
             research_storage_governance=local_research_storage_governance,
             background_loop_status=background_loop_registry.snapshot,
             optional_background_tasks=lambda: {
+                "background_tasks_enabled": background_tasks_enabled(),
+                "runtime_profile": background_runtime_profile(),
                 "background_loop:ths_member_backfill": ths_concept_member_backfill_enabled(),
                 "background_loop:all_board_member_backfill": all_board_member_backfill_enabled(),
             },
             daily_control_plane_status=full_market_daily_control_status,
+            release_metadata=release_metadata,
     ))
 
 
@@ -4183,6 +4344,12 @@ async def sync_full_market_daily_endpoint(payload: FullMarketDailySyncRequest) -
     return await sync_full_market_daily(payload)
 
 
+async def sync_full_market_daily_controls_endpoint(
+    payload: FullMarketDailyControlsSyncRequest,
+) -> dict[str, Any]:
+    return await sync_full_market_daily_controls(payload.trade_date)
+
+
 async def post_close_refresh_endpoint(payload: PostCloseRefreshRequest) -> dict[str, Any]:
     return await run_post_close_refresh(payload)
 
@@ -4205,6 +4372,7 @@ app.include_router(build_market_actions_router(MarketActionDependencies(
     import_bars=import_bars,
     sync_universe=sync_market_universe_endpoint,
     sync_full_daily=sync_full_market_daily_endpoint,
+    sync_full_daily_controls=sync_full_market_daily_controls_endpoint,
     post_close_refresh=post_close_refresh_endpoint,
     sync_announcements=sync_cninfo_events_endpoint,
     rebuild_market_flow_features=rebuild_market_flow_features_endpoint,
@@ -4239,6 +4407,12 @@ async def run_strategy_review(payload: StrategyReviewRequest) -> dict[str, Any]:
 
 async def run_post_close_strategy_endpoint(payload: PostCloseStrategyRequest) -> dict[str, Any]:
     return await run_database_blocking(run_post_close_strategy, payload, timeout_seconds=60)
+
+
+async def run_ten_day_leader_rotation_endpoint(
+    payload: TenDayLeaderRotationRunRequest,
+) -> dict[str, Any]:
+    return await run_database_blocking(run_ten_day_leader_rotation, payload, timeout_seconds=90)
 
 
 async def run_strategy_pattern_mining_endpoint(payload: StrategyPatternMiningRequest) -> dict[str, Any]:
@@ -4554,6 +4728,9 @@ app.include_router(build_strategy_actions_router(StrategyActionDependencies(
     generate_recommendations=recommendations,
     daily_pipeline=run_daily_pipeline,
 )))
+app.include_router(build_ten_day_leader_rotation_actions_router(
+    TenDayLeaderRotationActionDependencies(run=run_ten_day_leader_rotation_endpoint),
+))
 
 
 def latest_recommendations() -> dict[str, Any]:

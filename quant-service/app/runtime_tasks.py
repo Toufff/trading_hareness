@@ -6,11 +6,22 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
 from threading import RLock
-from typing import Any, Awaitable
+from typing import Any, Awaitable, Mapping
 
 from .telemetry import background_loop_restarts_total
 from .network_health import network_state
+
+
+INTRADAY_EDGE_BACKGROUND_LOOPS = frozenset({
+    "intraday_monitor",
+    "super_get_fast_quote",
+    "minute_profile_capture",
+    "tencent_order_book",
+    "board_flow_curve",
+})
+BACKGROUND_RUNTIME_PROFILES = frozenset({"full", "research", "intraday_edge"})
 
 
 @dataclass(frozen=True)
@@ -20,6 +31,57 @@ class BackgroundTaskSpec:
     label: str
     enabled: bool
     factory: Callable[[], Awaitable[None]]
+
+
+def background_tasks_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Return whether this process may acquire any background-loop lease.
+
+    A preflight instance can validate its image, schema and HTTP pools against
+    production state without competing for collection or strategy work. The
+    normal service remains enabled by default.
+    """
+    values = environ if environ is not None else os.environ
+    return str(values.get("QUANT_BACKGROUND_TASKS_ENABLED", "true")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def background_runtime_profile(environ: Mapping[str, str] | None = None) -> str:
+    """Resolve one explicit single-writer role for process-owned loops."""
+    values = environ if environ is not None else os.environ
+    profile = str(values.get("QUANT_RUNTIME_PROFILE", "full")).strip().lower() or "full"
+    if profile not in BACKGROUND_RUNTIME_PROFILES:
+        supported = ", ".join(sorted(BACKGROUND_RUNTIME_PROFILES))
+        raise ValueError(f"QUANT_RUNTIME_PROFILE must be one of: {supported}")
+    return profile
+
+
+def apply_background_runtime_profile(
+    specs: tuple[BackgroundTaskSpec, ...],
+    environ: Mapping[str, str] | None = None,
+) -> tuple[BackgroundTaskSpec, ...]:
+    """Disable loops not owned by this process without changing their config.
+
+    ``intraday_edge`` is the always-on network collector and alert owner.
+    ``research`` owns everything else and cannot acquire a live collection
+    lease even when a legacy per-loop flag remains enabled. ``full`` preserves
+    the existing single-process behaviour for development and recovery.
+    """
+    profile = background_runtime_profile(environ)
+    if profile == "full":
+        return specs
+    return tuple(
+        BackgroundTaskSpec(
+            spec.label,
+            spec.enabled and (
+                spec.label in INTRADAY_EDGE_BACKGROUND_LOOPS
+                if profile == "intraday_edge"
+                else spec.label not in INTRADAY_EDGE_BACKGROUND_LOOPS
+            ),
+            spec.factory,
+        )
+        for spec in specs
+    )
 
 
 def start_leased_background_tasks(

@@ -112,6 +112,7 @@ required_leases=(
   background_loop:strategy_review
   background_loop:post_close_strategy
   background_loop:daily_strategy_summary
+  background_loop:ten_day_leader_rotation
 )
 # Membership backfills are intentionally optional: they can be disabled while
 # historical/member refresh work is paused.  The health payload is the only
@@ -126,17 +127,29 @@ for lease_key in "${required_leases[@]}"; do
 done
 pass 'quant database, shared provider pacing, required leases, executor, 30s/10s/1s and 60s board settings are opening-ready'
 
-intraday_json="$(curl --fail --silent --show-error --max-time 5 "$intraday_status_url")" || fail 'intraday status endpoint is unavailable'
-jq -e '
-  .summary.decision_path_degraded == false and
-  (first(.items[] | select(.key == "feishu_alert")) as $feishu |
-    $feishu.configured == true and $feishu.state == "ready") and
-  (first(.items[] | select(.key == "eastmoney_board_flow")) as $board |
-    $board.configured == true and $board.cadence == "上交所观察时段 09:20 起每 60 秒追加曲线") and
-  (first(.items[] | select(.key == "tencent_order_book")) as $book |
-    $book.configured == true and $book.cadence == "显式观察池批量每 3 秒" and
-    $book.details.max_symbols == 40 and $book.details.uncovered_watch_count == 0)
-' <<<"$intraday_json" >/dev/null || fail 'Feishu delivery or one-minute board rotation control path is degraded'
+intraday_ready=false
+# The status endpoint is intentionally fail-closed on a single stale public
+# flow frame.  A startup/readiness probe, however, must not race a short
+# refresh boundary: sample the already-persisted status three times without
+# calling any provider, then fail closed if the condition persists.
+for attempt in 1 2 3; do
+  intraday_json="$(curl --fail --silent --show-error --max-time 5 "$intraday_status_url")" || continue
+  if jq -e '
+    .summary.decision_path_degraded == false and
+    (first(.items[] | select(.key == "feishu_alert")) as $feishu |
+      $feishu.configured == true and $feishu.state == "ready") and
+    (first(.items[] | select(.key == "eastmoney_board_flow")) as $board |
+      $board.configured == true and $board.cadence == "上交所观察时段 09:20 起每 60 秒追加曲线") and
+    (first(.items[] | select(.key == "tencent_order_book")) as $book |
+      $book.configured == true and $book.cadence == "显式观察池批量每 3 秒" and
+      $book.details.max_symbols == 40 and $book.details.uncovered_watch_count == 0)
+  ' <<<"$intraday_json" >/dev/null; then
+    intraday_ready=true
+    break
+  fi
+  (( attempt < 3 )) && sleep 2
+done
+[[ "$intraday_ready" == true ]] || fail 'Feishu delivery or one-minute board rotation control path is degraded after 3 read-only samples'
 pass 'Feishu delivery, one-minute board rotation and bounded five-level observation path are ready'
 
 # Analyst evidence is deliberately not part of the live strategy/alert gate

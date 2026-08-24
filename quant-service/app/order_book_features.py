@@ -44,7 +44,9 @@ def order_book_observation(current: dict[str, Any], previous: dict[str, Any] | N
     bid_weighted, ask_weighted = _weighted_depth(bids), _weighted_depth(asks)
     depth_total = bid_weighted + ask_weighted
     qi5 = (bid_weighted - ask_weighted) / depth_total if depth_total else None
-    qi1 = ((bid1["size"] if bid1 else 0.0) - (ask1["size"] if ask1 else 0.0)) / ((bid1["size"] if bid1 else 0.0) + (ask1["size"] if ask1 else 0.0)) if bid1 or ask1 else None
+    bid1_size, ask1_size = (bid1["size"] if bid1 else 0.0), (ask1["size"] if ask1 else 0.0)
+    top_depth = bid1_size + ask1_size
+    qi1 = (bid1_size - ask1_size) / top_depth if top_depth else None
     one_sided = bool(bid1) != bool(ask1)
     book_side = "bid_only" if bid1 and not ask1 else "ask_only" if ask1 and not bid1 else "two_sided"
     result: dict[str, Any] = {

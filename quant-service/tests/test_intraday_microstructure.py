@@ -51,6 +51,15 @@ class IntradayMicrostructureTests(unittest.TestCase):
         observed = order_book_observation({"bids": [{"price": 10, "size": 100}, {"price": 0, "size": 0}, {"price": 9.98, "size": 100}], "asks": [{"price": 10.01, "size": 100}, {"price": 10.02, "size": 100}, {"price": 10.03, "size": 100}]})
         self.assertAlmostEqual(observed["bid_depth_lot"], 136.79, places=2)
 
+    def test_empty_top_depth_is_observed_without_dividing_by_zero(self):
+        observed = order_book_observation({
+            "bids": [{"price": 10, "size": 0}],
+            "asks": [{"price": 10.01, "size": 0}],
+        })
+        self.assertEqual(observed["status"], "observed")
+        self.assertIsNone(observed["qi1"])
+        self.assertIsNone(observed["qi5"])
+
     def test_order_flow_aggregates_windows_and_proxies(self):
         at = datetime(2026, 8, 12, 5, 5, tzinfo=timezone.utc)
         rows = [{"observed_at": at - timedelta(seconds=offset), "raw": {"order_book_features": {"ofi_best_level": value, "book_mid": 10.0 + value / 100, "qi5": 0.25, "bid_depth_lot": 100, "ask_depth_lot": 100, "outer_inner_delta_lot": value, "seal_volume_delta_lot": -offset}}} for offset, value in ((3, 2), (6, 3), (9, -1), (70, 9), (310, 99))]

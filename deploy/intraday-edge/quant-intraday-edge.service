@@ -1,0 +1,31 @@
+[Unit]
+Description=Quant intraday edge collector and Feishu alert owner
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=quant_edge
+Group=quant_edge
+WorkingDirectory=/opt/quant-intraday-edge/current/quant-service
+EnvironmentFile=/etc/quant-intraday-edge.env
+EnvironmentFile=-/etc/quant-intraday-edge.release.env
+ExecStart=/opt/quant-intraday-edge/.venv/bin/python entrypoint.py /opt/quant-intraday-edge/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 18110 --workers 1
+Restart=always
+RestartSec=5
+TimeoutStartSec=180
+TimeoutStopSec=30
+MemoryHigh=1100M
+MemoryMax=1400M
+TasksMax=256
+LimitNOFILE=16384
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/quant-intraday-edge
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

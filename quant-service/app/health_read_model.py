@@ -49,6 +49,31 @@ class HealthDependencies:
     background_loop_status: Callable[[], dict[str, dict[str, Any]]] | None = None
     optional_background_tasks: Callable[[], dict[str, bool]] | None = None
     daily_control_plane_status: Callable[[], dict[str, Any]] | None = None
+    release_metadata: Callable[[], dict[str, str | None]] | None = None
+
+
+def runtime_loops_with_lease_heartbeats(
+    runtime_loops: dict[str, dict[str, Any]], background_loop_leases: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Attach durable lease renewal evidence without relabelling lifecycle state.
+
+    ``updated_at`` is deliberately the last lifecycle transition.  A long
+    lived loop therefore needs a separate heartbeat field: lease renewal is a
+    local, cross-process proof that its current owner is still active.
+    """
+    leases = {
+        str(row.get("lease_key") or "").removeprefix("background_loop:"): row
+        for row in background_loop_leases
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for label, item in runtime_loops.items():
+        lease = leases.get(label)
+        result[label] = {
+            **dict(item),
+            "lease_heartbeat_at": lease.get("updated_at") if lease else None,
+            "lease_expires_at": lease.get("expires_at") if lease else None,
+        }
+    return result
 
 
 def health_payload(deps: HealthDependencies) -> dict[str, Any]:
@@ -82,8 +107,11 @@ def health_payload(deps: HealthDependencies) -> dict[str, Any]:
     resources = deps.resource_status(deps.data_directory())
     if deps.research_storage_governance is not None:
         resources["research_storage"] = deps.research_storage_governance(deps.database)
+    background_leases = [dict(row) for row in background_loop_leases]
+    runtime_loops = deps.background_loop_status() if deps.background_loop_status else {}
     return {
         "status": "ok", "service": "quant-research", "database_pool": pool,
+        "build": deps.release_metadata() if deps.release_metadata else {},
         "async_database_pool": deps.async_database_pool_status() if deps.async_database_pool_status else None,
         "resources": resources,
         "runtime_leases": {
@@ -93,9 +121,9 @@ def health_payload(deps: HealthDependencies) -> dict[str, Any]:
                 "expires_at": post_close_lease["expires_at"] if post_close_lease else None,
                 "updated_at": post_close_lease["updated_at"] if post_close_lease else None,
             },
-            "background_loops": [dict(row) for row in background_loop_leases],
+            "background_loops": background_leases,
         },
-        "runtime_loops": deps.background_loop_status() if deps.background_loop_status else {},
+        "runtime_loops": runtime_loops_with_lease_heartbeats(runtime_loops, background_leases),
         "optional_background_tasks": deps.optional_background_tasks() if deps.optional_background_tasks else {},
         "daily_control_plane": deps.daily_control_plane_status() if deps.daily_control_plane_status else {},
         "http_clients": {
@@ -122,4 +150,7 @@ def health_payload(deps: HealthDependencies) -> dict[str, Any]:
     }
 
 
-__all__ = ["DatabaseUnavailableError", "HealthDependencies", "health_payload"]
+__all__ = [
+    "DatabaseUnavailableError", "HealthDependencies", "health_payload",
+    "runtime_loops_with_lease_heartbeats",
+]

@@ -1154,6 +1154,49 @@ CREATE TABLE IF NOT EXISTS quant.strategy_pattern_samples (
 CREATE INDEX IF NOT EXISTS strategy_pattern_samples_rank_idx
     ON quant.strategy_pattern_samples(run_id,rank);
 
+-- Ten-session board-local rank materialization distilled from a retrospective
+-- workbook.  This is an isolated shadow projection: the database itself makes
+-- decision eligibility impossible until a future, explicitly migrated model
+-- supersedes this contract.
+CREATE TABLE IF NOT EXISTS quant.ten_day_leader_rotation_runs (
+    run_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_key text NOT NULL UNIQUE,
+    as_of_date date NOT NULL,
+    strategy_available_at timestamptz,
+    model_version text NOT NULL,
+    status text NOT NULL CHECK(status IN ('completed','partial','blocked')),
+    scope text NOT NULL DEFAULT 'research_only_no_orders' CHECK(scope='research_only_no_orders'),
+    source_status jsonb NOT NULL DEFAULT '{}'::jsonb,
+    summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ten_day_leader_rotation_runs_date_idx
+    ON quant.ten_day_leader_rotation_runs(as_of_date DESC,updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS quant.ten_day_leader_rotation_candidates (
+    run_id uuid NOT NULL REFERENCES quant.ten_day_leader_rotation_runs(run_id) ON DELETE CASCADE,
+    board text NOT NULL CHECK(board IN ('main','growth','bj')),
+    board_rank integer NOT NULL CHECK(board_rank BETWEEN 1 AND 30),
+    symbol text NOT NULL REFERENCES quant.instruments(symbol),
+    name text,
+    ten_day_return_pct numeric NOT NULL,
+    current_return_pct numeric NOT NULL,
+    candidate_path text,
+    shadow_state text NOT NULL,
+    shadow_eligible boolean NOT NULL DEFAULT false,
+    decision_eligible boolean NOT NULL DEFAULT false CHECK(NOT decision_eligible),
+    evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+    reason_codes jsonb NOT NULL DEFAULT '[]'::jsonb,
+    risk_flags jsonb NOT NULL DEFAULT '[]'::jsonb,
+    source_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
+    discovered_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY(run_id,symbol),
+    UNIQUE(run_id,board,board_rank)
+);
+CREATE INDEX IF NOT EXISTS ten_day_leader_rotation_candidates_state_idx
+    ON quant.ten_day_leader_rotation_candidates(run_id,shadow_state,board_rank);
+
 CREATE TABLE IF NOT EXISTS quant.claim_revisions (
     revision_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     prior_claim_id uuid REFERENCES quant.analyst_claims(claim_id) ON DELETE SET NULL,

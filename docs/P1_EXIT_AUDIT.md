@@ -1,6 +1,6 @@
 # P1 工程加固退出审计
 
-更新时间：2026-08-23。此文档是 P1 当前可验证状态的交接清单，不把 P2 的历史回填、分钟回放或策略阈值校准提前宣称为完成。
+更新时间：2026-08-24。此文档是 P1 当前可验证状态的交接清单，不把 P2 的历史回填、分钟回放或策略阈值校准提前宣称为完成。
 
 ## 已验证的运行边界
 
@@ -8,10 +8,10 @@
 | --- | --- | --- |
 | 交易数据范围 | 本轮没有新增历史数据请求；在线 Tushare 保持 allow-list、范围与行数上限，历史分钟仅允许本地文件导入 | 控制面/测试均未调用历史端点 |
 | async 数据库 I/O | async 函数自身不得直接开同步事务；同步闭包经有界数据库执行器运行 | `tests/test_async_database_boundaries.py` AST 门禁；`/metrics` 显示 executor 水位 |
-| 多副本循环 | 八个常驻循环各持有 `background_loop:*` 租约；失租即停、异常退出可过期接管 | `/health.runtime_leases.background_loops`、真实 `updated_at` 续租核验、租约异常测试 |
+| 多副本循环 | 九个常驻循环各持有 `background_loop:*` 租约（含十日排行榜影子研究）；失租即停、异常退出可过期接管 | `/health.runtime_leases.background_loops`、真实 `updated_at` 续租核验、租约异常测试 |
 | 上游韧性 | public HTTP、飞书和非 Super-GET Tushare 均使用生命周期 keep-alive 池、受限重试与 capability 熔断；Super GET 维持独立代理会话；上游有效 `Retry-After` 只会在原有一次重试内、最多延迟 10 秒。Tushare 另以数据库原子槽位协调多副本节流，超出 5 秒（可配置）共享等待预算时明确为本地背压；等待与拒绝可由 Prometheus 逐 provider 观测；公开源错误不携带凭据入库 | provider helper 回归、`/health.http_clients`、`/health.provider_rate_limits`、`provider_health` 和 Prometheus provider 指标 |
-| HTTP 调用所有权 | 策略、router、仓储与读模型不得绕过生命周期 HTTP 池；公共源、Tushare 与飞书各走独立受控 client | 静态 transport-ownership 回归；当前构建全量 Python discovery 734 项通过 |
-| Prometheus 控制面 | `/metrics` 自行以 5 秒 TTL 刷新本地连接池水位和当前 provider 熔断数；数据库异常不使 scrape 失败 | metrics-control-plane 回归；当前构建全量 Python discovery 734 项通过 |
+| HTTP 调用所有权 | 策略、router、仓储与读模型不得绕过生命周期 HTTP 池；公共源、Tushare 与飞书各走独立受控 client | 静态 transport-ownership 回归；当前构建全量 Python discovery 781 项通过 |
+| Prometheus 控制面 | `/metrics` 自行以 5 秒 TTL 刷新本地连接池水位和当前 provider 熔断数；数据库异常不使 scrape 失败 | metrics-control-plane 回归；当前构建全量 Python discovery 781 项通过 |
 | 盘中扫描 | 腾讯失败、空池、闭市门禁、正常完成均写可审计终态；无观察池命中时不再伪报 Tencent `completed`；板块上下文、纸面持仓和组合快照按扫描批量读取 | `quant_intraday_scan_duration_seconds`；闭市真实调用为 `blocked` |
 | 调度收敛 | n8n 18:50 日流水线只有服务端 `/pipeline/daily` 一个入口；端点内已执行特征、结算、评分与推荐，避免工作流后续节点重复计算 | `scripts/converge-n8n-quant-daily-workflow.sh` 的工作流导出回滚副本、受限更新与数据库拓扑复核 |
 | 飞书投递 | 观察池个股信号先落独立 outbox；失败有界重试，成功才进入冷却；日终摘要独立持久化；连续三次失败本地留痕，首次恢复正常投递会发送运维回执。板块轮动/挖掘只落前端证据，不单独发飞书；可重建事件/回执 60 天后有界清理 | alert delivery、恢复回执与日终摘要测试；服务状态页 |
@@ -19,7 +19,7 @@
 | 可恢复性 | Alembic 迁移受 advisory lock 保护；开盘预检会重建 PostgreSQL archive listing 并比对 manifest，校验备份权限和每份 workflow JSON；不执行 restore | `scripts/quant-opening-preflight.sh`、真实 12 workflow 验收与 `P1_RUNTIME_HARDENING_STATUS.md` |
 | 备份原子发布 | 只有 archive manifest 与 workflow 导出完成且每份 JSON 含 `nodes` 后才发布；失败 staging 自动清理 | `scripts/backup-postgres-and-workflows.sh` 语法与 12 workflow 等价验证 |
 | 回放准入 | `/api/v1/data-readiness/replay` 只读取本地日线、离线分钟与确认信号证据，并将 P2/P3 缺口显式展示给前端 | 2026-08-11 实测 `blocked`；不触发历史拉取、阈值校准或行情请求 |
-| 当日控制面 | 全市场收盘日线后顺序同步同日 `adj_factor`、`daily_basic`、`stk_limit`、`suspend_d`；非停牌控制须覆盖至少 95% 的已落库日线，任一缺失则不提升任何控制字段 | `test_full_market_daily_controls_sync.py`；`/health.daily_control_plane`；不拉取历史 |
+| 当日控制面 | 全市场收盘日线后顺序同步同日 `adj_factor`、`daily_basic`、`stk_limit`、`suspend_d`；日线和非停牌控制都必须覆盖至少 95% 的点时全 A 成员，且控制字段覆盖所有已纳入的日线；任一缺失则不提升任何控制字段 | `test_full_market_daily_controls_sync.py`、`test_daily_control_plane.py`；`/health.daily_control_plane`；不拉取历史 |
 
 ## 已拆出的稳定边界
 

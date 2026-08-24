@@ -5,11 +5,15 @@ import { open, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { createLedger } from './ledger.mjs';
+import { releaseMetadata } from './release-metadata.mjs';
 import { createGroupRelay } from './group-relay.mjs';
 import { createSummaryListener } from './summary-listener.mjs';
 import { createFeishuUserOauth } from './feishu-user-oauth.mjs';
 import { createFeishuWorkbench } from './feishu-workbench.mjs';
 import { isSystemRelayPlaceholder } from './message-filter.mjs';
+import { extractImportContent, isValidDateTime } from './message-time.mjs';
+import { shouldSkipMessageForward } from './message-idempotency.mjs';
+import { shouldRedownloadRetryMedia } from './retry-media.mjs';
 import Busboy from 'busboy';
 
 const required = ['FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'N8N_TEXT_WEBHOOK_URL', 'N8N_MEDIA_PART_WEBHOOK_URL', 'N8N_MEDIA_FINALIZE_WEBHOOK_URL'];
@@ -27,12 +31,18 @@ const quantServiceUrl = String(process.env.QUANT_SERVICE_URL ?? '').replace(/\/$
 const quantWriteApiKey = String(process.env.QUANT_WRITE_API_KEY ?? '');
 const quantAlertWebhookToken = String(process.env.QUANT_ALERT_WEBHOOK_TOKEN ?? '');
 const feishuAlertReceiveId = String(process.env.FEISHU_ALERT_RECEIVE_ID ?? '').trim();
+// paper-kb: `收录 <arXiv ids>` in the reading group triggers ingestion through n8n.
+const paperIngestWebhook = String(process.env.PAPER_KB_INGEST_WEBHOOK ?? '').trim();
+const paperIngestChatId = String(process.env.PAPER_KB_FEISHU_CHAT_ID ?? '').trim();
+const paperSearchWebhook = String(process.env.PAPER_KB_SEARCH_WEBHOOK ?? '').trim();
 const feishuAlertReceiveIdType = String(process.env.FEISHU_ALERT_RECEIVE_ID_TYPE ?? 'chat_id').trim();
 const supportedAlertReceiveIdTypes = new Set(['chat_id', 'open_id', 'user_id', 'union_id']);
 if (!supportedAlertReceiveIdTypes.has(feishuAlertReceiveIdType)) {
 	throw new Error('FEISHU_ALERT_RECEIVE_ID_TYPE must be chat_id, open_id, user_id, or union_id');
 }
 const dashboardPort = Number(process.env.DASHBOARD_PORT ?? 3000);
+const dashboardHost = String(process.env.DASHBOARD_HOST ?? '0.0.0.0').trim() || '0.0.0.0';
+const longConnectionEnabled = String(process.env.FEISHU_LONG_CONNECTION_ENABLED ?? 'true').toLowerCase() !== 'false';
 const frontendDist = process.env.FRONTEND_DIST ?? '/app/frontend-dist';
 const frontendMode = process.env.FRONTEND_MODE ?? (existsSync(frontendDist) ? 'spa' : 'legacy');
 const importTimeZone = process.env.IMPORT_TIME_ZONE ?? 'Asia/Shanghai';
@@ -208,6 +218,9 @@ async function runRetryQueue() {
 		if (!await ledger.markRetryRunning(queued.job_id)) continue;
 		try {
 			const payload = queued.payload ?? {};
+			const replayImportContent = payload.content_date
+				? { content: payload.import_content ?? '', content_date: payload.content_date, content_time: payload.content_time }
+				: extractImportContent(payload.message_text, { referenceTime: payload.receivedAt });
 			const originalResources = Array.isArray(payload.resources) ? payload.resources : [];
 			const replayResources = (queued.resources ?? []).map(({ asset, parts }) => ({
 				asset_id: asset.asset_id, property: `replay_${asset.ordinal}`, filename: filenameForMediaType(asset.filename, asset.media_type), media_type: asset.media_type,
@@ -216,13 +229,20 @@ async function runRetryQueue() {
 				last_modified: Number(originalResources[Number(asset.ordinal)]?.last_modified ?? Date.now()), part_size: uploadPartBytes,
 				part_count: parts.length, parts: parts.map((part) => ({ part_index: Number(part.part_index), property: `replay_${asset.ordinal}_part_${part.part_index}`, bytes: Number(part.bytes), sha256: part.sha256, uploaded: Boolean(part.uploaded), remote_status: part.remote_status })),
 			}));
-			if (replayResources.some((resource) => resource.path && !existsSync(resource.path))) throw new Error('本地重试文件已被清理，无法恢复上传');
-			await hydrateRemotePartState(replayResources);
+			const redownloadMedia = shouldRedownloadRetryMedia({
+				expectedResourceCount: originalResources.length, event: payload.event,
+			});
+			const deliveryResources = redownloadMedia
+				? await downloadMedia(payload.event, feishuUserOauth.sourceApi)
+				: replayResources;
+			if (redownloadMedia) console.info(`重试时已从飞书重新下载媒体：${queued.message_id}`);
+			if (deliveryResources.some((resource) => resource.path && !existsSync(resource.path))) throw new Error('本地重试文件已被清理，且无法从飞书恢复上传');
+			await hydrateRemotePartState(deliveryResources);
 			await forwardToN8n(payload.event, {
-				resources: replayResources, messageText: payload.message_text, sourceLabel: payload.source_label,
+				resources: deliveryResources, messageText: payload.message_text, sourceLabel: payload.source_label,
 				replayJobId: queued.job_id, source: payload.source, remoteBatchId: queued.remote_batch_id,
 				receivedAt: payload.receivedAt,
-				importContent: { content: payload.import_content ?? '', content_date: payload.content_date, content_time: payload.content_time },
+				importContent: replayImportContent,
 			});
 			} catch (error) {
 				// A workflow can persist the remote status before its webhook returns 500.
@@ -478,31 +498,6 @@ function filenameFromHeaders(headers, fallback) {
 	const value = headers?.['content-disposition'] ?? headers?.['Content-Disposition'];
 	const match = typeof value === 'string' && value.match(/filename\*?=(?:UTF-8''|\")?([^;\"]+)/i);
 	return match ? decodeURIComponent(match[1].replace(/\"/g, '')).replace(/[^\w.-]+/g, '_') : fallback;
-}
-
-function isValidDateTime(date, time) {
-	if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return false;
-	const [year, month, day] = date.split('-').map(Number);
-	const [hour, minute] = time.split(':').map(Number);
-	const value = new Date(Date.UTC(year, month - 1, day, hour, minute));
-	return value.getUTCFullYear() === year && value.getUTCMonth() === month - 1 && value.getUTCDate() === day &&
-		value.getUTCHours() === hour && value.getUTCMinutes() === minute;
-}
-
-function extractImportContent(messageText) {
-	const routeTag = messageText.match(/^#([a-z0-9-]+)\s*(?:\r?\n)?/i);
-	// `content_date` / `content_time` have a strong remote meaning: they are an
-	// explicit user-supplied timestamp.  Do not manufacture them from Feishu
-	// receipt time.  For analyst messages the remote worker must be able to
-	// recover a second-precision `stated_at` from the retained body instead.
-	if (!routeTag) return { content: '' };
-	let content = messageText.slice(routeTag[0].length).trim();
-	const override = content.match(/^@(\d{4}-\d{2}-\d{2})[ \t]+(\d{2}:\d{2})(?:[ \t]*(?:\r?\n)?)/);
-	if (!override) return { content };
-	if (!isValidDateTime(override[1], override[2])) {
-		throw new Error('指定时间无效，请使用 @YYYY-MM-DD HH:mm，例如 @2026-07-31 14:30');
-	}
-	return { content: content.slice(override[0].length).trim(), content_date: override[1], content_time: override[2] };
 }
 
 async function downloadMedia(data, messageResourceApi = null) {
@@ -1075,6 +1070,7 @@ const researchPaths = new Map([
 	['/api/research/strategy/ablation/latest', '/api/v1/strategy/ablation/latest'],
 	['/api/research/strategy/health', '/api/v1/strategy/health'],
 	['/api/research/strategy/pattern-mining/latest', '/api/v1/strategy/pattern-mining/latest'],
+	['/api/research/ten-day-leader-rotation/latest', '/api/v1/research/ten-day-leader-rotation/latest'],
 	['/api/research/intraday/outcomes/latest', '/api/v1/intraday/outcomes/latest'],
 	['/api/research/paper/status', '/api/v1/paper/status'],
 	['/api/research/strategy/contracts', '/api/v1/strategy/contracts'],
@@ -1115,9 +1111,11 @@ const researchActions = new Map([
 	['/api/research/strategies/backtest', '/api/v1/strategies/backtest'],
 	['/api/research/strategy/post-close/run', '/api/v1/strategy/post-close/run'],
 	['/api/research/strategy/pattern-mining/run', '/api/v1/strategy/pattern-mining/run'],
+	['/api/research/ten-day-leader-rotation/run', '/api/v1/research/ten-day-leader-rotation/run'],
 	['/api/research/strategy/watchlist-main-wave/run', '/api/v1/strategy/watchlist-main-wave/run'],
 	['/api/research/market/universe/sync', '/api/v1/market/universe/sync'],
 	['/api/research/market/full-daily/sync', '/api/v1/market/sync/full-daily'],
+	['/api/research/market/full-daily-controls/sync', '/api/v1/market/sync/full-daily-controls'],
 	['/api/research/market/post-close/refresh', '/api/v1/market/post-close/refresh'],
 	['/api/research/market/flow/features/rebuild', '/api/v1/market/flow/features/rebuild'],
 	['/api/research/market/snapshots/run', '/api/v1/market/snapshots/run'],
@@ -1153,7 +1151,7 @@ async function proxyResearchAction(path, request, response, method = 'POST') {
 		if (size > 64 * 1024) throw new Error('研究操作请求超过 64 KiB 上限');
 		chunks.push(chunk);
 	}
-	const longRunning = path.includes('/market/') || path.includes('/tushare/audit') || path.includes('/realtime/probe') || path.includes('/akshare/probe') || path.includes('/strategy/post-close/run') || path.includes('/strategy/pattern-mining/run') || path.includes('/strategy/watchlist-main-wave/run');
+	const longRunning = path.includes('/market/') || path.includes('/tushare/audit') || path.includes('/realtime/probe') || path.includes('/akshare/probe') || path.includes('/strategy/post-close/run') || path.includes('/strategy/pattern-mining/run') || path.includes('/strategy/watchlist-main-wave/run') || path.includes('/ten-day-leader-rotation/run');
 	const timeoutMs = path.includes('/market/post-close/refresh') ? 360_000 : longRunning ? 180_000 : 45_000;
 	const upstream = await fetch(`${quantServiceUrl}${path}`, {
 		method,
@@ -1408,7 +1406,7 @@ const dashboard = createServer((request, response) => {
 	}
 	if (url.pathname === '/health') {
 		response.writeHead(200, { 'content-type': 'application/json' });
-		response.end(JSON.stringify({ status: 'ok', events: recentEvents.length, quant_alert_configured: Boolean(quantAlertWebhookToken && feishuAlertReceiveId) }));
+		response.end(JSON.stringify({ status: 'ok', events: recentEvents.length, quant_alert_configured: Boolean(quantAlertWebhookToken && feishuAlertReceiveId), build: releaseMetadata() }));
 		return;
 	}
 	if (url.pathname === '/internal/quant-alert' && request.method === 'POST') {
@@ -1526,11 +1524,11 @@ async function forwardToN8n(data, manual = null) {
 	const messageText = manual?.messageText ?? String(extractMessagePayload(data.message ?? {}).text ?? '').trim();
 	const route = routeFromMessageText(messageText);
 	const receivedAt = manual?.receivedAt ?? new Date().toISOString();
-	const importContent = manual?.importContent ?? extractImportContent(messageText);
+	const importContent = manual?.importContent ?? extractImportContent(messageText, { referenceTime: receivedAt });
 	const messageId = data?.message?.message_id ?? null;
-	if (!manual?.replayJobId) {
-		const existing = await ledger.getJobByMessageId(messageId);
-		if (existing) return { jobId: existing.job_id, duplicate: true, batchId: existing.remote_batch_id };
+	const existing = await ledger.getJobByMessageId(messageId);
+	if (shouldSkipMessageForward({ existingJob: existing, replayJobId: manual?.replayJobId })) {
+		return { jobId: existing.job_id, duplicate: true, batchId: existing.remote_batch_id };
 	}
 	const resources = manual?.resources ?? await downloadMedia(data, manual?.messageResourceApi ?? null);
 	const payload = {
@@ -1553,14 +1551,9 @@ async function forwardToN8n(data, manual = null) {
 	});
 	if (duplicate && !manual?.replayJobId) return { jobId: job.job_id, duplicate: true, batchId: job.remote_batch_id };
 	if (payload.import_content) await ledger.recordContentItem(job.job_id, { content_type: 'text', content_sha256: payload.text_content_sha256, content_date: importContent.content_date, content_time: importContent.content_time, body: importContent.content });
-	const previousAssets = await ledger.findCompletedAssets(resources.map((resource) => resource.content_sha256));
-	if (resources.length && previousAssets.length === resources.length) {
-		for (const [ordinal, resource] of resources.entries()) { await ledger.recordAsset(job.job_id, ordinal, resource); }
-		await ledger.markAssets(job.job_id, 'duplicate');
-		await ledger.updateJob(job.job_id, { status: 'duplicate', stage: 'duplicate_media', error_class: 'remote_duplicate_prevented', error_message: '本地已存在相同媒体 SHA256，未再次创建远端请求' });
-		await Promise.all(resources.map((resource) => resource.path ? unlink(resource.path).catch(() => {}) : Promise.resolve()));
-		return { jobId: job.job_id, duplicate: true };
-	}
+	// Do not turn a new Feishu message into a duplicate just because an image or
+	// file has identical bytes to a historical attachment.  The upstream media
+	// protocol remains idempotent through its per-message batch/item/upload keys.
 	await ledger.updateJob(job.job_id, { status: resources.length ? 'uploading' : 'queued', stage: resources.length ? 'uploading_parts' : 'creating_text', attempt_count: Number(job.attempt_count ?? 0) + 1 });
 	const assetIds = [];
 	for (const [ordinal, resource] of resources.entries()) assetIds.push(await ledger.recordAsset(job.job_id, ordinal, resource));
@@ -1712,6 +1705,58 @@ function isQuantAlertBindingCommand(data) {
 	return text === '盘中提醒绑定';
 }
 
+// A reading-group message like `收录 2608.21157 2608.19677` asks the KB to pull those
+// arXiv papers in.  Only ids are extracted here; the KB revalidates every one of them
+// against NNNN.NNNNN before anything reaches a subprocess.
+function isPaperIngestCommand(data) {
+	const chatId = String(data?.message?.chat_id ?? '');
+	if (paperIngestChatId && chatId !== paperIngestChatId) return null;
+	const text = String(extractMessagePayload(data?.message ?? {}).text ?? '').replace(/@_user_\d+\s*/g, '').trim();
+	if (!/^(收录|收|ingest)\b/i.test(text)) return null;
+	const ids = [...text.matchAll(/\b\d{4}\.\d{4,5}(?:v\d+)?\b/g)].map((match) => match[0]);
+	return ids.length ? ids : null;
+}
+
+async function forwardPaperIngest(ids) {
+	if (!paperIngestWebhook) throw new Error('PAPER_KB_INGEST_WEBHOOK is not configured');
+	const response = await fetch(paperIngestWebhook, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ ids: ids.join(',') }),
+	});
+	if (!response.ok) throw new Error(`ingest webhook responded ${response.status}`);
+	return response.status;
+}
+
+// A reading-group message like `查询 MOE` or `精查 KV cache eviction` asks the KB to
+// search its own corpus. `精查`/`深查` opt into the slower LLM full-text rerank; every
+// other prefix gets the instant path. Only the query text is extracted here -- it is
+// length-capped and never reaches a subprocess on the KB side (see jobs.py:search).
+const PAPER_SEARCH_COMMAND = /^(精查|深查|查询|搜索|search)\s*[:：]?\s*(.+)$/i;
+const PAPER_SEARCH_DEEP_PREFIX = /^(精查|深查)/;
+
+function isPaperSearchCommand(data) {
+	const chatId = String(data?.message?.chat_id ?? '');
+	if (paperIngestChatId && chatId !== paperIngestChatId) return null;
+	const text = String(extractMessagePayload(data?.message ?? {}).text ?? '').replace(/@_user_\d+\s*/g, '').trim();
+	const match = text.match(PAPER_SEARCH_COMMAND);
+	if (!match) return null;
+	const query = match[2].trim();
+	if (!query) return null;
+	return { query, deep: PAPER_SEARCH_DEEP_PREFIX.test(match[1]) };
+}
+
+async function forwardPaperSearch(query, deep) {
+	if (!paperSearchWebhook) throw new Error('PAPER_KB_SEARCH_WEBHOOK is not configured');
+	const response = await fetch(paperSearchWebhook, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ query, deep }),
+	});
+	if (!response.ok) throw new Error(`search webhook responded ${response.status}`);
+	return response.status;
+}
+
 function pruneFeishuDedupe(now = Date.now()) {
 	for (const [key, entry] of feishuEventPromises) {
 		if (entry.expiresAt <= now) feishuEventPromises.delete(key);
@@ -1727,6 +1772,30 @@ async function processFeishuEvent(data) {
 	if (isQuantAlertBindingCommand(data)) {
 		updateEvent(eventId, { n8n_status: '已识别为盘中提醒绑定命令，未转发研究导入' });
 		return { bound_alert_group: true };
+	}
+	const paperIds = isPaperIngestCommand(data);
+	if (paperIds) {
+		try {
+			await forwardPaperIngest(paperIds);
+			updateEvent(eventId, { n8n_status: `已转发论文收录：${paperIds.join(', ')}` });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			updateEvent(eventId, { n8n_status: '论文收录转发失败', n8n_error: message });
+			console.error(`论文收录转发失败：${message}`);
+		}
+		return { paper_ingest: paperIds };
+	}
+	const paperSearch = isPaperSearchCommand(data);
+	if (paperSearch) {
+		try {
+			await forwardPaperSearch(paperSearch.query, paperSearch.deep);
+			updateEvent(eventId, { n8n_status: `已转发论文检索：${paperSearch.query}${paperSearch.deep ? '（精查）' : ''}` });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			updateEvent(eventId, { n8n_status: '论文检索转发失败', n8n_error: message });
+			console.error(`论文检索转发失败：${message}`);
+		}
+		return { paper_search: paperSearch };
 	}
 	const hasMedia = extractMessagePayload(data?.message ?? {}).resources.length > 0;
 	updateEvent(eventId, { n8n_status: hasMedia ? '下载媒体并转发中' : '转发中' });
@@ -1833,8 +1902,12 @@ process.on('unhandledRejection', (error) => {
 	console.error('Unhandled adapter rejection', error);
 });
 
-dashboard.listen(dashboardPort, '0.0.0.0', () => {
+dashboard.listen(dashboardPort, dashboardHost, () => {
 	console.info(`Feishu monitor available on port ${dashboardPort}`);
 });
-console.info('Starting Feishu long-connection client');
-wsClient.start({ eventDispatcher });
+if (longConnectionEnabled) {
+	console.info('Starting Feishu long-connection client');
+	wsClient.start({ eventDispatcher });
+} else {
+	console.info('Feishu long-connection client is disabled');
+}

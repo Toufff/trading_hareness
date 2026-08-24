@@ -53,6 +53,11 @@ def release_migration_lock(connection: psycopg.Connection) -> None:
         cursor.execute("SELECT pg_advisory_unlock(%s)", (MIGRATION_ADVISORY_LOCK_KEY,))
 
 
+def migration_command() -> list[str]:
+    """Run Alembic from the same virtual environment as the service."""
+    return [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"]
+
+
 def main(argv: list[str]) -> None:
     if not argv:
         raise SystemExit("usage: entrypoint.py <service command>")
@@ -61,7 +66,7 @@ def main(argv: list[str]) -> None:
     try:
         acquire_migration_lock(connection)
         print("applying versioned quant schema migrations", flush=True)
-        subprocess.run(["alembic", "-c", "alembic.ini", "upgrade", "head"], check=True)
+        subprocess.run(migration_command(), check=True)
     finally:
         try:
             release_migration_lock(connection)

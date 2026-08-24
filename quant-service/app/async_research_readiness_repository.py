@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .replay_readiness import replay_readiness_payload
+from .replay_readiness import PIT_DAILY_COVERAGE_CTE, replay_readiness_payload
 from .research_capacity import feature_readiness_projection, historical_capacity_plan
 
 
@@ -46,25 +46,18 @@ async def replay_readiness(async_database: Any) -> dict[str, Any]:
     """Read bounded replay gates using the native async connection."""
     async with async_database.transaction() as connection:
         result = await connection.execute(
-            """WITH universe AS (
-                    SELECT greatest(1,count(*)::int) symbols
-                      FROM quant.universe_members
-                     WHERE universe_key='all_a' AND enabled
-                 ), daily_counts AS (
-                    SELECT trading_date,count(DISTINCT symbol)::int symbols
-                      FROM quant.canonical_bars_daily
-                     WHERE symbol<>'000300.SH'
-                     GROUP BY trading_date
-                 ), full_dates AS (
-                    SELECT d.trading_date FROM daily_counts d,universe u
-                     WHERE d.symbols>=greatest(ceil(u.symbols*0.8)::int,1000)
-                 )
+            f"""{PIT_DAILY_COVERAGE_CTE}
                 SELECT
-                  (SELECT min(trading_date) FROM daily_counts) first_daily_date,
-                  (SELECT max(trading_date) FROM daily_counts) latest_daily_date,
+                  (SELECT min(trading_date) FROM daily_dates) first_daily_date,
+                  (SELECT max(trading_date) FROM daily_dates) latest_daily_date,
                   (SELECT min(trading_date) FROM full_dates) first_full_cross_section_date,
                   (SELECT max(trading_date) FROM full_dates) latest_full_cross_section_date,
                   (SELECT count(*)::int FROM full_dates) full_cross_section_days,
+                  (SELECT count(*)::int FROM daily_dates) daily_bar_days,
+                  (SELECT count(*)::int FROM expected_universe) point_in_time_universe_days,
+                  (SELECT count(*)::int FROM daily_dates dates
+                    WHERE NOT EXISTS (SELECT 1 FROM expected_universe universe
+                                      WHERE universe.trading_date=dates.trading_date)) missing_point_in_time_universe_days,
                   (SELECT count(DISTINCT (bar_time AT TIME ZONE 'Asia/Shanghai')::date)::int
                      FROM quant.market_bars_minute) offline_minute_trading_days,
                   (SELECT count(DISTINCT symbol)::int FROM quant.market_bars_minute) offline_minute_symbols,

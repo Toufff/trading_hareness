@@ -1,0 +1,13 @@
+[Unit]
+Description=Retry the next-session research shadow materialization after close
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 18:55:00 Asia/Shanghai
+OnCalendar=Mon..Fri *-*-* 19:15:00 Asia/Shanghai
+OnCalendar=Mon..Fri *-*-* 19:35:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=60
+Unit=quant-intraday-edge-materialize.service
+
+[Install]
+WantedBy=timers.target

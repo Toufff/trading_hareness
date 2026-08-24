@@ -46,7 +46,7 @@ jq -e '
   (all(.[]; (.nodes | length == 3))) and
   (all(.[]; ([.nodes[] | select(.type == "n8n-nodes-base.scheduleTrigger")] | length == 1))) and
   (all(.[]; ([.nodes[] | select(.type == "n8n-nodes-base.manualTrigger")] | length == 1))) and
-  ([.[] | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.url] | all(. == "http://quant-research:8000/api/v1/remote-archive/sync")) and
+  ([.[] | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.url] | all(. == "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/remote-archive/sync")) and
   ([.[] | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.headerParameters.parameters[] | select(.name == "X-Quant-Write-Key") | .value] | all(. == "={{ $env.QUANT_WRITE_API_KEY }}")) and
   ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("=\\{\\{ JSON.stringify")) and all(test("reports"))) and
   ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("workflow_id")) and all(test("remoteArchiveReports123"))) and

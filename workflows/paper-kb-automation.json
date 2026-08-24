@@ -1,0 +1,358 @@
+[
+  {
+    "id": "19326e4b-a76d-411f-acd5-aec69af5d0a7",
+    "name": "论文库：定时任务与飞书日报",
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "30 10 * * *"
+              }
+            ]
+          }
+        },
+        "id": "paperkb-cron-arxiv",
+        "name": "每日 10:30 arXiv 系统方向",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -360,
+          -120
+        ]
+      },
+      {
+        "parameters": {
+          "url": "http://host.docker.internal:8787/jobs/arxiv",
+          "method": "POST",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Paper-KB-Token",
+                "value": "={{ $env.PAPER_KB_JOBS_TOKEN }}"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "paperkb-run-arxiv",
+        "name": "抓取并评分 arXiv 新论文",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -100,
+          -120
+        ]
+      },
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "0 9 * * 1"
+              }
+            ]
+          }
+        },
+        "id": "paperkb-cron-harvest",
+        "name": "每周一 09:00 会议harvest",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -360,
+          60
+        ]
+      },
+      {
+        "parameters": {
+          "url": "http://host.docker.internal:8787/jobs/harvest",
+          "method": "POST",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Paper-KB-Token",
+                "value": "={{ $env.PAPER_KB_JOBS_TOKEN }}"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "paperkb-run-harvest",
+        "name": "重新harvest并写周报",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -100,
+          60
+        ]
+      },
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "0 10 * * 1"
+              }
+            ]
+          }
+        },
+        "id": "paperkb-cron-rescore",
+        "name": "每周一 10:00 idea 重打分",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -360,
+          240
+        ]
+      },
+      {
+        "parameters": {
+          "url": "http://host.docker.internal:8787/jobs/rescore-ideas",
+          "method": "POST",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Paper-KB-Token",
+                "value": "={{ $env.PAPER_KB_JOBS_TOKEN }}"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "paperkb-run-rescore",
+        "name": "退役已被做掉的 idea",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -100,
+          240
+        ]
+      },
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "0 21 * * *"
+              }
+            ]
+          }
+        },
+        "id": "paperkb-cron-status",
+        "name": "每日 21:00 状态复盘",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -360,
+          420
+        ]
+      },
+      {
+        "parameters": {
+          "url": "http://host.docker.internal:8787/jobs/status",
+          "method": "POST",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Paper-KB-Token",
+                "value": "={{ $env.PAPER_KB_JOBS_TOKEN }}"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "paperkb-run-status",
+        "name": "推送库存与任务健康",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -100,
+          420
+        ]
+      },
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "paper-ingest",
+          "responseMode": "onReceived",
+          "options": {}
+        },
+        "id": "paperkb-webhook-ingest",
+        "name": "飞书「收录」指令",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          -360,
+          600
+        ],
+        "webhookId": "paper-kb-ingest"
+      },
+      {
+        "parameters": {
+          "url": "http://host.docker.internal:8787/jobs/ingest",
+          "method": "POST",
+          "sendBody": true,
+          "contentType": "json",
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ ids: $json.body.ids }) }}",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Paper-KB-Token",
+                "value": "={{ $env.PAPER_KB_JOBS_TOKEN }}"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "paperkb-run-ingest",
+        "name": "收录到语料并蒸馏",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -100,
+          600
+        ]
+      },
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "paper-search",
+          "responseMode": "onReceived",
+          "options": {}
+        },
+        "id": "paperkb-webhook-search",
+        "name": "飞书「查询」指令",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          -360,
+          780
+        ],
+        "webhookId": "paper-kb-search"
+      },
+      {
+        "parameters": {
+          "url": "http://host.docker.internal:8787/jobs/search",
+          "method": "POST",
+          "sendBody": true,
+          "contentType": "json",
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ query: $json.body.query, deep: $json.body.deep }) }}",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Paper-KB-Token",
+                "value": "={{ $env.PAPER_KB_JOBS_TOKEN }}"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "paperkb-run-search",
+        "name": "执行论文检索",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -100,
+          780
+        ]
+      }
+    ],
+    "connections": {
+      "每日 10:30 arXiv 系统方向": {
+        "main": [
+          [
+            {
+              "node": "抓取并评分 arXiv 新论文",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "每周一 09:00 会议harvest": {
+        "main": [
+          [
+            {
+              "node": "重新harvest并写周报",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "每周一 10:00 idea 重打分": {
+        "main": [
+          [
+            {
+              "node": "退役已被做掉的 idea",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "每日 21:00 状态复盘": {
+        "main": [
+          [
+            {
+              "node": "推送库存与任务健康",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "飞书「收录」指令": {
+        "main": [
+          [
+            {
+              "node": "收录到语料并蒸馏",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "飞书「查询」指令": {
+        "main": [
+          [
+            {
+              "node": "执行论文检索",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "timezone": "Asia/Shanghai"
+    }
+  }
+]

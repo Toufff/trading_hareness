@@ -1,5 +1,15 @@
 import { Pool } from 'pg';
 
+export function completedAssetLookupSql() {
+	return `SELECT DISTINCT a.content_sha256,a.remote_upload_id
+		FROM ingestion_assets a
+		JOIN ingestion_jobs j ON j.job_id = a.job_id
+		WHERE a.state = 'completed'
+			AND j.status = 'completed'
+			AND j.remote_batch_id IS NOT NULL
+			AND a.content_sha256 = ANY($1::text[])`;
+}
+
 export function createLedger(connectionString) {
 	const pool = new Pool(connectionString ? { connectionString, max: 4, idleTimeoutMillis: 30_000 } : { max: 4, idleTimeoutMillis: 30_000 });
 	return {
@@ -219,7 +229,7 @@ export function createLedger(connectionString) {
 		async assetParts(assetId) { const { rows } = await pool.query(`SELECT asset_id,part_index,bytes,sha256,uploaded,remote_status,updated_at FROM ingestion_asset_parts WHERE asset_id=$1 ORDER BY part_index`, [assetId]); return rows; },
 		async findCompletedAssets(hashes) {
 			if (!hashes.length) return [];
-			const { rows } = await pool.query(`SELECT content_sha256,remote_upload_id FROM ingestion_assets WHERE state='completed' AND content_sha256 = ANY($1::text[])`, [hashes]);
+			const { rows } = await pool.query(completedAssetLookupSql(), [hashes]);
 			return rows;
 		},
 		async recordContentItem(jobId, item) {

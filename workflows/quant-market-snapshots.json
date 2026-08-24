@@ -18,7 +18,7 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [280, -180],
-        "parameters": {"url": "http://quant-research:8000/api/v1/market/universe/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 180000}}
+        "parameters": {"url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/market/universe/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 180000}}
       },
       {
         "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d003",
@@ -42,7 +42,7 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [280, -90],
-        "parameters": {"url": "http://quant-research:8000/api/v1/market/sectors/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"all_types\":true,\"sync_members\":false}", "options": {"timeout": 90000}}
+        "parameters": {"url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/market/sectors/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"all_types\":true,\"sync_members\":false}", "options": {"timeout": 90000}}
       },
       {
         "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d009",
@@ -58,7 +58,7 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [280, -10],
-        "parameters": {"url": "http://quant-research:8000/api/v1/providers/realtime/probe", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"symbols\":[\"000636.SZ\"],\"frequency\":\"1MIN\",\"etf_symbol\":\"159919.SZ\",\"index_symbol\":\"000300.SH\",\"sw_symbol\":\"801080.SI\"}", "options": {"timeout": 180000}}
+        "parameters": {"url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/providers/realtime/probe", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"symbols\":[\"000636.SZ\"],\"frequency\":\"1MIN\",\"etf_symbol\":\"159919.SZ\",\"index_symbol\":\"000300.SH\",\"sw_symbol\":\"801080.SI\"}", "options": {"timeout": 180000}}
       },
       {
         "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d004",
@@ -66,7 +66,7 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [280, 0],
-        "parameters": {"url": "http://quant-research:8000/api/v1/market/snapshots/run", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"session\":\"midday\",\"universe_key\":\"all_a\",\"refresh_public_quotes\":true}", "options": {"timeout": 180000}}
+        "parameters": {"url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/market/snapshots/run", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"session\":\"midday\",\"universe_key\":\"all_a\",\"refresh_public_quotes\":true}", "options": {"timeout": 180000}}
       },
       {
         "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d005",
@@ -82,7 +82,7 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [280, 180],
-        "parameters": {"url": "http://quant-research:8000/api/v1/market/snapshots/run", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"session\":\"close\",\"universe_key\":\"all_a\",\"refresh_public_quotes\":true}", "options": {"timeout": 180000}}
+        "parameters": {"url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/market/snapshots/run", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"session\":\"close\",\"universe_key\":\"all_a\",\"refresh_public_quotes\":true}", "options": {"timeout": 180000}}
       },
       {
         "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d007",
@@ -98,7 +98,7 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [280, 360],
-        "parameters": {"url": "http://quant-research:8000/api/v1/market/sync/full-daily", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 180000}}
+        "parameters": {"url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/market/sync/full-daily", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 180000}}
       },
       {
         "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d013",
@@ -114,7 +114,7 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [280, 450],
-        "parameters": {"url": "http://quant-research:8000/api/v1/market/sectors/flows/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 45000}}
+        "parameters": {"url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/market/sectors/flows/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 45000}}
       },
       {
         "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d015",
@@ -130,7 +130,7 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [280, 540],
-        "parameters": {"url": "http://quant-research:8000/api/v1/market/sectors/concepts/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 90000}}
+        "parameters": {"url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/market/sectors/concepts/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 90000}}
       },
       {
         "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d017",
@@ -146,7 +146,7 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [280, 630],
-        "parameters": {"url": "http://quant-research:8000/api/v1/market/sectors/concepts/candidates/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"top_concepts\":8,\"leaders_per_concept\":3}", "options": {"timeout": 180000}}
+        "parameters": {"url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/market/sectors/concepts/candidates/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"top_concepts\":8,\"leaders_per_concept\":3}", "options": {"timeout": 180000}}
       },
       {
         "id": "a3c2dc9c-11de-4dd1-9c85-564789a1d019",
@@ -162,7 +162,7 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [280, 720],
-        "parameters": {"url": "http://quant-research:8000/api/v1/events/cninfo/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"universe_key\":\"core\",\"lookback_days\":45,\"max_pages_per_symbol\":1}", "options": {"timeout": 180000}}
+        "parameters": {"url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/events/cninfo/sync", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"universe_key\":\"core\",\"lookback_days\":45,\"max_pages_per_symbol\":1}", "options": {"timeout": 180000}}
       }
     ],
     "connections": {

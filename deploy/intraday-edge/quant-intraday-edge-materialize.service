@@ -1,0 +1,21 @@
+[Unit]
+Description=Materialize the next-session ten-day research shadow pool
+After=quant-intraday-edge-daily.service
+Requires=quant-intraday-edge.service
+
+[Service]
+Type=oneshot
+User=quant_edge
+Group=quant_edge
+WorkingDirectory=/opt/quant-intraday-edge/current/quant-service
+EnvironmentFile=/etc/quant-intraday-edge.env
+EnvironmentFile=-/etc/quant-intraday-edge.release.env
+ExecStart=/opt/quant-intraday-edge/.venv/bin/python /opt/quant-intraday-edge/current/deploy/intraday-edge/edge_materialize.py
+TimeoutStartSec=900
+MemoryMax=900M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/quant-intraday-edge
+UMask=0027

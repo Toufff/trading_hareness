@@ -863,6 +863,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/research/ten-day-leader-rotation/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Latest */
+        get: operations["latest_api_v1_research_ten_day_leader_rotation_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/intraday/board-rotations/latest": {
         parameters: {
             query?: never;
@@ -1866,6 +1883,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/market/sync/full-daily-controls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sync Full Market Daily Controls */
+        post: operations["sync_full_market_daily_controls_api_v1_market_sync_full_daily_controls_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/market/post-close/refresh": {
         parameters: {
             query?: never;
@@ -2445,6 +2479,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/research/ten-day-leader-rotation/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run */
+        post: operations["run_api_v1_research_ten_day_leader_rotation_run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2923,6 +2974,21 @@ export interface components {
              * @enum {string}
              */
             terminal_status: "failed" | "blocked";
+        };
+        /**
+         * FullMarketDailyControlsSyncRequest
+         * @description One-date repair of the full-market daily control plane.
+         *
+         *     This endpoint deliberately cannot accept a range: callers may repair a
+         *     known incomplete trading date, but historical backfill remains a separate
+         *     operator workflow.
+         */
+        FullMarketDailyControlsSyncRequest: {
+            /**
+             * Trade Date
+             * Format: date
+             */
+            trade_date: string;
         };
         /** FullMarketDailySyncRequest */
         FullMarketDailySyncRequest: {
@@ -3465,6 +3531,148 @@ export interface components {
              * @default true
              */
             persist: boolean;
+        };
+        /** TenDayLeaderRotationCandidateResponse */
+        TenDayLeaderRotationCandidateResponse: {
+            /** Board */
+            board?: string | null;
+            /** Board Rank */
+            board_rank?: number | null;
+            /** Symbol */
+            symbol?: string | null;
+            /** Name */
+            name?: string | null;
+            /** Ten Day Return Pct */
+            ten_day_return_pct?: number | null;
+            /** Current Return Pct */
+            current_return_pct?: number | null;
+            /** Candidate Path */
+            candidate_path?: string | null;
+            /** Shadow State */
+            shadow_state?: string | null;
+            /** Shadow Eligible */
+            shadow_eligible?: boolean | null;
+            /** Decision Eligible */
+            decision_eligible?: boolean | null;
+            /** Evidence */
+            evidence?: {
+                [key: string]: unknown;
+            } | null;
+            /** Reason Codes */
+            reason_codes?: string[];
+            /** Risk Flags */
+            risk_flags?: string[];
+            /** Source Snapshot */
+            source_snapshot?: {
+                [key: string]: unknown;
+            } | null;
+            /** Discovered At */
+            discovered_at?: string | null;
+            /** Intraday Observed At */
+            intraday_observed_at?: string | null;
+            /** Intraday Quote Source */
+            intraday_quote_source?: string | null;
+            /** Intraday Shadow State */
+            intraday_shadow_state?: string | null;
+            /** Intraday Shadow Eligible */
+            intraday_shadow_eligible?: boolean | null;
+            /** Intraday Evidence */
+            intraday_evidence?: {
+                [key: string]: unknown;
+            } | null;
+            /** Intraday Reason Codes */
+            intraday_reason_codes?: string[] | null;
+            /** Intraday Risk Flags */
+            intraday_risk_flags?: string[] | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** TenDayLeaderRotationIntradayBatchResponse */
+        TenDayLeaderRotationIntradayBatchResponse: {
+            /**
+             * Scan Id
+             * Format: uuid
+             */
+            scan_id: string;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Observed Count */
+            observed_count: number;
+            /** Shadow Eligible Count */
+            shadow_eligible_count: number;
+            /**
+             * Decision Eligible Count
+             * @constant
+             */
+            decision_eligible_count: 0;
+            /** Quote Sources */
+            quote_sources: string[];
+        };
+        /** TenDayLeaderRotationIntradayResponse */
+        TenDayLeaderRotationIntradayResponse: {
+            pool_run?: components["schemas"]["TenDayLeaderRotationRunResponse"] | null;
+            latest_batch?: components["schemas"]["TenDayLeaderRotationIntradayBatchResponse"] | null;
+        };
+        /** TenDayLeaderRotationLatestResponse */
+        TenDayLeaderRotationLatestResponse: {
+            run?: components["schemas"]["TenDayLeaderRotationRunResponse"] | null;
+            /** Candidates */
+            candidates?: components["schemas"]["TenDayLeaderRotationCandidateResponse"][];
+            intraday?: components["schemas"]["TenDayLeaderRotationIntradayResponse"];
+            /**
+             * Scope
+             * @constant
+             */
+            scope: "research_only_no_orders";
+            /** Notice */
+            notice: string;
+        };
+        /** TenDayLeaderRotationRunRequest */
+        TenDayLeaderRotationRunRequest: {
+            /** As Of Date */
+            as_of_date?: string | null;
+            /**
+             * Per Board Limit
+             * @default 30
+             */
+            per_board_limit: number;
+            /**
+             * Minimum Full Market Symbols
+             * @default 5000
+             */
+            minimum_full_market_symbols: number;
+        };
+        /** TenDayLeaderRotationRunResponse */
+        TenDayLeaderRotationRunResponse: {
+            /** Run Id */
+            run_id?: string | null;
+            /** Run Key */
+            run_key?: string | null;
+            /** As Of Date */
+            as_of_date?: string | null;
+            /** Strategy Available At */
+            strategy_available_at?: string | null;
+            /** Model Version */
+            model_version?: string | null;
+            /** Status */
+            status?: string | null;
+            /** Source Status */
+            source_status?: {
+                [key: string]: unknown;
+            };
+            /** Summary */
+            summary?: {
+                [key: string]: unknown;
+            };
+            /** Created At */
+            created_at?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
+        } & {
+            [key: string]: unknown;
         };
         /** TushareCapabilityAuditRequest */
         TushareCapabilityAuditRequest: {
@@ -5043,6 +5251,37 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    latest_api_v1_research_ten_day_leader_rotation_latest_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenDayLeaderRotationLatestResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -6957,6 +7196,41 @@ export interface operations {
             };
         };
     };
+    sync_full_market_daily_controls_api_v1_market_sync_full_daily_controls_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FullMarketDailyControlsSyncRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     post_close_refresh_api_v1_market_post_close_refresh_post: {
         parameters: {
             query?: never;
@@ -8123,6 +8397,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["GenerateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_api_v1_research_ten_day_leader_rotation_run_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TenDayLeaderRotationRunRequest"];
             };
         };
         responses: {

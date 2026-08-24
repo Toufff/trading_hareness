@@ -4,10 +4,21 @@ import unittest
 from datetime import date
 from types import SimpleNamespace
 
-from app.full_market_daily_controls_sync import sync, valid_rows
+from pydantic import ValidationError
+
+from app.full_market_daily_controls_sync import CONTROL_PERSIST_TIMEOUT_SECONDS, sync, valid_rows
+from app.request_models import FullMarketDailyControlsSyncRequest
 
 
 class FullMarketDailyControlsSyncTests(unittest.IsolatedAsyncioTestCase):
+    def test_repair_contract_requires_one_explicit_trade_date(self):
+        self.assertEqual(
+            FullMarketDailyControlsSyncRequest(trade_date="2026-08-18").trade_date,
+            date(2026, 8, 18),
+        )
+        with self.assertRaises(ValidationError):
+            FullMarketDailyControlsSyncRequest()
+
     def test_valid_rows_is_exact_date_and_a_share_only(self):
         trade_date = date(2026, 8, 21)
         rows = valid_rows("adj_factor", [
@@ -48,6 +59,7 @@ class FullMarketDailyControlsSyncTests(unittest.IsolatedAsyncioTestCase):
         requested: list[str] = []
         persisted: list[str] = []
         statements: list[str] = []
+        database_timeouts: list[int | None] = []
 
         class Connection:
             def execute(self, statement, *_args):
@@ -60,7 +72,8 @@ class FullMarketDailyControlsSyncTests(unittest.IsolatedAsyncioTestCase):
                     def __exit__(self, *_args): return False
                 return Context()
 
-        async def run_db(action, *args, **_kwargs):
+        async def run_db(action, *args, **kwargs):
+            database_timeouts.append(kwargs.get("timeout_seconds"))
             return action(*args)
 
         async def fetch(api_name, _params, _fields, _provider):
@@ -85,6 +98,7 @@ class FullMarketDailyControlsSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(requested, ["adj_factor", "daily_basic", "stk_limit", "suspend_d"])
         self.assertEqual(persisted, requested)
+        self.assertEqual(database_timeouts, [None, CONTROL_PERSIST_TIMEOUT_SECONDS])
         self.assertIn("UPDATE quant.canonical_bars_daily SET is_suspended=false,canonicalized_at=now() WHERE trading_date=%s", statements)
         self.assertIn("UPDATE quant.market_bars_daily SET is_suspended=false WHERE trading_date=%s", statements)
 

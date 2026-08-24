@@ -139,7 +139,11 @@ class IntradayWatchlistScanServiceTests(unittest.TestCase):
             "realtime_validation_slice": lambda symbols, offset, limit: (symbols[offset:offset + limit], offset + limit),
             "tushare_minutes": default_async, "fast_confirmations": default_async,
             "board_cache_evidence": default_async, "build_source_status": lambda **_: {},
-            "persist_signals": default_async, "deliver_alert": default_async,
+            "persist_signals": default_async, "shadow_pool": default_async,
+            "shadow_rotation_due": lambda _: False, "shadow_rotation_slice": lambda *_: ([], 0),
+            "capture_shadow_quotes": default_async, "persist_shadow_observations": default_async,
+            "persist_shadow_status": default_async,
+            "deliver_alert": default_async,
             "alert_text": lambda *_args, **_kwargs: "alert", "decision_card_url": lambda _: None,
         }
         values.update(overrides)

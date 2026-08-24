@@ -26,7 +26,7 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [300, 90],
-        "parameters": {"url": "http://quant-research:8000/api/v1/intraday/scan", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"realtime_validation_limit\":4}", "options": {"timeout": 90000}}
+        "parameters": {"url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/intraday/scan", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{\"realtime_validation_limit\":4}", "options": {"timeout": 90000}}
       },
       {
         "id": "d45a2c40-3a8f-4b69-8a11-000000000004",
@@ -50,7 +50,7 @@
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [300, 450],
-        "parameters": {"url": "http://quant-research:8000/api/v1/intraday/board-report/run", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 90000}}
+        "parameters": {"url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/intraday/board-report/run", "method": "POST", "sendBody": true, "contentType": "json", "specifyBody": "json", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Quant-Write-Key", "value": "={{ $env.QUANT_WRITE_API_KEY }}"}]}, "jsonBody": "{}", "options": {"timeout": 90000}}
       }
     ],
     "connections": {

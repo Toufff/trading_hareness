@@ -245,13 +245,14 @@ class PlatformBoundaryTests(unittest.TestCase):
         action = AsyncMock(return_value={"status": "ok"})
         router = build_market_actions_router(MarketActionDependencies(
             import_bars=MagicMock(return_value={"imported": 0}), sync_universe=action,
-            sync_full_daily=action, post_close_refresh=action, sync_announcements=action,
+            sync_full_daily=action, sync_full_daily_controls=action, post_close_refresh=action, sync_announcements=action,
             rebuild_market_flow_features=action,
         ))
         methods_by_path = {route.path: route.methods for route in router.routes}
         for path in (
             "/api/v1/market/bars/import", "/api/v1/market/universe/sync",
-            "/api/v1/market/sync/full-daily", "/api/v1/market/post-close/refresh",
+            "/api/v1/market/sync/full-daily", "/api/v1/market/sync/full-daily-controls",
+            "/api/v1/market/post-close/refresh",
             "/api/v1/events/cninfo/sync", "/api/v1/market/flow/features/rebuild",
         ):
             self.assertEqual(methods_by_path[path], {"POST"})
@@ -548,7 +549,7 @@ class PlatformBoundaryTests(unittest.TestCase):
         post_close = MagicMock()
         post_close.fetchone.return_value = {"expires_at": "later", "updated_at": "now"}
         loops = MagicMock()
-        loops.fetchall.return_value = [{"lease_key": "background_loop:test", "expires_at": "later", "updated_at": "now"}]
+        loops.fetchall.return_value = [{"lease_key": "background_loop:intraday_monitor", "expires_at": "later", "updated_at": "now"}]
         connection.execute.side_effect = [open_circuits, post_close, loops]
         pool_updates: list[dict[str, object]] = []
         circuit_updates: list[int] = []
@@ -570,17 +571,27 @@ class PlatformBoundaryTests(unittest.TestCase):
             board_rotation_retention_days=lambda: 60, set_db_pool_gauge=pool_updates.append,
             set_open_circuit_gauge=circuit_updates.append,
             background_loop_status=lambda: {"intraday_monitor": {"state": "running", "updated_at": "now", "last_error": None}},
-            optional_background_tasks=lambda: {"background_loop:ths_member_backfill": False},
+            optional_background_tasks=lambda: {
+                "background_tasks_enabled": True,
+                "background_loop:ths_member_backfill": False,
+            },
             daily_control_plane_status=lambda: {"state": "ready", "trade_date": "2026-08-21"},
+            release_metadata=lambda: {"git_sha": "a1b2c3d", "release": "edge-test", "build_created_at": "2026-08-24T12:00:00Z"},
         )
         payload = read_health_payload(dependencies)
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["runtime_leases"]["background_loop_lease_seconds"], 120)
         self.assertTrue(payload["provider_rate_limits"]["shared_database_reservation"])
-        self.assertEqual(payload["runtime_leases"]["background_loops"][0]["lease_key"], "background_loop:test")
+        self.assertEqual(payload["runtime_leases"]["background_loops"][0]["lease_key"], "background_loop:intraday_monitor")
         self.assertEqual(payload["runtime_loops"]["intraday_monitor"]["state"], "running")
-        self.assertEqual(payload["optional_background_tasks"], {"background_loop:ths_member_backfill": False})
+        self.assertEqual(payload["runtime_loops"]["intraday_monitor"]["lease_heartbeat_at"], "now")
+        self.assertEqual(payload["runtime_loops"]["intraday_monitor"]["lease_expires_at"], "later")
+        self.assertEqual(payload["optional_background_tasks"], {
+            "background_tasks_enabled": True,
+            "background_loop:ths_member_backfill": False,
+        })
         self.assertEqual(payload["daily_control_plane"]["state"], "ready")
+        self.assertEqual(payload["build"]["git_sha"], "a1b2c3d")
         self.assertEqual(pool_updates, [{"pool_size": 2, "available": 1, "waiting": 0}])
         self.assertEqual(circuit_updates, [2])
 

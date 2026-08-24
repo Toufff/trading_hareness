@@ -33,6 +33,12 @@ class IntradayWatchlistScanDependencies:
     board_cache_evidence: Callable[[datetime], Awaitable[dict[str, Any]]]
     build_source_status: Callable[..., dict[str, Any]]
     persist_signals: Callable[..., Awaitable[list[dict[str, Any]]]]
+    shadow_pool: Callable[[], Awaitable[dict[str, Any]]]
+    shadow_rotation_due: Callable[[datetime], bool]
+    shadow_rotation_slice: Callable[[list[dict[str, Any]], datetime], tuple[list[dict[str, Any]], int]]
+    capture_shadow_quotes: Callable[[list[str]], Awaitable[tuple[dict[str, dict[str, Any]], dict[str, Any]]]]
+    persist_shadow_observations: Callable[..., Awaitable[dict[str, Any]]]
+    persist_shadow_status: Callable[[uuid.UUID, dict[str, Any]], Awaitable[None]]
     deliver_alert: Callable[[uuid.UUID, str], Awaitable[dict[str, Any]]]
     alert_text: Callable[..., str]
     decision_card_url: Callable[[str], str | None]
@@ -142,6 +148,47 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
         quote_capture.tencent_rows, quote_capture.latency_ms, tushare_minutes, surge_features,
         peer_contexts, fast_confirmations,
     )
+    shadow_observation: dict[str, Any] = {"status": "standby", "reason": "awaiting_next_minute_rotation"}
+    if dependencies.shadow_rotation_due(observed_at):
+        try:
+            shadow_pool = await dependencies.shadow_pool()
+            rotation_candidates, rotation_offset = dependencies.shadow_rotation_slice(
+                list(shadow_pool.get("candidates") or []), observed_at,
+            )
+            if shadow_pool.get("run") and rotation_candidates:
+                shadow_symbols = [str(item["symbol"]).upper() for item in rotation_candidates]
+                shadow_memberships = await dependencies.load_exact_memberships(shadow_symbols, observed_at)
+                shadow_mapped_peers = dependencies.mapped_peers(shadow_symbols, shadow_memberships)
+                shadow_watches = [
+                    {"symbol": symbol, "metadata": {"surge_strategy": {"enabled": True}}}
+                    for symbol in shadow_symbols
+                ]
+                shadow_quotes, shadow_quote_status = await dependencies.capture_shadow_quotes(shadow_symbols)
+                shadow_minutes, shadow_minute_status = await dependencies.surge_context(
+                    shadow_watches, mapped_peers=shadow_mapped_peers,
+                )
+                shadow_peer_contexts = build_peer_contexts(
+                    shadow_watches, shadow_mapped_peers, shadow_minutes, dependencies.peer_context,
+                )
+                shadow_observation = await dependencies.persist_shadow_observations(
+                    scan_id=scan_id, observed_at=observed_at, pool=shadow_pool,
+                    candidates=rotation_candidates, tencent_rows=quote_capture.tencent_rows,
+                    quotes=shadow_quotes,
+                    minute_features=shadow_minutes, peer_contexts=shadow_peer_contexts,
+                )
+                shadow_observation = {
+                    **shadow_observation, "rotation_offset": rotation_offset,
+                    "rotation_pool_size": len(shadow_pool.get("candidates") or []),
+                    "quote_source": shadow_quote_status,
+                    "minute_source": shadow_minute_status,
+                }
+            else:
+                shadow_observation = {"status": "standby", "reason": "no_completed_daily_shadow_cohort"}
+        except Exception as error:  # noqa: BLE001 - preserve the independent primary scan
+            shadow_observation = {"status": "degraded", "reason": str(error)[:240]}
+        await dependencies.persist_shadow_status(scan_id, shadow_observation)
+    if shadow_observation.get("status") != "standby":
+        source_status["ten_day_leader_rotation_shadow"] = shadow_observation
     alerts: list[dict[str, Any]] = []
     for signal in signals:
         if signal["state"] != "confirmed":
@@ -167,6 +214,7 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
             "next_offset": next_realtime_validation_offset,
         },
         "delivery_retry": retry_summary,
+        "ten_day_leader_rotation_shadow": shadow_observation,
         "notice": "仅为人工复核提醒，不构成交易指令；系统不会自动下单。",
     }
 

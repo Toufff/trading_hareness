@@ -20,6 +20,22 @@ quant-research FastAPI
         +-> raw -> canonical -> features -> signals -> outcomes
 ```
 
+The deployable background profiles split this map without changing the HTTP or
+research contracts. `intraday_edge` is the single live-polling and Feishu-alert
+writer for `intraday_monitor`, fast quote, minute profile, order book and board
+flow. `research` owns post-close review and local replay, but never starts those
+five polling loops. The edge keeps a bounded PostgreSQL database and streams an
+allowlisted, cursor-based evidence ledger back to the workstation over a
+forced-command SSH key. The importer is transactional and deliberately excludes
+leases, delivery outboxes, recommendations, credentials and any order-like
+state. A workstation outage therefore delays analysis visibility without
+stopping collection or losing retained evidence.
+
+Both profiles run the same committed source revision. The distinction is
+runtime configuration and ownership, not a long-lived server branch: releases
+publish a Git SHA and image/source provenance through the loopback health
+endpoints, while secret environment files remain outside version control.
+
 `quant-service/app/main.py` is the composition root.  It owns application
 lifespan, dependency assembly and router registration.  New behaviour belongs
 in a focused module, then is injected from `main.py`; production modules must
