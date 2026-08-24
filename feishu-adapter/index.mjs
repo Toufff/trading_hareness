@@ -7,6 +7,7 @@ import { createServer } from 'node:http';
 import { createLedger } from './ledger.mjs';
 import { releaseMetadata } from './release-metadata.mjs';
 import { endWritable, writeChunk } from './stream-write.mjs';
+import { singleFlight } from './single-flight.mjs';
 import { createGroupRelay } from './group-relay.mjs';
 import { createSummaryListener } from './summary-listener.mjs';
 import { createFeishuUserOauth } from './feishu-user-oauth.mjs';
@@ -220,8 +221,11 @@ async function runLocalAnalysisQueue() {
 	} catch (error) { console.error(`本地分析队列失败：${error instanceof Error ? error.message : String(error)}`); }
 }
 const deliveryWorkerId = `feishu-adapter-${process.pid}`;
-async function runDeliveryQueue() {
-	for (const delivery of await ledger.claimDeliveries({ workerId: deliveryWorkerId, limit: 5 })) {
+const runDeliveryQueue = singleFlight(async () => {
+	// The remote archive admits one active import registration per analyst. Keep
+	// this edge worker serial so a replay cannot make its own idempotency state
+	// conflict, while the durable outbox retains all later deliveries.
+	for (const delivery of await ledger.claimDeliveries({ workerId: deliveryWorkerId, limit: 1 })) {
 		const queued = await ledger.getJobDelivery(delivery.job_id);
 		if (!queued) { await ledger.completeDelivery(delivery.delivery_id); continue; }
 		try {
@@ -264,7 +268,7 @@ async function runDeliveryQueue() {
 				await ledger.failDelivery(delivery.delivery_id, { retryable, errorMessage: error instanceof Error ? error.message : String(error) });
 		}
 	}
-}
+});
 async function cleanupUnreferencedMedia() {
 	try {
 		const referenced = await ledger.referencedStoragePaths();
