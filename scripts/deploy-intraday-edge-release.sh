@@ -69,6 +69,9 @@ EOF
   install -m 0644 \"\$release_dir/deploy/intraday-edge/quant-intraday-edge-daily.service\" /etc/systemd/system/quant-intraday-edge-daily.service
   install -m 0644 \"\$release_dir/deploy/intraday-edge/quant-intraday-edge-materialize.service\" /etc/systemd/system/quant-intraday-edge-materialize.service
   install -m 0755 \"\$release_dir/deploy/intraday-edge/edge_export.sh\" /usr/local/sbin/quant-edge-export
+  # The restricted export account may read only the journal and explicit
+  # evidence tables. Re-apply idempotent grants with every edge release.
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -d quant_intraday_edge -f \"\$release_dir/deploy/intraday-edge/edge_export_grants.sql\" >/dev/null
   ln -sfn \"\$release_dir\" \"\$edge_root/current\"
   systemctl daemon-reload
   systemctl restart quant-intraday-edge.service
