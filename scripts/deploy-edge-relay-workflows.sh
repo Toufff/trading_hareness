@@ -131,11 +131,11 @@ for workflow_id in "${workflow_ids[@]}"; do
   printf '%s\t%s\n' "$workflow_id" "$(base64 -w 0 "$remote_stage/rendered/${workflow_id}.json")" >>"$payload_file"
 done
 psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$RELAY_PGUSER" -d "$RELAY_PGDATABASE" \
-  -v payload_file="$payload_file" -v actor="edge-workflow-deploy:${release_sha:0:12}" <<'SQL'
+  <<SQL
 BEGIN;
 CREATE TEMP TABLE edge_workflow_candidate (id text PRIMARY KEY, payload_base64 text NOT NULL) ON COMMIT DROP;
-\copy edge_workflow_candidate (id, payload_base64) FROM :'payload_file' WITH (FORMAT text)
-DO $$
+\\copy edge_workflow_candidate (id, payload_base64) FROM '${payload_file}' WITH (FORMAT text)
+DO \$body\$
 DECLARE actual_count integer;
 BEGIN
   SELECT count(*) INTO actual_count FROM edge_workflow_candidate;
@@ -151,7 +151,7 @@ BEGIN
     RAISE EXCEPTION 'refusing to create an unknown workflow entity';
   END IF;
 END
-$$;
+\$body\$;
 UPDATE workflow_entity
    SET active = false, "activeVersionId" = NULL, "updatedAt" = now()
  WHERE id IN (SELECT id FROM edge_workflow_candidate);
@@ -171,7 +171,7 @@ UPDATE workflow_entity w
  WHERE w.id = c.id;
 WITH revision AS (
   INSERT INTO workflow_history("versionId", "workflowId", authors, nodes, connections, name, description, "nodeGroups")
-  SELECT gen_random_uuid()::text, w.id, :"actor", w.nodes, w.connections, w.name, w.description, w."nodeGroups"
+  SELECT gen_random_uuid()::text, w.id, 'edge-workflow-deploy:${release_sha:0:12}', w.nodes, w.connections, w.name, w.description, w."nodeGroups"
     FROM workflow_entity w
    WHERE w.id IN (SELECT id FROM edge_workflow_candidate)
   RETURNING "versionId", "workflowId"
@@ -195,11 +195,11 @@ SELECT count(*) = 4 AS published_all
  WHERE w.id IN (SELECT id FROM edge_workflow_candidate)
    AND w.active
    AND w."activeVersionId" = p."publishedVersionId"
-\gset
-\if :published_all
-\else
-\quit
-\endif
+\\gset
+\\if :published_all
+\\else
+\\quit
+\\endif
 COMMIT;
 SQL
 
