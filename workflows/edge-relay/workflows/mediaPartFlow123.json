@@ -524,7 +524,7 @@
       "id": "5ed9ff83-ab35-4f4c-91dc-7935cb243446",
       "name": "Return upload state",
       "parameters": {
-        "jsCode": "const body = $('Prepare media input').first().json.body ?? {};\nconst session = $('Attach reserved upload session').first().json ?? {};\nconst batchId = body.batch_id || session.batch_id;\nconst uploadId = body.upload_id || session.upload_id;\nif (!batchId || !uploadId) throw new Error('上传会话响应不完整');\nreturn [{ json: { batch_id: String(batchId), upload_id: String(uploadId), part_index: Number(body.part_index) } }];",
+        "jsCode": "const body = $('Prepare media input').first().json.body ?? {};\nconst existing = $('Use existing upload session');\nconst session = existing.isExecuted\n  ? (existing.first().json ?? {})\n  : ($('Attach reserved upload session').first().json ?? {});\nconst batchId = body.batch_id || session.batch_id;\nconst uploadId = body.upload_id || session.upload_id;\nif (!batchId || !uploadId) throw new Error('上传会话响应不完整');\nreturn [{ json: { batch_id: String(batchId), upload_id: String(uploadId), part_index: Number(body.part_index) } }];",
         "mode": "runOnceForAllItems"
       },
       "position": [
