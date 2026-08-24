@@ -46,7 +46,7 @@ fi
 # Archive only the executable edge source and deployment templates. Existing
 # releases are retained for rollback; the script never prunes server history.
 git -C "$source_root" archive --format=tar "$release_sha" quant-service deploy/intraday-edge \
-  | "${ssh_command[@]}" "$edge_host" "set -euo pipefail; install -d -m 0750 '$release_dir'; tar -xf - -C '$release_dir'; test -f '$release_dir/quant-service/entrypoint.py'; test -f '$release_dir/deploy/intraday-edge/quant-intraday-edge.service'"
+  | "${ssh_command[@]}" "$edge_host" "set -euo pipefail; install -d -m 0750 -o root -g quant_edge '$release_dir'; tar -xf - -C '$release_dir'; chown -R root:quant_edge '$release_dir'; chmod -R g+rX '$release_dir'; test -f '$release_dir/quant-service/entrypoint.py'; test -f '$release_dir/deploy/intraday-edge/quant-intraday-edge.service'"
 
 "${ssh_command[@]}" "$edge_host" "set -euo pipefail
   edge_root='$edge_root'

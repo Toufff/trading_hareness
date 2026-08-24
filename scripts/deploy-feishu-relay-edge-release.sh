@@ -41,40 +41,46 @@ if [[ "$apply" != true ]]; then
   exit 0
 fi
 
-"${ssh_command[@]}" "$edge_host" "set -euo pipefail
-  edge_dir='$edge_dir'
-  runtime_env='$runtime_env'
-  secrets_env='$secrets_env'
-  image_ref='$image_ref'
-  release_sha='$release_sha'
-  release_label='$release_label'
-  built_at='$built_at'
-  test -f \"\$runtime_env\"
-  test -f \"\$secrets_env\"
-  docker pull \"\$image_ref\"
-  update_env() {
-    key=\"\$1\"; value=\"\$2\"; temp=\"\$(mktemp \"\${runtime_env}.XXXXXX\")\"
-    awk -v key=\"\$key\" -v value=\"\$value\" '
-      BEGIN { found=0 }
-      index(\$0, key "=") == 1 { print key "=" value; found=1; next }
-      { print }
-      END { if (!found) print key "=" value }
-    ' \"\$runtime_env\" > \"\$temp\"
-    install -m 0640 \"\$temp\" \"\$runtime_env\"
-    rm -f \"\$temp\"
-  }
-  update_env FEISHU_ADAPTER_IMAGE \"\$image_ref\"
-  update_env APP_GIT_SHA \"\$release_sha\"
-  update_env APP_RELEASE \"\$release_label\"
-  update_env APP_BUILD_CREATED_AT \"\$built_at\"
-  cd \"\$edge_dir\"
-  docker compose --env-file \"\$runtime_env\" --env-file \"\$secrets_env\" up -d --no-deps --no-build feishu-adapter
-  for attempt in {1..30}; do curl -fsS http://127.0.0.1:18300/health >/tmp/feishu-relay-release-health.json && break; sleep 2; done
-  test -s /tmp/feishu-relay-release-health.json
-  grep -Fq '\"status\":\"ok\"' /tmp/feishu-relay-release-health.json
-  grep -Fq '\"git_sha\":\"\$release_sha\"' /tmp/feishu-relay-release-health.json
-  grep -Fq '\"release\":\"\$release_label\"' /tmp/feishu-relay-release-health.json
-  echo 'relay adapter release health verified'
-  docker inspect -f '{{.State.Health.Status}} {{.RestartCount}}' feishu-relay-edge-adapter"
+"${ssh_command[@]}" "$edge_host" bash -s -- \
+  "$edge_dir" "$runtime_env" "$secrets_env" "$image_ref" "$release_sha" "$release_label" "$built_at" <<'REMOTE'
+set -euo pipefail
+edge_dir="$1"
+runtime_env="$2"
+secrets_env="$3"
+image_ref="$4"
+release_sha="$5"
+release_label="$6"
+built_at="$7"
+
+test -f "$runtime_env"
+test -f "$secrets_env"
+docker pull "$image_ref"
+update_env() {
+  key="$1"
+  value="$2"
+  temp="$(mktemp "${runtime_env}.XXXXXX")"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { found=0 }
+    index($0, key "=") == 1 { print key "=" value; found=1; next }
+    { print }
+    END { if (!found) print key "=" value }
+  ' "$runtime_env" > "$temp"
+  install -m 0640 "$temp" "$runtime_env"
+  rm -f "$temp"
+}
+update_env FEISHU_ADAPTER_IMAGE "$image_ref"
+update_env APP_GIT_SHA "$release_sha"
+update_env APP_RELEASE "$release_label"
+update_env APP_BUILD_CREATED_AT "$built_at"
+cd "$edge_dir"
+docker compose --env-file "$runtime_env" --env-file "$secrets_env" up -d --no-deps --no-build feishu-adapter
+for attempt in {1..30}; do curl -fsS http://127.0.0.1:18300/health >/tmp/feishu-relay-release-health.json && break; sleep 2; done
+test -s /tmp/feishu-relay-release-health.json
+grep -Fq '"status":"ok"' /tmp/feishu-relay-release-health.json
+grep -Fq "\"git_sha\":\"${release_sha}\"" /tmp/feishu-relay-release-health.json
+grep -Fq "\"release\":\"${release_label}\"" /tmp/feishu-relay-release-health.json
+echo 'relay adapter release health verified'
+docker inspect -f '{{.State.Health.Status}} {{.RestartCount}}' feishu-relay-edge-adapter
+REMOTE
 
 printf 'relay adapter release applied: %s (%s)\n' "$release_label" "$release_sha"
