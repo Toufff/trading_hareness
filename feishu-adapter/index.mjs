@@ -250,6 +250,15 @@ const runDeliveryQueue = singleFlight(async () => {
 				: replayResources;
 			if (redownloadMedia) console.info(`重试时已从飞书重新下载媒体：${queued.message_id}`);
 			if (deliveryResources.some((resource) => resource.path && !existsSync(resource.path))) throw new Error('本地重试文件已被清理，且无法从飞书恢复上传');
+			// Older versions admitted a tag-only summary bubble and let the n8n
+			// parser fail it.  A retry must not keep turning that non-content into
+			// a remote error: retain the ledger evidence, mark it filtered, and
+			// complete its outbox item without creating a remote batch.
+			if (!deliveryResources.length && !String(replayImportContent.content ?? '').trim()) {
+				await ledger.updateJob(queued.job_id, { status: 'filtered', stage: 'empty_tagged_payload', error_class: null, error_message: null });
+				await ledger.completeDelivery(delivery.delivery_id);
+				continue;
+			}
 			await hydrateRemotePartState(deliveryResources);
 			await dispatchToN8n(payload.event, {
 				resources: deliveryResources, messageText: payload.message_text, sourceLabel: payload.source_label,
