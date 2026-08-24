@@ -8,12 +8,32 @@ import unittest
 
 from app.edge_evidence_transfer import (
     CHANGE_PAGE_SIZE, CHANGE_REPLAY_WINDOW, TRANSFER_TABLES, edge_evidence_status,
+    assess_live_session_acceptance, read_live_session_acceptance, write_live_session_acceptance,
     parse_checkpoint, parse_restricted_export_command, parse_sequence, parse_since,
     read_cursor_payload, read_pull_status, upsert_statement, write_pull_status,
 )
 
 
 class EdgeEvidenceTransferTests(unittest.TestCase):
+    def test_live_session_acceptance_requires_fresh_expected_data_loops(self) -> None:
+        now = datetime(2026, 8, 24, 10, tzinfo=timezone.utc)
+        base_health = {"status": "ok", "optional_background_tasks": {"runtime_profile": "intraday_edge"}, "build": {"git_sha": "a1b2c3d"}}
+        healthy_status = {
+            "session_active": True, "session_reason": "continuous auction", "items": [
+                {"key": "tencent_realtime", "expected_active": True, "state": "healthy", "last_observed_at": now.isoformat(), "age_seconds": 4, "max_age_seconds": 45, "last_error": None},
+                {"key": "feishu_alert", "expected_active": True, "state": "ready", "last_observed_at": None, "age_seconds": None, "max_age_seconds": None, "last_error": None},
+            ],
+        }
+        passed = assess_live_session_acceptance(base_health, healthy_status, now=now)
+        self.assertEqual(passed["state"], "passed")
+        stale = assess_live_session_acceptance(base_health, {**healthy_status, "items": [{**healthy_status["items"][0], "age_seconds": 60}, healthy_status["items"][1]]}, now=now)
+        self.assertEqual(stale["state"], "failed")
+        standby = assess_live_session_acceptance(base_health, {**healthy_status, "session_active": False}, now=now)
+        self.assertEqual(standby["state"], "standby")
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "acceptance.json"
+            write_live_session_acceptance(passed, path=path)
+            self.assertEqual(read_live_session_acceptance(path)["state"], "passed")
     def test_transfer_scope_is_evidence_only_and_dependency_ordered(self) -> None:
         names = [table.name for table in TRANSFER_TABLES]
         self.assertLess(names.index("intraday_scan_runs"), names.index("intraday_signal_events"))

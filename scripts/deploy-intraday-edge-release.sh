@@ -68,6 +68,8 @@ EOF
   install -m 0644 \"\$release_dir/deploy/intraday-edge/quant-intraday-edge.service\" /etc/systemd/system/quant-intraday-edge.service
   install -m 0644 \"\$release_dir/deploy/intraday-edge/quant-intraday-edge-daily.service\" /etc/systemd/system/quant-intraday-edge-daily.service
   install -m 0644 \"\$release_dir/deploy/intraday-edge/quant-intraday-edge-materialize.service\" /etc/systemd/system/quant-intraday-edge-materialize.service
+  install -m 0644 \"\$release_dir/deploy/intraday-edge/quant-intraday-edge-live-acceptance.service\" /etc/systemd/system/quant-intraday-edge-live-acceptance.service
+  install -m 0644 \"\$release_dir/deploy/intraday-edge/quant-intraday-edge-live-acceptance.timer\" /etc/systemd/system/quant-intraday-edge-live-acceptance.timer
   install -m 0755 \"\$release_dir/deploy/intraday-edge/edge_export.sh\" /usr/local/sbin/quant-edge-export
   # The restricted export account may read only the journal and explicit
   # evidence tables. Re-apply idempotent grants with every edge release.
@@ -77,6 +79,7 @@ EOF
   sudo -u postgres psql -v ON_ERROR_STOP=1 -d quant_intraday_edge < \"\$release_dir/deploy/intraday-edge/edge_export_grants.sql\" >/dev/null
   ln -sfn \"\$release_dir\" \"\$edge_root/current\"
   systemctl daemon-reload
+  systemctl enable --now quant-intraday-edge-live-acceptance.timer
   systemctl restart quant-intraday-edge.service
   for attempt in {1..30}; do curl -fsS http://127.0.0.1:18110/health >/tmp/quant-edge-release-health.json && break; sleep 2; done
   test -s /tmp/quant-edge-release-health.json

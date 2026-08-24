@@ -41,6 +41,11 @@ and error state. It exits with code `3` outside that session rather than
 mistaking an intentional standby state for a passing live acceptance. Use
 `--allow-standby` for a control-plane-only off-session check.
 
+The edge additionally writes a secret-free acceptance receipt at 09:35 and
+13:05 Asia/Shanghai on weekdays. It records `passed`, `failed`, or `standby`
+in its retained data directory and includes it in the next evidence handoff,
+so an off workstation does not lose the following session's verification.
+
 Required secret environment values are installed directly into
 `/etc/quant-intraday-edge.env` with mode `0640`; they are not stored here.
 The checked edge configuration uses a 10 GiB disk warning watermark and an

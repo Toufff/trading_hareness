@@ -195,6 +195,7 @@ def edge_runtime_snapshot() -> dict[str, Any]:
         "build": health.get("build") if isinstance(health.get("build"), dict) else {},
         "runtime_loops": health.get("runtime_loops") or {},
         "daily_control_plane": health.get("daily_control_plane") or {},
+        "live_session_acceptance": read_live_session_acceptance(),
         "resources": {
             "state": resources.get("state") if isinstance(resources, dict) else None,
             "disk_free_bytes": disk.get("free_bytes") if isinstance(disk, dict) else None,
@@ -314,6 +315,97 @@ def _pull_status_path() -> Path:
     return Path(os.getenv(
         "QUANT_EDGE_EVIDENCE_PULL_STATUS_PATH", "/var/lib/quant/edge-evidence-pull-status.json",
     ))
+
+
+def _live_session_acceptance_path() -> Path:
+    configured = os.getenv("QUANT_EDGE_LIVE_SESSION_ACCEPTANCE_PATH", "").strip()
+    if configured:
+        return Path(configured)
+    return Path(os.getenv("QUANT_DATA_DIR", "/var/lib/quant")) / "live-session-acceptance.json"
+
+
+def read_live_session_acceptance(path: Path | None = None) -> dict[str, Any]:
+    """Read the edge-owned, secret-free last market-session acceptance result."""
+    acceptance_path = path or _live_session_acceptance_path()
+    try:
+        payload = json.loads(acceptance_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"state": "not_run"}
+    except (TypeError, json.JSONDecodeError) as error:
+        return {"state": "unavailable", "reason": f"invalid live-session acceptance: {str(error)[:240]}"}
+    if not isinstance(payload, dict):
+        return {"state": "unavailable", "reason": "invalid live-session acceptance payload"}
+    state = str(payload.get("state") or "unavailable")
+    if state not in {"passed", "failed", "standby"}:
+        return {"state": "unavailable", "reason": "invalid live-session acceptance state"}
+    return payload
+
+
+def write_live_session_acceptance(payload: dict[str, Any], *, path: Path | None = None) -> dict[str, Any]:
+    """Atomically persist one acceptance outcome without tokens or source payloads."""
+    acceptance_path = path or _live_session_acceptance_path()
+    acceptance_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = acceptance_path.with_suffix(acceptance_path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(acceptance_path)
+    return read_live_session_acceptance(acceptance_path)
+
+
+def assess_live_session_acceptance(health: dict[str, Any], status: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    """Evaluate only the active market-data loops from the published status."""
+    checked_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    build = health.get("build") if isinstance(health.get("build"), dict) else {}
+    profile = (health.get("optional_background_tasks") or {}).get("runtime_profile")
+    session_active = status.get("session_active") is True
+    items = status.get("items") if isinstance(status.get("items"), list) else []
+    required = [
+        item for item in items
+        if isinstance(item, dict) and item.get("expected_active") is True and item.get("key") != "feishu_alert"
+    ]
+    safe_items = [{
+        "key": item.get("key"), "state": item.get("state"),
+        "last_observed_at": item.get("last_observed_at"), "age_seconds": item.get("age_seconds"),
+        "max_age_seconds": item.get("max_age_seconds"), "last_error": item.get("last_error"),
+    } for item in required]
+    result: dict[str, Any] = {
+        "checked_at": checked_at, "build": build, "session_active": session_active,
+        "session_reason": str(status.get("session_reason") or ""), "items": safe_items,
+    }
+    if health.get("status") != "ok" or profile != "intraday_edge":
+        return {**result, "state": "failed", "reason": "edge health or runtime profile is invalid"}
+    if not session_active:
+        return {**result, "state": "standby", "reason": "SSE continuous session is inactive"}
+    if not required:
+        return {**result, "state": "failed", "reason": "no market-data loop is marked expected_active"}
+    failed = [item for item in required if not (
+        item.get("state") == "healthy"
+        and item.get("last_observed_at") is not None
+        and item.get("last_error") is None
+        and isinstance(item.get("age_seconds"), (int, float))
+        and isinstance(item.get("max_age_seconds"), (int, float))
+        and item["age_seconds"] <= item["max_age_seconds"]
+    )]
+    if failed:
+        return {**result, "state": "failed", "reason": "one or more expected market-data loops are stale or unhealthy"}
+    return {**result, "state": "passed", "reason": "all expected market-data loops are fresh"}
+
+
+def run_live_session_acceptance(*, path: Path | None = None, now: datetime | None = None) -> dict[str, Any]:
+    """Read loopback status and persist a bounded result for a systemd timer."""
+    try:
+        with urlopen("http://127.0.0.1:18110/health", timeout=3) as response:
+            health = json.load(response)
+        with urlopen("http://127.0.0.1:18110/api/v1/intraday/services/status", timeout=3) as response:
+            status = json.load(response)
+        if not isinstance(health, dict) or not isinstance(status, dict):
+            raise ValueError("edge health response is invalid")
+        result = assess_live_session_acceptance(health, status, now=now)
+    except Exception as error:  # leave durable, secret-free evidence for the operator
+        result = {
+            "state": "failed", "checked_at": (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(),
+            "session_active": None, "items": [], "reason": f"live-session acceptance request failed: {str(error)[:240]}",
+        }
+    return write_live_session_acceptance(result, path=path)
 
 
 def read_pull_status(path: Path | None = None) -> dict[str, Any]:
@@ -490,6 +582,7 @@ def main(argv: list[str] | None = None) -> int:
     pull_status_parser = subcommands.add_parser("pull-status")
     pull_status_parser.add_argument("--state", required=True, choices=("running", "completed", "failed"))
     pull_status_parser.add_argument("--error", default="")
+    subcommands.add_parser("live-session-acceptance")
     subcommands.add_parser("import")
     cursor_parser = subcommands.add_parser("cursor")
     cursor_parser.add_argument("--json", action="store_true")
@@ -514,6 +607,10 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.command == "pull-status":
         print(json.dumps(write_pull_status(arguments.state, error=arguments.error), ensure_ascii=False, separators=(",", ":")))
         return 0
+    if arguments.command == "live-session-acceptance":
+        result = run_live_session_acceptance()
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        return 1 if result.get("state") == "failed" else 0
     result = import_jsonl(sys.stdin)
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0
@@ -526,5 +623,5 @@ if __name__ == "__main__":
 __all__ = [
     "TRANSFER_TABLES", "TransferTable", "edge_evidence_status", "edge_runtime_snapshot",
     "CHANGE_PAGE_SIZE", "CHANGE_REPLAY_WINDOW", "export_changes", "export_jsonl", "import_jsonl",
-    "parse_checkpoint", "parse_restricted_export_command", "parse_sequence", "parse_since", "read_cursor", "read_cursor_payload", "read_pull_status", "upsert_statement", "write_pull_status",
+    "assess_live_session_acceptance", "parse_checkpoint", "parse_restricted_export_command", "parse_sequence", "parse_since", "read_cursor", "read_cursor_payload", "read_live_session_acceptance", "read_pull_status", "run_live_session_acceptance", "upsert_statement", "write_live_session_acceptance", "write_pull_status",
 ]
