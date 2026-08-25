@@ -227,6 +227,7 @@ class PlatformBoundaryTests(unittest.TestCase):
         self.assertEqual(methods_by_path["/api/v1/providers/realtime/probe"], {"POST"})
         self.assertEqual(methods_by_path["/api/v1/providers/tushare/audit"], {"POST"})
         self.assertEqual(methods_by_path["/api/v1/providers/tushare/fetch"], {"POST"})
+        self.assertEqual(methods_by_path["/api/v1/providers/fuyao/query"], {"POST"})
         self.assertEqual(methods_by_path["/api/v1/stocks/{symbol}/study"], {"POST"})
 
     def test_async_sync_symbol_resolution_uses_native_async_repository(self):

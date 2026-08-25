@@ -4010,9 +4010,13 @@ async def tushare_fetch(payload: TushareFetchRequest) -> dict[str, Any]:
 
 async def fuyao_query(payload: "FuyaoQueryRequest") -> dict[str, Any]:
     """Expose every documented Fuyao capability through the safe allow-list."""
-    from .fuyao_provider import fetch as fetch_fuyao
-    data = await fetch_fuyao(payload.capability, payload.params)
-    return {"provider": "fuyao_ths", "capability": payload.capability, "data": data, "research_only": True}
+    from .fuyao_provider import fetch_envelope as fetch_fuyao
+    envelope = await fetch_fuyao(payload.capability, payload.params)
+    return {
+        "provider": "fuyao_ths", "capability": payload.capability,
+        "request_id": envelope["request_id"], "message": envelope["message"],
+        "data": envelope["data"], "research_only": True, "live_effect": "none",
+    }
 
 
 async def stock_study(symbol: str, payload: StockStudyRequest | None = None) -> dict[str, Any]:

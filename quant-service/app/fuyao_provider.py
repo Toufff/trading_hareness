@@ -2,58 +2,132 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 import os
 from typing import Any
 
-from .fuyao_catalog import FUYAO_PATHS
+import httpx
+
+from .fuyao_catalog import FUYAO_PATHS, FUYAO_QUERY_PARAMS
 from .http_clients import provider_http_client
+from .http_retry import retry_delay_seconds
 from .tushare_providers import safe_error_detail
 
 
 FUYAO_BASE_URL = "https://fuyao.aicubes.cn"
 FUYAO_PROVIDER_KEY = "fuyao_ths"
+FUYAO_API_KEY_ENV_NAMES = ("HITHINK_FINANCE_API_KEY", "FUYAO_API_KEY", "FUYAO_TOKEN")
+FUYAO_RETRY_BUSINESS_CODES = {4001, 5001, 5002, 5003}
+FUYAO_TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
+FUYAO_MAX_ATTEMPTS = 3
 
 
 class FuyaoProviderError(RuntimeError):
     """Token-free supplier failure."""
 
+    def __init__(self, message: str, *, code: int | None = None, request_id: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.request_id = request_id
+
+
+class FuyaoQueryValidationError(FuyaoProviderError):
+    """The local allow-list rejected a query before provider I/O."""
+
+
+def _api_key() -> str:
+    for name in FUYAO_API_KEY_ENV_NAMES:
+        value = (os.getenv(name) or "").strip()
+        if value:
+            return value
+    return ""
+
 
 def configured() -> bool:
-    return bool((os.getenv("FUYAO_API_KEY") or "").strip())
+    return bool(_api_key())
 
 
 def validate_capability_query(capability: str, params: dict[str, Any]) -> str:
     path = FUYAO_PATHS.get(capability)
     if path is None:
-        raise FuyaoProviderError("unknown Fuyao capability")
+        raise FuyaoQueryValidationError("unknown Fuyao capability")
     if any(not isinstance(value, (str, int, float, bool)) and value is not None for value in params.values()):
-        raise FuyaoProviderError("Fuyao query values must be scalar")
+        raise FuyaoQueryValidationError("Fuyao query values must be scalar")
+    contract = FUYAO_QUERY_PARAMS[capability]
+    unknown = sorted(set(params) - set(contract["allowed"]))
+    if unknown:
+        raise FuyaoQueryValidationError(f"unknown Fuyao query parameters: {', '.join(unknown)}")
+    missing = sorted(
+        name for name in contract["required"]
+        if name not in params or params[name] is None or (isinstance(params[name], str) and not params[name].strip())
+    )
+    if missing:
+        raise FuyaoQueryValidationError(f"missing Fuyao query parameters: {', '.join(missing)}")
     return path
 
 
-async def fetch(capability: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Call one documented, allowlisted REST capability without leaking a key."""
-    key = (os.getenv("FUYAO_API_KEY") or "").strip()
+async def fetch_envelope(capability: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Call one allowlisted route and retain the official diagnostic envelope."""
+    key = _api_key()
     if not key:
-        raise FuyaoProviderError("FUYAO_API_KEY is not configured")
-    safe_params = dict(params or {})
+        raise FuyaoProviderError("HITHINK_FINANCE_API_KEY or FUYAO_API_KEY is not configured")
+    safe_params = {name: value for name, value in dict(params or {}).items() if value is not None}
     path = validate_capability_query(capability, safe_params)
-    try:
-        async with provider_http_client(FUYAO_PROVIDER_KEY, "") as client:
-            response = await client.get(f"{FUYAO_BASE_URL}{path}", params=safe_params, headers={"X-api-key": key})
-            response.raise_for_status()
-            payload = response.json()
-    except Exception as error:  # noqa: BLE001
-        raise FuyaoProviderError(safe_error_detail(str(error), 300)) from error
-    if not isinstance(payload, dict):
-        raise FuyaoProviderError("Fuyao returned a non-object response")
-    if payload.get("code") != 0:
-        raise FuyaoProviderError(safe_error_detail(str(payload.get("message") or "Fuyao business error"), 300))
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        raise FuyaoProviderError("Fuyao success response has no data object")
-    return data
+    last_transport_error: Exception | None = None
+    async with provider_http_client(FUYAO_PROVIDER_KEY, "") as client:
+        for attempt in range(FUYAO_MAX_ATTEMPTS):
+            response_headers: Any | None = None
+            try:
+                response = await client.get(
+                    f"{FUYAO_BASE_URL}{path}", params=safe_params, headers={"X-api-key": key},
+                )
+                response_headers = response.headers
+                if response.status_code in FUYAO_TRANSIENT_HTTP_STATUSES:
+                    if attempt < FUYAO_MAX_ATTEMPTS - 1:
+                        await asyncio.sleep(retry_delay_seconds(response_headers, 0.5 * (2**attempt)))
+                        continue
+                response.raise_for_status()
+                payload = response.json()
+            except (httpx.TimeoutException, httpx.TransportError) as error:
+                last_transport_error = error
+                if attempt < FUYAO_MAX_ATTEMPTS - 1:
+                    await asyncio.sleep(retry_delay_seconds(response_headers, 0.5 * (2**attempt)))
+                    continue
+                raise FuyaoProviderError(
+                    safe_error_detail(f"Fuyao transport failed after {FUYAO_MAX_ATTEMPTS} attempts: {error}", 300),
+                ) from error
+            except (httpx.HTTPStatusError, ValueError) as error:
+                raise FuyaoProviderError(safe_error_detail(str(error), 300)) from error
+
+            if not isinstance(payload, dict):
+                raise FuyaoProviderError("Fuyao returned a non-object response")
+            raw_code = payload.get("code")
+            try:
+                code = int(raw_code)
+            except (TypeError, ValueError):
+                raise FuyaoProviderError("Fuyao response has no numeric business code") from None
+            request_id = str(payload.get("request_id") or "").strip() or None
+            message = safe_error_detail(str(payload.get("message") or ""), 300)
+            if code in FUYAO_RETRY_BUSINESS_CODES and attempt < FUYAO_MAX_ATTEMPTS - 1:
+                await asyncio.sleep(retry_delay_seconds(response_headers, 0.5 * (2**attempt)))
+                continue
+            if code != 0:
+                raise FuyaoProviderError(message or "Fuyao business error", code=code, request_id=request_id)
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise FuyaoProviderError(
+                    "Fuyao success response has no data object", code=code, request_id=request_id,
+                )
+            return {"code": code, "message": message, "request_id": request_id, "data": data}
+    raise FuyaoProviderError(
+        safe_error_detail(f"Fuyao transport failed: {last_transport_error}", 300),
+    )
+
+
+async def fetch(capability: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Compatibility data-only view over :func:`fetch_envelope`."""
+    return dict((await fetch_envelope(capability, params))["data"])
 
 
 def _number(value: Any) -> float | None:
@@ -106,4 +180,8 @@ async def all_a_snapshot_rows() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     }
 
 
-__all__ = ["FUYAO_PROVIDER_KEY", "FuyaoProviderError", "all_a_snapshot_rows", "configured", "fetch", "normalize_snapshot_rows", "validate_capability_query"]
+__all__ = [
+    "FUYAO_API_KEY_ENV_NAMES", "FUYAO_PROVIDER_KEY", "FuyaoProviderError", "FuyaoQueryValidationError",
+    "all_a_snapshot_rows", "configured", "fetch", "fetch_envelope",
+    "normalize_snapshot_rows", "validate_capability_query",
+]

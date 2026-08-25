@@ -21,34 +21,65 @@ edge_host="${QUANT_EDGE_HOST:-root@47.114.113.152}"
 edge_key="${QUANT_EDGE_SSH_KEY:-/Users/papa/.ssh/feishu_relay_edge_ed25519}"
 edge_ssh_control_path="${QUANT_EDGE_SSH_CONTROL_PATH:-}"
 edge_root="${QUANT_EDGE_ROOT:-/opt/quant-intraday-edge}"
+github_repository="${QUANT_EDGE_GITHUB_REPOSITORY:-woshipapa/trading_hareness}"
+github_branch="${QUANT_EDGE_GITHUB_BRANCH:-main}"
 release_sha="$(git -C "$source_root" rev-parse --verify "${release_ref}^{commit}")"
 release_dir="$edge_root/releases/$release_sha"
 built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+release_paths=(quant-service deploy/intraday-edge scripts/audit-fuyao-capabilities.py scripts/deploy-intraday-edge-release.sh)
 [[ -r "$edge_key" ]] || { echo "edge SSH key is not readable: $edge_key" >&2; exit 2; }
+[[ "$github_repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "invalid GitHub repository" >&2; exit 2; }
+[[ "$github_branch" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "invalid GitHub branch" >&2; exit 2; }
 ssh_command=(ssh -i "$edge_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes)
 [[ -z "$edge_ssh_control_path" ]] || ssh_command+=(-S "$edge_ssh_control_path" -o ControlMaster=no -o BatchMode=yes)
 
-git -C "$source_root" diff --quiet --ignore-submodules -- quant-service deploy/intraday-edge || {
+git -C "$source_root" diff --quiet --ignore-submodules -- "${release_paths[@]}" || {
 	echo "refusing to deploy edge source with uncommitted changes; commit the edge release first" >&2
 	exit 1
 }
-git -C "$source_root" diff --cached --quiet --ignore-submodules -- quant-service deploy/intraday-edge || {
+git -C "$source_root" diff --cached --quiet --ignore-submodules -- "${release_paths[@]}" || {
 	echo "refusing to deploy staged but uncommitted edge source" >&2
 	exit 1
 }
 
+# GitHub is the release source of truth.  Refuse a local-only commit even if it
+# exists in the workstation object database.
+github_sha="$(git -C "$source_root" ls-remote --exit-code origin "refs/heads/$github_branch" | awk 'NR == 1 {print $1}')"
+[[ "$github_sha" == "$release_sha" ]] || {
+  echo "refusing edge deploy: origin/$github_branch is $github_sha, requested release is $release_sha" >&2
+  exit 1
+}
+github_archive_url="https://codeload.github.com/$github_repository/tar.gz/$release_sha"
+
 for command in git ssh tar; do command -v "$command" >/dev/null || { echo "missing required command: $command" >&2; exit 127; }; done
 
-printf 'release_sha=%s\nrelease_label=%s\nedge_host=%s\nrelease_dir=%s\n' "$release_sha" "$release_label" "$edge_host" "$release_dir"
+printf 'release_sha=%s\nrelease_label=%s\ngithub_branch=%s\ngithub_archive=%s\nedge_host=%s\nrelease_dir=%s\n' \
+  "$release_sha" "$release_label" "$github_branch" "$github_archive_url" "$edge_host" "$release_dir"
 if [[ "$apply" != true ]]; then
   echo "dry run only; append --apply after the committed revision is reviewed and pushed"
   exit 0
 fi
 
-# Archive only the executable edge source and deployment templates. Existing
-# releases are retained for rollback; the script never prunes server history.
-git -C "$source_root" archive --format=tar "$release_sha" quant-service deploy/intraday-edge \
-  | "${ssh_command[@]}" "$edge_host" "set -euo pipefail; install -d -m 0750 -o root -g quant_edge '$release_dir'; tar -xf - -C '$release_dir'; chown -R root:quant_edge '$release_dir'; chmod -R g+rX '$release_dir'; test -f '$release_dir/quant-service/entrypoint.py'; test -f '$release_dir/deploy/intraday-edge/quant-intraday-edge.service'"
+# Download the exact GitHub commit on the server, then retain only the edge
+# executable subset. Existing releases stay available for rollback.
+"${ssh_command[@]}" "$edge_host" "set -euo pipefail
+  release_dir='$release_dir'
+  archive_url='$github_archive_url'
+  temp_dir=\"\$(mktemp -d /tmp/quant-edge-github.XXXXXX)\"
+  case \"\$temp_dir\" in /tmp/quant-edge-github.*) ;; *) exit 1 ;; esac
+  trap 'rm -rf -- \"\$temp_dir\"' EXIT
+  curl --fail --location --silent --show-error --retry 3 \"\$archive_url\" \
+    | tar -xz -C \"\$temp_dir\" --strip-components=1
+  test -f \"\$temp_dir/quant-service/entrypoint.py\"
+  test -f \"\$temp_dir/deploy/intraday-edge/quant-intraday-edge.service\"
+  test -f \"\$temp_dir/scripts/audit-fuyao-capabilities.py\"
+  install -d -m 0750 -o root -g quant_edge \"\$release_dir\"
+  cp -a \"\$temp_dir/quant-service\" \"\$release_dir/quant-service\"
+  install -d \"\$release_dir/deploy\" \"\$release_dir/scripts\"
+  cp -a \"\$temp_dir/deploy/intraday-edge\" \"\$release_dir/deploy/intraday-edge\"
+  cp -a \"\$temp_dir/scripts/audit-fuyao-capabilities.py\" \"\$release_dir/scripts/audit-fuyao-capabilities.py\"
+  chown -R root:quant_edge \"\$release_dir\"
+  chmod -R g+rX \"\$release_dir\""
 
 "${ssh_command[@]}" "$edge_host" "set -euo pipefail
   edge_root='$edge_root'

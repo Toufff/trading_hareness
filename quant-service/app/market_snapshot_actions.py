@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Json
 
 from .free_market_providers import sina_quotes
-from .fuyao_provider import FuyaoProviderError
+from .fuyao_provider import FuyaoProviderError, configured as fuyao_configured
 from .market_flow_repository import persist_market_snapshot_flow_feature
 from .market_snapshots import snapshot_status, summarize_quotes
 from .provider_health import record_provider_failure, record_provider_success
@@ -66,7 +66,7 @@ class MarketSnapshotActions:
     @staticmethod
     def fuyao_enabled() -> bool:
         """Use the documented Fuyao/THS full-market snapshot when configured."""
-        return bool((os.getenv("FUYAO_API_KEY") or "").strip())
+        return fuyao_configured()
 
     @staticmethod
     def fuyao_quotes(

@@ -16,6 +16,7 @@ COPY quant-service/tests ./tests
 COPY quant-service/alembic.ini ./alembic.ini
 COPY quant-service/migrations ./migrations
 COPY quant-service/entrypoint.py ./entrypoint.py
+COPY scripts/audit-fuyao-capabilities.py ./tools/audit-fuyao-capabilities.py
 
 ENV APP_GIT_SHA=${APP_GIT_SHA} \
     APP_RELEASE=${APP_RELEASE} \

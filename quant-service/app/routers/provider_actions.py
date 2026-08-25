@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException
 
+from ..fuyao_provider import FuyaoProviderError, FuyaoQueryValidationError
 from ..request_models import (
     AkShareProbeRequest,
     FuyaoQueryRequest,
@@ -58,7 +59,15 @@ def build_provider_actions_router(deps: ProviderActionDependencies) -> APIRouter
     async def fuyao_query(payload: FuyaoQueryRequest) -> dict[str, Any]:
         if deps.fuyao_query is None:
             raise HTTPException(status_code=503, detail="Fuyao provider is not configured")
-        return await deps.fuyao_query(payload)
+        try:
+            return await deps.fuyao_query(payload)
+        except FuyaoQueryValidationError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except FuyaoProviderError as error:
+            raise HTTPException(status_code=502, detail={
+                "provider": "fuyao_ths", "code": error.code,
+                "request_id": error.request_id, "message": str(error),
+            }) from error
 
     @router.post("/api/v1/stocks/{symbol}/study")
     async def stock_study(symbol: str, payload: StockStudyRequest | None = None) -> dict[str, Any]:

@@ -15,6 +15,7 @@ from ..async_provider_status_read_repository import provider_capabilities as asy
 from ..async_provider_status_read_repository import provider_health as async_provider_health
 from ..async_provider_status_read_repository import tushare_catalog as async_tushare_catalog
 from ..provider_catalog import provider_capabilities_snapshot, tushare_catalog_snapshot
+from ..fuyao_catalog import catalog_contract as fuyao_catalog_contract
 from ..fuyao_catalog import catalog_items as fuyao_catalog_items
 from ..provider_observability import provider_health_snapshot
 
@@ -45,6 +46,7 @@ def build_provider_status_router(
         items = fuyao_catalog_items()
         return {
             "items": items, "count": len(items), "provider": "fuyao_ths",
+            "contract": fuyao_catalog_contract(),
             "coverage_rule": "documented allow-list != validated market-session evidence; query responses remain research-only.",
         }
 
