@@ -1,0 +1,118 @@
+[
+  {
+    "id": "quantEdgeSyncMonitor123",
+    "name": "市场研究：远端证据同步监控",
+    "active": true,
+    "settings": {
+      "executionOrder": "v1",
+      "saveExecutionProgress": false,
+      "saveManualExecutions": false
+    },
+    "nodes": [
+      {
+        "id": "5c4b973b-1de9-4158-898a-a57ad0db2ecd",
+        "name": "每五分钟检查同步",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [0, 0],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "*/5 * * * *"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "ed6f0bb9-15cb-436b-9987-a9c4b98d9b1e",
+        "name": "读取远端同步状态",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [240, 0],
+        "parameters": {
+          "url": "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/intraday/services/status",
+          "options": {
+            "timeout": 10000
+          }
+        },
+        "onError": "continueRegularOutput"
+      },
+      {
+        "id": "1e45ca68-59a5-4b1a-8e44-3d88df20296b",
+        "name": "判定并抑制重复告警",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [480, 0],
+        "parameters": {
+          "jsCode": "const payload = $input.first().json ?? {};\nconst handoff = payload.edge_handoff ?? {};\nconst pull = handoff.pull ?? {};\nconst state = String(handoff.state ?? 'unavailable');\nconst lag = Number(handoff.sequence_lag ?? 0);\nconst age = Number(handoff.age_seconds ?? Number.POSITIVE_INFINITY);\nconst failure = String(pull.last_error ?? payload.error?.message ?? '');\nconst unhealthy = !handoff.configured || state === 'degraded' || state === 'stale' || state === 'unavailable' || pull.state === 'failed' || age > 1200;\nconst catchingUpTooLong = state === 'catching_up' && (lag > 0 || age > 600);\nif (!unhealthy && !catchingUpTooLong) return [];\nconst signature = [state, lag, failure || 'no-error'].join('|');\nconst now = Date.now();\nconst store = $getWorkflowStaticData('global');\nconst previous = store.edgeSyncAlert ?? {};\nif (previous.signature === signature && Number(previous.at ?? 0) > now - 30 * 60 * 1000) return [];\nstore.edgeSyncAlert = { signature, at: now };\nconst remote = handoff.remote_sequence ?? '-';\nconst local = handoff.sequence ?? '-';\nconst reason = failure || (state === 'catching_up' ? '同步仍有积压' : '同步状态异常');\nreturn [{ json: { text: `【远端证据同步告警】状态：${state}；序列 ${local}/${remote}，积压 ${lag}；最近成功：${pull.last_success_at ?? '无'}；原因：${reason}` } }];"
+        }
+      },
+      {
+        "id": "fa0f8f3e-3302-4475-8230-9a02d18f658a",
+        "name": "发送飞书同步告警",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [740, 0],
+        "parameters": {
+          "url": "http://feishu-adapter:3000/internal/quant-alert",
+          "method": "POST",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Quant-Alert-Token",
+                "value": "={{ $env.QUANT_ALERT_WEBHOOK_TOKEN }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "contentType": "json",
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+          "options": {
+            "timeout": 15000
+          }
+        }
+      }
+    ],
+    "connections": {
+      "每五分钟检查同步": {
+        "main": [
+          [
+            {
+              "node": "读取远端同步状态",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "读取远端同步状态": {
+        "main": [
+          [
+            {
+              "node": "判定并抑制重复告警",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "判定并抑制重复告警": {
+        "main": [
+          [
+            {
+              "node": "发送飞书同步告警",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "pinData": {}
+  }
+]

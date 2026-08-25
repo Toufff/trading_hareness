@@ -80,6 +80,10 @@ services:
       GENERIC_TIMEZONE: Asia/Shanghai
       TZ: Asia/Shanghai
       QUANT_WRITE_API_KEY: ${QUANT_WRITE_API_KEY:?Set QUANT_WRITE_API_KEY in .env}
+      # The edge-sync monitor can notify the same configured Feishu alert
+      # target through the adapter; the workflow definition never contains
+      # the token value.
+      QUANT_ALERT_WEBHOOK_TOKEN: ${QUANT_ALERT_WEBHOOK_TOKEN:-}
       REMOTE_ANALYST_ARCHIVE_BASE_URL: ${REMOTE_ANALYST_ARCHIVE_BASE_URL:-}
     volumes:
       - n8n_data:/home/node/.n8n

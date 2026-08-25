@@ -21,6 +21,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/providers/fuyao/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Fuyao Catalog */
+        get: operations["fuyao_catalog_api_v1_providers_fuyao_catalog_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/providers/capabilities": {
         parameters: {
             query?: never;
@@ -1503,6 +1520,23 @@ export interface paths {
         put?: never;
         /** Tushare Fetch */
         post: operations["tushare_fetch_api_v1_providers_tushare_fetch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/providers/fuyao/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Fuyao Query */
+        post: operations["fuyao_query_api_v1_providers_fuyao_query_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3006,6 +3040,18 @@ export interface components {
              */
             minimum_rows: number;
         };
+        /**
+         * FuyaoQueryRequest
+         * @description One allowlisted Fuyao REST query; it never writes provider data.
+         */
+        FuyaoQueryRequest: {
+            /** Capability */
+            capability: string;
+            /** Params */
+            params?: {
+                [key: string]: string | number | boolean | null;
+            };
+        };
         /** GenerateRequest */
         GenerateRequest: {
             /** As Of Date */
@@ -3798,6 +3844,28 @@ export interface components {
 export type $defs = Record<string, never>;
 export interface operations {
     tushare_catalog_api_v1_providers_tushare_catalog_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    fuyao_catalog_api_v1_providers_fuyao_catalog_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -6397,6 +6465,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["TushareFetchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    fuyao_query_api_v1_providers_fuyao_query_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FuyaoQueryRequest"];
             };
         };
         responses: {

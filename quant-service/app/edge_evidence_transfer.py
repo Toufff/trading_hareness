@@ -223,6 +223,16 @@ def _journal_checkpoint(connection: psycopg.Connection) -> int:
     return int(row["value"] or 0)
 
 
+def _journal_head(connection: psycopg.Connection) -> tuple[int, datetime | None]:
+    """Return one point-in-time journal head for the incremental handoff."""
+    row = connection.execute(
+        """SELECT coalesce(max(sequence_id), 0)::bigint AS sequence,
+                  max(changed_at) AS latest_changed_at
+             FROM quant.edge_evidence_changes"""
+    ).fetchone()
+    return int(row["sequence"] or 0), row["latest_changed_at"]
+
+
 def export_jsonl(since: datetime, output: Any = sys.stdout) -> dict[str, Any]:
     """Write one repeatable-read, bounded evidence snapshot as JSONL."""
     emitted: dict[str, int] = {}
@@ -272,6 +282,7 @@ def export_changes(
         checkpoint = connection.execute("SELECT transaction_timestamp() AS value").fetchone()["value"]
         if not connection.execute("SELECT to_regclass('quant.edge_evidence_changes') AS value").fetchone()["value"]:
             raise RuntimeError("edge evidence change journal is unavailable; run the current Alembic migration first")
+        remote_sequence, remote_latest_changed_at = _journal_head(connection)
         rows = connection.execute(
             """SELECT sequence_id, table_name, record_key, row_data, changed_at
                  FROM quant.edge_evidence_changes
@@ -284,6 +295,8 @@ def export_changes(
         print(json.dumps({
             "kind": "metadata", "version": 2, "mode": "change_journal",
             "requested_after_sequence": requested_after, "replay_from_sequence": replay_from,
+            "remote_sequence": remote_sequence,
+            "remote_latest_changed_at": remote_latest_changed_at.isoformat() if remote_latest_changed_at else None,
             "checkpoint": checkpoint.isoformat(), "scope": "research_evidence_only",
             "edge_runtime": edge_runtime_snapshot(),
         }, ensure_ascii=False), file=output)
@@ -300,9 +313,13 @@ def export_changes(
         print(json.dumps({
             "kind": "checkpoint", "version": 2, "value": checkpoint.isoformat(),
             "sequence": next_sequence, "counts": counts,
+            "remote_sequence": remote_sequence,
+            "remote_latest_changed_at": remote_latest_changed_at.isoformat() if remote_latest_changed_at else None,
             "has_more": len(rows) >= bounded_limit,
         }, ensure_ascii=False, separators=(",", ":")), file=output)
     return {"checkpoint": checkpoint.isoformat(), "sequence": next_sequence, "counts": counts,
+            "remote_sequence": remote_sequence,
+            "remote_latest_changed_at": remote_latest_changed_at.isoformat() if remote_latest_changed_at else None,
             "has_more": len(rows) >= bounded_limit}
 
 
@@ -433,15 +450,20 @@ def read_pull_status(path: Path | None = None) -> dict[str, Any]:
     error = str(payload.get("last_error") or "").strip()
     if error:
         result["last_error"] = error[:300]
+    for key in ("pages_imported", "rows_imported", "duration_ms"):
+        value = payload.get(key)
+        if isinstance(value, int) and value >= 0:
+            result[key] = value
     return result
 
 
 def write_pull_status(
-    state: str, *, error: str | None = None, path: Path | None = None,
+    state: str, *, error: str | None = None, pages_imported: int | None = None,
+    rows_imported: int | None = None, duration_ms: int | None = None, path: Path | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Atomically persist one local pull attempt outcome for the dashboard."""
-    if state not in {"running", "completed", "failed"}:
+    if state not in {"running", "catching_up", "completed", "failed"}:
         raise ValueError("invalid edge evidence pull state")
     status_path = path or _pull_status_path()
     previous = read_pull_status(status_path)
@@ -452,10 +474,17 @@ def write_pull_status(
         "last_success_at": previous.get("last_success_at"),
         "last_error": None,
     }
-    if state == "completed":
+    if state in {"catching_up", "completed"}:
         payload["last_success_at"] = observed_at
     elif state == "failed":
         payload["last_error"] = str(error or "edge evidence pull failed").strip()[:300]
+    for key, value in {
+        "pages_imported": pages_imported,
+        "rows_imported": rows_imported,
+        "duration_ms": duration_ms,
+    }.items():
+        if value is not None:
+            payload[key] = max(0, int(value))
     status_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = status_path.with_suffix(status_path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -474,6 +503,14 @@ def read_cursor_payload(path: Path | None = None) -> dict[str, Any]:
         value = str(payload.get("checkpoint") or "")
         payload["checkpoint"] = parse_checkpoint(value).isoformat()
         payload["sequence"] = parse_sequence(payload.get("sequence"))
+        payload["remote_sequence"] = (
+            parse_sequence(payload.get("remote_sequence"))
+            if "remote_sequence" in payload else payload["sequence"]
+        )
+        payload["has_more"] = bool(payload.get("has_more"))
+        latest_changed_at = payload.get("remote_latest_changed_at")
+        if latest_changed_at:
+            payload["remote_latest_changed_at"] = parse_checkpoint(str(latest_changed_at)).isoformat()
         return payload
     except FileNotFoundError:
         return {"checkpoint": parse_checkpoint("").isoformat(), "sequence": 0}
@@ -483,6 +520,7 @@ def read_cursor_payload(path: Path | None = None) -> dict[str, Any]:
 
 def _write_cursor(
     checkpoint: str, counts: dict[str, int], edge_runtime: dict[str, Any], *, sequence: int = 0,
+    remote_sequence: int = 0, remote_latest_changed_at: str | None = None, has_more: bool = False,
     path: Path | None = None,
 ) -> None:
     cursor_path = path or _cursor_path()
@@ -491,6 +529,9 @@ def _write_cursor(
     temporary.write_text(json.dumps({
         "checkpoint": checkpoint, "counts": counts,
         "sequence": parse_sequence(sequence),
+        "remote_sequence": parse_sequence(remote_sequence),
+        "remote_latest_changed_at": remote_latest_changed_at,
+        "has_more": bool(has_more),
         "imported_at": datetime.now(timezone.utc).isoformat(),
         "edge_runtime": edge_runtime,
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -503,6 +544,9 @@ def import_jsonl(lines: Iterable[str], *, cursor_path: Path | None = None) -> di
     counts = {table.name: 0 for table in TRANSFER_TABLES}
     checkpoint = ""
     sequence = 0
+    remote_sequence = 0
+    remote_latest_changed_at: str | None = None
+    has_more = False
     metadata_seen = False
     edge_runtime: dict[str, Any] = {}
     with psycopg.connect() as connection:
@@ -517,10 +561,19 @@ def import_jsonl(lines: Iterable[str], *, cursor_path: Path | None = None) -> di
                         raise ValueError("invalid edge evidence metadata")
                     metadata_seen = True
                     edge_runtime = item.get("edge_runtime") if isinstance(item.get("edge_runtime"), dict) else {}
+                    remote_sequence = parse_sequence(item.get("remote_sequence") or item.get("journal_sequence"))
+                    remote_latest = item.get("remote_latest_changed_at")
+                    if remote_latest:
+                        remote_latest_changed_at = parse_checkpoint(str(remote_latest)).isoformat()
                     continue
                 if kind == "checkpoint":
                     checkpoint = parse_checkpoint(str(item.get("value") or "")).isoformat()
                     sequence = parse_sequence(item.get("sequence") or item.get("journal_sequence"))
+                    remote_sequence = parse_sequence(item.get("remote_sequence") or remote_sequence or sequence)
+                    remote_latest = item.get("remote_latest_changed_at")
+                    if remote_latest:
+                        remote_latest_changed_at = parse_checkpoint(str(remote_latest)).isoformat()
+                    has_more = bool(item.get("has_more"))
                     continue
                 if kind != "record" or not metadata_seen or checkpoint:
                     raise ValueError("invalid edge evidence stream ordering")
@@ -538,8 +591,15 @@ def import_jsonl(lines: Iterable[str], *, cursor_path: Path | None = None) -> di
                 counts[table.name] += 1
     if not metadata_seen or not checkpoint:
         raise ValueError("edge evidence stream is incomplete")
-    _write_cursor(checkpoint, counts, edge_runtime, sequence=sequence, path=cursor_path)
-    return {"status": "completed", "checkpoint": checkpoint, "sequence": sequence, "counts": counts}
+    _write_cursor(
+        checkpoint, counts, edge_runtime, sequence=sequence, remote_sequence=remote_sequence,
+        remote_latest_changed_at=remote_latest_changed_at, has_more=has_more, path=cursor_path,
+    )
+    return {
+        "status": "completed", "checkpoint": checkpoint, "sequence": sequence,
+        "remote_sequence": remote_sequence, "remote_latest_changed_at": remote_latest_changed_at,
+        "has_more": has_more, "counts": counts,
+    }
 
 
 def edge_evidence_status(
@@ -555,14 +615,25 @@ def edge_evidence_status(
         runtime = payload.get("edge_runtime") if isinstance(payload.get("edge_runtime"), dict) else {}
         remote_ok = runtime.get("status") == "ok" and runtime.get("runtime_profile") == "intraday_edge"
         pull = read_pull_status()
+        sequence = parse_sequence(payload.get("sequence"))
+        remote_sequence = parse_sequence(payload.get("remote_sequence"))
+        sequence_lag = max(0, remote_sequence - sequence)
+        catching_up = bool(payload.get("has_more")) or sequence_lag > 0
+        remote_latest_changed_at = payload.get("remote_latest_changed_at")
+        if remote_latest_changed_at:
+            remote_latest_changed_at = parse_checkpoint(str(remote_latest_changed_at)).isoformat()
         state = "ready" if remote_ok and age_seconds <= stale_after_seconds else "stale" if runtime else "unavailable"
-        if state == "ready" and pull.get("state") == "failed":
+        if state == "ready" and catching_up:
+            state = "catching_up"
+        if state in {"ready", "catching_up"} and pull.get("state") == "failed":
             state = "degraded"
         return {
             "configured": True, "state": state, "last_imported_at": imported_at.isoformat(),
             "age_seconds": round(age_seconds, 1), "stale_after_seconds": stale_after_seconds,
             "checkpoint": payload.get("checkpoint"), "counts": payload.get("counts") or {},
-            "sequence": parse_sequence(payload.get("sequence")),
+            "sequence": sequence, "remote_sequence": remote_sequence,
+            "sequence_lag": sequence_lag, "has_more": bool(payload.get("has_more")),
+            "remote_latest_changed_at": remote_latest_changed_at,
             "runtime": runtime, "pull": pull,
         }
     except FileNotFoundError:
@@ -581,8 +652,11 @@ def main(argv: list[str] | None = None) -> int:
     restricted_export_parser = subcommands.add_parser("restricted-export")
     restricted_export_parser.add_argument("original_command")
     pull_status_parser = subcommands.add_parser("pull-status")
-    pull_status_parser.add_argument("--state", required=True, choices=("running", "completed", "failed"))
+    pull_status_parser.add_argument("--state", required=True, choices=("running", "catching_up", "completed", "failed"))
     pull_status_parser.add_argument("--error", default="")
+    pull_status_parser.add_argument("--pages-imported", type=int)
+    pull_status_parser.add_argument("--rows-imported", type=int)
+    pull_status_parser.add_argument("--duration-ms", type=int)
     subcommands.add_parser("live-session-acceptance")
     subcommands.add_parser("import")
     cursor_parser = subcommands.add_parser("cursor")
@@ -606,7 +680,12 @@ def main(argv: list[str] | None = None) -> int:
             export_jsonl(parse_since(str(value)))
         return 0
     if arguments.command == "pull-status":
-        print(json.dumps(write_pull_status(arguments.state, error=arguments.error), ensure_ascii=False, separators=(",", ":")))
+        print(json.dumps(
+            write_pull_status(
+                arguments.state, error=arguments.error, pages_imported=arguments.pages_imported,
+                rows_imported=arguments.rows_imported, duration_ms=arguments.duration_ms,
+            ), ensure_ascii=False, separators=(",", ":"),
+        ))
         return 0
     if arguments.command == "live-session-acceptance":
         result = run_live_session_acceptance()

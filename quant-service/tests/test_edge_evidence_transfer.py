@@ -104,6 +104,20 @@ class EdgeEvidenceTransferTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid edge evidence pull state"):
             write_pull_status("unknown")
 
+    def test_catching_up_status_keeps_successful_page_metrics(self) -> None:
+        now = datetime(2026, 8, 24, 10, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            status_path = Path(directory) / "pull-status.json"
+            result = write_pull_status(
+                "catching_up", error="bounded catch-up will resume", pages_imported=4,
+                rows_imported=12_000, duration_ms=4_321, path=status_path, now=now,
+            )
+        self.assertEqual(result["state"], "catching_up")
+        self.assertEqual(result["last_success_at"], now.isoformat())
+        self.assertEqual(result["pages_imported"], 4)
+        self.assertEqual(result["rows_imported"], 12_000)
+        self.assertEqual(result["duration_ms"], 4_321)
+
     def test_upsert_uses_declared_key_and_updates_mutable_evidence(self) -> None:
         table = next(item for item in TRANSFER_TABLES if item.name == "intraday_scan_runs")
         statement = upsert_statement(table, ("scan_id", "status", "source_status"))
@@ -128,6 +142,22 @@ class EdgeEvidenceTransferTests(unittest.TestCase):
         self.assertEqual(ready["sequence"], 44)
         self.assertEqual(ready["runtime"]["build"]["git_sha"], "a1b2c3d")
         self.assertEqual(stale["state"], "stale")
+
+    def test_handoff_marks_backlog_as_catching_up_instead_of_ready(self) -> None:
+        now = datetime(2026, 8, 24, 10, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            cursor = Path(directory) / "cursor.json"
+            cursor.write_text(json.dumps({
+                "checkpoint": "2026-08-24T09:50:00Z", "imported_at": "2026-08-24T09:59:00Z",
+                "sequence": 44, "remote_sequence": 144, "has_more": True,
+                "remote_latest_changed_at": "2026-08-24T09:59:30Z",
+                "edge_runtime": {"status": "ok", "runtime_profile": "intraday_edge"},
+            }), encoding="utf-8")
+            status = edge_evidence_status(cursor, now=now, stale_after_seconds=1800)
+        self.assertEqual(status["state"], "catching_up")
+        self.assertEqual(status["sequence_lag"], 100)
+        self.assertTrue(status["has_more"])
+        self.assertEqual(status["remote_latest_changed_at"], "2026-08-24T09:59:30+00:00")
 
 
 if __name__ == "__main__":

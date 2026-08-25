@@ -21,7 +21,7 @@ normal short transaction/connection interruptions are idempotently recovered.
 Older releases fall back once to a bounded 30-day snapshot bootstrap. Imports
 are transactional, upsert mutable evidence, and never copy runtime leases,
 alert deliveries, recommendations, credentials or order state. A local launch
-agent may call the script every 15 minutes; when the Mac is off, the remote
+agent calls the script every two minutes; when the Mac is off, the remote
 database simply retains the evidence for the next pull.
 
 The puller records its latest local attempt separately from the evidence
