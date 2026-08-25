@@ -28,7 +28,7 @@ from app.fuyao_provider import FuyaoProviderError, fetch_envelope
 
 STOCK = "600519.SH"
 FUND = "025480.OF"
-ETF = "510300.SH"
+ETF = "159919.SZ"
 SNAPSHOT_ETF = "588000.SH"
 HOLDER_FUND = "007784.OF"
 INDEX = "000300.SH"
