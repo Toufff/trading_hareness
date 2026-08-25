@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
-from app.liquidity_screen import MINIMUM_LISTING_AGE_DAYS, MINIMUM_MEDIAN_DAILY_AMOUNT, MINIMUM_PRICE, liquidity_eligibility
+from app.liquidity_screen import (
+    MINIMUM_LISTING_AGE_DAYS,
+    MINIMUM_MEDIAN_DAILY_AMOUNT,
+    MINIMUM_PRICE,
+    liquidity_eligibility,
+    median_daily_amount_by_symbol,
+)
 
 
 class LiquidityScreenTests(unittest.TestCase):
@@ -45,6 +53,47 @@ class LiquidityScreenTests(unittest.TestCase):
         kwargs["list_date"] = self.as_of - timedelta(days=MINIMUM_LISTING_AGE_DAYS)
         eligible, flags = liquidity_eligibility(**kwargs)
         self.assertTrue(eligible)
+
+
+@unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
+class MedianDailyAmountUnitConversionIntegrationTests(unittest.TestCase):
+    """canonical_bars_daily.amount is stored in thousand yuan (docs/TUSHARE_COMPATIBLE_INGESTION.md,
+    daily_bar_repository.py's 0.02-0.50 amount/(volume*close) sanity band); a candidate whose
+    genuinely-liquid amount was compared without converting to yuan would be flagged illiquid
+    for essentially every real A-share symbol."""
+
+    symbol = "999985.SZ"
+    as_of_date = date(2099, 1, 20)
+
+    def _cleanup(self) -> None:
+        from app.main import db
+        with db.transaction() as connection:
+            connection.execute("DELETE FROM quant.canonical_bars_daily WHERE symbol=%s", (self.symbol,))
+            connection.execute("DELETE FROM quant.market_bars_daily WHERE symbol=%s", (self.symbol,))
+            connection.execute("DELETE FROM quant.raw_market_observations WHERE symbol=%s", (self.symbol,))
+            connection.execute("DELETE FROM quant.instruments WHERE symbol=%s", (self.symbol,))
+
+    def test_median_amount_is_converted_from_thousand_yuan_to_yuan(self) -> None:
+        from app.main import DailyBar, db, upsert_bar
+        self._cleanup()
+        try:
+            # 30,000 thousand-yuan = 30,000,000 yuan: exactly MINIMUM_MEDIAN_DAILY_AMOUNT.
+            raw_amount_thousand_yuan = Decimal(MINIMUM_MEDIAN_DAILY_AMOUNT) / Decimal(1000)
+            with db.transaction() as connection:
+                for offset in range(20):
+                    trading_date = self.as_of_date - timedelta(days=offset)
+                    upsert_bar(connection, DailyBar(
+                        symbol=self.symbol, trading_date=trading_date, open=Decimal("10"), high=Decimal("10.1"),
+                        low=Decimal("9.9"), close=Decimal("10"), volume=Decimal("1000000"),
+                        amount=raw_amount_thousand_yuan, adj_factor=Decimal("1.0"), is_suspended=False,
+                        source="p0-liquidity-unit-test",
+                        available_at=datetime.combine(trading_date, datetime.min.time(), tzinfo=timezone.utc),
+                    ))
+            with db.transaction() as connection:
+                result = median_daily_amount_by_symbol(connection, [self.symbol], self.as_of_date)
+            self.assertAlmostEqual(result[self.symbol], MINIMUM_MEDIAN_DAILY_AMOUNT, delta=1.0)
+        finally:
+            self._cleanup()
 
 
 if __name__ == "__main__":

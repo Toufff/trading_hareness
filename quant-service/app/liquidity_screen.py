@@ -50,11 +50,18 @@ def liquidity_eligibility(*, median_daily_amount: float | None, latest_price: fl
 
 
 def median_daily_amount_by_symbol(connection: Any, symbols: list[str], as_of_date: date, *, window_days: int = 20) -> dict[str, float | None]:
-    """20-session trailing median traded amount per symbol, up to and including as_of_date."""
+    """20-session trailing median traded amount (yuan) per symbol, up to and including as_of_date.
+
+    ``canonical_bars_daily.amount`` is stored in the documented Tushare-compatible
+    unit (thousand yuan, see docs/TUSHARE_COMPATIBLE_INGESTION.md and
+    daily_bar_repository.py's amount/(volume*close) sanity band of 0.02-0.50);
+    it is converted to yuan here so MINIMUM_MEDIAN_DAILY_AMOUNT can stay a
+    readable yuan constant instead of every caller needing to know the raw unit.
+    """
     if not symbols:
         return {}
     rows = connection.execute(
-        """SELECT symbol, percentile_cont(0.5) WITHIN GROUP (ORDER BY amount) AS median_amount
+        """SELECT symbol, percentile_cont(0.5) WITHIN GROUP (ORDER BY amount) * 1000 AS median_amount_yuan
              FROM (
                SELECT symbol, amount, row_number() OVER (PARTITION BY symbol ORDER BY trading_date DESC) AS rn
                  FROM quant.canonical_bars_daily
@@ -64,7 +71,7 @@ def median_daily_amount_by_symbol(connection: Any, symbols: list[str], as_of_dat
             GROUP BY symbol""",
         (symbols, as_of_date, window_days),
     ).fetchall()
-    return {str(row["symbol"]): (float(row["median_amount"]) if row["median_amount"] is not None else None) for row in rows}
+    return {str(row["symbol"]): (float(row["median_amount_yuan"]) if row["median_amount_yuan"] is not None else None) for row in rows}
 
 
 __all__ = ["MINIMUM_LISTING_AGE_DAYS", "MINIMUM_MEDIAN_DAILY_AMOUNT", "MINIMUM_PRICE",
