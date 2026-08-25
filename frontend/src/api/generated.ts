@@ -1951,6 +1951,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/market/post-close/refresh/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Post Close Refresh */
+        post: operations["start_post_close_refresh_api_v1_market_post_close_refresh_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events/cninfo/sync": {
         parameters: {
             query?: never;
@@ -7335,6 +7352,41 @@ export interface operations {
         };
     };
     post_close_refresh_api_v1_market_post_close_refresh_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PostCloseRefreshRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_post_close_refresh_api_v1_market_post_close_refresh_start_post: {
         parameters: {
             query?: never;
             header?: never;
