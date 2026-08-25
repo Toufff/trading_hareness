@@ -79,6 +79,21 @@ class PlatformBoundaryTests(unittest.TestCase):
         backfill.assert_called_once()
         invalidate.assert_called_once()
 
+    def test_intraday_attribution_refresh_is_bounded_to_settleable_signal_states(self):
+        import app.main as main_module
+
+        connection = MagicMock()
+        connection.execute.return_value.fetchall.return_value = []
+        changed = main_module.refresh_intraday_signal_attributions(
+            connection, cutoff=datetime(2026, 8, 13, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(changed, 0)
+        query, params = connection.execute.call_args.args
+        self.assertIn("state IN ('confirmed','alerted')", query)
+        self.assertIn("signal_type IN ('entry','watch','reduce','exit')", query)
+        self.assertEqual(params, (datetime(2026, 8, 13, tzinfo=timezone.utc),))
+
     def test_post_close_candidate_screen_is_pure_and_fail_closed_on_coverage(self):
         blocked = screen_candidates(
             date(2026, 8, 13), 10, 3, 2, [], {},

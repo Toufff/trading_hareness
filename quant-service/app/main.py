@@ -1038,7 +1038,10 @@ def refresh_intraday_signal_attributions(connection: Any, *, cutoff: datetime) -
     """
     rows = connection.execute(
         """SELECT signal_event_id,signal_key,signal_type,conditions,evidence
-             FROM quant.intraday_signal_events WHERE observed_at<=%s""",
+             FROM quant.intraday_signal_events
+            WHERE state IN ('confirmed','alerted')
+              AND signal_type IN ('entry','watch','reduce','exit')
+              AND observed_at<=%s""",
         (cutoff,),
     ).fetchall()
     changed = 0
