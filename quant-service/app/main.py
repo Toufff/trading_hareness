@@ -4316,7 +4316,7 @@ async def post_close_refresh_endpoint(payload: PostCloseRefreshRequest) -> dict[
     return await post_close_refresh_runtime.run(lambda: run_post_close_refresh(payload))
 
 
-def start_post_close_refresh_endpoint(payload: PostCloseRefreshRequest) -> dict[str, Any]:
+async def start_post_close_refresh_endpoint(payload: PostCloseRefreshRequest) -> dict[str, Any]:
     return post_close_refresh_runtime.start(lambda: run_post_close_refresh(payload))
 
 

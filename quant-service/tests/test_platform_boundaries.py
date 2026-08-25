@@ -247,7 +247,7 @@ class PlatformBoundaryTests(unittest.TestCase):
         router = build_market_actions_router(MarketActionDependencies(
             import_bars=MagicMock(return_value={"imported": 0}), sync_universe=action,
             sync_full_daily=action, sync_full_daily_controls=action, post_close_refresh=action,
-            start_post_close_refresh=MagicMock(return_value={"status": "running"}), sync_announcements=action,
+            start_post_close_refresh=AsyncMock(return_value={"status": "running"}), sync_announcements=action,
             rebuild_market_flow_features=action,
         ))
         methods_by_path = {route.path: route.methods for route in router.routes}

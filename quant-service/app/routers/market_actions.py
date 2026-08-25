@@ -30,7 +30,7 @@ class MarketActionDependencies:
     sync_full_daily: Callable[[FullMarketDailySyncRequest], Awaitable[dict[str, Any]]]
     sync_full_daily_controls: Callable[[FullMarketDailyControlsSyncRequest], Awaitable[dict[str, Any]]]
     post_close_refresh: Callable[[PostCloseRefreshRequest], Awaitable[dict[str, Any]]]
-    start_post_close_refresh: Callable[[PostCloseRefreshRequest], dict[str, Any]]
+    start_post_close_refresh: Callable[[PostCloseRefreshRequest], Awaitable[dict[str, Any]]]
     sync_announcements: Callable[[AnnouncementSyncRequest], Awaitable[dict[str, Any]]]
     rebuild_market_flow_features: Callable[[MarketFlowFeatureRebuildRequest], Awaitable[dict[str, Any]]]
 
@@ -60,8 +60,8 @@ def build_market_actions_router(deps: MarketActionDependencies) -> APIRouter:
         return await deps.post_close_refresh(payload)
 
     @router.post("/api/v1/market/post-close/refresh/start")
-    def start_post_close_refresh(payload: PostCloseRefreshRequest) -> dict[str, Any]:
-        return deps.start_post_close_refresh(payload)
+    async def start_post_close_refresh(payload: PostCloseRefreshRequest) -> dict[str, Any]:
+        return await deps.start_post_close_refresh(payload)
 
     @router.post("/api/v1/events/cninfo/sync")
     async def sync_cninfo_announcements(payload: AnnouncementSyncRequest) -> dict[str, Any]:
