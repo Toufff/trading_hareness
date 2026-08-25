@@ -1,13 +1,14 @@
 <script lang="ts">
 import { defineComponent, inject } from 'vue';
-import { dashboardContextKey } from '../dashboard-context';
+import { Refresh } from '@element-plus/icons-vue';
+import { groupRelayMonitorContextKey } from '../dashboard-context';
 
 export default defineComponent({
   name: 'GroupRelayMonitorView',
   setup() {
-    const dashboard = inject(dashboardContextKey);
+    const dashboard = inject(groupRelayMonitorContextKey);
     if (!dashboard) throw new Error('group relay monitor requires the dashboard shell context');
-    return dashboard as Record<string, any>;
+    return { ...dashboard, Refresh };
   },
 });
 </script>

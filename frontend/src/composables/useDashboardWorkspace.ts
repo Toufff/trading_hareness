@@ -12,7 +12,11 @@ import type { components } from '../api/generated';
 import { getJson, postJson } from '../api/http';
 import { useFeishuRelayWorkspace } from './useFeishuRelayWorkspace';
 import { usePolling } from './usePolling';
-import { dashboardContextKey, feishuWorkbenchContextKey } from '../dashboard-context';
+import {
+  dashboardContextKey,
+  feishuWorkbenchContextKey,
+  groupRelayMonitorContextKey,
+} from '../dashboard-context';
 
 
 
@@ -1082,6 +1086,9 @@ const dashboardBindings = {
 }
 provide('manual-relay', dashboardBindings);
 provide(feishuWorkbenchContextKey, { ...feishuRelayWorkspace, mobileLayout, dateText });
+provide(groupRelayMonitorContextKey, {
+  ...feishuRelayWorkspace, mobileLayout, eventFilter, visibleEvents, dateText, ageText,
+});
 provide(dashboardContextKey, dashboardBindings);
 return proxyRefs(dashboardBindings);
 }
