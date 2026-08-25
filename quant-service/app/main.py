@@ -127,6 +127,8 @@ from .async_ths_concept_member_backfill_repository import member_progress as rea
 from .async_sync_symbol_repository import analyst_claim_symbols as read_async_analyst_claim_symbols
 from .async_sync_symbol_repository import core_symbols as read_async_core_symbols
 from .async_sync_symbol_repository import limited_core_symbols as read_async_limited_core_symbols
+from .sync_symbol_repository import analyst_claim_symbols as read_sync_analyst_claim_symbols
+from .sync_symbol_repository import core_symbols as read_sync_core_symbols
 from .async_runtime_lease_repository import acquire as acquire_background_runtime_lease
 from .async_runtime_lease_repository import release as release_background_runtime_lease
 from .async_runtime_lease_repository import renew as renew_background_runtime_lease
@@ -776,18 +778,9 @@ def resolve_sync_symbols(requested: list[str]) -> list[str]:
     """Synchronous compatibility resolver for non-async callers and tests."""
     values = requested or [item.strip() for item in os.getenv("QUANT_UNIVERSE", "").split(",") if item.strip()]
     if not values:
-        with db.transaction() as connection:
-            rows = connection.execute(
-                "SELECT symbol FROM quant.universe_members WHERE universe_key='core' AND enabled ORDER BY priority,symbol"
-            ).fetchall()
-        values = [str(row["symbol"]) for row in rows]
+        values = read_sync_core_symbols(db)
     if not values:
-        with db.transaction() as connection:
-            rows = connection.execute(
-                """SELECT DISTINCT subject_key FROM quant.analyst_claims
-                   WHERE scope='stock' AND subject_key ~ '^\\d{6}\\.(SH|SZ|BJ)$'"""
-            ).fetchall()
-        values = [str(row["subject_key"]) for row in rows]
+        values = read_sync_analyst_claim_symbols(db)
     return _normalize_sync_symbols(values)
 
 
