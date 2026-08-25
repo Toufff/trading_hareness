@@ -621,8 +621,8 @@ from .intraday_scan_source_status import build_scan_source_status
 from .intraday_scan_signal_persistence import (
     IntradayScanPersistenceServiceDependencies,
     IntradayScanSignalPersistenceDependencies,
-    persist_scan_transaction,
 )
+from .intraday_scan_persistence_runtime import IntradayScanPersistenceRuntime
 from .intraday_watch_quote_capture import WatchQuoteCaptureDependencies, capture_watch_quotes
 from .intraday_watchlist_scan_service import (
     IntradayWatchlistScanDependencies,
@@ -2312,21 +2312,9 @@ async def latest_intraday_fast_quote_confirmations(symbols: list[str], quotes: d
             for symbol in symbols}
 
 
-def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, selected_symbols: list[str],
-                                  source_status: dict[str, Any], watches: list[dict[str, Any]],
-                                  quotes: dict[str, dict[str, Any]], all_a_rows: list[dict[str, Any]],
-                                  quote_latency_ms: int, tushare_minutes: dict[str, dict[str, Any]],
-                                  surge_features: dict[str, dict[str, Any]],
-                                  peer_contexts: dict[str, dict[str, Any]],
-                                  fast_confirmations: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """Generate and persist one scan's evidence in a single synchronous transaction.
-
-    The caller runs this function in ``database_executor``.  Keeping the
-    original one-transaction boundary preserves the signal de-duplication and
-    point-in-time context semantics while avoiding event-loop blocking.
-    """
-    return persist_scan_transaction(
-        IntradayScanPersistenceServiceDependencies(
+def _intraday_scan_persistence_dependencies() -> IntradayScanPersistenceServiceDependencies:
+    """Compose the declared atomic signal-evidence graph at the ASGI boundary."""
+    return IntradayScanPersistenceServiceDependencies(
             database=db,
             confirmation_window=INTRADAY_CONFIRMATION_WINDOW,
             signal_model_version=INTRADAY_SIGNAL_MODEL_VERSION,
@@ -2369,11 +2357,33 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
                     paper_decision_payload=paper_decision_payload, persist_paper_decision=persist_paper_decision,
                 ),
             ),
-        ),
-        scan_id=scan_id, observed_at=observed_at, selected_symbols=selected_symbols,
-        source_status=source_status, watches=watches, quotes=quotes, all_a_rows=all_a_rows,
-        quote_latency_ms=quote_latency_ms, tushare_minutes=tushare_minutes, surge_features=surge_features,
-        peer_contexts=peer_contexts, fast_confirmations=fast_confirmations,
+        )
+
+
+_intraday_scan_persistence_runtime: IntradayScanPersistenceRuntime | None = None
+
+
+def _intraday_scan_persistence_runtime_instance() -> IntradayScanPersistenceRuntime:
+    """Build after all composition ports are defined, on the first real scan."""
+    global _intraday_scan_persistence_runtime
+    if _intraday_scan_persistence_runtime is None:
+        _intraday_scan_persistence_runtime = IntradayScanPersistenceRuntime(
+            _intraday_scan_persistence_dependencies(),
+        )
+    return _intraday_scan_persistence_runtime
+
+
+def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, selected_symbols: list[str],
+                                  source_status: dict[str, Any], watches: list[dict[str, Any]],
+                                  quotes: dict[str, dict[str, Any]], all_a_rows: list[dict[str, Any]],
+                                  quote_latency_ms: int, tushare_minutes: dict[str, dict[str, Any]],
+                                  surge_features: dict[str, dict[str, Any]],
+                                  peer_contexts: dict[str, dict[str, Any]],
+                                  fast_confirmations: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compatibility callback for the watchlist scan service."""
+    return _intraday_scan_persistence_runtime_instance().persist(
+        scan_id, observed_at, selected_symbols, source_status, watches, quotes, all_a_rows,
+        quote_latency_ms, tushare_minutes, surge_features, peer_contexts, fast_confirmations,
     )
 
 
