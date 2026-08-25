@@ -186,6 +186,7 @@ from .post_close_pattern_score import review_score as pure_pattern_review_score
 from .post_close_pattern_candidates import select_candidates as pure_post_close_pattern_candidates
 from .post_close_candidate_screen import screen_candidates as pure_post_close_screen_candidates
 from .post_close_evidence import exact_board_context as pure_exact_board_context, lhb_context as pure_lhb_context
+from .post_close_evidence_repository import load_exact_board_context_rows, load_tushare_lhb_context_rows
 from .limit_pool_merge import merge_limit_pool_sources as merge_persisted_limit_pool_sources
 from .strategy_pattern_sample_repository import (
     load_strategy_pattern_sample_inputs,
@@ -1809,32 +1810,16 @@ def intraday_peer_context(peer_symbols: list[str], features: dict[str, dict[str,
 
 def post_close_exact_board_context(as_of_date: date) -> dict[str, dict[str, Any]]:
     """Join only exact THS member codes to same-date concept-flow evidence."""
-    with db.transaction() as connection:
-        rows = connection.execute(
-            """SELECT member.symbol,flow.sector_key,sector.label,flow.net_amount,flow.change_pct,flow.leading_label,
-                      flow.provider_key,flow.available_at
-                 FROM quant.sector_membership_history member
-                 JOIN quant.sector_market_observations flow
-                   ON flow.taxonomy_key=member.taxonomy_key AND flow.sector_key=member.sector_key
-                 JOIN quant.sectors sector ON sector.taxonomy_key=flow.taxonomy_key AND sector.sector_key=flow.sector_key
-                WHERE member.taxonomy_key='ths_concept_flow' AND member.effective_to IS NULL
-                  AND flow.taxonomy_key='ths_concept_flow' AND flow.trading_date=%s""",
-            (as_of_date,),
-        ).fetchall()
-    return pure_exact_board_context([dict(row) for row in rows], json_safe=strategy_json_safe)
+    return pure_exact_board_context(
+        load_exact_board_context_rows(db, as_of_date), json_safe=strategy_json_safe,
+    )
 
 
 def post_close_tushare_lhb_context(as_of_date: date) -> dict[str, dict[str, Any]]:
     """Aggregate deduplicated post-close institution-seat evidence by symbol."""
-    stamp = as_of_date.strftime("%Y%m%d")
-    with db.transaction() as connection:
-        rows = connection.execute(
-            """SELECT api_name,row_data,provider_key,available_at
-                 FROM quant.tushare_raw_records
-                WHERE api_name IN ('top_list','top_inst') AND row_data->>'trade_date'=%s
-                ORDER BY available_at DESC""", (stamp,),
-        ).fetchall()
-    return pure_lhb_context([dict(row) for row in rows], number=intraday_number)
+    return pure_lhb_context(
+        load_tushare_lhb_context_rows(db, as_of_date), number=intraday_number,
+    )
 
 
 def post_close_strategy_candidates(as_of_date: date, limit: int, minimum_full_market_symbols: int) -> dict[str, Any]:
