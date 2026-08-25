@@ -22,6 +22,8 @@ class PostCloseRefreshRuntimeTests(unittest.IsolatedAsyncioTestCase):
         request = asyncio.create_task(runtime.run(refresh))
         await started.wait()
         self.assertEqual(runtime.active_count, 1)
+        self.assertEqual(runtime.status()["active_count"], 1)
+        self.assertIsNotNone(runtime.status()["oldest_started_at"])
 
         request.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -34,6 +36,7 @@ class PostCloseRefreshRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0)
         self.assertEqual(runtime.active_count, 0)
+        self.assertEqual(runtime.status(), {"active_count": 0, "oldest_started_at": None})
 
 
 if __name__ == "__main__":

@@ -52,6 +52,7 @@ class HealthDependencies:
     daily_control_plane_status: Callable[[], dict[str, Any]] | None = None
     live_session_acceptance_status: Callable[[], dict[str, Any]] | None = None
     release_metadata: Callable[[], dict[str, str | None]] | None = None
+    post_close_runtime_status: Callable[[], dict[str, Any]] | None = None
 
 
 def runtime_loops_with_lease_heartbeats(
@@ -126,6 +127,9 @@ def health_payload(deps: HealthDependencies) -> dict[str, Any]:
             "background_loops": background_leases,
         },
         "runtime_loops": runtime_loops_with_lease_heartbeats(runtime_loops, background_leases),
+        "runtime_tasks": {
+            "post_close_refresh": deps.post_close_runtime_status() if deps.post_close_runtime_status else {},
+        },
         "runtime_task_contracts": deps.runtime_task_contracts() if deps.runtime_task_contracts else [],
         "optional_background_tasks": deps.optional_background_tasks() if deps.optional_background_tasks else {},
         "daily_control_plane": deps.daily_control_plane_status() if deps.daily_control_plane_status else {},

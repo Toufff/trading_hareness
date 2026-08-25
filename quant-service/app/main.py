@@ -3782,6 +3782,7 @@ def _health_payload() -> dict[str, Any]:
             daily_control_plane_status=full_market_daily_control_status,
             live_session_acceptance_status=read_live_session_acceptance,
             release_metadata=release_metadata,
+            post_close_runtime_status=post_close_refresh_runtime.status,
     ))
 
 

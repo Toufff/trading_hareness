@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -16,18 +17,26 @@ class PostCloseRefreshRuntime:
     """
 
     def __init__(self) -> None:
-        self._active: set[asyncio.Task[Any]] = set()
+        self._active: dict[asyncio.Task[Any], datetime] = {}
 
     async def run(self, action: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
         task = asyncio.create_task(action(), name="post-close-refresh")
-        self._active.add(task)
-        task.add_done_callback(self._active.discard)
+        self._active[task] = datetime.now(timezone.utc)
+        task.add_done_callback(self._active.pop)
         return await asyncio.shield(task)
 
     @property
     def active_count(self) -> int:
         """Expose local in-flight ownership for health/tests without data access."""
         return len(self._active)
+
+    def status(self) -> dict[str, Any]:
+        """Return process-local activity, distinct from the durable DB lease."""
+        started = min(self._active.values(), default=None)
+        return {
+            "active_count": len(self._active),
+            "oldest_started_at": started.isoformat() if started else None,
+        }
 
 
 __all__ = ["PostCloseRefreshRuntime"]
