@@ -609,6 +609,10 @@ from .intraday_signal_event_persistence import (
     IntradaySignalEventPersistenceDependencies,
     persist_generated_signals,
 )
+from .intraday_rule_input_retention_runtime import (
+    IntradayRuleInputRetentionDependencies,
+    IntradayRuleInputRetentionRuntime,
+)
 from .intraday_scan_preparation import (
     IntradayScanPreparationDependencies,
     prepare_intraday_scan_inputs,
@@ -2373,30 +2377,21 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
     )
 
 
-intraday_rule_input_pruned_on: date | None = None
+_intraday_rule_input_retention = IntradayRuleInputRetentionRuntime(
+    IntradayRuleInputRetentionDependencies(
+        database=db,
+        run_database=run_database_blocking,
+        rule_input_retention_days=intraday_rule_input_retention_days,
+        ephemeral_signal_retention_days=ephemeral_signal_retention_days,
+        prune_rule_inputs=prune_rule_input_evidence,
+        prune_ephemeral_events=prune_ephemeral_signal_events,
+    ),
+)
 
 
 async def prune_intraday_rule_input_evidence_if_due(observed_at: datetime) -> None:
-    """Run one bounded evidence-retention pass per China trading date.
-
-    Frozen core inputs are retained for replay, while repeated non-confirmed
-    signal rows are retained for the same conservative window and then safely
-    removed only when they have neither an alert delivery nor an outcome.
-    """
-    global intraday_rule_input_pruned_on
-    local_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
-    if intraday_rule_input_pruned_on == local_date:
-        return
-    rule_input_cutoff = observed_at - timedelta(days=intraday_rule_input_retention_days())
-    event_cutoff = observed_at - timedelta(days=ephemeral_signal_retention_days())
-
-    def prune() -> None:
-        with db.transaction() as connection:
-            prune_rule_input_evidence(connection, cutoff=rule_input_cutoff)
-            prune_ephemeral_signal_events(connection, cutoff=event_cutoff)
-
-    await run_database_blocking(prune)
-    intraday_rule_input_pruned_on = local_date
+    """Compatibility entry point for bounded, once-per-date evidence retention."""
+    await _intraday_rule_input_retention.prune_if_due(observed_at)
 
 
 async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str, Any]:
