@@ -17,6 +17,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from .strategy_thresholds import MAX_ENTRY_INTRADAY_GAIN_PCT
+
 
 MODEL_VERSION = "watchlist-main-wave-logit-v1"
 STRATEGY_KEY = "watchlist_main_wave_shadow_v1"
@@ -145,6 +147,12 @@ def build_examples(grouped: dict[str, list[dict[str, Any]]]) -> tuple[list[dict[
             if index + HORIZON_DAYS >= len(bars):
                 continue
             entry = bars[index + 1]
+            # A next-session limit-up open or suspension is not a fillable entry.
+            if entry.get("is_suspended"):
+                continue
+            entry_limit_up = _finite(entry.get("limit_up"))
+            if entry_limit_up is not None and entry["raw_open"] >= entry_limit_up * 0.999:
+                continue
             future = bars[index + 1:index + HORIZON_DAYS + 1]
             entry_price = entry["adjusted_open"]
             maximum_favorable = max(item["adjusted_high"] for item in future) / entry_price - 1
@@ -445,7 +453,7 @@ def main_wave_shadow_signal(watch: dict[str, Any], quote: dict[str, Any] | None,
     minute_volume = _finite((minute_features or {}).get("minute_volume_multiple"))
     above_vwap = _finite((minute_features or {}).get("above_vwap_pct"))
     confirming_peers = int((peer_context or {}).get("confirming_peer_count") or 0)
-    if (price_change is None or not 0.5 <= price_change <= 6.5 or return_3m is None or return_3m < 0.5
+    if (price_change is None or not 0.5 <= price_change <= MAX_ENTRY_INTRADAY_GAIN_PCT or return_3m is None or return_3m < 0.5
             or above_vwap is None or above_vwap < 0
             or max(quote_volume, minute_volume or 0.0) < 1.5
             or (flow <= 0 and confirming_peers < 2)):

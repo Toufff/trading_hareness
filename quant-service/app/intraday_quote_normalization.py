@@ -34,11 +34,20 @@ def merge_watch_quote_prices(
 def merge_sina_watch_quotes(
     quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]], *, number: Callable[[Any], float | None],
 ) -> dict[str, dict[str, Any]]:
-    """Use Sina only as a price fallback; do not fabricate Tencent flow fields."""
+    """Use Sina only as a price fallback; do not fabricate Tencent flow fields.
+
+    A caller that already populated ``quotes[symbol]["price"]`` from a prior
+    merge (Tencent's decision-eligible batch, or any other source) has a real
+    price for that symbol.  Sina must never overwrite it: this function is a
+    fallback for symbols with no price yet, not a second opinion that can
+    silently replace an already-fresher, decision-eligible quote.
+    """
     for row in rows:
         symbol = str(row.get("ts_code") or "")
         price, pre_close = number(row.get("close")), number(row.get("pre_close"))
         if not _SYMBOL.fullmatch(symbol) or price is None or price <= 0:
+            continue
+        if (quotes.get(symbol) or {}).get("price") is not None:
             continue
         existing = dict(quotes.get(symbol) or {"symbol": symbol, "name": row.get("name"), "raw": {}})
         existing["price"] = price

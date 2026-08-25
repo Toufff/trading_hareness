@@ -7,6 +7,13 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .strategy_thresholds import (
+    MAX_ENTRY_INTRADAY_GAIN_PCT,
+    STANDARD_ENTRY_MIN_INTRADAY_GAIN_PCT,
+    STANDARD_MINUTE_VOLUME_MULTIPLE_FLOOR,
+)
+
+
 def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
                            previous_quote: dict[str, Any] | None, daily_factors: dict[str, Any] | None = None,
                            minute_features: dict[str, Any] | None = None, peer_context: dict[str, Any] | None = None, *, number: Callable[[Any], float | None], upside_assessment_fn: Callable[..., dict[str, Any]], model_version: str,
@@ -80,7 +87,7 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
     freshness = quote.get("price_freshness") if isinstance(quote.get("price_freshness"), dict) else {}
     opening_gap_watch = (
         opening_gap_window and not holding and bool(watch.get("alert_on_entry"))
-        and 3.0 <= pct_change <= 6.5
+        and 3.0 <= pct_change <= MAX_ENTRY_INTRADAY_GAIN_PCT
         and str(quote.get("price_source") or "") == "tencent_batched_watch_quote"
         and str(freshness.get("status") or "") == "fresh"
     )
@@ -107,10 +114,11 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
     # chasing; this remains a manual candidate and is never executable.
     sector_surge = (
         isinstance(strategy, dict) and bool(strategy.get("enabled")) and not holding
-        and bool(watch.get("alert_on_entry")) and 1.0 <= pct_change <= 6.5
+        and bool(watch.get("alert_on_entry"))
+        and STANDARD_ENTRY_MIN_INTRADAY_GAIN_PCT <= pct_change <= MAX_ENTRY_INTRADAY_GAIN_PCT
         and minute_return_1m is not None and minute_return_1m >= 0.75
         and minute_return_3m is not None and 1.5 <= minute_return_3m <= 4.5
-        and minute_volume_multiple is not None and minute_volume_multiple >= 3.0
+        and minute_volume_multiple is not None and minute_volume_multiple >= STANDARD_MINUTE_VOLUME_MULTIPLE_FLOOR
         and above_vwap_pct is not None and 0 <= above_vwap_pct <= 5.5
         and available_peers >= 2 and confirming_peers >= 2 and peer_breadth >= 0.66
     )
@@ -159,7 +167,7 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
     deep_reversal_acceptance = (
         isinstance(reversal_research, dict) and bool(reversal_research.get("enabled")) and not holding
         and bool(watch.get("alert_on_entry")) and session_low_pct is not None and session_low_pct <= -8.5
-        and 0 <= pct_change <= 6.5 and recovery_from_low is not None and recovery_from_low >= 9.0
+        and 0 <= pct_change <= MAX_ENTRY_INTRADAY_GAIN_PCT and recovery_from_low is not None and recovery_from_low >= 9.0
         and minute_return_3m is not None and minute_return_3m >= 0.5
         and above_vwap_pct is not None and above_vwap_pct >= 0
         and deep_reversal_confirmation
@@ -183,9 +191,9 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
     # VWAP recovery and either extreme same-source flow or peer breadth.
     green_reclaim_research = (
         isinstance(reversal_research, dict) and bool(reversal_research.get("enabled")) and not holding
-        and bool(watch.get("alert_on_entry")) and 0.5 <= pct_change <= 6.5
+        and bool(watch.get("alert_on_entry")) and 0.5 <= pct_change <= MAX_ENTRY_INTRADAY_GAIN_PCT
         and minute_return_3m is not None and 1.5 <= minute_return_3m <= 4.5
-        and minute_volume_multiple is not None and minute_volume_multiple >= 3.0
+        and minute_volume_multiple is not None and minute_volume_multiple >= STANDARD_MINUTE_VOLUME_MULTIPLE_FLOOR
         and above_vwap_pct is not None and 0 <= above_vwap_pct <= 6.0
         and recovery_from_low is not None and recovery_from_low >= 3.0
         and ((previous_pct_change is not None and previous_pct_change <= 0 < pct_change)
@@ -268,11 +276,12 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
     legacy_public_entry_inputs_available = not missing_public_fields
     fuyao_minute_breadth_entry = (
         not legacy_public_entry_inputs_available and not holding
-        and bool(watch.get("alert_on_entry")) and 1.0 <= pct_change <= 6.5
+        and bool(watch.get("alert_on_entry"))
+        and STANDARD_ENTRY_MIN_INTRADAY_GAIN_PCT <= pct_change <= MAX_ENTRY_INTRADAY_GAIN_PCT
         and previous_price is not None and price > previous_price
         and minute_return_1m is not None and minute_return_1m >= 0.75
         and minute_return_3m is not None and 1.5 <= minute_return_3m <= 4.5
-        and minute_volume_multiple is not None and minute_volume_multiple >= 3.0
+        and minute_volume_multiple is not None and minute_volume_multiple >= STANDARD_MINUTE_VOLUME_MULTIPLE_FLOOR
         and above_vwap_pct is not None and 0 <= above_vwap_pct <= 5.5
         and available_peers >= 2 and confirming_peers >= 2 and peer_breadth >= 0.66
     )
@@ -290,7 +299,8 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
                                        *( ["eastmoney_watch_flow_research_confirmation_only"] if bounded_watch_flow_only else []),
                                        "manual_review_required", "no_automatic_order"]})
     entry_setup = (legacy_public_entry_inputs_available and not holding and bool(watch.get("alert_on_entry"))
-                   and 1.0 <= pct_change <= 6.5 and volume_ratio >= 1.8 and turnover_rate >= 2.0
+                   and STANDARD_ENTRY_MIN_INTRADAY_GAIN_PCT <= pct_change <= MAX_ENTRY_INTRADAY_GAIN_PCT
+                   and volume_ratio >= 1.8 and turnover_rate >= 2.0
                    and main_net_inflow > 0 and previous_price is not None and price > previous_price)
     if entry_setup:
         signals.append({"signal_key": f"{symbol}:entry:{model_version}", "signal_type": "entry",

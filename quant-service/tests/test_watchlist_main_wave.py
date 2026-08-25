@@ -6,9 +6,12 @@ from datetime import date, timedelta
 from app.watchlist_main_wave import (
     FEATURE_KEYS,
     HORIZON_DAYS,
+    LOOKBACK_DAYS,
+    build_examples,
     chronological_splits,
     fit_logistic,
     main_wave_shadow_signal,
+    normalize_bars,
     score_features,
 )
 
@@ -58,6 +61,30 @@ class WatchlistMainWaveTests(unittest.TestCase):
             {"confirming_peer_count": 0}, prior,
         )
         self.assertIsNone(rejected)
+
+    def test_next_session_limit_up_or_suspension_is_not_a_fillable_entry(self) -> None:
+        start = date(2026, 1, 1)
+        rows = []
+        limit_up_index = LOOKBACK_DAYS + 5
+        suspended_index = LOOKBACK_DAYS + 10
+        for index in range(LOOKBACK_DAYS + 20):
+            trading_date = start + timedelta(days=index)
+            price = 10.0 + index * 0.05
+            open_price = price
+            if index == limit_up_index + 1:
+                open_price = price * 1.10
+            rows.append({
+                "symbol": "000001.SZ", "name": "样本", "trading_date": trading_date,
+                "open": open_price, "high": price * 1.02, "low": price * 0.98, "close": price,
+                "volume": 1000 + index, "amount": price * (1000 + index), "adj_factor": 1.0,
+                "is_suspended": index == suspended_index + 1,
+                "limit_up": price * 1.10, "limit_down": price * 0.90,
+            })
+        grouped = normalize_bars(rows)
+        examples, _ = build_examples(grouped)
+        signal_dates = {item["signal_date"] for item in examples}
+        self.assertNotIn(start + timedelta(days=limit_up_index), signal_dates)
+        self.assertNotIn(start + timedelta(days=suspended_index), signal_dates)
 
 
 if __name__ == "__main__":

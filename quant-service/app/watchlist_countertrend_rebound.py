@@ -16,6 +16,7 @@ import math
 from typing import Any, Iterable
 
 from .intraday_decision_context import shrunk_probability
+from .strategy_thresholds import MAX_ENTRY_INTRADAY_GAIN_PCT
 from .watchlist_main_wave import FEATURE_KEYS, LOOKBACK_DAYS, _feature_row, normalize_bars
 
 
@@ -495,7 +496,7 @@ def countertrend_rebound_realtime_signal(
     above_vwap = _finite((minute_features or {}).get("above_vwap_pct"))
     confirming_peers = int((peer_context or {}).get("confirming_peer_count") or 0)
     if (
-        price_change is None or not 0.5 <= price_change <= 6.5
+        price_change is None or not 0.5 <= price_change <= MAX_ENTRY_INTRADAY_GAIN_PCT
         or return_3m is None or return_3m < 0.5
         or above_vwap is None or above_vwap < 0
         or max(quote_volume, minute_volume or 0.0) < 1.5

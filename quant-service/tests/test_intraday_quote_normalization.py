@@ -39,6 +39,16 @@ class IntradayQuoteNormalizationTests(unittest.TestCase):
         self.assertIsNone(quotes["000001.SZ"]["main_flow_percentile"])
         self.assertEqual(observation_source(quotes["000001.SZ"]), "sina_free")
 
+    def test_sina_never_overwrites_an_already_priced_quote(self) -> None:
+        quotes = {"000001.SZ": {"symbol": "000001.SZ", "price": 10.2, "pct_change": 2.0,
+                                 "price_source": "tencent_batched_watch_quote", "raw": {}}}
+        merge_sina_watch_quotes(
+            quotes, [{"ts_code": "000001.SZ", "close": "99.9", "pre_close": "10", "trade_date": "20260817", "trade_time": "093001"}],
+            number=number,
+        )
+        self.assertEqual(quotes["000001.SZ"]["price"], 10.2)
+        self.assertEqual(quotes["000001.SZ"]["price_source"], "tencent_batched_watch_quote")
+
     def test_timestamp_and_percentile_contracts_are_explicit(self) -> None:
         observed_at = datetime(2026, 8, 17, 1, 30, 10, tzinfo=timezone.utc)
         fresh = exchange_time_status({"price_trade_time": "20260817093005"}, observed_at, 20)

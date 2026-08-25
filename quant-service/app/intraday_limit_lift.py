@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .strategy_thresholds import MAX_ENTRY_INTRADAY_GAIN_PCT
+
 
 def intraday_limit_lift_pattern(
     rows: list[dict[str, Any]], daily: dict[str, Any], *,
@@ -52,7 +54,8 @@ def intraday_limit_lift_pattern(
         recovery = number(feature.get("recovery_from_session_low_pct"))
         evidence = {**point, "index": index, "recovery_from_session_low_pct": recovery,
                     "breakout_above_prior_high_pct": breakout}
-        if (standard_ignition is None and 0.5 <= pct_change <= 6.5 and return_3m is not None and 1.2 <= return_3m <= 4.5
+        if (standard_ignition is None and 0.5 <= pct_change <= MAX_ENTRY_INTRADAY_GAIN_PCT
+                and return_3m is not None and 1.2 <= return_3m <= 4.5
                 and volume_multiple is not None and volume_multiple >= 2.5 and above_vwap is not None and above_vwap >= 0
                 and breakout is not None and breakout >= 0):
             standard_ignition = evidence

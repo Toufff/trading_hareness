@@ -15,6 +15,7 @@ from datetime import date, timedelta
 import math
 from typing import Any, Iterable
 
+from .strategy_thresholds import MAX_ENTRY_INTRADAY_GAIN_PCT
 from .watchlist_main_wave import (
     FEATURE_KEYS,
     FEATURE_LABELS,
@@ -439,7 +440,7 @@ def main_wave_v2_shadow_signal(
     minimum_volume = 2.0 if forming else 1.5
     minimum_above_vwap = 0.2 if forming else 0.0
     if (
-        price_change is None or not minimum_change <= price_change <= 6.5
+        price_change is None or not minimum_change <= price_change <= MAX_ENTRY_INTRADAY_GAIN_PCT
         or return_3m is None or return_3m < minimum_return_3m
         or above_vwap is None or above_vwap < minimum_above_vwap
         or max(quote_volume, minute_volume or 0.0) < minimum_volume

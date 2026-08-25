@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable
 
+from .strategy_thresholds import MAX_ENTRY_INTRADAY_GAIN_PCT, STANDARD_ENTRY_MIN_INTRADAY_GAIN_PCT
+
 
 def upside_research_assessment(
     quote: dict[str, Any] | None,
@@ -37,7 +39,8 @@ def upside_research_assessment(
     peer_confirmation = available_peers >= 2 and confirming_peers >= 2 and peer_breadth >= 0.5
     daily_base_ready = bool((daily_factors or {}).get("base_structure_ready"))
     components = {
-        "entry_window": pct_change is not None and 1.0 <= pct_change <= 6.5,
+        "entry_window": pct_change is not None
+                        and STANDARD_ENTRY_MIN_INTRADAY_GAIN_PCT <= pct_change <= MAX_ENTRY_INTRADAY_GAIN_PCT,
         "short_acceleration": return_3m is not None and 1.2 <= return_3m <= 3.5 and return_1m is not None and return_1m >= 0.25,
         "relative_volume": volume_multiple is not None and volume_multiple >= 2.5,
         "volume_not_extreme": volume_multiple is not None and volume_multiple <= 20.0,
@@ -109,7 +112,8 @@ def eac_acceptance_assessment(
     scan_return_pct = ((current_price / previous_price - 1) * 100 if current_price is not None and previous_price is not None and previous_price > 0 else None)
     components = {
         "minimum_hold_time": 30 <= elapsed_seconds <= confirmation_window_seconds,
-        "entry_window": pct_change is not None and 1.0 <= pct_change <= 6.5,
+        "entry_window": pct_change is not None
+                        and STANDARD_ENTRY_MIN_INTRADAY_GAIN_PCT <= pct_change <= MAX_ENTRY_INTRADAY_GAIN_PCT,
         "retains_expansion": retained_from_first_pct is not None and retained_from_first_pct >= -0.6,
         "no_fast_reversal": scan_return_pct is not None and scan_return_pct >= -0.25,
         "above_vwap": above_vwap is not None and above_vwap >= 0,
