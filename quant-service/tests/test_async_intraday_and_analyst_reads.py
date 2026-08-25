@@ -57,7 +57,7 @@ class AsyncIntradayAndAnalystReadTests(unittest.IsolatedAsyncioTestCase):
         class Connection:
             def __init__(self): self.calls = []
             async def execute(self, sql, _params=()):
-                self.calls.append(sql)
+                self.calls.append((sql, _params))
                 if "JOIN quant.intraday_signal_events" in sql:
                     return Result([{
                         "signal_event_id": "event-1", "symbol": "000001.SZ", "signal_key": "entry-v1",
@@ -86,6 +86,7 @@ class AsyncIntradayAndAnalystReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["items"][0]["attribution"]["stage"], "generic")
         self.assertEqual(payload["summary"][0]["rows"], 1)
         self.assertEqual(len(database.connection.calls), 3)
+        self.assertEqual(database.connection.calls[0][1], (500,))
 
     async def test_catalog_and_market_result_projections_use_native_async_connection(self) -> None:
         class Result:

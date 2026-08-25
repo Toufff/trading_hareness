@@ -846,10 +846,12 @@ class PlatformBoundaryTests(unittest.TestCase):
             attribution_fn=lambda *_args: {"stage": "generic"},
             attribution_summary_fn=lambda _rows: {"items": [], "validation_gate": {"status": "accumulating"}},
         )
-        self.assertEqual(connection.execute.call_args_list[0].args[1], (5000,))
+        # The dashboard asks for a small page, so its attribution projection
+        # must never hydrate an unbounded historical board-report window.
+        self.assertEqual(connection.execute.call_args_list[0].args[1], (500,))
         self.assertEqual(batch_calls, [[(observed_at, "600000.SH")]])
         self.assertEqual(payload["items"][0]["attribution"]["stage"], "generic")
-        self.assertEqual(payload["attribution_window_limit"], 5000)
+        self.assertEqual(payload["attribution_window_limit"], 500)
         router = build_intraday_outcome_reads_router(database, lambda *_args: {}, lambda *_args: {}, lambda _rows: {"items": [], "validation_gate": {}})
         methods_by_path = {route.path: route.methods for route in router.routes}
         self.assertEqual(methods_by_path["/api/v1/intraday/outcomes/latest"], {"GET"})

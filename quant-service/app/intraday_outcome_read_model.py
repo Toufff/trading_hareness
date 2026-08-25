@@ -15,7 +15,10 @@ def latest_intraday_outcomes(
 ) -> dict[str, Any]:
     """Read stored outcomes only; board context is batched inside one transaction."""
     bounded_limit = max(1, min(limit, 500))
-    attribution_window_limit = 5000
+    # Attribution only needs a recent, representative window for the dashboard.
+    # Keeping it bounded also bounds the point-in-time board-report JSON loaded
+    # in the same transaction; the requested page itself remains independent.
+    attribution_window_limit = 500
     missing_context = {
         "status": "missing", "market_state": "unknown", "board_snapshot_age_seconds": None,
         "symbol_board_matches": [], "notice": "no board snapshot existed before the signal",

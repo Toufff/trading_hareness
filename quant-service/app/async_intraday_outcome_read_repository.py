@@ -23,7 +23,10 @@ async def latest_intraday_outcomes(
 ) -> dict[str, Any]:
     """Read a bounded outcome window and batch its point-in-time board context."""
     bounded_limit = max(1, min(limit, 500))
-    attribution_window_limit = 5000
+    # Keep the attribution projection independent from a potentially large
+    # historical board-report payload.  The UI renders a page, not a full
+    # archival recomputation.
+    attribution_window_limit = 500
     missing_context = {
         "status": "missing", "market_state": "unknown", "board_snapshot_age_seconds": None,
         "symbol_board_matches": [], "notice": "no board snapshot existed before the signal",
