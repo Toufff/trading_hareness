@@ -16,6 +16,7 @@ from ..async_strategy_ablation_repository import latest_strategy_ablation as asy
 from ..strategy_health_read_model import latest_strategy_health
 from ..async_strategy_health_repository import latest_strategy_health as async_latest_strategy_health
 from ..strategy_promotion import sync_strategy_promotion_catalog
+from ..watchlist_candidate_proposals import sync_latest_watchlist_proposals
 
 
 def build_strategy_reads_router(database: Any, decision_model_version: str, async_database: Any | None = None,
@@ -62,5 +63,16 @@ def build_strategy_reads_router(database: Any, decision_model_version: str, asyn
         """
         as_of_date = cn_today()
         return {"as_of_date": str(as_of_date), "strategies": sync_strategy_promotion_catalog(database, as_of_date)}
+
+    @router.get("/api/v1/strategy/watchlist-proposals")
+    async def watchlist_proposals() -> dict[str, Any]:
+        """Cross-strategy watchlist candidates for human review only.
+
+        Never written into quant.intraday_watchlists: that table has a
+        previously-verified 40-symbol capacity bound tied to the live
+        Tencent batched-quote request size, and a human-curated watchlist
+        already uses most of it.
+        """
+        return sync_latest_watchlist_proposals(database)
 
     return router

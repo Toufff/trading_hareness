@@ -700,6 +700,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/strategy/watchlist-proposals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Watchlist Proposals
+         * @description Cross-strategy watchlist candidates for human review only.
+         *
+         *     Never written into quant.intraday_watchlists: that table has a
+         *     previously-verified 40-symbol capacity bound tied to the live
+         *     Tencent batched-quote request size, and a human-curated watchlist
+         *     already uses most of it.
+         */
+        get: operations["watchlist_proposals_api_v1_strategy_watchlist_proposals_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/paper/status": {
         parameters: {
             query?: never;
@@ -5010,6 +5035,28 @@ export interface operations {
         };
     };
     promotion_api_v1_strategy_promotion_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    watchlist_proposals_api_v1_strategy_watchlist_proposals_get: {
         parameters: {
             query?: never;
             header?: never;

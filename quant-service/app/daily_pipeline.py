@@ -22,6 +22,7 @@ async def run_pipeline(
     cn_today: Callable[[], date],
     materialize_regime: Callable[[date], Any] | None = None,
     materialize_candidate_ledger: Callable[[date], Any] | None = None,
+    materialize_watchlist_proposals: Callable[[date], Any] | None = None,
 ) -> dict[str, Any]:
     primary = await sync_tushare(tushare_request(trade_date=payload.as_of_date))
     fallback = None
@@ -40,11 +41,17 @@ async def run_pipeline(
     # holds for as_of_date; it does not require those strategies to run here.
     ledger = (await run_database_blocking(materialize_candidate_ledger, as_of_date, timeout_seconds=30)
              if materialize_candidate_ledger is not None else None)
+    # Proposals are read after the ledger materializes so they see today's
+    # candidates; this never writes into intraday_watchlists (see
+    # watchlist_candidate_proposals.py for why).
+    watchlist_proposals = (await run_database_blocking(materialize_watchlist_proposals, as_of_date, timeout_seconds=30)
+                           if materialize_watchlist_proposals is not None else None)
     outcomes = await run_database_blocking(recompute_outcomes, payload.as_of_date, timeout_seconds=60)
     scorecard = await run_database_blocking(recompute_scorecards, payload.as_of_date, timeout_seconds=30)
     result = await run_database_blocking(generate_recommendations, payload, timeout_seconds=30)
     return {"status": "completed", "market_sync": sync, "snapshot": snapshot, "regime": regime,
-            "candidate_ledger": ledger, "outcomes": outcomes, "scorecards": scorecard, "recommendations": result}
+            "candidate_ledger": ledger, "watchlist_proposals": watchlist_proposals, "outcomes": outcomes,
+            "scorecards": scorecard, "recommendations": result}
 
 
 __all__ = ["run_pipeline"]

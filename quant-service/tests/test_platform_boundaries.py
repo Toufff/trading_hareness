@@ -56,11 +56,12 @@ class PlatformBoundaryTests(unittest.TestCase):
         async def sync(_payload):
             return {"status": "completed"}
 
-        build_snapshot, materialize_regime, materialize_ledger = object(), object(), object()
+        build_snapshot, materialize_regime, materialize_ledger, materialize_proposals = object(), object(), object(), object()
         recompute_outcomes, recompute_scorecards, generate_recommendations = object(), object(), object()
         canned = {
             build_snapshot: {"status": "ready"}, materialize_regime: {"state": "trend_recovery"},
-            materialize_ledger: {"materialize_post_close_candidates": 3}, recompute_outcomes: {"outcomes": 1},
+            materialize_ledger: {"materialize_post_close_candidates": 3}, materialize_proposals: 5,
+            recompute_outcomes: {"outcomes": 1},
             recompute_scorecards: {"scorecards": 1}, generate_recommendations: {"recommendations": 1},
         }
         call_order: list[object] = []
@@ -78,15 +79,19 @@ class PlatformBoundaryTests(unittest.TestCase):
                 recompute_scorecards=recompute_scorecards, generate_recommendations=generate_recommendations,
                 run_database_blocking=blocking, cn_today=lambda: date(2026, 8, 14),
                 materialize_regime=materialize_regime, materialize_candidate_ledger=materialize_ledger,
+                materialize_watchlist_proposals=materialize_proposals,
             )
 
         result = asyncio.run(check())
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["regime"], {"state": "trend_recovery"})
         self.assertEqual(result["candidate_ledger"], {"materialize_post_close_candidates": 3})
+        self.assertEqual(result["watchlist_proposals"], 5)
         # Regime and ledger must materialize before outcomes settle against them.
         self.assertLess(call_order.index(materialize_regime), call_order.index(recompute_outcomes))
         self.assertLess(call_order.index(materialize_ledger), call_order.index(recompute_outcomes))
+        # Proposals must be read after the ledger materializes (they read from it).
+        self.assertLess(call_order.index(materialize_ledger), call_order.index(materialize_proposals))
 
     def test_post_close_evidence_aggregation_keeps_exact_board_and_deduplicates_lhb(self):
         boards = exact_board_context([

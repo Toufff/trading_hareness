@@ -597,6 +597,7 @@ from .outcome_recomputation import recompute as recompute_outcomes_isolated
 from .post_close_candidate_outcomes import settle_post_close_and_leader_rotation_outcomes
 from .market_regime_daily import materialize_market_regime
 from .strategy_daily_candidate_ledger import materialize_ledger, settle_ledger_outcomes as settle_strategy_ledger_outcomes
+from .watchlist_candidate_proposals import materialize_watchlist_proposals
 from .ths_concept_members_sync import sync as sync_ths_concept_members_isolated
 from .analyst_scorecards import readiness as analyst_scorecard_readiness
 from .analyst_scorecards import recompute as recompute_scorecards_isolated
@@ -1114,6 +1115,12 @@ def materialize_strategy_daily_candidate_ledger(as_of_date: date) -> dict[str, i
     """Normalize whatever each strategy's own table already holds for as_of_date into the ledger."""
     with db.transaction() as connection:
         return materialize_ledger(connection, as_of_date)
+
+
+def materialize_daily_watchlist_proposals(as_of_date: date) -> int:
+    """Read-only daily proposal list; never writes into intraday_watchlists."""
+    with db.transaction() as connection:
+        return materialize_watchlist_proposals(connection, as_of_date)
 
 
 def generate_recommendations_legacy(request: GenerateRequest) -> dict[str, Any]:
@@ -4685,6 +4692,7 @@ async def run_daily_pipeline(payload: GenerateRequest) -> dict[str, Any]:
         generate_recommendations=generate_recommendations, run_database_blocking=run_database_blocking,
         cn_today=cn_today, materialize_regime=materialize_market_regime_today,
         materialize_candidate_ledger=materialize_strategy_daily_candidate_ledger,
+        materialize_watchlist_proposals=materialize_daily_watchlist_proposals,
     )
 
 
