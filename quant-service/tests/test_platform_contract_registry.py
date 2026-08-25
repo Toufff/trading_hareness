@@ -16,6 +16,7 @@ from app.platform.runtime_task_registry import (
 )
 from app.runtime_tasks import BackgroundTaskSpec, validate_runtime_task_specs
 from app.platform.strategy_registry import strategy_contract_catalog
+from app.platform.strategy_registry import validate_strategy_runtime_versions
 from app.health_read_model import HealthDependencies, health_payload
 
 
@@ -62,6 +63,16 @@ class PlatformContractRegistryTests(unittest.TestCase):
         intraday = next(item for item in catalog if item["key"] == "intraday_watchlist_confirmation")
         self.assertEqual(intraday["input_contract"], "intraday-rule-input-v2")
         self.assertEqual({item["live_effect"] for item in catalog}, {"none"})
+
+    def test_runtime_strategy_versions_must_match_every_declared_contract(self) -> None:
+        versions = {
+            item["key"]: item["model_version"]
+            for item in strategy_contract_catalog()
+        }
+        validate_strategy_runtime_versions(versions)
+        versions["ten_day_leader_rotation_shadow"] = "stale-model"
+        with self.assertRaisesRegex(ValueError, "model version mismatch"):
+            validate_strategy_runtime_versions(versions)
 
     def test_health_can_publish_declared_task_contracts_without_provider_io(self) -> None:
         class Result:

@@ -8,7 +8,7 @@ entry grants broker or order capability.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, Mapping
 
 
 @dataclass(frozen=True)
@@ -50,6 +50,11 @@ STRATEGY_CONTRACTS: Final[dict[str, StrategyContract]] = {
         "same-date-close-v1", ("post_close_strategy_runs", "post_close_strategy_candidates"),
         "research", "research_enabled", "none", "same-date close candidate research with coverage gates",
     ),
+    "post_close_limit_lift_pattern": StrategyContract(
+        "post_close_limit_lift_pattern", "post-close-limit-lift-pattern-v6", "app/strategy_pattern_mining_service.py",
+        "post-close-limit-lift-pattern-v1", ("strategy_pattern_runs", "strategy_pattern_samples"),
+        "research", "research_enabled", "none", "bounded post-close minute-pattern discovery and replay evidence",
+    ),
 }
 
 
@@ -77,4 +82,33 @@ def strategy_contract_catalog() -> list[dict[str, Any]]:
     ]
 
 
-__all__ = ["STRATEGY_CONTRACTS", "StrategyContract", "strategy_contract", "strategy_contract_catalog"]
+def validate_strategy_runtime_versions(runtime_versions: Mapping[str, str]) -> None:
+    """Fail closed when a materialized strategy drifts from its registry contract.
+
+    Every declared strategy must be bound deliberately by the composition root.
+    The registry never grants execution authority: this guard protects evidence
+    provenance and replay identity only.
+    """
+    declared = set(STRATEGY_CONTRACTS)
+    configured = set(runtime_versions)
+    missing = sorted(declared - configured)
+    undeclared = sorted(configured - declared)
+    if missing or undeclared:
+        details = []
+        if missing:
+            details.append(f"missing declared strategies: {', '.join(missing)}")
+        if undeclared:
+            details.append(f"undeclared runtime strategies: {', '.join(undeclared)}")
+        raise ValueError("strategy runtime bindings drift from registry; " + "; ".join(details))
+    for key, version in runtime_versions.items():
+        expected = strategy_contract(key).model_version
+        if version != expected:
+            raise ValueError(
+                f"strategy model version mismatch for {key}: expected {expected}, received {version}",
+            )
+
+
+__all__ = [
+    "STRATEGY_CONTRACTS", "StrategyContract", "strategy_contract", "strategy_contract_catalog",
+    "validate_strategy_runtime_versions",
+]

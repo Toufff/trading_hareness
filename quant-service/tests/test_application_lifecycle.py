@@ -63,6 +63,7 @@ class ApplicationLifecycleTests(unittest.TestCase):
             verify_versioned_schema=mark("db:verify"),
             ensure_catalog_capabilities=ensure_catalog,
             run_database=run_database,
+            verify_strategy_contracts=mark("strategies:verify"),
             start_background_tasks=lambda: events.append("tasks:start") or {"loop": object_marker},
             cancel_background_tasks=cancel_tasks,
             cancel_shared_snapshots=cancel_snapshot,
@@ -80,7 +81,7 @@ class ApplicationLifecycleTests(unittest.TestCase):
         asyncio.run(exercise())
         self.assertEqual(events, [
             "db:open", "async_db:open", "configure:on", "metrics:init", "http:start",
-            "db:migrate", "db:verify", "run_database", "catalog", "tasks:start", "inside",
+            "db:migrate", "db:verify", "run_database", "catalog", "strategies:verify", "tasks:start", "inside",
             "tasks:cancel", "snapshot:cancel", "super_get:shutdown", "executors:shutdown",
             "http:close", "configure:off", "async_db:close", "db:close",
         ])

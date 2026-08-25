@@ -37,6 +37,7 @@ class ApplicationLifecycleDependencies:
     close_http_clients: Callable[[], Awaitable[Any]]
     close_async_database: Callable[[], Awaitable[Any]]
     close_database: Callable[[], Any]
+    verify_strategy_contracts: Callable[[], Any] = lambda: None
 
 
 async def _run_cleanup_steps(
@@ -97,6 +98,7 @@ async def application_lifespan(
             dependencies.migrate_database()
         dependencies.verify_versioned_schema()
         await dependencies.run_database(dependencies.ensure_catalog_capabilities, timeout_seconds=30)
+        dependencies.verify_strategy_contracts()
         background_tasks = dependencies.start_background_tasks()
         yield
     finally:

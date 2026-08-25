@@ -151,12 +151,14 @@ from .post_close_limit_features import board_count as pure_limit_board_count
 from .watchlist_daily_factors import watchlist_daily_factors as pure_watchlist_daily_factors
 from .watchlist_daily_factors import watchlist_daily_factors_by_symbol as pure_watchlist_daily_factors_by_symbol
 from .watchlist_main_wave_v2 import (
+    MODEL_VERSION as WATCHLIST_MAIN_WAVE_MODEL_VERSION,
     STRATEGY_KEY as WATCHLIST_MAIN_WAVE_STRATEGY_KEY,
     latest_shadow_priors_v2,
     main_wave_v2_shadow_signal,
     run_watchlist_main_wave_v2_research,
 )
 from .watchlist_countertrend_rebound import (
+    MODEL_VERSION as WATCHLIST_REBOUND_MODEL_VERSION,
     STRATEGY_KEY as WATCHLIST_REBOUND_STRATEGY_KEY,
     countertrend_rebound_failure_reduce_signal,
     countertrend_rebound_realtime_signal,
@@ -356,6 +358,7 @@ from .runtime_tasks import (
     supervise_leased_loop, supervise_loop, validate_runtime_task_specs,
 )
 from .platform.runtime_task_registry import runtime_task_contract_catalog
+from .platform.strategy_registry import validate_strategy_runtime_versions
 from .runtime_composition import LeasedRuntimeDependencies, build_leased_task_runner
 from .application_lifecycle import ApplicationLifecycleDependencies, application_lifespan
 from .intraday_outcomes import (
@@ -3600,6 +3603,18 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
     )
 
 
+def _verify_strategy_runtime_contracts() -> None:
+    """Verify runtime model identities before any strategy loop obtains a lease."""
+    validate_strategy_runtime_versions({
+        "intraday_watchlist_confirmation": INTRADAY_SIGNAL_MODEL_VERSION,
+        "watchlist_main_wave_shadow": WATCHLIST_MAIN_WAVE_MODEL_VERSION,
+        "countertrend_rebound_shadow": WATCHLIST_REBOUND_MODEL_VERSION,
+        "ten_day_leader_rotation_shadow": TEN_DAY_LEADER_ROTATION_MODEL_VERSION,
+        "post_close_base_candidates": POST_CLOSE_STRATEGY_MODEL_VERSION,
+        "post_close_limit_lift_pattern": STRATEGY_PATTERN_MODEL_VERSION,
+    })
+
+
 def _application_lifecycle_dependencies() -> ApplicationLifecycleDependencies:
     return ApplicationLifecycleDependencies(
         open_database=db.open,
@@ -3614,6 +3629,7 @@ def _application_lifecycle_dependencies() -> ApplicationLifecycleDependencies:
         verify_versioned_schema=db.verify_versioned_schema,
         ensure_catalog_capabilities=ensure_catalog_capabilities,
         run_database=run_database_blocking,
+        verify_strategy_contracts=_verify_strategy_runtime_contracts,
         start_background_tasks=_start_application_background_tasks,
         cancel_background_tasks=cancel_background_tasks,
         cancel_shared_snapshots=_intraday_all_a_snapshots.cancel_inflight,
