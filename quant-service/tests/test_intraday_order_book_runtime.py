@@ -80,6 +80,40 @@ class IntradayOrderBookRuntimeTests(unittest.TestCase):
         self.assertIn("source_name='tencent_order_book'", delete_query)
         self.assertEqual(delete_params, (datetime(2026, 8, 15, 7, tzinfo=timezone.utc),))
 
+    def test_watchlist_reload_is_throttled_across_ticks(self) -> None:
+        """A 3s capture tick must not reload an unchanged watchlist every tick."""
+        database = _Database([{"symbol": "000002.SZ"}])
+        calls = []
+
+        async def run_database(operation, *args, **kwargs):
+            calls.append(operation.__name__)
+            return operation(*args)
+
+        async def realtime_session():
+            return True, "continuous_auction"
+
+        async def open_capabilities(*_):
+            return set()
+
+        async def storage_allowed():
+            return True, {"state": "healthy"}
+
+        async def capture(_):
+            return {"status": "completed"}
+
+        async def run_loop(**kwargs):
+            first = await kwargs["load_symbols"]()
+            second = await kwargs["load_symbols"]()
+            self.assertEqual(first, second)
+
+        asyncio.run(run_intraday_order_book_runtime_loop(IntradayOrderBookRuntimeDependencies(
+            database=database, run_database=run_database, max_symbols=lambda: 40,
+            realtime_session=realtime_session, open_capabilities=open_capabilities,
+            storage_allowed=storage_allowed, capture=capture, interval_seconds=lambda: 3.0,
+            retention_days=lambda: 7, run_loop=run_loop,
+        )))
+        self.assertEqual(calls.count("load_watches"), 1, "second call within the refresh window must reuse the cache")
+
 
 if __name__ == "__main__":
     unittest.main()

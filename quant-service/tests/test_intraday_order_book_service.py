@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.intraday_order_book_service import capture_snapshot, enabled, interval_seconds, max_symbols, retention_days
+from app.intraday_order_book_service import capture_snapshot, enabled, interval_seconds, max_symbols, persist_observations, retention_days
 
 
 class IntradayOrderBookServiceTests(unittest.TestCase):
@@ -77,6 +79,57 @@ class IntradayOrderBookServiceTests(unittest.TestCase):
         self.assertNotIn("from .main", source)
         self.assertNotIn("httpx", source)
         self.assertIn("def persist_observations", source)
+
+
+@unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
+class BatchedPersistenceSqlIntegrationTests(unittest.TestCase):
+    """The per-row INSERT loop was replaced with one batched multi-row INSERT."""
+
+    symbols = ["999992.SZ", "999991.SZ"]
+
+    def _cleanup(self) -> None:
+        from app.main import db
+        with db.transaction() as connection:
+            connection.execute("DELETE FROM quant.intraday_quote_observations WHERE symbol=ANY(%s)", (self.symbols,))
+            connection.execute("DELETE FROM quant.instruments WHERE symbol=ANY(%s)", (self.symbols,))
+
+    def test_batched_insert_dedupes_and_reports_an_accurate_stored_count(self) -> None:
+        from app.main import db, record_provider_success, strategy_json_safe
+        self._cleanup()
+        observed_at = datetime(2099, 1, 2, 1, 30, tzinfo=timezone.utc)
+        try:
+            with db.transaction() as connection:
+                for symbol in self.symbols:
+                    connection.execute(
+                        "INSERT INTO quant.instruments(symbol,exchange) VALUES(%s,'SZ') ON CONFLICT DO NOTHING", (symbol,),
+                    )
+            rows = [{"ts_code": symbol, "price": 10.0 + index, "pre_close": 10.0, "bid1": 10.0, "ask1": 10.1}
+                    for index, symbol in enumerate(self.symbols)]
+            stored_first = persist_observations(
+                db, observed_at, rows, 50, json_safe=strategy_json_safe, record_success=record_provider_success,
+            )
+            self.assertEqual(stored_first, len(self.symbols))
+            with db.transaction() as connection:
+                persisted = connection.execute(
+                    "SELECT symbol,price FROM quant.intraday_quote_observations WHERE symbol=ANY(%s) ORDER BY symbol",
+                    (self.symbols,),
+                ).fetchall()
+            self.assertEqual({row["symbol"] for row in persisted}, set(self.symbols))
+            # A second call at the exact same observed_at collides with the unique
+            # (symbol,source_name,observed_at) index for both rows; the batched
+            # INSERT's rowcount must reflect that nothing new was actually stored.
+            stored_second = persist_observations(
+                db, observed_at, rows, 50, json_safe=strategy_json_safe, record_success=record_provider_success,
+            )
+            self.assertEqual(stored_second, 0)
+            # A later observed_at must be free to insert again (no dedup false positive).
+            stored_third = persist_observations(
+                db, observed_at + timedelta(seconds=30), rows, 50,
+                json_safe=strategy_json_safe, record_success=record_provider_success,
+            )
+            self.assertEqual(stored_third, len(self.symbols))
+        finally:
+            self._cleanup()
 
 
 if __name__ == "__main__":

@@ -69,6 +69,11 @@ def persist_observations(
             (symbols, session_start, observed_at),
         ).fetchall() if symbols else []
         previous_by_symbol = {str(item["symbol"]): dict(item) for item in previous_rows}
+        # One batched multi-row INSERT instead of one round trip per symbol:
+        # this loop runs every 3s for up to 40 symbols, so a per-row INSERT
+        # was ~19,000 individual statements/day for this table alone.
+        value_placeholders: list[str] = []
+        params: list[Any] = []
         for row in rows:
             symbol = str(row.get("ts_code") or "")
             if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
@@ -81,16 +86,18 @@ def persist_observations(
             if previous and not previous_is_fresh:
                 features["delta_status"] = "stale_previous"
             raw = {**row, "order_book_features": features}
+            pct_change = ((float(row["price"]) / float(row["pre_close"])) - 1) * 100 if row.get("pre_close") else None
+            value_placeholders.append("(NULL,%s,%s,'tencent_order_book',%s,%s,NULL,NULL,NULL,%s)")
+            params.extend([symbol, observed_at, row.get("price"), pct_change, Json(json_safe(raw))])
+        if value_placeholders:
             inserted = connection.execute(
                 """INSERT INTO quant.intraday_quote_observations(
                        scan_id,symbol,observed_at,source_name,price,pct_change,volume_ratio,turnover_rate,main_net_inflow,raw
-                   ) VALUES(NULL,%s,%s,'tencent_order_book',%s,%s,NULL,NULL,NULL,%s)
+                   ) VALUES """ + ",".join(value_placeholders) + """
                    ON CONFLICT(symbol,source_name,observed_at) DO NOTHING""",
-                (symbol, observed_at, row.get("price"),
-                 ((float(row["price"]) / float(row["pre_close"])) - 1) * 100 if row.get("pre_close") else None,
-                 Json(json_safe(raw))),
+                params,
             )
-            stored += int(inserted.rowcount > 0)
+            stored = inserted.rowcount
         record_success(connection, "tencent_free", "order_book_quote", stored, latency_ms)
     return stored
 

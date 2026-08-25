@@ -7,9 +7,17 @@ retention query through the existing database executor.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
+
+# Depth capture ticks every 3-30s (INTRADAY_ORDER_BOOK_INTERVAL_SECONDS), far
+# more often than the explicit watchlist actually changes membership.  Reload
+# on the same 30s cadence the fast-quote loop already uses instead of once
+# per tick, which was several thousand redundant reloads of an unchanged
+# watchlist over a trading day.
+WATCHLIST_REFRESH_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -30,7 +38,13 @@ async def run_intraday_order_book_runtime_loop(
     dependencies: IntradayOrderBookRuntimeDependencies,
 ) -> None:
     """Run depth observation without direct sync database work in main."""
+    cache: dict[str, Any] = {"symbols": [], "refresh_at": 0.0}
+
     async def load_symbols() -> list[str]:
+        loop_time = asyncio.get_running_loop().time()
+        if loop_time < cache["refresh_at"]:
+            return cache["symbols"]
+
         def load_watches() -> list[Any]:
             with dependencies.database.transaction() as connection:
                 return connection.execute(
@@ -40,7 +54,9 @@ async def run_intraday_order_book_runtime_loop(
                 ).fetchall()
 
         rows = await dependencies.run_database(load_watches)
-        return [str(row["symbol"]) for row in rows]
+        cache["symbols"] = [str(row["symbol"]) for row in rows]
+        cache["refresh_at"] = loop_time + WATCHLIST_REFRESH_SECONDS
+        return cache["symbols"]
 
     async def prune_before(now: datetime, retention_days: int) -> None:
         cutoff = now - timedelta(days=retention_days)
