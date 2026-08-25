@@ -723,7 +723,8 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
     def test_daily_pipeline_offloads_each_local_repository_stage(self):
         async def check() -> AsyncMock:
             blocking = AsyncMock(side_effect=[
-                {"status": "ready"}, {"outcomes": 1}, {"scorecards": 1}, {"recommendations": 1},
+                {"status": "ready"}, {"state": "trend_recovery"}, {"materialize_post_close_candidates": 0},
+                {"outcomes": 1}, {"scorecards": 1}, {"recommendations": 1},
             ])
             with patch("app.main.sync_tushare", new=AsyncMock(return_value={"status": "completed"})), \
                  patch("app.main.sync_tushare_daily_core", new=AsyncMock(return_value={"status": "completed"})), \
@@ -735,7 +736,8 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
         blocking = asyncio.run(check())
         self.assertEqual(
             [call.args[0].__name__ for call in blocking.await_args_list],
-            ["build_snapshot", "recompute_outcomes", "recompute_scorecards", "generate_recommendations"],
+            ["build_snapshot", "materialize_market_regime_today", "materialize_strategy_daily_candidate_ledger",
+             "recompute_outcomes", "recompute_scorecards", "generate_recommendations"],
         )
 
     def test_post_close_refresh_returns_conflict_when_durable_lease_is_held(self):

@@ -51,6 +51,43 @@ class PlatformBoundaryTests(unittest.TestCase):
         result = asyncio.run(check())
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(blocking.await_count, 1)
+
+    def test_daily_pipeline_materializes_regime_and_ledger_before_settling_outcomes(self):
+        async def sync(_payload):
+            return {"status": "completed"}
+
+        build_snapshot, materialize_regime, materialize_ledger = object(), object(), object()
+        recompute_outcomes, recompute_scorecards, generate_recommendations = object(), object(), object()
+        canned = {
+            build_snapshot: {"status": "ready"}, materialize_regime: {"state": "trend_recovery"},
+            materialize_ledger: {"materialize_post_close_candidates": 3}, recompute_outcomes: {"outcomes": 1},
+            recompute_scorecards: {"scorecards": 1}, generate_recommendations: {"recommendations": 1},
+        }
+        call_order: list[object] = []
+
+        async def blocking(operation, *_args, **_kwargs):
+            call_order.append(operation)
+            return canned[operation]
+
+        async def check() -> dict[str, object]:
+            return await run_pipeline(
+                GenerateRequest(), sync_tushare=sync, sync_baostock=sync,
+                sync_tushare_daily_core=AsyncMock(return_value={"status": "completed"}),
+                tushare_request=TushareSyncRequest, snapshot_request=lambda as_of: {"as_of_date": as_of},
+                build_snapshot=build_snapshot, recompute_outcomes=recompute_outcomes,
+                recompute_scorecards=recompute_scorecards, generate_recommendations=generate_recommendations,
+                run_database_blocking=blocking, cn_today=lambda: date(2026, 8, 14),
+                materialize_regime=materialize_regime, materialize_candidate_ledger=materialize_ledger,
+            )
+
+        result = asyncio.run(check())
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["regime"], {"state": "trend_recovery"})
+        self.assertEqual(result["candidate_ledger"], {"materialize_post_close_candidates": 3})
+        # Regime and ledger must materialize before outcomes settle against them.
+        self.assertLess(call_order.index(materialize_regime), call_order.index(recompute_outcomes))
+        self.assertLess(call_order.index(materialize_ledger), call_order.index(recompute_outcomes))
+
     def test_post_close_evidence_aggregation_keeps_exact_board_and_deduplicates_lhb(self):
         boards = exact_board_context([
             {"symbol": "000001.SZ", "net_amount": 10, "label": "A"},

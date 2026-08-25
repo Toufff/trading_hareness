@@ -595,6 +595,8 @@ from .eastmoney_live_hydration import hydrate as hydrate_eastmoney_live_isolated
 from .ths_sector_flows import sync_industry as sync_ths_industry_isolated, sync_concept_signals as sync_ths_concept_signals_isolated
 from .outcome_recomputation import recompute as recompute_outcomes_isolated
 from .post_close_candidate_outcomes import settle_post_close_and_leader_rotation_outcomes
+from .market_regime_daily import materialize_market_regime
+from .strategy_daily_candidate_ledger import materialize_ledger, settle_ledger_outcomes as settle_strategy_ledger_outcomes
 from .ths_concept_members_sync import sync as sync_ths_concept_members_isolated
 from .analyst_scorecards import readiness as analyst_scorecard_readiness
 from .analyst_scorecards import recompute as recompute_scorecards_isolated
@@ -1098,7 +1100,20 @@ def recompute_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
         db=db,
         recompute_intraday_signal_outcomes=recompute_intraday_signal_outcomes,
         settle_post_close_and_leader_rotation_outcomes=settle_post_close_and_leader_rotation_outcomes,
+        settle_ledger_outcomes=settle_strategy_ledger_outcomes,
     )
+
+
+def materialize_market_regime_today(as_of_date: date) -> dict[str, Any]:
+    """Persist the multi-index regime label for one already-closed trading day."""
+    with db.transaction() as connection:
+        return materialize_market_regime(connection, as_of_date)
+
+
+def materialize_strategy_daily_candidate_ledger(as_of_date: date) -> dict[str, int]:
+    """Normalize whatever each strategy's own table already holds for as_of_date into the ledger."""
+    with db.transaction() as connection:
+        return materialize_ledger(connection, as_of_date)
 
 
 def generate_recommendations_legacy(request: GenerateRequest) -> dict[str, Any]:
@@ -4668,7 +4683,8 @@ async def run_daily_pipeline(payload: GenerateRequest) -> dict[str, Any]:
         snapshot_request=lambda as_of: SnapshotRequest(as_of_date=as_of), build_snapshot=build_snapshot,
         recompute_outcomes=recompute_outcomes, recompute_scorecards=recompute_scorecards,
         generate_recommendations=generate_recommendations, run_database_blocking=run_database_blocking,
-        cn_today=cn_today,
+        cn_today=cn_today, materialize_regime=materialize_market_regime_today,
+        materialize_candidate_ledger=materialize_strategy_daily_candidate_ledger,
     )
 
 
