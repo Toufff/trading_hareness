@@ -254,6 +254,11 @@ services:
       AKSHARE_MAX_WORKERS: ${AKSHARE_MAX_WORKERS:-4}
       TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
       TUSHARE_API_URL: ${TUSHARE_API_URL:-https://api.tushare.pro}
+      # Fuyao/Hithink is a separately licensed, non-realtime research source.
+      # Keep its key in ignored local environment configuration; do not copy it
+      # to the Feishu adapter or any workflow definition.
+      FUYAO_API_KEY: ${FUYAO_API_KEY:-}
+      HITHINK_FINANCE_API_KEY: ${HITHINK_FINANCE_API_KEY:-}
       TUSHARE_PRIMARY_TOKEN: ${TUSHARE_PRIMARY_TOKEN:-}
       TUSHARE_PRIMARY_API_URL: ${TUSHARE_PRIMARY_API_URL:-}
       TUSHARE_SUPER_TOKEN: ${TUSHARE_SUPER_TOKEN:-}
