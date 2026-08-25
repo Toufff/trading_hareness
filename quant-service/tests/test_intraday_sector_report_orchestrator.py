@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
@@ -52,6 +53,30 @@ class IntradaySectorReportOrchestratorTests(IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["_runtime_quotes"]["600000.SH"]["turnover"], 6.0)
         self.assertFalse(result["decision_eligible"])
+
+    async def test_member_hydration_timeout_degrades_only_that_context(self):
+        async def fetch(_fn, kind, **_kwargs):
+            return [{"kind": kind}]
+
+        async def all_a_snapshot():
+            return [], {"status": "fresh"}
+
+        async def hydrate(*_args):
+            await asyncio.sleep(30)
+            return []
+
+        async def build(*_args):
+            return ([], {}, [], [], [])
+
+        result = await run(
+            SimpleNamespace(kind="concept", hydrate_top_boards=1, top_stocks=10),
+            run_public_blocking=fetch, board_flow=lambda kind: kind, all_a_snapshot=all_a_snapshot,
+            build_membership_report=build, hydrate_members=hydrate, member_symbol=lambda _: None,
+            number=lambda value: value, exchange_date=lambda: None, safe_error=lambda value, limit: value[:limit],
+            executor_saturated_error=_Saturated, provider_error=_Provider,
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["membership_hydration_status"]["concept"]["status"], "blocked")
 
 
 if __name__ == "__main__":

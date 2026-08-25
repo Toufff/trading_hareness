@@ -48,16 +48,33 @@ async def run(
                 "turnover": number(row.get("turnover")),
             }
     hydration: dict[str, list[dict[str, Any]]] = {}
+    hydration_status: dict[str, dict[str, str]] = {}
     if request.hydrate_top_boards:
-        for kind, flows in zip(kinds, flow_parts, strict=True):
-            hydration[kind] = await hydrate_members(kind, flows, request.hydrate_top_boards)
+        async def hydrate(kind: str, flows: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]], dict[str, str]]:
+            try:
+                rows = await asyncio.wait_for(
+                    hydrate_members(kind, flows, request.hydrate_top_boards), timeout=20,
+                )
+                return kind, rows, {"status": "completed"}
+            except asyncio.TimeoutError:
+                return kind, [], {"status": "blocked", "reason": "member hydration exceeded 20 second budget"}
+            except (executor_saturated_error, provider_error, ValueError) as error:
+                return kind, [], {"status": "blocked", "reason": safe_error(str(error), 300)}
+
+        completed = await asyncio.gather(
+            *(hydrate(kind, flows) for kind, flows in zip(kinds, flow_parts, strict=True)),
+        )
+        for kind, rows, status in completed:
+            hydration[kind] = rows
+            hydration_status[kind] = status
     report, coverage, sector_context, stock_context, realtime_context = await build_membership_report(
         kinds, list(flow_parts), quotes, request.top_stocks, exchange_date(),
     )
     report.sort(key=lambda item: (item["taxonomy_key"], -(item["net_inflow"] or 0), item["label"]))
     return {
         "status": "completed", "rank_by": "eastmoney_board_flow_then_fuyao_turnover", "decision_eligible": False,
-        "coverage": coverage, "items": report, "_runtime_quotes": quotes, "membership_hydration": hydration,
+        "coverage": coverage, "items": report, "_runtime_quotes": quotes,
+        "membership_hydration": hydration, "membership_hydration_status": hydration_status,
         "tushare_context": {
             "sector_close_flow": sector_context, "stock_daily_flow": stock_context,
             "realtime_probe": realtime_context,
