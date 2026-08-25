@@ -676,6 +676,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/strategy/promotion": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Promotion
+         * @description Fail-closed live-promotion status for every declared strategy contract.
+         *
+         *     Mirrors /api/v1/research/analyst-research/... promotion visibility.
+         *     Nothing here can grant execution: it only reports the audit trail a
+         *     human approval would have to leave in quant.strategy_promotion_registry.
+         */
+        get: operations["promotion_api_v1_strategy_promotion_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/paper/status": {
         parameters: {
             query?: never;
@@ -4964,6 +4988,28 @@ export interface operations {
         };
     };
     health_api_v1_strategy_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    promotion_api_v1_strategy_promotion_get: {
         parameters: {
             query?: never;
             header?: never;

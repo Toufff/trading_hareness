@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from datetime import date
+from typing import Any, Callable, Literal
 
 from fastapi import APIRouter
 
@@ -14,9 +15,11 @@ from ..strategy_ablation import latest_strategy_ablation
 from ..async_strategy_ablation_repository import latest_strategy_ablation as async_latest_strategy_ablation
 from ..strategy_health_read_model import latest_strategy_health
 from ..async_strategy_health_repository import latest_strategy_health as async_latest_strategy_health
+from ..strategy_promotion import sync_strategy_promotion_catalog
 
 
-def build_strategy_reads_router(database: Any, decision_model_version: str, async_database: Any | None = None) -> APIRouter:
+def build_strategy_reads_router(database: Any, decision_model_version: str, async_database: Any | None = None,
+                                cn_today: Callable[[], date] = date.today) -> APIRouter:
     router = APIRouter(tags=["strategy-reads"])
 
     @router.get("/api/v1/strategy/decisions/latest")
@@ -48,5 +51,16 @@ def build_strategy_reads_router(database: Any, decision_model_version: str, asyn
         if async_database is not None:
             return await async_latest_strategy_health(async_database)
         return latest_strategy_health(database)
+
+    @router.get("/api/v1/strategy/promotion")
+    async def promotion() -> dict[str, Any]:
+        """Fail-closed live-promotion status for every declared strategy contract.
+
+        Mirrors /api/v1/research/analyst-research/... promotion visibility.
+        Nothing here can grant execution: it only reports the audit trail a
+        human approval would have to leave in quant.strategy_promotion_registry.
+        """
+        as_of_date = cn_today()
+        return {"as_of_date": str(as_of_date), "strategies": sync_strategy_promotion_catalog(database, as_of_date)}
 
     return router
