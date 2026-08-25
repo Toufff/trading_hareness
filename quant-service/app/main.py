@@ -594,6 +594,7 @@ from .eastmoney_sector_members_sync import sync as sync_eastmoney_sector_members
 from .eastmoney_live_hydration import hydrate as hydrate_eastmoney_live_isolated
 from .ths_sector_flows import sync_industry as sync_ths_industry_isolated, sync_concept_signals as sync_ths_concept_signals_isolated
 from .outcome_recomputation import recompute as recompute_outcomes_isolated
+from .post_close_candidate_outcomes import settle_post_close_and_leader_rotation_outcomes
 from .ths_concept_members_sync import sync as sync_ths_concept_members_isolated
 from .analyst_scorecards import readiness as analyst_scorecard_readiness
 from .analyst_scorecards import recompute as recompute_scorecards_isolated
@@ -1096,6 +1097,7 @@ def recompute_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
         cn_today=cn_today,
         db=db,
         recompute_intraday_signal_outcomes=recompute_intraday_signal_outcomes,
+        settle_post_close_and_leader_rotation_outcomes=settle_post_close_and_leader_rotation_outcomes,
     )
 
 
