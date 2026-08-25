@@ -7,6 +7,7 @@ from app.post_close_refresh import record_stage_with_receipt, run_refresh
 from app.post_close_refresh_service import (
     POST_CLOSE_STAGE_DEPENDENCIES,
     POST_CLOSE_STAGE_ORDER,
+    POST_CLOSE_TIMEOUT_OVERRIDES,
     PostCloseRefreshDependencies,
     run_post_close_refresh,
 )
@@ -14,6 +15,10 @@ from app.request_models import PostCloseRefreshRequest
 
 
 class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
+    async def test_outcome_settlement_has_explicit_long_bounded_budget(self):
+        self.assertEqual(POST_CLOSE_TIMEOUT_OVERRIDES["analyst_outcomes"], 300.0)
+        self.assertEqual(POST_CLOSE_TIMEOUT_OVERRIDES["analyst_intraday_outcomes"], 180.0)
+
     async def test_service_assembles_same_date_stages_and_announcements_after_core_symbols(self):
         captured: dict[str, object] = {}
         providers: dict[str, object] = {}

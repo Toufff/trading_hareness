@@ -37,6 +37,11 @@ POST_CLOSE_TIMEOUT_OVERRIDES = {
     # Four bounded full-market control APIs run sequentially so an individual
     # provider's shared limiter remains authoritative.
     "core_daily_controls": 240.0,
+    # Outcome settlement scans retained evidence and is intentionally local.
+    # Give both orchestration and the blocking repository the same bounded
+    # window instead of inheriting the generic ten-second request budget.
+    "analyst_outcomes": 300.0,
+    "analyst_intraday_outcomes": 180.0,
 }
 
 POST_CLOSE_STAGE_DEPENDENCIES = {
@@ -164,9 +169,11 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
             StrategyDecisionRequest(session="close", kind="all", limit=20, validate_tushare_realtime=False),
         ),
         "close_review": lambda: dependencies.run_database(dependencies.persist_close_review, trade_date),
-        "analyst_outcomes": lambda: dependencies.run_database(dependencies.recompute_outcomes, trade_date),
+        "analyst_outcomes": lambda: dependencies.run_database(
+            dependencies.recompute_outcomes, trade_date, timeout_seconds=300,
+        ),
         "analyst_intraday_outcomes": lambda: dependencies.run_database(
-            dependencies.recompute_intraday_outcomes, trade_date, timeout_seconds=90,
+            dependencies.recompute_intraday_outcomes, trade_date, timeout_seconds=180,
         ),
         "analyst_scorecards": lambda: dependencies.run_database(dependencies.recompute_scorecards, trade_date),
         "analyst_expert_research": lambda: dependencies.run_database(dependencies.rebuild_analyst_research, trade_date),
