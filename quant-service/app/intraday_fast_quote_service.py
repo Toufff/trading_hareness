@@ -52,6 +52,22 @@ def cross_source_confirmation(
     }
 
 
+def bounded_rotation_pool_size(configured_max_symbols: int, interval_seconds: float, freshness_budget_seconds: float | None) -> int:
+    """Cap the rotation pool to what one-at-a-time rotation can actually refresh in budget.
+
+    The loop starts exactly one new capture per ``interval_seconds`` tick, so a
+    full rotation through N symbols takes N * interval_seconds.  Configuring more
+    symbols than ``freshness_budget_seconds`` allows silently produces per-symbol
+    staleness beyond the declared runtime-task contract instead of an explicit,
+    reported reduction in coverage.
+    """
+    configured = max(1, int(configured_max_symbols))
+    if not freshness_budget_seconds or interval_seconds <= 0:
+        return configured
+    achievable = max(1, int(freshness_budget_seconds // interval_seconds))
+    return min(configured, achievable)
+
+
 def fast_quote_rotation_slot(symbols: list[str], cursor: int) -> tuple[str | None, int]:
     """Choose one fair rotation item without assuming a fixed basket size."""
     if not symbols:

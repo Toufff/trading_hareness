@@ -82,6 +82,37 @@ class IntradayFastQuoteRuntimeTests(unittest.TestCase):
         self.assertIn("source_name='tushare_super_get_rt_k'", delete_query)
         self.assertEqual(delete_params, (cutoff,))
 
+    def test_rotation_pool_is_capped_to_the_declared_freshness_budget(self) -> None:
+        """40 configured symbols at a 1s tick cannot rotate within a 30s budget."""
+        database = _Database([{"symbol": "000001.SZ", "rank": 1}])
+
+        async def run_database(operation, *args, **kwargs):
+            return operation(*args)
+
+        async def run_loop(**kwargs):
+            await kwargs["load_symbols"]()
+
+        async def realtime_session():
+            return True, "continuous_auction"
+
+        async def storage_allowed():
+            return True, {"state": "healthy"}
+
+        async def capture(_):
+            return {"status": "completed"}
+
+        asyncio.run(run_intraday_fast_quote_runtime_loop(IntradayFastQuoteRuntimeDependencies(
+            database=database, run_database=run_database, max_symbols=lambda: 40,
+            watch_priority_key=lambda row: row["rank"], realtime_session=realtime_session,
+            high_frequency_window=lambda _: True, storage_allowed=storage_allowed, capture_quote=capture,
+            observe_completed=lambda *_: None, interval_seconds=lambda: 1.0,
+            max_in_flight=lambda: 20, retention_days=lambda: 7, run_loop=run_loop,
+            freshness_budget_seconds=lambda: 30.0,
+        )))
+        select_query, select_params = database.connection.executed[0]
+        self.assertIn("intraday_watchlists", select_query)
+        self.assertEqual(select_params, (30,), "pool must be capped to 30s budget / 1s interval, not the configured 40")
+
 
 if __name__ == "__main__":
     unittest.main()

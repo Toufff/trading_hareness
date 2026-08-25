@@ -373,7 +373,7 @@ from .runtime_tasks import (
     background_tasks_enabled, observe_completed_task, start_leased_background_tasks,
     supervise_leased_loop, supervise_loop, validate_runtime_task_specs,
 )
-from .platform.runtime_task_registry import runtime_task_contract_catalog
+from .platform.runtime_task_registry import runtime_task_contract, runtime_task_contract_catalog
 from .platform.strategy_registry import validate_strategy_runtime_versions
 from .runtime_composition import LeasedRuntimeDependencies, build_leased_task_runner
 from .application_lifecycle import ApplicationLifecycleDependencies, application_lifespan
@@ -2741,6 +2741,7 @@ async def intraday_super_get_fast_quote_loop() -> None:
         interval_seconds=intraday_super_get_fast_interval_seconds,
         max_in_flight=intraday_super_get_fast_max_in_flight,
         retention_days=intraday_fast_quote_retention_days, run_loop=run_intraday_fast_quote_loop,
+        freshness_budget_seconds=lambda: runtime_task_contract("super_get_fast_quote").freshness_budget_seconds,
     ))
 
 

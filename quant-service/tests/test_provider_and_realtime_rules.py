@@ -888,6 +888,12 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         self.assertEqual(next_rotation_offset_from_scan({"realtime_validation": {"next_offset": True}}, 4), 4)
         self.assertEqual(fast_quote_rotation_slot(["000001.SZ", "000002.SZ"], 2), ("000001.SZ", 3))
         self.assertEqual(fast_quote_rotation_slot([], 3), (None, 3))
+        # A full rotation through the pool must fit inside the declared
+        # freshness budget: one new symbol starts per interval tick.
+        self.assertEqual(bounded_rotation_pool_size(40, 1.0, 30.0), 30)
+        self.assertEqual(bounded_rotation_pool_size(20, 1.0, 30.0), 20)
+        self.assertEqual(bounded_rotation_pool_size(40, 1.0, None), 40)
+        self.assertEqual(bounded_rotation_pool_size(40, 0.0, 30.0), 40)
         self.assertEqual(intraday_board_refresh_interval_seconds(high), 60)
         self.assertEqual(intraday_board_refresh_interval_seconds(normal), 300)
         pre_open = __import__("datetime").datetime(2026, 8, 10, 9, 29, 50, tzinfo=china)

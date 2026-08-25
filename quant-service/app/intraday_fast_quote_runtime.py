@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
+from .intraday_fast_quote_service import bounded_rotation_pool_size
+
 
 @dataclass(frozen=True)
 class IntradayFastQuoteRuntimeDependencies:
@@ -27,6 +29,7 @@ class IntradayFastQuoteRuntimeDependencies:
     max_in_flight: Callable[[], int]
     retention_days: Callable[[], int]
     run_loop: Callable[..., Awaitable[None]]
+    freshness_budget_seconds: Callable[[], float | None] = lambda: None
 
 
 async def run_intraday_fast_quote_runtime_loop(
@@ -34,12 +37,19 @@ async def run_intraday_fast_quote_runtime_loop(
 ) -> None:
     """Run one-second cross-checks without broadening provider access."""
     async def load_symbols() -> list[str]:
+        # Rotation starts exactly one new symbol per interval tick, so more
+        # configured symbols than the declared freshness budget allows would
+        # silently rotate slower than the runtime-task contract promises.
+        pool_size = bounded_rotation_pool_size(
+            dependencies.max_symbols(), dependencies.interval_seconds(), dependencies.freshness_budget_seconds(),
+        )
+
         def load_watches() -> list[Any]:
             with dependencies.database.transaction() as connection:
                 return connection.execute(
                     "SELECT * FROM quant.intraday_watchlists WHERE enabled "
                     "ORDER BY available_quantity DESC,updated_at DESC,symbol LIMIT %s",
-                    (dependencies.max_symbols(),),
+                    (pool_size,),
                 ).fetchall()
         rows = await dependencies.run_database(load_watches)
         return [
