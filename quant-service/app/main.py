@@ -251,6 +251,7 @@ from .strategy_runtime_runners import (
 from .analyst_market_review import build_recorded_analyst_market_review
 from .strategy_pattern_read_model import latest_strategy_pattern_mining as read_latest_strategy_pattern_mining
 from .intraday_outcome_settlement import settle as persist_intraday_outcome_settlement
+from .intraday_outcome_runtime import IntradayOutcomeRuntime, IntradayOutcomeRuntimeDependencies
 from .tushare_normalization import normalize_rows as pure_normalize_tushare_rows
 from .market_regimes import (
     STRATEGY_INDEX_SYMBOLS,
@@ -1095,18 +1096,23 @@ def recompute_intraday_signal_outcomes_legacy(as_of_date: date | None = None) ->
     return recompute_intraday_signal_outcomes(as_of_date)
 def recompute_intraday_signal_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
     """Settle confirmed alerts from persisted evidence through the shared repository."""
-    cutoff = intraday_outcome_cutoff(as_of_date)
-    with db.transaction() as connection:
-        attribution_backfilled = refresh_intraday_signal_attributions(connection, cutoff=cutoff)
-        result = persist_intraday_outcome_settlement(
-            connection, as_of_date, cutoff=cutoff, horizons=INTRADAY_OUTCOME_HORIZONS,
-            direction_for=intraday_signal_direction, metrics_for=intraday_signal_outcome_metrics,
-            decimal_or_none=decimal_or_none, barrier_spec_type=LabelSpec,
-            triple_barrier_label=triple_barrier_label, persist_barrier_outcome=persist_barrier_outcome,
-            return_decomposition=a_share_return_decomposition, json_safe=strategy_json_safe,
-        )
+    result = IntradayOutcomeRuntime(IntradayOutcomeRuntimeDependencies(
+        database=db,
+        outcome_cutoff=intraday_outcome_cutoff,
+        refresh_attributions=refresh_intraday_signal_attributions,
+        settle=persist_intraday_outcome_settlement,
+        horizons=INTRADAY_OUTCOME_HORIZONS,
+        direction_for=intraday_signal_direction,
+        metrics_for=intraday_signal_outcome_metrics,
+        decimal_or_none=decimal_or_none,
+        barrier_spec_type=LabelSpec,
+        triple_barrier_label=triple_barrier_label,
+        persist_barrier_outcome=persist_barrier_outcome,
+        return_decomposition=a_share_return_decomposition,
+        json_safe=strategy_json_safe,
+    )).recompute(as_of_date)
     invalidate_intraday_probability_profiles()
-    return {**result, "attribution_backfilled": attribution_backfilled}
+    return result
 
 
 def recompute_outcomes_legacy(as_of_date: date | None = None) -> dict[str, Any]:
