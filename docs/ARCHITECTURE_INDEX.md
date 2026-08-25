@@ -9,7 +9,7 @@
 |---|---:|
 | Composition root | `quant-service/app/main.py` |
 | `main.py` top-level functions | 398 |
-| Python modules under `app/` | 335 |
+| Python modules under `app/` | 336 |
 | HTTP router modules | 36 |
 | Alembic migrations | 59 |
 | Frontend source files | 32 |
@@ -32,8 +32,8 @@ New behaviour should be owned by an existing domain package/owner.
 | `tushare` | 7 |
 | `daily` | 6 |
 | `limit` | 6 |
+| `provider` | 6 |
 | `research` | 6 |
-| `provider` | 5 |
 | `runtime` | 5 |
 | `watchlist` | 5 |
 | `paper` | 4 |

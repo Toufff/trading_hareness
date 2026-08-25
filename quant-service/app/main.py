@@ -179,6 +179,11 @@ from .intraday_decision_context import (
 )
 from .feature_snapshot_repository import materialize_feature_snapshot
 from .feature_snapshot_runtime import FeatureSnapshotRuntime, FeatureSnapshotRuntimeDependencies
+from .provider_control_plane_runtime import (
+    ProviderControlPlaneRuntime,
+    ProviderControlPlaneRuntimeDependencies,
+    mirror_runtime_rate_limits,
+)
 from .intraday_limit_lift import intraday_limit_lift_pattern as pure_intraday_limit_lift_pattern
 from .intraday_attribution import signal_attribution as pure_signal_attribution
 from .intraday_breakout import eac_acceptance_assessment as pure_eac_acceptance_assessment
@@ -807,33 +812,14 @@ def tushare_daily_api(symbol: str) -> str:
 
 def ensure_catalog_capabilities() -> None:
     """Register every catalog/provider contract without fabricating verification."""
-    items = catalog_items()
-    with db.transaction() as connection:
-        sync_runtime_provider_rate_limits(connection)
-        for item in items:
-            contract = api_capability(str(item["api_name"]))
-            providers = ["tushare_primary", "tushare_super_sdk"]
-            if item["api_name"] in SUPER_GET_VERIFIED_APIS:
-                providers.append("tushare_super_get")
-            if item["api_name"] == "stock_basic":
-                providers.append("tushare_backup")
-            for provider_key in providers:
-                connection.execute(
-                    """INSERT INTO quant.provider_api_capabilities(provider_key,api_name,availability,frequency,decision_eligible,note,metadata)
-                       VALUES(%s,%s,'declared',%s,%s,%s,%s)
-                       ON CONFLICT(provider_key,api_name) DO UPDATE SET frequency=EXCLUDED.frequency,
-                         decision_eligible=EXCLUDED.decision_eligible,
-                         metadata=quant.provider_api_capabilities.metadata || EXCLUDED.metadata""",
-                    (provider_key, item["api_name"], contract.frequency, contract.decision_eligible,
-                     contract.note[:500], Json({
-                         "catalog_origin": item["catalog_origin"],
-                         "permission_model": item["permission_model"],
-                         "min_points": item["min_points"],
-                         "request_policy": item["request_policy"],
-                         "model_role": item["model_role"],
-                         "priority": item["priority"],
-                     })),
-                )
+    ProviderControlPlaneRuntime(ProviderControlPlaneRuntimeDependencies(
+        database=db,
+        provider_configs=provider_configs,
+        catalog_items=catalog_items,
+        capability_contract=api_capability,
+        super_get_verified_apis=SUPER_GET_VERIFIED_APIS,
+        json_value=Json,
+    )).initialize()
 
 
 def sync_runtime_provider_rate_limits(connection: Any, configs: Mapping[str, Any] | None = None) -> None:
@@ -844,22 +830,7 @@ def sync_runtime_provider_rate_limits(connection: Any, configs: Mapping[str, Any
     mirror current avoids a stale database rate appearing in the UI as if it
     governed live requests; no credentials or endpoint details are stored.
     """
-    effective = provider_configs() if configs is None else configs
-    for provider in effective.values():
-        connection.execute(
-            """UPDATE quant.provider_capabilities SET rate_limit_per_minute=%s
-                 WHERE provider_key=%s AND market='cn'""",
-            (int(provider.rate_limit_per_minute), str(provider.key)),
-        )
-        connection.execute(
-            """UPDATE quant.providers
-                  SET config=config || jsonb_build_object(
-                        'rate_limit_source','runtime_environment',
-                        'runtime_rate_limit_per_minute',%s
-                      ),updated_at=now()
-                 WHERE provider_key=%s""",
-            (int(provider.rate_limit_per_minute), str(provider.key)),
-        )
+    mirror_runtime_rate_limits(connection, provider_configs() if configs is None else configs)
 
 
 def persist_free_daily(provider: str, rows: list[dict[str, Any]]) -> int:
