@@ -567,6 +567,7 @@ from .intraday_minute_capture_actions import IntradayMinuteCaptureActions
 from .intraday_event_replay_runner import run_recorded_signal_lifecycle_replay
 from .intraday_rule_input_replay_runner import run_recorded_rule_input_replay
 from .post_close_refresh import record_stage_with_receipt, run_refresh as run_post_close_refresh_orchestrated
+from .post_close_refresh_runtime import PostCloseRefreshRuntime
 from .post_close_refresh_service import (
     PostCloseRefreshDependencies,
     run_post_close_refresh as run_post_close_refresh_isolated,
@@ -702,6 +703,7 @@ _cninfo_announcement_actions = CninfoAnnouncementActions(db)
 _board_flow_capture_actions = BoardFlowCaptureActions(db)
 _board_rotation_repository = BoardRotationRepository(db)
 _intraday_minute_capture_actions = IntradayMinuteCaptureActions(db)
+post_close_refresh_runtime = PostCloseRefreshRuntime()
 
 
 def local_research_storage_governance(database: Database = db) -> dict[str, Any]:
@@ -4301,7 +4303,7 @@ async def sync_full_market_daily_controls_endpoint(
 
 
 async def post_close_refresh_endpoint(payload: PostCloseRefreshRequest) -> dict[str, Any]:
-    return await run_post_close_refresh(payload)
+    return await post_close_refresh_runtime.run(lambda: run_post_close_refresh(payload))
 
 
 async def sync_cninfo_events_endpoint(payload: AnnouncementSyncRequest) -> dict[str, Any]:
