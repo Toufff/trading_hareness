@@ -47,6 +47,7 @@ class HealthDependencies:
     async_database_pool_status: Callable[[], dict[str, Any]] | None = None
     research_storage_governance: Callable[[Any], dict[str, Any]] | None = None
     background_loop_status: Callable[[], dict[str, dict[str, Any]]] | None = None
+    runtime_task_contracts: Callable[[], list[dict[str, Any]]] | None = None
     optional_background_tasks: Callable[[], dict[str, bool]] | None = None
     daily_control_plane_status: Callable[[], dict[str, Any]] | None = None
     live_session_acceptance_status: Callable[[], dict[str, Any]] | None = None
@@ -125,6 +126,7 @@ def health_payload(deps: HealthDependencies) -> dict[str, Any]:
             "background_loops": background_leases,
         },
         "runtime_loops": runtime_loops_with_lease_heartbeats(runtime_loops, background_leases),
+        "runtime_task_contracts": deps.runtime_task_contracts() if deps.runtime_task_contracts else [],
         "optional_background_tasks": deps.optional_background_tasks() if deps.optional_background_tasks else {},
         "daily_control_plane": deps.daily_control_plane_status() if deps.daily_control_plane_status else {},
         "live_session_acceptance": deps.live_session_acceptance_status() if deps.live_session_acceptance_status else {},

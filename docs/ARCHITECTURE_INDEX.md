@@ -8,11 +8,11 @@
 | Item | Current value |
 |---|---:|
 | Composition root | `quant-service/app/main.py` |
-| `main.py` top-level functions | 392 |
-| Python modules under `app/` | 314 |
+| `main.py` top-level functions | 394 |
+| Python modules under `app/` | 326 |
 | HTTP router modules | 36 |
-| Alembic migrations | 56 |
-| Frontend source files | 26 |
+| Alembic migrations | 59 |
+| Frontend source files | 30 |
 
 ## Domain naming inventory
 
@@ -25,10 +25,10 @@ New behaviour should be owned by an existing domain package/owner.
 | `async` | 40 |
 | `analyst` | 17 |
 | `strategy` | 13 |
+| `ten` | 11 |
 | `market` | 10 |
 | `post` | 10 |
 | `board` | 9 |
-| `ten` | 8 |
 | `tushare` | 7 |
 | `daily` | 6 |
 | `limit` | 6 |
@@ -83,10 +83,14 @@ New behaviour should be owned by an existing domain package/owner.
 
 - `frontend/src/App.vue`
 - `frontend/src/api/analyst-contract.ts`
+- `frontend/src/api/feishu-workbench.test.ts`
+- `frontend/src/api/feishu-workbench.ts`
 - `frontend/src/api/generated.ts`
+- `frontend/src/api/group-relay.ts`
 - `frontend/src/api/http.test.ts`
 - `frontend/src/api/http.ts`
 - `frontend/src/components/RealtimeServicesPanel.vue`
+- `frontend/src/components/TenDayLeaderRotationPanel.vue`
 - `frontend/src/composables/useDashboardWorkspace.ts`
 - `frontend/src/composables/usePolling.test.ts`
 - `frontend/src/composables/usePolling.ts`

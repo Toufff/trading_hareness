@@ -9,7 +9,9 @@ import { DataZoomComponent, GridComponent, LegendComponent, MarkPointComponent, 
 import { CanvasRenderer } from 'echarts/renderers';
 import type { AnalystMarketReview, AutomationRun } from '../api/analyst-contract';
 import type { components } from '../api/generated';
-import { decodeJson, getJson, postJson } from '../api/http';
+import { groupRelayApi } from '../api/group-relay';
+import { feishuWorkbenchApi } from '../api/feishu-workbench';
+import { getJson, postJson } from '../api/http';
 import { usePolling } from './usePolling';
 import { dashboardContextKey } from '../dashboard-context';
 
@@ -538,7 +540,7 @@ async function loadRealtimeServices() {
 }
 async function loadGroupRelayStatus() {
   groupRelayLoading.value = true; groupRelayError.value = '';
-  try { groupRelayStatus.value = await getJson<GroupRelayStatus>('/api/group-relay/status'); }
+  try { groupRelayStatus.value = await groupRelayApi.status<GroupRelayStatus>(); }
   catch (error) { groupRelayError.value = error instanceof Error ? error.message : String(error); }
   finally { groupRelayLoading.value = false; }
 }
@@ -546,8 +548,8 @@ async function loadFeishuWorkbench() {
   feishuWorkbenchLoading.value = true; feishuWorkbenchError.value = '';
   try {
     const [status, messages] = await Promise.all([
-      getJson<FeishuWorkbenchStatus>('/api/feishu-workbench/status'),
-      getJson<{ items?: FeishuWorkbenchMessage[] }>('/api/feishu-workbench/messages?limit=80'),
+      feishuWorkbenchApi.status<FeishuWorkbenchStatus>(),
+      feishuWorkbenchApi.messages<{ items?: FeishuWorkbenchMessage[] }>(),
     ]);
     feishuWorkbench.value = status; feishuWorkbenchMessages.value = messages.items ?? [];
   } catch (error) { feishuWorkbenchError.value = error instanceof Error ? error.message : String(error); }
@@ -556,8 +558,7 @@ async function loadFeishuWorkbench() {
 async function inspectFeishuApplication() {
   feishuWorkbenchAction.value = 'application-inspection';
   try {
-    const path = '/api/feishu-workbench/application-inspection';
-    const result = await decodeJson<{ inspection?: FeishuApplicationInspection }>(await fetch(path, { method: 'POST', headers: { accept: 'application/json' } }), path);
+    const result = await feishuWorkbenchApi.inspectApplication<{ inspection?: FeishuApplicationInspection }>();
     ElMessage.info(result.inspection?.message ?? '已完成飞书后台配置复核'); await loadFeishuWorkbench();
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : String(error)); }
   finally { feishuWorkbenchAction.value = ''; }
@@ -592,8 +593,7 @@ const capabilityAuthorizationTagType = (item: FeishuCapability) => item.authoriz
 async function runWorkbenchAction(item: FeishuWorkbenchMessage, action: string) {
   feishuWorkbenchAction.value = `${item.source_message_id}:${action}`;
   try {
-    const path = '/api/feishu-workbench/actions';
-    await decodeJson(await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ source_message_id: item.source_message_id, action }) }), path);
+    await feishuWorkbenchApi.updateMessageState(item.source_message_id, action);
     ElMessage.success('协作状态已更新'); await loadFeishuWorkbench();
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : String(error)); }
   finally { feishuWorkbenchAction.value = ''; }
@@ -602,8 +602,7 @@ async function searchFeishuMessages() {
   if (!workbenchSearch.value.trim()) return;
   feishuWorkbenchAction.value = 'search';
   try {
-    const path = '/api/feishu-workbench/message-search';
-    workbenchSearchResult.value = await decodeJson(await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ query: workbenchSearch.value.trim() }) }), path);
+    workbenchSearchResult.value = await feishuWorkbenchApi.searchMessages<Record<string, unknown>>(workbenchSearch.value.trim());
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : String(error)); }
   finally { feishuWorkbenchAction.value = ''; }
 }
@@ -620,7 +619,7 @@ function openWorkbenchIntegration(kind: 'documents' | 'wiki-documents' | 'base-r
 async function runWorkbenchEndpoint(path: string, key: string, body: Record<string, unknown> = {}) {
   feishuWorkbenchAction.value = key;
   try {
-    await decodeJson(await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body) }), path);
+    await feishuWorkbenchApi.submit(path, body);
     ElMessage.success('已提交到飞书'); await loadFeishuWorkbench();
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : String(error)); }
   finally { feishuWorkbenchAction.value = ''; }
@@ -641,7 +640,7 @@ async function submitWorkbenchIntegration() {
   const path = `/api/feishu-workbench/${workbenchIntegration.value.kind}`;
   feishuWorkbenchAction.value = `integration:${workbenchIntegration.value.kind}`;
   try {
-    await decodeJson(await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(payload) }), path);
+    await feishuWorkbenchApi.submit(path, payload);
     ElMessage.success('已提交到飞书'); workbenchIntegrationDialog.value = false;
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : String(error)); }
   finally { feishuWorkbenchAction.value = ''; }
@@ -658,12 +657,11 @@ async function saveGroupRelayRoute() {
   const form = groupRelayRouteForm.value;
   groupRelayRouteSaving.value = true;
   try {
-    const path = form.key ? `/api/group-relay/routes/${encodeURIComponent(form.key)}` : '/api/group-relay/routes';
-    const response = await fetch(path, {
-      method: form.key ? 'PUT' : 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({ chat_name: form.chat_name, chat_id: form.chat_id || undefined, tag: form.tag, target_chat_ids: form.target_chat_ids_text.split(',').map((value) => value.trim()).filter(Boolean), target_chat_names: form.target_chat_names_text.split(',').map((value) => value.trim()).filter(Boolean), enabled: form.enabled }),
+    await groupRelayApi.upsertRoute<{ route: GroupRelaySourceStatus }>(form.key, {
+      chat_name: form.chat_name, chat_id: form.chat_id || undefined, tag: form.tag,
+      target_chat_ids: form.target_chat_ids_text.split(',').map((value) => value.trim()).filter(Boolean),
+      target_chat_names: form.target_chat_names_text.split(',').map((value) => value.trim()).filter(Boolean), enabled: form.enabled,
     });
-    await decodeJson<{ route: GroupRelaySourceStatus }>(response, path);
     groupRelayRouteDialog.value = false;
     ElMessage.success(form.key ? '源群配置已更新，将在下一次轮询生效' : '源群已注册，将在下一次轮询建立基线');
     await loadGroupRelayStatus();
@@ -671,9 +669,8 @@ async function saveGroupRelayRoute() {
   finally { groupRelayRouteSaving.value = false; }
 }
 async function setGroupRelayRouteEnabled(route: GroupRelaySourceStatus, enabled: boolean) {
-  const path = `/api/group-relay/routes/${encodeURIComponent(route.key)}`;
   try {
-    await decodeJson(await fetch(path, { method: 'PUT', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ chat_name: route.chat_name, tag: route.tag, enabled }) }), path);
+    await groupRelayApi.upsertRoute(route.key, { chat_name: route.chat_name, tag: route.tag, enabled });
     ElMessage.success(enabled ? '已启用，下一次轮询生效' : '已停用该源群');
     await loadGroupRelayStatus();
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : String(error)); }
@@ -681,12 +678,7 @@ async function setGroupRelayRouteEnabled(route: GroupRelaySourceStatus, enabled:
 async function deleteGroupRelayRoute(route: GroupRelaySourceStatus) {
   try {
     await ElMessageBox.confirm(`确认停止监听“${route.chat_name}”并删除其注册信息？已有转发记录会保留。`, '删除源群', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' });
-    const path = `/api/group-relay/routes/${encodeURIComponent(route.key)}`;
-    const response = await fetch(path, { method: 'DELETE', headers: { accept: 'application/json' } });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({})) as { message?: string };
-      throw new Error(payload.message ?? `HTTP ${response.status}`);
-    }
+    await groupRelayApi.removeRoute<Record<string, unknown>>(route.key);
     ElMessage.success('源群已删除，下一次轮询起停止监听');
     await loadGroupRelayStatus();
   } catch (error) {

@@ -26,7 +26,19 @@ export async function getJson<T>(path: string): Promise<T> {
 }
 
 export async function postJson<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
+  return writeJson<T>('POST', path, body);
+}
+
+export async function putJson<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
+  return writeJson<T>('PUT', path, body);
+}
+
+export async function deleteJson<T>(path: string): Promise<T> {
+  return decodeJson<T>(await fetch(path, { method: 'DELETE', headers: { accept: 'application/json' } }), path);
+}
+
+async function writeJson<T>(method: 'POST' | 'PUT', path: string, body: Record<string, unknown>): Promise<T> {
   return decodeJson<T>(await fetch(path, {
-    method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body),
+    method, headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body),
   }), path);
 }

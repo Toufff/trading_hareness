@@ -5,8 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from .platform.evidence_contracts import evidence_contract_catalog
+from .platform.runtime_task_registry import runtime_task_contract_catalog
+from .platform.strategy_registry import strategy_contract_catalog
 
-CONTEXT_VERSION = "2026-08-23.v9"
+
+CONTEXT_VERSION = "2026-08-25.v10"
 
 
 def repository_agent_context() -> dict[str, Any]:
@@ -23,6 +27,9 @@ def repository_agent_context() -> dict[str, Any]:
             "feishu_proxy": "feishu-adapter/index.mjs",
             "architecture": "docs/ARCHITECTURE.md",
             "architecture_index": "docs/ARCHITECTURE_INDEX.md",
+            "evidence_contracts": "quant-service/app/platform/evidence_contracts.py",
+            "runtime_task_registry": "quant-service/app/platform/runtime_task_registry.py",
+            "strategy_registry": "quant-service/app/platform/strategy_registry.py",
         },
         "module_map": {
             "security": "quant-service/app/security.py",
@@ -77,6 +84,9 @@ def repository_agent_context() -> dict[str, Any]:
             "verify the mounted OpenAPI and runtime health before handoff",
         ],
         "evidence_flow": ["raw", "canonical", "features", "signals", "outcomes"],
+        "evidence_contracts": evidence_contract_catalog(),
+        "runtime_task_contracts": runtime_task_contract_catalog(),
+        "strategy_contracts": strategy_contract_catalog(),
         "post_close_review": {
             "method": "short-term-review-v2",
             "steps": [

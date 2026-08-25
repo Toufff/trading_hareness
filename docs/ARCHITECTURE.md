@@ -49,9 +49,12 @@ not import `app.main`.
 |---|---|---|
 | HTTP request validation | `app/routers/` | Router functions validate and delegate; no provider crawling in a read route. |
 | Provider transport | `app/*provider*.py`, `app/http_clients.py` | Reuse lifecycle clients and record availability. |
+| Evidence semantics | `app/platform/evidence_contracts.py` | Every normalized source declares provider, capability, scope, coverage semantics and decision eligibility before strategies consume it. |
 | Persistent projections | `app/*_repository.py`, `app/*_read_model.py` | Bound result sets; async dashboard reads use `AsyncDatabase`. |
 | Timing and recovery | `app/*_scheduler.py`, `app/runtime_tasks.py` | Durable leases, idempotent run keys and explicit retry windows. |
+| Runtime ownership | `app/platform/runtime_task_registry.py` | Each leased task declares one owner profile, expected cadence, upstream capabilities and retained evidence datasets. |
 | Rules and research | `app/*_rules.py`, `app/*_research.py` | Keep inputs/outputs explicit and test without HTTP or database state. |
+| Strategy contracts | `app/platform/strategy_registry.py` | Every strategy declares its model/input contract, runtime owner, retained evidence and `live_effect=none`. |
 | Schema | `migrations/versions/` | New production schema changes use Alembic only. |
 | Legacy bootstrap | `app/database.py` | Disabled by default; only an explicit recovery operator may enable it. |
 | Frontend transport | `frontend/src/api/http.ts` | All JSON responses produce a readable non-JSON proxy error. |
@@ -60,7 +63,7 @@ not import `app.main`.
 
 ## Agent entry sequence
 
-1. Read `GET /api/v1/agent/context` and the latest durable automation receipt.
+1. Read `GET /api/v1/agent/context`, its evidence/task contract catalogs, and the latest durable automation receipt.
 2. Read the owning router, service, repository, migration and targeted test.
 3. Preserve point-in-time boundaries: `stated_at` is replay evidence;
    `strategy_available_at` is the only strategy eligibility time.

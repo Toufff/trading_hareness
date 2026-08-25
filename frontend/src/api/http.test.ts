@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { decodeJson, getJson, postJson } from './http';
+import { decodeJson, deleteJson, getJson, postJson, putJson } from './http';
 
 describe('frontend HTTP boundary', () => {
   it('returns valid JSON responses', async () => {
@@ -23,15 +23,21 @@ describe('frontend HTTP boundary', () => {
     );
   });
 
-  it('uses the shared JSON transport for GET and POST', async () => {
+  it('uses the shared JSON transport for every JSON HTTP method', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ value: 1 }), { headers: { 'content-type': 'application/json' } }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { headers: { 'content-type': 'application/json' } }));
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { headers: { 'content-type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ updated: true }), { headers: { 'content-type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ deleted: true }), { headers: { 'content-type': 'application/json' } }));
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(getJson<{ value: number }>('/api/example')).resolves.toEqual({ value: 1 });
     await expect(postJson<{ accepted: boolean }>('/api/example', { mode: 'safe' })).resolves.toEqual({ accepted: true });
+    await expect(putJson<{ updated: boolean }>('/api/example', { enabled: true })).resolves.toEqual({ updated: true });
+    await expect(deleteJson<{ deleted: boolean }>('/api/example')).resolves.toEqual({ deleted: true });
     expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/example', expect.objectContaining({ headers: expect.objectContaining({ accept: 'application/json' }) }));
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/example', expect.objectContaining({ method: 'POST', body: JSON.stringify({ mode: 'safe' }) }));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/example', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ enabled: true }) }));
+    expect(fetchMock).toHaveBeenNthCalledWith(4, '/api/example', expect.objectContaining({ method: 'DELETE' }));
   });
 });

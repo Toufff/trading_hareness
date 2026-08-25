@@ -355,6 +355,7 @@ from .runtime_tasks import (
     background_tasks_enabled, observe_completed_task, start_leased_background_tasks,
     supervise_leased_loop, supervise_loop,
 )
+from .platform.runtime_task_registry import runtime_task_contract_catalog
 from .application_lifecycle import ApplicationLifecycleDependencies, application_lifespan
 from .intraday_outcomes import (
     INTRADAY_OUTCOME_HORIZONS,
@@ -3825,6 +3826,7 @@ def _health_payload() -> dict[str, Any]:
             set_db_pool_gauge=set_db_pool_gauge, set_open_circuit_gauge=provider_circuit_open.set,
             research_storage_governance=local_research_storage_governance,
             background_loop_status=background_loop_registry.snapshot,
+            runtime_task_contracts=runtime_task_contract_catalog,
             optional_background_tasks=lambda: {
                 "background_tasks_enabled": background_tasks_enabled(),
                 "runtime_profile": background_runtime_profile(),

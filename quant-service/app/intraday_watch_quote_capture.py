@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
+from .platform.evidence_contracts import materialize_evidence_status
+
 
 @dataclass(frozen=True)
 class WatchQuoteCapture:
@@ -76,25 +78,24 @@ async def capture_watch_quotes(
     except timeout_or_all_a_errors as error:
         detail = dependencies.safe_error(str(error), 300)
         all_a_rows, all_a_snapshot_status = [], {"status": "unavailable", "error": detail}
+    all_a_snapshot_status = materialize_evidence_status("fuyao_all_a_snapshot", all_a_snapshot_status)
     quotes = {item["symbol"]: item for row in all_a_rows if (item := dependencies.quote_from_all_a(row)) is not None}
     eastmoney_watch_flow_rows: list[dict[str, Any]] = []
-    eastmoney_watch_flow_status: dict[str, Any] = {
-        "status": "unavailable", "scope": "explicit_watchlist_only", "cross_sectional": False,
-        "semantics": "watchlist_public_flow_proxy_not_exchange_order_flow",
-        "research_confirmation_only": True,
-    }
+    eastmoney_watch_flow_status = materialize_evidence_status(
+        "eastmoney_watch_flow", {"status": "unavailable"}, research_confirmation_only=True,
+    )
     try:
         eastmoney_watch_flow_rows = await asyncio.wait_for(asyncio.shield(eastmoney_task), timeout=2.0)
     except (asyncio.TimeoutError, *dependencies.watch_quote_errors) as error:
         eastmoney_watch_flow_status["error"] = dependencies.safe_error(str(error), 300)
     else:
-        eastmoney_watch_flow_status = {
-            "status": "fresh", "age_seconds": 0.0, "source": "eastmoney_watch_flow_batch",
-            "scope": "explicit_watchlist_only", "cross_sectional": False,
-            "semantics": "watchlist_public_flow_proxy_not_exchange_order_flow",
-            "research_confirmation_only": True, "matched_symbols": len(eastmoney_watch_flow_rows),
-        }
-    if all_a_snapshot_status.get("cross_sectional", True):
+        eastmoney_watch_flow_status = materialize_evidence_status(
+            "eastmoney_watch_flow",
+            {"status": "fresh", "age_seconds": 0.0, "source": "eastmoney_watch_flow_batch",
+             "matched_symbols": len(eastmoney_watch_flow_rows)},
+            research_confirmation_only=True,
+        )
+    if all_a_rows and all_a_snapshot_status.get("cross_sectional", True):
         dependencies.annotate_percentiles(quotes)
     dependencies.annotate_flow_provenance(quotes, all_a_snapshot_status)
     if eastmoney_watch_flow_rows:

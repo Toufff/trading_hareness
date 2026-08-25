@@ -12,15 +12,13 @@ from typing import Any, Awaitable, Mapping
 
 from .telemetry import background_loop_restarts_total
 from .network_health import network_state
+from .platform.runtime_task_registry import intraday_edge_task_labels, runtime_profile_owns_task
 
 
-INTRADAY_EDGE_BACKGROUND_LOOPS = frozenset({
-    "intraday_monitor",
-    "super_get_fast_quote",
-    "minute_profile_capture",
-    "tencent_order_book",
-    "board_flow_curve",
-})
+# Compatibility export for existing callers. The registry is now the source
+# of truth, so ownership is not duplicated in a profile filter and a separate
+# documentation list.
+INTRADAY_EDGE_BACKGROUND_LOOPS = intraday_edge_task_labels()
 BACKGROUND_RUNTIME_PROFILES = frozenset({"full", "research", "intraday_edge"})
 
 
@@ -73,11 +71,7 @@ def apply_background_runtime_profile(
     return tuple(
         BackgroundTaskSpec(
             spec.label,
-            spec.enabled and (
-                spec.label in INTRADAY_EDGE_BACKGROUND_LOOPS
-                if profile == "intraday_edge"
-                else spec.label not in INTRADAY_EDGE_BACKGROUND_LOOPS
-            ),
+            spec.enabled and runtime_profile_owns_task(profile, spec.label),
             spec.factory,
         )
         for spec in specs

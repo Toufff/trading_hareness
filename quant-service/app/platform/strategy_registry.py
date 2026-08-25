@@ -1,0 +1,80 @@
+"""Research-only strategy contracts for discovery, replay and Agent handoff.
+
+This is an explicit code-reviewed registry, not dynamic plugin loading.  A
+strategy remains evidence-only regardless of its maturity state; no registry
+entry grants broker or order capability.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Final
+
+
+@dataclass(frozen=True)
+class StrategyContract:
+    key: str
+    model_version: str
+    owner_module: str
+    input_contract: str
+    evidence_datasets: tuple[str, ...]
+    runtime_owner: str
+    maturity: str
+    live_effect: str
+    description: str
+
+
+STRATEGY_CONTRACTS: Final[dict[str, StrategyContract]] = {
+    "intraday_watchlist_confirmation": StrategyContract(
+        "intraday_watchlist_confirmation", "watchlist-confirmation-v5", "app/intraday_signal_rules.py",
+        "intraday-rule-input-v2", ("intraday_scan_runs", "intraday_rule_input_snapshots", "intraday_signal_events"),
+        "intraday_edge", "shadow", "none", "bounded watchlist price/minute/peer confirmation research",
+    ),
+    "watchlist_main_wave_shadow": StrategyContract(
+        "watchlist_main_wave_shadow", "watchlist-main-wave-pattern-v2", "app/watchlist_main_wave_v2.py",
+        "watchlist-main-wave-v2", ("watchlist_main_wave_runs", "watchlist_main_wave_candidates"),
+        "research", "shadow", "none", "post-close main-wave pattern research for the explicit watchlist",
+    ),
+    "countertrend_rebound_shadow": StrategyContract(
+        "countertrend_rebound_shadow", "watchlist-countertrend-rebound-state-v1", "app/watchlist_countertrend_rebound.py",
+        "countertrend-rebound-v1", ("watchlist_rebound_runs", "watchlist_rebound_candidates", "intraday_signal_events"),
+        "research", "shadow", "none", "causal countertrend rebound research and intraday acceptance evidence",
+    ),
+    "ten_day_leader_rotation_shadow": StrategyContract(
+        "ten_day_leader_rotation_shadow", "ten-day-leader-vwap-coordination-shadow-v1", "app/ten_day_leader_rotation_research.py",
+        "ten-day-leader-rotation-v1", ("ten_day_leader_rotation_runs", "ten_day_leader_rotation_candidates", "ten_day_leader_rotation_intraday_observations"),
+        "research", "shadow", "none", "post-close leader coordination pool with next-session observation",
+    ),
+    "post_close_base_candidates": StrategyContract(
+        "post_close_base_candidates", "post-close-base-start-v1", "app/post_close_strategy_service.py",
+        "same-date-close-v1", ("post_close_strategy_runs", "post_close_strategy_candidates"),
+        "research", "research_enabled", "none", "same-date close candidate research with coverage gates",
+    ),
+}
+
+
+def strategy_contract(key: str) -> StrategyContract:
+    try:
+        return STRATEGY_CONTRACTS[key]
+    except KeyError as error:
+        raise ValueError(f"unknown strategy contract: {key}") from error
+
+
+def strategy_contract_catalog() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": item.key,
+            "model_version": item.model_version,
+            "owner_module": item.owner_module,
+            "input_contract": item.input_contract,
+            "evidence_datasets": list(item.evidence_datasets),
+            "runtime_owner": item.runtime_owner,
+            "maturity": item.maturity,
+            "live_effect": item.live_effect,
+            "description": item.description,
+        }
+        for item in sorted(STRATEGY_CONTRACTS.values(), key=lambda item: item.key)
+    ]
+
+
+__all__ = ["STRATEGY_CONTRACTS", "StrategyContract", "strategy_contract", "strategy_contract_catalog"]
