@@ -165,6 +165,10 @@ from .watchlist_countertrend_rebound import (
     latest_rebound_priors,
     run_countertrend_rebound_research,
 )
+from .watchlist_shadow_research_runtime import (
+    WatchlistShadowResearchRuntime,
+    WatchlistShadowResearchRuntimeDependencies,
+)
 from .intraday_decision_context import (
     decision_context as intraday_decision_context,
     invalidate_intraday_probability_profiles,
@@ -4403,32 +4407,16 @@ async def run_strategy_pattern_mining_endpoint(payload: StrategyPatternMiningReq
 
 def persist_watchlist_main_wave_research(payload: WatchlistMainWaveResearchRequest) -> dict[str, Any]:
     """Fit and persist breakout plus counter-trend watchlist shadow models."""
-    with db.transaction() as connection:
-        result = run_watchlist_main_wave_v2_research(connection, payload.as_of_date)
-        rebound_result = run_countertrend_rebound_research(connection, payload.as_of_date)
-        persisted = {}
-        for model_result in (result, rebound_result):
-            row = connection.execute(
-                """INSERT INTO quant.strategy_experiments(
-                       strategy_key,universe_key,start_date,end_date,status,parameters,metrics,equity_curve,trades)
-                   VALUES(%s,'watchlist',%s,%s,%s,%s,%s,%s,%s)
-                   RETURNING strategy_experiment_id,created_at""",
-                (model_result["strategy_key"],
-                 model_result.get("start_date") or payload.as_of_date or cn_today(),
-                 model_result.get("end_date") or payload.as_of_date or cn_today(), model_result["status"],
-                 Json(strategy_json_safe(model_result.get("parameters", {}))),
-                 Json(strategy_json_safe(model_result.get("metrics", {}))),
-                 Json(strategy_json_safe(model_result.get("equity_curve", []))),
-                 Json(strategy_json_safe(model_result.get("trades", [])))),
-            ).fetchone()
-            persisted[model_result["strategy_key"]] = {
-                **model_result, "strategy_experiment_id": str(row["strategy_experiment_id"]),
-                "created_at": row["created_at"],
-            }
-    return {
-        **persisted[WATCHLIST_MAIN_WAVE_STRATEGY_KEY],
-        "countertrend_rebound": persisted[WATCHLIST_REBOUND_STRATEGY_KEY],
-    }
+    return WatchlistShadowResearchRuntime(WatchlistShadowResearchRuntimeDependencies(
+        database=db,
+        main_wave_research=run_watchlist_main_wave_v2_research,
+        rebound_research=run_countertrend_rebound_research,
+        main_wave_key=WATCHLIST_MAIN_WAVE_STRATEGY_KEY,
+        rebound_key=WATCHLIST_REBOUND_STRATEGY_KEY,
+        china_today=cn_today,
+        json_safe=strategy_json_safe,
+        json_value=Json,
+    )).persist(payload)
 
 
 async def run_watchlist_main_wave_endpoint(payload: WatchlistMainWaveResearchRequest) -> dict[str, Any]:

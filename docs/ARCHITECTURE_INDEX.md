@@ -9,7 +9,7 @@
 |---|---:|
 | Composition root | `quant-service/app/main.py` |
 | `main.py` top-level functions | 398 |
-| Python modules under `app/` | 330 |
+| Python modules under `app/` | 331 |
 | HTTP router modules | 36 |
 | Alembic migrations | 59 |
 | Frontend source files | 32 |
@@ -35,10 +35,10 @@ New behaviour should be owned by an existing domain package/owner.
 | `research` | 6 |
 | `provider` | 5 |
 | `runtime` | 5 |
+| `watchlist` | 5 |
 | `paper` | 4 |
 | `remote` | 4 |
 | `sector` | 4 |
-| `stock` | 4 |
 
 ## Router entrypoints
 
