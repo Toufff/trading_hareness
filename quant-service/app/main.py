@@ -15,7 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 from statistics import mean, median
 from time import monotonic
-from typing import Any, Awaitable, Callable, Literal, Mapping
+from typing import Any, Literal, Mapping
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -356,6 +356,7 @@ from .runtime_tasks import (
     supervise_leased_loop, supervise_loop,
 )
 from .platform.runtime_task_registry import runtime_task_contract_catalog
+from .runtime_composition import LeasedRuntimeDependencies, build_leased_task_runner
 from .application_lifecycle import ApplicationLifecycleDependencies, application_lifespan
 from .intraday_outcomes import (
     INTRADAY_OUTCOME_HORIZONS,
@@ -3606,19 +3607,16 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
     interval_seconds = intraday_scan_interval_seconds()
     lease_holder_id = uuid.uuid4()
     lease_seconds = background_loop_lease_seconds()
-
-    async def leased_background_loop(label: str, factory: Callable[[], Awaitable[None]]) -> None:
-        lease_key = f"background_loop:{label}"
-        async def acquire() -> bool:
-            return await acquire_background_runtime_lease(async_db, lease_key, lease_holder_id, lease_seconds)
-        async def renew() -> bool:
-            return await renew_background_runtime_lease(async_db, lease_key, lease_holder_id, lease_seconds)
-        async def release() -> None:
-            await release_background_runtime_lease(async_db, lease_key, lease_holder_id)
-        await supervise_leased_loop(
-            label, factory, acquire, renew, release, lease_seconds,
-            on_state=background_loop_registry.mark,
-        )
+    leased_background_loop = build_leased_task_runner(LeasedRuntimeDependencies(
+        database=async_db,
+        lease_holder_id=lease_holder_id,
+        lease_seconds=lease_seconds,
+        acquire_lease=acquire_background_runtime_lease,
+        renew_lease=renew_background_runtime_lease,
+        release_lease=release_background_runtime_lease,
+        supervise=supervise_leased_loop,
+        on_state=background_loop_registry.mark,
+    ))
 
     specs = apply_background_runtime_profile((
         BackgroundTaskSpec("intraday_monitor", interval_seconds >= 30, lambda: intraday_monitor_loop(interval_seconds)),
