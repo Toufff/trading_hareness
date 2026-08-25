@@ -17,6 +17,13 @@ from .post_close_scheduler import PostCloseSchedulerDependencies
 from .strategy_review_scheduler import StrategyReviewSchedulerDependencies
 
 
+def persist_strategy_review(database: Any, review_payload: Callable[[Any, Any], dict[str, Any]],
+                            request: Any) -> dict[str, Any]:
+    """Materialize one review through the sole synchronous transaction boundary."""
+    with database.transaction() as connection:
+        return review_payload(connection, request)
+
+
 @dataclass(frozen=True)
 class StrategyReviewRuntimeDependencies:
     database: Any
@@ -60,12 +67,13 @@ async def run_strategy_review_loop(dependencies: StrategyReviewRuntimeDependenci
         return await dependencies.run_database(dependencies.recompute_scorecards, exchange_date, timeout_seconds=30)
 
     async def persist_review(exchange_date: date, session: str) -> None:
-        def persist() -> None:
-            with dependencies.database.transaction() as connection:
-                dependencies.strategy_review_payload(
-                    connection, dependencies.strategy_review_request(session=session, as_of_date=exchange_date, persist=True),
-                )
-        await dependencies.run_database(persist, timeout_seconds=30)
+        await dependencies.run_database(
+            persist_strategy_review,
+            dependencies.database,
+            dependencies.strategy_review_payload,
+            dependencies.strategy_review_request(session=session, as_of_date=exchange_date, persist=True),
+            timeout_seconds=30,
+        )
 
     async def review_completed_for_checkpoint(exchange_date: date, session: str) -> bool:
         def load() -> bool:
@@ -152,6 +160,7 @@ async def run_post_close_strategy_loop(dependencies: PostCloseStrategyRuntimeDep
 __all__ = [
     "PostCloseStrategyRuntimeDependencies",
     "StrategyReviewRuntimeDependencies",
+    "persist_strategy_review",
     "run_post_close_strategy_loop",
     "run_strategy_review_loop",
 ]

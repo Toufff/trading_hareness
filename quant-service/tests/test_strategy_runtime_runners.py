@@ -8,6 +8,7 @@ import unittest
 from app.strategy_runtime_runners import (
     PostCloseStrategyRuntimeDependencies,
     StrategyReviewRuntimeDependencies,
+    persist_strategy_review,
     run_post_close_strategy_loop,
     run_strategy_review_loop,
 )
@@ -20,6 +21,20 @@ class _Database:
 
 
 class StrategyRuntimeRunnerTests(unittest.TestCase):
+    def test_persist_review_uses_one_shared_transaction_boundary(self) -> None:
+        calls = []
+
+        def payload(connection, request):
+            calls.append((connection, request))
+            return {"status": "completed"}
+
+        request = {"session": "close"}
+        result = persist_strategy_review(_Database(), payload, request)
+
+        self.assertEqual(result, {"status": "completed"})
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][1], request)
+
     def test_review_runner_preserves_checkpoint_operations_and_timeouts(self) -> None:
         calls: list[tuple[str, object]] = []
         exchange_date = date(2026, 8, 21)

@@ -243,6 +243,7 @@ from .strategy_review_scheduler import StrategyReviewSchedulerDependencies, stra
 from .strategy_runtime_runners import (
     PostCloseStrategyRuntimeDependencies,
     StrategyReviewRuntimeDependencies,
+    persist_strategy_review as persist_strategy_review_runtime,
     run_post_close_strategy_loop as run_post_close_strategy_runtime_loop,
     run_strategy_review_loop as run_strategy_review_runtime_loop,
 )
@@ -3335,8 +3336,11 @@ async def run_post_close_refresh(request: PostCloseRefreshRequest) -> dict[str, 
 
 
 def _persist_close_review(as_of_date: date) -> dict[str, Any]:
-    with db.transaction() as connection:
-        return strategy_review_payload(connection, StrategyReviewRequest(session="close", as_of_date=as_of_date, persist=True))
+    return persist_strategy_review_runtime(
+        db,
+        strategy_review_payload,
+        StrategyReviewRequest(session="close", as_of_date=as_of_date, persist=True),
+    )
 
 
 def rebuild_analyst_research_for_date(as_of_date: date) -> dict[str, Any]:
@@ -4370,10 +4374,9 @@ async def run_strategy_decision_endpoint(payload: StrategyDecisionRequest) -> di
 
 async def run_strategy_review(payload: StrategyReviewRequest) -> dict[str, Any]:
     """Materialize a noon/close review without fetching or downloading media."""
-    def persist_review() -> dict[str, Any]:
-        with db.transaction() as connection:
-            return strategy_review_payload(connection, payload)
-    return await run_database_blocking(persist_review, timeout_seconds=30)
+    return await run_database_blocking(
+        persist_strategy_review_runtime, db, strategy_review_payload, payload, timeout_seconds=30,
+    )
 
 
 async def run_post_close_strategy_endpoint(payload: PostCloseStrategyRequest) -> dict[str, Any]:
