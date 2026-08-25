@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextvars import Context
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,6 +20,10 @@ class PostCloseRefreshRuntime:
     def __init__(self) -> None:
         self._active: dict[asyncio.Task[Any], datetime] = {}
 
+    def _create_detached_task(self, action: Callable[[], Awaitable[dict[str, Any]]]) -> asyncio.Task[Any]:
+        """Escape the request-scoped cancellation context used by ASGI middleware."""
+        return asyncio.create_task(action(), name="post-close-refresh", context=Context())
+
     def start(self, action: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
         """Detach one refresh from the initiating HTTP request.
 
@@ -28,13 +33,13 @@ class PostCloseRefreshRuntime:
         """
         if self._active:
             return {"status": "running", "already_running": True, **self.status()}
-        task = asyncio.create_task(action(), name="post-close-refresh")
+        task = self._create_detached_task(action)
         self._active[task] = datetime.now(timezone.utc)
         task.add_done_callback(self._active.pop)
         return {"status": "running", "already_running": False, **self.status()}
 
     async def run(self, action: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
-        task = asyncio.create_task(action(), name="post-close-refresh")
+        task = self._create_detached_task(action)
         self._active[task] = datetime.now(timezone.utc)
         task.add_done_callback(self._active.pop)
         return await asyncio.shield(task)
