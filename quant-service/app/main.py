@@ -176,6 +176,7 @@ from .intraday_decision_context import (
     probability_for_signal as intraday_probability_for_signal,
 )
 from .feature_snapshot_repository import materialize_feature_snapshot
+from .feature_snapshot_runtime import FeatureSnapshotRuntime, FeatureSnapshotRuntimeDependencies
 from .intraday_limit_lift import intraday_limit_lift_pattern as pure_intraday_limit_lift_pattern
 from .intraday_attribution import signal_attribution as pure_signal_attribution
 from .intraday_breakout import eac_acceptance_assessment as pure_eac_acceptance_assessment
@@ -997,15 +998,19 @@ def analyst_text_factor_summary(connection: Any, as_of_date: date, lookback_days
 
 def build_feature_snapshot(as_of_date: date, universe_key: str = "core") -> dict[str, Any]:
     """Materialize deterministic, source-labelled features for the active universe."""
-    with db.transaction() as connection:
-        try:
-            return materialize_feature_snapshot(
-                connection, as_of_date, universe_key, feature_version=FEATURE_VERSION, number=number,
-                market_regime=market_regime, analyst_text_factor_summary=analyst_text_factor_summary,
-                latest_tushare_row=latest_tushare_row, analyst_feature=analyst_feature,
-            )
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+    try:
+        return FeatureSnapshotRuntime(FeatureSnapshotRuntimeDependencies(
+            database=db,
+            materialize=materialize_feature_snapshot,
+            feature_version=FEATURE_VERSION,
+            number=number,
+            market_regime=market_regime,
+            analyst_text_factor_summary=analyst_text_factor_summary,
+            latest_tushare_row=latest_tushare_row,
+            analyst_feature=analyst_feature,
+        )).build(as_of_date, universe_key)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 def intraday_market_context_from_board_report(row: Any, observed_at: datetime,
