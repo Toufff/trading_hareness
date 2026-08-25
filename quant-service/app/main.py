@@ -367,7 +367,7 @@ from .post_close_structures import (
     post_close_fresh_start_structure,
 )
 from .runtime_tasks import (
-    BackgroundTaskSpec, LoopRuntimeRegistry, cancel_background_tasks,
+    LoopRuntimeRegistry, cancel_background_tasks,
     apply_background_runtime_profile, background_runtime_profile,
     background_tasks_enabled, observe_completed_task, start_leased_background_tasks,
     supervise_leased_loop, supervise_loop, validate_runtime_task_specs,
@@ -376,6 +376,7 @@ from .platform.runtime_task_registry import runtime_task_contract_catalog
 from .platform.strategy_registry import validate_strategy_runtime_versions
 from .runtime_composition import LeasedRuntimeDependencies, build_leased_task_runner
 from .application_lifecycle import ApplicationLifecycleDependencies, application_lifespan
+from .background_task_catalog import build_specs as build_background_task_specs
 from .intraday_outcomes import (
     INTRADAY_OUTCOME_HORIZONS,
     intraday_outcome_cutoff,
@@ -3549,22 +3550,30 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
         on_state=background_loop_registry.mark,
     ))
 
-    specs = (
-        BackgroundTaskSpec("intraday_monitor", interval_seconds >= 30, lambda: intraday_monitor_loop(interval_seconds)),
-        BackgroundTaskSpec("super_get_fast_quote", interval_seconds >= 30, intraday_super_get_fast_quote_loop),
-        BackgroundTaskSpec("strategy_review", strategy_review_automation_enabled(), strategy_review_loop),
-        BackgroundTaskSpec("post_close_strategy", post_close_strategy_automation_enabled(), post_close_strategy_loop),
-        BackgroundTaskSpec(
-            "ten_day_leader_rotation",
-            ten_day_leader_rotation_automation_enabled(),
-            ten_day_leader_rotation_loop,
-        ),
-        BackgroundTaskSpec("daily_strategy_summary", daily_summary_automation_enabled(), daily_strategy_summary_loop),
-        BackgroundTaskSpec("ths_member_backfill", ths_concept_member_backfill_enabled(), ths_concept_member_backfill_loop),
-        BackgroundTaskSpec("all_board_member_backfill", all_board_member_backfill_enabled(), all_board_member_backfill_loop),
-        BackgroundTaskSpec("minute_profile_capture", intraday_minute_profile_capture_enabled(), intraday_minute_profile_capture_loop),
-        BackgroundTaskSpec("tencent_order_book", intraday_order_book_enabled() and interval_seconds >= 30, intraday_order_book_loop),
-        BackgroundTaskSpec("board_flow_curve", intraday_board_curve_enabled(), intraday_board_flow_curve_loop),
+    specs = build_background_task_specs(
+        interval_seconds=interval_seconds,
+        enabled={
+            "intraday_monitor": interval_seconds >= 30,
+            "super_get_fast_quote": interval_seconds >= 30,
+            "strategy_review": strategy_review_automation_enabled(),
+            "post_close_strategy": post_close_strategy_automation_enabled(),
+            "ten_day_leader_rotation": ten_day_leader_rotation_automation_enabled(),
+            "daily_strategy_summary": daily_summary_automation_enabled(),
+            "ths_member_backfill": ths_concept_member_backfill_enabled(),
+            "all_board_member_backfill": all_board_member_backfill_enabled(),
+            "minute_profile_capture": intraday_minute_profile_capture_enabled(),
+            "tencent_order_book": intraday_order_book_enabled() and interval_seconds >= 30,
+            "board_flow_curve": intraday_board_curve_enabled(),
+        },
+        loops={
+            "intraday_monitor": lambda: intraday_monitor_loop(interval_seconds),
+            "super_get_fast_quote": intraday_super_get_fast_quote_loop, "strategy_review": strategy_review_loop,
+            "post_close_strategy": post_close_strategy_loop, "ten_day_leader_rotation": ten_day_leader_rotation_loop,
+            "daily_strategy_summary": daily_strategy_summary_loop, "ths_member_backfill": ths_concept_member_backfill_loop,
+            "all_board_member_backfill": all_board_member_backfill_loop,
+            "minute_profile_capture": intraday_minute_profile_capture_loop, "tencent_order_book": intraday_order_book_loop,
+            "board_flow_curve": intraday_board_flow_curve_loop,
+        },
     )
     validate_runtime_task_specs(specs)
     return start_leased_background_tasks(
