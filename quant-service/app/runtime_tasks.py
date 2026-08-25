@@ -12,7 +12,11 @@ from typing import Any, Awaitable, Mapping
 
 from .telemetry import background_loop_restarts_total
 from .network_health import network_state
-from .platform.runtime_task_registry import intraday_edge_task_labels, runtime_profile_owns_task
+from .platform.runtime_task_registry import (
+    RUNTIME_TASK_CONTRACTS,
+    intraday_edge_task_labels,
+    runtime_profile_owns_task,
+)
 
 
 # Compatibility export for existing callers. The registry is now the source
@@ -76,6 +80,26 @@ def apply_background_runtime_profile(
         )
         for spec in specs
     )
+
+
+def validate_runtime_task_specs(specs: tuple[BackgroundTaskSpec, ...]) -> None:
+    """Fail startup if the composition root drifts from declared task ownership.
+
+    This guard intentionally runs before a runtime profile disables entries:
+    every deployable task must remain documented even when this process owns
+    only a subset of them.
+    """
+    configured = {spec.label for spec in specs}
+    declared = set(RUNTIME_TASK_CONTRACTS)
+    undeclared = sorted(configured - declared)
+    missing = sorted(declared - configured)
+    if undeclared or missing:
+        details = []
+        if undeclared:
+            details.append(f"undeclared labels: {', '.join(undeclared)}")
+        if missing:
+            details.append(f"missing declared labels: {', '.join(missing)}")
+        raise ValueError("runtime task specifications drift from registry; " + "; ".join(details))
 
 
 def start_leased_background_tasks(

@@ -353,7 +353,7 @@ from .runtime_tasks import (
     BackgroundTaskSpec, LoopRuntimeRegistry, cancel_background_tasks,
     apply_background_runtime_profile, background_runtime_profile,
     background_tasks_enabled, observe_completed_task, start_leased_background_tasks,
-    supervise_leased_loop, supervise_loop,
+    supervise_leased_loop, supervise_loop, validate_runtime_task_specs,
 )
 from .platform.runtime_task_registry import runtime_task_contract_catalog
 from .runtime_composition import LeasedRuntimeDependencies, build_leased_task_runner
@@ -3613,7 +3613,7 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
         on_state=background_loop_registry.mark,
     ))
 
-    specs = apply_background_runtime_profile((
+    specs = (
         BackgroundTaskSpec("intraday_monitor", interval_seconds >= 30, lambda: intraday_monitor_loop(interval_seconds)),
         BackgroundTaskSpec("super_get_fast_quote", interval_seconds >= 30, intraday_super_get_fast_quote_loop),
         BackgroundTaskSpec("strategy_review", strategy_review_automation_enabled(), strategy_review_loop),
@@ -3629,8 +3629,12 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
         BackgroundTaskSpec("minute_profile_capture", intraday_minute_profile_capture_enabled(), intraday_minute_profile_capture_loop),
         BackgroundTaskSpec("tencent_order_book", intraday_order_book_enabled() and interval_seconds >= 30, intraday_order_book_loop),
         BackgroundTaskSpec("board_flow_curve", intraday_board_curve_enabled(), intraday_board_flow_curve_loop),
-    ))
-    return start_leased_background_tasks(specs, leased_background_loop)
+    )
+    validate_runtime_task_specs(specs)
+    return start_leased_background_tasks(
+        apply_background_runtime_profile(specs),
+        leased_background_loop,
+    )
 
 
 def _application_lifecycle_dependencies() -> ApplicationLifecycleDependencies:

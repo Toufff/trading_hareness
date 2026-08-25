@@ -10,9 +10,11 @@ from app.platform.evidence_contracts import (
     materialize_evidence_status,
 )
 from app.platform.runtime_task_registry import (
+    RUNTIME_TASK_CONTRACTS,
     runtime_profile_owns_task,
     runtime_task_contract_catalog,
 )
+from app.runtime_tasks import BackgroundTaskSpec, validate_runtime_task_specs
 from app.platform.strategy_registry import strategy_contract_catalog
 from app.health_read_model import HealthDependencies, health_payload
 
@@ -43,6 +45,17 @@ class PlatformContractRegistryTests(unittest.TestCase):
         monitor = next(item for item in catalog if item["label"] == "intraday_monitor")
         self.assertEqual(monitor["owner_profile"], "intraday_edge")
         self.assertIn("intraday_scan_runs", monitor["evidence_datasets"])
+
+    def test_application_task_specs_must_match_the_declared_runtime_contracts(self) -> None:
+        async def loop() -> None:
+            return None
+
+        declared = tuple(BackgroundTaskSpec(label, True, loop) for label in RUNTIME_TASK_CONTRACTS)
+        validate_runtime_task_specs(declared)
+        with self.assertRaisesRegex(ValueError, "undeclared"):
+            validate_runtime_task_specs((*declared, BackgroundTaskSpec("typo", True, loop)))
+        with self.assertRaisesRegex(ValueError, "missing"):
+            validate_runtime_task_specs(declared[:-1])
 
     def test_strategy_catalog_declares_replay_inputs_and_never_live_effect(self) -> None:
         catalog = strategy_contract_catalog()
