@@ -76,8 +76,10 @@ def observation_source(quote: dict[str, Any] | None) -> str:
     source = str((quote or {}).get("price_source") or "")
     if source == "sina_batched_watch_quote":
         return "sina_free"
-    if source in {"tencent_batched_watch_quote", "tencent_all_a_snapshot"}:
+    if source == "tencent_batched_watch_quote":
         return "tencent_free"
+    if source == "fuyao_ths_all_a_snapshot":
+        return "fuyao_ths"
     return "unknown_realtime_source"
 
 
@@ -106,20 +108,24 @@ def exchange_time_status(quote: dict[str, Any] | None, observed_at: datetime, ma
     return {**result, "status": "fresh"}
 
 
-def quote_from_tencent(
-    row: dict[str, Any], *, symbol_from_code: Callable[[dict[str, Any]], str | None], number: Callable[[Any], float | None],
-) -> dict[str, Any] | None:
-    """Normalize limited Tencent cross-section fields for evidence use."""
-    code = str(row.get("code") or "").strip()
-    symbol = symbol_from_code({"代码": code[-6:]})
-    if not symbol:
+def quote_from_fuyao(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Preserve the Fuyao adapter's normalized all-A row without fake flow."""
+    def as_number(value: Any) -> float | None:
+        try:
+            return float(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    symbol = str(row.get("symbol") or "").upper()
+    price = as_number(row.get("price"))
+    if not _SYMBOL.fullmatch(symbol) or price is None or price <= 0:
         return None
     return {
-        "symbol": symbol, "name": row.get("name"), "price": number(row.get("zxj")),
-        "pct_change": number(row.get("zdf")), "volume_ratio": number(row.get("lb")),
-        "turnover_rate": number(row.get("hsl")), "main_net_inflow": number(row.get("zljlr")),
-        "turnover": number(row.get("turnover")), "raw": dict(row),
-        "price_source": "tencent_all_a_snapshot", "price_observed_from_depth": False,
+        "symbol": symbol, "name": row.get("name"), "price": price,
+        "pct_change": as_number(row.get("pct_change")), "turnover": as_number(row.get("turnover")),
+        "volume": as_number(row.get("volume")), "raw": dict(row.get("raw") or row),
+        "price_source": "fuyao_ths_all_a_snapshot", "price_observed_from_depth": False,
+        "price_observed_at": row.get("price_observed_at"),
     }
 
 
@@ -136,5 +142,5 @@ def annotate_flow_percentiles(quotes: dict[str, dict[str, Any]]) -> None:
 
 __all__ = [
     "annotate_flow_percentiles", "exchange_time_status", "merge_eastmoney_watch_flows",
-    "merge_sina_watch_quotes", "merge_watch_quote_prices", "observation_source", "quote_from_tencent",
+    "merge_sina_watch_quotes", "merge_watch_quote_prices", "observation_source", "quote_from_fuyao",
 ]

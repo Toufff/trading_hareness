@@ -474,11 +474,12 @@ class PlatformBoundaryTests(unittest.TestCase):
     def test_intraday_status_degrades_when_fresh_direct_watch_quotes_do_not_cover_pool(self):
         observed_at = datetime.now(timezone.utc)
         evidence = {
-            "health_rows": [], "quote_rows": [{"source_name": "tencent_free", "last_observed_at": observed_at, "rows": 5}], "raw_rows": [],
+            "health_rows": [], "quote_rows": [{"source_name": "fuyao_ths", "last_observed_at": observed_at, "rows": 5}], "raw_rows": [],
             "minute_profile": {"last_observed_at": None, "rows": 0, "latest_trading_date": None},
             "latest_scan": {"status": "completed", "observed_at": observed_at, "source_status": {}, "summary": {}},
             "latest_completed_scan": {"status": "completed", "observed_at": observed_at, "summary": {}, "source_status": {
-                "tencent": {"decision_eligible_watch_quote_symbols": 1, "all_a_only_watch_quote_symbols": 1,
+                "fuyao": {"all_a_only_watch_quote_symbols": 1, "all_a_snapshot": {"status": "fresh", "age_seconds": 0}},
+                "tencent_watch": {"decision_eligible_watch_quote_symbols": 1,
                             "sina_fallback_watch_quote_symbols": 0, "quote_timestamp_slo_seconds": 20},
             }},
             "latest_board": None, "latest_board_curve": None, "latest_delivery": None, "delivery_history": [],
@@ -497,22 +498,22 @@ class PlatformBoundaryTests(unittest.TestCase):
             daily_summary_automation_enabled=lambda: True, order_book_max_symbols=lambda: 40,
         )
         payload = read_intraday_services_status_payload(dependencies, evidence=evidence, session=(True, "open"), board_session=(True, "open"))
-        tencent = next(item for item in payload["items"] if item["key"] == "tencent_realtime")
-        self.assertEqual(tencent["state"], "degraded")
-        self.assertEqual(tencent["details"]["decision_eligible_watch_quote_symbols"], 1)
-        self.assertIn("1/2", tencent["last_error"])
+        order_book = next(item for item in payload["items"] if item["key"] == "tencent_order_book")
+        self.assertEqual(order_book["state"], "degraded")
+        self.assertIn("1/2", order_book["last_error"])
         self.assertTrue(payload["summary"]["decision_path_degraded"])
 
     def test_intraday_status_projects_and_gates_stale_public_flow_snapshot(self):
         observed_at = datetime.now(timezone.utc)
         evidence = {
-            "health_rows": [], "quote_rows": [{"source_name": "tencent_free", "last_observed_at": observed_at, "rows": 2}], "raw_rows": [],
+            "health_rows": [], "quote_rows": [{"source_name": "fuyao_ths", "last_observed_at": observed_at, "rows": 2}], "raw_rows": [],
             "minute_profile": {"last_observed_at": None, "rows": 0, "latest_trading_date": None},
             "latest_scan": {"status": "completed", "observed_at": observed_at, "source_status": {}, "summary": {}},
             "latest_completed_scan": {"status": "completed", "observed_at": observed_at, "summary": {}, "source_status": {
-                "tencent": {"decision_eligible_watch_quote_symbols": 2, "all_a_only_watch_quote_symbols": 0,
-                            "sina_fallback_watch_quote_symbols": 0,
+                "fuyao": {"all_a_only_watch_quote_symbols": 0,
                             "all_a_snapshot": {"status": "cached", "age_seconds": 46.0, "ttl_seconds": 30.0}},
+                "tencent_watch": {"decision_eligible_watch_quote_symbols": 2,
+                                  "sina_fallback_watch_quote_symbols": 0},
             }},
             "latest_board": None, "latest_board_curve": None, "latest_delivery": None, "delivery_history": [],
             "pending_delivery_count": 0, "pending_rotation_delivery_count": 0, "latest_daily_summary": None,
@@ -532,11 +533,10 @@ class PlatformBoundaryTests(unittest.TestCase):
 
         payload = read_intraday_services_status_payload(dependencies, evidence=evidence, session=(True, "open"), board_session=(True, "open"))
 
-        tencent = next(item for item in payload["items"] if item["key"] == "tencent_realtime")
-        self.assertEqual(tencent["state"], "degraded")
-        self.assertFalse(tencent["details"]["public_flow_snapshot_decision_eligible"])
-        self.assertEqual(tencent["details"]["public_flow_snapshot"]["max_decision_age_seconds"], 45.0)
-        self.assertIn("flow-dependent entries are blocked", tencent["last_error"])
+        fuyao = next(item for item in payload["items"] if item["key"] == "fuyao_ths_realtime")
+        self.assertEqual(fuyao["state"], "degraded")
+        self.assertEqual(fuyao["details"]["snapshot"]["max_decision_age_seconds"], 45.0)
+        self.assertIn("Fuyao all-A", fuyao["last_error"])
         self.assertTrue(payload["summary"]["decision_path_degraded"])
 
     def test_health_read_model_uses_only_injected_local_dependencies(self):

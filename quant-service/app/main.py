@@ -45,8 +45,8 @@ from .akshare_provider import (
     akshare_moneyflow_supplements,
     akshare_status,
     akshare_strong_pool_events,
-    akshare_tencent_all_a_spot,
 )
+from .fuyao_provider import FuyaoProviderError, all_a_snapshot_rows as fuyao_all_a_snapshot_rows
 from .analysis import as_utc
 from .capability_registry import api_capability
 from .database import AsyncDatabase, Database
@@ -112,7 +112,7 @@ from .intraday_quote_normalization import (
     merge_sina_watch_quotes as merge_intraday_sina_watch_quotes_pure,
     merge_watch_quote_prices as merge_intraday_watch_quote_prices_pure,
     observation_source as intraday_quote_observation_source_pure,
-    quote_from_tencent as intraday_quote_from_tencent_pure,
+    quote_from_fuyao as intraday_quote_from_fuyao_pure,
 )
 from .intraday_decision_card_read_model import decision_card as read_intraday_decision_card
 from .async_intraday_decision_card_repository import decision_card as read_async_intraday_decision_card
@@ -497,6 +497,7 @@ from .request_models import (
     EastmoneyBoardMemberSyncRequest,
     FactorEvaluationRequest,
     FetchRunReconcileRequest,
+    FuyaoQueryRequest,
     FullMarketDailyControlsSyncRequest,
     FullMarketDailySyncRequest,
     GenerateRequest,
@@ -1658,12 +1659,12 @@ def build_intraday_sector_report_from_membership(
 
 
 async def intraday_sector_report(request: IntradaySectorReportRequest) -> dict[str, Any]:
-    """Return same-source board flow with per-board Tencent main-flow leaders."""
+    """Return board flow with documented Fuyao all-A price/turnover leaders."""
     result = await run_intraday_sector_report_isolated(
         request,
         run_public_blocking=run_akshare_blocking,
         board_flow=akshare_eastmoney_board_flow,
-        all_a_spot=akshare_tencent_all_a_spot,
+        all_a_snapshot=fuyao_all_a_snapshot_rows,
         build_membership_report=lambda kinds, flows, quotes, top_n, exchange_date: run_database_blocking(
             build_intraday_sector_report_from_membership, kinds, flows, quotes, top_n, exchange_date,
         ),
@@ -1688,9 +1689,9 @@ _intraday_tencent_minute_cache: dict[str, tuple[float, dict[str, Any] | None, st
 INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS = 30.0
 
 
-async def _fetch_intraday_all_a_snapshot_rows() -> list[dict[str, Any]]:
-    """Fetch the broad Tencent cross section in its bounded provider executor."""
-    return await run_akshare_blocking(akshare_tencent_all_a_spot, timeout_seconds=20)
+async def _fetch_intraday_all_a_snapshot_rows() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Fetch the documented Fuyao/THS cross-section without a Tencent all-A call."""
+    return await fuyao_all_a_snapshot_rows()
 
 
 _intraday_all_a_snapshots = SharedAsyncSnapshot(
@@ -1717,14 +1718,9 @@ def consume_background_task_exception(task: asyncio.Task[Any]) -> None:
 
 
 async def intraday_all_a_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Return one shared, explicitly aged all-A flow cross-section.
-
-    It is used only for cross-sectional flow percentiles. Per-watch prices
-    are refreshed independently from Tencent's batched quote path, so a slow
-    all-A response cannot make a 10-second watch scan pretend its price is
-    fresh. The age is carried into the scan evidence.
-    """
-    return await _intraday_all_a_snapshots.get()
+    """Return one shared, explicitly aged Fuyao all-A price/turnover snapshot."""
+    (rows, supplier_status), cache_status = await _intraday_all_a_snapshots.get()
+    return rows, {**supplier_status, **cache_status}
 
 
 def merge_intraday_watch_quote_prices(quotes: dict[str, dict[str, Any]], depth_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -1770,15 +1766,9 @@ def intraday_quote_exchange_time_status(quote: dict[str, Any] | None, observed_a
     return intraday_quote_exchange_time_status_pure(quote, observed_at, max_age_seconds)
 
 
-def intraday_quote_from_tencent(row: dict[str, Any]) -> dict[str, Any] | None:
-    """Normalize the limited Tencent fields used for a time-sensitive alert.
-
-    This keeps the raw public row alongside normalized values.  ``zljlr`` is
-    provider-labelled indicative main-flow data, not exchange order flow.
-    """
-    return intraday_quote_from_tencent_pure(
-        row, symbol_from_code=eastmoney_member_symbol, number=intraday_number,
-    )
+def intraday_quote_from_fuyao(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize the documented THS all-A quote without inventing fund flow."""
+    return intraday_quote_from_fuyao_pure(row)
 
 
 def annotate_intraday_flow_percentiles(quotes: dict[str, dict[str, Any]]) -> None:
@@ -2318,7 +2308,7 @@ async def latest_intraday_fast_quote_confirmations(symbols: list[str], quotes: d
 
 def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, selected_symbols: list[str],
                                   source_status: dict[str, Any], watches: list[dict[str, Any]],
-                                  quotes: dict[str, dict[str, Any]], tencent_rows: list[dict[str, Any]],
+                                  quotes: dict[str, dict[str, Any]], all_a_rows: list[dict[str, Any]],
                                   quote_latency_ms: int, tushare_minutes: dict[str, dict[str, Any]],
                                   surge_features: dict[str, dict[str, Any]],
                                   peer_contexts: dict[str, dict[str, Any]],
@@ -2375,7 +2365,7 @@ def persist_intraday_scan_signals(scan_id: uuid.UUID, observed_at: datetime, sel
             ),
         ),
         scan_id=scan_id, observed_at=observed_at, selected_symbols=selected_symbols,
-        source_status=source_status, watches=watches, quotes=quotes, tencent_rows=tencent_rows,
+        source_status=source_status, watches=watches, quotes=quotes, all_a_rows=all_a_rows,
         quote_latency_ms=quote_latency_ms, tushare_minutes=tushare_minutes, surge_features=surge_features,
         peer_contexts=peer_contexts, fast_confirmations=fast_confirmations,
     )
@@ -2441,7 +2431,7 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
             WatchQuoteCaptureDependencies(
                 now=asyncio.get_running_loop().time, all_a_snapshot=intraday_all_a_snapshot,
                 tencent_watch_quotes=tencent_order_book_quotes, sina_quotes=sina_quotes,
-                eastmoney_watch_flows=eastmoney_watch_flow_quotes, quote_from_tencent=intraday_quote_from_tencent,
+                eastmoney_watch_flows=eastmoney_watch_flow_quotes, quote_from_all_a=intraday_quote_from_fuyao,
                 merge_eastmoney_flows=merge_intraday_eastmoney_watch_flows,
                 annotate_percentiles=annotate_intraday_flow_percentiles,
                 annotate_flow_provenance=pure_annotate_flow_snapshot_provenance,
@@ -2450,7 +2440,7 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
                 consume_background_exception=consume_background_task_exception, safe_error=safe_error_detail,
                 executor_saturated_error=ExecutorSaturatedError,
                 watch_quote_errors=(httpx.HTTPError, FreeProviderError, ValueError),
-                all_a_snapshot_errors=(AkShareProviderError, ValueError),
+                all_a_snapshot_errors=(FuyaoProviderError, ValueError),
             ),
         )
 
@@ -2474,7 +2464,7 @@ async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str,
         return await run_database_blocking(
             lambda: persist_ten_day_leader_rotation_intraday(
                 dependencies=TenDayLeaderRotationIntradayDependencies(
-                    database=db, quote_from_tencent=intraday_quote_from_tencent,
+                    database=db, quote_from_all_a=intraday_quote_from_fuyao,
                     quote_source=intraday_quote_observation_source,
                     market_context_batch=intraday_point_in_time_market_context_batch,
                     evaluate=evaluate_intraday_rotation_candidates,
@@ -3261,12 +3251,12 @@ def market_snapshot_public_quote_settings() -> dict[str, int | bool]:
     return _market_snapshot_actions.public_quote_settings()
 
 
-def market_snapshot_tencent_enabled() -> bool:
-    return _market_snapshot_actions.tencent_enabled()
+def market_snapshot_fuyao_enabled() -> bool:
+    return _market_snapshot_actions.fuyao_enabled()
 
 
-def tencent_snapshot_quotes(rows: list[dict[str, Any]], exchange_date: date) -> list[dict[str, Any]]:
-    return _market_snapshot_actions.tencent_quotes(rows, exchange_date, intraday_quote_from_tencent)
+def fuyao_snapshot_quotes(rows: list[dict[str, Any]], exchange_date: date) -> list[dict[str, Any]]:
+    return _market_snapshot_actions.fuyao_quotes(rows, exchange_date, intraday_quote_from_fuyao)
 
 
 def realtime_market_session(api_name: str | None = None, now: datetime | None = None) -> tuple[bool, str]:
@@ -3305,12 +3295,12 @@ def finalize_market_snapshot(
     planned_public_requests: int,
     refresh_error: str | None,
     refresh_skipped: str | None,
-    tencent_status: dict[str, Any],
+    fuyao_status: dict[str, Any],
 ) -> dict[str, Any]:
     return _market_snapshot_actions.finalize(
         request, observed_at, exchange_date, symbols, minimum_universe, minimum_coverage,
         licensed_providers, public_quote_settings, planned_public_requests, refresh_error,
-        refresh_skipped, tencent_status,
+        refresh_skipped, fuyao_status,
     )
 
 
@@ -3319,12 +3309,12 @@ async def build_market_snapshot(request: MarketSnapshotRequest) -> dict[str, Any
     return await _market_snapshot_actions.build(
         request,
         run_database=run_database_blocking,
-        run_akshare=run_akshare_blocking,
+        fetch_fuyao_all_a=fuyao_all_a_snapshot_rows,
         provider_capabilities=open_provider_capabilities,
-        quote_mapper=intraday_quote_from_tencent,
+        quote_mapper=intraday_quote_from_fuyao,
         thresholds=market_snapshot_thresholds,
         public_quote_settings=market_snapshot_public_quote_settings,
-        tencent_enabled=market_snapshot_tencent_enabled,
+        fuyao_enabled=market_snapshot_fuyao_enabled,
         universe_symbols=snapshot_universe_symbols,
         persist_batch=persist_public_quote_batch,
         persist_failure=persist_public_quote_failure,
@@ -4018,6 +4008,13 @@ async def tushare_fetch(payload: TushareFetchRequest) -> dict[str, Any]:
     return await fetch_tushare_catalog(payload)
 
 
+async def fuyao_query(payload: "FuyaoQueryRequest") -> dict[str, Any]:
+    """Expose every documented Fuyao capability through the safe allow-list."""
+    from .fuyao_provider import fetch as fetch_fuyao
+    data = await fetch_fuyao(payload.capability, payload.params)
+    return {"provider": "fuyao_ths", "capability": payload.capability, "data": data, "research_only": True}
+
+
 async def stock_study(symbol: str, payload: StockStudyRequest | None = None) -> dict[str, Any]:
     """Compatibility service function used by the provider-actions router."""
     return await build_stock_study(symbol, payload or StockStudyRequest())
@@ -4028,6 +4025,7 @@ app.include_router(build_provider_actions_router(ProviderActionDependencies(
     realtime_probe=probe_realtime_sources,
     tushare_audit=audit_tushare_capabilities,
     tushare_fetch=tushare_fetch,
+    fuyao_query=fuyao_query,
     stock_study=stock_study,
 )))
 

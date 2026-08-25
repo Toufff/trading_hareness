@@ -822,10 +822,11 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
 
         async def check() -> tuple[dict[str, object], AsyncMock]:
             blocking = AsyncMock(return_value=(local_report, {"concept": {"flow_boards": 1, "boards_with_members": 1}}, [], [], []))
-            with patch("app.main.run_akshare_blocking", new=AsyncMock(side_effect=[
-                [{"板块名称": "测试概念", "流入资金": 200, "流出资金": 77}],
-                [{"code": "sz000001", "name": "测试股"}],
-            ])), patch("app.main.run_database_blocking", new=blocking):
+            with patch("app.main.run_akshare_blocking", new=AsyncMock(return_value=[
+                {"板块名称": "测试概念", "流入资金": 200, "流出资金": 77},
+            ])), patch("app.main.fuyao_all_a_snapshot_rows", new=AsyncMock(return_value=(
+                [{"symbol": "000001.SZ", "name": "测试股", "pct_change": 1.2, "turnover": 10}], {"status": "fresh"},
+            ))), patch("app.main.run_database_blocking", new=blocking):
                 return await intraday_sector_report(IntradaySectorReportRequest(kind="concept", top_stocks=10)), blocking
 
         result, blocking = asyncio.run(check())

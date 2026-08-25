@@ -68,6 +68,7 @@ def free_provider_status() -> list[dict[str, str | bool]]:
             akshare_configured = False
     xinhua_url = bool((os.getenv("XINHUA_FINANCE_API_URL") or "").strip())
     xinhua_credential = bool((os.getenv("XINHUA_FINANCE_API_KEY") or "").strip())
+    fuyao_configured = bool((os.getenv("FUYAO_API_KEY") or "").strip())
     return [
         {"name": "eastmoney", "provider_key": "eastmoney_free", "label": "东方财富公开行情", "configured": True, "protocol": "public_http"},
         {"name": "tencent", "provider_key": "tencent_free", "label": "腾讯财经前复权日线（研究参考）", "configured": True,
@@ -75,6 +76,8 @@ def free_provider_status() -> list[dict[str, str | bool]]:
         {"name": "sina", "provider_key": "sina_free", "label": "新浪财经公开报价", "configured": True, "protocol": "public_http"},
         {"name": "cninfo", "provider_key": "cninfo_free", "label": "巨潮资讯公开公告", "configured": True, "protocol": "public_http"},
         {"name": "akshare", "provider_key": "akshare", "label": "AKShare 公开聚合源", "configured": akshare_configured, "protocol": "python_optional"},
+        {"name": "fuyao_ths", "provider_key": "fuyao_ths", "label": "同花顺 Fuyao 数据服务", "configured": fuyao_configured,
+         "protocol": "x_api_key", "canonical_promotion": False},
         {"name": "xinhua_finance", "provider_key": "xinhua_finance", "label": "新华财经机构数据/API 流",
          "configured": xinhua_url and xinhua_credential, "protocol": "contract_required"},
     ]

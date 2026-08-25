@@ -11,7 +11,7 @@ from typing import Any, Awaitable, Callable
 @dataclass(frozen=True)
 class WatchQuoteCapture:
     quotes: dict[str, dict[str, Any]]
-    tencent_rows: list[dict[str, Any]]
+    all_a_rows: list[dict[str, Any]]
     all_a_snapshot_status: dict[str, Any]
     fresh_watch_rows: list[dict[str, Any]]
     sina_watch_rows: list[dict[str, Any]]
@@ -26,7 +26,7 @@ class WatchQuoteCaptureDependencies:
     tencent_watch_quotes: Callable[..., Awaitable[list[dict[str, Any]]]]
     sina_quotes: Callable[[list[str]], Awaitable[list[dict[str, Any]]]]
     eastmoney_watch_flows: Callable[..., Awaitable[list[dict[str, Any]]]]
-    quote_from_tencent: Callable[[dict[str, Any]], dict[str, Any] | None]
+    quote_from_all_a: Callable[[dict[str, Any]], dict[str, Any] | None]
     merge_eastmoney_flows: Callable[[dict[str, dict[str, Any]], list[dict[str, Any]]], Any]
     annotate_percentiles: Callable[[dict[str, dict[str, Any]]], Any]
     annotate_flow_provenance: Callable[[dict[str, dict[str, Any]], dict[str, Any]], Any]
@@ -63,16 +63,16 @@ async def capture_watch_quotes(
     except dependencies.watch_quote_errors:
         sina_watch_rows = []
     try:
-        tencent_rows, all_a_snapshot_status = await asyncio.wait_for(asyncio.shield(all_a_task), timeout=2.0)
+        all_a_rows, all_a_snapshot_status = await asyncio.wait_for(asyncio.shield(all_a_task), timeout=2.0)
     except dependencies.executor_saturated_error as error:
         detail = dependencies.safe_error(str(error), 300)
-        tencent_rows, all_a_snapshot_status = [], {"status": "unavailable", "error": detail}
+        all_a_rows, all_a_snapshot_status = [], {"status": "unavailable", "error": detail}
     except timeout_or_all_a_errors as error:
         detail = dependencies.safe_error(str(error), 300)
-        tencent_rows, all_a_snapshot_status = [], {"status": "unavailable", "error": detail}
-    quotes = {item["symbol"]: item for row in tencent_rows if (item := dependencies.quote_from_tencent(row)) is not None}
+        all_a_rows, all_a_snapshot_status = [], {"status": "unavailable", "error": detail}
+    quotes = {item["symbol"]: item for row in all_a_rows if (item := dependencies.quote_from_all_a(row)) is not None}
     eastmoney_watch_flow_rows: list[dict[str, Any]] = []
-    if not tencent_rows:
+    if not all_a_rows:
         try:
             eastmoney_watch_flow_rows = await asyncio.wait_for(
                 dependencies.eastmoney_watch_flows(symbols, max_symbols=40), timeout=2.0,
@@ -90,7 +90,7 @@ async def capture_watch_quotes(
                     "source": "eastmoney_watch_flow_batch", "scope": "explicit_watchlist_only",
                     "cross_sectional": False,
                     "semantics": "watchlist_public_flow_proxy_not_exchange_order_flow",
-                    "fallback_from": "tencent_all_a_snapshot",
+                    "fallback_from": "fuyao_ths_all_a_snapshot",
                     "matched_symbols": len(eastmoney_watch_flow_rows),
                 }
     if all_a_snapshot_status.get("cross_sectional", True):
@@ -103,7 +103,7 @@ async def capture_watch_quotes(
             quote, observed_at, quote_timestamp_slo_seconds,
         )
     return WatchQuoteCapture(
-        quotes=quotes, tencent_rows=tencent_rows, all_a_snapshot_status=all_a_snapshot_status,
+        quotes=quotes, all_a_rows=all_a_rows, all_a_snapshot_status=all_a_snapshot_status,
         fresh_watch_rows=fresh_watch_rows, sina_watch_rows=sina_watch_rows,
         eastmoney_watch_flow_rows=eastmoney_watch_flow_rows,
         latency_ms=round((dependencies.now() - started_at) * 1000),

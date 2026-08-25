@@ -61,7 +61,7 @@ def persist_scan_transaction(
     source_status: dict[str, Any],
     watches: list[dict[str, Any]],
     quotes: dict[str, dict[str, Any]],
-    tencent_rows: list[dict[str, Any]],
+    all_a_rows: list[dict[str, Any]],
     quote_latency_ms: int,
     tushare_minutes: dict[str, dict[str, Any]],
     surge_features: dict[str, dict[str, Any]],
@@ -82,7 +82,7 @@ def persist_scan_transaction(
             source_status=source_status,
             watches=watches,
             quotes=quotes,
-            tencent_rows=tencent_rows,
+            all_a_rows=all_a_rows,
             quote_latency_ms=quote_latency_ms,
             tushare_minutes=tushare_minutes,
             surge_features=surge_features,
@@ -104,7 +104,7 @@ def persist_scan_signals(
     source_status: dict[str, Any],
     watches: list[dict[str, Any]],
     quotes: dict[str, dict[str, Any]],
-    tencent_rows: list[dict[str, Any]],
+    all_a_rows: list[dict[str, Any]],
     quote_latency_ms: int,
     tushare_minutes: dict[str, dict[str, Any]],
     surge_features: dict[str, dict[str, Any]],
@@ -118,7 +118,7 @@ def persist_scan_signals(
     """Persist one scan using the caller's already-open transaction."""
     prepared = dependencies.prepare_inputs(
         connection, scan_id=scan_id, observed_at=observed_at, selected_symbols=selected_symbols,
-        source_status=source_status, watches=watches, quotes=quotes, tencent_rows=tencent_rows,
+        source_status=source_status, watches=watches, quotes=quotes, all_a_rows=all_a_rows,
         quote_latency_ms=quote_latency_ms, tushare_minutes=tushare_minutes, surge_features=surge_features,
         confirmation_window=confirmation_window, dependencies=dependencies.preparation_dependencies,
     )

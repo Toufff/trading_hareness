@@ -9,7 +9,7 @@ def build_scan_source_status(
     *,
     selected_symbols: list[str],
     quotes: dict[str, dict[str, Any]],
-    tencent_rows: list[dict[str, Any]],
+    all_a_rows: list[dict[str, Any]],
     fresh_watch_rows: list[dict[str, Any]],
     sina_watch_rows: list[dict[str, Any]],
     eastmoney_watch_flow_rows: list[dict[str, Any]],
@@ -39,28 +39,31 @@ def build_scan_source_status(
     }
     all_a_watch_symbols = {
         symbol for symbol in selected_symbols
-        if (quotes.get(symbol) or {}).get("price_source") == "tencent_all_a_snapshot"
+        if (quotes.get(symbol) or {}).get("price_source") == "fuyao_ths_all_a_snapshot"
     }
     direct_watch_count = len(direct_watch_symbols)
     fresh_direct_watch_count = sum(
         1 for symbol in direct_watch_symbols
         if ((quotes.get(symbol) or {}).get("price_freshness") or {}).get("status") == "fresh"
     )
-    tencent_status = (
+    direct_status = (
         "completed" if fresh_direct_watch_count == len(selected_symbols)
-        else "partial" if direct_watch_count or tencent_rows else "unavailable"
+        else "partial" if direct_watch_count or all_a_rows else "unavailable"
     )
     return {
-        "tencent": {
-            "status": tencent_status, "rows": len(tencent_rows),
+        "fuyao": {
+            "status": "completed" if all_a_rows else "unavailable", "rows": len(all_a_rows),
             "matched": sum(symbol in quotes for symbol in selected_symbols),
             "all_a_snapshot": all_a_snapshot_status,
+            "all_a_only_watch_quote_symbols": len(all_a_watch_symbols),
+        },
+        "tencent_watch": {
+            "status": direct_status,
             "fresh_watch_quote_rows": len(fresh_watch_rows),
             "fresh_watch_quote_symbols": direct_watch_count,
             "decision_eligible_watch_quote_symbols": fresh_direct_watch_count,
             "stale_or_unstamped_direct_watch_quote_symbols": direct_watch_count - fresh_direct_watch_count,
             "quote_timestamp_slo_seconds": quote_timestamp_slo_seconds,
-            "all_a_only_watch_quote_symbols": len(all_a_watch_symbols),
             "sina_fallback_watch_quote_symbols": len(sina_watch_symbols),
             "missing_direct_watch_quote_symbols": len(selected_symbols) - direct_watch_count,
             "sina_watch_quote_rows": len(sina_watch_rows),

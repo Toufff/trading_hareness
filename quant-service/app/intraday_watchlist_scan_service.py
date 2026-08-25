@@ -132,7 +132,7 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
     fast_confirmations = await dependencies.fast_confirmations(selected_symbols, quote_capture.quotes, observed_at)
     board_cache_evidence = await dependencies.board_cache_evidence(observed_at)
     source_status = dependencies.build_source_status(
-        selected_symbols=selected_symbols, quotes=quote_capture.quotes, tencent_rows=quote_capture.tencent_rows,
+        selected_symbols=selected_symbols, quotes=quote_capture.quotes, all_a_rows=quote_capture.all_a_rows,
         fresh_watch_rows=quote_capture.fresh_watch_rows, sina_watch_rows=quote_capture.sina_watch_rows,
         eastmoney_watch_flow_rows=quote_capture.eastmoney_watch_flow_rows,
         all_a_snapshot_status=quote_capture.all_a_snapshot_status, surge_source=surge_source,
@@ -145,7 +145,7 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
     )
     signals = await dependencies.persist_signals(
         scan_id, observed_at, selected_symbols, source_status, watches, quote_capture.quotes,
-        quote_capture.tencent_rows, quote_capture.latency_ms, tushare_minutes, surge_features,
+        quote_capture.all_a_rows, quote_capture.latency_ms, tushare_minutes, surge_features,
         peer_contexts, fast_confirmations,
     )
     shadow_observation: dict[str, Any] = {"status": "standby", "reason": "awaiting_next_minute_rotation"}
@@ -172,7 +172,7 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
                 )
                 shadow_observation = await dependencies.persist_shadow_observations(
                     scan_id=scan_id, observed_at=observed_at, pool=shadow_pool,
-                    candidates=rotation_candidates, tencent_rows=quote_capture.tencent_rows,
+                    candidates=rotation_candidates, all_a_rows=quote_capture.all_a_rows,
                     quotes=shadow_quotes,
                     minute_features=shadow_minutes, peer_contexts=shadow_peer_contexts,
                 )

@@ -18,8 +18,8 @@ from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
 
-from .akshare_provider import AkShareProviderError, akshare_tencent_all_a_spot
 from .free_market_providers import sina_quotes
+from .fuyao_provider import FuyaoProviderError
 from .market_flow_repository import persist_market_snapshot_flow_feature
 from .market_snapshots import snapshot_status, summarize_quotes
 from .provider_health import record_provider_failure, record_provider_success
@@ -64,17 +64,17 @@ class MarketSnapshotActions:
         }
 
     @staticmethod
-    def tencent_enabled() -> bool:
-        """Use one Tencent all-A snapshot instead of dozens of public batches."""
-        return os.getenv("MARKET_SNAPSHOT_ENABLE_TENCENT_SNAPSHOT", "true").strip().lower() in {"1", "true", "yes", "on"}
+    def fuyao_enabled() -> bool:
+        """Use the documented Fuyao/THS full-market snapshot when configured."""
+        return bool((os.getenv("FUYAO_API_KEY") or "").strip())
 
     @staticmethod
-    def tencent_quotes(
+    def fuyao_quotes(
         rows: list[dict[str, Any]],
         exchange_date: date,
         quote_mapper: Callable[[dict[str, Any]], dict[str, Any] | None],
     ) -> list[dict[str, Any]]:
-        """Normalize the already-used Tencent all-A cross-section for storage."""
+        """Normalize the documented Fuyao all-A cross-section for storage."""
         result: list[dict[str, Any]] = []
         for row in rows:
             quote = quote_mapper(row)
@@ -82,9 +82,8 @@ class MarketSnapshotActions:
                 continue
             result.append({
                 "ts_code": quote["symbol"], "name": quote.get("name"), "close": quote.get("price"),
-                "pct_chg": quote.get("pct_change"), "vol": row.get("vol") or row.get("volume"),
-                "amount": quote.get("turnover"), "volume_ratio": quote.get("volume_ratio"),
-                "turnover_rate": quote.get("turnover_rate"), "main_net_inflow": quote.get("main_net_inflow"),
+                "pct_chg": quote.get("pct_change"), "vol": quote.get("volume"),
+                "amount": quote.get("turnover"),
                 "trade_date": exchange_date.strftime("%Y%m%d"), "source_session_date_inferred": True,
             })
         return result
@@ -126,7 +125,7 @@ class MarketSnapshotActions:
         planned_public_requests: int,
         refresh_error: str | None,
         refresh_skipped: str | None,
-        tencent_status: dict[str, Any],
+        fuyao_status: dict[str, Any],
     ) -> dict[str, Any]:
         """Read fresh evidence and write the idempotent snapshot in one DB worker."""
         fresh_after = observed_at - timedelta(minutes=10)
@@ -172,7 +171,7 @@ class MarketSnapshotActions:
                 "stale_quote_dates": stale_quote_dates,
                 "refresh_error": refresh_error,
                 "refresh_skipped": refresh_skipped,
-                "tencent_snapshot": tencent_status,
+                "fuyao_snapshot": fuyao_status,
                 "licensed_providers": sorted(licensed_providers),
                 "public_quotes_are_supplemental": True,
                 "public_quote_batch": {**public_quote_settings, "planned_requests": planned_public_requests},
@@ -205,12 +204,12 @@ class MarketSnapshotActions:
         request: Any,
         *,
         run_database: Callable[..., Awaitable[Any]],
-        run_akshare: Callable[..., Awaitable[Any]],
+        fetch_fuyao_all_a: Callable[[], Awaitable[tuple[list[dict[str, Any]], dict[str, Any]]]],
         provider_capabilities: Callable[[str, list[str]], Awaitable[set[str]]],
         quote_mapper: Callable[[dict[str, Any]], dict[str, Any] | None],
         thresholds: Callable[[], tuple[int, float, set[str]]],
         public_quote_settings: Callable[[], dict[str, int | bool]],
-        tencent_enabled: Callable[[], bool],
+        fuyao_enabled: Callable[[], bool],
         universe_symbols: Callable[[str], list[str]],
         persist_batch: Callable[[str, list[dict[str, Any]], int | None], int],
         persist_failure: Callable[[str, str, int | None], None],
@@ -228,45 +227,46 @@ class MarketSnapshotActions:
         symbols = await run_database(universe_symbols, request.universe_key)
         refresh_error = None
         refresh_skipped = None
-        tencent_status: dict[str, Any] = {"enabled": tencent_enabled(), "status": "not_attempted"}
+        fuyao_status: dict[str, Any] = {"enabled": fuyao_enabled(), "status": "not_attempted"}
         planned_public_requests = math.ceil(len(symbols) / int(settings["batch_size"])) if symbols else 0
-        tencent_circuit_open = False
+        fuyao_circuit_open = False
         sina_circuit_open = False
         if request.refresh_public_quotes and len(symbols) >= minimum_universe:
-            tencent_circuit_open = "realtime_quote" in await provider_capabilities("tencent_free", ["realtime_quote"])
+            fuyao_circuit_open = "realtime_quote" in await provider_capabilities("fuyao_ths", ["realtime_quote"])
             if settings["enabled"]:
                 sina_circuit_open = "realtime_quote" in await provider_capabilities("sina_free", ["realtime_quote"])
-        if request.refresh_public_quotes and tencent_enabled() and len(symbols) >= minimum_universe and tencent_circuit_open:
-            tencent_status = {"enabled": True, "status": "circuit_open", "notice": "provider health circuit is open; upstream request skipped"}
-        elif request.refresh_public_quotes and tencent_enabled() and len(symbols) >= minimum_universe:
+        if request.refresh_public_quotes and fuyao_enabled() and len(symbols) >= minimum_universe and fuyao_circuit_open:
+            fuyao_status = {"enabled": True, "status": "circuit_open", "notice": "provider health circuit is open; upstream request skipped"}
+        elif request.refresh_public_quotes and fuyao_enabled() and len(symbols) >= minimum_universe:
             try:
                 started_at = asyncio.get_running_loop().time()
-                raw_tencent_rows = await run_akshare(akshare_tencent_all_a_spot, timeout_seconds=25)
+                raw_fuyao_rows, upstream_status = await fetch_fuyao_all_a()
                 stored = await run_database(
-                    persist_batch, "tencent_free", self.tencent_quotes(raw_tencent_rows, exchange_date, quote_mapper),
+                    persist_batch, "fuyao_ths", self.fuyao_quotes(raw_fuyao_rows, exchange_date, quote_mapper),
                     round((asyncio.get_running_loop().time() - started_at) * 1000), timeout_seconds=60,
                 )
-                tencent_status = {
-                    "enabled": True, "status": "completed", "upstream_rows": len(raw_tencent_rows), "stored": stored,
+                fuyao_status = {
+                    "enabled": True, "status": "completed", "upstream_rows": len(raw_fuyao_rows), "stored": stored,
                     "session_date_inferred": True,
+                    "upstream": upstream_status,
                 }
             except ExecutorSaturatedError as error:
                 detail = safe_error_detail(str(error), 500)
-                # Local queue pressure says nothing about Tencent availability.
+                # Local queue pressure says nothing about supplier availability.
                 # Keep the provider circuit untouched and allow Sina below.
-                tencent_status = {"enabled": True, "status": "local_capacity", "error": detail}
-            except (asyncio.TimeoutError, AkShareProviderError, ValueError) as error:
+                fuyao_status = {"enabled": True, "status": "local_capacity", "error": detail}
+            except (asyncio.TimeoutError, FuyaoProviderError, ValueError) as error:
                 detail = safe_error_detail(str(error), 500)
-                tencent_status = {"enabled": True, "status": "failed", "error": detail}
+                fuyao_status = {"enabled": True, "status": "failed", "error": detail}
                 latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
-                await run_database(persist_failure, "tencent_free", detail, latency_ms)
-        elif request.refresh_public_quotes and not tencent_enabled() and not settings["enabled"]:
+                await run_database(persist_failure, "fuyao_ths", detail, latency_ms)
+        elif request.refresh_public_quotes and not fuyao_enabled() and not settings["enabled"]:
             refresh_skipped = "public_quote_batch_disabled"
         elif request.refresh_public_quotes and len(symbols) < minimum_universe:
             refresh_skipped = "universe_below_minimum"
-        elif request.refresh_public_quotes and tencent_status["status"] != "completed" and settings["enabled"] and sina_circuit_open:
+        elif request.refresh_public_quotes and fuyao_status["status"] != "completed" and settings["enabled"] and sina_circuit_open:
             refresh_skipped = "sina_realtime_quote_circuit_open"
-        elif request.refresh_public_quotes and tencent_status["status"] != "completed" and settings["enabled"]:
+        elif request.refresh_public_quotes and fuyao_status["status"] != "completed" and settings["enabled"]:
             try:
                 started_at = asyncio.get_running_loop().time()
                 fetched = await sina_quotes(
@@ -282,6 +282,6 @@ class MarketSnapshotActions:
                 await run_database(persist_failure, "sina_free", refresh_error, latency_ms)
         return await run_database(
             finalize, request, observed_at, exchange_date, symbols, minimum_universe, minimum_coverage,
-            licensed_providers, settings, planned_public_requests, refresh_error, refresh_skipped, tencent_status,
+            licensed_providers, settings, planned_public_requests, refresh_error, refresh_skipped, fuyao_status,
             timeout_seconds=60,
         )

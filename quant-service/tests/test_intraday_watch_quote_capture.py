@@ -9,7 +9,7 @@ from app.runtime_executors import ExecutorSaturatedError
 class WatchQuoteCaptureTests(unittest.TestCase):
     @staticmethod
     def dependencies(*, all_a_snapshot, tencent_watch_quotes, sina_quotes, eastmoney_watch_flows, calls):
-        def quote_from_tencent(row):
+        def quote_from_all_a(row):
             return dict(row)
 
         def merge_eastmoney_flows(quotes, rows):
@@ -37,7 +37,7 @@ class WatchQuoteCaptureTests(unittest.TestCase):
         return WatchQuoteCaptureDependencies(
             now=lambda: 10.0, all_a_snapshot=all_a_snapshot, tencent_watch_quotes=tencent_watch_quotes,
             sina_quotes=sina_quotes, eastmoney_watch_flows=eastmoney_watch_flows,
-            quote_from_tencent=quote_from_tencent, merge_eastmoney_flows=merge_eastmoney_flows,
+            quote_from_all_a=quote_from_all_a, merge_eastmoney_flows=merge_eastmoney_flows,
             annotate_percentiles=annotate_percentiles, annotate_flow_provenance=annotate_provenance,
             merge_watch_prices=merge_watch_prices, merge_sina_prices=merge_sina_prices,
             quote_freshness=lambda *_: {"status": "fresh"},

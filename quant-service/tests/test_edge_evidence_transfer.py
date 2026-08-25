@@ -20,7 +20,7 @@ class EdgeEvidenceTransferTests(unittest.TestCase):
         base_health = {"status": "ok", "optional_background_tasks": {"runtime_profile": "intraday_edge"}, "build": {"git_sha": "a1b2c3d"}}
         healthy_status = {
             "session_active": True, "session_reason": "continuous auction", "items": [
-                {"key": "tencent_realtime", "expected_active": True, "state": "healthy", "last_observed_at": now.isoformat(), "age_seconds": 4, "max_age_seconds": 45, "last_error": None},
+                {"key": "fuyao_ths_realtime", "expected_active": True, "state": "healthy", "last_observed_at": now.isoformat(), "age_seconds": 4, "max_age_seconds": 45, "last_error": None},
                 {"key": "feishu_alert", "expected_active": True, "state": "ready", "last_observed_at": None, "age_seconds": None, "max_age_seconds": None, "last_error": None},
             ],
         }

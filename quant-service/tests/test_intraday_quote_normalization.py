@@ -10,7 +10,7 @@ from app.intraday_quote_normalization import (
     merge_sina_watch_quotes,
     merge_watch_quote_prices,
     observation_source,
-    quote_from_tencent,
+    quote_from_fuyao,
 )
 
 
@@ -48,11 +48,10 @@ class IntradayQuoteNormalizationTests(unittest.TestCase):
         self.assertEqual(quotes["a"]["main_flow_percentile"], 0.0)
         self.assertEqual(quotes["b"]["main_flow_percentile"], 1.0)
 
-    def test_tencent_mapper_does_not_claim_invalid_codes(self) -> None:
-        mapper = lambda item: f"{item['代码']}.SZ" if item["代码"] == "000001" else None
-        quote = quote_from_tencent({"code": "sz000001", "zxj": "10", "zdf": "1.2"}, symbol_from_code=mapper, number=number)
+    def test_fuyao_mapper_does_not_claim_invalid_codes(self) -> None:
+        quote = quote_from_fuyao({"symbol": "000001.SZ", "price": "10", "pct_change": "1.2"})
         self.assertEqual(quote["symbol"] if quote else None, "000001.SZ")
-        self.assertIsNone(quote_from_tencent({"code": "bad"}, symbol_from_code=mapper, number=number))
+        self.assertIsNone(quote_from_fuyao({"symbol": "bad", "price": "10"}))
 
 
 if __name__ == "__main__":

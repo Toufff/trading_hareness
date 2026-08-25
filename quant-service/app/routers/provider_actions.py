@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..request_models import (
     AkShareProbeRequest,
+    FuyaoQueryRequest,
     RealtimeProbeRequest,
     StockStudyRequest,
     TushareCapabilityAuditRequest,
@@ -30,6 +31,7 @@ class ProviderActionDependencies:
     tushare_audit: Callable[[TushareCapabilityAuditRequest], Awaitable[dict[str, Any]]]
     tushare_fetch: Callable[[TushareFetchRequest], Awaitable[dict[str, Any]]]
     stock_study: Callable[[str, StockStudyRequest], Awaitable[dict[str, Any]]]
+    fuyao_query: Callable[[FuyaoQueryRequest], Awaitable[dict[str, Any]]] | None = None
 
 
 def build_provider_actions_router(deps: ProviderActionDependencies) -> APIRouter:
@@ -51,6 +53,12 @@ def build_provider_actions_router(deps: ProviderActionDependencies) -> APIRouter
     @router.post("/api/v1/providers/tushare/fetch")
     async def tushare_fetch(payload: TushareFetchRequest) -> dict[str, Any]:
         return await deps.tushare_fetch(payload)
+
+    @router.post("/api/v1/providers/fuyao/query")
+    async def fuyao_query(payload: FuyaoQueryRequest) -> dict[str, Any]:
+        if deps.fuyao_query is None:
+            raise HTTPException(status_code=503, detail="Fuyao provider is not configured")
+        return await deps.fuyao_query(payload)
 
     @router.post("/api/v1/stocks/{symbol}/study")
     async def stock_study(symbol: str, payload: StockStudyRequest | None = None) -> dict[str, Any]:

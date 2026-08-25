@@ -9,7 +9,9 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
         self.assertEqual(scan.symbols, ["600176.SH"])
         expanded_scan = IntradayScanRequest(symbols=[f"{600000 + index:06d}.SH" for index in range(21)])
         self.assertEqual(len(expanded_scan.symbols), 21)
-        quote = intraday_quote_from_tencent({"code": "sh600176", "name": "中国巨石", "zxj": "42.10", "zdf": "2.1", "lb": "2.3", "hsl": "4.2", "zljlr": "123.0"})
+        quote = intraday_quote_from_fuyao({"symbol": "600176.SH", "name": "中国巨石", "price": "42.10", "pct_change": "2.1"})
+        quote.update({"price_source": "tencent_batched_watch_quote", "volume_ratio": 2.3, "turnover_rate": 4.2,
+                      "main_net_inflow": 123.0})
         self.assertEqual(quote["symbol"], "600176.SH")
         entry_watch = {"symbol": "600176.SH", "available_quantity": 0, "alert_on_entry": True, "alert_on_exit": True}
         entry = intraday_signal_rules(entry_watch, quote, {"price": 42.00})
@@ -185,4 +187,3 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
         )
         self.assertFalse(result["allow_confirmation"])
         self.assertIn("public_flow_snapshot_not_fresh", result["reason_codes"])
-

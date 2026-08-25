@@ -131,15 +131,14 @@ class StrategyRuleRegressionTests(unittest.TestCase):
         self.assertEqual(metrics["defensive_inflow_boards"], ["贵金属", "银行"])
         self.assertEqual(metrics["technology_outflow_boards"], ["半导体", "通信设备"])
 
-    def test_tencent_snapshot_quotes_keep_inferred_exchange_date(self):
-        quotes = tencent_snapshot_quotes([
-            {"code": "sh600176", "name": "中国巨石", "zxj": "43.28", "zdf": "-2.48", "lb": "1.2", "hsl": "3.0", "zljlr": "12", "turnover": "100"},
+    def test_fuyao_snapshot_quotes_keep_inferred_exchange_date(self):
+        quotes = fuyao_snapshot_quotes([
+            {"symbol": "600176.SH", "name": "中国巨石", "price": "43.28", "pct_change": "-2.48", "volume": "12", "turnover": "100"},
         ], date(2026, 8, 10))
         self.assertEqual(quotes[0]["ts_code"], "600176.SH")
         self.assertEqual(quotes[0]["trade_date"], "20260810")
-        self.assertEqual(quotes[0]["volume_ratio"], 1.2)
-        self.assertEqual(quotes[0]["turnover_rate"], 3.0)
-        self.assertEqual(quotes[0]["main_net_inflow"], 12.0)
+        self.assertEqual(quotes[0]["vol"], 12.0)
+        self.assertNotIn("main_net_inflow", quotes[0])
         self.assertTrue(quotes[0]["source_session_date_inferred"])
 
     def test_free_provider_symbol_routing_is_explicit(self):

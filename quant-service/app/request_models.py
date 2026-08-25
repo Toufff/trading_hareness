@@ -15,6 +15,13 @@ from .tushare_official import AUDIT_FOCUS_APIS, official_spec
 from .tushare_providers import ProviderPreference
 
 
+class FuyaoQueryRequest(BaseModel):
+    """One allowlisted Fuyao REST query; it never writes provider data."""
+
+    capability: str = Field(pattern=r"^[a-z][a-z0-9_]{2,100}$")
+    params: dict[str, str | int | float | bool | None] = Field(default_factory=dict, max_length=30)
+
+
 class DailyBar(BaseModel):
     symbol: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
     trading_date: date

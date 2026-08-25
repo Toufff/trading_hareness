@@ -60,7 +60,7 @@ def prepare_intraday_scan_inputs(
     source_status: dict[str, Any],
     watches: list[dict[str, Any]],
     quotes: dict[str, dict[str, Any]],
-    tencent_rows: list[dict[str, Any]],
+    all_a_rows: list[dict[str, Any]],
     quote_latency_ms: int,
     tushare_minutes: dict[str, dict[str, Any]],
     surge_features: dict[str, dict[str, Any]],
@@ -74,11 +74,11 @@ def prepare_intraday_scan_inputs(
     """
     local_trade_date = observed_at.astimezone(timezone(timedelta(hours=8))).date()
     dependencies.roll_positions_sellable(connection, trading_date=local_trade_date)
-    if tencent_rows:
-        dependencies.record_provider_success(connection, "tencent_free", "realtime_quote", len(tencent_rows), quote_latency_ms)
+    if all_a_rows:
+        dependencies.record_provider_success(connection, "fuyao_ths", "realtime_quote", len(all_a_rows), quote_latency_ms)
     else:
         dependencies.record_provider_failure(
-            connection, "tencent_free", "realtime_quote", "all-A Tencent snapshot unavailable during watch scan", quote_latency_ms,
+            connection, "fuyao_ths", "realtime_quote", "all-A Fuyao snapshot unavailable during watch scan", quote_latency_ms,
         )
     connection.execute(
         """INSERT INTO quant.intraday_scan_runs(scan_id,observed_at,status,requested_symbols,source_status,summary)

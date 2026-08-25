@@ -102,9 +102,10 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
     raw = {str(row["api_name"]): dict(row) for row in raw_rows}
     completed_scan = dict(latest_completed_scan or {})
     completed_scan_source_status = dict(completed_scan.get("source_status") or {})
-    latest_watch_quote_status = dict(completed_scan_source_status.get("tencent") or {})
+    latest_fuyao_status = dict(completed_scan_source_status.get("fuyao") or {})
+    latest_watch_quote_status = dict(completed_scan_source_status.get("tencent_watch") or {})
     public_flow_snapshot, public_flow_snapshot_eligible = _public_flow_snapshot_readiness(
-        latest_watch_quote_status.get("all_a_snapshot")
+        latest_fuyao_status.get("all_a_snapshot")
     )
 
     def most_recent_health(keys: tuple[str, ...], capabilities: tuple[str, ...]) -> dict[str, Any]:
@@ -131,8 +132,8 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
         }
 
     scan_observed_at = latest_completed_scan["observed_at"] if latest_completed_scan else None
-    tencent_quote = quotes.get("tencent_free", {})
-    tencent_health = most_recent_health(("tencent_free",), ("realtime_quote",))
+    fuyao_quote = quotes.get("fuyao_ths", {})
+    fuyao_health = most_recent_health(("fuyao_ths",), ("realtime_quote",))
     order_book_quote = quotes.get("tencent_order_book", {})
     order_book_health = most_recent_health(("tencent_free",), ("order_book_quote",))
     fast_quote = quotes.get("tushare_super_get_rt_k", {})
@@ -157,18 +158,16 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
                      "rule_input_snapshots": deps.json_safe(rule_input_snapshots)},
         ),
         runtime_item(
-            key="tencent_realtime", label="腾讯全 A 实时行情", role="观察池全覆盖报价、量比、换手与主力流",
+            key="fuyao_ths_realtime", label="同花顺全 A 实时行情", role="全市场最新价、涨跌、成交量与成交额横截面",
             configured=True, expected_active=session_active,
-            last_observed_at=tencent_quote.get("last_observed_at") or scan_observed_at,
+            last_observed_at=fuyao_quote.get("last_observed_at") or scan_observed_at,
             max_age_seconds=25.0 if special_window else max(45.0, normal_interval * 1.8),
-            cadence="特别窗口 10 秒；其他连续竞价 30 秒", health_row=tencent_health,
-            details={"persisted_rows": int(tencent_quote.get("rows") or 0),
-                     "latest_watch_quote_coverage": deps.json_safe(latest_watch_quote_status) if latest_watch_quote_status else None,
-                     "decision_eligible_watch_quote_symbols": int(latest_watch_quote_status.get("decision_eligible_watch_quote_symbols") or 0),
-                     "sina_fallback_watch_quote_symbols": int(latest_watch_quote_status.get("sina_fallback_watch_quote_symbols") or 0),
-                     "all_a_only_watch_quote_symbols": int(latest_watch_quote_status.get("all_a_only_watch_quote_symbols") or 0),
-                     "public_flow_snapshot": deps.json_safe(public_flow_snapshot) if public_flow_snapshot else None,
-                     "public_flow_snapshot_decision_eligible": public_flow_snapshot_eligible},
+            cadence="特别窗口 10 秒；其他连续竞价 30 秒", health_row=fuyao_health,
+            details={"persisted_rows": int(fuyao_quote.get("rows") or 0),
+                     "latest_all_a_coverage": deps.json_safe(latest_fuyao_status) if latest_fuyao_status else None,
+                     "all_a_only_watch_quote_symbols": int(latest_fuyao_status.get("all_a_only_watch_quote_symbols") or 0),
+                     "snapshot": deps.json_safe(public_flow_snapshot) if public_flow_snapshot else None,
+                     "main_flow_semantics": "not_provided_by_fuyao; Eastmoney flow stays separately source-labelled"},
         ),
         runtime_item(
             key="tencent_order_book", label="腾讯观察池五档盘口", role="QI、OFI 近似、内外盘差分与区间 VWAP 的研究证据",
@@ -227,25 +226,22 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
         ),
     ]
     # A recent full-market snapshot alone must not paint the decision path
-    # green.  At least one current scan must contain a fresh direct Tencent
+    # green. At least one current scan must contain a fresh direct Tencent
     # watch quote for every enabled symbol before a human-facing alert can be
     # confirmed; Sina/all-A evidence remains visible in the details instead.
     required_watch_quotes = int(watch_row["enabled"] or 0)
     confirmed_watch_quotes = int(latest_watch_quote_status.get("decision_eligible_watch_quote_symbols") or 0)
     if session_active and required_watch_quotes and confirmed_watch_quotes < required_watch_quotes:
-        tencent_item = items[1]
-        tencent_item["state"] = "degraded"
-        tencent_item["last_error"] = (
+        order_book_item = items[2]
+        order_book_item["state"] = "degraded"
+        order_book_item["last_error"] = (
             f"fresh direct Tencent watch quotes cover {confirmed_watch_quotes}/{required_watch_quotes}; "
             "fallback/all-A evidence cannot confirm alerts"
         )
     if session_active and public_flow_snapshot_eligible is False:
-        tencent_item = items[1]
-        tencent_item["state"] = "degraded"
-        flow_error = "public all-A flow snapshot is stale or unavailable; new flow-dependent entries are blocked"
-        tencent_item["last_error"] = "; ".join(
-            part for part in (str(tencent_item.get("last_error") or "").strip(), flow_error) if part
-        )
+        fuyao_item = items[1]
+        fuyao_item["state"] = "degraded"
+        fuyao_item["last_error"] = "Fuyao all-A price/turnover snapshot is stale or unavailable"
     latest_board_feed = latest_board_curve or latest_board
     if board_session_active and latest_board_feed and latest_board_feed["status"] not in {"completed", "partial"}:
         board_summary = latest_board["summary"] if latest_board and isinstance(latest_board["summary"], dict) else {}

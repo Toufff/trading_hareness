@@ -73,7 +73,7 @@ class IntradayWatchlistScanServiceTests(unittest.TestCase):
             self.assertEqual(symbols, ["000001.SZ"])
             self.assertEqual(slo, 20.0)
             return SimpleNamespace(
-                quotes={"000001.SZ": {"price": 10.0}}, tencent_rows=[{"symbol": "000001.SZ"}],
+                quotes={"000001.SZ": {"price": 10.0}}, all_a_rows=[{"symbol": "000001.SZ"}],
                 fresh_watch_rows=[{"symbol": "000001.SZ"}], sina_watch_rows=[], eastmoney_watch_flow_rows=[],
                 all_a_snapshot_status={"status": "fresh", "cross_sectional": True}, latency_ms=9,
             )

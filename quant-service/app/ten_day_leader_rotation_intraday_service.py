@@ -11,7 +11,7 @@ from typing import Any, Callable
 @dataclass(frozen=True)
 class TenDayLeaderRotationIntradayDependencies:
     database: Any
-    quote_from_tencent: Callable[[dict[str, Any]], dict[str, Any] | None]
+    quote_from_all_a: Callable[[dict[str, Any]], dict[str, Any] | None]
     quote_source: Callable[[dict[str, Any] | None], str]
     market_context_batch: Callable[[Any, list[tuple[datetime, str]]], dict[tuple[datetime, str], dict[str, Any]]]
     evaluate: Callable[..., list[dict[str, Any]]]
@@ -21,7 +21,7 @@ class TenDayLeaderRotationIntradayDependencies:
 
 def persist_ten_day_leader_rotation_intraday(
     *, scan_id: Any, observed_at: datetime, pool: dict[str, Any], candidates: list[dict[str, Any]],
-    tencent_rows: list[dict[str, Any]], quotes: dict[str, dict[str, Any]], minute_features: dict[str, dict[str, Any]],
+    all_a_rows: list[dict[str, Any]], quotes: dict[str, dict[str, Any]], minute_features: dict[str, dict[str, Any]],
     peer_contexts: dict[str, dict[str, Any]], dependencies: TenDayLeaderRotationIntradayDependencies,
 ) -> dict[str, Any]:
     """Evaluate only the bounded selected slice; no alert or order path exists."""
@@ -31,8 +31,8 @@ def persist_ten_day_leader_rotation_intraday(
     quote_by_symbol: dict[str, dict[str, Any]] = {
         str(symbol).upper(): dict(value) for symbol, value in quotes.items()
     }
-    for raw in tencent_rows:
-        normalized = dependencies.quote_from_tencent(dict(raw))
+    for raw in all_a_rows:
+        normalized = dependencies.quote_from_all_a(dict(raw))
         if normalized and normalized.get("symbol"):
             quote_by_symbol[str(normalized["symbol"]).upper()] = normalized
     symbols = [str(item.get("symbol") or "").upper() for item in candidates]

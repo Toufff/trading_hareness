@@ -12,7 +12,7 @@ async def run(
     *,
     run_public_blocking: Callable[..., Awaitable[Any]],
     board_flow: Callable[[str], Any],
-    all_a_spot: Callable[[], Any],
+    all_a_snapshot: Callable[[], Awaitable[tuple[list[dict[str, Any]], dict[str, Any]]]],
     build_membership_report: Callable[..., Awaitable[Any]],
     hydrate_members: Callable[[str, list[dict[str, Any]], int], Awaitable[list[dict[str, Any]]]],
     member_symbol: Callable[[dict[str, Any]], str | None],
@@ -26,26 +26,26 @@ async def run(
     try:
         collected = await asyncio.gather(
             *(run_public_blocking(board_flow, kind, timeout_seconds=20) for kind in kinds),
-            run_public_blocking(all_a_spot, timeout_seconds=20),
+            all_a_snapshot(),
         )
-        *flow_parts, quote_rows = collected
+        *flow_parts, all_a_result = collected
+        quote_rows, _snapshot_status = all_a_result
     except executor_saturated_error as error:
         return {"status": "blocked", "reason": safe_error(str(error), 300),
-                "sources": {"eastmoney": "not_started", "tencent": "not_started"}}
+                "sources": {"eastmoney": "not_started", "fuyao": "not_started"}}
     except asyncio.TimeoutError:
-        return {"status": "blocked", "reason": "Eastmoney/Tencent live request exceeded 20 second budget",
-                "sources": {"eastmoney": "attempted", "tencent": "attempted"}}
+        return {"status": "blocked", "reason": "Eastmoney/Fuyao live request exceeded 20 second budget",
+                "sources": {"eastmoney": "attempted", "fuyao": "attempted"}}
     except (provider_error, ValueError) as error:
         return {"status": "blocked", "reason": safe_error(str(error), 500),
-                "sources": {"eastmoney": "attempted", "tencent": "attempted"}}
+                "sources": {"eastmoney": "attempted", "fuyao": "attempted"}}
     quotes: dict[str, dict[str, Any]] = {}
     for row in quote_rows:
-        symbol = member_symbol({"代码": str(row.get("code") or "")[2:]})
+        symbol = str(row.get("symbol") or "").upper()
         if symbol:
             quotes[symbol] = {
-                "symbol": symbol, "name": row.get("name"), "pct_change": number(row.get("zdf")),
-                "volume_ratio": number(row.get("lb")), "turnover_rate": number(row.get("hsl")),
-                "main_net_inflow": number(row.get("zljlr")), "turnover": number(row.get("turnover")),
+                "symbol": symbol, "name": row.get("name"), "pct_change": number(row.get("pct_change")),
+                "turnover": number(row.get("turnover")),
             }
     hydration: dict[str, list[dict[str, Any]]] = {}
     if request.hydrate_top_boards:
@@ -56,7 +56,7 @@ async def run(
     )
     report.sort(key=lambda item: (item["taxonomy_key"], -(item["net_inflow"] or 0), item["label"]))
     return {
-        "status": "completed", "rank_by": "tencent_main_net_inflow", "decision_eligible": False,
+        "status": "completed", "rank_by": "eastmoney_board_flow_then_fuyao_turnover", "decision_eligible": False,
         "coverage": coverage, "items": report, "_runtime_quotes": quotes, "membership_hydration": hydration,
         "tushare_context": {
             "sector_close_flow": sector_context, "stock_daily_flow": stock_context,

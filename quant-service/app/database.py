@@ -1405,7 +1405,7 @@ INSERT INTO quant.providers(provider_key,label) VALUES
     ('tushare_backup','Tushare REST 备用源'),
     ('akshare','AKShare'), ('baostock','BaoStock'),
     ('eastmoney_free','东方财富公开行情'), ('tencent_free','腾讯财经公开日线'), ('sina_free','新浪财经公开报价'),
-    ('cninfo_free','巨潮资讯公开公告'),
+    ('cninfo_free','巨潮资讯公开公告'), ('fuyao_ths','同花顺 Fuyao 数据服务'),
     ('remote_archive','远端市场复盘档案 API')
 ON CONFLICT(provider_key) DO NOTHING;
 
@@ -1527,6 +1527,7 @@ INSERT INTO quant.provider_capabilities(provider_key,capability,market,priority,
     ('tencent_free','daily_bar','cn',50,true,20),
     ('sina_free','realtime_quote','cn',55,true,10),
     ('cninfo_free','announcement','cn',35,true,20),
+    ('fuyao_ths','realtime_quote','cn',12,true,120),
     ('remote_archive','analyst_report','cn',10,true,60)
 ON CONFLICT(provider_key,capability,market) DO UPDATE SET
     priority=EXCLUDED.priority,enabled=EXCLUDED.enabled,
