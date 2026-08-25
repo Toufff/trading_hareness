@@ -1,4 +1,5 @@
-import type { InjectionKey } from 'vue';
+import type { InjectionKey, Ref } from 'vue';
+import type { useFeishuRelayWorkspace } from './composables/useFeishuRelayWorkspace';
 
 /**
  * Transitional shell context for independently mounted dashboard views.
@@ -11,3 +12,11 @@ import type { InjectionKey } from 'vue';
 export type DashboardContext = Record<string, unknown>;
 
 export const dashboardContextKey: InjectionKey<DashboardContext> = Symbol('quant-dashboard-context');
+
+/** Feature-scoped contract for the independently mounted Feishu workbench. */
+export type FeishuWorkbenchContext = ReturnType<typeof useFeishuRelayWorkspace> & {
+  mobileLayout: Ref<boolean>;
+  dateText: (value?: string | null) => string;
+};
+
+export const feishuWorkbenchContextKey: InjectionKey<FeishuWorkbenchContext> = Symbol('feishu-workbench-context');

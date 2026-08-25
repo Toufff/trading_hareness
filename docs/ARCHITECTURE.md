@@ -91,6 +91,8 @@ not import `app.main`.
 and shell-owned dialogs. `useDashboardWorkspace.ts` owns cross-domain polling,
 SSE lifecycle and research mutations; feature composables such as
 `useFeishuRelayWorkspace.ts` own their status, CRUD and operation state.
+Feature views receive a scoped typed injection contract where available rather
+than an unbounded dashboard record.
 Research tabs are independently lazy-loaded from
 `frontend/src/views/research/`; relay monitoring and Feishu workbench are their
 own views. New UI must join one of these owners instead of growing App.vue.

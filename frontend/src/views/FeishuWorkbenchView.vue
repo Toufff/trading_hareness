@@ -1,13 +1,14 @@
 <script lang="ts">
 import { defineComponent, inject } from 'vue';
-import { dashboardContextKey } from '../dashboard-context';
+import { Refresh } from '@element-plus/icons-vue';
+import { feishuWorkbenchContextKey } from '../dashboard-context';
 
 export default defineComponent({
   name: 'FeishuWorkbenchView',
   setup() {
-    const dashboard = inject(dashboardContextKey);
+    const dashboard = inject(feishuWorkbenchContextKey);
     if (!dashboard) throw new Error('Feishu workbench requires the dashboard shell context');
-    return dashboard as Record<string, any>;
+    return { ...dashboard, Refresh };
   },
 });
 </script>

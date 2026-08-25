@@ -12,7 +12,7 @@ import type { components } from '../api/generated';
 import { getJson, postJson } from '../api/http';
 import { useFeishuRelayWorkspace } from './useFeishuRelayWorkspace';
 import { usePolling } from './usePolling';
-import { dashboardContextKey } from '../dashboard-context';
+import { dashboardContextKey, feishuWorkbenchContextKey } from '../dashboard-context';
 
 
 
@@ -1081,6 +1081,7 @@ const dashboardBindings = {
     submitRelay,
 }
 provide('manual-relay', dashboardBindings);
+provide(feishuWorkbenchContextKey, { ...feishuRelayWorkspace, mobileLayout, dateText });
 provide(dashboardContextKey, dashboardBindings);
 return proxyRefs(dashboardBindings);
 }
