@@ -623,11 +623,12 @@ from .intraday_scan_signal_persistence import (
     IntradayScanSignalPersistenceDependencies,
 )
 from .intraday_scan_persistence_runtime import IntradayScanPersistenceRuntime
-from .intraday_watch_quote_capture import WatchQuoteCaptureDependencies, capture_watch_quotes
-from .intraday_watchlist_scan_service import (
-    IntradayWatchlistScanDependencies,
-    run_watchlist_scan,
+from .intraday_watch_quote_capture import WatchQuoteCaptureDependencies
+from .intraday_watchlist_scan_runtime import (
+    IntradayWatchlistScanRuntime,
+    IntradayWatchlistScanRuntimeDependencies,
 )
+from .intraday_watchlist_scan_service import run_watchlist_scan
 from .all_board_member_backfill_service import (
     AllBoardMemberBackfillDependencies,
     run as run_all_board_member_backfill_isolated,
@@ -2404,118 +2405,70 @@ async def prune_intraday_rule_input_evidence_if_due(observed_at: datetime) -> No
     await _intraday_rule_input_retention.prune_if_due(observed_at)
 
 
+def _intraday_watchlist_scan_runtime() -> IntradayWatchlistScanRuntime:
+    """Compose scan I/O ports without putting transactional closures in main."""
+    return IntradayWatchlistScanRuntime(IntradayWatchlistScanRuntimeDependencies(
+        clock=asyncio.get_running_loop().time,
+        observe_duration=lambda status, seconds: intraday_scan_duration_seconds.labels(status).observe(seconds),
+        now_utc=lambda: datetime.now(timezone.utc), new_scan_id=uuid.uuid4,
+        async_database=async_db, database=db, run_database=run_database_blocking,
+        watchlist_capacity=intraday_watchlist_capacity,
+        read_watchlists=read_async_intraday_scan_watchlists,
+        persist_terminal=persist_intraday_scan_terminal,
+        realtime_session=realtime_market_session_async,
+        prune_rule_inputs=prune_intraday_rule_input_evidence_if_due,
+        retry_pending_alerts=retry_pending_intraday_alerts,
+        read_exact_memberships=read_async_exact_watchlist_memberships,
+        mapped_peers=pure_mapped_watchlist_peers,
+        high_frequency_window=intraday_high_frequency_window,
+        quote_capture_dependencies=WatchQuoteCaptureDependencies(
+            now=asyncio.get_running_loop().time, all_a_snapshot=intraday_all_a_snapshot,
+            tencent_watch_quotes=tencent_order_book_quotes, sina_quotes=sina_quotes,
+            eastmoney_watch_flows=eastmoney_watch_flow_quotes, quote_from_all_a=intraday_quote_from_fuyao,
+            merge_eastmoney_flows=merge_intraday_eastmoney_watch_flows,
+            annotate_percentiles=annotate_intraday_flow_percentiles,
+            annotate_flow_provenance=pure_annotate_flow_snapshot_provenance,
+            merge_watch_prices=merge_intraday_watch_quote_prices,
+            merge_sina_prices=merge_intraday_sina_watch_quotes,
+            quote_freshness=intraday_quote_exchange_time_status,
+            consume_background_exception=consume_background_task_exception, safe_error=safe_error_detail,
+            executor_saturated_error=ExecutorSaturatedError,
+            watch_quote_errors=(httpx.HTTPError, FreeProviderError, ValueError),
+            all_a_snapshot_errors=(FuyaoProviderError, ValueError),
+        ),
+        surge_context=intraday_tencent_surge_context, peer_context=intraday_peer_context,
+        watch_priority_key=intraday_watch_priority_key,
+        realtime_validation_slice=intraday_realtime_validation_slice,
+        tushare_minutes=intraday_tushare_minutes,
+        fast_confirmations=latest_intraday_fast_quote_confirmations,
+        board_cache_evidence=intraday_board_cache_evidence,
+        build_source_status=build_scan_source_status,
+        persist_signals=persist_intraday_scan_signals,
+        read_shadow_pool=read_async_ten_day_leader_rotation_pool,
+        shadow_rotation_due=ten_day_leader_rotation_intraday_due,
+        shadow_rotation_slice=select_intraday_rotation_slice,
+        tencent_watch_quotes=tencent_order_book_quotes,
+        merge_watch_prices=merge_intraday_watch_quote_prices,
+        safe_error=safe_error_detail,
+        shadow_quote_errors=(httpx.HTTPError, FreeProviderError, ValueError),
+        rotation_persistence_dependencies=TenDayLeaderRotationIntradayDependencies(
+            database=db, quote_from_all_a=intraday_quote_from_fuyao,
+            quote_source=intraday_quote_observation_source,
+            market_context_batch=intraday_point_in_time_market_context_batch,
+            evaluate=evaluate_intraday_rotation_candidates,
+            persist=persist_intraday_rotation_observations, json_safe=strategy_json_safe,
+        ),
+        persist_rotation_observations=persist_ten_day_leader_rotation_intraday,
+        persist_rotation_scan_status=persist_intraday_rotation_scan_status,
+        json_safe=strategy_json_safe,
+        deliver_alert=deliver_intraday_alert, alert_text=intraday_alert_text,
+        decision_card_url=decision_card_url, run_scan=run_watchlist_scan,
+    ))
+
+
 async def run_intraday_watchlist_scan(request: IntradayScanRequest) -> dict[str, Any]:
     """Persist a bounded live scan.  The endpoint does not submit orders."""
-    scan_started_at = asyncio.get_running_loop().time()
-
-    def finish(payload: dict[str, Any]) -> dict[str, Any]:
-        intraday_scan_duration_seconds.labels(str(payload.get("status") or "unknown")).observe(
-            max(0.0, asyncio.get_running_loop().time() - scan_started_at)
-        )
-        return payload
-
-    async def load_watches(requested_symbols: list[str]) -> list[dict[str, Any]]:
-        # Fetch one extra row only to detect overflow.  It is unsafe to quietly
-        # scan the first 40 while presenting the result as a full decision.
-        capacity = int(intraday_watchlist_capacity(0)["max_symbols"])
-        return await read_async_intraday_scan_watchlists(async_db, requested_symbols, max_symbols=capacity)
-
-    async def persist_terminal(
-        scan_id: uuid.UUID, observed_at: datetime, status: str, requested_symbols: list[str],
-        source_status: dict[str, Any], summary: dict[str, Any],
-    ) -> None:
-        await run_database_blocking(
-            persist_intraday_scan_terminal, db, scan_id, observed_at, status, requested_symbols,
-            source_status, summary,
-        )
-
-    async def memberships(symbols: list[str], observed_at: datetime) -> list[dict[str, Any]]:
-        return await read_async_exact_watchlist_memberships(async_db, symbols, observed_at)
-
-    async def capture_quotes(symbols: list[str], observed_at: datetime, quote_timestamp_slo_seconds: float) -> Any:
-        return await capture_watch_quotes(
-            symbols, observed_at, quote_timestamp_slo_seconds,
-            WatchQuoteCaptureDependencies(
-                now=asyncio.get_running_loop().time, all_a_snapshot=intraday_all_a_snapshot,
-                tencent_watch_quotes=tencent_order_book_quotes, sina_quotes=sina_quotes,
-                eastmoney_watch_flows=eastmoney_watch_flow_quotes, quote_from_all_a=intraday_quote_from_fuyao,
-                merge_eastmoney_flows=merge_intraday_eastmoney_watch_flows,
-                annotate_percentiles=annotate_intraday_flow_percentiles,
-                annotate_flow_provenance=pure_annotate_flow_snapshot_provenance,
-                merge_watch_prices=merge_intraday_watch_quote_prices, merge_sina_prices=merge_intraday_sina_watch_quotes,
-                quote_freshness=intraday_quote_exchange_time_status,
-                consume_background_exception=consume_background_task_exception, safe_error=safe_error_detail,
-                executor_saturated_error=ExecutorSaturatedError,
-                watch_quote_errors=(httpx.HTTPError, FreeProviderError, ValueError),
-                all_a_snapshot_errors=(FuyaoProviderError, ValueError),
-            ),
-        )
-
-    async def persist_signals(*args: Any) -> list[dict[str, Any]]:
-        return await run_database_blocking(persist_intraday_scan_signals, *args, timeout_seconds=60)
-
-    async def shadow_pool() -> dict[str, Any]:
-        return await read_async_ten_day_leader_rotation_pool(async_db)
-
-    async def capture_shadow_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-        try:
-            rows = await tencent_order_book_quotes(symbols, max_symbols=40)
-        except (httpx.HTTPError, FreeProviderError, ValueError) as error:
-            return {}, {"status": "unavailable", "error": safe_error_detail(str(error), 240), "requested": len(symbols)}
-        quotes: dict[str, dict[str, Any]] = {}
-        merge_intraday_watch_quote_prices(quotes, rows)
-        return quotes, {"status": "completed", "requested": len(symbols), "matched": len(quotes),
-                        "source": "tencent_batched_watch_quote"}
-
-    async def persist_shadow_observations(**kwargs: Any) -> dict[str, Any]:
-        return await run_database_blocking(
-            lambda: persist_ten_day_leader_rotation_intraday(
-                dependencies=TenDayLeaderRotationIntradayDependencies(
-                    database=db, quote_from_all_a=intraday_quote_from_fuyao,
-                    quote_source=intraday_quote_observation_source,
-                    market_context_batch=intraday_point_in_time_market_context_batch,
-                    evaluate=evaluate_intraday_rotation_candidates,
-                    persist=persist_intraday_rotation_observations, json_safe=strategy_json_safe,
-                ),
-                **kwargs,
-            ),
-            timeout_seconds=30,
-        )
-
-    async def persist_shadow_status(scan_id: uuid.UUID, status: dict[str, Any]) -> None:
-        def write() -> None:
-            with db.transaction() as connection:
-                persist_intraday_rotation_scan_status(
-                    connection, scan_id=scan_id, status=status, json_safe=strategy_json_safe,
-                )
-        await run_database_blocking(
-            write,
-            timeout_seconds=10,
-        )
-
-    payload = await run_watchlist_scan(
-        request,
-        IntradayWatchlistScanDependencies(
-            now_utc=lambda: datetime.now(timezone.utc), new_scan_id=uuid.uuid4,
-            realtime_session=realtime_market_session_async, load_watches=load_watches,
-            watchlist_capacity=intraday_watchlist_capacity, persist_terminal=persist_terminal,
-            prune_rule_inputs=prune_intraday_rule_input_evidence_if_due, retry_pending_alerts=retry_pending_intraday_alerts,
-            load_exact_memberships=memberships, mapped_peers=pure_mapped_watchlist_peers,
-            high_frequency_window=intraday_high_frequency_window, capture_quotes=capture_quotes,
-            surge_context=intraday_tencent_surge_context, peer_context=intraday_peer_context,
-            watch_priority_key=intraday_watch_priority_key, realtime_validation_slice=intraday_realtime_validation_slice,
-            tushare_minutes=intraday_tushare_minutes, fast_confirmations=latest_intraday_fast_quote_confirmations,
-            board_cache_evidence=intraday_board_cache_evidence, build_source_status=build_scan_source_status,
-            persist_signals=persist_signals, shadow_pool=shadow_pool,
-            shadow_rotation_due=ten_day_leader_rotation_intraday_due,
-            shadow_rotation_slice=select_intraday_rotation_slice,
-            capture_shadow_quotes=capture_shadow_quotes,
-            persist_shadow_observations=persist_shadow_observations,
-            persist_shadow_status=persist_shadow_status, deliver_alert=deliver_intraday_alert,
-            alert_text=intraday_alert_text, decision_card_url=decision_card_url,
-        ),
-    )
-    return finish(payload)
+    return await _intraday_watchlist_scan_runtime().run(request)
 
 
 def intraday_board_curve_session(now: datetime | None = None) -> tuple[bool, str]:

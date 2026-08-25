@@ -8,8 +8,8 @@
 | Item | Current value |
 |---|---:|
 | Composition root | `quant-service/app/main.py` |
-| `main.py` top-level functions | 396 |
-| Python modules under `app/` | 329 |
+| `main.py` top-level functions | 397 |
+| Python modules under `app/` | 330 |
 | HTTP router modules | 36 |
 | Alembic migrations | 59 |
 | Frontend source files | 32 |
@@ -21,7 +21,7 @@ New behaviour should be owned by an existing domain package/owner.
 
 | Domain prefix | Top-level modules |
 |---|---:|
-| `intraday` | 60 |
+| `intraday` | 61 |
 | `async` | 40 |
 | `analyst` | 17 |
 | `strategy` | 13 |

@@ -51,7 +51,7 @@ not import `app.main`.
 | Provider transport | `app/*provider*.py`, `app/http_clients.py` | Reuse lifecycle clients and record availability. |
 | Evidence semantics | `app/platform/evidence_contracts.py` | Every normalized source declares provider, capability, scope, coverage semantics and decision eligibility before strategies consume it. |
 | Persistent projections | `app/*_repository.py`, `app/*_read_model.py` | Bound result sets; async dashboard reads use `AsyncDatabase`. |
-| Timing and recovery | `app/*_scheduler.py`, `app/runtime_tasks.py`, `app/runtime_composition.py` | Durable leases, idempotent run keys and explicit retry windows; the composition module binds lease ports without embedding them in the ASGI root. |
+| Timing and recovery | `app/*_scheduler.py`, `app/runtime_tasks.py`, `app/*_runtime.py` | Durable leases, idempotent run keys and explicit retry windows; runtime adapters bind scan I/O and lease ports without embedding transactional closures in the ASGI root. |
 | Runtime ownership | `app/platform/runtime_task_registry.py` | Each leased task declares one owner profile, expected cadence, upstream capabilities and retained evidence datasets; startup rejects an undeclared or missing task factory. |
 | Rules and research | `app/*_rules.py`, `app/*_research.py` | Keep inputs/outputs explicit and test without HTTP or database state. |
 | Strategy contracts | `app/platform/strategy_registry.py` | Every strategy declares its model/input contract, runtime owner, retained evidence and `live_effect=none`. |
