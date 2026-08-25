@@ -179,13 +179,13 @@ def edge_runtime_snapshot() -> dict[str, Any]:
     try:
         with urlopen("http://127.0.0.1:18110/health", timeout=3) as response:
             health = json.load(response)
-        with urlopen("http://127.0.0.1:18110/api/v1/intraday/services/status", timeout=3) as response:
-            intraday = json.load(response)
     except Exception as error:  # the evidence stream remains usable without the UI snapshot
         return {"status": "unavailable", "error": str(error)[:300]}
     resources = health.get("resources") if isinstance(health, dict) else {}
     disk = resources.get("disk") if isinstance(resources, dict) else {}
     storage = resources.get("research_storage") if isinstance(resources, dict) else {}
+    automation = health.get("intraday_automation") if isinstance(health, dict) else {}
+    automation = automation if isinstance(automation, dict) else {}
     return {
         "status": str(health.get("status") or "unknown"),
         "runtime_profile": (health.get("optional_background_tasks") or {}).get("runtime_profile"),
@@ -206,11 +206,14 @@ def edge_runtime_snapshot() -> dict[str, Any]:
             "managed": storage.get("managed") if isinstance(storage, dict) else None,
         },
         "intraday": {
-            "observed_at": intraday.get("observed_at"),
-            "session_active": intraday.get("session_active"),
-            "session_reason": intraday.get("session_reason"),
-            "summary": intraday.get("summary") or {},
-            "items": intraday.get("items") or [],
+            # The full services status can include a large strategy-detail
+            # payload during active sessions. It is intentionally not part of
+            # every evidence export: a slow dashboard read must never block
+            # the collector-to-research data handoff.
+            "session_active": automation.get("session_active"),
+            "session_reason": automation.get("session_reason"),
+            "summary": {},
+            "items": [],
         },
     }
 
