@@ -55,7 +55,7 @@ env APP_GIT_SHA="$release_sha" APP_RELEASE="$release_label" APP_BUILD_CREATED_AT
 env APP_GIT_SHA="$release_sha" APP_RELEASE="$release_label" APP_BUILD_CREATED_AT="$built_at" \
   docker compose up -d --no-deps quant-research feishu-adapter
 
-for attempt in {1..30}; do
+for attempt in {1..90}; do
   curl -fsS http://127.0.0.1:5681/health >/tmp/quant-local-release-health.json \
     && curl -fsS http://127.0.0.1:5680/health >/tmp/adapter-local-release-health.json && break
   sleep 2

@@ -112,7 +112,10 @@ EOF
   systemctl daemon-reload
   systemctl enable --now quant-intraday-edge-live-acceptance.timer
   systemctl restart quant-intraday-edge.service
-  for attempt in {1..30}; do curl -fsS http://127.0.0.1:18110/health >/tmp/quant-edge-release-health.json && break; sleep 2; done
+  # Alembic startup on the 2-core edge can exceed one minute when PostgreSQL is
+  # under ingestion load.  Keep the wait bounded but do not report a false
+  # rollback condition while systemd is still applying versioned migrations.
+  for attempt in {1..90}; do curl -fsS http://127.0.0.1:18110/health >/tmp/quant-edge-release-health.json && break; sleep 2; done
   test -s /tmp/quant-edge-release-health.json
   \"\$edge_root/.venv/bin/python\" - <<'PY'
 import json

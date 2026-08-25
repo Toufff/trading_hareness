@@ -29,6 +29,8 @@ from app.fuyao_provider import FuyaoProviderError, fetch_envelope
 STOCK = "600519.SH"
 FUND = "025480.OF"
 ETF = "510300.SH"
+SNAPSHOT_ETF = "588000.SH"
+HOLDER_FUND = "007784.OF"
 INDEX = "000300.SH"
 START_MS = 1735689600000  # 2025-01-01T00:00:00Z
 END_MS = 1767139200000  # 2025-12-31T00:00:00Z
@@ -74,14 +76,14 @@ def _base_cases() -> dict[str, dict[str, Any]]:
         "fund_financial_indicators": {"fund_type": "otc", "thscode": FUND},
         "fund_income_statements": {"fund_type": "otc", "thscode": FUND},
         "fund_balance_sheets": {"fund_type": "otc", "thscode": FUND},
-        "fund_holder_detail": {"fund_type": "otc", "thscode": FUND, "merge_scope": "all"},
+        "fund_holder_detail": {"fund_type": "otc", "thscode": HOLDER_FUND, "merge_scope": "all"},
         "fund_holder_top": {"fund_type": "exchange", "thscode": "588000.SH", "limit": 1},
         "fund_portfolio_holdings": {"fund_type": "otc", "thscode": FUND},
         "fund_manager_investment_style": {"manager_id": "H002417139"},
         "fund_manager_performance": {"manager_id": "H002417139", "range": "year"},
         "fund_manager_experience": {"manager_id": "H002417139"},
         "fund_manager_detail": {"manager_id": "H002417139"},
-        "fund_market_snapshot": {"thscode": ETF},
+        "fund_market_snapshot": {"thscode": SNAPSHOT_ETF},
         "fund_market_historical": {"thscode": ETF, "interval": "1d", "start": START_MS, "end": END_MS},
         "fund_news_article_list": {"fund_type": "otc", "thscode": FUND, "limit": 1},
         "fund_offerings_list": {"subscribe": "active"},
