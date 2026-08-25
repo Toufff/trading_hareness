@@ -13,6 +13,7 @@ def build_scan_source_status(
     fresh_watch_rows: list[dict[str, Any]],
     sina_watch_rows: list[dict[str, Any]],
     eastmoney_watch_flow_rows: list[dict[str, Any]],
+    eastmoney_watch_flow_status: dict[str, Any],
     all_a_snapshot_status: dict[str, Any],
     surge_source: dict[str, Any],
     priority_symbols: list[str],
@@ -69,9 +70,10 @@ def build_scan_source_status(
             "sina_watch_quote_rows": len(sina_watch_rows),
         },
         "eastmoney_watch_flow": {
-            "status": "completed" if eastmoney_watch_flow_rows else "not_used",
+            **eastmoney_watch_flow_status,
+            "status": "completed" if eastmoney_watch_flow_status.get("status") == "fresh" else "unavailable",
             "rows": len(eastmoney_watch_flow_rows), "scope": "explicit_watchlist_only",
-            "percentiles": "not_computed",
+            "percentiles": "not_computed", "research_confirmation_only": True,
         },
         "tencent_minute_context": surge_source,
         "tushare_rt_min": {

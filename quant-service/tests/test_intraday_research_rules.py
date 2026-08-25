@@ -105,6 +105,25 @@ class IntradayResearchRuleTests(unittest.TestCase):
         )
         self.assertFalse(any(item["signal_key"].endswith(":entry:fuyao_minute_breadth_v1") for item in suppressed))
 
+    def test_eastmoney_watch_flow_is_evidence_only_and_cannot_reenable_legacy_entry(self):
+        watch = {"symbol": "000001.SZ", "available_quantity": 0, "entry_price": None,
+                 "alert_on_entry": True, "alert_on_exit": True}
+        quote = {
+            "price": 10.4, "pct_change": 2.4, "volume_ratio": 3.5, "turnover_rate": 6.0,
+            "main_net_inflow": 1000, "price_source": "tencent_batched_watch_quote",
+            "price_freshness": {"status": "fresh"},
+            "flow_snapshot": {"scope": "explicit_watchlist_only", "cross_sectional": False,
+                              "decision_eligible": False},
+        }
+        minute = {"return_1m_pct": 0.9, "return_3m_pct": 1.8,
+                  "minute_volume_multiple": 3.4, "above_vwap_pct": 1.2}
+        peers = {"available_peer_count": 3, "confirming_peer_count": 2, "confirming_breadth": 0.67}
+        signals = intraday_signal_rules(watch, quote, {"price": 10.3}, None, minute, peers)
+        self.assertFalse(any(item["signal_key"] == "000001.SZ:entry:intraday-v1" for item in signals))
+        entry = next(item for item in signals if item["signal_key"] == "000001.SZ:entry:fuyao_minute_breadth_v1")
+        self.assertEqual(entry["conditions"]["flow_confirmation"], "eastmoney_watch_flow_observed_research_only")
+        self.assertIn("eastmoney_watch_flow_research_confirmation_only", entry["risk_flags"])
+
     def test_upside_breakout_research_requires_causal_high_volume_vwap_and_flow(self):
         rows = []
         prices = [10.0] * 20 + [10.05, 10.10, 10.25, 10.40]

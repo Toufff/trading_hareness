@@ -34,6 +34,8 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
     turnover_rate = turnover_rate_value if turnover_rate_value is not None else 0.0
     main_net_inflow = main_net_inflow_value if main_net_inflow_value is not None else 0.0
     main_flow_percentile = number(quote.get("main_flow_percentile"))
+    flow_snapshot = quote.get("flow_snapshot") if isinstance(quote.get("flow_snapshot"), dict) else {}
+    bounded_watch_flow_only = str(flow_snapshot.get("scope") or "") == "explicit_watchlist_only"
     previous_price = number((previous_quote or {}).get("price"))
     # Cost is the explicit position marker.  Sellable quantity is optional
     # because A-share T+1 and partial fills can make it temporarily unknown;
@@ -41,15 +43,26 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
     # because the user has not entered a share count.
     holding = watch.get("entry_price") is not None
     signals: list[dict[str, Any]] = []
-    missing_public_fields = [name for name, value in (
+    observed_public_fields = [name for name, value in (
         ("volume_ratio", volume_ratio_value), ("turnover_rate", turnover_rate_value),
         ("main_net_inflow", main_net_inflow_value),
     ) if value is None]
+    # Eastmoney supplies useful per-watch observations, but this selected
+    # basket is neither a cross-section nor an independent capital-flow
+    # universe. Keep it in evidence while treating it as unavailable for all
+    # legacy flow/ranking rules.
+    missing_public_fields = (
+        ["volume_ratio", "turnover_rate", "main_net_inflow"]
+        if bounded_watch_flow_only else observed_public_fields
+    )
+    if bounded_watch_flow_only:
+        volume_ratio = turnover_rate = main_net_inflow = 0.0
     common = {"price": price, "pct_change": pct_change, "volume_ratio": volume_ratio_value,
               "turnover_rate": turnover_rate_value, "main_net_inflow": main_net_inflow_value,
               "main_flow_percentile": main_flow_percentile, "price_above_previous_scan": previous_price is None or price > previous_price,
               "data_availability": {"missing_public_flow_fields": missing_public_fields,
-                                    "public_flow_available": not missing_public_fields},
+                                    "public_flow_available": not missing_public_fields,
+                                    "eastmoney_watch_flow_observed_research_only": bounded_watch_flow_only},
               "daily_factors": daily_factors or {"status": "not_available"},
               "minute_features": minute_features or {"status": "not_available"},
               "peer_context": peer_context or {"status": "not_available"}}
@@ -269,10 +282,12 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
                             52 + min(minute_volume_multiple, 8) * 3 + peer_breadth * 12, 2,
                         )), "hard": False, "independent_confirmation": True,
                         "conditions": {**common, "setup": "fuyao_minute_price_volume_plus_exact_peer_breadth",
-                                       "flow_confirmation": "not_required_fuyao_no_flow_semantics",
+                                       "flow_confirmation": ("eastmoney_watch_flow_observed_research_only"
+                                                             if bounded_watch_flow_only else "not_required_fuyao_no_flow_semantics"),
                                        "price_confirmation": "direct_watch_quote_above_previous_scan"},
                         "risk_flags": ["fuyao_no_public_main_flow", "minute_volume_proxy",
-                                       "independent_peer_confirmation", "requires_second_scan_confirmation",
+                        "independent_peer_confirmation", "requires_second_scan_confirmation",
+                                       *( ["eastmoney_watch_flow_research_confirmation_only"] if bounded_watch_flow_only else []),
                                        "manual_review_required", "no_automatic_order"]})
     entry_setup = (legacy_public_entry_inputs_available and not holding and bool(watch.get("alert_on_entry"))
                    and 1.0 <= pct_change <= 6.5 and volume_ratio >= 1.8 and turnover_rate >= 2.0

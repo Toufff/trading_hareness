@@ -125,7 +125,7 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
             "scope": "explicit_watchlist_only", "cross_sectional": False,
             "semantics": "watchlist_public_flow_proxy_not_exchange_order_flow",
         })
-        self.assertTrue(merged["000001.SZ"]["flow_snapshot"]["decision_eligible"])
+        self.assertFalse(merged["000001.SZ"]["flow_snapshot"]["decision_eligible"])
         self.assertFalse(merged["000001.SZ"]["flow_snapshot"]["cross_sectional"])
 
     def test_quote_exchange_timestamp_requires_one_current_shanghai_frame(self):

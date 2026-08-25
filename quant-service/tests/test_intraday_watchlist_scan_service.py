@@ -75,6 +75,7 @@ class IntradayWatchlistScanServiceTests(unittest.TestCase):
             return SimpleNamespace(
                 quotes={"000001.SZ": {"price": 10.0}}, all_a_rows=[{"symbol": "000001.SZ"}],
                 fresh_watch_rows=[{"symbol": "000001.SZ"}], sina_watch_rows=[], eastmoney_watch_flow_rows=[],
+                eastmoney_watch_flow_status={"status": "fresh", "scope": "explicit_watchlist_only"},
                 all_a_snapshot_status={"status": "fresh", "cross_sectional": True}, latency_ms=9,
             )
 

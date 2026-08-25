@@ -54,15 +54,19 @@ class WatchQuoteCaptureTests(unittest.TestCase):
             self.assertEqual(symbols, ["000001.SZ"])
             return [{"symbol": "000001.SZ", "close": 10.1}]
 
+        async def eastmoney(symbols, **_kwargs):
+            self.assertEqual(symbols, ["000001.SZ"])
+            return [{"symbol": "000001.SZ", "main_net_inflow": 12.0}]
+
         async def unexpected(*_args, **_kwargs):
-            raise AssertionError("fallback must not be called when direct watch prices exist")
+            raise AssertionError("Sina must not be called when direct watch prices exist")
 
         calls = []
         capture = asyncio.run(capture_watch_quotes(
             ["000001.SZ"], datetime(2026, 8, 22, 1, tzinfo=timezone.utc), 20.0,
             self.dependencies(
                 all_a_snapshot=all_a_snapshot, tencent_watch_quotes=direct,
-                sina_quotes=unexpected, eastmoney_watch_flows=unexpected, calls=calls,
+                sina_quotes=unexpected, eastmoney_watch_flows=eastmoney, calls=calls,
             ),
         ))
         self.assertEqual(capture.fresh_watch_rows[0]["close"], 10.1)
@@ -70,8 +74,10 @@ class WatchQuoteCaptureTests(unittest.TestCase):
         self.assertEqual(capture.quotes["000001.SZ"]["price_freshness"]["status"], "fresh")
         self.assertIn("percentiles", calls)
         self.assertEqual(capture.all_a_snapshot_status["status"], "fresh")
+        self.assertEqual(capture.eastmoney_watch_flow_status["status"], "fresh")
+        self.assertTrue(capture.eastmoney_watch_flow_status["research_confirmation_only"])
 
-    def test_uses_sina_price_and_eastmoney_flow_only_when_all_a_is_unavailable(self):
+    def test_keeps_all_a_failure_separate_from_parallel_eastmoney_watch_flow(self):
         async def all_a_snapshot():
             raise ExecutorSaturatedError("public executor full")
 
@@ -94,8 +100,9 @@ class WatchQuoteCaptureTests(unittest.TestCase):
                 sina_quotes=sina, eastmoney_watch_flows=eastmoney, calls=calls,
             ),
         ))
-        self.assertEqual(capture.all_a_snapshot_status["source"], "eastmoney_watch_flow_batch")
-        self.assertFalse(capture.all_a_snapshot_status["cross_sectional"])
+        self.assertEqual(capture.all_a_snapshot_status["status"], "unavailable")
+        self.assertEqual(capture.eastmoney_watch_flow_status["source"], "eastmoney_watch_flow_batch")
+        self.assertFalse(capture.eastmoney_watch_flow_status["cross_sectional"])
         self.assertEqual(capture.quotes["000002.SZ"]["price_source"], "sina_watch_batch")
         self.assertEqual(capture.quotes["000002.SZ"]["flow_source"], "eastmoney")
         self.assertNotIn("percentiles", calls)

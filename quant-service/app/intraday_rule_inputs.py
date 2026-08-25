@@ -44,6 +44,9 @@ def _quote_for_policy(quote: dict[str, Any] | None) -> dict[str, Any] | None:
     if isinstance(flow_snapshot, dict):
         selected["flow_snapshot"] = {
             "decision_eligible": _json_value(flow_snapshot.get("decision_eligible")),
+            "scope": _json_value(flow_snapshot.get("scope")),
+            "cross_sectional": _json_value(flow_snapshot.get("cross_sectional")),
+            "source": _json_value(flow_snapshot.get("source")),
         }
     return selected
 

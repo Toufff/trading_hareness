@@ -16,6 +16,7 @@ class WatchQuoteCapture:
     fresh_watch_rows: list[dict[str, Any]]
     sina_watch_rows: list[dict[str, Any]]
     eastmoney_watch_flow_rows: list[dict[str, Any]]
+    eastmoney_watch_flow_status: dict[str, Any]
     latency_ms: int
 
 
@@ -54,6 +55,11 @@ async def capture_watch_quotes(
     timeout_or_all_a_errors = (asyncio.TimeoutError, *dependencies.all_a_snapshot_errors)
     all_a_task = asyncio.create_task(dependencies.all_a_snapshot())
     all_a_task.add_done_callback(dependencies.consume_background_exception)
+    # This is deliberately a single bounded request for the explicit
+    # watchlist, started beside the all-A snapshot.  It is research
+    # corroboration only: its values never represent an all-market ranking.
+    eastmoney_task = asyncio.create_task(dependencies.eastmoney_watch_flows(symbols, max_symbols=40))
+    eastmoney_task.add_done_callback(dependencies.consume_background_exception)
     try:
         fresh_watch_rows = await dependencies.tencent_watch_quotes(symbols, max_symbols=40)
     except dependencies.watch_quote_errors:
@@ -72,30 +78,32 @@ async def capture_watch_quotes(
         all_a_rows, all_a_snapshot_status = [], {"status": "unavailable", "error": detail}
     quotes = {item["symbol"]: item for row in all_a_rows if (item := dependencies.quote_from_all_a(row)) is not None}
     eastmoney_watch_flow_rows: list[dict[str, Any]] = []
-    if not all_a_rows:
-        try:
-            eastmoney_watch_flow_rows = await asyncio.wait_for(
-                dependencies.eastmoney_watch_flows(symbols, max_symbols=40), timeout=2.0,
-            )
-        except (asyncio.TimeoutError, *dependencies.watch_quote_errors) as error:
-            all_a_snapshot_status = {
-                **all_a_snapshot_status,
-                "eastmoney_watch_fallback_error": dependencies.safe_error(str(error), 300),
-            }
-        else:
-            if eastmoney_watch_flow_rows:
-                dependencies.merge_eastmoney_flows(quotes, eastmoney_watch_flow_rows)
-                all_a_snapshot_status = {
-                    "status": "fresh", "age_seconds": 0.0,
-                    "source": "eastmoney_watch_flow_batch", "scope": "explicit_watchlist_only",
-                    "cross_sectional": False,
-                    "semantics": "watchlist_public_flow_proxy_not_exchange_order_flow",
-                    "fallback_from": "fuyao_ths_all_a_snapshot",
-                    "matched_symbols": len(eastmoney_watch_flow_rows),
-                }
+    eastmoney_watch_flow_status: dict[str, Any] = {
+        "status": "unavailable", "scope": "explicit_watchlist_only", "cross_sectional": False,
+        "semantics": "watchlist_public_flow_proxy_not_exchange_order_flow",
+        "research_confirmation_only": True,
+    }
+    try:
+        eastmoney_watch_flow_rows = await asyncio.wait_for(asyncio.shield(eastmoney_task), timeout=2.0)
+    except (asyncio.TimeoutError, *dependencies.watch_quote_errors) as error:
+        eastmoney_watch_flow_status["error"] = dependencies.safe_error(str(error), 300)
+    else:
+        eastmoney_watch_flow_status = {
+            "status": "fresh", "age_seconds": 0.0, "source": "eastmoney_watch_flow_batch",
+            "scope": "explicit_watchlist_only", "cross_sectional": False,
+            "semantics": "watchlist_public_flow_proxy_not_exchange_order_flow",
+            "research_confirmation_only": True, "matched_symbols": len(eastmoney_watch_flow_rows),
+        }
     if all_a_snapshot_status.get("cross_sectional", True):
         dependencies.annotate_percentiles(quotes)
     dependencies.annotate_flow_provenance(quotes, all_a_snapshot_status)
+    if eastmoney_watch_flow_rows:
+        dependencies.merge_eastmoney_flows(quotes, eastmoney_watch_flow_rows)
+        eastmoney_quotes = {
+            str(row.get("ts_code") or ""): quotes[str(row.get("ts_code") or "")]
+            for row in eastmoney_watch_flow_rows if str(row.get("ts_code") or "") in quotes
+        }
+        dependencies.annotate_flow_provenance(eastmoney_quotes, eastmoney_watch_flow_status)
     dependencies.merge_watch_prices(quotes, fresh_watch_rows)
     dependencies.merge_sina_prices(quotes, sina_watch_rows)
     for quote in quotes.values():
@@ -106,6 +114,7 @@ async def capture_watch_quotes(
         quotes=quotes, all_a_rows=all_a_rows, all_a_snapshot_status=all_a_snapshot_status,
         fresh_watch_rows=fresh_watch_rows, sina_watch_rows=sina_watch_rows,
         eastmoney_watch_flow_rows=eastmoney_watch_flow_rows,
+        eastmoney_watch_flow_status=eastmoney_watch_flow_status,
         latency_ms=round((dependencies.now() - started_at) * 1000),
     )
 

@@ -143,7 +143,15 @@ def annotate_flow_snapshot_provenance(
         age = float(snapshot_status.get("age_seconds"))
     except (TypeError, ValueError):
         age = None
-    decision_eligible = status in {"fresh", "cached"} and age is not None and age <= max_age_seconds
+    cross_sectional = bool(snapshot_status.get("cross_sectional", True))
+    # A bounded watch basket is useful corroborating evidence, but it cannot
+    # stand in for a market-wide flow snapshot.  In particular, it must not
+    # turn the legacy flow-based entry rule back on just because every name in
+    # a small, preselected basket happens to have a positive value.
+    decision_eligible = (
+        cross_sectional and status in {"fresh", "cached"}
+        and age is not None and age <= max_age_seconds
+    )
     provenance = {
         "status": status,
         "age_seconds": round(age, 3) if age is not None else None,
@@ -151,7 +159,7 @@ def annotate_flow_snapshot_provenance(
         "decision_eligible": decision_eligible,
         "source": str(snapshot_status.get("source") or "tencent_all_a_snapshot"),
         "scope": str(snapshot_status.get("scope") or "all_a_cross_section"),
-        "cross_sectional": bool(snapshot_status.get("cross_sectional", True)),
+        "cross_sectional": cross_sectional,
         "semantics": str(snapshot_status.get("semantics") or "all_a_public_flow_proxy_not_exchange_order_flow"),
     }
     for quote in quotes.values():
