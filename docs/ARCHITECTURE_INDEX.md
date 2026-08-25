@@ -12,7 +12,7 @@
 | Python modules under `app/` | 327 |
 | HTTP router modules | 36 |
 | Alembic migrations | 59 |
-| Frontend source files | 30 |
+| Frontend source files | 32 |
 
 ## Domain naming inventory
 
@@ -92,6 +92,8 @@ New behaviour should be owned by an existing domain package/owner.
 - `frontend/src/components/RealtimeServicesPanel.vue`
 - `frontend/src/components/TenDayLeaderRotationPanel.vue`
 - `frontend/src/composables/useDashboardWorkspace.ts`
+- `frontend/src/composables/useFeishuRelayWorkspace.test.ts`
+- `frontend/src/composables/useFeishuRelayWorkspace.ts`
 - `frontend/src/composables/usePolling.test.ts`
 - `frontend/src/composables/usePolling.ts`
 - `frontend/src/dashboard-context.ts`

@@ -88,8 +88,10 @@ not import `app.main`.
 ## Frontend ownership
 
 `frontend/src/App.vue` is the shell only: navigation, lazy view registration
-and shell-owned dialogs. `useDashboardWorkspace.ts` owns polling, SSE lifecycle
-and mutations. Research tabs are independently lazy-loaded from
+and shell-owned dialogs. `useDashboardWorkspace.ts` owns cross-domain polling,
+SSE lifecycle and research mutations; feature composables such as
+`useFeishuRelayWorkspace.ts` own their status, CRUD and operation state.
+Research tabs are independently lazy-loaded from
 `frontend/src/views/research/`; relay monitoring and Feishu workbench are their
 own views. New UI must join one of these owners instead of growing App.vue.
 
