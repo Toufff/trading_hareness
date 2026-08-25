@@ -151,6 +151,22 @@ class TushareProvider:
         return PROMAX_REALTIME_APIS if self.get_gateway_mode == "promax" else SUPER_GET_REALTIME_APIS
 
 
+def realtime_reserved_slots(limit_per_minute: int) -> int:
+    """Reserve a quarter of a provider's per-minute budget for realtime calls.
+
+    All capability classes for one provider key still share a single rolling
+    window and never exceed ``limit_per_minute`` in total (the provider's
+    actual rate limit is not broadened). A bulk/daily request is only turned
+    away once bulk usage alone would exceed the non-reserved remainder, so a
+    burst of bulk requests (backfill, catalog fetch) cannot starve the
+    latency-sensitive 1s realtime loop of every slot in the window. Below 4
+    requests/minute a quarter-reservation would leave bulk with none at all,
+    so no reservation applies.
+    """
+    limit = max(1, int(limit_per_minute))
+    return max(1, limit // 4) if limit >= 4 else 0
+
+
 class ProviderRateLimiter:
     """Process-local rolling-window and minimum-spacing provider guard."""
 
@@ -159,16 +175,19 @@ class ProviderRateLimiter:
         self._requests: dict[str, deque[float]] = {}
         self._last_started_at: dict[str, float] = {}
 
-    async def acquire(self, provider_key: str, limit_per_minute: int, min_interval_seconds: float = 0.0) -> None:
+    async def acquire(self, provider_key: str, limit_per_minute: int, min_interval_seconds: float = 0.0,
+                      *, capability_class: str = "default") -> None:
         limit = max(1, limit_per_minute)
         min_interval = max(0.0, min(60.0, min_interval_seconds))
+        reserved = realtime_reserved_slots(limit) if capability_class != "realtime" else 0
+        admission_limit = max(1, limit - reserved)
         while True:
             now = time.monotonic()
             async with self._lock:
                 requests = self._requests.setdefault(provider_key, deque())
                 while requests and now - requests[0] >= 60:
                     requests.popleft()
-                window_delay = max(0.0, 60 - (now - requests[0])) if len(requests) >= limit else 0.0
+                window_delay = max(0.0, 60 - (now - requests[0])) if len(requests) >= admission_limit else 0.0
                 spacing_delay = max(0.0, min_interval - (now - self._last_started_at.get(provider_key, 0.0)))
                 delay = max(window_delay, spacing_delay)
                 if delay <= 0:
@@ -202,12 +221,14 @@ def provider_request_reservation_status() -> dict[str, bool | float | None]:
     }
 
 
-async def acquire_provider_request_slot(provider: TushareProvider) -> None:
+async def acquire_provider_request_slot(provider: TushareProvider, *, capability_class: str = "default") -> None:
     """Apply shared reservation first, then the existing in-process limiter."""
     reserver = _provider_request_reserver
     if reserver is not None:
         await reserver(provider.key, provider.rate_limit_per_minute, provider.min_interval_seconds)
-    await request_limiter.acquire(provider.key, provider.rate_limit_per_minute, provider.min_interval_seconds)
+    await request_limiter.acquire(
+        provider.key, provider.rate_limit_per_minute, provider.min_interval_seconds, capability_class=capability_class,
+    )
 
 
 def _super_get_worker_count() -> int:
@@ -256,12 +277,12 @@ def safe_error_detail(value: str, limit: int = 500) -> str:
     return compact[:limit]
 
 
-async def provider_http_request(provider: TushareProvider, operation: Any) -> httpx.Response:
+async def provider_http_request(provider: TushareProvider, operation: Any, *, capability_class: str = "bulk") -> httpx.Response:
     """Apply bounded retry only to transient HTTP/provider transport errors."""
     transient = {429, 500, 502, 503, 504}
     last_error: Exception | None = None
     for attempt in range(2):
-        await acquire_provider_request_slot(provider)
+        await acquire_provider_request_slot(provider, capability_class=capability_class)
         response_headers: Any | None = None
         try:
             response = await operation()
@@ -515,7 +536,7 @@ async def call_provider(provider: TushareProvider, api_name: str, params: dict[s
         failures: list[str] = []
         for credential in credentials:
             for attempt in range(attempts_per_credential):
-                await acquire_provider_request_slot(provider)
+                await acquire_provider_request_slot(provider, capability_class="realtime" if realtime_request else "bulk")
                 response_headers: Any | None = None
                 try:
                     # The verified gateway/proxy pair requires requests-style
@@ -552,6 +573,9 @@ async def call_provider(provider: TushareProvider, api_name: str, params: dict[s
                     await asyncio.sleep(retry_delay_seconds(response_headers, 0.8))
         raise ProviderCallError(f"{provider.label} failed with configured credentials: " + "; ".join(failures))
 
+    # The uses_super_get branch above already returned; this covers the sdk_path
+    # (super_sdk) and backup_rest (never realtime-capable) protocols.
+    sdk_realtime_request = api_name in provider.get_realtime_apis
     async with provider_http_client(provider.key, provider.proxy_url) as client:
         if provider.protocol == "backup_rest":
             response = await provider_http_request(provider, lambda: client.get(
@@ -579,7 +603,10 @@ async def call_provider(provider: TushareProvider, api_name: str, params: dict[s
         if fields or provider.protocol == "sdk_path":
             payload["fields"] = fields or ""
         endpoint = f"{provider.endpoint}/{api_name}" if provider.protocol == "sdk_path" else provider.endpoint
-        response = await provider_http_request(provider, lambda: client.post(endpoint, json=payload))
+        response = await provider_http_request(
+            provider, lambda: client.post(endpoint, json=payload),
+            capability_class="realtime" if sdk_realtime_request else "bulk",
+        )
         if response.is_error:
             # Gateway 400/404 bodies often distinguish a bad parameter from an
             # unimplemented SDK path. Preserve that evidence for the catalog.

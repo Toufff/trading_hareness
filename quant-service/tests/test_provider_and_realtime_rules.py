@@ -744,7 +744,7 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         async def exercise() -> None:
             configure_provider_request_reserver(reserve)
             try:
-                with patch("app.tushare_providers.request_limiter.acquire", new=AsyncMock(side_effect=lambda *_: sequence.append("local"))):
+                with patch("app.tushare_providers.request_limiter.acquire", new=AsyncMock(side_effect=lambda *_, **__: sequence.append("local"))):
                     await acquire_provider_request_slot(provider)
             finally:
                 configure_provider_request_reserver(None)
@@ -1017,6 +1017,32 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
             return loop.time() - started
 
         self.assertGreaterEqual(asyncio.run(exercise()), 0.045)
+
+    def test_bulk_requests_cannot_starve_the_realtime_reservation(self):
+        self.assertEqual(realtime_reserved_slots(600), 150)
+        self.assertEqual(realtime_reserved_slots(3), 0)
+        self.assertEqual(realtime_reserved_slots(4), 1)
+        limiter = ProviderRateLimiter()
+
+        async def exercise() -> tuple[bool, bool]:
+            # Exhaust everything except the realtime reservation with bulk calls.
+            for _ in range(3):
+                await limiter.acquire("test", 4, capability_class="bulk")
+            bulk_admitted = True
+            try:
+                await asyncio.wait_for(limiter.acquire("test", 4, capability_class="bulk"), timeout=0.1)
+            except asyncio.TimeoutError:
+                bulk_admitted = False
+            realtime_admitted = True
+            try:
+                await asyncio.wait_for(limiter.acquire("test", 4, capability_class="realtime"), timeout=0.1)
+            except asyncio.TimeoutError:
+                realtime_admitted = False
+            return bulk_admitted, realtime_admitted
+
+        bulk_admitted, realtime_admitted = asyncio.run(exercise())
+        self.assertFalse(bulk_admitted, "bulk must not be able to consume the reserved realtime slot")
+        self.assertTrue(realtime_admitted, "realtime must still get in even after bulk exhausts its own share")
 
     def test_super_get_session_reuses_proxy_pool_per_worker_thread(self):
         session = MagicMock()
