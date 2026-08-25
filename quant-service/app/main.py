@@ -352,6 +352,7 @@ from .intraday_fast_quote_runtime import (
     IntradayFastQuoteRuntimeDependencies,
     run_intraday_fast_quote_runtime_loop,
 )
+from .intraday_fast_quote_confirmation_runtime import latest_confirmations as latest_fast_quote_confirmations
 from .study_realtime import _row_trade_date, _row_trade_datetime, looks_like_response_header, realtime_rows_are_current
 from .provider_health import (
     provider_error_availability,
@@ -2276,12 +2277,11 @@ def intraday_fast_quote_confirmation(quote: dict[str, Any] | None, fast_quote: d
 
 async def latest_intraday_fast_quote_confirmations(symbols: list[str], quotes: dict[str, dict[str, Any]],
                                                    observed_at: datetime) -> dict[str, dict[str, Any]]:
-    if not symbols:
-        return {}
-    rows = await read_async_latest_fast_quotes(async_db, symbols)
-    latest = {str(row["symbol"]): dict(row) for row in rows}
-    return {symbol: intraday_fast_quote_confirmation(quotes.get(symbol), latest.get(symbol), observed_at)
-            for symbol in symbols}
+    return await latest_fast_quote_confirmations(
+        symbols, quotes, observed_at,
+        read_latest=lambda items: read_async_latest_fast_quotes(async_db, items),
+        confirm=intraday_fast_quote_confirmation,
+    )
 
 
 def _intraday_scan_persistence_dependencies() -> IntradayScanPersistenceServiceDependencies:
