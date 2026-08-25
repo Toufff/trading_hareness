@@ -245,9 +245,38 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
                         "score": min(90, round(45 + pct_change * 4 + turnover_rate, 2)), "hard": False,
                         "conditions": {**common, "price_extension": "pct_ge_6_turnover_ge_12_flow_top_5pct"},
                         "risk_flags": ["abnormal_price_extension", "requires_second_scan_confirmation", "not_an_entry_instruction", "manual_review_required"]})
-    entry_setup = (not holding and bool(watch.get("alert_on_entry")) and 1.0 <= pct_change <= 6.5
-                   and volume_ratio >= 1.8 and turnover_rate >= 2.0 and main_net_inflow > 0
-                   and previous_price is not None and price > previous_price)
+    # Fuyao's all-A snapshot is deliberately price/volume/turnover-only: it
+    # does not claim an exchange-grade main-flow field, and it does not expose
+    # the legacy rolling volume-ratio/turnover pair.  Missing values must not
+    # quietly become zero and freeze every entry forever.  When that public
+    # flow contract is absent, replace it with independently captured minute
+    # expansion plus exact point-in-time peer breadth.  This is still a
+    # research candidate requiring a second scan, never an order instruction.
+    legacy_public_entry_inputs_available = not missing_public_fields
+    fuyao_minute_breadth_entry = (
+        not legacy_public_entry_inputs_available and not holding
+        and bool(watch.get("alert_on_entry")) and 1.0 <= pct_change <= 6.5
+        and previous_price is not None and price > previous_price
+        and minute_return_1m is not None and minute_return_1m >= 0.75
+        and minute_return_3m is not None and 1.5 <= minute_return_3m <= 4.5
+        and minute_volume_multiple is not None and minute_volume_multiple >= 3.0
+        and above_vwap_pct is not None and 0 <= above_vwap_pct <= 5.5
+        and available_peers >= 2 and confirming_peers >= 2 and peer_breadth >= 0.66
+    )
+    if fuyao_minute_breadth_entry and not signals:
+        signals.append({"signal_key": f"{symbol}:entry:fuyao_minute_breadth_v1", "signal_type": "entry",
+                        "severity": "info", "score": min(92, round(
+                            52 + min(minute_volume_multiple, 8) * 3 + peer_breadth * 12, 2,
+                        )), "hard": False, "independent_confirmation": True,
+                        "conditions": {**common, "setup": "fuyao_minute_price_volume_plus_exact_peer_breadth",
+                                       "flow_confirmation": "not_required_fuyao_no_flow_semantics",
+                                       "price_confirmation": "direct_watch_quote_above_previous_scan"},
+                        "risk_flags": ["fuyao_no_public_main_flow", "minute_volume_proxy",
+                                       "independent_peer_confirmation", "requires_second_scan_confirmation",
+                                       "manual_review_required", "no_automatic_order"]})
+    entry_setup = (legacy_public_entry_inputs_available and not holding and bool(watch.get("alert_on_entry"))
+                   and 1.0 <= pct_change <= 6.5 and volume_ratio >= 1.8 and turnover_rate >= 2.0
+                   and main_net_inflow > 0 and previous_price is not None and price > previous_price)
     if entry_setup:
         signals.append({"signal_key": f"{symbol}:entry:{model_version}", "signal_type": "entry",
                         "severity": "info", "score": min(95, round(40 + volume_ratio * 10 + turnover_rate * 2, 2)), "hard": False,

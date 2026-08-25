@@ -80,6 +80,31 @@ class IntradayResearchRuleTests(unittest.TestCase):
         signals = intraday_signal_rules(watch, quote, previous, None, feature, {"available_peer_count": 0})
         self.assertEqual(signals[0]["signal_key"], "000001.SZ:watch:green_reclaim_research_v1")
 
+    def test_fuyao_minute_breadth_entry_replaces_missing_public_flow_fields(self):
+        watch = {
+            "symbol": "000001.SZ", "available_quantity": 0, "entry_price": None,
+            "alert_on_entry": True, "alert_on_exit": True,
+        }
+        quote = {
+            "price": 10.4, "pct_change": 2.4,
+            "price_source": "tencent_batched_watch_quote",
+            "price_freshness": {"status": "fresh"},
+        }
+        minute = {
+            "return_1m_pct": 0.9, "return_3m_pct": 1.8,
+            "minute_volume_multiple": 3.4, "above_vwap_pct": 1.2,
+        }
+        peers = {"available_peer_count": 3, "confirming_peer_count": 2, "confirming_breadth": 0.67}
+        signals = intraday_signal_rules(watch, quote, {"price": 10.3}, None, minute, peers)
+        entry = next(item for item in signals if item["signal_key"] == "000001.SZ:entry:fuyao_minute_breadth_v1")
+        self.assertTrue(entry["independent_confirmation"])
+        self.assertEqual(entry["conditions"]["flow_confirmation"], "not_required_fuyao_no_flow_semantics")
+        suppressed = intraday_signal_rules(
+            watch, quote, {"price": 10.3}, None, minute,
+            {"available_peer_count": 3, "confirming_peer_count": 1, "confirming_breadth": 0.33},
+        )
+        self.assertFalse(any(item["signal_key"].endswith(":entry:fuyao_minute_breadth_v1") for item in suppressed))
+
     def test_upside_breakout_research_requires_causal_high_volume_vwap_and_flow(self):
         rows = []
         prices = [10.0] * 20 + [10.05, 10.10, 10.25, 10.40]
@@ -178,4 +203,3 @@ class IntradayResearchRuleTests(unittest.TestCase):
         self.assertEqual(regime["state"], "corrective_rebound")
         self.assertEqual(regime["index_count"], 4)
         self.assertEqual(regime["interpretation"], "B-wave is an analyst scenario label only")
-
