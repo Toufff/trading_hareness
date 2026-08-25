@@ -63,6 +63,10 @@ class PlatformContractRegistryTests(unittest.TestCase):
         intraday = next(item for item in catalog if item["key"] == "intraday_watchlist_confirmation")
         self.assertEqual(intraday["input_contract"], "intraday-rule-input-v2")
         self.assertEqual({item["live_effect"] for item in catalog}, {"none"})
+        main_wave = next(item for item in catalog if item["key"] == "watchlist_main_wave_shadow")
+        self.assertIsNotNone(main_wave["deprecated_reason"], "roc_auc<0.5 finding must stay documented, not silently dropped")
+        self.assertIn("roc_auc", main_wave["deprecated_reason"])
+        self.assertIsNone(next(item for item in catalog if item["key"] == "intraday_watchlist_confirmation")["deprecated_reason"])
 
     def test_runtime_strategy_versions_must_match_every_declared_contract(self) -> None:
         versions = {

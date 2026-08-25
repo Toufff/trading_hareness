@@ -22,6 +22,7 @@ class StrategyContract:
     maturity: str
     live_effect: str
     description: str
+    deprecated_reason: str | None = None
 
 
 STRATEGY_CONTRACTS: Final[dict[str, StrategyContract]] = {
@@ -34,6 +35,16 @@ STRATEGY_CONTRACTS: Final[dict[str, StrategyContract]] = {
         "watchlist_main_wave_shadow", "watchlist-main-wave-pattern-v2", "app/watchlist_main_wave_v2.py",
         "watchlist-main-wave-v2", ("watchlist_main_wave_runs", "watchlist_main_wave_candidates"),
         "research", "shadow", "none", "post-close main-wave pattern research for the explicit watchlist",
+        deprecated_reason=(
+            "walk-forward roc_auc=0.4499 (2026-08-25 run) / 0.4650 (2026-08-24 run), both below the 0.5 "
+            "random baseline, with selected_precision as low as 0.0526 vs a 0.1712 base rate "
+            "(quant.strategy_experiments, strategy_key=watchlist_main_wave_shadow_v2). Also only ever "
+            "scans the existing intraday_watchlists membership, a real selection-bias confound "
+            "(event_research_post_close_backtest_v1 found base_ready_30d positive across the full "
+            "market using the unrelated post_close_structures.py classifier, so main-wave's own "
+            "close-only feature/label design - not \"nothing in post-close screening works\" - is the "
+            "likely failure mode). Kept registered as a negative baseline, not removed."
+        ),
     ),
     "countertrend_rebound_shadow": StrategyContract(
         "countertrend_rebound_shadow", "watchlist-countertrend-rebound-state-v1", "app/watchlist_countertrend_rebound.py",
@@ -77,6 +88,7 @@ def strategy_contract_catalog() -> list[dict[str, Any]]:
             "maturity": item.maturity,
             "live_effect": item.live_effect,
             "description": item.description,
+            "deprecated_reason": item.deprecated_reason,
         }
         for item in sorted(STRATEGY_CONTRACTS.values(), key=lambda item: item.key)
     ]
