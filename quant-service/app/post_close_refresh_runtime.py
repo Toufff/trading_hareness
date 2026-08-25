@@ -19,6 +19,20 @@ class PostCloseRefreshRuntime:
     def __init__(self) -> None:
         self._active: dict[asyncio.Task[Any], datetime] = {}
 
+    def start(self, action: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
+        """Detach one refresh from the initiating HTTP request.
+
+        A caller can poll ``/health`` and durable automation receipts instead
+        of holding a reverse-proxy connection open for provider or settlement
+        work.  The post-close lease remains the cross-process authority.
+        """
+        if self._active:
+            return {"status": "running", "already_running": True, **self.status()}
+        task = asyncio.create_task(action(), name="post-close-refresh")
+        self._active[task] = datetime.now(timezone.utc)
+        task.add_done_callback(self._active.pop)
+        return {"status": "running", "already_running": False, **self.status()}
+
     async def run(self, action: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
         task = asyncio.create_task(action(), name="post-close-refresh")
         self._active[task] = datetime.now(timezone.utc)

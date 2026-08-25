@@ -4316,6 +4316,10 @@ async def post_close_refresh_endpoint(payload: PostCloseRefreshRequest) -> dict[
     return await post_close_refresh_runtime.run(lambda: run_post_close_refresh(payload))
 
 
+def start_post_close_refresh_endpoint(payload: PostCloseRefreshRequest) -> dict[str, Any]:
+    return post_close_refresh_runtime.start(lambda: run_post_close_refresh(payload))
+
+
 async def sync_cninfo_events_endpoint(payload: AnnouncementSyncRequest) -> dict[str, Any]:
     return await sync_cninfo_announcements(payload)
 
@@ -4336,6 +4340,7 @@ app.include_router(build_market_actions_router(MarketActionDependencies(
     sync_full_daily=sync_full_market_daily_endpoint,
     sync_full_daily_controls=sync_full_market_daily_controls_endpoint,
     post_close_refresh=post_close_refresh_endpoint,
+    start_post_close_refresh=start_post_close_refresh_endpoint,
     sync_announcements=sync_cninfo_events_endpoint,
     rebuild_market_flow_features=rebuild_market_flow_features_endpoint,
 )))

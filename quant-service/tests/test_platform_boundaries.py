@@ -246,14 +246,15 @@ class PlatformBoundaryTests(unittest.TestCase):
         action = AsyncMock(return_value={"status": "ok"})
         router = build_market_actions_router(MarketActionDependencies(
             import_bars=MagicMock(return_value={"imported": 0}), sync_universe=action,
-            sync_full_daily=action, sync_full_daily_controls=action, post_close_refresh=action, sync_announcements=action,
+            sync_full_daily=action, sync_full_daily_controls=action, post_close_refresh=action,
+            start_post_close_refresh=MagicMock(return_value={"status": "running"}), sync_announcements=action,
             rebuild_market_flow_features=action,
         ))
         methods_by_path = {route.path: route.methods for route in router.routes}
         for path in (
             "/api/v1/market/bars/import", "/api/v1/market/universe/sync",
             "/api/v1/market/sync/full-daily", "/api/v1/market/sync/full-daily-controls",
-            "/api/v1/market/post-close/refresh",
+            "/api/v1/market/post-close/refresh", "/api/v1/market/post-close/refresh/start",
             "/api/v1/events/cninfo/sync", "/api/v1/market/flow/features/rebuild",
         ):
             self.assertEqual(methods_by_path[path], {"POST"})

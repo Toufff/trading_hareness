@@ -7,6 +7,33 @@ from app.post_close_refresh_runtime import PostCloseRefreshRuntime
 
 
 class PostCloseRefreshRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_detaches_refresh_and_reports_active_task(self) -> None:
+        runtime = PostCloseRefreshRuntime()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def refresh() -> dict[str, str]:
+            started.set()
+            await release.wait()
+            return {"status": "completed"}
+
+        accepted = runtime.start(refresh)
+        self.assertEqual(accepted["status"], "running")
+        self.assertFalse(accepted["already_running"])
+        await started.wait()
+        self.assertEqual(runtime.active_count, 1)
+
+        duplicate = runtime.start(refresh)
+        self.assertEqual(duplicate["status"], "running")
+        self.assertTrue(duplicate["already_running"])
+
+        release.set()
+        for _ in range(10):
+            if runtime.active_count == 0:
+                break
+            await asyncio.sleep(0)
+        self.assertEqual(runtime.active_count, 0)
+
     async def test_refresh_continues_when_requesting_task_is_cancelled(self) -> None:
         runtime = PostCloseRefreshRuntime()
         started = asyncio.Event()
