@@ -1745,6 +1745,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/strategies/intraday/entry-timing-challengers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run Entry Timing Challengers */
+        post: operations["run_entry_timing_challengers_api_v1_strategies_intraday_entry_timing_challengers_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/claim-review/{review_id}": {
         parameters: {
             query?: never;
@@ -6916,6 +6933,41 @@ export interface operations {
         };
     };
     replay_recorded_rule_inputs_api_v1_strategies_intraday_replay_recorded_inputs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IntradayRuleInputReplayRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_entry_timing_challengers_api_v1_strategies_intraday_entry_timing_challengers_post: {
         parameters: {
             query?: never;
             header?: never;

@@ -598,6 +598,7 @@ from .post_close_candidate_outcomes import settle_post_close_and_leader_rotation
 from .market_regime_daily import materialize_market_regime
 from .strategy_daily_candidate_ledger import materialize_ledger, settle_ledger_outcomes as settle_strategy_ledger_outcomes
 from .watchlist_candidate_proposals import materialize_watchlist_proposals
+from .strategy_timing_challengers import run_challenger_backtest as run_intraday_entry_timing_challenger_backtest
 from .ths_concept_members_sync import sync as sync_ths_concept_members_isolated
 from .analyst_scorecards import readiness as analyst_scorecard_readiness
 from .analyst_scorecards import recompute as recompute_scorecards_isolated
@@ -4289,6 +4290,42 @@ async def replay_recorded_intraday_rule_inputs_endpoint(payload: IntradayRuleInp
     return await run_database_blocking(replay_recorded_intraday_rule_inputs, payload, timeout_seconds=60)
 
 
+def run_intraday_entry_timing_challengers(payload: IntradayRuleInputReplayRequest) -> dict[str, Any]:
+    def evaluate_variant(inputs: dict[str, Any], overrides: dict[str, Any]) -> list[dict[str, Any]]:
+        observed_at = (inputs.get("quote") or {}).get("_scan_observed_at")
+        opening_gap_window = (
+            isinstance(observed_at, datetime)
+            and time(9, 30) <= observed_at.astimezone(ZoneInfo("Asia/Shanghai")).time() < time(9, 40)
+        )
+        return pure_intraday_signal_rules(
+            inputs["watch"], inputs["quote"], inputs["previous_quote"], inputs["daily_factors"],
+            inputs["minute_features"], inputs["peer_context"],
+            number=intraday_number, upside_assessment_fn=intraday_upside_research_assessment,
+            model_version=INTRADAY_SIGNAL_MODEL_VERSION, opening_gap_window=opening_gap_window,
+            **overrides,
+        )
+
+    with db.transaction() as connection:
+        as_of_date = payload.as_of_date
+        if as_of_date is None:
+            row = connection.execute(
+                """SELECT max((observed_at AT TIME ZONE 'Asia/Shanghai')::date) AS d
+                     FROM quant.intraday_rule_input_snapshots WHERE model_version=%s""",
+                (INTRADAY_SIGNAL_MODEL_VERSION,),
+            ).fetchone()
+            as_of_date = row["d"] if row else None
+        if as_of_date is None:
+            return {"status": "blocked", "reason": "no recorded rule-input snapshots for this model version"}
+        return run_intraday_entry_timing_challenger_backtest(
+            connection, as_of_date, model_version=INTRADAY_SIGNAL_MODEL_VERSION,
+            evaluate_variant=evaluate_variant, max_rows=payload.max_rows,
+        )
+
+
+async def run_intraday_entry_timing_challengers_endpoint(payload: IntradayRuleInputReplayRequest) -> dict[str, Any]:
+    return await run_database_blocking(run_intraday_entry_timing_challengers, payload, timeout_seconds=120)
+
+
 app.include_router(build_research_actions_router(ResearchActionDependencies(
     analyse_ingestion=analyse_ingestion_endpoint,
     import_remote_report=import_remote_archive_report_endpoint,
@@ -4308,6 +4345,7 @@ app.include_router(build_research_actions_router(ResearchActionDependencies(
     sync_remote_archive=sync_remote_archive_endpoint,
     replay_recorded_intraday_events=replay_recorded_intraday_events_endpoint,
     replay_recorded_rule_inputs=replay_recorded_intraday_rule_inputs_endpoint,
+    run_entry_timing_challengers=run_intraday_entry_timing_challengers_endpoint,
 )))
 
 

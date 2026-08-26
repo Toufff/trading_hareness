@@ -5,7 +5,10 @@ This module has no database, HTTP or alert side effects.
 
 from __future__ import annotations
 
+from datetime import datetime
+from datetime import time as _time
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from .strategy_thresholds import (
     MAX_ENTRY_INTRADAY_GAIN_PCT,
@@ -13,16 +16,33 @@ from .strategy_thresholds import (
     STANDARD_MINUTE_VOLUME_MULTIPLE_FLOOR,
 )
 
+_CN_TZ = ZoneInfo("Asia/Shanghai")
+
 
 def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
                            previous_quote: dict[str, Any] | None, daily_factors: dict[str, Any] | None = None,
                            minute_features: dict[str, Any] | None = None, peer_context: dict[str, Any] | None = None, *, number: Callable[[Any], float | None], upside_assessment_fn: Callable[..., dict[str, Any]], model_version: str,
-                           opening_gap_window: bool = False) -> list[dict[str, Any]]:
+                           opening_gap_window: bool = False,
+                           entry_min_pct: float = STANDARD_ENTRY_MIN_INTRADAY_GAIN_PCT,
+                           entry_max_pct: float = MAX_ENTRY_INTRADAY_GAIN_PCT,
+                           entry_requires_minute_confirmation: bool = False,
+                           entry_session_windows: tuple[tuple[str, str], ...] | None = None) -> list[dict[str, Any]]:
     """Return explainable, non-executable signal conditions for one symbol.
 
     Entry signals deliberately require a second scan.  A configured hard stop
     is the only immediate exit condition, and only for an explicitly marked
     sellable position.  These are prompts for review, never order instructions.
+
+    The four ``entry_*`` keyword parameters exist only for the offline
+    timing-challenger replay harness (strategy_timing_challengers.py) to test
+    alternative thresholds against real recorded inputs without ever
+    reimplementing this rule. Their defaults exactly match the live values
+    (STANDARD_ENTRY_MIN_INTRADAY_GAIN_PCT / MAX_ENTRY_INTRADAY_GAIN_PCT / no
+    extra confirmation / no session restriction), so every existing caller
+    (the live scan, the deterministic replay runner) that does not pass them
+    sees byte-for-byte identical behavior. They apply only to ``entry_setup``,
+    the one rule with real observed live-fire evidence; the other opt-in
+    research setups are untouched.
     """
     symbol = str(watch["symbol"])
     if not quote or quote.get("price") is None:
@@ -298,10 +318,23 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
                         "independent_peer_confirmation", "requires_second_scan_confirmation",
                                        *( ["eastmoney_watch_flow_research_confirmation_only"] if bounded_watch_flow_only else []),
                                        "manual_review_required", "no_automatic_order"]})
+    entry_session_ok = True
+    if entry_session_windows is not None:
+        scan_observed_at = quote.get("_scan_observed_at") if isinstance(quote, dict) else None
+        entry_session_ok = isinstance(scan_observed_at, datetime) and any(
+            _time.fromisoformat(start) <= scan_observed_at.astimezone(_CN_TZ).time() < _time.fromisoformat(end)
+            for start, end in entry_session_windows
+        )
+    entry_minute_confirmed = (
+        not entry_requires_minute_confirmation
+        or (minute_volume_multiple is not None and minute_volume_multiple >= STANDARD_MINUTE_VOLUME_MULTIPLE_FLOOR
+            and above_vwap_pct is not None and above_vwap_pct >= 0)
+    )
     entry_setup = (legacy_public_entry_inputs_available and not holding and bool(watch.get("alert_on_entry"))
-                   and STANDARD_ENTRY_MIN_INTRADAY_GAIN_PCT <= pct_change <= MAX_ENTRY_INTRADAY_GAIN_PCT
+                   and entry_min_pct <= pct_change <= entry_max_pct
                    and volume_ratio >= 1.8 and turnover_rate >= 2.0
-                   and main_net_inflow > 0 and previous_price is not None and price > previous_price)
+                   and main_net_inflow > 0 and previous_price is not None and price > previous_price
+                   and entry_session_ok and entry_minute_confirmed)
     if entry_setup:
         signals.append({"signal_key": f"{symbol}:entry:{model_version}", "signal_type": "entry",
                         "severity": "info", "score": min(95, round(40 + volume_ratio * 10 + turnover_rate * 2, 2)), "hard": False,

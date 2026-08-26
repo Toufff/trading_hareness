@@ -391,6 +391,7 @@ class PlatformBoundaryTests(unittest.TestCase):
             sync_remote_archive=action,
             replay_recorded_intraday_events=action,
             replay_recorded_rule_inputs=action,
+            run_entry_timing_challengers=action,
         ))
         methods_by_path = {route.path: route.methods for route in router.routes}
         for path in (
@@ -402,6 +403,7 @@ class PlatformBoundaryTests(unittest.TestCase):
             "/api/v1/remote-archive/sync",
             "/api/v1/strategies/intraday/replay-recorded-events",
             "/api/v1/strategies/intraday/replay-recorded-inputs",
+            "/api/v1/strategies/intraday/entry-timing-challengers",
             "/api/v1/claim-review/{review_id}",
             "/api/v1/universes/members", "/api/v1/features/build",
             "/api/v1/factors/evaluate", "/api/v1/strategies/backtest",
