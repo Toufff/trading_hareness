@@ -72,6 +72,17 @@ STRATEGY_CONTRACTS: Final[dict[str, StrategyContract]] = {
         "research", "shadow", "none",
         "next-session scheduled disclosers without prior guidance, proposed for manual watchlist review",
     ),
+    # A universe source rather than a scored strategy or an entry rule.  Over
+    # 156 sessions its names touch the limit again at 20.20% against a 1.58%
+    # market rate, but that lift lives entirely in an unbuyable overnight gap:
+    # entered at the next open the edge is +0.006%.  It exists to point the
+    # intraday rules at a dense universe, not to say "buy these".
+    "limit_up_continuation": StrategyContract(
+        "limit_up_continuation", "limit-up-continuation-v1", "app/limit_up_continuation.py",
+        "prior-session-limit-up-v1", ("canonical_bars_daily", "strategy_watchlist_proposals"),
+        "research", "shadow", "none",
+        "prior-session limit-up names proposed as an intraday watchlist universe",
+    ),
     "post_close_limit_lift_pattern": StrategyContract(
         "post_close_limit_lift_pattern", "post-close-limit-lift-pattern-v6", "app/strategy_pattern_mining_service.py",
         "post-close-limit-lift-pattern-v1", ("strategy_pattern_runs", "strategy_pattern_samples"),

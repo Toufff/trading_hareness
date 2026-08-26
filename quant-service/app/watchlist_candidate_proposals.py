@@ -18,6 +18,12 @@ from two independent producers, tagged by ``proposal_source``:
                          strategy_daily_candidate_ledger.py's score_scale
                          field) and deduplicated to the single best-ranked
                          strategy per symbol.
+``limit_up_continuation``  names that closed locked at the upper limit on the
+                         prior session - the densest forward universe measured
+                         here (20.20% touch the limit again against a 1.58%
+                         market rate) and explicitly not an entry signal, since
+                         the open-to-close edge is absent.  See
+                         limit_up_continuation.py.
 ``disclosure_day_watch`` names whose report is registered for the next session
                          and that carry no prior guidance - a scheduled
                          catalyst rather than a scored candidate, so these rows
@@ -47,9 +53,17 @@ from .disclosure_day_watch import (
     rank_disclosure_watch,
     scheduled_disclosures,
 )
+from .limit_up_continuation import (
+    PROPOSAL_SOURCE as LIMIT_UP_SOURCE,
+    STRATEGY_KEY as LIMIT_UP_STRATEGY_KEY,
+    build_proposals as build_limit_up_proposals,
+    prior_session_limit_ups,
+)
 from .liquidity_screen import liquidity_eligibility, median_daily_amount_by_symbol
 
 DEFAULT_TOP_K = 15
+#: The set is the finding, not any ordering inside it, so the cap is loose.
+LIMIT_UP_TOP_K = 25
 LEDGER_SOURCE = "strategy_ledger"
 
 
@@ -99,8 +113,21 @@ def materialize_disclosure_day_watch(connection: Any, as_of_date: date, *,
     return {"status": "completed", "session": str(session), **ranked}
 
 
+def materialize_limit_up_continuation(connection: Any, as_of_date: date,
+                                      *, top_k: int = LIMIT_UP_TOP_K) -> dict[str, Any]:
+    """Prior-session limit-up names, liquidity-screened and traded-value ranked."""
+    candidates = prior_session_limit_ups(connection, as_of_date)
+    if not candidates:
+        return {"status": "empty", "considered": 0, "selected": []}
+    screen, traded_value = _liquidity_for(connection, [str(row["symbol"]) for row in candidates], as_of_date)
+    result = build_limit_up_proposals(candidates, screen, traded_value)
+    return {"status": "completed", **{**result, "selected": result["selected"][:max(0, top_k)],
+                                      "eligible_total": result["eligible_total"]}}
+
+
 def materialize_watchlist_proposals(connection: Any, as_of_date: date, *, top_k: int = DEFAULT_TOP_K,
-                                    disclosure_top_k: int = DISCLOSURE_TOP_K) -> dict[str, Any]:
+                                    disclosure_top_k: int = DISCLOSURE_TOP_K,
+                                    limit_up_top_k: int = LIMIT_UP_TOP_K) -> dict[str, Any]:
     connection.execute("DELETE FROM quant.strategy_watchlist_proposals WHERE as_of_date=%s", (as_of_date,))
     rows = connection.execute(
         """WITH scored AS (
@@ -117,6 +144,8 @@ def materialize_watchlist_proposals(connection: Any, as_of_date: date, *, top_k:
     ).fetchall()
     disclosure = materialize_disclosure_day_watch(connection, as_of_date, top_k=disclosure_top_k)
     disclosure_by_symbol = {item["symbol"]: item for item in disclosure["selected"]}
+    limit_up = materialize_limit_up_continuation(connection, as_of_date, top_k=limit_up_top_k)
+    limit_up_by_symbol = {item["symbol"]: item for item in limit_up["selected"]}
     proposal_rank = 0
     # The scored ledger is written first so it wins the (as_of_date, symbol)
     # key; a symbol that is also a scheduled discloser keeps its score and
@@ -127,6 +156,9 @@ def materialize_watchlist_proposals(connection: Any, as_of_date: date, *, top_k:
         overlap = disclosure_by_symbol.pop(str(row["symbol"]), None)
         if overlap is not None:
             evidence["disclosure_day_watch"] = overlap["evidence"]
+        continuation = limit_up_by_symbol.pop(str(row["symbol"]), None)
+        if continuation is not None:
+            evidence["limit_up_continuation"] = continuation["evidence"]
         connection.execute(
             """INSERT INTO quant.strategy_watchlist_proposals(
                     as_of_date,symbol,proposal_rank,strategy_key,raw_score,score_scale,
@@ -134,6 +166,24 @@ def materialize_watchlist_proposals(connection: Any, as_of_date: date, *, top_k:
                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (as_of_date, row["symbol"], proposal_rank, row["strategy_key"], row["raw_score"], row["score_scale"],
              row["strategy_percentile"], Json(evidence), LEDGER_SOURCE),
+        )
+    # Continuation names are emitted before the disclosure watch: their
+    # measured density is an order of magnitude higher, even though neither is
+    # an entry signal.  The table holds one row per (date, symbol), so a name
+    # in both sets is emitted once here carrying both bodies of evidence -
+    # without this the disclosure loop below collides on the primary key.
+    for symbol, item in limit_up_by_symbol.items():
+        proposal_rank += 1
+        evidence = dict(item["evidence"])
+        also_disclosing = disclosure_by_symbol.pop(symbol, None)
+        if also_disclosing is not None:
+            evidence["disclosure_day_watch"] = also_disclosing["evidence"]
+        connection.execute(
+            """INSERT INTO quant.strategy_watchlist_proposals(
+                    as_of_date,symbol,proposal_rank,strategy_key,raw_score,score_scale,
+                    strategy_percentile,evidence,proposal_source)
+               VALUES(%s,%s,%s,%s,NULL,'unscored_universe_source',NULL,%s,%s)""",
+            (as_of_date, symbol, proposal_rank, LIMIT_UP_STRATEGY_KEY, Json(evidence), LIMIT_UP_SOURCE),
         )
     for symbol, item in disclosure_by_symbol.items():
         proposal_rank += 1
@@ -145,7 +195,10 @@ def materialize_watchlist_proposals(connection: Any, as_of_date: date, *, top_k:
             (as_of_date, symbol, proposal_rank, DISCLOSURE_STRATEGY_KEY, Json(item["evidence"]), DISCLOSURE_SOURCE),
         )
     return {"stored": proposal_rank, "strategy_ledger": len(rows),
-            "disclosure_day_watch": len(disclosure_by_symbol), "disclosure": disclosure}
+            "limit_up_continuation": len(limit_up_by_symbol),
+            "disclosure_day_watch": len(disclosure_by_symbol),
+            "limit_up": {key: value for key, value in limit_up.items() if key != "selected"},
+            "disclosure": disclosure}
 
 
 def latest_watchlist_proposals(connection: Any) -> dict[str, Any]:
@@ -167,6 +220,8 @@ def sync_latest_watchlist_proposals(database: Any) -> dict[str, Any]:
 
 
 __all__ = [
-    "DEFAULT_TOP_K", "DISCLOSURE_TOP_K", "LEDGER_SOURCE", "latest_watchlist_proposals",
-    "materialize_disclosure_day_watch", "materialize_watchlist_proposals", "sync_latest_watchlist_proposals",
+    "DEFAULT_TOP_K", "DISCLOSURE_TOP_K", "LEDGER_SOURCE", "LIMIT_UP_TOP_K",
+    "latest_watchlist_proposals", "materialize_disclosure_day_watch",
+    "materialize_limit_up_continuation", "materialize_watchlist_proposals",
+    "sync_latest_watchlist_proposals",
 ]

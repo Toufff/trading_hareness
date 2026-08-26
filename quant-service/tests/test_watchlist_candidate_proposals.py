@@ -87,7 +87,9 @@ class WatchlistCandidateProposalsIntegrationTests(unittest.TestCase):
             with db.transaction() as connection:
                 result = latest_watchlist_proposals(connection)
             self.assertEqual(result["as_of_date"], str(self.as_of_date))
-            self.assertEqual(len(result["proposals"]), 2)
+            ledger_proposals = [item for item in result["proposals"]
+                                if item["proposal_source"] == "strategy_ledger"]
+            self.assertEqual(len(ledger_proposals), 2)
             self.assertIn("never written into quant.intraday_watchlists", result["notice"])
         finally:
             self._cleanup()
@@ -106,8 +108,11 @@ class WatchlistCandidateProposalsIntegrationTests(unittest.TestCase):
                 materialize_watchlist_proposals(connection, self.as_of_date)
                 materialize_watchlist_proposals(connection, self.as_of_date)
                 count = connection.execute(
-                    "SELECT count(*)::int n FROM quant.strategy_watchlist_proposals WHERE as_of_date=%s", (self.as_of_date,)
+                    "SELECT count(*)::int n FROM quant.strategy_watchlist_proposals"
+                    " WHERE as_of_date=%s AND proposal_source='strategy_ledger'", (self.as_of_date,)
                 ).fetchone()["n"]
+            # Re-running must replace, not accumulate: one ledger candidate in,
+            # one ledger row out, however many times it runs.
             self.assertEqual(count, 1)
         finally:
             self._cleanup()

@@ -609,6 +609,7 @@ from .full_market_daily_controls_sync import sync as sync_full_market_daily_cont
 from .earnings_calendar_sync import sync as sync_earnings_calendar_isolated
 from .stock_money_flow_sync import sync as sync_stock_money_flow_isolated
 from .disclosure_day_watch import MODEL_VERSION as DISCLOSURE_DAY_WATCH_MODEL_VERSION
+from .limit_up_continuation import MODEL_VERSION as LIMIT_UP_CONTINUATION_MODEL_VERSION
 from .core_daily_control_sync import CoreDailyControlDependencies, sync as sync_core_daily_controls_isolated
 from .sector_catalog_sync import sync_all as sync_all_sector_catalogs_isolated
 from .ths_sector_catalog_sync import sync as sync_ths_sector_catalog_isolated
@@ -3867,6 +3868,7 @@ def _verify_strategy_runtime_contracts() -> None:
         "post_close_base_candidates": POST_CLOSE_STRATEGY_MODEL_VERSION,
         "post_close_limit_lift_pattern": STRATEGY_PATTERN_MODEL_VERSION,
         "disclosure_day_watch": DISCLOSURE_DAY_WATCH_MODEL_VERSION,
+        "limit_up_continuation": LIMIT_UP_CONTINUATION_MODEL_VERSION,
         "xiaojie_leader_flow": XIAOJIE_LEADER_FLOW_MODEL_VERSION,
     })
 
