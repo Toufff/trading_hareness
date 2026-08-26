@@ -595,6 +595,7 @@ from .market_universe_sync import sync as sync_market_universe_isolated
 from .full_market_daily_sync import sync as sync_full_market_daily_isolated
 from .full_market_daily_controls_sync import sync as sync_full_market_daily_controls_isolated
 from .earnings_calendar_sync import sync as sync_earnings_calendar_isolated
+from .stock_money_flow_sync import sync as sync_stock_money_flow_isolated
 from .disclosure_day_watch import MODEL_VERSION as DISCLOSURE_DAY_WATCH_MODEL_VERSION
 from .core_daily_control_sync import CoreDailyControlDependencies, sync as sync_core_daily_controls_isolated
 from .sector_catalog_sync import sync_all as sync_all_sector_catalogs_isolated
@@ -1131,6 +1132,15 @@ def materialize_daily_watchlist_proposals(as_of_date: date) -> dict[str, Any]:
     """Read-only daily proposal list; never writes into intraday_watchlists."""
     with db.transaction() as connection:
         return materialize_watchlist_proposals(connection, as_of_date)
+
+
+async def sync_stock_money_flow(trade_date: date) -> dict[str, Any]:
+    """Ingest one completed session's per-stock capital flow (end-of-day only)."""
+    return await sync_stock_money_flow_isolated(
+        trade_date, call_tushare_api=call_tushare_api, parse_date=tushare_date,
+        expected_symbols=full_market_daily_row_count, run_database_blocking=run_database_blocking,
+        db=db, safe_error_detail=safe_error_detail,
+    )
 
 
 async def sync_earnings_calendar(as_of_date: date) -> dict[str, Any]:
@@ -1829,6 +1839,26 @@ async def intraday_watch_flow_reference(
     return await read_async_watch_flow_reference(async_db, symbols, observed_at)
 
 
+async def intraday_watch_volume_fallback(symbols: list[str]) -> dict[str, float]:
+    """Batched live cumulative volume, used only when the all-A snapshot fails.
+
+    ProMax ``rt_k`` answers the whole watch basket in one request with a
+    second-resolution ``updated_at``, so it is an independent third source for
+    the one input the derived flow metrics need.  It supplies volume only; the
+    decision price still comes from the Tencent batch.
+    """
+    if not symbols:
+        return {}
+    call = await call_tushare_api("rt_k", {"ts_code": ",".join(symbols)}, None, "super_get")
+    volumes: dict[str, float] = {}
+    for row in call.rows:
+        symbol = str(row.get("ts_code") or "").upper()
+        volume = intraday_number(row.get("vol"))
+        if symbol in set(symbols) and volume is not None and volume > 0:
+            volumes[symbol] = volume
+    return volumes
+
+
 def derive_intraday_watch_flow_metrics(
     quotes: dict[str, dict[str, Any]], reference: dict[str, dict[str, Any]], *, observed_at: datetime,
 ) -> dict[str, dict[str, float]]:
@@ -2476,6 +2506,7 @@ def _intraday_watchlist_scan_runtime() -> IntradayWatchlistScanRuntime:
             tencent_watch_quotes=tencent_order_book_quotes, sina_quotes=sina_quotes,
             eastmoney_watch_flows=eastmoney_watch_flow_quotes,
             watch_flow_reference=intraday_watch_flow_reference,
+            watch_volume_fallback=intraday_watch_volume_fallback,
             derive_flow_metrics=derive_intraday_watch_flow_metrics,
             apply_derived_flow_metrics=apply_intraday_derived_watch_flow_metrics,
             derived_flow_divergence=intraday_derived_flow_divergence,
@@ -4789,6 +4820,7 @@ async def run_daily_pipeline(payload: GenerateRequest) -> dict[str, Any]:
         cn_today=cn_today, materialize_regime=materialize_market_regime_today,
         materialize_candidate_ledger=materialize_strategy_daily_candidate_ledger,
         sync_earnings_calendar=sync_earnings_calendar,
+        sync_stock_money_flow=sync_stock_money_flow,
         materialize_watchlist_proposals=materialize_daily_watchlist_proposals,
     )
 

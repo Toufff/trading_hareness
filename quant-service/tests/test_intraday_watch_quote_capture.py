@@ -15,7 +15,7 @@ from app.runtime_executors import ExecutorSaturatedError
 class WatchQuoteCaptureTests(unittest.TestCase):
     @staticmethod
     def dependencies(*, all_a_snapshot, tencent_watch_quotes, sina_quotes, eastmoney_watch_flows, calls,
-                     watch_flow_reference=None, derive_flow_metrics=None):
+                     watch_flow_reference=None, derive_flow_metrics=None, volume_fallback=None):
         def quote_from_all_a(row):
             return dict(row)
 
@@ -45,10 +45,15 @@ class WatchQuoteCaptureTests(unittest.TestCase):
             calls.append("reference")
             return {}
 
+        async def no_volume_fallback(symbols):
+            calls.append("volume_fallback")
+            return {}
+
         return WatchQuoteCaptureDependencies(
             now=lambda: 10.0, all_a_snapshot=all_a_snapshot, tencent_watch_quotes=tencent_watch_quotes,
             sina_quotes=sina_quotes, eastmoney_watch_flows=eastmoney_watch_flows,
             watch_flow_reference=watch_flow_reference or no_reference,
+            watch_volume_fallback=volume_fallback or no_volume_fallback,
             derive_flow_metrics=derive_flow_metrics or (lambda quotes, reference, *, observed_at: {}),
             apply_derived_flow_metrics=pure_apply_derived_watch_flow_metrics,
             derived_flow_divergence=lambda quotes, derived: pure_derived_flow_divergence(
@@ -124,6 +129,48 @@ class WatchQuoteCaptureTests(unittest.TestCase):
         self.assertEqual(capture.quotes["000002.SZ"]["price_source"], "sina_watch_batch")
         self.assertEqual(capture.quotes["000002.SZ"]["flow_source"], "eastmoney")
         self.assertNotIn("percentiles", calls)
+
+    def test_volume_fallback_only_runs_when_the_all_a_snapshot_supplied_none(self):
+        """The batched realtime quote is a failure path, not the normal one."""
+        async def all_a_snapshot():
+            return [], {"status": "unavailable"}
+
+        async def direct(*_args, **_kwargs):
+            return [{"symbol": "000001.SZ", "close": 10.0, "pre_close": 9.9}]
+
+        async def sina(_symbols):
+            return []
+
+        async def eastmoney(_symbols, **_kwargs):
+            return []
+
+        async def reference(_symbols, _observed_at):
+            return {"000001.SZ": {"float_shares": 100_000_000.0, "mean_daily_volume_shares": 4_800_000.0}}
+
+        used = []
+
+        async def volume_fallback(symbols):
+            used.append(tuple(symbols))
+            return {"000001.SZ": 2_000_000.0}
+
+        calls = []
+        dependencies = self.dependencies(
+            all_a_snapshot=all_a_snapshot, tencent_watch_quotes=direct, sina_quotes=sina,
+            eastmoney_watch_flows=eastmoney, calls=calls, watch_flow_reference=reference,
+            volume_fallback=volume_fallback,
+            derive_flow_metrics=lambda quotes, ref, *, observed_at: pure_derive_watch_flow_metrics(
+                quotes, ref, observed_at=observed_at,
+                number=lambda value: float(value) if value is not None else None,
+            ),
+        )
+        capture = asyncio.run(capture_watch_quotes(
+            ["000001.SZ"], datetime(2026, 8, 26, 5, 30, tzinfo=timezone.utc), 20.0, dependencies,
+        ))
+        quote = capture.quotes["000001.SZ"]
+        self.assertEqual(used, [("000001.SZ",)], "fallback must run when all-A gave no volume")
+        self.assertEqual(quote["volume_source"], "promax_rt_k_batch")
+        self.assertAlmostEqual(quote["turnover_rate"], 2.0, places=5)
+        self.assertEqual(capture.derived_flow_status["volume_fallback_symbols"], 1)
 
     def test_derived_metrics_replace_eastmoney_values_and_leave_main_flow_to_eastmoney(self):
         """THS-derived is primary; Eastmoney remains the fallback and sole main-flow source."""

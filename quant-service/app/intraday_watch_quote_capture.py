@@ -31,6 +31,7 @@ class WatchQuoteCaptureDependencies:
     sina_quotes: Callable[[list[str]], Awaitable[list[dict[str, Any]]]]
     eastmoney_watch_flows: Callable[..., Awaitable[list[dict[str, Any]]]]
     watch_flow_reference: Callable[[list[str], datetime], Awaitable[dict[str, dict[str, Any]]]]
+    watch_volume_fallback: Callable[[list[str]], Awaitable[dict[str, float]]]
     derive_flow_metrics: Callable[..., dict[str, dict[str, float]]]
     apply_derived_flow_metrics: Callable[
         [dict[str, dict[str, Any]], dict[str, dict[str, float]]], dict[str, dict[str, str]]
@@ -70,6 +71,29 @@ async def _apply_derived_flow_metrics(
             "fuyao_ths_derived_watch_flow",
             {"status": "unavailable", "error": dependencies.safe_error(str(error), 300)},
         )
+    # The derivation needs cumulative volume, normally carried by the all-A
+    # snapshot.  On 2026-08-26 13:30 that snapshot and the Eastmoney basket
+    # failed in the same scan, leaving the watchlist with prices but no flow at
+    # all.  A single batched realtime quote covers the whole basket in well
+    # under a second and is independent of both, so it is used - only when the
+    # snapshot supplied nothing, never on the normal path.
+    volume_fallback: dict[str, float] = {}
+    if quotes and not any(quote.get("volume") for quote in quotes.values()):
+        try:
+            volume_fallback = await asyncio.wait_for(
+                dependencies.watch_volume_fallback(sorted(quotes)), timeout=3.0,
+            )
+        except (asyncio.TimeoutError, *dependencies.watch_quote_errors) as error:
+            volume_fallback = {}
+            fallback_error = dependencies.safe_error(str(error), 200)
+        else:
+            fallback_error = None
+        for symbol, volume in volume_fallback.items():
+            if symbol in quotes and not quotes[symbol].get("volume"):
+                quotes[symbol]["volume"] = volume
+                quotes[symbol]["volume_source"] = "promax_rt_k_batch"
+    else:
+        fallback_error = None
     derived = dependencies.derive_flow_metrics(quotes, reference, observed_at=observed_at)
     sources = dependencies.apply_derived_flow_metrics(quotes, derived)
     divergence = dependencies.derived_flow_divergence(quotes, derived)
@@ -84,6 +108,8 @@ async def _apply_derived_flow_metrics(
          "reference_symbols": len(reference), "derived_symbols": len(derived),
          "derived_field_symbols": field_counts,
          "main_net_inflow_source": "eastmoney_watch_flow_only_no_licensed_equivalent",
+         "volume_fallback_symbols": len(volume_fallback),
+         "volume_fallback_error": fallback_error,
          "eastmoney_agreement": divergence},
     )
 
@@ -155,11 +181,14 @@ async def capture_watch_quotes(
             for row in eastmoney_watch_flow_rows if str(row.get("ts_code") or "") in quotes
         }
         dependencies.annotate_flow_provenance(eastmoney_quotes, eastmoney_watch_flow_status)
+    dependencies.merge_watch_prices(quotes, fresh_watch_rows)
+    dependencies.merge_sina_prices(quotes, sina_watch_rows)
+    # Deliberately after the price merges: when the all-A snapshot fails
+    # outright these merges are what put the watch basket into ``quotes`` at
+    # all, and without them the volume fallback would have nothing to attach to.
     derived_flow_status = await _apply_derived_flow_metrics(
         quotes, reference_task, observed_at, dependencies,
     )
-    dependencies.merge_watch_prices(quotes, fresh_watch_rows)
-    dependencies.merge_sina_prices(quotes, sina_watch_rows)
     for quote in quotes.values():
         quote["price_freshness"] = dependencies.quote_freshness(
             quote, observed_at, quote_timestamp_slo_seconds,

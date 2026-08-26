@@ -53,12 +53,52 @@ SUPER_GET_REALTIME_APIS = frozenset({
 })
 # ProMax uses the same GET + X-API-Key wire contract but is an independent
 # gateway.  Do not inherit the legacy gateway's broad allow-list merely because
-# the URL shape matches: only these APIs were probed successfully against
-# ProMax on 2026-08-17.
+# the URL shape matches: every entry below was probed against ProMax and
+# returned code=0 with real rows.
+#
+# The previous list held six APIs from a 2026-08-17 single-attempt probe.  That
+# probe systematically under-reported: ProMax answers roughly 20% of single
+# calls with a transient 503/504, so an API that succeeds on retry was recorded
+# as unsupported.  Re-probed on 2026-08-26 with bounded retries, 43 of 45
+# candidates returned data - including the whole moneyflow family, the limit
+# pools, the THS/DC hot lists and the reporting calendar, none of which could
+# route here before.
 PROMAX_VERIFIED_APIS = frozenset({
-    "daily", "daily_basic", "moneyflow", "rt_k", "rt_min", "rt_min_daily",
+    # daily bars, controls and reference
+    "daily", "daily_basic", "stk_limit", "adj_factor", "suspend_d", "trade_cal",
+    "stock_basic", "index_daily",
+    # capital flow (all end-of-day; ProMax exposes no intraday flow route)
+    "moneyflow", "moneyflow_dc", "moneyflow_ths", "moneyflow_ind_ths",
+    "moneyflow_ind_dc", "moneyflow_mkt_dc", "moneyflow_hsgt", "moneyflow_cnt_ths",
+    # chip distribution and factors
+    "cyq_perf", "cyq_chips", "stk_factor_pro",
+    # limit pools and sentiment
+    "limit_list_d", "limit_list_ths", "limit_step", "limit_cpt_list", "kpl_list",
+    "ths_hot", "dc_hot",
+    # THS sector catalogue
+    "ths_index", "ths_daily", "ths_member",
+    # dragon-tiger and hot-money
+    "top_list", "top_inst", "hm_list", "hm_detail", "report_rc",
+    # reporting calendar and guidance
+    "disclosure_date", "forecast", "express",
+    # realtime
+    "rt_k", "rt_min", "rt_min_daily", "rt_etf_k", "rt_idx_k", "rt_sw_k", "rt_fut_min",
 })
-PROMAX_REALTIME_APIS = frozenset({"rt_k", "rt_min", "rt_min_daily"})
+# ``rt_fut_min_daily`` is deliberately absent: it answered HTTP 503 on every one
+# of four attempts, unlike every other route here.
+#
+# ProMax ``rt_k`` *is* a live quote - it carries a second-resolution
+# ``updated_at`` plus level-1 bid/ask - which is why it is realtime here.  The
+# separate SUPER_SDK_DELAYED_CONTEXT_APIS entry below describes the City SDK's
+# rt_k, a different upstream that was observed unchanged across intraday
+# samples; the two must not be conflated.
+PROMAX_REALTIME_APIS = frozenset({
+    "rt_k", "rt_min", "rt_min_daily", "rt_etf_k", "rt_idx_k", "rt_sw_k", "rt_fut_min",
+})
+# ``stk_factor_pro`` rejects a full-market ``trade_date`` cross-section on this
+# gateway (HTTP 400) but serves a per-symbol range, so it must only be routed
+# here when the caller has already bounded the request to a symbol.
+PROMAX_BOUNDED_ONLY_APIS = frozenset({"stk_factor_pro", "ths_member", "ths_index"})
 # City ``rt_k`` supplies only a trading date and was observed unchanged across
 # repeated intraday samples on 2026-08-13.  It is retained as delayed
 # cumulative quote context for research, but excluded from this verified
@@ -141,6 +181,17 @@ class TushareProvider:
 
     def uses_super_get(self, api_name: str) -> bool:
         return self.protocol == "get_x_api_key" and api_name in self.get_verified_apis
+
+    def requires_bounded_request(self, api_name: str) -> bool:
+        """True when this gateway serves the API only for a bounded scope.
+
+        These routes reject an unbounded full-market cross-section, so the
+        caller must have narrowed the request (a ts_code, or an explicit
+        limit) before it can be routed here.
+        """
+        bounded = (PROMAX_BOUNDED_ONLY_APIS if self.get_gateway_mode == "promax"
+                   else SUPER_GET_BOUNDED_ONLY_APIS)
+        return api_name in bounded
 
     @property
     def get_verified_apis(self) -> frozenset[str]:
@@ -335,6 +386,14 @@ def _super_get_http_get(url: str, *, params: dict[str, Any], credential: str,
     )
 
 
+#: Total wall-clock budget for retrying one realtime request.  Past this a
+#: skipped sample is preferable to a late one; the live scan runs every 30s.
+REALTIME_RETRY_DEADLINE_SECONDS = 6.0
+#: Short fixed backoff between realtime retries - transient gateway rejections
+#: are immediate, so a long backoff would only burn the deadline.
+REALTIME_RETRY_BACKOFF_SECONDS = 0.35
+
+
 def bounded_rate_limit(value: str | None, default: int) -> int:
     try:
         return min(600, max(1, int(value or default)))
@@ -415,6 +474,15 @@ def _expand_provider_name(api_name: str, name: str) -> tuple[ProviderName, ...]:
         return ("super_sdk", "super_get")
     if api_name in SUPER_GET_VERIFIED_APIS:
         return ("super_get", "super_sdk")
+    if api_name in PROMAX_VERIFIED_APIS:
+        # Verified on ProMax but not on the legacy GET gateway.  Expanding
+        # optimistically is safe because provider_candidates still filters by
+        # the *configured* gateway's own verified set, so a legacy deployment
+        # never routes here.  ProMax is placed second on purpose: it answers
+        # roughly one call in five with a transient rejection and its latency
+        # ranges from 200ms to tens of seconds, so it earns a redundancy slot,
+        # not the primary one.
+        return ("super_sdk", "super_get")
     return ("super_sdk",)
 
 
@@ -439,7 +507,7 @@ def provider_status(*, environ: Mapping[str, str] | None = None) -> list[dict[st
             return ("unavailable", "No verified realtime capability; live-family requests were unpurchased or rate-limited.", [])
         if provider.name == "super_get" and provider.configured:
             if provider.get_gateway_mode == "promax":
-                return ("verified_partial", "ProMax GET verification passed for rt_k, rt_min and rt_min_daily; all other routes remain excluded until separately tested.", sorted(provider.get_realtime_apis))
+                return ("verified_partial", "ProMax GET re-probed 2026-08-26 with retries: 43 of 45 candidate routes returned real rows, including the full moneyflow family, limit pools and the reporting calendar. rt_fut_min_daily stays excluded (HTTP 503 on every attempt).", sorted(provider.get_realtime_apis))
             return ("verified_partial", "Verified GET realtime: stock, ETF/index/SW snapshots and stock/futures minute subsets; unsupported live families remain excluded.", sorted(provider.get_realtime_apis))
         if provider.name == "super_sdk" and provider.configured:
             return ("verified_partial", "Verified City minute routes are timestamped. rt_k/rt_etf_k/rt_idx_k are delayed cumulative context only because no exchange timestamp was returned; *_min_daily routes remain unavailable.", sorted(SUPER_SDK_REALTIME_APIS))
@@ -509,7 +577,14 @@ def _filter_requested_realtime_rows(api_name: str, params: dict[str, Any],
     requested = str(params.get("ts_code") or params.get("symbol") or "").strip().upper()
     if api_name not in REALTIME_MARKET_HOURS_APIS or not requested or not rows:
         return rows
-    matched = [row for row in rows if str(row.get("ts_code") or row.get("code") or "").strip().upper() == requested]
+    # These routes accept a comma-separated batch as well as a single code, and
+    # the gateway may answer a batch with extra codes.  Comparing the raw
+    # parameter string against one row's ts_code discarded every row of a
+    # batched response, which silently turned a working batch request into an
+    # empty result.
+    wanted = {part.strip() for part in requested.split(",") if part.strip()}
+    matched = [row for row in rows
+               if str(row.get("ts_code") or row.get("code") or "").strip().upper() in wanted]
     return matched
 
 
@@ -523,10 +598,17 @@ async def call_provider(provider: TushareProvider, api_name: str, params: dict[s
         if provider.fallback_credential and provider.fallback_credential != provider.credential:
             credentials.append(provider.fallback_credential)
         realtime_request = api_name in provider.get_realtime_apis
-        # A stale realtime request is less useful than a skipped sample. Try
-        # each configured credential once with a short timeout, while keeping
-        # the more tolerant retry contract for daily/reference queries.
-        attempts_per_credential = 1 if realtime_request else 2
+        # A stale realtime request is less useful than a skipped sample, but a
+        # single attempt threw away far more than it protected: ProMax answers
+        # roughly one call in five with a transient 503/504, and rt_min
+        # accumulated 108 consecutive recorded failures under the old
+        # one-attempt rule while the same call succeeded on retry when probed
+        # by hand.  A transient rejection usually comes back fast (sub-second),
+        # so the retry is gated on a wall-clock deadline rather than a fixed
+        # count: a cheap fast failure is retried, a slow one is not, and
+        # freshness is still bounded.
+        attempts_per_credential = 3 if realtime_request else 2
+        realtime_deadline = asyncio.get_running_loop().time() + REALTIME_RETRY_DEADLINE_SECONDS
         # ProMax accepted the same contract but its upstream account pool can
         # respond more slowly than the legacy proxy.  It is kept out of the
         # high-concurrency fast loop by deployment pacing, so allow a bounded
@@ -543,14 +625,23 @@ async def call_provider(provider: TushareProvider, api_name: str, params: dict[s
                     # proxy routing; httpx CONNECT receives 407 here. Reuse a
                     # thread-local Session so frequent realtime calls do not
                     # renegotiate the proxy/TLS connection on every request.
+                    # Realtime attempts share one freshness budget instead of
+                    # each getting the full timeout: without this a single slow
+                    # attempt would consume the whole deadline and a retry
+                    # could still return a quote far too late to act on.
+                    attempt_timeout = request_timeout
+                    if realtime_request:
+                        remaining = realtime_deadline - asyncio.get_running_loop().time()
+                        attempt_timeout = max(1.0, min(request_timeout, remaining))
+
                     def proxy_http_get() -> requests.Response:
                         return _super_get_http_get(
                             f"{provider.endpoint}/{api_name}", params=params,
-                            credential=credential, proxy_url=provider.proxy_url, timeout=request_timeout,
+                            credential=credential, proxy_url=provider.proxy_url, timeout=attempt_timeout,
                         )
 
                     response = await _super_get_executor_boundary.run(
-                        _super_get_executor, proxy_http_get, timeout_seconds=request_timeout + 2,
+                        _super_get_executor, proxy_http_get, timeout_seconds=attempt_timeout + 2,
                     )
                     response_headers = response.headers
                     source = f"tushare:{provider.key}:{provider.get_gateway_mode or 'get'}"
@@ -569,7 +660,15 @@ async def call_provider(provider: TushareProvider, api_name: str, params: dict[s
                     failures.append(type(error).__name__)
                 except ValueError as error:
                     failures.append(type(error).__name__)
-                if attempt + 1 < attempts_per_credential:
+                if attempt + 1 >= attempts_per_credential:
+                    continue
+                if realtime_request:
+                    # Only keep retrying while a fresh sample is still possible.
+                    if asyncio.get_running_loop().time() >= realtime_deadline:
+                        failures.append("realtime retry deadline reached")
+                        break
+                    await asyncio.sleep(REALTIME_RETRY_BACKOFF_SECONDS)
+                else:
                     await asyncio.sleep(retry_delay_seconds(response_headers, 0.8))
         raise ProviderCallError(f"{provider.label} failed with configured credentials: " + "; ".join(failures))
 

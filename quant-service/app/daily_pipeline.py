@@ -21,6 +21,7 @@ async def run_pipeline(
     run_database_blocking: Callable[..., Awaitable[Any]],
     cn_today: Callable[[], date],
     sync_earnings_calendar: Callable[[date], Awaitable[dict[str, Any]]] | None = None,
+    sync_stock_money_flow: Callable[[date], Awaitable[dict[str, Any]]] | None = None,
     materialize_regime: Callable[[date], Any] | None = None,
     materialize_candidate_ledger: Callable[[date], Any] | None = None,
     materialize_watchlist_proposals: Callable[[date], Any] | None = None,
@@ -42,6 +43,11 @@ async def run_pipeline(
     # not depend on it.
     earnings_calendar = (await sync_earnings_calendar(as_of_date)
                          if sync_earnings_calendar is not None else None)
+    # Per-stock flow is end-of-day only and never feeds a live rule; it is
+    # ingested here so post-close and backtest work can finally ask whether
+    # main flow preceded anything.  Its failure is reported, never fatal.
+    stock_money_flow = (await sync_stock_money_flow(as_of_date)
+                        if sync_stock_money_flow is not None else None)
     regime = (await run_database_blocking(materialize_regime, as_of_date, timeout_seconds=30)
              if materialize_regime is not None else None)
     # Ledger materialization reads whatever each strategy's own table already
@@ -57,7 +63,8 @@ async def run_pipeline(
     scorecard = await run_database_blocking(recompute_scorecards, payload.as_of_date, timeout_seconds=30)
     result = await run_database_blocking(generate_recommendations, payload, timeout_seconds=30)
     return {"status": "completed", "market_sync": sync, "snapshot": snapshot, "regime": regime,
-            "earnings_calendar": earnings_calendar, "candidate_ledger": ledger,
+            "earnings_calendar": earnings_calendar, "stock_money_flow": stock_money_flow,
+            "candidate_ledger": ledger,
             "watchlist_proposals": watchlist_proposals, "outcomes": outcomes,
             "scorecards": scorecard, "recommendations": result}
 

@@ -732,6 +732,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
             with patch("app.main.sync_tushare", new=AsyncMock(return_value={"status": "completed"})), \
                  patch("app.main.sync_tushare_daily_core", new=AsyncMock(return_value={"status": "completed"})), \
                  patch("app.main.sync_earnings_calendar", new=AsyncMock(return_value={"status": "completed"})), \
+                 patch("app.main.sync_stock_money_flow", new=AsyncMock(return_value={"status": "completed"})), \
                  patch("app.main.run_database_blocking", new=blocking):
                 result = await run_daily_pipeline(GenerateRequest())
             self.assertEqual(result["status"], "completed")

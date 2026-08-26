@@ -1,6 +1,7 @@
 """Focused regression tests extracted from the legacy provider helper suite."""
 
 from provider_test_support import *  # noqa: F403
+from app.tushare_providers import PROMAX_VERIFIED_APIS
 
 
 class ProviderAndRealtimeRuleTests(unittest.TestCase):
@@ -646,16 +647,21 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         self.assertTrue(promax.supports("daily"))
         self.assertTrue(promax.supports("rt_min_daily"))
         self.assertTrue(promax.supports("moneyflow"))
-        self.assertFalse(promax.supports("ths_member"))
-        self.assertFalse(promax.supports("rt_fut_min"))
+        # Re-probed 2026-08-26 with retries: both answered with real rows, so
+        # both are now routable.  The gateway stays fail-closed on the one
+        # route that never answered and on anything undeclared.
+        self.assertTrue(promax.supports("ths_member"))
+        self.assertTrue(promax.supports("rt_fut_min"))
+        self.assertFalse(promax.supports("rt_fut_min_daily"))
+        self.assertFalse(promax.supports("not_a_real_api"))
         self.assertEqual([item.key for item in provider_candidates("daily", environ=env)],
                          ["tushare_super_get", "tushare_primary"])
         self.assertEqual([item.key for item in provider_candidates("rt_min_daily", environ=env)],
                          ["tushare_super_get"])
         status = {item["name"]: item for item in provider_status(environ=env)}["super_get"]
         self.assertEqual(status["get_gateway_mode"], "promax")
-        self.assertEqual(status["get_apis"],
-                         ["daily", "daily_basic", "moneyflow", "rt_k", "rt_min", "rt_min_daily"])
+        self.assertEqual(status["get_apis"], sorted(PROMAX_VERIFIED_APIS))
+        self.assertNotIn("rt_fut_min_daily", status["get_apis"])
 
     def test_realtime_cross_section_is_filtered_to_requested_symbol(self):
         rows = [

@@ -607,8 +607,18 @@ def import_jsonl(lines: Iterable[str], *, cursor_path: Path | None = None) -> di
 
 def edge_evidence_status(
     path: Path | None = None, *, now: datetime | None = None, stale_after_seconds: int = 1800,
+    pull_status_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Project the local cursor and remote snapshot without network I/O."""
+    """Project the local cursor and remote snapshot without network I/O.
+
+    ``pull_status_path`` is separate from ``path`` because the two files are
+    written by different owners (the importer writes the cursor, the launchd
+    pull job writes its attempt status).  It is injectable so a caller passing
+    a temporary cursor is not silently mixed with the real workstation's live
+    pull state - which previously made this projection untestable in isolation
+    and left its tests failing or passing according to whether the machine's
+    last real pull happened to have succeeded.
+    """
     cursor_path = path or _cursor_path()
     try:
         payload = json.loads(cursor_path.read_text(encoding="utf-8"))
@@ -617,7 +627,7 @@ def edge_evidence_status(
         age_seconds = max(0.0, (observed_at - imported_at).total_seconds())
         runtime = payload.get("edge_runtime") if isinstance(payload.get("edge_runtime"), dict) else {}
         remote_ok = runtime.get("status") == "ok" and runtime.get("runtime_profile") == "intraday_edge"
-        pull = read_pull_status()
+        pull = read_pull_status(pull_status_path)
         sequence = parse_sequence(payload.get("sequence"))
         remote_sequence = parse_sequence(payload.get("remote_sequence"))
         sequence_lag = max(0, remote_sequence - sequence)
