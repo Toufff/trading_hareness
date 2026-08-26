@@ -244,9 +244,14 @@ OFFICIAL_EXTENSIONS: Final[dict[str, OfficialApi]] = {
                               frequency="realtime", request_policy="market_hours_only", model_role="intraday_futures_bar",
                               priority="P0", required_params=("ts_code", "freq"), probe_profile="realtime_futures_daily"),
 
-    # Historical minute endpoints are inventory entries, not online routes.
-    "stk_mins": _api("历史分钟（仅离线文件）", 370, permission_model="offline_delivery", frequency="historical_minute",
-                     request_policy="offline_files_only", model_role="intraday_bar", priority="P1"),
+    # Historical minute endpoints are inventory entries, not online routes -
+    # with one measured exception.  stk_mins was probed live against the ProMax
+    # GET gateway on 2026-08-26 and returned 1-minute bars for dates at least
+    # two years back (2024-08-26 gave a correct 241 bars/session), so the
+    # offline-only classification was wrong for this route.  It serves one
+    # ts_code per request, which is why it stays a bounded route.
+    "stk_mins": _api("历史分钟", 370, permission_model="licensed_gateway", frequency="historical_minute",
+                     request_policy="bounded_symbol_request", model_role="intraday_bar", priority="P1"),
     "etf_mins": _api("历史分钟（仅离线文件）", 387, permission_model="offline_delivery", frequency="historical_minute",
                      request_policy="offline_files_only", model_role="intraday_etf_bar", priority="P2"),
     "sw_mins": _api("历史分钟（仅离线文件）", 469, permission_model="offline_delivery", frequency="historical_minute",

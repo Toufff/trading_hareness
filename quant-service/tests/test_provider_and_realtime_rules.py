@@ -503,11 +503,14 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         self.assertEqual(len(AUDITED_ADDITIONS_CATALOG), 7)
         self.assertEqual(len(TUSHARE_CATALOG), 200)
         self.assertEqual(catalog_counts()["market_hours_only"], 13)
-        self.assertEqual(catalog_counts()["offline_files_only"], 6)
+        # stk_mins left the offline-only set on 2026-08-26 after a live
+        # ProMax probe returned two years of 1-minute history.
+        self.assertEqual(catalog_counts()["offline_files_only"], 5)
         self.assertIn("stk_auction", TUSHARE_CATALOG)
         self.assertIn("stk_auction_o", TUSHARE_CATALOG)
         self.assertIn("stk_auction_c", TUSHARE_CATALOG)
         self.assertIn("rt_min", TUSHARE_CATALOG)
+        self.assertIn("stk_mins", TUSHARE_CATALOG)
         self.assertIn("moneyflow_cnt_ths", TUSHARE_CATALOG)
         self.assertIn("rt_min_daily", TUSHARE_CATALOG)
         self.assertIn("rt_etf_sz_iopv", REALTIME_MARKET_HOURS_APIS)

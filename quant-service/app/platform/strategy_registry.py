@@ -77,6 +77,13 @@ STRATEGY_CONTRACTS: Final[dict[str, StrategyContract]] = {
         "post-close-limit-lift-pattern-v1", ("strategy_pattern_runs", "strategy_pattern_samples"),
         "research", "research_enabled", "none", "bounded post-close minute-pattern discovery and replay evidence",
     ),
+    "xiaojie_leader_flow": StrategyContract(
+        "xiaojie_leader_flow", "xiaojie-leader-flow-v1", "app/xiaojie_leader_flow.py",
+        "xiaojie-leader-flow-input-v1",
+        ("intraday_quote_observations", "intraday_scan_runs", "strategy_pattern_samples", "analyst_observations"),
+        "research", "shadow", "none",
+        "point-in-time, research-only quantification of the 小杰夜报 leader/divergence/return-flow playbook",
+    ),
 }
 
 

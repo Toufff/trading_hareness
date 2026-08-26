@@ -2596,6 +2596,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/research/strategies/xiaojie-leader-flow/evaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Evaluate */
+        post: operations["evaluate_api_v1_research_strategies_xiaojie_leader_flow_evaluate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/research/ten-day-leader-rotation/run": {
         parameters: {
             query?: never;
@@ -3916,6 +3933,83 @@ export interface components {
         WatchlistMainWaveResearchRequest: {
             /** As Of Date */
             as_of_date?: string | null;
+        };
+        /**
+         * XiaojieLeaderFlowEvaluateRequest
+         * @description Evaluate the Xiao Jie playbook without any provider or order side effect.
+         */
+        XiaojieLeaderFlowEvaluateRequest: {
+            snapshot: components["schemas"]["XiaojieLeaderFlowSnapshotRequest"];
+            /** Parameters */
+            parameters?: {
+                [key: string]: number;
+            };
+        };
+        /**
+         * XiaojieLeaderFlowSnapshotRequest
+         * @description Point-in-time inputs retained by the research market-data pipeline.
+         */
+        XiaojieLeaderFlowSnapshotRequest: {
+            /** Index Above Support */
+            index_above_support?: boolean | null;
+            /** Index Volume Ratio */
+            index_volume_ratio?: number | null;
+            /** Breadth Up Count */
+            breadth_up_count?: number | null;
+            /** Breadth Down Count */
+            breadth_down_count?: number | null;
+            /** Main Sector Present */
+            main_sector_present?: boolean | null;
+            /** Sector Strength Percentile */
+            sector_strength_percentile?: number | null;
+            /** Candidate Strength Rank */
+            candidate_strength_rank?: number | null;
+            /** Is Back Row */
+            is_back_row?: boolean | null;
+            /** Turnover Rate */
+            turnover_rate?: number | null;
+            /** Volume Ratio */
+            volume_ratio?: number | null;
+            /** Prior One Word Board */
+            prior_one_word_board?: boolean | null;
+            /** Limit Up Return Flow */
+            limit_up_return_flow?: boolean | null;
+            /** Re Seal Confirmed */
+            re_seal_confirmed?: boolean | null;
+            /** Reverse Wrap Confirmed */
+            reverse_wrap_confirmed?: boolean | null;
+            /** Breakout Or Reverse Wrap */
+            breakout_or_reverse_wrap?: boolean | null;
+            /** Leader Pullback To Vwap */
+            leader_pullback_to_vwap?: boolean | null;
+            /** Intraday Above Vwap */
+            intraday_above_vwap?: boolean | null;
+            /** Support Or Vwap Holds */
+            support_or_vwap_holds?: boolean | null;
+            /** Drawdown From High Pct */
+            drawdown_from_high_pct?: number | null;
+            /** Post Limitup Break Rebound Pct */
+            post_limitup_break_rebound_pct?: number | null;
+            /** Futures Stock Both Rising */
+            futures_stock_both_rising?: boolean | null;
+            /** Profit Cushion Pct */
+            profit_cushion_pct?: number | null;
+            /** Ma5 Break Duration Minutes */
+            ma5_break_duration_minutes?: number | null;
+            /** Ma5 Recovered */
+            ma5_recovered?: boolean | null;
+            /** Box Support Broken */
+            box_support_broken?: boolean | null;
+            /** Entry Low Broken */
+            entry_low_broken?: boolean | null;
+            /** Days Without New High */
+            days_without_new_high?: number | null;
+            /** Days Without Rise */
+            days_without_rise?: number | null;
+            /** Limit Up Break */
+            limit_up_break?: boolean | null;
+            /** Sector Strength Fades */
+            sector_strength_fades?: boolean | null;
         };
     };
     responses: never;
@@ -8697,6 +8791,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["GenerateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    evaluate_api_v1_research_strategies_xiaojie_leader_flow_evaluate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["XiaojieLeaderFlowEvaluateRequest"];
             };
         };
         responses: {

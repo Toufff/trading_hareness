@@ -83,6 +83,9 @@ PROMAX_VERIFIED_APIS = frozenset({
     "disclosure_date", "forecast", "express",
     # realtime
     "rt_k", "rt_min", "rt_min_daily", "rt_etf_k", "rt_idx_k", "rt_sw_k", "rt_fut_min",
+    # historical minute bars - the only such source available anywhere in this
+    # deployment.  Verified back to 2024-08 at 1-minute resolution.
+    "stk_mins",
 })
 # ``rt_fut_min_daily`` is deliberately absent: it answered HTTP 503 on every one
 # of four attempts, unlike every other route here.
@@ -98,7 +101,9 @@ PROMAX_REALTIME_APIS = frozenset({
 # ``stk_factor_pro`` rejects a full-market ``trade_date`` cross-section on this
 # gateway (HTTP 400) but serves a per-symbol range, so it must only be routed
 # here when the caller has already bounded the request to a symbol.
-PROMAX_BOUNDED_ONLY_APIS = frozenset({"stk_factor_pro", "ths_member", "ths_index"})
+# ``stk_mins`` serves one ts_code per request (a comma-separated batch returns
+# nothing), so it must only be routed here for an already symbol-bounded call.
+PROMAX_BOUNDED_ONLY_APIS = frozenset({"stk_factor_pro", "ths_member", "ths_index", "stk_mins"})
 # City ``rt_k`` supplies only a trading date and was observed unchanged across
 # repeated intraday samples on 2026-08-13.  It is retained as delayed
 # cumulative quote context for research, but excluded from this verified

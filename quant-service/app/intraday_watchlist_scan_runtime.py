@@ -61,6 +61,7 @@ class IntradayWatchlistScanRuntimeDependencies:
     alert_text: Callable[..., str]
     decision_card_url: Callable[[str], str | None]
     run_scan: Callable[..., Awaitable[dict[str, Any]]]
+    xiaojie_leader_flow: Callable[..., Awaitable[dict[str, Any]]] | None = None
 
 
 class IntradayWatchlistScanRuntime:
@@ -169,6 +170,7 @@ class IntradayWatchlistScanRuntime:
             capture_shadow_quotes=capture_shadow_quotes,
             persist_shadow_observations=persist_shadow_observations,
             persist_shadow_status=persist_shadow_status,
+            xiaojie_leader_flow=dependencies.xiaojie_leader_flow,
             deliver_alert=dependencies.deliver_alert,
             alert_text=dependencies.alert_text,
             decision_card_url=dependencies.decision_card_url,

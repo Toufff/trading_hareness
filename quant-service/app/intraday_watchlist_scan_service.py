@@ -42,6 +42,7 @@ class IntradayWatchlistScanDependencies:
     deliver_alert: Callable[[uuid.UUID, str], Awaitable[dict[str, Any]]]
     alert_text: Callable[..., str]
     decision_card_url: Callable[[str], str | None]
+    xiaojie_leader_flow: Callable[..., Awaitable[dict[str, Any]]] | None = None
 
 
 def build_peer_contexts(
@@ -191,6 +192,19 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
         await dependencies.persist_shadow_status(scan_id, shadow_observation)
     if shadow_observation.get("status") != "standby":
         source_status["ten_day_leader_rotation_shadow"] = shadow_observation
+    # Leader-flow research runs on the all-A cross-section this scan already
+    # fetched, so it adds no provider call.  Like the rotation shadow above it
+    # is fully independent: any failure is recorded and the primary watchlist
+    # scan continues untouched.
+    xiaojie_observation: dict[str, Any] = {"status": "disabled"}
+    if dependencies.xiaojie_leader_flow is not None:
+        try:
+            xiaojie_observation = await dependencies.xiaojie_leader_flow(
+                scan_id=scan_id, observed_at=observed_at, all_a_rows=quote_capture.all_a_rows,
+            )
+        except Exception as error:  # noqa: BLE001 - never fail the primary scan
+            xiaojie_observation = {"status": "degraded", "reason": str(error)[:240]}
+        source_status["xiaojie_leader_flow"] = xiaojie_observation
     alerts: list[dict[str, Any]] = []
     for signal in signals:
         if signal["state"] != "confirmed":
@@ -217,6 +231,7 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
         },
         "delivery_retry": retry_summary,
         "ten_day_leader_rotation_shadow": shadow_observation,
+        "xiaojie_leader_flow": xiaojie_observation,
         "notice": "仅为人工复核提醒，不构成交易指令；系统不会自动下单。",
     }
 

@@ -13,6 +13,7 @@ from .capability_registry import api_capability
 from .tushare_catalog import TUSHARE_CATALOG
 from .tushare_official import AUDIT_FOCUS_APIS, official_spec
 from .tushare_providers import ProviderPreference
+from .xiaojie_leader_flow import DEFAULT_PARAMETERS
 
 
 class FuyaoQueryRequest(BaseModel):
@@ -169,6 +170,62 @@ class StrategyDecisionRequest(BaseModel):
     kind: Literal["all", "concept", "industry"] = "all"
     limit: int = Field(default=20, ge=1, le=50)
     validate_tushare_realtime: bool = True
+
+
+class XiaojieLeaderFlowSnapshotRequest(BaseModel):
+    """Point-in-time inputs retained by the research market-data pipeline."""
+
+    index_above_support: bool | None = None
+    index_volume_ratio: float | None = Field(default=None, ge=0)
+    breadth_up_count: int | None = Field(default=None, ge=0)
+    breadth_down_count: int | None = Field(default=None, ge=0)
+    main_sector_present: bool | None = None
+    sector_strength_percentile: float | None = Field(default=None, ge=0, le=1)
+    candidate_strength_rank: int | None = Field(default=None, ge=1)
+    is_back_row: bool | None = None
+    turnover_rate: float | None = Field(default=None, ge=0)
+    volume_ratio: float | None = Field(default=None, ge=0)
+    prior_one_word_board: bool | None = None
+    limit_up_return_flow: bool | None = None
+    re_seal_confirmed: bool | None = None
+    reverse_wrap_confirmed: bool | None = None
+    breakout_or_reverse_wrap: bool | None = None
+    leader_pullback_to_vwap: bool | None = None
+    intraday_above_vwap: bool | None = None
+    support_or_vwap_holds: bool | None = None
+    drawdown_from_high_pct: float | None = Field(default=None, ge=-100, le=100)
+    post_limitup_break_rebound_pct: float | None = Field(default=None, ge=-100, le=100)
+    futures_stock_both_rising: bool | None = None
+    profit_cushion_pct: float | None = Field(default=None, ge=-100, le=100)
+    ma5_break_duration_minutes: int | None = Field(default=None, ge=0)
+    ma5_recovered: bool | None = None
+    box_support_broken: bool | None = None
+    entry_low_broken: bool | None = None
+    days_without_new_high: int | None = Field(default=None, ge=0)
+    days_without_rise: int | None = Field(default=None, ge=0)
+    limit_up_break: bool | None = None
+    sector_strength_fades: bool | None = None
+
+
+class XiaojieLeaderFlowEvaluateRequest(BaseModel):
+    """Evaluate the Xiao Jie playbook without any provider or order side effect."""
+
+    snapshot: XiaojieLeaderFlowSnapshotRequest
+    parameters: dict[str, float | int] = Field(default_factory=dict, max_length=40)
+
+    @model_validator(mode="after")
+    def validate_parameters(self) -> "XiaojieLeaderFlowEvaluateRequest":
+        unknown = sorted(set(self.parameters) - set(DEFAULT_PARAMETERS))
+        if unknown:
+            raise ValueError(f"parameters are not registered: {', '.join(unknown)}")
+        for key, value in self.parameters.items():
+            if key.endswith("_fraction") and not 0 <= float(value) <= 1:
+                raise ValueError(f"{key} must be between 0 and 1")
+            if key.endswith("_percentile_min") and not 0 <= float(value) <= 1:
+                raise ValueError(f"{key} must be between 0 and 1")
+            if key.endswith("_minutes") and float(value) < 0:
+                raise ValueError(f"{key} must be non-negative")
+        return self
 
 
 class StrategyReviewRequest(BaseModel):

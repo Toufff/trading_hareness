@@ -147,6 +147,17 @@ from .intraday_volume_profiles import volume_time_profiles as pure_intraday_volu
 from .intraday_minute_provider_service import fetch_bounded_minute_context
 from .intraday_surge_context_service import capture as capture_intraday_surge_context
 from .strategy_candidate_ranking import select as select_intraday_candidates
+from .xiaojie_leader_flow import MODEL_VERSION as XIAOJIE_LEADER_FLOW_MODEL_VERSION, evaluate_snapshot as evaluate_xiaojie_leader_flow_snapshot
+from .xiaojie_indicators import evaluate_pool as evaluate_xiaojie_leader_pool
+from .xiaojie_reference_repository import (
+    ensure_session_trade_limits as ensure_xiaojie_session_trade_limits,
+    load_session_reference as load_xiaojie_session_reference,
+    persist_trade_limit_rows as persist_xiaojie_trade_limit_rows,
+    trade_limits as read_xiaojie_trade_limits,
+)
+from .xiaojie_observation_repository import (
+    mark_alerted as mark_xiaojie_alerted, record_candidates as record_xiaojie_candidates,
+)
 from . import offline_minute_import_service
 from .intraday_cross_section import SharedAsyncSnapshot
 from .intraday_state_machine import classify_setup_state as classify_intraday_setup_state
@@ -506,6 +517,7 @@ from .routers.market_actions import MarketActionDependencies, build_market_actio
 from .routers.intraday_actions import IntradayActionDependencies, build_intraday_actions_router
 from .routers.sector_actions import SectorActionDependencies, build_sector_actions_router
 from .routers.strategy_actions import StrategyActionDependencies, build_strategy_actions_router
+from .routers.xiaojie_leader_flow import build_xiaojie_leader_flow_router
 from .routers.research_actions import ResearchActionDependencies, build_research_actions_router
 from .routers.ingestion_actions import IngestionActionDependencies, build_ingestion_actions_router
 from .routers.system_control import SystemControlDependencies, build_system_control_router
@@ -1839,6 +1851,151 @@ async def intraday_watch_flow_reference(
     return await read_async_watch_flow_reference(async_db, symbols, observed_at)
 
 
+#: One session's reference is reloaded only when the trading date rolls over.
+_xiaojie_session_reference: dict[str, Any] = {"trading_date": None, "reference": None}
+#: Alerts are per newly-appearing (symbol, mode); this bounds a pathological day.
+XIAOJIE_MAX_ALERTS_PER_SCAN = 5
+XIAOJIE_MAX_ALERTS_PER_SESSION = 40
+
+
+async def _xiaojie_session_context(trading_date: date) -> dict[str, Any]:
+    """Load and cache one session's limits, memberships and prior-bar reference."""
+    cached = _xiaojie_session_reference
+    if cached["trading_date"] == trading_date and cached["reference"] is not None:
+        return cached["reference"]
+
+    async def read_limits(day: date) -> dict[str, float]:
+        return await run_database_blocking(
+            lambda: _with_connection(lambda connection: read_xiaojie_trade_limits(connection, day)),
+        )
+
+    async def persist_limits(day: date, rows: list[dict[str, Any]]) -> int:
+        return await run_database_blocking(
+            lambda: _with_connection(lambda connection: persist_xiaojie_trade_limit_rows(
+                connection, day, rows, "tushare", datetime.now(timezone.utc))),
+            timeout_seconds=180,
+        )
+
+    # Limit prices are published pre-open but only land in the table after the
+    # close, so intraday they must be provisioned before anything reads them.
+    await ensure_xiaojie_session_trade_limits(
+        trading_date, read_limits=read_limits, call_tushare_api=call_tushare_api,
+        persist_limits=persist_limits,
+    )
+    reference = await run_database_blocking(
+        lambda: _with_connection(lambda connection: load_xiaojie_session_reference(connection, trading_date)),
+        timeout_seconds=180,
+    )
+    _xiaojie_session_reference.update({"trading_date": trading_date, "reference": reference,
+                                       "alerts_sent": 0})
+    return reference
+
+
+def _with_connection(action: Any) -> Any:
+    with db.transaction() as connection:
+        return action(connection)
+
+
+async def run_xiaojie_leader_flow(*, scan_id: uuid.UUID, observed_at: datetime,
+                                  all_a_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Evaluate the leader pool from this scan's own cross-section.
+
+    Research-only throughout: the emitted signal events carry a dedicated
+    stage so nothing on the decision path can mistake them for watchlist
+    alerts, and the strategy stays at zero live weight in the promotion
+    registry.
+    """
+    if not all_a_rows:
+        return {"status": "skipped", "reason": "no all-A cross-section in this scan"}
+    trading_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+    reference = await _xiaojie_session_context(trading_date)
+    if not reference.get("limits"):
+        return {"status": "blocked", "reason": "session trade limits unavailable"}
+    result = evaluate_xiaojie_leader_pool(
+        all_a_rows, limits=reference["limits"], membership=reference["membership"],
+        references=reference["references"], observed_at=observed_at,
+        market_volume_baseline=reference.get("market_volume_baseline"),
+    )
+    candidates = result["candidates"]
+    fresh = await run_database_blocking(
+        lambda: _with_connection(lambda connection: record_xiaojie_candidates(
+            connection, trading_date, observed_at, scan_id, candidates)),
+        timeout_seconds=60,
+    ) if candidates else []
+
+    sent = int(_xiaojie_session_reference.get("alerts_sent") or 0)
+    remaining = min(XIAOJIE_MAX_ALERTS_PER_SCAN, max(0, XIAOJIE_MAX_ALERTS_PER_SESSION - sent))
+    alerted: list[tuple[str, str]] = []
+    alert_errors: list[str] = []
+    for candidate in fresh[:remaining]:
+        try:
+            event_id = await run_database_blocking(
+                lambda item=candidate: _with_connection(
+                    lambda connection: _persist_xiaojie_signal_event(connection, scan_id, observed_at, item)),
+                timeout_seconds=30,
+            )
+            await deliver_intraday_alert(event_id, _xiaojie_alert_text(candidate, trading_date))
+            alerted.append((candidate["symbol"], str(candidate.get("mode") or "unclassified")))
+        except Exception as error:  # noqa: BLE001 - an alert failure must not end the scan
+            alert_errors.append(f"{candidate.get('symbol')}: {safe_error_detail(str(error), 160)}")
+    if alerted:
+        _xiaojie_session_reference["alerts_sent"] = sent + len(alerted)
+        await run_database_blocking(
+            lambda: _with_connection(lambda connection: mark_xiaojie_alerted(
+                connection, trading_date, observed_at, alerted)),
+            timeout_seconds=30,
+        )
+    return {
+        "status": "completed", "model_version": XIAOJIE_LEADER_FLOW_MODEL_VERSION,
+        "pool_size": result["pool_size"], "evaluated": result["evaluated"],
+        "main_sector_count": result["main_sector_count"],
+        "regime": result["regime"],
+        "candidates": len(candidates), "new_candidates": len(fresh), "alerted": len(alerted),
+        "alerts_sent_this_session": int(_xiaojie_session_reference.get("alerts_sent") or 0),
+        "alert_errors": alert_errors or None,
+        "reference_symbols": len(reference["limits"]),
+        "live_effect": "none", "boundary": "research_only; no_automatic_order",
+    }
+
+
+def _persist_xiaojie_signal_event(connection: Any, scan_id: uuid.UUID, observed_at: datetime,
+                                  candidate: dict[str, Any]) -> uuid.UUID:
+    """Record a research observation as a distinctly-staged signal event.
+
+    ``stage`` isolates it: every decision-path consumer selects on the stages
+    the watchlist scan emits, so a research row cannot be mistaken for one.
+    """
+    event_id = uuid.uuid4()
+    mode = str(candidate.get("mode") or "unclassified")
+    connection.execute(
+        """INSERT INTO quant.intraday_signal_events(
+                signal_event_id,scan_id,symbol,signal_key,signal_type,severity,state,score,
+                observed_at,conditions,evidence,risk_flags,stage)
+           VALUES(%s,%s,%s,%s,'watch','info','alerted',0,%s,%s,%s,%s,'xiaojie_leader_flow_research')""",
+        (event_id, scan_id, candidate["symbol"], f"{candidate['symbol']}:xiaojie:{mode}",
+         observed_at, Json({"mode": mode, "position": candidate.get("position") or {},
+                            "stop_loss": candidate.get("stop_loss") or {}}),
+         Json(candidate.get("evidence") or {}), Json(candidate.get("risk_flags") or [])),
+    )
+    return event_id
+
+
+def _xiaojie_alert_text(candidate: dict[str, Any], trading_date: date) -> str:
+    evidence = candidate.get("evidence") or {}
+    board = evidence.get("board") or {}
+    state = "封板" if board.get("sealed") else ("炸板" if board.get("broken") else "近板")
+    pct = evidence.get("pct_change")
+    return (
+        f"【研究观察·小杰龙头】{candidate['symbol']} {candidate.get('mode')}\n"
+        f"{trading_date} {state} 涨幅 {pct:.2f}%\n" if pct is not None else
+        f"【研究观察·小杰龙头】{candidate['symbol']} {candidate.get('mode')}\n{trading_date} {state}\n"
+    ) + (
+        f"研究仓位参考 {(candidate.get('position') or {}).get('target_fraction')}；"
+        f"风险标记 {', '.join(candidate.get('risk_flags') or []) or '无'}\n"
+        "仅为研究观察，零实盘权重，不构成交易指令。"
+    )
+
+
 async def intraday_watch_volume_fallback(symbols: list[str]) -> dict[str, float]:
     """Batched live cumulative volume, used only when the all-A snapshot fails.
 
@@ -2545,6 +2702,7 @@ def _intraday_watchlist_scan_runtime() -> IntradayWatchlistScanRuntime:
             evaluate=evaluate_intraday_rotation_candidates,
             persist=persist_intraday_rotation_observations, json_safe=strategy_json_safe,
         ),
+        xiaojie_leader_flow=run_xiaojie_leader_flow,
         persist_rotation_observations=persist_ten_day_leader_rotation_intraday,
         persist_rotation_scan_status=persist_intraday_rotation_scan_status,
         json_safe=strategy_json_safe,
@@ -3709,6 +3867,7 @@ def _verify_strategy_runtime_contracts() -> None:
         "post_close_base_candidates": POST_CLOSE_STRATEGY_MODEL_VERSION,
         "post_close_limit_lift_pattern": STRATEGY_PATTERN_MODEL_VERSION,
         "disclosure_day_watch": DISCLOSURE_DAY_WATCH_MODEL_VERSION,
+        "xiaojie_leader_flow": XIAOJIE_LEADER_FLOW_MODEL_VERSION,
     })
 
 
@@ -4837,6 +4996,7 @@ app.include_router(build_strategy_actions_router(StrategyActionDependencies(
     generate_recommendations=recommendations,
     daily_pipeline=run_daily_pipeline,
 )))
+app.include_router(build_xiaojie_leader_flow_router(evaluate_xiaojie_leader_flow_snapshot))
 app.include_router(build_ten_day_leader_rotation_actions_router(
     TenDayLeaderRotationActionDependencies(run=run_ten_day_leader_rotation_endpoint),
 ))
