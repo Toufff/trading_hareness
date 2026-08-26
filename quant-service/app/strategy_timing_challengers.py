@@ -45,19 +45,28 @@ HORIZON_MINUTES = (5, 15, 30)
 PRICE_MATCH_TOLERANCE = timedelta(minutes=3)
 
 
-def _load_snapshots(connection: Any, as_of_date: date, model_version: str, max_rows: int) -> list[dict[str, Any]]:
-    return [dict(row) for row in connection.execute(
-        """SELECT rule_input_snapshot_id,symbol,observed_at,model_version,input_hash,inputs
-             FROM quant.intraday_rule_input_snapshots
+def _symbols_for_date(connection: Any, as_of_date: date, model_version: str) -> list[str]:
+    return [row["symbol"] for row in connection.execute(
+        """SELECT DISTINCT symbol FROM quant.intraday_rule_input_snapshots
             WHERE (observed_at AT TIME ZONE 'Asia/Shanghai')::date=%s AND model_version=%s
-            ORDER BY symbol,observed_at LIMIT %s""",
-        (as_of_date, model_version, max_rows),
+            ORDER BY symbol""",
+        (as_of_date, model_version),
     ).fetchall()]
 
 
-def _price_paths_by_symbol(rows: list[dict[str, Any]]) -> dict[str, list[tuple[datetime, float]]]:
-    """Reconstruct each symbol's intraday price path purely from its own recorded snapshots."""
-    paths: dict[str, list[tuple[datetime, float]]] = {}
+def _load_symbol_snapshots(connection: Any, as_of_date: date, model_version: str, symbol: str, max_rows: int) -> list[dict[str, Any]]:
+    return [dict(row) for row in connection.execute(
+        """SELECT rule_input_snapshot_id,symbol,observed_at,model_version,input_hash,inputs
+             FROM quant.intraday_rule_input_snapshots
+            WHERE (observed_at AT TIME ZONE 'Asia/Shanghai')::date=%s AND model_version=%s AND symbol=%s
+            ORDER BY observed_at LIMIT %s""",
+        (as_of_date, model_version, symbol, max_rows),
+    ).fetchall()]
+
+
+def _price_path(rows: list[dict[str, Any]]) -> list[tuple[datetime, float]]:
+    """Reconstruct one symbol's intraday price path purely from its own recorded snapshots."""
+    path: list[tuple[datetime, float]] = []
     for row in rows:
         price = (row.get("inputs") or {}).get("quote", {})
         price = price.get("price") if isinstance(price, dict) else None
@@ -67,10 +76,9 @@ def _price_paths_by_symbol(rows: list[dict[str, Any]]) -> dict[str, list[tuple[d
             price_value = float(price)
         except (TypeError, ValueError):
             continue
-        paths.setdefault(row["symbol"], []).append((row["observed_at"], price_value))
-    for symbol in paths:
-        paths[symbol].sort(key=lambda item: item[0])
-    return paths
+        path.append((row["observed_at"], price_value))
+    path.sort(key=lambda item: item[0])
+    return path
 
 
 def _forward_return(path: list[tuple[datetime, float]], entry_at: datetime, entry_price: float, minutes: int) -> float | None:
@@ -98,14 +106,25 @@ def run_challenger_backtest(connection: Any, as_of_date: date, *, model_version:
     with ``overrides`` splatted as keyword arguments; injected by the caller
     (main.py) so this module stays free of the live number()/upside_assessment_fn
     bindings, matching how intraday_rule_input_replay_runner.py's evaluate is injected.
+
+    Processes one symbol's rows at a time (the watchlist is capacity-bounded
+    to ~40 symbols, so this is dozens of small queries rather than one huge
+    fetch): loading a whole busy day's ~24k snapshots for every symbol at
+    once caused an OOM kill on this VM's small fixed memory budget.
     """
-    rows = _load_snapshots(connection, as_of_date, model_version, max_rows)
-    if not rows:
+    symbols = _symbols_for_date(connection, as_of_date, model_version)
+    if not symbols:
         return {"status": "blocked", "as_of_date": str(as_of_date), "reason": "no recorded snapshots for this date/model_version"}
-    paths = _price_paths_by_symbol(rows)
-    results: dict[str, Any] = {}
-    for challenger_key, overrides in CHALLENGERS.items():
-        entries: list[dict[str, Any]] = []
+    per_horizon = {f"{minutes}m": {"count": {}, "sum_return": {}, "hits": {}} for minutes in HORIZON_MINUTES}
+    total_entries: dict[str, int] = {key: 0 for key in CHALLENGERS}
+    total_snapshots = 0
+    for symbol in symbols:
+        rows = _load_symbol_snapshots(connection, as_of_date, model_version, symbol, max_rows)
+        if not rows:
+            continue
+        total_snapshots += len(rows)
+        path = _price_path(rows)
+        adapted: list[tuple[datetime, dict[str, Any]]] = []
         for row in rows:
             payload = dict(row.get("inputs") or {})
             stored_hash = str(row.get("input_hash") or "")
@@ -117,30 +136,39 @@ def run_challenger_backtest(connection: Any, as_of_date: date, *, model_version:
                 continue
             if isinstance(inputs.get("quote"), dict):
                 inputs["quote"] = {**inputs["quote"], "_scan_observed_at": row["observed_at"]}
-            for signal in evaluate_variant(inputs, overrides):
-                if signal.get("signal_type") != "entry":
-                    continue
-                price = (inputs.get("quote") or {}).get("price")
-                if price is None:
-                    continue
-                entries.append({"symbol": row["symbol"], "observed_at": row["observed_at"], "entry_price": float(price),
-                                "signal_key": signal.get("signal_key")})
-        by_horizon: dict[str, Any] = {}
+            adapted.append((row["observed_at"], inputs))
+        for challenger_key, overrides in CHALLENGERS.items():
+            for observed_at, inputs in adapted:
+                for signal in evaluate_variant(inputs, overrides):
+                    if signal.get("signal_type") != "entry":
+                        continue
+                    price = (inputs.get("quote") or {}).get("price")
+                    if price is None:
+                        continue
+                    total_entries[challenger_key] += 1
+                    for minutes in HORIZON_MINUTES:
+                        key = f"{minutes}m"
+                        forward = _forward_return(path, observed_at, float(price), minutes)
+                        bucket = per_horizon[key]
+                        counts = bucket["count"].setdefault(challenger_key, 0)
+                        if forward is not None:
+                            bucket["count"][challenger_key] = counts + 1
+                            bucket["sum_return"][challenger_key] = bucket["sum_return"].get(challenger_key, 0.0) + forward
+                            bucket["hits"][challenger_key] = bucket["hits"].get(challenger_key, 0) + int(forward > 0)
+    results: dict[str, Any] = {}
+    for challenger_key in CHALLENGERS:
+        by_horizon = {}
         for minutes in HORIZON_MINUTES:
-            returns = []
-            for entry in entries:
-                path = paths.get(entry["symbol"], [])
-                forward = _forward_return(path, entry["observed_at"], entry["entry_price"], minutes)
-                if forward is not None:
-                    returns.append(forward)
-            by_horizon[f"{minutes}m"] = {
-                "entries_fired": len(entries), "matured": len(returns),
-                "avg_return": round(sum(returns) / len(returns), 5) if returns else None,
-                "hit_rate": round(sum(value > 0 for value in returns) / len(returns), 4) if returns else None,
+            key = f"{minutes}m"
+            matured = per_horizon[key]["count"].get(challenger_key, 0)
+            by_horizon[key] = {
+                "entries_fired": total_entries[challenger_key], "matured": matured,
+                "avg_return": round(per_horizon[key]["sum_return"].get(challenger_key, 0.0) / matured, 5) if matured else None,
+                "hit_rate": round(per_horizon[key]["hits"].get(challenger_key, 0) / matured, 4) if matured else None,
             }
-        results[challenger_key] = {"total_entries": len(entries), "by_horizon": by_horizon}
+        results[challenger_key] = {"total_entries": total_entries[challenger_key], "by_horizon": by_horizon}
     status = "completed" if results["baseline"]["total_entries"] > 0 else "insufficient_history"
-    metrics = {"challengers": results, "snapshots": len(rows), "symbols": len(paths),
+    metrics = {"challengers": results, "snapshots": total_snapshots, "symbols": len(symbols),
               "data_boundary": {"source": "quant.intraday_rule_input_snapshots", "provider_access": "none",
                                 "historical_ingestion": "none", "threshold_fitting": "none", "orders": "none",
                                 "forward_return_source": "reconstructed from the same day's other recorded snapshots for that symbol only"}}
