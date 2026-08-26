@@ -132,5 +132,37 @@ class PreregisteredThresholdTests(unittest.TestCase):
             evaluate_snapshot(GATE, {"invented_knob": 1})
 
 
+
+class SupplementRotationReachabilityTests(unittest.TestCase):
+    """A supplement is not the leader, so gating it on rank 1-2 made it dead.
+
+    The live indicator marks a name as a supplement candidate only at rank 3 or
+    worse, while the leader gate required rank 1-2: the two intervals never
+    intersected, so the mode could be selected but never produce a candidate.
+    """
+
+    base = {**GATE, "candidate_strength_rank": 4, "is_back_row": True,
+            "supplement_candidate": True, "leader_not_broken": True}
+
+    def test_a_back_row_supplement_can_now_be_a_candidate(self):
+        result = evaluate_snapshot(self.base)
+        self.assertEqual(result["mode"], "supplement_rotation")
+        self.assertEqual(result["decision"], "research_candidate")
+
+    def test_it_stays_capped_at_the_small_fraction(self):
+        result = evaluate_snapshot(self.base)
+        self.assertLessEqual(result["position"]["target_fraction"], 0.10)
+
+    def test_the_exemption_does_not_leak_to_other_modes(self):
+        # A back-row name with no supplement premise is still blocked.
+        result = evaluate_snapshot({**GATE, "candidate_strength_rank": 4, "is_back_row": True,
+                                    "leader_pullback_to_vwap": True})
+        self.assertEqual(result["decision"], "no_trade")
+        self.assertIn("back_row_no_chase", result["risk_flags"])
+
+    def test_a_supplement_whose_leader_broke_is_still_blocked(self):
+        result = evaluate_snapshot({**self.base, "leader_not_broken": False})
+        self.assertEqual(result["decision"], "no_trade")
+
 if __name__ == "__main__":
     unittest.main()

@@ -1854,6 +1854,8 @@ async def intraday_watch_flow_reference(
 
 #: One session's reference is reloaded only when the trading date rolls over.
 _xiaojie_session_reference: dict[str, Any] = {"trading_date": None, "reference": None}
+#: Per-session MA5-break timers, reset when the trading date rolls over.
+_xiaojie_ma5_break_state: dict[str, Any] = {}
 #: Alerts are per newly-appearing (symbol, mode); this bounds a pathological day.
 XIAOJIE_MAX_ALERTS_PER_SCAN = 5
 XIAOJIE_MAX_ALERTS_PER_SESSION = 40
@@ -1889,6 +1891,7 @@ async def _xiaojie_session_context(trading_date: date) -> dict[str, Any]:
     )
     _xiaojie_session_reference.update({"trading_date": trading_date, "reference": reference,
                                        "alerts_sent": 0})
+    _xiaojie_ma5_break_state.clear()
     return reference
 
 
@@ -1915,6 +1918,7 @@ async def run_xiaojie_leader_flow(*, scan_id: uuid.UUID, observed_at: datetime,
     result = evaluate_xiaojie_leader_pool(
         all_a_rows, limits=reference["limits"], membership=reference["membership"],
         references=reference["references"], observed_at=observed_at,
+        ma5_break_state=_xiaojie_ma5_break_state,
         market_volume_baseline=reference.get("market_volume_baseline"),
     )
     candidates = result["candidates"]

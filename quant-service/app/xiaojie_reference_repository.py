@@ -116,7 +116,7 @@ def candidate_references(connection: Any, trading_date: date) -> dict[str, dict[
     """
     rows = connection.execute(
         """WITH recent AS (
-              SELECT symbol, trading_date, open, high, low, close, pre_close, limit_up,
+              SELECT symbol, trading_date, open, high, low, close, pre_close, limit_up, volume,
                      row_number() OVER (PARTITION BY symbol ORDER BY trading_date DESC) AS rn
                 FROM quant.canonical_bars_daily
                WHERE trading_date < %s AND trading_date >= %s - INTERVAL '90 days'
@@ -125,8 +125,11 @@ def candidate_references(connection: Any, trading_date: date) -> dict[str, dict[
               SELECT symbol, open, high, low, close, pre_close, limit_up
                 FROM recent WHERE rn = 1
            ), window_stats AS (
-              SELECT symbol, max(high) AS high_20d,
-                     avg(close) FILTER (WHERE rn <= %s) AS ma5
+              SELECT symbol, max(high) AS high_20d, min(low) AS low_20d,
+                     avg(close) FILTER (WHERE rn <= %s) AS ma5,
+                     avg(close) AS ma20,
+                     avg(volume) FILTER (WHERE rn <= %s) * 100 AS mean_volume_5d,
+                     max(close) FILTER (WHERE rn = 10) AS close_10_sessions_ago
                 FROM recent WHERE rn <= %s GROUP BY symbol
            ), no_new_high AS (
               SELECT symbol, count(*) AS days FROM recent r
@@ -143,14 +146,16 @@ def candidate_references(connection: Any, trading_date: date) -> dict[str, dict[
            )
            SELECT prior.symbol, prior.open, prior.high, prior.low, prior.close,
                   prior.pre_close, prior.limit_up,
-                  window_stats.high_20d, window_stats.ma5,
+                  window_stats.high_20d, window_stats.low_20d, window_stats.ma5,
+                  window_stats.ma20, window_stats.mean_volume_5d,
+                  window_stats.close_10_sessions_ago,
                   coalesce(no_new_high.days, 0) AS days_without_new_high,
                   coalesce(no_rise.days, 0) AS days_without_rise
              FROM prior
              LEFT JOIN window_stats USING (symbol)
              LEFT JOIN no_new_high USING (symbol)
              LEFT JOIN no_rise USING (symbol)""",
-        (trading_date, trading_date, MA_SESSIONS, LOOKBACK_SESSIONS,
+        (trading_date, trading_date, MA_SESSIONS, MA_SESSIONS, LOOKBACK_SESSIONS,
          LOOKBACK_SESSIONS, MA_SESSIONS),
     ).fetchall()
     references: dict[str, dict[str, Any]] = {}
@@ -165,7 +170,12 @@ def candidate_references(connection: Any, trading_date: date) -> dict[str, dict[
                 "limit_up": float(row["limit_up"]) if row["limit_up"] is not None else None,
             },
             "high_20d": float(row["high_20d"]) if row["high_20d"] is not None else None,
+            "low_20d": float(row["low_20d"]) if row["low_20d"] is not None else None,
             "ma5": float(row["ma5"]) if row["ma5"] is not None else None,
+            "ma20": float(row["ma20"]) if row["ma20"] is not None else None,
+            "mean_volume_5d": float(row["mean_volume_5d"]) if row["mean_volume_5d"] is not None else None,
+            "close_10_sessions_ago": (float(row["close_10_sessions_ago"])
+                                      if row["close_10_sessions_ago"] is not None else None),
             "days_without_new_high": int(row["days_without_new_high"] or 0),
             "days_without_rise": int(row["days_without_rise"] or 0),
         }

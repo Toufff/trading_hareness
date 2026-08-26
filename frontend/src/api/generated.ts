@@ -4010,6 +4010,26 @@ export interface components {
             limit_up_break?: boolean | null;
             /** Sector Strength Fades */
             sector_strength_fades?: boolean | null;
+            /** Index Right Side Confirmed */
+            index_right_side_confirmed?: boolean | null;
+            /** Breakout Confirmed */
+            breakout_confirmed?: boolean | null;
+            /** Icepoint */
+            icepoint?: boolean | null;
+            /** Left Side Signal */
+            left_side_signal?: boolean | null;
+            /** Distance From Ma5 Pct */
+            distance_from_ma5_pct?: number | null;
+            /** Oversold Rebound Confirmed */
+            oversold_rebound_confirmed?: boolean | null;
+            /** Supplement Candidate */
+            supplement_candidate?: boolean | null;
+            /** Leader Not Broken */
+            leader_not_broken?: boolean | null;
+            /** Is Etf */
+            is_etf?: boolean | null;
+            /** Trend Support Holds */
+            trend_support_holds?: boolean | null;
         };
     };
     responses: never;

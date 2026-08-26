@@ -246,3 +246,111 @@ class MarketVolumeBaselineTests(unittest.TestCase):
         # Only the listed name counts: 1000 手 -> 100,000 shares.  Including the
         # index would have made this 900,100,000.
         self.assertEqual(baseline, 100_000.0)
+
+
+class Ma5BreakTrackingTests(unittest.TestCase):
+    """The MA5 exit rule needs the moment a break started, not just its state."""
+
+    from datetime import datetime as _dt, timezone as _tz
+    base = _dt(2026, 8, 26, 5, 0, tzinfo=_tz.utc)
+
+    def test_a_name_above_its_ma5_has_no_running_break(self):
+        from app.xiaojie_indicators import track_ma5_break
+        state = {}
+        result = track_ma5_break(state, "A.SZ", 11.0, 10.0, self.base)
+        self.assertEqual(result, {"duration_minutes": 0.0, "recovered": True})
+        self.assertEqual(state, {})
+
+    def test_the_break_is_timed_from_its_first_observation(self):
+        from datetime import timedelta
+        from app.xiaojie_indicators import track_ma5_break
+        state = {}
+        track_ma5_break(state, "A.SZ", 9.5, 10.0, self.base)
+        later = track_ma5_break(state, "A.SZ", 9.4, 10.0, self.base + timedelta(minutes=20))
+        self.assertEqual(later["duration_minutes"], 20.0)
+        self.assertFalse(later["recovered"])
+
+    def test_recovery_clears_the_timer_and_a_second_break_restarts_it(self):
+        from datetime import timedelta
+        from app.xiaojie_indicators import track_ma5_break
+        state = {}
+        track_ma5_break(state, "A.SZ", 9.5, 10.0, self.base)
+        track_ma5_break(state, "A.SZ", 10.5, 10.0, self.base + timedelta(minutes=10))
+        self.assertEqual(state, {}, "recovering must clear the running break")
+        again = track_ma5_break(state, "A.SZ", 9.8, 10.0, self.base + timedelta(minutes=15))
+        self.assertEqual(again["duration_minutes"], 0.0,
+                         "the second break is timed from itself, not the first")
+
+    def test_a_missing_ma5_yields_no_verdict_rather_than_a_false_one(self):
+        from app.xiaojie_indicators import track_ma5_break
+        self.assertEqual(track_ma5_break({}, "A.SZ", 10.0, None, self.base),
+                         {"duration_minutes": None, "recovered": None})
+
+
+class NewModeFieldTests(unittest.TestCase):
+    """Fields the post-distillation modes gate on."""
+
+    market = {"index_above_support": True, "index_volume_ratio": 1.2,
+              "breadth_up_count": 3000, "breadth_down_count": 2000,
+              "elapsed_session_minutes": 240, "right_side_confirmed": True, "icepoint": False}
+
+    def _snapshot(self, row, reference=None, sectors=None):
+        from app.xiaojie_indicators import candidate_snapshot
+        return candidate_snapshot(
+            "A.SZ", row, market=self.market,
+            reference={"sectors": {"S1"}, **(reference or {})},
+            sectors={"main_sectors": {"S1"}, "ranks": {"A.SZ": 1},
+                     "strength_percentile": {"A.SZ": 0.95}, "leader_intact": {"A.SZ": True},
+                     **(sectors or {})},
+            limits={"A.SZ": 11.0})
+
+    def test_breakout_requires_volume_not_just_a_new_high(self):
+        row = _row("A.SZ", 10.5, high=10.5, prev=10.0, volume=1_000_000.0)
+        drifted = self._snapshot(row, {"high_20d": 10.4, "mean_volume_5d": 2_000_000.0})
+        self.assertFalse(drifted["breakout_confirmed"], "clearing a high on thin volume is not a breakout")
+        surged = self._snapshot(row, {"high_20d": 10.4, "mean_volume_5d": 500_000.0})
+        self.assertTrue(surged["breakout_confirmed"])
+
+    def test_distance_from_ma5_is_a_magnitude_the_rule_can_compare(self):
+        # The icepoint rule compares it against a positive floor, so a signed
+        # value would demand a name 3% *above* its MA5 for a left-side trial.
+        below = self._snapshot(_row("A.SZ", 9.0, prev=10.0), {"ma5": 10.0})
+        self.assertAlmostEqual(below["distance_from_ma5_pct"], 10.0, places=5)
+        self.assertAlmostEqual(below["_evidence"]["signed_distance_from_ma5_pct"], -10.0, places=5)
+        above = self._snapshot(_row("A.SZ", 11.0, prev=10.0), {"ma5": 10.0})
+        self.assertAlmostEqual(above["distance_from_ma5_pct"], 10.0, places=5)
+        self.assertAlmostEqual(above["_evidence"]["signed_distance_from_ma5_pct"], 10.0, places=5)
+
+    def test_left_side_signal_needs_a_bounce_off_the_low(self):
+        at_low = _row("A.SZ", 9.0, low=9.0, prev=10.0)
+        self.assertFalse(self._snapshot(at_low, {"ma5": 10.0})["left_side_signal"])
+        bounced = _row("A.SZ", 9.2, low=9.0, prev=10.0)
+        self.assertTrue(self._snapshot(bounced, {"ma5": 10.0})["left_side_signal"])
+
+    def test_oversold_rebound_needs_a_real_decline_and_a_turn(self):
+        falling = _row("A.SZ", 8.0, low=8.0, prev=8.5)
+        self.assertFalse(self._snapshot(falling, {"close_10_sessions_ago": 10.0, "low_20d": 7.9})[
+            "oversold_rebound_confirmed"], "still falling is not a rebound")
+        turning = _row("A.SZ", 8.2, low=7.95, prev=8.0)
+        self.assertTrue(self._snapshot(turning, {"close_10_sessions_ago": 10.0, "low_20d": 7.9})[
+            "oversold_rebound_confirmed"])
+
+    def test_a_shallow_dip_is_not_oversold(self):
+        row = _row("A.SZ", 9.8, low=9.7, prev=9.7)
+        self.assertFalse(self._snapshot(row, {"close_10_sessions_ago": 10.0, "low_20d": 9.6})[
+            "oversold_rebound_confirmed"])
+
+    def test_the_sector_leader_is_not_its_own_supplement(self):
+        row = _row("A.SZ", 10.5, prev=10.0)
+        self.assertFalse(self._snapshot(row)["supplement_candidate"], "rank 1 is the leader")
+        behind = self._snapshot(row, sectors={"ranks": {"A.SZ": 4}})
+        self.assertTrue(behind["supplement_candidate"])
+
+    def test_etf_mode_fails_closed_on_an_equity_cross_section(self):
+        # The licensed all-A snapshot carries no funds, so this must be a real
+        # False rather than an absent field read as unknown.
+        self.assertIs(self._snapshot(_row("A.SZ", 10.0, prev=10.0))["is_etf"], False)
+
+    def test_trend_support_tracks_ma20(self):
+        self.assertTrue(self._snapshot(_row("A.SZ", 10.5, prev=10.0), {"ma20": 10.0})["trend_support_holds"])
+        self.assertFalse(self._snapshot(_row("A.SZ", 9.5, prev=10.0), {"ma20": 10.0})["trend_support_holds"])

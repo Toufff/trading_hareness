@@ -60,6 +60,35 @@ class XiaojieLeaderFlowTests(unittest.TestCase):
         self.assertEqual(result["decision"], "no_trade")
         self.assertIn("cross_asset_chase_risk", result["risk_flags"])
 
+    def test_icepoint_is_only_a_small_left_side_trial_with_profit_cushion(self):
+        result = evaluate_snapshot(self._snapshot(
+            prior_one_word_board=False,
+            limit_up_return_flow=False,
+            icepoint=True,
+            left_side_signal=True,
+            distance_from_ma5_pct=4,
+            profit_cushion_pct=0.08,
+        ))
+        self.assertEqual(result["mode"], "icepoint_left_trial")
+        self.assertEqual(result["position"]["target_fraction"], 0.05)
+        self.assertTrue(result["position"]["staged_entry"])
+
+    def test_etf_trend_does_not_require_stock_leader_rank(self):
+        result = evaluate_snapshot(self._snapshot(
+            prior_one_word_board=False,
+            limit_up_return_flow=False,
+            is_etf=True,
+            trend_support_holds=True,
+            candidate_strength_rank=None,
+        ))
+        self.assertEqual(result["mode"], "etf_trend")
+        self.assertEqual(result["decision"], "research_candidate")
+
+    def test_long_term_dca_policy_is_exposed_as_research_metadata(self):
+        result = evaluate_snapshot(self._snapshot())
+        self.assertEqual(result["portfolio_policy"]["long_term_dca"]["parts_min"], 10)
+        self.assertEqual(result["portfolio_policy"]["long_term_dca"]["buy_on_drawdown_pct"], [5.0, 10.0])
+
 
 if __name__ == "__main__":
     unittest.main()

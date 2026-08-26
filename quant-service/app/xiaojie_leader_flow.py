@@ -43,6 +43,14 @@ DEFAULT_PARAMETERS: dict[str, Any] = {
     "swing_stop_loss_max_pct": 15.0,
     "short_term_stop_loss_min_pct": 10.0,
     "short_term_stop_loss_max_pct": 20.0,
+    "icepoint_ma5_distance_min_pct": 3.0,
+    "left_side_trial_fraction": 0.05,
+    "oversold_rebound_fraction": 0.05,
+    "staged_entry_initial_fraction": 0.50,
+    "long_term_dca_parts_min": 10,
+    "long_term_dca_parts_max": 20,
+    "long_term_dca_drawdown_min_pct": 5.0,
+    "long_term_dca_drawdown_max_pct": 10.0,
 }
 
 
@@ -117,6 +125,19 @@ def _mode(snapshot: Mapping[str, Any], params: Mapping[str, Any]) -> str | None:
         return "divergence_low_suck"
     if _flag(snapshot, "leader_pullback_to_vwap") and _flag(snapshot, "main_sector_present"):
         return "leader_pullback"
+    if _flag(snapshot, "index_right_side_confirmed") and _flag(snapshot, "breakout_confirmed"):
+        return "right_side_breakout"
+    distance_from_ma5 = _number(snapshot.get("distance_from_ma5_pct"))
+    if (_flag(snapshot, "icepoint") and _flag(snapshot, "left_side_signal")
+            and distance_from_ma5 is not None
+            and distance_from_ma5 >= float(params["icepoint_ma5_distance_min_pct"])):
+        return "icepoint_left_trial"
+    if _flag(snapshot, "oversold_rebound_confirmed") and _flag(snapshot, "support_or_vwap_holds"):
+        return "oversold_rebound"
+    if _flag(snapshot, "supplement_candidate") and _flag(snapshot, "leader_not_broken"):
+        return "supplement_rotation"
+    if _flag(snapshot, "is_etf") and _flag(snapshot, "trend_support_holds"):
+        return "etf_trend"
     if _flag(snapshot, "breakout_or_reverse_wrap"):
         return "潜龙出海_swing"
     return None
@@ -173,18 +194,49 @@ def evaluate_snapshot(snapshot: Mapping[str, Any], parameters: Mapping[str, Any]
         reasons.append("分歧或急跌后回到支撑/VWAP，满足低吸区间")
     elif selected_mode == "leader_pullback":
         reasons.append("核心龙头回踩分时均价且主线仍在")
+    elif selected_mode == "right_side_breakout":
+        reasons.append("指数右侧确认且个股放量突破")
+    elif selected_mode == "icepoint_left_trial":
+        reasons.append("冰点偏离 5 日线达到试错距离，仅允许左侧小仓位")
+    elif selected_mode == "oversold_rebound":
+        reasons.append("超跌反弹确认且支撑/VWAP 未破")
+    elif selected_mode == "supplement_rotation":
+        reasons.append("主龙头未破坏，板块补涨候选进入轮动")
+    elif selected_mode == "etf_trend":
+        reasons.append("ETF/低波动资产趋势支撑有效")
     else:
         reasons.append("潜龙出海突破/反包，仅作波段研究")
 
+    is_etf = _flag(snapshot, "is_etf")
+    # A supplement is by definition not the sector leader - the playbook allows
+    # it precisely as a follow-on, at a small position.  Gating it on "rank 1-2"
+    # made the mode unreachable: the live indicator only marks a name as a
+    # supplement candidate at rank 3 or worse, so the two intervals never
+    # intersected and the mode could select but never produce a candidate.
+    # It is exempted from the leader rank and back-row blocks and stays capped
+    # at the small high-risk fraction instead.
+    follows_a_leader = selected_mode == "supplement_rotation" and _flag(snapshot, "leader_not_broken")
+    leader_gate_ok = leader_ok or is_etf or follows_a_leader
+    left_side_without_cushion = selected_mode == "icepoint_left_trial" and (_number(snapshot.get("profit_cushion_pct")) or 0) <= 0
+    if left_side_without_cushion:
+        risk_flags.append("left_side_without_profit_cushion")
     hard_block = (
-        not market["ok"] or not market["complete"] or _flag(snapshot, "is_back_row")
-        or _flag(snapshot, "futures_stock_both_rising") or not sector_core or not leader_ok or selected_mode is None
+        not market["ok"] or not market["complete"]
+        or (_flag(snapshot, "is_back_row") and not follows_a_leader)
+        or _flag(snapshot, "futures_stock_both_rising") or not sector_core or not leader_gate_ok or selected_mode is None
+        or left_side_without_cushion
     )
     decision = "no_trade" if hard_block else "research_candidate"
     if decision == "no_trade":
         position_fraction = 0.0
+    elif selected_mode == "icepoint_left_trial":
+        position_fraction = float(params["left_side_trial_fraction"])
+    elif selected_mode in {"oversold_rebound", "supplement_rotation"}:
+        position_fraction = float(params["oversold_rebound_fraction"])
     elif high_risk:
         position_fraction = float(params["high_risk_position_fraction"])
+    elif selected_mode == "etf_trend":
+        position_fraction = float(params["normal_position_fraction"])
     elif selected_mode == "leader_pullback":
         position_fraction = float(params["leader_position_fraction"])
     else:
@@ -223,6 +275,9 @@ def evaluate_snapshot(snapshot: Mapping[str, Any], parameters: Mapping[str, Any]
         "min_pct": float(params["short_term_stop_loss_min_pct"] if high_risk else (params["swing_stop_loss_min_pct"] if selected_mode == "潜龙出海_swing" else params["normal_stop_loss_pct"])),
         "max_pct": float(params["short_term_stop_loss_max_pct"] if high_risk else (params["swing_stop_loss_max_pct"] if selected_mode == "潜龙出海_swing" else params["normal_stop_loss_pct"])),
     }
+    staged_entry = decision != "no_trade" and selected_mode not in {"etf_trend"}
+    initial_fraction = round(position_fraction * float(params["staged_entry_initial_fraction"]), 4) if staged_entry else round(position_fraction, 4)
+    confirmation_fraction = round(position_fraction - initial_fraction, 4) if staged_entry else 0.0
     return {
         "strategy_key": "xiaojie_leader_flow",
         "model_version": MODEL_VERSION,
@@ -232,7 +287,19 @@ def evaluate_snapshot(snapshot: Mapping[str, Any], parameters: Mapping[str, Any]
         "market_gate": market,
         "position": {
             "target_fraction": round(position_fraction, 4),
+            "staged_entry": staged_entry,
+            "initial_fraction": initial_fraction,
+            "confirmation_fraction": confirmation_fraction,
             "high_risk_total_cap_fraction": float(params["high_risk_total_fraction"]),
+        },
+        "portfolio_policy": {
+            "hierarchy": ["risk_management", "market_regime", "style", "sector", "stock", "entry_exit"],
+            "allocation": "single_symbol_10_to_20_percent; at_least_two_sectors; reserve_cash",
+            "long_term_dca": {
+                "parts_min": int(params["long_term_dca_parts_min"]),
+                "parts_max": int(params["long_term_dca_parts_max"]),
+                "buy_on_drawdown_pct": [float(params["long_term_dca_drawdown_min_pct"]), float(params["long_term_dca_drawdown_max_pct"])],
+            },
         },
         "stop_loss": stop_loss,
         "exit": {"action": exit_action, "codes": exit_codes},

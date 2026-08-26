@@ -205,6 +205,16 @@ class XiaojieLeaderFlowSnapshotRequest(BaseModel):
     days_without_rise: int | None = Field(default=None, ge=0)
     limit_up_break: bool | None = None
     sector_strength_fades: bool | None = None
+    index_right_side_confirmed: bool | None = None
+    breakout_confirmed: bool | None = None
+    icepoint: bool | None = None
+    left_side_signal: bool | None = None
+    distance_from_ma5_pct: float | None = Field(default=None, ge=0, le=100)
+    oversold_rebound_confirmed: bool | None = None
+    supplement_candidate: bool | None = None
+    leader_not_broken: bool | None = None
+    is_etf: bool | None = None
+    trend_support_holds: bool | None = None
 
 
 class XiaojieLeaderFlowEvaluateRequest(BaseModel):

@@ -29,7 +29,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Mapping
 
-from .intraday_derived_flow_metrics import session_elapsed_minutes
+from .intraday_derived_flow_metrics import SESSION_MINUTES, session_elapsed_minutes
 from .xiaojie_leader_flow import evaluate_snapshot
 
 
@@ -42,6 +42,19 @@ NEAR_LIMIT_PCT = 3.0
 MAX_CANDIDATES = 150
 #: A sector needs this many limit-ups before it counts as a 主线板块.
 MAIN_SECTOR_MIN_LIMIT_UPS = 3
+#: Market-wide sentiment floor: below this share of names above their own MA5,
+#: with limit-ups this scarce, the tape is at a 冰点 rather than merely weak.
+ICEPOINT_BREADTH_MAX = 0.25
+ICEPOINT_MAX_LIMIT_UPS = 20
+#: A right-side confirmation needs breadth, volume and direction together.
+RIGHT_SIDE_BREADTH_MIN = 0.55
+RIGHT_SIDE_VOLUME_RATIO_MIN = 1.0
+#: A breakout must clear the prior high on expanded volume, not drift over it.
+BREAKOUT_VOLUME_RATIO_MIN = 1.5
+#: "Oversold" is measured against the name's own recent range, not a fixed drop.
+OVERSOLD_DECLINE_MIN_PCT = 15.0
+#: A supplement candidate follows a leader; it is not itself the leader.
+SUPPLEMENT_MIN_RANK = 3
 #: "Pulled back to VWAP" means price has returned to within this band of it.
 VWAP_BAND_PCT = 1.0
 #: ...but only counts as a pullback if the name first traded this far above
@@ -146,6 +159,13 @@ def market_regime_inputs(rows: list[dict[str, Any]], references: Mapping[str, An
         "breadth_above_ma5": breadth_above_ma5,
         "market_volume": traded_volume,
         "elapsed_session_minutes": elapsed_session_minutes,
+        # Right side: breadth, volume and direction confirming together.  Any
+        # one of them alone is the condition the playbook warns about - a
+        # breakout with no volume, or volume with no follow-through.
+        "right_side_confirmed": bool(
+            breadth_above_ma5 is not None and breadth_above_ma5 >= RIGHT_SIDE_BREADTH_MIN
+            and volume_ratio is not None and volume_ratio >= RIGHT_SIDE_VOLUME_RATIO_MIN
+        ),
     }
 
 
@@ -219,8 +239,20 @@ def sector_context(pool: list[str], rows_by_symbol: Mapping[str, dict[str, Any]]
         for position, symbol in enumerate(members, start=1):
             if symbol not in ranks or position < ranks[symbol]:
                 ranks[symbol] = position
+    # A supplement only makes sense while its sector's leader is still intact:
+    # once the rank-1 name breaks, the rotation is a falling tide, not a relay.
+    leader_intact: dict[str, bool] = {}
+    for sector in main_sectors:
+        members = [symbol for symbol in pool if sector in membership.get(symbol, set())]
+        if not members:
+            continue
+        leader = min(members, key=lambda symbol: ranks.get(symbol, 999))
+        holding = board_state(snapshot_fields(rows_by_symbol.get(leader) or {}),
+                              limits.get(leader))["sealed"]
+        for symbol in members:
+            leader_intact[symbol] = leader_intact.get(symbol, False) or holding
     return {"main_sectors": main_sectors, "ranks": ranks,
-            "sealed_by_sector": sealed_by_sector,
+            "sealed_by_sector": sealed_by_sector, "leader_intact": leader_intact,
             "strength_percentile": sector_strength_percentiles(rows_by_symbol, membership)}
 
 
@@ -258,9 +290,30 @@ def sector_strength_percentiles(rows_by_symbol: Mapping[str, dict[str, Any]],
     return best
 
 
+def track_ma5_break(state: dict[str, Any], symbol: str, price: float | None,
+                    ma5: float | None, observed_at: datetime) -> dict[str, Any]:
+    """Maintain how long a name has been below its MA5 within one session.
+
+    The exit rule is "broke MA5 and did not recover within 15 minutes", which
+    is not answerable from a single snapshot: it needs the moment the break
+    started.  State is keyed per session by the caller and holds only the first
+    timestamp below the line, so a name that recovers and breaks again is timed
+    from the second break rather than the first.
+    """
+    if price is None or not ma5:
+        return {"duration_minutes": None, "recovered": None}
+    if price >= float(ma5):
+        state.pop(symbol, None)
+        return {"duration_minutes": 0.0, "recovered": True}
+    started = state.setdefault(symbol, observed_at)
+    return {"duration_minutes": max(0.0, (observed_at - started).total_seconds() / 60.0),
+            "recovered": False}
+
+
 def candidate_snapshot(symbol: str, row: Mapping[str, Any], *, market: Mapping[str, Any],
                        reference: Mapping[str, Any], sectors: Mapping[str, Any],
-                       limits: Mapping[str, float]) -> dict[str, Any]:
+                       limits: Mapping[str, float],
+                       ma5_break: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Assemble one candidate's point-in-time snapshot for the decision function."""
     fields = snapshot_fields(row)
     price = fields["price"]
@@ -276,6 +329,7 @@ def candidate_snapshot(symbol: str, row: Mapping[str, Any], *, market: Mapping[s
     rebound = None
     if board["broken"] and price is not None and fields["low"]:
         rebound = (price - fields["low"]) / fields["low"] * 100
+    elapsed_minutes = int(market.get("elapsed_session_minutes") or 0)
     vwap_distance = ((price - vwap) / vwap * 100) if (vwap and price is not None) else None
     # A pullback needs something to pull back from: the session must have
     # extended above VWAP, and price must now have returned toward it.
@@ -288,6 +342,43 @@ def candidate_snapshot(symbol: str, row: Mapping[str, Any], *, market: Mapping[s
         and 0 <= vwap_distance <= VWAP_BAND_PCT
     )
 
+    # --- inputs for the modes added after the first distillation -----------
+    ma5 = reference.get("ma5")
+    ma20 = reference.get("ma20")
+    # "距 5 日线至少 3%" is a distance, and the rule compares it against a
+    # positive floor.  A signed value would make the icepoint trial demand a
+    # name 3% *above* its MA5, which is the opposite of a left-side entry -
+    # and the mode's own left_side_signal already requires price below the
+    # line, so magnitude is the meaning that leaves the rule coherent.
+    signed_distance_from_ma5 = (((price - float(ma5)) / float(ma5) * 100)
+                                if (ma5 and price is not None) else None)
+    distance_from_ma5 = abs(signed_distance_from_ma5) if signed_distance_from_ma5 is not None else None
+    mean_volume = reference.get("mean_volume_5d")
+    own_volume_ratio = None
+    if mean_volume and fields["volume"] and elapsed_minutes > 0:
+        expected = float(mean_volume) * (elapsed_minutes / SESSION_MINUTES)
+        if expected > 0:
+            own_volume_ratio = fields["volume"] / expected
+    high_20d_value = reference.get("high_20d")
+    breakout_confirmed = bool(
+        high_20d_value and price is not None and price >= float(high_20d_value)
+        and own_volume_ratio is not None and own_volume_ratio >= BREAKOUT_VOLUME_RATIO_MIN
+    )
+    # Oversold is relative to the name's own 20-session range, so a stock that
+    # merely drifted does not qualify alongside one that halved.
+    low_20d_value, reference_close = reference.get("low_20d"), reference.get("close_10_sessions_ago")
+    decline_pct = (((float(reference_close) - price) / float(reference_close) * 100)
+                   if (reference_close and price is not None) else None)
+    oversold_rebound = bool(
+        decline_pct is not None and decline_pct >= OVERSOLD_DECLINE_MIN_PCT
+        and low_20d_value and price is not None and price > float(low_20d_value)
+        and fields["prev_close"] and price > float(fields["prev_close"])
+    )
+    left_side_signal = bool(
+        ma5 and price is not None and price < float(ma5)
+        and fields["low"] is not None and price > float(fields["low"])
+    )
+    trend_support_holds = bool(ma20 and price is not None and price >= float(ma20))
     prior = reference.get("prior_bar") or {}
     prior_one_word = bool(
         prior.get("limit_up") and prior.get("open") is not None
@@ -323,16 +414,43 @@ def candidate_snapshot(symbol: str, row: Mapping[str, Any], *, market: Mapping[s
         "support_or_vwap_holds": bool(vwap_distance is not None and vwap_distance >= 0),
         "leader_pullback_to_vwap": pulled_back,
         "breakout_or_reverse_wrap": breakout or reverse_wrap,
+        # right-side breakout
+        "index_right_side_confirmed": bool(market.get("right_side_confirmed")),
+        "breakout_confirmed": breakout_confirmed,
+        # icepoint left-side trial
+        "icepoint": bool(market.get("icepoint")),
+        "left_side_signal": left_side_signal,
+        "distance_from_ma5_pct": distance_from_ma5,
+        # oversold rebound
+        "oversold_rebound_confirmed": oversold_rebound,
+        # supplement rotation
+        "supplement_candidate": bool(
+            in_main and rank is not None and rank >= SUPPLEMENT_MIN_RANK
+            and fields["pct_change"] is not None and fields["pct_change"] > 0
+        ),
+        "leader_not_broken": bool(sectors.get("leader_intact", {}).get(symbol)),
+        # ETF trend - the licensed all-A snapshot is an equity cross-section and
+        # carries no funds, so is_etf is never true from this pipeline.  It is
+        # emitted as a real False rather than omitted so the mode fails closed
+        # instead of reading an absent field as unknown.
+        "is_etf": False,
+        "trend_support_holds": trend_support_holds,
         # exit context
         "limit_up_break": board["broken"],
         "sector_strength_fades": bool(reference.get("sector_strength_fades")),
         "box_support_broken": bool(ma5 and price is not None and price < float(ma5) * 0.97),
+        "ma5_break_duration_minutes": (ma5_break or {}).get("duration_minutes"),
+        "ma5_recovered": (ma5_break or {}).get("recovered"),
         "days_without_new_high": reference.get("days_without_new_high"),
         "days_without_rise": reference.get("days_without_rise"),
         # observability, not consumed by the decision function
         "_evidence": {
             "vwap": vwap, "vwap_distance_pct": vwap_distance, "limit_up": limit_up,
             "extended_above_vwap": extended_above_vwap, "pulled_back_to_vwap": pulled_back,
+            "own_volume_ratio": own_volume_ratio,
+            "distance_from_ma5_pct": distance_from_ma5,
+            "signed_distance_from_ma5_pct": signed_distance_from_ma5,
+            "decline_from_10_sessions_pct": decline_pct,
             "board": board, "session_high": fields["high"], "price": price,
             "pct_change": fields["pct_change"],
         },
@@ -341,7 +459,8 @@ def candidate_snapshot(symbol: str, row: Mapping[str, Any], *, market: Mapping[s
 
 def evaluate_pool(rows: list[dict[str, Any]], *, limits: Mapping[str, float],
                   membership: Mapping[str, set[str]], references: Mapping[str, Any],
-                  observed_at: datetime, market_volume_baseline: float | None = None,
+                  observed_at: datetime, ma5_break_state: dict[str, Any] | None = None,
+                  market_volume_baseline: float | None = None,
                   elapsed_session_minutes: int | None = None,
                   index_volume_ratio: float | None = None,
                   index_above_support: bool | None = None,
@@ -358,6 +477,18 @@ def evaluate_pool(rows: list[dict[str, Any]], *, limits: Mapping[str, float],
                                  if elapsed_session_minutes is not None
                                  else session_elapsed_minutes(observed_at)),
     )
+    # A 冰点 is a market-wide state: few boards holding and most names below
+    # their own short average.  It is computed from the sealed count rather
+    # than the pool size, since a pool of names merely approaching the limit
+    # says nothing about how much risk the tape is actually taking.
+    sealed_now = sum(1 for symbol in pool
+                     if board_state(snapshot_fields(rows_by_symbol[symbol]), limits.get(symbol))["sealed"])
+    regime["sealed_limit_ups"] = sealed_now
+    regime["icepoint"] = bool(
+        sealed_now <= ICEPOINT_MAX_LIMIT_UPS
+        and regime["breadth_above_ma5"] is not None
+        and regime["breadth_above_ma5"] <= ICEPOINT_BREADTH_MAX
+    )
     if index_volume_ratio is None:
         index_volume_ratio = regime["index_volume_ratio"]
     if index_above_support is None:
@@ -366,12 +497,21 @@ def evaluate_pool(rows: list[dict[str, Any]], *, limits: Mapping[str, float],
         rows, index_volume_ratio=index_volume_ratio, index_above_support=index_above_support,
         main_sector_present=bool(sectors["main_sectors"]),
     )
+    market["right_side_confirmed"] = regime["right_side_confirmed"]
+    market["icepoint"] = regime["icepoint"]
+    market["elapsed_session_minutes"] = regime["elapsed_session_minutes"]
     evaluations: list[dict[str, Any]] = []
+    break_state = ma5_break_state if ma5_break_state is not None else {}
     for symbol in pool:
         reference = dict(references.get(symbol) or {})
         reference.setdefault("sectors", membership.get(symbol, set()))
+        ma5_break = track_ma5_break(
+            break_state, symbol, snapshot_fields(rows_by_symbol[symbol])["price"],
+            reference.get("ma5"), observed_at,
+        )
         snapshot = candidate_snapshot(symbol, rows_by_symbol[symbol], market=market,
-                                      reference=reference, sectors=sectors, limits=limits)
+                                      reference=reference, sectors=sectors, limits=limits,
+                                      ma5_break=ma5_break)
         evidence = snapshot.pop("_evidence")
         result = evaluate_snapshot(snapshot)
         evaluations.append({"symbol": symbol, "decision": result["decision"], "mode": result["mode"],
@@ -388,9 +528,12 @@ def evaluate_pool(rows: list[dict[str, Any]], *, limits: Mapping[str, float],
 
 
 __all__ = [
+    "BREAKOUT_VOLUME_RATIO_MIN", "ICEPOINT_BREADTH_MAX", "ICEPOINT_MAX_LIMIT_UPS",
     "LIMIT_TOLERANCE", "MAIN_SECTOR_MIN_LIMIT_UPS", "MAX_CANDIDATES", "NEAR_LIMIT_PCT",
+    "OVERSOLD_DECLINE_MIN_PCT", "RIGHT_SIDE_BREADTH_MIN", "RIGHT_SIDE_VOLUME_RATIO_MIN",
+    "SUPPLEMENT_MIN_RANK",
     "PULLBACK_MIN_EXTENSION_PCT", "VWAP_BAND_PCT", "board_state", "candidate_snapshot", "evaluate_pool", "leader_pool",
     "market_gate_inputs", "market_regime_inputs", "sector_context",
     "sector_strength_percentiles",
-    "session_vwap", "snapshot_fields",
+    "session_vwap", "snapshot_fields", "track_ma5_break",
 ]
