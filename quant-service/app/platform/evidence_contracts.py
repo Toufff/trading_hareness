@@ -57,6 +57,15 @@ EVIDENCE_CONTRACTS: Final[dict[str, EvidenceContract]] = {
         scope="explicit_watchlist_only", cross_sectional=False, decision_eligible=False,
         semantics="bounded_watch_price_fallback_without_decision_timestamp_contract",
     ),
+    # Derived from the same licensed all-A snapshot the price cross-section
+    # comes from, so unlike the bounded Eastmoney basket it carries genuine
+    # cross-sectional scope.  It deliberately covers only the two fields that
+    # are arithmetic definitions; main_net_inflow stays Eastmoney's alone.
+    "fuyao_ths_derived_watch_flow": EvidenceContract(
+        key="fuyao_ths_derived_watch_flow", provider_key="fuyao_ths", capability="a_share_prices_snapshot",
+        scope="all_a_cross_section", cross_sectional=True, decision_eligible=False,
+        semantics="volume_ratio_and_turnover_rate_derived_from_licensed_snapshot_volume_and_local_float_shares",
+    ),
     "eastmoney_watch_flow": EvidenceContract(
         key="eastmoney_watch_flow", provider_key="eastmoney_free", capability="watchlist_flow_quote",
         scope="explicit_watchlist_only", cross_sectional=False, decision_eligible=False,

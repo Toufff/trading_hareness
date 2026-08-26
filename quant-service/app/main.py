@@ -22,6 +22,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, model_validator
+import psycopg
 from psycopg.types.json import Json
 
 from .akshare_provider import (
@@ -105,6 +106,11 @@ from .intraday_features import annotate_flow_snapshot_provenance as pure_annotat
 from .intraday_features import mapped_watchlist_peers as pure_mapped_watchlist_peers
 from .intraday_features import peer_context as pure_intraday_peer_context
 from .intraday_features import strategy_session_rows as pure_strategy_session_rows
+from .intraday_derived_flow_metrics import (
+    apply_derived_watch_flow_metrics as pure_apply_derived_watch_flow_metrics,
+    derive_watch_flow_metrics as pure_derive_watch_flow_metrics,
+    derived_flow_divergence as pure_derived_flow_divergence,
+)
 from .intraday_quote_normalization import (
     annotate_flow_percentiles as annotate_intraday_flow_percentiles_pure,
     exchange_time_status as intraday_quote_exchange_time_status_pure,
@@ -121,6 +127,7 @@ from .async_intraday_scan_preflight_repository import latest_fast_quotes as read
 from .async_intraday_scan_inputs_repository import exact_memberships as read_async_exact_watchlist_memberships
 from .async_intraday_scan_inputs_repository import enabled_watches as read_async_enabled_intraday_watches
 from .async_intraday_scan_inputs_repository import watchlists as read_async_intraday_scan_watchlists
+from .async_intraday_scan_inputs_repository import watch_flow_reference as read_async_watch_flow_reference
 from .ten_day_leader_rotation_read_repository import latest_ten_day_leader_rotation_pool as read_async_ten_day_leader_rotation_pool
 from .async_ths_concept_member_backfill_repository import existing_flow_rows as read_async_ths_concept_flow_rows
 from .async_ths_concept_member_backfill_repository import member_progress as read_async_ths_concept_member_progress
@@ -1805,6 +1812,40 @@ def annotate_intraday_flow_percentiles(quotes: dict[str, dict[str, Any]]) -> Non
     annotate_intraday_flow_percentiles_pure(quotes)
 
 
+async def intraday_watch_flow_reference(
+    symbols: list[str], observed_at: datetime,
+) -> dict[str, dict[str, Any]]:
+    """Read the local float-share and trailing-volume reference for one scan."""
+    return await read_async_watch_flow_reference(async_db, symbols, observed_at)
+
+
+def derive_intraday_watch_flow_metrics(
+    quotes: dict[str, dict[str, Any]], reference: dict[str, dict[str, Any]], *, observed_at: datetime,
+) -> dict[str, dict[str, float]]:
+    """Derive volume ratio and turnover rate from the licensed THS snapshot.
+
+    Both are arithmetic definitions over the snapshot's own cumulative volume,
+    so this replaces the public Eastmoney watch endpoint - which fails about
+    half of all 30-second scans - without adding a provider call.  It never
+    derives main_net_inflow: no licensed route supplies one.
+    """
+    return pure_derive_watch_flow_metrics(quotes, reference, observed_at=observed_at, number=intraday_number)
+
+
+def apply_intraday_derived_watch_flow_metrics(
+    quotes: dict[str, dict[str, Any]], derived: dict[str, dict[str, float]],
+) -> dict[str, dict[str, str]]:
+    """Promote derived metrics over the public values and label every field."""
+    return pure_apply_derived_watch_flow_metrics(quotes, derived)
+
+
+def intraday_derived_flow_divergence(
+    quotes: dict[str, dict[str, Any]], derived: dict[str, dict[str, float]],
+) -> dict[str, Any]:
+    """Measure derived-versus-Eastmoney agreement whenever both sources answer."""
+    return pure_derived_flow_divergence(quotes, derived, number=intraday_number)
+
+
 def intraday_minute_features(rows: list[dict[str, Any]], *, lookback: int = 20,
                              source: str = "tencent_free") -> dict[str, Any] | None:
     """Build a causal price/volume burst feature from normalized minute rows."""
@@ -2423,7 +2464,12 @@ def _intraday_watchlist_scan_runtime() -> IntradayWatchlistScanRuntime:
         quote_capture_dependencies=WatchQuoteCaptureDependencies(
             now=asyncio.get_running_loop().time, all_a_snapshot=intraday_all_a_snapshot,
             tencent_watch_quotes=tencent_order_book_quotes, sina_quotes=sina_quotes,
-            eastmoney_watch_flows=eastmoney_watch_flow_quotes, quote_from_all_a=intraday_quote_from_fuyao,
+            eastmoney_watch_flows=eastmoney_watch_flow_quotes,
+            watch_flow_reference=intraday_watch_flow_reference,
+            derive_flow_metrics=derive_intraday_watch_flow_metrics,
+            apply_derived_flow_metrics=apply_intraday_derived_watch_flow_metrics,
+            derived_flow_divergence=intraday_derived_flow_divergence,
+            quote_from_all_a=intraday_quote_from_fuyao,
             merge_eastmoney_flows=merge_intraday_eastmoney_watch_flows,
             annotate_percentiles=annotate_intraday_flow_percentiles,
             annotate_flow_provenance=pure_annotate_flow_snapshot_provenance,
@@ -2433,6 +2479,7 @@ def _intraday_watchlist_scan_runtime() -> IntradayWatchlistScanRuntime:
             consume_background_exception=consume_background_task_exception, safe_error=safe_error_detail,
             executor_saturated_error=ExecutorSaturatedError,
             watch_quote_errors=(httpx.HTTPError, FreeProviderError, ValueError),
+            watch_flow_reference_errors=(psycopg.Error, ExecutorSaturatedError, ValueError),
             all_a_snapshot_errors=(FuyaoProviderError, ValueError),
         ),
         surge_context=intraday_tencent_surge_context, peer_context=intraday_peer_context,

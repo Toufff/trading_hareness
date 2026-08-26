@@ -222,3 +222,74 @@ class IntradayResearchRuleTests(unittest.TestCase):
         self.assertEqual(regime["state"], "corrective_rebound")
         self.assertEqual(regime["index_count"], 4)
         self.assertEqual(regime["interpretation"], "B-wave is an analyst scenario label only")
+
+
+class PerFieldFlowTrustTests(unittest.TestCase):
+    """The licensed derived metrics are trusted per field; Eastmoney is not.
+
+    ``volume_ratio`` and ``turnover_rate`` derived from the licensed all-A
+    snapshot are cross-sectional definitions, so they are usable on their own
+    terms.  ``main_net_inflow`` has no licensed source and stays research-only,
+    which is what keeps the legacy entry rule gated.
+    """
+
+    watch = {"symbol": "000001.SZ", "available_quantity": 0, "entry_price": None,
+             "alert_on_entry": True, "alert_on_exit": True}
+
+    def _quote(self, sources, **overrides):
+        return {"price": 10.4, "pct_change": 2.4, "volume_ratio": 3.5, "turnover_rate": 6.0,
+                "main_net_inflow": 1000, "price_source": "tencent_batched_watch_quote",
+                "price_freshness": {"status": "fresh"},
+                "flow_snapshot": {"scope": "explicit_watchlist_only", "cross_sectional": False,
+                                  "decision_eligible": False},
+                "flow_metric_sources": sources, **overrides}
+
+    def test_derived_volume_fields_are_usable_while_main_flow_stays_research_only(self):
+        quote = self._quote({"volume_ratio": "fuyao_ths_derived", "turnover_rate": "fuyao_ths_derived",
+                             "main_net_inflow": "eastmoney_watch_flow"})
+        signals = intraday_signal_rules(self.watch, quote, {"price": 10.3}, None, None, None)
+        availability = signals[0]["conditions"]["data_availability"]
+        self.assertEqual(availability["missing_public_flow_fields"], ["main_net_inflow"])
+        self.assertFalse(availability["public_flow_available"])
+        self.assertFalse(any(item["signal_key"] == "000001.SZ:entry:intraday-v1" for item in signals),
+                         "entry_setup still requires a main_net_inflow nobody licenses")
+
+    def test_derived_volume_fields_revive_the_volume_anomaly_watch(self):
+        quote = self._quote({"volume_ratio": "fuyao_ths_derived", "turnover_rate": "fuyao_ths_derived",
+                             "main_net_inflow": "unavailable"}, main_net_inflow=None)
+        signals = intraday_signal_rules(self.watch, quote, {"price": 10.3}, None, None, None)
+        anomaly = next(item for item in signals if item["signal_key"] == "000001.SZ:watch:volume_anomaly")
+        self.assertEqual(anomaly["conditions"]["anomaly_direction"], "up")
+
+    # Minute/peer inputs that satisfy the fuyao_minute_breadth entry, which is
+    # the only rule that fires when every public flow field is research-only -
+    # without them a fully zeroed quote produces no signal to inspect at all.
+    minute = {"return_1m_pct": 0.9, "return_3m_pct": 1.8,
+              "minute_volume_multiple": 3.4, "above_vwap_pct": 1.2}
+    peers = {"available_peer_count": 3, "confirming_peer_count": 2, "confirming_breadth": 0.67}
+
+    def test_eastmoney_labelled_fields_stay_zeroed_exactly_as_before(self):
+        quote = self._quote({"volume_ratio": "eastmoney_watch_flow", "turnover_rate": "eastmoney_watch_flow",
+                             "main_net_inflow": "eastmoney_watch_flow"})
+        signals = intraday_signal_rules(self.watch, quote, {"price": 10.3}, None, self.minute, self.peers)
+        entry = next(item for item in signals if item["signal_key"] == "000001.SZ:entry:fuyao_minute_breadth_v1")
+        self.assertEqual(entry["conditions"]["data_availability"]["missing_public_flow_fields"],
+                         ["volume_ratio", "turnover_rate", "main_net_inflow"])
+        self.assertFalse(any(item["signal_key"] == "000001.SZ:watch:volume_anomaly" for item in signals))
+
+    def test_snapshots_frozen_before_labelling_keep_the_original_behaviour(self):
+        quote = self._quote({})
+        del quote["flow_metric_sources"]
+        signals = intraday_signal_rules(self.watch, quote, {"price": 10.3}, None, self.minute, self.peers)
+        entry = next(item for item in signals if item["signal_key"] == "000001.SZ:entry:fuyao_minute_breadth_v1")
+        availability = entry["conditions"]["data_availability"]
+        self.assertEqual(availability["missing_public_flow_fields"],
+                         ["volume_ratio", "turnover_rate", "main_net_inflow"])
+        self.assertIsNone(availability["flow_metric_sources"])
+        self.assertTrue(availability["eastmoney_watch_flow_observed_research_only"])
+
+    def test_a_fully_research_only_quote_with_no_minute_evidence_fires_nothing(self):
+        """Documents the state this change fixes: every flow rule is dead."""
+        quote = self._quote({"volume_ratio": "eastmoney_watch_flow", "turnover_rate": "eastmoney_watch_flow",
+                             "main_net_inflow": "eastmoney_watch_flow"})
+        self.assertEqual(intraday_signal_rules(self.watch, quote, {"price": 10.3}, None, None, None), [])

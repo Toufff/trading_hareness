@@ -73,4 +73,71 @@ async def exact_memberships(
     return [dict(row) for row in rows]
 
 
-__all__ = ["enabled_watches", "exact_memberships", "watchlists"]
+#: Trailing sessions averaged for the volume-ratio denominator.  Five is the
+#: conventional 量比 window and matches what the replaced Eastmoney field uses.
+VOLUME_RATIO_REFERENCE_SESSIONS = 5
+
+
+async def watch_flow_reference(
+    async_database: Any,
+    symbols: list[str],
+    observed_at: datetime,
+) -> dict[str, dict[str, Any]]:
+    """Load the local reference that turns snapshot volume into flow metrics.
+
+    Both columns carry Chinese market units that only this boundary knows:
+    ``daily_fundamentals.float_share`` is 万股 and ``canonical_bars_daily.volume``
+    is 手, so both are converted to plain shares here and every consumer above
+    works in one unit.
+
+    Only sessions strictly before the local trading date are read.  Today's
+    end-of-day rows land in the same tables after the close, and an intraday
+    derivation that silently started using them would be looking at its own
+    answer.
+    """
+    if not symbols:
+        return {}
+    local_trade_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+    async with async_database.transaction() as connection:
+        result = await connection.execute(
+            """WITH recent AS (
+                 SELECT symbol, volume,
+                        row_number() OVER (PARTITION BY symbol ORDER BY trading_date DESC) AS session_rank
+                   FROM quant.canonical_bars_daily
+                  WHERE symbol=ANY(%s) AND trading_date<%s AND volume IS NOT NULL AND volume>0
+                    AND NOT coalesce(is_suspended, false)
+               ), trailing_volume AS (
+                 SELECT symbol, avg(volume)*100 AS mean_daily_volume_shares,
+                        count(*) AS sample_sessions
+                   FROM recent WHERE session_rank<=%s GROUP BY symbol
+               ), latest_float AS (
+                 SELECT DISTINCT ON (symbol) symbol, float_share*10000 AS float_shares,
+                        trading_date AS float_share_date
+                   FROM quant.daily_fundamentals
+                  WHERE symbol=ANY(%s) AND trading_date<%s AND float_share IS NOT NULL AND float_share>0
+                  ORDER BY symbol, trading_date DESC
+               )
+               SELECT coalesce(trailing_volume.symbol, latest_float.symbol) AS symbol,
+                      latest_float.float_shares, latest_float.float_share_date,
+                      trailing_volume.mean_daily_volume_shares, trailing_volume.sample_sessions
+                 FROM trailing_volume FULL JOIN latest_float ON trailing_volume.symbol=latest_float.symbol""",
+            (symbols, local_trade_date, VOLUME_RATIO_REFERENCE_SESSIONS, symbols, local_trade_date),
+        )
+        rows = await result.fetchall()
+    return {
+        str(row["symbol"]): {
+            "float_shares": float(row["float_shares"]) if row["float_shares"] is not None else None,
+            "float_share_date": row["float_share_date"].isoformat() if row["float_share_date"] else None,
+            "mean_daily_volume_shares": (
+                float(row["mean_daily_volume_shares"]) if row["mean_daily_volume_shares"] is not None else None
+            ),
+            "sample_sessions": int(row["sample_sessions"] or 0),
+        }
+        for row in rows if row["symbol"]
+    }
+
+
+__all__ = [
+    "VOLUME_RATIO_REFERENCE_SESSIONS", "enabled_watches", "exact_memberships",
+    "watch_flow_reference", "watchlists",
+]

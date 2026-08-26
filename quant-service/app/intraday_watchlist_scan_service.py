@@ -136,6 +136,7 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
         fresh_watch_rows=quote_capture.fresh_watch_rows, sina_watch_rows=quote_capture.sina_watch_rows,
         eastmoney_watch_flow_rows=quote_capture.eastmoney_watch_flow_rows,
         eastmoney_watch_flow_status=quote_capture.eastmoney_watch_flow_status,
+        derived_flow_status=quote_capture.derived_flow_status,
         all_a_snapshot_status=quote_capture.all_a_snapshot_status, surge_source=surge_source,
         priority_symbols=priority_symbols, rotation_pool_size=len(ordered_priority_symbols),
         rotation_start_offset=(request.realtime_validation_offset % len(ordered_priority_symbols)

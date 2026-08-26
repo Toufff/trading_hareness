@@ -19,6 +19,7 @@ class WatchQuoteCapture:
     sina_watch_rows: list[dict[str, Any]]
     eastmoney_watch_flow_rows: list[dict[str, Any]]
     eastmoney_watch_flow_status: dict[str, Any]
+    derived_flow_status: dict[str, Any]
     latency_ms: int
 
 
@@ -29,6 +30,12 @@ class WatchQuoteCaptureDependencies:
     tencent_watch_quotes: Callable[..., Awaitable[list[dict[str, Any]]]]
     sina_quotes: Callable[[list[str]], Awaitable[list[dict[str, Any]]]]
     eastmoney_watch_flows: Callable[..., Awaitable[list[dict[str, Any]]]]
+    watch_flow_reference: Callable[[list[str], datetime], Awaitable[dict[str, dict[str, Any]]]]
+    derive_flow_metrics: Callable[..., dict[str, dict[str, float]]]
+    apply_derived_flow_metrics: Callable[
+        [dict[str, dict[str, Any]], dict[str, dict[str, float]]], dict[str, dict[str, str]]
+    ]
+    derived_flow_divergence: Callable[..., dict[str, Any]]
     quote_from_all_a: Callable[[dict[str, Any]], dict[str, Any] | None]
     merge_eastmoney_flows: Callable[[dict[str, dict[str, Any]], list[dict[str, Any]]], Any]
     annotate_percentiles: Callable[[dict[str, dict[str, Any]]], Any]
@@ -40,7 +47,45 @@ class WatchQuoteCaptureDependencies:
     safe_error: Callable[[str, int], str]
     executor_saturated_error: type[Exception]
     watch_quote_errors: tuple[type[Exception], ...]
+    watch_flow_reference_errors: tuple[type[Exception], ...]
     all_a_snapshot_errors: tuple[type[Exception], ...]
+
+
+async def _apply_derived_flow_metrics(
+    quotes: dict[str, dict[str, Any]], reference_task: "asyncio.Task[dict[str, dict[str, Any]]]",
+    observed_at: datetime, dependencies: WatchQuoteCaptureDependencies,
+) -> dict[str, Any]:
+    """Overlay the licensed derived metrics over the public Eastmoney values.
+
+    This runs after the Eastmoney merge on purpose: the derived value wins
+    where it exists, and any field it cannot derive - always including
+    ``main_net_inflow``, which no licensed route supplies - keeps whatever the
+    public endpoint returned.  A reference read that fails or exceeds the scan
+    budget degrades to exactly today's Eastmoney-only behaviour.
+    """
+    try:
+        reference = await asyncio.wait_for(asyncio.shield(reference_task), timeout=2.0)
+    except (asyncio.TimeoutError, *dependencies.watch_flow_reference_errors) as error:
+        return materialize_evidence_status(
+            "fuyao_ths_derived_watch_flow",
+            {"status": "unavailable", "error": dependencies.safe_error(str(error), 300)},
+        )
+    derived = dependencies.derive_flow_metrics(quotes, reference, observed_at=observed_at)
+    sources = dependencies.apply_derived_flow_metrics(quotes, derived)
+    divergence = dependencies.derived_flow_divergence(quotes, derived)
+    field_counts = {
+        field: sum(1 for labels in sources.values() if labels.get(field) == "fuyao_ths_derived")
+        for field in ("volume_ratio", "turnover_rate")
+    }
+    return materialize_evidence_status(
+        "fuyao_ths_derived_watch_flow",
+        {"status": "fresh" if derived else "unavailable", "age_seconds": 0.0,
+         "source": "fuyao_ths_all_a_snapshot_volume_with_local_float_shares",
+         "reference_symbols": len(reference), "derived_symbols": len(derived),
+         "derived_field_symbols": field_counts,
+         "main_net_inflow_source": "eastmoney_watch_flow_only_no_licensed_equivalent",
+         "eastmoney_agreement": divergence},
+    )
 
 
 async def capture_watch_quotes(
@@ -62,6 +107,11 @@ async def capture_watch_quotes(
     # corroboration only: its values never represent an all-market ranking.
     eastmoney_task = asyncio.create_task(dependencies.eastmoney_watch_flows(symbols, max_symbols=40))
     eastmoney_task.add_done_callback(dependencies.consume_background_exception)
+    # Local reference for the derived flow metrics.  It is a small indexed read
+    # of already-persisted end-of-day rows, started here so it overlaps the
+    # provider calls instead of extending the scan budget.
+    reference_task = asyncio.create_task(dependencies.watch_flow_reference(symbols, observed_at))
+    reference_task.add_done_callback(dependencies.consume_background_exception)
     try:
         fresh_watch_rows = await dependencies.tencent_watch_quotes(symbols, max_symbols=40)
     except dependencies.watch_quote_errors:
@@ -105,6 +155,9 @@ async def capture_watch_quotes(
             for row in eastmoney_watch_flow_rows if str(row.get("ts_code") or "") in quotes
         }
         dependencies.annotate_flow_provenance(eastmoney_quotes, eastmoney_watch_flow_status)
+    derived_flow_status = await _apply_derived_flow_metrics(
+        quotes, reference_task, observed_at, dependencies,
+    )
     dependencies.merge_watch_prices(quotes, fresh_watch_rows)
     dependencies.merge_sina_prices(quotes, sina_watch_rows)
     for quote in quotes.values():
@@ -116,6 +169,7 @@ async def capture_watch_quotes(
         fresh_watch_rows=fresh_watch_rows, sina_watch_rows=sina_watch_rows,
         eastmoney_watch_flow_rows=eastmoney_watch_flow_rows,
         eastmoney_watch_flow_status=eastmoney_watch_flow_status,
+        derived_flow_status=derived_flow_status,
         latency_ms=round((dependencies.now() - started_at) * 1000),
     )
 

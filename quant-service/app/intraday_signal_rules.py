@@ -70,25 +70,48 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
     # because the user has not entered a share count.
     holding = watch.get("entry_price") is not None
     signals: list[dict[str, Any]] = []
-    observed_public_fields = [name for name, value in (
-        ("volume_ratio", volume_ratio_value), ("turnover_rate", turnover_rate_value),
-        ("main_net_inflow", main_net_inflow_value),
-    ) if value is None]
+    public_flow_values = {"volume_ratio": volume_ratio_value, "turnover_rate": turnover_rate_value,
+                          "main_net_inflow": main_net_inflow_value}
     # Eastmoney supplies useful per-watch observations, but this selected
     # basket is neither a cross-section nor an independent capital-flow
     # universe. Keep it in evidence while treating it as unavailable for all
     # legacy flow/ranking rules.
-    missing_public_fields = (
-        ["volume_ratio", "turnover_rate", "main_net_inflow"]
-        if bounded_watch_flow_only else observed_public_fields
+    #
+    # ``flow_metric_sources`` refines that per field.  volume_ratio and
+    # turnover_rate can be derived from the licensed all-A snapshot's own
+    # cumulative volume plus locally persisted float shares, which is a
+    # cross-sectional definition rather than a bounded-basket observation, so
+    # a field labelled ``fuyao_ths_derived`` is usable on its own terms.  Every
+    # other label - including main_net_inflow, which no licensed route
+    # supplies - stays research-only exactly as before.  Snapshots frozen
+    # before this labelling existed carry no labels and keep the original
+    # all-or-nothing behaviour, so replayed evidence is unaffected.
+    flow_metric_sources = (
+        quote.get("flow_metric_sources") if isinstance(quote.get("flow_metric_sources"), dict) else {}
     )
-    if bounded_watch_flow_only:
-        volume_ratio = turnover_rate = main_net_inflow = 0.0
+    if flow_metric_sources:
+        research_only_fields = {
+            name for name in public_flow_values
+            if str(flow_metric_sources.get(name) or "") != "fuyao_ths_derived"
+        }
+    else:
+        research_only_fields = set(public_flow_values) if bounded_watch_flow_only else set()
+    missing_public_fields = [
+        name for name, value in public_flow_values.items()
+        if value is None or name in research_only_fields
+    ]
+    if "volume_ratio" in missing_public_fields:
+        volume_ratio = 0.0
+    if "turnover_rate" in missing_public_fields:
+        turnover_rate = 0.0
+    if "main_net_inflow" in missing_public_fields:
+        main_net_inflow = 0.0
     common = {"price": price, "pct_change": pct_change, "volume_ratio": volume_ratio_value,
               "turnover_rate": turnover_rate_value, "main_net_inflow": main_net_inflow_value,
               "main_flow_percentile": main_flow_percentile, "price_above_previous_scan": previous_price is None or price > previous_price,
               "data_availability": {"missing_public_flow_fields": missing_public_fields,
                                     "public_flow_available": not missing_public_fields,
+                                    "flow_metric_sources": flow_metric_sources or None,
                                     "eastmoney_watch_flow_observed_research_only": bounded_watch_flow_only},
               "daily_factors": daily_factors or {"status": "not_available"},
               "minute_features": minute_features or {"status": "not_available"},
