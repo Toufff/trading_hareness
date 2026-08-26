@@ -61,6 +61,17 @@ STRATEGY_CONTRACTS: Final[dict[str, StrategyContract]] = {
         "same-date-close-v1", ("post_close_strategy_runs", "post_close_strategy_candidates"),
         "research", "research_enabled", "none", "same-date close candidate research with coverage gates",
     ),
+    # A capacity-allocation source rather than a scored strategy: it selects
+    # which scheduled-catalyst names deserve scarce intraday watchlist slots
+    # and never emits a score or a direction.  See disclosure_day_watch.py for
+    # the 27-session event study behind the prior-guidance exclusion.
+    "disclosure_day_watch": StrategyContract(
+        "disclosure_day_watch", "disclosure-day-watch-v1", "app/disclosure_day_watch.py",
+        "disclosure-schedule-v1", ("disclosure_schedule", "earnings_forecasts", "earnings_express",
+                                   "strategy_watchlist_proposals"),
+        "research", "shadow", "none",
+        "next-session scheduled disclosers without prior guidance, proposed for manual watchlist review",
+    ),
     "post_close_limit_lift_pattern": StrategyContract(
         "post_close_limit_lift_pattern", "post-close-limit-lift-pattern-v6", "app/strategy_pattern_mining_service.py",
         "post-close-limit-lift-pattern-v1", ("strategy_pattern_runs", "strategy_pattern_samples"),

@@ -58,7 +58,7 @@ class WatchlistCandidateProposalsIntegrationTests(unittest.TestCase):
                 )
             with db.transaction() as connection:
                 stored = materialize_watchlist_proposals(connection, self.as_of_date, top_k=10)
-            self.assertEqual(stored, 2)
+            self.assertEqual(stored['strategy_ledger'], 2)
             with db.transaction() as connection:
                 rows = {row["symbol"]: dict(row) for row in connection.execute(
                     "SELECT * FROM quant.strategy_watchlist_proposals WHERE as_of_date=%s", (self.as_of_date,),
@@ -83,7 +83,7 @@ class WatchlistCandidateProposalsIntegrationTests(unittest.TestCase):
                     )
             with db.transaction() as connection:
                 stored = materialize_watchlist_proposals(connection, self.as_of_date, top_k=2)
-            self.assertEqual(stored, 2)
+            self.assertEqual(stored['strategy_ledger'], 2)
             with db.transaction() as connection:
                 result = latest_watchlist_proposals(connection)
             self.assertEqual(result["as_of_date"], str(self.as_of_date))

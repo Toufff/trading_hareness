@@ -726,11 +726,16 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
                 {"status": "ready"}, {"state": "trend_recovery"}, {"materialize_post_close_candidates": 0}, 0,
                 {"outcomes": 1}, {"scorecards": 1}, {"recommendations": 1},
             ])
+            # The reporting-calendar sync owns its own provider call and its
+            # own persist transaction, so it is stubbed here rather than being
+            # allowed to consume one of the offload side effects below.
             with patch("app.main.sync_tushare", new=AsyncMock(return_value={"status": "completed"})), \
                  patch("app.main.sync_tushare_daily_core", new=AsyncMock(return_value={"status": "completed"})), \
+                 patch("app.main.sync_earnings_calendar", new=AsyncMock(return_value={"status": "completed"})), \
                  patch("app.main.run_database_blocking", new=blocking):
                 result = await run_daily_pipeline(GenerateRequest())
             self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["earnings_calendar"], {"status": "completed"})
             return blocking
 
         blocking = asyncio.run(check())

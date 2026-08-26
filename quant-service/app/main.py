@@ -594,6 +594,8 @@ from .baostock_daily_sync import fetch_rows as fetch_baostock_rows_isolated, syn
 from .market_universe_sync import sync as sync_market_universe_isolated
 from .full_market_daily_sync import sync as sync_full_market_daily_isolated
 from .full_market_daily_controls_sync import sync as sync_full_market_daily_controls_isolated
+from .earnings_calendar_sync import sync as sync_earnings_calendar_isolated
+from .disclosure_day_watch import MODEL_VERSION as DISCLOSURE_DAY_WATCH_MODEL_VERSION
 from .core_daily_control_sync import CoreDailyControlDependencies, sync as sync_core_daily_controls_isolated
 from .sector_catalog_sync import sync_all as sync_all_sector_catalogs_isolated
 from .ths_sector_catalog_sync import sync as sync_ths_sector_catalog_isolated
@@ -1125,10 +1127,18 @@ def materialize_strategy_daily_candidate_ledger(as_of_date: date) -> dict[str, i
         return materialize_ledger(connection, as_of_date)
 
 
-def materialize_daily_watchlist_proposals(as_of_date: date) -> int:
+def materialize_daily_watchlist_proposals(as_of_date: date) -> dict[str, Any]:
     """Read-only daily proposal list; never writes into intraday_watchlists."""
     with db.transaction() as connection:
         return materialize_watchlist_proposals(connection, as_of_date)
+
+
+async def sync_earnings_calendar(as_of_date: date) -> dict[str, Any]:
+    """Ingest one reporting period's disclosure calendar and prior guidance."""
+    return await sync_earnings_calendar_isolated(
+        as_of_date, call_tushare_api=call_tushare_api, parse_date=tushare_date,
+        run_database_blocking=run_database_blocking, db=db, safe_error_detail=safe_error_detail,
+    )
 
 
 def generate_recommendations_legacy(request: GenerateRequest) -> dict[str, Any]:
@@ -3667,6 +3677,7 @@ def _verify_strategy_runtime_contracts() -> None:
         "ten_day_leader_rotation_shadow": TEN_DAY_LEADER_ROTATION_MODEL_VERSION,
         "post_close_base_candidates": POST_CLOSE_STRATEGY_MODEL_VERSION,
         "post_close_limit_lift_pattern": STRATEGY_PATTERN_MODEL_VERSION,
+        "disclosure_day_watch": DISCLOSURE_DAY_WATCH_MODEL_VERSION,
     })
 
 
@@ -4777,6 +4788,7 @@ async def run_daily_pipeline(payload: GenerateRequest) -> dict[str, Any]:
         generate_recommendations=generate_recommendations, run_database_blocking=run_database_blocking,
         cn_today=cn_today, materialize_regime=materialize_market_regime_today,
         materialize_candidate_ledger=materialize_strategy_daily_candidate_ledger,
+        sync_earnings_calendar=sync_earnings_calendar,
         materialize_watchlist_proposals=materialize_daily_watchlist_proposals,
     )
 

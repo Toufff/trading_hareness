@@ -20,6 +20,7 @@ async def run_pipeline(
     generate_recommendations: Callable[..., Any],
     run_database_blocking: Callable[..., Awaitable[Any]],
     cn_today: Callable[[], date],
+    sync_earnings_calendar: Callable[[date], Awaitable[dict[str, Any]]] | None = None,
     materialize_regime: Callable[[date], Any] | None = None,
     materialize_candidate_ledger: Callable[[date], Any] | None = None,
     materialize_watchlist_proposals: Callable[[date], Any] | None = None,
@@ -35,6 +36,12 @@ async def run_pipeline(
         return {"status": "blocked", "market_sync": sync, "snapshot": snapshot,
                 "reason": "行情数据或质量门禁未满足；没有生成候选池"}
     as_of_date = payload.as_of_date or cn_today()
+    # The reporting calendar is fetched before proposals so the disclosure-day
+    # watch source sees today's registered schedule for the next session.  Its
+    # own failure is reported, never fatal: the price-based ledger below does
+    # not depend on it.
+    earnings_calendar = (await sync_earnings_calendar(as_of_date)
+                         if sync_earnings_calendar is not None else None)
     regime = (await run_database_blocking(materialize_regime, as_of_date, timeout_seconds=30)
              if materialize_regime is not None else None)
     # Ledger materialization reads whatever each strategy's own table already
@@ -50,7 +57,8 @@ async def run_pipeline(
     scorecard = await run_database_blocking(recompute_scorecards, payload.as_of_date, timeout_seconds=30)
     result = await run_database_blocking(generate_recommendations, payload, timeout_seconds=30)
     return {"status": "completed", "market_sync": sync, "snapshot": snapshot, "regime": regime,
-            "candidate_ledger": ledger, "watchlist_proposals": watchlist_proposals, "outcomes": outcomes,
+            "earnings_calendar": earnings_calendar, "candidate_ledger": ledger,
+            "watchlist_proposals": watchlist_proposals, "outcomes": outcomes,
             "scorecards": scorecard, "recommendations": result}
 
 
