@@ -447,6 +447,7 @@ def candidate_snapshot(symbol: str, row: Mapping[str, Any], *, market: Mapping[s
         "_evidence": {
             "vwap": vwap, "vwap_distance_pct": vwap_distance, "limit_up": limit_up,
             "extended_above_vwap": extended_above_vwap, "pulled_back_to_vwap": pulled_back,
+            "candidate_strength_rank": rank,
             "own_volume_ratio": own_volume_ratio,
             "distance_from_ma5_pct": distance_from_ma5,
             "signed_distance_from_ma5_pct": signed_distance_from_ma5,

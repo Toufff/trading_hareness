@@ -61,6 +61,41 @@ EXIT_SEVERITY: dict[str, int] = {
 }
 
 
+#: Order in which competing candidates earn a scarce alert slot, following the
+#: playbook's own hierarchy: the core leader first, then buy points inside the
+#: main line, then the small-position follow-ons.  Without an explicit order a
+#: single scan's alerts go out in whatever order the pool happened to be built,
+#: and the most numerous mode wins by volume alone - on 2026-08-26's close,
+#: 43 of 72 candidates were supplement rotations at a 5% research position,
+#: which would have consumed the daily budget ahead of every 20% leader setup.
+MODE_ALERT_PRIORITY: dict[str, int] = {
+    "leader_pullback": 0,
+    "one_word_return_flow": 1,
+    "reverse_wrap": 2,
+    "divergence_low_suck": 3,
+    "right_side_breakout": 4,
+    "潜龙出海_swing": 5,
+    "etf_trend": 6,
+    "oversold_rebound": 7,
+    "icepoint_left_trial": 8,
+    "supplement_rotation": 9,
+}
+#: Anything unrecognised sorts after every declared mode rather than ahead of it.
+UNRANKED_MODE_PRIORITY = len(MODE_ALERT_PRIORITY)
+
+
+def alert_priority(candidate: Mapping[str, Any]) -> tuple[int, float]:
+    """Sort key for competing candidates: mode conviction, then leader rank.
+
+    Returns a tuple so ties inside a mode fall to the stronger name in its
+    sector rather than to whichever row was built first.
+    """
+    mode = str(candidate.get("mode") or "")
+    rank = _number((candidate.get("evidence") or {}).get("candidate_strength_rank"))
+    return (MODE_ALERT_PRIORITY.get(mode, UNRANKED_MODE_PRIORITY),
+            rank if rank is not None else 99.0)
+
+
 def _number(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -311,4 +346,7 @@ def evaluate_snapshot(snapshot: Mapping[str, Any], parameters: Mapping[str, Any]
     }
 
 
-__all__ = ["DEFAULT_PARAMETERS", "EXIT_SEVERITY", "INPUT_CONTRACT", "MODEL_VERSION", "evaluate_snapshot"]
+__all__ = [
+    "DEFAULT_PARAMETERS", "EXIT_SEVERITY", "INPUT_CONTRACT", "MODEL_VERSION",
+    "MODE_ALERT_PRIORITY", "UNRANKED_MODE_PRIORITY", "alert_priority", "evaluate_snapshot",
+]

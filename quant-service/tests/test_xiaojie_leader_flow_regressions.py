@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import unittest
 
-from app.xiaojie_leader_flow import DEFAULT_PARAMETERS, EXIT_SEVERITY, evaluate_snapshot
+from app.xiaojie_leader_flow import (
+    DEFAULT_PARAMETERS, EXIT_SEVERITY, MODE_ALERT_PRIORITY, alert_priority, evaluate_snapshot,
+)
 
 
 GATE = {
@@ -163,6 +165,57 @@ class SupplementRotationReachabilityTests(unittest.TestCase):
     def test_a_supplement_whose_leader_broke_is_still_blocked(self):
         result = evaluate_snapshot({**self.base, "leader_not_broken": False})
         self.assertEqual(result["decision"], "no_trade")
+
+
+class AlertPriorityTests(unittest.TestCase):
+    """Scarce alert slots must go by conviction, not by which mode is largest.
+
+    On 2026-08-26's close 43 of 72 candidates were supplement rotations at a 5%
+    research position; unordered, they would have consumed the daily alert
+    budget ahead of every 20% leader setup.
+    """
+
+    @staticmethod
+    def _candidate(mode, rank=1):
+        return {"symbol": f"{mode[:4]}.SZ", "mode": mode,
+                "evidence": {"candidate_strength_rank": rank}}
+
+    def test_the_core_leader_setup_outranks_a_supplement(self):
+        ordered = sorted([self._candidate("supplement_rotation"),
+                          self._candidate("leader_pullback")], key=alert_priority)
+        self.assertEqual([item["mode"] for item in ordered],
+                         ["leader_pullback", "supplement_rotation"])
+
+    def test_supplements_and_left_side_trials_sort_last(self):
+        modes = ["supplement_rotation", "icepoint_left_trial", "leader_pullback",
+                 "reverse_wrap", "one_word_return_flow"]
+        ordered = [item["mode"] for item in
+                   sorted([self._candidate(mode) for mode in modes], key=alert_priority)]
+        self.assertEqual(ordered[:3], ["leader_pullback", "one_word_return_flow", "reverse_wrap"])
+        self.assertEqual(ordered[-1], "supplement_rotation")
+
+    def test_a_crowd_of_supplements_cannot_bury_one_leader_setup(self):
+        crowd = [self._candidate("supplement_rotation", rank=index) for index in range(3, 43)]
+        crowd.append(self._candidate("leader_pullback"))
+        self.assertEqual(sorted(crowd, key=alert_priority)[0]["mode"], "leader_pullback")
+
+    def test_ties_inside_a_mode_break_on_sector_rank(self):
+        ordered = sorted([self._candidate("reverse_wrap", rank=4),
+                          self._candidate("reverse_wrap", rank=1)], key=alert_priority)
+        self.assertEqual([item["evidence"]["candidate_strength_rank"] for item in ordered], [1, 4])
+
+    def test_an_unknown_mode_sorts_after_every_declared_one(self):
+        ordered = sorted([self._candidate("something_new"),
+                          self._candidate("supplement_rotation")], key=alert_priority)
+        self.assertEqual(ordered[-1]["mode"], "something_new")
+
+    def test_a_missing_rank_does_not_win_the_tie(self):
+        without = {"symbol": "A.SZ", "mode": "reverse_wrap", "evidence": {}}
+        ordered = sorted([without, self._candidate("reverse_wrap", rank=2)], key=alert_priority)
+        self.assertEqual(ordered[0]["evidence"].get("candidate_strength_rank"), 2)
+
+    def test_every_declared_mode_has_a_distinct_priority(self):
+        self.assertEqual(len(set(MODE_ALERT_PRIORITY.values())), len(MODE_ALERT_PRIORITY))
 
 if __name__ == "__main__":
     unittest.main()

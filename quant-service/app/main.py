@@ -148,6 +148,7 @@ from .intraday_minute_provider_service import fetch_bounded_minute_context
 from .intraday_surge_context_service import capture as capture_intraday_surge_context
 from .strategy_candidate_ranking import select as select_intraday_candidates
 from .xiaojie_leader_flow import MODEL_VERSION as XIAOJIE_LEADER_FLOW_MODEL_VERSION, evaluate_snapshot as evaluate_xiaojie_leader_flow_snapshot
+from .xiaojie_leader_flow import alert_priority as xiaojie_alert_priority
 from .xiaojie_indicators import evaluate_pool as evaluate_xiaojie_leader_pool
 from .xiaojie_reference_repository import (
     ensure_session_trade_limits as ensure_xiaojie_session_trade_limits,
@@ -1930,6 +1931,9 @@ async def run_xiaojie_leader_flow(*, scan_id: uuid.UUID, observed_at: datetime,
 
     sent = int(_xiaojie_session_reference.get("alerts_sent") or 0)
     remaining = min(XIAOJIE_MAX_ALERTS_PER_SCAN, max(0, XIAOJIE_MAX_ALERTS_PER_SESSION - sent))
+    # Alert slots are scarce, so they go to the highest-conviction setups
+    # rather than to whichever mode happens to be most numerous.
+    fresh = sorted(fresh, key=xiaojie_alert_priority)
     alerted: list[tuple[str, str]] = []
     alert_errors: list[str] = []
     for candidate in fresh[:remaining]:
@@ -1956,6 +1960,8 @@ async def run_xiaojie_leader_flow(*, scan_id: uuid.UUID, observed_at: datetime,
         "main_sector_count": result["main_sector_count"],
         "regime": result["regime"],
         "candidates": len(candidates), "new_candidates": len(fresh), "alerted": len(alerted),
+        "alerts_suppressed_by_cap": max(0, len(fresh) - len(alerted)),
+        "alerted_modes": sorted({mode for _symbol, mode in alerted}),
         "alerts_sent_this_session": int(_xiaojie_session_reference.get("alerts_sent") or 0),
         "alert_errors": alert_errors or None,
         "reference_symbols": len(reference["limits"]),
