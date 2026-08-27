@@ -43,6 +43,7 @@ class IntradayWatchlistScanDependencies:
     alert_text: Callable[..., str]
     decision_card_url: Callable[[str], str | None]
     xiaojie_leader_flow: Callable[..., Awaitable[dict[str, Any]]] | None = None
+    persist_xiaojie_status: Callable[[uuid.UUID, dict[str, Any]], Awaitable[None]] | None = None
 
 
 def build_peer_contexts(
@@ -205,6 +206,10 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
         except Exception as error:  # noqa: BLE001 - never fail the primary scan
             xiaojie_observation = {"status": "degraded", "reason": str(error)[:240]}
         source_status["xiaojie_leader_flow"] = xiaojie_observation
+        # The row was written with the primary signals above, so the in-memory
+        # mutation alone never reaches the database.
+        if dependencies.persist_xiaojie_status is not None:
+            await dependencies.persist_xiaojie_status(scan_id, xiaojie_observation)
     alerts: list[dict[str, Any]] = []
     for signal in signals:
         if signal["state"] != "confirmed":

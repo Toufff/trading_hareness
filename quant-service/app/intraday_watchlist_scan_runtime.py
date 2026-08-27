@@ -15,6 +15,7 @@ import uuid
 
 from .intraday_watch_quote_capture import WatchQuoteCaptureDependencies, capture_watch_quotes
 from .intraday_watchlist_scan_service import IntradayWatchlistScanDependencies
+from .xiaojie_observation_repository import persist_scan_status as persist_xiaojie_scan_status
 from .ten_day_leader_rotation_intraday_service import TenDayLeaderRotationIntradayDependencies
 
 
@@ -134,6 +135,14 @@ class IntradayWatchlistScanRuntime:
                 timeout_seconds=30,
             )
 
+        async def persist_xiaojie_status(scan_id: uuid.UUID, status: dict[str, Any]) -> None:
+            def write() -> None:
+                with dependencies.database.transaction() as connection:
+                    persist_xiaojie_scan_status(
+                        connection, scan_id=scan_id, status=status, json_safe=dependencies.json_safe,
+                    )
+            await dependencies.run_database(write, timeout_seconds=10)
+
         async def persist_shadow_status(scan_id: uuid.UUID, status: dict[str, Any]) -> None:
             def write() -> None:
                 with dependencies.database.transaction() as connection:
@@ -171,6 +180,7 @@ class IntradayWatchlistScanRuntime:
             persist_shadow_observations=persist_shadow_observations,
             persist_shadow_status=persist_shadow_status,
             xiaojie_leader_flow=dependencies.xiaojie_leader_flow,
+            persist_xiaojie_status=persist_xiaojie_status,
             deliver_alert=dependencies.deliver_alert,
             alert_text=dependencies.alert_text,
             decision_card_url=dependencies.decision_card_url,

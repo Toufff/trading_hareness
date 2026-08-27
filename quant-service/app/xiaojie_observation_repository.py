@@ -55,6 +55,25 @@ def record_candidates(connection: Any, trading_date: date, observed_at: datetime
     return fresh
 
 
+def persist_scan_status(connection: Any, *, scan_id: Any, status: dict[str, Any],
+                        json_safe: Any) -> None:
+    """Merge this scan's leader-flow result onto its already-written row.
+
+    ``source_status`` is persisted with the primary signals well before the
+    leader-flow pass runs, so mutating the in-memory dict afterwards never
+    reached the database: the strategy executed and wrote its own observations
+    and alerts, but every scan record showed no trace of it.  A jsonb merge is
+    how the rotation shadow solves the same ordering, and it keeps the primary
+    scan's own status untouched.
+    """
+    connection.execute(
+        """UPDATE quant.intraday_scan_runs
+              SET source_status=source_status || %s::jsonb
+            WHERE scan_id=%s""",
+        (Json({"xiaojie_leader_flow": json_safe(status)}), scan_id),
+    )
+
+
 def mark_alerted(connection: Any, trading_date: date, alerted_at: datetime,
                  entries: list[tuple[str, str]]) -> int:
     """Stamp the observations an alert actually went out for."""
@@ -78,4 +97,4 @@ def session_observations(connection: Any, trading_date: date) -> list[dict[str, 
     return [dict(row) for row in rows]
 
 
-__all__ = ["mark_alerted", "record_candidates", "session_observations"]
+__all__ = ["mark_alerted", "persist_scan_status", "record_candidates", "session_observations"]

@@ -354,3 +354,47 @@ class NewModeFieldTests(unittest.TestCase):
     def test_trend_support_tracks_ma20(self):
         self.assertTrue(self._snapshot(_row("A.SZ", 10.5, prev=10.0), {"ma20": 10.0})["trend_support_holds"])
         self.assertFalse(self._snapshot(_row("A.SZ", 9.5, prev=10.0), {"ma20": 10.0})["trend_support_holds"])
+
+
+@unittest.skipUnless(__import__("os").getenv("PGHOST"), "requires the compose PostgreSQL service")
+class ScanStatusPersistenceTests(unittest.TestCase):
+    """source_status is written with the primary signals, before this pass runs.
+
+    Mutating the in-memory dict afterwards never reached the database: the
+    strategy executed and wrote its observations and alerts, but every scan
+    record showed no trace of it.
+    """
+
+    def _scan(self, connection):
+        return connection.execute(
+            "INSERT INTO quant.intraday_scan_runs(observed_at,status,source_status)"
+            " VALUES(now(),'completed','{\"tencent_watch\": {\"status\": \"completed\"}}'::jsonb)"
+            " RETURNING scan_id").fetchone()["scan_id"]
+
+    def test_the_status_lands_on_an_already_written_row(self):
+        from app.main import db, strategy_json_safe
+        from app.xiaojie_observation_repository import persist_scan_status
+        with db.transaction() as connection:
+            scan_id = self._scan(connection)
+            persist_scan_status(connection, scan_id=scan_id,
+                                status={"status": "completed", "candidates": 7},
+                                json_safe=strategy_json_safe)
+            row = connection.execute(
+                "SELECT source_status FROM quant.intraday_scan_runs WHERE scan_id=%s",
+                (scan_id,)).fetchone()
+            connection.execute("DELETE FROM quant.intraday_scan_runs WHERE scan_id=%s", (scan_id,))
+        self.assertEqual(row["source_status"]["xiaojie_leader_flow"]["candidates"], 7)
+
+    def test_it_merges_rather_than_replacing_the_primary_status(self):
+        from app.main import db, strategy_json_safe
+        from app.xiaojie_observation_repository import persist_scan_status
+        with db.transaction() as connection:
+            scan_id = self._scan(connection)
+            persist_scan_status(connection, scan_id=scan_id, status={"status": "completed"},
+                                json_safe=strategy_json_safe)
+            row = connection.execute(
+                "SELECT source_status FROM quant.intraday_scan_runs WHERE scan_id=%s",
+                (scan_id,)).fetchone()
+            connection.execute("DELETE FROM quant.intraday_scan_runs WHERE scan_id=%s", (scan_id,))
+        self.assertEqual(row["source_status"]["tencent_watch"]["status"], "completed",
+                         "the primary scan's own status must survive the merge")
