@@ -210,6 +210,20 @@ def market_volume_baseline(connection: Any, trading_date: date,
     return float(row["baseline"]) if row and row["baseline"] is not None else None
 
 
+def instrument_names(connection: Any) -> dict[str, str]:
+    """Symbol to its Chinese short name.
+
+    A live snapshot carries no name, so an alert built from one identifies a
+    stock by code alone - readable to the pipeline, not to the person holding
+    the phone. This rides along with the rest of the session reference, which
+    is cached per trading date, so naming costs one query a day.
+    """
+    rows = connection.execute(
+        "SELECT symbol, name FROM quant.instruments WHERE name IS NOT NULL AND name <> ''"
+    ).fetchall()
+    return {row["symbol"]: row["name"] for row in rows}
+
+
 def load_session_reference(connection: Any, trading_date: date) -> dict[str, Any]:
     """One call for everything a session's indicator construction needs."""
     return {
@@ -218,11 +232,12 @@ def load_session_reference(connection: Any, trading_date: date) -> dict[str, Any
         "membership": sector_membership(connection, trading_date),
         "references": candidate_references(connection, trading_date),
         "market_volume_baseline": market_volume_baseline(connection, trading_date),
+        "names": instrument_names(connection),
     }
 
 
 __all__ = [
     "LOOKBACK_SESSIONS", "MA_SESSIONS", "candidate_references", "ensure_session_trade_limits",
-    "load_session_reference", "persist_trade_limit_rows",
+    "instrument_names", "load_session_reference", "persist_trade_limit_rows",
     "market_volume_baseline", "sector_membership", "trade_limits",
 ]

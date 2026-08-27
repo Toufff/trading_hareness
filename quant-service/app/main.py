@@ -1965,7 +1965,8 @@ async def run_xiaojie_leader_flow(*, scan_id: uuid.UUID, observed_at: datetime,
                     lambda connection: _persist_xiaojie_signal_event(connection, scan_id, observed_at, item)),
                 timeout_seconds=30,
             )
-            await deliver_intraday_alert(event_id, _xiaojie_alert_text(candidate, trading_date))
+            await deliver_intraday_alert(
+                event_id, _xiaojie_alert_text(candidate, trading_date, reference.get("names")))
             alerted.append((candidate["symbol"], str(candidate.get("mode") or "unclassified")))
         except Exception as error:  # noqa: BLE001 - an alert failure must not end the scan
             alert_errors.append(f"{candidate.get('symbol')}: {safe_error_detail(str(error), 160)}")
@@ -2014,15 +2015,30 @@ def _persist_xiaojie_signal_event(connection: Any, scan_id: uuid.UUID, observed_
     return event_id
 
 
-def _xiaojie_alert_text(candidate: dict[str, Any], trading_date: date) -> str:
+def _xiaojie_alert_name(symbol: str, names: Mapping[str, str] | None) -> str:
+    """Label a symbol the way the person reading the alert recognises it.
+
+    A live snapshot carries no name, so an alert used to name a stock by code
+    alone.  The name leads because that is what a phone notification is read
+    by; the code follows so it stays copy-pasteable.  An unnamed symbol - a
+    fresh listing that has not reached ``instruments`` yet - degrades to the
+    bare code rather than failing the alert.
+    """
+    name = (names or {}).get(symbol)
+    return f"{name} {symbol}" if name else symbol
+
+
+def _xiaojie_alert_text(candidate: dict[str, Any], trading_date: date,
+                        names: Mapping[str, str] | None = None) -> str:
     evidence = candidate.get("evidence") or {}
     board = evidence.get("board") or {}
     state = "封板" if board.get("sealed") else ("炸板" if board.get("broken") else "近板")
     pct = evidence.get("pct_change")
+    label = _xiaojie_alert_name(candidate["symbol"], names)
     return (
-        f"【研究观察·小杰龙头】{candidate['symbol']} {candidate.get('mode')}\n"
+        f"【研究观察·小杰龙头】{label} {candidate.get('mode')}\n"
         f"{trading_date} {state} 涨幅 {pct:.2f}%\n" if pct is not None else
-        f"【研究观察·小杰龙头】{candidate['symbol']} {candidate.get('mode')}\n{trading_date} {state}\n"
+        f"【研究观察·小杰龙头】{label} {candidate.get('mode')}\n{trading_date} {state}\n"
     ) + (
         f"研究仓位参考 {(candidate.get('position') or {}).get('target_fraction')}；"
         f"风险标记 {', '.join(candidate.get('risk_flags') or []) or '无'}\n"

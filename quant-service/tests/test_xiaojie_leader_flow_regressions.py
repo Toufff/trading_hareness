@@ -7,6 +7,8 @@ independently. Each test names the concrete failure it locks out.
 from __future__ import annotations
 
 import unittest
+from datetime import date
+from unittest.mock import MagicMock, patch
 
 from app.xiaojie_leader_flow import (
     DEFAULT_PARAMETERS, EXIT_SEVERITY, MODE_ALERT_PRIORITY, alert_priority, evaluate_snapshot,
@@ -219,3 +221,74 @@ class AlertPriorityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AlertNamesTheStockNotJustItsCodeTests(unittest.TestCase):
+    """An alert is read by a person, so it has to say which stock it is.
+
+    The live snapshot the strategy runs on carries no name, so every alert
+    identified its subject by ts_code alone - unambiguous to the pipeline and
+    unreadable on a phone. Names ride along with the per-session reference,
+    which is cached per trading date.
+    """
+
+    names = {"600127.SH": "金健米业"}
+
+    def _candidate(self, symbol="600127.SH"):
+        return {"symbol": symbol, "mode": "right_side_breakout",
+                "position": {"target_fraction": 0.05}, "risk_flags": [],
+                "evidence": {"pct_change": 10.0, "board": {"sealed": True}}}
+
+    def _text(self, candidate, names):
+        from app.main import _xiaojie_alert_text
+        return _xiaojie_alert_text(candidate, date(2026, 8, 27), names)
+
+    def test_the_chinese_name_appears_alongside_the_code(self):
+        text = self._text(self._candidate(), self.names)
+        self.assertIn("金健米业", text)
+        self.assertIn("600127.SH", text)
+
+    def test_the_name_leads_so_a_notification_reads_as_a_stock(self):
+        text = self._text(self._candidate(), self.names)
+        self.assertLess(text.index("金健米业"), text.index("600127.SH"))
+
+    def test_an_unnamed_symbol_still_alerts_on_its_code(self):
+        # A fresh listing that has not reached ``instruments`` must not lose
+        # its alert over a missing label.
+        text = self._text(self._candidate("301999.SZ"), self.names)
+        self.assertIn("301999.SZ", text)
+
+    def test_no_names_at_all_degrades_rather_than_raising(self):
+        self.assertIn("600127.SH", self._text(self._candidate(), None))
+
+    def test_the_body_of_the_alert_is_unchanged(self):
+        text = self._text(self._candidate(), self.names)
+        for fragment in ("【研究观察·小杰龙头】", "封板", "涨幅 10.00%",
+                         "研究仓位参考", "不构成交易指令"):
+            self.assertIn(fragment, text)
+
+
+class SessionReferenceCarriesNamesTests(unittest.TestCase):
+    """The alert can only name a stock if the session reference loaded names."""
+
+    def test_the_loader_reads_names_once_per_session(self):
+        from app.xiaojie_reference_repository import instrument_names
+        connection = MagicMock()
+        connection.execute.return_value.fetchall.return_value = [
+            {"symbol": "600127.SH", "name": "金健米业"},
+            {"symbol": "000017.SZ", "name": "深中华A"},
+        ]
+        self.assertEqual(instrument_names(connection),
+                         {"600127.SH": "金健米业", "000017.SZ": "深中华A"})
+        self.assertEqual(connection.execute.call_count, 1)
+
+    def test_the_session_reference_exposes_them_under_names(self):
+        from app.xiaojie_reference_repository import load_session_reference
+        with patch("app.xiaojie_reference_repository.trade_limits", return_value={}), \
+             patch("app.xiaojie_reference_repository.sector_membership", return_value={}), \
+             patch("app.xiaojie_reference_repository.candidate_references", return_value={}), \
+             patch("app.xiaojie_reference_repository.market_volume_baseline", return_value=None), \
+             patch("app.xiaojie_reference_repository.instrument_names",
+                   return_value={"600127.SH": "金健米业"}):
+            reference = load_session_reference(MagicMock(), date(2026, 8, 27))
+        self.assertEqual(reference["names"], {"600127.SH": "金健米业"})
