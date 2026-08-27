@@ -724,7 +724,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
         async def check() -> AsyncMock:
             blocking = AsyncMock(side_effect=[
                 {"status": "ready"}, {"state": "trend_recovery"}, {"materialize_post_close_candidates": 0}, 0,
-                {"outcomes": 1}, {"scorecards": 1}, {"recommendations": 1},
+                {"settled": 0}, {"outcomes": 1}, {"scorecards": 1}, {"recommendations": 1},
             ])
             # The reporting-calendar sync owns its own provider call and its
             # own persist transaction, so it is stubbed here rather than being
@@ -743,7 +743,8 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
         self.assertEqual(
             [call.args[0].__name__ for call in blocking.await_args_list],
             ["build_snapshot", "materialize_market_regime_today", "materialize_strategy_daily_candidate_ledger",
-             "materialize_daily_watchlist_proposals", "recompute_outcomes", "recompute_scorecards", "generate_recommendations"],
+             "materialize_daily_watchlist_proposals", "settle_xiaojie_leader_flow_outcomes",
+             "recompute_outcomes", "recompute_scorecards", "generate_recommendations"],
         )
 
     def test_post_close_refresh_returns_conflict_when_durable_lease_is_held(self):

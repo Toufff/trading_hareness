@@ -156,6 +156,7 @@ from .xiaojie_reference_repository import (
     persist_trade_limit_rows as persist_xiaojie_trade_limit_rows,
     trade_limits as read_xiaojie_trade_limits,
 )
+from .xiaojie_outcome_settlement import settle_session as settle_xiaojie_session
 from .xiaojie_observation_repository import (
     alerted_count as xiaojie_alerted_count, mark_alerted as mark_xiaojie_alerted,
     record_candidates as record_xiaojie_candidates,
@@ -1147,6 +1148,12 @@ def materialize_daily_watchlist_proposals(as_of_date: date) -> dict[str, Any]:
     """Read-only daily proposal list; never writes into intraday_watchlists."""
     with db.transaction() as connection:
         return materialize_watchlist_proposals(connection, as_of_date)
+
+
+def settle_xiaojie_leader_flow_outcomes(as_of_date: date) -> dict[str, Any]:
+    """Attach realised outcomes to one session's leader-flow observations."""
+    with db.transaction() as connection:
+        return settle_xiaojie_session(connection, as_of_date)
 
 
 async def sync_stock_money_flow(trade_date: date) -> dict[str, Any]:
@@ -5009,6 +5016,7 @@ async def run_daily_pipeline(payload: GenerateRequest) -> dict[str, Any]:
         sync_earnings_calendar=sync_earnings_calendar,
         sync_stock_money_flow=sync_stock_money_flow,
         materialize_watchlist_proposals=materialize_daily_watchlist_proposals,
+        settle_xiaojie_outcomes=settle_xiaojie_leader_flow_outcomes,
     )
 
 

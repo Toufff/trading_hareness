@@ -25,6 +25,7 @@ async def run_pipeline(
     materialize_regime: Callable[[date], Any] | None = None,
     materialize_candidate_ledger: Callable[[date], Any] | None = None,
     materialize_watchlist_proposals: Callable[[date], Any] | None = None,
+    settle_xiaojie_outcomes: Callable[[date], Any] | None = None,
 ) -> dict[str, Any]:
     primary = await sync_tushare(tushare_request(trade_date=payload.as_of_date))
     fallback = None
@@ -59,12 +60,17 @@ async def run_pipeline(
     # watchlist_candidate_proposals.py for why).
     watchlist_proposals = (await run_database_blocking(materialize_watchlist_proposals, as_of_date, timeout_seconds=30)
                            if materialize_watchlist_proposals is not None else None)
+    # Settling turns accumulated leader-flow observations into an evaluable
+    # record.  Re-running refreshes: the next session's bars do not exist yet
+    # at this point, so the forward columns fill in on the following day's run.
+    xiaojie_outcomes = (await run_database_blocking(settle_xiaojie_outcomes, as_of_date, timeout_seconds=60)
+                        if settle_xiaojie_outcomes is not None else None)
     outcomes = await run_database_blocking(recompute_outcomes, payload.as_of_date, timeout_seconds=60)
     scorecard = await run_database_blocking(recompute_scorecards, payload.as_of_date, timeout_seconds=30)
     result = await run_database_blocking(generate_recommendations, payload, timeout_seconds=30)
     return {"status": "completed", "market_sync": sync, "snapshot": snapshot, "regime": regime,
             "earnings_calendar": earnings_calendar, "stock_money_flow": stock_money_flow,
-            "candidate_ledger": ledger,
+            "candidate_ledger": ledger, "xiaojie_outcomes": xiaojie_outcomes,
             "watchlist_proposals": watchlist_proposals, "outcomes": outcomes,
             "scorecards": scorecard, "recommendations": result}
 

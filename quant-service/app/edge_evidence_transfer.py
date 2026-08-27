@@ -46,6 +46,15 @@ TRANSFER_TABLES: tuple[TransferTable, ...] = (
         "intraday_scan_runs", "observed_at", ("scan_id",),
         frozenset({"requested_symbols", "source_status", "summary"}),
     ),
+    # The strategy runs on the edge; without this its observations never reach
+    # the workstation where outcomes are settled and modes are scored.
+    # last_seen_at is the watermark because a held setup is one row whose
+    # window widens, so it advances on every re-observation.
+    TransferTable(
+        "xiaojie_leader_flow_observations", "last_seen_at", ("trading_date", "symbol", "mode"),
+        frozenset({"stop_loss", "exit_state", "risk_flags", "reasons", "market_gate",
+                   "first_evidence", "last_evidence"}),
+    ),
     TransferTable(
         "intraday_signal_episodes", "updated_at", ("episode_id",), frozenset({"evidence"}),
     ),

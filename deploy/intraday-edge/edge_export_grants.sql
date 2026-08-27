@@ -22,6 +22,7 @@ GRANT SELECT ON TABLE
     quant.intraday_signal_events,
     quant.intraday_rule_input_snapshots,
     quant.ten_day_leader_rotation_intraday_observations,
+    quant.xiaojie_leader_flow_observations,
     -- The sequence journal is a transport cursor only. It carries rows from
     -- the allowlisted tables above and is needed for bounded delta exports.
     quant.edge_evidence_changes
