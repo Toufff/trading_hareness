@@ -7,7 +7,7 @@ import uuid
 from datetime import date, timedelta
 from typing import Any, Callable
 
-from psycopg.types.json import Json
+from .stable_json import stable_json
 
 
 def generate(
@@ -81,8 +81,8 @@ def generate(
         connection.execute(
             """INSERT INTO quant.recommendation_runs(run_id,as_of_date,model_version,market_regime,source_status,snapshot_key,status,model_metadata)
                VALUES(%s,%s,%s,%s,%s,%s,'completed',%s)""",
-            (run_id, as_of_date, model_version, regime, Json({"candidate_inputs": len(candidates), "universe_key": request.universe_key}),
-             materialized["snapshot_key"], Json({"feature_version": feature_version, "horizon_days": request.horizon_days,
+            (run_id, as_of_date, model_version, regime, stable_json({"candidate_inputs": len(candidates), "universe_key": request.universe_key}),
+             materialized["snapshot_key"], stable_json({"feature_version": feature_version, "horizon_days": request.horizon_days,
                                                    "analyst_execution_context": analyst_context, "analyst_weight_cap": analyst_weight})),
         )
         for rank, candidate in enumerate(candidates[:request.limit], start=1):
@@ -91,13 +91,13 @@ def generate(
             connection.execute(
                 """INSERT INTO quant.recommendations(run_id,rank,symbol,decision,score,score_breakdown,explanation,risk_flags,direction,horizon_days,confidence,valid_until,invalidation)
                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (run_id, rank, candidate["symbol"], candidate["decision"], candidate["score"], Json(breakdown), Json(explanation), Json(candidate["flags"]), candidate["direction"], request.horizon_days, candidate["confidence"], as_of_date + timedelta(days=request.horizon_days), Json(candidate["invalidation"])),
+                (run_id, rank, candidate["symbol"], candidate["decision"], candidate["score"], stable_json(breakdown), stable_json(explanation), stable_json(candidate["flags"]), candidate["direction"], request.horizon_days, candidate["confidence"], as_of_date + timedelta(days=request.horizon_days), stable_json(candidate["invalidation"])),
             )
             connection.execute(
                 """INSERT INTO quant.strategy_ablation_observations(run_id,symbol,market_only_score,analyst_shadow_score,applied_score,market_signal,analyst_signal,analyst_delta,applied_analyst_weight,analyst_execution_status,evidence)
                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT(run_id,symbol) DO UPDATE SET market_only_score=EXCLUDED.market_only_score,analyst_shadow_score=EXCLUDED.analyst_shadow_score,applied_score=EXCLUDED.applied_score,market_signal=EXCLUDED.market_signal,analyst_signal=EXCLUDED.analyst_signal,analyst_delta=EXCLUDED.analyst_delta,applied_analyst_weight=EXCLUDED.applied_analyst_weight,analyst_execution_status=EXCLUDED.analyst_execution_status,evidence=EXCLUDED.evidence""",
-                (run_id, candidate["symbol"], candidate["market_only_score"], candidate["analyst_shadow_score"], candidate["score"], candidate["quant_signal"], candidate["analyst_signal"], round(candidate["analyst_shadow_score"] - candidate["market_only_score"], 5), candidate["analyst_weight"], str(analyst_context.get("status") or "disabled"), Json({"execution_eligible": bool(analyst_context.get("execution_eligible")), "analyst_claim_count": candidate["signal_count"], "live_effect": "none"})),
+                (run_id, candidate["symbol"], candidate["market_only_score"], candidate["analyst_shadow_score"], candidate["score"], candidate["quant_signal"], candidate["analyst_signal"], round(candidate["analyst_shadow_score"] - candidate["market_only_score"], 5), candidate["analyst_weight"], str(analyst_context.get("status") or "disabled"), stable_json({"execution_eligible": bool(analyst_context.get("execution_eligible")), "analyst_claim_count": candidate["signal_count"], "live_effect": "none"})),
             )
     return {"run_id": str(run_id), "as_of_date": str(as_of_date), "market_regime": regime, "snapshot_key": materialized["snapshot_key"], "recommendations": candidates[:request.limit]}
 

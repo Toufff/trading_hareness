@@ -729,8 +729,8 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
             # The reporting-calendar sync owns its own provider call and its
             # own persist transaction, so it is stubbed here rather than being
             # allowed to consume one of the offload side effects below.
-            with patch("app.main.sync_tushare", new=AsyncMock(return_value={"status": "completed"})), \
-                 patch("app.main.sync_tushare_daily_core", new=AsyncMock(return_value={"status": "completed"})), \
+            with patch("app.main.sync_full_market_daily", new=AsyncMock(return_value={"status": "completed"})), \
+                 patch("app.main.sync_full_market_daily_controls", new=AsyncMock(return_value={"status": "completed"})), \
                  patch("app.main.sync_earnings_calendar", new=AsyncMock(return_value={"status": "completed"})), \
                  patch("app.main.sync_stock_money_flow", new=AsyncMock(return_value={"status": "completed"})), \
                  patch("app.main.run_database_blocking", new=blocking):

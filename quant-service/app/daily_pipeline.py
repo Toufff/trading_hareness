@@ -9,10 +9,11 @@ from typing import Any, Awaitable, Callable
 async def run_pipeline(
     payload: Any,
     *,
-    sync_tushare: Callable[[Any], Awaitable[dict[str, Any]]],
+    sync_full_market_daily: Callable[[Any], Awaitable[dict[str, Any]]],
     sync_baostock: Callable[[Any], Awaitable[dict[str, Any]]],
-    sync_tushare_daily_core: Callable[[date | None], Awaitable[dict[str, Any]]],
+    sync_full_market_daily_controls: Callable[[date], Awaitable[dict[str, Any]]],
     tushare_request: Any,
+    full_market_request: Any,
     snapshot_request: Callable[[date | None], Any],
     build_snapshot: Callable[..., Any],
     recompute_outcomes: Callable[..., Any],
@@ -27,17 +28,27 @@ async def run_pipeline(
     materialize_watchlist_proposals: Callable[[date], Any] | None = None,
     settle_xiaojie_outcomes: Callable[[date], Any] | None = None,
 ) -> dict[str, Any]:
-    primary = await sync_tushare(tushare_request(trade_date=payload.as_of_date))
+    # Both market stages take the whole cross-section in one request. The
+    # per-symbol synchronizers this replaced issued one call per name over the
+    # full ~5.5k universe: measured on 2026-08-27 they imported about 1.8 bars
+    # a minute, so a session's bars would have taken some 46 hours and the
+    # HTTP request died at 851s long before settlement ran. The same date
+    # loaded in 20s here.
+    as_of = payload.as_of_date or cn_today()
+    primary = await sync_full_market_daily(full_market_request(trade_date=payload.as_of_date))
     fallback = None
-    if primary["status"] in {"disabled", "partial", "failed"}:
+    if primary["status"] in {"blocked", "disabled", "partial", "failed"}:
         fallback = await sync_baostock(tushare_request(trade_date=payload.as_of_date))
-    core = await sync_tushare_daily_core(payload.as_of_date or cn_today()) if primary["status"] in {"completed", "unchanged", "partial"} else None
-    sync = {"primary": primary, "fallback": fallback, "core": core}
+    # Controls carry the limit prices every downstream limit-up judgement reads,
+    # and they refuse to run against a partially fetched date on their own.
+    controls = (await sync_full_market_daily_controls(as_of)
+                if primary["status"] in {"completed", "unchanged", "partial"} else None)
+    sync = {"primary": primary, "fallback": fallback, "controls": controls}
     snapshot = await run_database_blocking(build_snapshot, snapshot_request(payload.as_of_date), timeout_seconds=30)
     if snapshot["status"] != "ready":
         return {"status": "blocked", "market_sync": sync, "snapshot": snapshot,
                 "reason": "行情数据或质量门禁未满足；没有生成候选池"}
-    as_of_date = payload.as_of_date or cn_today()
+    as_of_date = as_of
     # The reporting calendar is fetched before proposals so the disclosure-day
     # watch source sees today's registered schedule for the next session.  Its
     # own failure is reported, never fatal: the price-based ledger below does
@@ -67,7 +78,10 @@ async def run_pipeline(
                         if settle_xiaojie_outcomes is not None else None)
     outcomes = await run_database_blocking(recompute_outcomes, payload.as_of_date, timeout_seconds=60)
     scorecard = await run_database_blocking(recompute_scorecards, payload.as_of_date, timeout_seconds=30)
-    result = await run_database_blocking(generate_recommendations, payload, timeout_seconds=30)
+    # Measured at 36-38s over the ~5.5k core universe on 2026-08-27; the 30s
+    # budget it used to carry cancelled the stage every run, which is why the
+    # pipeline reported an internal error at the very last step.
+    result = await run_database_blocking(generate_recommendations, payload, timeout_seconds=180)
     return {"status": "completed", "market_sync": sync, "snapshot": snapshot, "regime": regime,
             "earnings_calendar": earnings_calendar, "stock_money_flow": stock_money_flow,
             "candidate_ledger": ledger, "xiaojie_outcomes": xiaojie_outcomes,

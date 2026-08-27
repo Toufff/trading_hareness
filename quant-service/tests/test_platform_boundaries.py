@@ -3,6 +3,11 @@
 from provider_test_support import *  # noqa: F403
 
 
+def _full_market_request(*, trade_date=None):
+    """Stand-in for FullMarketDailySyncRequest in pipeline wiring tests."""
+    return {"trade_date": trade_date}
+
+
 class PlatformBoundaryTests(unittest.TestCase):
     def test_post_close_refresh_orchestrator_continues_after_stage_failure_and_releases_lease(self):
         calls: list[str] = []
@@ -41,9 +46,10 @@ class PlatformBoundaryTests(unittest.TestCase):
 
         async def check() -> dict[str, object]:
             return await run_pipeline(
-                GenerateRequest(), sync_tushare=sync, sync_baostock=sync,
-                sync_tushare_daily_core=AsyncMock(return_value={"status": "completed"}),
-                tushare_request=TushareSyncRequest, snapshot_request=lambda as_of: {"as_of_date": as_of},
+                GenerateRequest(), sync_full_market_daily=sync, sync_baostock=sync,
+                sync_full_market_daily_controls=AsyncMock(return_value={"status": "completed"}),
+                tushare_request=TushareSyncRequest, full_market_request=_full_market_request,
+                snapshot_request=lambda as_of: {"as_of_date": as_of},
                 build_snapshot=MagicMock(), recompute_outcomes=MagicMock(), recompute_scorecards=MagicMock(),
                 generate_recommendations=MagicMock(), run_database_blocking=blocking, cn_today=lambda: date(2026, 8, 14),
             )
@@ -72,9 +78,10 @@ class PlatformBoundaryTests(unittest.TestCase):
 
         async def check() -> dict[str, object]:
             return await run_pipeline(
-                GenerateRequest(), sync_tushare=sync, sync_baostock=sync,
-                sync_tushare_daily_core=AsyncMock(return_value={"status": "completed"}),
-                tushare_request=TushareSyncRequest, snapshot_request=lambda as_of: {"as_of_date": as_of},
+                GenerateRequest(), sync_full_market_daily=sync, sync_baostock=sync,
+                sync_full_market_daily_controls=AsyncMock(return_value={"status": "completed"}),
+                tushare_request=TushareSyncRequest, full_market_request=_full_market_request,
+                snapshot_request=lambda as_of: {"as_of_date": as_of},
                 build_snapshot=build_snapshot, recompute_outcomes=recompute_outcomes,
                 recompute_scorecards=recompute_scorecards, generate_recommendations=generate_recommendations,
                 run_database_blocking=blocking, cn_today=lambda: date(2026, 8, 14),
@@ -1468,3 +1475,58 @@ class PlatformBoundaryTests(unittest.TestCase):
                 return await circuit_open_provider_keys_async("daily", providers)
 
         self.assertEqual(asyncio.run(check()), {"tushare_super_sdk"})
+
+
+class DailyPipelineTakesTheCrossSectionInOneRequestTests(unittest.TestCase):
+    """The market stages must not iterate the universe symbol by symbol.
+
+    The per-symbol synchronizers this replaced issued one provider call per
+    name across ~5.5k symbols. Measured on 2026-08-27 they imported about 1.8
+    bars a minute, so the request died at 851s having loaded 41 of 5547 bars
+    and nothing downstream of the sync - settlement included - ever ran.
+    """
+
+    def _run(self, *, primary_status="completed"):
+        seen = {}
+
+        async def sync_full_market_daily(request):
+            seen["request"] = request
+            return {"status": primary_status}
+
+        async def sync_baostock(_request):
+            seen["baostock"] = True
+            return {"status": "completed"}
+
+        controls = AsyncMock(return_value={"status": "completed"})
+
+        async def blocking(operation, *_args, **_kwargs):
+            return {"status": "ready"} if operation is build else {}
+
+        build = object()
+        asyncio.run(run_pipeline(
+            GenerateRequest(as_of_date=date(2026, 8, 27)),
+            sync_full_market_daily=sync_full_market_daily, sync_baostock=sync_baostock,
+            sync_full_market_daily_controls=controls,
+            tushare_request=TushareSyncRequest, full_market_request=_full_market_request,
+            snapshot_request=lambda as_of: {"as_of_date": as_of}, build_snapshot=build,
+            recompute_outcomes=object(), recompute_scorecards=object(),
+            generate_recommendations=object(), run_database_blocking=blocking,
+            cn_today=lambda: date(2026, 8, 27),
+        ))
+        return seen, controls
+
+    def test_the_daily_stage_asks_for_one_whole_trade_date(self):
+        seen, _ = self._run()
+        self.assertEqual(seen["request"], {"trade_date": date(2026, 8, 27)},
+                         "the stage must request a trade date, never a single symbol")
+
+    def test_controls_run_on_the_resolved_date_not_none(self):
+        _, controls = self._run()
+        controls.assert_awaited_once_with(date(2026, 8, 27))
+
+    def test_a_blocked_primary_falls_back_rather_than_settling_on_a_partial_date(self):
+        # The full-market synchronizer reports "blocked", which the per-symbol
+        # one never did; without it in the set the fallback silently stopped.
+        seen, controls = self._run(primary_status="blocked")
+        self.assertTrue(seen.get("baostock"), "a blocked cross-section must reach the fallback")
+        controls.assert_not_awaited()

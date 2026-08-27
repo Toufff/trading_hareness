@@ -5006,8 +5006,9 @@ async def recommendations(payload: GenerateRequest) -> dict[str, Any]:
 
 async def run_daily_pipeline(payload: GenerateRequest) -> dict[str, Any]:
     return await run_daily_pipeline_orchestrated(
-        payload, sync_tushare=sync_tushare, sync_baostock=sync_baostock,
-        sync_tushare_daily_core=sync_tushare_daily_core, tushare_request=TushareSyncRequest,
+        payload, sync_full_market_daily=sync_full_market_daily, sync_baostock=sync_baostock,
+        sync_full_market_daily_controls=sync_full_market_daily_controls,
+        tushare_request=TushareSyncRequest, full_market_request=FullMarketDailySyncRequest,
         snapshot_request=lambda as_of: SnapshotRequest(as_of_date=as_of), build_snapshot=build_snapshot,
         recompute_outcomes=recompute_outcomes, recompute_scorecards=recompute_scorecards,
         generate_recommendations=generate_recommendations, run_database_blocking=run_database_blocking,

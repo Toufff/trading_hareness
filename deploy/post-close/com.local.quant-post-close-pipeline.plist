@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.quant-post-close-pipeline</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/papa/codebase/n8n/scripts/run-post-close-pipeline.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/papa/codebase/n8n</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- A plain interval, not a calendar time: this host runs on US Pacific
+       while the market runs on Asia/Shanghai, so a fixed local hour would
+       drift against the close twice a year. The script decides in exchange
+       time whether the moment is right, and a success marker keeps the
+       remaining ticks from re-syncing a date that is already done. -->
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/papa/Library/Logs/quant-post-close-pipeline.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/papa/Library/Logs/quant-post-close-pipeline.error.log</string>
+</dict>
+</plist>

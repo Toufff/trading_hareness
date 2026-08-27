@@ -44,7 +44,12 @@ def analyst_feature(connection: Any, symbol: str, as_of_date: date, number: Call
     weights = [number(row["strength"]) * number(row["extraction_confidence"]) for row in rows]
     return {"consensus": round(sum(weighted) / sum(weights), 5) if sum(weights) else 0.0,
             "claim_count": len(rows), "analyst_skill": 0.5, "status": "eligible_observation_context_only",
-            "evidence": [{"analyst_id": row["remote_analyst_id"], "direction": row["direction"],
-                          "strength": row["strength"], "horizon_days": row["horizon_days"], "evidence": row["evidence"]}
+            # The same two columns are coerced above to compute the consensus;
+            # passing them through raw here hands psycopg a Decimal, whose JSON
+            # dump has no default hook, so the whole feature snapshot fails to
+            # persist for any symbol that has an eligible observation.
+            "evidence": [{"analyst_id": row["remote_analyst_id"], "direction": number(row["direction"]),
+                          "strength": number(row["strength"]), "horizon_days": row["horizon_days"],
+                          "evidence": row["evidence"]}
                          for row in rows[:8]]}
 

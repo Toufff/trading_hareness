@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from datetime import date
 from statistics import mean
 from typing import Any, Callable
 
-from psycopg.types.json import Json
+from .stable_json import stable_dumps, stable_json
 
 from .research_prices import adjusted_bars
 
@@ -102,13 +101,14 @@ def materialize_feature_snapshot(
         features["analyst_market_context"] = analyst_context["market"]
         features["market_regime"] = regime
         items.append({"symbol": symbol, "features": features, "quality_flags": sorted(set(flags))})
-    stable = json.dumps(items, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    stable = stable_dumps(items)
     snapshot_key = hashlib.sha256(f"{feature_version}:{universe_key}:{as_of_date}:{stable}".encode()).hexdigest()
     for item in items:
         connection.execute(
             """INSERT INTO quant.feature_snapshots(snapshot_key,symbol,as_of_date,feature_version,features,quality_flags)
                VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(snapshot_key,symbol,feature_version) DO NOTHING""",
-            (snapshot_key, item["symbol"], as_of_date, feature_version, Json(item["features"]), Json(item["quality_flags"])),
+            (snapshot_key, item["symbol"], as_of_date, feature_version,
+             stable_json(item["features"]), stable_json(item["quality_flags"])),
         )
     return {"snapshot_key": snapshot_key, "as_of_date": str(as_of_date), "universe_key": universe_key,
             "feature_version": feature_version, "market_regime": regime, "items": items}
