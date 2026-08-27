@@ -487,3 +487,36 @@ class SealedBoardsAreNotAlertableTests(unittest.TestCase):
 
     def test_an_all_sealed_scan_yields_nothing_to_alert(self):
         self.assertEqual(self._actionable([self._candidate(f"{i}.SZ", True) for i in range(5)]), [])
+
+
+class PoolBoundReportingTests(unittest.TestCase):
+    """The candidate bound is a safety limit, not a screen.
+
+    On 2026-08-27 it bound at exactly 150 of 159 qualifying names and dropped
+    one that later sealed, while every status the scan reported looked like
+    full coverage.  Truncation must be visible.
+    """
+
+    def _rows(self, count):
+        return [{"symbol": f"{600000 + index}.SH", "price": 11.0 - index * 0.001,
+                 "raw": {"high_price": 11.0 - index * 0.001}} for index in range(count)]
+
+    def _limits(self, rows):
+        return {row["symbol"]: 11.0 for row in rows}
+
+    def test_truncation_is_reported_when_the_bound_binds(self):
+        rows = self._rows(12)
+        result = evaluate_pool(rows, limits=self._limits(rows), membership={}, references={},
+                               observed_at=datetime(2026, 8, 27, 2, 0, tzinfo=timezone.utc),
+                               max_candidates=10)
+        self.assertEqual(result["pool_size"], 10)
+        self.assertEqual(result["pool_qualified"], 12)
+        self.assertEqual(result["pool_truncated"], 2)
+
+    def test_nothing_is_reported_as_truncated_when_the_bound_is_slack(self):
+        rows = self._rows(4)
+        result = evaluate_pool(rows, limits=self._limits(rows), membership={}, references={},
+                               observed_at=datetime(2026, 8, 27, 2, 0, tzinfo=timezone.utc),
+                               max_candidates=10)
+        self.assertEqual(result["pool_truncated"], 0)
+        self.assertEqual(result["pool_qualified"], result["pool_size"])

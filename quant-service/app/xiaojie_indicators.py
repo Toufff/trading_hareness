@@ -39,7 +39,11 @@ LIMIT_TOLERANCE = 0.005
 #: a board that broke is exactly what the return-flow and re-seal modes watch.
 NEAR_LIMIT_PCT = 3.0
 #: Hard bound on how many candidates one scan evaluates.
-MAX_CANDIDATES = 150
+#: A safety bound on how many names one scan evaluates, not a filter.  It
+#: bound at exactly 150 of 159 qualifying names on 2026-08-27's morning
+#: session and silently dropped one that later sealed, so the headroom is
+#: widened and any truncation is now reported rather than swallowed.
+MAX_CANDIDATES = 250
 #: A sector needs this many limit-ups before it counts as a 主线板块.
 MAIN_SECTOR_MIN_LIMIT_UPS = 3
 #: Market-wide sentiment floor: below this share of names above their own MA5,
@@ -468,7 +472,11 @@ def evaluate_pool(rows: list[dict[str, Any]], *, limits: Mapping[str, float],
                   max_candidates: int = MAX_CANDIDATES) -> dict[str, Any]:
     """Build snapshots for the leader pool and run the decision function over it."""
     rows_by_symbol = {str(row.get("symbol") or ""): dict(row) for row in rows}
-    pool = leader_pool(rows, limits, max_candidates=max_candidates)
+    # Ranked once without the bound so the caller can see when the bound binds:
+    # a cap that silently truncates reads as full coverage in every status it
+    # reports, which is how the 2026-08-27 drop went unnoticed.
+    qualified = leader_pool(rows, limits, max_candidates=len(rows))
+    pool = qualified[:max(0, max_candidates)]
     sectors = sector_context(pool, rows_by_symbol, membership, limits)
     # Explicit overrides exist for replay; live scans derive both.
     regime = market_regime_inputs(
@@ -522,6 +530,7 @@ def evaluate_pool(rows: list[dict[str, Any]], *, limits: Mapping[str, float],
     candidates = [item for item in evaluations if item["decision"] == "research_candidate"]
     return {
         "observed_at": observed_at.isoformat(), "pool_size": len(pool),
+        "pool_qualified": len(qualified), "pool_truncated": len(qualified) - len(pool),
         "evaluated": len(evaluations), "candidates": candidates,
         "main_sector_count": len(sectors["main_sectors"]),
         "market_gate": market, "regime": regime, "evaluations": evaluations,
