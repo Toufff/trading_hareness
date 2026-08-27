@@ -157,7 +157,8 @@ from .xiaojie_reference_repository import (
     trade_limits as read_xiaojie_trade_limits,
 )
 from .xiaojie_observation_repository import (
-    mark_alerted as mark_xiaojie_alerted, record_candidates as record_xiaojie_candidates,
+    alerted_count as xiaojie_alerted_count, mark_alerted as mark_xiaojie_alerted,
+    record_candidates as record_xiaojie_candidates,
 )
 from . import offline_minute_import_service
 from .intraday_cross_section import SharedAsyncSnapshot
@@ -1857,7 +1858,9 @@ async def intraday_watch_flow_reference(
 _xiaojie_session_reference: dict[str, Any] = {"trading_date": None, "reference": None}
 #: Per-session MA5-break timers, reset when the trading date rolls over.
 _xiaojie_ma5_break_state: dict[str, Any] = {}
-#: Alerts are per newly-appearing (symbol, mode); this bounds a pathological day.
+#: Alerts are per newly-appearing (symbol, mode); this bounds a pathological
+#: day.  The running tally is read from the observations table, not held here,
+#: so a restart cannot reset it.
 XIAOJIE_MAX_ALERTS_PER_SCAN = 5
 XIAOJIE_MAX_ALERTS_PER_SESSION = 40
 
@@ -1890,8 +1893,7 @@ async def _xiaojie_session_context(trading_date: date) -> dict[str, Any]:
         lambda: _with_connection(lambda connection: load_xiaojie_session_reference(connection, trading_date)),
         timeout_seconds=180,
     )
-    _xiaojie_session_reference.update({"trading_date": trading_date, "reference": reference,
-                                       "alerts_sent": 0})
+    _xiaojie_session_reference.update({"trading_date": trading_date, "reference": reference})
     _xiaojie_ma5_break_state.clear()
     return reference
 
@@ -1929,14 +1931,27 @@ async def run_xiaojie_leader_flow(*, scan_id: uuid.UUID, observed_at: datetime,
         timeout_seconds=60,
     ) if candidates else []
 
-    sent = int(_xiaojie_session_reference.get("alerts_sent") or 0)
+    # A board already locked at the limit cannot be acted on: measured across
+    # 104 observations on 2026-08-27, the 61 found already sealed produced 0
+    # gains, 57 unchanged and 4 losses from the moment they were flagged, while
+    # the 43 found unsealed averaged +0.40%.  They stay recorded as research
+    # evidence but must not consume a scarce alert slot.
+    actionable = [item for item in fresh
+                  if not ((item.get("evidence") or {}).get("board") or {}).get("sealed")]
+    sealed_skipped = len(fresh) - len(actionable)
+    # The budget is read from what the table already recorded, so a restart
+    # mid-session cannot hand out a fresh allowance.
+    sent = await run_database_blocking(
+        lambda: _with_connection(lambda connection: xiaojie_alerted_count(connection, trading_date)),
+        timeout_seconds=30,
+    )
     remaining = min(XIAOJIE_MAX_ALERTS_PER_SCAN, max(0, XIAOJIE_MAX_ALERTS_PER_SESSION - sent))
     # Alert slots are scarce, so they go to the highest-conviction setups
     # rather than to whichever mode happens to be most numerous.
-    fresh = sorted(fresh, key=xiaojie_alert_priority)
+    actionable = sorted(actionable, key=xiaojie_alert_priority)
     alerted: list[tuple[str, str]] = []
     alert_errors: list[str] = []
-    for candidate in fresh[:remaining]:
+    for candidate in actionable[:remaining]:
         try:
             event_id = await run_database_blocking(
                 lambda item=candidate: _with_connection(
@@ -1948,7 +1963,6 @@ async def run_xiaojie_leader_flow(*, scan_id: uuid.UUID, observed_at: datetime,
         except Exception as error:  # noqa: BLE001 - an alert failure must not end the scan
             alert_errors.append(f"{candidate.get('symbol')}: {safe_error_detail(str(error), 160)}")
     if alerted:
-        _xiaojie_session_reference["alerts_sent"] = sent + len(alerted)
         await run_database_blocking(
             lambda: _with_connection(lambda connection: mark_xiaojie_alerted(
                 connection, trading_date, observed_at, alerted)),
@@ -1960,9 +1974,11 @@ async def run_xiaojie_leader_flow(*, scan_id: uuid.UUID, observed_at: datetime,
         "main_sector_count": result["main_sector_count"],
         "regime": result["regime"],
         "candidates": len(candidates), "new_candidates": len(fresh), "alerted": len(alerted),
-        "alerts_suppressed_by_cap": max(0, len(fresh) - len(alerted)),
+        "actionable_candidates": len(actionable),
+        "sealed_skipped": sealed_skipped,
+        "alerts_suppressed_by_cap": max(0, len(actionable) - len(alerted)),
         "alerted_modes": sorted({mode for _symbol, mode in alerted}),
-        "alerts_sent_this_session": int(_xiaojie_session_reference.get("alerts_sent") or 0),
+        "alerts_sent_this_session": sent + len(alerted),
         "alert_errors": alert_errors or None,
         "reference_symbols": len(reference["limits"]),
         "live_effect": "none", "boundary": "research_only; no_automatic_order",

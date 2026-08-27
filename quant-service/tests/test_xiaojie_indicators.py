@@ -398,3 +398,92 @@ class ScanStatusPersistenceTests(unittest.TestCase):
             connection.execute("DELETE FROM quant.intraday_scan_runs WHERE scan_id=%s", (scan_id,))
         self.assertEqual(row["source_status"]["tencent_watch"]["status"], "completed",
                          "the primary scan's own status must survive the merge")
+
+
+@unittest.skipUnless(__import__("os").getenv("PGHOST"), "requires the compose PostgreSQL service")
+class AlertBudgetDurabilityTests(unittest.TestCase):
+    """The session budget lived in memory, so a deploy handed out a fresh one.
+
+    On 2026-08-27 a 10:32 deploy reset an allowance that had been fully spent
+    by 10:27, which makes the cap unenforceable exactly when it binds.
+    """
+
+    from datetime import date as _date
+    trading_date = _date(2099, 9, 1)
+    symbols = ("999951.SZ", "999952.SZ")
+
+    def _cleanup(self):
+        from app.main import db
+        with db.transaction() as connection:
+            connection.execute(
+                "DELETE FROM quant.xiaojie_leader_flow_observations WHERE trading_date=%s",
+                (self.trading_date,))
+            connection.execute("DELETE FROM quant.instruments WHERE symbol=ANY(%s)", (list(self.symbols),))
+
+    def setUp(self):
+        from app.main import db
+        self._cleanup()
+        self.addCleanup(self._cleanup)
+        with db.transaction() as connection:
+            for symbol in self.symbols:
+                connection.execute(
+                    "INSERT INTO quant.instruments(symbol,exchange) VALUES(%s,'SZ') ON CONFLICT DO NOTHING",
+                    (symbol,))
+
+    def test_the_tally_comes_from_the_record_not_from_memory(self):
+        from datetime import datetime, timezone
+        from app.main import db
+        from app.xiaojie_observation_repository import alerted_count, mark_alerted, record_candidates
+        stamp = datetime(2099, 9, 1, 2, 0, tzinfo=timezone.utc)
+        with db.transaction() as connection:
+            self.assertEqual(alerted_count(connection, self.trading_date), 0)
+            record_candidates(connection, self.trading_date, stamp, None, [
+                {"symbol": symbol, "mode": "reverse_wrap", "decision": "research_candidate",
+                 "position": {}, "exit": {}, "risk_flags": [], "reasons": [],
+                 "market_gate": {}, "evidence": {}} for symbol in self.symbols])
+            self.assertEqual(alerted_count(connection, self.trading_date), 0,
+                             "recording a candidate is not the same as alerting on it")
+            mark_alerted(connection, self.trading_date, stamp, [(self.symbols[0], "reverse_wrap")])
+            self.assertEqual(alerted_count(connection, self.trading_date), 1)
+
+    def test_the_tally_is_scoped_to_its_own_session(self):
+        from datetime import datetime, timedelta, timezone
+        from app.main import db
+        from app.xiaojie_observation_repository import alerted_count, mark_alerted, record_candidates
+        stamp = datetime(2099, 9, 1, 2, 0, tzinfo=timezone.utc)
+        with db.transaction() as connection:
+            record_candidates(connection, self.trading_date, stamp, None, [
+                {"symbol": self.symbols[0], "mode": "reverse_wrap", "decision": "research_candidate",
+                 "position": {}, "exit": {}, "risk_flags": [], "reasons": [],
+                 "market_gate": {}, "evidence": {}}])
+            mark_alerted(connection, self.trading_date, stamp, [(self.symbols[0], "reverse_wrap")])
+            self.assertEqual(alerted_count(connection, self.trading_date + timedelta(days=1)), 0)
+
+
+class SealedBoardsAreNotAlertableTests(unittest.TestCase):
+    """A locked board cannot be acted on, so it must not spend an alert slot.
+
+    Across 104 observations on 2026-08-27 the 61 found already sealed produced
+    0 gains, 57 unchanged and 4 losses from the moment they were flagged; the
+    43 found unsealed averaged +0.40%.
+    """
+
+    @staticmethod
+    def _candidate(symbol, sealed):
+        return {"symbol": symbol, "mode": "reverse_wrap",
+                "evidence": {"board": {"sealed": sealed, "broken": False, "touched": sealed}}}
+
+    @staticmethod
+    def _actionable(candidates):
+        return [item for item in candidates
+                if not ((item.get("evidence") or {}).get("board") or {}).get("sealed")]
+
+    def test_sealed_candidates_are_filtered_out(self):
+        candidates = [self._candidate("A.SZ", True), self._candidate("B.SZ", False)]
+        self.assertEqual([item["symbol"] for item in self._actionable(candidates)], ["B.SZ"])
+
+    def test_a_candidate_with_no_board_evidence_is_still_actionable(self):
+        self.assertEqual(len(self._actionable([{"symbol": "A.SZ", "mode": "reverse_wrap", "evidence": {}}])), 1)
+
+    def test_an_all_sealed_scan_yields_nothing_to_alert(self):
+        self.assertEqual(self._actionable([self._candidate(f"{i}.SZ", True) for i in range(5)]), [])

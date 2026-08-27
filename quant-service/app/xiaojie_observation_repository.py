@@ -86,6 +86,22 @@ def mark_alerted(connection: Any, trading_date: date, alerted_at: datetime,
     return len(entries)
 
 
+def alerted_count(connection: Any, trading_date: date) -> int:
+    """Alerts already sent today, read from the record rather than memory.
+
+    The session budget used to live in a module-level dict, so any restart -
+    including a deploy mid-session - silently granted a fresh allowance. On
+    2026-08-27 a 10:32 deploy reset a budget that had been fully spent by
+    10:27, which makes the cap unenforceable exactly when it matters.
+    """
+    row = connection.execute(
+        """SELECT count(*) AS sent FROM quant.xiaojie_leader_flow_observations
+            WHERE trading_date=%s AND alerted_at IS NOT NULL""",
+        (trading_date,),
+    ).fetchone()
+    return int(row["sent"] or 0) if row else 0
+
+
 def session_observations(connection: Any, trading_date: date) -> list[dict[str, Any]]:
     rows = connection.execute(
         """SELECT symbol,mode,decision,target_fraction,first_seen_at,last_seen_at,
@@ -97,4 +113,7 @@ def session_observations(connection: Any, trading_date: date) -> list[dict[str, 
     return [dict(row) for row in rows]
 
 
-__all__ = ["mark_alerted", "persist_scan_status", "record_candidates", "session_observations"]
+__all__ = [
+    "alerted_count", "mark_alerted", "persist_scan_status", "record_candidates",
+    "session_observations",
+]
