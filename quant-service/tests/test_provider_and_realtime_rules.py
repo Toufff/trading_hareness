@@ -609,12 +609,12 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         self.assertEqual(configs["super_sdk"].rate_limit_per_minute, 30)
         self.assertEqual(configs["super_get"].rate_limit_per_minute, 60)
         self.assertEqual(configs["super_get"].min_interval_seconds, 1.0)
-        self.assertEqual([item.key for item in provider_candidates("daily", environ=env)], ["tushare_super_get", "tushare_primary"])
+        self.assertEqual([item.key for item in provider_candidates("daily", environ=env)], ["tushare_super_get", "tushare_primary", "tushare_backup"])
         self.assertEqual([item.key for item in provider_candidates("stock_basic", environ=env)], ["tushare_primary", "tushare_super_get", "tushare_super_sdk", "tushare_backup"])
         self.assertEqual([item.key for item in provider_candidates("stk_factor", environ=env)], ["tushare_primary", "tushare_super_sdk"])
-        self.assertEqual([item.key for item in provider_candidates("moneyflow", environ=env)], ["tushare_super_sdk", "tushare_super_get", "tushare_primary"])
-        self.assertEqual([item.key for item in provider_candidates("ths_member", environ=env)], ["tushare_super_sdk", "tushare_super_get", "tushare_primary"])
-        self.assertEqual([item.key for item in provider_candidates("moneyflow_ind_dc", environ=env)], ["tushare_super_get", "tushare_super_sdk", "tushare_primary"])
+        self.assertEqual([item.key for item in provider_candidates("moneyflow", environ=env)], ["tushare_super_sdk", "tushare_super_get", "tushare_primary", "tushare_backup"])
+        self.assertEqual([item.key for item in provider_candidates("ths_member", environ=env)], ["tushare_super_sdk", "tushare_super_get", "tushare_primary", "tushare_backup"])
+        self.assertEqual([item.key for item in provider_candidates("moneyflow_ind_dc", environ=env)], ["tushare_super_get", "tushare_super_sdk", "tushare_primary", "tushare_backup"])
         self.assertEqual([item.key for item in provider_candidates("rt_min", environ=env)], ["tushare_super_sdk", "tushare_super_get"])
         self.assertEqual([item.key for item in provider_candidates("rt_min_daily", environ=env)], ["tushare_super_get"])
         self.assertEqual([item.key for item in provider_candidates("rt_etf_min", environ=env)], ["tushare_super_sdk"])
@@ -629,6 +629,7 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         self.assertEqual(status["super_sdk"]["realtime_coverage"], "verified_partial")
         self.assertEqual(status["super_get"]["realtime_coverage"], "verified_partial")
         self.assertEqual(status["super_get"]["get_apis"], sorted(SUPER_GET_VERIFIED_APIS))
+        self.assertEqual(status["backup"]["datahub_apis"], sorted(DATAHUB_VERIFIED_APIS))
         self.assertEqual(status["super_get"]["bounded_only_apis"], ["ths_index", "ths_member"])
         self.assertEqual(status["super_get"]["reconciliation_required_apis"], ["stock_basic", "top_inst", "top_list"])
         self.assertIn("rt_min", status["super_sdk"]["super_alias_first_apis"])
@@ -719,6 +720,52 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         self.assertIs(response, success)
         self.assertEqual(operation.await_count, 2)
         sleep.assert_awaited_once_with(3.0)
+
+    def test_datahub_backup_maps_catalog_name_to_kebab_route_and_preserves_params(self):
+        provider = provider_configs({
+            "TUSHARE_BACKUP_API_KEY": "backup-secret",
+            "TUSHARE_BACKUP_API_URL": "https://datahub.example",
+        })["backup"]
+        response = MagicMock(status_code=200)
+        response.json.return_value = {
+            "code": 0,
+            "data": {"fields": ["ts_code", "trade_date"], "items": [["000001.SZ", "20260826"]]},
+        }
+
+        client = MagicMock()
+        client.get = AsyncMock(return_value=response)
+
+        class ClientContext:
+            async def __aenter__(self):
+                return client
+
+            async def __aexit__(self, *_args):
+                return False
+
+        request = AsyncMock(return_value=response)
+        with patch("app.tushare_providers.provider_http_client", return_value=ClientContext()), \
+             patch("app.tushare_providers.provider_http_request", new=request):
+            rows = asyncio.run(call_provider(provider, "daily_basic", {"trade_date": "20260826", "limit": 7}, None))
+
+        self.assertEqual(rows, [{"ts_code": "000001.SZ", "trade_date": "20260826"}])
+        call = request.await_args.args[1]
+        # Execute the request operation so the URL/headers/params contract is
+        # tested without making a network call.
+        asyncio.run(call())
+        client.get.assert_called_once_with(
+            "https://datahub.example/app-api/openapi/v1/tushare/daily-basic",
+            headers={"X-API-Key": "backup-secret"},
+            params={"trade_date": "20260826", "limit": 7},
+        )
+
+    def test_datahub_backup_is_fail_closed_for_unverified_realtime(self):
+        provider = provider_configs({
+            "TUSHARE_BACKUP_API_KEY": "backup-secret",
+            "TUSHARE_BACKUP_API_URL": "https://datahub.example",
+        })["backup"]
+        self.assertIn("daily_basic", DATAHUB_VERIFIED_APIS)
+        self.assertFalse(provider.supports("rt_k"))
+        self.assertFalse(provider.supports("rt_min"))
 
     def test_retry_after_hint_is_bounded_and_never_reduces_backoff(self):
         self.assertEqual(retry_delay_seconds({"Retry-After": "3"}, 0.8), 3.0)

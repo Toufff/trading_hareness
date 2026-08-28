@@ -122,6 +122,28 @@ SUPER_GET_RECONCILIATION_APIS = frozenset({"stock_basic", "top_list", "top_inst"
 # were observed stale or unsupported.
 SUPER_GET_EXCLUSIVE_APIS = frozenset({"daily", "rt_min_daily", "rt_fut_min", "rt_fut_min_daily"})
 
+# DataHub's REST endpoint is an independently probed, read-only fallback.
+# Keep this list deliberately smaller than the advertised Tushare catalog:
+# every entry was observed with a valid ``code=0`` envelope on 2026-08-26,
+# while realtime and historical-minute routes remain excluded from the
+# fallback until their timestamp/retention contracts are separately verified.
+DATAHUB_VERIFIED_APIS = frozenset({
+    "stock_basic", "daily", "daily_basic", "adj_factor", "trade_cal", "index_daily",
+    "stk_limit", "suspend_d", "weekly",
+    "moneyflow", "moneyflow_dc", "moneyflow_ths", "moneyflow_ind_dc",
+    "moneyflow_ind_ths", "moneyflow_mkt_dc", "moneyflow_cnt_ths", "moneyflow_hsgt",
+    "limit_list_d", "limit_list_ths", "limit_step", "limit_cpt_list",
+    "ths_index", "ths_daily", "ths_member", "ths_hot", "dc_hot", "kpl_list",
+    "cyq_perf", "cyq_chips", "stk_factor_pro", "top_list", "top_inst", "report_rc",
+    "forecast", "express", "income", "cashflow", "fina_mainbz", "fina_mainbz_vip",
+    "disclosure_date", "dividend", "namechange", "new_share", "share_float",
+    "stk_holdernumber", "stock_st", "etf_basic", "etf_share_size", "etf_sz_cons",
+    "fund_daily", "fund_nav", "fund_share", "fut_basic", "fut_daily", "fut_settle",
+    "fut_trade_cal", "fut_wsr", "ggt_daily", "ggt_top10", "hibor", "shibor",
+    "shibor_quote", "sge_daily", "us_tbr", "us_tltr", "us_trltr", "us_trycr",
+    "us_tycr", "cn_cpi", "cn_m", "cn_pmi", "cn_ppi", "eco_cal",
+})
+
 # Per-interface routing is based on the 2026-08-11 live audit.  City wins when
 # it is faster, timestamped, or demonstrably more complete; GET wins when City
 # is empty, unavailable, or ignores the requested scope.
@@ -175,7 +197,7 @@ class TushareProvider:
 
     def supports(self, api_name: str) -> bool:
         if self.name == "backup":
-            return api_name == "stock_basic"
+            return api_name in DATAHUB_VERIFIED_APIS
         if self.name == "super_get":
             return api_name in self.get_verified_apis
         if self.name == "super_sdk" and api_name in REALTIME_MARKET_HOURS_APIS:
@@ -499,6 +521,11 @@ def provider_candidates(api_name: str, preferred: ProviderPreference = "auto", *
         for name in _expand_provider_name(api_name, requested_name):
             if name not in names:
                 names.append(name)
+    # DataHub is an explicitly audited REST fallback.  Append it only for the
+    # automatic route so an explicit provider choice remains strict and the
+    # source cannot unexpectedly affect a super-only comparison.
+    if preferred == "auto" and "backup" not in names:
+        names.append("backup")
     return [provider for name in names if (provider := configs[name]).configured and provider.supports(api_name)]
 
 
@@ -543,6 +570,7 @@ def provider_status(*, environ: Mapping[str, str] | None = None) -> list[dict[st
                                       else sorted(get_first_apis) if provider.name == "super_get" else [],
             "get_gateway_mode": provider.get_gateway_mode if provider.name == "super_get" else None,
             "get_apis": sorted(provider.get_verified_apis) if provider.name == "super_get" else verified_get_apis,
+            "datahub_apis": sorted(DATAHUB_VERIFIED_APIS) if provider.name == "backup" else [],
             "complete_query_apis": sorted(provider.get_verified_apis - SUPER_GET_BOUNDED_ONLY_APIS - SUPER_GET_RECONCILIATION_APIS) if provider.name == "super_get" else [],
             "bounded_only_apis": sorted(provider.get_verified_apis & SUPER_GET_BOUNDED_ONLY_APIS) if provider.name == "super_get" else [],
             "reconciliation_required_apis": sorted(provider.get_verified_apis & SUPER_GET_RECONCILIATION_APIS) if provider.name == "super_get" else [],
@@ -682,9 +710,16 @@ async def call_provider(provider: TushareProvider, api_name: str, params: dict[s
     sdk_realtime_request = api_name in provider.get_realtime_apis
     async with provider_http_client(provider.key, provider.proxy_url) as client:
         if provider.protocol == "backup_rest":
+            endpoint_name = api_name.replace("_", "-")
+            provider_params = dict(params)
+            if "limit" in provider_params:
+                try:
+                    provider_params["limit"] = min(3000, max(1, int(provider_params["limit"])))
+                except (TypeError, ValueError) as error:
+                    raise ProviderCallError("backup provider limit must be an integer") from error
             response = await provider_http_request(provider, lambda: client.get(
-                f"{provider.endpoint}/app-api/openapi/v1/tushare/stock-basic",
-                headers={"X-API-Key": provider.credential}, params={**params, "limit": min(int(params.get("limit", 100)), 100)},
+                f"{provider.endpoint}/app-api/openapi/v1/tushare/{endpoint_name}",
+                headers={"X-API-Key": provider.credential}, params=provider_params,
             ))
             response.raise_for_status()
             body = response.json()

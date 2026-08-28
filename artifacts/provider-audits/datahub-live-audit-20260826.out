@@ -1,0 +1,2907 @@
+{
+  "as_of": "2026-08-26",
+  "catalog_count": 200,
+  "counts": {
+    "timeout": 5,
+    "unsupported": 127,
+    "untested": 1,
+    "valid_empty": 7,
+    "verified_partial": 60
+  },
+  "live": true,
+  "provider_count": 1,
+  "results": [
+    {
+      "api_name": "trade_cal",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "cal_date",
+        "exchange",
+        "is_open",
+        "pretrade_date"
+      ],
+      "latency_ms": 1458.7,
+      "params": {
+        "end_date": "20260826",
+        "exchange": "SSE",
+        "start_date": "20260819"
+      },
+      "provider": "backup",
+      "received": 8,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "stock_basic",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "act_ent_type",
+        "act_name",
+        "area",
+        "cnspell",
+        "industry",
+        "list_date",
+        "market",
+        "name",
+        "symbol",
+        "ts_code"
+      ],
+      "latency_ms": 1689.9,
+      "params": {
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 1,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "etf_basic",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "cname",
+        "csname",
+        "custod_name",
+        "etf_type",
+        "exchange",
+        "extname",
+        "index_code",
+        "index_name",
+        "list_date",
+        "list_status",
+        "mgr_name",
+        "mgt_fee",
+        "setup_date",
+        "ts_code"
+      ],
+      "latency_ms": 1547.2,
+      "params": {
+        "ts_code": "159919.SZ"
+      },
+      "provider": "backup",
+      "received": 1,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "etf_index",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "opt_basic",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fund_basic",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "index_basic",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "namechange",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "ann_date",
+        "change_reason",
+        "end_date",
+        "name",
+        "start_date",
+        "ts_code"
+      ],
+      "latency_ms": 4758.8,
+      "params": {
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 3,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "new_share",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "amount",
+        "ballot",
+        "funds",
+        "ipo_date",
+        "issue_date",
+        "limit_amount",
+        "market_amount",
+        "name",
+        "pe",
+        "price",
+        "sub_code",
+        "ts_code"
+      ],
+      "latency_ms": 1516.0,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819"
+      },
+      "provider": "backup",
+      "received": 8,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "daily",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "amount",
+        "change",
+        "close",
+        "high",
+        "low",
+        "open",
+        "pct_chg",
+        "pre_close",
+        "trade_date",
+        "ts_code",
+        "vol"
+      ],
+      "latency_ms": 10685.9,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "weekly",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "amount",
+        "change",
+        "close",
+        "high",
+        "low",
+        "open",
+        "pct_chg",
+        "pre_close",
+        "trade_date",
+        "ts_code",
+        "vol"
+      ],
+      "latency_ms": 1578.2,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 1,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "monthly",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "adj_factor",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "adj_factor",
+        "trade_date",
+        "ts_code"
+      ],
+      "latency_ms": 3512.7,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "daily_basic",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "circ_mv",
+        "close",
+        "dv_ratio",
+        "dv_ttm",
+        "float_share",
+        "free_share",
+        "pb",
+        "pe",
+        "pe_ttm",
+        "ps",
+        "ps_ttm",
+        "total_mv",
+        "total_share",
+        "trade_date",
+        "ts_code",
+        "turnover_rate",
+        "turnover_rate_f",
+        "volume_ratio"
+      ],
+      "latency_ms": 1215.2,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "stk_limit",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "down_limit",
+        "trade_date",
+        "ts_code",
+        "up_limit"
+      ],
+      "latency_ms": 3162.0,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "suspend_d",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [],
+      "latency_ms": 10548.1,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 0,
+      "status": "valid_empty"
+    },
+    {
+      "api_name": "fund_daily",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "amount",
+        "change",
+        "close",
+        "high",
+        "low",
+        "open",
+        "pct_chg",
+        "pre_close",
+        "trade_date",
+        "ts_code",
+        "vol"
+      ],
+      "latency_ms": 1818.9,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "159919.SZ"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "fund_adj",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "etf_share_size",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "etf_name",
+        "exchange",
+        "total_share",
+        "total_size",
+        "trade_date",
+        "ts_code"
+      ],
+      "latency_ms": 13301.1,
+      "params": {
+        "trade_date": "20260826",
+        "ts_code": "159919.SZ"
+      },
+      "provider": "backup",
+      "received": 1,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "index_daily",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "amount",
+        "change",
+        "close",
+        "high",
+        "low",
+        "open",
+        "pct_chg",
+        "pre_close",
+        "trade_date",
+        "ts_code",
+        "vol"
+      ],
+      "latency_ms": 2306.0,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000300.SH"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "index_dailybasic",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "opt_daily",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cb_daily",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "hk_hold",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "income",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [],
+      "latency_ms": 10514.0,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 0,
+      "status": "valid_empty"
+    },
+    {
+      "api_name": "income_vip",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "balancesheet",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "balancesheet_vip",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cashflow",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [],
+      "latency_ms": 1926.0,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 0,
+      "status": "valid_empty"
+    },
+    {
+      "api_name": "cashflow_vip",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "forecast",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [],
+      "latency_ms": 1413.0,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 0,
+      "status": "valid_empty"
+    },
+    {
+      "api_name": "forecast_vip",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "express",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [],
+      "latency_ms": 3250.1,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 0,
+      "status": "valid_empty"
+    },
+    {
+      "api_name": "express_vip",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "dividend",
+      "configured": true,
+      "duplicate_keys": 14,
+      "fields": [
+        "ann_date",
+        "cash_div",
+        "cash_div_tax",
+        "div_listdate",
+        "div_proc",
+        "end_date",
+        "ex_date",
+        "imp_ann_date",
+        "pay_date",
+        "record_date",
+        "stk_bo_rate",
+        "stk_co_rate",
+        "stk_div",
+        "ts_code"
+      ],
+      "latency_ms": 2758.1,
+      "params": {
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 83,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "fina_indicator",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fina_indicator_vip",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fina_audit",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fina_mainbz",
+      "configured": true,
+      "duplicate_keys": 134,
+      "fields": [
+        "bz_code",
+        "bz_cost",
+        "bz_item",
+        "bz_profit",
+        "bz_sales",
+        "curr_type",
+        "end_date",
+        "ts_code"
+      ],
+      "latency_ms": 11711.1,
+      "params": {
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 150,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "fina_mainbz_vip",
+      "configured": true,
+      "duplicate_keys": 697,
+      "fields": [
+        "bz_code",
+        "bz_cost",
+        "bz_item",
+        "bz_profit",
+        "bz_sales",
+        "curr_type",
+        "end_date",
+        "ts_code"
+      ],
+      "latency_ms": 11084.7,
+      "params": {
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 756,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "disclosure_date",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "actual_date",
+        "ann_date",
+        "end_date",
+        "pre_date",
+        "ts_code"
+      ],
+      "latency_ms": 1497.1,
+      "params": {
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 109,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "eco_cal",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "country",
+        "currency",
+        "date",
+        "event",
+        "fore_value",
+        "pre_value",
+        "time",
+        "value"
+      ],
+      "latency_ms": 2072.2,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819"
+      },
+      "provider": "backup",
+      "received": 100,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "shibor",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "1m",
+        "1w",
+        "1y",
+        "2w",
+        "3m",
+        "6m",
+        "9m",
+        "date",
+        "on"
+      ],
+      "latency_ms": 1537.0,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "shibor_quote",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "1m_a",
+        "1m_b",
+        "1w_a",
+        "1w_b",
+        "1y_a",
+        "1y_b",
+        "2w_a",
+        "2w_b",
+        "3m_a",
+        "3m_b",
+        "6m_a",
+        "6m_b",
+        "9m_a",
+        "9m_b",
+        "bank",
+        "date",
+        "on_a",
+        "on_b"
+      ],
+      "latency_ms": 2732.1,
+      "params": {
+        "date": "20260826"
+      },
+      "provider": "backup",
+      "received": 17,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "shibor_lpr",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "libor",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "hibor",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "12m",
+        "1m",
+        "1w",
+        "2m",
+        "2w",
+        "3m",
+        "6m",
+        "date",
+        "on"
+      ],
+      "latency_ms": 2539.7,
+      "params": {
+        "date": "20260826"
+      },
+      "provider": "backup",
+      "received": 1,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "wz_index",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "gz_index",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cn_gdp",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cn_cpi",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "cnt_accu",
+        "cnt_mom",
+        "cnt_val",
+        "cnt_yoy",
+        "month",
+        "nt_accu",
+        "nt_mom",
+        "nt_val",
+        "nt_yoy",
+        "town_accu",
+        "town_mom",
+        "town_val",
+        "town_yoy"
+      ],
+      "latency_ms": 14866.3,
+      "params": {
+        "month": "202608"
+      },
+      "provider": "backup",
+      "received": 511,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "cn_ppi",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "month",
+        "ppi_accu",
+        "ppi_cg_accu",
+        "ppi_cg_adu_accu",
+        "ppi_cg_adu_mom",
+        "ppi_cg_adu_yoy",
+        "ppi_cg_c_accu",
+        "ppi_cg_c_mom",
+        "ppi_cg_c_yoy",
+        "ppi_cg_dcg_accu",
+        "ppi_cg_dcg_mom",
+        "ppi_cg_dcg_yoy",
+        "ppi_cg_f_accu",
+        "ppi_cg_f_mom",
+        "ppi_cg_f_yoy",
+        "ppi_cg_mom",
+        "ppi_cg_yoy",
+        "ppi_mom",
+        "ppi_mp_accu",
+        "ppi_mp_mom",
+        "ppi_mp_p_accu",
+        "ppi_mp_p_mom",
+        "ppi_mp_p_yoy",
+        "ppi_mp_qm_accu",
+        "ppi_mp_qm_mom",
+        "ppi_mp_qm_yoy",
+        "ppi_mp_rm_accu",
+        "ppi_mp_rm_mom",
+        "ppi_mp_rm_yoy",
+        "ppi_mp_yoy",
+        "ppi_yoy"
+      ],
+      "latency_ms": 10579.1,
+      "params": {
+        "month": "202608"
+      },
+      "provider": "backup",
+      "received": 418,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "cn_m",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "m0",
+        "m0_mom",
+        "m0_yoy",
+        "m1",
+        "m1_mom",
+        "m1_yoy",
+        "m2",
+        "m2_mom",
+        "m2_yoy",
+        "month"
+      ],
+      "latency_ms": 6807.4,
+      "params": {
+        "month": "202608"
+      },
+      "provider": "backup",
+      "received": 583,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "sf_month",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cn_pmi",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "CREATE_BY",
+        "CREATE_TIME",
+        "ID",
+        "MONTH",
+        "PMI010000",
+        "PMI010100",
+        "PMI010200",
+        "PMI010300",
+        "PMI010400",
+        "PMI010401",
+        "PMI010402",
+        "PMI010403",
+        "PMI010500",
+        "PMI010501",
+        "PMI010502",
+        "PMI010503",
+        "PMI010600",
+        "PMI010601",
+        "PMI010602",
+        "PMI010603",
+        "PMI010700",
+        "PMI010701",
+        "PMI010702",
+        "PMI010703",
+        "PMI010800",
+        "PMI010801",
+        "PMI010802",
+        "PMI010803",
+        "PMI010900",
+        "PMI011000",
+        "PMI011100",
+        "PMI011200",
+        "PMI011300",
+        "PMI011400",
+        "PMI011500",
+        "PMI011600",
+        "PMI011700",
+        "PMI011800",
+        "PMI011900",
+        "PMI012000",
+        "PMI020100",
+        "PMI020101",
+        "PMI020102",
+        "PMI020200",
+        "PMI020201",
+        "PMI020202",
+        "PMI020300",
+        "PMI020301",
+        "PMI020302",
+        "PMI020400",
+        "PMI020401",
+        "PMI020402",
+        "PMI020500",
+        "PMI020501",
+        "PMI020502",
+        "PMI020600",
+        "PMI020601",
+        "PMI020602",
+        "PMI020700",
+        "PMI020800",
+        "PMI020900",
+        "PMI021000",
+        "PMI030000",
+        "UPDATE_BY",
+        "UPDATE_TIME"
+      ],
+      "latency_ms": 11207.9,
+      "params": {
+        "month": "202608"
+      },
+      "provider": "backup",
+      "received": 259,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "us_tycr",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "date",
+        "m1",
+        "m2",
+        "m3",
+        "m4",
+        "m6",
+        "y1",
+        "y10",
+        "y2",
+        "y20",
+        "y3",
+        "y30",
+        "y5",
+        "y7"
+      ],
+      "latency_ms": 3435.0,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "us_trycr",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "date",
+        "y10",
+        "y20",
+        "y30",
+        "y5",
+        "y7"
+      ],
+      "latency_ms": 1564.5,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "us_tbr",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "date",
+        "w13_bd",
+        "w13_ce",
+        "w17_bd",
+        "w17_ce",
+        "w26_bd",
+        "w26_ce",
+        "w4_bd",
+        "w4_ce",
+        "w52_bd",
+        "w52_ce",
+        "w8_bd",
+        "w8_ce"
+      ],
+      "latency_ms": 1428.2,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "us_tltr",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "cmt",
+        "date",
+        "e_factor",
+        "ltc"
+      ],
+      "latency_ms": 4614.0,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "us_trltr",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "date",
+        "ltr_avg"
+      ],
+      "latency_ms": 1514.0,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "stock_st",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "name",
+        "trade_date",
+        "ts_code",
+        "type",
+        "type_name"
+      ],
+      "latency_ms": 8894.8,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 205,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "stock_hsgt",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "top10_holders",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "top10_floatholders",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "pledge_stat",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "pledge_detail",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "repurchase",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "share_float",
+      "configured": true,
+      "duplicate_keys": 96,
+      "fields": [
+        "ann_date",
+        "float_date",
+        "float_ratio",
+        "float_share",
+        "holder_name",
+        "share_type",
+        "ts_code"
+      ],
+      "latency_ms": 4943.0,
+      "params": {
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 106,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "block_trade",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_holdernumber",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "ann_date",
+        "end_date",
+        "holder_num",
+        "ts_code"
+      ],
+      "latency_ms": 3479.4,
+      "params": {
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 197,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "stk_holdertrade",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "top_list",
+      "configured": true,
+      "duplicate_keys": 6,
+      "fields": [
+        "amount",
+        "amount_rate",
+        "close",
+        "float_values",
+        "l_amount",
+        "l_buy",
+        "l_sell",
+        "name",
+        "net_amount",
+        "net_rate",
+        "pct_change",
+        "reason",
+        "trade_date",
+        "ts_code",
+        "turnover_rate"
+      ],
+      "latency_ms": 12071.5,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 64,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "top_inst",
+      "configured": true,
+      "duplicate_keys": 632,
+      "fields": [
+        "buy",
+        "buy_rate",
+        "exalter",
+        "net_buy",
+        "reason",
+        "sell",
+        "sell_rate",
+        "side",
+        "trade_date",
+        "ts_code"
+      ],
+      "latency_ms": 1830.6,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 690,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "margin",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "margin_detail",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "margin_secs",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cyq_perf",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "cost_15pct",
+        "cost_50pct",
+        "cost_5pct",
+        "cost_85pct",
+        "cost_95pct",
+        "his_high",
+        "his_low",
+        "trade_date",
+        "ts_code",
+        "weight_avg",
+        "winner_rate"
+      ],
+      "latency_ms": 1468.8,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "cyq_chips",
+      "configured": true,
+      "duplicate_keys": 600,
+      "fields": [
+        "percent",
+        "price",
+        "trade_date",
+        "ts_code"
+      ],
+      "latency_ms": 1507.9,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 606,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "stk_factor",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_factor_pro",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "adj_factor",
+        "amount",
+        "asi_bfq",
+        "asi_hfq",
+        "asi_qfq",
+        "asit_bfq",
+        "asit_hfq",
+        "asit_qfq",
+        "atr_bfq",
+        "atr_hfq",
+        "atr_qfq",
+        "bbi_bfq",
+        "bbi_hfq",
+        "bbi_qfq",
+        "bias1_bfq",
+        "bias1_hfq",
+        "bias1_qfq",
+        "bias2_bfq",
+        "bias2_hfq",
+        "bias2_qfq",
+        "bias3_bfq",
+        "bias3_hfq",
+        "bias3_qfq",
+        "boll_lower_bfq",
+        "boll_lower_hfq",
+        "boll_lower_qfq",
+        "boll_mid_bfq",
+        "boll_mid_hfq",
+        "boll_mid_qfq",
+        "boll_upper_bfq",
+        "boll_upper_hfq",
+        "boll_upper_qfq",
+        "brar_ar_bfq",
+        "brar_ar_hfq",
+        "brar_ar_qfq",
+        "brar_br_bfq",
+        "brar_br_hfq",
+        "brar_br_qfq",
+        "cci_bfq",
+        "cci_hfq",
+        "cci_qfq",
+        "change",
+        "circ_mv",
+        "close",
+        "close_hfq",
+        "close_qfq",
+        "cr_bfq",
+        "cr_hfq",
+        "cr_qfq",
+        "dfma_dif_bfq",
+        "dfma_dif_hfq",
+        "dfma_dif_qfq",
+        "dfma_difma_bfq",
+        "dfma_difma_hfq",
+        "dfma_difma_qfq",
+        "dmi_adx_bfq",
+        "dmi_adx_hfq",
+        "dmi_adx_qfq",
+        "dmi_adxr_bfq",
+        "dmi_adxr_hfq",
+        "dmi_adxr_qfq",
+        "dmi_mdi_bfq",
+        "dmi_mdi_hfq",
+        "dmi_mdi_qfq",
+        "dmi_pdi_bfq",
+        "dmi_pdi_hfq",
+        "dmi_pdi_qfq",
+        "downdays",
+        "dpo_bfq",
+        "dpo_hfq",
+        "dpo_qfq",
+        "dv_ratio",
+        "dv_ttm",
+        "ema_bfq_10",
+        "ema_bfq_20",
+        "ema_bfq_250",
+        "ema_bfq_30",
+        "ema_bfq_5",
+        "ema_bfq_60",
+        "ema_bfq_90",
+        "ema_hfq_10",
+        "ema_hfq_20",
+        "ema_hfq_250",
+        "ema_hfq_30",
+        "ema_hfq_5",
+        "ema_hfq_60",
+        "ema_hfq_90",
+        "ema_qfq_10",
+        "ema_qfq_20",
+        "ema_qfq_250",
+        "ema_qfq_30",
+        "ema_qfq_5",
+        "ema_qfq_60",
+        "ema_qfq_90",
+        "emv_bfq",
+        "emv_hfq",
+        "emv_qfq",
+        "expma_12_bfq",
+        "expma_12_hfq",
+        "expma_12_qfq",
+        "expma_50_bfq",
+        "expma_50_hfq",
+        "expma_50_qfq",
+        "float_share",
+        "free_share",
+        "high",
+        "high_hfq",
+        "high_qfq",
+        "kdj_bfq",
+        "kdj_d_bfq",
+        "kdj_d_hfq",
+        "kdj_d_qfq",
+        "kdj_hfq",
+        "kdj_k_bfq",
+        "kdj_k_hfq",
+        "kdj_k_qfq",
+        "kdj_qfq",
+        "ktn_down_bfq",
+        "ktn_down_hfq",
+        "ktn_down_qfq",
+        "ktn_mid_bfq",
+        "ktn_mid_hfq",
+        "ktn_mid_qfq",
+        "ktn_upper_bfq",
+        "ktn_upper_hfq",
+        "ktn_upper_qfq",
+        "low",
+        "low_hfq",
+        "low_qfq",
+        "lowdays",
+        "ma_bfq_10",
+        "ma_bfq_20",
+        "ma_bfq_250",
+        "ma_bfq_30",
+        "ma_bfq_5",
+        "ma_bfq_60",
+        "ma_bfq_90",
+        "ma_hfq_10",
+        "ma_hfq_20",
+        "ma_hfq_250",
+        "ma_hfq_30",
+        "ma_hfq_5",
+        "ma_hfq_60",
+        "ma_hfq_90",
+        "ma_mass_bfq",
+        "ma_mass_hfq",
+        "ma_mass_qfq",
+        "ma_qfq_10",
+        "ma_qfq_20",
+        "ma_qfq_250",
+        "ma_qfq_30",
+        "ma_qfq_5",
+        "ma_qfq_60",
+        "ma_qfq_90",
+        "macd_bfq",
+        "macd_dea_bfq",
+        "macd_dea_hfq",
+        "macd_dea_qfq",
+        "macd_dif_bfq",
+        "macd_dif_hfq",
+        "macd_dif_qfq",
+        "macd_hfq",
+        "macd_qfq",
+        "madpo_bfq",
+        "madpo_hfq",
+        "madpo_qfq",
+        "maemv_bfq",
+        "maemv_hfq",
+        "maemv_qfq",
+        "maroc_bfq",
+        "maroc_hfq",
+        "maroc_qfq",
+        "mass_bfq",
+        "mass_hfq",
+        "mass_qfq",
+        "mfi_bfq",
+        "mfi_hfq",
+        "mfi_qfq",
+        "mtm_bfq",
+        "mtm_hfq",
+        "mtm_qfq",
+        "mtmma_bfq",
+        "mtmma_hfq",
+        "mtmma_qfq",
+        "obv_bfq",
+        "obv_hfq",
+        "obv_qfq",
+        "open",
+        "open_hfq",
+        "open_qfq",
+        "pb",
+        "pct_chg",
+        "pe",
+        "pe_ttm",
+        "pre_close",
+        "ps",
+        "ps_ttm",
+        "psy_bfq",
+        "psy_hfq",
+        "psy_qfq",
+        "psyma_bfq",
+        "psyma_hfq",
+        "psyma_qfq",
+        "roc_bfq",
+        "roc_hfq",
+        "roc_qfq",
+        "rsi_bfq_12",
+        "rsi_bfq_24",
+        "rsi_bfq_6",
+        "rsi_hfq_12",
+        "rsi_hfq_24",
+        "rsi_hfq_6",
+        "rsi_qfq_12",
+        "rsi_qfq_24",
+        "rsi_qfq_6",
+        "taq_down_bfq",
+        "taq_down_hfq",
+        "taq_down_qfq",
+        "taq_mid_bfq",
+        "taq_mid_hfq",
+        "taq_mid_qfq",
+        "taq_up_bfq",
+        "taq_up_hfq",
+        "taq_up_qfq",
+        "topdays",
+        "total_mv",
+        "total_share",
+        "trade_date",
+        "trix_bfq",
+        "trix_hfq",
+        "trix_qfq",
+        "trma_bfq",
+        "trma_hfq",
+        "trma_qfq",
+        "ts_code",
+        "turnover_rate",
+        "turnover_rate_f",
+        "updays",
+        "vol",
+        "volume_ratio",
+        "vr_bfq",
+        "vr_hfq",
+        "vr_qfq",
+        "wr1_bfq",
+        "wr1_hfq",
+        "wr1_qfq",
+        "wr_bfq",
+        "wr_hfq",
+        "wr_qfq",
+        "xsii_td1_bfq",
+        "xsii_td1_hfq",
+        "xsii_td1_qfq",
+        "xsii_td2_bfq",
+        "xsii_td2_hfq",
+        "xsii_td2_qfq",
+        "xsii_td3_bfq",
+        "xsii_td3_hfq",
+        "xsii_td3_qfq",
+        "xsii_td4_bfq",
+        "xsii_td4_hfq",
+        "xsii_td4_qfq"
+      ],
+      "latency_ms": 3112.4,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "report_rc",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [],
+      "latency_ms": 4115.4,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 0,
+      "status": "valid_empty"
+    },
+    {
+      "api_name": "broker_recommend",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_surv",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "moneyflow",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "buy_elg_amount",
+        "buy_elg_vol",
+        "buy_lg_amount",
+        "buy_lg_vol",
+        "buy_md_amount",
+        "buy_md_vol",
+        "buy_sm_amount",
+        "buy_sm_vol",
+        "net_mf_amount",
+        "net_mf_vol",
+        "sell_elg_amount",
+        "sell_elg_vol",
+        "sell_lg_amount",
+        "sell_lg_vol",
+        "sell_md_amount",
+        "sell_md_vol",
+        "sell_sm_amount",
+        "sell_sm_vol",
+        "trade_date",
+        "ts_code"
+      ],
+      "latency_ms": 11990.5,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "moneyflow_ths",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "buy_lg_amount",
+        "buy_lg_amount_rate",
+        "buy_md_amount",
+        "buy_md_amount_rate",
+        "buy_sm_amount",
+        "buy_sm_amount_rate",
+        "latest",
+        "name",
+        "net_amount",
+        "net_d5_amount",
+        "pct_change",
+        "trade_date",
+        "ts_code"
+      ],
+      "latency_ms": 1752.8,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "moneyflow_dc",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "buy_elg_amount",
+        "buy_elg_amount_rate",
+        "buy_lg_amount",
+        "buy_lg_amount_rate",
+        "buy_md_amount",
+        "buy_md_amount_rate",
+        "buy_sm_amount",
+        "buy_sm_amount_rate",
+        "close",
+        "name",
+        "net_amount",
+        "net_amount_rate",
+        "pct_change",
+        "trade_date",
+        "ts_code"
+      ],
+      "latency_ms": 1685.9,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "000636.SZ"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "moneyflow_ind_ths",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "close",
+        "close_price",
+        "company_num",
+        "industry",
+        "lead_stock",
+        "net_amount",
+        "net_buy_amount",
+        "net_sell_amount",
+        "pct_change",
+        "pct_change_stock",
+        "trade_date",
+        "ts_code"
+      ],
+      "latency_ms": 1689.4,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 90,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "moneyflow_ind_dc",
+      "configured": true,
+      "error_class": "timeout",
+      "latency_ms": 15009.4,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "status": "timeout"
+    },
+    {
+      "api_name": "moneyflow_mkt_dc",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "buy_elg_amount",
+        "buy_elg_amount_rate",
+        "buy_lg_amount",
+        "buy_lg_amount_rate",
+        "buy_md_amount",
+        "buy_md_amount_rate",
+        "buy_sm_amount",
+        "buy_sm_amount_rate",
+        "close_sh",
+        "close_sz",
+        "net_amount",
+        "net_amount_rate",
+        "pct_change_sh",
+        "pct_change_sz",
+        "trade_date"
+      ],
+      "latency_ms": 1557.4,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 1,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "moneyflow_hsgt",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "ggt_ss",
+        "ggt_sz",
+        "hgt",
+        "north_money",
+        "sgt",
+        "south_money",
+        "trade_date"
+      ],
+      "latency_ms": 4038.1,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 1,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "limit_list_ths",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "free_float",
+        "limit_amount",
+        "limit_order",
+        "limit_type",
+        "limit_up_suc_rate",
+        "lu_desc",
+        "lu_limit_order",
+        "market_type",
+        "name",
+        "open_num",
+        "pct_chg",
+        "price",
+        "status",
+        "tag",
+        "trade_date",
+        "ts_code",
+        "turnover",
+        "turnover_rate"
+      ],
+      "latency_ms": 12923.1,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 56,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "limit_list_d",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "amount",
+        "close",
+        "fd_amount",
+        "first_time",
+        "float_mv",
+        "industry",
+        "last_time",
+        "limit",
+        "limit_amount",
+        "limit_times",
+        "name",
+        "open_times",
+        "pct_chg",
+        "total_mv",
+        "trade_date",
+        "ts_code",
+        "turnover_ratio",
+        "up_stat"
+      ],
+      "latency_ms": 2940.4,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 72,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "limit_step",
+      "configured": true,
+      "error_class": "timeout",
+      "latency_ms": 15003.2,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "status": "timeout"
+    },
+    {
+      "api_name": "limit_cpt_list",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "cons_nums",
+        "days",
+        "name",
+        "pct_chg",
+        "rank",
+        "trade_date",
+        "ts_code",
+        "up_nums",
+        "up_stat"
+      ],
+      "latency_ms": 6410.8,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 20,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "ths_hot",
+      "configured": true,
+      "error_class": "timeout",
+      "latency_ms": 15004.7,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "status": "timeout"
+    },
+    {
+      "api_name": "dc_hot",
+      "configured": true,
+      "error_class": "timeout",
+      "latency_ms": 15005.2,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "status": "timeout"
+    },
+    {
+      "api_name": "hm_list",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "hm_detail",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "ths_index",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "count",
+        "exchange",
+        "list_date",
+        "name",
+        "ts_code",
+        "type"
+      ],
+      "latency_ms": 1500.4,
+      "params": {
+        "exchange": "A",
+        "type": "N"
+      },
+      "provider": "backup",
+      "received": 395,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "ths_daily",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [],
+      "latency_ms": 1420.9,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "885001.TI"
+      },
+      "provider": "backup",
+      "received": 0,
+      "status": "valid_empty"
+    },
+    {
+      "api_name": "ths_member",
+      "configured": true,
+      "provider": "backup",
+      "reason": "manual_parameters_required",
+      "status": "untested"
+    },
+    {
+      "api_name": "dc_index",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "dc_daily",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "dc_member",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "tdx_index",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "tdx_daily",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "tdx_member",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "kpl_list",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "amount",
+        "bid_amount",
+        "bid_change",
+        "bid_pct_chg",
+        "bid_turnover",
+        "free_float",
+        "last_time",
+        "ld_time",
+        "limit_order",
+        "lu_bid_vol",
+        "lu_desc",
+        "lu_limit_order",
+        "lu_time",
+        "name",
+        "net_change",
+        "open_time",
+        "pct_chg",
+        "rt_pct_chg",
+        "status",
+        "tag",
+        "theme",
+        "trade_date",
+        "ts_code",
+        "turnover_rate"
+      ],
+      "latency_ms": 2082.6,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 56,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "kpl_concept_cons",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_auction",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_auction_o",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_auction_c",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_min",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_idx_min",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_etf_min",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_fut_min",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stock_company",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_managers",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_rewards",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "bse_mapping",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "bak_basic",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "st",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_premarket",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_weekly_monthly",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_week_month_adj",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "hsgt_top10",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "ggt_top10",
+      "configured": true,
+      "duplicate_keys": 8,
+      "fields": [
+        "amount",
+        "close",
+        "market_type",
+        "name",
+        "net_amount",
+        "p_change",
+        "rank",
+        "sh_amount",
+        "sh_buy",
+        "sh_net_amount",
+        "sh_sell",
+        "sz_amount",
+        "sz_buy",
+        "sz_net_amount",
+        "sz_sell",
+        "trade_date",
+        "ts_code"
+      ],
+      "latency_ms": 1376.9,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 20,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "ggt_daily",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "buy_amount",
+        "buy_volume",
+        "sell_amount",
+        "sell_volume",
+        "trade_date"
+      ],
+      "latency_ms": 6188.1,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "bak_daily",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_shock",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_high_shock",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_alert",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "ccass_hold",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "ccass_hold_detail",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_nineturn",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_ah_comparison",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "slb_len",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "dc_concept",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "dc_concept_cons",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "moneyflow_cnt_ths",
+      "configured": true,
+      "error_class": "timeout",
+      "latency_ms": 15009.0,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "status": "timeout"
+    },
+    {
+      "api_name": "etf_sh_cons",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "etf_sz_cons",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "con_code",
+        "con_name",
+        "cpr",
+        "exchange",
+        "qty",
+        "rdr",
+        "red_cc",
+        "sub_cc",
+        "sub_flag",
+        "trade_date",
+        "ts_code"
+      ],
+      "latency_ms": 8501.0,
+      "params": {
+        "trade_date": "20260826",
+        "ts_code": "159919.SZ"
+      },
+      "provider": "backup",
+      "received": 301,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "idx_anns",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "index_weekly",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "index_monthly",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "index_weight",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "index_classify",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "index_member_all",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "sw_daily",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "ci_index_member",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "ci_daily",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "index_global",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "idx_factor_pro",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "daily_info",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "sz_daily_info",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fund_company",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fund_manager",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "mkt_idx_bmk",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fund_share",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "fd_share",
+        "fund_type",
+        "market",
+        "trade_date",
+        "ts_code"
+      ],
+      "latency_ms": 1666.8,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "159919.SZ"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "fund_nav",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "accum_div",
+        "accum_nav",
+        "adj_nav",
+        "ann_date",
+        "nav_date",
+        "net_asset",
+        "ts_code",
+        "unit_nav",
+        "update_flag"
+      ],
+      "latency_ms": 1516.2,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "159919.SZ"
+      },
+      "provider": "backup",
+      "received": 6,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "fund_div",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fund_portfolio",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fund_factor_pro",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fut_basic",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "d_mode_desc",
+        "d_month",
+        "delist_date",
+        "exchange",
+        "fut_code",
+        "last_ddate",
+        "list_date",
+        "multiplier",
+        "name",
+        "per_unit",
+        "quote_unit",
+        "quote_unit_desc",
+        "symbol",
+        "trade_unit",
+        "ts_code"
+      ],
+      "latency_ms": 3140.6,
+      "params": {
+        "exchange": "CFFEX",
+        "fut_type": "1"
+      },
+      "provider": "backup",
+      "received": 684,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "fut_trade_cal",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "cal_date",
+        "exchange",
+        "is_open",
+        "pretrade_date"
+      ],
+      "latency_ms": 3858.2,
+      "params": {
+        "end_date": "20260826",
+        "exchange": "CFFEX",
+        "start_date": "20260819"
+      },
+      "provider": "backup",
+      "received": 8,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "fut_daily",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "amount",
+        "change1",
+        "change2",
+        "close",
+        "high",
+        "low",
+        "oi",
+        "oi_chg",
+        "open",
+        "pre_close",
+        "pre_settle",
+        "settle",
+        "trade_date",
+        "ts_code",
+        "vol"
+      ],
+      "latency_ms": 3203.4,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819",
+        "ts_code": "IF2608.CFX"
+      },
+      "provider": "backup",
+      "received": 3,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "fut_weekly_monthly",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fut_wsr",
+      "configured": true,
+      "duplicate_keys": 1099,
+      "fields": [
+        "fut_name",
+        "pre_vol",
+        "symbol",
+        "trade_date",
+        "unit",
+        "vol",
+        "vol_chg",
+        "warehouse"
+      ],
+      "latency_ms": 13494.1,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 1100,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "fut_settle",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "b_hedging_margin_rate",
+        "delivery_fee",
+        "long_margin_rate",
+        "s_hedging_margin_rate",
+        "settle",
+        "short_margin_rate",
+        "trade_date",
+        "trading_fee",
+        "trading_fee_rate",
+        "ts_code"
+      ],
+      "latency_ms": 7532.9,
+      "params": {
+        "trade_date": "20260826"
+      },
+      "provider": "backup",
+      "received": 911,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "fut_holding",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fut_index_daily",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fut_mapping",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fut_weekly_detail",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "ft_limit",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "sge_basic",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "sge_daily",
+      "configured": true,
+      "duplicate_keys": 0,
+      "fields": [
+        "amount",
+        "change",
+        "close",
+        "high",
+        "low",
+        "oi",
+        "open",
+        "pct_change",
+        "price_avg",
+        "settle_dire",
+        "settle_vol",
+        "trade_date",
+        "ts_code",
+        "vol"
+      ],
+      "latency_ms": 2813.0,
+      "params": {
+        "end_date": "20260826",
+        "start_date": "20260819"
+      },
+      "provider": "backup",
+      "received": 246,
+      "status": "verified_partial"
+    },
+    {
+      "api_name": "cb_basic",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cb_issue",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cb_call",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cb_rate",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "top10_cb_holders",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cb_factor_pro",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cb_price_chg",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cb_share",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "cb_rating",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_k",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_min_daily",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_etf_k",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_etf_min_daily",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_etf_sz_iopv",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_idx_k",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_idx_min_daily",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_sw_k",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "rt_fut_min_daily",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "stk_mins",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "etf_mins",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "sw_mins",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fut_mins",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "fut_tick",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    },
+    {
+      "api_name": "opt_mins",
+      "configured": true,
+      "provider": "backup",
+      "reason": "provider_allowlist",
+      "status": "unsupported"
+    }
+  ],
+  "symbol": "000636.SZ"
+}
