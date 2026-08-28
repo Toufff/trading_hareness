@@ -520,3 +520,77 @@ class PoolBoundReportingTests(unittest.TestCase):
                                max_candidates=10)
         self.assertEqual(result["pool_truncated"], 0)
         self.assertEqual(result["pool_qualified"], result["pool_size"])
+
+
+class ReturnFlowIsReachableTests(unittest.TestCase):
+    """The one-word return flow must be witnessable from a single snapshot.
+
+    The instantaneous pair it used - "broken" and "sealed" at once - is
+    mutually exclusive, so the mode never fired: 002942.SZ's textbook T-board
+    on 2026-08-28 (one-word 08-27, opened to -3.3%, resealed by close)
+    produced no candidate on any of 448 afternoon scans.  The session low is
+    the memory a snapshot already carries.
+    """
+
+    LIMIT = 20.91
+
+    def _snapshot(self, price, low, high=None):
+        row = {"symbol": "002942.SZ", "price": price, "pct_change": (price / 19.01 - 1) * 100,
+               "raw": {"open_price": self.LIMIT, "high_price": high if high is not None else self.LIMIT,
+                        "low_price": low, "prev_price": 19.01}}
+        sectors = {"main_sectors": {"X"}, "ranks": {"002942.SZ": 3},
+                   "strength_percentile": {"002942.SZ": 0.92}, "leader_intact": {"002942.SZ": True},
+                   "sealed_by_sector": {"X": 14}}
+        reference = {"sectors": {"X"},
+                     "prior_bar": {"open": 19.01, "high": 19.01, "low": 19.01, "close": 19.01,
+                                    "pre_close": 17.28, "limit_up": 19.01}}
+        snapshot = candidate_snapshot("002942.SZ", row, market={"elapsed_session_minutes": 200},
+                                      reference=reference, sectors=sectors,
+                                      limits={"002942.SZ": self.LIMIT})
+        snapshot.pop("_evidence", None)
+        return snapshot
+
+    def test_a_resealed_t_board_carries_both_flags(self):
+        snapshot = self._snapshot(price=self.LIMIT, low=18.38)
+        self.assertTrue(snapshot["prior_one_word_board"])
+        self.assertTrue(snapshot["limit_up_return_flow"])
+        self.assertTrue(snapshot["re_seal_confirmed"])
+
+    def test_an_intact_one_word_board_is_not_a_return_flow(self):
+        # Never traded below the limit: the seal never opened, nothing flowed.
+        snapshot = self._snapshot(price=self.LIMIT, low=self.LIMIT)
+        self.assertFalse(snapshot["limit_up_return_flow"])
+        self.assertFalse(snapshot["re_seal_confirmed"])
+
+    def test_a_board_still_open_has_no_reseal_yet(self):
+        snapshot = self._snapshot(price=18.50, low=18.38)
+        self.assertTrue(snapshot["limit_up_return_flow"])
+        self.assertFalse(snapshot["re_seal_confirmed"])
+
+    def test_the_002942_case_now_evaluates_to_a_candidate(self):
+        from app.xiaojie_leader_flow import evaluate_snapshot
+        snapshot = self._snapshot(price=self.LIMIT, low=18.38)
+        snapshot.update({"index_above_support": True, "index_volume_ratio": 1.3,
+                         "breadth_up_count": 3013, "breadth_down_count": 2390})
+        result = evaluate_snapshot(snapshot)
+        self.assertEqual(result["mode"], "one_word_return_flow")
+        self.assertEqual(result["decision"], "research_candidate")
+
+
+class FrontRowWidthTests(unittest.TestCase):
+    """Rank 3 in a broad main sector is core, not chase."""
+
+    def _rank(self, rank):
+        sectors = {"main_sectors": {"X"}, "ranks": {"S": rank},
+                   "strength_percentile": {"S": 0.9}, "leader_intact": {"S": True}}
+        snapshot = candidate_snapshot("S", {"symbol": "S", "price": 10.0, "pct_change": 5.0,
+                                            "raw": {"low_price": 9.5, "high_price": 10.0}},
+                                      market={}, reference={"sectors": {"X"}},
+                                      sectors=sectors, limits={"S": 11.0})
+        return snapshot["is_back_row"]
+
+    def test_rank_three_is_front_row(self):
+        self.assertFalse(self._rank(3))
+
+    def test_rank_four_is_back_row(self):
+        self.assertTrue(self._rank(4))

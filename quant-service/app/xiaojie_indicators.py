@@ -59,6 +59,10 @@ BREAKOUT_VOLUME_RATIO_MIN = 1.5
 OVERSOLD_DECLINE_MIN_PCT = 15.0
 #: A supplement candidate follows a leader; it is not itself the leader.
 SUPPLEMENT_MIN_RANK = 3
+#: The deepest sector rank that still counts as front row.  At 2 it excluded
+#: rank 3 in a 14-board main sector (002942.SZ, 2026-08-28), which reads as a
+#: follow-on in a two-name theme but as core in a broad one.
+FRONT_ROW_MAX_RANK = 3
 #: "Pulled back to VWAP" means price has returned to within this band of it.
 VWAP_BAND_PCT = 1.0
 #: ...but only counts as a pullback if the name first traded this far above
@@ -396,6 +400,10 @@ def candidate_snapshot(symbol: str, row: Mapping[str, Any], *, market: Mapping[s
     high_20d = reference.get("high_20d")
     breakout = bool(high_20d and price is not None and price >= float(high_20d))
     ma5 = reference.get("ma5")
+    opened_below_limit = bool(
+        limit_up is not None and fields["low"] is not None
+        and float(fields["low"]) < float(limit_up) - LIMIT_TOLERANCE
+    )
 
     return {
         # market gate
@@ -407,11 +415,20 @@ def candidate_snapshot(symbol: str, row: Mapping[str, Any], *, market: Mapping[s
         # leader confirmation
         "sector_strength_percentile": sectors.get("strength_percentile", {}).get(symbol),
         "candidate_strength_rank": rank if rank is not None else 99,
-        "is_back_row": bool(rank is not None and rank > 2),
+        "is_back_row": bool(rank is not None and rank > FRONT_ROW_MAX_RANK),
         # entry modes
         "prior_one_word_board": prior_one_word,
-        "limit_up_return_flow": board["broken"],
-        "re_seal_confirmed": board["sealed"] and board["touched"],
+        # A return flow is a process - the board opened and then resealed -
+        # which a single instant cannot witness: "broken" and "sealed" are
+        # mutually exclusive at any moment, so this pair was structurally
+        # unreachable and the mode never fired (002942.SZ's textbook T-board
+        # on 2026-08-28 produced no candidate).  The session low is the
+        # memory a snapshot already carries: for yesterday's one-word name,
+        # any trade below today's limit means the seal opened, so a sealed
+        # price above a sub-limit low is the completed return flow - and it
+        # survives a collector restart, which an in-process state would not.
+        "limit_up_return_flow": opened_below_limit,
+        "re_seal_confirmed": board["sealed"] and opened_below_limit,
         "reverse_wrap_confirmed": reverse_wrap,
         "drawdown_from_high_pct": drawdown,
         "post_limitup_break_rebound_pct": rebound,
@@ -538,7 +555,7 @@ def evaluate_pool(rows: list[dict[str, Any]], *, limits: Mapping[str, float],
 
 
 __all__ = [
-    "BREAKOUT_VOLUME_RATIO_MIN", "ICEPOINT_BREADTH_MAX", "ICEPOINT_MAX_LIMIT_UPS",
+    "BREAKOUT_VOLUME_RATIO_MIN", "FRONT_ROW_MAX_RANK", "ICEPOINT_BREADTH_MAX", "ICEPOINT_MAX_LIMIT_UPS",
     "LIMIT_TOLERANCE", "MAIN_SECTOR_MIN_LIMIT_UPS", "MAX_CANDIDATES", "NEAR_LIMIT_PCT",
     "OVERSOLD_DECLINE_MIN_PCT", "RIGHT_SIDE_BREADTH_MIN", "RIGHT_SIDE_VOLUME_RATIO_MIN",
     "SUPPLEMENT_MIN_RANK",

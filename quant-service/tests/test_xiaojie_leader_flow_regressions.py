@@ -108,15 +108,15 @@ class PreregisteredThresholdTests(unittest.TestCase):
     """The three most overfit-prone numbers were pinned in code, beyond calibration."""
 
     def test_the_previously_hardcoded_thresholds_are_registered(self):
-        for name, value in (("leader_rank_max", 2), ("days_without_new_high_min", 3),
+        for name, value in (("leader_rank_max", 3), ("days_without_new_high_min", 3),
                             ("days_without_rise_min", 5)):
             with self.subTest(name=name):
                 self.assertEqual(DEFAULT_PARAMETERS[name], value)
 
     def test_leader_rank_is_calibratable(self):
-        snapshot = {**GATE, "candidate_strength_rank": 3, "leader_pullback_to_vwap": True}
+        snapshot = {**GATE, "candidate_strength_rank": 4, "leader_pullback_to_vwap": True}
         self.assertEqual(evaluate_snapshot(snapshot)["decision"], "no_trade")
-        widened = evaluate_snapshot(snapshot, {"leader_rank_max": 3})
+        widened = evaluate_snapshot(snapshot, {"leader_rank_max": 4})
         self.assertEqual(widened["decision"], "research_candidate")
 
     def test_time_stops_are_calibratable(self):

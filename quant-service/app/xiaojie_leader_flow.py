@@ -23,7 +23,9 @@ DEFAULT_PARAMETERS: dict[str, Any] = {
     # high" and "3-5 day time stop".  Those ranges were previously pinned in
     # code, which put the three most overfit-prone numbers in the module beyond
     # the reach of the walk-forward calibration this file promises.
-    "leader_rank_max": 2,
+    # Widened from 2 with FRONT_ROW_MAX_RANK: rank 3 in a broad main sector
+    # is core, not chase (002942.SZ sat at rank 3 of 14 boards on 2026-08-28).
+    "leader_rank_max": 3,
     "days_without_new_high_min": 3,
     "days_without_rise_min": 5,
     "index_volume_ratio_min": 1.0,
