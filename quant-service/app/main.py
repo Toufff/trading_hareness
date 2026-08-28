@@ -38,7 +38,6 @@ from .akshare_provider import (
     akshare_index_fund_supplements,
     akshare_lhb_events,
     akshare_lhb_supplements,
-    akshare_live_limit_up_pool_events,
     akshare_limit_pool_events,
     akshare_macro_cross_asset_supplements,
     akshare_market_summary,
@@ -48,6 +47,7 @@ from .akshare_provider import (
     akshare_strong_pool_events,
 )
 from .fuyao_provider import FuyaoProviderError, all_a_snapshot_rows as fuyao_all_a_snapshot_rows
+from .limit_up_anchor import live_limit_up_pool_rows
 from .analysis import as_utc
 from .capability_registry import api_capability
 from .database import AsyncDatabase, Database
@@ -3156,27 +3156,48 @@ async def run_intraday_board_report(*, deliver: bool = False) -> dict[str, Any]:
     )
 
 
+def _persist_local_limit_pool_failure(error: str) -> None:
+    """A fuyao outage is fuyao_derived's failure, not AKShare's."""
+    with db.transaction() as connection:
+        record_provider_failure(connection, "fuyao_derived", "limit_pool", error, None)
+
+
+def _persist_local_limit_pool(rows: list[dict[str, Any]]) -> int:
+    """Store locally derived anchors and their provider health in a DB worker."""
+    stored = persist_market_events("fuyao_derived", rows)
+    with db.transaction() as connection:
+        record_provider_success(connection, "fuyao_derived", "limit_pool", stored, None)
+    return stored
+
+
 async def refresh_intraday_limit_up_anchors(observed_at: datetime) -> dict[str, Any]:
     """Refresh one factual live limit-up pool before linkage mining.
 
-    Tushare limit-list endpoints remain the preferred second source when they
-    return same-date rows.  Today they have a valid empty response, therefore
-    this bounded Eastmoney fact pool is the live anchor rather than a stale
-    close-only Tushare result.
+    Derived locally from the licensed all-A snapshot and the session's limit
+    prices - the same sealed-ness computation the leader pool runs every scan,
+    which covered 100% of the day's true sealed boards on 2026-08-27.  The
+    Eastmoney HTML pool this replaces came through AKShare's lxml parser,
+    which segfaulted the edge collector at session boundaries five times in a
+    week; a locally computed fact has no parser, no vendor availability window
+    and no abandoned worker thread.
     """
     trade_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
     try:
-        rows = await run_akshare_blocking(akshare_live_limit_up_pool_events, trade_date, timeout_seconds=20)
-        stored = await run_database_blocking(
-            persist_akshare_probe_result, "limit_pool", rows, "", timeout_seconds=30,
-        )
+        reference = await _xiaojie_session_context(trade_date)
+        limits = reference.get("limits") or {}
+        if not limits:
+            return {"status": "blocked", "reason": "session trade limits unavailable"}
+        snapshot_rows, _meta = await fuyao_all_a_snapshot_rows()
+        rows = live_limit_up_pool_rows(snapshot_rows, limits, reference.get("names"), observed_at)
+        stored = await run_database_blocking(_persist_local_limit_pool, rows, timeout_seconds=30)
         return {"status": "completed" if rows else "empty", "received": len(rows), "stored": stored,
-                "source": "eastmoney_limit_up_pool"}
+                "source": "fuyao_all_a_plus_stk_limit"}
     except ExecutorSaturatedError as error:
         return {"status": "blocked", "reason": safe_error_detail(str(error), 300)}
-    except (asyncio.TimeoutError, AkShareProviderError, ValueError) as error:
-        await run_database_blocking(persist_akshare_probe_failure, "limit_pool", str(error) or "limit-up pool request failed")
-        return {"status": "failed", "reason": safe_error_detail(str(error), 300)}
+    except (asyncio.TimeoutError, FuyaoProviderError, ValueError) as error:
+        await run_database_blocking(
+            _persist_local_limit_pool_failure, str(error) or "limit-up pool request failed")
+        return {"status": "unavailable", "reason": safe_error_detail(str(error), 300)}
 
 
 async def run_limit_linkage_mining(observed_at: datetime, quote_by_symbol: dict[str, dict[str, Any]]) -> dict[str, Any]:
