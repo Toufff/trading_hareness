@@ -9,52 +9,6 @@
             "interval": [
               {
                 "field": "cronExpression",
-                "expression": "30 10 * * *"
-              }
-            ]
-          }
-        },
-        "id": "paperkb-cron-arxiv",
-        "name": "每日 10:30 arXiv 系统方向",
-        "type": "n8n-nodes-base.scheduleTrigger",
-        "typeVersion": 1.2,
-        "position": [
-          -360,
-          -120
-        ]
-      },
-      {
-        "parameters": {
-          "url": "http://host.docker.internal:8787/jobs/arxiv",
-          "method": "POST",
-          "sendHeaders": true,
-          "headerParameters": {
-            "parameters": [
-              {
-                "name": "X-Paper-KB-Token",
-                "value": "={{ $env.PAPER_KB_JOBS_TOKEN }}"
-              }
-            ]
-          },
-          "options": {
-            "timeout": 30000
-          }
-        },
-        "id": "paperkb-run-arxiv",
-        "name": "抓取并评分 arXiv 新论文",
-        "type": "n8n-nodes-base.httpRequest",
-        "typeVersion": 4.2,
-        "position": [
-          -100,
-          -120
-        ]
-      },
-      {
-        "parameters": {
-          "rule": {
-            "interval": [
-              {
-                "field": "cronExpression",
                 "expression": "0 9 * * 1"
               }
             ]
@@ -280,20 +234,55 @@
           -100,
           780
         ]
+      },
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "30 20 * * 1"
+              }
+            ]
+          }
+        },
+        "id": "paperkb-cron-evalretrieval",
+        "name": "每周一 20:30 检索评测",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -360,
+          560
+        ]
+      },
+      {
+        "parameters": {
+          "url": "http://host.docker.internal:8787/jobs/eval-retrieval",
+          "method": "POST",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Paper-KB-Token",
+                "value": "={{ $env.PAPER_KB_JOBS_TOKEN }}"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "paperkb-run-evalretrieval",
+        "name": "评测检索质量并回报",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -100,
+          560
+        ]
       }
     ],
     "connections": {
-      "每日 10:30 arXiv 系统方向": {
-        "main": [
-          [
-            {
-              "node": "抓取并评分 arXiv 新论文",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      },
       "每周一 09:00 会议harvest": {
         "main": [
           [
@@ -343,6 +332,17 @@
           [
             {
               "node": "执行论文检索",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "每周一 20:30 检索评测": {
+        "main": [
+          [
+            {
+              "node": "评测检索质量并回报",
               "type": "main",
               "index": 0
             }

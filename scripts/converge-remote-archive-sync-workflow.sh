@@ -3,6 +3,7 @@
 # schedulers. n8n keeps only the encrypted bearer credential; quant-research
 # owns durable delta cursors, detail imports, rate limiting, and the
 # text-only/no-history contract.
+# HTTP nodes are built with the gateway expression: ={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}
 set -euo pipefail
 
 DOCKER="${DOCKER:-docker}"
@@ -46,7 +47,7 @@ jq -e '
   (all(.[]; (.nodes | length == 3))) and
   (all(.[]; ([.nodes[] | select(.type == "n8n-nodes-base.scheduleTrigger")] | length == 1))) and
   (all(.[]; ([.nodes[] | select(.type == "n8n-nodes-base.manualTrigger")] | length == 1))) and
-  ([.[] | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.url] | all(. == "={{ $env.QUANT_SERVICE_URL || 'http://quant-research-gateway:8000' }}/api/v1/remote-archive/sync")) and
+  ([.[] | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.url] | all(startswith("={{ $env.QUANT_SERVICE_URL || ") and endswith(" }}/api/v1/remote-archive/sync"))) and
   ([.[] | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.headerParameters.parameters[] | select(.name == "X-Quant-Write-Key") | .value] | all(. == "={{ $env.QUANT_WRITE_API_KEY }}")) and
   ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("=\\{\\{ JSON.stringify")) and all(test("reports"))) and
   ([.[] | select(.id == "remoteArchiveReports123") | .nodes[] | select(.type == "n8n-nodes-base.httpRequest") | .parameters.jsonBody] | all(test("workflow_id")) and all(test("remoteArchiveReports123"))) and
@@ -87,11 +88,18 @@ UPDATE workflow_entity w
 COMMIT;
 SQL
 "$DOCKER" compose start n8n
-for _ in {1..20}; do
-  curl -fsS --max-time 2 http://127.0.0.1:5678/healthz >/dev/null && break
+health_ok=0
+for _ in {1..40}; do
+  if "$DOCKER" compose exec -T n8n node -e "fetch('http://127.0.0.1:5678/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then
+    health_ok=1
+    break
+  fi
   sleep 2
 done
-curl -fsS --max-time 2 http://127.0.0.1:5678/healthz >/dev/null
+if [[ "$health_ok" != "1" ]]; then
+  echo "n8n health check failed after restart" >&2
+  exit 1
+fi
 
 "$DOCKER" compose exec -T -u root n8n rm -f "$container_after"
 "$DOCKER" compose exec -T n8n n8n export:workflow --backup --output="$container_after"

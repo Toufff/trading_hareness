@@ -18,6 +18,7 @@ import { hasImportableTaggedPayload } from './summary-ingestion-filter.mjs';
 import { isOperatorPausedIngestion } from './ingestion-health.mjs';
 import { shouldSkipMessageForward } from './message-idempotency.mjs';
 import { shouldRedownloadRetryMedia } from './retry-media.mjs';
+import { parsePaperIngestIds } from './paper-ingest-command.mjs';
 import Busboy from 'busboy';
 
 const required = ['FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'N8N_TEXT_WEBHOOK_URL', 'N8N_MEDIA_PART_WEBHOOK_URL', 'N8N_MEDIA_FINALIZE_WEBHOOK_URL'];
@@ -1818,9 +1819,7 @@ function isPaperIngestCommand(data) {
 	const chatId = String(data?.message?.chat_id ?? '');
 	if (paperIngestChatId && chatId !== paperIngestChatId) return null;
 	const text = String(extractMessagePayload(data?.message ?? {}).text ?? '').replace(/@_user_\d+\s*/g, '').trim();
-	if (!/^(收录|收|ingest)\b/i.test(text)) return null;
-	const ids = [...text.matchAll(/\b\d{4}\.\d{4,5}(?:v\d+)?\b/g)].map((match) => match[0]);
-	return ids.length ? ids : null;
+	return parsePaperIngestIds(text);
 }
 
 async function forwardPaperIngest(ids) {

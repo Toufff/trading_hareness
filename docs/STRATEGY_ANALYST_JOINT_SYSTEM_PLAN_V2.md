@@ -606,7 +606,7 @@ Qlib/vectorbt/LLM 评估必须在独立离线 worker 中串行或小并发运行
 - 2026-08-14 盘后 outcome 重算拆分：分析师 claims、推荐候选和本地 canonical 日线的 T+1/基准/MFE/MAE 结算已迁至 `app/outcome_recomputation.py`；不拉取历史、不调用 provider，主服务保留兼容入口。
 - 2026-08-14 THS 概念成员分页拆分：资金流目录选择、resume/offset、`super_get` 禁止、3000 行截断保护和成员状态写入已迁至 `app/ths_concept_members_sync.py`；主服务保留兼容入口，未将不完整响应纳入 Top10 分母。
 - 2026-08-14 分析师 scorecard 重算拆分：本地 claims/推荐/日线结算后的 scorecard materialization 已迁至 `app/analyst_scorecards.py`；保留上海日期与 `exit_date<=as_of_date` 的防未来函数约束，未改变分析师 live 权重（当前仍为 `live_strategy_effect=none`）。
-- 2026-08-14 分析师同步可靠性收敛：`remoteArchiveReports123` 与 `remoteArchiveMessages123` 已作为独立 n8n 调度发布，分别只请求 `reports` / `messages`；服务侧限频也按流独立，HTTP 请求仍共享 keep-alive 与 `Retry-After` 节流。旧 `remoteArchiveSync123` 已停用并保留历史。首次运行发现并修复 n8n JSON Body 表达式和凭据域名白名单：新凭据 `remoteArchiveLocalBearer123` 只允许远端 IP 与本地 `quant-research`，不改变旧凭据。当前等待修复后新图首轮运行，未请求媒体或历史文本。
+- 2026-08-26/27 分析师同步可靠性收敛：`remoteArchiveReports123` 与 `remoteArchiveMessages123` 已作为独立 n8n 调度发布，分别只请求 `reports` / `messages`；服务侧限频也按流独立，HTTP 请求仍共享 keep-alive 与 `Retry-After` 节流。旧 `remoteArchiveSync123` 已停用并保留历史。工作流统一经 `quant-research-gateway:8000` 调用，凭据 `remoteArchiveLocalBearer123` 的域名白名单已包含远端 IP、`quant-research` 与 gateway。2026-08-27 已完成 reports/messages 各一次 text-only smoke sync（HTTP 200），未请求媒体或历史文本；messages 全局游标仍按有界批次推进，历史积压不会被跳过。
 - 2026-08-14 分析师人工复核统一：报告和消息 evidence 都可进入同一 `claim_review` 写路径；批准后 claim 继承 evidence 的不可变 `available_at`，不会以审核时的 `now()` 伪造可用时点。该路径仍只产生研究上下文，`promotion_registry` 未批准前 live 权重保持 0。全量 322 项回归通过。
 - 2026-08-14 n8n 运行收敛：外部 runner 与 Task Broker 断连曾使 48 条已中断任务长期停在 `running`；重启后 runner 已重新注册，新增带审计清单的 stale-execution reconciliation，仅将明确超时的 `running` 标为 `crashed`，不删除执行证据。此举不改变量化服务自身的实时循环或策略阈值。
 
