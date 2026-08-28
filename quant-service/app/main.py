@@ -48,6 +48,10 @@ from .akshare_provider import (
 )
 from .fuyao_provider import FuyaoProviderError, all_a_snapshot_rows as fuyao_all_a_snapshot_rows
 from .limit_up_anchor import live_limit_up_pool_rows
+from .launch_radar import (
+    evaluate_launch_radar,
+    record_launch_observations as record_launch_radar_observations,
+)
 from .analysis import as_utc
 from .capability_registry import api_capability
 from .database import AsyncDatabase, Database
@@ -150,6 +154,7 @@ from .strategy_candidate_ranking import select as select_intraday_candidates
 from .xiaojie_leader_flow import MODEL_VERSION as XIAOJIE_LEADER_FLOW_MODEL_VERSION, evaluate_snapshot as evaluate_xiaojie_leader_flow_snapshot
 from .xiaojie_leader_flow import alert_priority as xiaojie_alert_priority
 from .xiaojie_indicators import evaluate_pool as evaluate_xiaojie_leader_pool
+from .xiaojie_indicators import leader_pool as leader_pool_symbols
 from .xiaojie_reference_repository import (
     ensure_session_trade_limits as ensure_xiaojie_session_trade_limits,
     load_session_reference as load_xiaojie_session_reference,
@@ -1905,6 +1910,7 @@ async def intraday_watch_flow_reference(
 _xiaojie_session_reference: dict[str, Any] = {"trading_date": None, "reference": None}
 #: Per-session MA5-break timers, reset when the trading date rolls over.
 _xiaojie_ma5_break_state: dict[str, Any] = {}
+_launch_velocity_state: dict[str, Any] = {}
 #: Alerts are per newly-appearing (symbol, mode); this bounds a pathological
 #: day.  The running tally is read from the observations table, not held here,
 #: so a restart cannot reset it.
@@ -1942,6 +1948,7 @@ async def _xiaojie_session_context(trading_date: date) -> dict[str, Any]:
     )
     _xiaojie_session_reference.update({"trading_date": trading_date, "reference": reference})
     _xiaojie_ma5_break_state.clear()
+    _launch_velocity_state.clear()
     return reference
 
 
@@ -2016,8 +2023,32 @@ async def run_xiaojie_leader_flow(*, scan_id: uuid.UUID, observed_at: datetime,
                 connection, trading_date, observed_at, alerted)),
             timeout_seconds=30,
         )
+    # Shadow-mode launch radar rides the same cross-section: the launch band
+    # (past +5%, not yet leader-pool territory) is watched for the three-way
+    # coincidence of volume burst, standing sector anchor and price velocity.
+    # Research-only - observations settle through the shared outcomes table,
+    # and no alert is ever sent from here.
+    launch_status: dict[str, Any] = {"status": "skipped"}
+    try:
+        launch = evaluate_launch_radar(
+            all_a_rows, limits=reference["limits"], membership=reference["membership"],
+            references=reference["references"], pool=leader_pool_symbols(all_a_rows, reference["limits"]),
+            velocity_state=_launch_velocity_state, observed_at=observed_at,
+            elapsed_session_minutes=int(result["market_gate"].get("elapsed_session_minutes") or 0),
+        )
+        launch_fresh = await run_database_blocking(
+            lambda: _with_connection(lambda connection: record_launch_radar_observations(
+                connection, trading_date, observed_at, scan_id, launch["candidates"])),
+            timeout_seconds=30,
+        ) if launch["candidates"] else 0
+        launch_status = {"status": "completed", "band_size": launch["band_size"],
+                         "candidates": len(launch["candidates"]), "new": launch_fresh,
+                         "truncated": launch["truncated"]}
+    except Exception as error:  # noqa: BLE001 - the radar must never end the scan
+        launch_status = {"status": "failed", "reason": safe_error_detail(str(error), 200)}
     return {
         "status": "completed", "model_version": XIAOJIE_LEADER_FLOW_MODEL_VERSION,
+        "launch_radar": launch_status,
         "pool_size": result["pool_size"], "evaluated": result["evaluated"],
         "main_sector_count": result["main_sector_count"],
         "regime": result["regime"],
