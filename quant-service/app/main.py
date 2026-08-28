@@ -613,6 +613,10 @@ from .baostock_daily_sync import fetch_rows as fetch_baostock_rows_isolated, syn
 from .market_universe_sync import sync as sync_market_universe_isolated
 from .full_market_daily_sync import sync as sync_full_market_daily_isolated
 from .full_market_daily_controls_sync import sync as sync_full_market_daily_controls_isolated
+from .minute_bar_session_backfill import (
+    backfill_session as backfill_minute_session,
+    session_symbols as session_minute_symbols,
+)
 from .earnings_calendar_sync import sync as sync_earnings_calendar_isolated
 from .stock_money_flow_sync import sync as sync_stock_money_flow_isolated
 from .disclosure_day_watch import MODEL_VERSION as DISCLOSURE_DAY_WATCH_MODEL_VERSION
@@ -1165,6 +1169,31 @@ def settle_xiaojie_leader_flow_outcomes(as_of_date: date) -> dict[str, Any]:
     """Attach realised outcomes to one session's leader-flow observations."""
     with db.transaction() as connection:
         return settle_xiaojie_session(connection, as_of_date)
+
+
+def _read_session_minute_symbols(as_of_date: date) -> dict[str, Any]:
+    """Read one session's board + benchmark symbol list off the executor."""
+    with db.transaction() as connection:
+        return session_minute_symbols(connection, as_of_date)
+
+
+async def backfill_session_minute_bars(as_of_date: date) -> dict[str, Any]:
+    """Minute bars for one session's boards and benchmarks (research-only).
+
+    Gathered last in the post-close pipeline because ``stk_mins`` is a slow,
+    per-symbol route: it answered ~55% of sampled boards over three closed
+    sessions and 0% intraday, so this is best-effort supplementary data.
+    ``availability_pct`` rides out in the result so a low-answer night reads as
+    low availability rather than an empty table, and a re-run backfills the
+    rest since the write is idempotent.  The symbol read is offloaded like
+    every other database call an async path makes, so the event loop is never
+    blocked on a sync transaction.
+    """
+    selection = await run_database_blocking(
+        lambda: _read_session_minute_symbols(as_of_date), timeout_seconds=30)
+    return await backfill_minute_session(
+        as_of_date, symbols=selection["symbols"], call_tushare_api=call_tushare_api,
+        run_database_blocking=run_database_blocking, db=db)
 
 
 async def sync_stock_money_flow(trade_date: date) -> dict[str, Any]:
@@ -5048,6 +5077,7 @@ async def run_daily_pipeline(payload: GenerateRequest) -> dict[str, Any]:
         sync_stock_money_flow=sync_stock_money_flow,
         materialize_watchlist_proposals=materialize_daily_watchlist_proposals,
         settle_xiaojie_outcomes=settle_xiaojie_leader_flow_outcomes,
+        backfill_minute_bars=backfill_session_minute_bars,
     )
 
 

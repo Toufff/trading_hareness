@@ -726,6 +726,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
                 {"status": "ready"}, {"state": "trend_recovery"}, {"status": "completed", "stage": "mixed"},
                 {"materialize_post_close_candidates": 0}, 0,
                 {"settled": 0}, {"outcomes": 1}, {"scorecards": 1}, {"recommendations": 1},
+                {"symbols": []},
             ])
             # The reporting-calendar sync owns its own provider call and its
             # own persist transaction, so it is stubbed here rather than being
@@ -734,6 +735,8 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
                  patch("app.main.sync_full_market_daily_controls", new=AsyncMock(return_value={"status": "completed"})), \
                  patch("app.main.sync_earnings_calendar", new=AsyncMock(return_value={"status": "completed"})), \
                  patch("app.main.sync_stock_money_flow", new=AsyncMock(return_value={"status": "completed"})), \
+                 patch("app.main.backfill_minute_session",
+                       new=AsyncMock(return_value={"availability_pct": None, "bars": 0})), \
                  patch("app.main.run_database_blocking", new=blocking):
                 result = await run_daily_pipeline(GenerateRequest())
             self.assertEqual(result["status"], "completed")
@@ -746,7 +749,8 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
             ["build_snapshot", "materialize_market_regime_today", "materialize_sentiment_cycle_today",
              "materialize_strategy_daily_candidate_ledger",
              "materialize_daily_watchlist_proposals", "settle_xiaojie_leader_flow_outcomes",
-             "recompute_outcomes", "recompute_scorecards", "generate_recommendations"],
+             "recompute_outcomes", "recompute_scorecards", "generate_recommendations",
+             "<lambda>"],
         )
 
     def test_post_close_refresh_returns_conflict_when_durable_lease_is_held(self):

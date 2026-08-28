@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from typing import Any, Awaitable, Callable
+
+#: A bounded ceiling on the minute-bar pass, which is the one stage that talks
+#: to a slow, per-symbol upstream. The rest of the pipeline runs in well under
+#: this; the cap only stops a stalling route from holding the whole post-close
+#: run open. Whatever it does not reach is filled in by the next day's re-run.
+MINUTE_BACKFILL_BUDGET_SECONDS = 600
 
 
 async def run_pipeline(
@@ -28,6 +35,7 @@ async def run_pipeline(
     materialize_candidate_ledger: Callable[[date], Any] | None = None,
     materialize_watchlist_proposals: Callable[[date], Any] | None = None,
     settle_xiaojie_outcomes: Callable[[date], Any] | None = None,
+    backfill_minute_bars: Callable[[date], Awaitable[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     # Both market stages take the whole cross-section in one request. The
     # per-symbol synchronizers this replaced issued one call per name over the
@@ -90,7 +98,24 @@ async def run_pipeline(
     # budget it used to carry cancelled the stage every run, which is why the
     # pipeline reported an internal error at the very last step.
     result = await run_database_blocking(generate_recommendations, payload, timeout_seconds=180)
+    # Minute bars for the session's boards and benchmarks, gathered last. The
+    # route is slow and only partly available - stk_mins answered ~55% of
+    # sampled boards over three closed sessions and 0% intraday - so it runs
+    # after every decision output already exists, and its failure is reported,
+    # never fatal. The budget stops a stalling upstream from holding the run
+    # open; whatever it misses a re-run backfills, since the write is
+    # idempotent and settles against the same session.
+    minute_bars = None
+    if backfill_minute_bars is not None:
+        try:
+            minute_bars = await asyncio.wait_for(
+                backfill_minute_bars(as_of_date), timeout=MINUTE_BACKFILL_BUDGET_SECONDS)
+        except asyncio.TimeoutError:
+            minute_bars = {"status": "timeout", "budget_seconds": MINUTE_BACKFILL_BUDGET_SECONDS}
+        except Exception as error:  # noqa: BLE001 - a research backfill never fails the pipeline
+            minute_bars = {"status": "failed", "error": f"{type(error).__name__}: {str(error)[:200]}"}
     return {"status": "completed", "market_sync": sync, "snapshot": snapshot, "regime": regime,
+            "minute_bars": minute_bars,
             "sentiment_cycle": sentiment_cycle,
             "earnings_calendar": earnings_calendar, "stock_money_flow": stock_money_flow,
             "candidate_ledger": ledger, "xiaojie_outcomes": xiaojie_outcomes,
