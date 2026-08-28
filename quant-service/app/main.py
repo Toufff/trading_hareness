@@ -420,6 +420,10 @@ from .intraday_market_context_repository import (
 )
 from .intraday_rule_snapshot_repository import persist_rule_input_snapshot, prune_rule_input_evidence
 from .intraday_event_retention import ephemeral_signal_retention_days, prune_ephemeral_signal_events
+from .edge_evidence_transfer import (
+    JOURNAL_RETENTION_DAYS as EDGE_CHANGE_JOURNAL_RETENTION_DAYS,
+    prune_change_journal as prune_edge_change_journal,
+)
 from .market_session_repository import (
     realtime_market_session as read_realtime_market_session,
     realtime_market_session_async as read_realtime_market_session_async,
@@ -622,6 +626,7 @@ from .ths_sector_flows import sync_industry as sync_ths_industry_isolated, sync_
 from .outcome_recomputation import recompute as recompute_outcomes_isolated
 from .post_close_candidate_outcomes import settle_post_close_and_leader_rotation_outcomes
 from .market_regime_daily import materialize_market_regime
+from .sentiment_cycle_daily import materialize_sentiment_cycle
 from .strategy_daily_candidate_ledger import materialize_ledger, settle_ledger_outcomes as settle_strategy_ledger_outcomes
 from .watchlist_candidate_proposals import materialize_watchlist_proposals
 from .strategy_timing_challengers import run_challenger_backtest as run_intraday_entry_timing_challenger_backtest
@@ -1136,6 +1141,12 @@ def materialize_market_regime_today(as_of_date: date) -> dict[str, Any]:
     """Persist the multi-index regime label for one already-closed trading day."""
     with db.transaction() as connection:
         return materialize_market_regime(connection, as_of_date)
+
+
+def materialize_sentiment_cycle_today(as_of_date: date) -> dict[str, Any]:
+    """Persist the short-term board-tape reading for one already-closed session."""
+    with db.transaction() as connection:
+        return materialize_sentiment_cycle(connection, as_of_date)
 
 
 def materialize_strategy_daily_candidate_ledger(as_of_date: date) -> dict[str, int]:
@@ -2683,6 +2694,8 @@ _intraday_rule_input_retention = IntradayRuleInputRetentionRuntime(
         ephemeral_signal_retention_days=ephemeral_signal_retention_days,
         prune_rule_inputs=prune_rule_input_evidence,
         prune_ephemeral_events=prune_ephemeral_signal_events,
+        prune_change_journal=prune_edge_change_journal,
+        change_journal_retention_days=lambda: EDGE_CHANGE_JOURNAL_RETENTION_DAYS,
     ),
 )
 
@@ -5029,6 +5042,7 @@ async def run_daily_pipeline(payload: GenerateRequest) -> dict[str, Any]:
         recompute_outcomes=recompute_outcomes, recompute_scorecards=recompute_scorecards,
         generate_recommendations=generate_recommendations, run_database_blocking=run_database_blocking,
         cn_today=cn_today, materialize_regime=materialize_market_regime_today,
+        materialize_sentiment_cycle=materialize_sentiment_cycle_today,
         materialize_candidate_ledger=materialize_strategy_daily_candidate_ledger,
         sync_earnings_calendar=sync_earnings_calendar,
         sync_stock_money_flow=sync_stock_money_flow,

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+import traceback
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -72,7 +73,15 @@ async def run_intraday_monitor_loop(
             )
             for result in results:
                 if isinstance(result, Exception):
-                    log(f"intraday monitor source pass failed: {str(result)[:300]}")
+                    # The message alone does not locate the defect.  On
+                    # 2026-08-28 a bare "Object of type Decimal is not JSON
+                    # serializable" failed 352 passes - about 68% of the
+                    # session - and named no file, no line and no source pass,
+                    # and it did not reproduce off the edge.  The tail of the
+                    # frames is what makes such a failure addressable.
+                    frames = "".join(traceback.format_exception(
+                        type(result), result, result.__traceback__))
+                    log(f"intraday monitor source pass failed: {str(result)[:300]}\n{frames[-1500:]}")
         except Exception as error:  # noqa: BLE001 - a later interval may recover a public source
             log(f"intraday monitor iteration failed: {str(error)[:300]}")
 

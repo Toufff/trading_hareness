@@ -144,5 +144,48 @@ class PaperExecutionTests(unittest.TestCase):
         self.assertEqual(params, (datetime(2026, 8, 14).date(), datetime(2026, 8, 14).date()))
 
 
+class RoundTripCostPercentTests(unittest.TestCase):
+    """Research settles in percentages and cannot call the notional estimator.
+
+    The percentage form has to stay derived from the same constants: a second
+    rate table would drift from the paper-trading one, and every net figure in
+    the scorecards would then be judged against a cost nobody trades at.
+    """
+
+    def test_it_is_one_buy_plus_one_sell_from_the_shared_constants(self):
+        from app.ashare_reality import (
+            DEFAULT_COMMISSION_RATE, DEFAULT_SLIPPAGE_BPS, DEFAULT_STAMP_TAX_RATE,
+            round_trip_cost_pct,
+        )
+        slippage = DEFAULT_SLIPPAGE_BPS / Decimal("10000")
+        expected = ((DEFAULT_COMMISSION_RATE + slippage)
+                    + (DEFAULT_COMMISSION_RATE + DEFAULT_STAMP_TAX_RATE + slippage)) * Decimal("100")
+        self.assertEqual(round_trip_cost_pct(), expected)
+
+    def test_stamp_tax_is_charged_once_on_the_sell_leg_only(self):
+        from app.ashare_reality import DEFAULT_STAMP_TAX_RATE, round_trip_cost_pct
+        without_stamp = round_trip_cost_pct(stamp_tax_rate=Decimal("0"))
+        self.assertEqual(round_trip_cost_pct() - without_stamp,
+                         DEFAULT_STAMP_TAX_RATE * Decimal("100"))
+
+    def test_it_agrees_with_the_notional_estimator_above_the_commission_floor(self):
+        from app.ashare_reality import estimate_trade_cost, round_trip_cost_pct
+        # 10,000 shares at 50 is far above the 5 yuan floor, so the two forms
+        # must agree; below the floor they deliberately do not, which is why
+        # the percentage form documents that it understates small positions.
+        quantity, price = 10_000, Decimal("50")
+        notional = price * quantity
+        buy = estimate_trade_cost(side="buy", quantity=quantity, price=price)
+        sell = estimate_trade_cost(side="sell", quantity=quantity, price=price)
+        combined = (buy["total_cost"] + sell["total_cost"]) / notional * Decimal("100")
+        self.assertAlmostEqual(float(combined), float(round_trip_cost_pct()), places=9)
+
+    def test_the_round_trip_is_material_against_the_edges_being_measured(self):
+        from app.ashare_reality import round_trip_cost_pct
+        # 2026-08-27: supplement_rotation settled at +0.36% gross. If the
+        # round trip ever falls below that the guard this protects is gone.
+        self.assertGreater(float(round_trip_cost_pct()), 0.2)
+
+
 if __name__ == "__main__":
     unittest.main()

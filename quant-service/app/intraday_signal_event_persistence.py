@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 import uuid
 
-from psycopg.types.json import Json
+from .stable_json import tolerant_json
 
 
 @dataclass(frozen=True)
@@ -132,7 +132,12 @@ def persist_generated_signals(
                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING signal_event_id""",
             (scan_id, symbol, signal["signal_key"], signal["signal_type"], signal["severity"], state,
              signal["score"], observed_at, observed_at + confirmation_window,
-             Json(signal["conditions"]), Json(evidence), Json(signal["risk_flags"]),
+             # ``evidence`` is assembled from rule inputs that came out of the
+             # database, so it can carry a Decimal or a datetime the stdlib
+             # encoder has no hook for.  Nothing here hashes the stored text,
+             # so the tolerant adapter is safe and key order is untouched.
+             tolerant_json(signal["conditions"]), tolerant_json(evidence),
+             tolerant_json(signal["risk_flags"]),
              episode["episode_id"] if episode else None,
              episode["material_state_hash"] if episode else None,
              episode["stage"] if episode else "data_issue"),
@@ -148,7 +153,8 @@ def persist_generated_signals(
                          FROM quant.paper_decisions
                         WHERE signal_event_id=%s ORDER BY created_at DESC LIMIT 1""",
                     (symbol, "; ".join(portfolio_gate.reasons), observed_at,
-                     Json({"risk_flags": list(portfolio_gate.risk_flags)}), event["signal_event_id"]),
+                     tolerant_json({"risk_flags": list(portfolio_gate.risk_flags)}),
+                     event["signal_event_id"]),
                 )
         persisted.append({
             "signal_event_id": event["signal_event_id"], "symbol": symbol, "state": state,

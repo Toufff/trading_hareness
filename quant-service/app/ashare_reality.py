@@ -121,7 +121,28 @@ def estimate_trade_cost(*, side: str, quantity: int, price: Decimal | float,
     }
 
 
+def round_trip_cost_pct(*, commission_rate: Decimal = DEFAULT_COMMISSION_RATE,
+                        stamp_tax_rate: Decimal = DEFAULT_STAMP_TAX_RATE,
+                        slippage_bps: Decimal = DEFAULT_SLIPPAGE_BPS) -> Decimal:
+    """One buy plus one sell, as a percentage of notional.
+
+    Research settles in percentage returns and has no position size, so it
+    cannot call ``estimate_trade_cost``; deriving the round trip from the same
+    constants keeps one source of truth rather than a second rate table that
+    drifts from the paper-trading one.
+
+    The commission floor is deliberately absent: it depends on notional, and a
+    percentage that silently assumed one would be wrong at every other size.
+    Costs are therefore understated for small positions, which is the
+    direction that flatters a strategy - read a marginal net edge accordingly.
+    """
+    buy = commission_rate + slippage_bps / Decimal("10000")
+    sell = commission_rate + stamp_tax_rate + slippage_bps / Decimal("10000")
+    return (buy + sell) * Decimal("100")
+
+
 __all__ = [
     "AshareTradability", "DEFAULT_COMMISSION_RATE", "DEFAULT_SLIPPAGE_BPS", "DEFAULT_STAMP_TAX_RATE",
     "LOT_SIZE", "assess_tradability", "estimate_trade_cost", "price_limit_state", "round_board_lot",
+    "round_trip_cost_pct",
 ]

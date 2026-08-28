@@ -115,6 +115,51 @@ def parse_checkpoint(value: str, *, now: datetime | None = None) -> datetime:
     return parsed
 
 
+#: The journal is a delivery log, not evidence: every row it carries also
+#: lives in the source table the trigger fired on, and the workstation pulls
+#: every two minutes.  Holding entries beyond this only inflates the hot
+#: database.  On 2026-08-28 it had never been pruned at all - 468k rows and
+#: 1318 MB, 43% of the whole edge database - which pushed the hot budget to
+#: 99% and made the storage guard stop non-essential capture mid-session.
+JOURNAL_RETENTION_DAYS = 3
+
+
+def prune_change_journal(connection: Any, *, cutoff: datetime,
+                         keep_after_sequence: int | None = None) -> int:
+    """Drop delivered journal entries older than ``cutoff``.
+
+    Age is the rule the edge can apply on its own: it does not hold the
+    puller's cursor, and the puller runs every two minutes, so an entry three
+    days old has either been read or the transfer has been broken for a
+    thousand cycles.  Losing an old entry is recoverable either way - the
+    ``export-since`` path rebuilds a window straight from the source tables,
+    which is how the 2026-08-27 gap was backfilled.
+
+    ``keep_after_sequence`` is an optional extra floor for a caller that does
+    know the cursor; the replay window is subtracted so a re-read still finds
+    what it asks for.
+
+    The journal is an edge-only table, but this runs from the shared retention
+    pass that also bounds rule inputs.  Absent the table it returns rather than
+    raising, so a workstation without a journal cannot lose the retention it
+    does need to the one it does not have.
+    """
+    if connection.execute(
+        "SELECT to_regclass('quant.edge_evidence_changes') AS value"
+    ).fetchone()["value"] is None:
+        return 0
+    conditions = ["changed_at < %s"]
+    parameters: list[Any] = [cutoff]
+    if keep_after_sequence is not None:
+        conditions.append("sequence_id <= %s")
+        parameters.append(max(0, int(keep_after_sequence) - CHANGE_REPLAY_WINDOW))
+    result = connection.execute(
+        f"DELETE FROM quant.edge_evidence_changes WHERE {' AND '.join(conditions)}",
+        tuple(parameters),
+    )
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 def parse_since(value: str, *, now: datetime | None = None) -> datetime:
     """Overlap a valid cursor and cap the remote scan window."""
     reference = now or datetime.now(timezone.utc)
@@ -724,6 +769,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "TRANSFER_TABLES", "TransferTable", "edge_evidence_status", "edge_runtime_snapshot",
-    "CHANGE_PAGE_SIZE", "CHANGE_REPLAY_WINDOW", "export_changes", "export_jsonl", "import_jsonl",
+    "CHANGE_PAGE_SIZE", "CHANGE_REPLAY_WINDOW", "JOURNAL_RETENTION_DAYS",
+    "export_changes", "export_jsonl", "import_jsonl", "prune_change_journal",
     "assess_live_session_acceptance", "parse_checkpoint", "parse_restricted_export_command", "parse_sequence", "parse_since", "read_cursor", "read_cursor_payload", "read_live_session_acceptance", "read_pull_status", "run_live_session_acceptance", "upsert_statement", "write_live_session_acceptance", "write_pull_status",
 ]

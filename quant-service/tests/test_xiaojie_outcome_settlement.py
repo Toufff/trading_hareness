@@ -135,6 +135,65 @@ class OutcomeSettlementTests(unittest.TestCase):
         self.assertAlmostEqual(float(included[0]["avg_session_pct"]), 5.0, places=4,
                                msg="mixing sealed entries in halves the apparent edge")
 
+    def test_returns_are_also_recorded_net_of_a_round_trip(self) -> None:
+        from app.ashare_reality import round_trip_cost_pct
+        with db.transaction() as connection:
+            self._bar(connection, self.symbols[0], self.session,
+                      open_=10.0, close=11.0, pre_close=10.0, limit_up=11.0)
+            self._bar(connection, self.symbols[0], self.next_session,
+                      open_=11.5, close=12.0, pre_close=11.0, limit_up=12.1)
+            self._observation(connection, self.symbols[0], "reverse_wrap", 10.0, False)
+            settle_session(connection, self.session)
+            row = connection.execute(
+                "SELECT * FROM quant.xiaojie_leader_flow_outcomes WHERE symbol=%s",
+                (self.symbols[0],)).fetchone()
+        cost = float(round_trip_cost_pct())
+        self.assertAlmostEqual(float(row["round_trip_cost_pct"]), cost, places=6)
+        self.assertAlmostEqual(float(row["net_session_return_pct"]), 10.0 - cost, places=4)
+        self.assertAlmostEqual(float(row["net_next_open_to_close_pct"]),
+                               (12.0 / 11.5 - 1) * 100 - cost, places=4)
+
+    def test_the_cost_is_charged_once_per_holding_period_not_once_per_column(self) -> None:
+        from app.ashare_reality import round_trip_cost_pct
+        with db.transaction() as connection:
+            self._bar(connection, self.symbols[0], self.session,
+                      open_=10.0, close=11.0, pre_close=10.0, limit_up=11.0)
+            self._observation(connection, self.symbols[0], "reverse_wrap", 10.0, False)
+            settle_session(connection, self.session)
+            row = connection.execute(
+                "SELECT session_return_pct, net_session_return_pct FROM"
+                " quant.xiaojie_leader_flow_outcomes WHERE symbol=%s",
+                (self.symbols[0],)).fetchone()
+        drag = float(row["session_return_pct"]) - float(row["net_session_return_pct"])
+        self.assertAlmostEqual(drag, float(round_trip_cost_pct()), places=6)
+
+    def test_a_gross_edge_smaller_than_the_round_trip_settles_negative(self) -> None:
+        # The case that motivated this: a mode reads as a marginal winner on
+        # gross and is a loser to the account that traded it.
+        with db.transaction() as connection:
+            self._bar(connection, self.symbols[0], self.session,
+                      open_=10.0, close=10.02, pre_close=10.0, limit_up=11.0)
+            self._observation(connection, self.symbols[0], "supplement_rotation", 10.0, False)
+            settle_session(connection, self.session)
+            row = connection.execute(
+                "SELECT session_return_pct, net_session_return_pct FROM"
+                " quant.xiaojie_leader_flow_outcomes WHERE symbol=%s",
+                (self.symbols[0],)).fetchone()
+        self.assertGreater(float(row["session_return_pct"]), 0)
+        self.assertLess(float(row["net_session_return_pct"]), 0)
+
+    def test_the_scorecard_counts_a_win_on_net_not_on_gross(self) -> None:
+        with db.transaction() as connection:
+            # Up 0.02% gross: ahead on the tape, behind after one round trip.
+            self._bar(connection, self.symbols[0], self.session,
+                      open_=10.0, close=10.02, pre_close=10.0, limit_up=11.0)
+            self._observation(connection, self.symbols[0], "supplement_rotation", 10.0, False)
+            settle_session(connection, self.session)
+            card = mode_scorecard(connection, self.session, self.session)
+        self.assertEqual(float(card[0]["session_win_pct"]), 0.0)
+        self.assertGreater(float(card[0]["avg_session_pct"]), 0)
+        self.assertLess(float(card[0]["avg_net_session_pct"]), 0)
+
     def test_settling_twice_refreshes_rather_than_duplicating(self) -> None:
         with db.transaction() as connection:
             self._bar(connection, self.symbols[0], self.session,

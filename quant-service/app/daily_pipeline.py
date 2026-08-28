@@ -24,6 +24,7 @@ async def run_pipeline(
     sync_earnings_calendar: Callable[[date], Awaitable[dict[str, Any]]] | None = None,
     sync_stock_money_flow: Callable[[date], Awaitable[dict[str, Any]]] | None = None,
     materialize_regime: Callable[[date], Any] | None = None,
+    materialize_sentiment_cycle: Callable[[date], Any] | None = None,
     materialize_candidate_ledger: Callable[[date], Any] | None = None,
     materialize_watchlist_proposals: Callable[[date], Any] | None = None,
     settle_xiaojie_outcomes: Callable[[date], Any] | None = None,
@@ -62,6 +63,13 @@ async def run_pipeline(
                         if sync_stock_money_flow is not None else None)
     regime = (await run_database_blocking(materialize_regime, as_of_date, timeout_seconds=30)
              if materialize_regime is not None else None)
+    # The index regime and the board tape are different readings of the same
+    # session, and the study behind this one showed the second separates
+    # outcomes the first does not.  Both are stored before anything downstream
+    # stratifies by them.
+    sentiment_cycle = (await run_database_blocking(materialize_sentiment_cycle, as_of_date,
+                                                   timeout_seconds=60)
+                       if materialize_sentiment_cycle is not None else None)
     # Ledger materialization reads whatever each strategy's own table already
     # holds for as_of_date; it does not require those strategies to run here.
     ledger = (await run_database_blocking(materialize_candidate_ledger, as_of_date, timeout_seconds=30)
@@ -83,6 +91,7 @@ async def run_pipeline(
     # pipeline reported an internal error at the very last step.
     result = await run_database_blocking(generate_recommendations, payload, timeout_seconds=180)
     return {"status": "completed", "market_sync": sync, "snapshot": snapshot, "regime": regime,
+            "sentiment_cycle": sentiment_cycle,
             "earnings_calendar": earnings_calendar, "stock_money_flow": stock_money_flow,
             "candidate_ledger": ledger, "xiaojie_outcomes": xiaojie_outcomes,
             "watchlist_proposals": watchlist_proposals, "outcomes": outcomes,

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from psycopg.types.json import Json
+from .stable_json import tolerant_json
 
 from .akshare_provider import akshare_eastmoney_board_flow
 from .provider_health import record_provider_failure, record_provider_success
@@ -118,7 +118,8 @@ class BoardFlowCaptureActions:
                                +coalesce((EXCLUDED.coverage->'industry'->>'flow_boards')::int,0)
                              >=coalesce((quant.intraday_board_flow_snapshots.coverage->'concept'->>'flow_boards')::int,0)
                                +coalesce((quant.intraday_board_flow_snapshots.coverage->'industry'->>'flow_boards')::int,0)""",
-                    (snapshot_minute, observed_at, status, Json(coverage), Json(source_status), Json(payload)),
+                    (snapshot_minute, observed_at, status, tolerant_json(coverage),
+                     tolerant_json(source_status), tolerant_json(payload)),
                 )
 
         await run_database(persist_snapshot)

@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, Callable
 import uuid
 
-from psycopg.types.json import Json
+from .stable_json import tolerant_json
 
 
 @dataclass(frozen=True)
@@ -138,7 +138,7 @@ def persist_scan_signals(
                 (
                     scan_id, symbol, observed_at, quote_source_name, quote.get("price"), quote.get("pct_change"),
                     quote.get("volume_ratio"), quote.get("turnover_rate"), quote.get("main_net_inflow"),
-                    Json(dependencies.json_safe(quote_raw)),
+                    tolerant_json(dependencies.json_safe(quote_raw)),
                 ),
             )
         daily_factors = prepared.daily_factors_by_symbol.get(symbol, {"status": "insufficient_history", "bar_count": 0})

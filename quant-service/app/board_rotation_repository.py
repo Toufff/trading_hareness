@@ -6,7 +6,7 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from psycopg.types.json import Json
+from .stable_json import tolerant_json
 
 
 class BoardRotationRepository:
@@ -98,6 +98,7 @@ class BoardRotationRepository:
                        ) VALUES(%s,%s,%s,%s,%s,%s,%s,'confirming',%s,%s,%s,%s)""",
                     (snapshot_minute, candidate["event_key"], candidate["taxonomy_key"], candidate["sector_key"],
                      candidate["label"], candidate["event_type"], candidate["direction"],
-                     observed_at, observed_at, observed_at + timedelta(minutes=2), Json(candidate)),
+                     observed_at, observed_at, observed_at + timedelta(minutes=2),
+                     tolerant_json(candidate)),
                 )
         return confirmed
