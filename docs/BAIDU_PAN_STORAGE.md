@@ -11,6 +11,7 @@
 - 7 天（可配置）分享链接创建。
 - 大文件本地有界 spool + 4 MiB（可配置）分片：`precreate → superfile2 → create`；快速上传会直接完成。
 - Feishu relay 的大于 IM 限制资源可按 `BAIDU_PAN_ARCHIVE_PROVIDER=baidu` 或 `auto`（未配置 Feishu Drive 时）归档到百度网盘。
+- 观察池与十日连板龙头影子策略的最新实时证据可由独立归档轮询器异步写入 `market-realtime/watchlist/YYYY-MM-DD/HH/` 与 `market-realtime/leader-rotation/YYYY-MM-DD/HH/`；归档队列有持久化幂等键和指数退避，不阻塞行情采集或策略计算。
 
 ## HTTP 入口
 
@@ -18,11 +19,13 @@
 
 `GET /api/baidu-pan/status`、`GET /api/baidu-pan/oauth/url`、`POST /api/baidu-pan/oauth/exchange`、`POST /api/baidu-pan/oauth/device`、`POST /api/baidu-pan/oauth/device-exchange`、`POST /api/baidu-pan/oauth/bootstrap`、`POST /api/baidu-pan/oauth/refresh`、`GET /api/baidu-pan/user`、`GET /api/baidu-pan/device-user?device_id=...`、`GET /api/baidu-pan/quota`、`GET /api/baidu-pan/files?dir=/&type=list|doc|image|video`、`GET /api/baidu-pan/list-all`、`GET /api/baidu-pan/meta?fsids=...`、`GET /api/baidu-pan/search?q=...&semantic=true`、`POST /api/baidu-pan/share`、`POST /api/baidu-pan/manage`（mkdir/copy/move/rename/delete）。
 
+归档运行状态：`GET /api/baidu-pan/market-archive/status`。该接口只返回启用状态、最近轮询/完成时间、队列计数和根目录，不返回任何凭据。
+
 首次使用时，设置环境变量后访问 OAuth URL，在回调中取得 `code`，再把 code POST 到 exchange。不要把 access/refresh token 放在 URL、前端代码或日志中。个人应用的根目录通常受 `/apps/<应用名>` 约束，实际目录以开放平台返回为准。
 
 ## 配置
 
-参见 `.env.example` 和 `deploy/feishu-relay-edge/relay.env.example` 中的 `BAIDU_PAN_*`。凭据必须通过部署环境注入；本仓库不包含用户提供的 AppKey/SecretKey。`BAIDU_PAN_ENABLED=false` 时适配器保持关闭，现有 Feishu Drive 行为不变。
+参见 `.env.example` 和 `deploy/feishu-relay-edge/relay.env.example` 中的 `BAIDU_PAN_*`。凭据必须通过部署环境注入；本仓库不包含用户提供的 AppKey/SecretKey。`BAIDU_PAN_ENABLED=false` 时适配器保持关闭，现有 Feishu Drive 行为不变。启用市场证据归档还需设置 `BAIDU_PAN_MARKET_ARCHIVE_ENABLED=true`；默认 30 秒轮询量化服务的最新观察池扫描和连板龙头影子结果。百度网盘只保存可重放的研究证据快照，永不作为实时策略阈值或订单输入。
 
 ## 边界与未宣称能力
 

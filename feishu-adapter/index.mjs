@@ -14,6 +14,7 @@ import { createSummaryListener } from './summary-listener.mjs';
 import { createFeishuUserOauth } from './feishu-user-oauth.mjs';
 import { createFeishuWorkbench } from './feishu-workbench.mjs';
 import { createBaiduPanStorage } from './baidu-pan-storage.mjs';
+import { createBaiduPanMarketArchive } from './baidu-pan-market-archive.mjs';
 import { isSystemRelayPlaceholder } from './message-filter.mjs';
 import { extractImportContent, isValidDateTime } from './message-time.mjs';
 import { hasImportableTaggedPayload } from './summary-ingestion-filter.mjs';
@@ -131,6 +132,12 @@ const baiduPan = createBaiduPanStorage({
 	maxUploadBytes: Number(process.env.BAIDU_PAN_MAX_UPLOAD_BYTES ?? 500 * 1024 * 1024),
 	sliceBytes: Number(process.env.BAIDU_PAN_SLICE_BYTES ?? 4 * 1024 * 1024),
 });
+const baiduPanMarketArchive = createBaiduPanMarketArchive({
+	baiduPan, ledger, quantServiceUrl,
+	enabled: String(process.env.BAIDU_PAN_MARKET_ARCHIVE_ENABLED ?? 'false').toLowerCase() === 'true',
+	intervalSeconds: Number(process.env.BAIDU_PAN_MARKET_ARCHIVE_INTERVAL_SECONDS ?? 30),
+	rootPath: String(process.env.BAIDU_PAN_MARKET_ARCHIVE_ROOT_PATH ?? '/apps/股票paper存储/market-realtime').trim(),
+});
 const feishuUserOauth = createFeishuUserOauth({
 	appId, appSecret, ledger, redirectUri: String(process.env.FEISHU_USER_OAUTH_REDIRECT_URI ?? 'http://localhost:8080/callback').trim(),
 });
@@ -234,6 +241,10 @@ const summaryListener = createSummaryListener({
 });
 setInterval(() => { void groupRelay.tick(); }, groupRelayIntervalSeconds * 1000).unref();
 void groupRelay.tick();
+if (baiduPanMarketArchive.enabled) {
+	setInterval(() => { void baiduPanMarketArchive.poll(); }, baiduPanMarketArchive.intervalMs).unref();
+	void baiduPanMarketArchive.poll();
+}
 setInterval(() => { void summaryListener.tick(); }, summaryListenerIntervalSeconds * 1000).unref();
 void summaryListener.tick();
 const reconcileSeconds = Math.max(30, Number(process.env.INGESTION_RECONCILE_SECONDS ?? 300));
@@ -1406,6 +1417,11 @@ const dashboard = createServer((request, response) => {
 	}
 	if (url.pathname === '/api/baidu-pan/status' && request.method === 'GET') {
 		void baiduPan.status().then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
+			.catch((error) => response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/market-archive/status' && request.method === 'GET') {
+		void baiduPanMarketArchive.status().then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
 			.catch((error) => response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
 		return;
 	}

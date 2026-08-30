@@ -77,10 +77,12 @@ export function createLedger(connectionString) {
 			CREATE TABLE IF NOT EXISTS feishu_relay_writer_ownership (singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton), writer_id text NOT NULL, generation bigint NOT NULL CHECK (generation > 0), updated_at timestamptz NOT NULL DEFAULT now());
 				CREATE TABLE IF NOT EXISTS feishu_user_oauth_tokens (token_key text PRIMARY KEY, access_ciphertext text NOT NULL, refresh_ciphertext text NOT NULL, access_expires_at timestamptz NOT NULL, refresh_expires_at timestamptz NOT NULL, scopes text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT now());
 				CREATE TABLE IF NOT EXISTS baidu_pan_oauth_tokens (token_key text PRIMARY KEY, access_ciphertext text NOT NULL, refresh_ciphertext text NOT NULL, access_expires_at timestamptz NOT NULL, refresh_expires_at timestamptz NOT NULL, scopes text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT now());
+				CREATE TABLE IF NOT EXISTS baidu_pan_archive_jobs (archive_id uuid PRIMARY KEY DEFAULT gen_random_uuid(), archive_key text NOT NULL UNIQUE, bucket text NOT NULL, observed_at timestamptz NOT NULL, exchange_date date NOT NULL, payload jsonb NOT NULL DEFAULT '{}'::jsonb, status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','processing','completed','retryable_failed','failed')), attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0), available_at timestamptz NOT NULL DEFAULT now(), lease_owner text, lease_expires_at timestamptz, remote_path text, remote_fs_id text, last_error text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
 				CREATE INDEX IF NOT EXISTS feishu_group_relay_messages_status_idx ON feishu_group_relay_messages(status, updated_at);
 				CREATE INDEX IF NOT EXISTS feishu_group_relay_actions_message_idx ON feishu_group_relay_actions(source_message_id, created_at DESC);
 				CREATE INDEX IF NOT EXISTS ingestion_jobs_status_idx ON ingestion_jobs(status, updated_at);
 				CREATE INDEX IF NOT EXISTS ingestion_delivery_outbox_ready_idx ON ingestion_delivery_outbox(status, available_at, created_at);
+				CREATE INDEX IF NOT EXISTS baidu_pan_archive_jobs_ready_idx ON baidu_pan_archive_jobs(status, available_at, created_at);
 				ALTER TABLE ingestion_assets DROP CONSTRAINT IF EXISTS ingestion_assets_content_sha256_key;
 				ALTER TABLE feishu_group_relay_messages ADD COLUMN IF NOT EXISTS action_card_message_id text;
 				ALTER TABLE feishu_group_relay_messages ADD COLUMN IF NOT EXISTS workflow_state text NOT NULL DEFAULT 'new';
@@ -130,6 +132,38 @@ export function createLedger(connectionString) {
 		async saveBaiduPanOAuthToken({ accessCiphertext, refreshCiphertext, accessExpiresAt, refreshExpiresAt, scopes }) {
 			await pool.query(`INSERT INTO baidu_pan_oauth_tokens(token_key,access_ciphertext,refresh_ciphertext,access_expires_at,refresh_expires_at,scopes)
 				VALUES('default',$1,$2,$3,$4,$5) ON CONFLICT(token_key) DO UPDATE SET access_ciphertext=EXCLUDED.access_ciphertext,refresh_ciphertext=EXCLUDED.refresh_ciphertext,access_expires_at=EXCLUDED.access_expires_at,refresh_expires_at=EXCLUDED.refresh_expires_at,scopes=EXCLUDED.scopes,updated_at=now()`, [accessCiphertext, refreshCiphertext, accessExpiresAt, refreshExpiresAt, scopes]);
+		},
+		async enqueueBaiduPanArchive({ archiveKey, bucket, observedAt, exchangeDate, payload }) {
+			const { rows } = await pool.query(`INSERT INTO baidu_pan_archive_jobs(archive_key,bucket,observed_at,exchange_date,payload)
+				VALUES($1,$2,$3,$4,$5) ON CONFLICT(archive_key) DO NOTHING RETURNING *`, [String(archiveKey), String(bucket), observedAt, exchangeDate, payload ?? {}]);
+			return rows[0] ?? null;
+		},
+		async claimBaiduPanArchives({ workerId, limit = 4, leaseSeconds = 300 } = {}) {
+			const boundedLimit = Math.max(1, Math.min(20, Number(limit) || 4));
+			const boundedLease = Math.max(30, Math.min(1800, Number(leaseSeconds) || 300));
+			const { rows } = await pool.query(`WITH candidates AS (
+				SELECT archive_id FROM baidu_pan_archive_jobs
+				WHERE (status IN ('queued','retryable_failed') AND available_at <= now())
+					OR (status='processing' AND lease_expires_at < now())
+				ORDER BY available_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2
+			) UPDATE baidu_pan_archive_jobs job
+			SET status='processing',attempt_count=job.attempt_count+1,lease_owner=$1,lease_expires_at=now()+($3 * interval '1 second'),updated_at=now()
+			FROM candidates WHERE job.archive_id=candidates.archive_id RETURNING job.*`, [String(workerId || 'baidu-pan-archive'), boundedLimit, boundedLease]);
+			return rows;
+		},
+		async completeBaiduPanArchive(archiveId, { remotePath, remoteFsId = null } = {}) {
+			const { rows } = await pool.query(`UPDATE baidu_pan_archive_jobs SET status='completed',remote_path=$2,remote_fs_id=$3,lease_owner=null,lease_expires_at=null,last_error=null,updated_at=now() WHERE archive_id=$1 RETURNING *`, [archiveId, remotePath ?? null, remoteFsId ?? null]);
+			return rows[0] ?? null;
+		},
+		async failBaiduPanArchive(archiveId, { errorMessage, retryable = true } = {}) {
+			const result = await pool.query('SELECT attempt_count FROM baidu_pan_archive_jobs WHERE archive_id=$1', [archiveId]);
+			const retryDelaySeconds = deliveryRetryDelaySeconds(result.rows[0]?.attempt_count);
+			const { rows } = await pool.query(`UPDATE baidu_pan_archive_jobs SET status=CASE WHEN $2 THEN 'retryable_failed' ELSE 'failed' END,available_at=CASE WHEN $2 THEN now()+($4 * interval '1 second') ELSE available_at END,lease_owner=null,lease_expires_at=null,last_error=$3,updated_at=now() WHERE archive_id=$1 RETURNING *`, [archiveId, Boolean(retryable), String(errorMessage ?? '').slice(0, 1000), retryDelaySeconds]);
+			return rows[0] ?? null;
+		},
+		async baiduPanArchiveStatus() {
+			const { rows } = await pool.query(`SELECT count(*) FILTER (WHERE status IN ('queued','processing','retryable_failed'))::int AS queue_depth,count(*) FILTER (WHERE status='completed')::int AS completed,count(*) FILTER (WHERE status='retryable_failed')::int AS retryable_failed,count(*) FILTER (WHERE status='failed')::int AS failed,max(updated_at) AS last_updated_at,max(updated_at) FILTER (WHERE status='completed') AS last_completed_at FROM baidu_pan_archive_jobs`);
+			return rows[0] ?? { queue_depth: 0, completed: 0, retryable_failed: 0, failed: 0, last_updated_at: null, last_completed_at: null };
 		},
 		async relayWriterFence(writerId) {
 			if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(String(writerId ?? ''))) throw new Error('relay writer ID 格式无效');
