@@ -9,6 +9,7 @@ import { releaseMetadata } from './release-metadata.mjs';
 import { endWritable, writeChunk } from './stream-write.mjs';
 import { singleFlight } from './single-flight.mjs';
 import { createGroupRelay } from './group-relay.mjs';
+import { createWeChatGroupRelay } from './wechat-group-relay.mjs';
 import { createSummaryListener } from './summary-listener.mjs';
 import { createFeishuUserOauth } from './feishu-user-oauth.mjs';
 import { createFeishuWorkbench } from './feishu-workbench.mjs';
@@ -19,6 +20,7 @@ import { isOperatorPausedIngestion } from './ingestion-health.mjs';
 import { shouldSkipMessageForward } from './message-idempotency.mjs';
 import { shouldRedownloadRetryMedia } from './retry-media.mjs';
 import { parsePaperIngestIds } from './paper-ingest-command.mjs';
+import { parsePaperFeedback } from './paper-feedback-command.mjs';
 import Busboy from 'busboy';
 
 const required = ['FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'N8N_TEXT_WEBHOOK_URL', 'N8N_MEDIA_PART_WEBHOOK_URL', 'N8N_MEDIA_FINALIZE_WEBHOOK_URL'];
@@ -40,6 +42,7 @@ const feishuAlertReceiveId = String(process.env.FEISHU_ALERT_RECEIVE_ID ?? '').t
 const paperIngestWebhook = String(process.env.PAPER_KB_INGEST_WEBHOOK ?? '').trim();
 const paperIngestChatId = String(process.env.PAPER_KB_FEISHU_CHAT_ID ?? '').trim();
 const paperSearchWebhook = String(process.env.PAPER_KB_SEARCH_WEBHOOK ?? '').trim();
+const paperFeedbackWebhook = String(process.env.PAPER_KB_FEEDBACK_WEBHOOK ?? '').trim();
 const feishuAlertReceiveIdType = String(process.env.FEISHU_ALERT_RECEIVE_ID_TYPE ?? 'chat_id').trim();
 const supportedAlertReceiveIdTypes = new Set(['chat_id', 'open_id', 'user_id', 'union_id']);
 if (!supportedAlertReceiveIdTypes.has(feishuAlertReceiveIdType)) {
@@ -150,6 +153,15 @@ const groupRelayConfig = {
 		{ key: 'xiaojie', tag: 'xiaojie', chatId: String(process.env.FEISHU_GROUP_RELAY_XIAOJIE_CHAT_ID ?? '').trim(), chatName: String(process.env.FEISHU_GROUP_RELAY_XIAOJIE_CHAT_NAME ?? '小杰夜报～').trim() },
 	],
 };
+const wechatGroupRelayConfig = {
+	enabled: String(process.env.WECHAT_GROUP_RELAY_ENABLED ?? 'false').toLowerCase() === 'true',
+	sourceKey: String(process.env.WECHAT_GROUP_RELAY_SOURCE_KEY ?? 'wechat_xiaolan').trim() || 'wechat_xiaolan',
+	sourceChatId: String(process.env.WECHAT_GROUP_RELAY_SOURCE_CHAT_ID ?? '50136408612@chatroom').trim(),
+	routeTag: String(process.env.WECHAT_GROUP_RELAY_ROUTE_TAG ?? 'xiaolan').trim() || 'xiaolan',
+	targetChatId: String(process.env.WECHAT_GROUP_RELAY_TARGET_CHAT_ID ?? '').trim() || groupRelayConfig.targetChatId,
+	endpointToken: String(process.env.WECHAT_GROUP_RELAY_ENDPOINT_TOKEN ?? '').trim(),
+	maxTextLength: Math.max(100, Math.min(10_000, Number(process.env.WECHAT_GROUP_RELAY_MAX_TEXT_LENGTH ?? 3500))),
+};
 // This guards a copied relay ledger during a deliberate failover/failback.
 // It is not presented as a cross-host distributed lock: the runbooks still
 // fence the old machine before promoting the new writer generation.
@@ -198,6 +210,9 @@ const groupRelay = createGroupRelay({
 	larkClient, sourceApi: feishuUserOauth.sourceApi, ledger, workbench: feishuWorkbench,
 	config: { ...groupRelayConfig, sourcesProvider: () => ledger.relayRoutes() }, canWrite: relayWriterFence,
 });
+const wechatGroupRelay = wechatGroupRelayConfig.enabled && wechatGroupRelayConfig.targetChatId
+	? createWeChatGroupRelay({ larkClient, ledger, config: wechatGroupRelayConfig })
+	: null;
 const summaryListener = createSummaryListener({
 	sourceApi: feishuUserOauth.sourceApi, ledger, processMessage: processSummaryGroupMessage,
 	config: summaryListenerConfig, canWrite: relayWriterFence,
@@ -716,6 +731,29 @@ function readJsonBody(request, limit = 18 * 1024 * 1024) {
 	});
 }
 
+async function handleWeChatGroupRelay(request, response) {
+	if (!wechatGroupRelayConfig.endpointToken || request.headers['x-wechat-relay-token'] !== wechatGroupRelayConfig.endpointToken) {
+		response.writeHead(401, { 'content-type': 'application/json' });
+		response.end(JSON.stringify({ status: 'unauthorized' }));
+		return;
+	}
+	if (!wechatGroupRelay) {
+		response.writeHead(503, { 'content-type': 'application/json' });
+		response.end(JSON.stringify({ status: 'disabled' }));
+		return;
+	}
+	try {
+		const payload = await readJsonBody(request, 16 * 1024 * 1024);
+		const result = await wechatGroupRelay.process(payload);
+		response.writeHead(result.status === 'sent' ? 201 : 200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+		response.end(JSON.stringify(result));
+	} catch (error) {
+		console.error(`微信群 relay 请求失败：${error instanceof Error ? error.message : String(error)}`);
+		response.writeHead(400, { 'content-type': 'application/json' });
+		response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
+	}
+}
+
 async function handleQuantAlert(request, response) {
 	if (!quantAlertWebhookToken || request.headers['x-quant-alert-token'] !== quantAlertWebhookToken) {
 		response.writeHead(401, { 'content-type': 'application/json' });
@@ -808,8 +846,8 @@ async function buildManualEvent(input) {
 	const resources = Array.isArray(input?.resources) ? input.resources : (Array.isArray(input?.media) ? input.media.map(manualResource) : []);
 	if (!text && !resources.length) throw new Error('请至少提供正文或一个媒体');
 	if (resources.length > 12) throw new Error('一次最多投递 12 个媒体');
-	const eventId = `manual-${randomUUID()}`;
-	const messageId = `manual_${randomUUID().replace(/-/g, '')}`;
+	const eventId = String(input?.event_id ?? '').trim() || `manual-${randomUUID()}`;
+	const messageId = String(input?.message_id ?? '').trim() || `manual_${randomUUID().replace(/-/g, '')}`;
 	const timestamp = contentDate ? `@${contentDate} ${contentTime}` : '';
 	const messageText = [`#${tag}`, timestamp, text].filter(Boolean).join('\n');
 	const content = {
@@ -1531,6 +1569,10 @@ const dashboard = createServer((request, response) => {
 		void handleManualRelay(request, response);
 		return;
 	}
+	if (url.pathname === '/wechat-group-relay' && request.method === 'POST') {
+		void handleWeChatGroupRelay(request, response);
+		return;
+	}
 	if (url.pathname === '/relay-clipboard-draft' && request.method === 'POST') {
 		void (async () => {
 			try {
@@ -1862,6 +1904,24 @@ async function forwardPaperSearch(query, deep) {
 	return response.status;
 }
 
+function isPaperFeedbackCommand(data) {
+	const chatId = String(data?.message?.chat_id ?? '');
+	if (paperIngestChatId && chatId !== paperIngestChatId) return null;
+	const text = String(extractMessagePayload(data?.message ?? {}).text ?? '').replace(/@_user_\d+\s*/g, '').trim();
+	return parsePaperFeedback(text);
+}
+
+async function forwardPaperFeedback(command, sourceEventId) {
+	if (!paperFeedbackWebhook) throw new Error('PAPER_KB_FEEDBACK_WEBHOOK is not configured');
+	const response = await fetch(paperFeedbackWebhook, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ ...command, source_event_id: sourceEventId }),
+	});
+	if (!response.ok) throw new Error(`feedback webhook responded ${response.status}`);
+	return response.status;
+}
+
 function pruneFeishuDedupe(now = Date.now()) {
 	for (const [key, entry] of feishuEventPromises) {
 		if (entry.expiresAt <= now) feishuEventPromises.delete(key);
@@ -1877,6 +1937,18 @@ async function processFeishuEvent(data) {
 	if (isQuantAlertBindingCommand(data)) {
 		updateEvent(eventId, { n8n_status: '已识别为盘中提醒绑定命令，未转发研究导入' });
 		return { bound_alert_group: true };
+	}
+	const paperFeedback = isPaperFeedbackCommand(data);
+	if (paperFeedback) {
+		try {
+			await forwardPaperFeedback(paperFeedback, eventId);
+			updateEvent(eventId, { n8n_status: `已转发论文推荐反馈：${paperFeedback.action}` });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			updateEvent(eventId, { n8n_status: '论文推荐反馈转发失败', n8n_error: message });
+			console.error(`论文推荐反馈转发失败：${message}`);
+		}
+		return { paper_feedback: paperFeedback };
 	}
 	const paperIds = isPaperIngestCommand(data);
 	if (paperIds) {
