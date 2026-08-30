@@ -18,7 +18,7 @@ COPY feishu-adapter/index.mjs feishu-adapter/ledger.mjs feishu-adapter/group-rel
      feishu-adapter/feishu-workbench.mjs feishu-adapter/release-metadata.mjs \
      feishu-adapter/stream-write.mjs feishu-adapter/single-flight.mjs \
      feishu-adapter/summary-ingestion-filter.mjs feishu-adapter/ingestion-health.mjs \
-     feishu-adapter/paper-ingest-command.mjs feishu-adapter/paper-feedback-command.mjs ./
+     feishu-adapter/paper-ingest-command.mjs feishu-adapter/paper-feedback-command.mjs feishu-adapter/baidu-pan-storage.mjs ./
 COPY config/source-registry.json /app/source-registry.json
 COPY frontend/dist /app/frontend-dist
 ENV APP_GIT_SHA=${APP_GIT_SHA} \
