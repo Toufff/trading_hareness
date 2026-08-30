@@ -173,6 +173,35 @@ launchctl print gui/$(id -u)/com.papa.wechat-image-relay
 WECHAT_RELAY_CHAT_DIR_ID=<目录ID> n8n/scripts/start-wechat-image-relay.sh xiaolan
 ```
 
+### 微信“小蓝炒股会”文字监控
+
+文字监控使用 LLDB 捕获的 `message/message_0.db` key 解密当前数据库和完整 WAL，
+再把新增文本投递到 adapter 的 `/wechat-group-relay`，由飞书 bot 发到现有汇总群并加 `#xiaolan`。
+它与上面的媒体 watcher 独立运行；首次启动默认 `skip_existing`，不会把历史消息全部重发。
+
+先在 n8n `.env` 配置一个本机入口 token，并保持开关关闭完成试跑：
+
+```dotenv
+WECHAT_GROUP_RELAY_ENABLED=false
+WECHAT_GROUP_RELAY_ENDPOINT_TOKEN=<随机长字符串>
+```
+
+重建并启动 adapter 后，确认本机 key 仍对应当前微信进程，再启动文字 watcher：
+
+```bash
+bash n8n/scripts/start-wechat-text-relay.sh
+tail -f n8n/logs/wechat-text-relay.log
+```
+
+确认日志和目标群均正常后，才把 `WECHAT_GROUP_RELAY_ENABLED=true` 并重建 adapter。停止：
+
+```bash
+bash n8n/scripts/stop-wechat-text-relay.sh
+```
+
+微信重启或数据库重新加密后，旧 key 可能失效；此时必须重新用 LLDB 捕获并更新
+`wechat-export-macos/all_keys.json`，不要继续用旧 key 运行 watcher。
+
 ## 配置与敏感信息
 
 私密配置在本目录的 [`.env`](.env) 中，权限应保持为仅当前用户可读。它至少包含：

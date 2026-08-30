@@ -11,18 +11,43 @@ import argparse
 import base64
 import datetime as dt
 import hashlib
+import io
 import json
 import os
+import re
+import struct
 from pathlib import Path
 import sys
 import time
 import urllib.error
 import urllib.request
 
+from Crypto.Cipher import AES
+try:
+    import av
+except ImportError:
+    av = None
+
 
 DEFAULT_ROOT = Path.home() / "Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
 STATE_DIR = Path("/Users/papa/codebase/n8n/state")
 DEFAULT_STATE = STATE_DIR / "wechat-image-relay-seen.json"
+DEFAULT_DIRECT_ENDPOINT = "http://127.0.0.1:18300/wechat-group-relay"
+WECHAT_CHAT_ID = "50136408612@chatroom"
+
+
+def relay_token() -> str:
+    token = os.environ.get("WECHAT_GROUP_RELAY_ENDPOINT_TOKEN", "").strip()
+    if token:
+        return token
+    env_path = STATE_DIR / "wechat-relay.env"
+    try:
+        for line in env_path.read_text().splitlines():
+            if line.startswith("WECHAT_GROUP_RELAY_ENDPOINT_TOKEN="):
+                return line.split("=", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return ""
 SUPPORTED_TAGS = {"liwei", "liuzi", "xiaolan"}
 MAX_FILE_BYTES = 12 * 1024 * 1024
 MEDIA_MAGIC = {
@@ -68,6 +93,67 @@ def media_type_for(path: Path) -> str | None:
         if brand in {b"M4A ", b"mp42", b"isom", b"iso2"} and path.suffix.lower() in {".m4a", ".aac"}:
             return "audio/mp4"
         return "video/mp4"
+    return None
+
+
+def image_key_for(account_dir: Path) -> tuple[bytes, int] | None:
+    """Derive the macOS WeChat 4.x V2 image key from the kvcomm UIN file."""
+    if not account_dir:
+        return None
+    wxid = account_dir.name
+    kvcomm = account_dir.parent.parent / "app_data/net/kvcomm"
+    if not kvcomm.is_dir():
+        return None
+    for item in sorted(kvcomm.glob("key_*_*.statistic")):
+        match = re.match(r"key_(\d+)_", item.name)
+        if match:
+            code = int(match.group(1))
+            if code <= 0:
+                continue
+            normalized_wxid = re.sub(r"_[0-9a-fA-F]{4}$", "", wxid)
+            key = hashlib.md5(f"{code}{normalized_wxid}".encode()).hexdigest()[:16].encode("ascii")
+            return key, code & 0xFF
+    return None
+
+
+def decode_v2(data: bytes, aes_key: bytes, xor_key: int) -> tuple[bytes, str] | None:
+    if len(data) < 15 or data[:6] != bytes.fromhex("070856320807"):
+        return None
+    aes_size, xor_size = struct.unpack_from("<LL", data, 6)
+    # WeChat always appends a full PKCS#7 block when aes_size is already
+    # aligned (1024 -> 1040), matching decryptDatV4 in the reference path.
+    aligned = aes_size + (16 - (aes_size % 16))
+    if 15 + aligned + xor_size > len(data):
+        return None
+    plain = AES.new(aes_key[:16], AES.MODE_ECB).decrypt(data[15:15 + aligned])
+    pad = plain[-1]
+    if 1 <= pad <= 16 and plain[-pad:] == bytes([pad]) * pad:
+        plain = plain[:-pad]
+    else:
+        plain = plain[:aes_size]
+    remaining = data[15 + aligned:]
+    if xor_size > len(remaining):
+        return None
+    # V2 stores an unmodified prefix followed by an XOR-encrypted tail.
+    # Applying XOR from the beginning corrupts HEVC/wxgf frames (green output).
+    raw_length = len(remaining) - xor_size
+    output = plain + remaining[:raw_length] + bytes(value ^ xor_key for value in remaining[raw_length:])
+    if output.startswith(b"\xff\xd8\xff"):
+        return output, "image/jpeg"
+    if output.startswith(b"\x89PNG\r\n\x1a\n"):
+        return output, "image/png"
+    if output.startswith(b"wxgf") and av is not None:
+        # wxgf wraps an HEVC still-image stream.  PyAV extracts the full
+        # resolution frame; falling back to the sibling _t.dat is avoided.
+        try:
+            container = av.open(io.BytesIO(output[4:]), format="hevc")
+            frame = next(container.decode(video=0), None)
+            if frame is not None:
+                buffer = io.BytesIO()
+                frame.to_image().save(buffer, format="JPEG", quality=95)
+                return buffer.getvalue(), "image/jpeg"
+        except Exception:
+            pass
     return None
 
 
@@ -148,12 +234,25 @@ def save_seen(path: Path, seen: set[str]) -> None:
 
 
 def file_payload(path: Path, stat: os.stat_result) -> dict[str, object] | None:
-    media_type = media_type_for(path)
-    if media_type is None:
-        return None
     try:
         data = path.read_bytes()
     except OSError:
+        return None
+    media_type = media_type_for(path)
+    if media_type is None and path.suffix.lower() == ".dat":
+        account_dir = next((parent for parent in path.parents if parent.parent.name == "xwechat_files"), None)
+        key_info = image_key_for(account_dir) if account_dir else None
+        if key_info:
+            for candidate in (path, path.with_name(path.stem + "_h.dat"), path.with_name(path.stem + "_t.dat")):
+                try:
+                    decoded = decode_v2(candidate.read_bytes(), *key_info)
+                except OSError:
+                    continue
+                if decoded:
+                    data, media_type = decoded
+                    path = candidate
+                    break
+    if media_type is None:
         return None
     digest = hashlib.sha256(data).hexdigest()
     extension = MEDIA_EXTENSIONS.get(media_type, "bin")
@@ -211,10 +310,30 @@ def post_batch(
         log(f"DRY RUN would relay {len(files)} image(s) as #{tag}: {paths}")
         return True
 
+    if endpoint.rstrip("/").endswith("/wechat-group-relay"):
+        # Direct route: keep one durable source id per batch and use the same
+        # tagged Feishu post/image path as the text listener.
+        first = files[0]
+        body = {
+            "source_message_id": f"wx:{WECHAT_CHAT_ID}:file:{first['sha256']}",
+            "source_chat_id": WECHAT_CHAT_ID,
+            "source_create_time": int(latest_mtime * 1000),
+            "sender": "",
+            "text": text or "微信图片消息",
+            "message_type": "3",
+            "media": [{"media_type": item["media_type"], "data_base64": item["data_base64"]} for item in files],
+        }
+        headers = {
+            "content-type": "application/json",
+            "x-wechat-relay-token": relay_token(),
+        }
+    else:
+        headers = {"content-type": "application/json"}
+
     request = urllib.request.Request(
         endpoint,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"content-type": "application/json"},
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
         method="POST",
     )
     try:
@@ -235,7 +354,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Watch local WeChat media temp files and relay them to n8n.")
     parser.add_argument("--tag", required=True, choices=sorted(SUPPORTED_TAGS), help="route tag used by the market import workflow")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="WeChat xwechat_files root")
-    parser.add_argument("--endpoint", default="http://127.0.0.1:5680/manual-relay", help="local feishu-adapter manual relay endpoint")
+    parser.add_argument("--endpoint", default=DEFAULT_DIRECT_ENDPOINT, help="local feishu-adapter relay endpoint")
     parser.add_argument("--source-label", default="微信本机图片监控", help="source label stored with the imported record")
     parser.add_argument("--text", default="", help="optional text to attach to each image batch")
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE, help="dedupe state file")

@@ -237,6 +237,99 @@
       },
       {
         "parameters": {
+          "httpMethod": "POST",
+          "path": "paper-feedback",
+          "responseMode": "onReceived",
+          "options": {}
+        },
+        "id": "paperkb-webhook-feedback",
+        "name": "飞书「推荐反馈」指令",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          -360,
+          960
+        ],
+        "webhookId": "paper-kb-feedback"
+      },
+      {
+        "parameters": {
+          "url": "http://host.docker.internal:8787/jobs/feedback",
+          "method": "POST",
+          "sendBody": true,
+          "contentType": "json",
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify($json.body) }}",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Paper-KB-Token",
+                "value": "={{ $env.PAPER_KB_JOBS_TOKEN }}"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "paperkb-run-feedback",
+        "name": "记录推荐反馈与偏好",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -100,
+          960
+        ]
+      },
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "cronExpression",
+                "expression": "30 20 * * 2"
+              }
+            ]
+          }
+        },
+        "id": "paperkb-cron-evalrecommendations",
+        "name": "每周二 20:30 推荐评测",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          -360,
+          1140
+        ]
+      },
+      {
+        "parameters": {
+          "url": "http://host.docker.internal:8787/jobs/eval-recommendations",
+          "method": "POST",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Paper-KB-Token",
+                "value": "={{ $env.PAPER_KB_JOBS_TOKEN }}"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "paperkb-run-evalrecommendations",
+        "name": "评测推荐并检查学习门槛",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          -100,
+          1140
+        ]
+      },
+      {
+        "parameters": {
           "rule": {
             "interval": [
               {
@@ -332,6 +425,28 @@
           [
             {
               "node": "执行论文检索",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "飞书「推荐反馈」指令": {
+        "main": [
+          [
+            {
+              "node": "记录推荐反馈与偏好",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "每周二 20:30 推荐评测": {
+        "main": [
+          [
+            {
+              "node": "评测推荐并检查学习门槛",
               "type": "main",
               "index": 0
             }
