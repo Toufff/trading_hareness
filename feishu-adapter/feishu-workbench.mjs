@@ -194,6 +194,7 @@ export function capabilityCatalog(config) {
 		item('speech', '音频转写', { category: '智能处理', requires: ['speech_to_text:speech'], note: '只接收 Opus、MP3、WAV、M4A 音频；飞书文件 ASR 适用于不超过 60 秒的音频。视频仍会正常转发，但不在此接口内转写。' }),
 		item('translation', '消息翻译', { category: '智能处理', requires: ['translation:text'], note: '按需调用，原始消息仍保持不变。' }),
 		item('drive', '大文件分片归档到 Drive', { category: '内容沉淀', configured: configured(config.driveFolderToken), requires: ['drive:file:upload'], note: configured(config.driveFolderToken) ? '超过 IM 30 MiB 限制时会流式归档到目标文件夹。' : '需要配置 FEISHU_WORKBENCH_DRIVE_FOLDER_TOKEN。' }),
+		item('baidu_pan', '大文件分片归档到百度网盘', { category: '内容沉淀', configured: config.baiduPanEnabled === true, authorizationSubject: 'user', requires: ['basic', 'netdisk'], note: config.baiduPanEnabled === true ? '可在飞书 IM 限制之外，将资源分片归档到百度网盘；需要完成一次百度 OAuth 授权。' : '设置 BAIDU_PAN_ENABLED=true 并完成百度网盘 OAuth 授权后启用。' }),
 		item('docs', '富文本/Markdown 文档沉淀', { category: '内容沉淀', requires: ['创建及编辑新版文档'], note: '工作台和行动卡片可创建文档，并将 Markdown/HTML 转换为飞书块。' }),
 		item('wiki', '知识库归档', { category: '内容沉淀', configured: configured(config.wikiSpaceId), requires: ['wiki:wiki'], note: configured(config.wikiSpaceId) ? '已配置知识空间，可把新建文档移入 Wiki。' : '配置 FEISHU_WORKBENCH_WIKI_SPACE_ID 后可将文档移入 Wiki。' }),
 		item('tasks', '任务创建/跟踪', { category: '协作', configured: configured(config.tasklistGuid), requires: ['task:task:write'], note: configured(config.tasklistGuid) ? '已配置任务清单。' : '需配置 FEISHU_WORKBENCH_TASKLIST_GUID。' }),
@@ -208,7 +209,7 @@ export function capabilityCatalog(config) {
 	];
 }
 
-export function createFeishuWorkbench({ appId, appSecret, larkClient, ledger, userRequest, sourceApi = null, config = {}, fetchImpl = fetch, logger = console }) {
+export function createFeishuWorkbench({ appId, appSecret, larkClient, ledger, userRequest, sourceApi = null, baiduPan = null, config = {}, fetchImpl = fetch, logger = console }) {
 	let cachedTenantToken = null;
 	let tenantTokenExpiresAt = 0;
 	let cachedOAuthOpenId = null;
@@ -523,6 +524,18 @@ export function createFeishuWorkbench({ appId, appSecret, larkClient, ledger, us
 		return { kind: 'drive', fileToken: finished.data.file_token, filename: asText(fileName, 250) || 'relay-file' };
 	}
 
+	async function uploadToBaiduPan({ readable, fileName, size, remotePath }) {
+		if (!baiduPan) throw new Error('百度网盘适配器未配置');
+		return baiduPan.uploadReadable({ readable, fileName, size, remotePath });
+	}
+
+	async function uploadToCloud({ readable, fileName, size, remotePath }) {
+		const provider = String(config.archiveProvider ?? 'auto').trim().toLowerCase();
+		if (provider === 'baidu' || (provider === 'auto' && !config.driveFolderToken && config.baiduPanEnabled === true)) return uploadToBaiduPan({ readable, fileName, size, remotePath });
+		if (provider === 'feishu' || provider === 'auto') return uploadToDrive({ readable, fileName, size });
+		throw new Error(`不支持的云归档 provider：${provider}`);
+	}
+
 	async function searchMessages({ query, pageToken }) {
 		if (!userRequest) throw new Error('用户 OAuth 不可用');
 		const text = asText(query, 200);
@@ -551,7 +564,7 @@ export function createFeishuWorkbench({ appId, appSecret, larkClient, ledger, us
 
 	return {
 		status: async () => ({ target_configured: Boolean(targetChatId), public_h5_url: config.publicBaseUrl ? `${String(config.publicBaseUrl).replace(/\/$/, '')}/workbench` : null, capabilities: capabilityCatalog(config), application_inspection: applicationInspection }),
-		publishActionCard, performAction, createDocument, createWikiDocument, createBaseRecord, listBaseRecords, updateBaseRecord, deleteBaseRecord, createCalendarEvent, createApproval, publishDigest, ensureWorkbenchTab, searchMessages, syncSourceChange, uploadToDrive, inspectApplication,
+		publishActionCard, performAction, createDocument, createWikiDocument, createBaseRecord, listBaseRecords, updateBaseRecord, deleteBaseRecord, createCalendarEvent, createApproval, publishDigest, ensureWorkbenchTab, searchMessages, syncSourceChange, uploadToDrive, uploadToBaiduPan, uploadToCloud, inspectApplication,
 		buildActionCard: (record) => buildActionCard({ sourceMessageId: record.source_message_id, routeTag: record.route_tag, sourceName: record.source_chat_name, message: record.message, workflowState: record.workflow_state, note: record.workflow_note }),
 	};
 }

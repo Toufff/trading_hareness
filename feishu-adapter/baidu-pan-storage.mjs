@@ -49,7 +49,7 @@ export function baiduPanAuthorizationUrl({ appKey, redirectUri = 'oob', state = 
 }
 
 function responseMessage(body, fallback) {
-	return asText(body?.errmsg ?? body?.error_description ?? body?.msg ?? fallback, 420);
+	return asText(body?.errmsg ?? body?.error_msg ?? body?.error_description ?? body?.msg ?? body?.error ?? fallback, 420);
 }
 
 export function createBaiduPanStorage({ appKey, secretKey, redirectUri = 'oob', ledger = null, fetchImpl = fetch, rootPath = '/', spoolDir = '', maxUploadBytes = DEFAULT_MAX_UPLOAD_BYTES, sliceBytes = DEFAULT_SLICE_BYTES }) {
@@ -60,6 +60,7 @@ export function createBaiduPanStorage({ appKey, secretKey, redirectUri = 'oob', 
 	const boundedSliceBytes = Math.max(256 * 1024, Math.min(32 * 1024 * 1024, Number(sliceBytes) || DEFAULT_SLICE_BYTES));
 	const boundedMaxUploadBytes = Math.max(1, Number(maxUploadBytes) || DEFAULT_MAX_UPLOAD_BYTES);
 	let refreshInFlight = null;
+	let cachedUserUk = null;
 
 	function ensureConfigured() {
 		if (!clientId || !clientSecret) throw new Error('百度网盘 AppKey/SecretKey 未配置');
@@ -156,17 +157,27 @@ export function createBaiduPanStorage({ appKey, secretKey, redirectUri = 'oob', 
 		return payload;
 	}
 
-	async function userInfo() { return request('/rest/2.0/xpan/nas', { params: { method: 'uinfo' } }); }
-	async function quota() { return request('/rest/2.0/xpan/nas', { params: { method: 'quota' } }); }
+	async function userInfo() { const result = await request('/rest/2.0/xpan/nas', { params: { method: 'uinfo', vip_version: 'v2' } }); cachedUserUk = Number(result?.uk) || cachedUserUk; return result; }
+	async function quota({ checkFree, checkExpire } = {}) { return request('/api/quota', { params: { ...(checkFree === undefined ? {} : { checkfree: Number(checkFree) ? 1 : 0 }), ...(checkExpire === undefined ? {} : { checkexpire: Number(checkExpire) ? 1 : 0 }) } }); }
+	async function iotQueryUserInfo(deviceId) { const value = String(deviceId ?? '').trim(); if (!value) throw new Error('百度网盘 iotqueryuinfo 需要 device_id'); return request('/rest/2.0/xpan/device', { params: { method: 'iotqueryuinfo', device_id: value } }); }
 	async function list({ dir = '/', order, desc, start = 0, limit = 1000, folder, web, showempty } = {}) { return request('/rest/2.0/xpan/file', { params: { method: 'list', openapi: 'xpansdk', dir: normalizeBaiduPanPath(dir), ...(order ? { order } : {}), desc: desc === undefined ? undefined : Number(desc) ? 1 : 0, start, limit: Math.min(1000, Math.max(1, Number(limit) || 1000)), ...(folder === undefined ? {} : { folder: Number(folder) ? 1 : 0 }), ...(web === undefined ? {} : { web: Number(web) ? 1 : 0 }), ...(showempty === undefined ? {} : { showempty: Number(showempty) ? 1 : 0 }) } }); }
 	async function listByType(method, { dir = '/', start = 0, limit = 1000 } = {}) {
 		if (!new Set(['doclist', 'imagelist', 'videolist']).has(method)) throw new Error('百度网盘文件类型不支持');
+		if (method === 'videolist') {
+			const result = await list({ dir, start, limit });
+			return { ...result, list: Array.isArray(result?.list) ? result.list.filter((item) => Number(item?.category) === 1) : [] };
+		}
 		return request('/rest/2.0/xpan/file', { params: { method, openapi: 'xpansdk', parent_path: normalizeBaiduPanPath(dir), ...(Number(start) > 0 ? { page: Math.floor(Number(start)) + 1 } : {}), num: Math.min(1000, Math.max(1, Number(limit) || 1000)) } });
 	}
-	async function search(query, { dir = '/', category } = {}) { return request('/rest/2.0/xpan/file', { params: { method: 'search', openapi: 'xpansdk', dir: normalizeBaiduPanPath(dir), key: asText(query, 200), ...(category === undefined ? {} : { category }) } }); }
-	async function fileMeta(fsids, { extra = 0 } = {}) { const ids = Array.isArray(fsids) ? fsids : [fsids]; return request('/rest/2.0/xpan/multimedia', { params: { method: 'filemetas', fsids: JSON.stringify(ids.map(Number).filter(Number.isFinite)), dlink: 1, extra } }); }
-	async function listAll({ path = '/', recursion = 1 } = {}) { return request('/rest/2.0/xpan/multimedia', { params: { method: 'listall', path: normalizeBaiduPanPath(path), recursion: Number(recursion) ? 1 : 0 } }); }
-	async function semanticSearch(query, options = {}) { return request('/xpan/unisearch', { method: 'POST', params: { query: asText(query, 200), scene: 'mcpserver', ...(options.dir ? { dirs: JSON.stringify([{ path: normalizeBaiduPanPath(options.dir) }]) } : {}), ...(options.category ? { category: JSON.stringify(options.category) } : {}), ...(options.num ? { num: Math.min(100, Math.max(1, Number(options.num) || 20)) } : {}) }, body: '{}' }); }
+	async function search(query, { dir = '/', category, page, num, recursion, web } = {}) { return request('/rest/2.0/xpan/file', { params: { method: 'search', openapi: 'xpansdk', dir: normalizeBaiduPanPath(dir), key: asText(query, 200), ...(category === undefined ? {} : { category }), ...(page === undefined ? {} : { page }), ...(num === undefined ? {} : { num: Math.min(1000, Math.max(1, Number(num) || 100)) }), ...(recursion === undefined ? {} : { recursion: Number(recursion) ? 1 : 0 }), ...(web === undefined ? {} : { web: Number(web) ? 1 : 0 }) } }); }
+	async function fileMeta(fsids, { extra = 0, thumb, path, needmedia } = {}) { const ids = Array.isArray(fsids) ? fsids : [fsids]; return request('/rest/2.0/xpan/multimedia', { params: { method: 'filemetas', openapi: 'xpansdk', fsids: JSON.stringify(ids.map(Number).filter(Number.isFinite)), dlink: 1, extra, ...(thumb === undefined ? {} : { thumb }), ...(path ? { path: normalizeBaiduPanPath(path) } : {}), ...(needmedia === undefined ? {} : { needmedia: Number(needmedia) ? 1 : 0 }) } }); }
+	async function listAll({ path = '/', recursion = 1, web, start, limit, order, desc } = {}) { return request('/rest/2.0/xpan/multimedia', { params: { method: 'listall', openapi: 'xpansdk', path: normalizeBaiduPanPath(path), recursion: Number(recursion) ? 1 : 0, ...(web === undefined ? {} : { web: Number(web) ? 1 : 0 }), ...(start === undefined ? {} : { start }), ...(limit === undefined ? {} : { limit: Math.min(1000, Math.max(1, Number(limit) || 1000)) }), ...(order ? { order } : {}), ...(desc === undefined ? {} : { desc: Number(desc) ? 1 : 0 }) } }); }
+	async function semanticSearch(query, options = {}) {
+		const text = asText(query, 200); if (!text) throw new Error('百度网盘语义搜索 query 不能为空');
+		let uk = Number(options.uk) || cachedUserUk;
+		if (options.dir && !uk) { const info = await userInfo(); uk = Number(info?.uk) || 0; }
+		return request('/xpan/unisearch', { method: 'POST', params: { query: text, scene: 'mcpserver', ...(options.dir && uk ? { dirs: JSON.stringify([{ uk, path: normalizeBaiduPanPath(options.dir) }]) } : {}), ...(options.category ? { category: JSON.stringify(options.category) } : {}), ...(options.num ? { num: Math.min(500, Math.max(1, Number(options.num) || 20)) } : {}), ...(options.stream === undefined ? {} : { stream: Number(options.stream) ? 1 : 0 }), ...(options.searchType === undefined ? {} : { search_type: Number(options.searchType) || 0 }), ...(options.sources ? { sources: JSON.stringify(options.sources) } : {}) }, body: '{}' });
+	}
 
 	async function uploadReadable({ readable, fileName, size, remotePath = rootPath, rtype = 1 }) {
 		if (!readable || typeof readable[Symbol.asyncIterator] !== 'function') throw new Error('百度网盘上传需要可读流');
@@ -202,12 +213,12 @@ export function createBaiduPanStorage({ appKey, secretKey, redirectUri = 'oob', 
 		} finally { await rm(dir, { recursive: true, force: true }).catch(() => {}); }
 	}
 
-	async function download(fsId) { const meta = await fileMeta([fsId], { extra: 0 }); const dlink = meta?.list?.[0]?.dlink; if (!dlink) throw new Error('百度网盘未返回 dlink'); return request(dlink, { raw: true }); }
-	async function createShareLink(fsids, { period = 7, password = '' } = {}) { const ids = (Array.isArray(fsids) ? fsids : [fsids]).map((value) => String(value)); if (!ids.length || ids.length > 100) throw new Error('分享文件数量必须为 1–100'); return request('/rest/2.0/xpan/share', { method: 'POST', params: { method: 'create' }, body: new URLSearchParams({ fsid_list: JSON.stringify(ids), period: String(Math.max(0, Number(period) || 7)), pwd: asText(password, 4) }) }); }
+	async function download(fsId) { const meta = await fileMeta([fsId], { extra: 0 }); const dlink = meta?.list?.[0]?.dlink; if (!dlink) throw new Error('百度网盘未返回 dlink'); const response = await fetchImpl(dlink, { headers: { accept: '*/*', 'user-agent': 'pan.baidu.com' }, signal: AbortSignal.timeout(60_000) }); if (!response.ok || !response.body) throw new Error(`百度网盘下载失败（HTTP ${response.status}）`); return response; }
+	async function createShareLink(fsids, { period = 7, password = '1234' } = {}) { const ids = (Array.isArray(fsids) ? fsids : [fsids]).map((value) => String(value).trim()).filter(Boolean); if (!ids.length || ids.length > 100) throw new Error('分享文件数量必须为 1–100'); const pwd = asText(password, 4).toLowerCase(); if (!/^[a-z0-9]{4}$/.test(pwd)) throw new Error('分享密码必须是 4 位数字或小写字母'); return request('/rest/2.0/xpan/share', { method: 'POST', params: { method: 'create' }, body: new URLSearchParams({ fsid_list: JSON.stringify(ids), period: String(Math.max(1, Number(period) || 7)), pwd }) }); }
 	async function manage(opera, filelist, { async = 1, ondup } = {}) {
 		return request('/rest/2.0/xpan/file', { method: 'POST', params: { method: 'filemanager', opera }, body: new URLSearchParams({ async: String(async), filelist: JSON.stringify(filelist), ...(ondup ? { ondup } : {}) }) });
 	}
 	function copyMoveItem(from, to, name) { return { path: normalizeBaiduPanPath(from), dest: normalizeBaiduPanPath(to), ...(asText(name, 255) ? { newname: asText(name, 255) } : {}) }; }
 
-	return { status, authorizationUrl: (state) => baiduPanAuthorizationUrl({ appKey: clientId, redirectUri: effectiveRedirectUri, state }), deviceCode, exchangeAuthorizationCode, exchangeDeviceCode, bootstrapRefreshToken, refresh: async () => { ensureConfigured(); const record = await ledger.getBaiduPanOAuthToken(); if (!record) throw new Error('尚未保存百度网盘 OAuth 授权'); await refreshToken(record); return status(); }, userInfo, quota, list, listByType, fileDocList: (options) => listByType('doclist', options), fileImageList: (options) => listByType('imagelist', options), fileVideoList: (options) => listByType('videolist', options), listAll, search, semanticSearch, fileMeta, uploadReadable, download, createShareLink, mkdir: (path) => request('/rest/2.0/xpan/file', { method: 'POST', params: { method: 'create' }, body: new URLSearchParams({ path: normalizeBaiduPanPath(path), isdir: '1', rtype: '1' }) }), copy: (from, to, name) => manage('copy', [copyMoveItem(from, to, name)], { ondup: 'newcopy' }), move: (from, to, name) => manage('move', [copyMoveItem(from, to, name)]), rename: (path, name) => manage('rename', [{ path: normalizeBaiduPanPath(path), newname: asText(name, 255) }]), remove: (path) => manage('delete', [normalizeBaiduPanPath(path)], { async: 1 }) };
+	return { status, authorizationUrl: (state) => baiduPanAuthorizationUrl({ appKey: clientId, redirectUri: effectiveRedirectUri, state }), deviceCode, exchangeAuthorizationCode, exchangeDeviceCode, bootstrapRefreshToken, refresh: async () => { ensureConfigured(); const record = await ledger.getBaiduPanOAuthToken(); if (!record) throw new Error('尚未保存百度网盘 OAuth 授权'); await refreshToken(record); return status(); }, userInfo, quota, iotQueryUserInfo, list, listByType, fileDocList: (options) => listByType('doclist', options), fileImageList: (options) => listByType('imagelist', options), fileVideoList: (options) => listByType('videolist', options), listAll, search, semanticSearch, fileMeta, uploadReadable, download, createShareLink, mkdir: (path) => request('/rest/2.0/xpan/file', { method: 'POST', params: { method: 'create' }, body: new URLSearchParams({ path: normalizeBaiduPanPath(path), isdir: '1', rtype: '1' }) }), copy: (from, to, name) => manage('copy', [copyMoveItem(from, to, name)], { ondup: 'newcopy' }), move: (from, to, name) => manage('move', [copyMoveItem(from, to, name)]), rename: (path, name) => manage('rename', [{ path: normalizeBaiduPanPath(path), newname: asText(name, 255) }]), remove: (path) => manage('delete', [normalizeBaiduPanPath(path)], { async: 1 }) };
 }

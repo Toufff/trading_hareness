@@ -248,8 +248,8 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 		const filename = filenameFromHeaders(response.headers, `${descriptor.kind}-${descriptor.key}`);
 		const declaredBytes = Number(headerValue(response.headers, 'content-length'));
 		if (Number.isFinite(declaredBytes) && declaredBytes > MAX_SOURCE_FILE_BYTES) {
-			if (!workbench?.uploadToDrive) throw new RelayUnsupportedError(`消息资源超过 ${Math.floor(MAX_SOURCE_FILE_BYTES / 1024 / 1024)} MiB 转发上限；未配置云空间归档`);
-			const archived = await workbench.uploadToDrive({ readable: response.getReadableStream(), fileName: filename, size: declaredBytes });
+			if (!workbench?.uploadToCloud) throw new RelayUnsupportedError(`消息资源超过 ${Math.floor(MAX_SOURCE_FILE_BYTES / 1024 / 1024)} MiB 转发上限；未配置云空间归档`);
+			const archived = await workbench.uploadToCloud({ readable: response.getReadableStream(), fileName: filename, size: declaredBytes });
 			return { ...archived, contentType };
 		}
 		const bytes = await readableToBuffer(response.getReadableStream(), MAX_SOURCE_FILE_BYTES);
@@ -297,6 +297,9 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 		const uploaded = await downloadAndUpload(message, descriptor);
 		if (uploaded.kind === 'drive') {
 			return { component: 'drive-archive', msgType: 'text', content: { text: taggedText(source.tag, `大文件已归档至配置的飞书云空间文件夹：${uploaded.filename}\n文件 token：${uploaded.fileToken}`) } };
+		}
+		if (uploaded.kind === 'baidu_pan') {
+			return { component: 'baidu-pan-archive', msgType: 'text', content: { text: taggedText(source.tag, `大文件已归档至百度网盘：${uploaded.path}\n文件 ID：${uploaded.fsId ?? 'rapid-upload'}`) } };
 		}
 		if (message.msg_type !== 'media' || uploaded.kind !== 'file') {
 			if (uploaded.kind === 'image') {

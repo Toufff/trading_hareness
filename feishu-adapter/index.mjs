@@ -13,6 +13,7 @@ import { createWeChatGroupRelay } from './wechat-group-relay.mjs';
 import { createSummaryListener } from './summary-listener.mjs';
 import { createFeishuUserOauth } from './feishu-user-oauth.mjs';
 import { createFeishuWorkbench } from './feishu-workbench.mjs';
+import { createBaiduPanStorage } from './baidu-pan-storage.mjs';
 import { isSystemRelayPlaceholder } from './message-filter.mjs';
 import { extractImportContent, isValidDateTime } from './message-time.mjs';
 import { hasImportableTaggedPayload } from './summary-ingestion-filter.mjs';
@@ -119,6 +120,17 @@ const ingestionStorageDir = process.env.INGESTION_STORAGE_DIR ?? '/var/lib/adapt
 mkdirSync(ingestionStorageDir, { recursive: true });
 const ledger = createLedger(process.env.INGESTION_DATABASE_URL || undefined);
 await ledger.init(sourceRegistry);
+const baiduPanEnabled = String(process.env.BAIDU_PAN_ENABLED ?? 'false').toLowerCase() === 'true';
+const baiduPan = createBaiduPanStorage({
+	appKey: process.env.BAIDU_PAN_APP_KEY,
+	secretKey: process.env.BAIDU_PAN_SECRET_KEY,
+	redirectUri: String(process.env.BAIDU_PAN_REDIRECT_URI ?? 'oob').trim() || 'oob',
+	ledger,
+	rootPath: String(process.env.BAIDU_PAN_ROOT_PATH ?? '/apps/股票paper存储/feishu-relay').trim(),
+	spoolDir: String(process.env.BAIDU_PAN_SPOOL_DIR ?? '').trim(),
+	maxUploadBytes: Number(process.env.BAIDU_PAN_MAX_UPLOAD_BYTES ?? 500 * 1024 * 1024),
+	sliceBytes: Number(process.env.BAIDU_PAN_SLICE_BYTES ?? 4 * 1024 * 1024),
+});
 const feishuUserOauth = createFeishuUserOauth({
 	appId, appSecret, ledger, redirectUri: String(process.env.FEISHU_USER_OAUTH_REDIRECT_URI ?? 'http://localhost:8080/callback').trim(),
 });
@@ -194,6 +206,8 @@ const feishuWorkbench = createFeishuWorkbench({
 		publicBaseUrl: String(process.env.FEISHU_WORKBENCH_PUBLIC_BASE_URL ?? '').trim(),
 		driveFolderToken: String(process.env.FEISHU_WORKBENCH_DRIVE_FOLDER_TOKEN ?? '').trim(),
 		driveMaxFileBytes: Math.max(30 * 1024 * 1024, Number(process.env.FEISHU_WORKBENCH_DRIVE_MAX_FILE_BYTES ?? 524_288_000)),
+		archiveProvider: String(process.env.BAIDU_PAN_ARCHIVE_PROVIDER ?? 'auto').trim().toLowerCase(),
+		baiduPanEnabled,
 		wikiSpaceId: String(process.env.FEISHU_WORKBENCH_WIKI_SPACE_ID ?? '').trim(),
 		wikiParentNodeToken: String(process.env.FEISHU_WORKBENCH_WIKI_PARENT_NODE_TOKEN ?? '').trim(),
 		tasklistGuid: String(process.env.FEISHU_WORKBENCH_TASKLIST_GUID ?? '').trim(),
@@ -205,6 +219,7 @@ const feishuWorkbench = createFeishuWorkbench({
 		asrEngineType: String(process.env.FEISHU_WORKBENCH_ASR_ENGINE_TYPE ?? '16k_auto').trim(),
 		actionCardsEnabled: groupRelayConfig.actionCardsEnabled,
 	},
+	baiduPan,
 });
 const groupRelay = createGroupRelay({
 	larkClient, sourceApi: feishuUserOauth.sourceApi, ledger, workbench: feishuWorkbench,
@@ -1387,6 +1402,97 @@ const dashboard = createServer((request, response) => {
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
 			response.end(JSON.stringify({ ...workbench, capabilities: annotateWorkbenchCapabilities(workbench.capabilities, oauth, workbench.application_inspection), user_oauth_configured: Boolean(oauth.configured), user_oauth_scopes: oauth.scopes ?? '', user_oauth_scope_audit: oauth.scope_audit ?? null, event_subscriptions: workbenchEventStatus() }));
 		}).catch((error) => response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/status' && request.method === 'GET') {
+		void baiduPan.status().then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
+			.catch((error) => response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/oauth/url' && request.method === 'GET') {
+		try { const state = String(url.searchParams.get('state') ?? 'baidu-pan').slice(0, 200); response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ authorization_url: baiduPan.authorizationUrl(state), redirect_uri: String(process.env.BAIDU_PAN_REDIRECT_URI ?? 'oob') })); } catch (error) { response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })); }
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/oauth/device' && request.method === 'POST') {
+		void baiduPan.deviceCode().then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/oauth/exchange' && request.method === 'POST') {
+		void readJsonBody(request, 16 * 1024).then((payload) => baiduPan.exchangeAuthorizationCode(payload?.code, payload?.redirect_uri)).then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/oauth/device-exchange' && request.method === 'POST') {
+		void readJsonBody(request, 16 * 1024).then((payload) => baiduPan.exchangeDeviceCode(payload?.device_code ?? payload?.code)).then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/oauth/bootstrap' && request.method === 'POST') {
+		void readJsonBody(request, 16 * 1024).then((payload) => baiduPan.bootstrapRefreshToken(payload?.refresh_token)).then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/oauth/refresh' && request.method === 'POST') {
+		void baiduPan.refresh().then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/user' && request.method === 'GET') {
+		void baiduPan.userInfo().then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/device-user' && request.method === 'GET') {
+		void baiduPan.iotQueryUserInfo(url.searchParams.get('device_id')).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/quota' && request.method === 'GET') {
+		void baiduPan.quota({ checkFree: url.searchParams.has('checkfree') ? url.searchParams.get('checkfree') : undefined, checkExpire: url.searchParams.has('checkexpire') ? url.searchParams.get('checkexpire') : undefined }).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/files' && request.method === 'GET') {
+		const dir = url.searchParams.get('dir') ?? '/'; const type = url.searchParams.get('type') ?? 'list'; const options = { dir, start: url.searchParams.get('start') ?? 0, limit: url.searchParams.get('limit') ?? 1000 };
+		const method = type === 'doc' ? baiduPan.fileDocList : type === 'image' ? baiduPan.fileImageList : type === 'video' ? baiduPan.fileVideoList : baiduPan.list;
+		void method(options).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/search' && request.method === 'GET') {
+		const query = url.searchParams.get('q') ?? ''; const semantic = url.searchParams.get('semantic') === 'true';
+		void (semantic ? baiduPan.semanticSearch(query, { dir: url.searchParams.get('dir') ?? undefined }) : baiduPan.search(query, { dir: url.searchParams.get('dir') ?? '/' })).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/meta' && request.method === 'GET') {
+		const rawIds = url.searchParams.getAll('fsid').length ? url.searchParams.getAll('fsid') : String(url.searchParams.get('fsids') ?? '').split(',').map((value) => value.trim()).filter(Boolean);
+		void baiduPan.fileMeta(rawIds).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/list-all' && request.method === 'GET') {
+		void baiduPan.listAll({ path: url.searchParams.get('path') ?? '/', recursion: url.searchParams.get('recursion') ?? 1, web: url.searchParams.get('web') ?? undefined, start: url.searchParams.get('start') ?? undefined, limit: url.searchParams.get('limit') ?? undefined, order: url.searchParams.get('order') ?? undefined, desc: url.searchParams.get('desc') ?? undefined }).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/manage' && request.method === 'POST') {
+		void readJsonBody(request, 32 * 1024).then(async (payload) => {
+			const operation = String(payload?.operation ?? '').trim();
+			if (operation === 'mkdir') return baiduPan.mkdir(payload?.path);
+			if (operation === 'copy') return baiduPan.copy(payload?.from, payload?.to, payload?.name);
+			if (operation === 'move') return baiduPan.move(payload?.from, payload?.to, payload?.name);
+			if (operation === 'rename') return baiduPan.rename(payload?.path, payload?.name);
+			if (operation === 'delete') return baiduPan.remove(payload?.path);
+			throw new Error('不支持的百度网盘文件操作');
+		}).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		return;
+	}
+	if (url.pathname === '/api/baidu-pan/share' && request.method === 'POST') {
+		void readJsonBody(request, 16 * 1024).then((payload) => baiduPan.createShareLink(payload?.fsids ?? payload?.fsid_list, { period: payload?.period, password: payload?.password })).then((result) => { response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
+			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/application-inspection' && request.method === 'POST') {

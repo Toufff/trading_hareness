@@ -76,6 +76,7 @@ export function createLedger(connectionString) {
 			CREATE TABLE IF NOT EXISTS feishu_summary_listener_state (listener_key text PRIMARY KEY, chat_id text NOT NULL, cursor_create_time bigint NOT NULL, last_source_create_time bigint, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
 			CREATE TABLE IF NOT EXISTS feishu_relay_writer_ownership (singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton), writer_id text NOT NULL, generation bigint NOT NULL CHECK (generation > 0), updated_at timestamptz NOT NULL DEFAULT now());
 				CREATE TABLE IF NOT EXISTS feishu_user_oauth_tokens (token_key text PRIMARY KEY, access_ciphertext text NOT NULL, refresh_ciphertext text NOT NULL, access_expires_at timestamptz NOT NULL, refresh_expires_at timestamptz NOT NULL, scopes text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT now());
+				CREATE TABLE IF NOT EXISTS baidu_pan_oauth_tokens (token_key text PRIMARY KEY, access_ciphertext text NOT NULL, refresh_ciphertext text NOT NULL, access_expires_at timestamptz NOT NULL, refresh_expires_at timestamptz NOT NULL, scopes text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT now());
 				CREATE INDEX IF NOT EXISTS feishu_group_relay_messages_status_idx ON feishu_group_relay_messages(status, updated_at);
 				CREATE INDEX IF NOT EXISTS feishu_group_relay_actions_message_idx ON feishu_group_relay_actions(source_message_id, created_at DESC);
 				CREATE INDEX IF NOT EXISTS ingestion_jobs_status_idx ON ingestion_jobs(status, updated_at);
@@ -123,6 +124,11 @@ export function createLedger(connectionString) {
 		async getFeishuUserOauthToken() { const { rows } = await pool.query("SELECT * FROM feishu_user_oauth_tokens WHERE token_key='default'"); return rows[0] ?? null; },
 		async saveFeishuUserOauthToken({ accessCiphertext, refreshCiphertext, accessExpiresAt, refreshExpiresAt, scopes }) {
 			await pool.query(`INSERT INTO feishu_user_oauth_tokens(token_key,access_ciphertext,refresh_ciphertext,access_expires_at,refresh_expires_at,scopes)
+				VALUES('default',$1,$2,$3,$4,$5) ON CONFLICT(token_key) DO UPDATE SET access_ciphertext=EXCLUDED.access_ciphertext,refresh_ciphertext=EXCLUDED.refresh_ciphertext,access_expires_at=EXCLUDED.access_expires_at,refresh_expires_at=EXCLUDED.refresh_expires_at,scopes=EXCLUDED.scopes,updated_at=now()`, [accessCiphertext, refreshCiphertext, accessExpiresAt, refreshExpiresAt, scopes]);
+		},
+		async getBaiduPanOAuthToken() { const { rows } = await pool.query("SELECT * FROM baidu_pan_oauth_tokens WHERE token_key='default'"); return rows[0] ?? null; },
+		async saveBaiduPanOAuthToken({ accessCiphertext, refreshCiphertext, accessExpiresAt, refreshExpiresAt, scopes }) {
+			await pool.query(`INSERT INTO baidu_pan_oauth_tokens(token_key,access_ciphertext,refresh_ciphertext,access_expires_at,refresh_expires_at,scopes)
 				VALUES('default',$1,$2,$3,$4,$5) ON CONFLICT(token_key) DO UPDATE SET access_ciphertext=EXCLUDED.access_ciphertext,refresh_ciphertext=EXCLUDED.refresh_ciphertext,access_expires_at=EXCLUDED.access_expires_at,refresh_expires_at=EXCLUDED.refresh_expires_at,scopes=EXCLUDED.scopes,updated_at=now()`, [accessCiphertext, refreshCiphertext, accessExpiresAt, refreshExpiresAt, scopes]);
 		},
 		async relayWriterFence(writerId) {
