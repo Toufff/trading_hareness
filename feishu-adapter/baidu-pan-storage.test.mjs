@@ -103,3 +103,23 @@ test('uses the official quota endpoint and optional checks', async () => {
 	assert.equal(quotaUrl.searchParams.get('checkfree'), '1');
 	assert.equal(quotaUrl.searchParams.get('checkexpire'), '1');
 });
+
+test('falls back to directory walking when listall is unavailable', async () => {
+	const ledger = ledgerStub();
+	const urls = [];
+	const fetchImpl = async (url) => {
+		urls.push(String(url));
+		if (String(url).startsWith('https://openapi.baidu.com')) return new Response(JSON.stringify({ access_token: 'a', refresh_token: 'r', expires_in: 3600 }), { status: 200 });
+		const parsed = new URL(url);
+		if (parsed.searchParams.get('method') === 'listall') return new Response(JSON.stringify({ errno: 20020, error_code: 20020 }), { status: 200 });
+		if (parsed.searchParams.get('method') === 'list' && parsed.searchParams.get('dir') === '/') return new Response(JSON.stringify({ errno: 0, list: [{ path: '/child', isdir: 1 }, { path: '/root.txt', isdir: 0 }], has_more: 0 }), { status: 200 });
+		if (parsed.searchParams.get('method') === 'list' && parsed.searchParams.get('dir') === '/child') return new Response(JSON.stringify({ errno: 0, list: [{ path: '/child/nested.txt', isdir: 0 }], has_more: 0 }), { status: 200 });
+		throw new Error(`unexpected ${url}`);
+	};
+	const storage = createBaiduPanStorage({ appKey: 'app', secretKey: 'secret', ledger, fetchImpl });
+	await storage.exchangeAuthorizationCode('c');
+	const result = await storage.listAll({ path: '/', recursion: 1, limit: 10 });
+	assert.deepEqual(result.list.map((item) => item.path), ['/child', '/root.txt', '/child/nested.txt']);
+	assert.equal(result.fallback, 'directory_walk');
+	assert.equal(new URL(urls[1]).searchParams.get('method'), 'listall');
+});

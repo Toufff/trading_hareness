@@ -49,7 +49,8 @@ export function baiduPanAuthorizationUrl({ appKey, redirectUri = 'oob', state = 
 }
 
 function responseMessage(body, fallback) {
-	return asText(body?.errmsg ?? body?.error_msg ?? body?.error_description ?? body?.msg ?? body?.error ?? fallback, 420);
+	const detail = body?.errmsg ?? body?.error_msg ?? body?.error_description ?? body?.msg ?? body?.error ?? body?.error_code;
+	return asText(detail ?? (body && typeof body === 'object' ? JSON.stringify(body) : fallback), 420);
 }
 
 export function createBaiduPanStorage({ appKey, secretKey, redirectUri = 'oob', ledger = null, fetchImpl = fetch, rootPath = '/', spoolDir = '', maxUploadBytes = DEFAULT_MAX_UPLOAD_BYTES, sliceBytes = DEFAULT_SLICE_BYTES }) {
@@ -171,7 +172,44 @@ export function createBaiduPanStorage({ appKey, secretKey, redirectUri = 'oob', 
 	}
 	async function search(query, { dir = '/', category, page, num, recursion, web } = {}) { return request('/rest/2.0/xpan/file', { params: { method: 'search', openapi: 'xpansdk', dir: normalizeBaiduPanPath(dir), key: asText(query, 200), ...(category === undefined ? {} : { category }), ...(page === undefined ? {} : { page }), ...(num === undefined ? {} : { num: Math.min(1000, Math.max(1, Number(num) || 100)) }), ...(recursion === undefined ? {} : { recursion: Number(recursion) ? 1 : 0 }), ...(web === undefined ? {} : { web: Number(web) ? 1 : 0 }) } }); }
 	async function fileMeta(fsids, { extra = 0, thumb, path, needmedia } = {}) { const ids = Array.isArray(fsids) ? fsids : [fsids]; return request('/rest/2.0/xpan/multimedia', { params: { method: 'filemetas', openapi: 'xpansdk', fsids: JSON.stringify(ids.map(Number).filter(Number.isFinite)), dlink: 1, extra, ...(thumb === undefined ? {} : { thumb }), ...(path ? { path: normalizeBaiduPanPath(path) } : {}), ...(needmedia === undefined ? {} : { needmedia: Number(needmedia) ? 1 : 0 }) } }); }
-	async function listAll({ path = '/', recursion = 1, web, start, limit, order, desc } = {}) { return request('/rest/2.0/xpan/multimedia', { params: { method: 'listall', path: normalizeBaiduPanPath(path), recursion: Number(recursion) ? 1 : 0, ...(web === undefined ? {} : { web: Number(web) ? 1 : 0 }), ...(start === undefined ? {} : { start }), ...(limit === undefined ? {} : { limit: Math.min(1000, Math.max(1, Number(limit) || 1000)) }), ...(order ? { order } : {}), ...(desc === undefined ? {} : { desc: Number(desc) ? 1 : 0 }) } }); }
+	async function listAllFallback({ path = '/', recursion = 1, web, start = 0, limit, order, desc } = {}) {
+		const root = normalizeBaiduPanPath(path);
+		const offset = Math.max(0, Number(start) || 0);
+		const pageLimit = Math.min(1000, Math.max(1, Number(limit) || 1000));
+		const end = offset + pageLimit;
+		const pending = [root];
+		const visited = new Set();
+		const entries = [];
+		let first = null;
+		while (pending.length && entries.length < end) {
+			const dir = pending.shift();
+			if (visited.has(dir)) continue;
+			visited.add(dir);
+			let cursor = 0;
+			while (entries.length < end) {
+				const result = await list({ dir, order, desc, start: cursor, limit: pageLimit, web });
+				first ||= result;
+				const page = Array.isArray(result?.list) ? result.list : [];
+				if (!page.length) break;
+				for (const item of page) {
+					entries.push(item);
+					if (Number(recursion) && Number(item?.isdir) === 1 && item?.path) pending.push(normalizeBaiduPanPath(item.path));
+					if (entries.length >= end) break;
+				}
+				if (entries.length >= end || Number(result?.has_more) !== 1 || page.length < pageLimit) break;
+				cursor += page.length;
+			}
+		}
+		return { ...(first ?? { errno: 0 }), list: entries.slice(offset, end), has_more: entries.length >= end ? 1 : 0, fallback: 'directory_walk' };
+	}
+	async function listAll(options = {}) {
+		try {
+			return await request('/rest/2.0/xpan/multimedia', { params: { method: 'listall', path: normalizeBaiduPanPath(options.path ?? '/'), recursion: Number(options.recursion ?? 1) ? 1 : 0, ...(options.web === undefined ? {} : { web: Number(options.web) ? 1 : 0 }), ...(options.start === undefined ? {} : { start: options.start }), ...(options.limit === undefined ? {} : { limit: Math.min(1000, Math.max(1, Number(options.limit) || 1000)) }), ...(options.order ? { order: options.order } : {}), ...(options.desc === undefined ? {} : { desc: Number(options.desc) ? 1 : 0 }) } });
+		} catch (error) {
+			if (!/20020/.test(String(error?.message ?? error))) throw error;
+			return listAllFallback(options);
+		}
+	}
 	async function semanticSearch(query, options = {}) {
 		const text = asText(query, 200); if (!text) throw new Error('百度网盘语义搜索 query 不能为空');
 		let uk = Number(options.uk) || cachedUserUk;
