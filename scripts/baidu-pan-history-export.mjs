@@ -135,7 +135,7 @@ async function exportDataset({ pool, baiduPan, dataset, from, to, root = DEFAULT
 
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
-	const password = process.env.POSTGRES_PASSWORD;
+	const password = process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD;
 	if (!password) throw new Error('POSTGRES_PASSWORD is required');
 	const host = process.env.PGHOST || '127.0.0.1';
 	const port = process.env.PGPORT || '5432';
