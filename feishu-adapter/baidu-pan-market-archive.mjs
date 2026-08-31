@@ -3,6 +3,102 @@ import { Readable } from 'node:stream';
 const DEFAULT_ROOT = '/apps/股票paper存储/market-realtime';
 const MAX_SNAPSHOT_BYTES = 12 * 1024 * 1024;
 
+function latestTimestamp(values) {
+	return values
+		.map((value) => text(value))
+		.filter(Boolean)
+		.sort()
+		.at(-1) ?? null;
+}
+
+const SNAPSHOT_SPECS = [
+	{
+		bucket: 'watchlist',
+		path: '/api/v1/intraday/scans/latest?limit=200',
+		source: 'quant.intraday.scans.latest',
+		identity: (body) => text(body?.scan?.scan_id),
+		observedAt: (body) => body?.scan?.observed_at,
+	},
+	{
+		bucket: 'leader-rotation',
+		path: '/api/v1/research/ten-day-leader-rotation/latest?limit=90',
+		source: 'quant.ten_day_leader_rotation.latest',
+		identity: (body) => {
+			const runId = text(body?.run?.run_id, 'none');
+			const batchId = text(body?.intraday?.latest_batch?.scan_id, text(body?.intraday?.latest_batch?.observed_at, 'none'));
+			return body?.run || body?.intraday?.latest_batch ? `${runId}:${batchId}` : '';
+		},
+		observedAt: (body) => body?.intraday?.latest_batch?.observed_at ?? body?.run?.updated_at,
+	},
+	{
+		bucket: 'board-rotation',
+		path: '/api/v1/intraday/board-rotations/latest',
+		source: 'quant.intraday.board_rotations.latest',
+		identity: (body) => latestTimestamp((body?.items ?? []).map((item) => item?.updated_at ?? item?.snapshot_minute)),
+		observedAt: (body) => latestTimestamp((body?.items ?? []).map((item) => item?.updated_at ?? item?.snapshot_minute)),
+	},
+	{
+		bucket: 'board-mining',
+		path: '/api/v1/intraday/board-stock-mining/latest',
+		source: 'quant.intraday.board_stock_mining.latest',
+		identity: (body) => text(body?.run?.mining_run_id),
+		observedAt: (body) => body?.run?.observed_at,
+	},
+	{
+		bucket: 'limit-linkage',
+		path: '/api/v1/intraday/limit-linkage/latest',
+		source: 'quant.intraday.limit_linkage.latest',
+		identity: (body) => text(body?.run?.linkage_run_id),
+		observedAt: (body) => body?.run?.observed_at,
+	},
+	{
+		bucket: 'sector-curves',
+		path: '/api/v1/market/sectors/intraday/curves',
+		source: 'quant.market.sectors.intraday.curves',
+		identity: (body) => {
+			const points = (body?.items ?? []).flatMap((item) => item?.points ?? []);
+			const latest = latestTimestamp(points.map((point) => point?.observed_at));
+			return body?.trade_date && latest ? `${body.trade_date}:${latest}` : '';
+		},
+		observedAt: (body) => latestTimestamp((body?.items ?? []).flatMap((item) => (item?.points ?? []).map((point) => point?.observed_at))),
+	},
+	{
+		bucket: 'strategy-decisions',
+		path: '/api/v1/strategy/decisions/latest',
+		source: 'quant.strategy.decisions.latest',
+		identity: (body) => text(body?.run?.run_id),
+		observedAt: (body) => body?.run?.observed_at ?? body?.run?.created_at,
+	},
+	{
+		bucket: 'strategy-health',
+		path: '/api/v1/strategy/health',
+		source: 'quant.strategy.health',
+		identity: (body) => text(body?.observed_at),
+		observedAt: (body) => body?.observed_at,
+	},
+	{
+		bucket: 'post-close',
+		path: '/api/v1/strategy/post-close/latest',
+		source: 'quant.strategy.post_close.latest',
+		identity: (body) => text(body?.run?.run_id ?? body?.candidate_run?.run_id),
+		observedAt: (body) => body?.run?.updated_at ?? body?.candidate_run?.updated_at,
+	},
+	{
+		bucket: 'pattern-mining',
+		path: '/api/v1/strategy/pattern-mining/latest',
+		source: 'quant.strategy.pattern_mining.latest',
+		identity: (body) => text(body?.run?.run_id),
+		observedAt: (body) => body?.run?.updated_at ?? body?.run?.created_at,
+	},
+	{
+		bucket: 'strategy-reviews',
+		path: '/api/v1/strategy/reviews/latest',
+		source: 'quant.strategy.reviews.latest',
+		identity: (body) => text(body?.review?.review_id),
+		observedAt: (body) => body?.review?.observed_at ?? body?.review?.created_at,
+	},
+];
+
 function text(value, fallback = '') {
 	return String(value ?? fallback).trim();
 }
@@ -110,15 +206,12 @@ export function createBaiduPanMarketArchive({ baiduPan, ledger, quantServiceUrl,
 		if (!enabledFlag || running) return;
 		lastPollAt = new Date().toISOString();
 		try {
-			const [scan, leader] = await Promise.all([
-				fetchJson('/api/v1/intraday/scans/latest?limit=200'),
-				fetchJson('/api/v1/research/ten-day-leader-rotation/latest?limit=90'),
-			]);
-			const scanId = text(scan?.scan?.scan_id);
-			if (scanId) await enqueueSnapshot('watchlist', scanId, scan.scan.observed_at, { source: 'quant.intraday.scans.latest', scan });
-			const runId = text(leader?.run?.run_id, 'none');
-			const batchId = text(leader?.intraday?.latest_batch?.scan_id, text(leader?.intraday?.latest_batch?.observed_at, 'none'));
-			if (leader?.run || leader?.intraday?.latest_batch) await enqueueSnapshot('leader-rotation', `${runId}:${batchId}`, leader?.intraday?.latest_batch?.observed_at ?? leader?.run?.updated_at, { source: 'quant.ten_day_leader_rotation.latest', leader });
+			const results = await Promise.all(SNAPSHOT_SPECS.map(async (spec) => ({ spec, body: await fetchJson(spec.path) })));
+			for (const { spec, body } of results) {
+				const identity = text(spec.identity(body));
+				if (!identity) continue;
+				await enqueueSnapshot(spec.bucket, identity, spec.observedAt(body), { source: spec.source, data: body });
+			}
 			lastSuccessAt = new Date().toISOString();
 			lastError = null;
 		} catch (error) {

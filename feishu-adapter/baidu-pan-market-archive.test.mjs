@@ -25,7 +25,8 @@ test('archives latest watchlist and leader evidence asynchronously with idempote
 	};
 	const fetchImpl = async (url) => {
 		if (url.endsWith('/api/v1/intraday/scans/latest?limit=200')) return new Response(JSON.stringify({ scan: { scan_id: 'scan-1', observed_at: '2026-08-30T08:00:00.000Z' }, signals: [] }), { status: 200 });
-		return new Response(JSON.stringify({ run: { run_id: 'run-1', updated_at: '2026-08-30T08:00:00.000Z' }, candidates: [], intraday: { latest_batch: { scan_id: 'scan-1', observed_at: '2026-08-30T08:00:00.000Z' } } }), { status: 200 });
+		if (url.endsWith('/api/v1/research/ten-day-leader-rotation/latest?limit=90')) return new Response(JSON.stringify({ run: { run_id: 'run-1', updated_at: '2026-08-30T08:00:00.000Z' }, candidates: [], intraday: { latest_batch: { scan_id: 'scan-1', observed_at: '2026-08-30T08:00:00.000Z' } } }), { status: 200 });
+		return new Response(JSON.stringify({}), { status: 200 });
 	};
 	const archive = createBaiduPanMarketArchive({ baiduPan, ledger, quantServiceUrl: 'http://quant', enabled: true, fetchImpl, rootPath: '/archive' });
 	await archive.poll();
