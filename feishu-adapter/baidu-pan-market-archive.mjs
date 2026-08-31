@@ -194,7 +194,7 @@ export function createBaiduPanMarketArchive({ baiduPan, ledger, quantServiceUrl,
 		if (!enabledFlag || running) return;
 		running = true;
 		try {
-			const jobs = await ledger.claimBaiduPanArchives({ workerId: 'baidu-pan-market-archive', limit: 4, leaseSeconds: 300 });
+			const jobs = await ledger.claimBaiduPanArchives({ workerId: 'baidu-pan-market-archive', limit: 16, leaseSeconds: 300 });
 			for (const job of jobs) {
 				try { await uploadJob(job); }
 				catch (error) { await ledger.failBaiduPanArchive(job.archive_id, { errorMessage: String(error?.message ?? error), retryable: true }); logger.warn(`百度网盘研究快照归档失败：${error?.message ?? error}`); }
