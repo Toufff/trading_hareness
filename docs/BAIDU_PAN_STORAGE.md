@@ -11,7 +11,7 @@
 - 7 天（可配置）分享链接创建。
 - 大文件本地有界 spool + 4 MiB（可配置）分片：`precreate → superfile2 → create`；快速上传会直接完成。
 - Feishu relay 的大于 IM 限制资源可按 `BAIDU_PAN_ARCHIVE_PROVIDER=baidu` 或 `auto`（未配置 Feishu Drive 时）归档到百度网盘。
-- 观察池与十日连板龙头影子策略的最新实时证据可由独立归档轮询器异步写入 `market-realtime/watchlist/YYYY-MM-DD/HH/` 与 `market-realtime/leader-rotation/YYYY-MM-DD/HH/`；归档队列有持久化幂等键和指数退避，不阻塞行情采集或策略计算。
+- 观察池、十日连板龙头影子、板块轮动/曲线、板块挖掘、涨停关联、策略决策/健康、盘后候选、模式挖掘和复盘的最新证据，可由独立归档轮询器异步写入 `market-realtime/<dataset>/YYYY-MM-DD/HH/`；归档队列有持久化幂等键和指数退避，不阻塞行情采集或策略计算。
 
 ## HTTP 入口
 
@@ -25,7 +25,7 @@
 
 ## 配置
 
-参见 `.env.example` 和 `deploy/feishu-relay-edge/relay.env.example` 中的 `BAIDU_PAN_*`。凭据必须通过部署环境注入；本仓库不包含用户提供的 AppKey/SecretKey。`BAIDU_PAN_ENABLED=false` 时适配器保持关闭，现有 Feishu Drive 行为不变。启用市场证据归档还需设置 `BAIDU_PAN_MARKET_ARCHIVE_ENABLED=true`；默认 30 秒轮询量化服务的最新观察池扫描和连板龙头影子结果。百度网盘只保存可重放的研究证据快照，永不作为实时策略阈值或订单输入。
+参见 `.env.example` 和 `deploy/feishu-relay-edge/relay.env.example` 中的 `BAIDU_PAN_*`。凭据必须通过部署环境注入；本仓库不包含用户提供的 AppKey/SecretKey。`BAIDU_PAN_ENABLED=false` 时适配器保持关闭，现有 Feishu Drive 行为不变。启用市场证据归档还需设置 `BAIDU_PAN_MARKET_ARCHIVE_ENABLED=true`；默认每 30 秒轮询量化服务的各项最新研究读模型，按返回的 run/scan/观察时刻生成确定性键。单个快照超过 12 MiB 会进入可重试失败，不会阻塞行情采集；百度网盘只保存可重放的研究证据快照，永不作为实时策略阈值或订单输入。
 
 ## 边界与未宣称能力
 
