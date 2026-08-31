@@ -27,7 +27,7 @@ class StrategyContract:
 
 STRATEGY_CONTRACTS: Final[dict[str, StrategyContract]] = {
     "intraday_watchlist_confirmation": StrategyContract(
-        "intraday_watchlist_confirmation", "watchlist-confirmation-v5", "app/intraday_signal_rules.py",
+        "intraday_watchlist_confirmation", "watchlist-confirmation-v6", "app/intraday_signal_rules.py",
         "intraday-rule-input-v2", ("intraday_scan_runs", "intraday_rule_input_snapshots", "intraday_signal_events"),
         "intraday_edge", "shadow", "none", "bounded watchlist price/minute/peer confirmation research",
     ),

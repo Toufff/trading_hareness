@@ -40,7 +40,7 @@ class IntradayResearchRuleTests(unittest.TestCase):
         self.assertEqual(
             intraday_signal_attribution("000001.SZ:watch:test", "watch", {}, evidence),
             isolated_signal_attribution("000001.SZ:watch:test", "watch", {}, evidence,
-                                        number=pure_intraday_number, signal_model_version="watchlist-confirmation-v5"),
+                                        number=pure_intraday_number, signal_model_version="watchlist-confirmation-v6"),
         )
         watch = {"symbol": "000001.SZ", "entry_price": None, "available_quantity": 0, "alert_on_entry": True, "alert_on_exit": True}
         quote = {"price": 10.2, "pct_change": 2.0, "volume_ratio": 2.0, "turnover_rate": 4.0, "main_net_inflow": 100, "main_flow_percentile": 0.95}
@@ -48,7 +48,7 @@ class IntradayResearchRuleTests(unittest.TestCase):
             intraday_signal_rules(watch, quote, {"price": 10.1}),
             isolated_signal_rules(watch, quote, {"price": 10.1}, number=pure_intraday_number,
                                    upside_assessment_fn=lambda q, d, m, p: isolated_upside_assessment(q, d, m, p, number=pure_intraday_number, eac_window=pure_eac_window),
-                                   model_version="watchlist-confirmation-v5"),
+                                   model_version="watchlist-confirmation-v6"),
         )
         items = [{"signal_event_id": "s1", "status": "matured", "raw_return": 0.01,
                   "maximum_favorable_excursion": 0.02, "maximum_adverse_excursion": -0.005,
@@ -260,6 +260,42 @@ class PerFieldFlowTrustTests(unittest.TestCase):
         signals = intraday_signal_rules(self.watch, quote, {"price": 10.3}, None, None, None)
         anomaly = next(item for item in signals if item["signal_key"] == "000001.SZ:watch:volume_anomaly")
         self.assertEqual(anomaly["conditions"]["anomaly_direction"], "up")
+        # Without adaptive metadata the gates are exactly the historical floors.
+        self.assertEqual(anomaly["conditions"]["volume_ratio_gate"], 2.5)
+        self.assertEqual(anomaly["conditions"]["turnover_rate_gate"], 5.0)
+
+    _trusted = {"volume_ratio": "fuyao_ths_derived", "turnover_rate": "fuyao_ths_derived",
+                "main_net_inflow": "unavailable"}
+
+    def test_adaptive_percentiles_raise_the_anomaly_bar_for_active_names(self):
+        # A chronically active name: turnover 6% and volume ratio 3.5 clear the
+        # absolute floors, but sit below its own rolling percentiles, so what
+        # used to fire every few minutes is no longer anomalous.
+        watch = {**self.watch, "metadata": {"volume_anomaly_thresholds": {
+            "volume_ratio_p95": 4.1, "turnover_rate_p90": 8.0}}}
+        quote = self._quote(self._trusted, main_net_inflow=None)
+        signals = intraday_signal_rules(watch, quote, {"price": 10.3}, None, None, None)
+        self.assertFalse(any(item["signal_key"] == "000001.SZ:watch:volume_anomaly" for item in signals))
+
+    def test_adaptive_percentiles_still_fire_on_a_genuine_outlier(self):
+        watch = {**self.watch, "metadata": {"volume_anomaly_thresholds": {
+            "volume_ratio_p95": 4.1, "turnover_rate_p90": 8.0}}}
+        quote = self._quote(self._trusted, main_net_inflow=None, volume_ratio=4.6, turnover_rate=9.2)
+        signals = intraday_signal_rules(watch, quote, {"price": 10.3}, None, None, None)
+        anomaly = next(item for item in signals if item["signal_key"] == "000001.SZ:watch:volume_anomaly")
+        self.assertEqual(anomaly["conditions"]["volume_ratio_gate"], 4.1)
+        self.assertEqual(anomaly["conditions"]["turnover_rate_gate"], 8.0)
+
+    def test_tiny_percentiles_never_lower_the_absolute_floors(self):
+        # A quiet name's own P95 can be far below the floors; the floors win so
+        # adaptive thresholds only ever reduce noise, never add it.
+        watch = {**self.watch, "metadata": {"volume_anomaly_thresholds": {
+            "volume_ratio_p95": 0.9, "turnover_rate_p90": 1.2}}}
+        quote = self._quote(self._trusted, main_net_inflow=None, volume_ratio=2.6, turnover_rate=5.5)
+        signals = intraday_signal_rules(watch, quote, {"price": 10.3}, None, None, None)
+        anomaly = next(item for item in signals if item["signal_key"] == "000001.SZ:watch:volume_anomaly")
+        self.assertEqual(anomaly["conditions"]["volume_ratio_gate"], 2.5)
+        self.assertEqual(anomaly["conditions"]["turnover_rate_gate"], 5.0)
 
     # Minute/peer inputs that satisfy the fuyao_minute_breadth entry, which is
     # the only rule that fires when every public flow field is research-only -

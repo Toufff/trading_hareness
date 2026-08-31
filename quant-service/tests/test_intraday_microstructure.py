@@ -83,7 +83,7 @@ class IntradayMicrostructureTests(unittest.TestCase):
         result = a_share_return_decomposition(Decimal("10"), 1, Decimal("10.5"), Decimal("10.2"), Decimal("10.8"))
         self.assertEqual(result["trigger_to_close"], Decimal("0.05"))
         self.assertEqual(result["trigger_to_next_close"], Decimal("0.08"))
-        attribution = signal_attribution("000001.SZ:watch:test", "watch", {}, {"tencent_order_book": {"status": "observed", "latest_features": {"status": "observed", "delta_status": "ready", "qi5": 0.4}, "ofi_30s": 3, "ofi_30s_sample_count": 3}, "tencent_minute": {"price_log_volume_corr_30m": -0.4, "smart_money_q_30m": 0.99}}, number=intraday_number, signal_model_version="watchlist-confirmation-v5")
+        attribution = signal_attribution("000001.SZ:watch:test", "watch", {}, {"tencent_order_book": {"status": "observed", "latest_features": {"status": "observed", "delta_status": "ready", "qi5": 0.4}, "ofi_30s": 3, "ofi_30s_sample_count": 3}, "tencent_minute": {"price_log_volume_corr_30m": -0.4, "smart_money_q_30m": 0.99}}, number=intraday_number, signal_model_version="watchlist-confirmation-v6")
         self.assertEqual(attribution["microstructure_state"], "observed_bid_heavy_positive_ofi_30s")
         self.assertEqual(attribution["ofi_attribution_window"], "30s")
         self.assertEqual(attribution["price_volume_state"], "negative_corr")

@@ -25,7 +25,7 @@ def _evaluate(watch, quote, previous_quote=None, minute_features=None, **overrid
         upside_assessment_fn=lambda q, d, m, p: isolated_upside_assessment(
             q, d, m, p, number=pure_intraday_number, eac_window=pure_eac_window,
         ),
-        model_version="watchlist-confirmation-v5", **overrides,
+        model_version="watchlist-confirmation-v6", **overrides,
     )
 
 

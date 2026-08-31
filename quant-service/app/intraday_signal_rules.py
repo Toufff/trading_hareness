@@ -368,12 +368,29 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
         signals.append({"signal_key": f"{symbol}:reduce:{model_version}", "signal_type": "reduce",
                         "severity": "warning", "score": 70, "hard": False, "conditions": {**common, "entry_price": float(watch["entry_price"])},
                         "risk_flags": ["loss_with_negative_main_flow", "requires_second_scan_confirmation", "manual_review_required"]})
-    volume_anomaly = volume_ratio >= 2.5 and turnover_rate >= 5.0
+    # Absolute floors alone stopped discriminating on chronically active names:
+    # the noisiest pool members run a median turnover of 6-11%, so the 5% floor
+    # was always true and the rule collapsed to volume_ratio alone, firing for
+    # 5-8% of every session straight into cooldown suppression. Per-symbol
+    # rolling percentiles (computed post-close on the workstation from recorded
+    # observations, shipped in watchlist metadata) raise the bar to "unusual for
+    # this stock". The absolute floors stay as the minimum, so a quiet name is
+    # not woken by its own tiny percentiles and a missing metadata block keeps
+    # the original behaviour exactly.
+    watch_metadata = watch.get("metadata") if isinstance(watch.get("metadata"), dict) else {}
+    anomaly_thresholds = watch_metadata.get("volume_anomaly_thresholds")
+    if not isinstance(anomaly_thresholds, dict):
+        anomaly_thresholds = {}
+    volume_ratio_gate = max(2.5, number(anomaly_thresholds.get("volume_ratio_p95")) or 0.0)
+    turnover_rate_gate = max(5.0, number(anomaly_thresholds.get("turnover_rate_p90")) or 0.0)
+    volume_anomaly = volume_ratio >= volume_ratio_gate and turnover_rate >= turnover_rate_gate
     if volume_anomaly and not signals:
         direction = "up" if pct_change > 0 else "down" if pct_change < 0 else "flat"
         signals.append({"signal_key": f"{symbol}:watch:volume_anomaly", "signal_type": "watch", "severity": "warning",
                         "score": min(90, round(30 + volume_ratio * 10 + turnover_rate * 2, 2)), "hard": False,
-                        "conditions": {**common, "anomaly_direction": direction},
+                        "conditions": {**common, "anomaly_direction": direction,
+                                       "volume_ratio_gate": round(volume_ratio_gate, 2),
+                                       "turnover_rate_gate": round(turnover_rate_gate, 2)},
                         "risk_flags": ["abnormal_volume", "requires_second_scan_confirmation", "manual_review_required"]})
     return signals
 
