@@ -1,12 +1,19 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { Readable } from 'node:stream';
 import { gzipSync } from 'node:zlib';
-import pg from '../feishu-adapter/node_modules/pg/lib/index.js';
-import { createLedger } from '../feishu-adapter/ledger.mjs';
-import { createBaiduPanStorage, normalizeBaiduPanPath } from '../feishu-adapter/baidu-pan-storage.mjs';
+const adapterRoot = existsSync(new URL('../feishu-adapter/ledger.mjs', import.meta.url))
+	? new URL('../feishu-adapter/', import.meta.url)
+	: new URL('../', import.meta.url);
+const [{ default: pg }, { createLedger }, { createBaiduPanStorage, normalizeBaiduPanPath }] = await Promise.all([
+	import(new URL('node_modules/pg/lib/index.js', adapterRoot)),
+	import(new URL('ledger.mjs', adapterRoot)),
+	import(new URL('baidu-pan-storage.mjs', adapterRoot)),
+]);
 
 const DEFAULT_ROOT = '/apps/股票paper存储/market-realtime/history';
 const DEFAULT_PART_ROWS = 5000;
@@ -37,7 +44,7 @@ function safeSegment(value) {
 }
 
 function parseArgs(argv) {
-	const args = { dataset: '', from: '', to: '', root: process.env.BAIDU_PAN_HISTORY_ROOT_PATH || DEFAULT_ROOT, partRows: DEFAULT_PART_ROWS, maxPartBytes: DEFAULT_MAX_PART_BYTES, dryRun: false };
+	const args = { dataset: '', from: '', to: '', root: process.env.BAIDU_PAN_HISTORY_ROOT_PATH || DEFAULT_ROOT, outputDir: '', partRows: DEFAULT_PART_ROWS, maxPartBytes: DEFAULT_MAX_PART_BYTES, dryRun: false };
 	for (let i = 0; i < argv.length; i += 1) {
 		const arg = argv[i];
 		if (arg === '--dry-run') { args.dryRun = true; continue; }
@@ -49,6 +56,7 @@ function parseArgs(argv) {
 		else if (key === 'from') args.from = value;
 		else if (key === 'to') args.to = value;
 		else if (key === 'root') args.root = value;
+		else if (key === 'outputdir') args.outputDir = value;
 		else if (key === 'partrows') args.partRows = Math.max(1, Math.min(100_000, Number(value) || DEFAULT_PART_ROWS));
 		else if (key === 'maxpartbytes') args.maxPartBytes = Math.max(1_048_576, Math.min(450 * 1024 * 1024, Number(value) || DEFAULT_MAX_PART_BYTES));
 		else throw new Error(`unknown argument: ${arg}`);
@@ -96,10 +104,11 @@ async function uploadBuffer(baiduPan, directory, filename, buffer) {
 	return { path: result.path ?? remotePath, skipped: false, bytes: buffer.length, sha256: sha256(buffer) };
 }
 
-async function exportDataset({ pool, baiduPan, dataset, from, to, root = DEFAULT_ROOT, partRows = DEFAULT_PART_ROWS, maxPartBytes = DEFAULT_MAX_PART_BYTES, dryRun = false, logger = console }) {
+async function exportDataset({ pool, baiduPan, dataset, from, to, root = DEFAULT_ROOT, outputDir = '', partRows = DEFAULT_PART_ROWS, maxPartBytes = DEFAULT_MAX_PART_BYTES, dryRun = false, logger = console }) {
 	const spec = DATASETS[dataset];
 	const directory = archiveDirectory(root, dataset, from, to);
-	if (!dryRun) await ensureDirectory(baiduPan, directory);
+	if (!dryRun && !outputDir) await ensureDirectory(baiduPan, directory);
+	if (outputDir) await mkdir(outputDir, { recursive: true });
 	const orderBy = spec.order.map((column) => `t.${column}`).join(', ');
 	const query = `SELECT to_jsonb(t) AS row FROM ${spec.table} t WHERE t.${spec.dateColumn} >= $1::date AND t.${spec.dateColumn} < $2::date ORDER BY ${orderBy} LIMIT $3 OFFSET $4`;
 	const parts = [];
@@ -115,7 +124,9 @@ async function exportDataset({ pool, baiduPan, dataset, from, to, root = DEFAULT
 		if (compressed.length > maxPartBytes) throw new Error(`part ${partNumber + 1} compressed size exceeds configured limit; lower --part-rows`);
 		partNumber += 1;
 		const filename = `part-${String(partNumber).padStart(6, '0')}.jsonl.gz`;
-		const uploaded = dryRun ? { path: `${directory}/${filename}`, skipped: false, bytes: compressed.length, sha256: sha256(compressed) } : await uploadBuffer(baiduPan, directory, filename, compressed);
+		const uploaded = outputDir
+			? (await writeFile(`${outputDir}/${filename}`, compressed), { path: `${outputDir}/${filename}`, skipped: false, bytes: compressed.length, sha256: sha256(compressed) })
+			: dryRun ? { path: `${directory}/${filename}`, skipped: false, bytes: compressed.length, sha256: sha256(compressed) } : await uploadBuffer(baiduPan, directory, filename, compressed);
 		parts.push({ filename, rows: result.rows.length, ...uploaded });
 		totalRows += result.rows.length;
 		totalBytes += compressed.length;
@@ -129,7 +140,8 @@ async function exportDataset({ pool, baiduPan, dataset, from, to, root = DEFAULT
 		parts, research_only: true, live_effect: 'none', restore_policy: 'staging_schema_only',
 	};
 	const manifestBuffer = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-	if (!dryRun) await uploadBuffer(baiduPan, directory, 'manifest.json', manifestBuffer);
+	if (outputDir) await writeFile(`${outputDir}/manifest.json`, manifestBuffer);
+	else if (!dryRun) await uploadBuffer(baiduPan, directory, 'manifest.json', manifestBuffer);
 	return { ...manifest, manifest_path: manifestPath(directory), manifest_sha256: sha256(manifestBuffer), dry_run: dryRun };
 }
 

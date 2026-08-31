@@ -1,11 +1,17 @@
 #!/usr/bin/env node
 
 import { createReadStream } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import pg from '../feishu-adapter/node_modules/pg/lib/index.js';
-import { createLedger } from '../feishu-adapter/ledger.mjs';
-import { createBaiduPanStorage } from '../feishu-adapter/baidu-pan-storage.mjs';
+const adapterRoot = existsSync(new URL('../feishu-adapter/ledger.mjs', import.meta.url))
+	? new URL('../feishu-adapter/', import.meta.url)
+	: new URL('../', import.meta.url);
+const [{ default: pg }, { createLedger }, { createBaiduPanStorage }] = await Promise.all([
+	import(new URL('node_modules/pg/lib/index.js', adapterRoot)),
+	import(new URL('ledger.mjs', adapterRoot)),
+	import(new URL('baidu-pan-storage.mjs', adapterRoot)),
+]);
 
 function args(argv) {
 	if (argv.length !== 2) throw new Error('usage: baidu-pan-upload-file.mjs <local-file> <remote-path>');
