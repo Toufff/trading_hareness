@@ -92,14 +92,18 @@ async function ensureDirectory(baiduPan, path) {
 	}
 }
 
-async function remoteExists(baiduPan, directory, filename) {
+async function remoteExisting(baiduPan, directory, filename) {
 	const listed = await baiduPan.list({ dir: directory, limit: 1000 });
-	return (listed.list ?? []).some((item) => item?.server_filename === filename && Number(item?.isdir) !== 1);
+	return (listed.list ?? []).find((item) => item?.server_filename === filename && Number(item?.isdir) !== 1) ?? null;
 }
 
 async function uploadBuffer(baiduPan, directory, filename, buffer) {
 	const remotePath = `${directory}/${filename}`;
-	if (await remoteExists(baiduPan, directory, filename)) return { path: remotePath, skipped: true, bytes: buffer.length, sha256: sha256(buffer) };
+	const existing = await remoteExisting(baiduPan, directory, filename);
+	if (existing) {
+		if (Number(existing.size) !== buffer.length) throw new Error(`远端文件已存在但大小不一致：${remotePath}`);
+		return { path: remotePath, skipped: true, bytes: buffer.length, sha256: sha256(buffer) };
+	}
 	const result = await baiduPan.uploadReadable({ readable: Readable.from([buffer]), fileName: filename, size: buffer.length, remotePath });
 	return { path: result.path ?? remotePath, skipped: false, bytes: buffer.length, sha256: sha256(buffer) };
 }

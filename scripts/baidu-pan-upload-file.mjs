@@ -23,7 +23,7 @@ async function remoteExists(pan, remotePath) {
 	const directory = slash > 0 ? remotePath.slice(0, slash) : '/';
 	const filename = remotePath.slice(slash + 1);
 	const listed = await pan.list({ dir: directory, limit: 1000 });
-	return (listed.list ?? []).some((item) => item?.server_filename === filename && Number(item?.isdir) !== 1);
+	return (listed.list ?? []).find((item) => item?.server_filename === filename && Number(item?.isdir) !== 1) ?? null;
 }
 
 async function main() {
@@ -33,10 +33,6 @@ async function main() {
 	const connectionString = `postgresql://${encodeURIComponent(process.env.PGUSER || 'n8n')}:${encodeURIComponent(password)}@${process.env.PGHOST || '127.0.0.1'}:${process.env.PGPORT || '5432'}/${encodeURIComponent(process.env.PGDATABASE || 'n8n')}`;
 	const ledger = createLedger(connectionString);
 	const pan = createBaiduPanStorage({ appKey: process.env.BAIDU_PAN_APP_KEY, secretKey: process.env.BAIDU_PAN_SECRET_KEY, redirectUri: process.env.BAIDU_PAN_REDIRECT_URI || 'oob', ledger, rootPath: '/' });
-	if (await remoteExists(pan, remotePath)) {
-		console.log(JSON.stringify({ path: remotePath, skipped: true }));
-		return;
-	}
 	let readable;
 	let size;
 	if (file === '-') {
@@ -48,6 +44,12 @@ async function main() {
 	} else {
 		size = (await stat(file)).size;
 		readable = createReadStream(file);
+	}
+	const existing = await remoteExists(pan, remotePath);
+	if (existing) {
+		if (Number(existing.size) !== size) throw new Error(`远端文件已存在但大小不一致：${remotePath}`);
+		console.log(JSON.stringify({ path: remotePath, skipped: true }));
+		return;
 	}
 	const result = await pan.uploadReadable({ readable, fileName: remotePath.split('/').pop(), size, remotePath });
 	console.log(JSON.stringify({ path: result.path, fsId: result.fsId ?? null, size }));
