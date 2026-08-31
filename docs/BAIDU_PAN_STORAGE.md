@@ -23,6 +23,8 @@
 
 首次使用时，设置环境变量后访问 OAuth URL，在回调中取得 `code`，再把 code POST 到 exchange。不要把 access/refresh token 放在 URL、前端代码或日志中。个人应用的根目录通常受 `/apps/<应用名>` 约束，实际目录以开放平台返回为准。
 
+本地冷文件迁移可使用 `scripts/baidu-pan-archive-local-file.sh`：它只通过 SSH 标准输入把有界分片送到已授权的 edge 容器，token 不离开远端加密 ledger；源文件不会被删除。每个归档目录包含按序分片和 `manifest.json`，恢复时按 manifest 顺序拼接，并在删除本地源文件前完成 SHA256、字节数和 staging restore 校验。不要把远端 token 复制到本地；如需本地直连，请在本机单独完成 OAuth 授权并保存到本地 ledger。
+
 ## 配置
 
 参见 `.env.example` 和 `deploy/feishu-relay-edge/relay.env.example` 中的 `BAIDU_PAN_*`。凭据必须通过部署环境注入；本仓库不包含用户提供的 AppKey/SecretKey。`BAIDU_PAN_ENABLED=false` 时适配器保持关闭，现有 Feishu Drive 行为不变。启用市场证据归档还需设置 `BAIDU_PAN_MARKET_ARCHIVE_ENABLED=true`；默认每 30 秒轮询量化服务的各项最新研究读模型，按返回的 run/scan/观察时刻生成确定性键。单个快照超过 12 MiB 会进入可重试失败，不会阻塞行情采集；百度网盘只保存可重放的研究证据快照，永不作为实时策略阈值或订单输入。
