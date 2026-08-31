@@ -964,6 +964,16 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
             self.assertEqual(intraday_super_get_fast_max_symbols(), 40)
         with patch.dict("os.environ", {"INTRADAY_FAST_QUOTE_RETENTION_DAYS": "7"}):
             self.assertEqual(intraday_fast_quote_retention_days(), 7)
+        # Accumulating a 60-trading-day validation sample needs a window well past
+        # the old 30/120-day ceilings; anything beyond the hot window is archived.
+        with patch.dict("os.environ", {"INTRADAY_FAST_QUOTE_RETENTION_DAYS": "365"}):
+            self.assertEqual(intraday_fast_quote_retention_days(), 365)
+        with patch.dict("os.environ", {"INTRADAY_RULE_INPUT_RETENTION_DAYS": "365"}):
+            self.assertEqual(intraday_rule_input_retention_days(), 365)
+        with patch.dict("os.environ", {"INTRADAY_RULE_INPUT_RETENTION_DAYS": "10"}):
+            self.assertEqual(intraday_rule_input_retention_days(), 60)
+        with patch.dict("os.environ", {"INTRADAY_RULE_INPUT_RETENTION_DAYS": "9999"}):
+            self.assertEqual(intraday_rule_input_retention_days(), 400)
         with patch.dict("os.environ", {"INTRADAY_BOARD_ROTATION_RETENTION_DAYS": "60"}):
             self.assertEqual(intraday_board_rotation_retention_days(), 60)
 

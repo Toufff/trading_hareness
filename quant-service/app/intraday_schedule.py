@@ -105,18 +105,23 @@ def intraday_super_get_fast_max_symbols() -> int:
 
 def intraday_fast_quote_retention_days() -> int:
     try:
-        return max(1, min(30, int(os.getenv("INTRADAY_FAST_QUOTE_RETENTION_DAYS", "7"))))
+        return max(1, min(400, int(os.getenv("INTRADAY_FAST_QUOTE_RETENTION_DAYS", "7"))))
     except ValueError:
         return 7
 
 
+# Retention upper bounds are wide because the statistical gates, not disk, decide
+# how much evidence is worth keeping: formal validation needs 60 trading days and
+# 200 matured signals, so a 120-day ceiling left no headroom to accumulate a
+# sample. History that exceeds the hot window is archived to cold storage rather
+# than discarded.
 def intraday_rule_input_retention_days() -> int:
     """Keep enough frozen live inputs for the 60-day replay gate, bounded by SSD policy."""
     try:
         value = int(os.getenv("INTRADAY_RULE_INPUT_RETENTION_DAYS", "90"))
     except ValueError:
         value = 90
-    return min(120, max(60, value))
+    return min(400, max(60, value))
 
 
 def intraday_session_elapsed_seconds(now: datetime) -> float | None:
