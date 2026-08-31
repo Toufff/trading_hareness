@@ -81,7 +81,7 @@ echo "[5/6] Promoting the edge writer and enabling its pollers..."
 set -euo pipefail
 replace_or_append() {
   local key="$1" value="$2" file="$3"
-  if rg -q "^${key}=" "$file"; then sed -i -E "s|^${key}=.*|${key}=${value}|" "$file"; else printf '%s=%s\n' "$key" "$value" >>"$file"; fi
+  if grep -q "^${key}=" "$file"; then sed -i -E "s|^${key}=.*|${key}=${value}|" "$file"; else printf '%s=%s\n' "$key" "$value" >>"$file"; fi
 }
 cd "$EDGE_DIR"
 replace_or_append FEISHU_GROUP_RELAY_ENABLED true "$EDGE_RUNTIME_ENV"
