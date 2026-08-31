@@ -19,8 +19,19 @@ async function main() {
 	const connectionString = `postgresql://${encodeURIComponent(process.env.PGUSER || 'n8n')}:${encodeURIComponent(password)}@${process.env.PGHOST || '127.0.0.1'}:${process.env.PGPORT || '5432'}/${encodeURIComponent(process.env.PGDATABASE || 'n8n')}`;
 	const ledger = createLedger(connectionString);
 	const pan = createBaiduPanStorage({ appKey: process.env.BAIDU_PAN_APP_KEY, secretKey: process.env.BAIDU_PAN_SECRET_KEY, redirectUri: process.env.BAIDU_PAN_REDIRECT_URI || 'oob', ledger, rootPath: '/' });
-	const size = (await stat(file)).size;
-	const result = await pan.uploadReadable({ readable: createReadStream(file), fileName: remotePath.split('/').pop(), size, remotePath });
+	let readable;
+	let size;
+	if (file === '-') {
+		const chunks = [];
+		for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+		const content = Buffer.concat(chunks);
+		readable = (async function* () { yield content; }());
+		size = content.length;
+	} else {
+		size = (await stat(file)).size;
+		readable = createReadStream(file);
+	}
+	const result = await pan.uploadReadable({ readable, fileName: remotePath.split('/').pop(), size, remotePath });
 	console.log(JSON.stringify({ path: result.path, fsId: result.fsId ?? null, size }));
 }
 
