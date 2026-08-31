@@ -72,7 +72,7 @@ psql_args=(-h 127.0.0.1 -U "$RELAY_PGUSER" -d "$RELAY_PGDATABASE" -v ON_ERROR_ST
   cat "$REMOTE_DUMP"
   printf 'COMMIT;\n'
 } | psql "${psql_args[@]}" >/dev/null
-psql "${psql_args[@]}" -v writer_id="$REMOTE_WRITER_ID" -c "INSERT INTO public.feishu_relay_writer_ownership(singleton,writer_id,generation) VALUES(true, :'writer_id', 1) ON CONFLICT(singleton) DO UPDATE SET writer_id=EXCLUDED.writer_id,generation=public.feishu_relay_writer_ownership.generation+1,updated_at=now();" >/dev/null
+psql "${psql_args[@]}" -c "INSERT INTO public.feishu_relay_writer_ownership(singleton,writer_id,generation) VALUES(true, '$REMOTE_WRITER_ID', 1) ON CONFLICT(singleton) DO UPDATE SET writer_id=EXCLUDED.writer_id,generation=public.feishu_relay_writer_ownership.generation+1,updated_at=now();" >/dev/null
 rm -f "$REMOTE_DUMP"
 REMOTE
 

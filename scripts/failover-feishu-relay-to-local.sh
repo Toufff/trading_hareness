@@ -85,8 +85,7 @@ echo "[2/5] Restoring remote ledger into local PostgreSQL transactionally..."
 # promotion record after the old remote pollers have been fenced.  The adapter
 # checks the owner before either polling loop can write or send.
 docker exec -i "$local_postgres_container" psql -v ON_ERROR_STOP=1 -U n8n -d n8n \
-  -v writer_id="$local_writer_id" \
-  -c "INSERT INTO public.feishu_relay_writer_ownership(singleton,writer_id,generation) VALUES(true, :'writer_id', 1) ON CONFLICT(singleton) DO UPDATE SET writer_id=EXCLUDED.writer_id,generation=public.feishu_relay_writer_ownership.generation+1,updated_at=now();" >/dev/null
+  -c "INSERT INTO public.feishu_relay_writer_ownership(singleton,writer_id,generation) VALUES(true, '$local_writer_id', 1) ON CONFLICT(singleton) DO UPDATE SET writer_id=EXCLUDED.writer_id,generation=public.feishu_relay_writer_ownership.generation+1,updated_at=now();" >/dev/null
 
 echo "[3/5] Copying any remote retry-media files to local durable storage..."
 "${edge_ssh[@]}" "$edge_host" "tar -C '$edge_dir/adapter-ingestion' -cf - ." \
