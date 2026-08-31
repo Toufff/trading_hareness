@@ -251,7 +251,22 @@ export function createBaiduPanStorage({ appKey, secretKey, redirectUri = 'oob', 
 		} finally { await rm(dir, { recursive: true, force: true }).catch(() => {}); }
 	}
 
-	async function download(fsId) { const meta = await fileMeta([fsId], { extra: 0 }); const dlink = meta?.list?.[0]?.dlink; if (!dlink) throw new Error('百度网盘未返回 dlink'); const response = await fetchImpl(dlink, { headers: { accept: '*/*', 'user-agent': 'pan.baidu.com' }, signal: AbortSignal.timeout(60_000) }); if (!response.ok || !response.body) throw new Error(`百度网盘下载失败（HTTP ${response.status}）`); return response; }
+	async function download(fsId) {
+		const meta = await fileMeta([fsId], { extra: 0 });
+		const dlink = meta?.list?.[0]?.dlink;
+		if (!dlink) throw new Error('百度网盘未返回 dlink');
+		// filemetas returns a short-lived PCS link.  The official SDK and
+		// open-platform examples append the current OAuth token when following
+		// that link; omitting it results in a 403 even though filemetas itself
+		// succeeds.  Resolve the token through the same refresh-aware path used
+		// by every other request, without ever logging or returning it.
+		const token = await accessToken();
+		const downloadUrl = new URL(String(dlink));
+		downloadUrl.searchParams.set('access_token', token);
+		const response = await fetchImpl(downloadUrl, { headers: { accept: '*/*', 'user-agent': 'pan.baidu.com' }, redirect: 'follow', signal: AbortSignal.timeout(60_000) });
+		if (!response.ok || !response.body) throw new Error(`百度网盘下载失败（HTTP ${response.status}）`);
+		return response;
+	}
 	async function createShareLink(fsids, { period = 7, password = '1234' } = {}) { const ids = (Array.isArray(fsids) ? fsids : [fsids]).map((value) => String(value).trim()).filter(Boolean); if (!ids.length || ids.length > 100) throw new Error('分享文件数量必须为 1–100'); const pwd = asText(password, 4).toLowerCase(); if (!/^[a-z0-9]{4}$/.test(pwd)) throw new Error('分享密码必须是 4 位数字或小写字母'); return request('/rest/2.0/xpan/share', { method: 'POST', params: { method: 'create' }, body: new URLSearchParams({ fsid_list: JSON.stringify(ids), period: String(Math.max(1, Number(period) || 7)), pwd }) }); }
 	async function manage(opera, filelist, { async = 1, ondup } = {}) {
 		return request('/rest/2.0/xpan/file', { method: 'POST', params: { method: 'filemanager', opera }, body: new URLSearchParams({ async: String(async), filelist: JSON.stringify(filelist), ...(ondup ? { ondup } : {}) }) });

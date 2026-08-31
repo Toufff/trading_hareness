@@ -104,6 +104,28 @@ test('uses the official quota endpoint and optional checks', async () => {
 	assert.equal(quotaUrl.searchParams.get('checkexpire'), '1');
 });
 
+test('follows dlink with the refreshed OAuth token for readback verification', async () => {
+	const ledger = ledgerStub();
+	const calls = [];
+	const fetchImpl = async (url, options = {}) => {
+		calls.push({ url: String(url), options });
+		if (String(url).startsWith('https://openapi.baidu.com')) return new Response(JSON.stringify({ access_token: 'access-read', refresh_token: 'refresh-read', expires_in: 3600 }), { status: 200 });
+		const parsed = new URL(url);
+		if (parsed.searchParams.get('method') === 'filemetas') return new Response(JSON.stringify({ errno: 0, list: [{ dlink: 'https://d.pcs.baidu.com/file?x=1' }] }), { status: 200 });
+		assert.equal(parsed.hostname, 'd.pcs.baidu.com');
+		assert.equal(parsed.searchParams.get('access_token'), 'access-read');
+		assert.equal(options.redirect, 'follow');
+		return new Response('archive-bytes', { status: 200 });
+	};
+	const storage = createBaiduPanStorage({ appKey: 'app', secretKey: 'secret', ledger, fetchImpl });
+	await storage.exchangeAuthorizationCode('c');
+	const response = await storage.download(42);
+	assert.equal(await response.text(), 'archive-bytes');
+	const downloadCall = calls.find((call) => call.url.startsWith('https://d.pcs.baidu.com/'));
+	assert.ok(downloadCall);
+	assert.match(downloadCall.url, /access_token=access-read/);
+});
+
 test('falls back to directory walking when listall is unavailable', async () => {
 	const ledger = ledgerStub();
 	const urls = [];

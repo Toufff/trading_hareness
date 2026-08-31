@@ -82,6 +82,18 @@ function rowJson(row) {
 	return `${JSON.stringify(row)}\n`;
 }
 
+function buildPageQuery(spec, from, to, cursor, limit) {
+	const orderBy = spec.order.map((column) => `t.${column}`).join(', ');
+	const cursorClause = cursor
+		? ` AND (${spec.order.map((column) => `t.${column}`).join(', ')}) > (${spec.order.map((_, index) => `$${index + 3}`).join(', ')})`
+		: '';
+	const params = cursor ? [from, to, ...spec.order.map((column) => cursor[column]), limit] : [from, to, limit];
+	return {
+		sql: `SELECT to_jsonb(t) AS row FROM ${spec.table} t WHERE t.${spec.dateColumn} >= $1::date AND t.${spec.dateColumn} < $2::date${cursorClause} ORDER BY ${orderBy} LIMIT $${cursor ? spec.order.length + 3 : 3}`,
+		params,
+	};
+}
+
 async function ensureDirectory(baiduPan, path) {
 	const parts = normalizeBaiduPanPath(path).split('/').filter(Boolean);
 	let current = '';
@@ -113,15 +125,14 @@ async function exportDataset({ pool, baiduPan, dataset, from, to, root = DEFAULT
 	const directory = archiveDirectory(root, dataset, from, to);
 	if (!dryRun && !outputDir) await ensureDirectory(baiduPan, directory);
 	if (outputDir) await mkdir(outputDir, { recursive: true });
-	const orderBy = spec.order.map((column) => `t.${column}`).join(', ');
-	const query = `SELECT to_jsonb(t) AS row FROM ${spec.table} t WHERE t.${spec.dateColumn} >= $1::date AND t.${spec.dateColumn} < $2::date ORDER BY ${orderBy} LIMIT $3 OFFSET $4`;
 	const parts = [];
-	let offset = 0;
+	let cursor = null;
 	let partNumber = 0;
 	let totalRows = 0;
 	let totalBytes = 0;
 	while (true) {
-		const result = await pool.query(query, [from, to, partRows, offset]);
+		const page = buildPageQuery(spec, from, to, cursor, partRows);
+		const result = await pool.query(page.sql, page.params);
 		if (!result.rows.length) break;
 		const raw = Buffer.from(result.rows.map((item) => rowJson(item.row)).join(''), 'utf8');
 		const compressed = gzipSync(raw, { level: 6 });
@@ -134,7 +145,9 @@ async function exportDataset({ pool, baiduPan, dataset, from, to, root = DEFAULT
 		parts.push({ filename, rows: result.rows.length, ...uploaded });
 		totalRows += result.rows.length;
 		totalBytes += compressed.length;
-		offset += result.rows.length;
+		const lastRow = result.rows.at(-1)?.row;
+		if (!lastRow || spec.order.some((column) => lastRow[column] === null || lastRow[column] === undefined)) throw new Error(`历史归档 ${dataset} 的排序列不能为 NULL`);
+		cursor = Object.fromEntries(spec.order.map((column) => [column, lastRow[column]]));
 		logger.info(`历史归档 ${dataset}: ${filename}, rows=${result.rows.length}, bytes=${compressed.length}${uploaded.skipped ? ', skipped=existing' : ''}`);
 		if (result.rows.length < partRows) break;
 	}
@@ -171,4 +184,4 @@ async function main() {
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error) => { console.error(error?.stack || error); process.exitCode = 1; });
 
-export { DATASETS, archiveDirectory, exportDataset, manifestPath, parseArgs, sha256 };
+export { DATASETS, archiveDirectory, buildPageQuery, exportDataset, manifestPath, parseArgs, sha256 };
