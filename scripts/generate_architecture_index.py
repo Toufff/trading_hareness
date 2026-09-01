@@ -28,7 +28,7 @@ def _python_files(path: Path) -> list[Path]:
 
 
 def _functions(path: Path) -> int:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     return sum(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) for node in tree.body)
 
 
@@ -98,7 +98,7 @@ def main() -> int:
     args = parser.parse_args()
     rendered = render()
     if args.check:
-        if not OUTPUT.is_file() or OUTPUT.read_text() != rendered:
+        if not OUTPUT.is_file() or OUTPUT.read_text(encoding="utf-8") != rendered:
             print("architecture index is stale; run python3 scripts/generate_architecture_index.py")
             return 1
         print("architecture index is current")

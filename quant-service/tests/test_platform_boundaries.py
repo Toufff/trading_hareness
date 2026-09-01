@@ -117,7 +117,13 @@ class PlatformBoundaryTests(unittest.TestCase):
     def test_intraday_outcome_settlement_entry_delegates_to_isolated_repository(self):
         import app.main as main_module
         sentinel = {"status": "settled"}
-        with patch("app.main.persist_intraday_outcome_settlement", return_value=sentinel) as settle:
+        connection = object()
+        transaction = MagicMock()
+        transaction.__enter__.return_value = connection
+        transaction.__exit__.return_value = False
+        database = MagicMock()
+        database.transaction.return_value = transaction
+        with patch("app.main.db", database), patch("app.main.persist_intraday_outcome_settlement", return_value=sentinel) as settle:
             with patch("app.main.intraday_outcome_cutoff") as cutoff:
                 with patch("app.main.refresh_intraday_signal_attributions", return_value=7) as backfill:
                     with patch("app.main.invalidate_intraday_probability_profiles") as invalidate:
@@ -125,6 +131,7 @@ class PlatformBoundaryTests(unittest.TestCase):
                         result = main_module.recompute_intraday_signal_outcomes(date(2026, 8, 13))
         self.assertEqual(result, {"status": "settled", "attribution_backfilled": 7})
         settle.assert_called_once()
+        self.assertIs(settle.call_args.args[0], connection)
         backfill.assert_called_once()
         invalidate.assert_called_once()
 
@@ -1394,7 +1401,7 @@ class PlatformBoundaryTests(unittest.TestCase):
 
     def test_cninfo_announcement_transport_is_https_only(self):
         from app import free_market_providers
-        source = Path(free_market_providers.__file__).read_text()
+        source = Path(free_market_providers.__file__).read_text(encoding="utf-8")
         self.assertIn('https://www.cninfo.com.cn/new/hisAnnouncement/query', source)
         self.assertIn('https://static.cninfo.com.cn/', source)
         self.assertNotIn('http://www.cninfo.com.cn/new/hisAnnouncement/query', source)
@@ -1478,140 +1485,3 @@ class PlatformBoundaryTests(unittest.TestCase):
                 return await circuit_open_provider_keys_async("daily", providers)
 
         self.assertEqual(asyncio.run(check()), {"tushare_super_sdk"})
-
-
-class DailyPipelineTakesTheCrossSectionInOneRequestTests(unittest.TestCase):
-    """The market stages must not iterate the universe symbol by symbol.
-
-    The per-symbol synchronizers this replaced issued one provider call per
-    name across ~5.5k symbols. Measured on 2026-08-27 they imported about 1.8
-    bars a minute, so the request died at 851s having loaded 41 of 5547 bars
-    and nothing downstream of the sync - settlement included - ever ran.
-    """
-
-    def _run(self, *, primary_status="completed"):
-        seen = {}
-
-        async def sync_full_market_daily(request):
-            seen["request"] = request
-            return {"status": primary_status}
-
-        async def sync_baostock(_request):
-            seen["baostock"] = True
-            return {"status": "completed"}
-
-        controls = AsyncMock(return_value={"status": "completed"})
-
-        async def blocking(operation, *_args, **_kwargs):
-            return {"status": "ready"} if operation is build else {}
-
-        build = object()
-        asyncio.run(run_pipeline(
-            GenerateRequest(as_of_date=date(2026, 8, 27)),
-            sync_full_market_daily=sync_full_market_daily, sync_baostock=sync_baostock,
-            sync_full_market_daily_controls=controls,
-            tushare_request=TushareSyncRequest, full_market_request=_full_market_request,
-            snapshot_request=lambda as_of: {"as_of_date": as_of}, build_snapshot=build,
-            recompute_outcomes=object(), recompute_scorecards=object(),
-            generate_recommendations=object(), run_database_blocking=blocking,
-            cn_today=lambda: date(2026, 8, 27),
-        ))
-        return seen, controls
-
-    def test_the_daily_stage_asks_for_one_whole_trade_date(self):
-        seen, _ = self._run()
-        self.assertEqual(seen["request"], {"trade_date": date(2026, 8, 27)},
-                         "the stage must request a trade date, never a single symbol")
-
-    def test_controls_run_on_the_resolved_date_not_none(self):
-        _, controls = self._run()
-        controls.assert_awaited_once_with(date(2026, 8, 27))
-
-    def test_a_blocked_primary_falls_back_rather_than_settling_on_a_partial_date(self):
-        # The full-market synchronizer reports "blocked", which the per-symbol
-        # one never did; without it in the set the fallback silently stopped.
-        seen, controls = self._run(primary_status="blocked")
-        self.assertTrue(seen.get("baostock"), "a blocked cross-section must reach the fallback")
-        controls.assert_not_awaited()
-
-
-
-class MinuteBarBackfillRunsLastAndNeverFailsThePipelineTests(unittest.TestCase):
-    """The minute-bar pass is best-effort supplementary data.
-
-    stk_mins answered ~55% of sampled boards over three closed sessions and 0%
-    intraday, so it is wired to run after every decision output already exists,
-    with a bounded budget and a failure that is reported rather than fatal.
-    """
-
-    def _pipeline(self, backfill, *, budget=None, order=None):
-        async def tracked(operation, *_a, **_k):
-            if order is not None:
-                order.append("db")
-            return {"status": "ready"}
-
-        async def wrapped(as_of):
-            if order is not None:
-                order.append("backfill")
-            return await backfill(as_of)
-
-        kwargs = dict(
-            sync_full_market_daily=AsyncMock(return_value={"status": "completed"}),
-            sync_baostock=AsyncMock(return_value={"status": "completed"}),
-            sync_full_market_daily_controls=AsyncMock(return_value={"status": "completed"}),
-            tushare_request=TushareSyncRequest, full_market_request=_full_market_request,
-            snapshot_request=lambda a: {"as_of_date": a}, build_snapshot=object(),
-            recompute_outcomes=object(), recompute_scorecards=object(),
-            generate_recommendations=object(), run_database_blocking=tracked,
-            cn_today=lambda: date(2026, 8, 28), backfill_minute_bars=wrapped)
-
-        def go():
-            return asyncio.run(run_pipeline(GenerateRequest(as_of_date=date(2026, 8, 28)), **kwargs))
-
-        if budget is not None:
-            with patch("app.daily_pipeline.MINUTE_BACKFILL_BUDGET_SECONDS", budget):
-                return go()
-        return go()
-
-    def test_the_backfill_runs_after_the_decision_stages(self):
-        order = []
-
-        async def ok(_a):
-            return {"availability_pct": 55.0, "bars": 2885}
-
-        result = self._pipeline(ok, order=order)
-        self.assertEqual(order[-1], "backfill")
-        self.assertEqual(result["minute_bars"], {"availability_pct": 55.0, "bars": 2885})
-
-    def test_a_failing_backfill_leaves_the_pipeline_completed(self):
-        async def boom(_a):
-            raise RuntimeError("stk_mins 202")
-
-        result = self._pipeline(boom)
-        self.assertEqual(result["status"], "completed")
-        self.assertEqual(result["minute_bars"]["status"], "failed")
-        self.assertIn("RuntimeError", result["minute_bars"]["error"])
-
-    def test_a_slow_backfill_is_bounded_by_the_budget(self):
-        async def hang(_a):
-            await asyncio.sleep(1.0)
-
-        result = self._pipeline(hang, budget=0.05)
-        self.assertEqual(result["status"], "completed")
-        self.assertEqual(result["minute_bars"]["status"], "timeout")
-        self.assertEqual(result["minute_bars"]["budget_seconds"], 0.05)
-
-    def test_the_pipeline_completes_unchanged_without_a_backfill_wired(self):
-        result = asyncio.run(run_pipeline(
-            GenerateRequest(as_of_date=date(2026, 8, 28)),
-            sync_full_market_daily=AsyncMock(return_value={"status": "completed"}),
-            sync_baostock=AsyncMock(return_value={"status": "completed"}),
-            sync_full_market_daily_controls=AsyncMock(return_value={"status": "completed"}),
-            tushare_request=TushareSyncRequest, full_market_request=_full_market_request,
-            snapshot_request=lambda a: {"as_of_date": a}, build_snapshot=object(),
-            recompute_outcomes=object(), recompute_scorecards=object(),
-            generate_recommendations=object(),
-            run_database_blocking=AsyncMock(return_value={"status": "ready"}),
-            cn_today=lambda: date(2026, 8, 28)))
-        self.assertEqual(result["status"], "completed")
-        self.assertIsNone(result["minute_bars"])

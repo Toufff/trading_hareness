@@ -45,13 +45,13 @@ def main() -> int:
 
     # Keep the decompositions from silently regressing.  App.vue is the shell;
     # dashboard state belongs in its composable and feature UI in tab views.
-    app_vue_lines = len((FRONTEND / "App.vue").read_text().splitlines())
+    app_vue_lines = len((FRONTEND / "App.vue").read_text(encoding="utf-8").splitlines())
     if app_vue_lines > 150:
         problems.append(f"frontend/src/App.vue exceeds shell budget: {app_vue_lines} > 150")
     oversized_tests = [
-        f"{path.name}:{len(path.read_text().splitlines())}"
+        f"{path.name}:{len(path.read_text(encoding='utf-8').splitlines())}"
         for path in sorted(TESTS.glob("test_*.py"))
-        if len(path.read_text().splitlines()) > 1_500
+        if len(path.read_text(encoding="utf-8").splitlines()) > 1_500
     ]
     if oversized_tests:
         problems.append("oversized focused test module(s): " + ", ".join(oversized_tests))
@@ -60,7 +60,7 @@ def main() -> int:
             problems.append(f"legacy catch-all test remains: {legacy_name}")
 
     main_path = APP / "main.py"
-    main_tree = ast.parse(main_path.read_text())
+    main_tree = ast.parse(main_path.read_text(encoding="utf-8"))
     direct_routes = []
     for node in main_tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -76,7 +76,7 @@ def main() -> int:
     for path in APP.rglob("*.py"):
         if path == main_path or "__pycache__" in path.parts:
             continue
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and (
                 node.module == "app.main" or (node.module == "main" and node.level == 1)

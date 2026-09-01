@@ -39,7 +39,7 @@ class OfflineMinuteImportRecoveryTests(unittest.TestCase):
         self.assertEqual(offline_minute_import_stale_seconds({"OFFLINE_MINUTE_IMPORT_STALE_SECONDS": "1"}), 60)
         self.assertEqual(offline_minute_import_stale_seconds({"OFFLINE_MINUTE_IMPORT_STALE_SECONDS": "999999"}), 86_400)
         self.assertEqual(offline_minute_import_stale_seconds({"OFFLINE_MINUTE_IMPORT_STALE_SECONDS": "bad"}), 900)
-        source = (Path(__file__).resolve().parents[1] / "app" / "offline_minute_import_service.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "app" / "offline_minute_import_service.py").read_text(encoding="utf-8")
         self.assertIn("pg_advisory_xact_lock", source)
         self.assertIn("FOR UPDATE", source)
         self.assertNotIn("from .main", source)

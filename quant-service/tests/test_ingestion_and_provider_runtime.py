@@ -966,8 +966,8 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
         ])
 
     def test_post_close_refresh_constructs_a_valid_cninfo_date_range_and_research_wrapper(self):
-        source = Path("app/post_close_refresh_service.py").read_text()
-        composition = Path("app/main.py").read_text()
+        source = Path("app/post_close_refresh_service.py").read_text(encoding="utf-8")
+        composition = Path("app/main.py").read_text(encoding="utf-8")
         self.assertIn('start_date=trade_date - timedelta(days=45)', source)
         self.assertIn('rebuild_analyst_research=rebuild_analyst_research_for_date', composition)
         self.assertIn('def rebuild_analyst_research_for_date(as_of_date: date)', composition)

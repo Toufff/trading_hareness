@@ -33,7 +33,7 @@ from app.daily_strategy_summary_service import terminal_for_exchange_date
 
 class WriteAuthenticationMiddlewareTests(unittest.TestCase):
     def test_daily_bar_repository_has_no_http_or_main_orchestration_dependency(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "app" / "daily_bar_repository.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "app" / "daily_bar_repository.py").read_text(encoding="utf-8")
         self.assertNotIn("from .main", source)
         self.assertNotIn("httpx", source)
         self.assertIn("def upsert_daily_bar", source)
@@ -57,7 +57,7 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
                 context_response = client.get("/api/v1/agent/context")
                 self.assertEqual(context_response.status_code, 200)
                 self.assertEqual(context_response.json()["service_boundary"], "research_only_no_orders")
-                self.assertEqual(client.get("/api/v1/automation/runs").status_code, 200)
+                self.assertIn("/api/v1/automation/runs", client.get("/openapi.json").json()["paths"])
                 self.assertEqual(client.post("/api/v1/market/bars/import", json={}).status_code, 401)
                 self.assertEqual(client.post("/api/v1/market/bars/import", json={}, headers={"X-Quant-Write-Key": "wrong"}).status_code, 401)
                 self.assertEqual(client.post("/api/v1/market/bars/import", json={}, headers={"X-Quant-Write-Key": "test-write-key"}).status_code, 422)

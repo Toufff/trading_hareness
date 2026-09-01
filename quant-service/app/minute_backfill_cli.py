@@ -1,51 +1,62 @@
 """Drive the minute-bar session backfill over a date range.
 
-The library pieces already exist -- ``session_symbols`` picks each session's
-limit-up pool, trend/near-threshold cohorts, matched controls and benchmarks,
-and ``backfill_session`` walks them one request at a time because the upstream
-serves a single ts_code per call. What was missing is a way to run them over a
-range and resume, which is what this adds.
-
-Bounded on purpose: the whole point of scoping to the limit-up pool is that a
-full-market minute backfill would not fit the gateway budget. Progress is
-printed per session so a long run can be watched, and a session already covered
-is skipped so the command can be re-run.
-
-    python -m app.minute_backfill_cli --start-date 2026-06-01 --end-date 2026-08-31
+This module contains the command logic but does not import the ASGI composition
+root. The executable wrapper under ``scripts/`` supplies database, provider and
+executor dependencies explicitly.
 """
+
 from __future__ import annotations
 
 import argparse
-import asyncio
-import json
+from dataclasses import dataclass
 from datetime import date, datetime
+import json
+from typing import Any, Awaitable, Callable, Sequence
 
-from .main import call_tushare_api, db, run_database_blocking
 from .minute_bar_session_backfill import backfill_session, coverage_report, session_symbols
+
+
+@dataclass(frozen=True)
+class MinuteBackfillCliDependencies:
+    database: Any
+    call_tushare_api: Callable[..., Awaitable[Any]]
+    run_database_blocking: Callable[..., Awaitable[Any]]
 
 
 def _iso(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-# run_database_blocking hands the action no connection, so each one opens its own
-# short transaction through the shared pool.
-def _open_days(start: date, end: date) -> list[date]:
-    with db.transaction() as connection:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--start-date", required=True, type=_iso)
+    parser.add_argument("--end-date", required=True, type=_iso)
+    parser.add_argument(
+        "--limit", type=int, default=60,
+        help="max limit-up names per session; benchmarks are always kept",
+    )
+    parser.add_argument(
+        "--min-covered", type=int, default=0,
+        help="legacy compatibility; 0 skips only when every selected symbol is covered",
+    )
+    return parser.parse_args(argv)
+
+
+def _open_days(database: Any, start: date, end: date) -> list[date]:
+    with database.transaction() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT DISTINCT trading_date FROM quant.canonical_bars_daily "
                 "WHERE trading_date BETWEEN %s AND %s ORDER BY trading_date",
                 (start, end),
             )
-            # The pool is configured with a dict row factory.
             return [row["trading_date"] for row in cursor.fetchall()]
 
 
-def _covered_symbols(trading_date: date, symbols: list[str]) -> set[str]:
+def _covered_symbols(database: Any, trading_date: date, symbols: list[str]) -> set[str]:
     if not symbols:
         return set()
-    with db.transaction() as connection:
+    with database.transaction() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 """SELECT DISTINCT symbol FROM quant.market_bars_minute
@@ -56,62 +67,76 @@ def _covered_symbols(trading_date: date, symbols: list[str]) -> set[str]:
             return {str(row["symbol"]) for row in cursor.fetchall()}
 
 
-def _session_symbols(trading_date: date, limit: int) -> dict:
-    with db.transaction() as connection:
+def _session_symbols(database: Any, trading_date: date, limit: int) -> dict[str, Any]:
+    with database.transaction() as connection:
         return session_symbols(connection, trading_date, limit=limit)
 
 
-async def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--start-date", required=True, type=_iso)
-    parser.add_argument("--end-date", required=True, type=_iso)
-    parser.add_argument("--limit", type=int, default=60,
-                        help="max limit-up names per session; benchmarks are always kept")
-    parser.add_argument("--min-covered", type=int, default=0,
-                        help="legacy compatibility; 0 skips only when every selected symbol is covered")
-    args = parser.parse_args()
-
-    days = await run_database_blocking(_open_days, args.start_date, args.end_date)
-    print(json.dumps({"status": "started", "open_days": len(days),
-                      "start": str(args.start_date), "end": str(args.end_date)}), flush=True)
+async def run(args: argparse.Namespace, deps: MinuteBackfillCliDependencies) -> int:
+    days = await deps.run_database_blocking(_open_days, deps.database, args.start_date, args.end_date)
+    print(json.dumps({
+        "status": "started", "open_days": len(days),
+        "start": str(args.start_date), "end": str(args.end_date),
+    }), flush=True)
 
     done = skipped = failed = 0
     for index, trading_date in enumerate(days, start=1):
-        picked = await run_database_blocking(_session_symbols, trading_date, args.limit)
+        picked = await deps.run_database_blocking(_session_symbols, deps.database, trading_date, args.limit)
         symbols = picked["symbols"]
         if not symbols:
             skipped += 1
             continue
-        covered_symbols = await run_database_blocking(_covered_symbols, trading_date, symbols)
-        # A prior run may contain only the old board/benchmark cohort.  Do not
-        # call that day complete until every currently selected trend, near-limit
-        # and matched-control symbol also has a stored minute session.
+        covered_symbols = await deps.run_database_blocking(
+            _covered_symbols, deps.database, trading_date, symbols,
+        )
         if len(covered_symbols) == len(set(symbols)):
             skipped += 1
             continue
         symbols = [symbol for symbol in symbols if symbol not in covered_symbols]
-        selection_roles: dict[str, list[str]] = {symbol: ["benchmark"] for symbol in picked.get("benchmarks", [])}
+        selection_roles: dict[str, list[str]] = {
+            symbol: ["benchmark"] for symbol in picked.get("benchmarks", [])
+        }
         for role, role_symbols in dict(picked.get("sample_roles", {})).items():
             for symbol in role_symbols:
                 selection_roles.setdefault(str(symbol), []).append(str(role))
         try:
             outcome = await backfill_session(
-                trading_date, symbols=symbols, call_tushare_api=call_tushare_api,
-                run_database_blocking=run_database_blocking, db=db, selection_roles=selection_roles)
+                trading_date,
+                symbols=symbols,
+                call_tushare_api=deps.call_tushare_api,
+                run_database_blocking=deps.run_database_blocking,
+                db=deps.database,
+                selection_roles=selection_roles,
+            )
             report = coverage_report(outcome.get("results", []))
             done += 1
-            print(json.dumps({"day": str(trading_date), "progress": f"{index}/{len(days)}",
-                              "symbols": len(symbols), "coverage": report,
-                              "skipped": skipped, "failed": failed}, default=str), flush=True)
-        except Exception as error:  # noqa: BLE001 - one session must not end the run
+            print(json.dumps({
+                "day": str(trading_date), "progress": f"{index}/{len(days)}",
+                "symbols": len(symbols), "coverage": report,
+                "skipped": skipped, "failed": failed,
+            }, default=str), flush=True)
+        except Exception as error:  # noqa: BLE001 - one session must not end the range
             failed += 1
-            print(json.dumps({"day": str(trading_date), "progress": f"{index}/{len(days)}",
-                              "error": str(error)[:200]}), flush=True)
+            print(json.dumps({
+                "day": str(trading_date), "progress": f"{index}/{len(days)}",
+                "error": str(error)[:200],
+            }), flush=True)
 
-    print(json.dumps({"status": "finished", "sessions_done": done,
-                      "skipped": skipped, "failed": failed}), flush=True)
+    print(json.dumps({
+        "status": "finished", "sessions_done": done,
+        "skipped": skipped, "failed": failed,
+    }), flush=True)
     return 0
 
 
+async def main(deps: MinuteBackfillCliDependencies, argv: Sequence[str] | None = None) -> int:
+    return await run(parse_args(argv), deps)
+
+
+__all__ = ["MinuteBackfillCliDependencies", "main", "parse_args", "run"]
+
+
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(
+        "Use scripts/run-minute-backfill.py so runtime dependencies are assembled outside app modules."
+    )

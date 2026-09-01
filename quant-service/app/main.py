@@ -514,6 +514,7 @@ from .routers.event_reads import build_event_reads_router
 from .routers.strategy_reads import build_strategy_reads_router
 from .routers.paper_reads import build_paper_reads_router
 from .routers.paper_actions import build_paper_actions_router
+from .routers.personal_decisions import PersonalDecisionDependencies, build_personal_decisions_router
 from .routers.analyst_prompt_lab import build_analyst_prompt_lab_router
 from .routers.strategy_pattern_reads import build_strategy_pattern_reads_router
 from .routers.ten_day_leader_rotation_reads import build_ten_day_leader_rotation_reads_router
@@ -667,6 +668,8 @@ from .telemetry import (
 from .runtime_executors import ExecutorSaturatedError, run_akshare_blocking, run_database_blocking, runtime_executor_status, shutdown_runtime_executors
 from .l2_research_gate import evaluate_l2_incremental_value
 from .l2_research_repository import latest_l2_evaluation, persist_l2_evaluation
+from .personal_decision_repository import persist_broker_snapshot, persist_trade_plan
+from .async_personal_decision_repository import latest_broker_snapshot, latest_personal_decision_brief
 from .provider_rate_limits import provider_request_spacing_seconds, reserve_provider_rate_limit_slot
 from .runtime_leases import (
     POST_CLOSE_REFRESH_LEASE_KEY,
@@ -4165,6 +4168,14 @@ app.include_router(build_l2_research_router(L2ResearchDependencies(
 app.include_router(build_strategy_reads_router(db, STRATEGY_DECISION_MODEL_VERSION, async_db, cn_today=cn_today))
 app.include_router(build_paper_reads_router(db, async_db))
 app.include_router(build_paper_actions_router(db, configure_paper_account, accept_paper_decision))
+app.include_router(build_personal_decisions_router(PersonalDecisionDependencies(
+    database=db,
+    async_database=async_db,
+    persist_snapshot=persist_broker_snapshot,
+    persist_plan=persist_trade_plan,
+    latest_snapshot=latest_broker_snapshot,
+    latest_brief=latest_personal_decision_brief,
+)))
 app.include_router(build_analyst_prompt_lab_router(
     db, materialize_prompt_candidates, label_prompt_candidate, evaluate_prompt_variant,
     materialize_intraday_analyst_outcomes, async_database=async_db,

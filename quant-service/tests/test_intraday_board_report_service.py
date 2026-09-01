@@ -21,7 +21,7 @@ class IntradayBoardReportServiceTests(unittest.TestCase):
                                     "概念流入：概念甲 +5.0；概念乙 -4.0", "概念流出：概念乙 -4.0；概念甲 +5.0"])
 
     def test_service_has_no_main_or_http_client_dependency(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_board_report_service.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_board_report_service.py").read_text(encoding="utf-8")
         self.assertNotIn("from .main", source)
         self.assertNotIn("httpx", source)
         self.assertIn("Feishu is reserved for watched-stock strategy signals", source)

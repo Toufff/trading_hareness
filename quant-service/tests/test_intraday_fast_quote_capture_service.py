@@ -58,7 +58,7 @@ class IntradayFastQuoteCaptureServiceTests(unittest.TestCase):
         self.assertEqual(asyncio.run(check())["status"], "circuit_open")
 
     def test_service_has_no_main_or_http_client_dependency(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_fast_quote_capture_service.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_fast_quote_capture_service.py").read_text(encoding="utf-8")
         self.assertNotIn("from .main", source)
         self.assertNotIn("httpx", source)
         self.assertIn("A provider circuit-open response", source)

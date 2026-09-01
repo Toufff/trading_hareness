@@ -44,7 +44,7 @@ class ResearchStorageAdmissionTests(unittest.IsolatedAsyncioTestCase):
                 "QUANT_HOT_DATABASE_SOFT_BYTES": "800", "QUANT_RESEARCH_STORAGE_WARNING_RATIO": "0.8",
                 "QUANT_RESEARCH_STORAGE_STOP_RATIO": "0.9",
             },
-            directory_bytes=lambda path: 200 if str(path) == "/tmp/quant-test" else 0,
+            directory_bytes=lambda path: 200 if path.as_posix() == "/tmp/quant-test" else 0,
         )
 
         self.assertEqual(result["managed"]["used_bytes"], 300)

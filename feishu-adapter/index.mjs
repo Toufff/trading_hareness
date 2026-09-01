@@ -1190,6 +1190,8 @@ const researchPaths = new Map([
 	['/api/research/ten-day-leader-rotation/latest', '/api/v1/research/ten-day-leader-rotation/latest'],
 	['/api/research/intraday/outcomes/latest', '/api/v1/intraday/outcomes/latest'],
 	['/api/research/paper/status', '/api/v1/paper/status'],
+	['/api/research/personal/portfolio-snapshots/latest', '/api/v1/personal/portfolio-snapshots/latest'],
+	['/api/research/personal/decision-briefs/latest', '/api/v1/personal/decision-briefs/latest'],
 	['/api/research/strategy/contracts', '/api/v1/strategy/contracts'],
 	['/api/research/strategy/funnel', '/api/v1/strategy/funnel'],
 	['/api/research/intraday/services/status', '/api/v1/intraday/services/status'],

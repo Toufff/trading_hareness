@@ -78,7 +78,7 @@ class IntradayMinuteProfileRunnerTests(unittest.TestCase):
         self.assertEqual(completed, set())
 
     def test_runner_has_no_main_or_http_client_dependency(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_minute_profile_runner.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_minute_profile_runner.py").read_text(encoding="utf-8")
         self.assertNotIn("from .main", source)
         self.assertNotIn("httpx", source)
         self.assertIn("time(14, 55)", source)

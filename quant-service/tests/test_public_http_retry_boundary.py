@@ -33,5 +33,5 @@ class PublicHttpRetryBoundaryTests(unittest.TestCase):
     def test_free_market_adapter_uses_only_the_bounded_retry_primitive_for_http(self) -> None:
         source = Path(__file__).resolve().parents[1] / "app" / "free_market_providers.py"
         visitor = _HttpClientCallVisitor()
-        visitor.visit(ast.parse(source.read_text()))
+        visitor.visit(ast.parse(source.read_text(encoding="utf-8")))
         self.assertEqual(visitor.violations, [], f"direct public HTTP calls bypass retry: {visitor.violations}")

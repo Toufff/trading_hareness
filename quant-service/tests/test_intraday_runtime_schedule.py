@@ -46,6 +46,7 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
             minute_fetch = AsyncMock(return_value=rows)
             with patch("app.main.open_provider_capabilities", new=AsyncMock(return_value=set())), \
                  patch("app.main.tencent_intraday_minutes", new=minute_fetch), \
+                 patch("app.main.run_database_blocking", new=AsyncMock(return_value=None)), \
                  patch("app.main._intraday_tencent_minute_cache", new={}):
                 features, source = await intraday_tencent_surge_context(watches)
             return features, source, minute_fetch
@@ -74,6 +75,7 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
             with patch("app.main.open_provider_capabilities", new=AsyncMock(return_value=set())), \
                  patch("app.main.tencent_intraday_minutes", new=minute_fetch), \
                  patch("app.main.intraday_minute_profile_max_symbols", return_value=3), \
+                 patch("app.main.run_database_blocking", new=AsyncMock(return_value=None)), \
                  patch("app.main._intraday_tencent_minute_cache", new={}):
                 _, source = await intraday_tencent_surge_context(watches)
             return source, minute_fetch

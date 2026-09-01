@@ -6,6 +6,11 @@ For the verified current workflow, service topology, automatic startup behavior,
 
 The local research service and the future server deployment path are documented in [DEPLOYMENT.md](DEPLOYMENT.md). The complete analyst-channel quant research design and phased acceptance plan are in [docs/QUANT_RESEARCH_IMPLEMENTATION_PLAN.md](docs/QUANT_RESEARCH_IMPLEMENTATION_PLAN.md). The default Compose stack remains local-only; the separate server composition exposes only TLS reverse-proxy endpoints.
 
+The Windows `stock-brain` cutover, facts-only import boundary, actual-portfolio
+contracts and personal decision dashboard are documented in
+[docs/STOCK_BRAIN_MIGRATION.md](docs/STOCK_BRAIN_MIGRATION.md). The migration
+never exposes a broker order path and does not import legacy action-card plans.
+
 ## Start
 
 ```bash

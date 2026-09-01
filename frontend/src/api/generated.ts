@@ -608,6 +608,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/research/l2/evaluations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record */
+        post: operations["record_api_v1_research_l2_evaluations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/research/l2/evaluations/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Latest */
+        get: operations["latest_api_v1_research_l2_evaluations_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/strategy/decisions/latest": {
         parameters: {
             query?: never;
@@ -838,6 +872,74 @@ export interface paths {
         put?: never;
         /** Accept Decision */
         post: operations["accept_decision_api_v1_paper_decisions__decision_id__accept_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/personal/portfolio-snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record Portfolio Snapshot */
+        post: operations["record_portfolio_snapshot_api_v1_personal_portfolio_snapshots_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/personal/portfolio-snapshots/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Latest Portfolio Snapshot */
+        get: operations["read_latest_portfolio_snapshot_api_v1_personal_portfolio_snapshots_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/personal/trade-plans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record Trade Plan */
+        post: operations["record_trade_plan_api_v1_personal_trade_plans_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/personal/decision-briefs/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Latest Personal Decision Brief */
+        get: operations["read_latest_personal_decision_brief_api_v1_personal_decision_briefs_latest_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2950,6 +3052,68 @@ export interface components {
              */
             sync_announcements: boolean;
         };
+        /** BrokerPortfolioSnapshotInput */
+        BrokerPortfolioSnapshotInput: {
+            /**
+             * Contract Version
+             * @default personal-decision-v1
+             * @constant
+             */
+            contract_version: "personal-decision-v1";
+            /** Account Key */
+            account_key: string;
+            /** Source */
+            source: string;
+            /** Source Snapshot Key */
+            source_snapshot_key: string;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /**
+             * Verification
+             * @enum {string}
+             */
+            verification: "verified_exact" | "verified_partial";
+            /** Cash */
+            cash?: number | string | null;
+            /** Total Asset */
+            total_asset?: number | string | null;
+            /** Total Market Value */
+            total_market_value?: number | string | null;
+            /** Positions */
+            positions?: components["schemas"]["BrokerPositionInput"][];
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
+        /** BrokerPositionInput */
+        BrokerPositionInput: {
+            /** Symbol */
+            symbol: string;
+            /** Name */
+            name: string;
+            /** Quantity */
+            quantity: number | string;
+            /** Sellable Quantity */
+            sellable_quantity: number | string;
+            /** Average Cost */
+            average_cost?: number | string | null;
+            /** Market Price */
+            market_price?: number | string | null;
+            /** Market Value */
+            market_value?: number | string | null;
+            /** Unrealized Pnl */
+            unrealized_pnl?: number | string | null;
+            /** Position Weight Pct */
+            position_weight_pct?: number | string | null;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
         /** ClaimReviewRequest */
         ClaimReviewRequest: {
             /**
@@ -3322,6 +3486,48 @@ export interface components {
             };
         };
         /**
+         * L2IncrementalEvaluationRequest
+         * @description Submit licensed/offline L2 evidence without opening a live data path.
+         */
+        L2IncrementalEvaluationRequest: {
+            /**
+             * Source Kind
+             * @default licensed_level2_offline
+             * @constant
+             */
+            source_kind: "licensed_level2_offline";
+            /**
+             * Algorithm Version
+             * @default l2-gate-v1
+             */
+            algorithm_version: string;
+            /**
+             * Minimum Samples
+             * @default 200
+             */
+            minimum_samples: number;
+            /** Rows */
+            rows: components["schemas"]["L2PairedObservation"][];
+            /** Evidence Window Start */
+            evidence_window_start?: string | null;
+            /** Evidence Window End */
+            evidence_window_end?: string | null;
+        };
+        /**
+         * L2PairedObservation
+         * @description One matched research-only Level-1 versus Level-2 observation.
+         */
+        L2PairedObservation: {
+            /** Baseline Score */
+            baseline_score: number;
+            /** L2 Score */
+            l2_score: number;
+            /** Outcome */
+            outcome: number;
+            /** L2 Algorithm Version */
+            l2_algorithm_version: string;
+        };
+        /**
          * MarketFlowFeatureRebuildRequest
          * @description Bounded local-evidence rebuild; it never authorizes provider history.
          */
@@ -3424,6 +3630,64 @@ export interface components {
              */
             account_key: "default";
         };
+        /** PersonalTradePlanInput */
+        PersonalTradePlanInput: {
+            /**
+             * Contract Version
+             * @default personal-decision-v1
+             * @constant
+             */
+            contract_version: "personal-decision-v1";
+            /** Plan Key */
+            plan_key: string;
+            /**
+             * Plan Kind
+             * @enum {string}
+             */
+            plan_kind: "holding" | "new_buy";
+            /** Symbol */
+            symbol: string;
+            /** Name */
+            name: string;
+            /**
+             * As Of At
+             * Format: date-time
+             */
+            as_of_at: string;
+            /**
+             * Valid Until
+             * Format: date-time
+             */
+            valid_until: string;
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "hold" | "observe" | "buy_on_trigger" | "reduce_on_trigger" | "exit_on_trigger" | "avoid";
+            entry_zone?: components["schemas"]["PriceZone"] | null;
+            /** Add Trigger */
+            add_trigger?: string | null;
+            /** Reduce Trigger */
+            reduce_trigger?: string | null;
+            /** Exit Trigger */
+            exit_trigger: string;
+            /** Stop Price */
+            stop_price?: number | string | null;
+            /** Target Prices */
+            target_prices?: (number | string)[];
+            /** Max Position Pct */
+            max_position_pct: number | string;
+            /** Rationale */
+            rationale: string[];
+            /** Evidence Refs */
+            evidence_refs: string[];
+            /** Risk Flags */
+            risk_flags?: string[];
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
         /** PostCloseRefreshRequest */
         PostCloseRefreshRequest: {
             /** Trade Date */
@@ -3458,6 +3722,13 @@ export interface components {
              * @default 1000
              */
             minimum_full_market_symbols: number;
+        };
+        /** PriceZone */
+        PriceZone: {
+            /** Lower */
+            lower: number | string;
+            /** Upper */
+            upper: number | string;
         };
         /** RealtimeProbeRequest */
         RealtimeProbeRequest: {
@@ -5104,6 +5375,63 @@ export interface operations {
             };
         };
     };
+    record_api_v1_research_l2_evaluations_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["L2IncrementalEvaluationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    latest_api_v1_research_l2_evaluations_latest_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     decision_api_v1_strategy_decisions_latest_get: {
         parameters: {
             query?: never;
@@ -5439,6 +5767,142 @@ export interface operations {
                 "application/json": components["schemas"]["PaperDecisionAcceptRequest"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    record_portfolio_snapshot_api_v1_personal_portfolio_snapshots_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BrokerPortfolioSnapshotInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_latest_portfolio_snapshot_api_v1_personal_portfolio_snapshots_latest_get: {
+        parameters: {
+            query: {
+                account_key: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    record_trade_plan_api_v1_personal_trade_plans_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PersonalTradePlanInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_latest_personal_decision_brief_api_v1_personal_decision_briefs_latest_get: {
+        parameters: {
+            query: {
+                account_key: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

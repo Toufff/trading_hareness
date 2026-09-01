@@ -75,7 +75,7 @@ class IntradayOrderBookServiceTests(unittest.TestCase):
         self.assertEqual(len(persisted), 1)
 
     def test_service_owns_no_fastapi_or_provider_client(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_order_book_service.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_order_book_service.py").read_text(encoding="utf-8")
         self.assertNotIn("from .main", source)
         self.assertNotIn("httpx", source)
         self.assertIn("def persist_observations", source)

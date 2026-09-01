@@ -74,7 +74,7 @@ class IntradayBoardCurveRunnerTests(unittest.TestCase):
         self.assertIsNone(pruned_on)
 
     def test_runner_has_no_main_or_http_client_dependency(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_board_curve_runner.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_board_curve_runner.py").read_text(encoding="utf-8")
         self.assertNotIn("from .main", source)
         self.assertNotIn("httpx", source)
         self.assertIn("missed minutes are never replayed", source)

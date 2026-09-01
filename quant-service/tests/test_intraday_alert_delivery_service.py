@@ -84,7 +84,7 @@ class IntradayAlertDeliveryServiceTests(unittest.TestCase):
         self.assertEqual(calls, 2)
 
     def test_service_has_no_main_or_http_client_dependency(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_alert_delivery_service.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_alert_delivery_service.py").read_text(encoding="utf-8")
         self.assertNotIn("from .main", source)
         self.assertNotIn("httpx", source)
         self.assertIn("def load_due_deliveries", source)

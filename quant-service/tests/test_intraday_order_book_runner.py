@@ -80,7 +80,7 @@ class IntradayOrderBookRunnerTests(unittest.TestCase):
         ])
 
     def test_runner_has_no_main_or_http_client_dependency(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_order_book_runner.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "app" / "intraday_order_book_runner.py").read_text(encoding="utf-8")
         self.assertNotIn("from .main", source)
         self.assertNotIn("httpx", source)
         self.assertIn("max(15.0, interval)", source)

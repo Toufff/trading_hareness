@@ -177,7 +177,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             "async_market_session_repository.py",
             "async_analyst_text_feature_read_repository.py",
         ):
-            tree = ast.parse((app_root / module_name).read_text())
+            tree = ast.parse((app_root / module_name).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.AsyncFunctionDef):
                     self.assertNotIn("db", [argument.arg for argument in node.args.args], module_name)
@@ -187,7 +187,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
         hits: list[str] = []
         for path in sorted(app_root.rglob("*.py")):
             visitor = _DirectAsyncDbTransactionVisitor()
-            visitor.visit(ast.parse(path.read_text()))
+            visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
             hits.extend(f"{path.relative_to(app_root)}:{line}:{function}:{call}" for function, line, call in visitor.hits)
         self.assertEqual(hits, [], "async DB transactions must use run_database_blocking: " + ", ".join(hits))
 
@@ -196,7 +196,7 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
         hits: list[str] = []
         for path in sorted(app_root.rglob("*.py")):
             visitor = _DirectAsyncRepositoryCallVisitor()
-            visitor.visit(ast.parse(path.read_text()))
+            visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
             hits.extend(f"{path.relative_to(app_root)}:{line}:{function}:{call}" for function, line, call in visitor.hits)
         self.assertEqual(hits, [], "async repository work must use run_database_blocking: " + ", ".join(hits))
 
@@ -210,7 +210,7 @@ class MainRouterBoundaryTests(unittest.TestCase):
         injects local runtime dependencies.
         """
         main_path = Path(__file__).resolve().parents[1] / "app" / "main.py"
-        tree = ast.parse(main_path.read_text())
+        tree = ast.parse(main_path.read_text(encoding="utf-8"))
         direct_routes: set[tuple[str, str]] = set()
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -228,7 +228,7 @@ class MainRouterBoundaryTests(unittest.TestCase):
     def test_legacy_sync_names_are_thin_compatibility_aliases(self) -> None:
         """Prevent removed provider implementations from returning to main.py."""
         main_path = Path(__file__).resolve().parents[1] / "app" / "main.py"
-        tree = ast.parse(main_path.read_text())
+        tree = ast.parse(main_path.read_text(encoding="utf-8"))
         names = {
             "sync_tushare_legacy", "sync_baostock_legacy", "sync_market_universe_legacy",
             "sync_full_market_daily_legacy", "sync_ths_sector_catalog_legacy",
@@ -268,7 +268,7 @@ class RouterReadBoundaryTests(unittest.TestCase):
         routers = Path(__file__).resolve().parents[1] / "app" / "routers"
         sync_gets: set[tuple[str, str]] = set()
         for path in sorted(routers.glob("*.py")):
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.FunctionDef):
                     continue
