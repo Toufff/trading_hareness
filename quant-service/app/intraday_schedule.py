@@ -11,6 +11,22 @@ CN_TZ = ZoneInfo("Asia/Shanghai")
 INTRADAY_WATCHLIST_MAX_SYMBOLS = 40
 
 
+def intraday_watchlist_max_symbols() -> int:
+    """Return the configured live-watch capacity without weakening the batch caps.
+
+    The historical default remains 40 (the audited single-batch size).  A
+    larger observation pool may be enabled explicitly, but is processed in
+    provider-sized batches by the capture layer.  Capping the setting at 100
+    keeps the bounded scan contract and prevents an accidental full-market
+    scrape from a stale environment file.
+    """
+    try:
+        value = int(os.getenv("INTRADAY_WATCHLIST_MAX_SYMBOLS", str(INTRADAY_WATCHLIST_MAX_SYMBOLS)))
+    except ValueError:
+        value = INTRADAY_WATCHLIST_MAX_SYMBOLS
+    return max(INTRADAY_WATCHLIST_MAX_SYMBOLS, min(100, value))
+
+
 def intraday_scan_interval_seconds() -> int:
     try:
         return max(0, min(300, int(os.getenv("INTRADAY_SCAN_INTERVAL_SECONDS", "0"))))
@@ -32,10 +48,10 @@ def intraday_effective_scan_interval_seconds(normal_interval_seconds: int, now: 
     return 10 if intraday_high_frequency_window(now) else normal_interval_seconds
 
 
-def intraday_watchlist_capacity(symbol_count: int, *, max_symbols: int = INTRADAY_WATCHLIST_MAX_SYMBOLS) -> dict[str, int | bool | str]:
+def intraday_watchlist_capacity(symbol_count: int, *, max_symbols: int | None = None) -> dict[str, int | bool | str]:
     """Fail closed rather than silently scanning only a prefix of a watchlist."""
     requested = max(0, int(symbol_count))
-    capacity = max(1, int(max_symbols))
+    capacity = intraday_watchlist_max_symbols() if max_symbols is None else max(1, int(max_symbols))
     blocked = requested > capacity
     return {
         "requested_symbols": requested,

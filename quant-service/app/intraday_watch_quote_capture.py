@@ -10,6 +10,39 @@ from typing import Any, Awaitable, Callable
 from .platform.evidence_contracts import materialize_evidence_status
 
 
+async def _batched_provider_fetch(
+    fetch: Callable[..., Awaitable[list[dict[str, Any]]]],
+    symbols: list[str],
+    *,
+    batch_size: int,
+) -> list[dict[str, Any]]:
+    """Fetch an expanded observation pool using audited provider batch sizes.
+
+    Providers retain their independently verified request cap (currently 40)
+    while the user-facing observation pool can be expanded to 100.  Partial
+    batch failures are preserved as partial evidence; only an all-batch
+    failure is raised so the caller can activate its existing fallback path.
+    """
+    unique = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+    if not unique:
+        return []
+    batches = [unique[index:index + batch_size] for index in range(0, len(unique), batch_size)]
+    results = await asyncio.gather(
+        *(fetch(batch, max_symbols=batch_size) for batch in batches),
+        return_exceptions=True,
+    )
+    rows: list[dict[str, Any]] = []
+    errors: list[BaseException] = []
+    for result in results:
+        if isinstance(result, BaseException):
+            errors.append(result)
+        elif isinstance(result, list):
+            rows.extend(result)
+    if rows or not errors:
+        return rows
+    raise errors[0]
+
+
 @dataclass(frozen=True)
 class WatchQuoteCapture:
     quotes: dict[str, dict[str, Any]]
@@ -131,7 +164,9 @@ async def capture_watch_quotes(
     # This is deliberately a single bounded request for the explicit
     # watchlist, started beside the all-A snapshot.  It is research
     # corroboration only: its values never represent an all-market ranking.
-    eastmoney_task = asyncio.create_task(dependencies.eastmoney_watch_flows(symbols, max_symbols=40))
+    eastmoney_task = asyncio.create_task(
+        _batched_provider_fetch(dependencies.eastmoney_watch_flows, symbols, batch_size=40),
+    )
     eastmoney_task.add_done_callback(dependencies.consume_background_exception)
     # Local reference for the derived flow metrics.  It is a small indexed read
     # of already-persisted end-of-day rows, started here so it overlaps the
@@ -139,7 +174,9 @@ async def capture_watch_quotes(
     reference_task = asyncio.create_task(dependencies.watch_flow_reference(symbols, observed_at))
     reference_task.add_done_callback(dependencies.consume_background_exception)
     try:
-        fresh_watch_rows = await dependencies.tencent_watch_quotes(symbols, max_symbols=40)
+        fresh_watch_rows = await _batched_provider_fetch(
+            dependencies.tencent_watch_quotes, symbols, batch_size=40,
+        )
     except dependencies.watch_quote_errors:
         fresh_watch_rows = []
     try:
