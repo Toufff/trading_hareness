@@ -1234,6 +1234,7 @@ class PlatformBoundaryTests(unittest.TestCase):
         router = build_event_reads_router(MagicMock())
         methods_by_path = {route.path: route.methods for route in router.routes}
         self.assertEqual(methods_by_path["/api/v1/events/announcements"], {"GET"})
+        self.assertEqual(methods_by_path["/api/v1/events/market"], {"GET"})
         self.assertEqual(methods_by_path["/api/v1/events/lhb"], {"GET"})
 
     def test_strategy_reads_router_keeps_materialized_results_as_get_only(self):

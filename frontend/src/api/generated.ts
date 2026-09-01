@@ -574,6 +574,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/events/market": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Events */
+        get: operations["events_api_v1_events_market_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events/lhb": {
         parameters: {
             query?: never;
@@ -4985,6 +5002,43 @@ export interface operations {
         parameters: {
             query?: {
                 symbol?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    events_api_v1_events_market_get: {
+        parameters: {
+            query?: {
+                symbol?: string | null;
+                event_type?: string | null;
+                trade_date?: string | null;
                 limit?: number;
                 offset?: number;
             };

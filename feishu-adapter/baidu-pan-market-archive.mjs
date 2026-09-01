@@ -13,6 +13,17 @@ function latestTimestamp(values) {
 
 const SNAPSHOT_SPECS = [
 	{
+		bucket: 'market-events',
+		path: '/api/v1/events/market?limit=500',
+		source: 'quant.market.events',
+		identity: (body) => {
+			const items = body?.items ?? [];
+			const latest = items[0];
+			return latest?.event_id && latest?.occurred_at ? `${latest.event_id}:${latest.occurred_at}:${body?.total ?? items.length}` : '';
+		},
+		observedAt: (body) => latestTimestamp((body?.items ?? []).map((item) => item?.occurred_at ?? item?.available_at)),
+	},
+	{
 		bucket: 'all-a-level1',
 		path: '/api/v1/market/level1/latest?limit=6000',
 		source: 'quant.market.level1.latest',

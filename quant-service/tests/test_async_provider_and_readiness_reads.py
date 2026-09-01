@@ -224,5 +224,6 @@ class AsyncProviderAndReadinessReadTests(unittest.IsolatedAsyncioTestCase):
         # Route assembly uses the production async repository; this smoke
         # check also guards that both public endpoints remain GET-only.
         self.assertEqual({route.path: route.methods for route in router.routes}, {
-            "/api/v1/events/announcements": {"GET"}, "/api/v1/events/lhb": {"GET"},
+            "/api/v1/events/announcements": {"GET"}, "/api/v1/events/market": {"GET"},
+            "/api/v1/events/lhb": {"GET"},
         })
