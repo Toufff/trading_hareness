@@ -11,7 +11,8 @@ $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\'
 $frontend = Join-Path $repository 'frontend'
 $dist = Join-Path $frontend 'dist'
 if (-not $SkipBuild) {
-    & npm --prefix $frontend run build
+    $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
+    & $npm --prefix $frontend run build
     if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed' }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $dist 'index.html') -PathType Leaf)) { throw 'Frontend dist is missing' }
