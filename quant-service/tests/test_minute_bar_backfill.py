@@ -136,7 +136,7 @@ class BackfillOrchestrationTests(unittest.TestCase):
     def test_it_requests_one_bounded_symbol_from_the_get_gateway(self):
         _, captured = self._run([_bar("000001.SZ", "2026-08-25 09:30:00")])
         self.assertEqual(captured["api"], "stk_mins")
-        self.assertEqual(captured["preference"], "super_get")
+        self.assertEqual(captured["preference"], "auto")
         self.assertEqual(captured["params"]["ts_code"], "000001.SZ")
         self.assertEqual(captured["params"]["freq"], "1min")
         self.assertNotIn(",", captured["params"]["ts_code"], "the route serves one symbol per call")

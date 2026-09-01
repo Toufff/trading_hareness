@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Callable
 
+from .sector_membership_repository import point_in_time_membership_predicate
+
 
 def select_concepts(database: Any, requested_date: date | None, top_concepts: int) -> tuple[date | None, list[Any]]:
     """Select bounded positive-flow concepts from locally persisted evidence."""
@@ -59,12 +61,12 @@ def persist_candidates(
     json_value: Callable[[Any], Any],
 ) -> tuple[int, list[dict[str, Any]]]:
     """Write top limit-up members for each exact, same-date concept relation."""
+    membership_predicate = point_in_time_membership_predicate("member")
     with database.transaction() as connection:
         memberships = connection.execute(
-            """SELECT sector_key,symbol,raw FROM quant.sector_membership_history
-                 WHERE taxonomy_key='ths_concept_flow' AND sector_key = ANY(%s) AND effective_from<=%s
-                   AND (effective_to IS NULL OR effective_to>=%s)""",
-            (concept_keys, selected_date, selected_date),
+            f"""SELECT sector_key,symbol,raw FROM quant.sector_membership_history member
+                 WHERE taxonomy_key='ths_concept_flow' AND sector_key = ANY(%s) AND {membership_predicate}""",
+            (concept_keys, selected_date, selected_date, selected_date),
         ).fetchall()
         members_by_sector: dict[str, list[dict[str, Any]]] = {}
         for row in memberships:

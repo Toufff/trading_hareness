@@ -11,6 +11,8 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .sector_membership_repository import point_in_time_membership_predicate
+
 
 async def watchlists(
     async_database: Any,
@@ -60,14 +62,14 @@ async def exact_memberships(
     if not symbols:
         return []
     local_trade_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+    membership_predicate = point_in_time_membership_predicate("member", known_at_cutoff_sql="%s")
     async with async_database.transaction() as connection:
         result = await connection.execute(
-            """SELECT taxonomy_key,sector_key,symbol
-                 FROM quant.sector_membership_history
-                WHERE symbol=ANY(%s) AND effective_from<=%s
-                  AND (effective_to IS NULL OR effective_to>=%s)
+            f"""SELECT taxonomy_key,sector_key,symbol
+                 FROM quant.sector_membership_history member
+                WHERE symbol=ANY(%s) AND {membership_predicate}
                   AND taxonomy_key IN ('ths_concept_flow','ths_index_n','ths_industry')""",
-            (symbols, local_trade_date, local_trade_date),
+            (symbols, local_trade_date, local_trade_date, observed_at),
         )
         rows = await result.fetchall()
     return [dict(row) for row in rows]

@@ -46,7 +46,9 @@ class PostCloseStrategyServiceTests(unittest.TestCase):
         latest_result.fetchone.return_value = {"trading_date": date(2026, 8, 13)}
         inserted_result = MagicMock()
         inserted_result.fetchone.return_value = {"run_id": "c7a3668d-02fc-4d50-8f97-923f7f0f430d"}
-        connection.execute.side_effect = [latest_result, inserted_result, MagicMock(), MagicMock()]
+        connection.execute.side_effect = [
+            latest_result, inserted_result, MagicMock(), MagicMock(), MagicMock(), MagicMock(),
+        ]
         target_date = date(2026, 8, 14)
         loaded = {
             "status": "completed", "as_of_date": str(target_date),
@@ -56,6 +58,11 @@ class PostCloseStrategyServiceTests(unittest.TestCase):
                 "risk_flags": [],
             }],
             "source_status": {"daily_bars": 30, "daily_symbols": 5000, "exact_board_context_symbols": 1},
+            "screen_observations": [{
+                "symbol": "000001.SZ", "name": "A", "screen_state": "candidate",
+                "candidate_type": "base_ready_30d", "score": 88.0, "reason_codes": [],
+                "structure": {"status": "ready"}, "board_context": {"exact_member_mapping": True},
+            }],
             "summary": {"returned": 1},
         }
         loader = MagicMock(return_value=loaded)
@@ -69,7 +76,7 @@ class PostCloseStrategyServiceTests(unittest.TestCase):
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["as_of_date"], str(target_date))
         self.assertEqual(payload["model_version"], "post-close-test-v1")
-        self.assertEqual(connection.execute.call_count, 4)
+        self.assertEqual(connection.execute.call_count, 6)
 
     def test_retry_window_is_shanghai_clock_bounded(self) -> None:
         china = ZoneInfo("Asia/Shanghai")

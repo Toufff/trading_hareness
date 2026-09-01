@@ -51,7 +51,9 @@ async def sync(
             with db.transaction() as connection:
                 active_rows = connection.execute(
                     """SELECT sector_key,count(*)::int members FROM quant.sector_membership_history
-                         WHERE taxonomy_key=%s AND effective_to IS NULL GROUP BY sector_key""", (taxonomy_key,),
+                         WHERE taxonomy_key=%s AND effective_to IS NULL
+                           AND effective_from_basis IN ('provider_interval','observed_snapshot')
+                         GROUP BY sector_key""", (taxonomy_key,),
                 ).fetchall()
                 failed_rows = connection.execute(
                     """SELECT sector_key,attempts FROM quant.sector_member_sync_state

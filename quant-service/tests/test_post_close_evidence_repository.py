@@ -52,7 +52,9 @@ class PostCloseEvidenceRepositoryTests(unittest.TestCase):
         statement, params = self.connection.calls[-1]
         self.assertIn("quant.sector_membership_history", statement)
         self.assertIn("flow.trading_date=%s", statement)
-        self.assertEqual(params, (self.as_of_date,))
+        self.assertIn("member.known_at <=", statement)
+        self.assertIn("effective_from_basis IN ('provider_interval','observed_snapshot')", statement)
+        self.assertEqual(params, (self.as_of_date, self.as_of_date, self.as_of_date, self.as_of_date))
 
     def test_lhb_read_uses_tushare_trade_date_format(self):
         load_tushare_lhb_context_rows(self.database, self.as_of_date)

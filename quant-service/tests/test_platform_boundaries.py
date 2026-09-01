@@ -165,6 +165,8 @@ class PlatformBoundaryTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["candidates"][0]["candidate_type"], "base_ready_30d")
         self.assertEqual(result["summary"]["base_ready_30d"], 2)
+        self.assertEqual(len(result["screen_observations"]), 2)
+        self.assertEqual({item["screen_state"] for item in result["screen_observations"]}, {"candidate"})
     def test_intraday_terminal_repository_records_failure_latency(self):
         connection = MagicMock()
         database = MagicMock()

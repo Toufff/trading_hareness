@@ -10,6 +10,7 @@ from typing import Any
 from psycopg.types.json import Json
 
 from .sector_flow_features import sector_flow_feature, sector_flow_outcome
+from .sector_membership_repository import point_in_time_membership_predicate
 
 
 def _sign(value: Any) -> int:
@@ -21,6 +22,8 @@ def rebuild_sector_flow_daily_features(database: Any, start_date: date, end_date
     if end_date < start_date or (end_date - start_date).days > 45:
         raise ValueError("sector-flow feature rebuild requires an ordered range capped at 45 days")
     context_start = start_date - timedelta(days=10)
+    membership_predicate_lhb = point_in_time_membership_predicate("m", "l.day")
+    membership_predicate_event = point_in_time_membership_predicate("m", "event.day")
     with database.transaction() as connection:
         flow_rows = connection.execute(
             """SELECT DISTINCT ON(trading_date,sector_key)
@@ -35,7 +38,7 @@ def rebuild_sector_flow_daily_features(database: Any, start_date: date, end_date
             (context_start, end_date),
         ).fetchall()
         lhb_rows = connection.execute(
-            """WITH event_json AS (
+            f"""WITH event_json AS (
                    SELECT occurred_at,symbol,available_at,
                           CASE WHEN body IS JSON THEN body::jsonb END AS payload
                      FROM quant.market_events WHERE event_type='lhb_event'
@@ -62,7 +65,7 @@ def rebuild_sector_flow_daily_features(database: Any, start_date: date, end_date
                      FROM one_per_symbol l
                      JOIN quant.sector_membership_history m
                        ON m.taxonomy_key='ths_concept_flow' AND m.symbol=l.symbol
-                      AND m.effective_from<=l.day AND (m.effective_to IS NULL OR m.effective_to>=l.day)
+                      AND {membership_predicate_lhb}
                     GROUP BY l.day,m.sector_key
                ), limits AS (
                    SELECT day,m.sector_key,count(DISTINCT event.symbol) AS limit_up_count
@@ -72,7 +75,7 @@ def rebuild_sector_flow_daily_features(database: Any, start_date: date, end_date
                      ) event
                      JOIN quant.sector_membership_history m
                        ON m.taxonomy_key='ths_concept_flow' AND m.symbol=event.symbol
-                      AND m.effective_from<=event.day AND (m.effective_to IS NULL OR m.effective_to>=event.day)
+                      AND {membership_predicate_event}
                     WHERE day BETWEEN %s AND %s GROUP BY day,m.sector_key
                )
                SELECT COALESCE(a.day,l.day) AS trading_date,
@@ -82,7 +85,7 @@ def rebuild_sector_flow_daily_features(database: Any, start_date: date, end_date
                       COALESCE(a.negative_count,0) AS negative_count,
                       COALESCE(l.limit_up_count,0) AS limit_up_count
                  FROM aggregate a FULL JOIN limits l USING(day,sector_key)""",
-            (start_date, end_date, start_date, end_date),
+            (start_date, start_date, start_date, end_date, start_date, end_date),
         ).fetchall()
 
     flows_by_sector: dict[str, list[dict[str, Any]]] = defaultdict(list)

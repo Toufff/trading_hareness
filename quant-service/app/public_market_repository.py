@@ -141,7 +141,9 @@ def persist_market_events(database: Any, provider: str, rows: list[dict[str, Any
             content_sha256 = hashlib.sha256(payload.encode()).hexdigest()
             event_type = str(row.get("event_type") or "announcement")
             occurred_date = published_at.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
-            identity_key = market_event_identity_key(provider, event_type, symbol, occurred_date)
+            identity_key = str(row.get("event_identity_key") or "").strip() or market_event_identity_key(
+                provider, event_type, symbol, occurred_date,
+            )
             connection.execute(
                 "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,%s) ON CONFLICT(symbol) DO NOTHING",
                 (symbol, exchange_for(symbol), provider),

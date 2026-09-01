@@ -32,6 +32,34 @@ async def market_snapshots(async_database: Any, limit: int) -> dict[str, Any]:
     return {"items": rows}
 
 
+async def latest_all_a_level1(async_database: Any, limit: int = 6000) -> dict[str, Any]:
+    """Return the newest complete raw all-A Level-1 capture."""
+    bounded = max(1, min(int(limit), 6000))
+    async with async_database.transaction() as conn:
+        latest_result = await conn.execute(
+            "SELECT max(effective_at) AS snapshot_at FROM quant.raw_market_observations WHERE capability='a_share_prices_snapshot'"
+        )
+        latest = await latest_result.fetchone()
+        snapshot_at = latest["snapshot_at"] if latest else None
+        if snapshot_at is None:
+            return {"status": "empty", "snapshot_at": None, "items": [], "count": 0}
+        result = await conn.execute(
+            """SELECT symbol,effective_at,available_at,normalized,payload_sha256
+                 FROM quant.raw_market_observations
+                WHERE capability='a_share_prices_snapshot' AND effective_at=%s
+                ORDER BY symbol LIMIT %s""", (snapshot_at, bounded)
+        )
+        rows = await result.fetchall()
+        count_result = await conn.execute(
+            """SELECT count(*)::int AS count FROM quant.raw_market_observations
+                 WHERE capability='a_share_prices_snapshot' AND effective_at=%s""", (snapshot_at,)
+        )
+        count = (await count_result.fetchone())["count"]
+    return {"status": "completed", "snapshot_at": snapshot_at, "items": rows,
+            "count": count, "returned": len(rows), "truncated": count > len(rows),
+            "research_only": True}
+
+
 async def offline_minute_imports(async_database: Any, limit: int, offline_directory: str) -> dict[str, Any]:
     async with async_database.transaction() as conn:
         result = await conn.execute("SELECT import_id,source_name,file_name,dataset_kind,status,row_count,rejected_rows,error_message,started_at,finished_at FROM quant.offline_imports ORDER BY started_at DESC LIMIT %s", (_limit(limit, 100),))

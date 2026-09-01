@@ -13,6 +13,13 @@ function latestTimestamp(values) {
 
 const SNAPSHOT_SPECS = [
 	{
+		bucket: 'all-a-level1',
+		path: '/api/v1/market/level1/latest?limit=6000',
+		source: 'quant.market.level1.latest',
+		identity: (body) => text(body?.snapshot_at),
+		observedAt: (body) => body?.snapshot_at,
+	},
+	{
 		bucket: 'watchlist',
 		path: '/api/v1/intraday/scans/latest?limit=200',
 		source: 'quant.intraday.scans.latest',

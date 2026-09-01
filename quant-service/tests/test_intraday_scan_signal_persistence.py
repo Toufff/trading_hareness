@@ -8,6 +8,7 @@ from app.intraday_scan_signal_persistence import (
     IntradayScanSignalPersistenceDependencies,
     persist_scan_signals,
     persist_scan_transaction,
+    scan_rejection_reasons,
 )
 
 
@@ -40,6 +41,16 @@ class _Database:
 
 
 class IntradayScanSignalPersistenceTests(unittest.TestCase):
+    def test_rejection_reasons_keep_missing_evidence_explicit(self):
+        reasons = scan_rejection_reasons(
+            {"price": 10, "data_availability": {"missing_public_flow_fields": ["main_net_inflow"]}},
+            {"status": "insufficient_history"}, {"status": "not_available"}, [],
+        )
+        self.assertIn("flow_main_net_inflow_missing_or_research_only", reasons)
+        self.assertIn("daily_history_insufficient", reasons)
+        self.assertIn("minute_confirmation_missing", reasons)
+        self.assertIn("no_rule_condition_met", reasons)
+
     def test_live_adapter_preserves_one_transaction_for_entire_scan(self):
         connection = _Connection()
         database = _Database(connection)
@@ -134,8 +145,9 @@ class IntradayScanSignalPersistenceTests(unittest.TestCase):
         )
 
         self.assertEqual(result, [{"symbol": "000001.SZ", "state": "confirming"}])
-        self.assertEqual(len(connection.executed), 1)
+        self.assertGreaterEqual(len(connection.executed), 2)
         self.assertIn("intraday_quote_observations", connection.executed[0][0])
+        self.assertIn("intraday_scan_rejections", connection.executed[-1][0])
         self.assertEqual(calls[0][0], "snapshot")
         self.assertEqual(calls[1][0], "generate")
         self.assertEqual(calls[2][1], ["000001.SZ:watch:test"])

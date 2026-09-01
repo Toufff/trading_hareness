@@ -141,7 +141,7 @@ class PaperExecutionTests(unittest.TestCase):
         )
         membership_sql, params = connection.calls[0]
         self.assertIn("effective_from<=%s", membership_sql)
-        self.assertEqual(params, (datetime(2026, 8, 14).date(), datetime(2026, 8, 14).date()))
+        self.assertEqual(params, (datetime(2026, 8, 14).date(), datetime(2026, 8, 14).date(), datetime(2026, 8, 14).date()))
 
 
 class RoundTripCostPercentTests(unittest.TestCase):

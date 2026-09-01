@@ -62,6 +62,10 @@ from .async_market_session_repository import realtime_market_session as read_asy
 from .async_market_session_repository import sse_calendar_open as read_async_sse_calendar_open
 from .async_market_session_repository import sse_calendar_status as read_async_sse_calendar_status
 from .daily_bar_repository import exchange_for, provider_priority, upsert_daily_bar
+from .sector_membership_repository import (
+    persist_observed_snapshot as persist_observed_sector_snapshot,
+    persist_ths_snapshot as persist_ths_sector_snapshot,
+)
 from .public_market_repository import (
     persist_free_daily as _persist_free_daily,
     persist_free_quote as _persist_free_quote,
@@ -373,6 +377,9 @@ from .intraday_schedule import (
     intraday_watchlist_capacity,
 )
 from .intraday_monitor_service import run_intraday_monitor_loop
+from .market_event_capture import capture as capture_market_events
+from .market_event_runtime import run_market_event_capture_loop
+from .level1_snapshot_runtime import capture_level1_snapshot, run_level1_snapshot_loop
 from .intraday_fast_quote_service import cross_source_confirmation, run_intraday_fast_quote_loop
 from .intraday_fast_quote_runtime import (
     IntradayFastQuoteRuntimeDependencies,
@@ -1546,39 +1553,11 @@ def upsert_sector(connection: Any, taxonomy_key: str, sector_key: str, label: st
 
 def persist_ths_sector_members(connection: Any, taxonomy_key: str, sector_key: str, rows: list[dict[str, Any]],
                                provider_key: str, available_at: datetime) -> int:
-    """Apply one complete constituent response as point-in-time membership evidence."""
-    sync_date = available_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
-    active_members: set[str] = set()
-    for row in rows:
-        symbol = str(row.get("con_code") or "").upper()
-        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
-            continue
-        ensure_tushare_instrument(connection, symbol)
-        effective_from = tushare_date(row.get("in_date")) or date(1900, 1, 1)
-        effective_to = tushare_date(row.get("out_date"))
-        connection.execute(
-            """INSERT INTO quant.sector_membership_history(taxonomy_key,sector_key,symbol,effective_from,effective_to,provider_key,available_at,raw)
-               VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT(taxonomy_key,sector_key,symbol,effective_from) DO UPDATE SET effective_to=EXCLUDED.effective_to,
-                 provider_key=EXCLUDED.provider_key,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
-            (taxonomy_key, sector_key, symbol, effective_from, effective_to, provider_key, available_at, Json(row)),
-        )
-        # THS can return historical constituents together with the current
-        # snapshot.  Only open membership rows belong in today's Top10
-        # denominator; counting every evidence row materially overstates the
-        # live board size.
-        if effective_to is None:
-            active_members.add(symbol)
-    # A successful response is authoritative for current constituents. Keep
-    # prior history but close only rows that are still open and no longer seen.
-    if rows:
-        connection.execute(
-            """UPDATE quant.sector_membership_history SET effective_to=%s,available_at=%s
-                 WHERE taxonomy_key=%s AND sector_key=%s AND effective_to IS NULL
-                   AND NOT symbol = ANY(%s)""",
-            (sync_date - timedelta(days=1), available_at, taxonomy_key, sector_key, list(active_members)),
-        )
-    return len(active_members)
+    """Persist one complete response without inventing a historical start date."""
+    return persist_ths_sector_snapshot(
+        connection, taxonomy_key, sector_key, rows, provider_key, available_at,
+        ensure_instrument=ensure_tushare_instrument, parse_date=tushare_date,
+    )
 
 
 def eastmoney_member_symbol(row: dict[str, Any]) -> str | None:
@@ -1599,36 +1578,18 @@ def eastmoney_member_symbol(row: dict[str, Any]) -> str | None:
 
 def persist_eastmoney_sector_members(connection: Any, taxonomy_key: str, sector_key: str, rows: list[dict[str, Any]],
                                      available_at: datetime) -> int:
-    """Apply one complete public Eastmoney board member response as a snapshot."""
-    members: set[str] = set()
-    stored = 0
-    for row in rows:
-        symbol = eastmoney_member_symbol(row)
-        if not symbol:
-            continue
+    """Persist a current-snapshot response with its real observation date."""
+    def ensure_instrument(connection: Any, symbol: str, row: dict[str, Any]) -> None:
         connection.execute(
             "INSERT INTO quant.instruments(symbol,exchange,name,source) VALUES(%s,%s,%s,'akshare') "
             "ON CONFLICT(symbol) DO UPDATE SET name=coalesce(EXCLUDED.name,quant.instruments.name),updated_at=now()",
             (symbol, exchange_for(symbol), str(row.get("名称") or row.get("name") or "").strip() or None),
         )
-        connection.execute(
-            """INSERT INTO quant.sector_membership_history(taxonomy_key,sector_key,symbol,effective_from,effective_to,provider_key,available_at,raw)
-               VALUES(%s,%s,%s,'1900-01-01',null,'akshare',%s,%s)
-               ON CONFLICT(taxonomy_key,sector_key,symbol,effective_from) DO UPDATE SET effective_to=null,
-                 provider_key=EXCLUDED.provider_key,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
-            (taxonomy_key, sector_key, symbol, available_at, Json(row)),
-        )
-        members.add(symbol)
-        stored += 1
-    if members:
-        sync_date = available_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
-        connection.execute(
-            """UPDATE quant.sector_membership_history SET effective_to=%s,available_at=%s
-                 WHERE taxonomy_key=%s AND sector_key=%s AND provider_key='akshare' AND effective_to IS NULL
-                   AND NOT symbol = ANY(%s)""",
-            (sync_date - timedelta(days=1), available_at, taxonomy_key, sector_key, list(members)),
-        )
-    return stored
+
+    return persist_observed_sector_snapshot(
+        connection, taxonomy_key, sector_key, rows, "akshare", available_at,
+        member_symbol=eastmoney_member_symbol, ensure_instrument=ensure_instrument,
+    )
 
 
 async def sync_ths_sector_catalog_legacy(request: SectorCatalogSyncRequest) -> dict[str, Any]:
@@ -3154,6 +3115,46 @@ async def intraday_minute_profile_capture_loop() -> None:
     ))
 
 
+async def market_event_capture_loop() -> None:
+    """Persist Fuyao all-A auction/pool/chain evidence on a 60s cadence."""
+    async def fetch(capability: str, params: dict[str, Any]) -> Mapping[str, Any]:
+        from .fuyao_provider import fetch as fetch_fuyao
+        return await fetch_fuyao(capability, params)
+
+    async def persist(provider: str, rows: list[dict[str, Any]]) -> int:
+        return await run_database_blocking(persist_market_events, provider, rows, timeout_seconds=60)
+
+    async def open_session(now: datetime) -> bool:
+        active, _reason = await realtime_market_session_async(now=now)
+        return active
+
+    async def all_symbols() -> Sequence[str]:
+        return await run_database_blocking(lambda: _market_snapshot_actions.universe_symbols("all_a"), timeout_seconds=15)
+
+    await run_market_event_capture_loop(
+        interval_seconds=60, capture=lambda observed_at, **kwargs: capture_market_events(
+            observed_at, fetch=fetch, persist=persist, **kwargs,
+        ), session_open=open_session, symbols=all_symbols,
+    )
+
+
+async def all_a_level1_snapshot_capture_loop() -> None:
+    """Persist one complete all-A Level-1 cross-section about every minute."""
+    async def persist(provider: str, capability: str, rows: list[dict[str, Any]]) -> int:
+        return await run_database_blocking(
+            persist_public_observations, provider, capability, rows, timeout_seconds=90,
+        )
+
+    async def capture() -> dict[str, Any]:
+        return await capture_level1_snapshot(
+            fetch_snapshot=fuyao_all_a_snapshot_rows,
+            persist=persist,
+            session_open=lambda now: realtime_market_session_async(now=now),
+        )
+
+    await run_level1_snapshot_loop(interval_seconds=60, capture=capture)
+
+
 def intraday_flow_label(value: Any) -> str:
     number_value = intraday_number(value)
     if number_value is None:
@@ -3983,6 +3984,8 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
             "minute_profile_capture": intraday_minute_profile_capture_enabled(),
             "tencent_order_book": intraday_order_book_enabled() and interval_seconds >= 30,
             "board_flow_curve": intraday_board_curve_enabled(),
+            "market_event_capture": os.getenv("MARKET_EVENT_CAPTURE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
+            "all_a_level1_snapshot": os.getenv("ALL_A_LEVEL1_CAPTURE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
         },
         loops={
             "intraday_monitor": lambda: intraday_monitor_loop(interval_seconds),
@@ -3992,6 +3995,8 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
             "all_board_member_backfill": all_board_member_backfill_loop,
             "minute_profile_capture": intraday_minute_profile_capture_loop, "tencent_order_book": intraday_order_book_loop,
             "board_flow_curve": intraday_board_flow_curve_loop,
+            "market_event_capture": market_event_capture_loop,
+            "all_a_level1_snapshot": all_a_level1_snapshot_capture_loop,
         },
     )
     validate_runtime_task_specs(specs)

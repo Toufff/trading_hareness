@@ -42,6 +42,10 @@ def build_market_result_reads_router(
     async def snapshots(limit: int = 20) -> dict[str, Any]:
         return await async_read_model.market_snapshots(async_database, limit) if async_database else read_model.market_snapshots(database, limit)
 
+    @router.get("/api/v1/market/level1/latest")
+    async def latest_level1(limit: int = 6000) -> dict[str, Any]:
+        return await async_read_model.latest_all_a_level1(async_database, limit) if async_database else read_model.latest_all_a_level1(database, limit)
+
     @router.get("/api/v1/market/minute/imports")
     async def minute_imports(limit: int = 30) -> dict[str, Any]:
         return await async_read_model.offline_minute_imports(async_database, limit, str(offline_root_fn())) if async_database else read_model.offline_minute_imports(database, limit, str(offline_root_fn()))

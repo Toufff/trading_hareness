@@ -40,7 +40,8 @@ async def hydrate(
         with db.transaction() as connection:
             return connection.execute(
                 """SELECT DISTINCT sector_key FROM quant.sector_membership_history
-                     WHERE taxonomy_key=%s AND effective_to IS NULL""", (taxonomy_key,),
+                     WHERE taxonomy_key=%s AND effective_to IS NULL
+                       AND effective_from_basis IN ('provider_interval','observed_snapshot')""", (taxonomy_key,),
             ).fetchall()
     mapped = {str(row["sector_key"]) for row in await run_database_blocking(load_mapped_rows)}
 

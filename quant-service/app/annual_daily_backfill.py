@@ -93,6 +93,10 @@ CORE_DAILY_SPECS = (
             fallback_provider_names=("primary",)),
     ApiSpec("stk_limit", "super_sdk", 4_800, promote="stk_limit", fallback_provider_name="primary"),
     ApiSpec("suspend_d", "super_sdk", legal_empty=True, promote="suspend_d", fallback_provider_name="primary"),
+    # Daily ST membership is retained as dated evidence.  It is not merged
+    # into the current instrument flag until a separate point-in-time reader
+    # asks for the requested trade date.
+    ApiSpec("stock_st", "primary", legal_empty=True, promote="stock_st", fallback_provider_name="super_sdk"),
 )
 
 SECTOR_EVENT_SPECS = (
@@ -141,7 +145,7 @@ def historical_daily_strategy_available_at(trade_date: date) -> datetime:
 def valid_rows(api_name: str, rows: list[dict[str, Any]], trade_date: date | None = None) -> list[dict[str, Any]]:
     """Apply only deterministic shape/date filters; never invent missing rows."""
     stamp = trade_date.strftime("%Y%m%d") if trade_date else None
-    if api_name in {"daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d"}:
+    if api_name in {"daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d", "stock_st"}:
         return [
             dict(row) for row in rows
             if STOCK_CODE.fullmatch(str(row.get("ts_code") or "").upper())
@@ -483,7 +487,7 @@ def _persist_trade_calendar(connection: Any, provider_key: str, available_at: da
     )
 
 
-def _persist_stock_basic(connection: Any, provider_key: str) -> None:
+def _persist_stock_basic(connection: Any, provider_key: str, available_at: datetime) -> None:
     connection.execute(
         """INSERT INTO quant.instruments(symbol,exchange,name,industry,list_date,delist_date,is_st,source)
            SELECT upper(row_data->>'ts_code'),
@@ -503,6 +507,46 @@ def _persist_stock_basic(connection: Any, provider_key: str) -> None:
              delist_date=coalesce(EXCLUDED.delist_date,quant.instruments.delist_date),
              is_st=EXCLUDED.is_st,source=EXCLUDED.source,updated_at=now()""",
         (provider_key,),
+    )
+    # Keep the three stock_basic list-status cross-sections as immutable
+    # evidence.  ``quant.instruments`` is intentionally only the current
+    # projection, while this table is what a ten-year replay can inspect.
+    connection.execute(
+        """INSERT INTO quant.instrument_lifecycle_evidence(
+               symbol,provider,observed_at,status_date,list_status,list_date,delist_date,is_st,available_at,raw)
+           SELECT upper(row_data->>'ts_code'),%s,%s,
+                  coalesce(CASE WHEN row_data->>'trade_date' ~ '^\\d{8}$' THEN to_date(row_data->>'trade_date','YYYYMMDD') END,%s::date),
+                  CASE WHEN row_data->>'_list_status' IN ('L','D','P') THEN row_data->>'_list_status' ELSE 'UNKNOWN' END,
+                  CASE WHEN row_data->>'list_date' ~ '^\\d{8}$' THEN to_date(row_data->>'list_date','YYYYMMDD') END,
+                  CASE WHEN row_data->>'delist_date' ~ '^\\d{8}$' THEN to_date(row_data->>'delist_date','YYYYMMDD') END,
+                  CASE WHEN lower(coalesce(row_data->>'is_st','')) IN ('true','1','y','yes') THEN true
+                       WHEN lower(coalesce(row_data->>'is_st','')) IN ('false','0','n','no') THEN false
+                       ELSE coalesce(row_data->>'name','') ~* '(^|\\*)ST' END,
+                  %s,row_data
+             FROM annual_daily_stage
+            WHERE upper(row_data->>'ts_code') ~ '^\\d{6}\\.(SH|SZ|BJ)$'
+           ON CONFLICT(symbol,provider,status_date,list_status) DO UPDATE SET
+             list_date=EXCLUDED.list_date,delist_date=EXCLUDED.delist_date,
+             is_st=EXCLUDED.is_st,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
+        (provider_key, available_at, available_at),
+    )
+
+
+def _persist_stock_st(connection: Any, provider_key: str, available_at: datetime, _ingested_at: datetime,
+                       _availability_basis: str) -> None:
+    """Persist daily ST cross-sections without overwriting current status."""
+    _persist_instruments_from_stage(connection, provider_key)
+    connection.execute(
+        """INSERT INTO quant.instrument_lifecycle_evidence(
+               symbol,provider,observed_at,status_date,list_status,list_date,delist_date,is_st,available_at,raw)
+           SELECT upper(row_data->>'ts_code'),%s,%s,to_date(row_data->>'trade_date','YYYYMMDD'),'UNKNOWN',
+                  NULL,NULL,true,%s,row_data
+             FROM annual_daily_stage
+            WHERE upper(row_data->>'ts_code') ~ '^\\d{6}\\.(SH|SZ|BJ)$'
+              AND row_data->>'trade_date' ~ '^\\d{8}$'
+           ON CONFLICT(symbol,provider,status_date,list_status) DO UPDATE SET
+             is_st=true,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
+        (provider_key, _ingested_at, available_at),
     )
 
 
@@ -587,6 +631,7 @@ PROMOTERS: dict[str, Callable[..., None]] = {
     "daily_basic": _persist_daily_basic,
     "stk_limit": _persist_stk_limit,
     "suspend_d": _persist_suspend_d,
+    "stock_st": _persist_stock_st,
 }
 
 

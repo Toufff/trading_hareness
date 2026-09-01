@@ -24,6 +24,25 @@ CREATE TABLE IF NOT EXISTS quant.instruments (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Provider snapshots preserve listing/delisting/ST status provenance.  The
+-- current ``instruments`` row is a projection; historical replay must consult
+-- this append-only evidence rather than treating today's status as timeless.
+CREATE TABLE IF NOT EXISTS quant.instrument_lifecycle_evidence (
+    symbol text NOT NULL REFERENCES quant.instruments(symbol) ON DELETE CASCADE,
+    provider text NOT NULL,
+    observed_at timestamptz NOT NULL,
+    status_date date NOT NULL,
+    list_status text NOT NULL CHECK (list_status IN ('L','D','P','UNKNOWN')),
+    list_date date,
+    delist_date date,
+    is_st boolean,
+    available_at timestamptz NOT NULL,
+    raw jsonb NOT NULL DEFAULT '{}'::jsonb,
+    PRIMARY KEY(symbol,provider,status_date,list_status)
+);
+CREATE INDEX IF NOT EXISTS instrument_lifecycle_status_date_idx
+    ON quant.instrument_lifecycle_evidence(list_status,observed_at DESC,symbol);
+
 CREATE TABLE IF NOT EXISTS quant.market_bars_daily (
     symbol text NOT NULL REFERENCES quant.instruments(symbol),
     trading_date date NOT NULL,
@@ -460,6 +479,20 @@ CREATE TABLE IF NOT EXISTS quant.intraday_scan_runs (
 );
 CREATE INDEX IF NOT EXISTS intraday_scan_runs_time_idx ON quant.intraday_scan_runs(observed_at DESC);
 
+CREATE TABLE IF NOT EXISTS quant.intraday_scan_rejections (
+    scan_id uuid NOT NULL REFERENCES quant.intraday_scan_runs(scan_id) ON DELETE CASCADE,
+    symbol text NOT NULL REFERENCES quant.instruments(symbol) ON DELETE CASCADE,
+    model_version text NOT NULL,
+    observed_at timestamptz NOT NULL,
+    outcome text NOT NULL CHECK (outcome IN ('rejected','candidate','suppressed')),
+    reason_codes jsonb NOT NULL DEFAULT '[]'::jsonb,
+    evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY(scan_id,symbol,model_version)
+);
+CREATE INDEX IF NOT EXISTS intraday_scan_rejections_symbol_time_idx
+    ON quant.intraday_scan_rejections(symbol,observed_at DESC,outcome);
+
 CREATE TABLE IF NOT EXISTS quant.intraday_quote_observations (
     quote_observation_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     scan_id uuid REFERENCES quant.intraday_scan_runs(scan_id) ON DELETE SET NULL,
@@ -800,12 +833,17 @@ CREATE TABLE IF NOT EXISTS quant.sector_membership_history (
     effective_to date,
     provider_key text NOT NULL REFERENCES quant.providers(provider_key) ON DELETE RESTRICT,
     available_at timestamptz NOT NULL,
+    known_at timestamptz NOT NULL DEFAULT now(),
+    effective_from_basis text NOT NULL DEFAULT 'legacy_unbounded',
+    effective_to_basis text NOT NULL DEFAULT 'legacy_unbounded',
     raw jsonb NOT NULL DEFAULT '{}'::jsonb,
     PRIMARY KEY(taxonomy_key, sector_key, symbol, effective_from),
     FOREIGN KEY(taxonomy_key, sector_key) REFERENCES quant.sectors(taxonomy_key, sector_key) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS sector_membership_symbol_time_idx
     ON quant.sector_membership_history(symbol, effective_from DESC);
+CREATE INDEX IF NOT EXISTS sector_membership_pit_provenance_idx
+    ON quant.sector_membership_history(taxonomy_key, effective_from_basis, known_at, effective_from DESC);
 
 -- A durable cursor for the bounded THS concept-member backfill.  It prevents
 -- a restart or a transient supplier error from making a partially hydrated
@@ -1116,6 +1154,25 @@ CREATE TABLE IF NOT EXISTS quant.post_close_strategy_candidates (
 );
 CREATE INDEX IF NOT EXISTS post_close_strategy_candidates_rank_idx
     ON quant.post_close_strategy_candidates(run_id,rank);
+
+-- Retain positive, rejected and insufficient-history screen outcomes.  This
+-- is compact causal evidence, not a duplicate store for daily market bars.
+CREATE TABLE IF NOT EXISTS quant.post_close_strategy_screen_observations (
+    run_id uuid NOT NULL REFERENCES quant.post_close_strategy_runs(run_id) ON DELETE CASCADE,
+    symbol text NOT NULL REFERENCES quant.instruments(symbol),
+    name text,
+    screen_state text NOT NULL CHECK (screen_state IN ('candidate','rejected','insufficient_history')),
+    candidate_type text,
+    score numeric,
+    reason_codes jsonb NOT NULL DEFAULT '[]'::jsonb,
+    structure jsonb NOT NULL DEFAULT '{}'::jsonb,
+    board_context jsonb NOT NULL DEFAULT '{}'::jsonb,
+    source_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY(run_id,symbol)
+);
+CREATE INDEX IF NOT EXISTS post_close_screen_observations_state_idx
+    ON quant.post_close_strategy_screen_observations(run_id,screen_state,candidate_type);
 
 -- A bounded post-close replay set for limit-up leaders, first boards,
 -- consecutive boards and deep intraday reversals.  The table stores compact

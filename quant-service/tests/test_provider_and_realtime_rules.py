@@ -531,8 +531,12 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             TushareFetchRequest(api_name="rt_min_daily", params={"ts_code": "000001.SZ"})
         self.assertEqual(TushareFetchRequest(api_name="rt_min_daily", params={"ts_code": "000001.SZ", "freq": "1MIN"}).api_name, "rt_min_daily")
+        minute_request = TushareFetchRequest(api_name="stk_mins", params={
+            "ts_code": "000001.SZ", "start_date": "20260825 09:30:00", "end_date": "20260825 15:00:00",
+        })
+        self.assertEqual(minute_request.api_name, "stk_mins")
         with self.assertRaises(ValidationError):
-            TushareFetchRequest(api_name="stk_mins", params={"ts_code": "000001.SZ"})
+            TushareFetchRequest(api_name="stk_mins", params={"start_date": "20260825", "end_date": "20260825"})
         self.assertEqual(default_probe_params("rt_idx_min")["freq"], "1MIN")
         self.assertEqual(default_probe_params("rt_min_daily")["freq"], "1MIN")
         self.assertEqual(default_probe_params("rt_etf_min_daily")["freq"], "1MIN")

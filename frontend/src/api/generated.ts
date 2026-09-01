@@ -1388,6 +1388,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/market/level1/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Latest Level1 */
+        get: operations["latest_level1_api_v1_market_level1_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/market/minute/imports": {
         parameters: {
             query?: never;
@@ -6385,6 +6402,39 @@ export interface operations {
         };
     };
     snapshots_api_v1_market_snapshots_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    latest_level1_api_v1_market_level1_latest_get: {
         parameters: {
             query?: {
                 limit?: number;

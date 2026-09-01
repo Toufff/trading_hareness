@@ -53,7 +53,9 @@ async def sync(
             with db.transaction() as connection:
                 rows = connection.execute(
                     """SELECT sector_key,count(*)::int members FROM quant.sector_membership_history
-                         WHERE taxonomy_key=%s AND effective_to IS NULL GROUP BY sector_key""", (key,),
+                         WHERE taxonomy_key=%s AND effective_to IS NULL
+                           AND effective_from_basis IN ('provider_interval','observed_snapshot')
+                         GROUP BY sector_key""", (key,),
                 ).fetchall()
                 return [dict(row) for row in rows]
         active = {str(row["sector_key"]) for row in await run_database_blocking(select_incomplete) if int(row["members"] or 0) > 0}

@@ -81,6 +81,14 @@ class AnnualDailyBackfillTests(unittest.TestCase):
         ], date(2026, 8, 14))
         self.assertEqual(rows, [{"ts_code": "600000.SH", "trade_date": "20260814"}])
 
+    def test_stock_st_is_dated_cross_section_not_current_instrument_projection(self):
+        rows = valid_rows("stock_st", [
+            {"ts_code": "600000.SH", "trade_date": "20260814"},
+            {"ts_code": "510300.SH", "trade_date": "20260814"},
+            {"ts_code": "000001.SZ", "trade_date": "20260813"},
+        ], date(2026, 8, 14))
+        self.assertEqual(rows, [{"ts_code": "600000.SH", "trade_date": "20260814"}])
+
     def test_request_key_is_stable_and_parameter_sensitive(self):
         first = request_key("tushare_primary", "daily", {"trade_date": "20260814"})
         same = request_key("tushare_primary", "daily", {"trade_date": "20260814"})

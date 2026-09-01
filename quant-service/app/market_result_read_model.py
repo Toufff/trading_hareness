@@ -85,6 +85,31 @@ def market_snapshots(database: Any, limit: int) -> dict[str, Any]:
     return {"items": rows}
 
 
+def latest_all_a_level1(database: Any, limit: int = 6000) -> dict[str, Any]:
+    """Return the newest complete raw all-A Level-1 capture."""
+    limit = max(1, min(int(limit), 6000))
+    with database.transaction() as connection:
+        latest = connection.execute(
+            "SELECT max(effective_at) AS snapshot_at FROM quant.raw_market_observations WHERE capability='a_share_prices_snapshot'"
+        ).fetchone()
+        snapshot_at = latest["snapshot_at"] if latest else None
+        if snapshot_at is None:
+            return {"status": "empty", "snapshot_at": None, "items": [], "count": 0}
+        rows = connection.execute(
+            """SELECT symbol,effective_at,available_at,normalized,payload_sha256
+                 FROM quant.raw_market_observations
+                WHERE capability='a_share_prices_snapshot' AND effective_at=%s
+                ORDER BY symbol LIMIT %s""", (snapshot_at, limit)
+        ).fetchall()
+        count = connection.execute(
+            """SELECT count(*)::int AS count FROM quant.raw_market_observations
+                 WHERE capability='a_share_prices_snapshot' AND effective_at=%s""", (snapshot_at,)
+        ).fetchone()["count"]
+    return {"status": "completed", "snapshot_at": snapshot_at, "items": rows,
+            "count": count, "returned": len(rows), "truncated": count > len(rows),
+            "research_only": True}
+
+
 def offline_minute_imports(database: Any, limit: int, offline_directory: str) -> dict[str, Any]:
     with database.transaction() as connection:
         rows = connection.execute(

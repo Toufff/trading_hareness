@@ -5,12 +5,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from .platform.data_product_registry import data_product_contract_catalog
 from .platform.evidence_contracts import evidence_contract_catalog
 from .platform.runtime_task_registry import runtime_task_contract_catalog
 from .platform.strategy_registry import strategy_contract_catalog
 
 
-CONTEXT_VERSION = "2026-08-25.v10"
+CONTEXT_VERSION = "2026-08-31.v11"
 
 
 def repository_agent_context() -> dict[str, Any]:
@@ -27,6 +28,7 @@ def repository_agent_context() -> dict[str, Any]:
             "feishu_proxy": "feishu-adapter/index.mjs",
             "architecture": "docs/ARCHITECTURE.md",
             "architecture_index": "docs/ARCHITECTURE_INDEX.md",
+            "data_product_registry": "quant-service/app/platform/data_product_registry.py",
             "evidence_contracts": "quant-service/app/platform/evidence_contracts.py",
             "runtime_task_registry": "quant-service/app/platform/runtime_task_registry.py",
             "strategy_registry": "quant-service/app/platform/strategy_registry.py",
@@ -84,6 +86,7 @@ def repository_agent_context() -> dict[str, Any]:
             "verify the mounted OpenAPI and runtime health before handoff",
         ],
         "evidence_flow": ["raw", "canonical", "features", "signals", "outcomes"],
+        "data_product_contracts": data_product_contract_catalog(),
         "evidence_contracts": evidence_contract_catalog(),
         "runtime_task_contracts": runtime_task_contract_catalog(),
         "strategy_contracts": strategy_contract_catalog(),

@@ -1,10 +1,10 @@
 """Drive the minute-bar session backfill over a date range.
 
 The library pieces already exist -- ``session_symbols`` picks each session's
-limit-up pool plus the benchmarks, and ``backfill_session`` walks them one
-request at a time because the upstream serves a single ts_code per call. What
-was missing is a way to run them over a range and resume, which is what this
-adds.
+limit-up pool, trend/near-threshold cohorts, matched controls and benchmarks,
+and ``backfill_session`` walks them one request at a time because the upstream
+serves a single ts_code per call. What was missing is a way to run them over a
+range and resume, which is what this adds.
 
 Bounded on purpose: the whole point of scoping to the limit-up pool is that a
 full-market minute backfill would not fit the gateway budget. Progress is
@@ -42,16 +42,18 @@ def _open_days(start: date, end: date) -> list[date]:
             return [row["trading_date"] for row in cursor.fetchall()]
 
 
-def _already_covered(trading_date: date) -> int:
+def _covered_symbols(trading_date: date, symbols: list[str]) -> set[str]:
+    if not symbols:
+        return set()
     with db.transaction() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT count(DISTINCT symbol) FROM quant.market_bars_minute "
-                "WHERE bar_time >= %s::date AND bar_time < (%s::date + 1) ",
-                (trading_date, trading_date),
+                """SELECT DISTINCT symbol FROM quant.market_bars_minute
+                   WHERE symbol=ANY(%s)
+                     AND (bar_time AT TIME ZONE 'Asia/Shanghai')::date=%s""",
+                (symbols, trading_date),
             )
-            row = cursor.fetchone()
-            return int((row or {}).get("count") or 0)
+            return {str(row["symbol"]) for row in cursor.fetchall()}
 
 
 def _session_symbols(trading_date: date, limit: int) -> dict:
@@ -65,8 +67,8 @@ async def main() -> int:
     parser.add_argument("--end-date", required=True, type=_iso)
     parser.add_argument("--limit", type=int, default=60,
                         help="max limit-up names per session; benchmarks are always kept")
-    parser.add_argument("--min-covered", type=int, default=5,
-                        help="skip a session that already has at least this many symbols")
+    parser.add_argument("--min-covered", type=int, default=0,
+                        help="legacy compatibility; 0 skips only when every selected symbol is covered")
     args = parser.parse_args()
 
     days = await run_database_blocking(_open_days, args.start_date, args.end_date)
@@ -75,19 +77,27 @@ async def main() -> int:
 
     done = skipped = failed = 0
     for index, trading_date in enumerate(days, start=1):
-        covered = await run_database_blocking(_already_covered, trading_date)
-        if covered >= args.min_covered:
-            skipped += 1
-            continue
         picked = await run_database_blocking(_session_symbols, trading_date, args.limit)
         symbols = picked["symbols"]
         if not symbols:
             skipped += 1
             continue
+        covered_symbols = await run_database_blocking(_covered_symbols, trading_date, symbols)
+        # A prior run may contain only the old board/benchmark cohort.  Do not
+        # call that day complete until every currently selected trend, near-limit
+        # and matched-control symbol also has a stored minute session.
+        if len(covered_symbols) == len(set(symbols)):
+            skipped += 1
+            continue
+        symbols = [symbol for symbol in symbols if symbol not in covered_symbols]
+        selection_roles: dict[str, list[str]] = {symbol: ["benchmark"] for symbol in picked.get("benchmarks", [])}
+        for role, role_symbols in dict(picked.get("sample_roles", {})).items():
+            for symbol in role_symbols:
+                selection_roles.setdefault(str(symbol), []).append(str(role))
         try:
             outcome = await backfill_session(
                 trading_date, symbols=symbols, call_tushare_api=call_tushare_api,
-                run_database_blocking=run_database_blocking, db=db)
+                run_database_blocking=run_database_blocking, db=db, selection_roles=selection_roles)
             report = coverage_report(outcome.get("results", []))
             done += 1
             print(json.dumps({"day": str(trading_date), "progress": f"{index}/{len(days)}",

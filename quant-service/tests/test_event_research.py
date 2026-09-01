@@ -207,9 +207,9 @@ class SectorFlowReversalStockLevelResearchTests(unittest.TestCase):
                     (self.taxonomy_key, self.sector_key),
                 )
                 connection.execute(
-                    """INSERT INTO quant.sector_membership_history(taxonomy_key,sector_key,symbol,effective_from,provider_key,available_at)
-                       VALUES(%s,%s,%s,%s,'tushare',%s)""",
-                    (self.taxonomy_key, self.sector_key, self.symbol, date(1900, 1, 1), available_at),
+                    """INSERT INTO quant.sector_membership_history(taxonomy_key,sector_key,symbol,effective_from,provider_key,available_at,known_at,effective_from_basis,effective_to_basis)
+                       VALUES(%s,%s,%s,%s,'tushare',%s,%s,'observed_snapshot','observed_snapshot')""",
+                    (self.taxonomy_key, self.sector_key, self.symbol, self.signal_date, available_at, available_at),
                 )
                 connection.execute(
                     """INSERT INTO quant.sector_flow_daily_features(

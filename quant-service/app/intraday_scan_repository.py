@@ -18,6 +18,7 @@ from psycopg.types.json import Json
 
 from .provider_health import record_provider_failure
 from .tushare_providers import safe_error_detail
+from .sector_membership_repository import point_in_time_membership_predicate
 
 
 @dataclass(frozen=True)
@@ -127,12 +128,12 @@ def load_intraday_scan_local_state(
             (selected_symbols,),
         ).fetchall()
     }
+    membership_predicate = point_in_time_membership_predicate("member", "(%s::date)")
     sector_rows = connection.execute(
-        """SELECT symbol,sector_key FROM quant.sector_membership_history
-            WHERE symbol=ANY(%s) AND effective_from<=%s
-              AND (effective_to IS NULL OR effective_to>=%s)
+        f"""SELECT symbol,sector_key FROM quant.sector_membership_history member
+            WHERE symbol=ANY(%s) AND {membership_predicate}
               AND taxonomy_key IN ('ths_concept_flow','ths_index_n','ths_industry')""",
-        (selected_symbols, local_trade_date, local_trade_date),
+        (selected_symbols, local_trade_date, local_trade_date, local_trade_date),
     ).fetchall() if selected_symbols else []
     candidate_sector_keys: dict[str, list[str]] = {}
     for row in sector_rows:

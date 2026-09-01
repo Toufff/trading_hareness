@@ -58,6 +58,11 @@ HISTORICAL_MINUTE_APIS: Final[frozenset[str]] = frozenset({
     "stk_mins", "etf_mins", "sw_mins", "fut_mins", "fut_tick", "opt_mins",
 })
 
+# ``stk_mins`` remains a historical-minute product, but the audited ProMax
+# gateway serves it online for one explicitly bounded ``ts_code`` per request.
+# The other minute/tick families are still offline-file-only.
+ONLINE_BOUNDED_HISTORICAL_MINUTE_APIS: Final[frozenset[str]] = frozenset({"stk_mins"})
+
 
 OFFICIAL_EXTENSIONS: Final[dict[str, OfficialApi]] = {
     # Company/reference APIs missing from the supplier's written 109 list.

@@ -5,6 +5,10 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from app.platform.data_product_registry import (
+    data_product_contract_catalog,
+    validate_declared_dataset_coverage,
+)
 from app.platform.evidence_contracts import (
     evidence_contract_catalog,
     materialize_evidence_status,
@@ -67,6 +71,21 @@ class PlatformContractRegistryTests(unittest.TestCase):
         self.assertIsNotNone(main_wave["deprecated_reason"], "roc_auc<0.5 finding must stay documented, not silently dropped")
         self.assertIn("roc_auc", main_wave["deprecated_reason"])
         self.assertIsNone(next(item for item in catalog if item["key"] == "intraday_watchlist_confirmation")["deprecated_reason"])
+
+    def test_every_declared_evidence_dataset_has_a_cloud_archive_contract(self) -> None:
+        catalog = data_product_contract_catalog()
+        self.assertEqual([item["key"] for item in catalog], sorted(item["key"] for item in catalog))
+        validate_declared_dataset_coverage(strategy_contract_catalog(), runtime_task_contract_catalog())
+        declared = {
+            dataset
+            for contract in (*strategy_contract_catalog(), *runtime_task_contract_catalog())
+            for dataset in contract["evidence_datasets"]
+        }
+        by_key = {item["key"]: item for item in catalog}
+        self.assertTrue(declared <= set(by_key))
+        self.assertEqual({by_key[key]["cloud_retention"] for key in declared}, {"indefinite_immutable"})
+        self.assertEqual(by_key["intraday_rule_input_snapshots"]["replay_role"], "exact_rule_replay")
+        self.assertEqual(by_key["automation_runs"]["replay_role"], "execution_audit_only")
 
     def test_runtime_strategy_versions_must_match_every_declared_contract(self) -> None:
         versions = {

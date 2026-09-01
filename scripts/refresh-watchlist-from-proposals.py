@@ -28,7 +28,7 @@ ADMIT_CAPS = {"limit_up_continuation": 8, "disclosure_day_watch": 4}
 SOURCE_TAGS = {"limit_up_continuation": "延续", "disclosure_day_watch": "披露"}
 AUTO_TAGS = tuple(SOURCE_TAGS.values())
 RETIRE_AFTER_SESSIONS = 5
-WINDOW_OPEN, WINDOW_CLOSE = "0000", "2359"
+WINDOW_OPEN, WINDOW_CLOSE = "1645", "2359"
 
 
 def psql(sql: str) -> str:

@@ -24,6 +24,7 @@ test('history export creates deterministic partition paths and manifest metadata
 test('history export argument parser is bounded and rejects reversed dates', () => {
 	const args = parseArgs(['--dataset', 'intraday_quote_observations', '--from', '2026-08-01', '--to', '2026-08-02', '--part-rows', '200000']);
 	assert.equal(args.partRows, 100000);
+	assert.equal(parseArgs(['--dataset', 'post_close_strategy_screen_observations', '--from', '2026-08-01', '--to', '2026-08-02']).dataset, 'post_close_strategy_screen_observations');
 	assert.throws(() => parseArgs(['--dataset', 'canonical_bars_daily', '--from', '2026-08-02', '--to', '2026-08-01']), /from < to/);
 });
 

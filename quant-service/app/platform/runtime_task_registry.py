@@ -43,6 +43,16 @@ RUNTIME_TASK_CONTRACTS: Final[dict[str, RuntimeTaskContract]] = {
         "board_flow_curve", "intraday_edge", "market-session polling", ("board_flow",),
         ("intraday_board_flow_snapshots",), "board-flow curve evidence", 180,
     ),
+    "market_event_capture": RuntimeTaskContract(
+        "market_event_capture", "intraday_edge", "60s during market observation windows",
+        ("a_share_auction_snapshot", "a_share_limit_up_pool", "a_share_limit_break_pool", "a_share_limit_up_ladder"),
+        ("market_events",), "all-A auction, limit-pool and limit-chain evidence capture", 180,
+    ),
+    "all_a_level1_snapshot": RuntimeTaskContract(
+        "all_a_level1_snapshot", "intraday_edge", "60s during market session",
+        ("a_share_prices_snapshot",), ("raw_market_observations",),
+        "complete all-A Level-1 raw snapshot for width/rank and validation windows", 120,
+    ),
     "strategy_review": RuntimeTaskContract(
         "strategy_review", "research", "scheduled checkpoints", ("daily", "board_flow"),
         ("analyst_market_reviews", "strategy_reviews"), "post-close descriptive strategy review",

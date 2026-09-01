@@ -129,14 +129,22 @@ class TushareFetchRequest(BaseModel):
             raise ValueError("start_date and end_date must be supplied together")
         if start and end:
             try:
-                start_date = datetime.strptime(str(start), "%Y%m%d").date()
-                end_date = datetime.strptime(str(end), "%Y%m%d").date()
+                start_text, end_text = str(start), str(end)
+                if self.api_name == "stk_mins":
+                    # The minute route accepts exchange-local timestamps; the
+                    # date span is still bounded before it reaches a provider.
+                    start_date = datetime.strptime(start_text[:8], "%Y%m%d").date()
+                    end_date = datetime.strptime(end_text[:8], "%Y%m%d").date()
+                else:
+                    start_date = datetime.strptime(start_text, "%Y%m%d").date()
+                    end_date = datetime.strptime(end_text, "%Y%m%d").date()
             except ValueError as error:
-                raise ValueError("date parameters must use YYYYMMDD") from error
+                expected = "YYYYMMDD or YYYYMMDD HH:MM:SS for stk_mins" if self.api_name == "stk_mins" else "YYYYMMDD"
+                raise ValueError(f"date parameters must use {expected}") from error
             maximum_days = 370 if self.api_name == "trade_cal" else 45
             if end_date < start_date or (end_date - start_date).days > maximum_days:
                 raise ValueError(f"online range is capped at {maximum_days} days; use offline files for historical bulk import")
-        if self.api_name in {"daily", "weekly", "monthly", "adj_factor", "daily_basic", "stk_limit", "suspend_d", "moneyflow", "cyq_perf", "cyq_chips", "stk_factor", "stk_factor_pro"} and not self.params.get("ts_code"):
+        if self.api_name in {"daily", "weekly", "monthly", "adj_factor", "daily_basic", "stk_limit", "suspend_d", "moneyflow", "cyq_perf", "cyq_chips", "stk_factor", "stk_factor_pro", "stk_mins"} and not self.params.get("ts_code"):
             raise ValueError(f"{self.api_name} requires an explicit ts_code")
         required_params = set((official_spec(self.api_name).required_params if official_spec(self.api_name) else ()))
         required_params.update(AUDITED_SUPER_REQUIRED_PARAMS.get(self.api_name, ()))

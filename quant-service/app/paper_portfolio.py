@@ -11,6 +11,7 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
+from .sector_membership_repository import point_in_time_membership_predicate
 
 
 @dataclass(frozen=True)
@@ -125,16 +126,16 @@ def persist_portfolio_snapshot(connection: Any, *, as_of: Any, quotes: dict[str,
     if hasattr(as_of, "replace"):
         as_of = as_of.replace(second=0, microsecond=0)
     as_of_date = as_of.astimezone(ZoneInfo("Asia/Shanghai")).date() if hasattr(as_of, "astimezone") else as_of
+    membership_predicate = point_in_time_membership_predicate("m", "%s::date")
     positions = [dict(row) for row in connection.execute(
-        """SELECT p.symbol,p.quantity,p.sellable_quantity,p.average_cost,p.buy_date,p.realized_pnl,
-                       COALESCE(array_agg(DISTINCT m.sector_key) FILTER (WHERE m.sector_key IS NOT NULL), '{}') AS sector_keys
+        f"""SELECT p.symbol,p.quantity,p.sellable_quantity,p.average_cost,p.buy_date,p.realized_pnl,
+                       COALESCE(array_agg(DISTINCT m.sector_key) FILTER (WHERE m.sector_key IS NOT NULL), '{{}}') AS sector_keys
                   FROM quant.paper_positions p
              LEFT JOIN quant.sector_membership_history m
-                    ON m.symbol=p.symbol AND m.effective_from<=%s
-                   AND (m.effective_to IS NULL OR m.effective_to>=%s)
+                    ON m.symbol=p.symbol AND {membership_predicate}
                    AND m.taxonomy_key IN ('ths_concept_flow','ths_index_n','ths_industry')
                  GROUP BY p.symbol,p.quantity,p.sellable_quantity,p.average_cost,p.buy_date,p.realized_pnl"""
-        , (as_of_date, as_of_date)).fetchall()]
+        , (as_of_date, as_of_date, as_of_date)).fetchall()]
     snapshot = mark_to_market(positions=positions, quotes=quotes, cash=cash,
                               previous_equity=previous_equity,
                               previous_close_equity=previous_close_equity)

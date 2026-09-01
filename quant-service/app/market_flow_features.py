@@ -171,7 +171,7 @@ def volume_flow_regime(
 
 POOL_EVENT_TYPES = frozenset({
     "limit_up_pool", "previous_limit_pool", "limit_open_pool",
-    "limit_down_pool", "sub_new_limit_pool", "strong_pool",
+    "limit_down_pool", "sub_new_limit_pool", "strong_pool", "auction_final", "limit_chain",
 })
 
 

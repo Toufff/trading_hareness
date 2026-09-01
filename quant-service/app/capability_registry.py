@@ -10,7 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
-from .tushare_official import HISTORICAL_MINUTE_APIS, OFFICIAL_EXTENSIONS, REALTIME_MARKET_HOURS_APIS, official_spec
+from .tushare_official import (
+    HISTORICAL_MINUTE_APIS,
+    ONLINE_BOUNDED_HISTORICAL_MINUTE_APIS,
+    OFFICIAL_EXTENSIONS,
+    REALTIME_MARKET_HOURS_APIS,
+    official_spec,
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,14 @@ VERIFIED_SUPER_APIS: Final[frozenset[str]] = frozenset({
 
 
 def api_capability(api_name: str) -> ApiCapability:
+    if api_name in ONLINE_BOUNDED_HISTORICAL_MINUTE_APIS:
+        return ApiCapability(
+            frequency="historical_minute",
+            decision_eligible=False,
+            preferred_providers=("super_get", "super_sdk"),
+            status="verified_bounded",
+            note="Audited ProMax gateway serves one ts_code per request; callers must keep the request symbol-bounded and retain raw rows for research replay.",
+        )
     if api_name in HISTORICAL_MINUTE_APIS:
         return ApiCapability(
             frequency="historical_minute_file",

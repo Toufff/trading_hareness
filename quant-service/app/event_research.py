@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 from typing import Any
+from .sector_membership_repository import point_in_time_membership_predicate
 
 from psycopg.types.json import Json
 
@@ -190,15 +191,10 @@ def research_short_term_reversal(connection: Any, start_date: date, end_date: da
 
 def research_sector_flow_reversal_stock_level(connection: Any, start_date: date, end_date: date,
                                               horizon_days: int = 1) -> dict[str, Any]:
-    """Member-stock forward return after a sector-level reversal_in/reversal_out transition.
-
-    quant.sector_membership_history has no reliable effective_from (every row
-    is backdated to 1900-01-01), so this joins current known membership only
-    - not a point-in-time reconstruction. That is a real limitation, stated
-    in the persisted metrics, not silently assumed away.
-    """
+    """Member-stock forward return using only as-known-at membership evidence."""
+    membership_predicate = point_in_time_membership_predicate("m", "s.trading_date")
     rows = connection.execute(
-        """WITH signal AS (
+        f"""WITH signal AS (
                 SELECT f.taxonomy_key,f.sector_key,f.trading_date,f.transition
                   FROM quant.sector_flow_daily_features f
                  WHERE f.trading_date BETWEEN %s AND %s AND f.transition IN ('reversal_in','reversal_out')
@@ -206,7 +202,7 @@ def research_sector_flow_reversal_stock_level(connection: Any, start_date: date,
                 SELECT s.transition,s.trading_date,m.symbol
                   FROM signal s JOIN quant.sector_membership_history m
                     ON m.taxonomy_key=s.taxonomy_key AND m.sector_key=s.sector_key
-                    AND (m.effective_to IS NULL OR m.effective_to>s.trading_date)
+                    AND {membership_predicate}
              ), priced AS (
                 SELECT me.transition,me.symbol,me.trading_date,
                   (SELECT b.trading_date FROM quant.canonical_bars_daily b WHERE b.symbol=me.symbol AND b.trading_date>me.trading_date
@@ -235,7 +231,7 @@ def research_sector_flow_reversal_stock_level(connection: Any, start_date: date,
     min_days = min((item["distinct_event_days"] for item in cohorts.values()), default=0)
     status = "completed" if total >= 200 and min_days >= 20 else "insufficient_history"
     metrics = {"cohorts": cohorts, "total_events": total, "horizon_days": horizon_days,
-              "membership_caveat": "current known membership only; sector_membership_history has no reliable effective_from"}
+              "membership_caveat": "strict point-in-time membership only; legacy_unbounded rows excluded"}
     _persist_experiment(connection, "event_research_sector_flow_reversal_stock_v1", start_date, end_date, status,
                         {"horizon_days": horizon_days}, metrics)
     return metrics

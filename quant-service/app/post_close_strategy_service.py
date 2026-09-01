@@ -91,14 +91,26 @@ def run(
              Json(json_safe(result.get("source_status", {}))),
              Json(json_safe({**result.get("summary", {}), "reason": result.get("reason")}))),
         ).fetchone()
+        connection.execute("DELETE FROM quant.post_close_strategy_screen_observations WHERE run_id=%s", (run_row["run_id"],))
         connection.execute("DELETE FROM quant.post_close_strategy_candidates WHERE run_id=%s", (run_row["run_id"],))
+        source_snapshot = {
+            "as_of_date": str(as_of_date), "model_version": model_version,
+            "daily_bars": result.get("source_status", {}).get("daily_bars"),
+            "daily_symbols": result.get("source_status", {}).get("daily_symbols"),
+            "exact_board_context_symbols": result.get("source_status", {}).get("exact_board_context_symbols"),
+            "screened_symbols": result.get("source_status", {}).get("screened_symbols"),
+        }
+        for observation in result.get("screen_observations", []):
+            connection.execute(
+                """INSERT INTO quant.post_close_strategy_screen_observations(
+                       run_id,symbol,name,screen_state,candidate_type,score,reason_codes,structure,board_context,source_snapshot
+                   ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (run_row["run_id"], observation["symbol"], observation.get("name"), observation["screen_state"],
+                 observation.get("candidate_type"), observation.get("score"), Json(observation.get("reason_codes", [])),
+                 Json(json_safe(observation.get("structure", {}))), Json(json_safe(observation.get("board_context", {}))),
+                 Json(json_safe(source_snapshot))),
+            )
         for rank, candidate in enumerate(result.get("candidates", []), start=1):
-            source_snapshot = {
-                "as_of_date": str(as_of_date), "model_version": model_version,
-                "daily_bars": result.get("source_status", {}).get("daily_bars"),
-                "daily_symbols": result.get("source_status", {}).get("daily_symbols"),
-                "exact_board_context_symbols": result.get("source_status", {}).get("exact_board_context_symbols"),
-            }
             connection.execute(
                 """INSERT INTO quant.post_close_strategy_candidates(
                            run_id,rank,symbol,candidate_type,score,structure,board_context,risk_flags,

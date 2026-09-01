@@ -16,6 +16,41 @@ import uuid
 from .stable_json import tolerant_json
 
 
+def scan_rejection_reasons(
+    quote: dict[str, Any] | None,
+    daily_factors: dict[str, Any] | None,
+    minute_features: dict[str, Any] | None,
+    generated_signals: list[dict[str, Any]],
+) -> list[str]:
+    """Explain why one scanned symbol did not become a research candidate.
+
+    Rules remain pure and unchanged; this compact reason projection records
+    the observable gates that were absent at scan time.  It is deliberately
+    conservative: an unknown value is reported as missing rather than inferred
+    to have passed.
+    """
+    reasons: list[str] = []
+    if not quote or quote.get("price") is None:
+        reasons.append("quote_missing")
+    else:
+        availability = quote.get("data_availability") if isinstance(quote.get("data_availability"), dict) else {}
+        for field in availability.get("missing_public_flow_fields") or []:
+            reasons.append(f"flow_{str(field)}_missing_or_research_only")
+    if not isinstance(daily_factors, dict) or daily_factors.get("status") in {"insufficient_history", "not_available"}:
+        reasons.append("daily_history_insufficient")
+    minute = minute_features if isinstance(minute_features, dict) else {}
+    if minute.get("status") in {None, "not_available", "unavailable", "insufficient_history"}:
+        reasons.append("minute_confirmation_missing")
+    if not generated_signals:
+        reasons.append("no_rule_condition_met")
+    else:
+        for signal in generated_signals:
+            for flag in signal.get("risk_flags") or []:
+                if str(flag) not in reasons:
+                    reasons.append(str(flag))
+    return list(dict.fromkeys(reasons)) or ["no_rule_condition_met"]
+
+
 @dataclass(frozen=True)
 class IntradayScanSignalPersistenceDependencies:
     prepare_inputs: Callable[..., Any]
@@ -176,7 +211,7 @@ def persist_scan_signals(
             connection, [str(signal["signal_key"]) for signal in generated_signals], symbol,
             session_start=prepared.session_start,
         )
-        signals.extend(dependencies.persist_generated_signals(
+        persisted = dependencies.persist_generated_signals(
             connection, scan_id=scan_id, observed_at=observed_at, symbol=symbol, watch=watch,
             quote=quote, daily_factors=daily_factors, minute_feature=minute_feature,
             peer_context=peer_context, market_context=market_context, fast_confirmation=fast_confirmation,
@@ -186,7 +221,23 @@ def persist_scan_signals(
             generated_signals=generated_signals, existing_event_state=event_state,
             confirmation_window=confirmation_window, factor_contract_version=factor_contract_version,
             dependencies=dependencies.signal_event_persistence_dependencies,
-        ))
+        )
+        signals.extend(persisted)
+        outcome = "candidate" if persisted else "rejected"
+        if persisted and all(str(item.get("state") or "") == "suppressed" for item in persisted):
+            outcome = "suppressed"
+        connection.execute(
+            """INSERT INTO quant.intraday_scan_rejections(
+                   scan_id,symbol,model_version,observed_at,outcome,reason_codes,evidence)
+               VALUES(%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT(scan_id,symbol,model_version) DO UPDATE SET
+                 outcome=EXCLUDED.outcome,reason_codes=EXCLUDED.reason_codes,evidence=EXCLUDED.evidence""",
+            (scan_id, symbol, signal_model_version, observed_at, outcome,
+             tolerant_json(scan_rejection_reasons(quote, daily_factors, minute_feature, generated_signals)),
+             tolerant_json({"generated_signal_count": len(generated_signals), "persisted_signal_count": len(persisted),
+                            "quote_available": bool(quote), "daily_status": daily_factors.get("status"),
+                            "minute_status": minute_feature.get("status") if isinstance(minute_feature, dict) else None})),
+        )
     return signals
 
 
@@ -195,4 +246,5 @@ __all__ = [
     "IntradayScanSignalPersistenceDependencies",
     "persist_scan_signals",
     "persist_scan_transaction",
+    "scan_rejection_reasons",
 ]

@@ -10,20 +10,23 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from .sector_membership_repository import point_in_time_membership_predicate
+
 
 def load_exact_board_context_rows(database: Any, as_of_date: date) -> list[dict[str, Any]]:
-    """Return same-date THS concept-flow membership rows with source metadata."""
+    """Return only same-date, as-known-at THS concept-flow membership rows."""
+    membership_predicate = point_in_time_membership_predicate("member")
     with database.transaction() as connection:
         rows = connection.execute(
-            """SELECT member.symbol,flow.sector_key,sector.label,flow.net_amount,flow.change_pct,flow.leading_label,
+            f"""SELECT member.symbol,flow.sector_key,sector.label,flow.net_amount,flow.change_pct,flow.leading_label,
                       flow.provider_key,flow.available_at
                  FROM quant.sector_membership_history member
                  JOIN quant.sector_market_observations flow
                    ON flow.taxonomy_key=member.taxonomy_key AND flow.sector_key=member.sector_key
                  JOIN quant.sectors sector ON sector.taxonomy_key=flow.taxonomy_key AND sector.sector_key=flow.sector_key
-                WHERE member.taxonomy_key='ths_concept_flow' AND member.effective_to IS NULL
+                WHERE member.taxonomy_key='ths_concept_flow' AND {membership_predicate}
                   AND flow.taxonomy_key='ths_concept_flow' AND flow.trading_date=%s""",
-            (as_of_date,),
+            (as_of_date, as_of_date, as_of_date, as_of_date),
         ).fetchall()
     return [dict(row) for row in rows]
 

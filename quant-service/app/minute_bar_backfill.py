@@ -35,7 +35,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from datetime import date, datetime, time as _time, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Sequence
 from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
@@ -211,6 +211,7 @@ def limit_up_symbols(connection: Any, start_date: date, end_date: date) -> dict[
 
 async def backfill_symbol_session(
     symbol: str, trading_date: date, *,
+    selection_roles: Sequence[str] = (),
     call_tushare_api: Callable[..., Awaitable[Any]],
     run_database_blocking: Callable[..., Awaitable[Any]],
     db: Any,
@@ -221,11 +222,17 @@ async def backfill_symbol_session(
         MINUTE_API,
         {"ts_code": symbol, "freq": "1min",
          "start_date": f"{stamp} 09:30:00", "end_date": f"{stamp} 15:00:00"},
-        None, "super_get",
+        # Automatic routing keeps the audited ProMax GET as first candidate but
+        # can fall through to the SDK when the GET gateway returns an empty
+        # session (the upstream has done this intermittently).
+        None, "auto",
     )
     rows = normalize_minute_rows(symbol, call.rows)
     if not rows:
         return {"symbol": symbol, "trading_date": str(trading_date), "status": "empty", "bars": 0}
+    roles = sorted({str(role) for role in selection_roles if str(role)})
+    if roles:
+        rows = [{**row, "raw": {**dict(row["raw"]), "selection_roles": roles}} for row in rows]
     observed_at = datetime.now(timezone.utc)
 
     def persist() -> int:
@@ -243,7 +250,7 @@ async def backfill_symbol_session(
     return {"symbol": symbol, "trading_date": str(trading_date),
             "status": "completed" if stored >= FULL_SESSION_BARS - 1 else "partial",
             "bars": stored, "expected": FULL_SESSION_BARS,
-            "reconciliation": reconciliation}
+            "selection_roles": roles, "reconciliation": reconciliation}
 
 
 __all__ = [

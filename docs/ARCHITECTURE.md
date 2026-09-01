@@ -50,6 +50,7 @@ not import `app.main`.
 | HTTP request validation | `app/routers/` | Router functions validate and delegate; no provider crawling in a read route. |
 | Provider transport | `app/*provider*.py`, `app/http_clients.py` | Reuse lifecycle clients and record availability. |
 | Evidence semantics | `app/platform/evidence_contracts.py` | Every normalized source declares provider, capability, scope, coverage semantics and decision eligibility before strategies consume it. |
+| Data placement and replay | `app/platform/data_product_registry.py` | Every strategy/runtime dataset declares time semantics, local tier, immutable cloud format, partition keys and replay role. Cloud copies never become direct decision inputs. |
 | Persistent projections | `app/*_repository.py`, `app/*_read_model.py` | Bound result sets; async dashboard reads use `AsyncDatabase`. |
 | Timing and recovery | `app/*_scheduler.py`, `app/runtime_tasks.py`, `app/*_runtime.py` | Durable leases, idempotent run keys and explicit retry windows; runtime adapters bind scan I/O and lease ports without embedding transactional closures in the ASGI root. |
 | Runtime ownership | `app/platform/runtime_task_registry.py` | Each leased task declares one owner profile, expected cadence, upstream capabilities and retained evidence datasets; startup rejects an undeclared or missing task factory. |
@@ -82,6 +83,10 @@ not import `app.main`.
   `stk_limit` controls.
 - `raw -> canonical -> features -> signals -> outcomes` is append/evidence
   oriented.  Replay outcomes never change live weights.
+- Each layer is archived as immutable, manifest-addressed evidence. Research
+  restores cloud partitions into staging and validates schema, hash, row count
+  and point-in-time fields before use; strategies never query cloud objects in
+  the live decision path.
 - Network loss keeps local loops alive.  Durable cursors, leases and run keys
   resume work after recovery without replaying completed work.
 

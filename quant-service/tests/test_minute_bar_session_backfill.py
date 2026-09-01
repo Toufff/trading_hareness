@@ -24,9 +24,14 @@ from app.minute_bar_session_backfill import (
 class SessionSymbolTests(unittest.TestCase):
     def _connection(self, boards):
         connection = MagicMock()
-        connection.execute.return_value.fetchall.return_value = [
-            {"trading_date": date(2026, 8, 28), "symbol": symbol} for symbol in boards
-        ]
+        def execute(_statement, params):
+            board_limit = int(params[3])
+            rows = [
+                {"sample_role": "board", "symbol": symbol, "source_total": len(boards)}
+                for symbol in boards[:board_limit]
+            ]
+            return MagicMock(fetchall=MagicMock(return_value=rows))
+        connection.execute.side_effect = execute
         return connection
 
     def test_benchmarks_lead_the_list(self):
@@ -56,14 +61,38 @@ class SessionSymbolTests(unittest.TestCase):
         result = session_symbols(self._connection([]), date(2026, 8, 28))
         self.assertEqual(result["symbols"], list(BENCHMARK_SYMBOLS))
 
+    def test_event_selector_exposes_near_limit_and_matched_control_roles(self):
+        connection = MagicMock()
+        connection.execute.return_value.fetchall.return_value = [
+            {"sample_role": "board", "symbol": "600000.SH", "source_total": 2},
+            {"sample_role": "near_limit", "symbol": "000001.SZ", "source_total": 1},
+            {"sample_role": "matched_control", "symbol": "000002.SZ", "source_total": 1},
+        ]
+        result = session_symbols(connection, date(2026, 8, 28))
+        self.assertEqual(result["boards"], 2)
+        self.assertEqual(result["near_limit"], 1)
+        self.assertEqual(result["matched_controls"], 1)
+        self.assertEqual(result["sample_roles"]["matched_control"], ["000002.SZ"])
+
+    def test_trend_cohort_is_requested_and_tagged(self):
+        connection = MagicMock()
+        connection.execute.return_value.fetchall.return_value = [
+            {"sample_role": "trend", "symbol": "300001.SZ", "source_total": 7},
+        ]
+        result = session_symbols(connection, date(2026, 8, 28))
+        self.assertIn("300001.SZ", result["symbols"])
+        self.assertEqual(result["trend"], 1)
+        self.assertEqual(result["sample_roles"]["trend"], ["300001.SZ"])
+
 
 class BackfillSessionTests(unittest.TestCase):
-    def _run(self, symbols, side_effect):
+    def _run(self, symbols, side_effect, selection_roles=None):
         with patch("app.minute_bar_session_backfill.backfill_symbol_session",
                    side_effect=side_effect) as backfill:
             result = asyncio.run(backfill_session(
                 date(2026, 8, 28), symbols=symbols,
-                call_tushare_api=MagicMock(), run_database_blocking=MagicMock(), db=MagicMock()))
+                call_tushare_api=MagicMock(), run_database_blocking=MagicMock(), db=MagicMock(),
+                selection_roles=selection_roles))
         return result, backfill
 
     def test_one_unavailable_symbol_does_not_end_the_pass(self):
@@ -93,6 +122,14 @@ class BackfillSessionTests(unittest.TestCase):
 
         self._run(["A", "B", "C"], side_effect)
         self.assertEqual(seen, ["A", "B", "C"])
+
+    def test_selection_roles_are_forwarded_to_the_persisting_symbol_call(self):
+        async def side_effect(symbol, _trading_date, **kwargs):
+            return {"symbol": symbol, "status": "completed", "bars": 241,
+                    "selection_roles": kwargs["selection_roles"]}
+
+        result, _ = self._run(["A"], side_effect, {"A": ["board", "benchmark"]})
+        self.assertEqual(result["results"][0]["selection_roles"], ["board", "benchmark"])
 
 
 class CoverageReportTests(unittest.TestCase):

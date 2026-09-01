@@ -24,6 +24,18 @@ quant-service/reports/
 *.manifest
 *.log
 
+# Local WeChat desktop listeners and extraction helpers.  These processes
+# consume the user's local WeChat database/key material and are intentionally
+# kept out of GitHub; only the Feishu adapter contract is repository code.
+scripts/wechat-*-relay.py
+scripts/wechat-xiaolan-backfill.py
+scripts/wechat_article_enricher.py
+scripts/wechat_sqlcipher.py
+scripts/tests/test_wechat_article_enricher.py
+scripts/start-wechat-*-relay.sh
+scripts/stop-wechat-*-relay.sh
+launchd/com.papa.wechat-*-relay.plist
+
 # Python artifacts
 __pycache__/
 *.py[cod]

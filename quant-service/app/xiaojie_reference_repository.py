@@ -17,6 +17,8 @@ from typing import Any, Awaitable, Callable
 
 from psycopg.types.json import Json
 
+from .sector_membership_repository import point_in_time_membership_predicate
+
 #: Sessions used for the breakout high and the recent-behaviour counters.
 LOOKBACK_SESSIONS = 20
 MA_SESSIONS = 5
@@ -95,11 +97,13 @@ def persist_trade_limit_rows(connection: Any, trading_date: date, rows: list[dic
 
 def sector_membership(connection: Any, trading_date: date,
                       taxonomy_key: str = "ths_concept_flow") -> dict[str, set[str]]:
+    membership_predicate = point_in_time_membership_predicate(
+        "member", known_at_cutoff_sql="((%s::date + time '08:59:59') AT TIME ZONE 'Asia/Shanghai')",
+    )
     rows = connection.execute(
-        """SELECT symbol, sector_key FROM quant.sector_membership_history
-            WHERE taxonomy_key=%s AND effective_from<=%s
-              AND (effective_to IS NULL OR effective_to>=%s)""",
-        (taxonomy_key, trading_date, trading_date),
+        f"""SELECT symbol, sector_key FROM quant.sector_membership_history member
+            WHERE taxonomy_key=%s AND {membership_predicate}""",
+        (taxonomy_key, trading_date, trading_date, trading_date),
     ).fetchall()
     membership: dict[str, set[str]] = {}
     for row in rows:
