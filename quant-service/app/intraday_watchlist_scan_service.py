@@ -49,6 +49,20 @@ def quote_volume_anomaly_symbols(
     return [symbol for _score, symbol in sorted(candidates, key=lambda item: (-item[0], item[1]))]
 
 
+def inject_anomaly_rotation_priority(
+    selected_symbols: list[str], anomaly_symbols: list[str], limit: int,
+) -> list[str]:
+    """Ensure the bounded Tushare validation slice includes top anomalies."""
+    if limit <= 0:
+        return []
+    ordered: list[str] = []
+    for symbol in anomaly_symbols + selected_symbols:
+        symbol = str(symbol).upper()
+        if symbol and symbol not in ordered:
+            ordered.append(symbol)
+    return ordered[:limit]
+
+
 async def _surge_context_with_priority(
     surge_context: Callable[..., Awaitable[tuple[dict[str, dict[str, Any]], dict[str, Any]]]],
     watches: list[dict[str, Any]], mapped_peers: dict[str, dict[str, Any]],
@@ -195,6 +209,9 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
     ]
     priority_symbols, next_realtime_validation_offset = dependencies.realtime_validation_slice(
         ordered_priority_symbols, request.realtime_validation_offset, request.realtime_validation_limit,
+    )
+    priority_symbols = inject_anomaly_rotation_priority(
+        priority_symbols, anomaly_symbols, request.realtime_validation_limit,
     )
     tushare_minutes = await dependencies.tushare_minutes(priority_symbols) if priority_symbols else {}
     fast_confirmations = await dependencies.fast_confirmations(selected_symbols, quote_capture.quotes, observed_at)

@@ -7,6 +7,7 @@ import uuid
 from app.intraday_watchlist_scan_service import (
     IntradayWatchlistScanDependencies,
     build_peer_contexts,
+    inject_anomaly_rotation_priority,
     quote_volume_anomaly_symbols,
     run_watchlist_scan,
 )
@@ -29,6 +30,10 @@ class IntradayWatchlistScanServiceTests(unittest.TestCase):
             "600176.SH": {"volume_ratio": 3.0, "turnover_rate": 8.0},
         }
         self.assertEqual(quote_volume_anomaly_symbols(watches, quotes), ["300364.SZ", "600176.SH"])
+        self.assertEqual(
+            inject_anomaly_rotation_priority(["000001.SZ", "600176.SH"], ["300364.SZ"], 2),
+            ["300364.SZ", "000001.SZ"],
+        )
 
     def test_closed_session_persists_only_terminal_scan(self):
         calls = []
