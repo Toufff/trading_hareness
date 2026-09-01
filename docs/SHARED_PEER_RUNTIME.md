@@ -54,6 +54,12 @@ lightServer root privileges.
 - The peer role inherits the application's database privileges and may run
   explicit research/migrations. Access can be revoked by disabling the role or
   removing the SSH key.
+- Peer credentials are long-lived static credentials: the SSH key, database
+  password, shared read/write API keys, and n8n encryption key have no scheduled
+  rotation or automatic expiry. Rotate them only after suspected disclosure,
+  an owner-requested revocation, or an explicit maintenance event. Plaintext
+  values belong in the owner's private handoff bundle outside the checkout and
+  must never be committed to Git.
 - Peer n8n state uses `trading_hareness_peer_n8n`. Two independently managed
   n8n instances must not share one n8n application schema.
 - Longhu reads go through `/licensed/longhu/*` with a dedicated read key. The
@@ -98,7 +104,9 @@ ssh lightServer1 "ss -lnt | grep -E '127.0.0.1:(15432|15681)'"
 Clone the owner's fork as `stockpeer`, check out the reviewed branch, and copy
 `deploy/shared-peer/.env.example` to `.env`. Fill it from the separately
 delivered `peer.env`; do not commit it. The tunnel key must be owned by
-`stockpeer` and mode `0600`.
+`stockpeer` and mode `0600`. If the environment bundle was copied from Windows,
+normalize it before sourcing it: `sed -i 's/\r$//' deploy/shared-peer/.env`.
+Release activation performs this normalization automatically.
 
 The peer image is built from a verified Linux wheelhouse so a slow or blocked
 PyPI route cannot make deployment non-reproducible. On the owner workstation:

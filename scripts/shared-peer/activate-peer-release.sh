@@ -35,6 +35,10 @@ test -f "${wheelhouse_target}/SHA256SUMS"
 if [[ -s "${saved_env}" ]]; then
   install -m 0600 "${saved_env}" "${repo_target}/deploy/shared-peer/.env"
 fi
+# Environment bundles are commonly produced on the Windows owner host. Strip
+# CRLF before Linux shells source the file; otherwise a trailing CR can become
+# part of an HTTP header value and make an otherwise valid static API key fail.
+sed -i 's/\r$//' "${repo_target}/deploy/shared-peer/.env"
 grep -q '^PEER_WHEELHOUSE_PATH=' "${repo_target}/deploy/shared-peer/.env" || \
   printf '\nPEER_WHEELHOUSE_PATH=%s\n' "${current_wheelhouse}" >> "${repo_target}/deploy/shared-peer/.env"
 
