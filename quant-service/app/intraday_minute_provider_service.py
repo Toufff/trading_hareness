@@ -108,6 +108,7 @@ async def fetch_bounded_minute_context(
     async def fetch_one(symbol: str) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
         source, rows = await fetch_rows(symbol)
         received_rows = normalize_super_get_minute_rows(rows, number=number)
+        normalized = received_rows
         stale_rows = 0
         if observed_at is not None:
             rows, stale_rows = filter_fresh_minute_rows(
