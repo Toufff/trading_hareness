@@ -531,6 +531,7 @@ from .routers.sector_reads import build_sector_reads_router
 from .routers.intraday_evidence_reads import build_intraday_evidence_reads_router
 from .routers.market_result_reads import build_market_result_reads_router
 from .routers.market_flow_reads import build_market_flow_reads_router
+from .routers.l2_research import L2ResearchDependencies, build_l2_research_router
 from .routers.provider_actions import ProviderActionDependencies, build_provider_actions_router
 from .routers.market_actions import MarketActionDependencies, build_market_actions_router
 from .routers.intraday_actions import IntradayActionDependencies, build_intraday_actions_router
@@ -585,6 +586,7 @@ from .request_models import (
     SectorCatalogSyncRequest,
     SectorFlowSyncRequest,
     StrategyBacktestRequest,
+    L2IncrementalEvaluationRequest,
     StrategyDecisionRequest,
     StrategyPatternMiningRequest,
     StrategyReviewRequest,
@@ -663,6 +665,8 @@ from .telemetry import (
     provider_shared_rate_limit_wait_seconds,
 )
 from .runtime_executors import ExecutorSaturatedError, run_akshare_blocking, run_database_blocking, runtime_executor_status, shutdown_runtime_executors
+from .l2_research_gate import evaluate_l2_incremental_value
+from .l2_research_repository import latest_l2_evaluation, persist_l2_evaluation
 from .provider_rate_limits import provider_request_spacing_seconds, reserve_provider_rate_limit_slot
 from .runtime_leases import (
     POST_CLOSE_REFRESH_LEASE_KEY,
@@ -2472,7 +2476,7 @@ async def retry_pending_intraday_alerts(limit: int = 3) -> dict[str, int]:
 
 
 async def intraday_tushare_minutes(symbols: list[str]) -> dict[str, dict[str, Any]]:
-    """Get a bounded minute feature window through the verified super GET path."""
+    """Get a bounded, fresh minute feature window through Tushare routes."""
     async def fetch_rows(symbol: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         source, rows = await stock_study_fetch("tushare_rt_min", TushareFetchRequest(
             api_name="rt_min", provider="super", params={"ts_code": symbol, "freq": "1MIN"}, max_rows=30, force_refresh=True,
@@ -2481,6 +2485,7 @@ async def intraday_tushare_minutes(symbols: list[str]) -> dict[str, dict[str, An
 
     return await fetch_bounded_minute_context(
         symbols, fetch_rows=fetch_rows, feature_builder=intraday_minute_features, number=intraday_number,
+        observed_at=datetime.now(timezone.utc), max_age_seconds=90.0,
     )
 
 
@@ -2581,10 +2586,11 @@ async def capture_intraday_minute_sessions(symbols: list[str]) -> dict[str, Any]
 
 async def intraday_tencent_surge_context(
     watches: list[dict[str, Any]], *, mapped_peers: dict[str, dict[str, Any]] | None = None,
+    priority_symbols: list[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Compatibility entry point backed by the bounded minute-context service."""
     return await capture_intraday_surge_context(
-        watches, mapped_peers=mapped_peers, cache=_intraday_tencent_minute_cache,
+        watches, mapped_peers=mapped_peers, priority_symbols=priority_symbols, cache=_intraday_tencent_minute_cache,
         max_symbols=intraday_minute_profile_max_symbols,
         open_capabilities=open_provider_capabilities,
         capability=TENCENT_INTRADAY_MINUTE_CAPABILITY,
@@ -4127,6 +4133,35 @@ app.include_router(build_analyst_skill_reads_router(db, analyst_skill_profiles, 
 app.include_router(build_analyst_research_reads_router(db, analyst_research_status, async_database=async_db))
 app.include_router(build_automation_reads_router(db, async_database=async_db))
 app.include_router(build_event_reads_router(db, async_db))
+
+
+async def record_l2_research_evaluation(payload: L2IncrementalEvaluationRequest) -> dict[str, Any]:
+    """Evaluate and persist licensed L2 evidence on the database executor."""
+    evaluation = evaluate_l2_incremental_value(
+        [row.model_dump() for row in payload.rows], minimum_samples=payload.minimum_samples,
+    )
+    return await run_database_blocking(
+        persist_l2_evaluation, db,
+        source_kind=payload.source_kind,
+        algorithm_version=payload.algorithm_version,
+        minimum_samples=payload.minimum_samples,
+        evaluation=evaluation,
+        evidence_window_start=payload.evidence_window_start,
+        evidence_window_end=payload.evidence_window_end,
+        timeout_seconds=30,
+    )
+
+
+async def latest_l2_research_evaluation() -> dict[str, Any]:
+    return await latest_l2_evaluation(async_db)
+
+
+app.include_router(build_l2_research_router(L2ResearchDependencies(
+    record=record_l2_research_evaluation,
+    latest=latest_l2_research_evaluation,
+)))
+
+
 app.include_router(build_strategy_reads_router(db, STRATEGY_DECISION_MODEL_VERSION, async_db, cn_today=cn_today))
 app.include_router(build_paper_reads_router(db, async_db))
 app.include_router(build_paper_actions_router(db, configure_paper_account, accept_paper_decision))

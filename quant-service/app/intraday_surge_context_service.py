@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable
 async def capture(
     watches: list[dict[str, Any]], *,
     mapped_peers: dict[str, dict[str, Any]] | None,
+    priority_symbols: list[str] | None = None,
     cache: dict[str, tuple[float, dict[str, Any] | None, str | None]],
     max_symbols: Callable[[], int],
     open_capabilities: Callable[..., Awaitable[set[str]]],
@@ -39,6 +40,13 @@ async def capture(
         if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) and symbol not in bucket:
             bucket.append(symbol)
 
+    # A quote-level anomaly is already evidence worth enriching.  Keep this
+    # explicit, bounded list ahead of the normal target/peer/passive buckets
+    # so a capped minute basket does not spend its budget on quiet names.
+    priority: list[str] = []
+    for value in priority_symbols or []:
+        append_unique(priority, value)
+
     for watch in watches:
         watch_symbol = str(watch["symbol"]).upper()
         metadata = watch.get("metadata") if isinstance(watch.get("metadata"), dict) else {}
@@ -55,7 +63,7 @@ async def capture(
                 append_unique(configured_peers, value)
         for value in (mapped_peers.get(watch_symbol) or {}).get("peer_symbols") or []:
             append_unique(mapped_peer_symbols, value)
-    for bucket in (configured_targets, configured_peers, passive_watches, mapped_peer_symbols):
+    for bucket in (priority, configured_targets, configured_peers, passive_watches, mapped_peer_symbols):
         for symbol in bucket:
             if symbol not in requested:
                 requested.append(symbol)
@@ -140,6 +148,7 @@ async def capture(
         "truncated": requested_total > len(requested), "completed": sorted(features), "errors": errors,
         "cached_symbols": sorted(cached_features), "cache_ttl_seconds": cache_ttl_seconds,
         "priority": {
+            "quote_anomaly_symbols": priority,
             "configured_targets": configured_targets, "configured_peers": configured_peers,
             "passive_watches": passive_watches, "mapped_peers": mapped_peer_symbols,
         },

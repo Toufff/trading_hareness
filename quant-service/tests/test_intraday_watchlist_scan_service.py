@@ -7,6 +7,7 @@ import uuid
 from app.intraday_watchlist_scan_service import (
     IntradayWatchlistScanDependencies,
     build_peer_contexts,
+    quote_volume_anomaly_symbols,
     run_watchlist_scan,
 )
 
@@ -15,6 +16,19 @@ class IntradayWatchlistScanServiceTests(unittest.TestCase):
     @staticmethod
     def request():
         return SimpleNamespace(symbols=[], realtime_validation_offset=0, realtime_validation_limit=4)
+
+    def test_quote_volume_anomalies_are_ranked_for_minute_enrichment(self):
+        watches = [
+            {"symbol": "000001.SZ"},
+            {"symbol": "300364.SZ", "metadata": {"volume_anomaly_thresholds": {"volume_ratio_p95": 3.0}}},
+            {"symbol": "600176.SH"},
+        ]
+        quotes = {
+            "000001.SZ": {"volume_ratio": 1.2, "turnover_rate": 4},
+            "300364.SZ": {"volume_ratio": 4.0, "turnover_rate": 28.0},
+            "600176.SH": {"volume_ratio": 3.0, "turnover_rate": 8.0},
+        }
+        self.assertEqual(quote_volume_anomaly_symbols(watches, quotes), ["300364.SZ", "600176.SH"])
 
     def test_closed_session_persists_only_terminal_scan(self):
         calls = []

@@ -10,6 +10,61 @@ from typing import Any
 import uuid
 
 
+def quote_volume_anomaly_symbols(
+    watches: list[dict[str, Any]], quotes: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Rank quote-level volume anomalies for immediate minute enrichment.
+
+    This deliberately mirrors the live volume-anomaly floors (2.5x volume
+    ratio and 5% turnover), including per-symbol metadata floors.  It only
+    changes evidence collection priority; it never creates or upgrades a
+    signal by itself.
+    """
+    candidates: list[tuple[float, str]] = []
+    for watch in watches:
+        symbol = str(watch.get("symbol") or "").upper()
+        quote = quotes.get(symbol) or {}
+        try:
+            volume_ratio = float(quote.get("volume_ratio"))
+            turnover_rate = float(quote.get("turnover_rate"))
+        except (TypeError, ValueError):
+            continue
+        metadata = watch.get("metadata") if isinstance(watch.get("metadata"), dict) else {}
+        thresholds = metadata.get("volume_anomaly_thresholds")
+        thresholds = thresholds if isinstance(thresholds, dict) else {}
+        try:
+            ratio_gate = max(2.5, float(thresholds.get("volume_ratio_p95") or 0))
+        except (TypeError, ValueError):
+            ratio_gate = 2.5
+        try:
+            turnover_gate = max(5.0, float(thresholds.get("turnover_rate_p90") or 0))
+        except (TypeError, ValueError):
+            turnover_gate = 5.0
+        if volume_ratio < ratio_gate or turnover_rate < turnover_gate:
+            continue
+        # A simple excess score keeps the ordering deterministic and gives
+        # the most unusual names the first slots in the bounded basket.
+        score = (volume_ratio / ratio_gate) + (turnover_rate / turnover_gate)
+        candidates.append((score, symbol))
+    return [symbol for _score, symbol in sorted(candidates, key=lambda item: (-item[0], item[1]))]
+
+
+async def _surge_context_with_priority(
+    surge_context: Callable[..., Awaitable[tuple[dict[str, dict[str, Any]], dict[str, Any]]]],
+    watches: list[dict[str, Any]], mapped_peers: dict[str, dict[str, Any]],
+    priority_symbols: list[str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Call old injected test adapters while supporting priority-aware ones."""
+    try:
+        return await surge_context(watches, mapped_peers=mapped_peers, priority_symbols=priority_symbols)
+    except TypeError as error:
+        # Third-party/replay adapters written before priority_symbols existed
+        # remain usable.  Do not hide a TypeError raised by the adapter body.
+        if "priority_symbols" not in str(error):
+            raise
+        return await surge_context(watches, mapped_peers=mapped_peers)
+
+
 @dataclass(frozen=True)
 class IntradayWatchlistScanDependencies:
     now_utc: Callable[[], datetime]
@@ -118,7 +173,15 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
     mapped_peer_groups = dependencies.mapped_peers(selected_symbols, membership_rows)
     quote_timestamp_slo_seconds = 20.0 if dependencies.high_frequency_window(observed_at) else 45.0
     quote_capture = await dependencies.capture_quotes(selected_symbols, observed_at, quote_timestamp_slo_seconds)
-    surge_features, surge_source = await dependencies.surge_context(watches, mapped_peers=mapped_peer_groups)
+    anomaly_symbols = quote_volume_anomaly_symbols(watches, quote_capture.quotes)
+    surge_features, surge_source = await _surge_context_with_priority(
+        dependencies.surge_context, watches, mapped_peer_groups, anomaly_symbols,
+    )
+    surge_source["minute_enrichment_priority"] = {
+        "symbols": anomaly_symbols,
+        "reason": "quote_volume_anomaly",
+        "notice": "只提升分钟证据采集优先级，不单独生成或升级信号。",
+    }
     surge_source["exact_watchlist_peer_mapping"] = {
         "status": "completed", "membership_rows": len(membership_rows),
         "symbols_with_mapped_peers": sum(bool(item.get("peer_symbols")) for item in mapped_peer_groups.values()),
@@ -126,7 +189,10 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
         "notice": "仅以同一 taxonomy_key + sector_key 的观察池成员确认；不按名称猜板块关联。",
     }
     peer_contexts = build_peer_contexts(watches, mapped_peer_groups, surge_features, dependencies.peer_context)
-    ordered_priority_symbols = [str(row["symbol"]) for row in sorted(watches, key=dependencies.watch_priority_key)]
+    ordered_priority_symbols = anomaly_symbols + [
+        str(row["symbol"]) for row in sorted(watches, key=dependencies.watch_priority_key)
+        if str(row["symbol"]).upper() not in set(anomaly_symbols)
+    ]
     priority_symbols, next_realtime_validation_offset = dependencies.realtime_validation_slice(
         ordered_priority_symbols, request.realtime_validation_offset, request.realtime_validation_limit,
     )

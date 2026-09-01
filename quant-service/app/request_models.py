@@ -445,6 +445,32 @@ class StrategyBacktestRequest(BaseModel):
     factors: list[str] = Field(default_factory=lambda: ["momentum_20d", "sma_gap_20d", "volume_ratio_20d", "reversal_5d"], min_length=1, max_length=16)
 
 
+class L2PairedObservation(BaseModel):
+    """One matched research-only Level-1 versus Level-2 observation."""
+
+    baseline_score: float
+    l2_score: float
+    outcome: float
+    l2_algorithm_version: str = Field(min_length=1, max_length=120)
+
+
+class L2IncrementalEvaluationRequest(BaseModel):
+    """Submit licensed/offline L2 evidence without opening a live data path."""
+
+    source_kind: Literal["licensed_level2_offline"] = "licensed_level2_offline"
+    algorithm_version: str = Field(default="l2-gate-v1", min_length=1, max_length=120)
+    minimum_samples: int = Field(default=200, ge=1, le=10000)
+    rows: list[L2PairedObservation] = Field(min_length=1, max_length=5000)
+    evidence_window_start: datetime | None = None
+    evidence_window_end: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "L2IncrementalEvaluationRequest":
+        if self.evidence_window_start and self.evidence_window_end and self.evidence_window_end < self.evidence_window_start:
+            raise ValueError("evidence_window_end must not be before evidence_window_start")
+        return self
+
+
 class RemoteReportImport(BaseModel):
     report: dict[str, Any]
 
