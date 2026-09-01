@@ -78,11 +78,14 @@ def main() -> int:
             "params": {"exchange": "SSE", "start_date": month_start, "end_date": month_end},
             "force_refresh": True,
         })
+        # Retention is independent of the control refresh. A blocked provider
+        # response must not leave old edge evidence occupying the hot budget.
+        retention = prune_edge_evidence()
         trade_date = current_trade_date()
         if trade_date is None:
             print({
                 "status": "closed", "calendar": calendar_result.get("status"),
-                "observed_at": now.isoformat(), "retention": prune_edge_evidence(),
+                "observed_at": now.isoformat(), "retention": retention,
             })
             return 0
         daily = post(client, "/api/v1/market/sync/full-daily", {
@@ -92,7 +95,7 @@ def main() -> int:
         print({
             "status": "completed", "trade_date": trade_date,
             "daily_status": daily.get("status"), "daily_rows": daily.get("imported_rows"),
-            "controls_status": controls.get("status"), "retention": prune_edge_evidence(),
+            "controls_status": controls.get("status"), "retention": retention,
         })
     return 0
 
