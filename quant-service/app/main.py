@@ -487,6 +487,7 @@ from .stock_study_readiness_repository import (
 from .intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload, intraday_services_status_payload_async as read_intraday_services_status_payload_async
 from .routers.provider_status import build_provider_status_router
 from .routers.longhu_reads import build_longhu_reads_router
+from .routers.licensed_stock_api import build_licensed_stock_api_router
 from .routers.research_readiness import build_research_readiness_router
 from .routers.intraday_status import build_intraday_status_router
 from .routers.analyst_reads import build_analyst_reads_router
@@ -495,7 +496,7 @@ from .routers.analyst_action_outcomes import build_analyst_action_outcomes_route
 from .routers.analyst_skill_reads import build_analyst_skill_reads_router
 from .routers.analyst_research_reads import build_analyst_research_reads_router
 from .routers.automation_reads import build_automation_reads_router
-from .security import remote_archive_sync_bearer_allowed, write_access_allowed
+from .security import licensed_stock_read_allowed, remote_archive_sync_bearer_allowed, write_access_allowed
 from .automation_run_repository import run_recorded
 from .daily_strategy_summary_service import (
     build_daily_strategy_summary as build_daily_strategy_summary_projection,
@@ -2621,6 +2622,15 @@ async def intraday_longhu_minutes(symbol: str) -> list[dict[str, Any]]:
     )
 
 
+async def shared_stock_api_call(request: dict[str, Any]) -> dict[str, Any]:
+    """Execute or forward one unrestricted documented stock-data call."""
+    if not longhu_vendor_configured():
+        raise RuntimeError("longhu_not_configured")
+    return await run_akshare_blocking(
+        lambda: longhu_intraday_source().raw_call(request), timeout_seconds=600,
+    )
+
+
 def intraday_watch_priority_key(row: dict[str, Any]) -> tuple[int, int, str]:
     """Keep the small verified-minute budget on explicitly enabled research watches."""
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
@@ -4283,6 +4293,11 @@ app.include_router(build_longhu_reads_router(
     quotes=shared_longhu_quotes,
     minutes=intraday_longhu_minutes,
 ))
+app.include_router(build_licensed_stock_api_router(
+    configured=longhu_vendor_configured,
+    shared_read_key=lambda: os.getenv("QUANT_SHARED_READ_API_KEY", ""),
+    call=shared_stock_api_call,
+))
 app.include_router(build_research_readiness_router(
     db, historical_estimate_from_db, feature_readiness_state, historical_replay_readiness, async_db,
 ))
@@ -4377,7 +4392,14 @@ app.include_router(build_market_result_reads_router(
 async def require_quant_write_key(request: Request, call_next: Any) -> Any:
     configured_key = os.getenv("QUANT_WRITE_API_KEY", "").strip()
     supplied_key = request.headers.get("X-Quant-Write-Key")
-    if not write_access_allowed(request.method, supplied_key, configured_key) and not remote_archive_sync_bearer_allowed(request):
+    licensed_read = licensed_stock_read_allowed(
+        request, os.getenv("QUANT_SHARED_READ_API_KEY", ""),
+    )
+    if (
+        not write_access_allowed(request.method, supplied_key, configured_key)
+        and not remote_archive_sync_bearer_allowed(request)
+        and not licensed_read
+    ):
         return JSONResponse(status_code=401, content={"detail": "valid X-Quant-Write-Key is required for write operations"})
     return await call_next(request)
 

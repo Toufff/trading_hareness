@@ -24,6 +24,8 @@ from typing import Any, Iterable, Mapping, Protocol
 
 import requests
 
+from .licensed_stock_api import execute as execute_licensed_stock_api
+
 
 MAX_PAGE_SIZE = 300
 MAX_TENCENT_BATCH_SIZE = 80
@@ -202,6 +204,8 @@ class LonghuIntradaySource(Protocol):
 
     def stock_minutes(self, symbol: str) -> list[dict[str, Any]]: ...
 
+    def raw_call(self, request: Mapping[str, Any]) -> dict[str, Any]: ...
+
 
 class SharedLonghuReadSource:
     """Read normalized licensed evidence through the owner's gateway.
@@ -233,6 +237,16 @@ class SharedLonghuReadSource:
         if not isinstance(payload, dict):
             raise TypeError("shared Longhu gateway response must be an object")
         return payload
+
+    def _post(self, path: str, *, payload: Mapping[str, Any]) -> dict[str, Any]:
+        response = self._session.post(
+            f"{self.base_url}{path}", json=dict(payload), timeout=max(180.0, self.timeout_seconds),
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict):
+            raise TypeError("shared stock API response must be an object")
+        return result
 
     def watch_quotes(
         self, symbols: Iterable[str], *, max_symbols: int = 24,
@@ -270,6 +284,10 @@ class SharedLonghuReadSource:
         if not rows:
             raise RuntimeError(f"shared Longhu minute returned no rows for {normalized}")
         return rows
+
+    def raw_call(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Forward the complete documented call contract to the owner gateway."""
+        return self._post("/licensed/stock-api/call", payload=request)
 
 
 def intraday_source() -> LonghuIntradaySource:
@@ -375,6 +393,20 @@ class LonghuVendorSource:
                     time.sleep(0.35 * (attempt + 1))
         assert error is not None
         raise error
+
+    def raw_call(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Call any documented stock endpoint through the owner-held identity."""
+        batch = request.get("batch") if isinstance(request.get("batch"), Mapping) else {}
+        return execute_licensed_stock_api(
+            session=self._session,
+            config=self.config,
+            target_key=str(request.get("target") or ""),
+            path=str(request["path"]) if request.get("path") is not None else None,
+            params=request.get("params") if isinstance(request.get("params"), Mapping) else {},
+            batch_param=str(batch.get("param")) if batch.get("param") else None,
+            batch_values=batch.get("values") if isinstance(batch.get("values"), list) else (),
+            batch_separator=str(batch.get("separator") or ","),
+        )
 
     def stock_quote(self, symbol: str) -> dict[str, Any]:
         """Fetch one exchange-timestamped quote from the licensed endpoint."""

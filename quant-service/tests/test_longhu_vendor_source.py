@@ -117,6 +117,34 @@ class LonghuVendorSourceTests(unittest.TestCase):
         self.assertTrue(status["truncated"])
         self.assertEqual(status["transport"], "shared_gateway")
 
+    def test_shared_gateway_forwards_full_stock_api_contract(self):
+        source = SharedLonghuReadSource("http://owner.test", "read-key")
+
+        class Response:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return {"target": "longhu_history", "calls": 3, "pages": []}
+
+        calls = []
+
+        def post(url, *, json, timeout):
+            calls.append((url, json, timeout))
+            return Response()
+
+        source._session.post = post
+        result = source.raw_call({
+            "target": "longhu_history",
+            "params": {"a": "GGList_JGCC", "c": "ZhuLiChiCang", "st": 650},
+        })
+        self.assertEqual(result["calls"], 3)
+        self.assertEqual(calls[0][0], "http://owner.test/licensed/stock-api/call")
+        self.assertEqual(calls[0][1]["params"]["st"], 650)
+        self.assertGreaterEqual(calls[0][2], 180.0)
+
     def test_plate_list_paginates_larger_logical_reads_in_300_row_batches(self):
         source = LonghuVendorSource(LonghuVendorConfig(token="t", user_id="u", device_id="d"))
         offsets = []

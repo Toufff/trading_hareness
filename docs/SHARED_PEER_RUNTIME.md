@@ -5,6 +5,10 @@ This deployment keeps the authoritative trading database on the owner's
 same research code in an isolated Docker environment. It does not expose a
 broker trading path and it does not copy the LonghuVIP upstream credential.
 
+The complete peer-facing stock-data contract, including all documented
+actions and automatic 300-record physical batching, is in
+[`SHARED_STOCK_DATA_API.md`](SHARED_STOCK_DATA_API.md).
+
 ## Topology
 
 ```mermaid
