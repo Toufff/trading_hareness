@@ -12,6 +12,8 @@ def build_scan_source_status(
     all_a_rows: list[dict[str, Any]],
     fresh_watch_rows: list[dict[str, Any]],
     sina_watch_rows: list[dict[str, Any]],
+    licensed_watch_rows: list[dict[str, Any]],
+    licensed_watch_status: dict[str, Any],
     eastmoney_watch_flow_rows: list[dict[str, Any]],
     eastmoney_watch_flow_status: dict[str, Any],
     derived_flow_status: dict[str, Any],
@@ -39,6 +41,15 @@ def build_scan_source_status(
         str(row.get("ts_code") or "") for row in sina_watch_rows
         if str(row.get("ts_code") or "") in selected_symbols
     }
+    licensed_watch_symbols = {
+        str(row.get("ts_code") or "") for row in licensed_watch_rows
+        if str(row.get("ts_code") or "") in selected_symbols
+    }
+    fresh_licensed_watch_count = sum(
+        1 for symbol in licensed_watch_symbols
+        if (quotes.get(symbol) or {}).get("price_source") == "longhuvip_watch_quote"
+        and ((quotes.get(symbol) or {}).get("price_freshness") or {}).get("status") == "fresh"
+    )
     all_a_watch_symbols = {
         symbol for symbol in selected_symbols
         if (quotes.get(symbol) or {}).get("price_source") == "fuyao_ths_all_a_snapshot"
@@ -69,6 +80,13 @@ def build_scan_source_status(
             "sina_fallback_watch_quote_symbols": len(sina_watch_symbols),
             "missing_direct_watch_quote_symbols": len(selected_symbols) - direct_watch_count,
             "sina_watch_quote_rows": len(sina_watch_rows),
+        },
+        "longhuvip_watch": {
+            **licensed_watch_status,
+            "matched_symbols": len(licensed_watch_symbols),
+            "decision_eligible_symbols": fresh_licensed_watch_count,
+            "fallback_policy": "tencent_then_sina_when_licensed_quote_is_missing_or_stale",
+            "scope": "explicit_watchlist_only",
         },
         "eastmoney_watch_flow": {
             **eastmoney_watch_flow_status,

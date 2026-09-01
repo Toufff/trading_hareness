@@ -52,6 +52,11 @@ EVIDENCE_CONTRACTS: Final[dict[str, EvidenceContract]] = {
         scope="explicit_watchlist_only", cross_sectional=False, decision_eligible=True,
         semantics="same_scan_batched_watch_price_with_exchange_timestamp",
     ),
+    "longhuvip_watch_quote": EvidenceContract(
+        key="longhuvip_watch_quote", provider_key="longhuvip", capability="stock_quote",
+        scope="explicit_watchlist_only", cross_sectional=False, decision_eligible=True,
+        semantics="licensed_same_scan_watch_price_with_exchange_timestamp_not_level2_order_cancellation",
+    ),
     "sina_watch_quote": EvidenceContract(
         key="sina_watch_quote", provider_key="sina_free", capability="realtime_quote",
         scope="explicit_watchlist_only", cross_sectional=False, decision_eligible=False,

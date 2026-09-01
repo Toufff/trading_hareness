@@ -1,0 +1,96 @@
+name: trading-hareness-peer
+
+services:
+  db-tunnel:
+    build:
+      context: ../..
+      dockerfile: deploy/shared-peer/Dockerfile.ssh-tunnel
+    restart: unless-stopped
+    environment:
+      PEER_SSH_HOST: ${PEER_SSH_HOST:?Set PEER_SSH_HOST}
+      PEER_SSH_PORT: ${PEER_SSH_PORT:-3535}
+      PEER_SSH_USER: ${PEER_SSH_USER:-stockpeer}
+      REMOTE_DB_PORT: ${REMOTE_DB_PORT:-15432}
+      REMOTE_API_PORT: ${REMOTE_API_PORT:-15681}
+    volumes:
+      - ${PEER_SSH_KEY_PATH:?Set PEER_SSH_KEY_PATH}:/run/secrets/peer_ssh_key:ro
+      - ${PEER_KNOWN_HOSTS_PATH:?Set PEER_KNOWN_HOSTS_PATH}:/run/secrets/known_hosts:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5432 && nc -z 127.0.0.1 5681"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  quant-research:
+    build:
+      context: ../..
+      dockerfile: quant-service/Dockerfile.peer
+      additional_contexts:
+        wheelhouse: ${PEER_WHEELHOUSE_PATH:?Set PEER_WHEELHOUSE_PATH}
+    restart: unless-stopped
+    depends_on:
+      db-tunnel:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${PEER_QUANT_PORT:-15682}:8000"
+    environment:
+      PGHOST: db-tunnel
+      PGPORT: 5432
+      PGDATABASE: ${PEER_QUANT_DATABASE:-trading_hareness}
+      PGUSER: ${PEER_DB_USER:-stock_peer}
+      PGPASSWORD: ${PEER_DB_PASSWORD:?Set PEER_DB_PASSWORD}
+      QUANT_DATA_DIR: /var/lib/quant
+      QUANT_LEGACY_SCHEMA_BOOTSTRAP: "false"
+      QUANT_BACKGROUND_TASKS_ENABLED: ${PEER_BACKGROUND_TASKS_ENABLED:-false}
+      QUANT_RUNTIME_PROFILE: research
+      QUANT_WRITE_API_KEY: ${PEER_QUANT_WRITE_API_KEY:?Set PEER_QUANT_WRITE_API_KEY}
+      QUANT_SHARED_READ_API_KEY: ${QUANT_SHARED_READ_API_KEY:?Set QUANT_SHARED_READ_API_KEY}
+      QUANT_SHARED_READ_API_BASE_URL: http://db-tunnel:5681
+      NO_PROXY: "*"
+      TZ: Asia/Shanghai
+    volumes:
+      - peer_quant_data:/var/lib/quant
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=3).read()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.33.7
+    profiles: ["n8n"]
+    restart: unless-stopped
+    depends_on:
+      db-tunnel:
+        condition: service_healthy
+      quant-research:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${PEER_N8N_PORT:-15678}:5678"
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: db-tunnel
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${PEER_N8N_DATABASE:-trading_hareness_peer_n8n}
+      DB_POSTGRESDB_USER: ${PEER_DB_USER:-stock_peer}
+      DB_POSTGRESDB_PASSWORD: ${PEER_DB_PASSWORD:?Set PEER_DB_PASSWORD}
+      DB_POSTGRESDB_SCHEMA: public
+      N8N_ENCRYPTION_KEY: ${PEER_N8N_ENCRYPTION_KEY:?Set PEER_N8N_ENCRYPTION_KEY}
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      N8N_SECURE_COOKIE: "false"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_RUNNERS_MODE: internal
+      QUANT_SERVICE_URL: http://quant-research:8000
+      QUANT_WRITE_API_KEY: ${PEER_QUANT_WRITE_API_KEY:?Set PEER_QUANT_WRITE_API_KEY}
+      GENERIC_TIMEZONE: Asia/Shanghai
+      TZ: Asia/Shanghai
+    volumes:
+      - peer_n8n_data:/home/node/.n8n
+
+volumes:
+  peer_quant_data:
+  peer_n8n_data:

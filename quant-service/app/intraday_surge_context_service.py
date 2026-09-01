@@ -26,6 +26,9 @@ async def capture(
     run_database: Callable[..., Awaitable[Any]],
     safe_error: Callable[[str, int], str],
     handled_errors: tuple[type[BaseException], ...],
+    provider_key: str = "tencent_free",
+    feature_source: str = "tencent_free_minute",
+    check_provider_circuit: bool = True,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Capture a capped target/peer basket with a 45-second feature cache."""
     requested: list[str] = []
@@ -87,7 +90,7 @@ async def capture(
                 cached_errors[symbol] = cached[2]
         else:
             missing.append(symbol)
-    if missing and capability in await open_capabilities("tencent_free", [capability]):
+    if missing and check_provider_circuit and capability in await open_capabilities(provider_key, [capability]):
         errors = {**cached_errors, **{symbol: "provider health circuit is open; upstream request skipped" for symbol in missing}}
         return cached_features, {
             "requested": requested, "requested_total": requested_total,
@@ -102,7 +105,7 @@ async def capture(
         try:
             async with semaphore:
                 rows = await asyncio.wait_for(fetch_minutes(symbol), timeout=6)
-            return symbol, minute_features(rows, source="tencent_free_minute"), None
+            return symbol, minute_features(rows, source=feature_source), None
         except handled_errors as error:
             return symbol, None, str(error)[:240]
 
@@ -154,6 +157,8 @@ async def capture(
         },
         "deadline_exceeded_symbols": sorted(tasks[task] for task in pending),
         "provider_status": "completed" if fresh_completed else "failed" if fresh_errors else "cached",
+        "provider": provider_key,
+        "feature_source": feature_source,
     }
 
 

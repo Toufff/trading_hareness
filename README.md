@@ -11,6 +11,11 @@ contracts and personal decision dashboard are documented in
 [docs/STOCK_BRAIN_MIGRATION.md](docs/STOCK_BRAIN_MIGRATION.md). The migration
 never exposes a broker order path and does not import legacy action-card plans.
 
+The optional collaborator runtime—G-drive PostgreSQL authority, loopback-only
+SSH relay, rootless Docker boundary, Longhu licensed-read gateway, candidate
+migration and rollback—is documented in
+[docs/SHARED_PEER_RUNTIME.md](docs/SHARED_PEER_RUNTIME.md).
+
 ## Windows stock platform runtime
 
 The migrated stock platform is code in this repository but keeps all large,

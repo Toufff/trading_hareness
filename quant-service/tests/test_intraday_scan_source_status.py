@@ -12,7 +12,8 @@ class IntradayScanSourceStatusTests(unittest.TestCase):
                 "000002.SZ": {"price_source": "fuyao_ths_all_a_snapshot", "price_freshness": {"status": "fresh"}},
             },
             all_a_rows=[{"symbol": "000001.SZ"}], fresh_watch_rows=[{"ts_code": "000001.SZ"}],
-            sina_watch_rows=[{"ts_code": "000002.SZ"}], eastmoney_watch_flow_rows=[],
+            sina_watch_rows=[{"ts_code": "000002.SZ"}], licensed_watch_rows=[],
+            licensed_watch_status={"status": "disabled"}, eastmoney_watch_flow_rows=[],
             eastmoney_watch_flow_status={"status": "unavailable", "scope": "explicit_watchlist_only"},
             derived_flow_status={"status": "fresh", "derived_symbols": 2},
             all_a_snapshot_status={"status": "cached", "age_seconds": 12}, surge_source={"provider_status": "completed"},
@@ -34,6 +35,7 @@ class IntradayScanSourceStatusTests(unittest.TestCase):
     def test_no_direct_or_all_a_rows_is_explicitly_unavailable(self):
         status = build_scan_source_status(
             selected_symbols=["000001.SZ"], quotes={}, all_a_rows=[], fresh_watch_rows=[], sina_watch_rows=[],
+            licensed_watch_rows=[], licensed_watch_status={"status": "disabled"},
             eastmoney_watch_flow_rows=[{"ts_code": "000001.SZ"}], all_a_snapshot_status={"status": "unavailable"},
             eastmoney_watch_flow_status={"status": "fresh", "scope": "explicit_watchlist_only"},
             derived_flow_status={"status": "unavailable"},

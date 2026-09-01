@@ -100,6 +100,44 @@ class WatchQuoteCaptureTests(unittest.TestCase):
         self.assertEqual(capture.eastmoney_watch_flow_status["status"], "fresh")
         self.assertTrue(capture.eastmoney_watch_flow_status["research_confirmation_only"])
 
+    def test_licensed_quote_overlays_tencent_and_reports_independent_status(self):
+        async def all_a_snapshot():
+            return [], {"status": "unavailable"}
+
+        async def direct(*_args, **_kwargs):
+            return [{"symbol": "000001.SZ", "close": 10.0}]
+
+        async def licensed(symbols):
+            self.assertEqual(symbols, ["000001.SZ"])
+            return ([{"symbol": "000001.SZ", "price": 10.2}],
+                    {"status": "completed", "received": 1})
+
+        async def empty(*_args, **_kwargs):
+            return []
+
+        calls = []
+        dependencies = self.dependencies(
+            all_a_snapshot=all_a_snapshot, tencent_watch_quotes=direct,
+            sina_quotes=empty, eastmoney_watch_flows=empty, calls=calls,
+        )
+
+        def merge_licensed(quotes, rows):
+            calls.append("licensed_prices")
+            for row in rows:
+                quotes.setdefault(row["symbol"], {"symbol": row["symbol"]})["price_source"] = "longhuvip_watch_quote"
+
+        dependencies = dataclasses.replace(
+            dependencies, licensed_watch_quotes=licensed, merge_licensed_prices=merge_licensed,
+            licensed_quote_errors=(ValueError,),
+        )
+        capture = asyncio.run(capture_watch_quotes(
+            ["000001.SZ"], datetime(2026, 8, 22, 1, tzinfo=timezone.utc), 20.0, dependencies,
+        ))
+        self.assertEqual(capture.quotes["000001.SZ"]["price_source"], "longhuvip_watch_quote")
+        self.assertEqual(capture.licensed_watch_status["status"], "completed")
+        self.assertEqual(capture.licensed_watch_rows[0]["price"], 10.2)
+        self.assertIn("licensed_prices", calls)
+
     def test_keeps_all_a_failure_separate_from_parallel_eastmoney_watch_flow(self):
         async def all_a_snapshot():
             raise ExecutorSaturatedError("public executor full")

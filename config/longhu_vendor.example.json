@@ -1,0 +1,11 @@
+{
+  "token": "",
+  "user_id": "",
+  "device_id": "",
+  "version": "5.20.0.2",
+  "page_size": 300,
+  "plate_page_size": 60,
+  "timeout_seconds": 20,
+  "retries": 3,
+  "workers": 12
+}

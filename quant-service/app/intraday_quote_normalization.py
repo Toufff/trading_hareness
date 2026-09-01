@@ -11,6 +11,47 @@ from zoneinfo import ZoneInfo
 _SYMBOL = re.compile(r"\d{6}\.(SH|SZ|BJ)")
 
 
+def merge_longhu_watch_quotes(
+    quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]], *, number: Callable[[Any], float | None],
+) -> dict[str, dict[str, Any]]:
+    """Overlay licensed watch quotes while preserving independently sourced flow.
+
+    Longhu is the preferred direct price source when its exchange timestamp is
+    present.  A malformed licensed row is ignored, leaving Tencent/Sina as the
+    existing fallback path.
+    """
+    for row in rows:
+        symbol = str(row.get("ts_code") or "")
+        price, pre_close = number(row.get("price")), number(row.get("pre_close"))
+        if not _SYMBOL.fullmatch(symbol) or price is None or price <= 0:
+            continue
+        existing = dict(quotes.get(symbol) or {"symbol": symbol, "name": row.get("name"), "raw": {}})
+        existing.update({
+            "name": row.get("name") or existing.get("name"),
+            "price": price,
+            "pct_change": (
+                round((price / pre_close - 1) * 100, 5)
+                if pre_close and pre_close > 0 else number(row.get("pct_change"))
+            ),
+            "price_source": "longhuvip_watch_quote",
+            # GetStockPanKou is a direct quote, not proof of Level-2 depth or
+            # order-cancellation evidence.
+            "price_observed_from_depth": False,
+            "price_trade_date": row.get("trade_date"),
+            "price_trade_time": row.get("trade_time"),
+        })
+        for key in ("volume", "amount", "turnover_rate", "volume_ratio"):
+            value = number(row.get(key))
+            if value is not None:
+                existing[key] = value
+        existing["raw"] = {
+            **(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}),
+            "longhu_watch_quote": row,
+        }
+        quotes[symbol] = existing
+    return quotes
+
+
 def merge_watch_quote_prices(
     quotes: dict[str, dict[str, Any]], depth_rows: list[dict[str, Any]], *, number: Callable[[Any], float | None],
 ) -> dict[str, dict[str, Any]]:
@@ -87,6 +128,8 @@ def observation_source(quote: dict[str, Any] | None) -> str:
         return "sina_free"
     if source == "tencent_batched_watch_quote":
         return "tencent_free"
+    if source == "longhuvip_watch_quote":
+        return "longhuvip"
     if source == "fuyao_ths_all_a_snapshot":
         return "fuyao_ths"
     return "unknown_realtime_source"
@@ -151,5 +194,6 @@ def annotate_flow_percentiles(quotes: dict[str, dict[str, Any]]) -> None:
 
 __all__ = [
     "annotate_flow_percentiles", "exchange_time_status", "merge_eastmoney_watch_flows",
-    "merge_sina_watch_quotes", "merge_watch_quote_prices", "observation_source", "quote_from_fuyao",
+    "merge_longhu_watch_quotes", "merge_sina_watch_quotes", "merge_watch_quote_prices",
+    "observation_source", "quote_from_fuyao",
 ]

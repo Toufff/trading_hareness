@@ -219,6 +219,12 @@ async def run_watchlist_scan(request: Any, dependencies: IntradayWatchlistScanDe
     source_status = dependencies.build_source_status(
         selected_symbols=selected_symbols, quotes=quote_capture.quotes, all_a_rows=quote_capture.all_a_rows,
         fresh_watch_rows=quote_capture.fresh_watch_rows, sina_watch_rows=quote_capture.sina_watch_rows,
+        licensed_watch_rows=getattr(quote_capture, "licensed_watch_rows", []),
+        licensed_watch_status=getattr(
+            quote_capture,
+            "licensed_watch_status",
+            {"status": "skipped", "reason": "licensed capture not supplied"},
+        ),
         eastmoney_watch_flow_rows=quote_capture.eastmoney_watch_flow_rows,
         eastmoney_watch_flow_status=quote_capture.eastmoney_watch_flow_status,
         derived_flow_status=quote_capture.derived_flow_status,

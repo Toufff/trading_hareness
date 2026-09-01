@@ -8,11 +8,11 @@
 | Item | Current value |
 |---|---:|
 | Composition root | `quant-service/app/main.py` |
-| `main.py` top-level functions | 427 |
-| Python modules under `app/` | 382 |
-| HTTP router modules | 39 |
-| Alembic migrations | 79 |
-| Frontend source files | 35 |
+| `main.py` top-level functions | 433 |
+| Python modules under `app/` | 395 |
+| HTTP router modules | 40 |
+| Alembic migrations | 83 |
+| Frontend source files | 37 |
 
 ## Domain naming inventory
 
@@ -23,7 +23,7 @@ New behaviour should be owned by an existing domain package/owner.
 |---|---:|
 | `intraday` | 64 |
 | `async` | 41 |
-| `strategy` | 18 |
+| `strategy` | 19 |
 | `analyst` | 17 |
 | `market` | 13 |
 | `post` | 13 |
@@ -61,6 +61,7 @@ New behaviour should be owned by an existing domain package/owner.
 - `routers/intraday_status.py`
 - `routers/l2_research.py`
 - `routers/limit_linkage_mining_reads.py`
+- `routers/longhu_reads.py`
 - `routers/market_actions.py`
 - `routers/market_flow_reads.py`
 - `routers/market_result_reads.py`
@@ -102,6 +103,8 @@ New behaviour should be owned by an existing domain package/owner.
 - `frontend/src/composables/usePolling.test.ts`
 - `frontend/src/composables/usePolling.ts`
 - `frontend/src/dashboard-context.ts`
+- `frontend/src/dashboard-navigation.test.ts`
+- `frontend/src/dashboard-navigation.ts`
 - `frontend/src/main.ts`
 - `frontend/src/style.css`
 - `frontend/src/views/FeishuWorkbenchView.vue`

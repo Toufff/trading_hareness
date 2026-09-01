@@ -272,6 +272,11 @@ services:
       # to the Feishu adapter or any workflow definition.
       FUYAO_API_KEY: ${FUYAO_API_KEY:-}
       HITHINK_FINANCE_API_KEY: ${HITHINK_FINANCE_API_KEY:-}
+      # Licensed Longhu credentials remain in an ignored host file.  Business
+      # code only sees the normalized adapter and never embeds the token.
+      QUANT_LONGHU_CONFIG_PATH: /run/secrets/longhu_vendor.json
+      QUANT_LONGHU_INTRADAY_MAX_SYMBOLS: ${QUANT_LONGHU_INTRADAY_MAX_SYMBOLS:-24}
+      QUANT_SHARED_READ_API_KEY: ${QUANT_SHARED_READ_API_KEY:-}
       TUSHARE_PRIMARY_TOKEN: ${TUSHARE_PRIMARY_TOKEN:-}
       TUSHARE_PRIMARY_API_URL: ${TUSHARE_PRIMARY_API_URL:-}
       TUSHARE_SUPER_TOKEN: ${TUSHARE_SUPER_TOKEN:-}
@@ -353,6 +358,7 @@ services:
     volumes:
       - quant_data:/var/lib/quant
       - ./certs/market-review-api.pem:/opt/market-review-api.pem:ro
+      - ${QUANT_LONGHU_CONFIG_HOST_PATH:-./config/longhu_vendor.example.json}:/run/secrets/longhu_vendor.json:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
       interval: 15s

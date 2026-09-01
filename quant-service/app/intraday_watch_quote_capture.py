@@ -54,6 +54,8 @@ class WatchQuoteCapture:
     eastmoney_watch_flow_status: dict[str, Any]
     derived_flow_status: dict[str, Any]
     latency_ms: int
+    licensed_watch_rows: list[dict[str, Any]]
+    licensed_watch_status: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,14 @@ class WatchQuoteCaptureDependencies:
     watch_quote_errors: tuple[type[Exception], ...]
     watch_flow_reference_errors: tuple[type[Exception], ...]
     all_a_snapshot_errors: tuple[type[Exception], ...]
+    licensed_watch_quotes: Callable[
+        [list[str]], Awaitable[tuple[list[dict[str, Any]], dict[str, Any]]]
+    ] | None = None
+    merge_licensed_prices: Callable[
+        [dict[str, dict[str, Any]], list[dict[str, Any]]], Any
+    ] | None = None
+    licensed_quote_errors: tuple[type[Exception], ...] = ()
+    licensed_quote_timeout_seconds: float = 4.0
 
 
 async def _apply_derived_flow_metrics(
@@ -173,6 +183,12 @@ async def capture_watch_quotes(
     # provider calls instead of extending the scan budget.
     reference_task = asyncio.create_task(dependencies.watch_flow_reference(symbols, observed_at))
     reference_task.add_done_callback(dependencies.consume_background_exception)
+    licensed_task = (
+        asyncio.create_task(dependencies.licensed_watch_quotes(symbols))
+        if dependencies.licensed_watch_quotes is not None else None
+    )
+    if licensed_task is not None:
+        licensed_task.add_done_callback(dependencies.consume_background_exception)
     try:
         fresh_watch_rows = await _batched_provider_fetch(
             dependencies.tencent_watch_quotes, symbols, batch_size=40,
@@ -220,6 +236,27 @@ async def capture_watch_quotes(
         dependencies.annotate_flow_provenance(eastmoney_quotes, eastmoney_watch_flow_status)
     dependencies.merge_watch_prices(quotes, fresh_watch_rows)
     dependencies.merge_sina_prices(quotes, sina_watch_rows)
+    licensed_watch_rows: list[dict[str, Any]] = []
+    licensed_watch_status = materialize_evidence_status(
+        "longhuvip_watch_quote", {"status": "disabled", "requested": len(symbols)},
+    )
+    if licensed_task is not None:
+        try:
+            licensed_watch_rows, raw_licensed_status = await asyncio.wait_for(
+                asyncio.shield(licensed_task), timeout=dependencies.licensed_quote_timeout_seconds,
+            )
+        except (asyncio.TimeoutError, *dependencies.licensed_quote_errors) as error:
+            licensed_watch_status = materialize_evidence_status(
+                "longhuvip_watch_quote",
+                {"status": "unavailable", "requested": len(symbols),
+                 "error": dependencies.safe_error(str(error), 300)},
+            )
+        else:
+            licensed_watch_status = materialize_evidence_status(
+                "longhuvip_watch_quote", raw_licensed_status,
+            )
+            if dependencies.merge_licensed_prices is not None:
+                dependencies.merge_licensed_prices(quotes, licensed_watch_rows)
     # Deliberately after the price merges: when the all-A snapshot fails
     # outright these merges are what put the watch basket into ``quotes`` at
     # all, and without them the volume fallback would have nothing to attach to.
@@ -237,6 +274,8 @@ async def capture_watch_quotes(
         eastmoney_watch_flow_status=eastmoney_watch_flow_status,
         derived_flow_status=derived_flow_status,
         latency_ms=round((dependencies.now() - started_at) * 1000),
+        licensed_watch_rows=licensed_watch_rows,
+        licensed_watch_status=licensed_watch_status,
     )
 
 

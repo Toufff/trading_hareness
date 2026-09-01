@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Protocol
 
 import requests
 
@@ -67,6 +67,83 @@ def normalize_stock_symbol(value: Any) -> str | None:
     return None
 
 
+def _stock_code(value: Any) -> str | None:
+    symbol = normalize_stock_symbol(value)
+    return symbol.split(".", 1)[0] if symbol else None
+
+
+def parse_stock_snapshot_payload(payload: Mapping[str, Any], symbol: str) -> dict[str, Any] | None:
+    """Normalize one ``GetStockPanKou`` response for the live watch pipeline.
+
+    The vendor response exposes an exchange timestamp.  Keeping that timestamp
+    separate from our receipt time lets the existing freshness gate reject a
+    delayed response instead of treating a successful HTTP request as fresh.
+    """
+    normalized = normalize_stock_symbol(symbol)
+    code = _stock_code(symbol)
+    real = payload.get("real") if isinstance(payload.get("real"), Mapping) else {}
+    price = _number(real.get("last_px"))
+    if not normalized or not code or _stock_code(payload.get("code")) != code or price is None or price <= 0:
+        return None
+    day = "".join(character for character in str(payload.get("day") or "") if character.isdigit())[:8]
+    quote_time = "".join(character for character in str(real.get("time") or "") if character.isdigit())[:6]
+    return {
+        "ts_code": normalized,
+        "name": str(payload.get("name") or normalized),
+        "price": price,
+        "pre_close": _number(payload.get("preclose_px")),
+        "open": _number(real.get("open_px")),
+        "high": _number(real.get("high_px")),
+        "low": _number(real.get("low_px")),
+        "pct_change": _number(real.get("px_change_rate")),
+        "volume": _number(real.get("total_amount")),
+        "amount": _number(real.get("total_turnover")),
+        "turnover_rate": _number(real.get("turnover_ratio")),
+        "volume_ratio": _number(real.get("vol_ratio")),
+        "amplitude": _number(real.get("amplitude")),
+        "pe_ttm": _number(real.get("TTMPeRate")),
+        "pb": _number(real.get("dyn_pb_rate")),
+        "trade_date": day or None,
+        "trade_time": f"{day}{quote_time}" if len(day) == 8 and len(quote_time) == 6 else None,
+        "raw": {"provider": "longhuvip", "action": "GetStockPanKou"},
+    }
+
+
+def parse_stock_minute_payload(payload: Mapping[str, Any], symbol: str) -> list[dict[str, Any]]:
+    """Normalize per-minute Longhu rows without inventing Level-2 semantics."""
+    normalized = normalize_stock_symbol(symbol)
+    if not normalized:
+        return []
+    rows: list[dict[str, Any]] = []
+    cumulative_volume = 0.0
+    for raw in payload.get("trend") or []:
+        if not isinstance(raw, list) or len(raw) < 4:
+            continue
+        minute = str(raw[0] or "").replace(":", "")[:4]
+        price = _number(raw[1])
+        volume_lot = max(0.0, _number(raw[3]) or 0.0)
+        if not re.fullmatch(r"\d{4}", minute) or price is None or price <= 0:
+            continue
+        cumulative_volume += volume_lot
+        average_price = _number(raw[2])
+        rows.append({
+            "symbol": normalized,
+            "time": minute,
+            "close": price,
+            "vwap": average_price,
+            "volume_lot": volume_lot,
+            "vol": volume_lot,
+            "amount": round((average_price or price) * volume_lot * 100, 4),
+            "cumulative_volume_lot": cumulative_volume,
+            "cumulative_segment": 0 if minute <= "1130" else 1,
+            "is_complete": True,
+            "source": "longhuvip:GetStockTrendIncremental",
+        })
+    if rows:
+        rows[-1]["is_complete"] = False
+    return rows
+
+
 @dataclass(frozen=True)
 class LonghuVendorConfig:
     token: str
@@ -105,11 +182,103 @@ class LonghuVendorConfig:
 
 
 def configured(path: str | Path | None = None) -> bool:
+    if os.getenv("QUANT_SHARED_READ_API_BASE_URL", "").strip() and os.getenv(
+        "QUANT_SHARED_READ_API_KEY", ""
+    ).strip():
+        return True
     try:
         LonghuVendorConfig.load(path)
         return True
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
+
+
+class LonghuIntradaySource(Protocol):
+    """Small contract shared by the local licensed and remote gateway clients."""
+
+    def watch_quotes(
+        self, symbols: Iterable[str], *, max_symbols: int = 24,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]: ...
+
+    def stock_minutes(self, symbol: str) -> list[dict[str, Any]]: ...
+
+
+class SharedLonghuReadSource:
+    """Read normalized licensed evidence through the owner's gateway.
+
+    The upstream Longhu credential never leaves the owner's machine. A peer
+    only receives normalized rows and cannot widen one logical request beyond
+    the same 300-symbol ceiling enforced by the local adapter.
+    """
+
+    def __init__(
+        self, base_url: str | None = None, read_key: str | None = None,
+        *, timeout_seconds: float = 30.0,
+    ) -> None:
+        self.base_url = str(base_url or os.getenv("QUANT_SHARED_READ_API_BASE_URL") or "").rstrip("/")
+        self.read_key = str(read_key or os.getenv("QUANT_SHARED_READ_API_KEY") or "").strip()
+        if not self.base_url or not self.read_key:
+            raise ValueError("shared Longhu base URL and read key are required")
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self._session = requests.Session()
+        self._session.trust_env = False
+        self._session.headers.update({"X-Quant-Read-Key": self.read_key, "Accept": "application/json"})
+
+    def _get(self, path: str, *, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        response = self._session.get(
+            f"{self.base_url}{path}", params=dict(params or {}), timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise TypeError("shared Longhu gateway response must be an object")
+        return payload
+
+    def watch_quotes(
+        self, symbols: Iterable[str], *, max_symbols: int = 24,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        limit = max(1, min(MAX_PAGE_SIZE, int(max_symbols)))
+        ordered = list(dict.fromkeys(
+            symbol for value in symbols if (symbol := normalize_stock_symbol(value)) is not None
+        ))
+        selected = ordered[:limit]
+        if not selected:
+            return [], {
+                "status": "completed", "requested": 0, "selected": 0, "received": 0,
+                "truncated": False, "max_symbols": limit, "errors": [],
+                "source": "shared-longhu-gateway",
+            }
+        payload = self._get("/licensed/longhu/quotes", params={"symbols": ",".join(selected)})
+        rows = [row for row in payload.get("rows") or [] if isinstance(row, dict)]
+        status = payload.get("source_status") if isinstance(payload.get("source_status"), dict) else {}
+        return rows, {
+            **status,
+            "requested": len(ordered),
+            "selected": len(selected),
+            "received": len(rows),
+            "truncated": len(ordered) > len(selected),
+            "max_symbols": limit,
+            "transport": "shared_gateway",
+        }
+
+    def stock_minutes(self, symbol: str) -> list[dict[str, Any]]:
+        normalized = normalize_stock_symbol(symbol)
+        if not normalized:
+            raise ValueError(f"unsupported Longhu stock symbol: {symbol}")
+        payload = self._get(f"/licensed/longhu/minutes/{normalized}")
+        rows = [row for row in payload.get("rows") or [] if isinstance(row, dict)]
+        if not rows:
+            raise RuntimeError(f"shared Longhu minute returned no rows for {normalized}")
+        return rows
+
+
+def intraday_source() -> LonghuIntradaySource:
+    """Prefer the shared gateway only when both endpoint and key are present."""
+    if os.getenv("QUANT_SHARED_READ_API_BASE_URL", "").strip() and os.getenv(
+        "QUANT_SHARED_READ_API_KEY", ""
+    ).strip():
+        return SharedLonghuReadSource()
+    return LonghuVendorSource()
 
 
 def parse_industry_stock_row(row: Any, trade_date: date, plate_id: str) -> dict[str, Any] | None:
@@ -206,6 +375,67 @@ class LonghuVendorSource:
                     time.sleep(0.35 * (attempt + 1))
         assert error is not None
         raise error
+
+    def stock_quote(self, symbol: str) -> dict[str, Any]:
+        """Fetch one exchange-timestamped quote from the licensed endpoint."""
+        code = _stock_code(symbol)
+        if not code:
+            raise ValueError(f"unsupported Longhu stock symbol: {symbol}")
+        payload = self._json(
+            "https://apphwhq.longhuvip.com/w1/api/index.php",
+            {"a": "GetStockPanKou", "c": "StockL2Data", "apiv": "w41", "StockID": code},
+        )
+        parsed = parse_stock_snapshot_payload(payload, symbol)
+        if parsed is None:
+            raise RuntimeError(f"Longhu quote missing or mismatched for {code}")
+        return parsed
+
+    def watch_quotes(self, symbols: Iterable[str], *, max_symbols: int = 24) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Fetch a bounded explicit watch basket; never widen to an all-A scan."""
+        limit = max(1, min(MAX_PAGE_SIZE, int(max_symbols)))
+        ordered = list(dict.fromkeys(
+            symbol for value in symbols if (symbol := normalize_stock_symbol(value)) is not None
+        ))
+        selected = ordered[:limit]
+        rows: dict[str, dict[str, Any]] = {}
+        errors: list[str] = []
+        with ThreadPoolExecutor(
+            max_workers=min(self.config.workers, len(selected) or 1), thread_name_prefix="longhu-watch",
+        ) as pool:
+            futures = {pool.submit(self.stock_quote, symbol): symbol for symbol in selected}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    rows[symbol] = future.result()
+                except Exception as error:  # one symbol must not abort the basket
+                    errors.append(f"{symbol}:{type(error).__name__}:{error}")
+        return [rows[symbol] for symbol in selected if symbol in rows], {
+            "status": "completed" if len(rows) == len(selected) else "partial" if rows else "failed",
+            "requested": len(ordered),
+            "selected": len(selected),
+            "received": len(rows),
+            "truncated": len(ordered) > len(selected),
+            "max_symbols": limit,
+            "errors": errors[:20],
+            "source": "longhuvip:GetStockPanKou",
+        }
+
+    def stock_minutes(self, symbol: str) -> list[dict[str, Any]]:
+        """Fetch the current session minute path for one explicit security."""
+        code = _stock_code(symbol)
+        if not code:
+            raise ValueError(f"unsupported Longhu stock symbol: {symbol}")
+        payload = self._json(
+            "https://apphwhq.longhuvip.com/w1/api/index.php",
+            {
+                "a": "GetStockTrendIncremental", "c": "StockL2Data", "apiv": "w41",
+                "Type": 1, "StockID": code,
+            },
+        )
+        rows = parse_stock_minute_payload(payload, symbol)
+        if not rows:
+            raise RuntimeError(f"Longhu minute returned no rows for {code}")
+        return rows
 
     def industry_plate_catalog(self) -> list[dict[str, Any]]:
         url = "https://apphq.longhuvip.com/w1/api/index.php"
@@ -363,7 +593,9 @@ class LonghuVendorSource:
 
 
 __all__ = [
-    "DEFAULT_CONFIG_PATH", "FLOW_CONVENTION", "LonghuVendorConfig", "LonghuVendorSource",
+    "DEFAULT_CONFIG_PATH", "FLOW_CONVENTION", "LonghuIntradaySource", "LonghuVendorConfig",
+    "LonghuVendorSource", "SharedLonghuReadSource", "intraday_source",
     "MAX_PAGE_SIZE", "MAX_TENCENT_BATCH_SIZE", "configured", "normalize_stock_symbol",
-    "parse_industry_stock_row", "parse_tencent_quote_text", "safe_page_size",
+    "parse_industry_stock_row", "parse_stock_minute_payload", "parse_stock_snapshot_payload",
+    "parse_tencent_quote_text", "safe_page_size",
 ]
