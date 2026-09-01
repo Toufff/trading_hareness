@@ -12,6 +12,9 @@ from fastapi import HTTPException
 from .automation_run_repository import fail_run, finish_run, start_or_resume_run
 
 
+POST_CLOSE_RECEIPT_VERSION = "post-close-refresh-v5"
+
+
 async def record_stage_with_receipt(
     name: str,
     trade_date: date,
@@ -22,20 +25,27 @@ async def record_stage_with_receipt(
     safe_error_detail: Callable[[str, int], str],
 ) -> Any:
     """Run one stage only when its durable receipt is not already complete."""
-    run_key = f"post-close-refresh:{name}:{trade_date}"
+    # The version belongs in the idempotency key, not only metadata.  A stage
+    # implementation change must not be hidden forever behind an older
+    # completed receipt.
+    run_key = f"{POST_CLOSE_RECEIPT_VERSION}:{name}:{trade_date}"
 
     def begin() -> dict[str, Any]:
         with db.transaction() as connection:
             return start_or_resume_run(
                 connection, task_key="post_close_refresh.stage", run_key=run_key,
                 cadence="daily", as_of_date=trade_date,
-                methodology_version="post-close-refresh-v1", input_summary={"stage": name},
+                methodology_version=POST_CLOSE_RECEIPT_VERSION, input_summary={"stage": name},
             )
 
     receipt = await run_database_blocking(begin, timeout_seconds=10)
     if receipt.get("status") == "completed":
         summary = dict(receipt.get("output_summary") or {})
-        summary.setdefault("status", "completed")
+        # Older receipts could persist ``{"status": null}`` when an action
+        # omitted its own status even though the durable run was completed.
+        # The receipt row is authoritative here; never let a null summary
+        # re-block every downstream stage on every later restart.
+        summary["status"] = "completed"
         summary["resumed_from_receipt"] = True
         return summary
 
@@ -69,7 +79,9 @@ def _finish_stage_receipt(db: Any, run_id: str, status: str, result: Any) -> Non
     with db.transaction() as connection:
         finish_run(
             connection, run_id, status=status,
-            output_summary={"status": result.get("status")} if isinstance(result, dict) else {},
+            # Persist the normalized status computed by the wrapper rather
+            # than trusting every legacy action to return one consistently.
+            output_summary={"status": status},
         )
 
 
@@ -178,4 +190,4 @@ async def run_refresh(
             print(f"post-close refresh lease release failed: {safe_error_detail(str(error), 300)}")
 
 
-__all__ = ["record_stage_with_receipt", "run_refresh"]
+__all__ = ["POST_CLOSE_RECEIPT_VERSION", "record_stage_with_receipt", "run_refresh"]

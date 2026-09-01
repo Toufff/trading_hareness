@@ -11,6 +11,38 @@ contracts and personal decision dashboard are documented in
 [docs/STOCK_BRAIN_MIGRATION.md](docs/STOCK_BRAIN_MIGRATION.md). The migration
 never exposes a broker order path and does not import legacy action-card plans.
 
+## Windows stock platform runtime
+
+The migrated stock platform is code in this repository but keeps all large,
+authoritative state on the local 12 TB data disk:
+
+```text
+G:\StockPlatform\
+  config\runtime.env
+  data\postgresql16\
+  data\imports\
+  data\raw\
+  runtime\postgresql-16.15\
+```
+
+PostgreSQL listens on `127.0.0.1:55432` only.  Do not move its cluster, raw
+evidence or bulk imports into the checkout, a Git history or the lightServer.
+The lightServer may host a static UI and authenticated reverse proxy, while the
+G-drive database remains authoritative.
+
+The local runtime is kept healthy by `scripts/windows/start-stock-dashboard.ps1`.
+It rejects non-`G:` platform roots, starts the database/API/adapter without visible
+terminals, and maintains a loopback-only reverse tunnel to LightServer. The
+server hosts only versioned frontend assets and an HTTPS reverse proxy; it never
+stores the authoritative portfolio or market database.
+
+The quant API defaults to `http://127.0.0.1:5681`.  The personal decision page
+separates the settled market review, exact CITIC holdings, qualified conditional
+buys and the human-readable research audit.  No route places, modifies or
+cancels broker orders.  See
+[docs/STOCK_BRAIN_MIGRATION.md](docs/STOCK_BRAIN_MIGRATION.md) for the contracts,
+endpoints and live cutover acceptance criteria.
+
 ## Start
 
 ```bash

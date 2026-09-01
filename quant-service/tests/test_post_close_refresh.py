@@ -51,19 +51,22 @@ class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
             return {"status": "completed", "stages": {}}
 
         dependencies = PostCloseRefreshDependencies(
-            database=object(), china_today=lambda: date(2026, 8, 21), provider_configs=lambda: providers,
+            database=object(), china_today=lambda: date(2026, 8, 21), longhu_configured=lambda: False,
+            longhu_close_context=lambda _day: {"status": "completed"}, provider_configs=lambda: providers,
             run_database=completed, reconcile_stale_fetch_runs=lambda *_: None,
             reprocess_remote_reports=lambda *_: None, sync_market_universe=completed,
             sync_full_market_daily=full_market_daily, sync_strategy_index_context=completed,
             build_market_snapshot=completed, load_core_symbols=load_core, akshare_probe=probe,
             sync_ths_industry_flow=completed, sync_ths_concept_flow=completed,
             rebuild_market_flow_features=lambda *_: None, refresh_pattern_sources=completed,
+            persist_settled_limit_pool=lambda *_: {"status": "completed"},
             run_pattern_mining=completed, sync_daily_controls=completed,
             sync_cninfo_announcements=announcements, run_board_report=completed,
             run_strategy_decision=completed, persist_close_review=lambda *_: None,
             recompute_outcomes=lambda *_: None, recompute_intraday_outcomes=lambda *_: None,
             recompute_scorecards=lambda *_: None, rebuild_analyst_research=lambda *_: None,
-            run_post_close_strategy=lambda *_: None, persist_watchlist_main_wave=lambda *_: None,
+            run_post_close_strategy=lambda *_: None, refresh_decision_research=lambda *_: {"status": "completed"},
+            persist_watchlist_main_wave=lambda *_: None,
             build_research_snapshot=lambda *_: None, run_orchestrator=orchestrator,
             record_stage=completed, lease_key="lease", lease_seconds=lambda: 60,
             acquire_lease=lambda *_: True, renew_lease=lambda *_: True, release_lease=lambda *_: None,
@@ -220,6 +223,33 @@ class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
             run_database_blocking=run_db, safe_error_detail=lambda value, _limit: value,
         )
         self.assertFalse(called)
+        self.assertTrue(result["resumed_from_receipt"])
+
+    async def test_completed_receipt_repairs_legacy_null_summary_status(self):
+        class Result:
+            def fetchone(self):
+                return {"run_id": "receipt-1", "status": "completed", "output_summary": {"status": None}}
+
+        class Connection:
+            def execute(self, *_args, **_kwargs):
+                return Result()
+
+        class Database:
+            def transaction(self):
+                class Context:
+                    def __enter__(self): return Connection()
+                    def __exit__(self, *_args): return False
+                return Context()
+
+        async def run_db(action, *args, **_kwargs):
+            return action(*args)
+
+        result = await record_stage_with_receipt(
+            "legacy", date(2026, 8, 21), lambda: self.fail("completed receipt reran"),
+            db=Database(), run_database_blocking=run_db,
+            safe_error_detail=lambda value, _limit: value,
+        )
+        self.assertEqual(result["status"], "completed")
         self.assertTrue(result["resumed_from_receipt"])
 
 

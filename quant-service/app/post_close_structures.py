@@ -13,7 +13,7 @@ from typing import Any
 from .research_prices import adjusted_bars
 
 
-POST_CLOSE_STRATEGY_MODEL_VERSION = "post-close-base-start-v1"
+POST_CLOSE_STRATEGY_MODEL_VERSION = "post-close-base-start-v3"
 
 
 def _number(value: Any) -> float | None:

@@ -10,6 +10,7 @@ global client.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import os
 from typing import AsyncIterator
 
 import httpx
@@ -21,16 +22,27 @@ _provider_clients: dict[tuple[str, str], httpx.AsyncClient] = {}
 _remote_archive_clients: dict[tuple[str, str], httpx.AsyncClient] = {}
 
 
+def public_proxy_url() -> str | None:
+    """Return only the explicitly delegated public-source proxy.
+
+    ``trust_env`` remains disabled so unrelated process proxy variables cannot
+    silently reroute provider traffic.  The Windows launcher may deliberately
+    copy its current HTTP proxy into this one scoped variable.
+    """
+    return (os.getenv("QUANT_PUBLIC_HTTP_PROXY") or "").strip() or None
+
+
 async def start_http_clients() -> None:
     """Start the process-owned pool once from the FastAPI lifespan."""
     global _alert_client, _public_client
     if _public_client is None or _public_client.is_closed:
-        _public_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(15.0),
-            trust_env=False,
-            follow_redirects=True,
-            limits=httpx.Limits(max_connections=12, max_keepalive_connections=8, keepalive_expiry=30.0),
-        )
+        options: dict[str, object] = {
+            "timeout": httpx.Timeout(15.0), "trust_env": False, "follow_redirects": True,
+            "limits": httpx.Limits(max_connections=12, max_keepalive_connections=8, keepalive_expiry=30.0),
+        }
+        if proxy := public_proxy_url():
+            options["proxy"] = proxy
+        _public_client = httpx.AsyncClient(**options)
     if _alert_client is None or _alert_client.is_closed:
         # Keep the local Feishu adapter separate from public-source capacity:
         # a slow public host must never exhaust the human-alert path.
@@ -65,10 +77,13 @@ async def public_http_client() -> AsyncIterator[httpx.AsyncClient]:
     if _public_client is not None and not _public_client.is_closed:
         yield _public_client
         return
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(15.0), trust_env=False, follow_redirects=True,
-        limits=httpx.Limits(max_connections=4, max_keepalive_connections=2, keepalive_expiry=5.0),
-    ) as temporary_client:
+    options: dict[str, object] = {
+        "timeout": httpx.Timeout(15.0), "trust_env": False, "follow_redirects": True,
+        "limits": httpx.Limits(max_connections=4, max_keepalive_connections=2, keepalive_expiry=5.0),
+    }
+    if proxy := public_proxy_url():
+        options["proxy"] = proxy
+    async with httpx.AsyncClient(**options) as temporary_client:
         yield temporary_client
 
 
@@ -154,6 +169,7 @@ def public_http_client_status() -> dict[str, int | bool]:
     client = _public_client
     return {
         "lifecycle_owned": client is not None and not client.is_closed,
+        "proxy_configured": public_proxy_url() is not None,
         "max_connections": 12,
         "max_keepalive_connections": 8,
     }
@@ -186,5 +202,6 @@ def remote_archive_http_client_status() -> dict[str, int | bool]:
 __all__ = [
     "alert_http_client", "alert_http_client_status", "close_http_clients",
     "provider_http_client", "provider_http_client_status", "public_http_client", "public_http_client_status",
+    "public_proxy_url",
     "remote_archive_http_client", "remote_archive_http_client_status", "start_http_clients",
 ]

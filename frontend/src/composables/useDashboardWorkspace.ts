@@ -1,5 +1,5 @@
 
-import { computed, onBeforeUnmount, onMounted, provide, proxyRefs, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, provide, proxyRefs, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { DataAnalysis, Document, Operation, Refresh, UploadFilled, WarningFilled } from '@element-plus/icons-vue';
 import VChart from 'vue-echarts';
@@ -9,9 +9,10 @@ import { DataZoomComponent, GridComponent, LegendComponent, MarkPointComponent, 
 import { CanvasRenderer } from 'echarts/renderers';
 import type { AnalystMarketReview, AutomationRun } from '../api/analyst-contract';
 import type { components } from '../api/generated';
-import { getJson, postJson } from '../api/http';
+import { getJson as getJsonBase, postJson } from '../api/http';
 import { useFeishuRelayWorkspace } from './useFeishuRelayWorkspace';
 import { usePolling } from './usePolling';
+import { resolveInitialDashboardSection, type DashboardSection } from '../dashboard-navigation';
 import {
   dashboardContextKey,
   feishuWorkbenchContextKey,
@@ -145,14 +146,19 @@ const initialPath = window.location.pathname;
 const mobileMediaQuery = window.matchMedia('(max-width: 760px)');
 const mobileLayout = ref(mobileMediaQuery.matches);
 const syncMobileLayout = (event: MediaQueryListEvent) => { mobileLayout.value = event.matches; };
-const activeSection = ref(initialPath === '/relay' ? 'relay' : initialPath === '/monitor' ? 'monitor' : initialPath === '/workbench' ? 'workbench' : 'research');
+const activeSection = ref<DashboardSection>(resolveInitialDashboardSection(initialPath, localStorage.getItem('dashboard-active-section')));
 const sharedResearchParams = new URLSearchParams(window.location.search);
 const sharedResearchSymbol = (sharedResearchParams.get('symbol') || '').toUpperCase();
 const sharedResearchTab = sharedResearchParams.get('tab');
 const activeResearchTab = ref(sharedResearchTab === 'stock-study' && /^\d{6}\.(SH|SZ|BJ)$/.test(sharedResearchSymbol) ? 'stock-study' : 'overview');
 const routes = ref<Route[]>([]); const events = ref<EventItem[]>([]); const connected = ref(false); const eventFilter = ref('all');
 const relayTag = ref(''); const relaySource = ref(''); const relayText = ref(''); const relayFiles = ref<File[]>([]); const relayDate = ref(''); const relayTime = ref(''); const relayState = ref(''); const relayProgress = ref(0); const relayXhr = ref<XMLHttpRequest | null>(null);
-const loading = ref(false); const actionLoading = ref(''); const researchError = ref('');
+const loading = ref(false); const researchLoaded = ref(false); const actionLoading = ref(''); const researchError = ref('');
+let researchAbortController: AbortController | null = null;
+let sectionLoadTimer: number | null = null;
+const getJson = <T>(path: string) => getJsonBase<T>(path, {
+  signal: loading.value && path.startsWith('/api/research/') ? researchAbortController?.signal : undefined,
+});
 const overview = ref<ResearchOverview>({}); const reports = ref<RemoteReport[]>([]); const remoteMessages = ref<RemoteMessage[]>([]); const analystSkills = ref<AnalystSkillProfile[]>([]); const analystResearchStatus = ref<AnalystResearchStatus>({}); const claims = ref<AnalystClaim[]>([]); const providerHealth = ref<ProviderHealth[]>([]); const providerApiCapabilities = ref<ProviderApiCapability[]>([]); const marketSnapshots = ref<MarketSnapshot[]>([]); const sectors = ref<Sector[]>([]); const sectorFlows = ref<SectorFlow[]>([]); const conceptSignals = ref<ConceptSignal[]>([]); const conceptCandidates = ref<ConceptCandidate[]>([]); const announcements = ref<Announcement[]>([]); const lhbEvents = ref<Announcement[]>([]); const closeBoardReport = ref<BoardReviewReport | null>(null); const conceptBackfill = ref<ConceptBackfill>({ total_concepts: 0, mapped_concepts: 0, states: [] }); const closeStrategyReview = ref<StrategyReview | null>(null); const postCloseStrategyRun = ref<PostCloseStrategyRun | null>(null); const postCloseCandidates = ref<PostCloseCandidate[]>([]); const strategyPatternRun = ref<StrategyPatternRun | null>(null); const tenDayLeaderRotation = ref<TenDayLeaderRotation>({ candidates: [] }); const strategyLimitPool = ref<LimitPoolRow[]>([]); const strategyLimitLadder = ref<LimitLadderRow[]>([]); const strategyContinuationCandidates = ref<LimitPoolRow[]>([]); const strategyDragonLeaderCandidates = ref<LimitPoolRow[]>([]); const strategyDragonLeaderMarket = ref<DragonLeaderWatch['market_context']>({}); const strategyPoolCoverage = ref<LimitPoolCoverage>({}); const strategyPatternPicks = ref<StrategyPatternSample[]>([]); const strategyPatternSamples = ref<StrategyPatternSample[]>([]); const postCloseRefresh = ref<PostCloseRefresh | null>(null); const intradayOutcomes = ref<IntradayOutcome[]>([]); const intradayOutcomeSummary = ref<IntradayOutcomeSummary[]>([]); const intradayAttributionSummary = ref<IntradayAttributionSummary[]>([]); const attributionValidationGate = ref<AttributionValidationGate>({ status: 'accumulating', matured_unique_signals: 0, trading_days: 0, required_unique_signals: 200, required_trading_days: 60 }); const analystReadiness = ref<AnalystReadiness[]>([]); const analystScorecards = ref<AnalystScorecard[]>([]); const selectedReviewBoardKey = ref(''); const catalog = ref<{ count?: number; counts?: CatalogCounts; items?: CatalogItem[]; providers?: ProviderConfig[]; online_range_max_days?: number; historical_minute_policy?: string; realtime_minute_policy?: string; coverage_rule?: string }>({}); const recommendations = ref<Recommendation[]>([]); const universe = ref<UniverseMember[]>([]); const featureItems = ref<FeatureItem[]>([]); const claimReviews = ref<ClaimReview[]>([]); const factors = ref<Factor[]>([]); const factorEvaluations = ref<FactorEvaluation[]>([]); const strategies = ref<Strategy[]>([]); const strategyExperiments = ref<StrategyExperiment[]>([]); const mainWaveExperiments = ref<StrategyExperiment[]>([]); const frameworks = ref<Framework[]>([]); const trainingRoadmap = ref<TrainingRoadmap>({ status: 'planned', policy: '', stages: [] }); const qualityIssues = ref<QualityIssue[]>([]); const minuteImports = ref<MinuteImport[]>([]); const minuteDirectory = ref('');
 const replayReadiness = ref<ReplayReadiness>({});
 const realtimeServices = ref<RealtimeServiceStatus>({ items: [] }); const adapterHealth = ref<AdapterHealth>({}); const runtimeHealth = ref<{ resources?: { research_storage?: ResearchStorage }; network?: { state?: string; consecutive_failures?: number; last_success_at?: string | null; last_failure_at?: string | null; last_source?: string | null; last_error?: string | null; recovery_count?: number }; runtime_loops?: Record<string, { state?: string; updated_at?: string | null; lease_heartbeat_at?: string | null; lease_expires_at?: string | null; last_error?: string | null }>; optional_background_tasks?: { background_tasks_enabled?: boolean }; daily_control_plane?: { state?: string; trade_date?: string; daily_rows?: number; expected_daily_rows?: number; minimum_required_rows?: number; coverage_ratio?: number; adjustment_rows?: number; limit_rows?: number; reason?: string | null } }>({}); const realtimeLoading = ref(false); const realtimeError = ref('');
@@ -530,6 +536,10 @@ async function loadRealtimeServices() {
   } finally { realtimeLoading.value = false; }
 }
 async function loadResearch() {
+  if (loading.value) return;
+  researchAbortController?.abort();
+  const controller = new AbortController();
+  researchAbortController = controller;
   loading.value = true; researchError.value = '';
   try {
     const [overviewResult, replayReadinessResult, researchResult] = await Promise.allSettled([
@@ -573,7 +583,13 @@ async function loadResearch() {
     if (!universeText.value) universeText.value = universe.value.filter((item) => item.enabled).map((item) => item.symbol).join(', ');
     if (!sectorFlowDate.value) sectorFlowDate.value = sectorFlows.value[0]?.trading_date ?? overview.value.latest_market_snapshot?.exchange_date ?? '';
     if (!selectedFactors.value.length) selectedFactors.value = factors.value.filter((item) => item.implementation === 'native_sql').map((item) => item.factor_key);
-  } catch (error) { researchError.value = error instanceof Error ? error.message : String(error); } finally { loading.value = false; }
+    researchLoaded.value = true;
+  } catch (error) {
+    if (!controller.signal.aborted) researchError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (researchAbortController === controller) researchAbortController = null;
+    loading.value = false;
+  }
 }
 async function runAction(label: string, path: string, body: Record<string, unknown> = {}, confirmation = true) {
   if (confirmation) await ElMessageBox.confirm(`确认执行${label}？`, '研究操作', { type: 'warning', confirmButtonText: '执行', cancelButtonText: '取消' });
@@ -735,17 +751,49 @@ function submitRelay() {
   const form = new FormData(); form.append('tag', relayTag.value); form.append('text', relayText.value.trim()); form.append('source_label', relaySource.value.trim()); if (relayDate.value) form.append('content_date', relayDate.value); if (relayTime.value) form.append('content_time', relayTime.value); relayFiles.value.forEach((file) => form.append('media', file, file.name));
   const xhr = new XMLHttpRequest(); relayXhr.value = xhr; relayState.value = '上传中'; relayProgress.value = 0; xhr.open('POST', '/manual-relay'); xhr.upload.onprogress = (event) => { if (event.lengthComputable) relayProgress.value = Math.round(event.loaded / event.total * 100); }; xhr.onload = () => { try { const body = JSON.parse(xhr.responseText); if (xhr.status >= 300) throw new Error(body.message); relayState.value = `已接收 ${body.message_id}`; relayText.value = ''; relayFiles.value = []; } catch (error) { relayState.value = `失败：${error instanceof Error ? error.message : String(error)}`; } relayXhr.value = null; }; xhr.onerror = () => { relayState.value = '网络错误'; relayXhr.value = null; }; xhr.send(form);
 }
+function selectActiveSection(value: string) {
+  if (!['research', 'personal', 'monitor', 'workbench', 'relay'].includes(value)) return;
+  activeSection.value = value as DashboardSection;
+}
+function loadActiveSection() {
+  if (activeSection.value === 'research') {
+    if (!researchLoaded.value && !loading.value) void loadResearch();
+    void loadRealtimeServices();
+    void loadBoardFlowCurves(true); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining();
+  } else if (activeSection.value === 'monitor') {
+    void loadGroupRelayStatus();
+  } else if (activeSection.value === 'workbench') {
+    void loadFeishuWorkbench();
+  }
+}
+function scheduleActiveSectionLoad() {
+  if (sectionLoadTimer !== null) window.clearTimeout(sectionLoadTimer);
+  // Research hydrates dozens of independent panels.  A short debounce lets the
+  // shell remain navigable when the user is moving between top-level sections.
+  const delay = activeSection.value === 'research' ? 500 : 0;
+  sectionLoadTimer = window.setTimeout(() => {
+    sectionLoadTimer = null;
+    loadActiveSection();
+  }, delay);
+}
 onMounted(() => {
-  mobileMediaQuery.addEventListener('change', syncMobileLayout); loadConfig().catch(() => {}); connectEvents(); loadResearch();
-  polling.every(15_000, () => { void loadRealtimeServices(); });
-  polling.every(10_000, () => { void loadGroupRelayStatus(); });
-  polling.every(10_000, () => { void loadFeishuWorkbench(); });
-  void loadBoardFlowCurves(true); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining(); polling.every(60_000, () => {
-    if (document.visibilityState === 'visible' && boardFlowIsExchangeToday.value) { void loadBoardFlowCurves(false); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining(); }
+  mobileMediaQuery.addEventListener('change', syncMobileLayout); loadConfig().catch(() => {}); connectEvents(); scheduleActiveSectionLoad();
+  polling.every(15_000, () => { if (activeSection.value === 'research') void loadRealtimeServices(); });
+  polling.every(10_000, () => { if (activeSection.value === 'monitor') void loadGroupRelayStatus(); });
+  polling.every(10_000, () => { if (activeSection.value === 'workbench') void loadFeishuWorkbench(); });
+  polling.every(60_000, () => {
+    if (activeSection.value === 'research' && document.visibilityState === 'visible' && boardFlowIsExchangeToday.value) { void loadBoardFlowCurves(false); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining(); }
   });
+});
+watch(activeSection, (section) => {
+  localStorage.setItem('dashboard-active-section', section);
+  if (section !== 'research') researchAbortController?.abort();
+  scheduleActiveSectionLoad();
 });
 onBeforeUnmount(() => {
   mobileMediaQuery.removeEventListener('change', syncMobileLayout); eventSource?.close();
+  if (sectionLoadTimer !== null) window.clearTimeout(sectionLoadTimer);
+  researchAbortController?.abort();
   if (retryTimer) clearTimeout(retryTimer); polling.stop();
 });
 
@@ -755,6 +803,7 @@ const dashboardBindings = {
     mobileLayout,
     syncMobileLayout,
     activeSection,
+    selectActiveSection,
     sharedResearchParams,
     sharedResearchSymbol,
     sharedResearchTab,

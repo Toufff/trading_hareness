@@ -264,6 +264,41 @@ async def tencent_daily(symbol: str, start: str, end: str) -> list[dict[str, Any
     ]
 
 
+async def tencent_index_daily(symbol: str, start: str, end: str) -> list[dict[str, Any]]:
+    """Return unadjusted Tencent daily rows for the bounded strategy indexes.
+
+    Tencent exposes index bars under ``day`` rather than ``qfqday``.  Keeping
+    this adapter separate prevents an equity caller from accidentally treating
+    an unadjusted equity series as the existing qfq research contract.
+    """
+    if symbol not in {"000001.SH", "000300.SH", "399001.SZ", "399006.SZ"}:
+        raise ValueError("tencent index fallback only accepts the strategy index set")
+    key = tencent_symbol(symbol)
+    params = {"param": f"{key},day,,,80,qfq"}
+    async with public_http_client() as client:
+        response = await _request_with_retry(
+            client, "GET", "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+            params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=10,
+        )
+    payload = response.json()
+    if payload.get("code") != 0:
+        raise FreeProviderError(str(payload.get("msg") or "Tencent index kline request failed"))
+    daily = ((payload.get("data") or {}).get(key) or {}).get("day") or []
+    if not isinstance(daily, list):
+        raise FreeProviderError("Tencent returned an invalid index kline payload")
+    return [
+        {
+            "ts_code": symbol, "trade_date": values[0].replace("-", ""),
+            "open": values[1], "close": values[2], "high": values[3],
+            "low": values[4], "vol": values[5], "amount": None,
+            "price_basis": "unadjusted_index",
+        }
+        for values in daily
+        if isinstance(values, list) and len(values) >= 6
+        and start <= values[0].replace("-", "") <= end
+    ]
+
+
 async def sina_quote(symbol: str) -> dict[str, Any] | None:
     key = tencent_symbol(symbol)
     async with public_http_client() as client:

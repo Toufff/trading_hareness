@@ -21,8 +21,10 @@ export async function decodeJson<T>(response: Response, path: string): Promise<T
   return data as T;
 }
 
-export async function getJson<T>(path: string): Promise<T> {
-  return decodeJson<T>(await fetch(path, { headers: { accept: 'application/json' }, cache: 'no-store' }), path);
+export async function getJson<T>(path: string, options: { signal?: AbortSignal } = {}): Promise<T> {
+  return decodeJson<T>(await fetch(path, {
+    headers: { accept: 'application/json' }, cache: 'no-store', signal: options.signal,
+  }), path);
 }
 
 export async function postJson<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {

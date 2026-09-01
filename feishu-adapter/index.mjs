@@ -23,6 +23,7 @@ import { shouldSkipMessageForward } from './message-idempotency.mjs';
 import { shouldRedownloadRetryMedia } from './retry-media.mjs';
 import { parsePaperIngestIds } from './paper-ingest-command.mjs';
 import { parsePaperFeedback } from './paper-feedback-command.mjs';
+import { personalDecisionResearchPaths } from './personal-decision-routes.mjs';
 import Busboy from 'busboy';
 
 const required = ['FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'N8N_TEXT_WEBHOOK_URL', 'N8N_MEDIA_PART_WEBHOOK_URL', 'N8N_MEDIA_FINALIZE_WEBHOOK_URL'];
@@ -116,7 +117,8 @@ if (!Number.isFinite(feishuDedupeTtlMs) || feishuDedupeTtlMs < 0) {
 	throw new Error('FEISHU_DEDUPE_TTL_MS must be a non-negative number');
 }
 const feishuEventPromises = new Map();
-const sourceRegistry = JSON.parse(readFileSync('/app/source-registry.json', 'utf8'));
+const sourceRegistryFile = process.env.SOURCE_REGISTRY_FILE ?? '/app/source-registry.json';
+const sourceRegistry = JSON.parse(readFileSync(sourceRegistryFile, 'utf8'));
 const ingestionStorageDir = process.env.INGESTION_STORAGE_DIR ?? '/var/lib/adapter-ingestion';
 mkdirSync(ingestionStorageDir, { recursive: true });
 const ledger = createLedger(process.env.INGESTION_DATABASE_URL || undefined);
@@ -1190,8 +1192,7 @@ const researchPaths = new Map([
 	['/api/research/ten-day-leader-rotation/latest', '/api/v1/research/ten-day-leader-rotation/latest'],
 	['/api/research/intraday/outcomes/latest', '/api/v1/intraday/outcomes/latest'],
 	['/api/research/paper/status', '/api/v1/paper/status'],
-	['/api/research/personal/portfolio-snapshots/latest', '/api/v1/personal/portfolio-snapshots/latest'],
-	['/api/research/personal/decision-briefs/latest', '/api/v1/personal/decision-briefs/latest'],
+	...personalDecisionResearchPaths,
 	['/api/research/strategy/contracts', '/api/v1/strategy/contracts'],
 	['/api/research/strategy/funnel', '/api/v1/strategy/funnel'],
 	['/api/research/intraday/services/status', '/api/v1/intraday/services/status'],

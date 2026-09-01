@@ -51,7 +51,7 @@ class StrategyPatternSampleRepositoryTests(unittest.TestCase):
         self.assertEqual(database.calls[0][1], ("20260817",))
         self.assertEqual(database.calls[4][1], (["000001.SZ"], date(2026, 8, 17), date(2026, 6, 18)))
 
-    def test_no_same_day_pool_skips_prior_and_daily_queries(self) -> None:
+    def test_no_same_day_pool_checks_event_projection_then_skips_daily_query(self) -> None:
         class Result:
             def __init__(self, *, rows=None, row=None):
                 self.rows, self.row = rows or [], row
@@ -65,7 +65,10 @@ class StrategyPatternSampleRepositoryTests(unittest.TestCase):
         class Database:
             def __init__(self):
                 self.calls = []
-                self.results = iter([Result(), Result(), Result(row=None)])
+                self.results = iter([
+                    Result(), Result(), Result(row=None),
+                    Result(), Result(row=None),
+                ])
 
             @contextmanager
             def transaction(self):
@@ -75,10 +78,13 @@ class StrategyPatternSampleRepositoryTests(unittest.TestCase):
                 self.calls.append((str(sql), params))
                 return next(self.results)
 
-        inputs = load_strategy_pattern_sample_inputs(Database(), date(2026, 8, 17))
+        database = Database()
+        inputs = load_strategy_pattern_sample_inputs(database, date(2026, 8, 17))
         self.assertEqual(inputs.limit_rows, [])
         self.assertEqual(inputs.prior_limit_rows, [])
         self.assertEqual(inputs.daily_rows, [])
+        self.assertEqual(len(database.calls), 5)
+        self.assertIn("quant.market_events", database.calls[3][0])
 
     def test_persist_replaces_one_bounded_run_without_fetching_or_reranking(self) -> None:
         class Result:

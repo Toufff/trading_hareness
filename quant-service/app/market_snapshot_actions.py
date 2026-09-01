@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 import math
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
@@ -26,6 +26,22 @@ from .provider_health import record_provider_failure, record_provider_success
 from .public_market_repository import persist_free_quotes
 from .runtime_executors import ExecutorSaturatedError
 from .tushare_providers import safe_error_detail
+
+
+CHINA = ZoneInfo("Asia/Shanghai")
+
+
+def snapshot_fresh_after(request: Any, observed_at: datetime, exchange_date: date) -> datetime:
+    """Return the evidence cutoff appropriate to the requested checkpoint.
+
+    A close is immutable after the exchange closes. Requiring receipt within
+    ten minutes made a valid 15:00 close disappear from an evening retry.
+    Close snapshots require same-date evidence observed after 14:50 Shanghai;
+    midday/intraday snapshots retain the ten-minute freshness gate.
+    """
+    if request.session == "close":
+        return datetime.combine(exchange_date, time(14, 50), tzinfo=CHINA).astimezone(timezone.utc)
+    return observed_at - timedelta(minutes=10)
 
 
 class MarketSnapshotActions:
@@ -128,7 +144,7 @@ class MarketSnapshotActions:
         fuyao_status: dict[str, Any],
     ) -> dict[str, Any]:
         """Read fresh evidence and write the idempotent snapshot in one DB worker."""
-        fresh_after = observed_at - timedelta(minutes=10)
+        fresh_after = snapshot_fresh_after(request, observed_at, exchange_date)
         with self._database.transaction() as connection:
             quote_rows = connection.execute(
                 """WITH active AS (

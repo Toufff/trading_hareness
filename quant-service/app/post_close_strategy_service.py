@@ -33,19 +33,40 @@ def candidates(
     with database.transaction() as connection:
         coverage = connection.execute(
             """SELECT count(DISTINCT symbol)::int AS symbols
-                 FROM quant.canonical_bars_daily WHERE trading_date=%s AND symbol<>'000300.SH'""",
+                 FROM quant.canonical_bars_daily
+                WHERE trading_date=%s
+                  AND (symbol ~ '^(600|601|603|605)[0-9]{3}\\.SH$'
+                       OR symbol ~ '^(000|001|002|003)[0-9]{3}\\.SZ$')""",
             (as_of_date,),
         ).fetchone()
         rows = connection.execute(
-            """WITH ranked AS (
-                   SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.volume,b.adj_factor,i.name,
+            """WITH latest_basic AS (
+                   SELECT DISTINCT ON (row_data->>'ts_code') row_data->>'ts_code' AS symbol,row_data
+                     FROM quant.tushare_raw_records
+                    WHERE api_name='daily_basic' AND row_data->>'trade_date'=to_char(%s::date,'YYYYMMDD')
+                    ORDER BY row_data->>'ts_code',available_at DESC
+               ), latest_flow AS (
+                   SELECT DISTINCT ON (symbol) symbol,net_amount
+                     FROM quant.stock_money_flow_daily
+                    WHERE trading_date=%s AND source='longhuvip_main_net'
+                    ORDER BY symbol,available_at DESC
+               ), ranked AS (
+                   SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.volume,1::numeric AS adj_factor,i.name,
+                          close_day.amount,basic.row_data->>'turnover_rate' AS turnover_rate,
+                          basic.row_data->>'volume_ratio' AS volume_ratio,basic.row_data->>'pe' AS pe,
+                          basic.row_data->>'pb' AS pb,flow.net_amount AS main_net_amount,
                           row_number() OVER (PARTITION BY b.symbol ORDER BY b.trading_date DESC) AS rn
-                     FROM quant.canonical_bars_daily b LEFT JOIN quant.instruments i ON i.symbol=b.symbol
-                    WHERE b.symbol<>'000300.SH' AND b.trading_date<=%s AND b.trading_date>=%s
-                      AND b.quality_status IN ('fresh','partial')
+                     FROM quant.research_adjusted_bars_daily b LEFT JOIN quant.instruments i ON i.symbol=b.symbol
+                     LEFT JOIN quant.canonical_bars_daily close_day
+                       ON close_day.symbol=b.symbol AND close_day.trading_date=%s
+                     LEFT JOIN latest_basic basic ON basic.symbol=b.symbol
+                     LEFT JOIN latest_flow flow ON flow.symbol=b.symbol
+                    WHERE b.adjustment_basis='qfq' AND b.provider='stock_brain_tencent_qfq'
+                      AND b.trading_date<=%s AND b.trading_date>=%s
                  ) SELECT symbol,trading_date,high,low,close,volume,adj_factor,name
+                         ,amount,turnover_rate,volume_ratio,pe,pb,main_net_amount
                     FROM ranked WHERE rn<=30 ORDER BY symbol,trading_date""",
-            (as_of_date, as_of_date - timedelta(days=70)),
+            (as_of_date, as_of_date, as_of_date, as_of_date, as_of_date - timedelta(days=70)),
         ).fetchall()
     return screen(
         as_of_date, limit, minimum_full_market_symbols, int(coverage["symbols"] or 0),
@@ -121,7 +142,23 @@ def run(
                  Json(candidate["risk_flags"]), as_of_date + timedelta(days=1),
                  Json(candidate["risk_flags"]), Json(json_safe(source_snapshot))),
             )
-    return {**result, "run_id": str(run_row["run_id"]), "run_key": run_key, "model_version": model_version}
+    # The complete screen population remains durable in PostgreSQL for replay
+    # and audit.  Returning thousands of rejected rows made every browser and
+    # automation consumer pay a multi-megabyte response cost.  The synchronous
+    # response therefore carries only the observations corresponding to the
+    # bounded returned candidate list.
+    returned_symbols = {str(item["symbol"]) for item in result.get("candidates", [])}
+    response_observations = [
+        item for item in result.get("screen_observations", [])
+        if str(item.get("symbol")) in returned_symbols
+    ]
+    response = {**result, "screen_observations": response_observations}
+    response["source_status"] = {
+        **result.get("source_status", {}),
+        "screen_observations_persisted": len(result.get("screen_observations", [])),
+        "screen_observations_returned": len(response_observations),
+    }
+    return {**response, "run_id": str(run_row["run_id"]), "run_key": run_key, "model_version": model_version}
 
 
 def retry_window(value: datetime) -> bool:

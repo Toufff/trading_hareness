@@ -132,6 +132,23 @@ class PersonalDecisionContractTests(unittest.TestCase):
         self.assertTrue(brief["delivery"]["holding_actions_eligible"])
         self.assertEqual(brief["holdings"]["actions"][0]["plan"]["name"], "中信证券")
 
+    def test_degraded_market_stays_visible_but_cannot_make_the_whole_brief_complete(self) -> None:
+        portfolio = {
+            "observed_at": NOW.isoformat(), "verification": "verified_exact",
+            "positions": [{"symbol": "600030.SH", "name": "中信证券", "quantity": "100"}],
+        }
+        brief = assemble_personal_decision_brief(
+            as_of_at=NOW,
+            market_section={"status": "degraded", "quality_flags": ["missing_index_context"]},
+            portfolio=portfolio,
+            plans=[holding_plan()],
+        )
+        self.assertEqual(brief["status"], "partial")
+        self.assertEqual(brief["market"]["status"], "degraded")
+        self.assertTrue(brief["delivery"]["market_eligible"])
+        self.assertFalse(brief["delivery"]["market_complete"])
+        self.assertIn("market_section_degraded", brief["diagnostics"])
+
     def test_weekend_snapshot_remains_current_but_old_or_future_snapshot_does_not(self) -> None:
         portfolio = {
             "observed_at": NOW.isoformat(), "verification": "verified_exact",

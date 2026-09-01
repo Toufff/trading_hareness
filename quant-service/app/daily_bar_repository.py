@@ -43,7 +43,8 @@ def provider_priority(provider: str) -> int:
     return {
         "tushare": 10, "tushare_primary": 10, "tushare_super_get": 15,
         "tushare_super_sdk": 20, "tushare_super": 25,
-        "baostock": 30, "tushare_backup": 40, "eastmoney_free": 45,
+        "longhuvip_composite": 25, "baostock": 30, "tushare_backup": 40, "eastmoney_free": 45,
+        "tencent_index_free": 45,
         "akshare": 50, "tencent_free": 50, "sina_free": 55, "manual": 90,
     }.get(provider, 80)
 

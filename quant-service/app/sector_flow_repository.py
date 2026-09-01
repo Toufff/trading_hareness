@@ -85,7 +85,7 @@ def rebuild_sector_flow_daily_features(database: Any, start_date: date, end_date
                       COALESCE(a.negative_count,0) AS negative_count,
                       COALESCE(l.limit_up_count,0) AS limit_up_count
                  FROM aggregate a FULL JOIN limits l USING(day,sector_key)""",
-            (start_date, start_date, start_date, end_date, start_date, end_date),
+            (start_date, end_date, start_date, end_date),
         ).fetchall()
 
     flows_by_sector: dict[str, list[dict[str, Any]]] = defaultdict(list)

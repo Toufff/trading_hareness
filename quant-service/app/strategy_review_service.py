@@ -44,6 +44,8 @@ def build(
                 "reason": "no persisted board snapshot for the requested checkpoint; no provider was called"}
     observed_at = row["observed_at"]
     payload = dict(row["payload"] or {})
+    source_status = dict(row["source_status"] or {})
+    board_provider = str(source_status.get("provider") or "persisted_board_snapshot")
     board_items = list(payload.get("items") or [])
     current_market_state, state_metrics = market_state(board_items)
     breadth = index_breadth_context(connection, as_of_date, request.session, observed_at)
@@ -104,9 +106,13 @@ def build(
             "next_session": "龙虎榜、公告和新闻 are context only; they never revise same-day intraday evidence",
         },
         "data_boundary": {
-            "board_flow": "persisted Eastmoney/Tencent snapshot",
+            "board_flow": {
+                "provider": board_provider,
+                "basis": "persisted same-checkpoint board snapshot",
+                "semantics": source_status.get("flow_semantics") or "provider-declared board flow",
+            },
             "index_breadth": "saved Tencent all-A breadth plus point-in-time SSE/CSI300/SZSE/ChiNext close-daily context",
-            "tushare": "daily flow is close-context; rt_min is stock validation only",
+            "lhb": "saved Tushare top_list/top_inst rows when available; absence is reported, never inferred",
             "analyst": "text-only reports available no later than observed_at",
             "automation": "no broker order submission",
         },

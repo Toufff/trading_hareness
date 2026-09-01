@@ -76,6 +76,9 @@ class PostCloseStrategyServiceTests(unittest.TestCase):
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["as_of_date"], str(target_date))
         self.assertEqual(payload["model_version"], "post-close-test-v1")
+        self.assertEqual(len(payload["screen_observations"]), 1)
+        self.assertEqual(payload["source_status"]["screen_observations_persisted"], 1)
+        self.assertEqual(payload["source_status"]["screen_observations_returned"], 1)
         self.assertEqual(connection.execute.call_count, 6)
 
     def test_retry_window_is_shanghai_clock_bounded(self) -> None:

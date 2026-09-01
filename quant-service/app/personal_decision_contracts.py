@@ -164,7 +164,9 @@ def assemble_personal_decision_brief(
     vague "research pending" prose in the user-facing action list.
     """
     _timezone_aware(as_of_at, "as_of_at")
-    market_ready = bool(market_section and market_section.get("status") in {"ready", "completed"})
+    market_status = market_section.get("status") if market_section else None
+    market_available = market_status in {"ready", "completed", "degraded"}
+    market_complete = market_status in {"ready", "completed"}
     observed_at = portfolio.get("observed_at") if portfolio else None
     if isinstance(observed_at, str):
         observed_at = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
@@ -208,8 +210,10 @@ def assemble_personal_decision_brief(
     ]
     holdings_ready = portfolio_current and not missing_holding_plans
     diagnostics = []
-    if not market_ready:
+    if not market_available:
         diagnostics.append("market_section_unavailable")
+    elif not market_complete:
+        diagnostics.append("market_section_degraded")
     if portfolio and not portfolio_current:
         diagnostics.append("portfolio_snapshot_stale_or_not_exact")
     elif not portfolio:
@@ -218,8 +222,9 @@ def assemble_personal_decision_brief(
     return {
         "contract_version": CONTRACT_VERSION,
         "as_of_at": as_of_at.isoformat(),
-        "status": "ready" if market_ready and holdings_ready else "partial",
-        "market": {"status": "ready" if market_ready else "unavailable", "content": market_section if market_ready else None},
+        "status": "ready" if market_complete and holdings_ready else "partial",
+        "market": {"status": market_status if market_available else "unavailable",
+                   "content": market_section if market_available else None},
         "holdings": {
             "status": "ready" if holdings_ready else "blocked",
             "portfolio_observed_at": observed_at.isoformat() if isinstance(observed_at, datetime) else None,
@@ -227,7 +232,8 @@ def assemble_personal_decision_brief(
         },
         "new_buys": {"status": "ready", "actions": new_buy_actions},
         "delivery": {
-            "market_eligible": market_ready,
+            "market_eligible": market_available,
+            "market_complete": market_complete,
             "holding_actions_eligible": holdings_ready,
             "new_buy_actions_eligible": bool(new_buy_actions),
         },

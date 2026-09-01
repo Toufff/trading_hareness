@@ -57,7 +57,7 @@ STRATEGY_CONTRACTS: Final[dict[str, StrategyContract]] = {
         "research", "shadow", "none", "post-close leader coordination pool with next-session observation",
     ),
     "post_close_base_candidates": StrategyContract(
-        "post_close_base_candidates", "post-close-base-start-v1", "app/post_close_strategy_service.py",
+        "post_close_base_candidates", "post-close-base-start-v3", "app/post_close_strategy_service.py",
         "same-date-close-v1", ("post_close_strategy_runs", "post_close_strategy_candidates"),
         "research", "research_enabled", "none", "same-date close candidate research with coverage gates",
     ),

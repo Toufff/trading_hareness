@@ -40,4 +40,19 @@ describe('frontend HTTP boundary', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(3, '/api/example', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ enabled: true }) }));
     expect(fetchMock).toHaveBeenNthCalledWith(4, '/api/example', expect.objectContaining({ method: 'DELETE' }));
   });
+
+  it('forwards an abort signal so inactive dashboard sections can cancel heavy reads', async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: 'ok' }), { headers: { 'content-type': 'application/json' } }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getJson('/api/research/overview', { signal: controller.signal });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/research/overview',
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
 });

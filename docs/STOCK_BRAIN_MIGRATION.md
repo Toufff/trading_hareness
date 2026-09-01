@@ -102,13 +102,46 @@ A stale or missing broker snapshot blocks holding actions but cannot erase the
 market section or eligible new-buy plans.  Diagnostics are retained separately
 from human-facing action text.
 
+### DecisionResearchDossier
+
+The post-close scanner is not allowed to publish a research candidate directly
+as a recommendation.  Each bounded candidate batch and every actual holding is
+closed into a terminal dossier after the settled-close strategy stage:
+
+- `passed`: all applicable checks are passed or explicitly advisory, including
+  a separately executed downside case;
+- `rejected`: at least one named check failed and the dossier explains the
+  concrete reason in human language;
+- `incomplete`: a required observation is genuinely unavailable.  Incomplete
+  candidates never become new-buy plans and the public decision brief never
+  tells the user that somebody should research them later.
+
+The internal G0--G7 keys exist only for audit joins.  Human-facing output uses
+their full labels: account/market eligibility, business identity, valuation
+constraint, sector/catalyst, benefit mapping, price/liquidity trigger,
+independent downside case and complete trade plan.  The downside check is a
+separate function and does not consume the bullish score or scan rank.
+
+A passed short-term dossier is a market-structure setup, not a claim that the
+company is a long-term value investment.  Its `PersonalTradePlan` must still
+include an entry range, invalidation, stop, position cap, target and validity
+window.  Actual holdings receive a defensive plan from the exact broker
+snapshot even when company research rejects the bullish case.
+
 ## Deployment boundary
 
-- Linux/server: PostgreSQL, FastAPI, providers, strategy/research workers and
-  Vue dashboard.
-- Windows: CITIC read-only bridge and optional migration utilities.
-- Transport: authenticated HTTP using versioned JSON; no shared SQLite file and
-  no remote database access from the emulator process.
+- Windows workstation: the authoritative PostgreSQL cluster, raw evidence,
+  canonical market data, research workers and broker read-only bridge.  The
+  durable root is `G:\StockPlatform` on the local 12 TB data disk; repository
+  checkouts and generated secrets are not stored in the database directory.
+- lightServer: optional static frontend/reverse proxy only.  It must not become
+  the authoritative database or a second writer merely to publish the UI.
+- Transport: authenticated, versioned HTTP.  The emulator process never opens
+  PostgreSQL directly, and no component shares the legacy SQLite file after
+  cutover.
+- Backups: local PostgreSQL dumps and immutable evidence archives are written
+  under the G-drive platform root first, then may be copied to independent
+  remote/object storage.  A frontend deployment is never treated as a backup.
 
 ## Cutover acceptance
 
@@ -124,3 +157,36 @@ Cutover requires at least five consecutive trading days in shadow mode with:
 - explicit reason codes for every blocked section.
 
 Source-only unit tests are necessary but never sufficient for cutover.
+
+## Implemented runtime and audit endpoints
+
+The Windows runtime uses PostgreSQL 16 on `127.0.0.1:55432`; its data directory
+is `G:\StockPlatform\data\postgresql16`.  Runtime configuration is external to
+Git under `G:\StockPlatform\config`, and large imports and raw research files
+remain under `G:\StockPlatform\data`.  The repository must contain only code,
+migrations, bounded fixtures and documentation.
+
+The real post-close orchestration now runs `decision_research_closure` after
+`post_close_strategy` and `core_daily_controls`.  The stage is included in the
+same durable receipt as the market refresh.  The personal decision surface is:
+
+- `GET /api/v1/personal/portfolio-snapshots/latest?account_key=...`;
+- `GET /api/v1/personal/decision-briefs/latest?account_key=...`;
+- `GET /api/v1/personal/decision-research/latest`.
+
+The decision brief and research audit are intentionally independent reads.  A
+research-audit failure does not blank a valid market/holdings/new-buy brief, and
+a broker failure only blocks the holdings section.  The frontend displays the
+stock name first and its exchange code in parentheses on every first mention.
+
+### Current migration acceptance snapshot
+
+The 2026-09-01 real settled-close replay completed with no deferred stages.  It
+persisted a usable but explicitly `degraded` market review (the current
+multi-index/breadth evidence was incomplete), two exact holding dossiers,
+twelve bounded candidate dossiers, one qualified conditional-buy plan and two
+holding plans.  The current audit read returned 14 dossiers from the latest
+model/current candidate batch only, with no unfinished dossier.  This is an
+integration acceptance record, not an investment recommendation and not the
+five-day shadow cutover required above.  A degraded market section remains
+visible but can never make the overall decision brief claim `ready`.

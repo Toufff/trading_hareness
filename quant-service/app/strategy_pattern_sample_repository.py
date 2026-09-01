@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+import json
 from typing import Any
 
 from psycopg.types.json import Json
@@ -15,6 +16,63 @@ class StrategyPatternSampleInputs:
     step_rows: list[dict[str, Any]]
     prior_limit_rows: list[dict[str, Any]]
     daily_rows: list[dict[str, Any]]
+
+
+def _event_limit_rows(connection: Any, as_of_date: date) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Project generic persisted limit events into the legacy sample shape."""
+    current = connection.execute(
+        """SELECT DISTINCT ON(symbol) symbol,body,source,available_at
+             FROM quant.market_events
+            WHERE event_type='limit_up_pool'
+              AND (occurred_at AT TIME ZONE 'Asia/Shanghai')::date=%s
+            ORDER BY symbol,available_at DESC""",
+        (as_of_date,),
+    ).fetchall()
+    prior_row = connection.execute(
+        """SELECT max((occurred_at AT TIME ZONE 'Asia/Shanghai')::date) AS prior_date
+             FROM quant.market_events
+            WHERE event_type='limit_up_pool'
+              AND (occurred_at AT TIME ZONE 'Asia/Shanghai')::date<%s""",
+        (as_of_date,),
+    ).fetchone()
+    prior_date = prior_row["prior_date"] if prior_row else None
+    prior = connection.execute(
+        """SELECT DISTINCT ON(symbol) symbol,body,source,available_at
+             FROM quant.market_events
+            WHERE event_type='limit_up_pool'
+              AND (occurred_at AT TIME ZONE 'Asia/Shanghai')::date=%s
+            ORDER BY symbol,available_at DESC""",
+        (prior_date,),
+    ).fetchall() if prior_date else []
+
+    def project(row: dict[str, Any], day: date) -> dict[str, Any]:
+        try:
+            raw = json.loads(row.get("body") or "{}")
+        except (TypeError, ValueError):
+            raw = {}
+        return {
+            **raw,
+            "ts_code": str(raw.get("ts_code") or row["symbol"]).upper(),
+            "trade_date": day.strftime("%Y%m%d"),
+            "limit_type": "涨停池",
+            "status": raw.get("status") or "收盘封板",
+            "provider_key": row.get("source"),
+        }
+
+    current_projected = [project(dict(row), as_of_date) for row in current]
+    prior_projected = [project(dict(row), prior_date) for row in prior] if prior_date else []
+    prior_symbols = {row["ts_code"] for row in prior_projected}
+    step_rows = [
+        {"ts_code": row["ts_code"], "trade_date": row["trade_date"],
+         "nums": 2 if row["ts_code"] in prior_symbols else 1,
+         "derivation": "persisted_close_limit_intersection"}
+        for row in current_projected
+    ]
+    wrapped = [
+        {"row_data": row, "provider_key": row.get("provider_key"), "available_at": None}
+        for row in current_projected
+    ]
+    return wrapped, step_rows, prior_projected
 
 
 def load_strategy_pattern_sample_inputs(database: Any, as_of_date: date) -> StrategyPatternSampleInputs:
@@ -48,6 +106,8 @@ def load_strategy_pattern_sample_inputs(database: Any, as_of_date: date) -> Stra
                   AND row_data->>'trade_date'=%s AND row_data->>'limit_type'='涨停池'
                 ORDER BY row_data->>'ts_code',available_at DESC""", (prior_stamp,),
         ).fetchall() if prior_stamp else []
+        if not limit_rows:
+            limit_rows, step_rows, prior_limit_rows = _event_limit_rows(connection, as_of_date)
         symbols = [str(row["row_data"].get("ts_code") or "").upper() for row in limit_rows]
         daily_rows = connection.execute(
             """WITH ranked AS (
@@ -59,8 +119,8 @@ def load_strategy_pattern_sample_inputs(database: Any, as_of_date: date) -> Stra
         ).fetchall() if symbols else []
     return StrategyPatternSampleInputs(
         limit_rows=[dict(row) for row in limit_rows],
-        step_rows=[dict(row["row_data"] or {}) for row in step_rows],
-        prior_limit_rows=[dict(row["row_data"] or {}) for row in prior_limit_rows],
+        step_rows=[dict(row.get("row_data") or row) for row in step_rows],
+        prior_limit_rows=[dict(row.get("row_data") or row) for row in prior_limit_rows],
         daily_rows=[dict(row) for row in daily_rows],
     )
 

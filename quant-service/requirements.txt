@@ -8,5 +8,7 @@ SQLAlchemy==2.0.43
 psycopg[binary]==3.2.6
 psycopg-pool==3.2.6
 numpy==2.5.2
+pandas>=2.2,<3
+pyarrow>=17,<22
 prometheus-client==0.22.1
 uvicorn[standard]==0.34.2

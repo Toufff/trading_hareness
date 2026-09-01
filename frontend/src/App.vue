@@ -25,7 +25,7 @@ const PersonalDecisionView = defineAsyncComponent(() => import('./views/Personal
   <el-container class="app-shell">
     <el-aside width="236px" class="side-nav">
       <div class="brand"><el-icon><DataAnalysis /></el-icon><div><strong>Quant Research</strong><span>投研与市场数据</span></div></div>
-      <el-menu :default-active="dashboard.activeSection" class="menu" @select="(value: string) => dashboard.activeSection = value">
+      <el-menu :default-active="dashboard.activeSection" class="menu" @select="dashboard.selectActiveSection">
         <el-menu-item index="research"><el-icon><DataAnalysis /></el-icon><span>量化研究台</span></el-menu-item>
         <el-menu-item index="personal"><el-icon><Wallet /></el-icon><span>个人决策</span></el-menu-item>
         <el-menu-item index="monitor"><el-icon><Operation /></el-icon><span>导入监控</span></el-menu-item>

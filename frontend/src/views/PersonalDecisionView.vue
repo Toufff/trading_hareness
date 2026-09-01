@@ -1,9 +1,61 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue';
-import { reactive } from 'vue';
-import { usePersonalDecisionWorkspace, type TradePlan } from '../composables/usePersonalDecisionWorkspace';
+import { computed, reactive } from 'vue';
+import { usePersonalDecisionWorkspace, type DecisionResearchGate, type TradePlan } from '../composables/usePersonalDecisionWorkspace';
 
 const workspace = reactive(usePersonalDecisionWorkspace());
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function asTextList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+}
+
+function numberText(value: unknown, digits = 1): string {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toFixed(digits) : '—';
+}
+
+function stateLabel(value: unknown): string {
+  return ({
+    rotation_defensive: '防御板块占优', rotation_technology: '科技板块占优',
+    broad_risk_on: '全市场风险偏好上升', broad_risk_off: '全市场风险偏好下降',
+    mixed_or_neutral: '板块轮动、方向混合',
+    insufficient_index_history: '指数历史不足，不能判定',
+    corrective_rebound: '多指数纠错反弹', trend_recovery: '多指数趋势修复',
+    weak_or_declining: '多指数偏弱', mixed_transition: '多指数过渡分化',
+  } as Record<string, string>)[String(value)] ?? String(value || '尚未判定');
+}
+
+function qualityLabel(value: string): string {
+  return ({
+    multi_index_close_context_not_current: '多指数收盘背景并非当前交易日',
+    missing_index_context: '缺少可用指数背景',
+    missing_usable_breadth_snapshot: '缺少可用的全市场涨跌广度',
+  } as Record<string, string>)[value] ?? value;
+}
+
+const marketMetrics = computed(() => asRecord(workspace.marketReport.market_state_metrics));
+const indexContext = computed(() => asRecord(workspace.marketReport.index_breadth_context));
+const multiIndex = computed(() => asRecord(indexContext.value.multi_index_regime));
+const marketQualityFlags = computed(() => {
+  const top = asTextList(workspace.marketContent.quality_flags);
+  return top.length ? top : asTextList(indexContext.value.quality_flags);
+});
+const positiveFlowPct = computed(() => {
+  const value = Number(marketMetrics.value.positive_flow_share);
+  return Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '—';
+});
+const marketAssessment = computed(() => {
+  const defensive = asTextList(marketMetrics.value.defensive_inflow_boards);
+  const technologyOut = asTextList(marketMetrics.value.technology_outflow_boards);
+  if (String(workspace.marketContent.market_state) === 'rotation_defensive') {
+    return `资金偏向${defensive.slice(0, 5).join('、') || '防御方向'}；${technologyOut.slice(0, 5).join('、') || '科技方向'}承压。短线新开仓须等待个股和板块同时转强。`;
+  }
+  return '盘面方向必须与板块资金、个股量价触发同时确认，不能仅凭指数涨跌下单。';
+});
 
 function actionLabel(action: TradePlan['action']): string {
   return ({
@@ -24,6 +76,17 @@ function displayValue(value: unknown): string {
   if (Array.isArray(value)) return value.join('、');
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
+}
+
+function gateType(verdict: DecisionResearchGate['verdict']): 'success' | 'warning' | 'danger' | 'info' {
+  if (verdict === 'pass') return 'success';
+  if (verdict === 'fail') return 'danger';
+  if (verdict === 'advisory') return 'warning';
+  return 'info';
+}
+
+function gateLabel(verdict: DecisionResearchGate['verdict']): string {
+  return ({ pass: '通过', fail: '否决', advisory: '风险提示', unknown: '证据不足' })[verdict];
 }
 </script>
 
@@ -48,19 +111,65 @@ function displayValue(value: unknown): string {
     <template v-if="workspace.brief">
       <div class="status-grid section-gap">
         <div class="status-tile"><span>整张简报</span><el-tag :type="workspace.brief.status === 'ready' ? 'success' : 'warning'">{{ workspace.brief.status === 'ready' ? '完整' : '部分可用' }}</el-tag></div>
-        <div class="status-tile"><span>盘面分析</span><el-tag :type="workspace.brief.delivery.market_eligible ? 'success' : 'danger'">{{ workspace.brief.delivery.market_eligible ? '可用' : '缺失' }}</el-tag></div>
+        <div class="status-tile"><span>盘面分析</span><el-tag :type="workspace.brief.market.status === 'degraded' ? 'warning' : workspace.brief.delivery.market_eligible ? 'success' : 'danger'">{{ workspace.brief.market.status === 'degraded' ? '部分可用' : workspace.brief.delivery.market_eligible ? '完整' : '缺失' }}</el-tag></div>
         <div class="status-tile"><span>持仓操作</span><el-tag :type="workspace.brief.delivery.holding_actions_eligible ? 'success' : 'danger'">{{ workspace.brief.delivery.holding_actions_eligible ? '可用' : '阻断' }}</el-tag></div>
         <div class="status-tile"><span>新买计划</span><el-tag :type="workspace.brief.delivery.new_buy_actions_eligible ? 'success' : 'info'">{{ workspace.brief.delivery.new_buy_actions_eligible ? '有计划' : '无合格计划' }}</el-tag></div>
       </div>
 
       <el-card shadow="never" class="section-gap decision-section">
-        <template #header><div class="section-title"><div><strong>市场与板块</strong><small>{{ displayValue(workspace.marketContent.observed_at || workspace.brief.as_of_at) }}</small></div><el-tag effect="plain">{{ displayValue(workspace.marketContent.market_state) }}</el-tag></div></template>
+        <template #header><div class="section-title"><div><strong>市场与板块</strong><small>{{ displayValue(workspace.marketContent.observed_at || workspace.brief.as_of_at) }}</small></div><el-tag effect="plain">{{ stateLabel(workspace.marketContent.market_state) }}</el-tag></div></template>
         <el-empty v-if="!workspace.brief.delivery.market_eligible" description="没有可用的市场分析；这不会阻止已完成的新买计划显示" :image-size="52" />
-        <el-descriptions v-else :column="2" border size="small">
+        <template v-else>
+          <el-alert v-if="workspace.brief.market.status === 'degraded'" title="当前板块资金证据可用，但指数或全市场涨跌广度不完整；以下结论只能作为板块轮动参考。" type="warning" :closable="false" show-icon class="market-warning" />
+          <p class="market-assessment">{{ marketAssessment }}</p>
+        <el-descriptions :column="3" border size="small">
           <el-descriptions-item label="交易日">{{ displayValue(workspace.marketContent.exchange_date) }}</el-descriptions-item>
           <el-descriptions-item label="阶段">{{ displayValue(workspace.marketContent.session) }}</el-descriptions-item>
-          <el-descriptions-item v-for="(value, key) in workspace.marketReport" :key="String(key)" :label="String(key)" :span="2">{{ displayValue(value) }}</el-descriptions-item>
+          <el-descriptions-item label="盘面状态">{{ stateLabel(workspace.marketContent.market_state) }}</el-descriptions-item>
+          <el-descriptions-item label="已覆盖板块">{{ displayValue(marketMetrics.known_board_flows) }}</el-descriptions-item>
+          <el-descriptions-item label="净流入板块占比">{{ positiveFlowPct }}</el-descriptions-item>
+          <el-descriptions-item label="板块涨跌中位数">{{ numberText(marketMetrics.median_board_change_pct, 2) }}%</el-descriptions-item>
+          <el-descriptions-item label="防御资金流入" :span="3">{{ asTextList(marketMetrics.defensive_inflow_boards).join('、') || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="科技资金流出" :span="3">{{ asTextList(marketMetrics.technology_outflow_boards).join('、') || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="多指数状态">{{ stateLabel(multiIndex.state) }}</el-descriptions-item>
+          <el-descriptions-item label="有效指数数">{{ displayValue(multiIndex.index_count) }}</el-descriptions-item>
+          <el-descriptions-item label="数据缺口">{{ marketQualityFlags.length ? marketQualityFlags.map(qualityLabel).join('；') : '无' }}</el-descriptions-item>
         </el-descriptions>
+        </template>
+      </el-card>
+
+      <el-card shadow="never" class="section-gap decision-section">
+        <template #header>
+          <div class="section-title">
+            <div><strong>研究审计</strong><small>每项用人能读懂的名称说明；内部编号只作追溯</small></div>
+            <el-space v-if="workspace.research">
+              <el-tag type="success">通过 {{ workspace.research.summary.passed }}</el-tag>
+              <el-tag type="danger">否决 {{ workspace.research.summary.rejected }}</el-tag>
+              <el-tag v-if="workspace.research.summary.incomplete" type="warning">未完成 {{ workspace.research.summary.incomplete }}</el-tag>
+            </el-space>
+          </div>
+        </template>
+        <el-alert v-if="workspace.researchError" :title="workspace.researchError" type="warning" :closable="false" show-icon />
+        <el-empty v-else-if="!workspace.research?.items.length" description="尚无研究审计批次" :image-size="52" />
+        <el-collapse v-else class="research-list">
+          <el-collapse-item v-for="item in workspace.research.items" :key="item.dossier_key" :name="item.dossier_key">
+            <template #title>
+              <div class="research-heading">
+                <span><strong>{{ item.name }}</strong>（{{ item.symbol }}）</span>
+                <el-tag :type="item.status === 'passed' ? 'success' : item.status === 'rejected' ? 'danger' : 'warning'">
+                  {{ item.status === 'passed' ? '研究通过' : item.status === 'rejected' ? '研究否决' : '证据不足' }}
+                </el-tag>
+                <small v-if="item.source_candidate_rank">扫描第 {{ item.source_candidate_rank }} 名</small>
+              </div>
+            </template>
+            <p class="research-conclusion">{{ item.conclusion }}</p>
+            <div v-for="gate in item.gates" :key="gate.gate_key" class="gate-row">
+              <div class="gate-name"><strong>{{ gate.label }}</strong><small>{{ gate.gate_key }}<template v-if="gate.independent_run"> · 独立执行</template></small></div>
+              <el-tag :type="gateType(gate.verdict)" effect="plain">{{ gateLabel(gate.verdict) }}</el-tag>
+              <span>{{ gate.conclusion }}</span>
+            </div>
+          </el-collapse-item>
+        </el-collapse>
       </el-card>
 
       <el-card shadow="never" class="section-gap decision-section">
@@ -77,7 +186,7 @@ function displayValue(value: unknown): string {
             <el-descriptions-item label="退出条件" :span="2">{{ item.plan.exit_trigger }}</el-descriptions-item>
             <el-descriptions-item label="止损参考">{{ displayValue(item.plan.stop_price) }}</el-descriptions-item>
             <el-descriptions-item label="目标参考">{{ displayValue(item.plan.target_prices) }}</el-descriptions-item>
-            <el-descriptions-item label="仓位上限">{{ item.plan.max_position_pct }}%</el-descriptions-item>
+            <el-descriptions-item label="策略仓位上限">{{ item.plan.max_position_pct }}%</el-descriptions-item>
             <el-descriptions-item label="有效期">{{ item.plan.valid_until }}</el-descriptions-item>
           </el-descriptions>
           <ul class="rationale"><li v-for="reason in item.plan.rationale" :key="reason">{{ reason }}</li></ul>
@@ -127,8 +236,18 @@ function displayValue(value: unknown): string {
 .rationale { margin: 12px 0 0; padding-left: 20px; color: var(--el-text-color-regular); }
 .rationale li + li { margin-top: 5px; }
 .diagnostic-tag { margin: 0 8px 8px 0; }
+.research-heading { display: flex; align-items: center; gap: 10px; width: 100%; padding-right: 12px; }
+.research-heading small { margin-left: auto; color: var(--el-text-color-secondary); }
+.research-conclusion { margin: 4px 0 14px; color: var(--el-text-color-regular); }
+.market-warning { margin-bottom: 12px; }
+.market-assessment { margin: 0 0 14px; padding: 12px 14px; border-left: 3px solid var(--el-color-primary); background: var(--el-fill-color-light); line-height: 1.65; }
+.gate-row { display: grid; grid-template-columns: 180px 84px minmax(0, 1fr); align-items: start; gap: 12px; padding: 10px 0; border-top: 1px solid var(--el-border-color-lighter); }
+.gate-name { display: flex; flex-direction: column; gap: 2px; }
+.gate-name small { color: var(--el-text-color-secondary); }
 @media (max-width: 900px) {
   .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .toolbar-row { align-items: flex-start; flex-direction: column; }
+  .gate-row { grid-template-columns: 1fr 80px; }
+  .gate-row > span { grid-column: 1 / -1; }
 }
 </style>

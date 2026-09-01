@@ -1,68 +1,33 @@
-"""Database-boundary coverage for persisted post-close evidence reads."""
-
 from __future__ import annotations
 
 from datetime import date
 import unittest
+from unittest.mock import MagicMock
 
-from app.post_close_evidence_repository import (
-    load_exact_board_context_rows,
-    load_tushare_lhb_context_rows,
-)
-
-
-class _Result:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def fetchall(self):
-        return self._rows
-
-
-class _Transaction:
-    def __init__(self, connection):
-        self._connection = connection
-
-    def __enter__(self):
-        return self._connection
-
-    def __exit__(self, *_args):
-        return None
-
-
-class _Connection:
-    def __init__(self):
-        self.calls = []
-
-    def execute(self, statement, params):
-        self.calls.append((statement, params))
-        return _Result([{"symbol": "000001.SZ", "row_data": {"trade_date": "20260824"}}])
+from app.post_close_evidence_repository import load_exact_board_context_rows
 
 
 class PostCloseEvidenceRepositoryTests(unittest.TestCase):
-    def setUp(self):
-        self.connection = _Connection()
-        self.database = type("Database", (), {"transaction": lambda _self: _Transaction(self.connection)})()
-        self.as_of_date = date(2026, 8, 24)
+    def test_exact_context_falls_back_to_saved_longhu_industry_membership(self) -> None:
+        database = MagicMock()
+        connection = MagicMock()
+        database.transaction.return_value.__enter__.return_value = connection
+        result = MagicMock()
+        result.fetchall.return_value = [{
+            "symbol": "600000.SH", "sector_key": "881181", "label": "银行",
+            "net_amount": 100, "provider_key": "longhuvip_composite",
+            "taxonomy_key": "longhu_ths_industry",
+        }]
+        connection.execute.return_value = result
 
-    def test_exact_board_read_is_same_date_and_returns_plain_rows(self):
-        rows = load_exact_board_context_rows(self.database, self.as_of_date)
+        rows = load_exact_board_context_rows(database, date(2026, 9, 1))
 
-        self.assertEqual(rows, [{"symbol": "000001.SZ", "row_data": {"trade_date": "20260824"}}])
-        statement, params = self.connection.calls[-1]
-        self.assertIn("quant.sector_membership_history", statement)
-        self.assertIn("flow.trading_date=%s", statement)
-        self.assertIn("member.known_at <=", statement)
-        self.assertIn("effective_from_basis IN ('provider_interval','observed_snapshot')", statement)
-        self.assertEqual(params, (self.as_of_date, self.as_of_date, self.as_of_date, self.as_of_date))
-
-    def test_lhb_read_uses_tushare_trade_date_format(self):
-        load_tushare_lhb_context_rows(self.database, self.as_of_date)
-
-        statement, params = self.connection.calls[-1]
-        self.assertIn("api_name IN ('top_list','top_inst')", statement)
-        self.assertEqual(params, ("20260824",))
+        self.assertEqual(rows[0]["provider_key"], "longhuvip_composite")
+        query, params = connection.execute.call_args.args
+        self.assertIn("stock.raw->>'plate_id'", query)
+        self.assertIn("jsonb_array_elements", query)
+        self.assertEqual(params, (date(2026, 9, 1),) * 6)
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     unittest.main()

@@ -226,6 +226,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
         async def check() -> tuple[dict[str, object], AsyncMock]:
             blocking = AsyncMock(return_value=unchanged)
             with patch("app.main.provider_candidates", return_value=[provider]), \
+                 patch("app.main.longhu_vendor_configured", return_value=False), \
                  patch("app.main.run_database_blocking", new=blocking):
                 result = await sync_market_universe(MarketUniverseSyncRequest())
             return result, blocking
@@ -241,6 +242,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
         async def check() -> tuple[dict[str, object], AsyncMock]:
             blocking = AsyncMock(return_value=unchanged)
             with patch("app.main.provider_candidates", return_value=[provider]), \
+                 patch("app.main.longhu_vendor_configured", return_value=False), \
                  patch("app.main.run_database_blocking", new=blocking):
                 result = await sync_full_market_daily(FullMarketDailySyncRequest())
             return result, blocking
@@ -256,6 +258,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
             blocking = AsyncMock(side_effect=[None, None, None, None])
             saturated = AsyncMock(side_effect=ExecutorSaturatedError("super_get blocking executor is saturated"))
             with patch("app.main.provider_candidates", return_value=[provider]), \
+                 patch("app.main.longhu_vendor_configured", return_value=False), \
                  patch("app.main.run_database_blocking", new=blocking), \
                  patch("app.main.call_tushare_api", new=saturated):
                 universe = await sync_market_universe(MarketUniverseSyncRequest())

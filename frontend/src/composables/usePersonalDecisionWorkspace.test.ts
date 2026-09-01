@@ -26,7 +26,13 @@ describe('usePersonalDecisionWorkspace', () => {
       },
       diagnostics: ['broker_snapshot_missing'],
     };
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(payload));
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(payload))
+      .mockResolvedValueOnce(jsonResponse({
+        as_of_date: '2026-09-01',
+        summary: { total: 0, passed: 0, rejected: 0, incomplete: 0 },
+        items: [],
+      }));
     vi.stubGlobal('fetch', fetchMock);
 
     const workspace = usePersonalDecisionWorkspace();
@@ -58,5 +64,31 @@ describe('usePersonalDecisionWorkspace', () => {
 
     expect(workspace.brief.value).toBeNull();
     expect(workspace.error.value).toBe('portfolio unavailable');
+  });
+
+  it('keeps a valid decision brief when the independent research audit fails', async () => {
+    const payload = {
+      status: 'ready',
+      as_of_at: '2026-09-01T15:15:00+08:00',
+      market: { status: 'ready', content: { market_state: 'rotation' } },
+      holdings: { status: 'ready', actions: [] },
+      new_buys: { status: 'ready', actions: [] },
+      delivery: { market_eligible: true, holding_actions_eligible: true, new_buy_actions_eligible: false },
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(payload))
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify({ detail: 'research audit unavailable' }),
+        { status: 503, headers: { 'content-type': 'application/json' } },
+      ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const workspace = usePersonalDecisionWorkspace();
+    await workspace.load();
+
+    expect(workspace.brief.value).toEqual(payload);
+    expect(workspace.error.value).toBe('');
+    expect(workspace.research.value).toBeNull();
+    expect(workspace.researchError.value).toBe('research audit unavailable');
   });
 });

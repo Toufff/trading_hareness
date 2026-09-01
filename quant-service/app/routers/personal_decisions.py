@@ -19,6 +19,7 @@ class PersonalDecisionDependencies:
     persist_plan: Callable[[Any, PersonalTradePlanInput], dict[str, Any]]
     latest_snapshot: Callable[[Any, str], Awaitable[dict[str, Any] | None]]
     latest_brief: Callable[[Any, str], Awaitable[dict[str, Any]]]
+    latest_research: Callable[[Any], Awaitable[dict[str, Any]]]
 
 
 def build_personal_decisions_router(deps: PersonalDecisionDependencies) -> APIRouter:
@@ -52,6 +53,10 @@ def build_personal_decisions_router(deps: PersonalDecisionDependencies) -> APIRo
     @router.get("/api/v1/personal/decision-briefs/latest")
     async def read_latest_personal_decision_brief(account_key: str) -> dict[str, Any]:
         return await deps.latest_brief(deps.async_database, account_key)
+
+    @router.get("/api/v1/personal/decision-research/latest")
+    async def read_latest_decision_research() -> dict[str, Any]:
+        return await deps.latest_research(deps.async_database)
 
     return router
 

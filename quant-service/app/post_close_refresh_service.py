@@ -28,7 +28,8 @@ POST_CLOSE_STAGE_ORDER = (
     "close_market_snapshot", "akshare_supplements", "ths_industry_flow", "ths_concept_flow_and_limit_strength",
     "market_flow_features", "limit_ladder", "limit_lift_pattern_mining", "cninfo_announcements",
     "board_review", "close_strategy_decision", "close_review", "analyst_outcomes", "analyst_intraday_outcomes",
-    "analyst_scorecards", "analyst_expert_research", "post_close_strategy", "watchlist_main_wave", "research_snapshot",
+    "analyst_scorecards", "analyst_expert_research", "post_close_strategy", "decision_research_closure",
+    "watchlist_main_wave", "research_snapshot",
 )
 
 POST_CLOSE_TIMEOUT_OVERRIDES = {
@@ -56,6 +57,7 @@ POST_CLOSE_STAGE_DEPENDENCIES = {
     "post_close_strategy": ("core_daily_controls",),
     "watchlist_main_wave": ("core_daily_controls",),
     "research_snapshot": ("core_daily_controls",),
+    "decision_research_closure": ("post_close_strategy", "core_daily_controls"),
 }
 
 
@@ -65,6 +67,8 @@ class PostCloseRefreshDependencies:
 
     database: Any
     china_today: Callable[[], date]
+    longhu_configured: Callable[[], bool]
+    longhu_close_context: Callable[[date], dict[str, Any]]
     provider_configs: Callable[[], dict[str, Any]]
     run_database: Callable[..., Awaitable[Any]]
     reconcile_stale_fetch_runs: Callable[[Any], Any]
@@ -79,6 +83,7 @@ class PostCloseRefreshDependencies:
     sync_ths_concept_flow: Callable[[Any], Awaitable[dict[str, Any]]]
     rebuild_market_flow_features: Callable[..., Any]
     refresh_pattern_sources: Callable[[date], Awaitable[dict[str, Any]]]
+    persist_settled_limit_pool: Callable[[Any, date], dict[str, Any]]
     run_pattern_mining: Callable[[Any], Awaitable[dict[str, Any]]]
     sync_daily_controls: Callable[[date], Awaitable[dict[str, Any]]]
     sync_cninfo_announcements: Callable[[Any], Awaitable[dict[str, Any]]]
@@ -90,6 +95,7 @@ class PostCloseRefreshDependencies:
     recompute_scorecards: Callable[[date], Any]
     rebuild_analyst_research: Callable[[date], Any]
     run_post_close_strategy: Callable[[Any], Any]
+    refresh_decision_research: Callable[[Any, date], dict[str, Any]]
     persist_watchlist_main_wave: Callable[[Any], Any]
     build_research_snapshot: Callable[[Any], Any]
     run_orchestrator: Callable[..., Awaitable[dict[str, Any]]]
@@ -110,6 +116,7 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
     path.  It only preserves the existing same-date refresh workflow.
     """
     trade_date = request.trade_date or dependencies.china_today()
+    longhu_mode = dependencies.longhu_configured()
     super_get = dependencies.provider_configs().get("super_get")
     full_market_daily_provider = (
         "super_get"
@@ -121,6 +128,12 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
     async def akshare_stage() -> dict[str, Any]:
         nonlocal core_symbols
         core_symbols = await dependencies.load_core_symbols(request.announcement_limit)
+        if longhu_mode:
+            return {
+                "status": "skipped",
+                "reason": "optional AkShare probe is outside the Longhu authoritative close path",
+                "core_symbols": len(core_symbols),
+            }
         probe_symbol = core_symbols[0] if core_symbols else "000636.SZ"
         return await dependencies.akshare_probe(AkShareProbeRequest(
             symbol=probe_symbol, trade_date=trade_date,
@@ -135,6 +148,14 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
             end_date=trade_date, max_pages_per_symbol=1,
         ))
 
+    async def limit_ladder_stage() -> dict[str, Any]:
+        if longhu_mode:
+            return await dependencies.run_database(
+                dependencies.persist_settled_limit_pool, dependencies.database, trade_date,
+                timeout_seconds=60,
+            )
+        return await dependencies.refresh_pattern_sources(trade_date)
+
     actions: dict[str, Callable[[], Any]] = {
         "stale_fetch_runs": lambda: dependencies.run_database(
             dependencies.reconcile_stale_fetch_runs, FetchRunReconcileRequest(max_age_minutes=90),
@@ -146,27 +167,46 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
         ),
         "index_context": lambda: dependencies.sync_strategy_index_context(trade_date),
         "close_market_snapshot": lambda: dependencies.build_market_snapshot(
-            MarketSnapshotRequest(session="close", universe_key="all_a", refresh_public_quotes=True),
+            MarketSnapshotRequest(session="close", universe_key="all_a", refresh_public_quotes=False),
         ),
         "akshare_supplements": akshare_stage,
-        "ths_industry_flow": lambda: dependencies.sync_ths_industry_flow(
-            SectorFlowSyncRequest(trade_date=trade_date, provider="super"),
+        "ths_industry_flow": (
+            lambda: dependencies.run_database(dependencies.longhu_close_context, trade_date)
+            if longhu_mode else
+            dependencies.sync_ths_industry_flow(SectorFlowSyncRequest(trade_date=trade_date, provider="super"))
         ),
-        "ths_concept_flow_and_limit_strength": lambda: dependencies.sync_ths_concept_flow(
-            SectorFlowSyncRequest(trade_date=trade_date, provider="super"),
+        "ths_concept_flow_and_limit_strength": (
+            lambda: {
+                "status": "skipped",
+                "reason": "Longhu close supplies exact THS industry membership and flow, not concept flow",
+                "provider": "longhuvip_composite",
+            }
+            if longhu_mode else
+            dependencies.sync_ths_concept_flow(SectorFlowSyncRequest(trade_date=trade_date, provider="super"))
         ),
         "market_flow_features": lambda: dependencies.run_database(
             dependencies.rebuild_market_flow_features, dependencies.database, trade_date, trade_date, timeout_seconds=90,
         ),
-        "limit_ladder": lambda: dependencies.refresh_pattern_sources(trade_date),
+        "limit_ladder": limit_ladder_stage,
         "limit_lift_pattern_mining": lambda: dependencies.run_pattern_mining(
             StrategyPatternMiningRequest(as_of_date=trade_date, refresh_limit_sources=False),
         ),
         "core_daily_controls": lambda: dependencies.sync_daily_controls(trade_date),
         "cninfo_announcements": announcements_stage,
-        "board_review": lambda: dependencies.run_board_report(deliver=False),
-        "close_strategy_decision": lambda: dependencies.run_strategy_decision(
-            StrategyDecisionRequest(session="close", kind="all", limit=20, validate_tushare_realtime=False),
+        "board_review": (
+            lambda: dependencies.run_database(dependencies.longhu_close_context, trade_date)
+            if longhu_mode else dependencies.run_board_report(deliver=False)
+        ),
+        "close_strategy_decision": (
+            lambda: {
+                "status": "skipped",
+                "reason": "legacy provider-coupled close decision is superseded by the persisted post-close strategy stage",
+                "replacement_stage": "post_close_strategy",
+            }
+            if longhu_mode else
+            dependencies.run_strategy_decision(
+                StrategyDecisionRequest(session="close", kind="all", limit=20, validate_tushare_realtime=False),
+            )
         ),
         "close_review": lambda: dependencies.run_database(dependencies.persist_close_review, trade_date),
         "analyst_outcomes": lambda: dependencies.run_database(
@@ -179,6 +219,9 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
         "analyst_expert_research": lambda: dependencies.run_database(dependencies.rebuild_analyst_research, trade_date),
         "post_close_strategy": lambda: dependencies.run_database(
             dependencies.run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date),
+        ),
+        "decision_research_closure": lambda: dependencies.run_database(
+            dependencies.refresh_decision_research, dependencies.database, trade_date, timeout_seconds=120,
         ),
         "watchlist_main_wave": lambda: dependencies.run_database(
             dependencies.persist_watchlist_main_wave, WatchlistMainWaveResearchRequest(as_of_date=trade_date),
