@@ -76,6 +76,19 @@ class IntradayDecisionContextTests(unittest.TestCase):
         self.assertEqual(exit_context["action"], "离场复核")
         self.assertIn("硬止损", exit_context["reasons"][0])
 
+    def test_volume_anomaly_explains_quote_trigger_before_missing_minute_confirmation(self) -> None:
+        context = decision_context({
+            "signal_key": "300364.SZ:watch:volume_anomaly", "signal_type": "watch",
+            "conditions": {
+                "volume_ratio": 4.0338, "turnover_rate": 28.67067,
+                "volume_ratio_gate": 2.5, "turnover_rate_gate": 5.0,
+                "setup_state": {"state": "evidence_incomplete", "reasons": ["minute_feature_missing"]},
+            },
+        }, {"estimated_probability": None, "sample_rows": 0})
+        self.assertIn("量比 4.03、换手 28.67% 同时达到异常量能阈值", context["reasons"][0])
+        self.assertIn("分钟特征未取得", context["reasons"][1])
+        self.assertNotIn("minute_feature_missing", context["reasons"][1])
+
     def test_calibration_refuses_to_fit_below_independent_day_gate(self) -> None:
         result = out_of_fold_calibration_diagnostics([
             {"probability": 0.7, "outcome": 1, "exchange_date": "2026-08-10"},

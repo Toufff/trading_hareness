@@ -228,6 +228,21 @@ def decision_context(signal: dict[str, Any], probability: dict[str, Any]) -> dic
     peers = conditions.get("peer_context") if isinstance(conditions.get("peer_context"), dict) else {}
     setup_state = conditions.get("setup_state") if isinstance(conditions.get("setup_state"), dict) else {}
     reasons: list[str] = []
+    # A volume-anomaly watch is created from the quote-level gates below.  Do
+    # not let the later minute-evidence state hide that actual trigger in the
+    # human-facing explanation: missing minute data is a confirmation
+    # limitation, not the reason the candidate entered the watch set.
+    if signal_type == "watch" and str(signal.get("signal_key") or "").endswith(":watch:volume_anomaly"):
+        volume_ratio = _number(conditions.get("volume_ratio"))
+        turnover_rate = _number(conditions.get("turnover_rate"))
+        volume_gate = _number(conditions.get("volume_ratio_gate"))
+        turnover_gate = _number(conditions.get("turnover_rate_gate"))
+        if volume_ratio is not None and turnover_rate is not None:
+            gate_text = (
+                f"（阈值：量比≥{volume_gate:g}、换手≥{turnover_gate:g}%）"
+                if volume_gate is not None and turnover_gate is not None else ""
+            )
+            reasons.append(f"量比 {volume_ratio:.2f}、换手 {turnover_rate:.2f}% 同时达到异常量能阈值{gate_text}")
     if setup == "countertrend_rebound_confirmed_plus_intraday_acceptance":
         reasons.append("日线已进入B浪反弹确认态，而不是恐慌或单日试探")
         reasons.append(
@@ -265,7 +280,14 @@ def decision_context(signal: dict[str, Any], probability: dict[str, Any]) -> dic
     if conditions.get("hard_stop") is not None:
         reasons.append(f"现价已触及硬止损 {conditions.get('hard_stop')}")
     if setup_state.get("state") in {"policy_constrained", "data_blocked", "evidence_incomplete"}:
-        reasons.append(f"实时状态为 {setup_state.get('state')}：{'、'.join(str(item) for item in setup_state.get('reasons') or [])}")
+        state_reason_labels = {
+            "minute_feature_missing": "分钟特征未取得，暂不能确认3分钟动量和VWAP承接",
+            "missing_live_price": "实时价格缺失，无法进行策略确认",
+        }
+        state_reasons = "、".join(
+            state_reason_labels.get(str(item), str(item)) for item in setup_state.get("reasons") or []
+        )
+        reasons.append(f"实时状态为 {setup_state.get('state')}：{state_reasons}")
     if conditions.get("flow_extreme") == "bottom_1pct":
         reasons.append("主力流指标跌入全市场后1%，且量能放大")
     elif conditions.get("flow_extreme") == "top_1pct":
