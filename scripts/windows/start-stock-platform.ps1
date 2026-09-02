@@ -1,12 +1,14 @@
 [CmdletBinding()]
 param(
     [string]$PlatformRoot = 'G:\StockPlatform',
-    [string]$RepositoryRoot = 'F:\AIWorkflow\trading_hareness',
+    [string]$RepositoryRoot = '',
     [int]$ApiPort = 5681
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if (-not $RepositoryRoot) { $RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')) }
+Import-Module (Join-Path $PSScriptRoot 'runtime-observability.psm1') -Force
 
 function Read-EnvFile {
     param([string]$Path)
@@ -47,6 +49,7 @@ foreach ($path in @($envPath, $python, (Join-Path $serviceRoot 'database_bootstr
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing platform prerequisite: $path" }
 }
 New-Item -ItemType Directory -Force -Path $logs | Out-Null
+Invoke-RuntimeLogRetention -PlatformRoot $root
 Read-EnvFile $envPath
 $env:QUANT_BACKGROUND_TASKS_ENABLED = 'false'
 $env:QUANT_RUNTIME_PROFILE = 'research'
@@ -68,21 +71,57 @@ try {
         }
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 5
         [IO.File]::WriteAllText($pidPath, [string]$listener.OwningProcess, [Text.UTF8Encoding]::new($false))
+        $current = Get-RuntimeState -PlatformRoot $root -Service 'quant-api'
+        $currentStatus = if ($current -and $current.PSObject.Properties['status']) { [string]$current.status } else { '' }
+        $currentListenerPid = if ($current -and $current.PSObject.Properties['listener_pid']) { [int]$current.listener_pid } else { 0 }
+        $currentRunId = if ($current -and $current.PSObject.Properties['run_id']) { [string]$current.run_id } else { '' }
+        if (-not $current -or $currentStatus -ne 'healthy' -or $currentListenerPid -ne $listener.OwningProcess) {
+            $runId = if ($currentRunId) { $currentRunId } else { "adopted-$($listener.OwningProcess)" }
+            [void](Set-RuntimeState -PlatformRoot $root -Service 'quant-api' -State @{
+                status = 'healthy'
+                run_id = $runId
+                listener_pid = $listener.OwningProcess
+                health = [string]$health.status
+                adopted = -not [bool]$currentRunId
+            })
+            [void](Write-RuntimeEvent -PlatformRoot $root -Service 'quant-api' -Event 'listener_adopted' -RunId $runId -Data @{
+                listener_pid = $listener.OwningProcess
+                health = [string]$health.status
+            })
+        }
         [pscustomobject]@{ status = 'already_running'; pid = $listener.OwningProcess; health = $health.status; url = "http://127.0.0.1:$ApiPort" }
         return
     }
 
-if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
-    $existingPid = 0
-    [void][int]::TryParse(([IO.File]::ReadAllText($pidPath).Trim()), [ref]$existingPid)
-    if (
-        $existingPid -gt 0 -and
-        (Test-ExpectedApiProcess -ProcessId $existingPid -Repository $repository -Port $ApiPort)
-    ) {
-        Stop-Process -Id $existingPid -Force -ErrorAction SilentlyContinue
+    $previousState = Get-RuntimeState -PlatformRoot $root -Service 'quant-api'
+    $previousStatus = if ($previousState -and $previousState.PSObject.Properties['status']) { [string]$previousState.status } else { '' }
+    $previousRunId = if ($previousState -and $previousState.PSObject.Properties['run_id']) { [string]$previousState.run_id } else { '' }
+    if ($previousState -and $previousStatus -in @('healthy', 'process_started', 'supervisor_started')) {
+        [void](Write-RuntimeEvent -PlatformRoot $root -Service 'quant-api' -Event 'health_lost' -RunId $previousRunId -Level 'error' -Data @{
+            previous_status = $previousStatus
+            previous_listener_pid = if ($previousState.PSObject.Properties['listener_pid']) { [int]$previousState.listener_pid } else { $null }
+            previous_launcher_pid = if ($previousState.PSObject.Properties['launcher_pid']) { [int]$previousState.launcher_pid } else { $null }
+            reason = 'expected_listener_missing'
+        })
     }
-    Remove-Item -LiteralPath $pidPath -Force
-}
+
+    if ($previousState) {
+        [void](Request-RuntimeStop -PlatformRoot $root -Service 'quant-api' -Reason 'replace_unhealthy_runtime' -RequestedBy 'start-stock-platform.ps1')
+        foreach ($property in 'listener_pid', 'launcher_pid') {
+            $stalePid = 0
+            if ($previousState.PSObject.Properties[$property]) { $stalePid = [int]$previousState.$property }
+            if ($stalePid -gt 0) { Stop-Process -Id $stalePid -Force -ErrorAction SilentlyContinue }
+        }
+        if ($previousState.PSObject.Properties['supervisor_pid']) {
+            $supervisorPid = [int]$previousState.supervisor_pid
+            $supervisor = Get-Process -Id $supervisorPid -ErrorAction SilentlyContinue
+            if ($supervisor) {
+                Wait-Process -Id $supervisorPid -Timeout 3 -ErrorAction SilentlyContinue
+                if (Get-Process -Id $supervisorPid -ErrorAction SilentlyContinue) { Stop-Process -Id $supervisorPid -Force -ErrorAction SilentlyContinue }
+            }
+        }
+    }
+    Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
 
 Push-Location $serviceRoot
 try {
@@ -92,12 +131,11 @@ try {
     Pop-Location
 }
 
-$stdout = Join-Path $logs 'quant-api.stdout.log'
-$stderr = Join-Path $logs 'quant-api.stderr.log'
-$process = Start-Process -FilePath $python -WindowStyle Hidden -PassThru -WorkingDirectory $serviceRoot `
-    -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
-    -ArgumentList @('.\run_server.py','--host','127.0.0.1','--port',"$ApiPort")
-[IO.File]::WriteAllText($pidPath, [string]$process.Id, [Text.UTF8Encoding]::new($false))
+$runtimeRun = Start-RuntimeSupervisor -PlatformRoot $root -RepositoryRoot $repository -Service 'quant-api' `
+    -Executable $python -WorkingDirectory $serviceRoot `
+    -Arguments @('.\run_server.py', '--host', '127.0.0.1', '--port', "$ApiPort") `
+    -Metadata @{ port = $ApiPort; profile = 'research' }
+$stderr = [string]$runtimeRun.stderr
 
 $deadline = [DateTime]::UtcNow.AddSeconds(75)
 do {
@@ -108,6 +146,24 @@ do {
             throw 'health endpoint responded without the expected listener process'
         }
         [IO.File]::WriteAllText($pidPath, [string]$listener.OwningProcess, [Text.UTF8Encoding]::new($false))
+        $state = Get-RuntimeState -PlatformRoot $root -Service 'quant-api'
+        [void](Set-RuntimeState -PlatformRoot $root -Service 'quant-api' -State @{
+            status = 'healthy'
+            run_id = [string]$runtimeRun.run_id
+            supervisor_pid = [int]$runtimeRun.supervisor_pid
+            launcher_pid = if ($state -and $state.PSObject.Properties['launcher_pid']) { [int]$state.launcher_pid } else { $null }
+            listener_pid = $listener.OwningProcess
+            health = [string]$health.status
+            descriptor = [string]$runtimeRun.descriptor
+            stdout = [string]$runtimeRun.stdout
+            stderr = [string]$runtimeRun.stderr
+            started_at = if ($state -and $state.PSObject.Properties['started_at']) { [string]$state.started_at } else { $null }
+            healthy_at = [DateTimeOffset]::Now.ToString('o')
+        })
+        [void](Write-RuntimeEvent -PlatformRoot $root -Service 'quant-api' -Event 'healthy' -RunId ([string]$runtimeRun.run_id) -Data @{
+            listener_pid = $listener.OwningProcess
+            health = [string]$health.status
+        })
         [pscustomobject]@{ status = 'started'; pid = $listener.OwningProcess; health = $health.status; url = "http://127.0.0.1:$ApiPort" }
         return
     } catch {
@@ -117,6 +173,10 @@ do {
 
 $errorTail = if (Test-Path $stderr) { (Get-Content -LiteralPath $stderr -Tail 80) -join [Environment]::NewLine } else { '' }
 Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+[void](Write-RuntimeEvent -PlatformRoot $root -Service 'quant-api' -Event 'start_failed' -RunId ([string]$runtimeRun.run_id) -Level 'error' -Data @{
+    reason = 'health_timeout'
+    stderr = $stderr
+})
 throw "quant API did not become healthy within 75 seconds; inspect $stderr`n$errorTail"
 }
 finally {

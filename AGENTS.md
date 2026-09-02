@@ -39,19 +39,21 @@ provider response directly to a live threshold or order path.
 
 ## Agent workflow
 
-1. Read the relevant module, router, migration and existing test before editing.
-2. Add a pure-function test first, then a repository/HTTP test when a route or
+1. Read `docs/AGENT_HANDOFF.md` and inspect the active release before changing a
+   running Windows deployment.
+2. Read the relevant module, router, migration and existing test before editing.
+3. Add a pure-function test first, then a repository/HTTP test when a route or
    persistence path changes.
-3. Use `apply_patch`; do not rewrite generated artifacts or expose `.env` values.
-4. Run `docker compose exec -T quant-research python -m unittest discover -s tests -q`,
+4. Use `apply_patch`; do not rewrite generated artifacts or expose `.env` values.
+5. Run `docker compose exec -T quant-research python -m unittest discover -s tests -q`,
    `cd frontend && npm run typecheck && npm run build`, and `git diff --check`.
-5. For a scheduler change, verify database rows, latest status endpoint and one
+6. For a scheduler change, verify database rows, latest status endpoint and one
    real adapter request; a unit test alone does not prove the published route.
-6. Run `node scripts/verify-api-contract.mjs` after adding or renaming a route;
+7. Run `node scripts/verify-api-contract.mjs` after adding or renaming a route;
    it checks the running OpenAPI document instead of trusting a source-only map.
-7. Run `cd frontend && npm run api:generate` after an intentional API contract
+8. Run `cd frontend && npm run api:generate` after an intentional API contract
    change; `npm run api:check` verifies the checked-in generated type is current.
-8. Read `docs/ARCHITECTURE.md` before a cross-domain change; it is the concise
+9. Read `docs/ARCHITECTURE.md` before a cross-domain change; it is the concise
    ownership map, while this file remains the operational checklist.
 
 ## Review automation

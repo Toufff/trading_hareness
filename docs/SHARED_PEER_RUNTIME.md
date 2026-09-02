@@ -5,6 +5,12 @@ This deployment keeps the authoritative trading database on the owner's
 same research code in an isolated Docker environment. It does not expose a
 broker trading path and it does not copy the LonghuVIP upstream credential.
 
+The Windows production code is an immutable release under
+`G:\StockPlatform\releases`; `G:\StockPlatform\current` is the only path used by
+the production scheduled tasks. Development remains in
+`F:\AIWorkflow\trading_hareness`. See `AGENT_HANDOFF.md` for publishing,
+rollback and agent takeover.
+
 The complete peer-facing stock-data contract, including all documented
 actions and automatic 300-record physical batching, is in
 [`SHARED_STOCK_DATA_API.md`](SHARED_STOCK_DATA_API.md).
@@ -209,6 +215,41 @@ Owner-side acceptance:
 ```powershell
 pwsh .\scripts\shared-peer\verify-shared-runtime.ps1
 ```
+
+## Windows runtime observability
+
+The owner API, dashboard adapter, dashboard reverse tunnel, and shared peer
+tunnels are started through a
+small process supervisor. Every launch gets a unique run ID and separate
+stdout/stderr files, so a restart never truncates the evidence from the prior
+run. The supervisor waits for the child and records its exit code. A stop marker
+distinguishes an operator-requested stop from an unexpected exit.
+
+Runtime evidence lives outside Git under:
+
+```text
+G:\StockPlatform\logs\runtime\
+  lifecycle-YYYY-MM-DD.jsonl
+  quant-api.current.json
+  dashboard-adapter.current.json
+  dashboard-tunnel.current.json
+  services\<service>\YYYY-MM-DD\<run-id>.stdout.log
+  services\<service>\YYYY-MM-DD\<run-id>.stderr.log
+  services\<service>\YYYY-MM-DD\<run-id>.run.json
+```
+
+Use the bounded, secret-free diagnostic view before reading raw logs:
+
+```powershell
+pwsh .\scripts\windows\get-stock-runtime-status.ps1
+```
+
+Its state distinguishes `healthy`, `stopped`, `unexpected_exit`, and
+`supervisor_failed`, includes the actual supervisor/launcher/listener PIDs, and
+returns the latest lifecycle events. Service logs are retained for 30 days and
+lifecycle events for 90 days by the watchdog. The legacy
+`dashboard-watchdog.log` remains an append-only human-readable fallback; it is
+not the authoritative diagnostic record.
 
 It requires all of these to be true:
 

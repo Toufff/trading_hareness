@@ -1,14 +1,16 @@
 [CmdletBinding()]
 param(
     [string]$TaskName = 'trading-hareness-dashboard-runtime',
-    [string]$RepositoryRoot = 'F:\AIWorkflow\trading_hareness'
+    [string]$RepositoryRoot = '',
+    [string]$PlatformRoot = 'G:\StockPlatform'
 )
 
 $ErrorActionPreference = 'Stop'
+$RepositoryRoot = if ($RepositoryRoot) { [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\') } else { [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')).TrimEnd('\') }
 $script = Join-Path ([IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\')) 'scripts\windows\watch-stock-dashboard.ps1'
 if (-not (Test-Path -LiteralPath $script -PathType Leaf)) { throw "Missing $script" }
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
-$arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`""
+$arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`" -RepositoryRoot `"$RepositoryRoot`" -PlatformRoot `"$PlatformRoot`""
 $action = New-ScheduledTaskAction -Execute $pwsh -Argument $arguments
 $logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew -RestartCount 999 `

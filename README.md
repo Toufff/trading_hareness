@@ -4,7 +4,7 @@ This instance is deliberately local-only: n8n listens on `127.0.0.1:5678` and Po
 
 For the verified current workflow, service topology, automatic startup behavior, recovery commands, and troubleshooting, see [OPERATIONS.md](OPERATIONS.md).
 
-The local research service and the future server deployment path are documented in [DEPLOYMENT.md](DEPLOYMENT.md). The complete analyst-channel quant research design and phased acceptance plan are in [docs/QUANT_RESEARCH_IMPLEMENTATION_PLAN.md](docs/QUANT_RESEARCH_IMPLEMENTATION_PLAN.md). The default Compose stack remains local-only; the separate server composition exposes only TLS reverse-proxy endpoints.
+The local research service and the future server deployment path are documented in [DEPLOYMENT.md](DEPLOYMENT.md). Agents taking over the live Windows deployment must start with [docs/AGENT_HANDOFF.md](docs/AGENT_HANDOFF.md). The complete analyst-channel quant research design and phased acceptance plan are in [docs/QUANT_RESEARCH_IMPLEMENTATION_PLAN.md](docs/QUANT_RESEARCH_IMPLEMENTATION_PLAN.md). The default Compose stack remains local-only; the separate server composition exposes only TLS reverse-proxy endpoints.
 
 The Windows `stock-brain` cutover, facts-only import boundary, actual-portfolio
 contracts and personal decision dashboard are documented in
