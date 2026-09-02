@@ -75,59 +75,73 @@ def persist_intraday_market_flow_feature(
     observed_at: datetime,
 ) -> dict[str, Any]:
     """Derive one coverage-gated minute state from already stored raw snapshots."""
+    with database.transaction() as connection:
+        return _persist_intraday_market_flow_feature_on(connection, snapshot_minute, observed_at)
+
+
+def _persist_intraday_market_flow_feature_on(
+    connection: Any,
+    snapshot_minute: datetime,
+    observed_at: datetime,
+) -> dict[str, Any]:
+    """Same derivation as :func:`persist_intraday_market_flow_feature`, on a caller-owned connection.
+
+    Used by :func:`rebuild_stored_market_flow_features` so a multi-day rebuild
+    processes every minute row inside one transaction instead of opening one
+    transaction per minute.
+    """
     local = snapshot_minute.astimezone(CHINA)
     exchange_date = local.date()
     session_start_time = time(9, 30) if local.time() >= time(9, 30) else time(9, 20)
     session_start = datetime.combine(exchange_date, session_start_time, tzinfo=CHINA).astimezone(timezone.utc)
     afternoon_start = datetime.combine(exchange_date, time(13, 0), tzinfo=CHINA).astimezone(timezone.utc)
-    with database.transaction() as connection:
-        current = connection.execute(
-            """SELECT payload FROM quant.intraday_board_flow_snapshots
-                 WHERE snapshot_minute=%s AND status IN ('completed','partial')""",
-            (snapshot_minute,),
+    current = connection.execute(
+        """SELECT payload FROM quant.intraday_board_flow_snapshots
+             WHERE snapshot_minute=%s AND status IN ('completed','partial')""",
+        (snapshot_minute,),
+    ).fetchone()
+    if current is None:
+        return {"status": "insufficient", "state": "insufficient", "quality_flags": ["source_snapshot_missing"]}
+    five_minute = connection.execute(
+        """SELECT payload FROM quant.intraday_board_flow_snapshots
+             WHERE snapshot_minute<=%s AND snapshot_minute>=%s
+               AND status IN ('completed','partial')
+             ORDER BY snapshot_minute DESC LIMIT 1""",
+        (snapshot_minute - timedelta(minutes=5), session_start),
+    ).fetchone()
+    session_reference = connection.execute(
+        """SELECT payload FROM quant.intraday_board_flow_snapshots
+             WHERE snapshot_minute>=%s AND snapshot_minute<=%s
+               AND status IN ('completed','partial')
+             ORDER BY snapshot_minute LIMIT 1""",
+        (session_start, snapshot_minute),
+    ).fetchone()
+    afternoon_min = None
+    if local.time() >= time(13, 0):
+        row = connection.execute(
+            """SELECT min(concept_positive_ratio) AS minimum
+                 FROM quant.market_flow_feature_snapshots
+                WHERE exchange_date=%s AND cadence='minute'
+                  AND observed_at>=%s AND observed_at<%s
+                  AND concept_positive_ratio IS NOT NULL""",
+            (exchange_date, afternoon_start, observed_at),
         ).fetchone()
-        if current is None:
-            return {"status": "insufficient", "state": "insufficient", "quality_flags": ["source_snapshot_missing"]}
-        five_minute = connection.execute(
-            """SELECT payload FROM quant.intraday_board_flow_snapshots
-                 WHERE snapshot_minute<=%s AND snapshot_minute>=%s
-                   AND status IN ('completed','partial')
-                 ORDER BY snapshot_minute DESC LIMIT 1""",
-            (snapshot_minute - timedelta(minutes=5), session_start),
-        ).fetchone()
-        session_reference = connection.execute(
-            """SELECT payload FROM quant.intraday_board_flow_snapshots
-                 WHERE snapshot_minute>=%s AND snapshot_minute<=%s
-                   AND status IN ('completed','partial')
-                 ORDER BY snapshot_minute LIMIT 1""",
-            (session_start, snapshot_minute),
-        ).fetchone()
-        afternoon_min = None
-        if local.time() >= time(13, 0):
-            row = connection.execute(
-                """SELECT min(concept_positive_ratio) AS minimum
-                     FROM quant.market_flow_feature_snapshots
-                    WHERE exchange_date=%s AND cadence='minute'
-                      AND observed_at>=%s AND observed_at<%s
-                      AND concept_positive_ratio IS NOT NULL""",
-                (exchange_date, afternoon_start, observed_at),
-            ).fetchone()
-            afternoon_min = float(row["minimum"]) if row and row["minimum"] is not None else None
+        afternoon_min = float(row["minimum"]) if row and row["minimum"] is not None else None
 
-        current_breadth = board_flow_breadth(_items(current))
-        features = intraday_flow_state(
-            current_breadth,
-            five_minute_reference=board_flow_breadth(_items(five_minute)) if five_minute else None,
-            session_reference=board_flow_breadth(_items(session_reference)) if session_reference else None,
-            afternoon_min_positive_ratio=afternoon_min,
-        )
-        status = _feature_status(features)
-        _insert_feature(
-            connection,
-            feature_key=f"minute:{snapshot_minute.isoformat()}", exchange_date=exchange_date,
-            cadence="minute", observed_at=observed_at, source_snapshot_minute=snapshot_minute,
-            status=status, market_state=str(features["state"]), features=features,
-        )
+    current_breadth = board_flow_breadth(_items(current))
+    features = intraday_flow_state(
+        current_breadth,
+        five_minute_reference=board_flow_breadth(_items(five_minute)) if five_minute else None,
+        session_reference=board_flow_breadth(_items(session_reference)) if session_reference else None,
+        afternoon_min_positive_ratio=afternoon_min,
+    )
+    status = _feature_status(features)
+    _insert_feature(
+        connection,
+        feature_key=f"minute:{snapshot_minute.isoformat()}", exchange_date=exchange_date,
+        cadence="minute", observed_at=observed_at, source_snapshot_minute=snapshot_minute,
+        status=status, market_state=str(features["state"]), features=features,
+    )
     return {"status": status, **features}
 
 
@@ -197,6 +211,13 @@ def rebuild_stored_market_flow_features(
         raise ValueError("stored feature rebuild is capped at 45 calendar days")
     start_utc = datetime.combine(start_date, time.min, tzinfo=CHINA).astimezone(timezone.utc)
     end_utc = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=CHINA).astimezone(timezone.utc)
+    # Previously one transaction per read plus one further transaction per
+    # minute row and per snapshot row (potentially hundreds across a 45-day
+    # window).  Everything below now shares the single transaction opened
+    # here, matching how ``materialize_sector_flow_daily_outcomes`` already
+    # reads the minute-derived rows it depends on inside the same commit.
+    minute_counts = {"ready": 0, "partial": 0, "insufficient": 0}
+    snapshot_counts = {"ready": 0, "partial": 0, "insufficient": 0}
     with database.transaction() as connection:
         minute_rows = connection.execute(
             """SELECT snapshot_minute,observed_at
@@ -217,15 +238,12 @@ def rebuild_stored_market_flow_features(
             (start_date, end_date),
         ).fetchall()
 
-    minute_counts = {"ready": 0, "partial": 0, "insufficient": 0}
-    for row in minute_rows:
-        result = persist_intraday_market_flow_feature(database, row["snapshot_minute"], row["observed_at"])
-        result_status = str(result.get("status") or "insufficient")
-        minute_counts[result_status] = minute_counts.get(result_status, 0) + 1
+        for row in minute_rows:
+            result = _persist_intraday_market_flow_feature_on(connection, row["snapshot_minute"], row["observed_at"])
+            result_status = str(result.get("status") or "insufficient")
+            minute_counts[result_status] = minute_counts.get(result_status, 0) + 1
 
-    snapshot_counts = {"ready": 0, "partial": 0, "insufficient": 0}
-    for row in snapshot_rows:
-        with database.transaction() as connection:
+        for row in snapshot_rows:
             result = persist_market_snapshot_flow_feature(
                 connection,
                 session=str(row["session"]),
@@ -233,8 +251,8 @@ def rebuild_stored_market_flow_features(
                 observed_at=row["observed_at"],
                 summary=dict(row["summary"] or {}),
             )
-        result_status = str(result.get("status") or "insufficient")
-        snapshot_counts[result_status] = snapshot_counts.get(result_status, 0) + 1
+            result_status = str(result.get("status") or "insufficient")
+            snapshot_counts[result_status] = snapshot_counts.get(result_status, 0) + 1
 
     sector_daily = rebuild_sector_flow_daily_features(database, start_date, end_date)
     return {

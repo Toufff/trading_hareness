@@ -2,6 +2,12 @@
   "name": "n8n-feishu-adapter",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test *.test.mjs"
+  },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "1.72.0",
     "busboy": "1.6.0",

@@ -1,6 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { decodeJson, deleteJson, getJson, postJson, putJson } from './http';
+import { decodeJson, deleteJson, getDashboardKey, getJson, postJson, putJson, setDashboardKey } from './http';
+
+afterEach(() => {
+  setDashboardKey('');
+  localStorage.clear();
+});
 
 describe('frontend HTTP boundary', () => {
   it('returns valid JSON responses', async () => {
@@ -54,5 +59,72 @@ describe('frontend HTTP boundary', () => {
       '/api/research/overview',
       expect.objectContaining({ signal: controller.signal }),
     );
+  });
+
+  describe('X-Dashboard-Key operator header', () => {
+    it('sends no key header until one has been set', async () => {
+      const fetchMock = vi.fn((..._args: Parameters<typeof fetch>) => Promise.resolve(
+        new Response(JSON.stringify({ accepted: true }), { headers: { 'content-type': 'application/json' } }),
+      ));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await postJson('/api/research/pipeline/daily');
+
+      const [, init] = fetchMock.mock.calls[0]!;
+      expect((init as RequestInit).headers).not.toHaveProperty('X-Dashboard-Key');
+    });
+
+    it('attaches X-Dashboard-Key to write requests once an operator key is set, and persists it', async () => {
+      setDashboardKey('op-secret-1');
+      expect(getDashboardKey()).toBe('op-secret-1');
+      expect(localStorage.getItem('dashboardOperatorKey')).toBe('op-secret-1');
+
+      const fetchMock = vi.fn((..._args: Parameters<typeof fetch>) => Promise.resolve(
+        new Response(JSON.stringify({ accepted: true }), { headers: { 'content-type': 'application/json' } }),
+      ));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await postJson('/api/research/pipeline/daily');
+      await putJson('/api/example', {});
+      await deleteJson('/api/example');
+
+      for (const [, init] of fetchMock.mock.calls) {
+        expect((init as Record<string, string>).headers).toHaveProperty('X-Dashboard-Key', 'op-secret-1');
+      }
+    });
+
+    it('does not attach the key to plain reads', async () => {
+      setDashboardKey('op-secret-1');
+      const fetchMock = vi.fn((..._args: Parameters<typeof fetch>) => Promise.resolve(
+        new Response(JSON.stringify({ status: 'ok' }), { headers: { 'content-type': 'application/json' } }),
+      ));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await getJson('/api/research/overview');
+
+      const [, init] = fetchMock.mock.calls[0]!;
+      expect((init as RequestInit).headers).not.toHaveProperty('X-Dashboard-Key');
+    });
+
+    it('turns an unauthorized write into a readable "set the key" prompt when no key is set', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(new Response(
+        JSON.stringify({ detail: 'missing X-Dashboard-Key' }),
+        { status: 401, headers: { 'content-type': 'application/json' } },
+      ));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(postJson('/api/research/pipeline/daily')).rejects.toThrow(/设置操作者 Key|设置.*Key/);
+    });
+
+    it('surfaces the backend error as-is once a key has been set (a 401 then means the key is wrong)', async () => {
+      setDashboardKey('op-secret-1');
+      const fetchMock = vi.fn().mockResolvedValue(new Response(
+        JSON.stringify({ detail: 'invalid dashboard key' }),
+        { status: 401, headers: { 'content-type': 'application/json' } },
+      ));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(postJson('/api/research/pipeline/daily')).rejects.toThrow('invalid dashboard key');
+    });
   });
 });

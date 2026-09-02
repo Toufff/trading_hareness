@@ -8,9 +8,21 @@ from app.watchlist_countertrend_rebound import (
     countertrend_rebound_failure_reduce_signal,
     countertrend_rebound_realtime_signal,
     evaluate_rebound_split,
+    latest_rebound_priors,
     rebound_state,
 )
 from app.watchlist_main_wave import FEATURE_KEYS
+
+
+class _FakeConnection:
+    def __init__(self, row):
+        self._row = row
+
+    def execute(self, query, params=None):
+        return self
+
+    def fetchone(self):
+        return self._row
 
 
 def features(**overrides: float) -> dict[str, float]:
@@ -80,7 +92,10 @@ class CountertrendReboundTests(unittest.TestCase):
         )
         self.assertIsNotNone(signal)
         self.assertEqual(signal["signal_type"], "entry")
-        self.assertNotIn("shadow_only", signal)
+        # This state machine's precision is an in-sample test-split figure,
+        # not a validated live prior, so the signal must be shadow_only and
+        # never reach the alerted "confirmed" event state.
+        self.assertTrue(signal["shadow_only"])
         self.assertEqual(signal["conditions"]["research_probability"]["estimated_probability"], 0.31)
         self.assertIn("panic_stage_is_not_entry", signal["risk_flags"])
 
@@ -105,6 +120,7 @@ class CountertrendReboundTests(unittest.TestCase):
         )
         self.assertIsNotNone(failure)
         self.assertEqual(failure["signal_type"], "reduce")
+        self.assertTrue(failure["shadow_only"])
         self.assertTrue(failure["conditions"]["vwap_acceptance_lost"])
         self.assertTrue(failure["conditions"]["peer_confirmation_lost"])
         self.assertIsNone(countertrend_rebound_failure_reduce_signal(
@@ -126,6 +142,25 @@ class CountertrendReboundTests(unittest.TestCase):
             {"available_peer_count": 3, "confirming_peer_count": 0},
             {"state": "shadow_decline", "model_score": 0.7},
         ))
+
+    def test_latest_rebound_priors_marks_research_only(self) -> None:
+        row = {
+            "metrics": {
+                "current_scores": [{"symbol": "000636.SZ", "state": "shadow_confirmed", "model_score": 0.7}],
+                "walk_forward": {"test": {
+                    "base_rate": 0.1, "selected_rows": 60, "selected_dates": 40,
+                    "selected_net_terminal_return": 0.02, "selected_date_positive_rate": 0.3,
+                }},
+            },
+            "parameters": {"model_version": "v1", "live_effect": "explicit_watchlist_research_alert_only"},
+            "created_at": None,
+        }
+        priors = latest_rebound_priors(_FakeConnection(row))
+        self.assertIn("000636.SZ", priors)
+        # The precision behind research_probability is an in-sample
+        # test-split figure, not a validated live prior; callers must not
+        # treat it as an alert-eligible number.
+        self.assertTrue(priors["000636.SZ"]["research_only"])
 
     def test_next_session_suspension_is_not_treated_as_fillable_entry(self) -> None:
         start = date(2026, 1, 1)

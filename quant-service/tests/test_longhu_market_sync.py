@@ -40,6 +40,21 @@ class LonghuMarketSyncTests(unittest.TestCase):
         self.assertEqual(by_symbol["600001.SH"]["up_limit"], "10.50")
         self.assertTrue(all(row["factor_semantics"] == "same_day_identity_only" for row in controls["adj_factor"]))
 
+    def test_star_market_st_name_keeps_20_percent_not_5(self):
+        # A substring match on "ST" used to force any registration-board ST
+        # name down to the mainboard's 5% band; the shared prefix check must
+        # not do that.
+        daily = [{"ts_code": "688009.SH", "trade_date": "20260901", "pre_close": 10, "name": "ST测试科创"}]
+        controls = build_control_rows(daily)
+        by_symbol = {row["ts_code"]: row for row in controls["stk_limit"]}
+        self.assertEqual(by_symbol["688009.SH"]["up_limit"], "12.00")
+
+    def test_beijing_new_92_prefix_is_30_percent(self):
+        daily = [{"ts_code": "920819.BJ", "trade_date": "20260901", "pre_close": 10, "name": "示例北交所"}]
+        controls = build_control_rows(daily)
+        by_symbol = {row["ts_code"]: row for row in controls["stk_limit"]}
+        self.assertEqual(by_symbol["920819.BJ"]["up_limit"], "13.00")
+
 
 if __name__ == "__main__":
     unittest.main()

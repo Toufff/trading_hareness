@@ -15,16 +15,20 @@ import json
 import math
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol
+from urllib.parse import urlparse
 
 import requests
 
 from .licensed_stock_api import execute as execute_licensed_stock_api
+from .market_rules import cn_today, is_trading_day
+from .symbols import canonical_symbol
 
 
 MAX_PAGE_SIZE = 300
@@ -32,6 +36,56 @@ MAX_TENCENT_BATCH_SIZE = 80
 FLOW_CONVENTION = "longhuvip_zs_stocklist_main_net_field13"
 DEFAULT_CONFIG_PATH = Path.home() / ".stock-brain" / "longhu_vendor.json"
 USER_AGENT = "Dalvik/2.1.0 (Linux; U; Android 14; V2178A Build/UP1A.231005.007)"
+
+
+def _host_rate_limit_per_second() -> float:
+    try:
+        return max(0.1, float(os.getenv("QUANT_LONGHU_RATE_LIMIT_PER_SECOND", "8")))
+    except ValueError:
+        return 8.0
+
+
+class _HostTokenBucket:
+    """A minimal thread-safe token bucket limiting requests to one host."""
+
+    def __init__(self, rate_per_second: float) -> None:
+        self._rate = max(0.1, rate_per_second)
+        self._lock = threading.Lock()
+        self._tokens = self._rate
+        self._updated_at = time.monotonic()
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._tokens = min(self._rate, self._tokens + (now - self._updated_at) * self._rate)
+                self._updated_at = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait_seconds = (1.0 - self._tokens) / self._rate
+            time.sleep(max(0.001, wait_seconds))
+
+
+_host_token_buckets: dict[str, _HostTokenBucket] = {}
+_host_token_buckets_lock = threading.Lock()
+
+
+def _rate_limit_before_request(url: str) -> None:
+    """Block the calling worker thread until this host's next slot is free.
+
+    Longhu/Tencent have no documented rate limit, but 12-24 concurrent
+    threads previously shared one connection with no pacing at all. This is
+    process-wide (keyed by host), not per-``LonghuVendorSource`` instance, so
+    it still holds if more than one source object is ever constructed.
+    """
+    host = urlparse(url).netloc or url
+    with _host_token_buckets_lock:
+        bucket = _host_token_buckets.get(host)
+        if bucket is None:
+            bucket = _HostTokenBucket(_host_rate_limit_per_second())
+            _host_token_buckets[host] = bucket
+    bucket.acquire()
 
 
 def safe_page_size(value: int) -> int:
@@ -52,21 +106,27 @@ def _number(value: Any) -> float | None:
 
 
 def normalize_stock_symbol(value: Any) -> str | None:
+    """Resolve a vendor field to a canonical stock symbol, delegating the
+    exchange/board inference to the shared ``app.symbols`` table.
+
+    This used to take the trailing 6 digits of whatever string arrived and
+    route by a single leading digit, which mapped ``sh000300`` (an index) to
+    a nonexistent Shenzhen stock and could not tell a Shanghai B-share
+    (``900xxx``) from a genuine Beijing Stock Exchange listing (``920xxx``).
+
+    An explicit exchange prefix/suffix is trusted only when it agrees with
+    the board the bare code itself implies; ``sh000300`` names an index
+    (CSI 300), not a Shanghai stock at code 000300, so it is rejected rather
+    than silently accepted as one.
+    """
     raw = str(value or "").strip().upper()
-    if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", raw):
-        return raw
-    digits = "".join(character for character in raw if character.isdigit())[-6:]
-    if len(digits) != 6 or digits in {"399001", "399006"}:
+    symbol = canonical_symbol(raw, kind="stock")
+    if symbol is None:
         return None
-    if digits in {"000001", "000688"} and raw.lower().startswith("sh"):
+    code, _board = symbol.split(".", 1)
+    if canonical_symbol(code, kind="stock") != symbol:
         return None
-    if digits.startswith("6"):
-        return f"{digits}.SH"
-    if digits.startswith(("0", "3")):
-        return f"{digits}.SZ"
-    if digits.startswith(("4", "8", "9")):
-        return f"{digits}.BJ"
-    return None
+    return symbol
 
 
 def _stock_code(value: Any) -> str | None:
@@ -123,7 +183,12 @@ def parse_stock_minute_payload(payload: Mapping[str, Any], symbol: str) -> list[
             continue
         minute = str(raw[0] or "").replace(":", "")[:4]
         price = _number(raw[1])
-        volume_lot = max(0.0, _number(raw[3]) or 0.0)
+        raw_volume = _number(raw[3])
+        # A missing/unparseable volume field is not evidence of a genuine
+        # zero-volume minute; coercing it to 0.0 previously fabricated
+        # amount=price*0*100=0 as though that were an observed value.
+        volume_missing = raw_volume is None
+        volume_lot = max(0.0, raw_volume or 0.0)
         if not re.fullmatch(r"\d{4}", minute) or price is None or price <= 0:
             continue
         cumulative_volume += volume_lot
@@ -135,10 +200,10 @@ def parse_stock_minute_payload(payload: Mapping[str, Any], symbol: str) -> list[
             "vwap": average_price,
             "volume_lot": volume_lot,
             "vol": volume_lot,
-            "amount": round((average_price or price) * volume_lot * 100, 4),
+            "amount": None if volume_missing else round((average_price or price) * volume_lot * 100, 4),
             "cumulative_volume_lot": cumulative_volume,
             "cumulative_segment": 0 if minute <= "1130" else 1,
-            "is_complete": True,
+            "is_complete": not volume_missing,
             "source": "longhuvip:GetStockTrendIncremental",
         })
     if rows:
@@ -358,9 +423,23 @@ def parse_tencent_quote_text(text: str, requested: Mapping[str, str]) -> list[di
 class LonghuVendorSource:
     def __init__(self, config: LonghuVendorConfig | None = None) -> None:
         self.config = config or LonghuVendorConfig.load()
-        self._session = requests.Session()
-        self._session.trust_env = False
-        self._session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json,*/*"})
+        # ``requests.Session`` is not documented thread-safe, but every
+        # method here is dispatched across up to ``config.workers`` (24)
+        # concurrent threads (``ThreadPoolExecutor`` in ``watch_quotes`` and
+        # ``full_market_vendor_rows``). A thread-local session avoids
+        # sharing that mutable connection-pool state across threads while
+        # still reusing one TCP/TLS connection per worker thread.
+        self._thread_local = threading.local()
+
+    @property
+    def _session(self) -> requests.Session:
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            session.trust_env = False
+            session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json,*/*"})
+            self._thread_local.session = session
+        return session
 
     def _credentials(self) -> dict[str, Any]:
         return {
@@ -379,6 +458,7 @@ class LonghuVendorSource:
         error: Exception | None = None
         for attempt in range(self.config.retries):
             try:
+                _rate_limit_before_request(url)
                 response = self._session.get(url, params=merged, timeout=self.config.timeout_seconds)
                 response.raise_for_status()
                 payload = response.json()
@@ -533,11 +613,20 @@ class LonghuVendorSource:
         return result
 
     def full_market_vendor_rows(
-        self, trade_date: date, *, plate_ids: Iterable[str] | None = None,
+        self, trade_date: date, *, plate_ids: Iterable[str] | None = None, now: Any = None,
     ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+        """Fetch and merge every industry plate's cross-section for one date.
+
+        ``live`` selects the exchange's real-time host and is intentionally
+        conservative: a container's local clock is UTC, so comparing against
+        ``date.today()`` treated 00:00-08:00 Beijing time as still "yesterday"
+        and a weekend/holiday as though it were a live session, silently
+        stamping the prior trading day's closed-market snapshot with today's
+        date.  ``cn_today()`` fixes the timezone; ``is_trading_day`` refuses
+        to call a non-trading day "live" at all.
+        """
         plates = list(plate_ids) if plate_ids is not None else self.industry_plates()
-        today = date.today()
-        live = trade_date == today
+        live = trade_date == cn_today(now) and is_trading_day(trade_date)
         by_symbol: dict[str, dict[str, Any]] = {}
         conflicts: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
@@ -578,10 +667,9 @@ class LonghuVendorSource:
             batch = ordered[start:start + MAX_TENCENT_BATCH_SIZE]
             requested = {self._tencent_key(symbol): symbol for symbol in batch}
             try:
-                response = self._session.get(
-                    "https://qt.gtimg.cn/q=" + ",".join(requested),
-                    timeout=self.config.timeout_seconds,
-                )
+                tencent_url = "https://qt.gtimg.cn/q=" + ",".join(requested)
+                _rate_limit_before_request(tencent_url)
+                response = self._session.get(tencent_url, timeout=self.config.timeout_seconds)
                 response.raise_for_status()
                 rows.extend(parse_tencent_quote_text(response.content.decode("gb18030", errors="replace"), requested))
             except Exception as error:

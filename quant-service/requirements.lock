@@ -1,0 +1,68 @@
+# Pinned resolution of requirements.txt + requirements-dev.txt.
+# Generated from the local venv (`pip freeze`) on 2026-09-02 and adjusted so it
+# satisfies requirements.txt (pandas pinned to the 2.x line, `pandas<3`).
+# The local venv is Python 3.13 while the service image is python:3.12-slim:
+# re-resolve this file inside the 3.12 image (pip freeze there) before relying
+# on it for `pip install -r requirements.lock` in Dockerfile/CI.
+akshare==1.18.93
+alembic==1.16.5
+annotated-types==0.8.0
+anyio==4.14.2
+baostock==0.8.9
+beautifulsoup4==4.15.0
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.5.0
+colorama==0.4.6
+curl_cffi==0.16.2
+decorator==5.3.1
+et_xmlfile==2.0.0
+fastapi==0.115.12
+greenlet==3.5.5
+h11==0.16.0
+html5lib==1.1
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+idna==3.19
+iniconfig==2.3.0
+jsonpath==0.82.2
+lxml==6.1.2
+Mako==1.4.1
+MarkupSafe==3.0.3
+mini-racer==0.14.1
+numpy==2.5.2
+openpyxl==3.1.5
+packaging==26.3
+pandas==2.3.3
+pluggy==1.6.0
+prometheus_client==0.22.1
+psycopg-binary==3.2.6
+psycopg-pool==3.2.6
+psycopg==3.2.6
+pyarrow==21.0.0
+pycparser==3.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+Pygments==2.21.0
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+PyYAML==6.0.3
+requests==2.34.2
+six==1.17.0
+soupsieve==2.9.2
+SQLAlchemy==2.0.43
+starlette==0.46.2
+tabulate==0.10.0
+tqdm==4.70.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.3
+urllib3==2.7.0
+uvicorn==0.34.2
+watchfiles==1.2.0
+webencodings==0.6.1
+websockets==17.1
+xlrd==2.0.2

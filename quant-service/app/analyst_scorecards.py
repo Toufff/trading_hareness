@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import date
+from decimal import Decimal
 from typing import Any, Callable
+
+from .market_rules import LIMIT_TOLERANCE
+from .outcome_recomputation import resolve_benchmark_close, resolve_exit
+
+#: Bumped from ``excess-return-v1``: entry/exit pricing and the fillability
+#: and delisting/suspension handling are now identical to
+#: ``outcome_recomputation`` (see the module docstring below) instead of a
+#: separate, inconsistent close-to-close computation that also made a 1-day
+#: horizon's return identically zero.
+METHODOLOGY_VERSION = "excess-return-v2"
 
 
 def readiness(connection: Any) -> list[dict[str, Any]]:
@@ -42,8 +54,17 @@ def recompute(
     db: Any,
     readiness: Callable[[Any], list[dict[str, Any]]],
 ) -> dict[str, Any]:
+    """Fold every fillable, settled stock claim into an (analyst, horizon) scorecard row.
+
+    Entry/exit pricing deliberately shares ``outcome_recomputation``'s rules
+    instead of a separate close-to-close computation: entry is the next
+    session's open (never credited through a locked limit-up/down open or a
+    suspended session), and the exit session is resolved from the trade
+    calendar and instrument lifecycle rather than the claim's own bar count,
+    so a 1-day horizon can no longer exit the same session it entered and a
+    suspension gap can no longer silently stretch the holding period.
+    """
     as_of_date = as_of_date or cn_today()
-    methodology = "excess-return-v1"
     with db.transaction() as connection:
         rows = connection.execute(
             r"""WITH signal_source AS (
@@ -52,7 +73,7 @@ def recompute(
                 -- excluded so an old local extraction cannot affect a scorecard.
                 SELECT remote_analyst_id AS analyst_id,subject_key AS symbol,direction,strength,horizon_days,available_at
                   FROM quant.analyst_claims
-                 WHERE scope='stock' AND subject_key ~ '^\d{6}\.(SH|SZ|BJ)$'
+                 WHERE scope='stock' AND subject_key ~ '^\d{6}\.(SH|SZ|BJ)$' AND direction<>0
               ), entry_exit AS (
                 SELECT s.analyst_id,s.horizon_days,s.direction,s.strength,
                   (SELECT b.trading_date FROM quant.canonical_bars_daily b
@@ -63,39 +84,44 @@ def recompute(
                   s.symbol
                 FROM signal_source s
                 WHERE (s.available_at AT TIME ZONE 'Asia/Shanghai')::date <= %s
-                  AND s.direction <> 0
-              ), priced AS (
-                SELECT e.*, be.close AS entry_close,
-                  (SELECT bx.close FROM quant.canonical_bars_daily bx WHERE bx.symbol=e.symbol AND bx.trading_date >= e.entry_date
-                    AND bx.trading_date <= %s
-                    ORDER BY bx.trading_date OFFSET (e.horizon_days - 1) LIMIT 1) AS exit_close,
-                  (SELECT bx.trading_date FROM quant.canonical_bars_daily bx WHERE bx.symbol=e.symbol AND bx.trading_date >= e.entry_date
-                    AND bx.trading_date <= %s
-                    ORDER BY bx.trading_date OFFSET (e.horizon_days - 1) LIMIT 1) AS exit_date,
-                  benchmark_entry.close AS benchmark_entry_close, benchmark_exit.close AS benchmark_exit_close
-                FROM entry_exit e
-                LEFT JOIN quant.canonical_bars_daily be ON be.symbol=e.symbol AND be.trading_date=e.entry_date
-                LEFT JOIN quant.canonical_bars_daily benchmark_entry ON benchmark_entry.symbol='000300.SH' AND benchmark_entry.trading_date=e.entry_date
-                LEFT JOIN LATERAL (
-                  SELECT close FROM quant.canonical_bars_daily bx WHERE bx.symbol='000300.SH' AND bx.trading_date >= e.entry_date
-                    AND bx.trading_date <= %s
-                  ORDER BY bx.trading_date OFFSET (e.horizon_days - 1) LIMIT 1
-                ) benchmark_exit ON true
-              ), measured AS (
-                SELECT analyst_id,horizon_days,direction,strength,exit_date,
-                  ((exit_close / NULLIF(entry_close,0))-1) AS raw_return,
-                  ((benchmark_exit_close / NULLIF(benchmark_entry_close,0))-1) AS benchmark_return
-                FROM priced WHERE entry_close IS NOT NULL AND exit_close IS NOT NULL
               )
-              SELECT analyst_id,horizon_days,count(*)::int observations,
-                 avg(CASE WHEN direction*raw_return > 0 THEN 1.0 ELSE 0.0 END) hit_rate,
-                 avg(raw_return - coalesce(benchmark_return,0)) mean_excess_return,
-                 avg(direction*raw_return) mean_directional_return,
-                 avg(1-abs(strength - CASE WHEN direction*raw_return > 0 THEN 1 ELSE 0 END)) calibration_score
-              FROM measured WHERE exit_date IS NOT NULL AND exit_date<=%s GROUP BY analyst_id,horizon_days""",
-            (as_of_date, as_of_date, as_of_date, as_of_date, as_of_date, as_of_date),
+              -- A locked limit-up (long) or limit-down (short-thesis) open, or a
+              -- suspended session, is not a fillable entry and is left unsettled
+              -- rather than credited/debited as if a real order could have been placed.
+              SELECT e.*, entry.open entry_price, benchmark_entry.close AS benchmark_entry_close
+                FROM entry_exit e
+                JOIN quant.canonical_bars_daily entry ON entry.symbol=e.symbol AND entry.trading_date=e.entry_date
+                LEFT JOIN quant.canonical_bars_daily benchmark_entry ON benchmark_entry.symbol='000300.SH' AND benchmark_entry.trading_date=e.entry_date
+               WHERE entry.open IS NOT NULL AND NOT entry.is_suspended
+                 AND ((e.direction>0 AND (entry.limit_up IS NULL OR entry.open<entry.limit_up-%s))
+                   OR (e.direction<0 AND (entry.limit_down IS NULL OR entry.open>entry.limit_down+%s)))""",
+            (as_of_date, as_of_date, LIMIT_TOLERANCE, LIMIT_TOLERANCE),
         ).fetchall()
+        buckets: dict[tuple[str, int], dict[str, list[float]]] = defaultdict(
+            lambda: {"hits": [], "excess": [], "directional": [], "calibration": []}
+        )
         for row in rows:
+            resolved = resolve_exit(connection, row["symbol"], row["entry_date"], int(row["horizon_days"]), as_of_date)
+            if resolved["status"] in ("pending", "suspension_in_window"):
+                continue
+            entry_price = Decimal(row["entry_price"])
+            exit_close = Decimal(resolved["exit_close"])
+            raw_return = float(exit_close / entry_price - 1)
+            benchmark_exit_close = resolve_benchmark_close(connection, resolved["target_exit_date"])
+            benchmark_return = (float(Decimal(benchmark_exit_close) / Decimal(row["benchmark_entry_close"]) - 1)
+                                if benchmark_exit_close is not None and row["benchmark_entry_close"] else None)
+            direction = int(row["direction"])
+            strength = float(row["strength"] or 0.0)
+            bucket = buckets[(str(row["analyst_id"]), int(row["horizon_days"]))]
+            bucket["hits"].append(1.0 if direction * raw_return > 0 else 0.0)
+            bucket["excess"].append(raw_return - (benchmark_return or 0.0))
+            bucket["directional"].append(direction * raw_return)
+            bucket["calibration"].append(1 - abs(strength - (1.0 if direction * raw_return > 0 else 0.0)))
+        scorecards = 0
+        for (analyst_id, horizon_days), values in sorted(buckets.items()):
+            observations = len(values["hits"])
+            if not observations:
+                continue
             connection.execute(
                 """INSERT INTO quant.analyst_scorecards(analyst_id,horizon_days,as_of_date,observations,hit_rate,mean_excess_return,
                    mean_directional_return,calibration_score,methodology_version)
@@ -103,13 +129,15 @@ def recompute(
                    ON CONFLICT(analyst_id,horizon_days,as_of_date,methodology_version) DO UPDATE SET observations=EXCLUDED.observations,
                    hit_rate=EXCLUDED.hit_rate,mean_excess_return=EXCLUDED.mean_excess_return,
                    mean_directional_return=EXCLUDED.mean_directional_return,calibration_score=EXCLUDED.calibration_score""",
-                (row["analyst_id"], row["horizon_days"], as_of_date, row["observations"], row["hit_rate"],
-                 row["mean_excess_return"], row["mean_directional_return"], row["calibration_score"], methodology),
+                (analyst_id, horizon_days, as_of_date, observations,
+                 sum(values["hits"]) / observations, sum(values["excess"]) / observations,
+                 sum(values["directional"]) / observations, sum(values["calibration"]) / observations, METHODOLOGY_VERSION),
             )
+            scorecards += 1
         scorecard_readiness = readiness(connection)
-    return {"as_of_date": str(as_of_date), "scorecards": len(rows), "methodology_version": methodology,
+    return {"as_of_date": str(as_of_date), "scorecards": scorecards, "methodology_version": METHODOLOGY_VERSION,
             "readiness": scorecard_readiness,
             "notice": "仅有方向明确且未来价格路径已结算的股票观点会进入成绩单；主题和中性观点保留为研究上下文。"}
 
 
-__all__ = ["readiness", "recompute"]
+__all__ = ["METHODOLOGY_VERSION", "readiness", "recompute"]

@@ -12,7 +12,6 @@ import argparse
 import ast
 from collections import Counter
 from pathlib import Path
-import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]

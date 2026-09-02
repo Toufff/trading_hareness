@@ -8,6 +8,8 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool, ConnectionPool
 from psycopg.rows import dict_row
 
+from . import db_dsn
+
 
 SCHEMA_SQL = """
 CREATE SCHEMA IF NOT EXISTS quant;
@@ -1660,21 +1662,81 @@ def pool_settings(environ: Mapping[str, str] | None = None) -> dict[str, int]:
     return {"min_size": minimum, "max_size": maximum, "timeout_seconds": bounded("QUANT_DB_POOL_TIMEOUT_SECONDS", 10, 1, 60)}
 
 
+#: Default per-statement budget for every connection this process opens. A
+#: query stuck behind a lock or a runaway plan previously ran unbounded; a
+#: single slow query in one worker could not otherwise be told apart from a
+#: genuinely healthy long-running one. Long, already-audited call sites
+#: (post-close stage, backfill, replay) opt into a wider budget explicitly via
+#: ``Database.transaction(statement_timeout_ms=...)`` / ``long_transaction``
+#: rather than the connection default being widened for everyone.
+DEFAULT_STATEMENT_TIMEOUT_MS = 30_000
+DEFAULT_LOCK_TIMEOUT_MS = 5_000
+DEFAULT_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS = 60_000
+#: Budget for a caller that has explicitly opted into "long task" handling
+#: (post-close stage, backfill, replay) via ``long_transaction()``.
+LONG_TASK_STATEMENT_TIMEOUT_MS = 300_000
+
+
+def _bounded_timeout_ms(name: str, default_ms: int, *, minimum_ms: int = 0, maximum_ms: int = 900_000,
+                        environ: Mapping[str, str] | None = None) -> int:
+    """Read one millisecond timeout budget from the environment, bounded."""
+    env = os.environ if environ is None else environ
+    try:
+        return min(maximum_ms, max(minimum_ms, int(env.get(name, default_ms))))
+    except (TypeError, ValueError):
+        return default_ms
+
+
+def connection_statement_timeouts_ms(environ: Mapping[str, str] | None = None) -> dict[str, int]:
+    """Resolve the three session-level guards applied to every connection."""
+    return {
+        "statement_timeout_ms": _bounded_timeout_ms(
+            "QUANT_DB_STATEMENT_TIMEOUT_MS", DEFAULT_STATEMENT_TIMEOUT_MS, environ=environ,
+        ),
+        "lock_timeout_ms": _bounded_timeout_ms(
+            "QUANT_DB_LOCK_TIMEOUT_MS", DEFAULT_LOCK_TIMEOUT_MS, maximum_ms=300_000, environ=environ,
+        ),
+        "idle_in_transaction_session_timeout_ms": _bounded_timeout_ms(
+            "QUANT_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS", DEFAULT_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS, environ=environ,
+        ),
+    }
+
+
+def connection_options_string(environ: Mapping[str, str] | None = None, *, runtime_profile: str = "full") -> str:
+    """Build the ``-c ...`` libpq options string shared by both pools.
+
+    ``TimeZone`` is fixed rather than environment-configurable: every
+    timestamp comparison and ``now()`` call across this service already
+    assumes the China trading calendar, so a different session time zone
+    would silently corrupt date boundaries rather than offer a supported
+    deployment choice.
+    """
+    timeouts = connection_statement_timeouts_ms(environ)
+    return (
+        f"-c app.quant_runtime_profile={runtime_profile} "
+        f"-c statement_timeout={timeouts['statement_timeout_ms']} "
+        f"-c lock_timeout={timeouts['lock_timeout_ms']} "
+        f"-c idle_in_transaction_session_timeout={timeouts['idle_in_transaction_session_timeout_ms']} "
+        f"-c TimeZone=Asia/Shanghai"
+    )
+
+
 class Database:
     def __init__(self) -> None:
         # Edge-only evidence triggers use this connection-local setting.  The
         # same migrations run on the research workstation, but its imports
         # must never recursively append a second change journal.
         runtime_profile = str(os.getenv("QUANT_RUNTIME_PROFILE", "full")).strip().lower() or "full"
+        dsn_params = db_dsn.connection_params()
         self._connect_kwargs = {
-            "host": os.getenv("PGHOST", "postgres"),
-            "port": int(os.getenv("PGPORT", "5432")),
-            "dbname": os.getenv("PGDATABASE", "n8n"),
-            "user": os.getenv("PGUSER", "n8n"),
-            "password": os.getenv("PGPASSWORD", ""),
+            "host": dsn_params["host"],
+            "port": int(dsn_params["port"]),
+            "dbname": dsn_params["dbname"],
+            "user": dsn_params["user"],
+            "password": dsn_params["password"],
             "row_factory": dict_row,
             "connect_timeout": 8,
-            "options": f"-c app.quant_runtime_profile={runtime_profile}",
+            "options": connection_options_string(runtime_profile=runtime_profile),
         }
         self._pool_settings = pool_settings()
         # Keep construction side-effect free so import-time unit tests do not
@@ -1708,11 +1770,29 @@ class Database:
         }
 
     @contextmanager
-    def transaction(self) -> Iterator[psycopg.Connection]:
+    def transaction(self, *, statement_timeout_ms: int | None = None) -> Iterator[psycopg.Connection]:
+        """Open one transaction, optionally widening its statement_timeout.
+
+        The connection-level default (``QUANT_DB_STATEMENT_TIMEOUT_MS``,
+        30s) protects the common case. A caller that already knows its work
+        is a bounded long task (post-close stage, backfill, replay) passes an
+        explicit ``statement_timeout_ms`` instead of quietly inheriting a
+        budget too small for it; ``long_transaction`` is a named shortcut for
+        the common 300s case.
+        """
         self.open()
         with self._pool.connection() as connection:
             with connection.transaction():
+                if statement_timeout_ms is not None:
+                    # SET LOCAL does not accept a bind parameter in Postgres's
+                    # grammar; the value is our own bounded int, never
+                    # caller-supplied text, so inlining it is safe.
+                    connection.execute(f"SET LOCAL statement_timeout = {int(statement_timeout_ms)}")
                 yield connection
+
+    def long_transaction(self, statement_timeout_ms: int | None = None) -> "Iterator[psycopg.Connection]":
+        """Open one transaction budgeted for post-close stage/backfill/replay work."""
+        return self.transaction(statement_timeout_ms=statement_timeout_ms or LONG_TASK_STATEMENT_TIMEOUT_MS)
 
     def migrate(self) -> None:
         """Legacy bootstrap only; new schema changes belong to Alembic."""
@@ -1756,10 +1836,16 @@ class AsyncDatabase:
         self._connect_kwargs = {**source._connect_kwargs}
         self._pool_settings = dict(source._pool_settings)
         try:
-            async_min = max(1, min(4, int(os.getenv("QUANT_ASYNC_READ_POOL_MIN_SIZE", "1"))))
-            async_max = max(async_min, min(8, int(os.getenv("QUANT_ASYNC_READ_POOL_MAX_SIZE", "4"))))
+            # Defaults raised from 1/4 to 2/8 (WP10 finding): every dashboard
+            # GET shares this pool, and two long pg_stat-estimate readiness
+            # projections could previously fill it alone. The hardcoded
+            # ``min(4, ...)``/``min(8, ...)`` ceilings also made
+            # QUANT_ASYNC_READ_POOL_MAX_SIZE unable to exceed 4/8 regardless
+            # of what an operator configured; the new ceiling is 16.
+            async_min = max(1, min(16, int(os.getenv("QUANT_ASYNC_READ_POOL_MIN_SIZE", "2"))))
+            async_max = max(async_min, min(16, int(os.getenv("QUANT_ASYNC_READ_POOL_MAX_SIZE", "8"))))
         except ValueError:
-            async_min, async_max = 1, 4
+            async_min, async_max = 2, 8
         self._pool_settings["min_size"] = async_min
         self._pool_settings["max_size"] = async_max
         self._pool = AsyncConnectionPool(
@@ -1791,11 +1877,22 @@ class AsyncDatabase:
         }
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[psycopg.AsyncConnection]:
+    async def transaction(self, *, statement_timeout_ms: int | None = None) -> AsyncIterator[psycopg.AsyncConnection]:
+        """Open one async transaction, optionally widening its statement_timeout.
+
+        See ``Database.transaction`` for why this is opt-in per call rather
+        than a wider connection-level default.
+        """
         await self.open()
         async with self._pool.connection() as connection:
             async with connection.transaction():
+                if statement_timeout_ms is not None:
+                    await connection.execute(f"SET LOCAL statement_timeout = {int(statement_timeout_ms)}")
                 yield connection
+
+    def long_transaction(self, statement_timeout_ms: int | None = None) -> "AsyncIterator[psycopg.AsyncConnection]":
+        """Open one async transaction budgeted for a long research read/write."""
+        return self.transaction(statement_timeout_ms=statement_timeout_ms or LONG_TASK_STATEMENT_TIMEOUT_MS)
 
     async def ping(self) -> None:
         async with self.transaction() as connection:

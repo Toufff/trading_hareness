@@ -22,7 +22,7 @@ def load_exact_board_context_rows(database: Any, as_of_date: date) -> list[dict[
     than the former ``no_exact_ths_concept_mapping`` dead end.  Both branches
     are persisted evidence reads; this function never calls a provider.
     """
-    membership_predicate = point_in_time_membership_predicate("member")
+    membership_predicate = point_in_time_membership_predicate("member", "%(trade_date)s")
     with database.transaction() as connection:
         rows = connection.execute(
             f"""WITH exact_concepts AS (
@@ -34,12 +34,12 @@ def load_exact_board_context_rows(database: Any, as_of_date: date) -> list[dict[
                      JOIN quant.sectors sector
                        ON sector.taxonomy_key=flow.taxonomy_key AND sector.sector_key=flow.sector_key
                     WHERE member.taxonomy_key='ths_concept_flow' AND {membership_predicate}
-                      AND flow.taxonomy_key='ths_concept_flow' AND flow.trading_date=%s
+                      AND flow.taxonomy_key='ths_concept_flow' AND flow.trading_date=%(trade_date)s
                ), latest_longhu_report AS (
                    SELECT observed_at,payload
                      FROM quant.intraday_board_reports
                     WHERE status='completed'
-                      AND (observed_at AT TIME ZONE 'Asia/Shanghai')::date=%s
+                      AND (observed_at AT TIME ZONE 'Asia/Shanghai')::date=%(trade_date)s
                       AND source_status->>'provider'='longhuvip_composite'
                     ORDER BY observed_at DESC LIMIT 1
                ), longhu_boards AS (
@@ -56,7 +56,7 @@ def load_exact_board_context_rows(database: Any, as_of_date: date) -> list[dict[
                           board.leading_label,board.provider_key,board.available_at,board.taxonomy_key
                      FROM quant.stock_money_flow_daily stock
                      JOIN longhu_boards board ON board.sector_key=stock.raw->>'plate_id'
-                    WHERE stock.trading_date=%s AND stock.provider='longhuvip_composite'
+                    WHERE stock.trading_date=%(trade_date)s AND stock.provider='longhuvip_composite'
                       AND stock.source='longhuvip_main_net'
                )
                SELECT * FROM exact_concepts
@@ -65,7 +65,7 @@ def load_exact_board_context_rows(database: Any, as_of_date: date) -> list[dict[
                 WHERE NOT EXISTS (
                     SELECT 1 FROM exact_concepts concept WHERE concept.symbol=longhu.symbol
                 )""",
-            (as_of_date, as_of_date, as_of_date, as_of_date, as_of_date, as_of_date),
+            {"trade_date": as_of_date},
         ).fetchall()
     return [dict(row) for row in rows]
 

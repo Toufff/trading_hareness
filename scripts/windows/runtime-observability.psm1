@@ -256,6 +256,48 @@ function Invoke-RuntimeLogRetention {
         Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
+function Resolve-OwnerTunnelSshTarget {
+    # Owner-side automation (dashboard tunnel, shared-peer tunnels, runtime
+    # verification) historically always connected via a root-capable ssh
+    # config alias. When runtime.env carries all four
+    # OWNER_TUNNEL_SSH_{USER,KEY,HOST,PORT} keys, connect instead with a
+    # dedicated, restricted key (see scripts/shared-peer/install-owner-tunnel-key.sh
+    # for the matching authorized_keys entry). When any key is missing, fall
+    # back to the existing alias so unattended deployments keep working, and
+    # emit a clear warning so the gap is visible in logs/output.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RuntimeEnv,
+        [Parameter(Mandatory)][string]$FallbackAlias
+    )
+    $config = @{}
+    if (Test-Path -LiteralPath $RuntimeEnv -PathType Leaf) {
+        foreach ($line in [IO.File]::ReadAllLines($RuntimeEnv, [Text.Encoding]::UTF8)) {
+            if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { $config[$Matches[1]] = $Matches[2] }
+        }
+    }
+    $user = $config['OWNER_TUNNEL_SSH_USER']
+    $key = $config['OWNER_TUNNEL_SSH_KEY']
+    $sshHost = $config['OWNER_TUNNEL_SSH_HOST']
+    $port = $config['OWNER_TUNNEL_SSH_PORT']
+    if ($user -and $key -and $sshHost -and $port) {
+        return [pscustomobject]@{
+            Mode = 'restricted_key'
+            ConnectionArguments = @('-i', $key, '-p', $port, '-o', 'StrictHostKeyChecking=yes', '-o', 'IdentitiesOnly=yes')
+            Destination = "$user@$sshHost"
+        }
+    }
+    Write-Warning ("OWNER_TUNNEL_SSH_USER/OWNER_TUNNEL_SSH_KEY/OWNER_TUNNEL_SSH_HOST/OWNER_TUNNEL_SSH_PORT are not " + `
+        "all set in $RuntimeEnv; falling back to the ssh config alias '$FallbackAlias'. This alias is typically " + `
+        "root-capable. Run scripts/shared-peer/install-owner-tunnel-key.sh to provision a restricted owner tunnel " + `
+        "key and set the four OWNER_TUNNEL_SSH_* keys in runtime.env to stop using the root alias for unattended tunnels.")
+    return [pscustomobject]@{
+        Mode = 'alias_fallback'
+        ConnectionArguments = @()
+        Destination = $FallbackAlias
+    }
+}
+
 function Resolve-PostgresStartupAction {
     [CmdletBinding()]
     param(
@@ -290,5 +332,6 @@ Export-ModuleMember -Function @(
     'Request-RuntimeStop',
     'Invoke-RuntimeLogRetention',
     'Resolve-PostgresStartupAction',
-    'Assert-ReservedRemoteTunnelPort'
+    'Assert-ReservedRemoteTunnelPort',
+    'Resolve-OwnerTunnelSshTarget'
 )

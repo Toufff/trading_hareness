@@ -8,7 +8,6 @@ responsibility to retain raw source evidence.
 from __future__ import annotations
 
 import asyncio
-import functools
 import os
 import re
 import threading
@@ -175,6 +174,59 @@ class ProviderCallError(RuntimeError):
     def __init__(self, message: str, failures: tuple[tuple[str, str], ...] = ()) -> None:
         super().__init__(message)
         self.failures = failures
+
+
+class ProviderRateLimitedError(ProviderCallError):
+    """A provider explicitly asked the caller to slow down (HTTP 429 or similar).
+
+    Distinct from a transport or contract failure: correct backpressure
+    behaviour must not accumulate the same consecutive-failure state used to
+    trip the generic circuit breaker (see ``provider_health.record_provider_failure``).
+    """
+
+    def __init__(self, message: str, failures: tuple[tuple[str, str], ...] = (),
+                *, retry_after: float | None = None) -> None:
+        super().__init__(message, failures)
+        self.retry_after = retry_after
+
+
+class ProviderUnauthorizedError(ProviderCallError):
+    """The configured credential itself was rejected (HTTP 401/403/invalid token).
+
+    A bad key fails every subsequent call identically; it is not evidence of
+    upstream flakiness, so it is reported to ``provider_health`` as a distinct
+    ``unauthorized`` status rather than folded into the generic circuit.
+    """
+
+
+#: Coarse text markers used to classify an already-formatted failure message
+#: when the underlying HTTP status is not otherwise available to the caller
+#: (the retry/fallback loops in this module join multiple attempts' messages
+#: before raising). Matches are intentionally narrow: audit item 9 asks only
+#: to separate genuine rate limiting/bad-credential responses, not every
+#: "not purchased"/"not supported" capability rejection already handled by
+#: ``provider_health.provider_error_availability``.
+_RATE_LIMIT_MARKERS = ("http 429", "too many requests", "rate limit", "限流", "请求过于频繁")
+_UNAUTHORIZED_MARKERS = (
+    "http 401", "http 403", "unauthorized", "invalid token", "token expired",
+    "invalid api key", "invalid credential", "token无效", "认证失败",
+)
+
+
+def classify_provider_error_text(message: str) -> tuple[type[ProviderCallError], float | None]:
+    """Infer a coarse provider failure class from an already-formatted message.
+
+    Returns the exception subclass to raise (or ``ProviderCallError`` itself
+    when nothing matches) plus a ``Retry-After``-style hint in seconds when
+    one could be parsed out of the text.
+    """
+    lowered = message.lower()
+    if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+        match = re.search(r"retry[-_ ]after\D{0,5}(\d+(?:\.\d+)?)", lowered)
+        return ProviderRateLimitedError, (float(match.group(1)) if match else None)
+    if any(marker in lowered for marker in _UNAUTHORIZED_MARKERS):
+        return ProviderUnauthorizedError, None
+    return ProviderCallError, None
 
 
 @dataclass(frozen=True)
@@ -703,7 +755,13 @@ async def call_provider(provider: TushareProvider, api_name: str, params: dict[s
                     await asyncio.sleep(REALTIME_RETRY_BACKOFF_SECONDS)
                 else:
                     await asyncio.sleep(retry_delay_seconds(response_headers, 0.8))
-        raise ProviderCallError(f"{provider.label} failed with configured credentials: " + "; ".join(failures))
+        joined_failures = f"{provider.label} failed with configured credentials: " + "; ".join(failures)
+        error_cls, retry_after = classify_provider_error_text(joined_failures)
+        if error_cls is ProviderRateLimitedError:
+            raise ProviderRateLimitedError(joined_failures, retry_after=retry_after)
+        if error_cls is ProviderUnauthorizedError:
+            raise ProviderUnauthorizedError(joined_failures)
+        raise ProviderCallError(joined_failures)
 
     # The uses_super_get branch above already returned; this covers the sdk_path
     # (super_sdk) and backup_rest (never realtime-capable) protocols.
@@ -882,4 +940,10 @@ async def call_with_fallback(api_name: str, params: dict[str, Any], fields: str 
     if first_empty_provider is not None:
         return ProviderCall(provider=first_empty_provider, rows=[], failed_providers=tuple(failures),
                             empty_providers=tuple(empty_providers))
-    raise ProviderCallError(" | ".join(f"{key}: {error}" for key, error in failures), tuple(failures))
+    joined_failures = " | ".join(f"{key}: {error}" for key, error in failures)
+    error_cls, retry_after = classify_provider_error_text(joined_failures)
+    if error_cls is ProviderRateLimitedError:
+        raise ProviderRateLimitedError(joined_failures, tuple(failures), retry_after=retry_after)
+    if error_cls is ProviderUnauthorizedError:
+        raise ProviderUnauthorizedError(joined_failures, tuple(failures))
+    raise ProviderCallError(joined_failures, tuple(failures))

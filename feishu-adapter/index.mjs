@@ -24,6 +24,11 @@ import { shouldRedownloadRetryMedia } from './retry-media.mjs';
 import { parsePaperIngestIds } from './paper-ingest-command.mjs';
 import { parsePaperFeedback } from './paper-feedback-command.mjs';
 import { personalDecisionResearchPaths } from './personal-decision-routes.mjs';
+import { createOperatorAuth, isMutatingApiRoute, isSameOriginRequest, resolveOperatorAuthConfig } from './dashboard-auth.mjs';
+import { createOauthStateStore } from './oauth-state.mjs';
+import { manualEventId, manualMessageId } from './manual-ids.mjs';
+import { errorMessage, routeErrorHandler, sanitizeErrorForLog } from './error-response.mjs';
+import { filenameFromHeaders } from './filename-utils.mjs';
 import Busboy from 'busboy';
 
 const required = ['FEISHU_APP_ID', 'FEISHU_APP_SECRET', 'N8N_TEXT_WEBHOOK_URL', 'N8N_MEDIA_PART_WEBHOOK_URL', 'N8N_MEDIA_FINALIZE_WEBHOOK_URL'];
@@ -52,10 +57,29 @@ if (!supportedAlertReceiveIdTypes.has(feishuAlertReceiveIdType)) {
 	throw new Error('FEISHU_ALERT_RECEIVE_ID_TYPE must be chat_id, open_id, user_id, or union_id');
 }
 const dashboardPort = Number(process.env.DASHBOARD_PORT ?? 3000);
-const dashboardHost = String(process.env.DASHBOARD_HOST ?? '0.0.0.0').trim() || '0.0.0.0';
+// Loopback-only by default: this dashboard has no TLS of its own and, once
+// authenticated, can inject a quant-service write key into upstream
+// requests. Anything wider than 127.0.0.1 must be an explicit operator
+// choice (e.g. behind an authenticated reverse proxy or SSH tunnel).
+const dashboardHost = String(process.env.DASHBOARD_HOST ?? '127.0.0.1').trim() || '127.0.0.1';
+const operatorAuthConfig = resolveOperatorAuthConfig(process.env);
+const operatorAuth = createOperatorAuth(operatorAuthConfig);
+const baiduPanOauthStates = createOauthStateStore();
+// Bounds every larkClient.* / WSClient call (message send/update, image/file
+// upload, message-resource download, token refresh). This is an axios *idle*
+// timeout (no bytes for this long), not a total-duration cap, so it does not
+// truncate a slow-but-progressing large media download while still forcing a
+// genuinely hung request to fail instead of leaving a poller's `running`
+// flag stuck forever.
+Lark.defaultHttpInstance.defaults.timeout = Number(process.env.FEISHU_HTTP_TIMEOUT_MS ?? 20_000);
 const longConnectionEnabled = String(process.env.FEISHU_LONG_CONNECTION_ENABLED ?? 'true').toLowerCase() !== 'false';
 const frontendDist = process.env.FRONTEND_DIST ?? '/app/frontend-dist';
 const frontendMode = process.env.FRONTEND_MODE ?? (existsSync(frontendDist) ? 'spa' : 'legacy');
+if (frontendMode !== 'spa') {
+	console.warn(`前端回退到旧版内联 HTML（frontend_mode=${frontendMode}）：未找到构建产物目录 ${frontendDist}，或 FRONTEND_MODE 已显式设置。生产部署应确认 frontend/dist 已随镜像一起发布。`);
+}
+const manualRelayMaxFileBytes = Number(process.env.MANUAL_RELAY_MAX_FILE_BYTES ?? 200 * 1024 * 1024);
+const manualRelayMaxTotalBytes = Number(process.env.MANUAL_RELAY_MAX_TOTAL_BYTES ?? 1024 * 1024 * 1024);
 const importTimeZone = process.env.IMPORT_TIME_ZONE ?? 'Asia/Shanghai';
 const remoteUploadPartBytes = 8 * 1024 * 1024;
 const uploadPartBytes = Number(process.env.UPLOAD_PART_BYTES ?? remoteUploadPartBytes);
@@ -334,8 +358,12 @@ async function cleanupUnreferencedMedia() {
 	} catch (error) { console.error(`本地媒体对账失败：${error instanceof Error ? error.message : String(error)}`); }
 }
 async function reconcileNow() {
+	// runLocalAnalysisQueue and cleanupUnreferencedMedia each used to be
+	// scheduled a second time below at the same (or, for the analysis queue, a
+	// buggy near-zero) cadence. cleanupUnreferencedMedia has no cadence of its
+	// own worth preserving separately, so it stays only here; the analysis
+	// queue keeps its own faster, corrected interval below instead.
 	await runDeliveryQueue();
-	await runLocalAnalysisQueue();
 	await cleanupUnreferencedMedia();
 	if (Date.now() - lastLedgerPruneAt >= 60 * 60 * 1000) {
 		await ledger.pruneHistory(ledgerRetentionDays);
@@ -347,8 +375,11 @@ async function reconcileNow() {
 setInterval(() => {
 	void reconcileNow().catch((error) => console.error(`统一对账失败：${error instanceof Error ? error.message : String(error)}`));
 }, reconcileSeconds * 1000).unref();
-setInterval(() => { void cleanupUnreferencedMedia(); }, reconcileSeconds * 1000).unref();
-setInterval(runLocalAnalysisQueue, Math.max(30, Number(process.env.ANALYSIS_POLL_SECONDS ?? 60) * 1000)).unref();
+// Math.max used to be applied to the already-multiplied millisecond value,
+// so its floor of 30 meant 30 milliseconds instead of 30 seconds -- this ran
+// the analysis queue effectively in a busy loop. The floor now applies to
+// the seconds value before the *1000 conversion.
+setInterval(runLocalAnalysisQueue, Math.max(30, Number(process.env.ANALYSIS_POLL_SECONDS ?? 60)) * 1000).unref();
 setInterval(() => { void runDeliveryQueue(); }, 10_000).unref();
 void reconcileNow().catch((error) => console.error(`启动对账失败：${error instanceof Error ? error.message : String(error)}`));
 const sourceRoutes = new Map((sourceRegistry.routes ?? []).map((route) => [String(route.tag).toLowerCase(), route]));
@@ -526,30 +557,15 @@ async function readAssetPart(resource, offset, bytes) {
 	finally { await file.close(); }
 }
 
-async function fetchWithBackoff(url, options, { maxAttempts = 4, baseDelayMs = 500 } = {}) {
-	let lastError; let lastResponse;
-	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-		try {
-			const response = await fetch(url, options);
-			if (response.ok || (response.status >= 400 && response.status < 500)) return response;
-			lastResponse = response;
-			lastError = new Error(`HTTP ${response.status}`);
-		} catch (error) { lastError = error; }
-		if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, baseDelayMs * 2 ** (attempt - 1) + Math.floor(Math.random() * 200)));
-	}
-	if (lastResponse) return lastResponse;
-	throw lastError ?? new Error('request failed');
-}
-
 async function hydrateRemotePartState(resources) {
 	if (!mediaStateWebhookUrl) return;
 	for (const resource of resources) {
 		if (!resource.remote_upload_id) continue;
 		try {
-			const response = await fetchWithBackoff(mediaStateWebhookUrl, {
+			const response = await fetch(mediaStateWebhookUrl, {
 				method: 'POST', headers: { 'content-type': 'application/json' },
 				body: JSON.stringify({ upload_id: resource.remote_upload_id }), signal: AbortSignal.timeout(130_000),
-			}, { maxAttempts: 1 });
+			});
 			if (!response.ok) continue;
 			const state = await response.json();
 			const received = state?.upload?.received_parts ?? state?.received_parts ?? state?.parts_received ?? [];
@@ -562,12 +578,6 @@ async function hydrateRemotePartState(resources) {
 			console.warn(`无法读取远端上传会话 ${resource.remote_upload_id}：${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
-}
-
-function filenameFromHeaders(headers, fallback) {
-	const value = headers?.['content-disposition'] ?? headers?.['Content-Disposition'];
-	const match = typeof value === 'string' && value.match(/filename\*?=(?:UTF-8''|\")?([^;\"]+)/i);
-	return match ? decodeURIComponent(match[1].replace(/\"/g, '')).replace(/[^\w.-]+/g, '_') : fallback;
 }
 
 async function downloadMedia(data, messageResourceApi = null) {
@@ -627,15 +637,34 @@ function sendSse(response, event, payload) {
 	response.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
 }
 
+// /events is an unauthenticated, read-only monitoring feed (see dashboard-auth.mjs)
+// and has historically been proxied further (see the audit note on
+// deploy/stockbrain-local-gateway.nginx.conf). It must never carry the raw
+// Feishu event payload or sender/chat identifiers -- only enough to see
+// ingestion progress.
+function publicEventView(event) {
+	const { raw, sender_open_id, chat_id, ...redacted } = event;
+	return redacted;
+}
+
+// /jobs is likewise unauthenticated. `payload` carries the full original
+// event (including raw sender/chat identifiers and message text); operators
+// needing that detail already have the operator key required by
+// /api/jobs/:id/retry and other mutating routes.
+function publicJobView(job) {
+	const { payload, ...redacted } = job;
+	return redacted;
+}
+
 function broadcastSnapshot() {
-	for (const response of eventStreams) sendSse(response, 'snapshot', recentEvents);
+	for (const response of eventStreams) sendSse(response, 'snapshot', recentEvents.map(publicEventView));
 }
 
 function addEvent(data) {
 	const event = summarizeEvent(data);
 	recentEvents.unshift(event);
 	if (recentEvents.length > maxRecentEvents) recentEvents.pop();
-	for (const response of eventStreams) sendSse(response, 'message', event);
+	for (const response of eventStreams) sendSse(response, 'message', publicEventView(event));
 	return event;
 }
 
@@ -718,13 +747,18 @@ const relayHtml = `<!doctype html>
   :root{color-scheme:dark;font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0b1020;color:#edf2ff}body{margin:0}main{max-width:820px;margin:0 auto;padding:36px 24px 64px}header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:26px}h1{margin:0;font-size:29px}p{color:#aab7d4;line-height:1.6}a{color:#8eb3ff}form{background:#131b31;border:1px solid #263452;border-radius:14px;padding:22px;display:grid;gap:18px}label{display:grid;gap:8px;color:#cbd7f2;font-size:14px}select,input,textarea,button{font:inherit;border-radius:9px;border:1px solid #405276;background:#0b1020;color:#edf2ff;padding:10px 12px}textarea{min-height:190px;resize:vertical;line-height:1.55}.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}.drop{border:1px dashed #5272ad;border-radius:10px;padding:20px;text-align:center;color:#aab7d4}.drop.drag{background:#17274a;border-color:#8eb3ff}.files{margin:0;padding-left:20px;color:#cbd7f2;font-size:14px}.files:empty{display:none}button{cursor:pointer;background:#3268c6;border:0;font-weight:700}button:disabled{opacity:.65;cursor:wait}#result{min-height:22px;color:#aab7d4}.ok{color:#82efb7}.bad{color:#ffb6c5}.hint{font-size:13px;color:#8fa0c3;margin:0}.tag{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 </style></head><body><main>
 <header><div><h1>本机消息投递台</h1><p>从飞书、微信或网页复制文字；拖入或粘贴图片/音频后直接进入市场复盘工作流。</p></div><a href="/">查看处理监控</a></header>
-<form id="relay"><div class="row"><label>路由标签<select id="tag">${relayRouteOptions}</select></label><label>来源备注（可选）<input id="source" maxlength="120" placeholder="如：微信个人群 / 飞书群 A" /></label></div>
+<form id="relay"><div class="row"><label>操作员密钥<input id="operatorKey" type="password" autocomplete="off" placeholder="DASHBOARD_OPERATOR_KEY（保存在本浏览器）" /></label><label>路由标签<select id="tag">${relayRouteOptions}</select></label></div>
+<div class="row"><label>来源备注（可选）<input id="source" maxlength="120" placeholder="如：微信个人群 / 飞书群 A" /></label></div>
 <div class="row"><label>指定日期（可选）<input id="date" type="date" /></label><label>指定时间（可选）<input id="time" type="time" /></label></div>
 <label>正文<textarea id="text" placeholder="粘贴消息正文。若不指定日期和时间，按本机收到内容时的北京时间记录。"></textarea><button id="fillClipboard" type="button">填入当前剪贴板文字</button></label>
 <div id="drop" class="drop" tabindex="0">拖入图片、音频或视频，或在此页面直接粘贴媒体。<br /><span class="hint">支持多文件；单个媒体受本地入口大小限制。</span><br /><input id="file" type="file" accept="image/jpeg,image/png,image/webp,audio/mp4,audio/x-m4a,audio/mpeg,audio/wav,audio/x-wav,video/mp4,video/quicktime" multiple /></div><ul id="files" class="files"></ul>
 <button id="submit" type="submit">投递到市场复盘</button><div id="result" role="status"></div>
 </form></main><script>
 const staged=[]; const files=document.querySelector('#files'); const drop=document.querySelector('#drop'); const result=document.querySelector('#result'); const submit=document.querySelector('#submit');
+const operatorKeyInput=document.querySelector('#operatorKey');
+try{operatorKeyInput.value=localStorage.getItem('dashboardOperatorKey')||'';}catch{}
+operatorKeyInput.addEventListener('change',()=>{try{localStorage.setItem('dashboardOperatorKey',operatorKeyInput.value);}catch{}});
+function authHeaders(){const key=operatorKeyInput.value.trim();return key?{'X-Dashboard-Key':key}:{};}
 async function fillClipboard(){try{const text=await navigator.clipboard.readText();if(!text.trim())throw new Error('剪贴板没有文字');document.querySelector('#text').value=text;result.className='ok';result.textContent='已填入剪贴板文字。';}catch(err){result.className='bad';result.textContent='无法读取剪贴板：'+(err.message||err);}}
 document.querySelector('#fillClipboard').addEventListener('click',fillClipboard);
 const draftId=new URLSearchParams(location.search).get('draft');if(draftId){fetch('/relay-draft/'+encodeURIComponent(draftId),{cache:'no-store'}).then(r=>r.json().then(b=>({r,b}))).then(({r,b})=>{if(!r.ok)throw new Error(b.message);document.querySelector('#text').value=b.text;result.className='ok';result.textContent='已从快捷键填入剪贴板文字。';}).catch(err=>{result.className='bad';result.textContent=err.message||String(err);});}
@@ -735,11 +769,16 @@ for(const type of ['dragenter','dragover']) drop.addEventListener(type,e=>{e.pre
 for(const type of ['dragleave','drop']) drop.addEventListener(type,e=>{e.preventDefault();drop.classList.remove('drag')});
 drop.addEventListener('drop',e=>add(e.dataTransfer.files));
 window.addEventListener('paste',e=>{const pasted=[...e.clipboardData.items].filter(x=>x.kind==='file').map(x=>x.getAsFile()).filter(Boolean);if(pasted.length){e.preventDefault();add(pasted);result.textContent='已加入 '+pasted.length+' 个剪贴板媒体。';}});
-document.querySelector('#relay').addEventListener('submit',async e=>{e.preventDefault();result.className='';const tag=document.querySelector('#tag').value;const date=document.querySelector('#date').value;const time=document.querySelector('#time').value;if((date&&!time)||(!date&&time)){result.className='bad';result.textContent='指定时间时请同时填写日期和时间。';return;}const text=document.querySelector('#text').value.trim();if(!text&&!staged.length){result.className='bad';result.textContent='请至少填写正文或加入一个媒体。';return;}submit.disabled=true;submit.textContent='投递中…';try{const form=new FormData();form.append('tag',tag);form.append('text',text);form.append('source_label',document.querySelector('#source').value.trim());if(date)form.append('content_date',date);if(time)form.append('content_time',time);for(const file of staged)form.append('media',file,file.name);const response=await fetch('/manual-relay',{method:'POST',body:form});const body=await response.json();if(!response.ok)throw new Error(body.message||'投递失败');result.className='ok';result.textContent='已接收：'+body.message_id+'；n8n 正在处理。';document.querySelector('#text').value='';document.querySelector('#file').value='';staged.splice(0);render();}catch(err){result.className='bad';result.textContent=err.message||String(err);}finally{submit.disabled=false;submit.textContent='投递到市场复盘';}});
+document.querySelector('#relay').addEventListener('submit',async e=>{e.preventDefault();result.className='';const tag=document.querySelector('#tag').value;const date=document.querySelector('#date').value;const time=document.querySelector('#time').value;if((date&&!time)||(!date&&time)){result.className='bad';result.textContent='指定时间时请同时填写日期和时间。';return;}const text=document.querySelector('#text').value.trim();if(!text&&!staged.length){result.className='bad';result.textContent='请至少填写正文或加入一个媒体。';return;}submit.disabled=true;submit.textContent='投递中…';try{const form=new FormData();form.append('tag',tag);form.append('text',text);form.append('source_label',document.querySelector('#source').value.trim());if(date)form.append('content_date',date);if(time)form.append('content_time',time);for(const file of staged)form.append('media',file,file.name);const response=await fetch('/manual-relay',{method:'POST',headers:authHeaders(),body:form});const body=await response.json();if(!response.ok)throw new Error(body.message||'投递失败');result.className='ok';result.textContent='已接收：'+body.message_id+'；n8n 正在处理。';document.querySelector('#text').value='';document.querySelector('#file').value='';staged.splice(0);render();}catch(err){result.className='bad';result.textContent=err.message||String(err);}finally{submit.disabled=false;submit.textContent='投递到市场复盘';}});
 </script></body></html>`;
 
 function readJsonBody(request, limit = 18 * 1024 * 1024) {
 	return new Promise((resolve, reject) => {
+		const contentType = String(request.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+		if (contentType !== 'application/json') {
+			reject(new Error('请求 Content-Type 必须为 application/json'));
+			return;
+		}
 		const chunks = [];
 		let size = 0;
 		request.on('data', (chunk) => {
@@ -836,7 +875,7 @@ async function handleFeishuUserOauth(request, response) {
 function readMultipartBody(request) {
 	return new Promise((resolve, reject) => {
 		let parser;
-		try { parser = Busboy({ headers: request.headers, limits: { files: 12, fileSize: Number(process.env.INGESTION_MAX_FILE_BYTES ?? 524_288_000), fields: 8 } }); }
+		try { parser = Busboy({ headers: request.headers, limits: { files: 12, fileSize: manualRelayMaxFileBytes, fields: 8 } }); }
 		catch (error) { reject(error); return; }
 		const fields = {};
 		const resources = [];
@@ -844,6 +883,13 @@ function readMultipartBody(request) {
 		parser.on('field', (name, value) => { fields[name] = value; });
 		parser.on('file', (name, stream, info) => {
 			const index = resources.length;
+			// Busboy silently truncates a file at fileSize instead of erroring: the
+			// caller would otherwise get back a "successful" upload of a partial,
+			// corrupt file. Destroying the stream on `limit` turns that into an
+			// explicit rejection of this upload instead.
+			stream.on('limit', () => {
+				stream.destroy(new Error(`媒体超过单文件 ${Math.floor(manualRelayMaxFileBytes / 1024 / 1024)} MB 上限，已拒绝`));
+			});
 			const task = persistReadableAsset(stream, `manual_${index}`, String(info.filename || `manual-${index + 1}.bin`), String(info.mimeType || 'application/octet-stream'), Date.now()).then((asset) => { resources[index] = { ...asset, filename: asset.filename.replace(/[^\w.\-()\u4e00-\u9fff]+/g, '_').slice(0, 255) }; });
 			pending.push(task);
 		});
@@ -874,8 +920,15 @@ async function buildManualEvent(input) {
 	const resources = Array.isArray(input?.resources) ? input.resources : (Array.isArray(input?.media) ? input.media.map(manualResource) : []);
 	if (!text && !resources.length) throw new Error('请至少提供正文或一个媒体');
 	if (resources.length > 12) throw new Error('一次最多投递 12 个媒体');
-	const eventId = String(input?.event_id ?? '').trim() || `manual-${randomUUID()}`;
-	const messageId = String(input?.message_id ?? '').trim() || `manual_${randomUUID().replace(/-/g, '')}`;
+	const totalBytes = resources.reduce((sum, resource) => sum + Number(resource.declared_bytes ?? 0), 0);
+	if (totalBytes > manualRelayMaxTotalBytes) throw new Error(`投递媒体总大小超过 ${Math.floor(manualRelayMaxTotalBytes / 1024 / 1024)} MB 上限`);
+	// event_id/message_id are the ledger's UNIQUE dedupe keys. A caller-chosen
+	// value here used to let anyone pre-register a real Feishu message_id so
+	// the genuine message would later be silently dropped as a duplicate --
+	// these are therefore always generated server-side now, regardless of
+	// what the caller supplied.
+	const eventId = manualEventId();
+	const messageId = manualMessageId();
 	const timestamp = contentDate ? `@${contentDate} ${contentTime}` : '';
 	const messageText = [`#${tag}`, timestamp, text].filter(Boolean).join('\n');
 	const content = {
@@ -919,9 +972,8 @@ async function handleManualRelay(request, response) {
 		response.end(JSON.stringify({ status: 'accepted', message_id: manual.data.message.message_id }));
 	} catch (error) {
 		if (manual?.resources) await Promise.all(manual.resources.map((resource) => resource.path ? unlink(resource.path).catch(() => {}) : Promise.resolve()));
-		const message = error instanceof Error ? error.message : String(error);
 		response.writeHead(400, { 'content-type': 'application/json' });
-		response.end(JSON.stringify({ status: 'error', message }));
+		response.end(JSON.stringify({ status: 'error', message: errorMessage(error) }));
 	}
 }
 
@@ -1288,68 +1340,57 @@ async function proxyResearchAction(path, request, response, method = 'POST') {
 
 const dashboard = createServer((request, response) => {
 	const url = new URL(request.url ?? '/', 'http://localhost');
+	const method = request.method ?? 'GET';
+	if (isMutatingApiRoute(method, url.pathname)) {
+		if (!isSameOriginRequest(request.headers)) {
+			response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ status: 'error', message: 'cross-site request rejected' }));
+			return;
+		}
+		if (!operatorAuth.check(request.headers)) {
+			response.writeHead(401, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+			response.end(JSON.stringify({ status: 'error', message: 'missing or invalid X-Dashboard-Key' }));
+			return;
+		}
+	}
 	const researchPath = researchPaths.get(url.pathname);
 	if (researchPath && request.method === 'GET') {
-		void proxyResearch(researchPath, url.search, response).catch((error) => {
-			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
-		});
+		void proxyResearch(researchPath, url.search, response).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	const researchAction = researchActions.get(url.pathname);
 	if (researchAction && request.method === 'POST') {
-		void proxyResearchAction(researchAction, request, response).catch((error) => {
-			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
-		});
+		void proxyResearchAction(researchAction, request, response).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/research/paper/accounts' && request.method === 'PUT') {
-		void proxyResearchAction('/api/v1/paper/accounts', request, response, 'PUT').catch((error) => {
-			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
-		});
+		void proxyResearchAction('/api/v1/paper/accounts', request, response, 'PUT').catch(routeErrorHandler(response, 503));
 		return;
 	}
 	const paperDecisionAccept = /^\/api\/research\/paper\/decisions\/([0-9a-f-]{36})\/accept$/i.exec(url.pathname);
 	if (paperDecisionAccept && request.method === 'POST') {
-		void proxyResearchAction(`/api/v1/paper/decisions/${paperDecisionAccept[1]}/accept`, request, response).catch((error) => {
-			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
-		});
+		void proxyResearchAction(`/api/v1/paper/decisions/${paperDecisionAccept[1]}/accept`, request, response).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	const promptLabel = /^\/api\/research\/analyst-prompt-lab\/candidates\/([0-9a-f-]{36})\/label$/i.exec(url.pathname);
 	if (promptLabel && request.method === 'POST') {
-		void proxyResearchAction(`/api/v1/analyst-prompt-lab/candidates/${promptLabel[1]}/label`, request, response).catch((error) => {
-			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
-		});
+		void proxyResearchAction(`/api/v1/analyst-prompt-lab/candidates/${promptLabel[1]}/label`, request, response).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	const promptEvaluate = /^\/api\/research\/analyst-prompt-lab\/evaluate\/(strict_action|scenario_context|risk_first)$/i.exec(url.pathname);
 	if (promptEvaluate && request.method === 'POST') {
-		void proxyResearchAction(`/api/v1/analyst-prompt-lab/evaluate/${promptEvaluate[1]}`, request, response).catch((error) => {
-			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
-		});
+		void proxyResearchAction(`/api/v1/analyst-prompt-lab/evaluate/${promptEvaluate[1]}`, request, response).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	const stockStudy = /^\/api\/research\/stocks\/(\d{6}\.(?:SH|SZ|BJ))\/study$/i.exec(url.pathname);
 	if (stockStudy && request.method === 'POST') {
 		const symbol = stockStudy[1].toUpperCase();
-		void proxyResearchAction(`/api/v1/stocks/${encodeURIComponent(symbol)}/study`, request, response).catch((error) => {
-			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
-		});
+		void proxyResearchAction(`/api/v1/stocks/${encodeURIComponent(symbol)}/study`, request, response).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	const claimReview = /^\/api\/research\/claim-review\/([0-9a-f-]{36})$/i.exec(url.pathname);
 	if (claimReview && request.method === 'POST') {
-		void proxyResearchAction(`/api/v1/claim-review/${claimReview[1]}`, request, response).catch((error) => {
-			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
-		});
+		void proxyResearchAction(`/api/v1/claim-review/${claimReview[1]}`, request, response).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/config' && request.method === 'GET') {
@@ -1358,41 +1399,38 @@ const dashboard = createServer((request, response) => {
 		return;
 	}
 	if (url.pathname.startsWith('/api/jobs/') && request.method === 'GET') {
-		void ledger.getJob(url.pathname.slice('/api/jobs/'.length)).then((job) => { if (!job) { response.writeHead(404).end(); return; } response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ job })); }).catch((error) => response.writeHead(503).end(String(error)));
+		void ledger.getJob(url.pathname.slice('/api/jobs/'.length)).then((job) => { if (!job) { response.writeHead(404).end(); return; } response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ job: publicJobView(job) })); }).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname.startsWith('/api/assets/') && url.pathname.endsWith('/parts') && request.method === 'GET') {
 		const assetId = url.pathname.slice('/api/assets/'.length, -'/parts'.length);
-		void ledger.assetParts(assetId).then((parts) => response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ parts }))).catch((error) => response.writeHead(503).end(String(error)));
+		void ledger.assetParts(assetId).then((parts) => response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ parts }))).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname.startsWith('/api/jobs/') && url.pathname.endsWith('/retry') && request.method === 'POST') {
 		const jobId = url.pathname.slice('/api/jobs/'.length, -'/retry'.length);
-		void ledger.retryJob(jobId).then((job) => { if (!job) { response.writeHead(409, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: '只有失败、重复或卡住的排队任务可以手动重试' })); return; } response.writeHead(202, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'queued', job_id: job.job_id, message: '已进入本地重试队列；不会自动创建重复远端请求' })); }).catch((error) => response.writeHead(503).end(String(error)));
+		void ledger.retryJob(jobId).then((job) => { if (!job) { response.writeHead(409, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: '只有失败、重复或卡住的排队任务可以手动重试' })); return; } response.writeHead(202, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'queued', job_id: job.job_id, message: '已进入本地重试队列；不会自动创建重复远端请求' })); }).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/group-relay/status' && request.method === 'GET') {
 		void groupRelayDashboardStatus().then((status) => {
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
 			response.end(JSON.stringify(status));
-		}).catch((error) => {
-			response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-			response.end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) }));
-		});
+		}).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/group-relay/routes' && request.method === 'GET') {
 		void ledger.relayRoutes().then((routes) => {
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
 			response.end(JSON.stringify({ routes: routes.map(publicRelayRoute) }));
-		}).catch((error) => response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/group-relay/routes' && request.method === 'POST') {
 		void readJsonBody(request, 16 * 1024).then(createRelayRoute).then((route) => {
 			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' });
 			response.end(JSON.stringify({ route: publicRelayRoute(route) }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	const relayRouteMatch = /^\/api\/group-relay\/routes\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
@@ -1401,99 +1439,107 @@ const dashboard = createServer((request, response) => {
 			if (!route) { response.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: '源群不存在' })); return; }
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
 			response.end(JSON.stringify({ route: publicRelayRoute(route) }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (relayRouteMatch && request.method === 'DELETE') {
 		void ledger.deleteRelayRoute(relayRouteMatch[1]).then((deleted) => {
 			if (!deleted) { response.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: '源群不存在' })); return; }
 			response.writeHead(204, { 'cache-control': 'no-store' }).end();
-		}).catch((error) => response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/status' && request.method === 'GET') {
 		void Promise.all([feishuWorkbench.status(), feishuUserOauth.status()]).then(([workbench, oauth]) => {
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
 			response.end(JSON.stringify({ ...workbench, capabilities: annotateWorkbenchCapabilities(workbench.capabilities, oauth, workbench.application_inspection), user_oauth_configured: Boolean(oauth.configured), user_oauth_scopes: oauth.scopes ?? '', user_oauth_scope_audit: oauth.scope_audit ?? null, event_subscriptions: workbenchEventStatus() }));
-		}).catch((error) => response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/status' && request.method === 'GET') {
 		void baiduPan.status().then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
-			.catch((error) => response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/market-archive/status' && request.method === 'GET') {
 		void baiduPanMarketArchive.status().then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
-			.catch((error) => response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/oauth/url' && request.method === 'GET') {
-		try { const state = String(url.searchParams.get('state') ?? 'baidu-pan').slice(0, 200); response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ authorization_url: baiduPan.authorizationUrl(state), redirect_uri: String(process.env.BAIDU_PAN_REDIRECT_URI ?? 'oob') })); } catch (error) { response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })); }
+		// `state` is always generated here -- never accepted from the caller --
+		// and must be presented back unmodified to /oauth/exchange, which
+		// consumes it exactly once. This closes a login-CSRF / account-binding
+		// gap where a caller could previously choose (and later replay) its own
+		// state value.
+		try { const state = baiduPanOauthStates.create(); response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ authorization_url: baiduPan.authorizationUrl(state), redirect_uri: String(process.env.BAIDU_PAN_REDIRECT_URI ?? 'oob') })); } catch (error) { response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: errorMessage(error) })); }
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/oauth/device' && request.method === 'POST') {
 		void baiduPan.deviceCode().then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/oauth/exchange' && request.method === 'POST') {
-		void readJsonBody(request, 16 * 1024).then((payload) => baiduPan.exchangeAuthorizationCode(payload?.code, payload?.redirect_uri)).then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		void readJsonBody(request, 16 * 1024).then((payload) => {
+			if (!baiduPanOauthStates.consume(payload?.state)) throw new Error('OAuth state 无效或已过期，请重新发起授权');
+			return baiduPan.exchangeAuthorizationCode(payload?.code, payload?.redirect_uri);
+		}).then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/oauth/device-exchange' && request.method === 'POST') {
 		void readJsonBody(request, 16 * 1024).then((payload) => baiduPan.exchangeDeviceCode(payload?.device_code ?? payload?.code)).then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/oauth/bootstrap' && request.method === 'POST') {
 		void readJsonBody(request, 16 * 1024).then((payload) => baiduPan.bootstrapRefreshToken(payload?.refresh_token)).then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/oauth/refresh' && request.method === 'POST') {
 		void baiduPan.refresh().then((status) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(status)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/user' && request.method === 'GET') {
 		void baiduPan.userInfo().then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/device-user' && request.method === 'GET') {
 		void baiduPan.iotQueryUserInfo(url.searchParams.get('device_id')).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/quota' && request.method === 'GET') {
 		void baiduPan.quota({ checkFree: url.searchParams.has('checkfree') ? url.searchParams.get('checkfree') : undefined, checkExpire: url.searchParams.has('checkexpire') ? url.searchParams.get('checkexpire') : undefined }).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/files' && request.method === 'GET') {
 		const dir = url.searchParams.get('dir') ?? '/'; const type = url.searchParams.get('type') ?? 'list'; const options = { dir, start: url.searchParams.get('start') ?? 0, limit: url.searchParams.get('limit') ?? 1000 };
 		const method = type === 'doc' ? baiduPan.fileDocList : type === 'image' ? baiduPan.fileImageList : type === 'video' ? baiduPan.fileVideoList : baiduPan.list;
 		void method(options).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/search' && request.method === 'GET') {
 		const query = url.searchParams.get('q') ?? ''; const semantic = url.searchParams.get('semantic') === 'true';
 		void (semantic ? baiduPan.semanticSearch(query, { dir: url.searchParams.get('dir') ?? undefined }) : baiduPan.search(query, { dir: url.searchParams.get('dir') ?? '/' })).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/meta' && request.method === 'GET') {
 		const rawIds = url.searchParams.getAll('fsid').length ? url.searchParams.getAll('fsid') : String(url.searchParams.get('fsids') ?? '').split(',').map((value) => value.trim()).filter(Boolean);
 		void baiduPan.fileMeta(rawIds).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/list-all' && request.method === 'GET') {
 		void baiduPan.listAll({ path: url.searchParams.get('path') ?? '/', recursion: url.searchParams.get('recursion') ?? 1, web: url.searchParams.get('web') ?? undefined, start: url.searchParams.get('start') ?? undefined, limit: url.searchParams.get('limit') ?? undefined, order: url.searchParams.get('order') ?? undefined, desc: url.searchParams.get('desc') ?? undefined }).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/manage' && request.method === 'POST') {
@@ -1506,19 +1552,19 @@ const dashboard = createServer((request, response) => {
 			if (operation === 'delete') return baiduPan.remove(payload?.path);
 			throw new Error('不支持的百度网盘文件操作');
 		}).then((result) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/baidu-pan/share' && request.method === 'POST') {
 		void readJsonBody(request, 16 * 1024).then((payload) => baiduPan.createShareLink(payload?.fsids ?? payload?.fsid_list, { period: payload?.period, password: payload?.password })).then((result) => { response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result)); })
-			.catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+			.catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/application-inspection' && request.method === 'POST') {
 		void feishuWorkbench.inspectApplication().then((inspection) => {
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
 			response.end(JSON.stringify({ inspection }));
-		}).catch((error) => response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/messages' && request.method === 'GET') {
@@ -1526,7 +1572,7 @@ const dashboard = createServer((request, response) => {
 		void ledger.recentRelayMessages(limit).then((items) => {
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
 			response.end(JSON.stringify({ items }));
-		}).catch((error) => response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/actions' && request.method === 'POST') {
@@ -1536,74 +1582,74 @@ const dashboard = createServer((request, response) => {
 		})).then((result) => {
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
 			response.end(JSON.stringify({ status: 'ok', record: result.record, external: result.external ?? null }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/documents' && request.method === 'POST') {
 		void readJsonBody(request, 64 * 1024).then((payload) => feishuWorkbench.createDocument(payload ?? {})).then((result) => {
 			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/base-records' && request.method === 'POST') {
 		void readJsonBody(request, 128 * 1024).then((payload) => feishuWorkbench.createBaseRecord(payload ?? {})).then((result) => {
 			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/base-records' && request.method === 'GET') {
 		void feishuWorkbench.listBaseRecords({ pageSize: url.searchParams.get('page_size'), pageToken: url.searchParams.get('page_token') ?? '' }).then((result) => {
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'ok', result }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	const baseRecordMatch = url.pathname.match(/^\/api\/feishu-workbench\/base-records\/([^/]+)$/);
 	if (baseRecordMatch && request.method === 'PUT') {
 		void readJsonBody(request, 128 * 1024).then((payload) => feishuWorkbench.updateBaseRecord({ ...(payload ?? {}), recordId: decodeURIComponent(baseRecordMatch[1]) })).then((result) => {
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'ok', result }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (baseRecordMatch && request.method === 'DELETE') {
 		void feishuWorkbench.deleteBaseRecord({ recordId: decodeURIComponent(baseRecordMatch[1]) }).then((result) => {
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'ok', result }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/wiki-documents' && request.method === 'POST') {
 		void readJsonBody(request, 64 * 1024).then((payload) => feishuWorkbench.createWikiDocument(payload ?? {})).then((result) => {
 			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/digests' && request.method === 'POST') {
 		void readJsonBody(request, 8 * 1024).then((payload) => feishuWorkbench.publishDigest(payload ?? {})).then((result) => {
 			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/group-tabs' && request.method === 'POST') {
 		void readJsonBody(request, 8 * 1024).then((payload) => feishuWorkbench.ensureWorkbenchTab(payload ?? {})).then((result) => {
 			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/calendar-events' && request.method === 'POST') {
 		void readJsonBody(request, 64 * 1024).then((payload) => feishuWorkbench.createCalendarEvent(payload ?? {})).then((result) => {
 			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/approvals' && request.method === 'POST') {
 		void readJsonBody(request, 128 * 1024).then((payload) => feishuWorkbench.createApproval(payload ?? {})).then((result) => {
 			response.writeHead(201, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'created', result }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	if (url.pathname === '/api/feishu-workbench/message-search' && request.method === 'POST') {
 		void readJsonBody(request, 16 * 1024).then((payload) => feishuWorkbench.searchMessages(payload ?? {})).then((result) => {
 			response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ status: 'ok', result }));
-		}).catch((error) => response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: error instanceof Error ? error.message : String(error) })));
+		}).catch(routeErrorHandler(response, 400));
 		return;
 	}
 	// API paths must never fall through to the SPA.  A missing API route used to
@@ -1622,7 +1668,7 @@ const dashboard = createServer((request, response) => {
 	}
 	if (url.pathname === '/health') {
 		response.writeHead(200, { 'content-type': 'application/json' });
-		response.end(JSON.stringify({ status: 'ok', events: recentEvents.length, quant_alert_configured: Boolean(quantAlertWebhookToken && feishuAlertReceiveId), build: releaseMetadata() }));
+		response.end(JSON.stringify({ status: 'ok', events: recentEvents.length, quant_alert_configured: Boolean(quantAlertWebhookToken && feishuAlertReceiveId), frontend_mode: frontendMode, build: releaseMetadata() }));
 		return;
 	}
 	if (url.pathname === '/internal/quant-alert' && request.method === 'POST') {
@@ -1634,19 +1680,19 @@ const dashboard = createServer((request, response) => {
 		return;
 	}
 	if (url.pathname === '/metrics') {
-		void renderMetrics().then((metrics) => { response.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' }); response.end(metrics); }).catch((error) => { response.writeHead(503).end(String(error)); });
+		void renderMetrics().then((metrics) => { response.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' }); response.end(metrics); }).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/jobs' && request.method === 'GET') {
-		void ledger.pendingJobs().then((jobs) => { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ jobs })); }).catch((error) => { response.writeHead(503).end(JSON.stringify({ status: 'error', message: String(error) })); });
+		void ledger.pendingJobs().then((jobs) => { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ jobs: jobs.map(publicJobView) })); }).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/analysis/jobs' && request.method === 'GET') {
-		void ledger.pendingAnalysis().then((jobs) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ jobs })); }).catch((error) => response.writeHead(503).end(String(error)));
+		void ledger.pendingAnalysis().then((jobs) => { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ jobs })); }).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/reconcile' && request.method === 'POST') {
-		void reconcileNow().then((result) => response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(result))).catch((error) => response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'error', message: String(error) })));
+		void reconcileNow().then((result) => response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(result))).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/events') {
@@ -1655,17 +1701,15 @@ const dashboard = createServer((request, response) => {
 			'cache-control': 'no-cache',
 			connection: 'keep-alive',
 		});
-		sendSse(response, 'snapshot', recentEvents);
+		sendSse(response, 'snapshot', recentEvents.map(publicEventView));
 		eventStreams.add(response);
 		request.on('close', () => eventStreams.delete(response));
 		return;
 	}
 	if (url.pathname === '/n8n-status' && request.method === 'POST') {
-		const chunks = [];
-		request.on('data', (chunk) => chunks.push(chunk));
-		request.on('end', async () => {
+		void (async () => {
 			try {
-				const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+				const payload = await readJsonBody(request, 1024 * 1024);
 				const event = recentEvents.find((entry) => entry.message_id === payload.message_id);
 				if (event) {
 					Object.assign(event, {
@@ -1681,9 +1725,9 @@ const dashboard = createServer((request, response) => {
 				response.end(JSON.stringify({ status: 'ok' }));
 			} catch (error) {
 				response.writeHead(400, { 'content-type': 'application/json' });
-				response.end(JSON.stringify({ status: 'error', message: String(error) }));
+				response.end(JSON.stringify({ status: 'error', message: errorMessage(error) }));
 			}
-		});
+		})();
 		return;
 	}
 	if (url.pathname === '/n8n-error' && request.method === 'POST') {
@@ -1868,7 +1912,7 @@ async function dispatchToN8n(data, manual = null) {
 				const controller = new AbortController();
 				const timer = setTimeout(() => controller.abort(), Math.min(180_000, 30_000 + Math.ceil(totalBytes / uploadPartBytes) * 5_000));
 				try {
-					const response = await fetchWithBackoff(mediaPartWebhookUrl, { method: 'POST', body: form, signal: controller.signal }, { maxAttempts: 1 });
+					const response = await fetch(mediaPartWebhookUrl, { method: 'POST', body: form, signal: controller.signal });
 					if (!response.ok) {
 						const remoteText = (await response.text()).slice(0, 500);
 						await ledger.updateJob(job.job_id, {
@@ -1895,10 +1939,10 @@ async function dispatchToN8n(data, manual = null) {
 				 offset += bytes.length;
 			}
 			if (!lastUpload?.batch_id || !lastUpload?.upload_id) throw new Error('缺少可恢复的媒体批次或 upload_id');
-			const finalResponse = await fetchWithBackoff(mediaFinalizeWebhookUrl, {
+			const finalResponse = await fetch(mediaFinalizeWebhookUrl, {
 				method: 'POST', headers: { 'content-type': 'application/json' },
 				body: JSON.stringify({ batch_id: lastUpload.batch_id, upload_id: lastUpload.upload_id, media_sha256: resource.content_sha256, message_id: payload.event?.message?.message_id ?? null, submit: resources.indexOf(resource) === resources.length - 1 }),
-			}, { maxAttempts: 1 });
+			});
 			if (!finalResponse.ok) throw new Error(`n8n media finalize webhook returned HTTP ${finalResponse.status}: ${(await finalResponse.text()).slice(0, 240)}`);
 			await finalResponse.text();
 			await ledger.updateJob(job.job_id, { status: 'submitting', stage: 'remote_submit', remote_batch_id: lastUpload.batch_id });
@@ -1915,12 +1959,12 @@ async function dispatchToN8n(data, manual = null) {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	try {
-		const response = await fetchWithBackoff(targetWebhookUrl, {
+		const response = await fetch(targetWebhookUrl, {
 			method: 'POST',
 			headers,
 			body,
 			signal: controller.signal,
-		}, { maxAttempts: 1 });
+		});
 
 		if (!response.ok) {
 			const remoteBody = await response.text();
@@ -2200,9 +2244,29 @@ const wsClient = new Lark.WSClient({
 	loggerLevel: Lark.LoggerLevel.info,
 });
 
+// Never log the raw error object here: node-sdk's underlying AxiosError
+// carries the outbound request (including its Authorization header) on
+// error.config/error.request, and a bare `console.error(..., error)` would
+// print that in full.
 process.on('unhandledRejection', (error) => {
-	console.error('Unhandled adapter rejection', error);
+	console.error('Unhandled adapter rejection', sanitizeErrorForLog(error));
 });
+process.on('uncaughtException', (error) => {
+	console.error('Uncaught adapter exception', sanitizeErrorForLog(error));
+});
+
+let shuttingDown = false;
+async function shutdown(signal) {
+	if (shuttingDown) return;
+	shuttingDown = true;
+	console.info(`收到 ${signal}，开始优雅关闭`);
+	try { wsClient.close(); } catch (error) { console.error('关闭飞书长连接失败', sanitizeErrorForLog(error)); }
+	await new Promise((resolve) => dashboard.close(() => resolve())).catch(() => {});
+	try { await ledger.close(); } catch (error) { console.error('关闭数据库连接池失败', sanitizeErrorForLog(error)); }
+	process.exit(0);
+}
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
 
 dashboard.listen(dashboardPort, dashboardHost, () => {
 	console.info(`Feishu monitor available on port ${dashboardPort}`);

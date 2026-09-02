@@ -16,6 +16,7 @@ import math
 from typing import Any, Iterable
 
 from .intraday_decision_context import shrunk_probability
+from .market_rules import is_at_limit
 from .strategy_thresholds import MAX_ENTRY_INTRADAY_GAIN_PCT
 from .watchlist_main_wave import FEATURE_KEYS, LOOKBACK_DAYS, _feature_row, normalize_bars
 
@@ -224,7 +225,7 @@ def build_rebound_examples(
         if entry.get("is_suspended"):
             continue
         limit_up = _finite(entry.get("limit_up"))
-        if limit_up is not None and entry["raw_open"] >= limit_up * 0.999:
+        if limit_up is not None and is_at_limit(entry["raw_open"], limit_up):
             continue
         future = bars[index + 1:index + HORIZON_DAYS + 1]
         entry_price = entry["adjusted_open"]
@@ -381,7 +382,14 @@ def research_from_rows(
             "selection": f"confirmed_only_max_{MAX_DAILY_CANDIDATES}_per_day",
             "one_way_cost_bps": int(ONE_WAY_COST_RATE * 10_000),
             "panic_policy": "observation_only_never_direct_entry",
-            "live_effect": "explicit_watchlist_research_alert_only", "alert_eligible": True,
+            # This state machine was designed on July-August data and its
+            # precision comes from an in-sample test split, not a fresh
+            # out-of-sample forward window.  It must not be treated as a
+            # live-alert-eligible strategy until the promotion gate below is
+            # actually satisfied on genuinely new dates; realtime signals are
+            # therefore always emitted shadow_only (see
+            # ``countertrend_rebound_realtime_signal``).
+            "live_effect": "explicit_watchlist_research_alert_only", "alert_eligible": False,
             "probability_contract": "shrunk_research_probability_with_effective_trading_days",
             "test_reuse_policy": "diagnostic_only_after_july_august_were_observed",
         },
@@ -471,6 +479,12 @@ def latest_rebound_priors(connection: Any) -> dict[str, dict[str, Any]]:
             **item, "model_version": parameters.get("model_version"),
             "live_effect": parameters.get("live_effect"),
             "research_probability": probability,
+            # research_probability above is derived from an in-sample
+            # test-split precision (July-August diagnostic), not a validated
+            # out-of-sample rate.  Callers must not use it as a live alert
+            # prior; countertrend_rebound_realtime_signal already forces
+            # shadow_only regardless of this value.
+            "research_only": True,
             "trained_at": row["created_at"].isoformat() if row["created_at"] else None,
         }
         for item in metrics.get("current_scores") or [] if item.get("symbol")
@@ -509,6 +523,12 @@ def countertrend_rebound_realtime_signal(
         "signal_type": "entry", "severity": "warning",
         "score": round(float(prior["model_score"]) * 100, 2),
         "hard": False, "strategy_version": MODEL_VERSION,
+        # This state machine's precision is an in-sample test-split figure
+        # (see the July-August diagnostic note in research_from_rows'
+        # parameters), not a validated live prior.  It must never reach
+        # confirmed/alerted state on its own; intraday_signal_event_persistence
+        # forces shadow_only signals to the suppressed state.
+        "shadow_only": True,
         "independent_confirmation": confirming_peers >= 2,
         "conditions": {
             "setup": "countertrend_rebound_confirmed_plus_intraday_acceptance",
@@ -574,6 +594,9 @@ def countertrend_rebound_failure_reduce_signal(
         "signal_type": "reduce", "severity": "warning",
         "score": round(float(prior.get("model_score") or 0.0) * 100, 2),
         "hard": False, "strategy_version": MODEL_VERSION,
+        # Same not-yet-promoted state machine as the entry signal; keep it
+        # shadow_only until the promotion gate is satisfied on new dates.
+        "shadow_only": True,
         "independent_confirmation": peer_confirmation_lost,
         "conditions": {
             "setup": "countertrend_rebound_intraday_acceptance_failure",

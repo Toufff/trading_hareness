@@ -9,6 +9,7 @@ from typing import Any
 from psycopg.types.json import Json
 
 from .decision_research_contracts import DecisionResearchDossier
+from .research_prices import adjusted_bars
 
 
 def _hash(payload: dict[str, Any]) -> str:
@@ -138,13 +139,29 @@ def holding_evidence(connection: Any, as_of_date: Any, symbol: str) -> dict[str,
     ).fetchone()
     if not row:
         return None
-    bars = connection.execute(
-        """SELECT trading_date,open,high,low,close,volume
-             FROM quant.research_adjusted_bars_daily
-            WHERE symbol=%s AND adjustment_basis='qfq' AND trading_date<=%s
-            ORDER BY trading_date DESC LIMIT 30""",
-        (symbol, as_of_date),
-    ).fetchall()
+    # canonical_bars_daily carries the licensed, incremental adj_factor
+    # series; stock_brain_tencent_qfq's rows used a hardcoded adj_factor=1
+    # and were never validated the same way.  adjusted_bars() fails closed
+    # (returns no bars) rather than silently mixing an incomplete factor
+    # window with raw prices across a corporate action.
+    raw_bars = [
+        dict(item) for item in connection.execute(
+            """SELECT trading_date,open,high,low,close,volume,adj_factor
+                 FROM quant.canonical_bars_daily
+                WHERE symbol=%s AND trading_date<=%s
+                ORDER BY trading_date DESC LIMIT 30""",
+            (symbol, as_of_date),
+        ).fetchall()
+    ]
+    research_bars, _quality_flags = adjusted_bars(raw_bars)
+    bars = [
+        {
+            "trading_date": item["trading_date"], "volume": item.get("volume"),
+            "open": item.get("research_open"), "high": item.get("research_high"),
+            "low": item.get("research_low"), "close": item.get("research_close"),
+        }
+        for item in (research_bars or [])
+    ]
     legacy = connection.execute(
         """SELECT payload FROM quant.legacy_source_records
             WHERE source_system='stock-brain' AND source_table='research_runs'

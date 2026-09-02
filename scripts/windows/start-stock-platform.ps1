@@ -11,12 +11,20 @@ if (-not $RepositoryRoot) { $RepositoryRoot = [IO.Path]::GetFullPath((Join-Path 
 Import-Module (Join-Path $PSScriptRoot 'runtime-observability.psm1') -Force
 
 function Read-EnvFile {
+    # Returns a hashtable instead of injecting every key into the process
+    # environment: a full Set-Item Env: injection here would leak DB admin
+    # passwords and write keys into every later sibling process in this
+    # pwsh session (ssh tunnels, watchdogs, ...), not just the intended
+    # child. Callers pass only what a given child process needs via
+    # Start-RuntimeSupervisor's -Environment parameter.
     param([string]$Path)
+    $result = @{}
     foreach ($line in [IO.File]::ReadAllLines($Path, [Text.Encoding]::UTF8)) {
         if (-not $line -or $line.StartsWith('#')) { continue }
         $parts = $line.Split('=', 2)
-        if ($parts.Count -eq 2) { Set-Item -Path "Env:$($parts[0])" -Value $parts[1] }
+        if ($parts.Count -eq 2) { $result[$parts[0]] = $parts[1] }
     }
+    return $result
 }
 
 function Get-ApiListener {
@@ -50,9 +58,11 @@ foreach ($path in @($envPath, $python, (Join-Path $serviceRoot 'database_bootstr
 }
 New-Item -ItemType Directory -Force -Path $logs | Out-Null
 Invoke-RuntimeLogRetention -PlatformRoot $root
-Read-EnvFile $envPath
-$env:QUANT_BACKGROUND_TASKS_ENABLED = 'false'
-$env:QUANT_RUNTIME_PROFILE = 'research'
+$runtimeConfig = Read-EnvFile $envPath
+$environment = @{}
+foreach ($key in $runtimeConfig.Keys) { $environment[$key] = $runtimeConfig[$key] }
+$environment['QUANT_BACKGROUND_TASKS_ENABLED'] = 'false'
+$environment['QUANT_RUNTIME_PROFILE'] = 'research'
 # Public-market routing is deliberately opt-in through
 # QUANT_PUBLIC_HTTP_PROXY in runtime.env.  Inheriting a desktop-wide proxy
 # here made otherwise reachable Chinese quote hosts fail inside the service.
@@ -125,16 +135,22 @@ try {
 
 Push-Location $serviceRoot
 try {
+    # database_bootstrap.py is invoked in-process via the call operator, which
+    # has no equivalent of Start-Process -Environment, so the required keys
+    # are set on the process environment only for the duration of this call
+    # and removed immediately afterward in the finally block below.
+    foreach ($key in $environment.Keys) { Set-Item -Path "Env:$key" -Value $environment[$key] }
     & $python '.\database_bootstrap.py' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "database bootstrap/upgrade failed with exit code $LASTEXITCODE" }
 } finally {
+    foreach ($key in $environment.Keys) { Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue }
     Pop-Location
 }
 
 $runtimeRun = Start-RuntimeSupervisor -PlatformRoot $root -RepositoryRoot $repository -Service 'quant-api' `
     -Executable $python -WorkingDirectory $serviceRoot `
     -Arguments @('.\run_server.py', '--host', '127.0.0.1', '--port', "$ApiPort") `
-    -Metadata @{ port = $ApiPort; profile = 'research' }
+    -Environment $environment -Metadata @{ port = $ApiPort; profile = 'research' }
 $stderr = [string]$runtimeRun.stderr
 
 $deadline = [DateTime]::UtcNow.AddSeconds(75)

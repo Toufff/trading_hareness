@@ -7,7 +7,7 @@ from datetime import date
 
 from app.factor_sql_lab import (
     MIN_FORMAL_HISTORY_CALENDAR_SPAN_DAYS, _bh_q_values, _formal_history_blockers, _formal_history_metrics,
-    _materialize_evaluation_rows, _materialize_factor_scores,
+    _materialize_evaluation_rows, _materialize_factor_scores, _record_trial_and_deflated_sharpe, _series_metrics,
     _split_rows, evaluable_factor_keys, prepare_factor_panel, run_multi_factor_strategy_sql,
 )
 
@@ -103,6 +103,17 @@ class FactorSqlLabTests(unittest.TestCase):
         self.assertIn("trading_index-index_20d_ago=20", create_sql)
         self.assertIn("bar.close*bar.adj_factor", create_sql)
 
+    def test_series_metrics_uses_plain_iid_t_stat_for_single_day_horizon(self):
+        rows = [{"raw_rank_ic": value} for value in (0.02, -0.01, 0.03, 0.01, -0.02, 0.015, 0.025, -0.005)]
+        result = _series_metrics(rows, "raw_rank_ic", horizon_days=1)
+        self.assertIsNone(result["newey_west_bandwidth"])
+        self.assertIsNotNone(result["date_cluster_t_stat"])
+
+    def test_series_metrics_switches_to_newey_west_for_multi_day_horizon(self):
+        rows = [{"raw_rank_ic": value} for value in (0.02, -0.01, 0.03, 0.01, -0.02, 0.015, 0.025, -0.005)]
+        result = _series_metrics(rows, "raw_rank_ic", horizon_days=5)
+        self.assertEqual(result["newey_west_bandwidth"], 4)
+
     def test_factor_standardization_does_not_select_on_future_outcome(self):
         connection = RecordingConnection()
         _materialize_factor_scores(connection, "momentum_20d", date(2026, 1, 1), date(2026, 3, 1))
@@ -112,6 +123,77 @@ class FactorSqlLabTests(unittest.TestCase):
         _materialize_evaluation_rows(connection, "momentum_20d", date(2026, 1, 1), date(2026, 3, 1), 5)
         evaluation_sql = next(sql for sql, _ in connection.calls if "CREATE TEMP TABLE factor_sql_evaluation" in sql)
         self.assertIn("JOIN factor_sql_panel future", evaluation_sql)
+
+
+class _TrialLedgerResult:
+    def __init__(self, rows=None):
+        self._rows = rows or []
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _TrialLedgerConnection:
+    """A minimal stand-in for the two statements ``_record_trial_and_deflated_sharpe`` issues."""
+
+    def __init__(self, prior_metrics: list[dict]):
+        self.prior_rows = [{"metrics": metrics} for metrics in prior_metrics]
+        self.inserted: list[tuple] = []
+
+    def execute(self, sql, params=None):
+        if "SELECT metrics FROM quant.strategy_experiments" in sql:
+            return _TrialLedgerResult(self.prior_rows)
+        if "INSERT INTO quant.strategy_experiments" in sql:
+            self.inserted.append(params)
+            return _TrialLedgerResult()
+        raise AssertionError(f"unexpected SQL in trial ledger test: {sql}")
+
+
+class TrialLedgerAndDeflatedSharpeTests(unittest.TestCase):
+    returns = [0.02, -0.01] * 15  # 30 observations, well above MINIMUM_EVALUABLE_OBSERVATIONS
+
+    def test_first_trial_counts_as_one_and_still_produces_a_sharpe(self):
+        connection = _TrialLedgerConnection(prior_metrics=[])
+        trial = _record_trial_and_deflated_sharpe(
+            connection, "sql_factor_lab:momentum_5d", "all_a", date(2026, 1, 1), date(2026, 3, 1),
+            "completed", self.returns, {"horizon_days": 5},
+        )
+        self.assertEqual(trial["trials"], 1)
+        self.assertIsNotNone(trial["trial_sharpe"])
+        self.assertEqual(len(connection.inserted), 1, "the evaluation must be ledgered even on the first trial")
+
+    def test_trial_count_accumulates_across_prior_ledger_rows(self):
+        connection = _TrialLedgerConnection(prior_metrics=[
+            {"trial_sharpe": 0.4, "test_observations": 30}, {"trial_sharpe": -0.2, "test_observations": 30},
+        ])
+        trial = _record_trial_and_deflated_sharpe(
+            connection, "sql_factor_lab:momentum_5d", "all_a", date(2026, 1, 1), date(2026, 3, 1),
+            "completed", self.returns, {"horizon_days": 5},
+        )
+        self.assertEqual(trial["trials"], 3)
+        self.assertGreater(trial["trial_sharpe_variance"], 0.0)
+
+    def test_more_trials_never_makes_the_deflated_sharpe_more_generous(self):
+        few = _record_trial_and_deflated_sharpe(
+            _TrialLedgerConnection(prior_metrics=[{"trial_sharpe": 0.1}]),
+            "sql_factor_lab:momentum_5d", "all_a", date(2026, 1, 1), date(2026, 3, 1), "completed", self.returns, {},
+        )
+        many = _record_trial_and_deflated_sharpe(
+            _TrialLedgerConnection(prior_metrics=[{"trial_sharpe": 0.1 + 0.01 * index} for index in range(50)]),
+            "sql_factor_lab:momentum_5d", "all_a", date(2026, 1, 1), date(2026, 3, 1), "completed", self.returns, {},
+        )
+        self.assertGreaterEqual(few["deflated_sharpe_ratio"], many["deflated_sharpe_ratio"])
+
+    def test_too_few_test_observations_reports_no_deflated_sharpe(self):
+        connection = _TrialLedgerConnection(prior_metrics=[])
+        trial = _record_trial_and_deflated_sharpe(
+            connection, "sql_factor_lab:momentum_5d", "all_a", date(2026, 1, 1), date(2026, 3, 1),
+            "insufficient_history", [0.01, 0.02], {},
+        )
+        self.assertIsNone(trial["deflated_sharpe_ratio"])
 
 
 if __name__ == "__main__":

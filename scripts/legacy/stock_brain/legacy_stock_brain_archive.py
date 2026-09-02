@@ -6,12 +6,18 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 import hashlib
-import json
 import sqlite3
+import sys
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from .legacy_stock_brain_contracts import (
+# Sibling modules in this relocated, non-package directory; make sure this
+# file's own directory is importable regardless of how it was reached.
+_THIS_DIR = Path(__file__).resolve().parent
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
+
+from legacy_stock_brain_contracts import (  # noqa: E402
     KNOWN_TABLES,
     coerce_timestamp,
     evidence_timestamps,
@@ -23,7 +29,7 @@ from .legacy_stock_brain_contracts import (
     source_row_key,
     table_classification,
 )
-from .legacy_stock_brain_repository import LegacyStockBrainRepository
+from legacy_stock_brain_repository import LegacyStockBrainRepository  # noqa: E402
 
 
 DERIVED_SQLITE_TABLE_MARKERS = ("_fts", "_data", "_idx", "_content", "_docsize", "_config")

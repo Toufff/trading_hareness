@@ -1,6 +1,17 @@
 import unittest
 
-from app.short_term_review import build_short_term_review
+from app.short_term_review import _limit_ratio, build_short_term_review
+
+
+class LimitRatioTests(unittest.TestCase):
+    def test_star_cdr_689_is_20_percent_not_mainboard_default(self):
+        self.assertEqual(_limit_ratio("689009.SH"), 20.0)
+
+    def test_mainboard_st_is_5_percent(self):
+        self.assertEqual(_limit_ratio("600001.SH", is_st=True), 5.0)
+
+    def test_star_market_st_keeps_20_percent(self):
+        self.assertEqual(_limit_ratio("688009.SH", is_st=True), 20.0)
 
 
 class ShortTermReviewTests(unittest.TestCase):

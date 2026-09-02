@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import math
 from datetime import date, timedelta
-from statistics import mean, stdev
+from statistics import mean, pstdev, stdev
 from typing import Any, Iterable
+
+from psycopg.types.json import Json
 
 from .replay_readiness import P2_MIN_DAILY_CALENDAR_SPAN_DAYS, P2_MIN_FULL_CROSS_SECTION_DAYS
 from .backtest_execution_rules import a_share_exit_lag
+from .strategy_validation import deflated_sharpe_ratio, newey_west_mean_t_stat, sharpe_ratio
 
 
 SQL_FACTOR_COLUMNS = {
@@ -83,14 +86,29 @@ def _normal_two_sided_p(t_stat: float | None) -> float | None:
     return math.erfc(abs(t_stat) / math.sqrt(2.0))
 
 
-def _series_metrics(rows: list[dict[str, Any]], field: str) -> dict[str, Any]:
+def _series_metrics(rows: list[dict[str, Any]], field: str, *, horizon_days: int = 1) -> dict[str, Any]:
+    """Daily summary stats for one IC-like series.
+
+    A daily-sampled series measured over an ``horizon_days``>1 forward
+    window is autocorrelated by construction (consecutive days' windows
+    overlap), so the iid standard error understates the true variance and
+    overstates significance; the t-stat switches to a Newey-West HAC
+    estimator with bandwidth ``horizon_days - 1`` whenever the horizon is
+    more than one day.  ``std`` stays the plain sample standard deviation
+    for descriptive display either way.
+    """
     values = [float(row[field]) for row in rows if row.get(field) is not None]
     center, spread = _average(values), _sample_std(values)
-    t_stat = center / (spread / math.sqrt(len(values))) if center is not None and spread and values else None
+    newey_west_bandwidth = horizon_days - 1 if horizon_days > 1 else None
+    if newey_west_bandwidth is not None:
+        _, t_stat = newey_west_mean_t_stat(values, bandwidth=newey_west_bandwidth) if values else (None, None)
+    else:
+        t_stat = center / (spread / math.sqrt(len(values))) if center is not None and spread and values else None
     return {
         "days": len(values), "mean": center, "std": spread,
         "positive_ratio": sum(value > 0 for value in values) / len(values) if values else None,
         "date_cluster_t_stat": t_stat, "normal_approx_p_value": _normal_two_sided_p(t_stat),
+        "newey_west_bandwidth": newey_west_bandwidth,
     }
 
 
@@ -329,6 +347,47 @@ def _top_bucket_turnover(connection: Any) -> float | None:
     return float(row["turnover"]) if row and row.get("turnover") is not None else None
 
 
+def _record_trial_and_deflated_sharpe(connection: Any, strategy_key: str, universe_key: str, start_date: date,
+                                      end_date: date, status: str, test_returns: list[float],
+                                      parameters: dict[str, Any]) -> dict[str, Any]:
+    """Ledger this evaluation into ``quant.strategy_experiments`` and read the
+    deflated Sharpe of the out-of-sample test split back against every prior
+    trial for this factor, instead of shipping a hardcoded ``None``.
+
+    ``trials`` is every prior evaluation of this exact factor plus this one
+    (an honest count, not just the ones a caller chose to keep); the
+    trial-Sharpe variance needed by ``expected_maximum_sharpe`` is estimated
+    from the Sharpe ratios those prior trials themselves produced, which is
+    why every trial's own Sharpe is stored back into the ledger.
+    """
+    trial_sharpe = sharpe_ratio(test_returns)
+    prior_rows = [dict(row) for row in connection.execute(
+        "SELECT metrics FROM quant.strategy_experiments WHERE strategy_key=%s ORDER BY created_at", (strategy_key,),
+    ).fetchall()]
+    historical_sharpes = [
+        float(row["metrics"]["trial_sharpe"]) for row in prior_rows
+        if isinstance(row.get("metrics"), dict) and row["metrics"].get("trial_sharpe") is not None
+    ]
+    trials = len(prior_rows) + 1
+    all_sharpes = historical_sharpes + ([trial_sharpe] if trial_sharpe is not None else [])
+    trial_sharpe_variance = pstdev(all_sharpes) ** 2 if len(all_sharpes) >= 2 else 0.0
+    dsr = (
+        deflated_sharpe_ratio(test_returns, trials=trials, trial_sharpe_variance=trial_sharpe_variance)
+        if trial_sharpe is not None else None
+    )
+    connection.execute(
+        """INSERT INTO quant.strategy_experiments(strategy_key,universe_key,start_date,end_date,status,parameters,metrics)
+           VALUES(%s,%s,%s,%s,%s,%s,%s)""",
+        (strategy_key, universe_key, start_date, end_date, status, Json(parameters),
+         Json({"trial_sharpe": trial_sharpe, "test_observations": len(test_returns)})),
+    )
+    return {
+        "trials": trials, "trial_sharpe": trial_sharpe, "trial_sharpe_variance": trial_sharpe_variance,
+        "test_observations": len(test_returns), "deflated_sharpe_ratio": dsr,
+        "notice": "trials counts every prior quant.strategy_experiments row for this factor plus this run",
+    }
+
+
 def evaluate_factor_from_panel(connection: Any, factor_key: str, universe_key: str, start_date: date,
                                end_date: date, horizon_days: int, panel: dict[str, Any]) -> dict[str, Any]:
     if factor_key not in SQL_FACTOR_COLUMNS:
@@ -338,14 +397,14 @@ def evaluate_factor_from_panel(connection: Any, factor_key: str, universe_key: s
     splits, split_contract = _split_rows(daily, horizon_days)
     split_metrics = {
         key: {
-            "raw_rank_ic": _series_metrics(items, "raw_rank_ic"),
-            "neutral_rank_ic": _series_metrics(items, "neutral_rank_ic"),
-            "neutral_top_minus_bottom": _series_metrics(items, "neutral_top_minus_bottom"),
+            "raw_rank_ic": _series_metrics(items, "raw_rank_ic", horizon_days=horizon_days),
+            "neutral_rank_ic": _series_metrics(items, "neutral_rank_ic", horizon_days=horizon_days),
+            "neutral_top_minus_bottom": _series_metrics(items, "neutral_top_minus_bottom", horizon_days=horizon_days),
         }
         for key, items in splits.items()
     }
     observations = sum(int(row.get("observations") or 0) for row in daily)
-    neutral_metrics = _series_metrics(daily, "neutral_rank_ic")
+    neutral_metrics = _series_metrics(daily, "neutral_rank_ic", horizon_days=horizon_days)
     history = _formal_history_metrics(connection, start_date, end_date)
     inferred_members = connection.execute(
         """SELECT count(*)::int AS count FROM quant.universe_membership_history
@@ -356,16 +415,22 @@ def evaluate_factor_from_panel(connection: Any, factor_key: str, universe_key: s
     point_in_time_industry_ready = False
     promotion_ready = not _formal_history_blockers(history) and point_in_time_industry_ready
     status = "completed" if len(daily) >= 20 and observations >= 50 else "insufficient_history"
+    test_returns = [float(row["neutral_top_minus_bottom"]) for row in splits["test"] if row.get("neutral_top_minus_bottom") is not None]
+    trial = _record_trial_and_deflated_sharpe(
+        connection, f"sql_factor_lab:{factor_key}", universe_key, start_date, end_date, status, test_returns,
+        {"horizon_days": horizon_days, "start_date": str(start_date), "end_date": str(end_date)},
+    )
     return {
         "factor_key": factor_key, "universe_key": universe_key,
         "start_date": str(start_date), "end_date": str(end_date), "horizon_days": horizon_days,
         "status": status, "observations": observations, "cross_section_days": len(daily),
         "metrics": {
             "methodology_version": "sql-cross-section-v2",
-            "raw_rank_ic": _series_metrics(daily, "raw_rank_ic"),
+            "raw_rank_ic": _series_metrics(daily, "raw_rank_ic", horizon_days=horizon_days),
             "neutral_rank_ic": neutral_metrics,
-            "neutral_top_minus_bottom": _series_metrics(daily, "neutral_top_minus_bottom"),
+            "neutral_top_minus_bottom": _series_metrics(daily, "neutral_top_minus_bottom", horizon_days=horizon_days),
             "top_bucket_turnover": _top_bucket_turnover(connection),
+            "deflated_sharpe": trial,
             "walk_forward": split_metrics,
             "sample_gate": {"minimum_cross_section_days": 20, "minimum_observations": 50},
             "promotion_gate": {
@@ -426,13 +491,17 @@ def evaluate_factor_set(connection: Any, factor_keys: list[str], universe_key: s
     }
     q_values = _bh_q_values(p_values)
     for result in results:
+        deflated = result["metrics"].pop("deflated_sharpe", {})
         result["metrics"]["multiple_testing"] = {
             "method": "benjamini_hochberg_on_test_date_cluster_normal_approximation",
             "tested_factors": len(results),
             "test_p_value": p_values[result["factor_key"]],
             "test_q_value": q_values[result["factor_key"]],
-            "deflated_sharpe_ratio": None,
-            "notice": "DSR is withheld until at least three years and a registered trial count are available.",
+            "deflated_sharpe_ratio": deflated.get("deflated_sharpe_ratio"),
+            "deflated_sharpe_trials": deflated.get("trials"),
+            "deflated_sharpe_trial_variance": deflated.get("trial_sharpe_variance"),
+            "notice": "trials is every quant.strategy_experiments row logged for this factor so far (this run included); "
+                      "deflated_sharpe_ratio is None until the out-of-sample test split has enough observations to carry a Sharpe.",
         }
     return results
 
@@ -542,6 +611,11 @@ def run_multi_factor_strategy_sql(connection: Any, universe_key: str, start_date
     history = _formal_history_metrics(connection, start_date, end_date)
     point_in_time_industry_ready = False
     promotion_ready = not _formal_history_blockers(history) and point_in_time_industry_ready
+    status = "completed" if len(period_rows) >= 20 and trade_count >= 20 else "insufficient_history"
+    trial = _record_trial_and_deflated_sharpe(
+        connection, "multi_factor_rank_v1", universe_key, start_date, end_date, status, returns,
+        {"factors": factor_keys, "rebalance_days": rebalance_days, "hold_days": hold_days, "top_n": top_n},
+    )
     metrics = {
         "total_return": equity - 1 if period_rows else None,
         "annualized_return": annualized_return,
@@ -551,6 +625,7 @@ def run_multi_factor_strategy_sql(connection: Any, universe_key: str, start_date
         "max_drawdown": _max_drawdown([item["equity"] for item in curve]),
         "win_rate": sum(value > 0 for value in returns) / len(returns) if returns else None,
         "periods": len(period_rows), "trades": trade_count,
+        "deflated_sharpe": trial,
         "promotion_gate": {
             "status": "eligible_for_review" if promotion_ready else "research_only",
             "full_cross_section_days": history["days"],
@@ -575,7 +650,6 @@ def run_multi_factor_strategy_sql(connection: Any, universe_key: str, start_date
             "industry_quality": "current classification; formal promotion requires point-in-time industry history",
         },
     }
-    status = "completed" if len(period_rows) >= 20 and trade_count >= 20 else "insufficient_history"
     return {
         "strategy_key": "multi_factor_rank_v1", "universe_key": universe_key,
         "start_date": str(start_date), "end_date": str(end_date), "status": status,

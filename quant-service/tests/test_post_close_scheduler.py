@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import unittest
 from zoneinfo import ZoneInfo
 
@@ -79,6 +79,24 @@ class PostCloseSchedulerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(completed)
         self.assertEqual([item[0] for item in calls], ["calendar", "completed"])
+
+    async def test_a_naive_or_utc_now_is_explicitly_converted_to_china_time(self) -> None:
+        """WP6: local.date()/time() comparisons require China trading time.
+
+        18:30 UTC is 02:30 the *next* China day; a scheduler that compared a
+        raw UTC ``now()`` against these boundaries would pick the wrong
+        exchange date and its retry window would never open.
+        """
+        dependencies, calls = self._dependencies(complete=(True, True))
+        completed_dates = set()
+
+        utc_now = datetime(2026, 8, 14, 18, 30, tzinfo=timezone.utc)  # 2026-08-15 02:30 in China
+        completed = await post_close_scheduler_step(completed_dates, dependencies, local=utc_now)
+
+        self.assertTrue(completed)
+        china_date = datetime(2026, 8, 15, tzinfo=CN).date()
+        self.assertEqual(completed_dates, {china_date})
+        self.assertTrue(all(item[1] == china_date for item in calls))
 
 
 if __name__ == "__main__":

@@ -79,12 +79,12 @@ function Test-PostgresReady([int]$Attempts = 3, [int]$DelayMilliseconds = 500) {
 
 function Get-RemoteDashboardHealth {
     try {
-        return (& ssh -o BatchMode=yes -o ConnectTimeout=8 $SshHost "curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:$RemotePort/health" 2>$null)
+        return (& ssh @($target.ConnectionArguments) -o BatchMode=yes -o ConnectTimeout=8 $target.Destination "curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:$RemotePort/health" 2>$null)
     } catch { return '' }
 }
 
 function Test-RemoteDashboardListener {
-    & ssh -o BatchMode=yes -o ConnectTimeout=8 $SshHost "ss -ltn 'sport = :$RemotePort' | tail -n +2 | grep -q ." 2>$null
+    & ssh @($target.ConnectionArguments) -o BatchMode=yes -o ConnectTimeout=8 $target.Destination "ss -ltn 'sport = :$RemotePort' | tail -n +2 | grep -q ." 2>$null
     return $LASTEXITCODE -eq 0
 }
 
@@ -93,8 +93,9 @@ function Remove-StaleRemoteDashboardListener {
     [void](Write-RuntimeEvent -PlatformRoot $platform -Service 'dashboard-tunnel' -Event 'stale_remote_listener_cleanup_requested' -Level 'warning' -Data @{
         remote_port = $RemotePort
         ssh_host = $SshHost
+        ssh_target_mode = $target.Mode
     })
-    & ssh -o BatchMode=yes -o ConnectTimeout=8 $SshHost "fuser -k $RemotePort/tcp >/dev/null 2>&1 || true"
+    & ssh @($target.ConnectionArguments) -o BatchMode=yes -o ConnectTimeout=8 $target.Destination "fuser -k $RemotePort/tcp >/dev/null 2>&1 || true"
     if ($LASTEXITCODE -ne 0) { throw "Failed to request cleanup of stale remote listener $RemotePort" }
     $deadline = [DateTime]::UtcNow.AddSeconds(8)
     while ((Test-RemoteDashboardListener) -and [DateTime]::UtcNow -lt $deadline) {
@@ -116,7 +117,8 @@ $runtime = Join-Path $platform 'runtime'
 $pgData = Join-Path $platform 'data\postgresql16'
 $pgBin = Join-Path $runtime 'postgresql-16.15\bin'
 $config = Read-EnvFile $envPath
-foreach ($required in 'PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'QUANT_WRITE_API_KEY') {
+$target = Resolve-OwnerTunnelSshTarget -RuntimeEnv $envPath -FallbackAlias $SshHost
+foreach ($required in 'PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'QUANT_WRITE_API_KEY', 'DASHBOARD_OPERATOR_KEY') {
     if (-not $config[$required]) { throw "Missing $required in $envPath" }
 }
 New-Item -ItemType Directory -Force -Path $logs, $runtime | Out-Null
@@ -166,6 +168,9 @@ if (-not (Test-Listener $AdapterPort)) {
         N8N_MEDIA_FINALIZE_WEBHOOK_URL = 'http://127.0.0.1:9/final'
         QUANT_SERVICE_URL = "http://127.0.0.1:$ApiPort"
         QUANT_WRITE_API_KEY = $config.QUANT_WRITE_API_KEY
+        # Operator credential for every mutating dashboard route (X-Dashboard-Key);
+        # the adapter refuses to start without it (feishu-adapter/dashboard-auth.mjs).
+        DASHBOARD_OPERATOR_KEY = $config.DASHBOARD_OPERATOR_KEY
         DASHBOARD_HOST = '127.0.0.1'; DASHBOARD_PORT = [string]$AdapterPort
         FRONTEND_DIST = Join-Path $repository 'frontend\dist'; FRONTEND_MODE = 'spa'
         SOURCE_REGISTRY_FILE = Join-Path $repository 'config\source-registry.json'
@@ -227,12 +232,14 @@ if (-not $remoteHealthy) {
     }
     if (Test-RemoteDashboardListener) { Remove-StaleRemoteDashboardListener }
     $ssh = (Get-Command ssh.exe -ErrorAction Stop).Source
-    $tunnelRun = Start-RuntimeSupervisor -PlatformRoot $platform -RepositoryRoot $repository -Service 'dashboard-tunnel' `
-        -Executable $ssh -WorkingDirectory $repository -Arguments @(
+    $tunnelArguments = @($target.ConnectionArguments) + @(
         '-N', '-T', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes',
         '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3',
-        '-R', "127.0.0.1:$RemotePort`:127.0.0.1:$AdapterPort", $SshHost
-    ) -Metadata @{ remote_port = $RemotePort; adapter_port = $AdapterPort; ssh_host = $SshHost }
+        '-R', "127.0.0.1:$RemotePort`:127.0.0.1:$AdapterPort", $target.Destination
+    )
+    $tunnelRun = Start-RuntimeSupervisor -PlatformRoot $platform -RepositoryRoot $repository -Service 'dashboard-tunnel' `
+        -Executable $ssh -WorkingDirectory $repository -Arguments $tunnelArguments `
+        -Metadata @{ remote_port = $RemotePort; adapter_port = $AdapterPort; ssh_host = $SshHost; ssh_target_mode = $target.Mode }
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
         Start-Sleep -Milliseconds 500

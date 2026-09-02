@@ -1,17 +1,15 @@
 <script lang="ts">
 import { defineComponent, inject } from 'vue';
-import { Refresh, WarningFilled } from '@element-plus/icons-vue';
-import VChart from 'vue-echarts';
 import { dashboardContextKey } from '../../dashboard-context';
 import RealtimeServicesPanel from '../../components/RealtimeServicesPanel.vue';
 
 export default defineComponent({
   name: 'ProviderTab',
-  components: { Refresh, RealtimeServicesPanel, VChart, WarningFilled },
+  components: { RealtimeServicesPanel },
   setup() {
     const dashboard = inject(dashboardContextKey);
     if (!dashboard) throw new Error('research tab requires the dashboard shell context');
-    return dashboard as Record<string, any>;
+    return dashboard;
   },
 });
 </script>

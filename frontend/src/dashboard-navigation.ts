@@ -10,6 +10,11 @@ const routeSections: Record<string, DashboardSection> = {
   '/relay': 'relay',
 };
 
+// Shared with e2e/smoke.spec.ts so "the deep link the research console smoke
+// test navigates to" has one source of truth instead of two hardcoded '/research'
+// literals that could silently drift apart. See dashboard-navigation.test.ts.
+export const RESEARCH_SMOKE_ROUTE = '/research';
+
 export function isDashboardSection(value: string | null): value is DashboardSection {
   return value !== null && DASHBOARD_SECTIONS.includes(value as DashboardSection);
 }

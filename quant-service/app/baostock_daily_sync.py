@@ -9,6 +9,8 @@ from typing import Any, Awaitable, Callable
 
 from psycopg.types.json import Json
 
+from .daily_bar_repository import shares_to_lots, yuan_to_thousand_yuan
+
 
 def fetch_rows(symbols: list[str], trade_date: Any, *, baostock_code: Callable[[str], str]) -> tuple[list[dict[str, str]], list[str]]:
     """Blocking BaoStock client; caller dispatches it to the bounded public pool."""
@@ -105,11 +107,17 @@ async def sync(
             suffix = {"sh": "SH", "sz": "SZ", "bj": "BJ"}.get(exchange.lower())
             if not suffix:
                 raise ValueError(f"unsupported code {code}")
+            # BaoStock documents ``volume`` in raw shares and ``amount`` in
+            # yuan; the canonical daily contract (matching Tushare) is lots
+            # (100 shares) and thousand yuan.  Converting here, rather than
+            # leaving the guard to catch it downstream, keeps every promoted
+            # BaoStock row directly comparable to every other source's.
             valid_bars.append(daily_bar_type(
                 symbol=f"{raw_code}.{suffix}", trading_date=datetime.strptime(str(item["date"]), "%Y-%m-%d").date(),
                 open=decimal_or_none(item.get("open")), high=decimal_or_none(item.get("high")), low=decimal_or_none(item.get("low")),
                 close=decimal_or_none(item.get("close")), pre_close=decimal_or_none(item.get("preclose")),
-                volume=decimal_or_none(item.get("volume")), amount=decimal_or_none(item.get("amount")),
+                volume=shares_to_lots(decimal_or_none(item.get("volume"))),
+                amount=yuan_to_thousand_yuan(decimal_or_none(item.get("amount"))),
                 is_st=str(item.get("isST", "0")) == "1", source="baostock",
             ))
         except Exception as error:  # noqa: BLE001 - retain malformed-row evidence

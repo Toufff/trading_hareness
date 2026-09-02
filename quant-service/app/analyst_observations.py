@@ -6,7 +6,7 @@ separate promotion registry remains the only authority for analyst influence.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from psycopg.types.json import Json

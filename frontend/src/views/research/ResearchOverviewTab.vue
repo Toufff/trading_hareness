@@ -1,16 +1,16 @@
 <script lang="ts">
 import { defineComponent, inject } from 'vue';
-import { Refresh, WarningFilled } from '@element-plus/icons-vue';
-import VChart from 'vue-echarts';
+import { Refresh } from '@element-plus/icons-vue';
 import { dashboardContextKey } from '../../dashboard-context';
+import ResearchOnlyBadge from '../../components/ResearchOnlyBadge.vue';
 
 export default defineComponent({
   name: 'ResearchOverviewTab',
-  components: { Refresh, VChart, WarningFilled },
+  components: { ResearchOnlyBadge },
   setup() {
     const dashboard = inject(dashboardContextKey);
     if (!dashboard) throw new Error('research tab requires the dashboard shell context');
-    return dashboard as Record<string, any>;
+    return { ...dashboard, Refresh };
   },
 });
 </script>
@@ -63,7 +63,7 @@ export default defineComponent({
       </el-card>
     </el-col>
   </el-row>
-  <el-row :gutter="14"><el-col :md="14" :xs="24"><el-card shadow="never" header="数据快照"><template v-if="overview.latest_snapshot"><el-descriptions :column="1" border><el-descriptions-item label="状态"><el-tag :type="overview.latest_snapshot.status === 'ready' ? 'success' : 'warning'">{{ overview.latest_snapshot.status }}</el-tag></el-descriptions-item><el-descriptions-item label="截至日期">{{ overview.latest_snapshot.as_of_date }}</el-descriptions-item><el-descriptions-item label="知识截止">{{ dateText(overview.latest_snapshot.knowledge_cutoff) }}</el-descriptions-item></el-descriptions></template><el-empty v-else description="尚无研究快照" :image-size="72" /><div class="card-actions"><el-button :loading="actionLoading === '构建快照'" @click="runAction('构建快照','/api/research/snapshots/build')">构建快照</el-button><el-button type="primary" :loading="actionLoading === '运行日常管线'" @click="runAction('运行日常管线','/api/research/pipeline/daily')">运行日常管线</el-button></div></el-card></el-col><el-col :md="10" :xs="24"><el-card shadow="never" header="最新候选池"><el-empty v-if="!recommendations.length" description="没有可展示候选" :image-size="72" /><el-table v-else :data="recommendations.slice(0, 5)" size="small"><el-table-column prop="rank" label="#" width="48"/><el-table-column prop="symbol" label="标的"/><el-table-column prop="score" label="评分" width="70"/><el-table-column prop="decision" label="结论"/></el-table></el-card></el-col></el-row>
+  <el-row :gutter="14"><el-col :md="14" :xs="24"><el-card shadow="never" header="数据快照"><template v-if="overview.latest_snapshot"><el-descriptions :column="1" border><el-descriptions-item label="状态"><el-tag :type="overview.latest_snapshot.status === 'ready' ? 'success' : 'warning'">{{ overview.latest_snapshot.status }}</el-tag></el-descriptions-item><el-descriptions-item label="截至日期">{{ overview.latest_snapshot.as_of_date }}</el-descriptions-item><el-descriptions-item label="知识截止">{{ dateText(overview.latest_snapshot.knowledge_cutoff) }}</el-descriptions-item></el-descriptions></template><el-empty v-else description="尚无研究快照" :image-size="72" /><div class="card-actions"><el-button :loading="actionLoading === '构建快照'" @click="runAction('构建快照','/api/research/snapshots/build')">构建快照</el-button><el-button type="primary" :loading="actionLoading === '运行日常管线'" @click="runAction('运行日常管线','/api/research/pipeline/daily')">运行日常管线</el-button></div></el-card></el-col><el-col :md="10" :xs="24"><el-card shadow="never"><template #header><div class="card-header"><span>最新候选池</span><ResearchOnlyBadge /></div></template><el-empty v-if="!recommendations.length" description="没有可展示候选" :image-size="72" /><el-table v-else :data="recommendations.slice(0, 5)" size="small"><el-table-column prop="rank" label="#" width="48"/><el-table-column prop="symbol" label="标的"/><el-table-column prop="score" label="评分" width="70"/><el-table-column prop="decision" label="结论"/></el-table></el-card></el-col></el-row>
   <el-card shadow="never" header="研究运行"><el-space wrap><el-button :loading="actionLoading === '重算远端报告观点'" @click="runAction('重算远端报告观点','/api/research/reports/reprocess',{ limit: 100 }, true)">重算远端报告观点</el-button><el-button :loading="actionLoading === '重算观点结果'" @click="runAction('重算观点结果','/api/research/outcomes/recompute')">重算观点结果</el-button><el-button :loading="actionLoading === '重算分析师评分卡'" @click="runAction('重算分析师评分卡','/api/research/scorecards/recompute')">重算分析师评分卡</el-button><el-tag type="info">原始记录 {{ count('tushare_raw_records') }}</el-tag><el-tag type="info">离线分钟 {{ count('offline_minute_bars') }}</el-tag></el-space></el-card>
   <el-card shadow="never" header="运行与历史验证 Readiness">
     <el-alert :title="overview.feature_readiness?.decision_ready ? '运行基线：核心决策数据已通过当前门槛' : `运行基线阻塞：${(overview.feature_readiness?.blockers ?? []).join(', ') || '未知'}`" :type="overview.feature_readiness?.decision_ready ? 'success' : 'warning'" :closable="false" show-icon/>

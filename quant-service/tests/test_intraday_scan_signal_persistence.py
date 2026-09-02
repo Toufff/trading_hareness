@@ -10,6 +10,7 @@ from app.intraday_scan_signal_persistence import (
     persist_scan_transaction,
     scan_rejection_reasons,
 )
+from app.runtime_leases import LeaseLostError
 
 
 class _Connection:
@@ -36,6 +37,50 @@ class _Database:
 
             def __exit__(self, *args):
                 database.exited += 1
+
+        return _Transaction()
+
+
+class _FetchOne:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
+class _FenceAwareConnection:
+    """Answers ``runtime_leases`` fence SELECTs; records every statement."""
+
+    def __init__(self, live_fence):
+        self.executed = []
+        self._live_fence = live_fence
+
+    def execute(self, query, params=None):
+        self.executed.append((query, params))
+        if "runtime_leases" in query:
+            row = None if self._live_fence is None else {"fence": self._live_fence}
+            return _FetchOne(row)
+        return None
+
+
+class _FenceAwareDatabase:
+    def __init__(self, live_fence):
+        self.connection = _FenceAwareConnection(live_fence)
+        self.entered = 0
+        self.exited = 0
+
+    def transaction(self):
+        database = self
+
+        class _Transaction:
+            def __enter__(self):
+                database.entered += 1
+                return database.connection
+
+            def __exit__(self, exc_type, exc, tb):
+                database.exited += 1
+                return False
 
         return _Transaction()
 
@@ -81,6 +126,82 @@ class IntradayScanSignalPersistenceTests(unittest.TestCase):
             quote_latency_ms=0, tushare_minutes={}, surge_features={}, peer_contexts={}, fast_confirmations={},
         )
         self.assertEqual(result, [])
+        self.assertEqual((database.entered, database.exited), (1, 1))
+
+    def _fence_guarded_signal_dependencies(self, observed_at):
+        prepared = SimpleNamespace(
+            previous_by_symbol={}, daily_factors_by_symbol={}, raw_minute_features_by_symbol={},
+            minute_volume_profiles_by_symbol={}, order_book_by_symbol={}, market_contexts={},
+            paper_positions={}, snapshot_payload={}, candidate_sector_keys={}, shadow_priors={},
+            rebound_priors={}, first_eac_by_symbol={}, probability_profiles={}, session_start=observed_at,
+        )
+        return IntradayScanSignalPersistenceDependencies(
+            prepare_inputs=lambda *_args, **_kwargs: prepared,
+            preparation_dependencies=object(), quote_source=lambda _: "tencent_watch_batch",
+            json_safe=lambda value: value, persist_rule_input_snapshot=lambda *_args, **_kwargs: None,
+            attach_volume_time_profile=lambda *_args, **_kwargs: None, number=lambda value: value,
+            aggregate_order_book_observations=lambda *_args, **_kwargs: None,
+            generate_signals=lambda **_kwargs: [], signal_generation_dependencies=object(),
+            load_event_state=lambda *_args, **_kwargs: {},
+            persist_generated_signals=lambda *_args, **_kwargs: [], signal_event_persistence_dependencies=object(),
+        )
+
+    def test_matching_lease_fence_allows_the_write_to_proceed(self):
+        observed_at = datetime(2026, 8, 22, 2, tzinfo=timezone.utc)
+        database = _FenceAwareDatabase(live_fence=3)
+        result = persist_scan_transaction(
+            IntradayScanPersistenceServiceDependencies(
+                database=database, signal_dependencies=self._fence_guarded_signal_dependencies(observed_at),
+                confirmation_window=300, signal_model_version="v1", factor_contract_version="v2",
+                lease_key="background_loop:intraday_monitor", lease_fence=lambda: 3,
+            ),
+            scan_id=uuid.uuid4(), observed_at=observed_at, selected_symbols=["000001.SZ"],
+            source_status={}, watches=[{"symbol": "000001.SZ"}], quotes={}, all_a_rows=[],
+            quote_latency_ms=0, tushare_minutes={}, surge_features={}, peer_contexts={}, fast_confirmations={},
+        )
+        self.assertEqual(result, [])
+        self.assertTrue(any("runtime_leases" in query for query, _ in database.connection.executed))
+        self.assertEqual((database.entered, database.exited), (2, 2))
+
+    def test_superseded_lease_fence_raises_and_rolls_back_before_any_write(self):
+        observed_at = datetime(2026, 8, 22, 2, tzinfo=timezone.utc)
+        database = _FenceAwareDatabase(live_fence=7)
+        write_calls = []
+        signal_dependencies = self._fence_guarded_signal_dependencies(observed_at)
+        signal_dependencies = IntradayScanSignalPersistenceDependencies(
+            **{**signal_dependencies.__dict__, "prepare_inputs": lambda *a, **k: write_calls.append(1)},
+        )
+        with self.assertRaises(LeaseLostError):
+            persist_scan_transaction(
+                IntradayScanPersistenceServiceDependencies(
+                    database=database, signal_dependencies=signal_dependencies,
+                    confirmation_window=300, signal_model_version="v1", factor_contract_version="v2",
+                    lease_key="background_loop:intraday_monitor", lease_fence=lambda: 3,
+                ),
+                scan_id=uuid.uuid4(), observed_at=observed_at, selected_symbols=["000001.SZ"],
+                source_status={}, watches=[{"symbol": "000001.SZ"}], quotes={}, all_a_rows=[],
+                quote_latency_ms=0, tushare_minutes={}, surge_features={}, peer_contexts={}, fast_confirmations={},
+            )
+        # The outer write transaction is entered and exited (rolled back by
+        # the raised exception) but ``prepare_inputs`` (the first step of the
+        # actual write) never ran.
+        self.assertEqual(write_calls, [])
+        self.assertEqual((database.entered, database.exited), (2, 2))
+
+    def test_no_lease_fence_configured_skips_the_check(self):
+        observed_at = datetime(2026, 8, 22, 2, tzinfo=timezone.utc)
+        database = _FenceAwareDatabase(live_fence=7)
+        result = persist_scan_transaction(
+            IntradayScanPersistenceServiceDependencies(
+                database=database, signal_dependencies=self._fence_guarded_signal_dependencies(observed_at),
+                confirmation_window=300, signal_model_version="v1", factor_contract_version="v2",
+            ),
+            scan_id=uuid.uuid4(), observed_at=observed_at, selected_symbols=["000001.SZ"],
+            source_status={}, watches=[{"symbol": "000001.SZ"}], quotes={}, all_a_rows=[],
+            quote_latency_ms=0, tushare_minutes={}, surge_features={}, peer_contexts={}, fast_confirmations={},
+        )
+        self.assertEqual(result, [])
+        self.assertFalse(any("runtime_leases" in query for query, _ in database.connection.executed))
         self.assertEqual((database.entered, database.exited), (1, 1))
 
     def test_freezes_then_generates_and_persists_inside_caller_transaction(self):

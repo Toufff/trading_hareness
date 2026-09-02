@@ -316,13 +316,22 @@ class RemoteArchiveSyncService:
                         )
                     except Exception as error:
                         await self._run_database_blocking(self._fail_automation_run, run_id, error, timeout_seconds=20)
-                        error_code = (
-                            f"http_{error.status_code}" if isinstance(error, HTTPException) else type(error).__name__
-                        )
-                        await self._record(
-                            stream, "failed", started_at, datetime.now(timezone.utc), error_code,
-                            {"transport": self._transport.stats(), "error_type": type(error).__name__},
-                        )
+                        # A remote 401/403 means the archive itself rejected
+                        # this bearer (a stale/misconfigured n8n credential),
+                        # not a data or transport problem worth surfacing on
+                        # the sync health dashboard as a "recent failure" or
+                        # persisting as an attempt row.  The automation run
+                        # above is still closed out so it never stays
+                        # "running" forever.
+                        is_remote_auth_rejection = isinstance(error, HTTPException) and error.status_code in (401, 403)
+                        if not is_remote_auth_rejection:
+                            error_code = (
+                                f"http_{error.status_code}" if isinstance(error, HTTPException) else type(error).__name__
+                            )
+                            await self._record(
+                                stream, "failed", started_at, datetime.now(timezone.utc), error_code,
+                                {"transport": self._transport.stats(), "error_type": type(error).__name__},
+                            )
                         raise
                     result = {**result, "transport": self._transport.stats()}
                     workflow_id = str(getattr(payload, "workflow_id", "") or "").strip()

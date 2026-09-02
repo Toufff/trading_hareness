@@ -23,7 +23,7 @@ from typing import Any, Mapping
 
 from psycopg.types.json import Json
 
-from .xiaojie_indicators import LIMIT_TOLERANCE, NEAR_LIMIT_PCT, SESSION_MINUTES, board_state, snapshot_fields
+from .xiaojie_indicators import NEAR_LIMIT_PCT, SESSION_MINUTES, board_state, snapshot_fields
 
 MODEL_VERSION = "launch-radar-v1"
 #: Velocity starts warming here, below the band: a name is admitted the scan

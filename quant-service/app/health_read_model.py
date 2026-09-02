@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import os
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -53,6 +52,7 @@ class HealthDependencies:
     live_session_acceptance_status: Callable[[], dict[str, Any]] | None = None
     release_metadata: Callable[[], dict[str, str | None]] | None = None
     post_close_runtime_status: Callable[[], dict[str, Any]] | None = None
+    control_plane_writes_enabled: Callable[[], bool] | None = None
 
 
 def runtime_loops_with_lease_heartbeats(
@@ -114,6 +114,7 @@ def health_payload(deps: HealthDependencies) -> dict[str, Any]:
     runtime_loops = deps.background_loop_status() if deps.background_loop_status else {}
     return {
         "status": "ok", "service": "quant-research", "database_pool": pool,
+        "control_plane_writes_enabled": deps.control_plane_writes_enabled() if deps.control_plane_writes_enabled else True,
         "build": deps.release_metadata() if deps.release_metadata else {},
         "async_database_pool": deps.async_database_pool_status() if deps.async_database_pool_status else None,
         "resources": resources,

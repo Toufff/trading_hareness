@@ -9,8 +9,7 @@ never a live strategy input.
 from __future__ import annotations
 
 import math
-from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from statistics import mean
 from typing import Any
 
@@ -69,8 +68,17 @@ def chronological_calibration(
     """Evaluate Platt calibration against an expanding, embargoed timeline.
 
     Every event must contain ``event_date``, numeric ``score`` and binary
-    ``label``. Duplicate events on one date are allowed, but no event from the
-    embargo window can enter its own training set.
+    ``label``. An optional ``exit_date`` marks when that event's own label
+    actually became observable (e.g. the horizon's settlement date); when
+    present, the embargo is enforced against ``exit_date`` rather than
+    ``event_date``, because ``label`` is derived from a return realized up to
+    ``exit_date``, and an event dated only a day or two after another one may
+    still be settled long after it under a multi-day horizon: an ``d+2``
+    event trained on a ``d`` event's label would otherwise use a label that
+    was not yet known on ``d+2``. Events without ``exit_date`` fall back to
+    treating it as ``event_date`` plus ``embargo_days`` (the previous,
+    date-only behaviour), so the fallback error is conservative rather than
+    permissive when the caller has not been updated to supply it.
     """
     normalized = []
     for event in events:
@@ -82,12 +90,18 @@ def chronological_calibration(
             continue
         if label not in (0, 1) or not math.isfinite(score):
             continue
-        normalized.append({"event_date": event_date, "label": label, "score": score})
+        exit_date_raw = event.get("exit_date")
+        try:
+            exit_date = (exit_date_raw if isinstance(exit_date_raw, date) else date.fromisoformat(str(exit_date_raw))) \
+                if exit_date_raw is not None else event_date + timedelta(days=max(0, embargo_days))
+        except (TypeError, ValueError):
+            exit_date = event_date + timedelta(days=max(0, embargo_days))
+        normalized.append({"event_date": event_date, "label": label, "score": score, "exit_date": exit_date})
     normalized.sort(key=lambda row: row["event_date"])
     dates = sorted({row["event_date"] for row in normalized})
     predictions: list[dict[str, Any]] = []
     for row in normalized:
-        train = [item for item in normalized if (row["event_date"] - item["event_date"]).days > max(0, embargo_days)]
+        train = [item for item in normalized if item["exit_date"] < row["event_date"]]
         if len(train) < min_training_events:
             continue
         intercept, slope = _fit_platt([(item["score"], item["label"]) for item in train])
@@ -97,7 +111,8 @@ def chronological_calibration(
     labels = [row["label"] for row in predictions]
     baseline_probabilities = []
     for row in predictions:
-        train = [item for item in normalized if (row_date := item["event_date"]) < date.fromisoformat(row["event_date"]) and (date.fromisoformat(row["event_date"]) - row_date).days > max(0, embargo_days)]
+        row_event_date = date.fromisoformat(row["event_date"])
+        train = [item for item in normalized if item["exit_date"] < row_event_date]
         baseline_probabilities.append(mean(item["label"] for item in train) if train else 0.5)
     status = "completed" if len(predictions) >= minimum_oof_events else "insufficient_history"
     model_metrics = _metrics(probabilities, labels)

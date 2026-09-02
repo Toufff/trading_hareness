@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import sys
 from typing import Any, AsyncIterator, Awaitable, Callable
 
+from .logging_config import configure_logging
+
 
 @dataclass(frozen=True)
 class ApplicationLifecycleDependencies:
@@ -38,6 +40,13 @@ class ApplicationLifecycleDependencies:
     close_async_database: Callable[[], Awaitable[Any]]
     close_database: Callable[[], Any]
     verify_strategy_contracts: Callable[[], Any] = lambda: None
+    # Resolved once at startup so the app-wide write-key middleware never
+    # reads the environment per request; must raise to fail closed when no
+    # write key is configured (see ``app.main.resolve_write_api_key``).
+    resolve_write_api_key: Callable[[], Any] = lambda: None
+    # Peer/edge deployments run read-only against a shared control plane and
+    # must not attempt to register or mutate catalog capabilities there.
+    control_plane_writes_enabled: Callable[[], bool] = lambda: True
 
 
 async def _run_cleanup_steps(
@@ -81,7 +90,15 @@ async def application_lifespan(
     reserver_configured = False
     http_clients_started = False
     background_tasks: dict[str, Any] | None = None
+    # Structured logging has no external resource of its own (no socket, no
+    # file handle beyond stdout) and every later step's failure should already
+    # be logged, so it is configured unconditionally before anything else.
+    configure_logging()
     try:
+        # Fail closed before touching any resource: a misconfigured deployment
+        # with no write key must refuse to start rather than run with every
+        # write request silently allowed.
+        dependencies.resolve_write_api_key()
         dependencies.open_database()
         database_open = True
         await dependencies.open_async_database()
@@ -97,7 +114,8 @@ async def application_lifespan(
         if dependencies.legacy_schema_bootstrap_enabled():
             dependencies.migrate_database()
         dependencies.verify_versioned_schema()
-        await dependencies.run_database(dependencies.ensure_catalog_capabilities, timeout_seconds=30)
+        if dependencies.control_plane_writes_enabled():
+            await dependencies.run_database(dependencies.ensure_catalog_capabilities, timeout_seconds=30)
         dependencies.verify_strategy_contracts()
         background_tasks = dependencies.start_background_tasks()
         yield
@@ -105,8 +123,15 @@ async def application_lifespan(
         await _run_cleanup_steps([
             (background_tasks is not None, lambda: dependencies.cancel_background_tasks(background_tasks or {})),
             (background_tasks is not None, dependencies.cancel_shared_snapshots),
-            (async_database_open, dependencies.shutdown_super_get_executor),
-            (async_database_open, dependencies.shutdown_runtime_executors),
+            # These thread pools are process-local and created at import time;
+            # they own no async database connection. Gating them on
+            # ``async_database_open`` meant a failure between the synchronous
+            # and async database opens skipped their shutdown even though the
+            # synchronous blocking executor could already have accepted work.
+            # ``database_open`` is the earliest point either executor could
+            # plausibly be in use.
+            (database_open, dependencies.shutdown_super_get_executor),
+            (database_open, dependencies.shutdown_runtime_executors),
             (http_clients_started, dependencies.close_http_clients),
             (reserver_configured, lambda: dependencies.configure_request_reserver(None)),
             (async_database_open, dependencies.close_async_database),

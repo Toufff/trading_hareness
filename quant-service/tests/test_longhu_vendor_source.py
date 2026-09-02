@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import os
+import threading
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
+from unittest.mock import patch
 
+import app.longhu_vendor_source as longhu_vendor_source_module
 from app.longhu_vendor_source import (
     MAX_PAGE_SIZE,
     LonghuVendorConfig,
     LonghuVendorSource,
     SharedLonghuReadSource,
+    _HostTokenBucket,
+    _host_rate_limit_per_second,
+    _rate_limit_before_request,
     normalize_stock_symbol,
     parse_industry_stock_row,
     parse_stock_minute_payload,
@@ -62,6 +69,24 @@ class LonghuVendorSourceTests(unittest.TestCase):
         self.assertEqual(normalize_stock_symbol("920895"), "920895.BJ")
         self.assertIsNone(normalize_stock_symbol("399001"))
 
+    def test_shanghai_b_share_is_not_misrouted_to_beijing(self):
+        # A single leading-digit "9 -> BJ" rule used to route both a
+        # Shanghai B-share (900xxx) and a genuine BSE listing (920xxx) to
+        # Beijing; they must resolve to their own real exchange.
+        self.assertEqual(normalize_stock_symbol("900901"), "900901.SH")
+        self.assertEqual(normalize_stock_symbol("920819"), "920819.BJ")
+
+    def test_sh_index_is_not_misrouted_to_a_nonexistent_shenzhen_stock(self):
+        # Taking the trailing 6 digits and routing "0" prefixes to SZ used
+        # to turn CSI 300 (sh000300, a Shanghai index) into "000300.SZ".
+        self.assertIsNone(normalize_stock_symbol("sh000300"))
+        self.assertIsNone(normalize_stock_symbol("sh000001"))
+        self.assertIsNone(normalize_stock_symbol("sh000688"))
+
+    def test_bare_ambiguous_code_still_resolves_to_the_real_stock(self):
+        # Without an explicit "sh" index marker, 000001 is Ping An Bank.
+        self.assertEqual(normalize_stock_symbol("000001"), "000001.SZ")
+
     def test_stock_snapshot_keeps_vendor_exchange_timestamp(self):
         parsed = parse_stock_snapshot_payload({
             "code": "600664", "name": "哈药股份", "day": "20260901", "preclose_px": 9.29,
@@ -87,6 +112,23 @@ class LonghuVendorSourceTests(unittest.TestCase):
         self.assertEqual(rows[1]["amount"], 60300.0)
         self.assertEqual(rows[2]["cumulative_segment"], 1)
         self.assertFalse(rows[-1]["is_complete"])
+
+    def test_missing_minute_volume_does_not_fabricate_a_zero_amount(self):
+        # A None/unparseable volume field is not evidence of a genuine
+        # zero-volume minute; it must not be coerced into amount=price*0*100.
+        rows = parse_stock_minute_payload({
+            "trend": [
+                ["09:30", 10.0, 10.0, 100],
+                ["09:31", 10.1, 10.05, None],
+                ["09:32", 10.2, 10.08, 50],
+            ],
+        }, "600664.SH")
+        self.assertEqual(rows[1]["volume_lot"], 0.0)
+        self.assertIsNone(rows[1]["amount"])
+        self.assertFalse(rows[1]["is_complete"])
+        # An ordinary row with a real (even later-overridden) volume is
+        # unaffected.
+        self.assertIsNotNone(rows[0]["amount"])
 
     def test_shared_gateway_enforces_logical_cap_and_preserves_status(self):
         source = SharedLonghuReadSource("http://owner.test", "read-key")
@@ -168,6 +210,121 @@ class LonghuVendorSourceTests(unittest.TestCase):
         rows = source.plate_day("881001", date(2026, 8, 31), live=False)
         self.assertEqual(offsets, [0, 300])
         self.assertEqual(len(rows), 305)
+
+    def test_live_uses_shanghai_calendar_not_container_utc_midnight(self):
+        # 2026-08-31 23:30 UTC is already 2026-09-01 07:30 in Shanghai, so a
+        # container-local `date.today()` (UTC) would wrongly call the same
+        # trade_date "not live" one moment and "live" the next as the UTC
+        # date rolls, purely from the request's own timing.
+        source = LonghuVendorSource(LonghuVendorConfig(token="t", user_id="u", device_id="d"))
+        source.industry_plates = lambda: ["881001"]
+        seen_live = []
+
+        def fake_plate_day(plate_id, trade_date, *, live):
+            seen_live.append(live)
+            return []
+
+        source.plate_day = fake_plate_day
+        now = datetime(2026, 8, 31, 23, 30, tzinfo=timezone.utc)
+        source.full_market_vendor_rows(date(2026, 9, 1), now=now)
+        self.assertEqual(seen_live, [True])
+
+    def test_live_refuses_a_non_trading_day(self):
+        # 2026-09-06 is a Sunday; a non-trading day must never be treated as
+        # a live session even when it equals "today" in Shanghai.
+        source = LonghuVendorSource(LonghuVendorConfig(token="t", user_id="u", device_id="d"))
+        source.industry_plates = lambda: ["881001"]
+        seen_live = []
+
+        def fake_plate_day(plate_id, trade_date, *, live):
+            seen_live.append(live)
+            return []
+
+        source.plate_day = fake_plate_day
+        sunday = date(2026, 9, 6)
+        now = datetime(2026, 9, 6, 10, 0, tzinfo=timezone.utc)
+        source.full_market_vendor_rows(sunday, now=now)
+        self.assertEqual(seen_live, [False])
+
+
+class LonghuVendorSourceThreadLocalSessionTests(unittest.TestCase):
+    """WP6: a shared ``requests.Session`` across worker threads is unsafe."""
+
+    def test_session_is_reused_within_one_thread(self) -> None:
+        source = LonghuVendorSource(LonghuVendorConfig(token="t", user_id="u", device_id="d"))
+        self.assertIs(source._session, source._session)
+
+    def test_each_thread_gets_its_own_session(self) -> None:
+        source = LonghuVendorSource(LonghuVendorConfig(token="t", user_id="u", device_id="d"))
+        sessions: dict[int, object] = {}
+
+        def capture() -> None:
+            sessions[threading.get_ident()] = source._session
+
+        threads = [threading.Thread(target=capture) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(sessions), 4)
+        self.assertEqual(len({id(session) for session in sessions.values()}), 4)
+
+
+class HostTokenBucketTests(unittest.TestCase):
+    def test_default_rate_is_eight_per_second(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("QUANT_LONGHU_RATE_LIMIT_PER_SECOND", None)
+            self.assertEqual(_host_rate_limit_per_second(), 8.0)
+
+    def test_env_override_is_applied(self) -> None:
+        with patch.dict(os.environ, {"QUANT_LONGHU_RATE_LIMIT_PER_SECOND": "3"}, clear=False):
+            self.assertEqual(_host_rate_limit_per_second(), 3.0)
+
+    def test_invalid_env_value_falls_back_to_default(self) -> None:
+        with patch.dict(os.environ, {"QUANT_LONGHU_RATE_LIMIT_PER_SECOND": "not-a-number"}, clear=False):
+            self.assertEqual(_host_rate_limit_per_second(), 8.0)
+
+    def test_bucket_starts_full_and_never_blocks_within_its_burst(self) -> None:
+        bucket = _HostTokenBucket(rate_per_second=1000.0)
+
+        def acquire_many() -> None:
+            for _ in range(50):
+                bucket.acquire()
+
+        thread = threading.Thread(target=acquire_many)
+        thread.start()
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+
+    def test_bucket_paces_requests_once_exhausted(self) -> None:
+        import time
+
+        rate = 20.0
+        bucket = _HostTokenBucket(rate_per_second=rate)
+        # The bucket starts with one second's worth of burst capacity; drain
+        # all of it so the next acquire must wait for a refill.
+        for _ in range(int(rate)):
+            bucket.acquire()
+        started = time.monotonic()
+        bucket.acquire()
+        elapsed = time.monotonic() - started
+        self.assertGreater(elapsed, 0.02)
+
+    def test_rate_limit_before_request_reuses_one_bucket_per_host(self) -> None:
+        original_buckets = dict(longhu_vendor_source_module._host_token_buckets)
+        longhu_vendor_source_module._host_token_buckets.clear()
+        try:
+            _rate_limit_before_request("https://apphwhq.longhuvip.com/w1/api/index.php?a=x")
+            _rate_limit_before_request("https://apphwhq.longhuvip.com/w1/api/index.php?a=y")
+            _rate_limit_before_request("https://qt.gtimg.cn/q=sh600000")
+            self.assertEqual(
+                set(longhu_vendor_source_module._host_token_buckets.keys()),
+                {"apphwhq.longhuvip.com", "qt.gtimg.cn"},
+            )
+        finally:
+            longhu_vendor_source_module._host_token_buckets.clear()
+            longhu_vendor_source_module._host_token_buckets.update(original_buckets)
 
 
 if __name__ == "__main__":

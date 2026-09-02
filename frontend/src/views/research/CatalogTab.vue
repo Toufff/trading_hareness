@@ -1,16 +1,14 @@
 <script lang="ts">
 import { defineComponent, inject } from 'vue';
-import { Refresh, WarningFilled } from '@element-plus/icons-vue';
-import VChart from 'vue-echarts';
+import { Refresh } from '@element-plus/icons-vue';
 import { dashboardContextKey } from '../../dashboard-context';
 
 export default defineComponent({
   name: 'CatalogTab',
-  components: { Refresh, VChart, WarningFilled },
   setup() {
     const dashboard = inject(dashboardContextKey);
     if (!dashboard) throw new Error('research tab requires the dashboard shell context');
-    return dashboard as Record<string, any>;
+    return { ...dashboard, Refresh };
   },
 });
 </script>

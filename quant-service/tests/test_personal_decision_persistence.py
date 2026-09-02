@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import Mock
@@ -107,8 +108,8 @@ class PersonalDecisionPersistenceTests(unittest.TestCase):
         ))
         snapshot_endpoint = next(route.endpoint for route in router.routes if route.path.endswith("portfolio-snapshots"))
         plan_endpoint = next(route.endpoint for route in router.routes if route.path.endswith("trade-plans"))
-        self.assertFalse(snapshot_endpoint(snapshot())["live_orders"])
-        self.assertFalse(plan_endpoint(plan())["live_orders"])
+        self.assertFalse(asyncio.run(snapshot_endpoint(snapshot()))["live_orders"])
+        self.assertFalse(asyncio.run(plan_endpoint(plan()))["live_orders"])
 
     def test_router_maps_immutable_conflict_to_http_409(self) -> None:
         class Transaction:
@@ -127,7 +128,7 @@ class PersonalDecisionPersistenceTests(unittest.TestCase):
         ))
         endpoint = next(route.endpoint for route in router.routes if route.path.endswith("portfolio-snapshots"))
         with self.assertRaises(HTTPException) as raised:
-            endpoint(snapshot())
+            asyncio.run(endpoint(snapshot()))
         self.assertEqual(raised.exception.status_code, 409)
 
 

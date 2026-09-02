@@ -26,7 +26,7 @@ class PostCloseEvidenceRepositoryTests(unittest.TestCase):
         query, params = connection.execute.call_args.args
         self.assertIn("stock.raw->>'plate_id'", query)
         self.assertIn("jsonb_array_elements", query)
-        self.assertEqual(params, (date(2026, 9, 1),) * 6)
+        self.assertEqual(params, {"trade_date": date(2026, 9, 1)})
 
 
 if __name__ == "__main__":

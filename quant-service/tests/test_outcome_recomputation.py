@@ -18,6 +18,25 @@ from app.main import DailyBar, db, upsert_bar
 from app.outcome_recomputation import recompute as recompute_outcomes
 
 
+def _seed_trading_calendar(connection, dates) -> None:
+    """``resolve_exit`` reads the exit session off the trade calendar, not off
+    the symbol's own bar sequence, so every fixture date must be marked open."""
+    for trading_date in dates:
+        connection.execute(
+            """INSERT INTO quant.market_trade_calendar(exchange,calendar_date,is_open,provider,available_at)
+               VALUES('SSE',%s,true,'p0-fillability-test',%s)
+               ON CONFLICT(exchange,calendar_date) DO UPDATE SET is_open=true""",
+            (trading_date, datetime.combine(trading_date, datetime.min.time(), tzinfo=timezone.utc)),
+        )
+
+
+def _clear_trading_calendar(connection, dates) -> None:
+    for trading_date in dates:
+        connection.execute(
+            "DELETE FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s", (trading_date,),
+        )
+
+
 @unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
 class ClaimOutcomeFillabilityIntegrationTests(unittest.TestCase):
     analyst_id = "p0-fillability-test-analyst"
@@ -39,10 +58,12 @@ class ClaimOutcomeFillabilityIntegrationTests(unittest.TestCase):
                 connection.execute("DELETE FROM quant.market_bars_daily WHERE symbol=%s", (symbol,))
                 connection.execute("DELETE FROM quant.raw_market_observations WHERE symbol=%s", (symbol,))
                 connection.execute("DELETE FROM quant.instruments WHERE symbol=%s", (symbol,))
+            _clear_trading_calendar(connection, [self.entry_date, self.entry_date + timedelta(days=1), self.exit_date])
 
     def _seed_bars(self, connection, symbol: str, *, entry_locked: bool) -> None:
         prices = {self.entry_date: Decimal("10.00"), self.entry_date + timedelta(days=1): Decimal("10.20"),
                   self.exit_date: Decimal("10.50")}
+        _seed_trading_calendar(connection, prices.keys())
         for trading_date, close in prices.items():
             entry_open = close * Decimal("1.10") if entry_locked and trading_date == self.entry_date else close
             upsert_bar(connection, DailyBar(
@@ -132,11 +153,13 @@ class RecommendationOutcomeFillabilityIntegrationTests(unittest.TestCase):
             connection.execute("DELETE FROM quant.market_bars_daily WHERE symbol=%s", (self.symbol,))
             connection.execute("DELETE FROM quant.raw_market_observations WHERE symbol=%s", (self.symbol,))
             connection.execute("DELETE FROM quant.instruments WHERE symbol=%s", (self.symbol,))
+            _clear_trading_calendar(connection, [self.entry_date, self.entry_date + timedelta(days=1), self.exit_date])
 
     def test_locked_limit_up_open_leaves_the_recommendation_unsettled(self) -> None:
         self._cleanup()
         try:
             with db.transaction() as connection:
+                _seed_trading_calendar(connection, (self.entry_date, self.entry_date + timedelta(days=1), self.exit_date))
                 for trading_date, close in ((self.entry_date, Decimal("10.00")), (self.entry_date + timedelta(days=1), Decimal("10.20")),
                                              (self.exit_date, Decimal("10.50"))):
                     locked = trading_date == self.entry_date
@@ -167,6 +190,108 @@ class RecommendationOutcomeFillabilityIntegrationTests(unittest.TestCase):
                     "SELECT * FROM quant.outcomes WHERE symbol=%s", (self.symbol,)
                 ).fetchone()
             self.assertIsNone(outcome, "a locked limit-up open must not be credited as a fillable recommendation entry")
+        finally:
+            self._cleanup()
+
+
+class ExitOffsetParityTests(unittest.TestCase):
+    """Pure-function check that the SQL OFFSET literal never drifts from the
+    canonical ``a_share_exit_lag`` rule (see ``resolve_exit``'s docstring)."""
+
+    def test_exit_offset_matches_a_share_exit_lag_formula(self) -> None:
+        from app.backtest_execution_rules import a_share_exit_lag
+        from app.outcome_recomputation import _exit_offset
+
+        for horizon_days in range(1, 61):
+            self.assertEqual(_exit_offset(horizon_days), a_share_exit_lag(horizon_days - 1) - 1)
+
+    def test_one_day_horizon_no_longer_offsets_to_the_entry_session(self) -> None:
+        from app.outcome_recomputation import _exit_offset
+
+        self.assertEqual(_exit_offset(1), 1)
+        self.assertEqual(_exit_offset(2), 1)
+        self.assertEqual(_exit_offset(3), 2)
+
+
+@unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
+class SingleDayHorizonRegressionTests(unittest.TestCase):
+    """A 1-day horizon must not exit at the same session it entered.
+
+    Before this fix ``exit_close`` was read with ``OFFSET (horizon_days - 1)``
+    from ``entry_date``, so a 1-day horizon's exit session was ``entry_date``
+    itself: ``raw_return`` was entry-open-to-entry-close, and with these
+    fixtures (entry open == entry close) it was identically zero for every
+    single-day claim, regardless of what actually happened afterwards.
+    """
+
+    analyst_id = "p0-h1-test-analyst"
+    report_id = "p0-h1-test-report"
+    symbol = "999992.SZ"
+    entry_date = date(2099, 1, 3)
+    next_date = date(2099, 1, 4)
+
+    def _cleanup(self) -> None:
+        with db.transaction() as connection:
+            connection.execute("DELETE FROM quant.outcomes WHERE symbol=%s", (self.symbol,))
+            connection.execute("DELETE FROM quant.analyst_claims WHERE remote_analyst_id=%s", (self.analyst_id,))
+            connection.execute("DELETE FROM quant.analyst_evidence WHERE remote_report_id=%s", (self.report_id,))
+            connection.execute("DELETE FROM quant.remote_reports WHERE remote_report_id=%s", (self.report_id,))
+            connection.execute("DELETE FROM quant.remote_analysts WHERE remote_analyst_id=%s", (self.analyst_id,))
+            connection.execute("DELETE FROM quant.canonical_bars_daily WHERE symbol=%s", (self.symbol,))
+            connection.execute("DELETE FROM quant.market_bars_daily WHERE symbol=%s", (self.symbol,))
+            connection.execute("DELETE FROM quant.raw_market_observations WHERE symbol=%s", (self.symbol,))
+            connection.execute("DELETE FROM quant.instruments WHERE symbol=%s", (self.symbol,))
+            _clear_trading_calendar(connection, [self.entry_date, self.next_date])
+
+    def test_one_day_horizon_raw_return_reflects_the_next_session_not_zero(self) -> None:
+        self._cleanup()
+        try:
+            with db.transaction() as connection:
+                _seed_trading_calendar(connection, [self.entry_date, self.next_date])
+                for trading_date, open_price, close in (
+                    (self.entry_date, Decimal("10.00"), Decimal("10.00")),
+                    (self.next_date, Decimal("10.00"), Decimal("11.00")),
+                ):
+                    upsert_bar(connection, DailyBar(
+                        symbol=self.symbol, trading_date=trading_date, open=open_price,
+                        high=max(open_price, close) * Decimal("1.01"), low=min(open_price, close) * Decimal("0.99"),
+                        close=close, adj_factor=Decimal("1.0"), is_suspended=False,
+                        source="p0-h1-test", available_at=datetime.combine(trading_date, datetime.min.time(), tzinfo=timezone.utc),
+                    ))
+                available_at = datetime(2099, 1, 2, 3, 0, tzinfo=timezone.utc)
+                connection.execute(
+                    """INSERT INTO quant.remote_analysts(remote_analyst_id,name) VALUES(%s,%s)
+                       ON CONFLICT (remote_analyst_id) DO NOTHING""", (self.analyst_id, "P0 h1 test"),
+                )
+                connection.execute(
+                    """INSERT INTO quant.remote_reports(remote_report_id,remote_analyst_id,report_date,title,remote_version,content_hash)
+                       VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT (remote_report_id) DO NOTHING""",
+                    (self.report_id, self.analyst_id, date(2099, 1, 2), "test", "v1", "e" * 64),
+                )
+                evidence = connection.execute(
+                    """INSERT INTO quant.analyst_evidence(remote_report_id,evidence_key,evidence_type,body,content_sha256,available_at)
+                       VALUES(%s,%s,%s,%s,%s,%s) RETURNING evidence_id""",
+                    (self.report_id, f"claim-{self.symbol}", "paragraph", "test claim", ("f" + self.symbol)[:64].ljust(64, "0"), available_at),
+                ).fetchone()
+                connection.execute(
+                    """INSERT INTO quant.analyst_claims(evidence_id,remote_analyst_id,scope,subject_key,subject_label,direction,strength,
+                              horizon_days,extraction_confidence,explicitness,extractor_version,available_at,published_at)
+                       VALUES(%s,%s,'stock',%s,%s,1,0.80,1,0.90,1.0,'p0-h1-test',%s,%s)""",
+                    (evidence["evidence_id"], self.analyst_id, self.symbol, "P0 h1 test stock", available_at, available_at),
+                )
+            recompute_outcomes(
+                self.next_date, cn_today=lambda: self.next_date, db=db,
+                recompute_intraday_signal_outcomes=lambda _as_of: {"outcome_rows": 0},
+            )
+            with db.transaction() as connection:
+                outcome = connection.execute(
+                    "SELECT * FROM quant.outcomes WHERE symbol=%s", (self.symbol,)
+                ).fetchone()
+            self.assertIsNotNone(outcome)
+            self.assertEqual(outcome["entry_date"], self.entry_date)
+            self.assertNotEqual(outcome["exit_close"], outcome["entry_close"], "h=1 must not exit at the entry session's own close")
+            self.assertNotEqual(Decimal(outcome["raw_return"]), Decimal("0"))
+            self.assertEqual(Decimal(outcome["raw_return"]), Decimal("11.00") / Decimal("10.00") - 1)
         finally:
             self._cleanup()
 

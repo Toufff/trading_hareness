@@ -10,9 +10,27 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Json
 
 from .intraday_clock import continuous_auction_bounds, intraday_outcome_window
+from .outcome_recomputation import _archive_before_overwrite, bars_snapshot_hash
 
 
 INTRADAY_EXIT_QUOTE_TOLERANCE_SECONDS = 90
+#: Bumped from ``intraday-outcome-settlement-v1`` (the version the migration
+#: backfills onto pre-existing rows): the ``next_close`` reference no longer
+#: grabs "whichever bar comes next" for a symbol, which silently stretched
+#: past a suspension gap; it now requires the trade calendar's actual next
+#: session, and settles a delisted symbol at its last observed close instead
+#: of leaving it pending forever.
+METHODOLOGY_VERSION = "intraday-outcome-settlement-v2"
+
+
+def _next_calendar_trading_date(connection: Any, after_date: date, as_of_date: date) -> date | None:
+    row = connection.execute(
+        """SELECT calendar_date FROM quant.market_trade_calendar
+             WHERE exchange='SSE' AND is_open AND calendar_date>%s AND calendar_date<=%s
+             ORDER BY calendar_date LIMIT 1""",
+        (after_date, as_of_date),
+    ).fetchone()
+    return row["calendar_date"] if row else None
 
 
 def settle(
@@ -122,19 +140,27 @@ def settle(
                 ).fetchall()
                 outcome = metrics_for(entry_price, direction, [Decimal(row["price"]) for row in path])
                 matured += 1
+                snapshot_hash = bars_snapshot_hash([str(row["price"]) for row in path])
             else:
                 outcome = None
+                snapshot_hash = None
                 if status == "pending":
                     pending += 1
+            _archive_before_overwrite(
+                connection, "intraday_signal_outcomes", "signal_event_id=%s AND horizon_key=%s",
+                (signal["signal_event_id"], horizon_key), ("signal_event_id", "horizon_key"),
+            )
             connection.execute(
                 """INSERT INTO quant.intraday_signal_outcomes(signal_event_id,horizon_key,direction,entry_observed_at,entry_price,
-                     exit_observed_at,exit_price,raw_return,maximum_favorable_excursion,maximum_adverse_excursion,status,tradability,source_status)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'observed_quote_only',%s)
+                     exit_observed_at,exit_price,raw_return,maximum_favorable_excursion,maximum_adverse_excursion,status,tradability,
+                     source_status,methodology_version,bars_snapshot_hash)
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'observed_quote_only',%s,%s,%s)
                    ON CONFLICT(signal_event_id,horizon_key) DO UPDATE SET exit_observed_at=EXCLUDED.exit_observed_at,
                      exit_price=EXCLUDED.exit_price,raw_return=EXCLUDED.raw_return,
                      maximum_favorable_excursion=EXCLUDED.maximum_favorable_excursion,
                      maximum_adverse_excursion=EXCLUDED.maximum_adverse_excursion,status=EXCLUDED.status,
-                     tradability=EXCLUDED.tradability,source_status=EXCLUDED.source_status,calculated_at=now()""",
+                     tradability=EXCLUDED.tradability,source_status=EXCLUDED.source_status,
+                     methodology_version=EXCLUDED.methodology_version,bars_snapshot_hash=EXCLUDED.bars_snapshot_hash,calculated_at=now()""",
                 (signal["signal_event_id"], horizon_key, direction, entry_observed_at, entry_price,
                  exit_quote["observed_at"] if exit_quote else None, exit_quote["price"] if exit_quote else None,
                  outcome["raw_return"] if outcome else None, outcome["maximum_favorable_excursion"] if outcome else None,
@@ -145,17 +171,48 @@ def settle(
                          key: value.isoformat() if isinstance(value, datetime) else value
                          for key, value in window.items()
                      },
-                 })),
+                 }), METHODOLOGY_VERSION, snapshot_hash),
             )
             horizon_counts[horizon_key] += 1
         signal_date = signal["observed_at"].astimezone(ZoneInfo("Asia/Shanghai")).date()
         same_day_close: Decimal | None = None
-        for horizon_key, date_operator in (("close", "="), ("next_close", ">")):
-            daily_exit = connection.execute(
-                f"""SELECT trading_date,available_at,open,close FROM quant.canonical_bars_daily
-                     WHERE symbol=%s AND trading_date {date_operator} %s AND available_at>%s AND available_at<=%s
-                     ORDER BY trading_date LIMIT 1""", (signal["symbol"], signal_date, signal["observed_at"], cutoff),
-            ).fetchone()
+        for horizon_key in ("close", "next_close"):
+            delisted_next_close = False
+            if horizon_key == "close":
+                # Same-session close: no calendar lookup needed, a suspended
+                # session simply has no bar and correctly stays pending.
+                daily_exit = connection.execute(
+                    """SELECT trading_date,available_at,open,close FROM quant.canonical_bars_daily
+                         WHERE symbol=%s AND trading_date=%s AND available_at>%s AND available_at<=%s
+                         ORDER BY trading_date LIMIT 1""", (signal["symbol"], signal_date, signal["observed_at"], cutoff),
+                ).fetchone()
+            else:
+                # The trade calendar's actual next session, never "whichever
+                # bar for this symbol comes next": that silently stretched the
+                # reference across a suspension gap.  A delisted symbol
+                # settles at its last observed close instead of staying
+                # pending forever.
+                target_exit_date = _next_calendar_trading_date(connection, signal_date, cutoff.astimezone(ZoneInfo("Asia/Shanghai")).date())
+                daily_exit = None
+                if target_exit_date is not None:
+                    instrument = connection.execute(
+                        "SELECT delist_date FROM quant.instruments WHERE symbol=%s", (signal["symbol"],),
+                    ).fetchone()
+                    delist_date = instrument["delist_date"] if instrument else None
+                    if delist_date is not None and delist_date <= target_exit_date:
+                        daily_exit = connection.execute(
+                            """SELECT trading_date,available_at,open,close FROM quant.canonical_bars_daily
+                                 WHERE symbol=%s AND trading_date<=%s AND available_at<=%s
+                                 ORDER BY trading_date DESC LIMIT 1""",
+                            (signal["symbol"], delist_date, cutoff),
+                        ).fetchone()
+                        delisted_next_close = daily_exit is not None
+                    else:
+                        daily_exit = connection.execute(
+                            """SELECT trading_date,available_at,open,close FROM quant.canonical_bars_daily
+                                 WHERE symbol=%s AND trading_date=%s AND available_at>%s AND available_at<=%s""",
+                            (signal["symbol"], target_exit_date, signal["observed_at"], cutoff),
+                        ).fetchone()
             status = "matured" if daily_exit else "pending"
             outcome = metrics_for(entry_price, direction, [Decimal(daily_exit["close"])]) if daily_exit else None
             if horizon_key == "close" and daily_exit:
@@ -165,21 +222,29 @@ def settle(
                 Decimal(daily_exit["open"]) if horizon_key == "next_close" and daily_exit and daily_exit["open"] else None,
                 Decimal(daily_exit["close"]) if horizon_key == "next_close" and daily_exit else None,
             ) if horizon_key == "next_close" else None
+            tradability = "delisted" if delisted_next_close else "daily_close_reference"
+            snapshot_hash = bars_snapshot_hash([str(daily_exit["trading_date"]), str(daily_exit["close"])]) if daily_exit else None
+            _archive_before_overwrite(
+                connection, "intraday_signal_outcomes", "signal_event_id=%s AND horizon_key=%s",
+                (signal["signal_event_id"], horizon_key), ("signal_event_id", "horizon_key"),
+            )
             connection.execute(
                 """INSERT INTO quant.intraday_signal_outcomes(signal_event_id,horizon_key,direction,entry_observed_at,entry_price,
-                     exit_observed_at,exit_price,raw_return,maximum_favorable_excursion,maximum_adverse_excursion,status,tradability,source_status)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'daily_close_reference',%s)
+                     exit_observed_at,exit_price,raw_return,maximum_favorable_excursion,maximum_adverse_excursion,status,tradability,
+                     source_status,methodology_version,bars_snapshot_hash)
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT(signal_event_id,horizon_key) DO UPDATE SET exit_observed_at=EXCLUDED.exit_observed_at,
                      exit_price=EXCLUDED.exit_price,raw_return=EXCLUDED.raw_return,
                      maximum_favorable_excursion=EXCLUDED.maximum_favorable_excursion,
                      maximum_adverse_excursion=EXCLUDED.maximum_adverse_excursion,status=EXCLUDED.status,
-                     tradability=EXCLUDED.tradability,source_status=EXCLUDED.source_status,calculated_at=now()""",
+                     tradability=EXCLUDED.tradability,source_status=EXCLUDED.source_status,
+                     methodology_version=EXCLUDED.methodology_version,bars_snapshot_hash=EXCLUDED.bars_snapshot_hash,calculated_at=now()""",
                 (signal["signal_event_id"], horizon_key, direction, entry_observed_at, entry_price,
                  daily_exit["available_at"] if daily_exit else None, daily_exit["close"] if daily_exit else None,
                  outcome["raw_return"] if outcome else None, outcome["maximum_favorable_excursion"] if outcome else None,
-                 outcome["maximum_adverse_excursion"] if outcome else None, status,
+                 outcome["maximum_adverse_excursion"] if outcome else None, status, tradability,
                  Json(json_safe({"entry": "signal_evidence.tencent.price", "exit": "canonical_daily_close", "cutoff": cutoff.isoformat(),
-                                 "return_decomposition": decomposition}))),
+                                 "return_decomposition": decomposition})), METHODOLOGY_VERSION, snapshot_hash),
             )
             if status == "matured":
                 matured += 1

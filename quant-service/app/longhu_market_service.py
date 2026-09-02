@@ -103,18 +103,24 @@ async def sync(
             ),
         }
     except Exception as error:
+        # ``except ... as error`` is implicitly deleted once the block exits;
+        # capture its fields before defining a nested closure over them so a
+        # deferred call cannot see a NameError instead of the real failure.
+        error_type_name = type(error).__name__
+        error_text = str(error)[:1000]
+
         def fail() -> None:
             with db.transaction() as connection:
                 connection.execute(
                     """UPDATE quant.fetch_runs SET status='failed',finished_at=now(),
                               error_class=%s,error_message=%s
                         WHERE request_key=%s""",
-                    (type(error).__name__, str(error)[:1000], request_key),
+                    (error_type_name, error_text, request_key),
                 )
         await run_database_blocking(fail)
         return {
             "status": "failed", "trade_date": str(trade_date), "provider": PROVIDER_KEY,
-            "request_key": request_key, "reason": f"{type(error).__name__}: {error}",
+            "request_key": request_key, "reason": f"{error_type_name}: {error_text}",
         }
 
 

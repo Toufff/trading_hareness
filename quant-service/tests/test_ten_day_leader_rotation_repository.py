@@ -5,7 +5,6 @@ from datetime import date, datetime, timezone
 import unittest
 
 from app.ten_day_leader_rotation_repository import (
-    TenDayRankingInputs,
     completed_for_date,
     latest_full_market_date,
     load_ten_day_ranking_inputs,

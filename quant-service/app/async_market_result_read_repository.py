@@ -11,6 +11,34 @@ def _limit(value: int, maximum: int) -> int:
     return max(1, min(value, maximum))
 
 
+#: Shared verbatim with ``async_intraday_decision_card_repository.py``'s
+#: decision-card analyst scorecard readiness read, so the same "is this
+#: analyst mature enough to score" question is never answered by two
+#: independently-maintained copies of the same join.
+ANALYST_SCORECARD_READINESS_SQL = """SELECT a.remote_analyst_id,a.name,count(DISTINCT c.claim_id)::int stock_claims,
+                      count(DISTINCT c.claim_id) FILTER (WHERE c.direction<>0)::int directional_stock_claims,
+                      count(DISTINCT c.claim_id) FILTER (WHERE c.direction=0)::int neutral_stock_claims,
+                      count(DISTINCT o.outcome_id)::int settled_stock_outcomes,max(c.available_at) latest_claim_at
+                 FROM quant.remote_analysts a
+                 LEFT JOIN quant.analyst_claims c ON c.remote_analyst_id=a.remote_analyst_id AND c.scope='stock'
+                 LEFT JOIN quant.outcomes o ON o.claim_id=c.claim_id
+                GROUP BY a.remote_analyst_id,a.name ORDER BY a.name,a.remote_analyst_id"""
+
+
+def analyst_scorecard_readiness(rows: Iterable[Any]) -> list[dict[str, Any]]:
+    """Classify each analyst's scorecard-eligibility from the query above."""
+    readiness = []
+    for row in rows:
+        item = dict(row)
+        directional = int(item["directional_stock_claims"] or 0)
+        settled = int(item["settled_stock_outcomes"] or 0)
+        reason = ("no_directional_stock_claims" if directional == 0
+                  else "fewer_than_30_settled_stock_outcomes" if settled < 30
+                  else "eligible_for_scorecard_review")
+        readiness.append({**item, "mature": settled >= 30, "reason": reason})
+    return readiness
+
+
 async def tushare_raw(async_database: Any, api_name: str, provider: str | None, limit: int, offset: int, catalog: Iterable[str]) -> dict[str, Any]:
     if api_name not in catalog:
         raise HTTPException(status_code=404, detail="api_name is not in the enabled catalog")
@@ -99,9 +127,25 @@ def _number(value: Any, default: float = 0.0) -> float:
         return default
 
 
-async def _feature_readiness(conn: Any) -> dict[str, Any]:
-    result = await conn.execute(
-        """WITH latest_bar AS (
+#: Tushare-catalog P1 sources that only live inside the shared
+#: ``tushare_raw_records`` table (keyed by ``api_name``).  ``pg_stat`` only
+#: tracks per-table row estimates, not per-``api_name`` ones, so these keep an
+#: exact but index-bounded ``count(*) WHERE api_name=...`` instead of a
+#: pg_stat estimate; they are supplementary (never a decision blocker) and
+#: each query only touches the rows for its own api_name via
+#: ``tushare_raw_api_time_idx``.
+_TUSHARE_RAW_P1_FEATURES = ("moneyflow_dc", "moneyflow", "cyq_perf", "cyq_chips", "stk_factor_pro")
+
+
+#: The P0/P1 feature-readiness query, using ``pg_stat_all_tables`` row
+#: estimates instead of a full ``count(*)`` scan of the largest control-plane
+#: tables.  Exported so every caller of this projection -- async or sync --
+#: executes the exact same SQL text rather than maintaining independent,
+#: byte-identical-looking copies that can silently drift (see
+#: ``feature_readiness_estimated`` below and
+#: ``research_capacity.feature_readiness_state``, its synchronous
+#: counterpart).
+FEATURE_READINESS_ESTIMATE_SQL = """WITH latest_bar AS (
                  SELECT trading_date FROM quant.canonical_bars_daily
                   ORDER BY trading_date DESC LIMIT 1
              ), latest_snapshot AS (
@@ -129,11 +173,62 @@ async def _feature_readiness(conn: Any) -> dict[str, Any]:
            UNION ALL SELECT 'sector_flow',0,coalesce((SELECT rows FROM table_estimates WHERE relname='sector_market_observations'),0),
                   (SELECT max(trading_date) FROM quant.sector_market_observations),'P1'
            UNION ALL SELECT 'announcements',0,coalesce((SELECT rows FROM table_estimates WHERE relname='market_events'),0),
-                  (SELECT max(occurred_at::date) FROM quant.market_events),'P1'
+                  (SELECT max((occurred_at AT TIME ZONE 'Asia/Shanghai')::date) FROM quant.market_events),'P1'
            UNION ALL SELECT 'analyst_claims',0,coalesce((SELECT rows FROM table_estimates WHERE relname='analyst_claims'),0),
-                  (SELECT max((available_at AT TIME ZONE 'Asia/Shanghai')::date) FROM quant.analyst_claims),'P1'""")
-    rows = await result.fetchall()
-    result = await conn.execute("SELECT greatest(1,count(*)::int) symbols FROM quant.universe_members WHERE universe_key='all_a' AND enabled")
+                  (SELECT max((available_at AT TIME ZONE 'Asia/Shanghai')::date) FROM quant.analyst_claims),'P1'"""
+
+
+#: Exact, index-bounded per-``api_name`` row/symbol counts for the P1 tushare
+#: features that ``pg_stat`` cannot estimate individually (see
+#: ``_TUSHARE_RAW_P1_FEATURES``).  Shared verbatim by the async and sync
+#: feature-readiness readers.
+TUSHARE_RAW_P1_FEATURE_SQL = """SELECT api_name,count(DISTINCT row_data->>'ts_code')::int symbols,count(*)::int rows,
+                  max(to_date(NULLIF(row_data->>'trade_date',''),'YYYYMMDD')) latest_date
+             FROM quant.tushare_raw_records WHERE api_name=ANY(%s) GROUP BY api_name"""
+
+
+#: Live "all_a" universe size, shared by the async and sync feature-readiness
+#: readers so both compute coverage against the same denominator query.
+UNIVERSE_SIZE_SQL = "SELECT greatest(1,count(*)::int) symbols FROM quant.universe_members WHERE universe_key='all_a' AND enabled"
+
+
+def merge_tushare_p1_feature_rows(rows: list[dict[str, Any]], tushare_rows: Iterable[Any]) -> list[dict[str, Any]]:
+    """Append one row per ``_TUSHARE_RAW_P1_FEATURES`` entry to ``rows``.
+
+    Pure post-processing shared by the async and sync feature-readiness
+    readers once each has executed ``TUSHARE_RAW_P1_FEATURE_SQL`` on its own
+    connection type.
+    """
+    tushare_by_api = {row["api_name"]: row for row in tushare_rows}
+    merged = list(rows)
+    for api_name in _TUSHARE_RAW_P1_FEATURES:
+        found = tushare_by_api.get(api_name)
+        merged.append({
+            "feature": api_name, "symbols": int(found["symbols"]) if found else 0,
+            "rows": int(found["rows"]) if found else 0, "latest_date": found["latest_date"] if found else None,
+            "priority": "P1",
+        })
+    return merged
+
+
+async def feature_readiness_estimated(conn: Any) -> dict[str, Any]:
+    """Feature-readiness projection shared by the data-readiness endpoint and
+    the research overview panel.
+
+    This used to be two independently-maintained queries: this pg_stat-based
+    estimate (used only by ``research_overview``) and a byte-identical-looking
+    but unbounded ``count(DISTINCT ...)``/``count(*)`` scan over the same
+    largest tables in ``async_research_readiness_repository.feature_readiness``
+    and ``research_capacity.feature_readiness_state`` (the sync counterpart).
+    Both callers now share this one estimate-based implementation; the
+    response is marked ``estimated`` so a consumer never mistakes the P0
+    symbol/row counts for an exact tally.
+    """
+    result = await conn.execute(FEATURE_READINESS_ESTIMATE_SQL)
+    rows = [dict(row) for row in await result.fetchall()]
+    tushare_result = await conn.execute(TUSHARE_RAW_P1_FEATURE_SQL, (list(_TUSHARE_RAW_P1_FEATURES),))
+    rows = merge_tushare_p1_feature_rows(rows, await tushare_result.fetchall())
+    result = await conn.execute(UNIVERSE_SIZE_SQL)
     universe_size = int((await result.fetchone())["symbols"])
     items: list[dict[str, Any]] = []
     for row in rows:
@@ -146,7 +241,11 @@ async def _feature_readiness(conn: Any) -> dict[str, Any]:
         items.append({**row, "coverage": coverage, "status": status})
     blockers = [item["feature"] for item in items if item["feature"] in {"daily_bars", "daily_basic", "trade_limits"} and item["status"] != "ready"]
     return {"universe_key": "all_a", "universe_symbols": universe_size, "items": items,
-            "decision_ready": not blockers, "blockers": blockers}
+            "decision_ready": not blockers, "blockers": blockers, "estimated": True}
+
+
+#: Backward-compatible alias for the previous module-private name.
+_feature_readiness = feature_readiness_estimated
 
 
 async def research_overview(async_database: Any, history_estimate: dict[str, Any]) -> dict[str, Any]:
@@ -198,22 +297,9 @@ async def analyst_scorecards(async_database: Any, limit: int) -> dict[str, Any]:
     async with async_database.transaction() as conn:
         result = await conn.execute("SELECT analyst_id,horizon_days,as_of_date,observations,hit_rate,mean_excess_return,mean_directional_return,calibration_score,methodology_version,created_at FROM quant.analyst_scorecards ORDER BY as_of_date DESC,observations DESC,analyst_id,horizon_days LIMIT %s", (_limit(limit, 500),))
         rows = await result.fetchall()
-        result = await conn.execute(
-            """SELECT a.remote_analyst_id,a.name,count(DISTINCT c.claim_id)::int stock_claims,
-                      count(DISTINCT c.claim_id) FILTER (WHERE c.direction<>0)::int directional_stock_claims,
-                      count(DISTINCT c.claim_id) FILTER (WHERE c.direction=0)::int neutral_stock_claims,
-                      count(DISTINCT o.outcome_id)::int settled_stock_outcomes,max(c.available_at) latest_claim_at
-                 FROM quant.remote_analysts a
-                 LEFT JOIN quant.analyst_claims c ON c.remote_analyst_id=a.remote_analyst_id AND c.scope='stock'
-                 LEFT JOIN quant.outcomes o ON o.claim_id=c.claim_id
-                GROUP BY a.remote_analyst_id,a.name ORDER BY a.name,a.remote_analyst_id""")
+        result = await conn.execute(ANALYST_SCORECARD_READINESS_SQL)
         readiness_rows = await result.fetchall()
-    readiness = []
-    for row in readiness_rows:
-        item = dict(row)
-        directional, settled = int(item["directional_stock_claims"] or 0), int(item["settled_stock_outcomes"] or 0)
-        reason = "no_directional_stock_claims" if directional == 0 else ("fewer_than_30_settled_stock_outcomes" if settled < 30 else "eligible_for_scorecard_review")
-        readiness.append({**item, "mature": settled >= 30, "reason": reason})
+    readiness = analyst_scorecard_readiness(readiness_rows)
     return {"items": rows, "readiness": readiness, "notice": "成绩单只对方向明确、且后续价格路径已经成熟的股票观点计算。"}
 
 

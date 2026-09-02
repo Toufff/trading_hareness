@@ -12,9 +12,32 @@ from .tushare_providers import safe_error_detail
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
+#: Shared by the sync gate here and the native-async gate in
+#: ``async_market_session_repository.py`` so the two calendar readers never
+#: drift into two different queries against the same single-row lookup.
+SSE_CALENDAR_STATUS_SQL = "SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s"
 
-def _calendar_date(now: datetime | None) -> date:
+
+def calendar_date_for(now: datetime | None) -> date:
+    """Shanghai exchange date for a UTC-or-naive instant, defaulting to now."""
     return (now or datetime.now(timezone.utc)).astimezone(CN_TZ).date()
+
+
+#: Backward-compatible alias for the previous module-private name.
+_calendar_date = calendar_date_for
+
+
+def interpret_sse_calendar_row(row: Any) -> tuple[bool, str]:
+    """Turn one persisted calendar row into the shared open/reason contract.
+
+    The weekend short-circuit stays with each caller (so it can skip the
+    query entirely); this only interprets what the database returned.
+    """
+    if row is None:
+        return False, "SSE trade calendar has no entry for today; fail closed"
+    if not row["is_open"]:
+        return False, "SSE trade calendar marks today closed"
+    return True, "SSE trade calendar marks today open"
 
 
 def sse_calendar_status(database: Any, calendar_date: date) -> tuple[bool, str]:
@@ -22,15 +45,8 @@ def sse_calendar_status(database: Any, calendar_date: date) -> tuple[bool, str]:
     if calendar_date.weekday() >= 5:
         return False, "SSE trade calendar treats weekends as closed"
     with database.transaction() as connection:
-        row = connection.execute(
-            "SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s",
-            (calendar_date,),
-        ).fetchone()
-    if row is None:
-        return False, "SSE trade calendar has no entry for today; fail closed"
-    if not row["is_open"]:
-        return False, "SSE trade calendar marks today closed"
-    return True, "SSE trade calendar marks today open"
+        row = connection.execute(SSE_CALENDAR_STATUS_SQL, (calendar_date,)).fetchone()
+    return interpret_sse_calendar_row(row)
 
 
 def sse_calendar_open(database: Any, calendar_date: date) -> bool:
@@ -62,20 +78,13 @@ async def sse_calendar_status_async(
 
     def load_calendar() -> Any:
         with database.transaction() as connection:
-            return connection.execute(
-                "SELECT is_open FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s",
-                (calendar_date,),
-            ).fetchone()
+            return connection.execute(SSE_CALENDAR_STATUS_SQL, (calendar_date,)).fetchone()
 
     try:
         row = await database_runner(load_calendar)
     except ExecutorSaturatedError as error:
         return False, f"local calendar capacity unavailable; fail closed: {safe_error_detail(str(error), 180)}"
-    if row is None:
-        return False, "SSE trade calendar has no entry for today; fail closed"
-    if not row["is_open"]:
-        return False, "SSE trade calendar marks today closed"
-    return True, "SSE trade calendar marks today open"
+    return interpret_sse_calendar_row(row)
 
 
 def realtime_market_session(database: Any, api_name: str | None = None,
@@ -106,6 +115,7 @@ async def realtime_market_session_async(database: Any, api_name: str | None = No
 
 
 __all__ = [
+    "SSE_CALENDAR_STATUS_SQL", "calendar_date_for", "interpret_sse_calendar_row",
     "realtime_market_session", "realtime_market_session_async",
     "sse_calendar_open", "sse_calendar_open_async", "sse_calendar_status", "sse_calendar_status_async",
 ]

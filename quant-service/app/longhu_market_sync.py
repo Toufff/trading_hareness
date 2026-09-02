@@ -7,6 +7,8 @@ from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Mapping
 
+from .market_rules import a_share_limit_ratio, is_st_security_name
+
 
 PROVIDER_KEY = "longhuvip_composite"
 FLOW_SOURCE = "longhuvip_main_net"
@@ -104,15 +106,24 @@ def merge_cross_section(
 
 
 def _limit_ratio(symbol: str, name: str) -> tuple[Decimal, str]:
-    normalized_name = name.upper().replace("*", "")
-    if "ST" in normalized_name:
-        return Decimal("0.05"), "st_5_percent"
-    code, exchange = symbol.split(".")
-    if exchange == "BJ":
-        return Decimal("0.30"), "beijing_30_percent"
-    if code.startswith(("300", "301", "688", "689")):
-        return Decimal("0.20"), "registration_board_20_percent"
-    return Decimal("0.10"), "mainboard_10_percent"
+    """Delegate to the single shared board/ST price-band table.
+
+    ``name``'s ST prefix is matched with the exchange's own rule (a
+    startswith check), not the substring match this used to do, which
+    misfired on any name that merely contained "ST" incidentally.
+    """
+    is_st = is_st_security_name(name)
+    ratio = a_share_limit_ratio(symbol, is_st=is_st)
+    code = symbol.split(".", 1)[0]
+    if code.startswith(("4", "8", "92")):
+        rule = "beijing_30_percent"
+    elif code.startswith(("300", "301", "688", "689")):
+        rule = "registration_board_20_percent"
+    elif is_st:
+        rule = "st_5_percent"
+    else:
+        rule = "mainboard_10_percent"
+    return Decimal(str(ratio)), rule
 
 
 def build_control_rows(daily_rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:

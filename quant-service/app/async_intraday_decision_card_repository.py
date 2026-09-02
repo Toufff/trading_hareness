@@ -9,17 +9,17 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 
 from .analyst_text_features import summary_from_rows
+from .async_market_result_read_repository import ANALYST_SCORECARD_READINESS_SQL, analyst_scorecard_readiness
 from .intraday_decision_card_read_model import project_decision_card
+from .repo_common import async_fetch_all, async_fetch_one
 
 
 async def _fetchall(connection: Any, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-    result = await connection.execute(query, params)
-    return [dict(row) for row in await result.fetchall()]
+    return [dict(row) for row in await async_fetch_all(connection, query, params)]
 
 
 async def _fetchone(connection: Any, query: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
-    result = await connection.execute(query, params)
-    row = await result.fetchone()
+    row = await async_fetch_one(connection, query, params)
     return dict(row) if row else None
 
 
@@ -86,28 +86,8 @@ async def analyst_execution_context(
             "approved_at": registry.get("approved_at"), "as_of_date": str(as_of_date),
             "evidence": registry.get("evidence") or {},
         }
-    scorecard_rows = await _fetchall(
-        connection,
-        """SELECT a.remote_analyst_id,a.name,
-                  count(DISTINCT c.claim_id)::int stock_claims,
-                  count(DISTINCT c.claim_id) FILTER (WHERE c.direction<>0)::int directional_stock_claims,
-                  count(DISTINCT c.claim_id) FILTER (WHERE c.direction=0)::int neutral_stock_claims,
-                  count(DISTINCT o.outcome_id)::int settled_stock_outcomes,
-                  max(c.available_at) latest_claim_at
-             FROM quant.remote_analysts a
-             LEFT JOIN quant.analyst_claims c ON c.remote_analyst_id=a.remote_analyst_id AND c.scope='stock'
-             LEFT JOIN quant.outcomes o ON o.claim_id=c.claim_id
-             GROUP BY a.remote_analyst_id,a.name
-             ORDER BY a.name,a.remote_analyst_id""",
-    )
-    readiness = []
-    for item in scorecard_rows:
-        directional = int(item["directional_stock_claims"] or 0)
-        settled = int(item["settled_stock_outcomes"] or 0)
-        reason = "no_directional_stock_claims" if directional == 0 else (
-            "fewer_than_30_settled_stock_outcomes" if settled < 30 else "eligible_for_scorecard_review"
-        )
-        readiness.append({**item, "mature": settled >= 30, "reason": reason})
+    scorecard_rows = await _fetchall(connection, ANALYST_SCORECARD_READINESS_SQL)
+    readiness = analyst_scorecard_readiness(scorecard_rows)
     return {
         "factor_version": summary["factor_version"], "market": summary["market"], "themes": summary["themes"],
         "mature_analysts": [], "eligible_themes": [], "scorecard_readiness": readiness,

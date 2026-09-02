@@ -119,6 +119,7 @@ _PRODUCTS = (
 
     # Operational receipts can never be market features or strategy inputs.
     _product("automation_runs", "control", "created_at", ("task_key", "created_year"), archive_format="jsonl_zstd", local_tier="hot", local_hot_window_days=None, replay_role="execution_audit_only", description="durable task execution receipts"),
+    _product("retention_policies", "control", "updated_at", ("table_name",), archive_format="jsonl_zstd", local_tier="hot", local_hot_window_days=None, replay_role="execution_audit_only", description="per-table bounded-delete retention configuration and last-run receipts"),
 )
 
 

@@ -199,7 +199,9 @@ def summarize_evaluation(
                 sector_flow_by_day[(_as_date(row["trading_date"]), str(row["sector_key"]))] = float(row.get("net_amount") or 0)
             except (TypeError, ValueError):
                 continue
-    outcome_by_analyst: dict[str, dict[str, Any]] = defaultdict(lambda: {"matured": 0, "pending": 0, "unavailable": 0, "returns": []})
+    outcome_by_analyst: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"matured": 0, "pending": 0, "unavailable": 0, "returns": [], "event_keys": set()}
+    )
     intraday_by_analyst: dict[str, dict[str, Any]] = defaultdict(lambda: {
         "matured": 0, "pending": 0, "unavailable": 0, "returns": [], "event_keys": set(),
     })
@@ -213,9 +215,15 @@ def summarize_evaluation(
         if status == "matured" and row.get("directional_return") is not None:
             bucket["returns"].append(float(row["directional_return"]))
         if status == "matured":
-            matured_daily_event_keys.add(row.get("opinion_id") or (
+            # One independent event per opinion_id, not once per horizon_days
+            # row: analyst_opinion_outcomes carries one row per (opinion,
+            # horizon) pair, so an opinion evaluated at 8 horizons must not
+            # count as 8 samples toward the per-analyst maturity gate below.
+            event_key = row.get("opinion_id") or (
                 analyst, row.get("opinion_date"), row.get("scope"), row.get("subject_key"),
-            ))
+            )
+            bucket["event_keys"].add(event_key)
+            matured_daily_event_keys.add(event_key)
 
     # Intraday settlement is a real, session-bounded outcome even when the
     # longer daily horizon is still pending.  Count one independent event per
@@ -268,7 +276,9 @@ def summarize_evaluation(
     for analyst, item in analyst_rows.items():
         result = outcome_by_analyst.get(analyst, {})
         matured = int(result.get("matured", 0))
+        matured_independent_events = len(result.get("event_keys", set()))
         item["matured_outcomes"] = matured
+        item["matured_independent_events"] = matured_independent_events
         item["pending_outcomes"] = int(result.get("pending", 0))
         item["unavailable_outcomes"] = int(result.get("unavailable", 0))
         values = result.get("returns", [])
@@ -286,9 +296,13 @@ def summarize_evaluation(
             "matured_intraday_available" if item["intraday_matured_events"] else
             "matured_daily_available" if matured else "no_matured_outcome"
         )
-        item["mature"] = matured >= 30 and item["directional_claims"] >= 30
+        # Gated on independent opinion_id-deduplicated events, not raw outcome
+        # rows: analyst_opinion_outcomes carries one row per (opinion,
+        # horizon), so 4 opinions evaluated across the 8 registered horizons
+        # is 4 samples, not 32.
+        item["mature"] = matured_independent_events >= 30 and item["directional_claims"] >= 30
         item["status"] = "eligible_for_review" if item["mature"] else "research_only"
-        item["gate_reason"] = None if item["mature"] else "matured directional outcomes < 30 or directional claims < 30"
+        item["gate_reason"] = None if item["mature"] else "matured independent daily outcome events < 30 or directional claims < 30"
 
     timeline_map: dict[date, dict[str, Any]] = {}
     for day, market in market_by_day.items():
@@ -399,6 +413,35 @@ def summarize_evaluation(
     matured = len(matured_event_keys)
     observed_days = len({str(_as_date(row["exchange_date"])) for row in market_days})
     gate_status = "eligible_for_review" if observed_days >= REQUIRED_DAYS and matured >= REQUIRED_MATURED_EVENTS else "accumulating"
+
+    # Calibrated per horizon, never pooled: analyst_opinion_outcomes carries
+    # one row per (opinion, horizon), so pooling every registered horizon
+    # into one Platt fit let the same opinion enter the training/OOF sample
+    # up to 8 times.  ``exit_date`` (when the horizon's label was actually
+    # observable) drives the embargo inside chronological_calibration; it is
+    # threaded through here rather than only ``opinion_date``.
+    calibration_events_by_horizon: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in outcomes:
+        if (row.get("status") != "matured" or row.get("directional_return") is None
+                or row.get("opinion_date") is None or row.get("score") is None):
+            continue
+        try:
+            horizon = int(row.get("horizon_days") or 0)
+        except (TypeError, ValueError):
+            continue
+        calibration_events_by_horizon[horizon].append({
+            "event_date": row.get("opinion_date"), "exit_date": row.get("exit_date"),
+            "score": row.get("score"), "label": 1 if float(row.get("directional_return") or 0) > 0 else 0,
+        })
+    calibration_by_horizon = {
+        str(horizon): chronological_calibration(events)
+        for horizon, events in sorted(calibration_events_by_horizon.items())
+    }
+    _primary_horizon = 5 if 5 in calibration_events_by_horizon else (
+        min(calibration_events_by_horizon) if calibration_events_by_horizon else None
+    )
+    _calibration_by_horizon = calibration_by_horizon.get(str(_primary_horizon), chronological_calibration([]))
+
     return {
         "window": {"start_date": str(start_date), "end_date": str(end_date), "timezone": "Asia/Shanghai"},
         "analysts": sorted(analyst_rows.values(), key=lambda row: row["analyst_id"]),
@@ -418,12 +461,8 @@ def summarize_evaluation(
             "matured_intraday_independent_events": len(matured_intraday_event_keys),
         },
         "event_ledger": {"observations": len(observations), "opinions": len(opinions), "outcomes": len(outcomes), "intraday_outcomes": len(intraday_outcomes), "matured_independent_events": matured, "matured_daily_independent_events": len(matured_daily_event_keys), "matured_intraday_independent_events": len(matured_intraday_event_keys), "append_only_source": "quant.analyst_observations"},
-        "calibration": chronological_calibration([
-            {"event_date": row.get("opinion_date"), "score": row.get("score"),
-             "label": 1 if float(row.get("directional_return") or 0) > 0 else 0}
-            for row in outcomes if row.get("status") == "matured" and row.get("directional_return") is not None
-            and row.get("opinion_date") is not None and row.get("score") is not None
-        ]),
+        "calibration": _calibration_by_horizon,
+        "calibration_by_horizon": calibration_by_horizon,
         "baselines": _baseline_comparison(outcomes, baseline_market_by_day, sector_flow_by_day, theme_board_map),
     }
 
@@ -446,7 +485,7 @@ def analyst_market_evaluation(database: Any, start_date: date | None = None, end
         outcomes = [dict(row) for row in connection.execute(
             """SELECT o.opinion_id,p.remote_analyst_id,p.opinion_date,p.scope,p.subject_key,
                             p.direction * p.strength * p.explicitness score,
-                            o.status,o.directional_return,o.residual_return,o.horizon_days
+                            o.status,o.directional_return,o.residual_return,o.horizon_days,o.exit_date
                  FROM quant.analyst_opinion_outcomes o JOIN quant.analyst_opinions p ON p.opinion_id=o.opinion_id
                 WHERE p.opinion_date BETWEEN %s AND %s AND (%s::text IS NULL OR p.remote_analyst_id=%s)""", (start, end, analyst_id, analyst_id)).fetchall()]
         intraday_outcomes = [dict(row) for row in connection.execute(

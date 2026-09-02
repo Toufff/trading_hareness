@@ -21,6 +21,7 @@ from ..request_models import (
     MarketUniverseSyncRequest,
     PostCloseRefreshRequest,
 )
+from ..runtime_executors import run_database_blocking
 
 
 @dataclass(frozen=True)
@@ -40,8 +41,11 @@ def build_market_actions_router(deps: MarketActionDependencies) -> APIRouter:
     router = APIRouter(tags=["market-actions"])
 
     @router.post("/api/v1/market/bars/import")
-    def import_bars(payload: BarsImport) -> dict[str, int]:
-        return deps.import_bars(payload)
+    async def import_bars(payload: BarsImport) -> dict[str, int]:
+        # Manual bar import may write more than one row; keep it inside the
+        # bounded fast lane but with more headroom than the single-row write
+        # endpoints elsewhere in this package.
+        return await run_database_blocking(deps.import_bars, payload, timeout_seconds=10)
 
     @router.post("/api/v1/market/universe/sync")
     async def sync_market_universe(payload: MarketUniverseSyncRequest) -> dict[str, Any]:

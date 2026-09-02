@@ -36,11 +36,66 @@ export async function putJson<T>(path: string, body: Record<string, unknown> = {
 }
 
 export async function deleteJson<T>(path: string): Promise<T> {
-  return decodeJson<T>(await fetch(path, { method: 'DELETE', headers: { accept: 'application/json' } }), path);
+  return decodeWriteJson<T>(await fetch(path, {
+    method: 'DELETE', headers: { accept: 'application/json', ...dashboardKeyHeaders() },
+  }), path);
 }
 
 async function writeJson<T>(method: 'POST' | 'PUT', path: string, body: Record<string, unknown>): Promise<T> {
-  return decodeJson<T>(await fetch(path, {
-    method, headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body),
+  return decodeWriteJson<T>(await fetch(path, {
+    method,
+    headers: { 'content-type': 'application/json', accept: 'application/json', ...dashboardKeyHeaders() },
+    body: JSON.stringify(body),
   }), path);
+}
+
+// --- Operator key (X-Dashboard-Key) -----------------------------------
+//
+// WP2: every write route in the adapter now requires an `X-Dashboard-Key`
+// header matching its DASHBOARD_OPERATOR_KEY env var. The frontend never
+// ships a key; an operator sets one for their own browser via
+// setDashboardKey (persisted to localStorage so it survives a reload) or a
+// one-time `?dashboard_key=` URL parameter consumed at startup (see
+// main.ts). The storage key name (`dashboardOperatorKey`) is intentionally
+// the same one the adapter's own /relay page reads/writes, so a key set from
+// either surface is visible to the other in the same browser.
+const DASHBOARD_KEY_STORAGE_KEY = 'dashboardOperatorKey';
+let cachedDashboardKey: string | null = null;
+
+function readStoredDashboardKey(): string {
+  try {
+    return localStorage.getItem(DASHBOARD_KEY_STORAGE_KEY) ?? '';
+  } catch {
+    // localStorage can throw in a locked-down/private browsing context; fall
+    // back to "no key" rather than breaking the read paths that don't need one.
+    return '';
+  }
+}
+
+export function getDashboardKey(): string {
+  if (cachedDashboardKey === null) cachedDashboardKey = readStoredDashboardKey();
+  return cachedDashboardKey;
+}
+
+export function setDashboardKey(value: string): void {
+  const trimmed = value.trim();
+  cachedDashboardKey = trimmed;
+  try {
+    if (trimmed) localStorage.setItem(DASHBOARD_KEY_STORAGE_KEY, trimmed);
+    else localStorage.removeItem(DASHBOARD_KEY_STORAGE_KEY);
+  } catch {
+    // Keep the in-memory value for this session even if persistence fails.
+  }
+}
+
+function dashboardKeyHeaders(): Record<string, string> {
+  const key = getDashboardKey();
+  return key ? { 'X-Dashboard-Key': key } : {};
+}
+
+async function decodeWriteJson<T>(response: Response, path: string): Promise<T> {
+  if ((response.status === 401 || response.status === 403) && !getDashboardKey()) {
+    throw new Error(`${path} 需要先设置操作者 Key 才能执行写操作；请点击“设置 Key”后重试。`);
+  }
+  return decodeJson<T>(response, path);
 }

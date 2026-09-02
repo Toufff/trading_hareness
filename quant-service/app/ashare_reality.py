@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
-from .market_rules import a_share_limit_ratio
+from .market_rules import LIMIT_TOLERANCE, a_share_limit_ratio, is_at_limit
 
 
 LOT_SIZE = 100
@@ -59,9 +59,9 @@ def price_limit_state(*, symbol: str | None, quote: dict[str, Any] | None) -> di
     at_limit_up = bool(merged.get("at_limit_up"))
     at_limit_down = bool(merged.get("at_limit_down"))
     if price is not None and limit_up is not None:
-        at_limit_up = at_limit_up or price >= limit_up * 0.999
+        at_limit_up = at_limit_up or is_at_limit(price, limit_up)
     if price is not None and limit_down is not None:
-        at_limit_down = at_limit_down or price <= limit_down * 1.001
+        at_limit_down = at_limit_down or price <= limit_down + LIMIT_TOLERANCE
     # Percentage is only an evidence fallback.  Use 98% of the applicable
     # band to retain the prior conservative main-board 9.8% behavior while
     # correctly handling 20%, 30%, and ST 5% price bands.

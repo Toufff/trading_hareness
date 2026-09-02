@@ -11,6 +11,18 @@ from zoneinfo import ZoneInfo
 _SYMBOL = re.compile(r"\d{6}\.(SH|SZ|BJ)")
 
 
+#: The three intraday quote sources that can populate ``quotes[symbol]["volume"]``
+#: report cumulative volume in three different native units: LonghuVIP's
+#: ``GetStockPanKou`` (unconfirmed by vendor documentation; treated as shares
+#: here to match the exchange's own board-lot-adjacent convention until an
+#: operator confirms it against a known symbol), Tencent's single-quote depth
+#: feed (board lots, already labelled ``cumulative_volume_lot`` and never
+#: written under the plain ``volume`` key), and Sina's realtime quote (shares).
+#: A caller merging more than one of these into the same ``quotes[symbol]``
+#: entry must consult ``volume_unit`` rather than assume any one convention.
+LONGHU_WATCH_QUOTE_VOLUME_UNIT = "share"
+
+
 def merge_longhu_watch_quotes(
     quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]], *, number: Callable[[Any], float | None],
 ) -> dict[str, dict[str, Any]]:
@@ -19,6 +31,11 @@ def merge_longhu_watch_quotes(
     Longhu is the preferred direct price source when its exchange timestamp is
     present.  A malformed licensed row is ignored, leaving Tencent/Sina as the
     existing fallback path.
+
+    ``volume`` is annotated with ``volume_unit`` because it is *not* the same
+    unit as Tencent's board-lot cumulative volume or Sina's realtime share
+    volume; a caller merging this quote with either of those sources must not
+    treat the numbers as directly comparable without checking the unit.
     """
     for row in rows:
         symbol = str(row.get("ts_code") or "")
@@ -44,6 +61,8 @@ def merge_longhu_watch_quotes(
             value = number(row.get(key))
             if value is not None:
                 existing[key] = value
+        if row.get("ts_code") and number(row.get("volume")) is not None:
+            existing["volume_unit"] = LONGHU_WATCH_QUOTE_VOLUME_UNIT
         existing["raw"] = {
             **(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}),
             "longhu_watch_quote": row,
@@ -193,7 +212,7 @@ def annotate_flow_percentiles(quotes: dict[str, dict[str, Any]]) -> None:
 
 
 __all__ = [
-    "annotate_flow_percentiles", "exchange_time_status", "merge_eastmoney_watch_flows",
-    "merge_longhu_watch_quotes", "merge_sina_watch_quotes", "merge_watch_quote_prices",
-    "observation_source", "quote_from_fuyao",
+    "LONGHU_WATCH_QUOTE_VOLUME_UNIT", "annotate_flow_percentiles", "exchange_time_status",
+    "merge_eastmoney_watch_flows", "merge_longhu_watch_quotes", "merge_sina_watch_quotes",
+    "merge_watch_quote_prices", "observation_source", "quote_from_fuyao",
 ]

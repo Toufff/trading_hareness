@@ -1,5 +1,17 @@
 # stock-brain migration into trading_hareness
 
+## 2026-09-02 方法修订
+
+审计整改（WP4 数据正确性/点时边界、WP5 统计有效性与结算）修订了本文档"Implemented runtime and audit
+endpoints"一节所依赖的结果结算与事件可得性口径：涨停池/龙虎榜等事件的可得时刻改为盘后 15:30
+（`availability_basis="post_close_publication"`）、未收盘的日线不再进入 canonical 表、退市/停牌样本改为
+按交易日历正确纳入结算而不是静默排除或借用错误价格、多重比较统计接入了 Deflated Sharpe Ratio 与
+Benjamini-Hochberg 修正、`methodology_version` 现在有实际语义并归档旧计算结果。完整清单见
+[`STRATEGY_LOOP_V1.md`](STRATEGY_LOOP_V1.md) 的同名章节。**修订前的 replay/命中率数字（包括本文件"Current
+migration acceptance snapshot"一节记录的 2026-09-01 结果）不可与修订后的数字直接比较**，需要对受影响区间
+重新调用相应的结算函数才能得到可比数字；`decision_research_closure`/`post_close_strategy` 产出的历史
+dossier 在重算前应视为使用旧方法论生成。
+
 ## Decision
 
 `trading_hareness` becomes the long-term market-data, research-runtime and

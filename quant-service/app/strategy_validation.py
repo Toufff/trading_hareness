@@ -88,6 +88,35 @@ def walk_forward_splits(sessions: Sequence[date], *, train_size: int, test_size:
     return splits
 
 
+def newey_west_mean_t_stat(values: Sequence[float], *, bandwidth: int) -> tuple[float | None, float | None]:
+    """Newey-West HAC standard error and t-stat for a series' sample mean.
+
+    An h-day-forward return or IC series sampled every trading day is
+    autocorrelated by construction: consecutive h-day windows overlap for
+    h>1 sessions, so a plain iid standard error understates the true
+    variance and overstates significance (the López de Prado purging /
+    Newey-West 1987 correction). ``bandwidth`` is conventionally ``h - 1``
+    for an h-day-forward series; ``bandwidth=0`` reduces to the plain iid
+    variance, so this is a safe drop-in for a 1-day series too.
+    """
+    count = len(values)
+    if count < 2:
+        return None, None
+    average = mean(values)
+    centered = [value - average for value in values]
+    bandwidth = max(0, int(bandwidth))
+    long_run_variance = sum(value * value for value in centered) / count
+    for lag in range(1, min(bandwidth, count - 1) + 1):
+        weight = 1 - lag / (bandwidth + 1)
+        autocovariance = sum(centered[index] * centered[index - lag] for index in range(lag, count)) / count
+        long_run_variance += 2 * weight * autocovariance
+    long_run_variance = max(long_run_variance, 0.0)
+    if long_run_variance <= 0:
+        return 0.0, None
+    standard_error = math.sqrt(long_run_variance / count)
+    return standard_error, (average / standard_error if standard_error > 0 else None)
+
+
 def sharpe_ratio(returns: Sequence[float]) -> float | None:
     """Per-observation Sharpe of a return series, or None when undefined.
 
@@ -179,6 +208,6 @@ def deflated_sharpe_ratio(returns: Sequence[float], *, trials: int,
 __all__ = [
     "EULER_MASCHERONI", "MINIMUM_EVALUABLE_OBSERVATIONS", "SESSIONS_PER_YEAR",
     "WalkForwardSplit", "annualised",
-    "deflated_sharpe_ratio", "expected_maximum_sharpe", "probabilistic_sharpe_ratio",
+    "deflated_sharpe_ratio", "expected_maximum_sharpe", "newey_west_mean_t_stat", "probabilistic_sharpe_ratio",
     "sharpe_ratio", "walk_forward_splits",
 ]

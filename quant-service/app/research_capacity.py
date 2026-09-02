@@ -9,6 +9,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from .async_market_result_read_repository import (
+    FEATURE_READINESS_ESTIMATE_SQL,
+    TUSHARE_RAW_P1_FEATURE_SQL,
+    UNIVERSE_SIZE_SQL,
+    _TUSHARE_RAW_P1_FEATURES,
+    merge_tushare_p1_feature_rows,
+)
+
 
 # These are the only full-universe inputs required for the present daily
 # research baseline.  P1 sources (flows, chips, announcements and analyst
@@ -121,21 +129,23 @@ def current_data_coverage(connection: Any) -> dict[str, Any]:
 
 
 def feature_readiness_state(connection: Any) -> dict[str, Any]:
-    rows = connection.execute(
-        """SELECT 'daily_bars' feature,count(DISTINCT symbol)::int symbols,count(*)::int rows,max(trading_date) latest_date,'P0' priority FROM quant.canonical_bars_daily WHERE symbol<>'000300.SH'
-           UNION ALL SELECT 'daily_basic',count(DISTINCT symbol)::int,count(*)::int,max(trading_date),'P0' FROM quant.daily_fundamentals
-           UNION ALL SELECT 'trade_limits',count(DISTINCT symbol)::int,count(*)::int,max(trading_date),'P0' FROM quant.daily_trade_limits
-           UNION ALL SELECT 'moneyflow_dc',count(DISTINCT row_data->>'ts_code')::int,count(*)::int,max(to_date(NULLIF(row_data->>'trade_date',''),'YYYYMMDD')),'P0' FROM quant.tushare_raw_records WHERE api_name='moneyflow_dc'
-           UNION ALL SELECT 'moneyflow',count(DISTINCT row_data->>'ts_code')::int,count(*)::int,max(to_date(NULLIF(row_data->>'trade_date',''),'YYYYMMDD')),'P1' FROM quant.tushare_raw_records WHERE api_name='moneyflow'
-           UNION ALL SELECT 'cyq_perf',count(DISTINCT row_data->>'ts_code')::int,count(*)::int,max(to_date(NULLIF(row_data->>'trade_date',''),'YYYYMMDD')),'P1' FROM quant.tushare_raw_records WHERE api_name='cyq_perf'
-           UNION ALL SELECT 'cyq_chips',count(DISTINCT row_data->>'ts_code')::int,count(*)::int,max(to_date(NULLIF(row_data->>'trade_date',''),'YYYYMMDD')),'P1' FROM quant.tushare_raw_records WHERE api_name='cyq_chips'
-           UNION ALL SELECT 'stk_factor_pro',count(DISTINCT row_data->>'ts_code')::int,count(*)::int,max(to_date(NULLIF(row_data->>'trade_date',''),'YYYYMMDD')),'P1' FROM quant.tushare_raw_records WHERE api_name='stk_factor_pro'
-           UNION ALL SELECT 'sector_flow',count(DISTINCT sector_key)::int,count(*)::int,max(trading_date),'P1' FROM quant.sector_market_observations
-           UNION ALL SELECT 'announcements',count(DISTINCT symbol)::int,count(*)::int,max(occurred_at::date),'P1' FROM quant.market_events
-           UNION ALL SELECT 'analyst_claims',count(DISTINCT subject_key)::int,count(*)::int,
-              max((available_at AT TIME ZONE 'Asia/Shanghai')::date),'P1' FROM quant.analyst_claims""").fetchall()
-    universe_size = connection.execute("SELECT greatest(1,count(*)::int) symbols FROM quant.universe_members WHERE universe_key='all_a' AND enabled").fetchone()["symbols"]
-    return feature_readiness_projection([dict(row) for row in rows], int(universe_size))
+    """Synchronous counterpart of
+    ``async_market_result_read_repository.feature_readiness_estimated``.
+
+    This used to run its own independent, byte-identical-looking unbounded
+    ``count(DISTINCT ...)``/``count(*)`` scan of the same largest
+    control-plane tables; it now executes the exact same ``pg_stat``-estimate
+    SQL text on the synchronous connection and shares the same P1 tushare-row
+    merge and P0/P1 projection logic, so the two readers of the
+    ``/api/v1/data-readiness/features`` route can no longer drift apart. The
+    response is marked ``estimated`` for the same reason.
+    """
+    rows = [dict(row) for row in connection.execute(FEATURE_READINESS_ESTIMATE_SQL).fetchall()]
+    tushare_rows = connection.execute(TUSHARE_RAW_P1_FEATURE_SQL, (list(_TUSHARE_RAW_P1_FEATURES),)).fetchall()
+    rows = merge_tushare_p1_feature_rows(rows, tushare_rows)
+    universe_size = connection.execute(UNIVERSE_SIZE_SQL).fetchone()["symbols"]
+    projection = feature_readiness_projection(rows, int(universe_size))
+    return {**projection, "estimated": True}
 
 
 def historical_estimate_from_db(database: Any, request: Any) -> dict[str, Any]:

@@ -1,6 +1,14 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue';
 
+/* eslint-disable @typescript-eslint/no-explicit-any --
+ * These props mirror useDashboardWorkspace.ts's RealtimeServiceStatus /
+ * AdapterHealth / runtime-health payloads, whose real shapes are declared as
+ * function-local types in that composable and are not exported (WP8 audit
+ * item G2 tracks narrowing the composable's types; this panel's props were
+ * left as a documented remaining `any` rather than duplicating those types
+ * or retyping ~15 chained optional-property template expressions below).
+ */
 defineProps<{
   services: Record<string, any>;
   adapterHealth: Record<string, any>;

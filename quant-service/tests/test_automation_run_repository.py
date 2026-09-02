@@ -19,13 +19,20 @@ class Result:
 
 
 class Connection:
-    def __init__(self):
+    def __init__(self, resumed_status: str = "running", still_running_elsewhere: bool = False):
         self.calls = []
+        self._resumed_status = resumed_status
+        self._still_running_elsewhere = still_running_elsewhere
 
     def execute(self, sql, params=()):
         self.calls.append((sql, params))
+        if "SELECT 1 FROM quant.automation_runs" in sql:
+            return Result({"exists": True} if self._still_running_elsewhere else None)
         if "RETURNING run_id,status,output_summary" in sql:
-            return Result({"run_id": "run-1", "status": "completed", "output_summary": {"status": "completed"}})
+            return Result({
+                "run_id": "run-1", "status": self._resumed_status,
+                "output_summary": {"status": "completed"} if self._resumed_status == "completed" else {},
+            })
         if "RETURNING run_id" in sql:
             return Result({"run_id": "run-1"})
         if "SELECT run_id,task_key" in sql:
@@ -34,8 +41,8 @@ class Connection:
 
 
 class Database:
-    def __init__(self):
-        self.connection = Connection()
+    def __init__(self, connection: Connection | None = None):
+        self.connection = connection or Connection()
 
     def transaction(self):
         class Context:
@@ -71,8 +78,73 @@ class AutomationRunRepositoryTests(unittest.TestCase):
             run_recorded(database, task_key="test", run_key="test:failure", operation=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
         self.assertTrue(any("status='failed'" in sql for sql, _ in database.connection.calls))
 
+    def test_recorded_operation_result_is_returned_on_success(self):
+        database = Database()
+        result = run_recorded(database, task_key="test", run_key="test:success", operation=lambda: {"status": "ok"})
+        self.assertEqual(result, {"status": "ok"})
+
+    def test_completed_run_key_returns_receipt_without_running_the_operation(self):
+        database = Database(Connection(resumed_status="completed"))
+        calls: list[str] = []
+        result = run_recorded(
+            database, task_key="test", run_key="test:already-done",
+            operation=lambda: calls.append("ran") or {"status": "ok"},
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(calls, [])
+
+    def test_run_key_still_running_elsewhere_is_skipped_without_running_the_operation(self):
+        database = Database(Connection(still_running_elsewhere=True))
+        calls: list[str] = []
+        result = run_recorded(
+            database, task_key="test", run_key="test:in-progress",
+            operation=lambda: calls.append("ran") or {"status": "ok"},
+        )
+        self.assertEqual(result["status"], "skipped_running_elsewhere")
+        self.assertEqual(calls, [])
+
+    def test_process_local_in_flight_set_skips_a_concurrent_call_for_the_same_run_key(self):
+        database = Database()
+        in_flight: set[str] = {"test:concurrent"}
+        calls: list[str] = []
+        result = run_recorded(
+            database, task_key="test", run_key="test:concurrent",
+            operation=lambda: calls.append("ran") or {"status": "ok"},
+            in_flight_run_keys=in_flight,
+        )
+        self.assertEqual(result["status"], "skipped_in_flight_process")
+        self.assertEqual(calls, [])
+
+    def test_in_flight_set_is_cleared_after_a_successful_run_so_the_next_call_can_proceed(self):
+        database = Database()
+        in_flight: set[str] = set()
+        calls: list[str] = []
+        run_recorded(
+            database, task_key="test", run_key="test:sequential",
+            operation=lambda: calls.append("first") or {"status": "ok"},
+            in_flight_run_keys=in_flight,
+        )
+        self.assertEqual(in_flight, set())
+        run_recorded(
+            database, task_key="test", run_key="test:sequential",
+            operation=lambda: calls.append("second") or {"status": "ok"},
+            in_flight_run_keys=in_flight,
+        )
+        self.assertEqual(calls, ["first", "second"])
+
+    def test_in_flight_set_is_cleared_even_after_a_failure(self):
+        database = Database()
+        in_flight: set[str] = set()
+        with self.assertRaises(RuntimeError):
+            run_recorded(
+                database, task_key="test", run_key="test:fails",
+                operation=lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+                in_flight_run_keys=in_flight,
+            )
+        self.assertEqual(in_flight, set())
+
     def test_completed_receipt_is_preserved_for_restart_resume(self):
-        connection = Connection()
+        connection = Connection(resumed_status="completed")
         receipt = start_or_resume_run(
             connection, task_key="post_close_refresh.stage", run_key="post-close-refresh:daily:2026-08-21",
             cadence="daily", as_of_date=date(2026, 8, 21), input_summary={"stage": "daily"},

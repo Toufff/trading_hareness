@@ -15,6 +15,18 @@ export function deliveryRetryDelaySeconds(attemptCount) {
 	return Math.min(300, 10 * (2 ** Math.min(attempt - 1, 5)));
 }
 
+// Shared terminal-retry ceiling for the n8n delivery outbox, the baidu-pan
+// archive queue, and the cross-tenant group relay. Past this many attempts a
+// job stops being retried and is reported as a durable failure an operator
+// must act on, instead of silently retrying forever.
+export const DEFAULT_MAX_RETRY_ATTEMPTS = Number(process.env.INGESTION_MAX_RETRY_ATTEMPTS ?? 20);
+
+export function getOrCreateJobInsertSql() {
+	return `INSERT INTO ingestion_jobs(job_id,event_id,message_id,source_tag,topic_key,publisher_key,analyst_id,content_sha256,status,stage,payload)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,'queued','received',$9)
+		ON CONFLICT DO NOTHING RETURNING *`;
+}
+
 export function observabilitySql() {
 	return `SELECT
 		(SELECT count(*)::int FROM ingestion_jobs WHERE status IN ('queued','uploading','submitting','analysis_pending')) AS queue_depth,
@@ -52,8 +64,23 @@ export function ingestionStatusBySourceSql() {
 	FROM counts JOIN latest USING(source_tag) LEFT JOIN failures USING(source_tag) ORDER BY counts.source_tag`;
 }
 
-export function createLedger(connectionString) {
-	const pool = new Pool(connectionString ? { connectionString, max: 4, idleTimeoutMillis: 30_000 } : { max: 4, idleTimeoutMillis: 30_000 });
+export function createLedger(connectionString, { pool: injectedPool, logger = console } = {}) {
+	const pool = injectedPool ?? new Pool({
+		...(connectionString ? { connectionString } : {}),
+		max: 4,
+		idleTimeoutMillis: 30_000,
+		// An idle client that the server (or a network blip) drops emits
+		// 'error' on the pool. Without a listener, Node treats that as an
+		// uncaught exception and kills the whole adapter process.
+		connectionTimeoutMillis: Number(process.env.INGESTION_DB_CONNECT_TIMEOUT_MS ?? 10_000),
+		statement_timeout: Number(process.env.INGESTION_DB_STATEMENT_TIMEOUT_MS ?? 30_000),
+		query_timeout: Number(process.env.INGESTION_DB_STATEMENT_TIMEOUT_MS ?? 30_000),
+	});
+	if (!injectedPool) {
+		pool.on('error', (error) => {
+			logger.error(`Ledger 数据库连接池错误（已捕获，不会导致进程崩溃）：${error?.message ?? String(error)}`);
+		});
+	}
 	return {
 		async init(registry) {
 			await pool.query(`
@@ -112,11 +139,17 @@ export function createLedger(connectionString) {
 				ON CONFLICT(job_id) DO NOTHING`);
 		},
 		async getOrCreateJob({ jobId, eventId, messageId, route, payload, contentSha256 }) {
+			// A plain SELECT-then-INSERT here raced two concurrent deliveries of the
+			// same event/message into two ingestion_jobs rows. event_id and
+			// message_id both carry UNIQUE constraints, so a bare `ON CONFLICT DO
+			// NOTHING` (no target column) atomically de-duplicates against either
+			// one in a single round trip; only fall back to a SELECT when the
+			// INSERT actually lost the race.
+			const inserted = await pool.query(getOrCreateJobInsertSql(), [jobId, eventId ?? null, messageId ?? null, route.tag, route.topic_key, route.publisher_key, route.remote_analyst_id, contentSha256 ?? null, payload]);
+			if (inserted.rowCount) return { job: inserted.rows[0], duplicate: false };
 			const existing = await pool.query('SELECT * FROM ingestion_jobs WHERE event_id=$1 OR message_id=$2 LIMIT 1', [eventId ?? null, messageId ?? null]);
 			if (existing.rowCount) return { job: existing.rows[0], duplicate: true };
-			const result = await pool.query(`INSERT INTO ingestion_jobs(job_id,event_id,message_id,source_tag,topic_key,publisher_key,analyst_id,content_sha256,status,stage,payload)
-				VALUES($1,$2,$3,$4,$5,$6,$7,$8,'queued','received',$9) RETURNING *`, [jobId, eventId ?? null, messageId ?? null, route.tag, route.topic_key, route.publisher_key, route.remote_analyst_id, contentSha256 ?? null, payload]);
-			return { job: result.rows[0], duplicate: false };
+			throw new Error('ingestion job insert conflicted but no existing row could be found');
 		},
 		async getJobByMessageId(messageId) {
 			if (!messageId) return null;
@@ -155,10 +188,13 @@ export function createLedger(connectionString) {
 			const { rows } = await pool.query(`UPDATE baidu_pan_archive_jobs SET status='completed',remote_path=$2,remote_fs_id=$3,lease_owner=null,lease_expires_at=null,last_error=null,updated_at=now() WHERE archive_id=$1 RETURNING *`, [archiveId, remotePath ?? null, remoteFsId ?? null]);
 			return rows[0] ?? null;
 		},
-		async failBaiduPanArchive(archiveId, { errorMessage, retryable = true } = {}) {
+		async failBaiduPanArchive(archiveId, { errorMessage, retryable = true, maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS } = {}) {
 			const result = await pool.query('SELECT attempt_count FROM baidu_pan_archive_jobs WHERE archive_id=$1', [archiveId]);
-			const retryDelaySeconds = deliveryRetryDelaySeconds(result.rows[0]?.attempt_count);
-			const { rows } = await pool.query(`UPDATE baidu_pan_archive_jobs SET status=CASE WHEN $2 THEN 'retryable_failed' ELSE 'failed' END,available_at=CASE WHEN $2 THEN now()+($4 * interval '1 second') ELSE available_at END,lease_owner=null,lease_expires_at=null,last_error=$3,updated_at=now() WHERE archive_id=$1 RETURNING *`, [archiveId, Boolean(retryable), String(errorMessage ?? '').slice(0, 1000), retryDelaySeconds]);
+			const attemptCount = Number(result.rows[0]?.attempt_count ?? 0);
+			const exhausted = attemptCount >= Math.max(1, Number(maxAttempts) || DEFAULT_MAX_RETRY_ATTEMPTS);
+			const effectiveRetryable = Boolean(retryable) && !exhausted;
+			const retryDelaySeconds = deliveryRetryDelaySeconds(attemptCount);
+			const { rows } = await pool.query(`UPDATE baidu_pan_archive_jobs SET status=CASE WHEN $2 THEN 'retryable_failed' ELSE 'failed' END,available_at=CASE WHEN $2 THEN now()+($4 * interval '1 second') ELSE available_at END,lease_owner=null,lease_expires_at=null,last_error=$3,updated_at=now() WHERE archive_id=$1 RETURNING *`, [archiveId, effectiveRetryable, String((exhausted ? `[已达最大重试次数 ${attemptCount}，转为终态失败] ` : '') + String(errorMessage ?? '')).slice(0, 1000), retryDelaySeconds]);
 			return rows[0] ?? null;
 		},
 		async baiduPanArchiveStatus() {
@@ -225,13 +261,18 @@ export function createLedger(connectionString) {
 				VALUES($1,$2,$3,$4,$5,$6,$7,'filtered_system',$8,$9,$10)
 				ON CONFLICT(source_message_id) DO UPDATE SET source_key=EXCLUDED.source_key,source_chat_id=EXCLUDED.source_chat_id,source_create_time=EXCLUDED.source_create_time,target_chat_id=EXCLUDED.target_chat_id,route_tag=EXCLUDED.route_tag,message=EXCLUDED.message,status='filtered_system',source_update_time=coalesce(EXCLUDED.source_update_time,feishu_group_relay_messages.source_update_time),source_deleted=EXCLUDED.source_deleted,error_message=EXCLUDED.error_message,updated_at=now()`, [record.sourceMessageId ?? record.source_message_id, record.sourceKey ?? record.source_key, record.sourceChatId ?? record.source_chat_id, record.sourceCreateTime ?? record.source_create_time, record.targetChatId ?? record.target_chat_id, record.routeTag ?? record.route_tag, record.message, record.sourceUpdateTime ?? record.source_update_time ?? null, Boolean(record.message?.deleted), reason]);
 		},
-		async claimRelayMessage(record) {
+		async claimRelayMessage(record, { maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS } = {}) {
+			// Unlike the n8n delivery outbox, this table has no separate terminal
+			// 'failed' vs retryable 'retryable_failed' status. Once a message's
+			// attempt_count reaches maxAttempts, this WHERE clause simply stops
+			// matching it: the row stays at status='failed' (an operator-visible
+			// durable failure) instead of being retried forever.
 			const { rows } = await pool.query(`INSERT INTO feishu_group_relay_messages(source_message_id,source_key,source_chat_id,source_create_time,target_chat_id,route_tag,message,status,attempt_count,source_update_time)
 				VALUES($1,$2,$3,$4,$5,$6,$7,'processing',1,$8)
 				ON CONFLICT(source_message_id) DO UPDATE SET source_key=EXCLUDED.source_key,source_chat_id=EXCLUDED.source_chat_id,source_create_time=EXCLUDED.source_create_time,target_chat_id=EXCLUDED.target_chat_id,route_tag=EXCLUDED.route_tag,message=EXCLUDED.message,source_update_time=coalesce(EXCLUDED.source_update_time,feishu_group_relay_messages.source_update_time),status='processing',attempt_count=feishu_group_relay_messages.attempt_count+1,error_message=null,updated_at=now()
-				WHERE (feishu_group_relay_messages.status='failed' AND feishu_group_relay_messages.updated_at <= now() - interval '10 seconds' * power(2, least(greatest(feishu_group_relay_messages.attempt_count - 1, 0), 5)))
+				WHERE (feishu_group_relay_messages.status='failed' AND feishu_group_relay_messages.attempt_count < $9 AND feishu_group_relay_messages.updated_at <= now() - interval '10 seconds' * power(2, least(greatest(feishu_group_relay_messages.attempt_count - 1, 0), 5)))
 					OR (feishu_group_relay_messages.status='processing' AND feishu_group_relay_messages.updated_at < now() - interval '5 minutes')
-				RETURNING *`, [record.sourceMessageId ?? record.source_message_id, record.sourceKey ?? record.source_key, record.sourceChatId ?? record.source_chat_id, record.sourceCreateTime ?? record.source_create_time, record.targetChatId ?? record.target_chat_id, record.routeTag ?? record.route_tag, record.message, record.sourceUpdateTime ?? record.source_update_time ?? null]);
+				RETURNING *`, [record.sourceMessageId ?? record.source_message_id, record.sourceKey ?? record.source_key, record.sourceChatId ?? record.source_chat_id, record.sourceCreateTime ?? record.source_create_time, record.targetChatId ?? record.target_chat_id, record.routeTag ?? record.route_tag, record.message, record.sourceUpdateTime ?? record.source_update_time ?? null, Math.max(1, Number(maxAttempts) || DEFAULT_MAX_RETRY_ATTEMPTS)]);
 			return rows[0] ?? null;
 		},
 		async markRelayMessage(sourceMessageId, { status, targetMessageIds = [], errorMessage = null }) {
@@ -385,14 +426,17 @@ export function createLedger(connectionString) {
 			return rows;
 		},
 		async completeDelivery(deliveryId) { await pool.query(`UPDATE ingestion_delivery_outbox SET status='completed',lease_owner=null,lease_expires_at=null,last_error=null,updated_at=now() WHERE delivery_id=$1`, [deliveryId]); },
-		async failDelivery(deliveryId, { errorMessage, retryable }) {
+		async failDelivery(deliveryId, { errorMessage, retryable, maxAttempts = DEFAULT_MAX_RETRY_ATTEMPTS }) {
 			const attempt = await pool.query('SELECT attempt_count FROM ingestion_delivery_outbox WHERE delivery_id=$1', [deliveryId]);
-			const retryDelaySeconds = deliveryRetryDelaySeconds(attempt.rows[0]?.attempt_count);
+			const attemptCount = Number(attempt.rows[0]?.attempt_count ?? 0);
+			const exhausted = attemptCount >= Math.max(1, Number(maxAttempts) || DEFAULT_MAX_RETRY_ATTEMPTS);
+			const effectiveRetryable = Boolean(retryable) && !exhausted;
+			const retryDelaySeconds = deliveryRetryDelaySeconds(attemptCount);
 			const { rows } = await pool.query(`UPDATE ingestion_delivery_outbox
 				SET status=CASE WHEN $2 THEN 'retryable_failed' ELSE 'failed' END,
 					available_at=CASE WHEN $2 THEN now() + ($4 * interval '1 second') ELSE available_at END,
 					lease_owner=null,lease_expires_at=null,last_error=$3,updated_at=now()
-				WHERE delivery_id=$1 RETURNING *`, [deliveryId, Boolean(retryable), String(errorMessage ?? '').slice(0, 1000), retryDelaySeconds]);
+				WHERE delivery_id=$1 RETURNING *`, [deliveryId, effectiveRetryable, String((exhausted ? `[已达最大重试次数 ${attemptCount}，转为终态失败] ` : '') + String(errorMessage ?? '')).slice(0, 1000), retryDelaySeconds]);
 			return rows[0] ?? null;
 		},
 		async retryJob(jobId) {

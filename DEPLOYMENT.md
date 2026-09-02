@@ -1,8 +1,18 @@
 # 本机与服务器部署
 
-## 本机默认部署
+> **当前生产部署方式已迁移到 Windows `G:\StockPlatform` 平台，不再使用本文档"本机默认部署"一节里的
+> `docker compose` 流程。** 生产的启动、发布、回滚与运行时观测见
+> [`docs/AGENT_HANDOFF.md`](docs/AGENT_HANDOFF.md) 与
+> [`docs/SHARED_PEER_RUNTIME.md`](docs/SHARED_PEER_RUNTIME.md)。本页下面描述的
+> `quant-research` HTTP 接口契约、Tushare/AKShare 供应商配置和 n8n 收盘后调度工作流内容仍然
+> 适用（这些是服务本身的行为，与它跑在 Docker Compose 里还是 Windows 平台上无关），只有"本机默认
+> 部署"这一节的容器启动命令属于历史上的本机开发方式（早期该仓库以 `n8n` 为目录名），仍可用作本地
+> 开发/联调用途，但不是生产部署。完整的历史 macOS/Colima 运维手册已归档在
+> [`docs/legacy/MACOS_COLIMA_ERA.md`](docs/legacy/MACOS_COLIMA_ERA.md)。
 
-本项目的默认 `compose.yaml` 只把 n8n、relay 和量化 API 绑定到回环地址：`127.0.0.1:5678`、`127.0.0.1:5680` 和 `127.0.0.1:5681`。PostgreSQL、n8n runners、量化服务的容器端口均不直接对局域网或公网开放。
+## 本机默认部署（本地开发/联调用途，非生产）
+
+本项目的默认 `compose.yaml` 只把 n8n、relay 和量化 API 绑定到回环地址：`127.0.0.1:5678`、`127.0.0.1:5680` 和 `127.0.0.1:5681`。PostgreSQL、n8n runners、量化服务的容器端口均不直接对局域网或公网开放。这套 Compose 栈目前仍被 CI（`.github/workflows/verify-platform.yml`）用来起 PostgreSQL 并跑 `quant-service` 的单元测试，因此保留在仓库根目录，但它不是 Windows 生产平台的部署方式。
 
 量化服务 `n8n-quant-research` 会在启动时创建独立的 `quant` PostgreSQL schema；它与 ingestion ledger 共用数据库实例，但不会写入 n8n 的工作流表。分析师观点只从 47 远端“市场复盘档案 API”的已解析报告同步，本机不运行 OCR、ASR 或媒体转写。它提供：
 
@@ -27,10 +37,9 @@
 - `POST /api/v1/pipeline/daily`：更新数据、重算分析师表现并生成研究候选池；
 - `GET /api/v1/recommendations/latest`：读取最近一次候选池。
 
-启动或更新：
+启动或更新（在仓库根目录执行）：
 
 ```bash
-cd /Users/papa/codebase/n8n
 docker compose up -d --build
 docker compose ps
 curl --fail http://127.0.0.1:5681/health
@@ -97,7 +106,16 @@ curl -X POST http://127.0.0.1:5681/api/v1/pipeline/daily \
 
 ## n8n 收盘后调度
 
-生成可导入的工作流：
+> `scripts/build-quant-daily-workflow.mjs` 和 `scripts/build-factor-research-workflow.mjs`
+> 按 `.gitignore` 规则（`scripts/build-*-workflow.mjs`，只放行
+> `scripts/build-remote-archive-sync-workflow.mjs`）从不入库，因此**全新 checkout 上不存在这两个
+> 文件**；它们是本机生成的、绑定私有 webhook/凭据的工作流定义生成器，只在原先维护它们的操作员本机可用。
+> 另外，`scripts/converge-n8n-quant-daily-workflow.sh` 的注释已经说明，收盘后行情同步/质量门禁/特征
+> 快照/结果归因/评分卡/方向推荐这条链路的下游节点已经收敛进服务端的 `POST /api/v1/pipeline/daily`
+> 一个调用，不要假设下面的生成器命令在当前部署上仍然是必需步骤；需要管理已发布的 n8n 工作流时，先看
+> `scripts/converge-*.sh` 这组脚本。
+
+生成可导入的工作流（若本机存在该生成器脚本）：
 
 ```bash
 node scripts/build-quant-daily-workflow.mjs /tmp/quant-daily-workflow.json
@@ -109,7 +127,7 @@ node scripts/build-quant-daily-workflow.mjs /tmp/quant-daily-workflow.json
 node scripts/build-remote-archive-sync-workflow.mjs /tmp/text-workflow.json /tmp/remote-archive-sync.json
 ```
 
-每周因子有效性与交易成本回测使用独立工作流，周六 `10:30`（`Asia/Shanghai`）运行，避免干扰收盘后行情链路：
+每周因子有效性与交易成本回测使用独立工作流，周六 `10:30`（`Asia/Shanghai`）运行，避免干扰收盘后行情链路（同样只在本机存在该生成器脚本时可用）：
 
 ```bash
 node scripts/build-factor-research-workflow.mjs /tmp/quant-factor-research-workflow.json
@@ -145,10 +163,16 @@ node scripts/build-factor-research-workflow.mjs /tmp/quant-factor-research-workf
 3. 防火墙只开放 TCP 80、443 和 SSH 管理端口；不要开放 5432、5678、5680、5681。
 4. 在服务器环境文件中填好已有的飞书凭据、稳定的 `N8N_ENCRYPTION_KEY`、强 PostgreSQL 密码和 relay Basic Auth；不要把本机 `.env`、备份或数据库卷上传到 Git。
 
-在本机准备专用的服务器环境文件：
+在本机准备专用的服务器环境文件。**`deploy/.env.server.example` 模板文件当前不存在于本仓库**（按
+`.gitignore` 的 `.env.*` 规则被忽略，且没有被 `!.env.example` 例外放行——只有文件名恰好是
+`.env.example` 才会被放行，`deploy/shared-peer/.env.example` 就是这样一个已入库的例子）；在它被补上
+之前，直接创建 `/secure/path/market-relay.server.env`，按 [`deploy/compose.server.yaml`](deploy/compose.server.yaml)
+里出现的 `${VAR}` 占位符逐一填值，至少包含：`POSTGRES_PASSWORD`、`N8N_ENCRYPTION_KEY`、`N8N_DOMAIN`、
+`RELAY_DOMAIN`、`RELAY_BASIC_AUTH_USER`、`RELAY_BASIC_AUTH_HASH`、`ACME_EMAIL`、`FEISHU_APP_ID`、
+`FEISHU_APP_SECRET`；`scripts/deploy-server.sh` 本身在缺少 `deploy/.env.server.example` 且远端也没有
+既有 `.env` 时会直接退出并提示这一点。
 
 ```bash
-cp deploy/.env.server.example /secure/path/market-relay.server.env
 # 用密码管理器填充，不要提交该文件
 # Basic Auth hash: docker run --rm caddy:2.10-alpine caddy hash-password --plaintext 'your-password'
 DEPLOY_ENV_FILE=/secure/path/market-relay.server.env \

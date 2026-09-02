@@ -11,13 +11,14 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "quant-service"))
+sys.path.insert(0, str(ROOT / "scripts" / "legacy" / "stock_brain"))
 
-from app.legacy_stock_brain_archive import (  # noqa: E402
+from legacy_stock_brain_archive import (  # noqa: E402
     LegacyStockBrainArchiveImporter,
     create_consistent_snapshot,
     sha256_file,
 )
-from app.legacy_stock_brain_repository import LegacyStockBrainRepository  # noqa: E402
+from legacy_stock_brain_repository import LegacyStockBrainRepository  # noqa: E402
 
 
 def main() -> int:

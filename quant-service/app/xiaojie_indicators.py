@@ -26,15 +26,12 @@ place a decision is made and remains research-only.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any, Mapping
 
 from .intraday_derived_flow_metrics import SESSION_MINUTES, session_elapsed_minutes
+from .market_rules import LIMIT_TOLERANCE, is_at_limit
 from .xiaojie_leader_flow import evaluate_snapshot
-
-
-#: A board is treated as locked within this fraction of a yuan of the limit.
-LIMIT_TOLERANCE = 0.005
 #: Names within this distance of their limit still belong to the leader pool:
 #: a board that broke is exactly what the return-flow and re-seal modes watch.
 NEAR_LIMIT_PCT = 3.0
@@ -115,8 +112,8 @@ def board_state(fields: Mapping[str, Any], limit_up: float | None) -> dict[str, 
     price, high = fields.get("price"), fields.get("high")
     if limit_up is None or price is None:
         return {"touched": False, "sealed": False, "broken": False}
-    touched = high is not None and high >= limit_up - LIMIT_TOLERANCE
-    sealed = price >= limit_up - LIMIT_TOLERANCE
+    touched = high is not None and is_at_limit(high, limit_up)
+    sealed = is_at_limit(price, limit_up)
     return {"touched": touched, "sealed": sealed, "broken": touched and not sealed}
 
 
@@ -391,7 +388,7 @@ def candidate_snapshot(symbol: str, row: Mapping[str, Any], *, market: Mapping[s
     prior_one_word = bool(
         prior.get("limit_up") and prior.get("open") is not None
         and prior.get("open") == prior.get("high") == prior.get("low") == prior.get("close")
-        and float(prior["close"]) >= float(prior["limit_up"]) - LIMIT_TOLERANCE
+        and is_at_limit(prior["close"], prior["limit_up"])
     )
     reverse_wrap = bool(
         prior.get("open") is not None and price is not None and price > float(prior["open"])
@@ -402,7 +399,7 @@ def candidate_snapshot(symbol: str, row: Mapping[str, Any], *, market: Mapping[s
     ma5 = reference.get("ma5")
     opened_below_limit = bool(
         limit_up is not None and fields["low"] is not None
-        and float(fields["low"]) < float(limit_up) - LIMIT_TOLERANCE
+        and not is_at_limit(fields["low"], limit_up)
     )
 
     return {

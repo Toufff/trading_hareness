@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..personal_decision_contracts import BrokerPortfolioSnapshotInput, PersonalTradePlanInput
 from ..personal_decision_repository import ImmutableDecisionFactConflict
+from ..runtime_executors import run_database_blocking
 
 
 @dataclass(frozen=True)
@@ -26,10 +27,12 @@ def build_personal_decisions_router(deps: PersonalDecisionDependencies) -> APIRo
     router = APIRouter(tags=["personal-decision-support"])
 
     @router.post("/api/v1/personal/portfolio-snapshots")
-    def record_portfolio_snapshot(payload: BrokerPortfolioSnapshotInput) -> dict[str, Any]:
-        try:
+    async def record_portfolio_snapshot(payload: BrokerPortfolioSnapshotInput) -> dict[str, Any]:
+        def run() -> dict[str, Any]:
             with deps.database.transaction() as connection:
-                result = deps.persist_snapshot(connection, payload)
+                return deps.persist_snapshot(connection, payload)
+        try:
+            result = await run_database_blocking(run, timeout_seconds=3)
         except ImmutableDecisionFactConflict as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {**result, "live_orders": False, "boundary": "read_only_broker_fact"}
@@ -42,10 +45,12 @@ def build_personal_decisions_router(deps: PersonalDecisionDependencies) -> APIRo
         return snapshot
 
     @router.post("/api/v1/personal/trade-plans")
-    def record_trade_plan(payload: PersonalTradePlanInput) -> dict[str, Any]:
-        try:
+    async def record_trade_plan(payload: PersonalTradePlanInput) -> dict[str, Any]:
+        def run() -> dict[str, Any]:
             with deps.database.transaction() as connection:
-                result = deps.persist_plan(connection, payload)
+                return deps.persist_plan(connection, payload)
+        try:
+            result = await run_database_blocking(run, timeout_seconds=3)
         except ImmutableDecisionFactConflict as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return {**result, "live_orders": False, "boundary": "human_decision_support_only"}

@@ -14,6 +14,8 @@ from collections import Counter
 from statistics import mean
 from typing import Any
 
+from .market_rules import a_share_limit_ratio
+
 
 def _number(value: Any) -> float | None:
     if value is None or value == "":
@@ -58,13 +60,9 @@ def _limit_value(payload: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
-def _limit_ratio(symbol: str) -> float:
-    code = str(symbol or "")[:3]
-    if code in {"300", "301", "688", "689"}:
-        return 20.0
-    if code.startswith(("8", "4")):
-        return 30.0
-    return 10.0
+def _limit_ratio(symbol: str, is_st: bool = False) -> float:
+    """Delegate to the single shared board/ST price-band table (percent units)."""
+    return a_share_limit_ratio(symbol, is_st=is_st) * 100.0
 
 
 def _bar_change_pct(row: dict[str, Any], field: str) -> float | None:
@@ -145,7 +143,11 @@ def _sector_structure(board_summary: dict[str, Any]) -> dict[str, Any]:
                 if not isinstance(item, dict):
                     continue
                 stocks = [stock for stock in item.get("top_stocks") or [] if isinstance(stock, dict)]
-                limit_like = sum(1 for stock in stocks if (_number(stock.get("pct_change")) or 0) >= _limit_ratio(str(stock.get("symbol") or "")) - 0.3)
+                limit_like = sum(
+                    1 for stock in stocks
+                    if (_number(stock.get("pct_change")) or 0)
+                    >= _limit_ratio(str(stock.get("symbol") or ""), bool(stock.get("is_st"))) - 0.3
+                )
                 rising = sum(1 for stock in stocks if (_number(stock.get("pct_change")) or 0) > 0)
                 if limit_like >= 3:
                     structure_state = "limit_cluster"

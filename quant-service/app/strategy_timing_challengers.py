@@ -27,7 +27,9 @@ boundary (provider_access: none, historical_ingestion: none).
 
 from __future__ import annotations
 
+import math
 from datetime import date, datetime, timedelta
+from statistics import mean, stdev
 from typing import Any, Callable
 
 from psycopg.types.json import Json
@@ -43,6 +45,38 @@ CHALLENGERS: dict[str, dict[str, Any]] = {
 
 HORIZON_MINUTES = (5, 15, 30)
 PRICE_MATCH_TOLERANCE = timedelta(minutes=3)
+#: A challenger's cumulative (symbol, day) entry count, across every run
+#: ledgered in quant.strategy_experiments, must reach this before its
+#: results are anything but descriptive_only.
+MINIMUM_EVALUABLE_ENTRIES = 30
+BENJAMINI_HOCHBERG_Q = 0.05
+
+
+def _two_sided_normal_p(t_stat: float | None) -> float | None:
+    if t_stat is None or not math.isfinite(t_stat):
+        return None
+    return math.erfc(abs(t_stat) / math.sqrt(2.0))
+
+
+def _one_sample_t_stat(values: list[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    spread = stdev(values)
+    return (mean(values) / (spread / math.sqrt(len(values)))) if spread else None
+
+
+def _benjamini_hochberg_reject(p_values: dict[str, float | None], *, q: float = BENJAMINI_HOCHBERG_Q) -> dict[str, bool]:
+    valid = sorted((value, key) for key, value in p_values.items() if value is not None and math.isfinite(value))
+    count = len(valid)
+    reject = {key: False for key in p_values}
+    threshold_rank = 0
+    for rank, (value, _key) in enumerate(valid, start=1):
+        if value <= (rank / count) * q:
+            threshold_rank = rank
+    for rank, (_value, key) in enumerate(valid, start=1):
+        if rank <= threshold_rank:
+            reject[key] = True
+    return reject
 
 
 def _symbols_for_date(connection: Any, as_of_date: date, model_version: str) -> list[str]:
@@ -115,8 +149,11 @@ def run_challenger_backtest(connection: Any, as_of_date: date, *, model_version:
     symbols = _symbols_for_date(connection, as_of_date, model_version)
     if not symbols:
         return {"status": "blocked", "as_of_date": str(as_of_date), "reason": "no recorded snapshots for this date/model_version"}
-    per_horizon = {f"{minutes}m": {"count": {}, "sum_return": {}, "hits": {}} for minutes in HORIZON_MINUTES}
-    total_entries: dict[str, int] = {key: 0 for key in CHALLENGERS}
+    per_horizon = {f"{minutes}m": {"returns": {}} for minutes in HORIZON_MINUTES}
+    # One entry per (symbol, day) per challenger, not once per intraday signal
+    # fire: a symbol that fires 5 times in one session is one independent
+    # observation of "did this challenger's rule catch this name today", not 5.
+    entered_symbols: dict[str, set[str]] = {key: set() for key in CHALLENGERS}
     total_snapshots = 0
     for symbol in symbols:
         rows = _load_symbol_snapshots(connection, as_of_date, model_version, symbol, max_rows)
@@ -138,37 +175,66 @@ def run_challenger_backtest(connection: Any, as_of_date: date, *, model_version:
                 inputs["quote"] = {**inputs["quote"], "_scan_observed_at": row["observed_at"]}
             adapted.append((row["observed_at"], inputs))
         for challenger_key, overrides in CHALLENGERS.items():
+            if symbol in entered_symbols[challenger_key]:
+                continue
             for observed_at, inputs in adapted:
+                if symbol in entered_symbols[challenger_key]:
+                    break
                 for signal in evaluate_variant(inputs, overrides):
                     if signal.get("signal_type") != "entry":
                         continue
                     price = (inputs.get("quote") or {}).get("price")
                     if price is None:
                         continue
-                    total_entries[challenger_key] += 1
+                    entered_symbols[challenger_key].add(symbol)
                     for minutes in HORIZON_MINUTES:
                         key = f"{minutes}m"
                         forward = _forward_return(path, observed_at, float(price), minutes)
-                        bucket = per_horizon[key]
-                        counts = bucket["count"].setdefault(challenger_key, 0)
                         if forward is not None:
-                            bucket["count"][challenger_key] = counts + 1
-                            bucket["sum_return"][challenger_key] = bucket["sum_return"].get(challenger_key, 0.0) + forward
-                            bucket["hits"][challenger_key] = bucket["hits"].get(challenger_key, 0) + int(forward > 0)
-    results: dict[str, Any] = {}
+                            per_horizon[key]["returns"].setdefault(challenger_key, []).append(forward)
+                    break
+    total_entries = {key: len(symbols_seen) for key, symbols_seen in entered_symbols.items()}
+    prior_entries = _cumulative_entries(connection)
+    cumulative_entries = {key: prior_entries.get(key, 0) + total_entries[key] for key in CHALLENGERS}
+    p_values: dict[str, float | None] = {}
+    by_challenger_horizon: dict[str, dict[str, dict[str, Any]]] = {key: {} for key in CHALLENGERS}
     for challenger_key in CHALLENGERS:
-        by_horizon = {}
         for minutes in HORIZON_MINUTES:
             key = f"{minutes}m"
-            matured = per_horizon[key]["count"].get(challenger_key, 0)
-            by_horizon[key] = {
+            returns = per_horizon[key]["returns"].get(challenger_key, [])
+            matured = len(returns)
+            cell = {
                 "entries_fired": total_entries[challenger_key], "matured": matured,
-                "avg_return": round(per_horizon[key]["sum_return"].get(challenger_key, 0.0) / matured, 5) if matured else None,
-                "hit_rate": round(per_horizon[key]["hits"].get(challenger_key, 0) / matured, 4) if matured else None,
+                "avg_return": round(mean(returns), 5) if returns else None,
+                "hit_rate": round(sum(1 for value in returns if value > 0) / matured, 4) if matured else None,
             }
-        results[challenger_key] = {"total_entries": total_entries[challenger_key], "by_horizon": by_horizon}
-    status = "completed" if results["baseline"]["total_entries"] > 0 else "insufficient_history"
+            t_stat = _one_sample_t_stat(returns)
+            cell["t_stat"] = t_stat
+            p_value = _two_sided_normal_p(t_stat)
+            p_values[f"{challenger_key}:{key}"] = p_value
+            by_challenger_horizon[challenger_key][key] = cell
+    rejected = _benjamini_hochberg_reject(p_values)
+    results: dict[str, Any] = {}
+    for challenger_key in CHALLENGERS:
+        by_horizon = by_challenger_horizon[challenger_key]
+        for key, cell in by_horizon.items():
+            cell["benjamini_hochberg_significant"] = bool(rejected.get(f"{challenger_key}:{key}"))
+        enough_samples = cumulative_entries[challenger_key] >= MINIMUM_EVALUABLE_ENTRIES
+        any_significant = any(cell["benjamini_hochberg_significant"] for cell in by_horizon.values())
+        results[challenger_key] = {
+            "total_entries": total_entries[challenger_key], "cumulative_entries": cumulative_entries[challenger_key],
+            "by_horizon": by_horizon,
+            "descriptive_only": not (enough_samples and any_significant),
+            "gate_reason": None if enough_samples and any_significant else (
+                f"cumulative (symbol,day) entries {cumulative_entries[challenger_key]} < {MINIMUM_EVALUABLE_ENTRIES}"
+                if not enough_samples else "no horizon survives Benjamini-Hochberg correction across challengers and horizons"
+            ),
+        }
+    status = "completed" if total_entries["baseline"] > 0 else "insufficient_history"
     metrics = {"challengers": results, "snapshots": total_snapshots, "symbols": len(symbols),
+              "sample_gate": {"minimum_cumulative_entries": MINIMUM_EVALUABLE_ENTRIES, "benjamini_hochberg_q": BENJAMINI_HOCHBERG_Q,
+                              "unit": "one entry per (symbol, day) per challenger, deduplicated across repeat intraday fires"},
+              "descriptive_only": all(cell["descriptive_only"] for cell in results.values()),
               "data_boundary": {"source": "quant.intraday_rule_input_snapshots", "provider_access": "none",
                                 "historical_ingestion": "none", "threshold_fitting": "none", "orders": "none",
                                 "forward_return_source": "reconstructed from the same day's other recorded snapshots for that symbol only"}}
@@ -178,6 +244,28 @@ def run_challenger_backtest(connection: Any, as_of_date: date, *, model_version:
         (as_of_date, as_of_date, status, Json({"model_version": model_version, "challengers": list(CHALLENGERS)}), Json(metrics)),
     )
     return {"status": status, "as_of_date": str(as_of_date), **metrics}
+
+
+def _cumulative_entries(connection: Any) -> dict[str, int]:
+    """Sum every prior run's (symbol, day)-deduplicated entry counts per challenger.
+
+    Reads back ``total_entries`` from every previously ledgered
+    ``quant.strategy_experiments`` row for this strategy, so the 30-sample
+    gate reflects accumulated evidence across days, not just today's run
+    (which alone almost never reaches 30 distinct names).
+    """
+    rows = connection.execute(
+        "SELECT metrics FROM quant.strategy_experiments WHERE strategy_key='intraday_entry_timing_challengers_v1'",
+    ).fetchall()
+    totals: dict[str, int] = {key: 0 for key in CHALLENGERS}
+    for row in rows:
+        metrics = row["metrics"] if isinstance(row, dict) else dict(row).get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        for challenger_key, cell in (metrics.get("challengers") or {}).items():
+            if challenger_key in totals and isinstance(cell, dict) and isinstance(cell.get("total_entries"), int):
+                totals[challenger_key] += cell["total_entries"]
+    return totals
 
 
 __all__ = ["CHALLENGERS", "HORIZON_MINUTES", "run_challenger_backtest"]

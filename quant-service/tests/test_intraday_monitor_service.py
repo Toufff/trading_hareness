@@ -11,7 +11,6 @@ not reproduce off the edge.
 from __future__ import annotations
 
 import asyncio
-from datetime import date
 import unittest
 
 

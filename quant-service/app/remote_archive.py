@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
 
 from psycopg.types.json import Json
 
-from .analysis import EXTRACTOR_VERSION, direction_source, extract_signals
+from .analysis import direction_source, extract_signals
 from .analyst_trade_actions import sync_anqiang_message_trade_actions, sync_anqiang_trade_actions
 from .analyst_skill_models import rebuild_all_analyst_skill_profiles, rebuild_analyst_skill_profile
 from .analyst_expert_research import rebuild_analyst_research

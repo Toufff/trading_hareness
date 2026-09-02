@@ -25,8 +25,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Iterable, Mapping, Sequence
 
-#: A close within this of the limit counts as sealed, matching settlement.
-LIMIT_TOLERANCE = 0.005
+from .market_rules import LIMIT_TOLERANCE, is_at_limit
 #: A board this tall or taller is a "high board" in the ladder reading.
 HIGH_BOARD_MIN_HEIGHT = 3
 #: How far back a consecutive run is counted; beyond this the height reading
@@ -87,7 +86,7 @@ def _sealed(row: Mapping[str, Any]) -> bool:
     limit_up, close = row.get("limit_up"), row.get("close")
     if limit_up is None or close is None:
         return False
-    return float(close) >= float(limit_up) - LIMIT_TOLERANCE
+    return is_at_limit(close, limit_up)
 
 
 def _touched(row: Mapping[str, Any]) -> bool:
@@ -95,7 +94,7 @@ def _touched(row: Mapping[str, Any]) -> bool:
     if limit_up is None:
         return False
     reference = row.get("high") if row.get("high") is not None else row.get("close")
-    return reference is not None and float(reference) >= float(limit_up) - LIMIT_TOLERANCE
+    return reference is not None and is_at_limit(reference, limit_up)
 
 
 def sealed_symbols(rows: Iterable[Mapping[str, Any]]) -> set[str]:

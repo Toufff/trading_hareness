@@ -12,7 +12,7 @@ reading its own outcome.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Any, Awaitable, Callable
 
 from psycopg.types.json import Json
@@ -98,12 +98,13 @@ def persist_trade_limit_rows(connection: Any, trading_date: date, rows: list[dic
 def sector_membership(connection: Any, trading_date: date,
                       taxonomy_key: str = "ths_concept_flow") -> dict[str, set[str]]:
     membership_predicate = point_in_time_membership_predicate(
-        "member", known_at_cutoff_sql="((%s::date + time '08:59:59') AT TIME ZONE 'Asia/Shanghai')",
+        "member", "%(trade_date)s",
+        known_at_cutoff_sql="((%(trade_date)s::date + time '08:59:59') AT TIME ZONE 'Asia/Shanghai')",
     )
     rows = connection.execute(
         f"""SELECT symbol, sector_key FROM quant.sector_membership_history member
-            WHERE taxonomy_key=%s AND {membership_predicate}""",
-        (taxonomy_key, trading_date, trading_date, trading_date),
+            WHERE taxonomy_key=%(taxonomy_key)s AND {membership_predicate}""",
+        {"taxonomy_key": taxonomy_key, "trade_date": trading_date},
     ).fetchall()
     membership: dict[str, set[str]] = {}
     for row in rows:

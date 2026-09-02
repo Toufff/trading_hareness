@@ -147,7 +147,7 @@ def aggregate_order_book_observations(rows: list[dict[str, Any]], observed_at: d
     # not an exchange-level classification of informed trades.
     signed = []
     for item in recent:
-        outer, inner = _number(item.get("outer_inner_delta_lot")), None
+        outer = _number(item.get("outer_inner_delta_lot"))
         if outer is not None:
             signed.append(abs(outer))
     result["vpin_proxy_5m"] = round(sum(signed) / max(len(signed), 1), 6) if signed else None

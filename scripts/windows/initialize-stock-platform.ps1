@@ -185,13 +185,17 @@ try {
 
     $roleExistsOutput = & $psql -w -h 127.0.0.1 -p $Port -U stock_admin -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='quant_app'"
     $roleExists = if ($null -eq $roleExistsOutput) { '' } else { ([string]$roleExistsOutput).Trim() }
+    # Piped via stdin (-f -) rather than passed as a -c argument so the
+    # generated password never appears in this process's command line
+    # (visible to any other account via Get-Process/WMI Win32_Process).
+    $escapedAppPassword = $appPassword.Replace("'", "''")
     if ($roleExists -ne '1') {
-        & $psql -w -h 127.0.0.1 -p $Port -U stock_admin -d postgres -v ON_ERROR_STOP=1 `
-            -c "CREATE ROLE quant_app LOGIN PASSWORD '$appPassword'" | Out-Null
+        "CREATE ROLE quant_app LOGIN PASSWORD '$escapedAppPassword'" |
+            & $psql -w -h 127.0.0.1 -p $Port -U stock_admin -d postgres -v ON_ERROR_STOP=1 -f - | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Failed to create quant_app role' }
     } else {
-        & $psql -w -h 127.0.0.1 -p $Port -U stock_admin -d postgres -v ON_ERROR_STOP=1 `
-            -c "ALTER ROLE quant_app PASSWORD '$appPassword'" | Out-Null
+        "ALTER ROLE quant_app PASSWORD '$escapedAppPassword'" |
+            & $psql -w -h 127.0.0.1 -p $Port -U stock_admin -d postgres -v ON_ERROR_STOP=1 -f - | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Failed to refresh quant_app password' }
     }
 

@@ -19,7 +19,10 @@ from ..licensed_stock_api import UpstreamStockApiError, catalog
 
 class BatchValues(BaseModel):
     param: str = Field(min_length=1)
-    values: list[Any] = Field(default_factory=list)
+    # Matches the upstream vendor's own physical page-size cap: a caller
+    # cannot submit more raw batch values than a single provider page would
+    # ever legitimately need for one field of this request.
+    values: list[Any] = Field(default_factory=list, max_length=300)
     separator: str = ","
 
 

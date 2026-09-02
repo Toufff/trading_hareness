@@ -51,22 +51,19 @@ def candidates(
                     WHERE trading_date=%s AND source='longhuvip_main_net'
                     ORDER BY symbol,available_at DESC
                ), ranked AS (
-                   SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.volume,1::numeric AS adj_factor,i.name,
-                          close_day.amount,basic.row_data->>'turnover_rate' AS turnover_rate,
+                   SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.volume,b.adj_factor,i.name,
+                          b.amount,basic.row_data->>'turnover_rate' AS turnover_rate,
                           basic.row_data->>'volume_ratio' AS volume_ratio,basic.row_data->>'pe' AS pe,
                           basic.row_data->>'pb' AS pb,flow.net_amount AS main_net_amount,
                           row_number() OVER (PARTITION BY b.symbol ORDER BY b.trading_date DESC) AS rn
-                     FROM quant.research_adjusted_bars_daily b LEFT JOIN quant.instruments i ON i.symbol=b.symbol
-                     LEFT JOIN quant.canonical_bars_daily close_day
-                       ON close_day.symbol=b.symbol AND close_day.trading_date=%s
+                     FROM quant.canonical_bars_daily b LEFT JOIN quant.instruments i ON i.symbol=b.symbol
                      LEFT JOIN latest_basic basic ON basic.symbol=b.symbol
                      LEFT JOIN latest_flow flow ON flow.symbol=b.symbol
-                    WHERE b.adjustment_basis='qfq' AND b.provider='stock_brain_tencent_qfq'
-                      AND b.trading_date<=%s AND b.trading_date>=%s
+                    WHERE b.trading_date<=%s AND b.trading_date>=%s
                  ) SELECT symbol,trading_date,high,low,close,volume,adj_factor,name
                          ,amount,turnover_rate,volume_ratio,pe,pb,main_net_amount
                     FROM ranked WHERE rn<=30 ORDER BY symbol,trading_date""",
-            (as_of_date, as_of_date, as_of_date, as_of_date, as_of_date - timedelta(days=70)),
+            (as_of_date, as_of_date, as_of_date, as_of_date - timedelta(days=70)),
         ).fetchall()
     return screen(
         as_of_date, limit, minimum_full_market_symbols, int(coverage["symbols"] or 0),

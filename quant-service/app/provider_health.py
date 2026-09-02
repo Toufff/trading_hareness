@@ -27,11 +27,70 @@ def record_provider_success(connection: Any, provider: str, capability: str, row
     )
 
 
+def record_provider_empty_result(connection: Any, provider: str, capability: str,
+                                 latency_ms: int | None = None) -> None:
+    """Record a valid-but-empty response without resetting the failure streak.
+
+    A full-market cross-section provider legitimately returns zero rows
+    before the post-close publish window; that must remain distinguishable
+    from success.  ``record_provider_success`` used to be called with
+    ``rows=0`` for this case, which reset ``consecutive_failures`` to zero and
+    let a genuinely failing/misconfigured key look healthy indefinitely as
+    long as it kept answering empty instead of erroring.
+    """
+    provider_requests_total.labels(provider, capability, "empty").inc()
+    if latency_ms is not None and latency_ms >= 0:
+        provider_latency_seconds.labels(provider, capability).observe(latency_ms / 1000)
+    connection.execute(
+        """INSERT INTO quant.provider_health(provider_key,capability,market,consecutive_failures,last_success_at,last_latency_ms,last_row_count)
+           VALUES(%s,%s,'cn',0,now(),%s,0)
+           ON CONFLICT(provider_key,capability,market) DO UPDATE SET
+             last_success_at=now(),
+             last_latency_ms=COALESCE(EXCLUDED.last_latency_ms,quant.provider_health.last_latency_ms),
+             last_row_count=0,updated_at=now()""",
+        (provider, capability, latency_ms),
+    )
+
+
 def record_provider_failure(connection: Any, provider: str, capability: str, error: str,
-                           latency_ms: int | None = None) -> None:
+                           latency_ms: int | None = None, *, error_class: str | None = None,
+                           retry_after_seconds: float | None = None) -> None:
+    """Record a provider failure, classifying rate limits and bad credentials.
+
+    ``error_class="rate_limited"``/``"unauthorized"`` deliberately do not
+    increment ``consecutive_failures``: a supplier explicitly asking the
+    caller to slow down, or a credential that was rejected outright, is not
+    the same signal as intermittent upstream flakiness, and folding it into
+    the same circuit breaker tripped on correct backpressure behaviour or
+    permanently parked a fixable bad key behind the generic 5-minute circuit.
+    """
     provider_requests_total.labels(provider, capability, "failure").inc()
     if latency_ms is not None and latency_ms >= 0:
         provider_latency_seconds.labels(provider, capability).observe(latency_ms / 1000)
+    detail = safe_error_detail(error, 500)
+    if error_class == "rate_limited":
+        pause_seconds = min(300.0, max(1.0, float(retry_after_seconds or 30.0)))
+        connection.execute(
+            """INSERT INTO quant.provider_health(provider_key,capability,market,consecutive_failures,last_failure_at,last_error,last_latency_ms,circuit_open_until)
+               VALUES(%s,%s,'cn',0,now(),%s,%s,now() + (%s * interval '1 second'))
+               ON CONFLICT(provider_key,capability,market) DO UPDATE SET
+                 last_failure_at=now(),last_error=EXCLUDED.last_error,
+                 last_latency_ms=COALESCE(EXCLUDED.last_latency_ms,quant.provider_health.last_latency_ms),
+                 circuit_open_until=now() + (%s * interval '1 second'),updated_at=now()""",
+            (provider, capability, f"rate_limited: {detail}", latency_ms, pause_seconds, pause_seconds),
+        )
+        return
+    if error_class == "unauthorized":
+        connection.execute(
+            """INSERT INTO quant.provider_health(provider_key,capability,market,consecutive_failures,last_failure_at,last_error,last_latency_ms,circuit_open_until)
+               VALUES(%s,%s,'cn',0,now(),%s,%s,now() + interval '30 minutes')
+               ON CONFLICT(provider_key,capability,market) DO UPDATE SET
+                 last_failure_at=now(),last_error=EXCLUDED.last_error,
+                 last_latency_ms=COALESCE(EXCLUDED.last_latency_ms,quant.provider_health.last_latency_ms),
+                 circuit_open_until=now() + interval '30 minutes',updated_at=now()""",
+            (provider, capability, f"unauthorized: {detail}", latency_ms),
+        )
+        return
     connection.execute(
         """INSERT INTO quant.provider_health(provider_key,capability,market,consecutive_failures,last_failure_at,last_error,last_latency_ms,circuit_open_until)
            VALUES(%s,%s,'cn',1,now(),%s,%s,null)
@@ -40,7 +99,7 @@ def record_provider_failure(connection: Any, provider: str, capability: str, err
              last_latency_ms=COALESCE(EXCLUDED.last_latency_ms,quant.provider_health.last_latency_ms),
              circuit_open_until=CASE WHEN quant.provider_health.consecutive_failures+1 >= 3 THEN now()+interval '5 minutes' ELSE null END,
              updated_at=now()""",
-        (provider, capability, safe_error_detail(error, 500), latency_ms),
+        (provider, capability, detail, latency_ms),
     )
 
 

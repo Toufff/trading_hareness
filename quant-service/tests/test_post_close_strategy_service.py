@@ -40,6 +40,31 @@ class PostCloseStrategyServiceTests(unittest.TestCase):
         self.assertEqual(args[5], exact_context)
         self.assertIn("daily_base_structure", kwargs)
 
+    def test_candidate_loader_reads_canonical_bars_not_the_legacy_qfq_source(self) -> None:
+        # stock_brain_tencent_qfq bars carried a hardcoded adj_factor=1,
+        # bypassing the real corporate-action adjustment series; the loader
+        # must read canonical_bars_daily's own adj_factor instead.
+        database, connection = self._database()
+        coverage_result = MagicMock()
+        coverage_result.fetchone.return_value = {"symbols": 2}
+        rows_result = MagicMock()
+        rows_result.fetchall.return_value = []
+        connection.execute.side_effect = [coverage_result, rows_result]
+        screen = MagicMock(return_value={"status": "completed", "candidates": []})
+
+        candidates(
+            database, date(2026, 8, 14), 20, 2, board_context=lambda value: {},
+            screen=screen, daily_base_structure=lambda values: {},
+            forming_structure=lambda values: {}, fresh_start_structure=lambda values: {},
+        )
+
+        rows_sql = connection.execute.call_args_list[1].args[0]
+        self.assertNotIn("stock_brain_tencent_qfq", rows_sql)
+        self.assertNotIn("research_adjusted_bars_daily", rows_sql)
+        self.assertNotIn("1::numeric AS adj_factor", rows_sql)
+        self.assertIn("FROM quant.canonical_bars_daily b", rows_sql)
+        self.assertIn("b.adj_factor", rows_sql)
+
     def test_run_preserves_explicit_date_and_persists_candidate_evidence(self) -> None:
         database, connection = self._database()
         latest_result = MagicMock()

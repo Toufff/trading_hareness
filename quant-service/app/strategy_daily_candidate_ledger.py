@@ -26,6 +26,7 @@ from typing import Any
 from psycopg.types.json import Json
 
 from .liquidity_screen import liquidity_eligibility, median_daily_amount_by_symbol
+from .market_rules import LIMIT_TOLERANCE
 
 POST_CLOSE_STRATEGY_KEYS = {
     "base_ready_30d": "post_close_base_ready",
@@ -226,7 +227,7 @@ def settle_ledger_outcomes(connection: Any, as_of_date: date) -> int:
     locked limit-up open or a suspended entry session is left unsettled.
     """
     rows = connection.execute(
-        """WITH eligible AS (
+        f"""WITH eligible AS (
                 SELECT c.strategy_key,c.as_of_date candidate_date,c.symbol,
                   (SELECT b.trading_date FROM quant.canonical_bars_daily b
                    WHERE b.symbol=c.symbol AND b.trading_date>c.as_of_date AND b.trading_date<=%s
@@ -246,7 +247,7 @@ def settle_ledger_outcomes(connection: Any, as_of_date: date) -> int:
               )
               SELECT * FROM priced
               WHERE exit_close IS NOT NULL AND entry_price IS NOT NULL AND NOT entry_is_suspended
-                AND (entry_limit_up IS NULL OR entry_price<entry_limit_up*0.999)""",
+                AND (entry_limit_up IS NULL OR entry_price<entry_limit_up-{LIMIT_TOLERANCE})""",
         (as_of_date, as_of_date, HORIZON_DAYS - 1, HORIZON_DAYS - 1),
     ).fetchall()
     settled = 0

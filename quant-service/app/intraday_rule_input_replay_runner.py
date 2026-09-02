@@ -19,7 +19,7 @@ from typing import Any, Callable, Iterable
 
 from psycopg.types.json import Json
 
-from .intraday_replay import REPLAY_VERSION, market_event_from_row, replay_events
+from .intraday_replay import market_event_from_row, replay_events
 from .intraday_rule_inputs import intraday_rule_input_hash, intraday_rule_replay_inputs
 from .strategy_contracts import MarketEvent
 

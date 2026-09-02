@@ -16,6 +16,24 @@ def _date_key(row: dict[str, Any]) -> str:
     return str(row.get("trade_date") or row.get("date") or "")
 
 
+def rsi(closes: list[float], period: int = 14) -> float | None:
+    """Wilder's RSI over the last ``period`` closes-to-close changes.
+
+    A true N-period RSI needs N+1 closes (N changes plus the anchor before
+    the first one); this is the single shared implementation other modules
+    (e.g. ``watchlist_daily_factors``) should call instead of keeping their
+    own inline copy, which has previously drifted into an off-by-one
+    (N+1)-period RSI mislabelled as "rsi14".
+    """
+    if len(closes) <= period:
+        return None
+    window = closes[-(period + 1):]
+    gains = [max(window[index] - window[index - 1], 0) for index in range(1, len(window))]
+    losses = [max(window[index - 1] - window[index], 0) for index in range(1, len(window))]
+    average_gain, average_loss = sum(gains) / period, sum(losses) / period
+    return 100.0 if average_loss == 0 else round(100 - 100 / (1 + average_gain / average_loss), 2)
+
+
 def technical_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ordered = sorted((row for row in rows if _number(row.get("close")) is not None), key=_date_key)
     closes = [value for row in ordered if (value := _number(row.get("close"))) is not None]
@@ -29,12 +47,7 @@ def technical_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         return round((closes[-1] / closes[-days - 1] - 1) * 100, 2) if len(closes) > days else None
 
     sma5, sma10, sma20 = average(5), average(10), average(20)
-    gains = [max(closes[index] - closes[index - 1], 0) for index in range(max(1, len(closes) - 14), len(closes))]
-    losses = [max(closes[index - 1] - closes[index], 0) for index in range(max(1, len(closes) - 14), len(closes))]
-    rsi14 = None
-    if len(gains) == 14:
-        average_loss = sum(losses) / 14
-        rsi14 = 100.0 if average_loss == 0 else round(100 - 100 / (1 + (sum(gains) / 14) / average_loss), 2)
+    rsi14 = rsi(closes, period=14)
     score, reasons = 50, []
     if sma20 is not None:
         if closes[-1] > sma20:

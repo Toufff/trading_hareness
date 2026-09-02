@@ -1,12 +1,32 @@
 <script setup lang="ts">
 import { defineAsyncComponent } from 'vue';
-import { DataAnalysis, Document, Operation, Refresh, UploadFilled, Wallet } from '@element-plus/icons-vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
+import zhCn from 'element-plus/es/locale/lang/zh-cn';
+import { DataAnalysis, Document, Key, Operation, Refresh, UploadFilled, Wallet } from '@element-plus/icons-vue';
 import ManualRelayView from './views/ManualRelayView.vue';
 import GroupRelayMonitorView from './views/GroupRelayMonitorView.vue';
 import FeishuWorkbenchView from './views/FeishuWorkbenchView.vue';
 import { useDashboardWorkspace } from './composables/useDashboardWorkspace';
+import { getDashboardKey, setDashboardKey } from './api/http';
 
 const dashboard = useDashboardWorkspace();
+
+// Minimal "set the operator key" entry point (task WP8-4): writes go through
+// the adapter's X-Dashboard-Key gate (see src/api/http.ts); this dialog is
+// the one place a human enters/updates that key for their own browser.
+async function openSetDashboardKey() {
+  try {
+    const result = await ElMessageBox.prompt(
+      '用于飞书适配器的写操作鉴权（X-Dashboard-Key），只保存在本浏览器，不会上传。留空并保存可清除。',
+      '设置操作者 Key',
+      { confirmButtonText: '保存', cancelButtonText: '取消', inputValue: getDashboardKey(), inputPlaceholder: '粘贴运维分发的 Key' },
+    );
+    setDashboardKey(result.value ?? '');
+    ElMessage.success(result.value ? '操作者 Key 已保存到本浏览器' : '已清除操作者 Key');
+  } catch {
+    // User cancelled; leave the stored key untouched.
+  }
+}
 const ResearchOverviewTab = defineAsyncComponent(() => import('./views/research/ResearchOverviewTab.vue'));
 const MarketSnapshotsTab = defineAsyncComponent(() => import('./views/research/MarketSnapshotsTab.vue'));
 const CloseReviewTab = defineAsyncComponent(() => import('./views/research/CloseReviewTab.vue'));
@@ -22,6 +42,7 @@ const PersonalDecisionView = defineAsyncComponent(() => import('./views/Personal
 </script>
 
 <template>
+  <el-config-provider :locale="zhCn">
   <el-container class="app-shell">
     <el-aside width="236px" class="side-nav">
       <div class="brand"><el-icon><DataAnalysis /></el-icon><div><strong>Quant Research</strong><span>投研与市场数据</span></div></div>
@@ -32,7 +53,7 @@ const PersonalDecisionView = defineAsyncComponent(() => import('./views/Personal
         <el-menu-item index="workbench"><el-icon><Document /></el-icon><span>飞书工作台</span></el-menu-item>
         <el-menu-item index="relay"><el-icon><UploadFilled /></el-icon><span>手动投递</span></el-menu-item>
       </el-menu>
-      <div class="side-state"><el-tag :type="dashboard.connected ? 'success' : 'warning'" effect="plain">{{ dashboard.connected ? '事件流已连接' : '事件流重连中' }}</el-tag></div>
+      <div class="side-state"><el-tag :type="dashboard.connected ? 'success' : 'warning'" effect="plain">{{ dashboard.connected ? '事件流已连接' : '事件流重连中' }}</el-tag><el-button text :icon="Key" size="small" @click="openSetDashboardKey">设置 Key</el-button></div>
     </el-aside>
     <el-container>
       <el-header class="topbar"><div><h1>{{ dashboard.activeSection === 'research' ? '量化研究台' : dashboard.activeSection === 'personal' ? '个人决策' : dashboard.activeSection === 'monitor' ? '导入监控' : dashboard.activeSection === 'workbench' ? '飞书工作台' : '手动投递' }}</h1><span>{{ dashboard.activeSection === 'research' ? '分析师证据、市场数据与研究候选池' : dashboard.activeSection === 'personal' ? '实际持仓、市场判断与可执行的新买计划' : dashboard.activeSection === 'workbench' ? '汇总群协作闭环、可用能力与授权状态' : '本地持久化导入链路' }}</span></div><el-button v-if="dashboard.activeSection !== 'personal'" :icon="Refresh" :loading="dashboard.activeSection === 'workbench' ? dashboard.feishuWorkbenchLoading : dashboard.loading" @click="dashboard.activeSection === 'workbench' ? dashboard.loadFeishuWorkbench() : dashboard.loadResearch()">刷新数据</el-button></el-header>
@@ -101,4 +122,5 @@ const PersonalDecisionView = defineAsyncComponent(() => import('./views/Personal
     <template #footer><el-button @click="dashboard.workbenchIntegrationDialog = false">取消</el-button><el-button type="primary" :loading="dashboard.feishuWorkbenchAction.startsWith('integration:')" @click="dashboard.submitWorkbenchIntegration">提交</el-button></template>
   </el-dialog>
   <el-dialog v-model="dashboard.fetchResultOpen" title="读取结果" width="620px"><el-descriptions :column="2" border><el-descriptions-item v-for="(value, key) in dashboard.fetchResult" :key="String(key)" :label="String(key)"><span class="result-value">{{ typeof value === 'object' ? JSON.stringify(value) : value }}</span></el-descriptions-item></el-descriptions></el-dialog>
+  </el-config-provider>
 </template>

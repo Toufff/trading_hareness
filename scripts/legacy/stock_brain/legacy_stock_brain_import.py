@@ -9,9 +9,16 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 from pathlib import Path
+import sys
 from typing import Any
 
-from .personal_decision_contracts import BrokerPortfolioSnapshotInput
+# This module moved out of the ``app`` package (it is one-way migration code,
+# not a production dependency) but still needs one app/ contract type.
+_QUANT_SERVICE_ROOT = Path(__file__).resolve().parents[3] / "quant-service"
+if str(_QUANT_SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_QUANT_SERVICE_ROOT))
+
+from app.personal_decision_contracts import BrokerPortfolioSnapshotInput  # noqa: E402
 
 
 class LegacyPortfolioImportError(ValueError):

@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Any
 
+from .intraday_clock import CN_TZ
+
 
 TERMINAL_SUMMARY_STATUSES = frozenset({"sent", "disabled", "suppressed", "already_terminal", "attempts_exhausted"})
 
@@ -31,7 +33,9 @@ async def daily_strategy_summary_scheduler_step(
     *, local: datetime | None = None,
 ) -> bool:
     """Run at most one date-scoped summary attempt with durable restart safety."""
-    local = local or dependencies.now()
+    # Explicit conversion: in_summary_window below compares clock time
+    # against a fixed China evening window.
+    local = (local or dependencies.now()).astimezone(CN_TZ)
     exchange_date = local.date()
     if exchange_date in completed_dates or not in_summary_window(local):
         return False

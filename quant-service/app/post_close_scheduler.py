@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from .intraday_clock import CN_TZ
+
 
 @dataclass(frozen=True)
 class PostCloseSchedulerDependencies:
@@ -41,7 +43,10 @@ async def post_close_scheduler_step(
     run tables through ``completed_for_date``; it cannot inherit a stale date
     from a previous process.
     """
-    local = local or dependencies.now()
+    # Explicit conversion: ``date()``/``time()`` boundary comparisons below
+    # are meaningless unless ``local`` is actually in the China trading
+    # timezone, and a caller-supplied ``now`` is not guaranteed to be.
+    local = (local or dependencies.now()).astimezone(CN_TZ)
     exchange_date = local.date()
     if exchange_date in completed_dates:
         return False

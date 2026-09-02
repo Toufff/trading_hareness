@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
-import base64
 from datetime import date, datetime, time
 from decimal import Decimal
 import hashlib
 import json
-import re
+from pathlib import Path
+import sys
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
+
+# This module moved out of the ``app`` package (it is one-way migration code,
+# not a production dependency) but still needs two small app/ utilities.
+# Bootstrap ``quant-service`` onto sys.path so plain ``app.*`` imports resolve
+# whether this file is reached via the entry-point scripts in this directory
+# or collected directly by pytest.
+_QUANT_SERVICE_ROOT = Path(__file__).resolve().parents[3] / "quant-service"
+if str(_QUANT_SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_QUANT_SERVICE_ROOT))
+
+from app.json_safe_encoding import json_safe  # noqa: E402
+from app.symbols import canonical_symbol  # noqa: E402
 
 
 DURABLE_FACT_TABLES = frozenset({
@@ -74,22 +86,22 @@ def table_classification(table: str) -> str | None:
 
 
 def normalize_symbol(value: Any) -> str | None:
+    """Resolve a stock-brain symbol, delegating A-share inference to ``app.symbols``.
+
+    This used to route every bare "9"-leading code to Shanghai regardless of
+    whether it was a genuine Shanghai B-share (900xxx) or a Beijing Stock
+    Exchange listing (920xxx), and to default any unrecognized 6-digit code
+    to Shenzhen rather than admitting it did not know.
+    """
     raw = str(value or "").strip().upper()
     if not raw:
         return None
-    match = re.fullmatch(r"(SH|SZ|BJ)(\d{6})", raw)
-    if match:
-        return f"{match.group(2)}.{match.group(1)}"
-    if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", raw):
-        return raw
-    if re.fullmatch(r"\d{6}", raw):
-        if raw.startswith(("4", "8")):
-            return f"{raw}.BJ"
-        if raw.startswith(("5", "6", "9")):
-            return f"{raw}.SH"
-        return f"{raw}.SZ"
-    # Global tickers retain their vendor symbol. They are context evidence and
-    # are never fed through the A-share mainboard eligibility gate.
+    resolved = canonical_symbol(raw, kind="stock")
+    if resolved is not None:
+        return resolved
+    # Global tickers (and any 6-digit code that does not match a known
+    # exchange board prefix) retain their vendor symbol. They are context
+    # evidence and are never fed through the A-share mainboard eligibility gate.
     return raw
 
 
@@ -103,32 +115,6 @@ def exchange_for_symbol(symbol: str, *, venue: Any = None, market: Any = None) -
     if venue:
         return str(venue)
     return str(market or "GLOBAL")
-
-
-def json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (int, float, bool)):
-        return value
-    if isinstance(value, str):
-        # PostgreSQL text/JSONB cannot represent NUL and rejects unpaired UTF-16
-        # surrogates. Preserve such legacy bytes reversibly instead of silently
-        # deleting or replacing evidence text.
-        if "\x00" in value or any(0xD800 <= ord(character) <= 0xDFFF for character in value):
-            encoded = value.encode("utf-8", errors="surrogatepass")
-            return {
-                "encoding": "utf-8-base64",
-                "data": base64.b64encode(encoded).decode("ascii"),
-                "reason": "postgresql-text-incompatible",
-            }
-        return value
-    if isinstance(value, (datetime, date, Decimal)):
-        return str(value)
-    if isinstance(value, bytes):
-        return {"encoding": "base64", "data": base64.b64encode(value).decode("ascii")}
-    if isinstance(value, Mapping):
-        return {str(key): json_safe(item) for key, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [json_safe(item) for item in value]
-    return str(value)
 
 
 def parse_json_value(value: Any, default: Any) -> Any:

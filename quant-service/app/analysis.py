@@ -5,8 +5,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .symbols import canonical_symbol
+
 
 SYMBOL_PATTERN = re.compile(r"(?<!\d)(?:60\d{4}|68\d{4}|00\d{4}|30\d{4}|8\d{5}|4\d{5})(?!\d)")
+_EXCHANGE_NAMES = {"SH": "SSE", "SZ": "SZSE", "BJ": "BSE"}
 POSITIVE_TERMS = ("看多", "看好", "买入", "加仓", "布局", "低吸", "机会", "推荐", "上行", "增持")
 NEGATIVE_TERMS = ("看空", "回避", "减仓", "卖出", "避雷", "风险", "下跌", "止损", "谨慎")
 # These are explicit portfolio actions used by the analyst feed.  They are
@@ -19,11 +22,20 @@ EXTRACTOR_VERSION = "rules-v2"
 
 
 def normalize_symbol(code: str) -> tuple[str, str]:
-    if code.startswith(("60", "68")):
-        return f"{code}.SH", "SSE"
-    if code.startswith(("00", "30")):
-        return f"{code}.SZ", "SZSE"
-    return f"{code}.BJ", "BSE"
+    """Resolve a bare 6-digit code, delegating exchange inference to ``app.symbols``.
+
+    This used to be one of five independent, mutually-contradicting symbol
+    inference implementations in this codebase (e.g. one treating every "9"
+    or "4"/"8" prefix as Beijing regardless of board).  ``SYMBOL_PATTERN``
+    only matches 60/68/00/30/8x/4x prefixes, all of which ``canonical_symbol``
+    resolves, so the ``None`` branch below should be unreachable; it fails
+    closed rather than guessing a board.
+    """
+    symbol = canonical_symbol(code, kind="stock")
+    if symbol is None:
+        raise ValueError(f"unable to resolve exchange for symbol code {code!r}")
+    _, exchange = symbol.split(".", 1)
+    return symbol, _EXCHANGE_NAMES[exchange]
 
 
 def choose_horizon(text: str) -> int:

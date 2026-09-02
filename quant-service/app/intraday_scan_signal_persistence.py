@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any, Callable
 import uuid
 
+from .runtime_leases import check_runtime_lease_fence
 from .stable_json import tolerant_json
 
 
@@ -85,6 +86,12 @@ class IntradayScanPersistenceServiceDependencies:
     confirmation_window: Any
     signal_model_version: str
     factor_contract_version: str
+    # Fencing-token guard against a superseded leased-loop holder committing a
+    # write after a new holder has already taken over (see
+    # ``runtime_composition.current_lease_fence``).  Both default to ``None``
+    # so callers outside a leased loop (a manual scan trigger) are unaffected.
+    lease_key: str | None = None
+    lease_fence: Callable[[], int | None] | None = None
 
 
 def persist_scan_transaction(
@@ -109,6 +116,14 @@ def persist_scan_transaction(
     the durable transaction boundary used by the bounded database executor.
     """
     with dependencies.database.transaction() as connection:
+        if dependencies.lease_fence is not None:
+            expected_fence = dependencies.lease_fence()
+            if expected_fence is not None and dependencies.lease_key is not None:
+                # Raising here aborts the ``with`` block before any row is
+                # written, rolling the transaction back rather than letting a
+                # stale holder's in-flight scan commit after a new holder has
+                # already taken over this loop's lease.
+                check_runtime_lease_fence(dependencies.database, dependencies.lease_key, expected_fence)
         return persist_scan_signals(
             connection,
             scan_id=scan_id,

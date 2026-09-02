@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { inject } from 'vue';
 import { UploadFilled } from '@element-plus/icons-vue';
+import { dashboardContextKey } from '../dashboard-context';
 
-const dashboard = inject<any>('manual-relay');
+const dashboard = inject(dashboardContextKey);
 if (!dashboard) throw new Error('manual relay view requires its dashboard context');
 const { routes, relayTag, relaySource, relayDate, relayTime, relayText, relayFiles, relayXhr, relayProgress, relayState, addFiles, submitRelay } = dashboard;
 </script>

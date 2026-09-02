@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Awaitable, Callable
 
+from .automation_run_repository import POST_CLOSE_STRATEGY_TASK_KEY, post_close_strategy_run_key
 from .post_close_scheduler import PostCloseSchedulerDependencies
 from .strategy_review_scheduler import StrategyReviewSchedulerDependencies
 
@@ -121,6 +122,15 @@ class PostCloseStrategyRuntimeDependencies:
 
 async def run_post_close_strategy_loop(dependencies: PostCloseStrategyRuntimeDependencies) -> None:
     """Run durable same-date post-close operations through the existing scheduler."""
+    # A completed_for_date READ followed by a run_recorded WRITE is not
+    # atomic: a slow strategy run past the scheduler's retry window let two
+    # concurrent invocations from the same process both pass the read and
+    # both attempt the write. run_recorded's own durable dedup (an already
+    # 'running' run_key updated within the last few minutes is skipped) is
+    # the cross-process guard; this in-flight set additionally short-circuits
+    # a same-process race before it even reaches the database.
+    in_flight_run_keys: set[str] = set()
+
     async def completed_for_date(exchange_date: date) -> tuple[bool, bool]:
         return (
             bool(await dependencies.run_database(dependencies.strategy_completed_for_date, exchange_date, timeout_seconds=10)),
@@ -129,11 +139,11 @@ async def run_post_close_strategy_loop(dependencies: PostCloseStrategyRuntimeDep
 
     async def run_strategy(exchange_date: date) -> str:
         result = await dependencies.run_database(functools.partial(
-            dependencies.run_recorded, dependencies.database, task_key="post_close_strategy",
-            run_key=f"post-close-strategy:{exchange_date}",
+            dependencies.run_recorded, dependencies.database, task_key=POST_CLOSE_STRATEGY_TASK_KEY,
+            run_key=post_close_strategy_run_key(exchange_date),
             operation=functools.partial(dependencies.run_post_close_strategy, dependencies.post_close_request(as_of_date=exchange_date)),
             cadence="daily", as_of_date=exchange_date, methodology_version=dependencies.post_close_model_version,
-            input_summary={"data_boundary": "same_date_close"},
+            input_summary={"data_boundary": "same_date_close"}, in_flight_run_keys=in_flight_run_keys,
         ), timeout_seconds=60)
         return str(result.get("status") or "failed")
 
@@ -143,7 +153,7 @@ async def run_post_close_strategy_loop(dependencies: PostCloseStrategyRuntimeDep
             run_key=f"watchlist-main-wave:{exchange_date}",
             operation=functools.partial(dependencies.run_main_wave_research, dependencies.main_wave_request(as_of_date=exchange_date)),
             cadence="daily", as_of_date=exchange_date, methodology_version="watchlist-main-wave-v2",
-            input_summary={"universe": "watchlist"},
+            input_summary={"universe": "watchlist"}, in_flight_run_keys=in_flight_run_keys,
         ), timeout_seconds=90)
         return str(result.get("status") or "failed")
 

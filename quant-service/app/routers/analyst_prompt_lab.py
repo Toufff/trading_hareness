@@ -10,6 +10,7 @@ from fastapi import APIRouter
 
 from ..async_analyst_prompt_lab_read_repository import status as async_status
 from ..request_models import AnalystPromptEvaluateRequest, AnalystPromptGoldLabelRequest
+from ..runtime_executors import run_database_blocking
 
 
 def _status_sync(database: Any, limit: int) -> dict[str, Any]:
@@ -55,29 +56,37 @@ def build_analyst_prompt_lab_router(database: Any, materialize_fn: Callable[...,
         return _status_sync(database, limit)
 
     @router.post("/api/v1/analyst-prompt-lab/materialize")
-    def materialize() -> dict[str, Any]:
-        with database.transaction() as connection:
-            return materialize_fn(connection, cutoff_at=datetime.now(timezone.utc))
+    async def materialize() -> dict[str, Any]:
+        def run() -> dict[str, Any]:
+            with database.transaction() as connection:
+                return materialize_fn(connection, cutoff_at=datetime.now(timezone.utc))
+        return await run_database_blocking(run, timeout_seconds=3)
 
     @router.post("/api/v1/analyst-prompt-lab/candidates/{candidate_id}/label")
-    def label(candidate_id: UUID, payload: AnalystPromptGoldLabelRequest) -> dict[str, Any]:
-        with database.transaction() as connection:
-            item = label_fn(connection, candidate_id=candidate_id, label=payload.label,
-                            direction_correct=payload.direction_correct, action_executable=payload.action_executable,
-                            reviewer=payload.reviewer, notes=payload.notes)
+    async def label(candidate_id: UUID, payload: AnalystPromptGoldLabelRequest) -> dict[str, Any]:
+        def run() -> dict[str, Any]:
+            with database.transaction() as connection:
+                return label_fn(connection, candidate_id=candidate_id, label=payload.label,
+                                direction_correct=payload.direction_correct, action_executable=payload.action_executable,
+                                reviewer=payload.reviewer, notes=payload.notes)
+        item = await run_database_blocking(run, timeout_seconds=3)
         return {"status": "labelled", "item": item, "live_effect": "none"}
 
     @router.post("/api/v1/analyst-prompt-lab/evaluate/{variant_key}")
-    def evaluate(variant_key: str, payload: AnalystPromptEvaluateRequest) -> dict[str, Any]:
-        with database.transaction() as connection:
-            return evaluate_fn(connection, variant_key=variant_key,
-                               cutoff_at=payload.cutoff_at or datetime.now(timezone.utc),
-                               minimum_labels=payload.minimum_labels)
+    async def evaluate(variant_key: str, payload: AnalystPromptEvaluateRequest) -> dict[str, Any]:
+        def run() -> dict[str, Any]:
+            with database.transaction() as connection:
+                return evaluate_fn(connection, variant_key=variant_key,
+                                   cutoff_at=payload.cutoff_at or datetime.now(timezone.utc),
+                                   minimum_labels=payload.minimum_labels)
+        return await run_database_blocking(run, timeout_seconds=3)
 
     @router.post("/api/v1/analyst-intraday-outcomes/recompute")
-    def recompute_intraday_outcomes() -> dict[str, Any]:
-        with database.transaction() as connection:
-            return outcome_fn(connection, cutoff_at=datetime.now(timezone.utc))
+    async def recompute_intraday_outcomes() -> dict[str, Any]:
+        def run() -> dict[str, Any]:
+            with database.transaction() as connection:
+                return outcome_fn(connection, cutoff_at=datetime.now(timezone.utc))
+        return await run_database_blocking(run, timeout_seconds=3)
 
     return router
 

@@ -20,6 +20,16 @@ import requests
 
 MAX_PHYSICAL_BATCH = 300
 SENSITIVE_QUERY_KEYS = frozenset({"token", "userid", "deviceid"})
+#: This proxy shares an executor with intraday collection.  An unbounded
+#: ``st``/batch-value combination could serialize ceil(st/300)*ceil(len/300)
+#: upstream GETs (each retried up to 3x) and hold that shared executor for
+#: minutes.  Capping the *expected* call count -- not just each dimension
+#: independently -- catches the cross-product a caller could still reach by
+#: combining a large ``st`` with a large batch.
+MAX_EXPECTED_CALLS = 10
+#: Independent of whatever timeout a caller's config declares, this proxy
+#: must never hold the shared public-source executor longer than this.
+MAX_TIMEOUT_SECONDS = 60.0
 
 
 class UpstreamStockApiError(RuntimeError):
@@ -302,6 +312,16 @@ def execute(
         raise ValueError(f"unknown stock API target: {target_key}")
     resolved_path = _path(target, path)
     sanitized = _clean_params(params)
+    requested_size = _integer(sanitized.get("st"))
+    expected_calls = expected_call_count(
+        requested_size=requested_size if requested_size > 0 else None,
+        batch_value_count=len(batch_values) if batch_param and batch_values else None,
+    )
+    if expected_calls > MAX_EXPECTED_CALLS:
+        raise ValueError(
+            f"requested batch would need {expected_calls} upstream calls; "
+            f"the licensed proxy is capped at {MAX_EXPECTED_CALLS}"
+        )
     requests_to_make = _physical_requests(
         sanitized,
         batch_param=batch_param,
@@ -310,6 +330,7 @@ def execute(
     )
     pages: list[dict[str, Any]] = []
     url = urljoin(target.base_url, resolved_path)
+    timeout_seconds = min(MAX_TIMEOUT_SECONDS, float(getattr(config, "timeout_seconds", 20.0)))
 
     for offset, size, batch_count, physical_params in requests_to_make:
         request_params = dict(physical_params)
@@ -319,7 +340,7 @@ def execute(
             session,
             url=url,
             params=request_params,
-            timeout_seconds=float(getattr(config, "timeout_seconds", 20.0)),
+            timeout_seconds=timeout_seconds,
             retries=int(getattr(config, "retries", 3)),
         )
         pages.append({
@@ -329,7 +350,6 @@ def execute(
             "payload": payload,
         })
 
-    requested_size = _integer(sanitized.get("st"))
     return {
         "target": target.key,
         "path": resolved_path,
@@ -355,7 +375,9 @@ def expected_call_count(
 
 __all__ = [
     "DOCUMENTED_OPERATIONS",
+    "MAX_EXPECTED_CALLS",
     "MAX_PHYSICAL_BATCH",
+    "MAX_TIMEOUT_SECONDS",
     "TARGETS",
     "UpstreamStockApiError",
     "catalog",

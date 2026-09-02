@@ -8,10 +8,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')).TrimEnd('\')
 Import-Module (Join-Path $repository 'scripts\windows\runtime-observability.psm1') -Force
 $ssh = (Get-Command ssh.exe -ErrorAction Stop).Source
-$arguments = @(
+$runtimeEnvPath = Join-Path $PlatformRoot 'config\runtime.env'
+$target = Resolve-OwnerTunnelSshTarget -RuntimeEnv $runtimeEnvPath -FallbackAlias $SshAlias
+$arguments = @($target.ConnectionArguments) + @(
     "-NT",
     "-o", "BatchMode=yes",
     "-o", "ExitOnForwardFailure=yes",
@@ -19,12 +22,13 @@ $arguments = @(
     "-o", "ServerAliveCountMax=3",
     "-R", "127.0.0.1:$RemoteDatabasePort`:127.0.0.1:$LocalDatabasePort",
     "-R", "127.0.0.1:$RemoteApiPort`:127.0.0.1:$LocalApiPort",
-    $SshAlias
+    $target.Destination
 )
 
 $run = Start-RuntimeSupervisor -PlatformRoot $PlatformRoot -RepositoryRoot $repository -Service 'shared-peer-tunnels' `
     -Executable $ssh -WorkingDirectory $repository -Arguments $arguments -Metadata @{
         ssh_alias = $SshAlias
+        ssh_target_mode = $target.Mode
         remote_database_port = $RemoteDatabasePort
         remote_api_port = $RemoteApiPort
         local_database_port = $LocalDatabasePort

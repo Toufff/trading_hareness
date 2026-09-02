@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
-import functools
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -33,6 +33,10 @@ def bounded_queue_size(name: str, default: int, maximum: int = 64) -> int:
         return min(maximum, max(0, int(os.getenv(name, str(default)))))
     except ValueError:
         return default
+
+
+#: Boundary names that feed the legacy aggregate ``db_blocking_tasks`` gauge.
+_DATABASE_BOUNDARY_NAMES = frozenset({"database_fast", "database_batch"})
 
 
 class ExecutorSaturatedError(RuntimeError):
@@ -79,12 +83,12 @@ class BlockingExecutorBoundary:
 
         def tracked_action() -> Any:
             bounded_executor_tasks.labels(self.name, "inflight").inc()
-            if self.name == "database":
+            if self.name in _DATABASE_BOUNDARY_NAMES:
                 db_blocking_tasks.labels("inflight").inc()
             try:
                 return action(*args)
             finally:
-                if self.name == "database":
+                if self.name in _DATABASE_BOUNDARY_NAMES:
                     db_blocking_tasks.labels("inflight").dec()
                 bounded_executor_tasks.labels(self.name, "inflight").dec()
                 self._release()
@@ -125,18 +129,60 @@ public_source_executor = ThreadPoolExecutor(
     max_workers=public_source_executor_workers,
     thread_name_prefix="akshare",
 )
-database_executor_workers = bounded_worker_count("QUANT_DB_BLOCKING_MAX_WORKERS", 4, 8)
-database_executor = ThreadPoolExecutor(
-    max_workers=database_executor_workers,
-    thread_name_prefix="quant-db",
-)
-
 public_source_queue_capacity = bounded_queue_size("AKSHARE_MAX_QUEUE", 8)
-database_executor_queue_capacity = bounded_queue_size("QUANT_DB_BLOCKING_MAX_QUEUE", 8)
 public_source_boundary = BlockingExecutorBoundary("public_source", public_source_executor_workers, public_source_queue_capacity)
-database_executor_boundary = BlockingExecutorBoundary("database", database_executor_workers, database_executor_queue_capacity)
-db_blocking_tasks.labels("capacity").set(database_executor_workers)
-db_blocking_tasks.labels("queue_capacity").set(database_executor_queue_capacity)
+
+# A single ``quant-db`` pool made every caller share capacity: a slow
+# post-close stage or historical backfill (timeout budgets up to 300s) could
+# fill every worker and 503 the intraday/health path that only ever needs a
+# few seconds. Two bounded lanes give each traffic class its own ceiling.
+# ``QUANT_DB_BLOCKING_MAX_*`` remain the fast lane's env names for backward
+# compatibility with existing deployments; the batch lane has its own names.
+database_fast_executor_workers = bounded_worker_count("QUANT_DB_FAST_MAX_WORKERS", 4, 8) \
+    if os.getenv("QUANT_DB_FAST_MAX_WORKERS") is not None \
+    else bounded_worker_count("QUANT_DB_BLOCKING_MAX_WORKERS", 4, 8)
+database_fast_executor = ThreadPoolExecutor(
+    max_workers=database_fast_executor_workers,
+    thread_name_prefix="quant-db-fast",
+)
+database_fast_queue_capacity = bounded_queue_size("QUANT_DB_FAST_MAX_QUEUE", 8) \
+    if os.getenv("QUANT_DB_FAST_MAX_QUEUE") is not None \
+    else bounded_queue_size("QUANT_DB_BLOCKING_MAX_QUEUE", 8)
+database_fast_boundary = BlockingExecutorBoundary("database_fast", database_fast_executor_workers, database_fast_queue_capacity)
+
+database_batch_executor_workers = bounded_worker_count("QUANT_DB_BATCH_MAX_WORKERS", 4, 8)
+database_batch_executor = ThreadPoolExecutor(
+    max_workers=database_batch_executor_workers,
+    thread_name_prefix="quant-db-batch",
+)
+database_batch_queue_capacity = bounded_queue_size("QUANT_DB_BATCH_MAX_QUEUE", 8)
+database_batch_boundary = BlockingExecutorBoundary("database_batch", database_batch_executor_workers, database_batch_queue_capacity)
+
+# Backward-compatible aliases: several call sites/tests refer to the single
+# pre-split pool by these names. They now point at the fast lane, which keeps
+# every existing short (<=10s default) call working unchanged.
+database_executor_workers = database_fast_executor_workers
+database_executor = database_fast_executor
+database_executor_boundary = database_fast_boundary
+
+#: Above this bound a call is treated as post-close/backfill/replay work and
+#: routed to the batch lane instead of the fast lane, unless the caller
+#: explicitly names a ``lane``. This makes the split effective for every
+#: existing ``run_database_blocking(..., timeout_seconds=...)`` call across
+#: the codebase without requiring each one to be edited individually.
+DB_FAST_LANE_MAX_TIMEOUT_SECONDS = 30.0
+
+_DATABASE_LANES: dict[str, tuple[BlockingExecutorBoundary, ThreadPoolExecutor]] = {
+    "fast": (database_fast_boundary, database_fast_executor),
+    "batch": (database_batch_boundary, database_batch_executor),
+}
+
+#: Legacy aggregate metric kept for existing dashboards built against the
+#: single pre-split ``quant_db_blocking_tasks`` gauge: the sum of both lanes'
+#: capacity. Per-lane detail is already available from ``bounded_executor_tasks``
+#: (``executor="database_fast"|"database_batch"``).
+db_blocking_tasks.labels("capacity").set(sum(boundary.workers for boundary, _ in _DATABASE_LANES.values()))
+db_blocking_tasks.labels("queue_capacity").set(sum(boundary.queue_capacity for boundary, _ in _DATABASE_LANES.values()))
 db_blocking_tasks.labels("inflight").set(0)
 
 
@@ -155,20 +201,66 @@ async def run_akshare_blocking(action: Any, *args: Any, timeout_seconds: float, 
     return await public_source_boundary.run(public_source_executor, callable_action, *args, timeout_seconds=timeout_seconds)
 
 
-async def run_database_blocking(action: Any, *args: Any, timeout_seconds: float = 10) -> Any:
-    """Run a legacy synchronous repository operation in a bounded executor."""
-    return await database_executor_boundary.run(database_executor, action, *args, timeout_seconds=timeout_seconds)
+def resolve_database_lane(timeout_seconds: float, lane: str | None) -> str:
+    """Pick the fast or batch DB lane, defaulting purely from the timeout budget.
+
+    An explicit ``lane`` always wins. Otherwise a call budgeted for more than
+    ``DB_FAST_LANE_MAX_TIMEOUT_SECONDS`` is treated as post-close/backfill/
+    replay work: this makes the fast/batch split effective for every existing
+    ``run_database_blocking(...)`` call across the codebase without requiring
+    each one to be edited to pass ``lane=`` explicitly.
+    """
+    if lane is not None:
+        if lane not in _DATABASE_LANES:
+            raise ValueError(f"unknown database lane: {lane!r}")
+        return lane
+    return "batch" if timeout_seconds > DB_FAST_LANE_MAX_TIMEOUT_SECONDS else "fast"
+
+
+async def run_database_blocking(
+    action: Any, *args: Any, timeout_seconds: float = 10, lane: str | None = None,
+) -> Any:
+    """Run a legacy synchronous repository operation in a bounded executor.
+
+    See :func:`resolve_database_lane` for how the fast/batch lane is chosen.
+    """
+    resolved_lane = resolve_database_lane(timeout_seconds, lane)
+    boundary, executor = _DATABASE_LANES[resolved_lane]
+    return await boundary.run(executor, action, *args, timeout_seconds=timeout_seconds)
 
 
 def runtime_executor_status() -> dict[str, dict[str, int]]:
     """Expose only local capacity state; never starts market or DB work."""
-    return {"public_source": public_source_boundary.status(), "database": database_executor_boundary.status()}
+    return {
+        "public_source": public_source_boundary.status(),
+        "database_fast": database_fast_boundary.status(),
+        "database_batch": database_batch_boundary.status(),
+        # Backward-compatible alias for existing dashboards/health payload
+        # consumers that read a single "database" watermark.
+        "database": database_fast_boundary.status(),
+    }
 
 
-def shutdown_runtime_executors() -> None:
-    """Stop accepting new work during application shutdown without blocking it."""
+def shutdown_runtime_executors(*, wait_for_inflight_seconds: float = 5.0) -> None:
+    """Stop accepting new work, then briefly wait for in-flight DB work.
+
+    ``wait=False`` returns immediately so shutdown is never blocked
+    indefinitely by a slow query, but closing the database connections out
+    from under a still-running worker thread would surface as a confusing
+    driver error instead of a clean cancellation. Waiting a few seconds for
+    genuinely in-flight work to finish first is a pragmatic middle ground.
+    """
     public_source_executor.shutdown(wait=False, cancel_futures=True)
-    database_executor.shutdown(wait=False, cancel_futures=True)
+    database_fast_executor.shutdown(wait=False, cancel_futures=True)
+    database_batch_executor.shutdown(wait=False, cancel_futures=True)
+    if wait_for_inflight_seconds <= 0:
+        return
+    deadline = time.monotonic() + wait_for_inflight_seconds
+    boundaries = (public_source_boundary, database_fast_boundary, database_batch_boundary)
+    while time.monotonic() < deadline:
+        if all(boundary.status()["occupied"] == 0 for boundary in boundaries):
+            return
+        time.sleep(0.05)
 
 
 __all__ = [
@@ -176,7 +268,11 @@ __all__ = [
     "bounded_queue_size",
     "BlockingExecutorBoundary",
     "database_executor_workers",
+    "database_fast_executor_workers",
+    "database_batch_executor_workers",
+    "DB_FAST_LANE_MAX_TIMEOUT_SECONDS",
     "ExecutorSaturatedError",
+    "resolve_database_lane",
     "runtime_executor_status",
     "run_akshare_blocking",
     "run_database_blocking",

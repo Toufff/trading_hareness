@@ -8,6 +8,8 @@ import re
 
 from psycopg.types.json import Json
 
+from .daily_bar_batch_repository import upsert_daily_bars
+
 
 def normalize_rows(
     connection: Any, api_name: str, rows: list[dict[str, Any]], available_at: datetime,
@@ -23,6 +25,11 @@ def normalize_rows(
     if api_name not in core_apis:
         return 0
     normalized = 0
+    # ``daily``/``index_daily`` rows are the post-close full-market hot path
+    # (~5,500 symbols per call).  Their bars are parsed here as before but the
+    # actual persistence is deferred to one batched call after the loop
+    # instead of ``upsert_bar`` running its 5-6 statements per row.
+    pending_bars: list[Any] = []
     for row in rows:
         try:
             if api_name == "trade_cal":
@@ -69,7 +76,7 @@ def normalize_rows(
                     raise ValueError(f"{api_name} row needs ts_code and trade_date")
                 ensure_instrument(connection, symbol)
                 if api_name in {"daily", "index_daily"}:
-                    upsert_bar(connection, daily_bar_type(symbol=symbol, trading_date=trading_date, open=decimal_or_none(row.get("open")), high=decimal_or_none(row.get("high")), low=decimal_or_none(row.get("low")), close=decimal_or_none(row.get("close")), pre_close=decimal_or_none(row.get("pre_close")), volume=decimal_or_none(row.get("vol")), amount=decimal_or_none(row.get("amount")), source=provider_key, available_at=available_at))
+                    pending_bars.append(daily_bar_type(symbol=symbol, trading_date=trading_date, open=decimal_or_none(row.get("open")), high=decimal_or_none(row.get("high")), low=decimal_or_none(row.get("low")), close=decimal_or_none(row.get("close")), pre_close=decimal_or_none(row.get("pre_close")), volume=decimal_or_none(row.get("vol")), amount=decimal_or_none(row.get("amount")), source=provider_key, available_at=available_at))
                 elif api_name == "adj_factor":
                     adj_factor = decimal_or_none(row.get("adj_factor"))
                     if adj_factor is None:
@@ -90,6 +97,30 @@ def normalize_rows(
         except Exception as error:
             connection.execute("""INSERT INTO quant.data_quality_issues(capability,severity,code,message,details)
                    VALUES(%s,'warning','tushare_normalization_failed',%s,%s)""", (api_name, safe_error_detail(str(error), 500), Json({"row": row})))
+    if pending_bars:
+        # Each bar already incremented ``normalized`` above once it parsed
+        # successfully (matching every other branch's "parsed -> counted"
+        # contract); the persistence step below never increments it again on
+        # success, only decrements it for a bar that fails even the per-row
+        # fallback, so the two paths agree on the final count.
+        try:
+            upsert_daily_bars(connection, pending_bars)
+        except Exception:
+            # A batch-level failure (a genuine constraint violation, not a
+            # parse error -- those were already isolated above) degrades to
+            # the previous one-statement-set-per-bar path so one bad bar
+            # cannot silently drop the rest of a full-market cross-section.
+            for bar in pending_bars:
+                try:
+                    upsert_bar(connection, bar)
+                except Exception as bar_error:
+                    normalized -= 1
+                    connection.execute(
+                        """INSERT INTO quant.data_quality_issues(capability,severity,code,message,details)
+                               VALUES(%s,'warning','tushare_normalization_failed',%s,%s)""",
+                        (api_name, safe_error_detail(str(bar_error), 500),
+                         Json({"symbol": bar.symbol, "trading_date": str(bar.trading_date)})),
+                    )
     return normalized
 
 

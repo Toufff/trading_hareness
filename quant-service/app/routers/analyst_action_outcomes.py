@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import APIRouter
 
 from ..async_analyst_action_read_repository import anqiang_trade_action_outcomes as async_anqiang_trade_action_outcomes
+from ..runtime_executors import run_database_blocking
 
 
 def _status_sync(database: Any) -> dict[str, Any]:
@@ -39,9 +40,11 @@ def build_analyst_action_outcomes_router(
         return _status_sync(database)
 
     @router.post("/api/v1/analysts/anqiang/trade-action-outcomes/recompute")
-    def recompute() -> dict[str, Any]:
-        with database.transaction() as connection:
-            return materialize_fn(connection, cutoff_at=datetime.now(timezone.utc))
+    async def recompute() -> dict[str, Any]:
+        def run() -> dict[str, Any]:
+            with database.transaction() as connection:
+                return materialize_fn(connection, cutoff_at=datetime.now(timezone.utc))
+        return await run_database_blocking(run, timeout_seconds=3)
 
     return router
 

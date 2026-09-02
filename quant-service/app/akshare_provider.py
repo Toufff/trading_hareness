@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, time as dt_time
 from decimal import Decimal
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
+
+import requests
+
+from .market_rules import cn_today
+from .symbols import canonical_symbol
 
 
 class AkShareProviderError(RuntimeError):
@@ -28,6 +35,46 @@ def akshare_status() -> dict[str, str | bool]:
     return {"name": "akshare", "provider_key": "akshare", "label": f"AKShare {ak.__version__}", "configured": True, "protocol": "python_optional"}
 
 
+def akshare_default_http_timeout_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv("QUANT_AKSHARE_HTTP_TIMEOUT_SECONDS", "30")))
+    except ValueError:
+        return 30.0
+
+
+_requests_default_timeout_patched = False
+_requests_default_timeout_patch_lock = threading.Lock()
+
+
+def _ensure_requests_default_timeout() -> None:
+    """Give every AKShare-issued HTTP request a bounded timeout exactly once.
+
+    AKShare's underlying calls frequently omit ``timeout=``, which lets one
+    slow upstream host occupy a ``public_source`` bounded-executor worker
+    (``runtime_executors.py``) indefinitely: ``asyncio.wait_for`` cannot stop
+    a thread that has already started a blocking socket read. Patching the
+    shared ``requests.Session.request`` default is the smallest surface that
+    reaches every akshare call site without vendoring or forking it; a caller
+    that already passes an explicit ``timeout=`` (as this service's own
+    ``requests.Session`` users all do) is left untouched.
+    """
+    global _requests_default_timeout_patched
+    if _requests_default_timeout_patched:
+        return
+    with _requests_default_timeout_patch_lock:
+        if _requests_default_timeout_patched:
+            return
+        original_request = requests.Session.request
+
+        def request_with_default_timeout(self: requests.Session, method: str, url: str, *args: Any, **kwargs: Any) -> Any:
+            if kwargs.get("timeout") is None:
+                kwargs["timeout"] = akshare_default_http_timeout_seconds()
+            return original_request(self, method, url, *args, **kwargs)
+
+        requests.Session.request = request_with_default_timeout  # type: ignore[method-assign]
+        _requests_default_timeout_patched = True
+
+
 def _ak() -> Any:
     if not akshare_enabled():
         raise AkShareProviderError("AKShare connector is disabled")
@@ -35,6 +82,7 @@ def _ak() -> Any:
         import akshare as ak  # type: ignore
     except Exception as error:
         raise AkShareProviderError("AKShare is not installed") from error
+    _ensure_requests_default_timeout()
     return ak
 
 
@@ -102,19 +150,13 @@ def _market_symbol(symbol: str) -> str:
 
 
 def _symbol_from_code(code: Any) -> str | None:
-    text = str(code or "").strip().upper()
-    if text.startswith(("SH", "SZ", "BJ")):
-        prefix, code_text = text[:2], text[2:]
-        return f"{code_text}.{prefix}" if len(code_text) == 6 and code_text.isdigit() else None
-    if len(text) != 6 or not text.isdigit():
-        return None
-    if text.startswith("6"):
-        return f"{text}.SH"
-    if text.startswith(("0", "3")):
-        return f"{text}.SZ"
-    if text.startswith(("4", "8", "9")):
-        return f"{text}.BJ"
-    return None
+    """Resolve an Eastmoney/AKShare stock code, delegating to ``app.symbols``.
+
+    This used to route every "9"-leading bare code to the Beijing Stock
+    Exchange, which misclassified a Shanghai B-share (``900xxx``) the same
+    way a genuine BSE listing (``920xxx``) is classified.
+    """
+    return canonical_symbol(code, kind="stock")
 
 
 def _date_yyyymmdd(value: Any) -> str | None:
@@ -174,9 +216,20 @@ def _collect_public(specs: list[tuple[str, str, str, Callable[[Any], Any], int]]
     return rows
 
 
+def _post_close_published_at(trade_date: date) -> str:
+    """Return the earliest an Eastmoney limit-pool page is actually final.
+
+    These pools (limit-up/-down, previous-day, open, sub-new) are only
+    settled once the session closes; a naive ``datetime.min.time()``
+    (00:00) previously made a still-forming pool look "already known" at
+    market open.  15:30 Asia/Shanghai is a conservative post-close floor.
+    """
+    return datetime.combine(trade_date, dt_time(15, 30), tzinfo=ZoneInfo("Asia/Shanghai")).isoformat()
+
+
 def _pool_events(trade_date: date, specs: list[tuple[str, str, Callable[[Any], Any], str]]) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
-    published_at = datetime.combine(trade_date, datetime.min.time()).isoformat()
+    published_at = _post_close_published_at(trade_date)
     for ak_function, event_type, action, url in specs:
         try:
             raw_rows = _retry_call(ak_function, action, attempts=2)
@@ -191,6 +244,7 @@ def _pool_events(trade_date: date, specs: list[tuple[str, str, Callable[[Any], A
                 "ts_code": symbol,
                 "event_type": event_type,
                 "published_at": published_at,
+                "availability_basis": "post_close_publication",
                 "title": f"{event_type}：{name}",
                 "url": url,
                 "upstream_site": "eastmoney",
@@ -386,7 +440,7 @@ def akshare_corporate_risk_supplements(symbol: str, start_date: date, end_date: 
 
 def akshare_analyst_heat_supplements(symbol: str, year: int | None = None) -> list[dict[str, Any]]:
     code = _symbol_code(symbol)
-    rank_year = str(year or date.today().year)
+    rank_year = str(year or cn_today().year)
     return _collect_public([
         ("stock_analyst_rank_em", "eastmoney", "analyst_rank", lambda ak: ak.stock_analyst_rank_em(year=rank_year), 200),
         ("stock_profit_forecast_em", "eastmoney", "profit_forecast", lambda ak: ak.stock_profit_forecast_em(symbol=code), 200),
@@ -400,7 +454,7 @@ def akshare_analyst_heat_supplements(symbol: str, year: int | None = None) -> li
 
 
 def akshare_index_fund_supplements() -> list[dict[str, Any]]:
-    current_year = str(date.today().year)
+    current_year = str(cn_today().year)
     return _collect_public([
         ("index_csindex_all", "csindex", "csindex_directory", lambda ak: ak.index_csindex_all(), 300),
         ("index_stock_cons", "sina", "index_cons_000300", lambda ak: ak.index_stock_cons(symbol="000300"), 300),
@@ -457,7 +511,7 @@ def akshare_lhb_events(start_date: date, end_date: date) -> list[dict[str, Any]]
 def akshare_strong_pool_events(trade_date: date) -> list[dict[str, Any]]:
     raw_rows = _retry_call("stock_zt_pool_strong_em", lambda ak: ak.stock_zt_pool_strong_em(date=trade_date.strftime("%Y%m%d")), attempts=2)
     events: list[dict[str, Any]] = []
-    published_at = datetime.combine(trade_date, datetime.min.time()).isoformat()
+    published_at = _post_close_published_at(trade_date)
     for row in raw_rows:
         symbol = _symbol_from_code(row.get("代码"))
         if not symbol:
@@ -467,6 +521,7 @@ def akshare_strong_pool_events(trade_date: date) -> list[dict[str, Any]]:
             "ts_code": symbol,
             "event_type": "strong_pool",
             "published_at": published_at,
+            "availability_basis": "post_close_publication",
             "title": title,
             "url": "https://quote.eastmoney.com/ztb/detail#type=qsgc",
             "upstream_site": "eastmoney",

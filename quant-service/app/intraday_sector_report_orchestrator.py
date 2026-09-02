@@ -21,11 +21,13 @@ async def run(
     safe_error: Callable[[str, int], str],
     executor_saturated_error: type[Exception],
     provider_error: type[Exception],
+    flow_timeout_seconds: float = 20.0,
+    hydration_timeout_seconds: float = 20.0,
 ) -> dict[str, Any]:
     kinds = ("concept", "industry") if request.kind == "all" else (request.kind,)
     try:
         collected = await asyncio.gather(
-            *(run_public_blocking(board_flow, kind, timeout_seconds=20) for kind in kinds),
+            *(run_public_blocking(board_flow, kind, timeout_seconds=flow_timeout_seconds) for kind in kinds),
             all_a_snapshot(),
         )
         *flow_parts, all_a_result = collected
@@ -34,7 +36,7 @@ async def run(
         return {"status": "blocked", "reason": safe_error(str(error), 300),
                 "sources": {"eastmoney": "not_started", "fuyao": "not_started"}}
     except asyncio.TimeoutError:
-        return {"status": "blocked", "reason": "Eastmoney/Fuyao live request exceeded 20 second budget",
+        return {"status": "blocked", "reason": f"Eastmoney/Fuyao live request exceeded {flow_timeout_seconds:g} second budget",
                 "sources": {"eastmoney": "attempted", "fuyao": "attempted"}}
     except (provider_error, ValueError) as error:
         return {"status": "blocked", "reason": safe_error(str(error), 500),
@@ -53,11 +55,11 @@ async def run(
         async def hydrate(kind: str, flows: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]], dict[str, str]]:
             try:
                 rows = await asyncio.wait_for(
-                    hydrate_members(kind, flows, request.hydrate_top_boards), timeout=20,
+                    hydrate_members(kind, flows, request.hydrate_top_boards), timeout=hydration_timeout_seconds,
                 )
                 return kind, rows, {"status": "completed"}
             except asyncio.TimeoutError:
-                return kind, [], {"status": "blocked", "reason": "member hydration exceeded 20 second budget"}
+                return kind, [], {"status": "blocked", "reason": f"member hydration exceeded {hydration_timeout_seconds:g} second budget"}
             except (executor_saturated_error, provider_error, ValueError) as error:
                 return kind, [], {"status": "blocked", "reason": safe_error(str(error), 300)}
 

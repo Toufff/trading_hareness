@@ -42,14 +42,36 @@ def upgrade() -> None:
     """)
     op.execute("ALTER TABLE quant.analyst_evidence ALTER COLUMN remote_report_id DROP NOT NULL")
     op.execute("ALTER TABLE quant.analyst_evidence ADD COLUMN IF NOT EXISTS remote_message_id text REFERENCES quant.remote_analyst_messages(remote_message_id) ON DELETE CASCADE")
-    op.execute("ALTER TABLE quant.analyst_evidence ADD CONSTRAINT analyst_evidence_source_check CHECK ((remote_report_id IS NOT NULL)::integer + (remote_message_id IS NOT NULL)::integer = 1) NOT VALID")
-    op.execute("ALTER TABLE quant.analyst_evidence VALIDATE CONSTRAINT analyst_evidence_source_check")
+    # ``ADD CONSTRAINT ... NOT VALID`` immediately followed by ``VALIDATE`` in
+    # the same migration transaction buys nothing: the ACCESS EXCLUSIVE lock
+    # from ``ADD`` is held until commit anyway, so the validation scan already
+    # runs under the strongest lock.  A plain validated ``ADD CONSTRAINT`` is
+    # equivalent and one statement shorter.  Guard it so a partially applied
+    # database (constraint already present) can re-run this revision.
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                            WHERE conname='analyst_evidence_source_check'
+                              AND conrelid='quant.analyst_evidence'::regclass) THEN
+                ALTER TABLE quant.analyst_evidence ADD CONSTRAINT analyst_evidence_source_check
+                    CHECK ((remote_report_id IS NOT NULL)::integer + (remote_message_id IS NOT NULL)::integer = 1);
+            END IF;
+        END $$
+    """)
     op.execute("CREATE INDEX IF NOT EXISTS analyst_evidence_message_idx ON quant.analyst_evidence(remote_message_id)")
     op.execute("CREATE UNIQUE INDEX IF NOT EXISTS analyst_evidence_message_unique_idx ON quant.analyst_evidence(remote_message_id,evidence_key,content_sha256) WHERE remote_message_id IS NOT NULL")
     op.execute("ALTER TABLE quant.analyst_trade_actions ALTER COLUMN remote_report_id DROP NOT NULL")
     op.execute("ALTER TABLE quant.analyst_trade_actions ADD COLUMN IF NOT EXISTS remote_message_id text REFERENCES quant.remote_analyst_messages(remote_message_id) ON DELETE CASCADE")
-    op.execute("ALTER TABLE quant.analyst_trade_actions ADD CONSTRAINT analyst_trade_actions_source_check CHECK ((remote_report_id IS NOT NULL)::integer + (remote_message_id IS NOT NULL)::integer = 1) NOT VALID")
-    op.execute("ALTER TABLE quant.analyst_trade_actions VALIDATE CONSTRAINT analyst_trade_actions_source_check")
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                            WHERE conname='analyst_trade_actions_source_check'
+                              AND conrelid='quant.analyst_trade_actions'::regclass) THEN
+                ALTER TABLE quant.analyst_trade_actions ADD CONSTRAINT analyst_trade_actions_source_check
+                    CHECK ((remote_report_id IS NOT NULL)::integer + (remote_message_id IS NOT NULL)::integer = 1);
+            END IF;
+        END $$
+    """)
     op.execute("CREATE UNIQUE INDEX IF NOT EXISTS analyst_trade_actions_message_unique_idx ON quant.analyst_trade_actions(remote_message_id,content_sha256) WHERE remote_message_id IS NOT NULL")
 
 

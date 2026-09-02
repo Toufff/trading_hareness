@@ -38,10 +38,26 @@ runtime configuration and ownership, not a long-lived server branch: releases
 publish a Git SHA and image/source provenance through the loopback health
 endpoints, while secret environment files remain outside version control.
 
-`quant-service/app/main.py` is the composition root.  It owns application
-lifespan, dependency assembly and router registration.  New behaviour belongs
-in a focused module, then is injected from `main.py`; production modules must
-not import `app.main`.
+`quant-service/app/main.py` is the composition root by design: it owns
+application lifespan, dependency assembly and router registration. As of the
+2026-09 audit it is also, in practice, a large historical compatibility
+surface — roughly 1,500 lines of business logic and direct SQL that predate
+the current router/repository split (a full strategy orchestration, ad hoc
+`INSERT`/`UPDATE` statements, an unbounded signal-attribution loop, two
+`while True` polling loops), plus 16 `*_legacy` aliases and about 110
+"compatibility" forwarding functions with no remaining production caller.
+This is a known, being-unwound state, not the intended architecture: each of
+those blocks is slated to move into its already-existing counterpart module
+(for example the xiaojie leader-flow runtime, the daily control plane, the
+intraday watchlist service, intraday replay). **New behaviour must never be
+added here** — it belongs in a focused module, then is injected from
+`main.py`; production modules must not import `app.main`.
+
+Every rule in the table below is enforced by a test, not just documented —
+see "Architecture guard tests" in `AGENTS.md` for the current list
+(`tests/test_router_composition.py`, `tests/test_migration_contracts.py`,
+`tests/test_async_database_boundaries.py`). Adding a new architectural rule
+without an accompanying test is incomplete.
 
 ## Ownership boundaries
 

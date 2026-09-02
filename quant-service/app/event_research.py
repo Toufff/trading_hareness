@@ -14,8 +14,8 @@ registries this codebase already requires before anything can go live.
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
 from typing import Any
+from .market_rules import LIMIT_TOLERANCE, is_at_limit
 from .sector_membership_repository import point_in_time_membership_predicate
 
 from psycopg.types.json import Json
@@ -43,7 +43,7 @@ def _round(value: Any, digits: int = 4) -> float | None:
 def research_limit_up_continuation(connection: Any, start_date: date, end_date: date) -> dict[str, Any]:
     """Next-session behavior after a limit-up close, split by first-board vs repeat and by whether the next open is fillable."""
     rows = connection.execute(
-        """WITH all_bars AS (
+        f"""WITH all_bars AS (
                 -- lag() must see every prior trading day (including ones with no
                 -- limit_up value) or "previous day was also limit-up" silently
                 -- compares against the previous *limit-up-eligible* day instead
@@ -55,10 +55,10 @@ def research_limit_up_continuation(connection: Any, start_date: date, end_date: 
                 WHERE trading_date BETWEEN %s::date - 10 AND %s
              ), hits AS (
                 SELECT symbol,trading_date,close,limit_up,
-                  prev_close IS NOT NULL AND prev_limit_up IS NOT NULL AND prev_close>=prev_limit_up*0.999 AS prev_was_limit_up
+                  prev_close IS NOT NULL AND prev_limit_up IS NOT NULL AND prev_close>=prev_limit_up-{LIMIT_TOLERANCE} AS prev_was_limit_up
                 FROM all_bars
                 WHERE trading_date BETWEEN %s AND %s AND limit_up IS NOT NULL AND NOT is_suspended
-                  AND close>=limit_up*0.999
+                  AND close>=limit_up-{LIMIT_TOLERANCE}
              ), next_session AS (
                 SELECT h.symbol,h.trading_date,h.prev_was_limit_up,n.open,n.close nx_close,n.pre_close,n.limit_up nx_limit_up,n.is_suspended
                   FROM hits h
@@ -69,11 +69,11 @@ def research_limit_up_continuation(connection: Any, start_date: date, end_date: 
                  WHERE n.open>0 AND n.pre_close>0
              )
              SELECT prev_was_limit_up, count(*) n,
-               avg((open>=nx_limit_up*0.999)::int) pct_open_locked,
+               avg((open>=nx_limit_up-{LIMIT_TOLERANCE})::int) pct_open_locked,
                avg(open/pre_close-1) avg_open_gap,
-               avg(nx_close/open-1) FILTER (WHERE open<nx_limit_up*0.999) avg_open_to_close,
-               avg((nx_close>open)::int) FILTER (WHERE open<nx_limit_up*0.999) hit_open_to_close,
-               avg((nx_close>=nx_limit_up*0.999)::int) pct_re_limit
+               avg(nx_close/open-1) FILTER (WHERE open<nx_limit_up-{LIMIT_TOLERANCE}) avg_open_to_close,
+               avg((nx_close>open)::int) FILTER (WHERE open<nx_limit_up-{LIMIT_TOLERANCE}) hit_open_to_close,
+               avg((nx_close>=nx_limit_up-{LIMIT_TOLERANCE})::int) pct_re_limit
              FROM next_session GROUP BY prev_was_limit_up""",
         (start_date, end_date, start_date, end_date),
     ).fetchall()
@@ -102,7 +102,7 @@ def research_daily_volume_surge(connection: Any, start_date: date, end_date: dat
     horizon_metrics: dict[str, Any] = {}
     for horizon in horizons:
         rows = connection.execute(
-            """WITH signal AS (
+            f"""WITH signal AS (
                 SELECT f.symbol,f.trading_date
                   FROM quant.daily_fundamentals f
                  WHERE f.trading_date BETWEEN %s AND %s AND f.volume_ratio>=2.5 AND f.turnover_rate>=5.0
@@ -121,7 +121,7 @@ def research_daily_volume_surge(connection: Any, start_date: date, end_date: dat
                     SELECT close FROM quant.canonical_bars_daily b WHERE b.symbol=en.symbol AND b.trading_date>=en.entry_date
                      ORDER BY b.trading_date OFFSET %s LIMIT 1
                   ) x ON true
-                 WHERE NOT en.entry_is_suspended AND (en.entry_limit_up IS NULL OR en.entry_price<en.entry_limit_up*0.999)
+                 WHERE NOT en.entry_is_suspended AND (en.entry_limit_up IS NULL OR en.entry_price<en.entry_limit_up-{LIMIT_TOLERANCE})
              )
              SELECT count(*) n, avg(exit_close/entry_price-1) avg_return, avg((exit_close>entry_price)::int) hit_rate
                FROM exited""",
@@ -218,7 +218,7 @@ def research_sector_flow_reversal_stock_level(connection: Any, start_date: date,
                     SELECT close FROM quant.canonical_bars_daily b WHERE b.symbol=en.symbol AND b.trading_date>=en.entry_date
                      ORDER BY b.trading_date OFFSET %s LIMIT 1
                   ) x ON true
-                 WHERE NOT en.entry_is_suspended AND (en.entry_limit_up IS NULL OR en.entry_price<en.entry_limit_up*0.999)
+                 WHERE NOT en.entry_is_suspended AND (en.entry_limit_up IS NULL OR en.entry_price<en.entry_limit_up-{LIMIT_TOLERANCE})
              )
              SELECT transition, count(*) n, count(DISTINCT symbol) symbols, count(DISTINCT trading_date) event_days,
                avg(exit_close/entry_price-1) avg_return, avg((exit_close>entry_price)::int) hit_rate
@@ -328,7 +328,7 @@ def research_post_close_backtest(connection: Any, start_date: date, end_date: da
                 exit_row = exit_rows_by_symbol.get(symbol)
                 if entry is None or exit_row is None or entry["is_suspended"]:
                     continue
-                if entry["limit_up"] and float(entry["open"]) >= float(entry["limit_up"]) * 0.999:
+                if entry["limit_up"] and is_at_limit(float(entry["open"]), float(entry["limit_up"])):
                     continue
                 candidate_return = float(exit_row["close"]) / float(entry["open"]) - 1
                 for candidate_type in candidate_types:

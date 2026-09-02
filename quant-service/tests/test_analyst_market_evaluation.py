@@ -75,6 +75,49 @@ class AnalystMarketEvaluationTests(unittest.TestCase):
         self.assertEqual(cohort["unavailable_outcomes"], 1)
         self.assertEqual(result["horizon_matrix"][0]["horizon_days"], 5)
 
+    def test_thirty_sample_gate_dedupes_opinions_across_horizons(self):
+        """4 opinions x 8 horizons = 32 outcome rows must gate as 4 samples, not 32."""
+        outcomes = [
+            {"remote_analyst_id": "a", "opinion_id": f"o{opinion_index}", "opinion_date": date(2026, 8, 18),
+             "scope": "stock", "subject_key": f"00000{opinion_index}.SZ", "status": "matured",
+             "directional_return": 0.01, "horizon_days": horizon}
+            for opinion_index in range(4) for horizon in (1, 2, 3, 5, 10, 20, 40, 60)
+        ]
+        result = summarize_evaluation(
+            observations=[{"analyst_id": "a", "scope": "stock", "status": "eligible", "direction": 1} for _ in range(30)],
+            opinions=[{"remote_analyst_id": "a", "opinion_date": date(2026, 8, 18), "scope": "stock", "direction": 1} for _ in range(30)],
+            outcomes=outcomes, intraday_outcomes=[],
+            market_days=[{"exchange_date": date(2026, 8, 18), "market_state": "flow_expansion"}],
+            sector_days=[], start_date=date(2026, 8, 18), end_date=date(2026, 8, 18),
+        )
+        analyst = result["analysts"][0]
+        self.assertEqual(analyst["matured_outcomes"], 32, "raw outcome row count is unaffected")
+        self.assertEqual(analyst["matured_independent_events"], 4, "gate counts distinct opinion_ids, not outcome rows")
+        self.assertFalse(analyst["mature"], "4 independent events must not clear the 30-sample gate")
+
+    def test_calibration_is_grouped_by_horizon_and_excludes_duplicate_opinions(self):
+        outcomes = [
+            {"remote_analyst_id": "a", "opinion_id": "o1", "opinion_date": date(2026, 8, 18), "scope": "stock",
+             "subject_key": "000001.SZ", "status": "matured", "directional_return": 0.02, "horizon_days": 1,
+             "exit_date": date(2026, 8, 19), "score": 0.5},
+            {"remote_analyst_id": "a", "opinion_id": "o1", "opinion_date": date(2026, 8, 18), "scope": "stock",
+             "subject_key": "000001.SZ", "status": "matured", "directional_return": 0.05, "horizon_days": 5,
+             "exit_date": date(2026, 8, 25), "score": 0.5},
+        ]
+        result = summarize_evaluation(
+            observations=[], opinions=[], outcomes=outcomes, intraday_outcomes=[],
+            market_days=[{"exchange_date": date(2026, 8, 18), "market_state": "flow_expansion"}],
+            sector_days=[], start_date=date(2026, 8, 18), end_date=date(2026, 8, 18),
+        )
+        self.assertIn("1", result["calibration_by_horizon"])
+        self.assertIn("5", result["calibration_by_horizon"])
+        # Each horizon's calibration input has exactly this opinion once, not
+        # blended with the other horizon's copy of the same opinion.
+        self.assertEqual(result["calibration_by_horizon"]["1"]["events"], 1)
+        self.assertEqual(result["calibration_by_horizon"]["5"]["events"], 1)
+        # The primary (backward-compatible) "calibration" key prefers horizon 5.
+        self.assertEqual(result["calibration"], result["calibration_by_horizon"]["5"])
+
     def test_mature_intraday_outcome_is_manual_evidence_and_counts_once_per_event(self):
         result = summarize_evaluation(
             observations=[{"analyst_id": "a", "scope": "stock", "status": "eligible", "direction": 1}],

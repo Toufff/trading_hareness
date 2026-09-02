@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Final, Literal
 
+from .market_rules import cn_today
+
 
 PermissionModel = Literal["points", "separate_permission", "provider_contract", "offline_delivery"]
 RequestPolicy = Literal["online_bounded", "market_hours_only", "offline_files_only"]
@@ -392,7 +394,7 @@ def default_probe_params(api_name: str, *, symbol: str = "000636.SZ", as_of: dat
     profile = spec.probe_profile if spec is not None else SUPPLIER_PROBE_PROFILES.get(api_name, "manual")
     if profile == "manual":
         return None
-    effective_date = previous_weekday(as_of or date.today())
+    effective_date = previous_weekday(as_of or cn_today())
     end_date = effective_date.strftime("%Y%m%d")
     start_date = (effective_date - timedelta(days=7)).strftime("%Y%m%d")
     future = futures_symbol or default_futures_symbol(effective_date)

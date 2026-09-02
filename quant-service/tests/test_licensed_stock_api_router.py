@@ -64,6 +64,21 @@ def test_call_forwards_arbitrary_documented_action_and_batch_contract():
     assert calls[0]["batch"]["values"] == ["600000", "600001"]
 
 
+def test_batch_values_over_300_is_rejected_before_reaching_the_provider():
+    http, calls = client()
+    response = http.post(
+        "/licensed/stock-api/call",
+        headers={"X-Quant-Read-Key": "peer-key"},
+        json={
+            "target": "longhu_history",
+            "params": {"a": "GGList_JGCC", "c": "ZhuLiChiCang"},
+            "batch": {"param": "StockIDs", "values": [f"{index:06d}" for index in range(301)]},
+        },
+    )
+    assert response.status_code == 422
+    assert calls == []
+
+
 def test_disabled_provider_is_explicit_service_failure():
     http, _ = client(enabled=False)
     response = http.get(
@@ -91,4 +106,21 @@ def test_post_read_exception_is_narrow_and_requires_the_read_key():
     )
     assert not licensed_stock_read_allowed(
         request("/api/v1/bootstrap", "peer-key"), "peer-key",
+    )
+
+
+def test_licensed_read_rejects_non_ascii_keys_instead_of_raising():
+    # ``secrets.compare_digest`` raises TypeError on non-ASCII str
+    # arguments, which used to surface as an unhandled 500 instead of a
+    # normal rejection.  Starlette decodes header bytes as latin-1, so use
+    # accented characters in that range to round-trip exactly.
+    def request(path: str, key: str | None) -> Request:
+        headers = [] if key is None else [(b"x-quant-read-key", key.encode("latin-1"))]
+        return Request({"type": "http", "method": "POST", "path": path, "headers": headers})
+
+    assert not licensed_stock_read_allowed(
+        request("/licensed/stock-api/call", "clé-erronée"), "clé-secrète",
+    )
+    assert licensed_stock_read_allowed(
+        request("/licensed/stock-api/call", "clé-secrète"), "clé-secrète",
     )

@@ -8,7 +8,9 @@ from unittest.mock import MagicMock
 from fastapi import HTTPException
 
 from app.research_maintenance_service import (
+    STALE_AUTOMATION_RUN_AGE,
     ResearchMaintenanceDependencies,
+    reconcile_stale_automation_runs,
     reconcile_stale_fetch_runs,
     update_analyst_profile,
     update_universe_members,
@@ -92,3 +94,51 @@ class ResearchMaintenanceServiceTests(unittest.TestCase):
         self.assertEqual(result["matched"], 1)
         self.assertEqual(len(statements), 1)
         self.assertIn("status='running'", statements[0][0])
+
+    def test_reconcile_stale_automation_runs_fails_orphaned_running_rows(self) -> None:
+        """WP6 reaper: a SIGKILLed process's automation_runs row never clears."""
+        statements = []
+
+        def execute(sql, params=()):
+            statements.append((str(sql), params))
+            if str(sql).lstrip().startswith("SELECT"):
+                return MagicMock(fetchall=MagicMock(return_value=[
+                    {"run_id": "r1", "task_key": "post_close_strategy", "run_key": "post-close-strategy:2026-08-20",
+                     "status": "running", "started_at": None, "updated_at": None},
+                ]))
+            return MagicMock()
+
+        database = MagicMock()
+        database.transaction.return_value = _Transaction(execute)
+
+        result = reconcile_stale_automation_runs(_deps(database))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(len(statements), 2)
+        select_sql, select_params = statements[0]
+        update_sql, update_params = statements[1]
+        self.assertIn("status='running'", select_sql)
+        self.assertIn("updated_at<%s", select_sql)
+        self.assertIn("SET status='failed'", update_sql)
+        self.assertIn("error_class='stale_running_reconciled'", update_sql)
+        self.assertEqual(select_params[0], update_params[0])
+
+    def test_reconcile_stale_automation_runs_skips_the_update_when_nothing_matches(self) -> None:
+        statements = []
+
+        def execute(sql, params=()):
+            statements.append((str(sql), params))
+            return MagicMock(fetchall=MagicMock(return_value=[]))
+
+        database = MagicMock()
+        database.transaction.return_value = _Transaction(execute)
+
+        result = reconcile_stale_automation_runs(_deps(database))
+
+        self.assertEqual(result["matched"], 0)
+        # Only the SELECT ran; no UPDATE was issued for zero matches.
+        self.assertEqual(len(statements), 1)
+
+    def test_reconcile_stale_automation_runs_uses_a_two_hour_cutoff(self) -> None:
+        self.assertEqual(STALE_AUTOMATION_RUN_AGE.total_seconds(), 2 * 3600)

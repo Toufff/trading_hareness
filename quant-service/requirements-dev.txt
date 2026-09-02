@@ -1,0 +1,5 @@
+# Development / CI-only tools.  Runtime dependencies live in requirements.txt;
+# the pinned resolution of both is requirements.lock.
+-r requirements.txt
+pytest==9.1.1
+ruff==0.16.5

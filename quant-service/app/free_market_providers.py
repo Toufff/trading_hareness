@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 import os
 import re
 from typing import Any
@@ -16,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from .daily_bar_repository import yuan_to_thousand_yuan
 from .http_clients import public_http_client
 from .http_retry import retry_delay_seconds
 from .network_health import network_state
@@ -181,8 +183,17 @@ async def eastmoney_daily(symbol: str, start: str, end: str) -> list[dict[str, A
         values = str(line).split(",")
         if len(values) < 7:
             continue
+        # Eastmoney's kline volume (f56) is already in lots, matching the
+        # canonical convention, but its amount (f57) is in yuan; convert it
+        # to thousand yuan here so the guard in daily_bar_repository does not
+        # have to special-case this provider.
+        try:
+            amount = yuan_to_thousand_yuan(Decimal(values[6])) if values[6] not in (None, "", "-") else None
+        except InvalidOperation:
+            amount = None
         rows.append({"ts_code": symbol, "trade_date": values[0].replace("-", ""), "open": values[1], "close": values[2],
-                     "high": values[3], "low": values[4], "vol": values[5], "amount": values[6], "pct_chg": values[8] if len(values) > 8 else None})
+                     "high": values[3], "low": values[4], "vol": values[5], "amount": str(amount) if amount is not None else None,
+                     "pct_chg": values[8] if len(values) > 8 else None})
     return rows
 
 
@@ -379,12 +390,17 @@ async def tencent_intraday_minutes(symbol: str) -> list[dict[str, Any]]:
             price, cumulative_volume, cumulative_amount = float(parts[1]), int(parts[2]), float(parts[3])
         except ValueError:
             continue
-        if amount_scale is None:
+        # A pre-open or zero-volume opening minute has no informative
+        # cumulative_amount/volume ratio; locking the day's scale onto that
+        # row (rather than waiting for the first row that actually traded)
+        # previously defaulted every later minute to 1.0 and could put the
+        # whole day's VWAP 100x off once real volume began.
+        if amount_scale is None and cumulative_volume > 0:
             amount_scale = tencent_minute_amount_scale(
                 price=price, cumulative_volume_lot=cumulative_volume,
                 cumulative_amount=cumulative_amount,
             )
-        normalized_amount = cumulative_amount * amount_scale
+        normalized_amount = cumulative_amount * (amount_scale or 1.0)
         # Tencent occasionally begins a new cumulative segment after the
         # midday break.  It is not valid to manufacture a negative minute;
         # reset the delta origin and label the boundary so downstream returns

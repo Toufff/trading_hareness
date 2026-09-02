@@ -115,24 +115,37 @@ def persist_full_market_close(
         connection, "all_a", trade_date, symbols, source=PROVIDER_KEY, priority=20,
     )
     flow_count = persist_flow_rows(connection, merged.flow_rows, PROVIDER_KEY, observed_at)
-    quote_count = 0
     fetch_run = connection.execute(
         "SELECT fetch_run_id FROM quant.fetch_runs WHERE request_key=%s", (request_key,),
     ).fetchone()
     fetch_run_id = fetch_run["fetch_run_id"] if fetch_run else None
-    for quote in merged.quote_rows:
-        serialized = json.dumps(quote, ensure_ascii=False, sort_keys=True, default=str)
+    quote_count = len(merged.quote_rows)
+    if merged.quote_rows:
+        # One set-based upsert instead of one INSERT per quote row (a full
+        # close cross-section is one row per A-share symbol, ~5,500 rows).
+        # Deduplicated by (symbol, payload_sha256), last one wins, because
+        # PostgreSQL rejects an ON CONFLICT DO UPDATE that would affect the
+        # same target row twice within a single statement.
+        deduplicated: dict[tuple[str, str], str] = {}
+        for quote in merged.quote_rows:
+            serialized = json.dumps(quote, ensure_ascii=False, sort_keys=True, default=str)
+            content_sha256 = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+            deduplicated[(quote["ts_code"], content_sha256)] = serialized
+        symbols = [key[0] for key in deduplicated]
+        shas = [key[1] for key in deduplicated]
+        payloads = list(deduplicated.values())
         connection.execute(
             """INSERT INTO quant.raw_market_observations(
                    provider_key,capability,market,symbol,effective_at,available_at,
                    availability_basis,payload_sha256,normalized,payload,fetch_run_id)
-               VALUES(%s,'realtime_quote','cn',%s,%s,%s,'post_close_vendor_plus_public_crosscheck',%s,%s,%s,%s)
+               SELECT %(provider)s,'realtime_quote','cn',t.symbol,%(observed_at)s,%(observed_at)s,
+                      'post_close_vendor_plus_public_crosscheck',t.sha,t.payload_json::jsonb,t.payload_json::jsonb,%(fetch_run_id)s
+                 FROM unnest(%(symbols)s::text[],%(shas)s::text[],%(payloads)s::text[]) AS t(symbol,sha,payload_json)
                ON CONFLICT(provider_key,capability,market,symbol,effective_at,payload_sha256)
                DO UPDATE SET available_at=EXCLUDED.available_at,fetch_run_id=EXCLUDED.fetch_run_id""",
-            (PROVIDER_KEY, quote["ts_code"], observed_at, observed_at,
-             hashlib.sha256(serialized.encode("utf-8")).hexdigest(), Json(quote), Json(quote), fetch_run_id),
+            {"provider": PROVIDER_KEY, "observed_at": observed_at, "fetch_run_id": fetch_run_id,
+             "symbols": symbols, "shas": shas, "payloads": payloads},
         )
-        quote_count += 1
     usable_boards = [row for row in board_rows if row.get("net_inflow") is not None]
     inflow = sorted(usable_boards, key=lambda row: float(row["net_inflow"]), reverse=True)[:10]
     outflow = sorted(usable_boards, key=lambda row: float(row["net_inflow"]))[:10]

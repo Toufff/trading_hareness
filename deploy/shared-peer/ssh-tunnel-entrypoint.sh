@@ -20,6 +20,6 @@ exec ssh -NT \
   -o UserKnownHostsFile=/run/secrets/known_hosts \
   -i /tmp/peer_ssh_key \
   -p "${PEER_SSH_PORT}" \
-  -L "0.0.0.0:5432:127.0.0.1:${REMOTE_DB_PORT}" \
-  -L "0.0.0.0:5681:127.0.0.1:${REMOTE_API_PORT}" \
+  -L "127.0.0.1:5432:127.0.0.1:${REMOTE_DB_PORT}" \
+  -L "127.0.0.1:5681:127.0.0.1:${REMOTE_API_PORT}" \
   "${PEER_SSH_USER}@${PEER_SSH_HOST}"

@@ -1,4 +1,5 @@
 import type { ComputedRef, InjectionKey, Ref } from 'vue';
+import type { useDashboardWorkspace } from './composables/useDashboardWorkspace';
 import type { useFeishuRelayWorkspace } from './composables/useFeishuRelayWorkspace';
 
 /**
@@ -9,7 +10,7 @@ import type { useFeishuRelayWorkspace } from './composables/useFeishuRelayWorksp
  * mutations; a later slice can narrow a view to typed props without changing
  * its route or rendering contract.
  */
-export type DashboardContext = Record<string, unknown>;
+export type DashboardContext = ReturnType<typeof useDashboardWorkspace>;
 
 export const dashboardContextKey: InjectionKey<DashboardContext> = Symbol('quant-dashboard-context');
 

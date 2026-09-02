@@ -6,10 +6,17 @@ param(
     [int]$RemoteDatabasePort = 15432,
     [int]$RemoteApiPort = 15681,
     [int]$LocalDatabasePort = 55432,
-    [int]$LocalApiPort = 5681
+    [int]$LocalApiPort = 5681,
+    # Interactive logon requires an active console session and, even with
+    # -WindowStyle Hidden, briefly flashes a conhost window per launch/restart.
+    # S4U runs without a logged-on session and without flashing anything; pass
+    # -LogonType Interactive only if S4U cannot be granted "Log on as a batch
+    # job" on this host.
+    [ValidateSet('S4U', 'Interactive')][string]$LogonType = 'S4U'
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 $resolved = (Resolve-Path -LiteralPath $ScriptPath).Path
 $repository = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $resolved) '..\..')).TrimEnd('\')
 Import-Module (Join-Path $repository 'scripts\windows\runtime-observability.psm1') -Force
@@ -42,7 +49,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartCount 999 `
     -RestartInterval (New-TimeSpan -Minutes 1) `
     -MultipleInstances IgnoreNew
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType $LogonType -RunLevel Limited
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
     -Settings $settings -Principal $principal -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName

@@ -2,6 +2,59 @@
 
 状态：`research_only`。本模块生成可审计的提醒与情景卡，不连接券商、不提交订单。
 
+## 2026-09-02 方法修订
+
+本次审计整改（WP4 数据正确性/点时边界修复、WP5 统计有效性与结算修复）对本闭环依赖的底层事件可得性、
+入场/结算口径和多重比较统计做了以下修订。**修订前生成的 replay/命中率/回测数字不可与修订后的数字直接
+比较——两者度量的不是同一件事，需要对受影响的历史区间重新跑一遍相应的结算/评测函数才能得到可比数字**
+（见下方"需要重算"）。
+
+- **涨停池/龙虎榜等事件的可得时刻改为盘后**：`akshare_provider.py` 的涨停/跌停/曾涨停/开板/次新池
+  (`_pool_events`) 与强势股池 (`akshare_strong_pool_events`) 事件，`available_at`/`published_at` 不再
+  隐式等同于抓取时刻，而是显式取 `datetime.combine(trade_date, time(15,30), Asia/Shanghai)`
+  （新函数 `_post_close_published_at`），并标注 `availability_basis="post_close_publication"`。此前把
+  这类事件当作盘中可得会造成前视（look-ahead）：任何用这些事件驱动的盘中信号，在修订前的历史区间都可能
+  用到了"未来"才公开的池子归属。
+- **未收盘的日线 K 线不再进入 canonical 表**：`public_market_repository.py::persist_free_daily` 新增
+  守卫——只有 `trading_date>=cn_today(available_at)` 且当日已收盘（Asia/Shanghai `>=15:05`，
+  `market_rules.cn_today` 保证不受容器 UTC 时区影响）的行才会写入；被拒的行计数并各写一条
+  `data_quality_issues`（`code=unsettled_session_daily_row`）而不是静默丢弃或静默接受。修订前，盘中抓取
+  的"当日"未收盘价格可能已经进入过 canonical 日线表，任何读取"当日"canonical bar 的下游（含分析师成绩
+  单、回测）在修订前的数据上都可能读到过一根后来又变化的、非最终收盘价的"当日线"。
+- **分析师成绩单改为 T+1 入场，并统一 horizon 出场口径**：`analyst_scorecards.py::recompute` 不再用
+  "报告日收盘价"作为入场价（那本身就要求当天收盘才知道报告成立，且和结算口径的 T+1 open 入场不一致），
+  改为复用 `outcome_recomputation` 的口径——入场取下一交易日开盘价，且过滤涨跌停锁定与停牌当天的入场；
+  出场统一交给 `outcome_recomputation.resolve_exit` 按交易日历解析。`methodology_version` 从
+  `excess-return-v1` 升级为 `excess-return-v2`。h=1（单日）horizon 此前会因为入场/出场都取同一天收盘价
+  而恒为零收益，现在不再是这样。
+- **退市/停牌样本纳入结算，不再静默排除或借用错误的价格**：`outcome_recomputation.resolve_exit` 按
+  `quant.market_trade_calendar` 解析出场交易日；若目标日期时该股已退市（`delist_date<=目标日期`），用
+  最后一根收盘价结算并标记 `tradability='delisted'`（计入分母，不再从统计里消失）；若目标日历日该股当天
+  确实无成交（非退市，即停牌缺口），保持未结算（`status='pending'`/`suspension_in_window'`），不会借用
+  停牌前后的价格伪造出一次结算。此前的实现有的会把这类样本静默剔除，有的会借用"该股自己下一根有数据的
+  bar"从而跨过很长的停牌窗口，两者都会系统性扭曲命中率。
+- **多重比较修正（DSR / Benjamini-Hochberg）接入真实调用方**：`factor_sql_lab.py` 现在从
+  `quant.strategy_experiments`（trial ledger）读回每个 `strategy_key` 的历史试验次数与历史 Sharpe，据此
+  计算真实的 Deflated Sharpe Ratio（此前硬编码为 `None`，从未真正接入）；
+  `analyst_expert_research.equal_weight_baseline` 的 `go_no_go` 判定，从"8 个 horizon 任一 t≥1.96 即
+  go"改为对 8 个 horizon 的 t 统计量做 Benjamini-Hochberg 修正、且同时要求有效独立分析师样本数
+  `effective_independent_analysts>=5`；`strategy_timing_challengers.run_challenger_backtest` 同样按
+  (challenger, horizon) 做 BH 修正，未通过门禁的 challenger 标 `descriptive_only: true`。此前的"任一
+  horizon 显著即算显著"在 8 次比较下会系统性高估显著性。
+- **`methodology_version` 现在有实际语义，且旧计算结果可追溯**：`quant.outcomes`、
+  `post_close_strategy_candidate_outcomes`、`ten_day_leader_rotation_candidate_outcomes`、
+  `intraday_signal_outcomes`、`xiaojie_leader_flow_outcomes`、`analyst_opinion_outcomes` 都新增/沿用了
+  `methodology_version` 与 `bars_snapshot_hash` 两列；活表始终是"按当前方法论重算后的最新一次结果"（读侧
+  代码零改动），但覆盖前的旧值会先归档进对应的 `<table>_history` 表（`old_row jsonb` 完整快照），不再无
+  痕消失。这意味着同一 `(symbol, event, horizon)` 组合的历史结果可能在数据库里同时有 v1（本次修订前）与
+  v2（本次修订后）两条记录——按 `(主键列..., methodology_version)` 读取，不要假设只有一条。
+
+**需要重算**：对涉及 1 日 horizon、退市股、停牌股或涨停池/龙虎榜事件驱动信号的历史交易日，需要重新调用
+`outcome_recomputation.recompute`、`post_close_candidate_outcomes.settle_post_close_and_leader_rotation_outcomes`、
+`intraday_outcome_settlement.settle`、`xiaojie_outcome_settlement.settle_session` 与
+`analyst_scorecards.recompute`，才能让本页描述的结算口径在历史数据上生效；旧的 `pending`/已结算记录不会
+自动刷新。
+
 ## 目的
 
 分析师文本只提供可证伪的市场、主题或个股假设；实时行情决定假设是否获得确认。系统不把一篇报告、单一消息、龙虎榜或新闻直接转换为买卖指令。

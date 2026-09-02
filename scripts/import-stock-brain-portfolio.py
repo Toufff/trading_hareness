@@ -14,8 +14,9 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "quant-service"))
+sys.path.insert(0, str(ROOT / "scripts" / "legacy" / "stock_brain"))
 
-from app.legacy_stock_brain_import import load_stock_brain_portfolio  # noqa: E402
+from legacy_stock_brain_import import load_stock_brain_portfolio  # noqa: E402
 
 
 def _request_json(url: str, *, method: str = "GET", payload: dict | None = None, token: str = "") -> dict:

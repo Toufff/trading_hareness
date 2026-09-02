@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isSystemMessage } from './message-filter.mjs';
+import { filenameFromHeaders, headerValue } from './filename-utils.mjs';
 
 const DEFAULT_HISTORY_LOOKBACK_SECONDS = 5 * 60;
 const MAX_HISTORY_PAGES = 20;
@@ -84,16 +85,6 @@ function taggedText(tag, text = '') {
 
 function taggedFilename(tag, filename = 'file') {
 	return `#${tag} ${String(filename || 'file')}`;
-}
-
-function headerValue(headers, name) {
-	return headers?.[name] ?? headers?.[name.toLowerCase()] ?? headers?.[name.toUpperCase()] ?? '';
-}
-
-function filenameFromHeaders(headers, fallback) {
-	const contentDisposition = String(headerValue(headers, 'content-disposition'));
-	const match = contentDisposition.match(/filename\*?=(?:UTF-8''|\")?([^;\"]+)/i);
-	return match ? decodeURIComponent(match[1].replace(/\"/g, '')).replace(/[^\w.\-()\u4e00-\u9fff]+/g, '_') : fallback;
 }
 
 function fileType(filename, contentType) {
@@ -202,6 +193,12 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 	let lastTickCompletedAt = null;
 	let lastTickError = null;
 	let writerState = canWrite ? 'starting' : 'not_configured';
+	// A single hung larkClient/sourceApi call (network stall, no response, no
+	// rejection) used to leave `running` true forever: every later tick() call
+	// returns immediately at the top and polling stops for good. If a tick has
+	// been "running" longer than this watchdog window, force it back to a
+	// resumable state and log loudly instead of silently going dark.
+	const tickWatchdogMs = Math.max(1, Number(config.tickWatchdogSeconds ?? 15 * 60) * 1000);
 	const reconcileEveryMs = Math.max(60 * 60_000, Number(config.reconcileEverySeconds ?? 6 * 3600) * 1000);
 	const reconcileLookbackMs = Math.max(5 * 60_000, Number(config.reconcileLookbackSeconds ?? 24 * 3600) * 1000);
 	const sourceRuntime = new Map(config.sources.map((source) => [source.key, { state: 'starting', last_success_at: null, last_error: null, last_reconciled_at: null }]));
@@ -503,7 +500,13 @@ export function createGroupRelay({ larkClient, sourceApi, ledger, workbench = nu
 	}
 
 	async function tick() {
-		if (!config.enabled || running) return;
+		if (!config.enabled) return;
+		if (running) {
+			const stuckForMs = lastTickStartedAt ? Date.now() - Date.parse(lastTickStartedAt) : 0;
+			if (stuckForMs < tickWatchdogMs) return;
+			logger.error(`群消息转发轮询看门狗复位：上一次 tick 已运行 ${Math.floor(stuckForMs / 1000)}s 仍未结束（阈值 ${Math.floor(tickWatchdogMs / 1000)}s），强制复位 running 标志并重试`);
+			running = false;
+		}
 		if (canWrite) {
 			try {
 				const fence = await canWrite();

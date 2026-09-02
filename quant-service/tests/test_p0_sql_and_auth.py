@@ -24,7 +24,8 @@ from app.analyst_observations import persist_extraction_run, persist_observation
 from app.feature_snapshot_repository import materialize_feature_snapshot
 from app.intraday_event_retention import prune_ephemeral_signal_events
 from app.daily_bar_repository import daily_amount_unit_mismatch, quarantine_tushare_daily_amount_mismatches
-from app.main import DailyBar, app, db, executor_saturated_response, upsert_bar
+from app.main import DailyBar, app, db, executor_saturated_response, resolve_write_api_key, upsert_bar
+from app import main as main_module
 from app.runtime_executors import ExecutorSaturatedError
 from app.automation_run_repository import fail_run, finish_run, start_or_resume_run, start_run
 from app.strategy_review_service import completed_for_checkpoint
@@ -49,7 +50,13 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
 
         original_lifespan = app.router.lifespan_context
         previous = os.environ.get("QUANT_WRITE_API_KEY")
+        previous_configured_key = main_module.configured_write_api_key()
         os.environ["QUANT_WRITE_API_KEY"] = "test-write-key"
+        # The middleware now reads the key resolved once at startup rather
+        # than the environment on every request (see ``resolve_write_api_key``
+        # in app.main).  ``no_lifespan`` below skips the real startup, so
+        # resolve it explicitly here the same way the real lifespan would.
+        resolve_write_api_key()
         try:
             app.router.lifespan_context = no_lifespan
             with TestClient(app) as client:
@@ -68,12 +75,36 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
                 self.assertEqual(client.post("/api/v1/strategies/intraday/replay-recorded-inputs", json={"max_rows": 0}, headers={"X-Quant-Write-Key": "test-write-key"}).status_code, 422)
                 self.assertEqual(client.post("/api/v1/analyst-research/reviews/run", json={}).status_code, 401)
                 self.assertEqual(client.post("/api/v1/analyst-research/reviews/run", json={"cadence": "bad"}, headers={"X-Quant-Write-Key": "test-write-key"}).status_code, 422)
+                # The remote-archive-sync trigger is no longer a bypass of the
+                # write key: a bearer-shaped Authorization header alone must
+                # not be enough, and the write key alone is not enough either.
+                # ``max_items`` above its declared ``le=100`` proves middleware
+                # passage via a 422 without invoking the real remote-sync
+                # handler (every field otherwise defaults, so a valid ``{}``
+                # body would actually call out to the remote archive).
+                bearer = {"Authorization": "Bearer " + "a" * 32}
+                invalid_payload = {"max_items": 999}
+                self.assertEqual(client.post("/api/v1/remote-archive/sync", json=invalid_payload, headers=bearer).status_code, 401)
+                self.assertEqual(
+                    client.post(
+                        "/api/v1/remote-archive/sync", json=invalid_payload, headers={"X-Quant-Write-Key": "test-write-key"},
+                    ).status_code,
+                    401,
+                )
+                self.assertEqual(
+                    client.post(
+                        "/api/v1/remote-archive/sync", json=invalid_payload,
+                        headers={**bearer, "X-Quant-Write-Key": "test-write-key"},
+                    ).status_code,
+                    422,
+                )
         finally:
             app.router.lifespan_context = original_lifespan
             if previous is None:
                 os.environ.pop("QUANT_WRITE_API_KEY", None)
             else:
                 os.environ["QUANT_WRITE_API_KEY"] = previous
+            main_module._write_api_key_state["value"] = previous_configured_key
 
     def test_every_mounted_mutation_route_rejects_an_unsigned_request(self) -> None:
         """Keep the app-wide write gate true as routers are added.
@@ -89,7 +120,11 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
 
         original_lifespan = app.router.lifespan_context
         previous = os.environ.get("QUANT_WRITE_API_KEY")
+        previous_configured_key = main_module.configured_write_api_key()
         os.environ["QUANT_WRITE_API_KEY"] = "test-write-key"
+        # See the sibling test above: the middleware reads the key resolved
+        # once at startup, and ``no_lifespan`` skips that real startup step.
+        resolve_write_api_key()
         try:
             app.router.lifespan_context = no_lifespan
             with TestClient(app) as client:
@@ -109,6 +144,7 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
                 os.environ.pop("QUANT_WRITE_API_KEY", None)
             else:
                 os.environ["QUANT_WRITE_API_KEY"] = previous
+            main_module._write_api_key_state["value"] = previous_configured_key
 
     def test_executor_saturation_has_a_retryable_http_response(self) -> None:
         response = __import__("asyncio").run(executor_saturated_response(None, ExecutorSaturatedError("full")))
@@ -132,7 +168,7 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
                 self.writes = []
                 ascending = [
                     {
-                        "trading_date": date(2026, 1, index + 1), "close": 10 + index,
+                        "symbol": "000001.SZ", "trading_date": date(2026, 1, index + 1), "close": 10 + index,
                         "high": 10 + index, "low": 10 + index, "volume": 100,
                         "amount": 1000, "adj_factor": 2.0, "is_suspended": False,
                         "limit_up": None, "limit_down": None, "selected_provider": "super_sdk",
@@ -148,6 +184,8 @@ class WriteAuthenticationMiddlewareTests(unittest.TestCase):
                     return Result(rows=self.bars_descending)
                 if "FROM quant.daily_fundamentals" in sql:
                     return Result(row=None)
+                if "FROM quant.instrument_lifecycle_evidence" in sql:
+                    return Result(rows=[])
                 if "INSERT INTO quant.feature_snapshots" in sql:
                     self.writes.append(sql)
                     return Result()

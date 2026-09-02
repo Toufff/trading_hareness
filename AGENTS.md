@@ -13,7 +13,14 @@ provider response directly to a live threshold or order path.
 - `quant-service/app/*_repository.py`: database read/write projections.
 - `quant-service/app/*_scheduler.py`: timing, retry windows and idempotency only.
 - `quant-service/app/*_rules.py` / `*_research.py`: pure or research-only rules.
-- `quant-service/app/main.py`: composition root; do not add new business logic here.
+- `quant-service/app/main.py`: composition root by design, but historically
+  carries roughly 1,500 lines of leftover business logic, direct SQL and
+  compatibility forwarding (`*_legacy` aliases, duplicated status payload
+  helpers) that predates the router/repository split and is being unwound
+  incrementally. Read it as "legacy compatibility surface being reduced",
+  not as the intended shape. **New behaviour must never be added here** — it
+  belongs in a focused router/repository/rules module and is only wired up
+  from `main.py`.
 - `quant-service/migrations/versions/`: all production schema changes (Alembic).
 - `frontend/src/App.vue`: current Vue dashboard; keep API calls typed and label
   research-only/replay-only values visibly.
@@ -55,6 +62,26 @@ provider response directly to a live threshold or order path.
    change; `npm run api:check` verifies the checked-in generated type is current.
 9. Read `docs/ARCHITECTURE.md` before a cross-domain change; it is the concise
    ownership map, while this file remains the operational checklist.
+
+## Architecture guard tests
+
+The convention in this repository is: **every architecture rule above has a
+test that fails if the rule is violated**, not just a written statement. Do
+not remove or weaken one of these without removing the rule it enforces from
+this file and `docs/ARCHITECTURE.md` in the same change:
+
+- `quant-service/tests/test_router_composition.py` — every `build_*_router`
+  factory in `app/routers/*.py` must be imported and mounted exactly once by
+  `main.py`, and `main.py` must not mount an unknown router.
+- `quant-service/tests/test_migration_contracts.py` — the frozen legacy DDL
+  (`SCHEMA_SQL`/`PLATFORM_SCHEMA_SQL`) is hashed and pinned; every Alembic
+  migration's revision chain must be linear with a single head; every
+  `ADD CONSTRAINT` must be guarded for idempotency; every `ALTER TABLE`
+  target must already exist in the frozen DDL or an earlier migration.
+- `quant-service/tests/test_async_database_boundaries.py` — guards the event
+  loop from an accidental direct synchronous database call inside an async
+  code path (the async dashboard/read routers must go through
+  `AsyncDatabase`, never a blocking transaction on the event loop thread).
 
 ## Review automation
 

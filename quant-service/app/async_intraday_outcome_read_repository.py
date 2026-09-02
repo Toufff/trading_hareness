@@ -12,6 +12,13 @@ from bisect import bisect_right
 from datetime import datetime
 from typing import Any, Callable
 
+from .repo_common import bounded_limit as clamp_limit
+
+#: The board-report context window was previously unbounded; a pathological
+#: time span (or a report-generation regression) must not turn one dashboard
+#: read into an unbounded scan of ``intraday_board_reports.payload``.
+_MAX_BOARD_REPORTS = 2000
+
 
 async def latest_intraday_outcomes(
     async_database: Any,
@@ -22,7 +29,7 @@ async def latest_intraday_outcomes(
     attribution_summary_fn: Callable[[list[dict[str, Any]]], dict[str, Any]],
 ) -> dict[str, Any]:
     """Read a bounded outcome window and batch its point-in-time board context."""
-    bounded_limit = max(1, min(limit, 500))
+    bounded_limit = clamp_limit(limit, 500)
     # Keep the attribution projection independent from a potentially large
     # historical board-report payload.  The UI renders a page, not a full
     # archival recomputation.
@@ -48,6 +55,7 @@ async def latest_intraday_outcomes(
             for item in raw_items if isinstance(item.get("observed_at"), datetime)
         ]
         contexts: dict[tuple[datetime, str], dict[str, Any]] = {}
+        board_reports_truncated = False
         if observations:
             earliest, latest = min(item[0] for item in observations), max(item[0] for item in observations)
             report_result = await connection.execute(
@@ -57,10 +65,12 @@ async def latest_intraday_outcomes(
                            SELECT max(observed_at) FROM quant.intraday_board_reports
                             WHERE status='completed' AND observed_at<%s
                        ))
-                     ORDER BY observed_at""",
-                (latest, earliest, earliest),
+                     ORDER BY observed_at LIMIT %s""",
+                (latest, earliest, earliest, _MAX_BOARD_REPORTS + 1),
             )
-            reports = [dict(row) for row in await report_result.fetchall()]
+            report_rows = [dict(row) for row in await report_result.fetchall()]
+            board_reports_truncated = len(report_rows) > _MAX_BOARD_REPORTS
+            reports = report_rows[:_MAX_BOARD_REPORTS]
             report_times = [row["observed_at"] for row in reports]
             for observed_at, symbol in observations:
                 position = bisect_right(report_times, observed_at) - 1
@@ -93,6 +103,7 @@ async def latest_intraday_outcomes(
         "items": rows[:bounded_limit], "summary": summary, "attribution_summary": attribution_summary["items"],
         "attribution_validation_gate": attribution_summary["validation_gate"],
         "attribution_window_outcomes": len(rows), "attribution_window_limit": attribution_window_limit,
+        "board_reports_truncated": board_reports_truncated,
         "notice": "结果只衡量信号后的可观察价格路径，不代表成交、收益承诺或自动交易表现。",
     }
 

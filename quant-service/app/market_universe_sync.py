@@ -111,16 +111,20 @@ async def sync(
         return {"status": "blocked", "universe_key": request.universe_key, "reason": safe_error_detail(str(error), 500), "request_key": request_key}
     except Exception as error:  # noqa: BLE001 - provider failures are persisted and returned safely
         failure_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
+        # ``except ... as error`` is implicitly deleted once the block exits;
+        # capture the text before defining a nested closure over it so a
+        # deferred call cannot see a NameError instead of the real failure.
+        error_text = str(error)
 
         def persist_failure() -> None:
             with db.transaction() as connection:
-                detail = safe_error_detail(str(error), 1000)
+                detail = safe_error_detail(error_text, 1000)
                 connection.execute("UPDATE quant.fetch_runs SET status='failed',finished_at=now(),error_class='provider_error',error_message=%s WHERE request_key=%s", (detail, request_key))
                 record_provider_failure(connection, candidates[0].key, "stock_basic_all_a", detail, failure_latency_ms)
                 record_provider_api_capability(connection, candidates[0].key, "stock_basic", "failed", note=detail)
 
         await run_database_blocking(persist_failure)
-        return {"status": "blocked", "universe_key": request.universe_key, "reason": safe_error_detail(str(error), 500), "request_key": request_key}
+        return {"status": "blocked", "universe_key": request.universe_key, "reason": safe_error_detail(error_text, 500), "request_key": request_key}
 
 
 __all__ = ["sync"]

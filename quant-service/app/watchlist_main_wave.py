@@ -12,11 +12,11 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, timedelta
 import math
-from statistics import mean
 from typing import Any, Iterable
 
 import numpy as np
 
+from .market_rules import LIMIT_TOLERANCE
 from .strategy_thresholds import MAX_ENTRY_INTRADAY_GAIN_PCT
 
 
@@ -151,7 +151,7 @@ def build_examples(grouped: dict[str, list[dict[str, Any]]]) -> tuple[list[dict[
             if entry.get("is_suspended"):
                 continue
             entry_limit_up = _finite(entry.get("limit_up"))
-            if entry_limit_up is not None and entry["raw_open"] >= entry_limit_up * 0.999:
+            if entry_limit_up is not None and entry["raw_open"] >= entry_limit_up - LIMIT_TOLERANCE:
                 continue
             future = bars[index + 1:index + HORIZON_DAYS + 1]
             entry_price = entry["adjusted_open"]

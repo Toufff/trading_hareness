@@ -128,12 +128,12 @@ def load_intraday_scan_local_state(
             (selected_symbols,),
         ).fetchall()
     }
-    membership_predicate = point_in_time_membership_predicate("member", "(%s::date)")
+    membership_predicate = point_in_time_membership_predicate("member", "(%(trade_date)s::date)")
     sector_rows = connection.execute(
         f"""SELECT symbol,sector_key FROM quant.sector_membership_history member
-            WHERE symbol=ANY(%s) AND {membership_predicate}
+            WHERE symbol=ANY(%(symbols)s) AND {membership_predicate}
               AND taxonomy_key IN ('ths_concept_flow','ths_index_n','ths_industry')""",
-        (selected_symbols, local_trade_date, local_trade_date, local_trade_date),
+        {"symbols": selected_symbols, "trade_date": local_trade_date},
     ).fetchall() if selected_symbols else []
     candidate_sector_keys: dict[str, list[str]] = {}
     for row in sector_rows:

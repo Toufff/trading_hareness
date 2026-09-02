@@ -10,6 +10,11 @@ from typing import Any, Awaitable, Callable
 from fastapi import HTTPException
 
 from .automation_run_repository import fail_run, finish_run, start_or_resume_run
+from .logging_config import get_logger
+from .runtime_leases import LeaseLostError
+
+
+logger = get_logger(__name__)
 
 
 POST_CLOSE_RECEIPT_VERSION = "post-close-refresh-v5"
@@ -55,8 +60,12 @@ async def record_stage_with_receipt(
         if hasattr(result, "__await__"):
             result = await result
     except Exception as error:
+        # ``except ... as error`` is implicitly deleted once the block exits;
+        # capture it before defining a lambda closure over it so a deferred
+        # call cannot see a NameError instead of the real failure.
+        caught_error = error
         await run_database_blocking(
-            lambda: _fail_stage_receipt(db, run_id, error, safe_error_detail), timeout_seconds=10,
+            lambda: _fail_stage_receipt(db, run_id, caught_error, safe_error_detail), timeout_seconds=10,
         )
         raise
 
@@ -103,6 +112,7 @@ async def run_refresh(
     timeout_overrides: dict[str, float] | None = None,
     stage_dependencies: dict[str, tuple[str, ...]] | None = None,
     record_stage: Callable[[str, date, Callable[[], Any]], Awaitable[Any]] | None = None,
+    check_lease_fence: Callable[[Any, str, int], Awaitable[Any]] | None = None,
 ) -> dict[str, Any]:
     """Run durable post-close stages in their existing dependency order.
 
@@ -111,14 +121,49 @@ async def run_refresh(
     silently widen the data-fetch or historical-data boundary.
     """
     lease_holder_id = uuid.uuid4()
-    acquired = await run_database_blocking(acquire_lease, db, lease_key, lease_holder_id, lease_seconds())
-    if not acquired:
+    # ``acquire_lease`` now returns a fencing token (see runtime_leases.py):
+    # a monotonic counter that only advances when a *new* holder takes the
+    # lease, and stays stable across this holder's own renewals. Capturing
+    # it once here lets every stage below cheaply detect a stale/superseded
+    # holder before it starts writing, instead of only noticing after the
+    # fact via a failed renewal at the end of a stage.
+    lease_fence = await run_database_blocking(acquire_lease, db, lease_key, lease_holder_id, lease_seconds())
+    if not lease_fence:
         raise HTTPException(status_code=409, detail="a post-close refresh is already running in another service instance")
 
     started_at = datetime.now(timezone.utc)
     stages: dict[str, dict[str, Any]] = {}
     limits = timeout_overrides or {}
     dependencies = stage_dependencies or {}
+
+    # An independent heartbeat renews the lease on its own clock rather than
+    # only between stages. A single stage close to (or past) its own timeout
+    # budget must not be able to run right up against the lease's own TTL
+    # (audit: "analyst_outcomes timeout 300s == 最小 lease 300s") with no
+    # renewal happening while it is in flight; this task keeps ticking
+    # concurrently with whatever the current stage is awaiting.
+    heartbeat_lost = asyncio.Event()
+    heartbeat_error: BaseException | None = None
+
+    async def heartbeat() -> None:
+        nonlocal heartbeat_error
+        interval = max(1.0, lease_seconds() / 3)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                renewed_fence = await run_database_blocking(renew_lease, db, lease_key, lease_holder_id, lease_seconds())
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - conservatively stop before an unverified lease expires
+                heartbeat_error = error
+                heartbeat_lost.set()
+                return
+            if not renewed_fence or renewed_fence != lease_fence:
+                heartbeat_error = RuntimeError("post-close refresh lease was lost during heartbeat renewal")
+                heartbeat_lost.set()
+                return
+
+    heartbeat_task = asyncio.create_task(heartbeat())
 
     async def stage(name: str) -> dict[str, Any]:
         phase_started = asyncio.get_running_loop().time()
@@ -134,6 +179,14 @@ async def run_refresh(
             }
         else:
             try:
+                # A write dispatched to the bounded executor cannot be
+                # cancelled once its thread has started, so this check alone
+                # cannot stop an already-running stage's commit; it does stop
+                # every *later* stage from starting once a takeover is
+                # detected, narrowing the window from "the whole run" to "one
+                # in-flight stage" (see runtime_leases.check_runtime_lease_fence).
+                if check_lease_fence is not None:
+                    await check_lease_fence(db, lease_key, lease_fence)
                 if record_stage is not None:
                     result = record_stage(name, trade_date, actions[name])
                 else:
@@ -144,17 +197,27 @@ async def run_refresh(
                 payload.setdefault("status", "completed")
             except asyncio.TimeoutError:
                 payload = {"status": "failed", "error": f"stage exceeded its {int(timeout_seconds)}s budget; retry later"}
+            except LeaseLostError:
+                # The lease itself is gone; continuing to the next stage
+                # would let this holder keep acting as though it still owned
+                # the refresh. Abort the whole run rather than one stage.
+                raise
             except Exception as error:  # noqa: BLE001 - later evidence remains useful
                 payload = {"status": "failed", "error": safe_error_detail(str(error), 500)}
         payload["latency_ms"] = round((asyncio.get_running_loop().time() - phase_started) * 1000)
         stages[name] = json_safe(payload)
-        renewed = await run_database_blocking(renew_lease, db, lease_key, lease_holder_id, lease_seconds())
-        if not renewed:
+        renewed_fence = await run_database_blocking(renew_lease, db, lease_key, lease_holder_id, lease_seconds())
+        # A renewal never changes the fence; if it comes back different from
+        # what this holder captured at acquire time, something else already
+        # re-acquired and this holder's view of ownership cannot be trusted.
+        if not renewed_fence or renewed_fence != lease_fence:
             raise RuntimeError("post-close refresh lease was lost; remaining stages were not run")
         return payload
 
     try:
         for name in stage_order:
+            if heartbeat_lost.is_set():
+                raise heartbeat_error or RuntimeError("post-close refresh lease was lost")
             await stage(name)
         sources = {
             "tushare_super": "requested through daily, THS flow, limit ladder, specialty and index phases",
@@ -184,10 +247,18 @@ async def run_refresh(
             "notice": "一键更新只保存研究证据和候选，不会自动下单或发送交易指令。",
         }
     finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
         try:
             await run_database_blocking(release_lease, db, lease_key, lease_holder_id)
         except Exception as error:  # noqa: BLE001 - lease expiry remains a safe recovery path
-            print(f"post-close refresh lease release failed: {safe_error_detail(str(error), 300)}")
+            logger.warning(
+                f"post-close refresh lease release failed: {safe_error_detail(str(error), 300)}",
+                extra={"task": "post_close_refresh"},
+            )
 
 
 __all__ = ["POST_CLOSE_RECEIPT_VERSION", "record_stage_with_receipt", "run_refresh"]

@@ -70,7 +70,7 @@ async def market_lhb_events(async_database: Any, trade_date: date | None, limit:
         result = await connection.execute(
             """SELECT event_id,symbol,event_type,occurred_at,available_at,source,title,url,created_at
                  FROM quant.market_events
-                WHERE event_type='lhb_event' AND (%s::date IS NULL OR occurred_at::date=%s)
+                WHERE event_type='lhb_event' AND (%s::date IS NULL OR (occurred_at AT TIME ZONE 'Asia/Shanghai')::date=%s)
                 ORDER BY occurred_at DESC,created_at DESC LIMIT %s""",
             (trade_date, trade_date, max(1, min(limit, 500))),
         )

@@ -7,7 +7,7 @@ future local event replay without changing their time semantics.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
 
 _ALLOWED_SOURCES = (

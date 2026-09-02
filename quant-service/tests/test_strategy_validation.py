@@ -16,6 +16,7 @@ from app.strategy_validation import (
     annualised,
     deflated_sharpe_ratio,
     expected_maximum_sharpe,
+    newey_west_mean_t_stat,
     probabilistic_sharpe_ratio,
     sharpe_ratio,
     walk_forward_splits,
@@ -154,6 +155,38 @@ class DeflatedSharpeTests(unittest.TestCase):
 
     def test_an_unusable_series_reports_none_rather_than_a_number(self):
         self.assertIsNone(deflated_sharpe_ratio([0.01], trials=10, trial_sharpe_variance=0.25))
+
+
+class NeweyWestMeanTStatTests(unittest.TestCase):
+    def test_zero_bandwidth_matches_the_plain_iid_t_stat(self):
+        values = [0.01, -0.02, 0.015, 0.03, -0.01, 0.02, -0.015, 0.025]
+        se, t_stat = newey_west_mean_t_stat(values, bandwidth=0)
+        n = len(values)
+        average = sum(values) / n
+        population_variance = sum((value - average) ** 2 for value in values) / n
+        expected_se = math.sqrt(population_variance / n)
+        self.assertAlmostEqual(se, expected_se, places=9)
+        self.assertAlmostEqual(t_stat, average / expected_se, places=9)
+
+    def test_positive_autocorrelation_widens_the_standard_error(self):
+        # An h-day-forward series built by summing a 5-day rolling window of a
+        # smooth underlying signal: consecutive windows share 4 of their 5
+        # days, so they move together almost in lockstep (strong positive
+        # autocorrelation) the way an actual overlapping h-day-forward return
+        # series does.
+        base = [math.sin(index / 3.0) * 0.02 for index in range(40)]
+        overlapping = [sum(base[index:index + 5]) for index in range(len(base) - 4)]
+        se_iid, _ = newey_west_mean_t_stat(overlapping, bandwidth=0)
+        se_nw, _ = newey_west_mean_t_stat(overlapping, bandwidth=4)
+        self.assertGreater(se_nw, se_iid, "ignoring the overlap understates the true standard error")
+
+    def test_too_few_observations_is_undefined(self):
+        self.assertEqual(newey_west_mean_t_stat([0.1], bandwidth=0), (None, None))
+
+    def test_zero_variance_series_has_no_t_stat(self):
+        se, t_stat = newey_west_mean_t_stat([0.01, 0.01, 0.01], bandwidth=1)
+        self.assertEqual(se, 0.0)
+        self.assertIsNone(t_stat)
 
 
 if __name__ == "__main__":

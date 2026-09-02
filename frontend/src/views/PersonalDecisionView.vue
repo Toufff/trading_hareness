@@ -2,6 +2,7 @@
 import { Refresh } from '@element-plus/icons-vue';
 import { computed, reactive } from 'vue';
 import { usePersonalDecisionWorkspace, type DecisionResearchGate, type TradePlan } from '../composables/usePersonalDecisionWorkspace';
+import ResearchOnlyBadge from '../components/ResearchOnlyBadge.vue';
 
 const workspace = reactive(usePersonalDecisionWorkspace());
 
@@ -197,7 +198,7 @@ function gateLabel(verdict: DecisionResearchGate['verdict']): string {
         <template #header><div class="section-title"><div><strong>新买机会</strong><small>只显示已经形成完整进出场计划的标的</small></div><span>{{ workspace.brief.new_buys.actions?.length ?? 0 }} 项</span></div></template>
         <el-empty v-if="!workspace.brief.new_buys.actions?.length" description="当前没有满足完整研究与交易计划要求的新买标的" :image-size="52" />
         <div v-for="plan in workspace.brief.new_buys.actions" :key="plan.plan_key" class="action-card buy-card">
-          <div class="action-heading"><div><strong>{{ plan.name }}</strong><span>（{{ plan.symbol }}）</span></div><el-tag type="success">条件买入</el-tag></div>
+          <div class="action-heading"><div><strong>{{ plan.name }}</strong><span>（{{ plan.symbol }}）</span></div><el-space><ResearchOnlyBadge /><el-tag type="success">条件买入</el-tag></el-space></div>
           <el-descriptions :column="4" size="small" border>
             <el-descriptions-item label="买入区间">{{ displayValue(plan.entry_zone?.lower) }}–{{ displayValue(plan.entry_zone?.upper) }}</el-descriptions-item>
             <el-descriptions-item label="止损参考">{{ displayValue(plan.stop_price) }}</el-descriptions-item>

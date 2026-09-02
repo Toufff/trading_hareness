@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
+import functools
 from typing import Any
 
+from .automation_run_repository import POST_CLOSE_STRATEGY_TASK_KEY, post_close_strategy_run_key, run_recorded
 from .request_models import (
     AkShareProbeRequest,
     AnnouncementSyncRequest,
@@ -107,6 +109,15 @@ class PostCloseRefreshDependencies:
     release_lease: Callable[..., Any]
     safe_error_detail: Callable[[str, int], str]
     json_safe: Callable[[Any], Any]
+    check_lease_fence: Callable[[Any, str, int], Awaitable[Any]] | None = None
+    # Reaper (audit B-HIGH): a killed process leaves automation_runs rows
+    # stuck 'running' forever. Reconciled at the same stage/entry point as
+    # the existing fetch_runs reconcile rather than adding a new one.
+    reconcile_stale_automation_runs: Callable[[], Any] | None = None
+    # Must match the scheduled loop's methodology_version cosmetically only
+    # (run_key is the actual dedup key); kept as its own field so this module
+    # does not need to import main.py's model-version constant directly.
+    post_close_strategy_model_version: str = "post-close-strategy-v1"
 
 
 async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDependencies) -> dict[str, Any]:
@@ -156,10 +167,21 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
             )
         return await dependencies.refresh_pattern_sources(trade_date)
 
-    actions: dict[str, Callable[[], Any]] = {
-        "stale_fetch_runs": lambda: dependencies.run_database(
+    async def stale_fetch_runs_stage() -> dict[str, Any]:
+        result = await dependencies.run_database(
             dependencies.reconcile_stale_fetch_runs, FetchRunReconcileRequest(max_age_minutes=90),
-        ),
+        )
+        # Reconcile orphaned automation_runs rows (a killed process's
+        # 'running' receipt) at this same maintenance entry point rather
+        # than adding a separate scheduled task.
+        if dependencies.reconcile_stale_automation_runs is not None:
+            automation_result = await dependencies.run_database(dependencies.reconcile_stale_automation_runs)
+            if isinstance(result, dict):
+                result = {**result, "stale_automation_runs": automation_result}
+        return result
+
+    actions: dict[str, Callable[[], Any]] = {
+        "stale_fetch_runs": stale_fetch_runs_stage,
         "analyst_text": lambda: dependencies.run_database(dependencies.reprocess_remote_reports, dependencies.database, 500),
         "all_a_universe": lambda: dependencies.sync_market_universe(MarketUniverseSyncRequest()),
         "full_market_daily": lambda: dependencies.sync_full_market_daily(
@@ -217,9 +239,23 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
         ),
         "analyst_scorecards": lambda: dependencies.run_database(dependencies.recompute_scorecards, trade_date),
         "analyst_expert_research": lambda: dependencies.run_database(dependencies.rebuild_analyst_research, trade_date),
-        "post_close_strategy": lambda: dependencies.run_database(
-            dependencies.run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date),
-        ),
+        # Shares its task_key/run_key with the scheduled post-close loop
+        # (strategy_runtime_runners.run_post_close_strategy_loop) via
+        # automation_run_repository.post_close_strategy_run_key: previously
+        # this manual stage only got the generic per-stage receipt
+        # (POST_CLOSE_RECEIPT_VERSION:post_close_strategy:<date>) which the
+        # scheduler never checked, so the 18:55-20:30 overlap window let
+        # both triggers write the same strategy tables concurrently.
+        "post_close_strategy": lambda: dependencies.run_database(functools.partial(
+            run_recorded, dependencies.database, task_key=POST_CLOSE_STRATEGY_TASK_KEY,
+            run_key=post_close_strategy_run_key(trade_date),
+            operation=functools.partial(
+                dependencies.run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date),
+            ),
+            cadence="daily", as_of_date=trade_date,
+            methodology_version=dependencies.post_close_strategy_model_version,
+            input_summary={"data_boundary": "same_date_close", "trigger": "manual_refresh"},
+        )),
         "decision_research_closure": lambda: dependencies.run_database(
             dependencies.refresh_decision_research, dependencies.database, trade_date, timeout_seconds=120,
         ),
@@ -245,6 +281,7 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
         timeout_overrides=POST_CLOSE_TIMEOUT_OVERRIDES, stage_dependencies=POST_CLOSE_STAGE_DEPENDENCIES,
         record_stage=record_refresh_stage, trade_date=trade_date,
         safe_error_detail=dependencies.safe_error_detail, json_safe=dependencies.json_safe,
+        check_lease_fence=dependencies.check_lease_fence,
     )
 
 

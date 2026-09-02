@@ -4,19 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-
-async def _fetchall(connection: Any, sql: str, params: tuple[Any, ...] = ()) -> list[Any]:
-    result = await connection.execute(sql, params)
-    return await result.fetchall()
-
-
-async def _fetchone(connection: Any, sql: str, params: tuple[Any, ...] = ()) -> Any:
-    result = await connection.execute(sql, params)
-    return await result.fetchone()
+from .repo_common import async_fetch_all as _fetchall, async_fetch_one as _fetchone, bounded_limit
 
 
 async def paper_status(async_database: Any, limit: int = 50) -> dict[str, Any]:
-    bounded = max(1, min(int(limit), 200))
+    bounded = bounded_limit(limit, 200)
     async with async_database.transaction() as connection:
         decisions = await _fetchall(connection, """SELECT d.decision_id,d.signal_event_id,d.strategy_key,d.strategy_version,d.symbol,
                           d.direction,d.status,d.decision_at,d.target_quantity,d.target_weight,d.evidence,d.risk_flags
@@ -43,7 +35,7 @@ async def paper_status(async_database: Any, limit: int = 50) -> dict[str, Any]:
 
 
 async def strategy_funnel(async_database: Any, limit: int = 100) -> dict[str, Any]:
-    bounded = max(1, min(int(limit), 500))
+    bounded = bounded_limit(limit, 500)
     async with async_database.transaction() as connection:
         counts = await _fetchone(connection, """SELECT
                     (SELECT count(*) FROM quant.intraday_quote_observations WHERE observed_at >= now()-interval '1 day')::int AS quote_observations,

@@ -77,6 +77,10 @@ RUNTIME_TASK_CONTRACTS: Final[dict[str, RuntimeTaskContract]] = {
         "all_board_member_backfill", "research", "bounded background batches", ("dc_member", "ths_member"),
         ("sector_membership_history",), "bounded board member coverage backfill",
     ),
+    "retention_maintenance": RuntimeTaskContract(
+        "retention_maintenance", "research", "daily after 16:30 CST", (),
+        ("retention_policies",), "bounded batch delete for enabled retention policies",
+    ),
 }
 
 

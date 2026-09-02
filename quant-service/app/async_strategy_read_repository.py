@@ -2,24 +2,36 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
+
+from .repo_common import bounded_limit
+
+#: A recommendation run's rows are bounded by its own upstream universe size
+#: (single digits of thousands at most), but the read was previously
+#: unbounded ``SELECT *``; cap it defensively and surface truncation instead
+#: of silently growing the response with the universe.
+_MAX_RECOMMENDATIONS = 2000
 
 
 async def latest_strategy_decision(async_database: Any, model_version: str) -> dict[str, Any]:
     async with async_database.transaction() as connection:
         run = await connection.execute(
-            "SELECT * FROM quant.recommendation_runs WHERE model_version=%s ORDER BY created_at DESC LIMIT 1",
+            "SELECT run_id,as_of_date,model_version,market_regime,source_status,created_at "
+            "FROM quant.recommendation_runs WHERE model_version=%s ORDER BY created_at DESC LIMIT 1",
             (model_version,),
         )
         run = await run.fetchone()
         if not run:
-            return {"run": None, "recommendations": []}
+            return {"run": None, "recommendations": [], "truncated": False}
+        limit = bounded_limit(_MAX_RECOMMENDATIONS, _MAX_RECOMMENDATIONS)
         rows = await connection.execute(
-            "SELECT * FROM quant.recommendations WHERE run_id=%s ORDER BY rank", (run["run_id"],)
+            "SELECT run_id,rank,symbol,decision,score,score_breakdown,explanation,risk_flags "
+            "FROM quant.recommendations WHERE run_id=%s ORDER BY rank LIMIT %s",
+            (run["run_id"], limit + 1),
         )
         rows = await rows.fetchall()
-    return {"run": run, "recommendations": rows}
+    truncated = len(rows) > limit
+    return {"run": run, "recommendations": rows[:limit], "truncated": truncated}
 
 
 async def latest_strategy_review(async_database: Any, session: str | None) -> dict[str, Any]:

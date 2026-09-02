@@ -10,7 +10,7 @@ import tempfile
 from threading import Thread
 import unittest
 
-from app.legacy_stock_brain_import import LegacyPortfolioImportError, load_stock_brain_portfolio
+from legacy_stock_brain_import import LegacyPortfolioImportError, load_stock_brain_portfolio
 
 
 def legacy_payload(evidence_path: Path) -> dict:
@@ -105,7 +105,7 @@ class LegacyStockBrainImportTests(unittest.TestCase):
         thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            script_path = Path(__file__).resolve().parents[2] / "scripts" / "import-stock-brain-portfolio.py"
+            script_path = Path(__file__).resolve().parents[3] / "scripts" / "import-stock-brain-portfolio.py"
             spec = importlib.util.spec_from_file_location("stock_brain_portfolio_cli", script_path)
             module = importlib.util.module_from_spec(spec)
             assert spec and spec.loader

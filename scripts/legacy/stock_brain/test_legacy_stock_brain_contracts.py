@@ -3,8 +3,8 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 import unittest
 
-from app.legacy_stock_brain_archive import create_consistent_snapshot, sqlite_tables
-from app.legacy_stock_brain_contracts import (
+from legacy_stock_brain_archive import create_consistent_snapshot, sqlite_tables
+from legacy_stock_brain_contracts import (
     normalize_symbol,
     normalized_payload,
     payload_sha256,
@@ -18,6 +18,13 @@ class LegacyStockBrainContractTests(unittest.TestCase):
         self.assertEqual(normalize_symbol("002212"), "002212.SZ")
         self.assertEqual(normalize_symbol("830001"), "830001.BJ")
         self.assertEqual(normalize_symbol("^SOX"), "^SOX")
+
+    def test_shanghai_b_share_is_not_misrouted_to_the_beijing_exchange(self):
+        # Every bare "9"-leading code used to be routed to Shanghai
+        # regardless of whether it was a genuine Shanghai B-share (900xxx)
+        # or a Beijing Stock Exchange listing (920xxx).
+        self.assertEqual(normalize_symbol("900901"), "900901.SH")
+        self.assertEqual(normalize_symbol("920819"), "920819.BJ")
 
     def test_failed_orchestration_is_excluded_but_evidence_is_archived(self):
         self.assertIsNone(table_classification("decision_session_runs"))

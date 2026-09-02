@@ -8,11 +8,11 @@
 | Item | Current value |
 |---|---:|
 | Composition root | `quant-service/app/main.py` |
-| `main.py` top-level functions | 433 |
-| Python modules under `app/` | 395 |
-| HTTP router modules | 40 |
-| Alembic migrations | 83 |
-| Frontend source files | 37 |
+| `main.py` top-level functions | 403 |
+| Python modules under `app/` | 405 |
+| HTTP router modules | 41 |
+| Alembic migrations | 89 |
+| Frontend source files | 44 |
 
 ## Domain naming inventory
 
@@ -21,7 +21,7 @@ New behaviour should be owned by an existing domain package/owner.
 
 | Domain prefix | Top-level modules |
 |---|---:|
-| `intraday` | 64 |
+| `intraday` | 66 |
 | `async` | 41 |
 | `strategy` | 19 |
 | `analyst` | 17 |
@@ -30,15 +30,15 @@ New behaviour should be owned by an existing domain package/owner.
 | `ten` | 11 |
 | `board` | 9 |
 | `limit` | 8 |
+| `daily` | 7 |
 | `tushare` | 7 |
-| `daily` | 6 |
 | `provider` | 6 |
 | `research` | 6 |
 | `watchlist` | 6 |
+| `xiaojie` | 6 |
 | `runtime` | 5 |
 | `sector` | 5 |
 | `stock` | 5 |
-| `xiaojie` | 5 |
 
 ## Router entrypoints
 
@@ -60,6 +60,7 @@ New behaviour should be owned by an existing domain package/owner.
 - `routers/intraday_outcome_reads.py`
 - `routers/intraday_status.py`
 - `routers/l2_research.py`
+- `routers/licensed_stock_api.py`
 - `routers/limit_linkage_mining_reads.py`
 - `routers/longhu_reads.py`
 - `routers/market_actions.py`
@@ -94,7 +95,10 @@ New behaviour should be owned by an existing domain package/owner.
 - `frontend/src/api/http.test.ts`
 - `frontend/src/api/http.ts`
 - `frontend/src/components/RealtimeServicesPanel.vue`
+- `frontend/src/components/ResearchOnlyBadge.test.ts`
+- `frontend/src/components/ResearchOnlyBadge.vue`
 - `frontend/src/components/TenDayLeaderRotationPanel.vue`
+- `frontend/src/composables/useDashboardWorkspace.test.ts`
 - `frontend/src/composables/useDashboardWorkspace.ts`
 - `frontend/src/composables/useFeishuRelayWorkspace.test.ts`
 - `frontend/src/composables/useFeishuRelayWorkspace.ts`
@@ -107,9 +111,12 @@ New behaviour should be owned by an existing domain package/owner.
 - `frontend/src/dashboard-navigation.ts`
 - `frontend/src/main.ts`
 - `frontend/src/style.css`
+- `frontend/src/utils/escapeHtml.test.ts`
+- `frontend/src/utils/escapeHtml.ts`
 - `frontend/src/views/FeishuWorkbenchView.vue`
 - `frontend/src/views/GroupRelayMonitorView.vue`
 - `frontend/src/views/ManualRelayView.vue`
+- `frontend/src/views/PersonalDecisionView.test.ts`
 - `frontend/src/views/PersonalDecisionView.vue`
 - `frontend/src/views/research/AnalystEvidenceTab.vue`
 - `frontend/src/views/research/CatalogTab.vue`
@@ -119,6 +126,7 @@ New behaviour should be owned by an existing domain package/owner.
 - `frontend/src/views/research/MarketSnapshotsTab.vue`
 - `frontend/src/views/research/ProviderTab.vue`
 - `frontend/src/views/research/QualityTab.vue`
+- `frontend/src/views/research/ResearchOverviewTab.test.ts`
 - `frontend/src/views/research/ResearchOverviewTab.vue`
 - `frontend/src/views/research/StockStudyTab.vue`
 - `frontend/src/views/research/StrategyTab.vue`

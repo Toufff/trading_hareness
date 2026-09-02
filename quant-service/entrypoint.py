@@ -9,6 +9,8 @@ import time
 
 import psycopg
 
+from app import db_dsn
+
 
 # This is a fixed application-level lock namespace, not derived from a secret.
 # Every quant-research instance must hold it while applying Alembic revisions.
@@ -24,12 +26,13 @@ def migration_lock_timeout_seconds() -> int:
 
 
 def database_connection() -> psycopg.Connection:
+    params = db_dsn.connection_params()
     return psycopg.connect(
-        host=os.getenv("PGHOST", "postgres"),
-        port=os.getenv("PGPORT", "5432"),
-        dbname=os.getenv("PGDATABASE", "n8n"),
-        user=os.getenv("PGUSER", "n8n"),
-        password=os.getenv("PGPASSWORD", ""),
+        host=params["host"],
+        port=params["port"],
+        dbname=params["dbname"],
+        user=params["user"],
+        password=params["password"],
         connect_timeout=10,
         autocommit=True,
     )

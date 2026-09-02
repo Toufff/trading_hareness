@@ -11,8 +11,6 @@ def _full_market_request(*, trade_date=None):
 class PlatformBoundaryTests(unittest.TestCase):
     def test_post_close_refresh_orchestrator_continues_after_stage_failure_and_releases_lease(self):
         calls: list[str] = []
-        lease = AsyncMock(side_effect=[True, True, True, True])
-        release = AsyncMock()
         blocking = AsyncMock(side_effect=[True, True, True, True, True, True, True])
 
         async def failing_stage() -> dict[str, object]:
@@ -148,7 +146,12 @@ class PlatformBoundaryTests(unittest.TestCase):
         query, params = connection.execute.call_args.args
         self.assertIn("state IN ('confirmed','alerted')", query)
         self.assertIn("signal_type IN ('entry','watch','reduce','exit')", query)
-        self.assertEqual(params, (datetime(2026, 8, 13, tzinfo=timezone.utc),))
+        from app.intraday_signal_attribution_service import INTRADAY_SIGNAL_ATTRIBUTION_BACKFILL_LIMIT
+        self.assertEqual(
+            params, (datetime(2026, 8, 13, tzinfo=timezone.utc), INTRADAY_SIGNAL_ATTRIBUTION_BACKFILL_LIMIT),
+        )
+        # No changed rows: the batched UPDATE must not run at all.
+        self.assertEqual(connection.execute.call_count, 1)
 
     def test_post_close_candidate_screen_is_pure_and_fail_closed_on_coverage(self):
         blocked = screen_candidates(
@@ -659,6 +662,10 @@ class PlatformBoundaryTests(unittest.TestCase):
         )
         payload = read_health_payload(dependencies)
         self.assertEqual(payload["status"], "ok")
+        # Peer/edge deployments read this to confirm a shared control plane
+        # will not receive catalog-registration writes; default True when
+        # the dependency is omitted keeps the primary deployment unchanged.
+        self.assertTrue(payload["control_plane_writes_enabled"])
         self.assertEqual(payload["runtime_leases"]["background_loop_lease_seconds"], 120)
         self.assertTrue(payload["provider_rate_limits"]["shared_database_reservation"])
         self.assertEqual(payload["runtime_leases"]["background_loops"][0]["lease_key"], "background_loop:intraday_monitor")
@@ -675,6 +682,11 @@ class PlatformBoundaryTests(unittest.TestCase):
         self.assertEqual(payload["build"]["git_sha"], "a1b2c3d")
         self.assertEqual(pool_updates, [{"pool_size": 2, "available": 1, "waiting": 0}])
         self.assertEqual(circuit_updates, [2])
+
+        import dataclasses
+        connection.execute.side_effect = [open_circuits, post_close, loops]
+        peer_dependencies = dataclasses.replace(dependencies, control_plane_writes_enabled=lambda: False)
+        self.assertFalse(read_health_payload(peer_dependencies)["control_plane_writes_enabled"])
 
         database.ping.side_effect = RuntimeError("database down")
         with self.assertRaises(DatabaseUnavailableError):
@@ -738,7 +750,7 @@ class PlatformBoundaryTests(unittest.TestCase):
     def test_city_rt_k_is_delayed_context_not_verified_realtime(self):
         self.assertNotIn("rt_k", SUPER_SDK_REALTIME_APIS)
         self.assertIn("rt_k", SUPER_SDK_DELAYED_CONTEXT_APIS)
-        configs = provider_configs({
+        provider_configs({
             "TUSHARE_SUPER_SDK_TOKEN": "sdk", "TUSHARE_SUPER_SDK_API_URL": "https://city.example",
             "TUSHARE_SUPER_GET_API_KEY": "get", "TUSHARE_SUPER_GET_API_URL": "https://get.example",
         })

@@ -7,10 +7,9 @@ the ones the first live session showed actually matter.
 
 from __future__ import annotations
 
-import datetime as _dt
 import os
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from app.main import db
 from app.xiaojie_outcome_settlement import mode_scorecard, settle_session
@@ -29,11 +28,24 @@ class OutcomeSettlementTests(unittest.TestCase):
                 connection.execute(f"DELETE FROM quant.{table} WHERE trading_date=%s", (self.session,))
             connection.execute("DELETE FROM quant.canonical_bars_daily WHERE symbol=ANY(%s)", (list(self.symbols),))
             connection.execute("DELETE FROM quant.instruments WHERE symbol=ANY(%s)", (list(self.symbols),))
+            connection.execute(
+                "DELETE FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=ANY(%s)",
+                ([self.session, self.next_session],),
+            )
 
     def setUp(self) -> None:
         self._cleanup()
         self.addCleanup(self._cleanup)
         with db.transaction() as connection:
+            # settle_session resolves the next session from the trade
+            # calendar, not from "whichever symbol has a bar next".
+            for trading_date in (self.session, self.next_session):
+                connection.execute(
+                    """INSERT INTO quant.market_trade_calendar(exchange,calendar_date,is_open,provider,available_at)
+                       VALUES('SSE',%s,true,'p0-xiaojie-outcome-test',%s)
+                       ON CONFLICT(exchange,calendar_date) DO UPDATE SET is_open=true""",
+                    (trading_date, datetime.combine(trading_date, datetime.min.time(), tzinfo=timezone.utc)),
+                )
             for symbol in self.symbols:
                 connection.execute(
                     "INSERT INTO quant.instruments(symbol,exchange,list_date) VALUES(%s,'SZ',%s)",
@@ -206,6 +218,61 @@ class OutcomeSettlementTests(unittest.TestCase):
                 (self.session,)).fetchone()
         self.assertEqual(count["n"], 1)
 
+    def test_next_session_never_borrows_a_bar_from_past_a_suspension_gap(self) -> None:
+        """A symbol suspended on the trade calendar's actual next session
+        must stay pending, not settle against a bar several days later - the
+        pre-fix bug picked the market-wide next traded date, which a single
+        suspended name does not have to match.
+        """
+        with db.transaction() as connection:
+            self._bar(connection, self.symbols[0], self.session,
+                      open_=10.0, close=11.0, pre_close=10.0, limit_up=11.0)
+            # A bar exists several sessions later (after this symbol reopens),
+            # but nothing on the trade calendar's immediate next session.
+            far_later = self.next_session
+            for offset in range(1, 5):
+                far_later = self.next_session + timedelta(days=offset)
+                connection.execute(
+                    "INSERT INTO quant.market_trade_calendar(exchange,calendar_date,is_open,provider,available_at) "
+                    "VALUES('SSE',%s,true,'p0-xiaojie-outcome-test',%s) ON CONFLICT(exchange,calendar_date) DO UPDATE SET is_open=true",
+                    (far_later, self.stamp),
+                )
+            self._bar(connection, self.symbols[0], far_later, open_=50.0, close=55.0, pre_close=50.0, limit_up=55.0)
+            self._observation(connection, self.symbols[0], "reverse_wrap", 10.0, False)
+            result = settle_session(connection, self.session)
+            row = connection.execute(
+                "SELECT next_open, next_close FROM quant.xiaojie_leader_flow_outcomes WHERE symbol=%s",
+                (self.symbols[0],)).fetchone()
+        self.assertEqual(result["pending_next_session"], 1)
+        self.assertIsNone(row["next_open"])
+        self.assertIsNone(row["next_close"], "a suspension gap must not be bridged to a much later bar")
+        with db.transaction() as connection:
+            for offset in range(1, 5):
+                connection.execute(
+                    "DELETE FROM quant.market_trade_calendar WHERE exchange='SSE' AND calendar_date=%s",
+                    (self.next_session + timedelta(days=offset),),
+                )
+                connection.execute(
+                    "DELETE FROM quant.canonical_bars_daily WHERE symbol=%s AND trading_date=%s",
+                    (self.symbols[0], self.next_session + timedelta(days=offset)),
+                )
+
+    def test_a_delisted_symbol_settles_at_its_last_close_instead_of_staying_pending_forever(self) -> None:
+        with db.transaction() as connection:
+            self._bar(connection, self.symbols[0], self.session,
+                      open_=10.0, close=11.0, pre_close=10.0, limit_up=11.0)
+            connection.execute(
+                "UPDATE quant.instruments SET delist_date=%s WHERE symbol=%s", (self.session, self.symbols[0]),
+            )
+            self._observation(connection, self.symbols[0], "reverse_wrap", 10.0, False)
+            result = settle_session(connection, self.session)
+            row = connection.execute(
+                "SELECT next_open, next_close, next_open_locked FROM quant.xiaojie_leader_flow_outcomes WHERE symbol=%s",
+                (self.symbols[0],)).fetchone()
+        self.assertEqual(result["pending_next_session"], 0, "a delisted symbol must settle, not stay pending")
+        self.assertAlmostEqual(float(row["next_open"]), 10.0, places=4)
+        self.assertAlmostEqual(float(row["next_close"]), 11.0, places=4)
+        self.assertFalse(row["next_open_locked"])
 
 
 class ObservationTransferContractTests(unittest.TestCase):

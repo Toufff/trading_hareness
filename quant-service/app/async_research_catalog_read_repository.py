@@ -4,19 +4,26 @@ from __future__ import annotations
 
 from typing import Any
 
+from .repo_common import bounded_limit
 
-def _limit(value: int, maximum: int) -> int:
-    return max(1, min(value, maximum))
+_limit = bounded_limit
+
+#: A universe listing was previously unbounded; the whole-market ``all_a``
+#: universe is a few thousand symbols, so cap defensively and report
+#: truncation instead of letting the response grow with the universe size.
+_MAX_UNIVERSE_MEMBERS = 10000
 
 
 async def universe_members(async_database: Any, universe_key: str) -> dict[str, Any]:
     async with async_database.transaction() as conn:
+        limit = _MAX_UNIVERSE_MEMBERS
         result = await conn.execute(
             """SELECT m.universe_key,m.symbol,m.enabled,m.priority,m.source,m.metadata,m.added_at,m.updated_at,
                       i.name,i.industry,i.is_st FROM quant.universe_members m JOIN quant.instruments i ON i.symbol=m.symbol
-               WHERE m.universe_key=%s ORDER BY m.priority,m.symbol""", (universe_key,))
+               WHERE m.universe_key=%s ORDER BY m.priority,m.symbol LIMIT %s""", (universe_key, limit + 1))
         rows = await result.fetchall()
-    return {"universe_key": universe_key, "items": rows}
+    truncated = len(rows) > limit
+    return {"universe_key": universe_key, "items": rows[:limit], "truncated": truncated}
 
 
 async def latest_features(async_database: Any, universe_key: str, limit: int) -> dict[str, Any]:

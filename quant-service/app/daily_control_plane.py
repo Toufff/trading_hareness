@@ -9,10 +9,20 @@ decision gate appear unhealthy.
 from __future__ import annotations
 
 import math
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import date
 from typing import Any, Mapping
+
+from .full_market_daily_controls_sync import sync as sync_full_market_daily_controls_isolated
 
 
 MINIMUM_ALL_A_COVERAGE_RATIO = 0.95
+
+#: The daily controls sync considers a longhuvip cross-section "usable" once
+#: it covers at least this many symbols and its factor/limit controls reach
+#: the same minimum coverage ratio as the equity readiness gate above.
+LONGHU_MINIMUM_DAILY_ROWS = 3500
 
 
 EQUITY_DAILY_CONTROL_STATUS_SQL = """WITH latest AS (
@@ -74,6 +84,110 @@ def status_payload(row: Mapping[str, Any] | None) -> dict[str, Any]:
         "limit_rows": limit_rows,
         "reason": reason,
     }
+
+
+def daily_row_count(database: Any, trade_date: date) -> int:
+    """Return a usable all-A daily cross-section count, otherwise fail closed.
+
+    The controls synchronizer must never make a partially fetched daily date
+    appear ready merely because its local rows have matching controls.  The
+    expected population is the point-in-time all-A membership for this date.
+    """
+    with database.transaction() as connection:
+        row = connection.execute(
+            """WITH expected AS (
+                   SELECT count(DISTINCT symbol)::int AS expected_rows
+                     FROM quant.universe_membership_history
+                    WHERE universe_key='all_a' AND effective_from<=%s
+                      AND (effective_to IS NULL OR effective_to>=%s)
+               ), actual AS (
+                   SELECT count(DISTINCT bar.symbol)::int AS actual_rows
+                     FROM quant.canonical_bars_daily bar
+                     JOIN quant.universe_membership_history membership
+                       ON membership.universe_key='all_a' AND membership.symbol=bar.symbol
+                      AND membership.effective_from<=%s
+                      AND (membership.effective_to IS NULL OR membership.effective_to>=%s)
+                    WHERE bar.trading_date=%s AND bar.quality_status IN ('fresh','partial')
+               ) SELECT expected_rows,actual_rows FROM expected CROSS JOIN actual""",
+            (trade_date, trade_date, trade_date, trade_date, trade_date),
+        ).fetchone()
+    expected = int((row or {}).get("expected_rows") or 0)
+    actual = int((row or {}).get("actual_rows") or 0)
+    return actual if expected and actual >= math.ceil(expected * MINIMUM_ALL_A_COVERAGE_RATIO) else 0
+
+
+@dataclass(frozen=True)
+class DailyControlPlaneSyncDependencies:
+    database: Any
+    longhu_vendor_configured: Callable[[], bool]
+    run_database: Callable[..., Awaitable[Any]]
+    call_tushare_api: Callable[..., Awaitable[Any]]
+    parse_tushare_date: Callable[[Any], date | None]
+    persist_tushare_rows: Callable[..., Any]
+    persist_blocked: Callable[[str, Exception], None]
+    safe_error_detail: Callable[[str, int], str]
+    executor_saturated_error: type[BaseException]
+    record_provider_success: Callable[..., None]
+    record_provider_failure: Callable[..., None]
+    record_provider_api_capability: Callable[..., None]
+
+
+def _longhu_control_status(database: Any, trade_date: date) -> dict[str, Any] | None:
+    with database.transaction() as connection:
+        row = connection.execute(
+            """WITH daily AS (
+                   SELECT count(*)::int AS rows FROM quant.canonical_bars_daily
+                    WHERE trading_date=%s AND selected_provider='longhuvip_composite'
+                 ), factors AS (
+                   SELECT count(DISTINCT symbol)::int AS rows FROM quant.daily_adjustment_factors
+                    WHERE trading_date=%s AND provider='longhuvip_composite'
+                 ), limits AS (
+                   SELECT count(DISTINCT symbol)::int AS rows FROM quant.daily_trade_limits
+                    WHERE trading_date=%s AND provider='longhuvip_composite'
+                 ) SELECT daily.rows AS daily_rows,factors.rows AS factor_rows,
+                          limits.rows AS limit_rows FROM daily,factors,limits""",
+            (trade_date, trade_date, trade_date),
+        ).fetchone()
+    daily_rows = int((row or {}).get("daily_rows") or 0)
+    factor_rows = int((row or {}).get("factor_rows") or 0)
+    limit_rows = int((row or {}).get("limit_rows") or 0)
+    minimum_control_rows = math.ceil(daily_rows * MINIMUM_ALL_A_COVERAGE_RATIO)
+    if daily_rows >= LONGHU_MINIMUM_DAILY_ROWS and factor_rows >= minimum_control_rows and limit_rows >= minimum_control_rows:
+        return {
+            "status": "completed", "trade_date": str(trade_date),
+            "provider": "longhuvip_composite", "expected_daily_rows": daily_rows,
+            "rows": {"adj_factor": factor_rows, "stk_limit": limit_rows, "suspend_d": 0},
+            "quality_note": (
+                "adj_factor is same-day identity only; limits are board-rule derived and retain IPO/resumption warnings"
+            ),
+        }
+    return None
+
+
+async def sync_full_market_daily_controls(
+    trade_date: date, dependencies: DailyControlPlaneSyncDependencies,
+) -> dict[str, Any]:
+    """Fill same-date adjustment, limit and suspension controls after daily sync."""
+    if dependencies.longhu_vendor_configured():
+        ready = await dependencies.run_database(
+            lambda: _longhu_control_status(dependencies.database, trade_date))
+        if ready:
+            return ready
+    return await sync_full_market_daily_controls_isolated(
+        trade_date,
+        expected_daily_rows=lambda date_: daily_row_count(dependencies.database, date_),
+        call_tushare_api=dependencies.call_tushare_api,
+        parse_date=dependencies.parse_tushare_date,
+        persist_tushare_rows=dependencies.persist_tushare_rows,
+        persist_blocked=dependencies.persist_blocked,
+        run_database_blocking=dependencies.run_database,
+        db=dependencies.database,
+        safe_error_detail=dependencies.safe_error_detail,
+        executor_saturated_error=dependencies.executor_saturated_error,
+        record_provider_success=dependencies.record_provider_success,
+        record_provider_failure=dependencies.record_provider_failure,
+        record_provider_api_capability=dependencies.record_provider_api_capability,
+    )
 
 
 __all__ = ["EQUITY_DAILY_CONTROL_STATUS_SQL", "MINIMUM_ALL_A_COVERAGE_RATIO", "status_payload"]

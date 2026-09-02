@@ -3,25 +3,20 @@ import asyncio
 import functools
 import hashlib
 import json
-import math
-import os
 import re
-import secrets
 import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal
 from pathlib import Path
-from statistics import mean, median
+from statistics import median
 from time import monotonic
-from typing import Any, Literal, Mapping
+from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field, model_validator
 import psycopg
 from psycopg.types.json import Json
 
@@ -48,20 +43,22 @@ from .akshare_provider import (
 )
 from .fuyao_provider import FuyaoProviderError, all_a_snapshot_rows as fuyao_all_a_snapshot_rows
 from .limit_up_anchor import live_limit_up_pool_rows
-from .launch_radar import (
-    evaluate_launch_radar,
-    record_launch_observations as record_launch_radar_observations,
-)
 from .analysis import as_utc
 from .capability_registry import api_capability
 from .database import AsyncDatabase, Database
-from .daily_control_plane import EQUITY_DAILY_CONTROL_STATUS_SQL, status_payload as daily_control_plane_status_payload
+from .settings import Settings
+from . import daily_control_plane
+from .daily_control_plane import (
+    DailyControlPlaneSyncDependencies,
+    EQUITY_DAILY_CONTROL_STATUS_SQL,
+    status_payload as daily_control_plane_status_payload,
+)
 from .async_provider_circuit_repository import open_capabilities as read_async_open_provider_capabilities
 from .async_provider_circuit_repository import open_provider_keys as read_async_open_provider_keys
 from .async_market_session_repository import realtime_market_session as read_async_realtime_market_session
 from .async_market_session_repository import sse_calendar_open as read_async_sse_calendar_open
 from .async_market_session_repository import sse_calendar_status as read_async_sse_calendar_status
-from .daily_bar_repository import exchange_for, provider_priority, upsert_daily_bar
+from .daily_bar_repository import exchange_for, upsert_daily_bar
 from .sector_membership_repository import (
     persist_observed_snapshot as persist_observed_sector_snapshot,
     persist_ths_snapshot as persist_ths_sector_snapshot,
@@ -69,7 +66,6 @@ from .sector_membership_repository import (
 from .public_market_repository import (
     persist_free_daily as _persist_free_daily,
     persist_free_quote as _persist_free_quote,
-    persist_free_quotes as _persist_free_quotes,
     persist_market_events as _persist_market_events,
     persist_public_observations as _persist_public_observations,
     recent_market_events as _recent_market_events,
@@ -80,17 +76,19 @@ from .research_experiment_service import (
     backtest_strategy as backtest_strategy_isolated,
     build_snapshot as build_snapshot_isolated,
     evaluate_factors as evaluate_factors_isolated,
-    research_window as research_window_isolated,
 )
 from .research_maintenance_service import (
     ResearchMaintenanceDependencies,
+    reconcile_stale_automation_runs as reconcile_stale_automation_runs_isolated,
     reconcile_stale_fetch_runs as reconcile_stale_fetch_runs_isolated,
     update_analyst_profile as update_analyst_research_profile_isolated,
     update_universe_members as update_universe_members_isolated,
 )
 from .intraday_watchlist_service import (
     IntradayWatchlistDependencies,
+    WatchlistHistoryHydrationDependencies,
     delete as delete_intraday_watchlist_isolated,
+    hydrate_watchlist_history as intraday_watchlist_service_hydrate_history,
     sync_history as sync_intraday_watchlist_history_isolated,
     upsert as upsert_intraday_watchlist_isolated,
 )
@@ -103,7 +101,6 @@ from .tushare_fetch_ledger import (
     prepare_run as prepare_tushare_fetch_run_isolated,
 )
 from .analyst_promotion import MAX_APPROVED_WEIGHT, PROMOTION_KEY, analyst_live_promotion
-from .research_prices import adjusted_bars
 from .live_policy import live_policy_gate
 from .numeric_utils import decimal_or_none, intraday_number
 from .intraday_clock import eac_window as pure_intraday_eac_window
@@ -130,6 +127,8 @@ from .intraday_quote_normalization import (
     quote_from_fuyao as intraday_quote_from_fuyao_pure,
 )
 from .intraday_decision_card_read_model import decision_card as read_intraday_decision_card
+from . import intraday_signal_attribution_service
+from .intraday_signal_attribution_service import IntradaySignalAttributionRefreshDependencies
 from .async_intraday_decision_card_repository import decision_card as read_async_intraday_decision_card
 from .async_intraday_scan_preflight_repository import latest_board_report as read_async_latest_board_report
 from .async_intraday_scan_preflight_repository import latest_fast_quotes as read_async_latest_fast_quotes
@@ -157,9 +156,11 @@ from .intraday_minute_provider_service import fetch_bounded_minute_context
 from .intraday_surge_context_service import capture as capture_intraday_surge_context
 from .strategy_candidate_ranking import select as select_intraday_candidates
 from .xiaojie_leader_flow import MODEL_VERSION as XIAOJIE_LEADER_FLOW_MODEL_VERSION, evaluate_snapshot as evaluate_xiaojie_leader_flow_snapshot
-from .xiaojie_leader_flow import alert_priority as xiaojie_alert_priority
-from .xiaojie_indicators import evaluate_pool as evaluate_xiaojie_leader_pool
-from .xiaojie_indicators import leader_pool as leader_pool_symbols
+from .xiaojie_leader_flow_runtime import (
+    XiaojieLeaderFlowDependencies,
+    persist_xiaojie_signal_event,
+    run_xiaojie_leader_flow as xiaojie_leader_flow_runtime_run,
+)
 from .xiaojie_reference_repository import (
     ensure_session_trade_limits as ensure_xiaojie_session_trade_limits,
     load_session_reference as load_xiaojie_session_reference,
@@ -167,10 +168,6 @@ from .xiaojie_reference_repository import (
     trade_limits as read_xiaojie_trade_limits,
 )
 from .xiaojie_outcome_settlement import settle_session as settle_xiaojie_session
-from .xiaojie_observation_repository import (
-    alerted_count as xiaojie_alerted_count, mark_alerted as mark_xiaojie_alerted,
-    record_candidates as record_xiaojie_candidates,
-)
 from . import offline_minute_import_service
 from .intraday_cross_section import SharedAsyncSnapshot
 from .intraday_state_machine import classify_setup_state as classify_intraday_setup_state
@@ -277,8 +274,8 @@ from .post_close_strategy_service import (
     retry_window as post_close_strategy_retry_window,
     run as persisted_run_post_close_strategy,
 )
-from .post_close_scheduler import PostCloseSchedulerDependencies, post_close_strategy_scheduler
-from .strategy_review_scheduler import StrategyReviewSchedulerDependencies, strategy_review_scheduler
+from .post_close_scheduler import post_close_strategy_scheduler
+from .strategy_review_scheduler import strategy_review_scheduler
 from .strategy_runtime_runners import (
     PostCloseStrategyRuntimeDependencies,
     StrategyReviewRuntimeDependencies,
@@ -287,7 +284,6 @@ from .strategy_runtime_runners import (
     run_strategy_review_loop as run_strategy_review_runtime_loop,
 )
 from .analyst_market_review import build_recorded_analyst_market_review
-from .strategy_pattern_read_model import latest_strategy_pattern_mining as read_latest_strategy_pattern_mining
 from .intraday_outcome_settlement import settle as persist_intraday_outcome_settlement
 from .intraday_outcome_runtime import IntradayOutcomeRuntime, IntradayOutcomeRuntimeDependencies
 from .tushare_normalization import normalize_rows as pure_normalize_tushare_rows
@@ -332,10 +328,8 @@ from .intraday_board_curve_runtime import (
     run_intraday_board_curve_runtime_loop,
 )
 from . import intraday_fast_quote_capture_service
-from .market_snapshots import snapshot_status, summarize_quotes
 from .market_flow_repository import (
     persist_intraday_market_flow_feature,
-    persist_market_snapshot_flow_feature,
     rebuild_stored_market_flow_features,
 )
 from .intraday_alerts import daily_strategy_summary_text, delivery_health_recovery_text, intraday_alert_text
@@ -349,14 +343,7 @@ from .limit_linkage_mining_repository import persist_limit_linkage_mining_run
 from .limit_linkage_mining_service import LimitLinkageMiningDependencies, run as run_limit_linkage_mining_isolated
 from .async_limit_linkage_relation_repository import relations as read_async_limit_linkage_relations
 from .async_board_rotation_outbox_repository import suppress_legacy_deliveries as suppress_async_legacy_board_rotation_deliveries
-from .board_curve_read_model import board_display_slots as _board_display_slots
-from .board_curve_read_model import intraday_board_flow_curves as read_intraday_board_flow_curves
-from .board_curve_read_model import latest_close_sector_review_report as read_latest_close_sector_review_report
-from . import research_catalog_read_model as research_catalog_reads
-from . import sector_read_model as sector_reads
 from . import intraday_evidence_read_model as intraday_evidence_reads
-from . import market_result_read_model as market_result_reads
-from .intraday_outcome_read_model import latest_intraday_outcomes as read_latest_intraday_outcomes
 from .http_clients import (alert_http_client_status, close_http_clients, provider_http_client_status,
                            public_http_client_status, remote_archive_http_client_status, start_http_clients)
 from .network_health import network_state
@@ -390,10 +377,11 @@ from .intraday_fast_quote_runtime import (
     run_intraday_fast_quote_runtime_loop,
 )
 from .intraday_fast_quote_confirmation_runtime import latest_confirmations as latest_fast_quote_confirmations
-from .study_realtime import _row_trade_date, _row_trade_datetime, looks_like_response_header, realtime_rows_are_current
+from .study_realtime import looks_like_response_header, realtime_rows_are_current
 from .provider_health import (
     provider_error_availability,
     record_provider_api_capability,
+    record_provider_empty_result,
     record_provider_failure,
     record_provider_success,
 )
@@ -405,16 +393,24 @@ from .post_close_structures import (
     post_close_fresh_start_structure,
 )
 from .runtime_tasks import (
-    LoopRuntimeRegistry, cancel_background_tasks,
+    BackgroundTaskSpec, LoopRuntimeRegistry, cancel_background_tasks,
     apply_background_runtime_profile, background_runtime_profile,
     background_tasks_enabled, observe_completed_task, start_leased_background_tasks,
-    supervise_leased_loop, supervise_loop, validate_runtime_task_specs,
+    supervise_leased_loop, validate_runtime_task_specs,
 )
-from .platform.runtime_task_registry import runtime_task_contract, runtime_task_contract_catalog
+from .platform.runtime_task_registry import (
+    runtime_profile_owns_task, runtime_task_contract, runtime_task_contract_catalog,
+)
 from .platform.strategy_registry import validate_strategy_runtime_versions
-from .runtime_composition import LeasedRuntimeDependencies, build_leased_task_runner
+from .runtime_composition import (
+    LeasedRuntimeDependencies,
+    build_leased_task_runner,
+    current_lease_fence,
+    lease_key_for_label,
+)
 from .application_lifecycle import ApplicationLifecycleDependencies, application_lifespan
 from .background_task_catalog import build_specs as build_background_task_specs
+from .logging_config import get_logger
 from .intraday_outcomes import (
     INTRADAY_OUTCOME_HORIZONS,
     intraday_outcome_cutoff,
@@ -442,15 +438,10 @@ from .edge_evidence_transfer import (
 )
 from .market_session_repository import (
     realtime_market_session as read_realtime_market_session,
-    realtime_market_session_async as read_realtime_market_session_async,
-    sse_calendar_open as read_sse_calendar_open,
-    sse_calendar_open_async as read_sse_calendar_open_async,
     sse_calendar_status as read_sse_calendar_status,
-    sse_calendar_status_async as read_sse_calendar_status_async,
 )
 from .intraday_signal_policy import (
     signal_event_state as intraday_signal_event_state,
-    signal_material_change as intraday_signal_material_change,
 )
 from .contextual_policy_learning import contextual_bandit_policy_review
 from .paper_execution import paper_decision_payload, persist_barrier_outcome, persist_paper_decision, triple_barrier_label
@@ -480,7 +471,6 @@ from .feature_read_repository import latest_tushare_row as read_latest_tushare_r
 from .feature_read_repository import market_regime as read_market_regime
 from .analyst_text_features import DEFAULT_FACTOR_VERSION, analyst_text_factor_summary as read_analyst_text_factor_summary
 from .stock_study_readiness_repository import (
-    raw_api_window_summary as read_raw_api_window_summary,
     stock_study_claims as read_stock_study_claims,
     stock_window_readiness as read_stock_window_readiness,
 )
@@ -497,6 +487,7 @@ from .routers.analyst_skill_reads import build_analyst_skill_reads_router
 from .routers.analyst_research_reads import build_analyst_research_reads_router
 from .routers.automation_reads import build_automation_reads_router
 from .security import licensed_stock_read_allowed, remote_archive_sync_bearer_allowed, write_access_allowed
+from .symbols import canonical_symbol
 from .automation_run_repository import run_recorded
 from .daily_strategy_summary_service import (
     build_daily_strategy_summary as build_daily_strategy_summary_projection,
@@ -548,7 +539,7 @@ from .routers.xiaojie_leader_flow import build_xiaojie_leader_flow_router
 from .routers.research_actions import ResearchActionDependencies, build_research_actions_router
 from .routers.ingestion_actions import IngestionActionDependencies, build_ingestion_actions_router
 from .routers.system_control import SystemControlDependencies, build_system_control_router
-from .market_rules import a_share_limit_ratio, china_equity_session, china_futures_session, cn_today, is_st_security_name
+from .market_rules import a_share_limit_ratio, china_equity_session, china_futures_session, cn_today, is_st_security_name  # noqa: F401 -- re-exported for tests/provider_test_support.py
 from .request_models import (
     AkShareProbeRequest,
     AnalystResearchProfileRequest,
@@ -614,7 +605,11 @@ from .board_flow_capture_actions import BoardFlowCaptureActions
 from .board_rotation_repository import BoardRotationRepository
 from .intraday_minute_capture_actions import IntradayMinuteCaptureActions
 from .intraday_event_replay_runner import run_recorded_signal_lifecycle_replay
-from .intraday_rule_input_replay_runner import run_recorded_rule_input_replay
+from .intraday_replay_service import (
+    IntradayEntryTimingChallengerDependencies,
+    IntradayReplayDependencies,
+)
+from . import intraday_replay_service
 from .post_close_refresh import record_stage_with_receipt, run_refresh as run_post_close_refresh_orchestrated
 from .post_close_refresh_runtime import PostCloseRefreshRuntime
 from .post_close_refresh_service import (
@@ -639,7 +634,6 @@ from .longhu_vendor_source import (
     configured as longhu_vendor_configured,
     intraday_source as longhu_intraday_source,
 )
-from .full_market_daily_controls_sync import sync as sync_full_market_daily_controls_isolated
 from .minute_bar_session_backfill import (
     backfill_session as backfill_minute_session,
     session_symbols as session_minute_symbols,
@@ -661,13 +655,12 @@ from .market_regime_daily import materialize_market_regime
 from .sentiment_cycle_daily import materialize_sentiment_cycle
 from .strategy_daily_candidate_ledger import materialize_ledger, settle_ledger_outcomes as settle_strategy_ledger_outcomes
 from .watchlist_candidate_proposals import materialize_watchlist_proposals
-from .strategy_timing_challengers import run_challenger_backtest as run_intraday_entry_timing_challenger_backtest
 from .ths_concept_members_sync import sync as sync_ths_concept_members_isolated
 from .analyst_scorecards import readiness as analyst_scorecard_readiness
 from .analyst_scorecards import recompute as recompute_scorecards_isolated
 from .claim_review_service import review_claim as review_claim_isolated
 from .analyst_trade_action_read_model import anqiang_trade_action_replay
-from .analyst_skill_models import analyst_skill_profiles, rebuild_all_analyst_skill_profiles
+from .analyst_skill_models import analyst_skill_profiles
 from .analyst_expert_research import analyst_research_status, rebuild_analyst_research
 from .telemetry import (
     CONTENT_TYPE_LATEST,
@@ -693,11 +686,12 @@ from .runtime_leases import (
     POST_CLOSE_REFRESH_LEASE_KEY,
     acquire_runtime_lease,
     background_loop_lease_seconds,
+    check_runtime_lease_fence,
     post_close_refresh_lease_seconds,
     release_runtime_lease,
     renew_runtime_lease,
 )
-from .tushare_catalog import CORE_NORMALIZED_APIS, TUSHARE_CATALOG, catalog_counts, catalog_items
+from .tushare_catalog import CORE_NORMALIZED_APIS, TUSHARE_CATALOG, catalog_items
 from .tushare_catalog_fetch_service import CatalogFetchDependencies, fetch_catalog as run_catalog_fetch
 from .stock_study_tushare_service import StockStudyTushareDependencies, fetch_stock_study_input
 from .stock_study_service import StockStudyDependencies, build as build_stock_study_isolated
@@ -731,9 +725,17 @@ from .all_board_member_backfill_service import (
     AllBoardMemberBackfillDependencies,
     run as run_all_board_member_backfill_isolated,
 )
+from .all_board_member_backfill_runtime import (
+    AllBoardMemberBackfillLoopDependencies,
+    all_board_member_backfill_loop as run_all_board_member_backfill_loop_runtime,
+)
 from .ths_concept_member_backfill_service import (
     ThsConceptMemberBackfillDependencies,
     run as run_ths_concept_member_backfill_isolated,
+)
+from .ths_concept_member_backfill_runtime import (
+    ThsConceptMemberBackfillLoopDependencies,
+    ths_concept_member_backfill_loop as run_ths_concept_member_backfill_loop_runtime,
 )
 from .concept_limit_candidate_service import (
     ConceptLimitCandidateDependencies,
@@ -745,11 +747,9 @@ from .concept_limit_candidate_repository import (
     select_concepts as select_concept_limit_concepts,
 )
 from .tushare_official import (
-    AUDIT_FOCUS_APIS,
     HISTORICAL_MINUTE_APIS,
     REALTIME_MARKET_HOURS_APIS,
     default_probe_params,
-    official_spec,
     realtime_probe_matrix,
 )
 from .tushare_providers import (
@@ -769,6 +769,7 @@ from .tushare_providers import (
 from .universe_history import sync_universe_membership_history
 
 
+logger = get_logger(__name__)
 db = Database()
 async_db = AsyncDatabase(db)
 _remote_archive_actions = RemoteArchiveActions(
@@ -809,17 +810,22 @@ async def nonessential_high_frequency_capture_allowed() -> tuple[bool, dict[str,
 # A durable PostgreSQL lease serializes browser clicks and separate service
 # instances without relying on one process's asyncio state.
 def legacy_schema_bootstrap_enabled(environ: Mapping[str, str] | None = None) -> bool:
-    env = os.environ if environ is None else environ
-    return str(env.get("QUANT_LEGACY_SCHEMA_BOOTSTRAP", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    return Settings.from_environ(environ).legacy_schema_bootstrap_enabled
+
+
+def control_plane_writes_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Peer/edge deployments read a shared control plane and must not write to it.
+
+    Defaults to enabled so the primary deployment keeps registering catalog
+    capabilities at startup exactly as before; a peer compose profile sets
+    this to ``false`` to skip that write path entirely.
+    """
+    return Settings.from_environ(environ).control_plane_writes_enabled
 
 
 def provider_global_rate_limit_max_wait_seconds(environ: Mapping[str, str] | None = None) -> float:
     """Keep shared provider reservations bounded so callers fail locally first."""
-    env = os.environ if environ is None else environ
-    try:
-        return min(30.0, max(0.0, float(env.get("QUANT_PROVIDER_GLOBAL_RATE_LIMIT_MAX_WAIT_SECONDS", "5"))))
-    except (TypeError, ValueError):
-        return 5.0
+    return Settings.from_environ(environ).provider_global_rate_limit_max_wait_seconds
 
 
 async def reserve_tushare_provider_request_slot(provider_key: str, rate_limit_per_minute: int,
@@ -862,7 +868,7 @@ def _normalize_sync_symbols(values: list[str]) -> list[str]:
 
 def resolve_sync_symbols(requested: list[str]) -> list[str]:
     """Synchronous compatibility resolver for non-async callers and tests."""
-    values = requested or [item.strip() for item in os.getenv("QUANT_UNIVERSE", "").split(",") if item.strip()]
+    values = requested or list(Settings.from_environ().quant_universe)
     if not values:
         values = read_sync_core_symbols(db)
     if not values:
@@ -872,7 +878,7 @@ def resolve_sync_symbols(requested: list[str]) -> list[str]:
 
 async def resolve_sync_symbols_async(requested: list[str]) -> list[str]:
     """Resolve the same bounded universe without blocking an async caller."""
-    values = requested or [item.strip() for item in os.getenv("QUANT_UNIVERSE", "").split(",") if item.strip()]
+    values = requested or list(Settings.from_environ().quant_universe)
     if not values:
         values = await read_async_core_symbols(async_db)
     if not values:
@@ -929,10 +935,6 @@ def persist_free_quote(provider: str, symbol: str, quote: dict[str, Any] | None)
     return _persist_free_quote(db, provider, symbol, quote)
 
 
-def persist_free_quotes(provider: str, quotes: list[dict[str, Any]]) -> int:
-    """Compatibility entrypoint for the public-evidence repository."""
-    return _persist_free_quotes(db, provider, quotes)
-
 
 def persist_public_observations(provider: str, capability: str, rows: list[dict[str, Any]], symbol: str | None = None) -> int:
     """Compatibility entrypoint for the public-evidence repository."""
@@ -970,9 +972,6 @@ def persist_daily_bar_batch(bars: list[DailyBar]) -> int:
     return len(bars)
 
 
-def recompute_scorecards_legacy(as_of_date: date | None = None) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated scorecard service."""
-    return recompute_scorecards(as_of_date)
 def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
     """Compatibility entry point backed by local-only analyst scorecards."""
     return recompute_scorecards_isolated(as_of_date, cn_today=cn_today, db=db, readiness=analyst_scorecard_readiness)
@@ -994,14 +993,6 @@ def mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def bytes_to_gib(value: int | float) -> float:
-    """Compatibility export for callers that imported the old helper."""
-    return research_capacity.bytes_to_gib(value)
-
-
-def historical_capacity_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    """Compatibility export for the isolated capacity estimator."""
-    return research_capacity.historical_capacity_plan(*args, **kwargs)
 
 
 def historical_estimate_from_db(request: HistoricalCoverageEstimateRequest) -> dict[str, Any]:
@@ -1106,42 +1097,19 @@ def intraday_outcome_attribution_summary(items: list[dict[str, Any]]) -> dict[st
     return pure_outcome_attribution_summary(items, number=intraday_number)
 
 
+def _intraday_signal_attribution_refresh_dependencies() -> IntradaySignalAttributionRefreshDependencies:
+    return IntradaySignalAttributionRefreshDependencies(
+        attribution_for=intraday_signal_attribution, json_safe=strategy_json_safe,
+    )
+
+
 def refresh_intraday_signal_attributions(connection: Any, *, cutoff: datetime) -> int:
-    """Backfill deterministic attribution after a classifier correction.
-
-    Signal evidence is immutable, but attribution is a derived research label.
-    Rebuilding it in the same transaction as outcome settlement prevents old
-    EAC labels from contaminating subsequent offline policy reviews.
-    """
-    rows = connection.execute(
-        """SELECT signal_event_id,signal_key,signal_type,conditions,evidence
-             FROM quant.intraday_signal_events
-            WHERE state IN ('confirmed','alerted')
-              AND signal_type IN ('entry','watch','reduce','exit')
-              AND observed_at<=%s""",
-        (cutoff,),
-    ).fetchall()
-    changed = 0
-    for row in rows:
-        evidence = dict(row["evidence"] or {})
-        attribution = intraday_signal_attribution(
-            str(row["signal_key"]), str(row["signal_type"]),
-            dict(row["conditions"] or {}), evidence,
-        )
-        if evidence.get("attribution") == attribution:
-            continue
-        evidence["attribution"] = attribution
-        connection.execute(
-            "UPDATE quant.intraday_signal_events SET evidence=%s WHERE signal_event_id=%s",
-            (Json(strategy_json_safe(evidence)), row["signal_event_id"]),
-        )
-        changed += 1
-    return changed
+    """Compatibility export backed by the intraday signal attribution service."""
+    return intraday_signal_attribution_service.refresh_intraday_signal_attributions(
+        connection, cutoff=cutoff, dependencies=_intraday_signal_attribution_refresh_dependencies(),
+    )
 
 
-def recompute_intraday_signal_outcomes_legacy(as_of_date: date | None = None) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated outcome service."""
-    return recompute_intraday_signal_outcomes(as_of_date)
 def recompute_intraday_signal_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
     """Settle confirmed alerts from persisted evidence through the shared repository."""
     result = IntradayOutcomeRuntime(IntradayOutcomeRuntimeDependencies(
@@ -1163,9 +1131,6 @@ def recompute_intraday_signal_outcomes(as_of_date: date | None = None) -> dict[s
     return result
 
 
-def recompute_outcomes_legacy(as_of_date: date | None = None) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated outcome service."""
-    return recompute_outcomes(as_of_date)
 def recompute_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
     """Compatibility entry point backed by local-only outcome recomputation."""
     return recompute_outcomes_isolated(
@@ -1250,9 +1215,6 @@ async def sync_earnings_calendar(as_of_date: date) -> dict[str, Any]:
     )
 
 
-def generate_recommendations_legacy(request: GenerateRequest) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated recommendation service."""
-    return generate_recommendations(request)
 def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
     """Compatibility entry point backed by the isolated scorer/materializer."""
     return generate_recommendations_isolated(
@@ -1262,10 +1224,6 @@ def generate_recommendations(request: GenerateRequest) -> dict[str, Any]:
         json_safe=strategy_json_safe,
     )
 
-
-async def sync_tushare_legacy(request: TushareSyncRequest) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated synchronizer."""
-    return await sync_tushare(request)
 
 async def sync_tushare(request: TushareSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by the isolated daily synchronizer."""
@@ -1287,15 +1245,6 @@ async def sync_tushare(request: TushareSyncRequest) -> dict[str, Any]:
         executor_saturated_error=ExecutorSaturatedError,
     )
 
-
-def fetch_baostock_rows_legacy(symbols: list[str], trade_date: date) -> tuple[list[dict[str, str]], list[str]]:
-    """Deprecated compatibility alias; use the isolated BaoStock fetcher."""
-    return fetch_baostock_rows_isolated(symbols, trade_date, baostock_code=baostock_code)
-
-
-async def sync_baostock_legacy(request: TushareSyncRequest) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated BaoStock synchronizer."""
-    return await sync_baostock(request)
 
 async def sync_baostock(request: TushareSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by the isolated BaoStock synchronizer."""
@@ -1437,22 +1386,42 @@ def normalize_tushare_rows(connection: Any, api_name: str, rows: list[dict[str, 
 
 def persist_tushare_rows(connection: Any, api_name: str, request_key: str, rows: list[dict[str, Any]],
                          provider_key: str, available_at: datetime) -> int:
-    """Persist raw API evidence before promoting the supported canonical subset."""
-    for index, row in enumerate(rows):
-        serialized = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+    """Persist raw API evidence before promoting the supported canonical subset.
+
+    A full A-share cross-section is several thousand rows; this used to be
+    one INSERT per row (wp10-report.md "需要他人处理" #4). The raw evidence
+    write is now one batched ``INSERT ... SELECT FROM unnest(...)``. Rows are
+    deduplicated client-side by their conflict key first: a single INSERT
+    statement cannot target the same
+    ``(provider_key,api_name,record_key,content_sha256)`` row twice, which a
+    sequential loop tolerated (the second call just overwrote the first).
+    """
+    if rows:
+        deduped: dict[tuple[str, str], tuple[int, str]] = {}
+        for index, row in enumerate(rows):
+            serialized_for_hash = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+            content_hash = hashlib.sha256(serialized_for_hash.encode()).hexdigest()
+            record_key = tushare_record_key(row, request_key, index)
+            row_json = json.dumps(row, ensure_ascii=False, default=str)
+            # Last occurrence wins, matching the previous sequential
+            # behaviour where a later duplicate's ON CONFLICT UPDATE
+            # overwrote an earlier one's.
+            deduped[(record_key, content_hash)] = (index, row_json)
+        record_indexes = [item[0] for item in deduped.values()]
+        record_keys = [key[0] for key in deduped]
+        content_hashes = [key[1] for key in deduped]
+        row_jsons = [item[1] for item in deduped.values()]
         connection.execute(
             """INSERT INTO quant.tushare_raw_records(provider_key,api_name,request_key,record_index,record_key,content_sha256,row_data,available_at)
-               VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
+               SELECT %s,%s,%s,t.record_index,t.record_key,t.content_sha256,t.row_data::jsonb,%s
+                 FROM unnest(%s::integer[],%s::text[],%s::text[],%s::text[])
+                      AS t(record_index,record_key,content_sha256,row_data)
                ON CONFLICT(provider_key,api_name,record_key,content_sha256) DO UPDATE SET available_at=EXCLUDED.available_at,request_key=EXCLUDED.request_key""",
-            (provider_key, api_name, request_key, index, tushare_record_key(row, request_key, index),
-             hashlib.sha256(serialized.encode()).hexdigest(), Json(row), available_at),
+            (provider_key, api_name, request_key, available_at,
+             record_indexes, record_keys, content_hashes, row_jsons),
         )
     return normalize_tushare_rows(connection, api_name, rows, available_at, provider_key)
 
-
-async def sync_market_universe_legacy(request: MarketUniverseSyncRequest) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated universe synchronizer."""
-    return await sync_market_universe(request)
 
 async def sync_market_universe(request: MarketUniverseSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by the isolated universe synchronizer."""
@@ -1483,10 +1452,6 @@ async def sync_market_universe(request: MarketUniverseSyncRequest) -> dict[str, 
     )
 
 
-async def sync_full_market_daily_legacy(request: FullMarketDailySyncRequest) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated full-market synchronizer."""
-    return await sync_full_market_daily(request)
-
 async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by isolated full-market sync."""
     if request.provider == "auto" and longhu_vendor_configured():
@@ -1512,37 +1477,13 @@ async def sync_full_market_daily(request: FullMarketDailySyncRequest) -> dict[st
         record_provider_success=record_provider_success,
         record_provider_failure=record_provider_failure,
         record_provider_api_capability=record_provider_api_capability,
+        record_provider_empty=record_provider_empty_result,
     )
 
 
 def full_market_daily_row_count(trade_date: date) -> int:
-    """Return a usable all-A daily cross-section count, otherwise fail closed.
-
-    The controls synchronizer must never make a partially fetched daily date
-    appear ready merely because its local rows have matching controls.  The
-    expected population is the point-in-time all-A membership for this date.
-    """
-    with db.transaction() as connection:
-        row = connection.execute(
-            """WITH expected AS (
-                   SELECT count(DISTINCT symbol)::int AS expected_rows
-                     FROM quant.universe_membership_history
-                    WHERE universe_key='all_a' AND effective_from<=%s
-                      AND (effective_to IS NULL OR effective_to>=%s)
-               ), actual AS (
-                   SELECT count(DISTINCT bar.symbol)::int AS actual_rows
-                     FROM quant.canonical_bars_daily bar
-                     JOIN quant.universe_membership_history membership
-                       ON membership.universe_key='all_a' AND membership.symbol=bar.symbol
-                      AND membership.effective_from<=%s
-                      AND (membership.effective_to IS NULL OR membership.effective_to>=%s)
-                    WHERE bar.trading_date=%s AND bar.quality_status IN ('fresh','partial')
-               ) SELECT expected_rows,actual_rows FROM expected CROSS JOIN actual""",
-            (trade_date, trade_date, trade_date, trade_date, trade_date),
-        ).fetchone()
-    expected = int((row or {}).get("expected_rows") or 0)
-    actual = int((row or {}).get("actual_rows") or 0)
-    return actual if expected and actual >= math.ceil(expected * 0.95) else 0
+    """Compatibility export backed by the daily control-plane module."""
+    return daily_control_plane.daily_row_count(db, trade_date)
 
 
 def full_market_daily_control_status() -> dict[str, Any]:
@@ -1552,55 +1493,20 @@ def full_market_daily_control_status() -> dict[str, Any]:
     return daily_control_plane_status_payload(row)
 
 
+def _daily_control_plane_sync_dependencies() -> DailyControlPlaneSyncDependencies:
+    return DailyControlPlaneSyncDependencies(
+        database=db, longhu_vendor_configured=longhu_vendor_configured, run_database=run_database_blocking,
+        call_tushare_api=call_tushare_api, parse_tushare_date=tushare_date, persist_tushare_rows=persist_tushare_rows,
+        persist_blocked=persist_tushare_fetch_blocked, safe_error_detail=safe_error_detail,
+        executor_saturated_error=ExecutorSaturatedError, record_provider_success=record_provider_success,
+        record_provider_failure=record_provider_failure, record_provider_api_capability=record_provider_api_capability,
+    )
+
+
 async def sync_full_market_daily_controls(trade_date: date) -> dict[str, Any]:
-    """Fill same-date adjustment, limit and suspension controls after daily sync."""
-    if longhu_vendor_configured():
-        def longhu_control_status() -> dict[str, Any] | None:
-            with db.transaction() as connection:
-                row = connection.execute(
-                    """WITH daily AS (
-                           SELECT count(*)::int AS rows FROM quant.canonical_bars_daily
-                            WHERE trading_date=%s AND selected_provider='longhuvip_composite'
-                         ), factors AS (
-                           SELECT count(DISTINCT symbol)::int AS rows FROM quant.daily_adjustment_factors
-                            WHERE trading_date=%s AND provider='longhuvip_composite'
-                         ), limits AS (
-                           SELECT count(DISTINCT symbol)::int AS rows FROM quant.daily_trade_limits
-                            WHERE trading_date=%s AND provider='longhuvip_composite'
-                         ) SELECT daily.rows AS daily_rows,factors.rows AS factor_rows,
-                                  limits.rows AS limit_rows FROM daily,factors,limits""",
-                    (trade_date, trade_date, trade_date),
-                ).fetchone()
-            daily_rows = int((row or {}).get("daily_rows") or 0)
-            factor_rows = int((row or {}).get("factor_rows") or 0)
-            limit_rows = int((row or {}).get("limit_rows") or 0)
-            if daily_rows >= 3500 and factor_rows >= math.ceil(daily_rows * 0.95) and limit_rows >= math.ceil(daily_rows * 0.95):
-                return {
-                    "status": "completed", "trade_date": str(trade_date),
-                    "provider": "longhuvip_composite", "expected_daily_rows": daily_rows,
-                    "rows": {"adj_factor": factor_rows, "stk_limit": limit_rows, "suspend_d": 0},
-                    "quality_note": (
-                        "adj_factor is same-day identity only; limits are board-rule derived and retain IPO/resumption warnings"
-                    ),
-                }
-            return None
-        ready = await run_database_blocking(longhu_control_status)
-        if ready:
-            return ready
-    return await sync_full_market_daily_controls_isolated(
-        trade_date,
-        expected_daily_rows=full_market_daily_row_count,
-        call_tushare_api=call_tushare_api,
-        parse_date=tushare_date,
-        persist_tushare_rows=persist_tushare_rows,
-        persist_blocked=persist_tushare_fetch_blocked,
-        run_database_blocking=run_database_blocking,
-        db=db,
-        safe_error_detail=safe_error_detail,
-        executor_saturated_error=ExecutorSaturatedError,
-        record_provider_success=record_provider_success,
-        record_provider_failure=record_provider_failure,
-        record_provider_api_capability=record_provider_api_capability,
+    """Compatibility export backed by the daily control-plane module."""
+    return await daily_control_plane.sync_full_market_daily_controls(
+        trade_date, _daily_control_plane_sync_dependencies(),
     )
 
 
@@ -1635,17 +1541,7 @@ def persist_ths_sector_members(connection: Any, taxonomy_key: str, sector_key: s
 def eastmoney_member_symbol(row: dict[str, Any]) -> str | None:
     """Normalize the public board constituent code without guessing exchanges."""
     code = str(row.get("代码") or row.get("code") or row.get("股票代码") or "").strip().upper()
-    if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", code):
-        return code
-    if not re.fullmatch(r"\d{6}", code):
-        return None
-    if code.startswith("6"):
-        return f"{code}.SH"
-    if code.startswith(("0", "3")):
-        return f"{code}.SZ"
-    if code.startswith(("4", "8", "9")):
-        return f"{code}.BJ"
-    return None
+    return canonical_symbol(code, kind="stock")
 
 
 def persist_eastmoney_sector_members(connection: Any, taxonomy_key: str, sector_key: str, rows: list[dict[str, Any]],
@@ -1663,10 +1559,6 @@ def persist_eastmoney_sector_members(connection: Any, taxonomy_key: str, sector_
         member_symbol=eastmoney_member_symbol, ensure_instrument=ensure_instrument,
     )
 
-
-async def sync_ths_sector_catalog_legacy(request: SectorCatalogSyncRequest) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated THS catalog synchronizer."""
-    return await sync_ths_sector_catalog(request)
 
 async def sync_ths_sector_catalog(request: SectorCatalogSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by isolated THS catalog sync."""
@@ -1701,10 +1593,6 @@ async def sync_all_ths_sector_catalogs() -> dict[str, Any]:
         is_circuit_open_error=is_circuit_open_http_error,
     )
 
-
-async def sync_eastmoney_board_members_legacy(request: EastmoneyBoardMemberSyncRequest) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated Eastmoney member synchronizer."""
-    return await sync_eastmoney_board_members(request)
 
 async def sync_eastmoney_board_members(request: EastmoneyBoardMemberSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by isolated Eastmoney member sync."""
@@ -1952,11 +1840,6 @@ _xiaojie_session_reference: dict[str, Any] = {"trading_date": None, "reference":
 #: Per-session MA5-break timers, reset when the trading date rolls over.
 _xiaojie_ma5_break_state: dict[str, Any] = {}
 _launch_velocity_state: dict[str, Any] = {}
-#: Alerts are per newly-appearing (symbol, mode); this bounds a pathological
-#: day.  The running tally is read from the observations table, not held here,
-#: so a restart cannot reset it.
-XIAOJIE_MAX_ALERTS_PER_SCAN = 5
-XIAOJIE_MAX_ALERTS_PER_SESSION = 40
 
 
 async def _xiaojie_session_context(trading_date: date) -> dict[str, Any]:
@@ -1998,6 +1881,14 @@ def _with_connection(action: Any) -> Any:
         return action(connection)
 
 
+def _xiaojie_leader_flow_dependencies() -> XiaojieLeaderFlowDependencies:
+    return XiaojieLeaderFlowDependencies(
+        database=db, run_database=run_database_blocking, session_context=_xiaojie_session_context,
+        ma5_break_state=_xiaojie_ma5_break_state, velocity_state=_launch_velocity_state,
+        deliver_alert=deliver_intraday_alert, alert_text=_xiaojie_alert_text, safe_error_detail=safe_error_detail,
+    )
+
+
 async def run_xiaojie_leader_flow(*, scan_id: uuid.UUID, observed_at: datetime,
                                   all_a_rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Evaluate the leader pool from this scan's own cross-section.
@@ -2007,124 +1898,16 @@ async def run_xiaojie_leader_flow(*, scan_id: uuid.UUID, observed_at: datetime,
     alerts, and the strategy stays at zero live weight in the promotion
     registry.
     """
-    if not all_a_rows:
-        return {"status": "skipped", "reason": "no all-A cross-section in this scan"}
-    trading_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
-    reference = await _xiaojie_session_context(trading_date)
-    if not reference.get("limits"):
-        return {"status": "blocked", "reason": "session trade limits unavailable"}
-    result = evaluate_xiaojie_leader_pool(
-        all_a_rows, limits=reference["limits"], membership=reference["membership"],
-        references=reference["references"], observed_at=observed_at,
-        ma5_break_state=_xiaojie_ma5_break_state,
-        market_volume_baseline=reference.get("market_volume_baseline"),
+    return await xiaojie_leader_flow_runtime_run(
+        scan_id=scan_id, observed_at=observed_at, all_a_rows=all_a_rows,
+        dependencies=_xiaojie_leader_flow_dependencies(),
     )
-    candidates = result["candidates"]
-    fresh = await run_database_blocking(
-        lambda: _with_connection(lambda connection: record_xiaojie_candidates(
-            connection, trading_date, observed_at, scan_id, candidates)),
-        timeout_seconds=60,
-    ) if candidates else []
-
-    # A board already locked at the limit cannot be acted on: measured across
-    # 104 observations on 2026-08-27, the 61 found already sealed produced 0
-    # gains, 57 unchanged and 4 losses from the moment they were flagged, while
-    # the 43 found unsealed averaged +0.40%.  They stay recorded as research
-    # evidence but must not consume a scarce alert slot.
-    actionable = [item for item in fresh
-                  if not ((item.get("evidence") or {}).get("board") or {}).get("sealed")]
-    sealed_skipped = len(fresh) - len(actionable)
-    # The budget is read from what the table already recorded, so a restart
-    # mid-session cannot hand out a fresh allowance.
-    sent = await run_database_blocking(
-        lambda: _with_connection(lambda connection: xiaojie_alerted_count(connection, trading_date)),
-        timeout_seconds=30,
-    )
-    remaining = min(XIAOJIE_MAX_ALERTS_PER_SCAN, max(0, XIAOJIE_MAX_ALERTS_PER_SESSION - sent))
-    # Alert slots are scarce, so they go to the highest-conviction setups
-    # rather than to whichever mode happens to be most numerous.
-    actionable = sorted(actionable, key=xiaojie_alert_priority)
-    alerted: list[tuple[str, str]] = []
-    alert_errors: list[str] = []
-    for candidate in actionable[:remaining]:
-        try:
-            event_id = await run_database_blocking(
-                lambda item=candidate: _with_connection(
-                    lambda connection: _persist_xiaojie_signal_event(connection, scan_id, observed_at, item)),
-                timeout_seconds=30,
-            )
-            await deliver_intraday_alert(
-                event_id, _xiaojie_alert_text(candidate, trading_date, reference.get("names")))
-            alerted.append((candidate["symbol"], str(candidate.get("mode") or "unclassified")))
-        except Exception as error:  # noqa: BLE001 - an alert failure must not end the scan
-            alert_errors.append(f"{candidate.get('symbol')}: {safe_error_detail(str(error), 160)}")
-    if alerted:
-        await run_database_blocking(
-            lambda: _with_connection(lambda connection: mark_xiaojie_alerted(
-                connection, trading_date, observed_at, alerted)),
-            timeout_seconds=30,
-        )
-    # Shadow-mode launch radar rides the same cross-section: the launch band
-    # (past +5%, not yet leader-pool territory) is watched for the three-way
-    # coincidence of volume burst, standing sector anchor and price velocity.
-    # Research-only - observations settle through the shared outcomes table,
-    # and no alert is ever sent from here.
-    launch_status: dict[str, Any] = {"status": "skipped"}
-    try:
-        launch = evaluate_launch_radar(
-            all_a_rows, limits=reference["limits"], membership=reference["membership"],
-            references=reference["references"], pool=leader_pool_symbols(all_a_rows, reference["limits"]),
-            velocity_state=_launch_velocity_state, observed_at=observed_at,
-            elapsed_session_minutes=int(result["market_gate"].get("elapsed_session_minutes") or 0),
-        )
-        launch_fresh = await run_database_blocking(
-            lambda: _with_connection(lambda connection: record_launch_radar_observations(
-                connection, trading_date, observed_at, scan_id, launch["candidates"])),
-            timeout_seconds=30,
-        ) if launch["candidates"] else 0
-        launch_status = {"status": "completed", "band_size": launch["band_size"],
-                         "candidates": len(launch["candidates"]), "new": launch_fresh,
-                         "truncated": launch["truncated"]}
-    except Exception as error:  # noqa: BLE001 - the radar must never end the scan
-        launch_status = {"status": "failed", "reason": safe_error_detail(str(error), 200)}
-    return {
-        "status": "completed", "model_version": XIAOJIE_LEADER_FLOW_MODEL_VERSION,
-        "launch_radar": launch_status,
-        "pool_size": result["pool_size"], "evaluated": result["evaluated"],
-        "main_sector_count": result["main_sector_count"],
-        "regime": result["regime"],
-        "candidates": len(candidates), "new_candidates": len(fresh), "alerted": len(alerted),
-        "actionable_candidates": len(actionable),
-        "sealed_skipped": sealed_skipped,
-        "alerts_suppressed_by_cap": max(0, len(actionable) - len(alerted)),
-        "alerted_modes": sorted({mode for _symbol, mode in alerted}),
-        "alerts_sent_this_session": sent + len(alerted),
-        "alert_errors": alert_errors or None,
-        "reference_symbols": len(reference["limits"]),
-        "live_effect": "none", "boundary": "research_only; no_automatic_order",
-    }
 
 
 def _persist_xiaojie_signal_event(connection: Any, scan_id: uuid.UUID, observed_at: datetime,
                                   candidate: dict[str, Any]) -> uuid.UUID:
-    """Record a research observation as a distinctly-staged signal event.
-
-    ``stage`` isolates it: every decision-path consumer selects on the stages
-    the watchlist scan emits, so a research row cannot be mistaken for one.
-    """
-    event_id = uuid.uuid4()
-    mode = str(candidate.get("mode") or "unclassified")
-    connection.execute(
-        """INSERT INTO quant.intraday_signal_events(
-                signal_event_id,scan_id,symbol,signal_key,signal_type,severity,state,score,
-                observed_at,conditions,evidence,risk_flags,stage)
-           VALUES(%s,%s,%s,%s,'watch','info','alerted',0,%s,%s,%s,%s,'xiaojie_leader_flow_research')""",
-        (event_id, scan_id, candidate["symbol"], f"{candidate['symbol']}:xiaojie:{mode}",
-         observed_at, Json({"mode": mode, "position": candidate.get("position") or {},
-                            "stop_loss": candidate.get("stop_loss") or {}}),
-         Json(candidate.get("evidence") or {}), Json(candidate.get("risk_flags") or [])),
-    )
-    return event_id
+    """Compatibility export backed by the xiaojie leader-flow runtime module."""
+    return persist_xiaojie_signal_event(connection, scan_id, observed_at, candidate)
 
 
 def _xiaojie_alert_name(symbol: str, names: Mapping[str, str] | None) -> str:
@@ -2459,40 +2242,18 @@ def intraday_eac_acceptance_assessment(first_conditions: dict[str, Any] | None, 
     )
 
 
-WATCHLIST_FACTOR_MODEL_VERSION = "qlib-lean-watchlist-v1"
+def _watchlist_history_hydration_dependencies() -> WatchlistHistoryHydrationDependencies:
+    return WatchlistHistoryHydrationDependencies(
+        database=db, run_database=run_database_blocking, sync_tushare=sync_tushare,
+        fetch_supplemental=stock_study_fetch, daily_factors=watchlist_daily_factors, json_safe=strategy_json_safe,
+    )
 
 
 async def hydrate_watchlist_history(watchlist_id: uuid.UUID, symbol: str) -> dict[str, Any]:
-    """Fetch bounded history on pool registration and persist factor evidence."""
-    end_date = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    start_date = end_date - timedelta(days=45)
-    dated = {"ts_code": symbol, "start_date": start_date.strftime("%Y%m%d"), "end_date": end_date.strftime("%Y%m%d")}
-    daily_result = await sync_tushare(TushareSyncRequest(symbols=[symbol], start_date=start_date, end_date=end_date))
-    supplemental = await asyncio.gather(
-        stock_study_fetch("watchlist_adj_factor", TushareFetchRequest(api_name="adj_factor", params=dated, max_rows=60)),
-        stock_study_fetch("watchlist_daily_basic", TushareFetchRequest(api_name="daily_basic", params=dated, max_rows=60)),
-        stock_study_fetch("watchlist_moneyflow", TushareFetchRequest(api_name="moneyflow", params=dated, max_rows=60)),
-        stock_study_fetch("watchlist_moneyflow_dc", TushareFetchRequest(api_name="moneyflow_dc", params=dated, max_rows=60)),
+    """Compatibility export backed by the intraday watchlist service module."""
+    return await intraday_watchlist_service_hydrate_history(
+        watchlist_id, symbol, _watchlist_history_hydration_dependencies(),
     )
-    source_status = {"daily": daily_result, **{item[0]["source"]: item[0] for item in supplemental}}
-    factors = await run_database_blocking(watchlist_daily_factors, symbol)
-    daily_ok = daily_result.get("status") in {"completed", "partial", "unchanged"} and int(factors.get("bar_count") or 0) >= 21
-    supplemental_ok = sum(1 for item, _ in supplemental if item.get("status") in {"completed", "partial", "unchanged"})
-    status = "completed" if daily_ok and supplemental_ok >= 2 else "partial" if daily_ok else "failed"
-    factors.update({"factor_family": ["qlib_price_volume_rolling", "rsi14", "ma_trend", "lean_separate_risk_layer"],
-                    "factor_ready": daily_ok, "supplemental_sources_ready": supplemental_ok})
-
-    def persist_factor_snapshot() -> None:
-        with db.transaction() as connection:
-            connection.execute(
-                """INSERT INTO quant.watchlist_factor_snapshots(watchlist_id,symbol,observed_at,lookback_calendar_days,status,source_status,factors,model_version)
-                   VALUES(%s,%s,now(),45,%s,%s,%s,%s)""",
-                (watchlist_id, symbol, status, Json(strategy_json_safe(source_status)), Json(strategy_json_safe(factors)), WATCHLIST_FACTOR_MODEL_VERSION),
-            )
-
-    await run_database_blocking(persist_factor_snapshot)
-    return {"status": status, "start_date": str(start_date), "end_date": str(end_date), "source_status": source_status,
-            "factors": factors, "notice": "因子用于盘中提醒分层与后续回测，不构成自动交易指令。"}
 
 
 def intraday_signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
@@ -2514,7 +2275,7 @@ def intraday_signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
 
 def decision_card_url(symbol: str) -> str | None:
     """Return a human-reachable review link only when the operator configured one."""
-    base_url = (os.getenv("QUANT_DASHBOARD_PUBLIC_URL") or "").strip().rstrip("/")
+    base_url = Settings.from_environ().dashboard_public_url
     if not base_url:
         return None
     return f"{base_url}/?section=research&tab=stock-study&symbol={symbol}"
@@ -2566,30 +2327,21 @@ async def intraday_tushare_minutes(symbols: list[str]) -> dict[str, dict[str, An
 
 
 def intraday_minute_profile_capture_enabled() -> bool:
-    return os.getenv("INTRADAY_MINUTE_PROFILE_CAPTURE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    return Settings.from_environ().intraday_minute_profile_capture_enabled
 
 
 def intraday_minute_profile_retention_days() -> int:
-    try:
-        return max(20, min(365, int(os.getenv("INTRADAY_MINUTE_PROFILE_RETENTION_DAYS", "90"))))
-    except ValueError:
-        return 90
+    return Settings.from_environ().intraday_minute_profile_retention_days
 
 
 def intraday_minute_profile_max_symbols() -> int:
     """Bound the close capture without silently reducing the normal pool."""
-    try:
-        return max(1, min(40, int(os.getenv("INTRADAY_MINUTE_PROFILE_MAX_SYMBOLS", "40"))))
-    except ValueError:
-        return 40
+    return Settings.from_environ().intraday_minute_profile_max_symbols
 
 
 def intraday_longhu_max_symbols() -> int:
     """Bound licensed per-security calls independently from the watch capacity."""
-    try:
-        return max(1, min(60, int(os.getenv("QUANT_LONGHU_INTRADAY_MAX_SYMBOLS", "24"))))
-    except ValueError:
-        return 24
+    return Settings.from_environ().longhu_intraday_max_symbols
 
 
 async def intraday_longhu_watch_quotes(
@@ -2768,6 +2520,13 @@ def _intraday_scan_persistence_dependencies() -> IntradayScanPersistenceServiceD
             confirmation_window=INTRADAY_CONFIRMATION_WINDOW,
             signal_model_version=INTRADAY_SIGNAL_MODEL_VERSION,
             factor_contract_version=INTRADAY_FACTOR_CONTRACT_VERSION,
+            # Guards this write against a superseded ``intraday_monitor``
+            # leased-loop holder (see runtime_composition.current_lease_fence).
+            # ``current_lease_fence`` returns None when this process never
+            # acquired that label's lease (e.g. a manual scan trigger), in
+            # which case the check below is a no-op.
+            lease_key=lease_key_for_label("intraday_monitor"),
+            lease_fence=lambda: current_lease_fence("intraday_monitor"),
             signal_dependencies=IntradayScanSignalPersistenceDependencies(
                 prepare_inputs=prepare_intraday_scan_inputs,
                 preparation_dependencies=IntradayScanPreparationDependencies(
@@ -2963,11 +2722,6 @@ async def open_provider_capabilities(provider_key: str, capabilities: list[str])
     return await read_async_open_provider_capabilities(async_db, provider_key, capabilities)
 
 
-def intraday_board_display_slots(selected_date: date, now: datetime | None = None) -> list[datetime]:
-    """Compatibility export for the board-curve read model's exchange clock grid."""
-    return _board_display_slots(selected_date, now)
-
-
 def intraday_board_flow_curve_items(kind: str, flows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize one Eastmoney board cross-section without stock-level joins.
 
@@ -3049,24 +2803,20 @@ async def intraday_board_flow_curve_loop() -> None:
 
 
 def strategy_review_automation_enabled() -> bool:
-    return os.getenv("STRATEGY_REVIEW_AUTOMATION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    return Settings.from_environ().strategy_review_automation_enabled
 
 
 def post_close_strategy_automation_enabled() -> bool:
-    return os.getenv("POST_CLOSE_STRATEGY_AUTOMATION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    return Settings.from_environ().post_close_strategy_automation_enabled
 
 
 def ten_day_leader_rotation_automation_enabled() -> bool:
-    return os.getenv("TEN_DAY_LEADER_ROTATION_AUTOMATION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    return Settings.from_environ().ten_day_leader_rotation_automation_enabled
 
 
 def daily_summary_automation_enabled() -> bool:
-    return os.getenv("DAILY_SUMMARY_AUTOMATION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    return Settings.from_environ().daily_summary_automation_enabled
 
-
-def sse_calendar_open(calendar_date: date) -> bool:
-    """Compatibility entry point for the isolated persisted SSE gate."""
-    return read_sse_calendar_open(db, calendar_date)
 
 
 async def sse_calendar_open_async(calendar_date: date) -> bool:
@@ -3162,7 +2912,7 @@ def _daily_strategy_summary_runtime_dependencies() -> DailyStrategySummaryRuntim
     return DailyStrategySummaryRuntimeDependencies(
         database=db, run_database=run_database_blocking, build_summary=build_daily_strategy_summary,
         summary_text=daily_strategy_summary_text,
-        dashboard_url=lambda: (os.getenv("QUANT_DASHBOARD_PUBLIC_URL") or "").strip().rstrip("/") or None,
+        dashboard_url=lambda: Settings.from_environ().dashboard_public_url,
         json_safe=strategy_json_safe, json_value=Json, terminal_for_exchange_date=daily_summary_terminal_isolated,
         calendar_open=sse_calendar_open_async,
         now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
@@ -3588,10 +3338,6 @@ async def run_strategy_decision(request: StrategyDecisionRequest) -> dict[str, A
         model_version=STRATEGY_DECISION_MODEL_VERSION,
     )
 
-async def sync_ths_industry_moneyflow_legacy(request: SectorFlowSyncRequest) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated THS flow synchronizer."""
-    return await sync_ths_industry_moneyflow(request)
-
 async def sync_ths_industry_moneyflow(request: SectorFlowSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by isolated THS industry flow sync."""
     return await sync_ths_industry_isolated(
@@ -3600,11 +3346,6 @@ async def sync_ths_industry_moneyflow(request: SectorFlowSyncRequest) -> dict[st
         run_database_blocking=run_database_blocking, db=db, upsert_taxonomy=upsert_sector_taxonomy, upsert_sector=upsert_sector,
         decimal_or_none=decimal_or_none, json_value=Json, observed_at=lambda: datetime.now(timezone.utc),
     )
-
-
-async def sync_ths_concept_signals_legacy(request: SectorFlowSyncRequest) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated THS concept synchronizer."""
-    return await sync_ths_concept_signals(request)
 
 
 async def sync_ths_concept_signals(request: SectorFlowSyncRequest) -> dict[str, Any]:
@@ -3616,10 +3357,6 @@ async def sync_ths_concept_signals(request: SectorFlowSyncRequest) -> dict[str, 
         decimal_or_none=decimal_or_none, json_value=Json, observed_at=lambda: datetime.now(timezone.utc), http_exception=HTTPException,
     )
 
-
-async def sync_ths_concept_members_legacy(request: ConceptMemberSyncRequest) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated THS member synchronizer."""
-    return await sync_ths_concept_members(request)
 
 async def sync_ths_concept_members(request: ConceptMemberSyncRequest) -> dict[str, Any]:
     """Compatibility entry point backed by isolated concept-member sync."""
@@ -3639,27 +3376,19 @@ async def sync_ths_concept_members(request: ConceptMemberSyncRequest) -> dict[st
 
 
 def ths_concept_member_backfill_enabled() -> bool:
-    return os.getenv("THS_CONCEPT_MEMBER_BACKFILL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    return Settings.from_environ().ths_concept_member_backfill_enabled
 
 
 def ths_concept_member_backfill_batch_size() -> int:
-    try:
-        value = int(os.getenv("THS_CONCEPT_MEMBER_BACKFILL_BATCH_SIZE", "25"))
-    except ValueError:
-        value = 25
-    return min(25, max(1, value))
+    return Settings.from_environ().ths_concept_member_backfill_batch_size
 
 
 def all_board_member_backfill_enabled() -> bool:
-    return os.getenv("ALL_BOARD_MEMBER_BACKFILL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    return Settings.from_environ().all_board_member_backfill_enabled
 
 
 def all_board_member_backfill_batch_size() -> int:
-    try:
-        value = int(os.getenv("ALL_BOARD_MEMBER_BACKFILL_BATCH_SIZE", "10"))
-    except ValueError:
-        value = 10
-    return min(25, max(1, value))
+    return Settings.from_environ().all_board_member_backfill_batch_size
 
 
 async def run_all_board_member_backfill_batch(request: AllBoardMemberBackfillRequest) -> dict[str, Any]:
@@ -3678,19 +3407,21 @@ async def run_all_board_member_backfill_batch(request: AllBoardMemberBackfillReq
 
 
 async def all_board_member_backfill_loop() -> None:
-    """Use the quieter post-close window for durable all-board coverage."""
-    while True:
-        local = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
-        if await sse_calendar_open_async(local.date()) and time(15, 10) <= local.time() < time(18, 0):
-            try:
-                await run_all_board_member_backfill_batch(AllBoardMemberBackfillRequest(
-                    batch_size=all_board_member_backfill_batch_size(), include_ths=True, include_eastmoney=True,
-                ))
-            except Exception as error:  # Durable per-board states make the next batch safe.
-                print(f"all board member backfill batch failed: {safe_error_detail(str(error), 300)}")
-            await asyncio.sleep(90)
-            continue
-        await asyncio.sleep(60)
+    """Compose the durable all-board backfill batch with its polling cadence."""
+    async def run_batch() -> None:
+        await run_all_board_member_backfill_batch(AllBoardMemberBackfillRequest(
+            batch_size=all_board_member_backfill_batch_size(), include_ths=True, include_eastmoney=True,
+        ))
+
+    def log_failure(message: str) -> None:
+        logger.warning(
+            f"all board member backfill batch failed: {safe_error_detail(message, 300)}",
+            extra={"task": "all_board_member_backfill"},
+        )
+
+    await run_all_board_member_backfill_loop_runtime(AllBoardMemberBackfillLoopDependencies(
+        sse_calendar_open_async=sse_calendar_open_async, run_batch=run_batch, log_failure=log_failure,
+    ))
 
 
 async def run_ths_concept_member_backfill_batch(request: ConceptMemberBackfillRequest) -> dict[str, Any]:
@@ -3713,15 +3444,101 @@ async def run_ths_concept_member_backfill_batch(request: ConceptMemberBackfillRe
 
 
 async def ths_concept_member_backfill_loop() -> None:
-    """After close, complete one rate-bounded THS member batch at a time."""
+    """Compose the fail-closed THS concept member batch with its polling cadence."""
+    async def run_batch() -> None:
+        await run_ths_concept_member_backfill_batch(ConceptMemberBackfillRequest(batch_size=ths_concept_member_backfill_batch_size()))
+
+    def log_failure(message: str) -> None:
+        logger.warning(
+            f"THS concept member backfill batch failed: {safe_error_detail(message, 300)}",
+            extra={"task": "ths_member_backfill"},
+        )
+
+    await run_ths_concept_member_backfill_loop_runtime(ThsConceptMemberBackfillLoopDependencies(
+        sse_calendar_open_async=sse_calendar_open_async, run_batch=run_batch, log_failure=log_failure,
+    ))
+
+
+#: Audit B-HIGH / WP7 follow-up: quant.retention_policies rows all start
+#: enabled=false (see migration 20260902_0085), so this task does nothing on
+#: a fresh deploy even if this automation flag is on. Both gates must be
+#: explicitly opted into before any row is ever deleted.
+RETENTION_MAINTENANCE_TASK_KEY = "retention_maintenance"
+RETENTION_MAINTENANCE_MAX_BATCHES_PER_TABLE = 50
+
+
+def retention_maintenance_automation_enabled() -> bool:
+    """Off by default: this task is new, deletes data, and has no operator history yet."""
+    return Settings.from_environ().retention_maintenance_automation_enabled
+
+
+def _enabled_retention_policy_tables(database: Any) -> list[str]:
+    with database.transaction() as connection:
+        rows = connection.execute(
+            "SELECT table_name FROM quant.retention_policies WHERE enabled ORDER BY table_name",
+        ).fetchall()
+    return [str(row["table_name"]) for row in rows]
+
+
+def _apply_one_retention_batch(database: Any, table_name: str) -> int:
+    # Each batch is its own transaction (matches retention_maintenance.py's
+    # existing manual operator script): a large delete must not hold locks
+    # or an open transaction for the whole multi-table run.
+    with database.transaction() as connection:
+        row = connection.execute(
+            "SELECT deleted_rows FROM quant.apply_retention_policy(%s)", (table_name,),
+        ).fetchone()
+    return int(row["deleted_rows"] or 0) if row else 0
+
+
+def _run_retention_maintenance_operation() -> dict[str, Any]:
+    tables = _enabled_retention_policy_tables(db)
+    results: dict[str, Any] = {}
+    for table_name in tables:
+        total_deleted, batches = 0, 0
+        try:
+            for _ in range(RETENTION_MAINTENANCE_MAX_BATCHES_PER_TABLE):
+                deleted = _apply_one_retention_batch(db, table_name)
+                total_deleted += deleted
+                batches += 1
+                if deleted == 0:
+                    break
+        except Exception as error:  # noqa: BLE001 - one table's failure must not block the others
+            results[table_name] = {"status": "failed", "error": safe_error_detail(str(error), 300)}
+            continue
+        results[table_name] = {"status": "completed", "deleted_rows": total_deleted, "batches": batches}
+    return {"status": "completed", "tables": results, "enabled_tables": len(tables)}
+
+
+async def run_retention_maintenance() -> dict[str, Any]:
+    """Run one durable, deduplicated retention pass (see run_recorded)."""
+    today = cn_today()
+    return await run_database_blocking(functools.partial(
+        run_recorded, db, task_key=RETENTION_MAINTENANCE_TASK_KEY, run_key=f"retention-maintenance:{today}",
+        operation=_run_retention_maintenance_operation, cadence="daily", as_of_date=today,
+        methodology_version="retention-maintenance-v1",
+    ), timeout_seconds=280, lane="batch")
+
+
+async def retention_maintenance_loop() -> None:
+    """Once daily, after the post-close window, apply every enabled retention policy."""
+    completed_dates: set[date] = set()
     while True:
         local = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))
-        if await sse_calendar_open_async(local.date()) and time(15, 10) <= local.time() < time(18, 0):
+        exchange_date = local.date()
+        if exchange_date not in completed_dates and time(16, 30) <= local.time() < time(18, 30):
             try:
-                await run_ths_concept_member_backfill_batch(ConceptMemberBackfillRequest(batch_size=ths_concept_member_backfill_batch_size()))
-            except Exception as error:  # noqa: BLE001 - durable state makes the next batch safe to retry
-                print(f"THS concept member backfill batch failed: {str(error)[:300]}")
-            await asyncio.sleep(65)
+                result = await run_retention_maintenance()
+                if str(result.get("status") or "") in {
+                    "completed", "partial", "skipped_running_elsewhere", "skipped_in_flight_process",
+                }:
+                    completed_dates.add(exchange_date)
+            except Exception as error:  # noqa: BLE001 - retry within the same window on the next tick
+                logger.warning(
+                    f"retention maintenance failed: {safe_error_detail(str(error), 300)}",
+                    extra={"task": "retention_maintenance"},
+                )
+            await asyncio.sleep(120)
             continue
         await asyncio.sleep(60)
 
@@ -3862,13 +3679,13 @@ async def sync_cninfo_announcements(request: AnnouncementSyncRequest) -> dict[st
     )
 
 
-async def run_post_close_refresh_legacy(request: PostCloseRefreshRequest) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the lease-aware orchestrator."""
-    return await run_post_close_refresh(request)
-
-
 async def _post_close_core_symbols(limit: int) -> list[str]:
     return await read_async_limited_core_symbols(async_db, limit)
+
+
+async def check_post_close_refresh_lease_fence(database: Any, lease_key: str, fence: int) -> None:
+    """Run the fencing-token check through the bounded database executor."""
+    await run_database_blocking(check_runtime_lease_fence, database, lease_key, fence, timeout_seconds=10)
 
 
 def _post_close_refresh_dependencies() -> PostCloseRefreshDependencies:
@@ -3878,6 +3695,7 @@ def _post_close_refresh_dependencies() -> PostCloseRefreshDependencies:
         longhu_close_context=lambda trade_date: read_longhu_close_context(db, trade_date),
         provider_configs=provider_configs, run_database=run_database_blocking,
         reconcile_stale_fetch_runs=reconcile_stale_fetch_runs, reprocess_remote_reports=reprocess_remote_reports,
+        reconcile_stale_automation_runs=reconcile_stale_automation_runs,
         sync_market_universe=sync_market_universe, sync_full_market_daily=sync_full_market_daily,
         sync_strategy_index_context=sync_strategy_index_context, build_market_snapshot=build_market_snapshot,
         load_core_symbols=_post_close_core_symbols, akshare_probe=akshare_probe,
@@ -3897,6 +3715,8 @@ def _post_close_refresh_dependencies() -> PostCloseRefreshDependencies:
         lease_seconds=post_close_refresh_lease_seconds, acquire_lease=acquire_runtime_lease,
         renew_lease=renew_runtime_lease, release_lease=release_runtime_lease,
         safe_error_detail=safe_error_detail, json_safe=strategy_json_safe,
+        check_lease_fence=check_post_close_refresh_lease_fence,
+        post_close_strategy_model_version=POST_CLOSE_STRATEGY_MODEL_VERSION,
     )
 
 
@@ -4079,11 +3899,6 @@ def latest_study_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     return max(rows, key=study_date_key) if rows else None
 
 
-def raw_api_window_summary(connection: Any, api_name: str, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
-    """Compatibility export for the isolated stock-study readiness repository."""
-    return read_raw_api_window_summary(connection, api_name, symbol, start_date, end_date)
-
-
 def stock_window_readiness(symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
     """Compatibility export for the isolated stock-study readiness repository."""
     return read_stock_window_readiness(db, symbol, start_date, end_date)
@@ -4156,8 +3971,8 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
             "minute_profile_capture": intraday_minute_profile_capture_enabled(),
             "tencent_order_book": intraday_order_book_enabled() and interval_seconds >= 30,
             "board_flow_curve": intraday_board_curve_enabled(),
-            "market_event_capture": os.getenv("MARKET_EVENT_CAPTURE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
-            "all_a_level1_snapshot": os.getenv("ALL_A_LEVEL1_CAPTURE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
+            "market_event_capture": Settings.from_environ().market_event_capture_enabled,
+            "all_a_level1_snapshot": Settings.from_environ().all_a_level1_capture_enabled,
         },
         loops={
             "intraday_monitor": lambda: intraday_monitor_loop(interval_seconds),
@@ -4171,6 +3986,12 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
             "all_a_level1_snapshot": all_a_level1_snapshot_capture_loop,
         },
     )
+    # ``background_task_catalog.build_specs`` enumerates a fixed label tuple
+    # that does not include this task; append it directly here so a new
+    # entry does not require touching that shared, hand-enumerated catalog.
+    specs = (*specs, BackgroundTaskSpec(
+        RETENTION_MAINTENANCE_TASK_KEY, retention_maintenance_automation_enabled(), retention_maintenance_loop,
+    ))
     validate_runtime_task_specs(specs)
     return start_leased_background_tasks(
         apply_background_runtime_profile(specs),
@@ -4208,6 +4029,8 @@ def _application_lifecycle_dependencies() -> ApplicationLifecycleDependencies:
         ensure_catalog_capabilities=ensure_catalog_capabilities,
         run_database=run_database_blocking,
         verify_strategy_contracts=_verify_strategy_runtime_contracts,
+        resolve_write_api_key=resolve_write_api_key,
+        control_plane_writes_enabled=control_plane_writes_enabled,
         start_background_tasks=_start_application_background_tasks,
         cancel_background_tasks=cancel_background_tasks,
         cancel_shared_snapshots=_intraday_all_a_snapshots.cancel_inflight,
@@ -4242,6 +4065,12 @@ _metrics_control_plane_refreshed_at = 0.0
 background_loop_registry = LoopRuntimeRegistry()
 
 
+def _set_db_pool_gauge(pool: dict[str, Any]) -> None:
+    db_pool_connections.labels("size").set(pool["pool_size"])
+    db_pool_connections.labels("available").set(pool["available"])
+    db_pool_connections.labels("waiting").set(pool["waiting"])
+
+
 def refresh_metrics_control_plane(*, now: float | None = None) -> bool:
     """Refresh pool/circuit gauges from local state at most once per short TTL.
 
@@ -4260,10 +4089,7 @@ def refresh_metrics_control_plane(*, now: float | None = None) -> bool:
         if observed_at - _metrics_control_plane_refreshed_at < _METRICS_CONTROL_PLANE_REFRESH_SECONDS:
             return False
         try:
-            pool = db.pool_status()
-            db_pool_connections.labels("size").set(pool["pool_size"])
-            db_pool_connections.labels("available").set(pool["available"])
-            db_pool_connections.labels("waiting").set(pool["waiting"])
+            _set_db_pool_gauge(db.pool_status())
             with db.transaction() as connection:
                 open_circuits = connection.execute(
                     "SELECT count(*)::int AS count FROM quant.provider_health WHERE circuit_open_until > now()"
@@ -4289,13 +4115,13 @@ async def executor_saturated_response(_: Request, __: ExecutorSaturatedError) ->
 app.include_router(build_provider_status_router(db, provider_status, free_provider_status, async_database=async_db))
 app.include_router(build_longhu_reads_router(
     configured=longhu_vendor_configured,
-    shared_read_key=lambda: os.getenv("QUANT_SHARED_READ_API_KEY", ""),
+    shared_read_key=lambda: Settings.from_environ().shared_read_api_key,
     quotes=shared_longhu_quotes,
     minutes=intraday_longhu_minutes,
 ))
 app.include_router(build_licensed_stock_api_router(
     configured=longhu_vendor_configured,
-    shared_read_key=lambda: os.getenv("QUANT_SHARED_READ_API_KEY", ""),
+    shared_read_key=lambda: Settings.from_environ().shared_read_api_key,
     call=shared_stock_api_call,
 ))
 app.include_router(build_research_readiness_router(
@@ -4388,33 +4214,68 @@ app.include_router(build_market_result_reads_router(
 ))
 
 
+# ``QUANT_WRITE_API_KEY`` used to be read fresh from the environment on every
+# request, which silently allowed every write when it was unset (fail-open)
+# and gave the middleware no natural place to fail closed at startup.  It is
+# now resolved once by ``resolve_write_api_key`` (invoked from the real
+# application lifespan; see ``_application_lifecycle_dependencies``) and
+# cached here.  Tests that bypass the real lifespan configure this directly.
+_write_api_key_state: dict[str, str] = {"value": ""}
+
+
+def configured_write_api_key() -> str:
+    """Return the write API key resolved once at startup."""
+    return _write_api_key_state["value"]
+
+
+def resolve_write_api_key() -> None:
+    """Fail closed at startup when no write key is configured.
+
+    ``QUANT_ALLOW_UNAUTHENTICATED_WRITES=1`` is an explicit, logged opt-out
+    for local development; production deployments must set
+    ``QUANT_WRITE_API_KEY`` or the process refuses to start.
+    """
+    settings = Settings.from_environ()
+    key = settings.write_api_key
+    allow_unauthenticated = settings.allow_unauthenticated_writes
+    if not key and not allow_unauthenticated:
+        raise RuntimeError("QUANT_WRITE_API_KEY is required")
+    if not key:
+        logger.warning(
+            "QUANT_WRITE_API_KEY is not set; QUANT_ALLOW_UNAUTHENTICATED_WRITES=1 "
+            "permits every write request without a key. Do not use this outside local development."
+        )
+    _write_api_key_state["value"] = key
+
+
 @app.middleware("http")
 async def require_quant_write_key(request: Request, call_next: Any) -> Any:
-    configured_key = os.getenv("QUANT_WRITE_API_KEY", "").strip()
+    configured_key = configured_write_api_key()
     supplied_key = request.headers.get("X-Quant-Write-Key")
     licensed_read = licensed_stock_read_allowed(
-        request, os.getenv("QUANT_SHARED_READ_API_KEY", ""),
+        request, Settings.from_environ().shared_read_api_key,
     )
-    if (
-        not write_access_allowed(request.method, supplied_key, configured_key)
-        and not remote_archive_sync_bearer_allowed(request)
-        and not licensed_read
-    ):
+    if not write_access_allowed(request.method, supplied_key, configured_key) and not licensed_read:
         return JSONResponse(status_code=401, content={"detail": "valid X-Quant-Write-Key is required for write operations"})
+    # The remote-archive-sync trigger is not a bypass of the write key above:
+    # it always needs the write key like any other write route, and on top
+    # of that must present a bearer-shaped Authorization header before this
+    # service will contact the remote archive and record an automation run.
+    if (
+        request.method.upper() == "POST"
+        and request.url.path == "/api/v1/remote-archive/sync"
+        and not remote_archive_sync_bearer_allowed(request)
+    ):
+        return JSONResponse(status_code=401, content={"detail": "remote archive sync requires a bearer-shaped Authorization header"})
     return await call_next(request)
 
 
 def _health_payload() -> dict[str, Any]:
     """Build local runtime evidence without touching market providers."""
-    def set_db_pool_gauge(pool: dict[str, Any]) -> None:
-        db_pool_connections.labels("size").set(pool["pool_size"])
-        db_pool_connections.labels("available").set(pool["available"])
-        db_pool_connections.labels("waiting").set(pool["waiting"])
-
     return read_health_payload(HealthDependencies(
             database=db, post_close_lease_key=POST_CLOSE_REFRESH_LEASE_KEY,
             background_loop_lease_seconds=background_loop_lease_seconds,
-            data_directory=lambda: Path(os.getenv("QUANT_DATA_DIR", "/var/lib/quant")),
+            data_directory=lambda: Path(Settings.from_environ().data_dir),
             resource_status=runtime_resource_status, public_http_client_status=public_http_client_status,
             alert_http_client_status=alert_http_client_status, provider_http_client_status=provider_http_client_status,
             remote_archive_http_client_status=remote_archive_http_client_status,
@@ -4433,7 +4294,7 @@ def _health_payload() -> dict[str, Any]:
             board_curve_enabled=intraday_board_curve_enabled,
             board_curve_retention_days=intraday_board_curve_retention_days,
             board_rotation_retention_days=intraday_board_rotation_retention_days,
-            set_db_pool_gauge=set_db_pool_gauge, set_open_circuit_gauge=provider_circuit_open.set,
+            set_db_pool_gauge=_set_db_pool_gauge, set_open_circuit_gauge=provider_circuit_open.set,
             research_storage_governance=local_research_storage_governance,
             background_loop_status=background_loop_registry.snapshot,
             runtime_task_contracts=runtime_task_contract_catalog,
@@ -4447,6 +4308,7 @@ def _health_payload() -> dict[str, Any]:
             live_session_acceptance_status=read_live_session_acceptance,
             release_metadata=release_metadata,
             post_close_runtime_status=post_close_refresh_runtime.status,
+            control_plane_writes_enabled=control_plane_writes_enabled,
     ))
 
 
@@ -4460,19 +4322,7 @@ def _metrics_response() -> Response:
 
 def intraday_services_status_payload() -> dict[str, Any]:
     """Build the status board through the independent local read model."""
-    return read_intraday_services_status_payload(IntradayStatusDependencies(
-        database=db, alert_max_attempts=INTRADAY_ALERT_MAX_ATTEMPTS,
-        realtime_market_session=realtime_market_session, board_curve_session=intraday_board_curve_session,
-        high_frequency_window=intraday_high_frequency_window, scan_interval_seconds=intraday_scan_interval_seconds,
-        provider_status=provider_status, runtime_service_state=intraday_runtime_service_state,
-        json_safe=strategy_json_safe, super_get_fast_interval_seconds=intraday_super_get_fast_interval_seconds,
-        super_get_fast_max_in_flight=intraday_super_get_fast_max_in_flight,
-        fast_quote_retention_days=intraday_fast_quote_retention_days, board_curve_enabled=intraday_board_curve_enabled,
-        board_curve_retention_days=intraday_board_curve_retention_days,
-        board_rotation_retention_days=intraday_board_rotation_retention_days,
-        daily_summary_automation_enabled=daily_summary_automation_enabled,
-        order_book_max_symbols=intraday_order_book_max_symbols,
-    ))
+    return read_intraday_services_status_payload(_intraday_status_dependencies())
 
 
 def _intraday_status_dependencies() -> IntradayStatusDependencies:
@@ -4503,19 +4353,10 @@ app.include_router(build_intraday_status_router(
 ))
 
 
-def _legacy_schema_bootstrap() -> dict[str, Any]:
-    if not legacy_schema_bootstrap_enabled():
-        raise HTTPException(status_code=409, detail="legacy schema bootstrap is disabled; use versioned Alembic migrations")
-    db.migrate()
-    ensure_catalog_capabilities()
-    return {"status": "ok", "catalog": catalog_counts()}
-
-
 app.include_router(build_system_control_router(SystemControlDependencies(
     health_payload=_health_payload,
     database_unavailable_error=DatabaseUnavailableError,
     metrics_response=_metrics_response,
-    legacy_bootstrap=_legacy_schema_bootstrap,
 )))
 
 
@@ -4647,10 +4488,6 @@ app.include_router(build_provider_actions_router(ProviderActionDependencies(
 )))
 
 
-def tushare_raw(api_name: str, provider: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
-    """Compatibility export for the market-result read model."""
-    return market_result_reads.tushare_raw(db, api_name, provider, limit, offset, TUSHARE_CATALOG)
-
 
 def analyse_ingestion(analysis_id: uuid.UUID) -> dict[str, Any]:
     # Compatibility endpoint for older callers.  Analyst claims are now only
@@ -4704,19 +4541,10 @@ def update_analyst_research_profile(analyst_id: str, payload: AnalystResearchPro
     return update_analyst_research_profile_isolated(analyst_id, payload, _research_maintenance_dependencies())
 
 
-def review_claim_legacy(review_id: uuid.UUID, payload: ClaimReviewRequest) -> dict[str, Any]:
-    """Deprecated compatibility alias; use the isolated claim-review service."""
-    return review_claim(review_id, payload)
-
-
 def review_claim(review_id: uuid.UUID, payload: ClaimReviewRequest) -> dict[str, Any]:
     """Compatibility entry point for point-in-time safe claim review."""
     return review_claim_isolated(review_id, payload, database=db, exchange_for=exchange_for)
 
-
-def universe_members(universe_key: str) -> dict[str, Any]:
-    """Compatibility export for the research-catalog read model."""
-    return research_catalog_reads.universe_members(db, universe_key)
 
 
 def update_universe_members(payload: UniverseUpdateRequest) -> dict[str, Any]:
@@ -4727,10 +4555,6 @@ def build_features(payload: GenerateRequest) -> dict[str, Any]:
     return build_feature_snapshot(payload.as_of_date or cn_today(), payload.universe_key)
 
 
-def latest_features(universe_key: str = "core", limit: int = 200) -> dict[str, Any]:
-    """Compatibility export for the research-catalog read model."""
-    return research_catalog_reads.latest_features(db, universe_key, limit)
-
 
 def _research_experiment_dependencies() -> ResearchExperimentDependencies:
     return ResearchExperimentDependencies(
@@ -4740,46 +4564,26 @@ def _research_experiment_dependencies() -> ResearchExperimentDependencies:
     )
 
 
-def research_window(connection: Any, universe_key: str, start_date: date | None, end_date: date | None) -> tuple[date, date]:
-    """Compatibility export for the isolated local experiment window."""
-    return research_window_isolated(connection, universe_key, start_date, end_date, http_exception=HTTPException)
-
-
-def factor_registry() -> dict[str, Any]:
-    """Compatibility export for the research-catalog read model."""
-    return research_catalog_reads.factor_registry(db)
 
 
 def evaluate_factors(payload: FactorEvaluationRequest) -> dict[str, Any]:
     return evaluate_factors_isolated(payload, _research_experiment_dependencies())
 
 
-def factor_evaluations(universe_key: str = "core", limit: int = 100) -> dict[str, Any]:
-    """Compatibility export for the research-catalog read model."""
-    return research_catalog_reads.factor_evaluations(db, universe_key, limit)
-
-
-def strategy_registry() -> dict[str, Any]:
-    """Compatibility export for the research-catalog read model."""
-    return research_catalog_reads.strategy_registry(db)
 
 
 def backtest_strategy(payload: StrategyBacktestRequest) -> dict[str, Any]:
     return backtest_strategy_isolated(payload, _research_experiment_dependencies())
 
 
-def strategy_experiments(universe_key: str = "core", limit: int = 50) -> dict[str, Any]:
-    """Compatibility export for the research-catalog read model."""
-    return research_catalog_reads.strategy_experiments(db, universe_key, limit)
-
 
 def reconcile_stale_fetch_runs(payload: FetchRunReconcileRequest) -> dict[str, Any]:
     return reconcile_stale_fetch_runs_isolated(payload, _research_maintenance_dependencies())
 
 
-def data_quality_issues(limit: int = 100) -> dict[str, Any]:
-    """Compatibility export for the research-catalog read model."""
-    return research_catalog_reads.data_quality_issues(db, limit)
+def reconcile_stale_automation_runs() -> dict[str, Any]:
+    return reconcile_stale_automation_runs_isolated(_research_maintenance_dependencies())
+
 
 
 def build_snapshot(payload: SnapshotRequest) -> dict[str, Any]:
@@ -4872,80 +4676,33 @@ async def replay_recorded_intraday_events_endpoint(payload: IntradayEventReplayR
     return await run_database_blocking(replay_recorded_intraday_events, payload, timeout_seconds=60)
 
 
+def _intraday_replay_dependencies() -> IntradayReplayDependencies:
+    return IntradayReplayDependencies(
+        database=db, model_version=INTRADAY_SIGNAL_MODEL_VERSION, signal_rules=intraday_signal_rules,
+    )
+
+
 def replay_recorded_intraday_rule_inputs(payload: IntradayRuleInputReplayRequest) -> dict[str, Any]:
-    def evaluate(inputs: dict[str, Any]) -> list[dict[str, Any]]:
-        return intraday_signal_rules(
-            inputs["watch"], inputs["quote"], inputs["previous_quote"], inputs["daily_factors"],
-            inputs["minute_features"], inputs["peer_context"],
-        )
-
-    def evaluate_policy(signal: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
-        """Replay the same pure risk/policy gate from snapshot-local inputs.
-
-        V1 snapshots never call this function because they did not capture the
-        required point-in-time market and portfolio values.  The generic
-        replay runner labels them core-rule-only instead of reading current
-        database state.
-        """
-        portfolio_context = dict(inputs.get("portfolio_context") or {})
-        portfolio_gate = paper_risk_gate(
-            signal_type=str(signal.get("signal_type") or "watch"),
-            symbol=str(inputs["watch"]["symbol"]),
-            position=dict(portfolio_context.get("position") or {}),
-            snapshot=dict(portfolio_context.get("snapshot") or {}),
-            candidate_sector_keys=list(portfolio_context.get("candidate_sector_keys") or ()),
-        )
-        portfolio_risk = {
-            "allowed": portfolio_gate.allowed, "target_weight": portfolio_gate.target_weight,
-            "reasons": list(portfolio_gate.reasons), "risk_flags": list(portfolio_gate.risk_flags),
-        }
-        return live_policy_gate(
-            signal, inputs["watch"], inputs["quote"], inputs["daily_factors"],
-            dict(inputs.get("market_context") or {}), dict(inputs.get("fast_confirmation") or {}),
-            portfolio_risk,
-        )
-
-    with db.transaction() as connection:
-        return run_recorded_rule_input_replay(
-            connection, as_of_date=payload.as_of_date, max_rows=payload.max_rows,
-            model_version=INTRADAY_SIGNAL_MODEL_VERSION, evaluate=evaluate, evaluate_policy=evaluate_policy,
-        )
+    """Compatibility export backed by the intraday replay service module."""
+    return intraday_replay_service.replay_recorded_intraday_rule_inputs(payload, _intraday_replay_dependencies())
 
 
 async def replay_recorded_intraday_rule_inputs_endpoint(payload: IntradayRuleInputReplayRequest) -> dict[str, Any]:
     return await run_database_blocking(replay_recorded_intraday_rule_inputs, payload, timeout_seconds=60)
 
 
-def run_intraday_entry_timing_challengers(payload: IntradayRuleInputReplayRequest) -> dict[str, Any]:
-    def evaluate_variant(inputs: dict[str, Any], overrides: dict[str, Any]) -> list[dict[str, Any]]:
-        observed_at = (inputs.get("quote") or {}).get("_scan_observed_at")
-        opening_gap_window = (
-            isinstance(observed_at, datetime)
-            and time(9, 30) <= observed_at.astimezone(ZoneInfo("Asia/Shanghai")).time() < time(9, 40)
-        )
-        return pure_intraday_signal_rules(
-            inputs["watch"], inputs["quote"], inputs["previous_quote"], inputs["daily_factors"],
-            inputs["minute_features"], inputs["peer_context"],
-            number=intraday_number, upside_assessment_fn=intraday_upside_research_assessment,
-            model_version=INTRADAY_SIGNAL_MODEL_VERSION, opening_gap_window=opening_gap_window,
-            **overrides,
-        )
+def _intraday_entry_timing_challenger_dependencies() -> IntradayEntryTimingChallengerDependencies:
+    return IntradayEntryTimingChallengerDependencies(
+        database=db, model_version=INTRADAY_SIGNAL_MODEL_VERSION, pure_signal_rules=pure_intraday_signal_rules,
+        number=intraday_number, upside_assessment=intraday_upside_research_assessment,
+    )
 
-    with db.transaction() as connection:
-        as_of_date = payload.as_of_date
-        if as_of_date is None:
-            row = connection.execute(
-                """SELECT max((observed_at AT TIME ZONE 'Asia/Shanghai')::date) AS d
-                     FROM quant.intraday_rule_input_snapshots WHERE model_version=%s""",
-                (INTRADAY_SIGNAL_MODEL_VERSION,),
-            ).fetchone()
-            as_of_date = row["d"] if row else None
-        if as_of_date is None:
-            return {"status": "blocked", "reason": "no recorded rule-input snapshots for this model version"}
-        return run_intraday_entry_timing_challenger_backtest(
-            connection, as_of_date, model_version=INTRADAY_SIGNAL_MODEL_VERSION,
-            evaluate_variant=evaluate_variant, max_rows=payload.max_rows,
-        )
+
+def run_intraday_entry_timing_challengers(payload: IntradayRuleInputReplayRequest) -> dict[str, Any]:
+    """Compatibility export backed by the intraday replay service module."""
+    return intraday_replay_service.run_intraday_entry_timing_challengers(
+        payload, _intraday_entry_timing_challenger_dependencies(),
+    )
 
 
 async def run_intraday_entry_timing_challengers_endpoint(payload: IntradayRuleInputReplayRequest) -> dict[str, Any]:
@@ -4975,13 +4732,6 @@ app.include_router(build_research_actions_router(ResearchActionDependencies(
 )))
 
 
-def research_overview() -> dict[str, Any]:
-    """Compatibility export for the market-result read model."""
-    return market_result_reads.research_overview(
-        db, current_data_coverage_fn=current_data_coverage, feature_readiness_fn=feature_readiness_state,
-        history_estimate_fn=lambda: historical_estimate_from_db(HistoricalCoverageEstimateRequest(years=3, include_minute=False)),
-    )
-
 
 def import_bars(payload: BarsImport) -> dict[str, int]:
     with db.transaction() as connection:
@@ -5004,11 +4754,29 @@ async def sync_full_market_daily_controls_endpoint(
     return await sync_full_market_daily_controls(payload.trade_date)
 
 
+def _require_post_close_strategy_ownership() -> None:
+    """Refuse a one-click refresh on a process that does not own this task.
+
+    Without this, an ``intraday_edge`` process could trigger the same
+    research-side writes as the ``research`` owner through this HTTP endpoint,
+    racing the scheduled post-close loop's lease/run_key even though the
+    background loop itself is correctly disabled on this profile.
+    """
+    profile = background_runtime_profile()
+    if not runtime_profile_owns_task(profile, "post_close_strategy"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"this instance (runtime profile={profile}) does not own post_close_strategy",
+        )
+
+
 async def post_close_refresh_endpoint(payload: PostCloseRefreshRequest) -> dict[str, Any]:
+    _require_post_close_strategy_ownership()
     return await post_close_refresh_runtime.run(lambda: run_post_close_refresh(payload))
 
 
 async def start_post_close_refresh_endpoint(payload: PostCloseRefreshRequest) -> dict[str, Any]:
+    _require_post_close_strategy_ownership()
     return post_close_refresh_runtime.start(lambda: run_post_close_refresh(payload))
 
 
@@ -5095,19 +4863,6 @@ async def run_watchlist_main_wave_endpoint(payload: WatchlistMainWaveResearchReq
     return await run_database_blocking(persist_watchlist_main_wave_research, payload, timeout_seconds=90)
 
 
-def latest_strategy_pattern_mining() -> dict[str, Any]:
-    """Compatibility export; HTTP reads use the isolated read model."""
-    return read_latest_strategy_pattern_mining(
-        db, merge_limit_pool_sources, limit_board_count, strategy_json_safe,
-        post_close_limit_daily_features, post_close_exact_board_context,
-        post_close_tushare_lhb_context,
-    )
-
-
-def list_intraday_watchlists() -> dict[str, Any]:
-    """Compatibility export for the intraday-evidence read model."""
-    return intraday_evidence_reads.watchlists(db)
-
 
 def latest_intraday_decision_card(symbol: str) -> dict[str, Any]:
     symbol = symbol.upper()
@@ -5170,35 +4925,7 @@ app.include_router(build_intraday_actions_router(IntradayActionDependencies(
 )))
 
 
-def latest_close_sector_review_report() -> dict[str, Any]:
-    """Compatibility export for the local board-review read model."""
-    return read_latest_close_sector_review_report(db)
 
-
-def intraday_board_flow_curves(
-    trade_date: date | None = None,
-    taxonomy: Literal["industry", "concept"] = "industry",
-    since: datetime | None = None,
-) -> dict[str, Any]:
-    """Compatibility export for the bounded board-curve read model."""
-    return read_intraday_board_flow_curves(
-        db, trade_date, taxonomy, since,
-        curve_retention_days=intraday_board_curve_retention_days(),
-        rotation_retention_days=intraday_board_rotation_retention_days(),
-    )
-
-
-def ths_concept_member_backfill_status(trade_date: date | None = None) -> dict[str, Any]:
-    """Compatibility export for the sector read model."""
-    return sector_reads.concept_member_backfill_status(
-        db, trade_date,
-        automatic_enabled=ths_concept_member_backfill_enabled(), batch_size=ths_concept_member_backfill_batch_size(),
-    )
-
-
-def latest_intraday_watchlist_scan() -> dict[str, Any]:
-    """Compatibility export for the bounded intraday-evidence read model."""
-    return intraday_evidence_reads.latest_scan(db)
 
 
 async def sync_sector_flows_endpoint(payload: SectorFlowSyncRequest) -> dict[str, Any]:
@@ -5245,38 +4972,14 @@ app.include_router(build_sector_actions_router(SectorActionDependencies(
 )))
 
 
-def concept_sector_signals(trade_date: date | None = None, limit: int = 500) -> dict[str, Any]:
-    """Compatibility export for the sector read model."""
-    return sector_reads.concept_sector_signals(db, trade_date, limit)
 
 
-def concept_limit_candidates(trade_date: date | None = None, limit: int = 100) -> dict[str, Any]:
-    """Compatibility export for the sector read model."""
-    return sector_reads.concept_limit_candidates(db, trade_date, limit)
 
-
-def sector_flows(taxonomy_key: str = "ths_industry", trade_date: date | None = None, limit: int = 100) -> dict[str, Any]:
-    """Compatibility export for the sector read model."""
-    return sector_reads.sector_flows(db, taxonomy_key, trade_date, limit)
-
-
-def market_sectors(taxonomy_key: str = "ths_index_n", limit: int = 500, offset: int = 0) -> dict[str, Any]:
-    """Compatibility export for the sector read model."""
-    return sector_reads.market_sectors(db, taxonomy_key, limit, offset)
-
-
-def sector_members(sector_key: str, taxonomy_key: str = "ths_index_n", limit: int = 500, offset: int = 0) -> dict[str, Any]:
-    """Compatibility export for the sector read model."""
-    return sector_reads.sector_members(db, sector_key, taxonomy_key, limit, offset)
 
 
 async def run_market_snapshot_endpoint(payload: MarketSnapshotRequest) -> dict[str, Any]:
     return await build_market_snapshot(payload)
 
-
-def market_snapshots(limit: int = 20) -> dict[str, Any]:
-    """Compatibility export for the market-result read model."""
-    return market_result_reads.market_snapshots(db, limit)
 
 
 def import_offline_minute_bars(payload: OfflineMinuteImportRequest) -> dict[str, Any]:
@@ -5289,10 +4992,6 @@ def import_offline_minute_bars(payload: OfflineMinuteImportRequest) -> dict[str,
 async def import_offline_minute_bars_endpoint(payload: OfflineMinuteImportRequest) -> dict[str, Any]:
     return await run_database_blocking(import_offline_minute_bars, payload, timeout_seconds=60)
 
-
-def offline_minute_imports(limit: int = 30) -> dict[str, Any]:
-    """Compatibility export for the market-result read model."""
-    return market_result_reads.offline_minute_imports(db, limit, str(offline_data_root()))
 
 
 async def sync_tushare_endpoint(payload: TushareSyncRequest) -> dict[str, Any]:
@@ -5320,10 +5019,6 @@ async def scorecards(as_of_date: date | None = None) -> dict[str, Any]:
     return await run_database_blocking(recompute_scorecards, as_of_date, timeout_seconds=30)
 
 
-def analyst_scorecards(limit: int = 200) -> dict[str, Any]:
-    """Compatibility export for the market-result read model."""
-    return market_result_reads.analyst_scorecards(db, limit, analyst_scorecard_readiness)
-
 
 async def outcomes(as_of_date: date | None = None) -> dict[str, Any]:
     return await run_database_blocking(recompute_outcomes, as_of_date, timeout_seconds=60)
@@ -5332,15 +5027,6 @@ async def outcomes(as_of_date: date | None = None) -> dict[str, Any]:
 async def intraday_outcomes(as_of_date: date | None = None) -> dict[str, Any]:
     return await run_database_blocking(recompute_intraday_signal_outcomes, as_of_date, timeout_seconds=60)
 
-
-def latest_intraday_outcomes(limit: int = 100) -> dict[str, Any]:
-    """Compatibility export for the bounded intraday-outcome read model."""
-    return read_latest_intraday_outcomes(
-        db, limit,
-        market_context_batch_fn=intraday_point_in_time_market_context_batch,
-        attribution_fn=intraday_signal_attribution,
-        attribution_summary_fn=intraday_outcome_attribution_summary,
-    )
 
 
 async def recommendations(payload: GenerateRequest) -> dict[str, Any]:
@@ -5384,11 +5070,4 @@ app.include_router(build_ten_day_leader_rotation_actions_router(
 ))
 
 
-def latest_recommendations() -> dict[str, Any]:
-    """Compatibility export for the market-result read model."""
-    return market_result_reads.latest_recommendations(db)
 
-
-def metrics() -> dict[str, Any]:
-    """Compatibility export for the market-result read model."""
-    return market_result_reads.metrics(db)

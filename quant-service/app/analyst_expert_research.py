@@ -165,6 +165,15 @@ def rebuild_analyst_opinions(
                    "source_fingerprint": source_fingerprint, "materialized_as_of": str(as_of_date)})),
         ).fetchone()
         if previous is not None and previous["source_fingerprint"] != source_fingerprint:
+            # Archive rather than bare-DELETE: the outcome computed under the
+            # opinion's previous source fingerprint stays reviewable instead
+            # of disappearing the moment an upstream claim correction lands.
+            connection.execute(
+                """INSERT INTO quant.analyst_opinion_outcomes_history(opinion_id,horizon_days,methodology_version,old_row)
+                     SELECT opinion_id,horizon_days,methodology_version,to_jsonb(o)
+                       FROM quant.analyst_opinion_outcomes o WHERE opinion_id=%s""",
+                (opinion["opinion_id"],),
+            )
             deleted = connection.execute("DELETE FROM quant.analyst_opinion_outcomes WHERE opinion_id=%s", (opinion["opinion_id"],))
             invalidated_outcomes += int(deleted.rowcount or 0)
         statuses[factor_status] += 1
@@ -269,6 +278,33 @@ def _industry_size_benchmark_return(connection: Any, opinion: dict[str, Any], en
     return (mean(values), "industry_size_peer") if len(values) >= 8 else (fallback_return, "broad_market_fallback")
 
 
+def _delisted_stock_return(connection: Any, symbol: str, entry_date: date, exit_date: date) -> tuple[float | None, int, bool]:
+    """Settle a delisted single-stock opinion at its last observed close.
+
+    ``_basket_return`` requires an exact bar on ``exit_date``, which no
+    longer exists once a symbol is delisted; that made every delisted-stock
+    opinion permanently ``unavailable`` and invisible to hit_rate, a
+    survivorship bias in the write path itself.  Only used as a fallback for
+    scope='stock' opinions once the plain basket join comes back empty.
+    """
+    instrument = connection.execute(
+        "SELECT delist_date FROM quant.instruments WHERE symbol=%s", (symbol,),
+    ).fetchone()
+    delist_date = instrument["delist_date"] if instrument else None
+    if delist_date is None or delist_date > exit_date:
+        return None, 0, False
+    last_bar = connection.execute(
+        """SELECT close FROM quant.canonical_bars_daily WHERE symbol=%s AND trading_date<=%s
+             ORDER BY trading_date DESC LIMIT 1""", (symbol, delist_date),
+    ).fetchone()
+    entry_bar = connection.execute(
+        "SELECT close FROM quant.canonical_bars_daily WHERE symbol=%s AND trading_date=%s", (symbol, entry_date),
+    ).fetchone()
+    if last_bar is None or entry_bar is None or _number(entry_bar["close"]) <= 0:
+        return None, 0, False
+    return _number(last_bar["close"]) / _number(entry_bar["close"]) - 1, 1, True
+
+
 def recompute_analyst_opinion_outcomes(connection: Any, as_of_date: date) -> dict[str, Any]:
     opinions = [dict(row) for row in connection.execute(
         "SELECT * FROM quant.analyst_opinions WHERE (available_at AT TIME ZONE 'Asia/Shanghai')::date<=%s", (as_of_date,)
@@ -282,8 +318,16 @@ def recompute_analyst_opinion_outcomes(connection: Any, as_of_date: date) -> dic
             raw_return = benchmark_return = residual_return = directional_return = None
             basket_size = 0
             volatility = normalized_reward = None
+            delisted = False
             if status == "matured":
                 raw_return, basket_size = _basket_return(connection, symbols, entry_date, exit_date)
+                if raw_return is None and opinion["scope"] == "stock":
+                    # A single delisted name must remain in the sample rather
+                    # than vanish into "unavailable", which silently removed
+                    # it from every hit_rate denominator downstream.
+                    raw_return, basket_size, delisted = _delisted_stock_return(
+                        connection, opinion["subject_key"], entry_date, exit_date,
+                    )
                 broad_market_return, _ = _basket_return(connection, ["000001.SH"], entry_date, exit_date)
                 benchmark_return, neutralization_method = _industry_size_benchmark_return(
                     connection, opinion, entry_date, exit_date, broad_market_return,
@@ -293,7 +337,7 @@ def recompute_analyst_opinion_outcomes(connection: Any, as_of_date: date) -> dic
                 else:
                     residual_return = raw_return - (benchmark_return or 0.0)
                     directional_return = _number(opinion["direction"]) * residual_return
-                    volatility = _basket_volatility(connection, symbols, entry_date, exit_date)
+                    volatility = _basket_volatility(connection, symbols, entry_date, exit_date) if not delisted else None
                     # A bounded, risk-adjusted reward.  Cross-sectional
                     # de-consensus is applied in the aggregation layer.
                     normalized_reward = max(-1.0, min(1.0, directional_return / max(volatility or 0.02, 0.005) / 3.0))
@@ -309,7 +353,8 @@ def recompute_analyst_opinion_outcomes(connection: Any, as_of_date: date) -> dic
                 (opinion["opinion_id"], horizon, entry_date, exit_date, basket_size, raw_return, benchmark_return, residual_return,
                  directional_return, volatility, normalized_reward, status, OUTCOME_VERSION,
                  Json({"basket": opinion["scope"], "point_in_time": True, "min_theme_members": MIN_BASKET_MEMBERS,
-                       "neutralization_method": neutralization_method if status == "matured" else "not_settled"}), status),
+                       "neutralization_method": (f"{neutralization_method}+delisted_last_close" if delisted else neutralization_method)
+                                                if status == "matured" else "not_settled"}), status),
             )
             result[status] += 1
     return {"opinions": len(opinions), "outcomes": dict(result), "methodology": OUTCOME_VERSION}
@@ -321,6 +366,33 @@ def _clustered_mean(values: list[float]) -> dict[str, float | int | None]:
     average = mean(values)
     se = stdev(values) / math.sqrt(len(values)) if len(values) > 1 else None
     return {"mean": average, "se": se, "t_stat": average / se if se else None, "clusters": len(values)}
+
+
+def _two_sided_normal_p(t_stat: float | None) -> float | None:
+    """Two-sided normal-approximation p-value for a date-cluster t-stat."""
+    if t_stat is None or not math.isfinite(t_stat):
+        return None
+    return math.erfc(abs(t_stat) / math.sqrt(2.0))
+
+
+def _benjamini_hochberg_reject(p_values: dict[str, float | None], *, q: float = 0.05) -> dict[str, bool]:
+    """Per-key Benjamini-Hochberg rejection at false-discovery rate ``q``.
+
+    A missing/non-finite p-value is never rejected. Used so an 8-horizon
+    "any t>=1.96 is a go" rule (guaranteed to eventually fire on noise alone)
+    is replaced with a rule that survives testing 8 horizons at once.
+    """
+    valid = sorted((value, key) for key, value in p_values.items() if value is not None and math.isfinite(value))
+    count = len(valid)
+    reject = {key: False for key in p_values}
+    threshold_rank = 0
+    for rank, (value, _key) in enumerate(valid, start=1):
+        if value <= (rank / count) * q:
+            threshold_rank = rank
+    for rank, (_value, key) in enumerate(valid, start=1):
+        if rank <= threshold_rank:
+            reject[key] = True
+    return reject
 
 
 def _pearson(pairs: list[tuple[float, float]]) -> float | None:
@@ -428,6 +500,19 @@ def equal_weight_baseline(connection: Any, as_of_date: date | None = None) -> di
         direction_values[int(row["direction"])].append(_number(row["directional_return"]))
         regime_values[regimes.get(row["opinion_date"], "unknown")].append(_number(row["directional_return"]))
     crossing = next((point["horizon_days"] for point in curves if (point["mean_directional_residual"] or 0.0) < 0), None)
+    herding = _herding_effective_sample(rows)
+    effective_analysts = herding.get("effective_independent_analysts")
+    bh_p_values = {str(point["horizon_days"]): _two_sided_normal_p(point["t_stat"]) for point in curves}
+    bh_reject = _benjamini_hochberg_reject(bh_p_values)
+    significant_positive_horizons = [
+        point["horizon_days"] for point in curves
+        if bh_reject.get(str(point["horizon_days"])) and (point["ic"] or 0) > 0
+    ]
+    # Same-name repeats do not become independent evidence just by testing 8
+    # horizons at once (BH) if the underlying analysts are themselves highly
+    # correlated (the same handful of names herding on the same calls); both
+    # conditions must hold before advancing past research-only.
+    eligible_for_promotion = bool(significant_positive_horizons) and effective_analysts is not None and effective_analysts >= 5
     return {"model": "equal_weight_baseline_v2", "status": "research_only", "horizon_curve": curves,
             "drift_reversal": {"car_turning_horizon": reversal, "first_negative_car_horizon": crossing, "increments": increments,
                                  "direction_asymmetry": {"long_mean": round(mean(direction_values[1]), 6) if direction_values[1] else None,
@@ -442,9 +527,15 @@ def equal_weight_baseline(connection: Any, as_of_date: date | None = None) -> di
                 "small_mean": round(mean(audience_values["small"]), 6) if audience_values["small"] else None,
                 "large_mean": round(mean(audience_values["large"]), 6) if audience_values["large"] else None,
                 "reason": None if audience_status == "completed" else "no reviewed point-in-time audience-size profiles"},
-            "herding_adjustment": _herding_effective_sample(rows),
-            "go_no_go": {"status": "go" if any((point["t_stat"] or 0) >= 1.96 and (point["ic"] or 0) > 0 for point in curves) else "stop_or_collect",
-                         "rule": "advance only if positive IC is significant using date-cluster standard errors"}}
+            "herding_adjustment": herding,
+            "go_no_go": {"status": "go" if eligible_for_promotion else "stop_or_collect",
+                         "rule": "advance only if a horizon's positive IC survives Benjamini-Hochberg correction "
+                                 "across all registered horizons (date-cluster t-stats) and the herding-adjusted "
+                                 "effective independent analyst count (N_eff) is at least 5",
+                         "benjamini_hochberg": {"q": 0.05, "p_values": bh_p_values, "rejected_horizons": bh_reject,
+                                                "significant_positive_horizons": significant_positive_horizons},
+                         "effective_independent_analysts": effective_analysts,
+                         "minimum_effective_independent_analysts": 5}}
 
 
 def _softmax_weights(scores: dict[str, float], profiles: dict[str, dict[str, Any]]) -> dict[str, float]:
@@ -634,7 +725,7 @@ def rebuild_analyst_research(connection: Any, as_of_date: date) -> dict[str, Any
     experts = sleeping_experts_fixed_share(connection, as_of_date)
     phase_3 = conditional_selection_and_pairwise_ranking(connection, as_of_date)
     calibration_rows = connection.execute(
-        """SELECT p.opinion_date event_date,
+        """SELECT p.opinion_date event_date, o.exit_date,
                          p.direction * p.strength * p.explicitness score,
                          CASE WHEN o.directional_return>0 THEN 1 ELSE 0 END label
               FROM quant.analyst_opinion_outcomes o

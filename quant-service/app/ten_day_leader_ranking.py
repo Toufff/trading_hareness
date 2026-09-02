@@ -13,6 +13,8 @@ from datetime import date
 import math
 from typing import Any
 
+from .market_rules import is_at_limit
+
 
 def _number(value: Any) -> float | None:
     try:
@@ -93,7 +95,7 @@ def rank_ten_day_candidates(
             incomplete += 1
             continue
         limit_up = _number(latest.get("limit_up"))
-        is_limit_up = bool(limit_up is not None and close is not None and close >= limit_up * 0.999)
+        is_limit_up = is_at_limit(close, limit_up)
         ohlc = [_number(latest.get(key)) for key in ("open", "high", "low", "close")]
         is_one_word = bool(is_limit_up and None not in ohlc and max(ohlc) - min(ohlc) <= max(0.001, close * 0.0001))
         eligible.append({

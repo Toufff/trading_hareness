@@ -26,8 +26,16 @@ async def sync_health(async_database: Any) -> dict[str, Any]:
         attempts = await attempts_result.fetchall()
         promotion = await promotion_result.fetchall()
         try:
-            workflow_result = await connection.execute(WORKFLOW_SQL)
-            workflow_rows = await workflow_result.fetchall()
+            # A plain ``except Exception`` around a failed statement leaves the
+            # surrounding transaction aborted: PostgreSQL silently turns the
+            # eventual COMMIT into a ROLLBACK, discarding the reads captured
+            # above even though they already succeeded.  Running the optional
+            # n8n-audit read inside its own nested ``connection.transaction()``
+            # uses a SAVEPOINT instead, so a failure here only rolls back to
+            # that savepoint and leaves the outer transaction committable.
+            async with connection.transaction():
+                workflow_result = await connection.execute(WORKFLOW_SQL)
+                workflow_rows = await workflow_result.fetchall()
         except Exception:
             # An isolated quant schema has no n8n public audit tables.  The
             # durable local receipts remain useful and keep the projection

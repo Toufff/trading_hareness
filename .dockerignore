@@ -1,6 +1,19 @@
 .env
+**/.env
 backups/
 logs/
 state/
+.venv/
+.git/
 frontend/node_modules/
+**/node_modules/
 **/.DS_Store
+
+# NOTE: frontend/dist/ is intentionally NOT excluded here even though it is
+# a build artifact directory: feishu-adapter/Dockerfile does
+# `COPY frontend/dist /app/frontend-dist` from this same root build context,
+# so excluding it would silently ship the adapter image without its
+# dashboard assets (or fail the COPY outright). If this needs tightening,
+# it has to be done with a build-specific ignore file (e.g. a BuildKit
+# `feishu-adapter/Dockerfile.dockerignore`) that still allows frontend/dist,
+# not a blanket rule here.

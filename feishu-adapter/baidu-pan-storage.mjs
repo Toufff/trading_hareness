@@ -1,8 +1,9 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { decryptSecret, encryptSecret } from './secretbox.mjs';
 
 const API_BASE = 'https://pan.baidu.com';
 const OAUTH_BASE = 'https://openapi.baidu.com';
@@ -10,24 +11,18 @@ const ACCESS_TOKEN_SKEW_MS = 60_000;
 const DEFAULT_SLICE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 const BAIDU_OAUTH_SCOPES = 'basic,netdisk';
+const INVALID_TOKEN_MESSAGE = '百度网盘凭据格式无效，请重新授权';
 
 function deriveKey(secretKey) {
 	return createHash('sha256').update(`baidu-pan-oauth:${secretKey}`).digest();
 }
 
 function encrypt(value, key) {
-	const iv = randomBytes(12);
-	const cipher = createCipheriv('aes-256-gcm', key, iv);
-	const ciphertext = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()]);
-	return `v1.${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${ciphertext.toString('base64url')}`;
+	return encryptSecret(value, key);
 }
 
 function decrypt(value, key) {
-	const [version, iv, tag, ciphertext] = String(value ?? '').split('.');
-	if (version !== 'v1' || !iv || !tag || !ciphertext) throw new Error('百度网盘凭据格式无效，请重新授权');
-	const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64url'));
-	decipher.setAuthTag(Buffer.from(tag, 'base64url'));
-	return Buffer.concat([decipher.update(Buffer.from(ciphertext, 'base64url')), decipher.final()]).toString('utf8');
+	return decryptSecret(value, key, INVALID_TOKEN_MESSAGE);
 }
 
 function asText(value, limit = 240) {

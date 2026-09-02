@@ -20,19 +20,42 @@ from .analysis import as_utc
 from .request_models import DailyBar
 
 
-# Tushare's documented daily contract is ``vol`` in lots (100 shares) and
-# ``amount`` in thousand yuan.  Its implied amount/(lots * close) ratio is
-# therefore close to 0.1.  Some compatible GET responses have returned a
-# small subset of rows with ``amount`` in yuan instead, a 1,000x mixture that
-# silently corrupts liquidity ranks.  Keep the original row in immutable raw
-# evidence, but never promote an unverified amount into either daily control
-# table.
+# The canonical daily contract -- the one every provider adapter must convert
+# into before calling ``upsert_daily_bar`` -- is Tushare's own: ``volume`` in
+# lots (100 shares) and ``amount`` in thousand yuan.  Its implied
+# amount/(lots * close) ratio is therefore close to 0.1.  Some compatible GET
+# responses have returned a small subset of rows with ``amount`` in yuan
+# instead, a 1,000x mixture that silently corrupts liquidity ranks.  Keep the
+# original row in immutable raw evidence, but never promote an unverified
+# amount into either daily control table.
 TUSHARE_DAILY_AMOUNT_SOURCES = frozenset({
     "tushare", "tushare_primary", "tushare_super_get", "tushare_super_sdk",
     "tushare_super", "tushare_backup",
 })
 TUSHARE_DAILY_AMOUNT_RATIO_MIN = Decimal("0.02")
 TUSHARE_DAILY_AMOUNT_RATIO_MAX = Decimal("0.50")
+#: Sources exempt from the unit-ratio guard.  "manual" covers synthetic/
+#: test-fixture rows that intentionally use round numbers with no real
+#: amount/volume/close relationship, not a live market-data provider whose
+#: unit correctness we can verify this way.
+DAILY_AMOUNT_GUARD_EXEMPT_SOURCES = frozenset({"manual"})
+
+#: Public free-source providers report volume in raw shares; the canonical
+#: convention is board lots (100 shares).
+SHARES_PER_LOT = Decimal("100")
+#: Public free-source providers (BaoStock, Eastmoney's free kline) report
+#: amount in yuan; the canonical convention is thousand yuan.
+YUAN_PER_THOUSAND_YUAN = Decimal("1000")
+
+
+def shares_to_lots(value: Decimal | None) -> Decimal | None:
+    """Convert a raw share count to the canonical board-lot convention."""
+    return None if value is None else value / SHARES_PER_LOT
+
+
+def yuan_to_thousand_yuan(value: Decimal | None) -> Decimal | None:
+    """Convert a raw yuan amount to the canonical thousand-yuan convention."""
+    return None if value is None else value / YUAN_PER_THOUSAND_YUAN
 
 
 def exchange_for(symbol: str) -> str:
@@ -51,14 +74,23 @@ def provider_priority(provider: str) -> int:
 
 def daily_amount_unit_mismatch(*, source: str, amount: Decimal | None,
                                volume: Decimal | None, close: Decimal | None) -> bool:
-    """Return whether a Tushare daily amount violates its declared unit contract.
+    """Return whether a daily amount violates the canonical unit contract.
+
+    This used to only check Tushare's own sources, leaving every other
+    provider free to promote a wrongly-scaled amount into the canonical
+    table uncontested.  It now checks every source except the explicit
+    synthetic/test-fixture exemption, on the assumption that each adapter has
+    already converted its provider's native units (BaoStock's shares/yuan,
+    Eastmoney's yuan) into the shared lots/thousand-yuan convention before
+    calling ``upsert_daily_bar``; a value that still fails the ratio check
+    after that conversion is a genuine unit defect, not a currency choice.
 
     A missing/zero field is not a unit conclusion.  We only quarantine a row
     when all three values exist and its implied VWAP is impossible under the
     documented ``amount=thousand yuan, volume=lots`` convention.  This is a
     data-quality guard, never an inferred currency conversion.
     """
-    if source not in TUSHARE_DAILY_AMOUNT_SOURCES:
+    if source in DAILY_AMOUNT_GUARD_EXEMPT_SOURCES:
         return False
     if amount is None or volume is None or close is None or amount <= 0 or volume <= 0 or close <= 0:
         return False
@@ -229,7 +261,9 @@ def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
 
 
 __all__ = [
-    "TUSHARE_DAILY_AMOUNT_RATIO_MAX", "TUSHARE_DAILY_AMOUNT_RATIO_MIN",
-    "TUSHARE_DAILY_AMOUNT_SOURCES", "daily_amount_unit_mismatch", "exchange_for",
-    "provider_priority", "quarantine_tushare_daily_amount_mismatches", "upsert_daily_bar",
+    "DAILY_AMOUNT_GUARD_EXEMPT_SOURCES", "SHARES_PER_LOT", "TUSHARE_DAILY_AMOUNT_RATIO_MAX",
+    "TUSHARE_DAILY_AMOUNT_RATIO_MIN", "TUSHARE_DAILY_AMOUNT_SOURCES", "YUAN_PER_THOUSAND_YUAN",
+    "daily_amount_unit_mismatch", "exchange_for", "provider_priority",
+    "quarantine_tushare_daily_amount_mismatches", "shares_to_lots", "upsert_daily_bar",
+    "yuan_to_thousand_yuan",
 ]

@@ -30,6 +30,7 @@ async def sync(
     record_provider_success: Callable[..., Any],
     record_provider_failure: Callable[..., Any],
     record_provider_api_capability: Callable[..., Any],
+    record_provider_empty: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     candidates = provider_candidates("daily", request.provider)
     if not candidates:
@@ -111,7 +112,10 @@ async def sync(
         provider_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
 
         def persist_result() -> int:
-            with db.transaction() as connection:
+            # A full A-share cross-section is exactly the "post-close stage"
+            # case the connection-level statement_timeout default is too
+            # tight for; opt into the long-task budget explicitly.
+            with db.long_transaction() as connection:
                 normalized = persist_tushare_rows(connection, "daily", request_key, valid_rows, result.provider.key, observed_at)
                 connection.execute("UPDATE quant.fetch_runs SET status='completed',row_count=%s,finished_at=now() WHERE request_key=%s", (len(valid_rows), request_key))
                 record_provider_success(connection, result.provider.key, "daily_all_a", len(valid_rows), provider_latency_ms)
@@ -140,17 +144,28 @@ async def sync(
         # provider failure and must remain retryable.
         empty_providers = [*empty_provider_keys] if len(empty_provider_keys) == len(candidates) else []
         failure_latency_ms = round((asyncio.get_running_loop().time() - provider_started_at) * 1000)
+        # ``except ... as error`` is implicitly deleted once the block exits;
+        # capture the text before defining a nested closure over it so a
+        # deferred call cannot see a NameError instead of the real failure.
+        error_text = str(error)
 
         def persist_failure() -> None:
             with db.transaction() as connection:
-                detail = safe_error_detail(str(error), 1000)
+                detail = safe_error_detail(error_text, 1000)
                 connection.execute(
                     "UPDATE quant.fetch_runs SET status='failed',finished_at=now(),error_class=%s,error_message=%s WHERE request_key=%s",
                     ("source_empty" if empty_providers else "provider_error", detail, request_key),
                 )
                 if empty_providers:
                     for provider_key in empty_providers:
-                        record_provider_success(connection, provider_key, "daily_all_a", 0)
+                        # A valid empty full-market response ("not published
+                        # yet") is not the same evidence as a real success:
+                        # it must not reset a genuinely failing provider's
+                        # consecutive-failure streak back to zero.
+                        if record_provider_empty is not None:
+                            record_provider_empty(connection, provider_key, "daily_all_a")
+                        else:
+                            record_provider_success(connection, provider_key, "daily_all_a", 0)
                         record_provider_api_capability(connection, provider_key, "daily", "empty", 0,
                                                        "Valid empty full-market response; post-close data is not published yet.")
                 else:
@@ -160,7 +175,7 @@ async def sync(
                         record_provider_api_capability(connection, provider_key, "daily", "failed", note=provider_error)
 
         await run_database_blocking(persist_failure)
-        return {"status": "blocked", "trade_date": str(trade_date), "reason": safe_error_detail(str(error), 500),
+        return {"status": "blocked", "trade_date": str(trade_date), "reason": safe_error_detail(error_text, 500),
                 "fallback_empty_providers": empty_providers, "request_key": request_key}
 
 

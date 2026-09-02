@@ -4,9 +4,11 @@ from datetime import datetime, timezone
 import unittest
 
 from app.intraday_quote_normalization import (
+    LONGHU_WATCH_QUOTE_VOLUME_UNIT,
     annotate_flow_percentiles,
     exchange_time_status,
     merge_eastmoney_watch_flows,
+    merge_longhu_watch_quotes,
     merge_sina_watch_quotes,
     merge_watch_quote_prices,
     observation_source,
@@ -57,6 +59,19 @@ class IntradayQuoteNormalizationTests(unittest.TestCase):
         annotate_flow_percentiles(quotes)
         self.assertEqual(quotes["a"]["main_flow_percentile"], 0.0)
         self.assertEqual(quotes["b"]["main_flow_percentile"], 1.0)
+
+    def test_longhu_volume_is_annotated_with_its_native_unit(self) -> None:
+        # Longhu's cumulative volume must not be silently mixed with
+        # Tencent's board-lot or Sina's share-based volume under the same
+        # ambiguous "volume" key; callers need volume_unit to reconcile them.
+        quotes: dict[str, dict[str, object]] = {}
+        merge_longhu_watch_quotes(
+            quotes,
+            [{"ts_code": "000001.SZ", "price": "10.2", "pre_close": "10", "volume": "123456"}],
+            number=number,
+        )
+        self.assertEqual(quotes["000001.SZ"]["volume"], 123456.0)
+        self.assertEqual(quotes["000001.SZ"]["volume_unit"], LONGHU_WATCH_QUOTE_VOLUME_UNIT)
 
     def test_fuyao_mapper_does_not_claim_invalid_codes(self) -> None:
         quote = quote_from_fuyao({"symbol": "000001.SZ", "price": "10", "pct_change": "1.2"})

@@ -61,9 +61,34 @@ lightServer root privileges.
 - `G:\StockPlatform\data\postgresql16` is the only authoritative quant store.
 - The owner's local collector is the only scheduled market-data writer by
   default. `PEER_BACKGROUND_TASKS_ENABLED=false` prevents duplicate scans.
-- The peer role inherits the application's database privileges and may run
-  explicit research/migrations. Access can be revoked by disabling the role or
-  removing the SSH key.
+- **The peer is a read-only database principal.** `stock_peer` is `REVOKE`d
+  from the application role (`quant_app`) and set `NOINHERIT NOCREATEDB
+  NOCREATEROLE` with a connection limit, then explicitly re-granted only
+  `CONNECT`/`USAGE`/`SELECT` on the `quant` and `public` schemas (with
+  matching `ALTER DEFAULT PRIVILEGES`); the `quant` database session itself
+  is set `default_transaction_read_only=on` for that role, with a bounded
+  `statement_timeout`/`idle_in_transaction_session_timeout`. Peer credentials
+  can still open a session and run ad hoc `SELECT`s for research, but cannot
+  `INSERT`/`UPDATE`/`DELETE` into `quant`, and cannot run a schema migration
+  against it — **migrations against the authoritative `quant` database are
+  owner-only**, run from the owner's Windows workstation through the normal
+  `alembic upgrade head` / release-publish path, never from a peer session.
+  The peer's own `trading_hareness_peer_n8n` database is unaffected by this
+  and remains writable by the peer, since it is not the authoritative quant
+  store.
+- **Peer startup does not write to the provider control plane.** The peer's
+  `quant-research` service is started with
+  `QUANT_CONTROL_PLANE_WRITES_ENABLED=false` in
+  `deploy/shared-peer/compose.yaml`, on top of
+  `PEER_BACKGROUND_TASKS_ENABLED=false` above — the intent is that neither
+  scheduled background scans nor an explicit request from the peer container
+  can open a provider write path at all. (As of this writing `main.py` does
+  not yet read that variable to enforce it; see the work-package report that
+  edits `main.py` next for the exact wiring. Until that lands, the read-only
+  database grants above are the real backstop, not this application-level
+  switch.)
+- Database access can be revoked immediately by disabling the `stock_peer`
+  role or removing the peer's SSH key — see "Revocation" below.
 - Peer credentials are long-lived static credentials: the SSH key, database
   password, shared read/write API keys, and n8n encryption key have no scheduled
   rotation or automatic expiry. Rotate them only after suspected disclosure,
@@ -80,6 +105,13 @@ lightServer root privileges.
 - List endpoints cap each physical vendor page at 300 and paginate larger
   logical reads in the adapter. Explicit quote baskets are independently
   bounded by `QUANT_LONGHU_INTRADAY_MAX_SYMBOLS`.
+- The lightServer `authorized_keys` entries for both the peer (`stockpeer`)
+  and the owner's reverse-tunnel account carry `restrict,port-forwarding`
+  plus explicit `permitopen`/`permitlisten` clauses scoped to the exact
+  loopback ports each side needs (`15432`/`15681`/`15682`), instead of an
+  unrestricted key. The owner's tunnel scripts prefer a dedicated,
+  restricted `stockowner` account over a general-purpose SSH alias when one
+  is configured — see "Owner bootstrap" below.
 
 ## Owner bootstrap
 
@@ -94,6 +126,23 @@ This creates/updates the PostgreSQL `stock_peer` role, a separate peer n8n
 database, `G:\StockPlatform\peer\secrets\peer.env`, and the local shared-read
 key. It prints paths and status, never secret values.
 
+**This script must be re-run** after the 2026-09 hardening change that
+downgraded `stock_peer` to read-only (see "Ownership and writer policy"
+above) if the role already existed from before that change — a role created
+under the old, fully-privileged script is not retroactively narrowed until
+`bootstrap-local-peer.ps1` runs again. After re-running it, verify as
+`stock_peer` against the `quant` database:
+
+```sql
+SELECT * FROM <any quant-schema table> LIMIT 1;   -- must succeed (read-only grant)
+INSERT INTO <any quant-schema table> ...;         -- must fail with permission denied
+```
+
+and, connected to the peer's own n8n database
+(`trading_hareness_peer_n8n`), confirm a normal n8n write (e.g. a workflow
+execution) still succeeds — the role is only read-only against `quant`, not
+globally.
+
 Create a dedicated SSH key under `G:\StockPlatform\peer\secrets`, copy only
 the public key to lightServer, then provision the non-sudo account:
 
@@ -104,6 +153,45 @@ scp -P 3535 G:\StockPlatform\peer\secrets\stockpeer_ed25519.pub lightServer1:/ro
 ssh lightServer1 "AUTHORIZED_KEY_FILE=/root/stockpeer_ed25519.pub bash /root/provision-lightserver-rootless.sh"
 pwsh .\scripts\shared-peer\install-shared-tunnel-task.ps1
 ```
+
+**Existing `authorized_keys` entries on lightServer must be updated to the
+restricted form** (see "Ownership and writer policy" above): re-running
+`provision-lightserver-rootless.sh` with `AUTHORIZED_KEY_FILE` set
+regenerates the peer's entry with the `restrict,port-forwarding,permitopen=...`
+prefix automatically; an existing unrestricted entry does not update itself.
+
+Generate and install a dedicated, restricted owner-tunnel key instead of
+continuing to use a general-purpose SSH alias (e.g. `lightServer1`, which may
+be a root-capable alias). On lightServer, as root:
+
+```bash
+ssh-keygen -t ed25519 -f owner_tunnel_ed25519
+OWNER_TUNNEL_PUBLIC_KEY_FILE=/path/to/owner_tunnel_ed25519.pub \
+  bash scripts/shared-peer/install-owner-tunnel-key.sh
+```
+
+This provisions a dedicated `stockowner` account (default) with an
+`authorized_keys` entry restricted to
+`restrict,port-forwarding,permitlisten="127.0.0.1:15432",permitlisten="127.0.0.1:15680",permitlisten="127.0.0.1:15681"`.
+Copy the resulting private key to the Windows workstation (for example
+`G:\StockPlatform\peer\secrets\owner_tunnel_ed25519`) and add these four keys
+to `G:\StockPlatform\config\runtime.env`:
+
+```dotenv
+OWNER_TUNNEL_SSH_USER=stockowner
+OWNER_TUNNEL_SSH_KEY=G:\StockPlatform\peer\secrets\owner_tunnel_ed25519
+OWNER_TUNNEL_SSH_HOST=<lightServer host or IP>
+OWNER_TUNNEL_SSH_PORT=<lightServer sshd port>
+```
+
+`start-shared-tunnels.ps1`, `start-stock-dashboard.ps1` and
+`verify-shared-runtime.ps1` all resolve the SSH target through
+`Resolve-OwnerTunnelSshTarget` (`scripts/windows/runtime-observability.psm1`):
+when all four variables are set they use this restricted key; when any is
+missing they fall back to the pre-existing `$SshAlias` (the `lightServer1`
+alias) with a `Write-Warning`, so leaving this unconfigured does not break an
+existing deployment — it just does not get the security benefit of this
+change.
 
 The scheduled tunnel task runs hidden and publishes the owner database and
 owner API as lightServer loopback ports. The peer API is a third loopback-only

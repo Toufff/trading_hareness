@@ -13,6 +13,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')).TrimEnd('\')
+Import-Module (Join-Path $repository 'scripts\windows\runtime-observability.psm1') -Force
 
 function Read-EnvFile([string]$Path) {
     $values = @{}
@@ -28,7 +30,7 @@ function Wait-RemoteHttp200([int]$Port) {
     $consecutive = 0
     $lastCode = 'unavailable'
     do {
-        $lastCode = (& ssh.exe -o BatchMode=yes $SshAlias `
+        $lastCode = (& ssh.exe @($target.ConnectionArguments) -o BatchMode=yes $target.Destination `
             "curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:$Port/health").Trim()
         if ($lastCode -eq '200') {
             $consecutive++
@@ -41,6 +43,7 @@ function Wait-RemoteHttp200([int]$Port) {
     throw "Remote API did not reach $required consecutive HTTP 200 samples on 127.0.0.1:$Port before timeout; last code: $lastCode"
 }
 $runtime = Read-EnvFile $RuntimeEnv
+$target = Resolve-OwnerTunnelSshTarget -RuntimeEnv $RuntimeEnv -FallbackAlias $SshAlias
 $postgresRoot = Get-ChildItem -LiteralPath 'G:\StockPlatform\runtime' -Directory -Filter 'postgresql-*' |
     Sort-Object Name -Descending | Select-Object -First 1
 $psql = Join-Path $postgresRoot.FullName 'bin\psql.exe'
@@ -57,13 +60,13 @@ $quote = Invoke-RestMethod -Uri "$ApiBase/licensed/longhu/quotes?symbols=600664.
     -Headers $headers -TimeoutSec 35
 if (@($quote.rows).Count -ne 1) { throw 'Licensed read gateway did not return the requested quote' }
 
-$remotePorts = & ssh.exe -o BatchMode=yes $SshAlias `
+$remotePorts = & ssh.exe @($target.ConnectionArguments) -o BatchMode=yes $target.Destination `
     "ss -lnt | grep -E '127.0.0.1:($RemoteDatabasePort|$RemoteApiPort|$RemotePeerApiPort)' | wc -l"
 if ([int]$remotePorts -lt 3) { throw 'Database, owner API, and peer API loopback ports are not all available on lightServer' }
 
 $remoteOwnerCode = Wait-RemoteHttp200 -Port $RemoteApiPort
 $remotePeerCode = Wait-RemoteHttp200 -Port $RemotePeerApiPort
-$completeGatewayJson = (& ssh.exe -o BatchMode=yes $SshAlias `
+$completeGatewayJson = (& ssh.exe @($target.ConnectionArguments) -o BatchMode=yes $target.Destination `
     'python3 /home/stockpeer/trading_hareness/scripts/shared-peer/verify-complete-stock-api.py') -join [Environment]::NewLine
 $completeGateway = $completeGatewayJson | ConvertFrom-Json
 if (-not $completeGateway.passed) { throw 'Complete remote stock API acceptance probe failed' }
@@ -83,5 +86,6 @@ if ($PeerApiBase) {
     remote_peer_api = [int]$remotePeerCode
     complete_stock_gateway = $completeGateway.passed
     peer_api = if ($peerHealth) { $peerHealth.status } else { 'not_requested' }
+    ssh_target_mode = $target.Mode
     secrets_printed = $false
 }

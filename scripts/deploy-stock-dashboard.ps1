@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 if ($RemoteRoot -notmatch '^/[A-Za-z0-9._/-]+$') { throw "Unsafe RemoteRoot: $RemoteRoot" }
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
 $frontend = Join-Path $repository 'frontend'

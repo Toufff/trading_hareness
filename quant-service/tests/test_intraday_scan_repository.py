@@ -99,7 +99,8 @@ class IntradayScanRepositoryTests(unittest.TestCase):
         self.assertEqual(order_book_params[1], datetime(2026, 8, 17, 1, 0, tzinfo=timezone.utc))
         membership_sql, membership_params = connection.calls[2]
         self.assertIn("effective_from<=", membership_sql)
-        self.assertEqual(membership_params[1:], (date(2026, 8, 17), date(2026, 8, 17), date(2026, 8, 17)))
+        self.assertEqual(membership_params["trade_date"], date(2026, 8, 17))
+        self.assertEqual(membership_params["symbols"], ["000001.SZ"])
 
     def test_signal_state_batches_per_key_reads_and_preserves_alert_payload(self) -> None:
         class Result:

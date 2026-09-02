@@ -1045,18 +1045,17 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
         async def fails() -> None:
             raise RuntimeError("expected task failure")
 
-        async def check() -> tuple[set[asyncio.Task[object]], MagicMock]:
+        async def check() -> set[asyncio.Task[object]]:
             task = asyncio.create_task(fails())
             await asyncio.sleep(0)
             in_flight: set[asyncio.Task[object]] = {task}
-            reporter = MagicMock()
-            with patch("builtins.print", reporter):
+            with self.assertLogs("app.runtime_tasks", level="WARNING") as captured:
                 observe_completed_task(task, in_flight, "test")
-            return in_flight, reporter
+            self.assertTrue(any("test task failed" in message for message in captured.output))
+            return in_flight
 
-        in_flight, reporter = asyncio.run(check())
+        in_flight = asyncio.run(check())
         self.assertFalse(in_flight)
-        self.assertIn("test task failed", reporter.call_args.args[0])
 
     def test_loop_supervisor_restarts_after_failure_and_preserves_cancellation(self):
         async def check() -> int:
@@ -1226,6 +1225,11 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
 
             task = asyncio.create_task(supervise_leased_loop(
                 "lease_error_test", factory, acquire, renew, release, lease_seconds=3, retry_delay_seconds=0.01,
+                # WP6 lease fencing: a renew failure is now retried a bounded
+                # number of times before the lease is treated as lost. Keep
+                # that retry delay tiny here so the test stays fast; the
+                # production default (LEASE_RENEW_RETRY_DELAY_SECONDS) is 1s.
+                lease_renew_retry_delay_seconds=0.01,
             ))
             await asyncio.wait_for(started.wait(), timeout=1)
             await asyncio.wait_for(release_attempted.wait(), timeout=2)
@@ -1238,3 +1242,46 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
             acquire_calls, releases = asyncio.run(check())
         self.assertGreaterEqual(acquire_calls, 2)
         self.assertEqual(releases, 1)
+
+    def test_leased_loop_renew_retries_before_treating_lease_as_lost(self):
+        """WP6: a transient renew failure must not immediately drop a lease."""
+        async def check() -> int:
+            renew_calls = 0
+            started, released = asyncio.Event(), asyncio.Event()
+
+            async def factory() -> None:
+                started.set()
+                await asyncio.Event().wait()
+
+            async def acquire() -> bool:
+                return True
+
+            async def renew() -> bool:
+                nonlocal renew_calls
+                renew_calls += 1
+                if renew_calls <= 2:
+                    raise RuntimeError("transient renew failure")
+                return True
+
+            async def release() -> None:
+                released.set()
+
+            task = asyncio.create_task(supervise_leased_loop(
+                "lease_retry_test", factory, acquire, renew, release, lease_seconds=3, retry_delay_seconds=0.01,
+                lease_renew_retry_delay_seconds=0.01,
+            ))
+            await asyncio.wait_for(started.wait(), timeout=1)
+            # renew_delay is floored at 1.0s regardless of lease_seconds, so
+            # the first renew attempt fires at ~t=1.0s; the two retries then
+            # follow almost immediately (0.01s apart) and the third attempt
+            # succeeds. Wait past that point but well before the *next*
+            # renew_delay window to confirm the lease was never released.
+            await asyncio.sleep(1.5)
+            self.assertFalse(released.is_set())
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            return renew_calls
+
+        renew_calls = asyncio.run(check())
+        self.assertGreaterEqual(renew_calls, 3)

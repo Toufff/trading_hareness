@@ -9,7 +9,6 @@ semantics and that the crash class cannot quietly return.
 from __future__ import annotations
 
 import inspect
-import re
 import unittest
 from datetime import datetime, timezone
 

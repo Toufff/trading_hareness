@@ -1,28 +1,23 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { decryptSecret, encryptSecret } from './secretbox.mjs';
 
 const FEISHU_API_BASE = 'https://open.feishu.cn/open-apis';
 const TOKEN_PATH = '/authen/v2/oauth/token';
 const ACCESS_TOKEN_SKEW_MS = 60_000;
 const REQUIRED_RELAY_SCOPES = ['auth:user.id:read', 'im:chat:readonly', 'im:message', 'im:message.group_msg', 'im:message.group_msg:get_as_user', 'im:resource', 'offline_access'];
+const INVALID_TOKEN_MESSAGE = '保存的用户飞书凭据格式无效，请重新授权';
 
 function deriveKey(appSecret) {
 	return createHash('sha256').update(`feishu-user-oauth:${appSecret}`).digest();
 }
 
 function encrypt(value, key) {
-	const iv = randomBytes(12);
-	const cipher = createCipheriv('aes-256-gcm', key, iv);
-	const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
-	return `v1.${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${ciphertext.toString('base64url')}`;
+	return encryptSecret(value, key);
 }
 
 function decrypt(value, key) {
-	const [version, iv, tag, ciphertext] = String(value ?? '').split('.');
-	if (version !== 'v1' || !iv || !tag || !ciphertext) throw new Error('保存的用户飞书凭据格式无效，请重新授权');
-	const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64url'));
-	decipher.setAuthTag(Buffer.from(tag, 'base64url'));
-	return Buffer.concat([decipher.update(Buffer.from(ciphertext, 'base64url')), decipher.final()]).toString('utf8');
+	return decryptSecret(value, key, INVALID_TOKEN_MESSAGE);
 }
 
 function oauthError(payload, fallback) {
@@ -134,15 +129,29 @@ export function createFeishuUserOauth({ appId, appSecret, redirectUri, ledger, f
 		const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== '').map(([name, value]) => [name, String(value)]));
 		const normalizedMethod = String(method).toUpperCase();
 		const payload = body === undefined || body === null || typeof body === 'string' || body instanceof Uint8Array ? body : JSON.stringify(body);
-		const send = async (token) => fetchImpl(`${FEISHU_API_BASE}${path}${query.size ? `?${query}` : ''}`, {
-			method: normalizedMethod,
-			headers: {
-				authorization: `Bearer ${token}`, accept: stream ? '*/*' : 'application/json',
-				...(payload !== undefined && !headers['content-type'] && !headers['Content-Type'] ? { 'content-type': 'application/json' } : {}),
-				...headers,
-			},
-			...(payload === undefined ? {} : { body: payload }), signal: AbortSignal.timeout(30_000),
-		});
+		// The 30s bound below guards only getting a response (the fetch() promise
+		// settling). It must not also bound reading a large media body: a stream
+		// response's body can legitimately take much longer than 30s for a
+		// multi-hundred-MB attachment. Since the timer is cleared as soon as
+		// fetchImpl() resolves or rejects, a later `response.getReadableStream()`
+		// read is never tied to this AbortController and can run unbounded.
+		const send = async (token) => {
+			const controller = new AbortController();
+			const timer = setTimeout(() => controller.abort(), 30_000);
+			try {
+				return await fetchImpl(`${FEISHU_API_BASE}${path}${query.size ? `?${query}` : ''}`, {
+					method: normalizedMethod,
+					headers: {
+						authorization: `Bearer ${token}`, accept: stream ? '*/*' : 'application/json',
+						...(payload !== undefined && !headers['content-type'] && !headers['Content-Type'] ? { 'content-type': 'application/json' } : {}),
+						...headers,
+					},
+					...(payload === undefined ? {} : { body: payload }), signal: controller.signal,
+				});
+			} finally {
+				clearTimeout(timer);
+			}
+		};
 		let response = await send(await accessToken());
 		if ((response.status === 401 || response.status === 403) && retry) response = await send(await accessToken({ forceRefresh: true }));
 		if (stream) {

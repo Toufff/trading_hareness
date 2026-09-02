@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import unittest
 
-from app.fuyao_bulk_dump_capture import DumpDescriptor, descriptor_from_envelope, manifest_for_file
+from app.fuyao_bulk_dump_capture import descriptor_from_envelope, manifest_for_file
 
 
 class FuyaoBulkDumpCaptureTests(unittest.TestCase):

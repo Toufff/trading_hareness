@@ -17,7 +17,18 @@ def upgrade() -> None:
     op.execute("ALTER TABLE quant.remote_reports ADD COLUMN IF NOT EXISTS remote_published_at timestamptz")
     op.execute("ALTER TABLE quant.analyst_claims ADD COLUMN IF NOT EXISTS published_at timestamptz")
     op.execute("ALTER TABLE quant.analyst_claims ADD COLUMN IF NOT EXISTS explicitness numeric NOT NULL DEFAULT 0.5")
-    op.execute("ALTER TABLE quant.analyst_claims ADD CONSTRAINT analyst_claims_explicitness_range CHECK (explicitness >= 0 AND explicitness <= 1) NOT VALID")
+    # Idempotent: a partially applied or manually repaired database may already
+    # carry the constraint, and ``ADD CONSTRAINT`` has no ``IF NOT EXISTS``.
+    op.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                            WHERE conname='analyst_claims_explicitness_range'
+                              AND conrelid='quant.analyst_claims'::regclass) THEN
+                ALTER TABLE quant.analyst_claims ADD CONSTRAINT analyst_claims_explicitness_range
+                    CHECK (explicitness >= 0 AND explicitness <= 1) NOT VALID;
+            END IF;
+        END $$
+    """)
     op.execute("""
         UPDATE quant.remote_reports
            SET remote_published_at=coalesce(remote_published_at,remote_updated_at,remote_created_at)

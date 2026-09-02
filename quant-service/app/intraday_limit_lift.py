@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .market_rules import LIMIT_TOLERANCE
 from .strategy_thresholds import MAX_ENTRY_INTRADAY_GAIN_PCT
 
 
@@ -91,7 +92,7 @@ def intraday_limit_lift_pattern(
     reclaim_start = session_low_index if session_low_pct <= deep_discount_pct else 0
     zero_reclaim = first_reclaim(0.0, reclaim_start) if session_low_pct <= deep_discount_pct else None
     plus_five = first_reclaim(limit_pct * 0.5, reclaim_start)
-    limit_reclaim = first_price_reclaim(limit_price * 0.999, reclaim_start) if limit_price else None
+    limit_reclaim = first_price_reclaim(limit_price - LIMIT_TOLERANCE, reclaim_start) if limit_price else None
     opening_four, opening_eight = first_reclaim(limit_pct * 0.4), first_reclaim(limit_pct * 0.8)
     opening_drive = None
     if (session_low_pct > -3.0 and float(curve[0]["pct_vs_preclose"]) <= 3.0 and opening_four and opening_eight

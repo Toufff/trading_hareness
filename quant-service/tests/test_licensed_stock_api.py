@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.licensed_stock_api import (
+    MAX_EXPECTED_CALLS,
     MAX_PHYSICAL_BATCH,
+    MAX_TIMEOUT_SECONDS,
     TARGETS,
     UpstreamStockApiError,
     catalog,
@@ -204,6 +206,71 @@ def test_expected_call_count_matches_cross_product_batching():
     assert expected_call_count(requested_size=650) == 3
     assert expected_call_count(batch_value_count=601) == 3
     assert expected_call_count(requested_size=650, batch_value_count=601) == 9
+
+
+def test_st_and_batch_combination_exceeding_the_call_cap_is_rejected():
+    # 3000 rows needs 10 calls (at the cap); one more row pushes it to 11,
+    # which must be rejected before any upstream request is made.
+    session = Session()
+    try:
+        execute(
+            session=session,
+            config=Config(),
+            target_key="longhu_history",
+            path=None,
+            params={"a": "DailyLimitPerformance", "c": "HisHomeDingPan", "st": 3001},
+        )
+    except ValueError as error:
+        assert "upstream calls" in str(error)
+    else:
+        raise AssertionError("an over-cap request was accepted")
+    assert session.calls == []
+
+
+def test_st_and_batch_combination_at_the_call_cap_is_accepted():
+    session = Session()
+    execute(
+        session=session,
+        config=Config(),
+        target_key="longhu_history",
+        path=None,
+        params={"a": "DailyLimitPerformance", "c": "HisHomeDingPan", "st": 3000},
+    )
+    assert len(session.calls) == MAX_EXPECTED_CALLS == 10
+
+
+def test_cross_product_of_st_and_batch_values_is_also_capped():
+    session = Session()
+    values = [f"{index:06d}" for index in range(301)]  # 2 batch chunks
+    try:
+        execute(
+            session=session,
+            config=Config(),
+            target_key="longhu_quote",
+            path=None,
+            params={"a": "GetStockPanKou", "c": "StockL2Data", "st": 1501},  # 6 page chunks * 2 = 12
+            batch_param="StockIDs",
+            batch_values=values,
+        )
+    except ValueError as error:
+        assert "upstream calls" in str(error)
+    else:
+        raise AssertionError("a cross-product over-cap request was accepted")
+    assert session.calls == []
+
+
+def test_timeout_is_capped_regardless_of_configured_value():
+    session = Session()
+
+    @dataclass
+    class SlowConfig(Config):
+        timeout_seconds: float = 600.0
+
+    execute(
+        session=session, config=SlowConfig(), target_key="longhu_quote", path=None,
+        params={"a": "GetStockPanKou", "c": "StockL2Data"},
+    )
+    assert session.calls[0]["timeout"] == MAX_TIMEOUT_SECONDS
 
 
 def test_upstream_http_failure_is_sanitized():

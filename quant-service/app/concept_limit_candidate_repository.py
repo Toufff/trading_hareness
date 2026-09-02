@@ -61,12 +61,12 @@ def persist_candidates(
     json_value: Callable[[Any], Any],
 ) -> tuple[int, list[dict[str, Any]]]:
     """Write top limit-up members for each exact, same-date concept relation."""
-    membership_predicate = point_in_time_membership_predicate("member")
+    membership_predicate = point_in_time_membership_predicate("member", "%(trade_date)s")
     with database.transaction() as connection:
         memberships = connection.execute(
             f"""SELECT sector_key,symbol,raw FROM quant.sector_membership_history member
-                 WHERE taxonomy_key='ths_concept_flow' AND sector_key = ANY(%s) AND {membership_predicate}""",
-            (concept_keys, selected_date, selected_date, selected_date),
+                 WHERE taxonomy_key='ths_concept_flow' AND sector_key = ANY(%(concept_keys)s) AND {membership_predicate}""",
+            {"concept_keys": concept_keys, "trade_date": selected_date},
         ).fetchall()
         members_by_sector: dict[str, list[dict[str, Any]]] = {}
         for row in memberships:

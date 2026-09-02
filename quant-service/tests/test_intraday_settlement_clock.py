@@ -108,7 +108,7 @@ class IntradaySettlementClockTests(unittest.TestCase):
         self.assertEqual(result["matured"], 0)
         self.assertEqual(result["pending"], 2)  # the two daily references remain pending.
         self.assertFalse(any("observed_at>=%s AND observed_at<=%s" in query for query, _ in calls))
-        outcome_insert = next(params for query, params in calls if "INSERT INTO quant.intraday_signal_outcomes" in query)
+        outcome_insert = next(params for query, params in calls if "INSERT INTO quant.intraday_signal_outcomes(" in query)
         self.assertEqual(outcome_insert[10], "unavailable")
         self.assertEqual(persist_barrier.call_args.kwargs["result"]["status"], "unavailable")
 
@@ -143,7 +143,7 @@ class IntradaySettlementClockTests(unittest.TestCase):
                     return Result(rows=[{"price": "10.00"}, {"price": "10.20"}])
                 if "FROM quant.canonical_bars_daily" in text:
                     return Result(row=None)
-                if "INSERT INTO quant.intraday_signal_outcomes" in text:
+                if "INSERT INTO quant.intraday_signal_outcomes(" in text:
                     inserts.append(tuple(params))
                 return Result()
 
@@ -161,6 +161,70 @@ class IntradaySettlementClockTests(unittest.TestCase):
         intraday_insert = next(params for params in inserts if params[1] == "5m")
         self.assertEqual(intraday_insert[10], "matured")
         self.assertEqual(intraday_insert[5], exit_at)
+
+    def test_next_close_never_borrows_a_bar_from_past_a_suspension_gap(self) -> None:
+        """``next_close`` must resolve the trade calendar's actual next
+        session, not "whichever bar for this symbol comes next": a stock
+        suspended the day after the signal and reopening 5 days later must
+        stay pending, not be settled against that far-later reopening price.
+        """
+        signal_at = datetime(2026, 8, 11, 2, 0, tzinfo=timezone.utc)  # 10:00 Shanghai, 2026-08-11.
+        signal = {
+            "signal_event_id": "signal-3", "symbol": "000001.SZ", "signal_type": "entry",
+            "observed_at": signal_at, "evidence": {"tencent": {"price": "10.00"}},
+        }
+        calendar_next_date = date(2026, 8, 12)
+        reopening_after_suspension = {"trading_date": date(2026, 8, 17), "available_at": signal_at, "open": "9.00", "close": "9.50"}
+
+        class Result:
+            def __init__(self, *, rows=None, row=None):
+                self.rows, self.row = rows or [], row
+
+            def fetchall(self):
+                return self.rows
+
+            def fetchone(self):
+                return self.row
+
+        inserts: list[tuple[object, ...]] = []
+
+        class Connection:
+            def execute(self, query, params=None):
+                text = str(query)
+                if "FROM quant.intraday_signal_events" in text:
+                    return Result(rows=[signal])
+                if "FROM quant.market_trade_calendar" in text:
+                    return Result(row={"calendar_date": calendar_next_date})
+                if "SELECT delist_date FROM quant.instruments" in text:
+                    return Result(row={"delist_date": None})
+                if "FROM quant.canonical_bars_daily" in text and "trading_date=%s AND available_at>%s" in text:
+                    # The exact calendar-next-session bar does not exist: the
+                    # symbol is suspended that day.
+                    return Result(row=None)
+                if "FROM quant.canonical_bars_daily" in text:
+                    # A bar for this symbol does exist further out (the
+                    # pre-fix ">" query would have picked this one up).
+                    return Result(row=reopening_after_suspension)
+                if "SELECT observed_at,price" in text:
+                    return Result(rows=[])
+                if "INSERT INTO quant.intraday_signal_outcomes(" in text:
+                    inserts.append(tuple(params))
+                return Result()
+
+        result = settle(
+            Connection(), date(2026, 8, 11), cutoff=datetime(2026, 8, 20, 8, 0, tzinfo=timezone.utc),
+            horizons=(), direction_for=lambda _signal_type: 1,
+            metrics_for=intraday_signal_outcome_metrics,
+            decimal_or_none=lambda value: Decimal(str(value)) if value is not None else None,
+            barrier_spec_type=LabelSpec, triple_barrier_label=triple_barrier_label,
+            persist_barrier_outcome=MagicMock(), return_decomposition=a_share_return_decomposition,
+            json_safe=lambda value: value,
+        )
+
+        next_close_insert = next(params for params in inserts if params[1] == "next_close")
+        self.assertEqual(next_close_insert[10], "pending", "a suspension gap must not be silently bridged to a later bar")
+        self.assertIsNone(next_close_insert[6], "no exit_price must be credited across a suspension gap")
+        self.assertEqual(result["pending"], 2)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
+from .intraday_clock import CN_TZ
+
 
 REVIEW_CHECKPOINTS: tuple[tuple[str, time], ...] = (("midday", time(11, 31)), ("close", time(15, 5)))
 
@@ -44,7 +46,9 @@ async def strategy_review_scheduler_step(
     not added, so the next fifteen-second turn can retry while still inside the
     same bounded window.
     """
-    local = local or dependencies.now()
+    # Explicit conversion: checkpoint windows below compare local clock time
+    # against fixed China trading-session boundaries.
+    local = (local or dependencies.now()).astimezone(CN_TZ)
     exchange_date = local.date()
     if not await dependencies.calendar_open(exchange_date):
         return ()

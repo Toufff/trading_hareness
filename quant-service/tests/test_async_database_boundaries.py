@@ -6,67 +6,12 @@ import ast
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
 from pathlib import Path
 import unittest
 from unittest.mock import patch
 
 from app.runtime_executors import BlockingExecutorBoundary, ExecutorSaturatedError, run_akshare_blocking
-from app.async_strategy_read_repository import latest_strategy_decision
-from app.async_strategy_health_repository import latest_strategy_health
-from app.async_research_catalog_read_repository import factor_registry as async_factor_registry
-from app.async_market_result_read_repository import market_snapshots as async_market_snapshots
-from app.async_intraday_outcome_read_repository import latest_intraday_outcomes as async_latest_intraday_outcomes
-from app.async_intraday_evidence_read_repository import latest_scan as async_latest_intraday_scan
-from app.async_intraday_evidence_read_repository import watchlists as async_watchlists
-from app.async_analyst_skill_read_repository import profiles as async_analyst_skill_profiles
-from app.async_analyst_research_read_repository import observations as async_analyst_observations
-from app.async_analyst_research_read_repository import profiles as async_analyst_research_profiles
-from app.async_analyst_archive_read_repository import remote_messages as async_remote_messages
-from app.async_analyst_archive_read_repository import remote_reports as async_remote_reports
-from app.async_board_curve_read_repository import intraday_board_flow_curves as async_board_flow_curves
-from app.async_board_curve_read_repository import latest_close_sector_review_report as async_latest_board_review
-from app.async_board_research_read_repository import latest_board_rotation_events as async_board_rotations
-from app.async_board_research_read_repository import latest_board_stock_mining as async_board_stock_mining
-from app.async_analyst_action_read_repository import anqiang_trade_action_outcomes as async_action_outcomes
-from app.async_analyst_action_read_repository import anqiang_trade_action_replay as async_action_replay
-from app.async_automation_run_read_repository import latest_runs as async_automation_runs
-from app.async_market_flow_read_repository import market_flow_features as async_market_flow_features
-from app.async_sector_read_repository import concept_sector_signals as async_concept_signals
-from app.async_sector_read_repository import market_sectors as async_market_sectors
-from app.async_sector_read_repository import sector_members as async_sector_members
-from app.sector_read_model import project_concept_member_backfill_status
-from app.async_limit_linkage_mining_read_repository import latest_limit_linkage_mining as async_limit_linkage_mining
-from app.async_analyst_prompt_lab_read_repository import status as async_prompt_lab_status
-from app.async_analyst_market_review_read_repository import list_reviews as async_market_reviews
-from app.async_analyst_market_evaluation_read_repository import market_evaluation as async_market_evaluation
-from app.async_analyst_stock_timeline_read_repository import stock_timeline as async_stock_timeline
-from app.async_analyst_research_status_read_repository import status as async_research_status
-from app.async_analyst_sync_health_repository import sync_health as async_analyst_sync_health
-from app.async_analyst_archive_read_repository import analyst_sync_cursor as async_archive_sync_cursor
-from app.async_analyst_archive_read_repository import remote_report_list_state as async_archive_state
-from app.async_provider_status_read_repository import provider_health as async_provider_health
-from app.async_analyst_text_feature_read_repository import analyst_text_factor_summary as async_analyst_factor_summary
-from app.async_research_readiness_repository import replay_readiness as async_replay_readiness
-from app.async_research_readiness_repository import historical_estimate as async_historical_estimate
-from app.request_models import HistoricalCoverageEstimateRequest
-from app.routers.intraday_status import build_intraday_status_router
-from app.routers.event_reads import build_event_reads_router
-from app.routers.research_readiness import build_research_readiness_router
-from app.routers.analyst_skill_reads import build_analyst_skill_reads_router
 from app.routers.analyst_research_reads import build_analyst_research_reads_router
-from app.routers.analyst_reads import build_analyst_reads_router
-from app.routers.board_curve_reads import build_board_curve_reads_router
-from app.routers.board_rotation_reads import build_board_rotation_reads_router
-from app.routers.board_stock_mining_reads import build_board_stock_mining_reads_router
-from app.routers.analyst_trade_action_reads import build_analyst_trade_action_reads_router
-from app.routers.analyst_action_outcomes import build_analyst_action_outcomes_router
-from app.routers.automation_reads import build_automation_reads_router
-from app.routers.market_flow_reads import build_market_flow_reads_router
-from app.routers.sector_reads import build_sector_reads_router
-from app.routers.limit_linkage_mining_reads import build_limit_linkage_mining_reads_router
-from app.routers.analyst_prompt_lab import build_analyst_prompt_lab_router
-from app.routers.provider_status import build_provider_status_router
 
 
 class _DirectAsyncDbTransactionVisitor(ast.NodeVisitor):
@@ -225,24 +170,16 @@ class MainRouterBoundaryTests(unittest.TestCase):
                     direct_routes.add((method.upper(), decorator.args[0].value))
         self.assertEqual(direct_routes, set())
 
-    def test_legacy_sync_names_are_thin_compatibility_aliases(self) -> None:
-        """Prevent removed provider implementations from returning to main.py."""
+    def test_legacy_sync_aliases_have_been_removed(self) -> None:
+        """WP9b deleted every unused ``*_legacy`` alias; keep them from coming back."""
         main_path = Path(__file__).resolve().parents[1] / "app" / "main.py"
         tree = ast.parse(main_path.read_text(encoding="utf-8"))
-        names = {
-            "sync_tushare_legacy", "sync_baostock_legacy", "sync_market_universe_legacy",
-            "sync_full_market_daily_legacy", "sync_ths_sector_catalog_legacy",
-            "sync_eastmoney_board_members_legacy", "sync_ths_industry_moneyflow_legacy",
-            "sync_ths_concept_signals_legacy", "sync_ths_concept_members_legacy",
-            "review_claim_legacy",
+        legacy_names = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.endswith("_legacy")
         }
-        found = {}
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
-                found[node.name] = node
-        self.assertEqual(set(found), names)
-        for name, node in found.items():
-            self.assertLessEqual(len(node.body), 4, name)
+        self.assertEqual(legacy_names, set())
 
 
 class RouterReadBoundaryTests(unittest.TestCase):
@@ -258,9 +195,8 @@ class RouterReadBoundaryTests(unittest.TestCase):
         ("automation_reads.py", "agent_context"),
         ("intraday_status.py", "intraday_services_status"),
         ("research_readiness.py", "training_roadmap"),
-        # Health probes the strict synchronous local database control plane;
-        # Prometheus must remain scrapeable even while that probe is degraded.
-        ("system_control.py", "health"),
+        # Prometheus must remain scrapeable through a plain synchronous
+        # response even while the database-backed /health probe is degraded.
         ("system_control.py", "prometheus_metrics"),
     }
 

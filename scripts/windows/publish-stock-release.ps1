@@ -36,11 +36,22 @@ function Copy-DirectorySnapshot {
 }
 
 function Stop-ProductionRuntime {
+    # Graceful stop first, Stop-ScheduledTask second: Stop-ScheduledTask
+    # terminates the scheduled task's whole job object (the watchdog, the
+    # supervisor, and the supervised process) immediately, which never gives
+    # stop-stock-dashboard.ps1's Request-RuntimeStop a chance to write its
+    # stop marker or the supervisor a chance to record a clean 'stopped'
+    # status -- the runtime-state file is then left saying 'healthy' for a
+    # PID that is already dead. Running the graceful stop script first lets
+    # it write the marker and kill the actual listener PIDs itself, so the
+    # supervisor observes an expected exit and records it correctly; by the
+    # time Stop-ScheduledTask runs afterward there is normally nothing left
+    # for it to do.
     param([string]$RuntimeRoot)
-    Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels' -ErrorAction SilentlyContinue
-    Stop-ScheduledTask -TaskName 'trading-hareness-dashboard-runtime' -ErrorAction SilentlyContinue
     $stop = Join-Path $RuntimeRoot 'scripts\windows\stop-stock-dashboard.ps1'
     if (Test-Path -LiteralPath $stop -PathType Leaf) { & $stop -PlatformRoot $platform | Out-Null }
+    Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels' -ErrorAction SilentlyContinue
+    Stop-ScheduledTask -TaskName 'trading-hareness-dashboard-runtime' -ErrorAction SilentlyContinue
 }
 
 function Start-ProductionRuntime {
@@ -63,8 +74,12 @@ function Wait-ProductionHealth {
         } catch { }
     } while ([DateTime]::UtcNow -lt $deadline)
     if ([DateTime]::UtcNow -ge $deadline) { throw 'Production API and dashboard adapter did not become healthy before the deadline' }
+    # verify-shared-runtime.ps1 is a PowerShell script, not a native exe: on
+    # failure it throws (propagated by $ErrorActionPreference = 'Stop' in both
+    # this script and the callee), so $LASTEXITCODE here would only reflect
+    # whatever native command the script happened to run last, not its own
+    # success/failure.
     & (Join-Path $RuntimeRoot 'scripts\shared-peer\verify-shared-runtime.ps1') | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Shared runtime verification failed with exit code $LASTEXITCODE" }
 }
 
 $gitStatus = @(& git -C $source status --porcelain=v1)
@@ -120,6 +135,31 @@ try {
     Copy-DirectorySnapshot -Source (Join-Path $source 'feishu-adapter\node_modules') -Destination (Join-Path $app 'feishu-adapter\node_modules')
     Copy-DirectorySnapshot -Source (Join-Path $source 'frontend\dist') -Destination (Join-Path $app 'frontend\dist')
 
+    # A plain directory copy of .venv does not rewrite the absolute paths
+    # baked into it at creation time: pyvenv.cfg's `home`, and (more
+    # concretely, per the audit) the embedded shebang path inside every
+    # console-script launcher under .venv\Scripts (pip.exe, alembic.exe,
+    # uvicorn.exe, ...), which still points at $source's own .venv\Scripts.
+    # Rebuilding the venv in-place with `python -m venv --copies` plus a
+    # pinned wheelhouse would fix this properly; that is a larger change, so
+    # for now this only detects and records it as a manifest warning.
+    $venvWarnings = @()
+    $venvPyvenvCfg = Join-Path $app '.venv\pyvenv.cfg'
+    if (Test-Path -LiteralPath $venvPyvenvCfg -PathType Leaf) {
+        $homeLine = Get-Content -LiteralPath $venvPyvenvCfg -Encoding UTF8 | Where-Object { $_ -match '^\s*home\s*=' } | Select-Object -First 1
+        if ($homeLine) {
+            $homeValue = ($homeLine -split '=', 2)[1].Trim()
+            if ($homeValue.StartsWith($source, [StringComparison]::OrdinalIgnoreCase)) {
+                $venvWarnings += "pyvenv.cfg home ($homeValue) still points into the F: development checkout ($source); console-script launchers copied under .venv\Scripts embed this path at creation time and may silently run the dev interpreter instead of this release's own copy if invoked directly (running them via the venv's own python.exe, as the runtime scripts do, is unaffected)."
+            }
+        } else {
+            $venvWarnings += 'pyvenv.cfg is missing a home entry'
+        }
+    } else {
+        $venvWarnings += 'Missing .venv\pyvenv.cfg in the snapshotted virtual environment'
+    }
+    foreach ($warning in $venvWarnings) { Write-Warning $warning }
+
     $diff = @(& git -C $source diff --binary HEAD)
     [IO.File]::WriteAllLines((Join-Path $evidence 'working-tree.patch'), $diff, [Text.UTF8Encoding]::new($false))
     $untracked = @(& git -C $source ls-files --others --exclude-standard)
@@ -144,6 +184,7 @@ try {
         frontend_lock_sha256 = (Get-FileHash -LiteralPath (Join-Path $app 'frontend\package-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()
         adapter_package_sha256 = (Get-FileHash -LiteralPath (Join-Path $app 'feishu-adapter\package.json') -Algorithm SHA256).Hash.ToLowerInvariant()
         adapter_lock_sha256 = (Get-FileHash -LiteralPath (Join-Path $app 'feishu-adapter\package-lock.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+        venv_warnings = $venvWarnings
     }
     [IO.File]::WriteAllText((Join-Path $app 'release-manifest.json'), ($manifest | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
 
@@ -155,6 +196,12 @@ try {
     $contentDigest = (Get-FileHash -LiteralPath (Join-Path $evidence 'files.sha256') -Algorithm SHA256).Hash.ToLowerInvariant()
     $manifest['content_manifest_sha256'] = $contentDigest
     [IO.File]::WriteAllText((Join-Path $app 'release-manifest.json'), ($manifest | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
+
+    # Self-check the snapshot we just took against the manifest we just
+    # wrote before this release can ever become `current`: catches copy
+    # corruption (interrupted Copy-Item, concurrent writes to $source, a
+    # flaky disk) independently of the same check run again at switch time.
+    [void](Test-StockReleaseFileHashes -AppPath $app -ManifestPath (Join-Path $evidence 'files.sha256'))
 
     Move-Item -LiteralPath $stagingRoot -Destination $finalRoot
     $newApp = Join-Path $finalRoot 'app'
@@ -194,26 +241,53 @@ try {
     $failure = $_
     if (-not $activated) {
         try {
+            # Stop whatever is currently active first -- if Set-StockCurrentRelease
+            # above already flipped the junction to this (failing) release, that
+            # is this release's own app path, so its own stop script is used to
+            # tear down its own processes before anything is switched back.
             Stop-ProductionRuntime -RuntimeRoot $(if (Test-Path -LiteralPath $layout.CurrentPath) { $layout.CurrentPath } else { $fallbackRoot })
             if ($previousRelease -and (Test-Path -LiteralPath (Get-StockReleaseAppPath -PlatformRoot $platform -ReleaseId $previousRelease) -PathType Container)) {
+                [void](Test-StockReleaseIntegrity -PlatformRoot $platform -ReleaseId $previousRelease)
                 [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $previousRelease)
                 Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath
+                Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath
+                [void](Set-StockReleaseState -PlatformRoot $platform -State @{
+                    active_release = $previousRelease
+                    previous_release = if ($previousState.PSObject.Properties['previous_release']) { $previousState.previous_release } else { $null }
+                    last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = 'verified_after_automatic_rollback' }
+                    last_failed_release = $releaseId
+                    failure_message = $failure.Exception.Message
+                })
             } else {
+                # No previously-activated release to fall back to. Do not
+                # start production from the F: development checkout -- leave
+                # production stopped and fail loudly instead, so an operator
+                # has to make a deliberate decision rather than "production"
+                # silently running out of a developer's working tree.
                 if (Test-Path -LiteralPath $layout.CurrentPath) {
                     $current = Get-Item -LiteralPath $layout.CurrentPath -Force
                     if (-not ($current.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Rollback refused to remove non-junction $($layout.CurrentPath)" }
                     Remove-Item -LiteralPath $layout.CurrentPath -Force
                 }
-                Start-ProductionRuntime -RuntimeRoot $source
+                Write-Warning 'No previously-activated release is available to roll back to. Production is left stopped rather than started from the F: development checkout; publish a working release before restarting it.'
+                [void](Set-StockReleaseState -PlatformRoot $platform -State @{
+                    active_release = $null
+                    previous_release = if ($previousState.PSObject.Properties['previous_release']) { $previousState.previous_release } else { $null }
+                    last_verification = if ($previousState.PSObject.Properties['last_verification']) { $previousState.last_verification } else { $null }
+                    last_failed_release = $releaseId
+                    failure_message = $failure.Exception.Message
+                })
             }
-            [void](Set-StockReleaseState -PlatformRoot $platform -State @{
-                active_release = if ($previousRelease) { $previousRelease } else { $null }
-                previous_release = if ($previousState.PSObject.Properties['previous_release']) { $previousState.previous_release } else { $null }
-                last_verification = if ($previousState.PSObject.Properties['last_verification']) { $previousState.last_verification } else { $null }
-                last_failed_release = $releaseId
-                failure_message = $failure.Exception.Message
-            })
         } catch { Write-Warning "Automatic rollback also failed: $($_.Exception.Message)" }
+        # The failed release must not be considered by the retention policy
+        # or later reactivated by name; rename it out of the way (kept, not
+        # deleted, for forensics). By this point the junction no longer
+        # points at $finalRoot in either branch above, so this is safe.
+        if (Test-Path -LiteralPath $finalRoot -PathType Container) {
+            $failedRoot = "$finalRoot.failed"
+            if (Test-Path -LiteralPath $failedRoot) { Remove-Item -LiteralPath $failedRoot -Recurse -Force }
+            Rename-Item -LiteralPath $finalRoot -NewName (Split-Path -Leaf $failedRoot) -ErrorAction SilentlyContinue
+        }
     }
     throw $failure
 } finally {

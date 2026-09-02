@@ -10,6 +10,7 @@ import os
 from threading import RLock
 from typing import Any, Awaitable, Mapping
 
+from .logging_config import get_logger
 from .telemetry import background_loop_restarts_total
 from .network_health import network_state
 from .platform.runtime_task_registry import (
@@ -17,6 +18,10 @@ from .platform.runtime_task_registry import (
     intraday_edge_task_labels,
     runtime_profile_owns_task,
 )
+from .tushare_providers import safe_error_detail
+
+
+logger = get_logger(__name__)
 
 
 # Compatibility export for existing callers. The registry is now the source
@@ -24,6 +29,12 @@ from .platform.runtime_task_registry import (
 # documentation list.
 INTRADAY_EDGE_BACKGROUND_LOOPS = intraday_edge_task_labels()
 BACKGROUND_RUNTIME_PROFILES = frozenset({"full", "research", "intraday_edge"})
+
+#: Bounded retries for a durable lease renewal before treating it as lost.
+#: A single transient DB error must not immediately hand the lease to a new
+#: owner while the old holder's task is still running.
+LEASE_RENEW_MAX_RETRIES = 2
+LEASE_RENEW_RETRY_DELAY_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -120,14 +131,25 @@ def start_leased_background_tasks(
 
 
 async def cancel_background_tasks(tasks: dict[str, asyncio.Task[None]]) -> None:
-    """Cancel and await every owned loop so shutdown cannot leave orphan tasks."""
+    """Cancel and await every owned loop so shutdown cannot leave orphan tasks.
+
+    ``gather(..., return_exceptions=True)`` is required here: a sequential
+    ``await`` per task means the first task to raise something other than
+    ``CancelledError`` would abort the loop and leave every later task
+    uncancelled and orphaned past shutdown.
+    """
     for task in tasks.values():
         task.cancel()
-    for task in tasks.values():
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    for label, result in zip(tasks.keys(), results):
+        if isinstance(result, asyncio.CancelledError) or result is None:
+            continue
+        if isinstance(result, BaseException):
+            logger.warning(
+                f"{label} background task raised during shutdown cancellation: "
+                f"{safe_error_detail(str(result), 300)}",
+                extra={"task": label},
+            )
 
 
 class LoopRuntimeRegistry:
@@ -160,7 +182,7 @@ def observe_completed_task(task: asyncio.Task[Any], in_flight: set[asyncio.Task[
     try:
         task.result()
     except Exception as error:  # noqa: BLE001 - surface a bounded loop failure without crashing its scheduler
-        print(f"{label} task failed: {str(error)[:300]}")
+        logger.warning(f"{label} task failed: {safe_error_detail(str(error), 300)}", extra={"task": label})
 
 
 async def supervise_loop(label: str, factory: Callable[[], Awaitable[None]], restart_delay_seconds: float = 5.0,
@@ -184,13 +206,15 @@ async def supervise_loop(label: str, factory: Callable[[], Awaitable[None]], res
             failure_streak += 1
             if on_state is not None:
                 on_state(label, "failed", str(error))
-            print(f"{label} loop failed; restarting: {str(error)[:300]}")
+            logger.error(
+                f"{label} loop failed; restarting: {safe_error_detail(str(error), 300)}", extra={"task": label},
+            )
         else:
             background_loop_restarts_total.labels(label).inc()
             failure_streak = 0
             if on_state is not None:
                 on_state(label, "exited", None)
-            print(f"{label} loop exited unexpectedly; restarting")
+            logger.warning(f"{label} loop exited unexpectedly; restarting", extra={"task": label})
         network = network_state.snapshot()
         backoff = restart_delay_seconds * (2 ** min(max(failure_streak - 1, 0), 4))
         if network["state"] == "offline":
@@ -209,6 +233,7 @@ async def supervise_leased_loop(
     lease_seconds: int,
     retry_delay_seconds: float = 5.0,
     on_state: Callable[[str, str, str | None], None] | None = None,
+    lease_renew_retry_delay_seconds: float = LEASE_RENEW_RETRY_DELAY_SECONDS,
 ) -> None:
     """Run one supervised loop only while this process owns its durable lease."""
     renew_delay = max(1.0, lease_seconds / 3)
@@ -222,7 +247,10 @@ async def supervise_leased_loop(
         except Exception as error:  # noqa: BLE001 - DB control-plane outage must not kill the loop task
             if on_state is not None:
                 on_state(label, "lease_acquire_failed", str(error))
-            print(f"{label} lease acquire failed; retrying: {str(error)[:300]}")
+            logger.warning(
+                f"{label} lease acquire failed; retrying: {safe_error_detail(str(error), 300)}",
+                extra={"task": label},
+            )
             await asyncio.sleep(max(0.1, retry_delay_seconds))
             continue
         if not owns_lease:
@@ -237,17 +265,37 @@ async def supervise_leased_loop(
         ))
 
         async def renew_until_lost() -> None:
+            # A single DB blip previously dropped an otherwise-healthy lease
+            # immediately.  A bounded number of quick retries (on their own
+            # short delay, distinct from the normal renew cadence) distinguish
+            # a transient renew failure from an actual lost lease.
             while True:
                 await asyncio.sleep(renew_delay)
-                try:
-                    renewed = await renew()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:  # noqa: BLE001 - conservatively stop before an unverified lease expires
-                    if on_state is not None:
-                        on_state(label, "lease_renew_failed", str(error))
-                    print(f"{label} lease renew failed; treating lease as lost: {str(error)[:300]}")
-                    return
+                consecutive_errors = 0
+                while True:
+                    try:
+                        renewed = await renew()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as error:  # noqa: BLE001 - retried before conservatively treating the lease as lost
+                        consecutive_errors += 1
+                        if on_state is not None:
+                            on_state(label, "lease_renew_failed", str(error))
+                        if consecutive_errors <= LEASE_RENEW_MAX_RETRIES:
+                            logger.warning(
+                                f"{label} lease renew failed (attempt {consecutive_errors}/{LEASE_RENEW_MAX_RETRIES}); "
+                                f"retrying: {safe_error_detail(str(error), 300)}",
+                                extra={"task": label},
+                            )
+                            await asyncio.sleep(lease_renew_retry_delay_seconds)
+                            continue
+                        logger.error(
+                            f"{label} lease renew failed after {consecutive_errors} attempts; treating lease as "
+                            f"lost: {safe_error_detail(str(error), 300)}",
+                            extra={"task": label},
+                        )
+                        return
+                    break
                 if not renewed:
                     if on_state is not None:
                         on_state(label, "lease_lost", None)
@@ -263,7 +311,7 @@ async def supervise_leased_loop(
                         await worker
                     except asyncio.CancelledError:
                         pass
-                print(f"{label} lease lost; waiting for a new owner window")
+                logger.warning(f"{label} lease lost; waiting for a new owner window", extra={"task": label})
             else:
                 await worker
         finally:
@@ -279,7 +327,10 @@ async def supervise_leased_loop(
             except Exception as error:  # noqa: BLE001 - expiry remains the safe takeover fallback
                 if on_state is not None:
                     on_state(label, "lease_release_failed", str(error))
-                print(f"{label} lease release failed; it will expire naturally: {str(error)[:300]}")
+                logger.warning(
+                    f"{label} lease release failed; it will expire naturally: {safe_error_detail(str(error), 300)}",
+                    extra={"task": label},
+                )
             else:
                 if on_state is not None:
                     on_state(label, "standby", None)

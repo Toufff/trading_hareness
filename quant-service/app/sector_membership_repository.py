@@ -10,11 +10,10 @@ known.
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
-
-from psycopg.types.json import Json
 
 
 PROVIDER_INTERVAL = "provider_interval"
@@ -54,6 +53,14 @@ def point_in_time_membership_predicate(
     be visible to a replay before that refresh was actually received.  Legacy
     rows with the old synthetic 1900 start date remain auditable but cannot
     silently enter research features.
+
+    ``date_parameter`` appears up to three times in the returned fragment
+    (twice directly, once inside the default ``known_at_cutoff_sql``), which
+    used to force positional callers to repeat the same date literal three to
+    six times.  Pass ``date_parameter="%(trade_date)s"`` to bind it once as
+    ``{"trade_date": ...}`` in an otherwise fully named ``execute`` call
+    instead; the default stays the positional ``%s`` so existing callers that
+    build a plain tuple of parameters are unaffected.
     """
     cutoff = known_at_cutoff_sql or f"(({date_parameter}::date + time '17:00:00') AT TIME ZONE 'Asia/Shanghai')"
     return (
@@ -77,6 +84,11 @@ def persist_ths_snapshot(
 ) -> int:
     """Store one complete THS constituent response with explicit time basis."""
     active_members: set[str] = set()
+    # Rows are collected here and written in one batched upsert below instead
+    # of one INSERT per constituent (a THS concept/index snapshot can carry
+    # hundreds of members).  ``ensure_instrument`` stays per-row: it is an
+    # injected dependency owned outside this file.
+    to_write: dict[tuple[str, date], tuple[Any, ...]] = {}
     for row in rows:
         symbol = str(row.get("con_code") or "").upper()
         if len(symbol) != 9 or symbol[6:] not in {".SH", ".SZ", ".BJ"} or not symbol[:6].isdigit():
@@ -85,21 +97,36 @@ def persist_ths_snapshot(
         effective_from, effective_to, from_basis, to_basis = membership_interval(
             row, observed_at, parse_date=parse_date,
         )
+        to_write[(symbol, effective_from)] = (symbol, effective_from, effective_to, from_basis, to_basis, row)
+        if effective_to is None:
+            active_members.add(symbol)
+    if to_write:
+        entries = list(to_write.values())
         connection.execute(
             """INSERT INTO quant.sector_membership_history(
                    taxonomy_key,sector_key,symbol,effective_from,effective_to,provider_key,
-                   available_at,known_at,effective_from_basis,effective_to_basis,raw
-               ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   available_at,known_at,effective_from_basis,effective_to_basis,raw)
+               SELECT %(taxonomy_key)s,%(sector_key)s,t.symbol,t.effective_from,t.effective_to,%(provider_key)s,
+                      %(observed_at)s,%(observed_at)s,t.effective_from_basis,t.effective_to_basis,t.raw::jsonb
+                 FROM unnest(%(symbols)s::text[],%(effective_froms)s::date[],%(effective_tos)s::date[],
+                              %(from_bases)s::text[],%(to_bases)s::text[],%(raws)s::text[])
+                      AS t(symbol,effective_from,effective_to,effective_from_basis,effective_to_basis,raw)
                ON CONFLICT(taxonomy_key,sector_key,symbol,effective_from) DO UPDATE
                  SET effective_to=EXCLUDED.effective_to,provider_key=EXCLUDED.provider_key,
                      available_at=EXCLUDED.available_at,known_at=EXCLUDED.known_at,
                      effective_from_basis=EXCLUDED.effective_from_basis,
                      effective_to_basis=EXCLUDED.effective_to_basis,raw=EXCLUDED.raw""",
-            (taxonomy_key, sector_key, symbol, effective_from, effective_to, provider_key,
-             observed_at, observed_at, from_basis, to_basis, Json(row)),
+            {
+                "taxonomy_key": taxonomy_key, "sector_key": sector_key, "provider_key": provider_key,
+                "observed_at": observed_at,
+                "symbols": [entry[0] for entry in entries],
+                "effective_froms": [entry[1] for entry in entries],
+                "effective_tos": [entry[2] for entry in entries],
+                "from_bases": [entry[3] for entry in entries],
+                "to_bases": [entry[4] for entry in entries],
+                "raws": [json.dumps(entry[5], ensure_ascii=False, default=str) for entry in entries],
+            },
         )
-        if effective_to is None:
-            active_members.add(symbol)
     if rows:
         connection.execute(
             """UPDATE quant.sector_membership_history
@@ -127,26 +154,42 @@ def persist_observed_snapshot(
     members: set[str] = set()
     stored = 0
     effective_from = observed_exchange_date(observed_at)
+    # ``effective_to``/basis columns are constant for the whole snapshot, so
+    # only ``symbol``/``raw`` vary per row: collected here and written in one
+    # batched upsert instead of one INSERT per member.  Deduplicated by
+    # symbol (last one wins) because the conflict key only varies by symbol
+    # within one call, and PostgreSQL rejects an ON CONFLICT DO UPDATE that
+    # would affect the same target row twice in a single statement.
+    raw_by_symbol: dict[str, dict[str, Any]] = {}
     for row in rows:
         symbol = member_symbol(row)
         if not symbol:
             continue
         ensure_instrument(connection, symbol, row)
+        raw_by_symbol[symbol] = row
+        members.add(symbol)
+        stored += 1
+    if raw_by_symbol:
+        symbols = list(raw_by_symbol)
         connection.execute(
             """INSERT INTO quant.sector_membership_history(
                    taxonomy_key,sector_key,symbol,effective_from,effective_to,provider_key,
-                   available_at,known_at,effective_from_basis,effective_to_basis,raw
-               ) VALUES(%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s)
+                   available_at,known_at,effective_from_basis,effective_to_basis,raw)
+               SELECT %(taxonomy_key)s,%(sector_key)s,t.symbol,%(effective_from)s,NULL,%(provider_key)s,
+                      %(observed_at)s,%(observed_at)s,%(basis)s,%(basis)s,t.raw::jsonb
+                 FROM unnest(%(symbols)s::text[],%(raws)s::text[]) AS t(symbol,raw)
                ON CONFLICT(taxonomy_key,sector_key,symbol,effective_from) DO UPDATE
                  SET effective_to=NULL,provider_key=EXCLUDED.provider_key,
                      available_at=EXCLUDED.available_at,known_at=EXCLUDED.known_at,
                      effective_from_basis=EXCLUDED.effective_from_basis,
                      effective_to_basis=EXCLUDED.effective_to_basis,raw=EXCLUDED.raw""",
-            (taxonomy_key, sector_key, symbol, effective_from, provider_key, observed_at, observed_at,
-             OBSERVED_SNAPSHOT, OBSERVED_SNAPSHOT, Json(row)),
+            {
+                "taxonomy_key": taxonomy_key, "sector_key": sector_key, "provider_key": provider_key,
+                "observed_at": observed_at, "effective_from": effective_from, "basis": OBSERVED_SNAPSHOT,
+                "symbols": symbols,
+                "raws": [json.dumps(raw_by_symbol[symbol], ensure_ascii=False, default=str) for symbol in symbols],
+            },
         )
-        members.add(symbol)
-        stored += 1
     if rows:
         connection.execute(
             """UPDATE quant.sector_membership_history

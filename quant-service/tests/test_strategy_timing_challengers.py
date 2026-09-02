@@ -8,7 +8,10 @@ from datetime import date, datetime, timedelta, timezone
 
 from app.intraday_rule_inputs import intraday_rule_input_hash
 from app.main import db
-from app.strategy_timing_challengers import CHALLENGERS, run_challenger_backtest
+from app.strategy_timing_challengers import (
+    CHALLENGERS, MINIMUM_EVALUABLE_ENTRIES, _benjamini_hochberg_reject, _cumulative_entries,
+    _one_sample_t_stat, run_challenger_backtest,
+)
 from psycopg.types.json import Json
 
 
@@ -114,6 +117,66 @@ class StrategyTimingChallengerIntegrationTests(unittest.TestCase):
             "baseline", "c1_tighter_entry_ceiling_3pct", "c2_entry_session_windows",
             "c3_entry_requires_minute_confirmation",
         })
+
+
+class OneSampleTStatTests(unittest.TestCase):
+    def test_too_few_observations_is_undefined(self):
+        self.assertIsNone(_one_sample_t_stat([0.01]))
+
+    def test_zero_spread_is_undefined_not_infinite(self):
+        self.assertIsNone(_one_sample_t_stat([0.01, 0.01, 0.01]))
+
+    def test_a_clearly_positive_series_has_a_positive_t_stat(self):
+        t_stat = _one_sample_t_stat([0.01, 0.02, 0.015, 0.012, 0.018])
+        self.assertGreater(t_stat, 0)
+
+
+class BenjaminiHochbergRejectTests(unittest.TestCase):
+    def test_a_single_marginal_cell_among_many_is_not_rejected(self):
+        p_values = {f"cell-{index}": (0.04 if index == 0 else 0.7) for index in range(12)}
+        result = _benjamini_hochberg_reject(p_values)
+        self.assertFalse(any(result.values()))
+
+    def test_none_p_values_are_never_rejected(self):
+        result = _benjamini_hochberg_reject({"a": None, "b": 0.001})
+        self.assertFalse(result["a"])
+        self.assertTrue(result["b"])
+
+
+class _LedgerResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class _LedgerConnection:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def execute(self, _sql, _params=None):
+        return _LedgerResult(self.rows)
+
+
+class CumulativeEntriesTests(unittest.TestCase):
+    def test_sums_total_entries_across_every_ledgered_run(self):
+        connection = _LedgerConnection([
+            {"metrics": {"challengers": {"baseline": {"total_entries": 5}, "c1_tighter_entry_ceiling_3pct": {"total_entries": 2}}}},
+            {"metrics": {"challengers": {"baseline": {"total_entries": 7}}}},
+        ])
+        totals = _cumulative_entries(connection)
+        self.assertEqual(totals["baseline"], 12)
+        self.assertEqual(totals["c1_tighter_entry_ceiling_3pct"], 2)
+        self.assertEqual(totals["c2_entry_session_windows"], 0)
+
+    def test_malformed_rows_are_ignored_not_fatal(self):
+        connection = _LedgerConnection([{"metrics": "not-a-dict"}, {"metrics": {"challengers": None}}])
+        totals = _cumulative_entries(connection)
+        self.assertEqual(totals["baseline"], 0)
+
+    def test_minimum_evaluable_entries_is_thirty(self):
+        self.assertEqual(MINIMUM_EVALUABLE_ENTRIES, 30)
 
 
 if __name__ == "__main__":

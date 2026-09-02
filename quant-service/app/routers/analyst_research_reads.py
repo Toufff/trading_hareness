@@ -127,8 +127,11 @@ def build_analyst_research_reads_router(
         return latest_analyst_market_review(database, cadence)
 
     @router.post("/api/v1/analyst-research/reviews/run")
-    def run_review(request: AnalystMarketReviewRequest) -> dict[str, Any]:
-        return {"review": build_recorded_analyst_market_review(database, request.cadence, request.as_of_date)}
+    async def run_review(request: AnalystMarketReviewRequest) -> dict[str, Any]:
+        review = await run_database_blocking(
+            build_recorded_analyst_market_review, database, request.cadence, request.as_of_date, timeout_seconds=3,
+        )
+        return {"review": review}
 
     @router.get("/api/v1/analyst-research/stock-timeline")
     async def stock_timeline(

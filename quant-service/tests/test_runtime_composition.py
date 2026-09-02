@@ -6,7 +6,12 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-from app.runtime_composition import LeasedRuntimeDependencies, build_leased_task_runner
+from app.runtime_composition import (
+    LeasedRuntimeDependencies,
+    build_leased_task_runner,
+    current_lease_fence,
+    lease_key_for_label,
+)
 
 
 class RuntimeCompositionTests(unittest.TestCase):
@@ -45,6 +50,47 @@ class RuntimeCompositionTests(unittest.TestCase):
             renew.assert_awaited_once_with(database, "background_loop:intraday_monitor", holder, 45)
             release.assert_awaited_once_with(database, "background_loop:intraday_monitor", holder)
             return acquire, renew, release, supervise
+
+        asyncio.run(check())
+
+    def test_acquire_publishes_its_fence_for_the_task_body_to_read(self):
+        async def check() -> None:
+            acquire = AsyncMock(return_value=9)
+            renew = AsyncMock(return_value=9)
+            release = AsyncMock()
+            supervise = AsyncMock()
+            runner = build_leased_task_runner(LeasedRuntimeDependencies(
+                database=object(), lease_holder_id=object(), lease_seconds=45,
+                acquire_lease=acquire, renew_lease=renew, release_lease=release, supervise=supervise,
+            ))
+
+            async def loop() -> None:
+                return None
+
+            self.assertIsNone(current_lease_fence("fence_probe"))
+            await runner("fence_probe", loop)
+            await supervise.await_args.args[2]()  # invoke the wrapped acquire()
+            self.assertEqual(current_lease_fence("fence_probe"), 9)
+            self.assertEqual(lease_key_for_label("fence_probe"), "background_loop:fence_probe")
+
+        asyncio.run(check())
+
+    def test_acquire_publishes_none_when_the_lease_is_held_elsewhere(self):
+        async def check() -> None:
+            acquire = AsyncMock(return_value=None)
+            supervise = AsyncMock()
+            runner = build_leased_task_runner(LeasedRuntimeDependencies(
+                database=object(), lease_holder_id=object(), lease_seconds=45,
+                acquire_lease=acquire, renew_lease=AsyncMock(), release_lease=AsyncMock(), supervise=supervise,
+            ))
+
+            async def loop() -> None:
+                return None
+
+            await runner("fence_probe_lost", loop)
+            owns_lease = await supervise.await_args.args[2]()
+            self.assertFalse(owns_lease)
+            self.assertIsNone(current_lease_fence("fence_probe_lost"))
 
         asyncio.run(check())
 

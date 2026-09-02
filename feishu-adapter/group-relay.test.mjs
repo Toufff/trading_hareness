@@ -187,3 +187,24 @@ test('an edited interactive card updates the original portable summary instead o
 	assert.equal(sent.length, 1);
 	assert.deepEqual(updated[0], { path: { message_id: 'om_target_1' }, data: { msg_type: 'text', content: JSON.stringify({ text: '#anqiang\n[interactive]\n修订后的卡片正文\n查看详情\nhttps://example.test/detail' }) } });
 });
+
+test('a permanently hung tick is recovered by the watchdog instead of stopping polling forever', async () => {
+	const logs = [];
+	const relay = createGroupRelay({
+		larkClient: {}, sourceApi: {}, ledger: {},
+		logger: { info() {}, warn() {}, error: (message) => logs.push(message) },
+		config: {
+			enabled: true, targetChatId: 'oc_summary', tickWatchdogSeconds: 0.02,
+			// A sources provider that never resolves simulates a hung upstream call
+			// happening after `running` has already been set true.
+			sourcesProvider: () => new Promise(() => {}),
+			sources: [],
+		},
+	});
+	void relay.tick();
+	await new Promise((resolve) => setTimeout(resolve, 80));
+	assert.equal(relay.status().running, true, 'the first tick is still hung');
+	void relay.tick();
+	await new Promise((resolve) => setTimeout(resolve, 40));
+	assert.ok(logs.some((message) => message.includes('看门狗复位')), 'watchdog must log the forced reset');
+});

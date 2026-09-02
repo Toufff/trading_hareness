@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi import HTTPException
+
 from app.analyst_trade_actions import parse_anqiang_trade_actions
 from app.analyst_expert_research import EXPERT_DEFAULTS, HORIZONS, _clustered_mean, _cn_date, _herding_effective_sample, _pearson, _softmax_weights
 from app.analyst_skill_models import PROMPT_VARIANTS, _variant_payload
@@ -479,6 +481,50 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         self.assertEqual(result["streams"]["messages"]["items"], 0)
         self.assertEqual(len(recorded), 1)
         self.assertEqual(recorded[0][1:3], ("messages", "completed"))
+
+    def test_sync_service_does_not_record_an_attempt_row_for_a_remote_auth_rejection(self):
+        # A remote 401/403 means the archive rejected this bearer (a
+        # stale/misconfigured n8n credential), not a data or transport
+        # problem.  It must not pollute the sync health dashboard with a
+        # "recent failure" attempt row, though the automation run it started
+        # is still closed out (see remote_archive_sync.py sync()).
+        recorded = []
+        failed_runs = []
+
+        async def run_database(action, *args, timeout_seconds):
+            return action(*args)
+
+        async def fake_messages(_client, _maximum):
+            raise HTTPException(status_code=401, detail="invalid bearer")
+
+        service = RemoteArchiveSyncService(
+            settings=lambda: {"base_url": "https://archive.example", "ca_file": None, "max_items": 20,
+                              "minimum_interval_seconds": 1}, transport=MagicMock(), database=MagicMock(),
+            run_database_blocking=run_database, message_cursor_state=MagicMock(), report_cursor_state=MagicMock(),
+            import_message=MagicMock(), import_report=MagicMock(), update_global_cursor=MagicMock(),
+            update_report_cursor=MagicMock(), message_cursor_update=MagicMock(), report_cursor_update=MagicMock(),
+            parse_timestamp=MagicMock(), record_attempt=lambda *_args: recorded.append(_args),
+        )
+        service._messages = fake_messages
+        service._fail_automation_run = lambda run_id, error: failed_runs.append((run_id, error))
+
+        class Payload:
+            streams = ["messages"]
+            max_items = 20
+
+        class Client:
+            async def get(self, *_args, **_kwargs):
+                raise AssertionError("auth-rejection test must not issue an HTTP request")
+
+        @asynccontextmanager
+        async def client_context(*_args, **_kwargs):
+            yield Client()
+
+        with patch("app.remote_archive_sync.remote_archive_http_client", client_context):
+            with self.assertRaises(HTTPException):
+                __import__("asyncio").run(service.sync(Payload(), "Bearer " + "a" * 32))
+        self.assertEqual(recorded, [])
+        self.assertEqual(len(failed_runs), 1)
 
     def test_duplicate_same_stream_sync_waits_instead_of_returning_local_rate_limit(self):
         import asyncio

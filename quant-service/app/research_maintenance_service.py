@@ -77,6 +77,49 @@ def update_universe_members(payload: Any, deps: ResearchMaintenanceDependencies)
     }
 
 
+#: A run stuck ``status='running'`` past this age almost certainly belongs to
+#: a process that was SIGKILLed rather than one still genuinely working: no
+#: bounded database-executor call in this service runs anywhere near 2 hours.
+STALE_AUTOMATION_RUN_AGE = timedelta(hours=2)
+
+
+def reconcile_stale_automation_runs(deps: ResearchMaintenanceDependencies) -> dict[str, Any]:
+    """Fail durable run receipts orphaned by a killed process (audit B-HIGH).
+
+    ``automation_runs`` has no reaper: a SIGKILL between ``start_run``/
+    ``start_or_resume_run`` and ``finish_run``/``fail_run`` leaves the row
+    ``status='running'`` forever, which both looks like a live task in
+    ``/api/v1/automation/runs`` and (via ``start_or_resume_run``'s
+    ``CASE WHEN status='completed'`` guard) is *not* itself a false
+    "already completed" signal, but it also never lets the scheduler's
+    ``run_recorded`` stale-running skip clear so a fresh attempt has to wait
+    out ``updated_at`` regardless. This always runs; unlike
+    ``reconcile_stale_fetch_runs`` it takes no request payload because it is
+    meant to run unconditionally on a fixed cadence, not from a manual
+    operator-triggered endpoint.
+    """
+    cutoff = deps.now_utc() - STALE_AUTOMATION_RUN_AGE
+    with deps.database.transaction() as connection:
+        rows = connection.execute(
+            """SELECT run_id,task_key,run_key,status,started_at,updated_at
+                 FROM quant.automation_runs
+                WHERE status='running' AND updated_at<%s
+                ORDER BY updated_at""",
+            (cutoff,),
+        ).fetchall()
+        if rows:
+            connection.execute(
+                """UPDATE quant.automation_runs
+                      SET status='failed',finished_at=now(),error_class='stale_running_reconciled',
+                          error_message='Run exceeded the operational max age and was reconciled by the periodic retention/maintenance task',
+                          updated_at=now()
+                    WHERE status='running' AND updated_at<%s""",
+                (cutoff,),
+            )
+    return {"status": "completed", "max_age_hours": STALE_AUTOMATION_RUN_AGE.total_seconds() / 3600,
+            "matched": len(rows), "items": [dict(row) for row in rows]}
+
+
 def reconcile_stale_fetch_runs(payload: Any, deps: ResearchMaintenanceDependencies) -> dict[str, Any]:
     """Reconcile only stale `running` ledger rows; dry runs never mutate them."""
     cutoff = deps.now_utc() - timedelta(minutes=payload.max_age_minutes)
@@ -103,5 +146,6 @@ def reconcile_stale_fetch_runs(payload: Any, deps: ResearchMaintenanceDependenci
 
 
 __all__ = [
-    "ResearchMaintenanceDependencies", "reconcile_stale_fetch_runs", "update_analyst_profile", "update_universe_members",
+    "ResearchMaintenanceDependencies", "STALE_AUTOMATION_RUN_AGE", "reconcile_stale_automation_runs",
+    "reconcile_stale_fetch_runs", "update_analyst_profile", "update_universe_members",
 ]

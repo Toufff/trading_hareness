@@ -9,6 +9,8 @@ class AnalysisExtractionTests(unittest.TestCase):
         self.assertEqual(normalize_symbol("600519"), ("600519.SH", "SSE"))
         self.assertEqual(normalize_symbol("300750"), ("300750.SZ", "SZSE"))
         self.assertEqual(normalize_symbol("830799"), ("830799.BJ", "BSE"))
+        self.assertEqual(normalize_symbol("688981"), ("688981.SH", "SSE"))
+        self.assertEqual(normalize_symbol("430047"), ("430047.BJ", "BSE"))
 
     def test_nearby_opinions_do_not_cancel_each_other(self):
         signals = {signal.symbol: signal for signal in extract_signals("看好600519，建议中线布局；回避300750短线风险")}

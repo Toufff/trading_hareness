@@ -14,6 +14,16 @@ from .automation_run_repository import start_run, finish_run, fail_run
 CN = ZoneInfo("Asia/Shanghai")
 METHODOLOGY_VERSION = "analyst-market-review-v1"
 MIN_REGRESSION_DAYS = 8
+#: Trading (not calendar) sessions a "weekly" review's displayed period spans.
+WEEKLY_TRADING_DAYS = 5
+#: Calendar-day lookback for the regression *sample*, independent of the
+#: displayed reporting period.  A single natural week (WEEKLY_TRADING_DAYS
+#: sessions, one point lost to the forward-return shift below) can never
+#: reach MIN_REGRESSION_DAYS=8 pairs; the regression instead draws from a
+#: rolling window so the gate is reachable once enough calendar history has
+#: accumulated, rather than being architecturally unreachable forever.  Kept
+#: under analyst_market_evaluation's 62-day window cap.
+REGRESSION_LOOKBACK_DAYS = 60
 
 
 def ordinary_least_squares(rows: list[dict[str, Any]], x_key: str, y_key: str) -> dict[str, Any]:
@@ -28,24 +38,65 @@ def ordinary_least_squares(rows: list[dict[str, Any]], x_key: str, y_key: str) -
     if len(pairs) < MIN_REGRESSION_DAYS:
         return {"status": "insufficient_history", "n": len(pairs), "minimum_n": MIN_REGRESSION_DAYS,
                 "x": x_key, "y": y_key, "live_effect": "none"}
-    mean_x = sum(x for x, _ in pairs) / len(pairs)
-    mean_y = sum(y for _, y in pairs) / len(pairs)
+    n = len(pairs)
+    mean_x = sum(x for x, _ in pairs) / n
+    mean_y = sum(y for _, y in pairs) / n
     sxx = sum((x - mean_x) ** 2 for x, _ in pairs)
     syy = sum((y - mean_y) ** 2 for _, y in pairs)
     sxy = sum((x - mean_x) * (y - mean_y) for x, y in pairs)
     slope = sxy / sxx if sxx else 0.0
     intercept = mean_y - slope * mean_x
     r = sxy / math.sqrt(sxx * syy) if sxx and syy else 0.0
-    return {"status": "ready", "n": len(pairs), "minimum_n": MIN_REGRESSION_DAYS,
+    # Standard error and t-stat of the slope, so "descriptive regression" can
+    # actually be read as evidence rather than a bare point estimate.
+    degrees_of_freedom = n - 2
+    residual_sum_squares = max(0.0, syy - slope * sxy)
+    residual_variance = residual_sum_squares / degrees_of_freedom if degrees_of_freedom > 0 else None
+    se_slope = math.sqrt(residual_variance / sxx) if residual_variance is not None and sxx > 0 else None
+    t_stat = slope / se_slope if se_slope else None
+    return {"status": "ready", "n": n, "minimum_n": MIN_REGRESSION_DAYS,
             "x": x_key, "y": y_key, "slope": slope, "intercept": intercept,
-            "correlation": r, "r_squared": r * r, "live_effect": "none"}
+            "correlation": r, "r_squared": r * r, "se_slope": se_slope, "t_stat": t_stat,
+            "degrees_of_freedom": degrees_of_freedom if degrees_of_freedom > 0 else None, "live_effect": "none"}
 
 
-def _period(cadence: str, as_of: date) -> tuple[date, date]:
+def _forward_pairs(points: list[dict[str, Any]], x_key: str, y_key: str) -> list[dict[str, Any]]:
+    """Pair day N's ``x_key`` with day N+1's ``y_key``.
+
+    A same-day regression of claim direction against the same day's market
+    move is contemporaneous/reverse-causal: an analyst reacting to a move
+    already in progress looks identical to one predicting it. Shifting
+    ``y`` to the next available point in this already trading-day-only
+    series is the minimal fix that answers "did today's claims predict
+    tomorrow", not "did today's claims describe today".
+    """
+    ordered = sorted(points, key=lambda row: str(row.get("exchange_date") or ""))
+    pairs: list[dict[str, Any]] = []
+    for index in range(len(ordered) - 1):
+        current, following = ordered[index], ordered[index + 1]
+        if current.get(x_key) is not None and following.get(y_key) is not None:
+            pairs.append({x_key: current[x_key], y_key: following[y_key]})
+    return pairs
+
+
+def _period(database: Any, cadence: str, as_of: date) -> tuple[date, date]:
     if cadence == "daily":
         return as_of, as_of
-    # The report is generated at Friday close; use the preceding seven calendar
-    # days so holiday weeks remain visible rather than inventing observations.
+    # The report is generated at Friday close.  Resolve the displayed period
+    # to the actual last WEEKLY_TRADING_DAYS trading sessions (not a fixed
+    # seven-calendar-day span, which can hold as few as one or two sessions
+    # across a holiday week) so it reads as what was actually observed.
+    with database.transaction() as connection:
+        rows = connection.execute(
+            """SELECT calendar_date FROM quant.market_trade_calendar
+                 WHERE exchange='SSE' AND is_open AND calendar_date<=%s
+                 ORDER BY calendar_date DESC LIMIT %s""", (as_of, WEEKLY_TRADING_DAYS),
+        ).fetchall()
+    if rows:
+        return min(row["calendar_date"] for row in rows), as_of
+    # No calendar coverage this far back (a bootstrap window before the
+    # calendar table was backfilled): fall back to the previous heuristic
+    # instead of failing the whole review.
     return as_of - timedelta(days=6), as_of
 
 
@@ -82,18 +133,31 @@ def build_analyst_market_review(database: Any, cadence: str, as_of_date: date | 
     as_of = as_of_date or datetime.now(CN).date()
     if cadence not in {"daily", "weekly"}:
         raise ValueError("cadence must be daily or weekly")
-    start, end = _period(cadence, as_of)
+    start, end = _period(database, cadence, as_of)
     evaluation = analyst_market_evaluation(database, start, end)
     points = _market_points(database, start, end, evaluation)
     regressions = []
+    regression_window = None
     if cadence == "weekly":
+        # The regression draws from a rolling lookback independent of the
+        # displayed period (see REGRESSION_LOOKBACK_DAYS), and each pair
+        # shifts y to the next trading day so the fit answers "did this
+        # day's claims predict the next day's move", not "describe the same
+        # day's move" (see _forward_pairs).
+        regression_start = max(end - timedelta(days=REGRESSION_LOOKBACK_DAYS), date(1990, 1, 1))
+        regression_evaluation = evaluation if regression_start == start else analyst_market_evaluation(database, regression_start, end)
+        regression_points = points if regression_start == start else _market_points(database, regression_start, end, regression_evaluation)
+        regression_window = {"start_date": str(regression_start), "end_date": str(end), "points": len(regression_points)}
         for key in ("net_direction_score", "positive_claims", "negative_claims", "concept_positive_ratio"):
-            regressions.append(ordinary_least_squares(points, key, "market_mean_change_pct"))
+            regressions.append(ordinary_least_squares(
+                _forward_pairs(regression_points, key, "market_mean_change_pct"), key, "market_mean_change_pct",
+            ))
     status = "ready" if points and (cadence == "daily" or any(r.get("status") == "ready" for r in regressions)) else "insufficient_history"
     summary = {"cadence": cadence, "period": {"start_date": str(start), "end_date": str(end)},
                "daily_points": points, "evaluation": evaluation, "regressions": regressions,
+               "regression_window": regression_window,
                "governance": {"live_effect": "none", "replay_only_author_actions": True,
-                              "notice": "描述性研究；回归样本不足时不拟合、不调实时阈值。"},
+                              "notice": "描述性研究；回归样本不足时不拟合、不调实时阈值。y 为次日市场收益，避免同期反向因果。"},
                "generated_at": datetime.now(CN).isoformat()}
     with database.transaction() as connection:
         row = connection.execute(
@@ -135,7 +199,7 @@ def latest_analyst_market_review(database: Any, cadence: str) -> dict[str, Any]:
 def build_recorded_analyst_market_review(database: Any, cadence: str, as_of_date: date | None = None) -> dict[str, Any]:
     """Run the review with a durable success/failure receipt for automation."""
     as_of = as_of_date or datetime.now(CN).date()
-    start, end = _period(cadence, as_of)
+    start, end = _period(database, cadence, as_of)
     run_key = f"analyst-market-review:{cadence}:{start}:{end}"
     with database.transaction() as connection:
         run_id = start_run(

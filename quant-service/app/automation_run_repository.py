@@ -14,6 +14,21 @@ LATEST_RUNS_SQL = """SELECT run_id,task_key,run_key,cadence,as_of_date,status,me
                 WHERE (%s::text IS NULL OR task_key=%s)
                 ORDER BY started_at DESC LIMIT %s"""
 
+#: Shared identity for post-close strategy generation, regardless of which
+#: trigger runs it (audit section B, HIGH): the scheduled loop
+#: (strategy_runtime_runners.py) and the one-click manual refresh
+#: (post_close_refresh_service.py) previously used different task_key/run_key
+#: values, so during their 18:55-20:30 overlap window neither trigger's
+#: durable dedup in run_recorded could see the other already working on the
+#: same exchange date, and both could write the same strategy tables at once.
+POST_CLOSE_STRATEGY_TASK_KEY = "post_close_strategy"
+POST_CLOSE_STRATEGY_RUN_KEY_PREFIX = "post-close-strategy"
+
+
+def post_close_strategy_run_key(as_of_date: date) -> str:
+    """Build the one run_key every post-close strategy trigger must share."""
+    return f"{POST_CLOSE_STRATEGY_RUN_KEY_PREFIX}:{as_of_date}"
+
 
 def latest_runs_params(task_key: str | None, limit: int) -> tuple[tuple[Any, ...], int]:
     """Bound the shared automation receipt query for sync and async readers."""
@@ -86,27 +101,77 @@ def latest_runs(connection: Any, *, task_key: str | None = None, limit: int = 20
     return [dict(row) for row in rows]
 
 
+#: A run_key still ``status='running'`` and updated within this window is
+#: treated as genuinely in-flight elsewhere; a scheduler retry must skip it
+#: rather than start a second concurrent execution of the same work.
+DEFAULT_STALE_RUNNING_MINUTES = 10
+
+
 def run_recorded(database: Any, *, task_key: str, run_key: str, operation: Any,
                  cadence: str | None = None, as_of_date: date | None = None,
                  methodology_version: str | None = None,
-                 input_summary: dict[str, Any] | None = None) -> Any:
-    """Execute one synchronous task while recording durable lifecycle state."""
-    with database.transaction() as connection:
-        run_id = start_run(connection, task_key=task_key, run_key=run_key, cadence=cadence,
-                           as_of_date=as_of_date, methodology_version=methodology_version,
-                           input_summary=input_summary)
+                 input_summary: dict[str, Any] | None = None,
+                 in_flight_run_keys: set[str] | None = None,
+                 stale_running_minutes: int = DEFAULT_STALE_RUNNING_MINUTES) -> Any:
+    """Execute one synchronous task while recording durable lifecycle state.
+
+    Three layers guard against a scheduler racing itself into running the
+    same work twice (audit section B, HIGH: ``completed_for_date`` read then
+    ``run_recorded`` write was not atomic, and repeated timeouts could stack
+    up concurrent executions competing for the same bounded database
+    workers):
+
+    1. ``start_or_resume_run`` (not ``start_run``) so a completed receipt is
+       returned as-is instead of being overwritten back to ``running``.
+    2. A durable check: a run_key already ``status='running'`` and updated
+       within ``stale_running_minutes`` is treated as in-flight elsewhere and
+       skipped, rather than started a second time.
+    3. An optional process-local ``in_flight_run_keys`` set catches a
+       concurrent call to this function for the same run_key within one
+       process before it even reaches the database.
+    """
+    if in_flight_run_keys is not None:
+        if run_key in in_flight_run_keys:
+            return {"status": "skipped_in_flight_process"}
+        in_flight_run_keys.add(run_key)
     try:
-        result = operation()
-    except Exception as error:
         with database.transaction() as connection:
-            fail_run(connection, run_id, error)
-        raise
-    with database.transaction() as connection:
-        finish_run(connection, run_id, output_summary={"status": result.get("status")} if isinstance(result, dict) else {})
-    return result
+            still_running = connection.execute(
+                """SELECT 1 FROM quant.automation_runs
+                    WHERE run_key=%s AND status='running'
+                      AND updated_at > now() - (%s * interval '1 minute')""",
+                (run_key, stale_running_minutes),
+            ).fetchone()
+            if still_running:
+                return {"status": "skipped_running_elsewhere"}
+            resumed = start_or_resume_run(
+                connection, task_key=task_key, run_key=run_key, cadence=cadence,
+                as_of_date=as_of_date, methodology_version=methodology_version,
+                input_summary=input_summary,
+            )
+        if resumed["status"] == "completed":
+            summary = resumed.get("output_summary")
+            resumed_result = dict(summary) if isinstance(summary, dict) else {}
+            resumed_result.setdefault("status", "completed")
+            return resumed_result
+        run_id = resumed["run_id"]
+        try:
+            result = operation()
+        except Exception as error:
+            with database.transaction() as connection:
+                fail_run(connection, run_id, error)
+            raise
+        with database.transaction() as connection:
+            finish_run(connection, run_id, output_summary={"status": result.get("status")} if isinstance(result, dict) else {})
+        return result
+    finally:
+        if in_flight_run_keys is not None:
+            in_flight_run_keys.discard(run_key)
 
 
 __all__ = [
-    "LATEST_RUNS_SQL", "start_run", "start_or_resume_run", "finish_run", "fail_run",
+    "DEFAULT_STALE_RUNNING_MINUTES", "LATEST_RUNS_SQL", "POST_CLOSE_STRATEGY_RUN_KEY_PREFIX",
+    "POST_CLOSE_STRATEGY_TASK_KEY", "post_close_strategy_run_key",
+    "start_run", "start_or_resume_run", "finish_run", "fail_run",
     "latest_runs", "latest_runs_params", "run_recorded",
 ]
