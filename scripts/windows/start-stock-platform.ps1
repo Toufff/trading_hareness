@@ -17,6 +17,25 @@ function Read-EnvFile {
     }
 }
 
+function Get-ApiListener {
+    param([int]$Port)
+    return Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -in @('127.0.0.1', '0.0.0.0', '::1', '::') } |
+        Select-Object -First 1
+}
+
+function Test-ExpectedApiProcess {
+    param([int]$ProcessId, [string]$Repository, [int]$Port)
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    if (-not $process) { return $false }
+    $command = [string]$process.CommandLine
+    return (
+        $command -match 'run_server\.py' -and
+        $command -match "--port\s+$Port(?:\s|$)" -and
+        $command -match [regex]::Escape($Repository)
+    )
+}
+
 $root = [IO.Path]::GetFullPath($PlatformRoot).TrimEnd('\')
 $repository = [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\')
 $envPath = Join-Path $root 'config\runtime.env'
@@ -35,17 +54,32 @@ $env:QUANT_RUNTIME_PROFILE = 'research'
 # QUANT_PUBLIC_HTTP_PROXY in runtime.env.  Inheriting a desktop-wide proxy
 # here made otherwise reachable Chinese quote hosts fail inside the service.
 
+$mutex = [Threading.Mutex]::new($false, "Local\trading-hareness-quant-api-$ApiPort")
+if (-not $mutex.WaitOne([TimeSpan]::FromSeconds(30))) {
+    $mutex.Dispose()
+    throw "Timed out waiting for the quant API lifecycle lock on port $ApiPort"
+}
+
+try {
+    $listener = Get-ApiListener -Port $ApiPort
+    if ($listener) {
+        if (-not (Test-ExpectedApiProcess -ProcessId $listener.OwningProcess -Repository $repository -Port $ApiPort)) {
+            throw "Port $ApiPort belongs to an unexpected process $($listener.OwningProcess)"
+        }
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 5
+        [IO.File]::WriteAllText($pidPath, [string]$listener.OwningProcess, [Text.UTF8Encoding]::new($false))
+        [pscustomobject]@{ status = 'already_running'; pid = $listener.OwningProcess; health = $health.status; url = "http://127.0.0.1:$ApiPort" }
+        return
+    }
+
 if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
     $existingPid = 0
     [void][int]::TryParse(([IO.File]::ReadAllText($pidPath).Trim()), [ref]$existingPid)
-    if ($existingPid -gt 0 -and (Get-Process -Id $existingPid -ErrorAction SilentlyContinue)) {
-        try {
-            $health = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 3
-            [pscustomobject]@{ status = 'already_running'; pid = $existingPid; health = $health.status; url = "http://127.0.0.1:$ApiPort" }
-            return
-        } catch {
-            throw "PID $existingPid is alive but the quant API health check failed"
-        }
+    if (
+        $existingPid -gt 0 -and
+        (Test-ExpectedApiProcess -ProcessId $existingPid -Repository $repository -Port $ApiPort)
+    ) {
+        Stop-Process -Id $existingPid -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -LiteralPath $pidPath -Force
 }
@@ -67,18 +101,25 @@ $process = Start-Process -FilePath $python -WindowStyle Hidden -PassThru -Workin
 
 $deadline = [DateTime]::UtcNow.AddSeconds(75)
 do {
-    if ($process.HasExited) {
-        $errorTail = if (Test-Path $stderr) { (Get-Content -LiteralPath $stderr -Tail 80) -join [Environment]::NewLine } else { '' }
-        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
-        throw "quant API exited with code $($process.ExitCode): $errorTail"
-    }
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 2
-        [pscustomobject]@{ status = 'started'; pid = $process.Id; health = $health.status; url = "http://127.0.0.1:$ApiPort" }
+        $listener = Get-ApiListener -Port $ApiPort
+        if (-not $listener -or -not (Test-ExpectedApiProcess -ProcessId $listener.OwningProcess -Repository $repository -Port $ApiPort)) {
+            throw 'health endpoint responded without the expected listener process'
+        }
+        [IO.File]::WriteAllText($pidPath, [string]$listener.OwningProcess, [Text.UTF8Encoding]::new($false))
+        [pscustomobject]@{ status = 'started'; pid = $listener.OwningProcess; health = $health.status; url = "http://127.0.0.1:$ApiPort" }
         return
     } catch {
         Start-Sleep -Milliseconds 500
     }
 } while ([DateTime]::UtcNow -lt $deadline)
 
-throw "quant API did not become healthy within 75 seconds; inspect $stderr"
+$errorTail = if (Test-Path $stderr) { (Get-Content -LiteralPath $stderr -Tail 80) -join [Environment]::NewLine } else { '' }
+Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+throw "quant API did not become healthy within 75 seconds; inspect $stderr`n$errorTail"
+}
+finally {
+    [void]$mutex.ReleaseMutex()
+    $mutex.Dispose()
+}

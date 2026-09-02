@@ -2,7 +2,7 @@
 param(
     [string]$RepositoryRoot = 'F:\AIWorkflow\trading_hareness',
     [string]$PlatformRoot = 'G:\StockPlatform',
-    [int]$IntervalSeconds = 300
+    [int]$IntervalSeconds = 30
 )
 
 $ErrorActionPreference = 'Continue'

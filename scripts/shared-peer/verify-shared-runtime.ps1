@@ -5,6 +5,7 @@ param(
     [string]$SshAlias = 'lightServer1',
     [int]$RemoteDatabasePort = 15432,
     [int]$RemoteApiPort = 15681,
+    [int]$RemotePeerApiPort = 15682,
     [string]$PeerApiBase = ''
 )
 
@@ -36,8 +37,23 @@ $quote = Invoke-RestMethod -Uri "$ApiBase/licensed/longhu/quotes?symbols=600664.
 if (@($quote.rows).Count -ne 1) { throw 'Licensed read gateway did not return the requested quote' }
 
 $remotePorts = & ssh.exe -o BatchMode=yes $SshAlias `
-    "ss -lnt | grep -E '127.0.0.1:($RemoteDatabasePort|$RemoteApiPort)' | wc -l"
-if ([int]$remotePorts -lt 2) { throw 'Both reverse-tunnel loopback ports are not available on lightServer' }
+    "ss -lnt | grep -E '127.0.0.1:($RemoteDatabasePort|$RemoteApiPort|$RemotePeerApiPort)' | wc -l"
+if ([int]$remotePorts -lt 3) { throw 'Database, owner API, and peer API loopback ports are not all available on lightServer' }
+
+$remoteOwnerCode = (& ssh.exe -o BatchMode=yes $SshAlias `
+    "curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:$RemoteApiPort/health").Trim()
+if ($remoteOwnerCode -ne '200') {
+    throw "Remote owner API tunnel returned HTTP $remoteOwnerCode on 127.0.0.1:$RemoteApiPort"
+}
+$remotePeerCode = (& ssh.exe -o BatchMode=yes $SshAlias `
+    "curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:$RemotePeerApiPort/health").Trim()
+if ($remotePeerCode -ne '200') {
+    throw "Remote peer API returned HTTP $remotePeerCode on 127.0.0.1:$RemotePeerApiPort"
+}
+$completeGatewayJson = (& ssh.exe -o BatchMode=yes $SshAlias `
+    'python3 /home/stockpeer/trading_hareness/scripts/shared-peer/verify-complete-stock-api.py') -join [Environment]::NewLine
+$completeGateway = $completeGatewayJson | ConvertFrom-Json
+if (-not $completeGateway.passed) { throw 'Complete remote stock API acceptance probe failed' }
 
 $peerHealth = $null
 if ($PeerApiBase) {
@@ -50,6 +66,9 @@ if ($PeerApiBase) {
     local_api = $health.status
     licensed_quote_rows = @($quote.rows).Count
     reverse_tunnel_ports = [int]$remotePorts
+    remote_owner_api = [int]$remoteOwnerCode
+    remote_peer_api = [int]$remotePeerCode
+    complete_stock_gateway = $completeGateway.passed
     peer_api = if ($peerHealth) { $peerHealth.status } else { 'not_requested' }
     secrets_printed = $false
 }

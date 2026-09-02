@@ -96,11 +96,12 @@ ssh lightServer1 "AUTHORIZED_KEY_FILE=/root/stockpeer_ed25519.pub bash /root/pro
 pwsh .\scripts\shared-peer\install-shared-tunnel-task.ps1
 ```
 
-The scheduled tunnel task runs hidden and publishes only two lightServer
-loopback ports. Verify them with:
+The scheduled tunnel task runs hidden and publishes the owner database and
+owner API as lightServer loopback ports. The peer API is a third loopback-only
+listener created by rootless Compose. Verify all three with:
 
 ```powershell
-ssh lightServer1 "ss -lnt | grep -E '127.0.0.1:(15432|15681)'"
+ssh lightServer1 "ss -lnt | grep -E '127.0.0.1:(15432|15681|15682)'"
 ```
 
 ## Peer deployment
@@ -214,8 +215,19 @@ It requires all of these to be true:
 1. the G-drive database answers with its Alembic revision;
 2. the local API is healthy;
 3. an authenticated Longhu quote returns exactly one requested row;
-4. both reverse-tunnel ports exist on lightServer;
-5. optionally, the peer API is healthy when `-PeerApiBase` is provided.
+4. the database, owner API, and peer API loopback ports exist on lightServer;
+5. the remote owner API at `15681` returns HTTP 200, not merely an open port;
+6. the remote peer API at `15682` returns HTTP 200;
+7. the complete stock gateway probe passes authentication, catalog, quote,
+   breadth, public-source, and 300+1 batching checks.
+
+The Windows dashboard runtime task also supervises the owner API every 30
+seconds. It identifies the service from the actual listening PID and command
+line rather than trusting a stale PID file. Reinstall or refresh that task with:
+
+```powershell
+pwsh .\scripts\windows\install-stock-dashboard-task.ps1
+```
 
 Failure behavior is deliberate:
 
