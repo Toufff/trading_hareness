@@ -4,7 +4,13 @@ param(
     [string]$PlatformRoot = 'G:\StockPlatform',
     [int]$RetainCount = 3,
     [switch]$AllowDirty,
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    # Logon type for the two scheduled tasks re-registered on activation.
+    # S4U needs an elevated session (Register-ScheduledTask otherwise fails
+    # with access denied *after* the old runtime is stopped, forcing an
+    # automatic rollback); Interactive works unelevated but only while the
+    # operator is logged on.  Empty = pick S4U when elevated, else Interactive.
+    [ValidateSet('', 'S4U', 'Interactive')][string]$TaskLogonType = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +24,15 @@ if (-not $platform.StartsWith('G:\', [StringComparison]::OrdinalIgnoreCase)) {
 }
 if (-not (Test-Path -LiteralPath (Join-Path $source '.git') -PathType Container)) { throw "Source root is not a Git checkout: $source" }
 Import-Module (Join-Path $source 'scripts\windows\stock-release-management.psm1') -Force
+
+if (-not $TaskLogonType) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $elevated = ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $TaskLogonType = if ($elevated) { 'S4U' } else { 'Interactive' }
+    if (-not $elevated) {
+        Write-Warning "Not elevated: registering scheduled tasks with LogonType Interactive (S4U requires an elevated session). Pass -TaskLogonType S4U from an elevated shell to avoid the per-launch console flash."
+    }
+}
 
 function Invoke-Checked {
     param([string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory)
@@ -54,12 +69,24 @@ function Stop-ProductionRuntime {
     Stop-ScheduledTask -TaskName 'trading-hareness-dashboard-runtime' -ErrorAction SilentlyContinue
 }
 
+function Get-LogonTypeArguments {
+    # Older releases' task installers have no -LogonType parameter; the
+    # rollback path runs *their* copies, so only forward it when declared.
+    param([string]$Installer)
+    $command = Get-Command -Name $Installer -ErrorAction Stop
+    if ($command.Parameters.ContainsKey('LogonType')) { return @{ LogonType = $TaskLogonType } }
+    return @{}
+}
+
 function Start-ProductionRuntime {
     param([string]$RuntimeRoot)
-    & (Join-Path $RuntimeRoot 'scripts\windows\install-stock-dashboard-task.ps1') `
-        -RepositoryRoot $RuntimeRoot -PlatformRoot $platform | Out-Null
-    & (Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1') `
-        -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') -PlatformRoot $platform | Out-Null
+    $dashboardInstaller = Join-Path $RuntimeRoot 'scripts\windows\install-stock-dashboard-task.ps1'
+    $tunnelInstaller = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+    $dashboardExtra = Get-LogonTypeArguments -Installer $dashboardInstaller
+    $tunnelExtra = Get-LogonTypeArguments -Installer $tunnelInstaller
+    & $dashboardInstaller -RepositoryRoot $RuntimeRoot -PlatformRoot $platform @dashboardExtra | Out-Null
+    & $tunnelInstaller -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
+        -PlatformRoot $platform @tunnelExtra | Out-Null
 }
 
 function Wait-ProductionHealth {

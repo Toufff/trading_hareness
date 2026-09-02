@@ -11,7 +11,7 @@ param(
     # for the actual fix). S4U runs whether or not anyone is logged on and
     # needs no stored password; pass -LogonType Password (with -Credential)
     # only where the account cannot be granted "Log on as a batch job".
-    [ValidateSet('S4U', 'Password')][string]$LogonType = 'S4U',
+    [ValidateSet('S4U', 'Interactive', 'Password')][string]$LogonType = 'S4U',
     [PSCredential]$Credential
 )
 
@@ -42,8 +42,9 @@ $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Hours 2) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 10) `
     -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 
-if ($LogonType -eq 'S4U') {
-    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+if ($LogonType -in @('S4U', 'Interactive')) {
+    # Interactive needs no elevation but only runs while the operator is logged on.
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType $LogonType -RunLevel Limited
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal `
         -Settings $settings -Description 'Nightly pg_dump -Fc backup of the authoritative stock-platform database, with SHA-256 evidence and daily/weekly retention.' -Force | Out-Null
 } else {
