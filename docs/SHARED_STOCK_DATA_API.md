@@ -68,7 +68,7 @@ QUANT_SHARED_READ_API_KEY=<private handoff value>
 | GET | `/health` | 服务存活检查 |
 | GET | `/licensed/stock-api/catalog` | 全量目标、操作和 89 个原文档调用样例 |
 | POST | `/licensed/stock-api/call` | 通用全量调用与自动 300 分批 |
-| GET | `/licensed/longhu/quotes` | 兼容接口：标准化批量行情 |
+| GET | `/licensed/longhu/quotes` | 兼容接口：标准化批量行情，逻辑总量自动按 300 分批 |
 | GET | `/licensed/longhu/minutes/{symbol}` | 兼容接口：标准化单股分钟线 |
 
 Swagger 与 OpenAPI：
@@ -471,7 +471,7 @@ catalog 不限制未来新增或原文档遗漏的 action：只要属于已登�
 GET /licensed/longhu/quotes?symbols=600664.SH,600487.SH
 ```
 
-单个兼容请求仍最多 300 只；若需要更多，使用通用接口的 `batch`，或由客户端分组。
+兼容接口不限制逻辑总量；超过 300 只时由服务端自动拆成 300、300、余数等物理调用，再合并标准化结果。调用方也可以使用通用接口的 `batch` 获取逐页原始 payload。
 
 标准字段包括：
 

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from app.licensed_stock_api import (
     MAX_PHYSICAL_BATCH,
+    TARGETS,
     UpstreamStockApiError,
     catalog,
     execute,
@@ -65,6 +66,35 @@ def test_catalog_exposes_every_documented_family_without_operation_restriction()
     )
     assert payload["physical_batch_limit"] == 300
     assert payload["operation_restriction"] == "none_within_registered_targets"
+
+
+def test_every_documented_longhu_data_host_is_registered():
+    assert {
+        target.base_url for target in TARGETS.values()
+        if target.base_url.endswith(".longhuvip.com")
+    } == {
+        "https://apphis.longhuvip.com",
+        "https://apphwhq.longhuvip.com",
+        "https://apphq.longhuvip.com",
+        "https://apphwshhq.longhuvip.com",
+        "https://applhb.longhuvip.com",
+        "https://apparticle.longhuvip.com",
+    }
+
+
+def test_undocumented_action_and_custom_path_are_passed_through():
+    session = Session()
+    execute(
+        session=session,
+        config=Config(),
+        target_key="longhu_quote",
+        path="/w1/api/future.php",
+        params={"a": "FutureLonghuAction", "c": "FutureController", "custom": "kept"},
+    )
+    assert session.calls[0]["url"] == "https://apphwhq.longhuvip.com/w1/api/future.php"
+    assert session.calls[0]["params"]["a"] == "FutureLonghuAction"
+    assert session.calls[0]["params"]["c"] == "FutureController"
+    assert session.calls[0]["params"]["custom"] == "kept"
 
 
 def test_large_logical_page_is_split_into_physical_300_row_calls():

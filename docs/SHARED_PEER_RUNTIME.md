@@ -72,8 +72,11 @@ lightServer root privileges.
   must never be committed to Git.
 - Peer n8n state uses `trading_hareness_peer_n8n`. Two independently managed
   n8n instances must not share one n8n application schema.
-- Longhu reads go through `/licensed/longhu/*` with a dedicated read key. The
-  upstream token and device identity stay on the owner's machine.
+- Full Longhu reads go through `/licensed/stock-api/call` with a dedicated read
+  key; `/licensed/longhu/*` remains only as a normalized compatibility view.
+  Neither route limits logical quote totals: both split physical upstream calls
+  at 300 and combine or return every page. The upstream token and device
+  identity stay on the owner's machine.
 - List endpoints cap each physical vendor page at 300 and paginate larger
   logical reads in the adapter. Explicit quote baskets are independently
   bounded by `QUANT_LONGHU_INTRADAY_MAX_SYMBOLS`.
