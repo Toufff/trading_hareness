@@ -6,6 +6,8 @@ param(
     [int]$RemoteDatabasePort = 15432,
     [int]$RemoteApiPort = 15681,
     [int]$RemotePeerApiPort = 15682,
+    [int]$RemoteHealthTimeoutSeconds = 90,
+    [int]$RemoteHealthStableSamples = 2,
     [string]$PeerApiBase = ''
 )
 
@@ -18,6 +20,25 @@ function Read-EnvFile([string]$Path) {
         if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') { $values[$Matches[1]] = $Matches[2] }
     }
     return $values
+}
+
+function Wait-RemoteHttp200([int]$Port) {
+    $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(10, $RemoteHealthTimeoutSeconds))
+    $required = [Math]::Max(1, $RemoteHealthStableSamples)
+    $consecutive = 0
+    $lastCode = 'unavailable'
+    do {
+        $lastCode = (& ssh.exe -o BatchMode=yes $SshAlias `
+            "curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:$Port/health").Trim()
+        if ($lastCode -eq '200') {
+            $consecutive++
+            if ($consecutive -ge $required) { return 200 }
+        } else {
+            $consecutive = 0
+        }
+        Start-Sleep -Seconds 2
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Remote API did not reach $required consecutive HTTP 200 samples on 127.0.0.1:$Port before timeout; last code: $lastCode"
 }
 $runtime = Read-EnvFile $RuntimeEnv
 $postgresRoot = Get-ChildItem -LiteralPath 'G:\StockPlatform\runtime' -Directory -Filter 'postgresql-*' |
@@ -40,16 +61,8 @@ $remotePorts = & ssh.exe -o BatchMode=yes $SshAlias `
     "ss -lnt | grep -E '127.0.0.1:($RemoteDatabasePort|$RemoteApiPort|$RemotePeerApiPort)' | wc -l"
 if ([int]$remotePorts -lt 3) { throw 'Database, owner API, and peer API loopback ports are not all available on lightServer' }
 
-$remoteOwnerCode = (& ssh.exe -o BatchMode=yes $SshAlias `
-    "curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:$RemoteApiPort/health").Trim()
-if ($remoteOwnerCode -ne '200') {
-    throw "Remote owner API tunnel returned HTTP $remoteOwnerCode on 127.0.0.1:$RemoteApiPort"
-}
-$remotePeerCode = (& ssh.exe -o BatchMode=yes $SshAlias `
-    "curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:$RemotePeerApiPort/health").Trim()
-if ($remotePeerCode -ne '200') {
-    throw "Remote peer API returned HTTP $remotePeerCode on 127.0.0.1:$RemotePeerApiPort"
-}
+$remoteOwnerCode = Wait-RemoteHttp200 -Port $RemoteApiPort
+$remotePeerCode = Wait-RemoteHttp200 -Port $RemotePeerApiPort
 $completeGatewayJson = (& ssh.exe -o BatchMode=yes $SshAlias `
     'python3 /home/stockpeer/trading_hareness/scripts/shared-peer/verify-complete-stock-api.py') -join [Environment]::NewLine
 $completeGateway = $completeGatewayJson | ConvertFrom-Json
