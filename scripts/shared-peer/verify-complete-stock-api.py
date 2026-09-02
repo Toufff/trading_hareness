@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 from typing import Any
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import ProxyHandler, Request, build_opener
 
 
@@ -108,6 +109,19 @@ def main() -> int:
         "sizes": history_sizes,
     })
 
+    compatibility_symbols = ",".join(f"{index:06d}.SZ" for index in range(1, 302))
+    compatibility_status, compatibility_payload = request(
+        f"/licensed/longhu/quotes?{urlencode({'symbols': compatibility_symbols})}",
+    )
+    results.append({
+        "name": "compatibility_quotes_301",
+        "status": compatibility_status,
+        "calls": compatibility_payload.get("physical_calls"),
+        "requested_symbols": compatibility_payload.get("requested_symbols"),
+        "physical_batch_limit": compatibility_payload.get("physical_request_limit"),
+        "returned_rows": len(compatibility_payload.get("rows", [])),
+    })
+
     serialized = json.dumps(raw_results)
     credential_fields_present = any(
         field in serialized for field in ('"Token"', '"UserID"', '"DeviceID"')
@@ -129,6 +143,10 @@ def main() -> int:
         and all(row["status"] == 200 for row in results)
         and history_payload.get("calls") == 2
         and history_sizes == [300, 1]
+        and compatibility_status == 200
+        and compatibility_payload.get("physical_calls") == 2
+        and compatibility_payload.get("requested_symbols") == 301
+        and compatibility_payload.get("physical_request_limit") == 300
         and not credential_fields_present
     )
     summary["passed"] = passed
