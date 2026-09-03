@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol
-from urllib.parse import urlparse
 
 import requests
 
@@ -36,56 +35,6 @@ MAX_TENCENT_BATCH_SIZE = 80
 FLOW_CONVENTION = "longhuvip_zs_stocklist_main_net_field13"
 DEFAULT_CONFIG_PATH = Path.home() / ".stock-brain" / "longhu_vendor.json"
 USER_AGENT = "Dalvik/2.1.0 (Linux; U; Android 14; V2178A Build/UP1A.231005.007)"
-
-
-def _host_rate_limit_per_second() -> float:
-    try:
-        return max(0.1, float(os.getenv("QUANT_LONGHU_RATE_LIMIT_PER_SECOND", "8")))
-    except ValueError:
-        return 8.0
-
-
-class _HostTokenBucket:
-    """A minimal thread-safe token bucket limiting requests to one host."""
-
-    def __init__(self, rate_per_second: float) -> None:
-        self._rate = max(0.1, rate_per_second)
-        self._lock = threading.Lock()
-        self._tokens = self._rate
-        self._updated_at = time.monotonic()
-
-    def acquire(self) -> None:
-        while True:
-            with self._lock:
-                now = time.monotonic()
-                self._tokens = min(self._rate, self._tokens + (now - self._updated_at) * self._rate)
-                self._updated_at = now
-                if self._tokens >= 1.0:
-                    self._tokens -= 1.0
-                    return
-                wait_seconds = (1.0 - self._tokens) / self._rate
-            time.sleep(max(0.001, wait_seconds))
-
-
-_host_token_buckets: dict[str, _HostTokenBucket] = {}
-_host_token_buckets_lock = threading.Lock()
-
-
-def _rate_limit_before_request(url: str) -> None:
-    """Block the calling worker thread until this host's next slot is free.
-
-    Longhu/Tencent have no documented rate limit, but 12-24 concurrent
-    threads previously shared one connection with no pacing at all. This is
-    process-wide (keyed by host), not per-``LonghuVendorSource`` instance, so
-    it still holds if more than one source object is ever constructed.
-    """
-    host = urlparse(url).netloc or url
-    with _host_token_buckets_lock:
-        bucket = _host_token_buckets.get(host)
-        if bucket is None:
-            bucket = _HostTokenBucket(_host_rate_limit_per_second())
-            _host_token_buckets[host] = bucket
-    bucket.acquire()
 
 
 def safe_page_size(value: int) -> int:
@@ -458,7 +407,6 @@ class LonghuVendorSource:
         error: Exception | None = None
         for attempt in range(self.config.retries):
             try:
-                _rate_limit_before_request(url)
                 response = self._session.get(url, params=merged, timeout=self.config.timeout_seconds)
                 response.raise_for_status()
                 payload = response.json()
@@ -668,7 +616,6 @@ class LonghuVendorSource:
             requested = {self._tencent_key(symbol): symbol for symbol in batch}
             try:
                 tencent_url = "https://qt.gtimg.cn/q=" + ",".join(requested)
-                _rate_limit_before_request(tencent_url)
                 response = self._session.get(tencent_url, timeout=self.config.timeout_seconds)
                 response.raise_for_status()
                 rows.extend(parse_tencent_quote_text(response.content.decode("gb18030", errors="replace"), requested))

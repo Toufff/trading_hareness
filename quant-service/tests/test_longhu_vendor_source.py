@@ -1,20 +1,14 @@
 from __future__ import annotations
 
-import os
 import threading
 import unittest
 from datetime import date, datetime, timezone
-from unittest.mock import patch
 
-import app.longhu_vendor_source as longhu_vendor_source_module
 from app.longhu_vendor_source import (
     MAX_PAGE_SIZE,
     LonghuVendorConfig,
     LonghuVendorSource,
     SharedLonghuReadSource,
-    _HostTokenBucket,
-    _host_rate_limit_per_second,
-    _rate_limit_before_request,
     normalize_stock_symbol,
     parse_industry_stock_row,
     parse_stock_minute_payload,
@@ -269,62 +263,6 @@ class LonghuVendorSourceThreadLocalSessionTests(unittest.TestCase):
 
         self.assertEqual(len(sessions), 4)
         self.assertEqual(len({id(session) for session in sessions.values()}), 4)
-
-
-class HostTokenBucketTests(unittest.TestCase):
-    def test_default_rate_is_eight_per_second(self) -> None:
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("QUANT_LONGHU_RATE_LIMIT_PER_SECOND", None)
-            self.assertEqual(_host_rate_limit_per_second(), 8.0)
-
-    def test_env_override_is_applied(self) -> None:
-        with patch.dict(os.environ, {"QUANT_LONGHU_RATE_LIMIT_PER_SECOND": "3"}, clear=False):
-            self.assertEqual(_host_rate_limit_per_second(), 3.0)
-
-    def test_invalid_env_value_falls_back_to_default(self) -> None:
-        with patch.dict(os.environ, {"QUANT_LONGHU_RATE_LIMIT_PER_SECOND": "not-a-number"}, clear=False):
-            self.assertEqual(_host_rate_limit_per_second(), 8.0)
-
-    def test_bucket_starts_full_and_never_blocks_within_its_burst(self) -> None:
-        bucket = _HostTokenBucket(rate_per_second=1000.0)
-
-        def acquire_many() -> None:
-            for _ in range(50):
-                bucket.acquire()
-
-        thread = threading.Thread(target=acquire_many)
-        thread.start()
-        thread.join(timeout=1)
-        self.assertFalse(thread.is_alive())
-
-    def test_bucket_paces_requests_once_exhausted(self) -> None:
-        import time
-
-        rate = 20.0
-        bucket = _HostTokenBucket(rate_per_second=rate)
-        # The bucket starts with one second's worth of burst capacity; drain
-        # all of it so the next acquire must wait for a refill.
-        for _ in range(int(rate)):
-            bucket.acquire()
-        started = time.monotonic()
-        bucket.acquire()
-        elapsed = time.monotonic() - started
-        self.assertGreater(elapsed, 0.02)
-
-    def test_rate_limit_before_request_reuses_one_bucket_per_host(self) -> None:
-        original_buckets = dict(longhu_vendor_source_module._host_token_buckets)
-        longhu_vendor_source_module._host_token_buckets.clear()
-        try:
-            _rate_limit_before_request("https://apphwhq.longhuvip.com/w1/api/index.php?a=x")
-            _rate_limit_before_request("https://apphwhq.longhuvip.com/w1/api/index.php?a=y")
-            _rate_limit_before_request("https://qt.gtimg.cn/q=sh600000")
-            self.assertEqual(
-                set(longhu_vendor_source_module._host_token_buckets.keys()),
-                {"apphwhq.longhuvip.com", "qt.gtimg.cn"},
-            )
-        finally:
-            longhu_vendor_source_module._host_token_buckets.clear()
-            longhu_vendor_source_module._host_token_buckets.update(original_buckets)
 
 
 if __name__ == "__main__":
