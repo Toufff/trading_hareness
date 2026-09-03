@@ -2359,10 +2359,18 @@ async def intraday_longhu_watch_quotes(
 async def shared_longhu_quotes(
     symbols: list[str], max_symbols: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Gateway boundary for a caller-authenticated logical batch."""
+    """Gateway boundary for a caller-authenticated logical batch.
+
+    ``watch_quotes`` issues one vendor request per symbol across 12 threads, so
+    a full ``MAX_PAGE_SIZE`` batch of 300 symbols takes about 25 seconds of
+    upstream latency alone.  A 30 second budget left roughly 5 seconds of
+    headroom and turned any upstream slowdown into a 500 for the caller; 60
+    seconds keeps the boundary meaningful without pushing more concurrency at
+    the vendor.  Single-symbol and intraday paths keep their own tight budgets.
+    """
     return await run_akshare_blocking(
         lambda: longhu_intraday_source().watch_quotes(symbols, max_symbols=max_symbols),
-        timeout_seconds=30,
+        timeout_seconds=60,
     )
 
 
