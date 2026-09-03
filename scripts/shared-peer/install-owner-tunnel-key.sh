@@ -65,4 +65,5 @@ cat <<EOF
 owner_tunnel_user=${OWNER_TUNNEL_USER}
 authorized_keys=${owner_home}/.ssh/authorized_keys
 next_step="set OWNER_TUNNEL_SSH_USER=${OWNER_TUNNEL_USER}, OWNER_TUNNEL_SSH_KEY, OWNER_TUNNEL_SSH_HOST, OWNER_TUNNEL_SSH_PORT in runtime.env"
+warning="This account has a nologin shell. start-stock-dashboard.ps1 and verify-shared-runtime.ps1 run remote commands (curl/ss/fuser/probe) over the same SSH target, so setting those four variables today stops the reverse dashboard tunnel from starting. See docs/SHARED_PEER_RUNTIME.md before enabling them."
 EOF

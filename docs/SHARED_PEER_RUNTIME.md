@@ -193,6 +193,31 @@ alias) with a `Write-Warning`, so leaving this unconfigured does not break an
 existing deployment — it just does not get the security benefit of this
 change.
 
+> **Do not enable the four variables yet.** Setting them was tried on the live
+> platform on 2026-09-03 and had to be reverted. Only `start-shared-tunnels.ps1`
+> uses the target purely for `-R` port forwarding. `start-stock-dashboard.ps1`
+> also *runs remote commands* through the same target (`curl` for the remote
+> dashboard health check, `ss` to test the remote listener, `fuser -k` to clear
+> a stale one), and `verify-shared-runtime.ps1` runs `ss` plus the
+> `verify-complete-stock-api.py` acceptance probe the same way. The account this
+> installer creates has `--shell /usr/sbin/nologin`, so every one of those
+> commands fails with `This account is currently not available`; the dashboard
+> watchdog then loops on `Failed to request cleanup of stale remote listener
+> 15680` and the reverse dashboard tunnel never starts. The provisioned account
+> and key are harmless while the variables stay unset.
+>
+> Making the restricted key usable needs one of:
+>
+> 1. give `stockowner` a real shell and make the acceptance probe readable by it
+>    (it currently lives under `/home/stockpeer`), keeping `restrict` +
+>    `permitlisten` so only the three ports can be forwarded; or
+> 2. add a second `authorized_keys` entry with a forced `command=` wrapper that
+>    exposes only the health/listener checks, and teach
+>    `Resolve-OwnerTunnelSshTarget` to hand out a separate target for remote
+>    execution; or
+> 3. stop shelling out entirely — check remote dashboard health through the
+>    forwarded port instead of over SSH.
+
 The scheduled tunnel task runs hidden and publishes the owner database and
 owner API as lightServer loopback ports. The peer API is a third loopback-only
 listener created by rootless Compose. Verify all three with:
