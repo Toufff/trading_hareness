@@ -21,8 +21,14 @@ def main() -> int:
                         help="Use only when the current user explicitly maps this exported account to account-key")
     parser.add_argument("--validate-only", action="store_true",
                         help="Parse and report safe metadata without writing the database or archive")
+    parser.add_argument("--finalize-source", action="store_true",
+                        help="After a verified import, move the source from inbox into a uniquely named processed path")
     parser.add_argument("--archive-root", type=Path,
                         default=Path(r"G:\StockPlatform\data\imports\broker-orders\archive"))
+    parser.add_argument("--inbox-root", type=Path,
+                        default=Path(r"G:\StockPlatform\data\imports\broker-trades\inbox"))
+    parser.add_argument("--processed-root", type=Path,
+                        default=Path(r"G:\StockPlatform\data\imports\broker-trades\processed"))
     parser.add_argument("--env-file", type=Path, default=Path(r"G:\StockPlatform\config\runtime.env"))
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
@@ -31,6 +37,8 @@ def main() -> int:
     load_dotenv(args.env_file, override=True)
     from app.broker_order_export_parser import parse_order_export
     if args.validate_only:
+        if args.finalize_source:
+            parser.error("--validate-only and --finalize-source cannot be combined")
         parsed = parse_order_export(args.input.resolve())
         print(json.dumps({
             "status": "valid", "source_sha256": parsed.sha256,
@@ -43,6 +51,7 @@ def main() -> int:
         return 0
     from app.database import Database
     from app.broker_order_repository import import_order_export
+    from app.broker_order_source_files import move_imported_source
     database = Database()
     try:
         with database.transaction(statement_timeout_ms=30_000) as connection:
@@ -50,6 +59,11 @@ def main() -> int:
                 connection, args.input, account_key=args.account_key, broker=args.broker,
                 archive_root=args.archive_root, confirm_account_binding=args.confirm_account_binding,
             )
+        if args.finalize_source:
+            parsed = parse_order_export(args.input.resolve())
+            result.update(move_imported_source(
+                args.input, parsed, inbox_root=args.inbox_root, processed_root=args.processed_root,
+            ))
     except Exception as error:
         print(json.dumps({"status": "failed", "error_code": str(error).split(":", 1)[0]}, ensure_ascii=False))
         return 2

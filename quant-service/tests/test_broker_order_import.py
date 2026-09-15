@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from app.broker_order_export_parser import BrokerOrderExportError, parse_order_export
 from app.broker_order_timeline import map_execution_to_bars
+from app.broker_order_source_files import move_imported_source
 
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -87,6 +88,43 @@ class BrokerOrderExportTests(unittest.TestCase):
         self.assertEqual(mapped["mapped_bar_time"], "2026-09-15T09:30:00+08:00")
         self.assertEqual(mapped["confidence"], "low")
         self.assertEqual(mapped["session_basis"], "after_close_next_session")
+
+    def test_successful_source_is_renamed_and_moved_out_of_inbox(self):
+        inbox = Path(self.temp.name) / "inbox"
+        processed = Path(self.temp.name) / "processed"
+        inbox.mkdir()
+        source = inbox / "table.xls"
+        source.write_bytes(self.sample().read_bytes())
+        parsed = parse_order_export(source)
+        result = move_imported_source(source, parsed, inbox_root=inbox, processed_root=processed)
+        target = Path(result["processed_path"])
+        self.assertFalse(source.exists())
+        self.assertTrue(target.is_file())
+        self.assertEqual(target.name, f"2026-09-15_委托流水_{parsed.sha256[:8]}.xls")
+        self.assertEqual(result["source_disposition"], "moved")
+
+    def test_duplicate_processed_source_is_removed_only_after_hash_match(self):
+        inbox = Path(self.temp.name) / "inbox"
+        processed = Path(self.temp.name) / "processed"
+        inbox.mkdir()
+        first = inbox / "table.xls"
+        first.write_bytes(self.sample().read_bytes())
+        parsed = parse_order_export(first)
+        initial = move_imported_source(first, parsed, inbox_root=inbox, processed_root=processed)
+        duplicate = inbox / "table.xls"
+        duplicate.write_bytes(Path(initial["processed_path"]).read_bytes())
+        result = move_imported_source(duplicate, parsed, inbox_root=inbox, processed_root=processed)
+        self.assertEqual(result["source_disposition"], "duplicate_source_removed")
+        self.assertFalse(duplicate.exists())
+
+    def test_source_outside_inbox_is_never_moved(self):
+        inbox = Path(self.temp.name) / "inbox"
+        inbox.mkdir()
+        source = self.sample()
+        parsed = parse_order_export(source)
+        with self.assertRaisesRegex(ValueError, "SOURCE_OUTSIDE_INBOX"):
+            move_imported_source(source, parsed, inbox_root=inbox, processed_root=Path(self.temp.name) / "processed")
+        self.assertTrue(source.exists())
 
 
 if __name__ == "__main__":
