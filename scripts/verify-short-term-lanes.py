@@ -9,6 +9,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'quant-service'))
 from app.short_term_lanes.report_audit import check_bundle
 from app.short_term_lanes.publication import difference_paths
+from app.short_term_lanes.research_queue import lane_representatives
 
 
 def main():
@@ -55,8 +56,13 @@ def main():
     checks['dashboard_projection_matches']=dashboard_payload['run']['summary']['strategy_lanes']==result
     plan=result.get('review_plan',[])
     groups={g['key']:g['items'] for g in result.get('review_groups',[])}
-    expected=list(dict.fromkeys(l['selected'][0]['symbol'] for l in result['lanes'] if l['selected']))
-    checks['scan_first_research_plan']=[r['symbol'] for r in plan]==expected
+    expected_rows=lane_representatives(result)
+    expected=[r['symbol'] for r in expected_rows]
+    checks['shared_minimum_research_plan']=[r['symbol'] for r in plan]==expected
+    expected_lanes={lane['key'] for lane in result['lanes']
+                    if lane.get('selected') or lane.get('observation_list') or lane.get('caution_list')}
+    covered_lanes={key for row in plan for key in row.get('representative_lanes',[])}
+    checks['every_nonempty_lane_has_research_floor']=expected_lanes==covered_lanes
     checks['review_plan_traceable']=all(r['selection_reason'] and r['memberships'] and r['evidence_sha256'] and r['as_of_date']==args.date for r in plan)
     priority=groups.get('priority',[])
     reviewed={r['symbol'] for key,items in groups.items() if key!='background' for r in items}
@@ -86,6 +92,13 @@ def main():
     checks['dashboard_recommendation_matches']=(
         bool(recommendation.get('decision_id'))
         and dashboard_recommendation.get('decision_id')==recommendation.get('decision_id'))
+    shared={item['symbol']:item for item in result.get('company_reviews',[])}
+    recommendation_reviewed=recommendation.get('reviewed',[])
+    checks['recommendation_research_shared_with_reports']=all(
+        item['symbol'] in shared and shared[item['symbol']].get('business')==item.get('business')
+        and shared[item['symbol']].get('risk')==item.get('company_risk')
+        and shared[item['symbol']].get('conclusion') in md
+        for item in recommendation_reviewed)
     checks.update(check_bundle(result,args.report_dir))
     if args.reports_only:
         publication={'date','report_matches_api','dashboard_projection_matches','separate_lanes'}

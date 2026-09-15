@@ -78,6 +78,20 @@ def test_user_requested_representative_counts_without_duplicate_or_false_gap():
     assert sum(len(g['items']) for g in result['review_groups'])==1
 
 
+def test_structural_observation_still_creates_minimum_research_coverage():
+    data = scan()
+    lead = data['lanes'][0]['selected'][0]
+    data['lanes'][0]['selected'] = []
+    data['lanes'][0]['observation_list'] = [lead]
+    data['lanes'][1]['selected'] = []
+    data['lanes'][1]['observation_list'] = [lead]
+    result = project(data, [])
+    assert [row['symbol'] for row in result['review_plan']] == ['600001.SH']
+    assert result['review_plan'][0]['representative_lanes'] == ['trend', 'expansion']
+    assert {row['list'] for row in result['review_plan'][0]['memberships']} == {'observation_list'}
+    assert result['review_coverage']['missing_symbols'] == ['600001.SH']
+
+
 def test_report_explains_selection_before_lists():
     from app.short_term_lanes.service import render
     data=scan();data['coverage']={'complete_history':1000,'universe':1000};data['notice']='观察而非买入'
@@ -85,7 +99,7 @@ def test_report_explains_selection_before_lists():
     # Rendering the research section is independent of rendering raw rows.
     data['lanes']=[]
     text=render(data)
-    assert '为什么复核：趋势首位代表' in text
+    assert '为什么复核：趋势的条件观察首位' in text
     assert '本次具体问题：要检验什么' in text
     assert '复核结果：保留观察' in text
     assert '重点复核结论' not in text

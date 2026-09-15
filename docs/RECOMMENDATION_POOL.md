@@ -4,8 +4,8 @@
 
 ## 单一产物与模块
 
-- `app/recommendation_pool/rules.py`：完整候选并集、旧推荐必核、用户跟踪、确定性编译、有效期和最小差异。
-- `repository.py`：G盘PostgreSQL的`recommendation_pool_decisions`追加式版本，冻结context、review、result。相同输入幂等；实际扫描变化拒绝发布。
+- `app/recommendation_pool/rules.py`：完整候选并集、旧推荐必核、用户跟踪、确定性编译、有效期和最小差异。其最低公司研究覆盖与九策略共用 `short_term_lanes.research_queue`，不另造一套首位规则。
+- `repository.py`：G盘PostgreSQL的`recommendation_pool_decisions`追加式版本，冻结context、review、result。相同输入幂等；实际扫描变化拒绝发布。发布时将已完成的推荐研究同步写入公司证据账本，并在不改变扫描哈希的前提下刷新同轮策略报告。
 - `report.py` / `RecommendationPoolPanel.vue`：读取同一个result，不重排；Markdown 先展示九策略总扫描和内部推荐/观察池的前后差异，再展示逐股研究；网页位于收盘复盘的多策略报告首屏。
 - `projection_guard.py`：同花顺执行前读取当前正式结果，检查决策编号、动作完全一致以及用户并发修改。仅推荐、观察可被策略刷新修改；行业/ETF不在其动作域。
 - `followup.py`：将实际推荐及未选对照注册到既有前瞻观察账本；真实登记时间不回填成收盘前已推荐，日线跟踪不是实际交易收益。

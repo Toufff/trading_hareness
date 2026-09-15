@@ -189,3 +189,29 @@ def test_internal_pool_baseline_does_not_require_ths_snapshot():
     assert latest_target_groups(Database(), '2026-09-15') == {
         '推荐': ['600001.SH'], '观察': ['000001.SZ'],
     }
+
+
+def test_structural_observation_is_a_required_floor_not_a_research_cap():
+    candidate = lambda s: {'symbol': s, 'name': s, 'reason': 'structure', 'rank_score': 1,
+                           'metrics': {'close': 10, 'amount': 500000000}}
+    scan = {'status': 'completed', 'as_of_date': '2026-09-15', 'version': 'test', 'lanes': [
+        {'key': 'trend', 'label': '趋势', 'total_matches': 2,
+         'tracking_candidates': [candidate('a'), candidate('b')], 'selected': [],
+         'observation_list': [candidate('a'), candidate('b')], 'caution_list': []},
+    ]}
+    context = intake(scan, 'run', {'推荐': [], '观察': []})
+    assert context['required_reviews'] == ['a']
+    assert {row['symbol'] for row in context['candidates']} == {'a', 'b'}
+
+
+def test_recommendation_research_adapts_to_shared_company_ledger():
+    from datetime import date
+    from app.short_term_lanes.reviews import from_recommendation, validate
+    _, _, _, make_review = fixture()
+    item = make_review('600001.SH') | {'name': '六号', 'sources_of_selection': ['scan'],
+                               'memberships': [{'lane': 'accumulation'}]}
+    adapted = from_recommendation([item])[0]
+    validate(adapted, date(2026, 9, 14))
+    assert adapted['selection']['origin'] == 'scan'
+    assert adapted['business'] == item['business']
+    assert adapted['risk'] == item['company_risk']

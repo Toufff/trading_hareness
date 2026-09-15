@@ -13,14 +13,21 @@ from .report_results import lane_result, result_lines
 from .tracking_report import sections as tracking_sections
 from ..effectiveness.report import sections as effectiveness_sections
 from ..event_research.report import sections as event_sections
+from .research_queue import SECTIONS
 
 VERSION = 'strategy-report-bundle-tabular-results-2026-09-15'
 
 
 def lane_review(result: dict, lane: dict) -> dict:
     """Re-scope shared company evidence without importing another lane's rank."""
-    symbols = {r['symbol'] for r in lane['selected'] + lane.get('caution_list', [])}
-    first = lane['selected'][0]['symbol'] if lane['selected'] else None
+    displayed = []
+    seen = set()
+    for section, _ in SECTIONS:
+        for row in lane.get(section, []) or []:
+            if row['symbol'] not in seen:
+                displayed.append(row)
+                seen.add(row['symbol'])
+    symbols = {r['symbol'] for r in displayed}
     groups = []
     for group in result.get('review_groups', []):
         items = []
@@ -28,7 +35,7 @@ def lane_review(result: dict, lane: dict) -> dict:
             if review['symbol'] not in symbols:
                 continue
             links = [m for m in review['memberships'] if m['lane'] == lane['key']]
-            reason = '；'.join(f"{m['label']}{'候选' if m['list']=='selected' else '风险名单'}展示第{m['display_rank']}：{m['reason']}" for m in links)
+            reason = '；'.join(f"{m['label']}{m.get('state_label') or ('候选' if m['list']=='selected' else '风险名单')}展示第{m['display_rank']}：{m['reason']}" for m in links)
             items.append({**review, 'memberships': links, 'selection_reason': reason})
         if items:
             key = 'company' if group['key'] in {'priority', 'additional'} else group['key']
@@ -41,12 +48,19 @@ def lane_review(result: dict, lane: dict) -> dict:
         group['items'].sort(key=lambda review: min(
             ((m['list'] != 'selected', m['display_rank']) for m in review['memberships']),
             default=(True, len(symbols) + 1)))
-    targets = [{**r, 'selection_reason': f"{lane['label']}首位代表：{lane['selected'][0]['reason']}。",
-                'memberships': [m for m in r['memberships'] if m['lane']==lane['key']]}
-               for r in result.get('review_plan', []) if r['symbol']==first]
+    targets = []
+    for row in result.get('review_plan', []):
+        if lane['key'] not in row.get('representative_lanes', []):
+            continue
+        links = [m for m in row['memberships'] if m['lane'] == lane['key']]
+        if not links:
+            continue
+        targets.append({**row, 'selection_reason': '；'.join(
+            f"{m['label']}{m.get('state_label', '观察')}首位：{m['reason']}" for m in links
+        ), 'memberships': links})
     reviewed = {r['symbol'] for g in groups if g['key']!='background' for r in g['items']}
     missing = [r['symbol'] for r in targets if r['symbol'] not in reviewed]
-    return dict(review_policy=f"本报告独立讨论{lane['label']}，优先复核本策略展示首位；复用公司事实，不复用其他策略的名次或买入结论。",
+    return dict(review_policy=f"本报告独立讨论{lane['label']}；首位只是最低研究覆盖，不是研究上限。复用公司事实，不复用其他策略的名次或买入结论。",
                 review_plan=targets, review_groups=groups,
                 review_coverage=dict(planned=len(targets), completed=len(targets)-len(missing), missing_symbols=missing,
                                      selected_reviewed=len({r['symbol'] for r in lane['selected']} & reviewed), selected_total=len(lane['selected'])))
@@ -55,11 +69,15 @@ def lane_review(result: dict, lane: dict) -> dict:
 def overlaps(result: dict) -> list[dict]:
     symbols: dict[str, dict] = {}
     for lane in result['lanes']:
-        for section in ('selected', 'caution_list'):
+        lane_seen = set()
+        for section, state_label in SECTIONS:
             for row in lane.get(section, []):
+                if row['symbol'] in lane_seen:
+                    continue
+                lane_seen.add(row['symbol'])
                 entry = symbols.setdefault(row['symbol'], dict(symbol=row['symbol'], name=row['name'], memberships=[]))
                 entry['memberships'].append(dict(key=lane['key'], label=lane['label'],
-                                                state='候选' if section=='selected' else '风险观察', reason=row['reason']))
+                                                state=state_label, reason=row['reason']))
     result_rows = []
     for row in symbols.values():
         if len({m['key'] for m in row['memberships']}) < 2:
@@ -82,9 +100,9 @@ def overview(result: dict, strategy_reports: list[dict], repeated: list[dict]) -
     lines += ['## 策略对照与独立报告', '', '| 策略 | 匹配 / 展示 | 代表候选 | 本策略研究范围 |', '|---|---:|---|---|']
     for lane, report in zip(result['lanes'], strategy_reports):
         c = report['review']['review_coverage']
-        lead = stock(lane['selected'][0]) if lane['selected'] else (
-            '风险观察：' + stock(lane['caution_list'][0]) if lane.get('caution_list') else '无候选')
-        lines += [f"| [{lane['label']}]({report['filename']}) | {lane['total_matches']} / {len(lane['selected'])} | {lead} | 首位复核 {c['completed']}/{c['planned']}，展示候选公司证据覆盖 {c['selected_reviewed']}/{c['selected_total']} |"]
+        ordered = lane.get('selected') or lane.get('observation_list') or lane.get('caution_list') or []
+        lead = stock(ordered[0]) if ordered else '无候选'
+        lines += [f"| [{lane['label']}]({report['filename']}) | {lane['total_matches']} / {len(lane['selected'])} | {lead} | 最低覆盖 {c['completed']}/{c['planned']}，条件观察公司证据 {c['selected_reviewed']}/{c['selected_total']} |"]
     lines += ['', '## 跨策略重复与分歧', '', '重复出现不是独立利好计票，也不会自动提高仓位。', '']
     for row in repeated:
         lines += [f"- {stock(row)}："+'；'.join(f"{m['label']}（{m['state']}）" for m in row['memberships'])+f"。{row['interpretation']}"]
@@ -117,10 +135,10 @@ def make_bundle(result: dict) -> dict:
         c = review['review_coverage']
         lines = [f"# {day} {lane['label']}独立报告", '', f"[返回总报告]({summary_file})", '',
                  '## 本次结论', ''] + result_lines(summary)
-        lines += event_sections(result.get('event_research'), {s['symbol'] for s in lane['selected']+lane.get('caution_list',[])})
+        lines += event_sections(result.get('event_research'), {s['symbol'] for s in lane['selected']+lane.get('observation_list',[])+lane.get('caution_list',[])})
         lines += ['## 详细研究证据', ''] + review_sections(review) + candidates(lane)
         lines += ['## 数据与筛选说明', '', f"本策略要找什么：{lane['purpose']}。", ''] + context(result)
-        lines += [f"公司证据覆盖：展示候选 {c['selected_reviewed']}/{c['selected_total']}；首位代表 {c['completed']}/{c['planned']}。范围分开计数，不把首位完成说成全部候选完成。", '']
+        lines += [f"公司证据覆盖：条件观察 {c['selected_reviewed']}/{c['selected_total']}；本策略最低覆盖 {c['completed']}/{c['planned']}。首位是下限而不是上限，不把代表复核说成全部候选完成。", '']
         if key == 'event':
             lines += [f"已核验事件覆盖 {result['coverage'].get('verified_event_symbols',0)} 只；没有匹配不等于全市场没有事件。", '']
         lines += effectiveness_sections(result.get('effectiveness'),key) + tracking_sections(result.get('followup'),key) + limits(result)

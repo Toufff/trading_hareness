@@ -8,6 +8,8 @@ import math
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from ..short_term_lanes.research_queue import lane_representatives
+
 VERSION = 'recommendation-pool-20260914'
 STAGES = {'accumulation', 'initial_breakout', 'strong_pullback', 'post_limit', 'other'}
 
@@ -71,9 +73,7 @@ def intake(scan, run_id, groups, user_tracking=(), next_session=None):
             row['memberships'].append({'lane': lane['key'], 'rank': rank, 'population': len(candidates), 'state': c.get('state')})
             if 'scan' not in row['sources']:
                 row['sources'].append('scan')
-        representatives = lane.get('selected') or lane.get('observation_list') or lane.get('caution_list') or []
-        if representatives:
-            required.add(representatives[0]['symbol'])
+    required.update(row['symbol'] for row in lane_representatives(scan))
     for source, symbols in (('previous_recommendation', groups.get('推荐', [])), ('previous_observation', groups.get('观察', [])), ('user_tracking', user_tracking)):
         for s in symbols:
             row = rows.setdefault(s, {'symbol': s, 'name': s, 'memberships': [], 'evidence': {}, 'sources': []})

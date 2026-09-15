@@ -4,8 +4,11 @@ from __future__ import annotations
 import hashlib
 import json
 
-VERSION = 'scan-first-review-selection-2026-09-04'
-POLICY = '每条非空策略先复核展示顺位第1的代表，跨策略去重；这是研究覆盖顺序，不是跨策略收益排名。重复入选不算独立证据。'
+from .research_queue import lane_representatives, membership_index
+
+VERSION = 'shared-research-coverage-2026-09-16'
+POLICY = ('每条非空策略按条件观察、结构观察、风险观察的显示顺序选取首位，作为同轮公司研究的最低覆盖；'
+          '这不是研究上限。推荐池续审、用户跟踪和同类比较可增加复核对象；跨策略重复去重且不算独立利好。')
 GROUPS = (
     ('priority', '本轮优先复核：各策略代表'),
     ('additional', '补充候选复核'),
@@ -25,35 +28,13 @@ def valid_selection(review: dict) -> bool:
 
 
 def project(scan: dict, reviews: list[dict]) -> dict:
-    memberships: dict[str, list[dict]] = {}
-    targets: dict[str, dict] = {}
-    if scan['status'] == 'completed':
-        for lane in scan['lanes']:
-            for section in ('selected', 'caution_list'):
-                for index, row in enumerate(lane.get(section, []), 1):
-                    member = dict(lane=lane['key'], label=lane['label'], list=section,
-                                  display_rank=index, total_matches=lane['total_matches'],
-                                  reason=row['reason'], rank_score=row['rank_score'], metrics=row['metrics'],
-                                  liquidity=row.get('liquidity'), ranking_components=row.get('ranking_components'),
-                                  **({'factor_overlay':row['factor_overlay']} if row.get('factor_overlay') else {}))
-                    memberships.setdefault(row['symbol'], []).append(member)
-                    if section == 'selected' and index == 1:
-                        peer = lane[section][1] if len(lane[section]) > 1 else None
-                        comparison = (f"同组下一展示候选为{peer['name']}（{peer['symbol'].split('.')[0]}），其依据是：{peer['reason']}。"
-                                      if peer else '本策略当前没有第二个展示候选。')
-                        reason = (f"{lane['label']}首位代表：{row['reason']}。该名单已经过活跃度、拥挤度和行业集中度筛选，"
-                                  f"按本策略分数排序后展示第1，匹配共{lane['total_matches']}只；{comparison}"
-                                  '优先核查来自该策略顺位，不代表基本面或未来收益一定更好。')
-                        if row.get('factor_overlay'):
-                            reason += row['factor_overlay']['explanation']
-                        target = targets.setdefault(row['symbol'], dict(symbol=row['symbol'], name=row['name'], reasons=[]))
-                        target['reasons'].append(reason)
+    memberships = membership_index(scan)
     plan = []
-    for symbol, target in targets.items():
-        evidence = memberships[symbol]
-        plan.append(dict(symbol=symbol, name=target['name'], selection_reason='\n'.join(target['reasons']),
-                         memberships=evidence, as_of_date=scan['as_of_date'], scan_version=scan['version'],
-                         evidence_sha256=hashlib.sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True).encode()).hexdigest()))
+    for target in lane_representatives(scan):
+        evidence = target['memberships']
+        plan.append({**target, 'as_of_date': scan['as_of_date'], 'scan_version': scan['version'],
+                     'evidence_sha256': hashlib.sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True).encode()).hexdigest()})
+    targets = {row['symbol']: row for row in plan}
     by_symbol = {r['symbol']: r for r in reviews}
     grouped: dict[str, list[dict]] = {key: [] for key, _ in GROUPS}
     for symbol, review in by_symbol.items():
@@ -72,8 +53,8 @@ def project(scan: dict, reviews: list[dict]) -> dict:
             key = 'additional'
         else:
             key = 'background'
-        reason = ('\n'.join(targets[symbol]['reasons']) if key == 'priority' else
-                  '；'.join(f"{m['label']}{'候选' if m['list']=='selected' else '风险名单'}展示第{m['display_rank']}：{m['reason']}" for m in links))
+        reason = (targets[symbol]['selection_reason'] if key == 'priority' else
+                  '；'.join(f"{m['label']}{m.get('state_label') or ('候选' if m['list']=='selected' else '风险名单')}展示第{m['display_rank']}：{m['reason']}" for m in links))
         if key == 'background':
             reason = ('旧记录缺少原始选取理由，不能追认成当日优先复核。' if not valid else
                       '本记录仅作背景，不在本轮优先研究计划中；不能因已有研究而获得优先级。')

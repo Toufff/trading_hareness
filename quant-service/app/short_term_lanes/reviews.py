@@ -30,21 +30,68 @@ def validate(review: dict, day: date, *, require_selection: bool = True) -> None
             raise ValueError("Future evidence cannot support this scan")
 
 
-def persist(database, day: date, reviews: list[dict]) -> int:
+def persist_rows(connection, day: date, reviews: list[dict], *, now=None) -> int:
+    """Persist validated research using an existing transaction."""
     for review in reviews:
         validate(review, day)
-    now = datetime.now(timezone.utc)
-    with database.transaction() as c:
-        for review in reviews:
-            payload = json.dumps({**review, "review_date": str(day)}, ensure_ascii=False, sort_keys=True)
-            digest = hashlib.sha256(payload.encode()).hexdigest()
-            c.execute("""INSERT INTO quant.market_events
-                (event_id,symbol,event_type,occurred_at,available_at,source,title,body,url,content_sha256,availability_basis)
-                VALUES(%s,%s,'short_term_company_review',%s,%s,'primary_review',%s,%s,%s,%s,'actual_review_receipt')
-                ON CONFLICT(content_sha256) DO NOTHING""",
-                (uuid4(), review["symbol"], datetime.combine(day,datetime.min.time(),ZoneInfo('Asia/Shanghai')),
-                 now, review["name"]+"短线证据复核", payload, review["sources"][0]["url"], digest))
+    now = now or datetime.now(timezone.utc)
+    for review in reviews:
+        payload = json.dumps({**review, "review_date": str(day)}, ensure_ascii=False, sort_keys=True)
+        digest = hashlib.sha256(payload.encode()).hexdigest()
+        connection.execute("""INSERT INTO quant.market_events
+            (event_id,symbol,event_type,occurred_at,available_at,source,title,body,url,content_sha256,availability_basis)
+            VALUES(%s,%s,'short_term_company_review',%s,%s,'primary_review',%s,%s,%s,%s,'actual_review_receipt')
+            ON CONFLICT(content_sha256) DO NOTHING""",
+            (uuid4(), review["symbol"], datetime.combine(day,datetime.min.time(),ZoneInfo('Asia/Shanghai')),
+             now, review["name"]+"短线证据复核", payload, review["sources"][0]["url"], digest))
     return len(reviews)
+
+
+def persist(database, day: date, reviews: list[dict]) -> int:
+    with database.transaction() as connection:
+        return persist_rows(connection, day, reviews)
+
+
+def from_recommendation(items: list[dict]) -> list[dict]:
+    """Adapt completed pool research into the shared company evidence ledger."""
+    result = []
+    dispositions = {"recommend": "retain_watch", "observe": "retain_watch", "exclude": "exclude"}
+    for item in items:
+        sources = item.get("sources") or []
+        selection_sources = set(item.get("sources_of_selection") or [])
+        if "user_tracking" in selection_sources:
+            origin = "user_followup"
+        elif item.get("memberships"):
+            origin = "scan"
+        else:
+            origin = "background"
+        selection = {
+            "origin": origin,
+            "why_now": item.get("why_now") or item.get("comparison") or "本轮推荐池续审",
+            "question": item.get("peer_comparison") or item.get("comparison") or "公司事实是否支持策略观察",
+            "disposition": dispositions.get(item.get("decision"), "downgrade_watch"),
+        }
+        if origin == "user_followup":
+            selection["request_reference"] = "用户主动跟踪池续审"
+        review = {
+            "symbol": item["symbol"],
+            "name": item.get("name") or item["symbol"],
+            "business": item.get("business"),
+            "risk": item.get("company_risk"),
+            "conclusion": item.get("comparison") or item.get("why_now"),
+            "sources": sources,
+            "selection": selection,
+            "recommendation_research": {
+                key: item.get(key) for key in (
+                    "decision", "stage", "trigger", "invalidation", "peer_comparison",
+                    "sector_assessment", "priority", "data_date"
+                ) if item.get(key) is not None
+            },
+        }
+        if item.get("catalyst"):
+            review["catalyst"] = item["catalyst"]
+        result.append(review)
+    return result
 
 
 def load(database, day: date) -> dict[str, dict]:

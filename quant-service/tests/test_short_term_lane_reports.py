@@ -46,7 +46,7 @@ def test_strategy_is_self_contained_and_does_not_import_unrelated_stock():
     assert '股票乙' not in text
     assert '返回总报告' in text and '完整历史' in text
     assert reports['pullback']['review']['review_coverage']['completed']==0
-    assert '强势回踩候选展示第2' in reports['pullback']['markdown']
+    assert '强势回踩条件观察展示第2' in reports['pullback']['markdown']
 
 
 def test_empty_report_and_no_double_vote_overview():
@@ -116,7 +116,7 @@ def test_overlap_conflict_keeps_risk_visible():
     data.update(project(data,[]))
     bundle=make_bundle(data)
     assert '分歧' in bundle['overlaps'][0]['interpretation']
-    assert {m['state'] for m in bundle['overlaps'][0]['memberships']}=={'候选','风险观察'}
+    assert {m['state'] for m in bundle['overlaps'][0]['memberships']}=={'条件观察','风险观察'}
 
 
 def test_single_strategy_reorders_reviews_by_its_own_priority():

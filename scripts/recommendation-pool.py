@@ -23,6 +23,8 @@ def main():
     p.add_argument('--snapshot', type=Path)
     p.add_argument('--directory', type=Path, required=True)
     p.add_argument('--review', type=Path)
+    p.add_argument('--strategy-report-dir', type=Path,
+                   help='After publish, export the enriched same-run strategy reports from the database')
     p.add_argument('--env-file', default='G:/StockPlatform/config/runtime.env')
     a = p.parse_args()
     from dotenv import load_dotenv
@@ -68,6 +70,15 @@ def main():
             context = json.loads((a.directory / 'context.json').read_text(encoding='utf-8'))
             review = json.loads(a.review.read_text(encoding='utf-8-sig'))
             bundle = persist(db, context, review)
+            # Persist() enriches the existing same-run strategy publication
+            # with this exact company research. Re-read it instead of using
+            # the pre-publish snapshot held above.
+            payload = latest_post_close_strategy(db, a.date)
+            run = payload.get('latest_completed') or {}
+            scan = (run.get('summary') or {}).get('strategy_lanes') or {}
+            if a.strategy_report_dir:
+                from app.short_term_lanes.reports import write_bundle
+                write_bundle(a.strategy_report_dir, scan, scan['report_bundle'])
             write(a.directory / 'decision.json', bundle)
             # The human report carries the same persisted decision plus the
             # bound scanner snapshot, so readers can verify both the total
