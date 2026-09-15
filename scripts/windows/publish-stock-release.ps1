@@ -201,11 +201,10 @@ if (-not $SkipTests) {
     Invoke-Checked -FilePath (Get-Command pwsh.exe -ErrorAction Stop).Source `
         -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $source 'scripts\windows\tests\test-runtime-observability.ps1')) `
         -WorkingDirectory $source
-    Invoke-Checked -FilePath (Join-Path $source '.venv\Scripts\python.exe') `
-        -Arguments @('-m', 'unittest', 'discover', '-s', 'tests', '-q') -WorkingDirectory (Join-Path $source 'quant-service')
-    # unittest discovery does not execute pytest-style functions/fixtures.
-    # Keep both loaders while the suite is mixed; never call those tests passed
-    # merely because they were importable under unittest.
+    # Pytest executes both unittest.TestCase suites and pytest-style functions.
+    # Running unittest discovery first duplicates nearly the entire backend
+    # suite and can exhaust Windows ephemeral sockets before the authoritative
+    # pytest pass reaches its final tests.
     Invoke-Checked -FilePath (Join-Path $source '.venv\Scripts\python.exe') `
         -Arguments @('-m', 'pytest', 'tests', '-q', '--disable-warnings') -WorkingDirectory (Join-Path $source 'quant-service')
     Invoke-Checked -FilePath (Get-Command npm.cmd -ErrorAction Stop).Source -Arguments @('run', 'test') -WorkingDirectory (Join-Path $source 'frontend')
