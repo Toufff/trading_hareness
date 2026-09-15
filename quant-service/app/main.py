@@ -515,6 +515,7 @@ from .routers.strategy_governance import build_strategy_governance_router
 from .routers.paper_reads import build_paper_reads_router
 from .routers.paper_actions import build_paper_actions_router
 from .routers.personal_decisions import PersonalDecisionDependencies, build_personal_decisions_router
+from .routers.broker_order_history import build_broker_order_history_router
 from .routers.analyst_prompt_lab import build_analyst_prompt_lab_router
 from .routers.strategy_pattern_reads import build_strategy_pattern_reads_router
 from .routers.ten_day_leader_rotation_reads import build_ten_day_leader_rotation_reads_router
@@ -686,6 +687,7 @@ from .async_personal_decision_repository import (
     latest_market_advice,
     latest_personal_decision_brief,
 )
+from .broker_order_repository import order_history_summary, order_history_timeline
 from .provider_rate_limits import provider_request_spacing_seconds, reserve_provider_rate_limit_slot
 from .runtime_leases import (
     POST_CLOSE_REFRESH_LEASE_KEY,
@@ -4196,6 +4198,9 @@ app.include_router(build_personal_decisions_router(PersonalDecisionDependencies(
     latest_market_advice=latest_market_advice,
     latest_holding_advice=latest_holding_advice,
 )))
+app.include_router(build_broker_order_history_router(
+    async_db, order_history_summary, order_history_timeline,
+))
 app.include_router(build_analyst_prompt_lab_router(
     db, materialize_prompt_candidates, label_prompt_candidate, evaluate_prompt_variant,
     materialize_intraday_analyst_outcomes, async_database=async_db,
