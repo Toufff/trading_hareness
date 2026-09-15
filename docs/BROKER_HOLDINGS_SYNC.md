@@ -6,7 +6,7 @@
 
 - 触发语义固定为 `manual`。原 12:00/15:15 自动同步已停用（不是 15:00 调度），不后台轮询、不自动登录、不自动唤醒 MuMu。
 - 用户未指定券商时不得默认中信；先确认客户端、券商、显式 `account_key` 和掩码账户。
-- 文件导出优先；没有可验证导出时，由 `gpt-5.6-luna` 的 Luna 子 agent 直接做桌面结构化人工读取。主 agent 只负责授权、证据验收和 CLI 编排，不把 OCR 或模型猜测当事实。
+- 原始文件导出优先；没有可验证导出时，由 `gpt-5.6-luna` 的 Luna 子 agent 直接做桌面结构化人工读取。主 agent 只负责授权、证据验收和 CLI 编排，不把 OCR 或模型猜测当事实。
 - 不得买卖、撤单、转账、融资、修改自选或确认交易；不得读取密码、Cookie、内存或认证材料。
 - 不擅自 activate、抢焦点、覆盖用户正在使用的窗口或 restore 最小化窗口。用户明确授权“显示”时，才可尝试无激活显示；若必须取得焦点，先请用户允许。
 
@@ -25,6 +25,29 @@ G:\StockPlatform\current\.venv\Scripts\python.exe G:\StockPlatform\current\scrip
 G:\StockPlatform\current\.venv\Scripts\python.exe G:\StockPlatform\current\scripts\broker-fact-sync.py confirm-account --phase manual --manual-user-authorized --account-key <key> --run-id <UUID> --envelope <envelope.json> --confirmation-record <record.json>
 G:\StockPlatform\current\.venv\Scripts\python.exe G:\StockPlatform\current\scripts\broker-fact-sync.py complete --phase manual --manual-user-authorized --account-key <key> --run-id <UUID> --envelope <envelope.json> --validate-only
 ```
+
+## 同花顺导出优先流程
+
+当前实现支持同花顺常见的“扩展名为 `.xls`、内容实际为 GB18030/UTF-8 制表符文本”的导出。二进制旧式 XLS 与 XLSX 会明确失败，不能把任意 Excel 文件误读成已验证券商证据。
+
+一次完整同步应尽量导出三类原始文件：
+
+1. 账户汇总：总资产、可用资金、股票/证券市值；
+2. 当前持仓：证券代码、名称、实际数量、可用股份、成本价、市价、市值、盈亏；
+3. 对账单或交割单（可选）：交易日期、证券、备注中的买/卖、成交数量/价格/金额、发生金额和各项费用。
+
+成交记录不能替代当前持仓，持仓表也不能替代账户汇总。客户端当日已卖出的零数量行只保留在解析诊断中，不计为当前持仓。实际安装版本是否能分别导出账户汇总和持仓，仍须用一次真实 GUI 操作验收；如果账户总额不能导出，不能声称“完全文件化”，而应由本轮 UI 证据补齐或明确失败。
+
+Luna 只负责打开只读页面并保存原始文件。金融字段由解析器重读，session manifest 只允许记录观察时间、掩码账户和已有账户绑定。示例：
+
+```powershell
+G:\StockPlatform\current\.venv\Scripts\python.exe G:\StockPlatform\current\scripts\broker-fact-sync.py prepare-export `
+  --phase manual --manual-user-authorized --account-key <key> --run-id <UUID> `
+  --session-manifest <session.json> --holdings-export <holdings.xls> `
+  --account-export <account.xls> --trade-export <statement.xls>
+```
+
+命令生成 `export-envelope.json` 和可选的 `trade-batch.json`。`complete --validate-only` 会再次从原始文件解析并逐项比较，防止修改中间 JSON；随后正式 complete 在同一数据库事务写入持仓快照与去重成交记录，并读回持仓 API。成交表为 `quant.broker_trade_records`，同一 `account_key + trade_key` 重复导入不重复记账，内容冲突则失败。
 
 `confirm-account` 必须有真实用户确认记录，绑定方式为 `user_confirmed_once`；不得由 agent 自写布尔断言。账户 fingerprint 可为 nullable：用户未提供完整账号时不得伪造 fingerprint；若提供，算法为 `SHA256(NFKC(casefold(broker)) + ":" + NFKC(account_identifier 去空白后转大写))`。确认后才允许本轮 envelope 进入 complete。
 

@@ -126,3 +126,30 @@ def test_expiry_and_company_review_does_not_fill_software_groups():
     b['valid_until'] = '2026-09-15T15:00:00+08:00'
     assert current_view(scan, b, datetime.fromisoformat('2026-09-15T15:01:00+08:00'))['status'] == 'expired'
     assert current_view(scan, b, datetime.fromisoformat('2026-09-15T14:59:00+08:00'))['status'] == 'ready'
+
+
+def test_internal_pool_baseline_does_not_require_ths_snapshot():
+    from app.recommendation_pool.repository import latest_target_groups
+
+    class Result:
+        def fetchone(self):
+            return {'result': {'status': 'ready', 'target_groups': {
+                '推荐': ['600001.SH', '600001.SH'], '观察': ['000001.SZ'],
+            }}}
+
+    class Connection:
+        def execute(self, sql, params):
+            assert "recommendation_pool_decisions" in sql
+            assert params == ('2026-09-15',)
+            return Result()
+
+    class Transaction:
+        def __enter__(self): return Connection()
+        def __exit__(self, *_): return False
+
+    class Database:
+        def transaction(self): return Transaction()
+
+    assert latest_target_groups(Database(), '2026-09-15') == {
+        '推荐': ['600001.SH'], '观察': ['000001.SZ'],
+    }

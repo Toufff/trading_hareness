@@ -682,14 +682,10 @@ from .l2_research_repository import latest_l2_evaluation, persist_l2_evaluation
 from .personal_decision_repository import persist_broker_snapshot, persist_trade_plan
 from .async_personal_decision_repository import (
     latest_broker_snapshot,
-    latest_decision_research,
     latest_holding_advice,
     latest_market_advice,
-    latest_new_buy_advice,
-    latest_new_buy_research,
     latest_personal_decision_brief,
 )
-from .decision_research_service import refresh_decision_research_and_plans
 from .provider_rate_limits import provider_request_spacing_seconds, reserve_provider_rate_limit_slot
 from .runtime_leases import (
     POST_CLOSE_REFRESH_LEASE_KEY,
@@ -3732,7 +3728,6 @@ def _post_close_refresh_dependencies() -> PostCloseRefreshDependencies:
         recompute_intraday_outcomes=recompute_analyst_intraday_outcomes_for_date,
         recompute_scorecards=recompute_scorecards, rebuild_analyst_research=rebuild_analyst_research_for_date,
         run_post_close_strategy=run_post_close_strategy, persist_watchlist_main_wave=persist_watchlist_main_wave_research,
-        refresh_decision_research=refresh_decision_research_and_plans,
         build_research_snapshot=build_snapshot, run_orchestrator=run_post_close_refresh_orchestrated,
         record_stage=record_stage_with_receipt, lease_key=POST_CLOSE_REFRESH_LEASE_KEY,
         lease_seconds=post_close_refresh_lease_seconds, acquire_lease=acquire_runtime_lease,
@@ -4199,10 +4194,7 @@ app.include_router(build_personal_decisions_router(PersonalDecisionDependencies(
     latest_snapshot=latest_broker_snapshot,
     latest_brief=latest_personal_decision_brief,
     latest_market_advice=latest_market_advice,
-    latest_new_buy_advice=latest_new_buy_advice,
     latest_holding_advice=latest_holding_advice,
-    latest_research=latest_decision_research,
-    latest_new_buy_research=latest_new_buy_research,
 )))
 app.include_router(build_analyst_prompt_lab_router(
     db, materialize_prompt_candidates, label_prompt_candidate, evaluate_prompt_variant,

@@ -31,7 +31,7 @@ def main():
     from app.strategy_read_model import latest_post_close_strategy
     from app.intraday_evidence_read_model import watchlists
     from app.recommendation_pool.rules import intake, sync_plan, current_view
-    from app.recommendation_pool.repository import persist
+    from app.recommendation_pool.repository import latest_target_groups, persist
     from app.recommendation_pool.report import markdown
     db = Database()
     try:
@@ -50,7 +50,7 @@ def main():
                 groups[g['name']] = [c + '.' + suffix.get(m, m) for c, m in zip(filter(None, codes.split('|')), filter(None, markets.split('|')))]
         if a.command == 'prepare':
             if not a.snapshot:
-                raise ValueError('fresh_ths_snapshot_required')
+                groups = latest_target_groups(db, a.date)
             tracked = [r['symbol'] for r in watchlists(db).get('items', []) if any(t.get('source') == 'user' and t.get('active') is not False for t in (r.get('metadata') or {}).get('tracking_tags', []))]
             with db.transaction() as c:
                 nxt = c.execute("SELECT min(calendar_date) AS day FROM quant.market_trade_calendar WHERE exchange='SSE' AND is_open AND calendar_date>%s", (a.date,)).fetchone()
@@ -59,7 +59,9 @@ def main():
             context = intake(scan, run['run_id'], groups, tracked, nxt['day'])
             write(a.directory / 'context.json', context)
             write(a.directory / 'review-template.json', {'context_hash': context['context_hash'], 'author': '', 'market_assessment': '', 'attention_budget': 5, 'items': []})
-            print(json.dumps({'context_hash': context['context_hash'], 'candidate_count': context['candidate_count'], 'required_reviews': context['required_reviews']}, ensure_ascii=False))
+            print(json.dumps({'context_hash': context['context_hash'], 'candidate_count': context['candidate_count'],
+                              'required_reviews': context['required_reviews'],
+                              'baseline_source': 'ths_snapshot' if a.snapshot else 'internal_recommendation_pool'}, ensure_ascii=False))
         elif a.command == 'publish':
             if not a.review:
                 raise ValueError('review_required')

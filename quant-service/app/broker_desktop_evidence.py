@@ -1,10 +1,11 @@
 """Manual desktop broker evidence boundary. No UI, authentication or quote I/O.
 
-Normalized UI observations are accepted only with complete, hashed screenshots.
-Export ingestion is deliberately closed until a real client format has a tested
-parser; a manually typed JSON document is never itself a client export.
+Financial values may come from a validated client export or complete, hashed UI
+evidence.  A small session manifest can bind an export to the already confirmed
+account, but it can never supply holdings, totals or trades itself.
 """
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ import re
 import unicodedata
 
 from .broker_fact_sync_rules import SHANGHAI, validate_exact_totals
+from .broker_export_parser import parse_account_export, parse_holdings_export, parse_trade_export
 
 CONTRACT = "ths-desktop-holdings-v1"
 SOURCES = {"ths_desktop_export", "ths_desktop_ui"}
@@ -130,6 +132,42 @@ def verify_artifacts(items, observed_at=None):
     return result
 
 
+def _artifact_for_role(evidence, role):
+    matches = [item for item in evidence if role in item.get("roles", [])]
+    if len(matches) != 1:
+        raise ValueError("BROKER_EXPORT_EVIDENCE_AMBIGUOUS: " + role)
+    return matches[0]
+
+
+def verify_export_values(value, evidence):
+    """Reparse originals so a generated envelope cannot replace broker facts."""
+    holdings_artifact = _artifact_for_role(evidence, "holdings")
+    account_artifact = _artifact_for_role(evidence, "account_totals")
+    manifest_artifact = _artifact_for_role(evidence, "account_identity")
+    if holdings_artifact.get("kind") != "broker_export" or account_artifact.get("kind") != "broker_export":
+        raise ValueError("BROKER_EXPORT_EVIDENCE_REQUIRED")
+    holdings = parse_holdings_export(Path(holdings_artifact["path"]))
+    account = parse_account_export(Path(account_artifact["path"]))
+    manifest = json.loads(Path(manifest_artifact["path"]).read_text(encoding="utf-8-sig"))
+    for key in ("run_id", "account_key", "observed_at", "account_identity", "account_binding"):
+        if manifest.get(key) != value.get(key):
+            raise ValueError("BROKER_EXPORT_SESSION_MISMATCH: " + key)
+    expected_positions = []
+    for row in holdings.rows:
+        expected_positions.append({key: (str(item) if isinstance(item, Decimal) else item)
+                                   for key, item in row.items()})
+    actual_positions = []
+    for row in value.get("positions") or []:
+        actual_positions.append({key: (str(item) if isinstance(item, Decimal) else item)
+                                 for key, item in row.items()})
+    if actual_positions != expected_positions:
+        raise ValueError("BROKER_EXPORT_HOLDINGS_MISMATCH")
+    actual_account = value.get("account") or {}
+    for key in ("cash", "total_asset", "total_market_value"):
+        if Decimal(str(actual_account.get(key))) != account[key]:
+            raise ValueError("BROKER_EXPORT_ACCOUNT_MISMATCH: " + key)
+
+
 def validate_desktop_metadata(metadata, source, observed_at, positions):
     """Shared DTO validation: does not touch files (HTTP accepts evidence refs)."""
     if metadata.get("contract") != CONTRACT or metadata.get("trigger") != "manual":
@@ -152,9 +190,23 @@ def validate_desktop_metadata(metadata, source, observed_at, positions):
         raise ValueError("BROKER_INCOMPLETE_POSITIONS")
     if not positions and completeness.get("explicit_empty") is not True:
         raise ValueError("BROKER_EMPTY_ACCOUNT_UNPROVEN")
-    if source == "ths_desktop_export":
-        raise ValueError("BROKER_EXPORT_PARSER_UNAVAILABLE: real client format must be validated first")
     extraction = metadata.get("extraction") or {}
+    if source == "ths_desktop_export":
+        if extraction.get("method") != "client_export_parser" or extraction.get("parser") != "ths-text-export-v1":
+            raise ValueError("BROKER_EXPORT_PARSER_UNVERIFIED")
+        if not evidence or any(item.get("kind") not in {"broker_export", "session_manifest"} for item in evidence):
+            raise ValueError("BROKER_EXPORT_EVIDENCE_REQUIRED")
+        roles = {role for item in evidence for role in item.get("roles", [])}
+        if not {"account_identity", "account_totals", "holdings"} <= roles:
+            raise ValueError("BROKER_EXPORT_COVERAGE_INCOMPLETE")
+        if completeness.get("account_totals_verified") is not True or completeness.get("end_of_list_verified") is not True:
+            raise ValueError("BROKER_EXPORT_COMPLETENESS_UNVERIFIED")
+        for position in positions:
+            row = position.model_dump() if hasattr(position, "model_dump") else position
+            proof = row.get("metadata") or {}
+            if proof.get("source_kind") != "ths_holdings_export" or not proof.get("source_line"):
+                raise ValueError("BROKER_POSITION_EVIDENCE_MISSING")
+        return
     if extraction.get("method") not in {"computer_use_verified", "desktop_visual_verified", "window_capture_verified"}:
         raise ValueError("BROKER_UI_EXTRACTION_UNVERIFIED")
     if extraction.get("method") in {"desktop_visual_verified", "window_capture_verified"} and extraction.get("capture_method") != "win32_hwnd":
@@ -228,6 +280,8 @@ def load_manual_envelope(path, run, *, now=None):
     # Old captures may be reimported as history. Their time is never replaced
     # with start/recorded_at, and advice eligibility remains a separate rule.
     evidence = verify_artifacts(value.get("evidence"), observed)
+    if value.get("source") == "ths_desktop_export":
+        verify_export_values(value, evidence)
     hashes = sorted(item["sha256"] for item in evidence)
     bundle_hash = sha256(json.dumps(hashes).encode()).hexdigest()
     metadata = {"contract": CONTRACT, "trigger": "manual", "trade_date": value.get("trade_date"),
@@ -249,3 +303,90 @@ def load_manual_envelope(path, run, *, now=None):
         "cash": account.get("cash"), "total_asset": account.get("total_asset"),
         "total_market_value": account.get("total_market_value"), "positions": positions, "metadata": metadata,
     })
+
+
+def prepare_export_envelope(run, session_manifest_path, holdings_path, account_path, output_dir,
+                            *, trade_path=None, now=None):
+    """Convert raw client exports into immutable, reviewable import artifacts.
+
+    ``session_manifest_path`` carries only observation/account-binding metadata.
+    Every financial value is parsed from one of the original broker exports.
+    """
+    now = now or datetime.now(timezone.utc)
+    manifest_path = Path(session_manifest_path).resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    if manifest.get("schema_version") != "broker-export-session-v1":
+        raise ValueError("BROKER_EXPORT_SESSION_MANIFEST_INVALID")
+    if str(manifest.get("run_id")) != str(run["run_id"]):
+        raise ValueError("BROKER_RUN_EVIDENCE_MISMATCH")
+    account_key = (run.get("input_summary") or {}).get("account_key")
+    if manifest.get("account_key") != account_key:
+        raise ValueError("BROKER_ACCOUNT_IDENTITY_MISMATCH")
+    observed = aware_time(manifest.get("observed_at"), "observed_at")
+    if observed > now + timedelta(seconds=5) or now - observed > timedelta(minutes=15):
+        raise ValueError("BROKER_EXPORT_OBSERVATION_TIME_INVALID")
+    holdings_path, account_path = Path(holdings_path).resolve(), Path(account_path).resolve()
+    holdings = parse_holdings_export(holdings_path)
+    account = parse_account_export(account_path)
+    validate_exact_totals(
+        {"total_assets": account["total_asset"], "market_value": account["total_market_value"],
+         "available_cash": account["cash"]},
+        [{"quantity": row["quantity"], "available_quantity": row["sellable_quantity"],
+          "price": row["market_price"], "market_value": row["market_value"]} for row in holdings.rows],
+    )
+    def artifact(path, digest, roles, kind="broker_export"):
+        return {"path": str(path), "sha256": digest, "captured_at": observed.isoformat(),
+                "kind": kind, "roles": roles}
+    manifest_digest = sha256(manifest_path.read_bytes()).hexdigest()
+    evidence = [
+        artifact(manifest_path, manifest_digest, ["account_identity"], "session_manifest"),
+        artifact(holdings_path, holdings.sha256, ["holdings"]),
+        artifact(account_path, account["sha256"], ["account_totals"]),
+    ]
+    trades = None
+    if trade_path:
+        trade_path = Path(trade_path).resolve()
+        trades = parse_trade_export(trade_path)
+        evidence.append(artifact(trade_path, trades.sha256, ["trades"]))
+    value = {
+        "schema_version": CONTRACT,
+        "trigger": "manual",
+        "source": "ths_desktop_export",
+        "run_id": str(run["run_id"]),
+        "account_key": account_key,
+        "observed_at": observed.isoformat(),
+        "trade_date": manifest.get("trade_date") or observed.astimezone(SHANGHAI).date().isoformat(),
+        "account_identity": manifest.get("account_identity"),
+        "account_binding": manifest.get("account_binding"),
+        "extraction": {
+            "method": "client_export_parser", "parser": "ths-text-export-v1",
+            "holdings_encoding": holdings.encoding, "account_encoding": account["encoding"],
+        },
+        "completeness": {
+            "all_positions_visible": True, "position_count": len(holdings.rows),
+            "explicit_empty": len(holdings.rows) == 0,
+            "holdings_pages": [1], "end_of_list_verified": True, "account_totals_verified": True,
+            "ignored_zero_quantity_rows": len([row for row in holdings.ignored_rows if row["reason"] == "zero_actual_quantity"]),
+        },
+        "evidence": evidence,
+        "account": {key: str(account[key]) for key in ("cash", "total_asset", "total_market_value")},
+        "positions": [{key: (str(item) if isinstance(item, Decimal) else item)
+                       for key, item in row.items()} for row in holdings.rows],
+    }
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    envelope_path = output / "export-envelope.json"
+    envelope_path.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    result = {"envelope": str(envelope_path), "position_count": len(holdings.rows),
+              "ignored_holding_rows": len(holdings.ignored_rows), "trade_batch": None, "trade_count": 0}
+    if trades is not None:
+        batch = {
+            "schema_version": "broker-trade-export-v1", "run_id": str(run["run_id"]),
+            "account_key": account_key, "observed_at": observed.isoformat(),
+            "source": "ths_desktop_export", "source_sha256": trades.sha256,
+            "records": trades.rows, "ignored_rows": trades.ignored_rows,
+        }
+        batch_path = output / "trade-batch.json"
+        batch_path.write_text(json.dumps(batch, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        result.update(trade_batch=str(batch_path), trade_count=len(trades.rows), ignored_trade_rows=len(trades.ignored_rows))
+    return result

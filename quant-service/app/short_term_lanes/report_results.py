@@ -22,26 +22,14 @@ def lane_result(result: dict, lane: dict, review: dict) -> dict:
     if lane['key'] == 'event':
         conclusion += f" 已核验事件覆盖 {result['coverage'].get('verified_event_symbols', 0)} 只，没有匹配不等于全市场没有事件。"
     evidence = {r['symbol']: r for g in review.get('review_groups', []) if g['key'] != 'background' for r in g['items']}
-    decisions = {r['symbol']: r for r in (review.get('decision_research') or {}).get('dossiers', [])}
     rows = []
     for state, entries in [('结构观察', discovered), ('条件观察', selected), ('风险观察', caution)]:
         for row in entries:
             research = evidence.get(row['symbol'])
-            decision = decisions.get(row['symbol'])
             if research:
                 research_conclusion = f"{research['outcome_label']}：{research['conclusion']}"
-            elif decision and decision.get('status') == 'passed':
-                research_conclusion = f"决策门禁通过：{decision['conclusion']}"
-            elif decision and decision.get('status') == 'rejected':
-                research_conclusion = f"决策门禁否决：{decision['conclusion']}"
-            elif decision:
-                failed = '；'.join(g.get('conclusion','') for g in decision.get('gates', []) if g.get('verdict') == 'unknown')
-                research_conclusion = f"决策门禁终止为证据不足：{failed or decision.get('conclusion','未形成可执行计划')}"
             else:
-                research_conclusion = (
-                    '本股仅属于该策略的量价筛选展示，未列入本轮优先决策研究；'
-                    '因此没有买入结论，而不是留下待他人完成的任务。'
-                )
+                research_conclusion = None
             rows.append(dict(symbol=row['symbol'], name=row['name'], state=state,
                 conclusion=research_conclusion,
                 reason=row['reason'], confirmation=row.get('confirmation', ''),
@@ -53,8 +41,9 @@ def lane_result(result: dict, lane: dict, review: dict) -> dict:
 def result_lines(summary: dict, *, compact: bool = False) -> list[str]:
     lines = [summary['conclusion'], '']
     for row in summary['rows']:
-        lines += [f"{'-' if compact else '###'} {stock(row)} · {row['state']}", '',
-                  f"结论：{row['conclusion']}", '']
+        lines += [f"{'-' if compact else '###'} {stock(row)} · {row['state']}", '']
+        if row['conclusion']:
+            lines += [f"公司复核：{row['conclusion']}", '']
         if not compact:
             lines += [f"- 为什么关注：{row['reason']}",
                       f"- 确认条件：{row['confirmation'] or '本轮未形成入场条件'}",

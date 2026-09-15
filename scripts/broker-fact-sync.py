@@ -11,11 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "quant-service"))
 from app.broker_manual_sync import (TASK_KEY, MAX_RUN_AGE, validate_manual_request, start_manual,
                                     complete_manual, alert_path, confirm_manual_account)
+from app.broker_desktop_evidence import prepare_export_envelope
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["start", "complete", "confirm-account", "fail", "status", "retry-import"])
+    parser.add_argument("action", choices=["start", "prepare-export", "complete", "confirm-account", "fail", "status", "retry-import"])
     parser.add_argument("--phase", default="manual", help="Only manual is accepted; scheduled phases are retired")
     parser.add_argument("--manual-user-authorized", action="store_true")
     parser.add_argument("--account-key")
@@ -23,6 +24,12 @@ def main():
     parser.add_argument("--envelope", type=Path)
     parser.add_argument("--confirmation-record", type=Path,
                         help="Actual current-user confirmation JSON, never an agent-authored consent statement")
+    parser.add_argument("--session-manifest", type=Path,
+                        help="Observation/account-binding metadata; never supplies balances, positions or trades")
+    parser.add_argument("--holdings-export", type=Path)
+    parser.add_argument("--account-export", type=Path)
+    parser.add_argument("--trade-export", type=Path)
+    parser.add_argument("--trade-batch", type=Path)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--error-code", default="BROKER_SYNC_FAILED")
     parser.add_argument("--message", default="")
@@ -76,6 +83,15 @@ def main():
                     if args.validate_only:
                         raise ValueError("BROKER_CONFIRMATION_ACTION_REQUIRES_EXPLICIT_WRITE")
                     result = confirm_manual_account(connection, run, args.envelope, args.confirmation_record)
+                elif args.action == "prepare-export":
+                    if args.session_manifest is None or args.holdings_export is None or args.account_export is None:
+                        raise ValueError("BROKER_EXPORT_INPUTS_REQUIRED")
+                    if run["status"] != "running":
+                        raise ValueError("BROKER_RUN_ALREADY_TERMINAL")
+                    result = prepare_export_envelope(
+                        run, args.session_manifest, args.holdings_export, args.account_export,
+                        args.evidence_root / str(run["run_id"]), trade_path=args.trade_export,
+                    )
                 elif run["status"] == "completed":
                     result = {**(run.get("output_summary") or {}), "status": "idempotent"}
                 elif run["status"] != "running":
@@ -87,7 +103,8 @@ def main():
                         if args.envelope is None:
                             raise ValueError("BROKER_ENVELOPE_REQUIRED")
                         result = complete_manual(connection, run, args.envelope, args.evidence_root,
-                                                 args.base_url, args.adapter_url, validate_only=args.validate_only)
+                                                 args.base_url, args.adapter_url, validate_only=args.validate_only,
+                                                 trade_batch=args.trade_batch)
                     except Exception as error:
                         if not args.validate_only:
                             with connection.transaction():

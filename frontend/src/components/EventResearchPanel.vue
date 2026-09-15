@@ -14,7 +14,7 @@ export type EventResearch = {
   leads: { document_id: string; title: string; published_at: string; symbols: { name: string; symbol: string }[] }[];
 };
 const props=defineProps<{ value?: EventResearch; symbols?: string[] }>();
-const events=computed(()=>props.value?.events.filter(e=>!props.symbols || e.symbols.length===0 || e.symbols.some(s=>props.symbols?.includes(s.symbol)))??[]);
+const events=computed(()=>(props.value?.events??[]).filter(e=>!props.symbols || e.symbols.length===0 || e.symbols.some(s=>props.symbols?.includes(s.symbol))));
 const leads=computed(()=>(props.value?.leads??[]).filter(e=>!props.symbols || e.symbols.some(s=>props.symbols?.includes(s.symbol))).slice(0,12));
 const labels:Record<string,string>={analyzed:'已完成有界消息研究',leads_only:'线索已获取 · 语义研究未完成',failed:'消息链失败',absent:'没有可用消息快照',no_news:'来源没有返回消息'};
 const surprise:Record<string,string>={positive:'正向预期差',negative:'负向预期差',neutral:'符合预期',unknown:'预期差未知'};

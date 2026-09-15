@@ -51,7 +51,8 @@ def main():
     checks['history_dates']=all([x['date'] for x in r['metrics']['flow_series']]==result['sessions'] for r in rows)
     response=session.get(args.dashboard_url+'/api/research/strategy/post-close/latest',params={'as_of_date':args.date},timeout=30)
     response.raise_for_status()
-    checks['dashboard_projection_matches']=response.json()['run']['summary']['strategy_lanes']==result
+    dashboard_payload=response.json()
+    checks['dashboard_projection_matches']=dashboard_payload['run']['summary']['strategy_lanes']==result
     plan=result.get('review_plan',[])
     groups={g['key']:g['items'] for g in result.get('review_groups',[])}
     expected=list(dict.fromkeys(l['selected'][0]['symbol'] for l in result['lanes'] if l['selected']))
@@ -59,20 +60,32 @@ def main():
     checks['review_plan_traceable']=all(r['selection_reason'] and r['memberships'] and r['evidence_sha256'] and r['as_of_date']==args.date for r in plan)
     priority=groups.get('priority',[])
     reviewed={r['symbol'] for key,items in groups.items() if key!='background' for r in items}
-    decision=result.get('decision_research') or {}
-    terminal={r['symbol']:r for r in decision.get('dossiers',[]) if r.get('status') in {'passed','rejected'}}
-    checks['decision_research_terminal']=decision.get('status')=='complete' and decision.get('terminal')==len(expected)
-    checks['representative_reviews_complete']=set(expected)<=set(reviewed)|set(terminal)
+    checks['representative_reviews_complete']=set(expected)<=set(reviewed)
     checks['priority_reasons_and_questions_visible']=all(
         any(r['symbol']==symbol and r['selection_reason'] in md and r['selection']['question'] in md and r['outcome_label'] in md for r in priority)
-        or (symbol in terminal and terminal[symbol]['conclusion'] in md)
         for symbol in expected)
     checks['reviews_not_promoted_by_availability']=all(r['selection']['origin']=='scan' for r in priority)
     all_reviews=[r['symbol'] for group in groups.values() for r in group]
     checks['review_groups_disjoint']=len(all_reviews)==len(set(all_reviews))
     checks['review_before_raw_lists']=0<=md.find('## 本次结论')<md.find('## 策略对照与独立报告') and all(
-        (next((r['conclusion'] for r in priority if r['symbol']==symbol), terminal[symbol]['conclusion'] if symbol in terminal else '')
+        (next((r['conclusion'] for r in priority if r['symbol']==symbol), '')
          in md[:md.find('## 策略对照与独立报告')]) for symbol in expected)
+    recommendation=payload['run']['summary'].get('recommendation_pool') or result.get('recommendation_pool') or {}
+    recommendation_coverage=recommendation.get('coverage') or {}
+    dashboard_recommendation=dashboard_payload['run']['summary'].get('recommendation_pool') or {}
+    checks['formal_recommendation_ready']=recommendation.get('status')=='ready' and recommendation.get('sync_allowed') is True
+    checks['formal_recommendation_coverage_complete']=(
+        not recommendation_coverage.get('missing') and not recommendation_coverage.get('errors')
+        and recommendation_coverage.get('reviewed',0)>=recommendation_coverage.get('required',0)
+    )
+    checks['formal_recommendation_research_only']=recommendation.get('research_only') is True and all(
+        item.get('buy_authorized') is False for item in recommendation.get('reviewed',[]))
+    checks['formal_recommendation_actions_complete']=all(
+        item.get('trigger') and item.get('invalidation') and item.get('sources')
+        for item in recommendation.get('recommended',[]))
+    checks['dashboard_recommendation_matches']=(
+        bool(recommendation.get('decision_id'))
+        and dashboard_recommendation.get('decision_id')==recommendation.get('decision_id'))
     checks.update(check_bundle(result,args.report_dir))
     if args.reports_only:
         publication={'date','report_matches_api','dashboard_projection_matches','separate_lanes'}

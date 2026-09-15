@@ -144,11 +144,9 @@ if (-not $Force -and (Test-EquityDateReady $health $today) -and $laneState -and
     $laneState.Value.as_of_date -eq $today -and $laneState.Value.status -eq 'completed' -and
     $laneState.Value.version -eq 'short-term-lanes-discovery-split-2026-09-13' -and $selectionState -and
     $selectionState.Value -eq 'scan-first-review-selection-2026-09-04' -and $bundleState -and
-    $bundleState.Value.version -eq 'strategy-report-bundle-results-first-2026-09-11' -and
-    (Get-ContractValue $laneState.Value 'decision_research.status') -eq 'complete') {
-    & (Join-Path $root '.venv\Scripts\python.exe') (Join-Path $root 'scripts\verify-short-term-lanes.py') --date $today --base-url $ApiBase --report-dir $reportDir
+    $bundleState.Value.version -eq 'strategy-report-bundle-results-first-2026-09-11') {
+    & (Join-Path $root '.venv\Scripts\python.exe') (Join-Path $root 'scripts\verify-short-term-lanes.py') --date $today --base-url $ApiBase --report-dir $reportDir --reports-only
     if ($LASTEXITCODE -eq 0) {
-        Start-IndependentGovernance
         return Write-PipelineRecord -Record @{ status = 'skipped'; reason = 'same-date market, strategies and all report files verified'; trade_date = $landed }
     }
 }
@@ -239,38 +237,17 @@ try {
     $scan = Invoke-RestMethod -Method Post -Uri "$ApiBase/api/v1/strategy/post-close/run" `
         -Headers @{ 'X-Quant-Write-Key' = $config['QUANT_WRITE_API_KEY']; 'Content-Type' = 'application/json' } `
         -Body (ConvertTo-Json -InputObject @{ as_of_date = $today } -Compress) -TimeoutSec 180 -NoProxy
-    # Discovery and research are separate, but the user-facing decision report
-    # is not published until every planned representative has a terminal
-    # dossier.  Rebuilding the same run is idempotent and only projects the
-    # persisted dossiers back into the report bundle.
-    $stage = 'lane_decision_research_closure'
-    [void](Write-PipelineRecord -Record @{status='running'; strategy_run_id=$scan.run_id})
-    $savedResearch = @{}
-    foreach ($key in $config.Keys) { $savedResearch[$key] = [Environment]::GetEnvironmentVariable($key, 'Process'); [Environment]::SetEnvironmentVariable($key, $config[$key], 'Process') }
-    try {
-        $researchOutput = & (Join-Path $root '.venv\Scripts\python.exe') (Join-Path $root 'scripts\close-strategy-research.py') --date $today 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "Lane decision research closure failed: $LASTEXITCODE $researchOutput" }
-        $research = ([string]($researchOutput | Select-Object -Last 1)) | ConvertFrom-Json
-    } finally { foreach ($key in $savedResearch.Keys) { [Environment]::SetEnvironmentVariable($key, $savedResearch[$key], 'Process') } }
-    $record['decision_research_closure'] = $research
-    $scan = Invoke-RestMethod -Method Post -Uri "$ApiBase/api/v1/strategy/post-close/run" `
-        -Headers @{ 'X-Quant-Write-Key' = $config['QUANT_WRITE_API_KEY']; 'Content-Type' = 'application/json' } `
-        -Body (ConvertTo-Json -InputObject @{ as_of_date = $today } -Compress) -TimeoutSec 180 -NoProxy
     $stage = 'publication_readback'
     $readback = Invoke-RestMethod -Uri "$ApiBase/api/v1/strategy/post-close/latest?as_of_date=$today" -TimeoutSec 30 -NoProxy
     if ($readback.run.as_of_date -ne $today -or $readback.run.summary.strategy_lanes.status -ne 'completed') {
         throw 'Persisted multi-strategy readback did not match requested date and completion'
-    }
-    $decisionState = $readback.run.summary.strategy_lanes.decision_research
-    if ($decisionState.status -ne 'complete' -or $decisionState.terminal -ne $decisionState.planned) {
-        throw 'Decision research did not reach terminal coverage for the persisted lane plan'
     }
     # Export the persisted scan, not an independently recomputed CLI generation.
     $stage = 'publication_export'
     & (Join-Path $root '.venv\Scripts\python.exe') (Join-Path $root 'scripts\export-strategy-publication.py') --date $today --expected-run-id $scan.run_id --base-url $ApiBase --report-dir $reportDir
     if ($LASTEXITCODE -ne 0) { throw 'Persisted strategy export failed; no recomputation fallback' }
     $stage = 'publication_readback'
-    & (Join-Path $root '.venv\Scripts\python.exe') (Join-Path $root 'scripts\verify-short-term-lanes.py') --date $today --base-url $ApiBase --report-dir $reportDir
+    & (Join-Path $root '.venv\Scripts\python.exe') (Join-Path $root 'scripts\verify-short-term-lanes.py') --date $today --base-url $ApiBase --report-dir $reportDir --reports-only
     if ($LASTEXITCODE -ne 0) {
         $receiptPath = Join-Path $reportDir ($today + '_report_publication.json')
         if (Test-Path -LiteralPath $receiptPath) {
@@ -287,6 +264,7 @@ try {
     $record['strategy_run_id'] = $scan.run_id
     $record['lane_counts'] = @($readback.run.summary.strategy_lanes.lanes | ForEach-Object { @{ name=$_.label; matches=$_.total_matches } })
     $record['company_review_coverage'] = $readback.run.summary.strategy_lanes.review_coverage
+    $record['research_status'] = if ($record['company_review_coverage'].missing_symbols.Count -eq 0) { 'complete' } else { 'screening_only' }
     # Independent scopes: a successful scan is not a published recommendation.
     $record['recommendation_status'] = Get-ContractValue $readback 'run.summary.recommendation_pool.status'
     $record['recommendation_decision_id'] = Get-ContractValue $readback 'run.summary.recommendation_pool.decision_id'

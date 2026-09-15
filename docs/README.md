@@ -36,7 +36,7 @@ describe a standing design, not a one-off finding.
 |---|---|
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Platform-wide architecture, runtime map and ownership-boundary table. Read before any cross-domain change. |
 | [`ARCHITECTURE_INDEX.md`](ARCHITECTURE_INDEX.md) | **Generated** — do not hand-edit. Produced by `scripts/generate_architecture_index.py`; regenerate it instead of editing it directly. |
-| [`STOCK_BRAIN_MIGRATION.md`](STOCK_BRAIN_MIGRATION.md) | Old-system/new-system boundary, migration classes, `BrokerPortfolioSnapshot`/`PersonalTradePlan`/`PersonalDecisionBrief`/`DecisionResearchDossier` contracts, and cutover acceptance criteria. Carries a 2026-09-02 methodology-revision note. |
+| [`STOCK_BRAIN_MIGRATION.md`](STOCK_BRAIN_MIGRATION.md) | Old/new boundary, broker facts, nine-lane/company-review/recommendation contracts, retired G0--G7 history, and cutover acceptance criteria. |
 | [`STRATEGY_LOOP_V1.md`](STRATEGY_LOOP_V1.md) | Strategy loop v1: analyst text opinions, intraday confirmation and post-close review methodology. Carries a 2026-09-02 methodology-revision note. |
 | [`STRATEGY_ANALYST_JOINT_SYSTEM_PLAN_V2.md`](STRATEGY_ANALYST_JOINT_SYSTEM_PLAN_V2.md) | Second architecture audit and implementation plan for the joint strategy/analyst system. |
 | [`QUANT_RESEARCH_IMPLEMENTATION_PLAN.md`](QUANT_RESEARCH_IMPLEMENTATION_PLAN.md) | Analyst-channel-driven quant research platform implementation plan and phased acceptance criteria. |

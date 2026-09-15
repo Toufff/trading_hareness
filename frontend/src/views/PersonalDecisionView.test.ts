@@ -14,32 +14,29 @@ afterEach(() => {
 });
 
 describe('PersonalDecisionView', () => {
-  it('marks a conditional-buy new-buy plan as research-only, not a trade instruction', async () => {
-    const buyPlan = {
-          plan_key: 'buy-1', plan_kind: 'new_buy', symbol: '000001.SZ', name: '示例股票',
-          action: 'buy_on_trigger', exit_trigger: '跌破止损', max_position_pct: 5, valid_until: '2026-09-05',
-          rationale: [],
+  it('renders the formal recommendation decision as research-only, not a legacy trade plan', async () => {
+    const recommendation = {
+      status: 'ready', decision_id: 'decision-1', as_of_date: '2026-09-01', market_assessment: '弱市只看条件触发',
+      coverage: { candidates: 20, reviewed: 3, missing: [], errors: {} },
+      recommended: [{ symbol: '000001.SZ', name: '示例股票', priority: 1, stage: 'accumulation', why_now: '量价承接', comparison: '同类更稳', trigger: '回踩企稳', invalidation: '跌破平台', company_risk: '盈利波动' }],
+      reviewed: [], notice: '研究结论，不是交易授权',
     };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ status: 'ready', as_of_at: '2026-09-01T15:15:00+08:00', content: {}, delivery: { eligible: true, complete: true } }))
-      .mockResolvedValueOnce(jsonResponse({ status: 'ready', as_of_at: '2026-09-01T15:15:00+08:00', actions: [buyPlan], delivery: { eligible: true } }))
-      .mockResolvedValueOnce(jsonResponse({ as_of_date: '2026-09-01', summary: { total: 0, passed: 0, rejected: 0, incomplete: 0 }, items: [] }))
+      .mockResolvedValueOnce(jsonResponse({ latest_completed: { summary: { recommendation_pool: recommendation } } }))
       .mockResolvedValueOnce(jsonResponse({ as_of_date: '2026-09-01', status: 'completed', research_only: true, depends_on_holdings: false, total_unique: 1, items: [{ symbol: '600001.SH', name: '扫描股票', lane_keys: ['trend'], lane_labels: ['主线趋势'], reason: '全市场命中', confirmation: '放量突破', invalidation: '跌破平台', review_status: 'technical_observation', review_label: '量价观察，尚未升级', buy_authorized: false, depends_on_holdings: false }] }));
     vi.stubGlobal('fetch', fetchMock);
 
     const wrapper = mount(PersonalDecisionView, { props: { mode: 'market' }, global: { plugins: [ElementPlus] } });
     await flushPromises();
 
-    const buyCard = wrapper.find('.buy-card');
-    expect(buyCard.exists()).toBe(true);
-    expect(buyCard.find('.chart-launch').text()).toBe('查看图形');
+    const recommendationCard = wrapper.find('.recommendation-decision');
+    expect(recommendationCard.exists()).toBe(true);
+    expect(recommendationCard.text()).toContain('示例股票');
+    expect(recommendationCard.text()).toContain('研究结论，不是交易授权');
     expect(wrapper.find('.chart-entry-card').text()).toContain('按代码打开图形');
-    expect(wrapper.find('.chart-entry-card').text()).not.toContain('示例股票');
     expect(wrapper.find('.market-scan-section').text()).toContain('扫描股票');
     expect(wrapper.find('.market-scan-section').text()).not.toContain('示例股票');
-    const note = buyCard.find('[role="note"]');
-    expect(note.exists()).toBe(true);
-    expect(note.text()).toContain('仅供研究参考');
     expect(wrapper.text()).not.toContain('账户持仓建议');
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('holding-advice'))).toBe(false);
   });
@@ -95,8 +92,7 @@ describe('PersonalDecisionView', () => {
   it('renders a durable user tracking tag alongside later strategy tags', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ status: 'ready', as_of_at: '2026-09-05T15:15:00+08:00', content: {}, delivery: { eligible: true, complete: true } }))
-      .mockResolvedValueOnce(jsonResponse({ status: 'ready', as_of_at: '2026-09-05T15:15:00+08:00', actions: [], delivery: { eligible: false } }))
-      .mockResolvedValueOnce(jsonResponse({ as_of_date: '2026-09-05', summary: { total: 0, passed: 0, rejected: 0, incomplete: 0 }, items: [] }))
+      .mockResolvedValueOnce(jsonResponse({ latest_completed: { summary: { recommendation_pool: { status: 'unavailable' } } } }))
       .mockResolvedValueOnce(jsonResponse({
         as_of_date: '2026-09-05', status: 'completed', research_only: true, depends_on_holdings: false,
         total_unique: 1, strategy_total_unique: 1, user_tracking_total: 1,

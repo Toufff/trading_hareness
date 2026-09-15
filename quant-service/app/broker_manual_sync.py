@@ -12,6 +12,7 @@ from psycopg.types.json import Json
 from .automation_run_repository import start_run, finish_run, fail_run
 from .broker_desktop_evidence import CONTRACT, load_manual_envelope, verify_account_binding
 from .broker_fact_sync_rules import SHANGHAI
+from .broker_trade_repository import load_trade_batch, persist_trade_batch
 from .personal_decision_repository import persist_broker_snapshot
 
 TASK_KEY = "broker_holdings_manual"
@@ -166,17 +167,21 @@ def verify_readback(snapshot, saved, readback):
             raise ValueError("BROKER_API_EVIDENCE_MISMATCH: " + field)
 
 
-def complete_manual(connection, run, envelope, evidence_root, owner_url, adapter_url, *, validate_only=False):
+def complete_manual(connection, run, envelope, evidence_root, owner_url, adapter_url, *, validate_only=False,
+                    trade_batch=None):
     snapshot = load_manual_envelope(envelope, run)
     verify_account_binding(connection, snapshot.account_key, snapshot.metadata)
+    trades = load_trade_batch(trade_batch, run, snapshot) if trade_batch else None
     folder = Path(evidence_root) / str(run["run_id"])
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "validated-snapshot.json").write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
     if validate_only:
         return {"status": "validated", "observed_at": snapshot.observed_at.isoformat(),
-                "trade_date": snapshot.metadata["trade_date"], "position_count": len(snapshot.positions)}
+                "trade_date": snapshot.metadata["trade_date"], "position_count": len(snapshot.positions),
+                "trade_count": len(trades["records"]) if trades else 0}
     with connection.transaction():
         saved = persist_broker_snapshot(connection, snapshot)
+        trade_result = persist_trade_batch(connection, trades, snapshot) if trades else None
     row = connection.execute(
         """SELECT snapshot_id,account_key,source,source_snapshot_key,observed_at,verification,
                   cash,total_asset,total_market_value,content_hash,metadata
@@ -207,7 +212,7 @@ def complete_manual(connection, run, envelope, evidence_root, owner_url, adapter
                "position_count": len(snapshot.positions), "account_key": snapshot.account_key,
                "source": snapshot.source, "historical_import": historical, "subsequent_trades": "unknown",
                "owner_adapter_verified": True, "database_rows_verified": True,
-               "run_id": str(run["run_id"]), "evidence_dir": str(folder)}
+               "trade_import": trade_result, "run_id": str(run["run_id"]), "evidence_dir": str(folder)}
     with connection.transaction():
         finish_run(connection, str(run["run_id"]), output_summary=summary)
     (folder / "receipt.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

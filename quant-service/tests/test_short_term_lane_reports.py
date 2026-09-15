@@ -156,8 +156,8 @@ def test_caution_only_result_is_visible_without_promoting_it():
     summary = report['result_summary']
     assert '风险观察' in summary['conclusion']
     assert summary['rows'][0]['state'] == '风险观察'
-    assert '未列入本轮优先决策研究' in summary['rows'][0]['conclusion']
-    assert '留下待他人完成的任务' in summary['rows'][0]['conclusion']
+    assert summary['rows'][0]['conclusion'] is None
+    assert '待他人完成' not in report['markdown']
     assert report['markdown'].index('股票甲（600001）') < report['markdown'].index('完整历史')
 
 

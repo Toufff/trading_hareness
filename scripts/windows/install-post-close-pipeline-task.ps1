@@ -45,7 +45,7 @@ $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At $StartTime `
 $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
     -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-$description = 'Post-close A-share pipeline: market ingestion, incremental Longhu history, six short-term watchlists, and same-date persisted readback; retry missing stages every 30 minutes.'
+$description = 'Post-close A-share pipeline: market ingestion, incremental Longhu history, nine short-term strategy lanes, company-review/recommendation publication, and same-date persisted readback; retry only missing stages every 30 minutes.'
 
 if ($LogonType -in @('S4U', 'Interactive')) {
     $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType $LogonType -RunLevel Limited

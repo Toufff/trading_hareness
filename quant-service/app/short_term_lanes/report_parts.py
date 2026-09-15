@@ -31,30 +31,13 @@ def context(result: dict) -> list[str]:
 
 def review_sections(projection: dict) -> list[str]:
     lines = []
-    decision = projection.get('decision_research') or {}
     if projection.get('review_plan'):
         c = projection['review_coverage']
-        terminal = decision.get('terminal', 0)
         lines += ['## 为什么优先复核这些股票', '', projection['review_policy'], '',
-                  f"首位代表计划 {c['planned']} 只；一手公司复核 {c['completed']} 只，结构化决策门禁终态 {terminal}/{decision.get('planned', c['planned'])}；两者分开计数。", '']
+                  f"首位代表计划 {c['planned']} 只；一手公司复核 {c['completed']} 只。策略筛选与公司研究分开计数。", '']
         for target in projection['review_plan']:
             if target['symbol'] in c['missing_symbols']:
-                dossier = next((row for row in decision.get('dossiers', []) if row.get('symbol') == target['symbol']), None)
-                if dossier and dossier.get('status') in {'passed','rejected'}:
-                    lines += [f"- {stock(target)}：{target['selection_reason']} 已取得结构化决策门禁终态；一手公司复核是独立证据层，未用其他股票替代。", '']
-                elif dossier:
-                    lines += [f"- {stock(target)}：{target['selection_reason']} 决策门禁已明确终止为证据不足，不生成买入计划。", '']
-                else:
-                    lines += [f"- {stock(target)}：{target['selection_reason']} 本轮决策研究未执行，整张决策报告不得标为闭环。", '']
-    if decision.get('dossiers'):
-        lines += ['## 结构化决策门禁', '',
-                  '门禁读取同轮量价、板块、估值和独立下行几何；通过也不等同自动交易或长期价值结论。', '']
-        for dossier in decision['dossiers']:
-            lines += [f"### {stock(dossier)}", '',
-                      f"终态：{dossier.get('status')}。{dossier.get('conclusion','')}", '']
-            for gate in dossier.get('gates', []):
-                lines += [f"- {gate.get('gate_key')} {gate.get('label')} [{gate.get('verdict')}]：{gate.get('conclusion')}" ]
-            lines += ['']
+                lines += [f"- {stock(target)}：{target['selection_reason']} 当前只有同轮策略证据，本报告据此保持“筛选候选”，不升级为推荐。", '']
     for group in projection.get('review_groups', []):
         if not group['items']:
             continue

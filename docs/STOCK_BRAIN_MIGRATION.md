@@ -9,8 +9,8 @@ endpoints"一节所依赖的结果结算与事件可得性口径：涨停池/龙
 Benjamini-Hochberg 修正、`methodology_version` 现在有实际语义并归档旧计算结果。完整清单见
 [`STRATEGY_LOOP_V1.md`](STRATEGY_LOOP_V1.md) 的同名章节。**修订前的 replay/命中率数字（包括本文件"Current
 migration acceptance snapshot"一节记录的 2026-09-01 结果）不可与修订后的数字直接比较**，需要对受影响区间
-重新调用相应的结算函数才能得到可比数字；`decision_research_closure`/`post_close_strategy` 产出的历史
-dossier 在重算前应视为使用旧方法论生成。
+重新调用相应的结算函数才能得到可比数字。已退休的 `decision_research_closure`/G0--G7
+dossier 只保留为历史审计资料，不再进入新平台扫描、公司研究、推荐池、报告或网页。
 
 ## Decision
 
@@ -117,31 +117,25 @@ A stale or missing broker snapshot blocks holding actions but cannot erase the
 market section or eligible new-buy plans.  Diagnostics are retained separately
 from human-facing action text.
 
-### DecisionResearchDossier
+### Retired DecisionResearchDossier / G0--G7
 
-The post-close scanner is not allowed to publish a research candidate directly
-as a recommendation.  Each bounded candidate batch and every actual holding is
-closed into a terminal dossier after the settled-close strategy stage:
+The 2026-09-01 migration temporarily introduced a synthetic G0--G7 dossier
+layer.  Live evidence showed that it could mark a batch completed while doing
+no candidate company review, so the runtime service, routes, report projection
+and public UI were retired on 2026-09-15.  Its tables and migration remain only
+to preserve historical audit rows; no active module may import or execute it.
 
-- `passed`: all applicable checks are passed or explicitly advisory, including
-  a separately executed downside case;
-- `rejected`: at least one named check failed and the dossier explains the
-  concrete reason in human language;
-- `incomplete`: a required observation is genuinely unavailable.  Incomplete
-  candidates never become new-buy plans and the public decision brief never
-  tells the user that somebody should research them later.
+The current decision chain is explicit and independently testable:
 
-The internal G0--G7 keys exist only for audit joins.  Human-facing output uses
-their full labels: account/market eligibility, business identity, valuation
-constraint, sector/catalyst, benefit mapping, price/liquidity trigger,
-independent downside case and complete trade plan.  The downside check is a
-separate function and does not consume the bullish score or scan rank.
+1. `short_term_lanes` persists the full nine-lane screen and its review plan;
+2. `short_term_company_review` records actual primary-source company review;
+3. `recommendation_pool_decisions` compares the full candidate population,
+   prior internal pool and user tracking, then publishes one versioned result;
+4. broker holdings remain a separate, user-triggered read-only fact stream.
 
-A passed short-term dossier is a market-structure setup, not a claim that the
-company is a long-term value investment.  Its `PersonalTradePlan` must still
-include an entry range, invalidation, stop, position cap, target and validity
-window.  Actual holdings receive a defensive plan from the exact broker
-snapshot even when company research rejects the bullish case.
+A successful scan/report publication is therefore not called completed company
+research or a ready recommendation.  The public market page reads the formal
+recommendation pool and never projects historical G0--G7 rows.
 
 ## Deployment boundary
 
@@ -181,27 +175,29 @@ Git under `G:\StockPlatform\config`, and large imports and raw research files
 remain under `G:\StockPlatform\data`.  The repository must contain only code,
 migrations, bounded fixtures and documentation.
 
-The real post-close orchestration now runs `decision_research_closure` after
-`post_close_strategy` and `core_daily_controls`.  The stage is included in the
-same durable receipt as the market refresh.  The personal decision surface is:
+The post-close orchestration now publishes settled market evidence and the
+nine-lane scan.  Company review coverage and formal recommendation status are
+separate fields in the same dated read model.  The active personal surface is:
 
 - `GET /api/v1/personal/portfolio-snapshots/latest?account_key=...`;
 - `GET /api/v1/personal/decision-briefs/latest?account_key=...`;
-- `GET /api/v1/personal/decision-research/latest`.
+- `GET /api/v1/strategy/post-close/latest?as_of_date=...`.
 
-The decision brief and research audit are intentionally independent reads.  A
-research-audit failure does not blank a valid market/holdings/new-buy brief, and
-a broker failure only blocks the holdings section.  The frontend displays the
-stock name first and its exchange code in parentheses on every first mention.
+Market/recommendation and holdings are intentionally independent reads.  A
+broker failure only blocks the holdings section and cannot filter the full
+market candidate/recommendation surface.  The frontend displays the stock name
+first and its exchange code in parentheses on every first mention.
 
 ### Current migration acceptance snapshot
 
-The 2026-09-01 real settled-close replay completed with no deferred stages.  It
-persisted a usable but explicitly `degraded` market review (the current
+The following paragraph is a historical migration receipt, not the active
+acceptance contract.  The 2026-09-01 settled-close replay persisted an
+explicitly `degraded` market review (the current
 multi-index/breadth evidence was incomplete), two exact holding dossiers,
 twelve bounded candidate dossiers, one qualified conditional-buy plan and two
 holding plans.  The current audit read returned 14 dossiers from the latest
-model/current candidate batch only, with no unfinished dossier.  This is an
-integration acceptance record, not an investment recommendation and not the
+model/current candidate batch only.  Those dossiers are retired historical
+evidence and cannot satisfy current research coverage.  This is an integration
+receipt, not an investment recommendation and not the
 five-day shadow cutover required above.  A degraded market section remains
 visible but can never make the overall decision brief claim `ready`.

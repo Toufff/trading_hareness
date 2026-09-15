@@ -21,10 +21,7 @@ class PersonalDecisionDependencies:
     latest_snapshot: Callable[[Any, str], Awaitable[dict[str, Any] | None]]
     latest_brief: Callable[[Any, str], Awaitable[dict[str, Any]]]
     latest_market_advice: Callable[[Any], Awaitable[dict[str, Any]]]
-    latest_new_buy_advice: Callable[[Any], Awaitable[dict[str, Any]]]
     latest_holding_advice: Callable[[Any, str], Awaitable[dict[str, Any]]]
-    latest_research: Callable[[Any], Awaitable[dict[str, Any]]]
-    latest_new_buy_research: Callable[[Any], Awaitable[dict[str, Any]]]
 
 
 def build_personal_decisions_router(deps: PersonalDecisionDependencies) -> APIRouter:
@@ -69,21 +66,9 @@ def build_personal_decisions_router(deps: PersonalDecisionDependencies) -> APIRo
     async def read_latest_market_advice() -> dict[str, Any]:
         return await deps.latest_market_advice(deps.async_database)
 
-    @router.get("/api/v1/advice/new-buys/latest")
-    async def read_latest_new_buy_advice() -> dict[str, Any]:
-        return await deps.latest_new_buy_advice(deps.async_database)
-
     @router.get("/api/v1/personal/holding-advice/latest")
     async def read_latest_holding_advice(account_key: str) -> dict[str, Any]:
         return await deps.latest_holding_advice(deps.async_database, account_key)
-
-    @router.get("/api/v1/personal/decision-research/latest")
-    async def read_latest_decision_research() -> dict[str, Any]:
-        return await deps.latest_research(deps.async_database)
-
-    @router.get("/api/v1/advice/new-buys/research/latest")
-    async def read_latest_new_buy_research() -> dict[str, Any]:
-        return await deps.latest_new_buy_research(deps.async_database)
 
     return router
 

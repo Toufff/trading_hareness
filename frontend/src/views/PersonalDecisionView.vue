@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue';
 import { computed, reactive } from 'vue';
-import { usePersonalDecisionWorkspace, type DecisionResearchGate, type TradePlan } from '../composables/usePersonalDecisionWorkspace';
+import { usePersonalDecisionWorkspace, type TradePlan } from '../composables/usePersonalDecisionWorkspace';
 import ResearchOnlyBadge from '../components/ResearchOnlyBadge.vue';
 import StockResearchWorkbench from '../components/StockResearchWorkbench.vue';
 import EventResearchLive from '../components/EventResearchLive.vue';
+import RecommendationPoolPanel from '../components/RecommendationPoolPanel.vue';
 
 const props = withDefaults(defineProps<{ mode?: 'market' | 'holdings' }>(), { mode: 'market' });
 const isMarketView = computed(() => props.mode === 'market');
@@ -89,17 +90,6 @@ function scanTags(item: { tags?: Array<{ key: string; label: string; source: 'us
   return (item.lane_labels || []).map((label, index) => ({ key: `legacy:${index}:${label}`, label, source: 'strategy' as const }));
 }
 
-function gateType(verdict: DecisionResearchGate['verdict']): 'success' | 'warning' | 'danger' | 'info' {
-  if (verdict === 'pass') return 'success';
-  if (verdict === 'fail') return 'danger';
-  if (verdict === 'advisory') return 'warning';
-  return 'info';
-}
-
-function gateLabel(verdict: DecisionResearchGate['verdict']): string {
-  return ({ pass: '通过', fail: '否决', advisory: '风险提示', unknown: '证据不足' })[verdict];
-}
-
 function trackingStanceLabel(value?: string): string {
   return ({
     strengthening: '多维度转强', mixed_watch: '方向尚未一致', risk_repair: '风险修复阶段',
@@ -142,7 +132,7 @@ function compactMoney(value: unknown): string {
       <div v-if="isMarketView" class="status-grid section-gap independent-status-grid market-status-grid">
         <div class="status-tile"><span>盘面分析</span><el-tag :type="workspace.brief.market.status === 'degraded' ? 'warning' : workspace.brief.delivery.market_eligible ? 'success' : 'danger'">{{ workspace.brief.market.status === 'degraded' ? '部分可用' : workspace.brief.delivery.market_eligible ? '完整' : '缺失' }}</el-tag></div>
         <div class="status-tile"><span>全市场观察</span><el-tag :type="workspace.scanWatchlist?.items.length ? 'success' : workspace.scanError ? 'danger' : 'info'">{{ workspace.scanWatchlist?.items.length ? `${workspace.scanWatchlist.items.length} 只` : workspace.scanError ? '读取失败' : '暂无' }}</el-tag></div>
-        <div class="status-tile"><span>可执行新买</span><el-tag :type="workspace.brief.delivery.new_buy_actions_eligible ? 'success' : 'info'">{{ workspace.brief.delivery.new_buy_actions_eligible ? '有计划' : '当前无计划' }}</el-tag></div>
+        <div class="status-tile"><span>正式条件重点</span><el-tag :type="workspace.formalRecommendation?.status === 'ready' ? 'success' : 'info'">{{ workspace.formalRecommendation?.status === 'ready' ? `${Array.isArray(workspace.formalRecommendation?.recommended) ? workspace.formalRecommendation.recommended.length : 0} 只` : '尚未发布' }}</el-tag></div>
       </div>
       <div v-else class="status-grid section-gap holdings-status-grid">
         <div class="status-tile"><span>账户持仓</span><el-tag :type="workspace.brief.delivery.holding_actions_eligible ? 'success' : 'danger'">{{ workspace.brief.delivery.holding_actions_eligible ? '当前且可用' : '同步不可用' }}</el-tag></div>
@@ -226,60 +216,7 @@ function compactMoney(value: unknown): string {
         </template>
       </el-card>
 
-      <el-card v-if="isMarketView" shadow="never" class="section-gap decision-section stock-advice-section">
-        <template #header><div class="section-title"><div><strong>股票建议</strong><small>不读取账户、持仓数量、成本或仓位；只显示完整研究形成的计划</small></div><span>{{ workspace.brief.new_buys.actions?.length ?? 0 }} 项</span></div></template>
-        <el-alert v-if="workspace.newBuyError" :title="workspace.newBuyError" type="error" :closable="false" show-icon />
-        <el-empty v-else-if="!workspace.brief.new_buys.actions?.length" description="当前没有满足完整研究与交易计划要求的新买标的" :image-size="52" />
-        <div v-for="plan in workspace.brief.new_buys.actions" :key="plan.plan_key" class="action-card buy-card">
-          <div class="action-heading">
-            <div><strong>{{ plan.name }}</strong><span>（{{ plan.symbol }}）</span></div>
-            <el-space><el-button type="primary" plain size="small" class="chart-launch" @click="workspace.openChart(plan.symbol)">查看图形</el-button><ResearchOnlyBadge /><el-tag type="success">条件买入</el-tag></el-space>
-          </div>
-          <el-descriptions :column="4" size="small" border>
-            <el-descriptions-item label="买入区间">{{ displayValue(plan.entry_zone?.lower) }}–{{ displayValue(plan.entry_zone?.upper) }}</el-descriptions-item>
-            <el-descriptions-item label="止损参考">{{ displayValue(plan.stop_price) }}</el-descriptions-item>
-            <el-descriptions-item label="目标参考">{{ displayValue(plan.target_prices) }}</el-descriptions-item>
-            <el-descriptions-item label="最大仓位">{{ plan.max_position_pct }}%</el-descriptions-item>
-            <el-descriptions-item label="加仓条件" :span="2">{{ displayValue(plan.add_trigger) }}</el-descriptions-item>
-            <el-descriptions-item label="失效条件" :span="2">{{ plan.exit_trigger }}</el-descriptions-item>
-          </el-descriptions>
-          <ul class="rationale"><li v-for="reason in plan.rationale" :key="reason">{{ reason }}</li></ul>
-        </div>
-      </el-card>
-
-      <el-card v-if="isMarketView" shadow="never" class="section-gap decision-section">
-        <template #header>
-          <div class="section-title">
-            <div><strong>股票候选研究</strong><small>这里只读取新买候选，不混入持仓研究</small></div>
-            <el-space v-if="workspace.research">
-              <el-tag type="success">通过 {{ workspace.research.summary.passed }}</el-tag>
-              <el-tag type="danger">否决 {{ workspace.research.summary.rejected }}</el-tag>
-              <el-tag v-if="workspace.research.summary.incomplete" type="warning">未完成 {{ workspace.research.summary.incomplete }}</el-tag>
-            </el-space>
-          </div>
-        </template>
-        <el-alert v-if="workspace.researchError" :title="workspace.researchError" type="warning" :closable="false" show-icon />
-        <el-empty v-else-if="!workspace.research?.items.length" description="尚无研究审计批次" :image-size="52" />
-        <el-collapse v-else class="research-list">
-          <el-collapse-item v-for="item in workspace.research.items" :key="item.dossier_key" :name="item.dossier_key">
-            <template #title>
-              <div class="research-heading">
-                <span><strong>{{ item.name }}</strong>（{{ item.symbol }}）</span>
-                <el-tag :type="item.status === 'passed' ? 'success' : item.status === 'rejected' ? 'danger' : 'warning'">
-                  {{ item.status === 'passed' ? '研究通过' : item.status === 'rejected' ? '研究否决' : '证据不足' }}
-                </el-tag>
-                <small v-if="item.source_candidate_rank">扫描第 {{ item.source_candidate_rank }} 名</small>
-              </div>
-            </template>
-            <p class="research-conclusion">{{ item.conclusion }}</p>
-            <div v-for="gate in item.gates" :key="gate.gate_key" class="gate-row">
-              <div class="gate-name"><strong>{{ gate.label }}</strong><small>{{ gate.gate_key }}<template v-if="gate.independent_run"> · 独立执行</template></small></div>
-              <el-tag :type="gateType(gate.verdict)" effect="plain">{{ gateLabel(gate.verdict) }}</el-tag>
-              <span>{{ gate.conclusion }}</span>
-            </div>
-          </el-collapse-item>
-        </el-collapse>
-      </el-card>
+      <RecommendationPoolPanel v-if="isMarketView" :value="workspace.formalRecommendation" />
 
       <el-card v-if="isHoldingsView" shadow="never" class="section-gap decision-section holdings-only-section">
         <template #header><div class="section-title"><div><strong>账户持仓建议</strong><small>独立券商链；持仓快照 {{ displayValue(workspace.brief.holdings.portfolio_observed_at) }}</small></div><el-space><el-input v-model="workspace.accountKey" aria-label="账户标识" class="account-input" @keyup.enter="workspace.load" /><span>{{ workspace.brief.holdings.actions?.length ?? 0 }} 项</span></el-space></div></template>

@@ -19,7 +19,6 @@ from .reviews import load as load_reviews, persist as persist_reviews
 from .selection import project
 from .reports import make_bundle, write_bundle
 from .enrichment_queue import symbols as enrichment_symbols
-from .decision_projection import load as load_decision_dossiers, project as project_decision_research
 
 
 def governed_selection(database):
@@ -100,17 +99,6 @@ def build(database: Any, day: date, *, history_fetcher=fetch_candidate_history, 
         if result['status']=='completed' else {'status':'data_gap', 'production_effect':'none'})
     result['governance_config'] = governance_config
     result.update(project(result, result['company_reviews']))
-    # Decision closure is executed after the first persisted scan.  A second
-    # idempotent build projects only already-persisted dossiers back into the
-    # same report generation; it never fabricates completion from the scan.
-    try:
-        decision_dossiers = load_decision_dossiers(database, day)
-    except Exception as exc:
-        import logging
-        logging.getLogger(__name__).exception('lane_decision_research_read_failed date=%s', day)
-        decision_dossiers = []
-        result['decision_research_read_error'] = type(exc).__name__
-    result['decision_research'] = project_decision_research(result['review_plan'], decision_dossiers)
     result["coverage"]["verified_event_symbols"] = len(event_map)
     for lane in result["lanes"]:
         for item in lane["selected"]+lane.get("caution_list", []):

@@ -208,12 +208,14 @@ run.
 6. `docs/SHARED_PEER_RUNTIME.md` — owner, lightServer and collaborator topology.
 7. `docs/SHARED_STOCK_DATA_API.md` — complete read-only stock API contract.
 
-Legacy `stock-brain-*` scheduled tasks can coexist during migration. They are
-not proof that the trading-hareness production runtime is unhealthy, and they
-must not be silently deleted as part of a release operation.
+Legacy `stock-brain-*` scheduled tasks were allowed to coexist only during the
+cutover observation window.  After the 2026-09-15 archive/readback acceptance,
+their exact task definitions are archived and the disabled definitions are
+removed with `remove-legacy-stock-brain-tasks.ps1`.  A release operation must
+never recreate them; only an explicit historical-recovery procedure may do so.
 # 2026-09-10 cutover in progress
 
-Read [CUTOVER_20260910.md](CUTOVER_20260910.md) before operating this host. The legacy stock-brain jobs are intentionally paused and must not be restarted automatically. Production recovery and historical import have separate receipts; neither unit tests nor successful publication mean full acceptance.
+Read [CUTOVER_20260910.md](CUTOVER_20260910.md) before operating this host. The legacy stock-brain jobs are archived and removed, and must not be recreated automatically. Production recovery and historical import have separate receipts; neither unit tests nor successful publication mean full acceptance.
 # News-delivery cadence update — 2026-09-15
 
 News acquisition/application now has its own console-free Windows task:

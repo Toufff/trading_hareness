@@ -30,7 +30,7 @@ POST_CLOSE_STAGE_ORDER = (
     "close_market_snapshot", "akshare_supplements", "ths_industry_flow", "ths_concept_flow_and_limit_strength",
     "market_flow_features", "limit_ladder", "limit_lift_pattern_mining", "cninfo_announcements",
     "board_review", "close_strategy_decision", "close_review", "analyst_outcomes", "analyst_intraday_outcomes",
-    "analyst_scorecards", "analyst_expert_research", "post_close_strategy", "decision_research_closure",
+    "analyst_scorecards", "analyst_expert_research", "post_close_strategy",
     "user_tracking_research", "watchlist_main_wave", "research_snapshot",
 )
 
@@ -60,7 +60,6 @@ POST_CLOSE_STAGE_DEPENDENCIES = {
     "post_close_strategy": ("core_daily_controls",),
     "watchlist_main_wave": ("core_daily_controls",),
     "research_snapshot": ("core_daily_controls",),
-    "decision_research_closure": ("post_close_strategy", "core_daily_controls"),
     "user_tracking_research": ("core_daily_controls",),
 }
 
@@ -99,7 +98,6 @@ class PostCloseRefreshDependencies:
     recompute_scorecards: Callable[[date], Any]
     rebuild_analyst_research: Callable[[date], Any]
     run_post_close_strategy: Callable[[Any], Any]
-    refresh_decision_research: Callable[[Any, date], dict[str, Any]]
     persist_watchlist_main_wave: Callable[[Any], Any]
     build_research_snapshot: Callable[[Any], Any]
     run_orchestrator: Callable[..., Awaitable[dict[str, Any]]]
@@ -214,17 +212,6 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
             input_summary={"data_boundary": "same_date_close", "trigger": "manual_refresh"},
         ))
 
-    def decision_research_stage() -> Any:
-        if longhu_mode:
-            return {
-                "status": "completed", "delegated": True,
-                "reason": "Decision closure runs after the persisted nine-lane review plan",
-                "replacement_stage": "lane_decision_research_closure",
-            }
-        return dependencies.run_database(
-            dependencies.refresh_decision_research, dependencies.database, trade_date, timeout_seconds=120,
-        )
-
     actions: dict[str, Callable[[], Any]] = {
         "stale_fetch_runs": stale_fetch_runs_stage,
         "analyst_text": lambda: dependencies.run_database(dependencies.reprocess_remote_reports, dependencies.database, 500),
@@ -295,7 +282,6 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
         # scheduler never checked, so the 18:55-20:30 overlap window let
         # both triggers write the same strategy tables concurrently.
         "post_close_strategy": post_close_strategy_stage,
-        "decision_research_closure": decision_research_stage,
         "user_tracking_research": (
             lambda: dependencies.refresh_user_tracking(trade_date)
             if dependencies.refresh_user_tracking is not None else

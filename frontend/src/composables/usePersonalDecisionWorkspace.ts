@@ -68,41 +68,6 @@ type HoldingAdvice = PersonalDecisionBrief['holdings'] & {
   diagnostics?: string[];
 };
 
-type NewBuyAdvice = {
-  status: 'ready';
-  as_of_at: string;
-  actions?: TradePlan[];
-  delivery: { eligible: boolean };
-  diagnostics?: string[];
-};
-
-export type DecisionResearchGate = {
-  gate_key: string;
-  label: string;
-  verdict: 'pass' | 'fail' | 'unknown' | 'advisory';
-  independent_run: boolean;
-  conclusion: string;
-};
-
-export type DecisionResearchItem = {
-  dossier_key: string;
-  as_of_date: string;
-  symbol: string;
-  name: string;
-  strategy_family: string;
-  status: 'passed' | 'rejected' | 'incomplete';
-  conclusion: string;
-  source_candidate_rank?: number | null;
-  gates: DecisionResearchGate[];
-};
-
-export type DecisionResearchBatch = {
-  as_of_date?: string | null;
-  summary: { total: number; passed: number; rejected: number; incomplete: number };
-  items: DecisionResearchItem[];
-  boundary?: string;
-};
-
 export type MarketScanWatchItem = {
   symbol: string;
   name: string;
@@ -162,15 +127,13 @@ export type PersonalDecisionScope = 'market' | 'holdings' | 'all';
 export function usePersonalDecisionWorkspace(scope: PersonalDecisionScope = 'all') {
   const accountKey = ref(localStorage.getItem('personal-decision-account') || DEFAULT_ACCOUNT);
   const brief = ref<PersonalDecisionBrief | null>(null);
-  const research = ref<DecisionResearchBatch | null>(null);
+  const formalRecommendation = ref<Record<string, unknown> | null>(null);
   const scanWatchlist = ref<MarketScanWatchlist | null>(null);
   const loading = ref(false);
   const error = ref('');
-  const researchError = ref('');
   const scanError = ref('');
   const marketError = ref('');
   const holdingError = ref('');
-  const newBuyError = ref('');
   const chartWorkbench = ref<StockWorkbench | null>(null);
   const chartSymbol = ref('');
   const chartOpen = ref(false);
@@ -186,11 +149,9 @@ export function usePersonalDecisionWorkspace(scope: PersonalDecisionScope = 'all
   async function load() {
     loading.value = true;
     error.value = '';
-    researchError.value = '';
     scanError.value = '';
     marketError.value = '';
     holdingError.value = '';
-    newBuyError.value = '';
     try {
       const includeMarket = scope !== 'holdings';
       const includeHoldings = scope !== 'market';
@@ -200,28 +161,21 @@ export function usePersonalDecisionWorkspace(scope: PersonalDecisionScope = 'all
       const marketTask: Promise<MarketAdvice> = includeMarket
         ? getJson<MarketAdvice>('/api/research/advice/market/latest')
         : Promise.resolve({ status: 'unavailable', as_of_at: now, content: null, delivery: { eligible: false, complete: false }, diagnostics: [] });
-      const newBuyTask: Promise<NewBuyAdvice> = includeMarket
-        ? getJson<NewBuyAdvice>('/api/research/advice/new-buys/latest')
-        : Promise.resolve({ status: 'ready', as_of_at: now, actions: [], delivery: { eligible: false }, diagnostics: [] });
       const holdingTask: Promise<HoldingAdvice> = includeHoldings
         ? getJson<HoldingAdvice>(`/api/research/personal/holding-advice/latest?${params}`)
         : Promise.resolve({ status: 'blocked', as_of_at: now, actions: [], freshness_status: 'stale_or_unverified', delivery: { eligible: false }, diagnostics: [] });
-      const researchTask: Promise<DecisionResearchBatch | null> = includeMarket
-        ? getJson<DecisionResearchBatch>('/api/research/advice/new-buys/research/latest')
+      const recommendationTask: Promise<Record<string, unknown> | null> = includeMarket
+        ? getJson<Record<string, unknown>>('/api/research/strategy/post-close/latest')
         : Promise.resolve(null);
       const scanTask: Promise<MarketScanWatchlist | null> = includeMarket
         ? getJson<MarketScanWatchlist>('/api/research/strategy/post-close/watchlist/latest?limit=16')
         : Promise.resolve(null);
-      const [marketResult, newBuyResult, holdingResult, researchResult, scanResult] = await Promise.allSettled([
-        marketTask, newBuyTask, holdingTask, researchTask, scanTask,
+      const [marketResult, holdingResult, recommendationResult, scanResult] = await Promise.allSettled([
+        marketTask, holdingTask, recommendationTask, scanTask,
       ]);
       const market = marketResult.status === 'fulfilled' ? marketResult.value : {
         status: 'unavailable' as const, as_of_at: new Date().toISOString(), content: null,
         delivery: { eligible: false, complete: false }, diagnostics: ['market_transport_failure'],
-      };
-      const newBuys = newBuyResult.status === 'fulfilled' ? newBuyResult.value : {
-        status: 'ready' as const, as_of_at: new Date().toISOString(), actions: [],
-        delivery: { eligible: false }, diagnostics: ['new_buy_transport_failure'],
       };
       const holdings = holdingResult.status === 'fulfilled' ? holdingResult.value : {
         status: 'blocked' as const, as_of_at: new Date().toISOString(), actions: [],
@@ -233,26 +187,30 @@ export function usePersonalDecisionWorkspace(scope: PersonalDecisionScope = 'all
         as_of_at: scope === 'holdings' ? holdings.as_of_at : market.as_of_at,
         market: { status: market.status, content: market.content },
         holdings,
-        new_buys: { status: 'ready', actions: newBuys.actions ?? [] },
+        new_buys: { status: 'ready', actions: [] },
         delivery: {
           market_eligible: market.delivery.eligible,
           market_complete: market.delivery.complete,
           holding_actions_eligible: holdings.delivery.eligible,
-          new_buy_actions_eligible: newBuys.delivery.eligible,
+          new_buy_actions_eligible: false,
         },
         diagnostics: [
-          ...(includeMarket ? [...(market.diagnostics ?? []), ...(newBuys.diagnostics ?? [])] : []),
+          ...(includeMarket ? (market.diagnostics ?? []) : []),
           ...(includeHoldings ? (holdings.diagnostics ?? []) : []),
         ],
       };
       if (includeMarket && marketResult.status === 'rejected') marketError.value = marketResult.reason instanceof Error ? marketResult.reason.message : String(marketResult.reason);
-      if (includeMarket && newBuyResult.status === 'rejected') newBuyError.value = newBuyResult.reason instanceof Error ? newBuyResult.reason.message : String(newBuyResult.reason);
       if (includeHoldings && holdingResult.status === 'rejected') holdingError.value = holdingResult.reason instanceof Error ? holdingResult.reason.message : String(holdingResult.reason);
-      if (researchResult.status === 'fulfilled') research.value = researchResult.value;
-      else {
-        research.value = null;
-        researchError.value = researchResult.reason instanceof Error ? researchResult.reason.message : String(researchResult.reason);
-      }
+      if (recommendationResult.status === 'fulfilled') {
+        const payload = recommendationResult.value as {
+          run?: { summary?: { strategy_lanes?: { recommendation_pool?: Record<string, unknown> } } };
+          latest_completed?: { summary?: { recommendation_pool?: Record<string, unknown>; strategy_lanes?: { recommendation_pool?: Record<string, unknown> } } };
+        } | null;
+        formalRecommendation.value = payload?.run?.summary?.strategy_lanes?.recommendation_pool
+          ?? payload?.latest_completed?.summary?.recommendation_pool
+          ?? payload?.latest_completed?.summary?.strategy_lanes?.recommendation_pool
+          ?? null;
+      } else formalRecommendation.value = null;
       if (scanResult.status === 'fulfilled') scanWatchlist.value = scanResult.value;
       else {
         scanWatchlist.value = null;
@@ -261,7 +219,7 @@ export function usePersonalDecisionWorkspace(scope: PersonalDecisionScope = 'all
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : String(cause);
       brief.value = null;
-      research.value = null;
+      formalRecommendation.value = null;
       scanWatchlist.value = null;
     } finally {
       loading.value = false;
@@ -299,7 +257,7 @@ export function usePersonalDecisionWorkspace(scope: PersonalDecisionScope = 'all
 
   onMounted(load);
   return {
-    accountKey, brief, research, scanWatchlist, loading, error, researchError, scanError, marketError, holdingError, newBuyError,
+    accountKey, brief, formalRecommendation, scanWatchlist, loading, error, scanError, marketError, holdingError,
     marketContent, marketReport, load,
     chartWorkbench, chartSymbol, chartOpen, chartLoading, chartError, openChart, closeChart,
   };

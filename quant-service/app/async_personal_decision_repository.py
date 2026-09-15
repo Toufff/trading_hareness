@@ -194,87 +194,8 @@ async def latest_holding_advice(
     }
 
 
-async def latest_decision_research(async_database: Any) -> dict[str, Any]:
-    """Return the latest bounded dossier batch with human-readable gates."""
-    async with async_database.transaction() as connection:
-        latest = await _one(
-            connection,
-            "SELECT max(as_of_date) AS as_of_date FROM quant.decision_research_dossiers",
-        )
-        as_of_date = latest["as_of_date"] if latest else None
-        if as_of_date is None:
-            return {"as_of_date": None, "items": [], "summary": {"total": 0, "passed": 0, "rejected": 0, "incomplete": 0}}
-        rows = await _all(
-            connection,
-            """WITH latest_model AS (
-                   SELECT model_version FROM quant.decision_research_dossiers
-                    WHERE as_of_date=%s ORDER BY created_at DESC LIMIT 1
-               ), latest_candidate_run AS (
-                   SELECT source_candidate_run_id FROM quant.decision_research_dossiers
-                    WHERE as_of_date=%s AND model_version=(SELECT model_version FROM latest_model)
-                      AND evidence_snapshot->>'role'='candidate' AND source_candidate_run_id IS NOT NULL
-                    ORDER BY created_at DESC LIMIT 1
-               ), selected AS (
-                   SELECT DISTINCT ON (d.symbol,d.evidence_snapshot->>'role') d.dossier_id
-                     FROM quant.decision_research_dossiers d
-                    WHERE d.as_of_date=%s AND d.model_version=(SELECT model_version FROM latest_model)
-                      AND (
-                        d.evidence_snapshot->>'role'='holding'
-                        OR d.source_candidate_run_id=(SELECT source_candidate_run_id FROM latest_candidate_run)
-                      )
-                    ORDER BY d.symbol,d.evidence_snapshot->>'role',d.created_at DESC
-               )
-               SELECT d.dossier_id,d.dossier_key,d.as_of_date,d.symbol,d.name,d.strategy_family,
-                      d.model_version,d.status,d.conclusion,d.source_candidate_rank,d.evidence_snapshot,
-                      d.evidence_refs,d.created_at,
-                      coalesce(jsonb_agg(jsonb_build_object(
-                        'gate_key',g.gate_key,'label',g.label,'verdict',g.verdict,
-                        'independent_run',g.independent_run,'conclusion',g.conclusion,'evidence',g.evidence
-                      ) ORDER BY g.gate_key) FILTER (WHERE g.gate_key IS NOT NULL),'[]'::jsonb) AS gates
-                 FROM quant.decision_research_dossiers d
-                 JOIN selected selected_dossier ON selected_dossier.dossier_id=d.dossier_id
-                 LEFT JOIN quant.decision_research_gates g ON g.dossier_id=d.dossier_id
-                GROUP BY d.dossier_id
-                ORDER BY d.status='passed' DESC,d.source_candidate_rank NULLS FIRST,d.symbol""",
-            (as_of_date, as_of_date, as_of_date),
-        )
-    items = [dict(row) for row in rows]
-    return {
-        "as_of_date": as_of_date,
-        "items": items,
-        "summary": {
-            "total": len(items),
-            "passed": sum(item["status"] == "passed" for item in items),
-            "rejected": sum(item["status"] == "rejected" for item in items),
-            "incomplete": sum(item["status"] == "incomplete" for item in items),
-        },
-        "boundary": "terminal research audit; a passed short-term dossier is not a long-term value claim",
-    }
-
-
-async def latest_new_buy_research(async_database: Any) -> dict[str, Any]:
-    """Project only account-independent candidate research for stock advice."""
-    result = await latest_decision_research(async_database)
-    items = [
-        item for item in result.get("items", [])
-        if (item.get("evidence_snapshot") or {}).get("role") == "candidate"
-    ]
-    return {
-        **result,
-        "items": items,
-        "summary": {
-            "total": len(items),
-            "passed": sum(item.get("status") == "passed" for item in items),
-            "rejected": sum(item.get("status") == "rejected" for item in items),
-            "incomplete": sum(item.get("status") == "incomplete" for item in items),
-        },
-        "boundary": "new-buy candidate research only; independent of broker holdings",
-        "depends_on_broker": False,
-    }
-
-
 __all__ = [
-    "active_trade_plans", "latest_broker_snapshot", "latest_decision_research",
+    "active_trade_plans", "latest_broker_snapshot",
     "latest_market_section", "latest_personal_decision_brief", "latest_market_advice",
-    "latest_new_buy_advice", "latest_holding_advice", "latest_new_buy_research",
+    "latest_new_buy_advice", "latest_holding_advice",
 ]

@@ -68,3 +68,37 @@ def test_scheduled_entry_collects_then_builds_once_and_exports_before_verifying(
     assert '--collect --output-dir' not in section
     assert section.index('/api/v1/strategy/post-close/run') < section.index('export-strategy-publication.py')
     assert section.index('export-strategy-publication.py') < section.index('verify-short-term-lanes.py')
+    assert section.count('/api/v1/strategy/post-close/run') == 1
+    assert 'close-strategy-research.py' not in section
+    assert 'decision_research' not in section
+    assert '--reports-only' in section
+
+
+def test_same_date_retry_only_verifies_and_never_redispatches_governance():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / 'scripts/windows/run-post-close-pipeline.ps1').read_text(encoding='utf-8')
+    preflight = script[script.index("if (-not $Force -and (Test-EquityDateReady"):script.index("$stage = 'equity_ingestion'")]
+    assert "strategy-report-bundle-results-first-2026-09-11" in preflight
+    assert 'verify-short-term-lanes.py' in preflight
+    assert 'Start-IndependentGovernance' not in preflight
+
+
+def test_new_strategy_runtime_does_not_import_retired_gates():
+    root = Path(__file__).resolve().parents[2]
+    active_paths = [
+        root / 'quant-service/app/short_term_lanes',
+        root / 'quant-service/app/recommendation_pool',
+        root / 'quant-service/app/post_close_refresh_service.py',
+        root / 'quant-service/app/routers/personal_decisions.py',
+        root / 'scripts/windows/run-post-close-pipeline.ps1',
+        root / 'frontend/src/composables/usePersonalDecisionWorkspace.ts',
+        root / 'frontend/src/views/PersonalDecisionView.vue',
+    ]
+    offenders = []
+    for path in active_paths:
+        files = path.rglob('*.py') if path.is_dir() else [path]
+        for file in files:
+            body = file.read_text(encoding='utf-8')
+            if 'decision_research' in body or 'G0' in body or 'G7' in body:
+                offenders.append(str(file.relative_to(root)))
+    assert offenders == []

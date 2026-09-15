@@ -70,7 +70,7 @@ class DesktopManualTests(unittest.TestCase):
 
     def test_export_not_hand_transcribed_json(self):
         self.value["source"] = "ths_desktop_export"
-        with self.assertRaisesRegex(ValueError, "EXPORT_PARSER_UNAVAILABLE"):
+        with self.assertRaisesRegex(ValueError, "EXPORT_EVIDENCE_REQUIRED"):
             self.load()
 
     def test_hash_and_observation_rejected(self):

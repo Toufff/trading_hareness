@@ -6,6 +6,25 @@ LATEST_SQL = '''SELECT result FROM quant.recommendation_pool_decisions
                WHERE run_id=%s ORDER BY created_at DESC,decision_id DESC LIMIT 1'''
 
 
+def latest_target_groups(database, as_of_date):
+    """Return the last persisted internal pool; broker/watchlist state is unrelated.
+
+    Preparing a research decision must not require logging in to or reading
+    Tonghuashun.  That external snapshot is required only when an already
+    published decision is projected to the display-only watchlist.
+    """
+    with database.transaction() as connection:
+        row = connection.execute(
+            """SELECT result FROM quant.recommendation_pool_decisions
+                 WHERE as_of_date<=%s AND result->>'status'='ready'
+                 ORDER BY as_of_date DESC,created_at DESC,decision_id DESC LIMIT 1""",
+            (as_of_date,),
+        ).fetchone()
+    result = (row or {}).get('result') or {}
+    groups = result.get('target_groups') or {}
+    return {key: sorted(set(groups.get(key) or [])) for key in ('推荐', '观察')}
+
+
 def attach(run, row):
     if run:
         run['summary'] = {**(run.get('summary') or {}), 'recommendation_pool': current_view(

@@ -46,16 +46,10 @@ def lane_review(result: dict, lane: dict) -> dict:
                for r in result.get('review_plan', []) if r['symbol']==first]
     reviewed = {r['symbol'] for g in groups if g['key']!='background' for r in g['items']}
     missing = [r['symbol'] for r in targets if r['symbol'] not in reviewed]
-    decision = result.get('decision_research') or {}
-    lane_decision = {
-        **{key: value for key, value in decision.items() if key != 'dossiers'},
-        'dossiers': [row for row in decision.get('dossiers', []) if row.get('symbol') in symbols],
-    }
     return dict(review_policy=f"本报告独立讨论{lane['label']}，优先复核本策略展示首位；复用公司事实，不复用其他策略的名次或买入结论。",
                 review_plan=targets, review_groups=groups,
                 review_coverage=dict(planned=len(targets), completed=len(targets)-len(missing), missing_symbols=missing,
-                                     selected_reviewed=len({r['symbol'] for r in lane['selected']} & reviewed), selected_total=len(lane['selected'])),
-                decision_research=lane_decision)
+                                     selected_reviewed=len({r['symbol'] for r in lane['selected']} & reviewed), selected_total=len(lane['selected'])))
 
 
 def overlaps(result: dict) -> list[dict]:

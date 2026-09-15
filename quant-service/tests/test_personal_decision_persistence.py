@@ -105,8 +105,7 @@ class PersonalDecisionPersistenceTests(unittest.TestCase):
             persist_snapshot=lambda _connection, _payload: {"status": "created"},
             persist_plan=lambda _connection, _payload: {"status": "created"},
             latest_snapshot=latest_snapshot, latest_brief=latest_brief,
-            latest_market_advice=Mock(), latest_new_buy_advice=Mock(),
-            latest_holding_advice=Mock(), latest_research=Mock(), latest_new_buy_research=Mock(),
+            latest_market_advice=Mock(), latest_holding_advice=Mock(),
         ))
         snapshot_endpoint = next(route.endpoint for route in router.routes if route.path.endswith("portfolio-snapshots"))
         plan_endpoint = next(route.endpoint for route in router.routes if route.path.endswith("trade-plans"))
@@ -127,8 +126,7 @@ class PersonalDecisionPersistenceTests(unittest.TestCase):
         router = build_personal_decisions_router(PersonalDecisionDependencies(
             database=database, async_database=object(), persist_snapshot=conflict,
             persist_plan=conflict, latest_snapshot=Mock(), latest_brief=Mock(),
-            latest_market_advice=Mock(), latest_new_buy_advice=Mock(),
-            latest_holding_advice=Mock(), latest_research=Mock(), latest_new_buy_research=Mock(),
+            latest_market_advice=Mock(), latest_holding_advice=Mock(),
         ))
         endpoint = next(route.endpoint for route in router.routes if route.path.endswith("portfolio-snapshots"))
         with self.assertRaises(HTTPException) as raised:
