@@ -8,7 +8,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from app.broker_desktop_evidence import account_fingerprint, load_manual_envelope, verify_account_binding
-from app.broker_manual_sync import validate_manual_request, verify_readback, start_manual, confirm_manual_account
+from app.broker_manual_sync import (validate_manual_request, verify_readback, start_manual,
+                                    confirm_manual_account, reusable_account_binding)
 from app.broker_snapshot_freshness import broker_freshness
 from app.personal_decision_contracts import BrokerPortfolioSnapshotInput
 from app.personal_decision_repository import persist_broker_snapshot
@@ -81,6 +82,12 @@ class DesktopManualTests(unittest.TestCase):
         self.value["observed_at"] = (self.now + timedelta(days=1)).isoformat()
         with self.assertRaisesRegex(ValueError, "OBSERVATION_TIME"):
             self.load()
+
+    def test_uppercase_sha256_from_windows_receipt_is_accepted(self):
+        self.value["evidence"][0]["sha256"] = self.value["evidence"][0]["sha256"].upper()
+        snapshot = self.load()
+        self.assertEqual(snapshot.metadata["evidence"][0]["sha256"],
+                         self.value["evidence"][0]["sha256"].lower())
 
     def test_missing_row_duplicate_and_bad_numeric(self):
         original = copy.deepcopy(self.value)
@@ -172,6 +179,19 @@ class DesktopManualTests(unittest.TestCase):
                                           Mock(fetchone=Mock(return_value={"run_id": "busy", "started_at": self.now}))]
         result = start_manual(connection, "selected-account", self.root, now=self.now)
         self.assertEqual(result["status"], "skipped_running")
+
+    def test_reusable_account_binding_preserves_original_confirmation_anchor(self):
+        existing = {
+            "snapshot_id": "latest-snapshot",
+            "metadata": {"account_binding": {"method": "user_confirmed_once",
+                                                "existing_snapshot_id": "confirmation-anchor",
+                                                "confirmation_run_id": "confirmation-run"}},
+        }
+        self.assertEqual(reusable_account_binding(existing), {
+            "method": "user_confirmed_once",
+            "existing_snapshot_id": "confirmation-anchor",
+            "confirmation_run_id": "confirmation-run",
+        })
 
     def test_source_key_cannot_refresh_same_artifact(self):
         snapshot = self.load()

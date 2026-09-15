@@ -121,7 +121,8 @@ def verify_artifacts(items, observed_at=None):
             raise ValueError("BROKER_EVIDENCE_FILE_INVALID")
         body = path.read_bytes()
         digest = sha256(body).hexdigest()
-        if digest != item.get("sha256"):
+        expected_digest = str(item.get("sha256") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_digest) or digest != expected_digest:
             raise ValueError("BROKER_EVIDENCE_HASH_MISMATCH")
         if item.get("kind") == "screenshot" and not (body.startswith(b"\x89PNG\r\n\x1a\n") or body.startswith(b"\xff\xd8\xff")):
             raise ValueError("BROKER_SCREENSHOT_INVALID")

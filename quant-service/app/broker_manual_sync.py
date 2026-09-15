@@ -19,6 +19,23 @@ TASK_KEY = "broker_holdings_manual"
 MAX_RUN_AGE = timedelta(minutes=15)
 
 
+def reusable_account_binding(existing):
+    """Return the stable binding anchor agents should copy into a new envelope."""
+    metadata = existing.get("metadata") or {}
+    prior = metadata.get("account_binding") or {}
+    if (prior.get("method") == "user_confirmed_once"
+            and prior.get("existing_snapshot_id") and prior.get("confirmation_run_id")):
+        return {
+            "method": "user_confirmed_once",
+            "existing_snapshot_id": str(prior["existing_snapshot_id"]),
+            "confirmation_run_id": str(prior["confirmation_run_id"]),
+        }
+    return {
+        "method": "existing_account_evidence_match",
+        "existing_snapshot_id": str(existing["snapshot_id"]),
+    }
+
+
 def validate_manual_request(phase, authorized, account_key):
     if phase != "manual":
         raise ValueError("BROKER_MANUAL_ONLY: scheduled holdings synchronization is retired")
@@ -41,7 +58,7 @@ def start_manual(connection, account_key, evidence_root, *, now=None):
     with connection.transaction():
         connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (account_key + ":broker-sync",))
         existing = connection.execute(
-            "SELECT snapshot_id FROM quant.broker_portfolio_snapshots WHERE account_key=%s ORDER BY observed_at DESC LIMIT 1",
+            "SELECT snapshot_id,metadata FROM quant.broker_portfolio_snapshots WHERE account_key=%s ORDER BY observed_at DESC LIMIT 1",
             (account_key,),
         ).fetchone()
         if not existing:
@@ -55,14 +72,18 @@ def start_manual(connection, account_key, evidence_root, *, now=None):
         if running:
             fail_run(connection, str(running["run_id"]), ValueError("BROKER_MANUAL_RUN_EXPIRED"), error_class="BROKER_MANUAL_RUN_EXPIRED")
             alert_path(evidence_root, running["run_id"], "BROKER_MANUAL_RUN_EXPIRED")
+        binding = reusable_account_binding(existing)
         run_id = start_run(connection, task_key=TASK_KEY, run_key="broker-manual:" + str(uuid.uuid4()),
                            cadence="manual", as_of_date=now.astimezone(SHANGHAI).date(), methodology_version=CONTRACT,
-                           input_summary={"account_key": account_key, "trigger": "manual", "ui_operations": False})
+                           input_summary={"account_key": account_key, "trigger": "manual", "ui_operations": False,
+                                          "account_binding": binding})
     folder = Path(evidence_root) / run_id
     folder.mkdir(parents=True, exist_ok=True)
     return {"status": "started", "run_id": run_id, "account_key": account_key, "evidence_dir": str(folder),
             "deadline_at": (now + MAX_RUN_AGE).isoformat(), "sync_mode": "manual",
-            "existing_snapshot_id": str(existing["snapshot_id"]), "client_operations": False}
+            "existing_snapshot_id": binding["existing_snapshot_id"],
+            "latest_snapshot_id": str(existing["snapshot_id"]),
+            "account_binding": binding, "client_operations": False}
 
 
 def read_api(base_url, account_key, *, adapter=False):
