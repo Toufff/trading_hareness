@@ -34,6 +34,8 @@ def check_bundle(result: dict, directory: Path) -> dict[str, bool]:
         'bundle_results_first': bool(reports) and all(
             next((line for line in r['markdown'].splitlines() if line.startswith('## ')), '') == '## 本次结论'
             for r in reports),
+        'bundle_no_unreviewed_placeholders': bool(reports) and all(
+            '筛选层：本轮未列入公司比较范围' not in r['markdown'] for r in reports),
         'bundle_result_summary_scoped': all(lane['key'] in by_key and
             by_key[lane['key']].get('result_summary', {}).get('key') == lane['key'] and
             [row['symbol'] for row in by_key[lane['key']]['result_summary']['rows']] ==

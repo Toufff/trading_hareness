@@ -149,19 +149,23 @@ def test_results_and_actual_research_precede_process_in_every_report():
     assert first['confirmation'] == data['lanes'][0]['selected'][0]['confirmation']
 
 
-def test_overview_tables_explain_every_displayed_stock_even_without_company_review():
+def test_conclusion_tables_only_show_completed_company_comparisons():
     reports = {r['key']: r for r in make_bundle(example())['reports']}
     overview = reports['overview']['markdown']
-    # Both reviewed and unreviewed rows retain their strategy reason and
-    # executable confirmation/invalidation evidence instead of becoming a
-    # bare-name list in compact mode.
-    assert '| 股票 | 状态 | 为什么关注 | 公司复核 |' in overview
+    pullback = reports['pullback']['markdown']
+    conclusion = pullback.split('## 本次结论', 1)[1].split('\n## ', 1)[0]
+    # The decision section is reserved for completed company comparisons.
+    # Pure screening rows remain available in the detailed strategy section
+    # without being padded with a repeated pseudo-review.
+    assert '| 股票 | 状态 | 为什么关注 | 公司比较结论 |' in overview
     assert '| 股票 | 确认条件 | 放弃条件 | 风险与有效期 |' in overview
-    assert '股票乙（600002）' in overview
-    assert '回踩缩量' in overview
+    assert '筛选层：本轮未列入公司比较范围' not in overview
+    assert '另有 1 只量价/结构筛选观察' in conclusion
+    assert '股票乙（600002）' not in conclusion
+    assert '股票乙（600002）' in pullback
+    assert pullback.index('股票乙（600002）') > pullback.index('## 详细研究证据')
     assert '缩量承接后转强' in overview
     assert '结构被破坏' in overview
-    assert '筛选层：本轮未列入公司比较范围' in overview
 
 
 def test_caution_only_result_is_visible_without_promoting_it():

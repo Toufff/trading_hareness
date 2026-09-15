@@ -49,29 +49,30 @@ def result_lines(summary: dict, *, compact: bool = False) -> list[str]:
     if not summary['rows']:
         return lines
 
-    # The overview used to collapse unreviewed rows to bare stock names.  That
-    # made a strategy screen look like an unexplained recommendation list and
-    # happened to leave only the first reviewed representative with prose.
-    # Keep company review and strategy evidence distinct, but show both for
-    # every displayed row on the first screen.
-    lines += [
-        '| 股票 | 状态 | 为什么关注 | 公司复核 |',
-        '|---|---|---|---|',
-    ]
-    for row in summary['rows']:
-        review = row['conclusion'] or '筛选层：本轮未列入公司比较范围，不作推荐或排除结论'
-        lines.append(
-            f"| {_cell(stock(row))} | {_cell(row['state'])} | {_cell(row['reason'])} | {_cell(review)} |"
-        )
+    reviewed = [row for row in summary['rows'] if row['conclusion']]
+    screening_only = len(summary['rows']) - len(reviewed)
+    if reviewed:
+        lines += [
+            '| 股票 | 状态 | 为什么关注 | 公司比较结论 |',
+            '|---|---|---|---|',
+        ]
+        for row in reviewed:
+            lines.append(
+                f"| {_cell(stock(row))} | {_cell(row['state'])} | {_cell(row['reason'])} | {_cell(row['conclusion'])} |"
+            )
 
-    lines += ['', '| 股票 | 确认条件 | 放弃条件 | 风险与有效期 |', '|---|---|---|---|']
-    for row in summary['rows']:
-        confirmation = row['confirmation'] or '本轮未形成入场条件'
-        invalidation = row['invalidation'] or '本轮未形成失效条件'
-        risk = f"{row['caution'] or '无额外说明'}；有效期：{row['expiry'] or '未注明'}"
-        lines.append(
-            f"| {_cell(stock(row))} | 确认条件：{_cell(confirmation)} | "
-            f"放弃条件：{_cell(invalidation)} | {_cell(risk)} |"
-        )
-    lines.append('')
+        lines += ['', '| 股票 | 确认条件 | 放弃条件 | 风险与有效期 |', '|---|---|---|---|']
+        for row in reviewed:
+            confirmation = row['confirmation'] or '本轮未形成入场条件'
+            invalidation = row['invalidation'] or '本轮未形成失效条件'
+            risk = f"{row['caution'] or '无额外说明'}；有效期：{row['expiry'] or '未注明'}"
+            lines.append(
+                f"| {_cell(stock(row))} | 确认条件：{_cell(confirmation)} | "
+                f"放弃条件：{_cell(invalidation)} | {_cell(risk)} |"
+            )
+        lines.append('')
+
+    if screening_only:
+        destination = '对应独立策略报告' if compact else '下方筛选明细'
+        lines += [f"另有 {screening_only} 只量价/结构筛选观察，详见{destination}；它们不占用公司结论区。", '']
     return lines
