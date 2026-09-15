@@ -21,6 +21,12 @@ from ..runtime_executors import run_database_blocking
 
 logger = get_logger(__name__)
 
+# Peer readiness crosses an SSH database tunnel.  These two probes execute
+# sequentially and must tolerate short tunnel contention without reporting a
+# false outage; the container healthcheck has a larger enclosing budget.
+ASYNC_DATABASE_PROBE_TIMEOUT_SECONDS = 10.0
+SYNC_DATABASE_PROBE_TIMEOUT_SECONDS = 15
+
 
 @dataclass(frozen=True)
 class SystemControlDependencies:
@@ -38,7 +44,10 @@ def build_system_control_router(deps: SystemControlDependencies) -> APIRouter:
     async def health() -> dict[str, Any]:
         if deps.async_database_probe is not None:
             try:
-                await asyncio.wait_for(deps.async_database_probe(), timeout=5.0)
+                await asyncio.wait_for(
+                    deps.async_database_probe(),
+                    timeout=ASYNC_DATABASE_PROBE_TIMEOUT_SECONDS,
+                )
             except Exception as error:
                 logger.warning('health_async_database_unavailable', extra={
                     'task': 'health', 'error_type': type(error).__name__,
@@ -49,7 +58,10 @@ def build_system_control_router(deps: SystemControlDependencies) -> APIRouter:
             # the bounded fast lane instead of anyio's unbounded default
             # threadpool keeps a stuck query from silently accumulating one
             # more occupied worker thread per poll.
-            return await run_database_blocking(deps.health_payload, timeout_seconds=8)
+            return await run_database_blocking(
+                deps.health_payload,
+                timeout_seconds=SYNC_DATABASE_PROBE_TIMEOUT_SECONDS,
+            )
         except TimeoutError as error:
             # A saturated database executor is degraded readiness, not an
             # unhandled application error.  Keep this response explicit so

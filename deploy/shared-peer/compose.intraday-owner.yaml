@@ -12,6 +12,7 @@ services:
       QUANT_SHARED_READ_API_BASE_URL: http://db-tunnel:5681
       QUANT_DB_BLOCKING_MAX_WORKERS: ${PEER_DB_BLOCKING_MAX_WORKERS:-8}
       QUANT_DB_BLOCKING_MAX_QUEUE: ${PEER_DB_BLOCKING_MAX_QUEUE:-16}
+      QUANT_DB_POOL_TIMEOUT_SECONDS: ${PEER_DB_POOL_TIMEOUT_SECONDS:-30}
       QUANT_FEISHU_DIRECT_ENABLED: ${PEER_FEISHU_DIRECT_ENABLED:-false}
       INTRADAY_SCAN_INTERVAL_SECONDS: ${PEER_INTRADAY_SCAN_INTERVAL_SECONDS:-30}
       INTRADAY_WATCHLIST_MAX_SYMBOLS: ${PEER_WATCHLIST_MAX_SYMBOLS:-100}
@@ -56,6 +57,7 @@ services:
       QUANT_SHARED_READ_API_BASE_URL: http://db-tunnel:5681
       QUANT_DB_BLOCKING_MAX_WORKERS: ${PEER_RESEARCH_DB_BLOCKING_MAX_WORKERS:-4}
       QUANT_DB_BLOCKING_MAX_QUEUE: ${PEER_RESEARCH_DB_BLOCKING_MAX_QUEUE:-16}
+      QUANT_DB_POOL_TIMEOUT_SECONDS: ${PEER_DB_POOL_TIMEOUT_SECONDS:-30}
       QUANT_LONGHU_DIRECT_ENABLED: "false"
       QUANT_FEISHU_DIRECT_ENABLED: "false"
       STRATEGY_REVIEW_AUTOMATION_ENABLED: ${PEER_STRATEGY_REVIEW_AUTOMATION_ENABLED:-true}
@@ -76,8 +78,8 @@ services:
     volumes:
       - peer_quant_research_data:/var/lib/quant-research
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=15).read()\""]
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=28).read()\""]
       interval: 15s
-      timeout: 17s
+      timeout: 30s
       retries: 12
       start_period: 20s

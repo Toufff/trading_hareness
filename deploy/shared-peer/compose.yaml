@@ -58,6 +58,7 @@ services:
       QUANT_WRITE_API_KEY: ${PEER_QUANT_WRITE_API_KEY:?Set PEER_QUANT_WRITE_API_KEY}
       QUANT_SHARED_READ_API_KEY: ${QUANT_SHARED_READ_API_KEY:?Set QUANT_SHARED_READ_API_KEY}
       QUANT_SHARED_READ_API_BASE_URL: http://db-tunnel:5681
+      QUANT_DB_POOL_TIMEOUT_SECONDS: ${PEER_DB_POOL_TIMEOUT_SECONDS:-30}
       QUANT_LONGHU_DIRECT_ENABLED: "false"
       APP_GIT_SHA: ${PEER_APP_GIT_SHA:-}
       APP_RELEASE: ${PEER_APP_RELEASE:-}
@@ -67,9 +68,9 @@ services:
     volumes:
       - peer_quant_data:/var/lib/quant
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=15).read()\""]
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=28).read()\""]
       interval: 15s
-      timeout: 17s
+      timeout: 30s
       retries: 12
       start_period: 20s
 

@@ -92,7 +92,7 @@ class SystemControlRouterTests(unittest.TestCase):
             with self._client(async_probe=probe) as client:
                 self.assertEqual(client.get("/health").status_code, 200)
 
-        self.assertEqual(observed, [5.0, 8])
+        self.assertEqual(observed, [10.0, 15])
 
     def test_sync_health_timeout_is_reported_as_degraded_not_internal_error(self) -> None:
         async def timed_out(*_args, **_kwargs):
@@ -125,4 +125,4 @@ class SystemControlRouterTests(unittest.TestCase):
 
         self.assertEqual(payload, {"status": "ok"})
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][1], {"timeout_seconds": 8})
+        self.assertEqual(calls[0][1], {"timeout_seconds": 15})
