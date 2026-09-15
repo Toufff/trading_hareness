@@ -238,14 +238,50 @@ class SharedLonghuReadSource:
         if not self.base_url or not self.read_key:
             raise ValueError("shared Longhu base URL and read key are required")
         self.timeout_seconds = max(1.0, float(timeout_seconds))
-        self._session = requests.Session()
-        self._session.trust_env = False
-        self._session.headers.update({"X-Quant-Read-Key": self.read_key, "Accept": "application/json"})
+        self._session_lock = threading.Lock()
+        self._session = self._new_session()
+
+    def _new_session(self) -> requests.Session:
+        session = requests.Session()
+        session.trust_env = False
+        session.headers.update({"X-Quant-Read-Key": self.read_key, "Accept": "application/json"})
+        return session
+
+    def _replace_stale_session(self, failed: requests.Session) -> requests.Session:
+        # A reverse-tunnel restart leaves the peer's keep-alive socket looking
+        # reusable until its first request. Every gateway operation is
+        # read-only, including POST /licensed/stock-api/call, so retry exactly
+        # once on a transport disconnect with a fresh pool. Do not retry HTTP
+        # errors or timeouts: those carry different operational meaning.
+        with self._session_lock:
+            if self._session is failed:
+                self._session = self._new_session()
+                failed.close()
+            return self._session
+
+    def _get_response(self, path: str, *, params: Mapping[str, Any] | None = None) -> requests.Response:
+        session = self._session
+        try:
+            return session.get(
+                f"{self.base_url}{path}", params=dict(params or {}), timeout=self.timeout_seconds,
+            )
+        except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError):
+            return self._replace_stale_session(session).get(
+                f"{self.base_url}{path}", params=dict(params or {}), timeout=self.timeout_seconds,
+            )
+
+    def _post_response(self, path: str, *, payload: Mapping[str, Any]) -> requests.Response:
+        timeout = max(180.0, self.timeout_seconds)
+        session = self._session
+        try:
+            return session.post(f"{self.base_url}{path}", json=dict(payload), timeout=timeout)
+        except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError):
+            return self._replace_stale_session(session).post(
+                f"{self.base_url}{path}", json=dict(payload), timeout=timeout,
+            )
 
     def _get(self, path: str, *, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        response = self._session.get(
-            f"{self.base_url}{path}", params=dict(params or {}), timeout=self.timeout_seconds,
-        )
+        response = self._get_response(path, params=params)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
@@ -253,9 +289,7 @@ class SharedLonghuReadSource:
         return payload
 
     def _post(self, path: str, *, payload: Mapping[str, Any]) -> dict[str, Any]:
-        response = self._session.post(
-            f"{self.base_url}{path}", json=dict(payload), timeout=max(180.0, self.timeout_seconds),
-        )
+        response = self._post_response(path, payload=payload)
         response.raise_for_status()
         result = response.json()
         if not isinstance(result, dict):

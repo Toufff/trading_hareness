@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import unittest
+from unittest.mock import patch
 from datetime import date, datetime, timezone
 
 from app.longhu_vendor_source import (
@@ -180,6 +181,50 @@ class LonghuVendorSourceTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "http://owner.test/licensed/stock-api/call")
         self.assertEqual(calls[0][1]["params"]["st"], 650)
         self.assertGreaterEqual(calls[0][2], 180.0)
+
+    def test_shared_gateway_replaces_stale_pool_and_retries_read_only_post_once(self):
+        source = SharedLonghuReadSource("http://owner.test", "read-key")
+
+        class Response:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return {"target": "longhu_history", "calls": 1, "pages": []}
+
+        class StaleSession:
+            def __init__(self):
+                self.closed = False
+
+            def post(self, *_args, **_kwargs):
+                raise requests.ConnectionError("dead reverse-tunnel keepalive")
+
+            def close(self):
+                self.closed = True
+
+        class FreshSession:
+            def __init__(self):
+                self.trust_env = True
+                self.headers = {}
+                self.calls = 0
+
+            def post(self, *_args, **_kwargs):
+                self.calls += 1
+                return Response()
+
+        import requests
+        stale = StaleSession()
+        fresh = FreshSession()
+        source._session = stale
+        with patch("app.longhu_vendor_source.requests.Session", return_value=fresh):
+            result = source.raw_call({"target": "longhu_history", "params": {"st": 1}})
+        self.assertEqual(result["calls"], 1)
+        self.assertTrue(stale.closed)
+        self.assertEqual(fresh.calls, 1)
+        self.assertFalse(fresh.trust_env)
+        self.assertEqual(fresh.headers["X-Quant-Read-Key"], "read-key")
 
     def test_plate_list_paginates_larger_logical_reads_in_300_row_batches(self):
         source = LonghuVendorSource(LonghuVendorConfig(token="t", user_id="u", device_id="d"))
