@@ -34,7 +34,7 @@ class BrokerExportParserTests(unittest.TestCase):
         trades = self.write(
             "statement.xls",
             "交易日期\t成交时间\t证券代码\t证券名称\t备注\t成交数量\t成交价格\t成交金额\t发生金额\t手续费\t印花税\t过户费\t货币单位\n"
-            "20260915\t093012\t600664\t哈药股份\t证券买入\t1000\t7.20\t7200\t-7201.50\t1.50\t0\t0\t人民币\n"
+            "20260915\t093012\t600664\t哈药股份\t证券买入\t1000\t7.20\t7200\t-7201.50\t-1.50\t0\t0\t人民币\n"
             "20260915\t100000\t600664\t哈药股份\t撤单\t100\t7.10\t710\t0\t0\t0\t0\t人民币\n",
         )
         return holdings, account, trades
@@ -62,6 +62,7 @@ class BrokerExportParserTests(unittest.TestCase):
         self.assertEqual(str(totals["total_market_value"]), "7500")
         fills = parse_trade_export(trades)
         self.assertEqual((fills.rows[0]["side"], fills.rows[0]["symbol"]), ("buy", "600664.SH"))
+        self.assertEqual(str(fills.rows[0]["commission"]), "1.50")
         self.assertEqual(fills.ignored_rows[0]["reason"], "cancelled_or_invalid")
 
     def test_prepare_and_reparse_envelope(self):
