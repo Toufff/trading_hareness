@@ -109,8 +109,10 @@ Assert-True ($publishSource -notmatch 'Start-ProductionRuntime\s+-RuntimeRoot\s+
 Assert-True ($publishSource -match '\.failed') `
     'publish-stock-release.ps1 must rename a release that never activated successfully to "<id>.failed" so the retention policy skips it'
 
+Assert-True ($publishSource.Contains("`$branch = (@(& git -C `$source branch --show-current) -join '').Trim()")) `
+    'publish-stock-release.ps1 must normalize an empty detached-HEAD branch result before Trim()'
 Assert-True ($publishSource.Contains("if (-not `$branch) { `$branch = 'DETACHED' }")) `
-    'publish-stock-release.ps1 must accept a detached clean release source instead of calling Trim() on a null branch result'
+    'publish-stock-release.ps1 must label a detached clean release source explicitly'
 
 [pscustomobject]@{
     passed = $true
