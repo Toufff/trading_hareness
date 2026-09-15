@@ -63,6 +63,9 @@ Invoke-RuntimeLogRetention -PlatformRoot $root
 $runtimeConfig = Read-EnvFile $envPath
 $environment = @{}
 foreach ($key in $runtimeConfig.Keys) { $environment[$key] = $runtimeConfig[$key] }
+foreach ($entry in (Get-ReleaseProcessEnvironment -RepositoryRoot $repository).GetEnumerator()) {
+    $environment[$entry.Key] = $entry.Value
+}
 $environment['QUANT_BACKGROUND_TASKS_ENABLED'] = 'false'
 $environment['QUANT_RUNTIME_PROFILE'] = 'research'
 # Public-market routing is deliberately opt-in through

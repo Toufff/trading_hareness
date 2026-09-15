@@ -307,6 +307,26 @@ function Resolve-PostgresStartupAction {
     return 'fail_unknown_status'
 }
 
+function Get-ReleaseProcessEnvironment {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RepositoryRoot)
+
+    $manifestPath = Join-Path ([IO.Path]::GetFullPath($RepositoryRoot)) 'release-manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return @{} }
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -DateKind String
+    } catch {
+        throw "Invalid release manifest at $manifestPath`: $($_.Exception.Message)"
+    }
+    $environment = @{}
+    if ([string]$manifest.git_head -match '^[0-9a-fA-F]{7,64}$') {
+        $environment['APP_GIT_SHA'] = ([string]$manifest.git_head).ToLowerInvariant()
+    }
+    if ([string]$manifest.release_id) { $environment['APP_RELEASE'] = [string]$manifest.release_id }
+    if ([string]$manifest.created_at) { $environment['APP_BUILD_CREATED_AT'] = [string]$manifest.created_at }
+    return $environment
+}
+
 function Assert-ReservedRemoteTunnelPort {
     [CmdletBinding()]
     param(
@@ -328,6 +348,7 @@ Export-ModuleMember -Function @(
     'Start-RuntimeSupervisor',
     'Request-RuntimeStop',
     'Invoke-RuntimeLogRetention',
+    'Get-ReleaseProcessEnvironment',
     'Resolve-PostgresStartupAction',
     'Assert-ReservedRemoteTunnelPort',
     'Resolve-OwnerTunnelSshTarget'

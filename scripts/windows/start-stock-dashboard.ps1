@@ -185,6 +185,9 @@ if (-not (Test-Listener $AdapterPort)) {
         FEISHU_SUMMARY_LISTENER_ENABLED = 'false'; WECHAT_GROUP_RELAY_ENABLED = 'false'
         BAIDU_PAN_ENABLED = 'false'; BAIDU_PAN_MARKET_ARCHIVE_ENABLED = 'false'
     }
+    foreach ($entry in (Get-ReleaseProcessEnvironment -RepositoryRoot $repository).GetEnumerator()) {
+        $environment[$entry.Key] = $entry.Value
+    }
     $adapterRun = Start-RuntimeSupervisor -PlatformRoot $platform -RepositoryRoot $repository -Service 'dashboard-adapter' `
         -Executable 'C:\Program Files\nodejs\node.exe' -WorkingDirectory (Join-Path $repository 'feishu-adapter') `
         -Arguments @('index.mjs') -Environment $environment -Metadata @{ port = $AdapterPort }

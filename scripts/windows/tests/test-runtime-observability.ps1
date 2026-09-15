@@ -95,6 +95,18 @@ try {
     try { [void](Assert-ReservedRemoteTunnelPort -Port 22) } catch { $unsafePortRejected = $true }
     Assert-True $unsafePortRejected 'remote cleanup must reject ports outside the explicit allowlist'
 
+    $releaseRoot = Join-Path $sandbox 'release-app'
+    New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
+    [IO.File]::WriteAllText((Join-Path $releaseRoot 'release-manifest.json'), (@{
+        git_head = 'D11FED93ACB1C33E6FA164C55C81B53DC169FE47'
+        release_id = 'release-test'
+        created_at = '2026-09-15T18:00:00+08:00'
+    } | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+    $releaseEnvironment = Get-ReleaseProcessEnvironment -RepositoryRoot $releaseRoot
+    Assert-True ($releaseEnvironment.APP_GIT_SHA -eq 'd11fed93acb1c33e6fa164c55c81b53dc169fe47') 'release git SHA must be injected into runtime processes'
+    Assert-True ($releaseEnvironment.APP_RELEASE -eq 'release-test') 'release id must be injected into runtime processes'
+    Assert-True ($releaseEnvironment.APP_BUILD_CREATED_AT -eq '2026-09-15T18:00:00+08:00') 'release build time must be injected into runtime processes'
+
     [pscustomobject]@{
         passed = $true
         lifecycle = $lifecycle[0].FullName
@@ -105,6 +117,7 @@ try {
         old_log_retained = (Test-Path -LiteralPath $retainedStdout)
         postgres_state_machine = $true
         unsafe_remote_cleanup_rejected = $unsafePortRejected
+        release_metadata_injected = $true
     }
 } finally {
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
