@@ -161,7 +161,7 @@ def test_overview_tables_explain_every_displayed_stock_even_without_company_revi
     assert '回踩缩量' in overview
     assert '缩量承接后转强' in overview
     assert '结构被破坏' in overview
-    assert '未进入本轮公司深度复核' in overview
+    assert '筛选层：本轮未列入公司比较范围' in overview
 
 
 def test_caution_only_result_is_visible_without_promoting_it():

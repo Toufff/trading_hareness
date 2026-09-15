@@ -23,7 +23,7 @@ def main():
     p.add_argument('--snapshot', type=Path)
     p.add_argument('--directory', type=Path, required=True)
     p.add_argument('--review', type=Path)
-    p.add_argument('--strategy-report-dir', type=Path,
+    p.add_argument('--strategy-report-dir', type=Path, default=Path('G:/StockPlatform/reports/short-term'),
                    help='After publish, export the enriched same-run strategy reports from the database')
     p.add_argument('--env-file', default='G:/StockPlatform/config/runtime.env')
     a = p.parse_args()
@@ -76,9 +76,8 @@ def main():
             payload = latest_post_close_strategy(db, a.date)
             run = payload.get('latest_completed') or {}
             scan = (run.get('summary') or {}).get('strategy_lanes') or {}
-            if a.strategy_report_dir:
-                from app.short_term_lanes.reports import write_bundle
-                write_bundle(a.strategy_report_dir, scan, scan['report_bundle'])
+            from app.short_term_lanes.reports import write_bundle
+            write_bundle(a.strategy_report_dir, scan, scan['report_bundle'])
             write(a.directory / 'decision.json', bundle)
             # The human report carries the same persisted decision plus the
             # bound scanner snapshot, so readers can verify both the total

@@ -59,7 +59,7 @@ def result_lines(summary: dict, *, compact: bool = False) -> list[str]:
         '|---|---|---|---|',
     ]
     for row in summary['rows']:
-        review = row['conclusion'] or '未进入本轮公司深度复核；当前仅保留量价/结构筛选结论'
+        review = row['conclusion'] or '筛选层：本轮未列入公司比较范围，不作推荐或排除结论'
         lines.append(
             f"| {_cell(stock(row))} | {_cell(row['state'])} | {_cell(row['reason'])} | {_cell(review)} |"
         )
