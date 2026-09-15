@@ -177,7 +177,9 @@ if ($dirty -and -not $AllowDirty) {
 }
 $head = (& git -C $source rev-parse HEAD).Trim()
 $shortHead = $head.Substring(0, 12)
-$branch = (& git -C $source branch --show-current).Trim()
+$branch = [string](& git -C $source branch --show-current)
+$branch = $branch.Trim()
+if (-not $branch) { $branch = 'DETACHED' }
 $stamp = [DateTimeOffset]::Now.ToString('yyyyMMddTHHmmss')
 $releaseId = "$stamp-$shortHead-$(if ($dirty) { 'dirty' } else { 'clean' })"
 $layout = Get-StockReleaseLayout -PlatformRoot $platform

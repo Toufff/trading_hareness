@@ -109,6 +109,9 @@ Assert-True ($publishSource -notmatch 'Start-ProductionRuntime\s+-RuntimeRoot\s+
 Assert-True ($publishSource -match '\.failed') `
     'publish-stock-release.ps1 must rename a release that never activated successfully to "<id>.failed" so the retention policy skips it'
 
+Assert-True ($publishSource.Contains("if (-not `$branch) { `$branch = 'DETACHED' }")) `
+    'publish-stock-release.ps1 must accept a detached clean release source instead of calling Trim() on a null branch result'
+
 [pscustomobject]@{
     passed = $true
     sha256_rejects_tampered_file = $true
@@ -116,4 +119,5 @@ Assert-True ($publishSource -match '\.failed') `
     failed_release_excluded_from_retention = $true
     stop_order_is_graceful_before_scheduled_task = $true
     dev_checkout_fallback_removed = $true
+    detached_head_source_supported = $true
 }
