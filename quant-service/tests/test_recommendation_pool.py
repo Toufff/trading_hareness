@@ -89,7 +89,20 @@ def test_changed_scan_is_not_current_and_report_uses_same_bundle():
     scan['lanes'][0]['tracking_candidates'][0]['metrics']['close'] = 11
     assert current_view(scan, b)['status'] == 'stale'
     assert b['decision_id'] in markdown(b)
-    assert '推荐决策' in markdown(b)
+    assert '盘后总扫描与推荐池更新' in markdown(b)
+
+
+def test_human_report_leads_with_total_scan_and_exact_pool_diff():
+    scan, c, r, _ = fixture()
+    b = compile_decision(c, r)
+    text = markdown(b, scan, {'8': '推荐八号', '9': '旧推荐九号'})
+    assert text.index('## 一眼结论') < text.index('## 本轮重点')
+    assert text.index('## 推荐池更新') < text.index('## 九策略总扫描')
+    assert '| 分组 | 更新前 | 更新后 | 新增 | 移除 | 保留 |' in text
+    assert '| 推荐 | 1 | 1 | 推荐八号（8） | 旧推荐九号（9） | 无 |' in text
+    assert '| 策略 | 全量匹配 | 条件观察 | 结构观察 | 风险观察 | 首位展示 |' in text
+    assert '| accumulation | 0 | 1 | 0 | 0 | 0（0） |' in text
+    assert '去重候选 12 只' in text
 
 
 def test_post_scan_research_projection_does_not_make_decision_stale():

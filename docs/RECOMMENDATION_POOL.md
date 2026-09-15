@@ -6,7 +6,7 @@
 
 - `app/recommendation_pool/rules.py`：完整候选并集、旧推荐必核、用户跟踪、确定性编译、有效期和最小差异。
 - `repository.py`：G盘PostgreSQL的`recommendation_pool_decisions`追加式版本，冻结context、review、result。相同输入幂等；实际扫描变化拒绝发布。
-- `report.py` / `RecommendationPoolPanel.vue`：读取同一个result，不重排；网页位于收盘复盘的多策略报告首屏。
+- `report.py` / `RecommendationPoolPanel.vue`：读取同一个result，不重排；Markdown 先展示九策略总扫描和内部推荐/观察池的前后差异，再展示逐股研究；网页位于收盘复盘的多策略报告首屏。
 - `projection_guard.py`：同花顺执行前读取当前正式结果，检查决策编号、动作完全一致以及用户并发修改。仅推荐、观察可被策略刷新修改；行业/ETF不在其动作域。
 - `followup.py`：将实际推荐及未选对照注册到既有前瞻观察账本；真实登记时间不回填成收盘前已推荐，日线跟踪不是实际交易收益。
 
@@ -16,7 +16,7 @@
 
 1. `prepare --date YYYY-MM-DD --snapshot <本次THS回执> --directory <G盘本轮目录>`：保存context与空review模板。读取的是完整tracking_candidates，而不是展示top5；包括旧推荐、观察、用户跟踪。市场/参数/完整名单有输入hash。
 2. 对完整并集做量价/板块比较，再实际调查优先挑战者和全部必核项。填写review.json。不能将“未复核”伪写为排除。优先序是有署名的研究判断，不伪称量化最优。
-3. `publish --date ... --directory ... --review ...`：逐股校验并追加保存，写decision.json、推荐决策.md；真实登记前瞻跟踪。部分研究有效仍保留展示，缺少旧推荐复核时禁止整体覆盖THS，明确指出股票及字段。
+3. `publish --date ... --directory ... --review ...`：逐股校验并追加保存，写decision.json、推荐决策.md；Markdown 是同一轮扫描+池子差异的总交付，不再要求读者手工拼接两个文件。真实登记前瞻跟踪。部分研究有效仍保留展示，缺少旧推荐复核时禁止整体覆盖THS，明确指出股票及字段。
 4. 用户有自选同步授权时，重新snapshot，再`plan --date ... --directory ... --snapshot ...`生成ths-plan.json。只能将此计划交给ths-watchlist预演/apply；不手写策略推荐差异。
 5. 比对DB/owner/adapter/public的decision_id、报告和THS云端成员、远航版两份缓存。云端和缓存不证明手机UI；不要声称手机验收。
 

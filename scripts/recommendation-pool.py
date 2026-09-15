@@ -69,7 +69,24 @@ def main():
             review = json.loads(a.review.read_text(encoding='utf-8-sig'))
             bundle = persist(db, context, review)
             write(a.directory / 'decision.json', bundle)
-            write(a.directory / '推荐决策.md', markdown(bundle))
+            # The human report carries the same persisted decision plus the
+            # bound scanner snapshot, so readers can verify both the total
+            # scan and the resulting pool change without opening two files.
+            pool_symbols = sorted({
+                symbol
+                for groups_key in ('baseline', 'target_groups')
+                for symbol_list in (bundle.get(groups_key) or {}).values()
+                for symbol in symbol_list
+            })
+            names = {}
+            if pool_symbols:
+                with db.transaction() as c:
+                    rows = c.execute(
+                        'SELECT symbol,name FROM quant.instruments WHERE symbol = ANY(%s)',
+                        (pool_symbols,),
+                    ).fetchall()
+                names = {row['symbol']: row['name'] for row in rows}
+            write(a.directory / '推荐决策.md', markdown(bundle, scan, names))
             print(json.dumps({'decision_id': bundle['decision_id'], 'status': bundle['status'], 'coverage': bundle['coverage']}, ensure_ascii=False))
             if not bundle['sync_allowed']:
                 return 2
