@@ -90,6 +90,13 @@ without an accompanying test is incomplete.
 6. Verify mounted OpenAPI and `/health`; a source-only pass is not a runtime
    acceptance.
 
+Cross-domain work starts from an identified commit and ends in a new coherent
+commit before another task begins.  Production normally publishes only a clean
+checkout.  A manifest-backed dirty release is reserved for emergency diagnosis
+and never becomes an implicit development baseline.  Release evidence records
+the source commit, release id and live readback independently from unit/build
+results.
+
 ## Data and decision gates
 
 - Missing/stale provider data, incomplete sector membership and insufficient

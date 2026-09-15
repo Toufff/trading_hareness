@@ -63,6 +63,24 @@ provider response directly to a live threshold or order path.
 9. Read `docs/ARCHITECTURE.md` before a cross-domain change; it is the concise
    ownership map, while this file remains the operational checklist.
 
+## Version-control and release discipline
+
+- Inspect `git status --short` before editing.  If unrelated work is present,
+  preserve it and establish an explicit checkpoint before a cross-domain
+  refactor; do not silently mix several tasks into one unreviewable diff.
+- Commit each coherent, tested change separately.  A repository with completed
+  implementation work must not be left dirty while a new task starts.
+- Run a staged secret scan and `git diff --cached --check` before every commit.
+  Agent/browser state, generated test output, runtime configuration and real
+  credentials never enter Git.
+- A production release normally comes from a clean commit.  `-AllowDirty` is an
+  emergency, manifest-backed diagnostic escape hatch, not the normal publish
+  path; the dirty snapshot must be committed or discarded before more work.
+- Every deployment handoff records the source commit, release id, targeted test
+  result, full-suite result and live readback result.  Source tests, deployment
+  and live acceptance are separate claims.
+- Never describe a source-only or mocked test as an end-to-end acceptance.
+
 ## Architecture guard tests
 
 The convention in this repository is: **every architecture rule above has a
@@ -82,6 +100,9 @@ this file and `docs/ARCHITECTURE.md` in the same change:
   loop from an accidental direct synchronous database call inside an async
   code path (the async dashboard/read routers must go through
   `AsyncDatabase`, never a blocking transaction on the event loop thread).
+- `quant-service/tests/test_repository_workflow_policy.py` — keeps the clean
+  commit/release boundary, secret-state ignores and live-acceptance wording in
+  the repository contract.
 
 ## Review automation
 
