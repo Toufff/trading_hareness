@@ -14,7 +14,7 @@ from .tracking_report import sections as tracking_sections
 from ..effectiveness.report import sections as effectiveness_sections
 from ..event_research.report import sections as event_sections
 
-VERSION = 'strategy-report-bundle-results-first-2026-09-11'
+VERSION = 'strategy-report-bundle-tabular-results-2026-09-15'
 
 
 def lane_review(result: dict, lane: dict) -> dict:

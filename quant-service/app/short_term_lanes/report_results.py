@@ -4,6 +4,12 @@ from __future__ import annotations
 from .report_parts import stock
 
 
+def _cell(value: object) -> str:
+    """Keep generated Markdown tables valid for human-authored evidence."""
+    text = str(value or '').strip().replace('\r\n', '\n').replace('\r', '\n')
+    return text.replace('|', '\\|').replace('\n', '<br>')
+
+
 def lane_result(result: dict, lane: dict, review: dict) -> dict:
     selected = lane['selected']
     caution = lane.get('caution_list', [])
@@ -40,13 +46,32 @@ def lane_result(result: dict, lane: dict, review: dict) -> dict:
 
 def result_lines(summary: dict, *, compact: bool = False) -> list[str]:
     lines = [summary['conclusion'], '']
+    if not summary['rows']:
+        return lines
+
+    # The overview used to collapse unreviewed rows to bare stock names.  That
+    # made a strategy screen look like an unexplained recommendation list and
+    # happened to leave only the first reviewed representative with prose.
+    # Keep company review and strategy evidence distinct, but show both for
+    # every displayed row on the first screen.
+    lines += [
+        '| 股票 | 状态 | 为什么关注 | 公司复核 |',
+        '|---|---|---|---|',
+    ]
     for row in summary['rows']:
-        lines += [f"{'-' if compact else '###'} {stock(row)} · {row['state']}", '']
-        if row['conclusion']:
-            lines += [f"公司复核：{row['conclusion']}", '']
-        if not compact:
-            lines += [f"- 为什么关注：{row['reason']}",
-                      f"- 确认条件：{row['confirmation'] or '本轮未形成入场条件'}",
-                      f"- 放弃条件：{row['invalidation'] or '本轮未形成失效条件'}",
-                      f"- 注意：{row['caution']}；有效期：{row['expiry']}", '']
+        review = row['conclusion'] or '未进入本轮公司深度复核；当前仅保留量价/结构筛选结论'
+        lines.append(
+            f"| {_cell(stock(row))} | {_cell(row['state'])} | {_cell(row['reason'])} | {_cell(review)} |"
+        )
+
+    lines += ['', '| 股票 | 确认条件 | 放弃条件 | 风险与有效期 |', '|---|---|---|---|']
+    for row in summary['rows']:
+        confirmation = row['confirmation'] or '本轮未形成入场条件'
+        invalidation = row['invalidation'] or '本轮未形成失效条件'
+        risk = f"{row['caution'] or '无额外说明'}；有效期：{row['expiry'] or '未注明'}"
+        lines.append(
+            f"| {_cell(stock(row))} | 确认条件：{_cell(confirmation)} | "
+            f"放弃条件：{_cell(invalidation)} | {_cell(risk)} |"
+        )
+    lines.append('')
     return lines

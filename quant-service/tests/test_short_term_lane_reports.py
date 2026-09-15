@@ -146,6 +146,21 @@ def test_results_and_actual_research_precede_process_in_every_report():
     assert first['confirmation'] == data['lanes'][0]['selected'][0]['confirmation']
 
 
+def test_overview_tables_explain_every_displayed_stock_even_without_company_review():
+    reports = {r['key']: r for r in make_bundle(example())['reports']}
+    overview = reports['overview']['markdown']
+    # Both reviewed and unreviewed rows retain their strategy reason and
+    # executable confirmation/invalidation evidence instead of becoming a
+    # bare-name list in compact mode.
+    assert '| 股票 | 状态 | 为什么关注 | 公司复核 |' in overview
+    assert '| 股票 | 确认条件 | 放弃条件 | 风险与有效期 |' in overview
+    assert '股票乙（600002）' in overview
+    assert '回踩缩量' in overview
+    assert '缩量承接后转强' in overview
+    assert '结构被破坏' in overview
+    assert '未进入本轮公司深度复核' in overview
+
+
 def test_caution_only_result_is_visible_without_promoting_it():
     data = example()
     lane = data['lanes'][0]
