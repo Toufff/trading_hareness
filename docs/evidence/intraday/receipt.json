@@ -1,0 +1,13 @@
+{
+  "base": "http://127.0.0.1:5680",
+  "run_id": "3fc45483-571c-4653-ac97-66911ec70aa6",
+  "lanes": 9,
+  "all_lane_switches": true,
+  "coverage_warning": true,
+  "desktop": true,
+  "mobile": true,
+  "real_charts": true,
+  "error_state": true,
+  "source": "actual_deployed_api",
+  "errors": []
+}

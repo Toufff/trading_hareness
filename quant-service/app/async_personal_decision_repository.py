@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .personal_decision_contracts import assemble_personal_decision_brief
+from .broker_snapshot_freshness import broker_freshness
 
 
 async def _one(connection: Any, sql: str, params: tuple[Any, ...] = ()) -> Any:
@@ -37,7 +38,11 @@ async def latest_broker_snapshot(async_database: Any, account_key: str) -> dict[
                  FROM quant.broker_position_snapshots WHERE snapshot_id=%s ORDER BY market_value DESC NULLS LAST,symbol""",
             (snapshot["snapshot_id"],),
         )
-    return {**dict(snapshot), "positions": [dict(row) for row in positions], "live_orders": False}
+    freshness = broker_freshness(dict(snapshot), datetime.now(timezone.utc))
+    return {**dict(snapshot), "positions": [dict(row) for row in positions], "live_orders": False,
+            "sync_mode": "manual", "subsequent_trades": "unknown",
+            "trade_date": str(freshness["trade_date"]) if freshness["trade_date"] else None,
+            "as_of_status": "within_existing_age_policy" if freshness["current"] else "historical_only"}
 
 
 async def active_trade_plans(async_database: Any, as_of_at: datetime) -> list[dict[str, Any]]:
@@ -104,6 +109,91 @@ async def latest_personal_decision_brief(
     )
 
 
+async def latest_market_advice(
+    async_database: Any, *, as_of_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Return account-independent market advice."""
+    observed_at = as_of_at or datetime.now(timezone.utc)
+    market = await latest_market_section(async_database, as_of_at=observed_at)
+    status = str((market or {}).get("status") or "unavailable")
+    return {
+        "contract_version": "market-advice-v1",
+        "as_of_at": observed_at.isoformat(),
+        "status": status,
+        "content": market if status in {"ready", "completed", "degraded"} else None,
+        "delivery": {
+            "eligible": status in {"ready", "completed", "degraded"},
+            "complete": status in {"ready", "completed"},
+        },
+        "diagnostics": [] if status in {"ready", "completed"} else [f"market_section_{status}"],
+        "depends_on_broker": False,
+    }
+
+
+async def latest_new_buy_advice(
+    async_database: Any, *, as_of_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Return account-independent new-buy plans only."""
+    observed_at = as_of_at or datetime.now(timezone.utc)
+    market = await latest_market_section(async_database, as_of_at=observed_at)
+    plans = await active_trade_plans(async_database, observed_at)
+    assembled = assemble_personal_decision_brief(
+        as_of_at=observed_at,
+        market_section=market,
+        portfolio=None,
+        plans=[plan for plan in plans if plan.get("plan_kind") == "new_buy"],
+    )
+    actions = list(assembled["new_buys"]["actions"])
+    return {
+        "contract_version": "new-buy-advice-v1",
+        "as_of_at": observed_at.isoformat(),
+        "status": "ready",
+        "actions": actions,
+        "delivery": {"eligible": bool(actions)},
+        "diagnostics": [
+            item for item in assembled["diagnostics"]
+            if item.startswith("trade_plan_stale:new_buy:")
+        ],
+        "depends_on_broker": False,
+    }
+
+
+async def latest_holding_advice(
+    async_database: Any, account_key: str, *, as_of_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Return actions only for an exact current broker snapshot.
+
+    A stale snapshot contributes timestamps and diagnostics, never positions,
+    quantities, prices, or actions.
+    """
+    observed_at = as_of_at or datetime.now(timezone.utc)
+    portfolio = await latest_broker_snapshot(async_database, account_key)
+    market = await latest_market_section(async_database, as_of_at=observed_at)
+    plans = await active_trade_plans(async_database, observed_at)
+    assembled = assemble_personal_decision_brief(
+        as_of_at=observed_at,
+        market_section=market,
+        portfolio=portfolio,
+        plans=[plan for plan in plans if plan.get("plan_kind") == "holding"],
+    )
+    holdings = dict(assembled["holdings"])
+    current = holdings.get("freshness_status") == "current"
+    if not current:
+        holdings["actions"] = []
+    return {
+        "contract_version": "holding-advice-v1",
+        "as_of_at": observed_at.isoformat(),
+        **holdings,
+        "delivery": {"eligible": bool(current and holdings.get("status") == "ready")},
+        "diagnostics": [
+            item for item in assembled["diagnostics"]
+            if item.startswith(("portfolio_", "holding_plan_", "trade_plan_stale:holding:"))
+        ],
+        "depends_on_broker": True,
+        "stale_snapshot_is_historical_only": not current,
+    }
+
+
 async def latest_decision_research(async_database: Any) -> dict[str, Any]:
     """Return the latest bounded dossier batch with human-readable gates."""
     async with async_database.transaction() as connection:
@@ -162,7 +252,29 @@ async def latest_decision_research(async_database: Any) -> dict[str, Any]:
     }
 
 
+async def latest_new_buy_research(async_database: Any) -> dict[str, Any]:
+    """Project only account-independent candidate research for stock advice."""
+    result = await latest_decision_research(async_database)
+    items = [
+        item for item in result.get("items", [])
+        if (item.get("evidence_snapshot") or {}).get("role") == "candidate"
+    ]
+    return {
+        **result,
+        "items": items,
+        "summary": {
+            "total": len(items),
+            "passed": sum(item.get("status") == "passed" for item in items),
+            "rejected": sum(item.get("status") == "rejected" for item in items),
+            "incomplete": sum(item.get("status") == "incomplete" for item in items),
+        },
+        "boundary": "new-buy candidate research only; independent of broker holdings",
+        "depends_on_broker": False,
+    }
+
+
 __all__ = [
     "active_trade_plans", "latest_broker_snapshot", "latest_decision_research",
-    "latest_market_section", "latest_personal_decision_brief",
+    "latest_market_section", "latest_personal_decision_brief", "latest_market_advice",
+    "latest_new_buy_advice", "latest_holding_advice", "latest_new_buy_research",
 ]

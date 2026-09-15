@@ -105,6 +105,33 @@ $pgDump = Join-Path $postgresRoot.FullName 'bin\pg_dump.exe'
 if (-not (Test-Path -LiteralPath $pgDump -PathType Leaf)) { throw "Missing pg_dump.exe: $pgDump" }
 
 $today = (Get-Date).ToString('yyyy-MM-dd')
+
+# The scheduled task runs this script with no console attached, so the summary
+# object below is the only account of what happened - and it went nowhere.
+# Every outcome (success, skip and failure alike) is now appended to
+# logs\stock-backup.jsonl, one JSON object per run, so an operator can tell a
+# working nightly backup from one that has not run in weeks without waiting for
+# a restore. Appending rather than overwriting keeps a same-day retry from
+# erasing the evidence (size, SHA-256) of the run that actually took the dump.
+function Write-BackupRecord {
+    param([Parameter(Mandatory)][hashtable]$Record)
+    $Record['recorded_at'] = (Get-Date).ToString('o')
+    $logDir = Join-Path $platform 'logs'
+    try {
+        New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+        $line = (ConvertTo-Json -InputObject $Record -Depth 6 -Compress) + [Environment]::NewLine
+        [IO.File]::AppendAllText(
+            (Join-Path $logDir 'stock-backup.jsonl'), $line, [Text.UTF8Encoding]::new($false))
+    } catch {
+        Write-Warning "Failed to write backup record: $($_.Exception.Message)"
+    }
+}
+
+trap {
+    Write-BackupRecord -Record @{ status = 'failed'; error = $_.Exception.Message }
+    break
+}
+
 $dayDir = Join-Path $backupRoot $today
 New-Item -ItemType Directory -Force -Path $dayDir | Out-Null
 
@@ -116,7 +143,15 @@ if ($freeBytes -lt $minimumFreeBytes) {
 }
 
 $dumpFile = Join-Path $dayDir "$($config['PGDATABASE'])-$today.dump"
-if (Test-Path -LiteralPath $dumpFile) { throw "Backup already exists for today: $dumpFile" }
+if (Test-Path -LiteralPath $dumpFile) {
+    # A daily job that is retried, or run by hand before the trigger fires,
+    # must not fail: today's recovery point already exists, which is the
+    # outcome the job exists to guarantee.
+    $record = @{ status = 'skipped'; reason = 'backup already exists for today'; dump_file = $dumpFile }
+    Write-BackupRecord -Record $record
+    [pscustomobject]$record
+    return
+}
 
 $env:PGPASSWORD = $dumpPassword
 try {
@@ -143,7 +178,7 @@ foreach ($name in $removed) {
     if ($entry) { Remove-Item -LiteralPath $entry.FullName -Recurse -Force }
 }
 
-[pscustomobject]@{
+$summary = @{
     status = 'backed_up'
     database = $config.PGDATABASE
     dump_file = $dumpFile
@@ -153,3 +188,5 @@ foreach ($name in $removed) {
     free_bytes_after = $freeBytes - $sizeBytes
     pruned_days = $removed
 }
+Write-BackupRecord -Record $summary
+[pscustomobject]$summary

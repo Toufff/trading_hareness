@@ -45,19 +45,27 @@ async def latest_strategy_review(async_database: Any, session: str | None) -> di
     return {"review": row, "notice": "复盘是点时证据与情景准备，不是自动委托。"}
 
 
-async def latest_post_close_strategy(async_database: Any) -> dict[str, Any]:
+async def latest_post_close_strategy(async_database: Any, as_of_date=None) -> dict[str, Any]:
     async with async_database.transaction() as connection:
         attempt_result = await connection.execute(
             """SELECT run_id,run_key,as_of_date,model_version,status,source_status,summary,created_at,updated_at
-                 FROM quant.post_close_strategy_runs ORDER BY as_of_date DESC,updated_at DESC LIMIT 1"""
+                 FROM quant.post_close_strategy_runs WHERE (%s::date IS NULL OR as_of_date=%s)
+                 ORDER BY as_of_date DESC,(summary ? 'strategy_lanes') DESC,updated_at DESC LIMIT 1""", (as_of_date,as_of_date)
         )
         latest_attempt = await attempt_result.fetchone()
         completed_result = await connection.execute(
             """SELECT run_id,run_key,as_of_date,model_version,status,source_status,summary,created_at,updated_at
                  FROM quant.post_close_strategy_runs WHERE status IN ('completed','partial')
-                 ORDER BY as_of_date DESC,updated_at DESC LIMIT 1"""
+                   AND (%s::date IS NULL OR as_of_date=%s)
+                 ORDER BY as_of_date DESC,(summary ? 'strategy_lanes') DESC,updated_at DESC LIMIT 1""", (as_of_date,as_of_date)
         )
         latest_completed = await completed_result.fetchone()
+        from .recommendation_pool.repository import LATEST_SQL, attach
+        if latest_completed:
+            decision_cursor = await connection.execute(LATEST_SQL, (latest_completed['run_id'],))
+            attach(latest_completed, await decision_cursor.fetchone())
+            if latest_attempt and latest_attempt['run_id'] == latest_completed['run_id']:
+                latest_attempt = latest_completed
         if not latest_completed:
             return {
                 "run": latest_attempt,

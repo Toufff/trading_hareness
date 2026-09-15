@@ -1,0 +1,75 @@
+[
+  {
+    "symbol": "601929.SH", "name": "吉视传媒",
+    "selection": {"origin": "scan", "why_now": "资金横盘策略首位代表，针对未涨停传媒扩散机会复核。", "question": "合计流入与窄幅盘整能否解释为盈利改善？它是否与出版股有相同主营？", "disposition": "retain_watch"},
+    "business": "广电网络运营及相关信息服务，不能把文化传媒板块归属直接理解为出版业务。",
+    "risk": "2026年半年报归母净利润约为-2.20亿元，仍在亏损；短线资金优势不等于盈利反转。",
+    "conclusion": "保留资金积累与传媒扩散观察。它更接近未涨停的资金博弈，不等同于中国出版的涨停接力，也不因为5日资金较强就直接追入。",
+    "sources": [{"url": "https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id=12525415&stockid=601929", "published_date": "2026-08-25", "kind": "company_filing_mirror"}]
+  },
+  {
+    "symbol": "603093.SH", "name": "南华期货",
+    "selection": {"origin": "scan", "why_now": "同时出现在强势回踩与趋势展示名单，补充对比两种结构；不作为全市场优先级第一。", "question": "趋势背后是否有利润支撑，期货业务能否等同证券经纪？", "disposition": "retain_watch"},
+    "business": "以境内外期货经纪、衍生品和相关金融服务为主，不能简单套用纯证券经纪公司的盈利结构。",
+    "risk": "客户保证金等会影响经营现金流，不能把全部现金流当成可分配利润；境外利率和市场交易活跃度会影响盈利。",
+    "conclusion": "本轮同时进入趋势和缩量回踩观察，量价结构比单纯横盘更贴近短线。半年报归母净利润约3.88亿元、同比增长67.91%，但这是8月已披露的经营背景，不是今天的新催化。",
+    "sources": [{"url": "https://paper.cnstock.com/html/2026-08/18/content_2256022.htm", "published_date": "2026-08-18", "kind": "statutory_filing_publication"}]
+  },
+  {
+    "symbol": "002170.SZ", "name": "芭田股份",
+    "selection": {"origin": "user_followup", "why_now": "延续用户对芭田资金横盘与农化轮动的追问，而不是本次活跃短线扫描自动入选。", "question": "扩产许可是否已经兑现利润，资金与活跃度是否足以升级？", "disposition": "downgrade_watch", "request_reference": "本轮用户询问芭田强弱、科技修复时的农化风险，以及与中国出版涨停前成交额的对比"},
+    "business": "复合肥与磷矿、磷化工产业链。近期事实是子公司小高寨磷矿安全生产许可证的许可规模由200万吨/年增至290万吨/年。",
+    "catalyst": "已取得290万吨/年的安全生产许可证，为扩产提供许可条件；并非已经实现相应销量和利润。",
+    "risk": "产能许可不等于达产或增利，磷矿价格、销售需求、开采爬坡均会影响兑现；也不能断言科技修复就必然导致农化下跌。",
+    "conclusion": "仍留在原资金横盘专项观察。本次活跃短线名单要求当日成交额至少3亿元，而它约2.74亿元、5日净流入占成交额约0.12%，力度偏弱，因此没有硬塞进优先名单。",
+    "sources": [{"url": "https://static.cninfo.com.cn/finalpage/2026-09-02/1225540034.PDF", "published_date": "2026-09-02", "kind": "primary_filing"}]
+  },
+  {
+    "symbol": "603160.SH", "name": "汇顶科技",
+    "selection": {"origin": "background", "why_now": "保留此前补查的半导体经营背景；当前六策略展示名单均未选中它，不追认原始优先理由。", "question": "历史资金线索是否足以覆盖业绩与板块走弱风险？", "disposition": "exclude"},
+    "business": "指纹识别、触控及其他人机交互芯片，主要面向手机、PC和平板等终端。",
+    "risk": "半年报收入20.63亿元、同比下降8.4%，归母净利润2.52亿元、同比下降41.6%；终端需求和产品毛利率承压。",
+    "conclusion": "合计资金流入是可追踪的量化现象，但当天半导体弱、个股下跌，不应把它自动升级为低位买点。这里补充经营风险，不把低估值设为其他短线策略的统一门槛。",
+    "sources": [{"url": "https://static.cninfo.com.cn/finalpage/2026-08-21/1225484729.PDF", "published_date": "2026-08-21", "kind": "primary_filing"}]
+  },
+  {
+    "symbol": "603269.SH", "name": "海鸥股份",
+    "selection": {"origin": "risk", "why_now": "出现在强势回踩的高拥挤风险区，用来区分高位震荡与常规回踩机会。", "question": "十日涨逾50%后的小幅回撤，是否还能当作低风险回踩？冷却概念是否等于AI订单？", "disposition": "downgrade_watch"},
+    "business": "工业冷却塔及相关设备业务；不能仅凭冷却题材便认定它已获得大规模AI数据中心订单。",
+    "risk": "本轮十个交易日股价累计上涨超过50%，小幅缩量回撤仍然属于高位结构；高弹性伴随明显拥挤风险。",
+    "conclusion": "技术上符合强势后回撤，保留在高拥挤观察区，不把它排成常规回踩低吸首选。这是市场位置的区别，不是单纯因为基本面不够便宜。",
+    "sources": [{"url": "https://static.cninfo.com.cn/finalpage/2026-08-28/1225519717.PDF", "published_date": "2026-08-28", "kind": "primary_filing"}]
+  },
+  {
+    "symbol": "600657.SH", "name": "信达地产",
+    "selection": {"origin": "scan", "why_now": "放量启动首位代表，突破收盘平台并有地产板块广度支持，需要核查是否真有经营反转。", "question": "放量上涨能否解释为扭亏，利润与回款是否一致改善？", "disposition": "downgrade_watch"},
+    "business": "房地产开发为核心，配合物业、代建等业务；不是金融券商信达证券。",
+    "risk": "2026年半年报营收约12.83亿元、同比下降27.85%，归母净亏约13.20亿元，扣非仍亏约13.20亿元。减亏不等于扭亏，地产去化和资产价值仍影响业绩。",
+    "conclusion": "降级为地产轮动与量价启动观察，不作为盈利反转首选。经营现金流约10.45亿元、同比增加19.21%，有回款改善，但不能覆盖持续亏损的事实；优先复核它来自当天启动顺位，而非财务质量优于其他股票。",
+    "sources": [{"url": "https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?stockid=600657&id=12574869", "published_date": "2026-08-31", "kind": "company_filing_mirror"}]
+  },
+  {
+    "symbol": "000059.SZ", "name": "华锦股份",
+    "selection": {"origin": "scan", "why_now": "强势回踩首位代表，前期上涨后成交额收缩，核查其行业受益是否被误读。", "question": "利润修复有无财报支持，它是化肥主线还是炼化为主，现金流是否同步改善？", "disposition": "retain_watch"},
+    "business": "以石油化工为主，兼有化肥与精细化工；半年报石化收入占比约84.63%，化肥约5.95%，不能作为纯化肥股解释。",
+    "risk": "2026年上半年经营现金流约-14.43亿元，盈利并不等于同步收到现金；炼化价差、原油采购付款和需求变化影响较大。",
+    "conclusion": "保留强势回踩观察。半年报归母净利约3.65亿元、扣非约3.41亿元，较上年同期亏损改善，存在经营支撑；但不能把油价上涨或农化强势直接等同其利润上涨，仍需下一交易日回踩承接确认。",
+    "sources": [{"url": "https://money.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id=12505143&stockid=000059", "published_date": "2026-08-20", "kind": "company_filing_mirror"}]
+  },
+  {
+    "symbol": "600095.SH", "name": "湘财股份",
+    "selection": {"origin": "scan", "why_now": "趋势首位代表，并进入启动和潜伏展示名单；复核的是同一行情的多种描述，不能当三份独立利好。", "question": "证券方向的量价强势有无利润支撑，能否把本期增幅外推成稳定增长？", "disposition": "retain_watch"},
+    "business": "主要通过湘财证券开展证券相关业务，同时存在其他业务；合并报表不能与子公司口径混用。",
+    "risk": "证券公司收益受到市场成交、资产价格与投资业务波动影响；不能用半年利润增幅线性外推全年，也不能当成低波防御品种。",
+    "conclusion": "保留主线趋势观察。2026年半年报合并归母净利润约5.29亿元、同比增273.74%，扣非约5.02亿元，有盈利改善支持；但当前短线研究优势主要来自相对强势与行业共振，不等于可以在大涨后无条件追买。",
+    "sources": [{"url": "https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id=12547826&stockid=600095", "published_date": "2026-08-27", "kind": "company_filing_mirror"}]
+  },
+  {
+    "symbol": "601949.SH", "name": "中国出版",
+    "selection": {"origin": "scan", "why_now": "情绪接力首位代表，涨停且行业有同伴，需要区分市场强势和盈利改善。", "question": "这次涨停是否能由主营盈利改善解释，还是只能按情绪接力观察？", "disposition": "downgrade_watch"},
+    "business": "图书、报刊、音像等出版相关业务；与广电网络运营商不是相同主营。",
+    "risk": "2026年上半年营收19.18亿元、同比降8.58%，归母净利约1543万元、同比降88.39%，扣非亏损约5961万元。不能把当日涨停解释成业绩反转已获验证。",
+    "conclusion": "降级为纯情绪接力观察，不作为盈利驱动首选。涨停与板块同伴值得研究次日承接，但基本面核查没有支持经营拐点；没有核实新的公司级催化，也不能用板块标签代替。",
+    "sources": [{"url": "https://money.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id=12568916&stockid=601949", "published_date": "2026-08-29", "kind": "company_filing_mirror"}]
+  }
+]

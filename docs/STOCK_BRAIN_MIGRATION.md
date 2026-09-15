@@ -48,10 +48,13 @@ Windows CITIC read-only bridge  |
            market / holdings / new buys (independent)
 ```
 
-The Windows bridge may read CITIC through MuMu but must never place, amend or
-cancel an order.  The research service never controls the emulator directly.
-It only accepts immutable, timestamped broker snapshots through a versioned
-contract.
+The Windows bridge may read a user-selected, already logged-in desktop broker
+client but must never place, amend or cancel an order. The default path is a
+user-triggered desktop export, with Luna-owned UI reading as fallback. MuMu is
+not part of the default holdings path; explicit MuMu diagnostics remain
+read-only. The research service never controls a desktop client or emulator
+directly. It only accepts immutable, timestamped broker snapshots through a
+versioned contract. THS desktop reading is not yet real-world accepted.
 
 ## Migration classes
 
@@ -64,9 +67,9 @@ contract.
 - prediction, candidate and strategy outcomes with their original model
   versions and point-in-time boundaries.
 
-The first implemented bridge imports the latest exact CITIC snapshot from
-`stock-brain/daily/config.json`.  It requires one observation timestamp across
-the account and every position, a CITIC read-only source marker, a real broker
+The active bridge imports one user-triggered, exact broker snapshot from the
+current desktop export/UI evidence. It requires one observation timestamp across
+the account and every position, a broker read-only source marker, a real broker
 screenshot path and market-value reconciliation within 0.1%.  It deliberately
 drops every legacy `plan` and `trigger` field.  Dry-run is the default; API
 publication requires `--apply` and `QUANT_WRITE_API_KEY`, followed by exact

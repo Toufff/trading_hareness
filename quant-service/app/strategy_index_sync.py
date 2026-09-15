@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import date, timedelta
 from typing import Any, Awaitable, Callable
 
@@ -67,7 +66,14 @@ async def sync_index_context(
                 "error": public_error, "primary_error": primary_error,
             }
 
-    outcomes = dict(await asyncio.gather(*(one(symbol) for symbol in symbols)))
+    # The free index endpoints are reliable for this four-symbol basket when
+    # called serially, but intermittently reset concurrent connections.  Four
+    # bounded sequential requests add negligible close-pipeline latency and
+    # avoid leaving three indexes stale while one happens to succeed.
+    pairs = []
+    for symbol in symbols:
+        pairs.append(await one(symbol))
+    outcomes = dict(pairs)
     completed = [symbol for symbol, item in outcomes.items() if item["status"] == "completed"]
     return {
         "status": "completed" if len(completed) == len(symbols) else "partial",

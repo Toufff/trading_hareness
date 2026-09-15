@@ -1,0 +1,3 @@
+FROM trading-hareness-peer-quant-research:pool-recovery-20260914
+
+COPY longhu_reads.py /app/app/routers/longhu_reads.py

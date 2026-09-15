@@ -11,7 +11,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if (-not $RepositoryRoot) { $RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')) }
-Import-Module (Join-Path $PSScriptRoot 'runtime-observability.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'runtime-observability.psm1')
+Import-Module (Join-Path $PSScriptRoot 'background-process.psm1')
 
 function Read-EnvFile([string]$Path) {
     $result = @{}
@@ -70,8 +71,8 @@ function Record-LostRuntime([string]$Service, [string]$Reason) {
 
 function Test-PostgresReady([int]$Attempts = 3, [int]$DelayMilliseconds = 500) {
     for ($attempt = 1; $attempt -le [Math]::Max(1, $Attempts); $attempt++) {
-        & $pgIsReady -h $config.PGHOST -p $config.PGPORT -q
-        if ($LASTEXITCODE -eq 0) { return $true }
+        $probe = Invoke-ConsoleFreeCommand -FilePath $pgIsReady -Arguments @('-h', $config.PGHOST, '-p', $config.PGPORT, '-q') -TimeoutSeconds 6
+        if ($probe.ExitCode -eq 0) { return $true }
         if ($attempt -lt $Attempts) { Start-Sleep -Milliseconds $DelayMilliseconds }
     }
     return $false
@@ -79,13 +80,16 @@ function Test-PostgresReady([int]$Attempts = 3, [int]$DelayMilliseconds = 500) {
 
 function Get-RemoteDashboardHealth {
     try {
-        return (& ssh @($target.ConnectionArguments) -o BatchMode=yes -o ConnectTimeout=8 $target.Destination "curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:$RemotePort/health" 2>$null)
+        $probe = Invoke-ConsoleFreeCommand -FilePath (Get-Command ssh.exe).Source -Arguments (@($target.ConnectionArguments) + @('-o','BatchMode=yes','-o','ConnectTimeout=8',$target.Destination,
+            "curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:$RemotePort/health")) -TimeoutSeconds 15
+        return $probe.Stdout.Trim()
     } catch { return '' }
 }
 
 function Test-RemoteDashboardListener {
-    & ssh @($target.ConnectionArguments) -o BatchMode=yes -o ConnectTimeout=8 $target.Destination "ss -ltn 'sport = :$RemotePort' | tail -n +2 | grep -q ." 2>$null
-    return $LASTEXITCODE -eq 0
+    $probe = Invoke-ConsoleFreeCommand -FilePath (Get-Command ssh.exe).Source -Arguments (@($target.ConnectionArguments) + @('-o','BatchMode=yes','-o','ConnectTimeout=8',$target.Destination,
+        "ss -ltn 'sport = :$RemotePort' | tail -n +2 | grep -q .")) -TimeoutSeconds 15
+    return $probe.ExitCode -eq 0
 }
 
 function Remove-StaleRemoteDashboardListener {
@@ -95,8 +99,9 @@ function Remove-StaleRemoteDashboardListener {
         ssh_host = $SshHost
         ssh_target_mode = $target.Mode
     })
-    & ssh @($target.ConnectionArguments) -o BatchMode=yes -o ConnectTimeout=8 $target.Destination "fuser -k $RemotePort/tcp >/dev/null 2>&1 || true"
-    if ($LASTEXITCODE -ne 0) { throw "Failed to request cleanup of stale remote listener $RemotePort" }
+    $cleanup = Invoke-ConsoleFreeCommand -FilePath (Get-Command ssh.exe).Source -Arguments (@($target.ConnectionArguments) + @('-o','BatchMode=yes','-o','ConnectTimeout=8',$target.Destination,
+        "fuser -k $RemotePort/tcp >/dev/null 2>&1 || true")) -TimeoutSeconds 15
+    if ($cleanup.ExitCode -ne 0) { throw "Failed to request cleanup of stale remote listener $RemotePort" }
     $deadline = [DateTime]::UtcNow.AddSeconds(8)
     while ((Test-RemoteDashboardListener) -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 500
@@ -128,8 +133,9 @@ $pgIsReady = Join-Path $pgBin 'pg_isready.exe'
 $pgCtl = Join-Path $pgBin 'pg_ctl.exe'
 $postgresReady = Test-PostgresReady
 if (-not $postgresReady) {
-    $pgStatusText = (& $pgCtl status -D $pgData 2>&1 | Out-String).Trim()
-    $pgStatusExitCode = $LASTEXITCODE
+    $pgStatus = Invoke-ConsoleFreeCommand -FilePath $pgCtl -Arguments @('status','-D',$pgData) -TimeoutSeconds 10
+    $pgStatusText = ($pgStatus.Stdout + $pgStatus.Stderr).Trim()
+    $pgStatusExitCode = $pgStatus.ExitCode
     $startupAction = Resolve-PostgresStartupAction -Ready $false -PgCtlStatusExitCode $pgStatusExitCode
     [void](Write-RuntimeEvent -PlatformRoot $platform -Service 'postgresql' -Event 'readiness_failed' -Level 'warning' -Data @{
         pg_ctl_status_exit_code = $pgStatusExitCode
@@ -141,8 +147,8 @@ if (-not $postgresReady) {
             throw "PostgreSQL process is running but did not become ready: $pgStatusText"
         }
     } elseif ($startupAction -eq 'start_stopped_server') {
-    & $pgCtl start -D $pgData -l (Join-Path $logs 'postgresql-startup.log') -w
-    if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL failed to start from the G: data directory' }
+    $pgStart = Invoke-ConsoleFreeCommand -FilePath $pgCtl -Arguments @('start','-D',$pgData,'-l',(Join-Path $logs 'postgresql-startup.log'),'-w') -TimeoutSeconds 75
+    if ($pgStart.ExitCode -ne 0) { throw 'PostgreSQL failed to start from the G: data directory' }
         if (-not (Test-PostgresReady -Attempts 10 -DelayMilliseconds 500)) {
             throw 'PostgreSQL was started but did not pass readiness checks'
         }

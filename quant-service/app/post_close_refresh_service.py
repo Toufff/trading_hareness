@@ -31,7 +31,7 @@ POST_CLOSE_STAGE_ORDER = (
     "market_flow_features", "limit_ladder", "limit_lift_pattern_mining", "cninfo_announcements",
     "board_review", "close_strategy_decision", "close_review", "analyst_outcomes", "analyst_intraday_outcomes",
     "analyst_scorecards", "analyst_expert_research", "post_close_strategy", "decision_research_closure",
-    "watchlist_main_wave", "research_snapshot",
+    "user_tracking_research", "watchlist_main_wave", "research_snapshot",
 )
 
 POST_CLOSE_TIMEOUT_OVERRIDES = {
@@ -45,6 +45,7 @@ POST_CLOSE_TIMEOUT_OVERRIDES = {
     # window instead of inheriting the generic ten-second request budget.
     "analyst_outcomes": 300.0,
     "analyst_intraday_outcomes": 180.0,
+    "user_tracking_research": 240.0,
 }
 
 POST_CLOSE_STAGE_DEPENDENCIES = {
@@ -60,6 +61,7 @@ POST_CLOSE_STAGE_DEPENDENCIES = {
     "watchlist_main_wave": ("core_daily_controls",),
     "research_snapshot": ("core_daily_controls",),
     "decision_research_closure": ("post_close_strategy", "core_daily_controls"),
+    "user_tracking_research": ("core_daily_controls",),
 }
 
 
@@ -118,6 +120,7 @@ class PostCloseRefreshDependencies:
     # (run_key is the actual dedup key); kept as its own field so this module
     # does not need to import main.py's model-version constant directly.
     post_close_strategy_model_version: str = "post-close-strategy-v1"
+    refresh_user_tracking: Callable[[date], Awaitable[dict[str, Any]]] | None = None
 
 
 async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDependencies) -> dict[str, Any]:
@@ -180,16 +183,61 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
                 result = {**result, "stale_automation_runs": automation_result}
         return result
 
+    async def all_a_universe_stage() -> dict[str, Any]:
+        # A historical repair must not ask the live universe endpoint for the
+        # machine's current calendar date (weekends return no rows and used to
+        # mark an otherwise valid settled-date refresh partial).  The dated
+        # full-market sync below persists the authoritative universe snapshot.
+        if trade_date != dependencies.china_today():
+            return {
+                "status": "skipped",
+                "reason": "historical refresh uses the dated full-market universe snapshot",
+                "trade_date": str(trade_date),
+            }
+        return await dependencies.sync_market_universe(MarketUniverseSyncRequest())
+
+    def post_close_strategy_stage() -> Any:
+        if longhu_mode:
+            return {
+                "status": "completed", "delegated": True,
+                "reason": "Longhu production uses the persisted nine-lane scan after market refresh",
+                "replacement_stage": "strategy_collection_and_screen",
+            }
+        return dependencies.run_database(functools.partial(
+            run_recorded, dependencies.database, task_key=POST_CLOSE_STRATEGY_TASK_KEY,
+            run_key=post_close_strategy_run_key(trade_date),
+            operation=functools.partial(
+                dependencies.run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date),
+            ),
+            cadence="daily", as_of_date=trade_date,
+            methodology_version=dependencies.post_close_strategy_model_version,
+            input_summary={"data_boundary": "same_date_close", "trigger": "manual_refresh"},
+        ))
+
+    def decision_research_stage() -> Any:
+        if longhu_mode:
+            return {
+                "status": "completed", "delegated": True,
+                "reason": "Decision closure runs after the persisted nine-lane review plan",
+                "replacement_stage": "lane_decision_research_closure",
+            }
+        return dependencies.run_database(
+            dependencies.refresh_decision_research, dependencies.database, trade_date, timeout_seconds=120,
+        )
+
     actions: dict[str, Callable[[], Any]] = {
         "stale_fetch_runs": stale_fetch_runs_stage,
         "analyst_text": lambda: dependencies.run_database(dependencies.reprocess_remote_reports, dependencies.database, 500),
-        "all_a_universe": lambda: dependencies.sync_market_universe(MarketUniverseSyncRequest()),
+        "all_a_universe": all_a_universe_stage,
         "full_market_daily": lambda: dependencies.sync_full_market_daily(
             FullMarketDailySyncRequest(trade_date=trade_date, provider=full_market_daily_provider),
         ),
         "index_context": lambda: dependencies.sync_strategy_index_context(trade_date),
         "close_market_snapshot": lambda: dependencies.build_market_snapshot(
-            MarketSnapshotRequest(session="close", universe_key="all_a", refresh_public_quotes=False),
+            MarketSnapshotRequest(
+                session="close", universe_key="all_a",
+                refresh_public_quotes=False, exchange_date=trade_date,
+            ),
         ),
         "akshare_supplements": akshare_stage,
         "ths_industry_flow": (
@@ -246,18 +294,12 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
         # (POST_CLOSE_RECEIPT_VERSION:post_close_strategy:<date>) which the
         # scheduler never checked, so the 18:55-20:30 overlap window let
         # both triggers write the same strategy tables concurrently.
-        "post_close_strategy": lambda: dependencies.run_database(functools.partial(
-            run_recorded, dependencies.database, task_key=POST_CLOSE_STRATEGY_TASK_KEY,
-            run_key=post_close_strategy_run_key(trade_date),
-            operation=functools.partial(
-                dependencies.run_post_close_strategy, PostCloseStrategyRequest(as_of_date=trade_date),
-            ),
-            cadence="daily", as_of_date=trade_date,
-            methodology_version=dependencies.post_close_strategy_model_version,
-            input_summary={"data_boundary": "same_date_close", "trigger": "manual_refresh"},
-        )),
-        "decision_research_closure": lambda: dependencies.run_database(
-            dependencies.refresh_decision_research, dependencies.database, trade_date, timeout_seconds=120,
+        "post_close_strategy": post_close_strategy_stage,
+        "decision_research_closure": decision_research_stage,
+        "user_tracking_research": (
+            lambda: dependencies.refresh_user_tracking(trade_date)
+            if dependencies.refresh_user_tracking is not None else
+            {"status": "skipped", "reason": "user tracking research is not configured"}
         ),
         "watchlist_main_wave": lambda: dependencies.run_database(
             dependencies.persist_watchlist_main_wave, WatchlistMainWaveResearchRequest(as_of_date=trade_date),

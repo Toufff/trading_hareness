@@ -83,6 +83,25 @@ class AutomationRunRepositoryTests(unittest.TestCase):
         result = run_recorded(database, task_key="test", run_key="test:success", operation=lambda: {"status": "ok"})
         self.assertEqual(result, {"status": "ok"})
 
+    def test_business_block_is_not_cached_as_success(self):
+        for outcome in ('blocked','partial','failed'):
+            database=Database()
+            run_recorded(database,task_key='test',run_key='test:'+outcome,
+                         operation=lambda:{'status':outcome,'reason':'missing actual data'})
+            writes=[params for sql,params in database.connection.calls if 'SET status=%s,output_summary=%s' in sql]
+            self.assertEqual(writes[-1][0],outcome)
+            self.assertEqual(writes[-1][1].obj['reason'],'missing actual data')
+
+    def test_old_false_success_receipt_is_retried(self):
+        from unittest.mock import patch
+        database=Database(); calls=[]
+        with patch('app.automation_run_repository.start_or_resume_run',return_value={
+            'run_id':'old-run','status':'completed','output_summary':{'status':'blocked'}}):
+            result=run_recorded(database,task_key='test',run_key='test:legacy-bad',
+                               operation=lambda:calls.append('ran') or {'status':'completed'})
+        self.assertEqual(calls,['ran'])
+        self.assertEqual(result['status'],'completed')
+
     def test_completed_run_key_returns_receipt_without_running_the_operation(self):
         database = Database(Connection(resumed_status="completed"))
         calls: list[str] = []

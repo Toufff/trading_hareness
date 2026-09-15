@@ -1,0 +1,53 @@
+{
+  "passed": true,
+  "checked_at": "2026-09-10T04:59:58.564Z",
+  "base_url": "https://stock.toufai.top",
+  "trade_date": "2026-09-09",
+  "model_version": "sector_heat_pg_v1",
+  "timings_ms": {
+    "ranking_loaded": 3139,
+    "nonblank_entry_visible": 4199,
+    "standalone_visible": 6559,
+    "industry_data_visible": 11309,
+    "industry_chart_visible": 11312,
+    "concept_detail_visible": 13635
+  },
+  "desktop_geometry": {
+    "chart": {
+      "x": 413,
+      "y": 640.5625,
+      "width": 964,
+      "height": 310
+    },
+    "ranking": {
+      "x": 36,
+      "y": 296.515625,
+      "width": 330,
+      "height": 751.734375
+    },
+    "detail": {
+      "x": 386,
+      "y": 296.515625,
+      "width": 1018,
+      "height": 751.734375
+    },
+    "overflow": false
+  },
+  "mobile_geometry": {
+    "rankingHeight": 239.6875,
+    "chartWidth": 332
+  },
+  "sectors": 204,
+  "industry": "有色冶炼加工",
+  "concept": "燃料乙醇",
+  "checks": [
+    "real public section API",
+    "visible standalone entry",
+    "industry search and selection",
+    "rendered chart canvas",
+    "intraday/daily controls",
+    "concept selection",
+    "desktop/mobile rendering",
+    "no browser runtime exceptions"
+  ]
+}

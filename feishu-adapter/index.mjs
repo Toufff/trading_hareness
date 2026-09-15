@@ -26,6 +26,7 @@ import { parsePaperFeedback } from './paper-feedback-command.mjs';
 import { personalDecisionResearchPaths } from './personal-decision-routes.mjs';
 import { createOperatorAuth, isMutatingApiRoute, isSameOriginRequest, resolveOperatorAuthConfig } from './dashboard-auth.mjs';
 import { createOauthStateStore } from './oauth-state.mjs';
+import { createStockWorkbenchControl, stockWorkbenchControlVocabulary } from './stock-workbench-control.mjs';
 import { manualEventId, manualMessageId } from './manual-ids.mjs';
 import { errorMessage, routeErrorHandler, sanitizeErrorForLog } from './error-response.mjs';
 import { filenameFromHeaders } from './filename-utils.mjs';
@@ -64,6 +65,7 @@ const dashboardPort = Number(process.env.DASHBOARD_PORT ?? 3000);
 const dashboardHost = String(process.env.DASHBOARD_HOST ?? '127.0.0.1').trim() || '127.0.0.1';
 const operatorAuthConfig = resolveOperatorAuthConfig(process.env);
 const operatorAuth = createOperatorAuth(operatorAuthConfig);
+const stockWorkbenchControl = createStockWorkbenchControl();
 const baiduPanOauthStates = createOauthStateStore();
 // Bounds every larkClient.* / WSClient call (message send/update, image/file
 // upload, message-resource download, token refresh). This is an axios *idle*
@@ -660,6 +662,10 @@ function broadcastSnapshot() {
 	for (const response of eventStreams) sendSse(response, 'snapshot', recentEvents.map(publicEventView));
 }
 
+function broadcastStockWorkbenchControl(state = stockWorkbenchControl.snapshot()) {
+	for (const response of eventStreams) sendSse(response, 'workbench-control', state);
+}
+
 function addEvent(data) {
 	const event = summarizeEvent(data);
 	recentEvents.unshift(event);
@@ -1200,6 +1206,7 @@ async function updateRelayRoute(sourceKey, payload) {
 
 const researchPaths = new Map([
 	['/api/research/runtime/health', '/health'],
+	['/api/research/intraday-scans', '/api/v1/intraday-scans'],
 	['/api/research/overview', '/api/v1/research/overview'],
 	['/api/research/reports', '/api/v1/remote-archive/reports'],
 	['/api/research/remote-archive/messages', '/api/v1/remote-archive/messages'],
@@ -1238,8 +1245,12 @@ const researchPaths = new Map([
 	['/api/research/intraday/limit-linkage/latest', '/api/v1/intraday/limit-linkage/latest'],
 	['/api/research/strategy/reviews/latest', '/api/v1/strategy/reviews/latest'],
 	['/api/research/strategy/post-close/latest', '/api/v1/strategy/post-close/latest'],
+	['/api/research/strategy/events/latest', '/api/v1/strategy/events/latest'],
+	['/api/research/strategy/post-close/watchlist/latest', '/api/v1/strategy/post-close/watchlist/latest'],
 	['/api/research/strategy/ablation/latest', '/api/v1/strategy/ablation/latest'],
 	['/api/research/strategy/health', '/api/v1/strategy/health'],
+	['/api/research/strategy/governance', '/api/v1/strategy/governance'],
+	['/api/v1/strategy/governance', '/api/v1/strategy/governance'],
 	['/api/research/strategy/pattern-mining/latest', '/api/v1/strategy/pattern-mining/latest'],
 	['/api/research/ten-day-leader-rotation/latest', '/api/v1/research/ten-day-leader-rotation/latest'],
 	['/api/research/intraday/outcomes/latest', '/api/v1/intraday/outcomes/latest'],
@@ -1386,6 +1397,37 @@ const dashboard = createServer((request, response) => {
 	if (stockStudy && request.method === 'POST') {
 		const symbol = stockStudy[1].toUpperCase();
 		void proxyResearchAction(`/api/v1/stocks/${encodeURIComponent(symbol)}/study`, request, response).catch(routeErrorHandler(response, 503));
+		return;
+	}
+	if (url.pathname === '/api/research/workbench-control' && request.method === 'GET') {
+		response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+		response.end(JSON.stringify({ state: stockWorkbenchControl.snapshot(), vocabulary: stockWorkbenchControlVocabulary }));
+		return;
+	}
+	if (url.pathname === '/api/research/workbench-control' && request.method === 'POST') {
+		void (async () => {
+			try {
+				const payload = await readJsonBody(request, 64 * 1024);
+				const state = stockWorkbenchControl.apply(payload);
+				broadcastStockWorkbenchControl(state);
+				response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+				response.end(JSON.stringify({ status: 'ok', state }));
+			} catch (error) {
+				response.writeHead(Number(error?.statusCode ?? 400), { 'content-type': 'application/json', 'cache-control': 'no-store' });
+				response.end(JSON.stringify({ status: 'error', message: errorMessage(error) }));
+			}
+		})();
+		return;
+	}
+	const stockWorkbench = /^\/api\/research\/stocks\/(\d{6}\.(?:SH|SZ|BJ))\/workbench$/i.exec(url.pathname);
+	if (stockWorkbench && request.method === 'GET') {
+		const symbol = stockWorkbench[1].toUpperCase();
+		void proxyResearch(`/api/v1/stocks/${encodeURIComponent(symbol)}/workbench`, url.search, response).catch(routeErrorHandler(response, 503));
+		return;
+	}
+	if (stockWorkbench && request.method === 'POST') {
+		const symbol = stockWorkbench[1].toUpperCase();
+		void proxyResearchAction(`/api/v1/stocks/${encodeURIComponent(symbol)}/workbench`, request, response).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	const claimReview = /^\/api\/research\/claim-review\/([0-9a-f-]{36})$/i.exec(url.pathname);
@@ -1702,6 +1744,7 @@ const dashboard = createServer((request, response) => {
 			connection: 'keep-alive',
 		});
 		sendSse(response, 'snapshot', recentEvents.map(publicEventView));
+		sendSse(response, 'workbench-control', stockWorkbenchControl.snapshot());
 		eventStreams.add(response);
 		request.on('close', () => eventStreams.delete(response));
 		return;

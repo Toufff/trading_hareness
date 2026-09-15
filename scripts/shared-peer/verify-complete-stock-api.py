@@ -155,4 +155,18 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except HTTPError as error:
+        try:
+            payload = json.loads(error.read().decode("utf-8", errors="replace"))
+            detail = str(payload.get("detail") or "HTTP request rejected")
+        except Exception:
+            detail = "HTTP request rejected without a JSON detail"
+        print(json.dumps({
+            "passed": False,
+            "failure_stage": "complete_gateway_http",
+            "http_status": error.code,
+            "detail": detail[:300],
+        }, ensure_ascii=False, sort_keys=True))
+        sys.exit(1)

@@ -12,9 +12,10 @@ from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "quant-service"))
+sys.path.insert(0, str(ROOT / 'scripts' / 'legacy' / 'stock_brain'))
 
-from app.legacy_stock_brain_archive import LegacyStockBrainArchiveImporter, sha256_file  # noqa: E402
-from app.legacy_stock_brain_repository import LegacyStockBrainRepository  # noqa: E402
+from legacy_stock_brain_archive import LegacyStockBrainArchiveImporter, sha256_file  # noqa: E402
+from legacy_stock_brain_repository import LegacyStockBrainRepository  # noqa: E402
 
 
 def build_fixture(path: Path) -> None:

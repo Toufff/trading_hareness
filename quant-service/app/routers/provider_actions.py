@@ -9,10 +9,11 @@ client, credential, or application singleton.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 import re
 from typing import Any, Awaitable, Callable
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from ..fuyao_provider import FuyaoProviderError, FuyaoQueryValidationError
 from ..request_models import (
@@ -20,6 +21,7 @@ from ..request_models import (
     FuyaoQueryRequest,
     RealtimeProbeRequest,
     StockStudyRequest,
+    StockWorkbenchRequest,
     TushareCapabilityAuditRequest,
     TushareFetchRequest,
 )
@@ -33,6 +35,7 @@ class ProviderActionDependencies:
     tushare_fetch: Callable[[TushareFetchRequest], Awaitable[dict[str, Any]]]
     stock_study: Callable[[str, StockStudyRequest], Awaitable[dict[str, Any]]]
     fuyao_query: Callable[[FuyaoQueryRequest], Awaitable[dict[str, Any]]] | None = None
+    stock_workbench: Callable[[str, StockWorkbenchRequest], Awaitable[dict[str, Any]]] | None = None
 
 
 def build_provider_actions_router(deps: ProviderActionDependencies) -> APIRouter:
@@ -75,6 +78,28 @@ def build_provider_actions_router(deps: ProviderActionDependencies) -> APIRouter
         if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", normalized):
             raise HTTPException(status_code=422, detail="symbol must use the Tushare form, for example 000636.SZ")
         return await deps.stock_study(normalized, payload or StockStudyRequest())
+
+    async def execute_stock_workbench(symbol: str, payload: StockWorkbenchRequest) -> dict[str, Any]:
+        normalized = symbol.upper()
+        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", normalized):
+            raise HTTPException(status_code=422, detail="symbol must use the Tushare form, for example 000636.SZ")
+        if deps.stock_workbench is None:
+            raise HTTPException(status_code=503, detail="stock workbench is not configured")
+        return await deps.stock_workbench(normalized, payload)
+
+    @router.get("/api/v1/stocks/{symbol}/workbench")
+    async def stock_workbench_read(
+        symbol: str,
+        as_of_date: date | None = None,
+        lookback_days: int = Query(default=120, ge=30, le=300),
+    ) -> dict[str, Any]:
+        return await execute_stock_workbench(
+            symbol, StockWorkbenchRequest(as_of_date=as_of_date, lookback_days=lookback_days),
+        )
+
+    @router.post("/api/v1/stocks/{symbol}/workbench")
+    async def stock_workbench_action(symbol: str, payload: StockWorkbenchRequest | None = None) -> dict[str, Any]:
+        return await execute_stock_workbench(symbol, payload or StockWorkbenchRequest())
 
     return router
 

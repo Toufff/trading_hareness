@@ -10,8 +10,12 @@ services:
       PEER_SSH_HOST: ${PEER_SSH_HOST:?Set PEER_SSH_HOST}
       PEER_SSH_PORT: ${PEER_SSH_PORT:-3535}
       PEER_SSH_USER: ${PEER_SSH_USER:-stockpeer}
+      PEER_SSH_HOST_KEY_ALIAS: ${PEER_SSH_HOST_KEY_ALIAS:-}
       REMOTE_DB_PORT: ${REMOTE_DB_PORT:-15432}
       REMOTE_API_PORT: ${REMOTE_API_PORT:-15681}
+      PGDATABASE: ${PEER_QUANT_DATABASE:-trading_hareness}
+      PGUSER: ${PEER_DB_USER:-stock_peer}
+      PGPASSWORD: ${PEER_DB_PASSWORD:?Set PEER_DB_PASSWORD}
     ports:
       # Published here rather than on quant-research/n8n because those two
       # services join this container's network namespace below (network_mode:
@@ -26,10 +30,11 @@ services:
       - ${PEER_SSH_KEY_PATH:?Set PEER_SSH_KEY_PATH}:/run/secrets/peer_ssh_key:ro
       - ${PEER_KNOWN_HOSTS_PATH:?Set PEER_KNOWN_HOSTS_PATH}:/run/secrets/known_hosts:ro
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 5432 && nc -z 127.0.0.1 5681"]
-      interval: 10s
-      timeout: 3s
-      retries: 12
+      test: ["CMD", "/usr/local/bin/ssh-tunnel-healthcheck"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   quant-research:
     build:

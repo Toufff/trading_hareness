@@ -56,7 +56,7 @@ def persist_dossier(connection: Any, dossier: DecisionResearchDossier) -> dict[s
 
 def latest_exact_portfolio(connection: Any, account_key: str) -> dict[str, Any] | None:
     snapshot = connection.execute(
-        """SELECT snapshot_id,observed_at,verification,cash,total_asset,total_market_value
+        """SELECT snapshot_id,observed_at,verification,cash,total_asset,total_market_value,source,metadata
              FROM quant.broker_portfolio_snapshots
             WHERE account_key=%s AND verification='verified_exact'
             ORDER BY observed_at DESC,recorded_at DESC LIMIT 1""",
@@ -74,7 +74,76 @@ def latest_exact_portfolio(connection: Any, account_key: str) -> dict[str, Any] 
     return {**dict(snapshot), "positions": [dict(row) for row in positions]}
 
 
-def latest_candidate_evidence(connection: Any, as_of_date: Any, limit: int) -> list[dict[str, Any]]:
+def _latest_lane_candidate_evidence(connection: Any, as_of_date: Any, limit: int) -> list[dict[str, Any]]:
+    """Read the bounded research plan produced by the nine-lane scan.
+
+    The former decision closure silently read ``post_close_strategy_candidates``
+    from the legacy single scanner.  The reports, however, are produced from
+    ``summary.strategy_lanes``.  Reading the persisted review plan here makes
+    discovery, research and publication share one candidate identity.
+    """
+    rows = connection.execute(
+        """WITH selected_run AS (
+               SELECT run_id,summary->'strategy_lanes' AS lanes
+                 FROM quant.post_close_strategy_runs
+                WHERE as_of_date=%s AND status IN ('completed','partial')
+                  AND summary ? 'strategy_lanes'
+                ORDER BY updated_at DESC LIMIT 1
+           ), planned AS (
+               SELECT run_id,ordinality::int AS rank,plan,
+                      plan->'memberships'->0 AS membership
+                 FROM selected_run
+                 CROSS JOIN LATERAL jsonb_array_elements(coalesce(lanes->'review_plan','[]'::jsonb))
+                      WITH ORDINALITY item(plan,ordinality)
+                ORDER BY ordinality LIMIT %s
+           ), latest_basic AS (
+               SELECT DISTINCT ON (row_data->>'ts_code')
+                      row_data->>'ts_code' AS symbol,row_data,available_at
+                 FROM quant.tushare_raw_records
+                WHERE api_name='daily_basic' AND row_data->>'trade_date'=to_char(%s::date,'YYYYMMDD')
+                ORDER BY row_data->>'ts_code',available_at DESC
+           ), latest_flow AS (
+               SELECT DISTINCT ON (symbol) symbol,net_amount,raw,available_at
+                 FROM quant.stock_money_flow_daily
+                WHERE trading_date=%s AND source='longhuvip_main_net'
+                ORDER BY symbol,available_at DESC
+           )
+           SELECT p.run_id,p.rank,p.plan->>'symbol' AS symbol,p.plan->>'name' AS name,
+                  'strategy_lane:'||(p.membership->>'lane') AS candidate_type,
+                  (p.membership->>'rank_score')::numeric AS score,
+                  jsonb_build_object('metrics',p.membership->'metrics') AS structure,
+                  jsonb_build_object(
+                    'sector_key',flow.raw->>'plate_id',
+                    'label',coalesce(nullif(flow.raw#>>'{screen_snapshot,sector_label}',''),sector.item->>'label'),
+                    'net_amount',sector.item->'net_inflow',
+                    'flow_percentile',sector.item->'flow_percentile',
+                    'exact_member_mapping',(flow.raw->>'plate_id' IS NOT NULL)
+                  ) AS board_context,
+                  '[]'::jsonb AS risk_flags,basic.row_data AS daily_basic,
+                  basic.available_at AS basic_available_at,flow.net_amount AS main_net_amount,
+                  flow.raw AS flow_raw,flow.available_at AS flow_available_at,
+                  coalesce(bars.amount,nullif(p.membership#>>'{metrics,amount}','')::numeric) AS amount,
+                  bars.close,bars.pre_close,bars.volume,bars.available_at AS bar_available_at
+             FROM planned p
+             LEFT JOIN latest_basic basic ON basic.symbol=p.plan->>'symbol'
+             LEFT JOIN latest_flow flow ON flow.symbol=p.plan->>'symbol'
+             LEFT JOIN quant.canonical_bars_daily bars
+                    ON bars.symbol=p.plan->>'symbol' AND bars.trading_date=%s
+             LEFT JOIN LATERAL (
+                    SELECT item
+                      FROM quant.intraday_board_reports report
+                      CROSS JOIN LATERAL jsonb_array_elements(coalesce(report.payload->'items','[]'::jsonb)) item
+                     WHERE (report.observed_at AT TIME ZONE 'Asia/Shanghai')::date=%s
+                       AND item->>'sector_key'=flow.raw->>'plate_id'
+                     ORDER BY report.observed_at DESC LIMIT 1
+             ) sector ON true
+            ORDER BY p.rank""",
+        (as_of_date, limit, as_of_date, as_of_date, as_of_date, as_of_date),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _latest_legacy_candidate_evidence(connection: Any, as_of_date: Any, limit: int) -> list[dict[str, Any]]:
     rows = connection.execute(
         """WITH selected_run AS (
                SELECT run_id FROM quant.post_close_strategy_runs
@@ -106,6 +175,23 @@ def latest_candidate_evidence(connection: Any, as_of_date: Any, limit: int) -> l
         (as_of_date, as_of_date, as_of_date, as_of_date, limit),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def latest_candidate_evidence(connection: Any, as_of_date: Any, limit: int) -> list[dict[str, Any]]:
+    """Prefer the nine-lane research plan; retain legacy fallback for old dates."""
+    planned = _latest_lane_candidate_evidence(connection, as_of_date, limit)
+    if planned:
+        return planned
+    lane_run = connection.execute(
+        """SELECT 1 FROM quant.post_close_strategy_runs
+            WHERE as_of_date=%s AND status IN ('completed','partial')
+              AND summary ? 'strategy_lanes'
+            ORDER BY updated_at DESC LIMIT 1""",
+        (as_of_date,),
+    ).fetchone()
+    # An empty current lane plan means "no prioritized research candidate",
+    # not permission to resurrect a different legacy scanner's symbols.
+    return [] if lane_run else _latest_legacy_candidate_evidence(connection, as_of_date, limit)
 
 
 def holding_evidence(connection: Any, as_of_date: Any, symbol: str) -> dict[str, Any] | None:

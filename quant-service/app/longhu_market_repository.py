@@ -4,13 +4,95 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
 
 from .longhu_market_sync import MergedCrossSection, PROVIDER_KEY, build_control_rows
 from .universe_history import sync_universe_membership_history
+
+
+LONGHU_INDUSTRY_TAXONOMY = "longhu_ths_industry"
+
+
+def persist_longhu_industry_memberships(
+    connection: Any,
+    trade_date: date,
+    observed_at: datetime,
+    flow_rows: list[dict[str, Any]],
+) -> int:
+    """Materialise the industry carried by the same dated Longhu stock row.
+
+    This is a complete all-A observed snapshot, not a reconstructed historical
+    interval.  Keeping the effective/known dates explicit prevents today's
+    classification from leaking backwards into a replay.
+    """
+    members: dict[str, tuple[str, str, dict[str, Any]]] = {}
+    sectors: dict[str, str] = {}
+    for row in flow_rows:
+        raw = dict(row.get("raw") or {})
+        sector_key = str(raw.get("plate_id") or "").strip()
+        screen = raw.get("screen_snapshot") if isinstance(raw.get("screen_snapshot"), dict) else {}
+        label = str(screen.get("sector_label") or raw.get("sector_label") or "").strip()
+        symbol = str(row.get("symbol") or "").upper()
+        if not sector_key or not label or not symbol:
+            continue
+        sectors[sector_key] = label
+        members[symbol] = (sector_key, label, raw)
+    if not members:
+        return 0
+    connection.execute(
+        """INSERT INTO quant.sector_taxonomies(taxonomy_key,label,provider_key,metadata)
+           VALUES(%s,%s,%s,%s)
+           ON CONFLICT(taxonomy_key) DO UPDATE SET label=EXCLUDED.label,
+             provider_key=EXCLUDED.provider_key,metadata=EXCLUDED.metadata,updated_at=now()""",
+        (LONGHU_INDUSTRY_TAXONOMY, "同花顺行业（Longhu日终）", PROVIDER_KEY,
+         Json({"basis": "complete_observed_close_cross_section"})),
+    )
+    connection.execute(
+        """INSERT INTO quant.sectors(taxonomy_key,sector_key,label,metadata)
+           SELECT %(taxonomy)s,t.sector_key,t.label,
+                  jsonb_build_object('provider',%(provider)s,'observed_date',%(trade_date)s::text)
+             FROM unnest(%(keys)s::text[],%(labels)s::text[]) AS t(sector_key,label)
+           ON CONFLICT(taxonomy_key,sector_key) DO UPDATE SET label=EXCLUDED.label,
+             metadata=quant.sectors.metadata || EXCLUDED.metadata,updated_at=now()""",
+        {"taxonomy": LONGHU_INDUSTRY_TAXONOMY, "provider": PROVIDER_KEY,
+         "trade_date": trade_date, "keys": list(sectors), "labels": list(sectors.values())},
+    )
+    symbols = list(members)
+    connection.execute(
+        """INSERT INTO quant.sector_membership_history(
+               taxonomy_key,sector_key,symbol,effective_from,effective_to,provider_key,
+               available_at,known_at,effective_from_basis,effective_to_basis,raw)
+           SELECT %(taxonomy)s,t.sector_key,t.symbol,%(trade_date)s,NULL,%(provider)s,
+                  %(observed_at)s,%(observed_at)s,'observed_snapshot','observed_snapshot',t.raw::jsonb
+             FROM unnest(%(sector_keys)s::text[],%(symbols)s::text[],%(raws)s::text[])
+                  AS t(sector_key,symbol,raw)
+           ON CONFLICT(taxonomy_key,sector_key,symbol,effective_from) DO UPDATE SET
+             effective_to=NULL,provider_key=EXCLUDED.provider_key,available_at=EXCLUDED.available_at,
+             known_at=EXCLUDED.known_at,effective_from_basis=EXCLUDED.effective_from_basis,
+             effective_to_basis=EXCLUDED.effective_to_basis,raw=EXCLUDED.raw""",
+        {"taxonomy": LONGHU_INDUSTRY_TAXONOMY, "trade_date": trade_date,
+         "provider": PROVIDER_KEY, "observed_at": observed_at,
+         "sector_keys": [members[symbol][0] for symbol in symbols], "symbols": symbols,
+         "raws": [json.dumps(members[symbol][2], ensure_ascii=False, default=str) for symbol in symbols]},
+    )
+    connection.execute(
+        """UPDATE quant.sector_membership_history prior SET
+               effective_to=%s,available_at=%s,known_at=%s,effective_to_basis='observed_snapshot'
+             WHERE prior.taxonomy_key=%s AND prior.provider_key=%s AND prior.effective_to IS NULL
+               AND prior.effective_from<%s
+               AND NOT EXISTS (
+                 SELECT 1 FROM unnest(%s::text[],%s::text[]) current(sector_key,symbol)
+                  WHERE current.sector_key=prior.sector_key AND current.symbol=prior.symbol
+               )""",
+        (trade_date - timedelta(days=1), observed_at, observed_at,
+         LONGHU_INDUSTRY_TAXONOMY, PROVIDER_KEY, trade_date,
+         [members[symbol][0] for symbol in symbols], symbols),
+    )
+    return len(members)
 
 
 def persist_settled_trade_calendar(
@@ -104,17 +186,16 @@ def persist_full_market_close(
              source=EXCLUDED.source,metadata=EXCLUDED.metadata,updated_at=now()""",
         (PROVIDER_KEY, trade_date, symbols),
     )
-    if symbols:
-        connection.execute(
-            """UPDATE quant.universe_members SET enabled=false,updated_at=now(),
-                      metadata=metadata || jsonb_build_object('disabled_by_snapshot',%s::text)
-                WHERE universe_key='all_a' AND enabled AND NOT (symbol=ANY(%s))""",
-            (trade_date, symbols),
-        )
+    # A coverage-gated quote snapshot can still miss suspended stocks or
+    # individual upstream failures. Missing prices are not a delisting event.
     history = sync_universe_membership_history(
         connection, "all_a", trade_date, symbols, source=PROVIDER_KEY, priority=20,
+        close_missing=False,
     )
     flow_count = persist_flow_rows(connection, merged.flow_rows, PROVIDER_KEY, observed_at)
+    industry_membership_count = persist_longhu_industry_memberships(
+        connection, trade_date, observed_at, merged.flow_rows,
+    )
     fetch_run = connection.execute(
         "SELECT fetch_run_id FROM quant.fetch_runs WHERE request_key=%s", (request_key,),
     ).fetchone()
@@ -138,12 +219,13 @@ def persist_full_market_close(
             """INSERT INTO quant.raw_market_observations(
                    provider_key,capability,market,symbol,effective_at,available_at,
                    availability_basis,payload_sha256,normalized,payload,fetch_run_id)
-               SELECT %(provider)s,'realtime_quote','cn',t.symbol,%(observed_at)s,%(observed_at)s,
-                      'post_close_vendor_plus_public_crosscheck',t.sha,t.payload_json::jsonb,t.payload_json::jsonb,%(fetch_run_id)s
+               SELECT %(provider)s,'settled_quote','cn',t.symbol,%(effective_at)s,%(observed_at)s,
+                      'dated_licensed_close_crosscheck',t.sha,t.payload_json::jsonb,t.payload_json::jsonb,%(fetch_run_id)s
                  FROM unnest(%(symbols)s::text[],%(shas)s::text[],%(payloads)s::text[]) AS t(symbol,sha,payload_json)
                ON CONFLICT(provider_key,capability,market,symbol,effective_at,payload_sha256)
                DO UPDATE SET available_at=EXCLUDED.available_at,fetch_run_id=EXCLUDED.fetch_run_id""",
             {"provider": PROVIDER_KEY, "observed_at": observed_at, "fetch_run_id": fetch_run_id,
+             "effective_at": datetime.combine(trade_date, datetime.min.time(), ZoneInfo('Asia/Shanghai')).replace(hour=15),
              "symbols": symbols, "shas": shas, "payloads": payloads},
         )
     usable_boards = [row for row in board_rows if row.get("net_inflow") is not None]
@@ -153,7 +235,7 @@ def persist_full_market_close(
     prior_board_report = connection.execute(
         """SELECT board_report_id FROM quant.intraday_board_reports
              WHERE status='completed'
-               AND (observed_at AT TIME ZONE 'Asia/Shanghai')::date=%s
+               AND coalesce(source_status->>'trade_date',source_status->'coverage'->'licensed_ohlc'->>'trade_date',(observed_at AT TIME ZONE 'Asia/Shanghai')::date::text)=%s::text
                AND source_status->>'provider'=%s
              ORDER BY observed_at DESC LIMIT 1""",
         (trade_date, PROVIDER_KEY),
@@ -163,7 +245,8 @@ def persist_full_market_close(
             """UPDATE quant.intraday_board_reports SET observed_at=%s,source_status=%s,summary=%s,payload=%s
                 WHERE board_report_id=%s""",
             (observed_at, Json({
-                "provider": PROVIDER_KEY, "coverage": source_health,
+                "provider": PROVIDER_KEY, "coverage": source_health, "trade_date": str(trade_date),
+                "data_as_of": f"{trade_date}T15:00:00+08:00",
                 "flow_semantics": "order_size_classified_not_institution_identity",
             }), Json(board_summary), Json({
                 "status": "completed", "items": board_rows,
@@ -177,7 +260,8 @@ def persist_full_market_close(
                    observed_at,status,source_status,summary,payload)
                VALUES(%s,'completed',%s,%s,%s)""",
             (observed_at, Json({
-                "provider": PROVIDER_KEY, "coverage": source_health,
+                "provider": PROVIDER_KEY, "coverage": source_health, "trade_date": str(trade_date),
+                "data_as_of": f"{trade_date}T15:00:00+08:00",
                 "flow_semantics": "order_size_classified_not_institution_identity",
             }), Json(board_summary), Json({
                 "status": "completed", "items": board_rows,
@@ -192,6 +276,7 @@ def persist_full_market_close(
         (len(merged.daily_rows), Json({
             "coverage": merged.coverage, "normalized": normalized,
             "flow_rows": flow_count, "quote_rows": quote_count, "board_rows": len(board_rows),
+            "industry_memberships": industry_membership_count,
             "source_health": source_health, "close_conflicts": list(merged.close_conflicts[:20]),
             "control_semantics": {
                 "adj_factor": "same_day_identity_only",
@@ -203,7 +288,7 @@ def persist_full_market_close(
     for capability, row_count, note in (
         ("daily", len(merged.daily_rows), "Coverage-gated all-A post-close daily cross-section verified."),
         ("stock_money_flow", flow_count, "Vendor field 13 order-size-classified main-net cross-section verified."),
-        ("realtime_quote", quote_count, "Same-session Tencent OHLC cross-check verified."),
+        ("settled_quote", quote_count, "Licensed dated OHLC cross-check verified; not realtime."),
     ):
         connection.execute(
             """INSERT INTO quant.provider_api_capabilities(
@@ -225,6 +310,7 @@ def persist_full_market_close(
         )
     return {
         "daily_rows": len(merged.daily_rows), "flow_rows": flow_count,
+        "industry_memberships": industry_membership_count,
         "quote_rows": quote_count, "board_rows": len(board_rows), "coverage": merged.coverage,
         "normalized": normalized, "universe_history": history,
         "calendar_rows": calendar_rows,
@@ -249,7 +335,7 @@ def persisted_close_context(database: Any, trade_date: date) -> dict[str, Any]:
                       source_status
                  FROM quant.intraday_board_reports
                 WHERE status='completed'
-                  AND (observed_at AT TIME ZONE 'Asia/Shanghai')::date=%s
+                  AND coalesce(source_status->>'trade_date',source_status->'coverage'->'licensed_ohlc'->>'trade_date',(observed_at AT TIME ZONE 'Asia/Shanghai')::date::text)=%s::text
                   AND source_status->>'provider'=%s
                 ORDER BY observed_at DESC LIMIT 1""",
             (trade_date, PROVIDER_KEY),
@@ -271,4 +357,7 @@ def persisted_close_context(database: Any, trade_date: date) -> dict[str, Any]:
     }
 
 
-__all__ = ["persist_full_market_close", "persist_settled_trade_calendar", "persisted_close_context"]
+__all__ = [
+    "persist_full_market_close", "persist_longhu_industry_memberships",
+    "persist_settled_trade_calendar", "persisted_close_context",
+]

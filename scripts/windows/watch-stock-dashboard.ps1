@@ -29,6 +29,9 @@ $cooldownSeconds = 600
 })
 while ($true) {
     $sleepSeconds = $baseIntervalSeconds
+    [void](Set-RuntimeState -PlatformRoot $platform -Service 'dashboard-watchdog' -State @{
+        status='checking'; run_id=$watchdogRunId; supervisor_pid=$PID; checked_at=[DateTimeOffset]::Now.ToString('o')
+    })
     try {
         & $startScript -PlatformRoot $PlatformRoot -RepositoryRoot $RepositoryRoot | Out-Null
         if ($consecutiveFailures -gt 0) {
@@ -37,8 +40,14 @@ while ($true) {
             })
         }
         $consecutiveFailures = 0
+        [void](Set-RuntimeState -PlatformRoot $platform -Service 'dashboard-watchdog' -State @{
+            status='healthy'; run_id=$watchdogRunId; supervisor_pid=$PID; checked_at=[DateTimeOffset]::Now.ToString('o')
+        })
     } catch {
         $consecutiveFailures += 1
+        [void](Set-RuntimeState -PlatformRoot $platform -Service 'dashboard-watchdog' -State @{
+            status='failed'; run_id=$watchdogRunId; supervisor_pid=$PID; checked_at=[DateTimeOffset]::Now.ToString('o'); error=$_.Exception.Message
+        })
         $line = "$(Get-Date -Format o) $($_.Exception.Message)"
         [IO.File]::AppendAllText($log, $line + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
         [void](Write-RuntimeEvent -PlatformRoot $platform -Service 'dashboard-watchdog' -Event 'watchdog_iteration_failed' -RunId $watchdogRunId -Level 'error' -Data @{

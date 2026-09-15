@@ -29,6 +29,12 @@ try {
     $target = Get-StockCurrentReleaseTarget -PlatformRoot $sandbox
     Assert-True ($target.EndsWith('release-003\app')) 'current must resolve to the selected immutable release'
     Assert-True ((Get-Content -LiteralPath (Join-Path $sandbox 'current\marker.txt') -Raw) -eq 'release-003') 'the current junction must serve the selected release'
+    $lockedFile = Join-Path (Get-StockReleaseAppPath -PlatformRoot $sandbox -ReleaseId 'release-001') 'marker.txt'
+    $handle = [IO.File]::Open($lockedFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    try {
+        $deferred = @(Remove-ExpiredStockReleases -PlatformRoot $sandbox -RetainCount 2)
+        Assert-True (-not ($deferred -contains 'release-001')) 'a locked old release must be deferred, not fail activation'
+    } finally { $handle.Dispose() }
     $removed = @(Remove-ExpiredStockReleases -PlatformRoot $sandbox -RetainCount 2)
     Assert-True ($removed -contains 'release-001') 'retention must prune releases older than active and previous'
     Assert-True (Test-Path -LiteralPath (Get-StockReleaseAppPath -PlatformRoot $sandbox -ReleaseId 'release-003')) 'retention must preserve active'

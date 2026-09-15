@@ -4,8 +4,17 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import unittest
+from unittest.mock import AsyncMock, patch
 
-from app.async_personal_decision_repository import active_trade_plans, latest_decision_research, latest_market_section
+from app.async_personal_decision_repository import (
+    active_trade_plans,
+    latest_decision_research,
+    latest_market_section,
+    latest_holding_advice,
+    latest_market_advice,
+    latest_new_buy_advice,
+    latest_new_buy_research,
+)
 
 
 NOW = datetime(2026, 9, 1, 7, 15, tzinfo=timezone.utc)
@@ -131,6 +140,47 @@ class AsyncPersonalDecisionRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await active_trade_plans(database, NOW), [])
         normalized = " ".join(database.sql.split())
         self.assertIn("ORDER BY plan_kind,symbol,created_at DESC,as_of_at DESC", normalized)
+
+    async def test_new_buy_research_excludes_holding_dossiers(self) -> None:
+        items = [
+            {"status": "passed", "evidence_snapshot": {"role": "holding"}},
+            {"status": "passed", "evidence_snapshot": {"role": "candidate"}},
+            {"status": "rejected", "evidence_snapshot": {"role": "candidate"}},
+        ]
+        result = await latest_new_buy_research(SequencedDatabase([
+            {"as_of_date": NOW.date()}, items,
+        ]))
+        self.assertEqual(len(result["items"]), 2)
+        self.assertEqual(result["summary"], {"total": 2, "passed": 1, "rejected": 1, "incomplete": 0})
+        self.assertFalse(result["depends_on_broker"])
+
+    async def test_split_advice_has_hard_broker_boundary(self) -> None:
+        market = {"status": "ready", "exchange_date": "2026-09-01"}
+        buy_plan = {
+            "plan_key": "buy:600000", "plan_kind": "new_buy", "symbol": "600000.SH",
+            "name": "浦发银行", "as_of_at": NOW, "valid_until": NOW + timedelta(days=2),
+            "action": "buy_on_trigger", "entry_zone": {"lower": 10, "upper": 10.2},
+            "exit_trigger": "结构失效", "stop_price": 9.5, "target_prices": [11],
+            "max_position_pct": 5, "rationale": ["完整研究"], "evidence_refs": ["dossier:1"],
+        }
+        stale_portfolio = {
+            "snapshot_id": "old", "verification": "verified_exact",
+            "observed_at": NOW - timedelta(days=4),
+            "positions": [{"symbol": "600664.SH", "name": "哈药股份"}],
+        }
+        with (
+            patch("app.async_personal_decision_repository.latest_market_section", new=AsyncMock(return_value=market)),
+            patch("app.async_personal_decision_repository.active_trade_plans", new=AsyncMock(return_value=[buy_plan])),
+            patch("app.async_personal_decision_repository.latest_broker_snapshot", new=AsyncMock(return_value=stale_portfolio)),
+        ):
+            market_result = await latest_market_advice(object(), as_of_at=NOW)
+            buy_result = await latest_new_buy_advice(object(), as_of_at=NOW)
+            holding_result = await latest_holding_advice(object(), "citics-primary", as_of_at=NOW)
+        self.assertFalse(market_result["depends_on_broker"])
+        self.assertFalse(buy_result["depends_on_broker"])
+        self.assertEqual([item["symbol"] for item in buy_result["actions"]], ["600000.SH"])
+        self.assertEqual(holding_result["actions"], [])
+        self.assertTrue(holding_result["stale_snapshot_is_historical_only"])
 
 
 if __name__ == "__main__":

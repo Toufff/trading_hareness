@@ -21,10 +21,30 @@ async def core_symbols(async_database: Any) -> list[str]:
 
 
 async def limited_core_symbols(async_database: Any, limit: int) -> list[str]:
-    """Return a bounded priority-ordered core basket for post-close supplements."""
+    """Return holdings first, then the bounded core basket for supplements.
+
+    Announcements and event research must never omit a held stock merely
+    because a separate watchlist projection has not placed it in ``core``.
+    The latest exact broker snapshot is used as an inclusion source only; its
+    staleness is still handled independently by the decision brief.
+    """
     async with async_database.transaction() as connection:
         result = await connection.execute(
-            f"{CORE_SYMBOLS_SQL} LIMIT %s",
+            """WITH latest_snapshot AS (
+                   SELECT snapshot_id FROM quant.broker_portfolio_snapshots
+                    WHERE verification='verified_exact'
+                    ORDER BY observed_at DESC,recorded_at DESC LIMIT 1
+               ), candidates AS (
+                   SELECT position.symbol,0::integer AS priority
+                     FROM quant.broker_position_snapshots position
+                     JOIN latest_snapshot snapshot ON snapshot.snapshot_id=position.snapshot_id
+                    WHERE position.quantity>0
+                   UNION ALL
+                   SELECT symbol,1000+priority FROM quant.universe_members
+                    WHERE universe_key='core' AND enabled
+               )
+               SELECT symbol,min(priority)::integer AS priority FROM candidates
+                GROUP BY symbol ORDER BY priority,symbol LIMIT %s""",
             (max(1, int(limit)),),
         )
         rows = await result.fetchall()

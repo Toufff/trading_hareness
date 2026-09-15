@@ -710,6 +710,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/strategy/events/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Event Research Latest */
+        get: operations["event_research_latest_api_v1_strategy_events_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/strategy/decisions/latest": {
         parameters: {
             query?: never;
@@ -753,6 +770,26 @@ export interface paths {
         };
         /** Post Close */
         get: operations["post_close_api_v1_strategy_post_close_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/strategy/post-close/watchlist/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Post Close Watchlist
+         * @description Small holdings-independent watchlist for human decision surfaces.
+         */
+        get: operations["post_close_watchlist_api_v1_strategy_post_close_watchlist_latest_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -844,6 +881,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sector-heat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Sector Heat */
+        get: operations["sector_heat_api_v1_sector_heat_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/intraday-scans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Intraday Scans */
+        get: operations["intraday_scans_api_v1_intraday_scans_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/strategy/governance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Governance */
+        get: operations["governance_api_v1_strategy_governance_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/paper/status": {
         parameters: {
             query?: never;
@@ -887,23 +975,6 @@ export interface paths {
         };
         /** Contracts */
         get: operations["contracts_api_v1_strategy_contracts_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/strategy/governance": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Governance */
-        get: operations["governance_api_v1_strategy_governance_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1014,6 +1085,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/advice/market/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Latest Market Advice */
+        get: operations["read_latest_market_advice_api_v1_advice_market_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/advice/new-buys/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Latest New Buy Advice */
+        get: operations["read_latest_new_buy_advice_api_v1_advice_new_buys_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/personal/holding-advice/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Latest Holding Advice */
+        get: operations["read_latest_holding_advice_api_v1_personal_holding_advice_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/personal/decision-research/latest": {
         parameters: {
             query?: never;
@@ -1023,6 +1145,23 @@ export interface paths {
         };
         /** Read Latest Decision Research */
         get: operations["read_latest_decision_research_api_v1_personal_decision_research_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/advice/new-buys/research/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Latest New Buy Research */
+        get: operations["read_latest_new_buy_research_api_v1_advice_new_buys_research_latest_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1807,6 +1946,24 @@ export interface paths {
         put?: never;
         /** Stock Study */
         post: operations["stock_study_api_v1_stocks__symbol__study_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/stocks/{symbol}/workbench": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Stock Workbench Read */
+        get: operations["stock_workbench_read_api_v1_stocks__symbol__workbench_get"];
+        put?: never;
+        /** Stock Workbench Action */
+        post: operations["stock_workbench_action_api_v1_stocks__symbol__workbench_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3640,6 +3797,8 @@ export interface components {
              * @default true
              */
             refresh_public_quotes: boolean;
+            /** Exchange Date */
+            exchange_date?: string | null;
         };
         /** MarketUniverseSyncRequest */
         MarketUniverseSyncRequest: {
@@ -3961,6 +4120,18 @@ export interface components {
             /**
              * Lookback Days
              * @default 21
+             */
+            lookback_days: number;
+        };
+        /** StockWorkbenchRequest */
+        StockWorkbenchRequest: {
+            /** As Of Date */
+            as_of_date?: string | null;
+            /** Knowledge Cutoff */
+            knowledge_cutoff?: string | null;
+            /**
+             * Lookback Days
+             * @default 120
              */
             lookback_days: number;
         };
@@ -5664,6 +5835,28 @@ export interface operations {
             };
         };
     };
+    event_research_latest_api_v1_strategy_events_latest_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     decision_api_v1_strategy_decisions_latest_get: {
         parameters: {
             query?: never;
@@ -5721,7 +5914,10 @@ export interface operations {
     };
     post_close_api_v1_strategy_post_close_latest_get: {
         parameters: {
-            query?: never;
+            query?: {
+                as_of_date?: string | null;
+                view?: "full" | "dashboard";
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -5737,6 +5933,48 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_close_watchlist_api_v1_strategy_post_close_watchlist_latest_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -5840,6 +6078,92 @@ export interface operations {
             };
         };
     };
+    sector_heat_api_v1_sector_heat_get: {
+        parameters: {
+            query?: {
+                key?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    intraday_scans_api_v1_intraday_scans_get: {
+        parameters: {
+            query?: {
+                run_id?: string | null;
+                lane?: string | null;
+                symbol?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    governance_api_v1_strategy_governance_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     status_api_v1_paper_status_get: {
         parameters: {
             query?: {
@@ -5907,28 +6231,6 @@ export interface operations {
         };
     };
     contracts_api_v1_strategy_contracts_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-        };
-    };
-    governance_api_v1_strategy_governance_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -6158,7 +6460,106 @@ export interface operations {
             };
         };
     };
+    read_latest_market_advice_api_v1_advice_market_latest_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    read_latest_new_buy_advice_api_v1_advice_new_buys_latest_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    read_latest_holding_advice_api_v1_personal_holding_advice_latest_get: {
+        parameters: {
+            query: {
+                account_key: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     read_latest_decision_research_api_v1_personal_decision_research_latest_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    read_latest_new_buy_research_api_v1_advice_new_buys_research_latest_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -7578,6 +7979,79 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": components["schemas"]["StockStudyRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stock_workbench_read_api_v1_stocks__symbol__workbench_get: {
+        parameters: {
+            query?: {
+                as_of_date?: string | null;
+                lookback_days?: number;
+            };
+            header?: never;
+            path: {
+                symbol: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stock_workbench_action_api_v1_stocks__symbol__workbench_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                symbol: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["StockWorkbenchRequest"] | null;
             };
         };
         responses: {

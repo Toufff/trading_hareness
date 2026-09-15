@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import unittest
 
-from app.longhu_market_repository import persist_full_market_close
+from app.longhu_market_repository import persist_full_market_close, persist_longhu_industry_memberships
 from app.longhu_market_sync import MergedCrossSection
 
 
@@ -46,6 +46,23 @@ def _merged(quote_rows: list[dict]) -> MergedCrossSection:
 
 
 class PersistFullMarketCloseQuoteBatchingTests(unittest.TestCase):
+    def test_longhu_industry_snapshot_is_materialised_with_point_in_time_basis(self) -> None:
+        connection = _RecordingConnection()
+        count = persist_longhu_industry_memberships(
+            connection, date(2026, 8, 20), datetime(2026, 8, 20, 7, tzinfo=timezone.utc),
+            [{"symbol": "600664.SH", "raw": {
+                "plate_id": "881140", "screen_snapshot": {"sector_label": "化学制药"},
+            }}],
+        )
+        self.assertEqual(count, 1)
+        membership = [(sql, params) for sql, params in connection.calls
+                      if "INSERT INTO quant.sector_membership_history" in sql]
+        self.assertEqual(len(membership), 1)
+        sql, params = membership[0]
+        self.assertIn("'observed_snapshot'", sql)
+        self.assertEqual(params["symbols"], ["600664.SH"])
+        self.assertEqual(params["sector_keys"], ["881140"])
+
     def test_quote_rows_are_written_in_exactly_one_statement(self) -> None:
         connection = _RecordingConnection(fetch_run_id="run-1")
         quote_rows = [
@@ -70,6 +87,10 @@ class PersistFullMarketCloseQuoteBatchingTests(unittest.TestCase):
         _sql, params = insert_calls[0]
         self.assertEqual(set(params["symbols"]), {"000001.SZ", "600000.SH"})
         self.assertEqual(params["fetch_run_id"], "run-1")
+        self.assertIn("'settled_quote'", _sql)
+        self.assertEqual(params['effective_at'].date(), date(2026,8,20))
+        self.assertFalse(any('enabled=false' in sql or 'DELETE FROM quant.universe_membership_history' in sql
+                             or 'closed_by' in sql for sql, _ in connection.calls))
 
     def test_no_quote_rows_issues_no_statement(self) -> None:
         connection = _RecordingConnection()

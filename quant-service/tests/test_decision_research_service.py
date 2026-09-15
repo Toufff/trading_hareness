@@ -3,9 +3,14 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
+from unittest.mock import patch
 
 from app.decision_research_contracts import DecisionResearchDossier, GATE_LABELS, ResearchGate
-from app.decision_research_service import _holding_plan, build_dossier, independent_downside_gate
+from app.decision_research_service import (
+    _holding_plan, build_dossier, independent_downside_gate,
+    refresh_decision_research_and_plans,
+    refresh_holding_research_and_plans,
+)
 
 
 def candidate_evidence() -> dict:
@@ -55,6 +60,31 @@ def test_negative_board_flow_is_a_terminal_rejection_not_an_unfinished_placehold
     assert all(gate.verdict != "unknown" for gate in dossier.gates)
 
 
+def test_lane_metrics_and_exact_industry_membership_form_a_terminal_dossier():
+    evidence = candidate_evidence()
+    evidence["candidate_type"] = "strategy_lane:accumulation"
+    evidence["structure"] = {"metrics": {
+        "close": 16.36, "recent_low": 15.60, "prior_high": 16.56,
+        "ma10": 16.08, "volatility": 1.95,
+    }}
+    evidence["daily_basic"] = {
+        "close": 16.36, "turnover_rate": 6.56, "volume_ratio": 1.21,
+        "pe": 41.95, "pb": 2.86,
+    }
+    evidence["board_context"] = {
+        "sector_key": "881121", "label": "半导体", "net_amount": 5_776_777_717,
+        "exact_member_mapping": True,
+    }
+    # Vendor text can be unavailable or mojibake; exact same-day industry
+    # membership remains a valid exposure check and must not become "later".
+    evidence["flow_raw"] = {"vendor_row": []}
+    dossier = build_dossier(evidence, as_of_date=date(2026, 9, 15), holding=False)
+    assert dossier.status == "passed"
+    assert dossier.evidence_snapshot["geometry"]["support"] == 15.60
+    assert next(g for g in dossier.gates if g.gate_key == "G1").verdict == "pass"
+    assert next(g for g in dossier.gates if g.gate_key == "G4").verdict == "pass"
+
+
 def test_independent_downside_gate_does_not_accept_missing_geometry():
     gate = independent_downside_gate(None, [])
     assert gate.verdict == "unknown"
@@ -95,3 +125,43 @@ def test_holding_plan_warning_precedes_stop_and_cap_is_a_policy_limit():
     assert float(plan.stop_price) < warning < close
     assert plan.max_position_pct == Decimal("25")
     assert plan.metadata["current_position_weight_pct"] == 81.5
+
+
+def test_holding_failure_cannot_rollback_or_downgrade_new_buy_lane():
+    committed = {
+        "status": "completed", "candidate_dossiers": 2, "passed_candidates": 1,
+        "rejected_candidates": 1, "incomplete_candidates": 0, "trade_plans": 1,
+        "dossier_receipts": ["candidate-1"], "plan_receipts": ["buy-1"],
+    }
+    with (
+        patch("app.decision_research_service.refresh_new_buy_research_and_plans", return_value=committed),
+        patch("app.decision_research_service.refresh_holding_research_and_plans", side_effect=RuntimeError("broker stale")),
+    ):
+        result = refresh_decision_research_and_plans(object(), date(2026, 9, 4))
+    assert result["status"] == "completed"
+    assert result["new_buy"] == committed
+    assert result["holdings"]["status"] == "blocked"
+    assert result["passed_candidates"] == 1
+    assert result["plan_receipts"] == ["buy-1"]
+
+
+def test_stale_portfolio_never_enters_holding_research():
+    class Transaction:
+        def __enter__(self): return object()
+        def __exit__(self, *_args): return False
+
+    class Database:
+        def transaction(self): return Transaction()
+
+    stale = {
+        "observed_at": datetime(2026, 9, 1, 15, 18, tzinfo=ZoneInfo("Asia/Shanghai")),
+        "positions": [{"symbol": "600664.SH", "name": "哈药股份"}],
+    }
+    with (
+        patch("app.decision_research_service.latest_exact_portfolio", return_value=stale),
+        patch("app.decision_research_service.holding_evidence") as holding_evidence,
+    ):
+        result = refresh_holding_research_and_plans(Database(), date(2026, 9, 4))
+    assert result["status"] == "blocked"
+    assert result["holding_dossiers"] == 0
+    holding_evidence.assert_not_called()

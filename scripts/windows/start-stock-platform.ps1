@@ -2,13 +2,15 @@
 param(
     [string]$PlatformRoot = 'G:\StockPlatform',
     [string]$RepositoryRoot = '',
-    [int]$ApiPort = 5681
+    [int]$ApiPort = 5681,
+    [ValidateRange(60,1800)][int]$MigrationTimeoutSeconds = 900
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if (-not $RepositoryRoot) { $RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')) }
-Import-Module (Join-Path $PSScriptRoot 'runtime-observability.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'runtime-observability.psm1')
+Import-Module (Join-Path $PSScriptRoot 'background-process.psm1')
 
 function Read-EnvFile {
     # Returns a hashtable instead of injecting every key into the process
@@ -133,19 +135,25 @@ try {
     }
     Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
 
-Push-Location $serviceRoot
+$migrationRunId = "migration-$PID-$([DateTimeOffset]::Now.ToString('yyyyMMddTHHmmss'))"
+[void](Set-RuntimeState -PlatformRoot $root -Service 'database-migration' -State @{
+    status='running'; run_id=$migrationRunId; started_at=[DateTimeOffset]::Now.ToString('o');
+    supervisor_pid=$PID; timeout_seconds=$MigrationTimeoutSeconds
+})
 try {
-    # database_bootstrap.py is invoked in-process via the call operator, which
-    # has no equivalent of Start-Process -Environment, so the required keys
-    # are set on the process environment only for the duration of this call
-    # and removed immediately afterward in the finally block below.
-    foreach ($key in $environment.Keys) { Set-Item -Path "Env:$key" -Value $environment[$key] }
-    & $python '.\database_bootstrap.py' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "database bootstrap/upgrade failed with exit code $LASTEXITCODE" }
-} finally {
-    foreach ($key in $environment.Keys) { Remove-Item -Path "Env:$key" -ErrorAction SilentlyContinue }
-    Pop-Location
+    $bootstrap = Invoke-ConsoleFreeCommand -FilePath $python -Arguments @('.\database_bootstrap.py') `
+        -WorkingDirectory $serviceRoot -Environment $environment -TimeoutSeconds $MigrationTimeoutSeconds
+    if ($bootstrap.ExitCode -ne 0) { throw "database migration exit $($bootstrap.ExitCode): $($bootstrap.Stdout) $($bootstrap.Stderr)" }
+    [void](Set-RuntimeState -PlatformRoot $root -Service 'database-migration' -State @{
+        status='completed'; run_id=$migrationRunId; finished_at=[DateTimeOffset]::Now.ToString('o')
+    })
+} catch {
+    [void](Set-RuntimeState -PlatformRoot $root -Service 'database-migration' -State @{
+        status='failed'; run_id=$migrationRunId; finished_at=[DateTimeOffset]::Now.ToString('o'); error=$_.Exception.Message
+    })
+    throw
 }
+if ($bootstrap.ExitCode -ne 0) { throw "database bootstrap/upgrade failed with exit code $($bootstrap.ExitCode)" }
 
 $runtimeRun = Start-RuntimeSupervisor -PlatformRoot $root -RepositoryRoot $repository -Service 'quant-api' `
     -Executable $python -WorkingDirectory $serviceRoot `

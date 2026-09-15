@@ -61,7 +61,7 @@ def merge_cross_section(
         if difference > Decimal("0.005"):
             conflicts.append({
                 "symbol": symbol, "vendor_close": str(vendor_close),
-                "tencent_close": str(quote_close), "relative_difference": str(difference),
+                "ohlc_close": str(quote_close), "relative_difference": str(difference),
             })
             continue
         name = str(vendor.get("name") or quote.get("name") or symbol)
@@ -98,7 +98,7 @@ def merge_cross_section(
             **quote, "ts_code": symbol, "name": name,
             "pct_chg": vendor.get("pct_chg") if vendor.get("pct_chg") is not None else quote.get("pct_chg"),
             "turnover_rate": vendor.get("turnover_rate"), "volume_ratio": vendor.get("volume_ratio"),
-            "main_net": vendor.get("main_net"), "provider_basis": "longhuvip+tencent",
+            "main_net": vendor.get("main_net"), "provider_basis": "longhuvip_licensed_dated_ohlc",
             "flow_convention": vendor.get("flow_convention"),
         })
     coverage = len(daily) / len(vendor_rows) if vendor_rows else 0.0

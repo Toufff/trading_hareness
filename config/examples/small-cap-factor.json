@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "factors": [
+    {"key": "small_cap", "enabled": true, "weight": 0.12, "strategies": ["accumulation", "pullback"]}
+  ]
+}

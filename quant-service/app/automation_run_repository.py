@@ -149,7 +149,7 @@ def run_recorded(database: Any, *, task_key: str, run_key: str, operation: Any,
                 as_of_date=as_of_date, methodology_version=methodology_version,
                 input_summary=input_summary,
             )
-        if resumed["status"] == "completed":
+        if resumed["status"] == "completed" and (resumed.get('output_summary') or {}).get('status') not in {'blocked','failed','partial'}:
             summary = resumed.get("output_summary")
             resumed_result = dict(summary) if isinstance(summary, dict) else {}
             resumed_result.setdefault("status", "completed")
@@ -162,7 +162,11 @@ def run_recorded(database: Any, *, task_key: str, run_key: str, operation: Any,
                 fail_run(connection, run_id, error)
             raise
         with database.transaction() as connection:
-            finish_run(connection, run_id, output_summary={"status": result.get("status")} if isinstance(result, dict) else {})
+            outcome = result.get('status') if isinstance(result,dict) else None
+            terminal_status = outcome if outcome in {'blocked','failed','partial'} else 'completed'
+            summary = {key:result[key] for key in ('status','reason','error','as_of_date','trade_date','run_id')
+                       if isinstance(result,dict) and key in result}
+            finish_run(connection, run_id, status=terminal_status, output_summary=summary)
         return result
     finally:
         if in_flight_run_keys is not None:

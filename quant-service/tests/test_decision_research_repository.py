@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from app.decision_research_repository import holding_evidence
+from app.decision_research_repository import holding_evidence, latest_candidate_evidence
 
 
 class _Result:
@@ -68,3 +68,62 @@ class HoldingEvidenceUsesCanonicalBarsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LaneCandidateEvidenceTests(unittest.TestCase):
+    def test_nine_lane_review_plan_precedes_legacy_candidate_table(self) -> None:
+        planned = [{
+            "run_id": "run-1", "rank": 0, "symbol": "002185.SZ", "name": "华天科技",
+            "candidate_type": "strategy_lane:accumulation", "score": Decimal("66.25"),
+            "structure": {"metrics": {"close": 16.36}}, "board_context": {},
+            "risk_flags": [], "daily_basic": {}, "basic_available_at": None,
+            "main_net_amount": Decimal("1"), "flow_raw": {}, "flow_available_at": None,
+            "amount": Decimal("10"), "close": Decimal("16.36"), "pre_close": Decimal("16"),
+            "volume": Decimal("1"), "bar_available_at": None,
+        }]
+
+        class Connection:
+            calls = 0
+
+            def execute(self, sql: str, _params: tuple[Any, ...]) -> _Result:
+                self.calls += 1
+                self.last_sql = sql
+                if "jsonb_array_elements" in sql:
+                    return _Result(rows=planned)
+                raise AssertionError("legacy single-strategy query must not run when lane plan exists")
+
+        connection = Connection()
+        result = latest_candidate_evidence(connection, date(2026, 9, 15), 12)
+        self.assertEqual([row["symbol"] for row in result], ["002185.SZ"])
+        self.assertIn("strategy_lanes", connection.last_sql)
+        self.assertEqual(connection.calls, 1)
+
+    def test_old_dates_without_lane_plan_keep_bounded_legacy_fallback(self) -> None:
+        class Connection:
+            calls = 0
+
+            def execute(self, sql: str, _params: tuple[Any, ...]) -> _Result:
+                self.calls += 1
+                if "jsonb_array_elements" in sql:
+                    return _Result(rows=[])
+                if "SELECT 1 FROM quant.post_close_strategy_runs" in sql:
+                    return _Result(row=None)
+                self.legacy_sql = sql
+                return _Result(rows=[{"symbol": "600001.SH"}])
+
+        connection = Connection()
+        result = latest_candidate_evidence(connection, date(2026, 8, 1), 12)
+        self.assertEqual(result, [{"symbol": "600001.SH"}])
+        self.assertIn("post_close_strategy_candidates", connection.legacy_sql)
+        self.assertEqual(connection.calls, 3)
+
+    def test_empty_current_lane_plan_does_not_resurrect_legacy_candidates(self) -> None:
+        class Connection:
+            def execute(self, sql: str, _params: tuple[Any, ...]) -> _Result:
+                if "jsonb_array_elements" in sql:
+                    return _Result(rows=[])
+                if "SELECT 1 FROM quant.post_close_strategy_runs" in sql:
+                    return _Result(row={"?column?": 1})
+                raise AssertionError("legacy candidates must remain isolated")
+
+        self.assertEqual(latest_candidate_evidence(Connection(), date(2026, 9, 15), 12), [])

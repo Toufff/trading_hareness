@@ -1,5 +1,11 @@
 # Shared peer runtime
 
+Current lightServer incident/deployment addendum: [PEER_POOL_RECOVERY_20260914.md](PEER_POOL_RECOVERY_20260914.md).
+The later same-host routing fix and repeated load/outage acceptance are in
+[PEER_PRIVATE_TUNNEL_20260914.md](PEER_PRIVATE_TUNNEL_20260914.md).
+It records the two active writer profiles, immutable hotfix, outage acceptance and rollback;
+the generic research-only topology below is not the complete live deployment inventory.
+
 This deployment keeps the authoritative trading database on the owner's
 `G:\StockPlatform` disk while allowing one reviewed collaborator to run the
 same research code in an isolated Docker environment. It does not expose a
@@ -56,37 +62,164 @@ control of the `stockpeer` rootless Docker daemon, not root access and not the
 host's rootful Docker socket. A container escape therefore does not grant
 lightServer root privileges.
 
+## How the peer actually reaches the database
+
+The authoritative store has no network listener at all, yet a container on a
+cloud host 1,000 km away reads and writes it. Both statements are true, and
+the reason is worth stating explicitly because it decides where the security
+boundary really is.
+
+The database is a portable PostgreSQL 16.15 under the platform root — not a
+system install, not a Windows service, not in `PATH`:
+
+```text
+G:\StockPlatform\runtime\postgresql-16.15\bin\postgres.exe -D G:\StockPlatform\data\postgresql16
+G:\StockPlatform\data\postgresql16     3.8 GB   (pg_wal 1.7 GB, same spindle, no separate tablespace)
+G:\StockPlatform\config\postgresql-stock-platform.conf
+```
+
+`G:` is the workstation's only mechanical disk (HGST `HUH721212ALE601`, 10.9 TB,
+`MediaType = HDD`); the machine's other four volumes are SSD. Nothing starts the
+server at boot: `start-stock-dashboard.ps1` probes it with `pg_isready` and, if
+needed, runs `pg_ctl start`, and that script is driven by the 30-second watchdog
+loop. **The watchdog is the service manager for this deployment** — see
+"Windows runtime observability".
+
+Its exposure is closed:
+
+```text
+listen_addresses = '127.0.0.1'
+port             = 55432
+pg_hba.conf      local + 127.0.0.1/32 + ::1/128, scram-sha-256   (no network rule at all)
+```
+
+The reverse tunnel does not bypass `pg_hba`; it manufactures a loopback
+connection. The owner's machine dials **out** and asks the far end to publish a
+loopback listener that flows back down the same connection:
+
+```text
+ssh -NT -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+    -R 127.0.0.1:15432:127.0.0.1:55432 \
+    -R 127.0.0.1:15681:127.0.0.1:5681  lightServer1
+```
+
+Five hops, end to end:
+
+```text
+1. peer app container      PGHOST=db-tunnel PGPORT=5432 PGUSER=stock_peer
+        v  container network
+2. db-tunnel sidecar       ssh -L 0.0.0.0:5432:127.0.0.1:15432 stockpeer@<host> -p 3535
+        v  (it SSHes back into lightServer itself, purely to pull a host-loopback
+           port into the Docker network so sibling containers can address it)
+3. lightServer             127.0.0.1:15432   (held by sshd, loopback-only)
+        v  reverse tunnel, dialled outbound by the owner
+4. owner workstation       127.0.0.1:55432
+        v
+5. postgres.exe -D G:\StockPlatform\data\postgresql16
+```
+
+From the server's point of view every peer session is a local connection from
+`127.0.0.1`, which is why the second `pg_hba` line admits it. Three consequences
+follow, and they are the ones that matter operationally:
+
+- **The boundary is the two forwarded ports, not the machine list.** The
+  collaborator cannot log in to the workstation — the tunnel is outbound and
+  nothing listens in the other direction — but for as long as those ports
+  exist, the `quant` schema is reachable with the grants described below.
+- **There is no replica and no local copy.** lightServer has no PostgreSQL
+  binary and no data volume of consequence (`/var/lib/quant` is 0 bytes);
+  every peer query traverses the tunnel to the workstation's mechanical disk.
+- **The kill switch is unilateral and immediate.** Stopping the
+  `trading-hareness-shared-peer-tunnels` task removes `15432`/`15681` within
+  seconds. It needs no password change, no key removal, and no access to the
+  collaborator's host.
+
+## Verifying the access path
+
+Do not trust the privilege statements in this file; re-measure them. Effective
+grants, from the owner side:
+
+```sql
+select has_table_privilege('stock_peer','quant.canonical_bars_daily','SELECT')  as sel,
+       has_table_privilege('stock_peer','quant.canonical_bars_daily','INSERT')  as ins,
+       has_table_privilege('stock_peer','quant.canonical_bars_daily','UPDATE')  as upd,
+       has_table_privilege('stock_peer','quant.canonical_bars_daily','DELETE')  as del,
+       has_table_privilege('stock_peer','quant.canonical_bars_daily','TRUNCATE') as trunc;
+
+select rolname, rolinherit, rolconnlimit, rolconfig from pg_roles where rolname = 'stock_peer';
+select g.rolname as member_of from pg_auth_members m
+  join pg_roles r on r.oid = m.member join pg_roles g on g.oid = m.roleid
+ where r.rolname = 'stock_peer';
+```
+
+End to end from inside the peer container, which proves the whole chain rather
+than the grant alone. The write is rolled back, so it changes nothing:
+
+```bash
+docker exec trading-hareness-peer-quant-research-1 python3 -c "
+import os, psycopg
+c = psycopg.connect(host=os.environ['PGHOST'], port=os.environ['PGPORT'],
+                    dbname=os.environ['PGDATABASE'], user=os.environ['PGUSER'],
+                    password=os.environ['PGPASSWORD'], connect_timeout=10)
+try:
+    print(c.execute('select current_database(), current_user, inet_server_port()').fetchone())
+    print('read_only =', c.execute('show transaction_read_only').fetchone()[0])
+    print('rows =', c.execute(\"update quant.universe_members set updated_at = updated_at \"
+                              \"where symbol = (select min(symbol) from quant.universe_members)\").rowcount)
+finally:
+    c.rollback(); c.close()
+"
+```
+
+A correct result reports `inet_server_port() = 55432` — the workstation's
+PostgreSQL, not anything local to lightServer.
+
 ## Ownership and writer policy
 
 - `G:\StockPlatform\data\postgresql16` is the only authoritative quant store.
 - The owner's local collector is the only scheduled market-data writer by
   default. `PEER_BACKGROUND_TASKS_ENABLED=false` prevents duplicate scans.
-- **The peer is a read-only database principal.** `stock_peer` is `REVOKE`d
-  from the application role (`quant_app`) and set `NOINHERIT NOCREATEDB
-  NOCREATEROLE` with a connection limit, then explicitly re-granted only
-  `CONNECT`/`USAGE`/`SELECT` on the `quant` and `public` schemas (with
-  matching `ALTER DEFAULT PRIVILEGES`); the `quant` database session itself
-  is set `default_transaction_read_only=on` for that role, with a bounded
-  `statement_timeout`/`idle_in_transaction_session_timeout`. Peer credentials
-  can still open a session and run ad hoc `SELECT`s for research, but cannot
-  `INSERT`/`UPDATE`/`DELETE` into `quant`, and cannot run a schema migration
-  against it — **migrations against the authoritative `quant` database are
-  owner-only**, run from the owner's Windows workstation through the normal
-  `alembic upgrade head` / release-publish path, never from a peer session.
-  The peer's own `trading_hareness_peer_n8n` database is unaffected by this
-  and remains writable by the peer, since it is not the authoritative quant
-  store.
-- **Peer startup does not write to the provider control plane.** The peer's
-  `quant-research` service is started with
-  `QUANT_CONTROL_PLANE_WRITES_ENABLED=false` in
-  `deploy/shared-peer/compose.yaml`, on top of
-  `PEER_BACKGROUND_TASKS_ENABLED=false` above — the intent is that neither
-  scheduled background scans nor an explicit request from the peer container
-  can open a provider write path at all. (As of this writing `main.py` does
-  not yet read that variable to enforce it; see the work-package report that
-  edits `main.py` next for the exact wiring. Until that lands, the read-only
-  database grants above are the real backstop, not this application-level
-  switch.)
+- **The peer is a full read/write principal on `quant`. This is a deliberate
+  owner decision, not an oversight.** An earlier revision of this document
+  claimed the opposite in bold — that `stock_peer` had been revoked from
+  `quant_app`, set `NOINHERIT` with a connection limit, re-granted only
+  `SELECT`, and pinned to `default_transaction_read_only=on`. That lockdown
+  was designed during the 2026-09 audit but **was never applied**: the owner
+  chose to keep the collaborator fully trusted instead. The document was not
+  corrected at the time, so for two days it asserted a protection that did
+  not exist. Measured against production on 2026-09-05:
+
+  | Documented claim | Measured |
+  | --- | --- |
+  | revoked from `quant_app` | `stock_peer` **is** a member of `quant_app` |
+  | `NOINHERIT` | `rolinherit = t` |
+  | connection limit | `rolconnlimit = -1` |
+  | `SELECT` only | `SELECT/INSERT/UPDATE/DELETE/TRUNCATE` all true |
+  | `default_transaction_read_only=on` | `rolconfig` empty; session reports `off` |
+  | bounded statement/idle timeouts | none set |
+  | cannot write to `quant` | `UPDATE` from the peer container affected 1 row |
+
+  Treat every privilege statement in this file as a claim to be re-measured,
+  not as a guarantee. The queries that produce the table above are in
+  "Verifying the access path" below.
+
+  Schema migrations remain owner-only **by convention, not by permission**:
+  they run from the Windows workstation through `alembic upgrade head` and the
+  release-publish path. Nothing in the database currently prevents a peer
+  session from running one.
+
+  The peer's own `trading_hareness_peer_n8n` database is a separate store and
+  is not part of the authoritative `quant` data.
+- **`QUANT_CONTROL_PLANE_WRITES_ENABLED=false` is set in
+  `deploy/shared-peer/compose.yaml`, but the running peer stack predates it.**
+  The deployed container's environment does not carry the variable (verified
+  2026-09-05), so provider-capability rows are still rewritten with process
+  defaults on every peer restart. Today this is value-neutral — neither side
+  configures `TUSHARE_*_REQUESTS_PER_MINUTE`, so both compute the same
+  defaults — and it only becomes a real divergence once real rate limits are
+  configured on the owner. Recreating the peer stack from the current compose
+  closes it. Note also that `main.py` does not yet read the variable, so the
+  compose setting is a declaration of intent rather than an enforced control.
 - Database access can be revoked immediately by disabling the `stock_peer`
   role or removing the peer's SSH key — see "Revocation" below.
 - Peer credentials are long-lived static credentials: the SSH key, database
@@ -105,13 +238,26 @@ lightServer root privileges.
 - List endpoints cap each physical vendor page at 300 and paginate larger
   logical reads in the adapter. Explicit quote baskets are independently
   bounded by `QUANT_LONGHU_INTRADAY_MAX_SYMBOLS`.
-- The lightServer `authorized_keys` entries for both the peer (`stockpeer`)
-  and the owner's reverse-tunnel account carry `restrict,port-forwarding`
-  plus explicit `permitopen`/`permitlisten` clauses scoped to the exact
-  loopback ports each side needs (`15432`/`15681`/`15682`), instead of an
-  unrestricted key. The owner's tunnel scripts prefer a dedicated,
-  restricted `stockowner` account over a general-purpose SSH alias when one
-  is configured — see "Owner bootstrap" below.
+- **The `stockpeer` keys are unrestricted, and `stockpeer` has a login
+  shell.** An earlier revision claimed both peer and owner keys carried
+  `restrict,port-forwarding` with `permitopen`/`permitlisten` scoped to
+  `15432`/`15681`/`15682`. Measured 2026-09-05: all four keys in
+  `/home/stockpeer/.ssh/authorized_keys` carry **no options at all**, and
+  `stockpeer` is `/bin/bash`, not `nologin`. Because `stockpeer` is UID 1002
+  and owns `/run/user/1002/docker.sock`, an interactive login there is full
+  control of the rootless Docker daemon — including `docker inspect`, which
+  exposes the database password and the shared read key held in the peer
+  container's environment. This follows from the same "fully trusted
+  collaborator" decision as the database grants above.
+
+  One of those keys (`SHA256:BSQJGt3o…`, comment `stockpeer@ultratouf`) has
+  authenticated from three distinct addresses — the owner's own workstation
+  and two external networks. It is a shared private key, so it cannot be
+  revoked for one holder without revoking it for all of them.
+
+  Only the **owner's** `stockowner` key is restricted, and it is currently
+  inert: enabling it breaks the dashboard tunnel because the same SSH target
+  is used to run remote commands. See the warning under "Owner bootstrap".
 
 ## Owner bootstrap
 
@@ -154,11 +300,16 @@ ssh lightServer1 "AUTHORIZED_KEY_FILE=/root/stockpeer_ed25519.pub bash /root/pro
 pwsh .\scripts\shared-peer\install-shared-tunnel-task.ps1
 ```
 
-**Existing `authorized_keys` entries on lightServer must be updated to the
-restricted form** (see "Ownership and writer policy" above): re-running
-`provision-lightserver-rootless.sh` with `AUTHORIZED_KEY_FILE` set
+**Existing `authorized_keys` entries on lightServer are not updated in place**:
+re-running `provision-lightserver-rootless.sh` with `AUTHORIZED_KEY_FILE` set
 regenerates the peer's entry with the `restrict,port-forwarding,permitopen=...`
-prefix automatically; an existing unrestricted entry does not update itself.
+prefix, but an existing unrestricted entry does not update itself.
+
+> This is the procedure for restricting the peer key, not a statement that the
+> peer key is restricted. The owner has decided to keep the collaborator fully
+> trusted, so the `stockpeer` entries are deliberately left unrestricted — see
+> "Ownership and writer policy" above. Do not run this against `stockpeer`
+> without confirming that decision has changed.
 
 Generate and install a dedicated, restricted owner-tunnel key instead of
 continuing to use a general-purpose SSH alias (e.g. `lightServer1`, which may
@@ -397,9 +548,60 @@ Failure behavior is deliberate:
 - If migration validation fails, do not promote. Delete/recreate only the
   candidate database and retain production.
 
+## Open risks and TODO
+
+These follow from the trust model above and are **not** proposals to reduce the
+collaborator's access — the owner has decided that question. They exist because
+a trusted principal can still make a mistake, and because the current recovery
+floor is a full day.
+
+Measured 2026-09-05:
+
+```text
+wal_level       = replica
+archive_mode    = off            <- no WAL archiving
+archive_command = (disabled)     <- no point-in-time recovery
+```
+
+The only recovery points are the nightly `pg_dump` files under
+`G:\StockPlatform\backups\<date>\`. Combined with a single authoritative copy,
+no replica, `TRUNCATE` held by more than one principal, and market data that
+cannot be re-fetched once its session has passed (2026-09-02 and 09-03 are
+permanently absent for exactly this reason), one mistaken statement costs up to
+a day of data with no way to recover the middle.
+
+- [ ] **Enable WAL archiving.** Moves the recovery floor from "last night's
+      dump" to minutes. Touches nobody's permissions. Requires one PostgreSQL
+      restart, so schedule it outside market hours. Highest value of the three.
+- [ ] **Add a read replica on lightServer.** The database is ~2.1 GB and
+      lightServer has ~17 GB free (of which ~3.1 GB is reclaimable Docker build
+      cache). Logical replication would serve peer reads locally, survive a
+      tunnel outage, and take read load off the workstation's mechanical disk.
+- [ ] **Increase backup frequency.** One nightly run at 20:30 today; a second
+      run after the close would halve the worst-case window on its own.
+- [ ] **Recreate the peer stack from the current compose** so the deployed
+      container actually carries `QUANT_CONTROL_PLANE_WRITES_ENABLED=false`,
+      and wire `main.py` to honour it.
+- [ ] **Start the runtime without an interactive logon.** The watchdog task
+      that brings up PostgreSQL, the API and the tunnels is registered with
+      `LogonType=Interactive` and only a logon trigger, so after a reboot
+      nothing starts until an operator signs in to the workstation.
+
 ## Revocation
 
-Disable database access immediately:
+The fastest lever is owner-side and needs no access to the collaborator's host
+— stopping the reverse tunnel removes `15432`/`15681` within seconds, and the
+peer's database sessions and gateway calls fail immediately:
+
+```powershell
+Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels'
+Disable-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels'
+```
+
+`Disable` matters: the task carries a two-minute supervising trigger that would
+otherwise bring the tunnel straight back up.
+
+To revoke at the database instead:
 
 ```sql
 ALTER ROLE stock_peer NOLOGIN;
@@ -407,4 +609,8 @@ ALTER ROLE stock_peer NOLOGIN;
 
 Then remove the collaborator's public key from
 `/home/stockpeer/.ssh/authorized_keys` and stop the rootless Compose project.
+Note that the key to remove is shared with the owner's own workstation (see the
+`authorized_keys` bullet above), so removing it also breaks owner automation
+that authenticates as `stockpeer` until a replacement key is installed.
+
 No local market service restart is required to revoke the peer.

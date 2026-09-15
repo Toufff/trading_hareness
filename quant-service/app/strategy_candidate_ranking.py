@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Callable
+from .short_term_liquidity import evidence as liquidity_evidence
 
 
 def select(
@@ -78,7 +79,13 @@ def select(
             decision = "watch"
         candidate.update({"score": round(max(0.0, min(score, 100.0)), 2), "decision": decision,
                           "confidence": round(min(0.7, 0.25 + score / 200), 3), "risk_flags": flags})
-    candidates.sort(key=lambda item: (item["decision"] != "research_candidate", -item["score"], item["symbol"]))
+        liq = liquidity_evidence(candidate['turnover'], turnover_rate)
+        # Intraday amount is cumulative-to-now, not a manufactured daily
+        # total. Change research display rank, never the existing signal gate.
+        liq['scope'] = 'intraday_cumulative_only_discounted'
+        candidate['liquidity'] = liq
+        candidate['research_rank_score'] = round(.60*candidate['score']+.40*liq['score'],2)
+    candidates.sort(key=lambda item: (item["decision"] != "research_candidate", -item["research_rank_score"], item["symbol"]))
     return candidates[:limit]
 
 

@@ -133,20 +133,34 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
         sha_arr.append(payload_sha256)
         normalized_arr.append(json.dumps(normalized, ensure_ascii=False, sort_keys=True))
         index_arr.append(index)
+    # ``RETURNING`` can only project columns of the target table, so the
+    # caller-side ``row_index`` cannot be selected out of the INSERT itself
+    # (doing so fails with `column "row_index" does not exist`, which aborted
+    # the whole transaction and blocked every post-close daily refresh). Keep
+    # the input as a CTE and join the inserted rows back onto it by the
+    # conflict key instead; ``capability`` and ``market`` are constants here,
+    # so the remaining four columns identify a row uniquely. ``DO UPDATE``
+    # rather than ``DO NOTHING`` matters: it makes conflicting rows come back
+    # from RETURNING too, so every input bar gets its observation id.
     observation_rows = connection.execute(
-        """INSERT INTO quant.raw_market_observations(provider_key,capability,market,symbol,effective_at,available_at,payload_sha256,normalized,payload)
-           SELECT t.provider_key,'daily_bar','cn',t.symbol,t.effective_at,t.available_at,t.payload_sha256,
-                  t.normalized_json::jsonb,t.normalized_json::jsonb
-             FROM unnest(%s::text[],%s::text[],%s::timestamptz[],%s::timestamptz[],%s::text[],%s::text[],%s::integer[])
-                  AS t(provider_key,symbol,effective_at,available_at,payload_sha256,normalized_json,row_index)
-           ON CONFLICT(provider_key,capability,market,symbol,effective_at,payload_sha256) DO UPDATE SET available_at=EXCLUDED.available_at
-           RETURNING row_index,observation_id""",
+        """WITH input AS (
+               SELECT * FROM unnest(%s::text[],%s::text[],%s::timestamptz[],%s::timestamptz[],%s::text[],%s::text[],%s::integer[])
+                    AS t(provider_key,symbol,effective_at,available_at,payload_sha256,normalized_json,row_index)
+           ), inserted AS (
+               INSERT INTO quant.raw_market_observations(provider_key,capability,market,symbol,effective_at,available_at,payload_sha256,normalized,payload)
+               SELECT i.provider_key,'daily_bar','cn',i.symbol,i.effective_at,i.available_at,i.payload_sha256,
+                      i.normalized_json::jsonb,i.normalized_json::jsonb
+                 FROM input i
+               ON CONFLICT(provider_key,capability,market,symbol,effective_at,payload_sha256) DO UPDATE SET available_at=EXCLUDED.available_at
+               RETURNING observation_id,provider_key,symbol,effective_at,payload_sha256
+           )
+           SELECT i.row_index,ins.observation_id
+             FROM inserted ins
+             JOIN input i
+               ON i.provider_key=ins.provider_key AND i.symbol=ins.symbol
+              AND i.effective_at=ins.effective_at AND i.payload_sha256=ins.payload_sha256""",
         (provider_arr, symbol_arr, effective_arr, avail_arr, sha_arr, normalized_arr, index_arr),
     ).fetchall()
-    # ``RETURNING`` on a plain projection preserves the scan order of a single
-    # INSERT statement in every observed PostgreSQL version, but relying on
-    # order is unnecessary: row_index round-trips through the query, so the
-    # mapping below is correct even if that ever changed.
     observation_id_by_index = {row["row_index"]: row["observation_id"] for row in observation_rows}
 
     # --- market_bars_daily: last bar per (symbol, trading_date) wins ---
@@ -214,17 +228,70 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
             (issue_symbols, issue_dates, issue_details),
         )
 
-    # --- provider close-conflict issues (only for bars whose canonical close disagrees) ---
-    conflict_symbols, conflict_dates, conflict_details = [], [], []
-    for bar in bars:
-        existing = existing_canonical.get((bar.symbol, bar.trading_date))
-        if existing and existing["close"] and abs(Decimal(existing["close"]) - bar.close) > Decimal("0.001"):
-            conflict_symbols.append(bar.symbol)
-            conflict_dates.append(bar.trading_date)
-            conflict_details.append(json.dumps({
-                "existing_provider": existing["selected_provider"], "existing_close": str(existing["close"]),
-                "incoming_provider": bar.source, "incoming_close": str(bar.close),
-            }))
+    # --- canonical_bars_daily: fold every bar for a key in input order ---
+    # Taking only the last bar per key and comparing it against the pre-batch
+    # row silently loses the provider-priority contract whenever one batch
+    # carries two providers for the same (symbol, trading_date): the later,
+    # lower-priority close would win where a sequential upsert_daily_bar loop
+    # keeps the higher-priority one. Folding reproduces that loop exactly -
+    # each bar is weighed against the selection in force at its turn, not
+    # against the state the batch started from.
+    indexes_by_key: dict[tuple[str, Any], list[int]] = {}
+    for index, bar in enumerate(bars):
+        indexes_by_key.setdefault((bar.symbol, bar.trading_date), []).append(index)
+
+    replace_keys: list[tuple[str, Any]] = []
+    update_only_keys: list[tuple[str, Any]] = []
+    canonical_final: dict[tuple[str, Any], dict[str, Any]] = {}
+    # A close conflict is judged against the canonical close in force when the
+    # bar is processed, which inside one batch is the close an earlier bar of
+    # the same batch just won with - not the pre-batch row, which for a first
+    # import does not exist at all and would report no conflict ever.
+    conflict_symbols: list[str] = []
+    conflict_dates: list[Any] = []
+    conflict_details: list[str] = []
+    for key, indexes in indexes_by_key.items():
+        existing = existing_canonical.get(key)
+        merged_source_ids = ([str(value) for value in (existing["source_observation_ids"] or [])] if existing else [])
+        selected_provider = str(existing["selected_provider"]) if existing else None
+        selected_close = Decimal(existing["close"]) if existing and existing["close"] else None
+        winning_index: int | None = None
+        for index in indexes:
+            merged_source_ids.append(str(observation_id_by_index[index]))
+            bar = bars[index]
+            if selected_close is not None and abs(selected_close - bar.close) > Decimal("0.001"):
+                conflict_symbols.append(bar.symbol)
+                conflict_dates.append(bar.trading_date)
+                conflict_details.append(json.dumps({
+                    "existing_provider": selected_provider, "existing_close": str(selected_close),
+                    "incoming_provider": bar.source, "incoming_close": str(bar.close),
+                }))
+            if selected_provider is None or provider_priority(bar.source) <= provider_priority(selected_provider):
+                selected_provider = bar.source
+                selected_close = bar.close
+                winning_index = index
+        source_ids_json = json.dumps(merged_source_ids)
+        if winning_index is None:
+            # Every bar in this batch lost to the provider already on record;
+            # only the evidence trail grows.
+            canonical_final[key] = {"source_ids_json": source_ids_json}
+            update_only_keys.append(key)
+            continue
+        bar = bars[winning_index]
+        canonical_final[key] = {
+            "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close, "pre_close": bar.pre_close,
+            "volume": bar.volume, "amount": promoted_amount[winning_index],
+            "adj_factor": bar.adj_factor if bar.adj_factor is not None else (existing["adj_factor"] if existing else None),
+            "is_suspended": bar.is_suspended if bar.is_suspended is not None else (existing["is_suspended"] if existing else False),
+            "limit_up": bar.limit_up if bar.limit_up is not None else (existing["limit_up"] if existing else None),
+            "limit_down": bar.limit_down if bar.limit_down is not None else (existing["limit_down"] if existing else None),
+            "selected_provider": bar.source,
+            "source_ids_json": source_ids_json,
+            "quality_status": "partial" if amount_mismatch[winning_index] else "fresh",
+            "available_at": available_at_utc[winning_index],
+        }
+        replace_keys.append(key)
+
     if conflict_symbols:
         connection.execute(
             """INSERT INTO quant.data_quality_issues(capability,symbol,trading_date,severity,code,message,details)
@@ -233,30 +300,6 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
                  FROM unnest(%s::text[],%s::date[],%s::text[]) AS t(symbol,trading_date,details)""",
             (conflict_symbols, conflict_dates, conflict_details),
         )
-
-    # --- canonical_bars_daily: provider-priority replace decision, last bar per key wins ---
-    replace_keys: list[tuple[str, Any]] = []
-    update_only_keys: list[tuple[str, Any]] = []
-    canonical_final: dict[tuple[str, Any], dict[str, Any]] = {}
-    for key, index in last_index_by_key.items():
-        bar = bars[index]
-        existing = existing_canonical.get(key)
-        merged_source_ids = ([str(value) for value in (existing["source_observation_ids"] or [])] if existing else [])
-        merged_source_ids.append(str(observation_id_by_index[index]))
-        replace = existing is None or provider_priority(bar.source) <= provider_priority(str(existing["selected_provider"]))
-        canonical_final[key] = {
-            "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close, "pre_close": bar.pre_close,
-            "volume": bar.volume, "amount": promoted_amount[index],
-            "adj_factor": bar.adj_factor if bar.adj_factor is not None else (existing["adj_factor"] if existing else None),
-            "is_suspended": bar.is_suspended if bar.is_suspended is not None else (existing["is_suspended"] if existing else False),
-            "limit_up": bar.limit_up if bar.limit_up is not None else (existing["limit_up"] if existing else None),
-            "limit_down": bar.limit_down if bar.limit_down is not None else (existing["limit_down"] if existing else None),
-            "selected_provider": bar.source if replace else str(existing["selected_provider"]),
-            "source_ids_json": json.dumps(merged_source_ids),
-            "quality_status": "partial" if amount_mismatch[index] else "fresh",
-            "available_at": available_at_utc[index],
-        }
-        (replace_keys if replace else update_only_keys).append(key)
 
     if replace_keys:
         rows = [canonical_final[key] for key in replace_keys]

@@ -1,25 +1,32 @@
 <script lang="ts">
-import { defineComponent, inject } from 'vue';
+import { defineAsyncComponent, defineComponent, inject, reactive, toRefs } from 'vue';
 import { Refresh } from '@element-plus/icons-vue';
 import VChart from 'vue-echarts';
 import { dashboardContextKey } from '../../dashboard-context';
 import TenDayLeaderRotationPanel from '../../components/TenDayLeaderRotationPanel.vue';
 import ResearchOnlyBadge from '../../components/ResearchOnlyBadge.vue';
+import ShortTermLanesPanel from '../../components/ShortTermLanesPanel.vue';
 
 type BoardItem = { sector_key: string };
 
 export default defineComponent({
   name: 'CloseReviewTab',
-  components: { VChart, TenDayLeaderRotationPanel, ResearchOnlyBadge },
+  components: { VChart, TenDayLeaderRotationPanel, ResearchOnlyBadge, ShortTermLanesPanel,
+    GovernanceReviewPanel: defineAsyncComponent(() => import('../../components/StrategyGovernancePanel.vue')) },
   setup() {
     const dashboard = inject(dashboardContextKey);
     if (!dashboard) throw new Error('research tab requires the dashboard shell context');
-    return { ...dashboard, Refresh };
+    // The shell exposes proxyRefs; spreading it snapshots initial null values.
+    // Retain property references so late API responses and refreshes render.
+    return { ...toRefs(reactive(dashboard)), Refresh };
   },
 });
 </script>
 
 <template>
+  <p><a href="/intraday">盘中九策略：分时、入场情景与收盘对照</a></p>
+  <GovernanceReviewPanel />
+  <ShortTermLanesPanel :summary="postCloseStrategyRun?.summary" />
 
   <el-alert title="复盘页只读取已保存的板块报告、市场快照和龙虎榜。龙虎榜是收盘后公开的次日观察背景，不参与当天盘中评分。" type="info" :closable="false" show-icon/>
   <el-row :gutter="14" class="section-gap">

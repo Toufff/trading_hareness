@@ -35,8 +35,8 @@ export default defineConfig({
       output: {
         manualChunks: {
           vue: ['vue'],
-          'element-plus': ['element-plus', '@element-plus/icons-vue'],
-          charts: ['echarts', 'vue-echarts'],
+          // Let Rollup split the actually used components. Importing the root
+          // libraries here pulled ~1.5 MB into every standalone page startup.
         },
       },
     },

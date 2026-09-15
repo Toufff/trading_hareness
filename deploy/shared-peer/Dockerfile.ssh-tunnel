@@ -1,7 +1,11 @@
 FROM alpine:3.20
 
-RUN apk add --no-cache openssh-client netcat-openbsd
+RUN apk add --no-cache openssh-client netcat-openbsd postgresql16-client
 COPY deploy/shared-peer/ssh-tunnel-entrypoint.sh /usr/local/bin/ssh-tunnel-entrypoint
-RUN chmod 0755 /usr/local/bin/ssh-tunnel-entrypoint
+COPY deploy/shared-peer/ssh-tunnel-healthcheck.sh /usr/local/bin/ssh-tunnel-healthcheck
+RUN chmod 0755 /usr/local/bin/ssh-tunnel-entrypoint /usr/local/bin/ssh-tunnel-healthcheck
+
+HEALTHCHECK --interval=15s --timeout=10s --retries=3 --start-period=10s \
+  CMD ["/usr/local/bin/ssh-tunnel-healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/ssh-tunnel-entrypoint"]

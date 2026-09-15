@@ -27,16 +27,18 @@ def latest_strategy_review(database: Any, session: str | None) -> dict[str, Any]
     return {"review": row, "notice": "复盘是点时证据与情景准备，不是自动委托。"}
 
 
-def latest_post_close_strategy(database: Any) -> dict[str, Any]:
+def latest_post_close_strategy(database: Any, as_of_date=None) -> dict[str, Any]:
     with database.transaction() as connection:
         latest_attempt = connection.execute(
             """SELECT run_id,run_key,as_of_date,model_version,status,source_status,summary,created_at,updated_at
-                 FROM quant.post_close_strategy_runs ORDER BY as_of_date DESC,updated_at DESC LIMIT 1"""
+                 FROM quant.post_close_strategy_runs WHERE (%s::date IS NULL OR as_of_date=%s)
+                 ORDER BY as_of_date DESC,(summary ? 'strategy_lanes') DESC,updated_at DESC LIMIT 1""", (as_of_date,as_of_date)
         ).fetchone()
         latest_completed = connection.execute(
             """SELECT run_id,run_key,as_of_date,model_version,status,source_status,summary,created_at,updated_at
                  FROM quant.post_close_strategy_runs WHERE status IN ('completed','partial')
-                 ORDER BY as_of_date DESC,updated_at DESC LIMIT 1"""
+                   AND (%s::date IS NULL OR as_of_date=%s)
+                 ORDER BY as_of_date DESC,(summary ? 'strategy_lanes') DESC,updated_at DESC LIMIT 1""", (as_of_date,as_of_date)
         ).fetchone()
         if not latest_completed:
             return {
@@ -47,6 +49,10 @@ def latest_post_close_strategy(database: Any) -> dict[str, Any]:
                 "candidates": [],
                 "notice": "尚未得到可用的盘后蓄势/首动研究。",
             }
+        from .recommendation_pool.repository import LATEST_SQL, attach
+        attach(latest_completed, connection.execute(LATEST_SQL, (latest_completed['run_id'],)).fetchone())
+        if latest_attempt and latest_attempt['run_id'] == latest_completed['run_id']:
+            latest_attempt = latest_completed
         rows = connection.execute(
             """SELECT c.rank,c.symbol,i.name,c.candidate_type,c.score,c.structure,c.board_context,c.risk_flags,
                           c.discovered_at,c.expires_at,c.reason_codes,c.source_snapshot

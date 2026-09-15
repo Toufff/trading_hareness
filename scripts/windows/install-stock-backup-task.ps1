@@ -34,9 +34,18 @@ foreach ($path in @($backupScript, $hiddenHost)) {
 
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
 $wscript = (Get-Command wscript.exe -ErrorAction Stop).Source
-$innerCommand = '"{0}" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{1}" -RuntimeEnv "{2}" -PlatformRoot "{3}"' -f `
-    $pwsh, $backupScript, $RuntimeEnv, $platform
-$action = New-ScheduledTaskAction -Execute $wscript -Argument ('"{0}" "{1}"' -f $hiddenHost, $innerCommand) -WorkingDirectory $RepositoryRoot
+# One quoting level only: every token below is a separate wscript argument and
+# run-hidden.vbs reassembles them. Passing the inner command as a single
+# pre-quoted argument silently breaks - the nested quotes are eaten by the
+# command-line parser, Shell.Run fails, and wscript.exe blocks on a modal error
+# dialog until the task hits its execution time limit.
+$innerArguments = @(
+    $pwsh, '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', $backupScript, '-RuntimeEnv', $RuntimeEnv, '-PlatformRoot', $platform
+)
+$taskArguments = (@($hiddenHost) + $innerArguments |
+    ForEach-Object { if ($_ -match '\s') { '"{0}"' -f $_ } else { $_ } }) -join ' '
+$action = New-ScheduledTaskAction -Execute $wscript -Argument $taskArguments -WorkingDirectory $RepositoryRoot
 $trigger = New-ScheduledTaskTrigger -Daily -At $StartTime
 $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Hours 2) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 10) `

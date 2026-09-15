@@ -45,3 +45,26 @@ body { margin: 0; min-width: 320px; background: #f4f6f9; }
 .realtime-service-role { min-height: 38px; margin: 9px 0 12px; color: #64728a; font-size: 12px; line-height: 1.55; }
 .realtime-service-error { display: block; width: 100%; margin-top: 10px; font-size: 11px; }
 @media (max-width: 760px) { .side-nav { width: 62px !important; padding: 13px 7px; }.brand { justify-content: center; padding: 8px 0 20px; }.brand div, .menu .el-menu-item span, .side-state { display: none; }.menu .el-menu-item { justify-content: center; padding: 0 !important; }.menu .el-icon { margin-right: 0; }.topbar { height: auto; min-height: 70px; padding: 14px 16px; }.topbar span { display: none; }.content { padding: 16px; }.table-toolbar { flex-wrap: wrap; }.table-toolbar .el-input, .table-toolbar .el-select, .study-form .el-input { width: 100%; }.card-header { align-items: flex-start; flex-wrap: wrap; }.card-header > span { width: 100%; }.card-header > .el-space { width: 100%; }.el-card__body { padding: 12px; }.card-actions { justify-content: stretch; }.card-actions .el-button { flex: 1; }.board-flow-toolbar { align-items: stretch; flex-direction: column; }.board-flow-focus { width: 100%; }.board-flow-chart { height: 430px; } }
+
+/* Keep all six destinations readable without reserving a desktop sidebar on a phone.
+   Extra specificity is intentional: Element Plus CSS is loaded with lazy chunks. */
+@media (max-width: 760px) {
+  .app-shell.el-container { flex-direction: column; width: 100%; min-width: 0; }
+  .app-shell > .side-nav { width: 100% !important; flex: none; padding: 8px 12px; overflow: visible; }
+  .app-shell > .el-container { width: 100%; min-width: 0; }
+  .app-shell .brand { justify-content: flex-start; padding: 4px 2px 8px; gap: 8px; }
+  .app-shell .brand div { display: block; }
+  .app-shell .brand strong { font-size: 14px; }
+  .app-shell .brand span { display: none; }
+  .app-shell .brand .el-icon { font-size: 20px; }
+  .app-shell .menu { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; width: 100%; border: 0; }
+  .app-shell .menu .el-menu-item { height: 42px; line-height: 42px; margin: 0; min-width: 0; font-size: 12px; }
+  .app-shell .menu .el-menu-item span { display: inline; }
+  .app-shell .menu .el-icon { width: 18px; font-size: 16px; margin-right: 4px; }
+  .app-shell .side-state { display: flex; justify-content: space-between; align-items: center; margin: 4px 0 0; padding: 4px 2px 0; }
+  .app-shell .side-state .el-button { color: #c0d1eb; }
+  .app-shell .topbar { width: 100%; min-width: 0; padding: 12px; gap: 10px; }
+  .app-shell .topbar h1 { font-size: 18px; }
+  .app-shell .content { width: 100%; min-width: 0; max-width: 100%; padding: 12px; }
+  .app-shell .research-tabs { min-width: 0; width: 100%; }
+}

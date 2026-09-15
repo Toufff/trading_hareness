@@ -10,7 +10,10 @@ param(
     # with access denied *after* the old runtime is stopped, forcing an
     # automatic rollback); Interactive works unelevated but only while the
     # operator is logged on.  Empty = pick S4U when elevated, else Interactive.
-    [ValidateSet('', 'S4U', 'Interactive')][string]$TaskLogonType = ''
+    [ValidateSet('', 'S4U', 'Interactive')][string]$TaskLogonType = '',
+    # Used for a UI-disruption repair: never restart a known-noisy old task
+    # merely because activation/health verification of the new release failed.
+    [switch]$KeepStoppedOnFailure
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,7 +33,7 @@ if (-not $TaskLogonType) {
     $elevated = ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     $TaskLogonType = if ($elevated) { 'S4U' } else { 'Interactive' }
     if (-not $elevated) {
-        Write-Warning "Not elevated: registering scheduled tasks with LogonType Interactive (S4U requires an elevated session). Pass -TaskLogonType S4U from an elevated shell to avoid the per-launch console flash."
+        Write-Verbose 'Using Interactive logon with the console-free GUI launcher; S4U requires elevation.'
     }
 }
 
@@ -67,6 +70,7 @@ function Stop-ProductionRuntime {
     if (Test-Path -LiteralPath $stop -PathType Leaf) { & $stop -PlatformRoot $platform | Out-Null }
     Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels' -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName 'trading-hareness-dashboard-runtime' -ErrorAction SilentlyContinue
+    Stop-ScheduledTask -TaskName 'trading-hareness-post-close-pipeline' -ErrorAction SilentlyContinue
 }
 
 function Get-LogonTypeArguments {
@@ -80,17 +84,40 @@ function Get-LogonTypeArguments {
 
 function Start-ProductionRuntime {
     param([string]$RuntimeRoot)
+    # Migrations can legitimately take minutes on the archival HDD. Finish
+    # them under the lifecycle lock before starting a watchdog/HTTP deadline;
+    # otherwise the watchdog repeatedly aborts a healthy index build at 90s.
+    $platformStarter = Join-Path $RuntimeRoot 'scripts\windows\start-stock-platform.ps1'
+    & $platformStarter -RepositoryRoot $RuntimeRoot -PlatformRoot $platform | Out-Null
     $dashboardInstaller = Join-Path $RuntimeRoot 'scripts\windows\install-stock-dashboard-task.ps1'
     $tunnelInstaller = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+    $postCloseInstaller = Join-Path $RuntimeRoot 'scripts\windows\install-post-close-pipeline-task.ps1'
     $dashboardExtra = Get-LogonTypeArguments -Installer $dashboardInstaller
     $tunnelExtra = Get-LogonTypeArguments -Installer $tunnelInstaller
+    $postCloseExtra = Get-LogonTypeArguments -Installer $postCloseInstaller
     & $dashboardInstaller -RepositoryRoot $RuntimeRoot -PlatformRoot $platform @dashboardExtra | Out-Null
-    & $tunnelInstaller -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
-        -PlatformRoot $platform @tunnelExtra | Out-Null
+    $sharedPeerStartupError = $null
+    try {
+        & $tunnelInstaller -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
+            -PlatformRoot $platform @tunnelExtra | Out-Null
+    } catch {
+        $sharedPeerStartupError = $_.Exception.Message
+        Write-Warning "Local runtime was installed, but shared-peer tunnel startup is degraded: $sharedPeerStartupError"
+    }
+    & $postCloseInstaller -RepositoryRoot $RuntimeRoot -PlatformRoot $platform @postCloseExtra | Out-Null
+    $newsInstaller = Join-Path $RuntimeRoot 'scripts\windows\install-event-research-delivery-task.ps1'
+    if (Test-Path -LiteralPath $newsInstaller) {
+        $newsExtra = Get-LogonTypeArguments -Installer $newsInstaller
+        & $newsInstaller -RepositoryRoot $RuntimeRoot -PlatformRoot $platform @newsExtra | Out-Null
+    } else {
+        Get-ScheduledTask -TaskName 'trading-hareness-event-research-delivery' -ErrorAction SilentlyContinue |
+            Disable-ScheduledTask | Out-Null
+    }
+    return [pscustomobject]@{ shared_peer_startup_error = $sharedPeerStartupError }
 }
 
 function Wait-ProductionHealth {
-    param([string]$RuntimeRoot, [int]$TimeoutSeconds = 150)
+    param([string]$RuntimeRoot, [int]$TimeoutSeconds = 150, [string]$SharedPeerStartupError = '')
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         Start-Sleep -Seconds 2
@@ -106,7 +133,40 @@ function Wait-ProductionHealth {
     # this script and the callee), so $LASTEXITCODE here would only reflect
     # whatever native command the script happened to run last, not its own
     # success/failure.
-    & (Join-Path $RuntimeRoot 'scripts\shared-peer\verify-shared-runtime.ps1') | Out-Null
+    if ($SharedPeerStartupError) {
+        return [pscustomobject]@{
+            local_api = 'ok'
+            dashboard_adapter = 'ok'
+            shared_runtime = 'degraded'
+            remote_owner_api = 'unavailable'
+            remote_peer_api = 'unavailable'
+            shared_error = $SharedPeerStartupError
+        }
+    }
+    try {
+        $shared = & (Join-Path $RuntimeRoot 'scripts\shared-peer\verify-shared-runtime.ps1')
+        return [pscustomobject]@{
+            local_api = 'ok'
+            dashboard_adapter = 'ok'
+            shared_runtime = 'ok'
+            remote_owner_api = $shared.remote_owner_api
+            remote_peer_api = $shared.remote_peer_api
+            shared_error = $null
+        }
+    } catch {
+        # The friend-facing reverse tunnel is an independent optional surface.
+        # It must remain observable, but an outage on lightServer must not roll
+        # back a release whose local API and dashboard are already healthy.
+        Write-Warning "Local release is healthy, but shared-peer verification is degraded: $($_.Exception.Message)"
+        return [pscustomobject]@{
+            local_api = 'ok'
+            dashboard_adapter = 'ok'
+            shared_runtime = 'degraded'
+            remote_owner_api = 'unavailable'
+            remote_peer_api = 'unavailable'
+            shared_error = $_.Exception.Message
+        }
+    }
 }
 
 $gitStatus = @(& git -C $source status --porcelain=v1)
@@ -127,11 +187,28 @@ $finalRoot = Join-Path $layout.ReleasesRoot $releaseId
 if ((Test-Path -LiteralPath $stagingRoot) -or (Test-Path -LiteralPath $finalRoot)) { throw "Release already exists: $releaseId" }
 
 if (-not $SkipTests) {
+    foreach ($test in 'test-post-close-contract.ps1','test-live-runtime-state.ps1','test-stock-release-management.ps1','test-stock-release-safety.ps1','test-event-delivery-task.ps1','test-public-gateway-contract.ps1') {
+        Invoke-Checked -FilePath (Get-Command pwsh.exe -ErrorAction Stop).Source `
+            -Arguments @('-NoProfile','-File',(Join-Path $source "scripts\windows\tests\$test")) -WorkingDirectory $source
+    }
+    & (Join-Path $source 'scripts\windows\build-background-task-host.ps1') | Out-Null
+    Invoke-Checked -FilePath (Get-Command pwsh.exe -ErrorAction Stop).Source `
+        -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $source 'scripts\windows\tests\test-background-process.ps1')) `
+        -WorkingDirectory $source
+    Invoke-Checked -FilePath (Get-Command pwsh.exe -ErrorAction Stop).Source `
+        -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $source 'scripts\windows\tests\test-runtime-isolation.ps1')) `
+        -WorkingDirectory $source
     Invoke-Checked -FilePath (Get-Command pwsh.exe -ErrorAction Stop).Source `
         -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $source 'scripts\windows\tests\test-runtime-observability.ps1')) `
         -WorkingDirectory $source
     Invoke-Checked -FilePath (Join-Path $source '.venv\Scripts\python.exe') `
         -Arguments @('-m', 'unittest', 'discover', '-s', 'tests', '-q') -WorkingDirectory (Join-Path $source 'quant-service')
+    # unittest discovery does not execute pytest-style functions/fixtures.
+    # Keep both loaders while the suite is mixed; never call those tests passed
+    # merely because they were importable under unittest.
+    Invoke-Checked -FilePath (Join-Path $source '.venv\Scripts\python.exe') `
+        -Arguments @('-m', 'pytest', 'tests', '-q', '--disable-warnings') -WorkingDirectory (Join-Path $source 'quant-service')
+    Invoke-Checked -FilePath (Get-Command npm.cmd -ErrorAction Stop).Source -Arguments @('run', 'test') -WorkingDirectory (Join-Path $source 'frontend')
     Invoke-Checked -FilePath (Get-Command npm.cmd -ErrorAction Stop).Source -Arguments @('run', 'typecheck') -WorkingDirectory (Join-Path $source 'frontend')
     Invoke-Checked -FilePath (Get-Command npm.cmd -ErrorAction Stop).Source -Arguments @('run', 'build') -WorkingDirectory (Join-Path $source 'frontend')
     & git -C $source diff --check
@@ -143,6 +220,7 @@ $previousRelease = if ($previousState.PSObject.Properties['active_release']) { [
 $previousTarget = Get-StockCurrentReleaseTarget -PlatformRoot $platform
 $fallbackRoot = if ($previousTarget) { $previousTarget } else { $source }
 $activated = $false
+$activationAttempted = $false
 
 try {
     $app = Join-Path $stagingRoot 'app'
@@ -161,6 +239,7 @@ try {
     Copy-DirectorySnapshot -Source (Join-Path $source '.venv') -Destination (Join-Path $app '.venv')
     Copy-DirectorySnapshot -Source (Join-Path $source 'feishu-adapter\node_modules') -Destination (Join-Path $app 'feishu-adapter\node_modules')
     Copy-DirectorySnapshot -Source (Join-Path $source 'frontend\dist') -Destination (Join-Path $app 'frontend\dist')
+    Copy-DirectorySnapshot -Source (Join-Path $source 'scripts\windows\bin') -Destination (Join-Path $app 'scripts\windows\bin')
 
     # A plain directory copy of .venv does not rewrite the absolute paths
     # baked into it at creation time: pyvenv.cfg's `home`, and (more
@@ -232,16 +311,20 @@ try {
 
     Move-Item -LiteralPath $stagingRoot -Destination $finalRoot
     $newApp = Join-Path $finalRoot 'app'
+    $activationAttempted = $true
     Stop-ProductionRuntime -RuntimeRoot $fallbackRoot
     [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $releaseId)
-    Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath
-    Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath
+    $startup = Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath
+    $healthVerification = Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
+        -SharedPeerStartupError ([string]$startup.shared_peer_startup_error)
     $verification = [ordered]@{
         verified_at = [DateTimeOffset]::Now.ToString('o')
-        local_api = 'ok'
-        dashboard_adapter = 'ok'
-        remote_owner_api = 200
-        remote_peer_api = 200
+        local_api = $healthVerification.local_api
+        dashboard_adapter = $healthVerification.dashboard_adapter
+        shared_runtime = $healthVerification.shared_runtime
+        remote_owner_api = $healthVerification.remote_owner_api
+        remote_peer_api = $healthVerification.remote_peer_api
+        shared_error = $healthVerification.shared_error
     }
     [void](Set-StockReleaseState -PlatformRoot $platform -State @{
         active_release = $releaseId
@@ -266,25 +349,53 @@ try {
     }
 } catch {
     $failure = $_
-    if (-not $activated) {
+    if (-not $activated -and $activationAttempted) {
         try {
             # Stop whatever is currently active first -- if Set-StockCurrentRelease
             # above already flipped the junction to this (failing) release, that
             # is this release's own app path, so its own stop script is used to
             # tear down its own processes before anything is switched back.
             Stop-ProductionRuntime -RuntimeRoot $(if (Test-Path -LiteralPath $layout.CurrentPath) { $layout.CurrentPath } else { $fallbackRoot })
+            if ($KeepStoppedOnFailure) {
+                foreach ($taskName in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-dashboard-runtime') {
+                    Disable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
+                }
+            }
+            $rollbackCompatible = $false
             if ($previousRelease -and (Test-Path -LiteralPath (Get-StockReleaseAppPath -PlatformRoot $platform -ReleaseId $previousRelease) -PathType Container)) {
+                $candidateRuntime = Get-StockReleaseAppPath -PlatformRoot $platform -ReleaseId $previousRelease
+                & (Join-Path $source '.venv\Scripts\python.exe') (Join-Path $source 'scripts\check-release-schema.py') --candidate-runtime $candidateRuntime --env-file (Join-Path $platform 'config\runtime.env') | Out-Null
+                $rollbackCompatible = $LASTEXITCODE -eq 0
+            }
+            if ($rollbackCompatible) {
                 [void](Test-StockReleaseIntegrity -PlatformRoot $platform -ReleaseId $previousRelease)
                 [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $previousRelease)
-                Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath
-                Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath
+                if (-not $KeepStoppedOnFailure) {
+                    $rollbackStartup = Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath
+                    [void](Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
+                        -SharedPeerStartupError ([string]$rollbackStartup.shared_peer_startup_error))
+                }
                 [void](Set-StockReleaseState -PlatformRoot $platform -State @{
                     active_release = $previousRelease
                     previous_release = if ($previousState.PSObject.Properties['previous_release']) { $previousState.previous_release } else { $null }
-                    last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = 'verified_after_automatic_rollback' }
+                    last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = $(if ($KeepStoppedOnFailure) { 'disabled_after_failed_activation' } else { 'verified_after_automatic_rollback' }) }
                     last_failed_release = $releaseId
                     failure_message = $failure.Exception.Message
                 })
+            } elseif ($previousRelease -and (Test-Path -LiteralPath (Join-Path $finalRoot 'app') -PathType Container)) {
+                # Never activate old code that cannot recognize an applied DB
+                # migration. Keep the new tree addressable for forward repair.
+                foreach ($taskName in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-dashboard-runtime') {
+                    Disable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
+                }
+                [void](Set-StockReleaseState -PlatformRoot $platform -State @{
+                    active_release = $releaseId
+                    previous_release = $previousRelease
+                    last_failed_release = $releaseId
+                    last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = 'stopped_schema_incompatible_rollback' }
+                    failure_message = $failure.Exception.Message
+                })
+                Write-Warning 'Rollback refused: prior code cannot recognize the database schema; runtime stopped for forward repair.'
             } else {
                 # No previously-activated release to fall back to. Do not
                 # start production from the F: development checkout -- leave
@@ -310,7 +421,8 @@ try {
         # or later reactivated by name; rename it out of the way (kept, not
         # deleted, for forensics). By this point the junction no longer
         # points at $finalRoot in either branch above, so this is safe.
-        if (Test-Path -LiteralPath $finalRoot -PathType Container) {
+        $stillCurrent = Get-StockCurrentReleaseTarget -PlatformRoot $platform
+        if ((Test-Path -LiteralPath $finalRoot -PathType Container) -and -not ($stillCurrent -and $stillCurrent.StartsWith($finalRoot + '\', [StringComparison]::OrdinalIgnoreCase))) {
             $failedRoot = "$finalRoot.failed"
             if (Test-Path -LiteralPath $failedRoot) { Remove-Item -LiteralPath $failedRoot -Recurse -Force }
             Rename-Item -LiteralPath $finalRoot -NewName (Split-Path -Leaf $failedRoot) -ErrorAction SilentlyContinue

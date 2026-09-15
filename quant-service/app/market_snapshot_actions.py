@@ -152,10 +152,12 @@ class MarketSnapshotActions:
                      ), latest AS (
                        SELECT DISTINCT ON (o.symbol) o.symbol,o.provider_key,o.available_at,o.normalized
                        FROM quant.raw_market_observations o JOIN active a ON a.symbol=o.symbol
-                       WHERE o.capability='realtime_quote' AND o.available_at>=%s
+                       WHERE (o.capability='realtime_quote' OR (o.capability='settled_quote' AND %s))
+                         AND o.available_at>=%s
+                         AND (o.effective_at AT TIME ZONE 'Asia/Shanghai')::date=%s
                        ORDER BY o.symbol,o.available_at DESC
                      ) SELECT symbol,provider_key,available_at,normalized FROM latest""",
-                (request.universe_key, fresh_after),
+                (request.universe_key, request.session == 'close', fresh_after, exchange_date),
             ).fetchall()
             dated_rows = [
                 row for row in quote_rows
@@ -237,7 +239,7 @@ class MarketSnapshotActions:
         unlock recommendation decisions without a configured licensed feed.
         """
         observed_at = datetime.now(timezone.utc)
-        exchange_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+        exchange_date = request.exchange_date or observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
         minimum_universe, minimum_coverage, licensed_providers = thresholds()
         settings = public_quote_settings()
         symbols = await run_database(universe_symbols, request.universe_key)

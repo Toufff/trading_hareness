@@ -74,10 +74,13 @@ def _geometry_from_structure(evidence: dict[str, Any]) -> dict[str, float] | Non
     structure = evidence.get("structure")
     metrics = structure.get("metrics", {}) if isinstance(structure, dict) else {}
     close = _float(evidence.get("close") or _daily_basic(evidence).get("close"))
-    support = _float(metrics.get("support_price"))
-    resistance = _float(metrics.get("resistance_price"))
-    sma20 = _float(metrics.get("sma20"))
-    recent_range = _float(metrics.get("recent_range_pct"))
+    # The legacy scanner and the nine-lane scanner use different, explicit
+    # names for the same bounded geometry.  Accept both rather than forcing the
+    # decision closure back onto the legacy candidate table.
+    support = _float(metrics.get("support_price") or metrics.get("recent_low"))
+    resistance = _float(metrics.get("resistance_price") or metrics.get("prior_high"))
+    sma20 = _float(metrics.get("sma20") or metrics.get("ma10") or metrics.get("ma5"))
+    recent_range = _float(metrics.get("recent_range_pct") or metrics.get("volatility"))
     if not all(value and value > 0 for value in (close, support, resistance, sma20)):
         return None
     return {
@@ -180,6 +183,8 @@ def build_dossier(
     board_net = _float(board.get("net_amount") if "net_amount" in board else board.get("net_inflow"))
     board_percentile = _float(board.get("flow_percentile"))
     exact_mapping = bool(board.get("exact_member_mapping", True) and board.get("sector_key"))
+    industry_label = str(board.get("label") or "").strip() or None
+    exposure_label = theme or industry_label
     geometry_base = _geometry_from_bars(evidence) if holding else _geometry_from_structure(evidence)
     geometry = _trade_geometry(geometry_base, holding=holding) if geometry_base else None
     risk_flags = [str(flag) for flag in evidence.get("risk_flags", [])]
@@ -211,10 +216,12 @@ def build_dossier(
             evidence={"symbol": symbol, "name": name, "risk_flags": risk_flags},
         ),
         ResearchGate(
-            gate_key="G1", label=GATE_LABELS["G1"], verdict="pass" if exact_mapping and theme else "unknown",
-            conclusion=(f"同花顺行业归属为{board.get('label')}，供应商主题标签为“{theme}”。" if exact_mapping and theme
-                        else "缺少精确行业归属或主营主题标签，不能仅凭价格形态判断公司身份。"),
-            evidence={"industry": board.get("label"), "sector_key": board.get("sector_key"), "theme": theme,
+            gate_key="G1", label=GATE_LABELS["G1"], verdict="pass" if exact_mapping and exposure_label else "unknown",
+            conclusion=(f"同日精确行业成分归属为{industry_label}，供应商主题/行业暴露为“{exposure_label}”。"
+                        if exact_mapping and exposure_label
+                        else "缺少精确行业归属或业务暴露标签，不能仅凭价格形态判断公司身份。"),
+            evidence={"industry": industry_label, "sector_key": board.get("sector_key"), "theme": theme,
+                      "exposure_label": exposure_label,
                       "source": "longhuvip_composite"},
         ),
         ResearchGate(
@@ -236,11 +243,11 @@ def build_dossier(
                       "industry": board.get("label")},
         ),
         ResearchGate(
-            gate_key="G4", label=GATE_LABELS["G4"], verdict="pass" if exact_mapping and theme else "unknown",
-            conclusion=(f"供应商行业成分与主题标签交叉指向“{board.get('label')} / {theme}”；"
+            gate_key="G4", label=GATE_LABELS["G4"], verdict="pass" if exact_mapping and exposure_label else "unknown",
+            conclusion=(f"同日精确行业成分与业务暴露指向“{industry_label} / {exposure_label}”；"
                         "这只确认短线方向暴露，不等同于公司利润受益核验。"
-                        if exact_mapping and theme else "尚未形成公司与当期方向之间的精确映射。"),
-            evidence={"exact_member_mapping": exact_mapping, "theme": theme,
+                        if exact_mapping and exposure_label else "尚未形成公司与当期方向之间的精确映射。"),
+            evidence={"exact_member_mapping": exact_mapping, "theme": theme, "exposure_label": exposure_label,
                       "boundary": "market-structure exposure; not a forecast of profit contribution"},
         ),
         ResearchGate(
@@ -300,7 +307,14 @@ def build_dossier(
     )
 
 
-def _holding_plan(dossier: DecisionResearchDossier, position: dict[str, Any], as_of_at: datetime) -> PersonalTradePlanInput:
+def _holding_plan(
+    dossier: DecisionResearchDossier,
+    position: dict[str, Any],
+    as_of_at: datetime,
+    *,
+    portfolio_snapshot_id: Any = None,
+    portfolio_observed_at: Any = None,
+) -> PersonalTradePlanInput:
     geometry = dossier.evidence_snapshot["geometry"]
     weight = _float(position.get("position_weight_pct")) or 0.0
     rejected = dossier.status == "rejected"
@@ -338,6 +352,9 @@ def _holding_plan(dossier: DecisionResearchDossier, position: dict[str, Any], as
         risk_flags=[gate.conclusion for gate in dossier.gates if gate.verdict in {"fail", "advisory"}],
         metadata={"research_status": dossier.status, "strategy_family": dossier.strategy_family,
                   "source": "decision_research_closure", "current_position_weight_pct": weight,
+                  "portfolio_snapshot_id": str(portfolio_snapshot_id) if portfolio_snapshot_id is not None else None,
+                  "portfolio_observed_at": str(portfolio_observed_at) if portfolio_observed_at is not None else None,
+                  "portfolio_quantity": str(position.get("quantity")) if position.get("quantity") is not None else None,
                   "risk_warning_price": round(risk_warning, 4)},
     )
 
@@ -379,17 +396,55 @@ def _new_buy_plan(dossier: DecisionResearchDossier, as_of_at: datetime) -> Perso
     )
 
 
-def refresh_decision_research_and_plans(
-    database: Any, as_of_date: date, *, account_key: str = "citics-primary", candidate_limit: int = 12,
+def refresh_new_buy_research_and_plans(
+    database: Any, as_of_date: date, *, candidate_limit: int = 12,
 ) -> dict[str, Any]:
-    """Persist terminal research and plans for one settled close."""
-    # The close itself is the evidence boundary.  Using a future evening time
-    # made plans invisible between 15:00 and that arbitrary timestamp.
+    """Commit account-independent candidate research in its own transaction."""
+    as_of_at = datetime.combine(as_of_date, time(15, 10), tzinfo=SHANGHAI)
+    with database.transaction() as connection:
+        candidate_rows = latest_candidate_evidence(connection, as_of_date, candidate_limit)
+        candidate_dossiers = [
+            build_dossier(row, as_of_date=as_of_date, holding=False) for row in candidate_rows
+        ]
+        dossier_receipts = [persist_dossier(connection, dossier) for dossier in candidate_dossiers]
+        passed_candidates = [dossier for dossier in candidate_dossiers if dossier.status == "passed"]
+        plan_receipts = [
+            persist_trade_plan(connection, _new_buy_plan(dossier, as_of_at))
+            for dossier in passed_candidates
+        ]
+    return {
+        "status": "completed", "as_of_date": str(as_of_date),
+        "candidate_dossiers": len(candidate_dossiers),
+        "passed_candidates": len(passed_candidates),
+        "rejected_candidates": sum(dossier.status == "rejected" for dossier in candidate_dossiers),
+        "incomplete_candidates": sum(dossier.status == "incomplete" for dossier in candidate_dossiers),
+        "trade_plans": len(plan_receipts), "dossier_receipts": dossier_receipts,
+        "plan_receipts": plan_receipts, "depends_on_broker": False,
+    }
+
+
+def refresh_holding_research_and_plans(
+    database: Any, as_of_date: date, *, account_key: str = "citics-primary",
+) -> dict[str, Any]:
+    """Commit broker-dependent holding research in a separate transaction."""
     as_of_at = datetime.combine(as_of_date, time(15, 10), tzinfo=SHANGHAI)
     with database.transaction() as connection:
         portfolio = latest_exact_portfolio(connection, account_key)
+        from .broker_snapshot_freshness import broker_freshness
+        portfolio_observed_at = (portfolio or {}).get("observed_at")
+        # The stored portfolio is a historical input, not a claim of the live
+        # account now. Use the same eligibility policy as the personal brief.
+        freshness = broker_freshness(portfolio, datetime.now(SHANGHAI), as_of_date)
+        if not freshness["current"]:
+            return {
+                "status": "blocked", "as_of_date": str(as_of_date),
+                "portfolio_observed_at": portfolio_observed_at,
+                "holding_dossiers": 0, "trade_plans": 0,
+                "dossier_receipts": [], "plan_receipts": [],
+                "reason": "portfolio_snapshot_missing_or_older_than_market",
+                "depends_on_broker": True,
+            }
         holdings = list((portfolio or {}).get("positions") or [])
-        candidate_rows = latest_candidate_evidence(connection, as_of_date, candidate_limit)
         holding_pairs: list[tuple[DecisionResearchDossier, dict[str, Any]]] = []
         for position in holdings:
             evidence = holding_evidence(connection, as_of_date, str(position["symbol"]))
@@ -401,34 +456,63 @@ def refresh_decision_research_and_plans(
                     evidence, as_of_date=as_of_date, holding=True, position=position,
                 ), position))
         holding_dossiers = [item[0] for item in holding_pairs]
-        candidate_dossiers = [
-            build_dossier(row, as_of_date=as_of_date, holding=False) for row in candidate_rows
-        ]
-        dossier_receipts = [persist_dossier(connection, dossier) for dossier in [*holding_dossiers, *candidate_dossiers]]
+        dossier_receipts = [persist_dossier(connection, dossier) for dossier in holding_dossiers]
         plan_receipts = []
         for dossier, position in holding_pairs:
             if dossier.evidence_snapshot.get("geometry"):
-                plan_receipts.append(persist_trade_plan(connection, _holding_plan(dossier, position, as_of_at)))
-        passed_candidates = [dossier for dossier in candidate_dossiers if dossier.status == "passed"]
-        for dossier in passed_candidates:
-            plan_receipts.append(persist_trade_plan(connection, _new_buy_plan(dossier, as_of_at)))
+                plan_receipts.append(persist_trade_plan(connection, _holding_plan(
+                    dossier, position, as_of_at,
+                    portfolio_snapshot_id=(portfolio or {}).get("snapshot_id"),
+                    portfolio_observed_at=(portfolio or {}).get("observed_at"),
+                )))
     return {
-        "status": "completed",
-        "as_of_date": str(as_of_date),
+        "status": "completed", "as_of_date": str(as_of_date),
         "portfolio_observed_at": (portfolio or {}).get("observed_at"),
-        "holding_dossiers": len(holding_dossiers),
-        "candidate_dossiers": len(candidate_dossiers),
-        "passed_candidates": len(passed_candidates),
-        "rejected_candidates": sum(dossier.status == "rejected" for dossier in candidate_dossiers),
-        "incomplete_candidates": sum(dossier.status == "incomplete" for dossier in candidate_dossiers),
-        "trade_plans": len(plan_receipts),
-        "dossier_receipts": dossier_receipts,
-        "plan_receipts": plan_receipts,
-        "boundary": "human_decision_support_only; no broker order path",
+        "holding_dossiers": len(holding_dossiers), "trade_plans": len(plan_receipts),
+        "dossier_receipts": dossier_receipts, "plan_receipts": plan_receipts,
+        "depends_on_broker": True,
+    }
+
+
+def refresh_decision_research_and_plans(
+    database: Any, as_of_date: date, *, account_key: str = "citics-primary", candidate_limit: int = 12,
+) -> dict[str, Any]:
+    """Run independent new-buy and holding write lanes.
+
+    New-buy results commit first.  A broker-side failure is returned as a
+    holding-only diagnostic and cannot roll back or downgrade stock advice.
+    """
+    new_buy = refresh_new_buy_research_and_plans(
+        database, as_of_date, candidate_limit=candidate_limit,
+    )
+    try:
+        holdings = refresh_holding_research_and_plans(
+            database, as_of_date, account_key=account_key,
+        )
+    except Exception as error:
+        holdings = {
+            "status": "blocked", "as_of_date": str(as_of_date),
+            "error": f"{type(error).__name__}: {error}", "depends_on_broker": True,
+        }
+    return {
+        "status": new_buy["status"], "as_of_date": str(as_of_date),
+        "new_buy": new_buy, "holdings": holdings,
+        # Compatibility counters remain explicitly sourced from their lanes.
+        "portfolio_observed_at": holdings.get("portfolio_observed_at"),
+        "holding_dossiers": holdings.get("holding_dossiers", 0),
+        "candidate_dossiers": new_buy["candidate_dossiers"],
+        "passed_candidates": new_buy["passed_candidates"],
+        "rejected_candidates": new_buy["rejected_candidates"],
+        "incomplete_candidates": new_buy["incomplete_candidates"],
+        "trade_plans": new_buy["trade_plans"] + holdings.get("trade_plans", 0),
+        "dossier_receipts": [*new_buy["dossier_receipts"], *holdings.get("dossier_receipts", [])],
+        "plan_receipts": [*new_buy["plan_receipts"], *holdings.get("plan_receipts", [])],
+        "boundary": "independent new-buy and holding transactions; no broker order path",
     }
 
 
 __all__ = [
     "HOLDING_SHORT_TERM_CAP_PCT", "STRATEGY_FAMILY", "build_dossier", "independent_downside_gate",
-    "refresh_decision_research_and_plans",
+    "refresh_decision_research_and_plans", "refresh_new_buy_research_and_plans",
+    "refresh_holding_research_and_plans",
 ]

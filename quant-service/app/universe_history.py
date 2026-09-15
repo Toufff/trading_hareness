@@ -20,6 +20,7 @@ def sync_universe_membership_history(
     *,
     source: str,
     priority: int = 100,
+    close_missing: bool = True,
 ) -> dict[str, int]:
     """Open/close PIT intervals for one authoritative live-universe snapshot."""
     symbols = sorted({str(symbol).strip().upper() for symbol in active_symbols if symbol})
@@ -29,7 +30,7 @@ def sync_universe_membership_history(
               AND history.effective_from=%s
               AND NOT (history.symbol=ANY(%s))""",
         (universe_key, exchange_date, symbols),
-    ).rowcount
+    ).rowcount if close_missing else 0
     closed = connection.execute(
         """UPDATE quant.universe_membership_history history
               SET effective_to=%s,updated_at=now(),
@@ -38,7 +39,7 @@ def sync_universe_membership_history(
               AND history.effective_from<%s
               AND NOT (history.symbol=ANY(%s))""",
         (exchange_date - timedelta(days=1), source, universe_key, exchange_date, symbols),
-    ).rowcount
+    ).rowcount if close_missing else 0
     if symbols:
         opened = connection.execute(
             """INSERT INTO quant.universe_membership_history(

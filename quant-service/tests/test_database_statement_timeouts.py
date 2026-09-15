@@ -173,6 +173,8 @@ class _FakeAsyncPoolConnectionContext:
 
 
 class _FakeAsyncPool:
+    closed = False
+
     def __init__(self, connection: _FakeAsyncConnection) -> None:
         self._connection = connection
 
@@ -186,7 +188,7 @@ class _FakeAsyncPool:
         return _FakeAsyncPoolConnectionContext(self._connection)
 
     def get_stats(self):
-        return {}
+        return {'pool_size': 1, 'pool_available': 1, 'requests_waiting': 0}
 
 
 class TransactionStatementTimeoutOverrideTests(unittest.TestCase):

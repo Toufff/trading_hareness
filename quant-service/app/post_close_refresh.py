@@ -17,7 +17,7 @@ from .runtime_leases import LeaseLostError
 logger = get_logger(__name__)
 
 
-POST_CLOSE_RECEIPT_VERSION = "post-close-refresh-v5"
+POST_CLOSE_RECEIPT_VERSION = "post-close-refresh-v6-dated-evidence"
 
 
 async def record_stage_with_receipt(
@@ -90,7 +90,13 @@ def _finish_stage_receipt(db: Any, run_id: str, status: str, result: Any) -> Non
             connection, run_id, status=status,
             # Persist the normalized status computed by the wrapper rather
             # than trusting every legacy action to return one consistently.
-            output_summary={"status": status},
+            output_summary={"status": status, **{
+                key: result[key] for key in ('reason', 'error', 'trade_date', 'as_of_date', 'provider',
+                    'daily_rows', 'flow_rows', 'board_rows', 'coverage', 'quote_count', 'universe_count',
+                    'quality_flags', 'candidate_dossiers', 'passed_candidates', 'incomplete_candidates',
+                    'holding_dossiers', 'trade_plans', 'depends_on_broker')
+                if isinstance(result, dict) and key in result
+            }},
         )
 
 

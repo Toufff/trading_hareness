@@ -21,8 +21,11 @@ class PostCloseStrategyServiceTests(unittest.TestCase):
         coverage_result = MagicMock()
         coverage_result.fetchone.return_value = {"symbols": 2}
         rows_result = MagicMock()
-        rows_result.fetchall.return_value = [{"symbol": "000001.SZ", "close": 10}]
-        connection.execute.side_effect = [coverage_result, rows_result]
+        bars = [{"symbol": "000001.SZ", "close": 10, "trading_date": date(2026, 8, day)} for day in range(4,15)]
+        rows_result.fetchall.return_value = bars
+        calendar_result = MagicMock()
+        calendar_result.fetchall.return_value = [{"calendar_date": r["trading_date"]} for r in bars]
+        connection.execute.side_effect = [coverage_result, rows_result, calendar_result]
         exact_context = {"000001.SZ": {"sector_key": "885001.TI"}}
         screen = MagicMock(return_value={"status": "completed", "candidates": []})
         as_of_date = date(2026, 8, 14)
@@ -36,7 +39,7 @@ class PostCloseStrategyServiceTests(unittest.TestCase):
         self.assertEqual(payload["status"], "completed")
         args, kwargs = screen.call_args
         self.assertEqual(args[:4], (as_of_date, 20, 2, 2))
-        self.assertEqual(args[4], [{"symbol": "000001.SZ", "close": 10}])
+        self.assertEqual(args[4], bars)
         self.assertEqual(args[5], exact_context)
         self.assertIn("daily_base_structure", kwargs)
 
@@ -49,7 +52,9 @@ class PostCloseStrategyServiceTests(unittest.TestCase):
         coverage_result.fetchone.return_value = {"symbols": 2}
         rows_result = MagicMock()
         rows_result.fetchall.return_value = []
-        connection.execute.side_effect = [coverage_result, rows_result]
+        calendar_result = MagicMock()
+        calendar_result.fetchall.return_value = []
+        connection.execute.side_effect = [coverage_result, rows_result, calendar_result]
         screen = MagicMock(return_value={"status": "completed", "candidates": []})
 
         candidates(

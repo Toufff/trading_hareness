@@ -8,23 +8,47 @@ research funnel, not in a human-facing decision brief.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from .broker_snapshot_freshness import broker_freshness
+from .broker_desktop_evidence import SOURCES as DESKTOP_SOURCES, validate_desktop_metadata
+from .broker_fact_sync_rules import validate_exact_totals
 
 
 CONTRACT_VERSION = "personal-decision-v1"
 BrokerVerification = Literal["verified_exact", "verified_partial"]
 PlanKind = Literal["holding", "new_buy"]
 PlanAction = Literal["hold", "observe", "buy_on_trigger", "reduce_on_trigger", "exit_on_trigger", "avoid"]
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def _timezone_aware(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must include a timezone offset")
     return value
+
+
+def _date_value(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.astimezone(SHANGHAI).date() if value.tzinfo else value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _market_trade_date(market_section: dict[str, Any] | None) -> date | None:
+    if not market_section:
+        return None
+    return _date_value(market_section.get("exchange_date") or market_section.get("trading_date"))
 
 
 class PriceZone(BaseModel):
@@ -80,9 +104,22 @@ class BrokerPortfolioSnapshotInput(BaseModel):
         symbols = [position.symbol for position in self.positions]
         if len(symbols) != len(set(symbols)):
             raise ValueError("positions must contain each symbol at most once")
-        if self.verification == "verified_exact" and self.total_market_value is not None:
+        if self.source in DESKTOP_SOURCES:
+            if self.verification != "verified_exact":
+                raise ValueError("BROKER_DESKTOP_EXACT_REQUIRED")
+            validate_desktop_metadata(self.metadata, self.source, self.observed_at, self.positions)
+            validate_exact_totals(
+                {"total_assets": self.total_asset, "market_value": self.total_market_value, "available_cash": self.cash},
+                [{"quantity": row.quantity, "available_quantity": row.sellable_quantity,
+                  "price": row.market_price, "market_value": row.market_value} for row in self.positions],
+            )
+        if self.verification == "verified_exact":
+            if any(value is None for value in (self.total_market_value, self.total_asset, self.cash)):
+                raise ValueError("verified_exact requires account total_asset, total_market_value and cash to reconcile")
             known_values = [position.market_value for position in self.positions]
-            if known_values and all(value is not None for value in known_values):
+            if any(value is None for value in known_values):
+                raise ValueError("verified_exact requires every position market_value to reconcile")
+            if all(value is not None for value in known_values):
                 position_total = sum((value for value in known_values if value is not None), Decimal("0"))
                 # Broker account totals and per-position rows are commonly rounded
                 # at different display precisions.  A one-per-mille tolerance keeps
@@ -91,6 +128,13 @@ class BrokerPortfolioSnapshotInput(BaseModel):
                 tolerance = max(Decimal("1.00"), self.total_market_value * Decimal("0.001"))
                 if abs(position_total - self.total_market_value) > tolerance:
                     raise ValueError("verified_exact position market values must reconcile to total_market_value")
+            if self.source == 'citics_mumu_luna' and not (
+                self.metadata.get('fresh_navigation_verified') is True
+                and self.metadata.get('complete_positions_verified') is True
+                and self.metadata.get('evidence')
+                and self.metadata.get('controller_model') == 'gpt-5.6-luna'
+            ):
+                raise ValueError('verified_exact CITIC observation requires fresh Luna screenshot evidence')
         return self
 
 
@@ -167,28 +211,31 @@ def assemble_personal_decision_brief(
     market_status = market_section.get("status") if market_section else None
     market_available = market_status in {"ready", "completed", "degraded"}
     market_complete = market_status in {"ready", "completed"}
-    observed_at = portfolio.get("observed_at") if portfolio else None
-    if isinstance(observed_at, str):
-        observed_at = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
-    portfolio_age = (
-        as_of_at.astimezone(timezone.utc) - observed_at.astimezone(timezone.utc)
-        if isinstance(observed_at, datetime) and observed_at.tzinfo is not None
-        else None
-    )
-    portfolio_current = bool(
-        portfolio
-        and portfolio.get("verification") == "verified_exact"
-        and portfolio_age is not None
-        and -future_clock_tolerance <= portfolio_age <= max_portfolio_age
-    )
+    reference_trade_date = _market_trade_date(market_section)
+    freshness = broker_freshness(portfolio, as_of_at, reference_trade_date,
+                                 max_portfolio_age, future_clock_tolerance)
+    observed_at, portfolio_age = freshness["observed_at"], freshness["age"]
+    portfolio_current, portfolio_trade_date = freshness["current"], freshness["trade_date"]
     usable_plans = []
+    stale_plans: list[tuple[str, str, str]] = []
     for raw in plans:
         try:
             plan = PersonalTradePlanInput.model_validate(raw)
         except ValueError:
             continue
-        if plan.valid_until >= as_of_at:
-            usable_plans.append(plan)
+        if plan.valid_until < as_of_at:
+            continue
+        plan_trade_date = _date_value(plan.as_of_at)
+        if reference_trade_date and plan_trade_date and plan_trade_date < reference_trade_date:
+            stale_plans.append((plan.plan_kind, plan.symbol, "older_than_latest_market"))
+            continue
+        if plan.plan_kind == "holding" and portfolio_current and portfolio:
+            expected_snapshot_id = portfolio.get("snapshot_id")
+            bound_snapshot_id = plan.metadata.get("portfolio_snapshot_id")
+            if expected_snapshot_id is not None and str(bound_snapshot_id or "") != str(expected_snapshot_id):
+                stale_plans.append((plan.plan_kind, plan.symbol, "not_bound_to_latest_portfolio"))
+                continue
+        usable_plans.append(plan)
     latest_by_key: dict[tuple[str, str], PersonalTradePlanInput] = {}
     for plan in sorted(usable_plans, key=lambda item: item.as_of_at):
         latest_by_key[(plan.plan_kind, plan.symbol)] = plan
@@ -216,9 +263,14 @@ def assemble_personal_decision_brief(
         diagnostics.append("market_section_degraded")
     if portfolio and not portfolio_current:
         diagnostics.append("portfolio_snapshot_stale_or_not_exact")
+        if reference_trade_date and portfolio_trade_date and portfolio_trade_date < reference_trade_date:
+            diagnostics.append(
+                f"portfolio_snapshot_older_than_market:{portfolio_trade_date}:{reference_trade_date}"
+            )
     elif not portfolio:
         diagnostics.append("portfolio_snapshot_missing")
     diagnostics.extend(f"holding_plan_missing:{symbol}" for symbol in missing_holding_plans)
+    diagnostics.extend(f"trade_plan_stale:{kind}:{symbol}:{reason}" for kind, symbol, reason in stale_plans)
     return {
         "contract_version": CONTRACT_VERSION,
         "as_of_at": as_of_at.isoformat(),
@@ -228,6 +280,12 @@ def assemble_personal_decision_brief(
         "holdings": {
             "status": "ready" if holdings_ready else "blocked",
             "portfolio_observed_at": observed_at.isoformat() if isinstance(observed_at, datetime) else None,
+            "reference_trade_date": str(reference_trade_date) if reference_trade_date else None,
+            "portfolio_trade_date": str(portfolio_trade_date) if portfolio_trade_date else None,
+            "sync_mode": "manual",
+            "subsequent_trades": "unknown",
+            "freshness_status": "current" if portfolio_current else "stale_or_unverified",
+            "age_seconds": int(portfolio_age.total_seconds()) if portfolio_age is not None else None,
             "actions": holding_actions,
         },
         "new_buys": {"status": "ready", "actions": new_buy_actions},

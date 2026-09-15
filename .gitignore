@@ -48,6 +48,13 @@ node_modules/
 dist/
 .vite/
 coverage/
+/scripts/windows/bin/
+frontend/test-results/
+
+# Local agent/browser work state; never part of a source release.
+.agents/
+.codex/
+.playwright-cli/
 
 # OS/editor noise
 .DS_Store

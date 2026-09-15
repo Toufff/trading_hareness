@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'runtime-observability.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'runtime-health-policy.psm1') -Force
 
 function Test-PidProperty {
     param([object]$State, [string]$Property)
@@ -20,18 +21,25 @@ function Test-PidProperty {
 
 function Test-JsonHealth([string]$Url) {
     try {
-        $response = Invoke-RestMethod -Uri $Url -TimeoutSec 5
-        return [ordered]@{ reachable = $true; status = [string]$response.status; error = $null }
+        $response = Invoke-RestMethod -Uri $Url -TimeoutSec 5 -NoProxy
+        return [ordered]@{ reachable = ([string]$response.status -eq 'ok'); status = [string]$response.status; error = $null }
     } catch {
         return [ordered]@{ reachable = $false; status = $null; error = $_.Exception.Message }
     }
 }
 
 $root = [IO.Path]::GetFullPath($PlatformRoot).TrimEnd('\')
+$apiHealth = Test-JsonHealth -Url "http://127.0.0.1:$ApiPort/health"
+$adapterHealth = Test-JsonHealth -Url "http://127.0.0.1:$AdapterPort/health"
 $services = foreach ($service in 'quant-api', 'dashboard-adapter', 'dashboard-tunnel', 'shared-peer-tunnels') {
     $state = Get-RuntimeState -PlatformRoot $root -Service $service
+    $alive = [bool](Test-PidProperty -State $state -Property 'supervisor_pid')
+    $reachable = switch ($service) { 'quant-api' { $apiHealth.reachable }; 'dashboard-adapter' { $adapterHealth.reachable }; default { $null } }
+    $recorded = if ($state -and $state.PSObject.Properties['status']) { [string]$state.status } else { '' }
     [ordered]@{
         service = $service
+        effective_status = Resolve-LiveRuntimeState -RecordedStatus $recorded -SupervisorAlive $alive -Reachable $reachable
+        recorded_status_is_historical = $true
         state = $state
         supervisor_alive = Test-PidProperty -State $state -Property 'supervisor_pid'
         launcher_alive = Test-PidProperty -State $state -Property 'launcher_pid'
@@ -58,8 +66,8 @@ $events = @(
 [ordered]@{
     checked_at = [DateTimeOffset]::Now.ToString('o')
     platform_root = $root
-    api_health = Test-JsonHealth -Url "http://127.0.0.1:$ApiPort/health"
-    adapter_health = Test-JsonHealth -Url "http://127.0.0.1:$AdapterPort/health"
+    api_health = $apiHealth
+    adapter_health = $adapterHealth
     services = @($services)
     recent_events = $events
 } | ConvertTo-Json -Depth 12

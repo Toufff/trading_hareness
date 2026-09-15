@@ -1,4 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+// Resolve the large module before test timers/mocks are installed. Otherwise
+// a cold dynamic import can outlive the first test and consume the next mock.
+import { useDashboardWorkspace } from './useDashboardWorkspace';
 
 // jsdom does not implement matchMedia; the dashboard shell uses it to track
 // the mobile layout breakpoint outside of any test-relevant behaviour here.
@@ -32,7 +35,7 @@ function requestUrl(input: RequestInfo | URL): string {
   return input.url;
 }
 
-describe('useDashboardWorkspace research panel loading (allSettled + stale flags)', () => {
+describe('useDashboardWorkspace visible-tab loading and stale flags', () => {
   it('keeps every other panel usable and only flags the failing panel as stale', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = requestUrl(input);
@@ -43,18 +46,17 @@ describe('useDashboardWorkspace research panel loading (allSettled + stale flags
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const { useDashboardWorkspace } = await import('./useDashboardWorkspace');
     const dashboard = useDashboardWorkspace();
     await dashboard.loadResearch();
 
-    // A single failing endpoint must not stop the ~50 other independent
-    // panels sharing this refresh cycle from loading and being marked fresh.
+    // Failure isolation remains, but unrelated hidden tabs are not requested.
     expect(dashboard.panelStatus.overview!.stale).toBe(true);
     expect(dashboard.panelStatus.overview!.error).toContain('overview backend unavailable');
-    expect(dashboard.panelStatus.reports!.stale).toBe(false);
-    expect(dashboard.panelStatus.reports!.error).toBeNull();
-    expect(dashboard.panelStatus.reports!.updatedAt).toBeTruthy();
-    expect(dashboard.panelStatus['strategy-health']!.stale).toBe(false);
+    expect(dashboard.panelStatus.recommendations!.stale).toBe(false);
+    expect(dashboard.panelStatus.recommendations!.error).toBeNull();
+    expect(dashboard.panelStatus.recommendations!.updatedAt).toBeTruthy();
+    expect(dashboard.panelStatus['strategy-health']).toBeUndefined();
+    expect(fetchMock.mock.calls.map(call => requestUrl(call[0]))).toHaveLength(3);
 
     expect(dashboard.stalePanelKeys).toEqual(['overview']);
     expect(dashboard.researchError).toContain('overview');
@@ -74,7 +76,6 @@ describe('useDashboardWorkspace research panel loading (allSettled + stale flags
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const { useDashboardWorkspace } = await import('./useDashboardWorkspace');
     const dashboard = useDashboardWorkspace();
 
     await dashboard.loadResearch();
@@ -92,11 +93,10 @@ describe('useDashboardWorkspace research panel loading (allSettled + stale flags
   it('never rejects loadResearch even when every panel fails', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(jsonResponse({ detail: 'down' }, 500))));
 
-    const { useDashboardWorkspace } = await import('./useDashboardWorkspace');
     const dashboard = useDashboardWorkspace();
 
     await expect(dashboard.loadResearch()).resolves.toBeUndefined();
-    expect(dashboard.stalePanelKeys.length).toBeGreaterThan(40);
+    expect(dashboard.stalePanelKeys).toHaveLength(3);
     expect(dashboard.researchError).toBeTruthy();
     expect(dashboard.researchLoaded).toBe(true);
   });
@@ -118,7 +118,6 @@ describe('useDashboardWorkspace unmount cleanup', () => {
 
     const { mount } = await import('@vue/test-utils');
     const { defineComponent, h } = await import('vue');
-    const { useDashboardWorkspace } = await import('./useDashboardWorkspace');
 
     let dashboard!: ReturnType<typeof useDashboardWorkspace>;
     const Host = defineComponent({

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Json
 
 from .request_models import TushareFetchRequest, TushareSyncRequest
+from .user_tracking_research import has_active_user_tracking_tag
 
 #: Model version stamped on every persisted factor snapshot; bump when the
 #: factor family or its inputs change so old snapshots stay explainable.
@@ -27,6 +28,7 @@ class IntradayWatchlistDependencies:
     exchange_for: Callable[[str], str]
     json_value: Callable[[Any], Any]
     http_exception: type[Exception]
+    refresh_user_tracking: Callable[[str], Awaitable[dict[str, Any]]] | None = None
 
 
 @dataclass(frozen=True)
@@ -94,7 +96,8 @@ async def upsert(symbol: str, payload: Any, deps: IntradayWatchlistDependencies)
                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT(symbol) DO UPDATE SET label=EXCLUDED.label,enabled=EXCLUDED.enabled,alert_on_entry=EXCLUDED.alert_on_entry,
                       alert_on_exit=EXCLUDED.alert_on_exit,entry_price=EXCLUDED.entry_price,available_quantity=EXCLUDED.available_quantity,
-                      hard_stop=EXCLUDED.hard_stop,take_profit=EXCLUDED.take_profit,metadata=EXCLUDED.metadata,updated_at=now()
+                      hard_stop=EXCLUDED.hard_stop,take_profit=EXCLUDED.take_profit,
+                      metadata=quant.intraday_watchlists.metadata || EXCLUDED.metadata,updated_at=now()
                    RETURNING *""",
                 (symbol, payload.label, payload.enabled, payload.alert_on_entry, payload.alert_on_exit, payload.entry_price,
                  payload.available_quantity, payload.hard_stop, payload.take_profit, deps.json_value(payload.metadata)),
@@ -102,8 +105,12 @@ async def upsert(symbol: str, payload: Any, deps: IntradayWatchlistDependencies)
 
     row = await deps.run_database(persist_watchlist)
     history = await deps.hydrate_history(row["watchlist_id"], symbol)
+    tracking_research = None
+    if has_active_user_tracking_tag(payload.metadata) and deps.refresh_user_tracking is not None:
+        tracking_research = await deps.refresh_user_tracking(symbol)
     return {
         "item": row, "history_hydration": history,
+        "user_tracking_research": tracking_research,
         "notice": "已更新提醒范围并拉取了受限历史；不构成交易指令，也不会自动下单。",
     }
 

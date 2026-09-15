@@ -60,7 +60,7 @@ async def sync(
                      attempt_count=quant.fetch_runs.attempt_count+1,started_at=now(),finished_at=NULL,
                      error_class=NULL,error_message=NULL""",
                 (PROVIDER_KEY, trade_date, request_key, Json({
-                    "source": "longhuvip_industry_plus_tencent_ohlc",
+                    "source": "longhuvip_industry_plus_dated_licensed_ohlc",
                     "physical_vendor_page_limit": 300,
                 })),
             )
@@ -72,7 +72,7 @@ async def sync(
     try:
         source = source_factory()
         evidence = await run_public_blocking(
-            source.fetch_full_market_evidence, trade_date, timeout_seconds=240,
+            source.fetch_full_market_evidence, trade_date, timeout_seconds=900,
         )
         merged = merge_cross_section(trade_date, evidence["vendor_rows"], evidence["quote_rows"])
         vendor_count = len(evidence["vendor_rows"])
@@ -81,7 +81,8 @@ async def sync(
         if len(merged.daily_rows) < MINIMUM_ROWS or merged.coverage < MINIMUM_COVERAGE:
             raise RuntimeError(
                 f"cross-source OHLC coverage {len(merged.daily_rows)}/{vendor_count} "
-                f"({merged.coverage:.2%}) is below {MINIMUM_COVERAGE:.0%}"
+                f"({merged.coverage:.2%}) is below {MINIMUM_COVERAGE:.0%}; "
+                f"OHLC health={evidence['health'].get('licensed_ohlc', {})}"
             )
         observed_at = datetime.now(timezone.utc)
 

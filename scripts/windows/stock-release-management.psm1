@@ -167,11 +167,18 @@ function Remove-ExpiredStockReleases {
         if (-not $candidate.StartsWith($releaseRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
             throw "Refusing to remove a release outside the release root: $candidate"
         }
-        if ($candidate -eq (Get-StockCurrentReleaseTarget -PlatformRoot $PlatformRoot)) {
+        $currentTarget = Get-StockCurrentReleaseTarget -PlatformRoot $PlatformRoot
+        if ($currentTarget -and ($currentTarget.Equals($candidate, [StringComparison]::OrdinalIgnoreCase) -or $currentTarget.StartsWith($candidate + '\', [StringComparison]::OrdinalIgnoreCase))) {
             throw "Refusing to remove the active release target: $candidate"
         }
-        Remove-Item -LiteralPath $candidate -Recurse -Force
-        $removed += $release.Name
+        try {
+            Remove-Item -LiteralPath $candidate -Recurse -Force -ErrorAction Stop
+            $removed += $release.Name
+        } catch {
+            # Retention is housekeeping, not activation. A locked old directory
+            # must not turn a healthy deployment into a reported failure.
+            Write-Warning "Release cleanup deferred for $($release.Name): $($_.Exception.Message)"
+        }
     }
     return $removed
 }

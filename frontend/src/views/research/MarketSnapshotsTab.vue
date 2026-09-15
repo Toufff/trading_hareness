@@ -2,10 +2,11 @@
 import { defineComponent, inject } from 'vue';
 import { dashboardContextKey } from '../../dashboard-context';
 import ResearchOnlyBadge from '../../components/ResearchOnlyBadge.vue';
+import SectorHeatPanel from '../../components/SectorHeatPanel.vue';
 
 export default defineComponent({
   name: 'MarketSnapshotsTab',
-  components: { ResearchOnlyBadge },
+  components: { ResearchOnlyBadge, SectorHeatPanel },
   setup() {
     const dashboard = inject(dashboardContextKey);
     if (!dashboard) throw new Error('research tab requires the dashboard shell context');
@@ -16,7 +17,9 @@ export default defineComponent({
 
 <template>
 
-  <el-alert title="午盘与收盘快照默认不调用公开全市场报价；启用前须确认上游限频。公开报价仅用于市场补充，未经授权的实时分钟源不会进入推荐决策。" type="warning" :closable="false" show-icon />
+  <a href="/sector-heat">独立打开板块热度（不加载其他研究模块）</a>
+  <SectorHeatPanel />
+  <el-alert title="以下为原始采集与快照管理；不影响上方板块热度的只读浏览。" type="info" :closable="false" class="section-gap" />
   <el-row :gutter="14" class="section-gap">
     <el-col :md="8" :xs="24"><el-card shadow="never" header="全市场基准"><el-statistic title="已登记A股" :value="count('all_a_symbols')"/><el-text type="info">每日盘前从 stock_basic 刷新。</el-text><div class="card-actions"><el-button type="primary" :loading="actionLoading === '刷新全市场股票池'" @click="syncAllMarketUniverse">刷新股票池</el-button></div></el-card></el-col>
     <el-col :md="8" :xs="24"><el-card shadow="never" header="盘中补充"><el-statistic title="市场快照次数" :value="count('market_snapshot_runs')"/><el-text type="info">上海时间 11:35 自动运行。</el-text><div class="card-actions"><el-button :loading="actionLoading === '生成午盘全市场快照'" @click="runMarketSnapshot('midday')">生成午盘快照</el-button></div></el-card></el-col>

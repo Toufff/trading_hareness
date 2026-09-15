@@ -46,6 +46,30 @@ if ! grep -Rqs 'include /etc/nginx/snippets/stockbrain-local-gateway.conf' /etc/
   exit 1
 fi
 mv "`${next_snippet}" "`${snippet}"
+
+# Asset URLs are content hashed and advertised as immutable for 30 days.  A
+# browser can therefore keep an older index/chunk graph open while this release
+# is activated.  Preserve hashed assets from every retained release inside that
+# cache horizon so an in-flight or cached page never turns blank on deployment.
+mkdir -p "`${release}/assets"
+find "`${root}/releases" -mindepth 2 -maxdepth 2 -type d -name assets -mtime -31 -print0 |
+  while IFS= read -r -d '' old_assets; do
+    if [ "`${old_assets}" != "`${release}/assets" ]; then
+      cp -a -n "`${old_assets}/." "`${release}/assets/"
+    fi
+  done
+
+# Fail before activation when the generated entry points at an asset that was
+# not uploaded.  This verifies the deployable artifact, not merely nginx.conf.
+for asset in `$(grep -oE 'assets/[A-Za-z0-9_.-]+\.(js|css)' "`${release}/index.html" | sort -u); do
+  if [ ! -f "`${release}/`${asset}" ]; then
+    echo "missing release asset: `${asset}" >&2
+    if [ "`${had_snippet}" -eq 1 ]; then cp "`${previous_snippet}" "`${snippet}"; else rm -f "`${snippet}"; fi
+    rm -f "`${previous_snippet}"
+    exit 1
+  fi
+done
+
 ln -sfn "`${release}" "`${root}/current.next"
 mv -Tf "`${root}/current.next" "`${root}/current"
 if ! nginx -t; then

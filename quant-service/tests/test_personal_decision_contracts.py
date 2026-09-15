@@ -46,6 +46,7 @@ class PersonalDecisionContractTests(unittest.TestCase):
             "observed_at": NOW.isoformat(),
             "verification": "verified_exact",
             "total_market_value": "2000",
+            "total_asset": "2100", "cash": "100",
             "positions": [{
                 "symbol": "600030.SH", "name": "中信证券", "quantity": "100",
                 "sellable_quantity": "100", "market_value": "1900",
@@ -171,6 +172,60 @@ class PersonalDecisionContractTests(unittest.TestCase):
             portfolio=portfolio | {"observed_at": (NOW + timedelta(hours=1)).isoformat()}, plans=[],
         )
         self.assertFalse(future["delivery"]["holding_actions_eligible"])
+
+    def test_old_portfolio_and_plans_cannot_be_presented_with_a_newer_market_close(self) -> None:
+        as_of_at = NOW + timedelta(days=4)
+        portfolio = {
+            "snapshot_id": "snapshot-sep-1", "observed_at": NOW.isoformat(),
+            "verification": "verified_exact",
+            "positions": [{"symbol": "600030.SH", "name": "中信证券", "quantity": "100"}],
+        }
+        old_plan = holding_plan() | {"valid_until": (as_of_at + timedelta(days=1)).isoformat()}
+        old_buy = old_plan | {
+            "plan_key": "new-buy:600176.SH:20260901", "plan_kind": "new_buy",
+            "symbol": "600176.SH", "name": "中国巨石", "action": "buy_on_trigger",
+            "entry_zone": {"lower": "20", "upper": "21"}, "stop_price": "19",
+            "target_prices": ["23"], "max_position_pct": "10",
+        }
+        brief = assemble_personal_decision_brief(
+            as_of_at=as_of_at,
+            market_section={"status": "ready", "exchange_date": "2026-09-04"},
+            portfolio=portfolio,
+            plans=[old_plan, old_buy],
+        )
+        self.assertEqual(brief["holdings"]["freshness_status"], "stale_or_unverified")
+        self.assertFalse(brief["delivery"]["holding_actions_eligible"])
+        self.assertFalse(brief["delivery"]["new_buy_actions_eligible"])
+        self.assertIn("portfolio_snapshot_older_than_market:2026-09-01:2026-09-04", brief["diagnostics"])
+        self.assertTrue(any(value.startswith("trade_plan_stale:") for value in brief["diagnostics"]))
+
+    def test_holding_plan_must_bind_to_latest_broker_snapshot(self) -> None:
+        portfolio = {
+            "snapshot_id": "snapshot-current", "observed_at": NOW.isoformat(),
+            "verification": "verified_exact",
+            "positions": [{"symbol": "600030.SH", "name": "中信证券", "quantity": "100"}],
+        }
+        unbound = holding_plan()
+        blocked = assemble_personal_decision_brief(
+            as_of_at=NOW,
+            market_section={"status": "ready", "exchange_date": "2026-09-01"},
+            portfolio=portfolio,
+            plans=[unbound],
+        )
+        self.assertFalse(blocked["delivery"]["holding_actions_eligible"])
+        self.assertIn(
+            "trade_plan_stale:holding:600030.SH:not_bound_to_latest_portfolio",
+            blocked["diagnostics"],
+        )
+
+        bound = unbound | {"metadata": {"portfolio_snapshot_id": "snapshot-current"}}
+        ready = assemble_personal_decision_brief(
+            as_of_at=NOW,
+            market_section={"status": "ready", "exchange_date": "2026-09-01"},
+            portfolio=portfolio,
+            plans=[bound],
+        )
+        self.assertTrue(ready["delivery"]["holding_actions_eligible"])
 
 
 if __name__ == "__main__":

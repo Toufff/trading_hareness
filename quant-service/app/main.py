@@ -509,6 +509,9 @@ from .strategy_context_read_model import (
 )
 from .routers.event_reads import build_event_reads_router
 from .routers.strategy_reads import build_strategy_reads_router
+from .routers.sector_heat import build_sector_heat_router
+from .routers.intraday_scans import build_intraday_scans_router
+from .routers.strategy_governance import build_strategy_governance_router
 from .routers.paper_reads import build_paper_reads_router
 from .routers.paper_actions import build_paper_actions_router
 from .routers.personal_decisions import PersonalDecisionDependencies, build_personal_decisions_router
@@ -581,6 +584,7 @@ from .request_models import (
     RemoteMessageReprocessRequest,
     SnapshotRequest,
     StockStudyRequest,
+    StockWorkbenchRequest,
     SectorCatalogSyncRequest,
     SectorFlowSyncRequest,
     StrategyBacktestRequest,
@@ -631,6 +635,7 @@ from .full_market_daily_sync import sync as sync_full_market_daily_isolated
 from .longhu_market_service import sync as sync_longhu_full_market_close
 from .longhu_market_repository import persisted_close_context as read_longhu_close_context
 from .longhu_vendor_source import (
+    LonghuVendorSource,
     configured as longhu_vendor_configured,
     intraday_source as longhu_intraday_source,
 )
@@ -678,6 +683,10 @@ from .personal_decision_repository import persist_broker_snapshot, persist_trade
 from .async_personal_decision_repository import (
     latest_broker_snapshot,
     latest_decision_research,
+    latest_holding_advice,
+    latest_market_advice,
+    latest_new_buy_advice,
+    latest_new_buy_research,
     latest_personal_decision_brief,
 )
 from .decision_research_service import refresh_decision_research_and_plans
@@ -696,6 +705,10 @@ from .tushare_catalog_fetch_service import CatalogFetchDependencies, fetch_catal
 from .stock_study_tushare_service import StockStudyTushareDependencies, fetch_stock_study_input
 from .stock_study_service import StockStudyDependencies, build as build_stock_study_isolated
 from .stock_study_public_service import StockStudyPublicDependencies, fetch as fetch_stock_study_public
+from .async_stock_workbench_repository import stock_workbench_evidence
+from .stock_workbench_service import StockWorkbenchDependencies, build as build_stock_workbench_isolated
+from .async_intraday_evidence_read_repository import watchlists as read_async_user_tracking_rows
+from .user_tracking_runtime import build_refresher as build_user_tracking_refresher
 from .intraday_signal_generation import IntradaySignalGenerationDependencies, generate_intraday_signals
 from .intraday_signal_event_persistence import (
     IntradaySignalEventPersistenceDependencies,
@@ -2025,9 +2038,11 @@ def post_close_strategy_candidates(as_of_date: date, limit: int, minimum_full_ma
 
 def run_post_close_strategy(request: PostCloseStrategyRequest) -> dict[str, Any]:
     """Compatibility entry point for the isolated persisted-only service."""
+    from .short_term_lanes.service import build as build_short_term_lanes
     return persisted_run_post_close_strategy(
         db, request, model_version=POST_CLOSE_STRATEGY_MODEL_VERSION,
         candidate_loader=post_close_strategy_candidates, json_safe=strategy_json_safe,
+        lane_loader=lambda day: build_short_term_lanes(db, day),
     )
 
 
@@ -3725,6 +3740,7 @@ def _post_close_refresh_dependencies() -> PostCloseRefreshDependencies:
         safe_error_detail=safe_error_detail, json_safe=strategy_json_safe,
         check_lease_fence=check_post_close_refresh_lease_fence,
         post_close_strategy_model_version=POST_CLOSE_STRATEGY_MODEL_VERSION,
+        refresh_user_tracking=refresh_user_tracking_research,
     )
 
 
@@ -4163,17 +4179,16 @@ async def record_l2_research_evaluation(payload: L2IncrementalEvaluationRequest)
     )
 
 
-async def latest_l2_research_evaluation() -> dict[str, Any]:
-    return await latest_l2_evaluation(async_db)
-
-
 app.include_router(build_l2_research_router(L2ResearchDependencies(
     record=record_l2_research_evaluation,
-    latest=latest_l2_research_evaluation,
+    latest=lambda: latest_l2_evaluation(async_db),
 )))
 
 
 app.include_router(build_strategy_reads_router(db, STRATEGY_DECISION_MODEL_VERSION, async_db, cn_today=cn_today))
+app.include_router(build_sector_heat_router(db, run_database_blocking))
+app.include_router(build_intraday_scans_router(db, run_database_blocking))
+app.include_router(build_strategy_governance_router(async_database=async_db))
 app.include_router(build_paper_reads_router(db, async_db))
 app.include_router(build_paper_actions_router(db, configure_paper_account, accept_paper_decision))
 app.include_router(build_personal_decisions_router(PersonalDecisionDependencies(
@@ -4183,7 +4198,11 @@ app.include_router(build_personal_decisions_router(PersonalDecisionDependencies(
     persist_plan=persist_trade_plan,
     latest_snapshot=latest_broker_snapshot,
     latest_brief=latest_personal_decision_brief,
+    latest_market_advice=latest_market_advice,
+    latest_new_buy_advice=latest_new_buy_advice,
+    latest_holding_advice=latest_holding_advice,
     latest_research=latest_decision_research,
+    latest_new_buy_research=latest_new_buy_research,
 )))
 app.include_router(build_analyst_prompt_lab_router(
     db, materialize_prompt_candidates, label_prompt_candidate, evaluate_prompt_variant,
@@ -4363,6 +4382,7 @@ app.include_router(build_intraday_status_router(
 
 app.include_router(build_system_control_router(SystemControlDependencies(
     health_payload=_health_payload,
+    async_database_probe=async_db.ping,
     database_unavailable_error=DatabaseUnavailableError,
     metrics_response=_metrics_response,
 )))
@@ -4486,6 +4506,28 @@ async def stock_study(symbol: str, payload: StockStudyRequest | None = None) -> 
     return await build_stock_study(symbol, payload or StockStudyRequest())
 
 
+async def stock_workbench(symbol: str, payload: StockWorkbenchRequest | None = None) -> dict[str, Any]:
+    """Build one strategy-driven visual workbench from licensed and stored evidence."""
+    return await build_stock_workbench_isolated(
+        symbol,
+        payload or StockWorkbenchRequest(),
+        StockWorkbenchDependencies(
+            china_today=cn_today,
+            run_provider=run_akshare_blocking,
+            evidence=lambda code, as_of_date, **kwargs: stock_workbench_evidence(
+                async_db, code, as_of_date, **kwargs,
+            ),
+            source_factory=LonghuVendorSource,
+        ),
+    )
+
+
+refresh_user_tracking_research = build_user_tracking_refresher(
+    async_database=async_db, database=db, read_rows=read_async_user_tracking_rows,
+    build_workbench=stock_workbench, run_database=run_database_blocking,
+)
+
+
 app.include_router(build_provider_actions_router(ProviderActionDependencies(
     akshare_probe=akshare_probe,
     realtime_probe=probe_realtime_sources,
@@ -4493,6 +4535,7 @@ app.include_router(build_provider_actions_router(ProviderActionDependencies(
     tushare_fetch=tushare_fetch,
     fuyao_query=fuyao_query,
     stock_study=stock_study,
+    stock_workbench=stock_workbench,
 )))
 
 
@@ -4883,6 +4926,7 @@ def _intraday_watchlist_dependencies() -> IntradayWatchlistDependencies:
     return IntradayWatchlistDependencies(
         database=db, run_database=run_database_blocking, hydrate_history=hydrate_watchlist_history,
         exchange_for=exchange_for, json_value=Json, http_exception=HTTPException,
+        refresh_user_tracking=lambda symbol: refresh_user_tracking_research(symbols={symbol}),
     )
 
 
@@ -5076,6 +5120,3 @@ app.include_router(build_xiaojie_leader_flow_router(evaluate_xiaojie_leader_flow
 app.include_router(build_ten_day_leader_rotation_actions_router(
     TenDayLeaderRotationActionDependencies(run=run_ten_day_leader_rotation_endpoint),
 ))
-
-
-

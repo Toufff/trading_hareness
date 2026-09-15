@@ -156,7 +156,7 @@ class LegacyStockBrainRepository:
             ON CONFLICT(symbol) DO UPDATE SET
                 exchange=CASE WHEN quant.instruments.exchange IN ('','UNKNOWN')
                               THEN excluded.exchange ELSE quant.instruments.exchange END,
-                name=coalesce(NULLIF(excluded.name,''),quant.instruments.name),updated_at=now()""")
+                name=coalesce(NULLIF(quant.instruments.name,''),excluded.name),updated_at=now()""")
 
     @staticmethod
     def upsert_money_flows(cursor: psycopg.Cursor, rows: Sequence[Mapping[str, Any]]) -> None:
@@ -216,7 +216,8 @@ class LegacyStockBrainRepository:
                    open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,
                    pre_close=excluded.pre_close,volume=excluded.volume,amount=excluded.amount,
                    source=excluded.source,available_at=excluded.available_at
-               WHERE excluded.available_at >= quant.market_bars_daily.available_at""",
+               WHERE quant.market_bars_daily.source LIKE 'legacy:%%'
+                 AND excluded.available_at >= quant.market_bars_daily.available_at""",
             values,
         )
         cursor.executemany(
@@ -230,7 +231,8 @@ class LegacyStockBrainRepository:
                    selected_provider=excluded.selected_provider,
                    source_observation_ids=excluded.source_observation_ids,
                    quality_status='fresh',available_at=excluded.available_at,canonicalized_at=now()
-               WHERE excluded.available_at >= quant.canonical_bars_daily.available_at""",
+               WHERE quant.canonical_bars_daily.selected_provider LIKE 'legacy:%%'
+                 AND excluded.available_at >= quant.canonical_bars_daily.available_at""",
             [(
                 row["symbol"], row["trading_date"], row.get("open"), row.get("high"), row.get("low"),
                 row["close"], row.get("pre_close"), row.get("volume"), row.get("amount"),

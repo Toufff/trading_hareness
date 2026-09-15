@@ -1,0 +1,26 @@
+import { test, expect } from '@playwright/test';
+import { readFileSync, writeFileSync } from 'node:fs';
+test.use({ channel:'msedge',headless:true });
+test('real public effectiveness in overview and lane, desktop and mobile',async({page,context})=>{
+  test.skip(process.env.RUN_EFFECTIVENESS_UI_LIVE!=='1','Explicit live read-only acceptance');
+  test.setTimeout(90_000);
+  const credentials=JSON.parse(readFileSync('C:/Users/brave/.stockbrain/dashboard-credentials.json','utf8'));
+  await context.addCookies([{name:'stockbrain_access',value:credentials.magic_cookie_token,domain:'stock.toufai.top',path:'/',secure:true,httpOnly:true}]);
+  const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.setViewportSize({width:1440,height:1000});
+  await page.goto('https://stock.toufai.top/research');
+  await page.getByRole('tab',{name:'收盘复盘',exact:true}).click();
+  const panel=page.getByTestId('strategy-effectiveness');
+  await expect(panel).toBeVisible({timeout:45_000});await panel.locator('summary').click();
+  await expect(panel.locator('table tbody tr').first()).toBeVisible();
+  await expect(panel).toContainText('样本不足不等于通过');
+  await panel.screenshot({path:'G:/StockPlatform/data/research/effectiveness-acceptance/desktop.png'});
+  await page.locator('[data-report-key="accumulation"]').click();
+  await panel.locator('summary').click();await expect(panel.locator('table tbody tr').first()).toBeVisible();
+  await page.setViewportSize({width:390,height:844});
+  const box=await panel.evaluate(el=>({width:el.clientWidth,scroll:el.scrollWidth}));
+  expect(box.scroll).toBeLessThanOrEqual(box.width+1);
+  await panel.screenshot({path:'G:/StockPlatform/data/research/effectiveness-acceptance/mobile.png'});
+  expect(errors).toEqual([]);
+  writeFileSync('G:/StockPlatform/data/research/effectiveness-acceptance/browser-receipt.json',JSON.stringify({passed:true,at:new Date().toISOString(),errors,box,scope:'real public overview/lane, desktop/mobile; no fixture responses'}));
+});

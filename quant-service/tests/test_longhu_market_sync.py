@@ -25,7 +25,7 @@ class LonghuMarketSyncTests(unittest.TestCase):
         self.assertEqual(result.coverage, 1.0)
         self.assertEqual(result.daily_rows[0]["close"], 9.49)
         self.assertEqual(result.flow_rows[0]["net_amount"], 83_000_000)
-        self.assertEqual(result.quote_rows[0]["provider_basis"], "longhuvip+tencent")
+        self.assertEqual(result.quote_rows[0]["provider_basis"], "longhuvip_licensed_dated_ohlc")
 
     def test_control_rows_use_transparent_identity_factor_and_board_limits(self):
         daily = [

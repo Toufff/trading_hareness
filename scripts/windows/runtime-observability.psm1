@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'background-process.psm1')
 
 function Get-RuntimeLogRoot {
     param([Parameter(Mandatory)][string]$PlatformRoot)
@@ -152,6 +153,8 @@ function Start-RuntimeSupervisor {
         stop_marker = $run.StopMarker
         requested_at = [DateTimeOffset]::Now.ToString('o')
         metadata = $Metadata
+        owner_pid = $PID
+        owner_started_at = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')
     }
     Write-AtomicUtf8File -Path $run.Descriptor -Content ($descriptor | ConvertTo-Json -Depth 10)
     [void](Write-RuntimeEvent -PlatformRoot $PlatformRoot -Service $Service -Event 'start_requested' -RunId $run.RunId -Data @{
@@ -164,16 +167,9 @@ function Start-RuntimeSupervisor {
     $supervisorScript = Join-Path ([IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\')) 'scripts\windows\supervise-runtime-process.ps1'
     if (-not (Test-Path -LiteralPath $supervisorScript -PathType Leaf)) { throw "Missing runtime supervisor: $supervisorScript" }
     $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
-    $argumentLine = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$supervisorScript`" -DescriptorPath `"$($run.Descriptor)`""
-    $start = @{
-        FilePath = $pwsh
-        ArgumentList = $argumentLine
-        PassThru = $true
-        WindowStyle = 'Hidden'
-        WorkingDirectory = $WorkingDirectory
-    }
-    if ($Environment.Count -gt 0) { $start.Environment = $Environment }
-    $supervisor = Start-Process @start
+    $start = New-ConsoleFreeStartInfo -FilePath $pwsh -WorkingDirectory $WorkingDirectory -Environment $Environment `
+        -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $supervisorScript, '-DescriptorPath', $run.Descriptor)
+    $supervisor = [Diagnostics.Process]::Start($start)
     $state = @{
         status = 'supervisor_started'
         run_id = $run.RunId
@@ -183,7 +179,8 @@ function Start-RuntimeSupervisor {
         stderr = $run.Stderr
         requested_at = $descriptor.requested_at
     }
-    [void](Set-RuntimeState -PlatformRoot $PlatformRoot -Service $Service -State $state)
+    # Only the lock-owning supervisor writes current state. A late parent write
+    # used to overwrite process_started/exit state (and duplicate launches).
     [void](Write-RuntimeEvent -PlatformRoot $PlatformRoot -Service $Service -Event 'supervisor_started' -RunId $run.RunId -Data @{ supervisor_pid = $supervisor.Id })
     return [pscustomobject]($state + @{ stop_marker = $run.StopMarker })
 }

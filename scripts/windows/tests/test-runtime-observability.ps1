@@ -17,6 +17,7 @@ New-Item -ItemType Directory -Force -Path $sandbox | Out-Null
 
 try {
     Import-Module $module -Force
+    Import-Module (Join-Path $windowsScripts 'background-process.psm1') -Force
     [void](Write-RuntimeEvent -PlatformRoot $sandbox -Service 'unit-service' -Event 'unit_event' -RunId 'unit-run' -Data @{ value = 7 })
     $lifecycle = @(Get-ChildItem -LiteralPath (Join-Path $sandbox 'logs\runtime') -Filter 'lifecycle-*.jsonl' -File)
     Assert-True ($lifecycle.Count -eq 1) 'one daily lifecycle log must be created'
@@ -41,9 +42,9 @@ try {
         metadata = @{}
     }
     [IO.File]::WriteAllText($runtimeRun.Descriptor, ($descriptor | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
-    $process = Start-Process -FilePath $pwsh -PassThru -WindowStyle Hidden -Wait -ArgumentList (
-        "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$supervisorScript`" -DescriptorPath `"$($runtimeRun.Descriptor)`""
-    )
+    $process = [Diagnostics.Process]::Start((New-ConsoleFreeStartInfo -FilePath $pwsh -Arguments @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $supervisorScript, '-DescriptorPath', $runtimeRun.Descriptor)))
+    $process.WaitForExit()
     Assert-True ($process.ExitCode -eq 7) 'the supervisor must preserve the child exit code'
     Assert-True ((Get-Content -LiteralPath $runtimeRun.Stdout -Raw).Contains('stdout-preserved')) 'stdout must be preserved in a per-run file'
     Assert-True ((Get-Content -LiteralPath $runtimeRun.Stderr -Raw).Contains('stderr-preserved')) 'stderr must be preserved in a per-run file'
@@ -71,9 +72,9 @@ try {
     }
     [IO.File]::WriteAllText($expectedRun.Descriptor, ($expectedDescriptor | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText($expectedRun.StopMarker, '{"reason":"unit_test_stop"}', [Text.UTF8Encoding]::new($false))
-    $expectedProcess = Start-Process -FilePath $pwsh -PassThru -WindowStyle Hidden -Wait -ArgumentList (
-        "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$supervisorScript`" -DescriptorPath `"$($expectedRun.Descriptor)`""
-    )
+    $expectedProcess = [Diagnostics.Process]::Start((New-ConsoleFreeStartInfo -FilePath $pwsh -Arguments @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $supervisorScript, '-DescriptorPath', $expectedRun.Descriptor)))
+    $expectedProcess.WaitForExit()
     Assert-True ($expectedProcess.ExitCode -eq 0) 'an expected child exit code must be preserved'
     $expectedState = Get-RuntimeState -PlatformRoot $sandbox -Service 'expected-exit'
     Assert-True ($expectedState.status -eq 'stopped') 'a marked exit must be classified as stopped'

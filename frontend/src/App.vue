@@ -2,7 +2,7 @@
 import { defineAsyncComponent } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import zhCn from 'element-plus/es/locale/lang/zh-cn';
-import { DataAnalysis, Document, Key, Operation, Refresh, UploadFilled, Wallet } from '@element-plus/icons-vue';
+import { DataAnalysis, Document, Key, Operation, Refresh, TrendCharts, UploadFilled, Wallet } from '@element-plus/icons-vue';
 import ManualRelayView from './views/ManualRelayView.vue';
 import GroupRelayMonitorView from './views/GroupRelayMonitorView.vue';
 import FeishuWorkbenchView from './views/FeishuWorkbenchView.vue';
@@ -48,7 +48,8 @@ const PersonalDecisionView = defineAsyncComponent(() => import('./views/Personal
       <div class="brand"><el-icon><DataAnalysis /></el-icon><div><strong>Quant Research</strong><span>投研与市场数据</span></div></div>
       <el-menu :default-active="dashboard.activeSection" class="menu" @select="dashboard.selectActiveSection">
         <el-menu-item index="research"><el-icon><DataAnalysis /></el-icon><span>量化研究台</span></el-menu-item>
-        <el-menu-item index="personal"><el-icon><Wallet /></el-icon><span>个人决策</span></el-menu-item>
+        <el-menu-item index="market-decision"><el-icon><TrendCharts /></el-icon><span>市场与选股</span></el-menu-item>
+        <el-menu-item index="holdings"><el-icon><Wallet /></el-icon><span>我的持仓</span></el-menu-item>
         <el-menu-item index="monitor"><el-icon><Operation /></el-icon><span>导入监控</span></el-menu-item>
         <el-menu-item index="workbench"><el-icon><Document /></el-icon><span>飞书工作台</span></el-menu-item>
         <el-menu-item index="relay"><el-icon><UploadFilled /></el-icon><span>手动投递</span></el-menu-item>
@@ -56,47 +57,48 @@ const PersonalDecisionView = defineAsyncComponent(() => import('./views/Personal
       <div class="side-state"><el-tag :type="dashboard.connected ? 'success' : 'warning'" effect="plain">{{ dashboard.connected ? '事件流已连接' : '事件流重连中' }}</el-tag><el-button text :icon="Key" size="small" @click="openSetDashboardKey">设置 Key</el-button></div>
     </el-aside>
     <el-container>
-      <el-header class="topbar"><div><h1>{{ dashboard.activeSection === 'research' ? '量化研究台' : dashboard.activeSection === 'personal' ? '个人决策' : dashboard.activeSection === 'monitor' ? '导入监控' : dashboard.activeSection === 'workbench' ? '飞书工作台' : '手动投递' }}</h1><span>{{ dashboard.activeSection === 'research' ? '分析师证据、市场数据与研究候选池' : dashboard.activeSection === 'personal' ? '实际持仓、市场判断与可执行的新买计划' : dashboard.activeSection === 'workbench' ? '汇总群协作闭环、可用能力与授权状态' : '本地持久化导入链路' }}</span></div><el-button v-if="dashboard.activeSection !== 'personal'" :icon="Refresh" :loading="dashboard.activeSection === 'workbench' ? dashboard.feishuWorkbenchLoading : dashboard.loading" @click="dashboard.activeSection === 'workbench' ? dashboard.loadFeishuWorkbench() : dashboard.loadResearch()">刷新数据</el-button></el-header>
+      <el-header class="topbar"><div><h1>{{ dashboard.activeSection === 'research' ? '量化研究台' : dashboard.activeSection === 'market-decision' ? '市场与选股' : dashboard.activeSection === 'holdings' ? '我的持仓' : dashboard.activeSection === 'monitor' ? '导入监控' : dashboard.activeSection === 'workbench' ? '飞书工作台' : '手动投递' }}</h1><span>{{ dashboard.activeSection === 'research' ? '分析师证据、市场数据与研究候选池' : dashboard.activeSection === 'market-decision' ? '全市场扫描、盘面判断与独立新买研究' : dashboard.activeSection === 'holdings' ? '中信证券精确持仓与持仓内操作计划' : dashboard.activeSection === 'workbench' ? '汇总群协作闭环、可用能力与授权状态' : '本地持久化导入链路' }}</span></div><el-button v-if="!['market-decision', 'holdings'].includes(dashboard.activeSection)" :icon="Refresh" :loading="dashboard.activeSection === 'workbench' ? dashboard.feishuWorkbenchLoading : dashboard.loading" @click="dashboard.activeSection === 'workbench' ? dashboard.loadFeishuWorkbench() : dashboard.loadResearch()">刷新数据</el-button></el-header>
       <el-main class="content">
         <template v-if="dashboard.activeSection === 'research'">
           <el-alert v-if="dashboard.researchError" :title="dashboard.researchError" type="error" show-icon :closable="false" class="section-gap" />
           <el-tabs v-model="dashboard.activeResearchTab" class="research-tabs">
-            <el-tab-pane label="研究概览" name="overview">
+            <el-tab-pane label="研究概览" name="overview" lazy>
               <ResearchOverviewTab />
             </el-tab-pane>
-            <el-tab-pane label="全市场快照" name="market-snapshots">
+            <el-tab-pane label="板块热度" name="market-snapshots" lazy>
               <MarketSnapshotsTab />
             </el-tab-pane>
-            <el-tab-pane label="收盘复盘" name="close-review">
+            <el-tab-pane label="收盘复盘" name="close-review" lazy>
               <CloseReviewTab />
             </el-tab-pane>
-            <el-tab-pane label="策略与股票池" name="strategy">
+            <el-tab-pane label="策略与股票池" name="strategy" lazy>
               <StrategyTab />
             </el-tab-pane>
-            <el-tab-pane label="因子与回测" name="factor-lab">
+            <el-tab-pane label="因子与回测" name="factor-lab" lazy>
               <FactorLabTab />
             </el-tab-pane>
-            <el-tab-pane label="个股研究" name="stock-study">
+            <el-tab-pane label="个股研究" name="stock-study" lazy>
               <StockStudyTab />
             </el-tab-pane>
-            <el-tab-pane label="分析师证据" name="evidence">
+            <el-tab-pane label="分析师证据" name="evidence" lazy>
               <AnalystEvidenceTab />
             </el-tab-pane>
-            <el-tab-pane label="观点复核" name="claim-review">
+            <el-tab-pane label="观点复核" name="claim-review" lazy>
               <ClaimReviewTab />
             </el-tab-pane>
-            <el-tab-pane label="数据源 Doctor" name="providers">
+            <el-tab-pane label="数据源 Doctor" name="providers" lazy>
               <ProviderTab />
             </el-tab-pane>
-            <el-tab-pane label="接口与原始数据" name="catalog">
+            <el-tab-pane label="接口与原始数据" name="catalog" lazy>
               <CatalogTab />
             </el-tab-pane>
-            <el-tab-pane label="质量与分钟数据" name="quality">
+            <el-tab-pane label="质量与分钟数据" name="quality" lazy>
               <QualityTab />
             </el-tab-pane>
           </el-tabs>
         </template>
-        <PersonalDecisionView v-else-if="dashboard.activeSection === 'personal'" />
+        <PersonalDecisionView v-else-if="dashboard.activeSection === 'market-decision'" mode="market" />
+        <PersonalDecisionView v-else-if="dashboard.activeSection === 'holdings'" mode="holdings" />
         <GroupRelayMonitorView v-else-if="dashboard.activeSection === 'monitor'" />
         <FeishuWorkbenchView v-else-if="dashboard.activeSection === 'workbench'" />
         <ManualRelayView v-else />

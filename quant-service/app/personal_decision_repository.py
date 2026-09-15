@@ -9,6 +9,7 @@ from typing import Any
 from psycopg.types.json import Json
 
 from .personal_decision_contracts import BrokerPortfolioSnapshotInput, PersonalTradePlanInput
+from .broker_desktop_evidence import SOURCES as DESKTOP_SOURCES, verify_account_binding, verify_artifacts
 
 
 class ImmutableDecisionFactConflict(ValueError):
@@ -21,6 +22,12 @@ def _content_hash(payload: dict[str, Any]) -> str:
 
 
 def persist_broker_snapshot(connection: Any, snapshot: BrokerPortfolioSnapshotInput) -> dict[str, Any]:
+    if snapshot.source in DESKTOP_SOURCES:
+        artifacts = verify_artifacts(snapshot.metadata.get("evidence"), snapshot.observed_at)
+        digest = sha256(json.dumps(sorted(item["sha256"] for item in artifacts)).encode()).hexdigest()
+        if snapshot.metadata.get("evidence_bundle_sha256") != digest or snapshot.source_snapshot_key != digest:
+            raise ValueError("BROKER_EVIDENCE_BUNDLE_MISMATCH")
+        verify_account_binding(connection, snapshot.account_key, snapshot.metadata)
     payload = snapshot.model_dump(mode="json")
     content_hash = _content_hash(payload)
     existing = connection.execute(

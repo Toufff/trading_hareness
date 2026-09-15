@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, provide, proxyRefs, ref, watch } 
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { use } from 'echarts/core';
 import { BarChart, CandlestickChart, LineChart, ScatterChart } from 'echarts/charts';
-import { DataZoomComponent, GridComponent, LegendComponent, MarkPointComponent, TooltipComponent } from 'echarts/components';
+import { DataZoomComponent, GridComponent, LegendComponent, MarkAreaComponent, MarkLineComponent, MarkPointComponent, TooltipComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 import type { AnalystMarketReview, AutomationRun } from '../api/analyst-contract';
 import type { components } from '../api/generated';
@@ -11,7 +11,11 @@ import { getJson as getJsonBase, postJson } from '../api/http';
 import { escapeHtml } from '../utils/escapeHtml';
 import { useFeishuRelayWorkspace } from './useFeishuRelayWorkspace';
 import { usePolling } from './usePolling';
-import { resolveInitialDashboardSection, type DashboardSection } from '../dashboard-navigation';
+import { panelsForResearchTab, settlePanelQueue } from './research-panel-loading';
+import type { StockWorkbench } from '../components/stock-workbench';
+import type { StockWorkbenchControl } from '../components/stock-workbench-control';
+import { isLiveWorkbenchControl } from '../components/stock-workbench-control';
+import { dashboardSectionPath, resolveInitialDashboardSection, type DashboardSection } from '../dashboard-navigation';
 import {
   dashboardContextKey,
   feishuWorkbenchContextKey,
@@ -21,7 +25,7 @@ import {
 
 
 export function useDashboardWorkspace() {
-use([BarChart, CandlestickChart, LineChart, ScatterChart, DataZoomComponent, GridComponent, LegendComponent, MarkPointComponent, TooltipComponent, CanvasRenderer]);
+use([BarChart, CandlestickChart, LineChart, ScatterChart, DataZoomComponent, GridComponent, LegendComponent, MarkAreaComponent, MarkLineComponent, MarkPointComponent, TooltipComponent, CanvasRenderer]);
 
 type Route = { tag: string; label: string };
 type EventItem = { event_id: string; received_at: string; message_type?: string; text?: string; source_label?: string; n8n_status?: string; target_status?: string; target_batch_id?: string | null; n8n_error?: string | null };
@@ -124,11 +128,6 @@ type FeatureItem = { symbol: string; name?: string; features: Record<string, unk
 type ClaimReview = { review_id: string; suggested_label: string; suggested_symbol?: string; analyst_name?: string; direction: number; strength: number; horizon_days: number; evidence: string; status: string };
 type QualityIssue = { issue_id?: string; severity: string; capability?: string; symbol?: string; trading_date?: string; code: string; message: string; created_at?: string };
 type MinuteImport = { import_id: string; source_name: string; file_name: string; status: string; row_count: number; rejected_rows: number; started_at?: string; finished_at?: string; error_message?: string };
-type StudySource = { source: string; api_name: string; provider?: string; status: string; received: number; stored: number; error?: string; failures?: string[]; fallback_failures?: { provider: string; error: string }[] };
-type StudyClaim = { claim_id: string; analyst_name: string; subject_label?: string; direction: number; strength: number; horizon_days: number; extraction_confidence?: number; available_at?: string; evidence: string };
-type StockReadinessItem = { api_name: string; label: string; priority: string; rows: number; latest_date?: string | null; status: string };
-type StockReadiness = { symbol: string; window_start: string; window_end: string; mode: string; decision_ready: boolean; blockers: string[]; items: StockReadinessItem[] };
-type StockStudy = { symbol: string; as_of_date: string; lookback_days: number; sources: StudySource[]; on_demand_readiness?: StockReadiness; market: Record<string, Record<string, unknown> | Record<string, unknown>[] | null>; events?: { announcements?: Announcement[]; provider?: string; decision_eligible?: boolean }; technical: Record<string, unknown>; analyst: { summary: Record<string, unknown>; claims: StudyClaim[] }; combined: { score: number; stance: string; notice: string; reasons: string[] } };
 type Factor = { factor_key: string; label: string; category: string; implementation: string; framework_tags: string[]; status: string; version: string; metadata?: Record<string, unknown> };
 type FactorEvaluation = { evaluation_id: string; factor_key: string; label: string; status: string; observations: number; cross_section_days: number; horizon_days: number; metrics: Record<string, unknown>; artifact?: Record<string, unknown>; created_at?: string };
 type Strategy = { strategy_key: string; label: string; engine: string; version: string; configuration: Record<string, unknown>; status: string };
@@ -172,18 +171,12 @@ function recordPanelError(key: string, error: unknown): void {
   const previous = panelStatus.value[key];
   panelStatus.value[key] = { error: message, updatedAt: previous?.updatedAt ?? null, stale: true };
 }
-// Runs every panel fetch independently via allSettled: a failing panel keeps
-// its previous data and is flagged stale instead of blocking the ~50 other
-// panels that share this one refresh cycle.
+// Only visible-tab dependencies enter this bounded, cancellation-aware queue.
 async function loadPanels(entries: PanelEntry[], signal?: AbortSignal): Promise<void> {
-  const results = await Promise.allSettled(entries.map((entry) => entry.run()));
-  if (signal?.aborted) return;
-  results.forEach((result, index) => {
-    const entry = entries[index];
-    if (!entry) return;
-    if (result.status === 'fulfilled') recordPanelSuccess(entry.key);
-    else recordPanelError(entry.key, result.reason);
-  });
+  await settlePanelQueue(entries, (entry, error) => {
+    if (error === undefined) recordPanelSuccess(entry.key);
+    else recordPanelError(entry.key, error);
+  }, signal);
 }
 const overview = ref<ResearchOverview>({}); const reports = ref<RemoteReport[]>([]); const remoteMessages = ref<RemoteMessage[]>([]); const analystSkills = ref<AnalystSkillProfile[]>([]); const analystResearchStatus = ref<AnalystResearchStatus>({}); const claims = ref<AnalystClaim[]>([]); const providerHealth = ref<ProviderHealth[]>([]); const providerApiCapabilities = ref<ProviderApiCapability[]>([]); const marketSnapshots = ref<MarketSnapshot[]>([]); const sectors = ref<Sector[]>([]); const sectorFlows = ref<SectorFlow[]>([]); const conceptSignals = ref<ConceptSignal[]>([]); const conceptCandidates = ref<ConceptCandidate[]>([]); const announcements = ref<Announcement[]>([]); const lhbEvents = ref<Announcement[]>([]); const closeBoardReport = ref<BoardReviewReport | null>(null); const conceptBackfill = ref<ConceptBackfill>({ total_concepts: 0, mapped_concepts: 0, states: [] }); const closeStrategyReview = ref<StrategyReview | null>(null); const postCloseStrategyRun = ref<PostCloseStrategyRun | null>(null); const postCloseCandidates = ref<PostCloseCandidate[]>([]); const strategyPatternRun = ref<StrategyPatternRun | null>(null); const tenDayLeaderRotation = ref<TenDayLeaderRotation>({ candidates: [] }); const strategyLimitPool = ref<LimitPoolRow[]>([]); const strategyLimitLadder = ref<LimitLadderRow[]>([]); const strategyContinuationCandidates = ref<LimitPoolRow[]>([]); const strategyDragonLeaderCandidates = ref<LimitPoolRow[]>([]); const strategyDragonLeaderMarket = ref<DragonLeaderWatch['market_context']>({}); const strategyPoolCoverage = ref<LimitPoolCoverage>({}); const strategyPatternPicks = ref<StrategyPatternSample[]>([]); const strategyPatternSamples = ref<StrategyPatternSample[]>([]); const postCloseRefresh = ref<PostCloseRefresh | null>(null); const intradayOutcomes = ref<IntradayOutcome[]>([]); const intradayOutcomeSummary = ref<IntradayOutcomeSummary[]>([]); const intradayAttributionSummary = ref<IntradayAttributionSummary[]>([]); const attributionValidationGate = ref<AttributionValidationGate>({ status: 'accumulating', matured_unique_signals: 0, trading_days: 0, required_unique_signals: 200, required_trading_days: 60 }); const analystReadiness = ref<AnalystReadiness[]>([]); const analystScorecards = ref<AnalystScorecard[]>([]); const selectedReviewBoardKey = ref(''); const catalog = ref<{ count?: number; counts?: CatalogCounts; items?: CatalogItem[]; providers?: ProviderConfig[]; online_range_max_days?: number; historical_minute_policy?: string; realtime_minute_policy?: string; coverage_rule?: string }>({}); const recommendations = ref<Recommendation[]>([]); const universe = ref<UniverseMember[]>([]); const featureItems = ref<FeatureItem[]>([]); const claimReviews = ref<ClaimReview[]>([]); const factors = ref<Factor[]>([]); const factorEvaluations = ref<FactorEvaluation[]>([]); const strategies = ref<Strategy[]>([]); const strategyExperiments = ref<StrategyExperiment[]>([]); const mainWaveExperiments = ref<StrategyExperiment[]>([]); const frameworks = ref<Framework[]>([]); const trainingRoadmap = ref<TrainingRoadmap>({ status: 'planned', policy: '', stages: [] }); const qualityIssues = ref<QualityIssue[]>([]); const minuteImports = ref<MinuteImport[]>([]); const minuteDirectory = ref('');
 const replayReadiness = ref<ReplayReadiness>({});
@@ -209,7 +202,7 @@ const analystStockTimeline = ref<AnalystStockTimeline | null>(null); const analy
 const strategyAblation = ref<StrategyAblation>({});
 const strategyHealth = ref<StrategyHealth>({});
 const catalogQuery = ref(''); const catalogGroup = ref('all'); const selectedCatalog = ref<CatalogItem[]>([]); const auditResults = ref<CapabilityAuditRow[]>([]); const catalogRefreshing = ref(false); const fetchDialogOpen = ref(false); const fetchResultOpen = ref(false); const fetchResult = ref<Record<string, unknown>>({}); const fetchForm = ref({ api_name: 'daily', provider: 'auto', paramsText: '{\n  "ts_code": "000001.SZ",\n  "start_date": "20260804",\n  "end_date": "20260804"\n}', fields: 'ts_code,trade_date,open,high,low,close,vol,amount', max_rows: 100 });
-const studySymbol = ref(/^\d{6}\.(SH|SZ|BJ)$/.test(sharedResearchSymbol) ? sharedResearchSymbol : '000636.SZ'); const studyLookback = ref(21); const stockStudy = ref<StockStudy | null>(null); const studyLoading = ref(false); const studyError = ref('');
+const studySymbol = ref(/^\d{6}\.(SH|SZ|BJ)$/.test(sharedResearchSymbol) ? sharedResearchSymbol : '000636.SZ'); const studyLookback = ref(120); const stockStudy = ref<StockWorkbench | null>(null); const stockWorkbenchControl = ref<StockWorkbenchControl | null>(null); const studyLoading = ref(false); const studyError = ref('');
 const universeText = ref(''); const universePriority = ref(100); const reviewSymbol = ref<Record<string, string>>({}); const sectorMemberOffset = ref(0); const sectorMemberLimit = ref(10); const sectorFlowDate = ref('');
 const chinaMinute = (value?: string | null) => value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) : '-';
 const chinaDateTime = (value?: string | null) => value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) : '-';
@@ -272,12 +265,12 @@ const storageText = (value?: number) => value === undefined || value === null ? 
 const rowText = (value?: number) => value === undefined || value === null ? '-' : Number(value).toLocaleString();
 const featureStatusType = (value?: string) => value === 'ready' ? 'success' : value === 'missing' ? 'danger' : 'warning';
 const studyBars = computed<Record<string, unknown>[]>(() => {
-  const bars = stockStudy.value?.market.daily_bars;
+  const bars = stockStudy.value?.series.daily;
   return Array.isArray(bars) ? bars : [];
 });
 const studyMarketRecord = (name: string): Record<string, unknown> => {
-  const value = stockStudy.value?.market[name];
-  return value && !Array.isArray(value) ? value : {};
+  const value = (stockStudy.value as unknown as { market?: Record<string, unknown> } | null)?.market?.[name];
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 };
 const featureRecord = (row: FeatureItem, name: string): Record<string, unknown> => {
   const value = row.features[name];
@@ -591,7 +584,7 @@ function researchPanelEntries(): PanelEntry[] {
     { key: 'concept-backfill', run: async () => { conceptBackfill.value = await getJson<ConceptBackfill>('/api/research/market/sectors/concepts/members/backfill/status'); } },
     { key: 'close-strategy-review', run: async () => { closeStrategyReview.value = (await getJson<{ review?: StrategyReview | null }>('/api/research/strategy/reviews/latest?session=close')).review ?? null; } },
     { key: 'post-close-strategy', run: async () => {
-      const result = await getJson<{ run?: PostCloseStrategyRun | null; candidates?: PostCloseCandidate[] }>('/api/research/strategy/post-close/latest');
+      const result = await getJson<{ run?: PostCloseStrategyRun | null; candidates?: PostCloseCandidate[] }>('/api/research/strategy/post-close/latest?view=dashboard');
       postCloseStrategyRun.value = result.run ?? null; postCloseCandidates.value = result.candidates ?? [];
     } },
     { key: 'pattern-mining', run: async () => {
@@ -644,28 +637,27 @@ function researchPanelEntries(): PanelEntry[] {
   ];
 }
 async function loadResearch() {
-  if (loading.value) return;
   researchAbortController?.abort();
   const controller = new AbortController();
   researchAbortController = controller;
+  const entries = panelsForResearchTab(researchPanelEntries(), activeResearchTab.value);
   loading.value = true; researchError.value = '';
   try {
-    // Every panel below fetches and settles independently: one failing
-    // endpoint keeps its panel's previous data (flagged stale) instead of
-    // blocking the ~50 other panels that share this refresh cycle.
-    await loadPanels(researchPanelEntries(), controller.signal);
+    await loadPanels(entries, controller.signal);
     if (controller.signal.aborted) return;
     if (!universeText.value) universeText.value = universe.value.filter((item) => item.enabled).map((item) => item.symbol).join(', ');
     if (!sectorFlowDate.value) sectorFlowDate.value = sectorFlows.value[0]?.trading_date ?? overview.value.latest_market_snapshot?.exchange_date ?? '';
     if (!selectedFactors.value.length) selectedFactors.value = factors.value.filter((item) => item.implementation === 'native_sql').map((item) => item.factor_key);
     researchLoaded.value = true;
-    const failedKeys = stalePanelKeys.value;
+    const failedKeys = entries.filter(entry => panelStatus.value[entry.key]?.stale).map(entry => entry.key);
     researchError.value = failedKeys.length ? `${failedKeys.length} 个面板刷新失败，已保留旧数据：${failedKeys.join('、')}` : '';
   } catch (error) {
     if (!controller.signal.aborted) researchError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    if (researchAbortController === controller) researchAbortController = null;
-    loading.value = false;
+    if (researchAbortController === controller) {
+      researchAbortController = null;
+      loading.value = false;
+    }
   }
 }
 async function runAction(label: string, path: string, body: Record<string, unknown> = {}, confirmation = true) {
@@ -737,8 +729,9 @@ async function runStockStudy() {
   if (!/^\d{6}\.(SH|SZ|BJ)$/.test(symbol)) { ElMessage.error('代码格式应为 000636.SZ'); return; }
   studyLoading.value = true; studyError.value = ''; stockStudy.value = null;
   try {
-    stockStudy.value = await postJson<StockStudy>(`/api/research/stocks/${symbol}/study`, { lookback_days: studyLookback.value });
-    studySymbol.value = symbol; ElMessage.success(`${symbol} 的研究证据已刷新`); await loadResearch();
+    const params = new URLSearchParams({ lookback_days: String(studyLookback.value) });
+    stockStudy.value = await getJson<StockWorkbench>(`/api/research/stocks/${symbol}/workbench?${params}`);
+    studySymbol.value = symbol; ElMessage.success(`${symbol} 的策略工作台已刷新`);
   } catch (error) { studyError.value = error instanceof Error ? error.message : String(error); } finally { studyLoading.value = false; }
 }
 async function probeRealtimeMinutes() {
@@ -819,8 +812,23 @@ function connectEvents() {
   eventSource?.close(); eventSource = new EventSource('/events');
   eventSource.addEventListener('snapshot', (event) => { events.value = JSON.parse((event as MessageEvent).data); connected.value = true; });
   eventSource.addEventListener('message', (event) => { const item: EventItem = JSON.parse((event as MessageEvent).data); events.value = [item, ...events.value.filter((current) => current.event_id !== item.event_id)].slice(0, 200); connected.value = true; });
+  eventSource.addEventListener('workbench-control', (event) => {
+    try { void applyStockWorkbenchControl(JSON.parse((event as MessageEvent).data) as StockWorkbenchControl); }
+    catch { /* a malformed presentation event must not interrupt the dashboard feed */ }
+  });
   eventSource.onopen = () => { connected.value = true; retryDelay = 1000; };
   eventSource.onerror = () => { connected.value = false; eventSource?.close(); if (retryTimer) clearTimeout(retryTimer); retryTimer = window.setTimeout(connectEvents, retryDelay); retryDelay = Math.min(30_000, retryDelay * 2); };
+}
+async function applyStockWorkbenchControl(control: StockWorkbenchControl) {
+  if (stockWorkbenchControl.value && control.revision <= stockWorkbenchControl.value.revision) return;
+  stockWorkbenchControl.value = control;
+  if (!isLiveWorkbenchControl(control) || !control.symbol) return;
+  const requiresLoad = stockStudy.value?.symbol !== control.symbol || studyLookback.value !== control.lookback_days;
+  activeSection.value = 'research';
+  activeResearchTab.value = 'stock-study';
+  studySymbol.value = control.symbol;
+  studyLookback.value = control.lookback_days;
+  if (requiresLoad && !studyLoading.value) await runStockStudy();
 }
 function addFiles(list: FileList | File[]) { const incoming = Array.from(list); const allowed = incoming.filter((file) => file.size <= 500 * 1024 * 1024); if (allowed.length !== incoming.length) relayState.value = '超过 500 MB 的文件未加入'; relayFiles.value = [...relayFiles.value, ...allowed.filter((file) => !relayFiles.value.some((current) => current.name === file.name && current.size === file.size))]; }
 function submitRelay() {
@@ -829,14 +837,20 @@ function submitRelay() {
   const xhr = new XMLHttpRequest(); relayXhr.value = xhr; relayState.value = '上传中'; relayProgress.value = 0; xhr.open('POST', '/manual-relay'); xhr.upload.onprogress = (event) => { if (event.lengthComputable) relayProgress.value = Math.round(event.loaded / event.total * 100); }; xhr.onload = () => { try { const body = JSON.parse(xhr.responseText); if (xhr.status >= 300) throw new Error(body.message); relayState.value = `已接收 ${body.message_id}`; relayText.value = ''; relayFiles.value = []; } catch (error) { relayState.value = `失败：${error instanceof Error ? error.message : String(error)}`; } relayXhr.value = null; }; xhr.onerror = () => { relayState.value = '网络错误'; relayXhr.value = null; }; xhr.send(form);
 }
 function selectActiveSection(value: string) {
-  if (!['research', 'personal', 'monitor', 'workbench', 'relay'].includes(value)) return;
+  if (!['research', 'market-decision', 'holdings', 'monitor', 'workbench', 'relay'].includes(value)) return;
   activeSection.value = value as DashboardSection;
+  window.history.replaceState({}, '', dashboardSectionPath(activeSection.value));
 }
 function loadActiveSection() {
   if (activeSection.value === 'research') {
-    if (!researchLoaded.value && !loading.value) void loadResearch();
-    void loadRealtimeServices();
-    void loadBoardFlowCurves(true); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining();
+    const tab = activeResearchTab.value;
+    void loadResearch().then(() => {
+      if (activeSection.value !== 'research' || activeResearchTab.value !== tab) return;
+      if (tab === 'providers') void loadRealtimeServices();
+      if (tab === 'close-review') {
+        void loadBoardFlowCurves(true); void loadMarketFlowFeatures(); void loadBoardRotationEvents(); void loadBoardStockMining(); void loadLimitLinkageMining();
+      }
+    });
   } else if (activeSection.value === 'monitor') {
     void loadGroupRelayStatus();
   } else if (activeSection.value === 'workbench') {
@@ -845,8 +859,7 @@ function loadActiveSection() {
 }
 function scheduleActiveSectionLoad() {
   if (sectionLoadTimer !== null) window.clearTimeout(sectionLoadTimer);
-  // Research hydrates dozens of independent panels.  A short debounce lets the
-  // shell remain navigable when the user is moving between top-level sections.
+  // Debounce quick navigation; only the final visible tab starts its requests.
   const delay = activeSection.value === 'research' ? 500 : 0;
   sectionLoadTimer = window.setTimeout(() => {
     sectionLoadTimer = null;
@@ -859,11 +872,11 @@ onMounted(() => {
   connectEvents(); scheduleActiveSectionLoad();
   // Each task returns its in-flight promise (rather than using `void`) so
   // usePolling's overlap guard can see when a tick is still running.
-  polling.every(15_000, () => (activeSection.value === 'research' ? loadRealtimeServices() : undefined));
+  polling.every(15_000, () => (activeSection.value === 'research' && activeResearchTab.value === 'providers' ? loadRealtimeServices() : undefined));
   polling.every(10_000, () => (activeSection.value === 'monitor' ? loadGroupRelayStatus() : undefined));
   polling.every(10_000, () => (activeSection.value === 'workbench' ? loadFeishuWorkbench() : undefined));
   polling.every(60_000, () => {
-    if (activeSection.value === 'research' && document.visibilityState === 'visible' && boardFlowIsExchangeToday.value) {
+    if (activeSection.value === 'research' && activeResearchTab.value === 'close-review' && document.visibilityState === 'visible' && boardFlowIsExchangeToday.value) {
       return Promise.all([loadBoardFlowCurves(false), loadMarketFlowFeatures(), loadBoardRotationEvents(), loadBoardStockMining(), loadLimitLinkageMining()]);
     }
     return undefined;
@@ -872,6 +885,11 @@ onMounted(() => {
 watch(activeSection, (section) => {
   localStorage.setItem('dashboard-active-section', section);
   if (section !== 'research') researchAbortController?.abort();
+  scheduleActiveSectionLoad();
+});
+watch(activeResearchTab, () => {
+  if (activeSection.value !== 'research') return;
+  researchAbortController?.abort();
   scheduleActiveSectionLoad();
 });
 onBeforeUnmount(() => {
@@ -1017,6 +1035,7 @@ const dashboardBindings = {
     studySymbol,
     studyLookback,
     stockStudy,
+    stockWorkbenchControl,
     studyLoading,
     studyError,
     universeText,
@@ -1218,6 +1237,7 @@ const dashboardBindings = {
     runStrategyBacktest,
     runMainWaveResearch,
     connectEvents,
+    applyStockWorkbenchControl,
     addFiles,
     submitRelay,
 }

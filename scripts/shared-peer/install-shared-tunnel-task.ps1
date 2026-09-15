@@ -7,11 +7,7 @@ param(
     [int]$RemoteApiPort = 15681,
     [int]$LocalDatabasePort = 55432,
     [int]$LocalApiPort = 5681,
-    # Interactive logon requires an active console session and, even with
-    # -WindowStyle Hidden, briefly flashes a conhost window per launch/restart.
-    # S4U runs without a logged-on session and without flashing anything; pass
-    # -LogonType Interactive only if S4U cannot be granted "Log on as a batch
-    # job" on this host.
+    # Both modes use a GUI launcher; Interactive must also remain console-free.
     [ValidateSet('S4U', 'Interactive')][string]$LogonType = 'S4U'
 )
 
@@ -20,34 +16,56 @@ Set-StrictMode -Version Latest
 $resolved = (Resolve-Path -LiteralPath $ScriptPath).Path
 $repository = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $resolved) '..\..')).TrimEnd('\')
 Import-Module (Join-Path $repository 'scripts\windows\runtime-observability.psm1') -Force
+Import-Module (Join-Path $repository 'scripts\windows\background-process.psm1') -Force
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 $state = Request-RuntimeStop -PlatformRoot $PlatformRoot -Service 'shared-peer-tunnels' -Reason 'task_reinstall' -RequestedBy 'install-shared-tunnel-task.ps1'
-if ($state) {
-    if ($state.PSObject.Properties['launcher_pid'] -and [int]$state.launcher_pid -gt 0) {
-        Stop-Process -Id ([int]$state.launcher_pid) -Force -ErrorAction SilentlyContinue
-    }
-    if ($state.PSObject.Properties['supervisor_pid'] -and [int]$state.supervisor_pid -gt 0) {
-        Wait-Process -Id ([int]$state.supervisor_pid) -Timeout 3 -ErrorAction SilentlyContinue
-        if (Get-Process -Id ([int]$state.supervisor_pid) -ErrorAction SilentlyContinue) {
-            Stop-Process -Id ([int]$state.supervisor_pid) -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
+# State may point to yesterday's dead PID. Reconcile only live ssh processes
+# whose command line owns both exact forwarding tuples; never kill by stale PID.
 Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
     Where-Object {
         $_.CommandLine -match "127\.0\.0\.1:$RemoteDatabasePort`:127\.0\.0\.1:$LocalDatabasePort" -and
         $_.CommandLine -match "127\.0\.0\.1:$RemoteApiPort`:127\.0\.0\.1:$LocalApiPort"
     } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-$pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
-$action = New-ScheduledTaskAction -Execute $pwsh -Argument (
-    '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -PlatformRoot "{1}" -SshAlias "{2}" -RemoteDatabasePort {3} -RemoteApiPort {4} -LocalDatabasePort {5} -LocalApiPort {6}' -f `
-        $resolved, $PlatformRoot, $SshAlias, $RemoteDatabasePort, $RemoteApiPort, $LocalDatabasePort, $LocalApiPort
-)
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$action = New-HiddenPowerShellTaskAction -RepositoryRoot $repository -ScriptPath $resolved -ScriptArguments @(
+    '-PlatformRoot', $PlatformRoot, '-SshAlias', $SshAlias, '-RemoteDatabasePort', "$RemoteDatabasePort",
+    '-RemoteApiPort', "$RemoteApiPort", '-LocalDatabasePort', "$LocalDatabasePort", '-LocalApiPort', "$LocalApiPort")
+# Two triggers on purpose.
+#
+# -RestartCount/-RestartInterval below do NOT cover the failure that actually
+# happens here. Task Scheduler restarts a task whose *engine* could not run it;
+# an action that exits nonzero is recorded as a completed run with a return
+# code, and nothing restarts it. Measured on 2026-09-04: ssh lost its server
+# connection ("client_loop: send disconnect: Connection reset"), the action
+# exited 255, and the peer's database and owner-API tunnels simply stayed down
+# for as long as nobody looked - the peer kept answering /health out of its own
+# process while every call through the gateway returned 500.
+#
+# The repeating trigger is the actual supervisor: MultipleInstances IgnoreNew
+# makes a tick free while the tunnels are up, and the first tick after a drop
+# brings them back. It must be a time trigger, not a repetition hung off the
+# logon trigger: a logon trigger's repetition only starts when that trigger
+# fires, so on a host where the operator logged in hours before the task was
+# installed it never starts at all (measured: no recovery 7 minutes after
+# killing ssh). A start boundary in the past plus -StartWhenAvailable makes the
+# first tick due immediately.
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+# A daily trigger re-arms the repetition every midnight, which is the only way
+# to express "forever" that Task Scheduler accepts: an unbounded
+# RepetitionDuration is rejected as out of range.
+$superviseTrigger = New-ScheduledTaskTrigger -Daily -At (Get-Date).Date
+$superviseTrigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date).Date `
+    -RepetitionInterval (New-TimeSpan -Minutes 2) `
+    -RepetitionDuration (New-TimeSpan -Hours 23 -Minutes 58)).Repetition
+# New-ScheduledTaskTrigger defaults this to true: at the daily boundary it
+# killed the task's parent but left detached ssh alive, producing a restart storm.
+$superviseTrigger.Repetition.StopAtDurationEnd = $false
+$trigger = @($logonTrigger, $superviseTrigger)
 $settings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit (New-TimeSpan -Days 3650) `
+    -Hidden -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -RestartCount 999 `
     -RestartInterval (New-TimeSpan -Minutes 1) `
+    -StartWhenAvailable `
     -MultipleInstances IgnoreNew
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType $LogonType -RunLevel Limited
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
@@ -72,8 +90,9 @@ if ($task.State -ne 'Running') {
 $healthDeadline = [DateTime]::UtcNow.AddSeconds(30)
 $remoteHealth = ''
 do {
-    $remoteHealth = (& ssh.exe -o BatchMode=yes -o ConnectTimeout=5 $SshAlias `
-        "curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:$RemoteApiPort/health" 2>$null | Out-String).Trim()
+    $probe = Invoke-ConsoleFreeCommand -FilePath (Get-Command ssh.exe).Source -Arguments @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', $SshAlias,
+        "curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:$RemoteApiPort/health") -TimeoutSeconds 12
+    $remoteHealth = $probe.Stdout.Trim()
     if ($remoteHealth -eq '200') { break }
     Start-Sleep -Seconds 1
 } while ([DateTime]::UtcNow -lt $healthDeadline)

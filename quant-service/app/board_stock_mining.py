@@ -9,6 +9,7 @@ separately validated intraday alert rules.
 from __future__ import annotations
 
 from typing import Any
+from .short_term_liquidity import evidence as liquidity_evidence
 
 
 def _number(value: Any) -> float | None:
@@ -21,7 +22,7 @@ def _number(value: Any) -> float | None:
 def _ranked(candidates: list[dict[str, Any]], direction: str, maximum: int) -> list[dict[str, Any]]:
     selected = sorted(
         (item for item in candidates if item["direction"] == direction),
-        key=lambda item: (-float(item["score"]), item["symbol"], item["sector_key"]),
+        key=lambda item: (-float(item.get("research_rank_score",item["score"])), item["symbol"], item["sector_key"]),
     )[:maximum]
     for rank, item in enumerate(selected, start=1):
         item["rank"] = rank
@@ -92,7 +93,14 @@ def board_stock_mining_candidates(
 
             if direction is None or setup_key is None:
                 continue
+            liq = liquidity_evidence(stock.get('turnover'),turnover_rate)
+            liq['scope'] = 'intraday_cumulative_only_discounted'
             candidates.append({
+                'liquidity': liq,
+                # Do not suppress small-stock outflow warnings: this request
+                # changes opportunity priority, not risk-alert severity.
+                'research_rank_score': round(.60*(base+price_component)+.40*liq['score'],2)
+                                       if direction == 'inflow' else round(base+price_component,2),
                 "direction": direction,
                 "setup_key": setup_key,
                 "symbol": symbol,
@@ -127,7 +135,7 @@ def board_stock_mining_candidates(
         "inflow_candidates": len(inflows),
         "outflow_candidates": len(outflows),
         "returned": len(inflows) + len(outflows),
-        "model_version": "board-flow-stock-mining-v1",
+        "model_version": "board-flow-stock-mining-liquidity-20260910",
         "notice": "研究候选，不是买卖指令；仅在精确成员映射和同刻报价完整时生成。",
     }
     return inflows + outflows, coverage, summary

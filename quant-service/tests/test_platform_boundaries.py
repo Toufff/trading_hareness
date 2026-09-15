@@ -290,7 +290,7 @@ class PlatformBoundaryTests(unittest.TestCase):
         finally:
             main_module._metrics_control_plane_refreshed_at = original
 
-    def test_provider_actions_router_has_only_bounded_post_contracts(self):
+    def test_provider_actions_router_has_bounded_provider_actions_and_read_only_workbench(self):
         action = AsyncMock(return_value={"status": "ok"})
         router = build_provider_actions_router(ProviderActionDependencies(
             akshare_probe=action, realtime_probe=action, tushare_audit=action,
@@ -305,6 +305,7 @@ class PlatformBoundaryTests(unittest.TestCase):
         self.assertEqual(methods_by_path["/api/v1/providers/tushare/fetch"], {"POST"})
         self.assertEqual(methods_by_path["/api/v1/providers/fuyao/query"], {"POST"})
         self.assertEqual(methods_by_path["/api/v1/stocks/{symbol}/study"], {"POST"})
+        self.assertEqual(methods_by_path["/api/v1/stocks/{symbol}/workbench"], {"GET", "POST"})
 
     def test_async_sync_symbol_resolution_uses_native_async_repository(self):
         async def check() -> AsyncMock:

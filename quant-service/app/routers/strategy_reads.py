@@ -17,11 +17,25 @@ from ..strategy_health_read_model import latest_strategy_health
 from ..async_strategy_health_repository import latest_strategy_health as async_latest_strategy_health
 from ..strategy_promotion import sync_strategy_promotion_catalog
 from ..watchlist_candidate_proposals import sync_latest_watchlist_proposals
+from ..strategy_watchlist_projection import compact_post_close_watchlist
+from ..strategy_dashboard_projection import dashboard_post_close
+from ..intraday_evidence_read_model import watchlists as sync_intraday_watchlists
+from ..async_intraday_evidence_read_repository import watchlists as async_intraday_watchlists
 
 
 def build_strategy_reads_router(database: Any, decision_model_version: str, async_database: Any | None = None,
                                 cn_today: Callable[[], date] = date.today) -> APIRouter:
     router = APIRouter(tags=["strategy-reads"])
+
+    @router.get("/api/v1/strategy/events/latest")
+    async def event_research_latest() -> dict[str, Any]:
+        from ..event_research.async_repository import latest
+        if async_database is not None:
+            return await latest(async_database)
+        from datetime import datetime, timezone
+        from ..event_research.pipeline import context
+        from ..runtime_executors import run_database_blocking
+        return await run_database_blocking(context, database, datetime.now(timezone.utc), timeout_seconds=10)
 
     @router.get("/api/v1/strategy/decisions/latest")
     async def decision() -> dict[str, Any]:
@@ -36,10 +50,23 @@ def build_strategy_reads_router(database: Any, decision_model_version: str, asyn
         return sync_latest_strategy_review(database, session)
 
     @router.get("/api/v1/strategy/post-close/latest")
-    async def post_close() -> dict[str, Any]:
+    async def post_close(as_of_date: date | None = None, view: Literal['full', 'dashboard'] = 'full') -> dict[str, Any]:
         if async_database is not None:
-            return await latest_post_close_strategy(async_database)
-        return sync_latest_post_close_strategy(database)
+            payload = await latest_post_close_strategy(async_database, as_of_date)
+        else:
+            payload = sync_latest_post_close_strategy(database, as_of_date)
+        return dashboard_post_close(payload) if view == 'dashboard' else payload
+
+    @router.get("/api/v1/strategy/post-close/watchlist/latest")
+    async def post_close_watchlist(limit: int = 16) -> dict[str, Any]:
+        """Small holdings-independent watchlist for human decision surfaces."""
+        if async_database is not None:
+            payload = await latest_post_close_strategy(async_database)
+            tracked = await async_intraday_watchlists(async_database)
+        else:
+            payload = sync_latest_post_close_strategy(database)
+            tracked = sync_intraday_watchlists(database)
+        return compact_post_close_watchlist(payload, limit, user_tracking=tracked.get("items") or [])
 
     @router.get("/api/v1/strategy/ablation/latest")
     async def ablation(limit: int = 200) -> dict[str, Any]:

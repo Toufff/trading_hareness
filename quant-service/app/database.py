@@ -9,6 +9,7 @@ from psycopg_pool import AsyncConnectionPool, ConnectionPool
 from psycopg.rows import dict_row
 
 from . import db_dsn
+from .empty_pool_recovery import EmptyPoolRecovery
 
 
 SCHEMA_SQL = """
@@ -1832,6 +1833,7 @@ class AsyncDatabase:
     """
 
     def __init__(self, source: Database | None = None) -> None:
+        self._empty_pool_recovery = EmptyPoolRecovery()
         source = source or Database()
         self._connect_kwargs = {**source._connect_kwargs}
         self._pool_settings = dict(source._pool_settings)
@@ -1884,6 +1886,7 @@ class AsyncDatabase:
         than a wider connection-level default.
         """
         await self.open()
+        await self._empty_pool_recovery.ensure_progress(self._pool)
         async with self._pool.connection() as connection:
             async with connection.transaction():
                 if statement_timeout_ms is not None:

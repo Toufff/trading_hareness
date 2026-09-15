@@ -1,5 +1,5 @@
 <script lang="ts">
-import { defineComponent, inject } from 'vue';
+import { defineComponent, inject, reactive, toRefs } from 'vue';
 import { Refresh } from '@element-plus/icons-vue';
 import { dashboardContextKey } from '../../dashboard-context';
 
@@ -8,7 +8,7 @@ export default defineComponent({
   setup() {
     const dashboard = inject(dashboardContextKey);
     if (!dashboard) throw new Error('research tab requires the dashboard shell context');
-    return { ...dashboard, Refresh };
+    return { ...toRefs(reactive(dashboard)), Refresh };
   },
 });
 </script>

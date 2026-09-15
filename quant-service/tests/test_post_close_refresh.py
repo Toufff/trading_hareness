@@ -44,11 +44,16 @@ class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
             captured["daily_request"] = request
             return {"status": "completed"}
 
+        async def market_snapshot(request):
+            captured["market_snapshot_request"] = request
+            return {"status": "completed"}
+
         async def orchestrator(_request, **kwargs):
             captured["stage_order"] = kwargs["stage_order"]
             captured["dependencies"] = kwargs["stage_dependencies"]
             await kwargs["actions"]["full_market_daily"]()
             await kwargs["actions"]["akshare_supplements"]()
+            await kwargs["actions"]["close_market_snapshot"]()
             await kwargs["actions"]["cninfo_announcements"]()
             return {"status": "completed", "stages": {}}
 
@@ -58,7 +63,7 @@ class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
             run_database=completed, reconcile_stale_fetch_runs=lambda *_: None,
             reprocess_remote_reports=lambda *_: None, sync_market_universe=completed,
             sync_full_market_daily=full_market_daily, sync_strategy_index_context=completed,
-            build_market_snapshot=completed, load_core_symbols=load_core, akshare_probe=probe,
+            build_market_snapshot=market_snapshot, load_core_symbols=load_core, akshare_probe=probe,
             sync_ths_industry_flow=completed, sync_ths_concept_flow=completed,
             rebuild_market_flow_features=lambda *_: None, refresh_pattern_sources=completed,
             persist_settled_limit_pool=lambda *_: {"status": "completed"},
@@ -85,6 +90,9 @@ class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["core_limit"], 7)
         self.assertEqual(captured["daily_request"].provider, "auto")
         self.assertEqual(captured["probe"].symbol, "000001.SZ")
+        market_request = captured["market_snapshot_request"]
+        self.assertEqual(market_request.exchange_date, date(2026, 8, 21))
+        self.assertFalse(market_request.refresh_public_quotes)
         self.assertEqual(captured["announcements"].symbols, ["000001.SZ"])
         self.assertEqual(captured["announcements"].start_date, date(2026, 7, 7))
 

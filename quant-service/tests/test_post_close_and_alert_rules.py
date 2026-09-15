@@ -44,6 +44,7 @@ class PostCloseAndAlertRuleTests(unittest.TestCase):
         connection.execute.side_effect = [
             MagicMock(fetchone=MagicMock(return_value=attempt)),
             MagicMock(fetchone=MagicMock(return_value=completed)),
+            MagicMock(fetchone=MagicMock(return_value=None)),  # No formal recommendation yet.
             MagicMock(fetchall=MagicMock(return_value=[{"symbol": "000636.SZ", "rank": 1}])),
         ]
         database = MagicMock()
@@ -55,6 +56,7 @@ class PostCloseAndAlertRuleTests(unittest.TestCase):
         self.assertEqual(result["latest_completed"]["status"], "completed")
         self.assertEqual(result["candidate_run"]["as_of_date"], date(2026, 8, 12))
         self.assertEqual(result["candidates"][0]["symbol"], "000636.SZ")
+        self.assertEqual(result['latest_completed']['summary']['recommendation_pool']['status'], 'unavailable')
 
     def test_limit_ladder_and_ground_to_sky_replay_keep_causal_checkpoints(self):
         self.assertEqual(limit_board_count("首板"), 1)

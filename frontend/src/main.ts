@@ -1,5 +1,4 @@
 import { createApp } from 'vue';
-import App from './App.vue';
 import './style.css';
 import { setDashboardKey } from './api/http';
 
@@ -23,4 +22,19 @@ if (startupDashboardKey) {
   window.history.replaceState(null, '', `${window.location.pathname}${remaining ? `?${remaining}` : ''}${window.location.hash}`);
 }
 
-createApp(App).mount('#app');
+// A board review must not wait for unrelated portfolio/ingestion panels.
+const rootComponent = window.location.pathname.replace(/\/$/, '') === '/sector-heat'
+  ? import('./views/SectorHeatView.vue') : window.location.pathname.replace(/\/$/, '') === '/intraday'
+    ? import('./views/IntradayScanView.vue') : import('./App.vue');
+const loadingTimer = window.setTimeout(() => {
+  const status = document.getElementById('startup-status');
+  if (status) status.textContent = '界面资源加载较慢；若持续等待，请点击重新加载。尚未开始读取数据，不代表没有分析结果。';
+}, 8000);
+void rootComponent.then(({ default: component }) => {
+  window.clearTimeout(loadingTimer);
+  createApp(component).mount('#app');
+}).catch(() => {
+  window.clearTimeout(loadingTimer);
+  const status = document.getElementById('startup-status');
+  if (status) { status.textContent = '界面资源加载失败，请重新加载页面。'; status.setAttribute('role', 'alert'); }
+});

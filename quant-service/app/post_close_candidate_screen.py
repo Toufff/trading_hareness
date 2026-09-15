@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from typing import Any, Callable
+from .short_term_liquidity import evidence as liquidity_evidence
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -71,11 +72,15 @@ def _ranking_score(
         activity_component *= 0.65
     flow_ratio = (main_net / amount) if amount and main_net is not None else None
     flow_component = 0.5 if flow_ratio is None else _clamp(0.5 + flow_ratio * 8.0)
+    liq = liquidity_evidence(amount, turnover, latest.get('_recent_amounts', []))
+    liquidity_component = liq['amount_score'] / 100
     score = 100 * (
-        structure_component * 0.45 + liquidity_percentile * 0.15 + activity_component * 0.10
-        + flow_component * 0.15 + board_component * 0.15
+        structure_component * 0.30 + liquidity_component * 0.35 + activity_component * 0.15
+        + flow_component * 0.10 + board_component * 0.10
     )
     flags = []
+    if amount is None:
+        flags.append('short_term_amount_missing')
     if amount is not None and amount < 120_000_000:
         flags.append("short_term_liquidity_below_120m")
     if turnover is not None and turnover < 1.5:
@@ -83,7 +88,7 @@ def _ranking_score(
     if flow_ratio is not None and flow_ratio < 0:
         flags.append("same_day_main_net_negative")
     return round(score, 2), {
-        "structure": round(structure_component, 4), "liquidity": round(liquidity_percentile, 4),
+        "structure": round(structure_component, 4), "liquidity": round(liquidity_component, 4),
         "activity": round(activity_component, 4), "individual_flow": round(flow_component, 4),
         "board_flow": round(board_component, 4),
     }, flags
@@ -118,7 +123,10 @@ def screen_candidates(
         grouped.setdefault(symbol, []).append(item)
         names[symbol] = item.get("name")
 
-    latest_by_symbol = {symbol: bars[-1] for symbol, bars in grouped.items()}
+    for bars in grouped.values():
+        bars.sort(key=lambda r: str(r.get('trading_date') or r.get('trade_date') or ''))
+    latest_by_symbol = {symbol: {**bars[-1], '_recent_amounts': [r.get('amount') for r in bars[-5:]]}
+                        for symbol, bars in grouped.items()}
     liquidity_percentiles = _percentiles({
         symbol: _number(item.get("amount")) for symbol, item in latest_by_symbol.items()
     })
@@ -221,7 +229,8 @@ def screen_candidates(
 
     candidates = sorted(
         proposals.values(),
-        key=lambda item: (item["candidate_type"] != "base_ready_30d", -float(item["score"]), item["symbol"]),
+        key=lambda item: (bool({'short_term_amount_missing','short_term_liquidity_below_120m'}
+                             .intersection(item['risk_flags'])), -float(item["score"]), item["symbol"]),
     )[:limit]
     return {
         "status": "completed", "as_of_date": str(as_of_date), "candidates": candidates,

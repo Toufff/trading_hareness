@@ -16,10 +16,11 @@ class _Unavailable(RuntimeError):
 
 
 class SystemControlRouterTests(unittest.TestCase):
-    def _client(self, *, health_payload=lambda: {"status": "ok"}) -> TestClient:
+    def _client(self, *, health_payload=lambda: {"status": "ok"}, async_probe=None) -> TestClient:
         app = FastAPI()
         app.include_router(build_system_control_router(SystemControlDependencies(
             health_payload=health_payload,
+            async_database_probe=async_probe,
             database_unavailable_error=_Unavailable,
             metrics_response=lambda: Response(b"quant_test_metric 1\n", media_type="text/plain"),
         )))
@@ -47,6 +48,31 @@ class SystemControlRouterTests(unittest.TestCase):
         self.assertEqual(response.json()["detail"], "database unavailable")
         self.assertNotIn("host=", response.text)
         self.assertNotIn("pool closed", response.text)
+
+    def test_sync_healthy_async_broken_is_503(self):
+        async def broken():
+            raise RuntimeError('secret connection details')
+        with self._client(async_probe=broken) as client:
+            response = client.get('/health')
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()['detail'], 'async database unavailable')
+        self.assertNotIn('secret', response.text)
+
+    def test_async_probe_recovers_without_recreating_app(self):
+        attempts = []
+        async def probe():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError('temporary outage')
+        with self._client(async_probe=probe) as client:
+            self.assertEqual(client.get('/health').status_code, 503)
+            self.assertEqual(client.get('/health').status_code, 200)
+
+    def test_async_probe_timeout_is_bounded(self):
+        async def stuck():
+            await asyncio.sleep(60)
+        with self._client(async_probe=stuck) as client:
+            self.assertEqual(client.get('/health').status_code, 503)
 
     def test_health_runs_through_the_bounded_fast_lane(self) -> None:
         """WP6: /health must not run the DB probe in anyio's unbounded threadpool."""

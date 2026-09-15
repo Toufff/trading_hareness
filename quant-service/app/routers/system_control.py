@@ -8,8 +8,9 @@ runtime state.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
@@ -26,6 +27,7 @@ class SystemControlDependencies:
     health_payload: Callable[[], dict[str, Any]]
     database_unavailable_error: type[Exception]
     metrics_response: Callable[[], Response]
+    async_database_probe: Callable[[], Awaitable[None]] | None = None
 
 
 def build_system_control_router(deps: SystemControlDependencies) -> APIRouter:
@@ -34,6 +36,14 @@ def build_system_control_router(deps: SystemControlDependencies) -> APIRouter:
 
     @router.get("/health")
     async def health() -> dict[str, Any]:
+        if deps.async_database_probe is not None:
+            try:
+                await asyncio.wait_for(deps.async_database_probe(), timeout=1.0)
+            except Exception as error:
+                logger.warning('health_async_database_unavailable', extra={
+                    'task': 'health', 'error_type': type(error).__name__,
+                })
+                raise HTTPException(status_code=503, detail='async database unavailable') from error
         try:
             # Docker's healthcheck polls this every ~15s; running it through
             # the bounded fast lane instead of anyio's unbounded default

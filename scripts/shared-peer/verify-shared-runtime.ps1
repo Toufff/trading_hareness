@@ -68,8 +68,11 @@ $remoteOwnerCode = Wait-RemoteHttp200 -Port $RemoteApiPort
 $remotePeerCode = Wait-RemoteHttp200 -Port $RemotePeerApiPort
 $completeGatewayJson = (& ssh.exe @($target.ConnectionArguments) -o BatchMode=yes $target.Destination `
     'python3 /home/stockpeer/trading_hareness/scripts/shared-peer/verify-complete-stock-api.py') -join [Environment]::NewLine
+if ($LASTEXITCODE -ne 0) { throw "Remote complete stock API probe exited $LASTEXITCODE; owner health alone does not prove peer compatibility" }
 $completeGateway = $completeGatewayJson | ConvertFrom-Json
-if (-not $completeGateway.passed) { throw 'Complete remote stock API acceptance probe failed' }
+if (-not $completeGateway -or -not $completeGateway.PSObject.Properties['passed'] -or -not $completeGateway.passed) {
+    throw 'Complete remote stock API acceptance probe returned no positive receipt'
+}
 
 $peerHealth = $null
 if ($PeerApiBase) {

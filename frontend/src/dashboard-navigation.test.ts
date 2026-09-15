@@ -1,20 +1,26 @@
 import { describe, expect, it } from 'vitest';
-import { isDashboardSection, RESEARCH_SMOKE_ROUTE, resolveInitialDashboardSection } from './dashboard-navigation';
+import { dashboardSectionPath, isDashboardSection, RESEARCH_SMOKE_ROUTE, resolveInitialDashboardSection } from './dashboard-navigation';
 
 describe('dashboard navigation', () => {
   it('honours explicit deep links before persisted navigation', () => {
-    expect(resolveInitialDashboardSection('/research', 'personal')).toBe('research');
-    expect(resolveInitialDashboardSection('/personal/', 'research')).toBe('personal');
+    expect(resolveInitialDashboardSection('/research', 'holdings')).toBe('research');
+    expect(resolveInitialDashboardSection('/personal/', 'research')).toBe('market-decision');
+    expect(resolveInitialDashboardSection('/holdings', 'research')).toBe('holdings');
   });
 
   it('defaults to the light decision workspace instead of eagerly loading research', () => {
-    expect(resolveInitialDashboardSection('/', null)).toBe('personal');
-    expect(resolveInitialDashboardSection('/unknown', 'invalid')).toBe('personal');
+    expect(resolveInitialDashboardSection('/', null)).toBe('market-decision');
+    expect(resolveInitialDashboardSection('/unknown', 'invalid')).toBe('market-decision');
   });
 
   it('accepts only known persisted sections', () => {
     expect(isDashboardSection('monitor')).toBe(true);
     expect(isDashboardSection('admin')).toBe(false);
+  });
+
+  it('gives the two decision surfaces distinct URLs', () => {
+    expect(dashboardSectionPath('market-decision')).toBe('/market');
+    expect(dashboardSectionPath('holdings')).toBe('/holdings');
   });
 
   it('keeps RESEARCH_SMOKE_ROUTE (what e2e/smoke.spec.ts navigates to) resolving to the research console', () => {

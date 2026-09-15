@@ -632,30 +632,20 @@ class LonghuVendorSource:
         vendor, vendor_health = self.full_market_vendor_rows(
             trade_date, plate_ids=[row["sector_key"] for row in catalog],
         )
-        quotes, quote_health = self.tencent_quotes(vendor)
+        from .longhu_settled_quotes import fetch as fetch_settled_quotes
+        quotes, quote_health = fetch_settled_quotes(self, vendor, trade_date, workers=8)
         members_by_plate: dict[str, list[dict[str, Any]]] = {}
         for row in vendor.values():
             members_by_plate.setdefault(str(row["plate_id"]), []).append(row)
         board_rows: list[dict[str, Any]] = []
+        from .longhu_board_close import aggregate_board
         for board in catalog:
             members = members_by_plate.get(board["sector_key"], [])
-            leaders = sorted(
-                members,
-                key=lambda row: (float(row.get("main_net") or 0), float(row.get("pct_chg") or 0)),
-                reverse=True,
-            )[:10]
-            board_rows.append({
-                **board, "mapped_members": len(members), "quoted_members": len(members),
-                "top_stocks": [{
-                    "symbol": row["symbol"], "name": row["name"],
-                    "pct_change": row.get("pct_chg"), "net_inflow": row.get("main_net"),
-                } for row in leaders],
-                "source": "longhuvip:RealRankingInfo+ZhiShuStockList_W8",
-            })
+            board_rows.append(aggregate_board(board, members, trade_date))
         return {
             "trade_date": trade_date, "vendor_rows": vendor, "quote_rows": quotes,
             "board_rows": board_rows,
-            "health": {"longhu": vendor_health, "tencent": quote_health},
+            "health": {"longhu": vendor_health, "licensed_ohlc": quote_health},
         }
 
 

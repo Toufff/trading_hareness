@@ -13,6 +13,14 @@ from app.daily_control_plane import (
 
 
 class DailyControlPlaneTests(unittest.TestCase):
+    def test_requested_date_query_does_not_use_latest_date(self):
+        from app.daily_control_plane import status_query
+        sql, params = status_query(date(2026, 9, 7))
+        self.assertEqual(params, (date(2026, 9, 7),))
+        self.assertNotIn('max(trading_date)', sql)
+        self.assertIn('SELECT %s::date AS trading_date', sql)
+        self.assertEqual(status_query(), (EQUITY_DAILY_CONTROL_STATUS_SQL, ()))
+
     def test_index_rows_do_not_participate_in_equity_control_gate(self):
         self.assertIn("universe_key='all_a'", EQUITY_DAILY_CONTROL_STATUS_SQL)
         self.assertIn("expected_daily_rows", EQUITY_DAILY_CONTROL_STATUS_SQL)
@@ -42,7 +50,15 @@ class DailyControlPlaneTests(unittest.TestCase):
         self.assertIn("point-in-time all-A", payload["reason"])
 
     def test_empty_result_is_absent(self):
-        self.assertEqual(status_payload(None), {"state": "absent", "reason": "no canonical equity daily bars"})
+        payload = status_payload(None)
+        self.assertEqual(payload['state'], 'absent')
+        self.assertIsNone(payload['trade_date'])
+        self.assertEqual(payload['daily_rows'], 0)
+
+    def test_null_aggregate_date_is_absent_not_string_none(self):
+        payload = status_payload({'trading_date': None, 'daily_rows': 0})
+        self.assertIsNone(payload['trade_date'])
+        self.assertEqual(payload['state'], 'absent')
 
 
 def _fake_database(row):

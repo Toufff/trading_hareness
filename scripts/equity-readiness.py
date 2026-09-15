@@ -1,0 +1,30 @@
+"""Read a requested equity session from the sole production PostgreSQL store."""
+import argparse
+from datetime import date
+import json
+from pathlib import Path
+import sys
+
+import psycopg
+from psycopg.rows import dict_row
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'quant-service'))
+from app.daily_control_plane import status_query, status_payload
+from app.db_dsn import connection_params
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--date', type=date.fromisoformat)
+    p.add_argument('--env-file', default=r'G:\StockPlatform\config\runtime.env')
+    a = p.parse_args()
+    config = dict(line.split('=', 1) for line in Path(a.env_file).read_text(encoding='utf-8-sig').splitlines()
+                  if '=' in line and not line.startswith('#'))
+    with psycopg.connect(**connection_params(config), row_factory=dict_row, connect_timeout=10,
+                        options='-c default_transaction_read_only=on -c statement_timeout=30000') as c:
+        sql, params = status_query(a.date)
+        print(json.dumps({'daily_control_plane': status_payload(c.execute(sql, params).fetchone())}))
+
+
+if __name__ == '__main__':
+    main()

@@ -25,8 +25,17 @@ MINIMUM_ALL_A_COVERAGE_RATIO = 0.95
 LONGHU_MINIMUM_DAILY_ROWS = 3500
 
 
-EQUITY_DAILY_CONTROL_STATUS_SQL = """WITH latest AS (
-       SELECT max(trading_date) AS trading_date FROM quant.canonical_bars_daily
+EQUITY_DAILY_CONTROL_STATUS_SQL = """WITH equity_bars AS (
+       SELECT bar.* FROM quant.canonical_bars_daily bar
+        WHERE bar.quality_status IN ('fresh','partial')
+          AND EXISTS (
+            SELECT 1 FROM quant.universe_membership_history membership
+             WHERE membership.universe_key='all_a' AND membership.symbol=bar.symbol
+               AND membership.effective_from<=bar.trading_date
+               AND (membership.effective_to IS NULL OR membership.effective_to>=bar.trading_date)
+          )
+   ), latest AS (
+       SELECT max(trading_date) AS trading_date FROM equity_bars
    ), expected AS (
        SELECT latest.trading_date,count(DISTINCT membership.symbol)::int AS expected_daily_rows
          FROM latest
@@ -40,21 +49,29 @@ EQUITY_DAILY_CONTROL_STATUS_SQL = """WITH latest AS (
        count(DISTINCT bar.symbol) FILTER (WHERE bar.adj_factor IS NOT NULL)::int AS adjustment_rows,
        count(DISTINCT bar.symbol) FILTER (WHERE bar.limit_up IS NOT NULL AND bar.limit_down IS NOT NULL)::int AS limit_rows
      FROM expected
-     LEFT JOIN quant.canonical_bars_daily bar
+     LEFT JOIN equity_bars bar
        ON bar.trading_date=expected.trading_date
-      AND bar.quality_status IN ('fresh','partial')
-     LEFT JOIN quant.universe_membership_history membership
-       ON membership.universe_key='all_a' AND membership.symbol=bar.symbol
-      AND membership.effective_from<=expected.trading_date
-      AND (membership.effective_to IS NULL OR membership.effective_to>=expected.trading_date)
-    WHERE membership.symbol IS NOT NULL OR bar.symbol IS NULL
     GROUP BY expected.trading_date,expected.expected_daily_rows"""
+
+
+def status_query(trade_date: date | None = None) -> tuple[str, tuple]:
+    """Historical repairs verify their requested date, not a newer partial day."""
+    if trade_date is None:
+        return EQUITY_DAILY_CONTROL_STATUS_SQL, ()
+    return EQUITY_DAILY_CONTROL_STATUS_SQL.replace(
+        'SELECT max(trading_date) AS trading_date FROM equity_bars',
+        'SELECT %s::date AS trading_date'), (trade_date,)
 
 
 def status_payload(row: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return an explicit fail-closed readiness result from one aggregate row."""
-    if not row:
-        return {"state": "absent", "reason": "no canonical equity daily bars"}
+    if not row or row.get('trading_date') is None:
+        return {
+            "state": "absent", "trade_date": None,
+            "daily_rows": 0, "expected_daily_rows": 0, "minimum_required_rows": 0,
+            "coverage_ratio": 0.0, "adjustment_rows": 0, "limit_rows": 0,
+            "reason": "no canonical equity daily bars",
+        }
     daily_rows = int(row["daily_rows"])
     expected_daily_rows = int(row.get("expected_daily_rows") or daily_rows)
     adjustment_rows = int(row["adjustment_rows"])

@@ -1,13 +1,24 @@
-export const DASHBOARD_SECTIONS = ['research', 'personal', 'monitor', 'workbench', 'relay'] as const;
+export const DASHBOARD_SECTIONS = ['research', 'market-decision', 'holdings', 'monitor', 'workbench', 'relay'] as const;
 
 export type DashboardSection = (typeof DASHBOARD_SECTIONS)[number];
 
 const routeSections: Record<string, DashboardSection> = {
   '/research': 'research',
-  '/personal': 'personal',
+  '/personal': 'market-decision',
+  '/market': 'market-decision',
+  '/holdings': 'holdings',
   '/monitor': 'monitor',
   '/workbench': 'workbench',
   '/relay': 'relay',
+};
+
+const sectionRoutes: Record<DashboardSection, string> = {
+  research: '/research',
+  'market-decision': '/market',
+  holdings: '/holdings',
+  monitor: '/monitor',
+  workbench: '/workbench',
+  relay: '/relay',
 };
 
 // Shared with e2e/smoke.spec.ts so "the deep link the research console smoke
@@ -19,11 +30,15 @@ export function isDashboardSection(value: string | null): value is DashboardSect
   return value !== null && DASHBOARD_SECTIONS.includes(value as DashboardSection);
 }
 
+export function dashboardSectionPath(section: DashboardSection): string {
+  return sectionRoutes[section];
+}
+
 export function resolveInitialDashboardSection(pathname: string, persisted: string | null): DashboardSection {
   const routed = routeSections[pathname.replace(/\/$/, '') || '/'];
   if (routed) return routed;
   if (isDashboardSection(persisted)) return persisted;
   // The migrated product is decision-first.  The very large research console is
   // loaded only when the user asks for it, so it cannot stall the action page.
-  return 'personal';
+  return 'market-decision';
 }

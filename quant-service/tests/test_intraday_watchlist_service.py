@@ -50,6 +50,67 @@ class IntradayWatchlistServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 404)
         deps.hydrate_history.assert_not_awaited()
 
+    async def test_upsert_merges_metadata_so_user_tracking_survives_later_updates(self) -> None:
+        connection = MagicMock()
+        connection.execute.side_effect = [None, MagicMock(fetchone=MagicMock(return_value={
+            "watchlist_id": uuid.uuid4(), "symbol": "600664.SH",
+        }))]
+        database = MagicMock()
+        database.transaction.return_value.__enter__.return_value = connection
+
+        async def run_database(action, *args):
+            return action(*args) if args else action()
+
+        deps = _deps(
+            database=database,
+            run_database=run_database,
+            hydrate_history=AsyncMock(return_value={"status": "completed"}),
+            exchange_for=lambda _symbol: "SH",
+        )
+        payload = SimpleNamespace(
+            symbol="600664.SH", label="哈药股份", enabled=True,
+            alert_on_entry=True, alert_on_exit=True, entry_price=None,
+            available_quantity=0, hard_stop=None, take_profit=None,
+            metadata={"tracking_reason": "strategy_refresh"},
+        )
+
+        await upsert("600664.SH", payload, deps)
+
+        upsert_sql = connection.execute.call_args_list[1].args[0]
+        self.assertIn("metadata=quant.intraday_watchlists.metadata || EXCLUDED.metadata", upsert_sql)
+
+    async def test_manual_tracking_upsert_builds_research_after_history_hydration(self) -> None:
+        connection = MagicMock()
+        connection.execute.side_effect = [None, MagicMock(fetchone=MagicMock(return_value={
+            "watchlist_id": uuid.uuid4(), "symbol": "600664.SH",
+        }))]
+        database = MagicMock()
+        database.transaction.return_value.__enter__.return_value = connection
+
+        async def run_database(action, *args):
+            return action(*args) if args else action()
+
+        refresh = AsyncMock(return_value={"status": "completed", "completed": 1})
+        deps = _deps(
+            database=database, run_database=run_database,
+            hydrate_history=AsyncMock(return_value={"status": "completed"}),
+            exchange_for=lambda _symbol: "SH", refresh_user_tracking=refresh,
+        )
+        payload = SimpleNamespace(
+            symbol="600664.SH", label="哈药股份", enabled=True,
+            alert_on_entry=True, alert_on_exit=True, entry_price=None,
+            available_quantity=0, hard_stop=None, take_profit=None,
+            metadata={"tracking_tags": [{
+                "key": "user_requested_tracking", "source": "user", "active": True,
+            }]},
+        )
+
+        result = await upsert("600664.SH", payload, deps)
+
+        deps.hydrate_history.assert_awaited_once()
+        refresh.assert_awaited_once_with("600664.SH")
+        self.assertEqual(result["user_tracking_research"]["completed"], 1)
+
 
 def _hydration_deps(**overrides) -> WatchlistHistoryHydrationDependencies:
     database = MagicMock()

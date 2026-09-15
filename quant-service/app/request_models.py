@@ -384,6 +384,12 @@ class StockStudyRequest(BaseModel):
     lookback_days: int = Field(default=21, ge=5, le=45)
 
 
+class StockWorkbenchRequest(BaseModel):
+    as_of_date: date | None = None
+    knowledge_cutoff: datetime | None = None
+    lookback_days: int = Field(default=120, ge=30, le=300)
+
+
 class AkShareProbeRequest(BaseModel):
     symbol: str = Field(default="000636.SZ", pattern=r"^\d{6}\.(SH|SZ|BJ)$")
     trade_date: date | None = None
@@ -611,6 +617,16 @@ class MarketSnapshotRequest(BaseModel):
     session: Literal["midday", "close"]
     universe_key: str = Field(default="all_a", pattern=r"^[a-z][a-z0-9_-]{0,48}$")
     refresh_public_quotes: bool = True
+    # Internal/post-close repair may rebuild an immutable settled session from
+    # already persisted same-date observations. Public quote refresh remains
+    # disabled for that path, so this cannot relabel live quotes as history.
+    exchange_date: date | None = None
+
+    @model_validator(mode="after")
+    def validate_snapshot_date(self) -> "MarketSnapshotRequest":
+        if self.exchange_date is not None and self.refresh_public_quotes:
+            raise ValueError("historical exchange_date requires refresh_public_quotes=false")
+        return self
 
 
 class AnnouncementSyncRequest(BaseModel):

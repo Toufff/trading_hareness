@@ -65,12 +65,26 @@ def candidates(
                     FROM ranked WHERE rn<=30 ORDER BY symbol,trading_date""",
             (as_of_date, as_of_date, as_of_date, as_of_date - timedelta(days=70)),
         ).fetchall()
-    return screen(
+        calendar_rows = connection.execute(
+            """SELECT calendar_date FROM quant.market_trade_calendar WHERE exchange='SSE'
+                 AND is_open AND calendar_date<=%s ORDER BY calendar_date DESC LIMIT 11""", (as_of_date,),
+        ).fetchall()
+    expected = {str(r["calendar_date"]) for r in calendar_rows}
+    present: dict[str, set[str]] = {}
+    for row in rows:
+        present.setdefault(row["symbol"], set()).add(str(row.get("trading_date")))
+    # Keep the legacy 30-bar screen from bridging missing recent sessions.
+    # Multi-lane scans use their own complete same-source close histories.
+    allowed = {symbol for symbol, dates in present.items() if len(expected) == 11 and expected <= dates}
+    clean_rows = [dict(row) for row in rows if row["symbol"] in allowed]
+    result = screen(
         as_of_date, limit, minimum_full_market_symbols, int(coverage["symbols"] or 0),
-        [dict(row) for row in rows], board_context(as_of_date),
+        clean_rows, board_context(as_of_date),
         daily_base_structure=daily_base_structure, forming_structure=forming_structure,
         fresh_start_structure=fresh_start_structure,
     )
+    result.setdefault("source_status", {})["legacy_incomplete_recent_history"] = len(present)-len(allowed)
+    return result
 
 
 def run(
@@ -80,6 +94,7 @@ def run(
     model_version: str,
     candidate_loader: Callable[[date, int, int], dict[str, Any]],
     json_safe: Callable[[Any], Any],
+    lane_loader: Callable[[date], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Persist an exact-date screen, including an explicit blocked attempt."""
     with database.transaction() as connection:
@@ -97,6 +112,12 @@ def run(
             "reason": "no full-market daily bar set is stored",
         }
     result = candidate_loader(as_of_date, request.limit, request.minimum_full_market_symbols)
+    if lane_loader is not None:
+        lanes = lane_loader(as_of_date)
+        result.setdefault("summary", {})["strategy_lanes"] = lanes
+        result.setdefault("source_status", {})["strategy_lanes_status"] = lanes["status"]
+        if lanes["status"] != "completed":
+            result["status"] = "partial"
     run_key = hashlib.sha256(f"{model_version}:{as_of_date}".encode()).hexdigest()
     with database.transaction() as connection:
         run_row = connection.execute(
@@ -171,7 +192,7 @@ def completed_for_date(database: Any, as_of_date: date, *, model_version: str) -
         row = connection.execute(
             "SELECT status FROM quant.post_close_strategy_runs WHERE run_key=%s", (run_key,),
         ).fetchone()
-    return bool(row and row["status"] in {"completed", "partial"})
+    return bool(row and row["status"] == "completed")
 
 
 __all__ = ["candidates", "completed_for_date", "retry_window", "run"]
