@@ -28,3 +28,13 @@ def test_peer_release_provenance_reaches_both_runtime_processes() -> None:
         assert "PEER_APP_GIT_SHA" in environment["APP_GIT_SHA"]
         assert "PEER_APP_RELEASE" in environment["APP_RELEASE"]
         assert "PEER_APP_BUILD_CREATED_AT" in environment["APP_BUILD_CREATED_AT"]
+
+
+def test_peer_healthcheck_outer_budget_exceeds_application_probe_budget() -> None:
+    base = _services("compose.yaml")
+    overlay = _services("compose.intraday-owner.yaml")
+
+    for service in (base["quant-research"], overlay["quant-research-scheduler"]):
+        healthcheck = service["healthcheck"]
+        assert "timeout=10" in " ".join(healthcheck["test"])
+        assert healthcheck["timeout"] == "12s"
