@@ -51,6 +51,10 @@ services:
       QUANT_SKIP_MIGRATIONS: "true"
       QUANT_BACKGROUND_TASKS_ENABLED: ${PEER_BACKGROUND_TASKS_ENABLED:-false}
       QUANT_RUNTIME_PROFILE: research
+      # Capability catalog projection is an owner deployment concern.  The
+      # two peer processes share one database and must not race to rewrite it
+      # during a simultaneous restart.
+      QUANT_CONTROL_PLANE_WRITES_ENABLED: "false"
       QUANT_WRITE_API_KEY: ${PEER_QUANT_WRITE_API_KEY:?Set PEER_QUANT_WRITE_API_KEY}
       QUANT_SHARED_READ_API_KEY: ${QUANT_SHARED_READ_API_KEY:?Set QUANT_SHARED_READ_API_KEY}
       QUANT_SHARED_READ_API_BASE_URL: http://db-tunnel:5681
