@@ -113,6 +113,10 @@ Assert-True ($publishSource.Contains("`$branch = (@(& git -C `$source branch --s
     'publish-stock-release.ps1 must normalize an empty detached-HEAD branch result before Trim()'
 Assert-True ($publishSource.Contains("if (-not `$branch) { `$branch = 'DETACHED' }")) `
     'publish-stock-release.ps1 must label a detached clean release source explicitly'
+Assert-True ($publishSource.Contains("[IO.FileShare]::None")) `
+    'publish-stock-release.ps1 must serialize production activation across concurrent agents and branches'
+Assert-True ($publishSource.Contains("production-publish.lock")) `
+    'publish-stock-release.ps1 must use the platform-wide production publish lock'
 
 [pscustomobject]@{
     passed = $true
@@ -122,4 +126,5 @@ Assert-True ($publishSource.Contains("if (-not `$branch) { `$branch = 'DETACHED'
     stop_order_is_graceful_before_scheduled_task = $true
     dev_checkout_fallback_removed = $true
     detached_head_source_supported = $true
+    concurrent_publish_serialized = $true
 }

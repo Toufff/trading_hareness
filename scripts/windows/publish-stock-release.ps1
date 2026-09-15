@@ -11,6 +11,7 @@ param(
     # automatic rollback); Interactive works unelevated but only while the
     # operator is logged on.  Empty = pick S4U when elevated, else Interactive.
     [ValidateSet('', 'S4U', 'Interactive')][string]$TaskLogonType = '',
+    [int]$PublishLockTimeoutSeconds = 900,
     # Used for a UI-disruption repair: never restart a known-noisy old task
     # merely because activation/health verification of the new release failed.
     [switch]$KeepStoppedOnFailure
@@ -80,6 +81,33 @@ function Get-LogonTypeArguments {
     $command = Get-Command -Name $Installer -ErrorAction Stop
     if ($command.Parameters.ContainsKey('LogonType')) { return @{ LogonType = $TaskLogonType } }
     return @{}
+}
+
+function Enter-ProductionPublishLock {
+    param([Parameter(Mandatory)][string]$PlatformRoot, [int]$TimeoutSeconds = 900)
+    $lockRoot = Join-Path $PlatformRoot 'state'
+    New-Item -ItemType Directory -Force -Path $lockRoot | Out-Null
+    $lockPath = Join-Path $lockRoot 'production-publish.lock'
+    $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(1, $TimeoutSeconds))
+    do {
+        try {
+            $stream = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            $receipt = [Text.Encoding]::UTF8.GetBytes((@{
+                pid = $PID
+                source = $source
+                acquired_at = [DateTimeOffset]::Now.ToString('o')
+            } | ConvertTo-Json -Compress))
+            $stream.SetLength(0)
+            $stream.Write($receipt, 0, $receipt.Length)
+            $stream.Flush($true)
+            return $stream
+        } catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Timed out waiting for the production publish lock at $lockPath"
+            }
+            Start-Sleep -Seconds 2
+        }
+    } while ($true)
 }
 
 function Start-ProductionRuntime {
@@ -169,6 +197,8 @@ function Wait-ProductionHealth {
     }
 }
 
+$publishLock = Enter-ProductionPublishLock -PlatformRoot $platform -TimeoutSeconds $PublishLockTimeoutSeconds
+try {
 $gitStatus = @(& git -C $source status --porcelain=v1)
 if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
 $dirty = $gitStatus.Count -gt 0
@@ -437,4 +467,7 @@ try {
             Remove-Item -LiteralPath $resolvedStaging -Recurse -Force
         }
     }
+}
+} finally {
+    if ($publishLock) { $publishLock.Dispose() }
 }
