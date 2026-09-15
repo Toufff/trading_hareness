@@ -251,13 +251,20 @@ class LonghuVendorSourceThreadLocalSessionTests(unittest.TestCase):
     def test_each_thread_gets_its_own_session(self) -> None:
         source = LonghuVendorSource(LonghuVendorConfig(token="t", user_id="u", device_id="d"))
         sessions: dict[int, object] = {}
+        ready = threading.Barrier(5)
 
         def capture() -> None:
+            # Keep all workers alive concurrently.  Without a barrier a fast
+            # Linux scheduler may finish one thread before the next starts and
+            # legally reuse its thread id, turning a scheduling artifact into
+            # a false failure of the thread-local session contract.
+            ready.wait(timeout=5)
             sessions[threading.get_ident()] = source._session
 
         threads = [threading.Thread(target=capture) for _ in range(4)]
         for thread in threads:
             thread.start()
+        ready.wait(timeout=5)
         for thread in threads:
             thread.join()
 
