@@ -100,6 +100,9 @@ def test_independent_discovery_audit_accepts_own_lane_and_rejects_foreign_symbol
     lane = data['lanes'][0]
     extra = {**deepcopy(lane['selected'][0]), 'symbol':'000636.SZ', 'name':'风华高科'}
     lane['observation_list'] = [extra, lane['selected'][0]]
+    extra_review = {**deepcopy(data['review_groups'][0]['items'][0]),
+                    'symbol': extra['symbol'], 'name': extra['name']}
+    data.update(project(data, [data['review_groups'][0]['items'][0], extra_review]))
     data['report_bundle'] = make_bundle(data)
     write_bundle(tmp_path, data, data['report_bundle'])
     assert all(check_bundle(data,tmp_path).values())

@@ -49,7 +49,7 @@ def check_bundle(result: dict, directory: Path) -> dict[str, bool]:
         'bundle_empty_strategies_explained': all(lane['key'] in by_key and
             lane['empty_reason'] in by_key[lane['key']]['markdown'] for lane in lanes if not lane['selected']),
         'bundle_strategy_reviews_scoped': all(lane['key'] in by_key and all(
-            review['symbol'] in {r['symbol'] for r in lane['selected'] + lane.get('caution_list', [])}
+            review['symbol'] in {r['symbol'] for r in lane['selected'] + lane.get('observation_list', []) + lane.get('caution_list', [])}
             for group in by_key[lane['key']]['review']['review_groups'] for review in group['items']) for lane in lanes),
     }
     return checks
