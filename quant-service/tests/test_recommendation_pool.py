@@ -92,6 +92,29 @@ def test_changed_scan_is_not_current_and_report_uses_same_bundle():
     assert '推荐决策' in markdown(b)
 
 
+def test_post_scan_research_projection_does_not_make_decision_stale():
+    scan, c, r, _ = fixture()
+    b = compile_decision(c, r)
+    replay = deepcopy(scan)
+    replay['lanes'][0]['selected'][0]['company_review'] = {
+        'generated_at': '2026-09-14T20:00:00+08:00',
+        'conclusion': 'independent company research projection',
+    }
+    assert current_view(replay, b)['status'] == 'ready'
+
+
+def test_representative_order_and_event_evidence_remain_hash_material():
+    scan, c, r, _ = fixture()
+    b = compile_decision(c, r)
+    changed = deepcopy(scan)
+    changed['lanes'][0]['selected'].append(deepcopy(changed['lanes'][0]['tracking_candidates'][1]))
+    changed['lanes'][0]['selected'].reverse()
+    assert current_view(changed, b)['status'] == 'stale'
+    changed = deepcopy(scan)
+    changed['lanes'][0]['selected'][0]['events'] = [{'published_date': '2026-09-14', 'title': 'new event'}]
+    assert current_view(changed, b)['status'] == 'stale'
+
+
 def test_tamper_or_future_source_rejected():
     _, c, r, _ = fixture()
     r['items'][0]['sources'][0]['published_date'] = '2026-09-15'

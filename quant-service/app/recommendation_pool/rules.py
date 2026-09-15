@@ -16,10 +16,45 @@ def digest(value):
     return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), default=str).encode()).hexdigest()
 
 
+def _scan_evidence(scan):
+    """Return only evidence owned by the scanner.
+
+    ``short_term_lanes.build`` enriches display rows with ``company_review``
+    after the pure screen has completed.  Replaying the same settled session
+    can also regenerate prose/report fields.  Neither operation changes the
+    market screen that a recommendation review was based on, so those fields
+    must not invalidate an otherwise identical decision.
+
+    Candidate population, ranks/metrics, displayed representative order,
+    event evidence, market regime, coverage and settings remain in the hash.
+    A real rescan change therefore still invalidates the decision.
+    """
+    lane_evidence = []
+    for lane in scan.get('lanes', []):
+        display = {}
+        for section in ('selected', 'caution_list', 'observation_list'):
+            display[section] = [
+                {k: deepcopy(v) for k, v in row.items() if k != 'company_review'}
+                for row in lane.get(section, [])
+            ]
+        lane_evidence.append({
+            'key': lane.get('key'),
+            'status': lane.get('status'),
+            'total_matches': lane.get('total_matches'),
+            'tracking_candidates': deepcopy(lane.get('tracking_candidates')),
+            'factor_policy': deepcopy(lane.get('factor_policy')),
+            'data_gaps': deepcopy(lane.get('data_gaps')),
+            'regime_route': deepcopy(lane.get('regime_route')),
+            **display,
+        })
+    return {
+        k: deepcopy(scan.get(k))
+        for k in ('as_of_date', 'version', 'settings', 'coverage', 'market')
+    } | {'lanes': lane_evidence}
+
+
 def scan_hash(scan):
-    # Reports and company-review timestamps can change without changing market inputs.
-    # Hash all actual candidates, parameters, coverage and market context instead.
-    return digest({k: scan.get(k) for k in ('as_of_date', 'version', 'settings', 'coverage', 'market', 'lanes')})
+    return digest(_scan_evidence(scan))
 
 
 def intake(scan, run_id, groups, user_tracking=(), next_session=None):
