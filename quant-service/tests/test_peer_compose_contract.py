@@ -36,5 +36,5 @@ def test_peer_healthcheck_outer_budget_exceeds_application_probe_budget() -> Non
 
     for service in (base["quant-research"], overlay["quant-research-scheduler"]):
         healthcheck = service["healthcheck"]
-        assert "timeout=10" in " ".join(healthcheck["test"])
-        assert healthcheck["timeout"] == "12s"
+        assert "timeout=15" in " ".join(healthcheck["test"])
+        assert healthcheck["timeout"] == "17s"

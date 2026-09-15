@@ -71,8 +71,28 @@ class SystemControlRouterTests(unittest.TestCase):
     def test_async_probe_timeout_is_bounded(self):
         async def stuck():
             await asyncio.sleep(60)
+        async def expire(awaitable, *, timeout):
+            awaitable.close()
+            raise TimeoutError
         with self._client(async_probe=stuck) as client:
-            self.assertEqual(client.get('/health').status_code, 503)
+            with patch("app.routers.system_control.asyncio.wait_for", new=expire):
+                self.assertEqual(client.get('/health').status_code, 503)
+
+    def test_async_probe_allows_tunnel_latency_budget(self) -> None:
+        observed: list[float] = []
+
+        async def probe() -> None:
+            return None
+
+        async def capture(awaitable, *, timeout):
+            observed.append(timeout)
+            return await awaitable
+
+        with patch("app.routers.system_control.asyncio.wait_for", new=capture):
+            with self._client(async_probe=probe) as client:
+                self.assertEqual(client.get("/health").status_code, 200)
+
+        self.assertEqual(observed, [5.0, 8])
 
     def test_sync_health_timeout_is_reported_as_degraded_not_internal_error(self) -> None:
         async def timed_out(*_args, **_kwargs):

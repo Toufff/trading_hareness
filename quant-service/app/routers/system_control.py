@@ -38,7 +38,7 @@ def build_system_control_router(deps: SystemControlDependencies) -> APIRouter:
     async def health() -> dict[str, Any]:
         if deps.async_database_probe is not None:
             try:
-                await asyncio.wait_for(deps.async_database_probe(), timeout=1.0)
+                await asyncio.wait_for(deps.async_database_probe(), timeout=5.0)
             except Exception as error:
                 logger.warning('health_async_database_unavailable', extra={
                     'task': 'health', 'error_type': type(error).__name__,
