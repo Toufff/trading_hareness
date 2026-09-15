@@ -5,6 +5,8 @@ repo_archive="${1:?repo archive is required}"
 wheelhouse_archive="${2:?wheelhouse archive is required}"
 peer_home="${PEER_HOME:-/home/stockpeer}"
 release_id="${RELEASE_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+release_git_sha="${RELEASE_GIT_SHA:-}"
+release_created_at="${RELEASE_CREATED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 release_store="${PEER_RELEASES_ROOT:-${peer_home}/.local/share/trading-hareness/releases}"
 release_root="${release_store}/${release_id}"
 repo_target="${release_root}/trading_hareness"
@@ -42,6 +44,15 @@ fi
 sed -i 's/\r$//' "${repo_target}/deploy/shared-peer/.env"
 grep -q '^PEER_WHEELHOUSE_PATH=' "${repo_target}/deploy/shared-peer/.env" || \
   printf '\nPEER_WHEELHOUSE_PATH=%s\n' "${current_wheelhouse}" >> "${repo_target}/deploy/shared-peer/.env"
+for pair in \
+  "PEER_APP_GIT_SHA=${release_git_sha}" \
+  "PEER_APP_RELEASE=${release_id}" \
+  "PEER_APP_BUILD_CREATED_AT=${release_created_at}"
+do
+  key="${pair%%=*}"
+  sed -i "/^${key}=/d" "${repo_target}/deploy/shared-peer/.env"
+  printf '%s\n' "${pair}" >> "${repo_target}/deploy/shared-peer/.env"
+done
 
 if [[ "$(id -u)" -eq 0 ]]; then
   chown -R stockpeer:stockpeer "${release_root}"
