@@ -49,7 +49,13 @@ def build_system_control_router(deps: SystemControlDependencies) -> APIRouter:
             # the bounded fast lane instead of anyio's unbounded default
             # threadpool keeps a stuck query from silently accumulating one
             # more occupied worker thread per poll.
-            return await run_database_blocking(deps.health_payload, timeout_seconds=3)
+            return await run_database_blocking(deps.health_payload, timeout_seconds=8)
+        except TimeoutError as error:
+            # A saturated database executor is degraded readiness, not an
+            # unhandled application error.  Keep this response explicit so
+            # Docker and external monitors agree on the same failure state.
+            logger.warning("health_database_probe_timeout", extra={"task": "health"})
+            raise HTTPException(status_code=503, detail="health probe timeout") from error
         except deps.database_unavailable_error as error:
             # The raw driver error can carry host/port/user details; log it
             # locally and return only a fixed, unauthenticated-safe message.

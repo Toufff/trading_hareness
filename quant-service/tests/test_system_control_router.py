@@ -74,6 +74,18 @@ class SystemControlRouterTests(unittest.TestCase):
         with self._client(async_probe=stuck) as client:
             self.assertEqual(client.get('/health').status_code, 503)
 
+    def test_sync_health_timeout_is_reported_as_degraded_not_internal_error(self) -> None:
+        async def timed_out(*_args, **_kwargs):
+            raise TimeoutError("executor saturated")
+
+        with patch("app.routers.system_control.run_database_blocking", new=timed_out):
+            with self._client() as client:
+                response = client.get("/health")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {"detail": "health probe timeout"})
+        self.assertNotIn("executor saturated", response.text)
+
     def test_health_runs_through_the_bounded_fast_lane(self) -> None:
         """WP6: /health must not run the DB probe in anyio's unbounded threadpool."""
         calls: list[tuple[object, dict[str, object]]] = []
@@ -93,4 +105,4 @@ class SystemControlRouterTests(unittest.TestCase):
 
         self.assertEqual(payload, {"status": "ok"})
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][1], {"timeout_seconds": 3})
+        self.assertEqual(calls[0][1], {"timeout_seconds": 8})

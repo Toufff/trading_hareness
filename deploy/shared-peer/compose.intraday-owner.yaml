@@ -76,7 +76,7 @@ services:
     volumes:
       - peer_quant_research_data:/var/lib/quant-research
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=3).read()\""]
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=10).read()\""]
       interval: 15s
       timeout: 5s
       retries: 12
