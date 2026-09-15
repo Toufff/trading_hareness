@@ -295,6 +295,20 @@ function Resolve-OwnerTunnelSshTarget {
     }
 }
 
+function Resolve-OwnerTunnelControlSshTarget {
+    # The dedicated owner key is intentionally forwarding-only: its remote
+    # account uses nologin and authorized_keys grants only reserved
+    # permitlisten ports. Listener inspection, cleanup and acceptance probes
+    # remain short-lived control-plane commands on the operator alias.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$FallbackAlias)
+    return [pscustomobject]@{
+        Mode = 'operator_alias_control'
+        ConnectionArguments = @()
+        Destination = $FallbackAlias
+    }
+}
+
 function Resolve-PostgresStartupAction {
     [CmdletBinding()]
     param(
@@ -352,4 +366,5 @@ Export-ModuleMember -Function @(
     'Resolve-PostgresStartupAction',
     'Assert-ReservedRemoteTunnelPort',
     'Resolve-OwnerTunnelSshTarget'
+    'Resolve-OwnerTunnelControlSshTarget'
 )

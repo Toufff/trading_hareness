@@ -14,7 +14,8 @@ Import-Module (Join-Path $repository 'scripts\windows\runtime-observability.psm1
 Import-Module (Join-Path $repository 'scripts\windows\background-process.psm1') -Force
 $ssh = (Get-Command ssh.exe -ErrorAction Stop).Source
 $runtimeEnvPath = Join-Path $PlatformRoot 'config\runtime.env'
-$target = Resolve-OwnerTunnelSshTarget -RuntimeEnv $runtimeEnvPath -FallbackAlias $SshAlias
+$tunnelTarget = Resolve-OwnerTunnelSshTarget -RuntimeEnv $runtimeEnvPath -FallbackAlias $SshAlias
+$controlTarget = Resolve-OwnerTunnelControlSshTarget -FallbackAlias $SshAlias
 
 # --- reclaim stale remote listeners before binding -------------------------
 #
@@ -31,8 +32,8 @@ $target = Resolve-OwnerTunnelSshTarget -RuntimeEnv $runtimeEnvPath -FallbackAlia
 # this way since it was written; this path never did.
 function Test-RemoteTunnelListener {
     param([Parameter(Mandatory)][int]$Port)
-    $probe = Invoke-ConsoleFreeCommand -FilePath $ssh -Arguments (@($target.ConnectionArguments) + @(
-        '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', $target.Destination,
+    $probe = Invoke-ConsoleFreeCommand -FilePath $ssh -Arguments (@($controlTarget.ConnectionArguments) + @(
+        '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', $controlTarget.Destination,
         "ss -ltn 'sport = :$Port' | tail -n +2 | grep -q .")) -TimeoutSeconds 15
     return $probe.ExitCode -eq 0
 }
@@ -47,10 +48,10 @@ function Remove-StaleRemoteTunnelListener {
         -Event 'stale_remote_listener_cleanup_requested' -Level 'warning' -Data @{
             remote_port = $Port
             ssh_host = $SshAlias
-            ssh_target_mode = $target.Mode
+            ssh_target_mode = $controlTarget.Mode
         })
-    $cleanup = Invoke-ConsoleFreeCommand -FilePath $ssh -Arguments (@($target.ConnectionArguments) + @(
-        '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', $target.Destination,
+    $cleanup = Invoke-ConsoleFreeCommand -FilePath $ssh -Arguments (@($controlTarget.ConnectionArguments) + @(
+        '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', $controlTarget.Destination,
         "fuser -k $Port/tcp >/dev/null 2>&1 || true")) -TimeoutSeconds 15
     if ($cleanup.ExitCode -ne 0) { throw "Failed to request cleanup of stale remote listener $Port" }
     $deadline = [DateTime]::UtcNow.AddSeconds(8)
@@ -78,7 +79,7 @@ if ($liveLocalTunnel.Count -eq 0) {
     }
 }
 
-$arguments = @($target.ConnectionArguments) + @(
+$arguments = @($tunnelTarget.ConnectionArguments) + @(
     "-NT",
     "-o", "BatchMode=yes",
     "-o", "ExitOnForwardFailure=yes",
@@ -86,13 +87,14 @@ $arguments = @($target.ConnectionArguments) + @(
     "-o", "ServerAliveCountMax=3",
     "-R", "127.0.0.1:$RemoteDatabasePort`:127.0.0.1:$LocalDatabasePort",
     "-R", "127.0.0.1:$RemoteApiPort`:127.0.0.1:$LocalApiPort",
-    $target.Destination
+    $tunnelTarget.Destination
 )
 
 $run = Start-RuntimeSupervisor -PlatformRoot $PlatformRoot -RepositoryRoot $repository -Service 'shared-peer-tunnels' `
     -Executable $ssh -WorkingDirectory $repository -Arguments $arguments -Metadata @{
         ssh_alias = $SshAlias
-        ssh_target_mode = $target.Mode
+        ssh_target_mode = $tunnelTarget.Mode
+        ssh_control_target_mode = $controlTarget.Mode
         remote_database_port = $RemoteDatabasePort
         remote_api_port = $RemoteApiPort
         local_database_port = $LocalDatabasePort

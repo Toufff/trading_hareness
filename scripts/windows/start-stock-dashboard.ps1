@@ -80,14 +80,14 @@ function Test-PostgresReady([int]$Attempts = 3, [int]$DelayMilliseconds = 500) {
 
 function Get-RemoteDashboardHealth {
     try {
-        $probe = Invoke-ConsoleFreeCommand -FilePath (Get-Command ssh.exe).Source -Arguments (@($target.ConnectionArguments) + @('-o','BatchMode=yes','-o','ConnectTimeout=8',$target.Destination,
+        $probe = Invoke-ConsoleFreeCommand -FilePath (Get-Command ssh.exe).Source -Arguments (@($controlTarget.ConnectionArguments) + @('-o','BatchMode=yes','-o','ConnectTimeout=8',$controlTarget.Destination,
             "curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:$RemotePort/health")) -TimeoutSeconds 15
         return $probe.Stdout.Trim()
     } catch { return '' }
 }
 
 function Test-RemoteDashboardListener {
-    $probe = Invoke-ConsoleFreeCommand -FilePath (Get-Command ssh.exe).Source -Arguments (@($target.ConnectionArguments) + @('-o','BatchMode=yes','-o','ConnectTimeout=8',$target.Destination,
+    $probe = Invoke-ConsoleFreeCommand -FilePath (Get-Command ssh.exe).Source -Arguments (@($controlTarget.ConnectionArguments) + @('-o','BatchMode=yes','-o','ConnectTimeout=8',$controlTarget.Destination,
         "ss -ltn 'sport = :$RemotePort' | tail -n +2 | grep -q .")) -TimeoutSeconds 15
     return $probe.ExitCode -eq 0
 }
@@ -97,9 +97,9 @@ function Remove-StaleRemoteDashboardListener {
     [void](Write-RuntimeEvent -PlatformRoot $platform -Service 'dashboard-tunnel' -Event 'stale_remote_listener_cleanup_requested' -Level 'warning' -Data @{
         remote_port = $RemotePort
         ssh_host = $SshHost
-        ssh_target_mode = $target.Mode
+        ssh_target_mode = $controlTarget.Mode
     })
-    $cleanup = Invoke-ConsoleFreeCommand -FilePath (Get-Command ssh.exe).Source -Arguments (@($target.ConnectionArguments) + @('-o','BatchMode=yes','-o','ConnectTimeout=8',$target.Destination,
+    $cleanup = Invoke-ConsoleFreeCommand -FilePath (Get-Command ssh.exe).Source -Arguments (@($controlTarget.ConnectionArguments) + @('-o','BatchMode=yes','-o','ConnectTimeout=8',$controlTarget.Destination,
         "fuser -k $RemotePort/tcp >/dev/null 2>&1 || true")) -TimeoutSeconds 15
     if ($cleanup.ExitCode -ne 0) { throw "Failed to request cleanup of stale remote listener $RemotePort" }
     $deadline = [DateTime]::UtcNow.AddSeconds(8)
@@ -122,7 +122,8 @@ $runtime = Join-Path $platform 'runtime'
 $pgData = Join-Path $platform 'data\postgresql16'
 $pgBin = Join-Path $runtime 'postgresql-16.15\bin'
 $config = Read-EnvFile $envPath
-$target = Resolve-OwnerTunnelSshTarget -RuntimeEnv $envPath -FallbackAlias $SshHost
+$tunnelTarget = Resolve-OwnerTunnelSshTarget -RuntimeEnv $envPath -FallbackAlias $SshHost
+$controlTarget = Resolve-OwnerTunnelControlSshTarget -FallbackAlias $SshHost
 foreach ($required in 'PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'QUANT_WRITE_API_KEY', 'DASHBOARD_OPERATOR_KEY') {
     if (-not $config[$required]) { throw "Missing $required in $envPath" }
 }
@@ -241,14 +242,14 @@ if (-not $remoteHealthy) {
     }
     if (Test-RemoteDashboardListener) { Remove-StaleRemoteDashboardListener }
     $ssh = (Get-Command ssh.exe -ErrorAction Stop).Source
-    $tunnelArguments = @($target.ConnectionArguments) + @(
+    $tunnelArguments = @($tunnelTarget.ConnectionArguments) + @(
         '-N', '-T', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes',
         '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3',
-        '-R', "127.0.0.1:$RemotePort`:127.0.0.1:$AdapterPort", $target.Destination
+        '-R', "127.0.0.1:$RemotePort`:127.0.0.1:$AdapterPort", $tunnelTarget.Destination
     )
     $tunnelRun = Start-RuntimeSupervisor -PlatformRoot $platform -RepositoryRoot $repository -Service 'dashboard-tunnel' `
         -Executable $ssh -WorkingDirectory $repository -Arguments $tunnelArguments `
-        -Metadata @{ remote_port = $RemotePort; adapter_port = $AdapterPort; ssh_host = $SshHost; ssh_target_mode = $target.Mode }
+        -Metadata @{ remote_port = $RemotePort; adapter_port = $AdapterPort; ssh_host = $SshHost; ssh_target_mode = $tunnelTarget.Mode; ssh_control_target_mode = $controlTarget.Mode }
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
         Start-Sleep -Milliseconds 500

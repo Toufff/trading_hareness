@@ -95,6 +95,22 @@ try {
     try { [void](Assert-ReservedRemoteTunnelPort -Port 22) } catch { $unsafePortRejected = $true }
     Assert-True $unsafePortRejected 'remote cleanup must reject ports outside the explicit allowlist'
 
+    $tunnelEnv = Join-Path $sandbox 'runtime.env'
+    $tunnelKey = Join-Path $sandbox 'owner_tunnel_ed25519'
+    [IO.File]::WriteAllText($tunnelEnv, (@(
+        'OWNER_TUNNEL_SSH_USER=stockowner'
+        "OWNER_TUNNEL_SSH_KEY=$tunnelKey"
+        'OWNER_TUNNEL_SSH_HOST=192.0.2.10'
+        'OWNER_TUNNEL_SSH_PORT=3535'
+    ) -join [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+    $tunnelTarget = Resolve-OwnerTunnelSshTarget -RuntimeEnv $tunnelEnv -FallbackAlias 'lightServer1'
+    $controlTarget = Resolve-OwnerTunnelControlSshTarget -FallbackAlias 'lightServer1'
+    Assert-True ($tunnelTarget.Mode -eq 'restricted_key') 'persistent tunnels must use the configured restricted owner key'
+    Assert-True ($tunnelTarget.Destination -eq 'stockowner@192.0.2.10') 'restricted tunnel destination must use its dedicated account'
+    Assert-True ($tunnelTarget.ConnectionArguments -contains $tunnelKey) 'restricted tunnel arguments must carry the dedicated identity'
+    Assert-True ($controlTarget.Mode -eq 'operator_alias_control') 'remote commands must be separated from the forwarding-only identity'
+    Assert-True ($controlTarget.Destination -eq 'lightServer1') 'remote commands must retain the configured operator alias'
+
     $releaseRoot = Join-Path $sandbox 'release-app'
     New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
     [IO.File]::WriteAllText((Join-Path $releaseRoot 'release-manifest.json'), (@{
@@ -117,6 +133,7 @@ try {
         old_log_retained = (Test-Path -LiteralPath $retainedStdout)
         postgres_state_machine = $true
         unsafe_remote_cleanup_rejected = $unsafePortRejected
+        owner_tunnel_identity_separated = $true
         release_metadata_injected = $true
     }
 } finally {
