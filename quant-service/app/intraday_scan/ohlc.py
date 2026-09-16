@@ -10,7 +10,14 @@ from math import isfinite
 
 def merge(histories,quotes,cutoff,captured_at):
     cutoff=datetime.fromisoformat(cutoff);observed=datetime.fromisoformat(captured_at)
-    if cutoff.date()!=observed.date() or (cutoff.hour<15 and (observed.hour>=15 or observed-cutoff>timedelta(minutes=10))):
+    lunch_snapshot = (
+        cutoff.hour == 11 and cutoff.minute == 30
+        and (observed.hour == 11 and observed.minute >= 30 or observed.hour == 12)
+    )
+    if cutoff.date()!=observed.date() or (
+        cutoff.hour<15 and not lunch_snapshot
+        and (observed.hour>=15 or observed-cutoff>timedelta(minutes=10))
+    ):
         raise ValueError('Quote cannot be backfilled into earlier intraday window')
     out=deepcopy(histories);errors={};current=0;ready=0
     by={r['ts_code']:r for r in quotes}
@@ -19,7 +26,13 @@ def merge(histories,quotes,cutoff,captured_at):
         try:
             if not q or q.get('trade_date')!=cutoff.strftime('%Y%m%d'):raise ValueError('quote_wrong_day_or_missing')
             stamp=datetime.strptime(q.get('trade_time') or '', '%Y%m%d%H%M%S').replace(tzinfo=cutoff.tzinfo)
-            expected=min(observed,observed.replace(hour=15,minute=0,second=0,microsecond=0))
+            # During the exchange lunch break the latest valid market window is
+            # still 11:30.  Provider ``trade_time`` is a refresh timestamp and
+            # may be either 11:30 or the later retrieval time, so keep the
+            # lower freshness bound at the actual market cutoff while still
+            # rejecting future timestamps.  After 13:00 this exception no
+            # longer applies and an old 11:30 window cannot be reconstructed.
+            expected=cutoff if lunch_snapshot else min(observed,observed.replace(hour=15,minute=0,second=0,microsecond=0))
             if stamp>observed+timedelta(seconds=5) or stamp<expected-timedelta(minutes=10):raise ValueError('quote_stale_or_future')
             values=[q.get(k) for k in ('open','high','low','price','amount')]
             if any(not isinstance(v,(int,float)) or not isfinite(v) or v<=0 for v in values):raise ValueError('quote_missing_ohlc')
