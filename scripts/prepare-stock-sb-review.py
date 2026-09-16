@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "quant-service"))
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", type=date.fromisoformat, required=True, help="交易日 YYYY-MM-DD")
-    parser.add_argument("--symbol", required=True, help="6 位代码或 600664.SH")
+    parser.add_argument("--symbol", required=True, help="股票名称、6 位代码或 600664.SH")
     parser.add_argument("--account-key", default="citics-primary")
     parser.add_argument("--env-file", type=Path, default=Path(r"G:\StockPlatform\config\runtime.env"))
     parser.add_argument("--output-root", type=Path, default=Path(r"G:\StockPlatform\reports\stock-sb-review"))
@@ -43,14 +43,15 @@ def main() -> int:
     from dotenv import load_dotenv
     load_dotenv(args.env_file, override=True)
     from app.database import Database
-    from app.stock_sb_review import collect_review, normalized_symbol
+    from app.stock_sb_review import collect_review, resolve_order_symbol
     from app.stock_sb_review_page import write_review_page
 
     try:
-        symbol = normalized_symbol(args.symbol)
         database = Database()
         try:
             with database.transaction(statement_timeout_ms=45_000) as connection:
+                symbol = resolve_order_symbol(connection, account_key=args.account_key,
+                                              day=args.date, stock=args.symbol)
                 payload = collect_review(connection, account_key=args.account_key,
                                          day=args.date, symbol=symbol)
         finally:

@@ -49,6 +49,28 @@ def _fetch(connection: Any, sql: str, params: tuple[Any, ...]) -> list[dict[str,
     return [dict(row) for row in connection.execute(sql, params).fetchall()]
 
 
+def resolve_order_symbol(connection: Any, *, account_key: str, day: date, stock: str) -> str:
+    """Resolve a name only within this account/day's already imported orders."""
+    try:
+        return normalized_symbol(stock)
+    except ValueError:
+        pass
+    name = stock.strip()
+    if not name or len(name) > 40:
+        raise ValueError("请提供有效股票名或代码")
+    rows = _fetch(connection, """
+        SELECT DISTINCT symbol,name FROM quant.broker_order_events
+         WHERE account_key=%s AND order_date=%s AND name LIKE %s
+         ORDER BY symbol LIMIT 20
+    """, (account_key, day, f"%{name}%"))
+    symbols = sorted({row["symbol"] for row in rows if row["symbol"]})
+    if len(symbols) == 1:
+        return symbols[0]
+    if not symbols:
+        raise ValueError(f"{day} 的已导入委托中找不到“{name}”；请核对名称、账户和日期")
+    raise ValueError(f"股票名“{name}”对应多个代码：{', '.join(symbols)}；请指定代码")
+
+
 def _minute_rows(connection: Any, symbol: str, day: date) -> tuple[list[dict[str, Any]], str]:
     bars = _fetch(connection, """
         SELECT bar_time,open,high,low,close,volume,amount,source_name,available_at

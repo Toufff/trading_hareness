@@ -1,12 +1,13 @@
 """Decision-time facts must not inherit future bars or later broker fills."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import json
 import tempfile
 import unittest
+from unittest.mock import MagicMock
 
-from app.stock_sb_review import _event_context, _post_event, normalized_symbol
+from app.stock_sb_review import _event_context, _post_event, normalized_symbol, resolve_order_symbol
 from app.stock_sb_review_page import write_review_page
 
 
@@ -20,6 +21,17 @@ class StockSbReviewTests(unittest.TestCase):
         self.assertEqual(normalized_symbol("920123"), "920123.BJ")
         with self.assertRaises(ValueError):
             normalized_symbol("wrong")
+
+    def test_name_resolution_scoped_to_imported_orders(self) -> None:
+        connection = MagicMock()
+        connection.execute.return_value.fetchall.return_value = [
+            {"symbol": "600664.SH", "name": "哈药股份"},
+        ]
+        value = resolve_order_symbol(connection, account_key="citics-primary",
+                                     day=date(2026, 9, 15), stock="哈药")
+        self.assertEqual(value, "600664.SH")
+        self.assertEqual(connection.execute.call_args.args[1][:2],
+                         ("citics-primary", date(2026, 9, 15)))
 
     def test_current_minute_is_excluded_from_decision(self) -> None:
         start = datetime(2026, 9, 15, 1, 30, tzinfo=UTC)
