@@ -6,9 +6,10 @@ from statistics import median
 from .ohlc import capture_matches_cutoff
 from .rules import digest, evaluate, LABELS, STATE_ORDER
 from .tail import restore_settings
+from .presentation import build as build_presentation
 from ..short_term_lanes.rules import screen, Settings
 
-VERSION = 'intraday-nine-20260914-1'
+VERSION = 'intraday-nine-20260916-2'
 
 
 def implementation_hash():
@@ -143,12 +144,14 @@ def build(data):
                           data_gaps=lane['data_gaps'], total_matches=lane['total_matches'],
                           discovery_scope='九策略正式核心重算；盘中量价与执行证据单列，不等于收盘确认'))
     changes = [r['pct_chg'] for r in quotes.values()]
+    presentation = build_presentation(items, lanes)
     return dict(version=VERSION, input_hash=digest(data), implementation_hash=implementation_hash(), cutoff=data['cutoff'],
                 observed_at=data['observed_at'], ohlc_captured_at=data.get('ohlc_captured_at'),
                 phase='after_close_initialization' if closed else 'tail' if cutoff.hour == 14 and cutoff.minute >= 30 else 'intraday',
                 history_through=data['sessions'][-1], lanes=lanes, previous=[r for r in items if r['source'] == 'previous'],
                 previous_count=sum(r['source'] == 'previous' for r in items), health=data['health'],
                 history_health=data.get('history_health', {}), minute_health=data.get('minute_health', {}),
+                presentation=presentation,
                 governance_config=data.get('governance_config', {}),
                 event_research=data.get('event_research'),
                 confirmation_status='partial' if any(r['evidence_gaps'] for r in items) else 'complete',

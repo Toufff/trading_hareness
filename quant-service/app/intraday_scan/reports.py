@@ -19,14 +19,29 @@ def table(items):
         lines.append(f"|{r['name']}（{r['symbol'].split('.')[0]}）|{LABELS[r['lane']]}|{STATES[r['state']]}|{price}|{amount}|{ref} / {support}|{reason}|")
     return '\n'.join(lines)
 
+def recommendation_table(items):
+    lines=['|优先级|股票|午盘状态|价格 / 涨幅|原触发条件|原失效条件|','|---|---|---|---|---|---|']
+    for r in items:
+        price=f"{r['price']:.2f} / {r['change_pct']:+.2f}%" if r.get('price') else '—'
+        trigger=(r.get('recommendation_trigger') or '—').replace('|','/').replace('\n',' ')
+        invalidation=(r.get('recommendation_invalidation') or '—').replace('|','/').replace('\n',' ')
+        lines.append(f"|{r.get('recommendation_priority','—')}|{r['name']}（{r['symbol'].split('.')[0]}）|{STATES[r['state']]}|{price}|{trigger}|{invalidation}|")
+    return '\n'.join(lines)
+
 def render(result):
     from ..event_research.report import sections as event_sections
+    from .presentation import build as build_presentation
     out={};header=f"数据截止 {result['cutoff']}；模型 {result['version']}；输入 {result['input_hash']}。\n\n"
-    old=[r for r in result['previous'] if r.get('display_rank') is not None or r.get('manual_recommended')]
-    summary='# 盘中多策略观察\n\n'+header+'\n'.join(event_sections(result.get('event_research')))+'## 原推荐先跟踪\n\n'+table(old)+'\n\n## 各策略当前前排（包含延续与新发现）\n\n'
+    presentation=result.get('presentation') or build_presentation(
+        [r for lane in result['lanes'] for r in lane['items']], result['lanes'])
+    formal=presentation['formal_recommendations']
+    summary='# 盘中多策略观察\n\n'+header+'\n'.join(event_sections(result.get('event_research')))
+    summary+='## 昨日正式推荐跟踪（按正式优先级）\n\n'+(recommendation_table(formal) if formal else '昨日没有仍在有效观察窗口内的正式推荐。')+'\n\n'
+    summary+='选择合同：'+presentation['selection_contract']+'\n\n'
+    summary+='## 各策略当前前排（按策略内部顺序）\n\n'
     seen=set()
     for lane in result['lanes']:
-        new=[r for r in lane['items'] if r['state'] in {'confirmed_observation','platform_observation'}][:3]
+        new=presentation['strategy_front'][lane['key']]
         summary+='### '+lane['label']+'\n\n'+(table(new) if new else '本轮没有分钟确认对象；查看独立报告中的等待/缺证据列表。')+'\n\n'
         body='# '+lane['label']+'：盘中报告\n\n'+table(lane['top'])+'\n\n'+header
         body+='\n'.join(event_sections(result.get('event_research'),{r['symbol'] for r in lane['items']}))

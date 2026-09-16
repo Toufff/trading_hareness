@@ -4,6 +4,56 @@ from uuid import uuid4
 from psycopg.types.json import Json
 from .rules import digest
 
+STAGE_LANE = {
+    'accumulation': 'accumulation',
+    'initial_breakout': 'expansion',
+    'strong_pullback': 'pullback',
+    'post_limit': 'relay',
+}
+
+
+def merge_formal_recommendations(rows, bundle):
+    """Attach the prior formal decision without inventing a cross-lane score.
+
+    Recommendation priority is editorial/research priority and remains separate
+    from every lane's quantitative rank.  One primary lane is used only to
+    evaluate the recommendation against the current intraday tape.
+    """
+    if not bundle:
+        return rows
+    result = {(r['symbol'], r['lane']): dict(r) for r in rows}
+    for item in sorted(bundle.get('recommended', []), key=lambda r: (r.get('priority', 9999), r['symbol'])):
+        memberships = sorted(item.get('memberships') or [], key=lambda r: (r.get('rank', 9999), r.get('lane', '')))
+        preferred = STAGE_LANE.get(item.get('stage'))
+        lane = next((r['lane'] for r in memberships if r.get('lane') == preferred), None)
+        lane = lane or (memberships[0].get('lane') if memberships else preferred) or 'accumulation'
+        key = (item['symbol'], lane)
+        existing = result.get(key, {})
+        result[key] = {
+            **existing,
+            'symbol': item['symbol'],
+            'name': item.get('name') or existing.get('name') or item['symbol'],
+            'lane': lane,
+            'origin_id': existing.get('origin_id') or digest([bundle.get('decision_id'), item['symbol'], lane]),
+            'available_at': existing.get('available_at') or bundle.get('created_at') or bundle.get('as_of_date'),
+            'source': 'previous',
+            'manual_recommended': True,
+            'formal_recommendation': True,
+            'recommendation_priority': item.get('priority'),
+            'recommendation_decision_id': bundle.get('decision_id'),
+            'recommendation_data_date': item.get('data_date') or bundle.get('as_of_date'),
+            'recommendation_valid_until': bundle.get('valid_until'),
+            'recommendation_trigger': item.get('trigger'),
+            'recommendation_invalidation': item.get('invalidation'),
+            'recommendation_comparison': item.get('comparison'),
+            'recommendation_why_now': item.get('why_now'),
+            'display_rank': existing.get('display_rank', 0),
+            'original_reason': existing.get('original_reason') or item.get('why_now'),
+            'original_confirmation': existing.get('original_confirmation') or item.get('trigger'),
+            'original_invalidation': existing.get('original_invalidation') or item.get('invalidation'),
+        }
+    return list(result.values())
+
 def seeds(database,day,cutoff):
     with database.transaction() as c:
         r=c.execute('''SELECT run_id,updated_at,summary->'strategy_lanes' AS scan
@@ -16,6 +66,11 @@ def seeds(database,day,cutoff):
         previous_intraday=c.execute('''SELECT result FROM quant.intraday_strategy_scans
             WHERE cutoff<%s AND cutoff>=%s AND state='completed'
             ORDER BY cutoff DESC,created_at DESC LIMIT 1''',(cutoff,day-timedelta(days=4))).fetchone()
+        formal=c.execute('''SELECT result FROM quant.recommendation_pool_decisions
+            WHERE as_of_date<%s AND created_at<=%s AND result->>'status'='ready'
+              AND (result->>'valid_until')::timestamptz>=%s
+            ORDER BY as_of_date DESC,created_at DESC,decision_id DESC LIMIT 1''',
+            (day,cutoff,cutoff)).fetchone()
     result={};baseline={}
     if r:
         scan=r['scan'];baseline=dict(run_id=str(r['run_id']),date=scan['as_of_date'],version=scan.get('version'))
@@ -56,7 +111,7 @@ def seeds(database,day,cutoff):
             'support':existing.get('support',o.get('reference_low')),'display_rank':0,
             'manual_recommended':True,'original_reason':o.get('manual',{}).get('reason',o.get('reason')),
             'original_confirmation':o.get('confirmation'),'source':'previous'}
-    return list(result.values()),baseline
+    return merge_formal_recommendations(list(result.values()), (formal or {}).get('result')),baseline
 
 def previous_plans(database,cutoff):
     with database.transaction() as c:

@@ -3,6 +3,7 @@ from unittest.mock import patch
 import pytest
 from app.intraday_scan import engine
 from app.intraday_scan.rules import evaluate
+from app.intraday_scan.repository import merge_formal_recommendations
 
 
 def sample():
@@ -83,3 +84,36 @@ def test_platform_future_trigger_is_not_fill():
     r=evaluate(dict(symbol='600000.SH',lane='accumulation',reference=10.5,support=9.8),sample()['rows'][0],
         [dict(time=t,close=10,vwap=9.99) for t in ('1128','1129','1130')],sample()['cutoff'],0,previous_plan=old)
     assert r['plan']['state']=='triggered_unverified_fill' and not r['buy_authorized']
+
+
+def test_formal_recommendation_is_first_class_and_not_mixed_with_lane_rank():
+    seeds = [dict(symbol='600000.SH', name='样本', lane='accumulation', source='previous',
+                  origin_id='old', reference=10.5, support=9.8)]
+    bundle = dict(decision_id='decision-1', as_of_date='2026-09-13', valid_until='2026-09-14T15:00:00+08:00',
+                  recommended=[dict(symbol='600000.SH', name='正式第一', priority=1, stage='accumulation',
+                                    data_date='2026-09-13', trigger='回踩确认', invalidation='跌破失效',
+                                    memberships=[dict(lane='accumulation', rank=8)])])
+    merged = merge_formal_recommendations(seeds, bundle)
+    assert len(merged) == 1
+    assert merged[0]['formal_recommendation'] is True
+    assert merged[0]['recommendation_priority'] == 1
+    assert merged[0]['recommendation_trigger'] == '回踩确认'
+
+
+def test_presentation_is_deterministic_and_report_puts_formal_first():
+    d=sample()
+    d['seeds']=[dict(symbol='600000.SH',name='正式第一',lane='accumulation',source='previous',
+        origin_id='formal',reference=10.5,support=9.8,formal_recommendation=True,
+        recommendation_priority=1,recommendation_trigger='回踩确认',recommendation_invalidation='跌破失效'),
+        dict(symbol='600001.SH',name='普通历史',lane='accumulation',source='previous',
+        origin_id='history',reference=10.5,support=9.8,display_rank=1)]
+    d['minutes']={s:[dict(time=t,close=10,vwap=9.99) for t in ('1128','1129','1130')]
+                  for s in ('600000.SH','600001.SH')}
+    with patch.object(engine,'screen',return_value=core()):result=engine.build(d)
+    p=result['presentation']
+    assert [r['symbol'] for r in p['formal_recommendations']]==['600000.SH']
+    assert [r['symbol'] for r in p['strategy_followups']['accumulation']]==['600001.SH']
+    from app.intraday_scan.reports import render
+    report=render(result)['overview']
+    assert report.index('昨日正式推荐跟踪') < report.index('各策略当前前排')
+    assert '不得从混合表人工挑选' in report
