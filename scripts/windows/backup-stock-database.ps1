@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'stock-incremental-backup.psm1') -Force
 
 function Read-EnvFile([string]$Path) {
     $result = @{}
@@ -103,6 +104,14 @@ $postgresRoot = Get-ChildItem -LiteralPath (Join-Path $platform 'runtime') -Dire
 if (-not $postgresRoot) { throw "PostgreSQL runtime not found under $(Join-Path $platform 'runtime')" }
 $pgDump = Join-Path $postgresRoot.FullName 'bin\pg_dump.exe'
 if (-not (Test-Path -LiteralPath $pgDump -PathType Leaf)) { throw "Missing pg_dump.exe: $pgDump" }
+$psql = Join-Path $postgresRoot.FullName 'bin\psql.exe'
+
+# Large, mostly append-only tables are exported incrementally (see
+# stock-incremental-backup.psm1) and their data is left out of the nightly
+# dump -- but only after this run's incremental export fully succeeded, so a
+# failed export degrades to a full dump instead of a hole in the backup.
+$incrementalSpecs = @(Get-StockIncrementalTableSpecs -Value $config['STOCK_BACKUP_INCREMENTAL_TABLES'])
+if ($incrementalSpecs.Count -gt 0 -and -not (Test-Path -LiteralPath $psql -PathType Leaf)) { throw "Missing psql.exe: $psql" }
 
 $today = (Get-Date).ToString('yyyy-MM-dd')
 
@@ -142,20 +151,46 @@ if ($freeBytes -lt $minimumFreeBytes) {
     throw "Refusing to start backup: only $freeBytes byte(s) free on $backupDrive, below the configured minimum of $minimumFreeBytes byte(s) (STOCK_BACKUP_MIN_FREE_BYTES)"
 }
 
+# Incremental export runs on every invocation, including a same-day retry
+# after the dump already exists: its watermark makes it idempotent.
+$incrementalResults = [Collections.Generic.List[object]]::new()
+$incrementalError = $null
+if ($incrementalSpecs.Count -gt 0) {
+    $connection = @{
+        Psql = $psql; Host = $config.PGHOST; Port = $config.PGPORT; Database = $config.PGDATABASE
+        User = $dumpUser; Password = $dumpPassword
+    }
+    try {
+        foreach ($spec in $incrementalSpecs) {
+            $incrementalResults.Add((Invoke-StockIncrementalBackup -Connection $connection -Spec $spec -BackupRoot $backupRoot))
+        }
+    } catch {
+        $incrementalError = $_.Exception.Message
+    }
+}
+$excludedTableData = if ($null -eq $incrementalError) { @($incrementalSpecs | ForEach-Object Table) } else { @() }
+
 $dumpFile = Join-Path $dayDir "$($config['PGDATABASE'])-$today.dump"
 if (Test-Path -LiteralPath $dumpFile) {
     # A daily job that is retried, or run by hand before the trigger fires,
     # must not fail: today's recovery point already exists, which is the
     # outcome the job exists to guarantee.
-    $record = @{ status = 'skipped'; reason = 'backup already exists for today'; dump_file = $dumpFile }
+    $record = @{
+        status = if ($incrementalError) { 'failed' } else { 'skipped' }
+        reason = 'backup already exists for today'; dump_file = $dumpFile
+        incremental = $incrementalResults.ToArray(); incremental_error = $incrementalError
+    }
     Write-BackupRecord -Record $record
     [pscustomobject]$record
+    if ($incrementalError) { exit 1 }
     return
 }
 
+$dumpArguments = @('-Fc', '-h', $config.PGHOST, '-p', $config.PGPORT, '-U', $dumpUser, '-d', $config.PGDATABASE, '-f', $dumpFile)
+foreach ($table in $excludedTableData) { $dumpArguments += "--exclude-table-data=$table" }
 $env:PGPASSWORD = $dumpPassword
 try {
-    & $pgDump -Fc -h $config.PGHOST -p $config.PGPORT -U $dumpUser -d $config.PGDATABASE -f $dumpFile
+    & $pgDump @dumpArguments
     if ($LASTEXITCODE -ne 0) { throw "pg_dump failed with exit code $LASTEXITCODE" }
 } finally {
     Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
@@ -164,11 +199,15 @@ try {
 $hash = (Get-FileHash -LiteralPath $dumpFile -Algorithm SHA256).Hash.ToLowerInvariant()
 $sizeBytes = (Get-Item -LiteralPath $dumpFile).Length
 [IO.File]::WriteAllText("$dumpFile.sha256", "$hash  $(Split-Path -Leaf $dumpFile)$([Environment]::NewLine)", [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText("$dumpFile.excluded-table-data.json",
+    (ConvertTo-Json -InputObject @{ excluded_table_data = $excludedTableData; incremental = $incrementalResults.ToArray() } -Depth 6),
+    [Text.UTF8Encoding]::new($false))
 
 # Retention: keep every daily backup within $dailyRetentionDays, plus one
 # backup per ISO week (the earliest available in that week) for the last
 # $weeklyRetentionWeeks weeks beyond that, so a corruption discovered weeks
-# later still has a recovery point.
+# later still has a recovery point.  Only yyyy-MM-dd directories are
+# considered; incremental chunks under backups\incremental are never pruned.
 $allDayDirs = @(Get-ChildItem -LiteralPath $backupRoot -Directory -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}$' })
 $removed = @(Select-StockBackupRetentionRemovals -DayNames @($allDayDirs.Name) -Now (Get-Date) `
@@ -179,7 +218,9 @@ foreach ($name in $removed) {
 }
 
 $summary = @{
-    status = 'backed_up'
+    # A failed incremental export still leaves a complete (full) dump, but
+    # the run is recorded as degraded so it is not mistaken for a normal night.
+    status = if ($incrementalError) { 'degraded_full_dump' } else { 'backed_up' }
     database = $config.PGDATABASE
     dump_file = $dumpFile
     sha256 = $hash
@@ -187,6 +228,10 @@ $summary = @{
     backup_root = $backupRoot
     free_bytes_after = $freeBytes - $sizeBytes
     pruned_days = $removed
+    excluded_table_data = $excludedTableData
+    incremental = $incrementalResults.ToArray()
+    incremental_error = $incrementalError
 }
 Write-BackupRecord -Record $summary
 [pscustomobject]$summary
+if ($incrementalError) { exit 1 }

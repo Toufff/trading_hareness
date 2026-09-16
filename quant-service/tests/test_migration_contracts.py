@@ -206,6 +206,37 @@ class RawMarketIndexMigrationTests(unittest.TestCase):
         self.assertEqual(self.module.down_revision, "20260916_0099")
 
 
+class RawMarketUpdateTrackingMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.module = _load(VERSIONS / "20260916_0101_raw_market_update_tracking.py")
+
+    def test_table_locks_are_catalog_guarded_with_lock_timeout(self):
+        statements, autocommit = _statements(self.module.upgrade)
+        column, function, trigger = statements[:3]
+        self.assertRegex(column, r"IF NOT EXISTS \( SELECT 1 FROM information_schema\.columns .* column_name='updated_at' \) THEN SET LOCAL lock_timeout = '10s'; ALTER TABLE quant\.raw_market_observations ADD COLUMN updated_at timestamptz;")
+        self.assertIn("NEW.updated_at := clock_timestamp();", function)
+        self.assertRegex(trigger, r"IF NOT EXISTS \( SELECT 1 FROM pg_trigger WHERE tgname='raw_market_observations_touch_updated_at' .* SET LOCAL lock_timeout = '10s'; CREATE TRIGGER raw_market_observations_touch_updated_at BEFORE UPDATE ON quant\.raw_market_observations")
+        self.assertNotIn("INSERT", trigger)
+        self.assertEqual(autocommit, [
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS raw_market_updated_at_idx "
+            "ON quant.raw_market_observations (updated_at) WHERE updated_at IS NOT NULL",
+        ])
+        self.assertEqual(len(statements), 4)
+
+    def test_downgrade_reverses_every_object(self):
+        statements, autocommit = _statements(self.module.downgrade)
+        self.assertEqual(autocommit, ["DROP INDEX CONCURRENTLY IF EXISTS quant.raw_market_updated_at_idx"])
+        self.assertEqual(statements[1:], [
+            "DROP TRIGGER IF EXISTS raw_market_observations_touch_updated_at ON quant.raw_market_observations",
+            "DROP FUNCTION IF EXISTS quant.touch_raw_market_observation_updated_at()",
+            "ALTER TABLE quant.raw_market_observations DROP COLUMN IF EXISTS updated_at",
+        ])
+
+    def test_chain_position(self):
+        self.assertEqual(self.module.revision, "20260916_0101")
+        self.assertEqual(self.module.down_revision, "20260916_0100")
+
+
 class RetentionPolicyMigrationTests(unittest.TestCase):
     def setUp(self):
         self.module = _load(VERSIONS / "20260902_0085_retention_policies.py")

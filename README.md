@@ -132,6 +132,7 @@ the precise diff.
 |---|---|---|
 | `OWNER_TUNNEL_SSH_USER` / `OWNER_TUNNEL_SSH_KEY` / `OWNER_TUNNEL_SSH_HOST` / `OWNER_TUNNEL_SSH_PORT` | unset (falls back to the pre-existing `lightServer1` SSH alias, with a warning) | When all four are set in `runtime.env`, the owner's reverse tunnel scripts log in as a dedicated, restricted lightServer account instead of a root-capable alias. See "Owner bootstrap" in `docs/SHARED_PEER_RUNTIME.md`. |
 | `STOCK_BACKUP_ROOT` / `STOCK_BACKUP_MIN_FREE_BYTES` | `<PlatformRoot>\backups` / provider default | Destination and free-space guard for the new `scripts/windows/backup-stock-database.ps1` daily `pg_dump` job. |
+| `STOCK_BACKUP_INCREMENTAL_TABLES` | `quant.raw_market_observations:created_at:updated_at` | `schema.table:created_column[:updated_column]` list (`;`-separated, `none` disables). These tables are exported nightly as verified per-day chunks under `<backup root>/incremental/` and their data is left out of the `pg_dump`; restore with `scripts/windows/restore-stock-database.ps1`. See `docs/STOCK_BACKUP_INCREMENTAL.md`. |
 
 ## Repository layout
 

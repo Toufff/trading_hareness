@@ -218,7 +218,7 @@ $finalRoot = Join-Path $layout.ReleasesRoot $releaseId
 if ((Test-Path -LiteralPath $stagingRoot) -or (Test-Path -LiteralPath $finalRoot)) { throw "Release already exists: $releaseId" }
 
 if (-not $SkipTests) {
-    foreach ($test in 'test-post-close-contract.ps1','test-live-runtime-state.ps1','test-stock-release-management.ps1','test-stock-release-safety.ps1','test-event-delivery-task.ps1','test-public-gateway-contract.ps1') {
+    foreach ($test in 'test-post-close-contract.ps1','test-live-runtime-state.ps1','test-stock-release-management.ps1','test-stock-release-safety.ps1','test-event-delivery-task.ps1','test-public-gateway-contract.ps1','test-backup-stock-database.ps1') {
         Invoke-Checked -FilePath (Get-Command pwsh.exe -ErrorAction Stop).Source `
             -Arguments @('-NoProfile','-File',(Join-Path $source "scripts\windows\tests\$test")) -WorkingDirectory $source
     }
