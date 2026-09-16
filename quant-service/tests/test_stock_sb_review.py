@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock
 
-from app.stock_sb_review import _event_context, _post_event, normalized_symbol, resolve_order_symbol
+from app.stock_sb_review import _event_context, _exact_fill_event, _post_event, normalized_symbol, resolve_order_symbol
 from app.stock_sb_review_page import write_review_page
 
 
@@ -47,6 +47,21 @@ class StockSbReviewTests(unittest.TestCase):
         self.assertEqual(context["last_price"], 10)
         self.assertEqual(context["turnover_weighted_close_so_far"], 10)
         self.assertEqual(_post_event(bars, at, 10), {})
+
+    def test_exact_execution_keeps_order_and_fill_times_distinct(self) -> None:
+        event = _exact_fill_event({
+            "trade_key": "a" * 64, "trade_date": date(2026, 9, 16),
+            "trade_time": datetime.strptime("10:21:29", "%H:%M:%S").time(),
+            "symbol": "600498.SH", "name": "烽火通信", "side": "sell",
+            "quantity": 100, "price": 41.84, "gross_amount": 4184,
+            "source_sha256": "b" * 64,
+            "metadata": {"order_time": "10:21:25", "order_number": "2037197",
+                         "execution_number": "12345679"},
+        })
+        self.assertEqual(event["order_at"].isoformat(), "2026-09-16T10:21:25+08:00")
+        self.assertEqual(event["fill_at"].isoformat(), "2026-09-16T10:21:29+08:00")
+        self.assertIsNone(event["order_quantity"])
+        self.assertEqual(event["time_basis"], "broker_exact_fill_time")
 
     def test_html_embedded_data_escapes_script_breakout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -208,6 +208,11 @@ FEE_GROUPS = {
     "other_fee": {_header(value) for value in ("交易所清算费", "基金手续费", "规费", "其他费用")},
 }
 
+DAILY_SIDE = {_header("买卖")}
+ORDER_NUMBER = {_header("委托编号")}
+EXECUTION_NUMBER = {_header("成交编号")}
+ORDER_TIME = {_header("委托时间")}
+
 
 def _date(value: object) -> date:
     raw = re.sub(r"\D", "", _text(value))
@@ -276,7 +281,66 @@ def parse_trade_export(path: Path) -> ParsedExport:
     return ParsedExport(records, ignored, encoding, digest, header_row + 1)
 
 
+def parse_daily_execution_export(path: Path, trade_date: date) -> ParsedExport:
+    """Parse date-less 当日成交 rows with exact fill time; zero rows are not cancellations."""
+    if not isinstance(trade_date, date) or isinstance(trade_date, datetime):
+        raise BrokerExportError("BROKER_DAILY_EXECUTION_DATE_REQUIRED")
+    raw_rows, encoding, digest = _decode_table(Path(path))
+    required = (TRADE_TIME, SYMBOL, NAME, DAILY_SIDE, TRADE_QUANTITY, TRADE_PRICE,
+                GROSS_AMOUNT, ORDER_NUMBER, EXECUTION_NUMBER, ORDER_TIME)
+    header_row, columns = _find_header(raw_rows, required)
+    records, ignored = [], []
+    seen: dict[str, str] = {}
+    for line_number, row in enumerate(raw_rows[header_row + 1:], start=header_row + 2):
+        quantity = _decimal(_cell(row, columns, TRADE_QUANTITY), "trade_quantity")
+        if quantity == 0:
+            ignored.append({"line": line_number, "reason": "zero_quantity_no_fill_status"})
+            continue
+        symbol = normalize_symbol(_cell(row, columns, SYMBOL))
+        raw_side = _text(_cell(row, columns, DAILY_SIDE))
+        side = "buy" if "买" in raw_side else "sell" if "卖" in raw_side else None
+        if side is None:
+            raise BrokerExportError("BROKER_DAILY_EXECUTION_SIDE_INVALID")
+        trade_time = _time(_cell(row, columns, TRADE_TIME))
+        order_time = _time(_cell(row, columns, ORDER_TIME))
+        if trade_time is None or order_time is None:
+            raise BrokerExportError("BROKER_DAILY_EXECUTION_TIME_MISSING")
+        price = _decimal(_cell(row, columns, TRADE_PRICE), "trade_price")
+        gross_amount = _decimal(_cell(row, columns, GROSS_AMOUNT), "gross_amount")
+        if price <= 0 or gross_amount <= 0:
+            raise BrokerExportError("BROKER_DAILY_EXECUTION_VALUE_INVALID")
+        order_number = _text(_cell(row, columns, ORDER_NUMBER))
+        execution_number = _text(_cell(row, columns, EXECUTION_NUMBER))
+        if not order_number or not execution_number or execution_number == "0000":
+            raise BrokerExportError("BROKER_DAILY_EXECUTION_ID_MISSING")
+        raw_map = {_text(raw_rows[header_row][offset]): (row[offset] if offset < len(row) else "")
+                   for offset in range(len(raw_rows[header_row])) if _text(raw_rows[header_row][offset])}
+        canonical = json.dumps(raw_map, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        trade_key = sha256(f"ths-daily-fill:{trade_date}:{symbol}:{execution_number}".encode()).hexdigest()
+        if trade_key in seen:
+            if seen[trade_key] != canonical:
+                raise BrokerExportError("BROKER_DAILY_EXECUTION_DUPLICATE_CONFLICT")
+            ignored.append({"line": line_number, "reason": "duplicate_execution"})
+            continue
+        seen[trade_key] = canonical
+        records.append({
+            "trade_key": trade_key, "trade_date": trade_date, "trade_time": trade_time,
+            "symbol": symbol, "name": _text(_cell(row, columns, NAME)), "side": side,
+            "quantity": quantity, "price": price, "gross_amount": gross_amount,
+            "net_amount": None, "currency": "人民币",
+            "commission": Decimal(0), "stamp_duty": Decimal(0),
+            "transfer_fee": Decimal(0), "other_fee": Decimal(0),
+            "metadata": {"source_line": line_number, "raw_type": raw_side,
+                         "order_number": order_number, "execution_number": execution_number,
+                         "order_time": order_time.isoformat(), "raw_row": raw_map,
+                         "fee_semantics": "not_provided"},
+        })
+    if not records:
+        raise BrokerExportError("BROKER_DAILY_EXECUTION_NO_FILLS")
+    return ParsedExport(records, ignored, encoding, digest, header_row + 1)
+
+
 __all__ = [
     "BrokerExportError", "ParsedExport", "normalize_symbol", "parse_account_export",
-    "parse_holdings_export", "parse_trade_export",
+    "parse_holdings_export", "parse_trade_export", "parse_daily_execution_export",
 ]

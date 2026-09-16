@@ -2,11 +2,11 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 from app.broker_desktop_evidence import account_fingerprint, load_manual_envelope, prepare_export_envelope
-from app.broker_export_parser import BrokerExportError, parse_account_export, parse_holdings_export, parse_trade_export
+from app.broker_export_parser import BrokerExportError, parse_account_export, parse_daily_execution_export, parse_holdings_export, parse_trade_export
 from app.broker_trade_repository import load_trade_batch, persist_trade_batch
 
 
@@ -134,6 +134,25 @@ class BrokerExportParserTests(unittest.TestCase):
         account = self.write("bad-account.xls", "总资产\t100\n")
         with self.assertRaisesRegex(BrokerExportError, "TOTALS_MISSING"):
             parse_account_export(account)
+
+    def test_date_less_daily_execution_export_preserves_exact_fill_times(self):
+        source = self.write(
+            "daily-executions.xls",
+            "成交时间\t证券代码\t证券名称\t买卖\t成交数量\t成交价格\t成交金额\t委托编号\t成交编号\t委托时间\n"
+            "10:21:28\t600498\t烽火通信\t卖出\t300.00\t41.84\t12552.00\t2037197\t12345678\t10:21:25\n"
+            "10:21:29\t600498\t烽火通信\t卖出\t100.00\t41.84\t4184.00\t2037197\t12345679\t10:21:25\n"
+            "10:22:00\t600664\t哈药股份\t买入\t0\t0\t0\t2037200\t0000\t10:21:59\n",
+        )
+        parsed = parse_daily_execution_export(source, date(2026, 9, 16))
+        self.assertEqual(len(parsed.rows), 2)
+        self.assertEqual(len(parsed.ignored_rows), 1)
+        self.assertEqual(parsed.ignored_rows[0]["reason"], "zero_quantity_no_fill_status")
+        self.assertEqual(str(parsed.rows[0]["trade_time"]), "10:21:28")
+        self.assertEqual(parsed.rows[0]["metadata"]["order_time"], "10:21:25")
+        self.assertEqual(parsed.rows[0]["metadata"]["order_number"], "2037197")
+        self.assertNotEqual(parsed.rows[0]["trade_key"], parsed.rows[1]["trade_key"])
+        other_day = parse_daily_execution_export(source, date(2026, 9, 17))
+        self.assertNotEqual(parsed.rows[0]["trade_key"], other_day.rows[0]["trade_key"])
 
 
 if __name__ == "__main__":

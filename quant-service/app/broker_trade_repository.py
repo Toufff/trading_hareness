@@ -54,17 +54,18 @@ def load_trade_batch(path, run, snapshot):
     return value
 
 
-def persist_trade_batch(connection, batch, snapshot):
+def persist_trade_batch(connection, batch, snapshot, *, upsert_instruments=True):
     source_hash = batch["source_sha256"]
     broker = snapshot.metadata["account_identity"]["broker"]
     inserted = idempotent = 0
     for row in batch["records"]:
-        connection.execute(
-            """INSERT INTO quant.instruments(symbol,exchange,name,source)
-               VALUES(%s,%s,%s,'ths_desktop_export')
-               ON CONFLICT(symbol) DO UPDATE SET name=COALESCE(NULLIF(EXCLUDED.name,''),quant.instruments.name)""",
-            (row["symbol"], row["symbol"].rsplit(".", 1)[-1], row["name"]),
-        )
+        if upsert_instruments:
+            connection.execute(
+                """INSERT INTO quant.instruments(symbol,exchange,name,source)
+                   VALUES(%s,%s,%s,'ths_desktop_export')
+                   ON CONFLICT(symbol) DO UPDATE SET name=COALESCE(NULLIF(EXCLUDED.name,''),quant.instruments.name)""",
+                (row["symbol"], row["symbol"].rsplit(".", 1)[-1], row["name"]),
+            )
         existing = connection.execute(
             "SELECT source_sha256,metadata FROM quant.broker_trade_records WHERE account_key=%s AND trade_key=%s",
             (snapshot.account_key, row["trade_key"]),

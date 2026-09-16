@@ -6,14 +6,16 @@ promotes a price-cross estimate to a broker-confirmed execution timestamp.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .broker_order_timeline import map_execution_to_bars
 
 
 BENCHMARKS = ("000001.SH", "399001.SZ", "000300.SH", "000905.SH")
+CN = ZoneInfo("Asia/Shanghai")
 
 
 def json_value(value: Any) -> Any:
@@ -50,7 +52,7 @@ def _fetch(connection: Any, sql: str, params: tuple[Any, ...]) -> list[dict[str,
 
 
 def resolve_order_symbol(connection: Any, *, account_key: str, day: date, stock: str) -> str:
-    """Resolve a name only within this account/day's already imported orders."""
+    """Resolve a name only within this account/day's imported activity."""
     try:
         return normalized_symbol(stock)
     except ValueError:
@@ -59,16 +61,43 @@ def resolve_order_symbol(connection: Any, *, account_key: str, day: date, stock:
     if not name or len(name) > 40:
         raise ValueError("请提供有效股票名或代码")
     rows = _fetch(connection, """
-        SELECT DISTINCT symbol,name FROM quant.broker_order_events
-         WHERE account_key=%s AND order_date=%s AND name LIKE %s
-         ORDER BY symbol LIMIT 20
-    """, (account_key, day, f"%{name}%"))
+        SELECT DISTINCT symbol,name FROM (
+            SELECT symbol,name FROM quant.broker_order_events
+             WHERE account_key=%s AND order_date=%s AND name LIKE %s
+            UNION ALL
+            SELECT symbol,name FROM quant.broker_trade_records
+             WHERE account_key=%s AND trade_date=%s AND name LIKE %s
+        ) activity ORDER BY symbol LIMIT 20
+    """, (account_key, day, f"%{name}%", account_key, day, f"%{name}%"))
     symbols = sorted({row["symbol"] for row in rows if row["symbol"]})
     if len(symbols) == 1:
         return symbols[0]
     if not symbols:
         raise ValueError(f"{day} 的已导入委托中找不到“{name}”；请核对名称、账户和日期")
     raise ValueError(f"股票名“{name}”对应多个代码：{', '.join(symbols)}；请指定代码")
+
+
+def _exact_fill_event(row: dict[str, Any]) -> dict[str, Any]:
+    """Project one broker-confirmed execution without inventing an order size."""
+    day = row["trade_date"]
+    metadata = row.get("metadata") or {}
+    has_order_time = bool(metadata.get("order_time"))
+    order_time = time.fromisoformat(str(metadata["order_time"])) if has_order_time else row["trade_time"]
+    order_at = datetime.combine(day, order_time, tzinfo=CN)
+    fill_at = datetime.combine(day, row["trade_time"], tzinfo=CN)
+    return {
+        "event_key": row["trade_key"], "order_date": day, "order_at": order_at,
+        "fill_at": fill_at, "symbol": row["symbol"], "name": row["name"],
+        "side": row["side"], "raw_side": "买入" if row["side"] == "buy" else "卖出",
+        "status": "成交明细", "order_number": metadata.get("order_number") or "未提供",
+        "execution_number": metadata.get("execution_number") or "未提供",
+        "order_quantity": None, "filled_quantity": row["quantity"],
+        "gross_amount": row["gross_amount"], "order_price": None,
+        "fill_price": row["price"], "is_execution": True,
+        "time_basis": "broker_exact_fill_time", "source_type": "trade_fill",
+        "order_time_basis": "export_order_time" if has_order_time else "fill_time_fallback",
+        "source_sha256": row["source_sha256"],
+    }
 
 
 def _minute_rows(connection: Any, symbol: str, day: date) -> tuple[list[dict[str, Any]], str]:
@@ -140,7 +169,7 @@ def _post_event(bars: list[dict[str, Any]], order_at: datetime, price: float) ->
 
 def collect_review(connection: Any, *, account_key: str, day: date, symbol: str) -> dict[str, Any]:
     symbol = normalized_symbol(symbol)
-    events = _fetch(connection, """
+    order_events = _fetch(connection, """
         SELECT event_key,order_date,order_at,symbol,name,side,raw_side,status,order_number,
                order_quantity,filled_quantity,gross_amount,order_price,fill_price,
                is_execution,time_basis,source_sha256
@@ -148,8 +177,27 @@ def collect_review(connection: Any, *, account_key: str, day: date, symbol: str)
          WHERE account_key=%s AND symbol=%s AND order_date=%s
          ORDER BY order_at,event_key LIMIT 300
     """, (account_key, symbol, day))
+    trade_rows = _fetch(connection, """
+        SELECT trade_key,trade_date,trade_time,symbol,name,side,quantity,price,gross_amount,
+               source_sha256,metadata
+         FROM quant.broker_trade_records
+         WHERE account_key=%s AND symbol=%s AND trade_date=%s AND trade_time IS NOT NULL
+         ORDER BY trade_time,trade_key LIMIT 300
+    """, (account_key, symbol, day))
+    trade_quantity_by_order: dict[str, Decimal] = {}
+    for trade in trade_rows:
+        number = str((trade.get("metadata") or {}).get("order_number") or "")
+        trade_quantity_by_order[number] = trade_quantity_by_order.get(number, Decimal(0)) + Decimal(trade["quantity"])
+    # A complete exact-fill export supersedes the aggregate execution row,
+    # while cancelled and unmatched order rows remain visible.
+    events = [event for event in order_events if not (
+        event["is_execution"] and event["order_number"] in trade_quantity_by_order
+        and trade_quantity_by_order[event["order_number"]] == Decimal(event["filled_quantity"])
+    )]
+    events.extend(_exact_fill_event(row) for row in trade_rows)
+    events.sort(key=lambda row: (row.get("fill_at") or row["order_at"], row["event_key"]))
     if not events:
-        raise ValueError(f"该账户在 {day} 没有 {symbol} 的已导入委托记录；先确认导入日期和账户绑定")
+        raise ValueError(f"该账户在 {day} 没有 {symbol} 的已导入委托或成交记录；先确认导入日期和账户绑定")
 
     bars, bar_source = _minute_rows(connection, symbol, day)
     daily = _daily_rows(connection, symbol, day)
@@ -206,15 +254,22 @@ def collect_review(connection: Any, *, account_key: str, day: date, symbol: str)
         row = {key: json_value(value) for key, value in event.items()}
         row["decision_context"] = _event_context(bars, event["order_at"])
         if event["is_execution"]:
-            row["minute_mapping"] = map_execution_to_bars(
-                {"order_at": event["order_at"], "price": event["fill_price"]}, bars)
+            if event.get("fill_at"):
+                row["minute_mapping"] = {"exact_fill_at": json_value(event["fill_at"]),
+                                         "confidence": "券商成交明细"}
+            else:
+                row["minute_mapping"] = map_execution_to_bars(
+                    {"order_at": event["order_at"], "price": event["fill_price"]}, bars)
             row["hindsight_from_order_time"] = _post_event(
-                bars, event["order_at"], float(event["fill_price"] or 0))
+                bars, event.get("fill_at") or event["order_at"], float(event["fill_price"] or 0))
         reviewed_events.append(row)
 
     gaps = []
     if len(bars) < 180:
         gaps.append(f"个股分钟线仅 {len(bars)} 根；不足以作完整日内量价复盘")
+    if bars and any(event.get("fill_at") and event["fill_at"] > bars[-1]["bar_time"] + timedelta(minutes=1)
+                    for event in events):
+        gaps.append("有真实成交时刻晚于最后一根可用分钟K；图上按成交时刻和成交价标点，但该时刻附近的量价走势缺失")
     if not any(item["bars"] for item in benchmarks.values()):
         gaps.append("基准指数分钟线缺失；无法复原下单时相对大盘走势")
     if not quotes:
@@ -231,10 +286,12 @@ def collect_review(connection: Any, *, account_key: str, day: date, symbol: str)
         gaps.append("该股日线背景缺失")
     return {
         "version": 1, "account_key": account_key, "day": day.isoformat(), "symbol": symbol,
-        "name": events[0]["name"], "time_semantics": "委托时间为事实；成交分钟仅由委托后成交价首次触达推断，不是实际成交时间",
+        "name": events[0]["name"], "time_semantics": (
+            "当日成交导出中的成交时刻为券商记录的事实；委托流水若无成交时刻，仍只作价格触达推断"
+            if trade_rows else "委托时间为事实；成交分钟仅由委托后成交价首次触达推断，不是实际成交时间"),
         "bar_source": bar_source, "coverage": {"stock_minute_bars": len(bars),
         "index_minute_bars": {key: len(value["bars"]) for key, value in benchmarks.items()},
-        "quotes": len(quotes),
+        "quotes": len(quotes), "exact_fill_rows": len(trade_rows),
         "quotes_with_main_net_inflow": sum(row["main_net_inflow"] is not None for row in quotes),
         "gaps": gaps},
         "events": reviewed_events, "bars": clean_rows(bars), "daily": clean_rows(daily),
