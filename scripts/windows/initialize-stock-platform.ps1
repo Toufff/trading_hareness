@@ -129,8 +129,11 @@ $managedConfig = Join-Path $config 'postgresql-stock-platform.conf'
     "listen_addresses = '127.0.0.1'"
     "port = $Port"
     'max_connections = 50'
-    "shared_buffers = '512MB'"
-    "effective_cache_size = '4GB'"
+    # The database lives on an HDD on a 90+ GB workstation: keep hot index
+    # pages in shared memory instead of re-seeking them, and let the planner
+    # know how much the OS file cache holds.
+    "shared_buffers = '4GB'"
+    "effective_cache_size = '32GB'"
     "maintenance_work_mem = '512MB'"
     "work_mem = '16MB'"
     'wal_compression = on'

@@ -174,6 +174,38 @@ class HotTableIndexMigrationTests(unittest.TestCase):
         self.assertEqual(self.module.down_revision, "20260901_0083")
 
 
+class RawMarketIndexMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.module = _load(VERSIONS / "20260916_0100_raw_market_latest_and_backup_indexes.py")
+
+    def test_indexes_are_created_concurrently_inside_autocommit(self):
+        statements, autocommit = _statements(self.module.upgrade)
+        self.assertEqual(statements, autocommit)
+        self.assertEqual(statements, [
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS raw_market_capability_effective_idx "
+            "ON quant.raw_market_observations (capability, effective_at DESC)",
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS raw_market_created_at_brin_idx "
+            "ON quant.raw_market_observations USING brin (created_at)",
+        ])
+
+    def test_indexed_columns_exist(self):
+        block = _table_block(SCHEMA_SQL + PLATFORM_SCHEMA_SQL, "raw_market_observations")
+        for column in ("capability", "effective_at", "created_at"):
+            self.assertRegex(block, rf"(?m)^\s*{column} ")
+
+    def test_downgrade_drops_every_index_concurrently(self):
+        statements, autocommit = _statements(self.module.downgrade)
+        self.assertEqual(statements, autocommit)
+        self.assertEqual(statements, [
+            "DROP INDEX CONCURRENTLY IF EXISTS quant.raw_market_created_at_brin_idx",
+            "DROP INDEX CONCURRENTLY IF EXISTS quant.raw_market_capability_effective_idx",
+        ])
+
+    def test_chain_position(self):
+        self.assertEqual(self.module.revision, "20260916_0100")
+        self.assertEqual(self.module.down_revision, "20260916_0099")
+
+
 class RetentionPolicyMigrationTests(unittest.TestCase):
     def setUp(self):
         self.module = _load(VERSIONS / "20260902_0085_retention_policies.py")
