@@ -31,7 +31,14 @@ def clean_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def normalized_symbol(symbol: str) -> str:
     value = symbol.strip().upper()
     if len(value) == 6 and value.isdigit():
-        suffix = "SH" if value.startswith(("5", "6", "9")) else "SZ" if value.startswith(("0", "1", "2", "3")) else "BJ"
+        if value.startswith(("4", "8", "92")):
+            suffix = "BJ"
+        elif value.startswith(("5", "6", "9")):
+            suffix = "SH"
+        elif value.startswith(("0", "1", "2", "3")):
+            suffix = "SZ"
+        else:
+            raise ValueError("无法识别该 A 股代码的交易所")
         return f"{value}.{suffix}"
     if len(value) == 9 and value[:6].isdigit() and value[6] == "." and value[7:] in {"SH", "SZ", "BJ"}:
         return value

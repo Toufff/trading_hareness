@@ -17,6 +17,7 @@ class StockSbReviewTests(unittest.TestCase):
     def test_symbol_normalization(self) -> None:
         self.assertEqual(normalized_symbol("600664"), "600664.SH")
         self.assertEqual(normalized_symbol("002156"), "002156.SZ")
+        self.assertEqual(normalized_symbol("920123"), "920123.BJ")
         with self.assertRaises(ValueError):
             normalized_symbol("wrong")
 
