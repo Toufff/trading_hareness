@@ -100,9 +100,12 @@ pwsh -File scripts\windows\run-stock-backup-offsite.ps1 -Command selftest   # �
 先从云端把备份树取回本地（会下载**最新一天**的基础备份 + 全部增量分片）：
 
 ```powershell
-pwsh -File scripts\windows\run-stock-backup-offsite.ps1 -Command fetch `
-  -CommandArguments '--dest','G:\restore-from-cloud','--day','2026-09-16'
+pwsh -File scripts\windows\run-stock-backup-offsite.ps1 fetch --dest G:\restore-from-cloud --day 2026-09-16
 ```
+
+> [!warning] 用位置参数写 `--dest` / `--day`
+> `pwsh -File` 会把 `-CommandArguments '--dest','G:\x'` 当成一个逗号连起来的字符串，
+> 选项会被静默丢掉。位置参数写法（上面那种）才是对的。
 
 `--day` 省略时取云端最新一天。取回后按本地流程还原到**新库**：
 

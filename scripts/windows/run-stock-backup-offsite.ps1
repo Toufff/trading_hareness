@@ -4,9 +4,15 @@ param(
     [ValidateSet('init-key', 'authorize', 'status', 'nightly', 'upload', 'prune', 'fetch', 'selftest')]
     [string]$Command = 'nightly',
 
-    # Extra CLI arguments, e.g. -CommandArguments '--dest','G:\restore','--day','2026-09-16'
+    # Remaining arguments go to the CLI verbatim, e.g.
+    #   run-stock-backup-offsite.ps1 fetch --dest G:\restore --day 2026-09-16
+    # They are positional on purpose: under `pwsh -File` the named form
+    # (-CommandArguments '--dest','G:\x') arrives as ONE comma-joined literal
+    # token, so the option is silently dropped and the CLI reports a missing
+    # --dest instead. A stray named use now fails loudly rather than quietly
+    # losing the value.
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
-    [string[]]$CommandArguments = @(),
+    [string[]]$CliArguments = @(),
 
     [string]$RuntimeEnv = 'G:\StockPlatform\config\runtime.env',
     [string]$PlatformRoot = 'G:\StockPlatform'
@@ -67,9 +73,15 @@ $logFile = Join-Path $logDir 'stock-backup-offsite.jsonl'
 # `$output = & node ...` does) would hide the code the operator has to type.
 $previousErrorAction = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'   # native stderr must be logged, not thrown
+# The CLI emits UTF-8 JSON containing the Chinese remote directory. PowerShell
+# decodes a native command's stdout with [Console]::OutputEncoding, which in the
+# hidden scheduled-task host defaults to the OEM code page (cp936 here), so the
+# logged path came out as mojibake even though the upload itself was correct.
+# A process with no console can refuse the assignment, hence the guard.
+try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { }
 $exitCode = 1
 try {
-    & $node $cli $Command @CommandArguments 2>&1 | ForEach-Object {
+    & $node $cli $Command @CliArguments 2>&1 | ForEach-Object {
         $text = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { [string]$_ }
         Write-Output $text
         try {
