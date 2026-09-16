@@ -8,16 +8,26 @@ from datetime import datetime, timedelta
 from math import isfinite
 
 
+def capture_matches_cutoff(cutoff, observed):
+    """Return whether one quote capture can describe the frozen market cutoff."""
+    if cutoff.date()!=observed.date() or observed<cutoff:
+        return False
+    if cutoff.hour>=15:
+        return True
+    lunch_snapshot = (
+        cutoff.hour == 11 and cutoff.minute == 30
+        and (observed.hour == 11 and observed.minute >= 30 or observed.hour == 12)
+    )
+    return lunch_snapshot or (observed.hour<15 and observed-cutoff<=timedelta(minutes=10))
+
+
 def merge(histories,quotes,cutoff,captured_at):
     cutoff=datetime.fromisoformat(cutoff);observed=datetime.fromisoformat(captured_at)
     lunch_snapshot = (
         cutoff.hour == 11 and cutoff.minute == 30
         and (observed.hour == 11 and observed.minute >= 30 or observed.hour == 12)
     )
-    if cutoff.date()!=observed.date() or (
-        cutoff.hour<15 and not lunch_snapshot
-        and (observed.hour>=15 or observed-cutoff>timedelta(minutes=10))
-    ):
+    if not capture_matches_cutoff(cutoff, observed):
         raise ValueError('Quote cannot be backfilled into earlier intraday window')
     out=deepcopy(histories);errors={};current=0;ready=0
     by={r['ts_code']:r for r in quotes}

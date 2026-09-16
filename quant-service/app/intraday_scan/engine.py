@@ -3,6 +3,7 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta
 from statistics import median
+from .ohlc import capture_matches_cutoff
 from .rules import digest, evaluate, LABELS, STATE_ORDER
 from .tail import restore_settings
 from ..short_term_lanes.rules import screen, Settings
@@ -42,7 +43,7 @@ def validate(data):
         if not captured or datetime.fromisoformat(captured) > observed:
             raise ValueError('OHLC capture provenance missing/future')
         stamp = datetime.fromisoformat(captured)
-        if stamp.date() != cutoff.date() or (cutoff.hour < 15 and (stamp.hour >= 15 or stamp - cutoff > timedelta(minutes=10))):
+        if not capture_matches_cutoff(cutoff, stamp):
             raise ValueError('Cannot enrich historical intraday snapshot with later daily OHLC')
         if any(r['date'] > day for bars in data['price_histories'].values() for r in bars):
             raise ValueError('Future OHLC')

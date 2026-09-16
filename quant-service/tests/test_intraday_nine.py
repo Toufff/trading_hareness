@@ -51,6 +51,14 @@ def test_source_contract_failures(kind):
     with pytest.raises(ValueError):engine.validate(d)
 
 
+def test_lunch_break_ohlc_provenance_matches_the_1130_cutoff():
+    d=sample()
+    d['observed_at']='2026-09-14T12:43:00+08:00'
+    d['ohlc_captured_at']='2026-09-14T12:43:00+08:00'
+    d['price_histories']={'600000.SH':[dict(date='2026-09-14')]}
+    assert engine.validate(d).strftime('%H:%M')=='11:30'
+
+
 def test_accumulation_inside_platform_not_breakout():
     d=sample(); d['seeds']=[dict(symbol='600000.SH',name='样本',lane='accumulation',source='previous',
         origin_id='x',reference=10.5,support=9.8)]
