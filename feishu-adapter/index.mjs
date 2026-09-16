@@ -1255,6 +1255,7 @@ const researchPaths = new Map([
 	['/api/research/ten-day-leader-rotation/latest', '/api/v1/research/ten-day-leader-rotation/latest'],
 	['/api/research/intraday/outcomes/latest', '/api/v1/intraday/outcomes/latest'],
 	['/api/research/paper/status', '/api/v1/paper/status'],
+	['/api/research/agent-paper/status', '/api/v1/agent-paper/status'],
 	...personalDecisionResearchPaths,
 	['/api/research/strategy/contracts', '/api/v1/strategy/contracts'],
 	['/api/research/strategy/funnel', '/api/v1/strategy/funnel'],

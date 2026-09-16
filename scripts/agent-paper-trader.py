@@ -1,0 +1,121 @@
+"""Agent paper trader: initialize, run one trading day, decide once, or report.
+
+Paper-only research.  It never touches a broker, and the model only receives
+JSON context through the local Claude Code CLI.
+"""
+import argparse
+import asyncio
+import json
+import msvcrt
+import sys
+from datetime import date, datetime, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'quant-service'))
+from dotenv import load_dotenv  # noqa: E402
+
+SHANGHAI = ZoneInfo('Asia/Shanghai')
+
+
+def _json(value):
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('command', choices=['init', 'run-day', 'decide-once', 'report', 'model-check'])
+    parser.add_argument('--env-file', default='G:/StockPlatform/config/runtime.env')
+    parser.add_argument('--platform-root', type=Path, default=Path('G:/StockPlatform'))
+    parser.add_argument('--account-key', default='agent-claude-opus')
+    parser.add_argument('--source-account', default='citics-primary')
+    parser.add_argument('--start-date')
+    parser.add_argument('--model')
+    parser.add_argument('--backend', choices=['claude_cli', 'event_research'])
+    parser.add_argument('--decision-minutes', type=int, default=5)
+    parser.add_argument('--day')
+    args = parser.parse_args()
+    load_dotenv(args.env_file, override=True)
+
+    from app.database import Database
+    from app.event_research.trading_calendar import is_open
+    from app.agent_paper.model import build_model
+    from app.agent_paper.report import status
+    from app.agent_paper.runner import Runner, initialize_account, run_day
+
+    log_path = args.platform_root / 'logs' / f'agent-paper-{args.account_key}.jsonl'
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def log(entry):
+        entry = {'recorded_at': datetime.now(timezone.utc).isoformat(), **entry}
+        with log_path.open('a', encoding='utf-8') as stream:
+            stream.write(_json(entry) + '\n')
+
+    db = Database()
+    try:
+        if args.command == 'init':
+            model = build_model(args.backend, model=args.model)
+            start = date.fromisoformat(args.start_date) if args.start_date else datetime.now(SHANGHAI).date()
+            result = initialize_account(db, account_key=args.account_key, model=model.model,
+                                        source_account=args.source_account, start_date=start)
+            log({'event': 'init', **result})
+            print(_json(result))
+            return 0
+        if args.command == 'model-check':
+            # One tiny call proving the CLI login works in this environment; no ledger change.
+            from app.agent_paper.model import ModelFailure
+            model = build_model(args.backend, model=args.model)
+            try:
+                result = model.decide(_json({'now': datetime.now(SHANGHAI).isoformat(), 'check': '连通性检查：不要下单，orders 返回空数组'}))
+                entry = {'event': 'model_check', 'status': 'ok', 'model': result.model, 'duration_ms': result.duration_ms,
+                         'orders': result.output.get('orders'), 'cost_usd': (result.usage or {}).get('total_cost_usd')}
+            except ModelFailure as failure:
+                entry = {'event': 'model_check', 'status': 'failed', 'model': model.model, 'error': failure.code, 'detail': failure.detail}
+            log(entry)
+            print(_json(entry))
+            return 0 if entry['status'] == 'ok' else 3
+        if args.command == 'report':
+            with db.transaction() as connection:
+                day = date.fromisoformat(args.day) if args.day else None
+                print(_json(status(connection, account_key=args.account_key, day=day)))
+            return 0
+        now = datetime.now(SHANGHAI)
+        if not is_open(now.date()):
+            log({'event': 'closed_day', 'day': now.date().isoformat()})
+            print(_json({'status': 'closed_day'}))
+            return 0
+        runner = Runner(db, args.account_key, build_model(args.backend, model=args.model), decision_minutes=args.decision_minutes)
+        with db.transaction() as connection:
+            if connection.execute('SELECT 1 FROM quant.agent_paper_accounts WHERE account_key=%s', (args.account_key,)).fetchone() is None:
+                raise SystemExit(f'account {args.account_key} is not initialized')
+        if args.command == 'decide-once':
+            runner.start_of_day(now)
+            outcome = asyncio.run(runner.decide(now))
+            log({'event': 'manual_decision', **outcome})
+            print(_json(outcome))
+            return 0
+        lock_path = args.platform_root / 'run' / f'agent-paper-{args.account_key}.lock'
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, 'a+')
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            print(_json({'status': 'already_running'}))
+            return 0
+        log({'event': 'day_start', 'at': now.isoformat()})
+        summary = asyncio.run(run_day(runner, now_fn=lambda: datetime.now(SHANGHAI), log=log))
+        print(_json(summary))
+        return 0
+    except SystemExit:
+        raise
+    except Exception as error:
+        log({'event': 'failed', 'command': args.command, 'error': f'{type(error).__name__}: {str(error)[:300]}'})
+        print(_json({'status': 'failed', 'error_type': type(error).__name__, 'error': str(error)[:300]}))
+        return 2
+    finally:
+        db.close()
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

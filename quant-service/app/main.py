@@ -513,6 +513,7 @@ from .routers.sector_heat import build_sector_heat_router
 from .routers.intraday_scans import build_intraday_scans_router
 from .routers.strategy_governance import build_strategy_governance_router
 from .routers.paper_reads import build_paper_reads_router
+from .routers.agent_paper_reads import build_agent_paper_reads_router
 from .routers.paper_actions import build_paper_actions_router
 from .routers.personal_decisions import PersonalDecisionDependencies, build_personal_decisions_router
 from .routers.broker_order_history import build_broker_order_history_router
@@ -4187,6 +4188,7 @@ app.include_router(build_sector_heat_router(db, run_database_blocking))
 app.include_router(build_intraday_scans_router(db, run_database_blocking))
 app.include_router(build_strategy_governance_router(async_database=async_db))
 app.include_router(build_paper_reads_router(db, async_db))
+app.include_router(build_agent_paper_reads_router(db))
 app.include_router(build_paper_actions_router(db, configure_paper_account, accept_paper_decision))
 app.include_router(build_personal_decisions_router(PersonalDecisionDependencies(
     database=db,
