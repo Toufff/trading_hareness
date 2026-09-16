@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { decryptSecret, encryptSecret } from './secretbox.mjs';
@@ -10,6 +10,12 @@ const OAUTH_BASE = 'https://openapi.baidu.com';
 const ACCESS_TOKEN_SKEW_MS = 60_000;
 const DEFAULT_SLICE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+// Open-platform limits: every slice but the last must be at least 4 MiB; a
+// super-member may use slices up to 32 MiB, and a file has at most 1024.
+const MIN_SLICE_BYTES = 4 * 1024 * 1024;
+const MAX_SLICE_BYTES = 32 * 1024 * 1024;
+const MAX_SLICES = 1024;
+const LOCATE_UPLOAD_APP_ID = '250528';
 const BAIDU_OAUTH_SCOPES = 'basic,netdisk';
 const INVALID_TOKEN_MESSAGE = '百度网盘凭据格式无效，请重新授权';
 
@@ -48,6 +54,17 @@ function responseMessage(body, fallback) {
 	return asText(detail ?? (body && typeof body === 'object' ? JSON.stringify(body) : fallback), 420);
 }
 
+// True while a device-code authorization simply has not been confirmed yet.
+// Baidu answers the poll with error=authorization_pending and a description
+// such as "User has not yet completed the authorization"; older responses use
+// slow_down. Anything else (expired_token, invalid_client, ...) is fatal and
+// must not be retried as if it were a pending approval.
+export function isBaiduPanAuthorizationPending(error) {
+	const code = String(error?.oauthCode ?? '').trim().toLowerCase();
+	if (code === 'authorization_pending' || code === 'slow_down') return true;
+	return /authorization_pending|slow_down|not yet completed|尚未.*(确认|授权)/i.test(String(error?.message ?? ''));
+}
+
 export function createBaiduPanStorage({ appKey, secretKey, redirectUri = 'oob', ledger = null, fetchImpl = fetch, rootPath = '/', spoolDir = '', maxUploadBytes = DEFAULT_MAX_UPLOAD_BYTES, sliceBytes = DEFAULT_SLICE_BYTES }) {
 	const clientId = String(appKey ?? '').trim();
 	const clientSecret = String(secretKey ?? '').trim();
@@ -68,7 +85,18 @@ export function createBaiduPanStorage({ appKey, secretKey, redirectUri = 'oob', 
 		const query = new URLSearchParams({ client_id: clientId, client_secret: clientSecret, ...params });
 		const response = await fetchImpl(`${OAUTH_BASE}/oauth/2.0/token?${query}`, { signal: AbortSignal.timeout(15_000), headers: { accept: 'application/json' } });
 		let body; try { body = await response.json(); } catch { throw new Error(`百度网盘 OAuth 返回无效响应（HTTP ${response.status}）`); }
-		if (!response.ok || body?.error || body?.errno) throw new Error(`百度网盘 OAuth 失败：${responseMessage(body, `HTTP ${response.status}`)}`);
+		if (!response.ok || body?.error || body?.errno) {
+			// The machine-readable OAuth error code is what tells a device-code
+			// poller "keep waiting" (authorization_pending) apart from a real
+			// failure (expired_token, invalid_client, ...). It must survive on
+			// the error: responseMessage() prefers the human-readable
+			// error_description ("User has not yet completed the authorization")
+			// and would otherwise drop the code.
+			const error = new Error(`百度网盘 OAuth 失败：${responseMessage(body, `HTTP ${response.status}`)}`);
+			error.oauthCode = String(body?.error ?? body?.errno ?? '');
+			error.httpStatus = response.status;
+			throw error;
+		}
 		if (!body?.access_token) throw new Error('百度网盘 OAuth 未返回 access_token');
 		return body;
 	}
@@ -136,14 +164,14 @@ export function createBaiduPanStorage({ appKey, secretKey, redirectUri = 'oob', 
 		return { configured: true, app_configured: true, authorized: Boolean(record), access_expires_at: record?.access_expires_at ?? null, refresh_expires_at: record?.refresh_expires_at ?? null, scopes: record?.scopes ?? '' };
 	}
 
-	async function request(path, { method = 'GET', params = {}, body, raw = false, retry = true } = {}) {
+	async function request(path, { method = 'GET', params = {}, body, raw = false, retry = true, timeoutMs = 30_000 } = {}) {
 		const base = String(path).startsWith('http') ? String(path) : `${API_BASE}${path}`;
 		const send = async (token) => {
 			const requestBody = body === undefined || body instanceof URLSearchParams || body instanceof FormData || typeof body === 'string' || Buffer.isBuffer(body)
 				? body
 				: new URLSearchParams(body);
 			const contentType = body instanceof FormData ? {} : body === undefined ? {} : typeof body === 'string' ? { 'content-type': 'application/json' } : { 'content-type': 'application/x-www-form-urlencoded' };
-			return fetchImpl(`${base}${base.includes('?') ? '&' : '?'}${new URLSearchParams({ ...params, access_token: token })}`, { method, headers: { accept: raw ? '*/*' : 'application/json', ...contentType }, body: requestBody, signal: AbortSignal.timeout(30_000) });
+			return fetchImpl(`${base}${base.includes('?') ? '&' : '?'}${new URLSearchParams({ ...params, access_token: token })}`, { method, headers: { accept: raw ? '*/*' : 'application/json', ...contentType }, body: requestBody, signal: AbortSignal.timeout(timeoutMs) });
 		};
 		let response = await send(await accessToken());
 		if ((response.status === 401 || response.status === 403) && retry) response = await send(await accessToken({ forceRefresh: true }));
@@ -246,6 +274,75 @@ export function createBaiduPanStorage({ appKey, secretKey, redirectUri = 'oob', 
 		} finally { await rm(dir, { recursive: true, force: true }).catch(() => {}); }
 	}
 
+	async function locateUploadServer(path, uploadId) {
+		const result = await request('https://d.pcs.baidu.com/rest/2.0/pcs/file', { params: { method: 'locateupload', appid: LOCATE_UPLOAD_APP_ID, path, uploadid: uploadId, upload_version: '2.0' } });
+		const servers = [...(result?.servers ?? []), ...(result?.bak_servers ?? [])].map((item) => String(item?.server ?? '')).filter((server) => server.startsWith('https://'));
+		if (!servers.length) throw new Error('百度网盘未返回可用的 HTTPS 上传域名');
+		return servers;
+	}
+
+	// Streams one byte range of a local file to the app directory.  Slice MD5s
+	// are computed in a streaming pass and each slice is read again only when
+	// it is sent, so memory stays bounded by one slice regardless of file size
+	// (uploadReadable buffers the whole payload and is kept for small uploads).
+	async function uploadFile({ localPath, remotePath, start = 0, length, sliceBytes: requestedSliceBytes = MAX_SLICE_BYTES, rtype = 3, attempts = 4, sliceTimeoutMs = 15 * 60_000, onProgress } = {}) {
+		const path = normalizeBaiduPanPath(remotePath, '/');
+		const offset = Math.max(0, Number(start) || 0);
+		const bytes = length === undefined ? (await stat(localPath)).size - offset : Number(length);
+		if (!Number.isFinite(bytes) || bytes <= 0) throw new Error('百度网盘上传需要有效文件大小');
+		const slice = Math.max(MIN_SLICE_BYTES, Math.min(MAX_SLICE_BYTES, Number(requestedSliceBytes) || MAX_SLICE_BYTES));
+		const count = Math.ceil(bytes / slice);
+		if (count > MAX_SLICES) throw new Error(`百度网盘单文件最多 ${MAX_SLICES} 个分片，当前需要 ${count} 个`);
+		const blockList = [];
+		const whole = createHash('md5');
+		const handle = createReadStream(localPath, { start: offset, end: offset + bytes - 1, highWaterMark: 1024 * 1024 });
+		let current = createHash('md5'); let filled = 0;
+		for await (const chunk of handle) {
+			let view = Buffer.from(chunk);
+			whole.update(view);
+			while (view.length) {
+				const take = Math.min(view.length, slice - filled);
+				current.update(view.subarray(0, take)); filled += take; view = view.subarray(take);
+				if (filled === slice) { blockList.push(current.digest('hex')); current = createHash('md5'); filled = 0; }
+			}
+		}
+		if (filled > 0) blockList.push(current.digest('hex'));
+		if (blockList.length !== count) throw new Error(`百度网盘分片计算不一致：预期 ${count}，实际 ${blockList.length}`);
+		const precreate = await request('/rest/2.0/xpan/file', { method: 'POST', params: { method: 'precreate' }, body: new URLSearchParams({ path, size: String(bytes), isdir: '0', autoinit: '1', rtype: String(rtype), block_list: JSON.stringify(blockList) }) });
+		const needed = Array.isArray(precreate.block_list) && precreate.block_list.length ? precreate.block_list.map(Number) : (Number(precreate.return_type) === 2 ? [] : [0]);
+		let servers = needed.length ? await locateUploadServer(path, precreate.uploadid) : [];
+		let sent = 0;
+		for (const index of needed) {
+			if (!Number.isInteger(index) || index < 0 || index >= count) throw new Error(`百度网盘预创建返回了无效分片序号 ${index}`);
+			const partStart = offset + index * slice;
+			const partBytes = Math.min(slice, bytes - index * slice);
+			let lastError = null;
+			for (let attempt = 0; attempt < Math.max(1, attempts); attempt += 1) {
+				try {
+					const part = Buffer.alloc(partBytes); let read = 0;
+					for await (const chunk of createReadStream(localPath, { start: partStart, end: partStart + partBytes - 1 })) { Buffer.from(chunk).copy(part, read); read += chunk.length; }
+					if (read !== partBytes) throw new Error(`读取分片 ${index} 失败：${read}/${partBytes}`);
+					const form = new FormData(); form.set('file', new Blob([part]), 'slice');
+					const server = servers[attempt % servers.length];
+					const result = await request(`${server}/rest/2.0/pcs/superfile2`, { method: 'POST', params: { method: 'upload', type: 'tmpfile', path, uploadid: precreate.uploadid, partseq: String(index) }, body: form, timeoutMs: sliceTimeoutMs });
+					if (result?.md5 && String(result.md5).toLowerCase() !== blockList[index]) throw new Error(`分片 ${index} 云端 MD5 与本地不一致`);
+					lastError = null; break;
+				} catch (error) {
+					lastError = error;
+					servers = await locateUploadServer(path, precreate.uploadid).catch(() => servers);
+					await new Promise((resolve) => setTimeout(resolve, Math.min(30_000, 2_000 * 2 ** attempt)));
+				}
+			}
+			if (lastError) throw lastError;
+			sent += partBytes;
+			if (onProgress) onProgress({ sent, bytes, slice: index, slices: count });
+		}
+		const finished = await request('/rest/2.0/xpan/file', { method: 'POST', params: { method: 'create' }, body: new URLSearchParams({ path, size: String(bytes), isdir: '0', uploadid: String(precreate.uploadid ?? ''), rtype: String(rtype), block_list: JSON.stringify(blockList) }) });
+		const createdSize = Number(finished?.size ?? bytes);
+		if (createdSize !== bytes) throw new Error(`百度网盘创建文件大小不一致：本地 ${bytes}，云端 ${createdSize}`);
+		return { path: finished.path || path, fs_id: finished.fs_id ?? null, size: bytes, md5: whole.digest('hex'), block_list: blockList, slice_bytes: slice, rapid_upload: needed.length === 0 };
+	}
+
 	async function download(fsId) {
 		const meta = await fileMeta([fsId], { extra: 0 });
 		const dlink = meta?.list?.[0]?.dlink;
@@ -268,5 +365,5 @@ export function createBaiduPanStorage({ appKey, secretKey, redirectUri = 'oob', 
 	}
 	function copyMoveItem(from, to, name) { return { path: normalizeBaiduPanPath(from), dest: normalizeBaiduPanPath(to), ...(asText(name, 255) ? { newname: asText(name, 255) } : {}) }; }
 
-	return { status, authorizationUrl: (state) => baiduPanAuthorizationUrl({ appKey: clientId, redirectUri: effectiveRedirectUri, state }), deviceCode, exchangeAuthorizationCode, exchangeDeviceCode, bootstrapRefreshToken, refresh: async () => { ensureConfigured(); const record = await ledger.getBaiduPanOAuthToken(); if (!record) throw new Error('尚未保存百度网盘 OAuth 授权'); await refreshToken(record); return status(); }, userInfo, quota, iotQueryUserInfo, list, listByType, fileDocList: (options) => listByType('doclist', options), fileImageList: (options) => listByType('imagelist', options), fileVideoList: (options) => listByType('videolist', options), listAll, search, semanticSearch, fileMeta, uploadReadable, download, createShareLink, mkdir: (path) => request('/rest/2.0/xpan/file', { method: 'POST', params: { method: 'create' }, body: new URLSearchParams({ path: normalizeBaiduPanPath(path), isdir: '1', rtype: '1' }) }), copy: (from, to, name) => manage('copy', [copyMoveItem(from, to, name)], { ondup: 'newcopy' }), move: (from, to, name) => manage('move', [copyMoveItem(from, to, name)]), rename: (path, name) => manage('rename', [{ path: normalizeBaiduPanPath(path), newname: asText(name, 255) }]), remove: (path) => manage('delete', [normalizeBaiduPanPath(path)], { async: 1 }) };
+	return { status, authorizationUrl: (state) => baiduPanAuthorizationUrl({ appKey: clientId, redirectUri: effectiveRedirectUri, state }), deviceCode, exchangeAuthorizationCode, exchangeDeviceCode, bootstrapRefreshToken, refresh: async () => { ensureConfigured(); const record = await ledger.getBaiduPanOAuthToken(); if (!record) throw new Error('尚未保存百度网盘 OAuth 授权'); await refreshToken(record); return status(); }, userInfo, quota, iotQueryUserInfo, list, listByType, fileDocList: (options) => listByType('doclist', options), fileImageList: (options) => listByType('imagelist', options), fileVideoList: (options) => listByType('videolist', options), listAll, search, semanticSearch, fileMeta, uploadReadable, uploadFile, locateUploadServer, download, createShareLink, mkdir: (path) => request('/rest/2.0/xpan/file', { method: 'POST', params: { method: 'create' }, body: new URLSearchParams({ path: normalizeBaiduPanPath(path), isdir: '1', rtype: '1' }) }), copy: (from, to, name) => manage('copy', [copyMoveItem(from, to, name)], { ondup: 'newcopy' }), move: (from, to, name) => manage('move', [copyMoveItem(from, to, name)]), rename: (path, name) => manage('rename', [{ path: normalizeBaiduPanPath(path), newname: asText(name, 255) }]), remove: (path) => manage('delete', [normalizeBaiduPanPath(path)], { async: 1 }) };
 }
