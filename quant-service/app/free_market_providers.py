@@ -370,13 +370,29 @@ async def tencent_intraday_minutes(symbol: str) -> list[dict[str, Any]]:
     the signal layer compare a current burst with only earlier minutes.  The
     last row may be an in-progress minute and is labelled accordingly.
     """
+    return (await tencent_intraday_minute_session(symbol))["rows"]
+
+
+async def tencent_intraday_minute_session(symbol: str) -> dict[str, Any]:
+    """Return Tencent's minute tape together with the session date it declares.
+
+    The endpoint only serves its latest session.  A caller asking for a named
+    trading day must compare ``session_date`` instead of assuming "today".
+    """
     key = tencent_symbol(symbol)
     async with public_http_client() as client:
         response = await _request_with_retry(client, "GET", "https://web.ifzq.gtimg.cn/appstock/app/minute/query", params={"code": key}, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
     payload = response.json()
-    values = (((payload.get("data") or {}).get(key) or {}).get("data") or {}).get("data") or []
+    session = ((payload.get("data") or {}).get(key) or {}).get("data") or {}
+    values = session.get("data") or []
     if not isinstance(values, list):
         raise FreeProviderError("Tencent returned an invalid intraday minute payload")
+    raw_date = str(session.get("date") or "")
+    session_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}" if re.fullmatch(r"\d{8}", raw_date) else None
+    return {"session_date": session_date, "rows": _tencent_minute_rows(symbol, values)}
+
+
+def _tencent_minute_rows(symbol: str, values: list[Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     previous_volume = 0
     previous_amount = 0.0

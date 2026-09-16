@@ -70,6 +70,17 @@ class TencentIntradayMinutesAmountScaleTests(unittest.TestCase):
         # degenerate all-zero opening row.
         self.assertEqual(rows[1]["cumulative_amount"], 293000.0 * 100.0)
 
+    def test_session_date_is_exposed_for_named_day_checks(self) -> None:
+        payload = {"data": {"sh000001": {"data": {"date": "20260916", "data": ["0930 3861.75 3603417 5102370437.20"]}}}}
+
+        async def run() -> dict[str, object]:
+            with patch.object(free_market_providers, "_request_with_retry", new=AsyncMock(return_value=_FakeResponse(payload))):
+                return await free_market_providers.tencent_intraday_minute_session("000001.SH")
+
+        session = asyncio.run(run())
+        self.assertEqual(session["session_date"], "2026-09-16")
+        self.assertEqual(session["rows"][0]["close"], 3861.75)
+
 
 if __name__ == "__main__":
     unittest.main()
