@@ -387,4 +387,3 @@ def reference_close(daily: list[dict[str, Any]], day: date) -> float | None:
 def previous_trading_day(daily: list[dict[str, Any]], day: date) -> date | None:
     prior = [row["trading_date"] for row in daily if row["trading_date"] < day]
     return max(prior) if prior else None
-
