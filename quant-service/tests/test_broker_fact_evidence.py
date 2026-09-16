@@ -12,10 +12,20 @@ class BrokerTraceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.now = datetime.now(timezone.utc)
+        # Pinned instead of `datetime.now(timezone.utc)`: the rules below compare
+        # Shanghai calendar dates and bind the observation to the screenshots'
+        # mtimes, so a wall-clock base makes this suite fail whenever it runs
+        # between 23:40 and 24:00 local -- an offset of +20 minutes then lands on
+        # the next Shanghai day, which the deliberate same-day recovery rule
+        # rejects.  Mid-morning Shanghai keeps every offset used here inside one
+        # day.  The capture files are stamped with the same instant so the
+        # observation-to-screenshot binding still holds.
+        self.now = datetime(2026, 9, 16, 2, 0, tzinfo=timezone.utc)  # 10:00 Asia/Shanghai
         self.run = {'run_id': 'new-run', 'started_at': self.now - timedelta(seconds=30), 'input_summary': {'phase': 'manual'}}
         image = self.root / 'fresh.png'
         image.write_bytes(b'\x89PNG\r\n\x1a\n' + b'test')
+        stamp = self.now.timestamp()
+        os.utime(image, (stamp, stamp))
         Path(str(image) + '.capture.json').write_text('{"status":"success"}')
         self.trace = {'schema_version': 'citics-ai-ui-trace-v1', 'controller_model': 'gpt-5.6-luna', 'run_id': 'new-run',
             'phase': 'manual', 'completed_at': self.now.isoformat(), 'final_screenshot': str(image),
