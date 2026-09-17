@@ -249,6 +249,45 @@ def candidates(connection: Any, now: datetime) -> list[list[Any]]:
             for r in rows]
 
 
+def recommendation_pool(connection: Any, now: datetime) -> dict[str, Any] | None:
+    """The platform's latest reviewed recommendation/observation pool available at ``now``."""
+    row = connection.execute(
+        """SELECT as_of_date,created_at,result FROM quant.recommendation_pool_decisions
+            WHERE created_at<=%s ORDER BY created_at DESC LIMIT 1""", (now,),
+    ).fetchone()
+    if row is None:
+        return None
+    result = row["result"] or {}
+    keep = ("symbol", "name", "stage", "sector", "priority", "trigger", "why_now", "invalidation", "decision")
+    return {
+        "as_of_date": row["as_of_date"].isoformat(), "valid_until": result.get("valid_until"),
+        "market_assessment": result.get("market_assessment"),
+        "recommended": [{k: item.get(k) for k in keep} for item in result.get("recommended") or []],
+        "reviewed_observe": [{k: item.get(k) for k in ("symbol", "name", "decision", "invalidation", "why_now")}
+                             for item in result.get("reviewed") or [] if item.get("decision") != "recommend"][:12],
+        "strategy_screening_symbols": [[item.get("symbol"), item.get("name"),
+                                        [m.get("lane") for m in item.get("memberships") or []]]
+                                       for item in result.get("screening") or []][:40],
+    }
+
+
+def intraday_strategy_scan(connection: Any, now: datetime, day: date) -> dict[str, Any] | None:
+    """Today's nine-lane intraday scan, only when one was run today before ``now``."""
+    row = connection.execute(
+        """SELECT cutoff,result FROM quant.intraday_strategy_scans
+            WHERE state='completed' AND cutoff<=%s AND cutoff>=%s ORDER BY cutoff DESC LIMIT 1""",
+        (now, datetime.combine(day, datetime.min.time(), SHANGHAI)),
+    ).fetchone()
+    if row is None:
+        return None
+    lanes = []
+    for lane in (row["result"] or {}).get("lanes") or []:
+        items = lane.get("top") or lane.get("items") or []
+        lanes.append({"lane": lane.get("key"), "label": lane.get("label"),
+                      "top": [[i.get("symbol"), i.get("name"), i.get("state"), i.get("price"), i.get("reason")] for i in items[:5]]})
+    return {"cutoff": row["cutoff"].astimezone(SHANGHAI).strftime("%H:%M"), "lanes": lanes}
+
+
 def watchlist(connection: Any) -> list[list[Any]]:
     return [[r["symbol"], r["label"]] for r in _rows(connection, """
         SELECT symbol,label FROM quant.intraday_watchlists WHERE enabled ORDER BY symbol""", ())]
@@ -267,6 +306,8 @@ async def build_context(connection_factory: Callable[[], Any], *, now: datetime,
         watch = watchlist(connection)
         plan_rows = plans(connection, now)
         candidate_rows = candidates(connection, now)
+        pool = recommendation_pool(connection, now)
+        scan = intraday_strategy_scan(connection, now, day)
         db_part = {
             "board_flow": board_flow(connection, now, day), "market_breadth": breadth(connection, now, day),
             "board_rotations": rotations(connection, now, day), "limit_up_events": limit_events(connection, now, day),
@@ -275,7 +316,8 @@ async def build_context(connection_factory: Callable[[], Any], *, now: datetime,
     held = [row["symbol"] for row in positions if int(row["quantity"]) > 0]
     focus = [s for s in (account.get("memory") or {}).get("focus_symbols") or [] if isinstance(s, str)]
     detail = list(dict.fromkeys(held + [o["symbol"] for o in open_orders] + focus + [p["symbol"] for p in plan_rows]))[:DETAIL_LIMIT]
-    universe = list(dict.fromkeys(detail + [row[0] for row in watch] + [row[1] for row in candidate_rows]))
+    pool_symbols = [item["symbol"] for item in (pool or {}).get("recommended", []) + (pool or {}).get("reviewed_observe", [])]
+    universe = list(dict.fromkeys(detail + pool_symbols + [row[0] for row in watch] + [row[1] for row in candidate_rows]))
     quotes, indices = await asyncio.gather(fetch_quotes(universe), fetch_indices(list(INDEX_SYMBOLS)))
     minutes = await fetch_minute(detail, day)
     with connection_factory() as connection:
@@ -312,6 +354,8 @@ async def build_context(connection_factory: Callable[[], Any], *, now: datetime,
                                                     compact_quote(quotes[s])["pct"] if s in quotes else None]
                                                    for s, label in watch],
         "human_active_plans": plan_rows,
+        "platform_recommendation_pool": pool,
+        "platform_intraday_strategy_scan_today": scan,
         "post_close_candidates_rank_symbol_type_score_date_metrics": candidate_rows,
         "your_recent_decisions": recent_decisions,
         "your_memory": (account.get("memory") or {}).get("notes"),

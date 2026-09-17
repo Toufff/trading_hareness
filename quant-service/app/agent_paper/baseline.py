@@ -26,14 +26,18 @@ def replay_fills(cash: Decimal, positions: dict[str, dict[str, Any]], fills: lis
         recorded = sum((dec(fill.get(key)) for key in ("commission", "stamp_duty", "transfer_fee", "other_fee")), Decimal("0"))
         fees = recorded if recorded > 0 else fees_for(side, qty, price)
         row = book.setdefault(fill["symbol"], {"symbol": fill["symbol"], "name": fill.get("name"), "quantity": 0,
-                                               "average_cost": Decimal("0")})
+                                               "sellable_quantity": 0, "average_cost": Decimal("0")})
         held, avg = int(row["quantity"]), dec(row["average_cost"])
+        sellable = int(row.get("sellable_quantity", held) or 0)
         if side == "buy":
+            # Same-day buys stay unsellable (T+1).
             row["quantity"] = held + qty
+            row["sellable_quantity"] = sellable
             row["average_cost"] = (avg * held + price * qty + fees) / (held + qty)
             cash -= price * qty + fees
         else:
             row["quantity"] = held - qty
+            row["sellable_quantity"] = max(0, sellable - qty)
             cash += price * qty - fees
     return cash, {symbol: row for symbol, row in book.items() if int(row["quantity"]) > 0}
 
@@ -49,7 +53,8 @@ def latest_verified_snapshot(connection: Any, *, account_key: str, before: datet
     snapshot = dict(row)
     snapshot["positions"] = {
         position["symbol"]: dict(position) for position in connection.execute(
-            """SELECT symbol,name,quantity::int AS quantity,average_cost FROM quant.broker_position_snapshots
+            """SELECT symbol,name,quantity::int AS quantity,sellable_quantity::int AS sellable_quantity,average_cost,market_price
+                 FROM quant.broker_position_snapshots
                 WHERE snapshot_id=%s AND quantity>0""", (snapshot["snapshot_id"],),
         ).fetchall()
     }
@@ -86,19 +91,27 @@ def fills_imported_through(connection: Any, *, account_key: str) -> date | None:
     return row["through"] if row else None
 
 
-def build_baseline(connection: Any, *, source_account: str, start_date: date) -> dict[str, Any]:
-    """The human book as of the start date's open."""
-    cutoff = datetime.combine(start_date, time(9, 15), SHANGHAI)
-    snapshot = latest_verified_snapshot(connection, account_key=source_account, before=cutoff)
+def build_baseline(connection: Any, *, source_account: str, start_at: datetime) -> dict[str, Any]:
+    """The human book at ``start_at``: latest verified snapshot plus fills between them."""
+    snapshot = latest_verified_snapshot(connection, account_key=source_account, before=start_at)
     if snapshot is None:
-        raise ValueError("no verified broker snapshot before the start date")
+        raise ValueError("no verified broker snapshot before the start time")
+    same_day = snapshot["observed_at"].astimezone(SHANGHAI).date() == start_at.astimezone(SHANGHAI).date()
+    positions = {}
+    for symbol, row in snapshot["positions"].items():
+        # A prior-day book is fully sellable today; a same-day snapshot keeps its T+1 split.
+        sellable = int(row["sellable_quantity"] or 0) if same_day else int(row["quantity"])
+        cost = row["average_cost"] if row["average_cost"] is not None else row["market_price"]
+        positions[symbol] = {**row, "sellable_quantity": sellable, "average_cost": dec(cost),
+                             "cost_basis": "broker" if row["average_cost"] is not None else "missing_broker_cost_used_snapshot_price"}
     # Displayed cash can exclude frozen/in-transit balances; equity minus
     # market value is the cash that reconciles with total assets.
     cash = dec(snapshot["total_asset"]) - dec(snapshot["total_market_value"])
-    fills = human_fills(connection, account_key=source_account, after=snapshot["observed_at"], until=cutoff)
-    cash, positions = replay_fills(cash, snapshot["positions"], fills)
+    fills = human_fills(connection, account_key=source_account, after=snapshot["observed_at"], until=start_at)
+    cash, positions = replay_fills(cash, positions, fills)
     return {
         "source_account": source_account,
+        "start_at": start_at.isoformat(),
         "snapshot_id": str(snapshot["snapshot_id"]),
         "snapshot_observed_at": snapshot["observed_at"].isoformat(),
         "snapshot_displayed_cash": str(snapshot["cash"]),
@@ -106,9 +119,13 @@ def build_baseline(connection: Any, *, source_account: str, start_date: date) ->
         "replayed_fills": len(fills),
         "cash": cash.quantize(CENT),
         "positions": [{"symbol": symbol, "name": row.get("name"), "quantity": int(row["quantity"]),
-                       "average_cost": dec(row["average_cost"]).quantize(Decimal("0.0001"))}
+                       "sellable_quantity": int(row.get("sellable_quantity", row["quantity"])),
+                       "average_cost": dec(row["average_cost"]).quantize(Decimal("0.0001")),
+                       "snapshot_price": (str(row["market_price"]) if same_day and not fills and row.get("market_price") is not None
+                                          else None),
+                       "cost_basis": row.get("cost_basis", "replayed_fill")}
                       for symbol, row in sorted(positions.items())],
-        "basis": "verified broker snapshot + imported fills after it; cash = total_asset - market_value",
+        "basis": "verified broker snapshot + imported fills until start_at; cash = total_asset - market_value",
     }
 
 
@@ -126,13 +143,11 @@ def human_equity(connection: Any, *, baseline: dict[str, Any], day: date,
                  live_prices: dict[str, Decimal] | None = None) -> dict[str, Any]:
     """Reconstructed human equity at a day's close (or live, when prices are given)."""
     source = baseline["source_account"]
-    start = datetime.fromisoformat(baseline["snapshot_observed_at"])
     through = fills_imported_through(connection, account_key=source)
-    start_date = start.astimezone(SHANGHAI).date()
     positions = {row["symbol"]: dict(row) for row in baseline["positions"]}
     until = datetime.combine(day, time(23, 59), SHANGHAI)
-    # Replay from the baseline cutoff so the start book is not double counted.
-    cutoff = datetime.combine(date.fromisoformat(str(baseline.get("start_date") or start_date)), time(9, 15), SHANGHAI)
+    # Replay only fills after the start time so the start book is not double counted.
+    cutoff = datetime.fromisoformat(baseline["start_at"])
     fills = human_fills(connection, account_key=source, after=cutoff, until=until)
     cash, book = replay_fills(dec(baseline["cash"]), positions, fills)
     prices = dict(live_prices or {})

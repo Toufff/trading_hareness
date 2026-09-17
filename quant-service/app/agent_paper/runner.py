@@ -10,7 +10,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
@@ -51,6 +51,7 @@ class Runner:
     context_builder: Callable[..., Awaitable[tuple[dict[str, Any], dict[str, dict[str, Any]]]]] = build_context
     decision_minutes: int = 5
     clock: Callable[[], datetime] = lambda: datetime.now(SHANGHAI)
+    start_at: datetime = datetime(2000, 1, 1, tzinfo=SHANGHAI)
     last_match_at: dict[str, datetime] = field(default_factory=dict)
 
     def _tx(self):
@@ -208,19 +209,22 @@ class Runner:
             return repo.expire_orders(connection, self.account_key, now.astimezone(SHANGHAI).date(), now)
 
 
-def initialize_account(database: Any, *, account_key: str, model: str, source_account: str, start_date: date) -> dict[str, Any]:
+def initialize_account(database: Any, *, account_key: str, model: str, source_account: str, start_at: datetime) -> dict[str, Any]:
+    start_date = start_at.astimezone(SHANGHAI).date()
     with database.transaction() as connection:
-        baseline = build_baseline(connection, source_account=source_account, start_date=start_date)
+        baseline = build_baseline(connection, source_account=source_account, start_at=start_at)
         closes = connection.execute(
             """SELECT DISTINCT ON (symbol) symbol,close FROM quant.canonical_bars_daily
                 WHERE symbol=ANY(%s) AND trading_date<%s ORDER BY symbol,trading_date DESC""",
             ([p["symbol"] for p in baseline["positions"]], start_date),
         ).fetchall()
         prices = {row["symbol"]: dec(row["close"]) for row in closes}
+        # A same-day snapshot's own prices are what the human's equity was measured at.
+        prices.update({p["symbol"]: dec(p["snapshot_price"]) for p in baseline["positions"] if p.get("snapshot_price")})
         initial, _, missing = equity(dec(baseline["cash"]), baseline["positions"], prices)
         if missing:
-            raise ValueError(f"no prior close for {','.join(missing)}; refusing an unpriced starting equity")
-        baseline["initial_equity_basis"] = "baseline cash + previous trading-day closes"
+            raise ValueError(f"no starting price for {','.join(missing)}; refusing an unpriced starting equity")
+        baseline["initial_equity_basis"] = "baseline cash + same-day snapshot prices (else previous closes)"
         repo.create_account(connection, account_key=account_key, model=model, start_date=start_date, baseline=baseline,
                             initial_equity=initial.quantize(CENT))
     return {**baseline, "initial_equity": initial.quantize(CENT)}
@@ -243,7 +247,7 @@ async def run_day(runner: Runner, *, now_fn: Callable[[], datetime], sleep: Call
                 matched = await runner.match_open_orders(now)
                 if matched:
                     log({"event": "match", "at": now.isoformat(), "results": matched})
-                if decision_due(now, last, runner.decision_minutes):
+                if decision_due(now, last, runner.decision_minutes) and now >= runner.start_at:
                     outcome = await runner.decide(now)
                     last, decisions = now, decisions + 1
                     log({"event": "decision", "at": now.isoformat(), **outcome})

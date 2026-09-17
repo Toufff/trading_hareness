@@ -30,7 +30,7 @@ def main():
     parser.add_argument('--platform-root', type=Path, default=Path('G:/StockPlatform'))
     parser.add_argument('--account-key', default='agent-claude-opus')
     parser.add_argument('--source-account', default='citics-primary')
-    parser.add_argument('--start-date')
+    parser.add_argument('--start-at', help='ISO time in Asia/Shanghai, e.g. 2026-09-17T13:00')
     parser.add_argument('--model')
     parser.add_argument('--backend', choices=['claude_cli', 'event_research'])
     parser.add_argument('--decision-minutes', type=int, default=5)
@@ -56,9 +56,9 @@ def main():
     try:
         if args.command == 'init':
             model = build_model(args.backend, model=args.model)
-            start = date.fromisoformat(args.start_date) if args.start_date else datetime.now(SHANGHAI).date()
+            start = datetime.fromisoformat(args.start_at).replace(tzinfo=SHANGHAI) if args.start_at else datetime.now(SHANGHAI)
             result = initialize_account(db, account_key=args.account_key, model=model.model,
-                                        source_account=args.source_account, start_date=start)
+                                        source_account=args.source_account, start_at=start)
             log({'event': 'init', **result})
             print(_json(result))
             return 0
@@ -85,10 +85,13 @@ def main():
             log({'event': 'closed_day', 'day': now.date().isoformat()})
             print(_json({'status': 'closed_day'}))
             return 0
-        runner = Runner(db, args.account_key, build_model(args.backend, model=args.model), decision_minutes=args.decision_minutes)
         with db.transaction() as connection:
-            if connection.execute('SELECT 1 FROM quant.agent_paper_accounts WHERE account_key=%s', (args.account_key,)).fetchone() is None:
-                raise SystemExit(f'account {args.account_key} is not initialized')
+            account_row = connection.execute('SELECT baseline FROM quant.agent_paper_accounts WHERE account_key=%s', (args.account_key,)).fetchone()
+        if account_row is None:
+            raise SystemExit(f'account {args.account_key} is not initialized')
+        start_at = datetime.fromisoformat(account_row['baseline'].get('start_at') or '2000-01-01T00:00:00+08:00')
+        runner = Runner(db, args.account_key, build_model(args.backend, model=args.model),
+                        decision_minutes=args.decision_minutes, start_at=start_at)
         if args.command == 'decide-once':
             runner.start_of_day(now)
             outcome = asyncio.run(runner.decide(now))

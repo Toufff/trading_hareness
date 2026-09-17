@@ -89,6 +89,13 @@ class AgentPaperRuleTests(unittest.TestCase):
         self.assertEqual(cash, Decimal("723.80"))
         self.assertEqual(book_rows["600664.SH"]["quantity"], 2300)
 
+    def test_replay_keeps_same_day_buys_unsellable(self):
+        _, rows = replay_fills(Decimal("10000"), {"A": {"symbol": "A", "quantity": 1000, "sellable_quantity": 1000,
+                                                        "average_cost": Decimal("5")}},
+                               [{"symbol": "A", "side": "buy", "quantity": 500, "price": "5"},
+                                {"symbol": "A", "side": "sell", "quantity": 300, "price": "5"}])
+        self.assertEqual((rows["A"]["quantity"], rows["A"]["sellable_quantity"]), (1200, 700))
+
     def test_session_and_decision_cadence(self):
         at = lambda h, m: datetime(2026, 9, 17, h, m, tzinfo=SH)  # noqa: E731
         self.assertFalse(in_session(at(9, 29)))
@@ -169,10 +176,10 @@ class AgentPaperLedgerIntegrationTests(unittest.TestCase):
             connection.execute("""INSERT INTO quant.broker_portfolio_snapshots(account_key,source,source_snapshot_key,observed_at,verification,
                                    cash,total_asset,total_market_value,content_hash)
                                   VALUES('agent-test-human','test','agent-test',%s,'verified_exact',10,10710,10700,repeat('a',64))
-                                  RETURNING snapshot_id""", (datetime(2026, 9, 16, 15, 5, tzinfo=SH),))
+                                  RETURNING snapshot_id""", (datetime(2026, 9, 17, 11, 42, tzinfo=SH),))
             snapshot_id = connection.execute("SELECT snapshot_id FROM quant.broker_portfolio_snapshots WHERE source_snapshot_key='agent-test'").fetchone()["snapshot_id"]
-            connection.execute("""INSERT INTO quant.broker_position_snapshots(snapshot_id,symbol,name,quantity,sellable_quantity,average_cost)
-                                  VALUES(%s,'600664.SH','哈药股份',1000,0,7.0)""", (snapshot_id,))
+            connection.execute("""INSERT INTO quant.broker_position_snapshots(snapshot_id,symbol,name,quantity,sellable_quantity,average_cost,market_price,market_value)
+                                  VALUES(%s,'600664.SH','哈药股份',1000,600,7.0,7.1,7100)""", (snapshot_id,))
 
             class Database:
                 @contextmanager
@@ -198,7 +205,7 @@ class AgentPaperLedgerIntegrationTests(unittest.TestCase):
                 def decide(self, context_json):
                     return ModelResult(output={"market_view": "test", "focus_symbols": ["002185.SZ"], "notes": "n", "orders": [
                         {"action": "buy", "symbol": "002185.SZ", "quantity": 500, "order_type": "market", "reason": "depth test"},
-                        {"action": "sell", "symbol": "600664.SH", "quantity": 1000, "order_type": "limit", "limit_price": 7.5, "reason": "rest"},
+                        {"action": "sell", "symbol": "600664.SH", "quantity": 600, "order_type": "limit", "limit_price": 7.5, "reason": "rest"},
                         {"action": "buy", "symbol": "600664.SH", "quantity": 150, "reason": "bad lot"},
                     ]}, model="fake", duration_ms=1)
 
@@ -207,9 +214,13 @@ class AgentPaperLedgerIntegrationTests(unittest.TestCase):
             connection.execute("""INSERT INTO quant.canonical_bars_daily(symbol,trading_date,open,high,low,close,selected_provider,quality_status,available_at,canonicalized_at)
                                   VALUES('600664.SH','2026-09-16',7,7.3,6.9,7.2,'test','partial',now(),now())
                                   ON CONFLICT DO NOTHING""")
-            baseline = initialize_account(Database(), account_key="agent-test", model="fake", source_account="agent-test-human", start_date=day)
+            baseline = initialize_account(Database(), account_key="agent-test", model="fake", source_account="agent-test-human",
+                                          start_at=datetime(2026, 9, 17, 13, 0, tzinfo=SH))
             self.assertEqual(baseline["cash"], Decimal("10.00"))
-            now = datetime(2026, 9, 17, 9, 35, tzinfo=SH)
+            # A same-day snapshot keeps its T+1 split and is marked at its own prices.
+            self.assertEqual(baseline["positions"][0]["sellable_quantity"], 600)
+            self.assertEqual(baseline["initial_equity"], Decimal("7110.00"))
+            now = datetime(2026, 9, 17, 13, 5, tzinfo=SH)
             runner = Runner(Database(), "agent-test", Model(), fetch_quotes=fetch, context_builder=fake_context, clock=lambda: now)
             # The starting book is already sellable on the start date, so no roll is due.
             self.assertFalse(runner.start_of_day(now))
@@ -223,14 +234,14 @@ class AgentPaperLedgerIntegrationTests(unittest.TestCase):
                                   VALUES('600664.SH','agent-test',%s,7.52,'{}'::jsonb)""", (now + timedelta(minutes=1),))
             later = now + timedelta(minutes=2)
             matched = asyncio.run(runner.match_open_orders(later))
-            self.assertEqual(matched[0]["filled"], 1000)
+            self.assertEqual(matched[0]["filled"], 600)
             self.assertEqual(matched[0]["price"], 7.5)
             account = repo.load_account(connection, "agent-test")
-            self.assertEqual(account["cash"], Decimal("10") + Decimal("7500") - Decimal("12.50"))
+            self.assertEqual(account["cash"], Decimal("10") + Decimal("4500") - Decimal("9.50"))
             self.assertEqual(account["memory"]["focus_symbols"], ["002185.SZ"])
             asyncio.run(runner.snapshot_nav(later))
             report = status(connection, account_key="agent-test", day=day)
-            self.assertEqual(report["daily"][0]["agent_equity"], float(account["cash"]))
+            self.assertEqual(report["daily"][0]["agent_equity"], float(account["cash"] + Decimal("7.30") * 400))
             self.assertEqual(report["decisions_today"], {"decided": 1, "failed": 0})
             self.assertTrue(runner_module)
         finally:

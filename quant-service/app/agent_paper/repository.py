@@ -35,11 +35,13 @@ def create_account(connection: Any, *, account_key: str, model: str, start_date:
          start_date),
     )
     for row in baseline["positions"]:
-        # The human book is fully sellable at the start date's open.
+        sellable = int(row.get("sellable_quantity", row["quantity"]))
+        # Unsellable shares were bought on the start date and roll on the next trading day.
         connection.execute(
-            """INSERT INTO quant.agent_paper_positions(account_key,symbol,name,quantity,sellable_quantity,average_cost)
-               VALUES(%s,%s,%s,%s,%s,%s)""",
-            (account_key, row["symbol"], row.get("name"), row["quantity"], row["quantity"], row["average_cost"]),
+            """INSERT INTO quant.agent_paper_positions(account_key,symbol,name,quantity,sellable_quantity,average_cost,last_buy_date)
+               VALUES(%s,%s,%s,%s,%s,%s,%s)""",
+            (account_key, row["symbol"], row.get("name"), row["quantity"], sellable, row["average_cost"],
+             start_date if sellable < row["quantity"] else None),
         )
 
 
