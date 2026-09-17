@@ -37,6 +37,17 @@ def test_collapse_prefers_prospective_then_earliest_row():
     assert kept==['1','4','5']
 
 
+def test_manual_rows_registered_after_midnight_evaluate_from_scan_date():
+    from app.short_term_lanes.tracking_repository import scan_dated
+    o=origins(sample(),'2026-09-11T00:40:00+08:00','manual_recommendation')[0]
+    o['signal_date']='2026-09-11';o['manual']={'source_scan_date':'2026-09-10'}
+    fixed=scan_dated(o)
+    assert fixed['signal_date']=='2026-09-10' and fixed['signal_date_recorded']=='2026-09-11'
+    e=evaluate(fixed,['2026-09-11','2026-09-14'],[dict(trading_date='2026-09-11',close=103),dict(trading_date='2026-09-14',close=101)],'2026-09-14')
+    assert e['windows']['1']['return_pct']==3.0
+    assert scan_dated(origins(sample(),'2026-09-10T16:00:00+08:00','live_scan')[0])['signal_date']=='2026-09-10'
+
+
 def test_success_and_failure_retained_not_trade_returns():
     o=origins(sample(),'2026-09-10T16:00:00+08:00','published')[0]
     for close in (110,90):

@@ -65,7 +65,7 @@ def refresh(database, result, day, *, write=True):
     for b in bars:
         by[b['symbol']].append({**b['snapshot'],**{k:v for k,v in b.items() if k not in ('snapshot','symbol')},'trading_date':str(b['trading_date'])})
     ledger=[]
-    for o in old:
+    for o in map(scan_dated,old):
         e=evaluate(o,sessions,by[o['symbol']],str(day))
         e['calendar_complete']=calendar_complete
         if not calendar_complete:e['status']='calendar_gap'
@@ -83,6 +83,16 @@ def refresh(database, result, day, *, write=True):
     return dict(status='completed' if calendar_complete else 'calendar_gap',as_of_date=str(day),version=VERSION,
         total=len(items),ledger_rows=len(ledger),items=items,calendar_complete=calendar_complete,
         note='冻结发现日与原条件；第1/3/5/10交易日跟踪。历史补录单独标记，不计作当时真实成交或实盘胜率。')
+
+
+def scan_dated(origin):
+    """Manual recommendations registered after midnight (before 2026-09-17) stored the
+    registration date as signal_date while their reference close is the scan's close.
+    Evaluate them from the scan date; the ledger row itself is left as recorded."""
+    scan_date=(origin.get('manual') or {}).get('source_scan_date')
+    if scan_date and scan_date!=origin.get('signal_date'):
+        return {**origin,'signal_date':scan_date,'signal_date_recorded':origin['signal_date']}
+    return origin
 
 
 def collapse(evaluations):
