@@ -206,7 +206,7 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
             configured=os.getenv("INTRADAY_MINUTE_PROFILE_CAPTURE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
             expected_active=close_profile_active,
             last_observed_at=minute_profile.get("last_observed_at"), max_age_seconds=180.0,
-            cadence="交易日 14:55–15:00；默认最多 40 只",
+            cadence="交易日 14:55–15:00；覆盖全部观察池",
             details={"persisted_rows": int(minute_profile.get("rows") or 0),
                      "latest_trading_date": str(minute_profile.get("latest_trading_date") or "") or None,
                      "source": "longhuvip_intraday_minutes",
