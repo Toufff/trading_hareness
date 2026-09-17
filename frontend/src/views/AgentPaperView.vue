@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {computed,ref,onMounted,onBeforeUnmount} from 'vue';
 import {getJson} from '../api/http';
-type Daily={trading_date:string;agent_equity:number;agent_return_pct:number|null;human_equity:number;human_return_pct:number|null;human_fills_imported_through:string|null;human_missing_prices:string[]};
+type Daily={trading_date:string;agent_equity:number;agent_return_pct:number|null;human_equity:number|null;human_return_pct:number|null;human_basis?:string;human_comparable?:boolean;human_fills_imported_through:string|null;human_missing_prices:string[]};
 type Order={placed_at:string;symbol:string;name:string|null;side:string;order_type:string;quantity:number;limit_price:string|null;status:string;filled_quantity:number;fill_price:string|null;fees:string;reason:string|null;reject_reasons:string[]};
 type Decision={decided_at:string;status:string;market_view:string|null;notes:string|null;order_count:number|null;error:string|null;duration_ms:number|null};
 type Position={symbol:string;name:string|null;quantity:number;sellable_quantity:number;average_cost:string;realized_pnl:string};
@@ -39,7 +39,7 @@ onBeforeUnmount(()=>{ctrl?.abort();if(timer)window.clearInterval(timer);});
     </div>
     <p class="note">{{data.comparison_note}}<span v-if="latestDaily"> 成交导入至 {{latestDaily.human_fills_imported_through??'无'}}。</span></p>
     <section><h2>逐日对比</h2><table><thead><tr><th>日期</th><th>AI 权益</th><th>AI 收益</th><th>人类权益</th><th>人类收益</th></tr></thead>
-      <tbody><tr v-for="d in data.daily" :key="d.trading_date"><td>{{d.trading_date}}</td><td>{{d.agent_equity}}</td><td>{{pct(d.agent_return_pct)}}</td><td>{{d.human_equity}}</td><td>{{pct(d.human_return_pct)}}</td></tr></tbody></table></section>
+      <tbody><tr v-for="d in data.daily" :key="d.trading_date"><td>{{d.trading_date}}</td><td>{{d.agent_equity}}</td><td>{{pct(d.agent_return_pct)}}</td><td>{{d.human_equity??'—'}}</td><td>{{pct(d.human_return_pct)}}</td></tr></tbody></table></section>
     <section><h2>AI 持仓</h2><table><thead><tr><th>代码</th><th>名称</th><th>数量</th><th>可卖</th><th>成本</th><th>已实现</th></tr></thead>
       <tbody><tr v-for="p in data.positions" :key="p.symbol"><td>{{p.symbol}}</td><td>{{p.name}}</td><td>{{p.quantity}}</td><td>{{p.sellable_quantity}}</td><td>{{Number(p.average_cost).toFixed(3)}}</td><td>{{Number(p.realized_pnl).toFixed(2)}}</td></tr></tbody></table></section>
     <section><h2>{{data.day}} 委托</h2><p v-if="!data.orders?.length" class="note">今天还没有委托。</p>

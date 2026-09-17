@@ -36,7 +36,9 @@ def status(connection: Any, *, account_key: str, day: date | None = None, decisi
         daily.append({
             "trading_date": row["trading_date"].isoformat(), "agent_equity": float(row["equity"]),
             "agent_return_pct": _pct(dec(row["equity"]), initial), "agent_price_basis": row["price_basis"],
-            "human_equity": float(human["equity"]), "human_return_pct": _pct(dec(human["equity"]), initial),
+            "human_equity": float(human["equity"]) if human["comparable"] else None,
+            "human_return_pct": _pct(dec(human["equity"]), initial) if human["comparable"] else None,
+            "human_basis": human["basis"], "human_comparable": human["comparable"],
             "human_fills_imported_through": human["fills_imported_through"], "human_missing_prices": human["missing_prices"],
         })
     positions = [dict(r) for r in connection.execute(

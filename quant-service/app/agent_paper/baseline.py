@@ -129,21 +129,42 @@ def build_baseline(connection: Any, *, source_account: str, start_at: datetime) 
     }
 
 
-def daily_closes(connection: Any, symbols: list[str], day: date) -> dict[str, Decimal]:
+def daily_closes(connection: Any, symbols: list[str], day: date, *, exact: bool = False) -> dict[str, Decimal]:
+    """Latest close on or before ``day``; with ``exact`` only that day's close counts."""
     if not symbols:
         return {}
     rows = connection.execute(
-        """SELECT DISTINCT ON (symbol) symbol,close FROM quant.canonical_bars_daily
-            WHERE symbol = ANY(%s) AND trading_date<=%s ORDER BY symbol,trading_date DESC""", (symbols, day),
+        f"""SELECT DISTINCT ON (symbol) symbol,close FROM quant.canonical_bars_daily
+            WHERE symbol = ANY(%s) AND trading_date{'=' if exact else '<='}%s ORDER BY symbol,trading_date DESC""", (symbols, day),
     ).fetchall()
     return {row["symbol"]: dec(row["close"]) for row in rows}
 
 
 def human_equity(connection: Any, *, baseline: dict[str, Any], day: date,
                  live_prices: dict[str, Decimal] | None = None) -> dict[str, Any]:
-    """Reconstructed human equity at a day's close (or live, when prices are given)."""
+    """Human equity at a day's close (or live, when prices are given).
+
+    A verified broker snapshot taken after that day's close is the broker's own
+    number and wins; otherwise the start book is replayed with imported fills.
+    """
     source = baseline["source_account"]
     through = fills_imported_through(connection, account_key=source)
+    if live_prices is None:
+        close_snapshot = connection.execute(
+            """SELECT observed_at,total_asset,total_market_value FROM quant.broker_portfolio_snapshots
+                WHERE account_key=%s AND verification='verified_exact'
+                  AND (observed_at AT TIME ZONE 'Asia/Shanghai')::date=%s
+                  AND (observed_at AT TIME ZONE 'Asia/Shanghai')::time>='15:00'
+                ORDER BY observed_at DESC LIMIT 1""", (source, day),
+        ).fetchone()
+        if close_snapshot is not None:
+            total, market_value = dec(close_snapshot["total_asset"]), dec(close_snapshot["total_market_value"])
+            return {
+                "day": day.isoformat(), "cash": (total - market_value).quantize(CENT), "market_value": market_value.quantize(CENT),
+                "equity": total.quantize(CENT), "fills": None, "missing_prices": [], "basis": "broker_close_snapshot",
+                "observed_at": close_snapshot["observed_at"].isoformat(),
+                "fills_imported_through": through.isoformat() if through else None, "comparable": True,
+            }
     positions = {row["symbol"]: dict(row) for row in baseline["positions"]}
     until = datetime.combine(day, time(23, 59), SHANGHAI)
     # Replay only fills after the start time so the start book is not double counted.
@@ -151,7 +172,7 @@ def human_equity(connection: Any, *, baseline: dict[str, Any], day: date,
     fills = human_fills(connection, account_key=source, after=cutoff, until=until)
     cash, book = replay_fills(dec(baseline["cash"]), positions, fills)
     prices = dict(live_prices or {})
-    closes = daily_closes(connection, [s for s in book if s not in prices], day)
+    closes = daily_closes(connection, [s for s in book if s not in prices], day, exact=True)
     prices.update(closes)
     market_value, missing = Decimal("0"), []
     for symbol, row in book.items():
@@ -162,7 +183,7 @@ def human_equity(connection: Any, *, baseline: dict[str, Any], day: date,
         market_value += price * int(row["quantity"])
     return {
         "day": day.isoformat(), "cash": cash.quantize(CENT), "market_value": market_value.quantize(CENT),
-        "equity": (cash + market_value).quantize(CENT), "fills": len(fills), "missing_prices": missing,
+        "equity": (cash + market_value).quantize(CENT), "fills": len(fills), "missing_prices": missing, "basis": "baseline_plus_fills",
         "fills_imported_through": through.isoformat() if through else None,
         "comparable": bool(through and through >= day) and not missing,
     }
