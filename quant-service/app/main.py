@@ -368,6 +368,7 @@ from .intraday_schedule import (
     intraday_super_get_fast_max_in_flight,
     intraday_super_get_fast_max_symbols,
     intraday_watchlist_capacity,
+    intraday_watchlist_max_symbols,
 )
 from .intraday_monitor_service import run_intraday_monitor_loop
 from .market_event_capture import capture as capture_market_events
@@ -2346,13 +2347,8 @@ def intraday_minute_profile_retention_days() -> int:
 
 
 def intraday_minute_profile_max_symbols() -> int:
-    """Bound the close capture without silently reducing the normal pool."""
-    return Settings.from_environ().intraday_minute_profile_max_symbols
-
-
-def intraday_longhu_max_symbols() -> int:
-    """Bound licensed per-security calls independently from the watch capacity."""
-    return Settings.from_environ().longhu_intraday_max_symbols
+    """The close capture covers the whole explicit watchlist; Longhu has no per-call symbol cap."""
+    return intraday_watchlist_max_symbols()
 
 
 async def intraday_longhu_watch_quotes(
@@ -2362,7 +2358,7 @@ async def intraday_longhu_watch_quotes(
         return [], {"status": "disabled", "requested": len(symbols), "reason": "longhu_not_configured"}
 
     def fetch() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        return longhu_intraday_source().watch_quotes(symbols, max_symbols=intraday_longhu_max_symbols())
+        return longhu_intraday_source().watch_quotes(symbols)
 
     return await run_akshare_blocking(fetch, timeout_seconds=8)
 
@@ -2424,8 +2420,8 @@ def intraday_order_book_retention_days() -> int:
 
 
 def intraday_order_book_max_symbols() -> int:
-    """Bound a single Longhu depth batch without silently losing watches."""
-    return order_book_service.max_symbols()
+    """Depth covers the whole explicit watchlist; Longhu has no per-call symbol cap."""
+    return intraday_watchlist_max_symbols()
 
 
 def persist_intraday_order_book_observations(observed_at: datetime, rows: list[dict[str, Any]], latency_ms: int) -> int:
@@ -3182,7 +3178,7 @@ async def intraday_surge_context(
         return {}, {"provider_status": "disabled", "provider": LONGHU_PROVIDER, "reason": "longhu_not_configured"}
     features, status = await capture_intraday_surge_context(
         watches, mapped_peers=mapped_peers, priority_symbols=priority_symbols,
-        cache=_intraday_longhu_minute_cache, max_symbols=intraday_minute_profile_max_symbols,
+        cache=_intraday_longhu_minute_cache, max_symbols=None,
         open_capabilities=open_provider_capabilities, capability=LONGHU_INTRADAY_MINUTE_CAPABILITY,
         fetch_minutes=intraday_longhu_minutes, minute_features=intraday_minute_features,
         persist_health=persist_longhu_intraday_minute_health, run_database=run_database_blocking,

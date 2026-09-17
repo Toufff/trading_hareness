@@ -174,13 +174,13 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
         runtime_item(
             key="longhu_order_book", label="开盘啦观察池五档盘口", role="QI、OFI 近似、内外盘差分与区间 VWAP 的研究证据",
             configured=os.getenv("INTRADAY_ORDER_BOOK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
-            expected_active=session_active, last_observed_at=order_book_quote.get("last_observed_at"), max_age_seconds=90.0,
-            cadence="显式观察池每 30 秒逐只请求", health_row=order_book_health,
+            expected_active=session_active, last_observed_at=order_book_quote.get("last_observed_at"), max_age_seconds=12.0,
+            cadence="显式观察池每 3 秒全量请求", health_row=order_book_health,
             details={"persisted_rows": int(order_book_quote.get("rows") or 0),
                      "enabled_watch_count": int(watch_row["enabled"] or 0),
                      "max_symbols": deps.order_book_max_symbols(),
                      "uncovered_watch_count": max(0, int(watch_row["enabled"] or 0) - deps.order_book_max_symbols()),
-                     "scope": "逐只开盘啦盘口请求覆盖观察池；特征仅观测，不改变触发阈值"},
+                     "scope": "开盘啦盘口覆盖全部观察池；特征仅观测，不改变触发阈值"},
             startup_grace_seconds=20.0,
         ),
         runtime_item(

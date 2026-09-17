@@ -6,17 +6,16 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.intraday_order_book_service import capture_snapshot, enabled, interval_seconds, max_symbols, persist_observations, retention_days
+from app.intraday_order_book_service import capture_snapshot, enabled, interval_seconds, persist_observations, retention_days
 
 
 class IntradayOrderBookServiceTests(unittest.TestCase):
     def test_environment_bounds_are_explicit_and_safe(self) -> None:
         self.assertFalse(enabled({"INTRADAY_ORDER_BOOK_ENABLED": "off"}))
         self.assertTrue(enabled({"INTRADAY_ORDER_BOOK_ENABLED": "yes"}))
-        self.assertEqual(interval_seconds({"INTRADAY_ORDER_BOOK_INTERVAL_SECONDS": "0.2"}), 10.0)
-        self.assertEqual(interval_seconds({"INTRADAY_ORDER_BOOK_INTERVAL_SECONDS": "bad"}), 30.0)
+        self.assertEqual(interval_seconds({"INTRADAY_ORDER_BOOK_INTERVAL_SECONDS": "0.2"}), 3.0)
+        self.assertEqual(interval_seconds({"INTRADAY_ORDER_BOOK_INTERVAL_SECONDS": "bad"}), 3.0)
         self.assertEqual(retention_days({"INTRADAY_ORDER_BOOK_RETENTION_DAYS": "100"}), 30)
-        self.assertEqual(max_symbols({"INTRADAY_ORDER_BOOK_MAX_SYMBOLS": "1000"}), 60)
 
     def test_capture_filters_symbols_and_persists_one_bounded_batch(self) -> None:
         async def check() -> tuple[dict[str, object], list[object]]:

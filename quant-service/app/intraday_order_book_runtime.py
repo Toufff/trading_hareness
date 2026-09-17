@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable
 
 from .market_source_names import ORDER_BOOK_SOURCES_WITH_HISTORY
 
-# Depth capture ticks every 10-60s (INTRADAY_ORDER_BOOK_INTERVAL_SECONDS), more
+# Depth capture ticks every 3-30s (INTRADAY_ORDER_BOOK_INTERVAL_SECONDS), far
 # more often than the explicit watchlist actually changes membership.  Reload
 # on the same 30s cadence the fast-quote loop already uses instead of once
 # per tick, which was several thousand redundant reloads of an unchanged

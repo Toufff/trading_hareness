@@ -22,8 +22,6 @@ class SettingsFromEnvironDefaultsTests(unittest.TestCase):
         self.assertEqual(settings.provider_global_rate_limit_max_wait_seconds, 5.0)
         self.assertTrue(settings.intraday_minute_profile_capture_enabled)
         self.assertEqual(settings.intraday_minute_profile_retention_days, 90)
-        self.assertEqual(settings.intraday_minute_profile_max_symbols, 40)
-        self.assertEqual(settings.longhu_intraday_max_symbols, 40)
         self.assertTrue(settings.strategy_review_automation_enabled)
         self.assertTrue(settings.post_close_strategy_automation_enabled)
         self.assertTrue(settings.ten_day_leader_rotation_automation_enabled)

@@ -27,12 +27,11 @@ def enabled(environ: dict[str, str] | None = None) -> bool:
 
 
 def interval_seconds(environ: dict[str, str] | None = None) -> float:
-    """Depth is one licensed Longhu request per symbol, so the default is 30s and the floor 10s."""
     values = os.environ if environ is None else environ
     try:
-        return max(10.0, min(60.0, float(values.get("INTRADAY_ORDER_BOOK_INTERVAL_SECONDS", "30"))))
+        return max(3.0, min(30.0, float(values.get("INTRADAY_ORDER_BOOK_INTERVAL_SECONDS", "3"))))
     except ValueError:
-        return 30.0
+        return 3.0
 
 
 def retention_days(environ: dict[str, str] | None = None) -> int:
@@ -41,14 +40,6 @@ def retention_days(environ: dict[str, str] | None = None) -> int:
         return max(1, min(30, int(values.get("INTRADAY_ORDER_BOOK_RETENTION_DAYS", "7"))))
     except ValueError:
         return 7
-
-
-def max_symbols(environ: dict[str, str] | None = None) -> int:
-    values = os.environ if environ is None else environ
-    try:
-        return max(1, min(60, int(values.get("INTRADAY_ORDER_BOOK_MAX_SYMBOLS", "24"))))
-    except ValueError:
-        return 24
 
 
 def persist_observations(
@@ -143,6 +134,6 @@ async def capture_snapshot(
 
 
 __all__ = [
-    "capture_snapshot", "enabled", "interval_seconds", "max_symbols", "persist_failure",
+    "capture_snapshot", "enabled", "interval_seconds", "persist_failure",
     "persist_observations", "retention_days",
 ]

@@ -74,19 +74,15 @@ def order_book_row(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-async def longhu_order_book_quotes(symbols: list[str], *, max_symbols: int = 20) -> list[dict[str, Any]]:
-    """Fetch one bounded Longhu depth snapshot per explicit watchlist symbol."""
+async def longhu_order_book_quotes(symbols: list[str], *, max_symbols: int | None = None) -> list[dict[str, Any]]:
+    """Fetch one Longhu depth snapshot per explicit watchlist symbol."""
     normalized = list(dict.fromkeys(str(symbol).upper() for symbol in symbols
                                     if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(symbol).upper())))
     if not normalized:
         return []
-    if max_symbols < 1 or max_symbols > 300:
-        raise ValueError("Longhu order-book cap must be between 1 and 300")
-    if len(normalized) > max_symbols:
-        raise ValueError(f"Longhu order-book observations are capped at {max_symbols} watchlist symbols")
-    snapshots, _status = await _blocking(
-        lambda: intraday_source().watch_quotes(normalized, max_symbols=len(normalized)), timeout_seconds=20,
-    )
+    if max_symbols is not None:
+        normalized = normalized[:max(1, int(max_symbols))]
+    snapshots, _status = await _blocking(lambda: intraday_source().watch_quotes(normalized), timeout_seconds=20)
     return [row for snapshot in snapshots if (row := order_book_row(snapshot)) is not None]
 
 

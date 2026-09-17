@@ -76,16 +76,16 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
             with patch("app.main.open_provider_capabilities", new=AsyncMock(return_value=set())), \
                  patch("app.main.longhu_vendor_configured", return_value=True), \
                  patch("app.main.intraday_longhu_minutes", new=minute_fetch), \
-                 patch("app.main.intraday_minute_profile_max_symbols", return_value=3), \
                  patch("app.main.run_database_blocking", new=AsyncMock(return_value=None)), \
                  patch("app.main._intraday_longhu_minute_cache", new={}):
                 _, source = await intraday_surge_context(watches)
             return source, minute_fetch
 
         source, minute_fetch = asyncio.run(check())
-        self.assertEqual(source["requested"], ["000003.SZ", "000004.SZ", "000005.SZ"])
-        self.assertTrue(source["truncated"])
-        self.assertEqual(minute_fetch.await_count, 3)
+        # Longhu minute tapes have no per-call symbol cap: targets and peers lead, nothing is dropped.
+        self.assertEqual(source["requested"], ["000003.SZ", "000004.SZ", "000005.SZ", "000001.SZ", "000002.SZ"])
+        self.assertFalse(source["truncated"])
+        self.assertEqual(minute_fetch.await_count, 5)
 
     def test_cross_sectional_flow_extremes_are_unit_independent(self):
         quotes = {

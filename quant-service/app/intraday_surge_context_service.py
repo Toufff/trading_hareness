@@ -17,7 +17,7 @@ async def capture(
     mapped_peers: dict[str, dict[str, Any]] | None,
     priority_symbols: list[str] | None = None,
     cache: dict[str, tuple[float, dict[str, Any] | None, str | None]],
-    max_symbols: Callable[[], int],
+    max_symbols: Callable[[], int] | None,
     open_capabilities: Callable[..., Awaitable[set[str]]],
     capability: str,
     fetch_minutes: Callable[[str], Awaitable[list[dict[str, Any]]]],
@@ -72,7 +72,8 @@ async def capture(
                 requested.append(symbol)
 
     requested_total = len(requested)
-    requested = requested[:max_symbols()]
+    if max_symbols is not None:
+        requested = requested[:max_symbols()]
     now_monotonic = asyncio.get_running_loop().time()
     cache_ttl_seconds = 45.0
     for symbol, cached in list(cache.items()):

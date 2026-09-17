@@ -338,7 +338,7 @@ class LonghuIntradaySource(Protocol):
     """Small contract shared by the local licensed and remote gateway clients."""
 
     def watch_quotes(
-        self, symbols: Iterable[str], *, max_symbols: int = 24,
+        self, symbols: Iterable[str], *, max_symbols: int | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]: ...
 
     def stock_minutes(self, symbol: str) -> list[dict[str, Any]]: ...
@@ -422,12 +422,12 @@ class SharedLonghuReadSource:
         return result
 
     def watch_quotes(
-        self, symbols: Iterable[str], *, max_symbols: int = 24,
+        self, symbols: Iterable[str], *, max_symbols: int | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        limit = max(1, min(MAX_PAGE_SIZE, int(max_symbols)))
         ordered = list(dict.fromkeys(
             symbol for value in symbols if (symbol := normalize_stock_symbol(value)) is not None
         ))
+        limit = len(ordered) if max_symbols is None else max(1, int(max_symbols))
         selected = ordered[:limit]
         if not selected:
             return [], {
@@ -581,12 +581,12 @@ class LonghuVendorSource:
             raise RuntimeError(f"Longhu quote missing or mismatched for {code}")
         return parsed
 
-    def watch_quotes(self, symbols: Iterable[str], *, max_symbols: int = 24) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Fetch a bounded explicit watch basket; never widen to an all-A scan."""
-        limit = max(1, min(MAX_PAGE_SIZE, int(max_symbols)))
+    def watch_quotes(self, symbols: Iterable[str], *, max_symbols: int | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Fetch an explicit watch basket (never an implicit all-A scan); ``max_symbols`` is optional."""
         ordered = list(dict.fromkeys(
             symbol for value in symbols if (symbol := normalize_stock_symbol(value)) is not None
         ))
+        limit = len(ordered) if max_symbols is None else max(1, int(max_symbols))
         selected = ordered[:limit]
         rows: dict[str, dict[str, Any]] = {}
         errors: list[str] = []
