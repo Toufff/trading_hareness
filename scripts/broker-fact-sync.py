@@ -1,4 +1,4 @@
-"""Explicitly authorized manual desktop holdings import. Never operates a UI."""
+"""Broker holdings import: explicit manual runs, or the single post-close run. This CLI never operates a UI."""
 import argparse
 from datetime import datetime, timezone
 import json
@@ -9,7 +9,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "quant-service"))
-from app.broker_manual_sync import (TASK_KEY, MAX_RUN_AGE, validate_manual_request, start_manual,
+from app.broker_manual_sync import (TASK_KEY, TASK_KEYS, MAX_RUN_AGE, validate_manual_request, start_manual,
                                     complete_manual, alert_path, confirm_manual_account)
 from app.broker_desktop_evidence import prepare_export_envelope
 
@@ -17,7 +17,8 @@ from app.broker_desktop_evidence import prepare_export_envelope
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["start", "prepare-export", "complete", "confirm-account", "fail", "status", "retry-import"])
-    parser.add_argument("--phase", default="manual", help="Only manual is accepted; scheduled phases are retired")
+    parser.add_argument("--phase", default="manual", choices=["manual", "scheduled_close"],
+                        help="manual, or the single post-close run (trading days 15:00-15:40)")
     parser.add_argument("--manual-user-authorized", action="store_true")
     parser.add_argument("--account-key")
     parser.add_argument("--run-id")
@@ -42,10 +43,14 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
     run = None
     try:
-        if args.phase != "manual":
-            validate_manual_request(args.phase, False, None)
         if args.action not in {"status", "fail"}:
-            validate_manual_request(args.phase, args.manual_user_authorized, args.account_key)
+            from app.event_research.trading_calendar import is_open
+            from app.broker_fact_sync_rules import SHANGHAI
+            today = datetime.now(timezone.utc).astimezone(SHANGHAI).date()
+            validate_manual_request(args.phase, args.manual_user_authorized, args.account_key,
+                                    calendar_open=is_open(today) if args.phase == "scheduled_close" else None)
+            if args.phase == "scheduled_close" and args.action not in {"start", "complete"}:
+                raise ValueError("BROKER_CLOSE_SYNC_ACTION_NOT_ALLOWED")
         import psycopg
         from psycopg.rows import dict_row
         from app.db_dsn import connection_params
@@ -58,13 +63,13 @@ def main():
             if args.action == "status":
                 result = {"sync_mode": "manual", "runs": connection.execute(
                     """SELECT run_id,task_key,status,started_at,finished_at,error_class,output_summary
-                         FROM quant.automation_runs WHERE task_key=%s OR task_key LIKE 'citics_holdings_%%'
-                        ORDER BY started_at DESC LIMIT 10""", (TASK_KEY,)).fetchall()}
+                         FROM quant.automation_runs WHERE task_key = ANY(%s) OR task_key LIKE 'citics_holdings_%%'
+                        ORDER BY started_at DESC LIMIT 10""", (list(TASK_KEYS.values()),)).fetchall()}
             elif args.action == "start":
-                result = start_manual(connection, args.account_key, args.evidence_root)
+                result = start_manual(connection, args.account_key, args.evidence_root, trigger=args.phase)
             else:
                 run = connection.execute("SELECT * FROM quant.automation_runs WHERE run_id=%s", (args.run_id,)).fetchone()
-                if not run or run["task_key"] != TASK_KEY:
+                if not run or run["task_key"] != TASK_KEYS[args.phase]:
                     raise ValueError("BROKER_RUN_NOT_FOUND: historical MuMu runs are read-only")
                 if args.action == "retry-import":
                     raise ValueError("BROKER_REIMPORT_REQUIRES_NEW_MANUAL_RUN")

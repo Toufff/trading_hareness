@@ -1,5 +1,10 @@
-"""Manual broker import orchestration and audit; never controls a client."""
-from datetime import datetime, timedelta, timezone
+"""Broker holdings import orchestration and audit.
+
+Manual runs never control the client.  The single post-close scheduled run
+(authorized by the user on 2026-09-17) may only switch the broker window to
+the 资金股份 page; that navigation lives in ``broker_close_sync``.
+"""
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -16,6 +21,13 @@ from .broker_trade_repository import load_trade_batch, persist_trade_batch
 from .personal_decision_repository import persist_broker_snapshot
 
 TASK_KEY = "broker_holdings_manual"
+CLOSE_TASK_KEY = "broker_holdings_close"
+TASK_KEYS = {"manual": TASK_KEY, "scheduled_close": CLOSE_TASK_KEY}
+CLOSE_WINDOW = (time(15, 0), time(15, 40))
+CLOSE_AUTHORIZATION = {
+    "source": "current_user_message", "granted_on": "2026-09-17",
+    "scope": "one post-close holdings sync per trading day; may click to the 资金股份 page; no other schedule",
+}
 MAX_RUN_AGE = timedelta(minutes=15)
 
 
@@ -36,10 +48,16 @@ def reusable_account_binding(existing):
     }
 
 
-def validate_manual_request(phase, authorized, account_key):
-    if phase != "manual":
-        raise ValueError("BROKER_MANUAL_ONLY: scheduled holdings synchronization is retired")
-    if not authorized:
+def validate_manual_request(phase, authorized, account_key, *, now=None, calendar_open=None):
+    if phase == "scheduled_close":
+        local = (now or datetime.now(timezone.utc)).astimezone(SHANGHAI)
+        if calendar_open is not True:
+            raise ValueError("BROKER_CLOSE_SYNC_NOT_TRADING_DAY")
+        if not CLOSE_WINDOW[0] <= local.time().replace(tzinfo=None) <= CLOSE_WINDOW[1]:
+            raise ValueError("BROKER_CLOSE_SYNC_OUTSIDE_WINDOW: only 15:00-15:40 on trading days")
+    elif phase != "manual":
+        raise ValueError("BROKER_MANUAL_ONLY: only manual runs and the single post-close run are allowed")
+    elif not authorized:
         raise ValueError("BROKER_MANUAL_AUTHORIZATION_REQUIRED")
     if not account_key:
         raise ValueError("ACCOUNT_BINDING_REQUIRED: account_key must be selected explicitly")
@@ -53,8 +71,9 @@ def alert_path(evidence_root, run_id, code):
     return str(path)
 
 
-def start_manual(connection, account_key, evidence_root, *, now=None):
+def start_manual(connection, account_key, evidence_root, *, now=None, trigger="manual"):
     now = now or datetime.now(timezone.utc)
+    task_key = TASK_KEYS[trigger]
     with connection.transaction():
         connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (account_key + ":broker-sync",))
         existing = connection.execute(
@@ -65,7 +84,7 @@ def start_manual(connection, account_key, evidence_root, *, now=None):
             raise ValueError("ACCOUNT_BINDING_REQUIRED: no existing account; explicit registration is required")
         running = connection.execute(
             """SELECT * FROM quant.automation_runs WHERE task_key=%s AND status='running'
-                 AND input_summary->>'account_key'=%s ORDER BY started_at DESC LIMIT 1""", (TASK_KEY, account_key),
+                 AND input_summary->>'account_key'=%s ORDER BY started_at DESC LIMIT 1""", (task_key, account_key),
         ).fetchone()
         if running and now - running["started_at"] <= MAX_RUN_AGE:
             return {"status": "skipped_running", "run_id": str(running["run_id"])}
@@ -73,17 +92,20 @@ def start_manual(connection, account_key, evidence_root, *, now=None):
             fail_run(connection, str(running["run_id"]), ValueError("BROKER_MANUAL_RUN_EXPIRED"), error_class="BROKER_MANUAL_RUN_EXPIRED")
             alert_path(evidence_root, running["run_id"], "BROKER_MANUAL_RUN_EXPIRED")
         binding = reusable_account_binding(existing)
-        run_id = start_run(connection, task_key=TASK_KEY, run_key="broker-manual:" + str(uuid.uuid4()),
-                           cadence="manual", as_of_date=now.astimezone(SHANGHAI).date(), methodology_version=CONTRACT,
-                           input_summary={"account_key": account_key, "trigger": "manual", "ui_operations": False,
-                                          "account_binding": binding})
+        summary = {"account_key": account_key, "trigger": trigger, "ui_operations": trigger == "scheduled_close",
+                   "account_binding": binding}
+        if trigger == "scheduled_close":
+            summary.update(ui_operations_scope="navigate_to_funds_holdings_page_only", authorization=CLOSE_AUTHORIZATION)
+        run_id = start_run(connection, task_key=task_key, run_key=f"broker-{trigger}:" + str(uuid.uuid4()),
+                           cadence=trigger, as_of_date=now.astimezone(SHANGHAI).date(), methodology_version=CONTRACT,
+                           input_summary=summary)
     folder = Path(evidence_root) / run_id
     folder.mkdir(parents=True, exist_ok=True)
     return {"status": "started", "run_id": run_id, "account_key": account_key, "evidence_dir": str(folder),
-            "deadline_at": (now + MAX_RUN_AGE).isoformat(), "sync_mode": "manual",
+            "deadline_at": (now + MAX_RUN_AGE).isoformat(), "sync_mode": trigger,
             "existing_snapshot_id": binding["existing_snapshot_id"],
             "latest_snapshot_id": str(existing["snapshot_id"]),
-            "account_binding": binding, "client_operations": False}
+            "account_binding": binding, "client_operations": trigger == "scheduled_close"}
 
 
 def read_api(base_url, account_key, *, adapter=False):

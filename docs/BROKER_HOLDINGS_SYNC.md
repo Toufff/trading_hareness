@@ -4,7 +4,8 @@
 
 ## 入口与边界
 
-- 触发语义固定为 `manual`。原 12:00/15:15 自动同步已停用（不是 15:00 调度），不后台轮询、不自动登录、不自动唤醒 MuMu。
+- 触发语义为 `manual`，外加唯一例外 `scheduled_close`（用户 2026-09-17 授权）：每个交易日 15:10 由计划任务 `trading-hareness-broker-close-sync` 跑一次，CLI 只在交易日 15:00–15:40 接受该触发。其他任何时段的自动同步仍停用；不后台轮询、不自动登录、不自动唤醒 MuMu。
+- `scheduled_close` 允许的 UI 操作只有一种：交易窗口不在“查询 → 资金股份”时，点击左侧导航树里的“资金股份”（或先点“查询”展开），最多 2 次，每次点击后重新截图读数确认；点击点由 `broker_close_sync.click_target` 限定在导航树矩形内。优先发后台消息；无效时才短暂激活窗口点击并把前台还给原窗口。不滚动：持仓一屏放不下就失败。读数由 `claude -p`（只开 Read 工具）对同一截图独立读两次，必须一致且与证券市值、当日盈亏汇总对平，再走同一套 `complete --validate-only` → 入库 → 读回。编排见 `scripts/broker-close-sync.py`，同步后写 `G:\StockPlatform\reports\agent-paper\<日期>.html` 对比报告。
 - 用户未指定券商时不得默认中信；先确认客户端、券商、显式 `account_key` 和掩码账户。
 - 原始文件导出优先；没有可验证导出时，由 `gpt-5.6-luna` 的 Luna 子 agent 直接做桌面结构化人工读取。主 agent 只负责授权、证据验收和 CLI 编排，不把 OCR 或模型猜测当事实。
 - 不得买卖、撤单、转账、融资、修改自选或确认交易；不得读取密码、Cookie、内存或认证材料。
@@ -14,7 +15,7 @@
 
 网上交易系统进程为 `xiadan.exe`（网上股票交易系统 5.0）。`MainWindowHandle` 可能只是 `Internet Explorer_Hidden`；主 `happ` 窗口最小化时可能有 `-32000` 矩形。hidden 交易窗的被动 `PrintWindow` 黑图不构成证据。
 
-优先使用 `scripts/windows/broker-window-capture.ps1`。当前参数为：`-Mode list|capture`、`-ProcessIds`、`-Hwnd`、`-OutputPath`、`-ShowWithoutActivation`、`-TemporaryWidth`。`-ShowWithoutActivation` 与 `-TemporaryWidth` 都是显式 UI 动作，默认不开；临时加宽后必须恢复原尺寸。脚本只验证窗口身份、前台窗口未变化、输出文件 hash 及 PNG/JPEG 文件头，不证明图片内容；视觉完整性由 Luna 检查。UI 本轮最多 8 分钟、最多 2 次安全恢复。
+优先使用 `scripts/windows/broker-window-capture.ps1`。当前参数为：`-Mode list|capture|click|click-foreground`（click 系列仅供 `scheduled_close` 切页，`-X/-Y` 为窗口内坐标）、`-ProcessIds`、`-Hwnd`、`-OutputPath`、`-ShowWithoutActivation`、`-TemporaryWidth`。`-ShowWithoutActivation` 与 `-TemporaryWidth` 都是显式 UI 动作，默认不开；临时加宽后必须恢复原尺寸。脚本只验证窗口身份、前台窗口未变化、输出文件 hash 及 PNG/JPEG 文件头，不证明图片内容；视觉完整性由 Luna 检查。UI 本轮最多 8 分钟、最多 2 次安全恢复。
 
 ## 当前 CLI 与账户确认
 

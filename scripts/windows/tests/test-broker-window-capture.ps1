@@ -34,4 +34,7 @@ $target = @($windows | Where-Object title -eq '网上股票交易系统5.0')
 if ($target.Count -eq 1) {
     Assert-Rejected 'wrong-pid' @('-Mode', 'capture', '-ProcessIds', '1', '-Hwnd', [string]$target[0].hwnd)
 } else { Write-Output 'SKIP wrong-pid real-window test: no unique logged-in client window' }
+$clicked = Invoke-CaptureScript @('-Mode', 'click', '-Hwnd', '1', '-X', '10', '-Y', '10')
+if ($clicked.Code -eq 0) { throw 'click on an unvalidated HWND succeeded' }
+Write-Output 'click on an unvalidated HWND rejected'
 Write-Output "Capture negative tests passed. Evidence: $folder"

@@ -17,6 +17,7 @@ from .broker_export_parser import parse_account_export, parse_holdings_export, p
 
 CONTRACT = "ths-desktop-holdings-v1"
 SOURCES = {"ths_desktop_export", "ths_desktop_ui"}
+TRIGGERS = {"manual", "scheduled_close"}
 
 
 def account_fingerprint(broker, full_account_identifier):
@@ -171,7 +172,7 @@ def verify_export_values(value, evidence):
 
 def validate_desktop_metadata(metadata, source, observed_at, positions):
     """Shared DTO validation: does not touch files (HTTP accepts evidence refs)."""
-    if metadata.get("contract") != CONTRACT or metadata.get("trigger") != "manual":
+    if metadata.get("contract") != CONTRACT or metadata.get("trigger") not in TRIGGERS:
         raise ValueError("BROKER_MANUAL_EVIDENCE_REQUIRED")
     binding = metadata.get("account_binding") or {}
     method = binding.get("method")
@@ -269,8 +270,12 @@ def load_manual_envelope(path, run, *, now=None):
     from .personal_decision_contracts import BrokerPortfolioSnapshotInput
     now = now or datetime.now(timezone.utc)
     value = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-    if value.get("schema_version") != CONTRACT or value.get("trigger") != "manual":
+    if value.get("schema_version") != CONTRACT or value.get("trigger") not in TRIGGERS:
         raise ValueError("BROKER_MANUAL_EVIDENCE_REQUIRED")
+    if value["trigger"] != (run.get("input_summary") or {}).get("trigger", "manual"):
+        raise ValueError("BROKER_RUN_EVIDENCE_MISMATCH: trigger")
+    if value["trigger"] == "scheduled_close" and value.get("source") != "ths_desktop_ui":
+        raise ValueError("BROKER_RUN_EVIDENCE_MISMATCH: scheduled close reads the UI only")
     if value.get("source") not in SOURCES or str(value.get("run_id")) != str(run["run_id"]):
         raise ValueError("BROKER_RUN_EVIDENCE_MISMATCH")
     if value.get("account_key") != (run.get("input_summary") or {}).get("account_key"):
@@ -285,7 +290,7 @@ def load_manual_envelope(path, run, *, now=None):
         verify_export_values(value, evidence)
     hashes = sorted(item["sha256"] for item in evidence)
     bundle_hash = sha256(json.dumps(hashes).encode()).hexdigest()
-    metadata = {"contract": CONTRACT, "trigger": "manual", "trade_date": value.get("trade_date"),
+    metadata = {"contract": CONTRACT, "trigger": value["trigger"], "trade_date": value.get("trade_date"),
                 "account_identity": value.get("account_identity"), "account_binding": value.get("account_binding"),
                 "extraction": value.get("extraction"), "completeness": value.get("completeness"),
                 "evidence": evidence, "evidence_bundle_sha256": bundle_hash,
