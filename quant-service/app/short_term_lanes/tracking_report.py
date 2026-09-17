@@ -9,14 +9,19 @@ def sections(followup, lane=None):
     lines=['','## 往期候选跟踪与验证','',followup.get('note',''),'',f"跟踪状态：{followup['status']}。",'']
     items=[e for e in followup.get('items',[]) if (not lane or e['lane']==lane) and e['expected_sessions']>0]
     if not items:return lines+['尚无到期记录；不计为零收益或成功。','']
-    lines+=['| 股票 | 发现日 / 原展示位 | 1日 / 3日 / 5日 / 10日表现 | 原结构检查 | 证据 |',
-            '|---|---|---|---|---|']
+    lines+=['| 股票 | 策略 / 来源 | 发现日 / 原展示位 | 1日 / 3日 / 5日 / 10日表现 | 原结构检查 | 证据 |',
+            '|---|---|---|---|---|---|']
     def value(w):
         return f"{w['return_pct']:+.2f}%" if w['status']=='observed' else '未到期' if w['status']=='not_due' else '缺数据'
+    def origin(e):
+        # The same close can be tracked once as the scan's own discovery and once
+        # as a recommendation-pool registration; both rows are kept and labelled.
+        manual=str(e.get('source') or '').startswith('manual')
+        return f"{e.get('lane_label') or e['lane']} / {'推荐池登记' if manual else '扫描'}"
     featured=[e for e in items if e.get('display_rank') is not None]
     background=[e for e in items if e.get('display_rank') is None]
     for e in featured:
-        lines += [f"| {e['name']}（{e['symbol'].split('.')[0]}） | {e['signal_date']} / {e.get('display_rank') or '非首屏'} | "
+        lines += [f"| {e['name']}（{e['symbol'].split('.')[0]}） | {origin(e)} | {e['signal_date']} / {e.get('display_rank') or '非首屏'} | "
                   +' / '.join(value(e['windows'][str(h)]) for h in (1,3,5,10))
                   +f" | {LABELS.get(e['path_check'],e['path_check'])} | {'历史补录' if e['timing']=='reconstructed' else '前瞻记录'}；{e['status']} |"]
     ledger=followup.get('ledger_rows')
