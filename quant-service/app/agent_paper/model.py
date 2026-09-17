@@ -1,9 +1,9 @@
-"""Decision model transport: the local Claude Code CLI in headless, tool-free mode.
+"""Decision model transport: the local Claude Code CLI in headless mode.
 
 The CLI uses the machine's existing Claude Code login, so no API key is read
-or stored by the platform.  Tools, MCP servers, skills and project settings are
-disabled; the model only sees the JSON context on stdin and must answer with
-the order schema.
+or stored by the platform.  Only read-only web research tools may be enabled;
+MCP servers, skills and project settings are disabled.  The model receives the
+JSON context on stdin and must answer with the order schema.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ SYSTEM_PROMPT = """你是一名 A 股短线交易员，在操作自己的模拟�
 - 你每隔几分钟被调用一次。没有好机会时不下单是正常的；不要为了交易而交易。
 - 你拥有账户的完全决策权：可以调仓、清仓、买入持仓之外的任何 A 股（不限于自选、推荐池或候选），自主决定仓位、分批加减和止损。人类的计划、平台推荐池、九策略扫描和盘后候选都是可利用的参考，不是约束。
 - 想仔细看某只股票（盘口、分钟线、日线），把它放进 focus_symbols，下一轮会提供详细数据；也可以直接下单，成交按下单时的实时盘口撮合。
+- 需要系统之外的信息（公告原文、突发新闻、行业消息、个股异动原因）时可以用 WebSearch / WebFetch 自己查，注意信息发布时间。查询会推迟本轮下单，时间敏感的操作先下单再查。每轮最多查几次，别把时间耗在无关搜索上。
 - 每笔订单必须写清依据的具体指标和数值（价格位置、量能、主动买卖、盘口、板块、大盘等）。
 - 只输出符合 schema 的 JSON，不要输出其他文字。
 
@@ -112,6 +113,9 @@ class ClaudeCliModel:
         self.binary = binary or os.environ.get("AGENT_PAPER_CLAUDE_BIN") or shutil.which("claude") or "claude"
         self.timeout_seconds = int(timeout_seconds or os.environ.get("AGENT_PAPER_TIMEOUT_SECONDS") or DEFAULT_TIMEOUT_SECONDS)
         self.proxy = os.environ.get("AGENT_PAPER_CLI_PROXY") or ""
+        # Read-only research tools only; nothing that runs commands or writes files.
+        requested = os.environ.get("AGENT_PAPER_TOOLS", "WebSearch,WebFetch")
+        self.tools = [t for t in (x.strip() for x in requested.split(",")) if t in {"WebSearch", "WebFetch"}]
 
     def environment(self) -> dict[str, str]:
         """The CLI reaches Anthropic only through the user's terminal proxy; nothing else inherits it."""
@@ -123,7 +127,9 @@ class ClaudeCliModel:
         return env
 
     def command(self) -> list[str]:
-        return [self.binary, "-p", "--model", self.model, "--output-format", "json", "--tools", "",
+        tools = ",".join(self.tools)
+        allowed = ["--allowedTools", *self.tools] if self.tools else []
+        return [self.binary, "-p", "--model", self.model, "--output-format", "json", "--tools", tools, *allowed,
                 "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands",
                 "--system-prompt", SYSTEM_PROMPT, "--json-schema", json.dumps(OUTPUT_SCHEMA, ensure_ascii=False)]
 

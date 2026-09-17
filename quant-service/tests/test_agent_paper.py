@@ -135,6 +135,18 @@ class AgentPaperModelTests(unittest.TestCase):
         with patch.dict(os.environ, {"AGENT_PAPER_CLI_PROXY": ""}):
             self.assertEqual(ClaudeCliModel(model="m").proxy, "")
 
+    def test_cli_tools_are_limited_to_read_only_web_research(self):
+        from unittest.mock import patch
+        from app.agent_paper.model import ClaudeCliModel
+        with patch.dict(os.environ, {"AGENT_PAPER_TOOLS": "WebSearch,Bash,WebFetch"}):
+            command = ClaudeCliModel(model="m").command()
+        self.assertEqual(command[command.index("--tools") + 1], "WebSearch,WebFetch")
+        self.assertNotIn("Bash", command)
+        with patch.dict(os.environ, {"AGENT_PAPER_TOOLS": ""}):
+            command = ClaudeCliModel(model="m").command()
+        self.assertEqual(command[command.index("--tools") + 1], "")
+        self.assertNotIn("--allowedTools", command)
+
     def test_cli_errors_fail_closed(self):
         with self.assertRaises(ModelFailure) as caught:
             parse_cli_result(json.dumps({"is_error": True, "api_error_status": 403, "result": "Request not allowed"}))
