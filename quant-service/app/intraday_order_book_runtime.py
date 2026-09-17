@@ -1,4 +1,4 @@
-"""Application adapter for bounded Tencent order-book observation.
+"""Application adapter for bounded Longhu order-book observation.
 
 The loop engine keeps exchange-session, capability and cadence policy.  This
 adapter owns only bounded local watchlist reads and the source-scoped evidence
@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 
-# Depth capture ticks every 3-30s (INTRADAY_ORDER_BOOK_INTERVAL_SECONDS), far
+from .market_source_names import ORDER_BOOK_SOURCES_WITH_HISTORY
+
+# Depth capture ticks every 10-60s (INTRADAY_ORDER_BOOK_INTERVAL_SECONDS), more
 # more often than the explicit watchlist actually changes membership.  Reload
 # on the same 30s cadence the fast-quote loop already uses instead of once
 # per tick, which was several thousand redundant reloads of an unchanged
@@ -65,8 +67,8 @@ async def run_intraday_order_book_runtime_loop(
             with dependencies.database.transaction() as connection:
                 connection.execute(
                     "DELETE FROM quant.intraday_quote_observations "
-                    "WHERE source_name='tencent_order_book' AND observed_at<%s",
-                    (cutoff,),
+                    "WHERE source_name=ANY(%s) AND observed_at<%s",
+                    (list(ORDER_BOOK_SOURCES_WITH_HISTORY), cutoff),
                 )
 
         await dependencies.run_database(prune)

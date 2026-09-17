@@ -44,7 +44,7 @@ class TenDayLeaderRotationReadRepositoryTests(unittest.IsolatedAsyncioTestCase):
             _Result(rows=[]),
             _Result(row={"run_id": "completed", "status": "completed", "as_of_date": "2026-08-20"}),
             _Result(row={"scan_id": "scan-1", "observed_at": "2026-08-24T07:00:00Z", "observed_count": 20,
-                         "shadow_eligible_count": 0, "decision_eligible_count": 0, "quote_sources": ["tencent_free"]}),
+                         "shadow_eligible_count": 0, "decision_eligible_count": 0, "quote_sources": ["longhuvip"]}),
         ])
 
         result = await latest_ten_day_leader_rotation(database, limit=5)

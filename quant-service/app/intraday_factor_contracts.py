@@ -43,13 +43,13 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
     ),
     "public_flow_proxy": FactorSpec(
         factor_key="public_flow_proxy", version="v1", frequency="quote",
-        inputs=("tencent_free.zljlr",), availability_clock="quote_observed_at", minimum_history=1,
+        inputs=("all_a_snapshot.main_net_inflow",), availability_clock="quote_observed_at", minimum_history=1,
         quality_flags=("flow_missing", "quote_stale"),
         description="Provider-labelled public main-flow proxy; never labelled exchange order-flow imbalance.",
     ),
     "order_book_proxy": FactorSpec(
         factor_key="order_book_proxy", version="v1", frequency="quote",
-        inputs=("tencent_order_book.bid_ask_levels",), availability_clock="quote_observed_at", minimum_history=2,
+        inputs=("longhuvip_order_book.bid_ask_levels",), availability_clock="quote_observed_at", minimum_history=2,
         quality_flags=("order_book_missing", "one_sided_book"),
         live_use="attribution_only",
         description="Snapshot imbalance/erosion proxy, not true event-level OFI or VPIN.",

@@ -255,24 +255,14 @@ def _pool_events(trade_date: date, specs: list[tuple[str, str, Callable[[Any], A
 
 
 def akshare_daily(symbol: str, start: str, end: str) -> list[dict[str, Any]]:
-    try:
-        raw_rows = _retry_call(
-            "stock_zh_a_hist",
-            lambda ak: ak.stock_zh_a_hist(symbol=_symbol_code(symbol), period="daily", start_date=start, end_date=end, adjust=""),
-            attempts=2,
-        )
-        upstream_site = "eastmoney"
-        ak_function = "stock_zh_a_hist"
-        mapping = {"date": "日期", "open": "开盘", "close": "收盘", "high": "最高", "low": "最低", "vol": "成交量", "amount": "成交额", "pct_chg": "涨跌幅", "turnover_rate": "换手率"}
-    except AkShareProviderError:
-        raw_rows = _retry_call(
-            "stock_zh_a_hist_tx",
-            lambda ak: ak.stock_zh_a_hist_tx(symbol=_market_symbol(symbol), start_date=start, end_date=end, adjust=""),
-            attempts=2,
-        )
-        upstream_site = "tencent"
-        ak_function = "stock_zh_a_hist_tx"
-        mapping = {"date": "date", "open": "open", "close": "close", "high": "high", "low": "low", "vol": "volume", "amount": "amount", "pct_chg": "", "turnover_rate": "turnover"}
+    raw_rows = _retry_call(
+        "stock_zh_a_hist",
+        lambda ak: ak.stock_zh_a_hist(symbol=_symbol_code(symbol), period="daily", start_date=start, end_date=end, adjust=""),
+        attempts=2,
+    )
+    upstream_site = "eastmoney"
+    ak_function = "stock_zh_a_hist"
+    mapping = {"date": "日期", "open": "开盘", "close": "收盘", "high": "最高", "low": "最低", "vol": "成交量", "amount": "成交额", "pct_chg": "涨跌幅", "turnover_rate": "换手率"}
     rows: list[dict[str, Any]] = []
     for row in raw_rows:
         trade_date = _date_yyyymmdd(row.get(mapping["date"]))
@@ -354,10 +344,6 @@ def akshare_eastmoney_board_flow(kind: str) -> list[dict[str, Any]]:
     if kind == "industry":
         return _retry_call("stock_fund_flow_industry", lambda ak: ak.stock_fund_flow_industry(symbol="即时"))
     raise ValueError("kind must be concept or industry")
-
-
-def akshare_tencent_all_a_spot() -> list[dict[str, Any]]:
-    return _retry_call("stock_zh_a_spot_tx", lambda ak: ak.stock_zh_a_spot_tx())
 
 
 def akshare_moneyflow_supplements(symbol: str) -> list[dict[str, Any]]:

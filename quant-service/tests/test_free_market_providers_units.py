@@ -45,42 +45,5 @@ class EastmoneyDailyAmountUnitTests(unittest.TestCase):
         self.assertIsNone(rows[0]["amount"])
 
 
-class TencentIntradayMinutesAmountScaleTests(unittest.TestCase):
-    def test_zero_volume_opening_minute_does_not_lock_in_the_wrong_scale(self) -> None:
-        # A zero-volume opening tick used to lock amount_scale at 1.0 for the
-        # rest of the day even once trading began at the audited 100x
-        # cumulative-amount convention; the scale must be determined at the
-        # first row that actually has cumulative_volume_lot > 0.
-        payload = {"data": {"sz000001": {"data": {
-            "data": [
-                "0930 293.0 0 0",          # pre-open: zero volume/amount
-                "0931 293.0 1000 293000",  # first real minute: audited 100x convention
-            ],
-        }}}}
-        fake_response = _FakeResponse(payload)
-
-        async def run() -> list[dict[str, object]]:
-            with patch.object(free_market_providers, "_request_with_retry", new=AsyncMock(return_value=fake_response)):
-                return await free_market_providers.tencent_intraday_minutes("000001.SZ")
-
-        rows = asyncio.run(run())
-        self.assertIsNone(rows[0]["amount_unit_scale"])
-        self.assertEqual(rows[1]["amount_unit_scale"], 100.0)
-        # The scale is now correctly applied, not frozen at 1.0 from the
-        # degenerate all-zero opening row.
-        self.assertEqual(rows[1]["cumulative_amount"], 293000.0 * 100.0)
-
-    def test_session_date_is_exposed_for_named_day_checks(self) -> None:
-        payload = {"data": {"sh000001": {"data": {"date": "20260916", "data": ["0930 3861.75 3603417 5102370437.20"]}}}}
-
-        async def run() -> dict[str, object]:
-            with patch.object(free_market_providers, "_request_with_retry", new=AsyncMock(return_value=_FakeResponse(payload))):
-                return await free_market_providers.tencent_intraday_minute_session("000001.SH")
-
-        session = asyncio.run(run())
-        self.assertEqual(session["session_date"], "2026-09-16")
-        self.assertEqual(session["rows"][0]["close"], 3861.75)
-
-
 if __name__ == "__main__":
     unittest.main()

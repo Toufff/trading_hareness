@@ -1,4 +1,4 @@
-"""Runtime loop for bounded Tencent order-book observation.
+"""Runtime loop for bounded Longhu order-book observation.
 
 Provider decoding/persistence belongs to ``intraday_order_book_service``.  This
 module only coordinates session gates, local storage policy and daily pruning,
@@ -11,6 +11,8 @@ import asyncio
 from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
+
+from .market_source_names import LONGHU_PROVIDER
 
 
 AsyncCall = Callable[..., Awaitable[Any]]
@@ -35,8 +37,8 @@ async def run_iteration(
     active, _ = await realtime_session()
     if not active:
         return pruned_on, interval
-    if "order_book_quote" in await open_capabilities("tencent_free", ["order_book_quote"]):
-        # A protected source must not be retried at the normal 3-second depth
+    if "order_book_quote" in await open_capabilities(LONGHU_PROVIDER, ["order_book_quote"]):
+        # A protected source must not be retried at the normal depth
         # cadence.  This stays local and does not mutate provider health.
         return pruned_on, max(15.0, interval)
 

@@ -227,10 +227,10 @@ def evaluate_prompt_variant(connection: Any, *, variant_key: str, cutoff_at: dat
 
 def materialize_intraday_analyst_outcomes(connection: Any, *, cutoff_at: datetime | None = None,
                                           limit: int = 2000) -> dict[str, Any]:
-    """Settle only from already persisted, same-session Tencent quotes.
+    """Settle only from already persisted, same-session direct watch quotes.
 
     An analyst observation is usable only from ``strategy_available_at``.  We
-    accept its first local Tencent quote within a short bounded window, then
+    accept its first local direct quote within a short bounded window, then
     use the *actual* entry quote time to calculate each horizon.  Neither the
     11:30--13:00 lunch interval nor an overnight quote may satisfy an exit.
     """
@@ -253,7 +253,7 @@ def materialize_intraday_analyst_outcomes(connection: Any, *, cutoff_at: datetim
         if has_bounded_query_window(entry_window):
             entry = connection.execute(
                 """SELECT observed_at,price,source_name FROM quant.intraday_quote_observations
-                     WHERE symbol=%s AND source_name='tencent_free'
+                     WHERE symbol=%s AND source_name IN ('longhuvip','tencent_free')
                        AND observed_at>=%s AND observed_at<=%s AND price>0
                      ORDER BY observed_at LIMIT 1""",
                 (row["subject_key"], entry_window["query_start"], entry_window["query_end"]),
@@ -263,7 +263,7 @@ def materialize_intraday_analyst_outcomes(connection: Any, *, cutoff_at: datetim
             settlement: dict[str, Any] = {
                 "clock_basis": "strategy_available_at",
                 "entry_window": json_safe_window(entry_window),
-                "source": "tencent_free",
+                "source": "direct_watch_quote",
                 "session_bounded": True,
             }
             if entry is None:

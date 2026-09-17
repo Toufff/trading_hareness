@@ -32,7 +32,7 @@ class TenDayLeaderRotationIntradayResearchTests(unittest.TestCase):
             quotes={selected[0]["symbol"]: {"pct_change": 4.0, "price": 10}},
             minute_features={}, peer_contexts={},
             market_contexts={selected[0]["symbol"]: {"market_state": "attack_incubating"}},
-            quote_source=lambda _: "tencent_all_a_snapshot",
+            quote_source=lambda _: "fuyao_ths",
         )
 
         self.assertEqual(observations[0]["shadow_state"], "ranked_but_not_expanding")
@@ -51,7 +51,7 @@ class TenDayLeaderRotationIntradayResearchTests(unittest.TestCase):
                                             "available_peer_count": 2, "confirming_peer_count": 2,
                                             "confirming_breadth": 1.0}},
             market_contexts={"600001.SH": {"market_state": "attack_incubating"}},
-            quote_source=lambda _: "tencent_all_a_snapshot",
+            quote_source=lambda _: "fuyao_ths",
         )[0]
 
         self.assertEqual(observation["shadow_state"], "confirmed_coordination")

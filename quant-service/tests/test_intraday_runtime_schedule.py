@@ -10,7 +10,7 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
         expanded_scan = IntradayScanRequest(symbols=[f"{600000 + index:06d}.SH" for index in range(21)])
         self.assertEqual(len(expanded_scan.symbols), 21)
         quote = intraday_quote_from_fuyao({"symbol": "600176.SH", "name": "中国巨石", "price": "42.10", "pct_change": "2.1"})
-        quote.update({"price_source": "tencent_batched_watch_quote", "volume_ratio": 2.3, "turnover_rate": 4.2,
+        quote.update({"price_source": "longhuvip_watch_quote", "volume_ratio": 2.3, "turnover_rate": 4.2,
                       "main_net_inflow": 123.0})
         self.assertEqual(quote["symbol"], "600176.SH")
         entry_watch = {"symbol": "600176.SH", "available_quantity": 0, "alert_on_entry": True, "alert_on_exit": True}
@@ -26,7 +26,7 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
         watch = {"symbol": "600176.SH", "available_quantity": 0, "alert_on_entry": True, "alert_on_exit": True}
         quote = {
             "symbol": "600176.SH", "price": 43.20, "pct_change": 4.2,
-            "price_source": "tencent_batched_watch_quote", "price_freshness": {"status": "fresh"},
+            "price_source": "longhuvip_watch_quote", "price_freshness": {"status": "fresh"},
             "_scan_observed_at": datetime(2026, 8, 17, 1, 32, tzinfo=timezone.utc),
         }
         signals = intraday_signal_rules(watch, quote, None)
@@ -45,10 +45,11 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
         async def check() -> tuple[dict[str, object], dict[str, object], AsyncMock]:
             minute_fetch = AsyncMock(return_value=rows)
             with patch("app.main.open_provider_capabilities", new=AsyncMock(return_value=set())), \
-                 patch("app.main.tencent_intraday_minutes", new=minute_fetch), \
+                 patch("app.main.longhu_vendor_configured", return_value=True), \
+                 patch("app.main.intraday_longhu_minutes", new=minute_fetch), \
                  patch("app.main.run_database_blocking", new=AsyncMock(return_value=None)), \
-                 patch("app.main._intraday_tencent_minute_cache", new={}):
-                features, source = await intraday_tencent_surge_context(watches)
+                 patch("app.main._intraday_longhu_minute_cache", new={}):
+                features, source = await intraday_surge_context(watches)
             return features, source, minute_fetch
 
         features, source, minute_fetch = asyncio.run(check())
@@ -73,21 +74,18 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
         async def check() -> tuple[dict[str, object], AsyncMock]:
             minute_fetch = AsyncMock(return_value=rows)
             with patch("app.main.open_provider_capabilities", new=AsyncMock(return_value=set())), \
-                 patch("app.main.tencent_intraday_minutes", new=minute_fetch), \
+                 patch("app.main.longhu_vendor_configured", return_value=True), \
+                 patch("app.main.intraday_longhu_minutes", new=minute_fetch), \
                  patch("app.main.intraday_minute_profile_max_symbols", return_value=3), \
                  patch("app.main.run_database_blocking", new=AsyncMock(return_value=None)), \
-                 patch("app.main._intraday_tencent_minute_cache", new={}):
-                _, source = await intraday_tencent_surge_context(watches)
+                 patch("app.main._intraday_longhu_minute_cache", new={}):
+                _, source = await intraday_surge_context(watches)
             return source, minute_fetch
 
         source, minute_fetch = asyncio.run(check())
         self.assertEqual(source["requested"], ["000003.SZ", "000004.SZ", "000005.SZ"])
         self.assertTrue(source["truncated"])
         self.assertEqual(minute_fetch.await_count, 3)
-
-    def test_tencent_minute_amount_scale_corrects_only_audited_hundredfold_variant(self):
-        self.assertEqual(tencent_minute_amount_scale(price=293.0, cumulative_volume_lot=1000, cumulative_amount=293_000.0), 100.0)
-        self.assertEqual(tencent_minute_amount_scale(price=29.3, cumulative_volume_lot=1000, cumulative_amount=2_930_000.0), 1.0)
 
     def test_cross_sectional_flow_extremes_are_unit_independent(self):
         quotes = {
@@ -99,26 +97,26 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
         self.assertEqual(quotes["000001.SZ"]["main_flow_percentile"], 0.0)
         self.assertEqual(quotes["000003.SZ"]["main_flow_percentile"], 1.0)
 
-    def test_batched_watch_quote_refreshes_price_without_inventing_flow(self):
+    def test_licensed_watch_quote_refreshes_price_without_inventing_flow(self):
         quotes = {"000001.SZ": {"symbol": "000001.SZ", "price": 10.0, "pct_change": 0.0,
                                  "main_net_inflow": 123.0, "main_flow_percentile": 0.9, "raw": {}}}
-        merged = merge_intraday_watch_quote_prices(
+        merged = merge_intraday_longhu_watch_quotes(
             quotes, [{"ts_code": "000001.SZ", "name": "平安银行", "price": 10.2, "pre_close": 10.0}],
         )
         self.assertEqual(merged["000001.SZ"]["price"], 10.2)
         self.assertEqual(merged["000001.SZ"]["main_net_inflow"], 123.0)
-        self.assertEqual(merged["000001.SZ"]["price_source"], "tencent_batched_watch_quote")
-        self.assertEqual(intraday_quote_observation_source(merged["000001.SZ"]), "tencent_free")
+        self.assertEqual(merged["000001.SZ"]["price_source"], "longhuvip_watch_quote")
+        self.assertEqual(intraday_quote_observation_source(merged["000001.SZ"]), "longhuvip")
 
     def test_eastmoney_watch_flow_fallback_keeps_price_and_omits_small_basket_percentile(self):
         quotes = {"000001.SZ": {"symbol": "000001.SZ", "price": 10.2,
-                                  "price_source": "tencent_batched_watch_quote", "raw": {}}}
+                                  "price_source": "longhuvip_watch_quote", "raw": {}}}
         merged = merge_intraday_eastmoney_watch_flows(
             quotes, [{"ts_code": "000001.SZ", "volume_ratio": 2.4, "turnover_rate": 5.1,
                       "main_net_inflow": 123_000, "main_net_inflow_ratio": 1.8, "raw": {"f62": 123_000}}],
         )
         self.assertEqual(merged["000001.SZ"]["price"], 10.2)
-        self.assertEqual(merged["000001.SZ"]["price_source"], "tencent_batched_watch_quote")
+        self.assertEqual(merged["000001.SZ"]["price_source"], "longhuvip_watch_quote")
         self.assertEqual(merged["000001.SZ"]["volume_ratio"], 2.4)
         self.assertEqual(merged["000001.SZ"]["main_net_inflow"], 123_000)
         self.assertIsNone(merged["000001.SZ"]["main_flow_percentile"])
@@ -165,11 +163,11 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
         self.assertFalse(result["allow_confirmation"])
         self.assertIn("quote_source_not_decision_eligible", result["reason_codes"])
 
-    def test_live_policy_allows_current_tencent_watch_batch_after_other_gates_pass(self):
+    def test_live_policy_allows_current_longhu_watch_quote_after_other_gates_pass(self):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
             {"signal_type": "entry"}, {"available_quantity": 0},
-            {"price": 10, "price_source": "tencent_batched_watch_quote", "price_freshness": {"status": "fresh"}},
+            {"price": 10, "price_source": "longhuvip_watch_quote", "price_freshness": {"status": "fresh"}},
             {"status": "completed", "trade_constraints": {}},
             {"status": "available", "market_state": "mixed_or_neutral", "board_snapshot_age_seconds": 30},
             {"status": "confirmed"},
@@ -180,7 +178,7 @@ class IntradayRuntimeScheduleTests(unittest.TestCase):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
             {"signal_type": "entry"}, {"available_quantity": 0},
-            {"price": 10, "price_source": "tencent_batched_watch_quote", "price_freshness": {"status": "fresh"},
+            {"price": 10, "price_source": "longhuvip_watch_quote", "price_freshness": {"status": "fresh"},
              "main_net_inflow": 1, "flow_snapshot": {"status": "cached", "age_seconds": 46,
                                                         "decision_eligible": False}},
             {"status": "completed", "trade_constraints": {}},

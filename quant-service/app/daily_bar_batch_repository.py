@@ -6,7 +6,7 @@ including a per-bar ``SELECT ... FOR UPDATE``-less read-then-write against
 cross-section (~5,500 symbols), that is ~30,000 statements in a single
 transaction.  ``upsert_daily_bars`` here batches the same write contract
 (provider-priority selection, immutable raw evidence, amount-unit
-quarantine, ``tencent_free`` rejection) into a small, fixed number of
+quarantine) into a small, fixed number of
 set-based statements regardless of batch size.
 
 Semantics are intentionally identical to ``upsert_daily_bar`` for the common
@@ -47,9 +47,6 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
     """Batch-persist licensed/unadjusted daily bars; see module docstring."""
     if not bars:
         return 0
-    for bar in bars:
-        if bar.source == "tencent_free":
-            raise ValueError("tencent_free front-adjusted daily rows are raw research evidence only")
 
     symbols = sorted({bar.symbol for bar in bars})
 

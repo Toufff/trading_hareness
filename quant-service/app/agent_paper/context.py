@@ -1,7 +1,7 @@
 """Point-in-time decision context: what the human could see at the same moment.
 
-Live quotes, depth and minute tape come from the same public Tencent
-endpoints the platform already collects; board flow, breadth, rotations,
+Live quotes, depth, index levels and minute tape come from the same licensed
+Longhu reads the platform already collects; board flow, breadth, rotations,
 limit-up events, intraday signals, news research, post-close candidates and
 the human's active holding plans come from the platform database, filtered to
 rows available at ``now``.
@@ -10,14 +10,12 @@ rows available at ``now``.
 from __future__ import annotations
 
 import asyncio
-import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from ..free_market_providers import tencent_intraday_minute_session, tencent_order_book_quotes, tencent_symbol
-from ..http_clients import public_http_client
+from ..longhu_market_data import longhu_index_quotes, longhu_intraday_minute_session, longhu_order_book_quotes
 from .rules import dec
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -31,19 +29,10 @@ def _f(value: Any, digits: int = 2) -> float | None:
 
 
 async def fetch_index_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
-    keys = [tencent_symbol(symbol) for symbol in symbols]
-    async with public_http_client() as client:
-        response = await client.get(f"https://qt.gtimg.cn/q={','.join(keys)}",
-                                    headers={"Referer": "https://gu.qq.com", "User-Agent": "Mozilla/5.0"}, timeout=8)
     output: dict[str, dict[str, Any]] = {}
-    by_key = dict(zip((key.lower() for key in keys), symbols, strict=True))
-    for match in re.finditer(r'v_([a-z0-9]+)="([^"]*)";', response.text, re.I):
-        symbol, fields = by_key.get(match.group(1).lower()), match.group(2).split("~")
-        if not symbol or len(fields) < 5:
-            continue
-        price, pre_close = dec(fields[3]), dec(fields[4])
-        if price > 0 and pre_close > 0:
-            output[symbol] = {"price": float(price), "pct": round(float((price / pre_close - 1) * 100), 2)}
+    for symbol, row in (await longhu_index_quotes(symbols)).items():
+        price, pre_close = dec(row["price"]), dec(row["pre_close"])
+        output[symbol] = {"price": float(price), "pct": round(float((price / pre_close - 1) * 100), 2)}
     return output
 
 
@@ -54,7 +43,7 @@ async def fetch_live_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
     for start in range(0, len(unique), 60):
         batch = unique[start:start + 60]
         try:
-            rows = await tencent_order_book_quotes(batch, max_symbols=60)
+            rows = await longhu_order_book_quotes(batch, max_symbols=60)
         except Exception:  # noqa: BLE001 - absent quotes fail closed downstream
             continue
         output.update({row["ts_code"]: row for row in rows})
@@ -86,12 +75,12 @@ def summarize_minutes(rows: list[dict[str, Any]]) -> dict[str, Any]:
     for index in range(0, len(done), 5):
         chunk = done[index:index + 5]
         buckets.append([chunk[0]["time"], chunk[-1]["close"], max(r["close"] for r in chunk), min(r["close"] for r in chunk),
-                        round(sum(r["amount"] for r in chunk) / 1_000_000, 1)])
+                        round(sum(r.get("amount") or 0 for r in chunk) / 1_000_000, 1)])
     return {
         "open": prices[0], "high": max(prices), "low": min(prices), "last": last["close"],
         "high_time": done[prices.index(max(prices))]["time"], "low_time": done[prices.index(min(prices))]["time"],
         "vwap": round(last["vwap"], 3) if last.get("vwap") else None,
-        "last_10_minutes": [[r["time"], r["close"], round(r["amount"] / 1_000_000, 1), r["volume_lot"]] for r in done[-10:]],
+        "last_10_minutes": [[r["time"], r["close"], round((r.get("amount") or 0) / 1_000_000, 1), r["volume_lot"]] for r in done[-10:]],
         "five_minute_buckets_time_close_high_low_amount": buckets[-24:],
         "note": "high/low are minute closes, not tick extremes",
     }
@@ -103,7 +92,7 @@ async def fetch_minutes(symbols: list[str], day: date) -> dict[str, dict[str, An
     async def one(symbol: str) -> tuple[str, dict[str, Any]]:
         async with semaphore:
             try:
-                session = await tencent_intraday_minute_session(symbol)
+                session = await longhu_intraday_minute_session(symbol)
             except Exception:  # noqa: BLE001
                 return symbol, {"status": "fetch_failed"}
         if session.get("session_date") != day.isoformat():

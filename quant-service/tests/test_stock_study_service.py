@@ -61,7 +61,7 @@ class StockStudyServiceTests(unittest.TestCase):
             china_today=lambda: date(2026, 8, 21), tushare_request=request, daily_sync_request=request,
             fetch_tushare=fetch_tushare, realtime_market_session=session, sync_baostock=baostock,
             free_fetch=free_fetch, eastmoney_daily=daily, eastmoney_quote=quote, run_akshare=run_akshare,
-            akshare_daily=akshare_daily, tencent_daily=daily, sina_quote=quote,
+            akshare_daily=akshare_daily, longhu_daily=daily, sina_quote=quote,
             cninfo_announcements=announcements, run_database=run_database,
             persist_market_events=lambda _provider, rows: len(rows), persist_announcement_health=lambda *_args: None,
             technical_summary=lambda _rows: {"score": 70, "reasons": ["trend"]},
@@ -82,7 +82,7 @@ class StockStudyServiceTests(unittest.TestCase):
         skipped = [item for item in result["sources"] if item["api_name"] == "rt_min"]
         self.assertEqual([item["status"] for item in skipped], ["skipped", "skipped"])
         self.assertEqual(result["events"]["decision_eligible"], False)
-        self.assertEqual(result["market"]["tencent_daily_bars"][0]["close"], 10.0)
+        self.assertEqual(result["market"]["longhu_daily_bars"][0]["close"], 10.0)
 
     def test_live_session_adds_both_realtime_adapters_without_changing_research_boundary(self) -> None:
         fetched_requests: list[object] = []

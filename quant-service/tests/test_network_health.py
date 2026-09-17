@@ -13,7 +13,7 @@ class NetworkStateTrackerTests(unittest.TestCase):
         tracker.record_failure("tushare:super", "proxy unavailable")
         self.assertEqual(tracker.snapshot()["state"], "degraded")
         self.assertEqual(tracker.snapshot()["consecutive_failure_sources"], ["tushare:super"])
-        tracker.record_failure("public:tencent", "ConnectTimeout")
+        tracker.record_failure("public:sina", "ConnectTimeout")
         self.assertEqual(tracker.snapshot()["state"], "offline")
         tracker.record_success("tushare:super")
         snapshot = tracker.snapshot()

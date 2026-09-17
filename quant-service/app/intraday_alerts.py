@@ -37,7 +37,7 @@ def intraday_alert_text(
         f"{name} {signal['symbol']}",
         f"信号观测时间（上海）：{_shanghai_time(signal.get('observed_at'))}",
         f"现价 {conditions.get('price', '—')}｜涨跌 {conditions.get('pct_change', '—')}%｜量比 {conditions.get('volume_ratio', '—')}｜换手 {conditions.get('turnover_rate', '—')}%",
-        f"腾讯主力净流入指标 {conditions.get('main_net_inflow', '—')}（公开源估算）",
+        f"主力净流入指标 {conditions.get('main_net_inflow', '—')}（东财公开源估算）",
     ]
     if decision:
         lines.append(f"建议方向：{decision.get('action', '人工复核')}（系统不自动下单）")
@@ -85,7 +85,7 @@ def intraday_alert_text(
     if fast_confirmation.get("status") == "confirmed":
         lines.append(
             f"秒级价格交叉确认：Super GET {fast_confirmation.get('super_get_price', '—')}｜"
-            f"腾讯 {fast_confirmation.get('tencent_price', '—')}｜偏差 {fast_confirmation.get('gap_pct', '—')}%。"
+            f"开盘啦 {fast_confirmation.get('watch_price', '—')}｜偏差 {fast_confirmation.get('gap_pct', '—')}%。"
         )
     if decision_card_url:
         lines.append(f"决策卡（已保存证据）：{decision_card_url}")

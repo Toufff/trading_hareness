@@ -77,8 +77,8 @@ class IntradayOrderBookRuntimeTests(unittest.TestCase):
         delete_query, delete_params = database.connection.executed[1]
         self.assertIn("intraday_watchlists", select_query)
         self.assertEqual(select_params, (40,))
-        self.assertIn("source_name='tencent_order_book'", delete_query)
-        self.assertEqual(delete_params, (datetime(2026, 8, 15, 7, tzinfo=timezone.utc),))
+        self.assertIn("source_name=ANY(%s)", delete_query)
+        self.assertEqual(delete_params, (["longhuvip_order_book", "tencent_order_book"], datetime(2026, 8, 15, 7, tzinfo=timezone.utc)))
 
     def test_watchlist_reload_is_throttled_across_ticks(self) -> None:
         """A 3s capture tick must not reload an unchanged watchlist every tick."""

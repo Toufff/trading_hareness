@@ -17,13 +17,13 @@ def load_intraday_runtime_evidence(database: Any, max_alert_attempts: int) -> di
             """SELECT provider_key,capability,consecutive_failures,circuit_open_until,last_success_at,
                       last_failure_at,last_error,last_latency_ms,last_row_count,updated_at
                  FROM quant.provider_health
-                WHERE provider_key IN ('tencent_free','tushare_super_sdk','tushare_super_get','tushare_super')
+                WHERE provider_key IN ('longhuvip','tushare_super_sdk','tushare_super_get','tushare_super')
                   AND capability IN ('realtime_quote','order_book_quote','rt_k','rt_min','rt_min_daily')"""
         ).fetchall()
         quote_rows = connection.execute(
             """SELECT source_name,max(observed_at) AS last_observed_at,count(*)::int AS rows
                  FROM quant.intraday_quote_observations
-                WHERE source_name IN ('tencent_free','tencent_order_book','tushare_super_get_rt_k') GROUP BY source_name"""
+                WHERE source_name IN ('longhuvip','longhuvip_order_book','tushare_super_get_rt_k') GROUP BY source_name"""
         ).fetchall()
         raw_rows = connection.execute(
             """SELECT api_name,max(available_at) AS last_observed_at,count(*)::int AS rows
@@ -34,7 +34,7 @@ def load_intraday_runtime_evidence(database: Any, max_alert_attempts: int) -> di
             """SELECT max(available_at) AS last_observed_at,count(*)::int AS rows,
                       max(trading_date) AS latest_trading_date
                  FROM quant.intraday_minute_sessions
-                WHERE source_name='tencent_intraday_minutes'"""
+                WHERE source_name='longhuvip_intraday_minutes'"""
         ).fetchone()
         latest_scan = connection.execute(
             "SELECT status,observed_at,source_status,summary FROM quant.intraday_scan_runs ORDER BY observed_at DESC LIMIT 1"
@@ -123,13 +123,13 @@ async def load_intraday_runtime_evidence_async(async_database: Any, max_alert_at
             """SELECT provider_key,capability,consecutive_failures,circuit_open_until,last_success_at,
                       last_failure_at,last_error,last_latency_ms,last_row_count,updated_at
                  FROM quant.provider_health
-                WHERE provider_key IN ('tencent_free','tushare_super_sdk','tushare_super_get','tushare_super')
+                WHERE provider_key IN ('longhuvip','tushare_super_sdk','tushare_super_get','tushare_super')
                   AND capability IN ('realtime_quote','order_book_quote','rt_k','rt_min','rt_min_daily')"""
         )
         quote_rows = await all_rows(
             """SELECT source_name,max(observed_at) AS last_observed_at,count(*)::int AS rows
                  FROM quant.intraday_quote_observations
-                WHERE source_name IN ('tencent_free','tencent_order_book','tushare_super_get_rt_k') GROUP BY source_name"""
+                WHERE source_name IN ('longhuvip','longhuvip_order_book','tushare_super_get_rt_k') GROUP BY source_name"""
         )
         raw_rows = await all_rows(
             """SELECT api_name,max(available_at) AS last_observed_at,count(*)::int AS rows
@@ -140,7 +140,7 @@ async def load_intraday_runtime_evidence_async(async_database: Any, max_alert_at
             """SELECT max(available_at) AS last_observed_at,count(*)::int AS rows,
                       max(trading_date) AS latest_trading_date
                  FROM quant.intraday_minute_sessions
-                WHERE source_name='tencent_intraday_minutes'"""
+                WHERE source_name='longhuvip_intraday_minutes'"""
         )
         latest_scan = await one_row("SELECT status,observed_at,source_status,summary FROM quant.intraday_scan_runs ORDER BY observed_at DESC LIMIT 1")
         latest_completed_scan = await one_row("SELECT status,observed_at,source_status,summary FROM quant.intraday_scan_runs WHERE status='completed' ORDER BY observed_at DESC LIMIT 1")

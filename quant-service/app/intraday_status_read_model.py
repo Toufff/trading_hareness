@@ -24,7 +24,7 @@ PUBLIC_FLOW_SNAPSHOT_MAX_AGE_SECONDS = 45.0
 def _public_flow_snapshot_readiness(snapshot: Any) -> tuple[dict[str, Any] | None, bool | None]:
     """Project the all-A flow snapshot into the same bounded decision contract.
 
-    Individual direct Tencent quotes remain the primary price evidence.  This
+    Individual direct Longhu quotes remain the primary price evidence.  This
     function only describes whether the accompanying all-A flow fields are
     fresh enough to support a *new* flow-dependent entry, so the dashboard
     cannot accidentally represent cached flow as live confirmation.
@@ -103,7 +103,9 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
     completed_scan = dict(latest_completed_scan or {})
     completed_scan_source_status = dict(completed_scan.get("source_status") or {})
     latest_fuyao_status = dict(completed_scan_source_status.get("fuyao") or {})
-    latest_watch_quote_status = dict(completed_scan_source_status.get("tencent_watch") or {})
+    # Scans before 2026-09-18 recorded this block as "tencent_watch".
+    latest_watch_quote_status = dict(completed_scan_source_status.get("direct_watch")
+                                     or completed_scan_source_status.get("tencent_watch") or {})
     public_flow_snapshot, public_flow_snapshot_eligible = _public_flow_snapshot_readiness(
         latest_fuyao_status.get("all_a_snapshot")
     )
@@ -134,8 +136,8 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
     scan_observed_at = latest_completed_scan["observed_at"] if latest_completed_scan else None
     fuyao_quote = quotes.get("fuyao_ths", {})
     fuyao_health = most_recent_health(("fuyao_ths",), ("realtime_quote",))
-    order_book_quote = quotes.get("tencent_order_book", {})
-    order_book_health = most_recent_health(("tencent_free",), ("order_book_quote",))
+    order_book_quote = quotes.get("longhuvip_order_book", {})
+    order_book_health = most_recent_health(("longhuvip",), ("order_book_quote",))
     fast_quote = quotes.get("tushare_super_get_rt_k", {})
     rt_k_raw = raw.get("rt_k", {})
     fast_observed_at = fast_quote.get("last_observed_at") or rt_k_raw.get("last_observed_at")
@@ -170,19 +172,19 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
                      "main_flow_semantics": "not_provided_by_fuyao; Eastmoney flow stays separately source-labelled"},
         ),
         runtime_item(
-            key="tencent_order_book", label="腾讯观察池五档盘口", role="QI、OFI 近似、内外盘差分与区间 VWAP 的研究证据",
+            key="longhu_order_book", label="开盘啦观察池五档盘口", role="QI、OFI 近似、内外盘差分与区间 VWAP 的研究证据",
             configured=os.getenv("INTRADAY_ORDER_BOOK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
-            expected_active=session_active, last_observed_at=order_book_quote.get("last_observed_at"), max_age_seconds=12.0,
-            cadence="显式观察池批量每 3 秒", health_row=order_book_health,
+            expected_active=session_active, last_observed_at=order_book_quote.get("last_observed_at"), max_age_seconds=90.0,
+            cadence="显式观察池每 30 秒逐只请求", health_row=order_book_health,
             details={"persisted_rows": int(order_book_quote.get("rows") or 0),
                      "enabled_watch_count": int(watch_row["enabled"] or 0),
                      "max_symbols": deps.order_book_max_symbols(),
                      "uncovered_watch_count": max(0, int(watch_row["enabled"] or 0) - deps.order_book_max_symbols()),
-                     "scope": "单个腾讯批量请求覆盖观察池；特征仅观测，不改变触发阈值"},
+                     "scope": "逐只开盘啦盘口请求覆盖观察池；特征仅观测，不改变触发阈值"},
             startup_grace_seconds=20.0,
         ),
         runtime_item(
-            key="super_get_rt_k", label="Super GET 秒级 rt_k", role="与腾讯现价交叉确认，冲突时阻止直接推送",
+            key="super_get_rt_k", label="Super GET 秒级 rt_k", role="与开盘啦现价交叉确认，冲突时阻止直接推送",
             configured=super_configured, expected_active=session_active and special_window,
             last_observed_at=fast_observed_at, max_age_seconds=30.0, cadence="特别窗口全局每秒启动 1 次",
             health_row=fast_health, details={"persisted_fast_rows": int(fast_quote.get("rows") or 0),
@@ -200,14 +202,14 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
                      "health_provider_key": rt_min_health.get("provider_key")}, startup_grace_seconds=90.0,
         ),
         runtime_item(
-            key="tencent_minute_profile", label="腾讯观察池分钟剖面", role="盘末保存全部显式观察池的同刻量能基线",
+            key="longhu_minute_profile", label="开盘啦观察池分钟剖面", role="盘末保存全部显式观察池的同刻量能基线",
             configured=os.getenv("INTRADAY_MINUTE_PROFILE_CAPTURE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
             expected_active=close_profile_active,
             last_observed_at=minute_profile.get("last_observed_at"), max_age_seconds=180.0,
             cadence="交易日 14:55–15:00；默认最多 40 只",
             details={"persisted_rows": int(minute_profile.get("rows") or 0),
                      "latest_trading_date": str(minute_profile.get("latest_trading_date") or "") or None,
-                     "source": "tencent_intraday_minutes",
+                     "source": "longhuvip_intraday_minutes",
                      "feature_scope": "分钟收盘与累计量额；不伪装为真实分钟 OHLC"}, startup_grace_seconds=90.0,
         ),
         runtime_item(
@@ -226,7 +228,7 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
         ),
     ]
     # A recent full-market snapshot alone must not paint the decision path
-    # green. At least one current scan must contain a fresh direct Tencent
+    # green. At least one current scan must contain a fresh direct Longhu
     # watch quote for every enabled symbol before a human-facing alert can be
     # confirmed; Sina/all-A evidence remains visible in the details instead.
     required_watch_quotes = int(watch_row["enabled"] or 0)
@@ -235,7 +237,7 @@ def intraday_services_status_payload(deps: IntradayStatusDependencies, *, eviden
         order_book_item = items[2]
         order_book_item["state"] = "degraded"
         order_book_item["last_error"] = (
-            f"fresh direct Tencent watch quotes cover {confirmed_watch_quotes}/{required_watch_quotes}; "
+            f"fresh direct Longhu watch quotes cover {confirmed_watch_quotes}/{required_watch_quotes}; "
             "fallback/all-A evidence cannot confirm alerts"
         )
     if session_active and public_flow_snapshot_eligible is False:

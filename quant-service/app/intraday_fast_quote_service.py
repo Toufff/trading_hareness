@@ -17,7 +17,7 @@ def cross_source_confirmation(
     *,
     number: Callable[[Any], float | None],
 ) -> dict[str, Any]:
-    """Compare a Tencent watch price with a persisted Super GET sample.
+    """Compare the direct watch price with a persisted Super GET sample.
 
     Provider fetches and database lookups remain outside this pure boundary.
     Live scanning and recorded-event replay can therefore share the exact
@@ -31,19 +31,19 @@ def cross_source_confirmation(
         return {"status": "invalid", "max_age_seconds": max_age_seconds}
     age_seconds = max(0.0, (observed_at - fast_observed_at).total_seconds())
     fast_price = number(fast_quote.get("price"))
-    tencent_price = number((quote or {}).get("price"))
+    watch_price = number((quote or {}).get("price"))
     base = {
         "observed_at": fast_observed_at.isoformat(),
         "age_seconds": round(age_seconds, 2),
         "max_age_seconds": max_age_seconds,
         "super_get_price": fast_price,
-        "tencent_price": tencent_price,
+        "watch_price": watch_price,
     }
     if age_seconds > max_age_seconds:
         return {**base, "status": "stale"}
-    if fast_price is None or fast_price <= 0 or tencent_price is None or tencent_price <= 0:
+    if fast_price is None or fast_price <= 0 or watch_price is None or watch_price <= 0:
         return {**base, "status": "invalid"}
-    gap_pct = ((fast_price / tencent_price) - 1) * 100
+    gap_pct = ((fast_price / watch_price) - 1) * 100
     return {
         **base,
         "status": "confirmed" if abs(gap_pct) <= 0.8 else "mismatch",

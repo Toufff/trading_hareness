@@ -18,7 +18,7 @@ test('accepts a research-only snapshot from a no-background candidate', () => {
         observed_count: 20,
         shadow_eligible_count: 0,
         decision_eligible_count: 0,
-        quote_sources: ['tencent_free'],
+        quote_sources: ['longhuvip'],
       },
     },
     scope: 'research_only_no_orders',
@@ -30,7 +30,7 @@ test('accepts a research-only snapshot from a no-background candidate', () => {
 
 test('rejects a response that crosses the research-only decision boundary', () => {
   assert.throws(() => validateShadowRelease(healthy, {
-    intraday: { latest_batch: { observed_count: 1, shadow_eligible_count: 0, decision_eligible_count: 1, quote_sources: ['tencent_free'] } },
+    intraday: { latest_batch: { observed_count: 1, shadow_eligible_count: 0, decision_eligible_count: 1, quote_sources: ['longhuvip'] } },
     scope: 'research_only_no_orders',
   }), /decision_eligible_count must remain 0/);
 });

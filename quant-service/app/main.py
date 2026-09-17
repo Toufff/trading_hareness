@@ -122,7 +122,6 @@ from .intraday_quote_normalization import (
     merge_eastmoney_watch_flows as merge_intraday_eastmoney_watch_flows_pure,
     merge_longhu_watch_quotes as merge_intraday_longhu_watch_quotes_pure,
     merge_sina_watch_quotes as merge_intraday_sina_watch_quotes_pure,
-    merge_watch_quote_prices as merge_intraday_watch_quote_prices_pure,
     observation_source as intraday_quote_observation_source_pure,
     quote_from_fuyao as intraday_quote_from_fuyao_pure,
 )
@@ -305,11 +304,14 @@ from .free_market_providers import (
     free_provider_status,
     sina_quote,
     sina_quotes,
-    tencent_daily,
-    tencent_index_daily,
-    tencent_intraday_minutes,
-    tencent_order_book_quotes,
 )
+from .longhu_market_data import (
+    LonghuMarketDataError,
+    longhu_daily,
+    longhu_index_daily,
+    longhu_order_book_quotes,
+)
+from .market_source_names import LONGHU_MINUTE_FEATURE, LONGHU_PROVIDER
 from .order_book_features import aggregate_order_book_observations
 from . import intraday_order_book_service as order_book_service
 from . import intraday_order_book_runner
@@ -1668,8 +1670,9 @@ def ths_concept_top_stocks(flow_rows: list[dict[str, Any]], member_rows: list[di
                            quotes: dict[str, dict[str, Any]], top_stocks: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Join Tushare concept flows and members by their common THS ``ts_code``.
 
-    Display names are never used as a cross-source membership key.  Tencent is
-    only the intraday stock-ranking cross-section after the exact THS join.
+    Display names are never used as a cross-source membership key.  The all-A
+    quote snapshot is only the intraday stock-ranking cross-section after the
+    exact THS join.
     """
     members_by_sector: dict[str, list[str]] = {}
     for row in member_rows:
@@ -1734,14 +1737,13 @@ INTRADAY_CONFIRMATION_WINDOW = timedelta(minutes=5)
 INTRADAY_ALERT_COOLDOWN = timedelta(minutes=10)
 INTRADAY_ALERT_MAX_ATTEMPTS = 3
 # This process-local cache contains only the current explicit watch/peer
-# basket.  Entries expire quickly and are pruned in ``intraday_tencent_surge_context``.
-_intraday_tencent_minute_cache: dict[str, tuple[float, dict[str, Any] | None, str | None]] = {}
+# basket.  Entries expire quickly and are pruned in ``intraday_surge_context``.
 _intraday_longhu_minute_cache: dict[str, tuple[float, dict[str, Any] | None, str | None]] = {}
 INTRADAY_ALL_A_SNAPSHOT_TTL_SECONDS = 30.0
 
 
 async def _fetch_intraday_all_a_snapshot_rows() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Fetch the documented Fuyao/THS cross-section without a Tencent all-A call."""
+    """Fetch the documented Fuyao/THS all-A cross-section."""
     return await fuyao_all_a_snapshot_rows()
 
 
@@ -1774,11 +1776,6 @@ async def intraday_all_a_snapshot() -> tuple[list[dict[str, Any]], dict[str, Any
     return rows, {**supplier_status, **cache_status}
 
 
-def merge_intraday_watch_quote_prices(quotes: dict[str, dict[str, Any]], depth_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Overlay fresh batched watch prices without inventing flow fields."""
-    return merge_intraday_watch_quote_prices_pure(quotes, depth_rows, number=intraday_number)
-
-
 def merge_intraday_longhu_watch_quotes(
     quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -1787,16 +1784,16 @@ def merge_intraday_longhu_watch_quotes(
 
 
 def merge_intraday_sina_watch_quotes(quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Use Sina only as a price fallback; do not invent Tencent flow fields."""
+    """Use Sina only as a price fallback; do not invent flow fields."""
     return merge_intraday_sina_watch_quotes_pure(quotes, rows, number=intraday_number)
 
 
 def merge_intraday_eastmoney_watch_flows(quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Overlay bounded Eastmoney watch-basket flow without changing price source.
 
-    The direct Tencent depth batch remains the only decision-eligible price
+    The licensed Longhu watch quote remains the only decision-eligible price
     confirmation.  Eastmoney here only fills same-scan flow/turnover features
-    after the all-A Tencent percentile snapshot is unavailable.
+    when the all-A percentile snapshot is unavailable.
     """
     return merge_intraday_eastmoney_watch_flows_pure(quotes, rows, number=intraday_number)
 
@@ -1804,8 +1801,8 @@ def merge_intraday_eastmoney_watch_flows(quotes: dict[str, dict[str, Any]], rows
 def intraday_quote_observation_source(quote: dict[str, Any] | None) -> str:
     """Return the actual provider used for one persisted watch-price frame.
 
-    The watch scan may use a same-request Tencent depth quote, an all-A
-    Tencent snapshot, or a Sina fallback.  They must never be stored under the
+    The watch scan may use a same-request Longhu quote, the Fuyao/THS all-A
+    snapshot, or a Sina fallback.  They must never be stored under the
     same provider label: a later return calculation or freshness review needs
     to know exactly which source produced the price.
     """
@@ -1816,7 +1813,7 @@ def intraday_quote_exchange_time_status(quote: dict[str, Any] | None, observed_a
                                         max_age_seconds: float) -> dict[str, Any]:
     """Classify an upstream quote timestamp against one Shanghai-clock SLO.
 
-    Tencent emits one compact ``YYYYmmddHHMMSS`` field in its watch-depth
+    Longhu emits one compact ``YYYYmmddHHMMSS`` trade time in its watch-quote
     adapter; Sina emits date/time separately.  Parsing is deliberately strict:
     a missing or malformed source timestamp cannot masquerade as a freshly
     fetched quote for an alert confirmation.
@@ -1832,7 +1829,7 @@ def intraday_quote_from_fuyao(row: dict[str, Any]) -> dict[str, Any] | None:
 def annotate_intraday_flow_percentiles(quotes: dict[str, dict[str, Any]]) -> None:
     """Attach a cross-sectional main-flow percentile without assuming units.
 
-    Tencent's public flow unit is provider-specific, so extreme buy/sell is
+    The public flow unit is provider-specific, so extreme buy/sell is
     judged against the same all-A snapshot instead of a fragile absolute yuan
     threshold.  This is the cross-sectional normalization pattern used by
     factor research systems, applied only to the observed universe.
@@ -1959,7 +1956,7 @@ async def intraday_watch_volume_fallback(symbols: list[str]) -> dict[str, float]
     ProMax ``rt_k`` answers the whole watch basket in one request with a
     second-resolution ``updated_at``, so it is an independent third source for
     the one input the derived flow metrics need.  It supplies volume only; the
-    decision price still comes from the Tencent batch.
+    decision price still comes from the licensed Longhu quote.
     """
     if not symbols:
         return {}
@@ -2001,7 +1998,7 @@ def intraday_derived_flow_divergence(
 
 
 def intraday_minute_features(rows: list[dict[str, Any]], *, lookback: int = 20,
-                             source: str = "tencent_free") -> dict[str, Any] | None:
+                             source: str = LONGHU_MINUTE_FEATURE) -> dict[str, Any] | None:
     """Build a causal price/volume burst feature from normalized minute rows."""
     return pure_intraday_minute_features(rows, lookback=lookback, source=source, number=intraday_number)
 
@@ -2063,7 +2060,7 @@ def run_ten_day_leader_rotation(request: TenDayLeaderRotationRunRequest) -> dict
 
 
 STRATEGY_PATTERN_MODEL_VERSION = "post-close-limit-lift-pattern-v6"
-TENCENT_INTRADAY_MINUTE_CAPABILITY = "intraday_minute"
+LONGHU_INTRADAY_MINUTE_CAPABILITY = "intraday_minute"
 LOCAL_CAPACITY_HTTP_DETAIL = "local processing capacity is temporarily saturated; retry shortly"
 
 
@@ -2077,13 +2074,13 @@ def is_circuit_open_http_error(error: HTTPException) -> bool:
     return error.status_code == 503 and "circuit-open" in str(error.detail)
 
 
-def persist_tencent_intraday_minute_health(completed: int, errors: list[str], latency_ms: int | None = None) -> None:
+def persist_longhu_intraday_minute_health(completed: int, errors: list[str], latency_ms: int | None = None) -> None:
     """Persist one aggregate minute-tape outcome, never one health row per symbol."""
     with db.transaction() as connection:
         if completed:
-            record_provider_success(connection, "tencent_free", TENCENT_INTRADAY_MINUTE_CAPABILITY, completed, latency_ms)
+            record_provider_success(connection, LONGHU_PROVIDER, LONGHU_INTRADAY_MINUTE_CAPABILITY, completed, latency_ms)
         elif errors:
-            record_provider_failure(connection, "tencent_free", TENCENT_INTRADAY_MINUTE_CAPABILITY,
+            record_provider_failure(connection, LONGHU_PROVIDER, LONGHU_INTRADAY_MINUTE_CAPABILITY,
                                     " | ".join(errors)[:500], latency_ms)
 
 
@@ -2179,11 +2176,11 @@ def _strategy_pattern_mining_dependencies() -> StrategyPatternMiningDependencies
         latest_date=latest_strategy_pattern_date, refresh_sources=refresh_strategy_pattern_sources,
         sample_candidates=strategy_pattern_sample_candidates,
         open_provider_capabilities=open_provider_capabilities,
-        minute_capability=TENCENT_INTRADAY_MINUTE_CAPABILITY, fetch_minutes=tencent_intraday_minutes,
+        minute_capability=LONGHU_INTRADAY_MINUTE_CAPABILITY, fetch_minutes=intraday_longhu_minutes,
         intraday_pattern=intraday_limit_lift_pattern, review_score=strategy_pattern_review_score,
-        persist_minute_health=persist_tencent_intraday_minute_health, persist_run=persist_strategy_pattern_run,
+        persist_minute_health=persist_longhu_intraday_minute_health, persist_run=persist_strategy_pattern_run,
         run_database=run_database_blocking, model_version=STRATEGY_PATTERN_MODEL_VERSION,
-        handled_errors=(asyncio.TimeoutError, httpx.HTTPError, FreeProviderError, ValueError),
+        handled_errors=(asyncio.TimeoutError, LonghuMarketDataError, RuntimeError, ValueError),
     )
 
 
@@ -2427,7 +2424,7 @@ def intraday_order_book_retention_days() -> int:
 
 
 def intraday_order_book_max_symbols() -> int:
-    """Bound a single Tencent depth batch without silently losing watches."""
+    """Bound a single Longhu depth batch without silently losing watches."""
     return order_book_service.max_symbols()
 
 
@@ -2449,12 +2446,12 @@ async def capture_intraday_order_book_snapshot(symbols: list[str]) -> dict[str, 
     """Capture one pooled, bounded depth snapshot for the explicit watchlist."""
     return await order_book_service.capture_snapshot(
         symbols, max_symbols_value=intraday_order_book_max_symbols(),
-        fetch_quotes=tencent_order_book_quotes,
+        fetch_quotes=longhu_order_book_quotes,
         persist=persist_intraday_order_book_observations,
         persist_error=persist_intraday_order_book_failure,
         run_database=run_database_blocking,
         safe_error=safe_error_detail,
-        handled_errors=(httpx.HTTPError, FreeProviderError, ValueError, ExecutorSaturatedError, asyncio.TimeoutError),
+        handled_errors=(LonghuMarketDataError, RuntimeError, ValueError, ExecutorSaturatedError, asyncio.TimeoutError),
     )
 
 
@@ -2473,7 +2470,7 @@ async def capture_intraday_minute_sessions(symbols: list[str]) -> dict[str, Any]
     return await _intraday_minute_capture_actions.capture(
         symbols,
         realtime_session=realtime_market_session_async,
-        fetch_minutes=tencent_intraday_minutes,
+        fetch_minutes=intraday_longhu_minutes,
         run_database=run_database_blocking,
         parse_minute=offline_minute_row,
         ensure_instrument=ensure_offline_instrument,
@@ -2481,23 +2478,6 @@ async def capture_intraday_minute_sessions(symbols: list[str]) -> dict[str, Any]
     )
 
 
-async def intraday_tencent_surge_context(
-    watches: list[dict[str, Any]], *, mapped_peers: dict[str, dict[str, Any]] | None = None,
-    priority_symbols: list[str] | None = None,
-) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Compatibility entry point backed by the bounded minute-context service."""
-    return await capture_intraday_surge_context(
-        watches, mapped_peers=mapped_peers, priority_symbols=priority_symbols, cache=_intraday_tencent_minute_cache,
-        max_symbols=intraday_minute_profile_max_symbols,
-        open_capabilities=open_provider_capabilities,
-        capability=TENCENT_INTRADAY_MINUTE_CAPABILITY,
-        fetch_minutes=tencent_intraday_minutes,
-        minute_features=intraday_minute_features,
-        persist_health=persist_tencent_intraday_minute_health,
-        run_database=run_database_blocking,
-        safe_error=safe_error_detail,
-        handled_errors=(asyncio.TimeoutError, httpx.HTTPError, FreeProviderError, ValueError),
-    )
 
 
 async def intraday_board_cache_evidence(observed_at: datetime) -> dict[str, Any]:
@@ -2513,7 +2493,7 @@ async def intraday_board_cache_evidence(observed_at: datetime) -> dict[str, Any]
 
 def intraday_fast_quote_confirmation(quote: dict[str, Any] | None, fast_quote: dict[str, Any] | None,
                                      observed_at: datetime, max_age_seconds: float = 30.0) -> dict[str, Any]:
-    """Compare Tencent with the latest rotating Super GET ``rt_k`` sample.
+    """Compare the direct watch quote with the latest rotating Super GET ``rt_k`` sample.
 
     ``rt_k`` has no exchange timestamp, so freshness comes from our persisted
     observation time. Missing or stale evidence does not veto a signal. A
@@ -2654,7 +2634,8 @@ def _intraday_watchlist_scan_runtime() -> IntradayWatchlistScanRuntime:
         high_frequency_window=intraday_high_frequency_window,
         quote_capture_dependencies=WatchQuoteCaptureDependencies(
             now=asyncio.get_running_loop().time, all_a_snapshot=intraday_all_a_snapshot,
-            tencent_watch_quotes=tencent_order_book_quotes, sina_quotes=sina_quotes,
+            licensed_watch_quotes=intraday_longhu_watch_quotes,
+            merge_licensed_prices=merge_intraday_longhu_watch_quotes, sina_quotes=sina_quotes,
             eastmoney_watch_flows=eastmoney_watch_flow_quotes,
             watch_flow_reference=intraday_watch_flow_reference,
             watch_volume_fallback=intraday_watch_volume_fallback,
@@ -2665,7 +2646,6 @@ def _intraday_watchlist_scan_runtime() -> IntradayWatchlistScanRuntime:
             merge_eastmoney_flows=merge_intraday_eastmoney_watch_flows,
             annotate_percentiles=annotate_intraday_flow_percentiles,
             annotate_flow_provenance=pure_annotate_flow_snapshot_provenance,
-            merge_watch_prices=merge_intraday_watch_quote_prices,
             merge_sina_prices=merge_intraday_sina_watch_quotes,
             quote_freshness=intraday_quote_exchange_time_status,
             consume_background_exception=consume_background_task_exception, safe_error=safe_error_detail,
@@ -2673,8 +2653,6 @@ def _intraday_watchlist_scan_runtime() -> IntradayWatchlistScanRuntime:
             watch_quote_errors=(httpx.HTTPError, FreeProviderError, ValueError),
             watch_flow_reference_errors=(psycopg.Error, ExecutorSaturatedError, ValueError),
             all_a_snapshot_errors=(FuyaoProviderError, ValueError),
-            licensed_watch_quotes=intraday_longhu_watch_quotes,
-            merge_licensed_prices=merge_intraday_longhu_watch_quotes,
             licensed_quote_errors=(Exception,),
         ),
         surge_context=intraday_surge_context, peer_context=intraday_peer_context,
@@ -2688,10 +2666,10 @@ def _intraday_watchlist_scan_runtime() -> IntradayWatchlistScanRuntime:
         read_shadow_pool=read_async_ten_day_leader_rotation_pool,
         shadow_rotation_due=ten_day_leader_rotation_intraday_due,
         shadow_rotation_slice=select_intraday_rotation_slice,
-        tencent_watch_quotes=tencent_order_book_quotes,
-        merge_watch_prices=merge_intraday_watch_quote_prices,
+        shadow_watch_quotes=intraday_longhu_watch_quotes,
+        merge_shadow_prices=merge_intraday_longhu_watch_quotes,
         safe_error=safe_error_detail,
-        shadow_quote_errors=(httpx.HTTPError, FreeProviderError, ValueError),
+        shadow_quote_errors=(LonghuMarketDataError, RuntimeError, ValueError, asyncio.TimeoutError),
         rotation_persistence_dependencies=TenDayLeaderRotationIntradayDependencies(
             database=db, quote_from_all_a=intraday_quote_from_fuyao,
             quote_source=intraday_quote_observation_source,
@@ -3007,7 +2985,7 @@ async def intraday_super_get_fast_quote_loop() -> None:
 async def intraday_minute_profile_capture_loop() -> None:
     """Capture the explicit-watch EAC baseline once near each A-share close.
 
-    Tencent minute tapes are requested during the final continuous-auction
+    Longhu minute tapes are requested during the final continuous-auction
     window. A failed fetch may retry during the short 14:55--14:59 window; a
     completed or partial capture is never repeated that day.
     """
@@ -3191,7 +3169,7 @@ async def sync_strategy_index_context(as_of_date: date) -> dict[str, Any]:
         fetch_public=eastmoney_daily,
         persist_public=persist_free_daily,
         run_database=run_database_blocking,
-        fetch_secondary=tencent_index_daily,
+        fetch_secondary=longhu_index_daily,
     )
 
 
@@ -3199,36 +3177,19 @@ async def intraday_surge_context(
     watches: list[dict[str, Any]], *, mapped_peers: dict[str, dict[str, Any]] | None = None,
     priority_symbols: list[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Use licensed minute paths first and retain Tencent as an automatic fallback."""
-    licensed_features: dict[str, dict[str, Any]] = {}
-    licensed_status: dict[str, Any] = {
-        "provider_status": "disabled", "provider": "longhuvip", "reason": "longhu_not_configured",
-    }
-    if longhu_vendor_configured():
-        licensed_features, licensed_status = await capture_intraday_surge_context(
-            watches, mapped_peers=mapped_peers, priority_symbols=priority_symbols,
-            cache=_intraday_longhu_minute_cache, max_symbols=intraday_minute_profile_max_symbols,
-            open_capabilities=open_provider_capabilities, capability="intraday_minute",
-            fetch_minutes=intraday_longhu_minutes, minute_features=intraday_minute_features,
-            persist_health=lambda *_args: None, run_database=run_database_blocking,
-            safe_error=safe_error_detail, handled_errors=(Exception,),
-            provider_key="longhuvip", feature_source="longhuvip_minute",
-            check_provider_circuit=False,
-        )
-    fallback_features, fallback_status = await intraday_tencent_surge_context(
+    """Build minute context from licensed Longhu minute paths."""
+    if not longhu_vendor_configured():
+        return {}, {"provider_status": "disabled", "provider": LONGHU_PROVIDER, "reason": "longhu_not_configured"}
+    features, status = await capture_intraday_surge_context(
         watches, mapped_peers=mapped_peers, priority_symbols=priority_symbols,
+        cache=_intraday_longhu_minute_cache, max_symbols=intraday_minute_profile_max_symbols,
+        open_capabilities=open_provider_capabilities, capability=LONGHU_INTRADAY_MINUTE_CAPABILITY,
+        fetch_minutes=intraday_longhu_minutes, minute_features=intraday_minute_features,
+        persist_health=persist_longhu_intraday_minute_health, run_database=run_database_blocking,
+        safe_error=safe_error_detail, handled_errors=(Exception,),
+        provider_key=LONGHU_PROVIDER, feature_source=LONGHU_MINUTE_FEATURE,
     )
-    return {**fallback_features, **licensed_features}, {
-        "provider_status": (
-            "completed" if licensed_features else str(fallback_status.get("provider_status") or "failed")
-        ),
-        "primary": licensed_status,
-        "fallback": fallback_status,
-        "completed": sorted(set(fallback_features) | set(licensed_features)),
-        "licensed_completed": sorted(licensed_features),
-        "fallback_completed": sorted(set(fallback_features) - set(licensed_features)),
-        "policy": "longhuvip_primary_tencent_fallback",
-    }
+    return features, {**status, "completed": sorted(features), "policy": "longhuvip_only"}
 
 
 def analyst_execution_context(connection: Any, as_of_date: date, observed_at: datetime | None = None) -> dict[str, Any]:
@@ -3291,8 +3252,8 @@ async def intraday_decision_card_async(symbol: str) -> dict[str, Any]:
 def strategy_intraday_candidates(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     """Turn an exact board-member join into transparent, bounded candidates.
 
-    Board scores use within-taxonomy ranks.  Stock scores then use Tencent's
-    relative main flow, volume ratio, turnover and price change.  The function
+    Board scores use within-taxonomy ranks.  Stock scores then use the quote
+    snapshot's relative main flow, volume ratio, turnover and price change.  The function
     is deliberately pure so its time semantics and risk gates are testable.
     """
     return select_intraday_candidates(items, limit, rank=strategy_rank, number=intraday_number)
@@ -3901,7 +3862,7 @@ async def stock_study_free_fetch(label: str, provider: str, capability: str, fet
             persist_success=persist_stock_study_free_result,
             persist_failure=persist_stock_study_free_failure,
             safe_error_detail=safe_error_detail,
-            request_errors=(httpx.HTTPError, FreeProviderError, AkShareProviderError, ValueError),
+            request_errors=(httpx.HTTPError, FreeProviderError, AkShareProviderError, LonghuMarketDataError, RuntimeError, ValueError, asyncio.TimeoutError),
         ),
     )
 
@@ -3940,7 +3901,7 @@ async def build_stock_study(symbol: str, request: StockStudyRequest) -> dict[str
             sync_baostock=sync_baostock, free_fetch=stock_study_free_fetch,
             eastmoney_daily=eastmoney_daily, eastmoney_quote=eastmoney_quote,
             run_akshare=run_akshare_blocking, akshare_daily=akshare_daily,
-            tencent_daily=tencent_daily, sina_quote=sina_quote, cninfo_announcements=cninfo_announcements,
+            longhu_daily=longhu_daily, sina_quote=sina_quote, cninfo_announcements=cninfo_announcements,
             run_database=run_database_blocking, persist_market_events=persist_market_events,
             persist_announcement_health=persist_announcement_provider_health, technical_summary=technical_summary,
             analyst_claims=stock_study_claims, recent_events=recent_market_events,
@@ -3991,7 +3952,7 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
             "ths_member_backfill": ths_concept_member_backfill_enabled(),
             "all_board_member_backfill": all_board_member_backfill_enabled(),
             "minute_profile_capture": intraday_minute_profile_capture_enabled(),
-            "tencent_order_book": intraday_order_book_enabled() and interval_seconds >= 30,
+            "longhu_order_book": intraday_order_book_enabled() and interval_seconds >= 30,
             "board_flow_curve": intraday_board_curve_enabled(),
             "market_event_capture": Settings.from_environ().market_event_capture_enabled,
             "all_a_level1_snapshot": Settings.from_environ().all_a_level1_capture_enabled,
@@ -4002,7 +3963,7 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
             "post_close_strategy": post_close_strategy_loop, "ten_day_leader_rotation": ten_day_leader_rotation_loop,
             "daily_strategy_summary": daily_strategy_summary_loop, "ths_member_backfill": ths_concept_member_backfill_loop,
             "all_board_member_backfill": all_board_member_backfill_loop,
-            "minute_profile_capture": intraday_minute_profile_capture_loop, "tencent_order_book": intraday_order_book_loop,
+            "minute_profile_capture": intraday_minute_profile_capture_loop, "longhu_order_book": intraday_order_book_loop,
             "board_flow_curve": intraday_board_flow_curve_loop,
             "market_event_capture": market_event_capture_loop,
             "all_a_level1_snapshot": all_a_level1_snapshot_capture_loop,

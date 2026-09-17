@@ -10,11 +10,12 @@ from app.longhu_vendor_source import (
     LonghuVendorConfig,
     LonghuVendorSource,
     SharedLonghuReadSource,
+    longhu_security_id,
     normalize_stock_symbol,
+    parse_daily_kline_payload,
     parse_industry_stock_row,
     parse_stock_minute_payload,
     parse_stock_snapshot_payload,
-    parse_tencent_quote_text,
     safe_page_size,
 )
 
@@ -44,19 +45,23 @@ class LonghuVendorSourceTests(unittest.TestCase):
         self.assertEqual(parsed["pe"], 18.6)
         self.assertEqual(parsed["pb"], 2.4)
 
-    def test_tencent_batch_parser_keeps_exchange_date_and_ohlc(self):
-        fields = [""] * 39
-        fields[1], fields[3], fields[4], fields[5] = "哈药股份", "9.49", "9.29", "9.30"
-        fields[6], fields[30], fields[32] = "123456", "20260901150003", "2.15"
-        fields[33], fields[34], fields[37] = "9.58", "9.18", "125000.5"
-        text = f'v_sh600664="{"~".join(fields)}";'
-        rows = parse_tencent_quote_text(text, {"sh600664": "600664.SH"})
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["trade_date"], "20260901")
-        self.assertEqual(rows[0]["high"], 9.58)
-        self.assertEqual(rows[0]["low"], 9.18)
-        self.assertEqual(rows[0]["vol"], 123456)
-        self.assertEqual(rows[0]["amount"], 1_250_005_000)
+    def test_daily_kline_is_dated_unadjusted_lots_and_thousand_cny(self):
+        payload = {"x": ["20260915", "20260916", "20260917"],
+                   "y": [[15.86, 16.36, 16.53, 15.86], [16.37, 16.85, 16.93, 16.21], [16.68, 16.39, 16.91, 16.35]],
+                   "vol": [2180763, 2596268, 2111340], "bal": [3550286442, 4321902474, 3501552411]}
+        rows = parse_daily_kline_payload(payload, "002185.SZ", "20260916", "20260917")
+        self.assertEqual([row["trade_date"] for row in rows], ["20260916", "20260917"])
+        self.assertEqual((rows[1]["open"], rows[1]["close"], rows[1]["high"], rows[1]["low"]), (16.68, 16.39, 16.91, 16.35))
+        self.assertEqual((rows[1]["pre_close"], rows[1]["vol"], rows[1]["amount"]), (16.85, 2111340, 3501552.411))
+        self.assertEqual(parse_daily_kline_payload({**payload, "y": payload["y"][:2]}, "002185.SZ", "20260901", "20260917"), [])
+
+    def test_indexes_need_an_exchange_and_map_to_vendor_ids(self):
+        self.assertEqual(longhu_security_id("000001.SH"), ("000001.SH", "SH000001"))
+        self.assertEqual(longhu_security_id("399001.SZ"), ("399001.SZ", "SZ399001"))
+        self.assertEqual(longhu_security_id("000001"), ("000001.SZ", "000001"))
+        self.assertEqual(longhu_security_id("002185.SZ"), ("002185.SZ", "002185"))
+        self.assertEqual(longhu_security_id("sh000300"), ("000300.SH", "SH000300"))
+        self.assertIsNone(longhu_security_id("399001"))
 
     def test_symbol_normalization_is_explicit(self):
         self.assertEqual(normalize_stock_symbol("600664"), "600664.SH")
@@ -95,6 +100,17 @@ class LonghuVendorSourceTests(unittest.TestCase):
         self.assertEqual(parsed["trade_time"], "20260901145901")
         self.assertEqual(parsed["price"], 9.49)
 
+    def test_stock_snapshot_carries_lot_depth_and_active_side_volume(self):
+        weituo = {"b1": [16.39, 2519], "b2": [16.38, 3627], "b3": [0, 0], "s1": [16.4, 3944], "s2": [16.41, 1147]}
+        parsed = parse_stock_snapshot_payload({
+            "code": "002185", "name": "华天科技", "day": "20260917", "preclose_px": 16.85, "weituo": weituo,
+            "real": {"last_px": 16.39, "time": "150003000", "total_amount": 2111340, "total_turnover": 3501552411,
+                     "amount_in": 1162931, "amount_out": 948408, "avg_px": 16.585},
+        }, "002185.SZ")
+        self.assertEqual(parsed["bids"][:3], [{"price": 16.39, "size": 2519}, {"price": 16.38, "size": 3627}, {"price": 0.0, "size": 0.0}])
+        self.assertEqual(len(parsed["asks"]), 5)
+        self.assertEqual((parsed["outer_volume_lot"], parsed["inner_volume_lot"]), (948408, 1162931))
+
     def test_stock_minutes_are_normalized_for_existing_feature_engine(self):
         rows = parse_stock_minute_payload({
             "trend": [
@@ -104,9 +120,15 @@ class LonghuVendorSourceTests(unittest.TestCase):
             ],
         }, "600664.SH")
         self.assertEqual([row["volume_lot"] for row in rows], [100.0, 60.0, 80.0])
-        self.assertEqual(rows[1]["amount"], 60300.0)
+        # The trend VWAP is cumulative: 10.05 x 160 lots x 100 - 10.0 x 100 lots x 100.
+        self.assertEqual((rows[1]["cumulative_amount"], rows[1]["amount"]), (160800.0, 60800.0))
         self.assertEqual(rows[2]["cumulative_segment"], 1)
         self.assertFalse(rows[-1]["is_complete"])
+
+    def test_index_minutes_keep_the_vendor_session_date(self):
+        rows = parse_stock_minute_payload({"day": "20260917", "trend": [["09:30", 3877, 3878.952, 3717122, 1]]}, "000001.SH")
+        self.assertEqual((rows[0]["ts_code"], rows[0]["session_date"]), ("000001.SH", "2026-09-17"))
+        self.assertEqual(parse_stock_minute_payload({"trend": [["09:30", 1, 1, 1]]}, "sh000001"), parse_stock_minute_payload({"trend": [["09:30", 1, 1, 1]]}, "000001.SH"))
 
     def test_missing_minute_volume_does_not_fabricate_a_zero_amount(self):
         # A None/unparseable volume field is not evidence of a genuine

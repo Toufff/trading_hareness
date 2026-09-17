@@ -14,7 +14,7 @@ from app.runtime_executors import ExecutorSaturatedError
 
 class WatchQuoteCaptureTests(unittest.TestCase):
     @staticmethod
-    def dependencies(*, all_a_snapshot, tencent_watch_quotes, sina_quotes, eastmoney_watch_flows, calls,
+    def dependencies(*, all_a_snapshot, direct_watch_quotes, sina_quotes, eastmoney_watch_flows, calls,
                      watch_flow_reference=None, derive_flow_metrics=None, volume_fallback=None):
         def quote_from_all_a(row):
             return dict(row)
@@ -31,10 +31,14 @@ class WatchQuoteCaptureTests(unittest.TestCase):
         def annotate_provenance(quotes, status):
             calls.append(("provenance", status.get("source")))
 
+        async def licensed_watch_quotes(symbols):
+            rows = await direct_watch_quotes(symbols)
+            return rows, {"status": "completed" if rows else "empty", "received": len(rows)}
+
         def merge_watch_prices(quotes, rows):
-            calls.append("watch_prices")
+            calls.append("licensed_prices")
             for row in rows:
-                quotes.setdefault(row["symbol"], {"symbol": row["symbol"]})["price_source"] = "tencent_watch_batch"
+                quotes.setdefault(row["symbol"], {"symbol": row["symbol"]})["price_source"] = "longhuvip_watch_quote"
 
         def merge_sina_prices(quotes, rows):
             calls.append("sina_prices")
@@ -50,7 +54,8 @@ class WatchQuoteCaptureTests(unittest.TestCase):
             return {}
 
         return WatchQuoteCaptureDependencies(
-            now=lambda: 10.0, all_a_snapshot=all_a_snapshot, tencent_watch_quotes=tencent_watch_quotes,
+            now=lambda: 10.0, all_a_snapshot=all_a_snapshot, licensed_watch_quotes=licensed_watch_quotes,
+            merge_licensed_prices=merge_watch_prices,
             sina_quotes=sina_quotes, eastmoney_watch_flows=eastmoney_watch_flows,
             watch_flow_reference=watch_flow_reference or no_reference,
             watch_volume_fallback=volume_fallback or no_volume_fallback,
@@ -61,19 +66,19 @@ class WatchQuoteCaptureTests(unittest.TestCase):
             ),
             quote_from_all_a=quote_from_all_a, merge_eastmoney_flows=merge_eastmoney_flows,
             annotate_percentiles=annotate_percentiles, annotate_flow_provenance=annotate_provenance,
-            merge_watch_prices=merge_watch_prices, merge_sina_prices=merge_sina_prices,
+            merge_sina_prices=merge_sina_prices,
             quote_freshness=lambda *_: {"status": "fresh"},
             consume_background_exception=lambda task: task.exception() if not task.cancelled() else None,
             safe_error=lambda detail, _: detail, executor_saturated_error=ExecutorSaturatedError,
             watch_quote_errors=(ValueError,), watch_flow_reference_errors=(ValueError,),
-            all_a_snapshot_errors=(ValueError,),
+            all_a_snapshot_errors=(ValueError,), licensed_quote_errors=(ValueError,),
         )
 
     def test_keeps_direct_watch_prices_and_cross_sectional_percentiles(self):
         async def all_a_snapshot():
             return [{"symbol": "000001.SZ", "close": 10.0}], {"status": "fresh", "cross_sectional": True}
 
-        async def direct(symbols, **_):
+        async def direct(symbols):
             self.assertEqual(symbols, ["000001.SZ"])
             return [{"symbol": "000001.SZ", "close": 10.1}]
 
@@ -88,24 +93,24 @@ class WatchQuoteCaptureTests(unittest.TestCase):
         capture = asyncio.run(capture_watch_quotes(
             ["000001.SZ"], datetime(2026, 8, 22, 1, tzinfo=timezone.utc), 20.0,
             self.dependencies(
-                all_a_snapshot=all_a_snapshot, tencent_watch_quotes=direct,
+                all_a_snapshot=all_a_snapshot, direct_watch_quotes=direct,
                 sina_quotes=unexpected, eastmoney_watch_flows=eastmoney, calls=calls,
             ),
         ))
-        self.assertEqual(capture.fresh_watch_rows[0]["close"], 10.1)
-        self.assertEqual(capture.quotes["000001.SZ"]["price_source"], "tencent_watch_batch")
+        self.assertEqual(capture.licensed_watch_rows[0]["close"], 10.1)
+        self.assertEqual(capture.quotes["000001.SZ"]["price_source"], "longhuvip_watch_quote")
         self.assertEqual(capture.quotes["000001.SZ"]["price_freshness"]["status"], "fresh")
         self.assertIn("percentiles", calls)
         self.assertEqual(capture.all_a_snapshot_status["status"], "fresh")
         self.assertEqual(capture.eastmoney_watch_flow_status["status"], "fresh")
         self.assertTrue(capture.eastmoney_watch_flow_status["research_confirmation_only"])
 
-    def test_licensed_quote_overlays_tencent_and_reports_independent_status(self):
+    def test_licensed_quote_is_the_direct_price_and_reports_independent_status(self):
         async def all_a_snapshot():
             return [], {"status": "unavailable"}
 
         async def direct(*_args, **_kwargs):
-            return [{"symbol": "000001.SZ", "close": 10.0}]
+            raise AssertionError("the replaced licensed fetch must be the only direct quote call")
 
         async def licensed(symbols):
             self.assertEqual(symbols, ["000001.SZ"])
@@ -117,7 +122,7 @@ class WatchQuoteCaptureTests(unittest.TestCase):
 
         calls = []
         dependencies = self.dependencies(
-            all_a_snapshot=all_a_snapshot, tencent_watch_quotes=direct,
+            all_a_snapshot=all_a_snapshot, direct_watch_quotes=direct,
             sina_quotes=empty, eastmoney_watch_flows=empty, calls=calls,
         )
 
@@ -157,7 +162,7 @@ class WatchQuoteCaptureTests(unittest.TestCase):
         capture = asyncio.run(capture_watch_quotes(
             ["000002.SZ"], datetime(2026, 8, 22, 1, tzinfo=timezone.utc), 45.0,
             self.dependencies(
-                all_a_snapshot=all_a_snapshot, tencent_watch_quotes=direct,
+                all_a_snapshot=all_a_snapshot, direct_watch_quotes=direct,
                 sina_quotes=sina, eastmoney_watch_flows=eastmoney, calls=calls,
             ),
         ))
@@ -193,7 +198,7 @@ class WatchQuoteCaptureTests(unittest.TestCase):
 
         calls = []
         dependencies = self.dependencies(
-            all_a_snapshot=all_a_snapshot, tencent_watch_quotes=direct, sina_quotes=sina,
+            all_a_snapshot=all_a_snapshot, direct_watch_quotes=direct, sina_quotes=sina,
             eastmoney_watch_flows=eastmoney, calls=calls, watch_flow_reference=reference,
             volume_fallback=volume_fallback,
             derive_flow_metrics=lambda quotes, ref, *, observed_at: pure_derive_watch_flow_metrics(
@@ -236,7 +241,7 @@ class WatchQuoteCaptureTests(unittest.TestCase):
 
         calls = []
         dependencies = self.dependencies(
-            all_a_snapshot=all_a_snapshot, tencent_watch_quotes=direct, sina_quotes=sina,
+            all_a_snapshot=all_a_snapshot, direct_watch_quotes=direct, sina_quotes=sina,
             eastmoney_watch_flows=eastmoney, calls=calls, watch_flow_reference=reference,
             derive_flow_metrics=lambda quotes, ref, *, observed_at: pure_derive_watch_flow_metrics(
                 quotes, ref, observed_at=observed_at,
@@ -280,7 +285,7 @@ class WatchQuoteCaptureTests(unittest.TestCase):
         capture = asyncio.run(capture_watch_quotes(
             ["000001.SZ"], datetime(2026, 8, 26, 3, 8, tzinfo=timezone.utc), 20.0,
             self.dependencies(
-                all_a_snapshot=all_a_snapshot, tencent_watch_quotes=direct, sina_quotes=sina,
+                all_a_snapshot=all_a_snapshot, direct_watch_quotes=direct, sina_quotes=sina,
                 eastmoney_watch_flows=eastmoney, calls=[], watch_flow_reference=broken_reference,
             ),
         ))

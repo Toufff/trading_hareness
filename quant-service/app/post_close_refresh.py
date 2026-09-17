@@ -228,7 +228,6 @@ async def run_refresh(
         sources = {
             "tushare_super": "requested through daily, THS flow, limit ladder, specialty and index phases",
             "akshare_eastmoney": "requested through supplements and board review",
-            "tencent": "requested through the close all-A snapshot and board review",
             "cninfo": stages.get("cninfo_announcements", {"status": "skipped"})["status"],
             "sina": "not used for full-market close; bounded stock-study fallback only",
             "xinhua_finance": "skipped: no licensed endpoint/authentication configured",

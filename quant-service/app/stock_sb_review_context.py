@@ -171,7 +171,7 @@ def fetch_order_book(connection: Any, *, symbol: str, day: date) -> list[dict[st
                raw->>'cumulative_amount' AS cumulative_amount,raw->>'trade_time' AS trade_time,
                raw->'order_book_features'->>'qi1' AS qi1,raw->'order_book_features'->>'qi5' AS qi5
           FROM quant.intraday_quote_observations
-         WHERE symbol=%s AND source_name='tencent_order_book' AND observed_at >= %s AND observed_at < %s
+         WHERE symbol=%s AND source_name IN ('longhuvip_order_book','tencent_order_book') AND observed_at >= %s AND observed_at < %s
          ORDER BY observed_at LIMIT 6000
     """, (symbol, start, end))
 
@@ -371,7 +371,7 @@ def benchmark_bars_from_session(session: dict[str, Any], *, symbol: str, day: da
             "bar_time": datetime.combine(day, time(int(clock[:2]), int(clock[2:])), tzinfo=CN),
             "open": price, "high": price, "low": price, "close": price,
             "volume": _num(row.get("volume_lot")), "amount": _num(row.get("amount")),
-            "source_name": "tencent_free_minute_query_review_fetch", "available_at": fetched_at,
+            "source_name": "longhuvip_minute_review_fetch", "available_at": fetched_at,
         })
     return bars, "review_time_fetch" if bars else "provider_empty"
 

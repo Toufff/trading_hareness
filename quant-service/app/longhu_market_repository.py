@@ -1,4 +1,4 @@
-"""Persistence boundary for the Longhu/Tencent full-market close source."""
+"""Persistence boundary for the Longhu full-market close source."""
 
 from __future__ import annotations
 

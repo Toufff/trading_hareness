@@ -1,0 +1,30 @@
+"""Persisted source/provider names for Longhu intraday evidence.
+
+Rows written before 2026-09-18 came from Tencent's public feeds and keep their
+original ``tencent_*`` labels: provenance is never rewritten.  Readers that span
+that boundary use the ``*_WITH_HISTORY`` tuples; writers use only Longhu names.
+"""
+
+from __future__ import annotations
+
+LONGHU_PROVIDER = "longhuvip"
+LONGHU_ORDER_BOOK = "longhuvip_order_book"
+LONGHU_WATCH_QUOTE = "longhuvip_watch_quote"
+LONGHU_INTRADAY_MINUTES = "longhuvip_intraday_minutes"
+LONGHU_MINUTE_FEATURE = "longhuvip_minute"
+
+HISTORICAL_TENCENT_PROVIDER = "tencent_free"
+HISTORICAL_TENCENT_ORDER_BOOK = "tencent_order_book"
+HISTORICAL_TENCENT_WATCH_QUOTE = "tencent_free"
+HISTORICAL_TENCENT_INTRADAY_MINUTES = "tencent_intraday_minutes"
+
+ORDER_BOOK_SOURCES_WITH_HISTORY = (LONGHU_ORDER_BOOK, HISTORICAL_TENCENT_ORDER_BOOK)
+WATCH_QUOTE_SOURCES_WITH_HISTORY = (LONGHU_WATCH_QUOTE, HISTORICAL_TENCENT_WATCH_QUOTE)
+INTRADAY_MINUTE_SOURCES_WITH_HISTORY = (LONGHU_INTRADAY_MINUTES, HISTORICAL_TENCENT_INTRADAY_MINUTES)
+
+__all__ = [
+    "HISTORICAL_TENCENT_INTRADAY_MINUTES", "HISTORICAL_TENCENT_ORDER_BOOK", "HISTORICAL_TENCENT_PROVIDER",
+    "HISTORICAL_TENCENT_WATCH_QUOTE", "INTRADAY_MINUTE_SOURCES_WITH_HISTORY", "LONGHU_INTRADAY_MINUTES",
+    "LONGHU_MINUTE_FEATURE", "LONGHU_ORDER_BOOK", "LONGHU_PROVIDER", "LONGHU_WATCH_QUOTE",
+    "ORDER_BOOK_SOURCES_WITH_HISTORY", "WATCH_QUOTE_SOURCES_WITH_HISTORY",
+]

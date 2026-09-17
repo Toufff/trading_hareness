@@ -7,7 +7,7 @@ class StrategyRuleRegressionTests(unittest.TestCase):
     def test_live_policy_gate_blocks_entry_on_paper_portfolio_limit(self):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
-            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10, "price_source": "tencent_batched_watch_quote"},
+            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10, "price_source": "longhuvip_watch_quote"},
             {"status": "completed", "trade_constraints": {}},
             {"status": "available", "market_state": "mixed_or_neutral", "board_snapshot_age_seconds": 30},
             {"status": "confirmed"},
@@ -144,9 +144,10 @@ class StrategyRuleRegressionTests(unittest.TestCase):
     def test_free_provider_symbol_routing_is_explicit(self):
         self.assertEqual(eastmoney_secid("603580.SH"), "1.603580")
         self.assertEqual(eastmoney_secid("000636.SZ"), "0.000636")
-        self.assertEqual(tencent_symbol("603580.SH"), "sh603580")
-        self.assertEqual(tencent_symbol("000636.SZ"), "sz000636")
-        self.assertTrue({"eastmoney_free", "tencent_free", "sina_free", "cninfo_free", "akshare", "xinhua_finance"}.issubset(
+        self.assertEqual(exchange_prefixed_code("603580.SH"), "sh603580")
+        self.assertEqual(exchange_prefixed_code("000636.SZ"), "sz000636")
+        self.assertNotIn("tencent_free", {item["provider_key"] for item in free_provider_status()})
+        self.assertTrue({"eastmoney_free", "sina_free", "cninfo_free", "akshare", "xinhua_finance"}.issubset(
             {item["provider_key"] for item in free_provider_status()}
         ))
         self.assertEqual(cninfo_stock_param("000636.SZ")["stock"], "000636,gssz0000636")

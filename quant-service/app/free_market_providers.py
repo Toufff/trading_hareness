@@ -13,7 +13,6 @@ from decimal import Decimal, InvalidOperation
 import os
 import re
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -74,8 +73,6 @@ def free_provider_status() -> list[dict[str, str | bool]]:
     has_fuyao = fuyao_configured()
     return [
         {"name": "eastmoney", "provider_key": "eastmoney_free", "label": "东方财富公开行情", "configured": True, "protocol": "public_http"},
-        {"name": "tencent", "provider_key": "tencent_free", "label": "腾讯财经前复权日线（研究参考）", "configured": True,
-         "protocol": "public_http", "canonical_promotion": False},
         {"name": "sina", "provider_key": "sina_free", "label": "新浪财经公开报价", "configured": True, "protocol": "public_http"},
         {"name": "cninfo", "provider_key": "cninfo_free", "label": "巨潮资讯公开公告", "configured": True, "protocol": "public_http"},
         {"name": "akshare", "provider_key": "akshare", "label": "AKShare 公开聚合源", "configured": akshare_configured, "protocol": "python_optional"},
@@ -91,7 +88,8 @@ def eastmoney_secid(symbol: str) -> str:
     return f"{1 if exchange == 'SH' else 0}.{code}"
 
 
-def tencent_symbol(symbol: str) -> str:
+def exchange_prefixed_code(symbol: str) -> str:
+    """``600664.SH`` -> ``sh600664``: the key format Sina's quote list expects."""
     code, exchange = symbol.split(".", 1)
     return f"{'sh' if exchange == 'SH' else 'sz' if exchange == 'SZ' else 'bj'}{code}"
 
@@ -215,7 +213,7 @@ async def eastmoney_watch_flow_quotes(symbols: list[str], *, max_symbols: int = 
 
     This is deliberately *not* an all-A replacement: it supplies current
     volume ratio, turnover and indicative main flow for explicitly watched
-    names when Tencent's slow all-A cross-section misses its scan budget.
+    names when the all-A cross-section misses its scan budget.
     Callers must not derive cross-sectional percentiles from this small basket.
     """
     normalized = [symbol.upper() for symbol in symbols if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol.upper())]
@@ -252,66 +250,8 @@ async def eastmoney_watch_flow_quotes(symbols: list[str], *, max_symbols: int = 
     return result
 
 
-async def tencent_daily(symbol: str, start: str, end: str) -> list[dict[str, Any]]:
-    # Tencent's public endpoint accepts a bounded count. Filter locally by the
-    # caller's allowed dates because its explicit date parameters are not
-    # consistently honoured across securities.  These are explicitly qfq
-    # (front-adjusted) rows and the caller persists them only as raw research
-    # evidence; they must not enter the unadjusted canonical daily series.
-    key = tencent_symbol(symbol)
-    params = {"param": f"{key},day,,,80,qfq"}
-    async with public_http_client() as client:
-        response = await _request_with_retry(client, "GET", "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get", params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-    payload = response.json()
-    if payload.get("code") != 0:
-        raise FreeProviderError(str(payload.get("msg") or "Tencent kline request failed"))
-    daily = ((payload.get("data") or {}).get(key) or {}).get("qfqday") or []
-    if not isinstance(daily, list):
-        raise FreeProviderError("Tencent returned an invalid kline payload")
-    return [
-        {"ts_code": symbol, "trade_date": values[0].replace("-", ""), "open": values[1], "close": values[2],
-         "high": values[3], "low": values[4], "vol": values[5], "amount": None}
-        for values in daily if isinstance(values, list) and len(values) >= 6 and start <= values[0].replace("-", "") <= end
-    ]
-
-
-async def tencent_index_daily(symbol: str, start: str, end: str) -> list[dict[str, Any]]:
-    """Return unadjusted Tencent daily rows for the bounded strategy indexes.
-
-    Tencent exposes index bars under ``day`` rather than ``qfqday``.  Keeping
-    this adapter separate prevents an equity caller from accidentally treating
-    an unadjusted equity series as the existing qfq research contract.
-    """
-    if symbol not in {"000001.SH", "000300.SH", "399001.SZ", "399006.SZ"}:
-        raise ValueError("tencent index fallback only accepts the strategy index set")
-    key = tencent_symbol(symbol)
-    params = {"param": f"{key},day,,,80,qfq"}
-    async with public_http_client() as client:
-        response = await _request_with_retry(
-            client, "GET", "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
-            params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=10,
-        )
-    payload = response.json()
-    if payload.get("code") != 0:
-        raise FreeProviderError(str(payload.get("msg") or "Tencent index kline request failed"))
-    daily = ((payload.get("data") or {}).get(key) or {}).get("day") or []
-    if not isinstance(daily, list):
-        raise FreeProviderError("Tencent returned an invalid index kline payload")
-    return [
-        {
-            "ts_code": symbol, "trade_date": values[0].replace("-", ""),
-            "open": values[1], "close": values[2], "high": values[3],
-            "low": values[4], "vol": values[5], "amount": None,
-            "price_basis": "unadjusted_index",
-        }
-        for values in daily
-        if isinstance(values, list) and len(values) >= 6
-        and start <= values[0].replace("-", "") <= end
-    ]
-
-
 async def sina_quote(symbol: str) -> dict[str, Any] | None:
-    key = tencent_symbol(symbol)
+    key = exchange_prefixed_code(symbol)
     async with public_http_client() as client:
         response = await _request_with_retry(client, "GET", f"https://hq.sinajs.cn/list={key}", headers={"Referer": "https://finance.sina.com.cn", "User-Agent": "Mozilla/5.0"}, timeout=8)
     try:
@@ -342,192 +282,6 @@ def parse_sina_quote_batch(payload: str, symbols_by_key: dict[str, str]) -> list
     return rows
 
 
-def tencent_minute_amount_scale(*, price: float, cumulative_volume_lot: int,
-                                cumulative_amount: float) -> float:
-    """Return the audited Tencent minute amount unit multiplier.
-
-    Most Tencent minute feeds encode cumulative amount in yuan, but a subset
-    of symbols has been observed with the amount scaled down by 100.  That
-    made a perfectly ordinary 293-yuan stock appear to trade at a 2.93-yuan
-    VWAP and could therefore create a false ``above_vwap`` confirmation.
-    Infer only the exact, two-order-of-magnitude variant from the implied
-    VWAP; do not attempt to "correct" arbitrary provider values.
-    """
-    if price <= 0 or cumulative_volume_lot <= 0 or cumulative_amount <= 0:
-        return 1.0
-    raw_vwap = cumulative_amount / (cumulative_volume_lot * 100)
-    if raw_vwap <= 0:
-        return 1.0
-    ratio = price / raw_vwap
-    return 100.0 if 80.0 <= ratio <= 120.0 else 1.0
-
-
-async def tencent_intraday_minutes(symbol: str) -> list[dict[str, Any]]:
-    """Return today's Tencent minute tape with non-look-ahead volume deltas.
-
-    Tencent publishes cumulative volume in board lots and cumulative amount.
-    Keeping both the raw cumulative values and the per-minute differences lets
-    the signal layer compare a current burst with only earlier minutes.  The
-    last row may be an in-progress minute and is labelled accordingly.
-    """
-    return (await tencent_intraday_minute_session(symbol))["rows"]
-
-
-async def tencent_intraday_minute_session(symbol: str) -> dict[str, Any]:
-    """Return Tencent's minute tape together with the session date it declares.
-
-    The endpoint only serves its latest session.  A caller asking for a named
-    trading day must compare ``session_date`` instead of assuming "today".
-    """
-    key = tencent_symbol(symbol)
-    async with public_http_client() as client:
-        response = await _request_with_retry(client, "GET", "https://web.ifzq.gtimg.cn/appstock/app/minute/query", params={"code": key}, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
-    payload = response.json()
-    session = ((payload.get("data") or {}).get(key) or {}).get("data") or {}
-    values = session.get("data") or []
-    if not isinstance(values, list):
-        raise FreeProviderError("Tencent returned an invalid intraday minute payload")
-    raw_date = str(session.get("date") or "")
-    session_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}" if re.fullmatch(r"\d{8}", raw_date) else None
-    return {"session_date": session_date, "rows": _tencent_minute_rows(symbol, values)}
-
-
-def _tencent_minute_rows(symbol: str, values: list[Any]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    previous_volume = 0
-    previous_amount = 0.0
-    amount_scale: float | None = None
-    segment = 0
-    for value in values:
-        parts = str(value).split()
-        if len(parts) != 4 or not re.fullmatch(r"\d{4}", parts[0]):
-            continue
-        try:
-            price, cumulative_volume, cumulative_amount = float(parts[1]), int(parts[2]), float(parts[3])
-        except ValueError:
-            continue
-        # A pre-open or zero-volume opening minute has no informative
-        # cumulative_amount/volume ratio; locking the day's scale onto that
-        # row (rather than waiting for the first row that actually traded)
-        # previously defaulted every later minute to 1.0 and could put the
-        # whole day's VWAP 100x off once real volume began.
-        if amount_scale is None and cumulative_volume > 0:
-            amount_scale = tencent_minute_amount_scale(
-                price=price, cumulative_volume_lot=cumulative_volume,
-                cumulative_amount=cumulative_amount,
-            )
-        normalized_amount = cumulative_amount * (amount_scale or 1.0)
-        # Tencent occasionally begins a new cumulative segment after the
-        # midday break.  It is not valid to manufacture a negative minute;
-        # reset the delta origin and label the boundary so downstream returns
-        # and baselines never bridge the two segments.
-        cumulative_reset = cumulative_volume < previous_volume or normalized_amount < previous_amount
-        if cumulative_reset:
-            segment += 1
-            previous_volume, previous_amount = 0, 0.0
-        rows.append({
-            "ts_code": symbol, "time": parts[0], "close": price,
-            "cumulative_volume_lot": cumulative_volume, "cumulative_amount": normalized_amount,
-            "amount_unit_scale": amount_scale,
-            "volume_lot": cumulative_volume - previous_volume, "amount": normalized_amount - previous_amount,
-            "vwap": normalized_amount / (cumulative_volume * 100) if cumulative_volume else None,
-            "cumulative_segment": segment, "cumulative_reset": cumulative_reset,
-            "source": "tencent_free",
-        })
-        previous_volume, previous_amount = cumulative_volume, normalized_amount
-    if rows:
-        now = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%H%M")
-        for row in rows:
-            row["is_complete"] = row["time"] < now
-    return rows
-
-
-def _tencent_order_book_row(symbol: str, values: list[str]) -> dict[str, Any] | None:
-    """Decode Tencent's documented-in-practice single-quote depth layout.
-
-    The all-A endpoint intentionally omits the order book.  The bounded
-    single-quote layout has current/pre-open price, cumulative volume/amount,
-    outer/inner volume, then five bid and five ask price/size pairs.  We keep
-    the original field positions in ``raw_fields`` so any future upstream
-    layout change is auditable rather than silently reinterpreted.
-    """
-    if len(values) < 29:
-        return None
-    try:
-        price, pre_close = float(values[3]), float(values[4])
-        cumulative_volume, outer_volume, inner_volume = float(values[6]), float(values[7]), float(values[8])
-        # Field 35 is ``last/accumulated-volume/accumulated-amount`` in the
-        # live single-quote payload.  The terminal component is not a pure
-        # number when an upstream adds a suffix, so retain null rather than
-        # fabricating interval VWAP.
-        cumulative_amount = float(values[35].split("/")[-1]) if len(values) > 35 and "/" in values[35] and re.fullmatch(r"-?\d+(?:\.\d+)?", values[35].split("/")[-1]) else None
-    except (TypeError, ValueError):
-        return None
-    # Preserve all five positions, including a zero/empty side at a limit-up
-    # or limit-down.  A sealed limit book is the most important observation to
-    # retain for later seal/erosion research, not an invalid quote to discard.
-    bids: list[dict[str, float]] = []
-    asks: list[dict[str, float]] = []
-    try:
-        for level in range(5):
-            bid_offset, ask_offset = 9 + level * 2, 19 + level * 2
-            bid_price, bid_size = float(values[bid_offset]), float(values[bid_offset + 1])
-            ask_price, ask_size = float(values[ask_offset]), float(values[ask_offset + 1])
-            bids.append({"price": bid_price, "size": bid_size})
-            asks.append({"price": ask_price, "size": ask_size})
-    except (TypeError, ValueError):
-        return None
-    valid_bids = [row for row in bids if row["price"] > 0 and row["size"] >= 0]
-    valid_asks = [row for row in asks if row["price"] > 0 and row["size"] >= 0]
-    if (not valid_bids and not valid_asks) or price <= 0 or pre_close <= 0:
-        return None
-    return {
-        "ts_code": symbol, "name": values[1], "price": price, "pre_close": pre_close,
-        "cumulative_volume_lot": cumulative_volume, "cumulative_amount": cumulative_amount,
-        "outer_volume_lot": outer_volume, "inner_volume_lot": inner_volume,
-        "bids": bids, "asks": asks,
-        "one_sided_book": bool(valid_bids) != bool(valid_asks),
-        "book_side": "bid_only" if valid_bids and not valid_asks else "ask_only" if valid_asks and not valid_bids else "two_sided",
-        "seal_volume_lot": (valid_bids[0]["size"] if valid_bids and not valid_asks else
-                            valid_asks[0]["size"] if valid_asks and not valid_bids else None),
-        "trade_time": values[30] if len(values) > 30 else None,
-        "raw_fields": values[:40], "source": "tencent_order_book",
-    }
-
-
-async def tencent_order_book_quotes(symbols: list[str], *, max_symbols: int = 20) -> list[dict[str, Any]]:
-    """Fetch one bounded Tencent depth snapshot for explicit watchlist symbols.
-
-    A single comma-separated request is used for the whole watchlist.  This is
-    The caller supplies a bounded cap. Depth collection uses 20; the live
-    watch quote path may use 40 in the same batched request. Neither is a
-    general market-depth scraper.
-    """
-    normalized = list(dict.fromkeys(str(symbol).upper() for symbol in symbols if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", str(symbol).upper())))
-    if not normalized:
-        return []
-    if max_symbols < 1 or max_symbols > 80:
-        raise ValueError("Tencent quote batch cap must be between 1 and 80")
-    if len(normalized) > max_symbols:
-        raise ValueError(f"Tencent order-book observations are capped at {max_symbols} watchlist symbols")
-    keys = [tencent_symbol(symbol) for symbol in normalized]
-    by_key = {key.lower(): symbol for key, symbol in zip(keys, normalized, strict=True)}
-    async with public_http_client() as client:
-        response = await _request_with_retry(
-            client, "GET", f"https://qt.gtimg.cn/q={','.join(keys)}",
-            headers={"Referer": "https://gu.qq.com", "User-Agent": "Mozilla/5.0"}, timeout=8,
-        )
-    rows: list[dict[str, Any]] = []
-    for match in re.finditer(r'v_([a-z0-9]+)="([^"]*)";', response.text, re.I):
-        symbol = by_key.get(match.group(1).lower())
-        if not symbol:
-            continue
-        row = _tencent_order_book_row(symbol, match.group(2).split("~"))
-        if row is not None:
-            rows.append(row)
-    return rows
-
-
 async def sina_quotes(symbols: list[str], *, batch_size: int = 80, concurrency: int = 2) -> list[dict[str, Any]]:
     """Fetch bounded batches of public quotes for a supplemental market view.
 
@@ -543,7 +297,7 @@ async def sina_quotes(symbols: list[str], *, batch_size: int = 80, concurrency: 
     semaphore = asyncio.Semaphore(concurrency)
 
     async def fetch_chunk(client: httpx.AsyncClient, chunk: list[str]) -> list[dict[str, Any]]:
-        keys = [tencent_symbol(symbol) for symbol in chunk]
+        keys = [exchange_prefixed_code(symbol) for symbol in chunk]
         mapping = {key.lower(): symbol for key, symbol in zip(keys, chunk, strict=True)}
         async with semaphore:
             response = await _request_with_retry(

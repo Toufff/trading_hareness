@@ -26,7 +26,7 @@ class StockStudyDependencies:
     eastmoney_quote: Callable[[str], Awaitable[dict[str, Any] | None]]
     run_akshare: Callable[..., Awaitable[Any]]
     akshare_daily: Callable[..., Any]
-    tencent_daily: Callable[[str, str, str], Awaitable[list[dict[str, Any]]]]
+    longhu_daily: Callable[[str, str, str], Awaitable[list[dict[str, Any]]]]
     sina_quote: Callable[[str], Awaitable[dict[str, Any] | None]]
     cninfo_announcements: Callable[..., Awaitable[list[dict[str, Any]]]]
     run_database: Callable[..., Awaitable[Any]]
@@ -86,7 +86,7 @@ async def build(symbol: str, request: Any, deps: StockStudyDependencies) -> dict
         deps.free_fetch("东方财富公开日线", "eastmoney_free", "daily_bar", lambda: deps.eastmoney_daily(symbol, start, end), symbol),
         deps.free_fetch("东方财富公开报价", "eastmoney_free", "realtime_quote", lambda: deps.eastmoney_quote(symbol), symbol),
         deps.free_fetch("AKShare公开日线", "akshare", "daily_bar", lambda: deps.run_akshare(deps.akshare_daily, symbol, start, end, timeout_seconds=12), symbol),
-        deps.free_fetch("腾讯财经公开日线", "tencent_free", "daily_bar", lambda: deps.tencent_daily(symbol, start, end), symbol),
+        deps.free_fetch("开盘啦日线", "longhuvip", "daily_bar", lambda: deps.longhu_daily(symbol, start, end), symbol),
         deps.free_fetch("新浪财经公开报价", "sina_free", "realtime_quote", lambda: deps.sina_quote(symbol), symbol),
     )
     sources = [result[0] for result in results]
@@ -141,7 +141,7 @@ async def build(symbol: str, request: Any, deps: StockStudyDependencies) -> dict
         "market": {
             "daily_bars": daily_rows[-45:], "latest_realtime": deps.latest_row(data.get("主源实时分钟", []) or data.get("超级源实时分钟", [])),
             "eastmoney_quote": free_data["东方财富公开报价"], "eastmoney_daily_bars": free_data["东方财富公开日线"],
-            "akshare_daily_bars": free_data["AKShare公开日线"], "tencent_daily_bars": free_data["腾讯财经公开日线"],
+            "akshare_daily_bars": free_data["AKShare公开日线"], "longhu_daily_bars": free_data["开盘啦日线"],
             "sina_quote": free_data["新浪财经公开报价"], "latest_adj_factor": deps.latest_row(data["复权因子"]),
             "latest_limit": deps.latest_row(data["涨跌停价格"]), "latest_daily_basic": deps.latest_row(data["每日估值指标"]),
             "latest_moneyflow": deps.latest_row(data["个股资金流"]), "latest_ths_moneyflow": deps.latest_row(data["同花顺个股资金流"]),

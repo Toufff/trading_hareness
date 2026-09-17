@@ -35,8 +35,8 @@ RUNTIME_TASK_CONTRACTS: Final[dict[str, RuntimeTaskContract]] = {
         "minute_profile_capture", "intraday_edge", "bounded market-session polling", ("intraday_minutes",),
         ("intraday_minute_sessions",), "minute features and time-of-day profile evidence", 180,
     ),
-    "tencent_order_book": RuntimeTaskContract(
-        "tencent_order_book", "intraday_edge", "3s during session", ("order_book_quote",),
+    "longhu_order_book": RuntimeTaskContract(
+        "longhu_order_book", "intraday_edge", "30s during session", ("order_book_quote",),
         ("intraday_order_book_observations",), "bounded watchlist order-book capture", 20,
     ),
     "board_flow_curve": RuntimeTaskContract(

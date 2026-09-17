@@ -29,7 +29,7 @@ ANQIANG_ACTION_REPLAY_HORIZONS = (5, 15, 30, 60)
 
 def materialize_anqiang_action_replay_outcomes(connection: Any, *, cutoff_at: datetime | None = None,
                                                 limit: int = 500) -> dict[str, Any]:
-    """Settle author-stated actions solely for replay, using local Tencent rows.
+    """Settle author-stated actions solely for replay, using local direct watch-quote rows.
 
     No provider call occurs here.  An unavailable author-stated timestamp or
     missing local quote stays explicit rather than being replaced with a daily
@@ -52,7 +52,7 @@ def materialize_anqiang_action_replay_outcomes(connection: Any, *, cutoff_at: da
         if has_bounded_query_window(entry_window):
             entry = connection.execute(
                 """SELECT observed_at,price,source_name FROM quant.intraday_quote_observations
-                     WHERE symbol=%s AND source_name='tencent_free'
+                     WHERE symbol=%s AND source_name IN ('longhuvip','tencent_free')
                        AND observed_at>=%s AND observed_at<=%s AND price>0
                      ORDER BY observed_at LIMIT 1""",
                 (row["symbol"], entry_window["query_start"], entry_window["query_end"]),
@@ -64,7 +64,7 @@ def materialize_anqiang_action_replay_outcomes(connection: Any, *, cutoff_at: da
                 "replay_only": True,
                 "strategy_effect": "none",
                 "entry_window": json_safe_window(entry_window),
-                "source": "tencent_free",
+                "source": "direct_watch_quote",
                 "session_bounded": True,
             }
             if entry is None:

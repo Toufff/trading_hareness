@@ -186,12 +186,12 @@ class PlatformBoundaryTests(unittest.TestCase):
         with patch("app.intraday_scan_repository.record_provider_failure") as record_failure:
             persist_intraday_scan_terminal(
                 database, scan_id, datetime(2026, 8, 13, 3, tzinfo=timezone.utc), "completed",
-                ["600000.SH"], {"tencent": "unavailable"}, {"watched": 1},
+                ["600000.SH"], {"watch_quotes": "unavailable"}, {"watched": 1},
                 provider_failure="upstream timeout", provider_latency_ms=234,
             )
 
         record_failure.assert_called_once_with(
-            connection, "tencent_free", "realtime_quote", "upstream timeout", 234,
+            connection, "longhuvip", "realtime_quote", "upstream timeout", 234,
         )
         sql = connection.execute.call_args.args[0]
         self.assertIn("INSERT INTO quant.intraday_scan_runs", sql)
@@ -514,7 +514,7 @@ class PlatformBoundaryTests(unittest.TestCase):
         self.assertEqual(payload["timezone"], "Asia/Shanghai")
         self.assertEqual([item["key"] for item in payload["items"]][-1], "primary_realtime")
         self.assertEqual(next(item for item in payload["items"] if item["key"] == "primary_realtime")["state"], "unavailable")
-        order_book = next(item for item in payload["items"] if item["key"] == "tencent_order_book")
+        order_book = next(item for item in payload["items"] if item["key"] == "longhu_order_book")
         self.assertEqual(order_book["details"]["max_symbols"], 40)
         self.assertEqual(order_book["details"]["uncovered_watch_count"], 0)
         database.transaction.assert_not_called()
@@ -560,7 +560,7 @@ class PlatformBoundaryTests(unittest.TestCase):
             "latest_scan": {"status": "completed", "observed_at": observed_at, "source_status": {}, "summary": {}},
             "latest_completed_scan": {"status": "completed", "observed_at": observed_at, "summary": {}, "source_status": {
                 "fuyao": {"all_a_only_watch_quote_symbols": 1, "all_a_snapshot": {"status": "fresh", "age_seconds": 0}},
-                "tencent_watch": {"decision_eligible_watch_quote_symbols": 1,
+                "direct_watch": {"decision_eligible_watch_quote_symbols": 1,
                             "sina_fallback_watch_quote_symbols": 0, "quote_timestamp_slo_seconds": 20},
             }},
             "latest_board": None, "latest_board_curve": None, "latest_delivery": None, "delivery_history": [],
@@ -579,7 +579,7 @@ class PlatformBoundaryTests(unittest.TestCase):
             daily_summary_automation_enabled=lambda: True, order_book_max_symbols=lambda: 40,
         )
         payload = read_intraday_services_status_payload(dependencies, evidence=evidence, session=(True, "open"), board_session=(True, "open"))
-        order_book = next(item for item in payload["items"] if item["key"] == "tencent_order_book")
+        order_book = next(item for item in payload["items"] if item["key"] == "longhu_order_book")
         self.assertEqual(order_book["state"], "degraded")
         self.assertIn("1/2", order_book["last_error"])
         self.assertTrue(payload["summary"]["decision_path_degraded"])
@@ -593,7 +593,7 @@ class PlatformBoundaryTests(unittest.TestCase):
             "latest_completed_scan": {"status": "completed", "observed_at": observed_at, "summary": {}, "source_status": {
                 "fuyao": {"all_a_only_watch_quote_symbols": 0,
                             "all_a_snapshot": {"status": "cached", "age_seconds": 46.0, "ttl_seconds": 30.0}},
-                "tencent_watch": {"decision_eligible_watch_quote_symbols": 2,
+                "direct_watch": {"decision_eligible_watch_quote_symbols": 2,
                                   "sina_fallback_watch_quote_symbols": 0},
             }},
             "latest_board": None, "latest_board_curve": None, "latest_delivery": None, "delivery_history": [],
@@ -643,7 +643,7 @@ class PlatformBoundaryTests(unittest.TestCase):
             network_status=lambda: {"state": "online"},
             provider_request_reservation_status=lambda: {"shared_database_reservation": True},
             runtime_executor_status=lambda: {"database": {"occupied": 0}}, super_get_executor_status=lambda: {"occupied": 0},
-            provider_status=lambda: [{"name": "super_get"}], free_provider_status=lambda: [{"name": "tencent"}],
+            provider_status=lambda: [{"name": "super_get"}], free_provider_status=lambda: [{"name": "sina"}],
             realtime_market_session=lambda: (False, "closed"), board_curve_session=lambda: (False, "closed"),
             scan_interval_seconds=lambda: 30, effective_scan_interval_seconds=lambda interval, _: interval,
             high_frequency_window=lambda _: False, super_get_fast_interval_seconds=lambda: 1.0,
@@ -1330,7 +1330,7 @@ class PlatformBoundaryTests(unittest.TestCase):
                     "session_window": "09:40-10:45", "time_bucket_volume_profile": {"status": "ready", "sample_days": 20},
                     "time_bucket_volume_surprise": 2.5,
                 }},
-                "realtime_cross_check": {"status": "confirmed", "super_get_price": 12.3, "tencent_price": 12.29, "gap_pct": 0.08},
+                "realtime_cross_check": {"status": "confirmed", "super_get_price": 12.3, "watch_price": 12.29, "gap_pct": 0.08},
                 "decision_context": {
                     "action": "入场复核", "reasons": ["首突破后量价同步"],
                     "invalidations": ["跌回VWAP"],

@@ -111,7 +111,7 @@ def build(
                 "basis": "persisted same-checkpoint board snapshot",
                 "semantics": source_status.get("flow_semantics") or "provider-declared board flow",
             },
-            "index_breadth": "saved Tencent all-A breadth plus point-in-time SSE/CSI300/SZSE/ChiNext close-daily context",
+            "index_breadth": "saved all-A breadth plus point-in-time SSE/CSI300/SZSE/ChiNext close-daily context",
             "lhb": "saved Tushare top_list/top_inst rows when available; absence is reported, never inferred",
             "analyst": "text-only reports available no later than observed_at",
             "automation": "no broker order submission",

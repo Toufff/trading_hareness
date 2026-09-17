@@ -1,4 +1,4 @@
-"""Bounded Tencent order-book capture, isolated from FastAPI orchestration.
+"""Bounded Longhu order-book capture, isolated from FastAPI orchestration.
 
 The service owns only the persisted evidence contract and one capture attempt.
 The caller still owns scheduler cadence, market-session gating, leases and
@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
 
+from .market_source_names import LONGHU_ORDER_BOOK, LONGHU_PROVIDER
 from .order_book_features import order_book_observation
 
 
@@ -26,11 +27,12 @@ def enabled(environ: dict[str, str] | None = None) -> bool:
 
 
 def interval_seconds(environ: dict[str, str] | None = None) -> float:
+    """Depth is one licensed Longhu request per symbol, so the default is 30s and the floor 10s."""
     values = os.environ if environ is None else environ
     try:
-        return max(3.0, min(30.0, float(values.get("INTRADAY_ORDER_BOOK_INTERVAL_SECONDS", "3"))))
+        return max(10.0, min(60.0, float(values.get("INTRADAY_ORDER_BOOK_INTERVAL_SECONDS", "30"))))
     except ValueError:
-        return 3.0
+        return 30.0
 
 
 def retention_days(environ: dict[str, str] | None = None) -> int:
@@ -44,9 +46,9 @@ def retention_days(environ: dict[str, str] | None = None) -> int:
 def max_symbols(environ: dict[str, str] | None = None) -> int:
     values = os.environ if environ is None else environ
     try:
-        return max(1, min(80, int(values.get("INTRADAY_ORDER_BOOK_MAX_SYMBOLS", "40"))))
+        return max(1, min(60, int(values.get("INTRADAY_ORDER_BOOK_MAX_SYMBOLS", "24"))))
     except ValueError:
-        return 40
+        return 24
 
 
 def persist_observations(
@@ -63,15 +65,15 @@ def persist_observations(
         previous_rows = connection.execute(
             """SELECT DISTINCT ON(symbol) symbol,observed_at,raw
                  FROM quant.intraday_quote_observations
-                WHERE symbol=ANY(%s) AND source_name='tencent_order_book'
+                WHERE symbol=ANY(%s) AND source_name=%s
                   AND observed_at>=%s AND observed_at<%s
                 ORDER BY symbol,observed_at DESC""",
-            (symbols, session_start, observed_at),
+            (symbols, LONGHU_ORDER_BOOK, session_start, observed_at),
         ).fetchall() if symbols else []
         previous_by_symbol = {str(item["symbol"]): dict(item) for item in previous_rows}
         # One batched multi-row INSERT instead of one round trip per symbol:
-        # this loop runs every 3s for up to 40 symbols, so a per-row INSERT
-        # was ~19,000 individual statements/day for this table alone.
+        # this loop runs every few seconds for the whole watchlist, so a
+        # per-row INSERT multiplies round trips for this table alone.
         value_placeholders: list[str] = []
         params: list[Any] = []
         for row in rows:
@@ -87,8 +89,8 @@ def persist_observations(
                 features["delta_status"] = "stale_previous"
             raw = {**row, "order_book_features": features}
             pct_change = ((float(row["price"]) / float(row["pre_close"])) - 1) * 100 if row.get("pre_close") else None
-            value_placeholders.append("(NULL,%s,%s,'tencent_order_book',%s,%s,NULL,NULL,NULL,%s)")
-            params.extend([symbol, observed_at, row.get("price"), pct_change, Json(json_safe(raw))])
+            value_placeholders.append("(NULL,%s,%s,%s,%s,%s,NULL,NULL,NULL,%s)")
+            params.extend([symbol, observed_at, LONGHU_ORDER_BOOK, row.get("price"), pct_change, Json(json_safe(raw))])
         if value_placeholders:
             inserted = connection.execute(
                 """INSERT INTO quant.intraday_quote_observations(
@@ -98,13 +100,13 @@ def persist_observations(
                 params,
             )
             stored = inserted.rowcount
-        record_success(connection, "tencent_free", "order_book_quote", stored, latency_ms)
+        record_success(connection, LONGHU_PROVIDER, "order_book_quote", stored, latency_ms)
     return stored
 
 
 def persist_failure(database: Any, error: str, latency_ms: int | None, *, record_failure: Callable[..., Any]) -> None:
     with database.transaction() as connection:
-        record_failure(connection, "tencent_free", "order_book_quote", error, latency_ms)
+        record_failure(connection, LONGHU_PROVIDER, "order_book_quote", error, latency_ms)
 
 
 async def capture_snapshot(
@@ -131,7 +133,7 @@ async def capture_snapshot(
         return {
             "status": "completed" if rows else "empty", "requested": len(selected), "received": len(rows),
             "stored": stored, "observed_at": observed_at.isoformat(), "latency_ms": latency_ms,
-            "source": "tencent_single_quote_order_book",
+            "source": LONGHU_ORDER_BOOK,
         }
     except handled_errors as error:
         latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)

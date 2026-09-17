@@ -307,7 +307,7 @@ def collect_review(connection: Any, *, account_key: str, day: date, symbol: str,
     if len(bars) < 180:
         gaps.append(f"个股分钟线仅 {len(bars)} 根；不足以作完整日内量价复盘")
     if bar_source == "review_time_fetch":
-        gaps.append("个股分钟线为生成复盘时从腾讯分钟接口按交易日校验后补采，未入库；只含每分钟最新价，不是完整 OHLC")
+        gaps.append("个股分钟线为生成复盘时从开盘啦分钟接口按交易日校验后补采，未入库；只含每分钟最新价，不是完整 OHLC")
     if bars and any(event.get("fill_at") and event["fill_at"] > bars[-1]["bar_time"] + timedelta(minutes=1)
                     for event in events):
         gaps.append("有真实成交时刻晚于最后一根可用分钟K；图上按成交时刻和成交价标点，但该时刻附近的量价走势缺失")

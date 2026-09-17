@@ -46,14 +46,14 @@ class _Database:
 class AsyncProviderCircuitRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_async_circuit_reads_are_bounded_and_empty_safe(self) -> None:
         database = _Database()
-        self.assertEqual(await open_capabilities(database, "tencent_free", ["realtime_quote"]), {"realtime_quote"})
+        self.assertEqual(await open_capabilities(database, "longhuvip", ["realtime_quote"]), {"realtime_quote"})
         self.assertEqual(await open_provider_keys(database, "daily", ["tushare_super_get"]), {"tushare_super_get"})
-        self.assertEqual(await open_capabilities(database, "tencent_free", []), set())
+        self.assertEqual(await open_capabilities(database, "longhuvip", []), set())
         self.assertEqual(await open_provider_keys(database, "daily", []), set())
         capabilities_query, capabilities_params = database.connection.calls[0]
         providers_query, providers_params = database.connection.calls[1]
         self.assertIn("circuit_open_until > now()", capabilities_query)
-        self.assertEqual(capabilities_params, ("tencent_free", ["realtime_quote"]))
+        self.assertEqual(capabilities_params, ("longhuvip", ["realtime_quote"]))
         self.assertIn("circuit_open_until > now()", providers_query)
         self.assertEqual(providers_params, ("daily", ["tushare_super_get"]))
 

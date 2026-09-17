@@ -79,7 +79,7 @@ class PaperQuoteEvidenceTests(unittest.TestCase):
 
         class Result:
             def fetchone(self):
-                return Row({"source_name": "tencent_free", "price": 10, "pct_change": 0,
+                return Row({"source_name": "longhuvip", "price": 10, "pct_change": 0,
                             "raw": {"is_suspended": True, "at_limit_up": True}})
 
         class Connection:
@@ -89,7 +89,7 @@ class PaperQuoteEvidenceTests(unittest.TestCase):
         quote = _latest_local_quote(Connection(), "600000.SH", datetime.now(timezone.utc))
         self.assertTrue(quote["is_suspended"])
         self.assertTrue(quote["at_limit_up"])
-        self.assertEqual(quote["source_name"], "tencent_free")
+        self.assertEqual(quote["source_name"], "longhuvip")
 
 
 class AnalystIntradayOutcomeClockTests(unittest.TestCase):
@@ -121,8 +121,8 @@ class AnalystIntradayOutcomeClockTests(unittest.TestCase):
                 calls.append((text, params))
                 if "FROM quant.analyst_observations" in text:
                     return Result(rows=[self_outer._observation(available_at)])
-                if "source_name='tencent_free'" in text:
-                    return Result(row={"observed_at": available_at, "price": "10.00", "source_name": "tencent_free"})
+                if "source_name IN ('longhuvip','tencent_free')" in text:
+                    return Result(row={"observed_at": available_at, "price": "10.00", "source_name": "longhuvip"})
                 if "INSERT INTO quant.analyst_intraday_outcomes" in text:
                     inserts.append(tuple(params))
                 return Result()
@@ -164,12 +164,12 @@ class AnalystIntradayOutcomeClockTests(unittest.TestCase):
                 text = str(query)
                 if "FROM quant.analyst_observations" in text:
                     return Result(rows=[self_outer._observation(available_at)])
-                if "source_name='tencent_free'" in text:
-                    return Result(row={"observed_at": available_at, "price": "10.00", "source_name": "tencent_free"})
+                if "source_name IN ('longhuvip','tencent_free')" in text:
+                    return Result(row={"observed_at": available_at, "price": "10.00", "source_name": "longhuvip"})
                 if "source_name=%s" in text:
                     query_start, query_end = params[-2:]
                     if query_start <= exit_at <= query_end:
-                        return Result(row={"observed_at": exit_at, "price": "10.20", "source_name": "tencent_free"})
+                        return Result(row={"observed_at": exit_at, "price": "10.20", "source_name": "longhuvip"})
                     return Result(row=None)
                 if "INSERT INTO quant.analyst_intraday_outcomes" in text:
                     inserts.append(tuple(params))
@@ -213,11 +213,11 @@ class AnqiangAuthorStatedReplayTests(unittest.TestCase):
                         "action_id": "action-1", "symbol": "000001.SZ", "direction": 1,
                         "stated_at": stated_at, "available_at": stated_at,
                     }])
-                if "source_name='tencent_free'" in text:
-                    return Result(row={"observed_at": stated_at, "price": "10.00", "source_name": "tencent_free"})
+                if "source_name IN ('longhuvip','tencent_free')" in text:
+                    return Result(row={"observed_at": stated_at, "price": "10.00", "source_name": "longhuvip"})
                 if "source_name=%s" in text:
                     query_start, query_end = params[-2:]
-                    return Result(row={"observed_at": exit_at, "price": "10.10", "source_name": "tencent_free"}
+                    return Result(row={"observed_at": exit_at, "price": "10.10", "source_name": "longhuvip"}
                                   if query_start <= exit_at <= query_end else None)
                 if "INSERT INTO quant.analyst_action_intraday_outcomes" in text:
                     inserts.append(tuple(params))

@@ -7,7 +7,7 @@ from app.longhu_market_sync import build_control_rows, merge_cross_section
 
 
 class LonghuMarketSyncTests(unittest.TestCase):
-    def test_merge_requires_same_date_tencent_ohlc_and_preserves_flow(self):
+    def test_merge_requires_same_date_longhu_ohlc_and_preserves_flow(self):
         vendor = {
             "600664.SH": {
                 "symbol": "600664.SH", "name": "哈药股份", "close": 9.49,
@@ -24,6 +24,9 @@ class LonghuMarketSyncTests(unittest.TestCase):
         result = merge_cross_section(date(2026, 9, 1), vendor, quotes)
         self.assertEqual(result.coverage, 1.0)
         self.assertEqual(result.daily_rows[0]["close"], 9.49)
+        # vol stays lots; the canonical amount is thousand CNY while the raw quote keeps CNY.
+        self.assertEqual((result.daily_rows[0]["vol"], result.daily_rows[0]["amount"]), (123456, "1250005"))
+        self.assertEqual(result.quote_rows[0]["amount"], 1_250_005_000)
         self.assertEqual(result.flow_rows[0]["net_amount"], 83_000_000)
         self.assertEqual(result.quote_rows[0]["provider_basis"], "longhuvip_licensed_dated_ohlc")
 

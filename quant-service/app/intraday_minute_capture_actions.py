@@ -1,4 +1,4 @@
-"""Bounded Tencent minute-session capture for explicit watchlist symbols."""
+"""Bounded Longhu minute-session capture for explicit watchlist symbols."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
+
+from .market_source_names import INTRADAY_MINUTE_SOURCES_WITH_HISTORY, LONGHU_INTRADAY_MINUTES, LONGHU_PROVIDER
 
 
 class IntradayMinuteCaptureActions:
@@ -28,7 +30,7 @@ class IntradayMinuteCaptureActions:
         ensure_instrument: Callable[[Any, str], None],
         retention_days: Callable[[], int],
     ) -> dict[str, Any]:
-        """Capture current-session Tencent rows through an injected persistence seam."""
+        """Capture current-session Longhu rows through an injected persistence seam."""
         active, reason = await realtime_session()
         if not active:
             return {"status": "blocked", "reason": reason, "stored": 0, "symbols": symbols}
@@ -38,7 +40,7 @@ class IntradayMinuteCaptureActions:
         async def fetch_one(symbol: str) -> tuple[str, list[dict[str, Any]], dict[str, Any] | None, str | None]:
             try:
                 rows = await fetch_minutes(symbol)
-                return symbol, rows, {"provider": "tencent_free", "api_name": "minute/query", "status": "completed"}, None
+                return symbol, rows, {"provider": LONGHU_PROVIDER, "api_name": "GetStockTrendIncremental", "status": "completed"}, None
             # Transport ownership stays inside the injected provider adapter.
             # This action only turns its bounded failure into per-symbol
             # research evidence; it must not import or classify HTTP clients.
@@ -70,7 +72,7 @@ class IntradayMinuteCaptureActions:
                             minute_clock = str(raw_row.get("time") or "")
                             if re.fullmatch(r"\d{4}", minute_clock):
                                 minute_clock = f"{minute_clock[:2]}:{minute_clock[2:]}"
-                            # Tencent exposes close/cumulative turnover, not
+                            # Longhu exposes close/session VWAP/volume, not
                             # true minute OHLC.  Use a flat bar only for the
                             # same-clock profile and preserve the raw source.
                             row = parse_minute({
@@ -85,13 +87,13 @@ class IntradayMinuteCaptureActions:
                             connection.execute(
                                 """INSERT INTO quant.intraday_minute_sessions(
                                        symbol,trading_date,minute_bucket,bar_time,open,high,low,close,volume,amount,source_name,available_at,raw
-                                   ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'tencent_intraday_minutes',%s,%s)
+                                   ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                                    ON CONFLICT(symbol,trading_date,minute_bucket,source_name) DO UPDATE SET
                                        bar_time=EXCLUDED.bar_time,open=EXCLUDED.open,high=EXCLUDED.high,low=EXCLUDED.low,
                                        close=EXCLUDED.close,volume=EXCLUDED.volume,amount=EXCLUDED.amount,
                                        available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
                                 (symbol, trading_date, bucket, row["bar_time"], row["open"], row["high"], row["low"], row["close"],
-                                 row["volume"], row["amount"], datetime.now(timezone.utc), Json(row["raw"])),
+                                 row["volume"], row["amount"], LONGHU_INTRADAY_MINUTES, datetime.now(timezone.utc), Json(row["raw"])),
                             )
                             stored += 1
                         except (ValueError, TypeError) as validation_error:
@@ -100,8 +102,8 @@ class IntradayMinuteCaptureActions:
                     connection.execute(
                         """DELETE FROM quant.intraday_minute_sessions
                              WHERE symbol=%s AND trading_date<%s
-                               AND source_name IN ('tushare_super_get_rt_min_daily','tushare_super_rt_min_daily','tencent_intraday_minutes')""",
-                        (symbol, retention_start),
+                               AND source_name = ANY(%s)""",
+                        (symbol, retention_start, ['tushare_super_get_rt_min_daily', 'tushare_super_rt_min_daily', *INTRADAY_MINUTE_SOURCES_WITH_HISTORY]),
                     )
             return stored_by_symbol, errors, source_status
 

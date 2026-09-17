@@ -47,11 +47,6 @@ EVIDENCE_CONTRACTS: Final[dict[str, EvidenceContract]] = {
         scope="all_a_cross_section", cross_sectional=True, decision_eligible=False,
         semantics="all_a_price_volume_turnover_snapshot_no_main_flow",
     ),
-    "tencent_watch_quote": EvidenceContract(
-        key="tencent_watch_quote", provider_key="tencent_free", capability="order_book_quote",
-        scope="explicit_watchlist_only", cross_sectional=False, decision_eligible=True,
-        semantics="same_scan_batched_watch_price_with_exchange_timestamp",
-    ),
     "longhuvip_watch_quote": EvidenceContract(
         key="longhuvip_watch_quote", provider_key="longhuvip", capability="stock_quote",
         scope="explicit_watchlist_only", cross_sectional=False, decision_eligible=True,

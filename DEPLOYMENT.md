@@ -23,7 +23,7 @@
 - `POST /api/v1/market/sync/tushare`：仅在配置 Tushare 主源或超级源和 `QUANT_UNIVERSE` 后拉取显式股票池；日线按主源、超级源顺序回退，并保留实际 provider；
 - `POST /api/v1/market/sync/baostock`：无需 token 的日线备源；只读取 `QUANT_UNIVERSE` 或远端报告中明确出现的股票代码，并自动补沪深 300 基准；
 - `GET /api/v1/providers/tushare/catalog`、`POST /api/v1/providers/tushare/fetch`：主源、超级路径源和 REST 备用源的受控通用入口。请求可指定 `provider=auto|primary|super|backup`；在线请求必须在白名单内，单次最多 45 天、3,000 行；历史分钟数据只允许从离线文件导入。
-- `POST /api/v1/stocks/{symbol}/study`：单标的受控研究入口。并发读取主/超级/备用 Tushare、同花顺资金流、BaoStock，以及不需 token 的东方财富、腾讯财经和新浪财经公开来源；逐来源保存原始证据、状态和健康记录。公开来源仅作低优先级交叉验证，不能覆盖已验证的主源日线。
+- `POST /api/v1/stocks/{symbol}/study`：单标的受控研究入口。并发读取主/超级/备用 Tushare、同花顺资金流、BaoStock，开盘啦授权日K，以及不需 token 的东方财富和新浪财经公开来源；逐来源保存原始证据、状态和健康记录。公开来源仅作低优先级交叉验证，不能覆盖已验证的主源日线。
 - `POST /api/v1/market/minute/import-offline`、`GET /api/v1/market/minute/imports`：供应商提供的历史分钟 CSV 只从 `quant-research` 持久卷的 `offline/` 目录流式导入；不经 n8n、浏览器或远端下载。CSV 格式和命令见 [`docs/TUSHARE_COMPATIBLE_INGESTION.md`](docs/TUSHARE_COMPATIBLE_INGESTION.md)。
 - `POST /api/v1/market/universe/sync`：每日盘前通过 `stock_basic` 刷新 `all_a` 活跃 A 股股票池。只有返回至少 1,000 只有效标的才会提交，避免供应商返回截断页时污染全市场任务。
 - `POST /api/v1/market/snapshots/run`、`GET /api/v1/market/snapshots`：生成午盘和收盘的全市场快照，保存覆盖率、涨跌家数、中位涨跌、成交额、来源和质量标记。公开报价只作为补充，未验证授权实时源时快照固定为 `degraded` 或 `blocked`，不会参与推荐。
@@ -93,7 +93,7 @@ curl -X POST http://127.0.0.1:5681/api/v1/pipeline/daily \
 研究服务把外部响应先保存为带来源和可用时间的原始证据，再生成受控股票池的特征快照。当前前端研究台提供：
 
 - 核心股票池维护：仅池内股票会在没有分析师观点时进入量化评分，避免无边界全市场抓取；
-- 单票多源研究：主/超级/备用 Tushare、东方财富、腾讯、新浪、BaoStock 的每项响应、失败和原始数据状态都可见；
+- 单票多源研究：主/超级/备用 Tushare、开盘啦、东方财富、新浪、BaoStock 的每项响应、失败和原始数据状态都可见；
 - 特征与方向推荐：日线趋势、成交量、东财主力/散户资金流、基础估值和已审核分析师观点共同评分；推荐保存特征快照、置信度、风险标记、失效条件和有效期；
 - 观点复核：远端报告中的公司名称无法精确映射为代码时进入待复核队列，批准并填写 Tushare 代码后才会进入股票级模型；
 - 结果归因：到期推荐和分析师观点用之后的可交易日线计算方向收益、基准收益、超额收益以及最大有利/不利变动。

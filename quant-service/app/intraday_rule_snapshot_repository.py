@@ -50,7 +50,7 @@ def prune_rule_input_evidence(connection: Any, *, cutoff: datetime) -> None:
     # have their stricter independent retention because they are attribution
     # evidence rather than core-rule inputs.
     connection.execute(
-        "DELETE FROM quant.intraday_quote_observations WHERE source_name IN ('tencent_free','sina_free') AND observed_at<%s",
+        "DELETE FROM quant.intraday_quote_observations WHERE source_name IN ('longhuvip','tencent_free','sina_free') AND observed_at<%s",
         (cutoff,),
     )
 

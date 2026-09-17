@@ -72,7 +72,7 @@ async def run(
     flow_boards = sum(int(item.get("flow_boards") or 0) for item in coverage.values())
     coverage_complete = flow_boards > 0 and mapped_boards >= flow_boards
     source_status = {
-        "eastmoney_board_flow": "completed", "tencent_quote": "completed",
+        "eastmoney_board_flow": "completed", "fuyao_all_a_quote": "completed",
         "tushare_close_context": report.get("tushare_context", {}),
         "tushare_realtime_validation": realtime,
         "mapping": {"mapped_boards": mapped_boards, "flow_boards": flow_boards, "complete": coverage_complete},

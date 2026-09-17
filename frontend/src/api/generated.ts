@@ -868,8 +868,8 @@ export interface paths {
          * @description Cross-strategy watchlist candidates for human review only.
          *
          *     Never written into quant.intraday_watchlists: that table has a
-         *     previously-verified 40-symbol capacity bound tied to the live
-         *     Tencent batched-quote request size, and a human-curated watchlist
+         *     previously-verified 40-symbol capacity bound tied to the
+         *     live watch-quote budget, and a human-curated watchlist
          *     already uses most of it.
          */
         get: operations["watchlist_proposals_api_v1_strategy_watchlist_proposals_get"];
