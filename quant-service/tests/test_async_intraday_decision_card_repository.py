@@ -42,7 +42,7 @@ class AsyncIntradayDecisionCardRepositoryTests(unittest.TestCase):
     def test_uses_native_async_local_evidence_and_keeps_analyst_context_zero_weight(self):
         observed_at = datetime(2026, 8, 22, 2, tzinfo=timezone.utc)
         connection = _Connection([
-            [{"observed_at": observed_at, "source_name": "tencent_watch", "price": 10.0,
+            [{"observed_at": observed_at, "source_name": "longhuvip", "price": 10.0,
               "pct_change": 1.2, "volume_ratio": 2.0, "turnover_rate": 3.0, "main_net_inflow": 10}],
             [{"signal_event_id": "event-1", "signal_key": "000001.SZ:entry:test", "signal_type": "entry",
               "severity": "info", "state": "confirmed", "score": 75, "observed_at": observed_at,

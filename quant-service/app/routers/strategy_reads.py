@@ -96,8 +96,8 @@ def build_strategy_reads_router(database: Any, decision_model_version: str, asyn
         """Cross-strategy watchlist candidates for human review only.
 
         Never written into quant.intraday_watchlists: that table has a
-        previously-verified 40-symbol capacity bound tied to the live
-        Tencent batched-quote request size, and a human-curated watchlist
+        previously-verified 40-symbol capacity bound tied to the
+        live watch-quote budget, and a human-curated watchlist
         already uses most of it.
         """
         return sync_latest_watchlist_proposals(database)

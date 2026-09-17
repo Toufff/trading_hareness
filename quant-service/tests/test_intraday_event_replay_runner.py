@@ -31,7 +31,7 @@ def rule_input(snapshot_id: str, observed_at: datetime, *, symbol: str = "000001
         watch={"symbol": symbol, "alert_on_entry": True, "alert_on_exit": True, "metadata": {}},
         quote={"symbol": symbol, "price": 10.3, "pct_change": 3.0, "volume_ratio": 2.0,
                "turnover_rate": 3.0, "main_net_inflow": 100.0},
-        previous_quote={"symbol": symbol, "source_name": "tencent_free", "price": 10.0},
+        previous_quote={"symbol": symbol, "source_name": "longhuvip", "price": 10.0},
         daily_factors={"status": "completed"}, minute_features={"status": "not_available"},
         peer_context={"status": "not_available"}, model_version="watchlist-confirmation-v4",
     )

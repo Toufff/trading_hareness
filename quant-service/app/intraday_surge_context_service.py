@@ -1,4 +1,4 @@
-"""Bounded Tencent minute-context capture for explicit intraday watches.
+"""Bounded Longhu minute-context capture for explicit intraday watches.
 
 This service owns no provider client, database or process-global cache.  The
 caller injects each boundary so the same narrow minute basket can be tested
@@ -26,8 +26,8 @@ async def capture(
     run_database: Callable[..., Awaitable[Any]],
     safe_error: Callable[[str, int], str],
     handled_errors: tuple[type[BaseException], ...],
-    provider_key: str = "tencent_free",
-    feature_source: str = "tencent_free_minute",
+    provider_key: str = "longhuvip",
+    feature_source: str = "longhuvip_minute",
     check_provider_circuit: bool = True,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Capture a capped target/peer basket with a 45-second feature cache."""

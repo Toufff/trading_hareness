@@ -27,14 +27,14 @@ def anqiang_trade_action_replay_query(as_of_date: date | None, limit: int) -> tu
                   LEFT JOIN LATERAL (
                     SELECT q.observed_at,q.price
                       FROM quant.intraday_quote_observations q
-                     WHERE q.symbol=a.symbol AND q.source_name='tencent_free'
+                     WHERE q.symbol=a.symbol AND q.source_name IN ('longhuvip','tencent_free')
                        AND q.observed_at >= a.stated_at - interval '5 minutes'
                        AND q.observed_at <= a.stated_at + interval '5 minutes'
                      ORDER BY abs(extract(epoch FROM (q.observed_at-a.stated_at))) LIMIT 1
                   ) near ON true
                   LEFT JOIN LATERAL (
                     SELECT q.price FROM quant.intraday_quote_observations q
-                     WHERE q.symbol=a.symbol AND q.source_name='tencent_free'
+                     WHERE q.symbol=a.symbol AND q.source_name IN ('longhuvip','tencent_free')
                        AND (q.observed_at AT TIME ZONE 'Asia/Shanghai')::date=(a.stated_at AT TIME ZONE 'Asia/Shanghai')::date
                      ORDER BY q.observed_at DESC LIMIT 1
                   ) close_quote ON true
@@ -48,7 +48,7 @@ def anqiang_trade_action_replay_query(as_of_date: date | None, limit: int) -> tu
 def project_anqiang_trade_action_replay(rows: list[Any], as_of_date: date | None, limit: int) -> dict[str, Any]:
     """Project local action evidence without a DB or provider.
 
-    Intraday returns are present only when our Tencent watch/order-book capture
+    Intraday returns are present only when our direct watch-quote capture
     has a nearest observation within five minutes.  Otherwise the caller gets
     the same-day official daily bar, not a fabricated minute replay.
     """
@@ -82,7 +82,7 @@ def project_anqiang_trade_action_replay(rows: list[Any], as_of_date: date | None
 def anqiang_trade_action_replay(database: Any, as_of_date: date | None, limit: int) -> dict[str, Any]:
     """Return actions with only evidence that was actually persisted locally.
 
-    Intraday returns are present only when our Tencent watch/order-book capture
+    Intraday returns are present only when our direct watch-quote capture
     has a nearest observation within five minutes.  Otherwise the caller gets
     the same-day official daily bar, not a fabricated minute replay.
     """

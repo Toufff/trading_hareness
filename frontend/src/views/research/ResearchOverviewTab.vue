@@ -19,7 +19,7 @@ export default defineComponent({
 
   <el-row :gutter="14" class="metric-row"><el-col v-for="metric in [{label:'远端报告',value:count('remote_reports')},{label:'结构化观点',value:count('claims')},{label:'标准日线',value:count('canonical_bars')},{label:'质量问题',value:count('quality_issues')}]" :key="metric.label" :xs="12" :md="6"><el-card shadow="never" class="metric-card"><span>{{ metric.label }}</span><strong>{{ metric.value }}</strong></el-card></el-col></el-row>
   <el-card shadow="never" class="section-gap" header="盘后一键更新">
-    <el-alert title="按依赖顺序刷新全A基准与日线、腾讯收盘快照、AKShare/东财补充、同花顺资金流、巨潮公告、龙虎榜背景、板块复盘、分析师结算和盘后策略。某源尚未发布时其余步骤仍会完成，并会显示待重试项。" type="info" :closable="false" show-icon/>
+    <el-alert title="按依赖顺序刷新全A基准与日线、开盘啦收盘快照、AKShare/东财补充、同花顺资金流、巨潮公告、龙虎榜背景、板块复盘、分析师结算和盘后策略。某源尚未发布时其余步骤仍会完成，并会显示待重试项。" type="info" :closable="false" show-icon/>
     <div class="card-actions">
       <el-button type="primary" :icon="Refresh" :loading="actionLoading === '盘后一键更新'" @click="runPostCloseRefresh">盘后一键更新</el-button>
       <el-tag v-if="postCloseRefresh" :type="postCloseRefresh.status === 'completed' ? 'success' : 'warning'">{{ postCloseRefresh.status }}</el-tag>

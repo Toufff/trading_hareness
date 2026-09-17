@@ -117,7 +117,7 @@ def persist_generated_signals(
         )
         signal["conditions"] = {**signal["conditions"], "episode": episode or {"state": "not_applicable"}}
         evidence = {
-            "tencent": quote, "tencent_order_book": order_book_feature, "tencent_minute": minute_feature,
+            "quote": quote, "order_book": order_book_feature, "minute": minute_feature,
             "peer_context": peer_context, "tushare_rt_min": tushare_minute,
             "tushare_rt_k_fast": fast_confirmation, "daily_factors": daily_factors,
             "market_context": market_context,

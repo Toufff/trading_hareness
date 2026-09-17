@@ -66,9 +66,11 @@ def provider_priority(provider: str) -> int:
     return {
         "tushare": 10, "tushare_primary": 10, "tushare_super_get": 15,
         "tushare_super_sdk": 20, "tushare_super": 25,
-        "longhuvip_composite": 25, "baostock": 30, "tushare_backup": 40, "eastmoney_free": 45,
-        "tencent_index_free": 45,
-        "akshare": 50, "tencent_free": 50, "sina_free": 55, "manual": 90,
+        "longhuvip_composite": 25, "longhuvip": 26, "baostock": 30, "tushare_backup": 40, "eastmoney_free": 45,
+        "longhuvip_index": 45,
+        # Selected on rows written before 2026-09-18; no current writer uses them.
+        "tencent_index_free": 45, "tencent_free": 50,
+        "akshare": 50, "sina_free": 55, "manual": 90,
     }.get(provider, 80)
 
 
@@ -183,10 +185,6 @@ def quarantine_tushare_daily_amount_mismatches(
 
 def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
     """Persist one licensed/unadjusted daily bar and its immutable evidence."""
-    if bar.source == "tencent_free":
-        # Tencent's public adapter is qfq/front-adjusted.  It can be retained
-        # as raw research evidence but must never enter the unadjusted series.
-        raise ValueError("tencent_free front-adjusted daily rows are raw research evidence only")
     amount_mismatch = daily_amount_unit_mismatch(
         source=bar.source, amount=bar.amount, volume=bar.volume, close=bar.close,
     )

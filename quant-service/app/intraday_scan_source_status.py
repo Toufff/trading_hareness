@@ -10,7 +10,6 @@ def build_scan_source_status(
     selected_symbols: list[str],
     quotes: dict[str, dict[str, Any]],
     all_a_rows: list[dict[str, Any]],
-    fresh_watch_rows: list[dict[str, Any]],
     sina_watch_rows: list[dict[str, Any]],
     licensed_watch_rows: list[dict[str, Any]],
     licensed_watch_status: dict[str, Any],
@@ -33,10 +32,6 @@ def build_scan_source_status(
     for item in fast_confirmations.values():
         status = str(item.get("status") or "unknown")
         fast_status_counts[status] = fast_status_counts.get(status, 0) + 1
-    direct_watch_symbols = {
-        str(row.get("ts_code") or "") for row in fresh_watch_rows
-        if str(row.get("ts_code") or "") in selected_symbols
-    }
     sina_watch_symbols = {
         str(row.get("ts_code") or "") for row in sina_watch_rows
         if str(row.get("ts_code") or "") in selected_symbols
@@ -54,11 +49,8 @@ def build_scan_source_status(
         symbol for symbol in selected_symbols
         if (quotes.get(symbol) or {}).get("price_source") == "fuyao_ths_all_a_snapshot"
     }
-    direct_watch_count = len(direct_watch_symbols)
-    fresh_direct_watch_count = sum(
-        1 for symbol in direct_watch_symbols
-        if ((quotes.get(symbol) or {}).get("price_freshness") or {}).get("status") == "fresh"
-    )
+    direct_watch_count = len(licensed_watch_symbols)
+    fresh_direct_watch_count = fresh_licensed_watch_count
     direct_status = (
         "completed" if fresh_direct_watch_count == len(selected_symbols)
         else "partial" if direct_watch_count or all_a_rows else "unavailable"
@@ -70,9 +62,10 @@ def build_scan_source_status(
             "all_a_snapshot": all_a_snapshot_status,
             "all_a_only_watch_quote_symbols": len(all_a_watch_symbols),
         },
-        "tencent_watch": {
+        "direct_watch": {
             "status": direct_status,
-            "fresh_watch_quote_rows": len(fresh_watch_rows),
+            "source": "longhuvip_watch_quote",
+            "fresh_watch_quote_rows": len(licensed_watch_rows),
             "fresh_watch_quote_symbols": direct_watch_count,
             "decision_eligible_watch_quote_symbols": fresh_direct_watch_count,
             "stale_or_unstamped_direct_watch_quote_symbols": direct_watch_count - fresh_direct_watch_count,
@@ -85,7 +78,7 @@ def build_scan_source_status(
             **licensed_watch_status,
             "matched_symbols": len(licensed_watch_symbols),
             "decision_eligible_symbols": fresh_licensed_watch_count,
-            "fallback_policy": "tencent_then_sina_when_licensed_quote_is_missing_or_stale",
+            "fallback_policy": "sina_price_only_when_licensed_quote_is_missing",
             "scope": "explicit_watchlist_only",
         },
         "eastmoney_watch_flow": {
@@ -96,7 +89,7 @@ def build_scan_source_status(
             "supplies": "main_net_inflow_only_when_derived_metrics_available",
         },
         "fuyao_ths_derived_watch_flow": derived_flow_status,
-        "tencent_minute_context": surge_source,
+        "minute_context": surge_source,
         "tushare_rt_min": {
             "requested": priority_symbols,
             "items": {symbol: item["source"] for symbol, item in tushare_minutes.items()},

@@ -344,24 +344,6 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         transaction.assert_called_once()
         self.assertEqual(upsert.call_count, 2)
 
-    def test_tencent_front_adjusted_daily_rows_remain_raw_research_evidence(self):
-        rows = [{"ts_code": "600000.SH", "trade_date": "20260810", "open": 10, "high": 11, "low": 9, "close": 10.5}]
-        with patch("app.main.persist_public_observations", return_value=1) as raw_only, \
-             patch("app.main.upsert_bar") as canonical:
-            stored = persist_free_daily("tencent_free", rows)
-        self.assertEqual(stored, 1)
-        raw_only.assert_called_once_with("tencent_free", "daily_bar", rows)
-        canonical.assert_not_called()
-
-    def test_tencent_front_adjusted_rows_are_rejected_by_canonical_upsert(self):
-        connection = MagicMock()
-        with self.assertRaisesRegex(ValueError, "front-adjusted"):
-            from app.main import upsert_bar
-            upsert_bar(connection, DailyBar(
-                symbol="600000.SH", trading_date=date(2026, 8, 10), close=Decimal("10"), source="tencent_free",
-            ))
-        connection.execute.assert_not_called()
-
     def test_public_market_repository_has_no_router_or_provider_dependency(self):
         source = Path("app/public_market_repository.py").read_text(encoding="utf-8")
         self.assertNotIn("from .main", source)
@@ -1038,7 +1020,7 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         self.assertEqual(slots[0].astimezone(china).strftime("%H:%M"), "09:20")
         self.assertEqual(slots[-1].astimezone(china).strftime("%H:%M"), "11:30")
 
-    def test_fast_super_get_quote_confirms_or_vetoes_fresh_tencent_price(self):
+    def test_fast_super_get_quote_confirms_or_vetoes_fresh_watch_price(self):
         now = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)
         confirmed = intraday_fast_quote_confirmation(
             {"price": 10.0}, {"price": 10.05, "observed_at": now}, now,

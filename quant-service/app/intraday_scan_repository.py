@@ -49,7 +49,7 @@ def previous_quote_frames(
 ) -> dict[str, dict[str, Any]]:
     """Load each watch's most recent same-source frame in one bounded query.
 
-    The caller supplies the actual source selected for this scan, so a Tencent
+    The caller supplies the actual source selected for this scan, so a Longhu
     frame can never be compared with a Sina fallback merely because both have
     the same symbol.  The existing 15-second/session boundary remains owned by
     the scanner and is passed in as ``not_before``.
@@ -113,7 +113,7 @@ def load_intraday_scan_local_state(
     """
     order_book_rows = connection.execute(
         """SELECT symbol,observed_at,raw FROM quant.intraday_quote_observations
-             WHERE symbol=ANY(%s) AND source_name='tencent_order_book'
+             WHERE symbol=ANY(%s) AND source_name='longhuvip_order_book'
                AND observed_at>=%s AND observed_at<%s
              ORDER BY symbol,observed_at DESC""",
         (selected_symbols, max(session_start, observed_at - timedelta(minutes=5)), observed_at),
@@ -218,7 +218,7 @@ def persist_intraday_scan_terminal(
         if provider_failure:
             record_provider_failure(
                 connection,
-                "tencent_free",
+                "longhuvip",
                 "realtime_quote",
                 safe_error_detail(provider_failure, 300),
                 provider_latency_ms,

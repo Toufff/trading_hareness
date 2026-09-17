@@ -13,7 +13,7 @@ _SYMBOL_PATTERN = re.compile(r"\d{6}\.(?:SH|SZ|BJ)")
 
 
 def minute_features(rows: list[dict[str, Any]], *, lookback: int = 20,
-                    source: str = "tencent_free",
+                    source: str = "longhuvip_minute",
                     number: Callable[[Any], float | None]) -> dict[str, Any] | None:
     """Build a causal price/volume burst feature from normalized minute rows."""
     # Do not bridge a provider-declared cumulative reset (normally its
@@ -132,7 +132,7 @@ def annotate_flow_snapshot_provenance(
 ) -> None:
     """Attach the all-A flow snapshot's freshness to quotes that consume it.
 
-    Tencent's public ``zljlr`` is a cross-sectional proxy, not a per-watch
+    The all-A public flow field is a cross-sectional proxy, not a per-watch
     exchange feed.  It must therefore carry the age of the all-A snapshot all
     the way into a signal's persisted evidence.  A direct watch quote may
     refresh price independently, but it does not make its inherited flow
@@ -157,7 +157,7 @@ def annotate_flow_snapshot_provenance(
         "age_seconds": round(age, 3) if age is not None else None,
         "max_age_seconds": max_age_seconds,
         "decision_eligible": decision_eligible,
-        "source": str(snapshot_status.get("source") or "tencent_all_a_snapshot"),
+        "source": str(snapshot_status.get("source") or "all_a_snapshot"),
         "scope": str(snapshot_status.get("scope") or "all_a_cross_section"),
         "cross_sectional": cross_sectional,
         "semantics": str(snapshot_status.get("semantics") or "all_a_public_flow_proxy_not_exchange_order_flow"),

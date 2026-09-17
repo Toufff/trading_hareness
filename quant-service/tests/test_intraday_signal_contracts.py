@@ -22,7 +22,7 @@ class IntradaySignalContractTests(unittest.TestCase):
                                      "ofi_30s": 1.0, "qi5": 0.2},
                 "daily_rebound_state": {"state": "shadow_confirmed"},
                 "policy_gate": {"version": "live-policy-gate-v1", "allow_confirmation": True,
-                                "quote_source": "tencent_batched_watch_quote"},
+                                "quote_source": "longhuvip_watch_quote"},
                 "factor_contract_version": "intraday-factor-contracts-v1",
             },
         }
@@ -34,11 +34,11 @@ class IntradaySignalContractTests(unittest.TestCase):
         self.assertEqual(contract["expected_return"], None)
         self.assertIn("vwap_loss_with_negative_momentum", contract["invalidation_codes"])
         self.assertEqual([item["source"] for item in contract["evidence"]], [
-            "tencent_batched_watch_quote", "public_flow_proxy", "intraday_minute_session",
-            "point_in_time_watchlist_membership", "tencent_order_book_snapshot",
+            "longhuvip_watch_quote", "public_flow_proxy", "intraday_minute_session",
+            "point_in_time_watchlist_membership", "longhuvip_order_book_snapshot",
             "prior_completed_daily_rebound_state",
         ])
-        order_book = next(item for item in contract["evidence"] if item["source"] == "tencent_order_book_snapshot")
+        order_book = next(item for item in contract["evidence"] if item["source"] == "longhuvip_order_book_snapshot")
         self.assertEqual(order_book["quality"], "attribution_only")
         self.assertEqual(signal["score"], 82.5)
 

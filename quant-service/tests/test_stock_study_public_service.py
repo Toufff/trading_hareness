@@ -22,7 +22,7 @@ class StockStudyPublicServiceTests(unittest.TestCase):
         dependencies = self.dependencies(capabilities={"daily_bar"})
         fetcher = Mock()
 
-        source, payload = asyncio.run(fetch("腾讯", "tencent_free", "daily_bar", fetcher, "000001.SZ", dependencies))
+        source, payload = asyncio.run(fetch("开盘啦日线", "longhuvip", "daily_bar", fetcher, "000001.SZ", dependencies))
 
         self.assertEqual(source["status"], "circuit_open")
         self.assertEqual(payload, [])
@@ -35,7 +35,7 @@ class StockStudyPublicServiceTests(unittest.TestCase):
         async def fetcher() -> list[dict[str, object]]:
             return [{"trade_date": "20260821", "close": 10.0}]
 
-        source, payload = asyncio.run(fetch("腾讯", "tencent_free", "daily_bar", fetcher, "000001.SZ", dependencies))
+        source, payload = asyncio.run(fetch("开盘啦日线", "longhuvip", "daily_bar", fetcher, "000001.SZ", dependencies))
 
         self.assertEqual(source["status"], "completed")
         self.assertEqual(payload[0]["close"], 10.0)

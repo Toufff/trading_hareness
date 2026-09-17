@@ -14,7 +14,7 @@ class TenDayLeaderRotationIntradayRepositoryTests(unittest.TestCase):
             connection, run_id="run-1", scan_id="scan-1", json_safe=lambda value: value,
             observations=[{
                 "symbol": "600001.SH", "observed_at": datetime(2026, 8, 24, 2, tzinfo=timezone.utc),
-                "quote_source": "tencent_all_a_snapshot", "shadow_state": "confirmed_coordination",
+                "quote_source": "fuyao_ths", "shadow_state": "confirmed_coordination",
                 "shadow_eligible": True, "decision_eligible": False, "evidence": {},
                 "reason_codes": ["ten_day_rank"], "risk_flags": ["shadow_sample_only"], "source_snapshot": {},
             }],

@@ -1,7 +1,7 @@
 """Pure, evidence-first mining of individual stocks from live board snapshots.
 
 The inputs are deliberately restricted to an exact board-member join and the
-same Tencent cross-section already acquired for the five-minute board report.
+same Fuyao/THS all-A cross-section already acquired for the five-minute board report.
 This is a research-candidate screen, never an order or a replacement for the
 separately validated intraday alert rules.
 """
@@ -118,7 +118,7 @@ def board_stock_mining_candidates(
                 "risk_flags": risk_flags,
                 "evidence": {
                     "membership": "exact_complete",
-                    "quote_snapshot": "tencent_same_board_report",
+                    "quote_snapshot": "fuyao_all_a_same_board_report",
                     "strategy_components": ["board_flow", "main_net_inflow", "volume_ratio", "turnover_rate", "pct_change"],
                 },
             })
@@ -129,7 +129,7 @@ def board_stock_mining_candidates(
         "exact_complete_boards": exact_boards,
         "quoted_exact_members": quoted_members,
         "partial_or_unmapped_boards_skipped": skipped_partial,
-        "candidate_policy": "exact member mapping plus same-board Tencent quote coverage only",
+        "candidate_policy": "exact member mapping plus same-board all-A quote coverage only",
     }
     summary = {
         "inflow_candidates": len(inflows),

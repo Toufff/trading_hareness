@@ -54,7 +54,7 @@ def roll_paper_positions_sellable(connection: Any, *, trading_date: Any) -> int:
 def _latest_local_quote(connection: Any, symbol: str, at_or_before: datetime) -> dict[str, Any] | None:
     row = connection.execute(
         """SELECT source_name,observed_at,price,pct_change,raw FROM quant.intraday_quote_observations
-             WHERE symbol=%s AND observed_at<=%s AND source_name IN ('tencent_free','tushare_super_get_rt_k')
+             WHERE symbol=%s AND observed_at<=%s AND source_name IN ('longhuvip','tencent_free','tushare_super_get_rt_k')
              ORDER BY observed_at DESC LIMIT 1""", (symbol, at_or_before),
     ).fetchone()
     if row is None:

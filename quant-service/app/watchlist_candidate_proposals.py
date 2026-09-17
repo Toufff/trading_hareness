@@ -3,8 +3,8 @@
 The only real bridge between selection and timing in this codebase is manual:
 a human PUTs a symbol into ``intraday_watchlists`` via the API. That table
 also has a hard, previously-verified 40-symbol capacity bound tied to the
-Tencent batched-quote request size the live intraday scan can make in one
-call - a human-curated watchlist already uses most of it (37/40 at the time
+live watch-quote budget the intraday scan can spend per scan - a
+human-curated watchlist already uses most of it (37/40 at the time
 this module was written). Auto-writing candidates into that table would risk
 pushing the live scan over its capacity and starving real alerting.
 

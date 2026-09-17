@@ -41,7 +41,7 @@ def intraday_limit_lift_pattern(
             session_low_pct, session_low_time, session_low_index = pct_change, str(row["time"]), index
         if pct_change > session_high_pct:
             session_high_pct, session_high_time = pct_change, str(row["time"])
-        feature = minute_features(session[:index + 1], source="tencent_free_pattern") if index >= 5 else None
+        feature = minute_features(session[:index + 1], source="longhuvip_pattern") if index >= 5 else None
         point = {"time": row["time"], "price": round(price, 4), "pct_vs_preclose": round(pct_change, 4),
                  "volume_lot": number(row.get("volume_lot", row.get("vol"))),
                  "return_3m_pct": (feature or {}).get("return_3m_pct"),
@@ -138,7 +138,7 @@ def intraday_limit_lift_pattern(
     if opening_drive: tags.append("opening_ladder_drive")
     if limit_reclaim: tags.append("limit_reached")
     if session_high_pct - session_low_pct < 0.8: tags.append("one_word_or_near_one_word")
-    return {"status": "completed", "minute_rows": len(session), "source": "tencent_free_minute",
+    return {"status": "completed", "minute_rows": len(session), "source": "longhuvip_minute",
             "pattern_tags": tags or ["unclassified_limit_lift"], "session_low": {"time": session_low_time, "pct_vs_preclose": round(session_low_pct, 4)},
             "session_high": {"time": session_high_time, "pct_vs_preclose": round(session_high_pct, 4)},
             "standard_ignition": standard_ignition, "opening_drive": opening_drive,

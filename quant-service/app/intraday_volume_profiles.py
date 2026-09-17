@@ -13,6 +13,9 @@ from typing import Any, Callable
 _ALLOWED_SOURCES = (
     "tushare_super_get_rt_min_daily",
     "tushare_super_rt_min_daily",
+    "longhuvip_intraday_minutes",
+    # Captured before 2026-09-18; still valid same-clock history.
+    "longhu_intraday_minutes",
     "tencent_intraday_minutes",
 )
 

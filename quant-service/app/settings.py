@@ -88,7 +88,8 @@ class Settings:
             intraday_minute_profile_max_symbols=_clamped_int(
                 env.get("INTRADAY_MINUTE_PROFILE_MAX_SYMBOLS"), default=40, minimum=1, maximum=40),
             longhu_intraday_max_symbols=_clamped_int(
-                env.get("QUANT_LONGHU_INTRADAY_MAX_SYMBOLS"), default=24, minimum=1, maximum=60),
+                # Longhu is the only direct watch price, so it must cover the default watchlist.
+                env.get("QUANT_LONGHU_INTRADAY_MAX_SYMBOLS"), default=40, minimum=1, maximum=100),
             strategy_review_automation_enabled=_flag(env.get("STRATEGY_REVIEW_AUTOMATION_ENABLED"), default=True),
             post_close_strategy_automation_enabled=_flag(env.get("POST_CLOSE_STRATEGY_AUTOMATION_ENABLED"), default=True),
             ten_day_leader_rotation_automation_enabled=_flag(

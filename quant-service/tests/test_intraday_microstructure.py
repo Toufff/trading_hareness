@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from app.free_market_providers import _tencent_order_book_row
+from app.longhu_market_data import order_book_row
 from app.intraday_attribution import signal_attribution
 from app.intraday_features import minute_features
 from app.intraday_outcomes import a_share_return_decomposition
@@ -22,19 +22,18 @@ class IntradayMicrostructureTests(unittest.TestCase):
         self.assertEqual(observed["cumulative_volume_delta_lot"], 10.0)
         self.assertEqual(observed["interval_vwap"], 10.5)
 
-    def test_tencent_order_book_decoder_preserves_a_limit_up_seal_with_empty_asks(self):
-        values = [""] * 36
-        values[1], values[3], values[4] = "涨停样本", "10.99", "9.99"
-        values[6], values[7], values[8] = "1000", "610", "390"
-        values[9], values[10] = "10.99", "557769"
-        for level in range(1, 5): values[9 + level * 2], values[10 + level * 2] = "0.00", "0"
-        for level in range(5): values[19 + level * 2], values[20 + level * 2] = "0.00", "0"
-        values[30], values[35] = "20260812130000", "10.99/1000/1099000"
-        row = _tencent_order_book_row("000001.SZ", values)
+    def test_longhu_order_book_row_preserves_a_limit_up_seal_with_empty_asks(self):
+        snapshot = {"ts_code": "000001.SZ", "name": "涨停样本", "price": 10.99, "pre_close": 9.99,
+                    "volume": 1000, "amount": 1_099_000, "outer_volume_lot": 610, "inner_volume_lot": 390,
+                    "trade_time": "20260812130000",
+                    "bids": [{"price": 10.99, "size": 557769.0}] + [{"price": 0.0, "size": 0.0}] * 4,
+                    "asks": [{"price": 0.0, "size": 0.0}] * 5}
+        row = order_book_row(snapshot)
         self.assertIsNotNone(row)
         self.assertTrue(row["one_sided_book"])
         self.assertEqual(row["book_side"], "bid_only")
         self.assertEqual(row["seal_volume_lot"], 557769.0)
+        self.assertEqual(row["cumulative_amount"], 1_099_000)
         observed = order_book_observation(row)
         self.assertEqual(observed["qi1"], 1.0)
         self.assertEqual(observed["qi5"], 1.0)
@@ -83,7 +82,7 @@ class IntradayMicrostructureTests(unittest.TestCase):
         result = a_share_return_decomposition(Decimal("10"), 1, Decimal("10.5"), Decimal("10.2"), Decimal("10.8"))
         self.assertEqual(result["trigger_to_close"], Decimal("0.05"))
         self.assertEqual(result["trigger_to_next_close"], Decimal("0.08"))
-        attribution = signal_attribution("000001.SZ:watch:test", "watch", {}, {"tencent_order_book": {"status": "observed", "latest_features": {"status": "observed", "delta_status": "ready", "qi5": 0.4}, "ofi_30s": 3, "ofi_30s_sample_count": 3}, "tencent_minute": {"price_log_volume_corr_30m": -0.4, "smart_money_q_30m": 0.99}}, number=intraday_number, signal_model_version="watchlist-confirmation-v6")
+        attribution = signal_attribution("000001.SZ:watch:test", "watch", {}, {"order_book": {"status": "observed", "latest_features": {"status": "observed", "delta_status": "ready", "qi5": 0.4}, "ofi_30s": 3, "ofi_30s_sample_count": 3}, "minute": {"price_log_volume_corr_30m": -0.4, "smart_money_q_30m": 0.99}}, number=intraday_number, signal_model_version="watchlist-confirmation-v6")
         self.assertEqual(attribution["microstructure_state"], "observed_bid_heavy_positive_ofi_30s")
         self.assertEqual(attribution["ofi_attribution_window"], "30s")
         self.assertEqual(attribution["price_volume_state"], "negative_corr")

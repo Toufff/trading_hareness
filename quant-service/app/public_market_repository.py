@@ -154,19 +154,12 @@ def persist_free_daily(
 ) -> int:
     """Promote only validated, session-settled unadjusted public daily rows.
 
-    Tencent's adapter is explicitly front-adjusted.  Its short-window bars
-    remain attributable raw evidence, never a fallback for the canonical
-    unadjusted series when a licensed provider has a gap.
-
     A same-day row (``trading_date >= cn_today()``) fetched before the
     session has settled is a still-running intraday bar, not a public daily
     close; promoting it let a stock-study call at 09:35 write today's K-line
     into canonical hours before it was final.  ``observed_at`` is the
     injectable "now" for both this guard and the row's ``available_at``.
     """
-    if provider == "tencent_free":
-        return persist_raw_observations(database, provider, "daily_bar", rows)
-
     available_at = observed_at or datetime.now(timezone.utc)
     today = cn_today(available_at)
     session_settled = available_at.astimezone(ZoneInfo("Asia/Shanghai")).time() >= SESSION_SETTLED_TIME

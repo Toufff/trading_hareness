@@ -43,7 +43,7 @@ class StrategyIndexSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["symbols"]["000300.SH"]["status"], "completed")
         self.assertIn("not configured", result["symbols"]["000300.SH"]["primary_error"])
 
-    async def test_failed_eastmoney_uses_tencent_index_fallback(self) -> None:
+    async def test_failed_eastmoney_uses_longhu_index_fallback(self) -> None:
         async def run_database(action, *args, **_kwargs):
             return action(*args)
 
@@ -57,7 +57,7 @@ class StrategyIndexSyncTests(unittest.IsolatedAsyncioTestCase):
         )
         item = result["symbols"]["000300.SH"]
         self.assertEqual(item["status"], "completed")
-        self.assertEqual(item["provider"], "tencent_index_free")
+        self.assertEqual(item["provider"], "longhuvip_index")
         self.assertIn("eastmoney disconnected", item["eastmoney_error"])
 
 

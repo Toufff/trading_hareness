@@ -48,7 +48,7 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
     if not quote or quote.get("price") is None:
         return [{"signal_key": f"{symbol}:data_issue:{model_version}", "signal_type": "data_issue",
                  "severity": "warning", "score": 0, "hard": False,
-                 "conditions": {"quote_available": False}, "risk_flags": ["missing_tencent_quote"]}]
+                 "conditions": {"quote_available": False}, "risk_flags": ["missing_live_quote"]}]
     price = float(quote["price"])
     pct_change = float(quote.get("pct_change") or 0)
     volume_ratio_value = number(quote.get("volume_ratio"))
@@ -131,7 +131,7 @@ def signal_rules(watch: dict[str, Any], quote: dict[str, Any] | None,
     opening_gap_watch = (
         opening_gap_window and not holding and bool(watch.get("alert_on_entry"))
         and 3.0 <= pct_change <= MAX_ENTRY_INTRADAY_GAIN_PCT
-        and str(quote.get("price_source") or "") == "tencent_batched_watch_quote"
+        and str(quote.get("price_source") or "") == "longhuvip_watch_quote"
         and str(freshness.get("status") or "") == "fresh"
     )
     if opening_gap_watch and not signals:

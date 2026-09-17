@@ -17,7 +17,7 @@ async def sync_index_context(
     persist_public: Callable[[str, list[dict[str, Any]]], int],
     run_database: Callable[..., Awaitable[Any]],
     fetch_secondary: Callable[[str, str, str], Awaitable[list[dict[str, Any]]]] | None = None,
-    secondary_provider: str = "tencent_index_free",
+    secondary_provider: str = "longhuvip_index",
 ) -> dict[str, Any]:
     """Persist every requested index, falling back symbol by symbol."""
     start_date = as_of_date - timedelta(days=45)

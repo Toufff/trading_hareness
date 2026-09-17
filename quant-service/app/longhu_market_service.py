@@ -1,4 +1,4 @@
-"""Orchestrate one idempotent Longhu/Tencent post-close market refresh."""
+"""Orchestrate one idempotent Longhu post-close market refresh."""
 
 from __future__ import annotations
 

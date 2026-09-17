@@ -53,7 +53,8 @@ def settle(
     for signal in signals:
         direction = direction_for(str(signal["signal_type"]))
         evidence = signal["evidence"] if isinstance(signal["evidence"], dict) else {}
-        entry_price = decimal_or_none((evidence.get("tencent") or {}).get("price"))
+        # Signals before 2026-09-18 stored the watch quote under "tencent".
+        entry_price = decimal_or_none((evidence.get("quote") or evidence.get("tencent") or {}).get("price"))
         entry_observed_at = signal["observed_at"]
         if entry_price is None:
             signal_bounds = continuous_auction_bounds(signal["observed_at"])
@@ -62,7 +63,7 @@ def settle(
                 session_start, _ = signal_bounds
                 entry_quote = connection.execute(
                     """SELECT observed_at,price FROM quant.intraday_quote_observations
-                         WHERE symbol=%s AND source_name='tencent_free' AND observed_at<=%s AND observed_at>=%s
+                         WHERE symbol=%s AND source_name IN ('longhuvip','tencent_free') AND observed_at<=%s AND observed_at>=%s
                            AND price>0 ORDER BY observed_at DESC LIMIT 1""",
                     (signal["symbol"], signal["observed_at"], max(session_start, signal["observed_at"] - timedelta(seconds=90))),
                 ).fetchone()
@@ -83,7 +84,7 @@ def settle(
             barrier_end = min(cutoff, session_end, barrier_deadline)
             barrier_rows = connection.execute(
                 """SELECT observed_at,price FROM quant.intraday_quote_observations
-                     WHERE symbol=%s AND source_name='tencent_free' AND observed_at>%s AND observed_at<=%s AND price>0
+                     WHERE symbol=%s AND source_name IN ('longhuvip','tencent_free') AND observed_at>%s AND observed_at<=%s AND price>0
                      ORDER BY observed_at""",
                 (signal["symbol"], entry_observed_at, barrier_end),
             ).fetchall()
@@ -105,7 +106,7 @@ def settle(
             connection, signal["signal_event_id"], spec=barrier_spec, entry_at=entry_observed_at,
             entry_price=entry_price, result=barrier_result,
             source_status={
-                "path": "local_tencent_free", "cutoff": cutoff.isoformat(),
+                "path": "local_direct_watch_quote", "cutoff": cutoff.isoformat(),
                 "session_bounded": True,
                 "row_count": len(barrier_rows),
                 "reason": barrier_result.get("reason"),
@@ -126,7 +127,7 @@ def settle(
                     and window["query_end"] >= window["query_start"]):
                 exit_quote = connection.execute(
                     """SELECT observed_at,price FROM quant.intraday_quote_observations
-                         WHERE symbol=%s AND source_name='tencent_free' AND observed_at>=%s AND observed_at<=%s AND price>0
+                         WHERE symbol=%s AND source_name IN ('longhuvip','tencent_free') AND observed_at>=%s AND observed_at<=%s AND price>0
                          ORDER BY observed_at LIMIT 1""",
                     (signal["symbol"], window["query_start"], window["query_end"]),
                 ).fetchone()
@@ -134,7 +135,7 @@ def settle(
             if exit_quote:
                 path = connection.execute(
                     """SELECT price FROM quant.intraday_quote_observations
-                         WHERE symbol=%s AND source_name='tencent_free' AND observed_at>=%s AND observed_at<=%s AND price>0
+                         WHERE symbol=%s AND source_name IN ('longhuvip','tencent_free') AND observed_at>=%s AND observed_at<=%s AND price>0
                          ORDER BY observed_at""",
                     (signal["symbol"], signal["observed_at"], exit_quote["observed_at"]),
                 ).fetchall()
@@ -166,7 +167,7 @@ def settle(
                  outcome["raw_return"] if outcome else None, outcome["maximum_favorable_excursion"] if outcome else None,
                  outcome["maximum_adverse_excursion"] if outcome else None, status,
                  Json({
-                     "entry": "signal_evidence.tencent.price", "exit": "tencent_free",
+                     "entry": "signal_evidence.quote.price", "exit": "direct_watch_quote",
                      "cutoff": cutoff.isoformat(), "settlement_window": {
                          key: value.isoformat() if isinstance(value, datetime) else value
                          for key, value in window.items()
@@ -243,7 +244,7 @@ def settle(
                  daily_exit["available_at"] if daily_exit else None, daily_exit["close"] if daily_exit else None,
                  outcome["raw_return"] if outcome else None, outcome["maximum_favorable_excursion"] if outcome else None,
                  outcome["maximum_adverse_excursion"] if outcome else None, status, tradability,
-                 Json(json_safe({"entry": "signal_evidence.tencent.price", "exit": "canonical_daily_close", "cutoff": cutoff.isoformat(),
+                 Json(json_safe({"entry": "signal_evidence.quote.price", "exit": "canonical_daily_close", "cutoff": cutoff.isoformat(),
                                  "return_decomposition": decomposition})), METHODOLOGY_VERSION, snapshot_hash),
             )
             if status == "matured":

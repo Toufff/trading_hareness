@@ -33,7 +33,7 @@ async def run_strategy_pattern_mining(request: Any, dependencies: StrategyPatter
     """Build bounded replay evidence from already-selected post-close samples.
 
     This is research-only: it neither imports historical data nor changes live
-    thresholds.  The sole network callback is the bounded Tencent minute tape
+    thresholds.  The sole network callback is the bounded Longhu minute tape
     supplied by the composition root.
     """
     latest = await dependencies.run_database(dependencies.latest_date)
@@ -46,7 +46,7 @@ async def run_strategy_pattern_mining(request: Any, dependencies: StrategyPatter
     )
     candidates = selection.get("candidates", [])
     minute_circuit_open = bool(candidates) and dependencies.minute_capability in await dependencies.open_provider_capabilities(
-        "tencent_free", [dependencies.minute_capability],
+        "longhuvip", [dependencies.minute_capability],
     )
     semaphore = asyncio.Semaphore(max(1, dependencies.max_in_flight))
 
@@ -63,12 +63,12 @@ async def run_strategy_pattern_mining(request: Any, dependencies: StrategyPatter
             review = dependencies.review_score(item, pattern, risk_flags)
             return {
                 **item, "limit_context": {**item["limit_context"], **review},
-                "intraday_pattern": pattern, "minute_source": "tencent_free_minute", "risk_flags": risk_flags,
+                "intraday_pattern": pattern, "minute_source": "longhuvip_minute", "risk_flags": risk_flags,
             }
         except dependencies.handled_errors as error:
             return {
                 **item, "intraday_pattern": {"status": "failed", "error": str(error)[:240], "curve": []},
-                "minute_source": "tencent_free_minute", "risk_flags": [*item["risk_flags"], "minute_replay_failed"],
+                "minute_source": "longhuvip_minute", "risk_flags": [*item["risk_flags"], "minute_replay_failed"],
             }
 
     if minute_circuit_open:
@@ -77,7 +77,7 @@ async def run_strategy_pattern_mining(request: Any, dependencies: StrategyPatter
             "intraday_pattern": {
                 "status": "blocked", "error": "provider health circuit is open; upstream request skipped", "curve": [],
             },
-            "minute_source": "tencent_free_minute", "risk_flags": [*item["risk_flags"], "minute_replay_circuit_open"],
+            "minute_source": "longhuvip_minute", "risk_flags": [*item["risk_flags"], "minute_replay_circuit_open"],
         } for item in candidates]
     else:
         started_at = asyncio.get_running_loop().time()
@@ -111,11 +111,11 @@ async def run_strategy_pattern_mining(request: Any, dependencies: StrategyPatter
     source_status = {
         "daily": "canonical_bars_daily", "limit_sources": limit_sources,
         "minute": {
-            "provider": "tencent_free", "status": "circuit_open" if minute_circuit_open else status,
+            "provider": "longhuvip", "status": "circuit_open" if minute_circuit_open else status,
             "completed": len(samples) - len(failed),
             "failed": {item["symbol"]: item["intraday_pattern"].get("error") for item in failed},
         },
-        "super_get_minute": "corroborating source when healthy; Tencent is the bounded post-close replay source",
+        "super_get_minute": "corroborating source when healthy; Longhu is the bounded post-close replay source",
     }
     run_key = hashlib.sha256(f"{dependencies.model_version}:{as_of_date}".encode()).hexdigest()
     run_id = await dependencies.run_database(

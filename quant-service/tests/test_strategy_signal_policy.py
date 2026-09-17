@@ -74,7 +74,7 @@ class StrategySignalPolicyTests(unittest.TestCase):
     def test_live_policy_gate_blocks_new_entry_during_broad_risk_off(self):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
-            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10, "price_source": "tencent_batched_watch_quote"},
+            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10, "price_source": "longhuvip_watch_quote"},
             {"status": "completed", "trade_constraints": {}},
             {"status": "available", "market_state": "broad_risk_off", "board_snapshot_age_seconds": 30},
             {"status": "confirmed"},
@@ -85,7 +85,7 @@ class StrategySignalPolicyTests(unittest.TestCase):
     def test_live_policy_gate_blocks_entry_when_daily_or_board_context_is_not_usable(self):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
-            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10, "price_source": "tencent_batched_watch_quote"},
+            {"signal_type": "entry"}, {"available_quantity": 0}, {"price": 10, "price_source": "longhuvip_watch_quote"},
             {"status": "data_quality_blocked", "trade_constraints": {}},
             {"status": "missing", "market_state": "unknown"},
             {"status": "missing"},
@@ -97,7 +97,7 @@ class StrategySignalPolicyTests(unittest.TestCase):
     def test_live_policy_gate_keeps_unsellable_hard_stop_as_risk_alert(self):
         from app.live_policy import live_policy_gate
         result = live_policy_gate(
-            {"signal_type": "exit"}, {"entry_price": 10, "available_quantity": 0}, {"price": 9, "price_source": "tencent_batched_watch_quote"},
+            {"signal_type": "exit"}, {"entry_price": 10, "available_quantity": 0}, {"price": 9, "price_source": "longhuvip_watch_quote"},
             {"trade_constraints": {"limit_down": 8}}, {"market_state": "mixed_or_neutral"}, {"status": "confirmed"},
         )
         self.assertEqual(result["decision"], "risk_alert_only")
@@ -106,7 +106,7 @@ class StrategySignalPolicyTests(unittest.TestCase):
     def test_live_policy_uses_shared_board_and_st_limit_fallbacks(self):
         from app.live_policy import live_policy_gate
         context = {"status": "available", "market_state": "mixed_or_neutral", "board_snapshot_age_seconds": 30}
-        fresh_quote = {"price": 11, "pct_change": 10, "price_source": "tencent_batched_watch_quote",
+        fresh_quote = {"price": 11, "pct_change": 10, "price_source": "longhuvip_watch_quote",
                        "price_freshness": {"status": "fresh"}}
         growth_board = live_policy_gate(
             {"signal_type": "entry"}, {"symbol": "300001.SZ", "available_quantity": 0}, fresh_quote,
@@ -136,7 +136,7 @@ class StrategySignalPolicyTests(unittest.TestCase):
         result = live_policy_gate(
             {"signal_type": "entry"}, {"symbol": "600001.SH", "available_quantity": 0},
             {"price": 10.0, "limit_up": 10.0, "pct_change": 3.0,
-             "price_source": "tencent_batched_watch_quote", "price_freshness": {"status": "fresh"}},
+             "price_source": "longhuvip_watch_quote", "price_freshness": {"status": "fresh"}},
             {"status": "completed", "trade_constraints": {"is_st": False, "limit_up": None, "limit_down": None}},
             {"status": "available", "market_state": "mixed_or_neutral", "board_snapshot_age_seconds": 30},
             {"status": "confirmed"},

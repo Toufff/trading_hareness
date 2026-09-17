@@ -50,8 +50,8 @@ class IntradayWatchlistScanRuntimeDependencies:
     read_shadow_pool: Callable[..., Awaitable[dict[str, Any]]]
     shadow_rotation_due: Callable[[datetime], bool]
     shadow_rotation_slice: Callable[[list[dict[str, Any]], datetime], tuple[list[dict[str, Any]], int]]
-    tencent_watch_quotes: Callable[..., Awaitable[list[dict[str, Any]]]]
-    merge_watch_prices: Callable[[dict[str, dict[str, Any]], list[dict[str, Any]]], Any]
+    shadow_watch_quotes: Callable[[list[str]], Awaitable[tuple[list[dict[str, Any]], dict[str, Any]]]]
+    merge_shadow_prices: Callable[[dict[str, dict[str, Any]], list[dict[str, Any]]], Any]
     safe_error: Callable[[str, int], str]
     shadow_quote_errors: tuple[type[Exception], ...]
     rotation_persistence_dependencies: TenDayLeaderRotationIntradayDependencies
@@ -112,7 +112,7 @@ class IntradayWatchlistScanRuntime:
             symbols: list[str],
         ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
             try:
-                rows = await dependencies.tencent_watch_quotes(symbols, max_symbols=40)
+                rows, _status = await dependencies.shadow_watch_quotes(symbols)
             except dependencies.shadow_quote_errors as error:
                 return {}, {
                     "status": "unavailable",
@@ -120,10 +120,10 @@ class IntradayWatchlistScanRuntime:
                     "requested": len(symbols),
                 }
             quotes: dict[str, dict[str, Any]] = {}
-            dependencies.merge_watch_prices(quotes, rows)
+            dependencies.merge_shadow_prices(quotes, rows)
             return quotes, {
                 "status": "completed", "requested": len(symbols), "matched": len(quotes),
-                "source": "tencent_batched_watch_quote",
+                "source": "longhuvip_watch_quote",
             }
 
         async def persist_shadow_observations(**kwargs: Any) -> dict[str, Any]:

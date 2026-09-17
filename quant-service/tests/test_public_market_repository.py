@@ -178,7 +178,7 @@ class PersistFreeQuotesBatchingTests(unittest.TestCase):
 
     def test_valid_quotes_are_written_in_exactly_one_statement(self) -> None:
         db = _RecordingDatabase()
-        stored = persist_free_quotes(db, "tencent_free", [
+        stored = persist_free_quotes(db, "sina_free", [
             {"ts_code": "000001.SZ", "price": 10.0},
             {"ts_code": "600000.SH", "price": 12.0},
         ])
@@ -191,14 +191,14 @@ class PersistFreeQuotesBatchingTests(unittest.TestCase):
 
     def test_malformed_symbols_are_skipped_without_a_statement(self) -> None:
         db = _RecordingDatabase()
-        stored = persist_free_quotes(db, "tencent_free", [{"ts_code": "not-a-symbol", "price": 1.0}])
+        stored = persist_free_quotes(db, "sina_free", [{"ts_code": "not-a-symbol", "price": 1.0}])
         self.assertEqual(stored, 0)
         self.assertEqual(db.connection.executed, [])
 
     def test_duplicate_symbol_and_payload_pairs_are_deduplicated(self) -> None:
         db = _RecordingDatabase()
         quote = {"ts_code": "000001.SZ", "price": 10.0}
-        stored = persist_free_quotes(db, "tencent_free", [dict(quote), dict(quote)])
+        stored = persist_free_quotes(db, "sina_free", [dict(quote), dict(quote)])
         self.assertEqual(stored, 1)
         _sql, params = db.connection.executed[0]
         self.assertEqual(len(params["symbols"]), 1)

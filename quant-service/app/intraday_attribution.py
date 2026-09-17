@@ -53,7 +53,8 @@ def signal_attribution(signal_key: str, signal_type: str, conditions: dict[str, 
     assessment_status = str(assessment.get("status") or "")
     volume_baseline = "ready" if assessment_status == "candidate" else "insufficient" if assessment_status == "attention_only" or "time_bucket_volume_baseline_insufficient" in risk_flags else "not_applicable"
     market_state = str(market_context.get("market_state") or "unknown")
-    order_book = evidence.get("tencent_order_book") if isinstance(evidence.get("tencent_order_book"), dict) else {}
+    # Evidence before 2026-09-18 used "tencent_order_book" / "tencent_minute" keys.
+    order_book = next((evidence[key] for key in ("order_book", "tencent_order_book") if isinstance(evidence.get(key), dict)), {})
     microstructure = order_book.get("latest_features") if isinstance(order_book.get("latest_features"), dict) else order_book.get("features") if isinstance(order_book.get("features"), dict) else {}
     qi5 = number(microstructure.get("qi5"))
     ofi_label, ofi = next(((label, number(order_book.get(f"ofi_{label}"))) for label in ("30s", "1m", "5m") if int(order_book.get(f"ofi_{label}_sample_count") or 0) >= 3 and number(order_book.get(f"ofi_{label}")) is not None), (None, None))
@@ -63,7 +64,7 @@ def signal_attribution(signal_key: str, signal_type: str, conditions: dict[str, 
         elif order_book.get("status") == "observed": microstructure_state += "_ofi_window_insufficient"
     elif microstructure.get("status") == "observed": microstructure_state = "first_snapshot_only"
     else: microstructure_state = "unobserved"
-    minute = evidence.get("tencent_minute") if isinstance(evidence.get("tencent_minute"), dict) else {}
+    minute = next((evidence[key] for key in ("minute", "tencent_minute") if isinstance(evidence.get(key), dict)), {})
     corr, smart_q = number(minute.get("price_log_volume_corr_30m")), number(minute.get("smart_money_q_30m"))
     return {"attribution_version": "intraday-signal-attribution-v2", "model_version": model_version, "stage": stage,
             "market_state": market_state, "sector_linkage": sector_linkage, "volume_baseline": volume_baseline,

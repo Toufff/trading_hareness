@@ -17,12 +17,12 @@ class IntradayScanRepositoryTests(unittest.TestCase):
     def test_previous_quotes_are_loaded_once_per_symbol_source_pair(self) -> None:
         connection = MagicMock()
         connection.execute.return_value.fetchall.return_value = [
-            {"symbol": "000001.SZ", "source_name": "tencent_free", "price": 10.0,
+            {"symbol": "000001.SZ", "source_name": "longhuvip", "price": 10.0,
              "observed_at": datetime(2026, 8, 17, 1, 0, tzinfo=timezone.utc)},
         ]
         frames = previous_quote_frames(
             connection,
-            {"000001.SZ": "tencent_free", "600000.SH": "sina_free"},
+            {"000001.SZ": "longhuvip", "600000.SH": "sina_free"},
             not_before=datetime(2026, 8, 17, 0, 59, 45, tzinfo=timezone.utc),
             observed_at=datetime(2026, 8, 17, 1, 0, tzinfo=timezone.utc),
         )
@@ -31,7 +31,7 @@ class IntradayScanRepositoryTests(unittest.TestCase):
         sql, params = connection.execute.call_args.args
         self.assertIn("DISTINCT ON(o.symbol,o.source_name)", sql)
         self.assertEqual(params[0], ["000001.SZ", "600000.SH"])
-        self.assertEqual(params[1], ["tencent_free", "sina_free"])
+        self.assertEqual(params[1], ["longhuvip", "sina_free"])
 
     def test_first_eac_events_are_batched_and_use_earliest_event(self) -> None:
         connection = MagicMock()
@@ -95,7 +95,7 @@ class IntradayScanRepositoryTests(unittest.TestCase):
         self.assertEqual(state.candidate_sector_keys, {"000001.SZ": ["pcb"]})
         self.assertEqual(state.snapshot_payload, {"equity": 99.0, "drawdown": -0.02})
         order_book_sql, order_book_params = connection.calls[0]
-        self.assertIn("source_name='tencent_order_book'", order_book_sql)
+        self.assertIn("source_name='longhuvip_order_book'", order_book_sql)
         self.assertEqual(order_book_params[1], datetime(2026, 8, 17, 1, 0, tzinfo=timezone.utc))
         membership_sql, membership_params = connection.calls[2]
         self.assertIn("effective_from<=", membership_sql)

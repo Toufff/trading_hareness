@@ -49,7 +49,7 @@ def limit_linkage_candidates(
             "pct_change": pct_change, "main_net_inflow": main_flow, "volume_ratio": volume_ratio,
             "turnover_rate": turnover_rate,
             "evidence": {"membership": "exact_ths_concept", "anchor": "eastmoney_limit_up_pool",
-                         "quote_snapshot": "tencent_same_board_report",
+                         "quote_snapshot": "fuyao_all_a_same_board_report",
                          "components": ["shared_concepts", "main_net_inflow", "volume_ratio", "turnover_rate", "pct_change"]},
             "risk_flags": ["leader_linkage_research_only", "requires_minute_confirmation"],
         })

@@ -11,16 +11,12 @@ from zoneinfo import ZoneInfo
 _SYMBOL = re.compile(r"\d{6}\.(SH|SZ|BJ)")
 
 
-#: The three intraday quote sources that can populate ``quotes[symbol]["volume"]``
-#: report cumulative volume in three different native units: LonghuVIP's
-#: ``GetStockPanKou`` (unconfirmed by vendor documentation; treated as shares
-#: here to match the exchange's own board-lot-adjacent convention until an
-#: operator confirms it against a known symbol), Tencent's single-quote depth
-#: feed (board lots, already labelled ``cumulative_volume_lot`` and never
-#: written under the plain ``volume`` key), and Sina's realtime quote (shares).
-#: A caller merging more than one of these into the same ``quotes[symbol]``
-#: entry must consult ``volume_unit`` rather than assume any one convention.
-LONGHU_WATCH_QUOTE_VOLUME_UNIT = "share"
+#: Intraday quote sources that can populate ``quotes[symbol]["volume"]`` use
+#: different native units: LonghuVIP's ``GetStockPanKou`` reports board lots on
+#: every board (verified 2026-09-17 against the exchange cumulative volume of
+#: 002185, 600664 and 688981), while Sina's realtime quote reports shares.  A
+#: caller merging both into one entry must consult ``volume_unit``.
+LONGHU_WATCH_QUOTE_VOLUME_UNIT = "lot"
 
 
 def merge_longhu_watch_quotes(
@@ -28,14 +24,12 @@ def merge_longhu_watch_quotes(
 ) -> dict[str, dict[str, Any]]:
     """Overlay licensed watch quotes while preserving independently sourced flow.
 
-    Longhu is the preferred direct price source when its exchange timestamp is
-    present.  A malformed licensed row is ignored, leaving Tencent/Sina as the
-    existing fallback path.
+    Longhu is the direct price source; its exchange timestamp decides
+    freshness.  A malformed licensed row is ignored, leaving Sina as the only
+    fallback path.
 
-    ``volume`` is annotated with ``volume_unit`` because it is *not* the same
-    unit as Tencent's board-lot cumulative volume or Sina's realtime share
-    volume; a caller merging this quote with either of those sources must not
-    treat the numbers as directly comparable without checking the unit.
+    ``volume`` is annotated with ``volume_unit`` (board lots) because Sina's
+    realtime volume is shares; the two are not directly comparable.
     """
     for row in rows:
         symbol = str(row.get("ts_code") or "")
@@ -71,33 +65,13 @@ def merge_longhu_watch_quotes(
     return quotes
 
 
-def merge_watch_quote_prices(
-    quotes: dict[str, dict[str, Any]], depth_rows: list[dict[str, Any]], *, number: Callable[[Any], float | None],
-) -> dict[str, dict[str, Any]]:
-    """Overlay dedicated Tencent batch prices without inventing flow fields."""
-    for row in depth_rows:
-        symbol = str(row.get("ts_code") or "")
-        price, pre_close = number(row.get("price")), number(row.get("pre_close"))
-        if not _SYMBOL.fullmatch(symbol) or price is None or price <= 0:
-            continue
-        existing = dict(quotes.get(symbol) or {"symbol": symbol, "name": row.get("name"), "raw": {}})
-        existing["price"] = price
-        existing["pct_change"] = round((price / pre_close - 1) * 100, 5) if pre_close and pre_close > 0 else existing.get("pct_change")
-        existing["price_source"] = "tencent_batched_watch_quote"
-        existing["price_observed_from_depth"] = True
-        existing["price_trade_time"] = row.get("trade_time")
-        existing["raw"] = {**(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}), "watch_quote": row}
-        quotes[symbol] = existing
-    return quotes
-
-
 def merge_sina_watch_quotes(
     quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]], *, number: Callable[[Any], float | None],
 ) -> dict[str, dict[str, Any]]:
-    """Use Sina only as a price fallback; do not fabricate Tencent flow fields.
+    """Use Sina only as a price fallback; do not fabricate flow fields.
 
     A caller that already populated ``quotes[symbol]["price"]`` from a prior
-    merge (Tencent's decision-eligible batch, or any other source) has a real
+    merge (the decision-eligible Longhu quote, or any other source) has a real
     price for that symbol.  Sina must never overwrite it: this function is a
     fallback for symbols with no price yet, not a second opinion that can
     silently replace an already-fresher, decision-eligible quote.
@@ -145,8 +119,6 @@ def observation_source(quote: dict[str, Any] | None) -> str:
     source = str((quote or {}).get("price_source") or "")
     if source == "sina_batched_watch_quote":
         return "sina_free"
-    if source == "tencent_batched_watch_quote":
-        return "tencent_free"
     if source == "longhuvip_watch_quote":
         return "longhuvip"
     if source == "fuyao_ths_all_a_snapshot":
@@ -214,5 +186,5 @@ def annotate_flow_percentiles(quotes: dict[str, dict[str, Any]]) -> None:
 __all__ = [
     "LONGHU_WATCH_QUOTE_VOLUME_UNIT", "annotate_flow_percentiles", "exchange_time_status",
     "merge_eastmoney_watch_flows", "merge_longhu_watch_quotes", "merge_sina_watch_quotes",
-    "merge_watch_quote_prices", "observation_source", "quote_from_fuyao",
+    "observation_source", "quote_from_fuyao",
 ]

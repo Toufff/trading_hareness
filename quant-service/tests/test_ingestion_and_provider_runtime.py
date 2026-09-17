@@ -29,7 +29,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
     def test_intraday_edge_profile_only_keeps_network_polling_loops(self):
         specs = tuple(BackgroundTaskSpec(label, True, AsyncMock()) for label in (
             "intraday_monitor", "super_get_fast_quote", "minute_profile_capture",
-            "tencent_order_book", "board_flow_curve", "strategy_review",
+            "longhu_order_book", "board_flow_curve", "strategy_review",
             "post_close_strategy", "ten_day_leader_rotation", "daily_strategy_summary",
             "ths_member_backfill", "all_board_member_backfill",
         ))
@@ -39,13 +39,13 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
         self.assertEqual(
             {spec.label for spec in profiled if spec.enabled},
             {"intraday_monitor", "super_get_fast_quote", "minute_profile_capture",
-             "tencent_order_book", "board_flow_curve"},
+             "longhu_order_book", "board_flow_curve"},
         )
 
     def test_research_profile_excludes_remote_owned_intraday_polling_loops(self):
         specs = (
             BackgroundTaskSpec("intraday_monitor", True, AsyncMock()),
-            BackgroundTaskSpec("tencent_order_book", True, AsyncMock()),
+            BackgroundTaskSpec("longhu_order_book", True, AsyncMock()),
             BackgroundTaskSpec("strategy_review", True, AsyncMock()),
             BackgroundTaskSpec("post_close_strategy", False, AsyncMock()),
         )
@@ -689,7 +689,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
         async def check() -> tuple[dict[str, object], AsyncMock]:
             blocking = AsyncMock(return_value=({"000001.SZ": 0}, {}, {"000001.SZ": {"status": "completed"}}))
             with patch("app.main.realtime_market_session_async", new=AsyncMock(return_value=(True, "open"))), \
-                 patch("app.main.tencent_intraday_minutes", new=AsyncMock(return_value=[])), \
+                 patch("app.main.intraday_longhu_minutes", new=AsyncMock(return_value=[])), \
                  patch("app.main.run_database_blocking", new=blocking):
                 result = await capture_intraday_minute_sessions(["000001.SZ"])
             return result, blocking
@@ -869,7 +869,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
             "latest_strategy_pattern_date", "strategy_pattern_sample_candidates", "persist_strategy_pattern_run",
         ])
 
-    def test_pattern_mining_skips_tencent_minute_replay_when_its_circuit_is_open(self):
+    def test_pattern_mining_skips_longhu_minute_replay_when_its_circuit_is_open(self):
         candidate = {
             "symbol": "000001.SZ", "name": "测试股", "primary_cohort": "limit_pool", "cohorts": ["limit_pool"],
             "board_context": {}, "limit_context": {}, "daily_features": {}, "risk_flags": [],
@@ -882,7 +882,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
             minute_fetch = AsyncMock()
             with patch("app.main.run_database_blocking", new=blocking), \
                  patch("app.main.open_provider_capabilities", new=AsyncMock(return_value={"intraday_minute"})), \
-                 patch("app.main.tencent_intraday_minutes", new=minute_fetch):
+                 patch("app.main.intraday_longhu_minutes", new=minute_fetch):
                 result = await run_strategy_pattern_mining(StrategyPatternMiningRequest(refresh_limit_sources=False))
             return result, minute_fetch
 
@@ -897,9 +897,10 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
         async def check() -> tuple[dict[str, object], dict[str, object], AsyncMock]:
             minute_fetch = AsyncMock()
             with patch("app.main.open_provider_capabilities", new=AsyncMock(return_value={"intraday_minute"})), \
-                 patch("app.main.tencent_intraday_minutes", new=minute_fetch), \
-                 patch("app.main._intraday_tencent_minute_cache", new={}):
-                features, source = await intraday_tencent_surge_context(watches)
+                 patch("app.main.longhu_vendor_configured", return_value=True), \
+                 patch("app.main.intraday_longhu_minutes", new=minute_fetch), \
+                 patch("app.main._intraday_longhu_minute_cache", new={}):
+                features, source = await intraday_surge_context(watches)
             return features, source, minute_fetch
 
         features, source, minute_fetch = asyncio.run(check())
@@ -923,7 +924,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
         ])
 
     def test_market_snapshot_skips_circuit_open_public_providers_without_external_requests(self):
-        expected = {"status": "blocked", "source_summary": {"tencent_snapshot": {"status": "circuit_open"}}}
+        expected = {"status": "blocked", "source_summary": {"public_quote_snapshot": {"status": "circuit_open"}}}
 
         async def check() -> tuple[dict[str, object], AsyncMock, AsyncMock]:
             blocking = AsyncMock(side_effect=[["000001.SZ"], expected])
@@ -1021,7 +1022,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
             blocking = AsyncMock(return_value=0)
             with patch("app.main.run_database_blocking", new=blocking), \
                  patch("app.main.open_provider_capabilities", new=AsyncMock(return_value=set())):
-                source, _ = await stock_study_free_fetch("test", "tencent_free", "daily_bar", fetcher, "000001.SZ")
+                source, _ = await stock_study_free_fetch("test", "longhuvip", "daily_bar", fetcher, "000001.SZ")
             return source, blocking
 
         source, blocking = asyncio.run(check())
@@ -1033,7 +1034,7 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
 
         async def check() -> dict[str, object]:
             with patch("app.main.open_provider_capabilities", new=AsyncMock(return_value={"daily_bar"})):
-                source, payload = await stock_study_free_fetch("test", "tencent_free", "daily_bar", fetcher, "000001.SZ")
+                source, payload = await stock_study_free_fetch("test", "longhuvip", "daily_bar", fetcher, "000001.SZ")
             self.assertEqual(payload, [])
             return source
 

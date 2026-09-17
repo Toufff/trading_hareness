@@ -148,7 +148,7 @@ DATAHUB_VERIFIED_APIS = frozenset({
 # is empty, unavailable, or ignores the requested scope.
 SUPER_REALTIME_PROVIDER_ORDER: dict[str, tuple[ProviderName, ...]] = {
     # City rt_k is excluded by ``supports`` above.  GET remains an optional
-    # context feed only; high-frequency strategy confirmation uses Tencent
+    # context feed only; high-frequency strategy confirmation uses Longhu
     # plus timestamped rt_min, never an un-stamped rt_k quote.
     "rt_k": ("super_get",),
     "rt_min": ("super_sdk", "super_get"),

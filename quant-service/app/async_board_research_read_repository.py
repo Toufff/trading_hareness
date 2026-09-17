@@ -53,7 +53,7 @@ async def latest_board_stock_mining(async_database: Any, limit: int = 20) -> dic
         "run": run,
         "inflow": [row for row in items if row["direction"] == "inflow"][:bounded],
         "outflow": [row for row in items if row["direction"] == "outflow"][:bounded],
-        "notice": "候选使用东财板块资金流、精确成分股映射及同刻腾讯量价/主力流；不按名称推断成员，也不构成买卖指令。",
+        "notice": "候选使用东财板块资金流、精确成分股映射及同刻同花顺全A量价；不按名称推断成员，也不构成买卖指令。",
     }
 
 

@@ -44,7 +44,7 @@ class IntradayContextRuleTests(unittest.TestCase):
         self.assertIn("WHERE symbol=ANY(%s)", repository_source)
         self.assertIn("prepared.market_contexts.get((observed_at, symbol), {})", scanner_source)
 
-    def test_intraday_scan_does_not_claim_tencent_completed_when_no_watch_quote_matches(self):
+    def test_intraday_scan_does_not_claim_direct_quotes_completed_when_no_watch_quote_matches(self):
         source = (Path(__file__).resolve().parents[1] / "app" / "intraday_scan_source_status.py").read_text(encoding="utf-8")
         self.assertIn('"completed" if fresh_direct_watch_count == len(selected_symbols)', source)
         self.assertIn('"decision_eligible_watch_quote_symbols": fresh_direct_watch_count', source)

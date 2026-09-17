@@ -126,18 +126,5 @@ class DailyBarBatchEquivalenceTests(unittest.TestCase):
         finally:
             self._cleanup()
 
-    def test_batch_rejects_tencent_free_like_the_per_row_path(self) -> None:
-        from app.daily_bar_batch_repository import upsert_daily_bars
-        from app.main import DailyBar, db
-
-        bad_bar = DailyBar(
-            symbol=self.mismatch_symbol, trading_date=self.trading_date, close=Decimal("10"),
-            source="tencent_free", available_at=datetime(2099, 3, 2, tzinfo=timezone.utc),
-        )
-        with self.assertRaisesRegex(ValueError, "front-adjusted"):
-            with db.transaction() as connection:
-                upsert_daily_bars(connection, [bad_bar])
-
-
 if __name__ == "__main__":
     unittest.main()

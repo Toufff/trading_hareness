@@ -80,7 +80,7 @@ class PaperExecutionTests(unittest.TestCase):
     def test_contract_payload_is_json_safe(self):
         observed = datetime(2026, 8, 14, tzinfo=timezone.utc)
         signal = SignalSpec("watchlist-confirmation", "v1", "watch", "000001.SZ", 1, observed,
-                            evidence=(EvidenceRef("tencent", observed_at=observed),))
+                            evidence=(EvidenceRef("longhuvip_watch_quote", observed_at=observed),))
         payload = contract_payload(signal)
         self.assertEqual(payload["symbol"], "000001.SZ")
         self.assertEqual(payload["evidence"][0]["observed_at"], observed.isoformat())

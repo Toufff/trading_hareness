@@ -16,7 +16,7 @@ class IntradaySurgeContextServiceTests(unittest.IsolatedAsyncioTestCase):
             return []
 
         async def open_capabilities(_provider, _capabilities):
-            return {"tencent_intraday_minute"}
+            return {"intraday_minute"}
 
         async def run_database(*_args, **_kwargs):
             raise AssertionError("circuit-open path must not persist a failed provider call")
@@ -24,7 +24,7 @@ class IntradaySurgeContextServiceTests(unittest.IsolatedAsyncioTestCase):
         features, evidence = await capture(
             [{"symbol": "000001.SZ", "metadata": {"surge_strategy": {"enabled": True, "peer_symbols": ["000002.SZ"]}}}],
             mapped_peers={"000001.SZ": {"peer_symbols": ["000003.SZ"]}}, cache={}, max_symbols=lambda: 20,
-            open_capabilities=open_capabilities, capability="tencent_intraday_minute", fetch_minutes=fetch,
+            open_capabilities=open_capabilities, capability="intraday_minute", fetch_minutes=fetch,
             minute_features=lambda rows, **_kwargs: {"rows": rows}, persist_health=lambda *_args: None,
             run_database=run_database, safe_error=lambda value, _limit: value,
             handled_errors=(asyncio.TimeoutError, ValueError),
@@ -50,7 +50,7 @@ class IntradaySurgeContextServiceTests(unittest.IsolatedAsyncioTestCase):
 
         kwargs = dict(
             mapped_peers=None, cache=cache, max_symbols=lambda: 20,
-            open_capabilities=open_capabilities, capability="tencent_intraday_minute", fetch_minutes=fetch,
+            open_capabilities=open_capabilities, capability="intraday_minute", fetch_minutes=fetch,
             minute_features=lambda rows, **_kwargs: {"latest": rows[-1]}, persist_health=lambda *_args: None,
             run_database=run_database, safe_error=lambda value, _limit: value,
             handled_errors=(asyncio.TimeoutError, ValueError),

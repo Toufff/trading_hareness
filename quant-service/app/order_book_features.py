@@ -14,7 +14,7 @@ def _number(value: Any) -> float | None:
 
 
 def _levels(value: Any) -> list[dict[str, float] | None]:
-    """Keep Tencent's level positions; never compact past an invalid quote."""
+    """Keep the vendor's level positions; never compact past an invalid quote."""
     rows = value if isinstance(value, list) else []
     parsed: list[dict[str, float] | None] = []
     for row in rows[:5]:
@@ -57,7 +57,7 @@ def order_book_observation(current: dict[str, Any], previous: dict[str, Any] | N
         "seal_volume_lot": bid1["size"] if book_side == "bid_only" else ask1["size"] if book_side == "ask_only" else None,
         "book_spread": round(ask1["price"] - bid1["price"], 6) if bid1 and ask1 else None,
         "book_mid": round((ask1["price"] + bid1["price"]) / 2, 6) if bid1 and ask1 else None,
-        "feature_version": "tencent-order-book-observation-v2",
+        "feature_version": "longhuvip-order-book-observation-v1",
     }
     if not previous:
         return {**result, "delta_status": "first_snapshot"}
@@ -105,7 +105,7 @@ def aggregate_order_book_observations(rows: list[dict[str, Any]], observed_at: d
                       and isinstance(row.get("raw"), dict)), key=lambda row: row["observed_at"], reverse=True)
     latest = dict(ordered[0]["raw"].get("order_book_features") or {}) if ordered else {}
     result: dict[str, Any] = {"status": "missing", "latest_features": latest,
-                              "feature_version": "tencent-order-book-aggregate-v1"}
+                              "feature_version": "longhuvip-order-book-aggregate-v1"}
     for label, seconds in (("30s", 30), ("1m", 60), ("5m", 300)):
         cutoff = observed_at - timedelta(seconds=seconds)
         features = [dict(row["raw"].get("order_book_features") or {}) for row in ordered if row["observed_at"] >= cutoff]

@@ -68,7 +68,7 @@ class IntradaySettlementClockTests(unittest.TestCase):
         signal_at = datetime(2026, 8, 11, 3, 25, tzinfo=timezone.utc)  # 11:25 China.
         signal = {
             "signal_event_id": "signal-1", "symbol": "000001.SZ", "signal_type": "entry",
-            "observed_at": signal_at, "evidence": {"tencent": {"price": "10.00"}},
+            "observed_at": signal_at, "evidence": {"quote": {"price": "10.00"}},
         }
 
         class Result:
@@ -117,7 +117,7 @@ class IntradaySettlementClockTests(unittest.TestCase):
         exit_at = datetime(2026, 8, 11, 2, 5, 20, tzinfo=timezone.utc)
         signal = {
             "signal_event_id": "signal-2", "symbol": "000001.SZ", "signal_type": "entry",
-            "observed_at": signal_at, "evidence": {"tencent": {"price": "10.00"}},
+            "observed_at": signal_at, "evidence": {"quote": {"price": "10.00"}},
         }
 
         class Result:
@@ -137,7 +137,7 @@ class IntradaySettlementClockTests(unittest.TestCase):
                 text = str(query)
                 if "FROM quant.intraday_signal_events" in text:
                     return Result(rows=[signal])
-                if "source_name='tencent_free' AND observed_at>=%s AND observed_at<=%s" in text:
+                if "source_name IN ('longhuvip','tencent_free') AND observed_at>=%s AND observed_at<=%s" in text:
                     return Result(row={"observed_at": exit_at, "price": "10.20"})
                 if "SELECT price FROM quant.intraday_quote_observations" in text:
                     return Result(rows=[{"price": "10.00"}, {"price": "10.20"}])
@@ -171,7 +171,7 @@ class IntradaySettlementClockTests(unittest.TestCase):
         signal_at = datetime(2026, 8, 11, 2, 0, tzinfo=timezone.utc)  # 10:00 Shanghai, 2026-08-11.
         signal = {
             "signal_event_id": "signal-3", "symbol": "000001.SZ", "signal_type": "entry",
-            "observed_at": signal_at, "evidence": {"tencent": {"price": "10.00"}},
+            "observed_at": signal_at, "evidence": {"quote": {"price": "10.00"}},
         }
         calendar_next_date = date(2026, 8, 12)
         reopening_after_suspension = {"trading_date": date(2026, 8, 17), "available_at": signal_at, "open": "9.00", "close": "9.50"}

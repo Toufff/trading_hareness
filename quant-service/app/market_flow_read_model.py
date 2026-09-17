@@ -103,7 +103,7 @@ def project_market_flow_features(
             "minimum_independent_events": 200,
             "live_strategy_effect": "none",
         },
-        "notice": "分钟东财板块流、腾讯全A量能和盘后Tushare资金流保持分层；缺失不补零，当前仅用于研究与前端复盘。",
+        "notice": "分钟东财板块流、全A量能和盘后Tushare资金流保持分层；缺失不补零，当前仅用于研究与前端复盘。",
     }
 
 

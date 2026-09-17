@@ -1,6 +1,6 @@
 """Coverage for the quote-row batching in longhu_market_repository.
 
-``persist_full_market_close`` previously ran one INSERT per Tencent quote row
+``persist_full_market_close`` previously ran one INSERT per settled quote row
 (one row per A-share symbol, ~5,500 for a full close).  It now writes the
 whole batch through one ``unnest``-driven upsert.
 """

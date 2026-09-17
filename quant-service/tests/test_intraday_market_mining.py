@@ -86,38 +86,21 @@ class IntradayMarketMiningTests(unittest.TestCase):
         self.assertEqual(observed["cumulative_volume_delta_lot"], 10.0)
         self.assertEqual(observed["interval_vwap"], 10.5)
 
-    def test_tencent_order_book_decoder_reads_cumulative_amount_from_field_35(self):
-        values = [""] * 36
-        values[1], values[3], values[4] = "样本", "10.20", "10.00"
-        values[6], values[7], values[8] = "1000", "610", "390"
-        for level in range(5):
-            values[9 + level * 2], values[10 + level * 2] = f"{10.19 - level * 0.01:.2f}", str(100 - level)
-            values[19 + level * 2], values[20 + level * 2] = f"{10.21 + level * 0.01:.2f}", str(90 - level)
-        values[30], values[35] = "20260812130000", "10.20/1000/1020000"
-        row = _tencent_order_book_row("000001.SZ", values)
-        self.assertIsNotNone(row)
-        self.assertEqual(row["cumulative_amount"], 1_020_000.0)
-        self.assertEqual(row["bids"][0], {"price": 10.19, "size": 100.0})
-
-    def test_tencent_order_book_decoder_preserves_a_limit_up_seal_with_empty_asks(self):
-        values = [""] * 36
-        values[1], values[3], values[4] = "涨停样本", "10.99", "9.99"
-        values[6], values[7], values[8] = "1000", "610", "390"
-        values[9], values[10] = "10.99", "557769"
-        for level in range(1, 5):
-            values[9 + level * 2], values[10 + level * 2] = "0.00", "0"
-        for level in range(5):
-            values[19 + level * 2], values[20 + level * 2] = "0.00", "0"
-        values[30], values[35] = "20260812130000", "10.99/1000/1099000"
-        row = _tencent_order_book_row("000001.SZ", values)
+    def test_longhu_order_book_row_preserves_a_limit_up_seal_with_empty_asks(self):
+        snapshot = {"ts_code": "000001.SZ", "name": "涨停样本", "price": 10.99, "pre_close": 9.99,
+                    "volume": 1000, "amount": 1_099_000, "outer_volume_lot": 610, "inner_volume_lot": 390,
+                    "trade_time": "20260812130000",
+                    "bids": [{"price": 10.99, "size": 557769.0}] + [{"price": 0.0, "size": 0.0}] * 4,
+                    "asks": [{"price": 0.0, "size": 0.0}] * 5}
+        row = order_book_row(snapshot)
         self.assertIsNotNone(row)
         self.assertTrue(row["one_sided_book"])
         self.assertEqual(row["book_side"], "bid_only")
         self.assertEqual(row["seal_volume_lot"], 557769.0)
+        self.assertEqual(row["cumulative_amount"], 1_099_000)
         observed = order_book_observation(row)
         self.assertEqual(observed["qi1"], 1.0)
         self.assertEqual(observed["qi5"], 1.0)
-        self.assertEqual(observed["seal_volume_lot"], 557769.0)
 
     def test_order_book_observation_never_turns_counter_reset_into_negative_turnover(self):
         observed = order_book_observation(

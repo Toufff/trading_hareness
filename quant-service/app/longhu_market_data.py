@@ -90,6 +90,38 @@ async def longhu_order_book_quotes(symbols: list[str], *, max_symbols: int = 20)
     return [row for snapshot in snapshots if (row := order_book_row(snapshot)) is not None]
 
 
+def _index_quote(symbol: str) -> dict[str, Any] | None:
+    """Latest index level from the minute tape (``GetStockPanKou`` does not serve indexes)."""
+    resolved = longhu_security_id(symbol)
+    if not resolved:
+        return None
+    envelope = intraday_source().raw_call({
+        "target": "longhu_quote",
+        "params": {"a": "GetStockTrendIncremental", "c": "StockL2Data", "apiv": "w41", "Type": 1, "StockID": resolved[1]},
+    })
+    payload = ((envelope.get("pages") or [{}])[0] or {}).get("payload") or {}
+    trend = [row for row in payload.get("trend") or [] if isinstance(row, list) and len(row) >= 2]
+    try:
+        price, pre_close = float(trend[-1][1]), float(payload.get("preclose_px"))
+    except (IndexError, TypeError, ValueError):
+        return None
+    if price <= 0 or pre_close <= 0:
+        return None
+    return {"ts_code": resolved[0], "price": price, "pre_close": pre_close, "trade_date": str(payload.get("day") or ""),
+            "minute": str(trend[-1][0]), "source": MINUTE_SOURCE}
+
+
+async def longhu_index_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """Latest level per index; a failed symbol is absent, never guessed."""
+    async def one(symbol: str) -> tuple[str, dict[str, Any] | None]:
+        try:
+            return symbol, await _blocking(lambda: _index_quote(symbol), timeout_seconds=10)
+        except Exception:  # noqa: BLE001 - one index must not drop the others
+            return symbol, None
+
+    return {symbol: row for symbol, row in await asyncio.gather(*(one(s) for s in symbols)) if row}
+
+
 async def longhu_daily(symbol: str, start: str, end: str) -> list[dict[str, Any]]:
     """Unadjusted daily stock bars in ``[start, end]`` (YYYYMMDD), lots / thousand CNY."""
     if not longhu_security_id(symbol):
@@ -107,6 +139,6 @@ async def longhu_index_daily(symbol: str, start: str, end: str) -> list[dict[str
 
 __all__ = [
     "DAILY_SOURCE", "MINUTE_SOURCE", "ORDER_BOOK_SOURCE", "PROVIDER_KEY", "STRATEGY_INDEXES",
-    "LonghuMarketDataError", "longhu_daily", "longhu_index_daily", "longhu_intraday_minute_session",
+    "LonghuMarketDataError", "longhu_daily", "longhu_index_daily", "longhu_index_quotes", "longhu_intraday_minute_session",
     "longhu_intraday_minutes", "longhu_order_book_quotes", "order_book_row",
 ]

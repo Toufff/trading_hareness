@@ -108,7 +108,7 @@ class IntradayScanSignalPersistenceTests(unittest.TestCase):
         )
         signal_dependencies = IntradayScanSignalPersistenceDependencies(
             prepare_inputs=lambda *_args, **_kwargs: prepared,
-            preparation_dependencies=object(), quote_source=lambda _: "tencent_watch_batch",
+            preparation_dependencies=object(), quote_source=lambda _: "longhuvip_watch_quote",
             json_safe=lambda value: value, persist_rule_input_snapshot=lambda *_args, **_kwargs: None,
             attach_volume_time_profile=lambda *_args, **_kwargs: None, number=lambda value: value,
             aggregate_order_book_observations=lambda *_args, **_kwargs: None,
@@ -137,7 +137,7 @@ class IntradayScanSignalPersistenceTests(unittest.TestCase):
         )
         return IntradayScanSignalPersistenceDependencies(
             prepare_inputs=lambda *_args, **_kwargs: prepared,
-            preparation_dependencies=object(), quote_source=lambda _: "tencent_watch_batch",
+            preparation_dependencies=object(), quote_source=lambda _: "longhuvip_watch_quote",
             json_safe=lambda value: value, persist_rule_input_snapshot=lambda *_args, **_kwargs: None,
             attach_volume_time_profile=lambda *_args, **_kwargs: None, number=lambda value: value,
             aggregate_order_book_observations=lambda *_args, **_kwargs: None,
@@ -247,7 +247,7 @@ class IntradayScanSignalPersistenceTests(unittest.TestCase):
 
         dependencies = IntradayScanSignalPersistenceDependencies(
             prepare_inputs=prepare_inputs, preparation_dependencies=object(),
-            quote_source=lambda _: "tencent_watch_batch", json_safe=lambda value: value,
+            quote_source=lambda _: "longhuvip_watch_quote", json_safe=lambda value: value,
             persist_rule_input_snapshot=snapshot,
             attach_volume_time_profile=lambda feature, profile, **_: {"feature": feature, "profile": profile},
             number=lambda value: float(value) if value is not None else None,
@@ -258,8 +258,8 @@ class IntradayScanSignalPersistenceTests(unittest.TestCase):
         )
         result = persist_scan_signals(
             connection, scan_id=uuid.uuid4(), observed_at=observed_at, selected_symbols=["000001.SZ"],
-            source_status={"tencent": {"status": "completed"}}, watches=[{"symbol": "000001.SZ"}],
-            quotes={"000001.SZ": {"price": 10.0, "price_source": "tencent_watch_batch", "raw": {"close": 10}}},
+            source_status={"direct_watch": {"status": "completed"}}, watches=[{"symbol": "000001.SZ"}],
+            quotes={"000001.SZ": {"price": 10.0, "price_source": "longhuvip_watch_quote", "raw": {"close": 10}}},
             all_a_rows=[], quote_latency_ms=12, tushare_minutes={"000001.SZ": {"rows": []}},
             surge_features={}, peer_contexts={"000001.SZ": {"peer_count": 1}}, fast_confirmations={},
             confirmation_window=300, signal_model_version="v1", factor_contract_version="v2", dependencies=dependencies,

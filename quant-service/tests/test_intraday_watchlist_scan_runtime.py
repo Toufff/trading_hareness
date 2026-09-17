@@ -59,7 +59,7 @@ class IntradayWatchlistScanRuntimeTests(unittest.TestCase):
             tushare_minutes=empty_async, fast_confirmations=empty_async, board_cache_evidence=empty_async,
             build_source_status=lambda **_: {}, persist_signals=lambda *_: [], read_shadow_pool=empty_async,
             shadow_rotation_due=lambda _: False, shadow_rotation_slice=lambda *_: ([], 0),
-            tencent_watch_quotes=empty_async, merge_watch_prices=lambda *_: None, safe_error=lambda value, _: value,
+            shadow_watch_quotes=empty_async, merge_shadow_prices=lambda *_: None, safe_error=lambda value, _: value,
             shadow_quote_errors=(ValueError,), rotation_persistence_dependencies=object(),
             persist_rotation_observations=lambda **_: {}, persist_rotation_scan_status=lambda *_args, **_kwargs: None,
             json_safe=lambda value: value, deliver_alert=empty_async, alert_text=lambda *_args, **_kwargs: "",

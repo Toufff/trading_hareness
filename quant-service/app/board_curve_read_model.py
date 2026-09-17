@@ -62,7 +62,7 @@ def project_latest_close_sector_review_report(row: Any) -> dict[str, Any]:
     """Project one already-read board review without a database dependency."""
     return {
         "report": row,
-        "notice": "板块 Top10 是同花顺精确成员与同一腾讯横截面的已保存复盘证据。",
+        "notice": "板块 Top10 是同花顺精确成员与同一全A横截面的已保存复盘证据。",
     }
 
 

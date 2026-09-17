@@ -13,7 +13,7 @@ def build_specs(*, interval_seconds: int, enabled: dict[str, bool], loops: dict[
     labels = (
             "intraday_monitor", "super_get_fast_quote", "strategy_review", "post_close_strategy",
             "ten_day_leader_rotation", "daily_strategy_summary", "ths_member_backfill",
-            "all_board_member_backfill", "minute_profile_capture", "tencent_order_book", "board_flow_curve",
+            "all_board_member_backfill", "minute_profile_capture", "longhu_order_book", "board_flow_curve",
             "market_event_capture",
             "all_a_level1_snapshot",
     )

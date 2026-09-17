@@ -93,7 +93,8 @@ class IntradayWatchlistScanServiceTests(unittest.TestCase):
             self.assertEqual(slo, 20.0)
             return SimpleNamespace(
                 quotes={"000001.SZ": {"price": 10.0}}, all_a_rows=[{"symbol": "000001.SZ"}],
-                fresh_watch_rows=[{"symbol": "000001.SZ"}], sina_watch_rows=[], eastmoney_watch_flow_rows=[],
+                licensed_watch_rows=[{"symbol": "000001.SZ"}], licensed_watch_status={"status": "completed"},
+                sina_watch_rows=[], eastmoney_watch_flow_rows=[],
                 eastmoney_watch_flow_status={"status": "fresh", "scope": "explicit_watchlist_only"},
                 derived_flow_status={"status": "fresh", "derived_symbols": 1},
                 all_a_snapshot_status={"status": "fresh", "cross_sectional": True}, latency_ms=9,
@@ -132,7 +133,7 @@ class IntradayWatchlistScanServiceTests(unittest.TestCase):
             high_frequency_window=lambda _: True, capture_quotes=capture, surge_context=surge,
             peer_context=lambda peers, _features: {"peer_symbols": peers}, tushare_minutes=minutes,
             fast_confirmations=confirmations, board_cache_evidence=board,
-            build_source_status=lambda **kwargs: {"direct": len(kwargs["fresh_watch_rows"])},
+            build_source_status=lambda **kwargs: {"direct": len(kwargs["licensed_watch_rows"])},
             persist_signals=persist, deliver_alert=deliver,
             alert_text=lambda *_args, decision_card_url=None: f"alert {decision_card_url}",
             decision_card_url=lambda symbol: f"card:{symbol}",

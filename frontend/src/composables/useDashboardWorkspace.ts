@@ -222,8 +222,8 @@ const realtimeStateType = (state?: RealtimeServiceState): 'success' | 'warning' 
 const realtimeStateText = (state?: RealtimeServiceState) => ({ healthy: '运行正常', ready: '投递就绪', standby: '待命', starting: '启动中', degraded: '降级/延迟', disabled: '未配置', unavailable: '明确不可用' }[state ?? 'disabled']);
 const realtimeDeliveryDetail = (service: RealtimeService) => {
   const details = service.details ?? {};
-  if (service.key === 'tencent_realtime' && details.public_flow_snapshot) {
-    const snapshot = details.public_flow_snapshot as { status?: string; age_seconds?: number; max_decision_age_seconds?: number; decision_eligible?: boolean };
+  if (service.key === 'fuyao_ths_realtime' && details.snapshot) {
+    const snapshot = details.snapshot as { status?: string; age_seconds?: number; max_decision_age_seconds?: number; decision_eligible?: boolean };
     return `资金流 ${snapshot.status ?? '未知'}；${snapshot.decision_eligible ? '可用于新入场确认' : '仅展示，禁止资金流确认'}；${ageText(snapshot.age_seconds)} / ${ageText(snapshot.max_decision_age_seconds)}`;
   }
   if (service.key === 'feishu_alert') return `最近 ${details.latest_delivery_kind ?? '无'} / ${details.latest_delivery_status ?? '无'}；待重试 ${details.pending_retry_count ?? 0}；带外关注 ${details.meta_alert_state ?? 'normal'}`;

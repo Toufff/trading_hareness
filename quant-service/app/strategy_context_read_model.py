@@ -139,7 +139,7 @@ def source_readiness(
         rows = connection.execute(
             """SELECT provider_key,capability,last_success_at,last_failure_at,last_row_count,consecutive_failures
                  FROM quant.provider_health
-                WHERE provider_key IN ('akshare','eastmoney_free','tencent_free','tushare_primary','tushare_super_sdk','tushare_super_get')
+                WHERE provider_key IN ('akshare','eastmoney_free','longhuvip','tushare_primary','tushare_super_sdk','tushare_super_get')
                 ORDER BY provider_key,capability"""
         ).fetchall()
         event_rows = connection.execute(

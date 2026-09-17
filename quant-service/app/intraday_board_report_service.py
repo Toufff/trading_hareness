@@ -115,7 +115,7 @@ async def run(
     local_time = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%H:%M")
     text = "\n".join([
         f"【盘中板块与关联挖掘快报｜{local_time}】", *sections,
-        "来源：东财实时板块资金流、东财涨停池、同花顺精确概念成员、腾讯全 A 行情；关联候选仅供研究，须经分钟承接确认，不构成买卖指令。",
+        "来源：东财实时板块资金流、东财涨停池、同花顺精确概念成员、同花顺全 A 行情；关联候选仅供研究，须经分钟承接确认，不构成买卖指令。",
     ])
     # Keep the rendered text for compatible callers/debuggers while explicitly
     # returning a suppressed delivery contract under the watched-stock policy.

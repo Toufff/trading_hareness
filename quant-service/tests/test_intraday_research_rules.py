@@ -26,9 +26,9 @@ class IntradayResearchRuleTests(unittest.TestCase):
     def test_intraday_attribution_labels_microstructure_as_observational(self):
         attribution = intraday_signal_attribution(
             "000001.SZ:watch:test", "watch", {},
-            {"tencent_order_book": {"status": "observed", "latest_features": {"status": "observed", "delta_status": "ready", "qi5": 0.4},
+            {"order_book": {"status": "observed", "latest_features": {"status": "observed", "delta_status": "ready", "qi5": 0.4},
                                       "ofi_30s": 3, "ofi_30s_sample_count": 3},
-             "tencent_minute": {"price_log_volume_corr_30m": -0.4, "smart_money_q_30m": 0.99}},
+             "minute": {"price_log_volume_corr_30m": -0.4, "smart_money_q_30m": 0.99}},
         )
         self.assertEqual(attribution["microstructure_state"], "observed_bid_heavy_positive_ofi_30s")
         self.assertEqual(attribution["ofi_attribution_window"], "30s")
@@ -36,7 +36,7 @@ class IntradayResearchRuleTests(unittest.TestCase):
         self.assertEqual(attribution["smart_money_state"], "below_session_vwap")
 
     def test_extracted_intraday_modules_match_compatibility_exports(self):
-        evidence = {"tencent_order_book": {"status": "observed", "latest_features": {"status": "observed", "delta_status": "ready", "qi5": 0.4}, "ofi_30s": 3, "ofi_30s_sample_count": 3}}
+        evidence = {"order_book": {"status": "observed", "latest_features": {"status": "observed", "delta_status": "ready", "qi5": 0.4}, "ofi_30s": 3, "ofi_30s_sample_count": 3}}
         self.assertEqual(
             intraday_signal_attribution("000001.SZ:watch:test", "watch", {}, evidence),
             isolated_signal_attribution("000001.SZ:watch:test", "watch", {}, evidence,
@@ -87,7 +87,7 @@ class IntradayResearchRuleTests(unittest.TestCase):
         }
         quote = {
             "price": 10.4, "pct_change": 2.4,
-            "price_source": "tencent_batched_watch_quote",
+            "price_source": "longhuvip_watch_quote",
             "price_freshness": {"status": "fresh"},
         }
         minute = {
@@ -110,7 +110,7 @@ class IntradayResearchRuleTests(unittest.TestCase):
                  "alert_on_entry": True, "alert_on_exit": True}
         quote = {
             "price": 10.4, "pct_change": 2.4, "volume_ratio": 3.5, "turnover_rate": 6.0,
-            "main_net_inflow": 1000, "price_source": "tencent_batched_watch_quote",
+            "main_net_inflow": 1000, "price_source": "longhuvip_watch_quote",
             "price_freshness": {"status": "fresh"},
             "flow_snapshot": {"scope": "explicit_watchlist_only", "cross_sectional": False,
                               "decision_eligible": False},
@@ -238,7 +238,7 @@ class PerFieldFlowTrustTests(unittest.TestCase):
 
     def _quote(self, sources, **overrides):
         return {"price": 10.4, "pct_change": 2.4, "volume_ratio": 3.5, "turnover_rate": 6.0,
-                "main_net_inflow": 1000, "price_source": "tencent_batched_watch_quote",
+                "main_net_inflow": 1000, "price_source": "longhuvip_watch_quote",
                 "price_freshness": {"status": "fresh"},
                 "flow_snapshot": {"scope": "explicit_watchlist_only", "cross_sectional": False,
                                   "decision_eligible": False},

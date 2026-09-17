@@ -6,7 +6,7 @@ from statistics import median
 from typing import Any
 
 
-PUBLIC_QUOTE_PROVIDERS = frozenset({"eastmoney_free", "tencent_free", "sina_free"})
+PUBLIC_QUOTE_PROVIDERS = frozenset({"eastmoney_free", "sina_free"})
 
 
 def as_number(value: Any) -> float | None:

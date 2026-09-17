@@ -43,7 +43,7 @@ class _Connection:
         if "market_bars_daily" in statement:
             return _Result(rows=[{"symbol": "000300.SH", "trading_date": "2026-08-21", "close": 10}])
         if "provider_health" in statement:
-            return _Result(rows=[{"provider_key": "tencent_free", "capability": "quote", "last_success_at": None,
+            return _Result(rows=[{"provider_key": "longhuvip", "capability": "quote", "last_success_at": None,
                                   "last_failure_at": None, "last_row_count": 1, "consecutive_failures": 0}])
         if "GROUP BY source,event_type" in statement:
             return _Result(rows=[{"source": "akshare", "event_type": "limit_up_pool", "latest_available_at": None, "rows": 2}])
@@ -95,7 +95,7 @@ class StrategyContextReadModelTests(unittest.TestCase):
             json_safe=lambda value: value,
         )
         self.assertEqual(result["xinhua_finance"]["status"], "not_configured")
-        self.assertIn("tencent_free", result["providers"])
+        self.assertIn("longhuvip", result["providers"])
         self.assertEqual(result["post_close_event_inventory"][0]["event_type"], "limit_up_pool")
 
 

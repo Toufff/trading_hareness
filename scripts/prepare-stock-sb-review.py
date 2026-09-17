@@ -1,8 +1,8 @@
 """Prepare an offline, private B/S review for one imported stock/day.
 
 No broker UI, trading, public publishing, database writes or background jobs.
-Index minute tapes missing from the database may be fetched once from the
-existing Tencent minute endpoint; they are embedded only when the provider
+Index and stock minute tapes missing from the database may be fetched once from
+the licensed Longhu minute endpoint; they are embedded only when the provider
 declares the requested session date and are never persisted.
 """
 
@@ -36,7 +36,7 @@ def main() -> int:
     parser.add_argument("--sector", action="append", default=[],
                         help="人工指定的关注板块名（可重复）；系统无归属数据时仅作对照，不视为归属事实")
     parser.add_argument("--benchmark-minutes", choices=("auto", "off"), default="auto",
-                        help="auto: 数据库缺指数或个股分钟线时，按日期校验后从腾讯分钟接口补采（不入库）")
+                        help="auto: 数据库缺指数或个股分钟线时，按日期校验后从开盘啦分钟接口补采（不入库）")
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -100,13 +100,13 @@ def main() -> int:
 
 def fetch_minutes(day: date, stock: str) -> dict[str, dict]:
     """Bounded, date-checked review-time fetch; any failure becomes a visible status."""
-    from app.free_market_providers import tencent_intraday_minute_session
+    from app.longhu_market_data import longhu_intraday_minute_session
     from app.stock_sb_review import BENCHMARKS
     from app.stock_sb_review_context import benchmark_bars_from_session
 
     async def one(symbol: str) -> tuple[str, dict]:
         try:
-            session = await asyncio.wait_for(tencent_intraday_minute_session(symbol), timeout=15)
+            session = await asyncio.wait_for(longhu_intraday_minute_session(symbol), timeout=20)
         except Exception as exc:  # noqa: BLE001 - a benchmark gap must not block the review
             return symbol, {"bars": [], "source": f"fetch_failed_{type(exc).__name__}"}
         fetched_at = datetime.now(ZoneInfo("Asia/Shanghai"))

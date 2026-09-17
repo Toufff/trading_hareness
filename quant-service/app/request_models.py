@@ -326,8 +326,8 @@ class IntradayWatchlistRequest(BaseModel):
 class IntradayScanRequest(BaseModel):
     """Run a bounded, non-executable scan over explicitly watched symbols."""
 
-    # Tencent's all-A snapshot is fetched once per scan.  The depth stream is
-    # one bounded batch whose cap is exposed by the service status endpoint.
+    # The all-A snapshot is fetched once per scan.  Direct Longhu watch quotes
+    # are bounded per scan; the cap is exposed by the service status endpoint.
     symbols: list[str] = Field(default_factory=list, max_length=40)
     realtime_validation_limit: int = Field(default=4, ge=0, le=4)
     realtime_validation_offset: int = Field(default=0, ge=0, le=40)
