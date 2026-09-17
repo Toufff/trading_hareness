@@ -31,7 +31,6 @@ from .symbols import canonical_symbol
 
 
 MAX_PAGE_SIZE = 300
-MAX_TENCENT_BATCH_SIZE = 80
 FLOW_CONVENTION = "longhuvip_zs_stocklist_main_net_field13"
 DEFAULT_CONFIG_PATH = Path.home() / ".stock-brain" / "longhu_vendor.json"
 USER_AGENT = "Dalvik/2.1.0 (Linux; U; Android 14; V2178A Build/UP1A.231005.007)"
@@ -83,12 +82,53 @@ def _stock_code(value: Any) -> str | None:
     return symbol.split(".", 1)[0] if symbol else None
 
 
+def _index_symbol(value: Any) -> str | None:
+    """Accept only an explicitly exchange-qualified SSE 000xxx / SZSE 399xxx index."""
+    raw = str(value or "").strip().upper()
+    match = re.fullmatch(r"(?:(SH|SZ)(\d{6})|(\d{6})\.(SH|SZ))", raw)
+    if not match:
+        return None
+    exchange, code = (match.group(1), match.group(2)) if match.group(1) else (match.group(4), match.group(3))
+    return f"{code}.{exchange}" if (exchange, code[:3]) in {("SH", "000"), ("SZ", "399")} else None
+
+
+def longhu_security_id(symbol: Any) -> tuple[str, str] | None:
+    """Return ``(canonical symbol, vendor StockID)`` for a stock or an index.
+
+    Longhu addresses stocks by bare code and indexes by ``SH000001`` /
+    ``SZ399001``.  Only an exchange-qualified ``000xxx.SH`` / ``399xxx.SZ`` is
+    an index; a bare ``000001`` stays Ping An Bank.
+    """
+    index = _index_symbol(symbol)
+    if index:
+        code, exchange = index.split(".")
+        return index, f"{exchange}{code}"
+    stock = normalize_stock_symbol(symbol)
+    return (stock, stock.split(".", 1)[0]) if stock else None
+
+
+def _vendor_day(value: Any) -> str:
+    return "".join(character for character in str(value or "") if character.isdigit())[:8]
+
+
+def _book_levels(weituo: Mapping[str, Any], prefix: str) -> list[dict[str, float]]:
+    """Five price/size levels in board lots; an empty side stays explicit zeros."""
+    levels = []
+    for level in range(1, 6):
+        pair = weituo.get(f"{prefix}{level}")
+        valid = isinstance(pair, list) and len(pair) >= 2
+        levels.append({"price": (_number(pair[0]) if valid else None) or 0.0,
+                       "size": (_number(pair[1]) if valid else None) or 0.0})
+    return levels
+
+
 def parse_stock_snapshot_payload(payload: Mapping[str, Any], symbol: str) -> dict[str, Any] | None:
     """Normalize one ``GetStockPanKou`` response for the live watch pipeline.
 
     The vendor response exposes an exchange timestamp.  Keeping that timestamp
     separate from our receipt time lets the existing freshness gate reject a
     delayed response instead of treating a successful HTTP request as fresh.
+    Volumes and depth sizes are board lots on every board, STAR included.
     """
     normalized = normalize_stock_symbol(symbol)
     code = _stock_code(symbol)
@@ -96,8 +136,9 @@ def parse_stock_snapshot_payload(payload: Mapping[str, Any], symbol: str) -> dic
     price = _number(real.get("last_px"))
     if not normalized or not code or _stock_code(payload.get("code")) != code or price is None or price <= 0:
         return None
-    day = "".join(character for character in str(payload.get("day") or "") if character.isdigit())[:8]
+    day = _vendor_day(payload.get("day"))
     quote_time = "".join(character for character in str(real.get("time") or "") if character.isdigit())[:6]
+    weituo = payload.get("weituo") if isinstance(payload.get("weituo"), Mapping) else {}
     return {
         "ts_code": normalized,
         "name": str(payload.get("name") or normalized),
@@ -109,6 +150,7 @@ def parse_stock_snapshot_payload(payload: Mapping[str, Any], symbol: str) -> dic
         "pct_change": _number(real.get("px_change_rate")),
         "volume": _number(real.get("total_amount")),
         "amount": _number(real.get("total_turnover")),
+        "vwap": _number(real.get("avg_px")),
         "turnover_rate": _number(real.get("turnover_ratio")),
         "volume_ratio": _number(real.get("vol_ratio")),
         "amplitude": _number(real.get("amplitude")),
@@ -116,17 +158,34 @@ def parse_stock_snapshot_payload(payload: Mapping[str, Any], symbol: str) -> dic
         "pb": _number(real.get("dyn_pb_rate")),
         "trade_date": day or None,
         "trade_time": f"{day}{quote_time}" if len(day) == 8 and len(quote_time) == 6 else None,
+        # ``amount_out`` tracks the outer (active-buy) side and ``amount_in``
+        # the inner side.  Longhu's classifier is its own; do not treat it as
+        # interchangeable with another feed's outer/inner split.
+        "outer_volume_lot": _number(real.get("amount_out")),
+        "inner_volume_lot": _number(real.get("amount_in")),
+        "bids": _book_levels(weituo, "b"),
+        "asks": _book_levels(weituo, "s"),
         "raw": {"provider": "longhuvip", "action": "GetStockPanKou"},
     }
 
 
 def parse_stock_minute_payload(payload: Mapping[str, Any], symbol: str) -> list[dict[str, Any]]:
-    """Normalize per-minute Longhu rows without inventing Level-2 semantics."""
-    normalized = normalize_stock_symbol(symbol)
-    if not normalized:
+    """Normalize per-minute Longhu rows (stock or index) without inventing Level-2 semantics.
+
+    Trend rows are ``[HH:MM, price, session VWAP, minute volume (lots), flag]``.
+    The VWAP column is cumulative, so cumulative amount is VWAP x cumulative
+    lots x 100 and a minute's amount is the difference; this reconciles with
+    the snapshot's ``total_turnover``.
+    """
+    resolved = longhu_security_id(symbol)
+    if not resolved:
         return []
+    normalized = resolved[0]
+    day = _vendor_day(payload.get("day"))
+    session_date = f"{day[:4]}-{day[4:6]}-{day[6:]}" if len(day) == 8 else None
     rows: list[dict[str, Any]] = []
     cumulative_volume = 0.0
+    previous_amount: float | None = 0.0
     for raw in payload.get("trend") or []:
         if not isinstance(raw, list) or len(raw) < 4:
             continue
@@ -142,21 +201,87 @@ def parse_stock_minute_payload(payload: Mapping[str, Any], symbol: str) -> list[
             continue
         cumulative_volume += volume_lot
         average_price = _number(raw[2])
+        cumulative_amount = (round(average_price * cumulative_volume * 100, 4)
+                             if average_price is not None and average_price > 0 else None)
+        amount = (None if volume_missing or cumulative_amount is None or previous_amount is None
+                  else round(max(0.0, cumulative_amount - previous_amount), 4))
+        previous_amount = cumulative_amount
         rows.append({
             "symbol": normalized,
+            "ts_code": normalized,
+            "session_date": session_date,
             "time": minute,
             "close": price,
             "vwap": average_price,
             "volume_lot": volume_lot,
             "vol": volume_lot,
-            "amount": None if volume_missing else round((average_price or price) * volume_lot * 100, 4),
+            "amount": amount,
             "cumulative_volume_lot": cumulative_volume,
+            "cumulative_amount": cumulative_amount,
             "cumulative_segment": 0 if minute <= "1130" else 1,
+            "cumulative_reset": False,
             "is_complete": not volume_missing,
             "source": "longhuvip:GetStockTrendIncremental",
         })
     if rows:
         rows[-1]["is_complete"] = False
+    return rows
+
+
+def parse_daily_kline_payload(payload: Mapping[str, Any], symbol: str, start: str, end: str) -> list[dict[str, Any]]:
+    """Unadjusted ``GetKLineDay_W14`` bars (``Is_FS=0``) inside ``[start, end]`` (YYYYMMDD).
+
+    ``y`` rows are open/close/high/low.  ``vol`` is board lots and ``bal`` is
+    CNY; rows leave here in the canonical lots / thousand-CNY contract.
+    """
+    resolved = longhu_security_id(symbol)
+    dates, values = payload.get("x") or [], payload.get("y") or []
+    if not resolved or len(dates) != len(values):
+        return []
+    volumes, amounts = payload.get("vol") or [], payload.get("bal") or []
+    rows: list[dict[str, Any]] = []
+    for index, (raw_day, candle) in enumerate(zip(dates, values)):
+        day = _vendor_day(raw_day)
+        if len(day) != 8 or not start <= day <= end or not isinstance(candle, list) or len(candle) < 4:
+            continue
+        open_, close, high, low = (_number(value) for value in candle[:4])
+        if any(value is None or value <= 0 for value in (open_, close, high, low)):
+            continue
+        if not low <= min(open_, close) <= max(open_, close) <= high:
+            continue
+        previous = values[index - 1] if index > 0 and isinstance(values[index - 1], list) and len(values[index - 1]) > 1 else None
+        amount_cny = _number(amounts[index]) if index < len(amounts) else None
+        rows.append({
+            "ts_code": resolved[0], "trade_date": day,
+            "open": open_, "close": close, "high": high, "low": low,
+            "pre_close": _number(previous[1]) if previous else None,
+            "vol": _number(volumes[index]) if index < len(volumes) else None,
+            "amount": amount_cny / 1000 if amount_cny is not None else None,
+            "price_basis": "unadjusted", "source": "longhuvip:GetKLineDay_W14",
+        })
+    return rows
+
+
+def fetch_daily_kline(source: "LonghuIntradaySource", symbol: str, start: str, end: str) -> list[dict[str, Any]]:
+    """Fetch dated unadjusted daily bars through the licensed call contract (local or gateway)."""
+    resolved = longhu_security_id(symbol)
+    if not resolved:
+        raise ValueError(f"unsupported Longhu security: {symbol}")
+    first = date(int(start[:4]), int(start[4:6]), int(start[6:]))
+    size = min(MAX_PAGE_SIZE, max(20, (cn_today() - first).days + 10))
+    envelope = source.raw_call({
+        "target": "longhu_history", "path": "/w1/api/index.php",
+        "params": {"a": "GetKLineDay_W14", "c": "StockLineData", "apiv": "w40", "StockID": resolved[1],
+                   "Type": "d", "Is_FS": "0", "st": size, "Index": 0},
+    })
+    rows: list[dict[str, Any]] = []
+    for page in envelope.get("pages") or []:
+        payload = page.get("payload") if isinstance(page, Mapping) else None
+        if not isinstance(payload, Mapping):
+            continue
+        if payload.get("errcode") is not None and str(payload.get("errcode")) != "0":
+            raise RuntimeError(f"Longhu errcode={payload.get('errcode')} action=GetKLineDay_W14")
+        rows.extend(parse_daily_kline_payload(payload, symbol, start, end))
     return rows
 
 
@@ -324,9 +449,10 @@ class SharedLonghuReadSource:
         }
 
     def stock_minutes(self, symbol: str) -> list[dict[str, Any]]:
-        normalized = normalize_stock_symbol(symbol)
-        if not normalized:
-            raise ValueError(f"unsupported Longhu stock symbol: {symbol}")
+        resolved = longhu_security_id(symbol)
+        if not resolved:
+            raise ValueError(f"unsupported Longhu security: {symbol}")
+        normalized = resolved[0]
         payload = self._get(f"/licensed/longhu/minutes/{normalized}")
         rows = [row for row in payload.get("rows") or [] if isinstance(row, dict)]
         if not rows:
@@ -372,35 +498,6 @@ def parse_industry_stock_row(row: Any, trade_date: date, plate_id: str) -> dict[
         "flow_convention": FLOW_CONVENTION,
         "raw": {"vendor_row": row, "plate_id": str(plate_id), "row_length": len(row)},
     }
-
-
-def parse_tencent_quote_text(text: str, requested: Mapping[str, str]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for match in re.finditer(r'v_([a-z0-9]+)="([^"]*)";', text, re.IGNORECASE):
-        request_key, fields = match.group(1).lower(), match.group(2).split("~")
-        symbol = requested.get(request_key)
-        if not symbol or len(fields) <= 37:
-            continue
-        price, pre_close = _number(fields[3]), _number(fields[4])
-        timestamp = str(fields[30] or "")
-        if price is None or price <= 0 or pre_close is None or len(timestamp) < 8:
-            continue
-        result.append({
-            "ts_code": symbol,
-            "name": str(fields[1] or symbol),
-            "trade_date": timestamp[:8],
-            "open": _number(fields[5]),
-            "high": _number(fields[33]),
-            "low": _number(fields[34]),
-            "close": price,
-            "pre_close": pre_close,
-            "vol": _number(fields[6]),
-            # Tencent field 37 is 10k CNY.  Store daily amount in CNY for this
-            # composite provider; the source label prevents unit ambiguity.
-            "amount": (_number(fields[37]) * 10_000 if _number(fields[37]) is not None else None),
-            "pct_chg": _number(fields[32]),
-        })
-    return result
 
 
 class LonghuVendorSource:
@@ -515,20 +612,20 @@ class LonghuVendorSource:
         }
 
     def stock_minutes(self, symbol: str) -> list[dict[str, Any]]:
-        """Fetch the current session minute path for one explicit security."""
-        code = _stock_code(symbol)
-        if not code:
-            raise ValueError(f"unsupported Longhu stock symbol: {symbol}")
+        """Fetch the current session minute path for one explicit stock or index."""
+        resolved = longhu_security_id(symbol)
+        if not resolved:
+            raise ValueError(f"unsupported Longhu security: {symbol}")
         payload = self._json(
             "https://apphwhq.longhuvip.com/w1/api/index.php",
             {
                 "a": "GetStockTrendIncremental", "c": "StockL2Data", "apiv": "w41",
-                "Type": 1, "StockID": code,
+                "Type": 1, "StockID": resolved[1],
             },
         )
-        rows = parse_stock_minute_payload(payload, symbol)
+        rows = parse_stock_minute_payload(payload, resolved[0])
         if not rows:
-            raise RuntimeError(f"Longhu minute returned no rows for {code}")
+            raise RuntimeError(f"Longhu minute returned no rows for {resolved[1]}")
         return rows
 
     def industry_plate_catalog(self) -> list[dict[str, Any]]:
@@ -636,31 +733,6 @@ class LonghuVendorSource:
         }
         return by_symbol, health
 
-    @staticmethod
-    def _tencent_key(symbol: str) -> str:
-        code, exchange = symbol.split(".")
-        return ("sh" if exchange == "SH" else "sz" if exchange == "SZ" else "bj") + code
-
-    def tencent_quotes(self, symbols: Iterable[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        ordered = sorted(set(symbols))
-        rows: list[dict[str, Any]] = []
-        errors: list[str] = []
-        for start in range(0, len(ordered), MAX_TENCENT_BATCH_SIZE):
-            batch = ordered[start:start + MAX_TENCENT_BATCH_SIZE]
-            requested = {self._tencent_key(symbol): symbol for symbol in batch}
-            try:
-                tencent_url = "https://qt.gtimg.cn/q=" + ",".join(requested)
-                response = self._session.get(tencent_url, timeout=self.config.timeout_seconds)
-                response.raise_for_status()
-                rows.extend(parse_tencent_quote_text(response.content.decode("gb18030", errors="replace"), requested))
-            except Exception as error:
-                errors.append(f"batch={start // MAX_TENCENT_BATCH_SIZE}:{type(error).__name__}:{error}")
-        return rows, {
-            "requested": len(ordered), "received": len(rows),
-            "coverage": len(rows) / len(ordered) if ordered else 0.0,
-            "batch_size": MAX_TENCENT_BATCH_SIZE, "errors": errors[:20],
-        }
-
     def fetch_full_market_evidence(self, trade_date: date) -> dict[str, Any]:
         catalog = self.industry_plate_catalog()
         vendor, vendor_health = self.full_market_vendor_rows(
@@ -686,7 +758,7 @@ class LonghuVendorSource:
 __all__ = [
     "DEFAULT_CONFIG_PATH", "FLOW_CONVENTION", "LonghuIntradaySource", "LonghuVendorConfig",
     "LonghuVendorSource", "SharedLonghuReadSource", "intraday_source",
-    "MAX_PAGE_SIZE", "MAX_TENCENT_BATCH_SIZE", "configured", "normalize_stock_symbol",
-    "parse_industry_stock_row", "parse_stock_minute_payload", "parse_stock_snapshot_payload",
-    "parse_tencent_quote_text", "safe_page_size",
+    "MAX_PAGE_SIZE", "configured", "fetch_daily_kline", "longhu_security_id", "normalize_stock_symbol",
+    "parse_daily_kline_payload", "parse_industry_stock_row", "parse_stock_minute_payload",
+    "parse_stock_snapshot_payload", "safe_page_size",
 ]
