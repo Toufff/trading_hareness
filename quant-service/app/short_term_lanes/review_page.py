@@ -132,12 +132,19 @@ def _verdict(lanes_result: dict, pool: dict) -> str:
     regime = market.get('regime') or {}
     lines = []
     recommended = pool.get('recommended') or []
-    if pool.get('status') == 'ready' and pool.get('decision_id'):
+    if pool.get('decision_id'):
         names = '、'.join(f"{esc(p.get('name'))}（优先{p.get('priority')}）" for p in recommended) or '无'
         baseline = set((pool.get('baseline') or {}).get('推荐') or [])
         downgraded = [p for p in (pool.get('reviewed') or []) if p.get('symbol') in baseline and p.get('decision') != 'recommend']
         down = '；' + '、'.join(esc(p.get('name')) for p in downgraded) + ' 从推荐降为' + '/'.join(sorted({DECISION_LABEL.get(p.get('decision'), '') for p in downgraded})) if downgraded else ''
-        lines.append(f"<p><strong>推荐池已更新（决策 {esc(pool['decision_id'][:8])}，有效期至 {esc(pool.get('valid_until'))}）：推荐 {names}{down}。</strong></p>")
+        status = pool.get('status')
+        if status == 'ready':
+            lines.append(f"<p><strong>推荐池已更新（决策 {esc(pool['decision_id'][:8])}，有效期至 {esc(pool.get('valid_until'))}）：推荐 {names}{down}。</strong></p>")
+        else:
+            # A stale/expired/partial decision is still the last formal decision;
+            # say what it decided and why it can no longer be synced.
+            lines.append(f"<p><strong>最近一次推荐池决策 {esc(pool['decision_id'][:8])}（状态 {esc(status)}）：推荐 {names}{down}。</strong> "
+                         f"{esc(pool.get('notice') or '该决策已不能同步为本轮结果。')}</p>")
         if pool.get('market_assessment'):
             lines.append(f"<p>{esc(pool['market_assessment'])}</p>")
     else:

@@ -40,6 +40,15 @@ def test_page_leads_with_decision_and_shows_every_lane_tab():
     assert '主线趋势 / 扫描' in html and '-2.73%' in html
 
 
+def test_stale_decision_is_shown_with_its_status_not_hidden():
+    data = payload()
+    pool = data['run']['summary']['recommendation_pool']
+    pool['status'] = 'stale'; pool['notice'] = '扫描证据已变化，以下是历史推荐，不能同步为本轮结果。'
+    html = render(data)
+    assert '最近一次推荐池决策 abcdef12（状态 stale）' in html and '甲股（优先1）' in html
+    assert '扫描证据已变化' in html and '推荐池已更新' not in html and '本轮没有正式推荐池决策' not in html
+
+
 def test_page_without_decision_is_honest():
     html = render(payload(pool_ready=False))
     assert '本轮没有正式推荐池决策' in html and '推荐池已更新' not in html
