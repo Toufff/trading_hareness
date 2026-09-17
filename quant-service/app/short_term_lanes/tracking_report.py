@@ -19,6 +19,8 @@ def sections(followup, lane=None):
         lines += [f"| {e['name']}（{e['symbol'].split('.')[0]}） | {e['signal_date']} / {e.get('display_rank') or '非首屏'} | "
                   +' / '.join(value(e['windows'][str(h)]) for h in (1,3,5,10))
                   +f" | {LABELS.get(e['path_check'],e['path_check'])} | {'历史补录' if e['timing']=='reconstructed' else '前瞻记录'}；{e['status']} |"]
-    lines+=['',f'另有{len(background)}条非首屏匹配持续跟踪，完整记录保存在同轮JSON及G盘观察账本；未删除落榜或下跌样本。',
+    ledger=followup.get('ledger_rows')
+    merged=f"账本原始记录{ledger}条，按股票、发现日、策略合并后展示{followup.get('total',len(items))}条；" if ledger else ''
+    lines+=['',f'{merged}另有{len(background)}条非首屏匹配持续跟踪，完整记录保存在同轮JSON及G盘观察账本；未删除落榜或下跌样本。',
             '以上为相对发现日收盘的走势，不是买入收益。触线不证明原条件全部成立；不将涨停计为可买入，不将跌停假定可止损。','']
     return lines

@@ -64,21 +64,38 @@ def refresh(database, result, day, *, write=True):
     by=defaultdict(list)
     for b in bars:
         by[b['symbol']].append({**b['snapshot'],**{k:v for k,v in b.items() if k not in ('snapshot','symbol')},'trading_date':str(b['trading_date'])})
-    items=[]
+    ledger=[]
     for o in old:
         e=evaluate(o,sessions,by[o['symbol']],str(day))
         e['calendar_complete']=calendar_complete
         if not calendar_complete:e['status']='calendar_gap'
-        e['lane_label']=o['lane_label'];e['source']=o['source'];e['profile']=o['profile']
-        items.append(e)
-    if write and items:
+        e['lane_label']=o['lane_label'];e['source']=o['source'];e['profile']=o['profile'];e['available_at']=o.get('available_at')
+        ledger.append(e)
+    if write and ledger:
         with database.transaction() as c:
             with c.cursor() as cur:
                 cur.executemany('''INSERT INTO quant.strategy_observation_evaluations
                     (origin_id,as_of_date,model_version,evidence_hash,evidence) VALUES(%s,%s,%s,%s,%s)
-                    ON CONFLICT DO NOTHING''',[(e['origin_id'],day,VERSION,digest(e),Json(e)) for e in items])
+                    ON CONFLICT DO NOTHING''',[(e['origin_id'],day,VERSION,digest(e),Json(e)) for e in ledger])
+    items=collapse(ledger)
     # Yesterday's displayed successes AND failures come first, never survivors only.
     items.sort(key=lambda e:(e['display_rank'] is None,-date.fromisoformat(e['signal_date']).toordinal(),e['display_rank'] or e['rank'],e['origin_id']))
     return dict(status='completed' if calendar_complete else 'calendar_gap',as_of_date=str(day),version=VERSION,
-        total=len(items),items=items,calendar_complete=calendar_complete,
+        total=len(items),ledger_rows=len(ledger),items=items,calendar_complete=calendar_complete,
         note='冻结发现日与原条件；第1/3/5/10交易日跟踪。历史补录单独标记，不计作当时真实成交或实盘胜率。')
+
+
+def collapse(evaluations):
+    """One displayed row per discovery: earlier ledger rows were appended on every
+    pipeline retry and review closure (identity now excludes those), and the same
+    close is also re-imported from the persisted run. The ledger keeps every row;
+    the display prefers the prospective record, then the earliest availability."""
+    best={}
+    for e in evaluations:
+        kind='manual' if str(e.get('source') or '').startswith('manual') else 'scan'
+        key=(e['symbol'],e['signal_date'],e['lane'],kind)
+        cur=best.get(key)
+        rank=(e.get('timing')!='prospective',e.get('available_at') or '',e['origin_id'])
+        if cur is None or rank<(cur.get('timing')!='prospective',cur.get('available_at') or '',cur['origin_id']):
+            best[key]=e
+    return list(best.values())

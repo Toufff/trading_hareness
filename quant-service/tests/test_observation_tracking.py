@@ -16,6 +16,27 @@ def test_origin_idempotent_and_conditions_frozen():
     assert origins(r,'2026-09-10T16:00:00+08:00','published')[0]['origin_id']!=a[0]['origin_id']
 
 
+def test_origin_identity_ignores_attached_research_and_import_source():
+    a=origins(sample(), '2026-09-10T16:00:00+08:00','live_scan')[0]
+    r=sample();r['company_reviews']=[dict(symbol='001232.SZ',conclusion='研究后补')]
+    b=origins(r,'2026-09-10T17:00:00+08:00','historical_run:abc')[0]
+    assert b['company_review'] and a['company_review'] is None
+    assert a['origin_id']==b['origin_id']
+    assert (a['timing'],b['timing'])==('prospective','reconstructed')
+
+
+def test_collapse_prefers_prospective_then_earliest_row():
+    from app.short_term_lanes.tracking_repository import collapse
+    base=dict(symbol='A',signal_date='2026-09-16',lane='expansion',display_rank=1,rank=1)
+    rows=[dict(base,origin_id='2',timing='reconstructed',source='historical_run:x',available_at='2026-09-16T17:10'),
+          dict(base,origin_id='3',timing='prospective',source='live_scan',available_at='2026-09-16T17:40'),
+          dict(base,origin_id='1',timing='prospective',source='live_scan',available_at='2026-09-16T16:48'),
+          dict(base,origin_id='4',timing='prospective',source='manual_recommendation',available_at='2026-09-16T17:33'),
+          dict(base,origin_id='5',timing='prospective',source='live_scan',available_at='2026-09-16T16:48',lane='rotation')]
+    kept=sorted(e['origin_id'] for e in collapse(rows))
+    assert kept==['1','4','5']
+
+
 def test_success_and_failure_retained_not_trade_returns():
     o=origins(sample(),'2026-09-10T16:00:00+08:00','published')[0]
     for close in (110,90):

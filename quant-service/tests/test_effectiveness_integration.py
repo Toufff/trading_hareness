@@ -1,5 +1,6 @@
 from copy import deepcopy
 from datetime import date,datetime,timezone
+from zoneinfo import ZoneInfo
 from unittest.mock import patch
 import pytest
 from test_effectiveness_loop import samples
@@ -89,12 +90,26 @@ def test_manual_registration_no_backdating_and_retry_identity():
     from app.effectiveness.manual import records
     scan={'as_of_date':'2026-09-11','version':'v','lanes':[{'key':'trend','label':'趋势',
         'tracking_candidates':[{'symbol':s,'name':s,'metrics':{'close':10}} for s in ('A','B')]}]}
+    # 2026-09-11 is a Friday; a weekend registration precedes the next session.
     a=records(scan,'trend',['A'],'agent','实际同时登记的理由',now=datetime(2026,9,13,10,tzinfo=timezone.utc))
     b=records(scan,'trend',['A'],'agent','实际同时登记的理由',now=datetime(2026,9,13,11,tzinfo=timezone.utc))
     assert [r['origin_id'] for r in a]==[r['origin_id'] for r in b]
-    assert all(r['signal_date']=='2026-09-13' and r['timing']=='prospective' for r in a)
+    # The reference close is the scan's close, so the signal date stays the scan
+    # date; the registration time is kept separately and is never backdated.
+    assert all(r['signal_date']=='2026-09-11' and r['timing']=='prospective' for r in a)
+    assert all(r['available_at'].startswith('2026-09-13') for r in a)
     assert [r['effectiveness']['selected'] for r in a]==[True,False]
     with pytest.raises(ValueError):records(scan,'trend',['A','B'],'agent','reason')
+    # Registered after midnight but before the next session: still the scan date.
+    c=records(scan,'trend',['A'],'agent','理由',now=datetime(2026,9,14,0,40,tzinfo=ZoneInfo('Asia/Shanghai')))
+    assert all(r['signal_date']=='2026-09-11' and r['timing']=='prospective' for r in c)
+    # A settled session in between makes the frozen scan stale.
+    with pytest.raises(ValueError):
+        records(scan,'trend',['A'],'agent','理由',now=datetime(2026,9,14,16,0,tzinfo=ZoneInfo('Asia/Shanghai')))
+    # Research attached later or a rebuilt report must not change the identity.
+    reviewed={**scan,'company_reviews':[{'symbol':'A','conclusion':'x'}],'report_bundle':{'x':1}}
+    d=records(reviewed,'trend',['A'],'agent','实际同时登记的理由',now=datetime(2026,9,13,10,tzinfo=timezone.utc))
+    assert [r['origin_id'] for r in d]==[r['origin_id'] for r in a]
 
 
 def test_origin_profiles_isolate_actual_code_changes():

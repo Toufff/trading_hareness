@@ -20,6 +20,14 @@ def digest(value):
     return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True,default=str).encode()).hexdigest()
 
 
+MUTABLE_FIELDS = ('origin_id', 'available_at', 'timing', 'company_review', 'source')
+
+
+def identity_fields(record):
+    """Immutable discovery facts; research, source label and timestamps are excluded."""
+    return {k: v for k, v in record.items() if k not in MUTABLE_FIELDS}
+
+
 def origins(result, available_at, source):
     day=result['as_of_date']
     profile=digest({'version':result['version'],'settings':result.get('settings',{}),
@@ -47,8 +55,11 @@ def origins(result, available_at, source):
                 display_rank=observations.get(item['symbol']), source_kind='machine',
                 regime=(result.get('market',{}).get('regime') or {}).get('label','unknown'),
                 features=effect_features(item,lane['key']))
-            # Identity does not depend on rerun time or on future tracking outcomes.
-            item_origin['origin_id']=digest(item_origin)
+            # Identity does not depend on rerun time or on future tracking outcomes,
+            # nor on research attached later (company_review) or on whether the same
+            # discovery was read live or re-imported from the persisted run (source);
+            # otherwise every retry and every review closure appended a new ledger row.
+            item_origin['origin_id']=digest(identity_fields(item_origin))
             timestamp=str(available_at)
             item_origin.update(available_at=timestamp,
                 timing='prospective' if timestamp[:10]==day and source=='live_scan' else 'reconstructed')
