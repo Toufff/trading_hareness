@@ -97,7 +97,35 @@ def day_view(connection: Any, day: date) -> dict[str, Any]:
             "initial_equity": report["initial_equity"], "cash": report["cash"], "daily": daily, "navs": navs,
             "positions": positions, "orders": orders, "decisions": decisions,
         })
+    result["human_trades"] = human_view(connection, day)
     return result
+
+
+def human_view(connection: Any, day: date) -> dict[str, Any]:
+    """The owner's broker fills for the day plus their own journal statements, side by side with the agents."""
+    fills = [dict(row) for row in connection.execute(
+        """SELECT trade_time,symbol,name,side,quantity,price,gross_amount,metadata->>'order_number' AS order_number,
+                  metadata->>'order_time' AS order_time
+             FROM quant.broker_trade_records
+            WHERE account_key='citics-primary' AND trade_date=%s AND trade_time IS NOT NULL
+            ORDER BY trade_time,symbol""", (day,)).fetchall()]
+    orders: dict[tuple[str, str], dict[str, Any]] = {}
+    for fill in fills:
+        key = (fill["symbol"], fill["order_number"] or str(fill["trade_time"]))
+        order = orders.setdefault(key, {"symbol": fill["symbol"], "name": fill["name"], "side": fill["side"],
+                                        "order_number": fill["order_number"], "order_time": fill["order_time"],
+                                        "first_fill_time": fill["trade_time"], "quantity": 0, "amount": 0.0, "fills": 0})
+        order["quantity"] += int(fill["quantity"])
+        gross = fill["gross_amount"] if fill["gross_amount"] is not None else fill["quantity"] * fill["price"]
+        order["amount"] += float(gross)
+        order["fills"] += 1
+    for order in orders.values():
+        order["avg_price"] = round(order["amount"] / order["quantity"], 4) if order["quantity"] else None
+    journal = [dict(row) for row in connection.execute(
+        """SELECT entry_date,title,body,actions,plans,metadata->>'symbol' AS symbol,metadata->>'name' AS name,created_at
+             FROM quant.personal_journal_entries
+            WHERE source='human_review_session' AND entry_date=%s ORDER BY created_at""", (day,)).fetchall()]
+    return {"orders": sorted(orders.values(), key=lambda o: o["first_fill_time"]), "journal": journal}
 
 
 def decision_detail(connection: Any, decision_id: str, part: str) -> dict[str, Any] | None:

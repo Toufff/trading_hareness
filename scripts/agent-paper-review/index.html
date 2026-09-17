@@ -122,7 +122,27 @@ function render(d){
       <div class="muted small">决策 ${ok}/${a.decisions.length} 轮 · 成交 ${filled} 笔 · 现金 ${num(nav?nav.cash:a.cash)}</div></div>`);
   }
   $('#score').innerHTML=cards.join('');
-  $('#cols').innerHTML=d.accounts.map(column).join('')||'<p class="empty">还没有模拟账户。</p>';
+  $('#cols').innerHTML=humanColumn(d.human_trades)+(d.accounts.map(column).join('')||'<p class="empty">还没有模拟账户。</p>');
+}
+
+function humanColumn(h){
+  if(!h)return '';
+  const notes=Object.fromEntries((h.journal||[]).map(j=>[j.symbol,j]));
+  const lastOrder={};for(const o of h.orders||[])lastOrder[o.symbol]=o;
+  const orders=(h.orders||[]).slice().reverse().map(o=>{
+    const j=lastOrder[o.symbol]===o?notes[o.symbol]:null;
+    const plan=j&&(j.plans||[])[0];
+    return `<article class="decision"><div class="dhead"><span class="t">${esc(String(o.first_fill_time).slice(0,8))}</span>
+        <span class="badge ${o.side==='buy'?'b-bad':'b-ok'}">${SIDE[o.side]||esc(o.side)}</span>
+        <span class="muted small">券商成交${o.fills>1?' · 分 '+o.fills+' 笔':''}${o.order_time?' · 委托 '+esc(o.order_time):''}</span></div>
+      <div class="dbody"><div class="order ${esc(o.side)}"><div class="line">${SIDE[o.side]||o.side} ${esc(o.symbol)} ${esc(o.name??'')} ${esc(o.quantity)} 股 · 均价 ${num(o.avg_price,3)}</div>
+        ${j&&j.body?`<div class="why"><strong>当时意图：</strong>${esc(j.body)}</div>`:''}</div>
+        ${plan?`<p class="view"><strong>次日计划：</strong>${esc(plan.plan)}</p>`:''}
+        ${j?'<p class="muted small">以上为你本人在复盘时的陈述，非系统推断。</p>':''}</div></article>`;
+  }).join('')||'<p class="empty">这一天没有导入的券商成交。</p>';
+  const unmatched=(h.journal||[]).filter(j=>!lastOrder[j.symbol]).map(j=>`<article class="decision"><div class="dhead"><span class="badge b-info">复盘记录</span> ${esc(j.title)}</div>
+      <div class="dbody"><div class="why">${esc(j.body)}</div>${(j.plans||[])[0]?`<p class="view"><strong>次日计划：</strong>${esc(j.plans[0].plan)}</p>`:''}</div></article>`).join('');
+  return `<div class="col"><h2><span>你（实盘）</span><span class="muted small">成交 ${(h.orders||[]).length} 笔委托 · 复盘记录 ${(h.journal||[]).length} 条</span></h2>${unmatched}${orders}</div>`;
 }
 
 function column(a){
