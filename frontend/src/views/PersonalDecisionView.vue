@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue';
-import { computed, reactive } from 'vue';
+import { computed, reactive, ref } from 'vue';
 import { usePersonalDecisionWorkspace, type TradePlan } from '../composables/usePersonalDecisionWorkspace';
 import ResearchOnlyBadge from '../components/ResearchOnlyBadge.vue';
 import StockResearchWorkbench from '../components/StockResearchWorkbench.vue';
@@ -12,6 +12,9 @@ const isMarketView = computed(() => props.mode === 'market');
 const isHoldingsView = computed(() => props.mode === 'holdings');
 const workspace = reactive(usePersonalDecisionWorkspace(props.mode));
 const holdingHasSnapshot = computed(() => Boolean(workspace.brief?.holdings?.portfolio_observed_at));
+// News research is background context on the selection page: rendered (and
+// polled) only when the reader opens it, so it never pushes candidates down.
+const newsOpen = ref(false);
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -118,7 +121,13 @@ function compactMoney(value: unknown): string {
           <h2>{{ isMarketView ? '市场与选股' : '我的持仓' }}</h2>
           <p>{{ isMarketView ? '全市场扫描、盘面与新买研究；此页面不读取任何券商账户数据。' : '持仓按用户主动同步；本页刷新只读取已入库快照，不会操作交易软件。' }}</p>
         </div>
-        <el-space>
+        <el-space wrap>
+          <div v-if="isMarketView" class="chart-entry-card">
+            <el-input v-model="workspace.chartSymbol" class="chart-symbol-input" placeholder="如 600487.SH" @keyup.enter="workspace.openChart(workspace.chartSymbol)">
+              <template #prepend>按代码打开图形</template>
+              <template #append><el-button @click="workspace.openChart(workspace.chartSymbol)">打开</el-button></template>
+            </el-input>
+          </div>
           <el-button type="primary" :icon="Refresh" :loading="workspace.loading" @click="workspace.load">刷新</el-button>
         </el-space>
       </div>
@@ -128,7 +137,6 @@ function compactMoney(value: unknown): string {
     <el-skeleton v-if="workspace.loading && !workspace.brief" :rows="8" animated class="section-gap" />
 
     <template v-if="workspace.brief">
-      <EventResearchLive v-if="isMarketView" />
       <div v-if="isMarketView" class="status-grid section-gap independent-status-grid market-status-grid">
         <div class="status-tile"><span>盘面分析</span><el-tag :type="workspace.brief.market.status === 'degraded' ? 'warning' : workspace.brief.delivery.market_eligible ? 'success' : 'danger'">{{ workspace.brief.market.status === 'degraded' ? '部分可用' : workspace.brief.delivery.market_eligible ? '完整' : '缺失' }}</el-tag></div>
         <div class="status-tile"><span>全市场观察</span><el-tag :type="workspace.scanWatchlist?.items.length ? 'success' : workspace.scanError ? 'danger' : 'info'">{{ workspace.scanWatchlist?.items.length ? `${workspace.scanWatchlist.items.length} 只` : workspace.scanError ? '读取失败' : '暂无' }}</el-tag></div>
@@ -139,16 +147,8 @@ function compactMoney(value: unknown): string {
         <div class="status-tile"><span>精确读取时间</span><strong>{{ displayValue(workspace.brief.holdings.portfolio_observed_at) }}</strong></div>
       </div>
 
-      <el-card v-if="isMarketView" shadow="never" class="section-gap chart-entry-card">
-        <div class="chart-entry-content">
-          <div><strong>按代码打开图形</strong><p>这里只负责查询，不再把持仓、市场观察和可执行新买混成一份名单。各类股票请从各自区域打开。</p></div>
-          <el-space>
-            <el-input v-model="workspace.chartSymbol" class="chart-symbol-input" placeholder="输入 600487.SH" @keyup.enter="workspace.openChart(workspace.chartSymbol)">
-              <template #append><el-button @click="workspace.openChart(workspace.chartSymbol)">打开图形</el-button></template>
-            </el-input>
-          </el-space>
-        </div>
-      </el-card>
+      <!-- 选股优先：正式重点在最前，扫描候选紧随其后；盘面与消息只作背景，折叠在页面底部。 -->
+      <RecommendationPoolPanel v-if="isMarketView" :value="workspace.formalRecommendation" />
 
       <el-card v-if="isMarketView" shadow="never" class="section-gap decision-section market-scan-section">
         <template #header>
@@ -193,14 +193,17 @@ function compactMoney(value: unknown): string {
         </div>
       </el-card>
 
-      <el-card v-if="isMarketView" shadow="never" class="section-gap decision-section">
-        <template #header><div class="section-title"><div><strong>市场与板块</strong><small>{{ displayValue(workspace.marketContent.observed_at || workspace.brief.as_of_at) }}</small></div><el-tag effect="plain">{{ stateLabel(workspace.marketContent.market_state) }}</el-tag></div></template>
+      <div v-if="isMarketView" class="context-grid section-gap">
+      <el-card shadow="never" class="decision-section market-context-card">
+        <template #header><div class="section-title"><div><strong>市场与板块</strong><small>背景参考 · {{ displayValue(workspace.marketContent.observed_at || workspace.brief.as_of_at) }}</small></div><el-tag effect="plain">{{ stateLabel(workspace.marketContent.market_state) }}</el-tag></div></template>
         <el-alert v-if="workspace.marketError" :title="workspace.marketError" type="error" :closable="false" show-icon />
         <el-empty v-if="!workspace.brief.delivery.market_eligible" description="没有可用的市场分析；这不会阻止已完成的新买计划显示" :image-size="52" />
         <template v-else>
           <el-alert v-if="workspace.brief.market.status === 'degraded'" title="当前板块资金证据可用，但指数或全市场涨跌广度不完整；以下结论只能作为板块轮动参考。" type="warning" :closable="false" show-icon class="market-warning" />
           <p class="market-assessment">{{ marketAssessment }}</p>
-        <el-descriptions :column="3" border size="small">
+        <details class="context-details">
+        <summary>完整盘面指标</summary>
+        <el-descriptions :column="2" border size="small">
           <el-descriptions-item label="交易日">{{ displayValue(workspace.marketContent.exchange_date) }}</el-descriptions-item>
           <el-descriptions-item label="阶段">{{ displayValue(workspace.marketContent.session) }}</el-descriptions-item>
           <el-descriptions-item label="盘面状态">{{ stateLabel(workspace.marketContent.market_state) }}</el-descriptions-item>
@@ -213,10 +216,16 @@ function compactMoney(value: unknown): string {
           <el-descriptions-item label="有效指数数">{{ displayValue(multiIndex.index_count) }}</el-descriptions-item>
           <el-descriptions-item label="数据缺口">{{ marketQualityFlags.length ? marketQualityFlags.map(qualityLabel).join('；') : '无' }}</el-descriptions-item>
         </el-descriptions>
+        </details>
         </template>
       </el-card>
 
-      <RecommendationPoolPanel v-if="isMarketView" :value="workspace.formalRecommendation" />
+      <el-card shadow="never" class="decision-section news-context-card">
+        <template #header><div class="section-title"><div><strong>消息与事件</strong><small>背景参考 · 展开后每分钟自动刷新</small></div><el-button size="small" plain @click="newsOpen = !newsOpen">{{ newsOpen ? '收起' : '展开消息研究' }}</el-button></div></template>
+        <EventResearchLive v-if="newsOpen" />
+        <p v-else class="context-hint">消息研究不进入选股结论，只解释方向；需要时再展开，避免挤占候选区域。</p>
+      </el-card>
+      </div>
 
       <el-card v-if="isHoldingsView" shadow="never" class="section-gap decision-section holdings-only-section">
         <template #header><div class="section-title"><div><strong>账户持仓建议</strong><small>独立券商链；持仓快照 {{ displayValue(workspace.brief.holdings.portfolio_observed_at) }}</small></div><el-space><el-input v-model="workspace.accountKey" aria-label="账户标识" class="account-input" @keyup.enter="workspace.load" /><span>{{ workspace.brief.holdings.actions?.length ?? 0 }} 项</span></el-space></div></template>
@@ -296,11 +305,12 @@ function compactMoney(value: unknown): string {
 .chart-drawer-title { display: flex; flex-direction: column; gap: 3px; }
 .chart-drawer-title strong { font-size: 18px; }
 .chart-drawer-title span { color: var(--el-text-color-secondary); font-size: 12px; }
-.chart-entry-card { border-left: 4px solid var(--el-color-primary); }
-.chart-entry-content { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
-.chart-entry-content strong { font-size: 17px; }
-.chart-entry-content p { margin: 5px 0 0; color: var(--el-text-color-secondary); line-height: 1.55; }
-.chart-symbol-input { width: 260px; }
+.chart-symbol-input { width: 300px; }
+.context-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.market-context-card, .news-context-card { border-top: 2px solid var(--el-border-color); }
+.context-details { margin-top: 4px; }
+.context-details summary { cursor: pointer; color: var(--el-text-color-secondary); font-size: 13px; margin-bottom: 10px; }
+.context-hint { margin: 0; color: var(--el-text-color-secondary); line-height: 1.6; }
 .market-scan-section { border-top: 2px solid var(--el-color-success-light-5); }
 .scan-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .scan-card { padding: 14px; border: 1px solid var(--el-border-color-lighter); border-left: 3px solid var(--el-color-info); border-radius: 8px; background: var(--el-fill-color-blank); }
@@ -329,8 +339,8 @@ function compactMoney(value: unknown): string {
   .toolbar-row { align-items: flex-start; flex-direction: column; }
   .gate-row { grid-template-columns: 1fr 80px; }
   .gate-row > span { grid-column: 1 / -1; }
-  .chart-entry-content { align-items: flex-start; flex-direction: column; }
   .chart-symbol-input { width: 100%; }
+  .context-grid { grid-template-columns: 1fr; }
   .scan-grid { grid-template-columns: 1fr; }
 }
 </style>

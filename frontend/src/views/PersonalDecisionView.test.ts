@@ -37,6 +37,14 @@ describe('PersonalDecisionView', () => {
     expect(wrapper.find('.chart-entry-card').text()).toContain('按代码打开图形');
     expect(wrapper.find('.market-scan-section').text()).toContain('扫描股票');
     expect(wrapper.find('.market-scan-section').text()).not.toContain('示例股票');
+    // Selection leads the page: formal picks, then scan candidates; market and
+    // news are background at the bottom, and news is not rendered until opened.
+    const order = ['recommendation-decision', 'market-scan-section', 'market-context-card', 'news-context-card']
+      .map(marker => wrapper.html().indexOf(marker));
+    expect(order.every((position, index) => position > (order[index - 1] ?? -1))).toBe(true);
+    expect(wrapper.find('.news-context-card').text()).toContain('展开消息研究');
+    expect(wrapper.find('.news-context-card').text()).not.toContain('消息变化与方向影响');
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('events/latest'))).toBe(false);
     expect(wrapper.text()).not.toContain('账户持仓建议');
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('holding-advice'))).toBe(false);
   });
