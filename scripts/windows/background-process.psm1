@@ -57,8 +57,10 @@ function Invoke-ConsoleFreeCommand {
 
 function New-HiddenPowerShellTaskAction {
     param([Parameter(Mandatory)][string]$RepositoryRoot, [Parameter(Mandatory)][string]$ScriptPath,
-          [string[]]$ScriptArguments = @())
-    $taskHost = Join-Path $RepositoryRoot 'scripts\windows\bin\stock-background-host.exe'
+          [string[]]$ScriptArguments = @(), [string]$HostRoot = '')
+    # Tasks that run scripts from the development checkout pass the published release as
+    # HostRoot: a long-lived host must not lock the checkout's bin, which publishing rebuilds.
+    $taskHost = Join-Path $(if ($HostRoot) { $HostRoot } else { $RepositoryRoot }) 'scripts\windows\bin\stock-background-host.exe'
     foreach ($path in @($taskHost, $ScriptPath)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing background task script: $path" }
     }

@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 $RepositoryRoot = if ($RepositoryRoot) { $RepositoryRoot } else { [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')) }
 if ((Get-TimeZone).Id -ne 'China Standard Time') { throw 'Close sync requires Windows China Standard Time; refusing shifted triggers' }
 Import-Module (Join-Path $PSScriptRoot 'background-process.psm1') -Force
-$action = New-HiddenPowerShellTaskAction -RepositoryRoot $RepositoryRoot `
+$action = New-HiddenPowerShellTaskAction -RepositoryRoot $RepositoryRoot -HostRoot (Join-Path $PlatformRoot 'current') `
     -ScriptPath (Join-Path $RepositoryRoot 'scripts\windows\run-broker-close-sync.ps1') `
     -ScriptArguments @('-RuntimeEnv', (Join-Path $PlatformRoot 'config\runtime.env'), '-PlatformRoot', $PlatformRoot, '-AccountKey', $AccountKey)
 # Exactly one attempt per day (user authorization 2026-09-17: only the post-close run may be scheduled).

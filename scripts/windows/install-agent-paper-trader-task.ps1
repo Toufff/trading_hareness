@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $RepositoryRoot = if ($RepositoryRoot) { $RepositoryRoot } else { [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')) }
 if ((Get-TimeZone).Id -ne 'China Standard Time') { throw 'Agent paper session requires Windows China Standard Time; refusing shifted triggers' }
 Import-Module (Join-Path $PSScriptRoot 'background-process.psm1') -Force
-$action = New-HiddenPowerShellTaskAction -RepositoryRoot $RepositoryRoot `
+$action = New-HiddenPowerShellTaskAction -RepositoryRoot $RepositoryRoot -HostRoot (Join-Path $PlatformRoot 'current') `
     -ScriptPath (Join-Path $RepositoryRoot 'scripts\windows\run-agent-paper-trader.ps1') `
     -ScriptArguments @('-RuntimeEnv', (Join-Path $PlatformRoot 'config\runtime.env'), '-PlatformRoot', $PlatformRoot, '-AccountKey', $AccountKey, '-Backend', $Backend)
 $trigger = New-ScheduledTaskTrigger -Daily -At '09:20'

@@ -22,6 +22,12 @@ Assert-True ($timer.Elapsed.TotalSeconds -lt 6) 'Exited parent with inherited ou
 Assert-True ($drain.OutputComplete -eq $false) 'An inherited pipe timeout must be explicit'
 $action = New-HiddenPowerShellTaskAction -RepositoryRoot ([IO.Path]::GetFullPath((Join-Path $scripts '..\..'))) -ScriptPath (Join-Path $scripts 'watch-stock-dashboard.ps1') -ScriptArguments @('-PlatformRoot', 'G:\Stock Platform')
 Assert-True ($action.Execute -match 'stock-background-host.exe$') 'The scheduler must launch the native GUI host'
+$repoRoot = [IO.Path]::GetFullPath((Join-Path $scripts '..\..'))
+$hosted = New-HiddenPowerShellTaskAction -RepositoryRoot $repoRoot -HostRoot $repoRoot -ScriptPath (Join-Path $scripts 'watch-stock-dashboard.ps1')
+Assert-True ($hosted.Execute -eq (Join-Path $repoRoot 'scripts\windows\bin\stock-background-host.exe') -and $hosted.WorkingDirectory -eq $repoRoot) 'HostRoot selects the host while scripts and working directory stay in the repository'
+foreach ($local in 'install-agent-paper-review-task.ps1','install-agent-paper-trader-task.ps1','install-broker-close-sync-task.ps1') {
+    Assert-True ((Get-Content (Join-Path $scripts $local) -Raw).Contains("-HostRoot (Join-Path `$PlatformRoot 'current')")) "$local must not run a long-lived host out of the checkout that publishing rebuilds"
+}
 Assert-True ($action.Arguments -notmatch 'run-hidden.vbs|run-background-task.ps1') 'No hidden-style console launcher may remain in the task entry chain'
 Assert-True ($action.Arguments -notmatch 'codex-runtimes') 'Production tasks must not depend on the assistant runtime cache'
 $installer = Get-Content (Join-Path $scripts '..\shared-peer\install-shared-tunnel-task.ps1') -Raw

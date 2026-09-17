@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $RepositoryRoot = if ($RepositoryRoot) { $RepositoryRoot } else { [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')) }
 Import-Module (Join-Path $PSScriptRoot 'background-process.psm1') -Force
-$action = New-HiddenPowerShellTaskAction -RepositoryRoot $RepositoryRoot `
+$action = New-HiddenPowerShellTaskAction -RepositoryRoot $RepositoryRoot -HostRoot (Join-Path $PlatformRoot 'current') `
     -ScriptPath (Join-Path $RepositoryRoot 'scripts\windows\run-agent-paper-review.ps1') `
     -ScriptArguments @('-RuntimeEnv', (Join-Path $PlatformRoot 'config\runtime.env'), '-Port', "$Port")
 # Resident read-only page on 127.0.0.1: start at logon, restart if it ever exits.
