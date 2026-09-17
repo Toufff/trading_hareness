@@ -20,11 +20,13 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Inside op.execute text, ":5" would be read as a bind parameter; keep a
+    # space after the JSON colon so the literal stays a literal.
     op.execute("""
         INSERT INTO quant.providers(provider_key,label,enabled,config)
         VALUES
           ('longhuvip','开盘啦授权行情（盘口/分钟/日K）',true,
-           '{"secret_source":"external_config_file","volume_unit":"lot","depth_levels":5}'::jsonb),
+           '{"secret_source":"external_config_file","volume_unit":"lot","depth_levels": 5}'::jsonb),
           ('longhuvip_index','开盘啦指数日K（策略指数兜底）',true,'{"price_basis":"unadjusted_index"}'::jsonb)
         ON CONFLICT(provider_key) DO UPDATE SET
           label=EXCLUDED.label,enabled=true,config=EXCLUDED.config,updated_at=now();
