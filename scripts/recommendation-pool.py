@@ -32,7 +32,7 @@ def main():
     from app.database import Database
     from app.strategy_read_model import latest_post_close_strategy
     from app.intraday_evidence_read_model import watchlists
-    from app.recommendation_pool.rules import intake, sync_plan, current_view
+    from app.recommendation_pool.rules import intake, sync_plan, current_view, note_template
     from app.recommendation_pool.repository import latest_target_groups, persist
     from app.recommendation_pool.report import markdown
     db = Database()
@@ -60,9 +60,25 @@ def main():
                 raise ValueError('next_trading_session_missing')
             context = intake(scan, run['run_id'], groups, tracked, nxt['day'])
             write(a.directory / 'context.json', context)
-            write(a.directory / 'review-template.json', {'context_hash': context['context_hash'], 'author': '', 'market_assessment': '', 'attention_budget': 5, 'items': []})
+            # The agent should spend its attention answering, not transcribing
+            # ranks the scan already knows.  Every required review arrives as a
+            # skeleton item and every candidate gets a note template, so a late
+            # promotion does not need a second prepare run.
+            names = {row['symbol']: row['name'] for row in context['candidates']}
+            notes = {row['symbol']: note_template(context, row['symbol']) for row in context['candidates']}
+            items = [{'symbol': symbol, 'name': names.get(symbol, symbol), 'data_date': context['as_of_date'],
+                      'decision': '', 'stage': '', 'priority': None, 'why_now': '', 'comparison': '',
+                      'invalidation': '', 'business': '', 'company_risk': '', 'sector_assessment': '',
+                      'sector': '', 'trigger': '', 'peer_comparison': '', 'sources': [],
+                      'recommendation_note': notes[symbol]}
+                     for symbol in context['required_reviews']]
+            write(a.directory / 'review-template.json', {'context_hash': context['context_hash'], 'author': '',
+                                                         'market_assessment': '', 'attention_budget': 5, 'items': items})
+            write(a.directory / 'note-templates.json', notes)
             print(json.dumps({'context_hash': context['context_hash'], 'candidate_count': context['candidate_count'],
                               'required_reviews': context['required_reviews'],
+                              'review_template_items': len(items), 'note_templates': len(notes),
+                              'sector_overview_sectors': len(context.get('sector_overview') or {}),
                               'baseline_source': 'ths_snapshot' if a.snapshot else 'internal_recommendation_pool'}, ensure_ascii=False))
         elif a.command == 'publish':
             if not a.review:

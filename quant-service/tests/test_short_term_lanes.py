@@ -134,6 +134,39 @@ class ShortTermLaneTests(unittest.TestCase):
         self.assertTrue(result['accumulation_observations'][0]['matched_intersection'])
         self.assertFalse(result['accumulation_observations'][0]['activity_eligible'])
 
+    def test_sector_overview_describes_whole_sectors_as_a_label_not_a_score(self):
+        rows, index = [], 0
+        for plate, label, prices, count in (("industry", "示例行业", [10+i*0.2 for i in range(11)], 6),
+                                            ("other", "弱势行业", [12-i*0.15 for i in range(11)], 5),
+                                            ("flat", "横盘行业", [10]*11, 8),
+                                            ("tiny", "小样本行业", [10]*11, 3)):
+            for _ in range(count):
+                r, s = fixture(prices, symbol=f"002{index:03}.SZ")
+                index += 1
+                for row in r:
+                    row["plate_id"], row["sector_label"] = plate, label
+                rows += r
+        result = self.scan(rows, s)
+        overview = result["sector_overview"]
+        # Fewer than five complete members is not an industry median.
+        self.assertEqual(set(overview), {"industry", "other", "flat"})
+        self.assertEqual(overview["industry"]["relative_strength"], "strong")
+        self.assertEqual(overview["other"]["relative_strength"], "weak")
+        self.assertEqual(overview["flat"]["relative_strength"], "neutral")
+        self.assertEqual(overview["other"]["label"], "弱势行业")
+        self.assertEqual(overview["other"]["members"], 5)
+        self.assertEqual(set(overview["industry"]), {
+            "sector_key", "label", "members", "up_fraction", "return10_median", "change_median", "limit_up",
+            "latest_breadth", "recent_breadth", "breadth_acceleration", "median_change_3d", "flow_3d",
+            "stable_leaders", "relative_return10", "relative_strength"})
+        self.assertAlmostEqual(overview["industry"]["relative_return10"],
+                               overview["industry"]["return10_median"] - result["market"]["median_return10"])
+        from copy import deepcopy
+        from app.recommendation_pool.rules import scan_hash
+        without = deepcopy(result)
+        without["sector_overview"] = {}
+        self.assertEqual(scan_hash(result), scan_hash(without))
+
     def test_crowded_spike_separate_not_deleted(self):
         rows,s=self.peer_market([10,10.1,10.4,10.6,10.8,11,11.1,11.3,11.4,11.5,12], [5e8]*10+[3e9])
         lane=self.scan(rows,s)['lanes'][1]

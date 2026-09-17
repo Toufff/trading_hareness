@@ -11,6 +11,12 @@ from zoneinfo import ZoneInfo
 from .rules import mainboard
 from .selection import valid_selection
 
+# Industry data, news and sector ETF proxies gathered for one decision are real
+# research and belong in the ledger, but they never replace the filing that the
+# company conclusion itself must rest on: at least one primary source stays
+# mandatory and only explicitly labelled research sources skip the host check.
+RESEARCH_SOURCE_KINDS = {"information_check", "sector_etf_proxy"}
+
 
 def validate(review: dict, day: date, *, require_selection: bool = True) -> None:
     if not mainboard(review):
@@ -20,14 +26,19 @@ def validate(review: dict, day: date, *, require_selection: bool = True) -> None
             raise ValueError(f"Missing reviewed evidence: {key}")
     if require_selection and not valid_selection(review):
         raise ValueError('Review requires selection origin, reason, question and disposition; user follow-up requires a request reference')
+    primary = False
     for source in review["sources"]:
         host = urlparse(source["url"]).hostname or ""
         official = any(host == domain or host.endswith('.'+domain) for domain in ("cninfo.com.cn", "sse.com.cn", "szse.cn", "cnstock.com"))
         filing_mirror = host.endswith("finance.sina.com.cn") and "/corp/view/vCB_AllBulletinDetail.php" in source["url"]
-        if not official and not filing_mirror:
+        research = source.get("kind") in RESEARCH_SOURCE_KINDS and str(source.get("url") or "").startswith("https://")
+        if not official and not filing_mirror and not research:
             raise ValueError("Review citations must be primary filings or their identified disclosure mirrors")
+        primary = primary or official or filing_mirror
         if date.fromisoformat(source["published_date"]) > day:
             raise ValueError("Future evidence cannot support this scan")
+    if not primary:
+        raise ValueError("Review citations must include at least one primary filing or disclosure mirror")
 
 
 def persist_rows(connection, day: date, reviews: list[dict], *, now=None) -> int:
@@ -84,7 +95,7 @@ def from_recommendation(items: list[dict]) -> list[dict]:
             "recommendation_research": {
                 key: item.get(key) for key in (
                     "decision", "stage", "trigger", "invalidation", "peer_comparison",
-                    "sector_assessment", "priority", "data_date"
+                    "sector_assessment", "priority", "data_date", "recommendation_note", "ranking_reference"
                 ) if item.get(key) is not None
             },
         }

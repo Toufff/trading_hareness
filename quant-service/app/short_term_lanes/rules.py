@@ -110,6 +110,42 @@ def features(bars: list[dict], sessions: list[str]) -> dict | None:
     }
 
 
+def whole_sector_overview(sectors: dict[str, dict], rotation: dict[str, dict],
+                          labels: dict[str, str], market_r10: float) -> dict[str, dict]:
+    """Aggregate every listed member of each sector, not only today's candidates.
+
+    A recommendation has to judge the whole industry's trend and volume/price,
+    which the per-stock candidate rows cannot show.  ``relative_strength`` is a
+    reference label describing where the sector sits against the market median,
+    never a score, a ranking or an expected return.  Sectors with fewer than
+    five complete members, and the unknown bucket, are left out: their medians
+    would not describe an industry.
+    """
+    overview: dict[str, dict] = {}
+    for key, stats in sectors.items():
+        if key == "unknown" or stats["members"] < 5:
+            continue
+        rotated = rotation.get(key) or {}
+        acceleration, flow_3d = rotated.get("breadth_acceleration"), rotated.get("flow_3d")
+        if stats["return10_median"] < market_r10 and stats["up_fraction"] < 0.5:
+            strength = "weak"
+        elif (stats["return10_median"] > market_r10 and stats["up_fraction"] >= 0.5
+              and ((acceleration is not None and acceleration >= 0) or (flow_3d is not None and flow_3d > 0))):
+            strength = "strong"
+        else:
+            strength = "neutral"
+        overview[key] = {
+            "sector_key": key, "label": labels.get(key, key), "members": stats["members"],
+            "up_fraction": stats["up_fraction"], "return10_median": stats["return10_median"],
+            "change_median": stats["change_median"], "limit_up": stats["limit_up"],
+            "latest_breadth": rotated.get("latest_breadth"), "recent_breadth": rotated.get("recent_breadth"),
+            "breadth_acceleration": acceleration, "median_change_3d": rotated.get("median_change_3d"),
+            "flow_3d": flow_3d, "stable_leaders": rotated.get("stable_leaders"),
+            "relative_return10": stats["return10_median"] - market_r10, "relative_strength": strength,
+        }
+    return dict(sorted(overview.items()))
+
+
 def screen(rows: list[dict], sessions: list[str], as_of_date: str, *, events: dict[str, list[dict]] | None = None,
            price_histories: dict[str, list[dict]] | None = None,
            history_health: dict | None = None,
@@ -134,14 +170,19 @@ def screen(rows: list[dict], sessions: list[str], as_of_date: str, *, events: di
                     and len(valid) / max(1, len(grouped)) >= settings.minimum_history_coverage)
     market_r10 = median([f["return_10d"] for f in valid.values()]) if valid else 0
     by_sector: dict[str, list[dict]] = defaultdict(list)
+    sector_labels: dict[str, str] = {}
     for symbol, f in valid.items():
-        by_sector[str(latest[symbol].get("plate_id") or "unknown")].append(f)
+        key = str(latest[symbol].get("plate_id") or "unknown")
+        by_sector[key].append(f)
+        if key not in sector_labels and latest[symbol].get("sector_label"):
+            sector_labels[key] = str(latest[symbol]["sector_label"])
     sectors = {key: {"members": len(fs), "up_fraction": sum(f["change_pct"] > 0 for f in fs)/len(fs),
                      "return10_median": median(f["return_10d"] for f in fs),
                      "change_median": median(f["change_pct"] for f in fs),
                      "limit_up": sum(f["change_pct"] >= 9.7 for f in fs)} for key, fs in by_sector.items()}
     regime = classify_regime(valid, sectors)
     rotation_by_sector = sector_rotation_metrics(valid, latest, market_r10)
+    sector_overview = whole_sector_overview(sectors, rotation_by_sector, sector_labels, market_r10)
     found: dict[str, list[dict]] = {key: [] for key, _, _ in LANES}
     lane_data_gaps: dict[str, Counter] = {key: Counter() for key, _, _ in ADVANCED_LANES}
     exclusions = Counter()
@@ -332,6 +373,9 @@ def screen(rows: list[dict], sessions: list[str], as_of_date: str, *, events: di
             "coverage": {"universe": len(grouped), "complete_history": len(valid), "excluded": dict(exclusions)},
             "market": {"median_return10": market_r10, "up_fraction": sum(f["change_pct"] > 0 for f in valid.values())/len(valid) if valid else None,
                        "regime": regime},
+            # Whole-sector reference for the recommendation layer; a label, not a
+            # score, and deliberately outside the scan hash evidence set.
+            "sector_overview": sector_overview,
             "history_enrichment": history_health or {"requested": 0, "ready": 0, "failed": 0},
             "risk_policy": {"separate_from_alpha": True, "t_plus_one": True, "cost_aware": True,
                             "portfolio_and_sector_caps": True, "time_and_trailing_stops": True},
