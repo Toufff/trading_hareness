@@ -1,4 +1,4 @@
-"""Pure merge and control derivation for the Longhu/Tencent close source."""
+"""Pure merge and control derivation for the Longhu full-market close source."""
 
 from __future__ import annotations
 
@@ -21,6 +21,11 @@ def _decimal(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except Exception:
         return None
+
+
+def _cny_to_thousand_cny(value: Any) -> str | None:
+    amount = _decimal(value)
+    return None if amount is None else str(amount / Decimal("1000"))
 
 
 @dataclass(frozen=True)
@@ -69,7 +74,10 @@ def merge_cross_section(
             "ts_code": symbol, "trade_date": expected_date, "name": name,
             "open": quote.get("open"), "high": quote.get("high"), "low": quote.get("low"),
             "close": quote.get("close"), "pre_close": quote.get("pre_close"),
-            "vol": quote.get("vol"), "amount": quote.get("amount"),
+            # Longhu kline ``vol`` is already board lots but ``bal`` is CNY. The
+            # canonical daily contract is lots / thousand CNY: convert at this
+            # boundary, or the unit guard quarantines every amount.
+            "vol": quote.get("vol"), "amount": _cny_to_thousand_cny(quote.get("amount")),
         })
         fundamentals.append({
             "ts_code": symbol, "trade_date": expected_date, "close": quote.get("close"),
