@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent 模拟盘复盘</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--fg:#1c1e21;--mute:#6b7280;--line:#e5e7eb;--soft:#f1f3f6;--accent:#2563eb;
+  --up:#d92d20;--down:#15803d;--warn:#b45309;--warn-bg:#fef3c7;--ok-bg:#e8f5ec;--bad-bg:#fdecea;--info-bg:#e8effd;--code:#f4f5f7}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1115;--panel:#171a21;--fg:#e6e8eb;--mute:#9aa3ae;--line:#2a2f38;
+  --soft:#1e222a;--accent:#6ea0ff;--up:#ff6b5e;--down:#4ade80;--warn:#fbbf24;--warn-bg:#3a2f12;--ok-bg:#15291c;--bad-bg:#3a1a18;--info-bg:#18233a;--code:#12151b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line)}
+.bar{max-width:1400px;margin:0 auto;padding:10px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+h1{font-size:17px;margin:0 12px 0 0}
+select,button{font:inherit;color:var(--fg);background:var(--soft);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.muted{color:var(--mute)}.small{font-size:12px}
+main{max-width:1400px;margin:0 auto;padding:16px}
+.score{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.card h3{margin:0 0 4px;font-size:13px;color:var(--mute);font-weight:500}
+.big{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
+.pos{color:var(--up)}.neg{color:var(--down)}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:16px;align-items:start}
+@media (max-width:520px){.cols{grid-template-columns:1fr}}
+.col h2{font-size:16px;margin:0 0 8px;display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mute);font-weight:500;font-size:12px}
+.scroll{overflow-x:auto}
+.decision{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin:10px 0;overflow:hidden}
+.dhead{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 12px;background:var(--soft);border-bottom:1px solid var(--line)}
+.dhead .t{font-weight:600;font-variant-numeric:tabular-nums}
+.dbody{padding:10px 12px}
+.badge{display:inline-block;font-size:12px;border-radius:999px;padding:0 8px;line-height:20px;white-space:nowrap}
+.b-ok{background:var(--ok-bg);color:var(--down)}.b-bad{background:var(--bad-bg);color:var(--up)}
+.b-warn{background:var(--warn-bg);color:var(--warn)}.b-info{background:var(--info-bg);color:var(--accent)}
+.view{margin:0 0 8px}
+.order{border-left:3px solid var(--line);padding:6px 10px;margin:8px 0;background:var(--soft);border-radius:0 6px 6px 0}
+.order.buy{border-left-color:var(--up)}.order.sell{border-left-color:var(--down)}
+.order .line{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-weight:600}
+.order .why{margin-top:4px;white-space:pre-wrap;word-break:break-word;font-weight:400}
+details.notes summary{cursor:pointer;color:var(--mute)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.chip{font-size:12px;background:var(--info-bg);color:var(--accent);border-radius:6px;padding:1px 8px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.actions button{font-size:12px;padding:2px 8px}
+.empty{color:var(--mute);padding:8px 0}
+.error{background:var(--bad-bg);color:var(--up);padding:8px 12px;border-radius:8px;margin-bottom:12px}
+dialog{width:min(1000px,96vw);max-height:90vh;border:1px solid var(--line);border-radius:12px;padding:0;background:var(--panel);color:var(--fg)}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.dlghead{position:sticky;top:0;background:var(--panel);display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line)}
+.dlgbody{padding:10px 14px;overflow:auto;max-height:calc(90vh - 52px)}
+.tree{font:12px/1.55 ui-monospace,Consolas,monospace}
+.tree details{margin-left:14px}.tree summary{cursor:pointer}
+.tree .k{color:var(--accent)}.tree .s{color:var(--warn)}.tree .n{color:var(--down)}
+.tree .leaf{margin-left:14px;white-space:pre-wrap;word-break:break-word}
+.tx{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:6px 10px}
+.tx pre{white-space:pre-wrap;word-break:break-word;background:var(--code);padding:8px;border-radius:6px;margin:6px 0 0;font:12px/1.5 ui-monospace,Consolas,monospace;max-height:420px;overflow:auto}
+</style>
+</head>
+<body>
+<header><div class="bar">
+  <h1>Agent 模拟盘复盘</h1>
+  <label class="muted">交易日 <select id="day"></select></label>
+  <button id="refresh">刷新</button>
+  <span id="stamp" class="muted small"></span>
+</div></header>
+<main>
+  <div id="error" class="error" hidden></div>
+  <section id="score" class="score"></section>
+  <section id="cols" class="cols"></section>
+</main>
+<dialog id="dlg"><div class="dlghead"><strong id="dlgtitle"></strong><button id="dlgclose">关闭</button></div><div id="dlgbody" class="dlgbody"></div></dialog>
+<script>
+const $=s=>document.querySelector(s);
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num=(v,d=2)=>v==null||v===''?'—':Number(v).toLocaleString('zh-CN',{minimumFractionDigits:d,maximumFractionDigits:d});
+const pct=v=>v==null?'—':(v>0?'+':'')+Number(v).toFixed(2)+'%';
+const sign=v=>v==null?'':v>0?'pos':v<0?'neg':'';
+const hm=s=>s?new Date(s).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'—';
+const NAMES={'agent-claude-opus':'Claude Opus','agent-dsh':'DSH'};
+const SIDE={buy:'买',sell:'卖',cancel:'撤单'};
+const STATUS={filled:['成交','b-ok'],partially_filled:['部分成交','b-warn'],open:['挂单中','b-info'],rejected:['拒绝','b-bad'],cancelled:['已撤','b-warn'],expired:['收盘未成交','b-warn']};
+const REASONS={no_live_quote:'无实时行情',not_board_lot:'不是整百股',limit_not_marketable:'限价未到可成交价',no_ask_depth:'卖盘无量',no_bid_depth:'买盘无量',no_depth:'盘口无量',
+  limit_up_or_no_ask_depth:'涨停或卖盘无量',limit_down_or_no_bid_depth:'跌停或买盘无量',insufficient_cash:'资金不足',insufficient_sellable_quantity:'可卖数量不足',
+  t_plus_one_or_insufficient_sellable_quantity:'T+1 或可卖数量不足',invalid_symbol:'代码无效',non_positive_quantity:'数量无效',cancel_unknown_order:'找不到要撤的单',
+  limit_price_required:'限价单缺价格',reason_required:'缺少理由',order_not_object:'订单格式错误',unsupported_action:'不支持的操作',unsupported_order_type:'不支持的订单类型'};
+const reason=r=>REASONS[r]||REASONS[String(r).split(':')[0]]||r;
+let current=null,lastBody='',timer=null;
+
+async function api(path){const r=await fetch(path,{cache:'no-store'});const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j;}
+
+async function loadDays(){
+  const {days}=await api('/api/days');const sel=$('#day');const keep=sel.value;
+  sel.innerHTML=days.map(d=>`<option>${d}</option>`).join('');
+  if(keep&&days.includes(keep))sel.value=keep;
+}
+async function load(){
+  try{
+    const day=$('#day').value;const body=await api('/api/day'+(day?`?date=${day}`:''));
+    $('#error').hidden=true;$('#stamp').textContent=`更新于 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`+(body.day===body.latest_day?' · 每 20 秒自动刷新':'');
+    const text=JSON.stringify(body);if(text!==lastBody){lastBody=text;current=body;render(body);}
+  }catch(e){$('#error').hidden=false;$('#error').textContent='读取失败：'+e.message;}
+}
+
+function render(d){
+  const cards=[];
+  const h=d.human;
+  cards.push(`<div class="card"><h3>你（实盘）</h3><div class="big">${h&&h.equity!=null?num(h.equity):'—'}</div>
+    <div class="${sign(h?.return_pct)}">${pct(h?.return_pct)}</div><div class="muted small">${h?.comparable?(h.basis==='broker_close_snapshot'?'收盘后券商快照':'快照+成交重建'):'当日收盘数据未齐，暂不可比'}</div></div>`);
+  for(const a of d.accounts){
+    const x=a.daily||{};const nav=a.navs.at(-1);
+    const filled=a.orders.filter(o=>['filled','partially_filled'].includes(o.status)).length;
+    const ok=a.decisions.filter(z=>z.status==='decided').length;
+    cards.push(`<div class="card"><h3>${esc(NAMES[a.account_key]||a.account_key)} <span class="small">${esc(a.model)}</span></h3>
+      <div class="big">${nav?num(nav.equity):'—'}</div><div class="${sign(x.agent_return_pct)}">${pct(x.agent_return_pct)}</div>
+      <div class="muted small">决策 ${ok}/${a.decisions.length} 轮 · 成交 ${filled} 笔 · 现金 ${num(nav?nav.cash:a.cash)}</div></div>`);
+  }
+  $('#score').innerHTML=cards.join('');
+  $('#cols').innerHTML=d.accounts.map(column).join('')||'<p class="empty">还没有模拟账户。</p>';
+}
+
+function column(a){
+  const marks=Object.fromEntries(((a.navs.at(-1)||{}).positions||[]).map(p=>[p.symbol,p.price]));
+  const pos=(a.positions||[]).filter(p=>Number(p.quantity)>0);
+  const posTable=pos.length?`<div class="scroll"><table><tr><th>代码</th><th>名称</th><th>数量</th><th>可卖</th><th>成本</th><th>记账价</th></tr>${pos.map(p=>`<tr><td>${esc(p.symbol)}</td><td>${esc(p.name??'')}</td><td>${esc(p.quantity)}</td><td>${esc(p.sellable_quantity??'—')}</td><td>${num(p.average_cost??p.avg_cost,3)}</td><td>${(p.price||marks[p.symbol])?num(p.price||marks[p.symbol]):'—'}</td></tr>`).join('')}</table></div>`:'<p class="empty">空仓</p>';
+  const decisions=a.decisions.length?a.decisions.slice().reverse().map(z=>decision(a,z)).join(''):'<p class="empty">这一天没有决策记录。</p>';
+  return `<div class="col"><h2><span>${esc(NAMES[a.account_key]||a.account_key)}</span><span class="muted small">起始 ${esc(a.start_date)} · 初始 ${num(a.initial_equity)}</span></h2>
+    <div class="card"><h3>持仓${a.navs.length?'（'+hm(a.navs.at(-1).as_of)+' 记账）':''}</h3>${posTable}</div>${decisions}</div>`;
+}
+
+function decision(a,z){
+  const st=z.status==='decided'?'<span class="badge b-ok">已决策</span>':`<span class="badge b-bad">${esc(z.status)}</span>`;
+  const orders=[];
+  for(const o of z.ledger_orders){
+    const [label,cls]=STATUS[o.status]||[o.status,'b-info'];
+    const fill=o.filled_quantity?` ${o.filled_quantity}@${num(o.fill_price)}`:'';
+    const rej=(o.reject_reasons||[]).map(reason).join('、');
+    orders.push(`<div class="order ${esc(o.side)}"><div class="line">${SIDE[o.side]||o.side} ${esc(o.symbol)} ${esc(o.name??'')} ${esc(o.quantity)} 股 · ${o.order_type==='limit'?'限价 '+num(o.limit_price):'市价'}
+      <span class="badge ${cls}">${label}${fill}</span>${rej?`<span class="muted small">${esc(rej)}</span>`:''}</div><div class="why">${esc(o.reason)}</div></div>`);
+  }
+  for(const o of z.outcomes||[]){
+    if(o.order_id)continue;
+    const raw=o.order||{};
+    orders.push(`<div class="order ${esc(raw.action)}"><div class="line">${SIDE[raw.action]||esc(raw.action)} ${esc(raw.symbol)} ${esc(raw.quantity)} 股
+      <span class="badge b-bad">${o.status==='cancelled'?'已撤':'下单前被规则拒绝'}</span><span class="muted small">${esc((o.reasons||[]).map(reason).join('、'))}</span></div><div class="why">${esc(raw.reason)}</div></div>`);
+  }
+  if(!z.outcomes&&z.proposed.length>z.ledger_orders.length){
+    orders.push(`<p class="muted small">模型提出 ${z.proposed.length} 笔，入账 ${z.ledger_orders.length} 笔；其余被规则拒绝，旧记录没有保存拒绝原因。</p>`);
+  }
+  const chips=z.searches.length?`<div class="chips">${z.searches.map(s=>`<span class="chip" title="${esc(s.target)}">${s.tool==='WebSearch'?'🔍':'🌐'} ${esc(s.target)}</span>`).join('')}</div>`:'';
+  const noTrail=!z.has_context?'<span class="muted small">该轮未存输入原文</span>':'';
+  return `<article class="decision"><div class="dhead"><span class="t">${hm(z.decided_at)}</span>${st}
+      <span class="muted small">${z.duration_ms?(z.duration_ms/1000).toFixed(0)+' 秒':''}${z.context_chars?' · 输入 '+(z.context_chars/1000).toFixed(1)+' 千字':''}${z.cost_usd?' · $'+Number(z.cost_usd).toFixed(3):''}${z.tool_calls?' · 查询 '+z.tool_calls+' 次':''}</span></div>
+    <div class="dbody">${z.error?`<div class="error">${esc(z.error)}</div>`:''}
+      ${z.market_view?`<p class="view"><strong>盘面判断：</strong>${esc(z.market_view)}</p>`:''}
+      ${orders.join('')||(z.status==='decided'?'<p class="muted small">本轮不操作。</p>':'')}
+      ${z.notes?`<details class="notes"><summary>备注 / 计划</summary><div class="why">${esc(z.notes)}</div></details>`:''}
+      ${chips}
+      <div class="actions">
+        <button data-part="context" data-id="${z.decision_id}" ${z.has_context?'':'disabled'}>看输入</button>
+        <button data-part="transcript" data-id="${z.decision_id}" ${z.has_transcript?'':'disabled'}>看过程</button>
+        <button data-part="output" data-id="${z.decision_id}">原始输出</button>${noTrail}
+      </div></div></article>`;
+}
+
+function tree(value,key,open){
+  const k=key!=null?`<span class="k">${esc(key)}</span>: `:'';
+  if(value===null||typeof value!=='object'){
+    const cls=typeof value==='string'?'s':typeof value==='number'?'n':'';
+    return `<div class="leaf">${k}<span class="${cls}">${esc(typeof value==='string'?value:JSON.stringify(value))}</span></div>`;
+  }
+  const entries=Array.isArray(value)?value.map((v,i)=>[i,v]):Object.entries(value);
+  const label=Array.isArray(value)?`[${entries.length}]`:`{${entries.length}}`;
+  return `<details ${open?'open':''}><summary>${k}<span class="muted">${label}</span></summary>${entries.map(([kk,v])=>tree(v,kk,false)).join('')}</details>`;
+}
+
+function transcript(items){
+  return items.map(e=>{
+    if(e.type==='tool_use')return `<div class="tx"><span class="badge b-info">${esc(e.name)}</span> ${esc(e.input?.query||e.input?.url||'')}<pre>${esc(JSON.stringify(e.input,null,1))}</pre></div>`;
+    if(e.type==='tool_result')return `<details class="tx"><summary><span class="badge ${e.is_error?'b-bad':'b-ok'}">工具返回</span> <span class="muted small">${esc(String(e.content).slice(0,120))}</span></summary><pre>${esc(e.content)}</pre></details>`;
+    if(e.type==='text')return `<div class="tx"><span class="badge b-warn">模型</span><pre>${esc(e.text)}</pre></div>`;
+    return `<details class="tx" ${e.type==='stdout'?'open':''}><summary><span class="badge b-info">${esc(e.type)}</span></summary><pre>${esc(e.text)}</pre></details>`;
+  }).join('')||'<p class="empty">没有过程记录。</p>';
+}
+
+async function openDetail(id,part){
+  const titles={context:'当时的输入（模型看到的全部数据）',transcript:'决策过程（文字、搜索与抓取）',output:'模型原始输出'};
+  $('#dlgtitle').textContent=titles[part];$('#dlgbody').innerHTML='<p class="empty">读取中…</p>';$('#dlg').showModal();
+  try{
+    const d=await api(`/api/decision/${id}?part=${part}`);
+    const head=`<p class="muted small">${esc(d.account_key)} · ${esc(new Date(d.decided_at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}))}</p>`;
+    $('#dlgbody').innerHTML=head+(part==='transcript'?transcript(d.body||[]):`<div class="tree">${tree(d.body,null,true)}</div>`);
+  }catch(e){$('#dlgbody').innerHTML=`<div class="error">${esc(e.message)}</div>`;}
+}
+
+document.addEventListener('click',e=>{const b=e.target.closest('button[data-part]');if(b)openDetail(b.dataset.id,b.dataset.part);});
+$('#dlgclose').onclick=()=>$('#dlg').close();
+$('#refresh').onclick=()=>{lastBody='';loadDays().then(load);};
+$('#day').onchange=()=>{lastBody='';load();};
+(async()=>{await loadDays();await load();
+  timer=setInterval(async()=>{if(!current||current.day!==current.latest_day)return;await loadDays();if($('#day').value===current.latest_day||!$('#day').value)load();},20000);})();
+</script>
+</body>
+</html>

@@ -63,7 +63,7 @@ def status(connection: Any, *, account_key: str, day: date | None = None, decisi
         "baseline": baseline, "day": day.isoformat(),
         "latest_nav": ({**dict(latest), "return_pct": _pct(dec(latest["equity"]), initial)} if latest else None),
         "daily": daily, "positions": positions, "orders": orders, "decisions_today": dict(counts), "recent_decisions": recent,
-        "comparison_note": "人类收益=券商快照+已导入成交按收盘价重建；某日成交未导入时该日人类收益不准。",
+        "comparison_note": "人类收益优先取当日 15:00 后核验过的券商持仓快照；没有时用起点快照+已导入成交按当日收盘价重建，缺价格则标为不可比。",
     }
 
 

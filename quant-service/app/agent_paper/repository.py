@@ -115,15 +115,24 @@ def last_decision_at(connection: Any, account_key: str) -> datetime | None:
 
 def insert_decision(connection: Any, *, account_key: str, decided_at: datetime, trading_date: date, status: str, model: str,
                     context_hash: str | None, context_chars: int | None, output: dict[str, Any] | None, error: str | None,
-                    usage: dict[str, Any] | None, duration_ms: int | None) -> str:
+                    usage: dict[str, Any] | None, duration_ms: int | None, context: dict[str, Any] | None = None,
+                    transcript: list[dict[str, Any]] | None = None) -> str:
     row = connection.execute(
         """INSERT INTO quant.agent_paper_decisions(account_key,decided_at,trading_date,status,model,context_hash,context_chars,
-                 output,error,usage,duration_ms)
-           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING decision_id""",
+                 output,error,usage,duration_ms,context,transcript)
+           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING decision_id""",
         (account_key, decided_at, trading_date, status, model, context_hash, context_chars,
-         Json(_jsonable(output)) if output is not None else None, error, Json(_jsonable(usage or {})), duration_ms),
+         Json(_jsonable(output)) if output is not None else None, error, Json(_jsonable(usage or {})), duration_ms,
+         Json(_jsonable(context)) if context is not None else None,
+         Json(_jsonable(transcript)) if transcript is not None else None),
     ).fetchone()
     return str(row["decision_id"])
+
+
+def record_outcomes(connection: Any, decision_id: str, outcomes: list[dict[str, Any]]) -> None:
+    """Every order the model proposed and what happened to it, including ones rejected before the ledger."""
+    connection.execute("UPDATE quant.agent_paper_decisions SET outcomes=%s WHERE decision_id=%s",
+                       (Json(_jsonable(outcomes)), decision_id))
 
 
 def update_memory(connection: Any, account_key: str, memory: dict[str, Any]) -> None:

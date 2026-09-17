@@ -59,10 +59,11 @@ OUTPUT_SCHEMA: dict[str, Any] = {
 
 
 class ModelFailure(RuntimeError):
-    def __init__(self, code: str, detail: str = "") -> None:
+    def __init__(self, code: str, detail: str = "", transcript: list[dict[str, Any]] | None = None) -> None:
         super().__init__(code)
         self.code = code
         self.detail = detail[:500]
+        self.transcript = transcript
 
 
 @dataclass
@@ -71,6 +72,7 @@ class ModelResult:
     model: str
     duration_ms: int
     usage: dict[str, Any] = field(default_factory=dict)
+    transcript: list[dict[str, Any]] | None = None
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -106,6 +108,59 @@ def parse_cli_result(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
     return _extract_json(str(envelope.get("result") or "")), usage
 
 
+TRANSCRIPT_TEXT_LIMIT = 6000
+
+
+def _clip(value: Any, limit: int = TRANSCRIPT_TEXT_LIMIT) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + f"…[truncated {len(value) - limit} chars]"
+    if isinstance(value, list):
+        return [_clip(item, limit) for item in value]
+    if isinstance(value, dict):
+        return {key: _clip(item, limit) for key, item in value.items()}
+    return value
+
+
+def parse_cli_stream(stdout: str) -> tuple[str, list[dict[str, Any]]]:
+    """Split ``--output-format stream-json`` into the final result event and an audit transcript.
+
+    The transcript keeps what the model did: its text, every tool call with its
+    input (search queries, fetched URLs) and a clipped copy of each tool result.
+    """
+    transcript: list[dict[str, Any]] = []
+    result = ""
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = event.get("type")
+        if kind == "result":
+            result = line
+            continue
+        if kind not in {"assistant", "user"}:
+            continue
+        content = (event.get("message") or {}).get("content")
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and block.get("text"):
+                transcript.append({"role": kind, "type": "text", "text": _clip(block["text"])})
+            elif block.get("type") == "tool_use":
+                transcript.append({"role": "assistant", "type": "tool_use", "id": block.get("id"), "name": block.get("name"),
+                                   "input": _clip(block.get("input"))})
+            elif block.get("type") == "tool_result":
+                body = block.get("content")
+                if isinstance(body, list):
+                    body = "\n".join(str(part.get("text", "")) for part in body if isinstance(part, dict))
+                transcript.append({"role": "tool", "type": "tool_result", "tool_use_id": block.get("tool_use_id"),
+                                   "is_error": bool(block.get("is_error")), "content": _clip(str(body or ""))})
+    return result, transcript
+
+
 class ClaudeCliModel:
     def __init__(self, *, model: str | None = None, binary: str | None = None,
                  timeout_seconds: int | None = None) -> None:
@@ -129,7 +184,7 @@ class ClaudeCliModel:
     def command(self) -> list[str]:
         tools = ",".join(self.tools)
         allowed = ["--allowedTools", *self.tools] if self.tools else []
-        return [self.binary, "-p", "--model", self.model, "--output-format", "json", "--tools", tools, *allowed,
+        return [self.binary, "-p", "--model", self.model, "--output-format", "stream-json", "--verbose", "--tools", tools, *allowed,
                 "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands",
                 "--system-prompt", SYSTEM_PROMPT, "--json-schema", json.dumps(OUTPUT_SCHEMA, ensure_ascii=False)]
 
@@ -147,10 +202,16 @@ class ClaudeCliModel:
                 raise ModelFailure("timeout", f"{self.timeout_seconds}s") from error
             except OSError as error:
                 raise ModelFailure("cli_unavailable", type(error).__name__) from error
-        if not completed.stdout.strip():
-            raise ModelFailure("cli_exit_without_output", f"exit {completed.returncode}: {completed.stderr[-300:]}")
-        output, usage = parse_cli_result(completed.stdout)
-        return ModelResult(output=output, model=self.model, duration_ms=int((time.monotonic() - started) * 1000), usage=usage)
+        result, transcript = parse_cli_stream(completed.stdout)
+        if not result:
+            raise ModelFailure("cli_exit_without_output", f"exit {completed.returncode}: {completed.stderr[-300:]}", transcript)
+        try:
+            output, usage = parse_cli_result(result)
+        except ModelFailure as failure:
+            failure.transcript = transcript
+            raise
+        return ModelResult(output=output, model=self.model, duration_ms=int((time.monotonic() - started) * 1000), usage=usage,
+                           transcript=transcript)
 
 
 class OpenAICompatibleModel:
@@ -215,10 +276,17 @@ class DshHeadlessModel:
                 raise ModelFailure("timeout", f"{self.timeout_seconds}s") from error
             except OSError as error:
                 raise ModelFailure("cli_unavailable", type(error).__name__) from error
+        transcript = [{"role": "assistant", "type": "stdout", "text": _clip(completed.stdout, 200_000)},
+                      {"role": "tool", "type": "stderr", "text": _clip(completed.stderr, 50_000)}]
         if completed.returncode != 0 or not completed.stdout.strip():
-            raise ModelFailure("dsh_failed", f"exit {completed.returncode}: {completed.stderr[-300:]}")
-        return ModelResult(output=_extract_json(completed.stdout), model=self.model,
-                           duration_ms=int((time.monotonic() - started) * 1000), usage={"stderr_chars": len(completed.stderr)})
+            raise ModelFailure("dsh_failed", f"exit {completed.returncode}: {completed.stderr[-300:]}", transcript)
+        try:
+            output = _extract_json(completed.stdout)
+        except ModelFailure as failure:
+            failure.transcript = transcript
+            raise
+        return ModelResult(output=output, model=self.model, duration_ms=int((time.monotonic() - started) * 1000),
+                           usage={"stderr_chars": len(completed.stderr)}, transcript=transcript)
 
 
 def build_model(backend: str | None = None, *, model: str | None = None) -> Any:

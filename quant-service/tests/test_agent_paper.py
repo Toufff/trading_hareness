@@ -216,6 +216,21 @@ class AgentPaperModelTests(unittest.TestCase):
         self.assertEqual(seen["command"][:3], ["dsh", "--profile", "headless"])
         self.assertEqual((seen["context"], seen["rules"], result.output["orders"]), ('{"now":"t"}', True, []))
 
+    def test_stream_transcript_keeps_searches_and_result(self):
+        from app.agent_paper.model import parse_cli_result, parse_cli_stream
+        lines = [
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "WebSearch", "input": {"query": "华天科技 公告"}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "x" * 7000}]}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}},
+            {"type": "result", "is_error": False, "structured_output": {"market_view": "v", "orders": []}, "usage": {}},
+        ]
+        result, transcript = parse_cli_stream("\n".join(json.dumps(line, ensure_ascii=False) for line in lines))
+        self.assertEqual(parse_cli_result(result)[0]["market_view"], "v")
+        self.assertEqual([e["type"] for e in transcript], ["tool_use", "tool_result", "text"])
+        self.assertEqual(transcript[0]["input"], {"query": "华天科技 公告"})
+        self.assertIn("truncated 1000 chars", transcript[1]["content"])
+
     def test_cli_errors_fail_closed(self):
         with self.assertRaises(ModelFailure) as caught:
             parse_cli_result(json.dumps({"is_error": True, "api_error_status": 403, "result": "Request not allowed"}))
@@ -288,7 +303,7 @@ class AgentPaperLedgerIntegrationTests(unittest.TestCase):
                         {"action": "buy", "symbol": "002185.SZ", "quantity": 500, "order_type": "market", "reason": "depth test"},
                         {"action": "sell", "symbol": "600664.SH", "quantity": 600, "order_type": "limit", "limit_price": 7.5, "reason": "rest"},
                         {"action": "buy", "symbol": "600664.SH", "quantity": 150, "reason": "bad lot"},
-                    ]}, model="fake", duration_ms=1)
+                    ]}, model="fake", duration_ms=1, transcript=[{"type": "tool_use", "name": "WebSearch", "input": {"query": "q"}}])
 
             from app.agent_paper.runner import initialize_account
             from app.agent_paper import runner as runner_module
@@ -311,6 +326,12 @@ class AgentPaperLedgerIntegrationTests(unittest.TestCase):
             self.assertEqual(by_symbol[("002185.SZ", "buy")]["status"], "rejected")
             self.assertEqual(by_symbol[("600664.SH", "sell")]["status"], "open")
             self.assertTrue(any(o["status"] == "rejected" and "not_board_lot" in o.get("reasons", []) for o in outcome["orders"]))
+            trail = connection.execute("SELECT context,transcript,outcomes FROM quant.agent_paper_decisions WHERE decision_id=%s",
+                                       (outcome["decision_id"],)).fetchone()
+            # What the agent saw, what it looked up, and every proposed order, including the one rejected before the ledger.
+            self.assertEqual(trail["context"], {"account": "agent-test"})
+            self.assertEqual(trail["transcript"][0]["input"], {"query": "q"})
+            self.assertEqual(len(trail["outcomes"]), 3)
             connection.execute("""INSERT INTO quant.intraday_quote_observations(symbol,source_name,observed_at,price,raw)
                                   VALUES('600664.SH','agent-test',%s,7.52,'{}'::jsonb)""", (now + timedelta(minutes=1),))
             later = now + timedelta(minutes=2)

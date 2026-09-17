@@ -135,7 +135,8 @@ class Runner:
             with self._tx() as connection:
                 repo.insert_decision(connection, account_key=self.account_key, decided_at=now, trading_date=day, status="model_failed",
                                      model=self.model.model, context_hash=context_hash, context_chars=len(context_json), output=None,
-                                     error=f"{failure.code}: {failure.detail}", usage=None, duration_ms=None)
+                                     error=f"{failure.code}: {failure.detail}", usage=None, duration_ms=None,
+                                     context=context, transcript=failure.transcript)
             return {"status": "model_failed", "error": failure.code}
         # Orders execute against the book as it stands after the model answered.
         executed_at = max(self.clock(), now)
@@ -149,7 +150,7 @@ class Runner:
             decision_id = repo.insert_decision(
                 connection, account_key=self.account_key, decided_at=now, trading_date=day, status="decided", model=result.model,
                 context_hash=context_hash, context_chars=len(context_json), output=output, error=None, usage=result.usage,
-                duration_ms=result.duration_ms)
+                duration_ms=result.duration_ms, context=context, transcript=result.transcript)
             focus = [s.upper() for s in output.get("focus_symbols") or [] if isinstance(s, str) and SYMBOL_RE.match(s.upper())]
             repo.update_memory(connection, self.account_key, {"notes": str(output.get("notes") or "")[:1200],
                                                               "focus_symbols": focus[:MAX_FOCUS_SYMBOLS]})
@@ -182,6 +183,7 @@ class Runner:
                     status = "rejected"
                 outcomes.append({"order_id": order_id, "symbol": order["symbol"], "side": order["action"], "status": status, **result_fill})
                 positions = {row["symbol"]: row for row in repo.load_positions(connection, self.account_key)}
+            repo.record_outcomes(connection, decision_id, outcomes)
         return {"status": "decided", "decision_id": decision_id, "orders": outcomes, "duration_ms": result.duration_ms,
                 "market_view": output.get("market_view")}
 
