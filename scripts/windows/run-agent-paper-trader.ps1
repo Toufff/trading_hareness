@@ -3,9 +3,12 @@ param(
     [string]$RuntimeEnv = 'G:\StockPlatform\config\runtime.env',
     [string]$PlatformRoot = 'G:\StockPlatform',
     [string]$AccountKey = 'agent-claude-opus',
-    [ValidateSet('run-day','model-check')][string]$Command = 'run-day'
+    [ValidateSet('run-day','model-check')][string]$Command = 'run-day',
+    # The Claude Code CLI needs the terminal proxy (same as the profile's `proxy`); only its subprocess uses it.
+    [string]$CliProxy = 'http://127.0.0.1:4537'
 )
 $ErrorActionPreference = 'Stop'
+$env:AGENT_PAPER_CLI_PROXY = $CliProxy
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $arguments = @((Join-Path $root 'scripts\agent-paper-trader.py'), $Command, '--env-file', $RuntimeEnv,
     '--platform-root', $PlatformRoot, '--account-key', $AccountKey)

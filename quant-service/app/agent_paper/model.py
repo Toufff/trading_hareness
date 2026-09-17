@@ -110,6 +110,16 @@ class ClaudeCliModel:
         self.model = model or os.environ.get("AGENT_PAPER_MODEL") or DEFAULT_MODEL
         self.binary = binary or os.environ.get("AGENT_PAPER_CLAUDE_BIN") or shutil.which("claude") or "claude"
         self.timeout_seconds = int(timeout_seconds or os.environ.get("AGENT_PAPER_TIMEOUT_SECONDS") or DEFAULT_TIMEOUT_SECONDS)
+        self.proxy = os.environ.get("AGENT_PAPER_CLI_PROXY") or ""
+
+    def environment(self) -> dict[str, str]:
+        """The CLI reaches Anthropic only through the user's terminal proxy; nothing else inherits it."""
+        env = dict(os.environ)
+        if self.proxy:
+            for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                env[name] = self.proxy
+            env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1,localhost"
+        return env
 
     def command(self) -> list[str]:
         return [self.binary, "-p", "--model", self.model, "--output-format", "json", "--tools", "",
@@ -123,7 +133,7 @@ class ClaudeCliModel:
             try:
                 completed = subprocess.run(
                     self.command(), input=context_json, capture_output=True, text=True, encoding="utf-8",
-                    timeout=self.timeout_seconds, cwd=workdir,
+                    timeout=self.timeout_seconds, cwd=workdir, env=self.environment(),
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
             except subprocess.TimeoutExpired as error:

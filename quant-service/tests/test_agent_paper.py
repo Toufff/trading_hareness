@@ -119,6 +119,15 @@ class AgentPaperModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported"):
             build_model("unknown")
 
+    def test_cli_proxy_applies_only_to_the_cli_environment(self):
+        from unittest.mock import patch
+        from app.agent_paper.model import ClaudeCliModel
+        with patch.dict(os.environ, {"AGENT_PAPER_CLI_PROXY": "http://127.0.0.1:4537"}):
+            env = ClaudeCliModel(model="claude-opus-5").environment()
+        self.assertEqual((env["HTTPS_PROXY"], env["NO_PROXY"]), ("http://127.0.0.1:4537", "127.0.0.1,localhost"))
+        with patch.dict(os.environ, {"AGENT_PAPER_CLI_PROXY": ""}):
+            self.assertEqual(ClaudeCliModel(model="m").proxy, "")
+
     def test_cli_errors_fail_closed(self):
         with self.assertRaises(ModelFailure) as caught:
             parse_cli_result(json.dumps({"is_error": True, "api_error_status": 403, "result": "Request not allowed"}))
