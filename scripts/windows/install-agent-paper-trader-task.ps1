@@ -4,6 +4,7 @@ param(
     [string]$RepositoryRoot = '',
     [string]$PlatformRoot = 'G:\StockPlatform',
     [string]$AccountKey = 'agent-claude-opus',
+    [ValidateSet('claude_cli','dsh','event_research')][string]$Backend = 'claude_cli',
     [ValidateSet('S4U','Interactive')][string]$LogonType = 'Interactive'
 )
 $ErrorActionPreference = 'Stop'
@@ -12,7 +13,7 @@ if ((Get-TimeZone).Id -ne 'China Standard Time') { throw 'Agent paper session re
 Import-Module (Join-Path $PSScriptRoot 'background-process.psm1') -Force
 $action = New-HiddenPowerShellTaskAction -RepositoryRoot $RepositoryRoot `
     -ScriptPath (Join-Path $RepositoryRoot 'scripts\windows\run-agent-paper-trader.ps1') `
-    -ScriptArguments @('-RuntimeEnv', (Join-Path $PlatformRoot 'config\runtime.env'), '-PlatformRoot', $PlatformRoot, '-AccountKey', $AccountKey)
+    -ScriptArguments @('-RuntimeEnv', (Join-Path $PlatformRoot 'config\runtime.env'), '-PlatformRoot', $PlatformRoot, '-AccountKey', $AccountKey, '-Backend', $Backend)
 $trigger = New-ScheduledTaskTrigger -Daily -At '09:20'
 # The day loop is restart-safe and single-instance (file lock); repetition only
 # restarts it after a crash or a late logon, and stops being attempted at 15:10.

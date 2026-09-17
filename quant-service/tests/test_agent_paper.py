@@ -147,6 +147,27 @@ class AgentPaperModelTests(unittest.TestCase):
         self.assertEqual(command[command.index("--tools") + 1], "")
         self.assertNotIn("--allowedTools", command)
 
+    def test_dsh_backend_reads_rules_and_context_from_its_private_directory(self):
+        from unittest.mock import patch
+        from app.agent_paper.model import DshHeadlessModel, build_model
+        seen = {}
+
+        def fake_run(command, **kwargs):
+            seen["command"] = command
+            with open(os.path.join(kwargs["cwd"], "context.json"), encoding="utf-8") as stream:
+                seen["context"] = stream.read()
+            seen["rules"] = os.path.exists(os.path.join(kwargs["cwd"], "instructions.md"))
+
+            class Done:
+                returncode, stdout, stderr = 0, '推理…\n{"market_view":"v","orders":[],"focus_symbols":[],"notes":""}', "log"
+            return Done()
+
+        self.assertIsInstance(build_model("dsh"), DshHeadlessModel)
+        with patch("app.agent_paper.model.subprocess.run", side_effect=fake_run):
+            result = DshHeadlessModel(binary="dsh").decide('{"now":"t"}')
+        self.assertEqual(seen["command"][:3], ["dsh", "--profile", "headless"])
+        self.assertEqual((seen["context"], seen["rules"], result.output["orders"]), ('{"now":"t"}', True, []))
+
     def test_cli_errors_fail_closed(self):
         with self.assertRaises(ModelFailure) as caught:
             parse_cli_result(json.dumps({"is_error": True, "api_error_status": 403, "result": "Request not allowed"}))

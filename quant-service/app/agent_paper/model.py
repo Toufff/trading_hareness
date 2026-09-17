@@ -183,14 +183,54 @@ class OpenAICompatibleModel:
                            duration_ms=int((time.monotonic() - started) * 1000), usage={"usage": usage})
 
 
+class DshHeadlessModel:
+    """DeepSeek Harness headless profile.
+
+    It takes the task as an argument and does not read stdin, so the rules and
+    the context are written to files in a private temporary directory and the
+    agent is told to read them.  The final assistant message must be the JSON.
+    """
+
+    def __init__(self, *, binary: str | None = None, timeout_seconds: int | None = None) -> None:
+        self.model = "dsh-headless"
+        self.binary = binary or os.environ.get("AGENT_PAPER_DSH_BIN") or shutil.which("dsh") or "dsh"
+        self.timeout_seconds = int(timeout_seconds or os.environ.get("AGENT_PAPER_TIMEOUT_SECONDS") or DEFAULT_TIMEOUT_SECONDS)
+
+    TASK = ("阅读当前目录下的 instructions.md（交易规则与输出格式）和 context.json（当前时刻的账户与盘面数据），"
+            "按 instructions.md 做出本轮模拟盘决策。最终回复只输出一个符合 schema 的 JSON 对象，不要输出其他文字。")
+
+    def decide(self, context_json: str) -> ModelResult:
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="agent-paper-dsh-") as workdir:
+            with open(os.path.join(workdir, "instructions.md"), "w", encoding="utf-8") as stream:
+                stream.write(SYSTEM_PROMPT + "\n\n输出 JSON schema：\n" + json.dumps(OUTPUT_SCHEMA, ensure_ascii=False, indent=1))
+            with open(os.path.join(workdir, "context.json"), "w", encoding="utf-8") as stream:
+                stream.write(context_json)
+            try:
+                completed = subprocess.run(
+                    [self.binary, "--profile", "headless", self.TASK], capture_output=True, text=True, encoding="utf-8",
+                    timeout=self.timeout_seconds, cwd=workdir, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except subprocess.TimeoutExpired as error:
+                raise ModelFailure("timeout", f"{self.timeout_seconds}s") from error
+            except OSError as error:
+                raise ModelFailure("cli_unavailable", type(error).__name__) from error
+        if completed.returncode != 0 or not completed.stdout.strip():
+            raise ModelFailure("dsh_failed", f"exit {completed.returncode}: {completed.stderr[-300:]}")
+        return ModelResult(output=_extract_json(completed.stdout), model=self.model,
+                           duration_ms=int((time.monotonic() - started) * 1000), usage={"stderr_chars": len(completed.stderr)})
+
+
 def build_model(backend: str | None = None, *, model: str | None = None) -> Any:
     selected = (backend or os.environ.get("AGENT_PAPER_BACKEND") or "claude_cli").lower()
     if selected == "claude_cli":
         return ClaudeCliModel(model=model)
     if selected == "event_research":
         return OpenAICompatibleModel()
+    if selected == "dsh":
+        return DshHeadlessModel()
     raise ValueError(f"unsupported agent paper backend: {selected}")
 
 
-__all__ = ["ClaudeCliModel", "DEFAULT_MODEL", "ModelFailure", "ModelResult", "OUTPUT_SCHEMA", "OpenAICompatibleModel",
+__all__ = ["ClaudeCliModel", "DEFAULT_MODEL", "ModelFailure", "ModelResult", "DshHeadlessModel", "OUTPUT_SCHEMA", "OpenAICompatibleModel",
            "SYSTEM_PROMPT", "build_model", "parse_cli_result"]

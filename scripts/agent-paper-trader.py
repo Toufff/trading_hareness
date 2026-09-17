@@ -32,7 +32,7 @@ def main():
     parser.add_argument('--source-account', default='citics-primary')
     parser.add_argument('--start-at', help='ISO time in Asia/Shanghai, e.g. 2026-09-17T13:00')
     parser.add_argument('--model')
-    parser.add_argument('--backend', choices=['claude_cli', 'event_research'])
+    parser.add_argument('--backend', choices=['claude_cli', 'event_research', 'dsh'])
     parser.add_argument('--decision-minutes', type=int, default=5)
     parser.add_argument('--day')
     args = parser.parse_args()
