@@ -185,20 +185,32 @@ class Runner:
         return {"status": "decided", "decision_id": decision_id, "orders": outcomes, "duration_ms": result.duration_ms,
                 "market_view": output.get("market_view")}
 
-    async def snapshot_nav(self, now: datetime, price_basis: str = "live_quote") -> dict[str, Any]:
+    async def snapshot_nav(self, now: datetime, price_basis: str = "live_quote", *, attempts: int = 1,
+                           retry_seconds: float = 30, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> dict[str, Any]:
+        """Record equity only when every position has a live price; never substitute cost."""
         with self._tx() as connection:
             positions = [p for p in repo.load_positions(connection, self.account_key) if int(p["quantity"]) > 0]
-        quotes = await self.fetch_quotes([p["symbol"] for p in positions]) if positions else {}
-        prices = {s: dec(q.get("price")) for s, q in quotes.items()}
+        symbols = [p["symbol"] for p in positions]
+        prices: dict[str, Decimal] = {}
+        for attempt in range(max(1, attempts)):
+            quotes = await self.fetch_quotes([s for s in symbols if s not in prices]) if symbols else {}
+            prices.update({s: dec(q.get("price")) for s, q in quotes.items() if dec(q.get("price")) > 0})
+            if all(s in prices for s in symbols):
+                break
+            if attempt + 1 < attempts:
+                await sleep(retry_seconds)
+        missing = [s for s in symbols if s not in prices]
+        if missing:
+            return {"equity": None, "missing": missing, "recorded": False}
         with self._tx() as connection:
             account = repo.load_account(connection, self.account_key)
-            total, market_value, missing = equity(dec(account["cash"]), positions, prices)
+            total, market_value, _ = equity(dec(account["cash"]), positions, prices)
             repo.insert_nav(connection, account_key=self.account_key, as_of=now, trading_date=now.astimezone(SHANGHAI).date(),
                             cash=dec(account["cash"]), market_value=market_value.quantize(CENT), equity=total.quantize(CENT),
-                            price_basis=price_basis if not missing else f"{price_basis};cost_for:{','.join(missing)}",
+                            price_basis=price_basis,
                             positions=[{"symbol": p["symbol"], "quantity": int(p["quantity"]),
-                                        "price": str(prices.get(p["symbol"], "")), "avg_cost": str(p["average_cost"])} for p in positions])
-        return {"equity": float(total), "missing": missing}
+                                        "price": str(prices[p["symbol"]]), "avg_cost": str(p["average_cost"])} for p in positions])
+        return {"equity": float(total), "missing": [], "recorded": True}
 
     def start_of_day(self, now: datetime) -> bool:
         with self._tx() as connection:
@@ -259,7 +271,8 @@ async def run_day(runner: Runner, *, now_fn: Callable[[], datetime], sleep: Call
         await sleep(pass_seconds)
         now = now_fn()
     expired = runner.end_of_day(now)
-    nav = await runner.snapshot_nav(now, price_basis="close_live_quote")
+    # Right at 15:00 the quote endpoint can return an empty book; retry for a few minutes.
+    nav = await runner.snapshot_nav(now, price_basis="close_live_quote", attempts=6, retry_seconds=30, sleep=sleep)
     summary = {"event": "day_end", "at": now.isoformat(), "decisions": decisions, "expired_orders": expired, **nav}
     log(summary)
     return summary

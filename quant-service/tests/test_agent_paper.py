@@ -96,6 +96,54 @@ class AgentPaperRuleTests(unittest.TestCase):
                                 {"symbol": "A", "side": "sell", "quantity": 300, "price": "5"}])
         self.assertEqual((rows["A"]["quantity"], rows["A"]["sellable_quantity"]), (1200, 700))
 
+    def test_close_equity_retries_and_never_substitutes_cost(self):
+        from app.agent_paper.runner import Runner
+
+        class Connection:
+            def __init__(self):
+                self.navs = []
+
+            def execute(self, sql, params=None):
+                class Result:
+                    def __init__(self, rows):
+                        self.rows = rows
+
+                    def fetchall(self):
+                        return self.rows
+
+                    def fetchone(self):
+                        return self.rows[0] if self.rows else None
+                if "FROM quant.agent_paper_positions" in sql:
+                    return Result([{"symbol": "A", "quantity": 100, "average_cost": Decimal("9")}])
+                if "FROM quant.agent_paper_accounts" in sql:
+                    return Result([{"cash": Decimal("100")}])
+                if "INSERT INTO quant.agent_paper_nav" in sql:
+                    self.navs.append(params)
+                    return Result([])
+                raise AssertionError(sql)
+
+        connection = Connection()
+
+        class Database:
+            @contextmanager
+            def transaction(self):
+                yield connection
+
+        responses = [{}, {}, {"A": {"price": "10"}}]
+
+        async def fetch(symbols):
+            return responses.pop(0)
+
+        async def no_sleep(seconds):
+            return None
+
+        runner = Runner(Database(), "acct", model=None, fetch_quotes=fetch)
+        at = datetime(2026, 9, 17, 15, 1, tzinfo=SH)
+        self.assertEqual(asyncio.run(runner.snapshot_nav(at, attempts=2, sleep=no_sleep))["recorded"], False)
+        self.assertEqual(connection.navs, [])
+        result = asyncio.run(runner.snapshot_nav(at, attempts=2, sleep=no_sleep))
+        self.assertEqual((result["recorded"], result["equity"]), (True, 1100.0))
+
     def test_session_and_decision_cadence(self):
         at = lambda h, m: datetime(2026, 9, 17, h, m, tzinfo=SH)  # noqa: E731
         self.assertFalse(in_session(at(9, 29)))
