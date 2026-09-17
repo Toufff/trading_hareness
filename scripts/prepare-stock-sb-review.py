@@ -36,7 +36,7 @@ def main() -> int:
     parser.add_argument("--sector", action="append", default=[],
                         help="人工指定的关注板块名（可重复）；系统无归属数据时仅作对照，不视为归属事实")
     parser.add_argument("--benchmark-minutes", choices=("auto", "off"), default="auto",
-                        help="auto: 数据库缺指数分钟线时，按日期校验后从腾讯分钟接口补采（不入库）")
+                        help="auto: 数据库缺指数或个股分钟线时，按日期校验后从腾讯分钟接口补采（不入库）")
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -54,16 +54,19 @@ def main() -> int:
     from app.stock_sb_review import collect_review, resolve_order_symbol
     from app.stock_sb_review_page import write_review_page
 
-    external_benchmarks = fetch_benchmarks(args.date) if args.benchmark_minutes == "auto" else {}
     try:
         database = Database()
         try:
             with database.transaction(statement_timeout_ms=45_000) as connection:
                 symbol = resolve_order_symbol(connection, account_key=args.account_key,
                                               day=args.date, stock=args.symbol)
+            # Fetch outside the transaction; a stock tape is only used when the database has none.
+            external = fetch_minutes(args.date, symbol) if args.benchmark_minutes == "auto" else {}
+            external_stock = external.pop(symbol, None)
+            with database.transaction(statement_timeout_ms=45_000) as connection:
                 payload = collect_review(connection, account_key=args.account_key,
                                          day=args.date, symbol=symbol, pinned_sectors=args.sector,
-                                         external_benchmarks=external_benchmarks)
+                                         external_benchmarks=external, external_stock_minutes=external_stock)
         finally:
             database.close()
         payload["generated_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
@@ -95,7 +98,7 @@ def main() -> int:
         raise
 
 
-def fetch_benchmarks(day: date) -> dict[str, dict]:
+def fetch_minutes(day: date, stock: str) -> dict[str, dict]:
     """Bounded, date-checked review-time fetch; any failure becomes a visible status."""
     from app.free_market_providers import tencent_intraday_minute_session
     from app.stock_sb_review import BENCHMARKS
@@ -111,7 +114,7 @@ def fetch_benchmarks(day: date) -> dict[str, dict]:
         return symbol, {"bars": bars, "source": status}
 
     async def run() -> dict[str, dict]:
-        return dict(await asyncio.gather(*(one(symbol) for symbol in BENCHMARKS)))
+        return dict(await asyncio.gather(*(one(symbol) for symbol in dict.fromkeys([*BENCHMARKS, stock]))))
 
     return asyncio.run(run())
 

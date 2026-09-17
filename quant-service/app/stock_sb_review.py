@@ -178,8 +178,9 @@ def _post_event(bars: list[dict[str, Any]], order_at: datetime, price: float) ->
 
 def collect_review(connection: Any, *, account_key: str, day: date, symbol: str,
                    pinned_sectors: list[str] | None = None,
-                   external_benchmarks: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Collect database evidence; ``external_benchmarks`` are pre-verified review-time fetches."""
+                   external_benchmarks: dict[str, dict[str, Any]] | None = None,
+                   external_stock_minutes: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Collect database evidence; ``external_*`` are pre-verified review-time fetches used only when the database has no tape."""
     symbol = normalized_symbol(symbol)
     pinned = [label.strip() for label in pinned_sectors or [] if label.strip()]
     order_events = _fetch(connection, """
@@ -213,7 +214,9 @@ def collect_review(connection: Any, *, account_key: str, day: date, symbol: str,
         raise ValueError(f"该账户在 {day} 没有 {symbol} 的已导入委托或成交记录；先确认导入日期和账户绑定")
 
     bars, bar_source = _minute_rows(connection, symbol, day)
-    daily = _daily_rows(connection, symbol, day)
+    if not bars and (external_stock_minutes or {}).get("bars"):
+        bars, bar_source = external_stock_minutes["bars"], external_stock_minutes["source"]
+    daily =_daily_rows(connection, symbol, day)
     benchmarks: dict[str, Any] = {}
     for benchmark in BENCHMARKS:
         benchmark_bars, source = _minute_rows(connection, benchmark, day)
@@ -303,6 +306,8 @@ def collect_review(connection: Any, *, account_key: str, day: date, symbol: str,
     gaps = []
     if len(bars) < 180:
         gaps.append(f"个股分钟线仅 {len(bars)} 根；不足以作完整日内量价复盘")
+    if bar_source == "review_time_fetch":
+        gaps.append("个股分钟线为生成复盘时从腾讯分钟接口按交易日校验后补采，未入库；只含每分钟最新价，不是完整 OHLC")
     if bars and any(event.get("fill_at") and event["fill_at"] > bars[-1]["bar_time"] + timedelta(minutes=1)
                     for event in events):
         gaps.append("有真实成交时刻晚于最后一根可用分钟K；图上按成交时刻和成交价标点，但该时刻附近的量价走势缺失")

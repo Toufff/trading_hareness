@@ -364,7 +364,8 @@ def benchmark_bars_from_session(session: dict[str, Any], *, symbol: str, day: da
     for row in session.get("rows") or []:
         clock = str(row.get("time") or "")
         price = _num(row.get("close"))
-        if len(clock) != 4 or not clock.isdigit() or price is None:
+        # Rows after 15:00 are post-close fixed-price trading, not the continuous session.
+        if len(clock) != 4 or not clock.isdigit() or clock > "1500" or price is None:
             continue
         bars.append({
             "bar_time": datetime.combine(day, time(int(clock[:2]), int(clock[2:])), tzinfo=CN),

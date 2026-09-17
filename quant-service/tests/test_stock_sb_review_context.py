@@ -215,8 +215,10 @@ class CollectReviewWiringTests(unittest.TestCase):
             {"bar_time": at("09:30:00"), "open": 1, "high": 1, "low": 1, "close": 1, "volume": None,
              "amount": None, "source_name": "t", "available_at": at("19:00:00")}]}}
         payload = collect_review(connection, account_key="citics-primary", day=day, symbol="600664.SH",
-                                 pinned_sectors=["化学制药", "不存在"], external_benchmarks=bench)
+                                 pinned_sectors=["化学制药", "不存在"], external_benchmarks=bench,
+                                 external_stock_minutes=bench["000001.SH"])
         self.assertEqual(payload["coverage"]["benchmark_sources"]["000001.SH"], "review_time_fetch")
+        self.assertEqual((payload["bar_source"], payload["coverage"]["stock_minute_bars"]), ("review_time_fetch", 1))
         self.assertEqual(payload["benchmarks"]["000001.SH"]["reference_close"], 7.12)
         self.assertEqual(payload["events"][0]["position"]["before_quantity"], 6000)
         gaps = " | ".join(payload["coverage"]["gaps"])
@@ -224,6 +226,7 @@ class CollectReviewWiringTests(unittest.TestCase):
         self.assertIn("指定板块在当日快照中不存在：不存在", gaps)
         self.assertIn("当日没有盘口五档快照", gaps)
         self.assertNotIn("基准指数分钟线缺失", gaps)
+        self.assertIn("个股分钟线为生成复盘时", gaps)
 
 
 if __name__ == "__main__":
