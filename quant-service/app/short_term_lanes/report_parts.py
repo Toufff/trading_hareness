@@ -59,7 +59,7 @@ def candidates(lane: dict) -> list[str]:
         heat = row.get('attention', {})
         lines += [f"### {stock(row)}", '', f"- 为什么观察：{row['reason']}。",
                   f"- 风险与执行：{row['caution']}。", f"- 等待确认：{row['confirmation']}。",
-                  f"- 放弃条件：{row['invalidation']}。"]
+                  f"- 放弃条件：{row['invalidation']}。", f"- 有效期：{row['expiry']}。"]
         if heat:
             ratio = heat.get('amount_multiple')
             ratio_text = f'{ratio:.2f}倍' if ratio is not None else '未知'
