@@ -94,6 +94,10 @@ def main():
             scan = (run.get('summary') or {}).get('strategy_lanes') or {}
             from app.short_term_lanes.reports import write_bundle
             write_bundle(a.strategy_report_dir, scan, scan['report_bundle'])
+            # The review page carries the decision too; regenerate it from the
+            # same re-read run so file and API show one decision_id.
+            from app.short_term_lanes.review_page import write as write_review_page
+            write_review_page(a.strategy_report_dir, {'run': run})
             write(a.directory / 'decision.json', bundle)
             # The human report carries the same persisted decision plus the
             # bound scanner snapshot, so readers can verify both the total

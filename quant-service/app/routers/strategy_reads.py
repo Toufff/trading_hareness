@@ -6,6 +6,7 @@ from datetime import date
 from typing import Any, Callable, Literal
 
 from fastapi import APIRouter
+from fastapi.responses import Response
 
 from ..strategy_read_model import latest_post_close_strategy as sync_latest_post_close_strategy
 from ..strategy_read_model import latest_strategy_decision as sync_latest_strategy_decision
@@ -56,6 +57,17 @@ def build_strategy_reads_router(database: Any, decision_model_version: str, asyn
         else:
             payload = sync_latest_post_close_strategy(database, as_of_date)
         return dashboard_post_close(payload) if view == 'dashboard' else payload
+
+    @router.get("/api/v1/strategy/post-close/review-page", response_class=Response)
+    async def post_close_review_page(as_of_date: date | None = None) -> Response:
+        """Human-first review page rendered from the same persisted run; no recomputation."""
+        from ..short_term_lanes.review_page import document
+        if async_database is not None:
+            payload = await latest_post_close_strategy(async_database, as_of_date)
+        else:
+            payload = sync_latest_post_close_strategy(database, as_of_date)
+        return Response(content=document(payload), media_type='text/html; charset=utf-8',
+                        headers={'cache-control': 'no-store'})
 
     @router.get("/api/v1/strategy/post-close/watchlist/latest")
     async def post_close_watchlist(limit: int = 16) -> dict[str, Any]:

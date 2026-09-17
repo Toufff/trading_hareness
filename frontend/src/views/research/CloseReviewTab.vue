@@ -24,7 +24,10 @@ export default defineComponent({
 </script>
 
 <template>
-  <p><a href="/intraday">盘中九策略：分时、入场情景与收盘对照</a></p>
+  <p>
+    <a href="/api/research/strategy/post-close/review-page" target="_blank" rel="noreferrer">盘后复盘报告页：结论、推荐池、候选研究、分策略结果</a>
+    · <a href="/intraday">盘中九策略：分时、入场情景与收盘对照</a>
+  </p>
   <GovernanceReviewPanel />
   <ShortTermLanesPanel :summary="postCloseStrategyRun?.summary" />
 

@@ -258,6 +258,13 @@ try {
         }
         throw 'Strategy report publication failed file / owner API / dashboard readback verification'
     }
+    # The human review page is a projection of the same persisted run; its
+    # failure must not turn a verified publication into a failed run.
+    try {
+        $pageOutput = & (Join-Path $root '.venv\Scripts\python.exe') (Join-Path $root 'scripts\export-review-page.py') --date $today --expected-run-id $scan.run_id --base-url $ApiBase --report-dir $reportDir 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "review page export failed: $($pageOutput | Select-Object -Last 1)" }
+        $record['review_page'] = ([string]($pageOutput | Select-Object -Last 1) | ConvertFrom-Json).file
+    } catch { $record['review_page_error'] = $_.Exception.Message }
     $record['strategy_status'] = 'completed'
     $record['status'] = if ($record.ContainsKey('market_refresh_error') -or $record.ContainsKey('ingestion_error')) { 'partial' } else { 'completed' }
     $record['report_count'] = $readback.run.summary.strategy_lanes.report_bundle.reports.Count

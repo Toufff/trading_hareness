@@ -1207,6 +1207,7 @@ async function updateRelayRoute(sourceKey, payload) {
 const researchPaths = new Map([
 	['/api/research/runtime/health', '/health'],
 	['/api/research/intraday-scans', '/api/v1/intraday-scans'],
+	['/api/research/strategy/post-close/review-page', '/api/v1/strategy/post-close/review-page'],
 	['/api/research/overview', '/api/v1/research/overview'],
 	['/api/research/reports', '/api/v1/remote-archive/reports'],
 	['/api/research/remote-archive/messages', '/api/v1/remote-archive/messages'],
