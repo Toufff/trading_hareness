@@ -113,6 +113,20 @@ pwsh .\scripts\shared-peer\install-shared-tunnel-tasks.ps1
 `Enable-ScheduledTask -TaskName trading-hareness-shared-peer-batch-tunnel`
 或重跑安装脚本。
 
+这条「失败就禁用」的规则很硬，所以判定必须站得住：健康判据的第三条
+（运行时状态属于本次安装）现在**同时**看 `run_id` 和 `started_at`，
+并且在 30 秒内**反复重读状态文件**，而不是只判一次——
+先起来的是 ssh 客户端，supervisor 写状态文件要晚一点，判一次就会把一条
+正在起来的隧道判成失败并禁用。另一头也补上了：
+`supervise-runtime-process.ps1` 抢不到 `<service>.lock` 时会以
+`duplicate_start_skipped` 退出并且**不写状态**，此时状态文件里仍是上一轮的
+`run_id`，而那条隧道是好的；只要 `supervisor_pid` 指向的进程还活着
+（且它的启动时间和状态里的 `started_at` 对得上，防止 pid 复用），
+就按 `duplicate_supervisor_still_serving` 接受，健康标签记为
+`remote_listener_open_owned_by_live_supervisor`，
+并把 `state_freshness` / `previous_run_id` 写进运行时状态和 `healthy` 事件里
+——**绝不会因为这个把一条正在服务的批量隧道禁用掉**。
+
 ### 2.2 授权 key 的端口白名单
 
 - owner 侧（`-R`）：`install-owner-tunnel-key.sh` 的默认
@@ -148,8 +162,17 @@ python3 scripts/shared-peer/deploy-batch-tunnel-port.py
    而 `REMOTE_API_PORT: "15681"`、改缩进、改用 `env_file`，渲染出来完全一样——
    少了原文哈希，重排过的 compose 会通过状态闸门，然后在 `.env` 已经改完之后
    用一句裸 `AssertionError` 死在写入中途。
-   **已经部署过（渲染环境里已有 `PEER_BATCH_DB_PORT`）则打印状态并 `exit 0`**：
-   部分失败后重跑确认幂等是常规动作，不该和真正的拒绝一样返回非零。
+   **已经部署过则打印状态并 `exit 0`**：部分失败后重跑确认幂等是常规动作，
+   不该和真正的拒绝一样返回非零。这个判断放在 `KNOWN_PEER_STATES` 查表**之后**
+   （部署完成的 peer 的 entrypoint 哈希本来就不在表里），
+   并且**只认两条同时成立的证据**：渲染后的 `PEER_BATCH_DB_PORT` 的**值非空**，
+   且 peer 的 entrypoint 里确实有批量转发那一行（`BATCH_FORWARD_MARKER`）。
+   只看「键在不在」是不够的：本仓库自己的 compose 无条件声明
+   `PEER_BATCH_DB_PORT: ${PEER_BATCH_DB_PORT:-}`，而 `.env.example` 里这个变量是
+   注释掉的，所以在一台什么都没部署过的 peer 上 `docker compose config` 照样会
+   渲染出这个键（值为空）；写完 compose 就被打断的那一次运行也是同一个形状。
+   这两种情况都必须落回正常的 `matches` / `mismatch` 闸门，
+   而不是被当成「成功的空操作」。
 2. **前置断言（在任何备份和改写之前）**：`quant-research` 在跑、有 psycopg、
    有 `PG*` 凭据；本机 15433 已有监听；并先用
    `SELECT 1, inet_server_port()` 打通 `db-tunnel:5432` 拿到基线
@@ -179,8 +202,19 @@ python3 scripts/shared-peer/deploy-batch-tunnel-port.py
 所以 `wait_healthy` 超时、5433 探测失败、以及最关键的
 「5432 探测失败」（探测顺序正是为了抓这一种）这三条路径，
 如果不重建，lightServer 会继续用脚本刚刚判定为坏的镜像对外提供数据库，
-而脚本却声称自己回滚了。若自动重建本身也失败，脚本会明确打印
-「AUTOMATIC ROLLBACK FAILED」并要求人工执行下面第 3 节的命令。
+而脚本却声称自己回滚了。
+
+重建之后脚本**不相信自己**：`docker tag` 的退出码被保留，
+重建出来的容器再用 `docker inspect` 读一次镜像 id，
+和构建前保存的那一个**逐字比较**，两个 id 都会打印出来
+（`preserved image id` / `recreated image id` / `retag exit code`）。
+这是必须的一步——`up -d --no-build` 解析的是**此刻**标签指向的镜像，
+所以如果重打标签失败（`:pre-batch-<stamp>` 被并发的 `docker image prune` 清掉、
+daemon 报错、磁盘满），`up -d` 依然返回 0，容器却是从那个刚被判定为坏的镜像起来的。
+只有两个 id 相等时才会重新探测 5432 并报告「rolled back」；
+否则（重建失败、或镜像 id 对不上）一律打印
+「AUTOMATIC ROLLBACK FAILED」，附上两个 id 和 retag 的退出码，
+并要求人工执行下面第 3 节的命令。
 
 ### 2.4 让消费方用上 5433
 

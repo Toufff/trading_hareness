@@ -106,7 +106,14 @@ function Stop-TunnelInstallOnFailure {
 }
 
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-$state = Request-RuntimeStop -PlatformRoot $PlatformRoot -Service $service -Reason 'task_reinstall' -RequestedBy 'install-shared-tunnel-task.ps1'
+# The PRE-install state, and above all its run_id: this is the run the health
+# gate below must NOT mistake for its own. Request-RuntimeStop returns $null when
+# there is no previous supervised run, which is the same thing as "no run_id to
+# be confused with".
+$previousState = Request-RuntimeStop -PlatformRoot $PlatformRoot -Service $service -Reason 'task_reinstall' -RequestedBy 'install-shared-tunnel-task.ps1'
+$previousRunId = if ($previousState -and $previousState.PSObject.Properties['run_id'] -and $previousState.run_id) {
+    [string]$previousState.run_id
+} else { '' }
 # State may point to yesterday's dead PID. Reconcile only live ssh processes
 # whose command line owns this profile's exact forwarding tuples; never kill by
 # stale PID, and never kill the other profile's connection.
@@ -188,8 +195,12 @@ if ($task.State -ne 'Running') {
 #   1. lightServer publishes a loopback listener on 15433 (`ss -ltn`), and
 #   2. a local ssh.exe whose command line carries this profile's exact
 #      forwarding tuple is alive, and
-#   3. the supervised runtime state was written by this install (its
-#      started_at is not older than the moment the task was registered).
+#   3. the supervised runtime state was written by this install - a run_id
+#      different from the one read before the install AND a started_at not older
+#      than the moment the task was registered - or, failing that, the run the
+#      state names is still owned by a live supervisor process (the
+#      duplicate_start_skipped case, where the tunnel is up but the previous
+#      supervisor still holds the lock and therefore the state).
 #      started_at is the field supervise-runtime-process.ps1 writes; an earlier
 #      version of this gate asserted on requested_at, which never reaches the
 #      state file, so it could not pass.
@@ -237,20 +248,66 @@ if ($tunnelProfile.HealthCheck -eq 'remote_api_http') {
     $healthLabel = 'remote_listener_open_owned_by_local_client'
 }
 
-$state = Get-RuntimeState -PlatformRoot $PlatformRoot -Service $service
-if (-not $state -or -not $state.PSObject.Properties['run_id']) {
-    Stop-TunnelInstallOnFailure -Message 'Shared peer tunnel became reachable without a supervised runtime state'
-}
-if ($tunnelProfile.HealthCheck -ne 'remote_api_http') {
+$freshness = $null
+if ($tunnelProfile.HealthCheck -eq 'remote_api_http') {
+    $state = Get-RuntimeState -PlatformRoot $PlatformRoot -Service $service
+} else {
     # Third leg of the batch claim: the state must belong to this install. The
     # judgement (and the failure message) is built by a pure function that reads
     # every field through PSObject.Properties, so a state file missing the field
     # produces a bounded failure instead of a StrictMode throw that would skip
     # Stop-TunnelInstallOnFailure and leave the task retrying every two minutes.
-    $freshness = Get-SharedTunnelStateFreshnessVerdict -State $state -InstallStartedAt $installStartedAt
-    if (-not $freshness.fresh) {
-        Stop-TunnelInstallOnFailure -Message $freshness.message
-    }
+    #
+    # It is POLLED, not judged once. The state file is written by whichever
+    # supervisor owns <service>.lock, and the ssh client that just satisfied legs
+    # 1 and 2 can be up before that write lands. Judging once turned that race
+    # into a disabled batch task.
+    #
+    # Two pieces of evidence, both of which this script already has:
+    #   * $previousRunId - the run_id from before the install. This install's
+    #     supervisor mints a new one, so a state still carrying the old id was
+    #     not written by this install, no matter what its clock says.
+    #   * the liveness of the supervisor named by the state. A supervisor that
+    #     cannot take the lock exits via duplicate_start_skipped and writes
+    #     nothing (supervise-runtime-process.ps1:27-32), so the previous run_id
+    #     can legitimately persist while the tunnel is up and serving. That is
+    #     accepted - as 'duplicate_supervisor_still_serving', not as this
+    #     install's own state - because disabling a healthy batch tunnel is a
+    #     worse failure than accepting an older run that demonstrably owns it.
+    $freshnessDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        $state = Get-RuntimeState -PlatformRoot $PlatformRoot -Service $service
+        $supervisorProcess = $null
+        if ($state -and $state.PSObject.Properties['supervisor_pid'] -and $state.supervisor_pid) {
+            # A state file carrying a non-numeric supervisor_pid must not throw
+            # an InvalidCastException here: that throw would escape
+            # Stop-TunnelInstallOnFailure and leave the batch task enabled and
+            # retrying - the same class of failure the pure judges exist to
+            # avoid. A pid that cannot be parsed simply vouches for nothing.
+            $supervisorPid = 0
+            if ([int]::TryParse([string]$state.supervisor_pid, [ref]$supervisorPid)) {
+                $supervisorProcess = Get-Process -Id $supervisorPid -ErrorAction SilentlyContinue
+            }
+        }
+        $liveness = Get-SharedTunnelSupervisorLiveness -State $state -Process $supervisorProcess
+        $freshness = Get-SharedTunnelStateFreshnessVerdict -State $state `
+            -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId `
+            -SupervisorAlive $liveness.alive
+        if ($freshness.accept) { break }
+        Start-Sleep -Seconds 1
+    } while ([DateTime]::UtcNow -lt $freshnessDeadline)
+}
+if (-not $state -or -not $state.PSObject.Properties['run_id']) {
+    Stop-TunnelInstallOnFailure -Message 'Shared peer tunnel became reachable without a supervised runtime state'
+}
+if ($null -ne $freshness -and -not $freshness.accept) {
+    Stop-TunnelInstallOnFailure -Message $freshness.message
+}
+if ($null -ne $freshness -and -not $freshness.fresh) {
+    # Accepted, but by the weaker claim. Say so in the health label rather than
+    # reporting the same string as an install whose own supervisor wrote the
+    # state.
+    $healthLabel = 'remote_listener_open_owned_by_live_supervisor'
 }
 $healthyState = @{}
 foreach ($property in $state.PSObject.Properties) {
@@ -264,14 +321,23 @@ $healthyState.verified_at = [DateTimeOffset]::Now.ToString('o')
 $healthyState.tunnel_profile = $tunnelProfile.Name
 $healthyState.remote_api_port = $tunnelProfile.RemoteApiPort
 $healthyState.remote_database_port = $tunnelProfile.RemoteDatabasePort
+$eventData = @{
+    health = $healthLabel
+    tunnel_profile = $tunnelProfile.Name
+    remote_api_port = $tunnelProfile.RemoteApiPort
+    remote_database_port = $tunnelProfile.RemoteDatabasePort
+}
+if ($null -ne $freshness) {
+    # Which claim was accepted, and against which previous run, is the whole
+    # point of the gate - keep the receipt where an operator will find it.
+    $healthyState.state_freshness = [string]$freshness.reason
+    $healthyState.previous_run_id = [string]$freshness.previous_run_id
+    $eventData.state_freshness = [string]$freshness.reason
+    $eventData.previous_run_id = [string]$freshness.previous_run_id
+}
 [void](Set-RuntimeState -PlatformRoot $PlatformRoot -Service $service -State $healthyState)
 [void](Write-RuntimeEvent -PlatformRoot $PlatformRoot -Service $service -Event 'healthy' `
-    -RunId ([string]$state.run_id) -Data @{
-        health = $healthLabel
-        tunnel_profile = $tunnelProfile.Name
-        remote_api_port = $tunnelProfile.RemoteApiPort
-        remote_database_port = $tunnelProfile.RemoteDatabasePort
-    })
+    -RunId ([string]$state.run_id) -Data $eventData)
 $task | Select-Object TaskName,State,
     @{Name='Profile';Expression={$tunnelProfile.Name}},
     @{Name='Health';Expression={$healthLabel}},

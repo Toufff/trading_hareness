@@ -158,7 +158,7 @@ scheduled task, supervised runtime service, state file and lock file:
 | runtime service | `shared-peer-tunnels` | `shared-peer-batch-tunnel` |
 | forwards | `-R 15432:55432`, `-R 15681:5681` | `-R 15433:55432` |
 | compression | off | `-o Compression=yes` |
-| health claim | remote API HTTP 200 | remote loopback listener on 15433, owned by this install's local ssh client, backed by a runtime state whose `started_at` post-dates the install |
+| health claim | remote API HTTP 200 | remote loopback listener on 15433, owned by this install's local ssh client, backed by a runtime state that belongs to this install (a new `run_id` **and** a `started_at` that post-dates it) or, failing that, to a run a live supervisor still owns |
 | peer address | `db-tunnel:5432` | `db-tunnel:5433` |
 
 The batch claim's third leg is keyed on `started_at` because that is the field
@@ -172,6 +172,29 @@ through `PSObject.Properties`: under `Set-StrictMode -Version Latest` a direct
 read of an absent property throws, and that throw would escape
 `Stop-TunnelInstallOnFailure`, leaving the failed batch task enabled and retrying
 every two minutes — the exact unbounded failure the helper exists to prevent.
+
+A timestamp alone is not the whole claim, in either direction.
+
+* The installer keeps the `run_id` it read *before* the install (the return of
+  `Request-RuntimeStop`) and passes it as `-PreviousRunId`. This install's
+  supervisor mints a new one, so a state still carrying the old id was not
+  written by this install whatever its clock says — no tolerance window, no
+  clock skew, nothing to get wrong.
+* `supervise-runtime-process.ps1` exits 0 with `duplicate_start_skipped` and
+  writes **no** state when it cannot take `<service>.lock`. If the previous
+  supervisor still holds that lock, the state keeps the previous `run_id`
+  indefinitely while the tunnel is up and serving. Disabling that task would be
+  a self-inflicted outage, so the verdict accepts it — as
+  `duplicate_supervisor_still_serving`, reported in the health label
+  `remote_listener_open_owned_by_live_supervisor` and in the `state_freshness`
+  field of the runtime state and the `healthy` event, never as this install's
+  own state. `Get-SharedTunnelSupervisorLiveness` is what vouches for it: the
+  `supervisor_pid` must name a running process whose start time sits beside the
+  state's own `started_at`, so a recycled pid proves nothing.
+* The verdict is **polled** until a 30 s deadline, re-reading the state each
+  second. The ssh client that satisfies legs 1 and 2 can be up before the
+  supervisor's state write lands; judging once turned that race into a disabled
+  batch task. `accept`, not `fresh`, is what the installer gates on.
 
 Both reach the same database on the same port 55432; only the transport differs.
 Compression is on for batch alone because bulk result sets compress well and the

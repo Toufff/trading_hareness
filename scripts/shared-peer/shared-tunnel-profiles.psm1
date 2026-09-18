@@ -203,10 +203,36 @@ function Get-SharedTunnelStateFreshnessVerdict {
     # A state whose timestamp is unreadable is never fresh. An unparsable or
     # absent stamp is the same evidence as an old one: no proof that this
     # install produced the state.
+    #
+    # A timestamp alone is still not enough in BOTH directions, which is why
+    # -PreviousRunId and -SupervisorAlive exist:
+    #
+    #  * Too weak. A clock that moved, or a state file whose started_at happens
+    #    to sit inside the tolerance window, can pass on time alone. The run_id
+    #    the installer already holds (Request-RuntimeStop returns the PRE-install
+    #    state) settles it with no clock at all: this install's supervisor minted
+    #    a new run_id, so a state still carrying the previous one was not
+    #    written by this install, whatever its stamp says.
+    #
+    #  * Too strong. scripts\windows\supervise-runtime-process.ps1 exits 0 with
+    #    `duplicate_start_skipped` and writes NO state when it cannot take
+    #    <service>.lock. If the previous supervisor still holds that lock, the
+    #    state keeps the previous run_id forever and a timestamp-only (or
+    #    run_id-only) gate would call a tunnel that is up and serving a failure -
+    #    and, for the batch profile, DISABLE its task. So when the caller can
+    #    show that the run named by the state is still supervised by a live
+    #    process, that is accepted: not fresh, but healthy. `accept`, not
+    #    `fresh`, is what the installer must gate on.
     [CmdletBinding()]
     param(
         [AllowNull()][psobject]$State,
         [Parameter(Mandatory)][DateTimeOffset]$InstallStartedAt,
+        # The run_id read BEFORE this install started, or '' when there was no
+        # previous state at all (then any run_id is a new one).
+        [AllowNull()][string]$PreviousRunId,
+        # Tri-state: $true - the run named by $State is still owned by a live
+        # supervisor process; $false - it is not; $null - not measured.
+        [AllowNull()][object]$SupervisorAlive = $null,
         [string]$Field = 'started_at',
         # Clock granularity only. The installer stamps $InstallStartedAt before
         # Register-ScheduledTask, so a legitimate run's started_at post-dates it.
@@ -218,21 +244,89 @@ function Get-SharedTunnelStateFreshnessVerdict {
     $parsed = [DateTimeOffset]::MinValue
     $parsedOk = $hasValue -and [DateTimeOffset]::TryParse($rawText, [ref]$parsed)
     $floor = $InstallStartedAt.AddSeconds(-$ToleranceSeconds)
+    $runIdProperty = if ($null -ne $State) { $State.PSObject.Properties['run_id'] } else { $null }
+    $runId = if ($null -ne $runIdProperty -and $null -ne $runIdProperty.Value) { [string]$runIdProperty.Value } else { '' }
+    $previous = if ($null -ne $PreviousRunId) { [string]$PreviousRunId } else { '' }
+    # No previous state means nothing to be confused with, so any run_id is new.
+    $runIdChanged = [string]::IsNullOrWhiteSpace($previous) -or ($runId -ne $previous)
+    $alive = ($SupervisorAlive -is [bool]) -and [bool]$SupervisorAlive
     $fresh = $false
+    $accept = $false
     if ($null -eq $State) { $reason = 'no_runtime_state' }
     elseif (-not $hasValue) { $reason = 'field_missing' }
     elseif (-not $parsedOk) { $reason = 'field_unparsable' }
+    elseif (-not $runIdChanged) {
+        # The supervisor never replaced the state. Either it has not run yet
+        # (the installer polls, so this verdict may be re-taken), or it exited
+        # via duplicate_start_skipped because the run below still owns the lock.
+        if ($alive) { $accept = $true; $reason = 'duplicate_supervisor_still_serving' }
+        else { $reason = 'run_id_unchanged' }
+    }
     elseif ($parsed -lt $floor) { $reason = 'state_predates_install' }
-    else { $fresh = $true; $reason = 'state_belongs_to_install' }
+    else { $fresh = $true; $accept = $true; $reason = 'state_belongs_to_install' }
     $observed = if ($hasValue) { $rawText } else { '<absent>' }
+    $message = if ($accept) {
+        ("Batch tunnel runtime state accepted ({0} '{1}', run_id '{2}' [{3}])") -f `
+            $Field, $observed, $runId, $reason
+    } else {
+        ("Batch tunnel health used a stale runtime state ({0} '{1}', run_id '{2}' vs previous " +
+            "'{3}' [{4}] does not post-date this install at '{5}', and no live supervisor owns " +
+            "that run)") -f $Field, $observed, $runId, $previous, $reason, $InstallStartedAt.ToString('o')
+    }
     return [pscustomobject][ordered]@{
         fresh = $fresh
+        accept = $accept
         reason = $reason
         field = $Field
         observed = $observed
+        run_id = $runId
+        previous_run_id = $previous
+        run_id_changed = $runIdChanged
+        supervisor_alive = $SupervisorAlive
         install_started_at = $InstallStartedAt.ToString('o')
-        message = ("Batch tunnel health used a stale runtime state ({0} '{1}' [{2}] does not " +
-            "post-date this install at '{3}')") -f $Field, $observed, $reason, $InstallStartedAt.ToString('o')
+        message = $message
+    }
+}
+
+function Get-SharedTunnelSupervisorLiveness {
+    # Pure judge for "is the run named by this state still supervised?".
+    #
+    # The caller passes the process it found for $State.supervisor_pid (or
+    # $null). A bare "the pid exists" is not enough: pids are reused, and after a
+    # reboot the pid in a leftover state file very likely belongs to something
+    # else entirely. So the process's StartTime must sit in a window around the
+    # state's own started_at - a supervisor stamps started_at within moments of
+    # its own process start, while a recycled pid belongs to a process that
+    # started much later (or earlier).
+    [CmdletBinding()]
+    param(
+        [AllowNull()][psobject]$State,
+        # Anything exposing Id and StartTime; Get-Process output in production.
+        [AllowNull()][psobject]$Process,
+        [double]$ToleranceSeconds = 120
+    )
+    $pidProperty = if ($null -ne $State) { $State.PSObject.Properties['supervisor_pid'] } else { $null }
+    $statePid = if ($null -ne $pidProperty -and $null -ne $pidProperty.Value) { [string]$pidProperty.Value } else { '' }
+    $startedProperty = if ($null -ne $State) { $State.PSObject.Properties['started_at'] } else { $null }
+    $startedText = if ($null -ne $startedProperty -and $null -ne $startedProperty.Value) { [string]$startedProperty.Value } else { '' }
+    $started = [DateTimeOffset]::MinValue
+    $startedOk = (-not [string]::IsNullOrWhiteSpace($startedText)) -and [DateTimeOffset]::TryParse($startedText, [ref]$started)
+    $alive = $false
+    if ([string]::IsNullOrWhiteSpace($statePid)) { $reason = 'no_supervisor_pid' }
+    elseif ($null -eq $Process) { $reason = 'supervisor_pid_not_running' }
+    elseif (-not $Process.PSObject.Properties['StartTime'] -or $null -eq $Process.StartTime) { $reason = 'process_start_time_unavailable' }
+    elseif (-not $startedOk) { $reason = 'state_started_at_unreadable' }
+    else {
+        $processStart = [DateTimeOffset]$Process.StartTime
+        $drift = [Math]::Abs(($processStart - $started).TotalSeconds)
+        if ($drift -gt $ToleranceSeconds) { $reason = 'supervisor_pid_reused' }
+        else { $alive = $true; $reason = 'supervisor_process_owns_this_run' }
+    }
+    return [pscustomobject][ordered]@{
+        alive = $alive
+        reason = $reason
+        supervisor_pid = $statePid
+        state_started_at = $startedText
     }
 }
 
@@ -242,5 +336,6 @@ Export-ModuleMember -Function @(
     'Get-SharedTunnelProcessPattern',
     'Test-SharedTunnelCommandLine',
     'Get-SharedTunnelConnectionVerdict',
-    'Get-SharedTunnelStateFreshnessVerdict'
+    'Get-SharedTunnelStateFreshnessVerdict',
+    'Get-SharedTunnelSupervisorLiveness'
 )
