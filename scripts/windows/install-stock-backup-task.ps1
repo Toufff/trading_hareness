@@ -4,7 +4,12 @@ param(
     [string]$RepositoryRoot = '',
     [string]$PlatformRoot = 'G:\StockPlatform',
     [string]$RuntimeEnv = '',
-    [string]$StartTime = '20:30',
+    # Moved out of the evening into the 04:00-08:00 maintenance window agreed
+    # with the operator (docs/OWNER_DATABASE_STORAGE.md): pg_dump saturates the
+    # disk, and the evening slot overlapped post-close publication and the
+    # operator's own use of the machine. 04:10 leaves the whole night free and
+    # still finishes long before the 06:00 storage-tier job.
+    [string]$StartTime = '04:10',
     # Interactive logon requires an active console session and, even with
     # -WindowStyle Hidden, briefly flashes a conhost window per run (see
     # scripts/windows/run-hidden.vbs, used below regardless of this choice,

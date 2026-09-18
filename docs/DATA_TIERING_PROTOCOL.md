@@ -1,5 +1,14 @@
 # 数据分层协议(Data Tiering Protocol)
 
+> **范围提示（2026-09-19 补）**：Windows 业主工作站上那套 PostgreSQL 的物理布局
+> ——热层 `PGDATA_DIR`（NVMe，500 GB 预算）、冷层 `stock_cold` 表空间、备份链、
+> 维护窗与数据目录迁移回滚——由 [OWNER_DATABASE_STORAGE.md](OWNER_DATABASE_STORAGE.md)
+> 定义，那是业主库布局的唯一权威文档。本文是 macOS/Docker 时期确立的四层放置协议
+> （L0 edge-hot / L1 research-hot / L2 warm / L3 cold），继续有效地回答"哪一类数据
+> 属于哪一层、保留多久、怎么流动"，但**不再描述业主库在磁盘上的位置**。
+> 下表里的 L1 research-hot，在今天的 Windows 部署里就是业主库这一整个实例
+> （热层＋冷层）。两者冲突时以 `OWNER_DATABASE_STORAGE.md` 为准。
+
 状态:已实施并实测(2026-08-31)。本文是四层存储的放置规范:哪类数据放哪层、
 保留多久、怎么流动。所有延迟与容量数字来自本机实测,不是估计。
 

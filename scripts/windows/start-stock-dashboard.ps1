@@ -13,6 +13,7 @@ Set-StrictMode -Version Latest
 if (-not $RepositoryRoot) { $RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')) }
 Import-Module (Join-Path $PSScriptRoot 'runtime-observability.psm1')
 Import-Module (Join-Path $PSScriptRoot 'background-process.psm1')
+Import-Module (Join-Path $PSScriptRoot 'postgres-managed-config.psm1')
 
 function Read-EnvFile([string]$Path) {
     $result = @{}
@@ -112,6 +113,11 @@ function Remove-StaleRemoteDashboardListener {
 }
 
 $platform = [IO.Path]::GetFullPath($PlatformRoot).TrimEnd('\')
+# The platform root -- reports, backups, cold tablespace, runtime binaries and
+# configuration -- stays on G:. The PostgreSQL hot data directory is the one
+# exception and is governed by PGDATA_DIR in runtime.env (production points it
+# at the NVMe tier F:\StockPlatformDB\postgresql16); see
+# docs/OWNER_DATABASE_STORAGE.md.
 if (-not $platform.StartsWith('G:\', [StringComparison]::OrdinalIgnoreCase)) {
     throw "Authoritative stock data must remain on G:, got $platform"
 }
@@ -119,7 +125,7 @@ $repository = [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\')
 $envPath = Join-Path $platform 'config\runtime.env'
 $logs = Join-Path $platform 'logs'
 $runtime = Join-Path $platform 'runtime'
-$pgData = Join-Path $platform 'data\postgresql16'
+$pgData = Resolve-StockPlatformDataDirectory -PlatformRoot $platform -RuntimeEnv $envPath
 $pgBin = Join-Path $runtime 'postgresql-16.15\bin'
 $config = Read-EnvFile $envPath
 $tunnelTarget = Resolve-OwnerTunnelSshTarget -RuntimeEnv $envPath -FallbackAlias $SshHost
@@ -149,7 +155,7 @@ if (-not $postgresReady) {
         }
     } elseif ($startupAction -eq 'start_stopped_server') {
     $pgStart = Invoke-ConsoleFreeCommand -FilePath $pgCtl -Arguments @('start','-D',$pgData,'-l',(Join-Path $logs 'postgresql-startup.log'),'-w') -TimeoutSeconds 75
-    if ($pgStart.ExitCode -ne 0) { throw 'PostgreSQL failed to start from the G: data directory' }
+    if ($pgStart.ExitCode -ne 0) { throw "PostgreSQL failed to start from the configured data directory $pgData" }
         if (-not (Test-PostgresReady -Attempts 10 -DelayMilliseconds 500)) {
             throw 'PostgreSQL was started but did not pass readiness checks'
         }

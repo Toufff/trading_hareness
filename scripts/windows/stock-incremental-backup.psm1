@@ -326,6 +326,19 @@ function Import-StockIncrementalChunks {
     param([Parameter(Mandatory)][hashtable]$Connection, [Parameter(Mandatory)]$Spec,
           [Parameter(Mandatory)][string]$BackupRoot)
     $directory = Join-Path (Join-Path $BackupRoot 'incremental') $Spec.Table
+    # A table can be excluded from the dump without ever having had a chunk
+    # chain of its own -- the cold twins are the standing example: their rows
+    # were exported while they were still in the hot table, so the twin's data
+    # is excluded but `backups\incremental\<twin>` never exists. Throwing here
+    # made every such dump unrestorable, and only after CREATE DATABASE and
+    # pg_restore had already run. Report the gap and let the restore finish.
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        return [pscustomobject]@{
+            table = $Spec.Table; chunks = 0; rows_applied = [int64]0
+            foreign_keys_to_revalidate = ''
+            status = 'no_chunk_chain'
+        }
+    }
     $manifests = @(Get-ChildItem -LiteralPath $directory -Filter '*.json' -File |
         Where-Object Name -ne 'state.json' | Sort-Object Name |
         ForEach-Object { Read-StockJsonFile -Path $_.FullName })
@@ -387,6 +400,7 @@ function Import-StockIncrementalChunks {
     return [pscustomobject]@{
         table = $Spec.Table; chunks = $manifests.Count; rows_applied = $loaded
         foreign_keys_to_revalidate = $foreignKeys
+        status = 'restored'
     }
 }
 

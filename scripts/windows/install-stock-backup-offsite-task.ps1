@@ -4,12 +4,13 @@ param(
     [string]$RepositoryRoot = '',
     [string]$PlatformRoot = 'G:\StockPlatform',
     [string]$RuntimeEnv = '',
-    # The nightly DB backup runs at 20:30; its dump normally takes a couple of
-    # minutes, but the 2026-09-16 incident showed it can run for ~an hour when
-    # the disk is busy. The off-site run is idempotent, so starting late (or
-    # being started again after a failure) is harmless: it uploads whatever
-    # backup files are not yet accounted for in the cloud catalog.
-    [string]$StartTime = '21:30',
+    # The nightly DB backup now runs at 04:10 inside the maintenance window;
+    # its dump normally takes a couple of minutes, but the 2026-09-16 incident
+    # showed it can run for ~an hour when the disk is busy. The off-site run is
+    # idempotent, so starting late (or being started again after a failure) is
+    # harmless: it uploads whatever backup files are not yet accounted for in
+    # the cloud catalog. 05:10 keeps the same one-hour gap after the dump.
+    [string]$StartTime = '05:10',
     # Empty means "pick by elevation", the way publish-stock-release.ps1 does:
     # S4U needs the account to hold "Log on as a batch job" and is refused
     # outright when the register call is not elevated, while Interactive needs

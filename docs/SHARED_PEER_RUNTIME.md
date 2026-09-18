@@ -73,13 +73,24 @@ The database is a portable PostgreSQL 16.15 under the platform root — not a
 system install, not a Windows service, not in `PATH`:
 
 ```text
-G:\StockPlatform\runtime\postgresql-16.15\bin\postgres.exe -D G:\StockPlatform\data\postgresql16
-G:\StockPlatform\data\postgresql16     3.8 GB   (pg_wal 1.7 GB, same spindle, no separate tablespace)
-G:\StockPlatform\config\postgresql-stock-platform.conf
+G:\StockPlatform\runtime\postgresql-16.15\bin\postgres.exe -D F:\StockPlatformDB\postgresql16
+F:\StockPlatformDB\postgresql16        hot tier (NVMe): tables, indexes, pg_wal, temp; 500 GB budget
+G:\StockPlatform\data\pg-cold          cold tier: tablespace stock_cold (quant.*_cold twins)
+G:\StockPlatform\config\postgresql-stock-platform.conf   generated, never hand-edited
 ```
 
+The data directory is **not** a fixed path: it is `PGDATA_DIR` in
+`G:\StockPlatform\config\runtime.env`, and every script resolves it from there
+(older deployments that never set it still default to
+`G:\StockPlatform\data\postgresql16`). As of 2026-09-19 the cluster was migrated
+off the HDD onto the NVMe volume; `G:` keeps the platform root, the cold
+tablespace and every backup. The full layout, the space policy and the
+migration/rollback runbook are in
+[`OWNER_DATABASE_STORAGE.md`](OWNER_DATABASE_STORAGE.md).
+
 `G:` is the workstation's only mechanical disk (HGST `HUH721212ALE601`, 10.9 TB,
-`MediaType = HDD`); the machine's other four volumes are SSD. Nothing starts the
+`MediaType = HDD`); the machine's other four volumes are SSD, which is why the
+hot tier now lives on one of them. Nothing starts the
 server at boot: `start-stock-dashboard.ps1` probes it with `pg_isready` and, if
 needed, runs `pg_ctl start`, and that script is driven by the 30-second watchdog
 loop. **The watchdog is the service manager for this deployment** — see
@@ -115,7 +126,7 @@ Five hops, end to end:
         v  reverse tunnel, dialled outbound by the owner
 4. owner workstation       127.0.0.1:55432
         v
-5. postgres.exe -D G:\StockPlatform\data\postgresql16
+5. postgres.exe -D F:\StockPlatformDB\postgresql16      (PGDATA_DIR; hot tier)
 ```
 
 From the server's point of view every peer session is a local connection from
@@ -176,9 +187,22 @@ PostgreSQL, not anything local to lightServer.
 
 ## Ownership and writer policy
 
-- `G:\StockPlatform\data\postgresql16` is the only authoritative quant store.
+- The cluster at `PGDATA_DIR` (production `F:\StockPlatformDB\postgresql16`,
+  hot tier) plus its `stock_cold` tablespace on `G:\StockPlatform\data\pg-cold`
+  is the only authoritative quant store. There is still exactly one database;
+  the two paths are two tiers of it.
 - The owner's local collector is the only scheduled market-data writer by
   default. `PEER_BACKGROUND_TASKS_ENABLED=false` prevents duplicate scans.
+- `stock_peer` carries `statement_timeout = 15min` and
+  `idle_in_transaction_session_timeout = 5min` (applied cluster-wide by
+  `database-storage-tiers.py install`). A forgotten `psql` session can no longer
+  hold a lock across the 04:00-08:00 maintenance window; a genuinely long query
+  must raise the limit explicitly with `SET LOCAL`.
+- Rows older than 365 days in the five tiered evidence tables live in
+  `quant.<table>_cold`. They are still online and still queryable, through
+  `quant.<table>_all`, but they sit on the mechanical disk — do not scan them
+  during the exchange session. See
+  [`OWNER_DATABASE_STORAGE.md`](OWNER_DATABASE_STORAGE.md).
 - **The peer is a full read/write principal on `quant`. This is a deliberate
   owner decision, not an oversight.** An earlier revision of this document
   claimed the opposite in bold — that `stock_peer` had been revoked from

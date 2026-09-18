@@ -56,6 +56,167 @@ function Select-StockBackupRetentionRemovals {
     return @($names | Where-Object { -not $keep.Contains($_) })
 }
 
+function Get-StockBackupExcludedTableData {
+    # Pure decision function.  Parses STOCK_BACKUP_EXCLUDE_TABLE_DATA, a
+    # semicolon separated list of "schema.table" whose *data* the nightly dump
+    # leaves out (the schema is still dumped, so a restore recreates the empty
+    # table).  This is the OPERATOR OVERRIDE only: the cold-tier twins are
+    # computed at dump time by Resolve-StockBackupExcludedTableData, which is
+    # what decides whether an exclusion is safe.  Production seeds no value.
+    # Identifiers must be lower-case schema.table -- a typo must fail the run
+    # rather than silently widen what the backup omits.  Repeats are collapsed
+    # (listing a table twice is harmless, unlike an unparseable name).
+    [CmdletBinding()]
+    param([string]$Value)
+    $text = if ($null -eq $Value) { '' } else { $Value.Trim() }
+    if (-not $text) { return @() }
+    $pattern = '^[a-z_][a-z0-9_]*$'
+    $tables = [Collections.Generic.List[string]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($entry in $text.Split(';')) {
+        $item = $entry.Trim()
+        if (-not $item) { continue }
+        $parts = $item.Split('.')
+        if ($parts.Count -ne 2 -or @($parts | Where-Object { $_ -cnotmatch $pattern }).Count -gt 0) {
+            throw "Invalid excluded table '$item': expected lower-case schema.table"
+        }
+        if ($seen.Add($item)) { $tables.Add($item) }
+    }
+    return $tables.ToArray()
+}
+
+function Get-StockIncrementalChainWatermark {
+    # The one filesystem read behind the twin-exclusion rule, split out so the
+    # decision itself (Resolve-StockBackupExcludedTableData) stays pure and
+    # unit-testable.  Returns the chunk chain's watermark for one hot table --
+    # the timestamp up to which its rows have actually been exported -- or
+    # $null when there is no chain, no state file, or nothing readable in it.
+    # $null always means "assume the chain carries nothing", never "assume it is
+    # fine": every caller below treats it as a refusal.
+    [CmdletBinding()]
+    param([string]$BackupRoot, [Parameter(Mandatory)][string]$Table)
+    if (-not $BackupRoot) { return $null }
+    $statePath = Join-Path (Join-Path (Join-Path $BackupRoot 'incremental') $Table) 'state.json'
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { return $null }
+    try {
+        $state = [IO.File]::ReadAllText($statePath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        if (-not $state -or -not $state.watermark) { return $null }
+        return [DateTimeOffset]::Parse([string]$state.watermark, [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AssumeUniversal)
+    } catch {
+        return $null
+    }
+}
+
+function Resolve-StockBackupExcludedTableData {
+    # Pure decision function: which tables' data this run's dump may leave out.
+    #
+    # A cold-tier twin (quant.<table>_cold) holds rows that were moved out of
+    # quant.<table>.  Leaving the twin's data out of the nightly dump is only
+    # safe when those rows are carried by something else, and the only
+    # something else is the hot table's incremental chunk chain: the rows were
+    # exported by window while they were still hot, and chunks are never
+    # pruned.  Excluding a twin whose hot table has no chain deletes the table
+    # from the backup chain entirely -- roughly two months later (14 daily plus
+    # 8 weekly dumps) its only copy is the live cold tablespace on the G: HDD.
+    #
+    # EXISTENCE OF A CHAIN IS NOT ENOUGH.  The tier job moves a row out of the
+    # hot table once it is older than the hot window; the chunk chain captured
+    # it only if the chain had already reached that row's timestamp.  So a chain
+    # whose watermark has stopped advancing -- a nightly incremental export that
+    # has been failing since March, a full backup disk, a row-count mismatch it
+    # re-hits every night -- stops carrying the rows the tier job keeps moving,
+    # while the dump keeps leaving the twin out.  The rule therefore refuses the
+    # twin unless the chain's watermark is NEWER than the tier cutoff
+    # (now - hot window): at that point every row the tier job is allowed to
+    # move is a row the chain has already exported.
+    #
+    # So the exclusion is COMPUTED here, at dump time, rather than seeded as a
+    # static list by the installer:
+    #   * every incremental table's own data (it is in the chain by definition,
+    #     and only when this run's export succeeded -- a failed export degrades
+    #     to a full dump instead of a hole);
+    #   * the twin of every incremental table whose chain watermark is fresh;
+    #   * anything else the operator listed in STOCK_BACKUP_EXCLUDE_TABLE_DATA,
+    #     which stays an override -- except a twin whose hot table has no chain
+    #     or a stale one, which is refused and reported rather than honoured.
+    #
+    # $ChainWatermarks maps a hot table to its chunk-chain watermark (see
+    # Get-StockIncrementalChainWatermark); a table that is absent from it, or
+    # mapped to $null, has no usable chain.  The default of an empty map is
+    # deliberately the safe direction: no watermark known, nothing excluded,
+    # the dump gets bigger rather than incomplete.
+    [CmdletBinding()]
+    param(
+        [string[]]$IncrementalTables = @(),
+        [bool]$IncrementalSucceeded = $true,
+        [string[]]$ConfiguredExclusions = @(),
+        [hashtable]$ChainWatermarks = @{},
+        [DateTimeOffset]$Now = [DateTimeOffset]::Now,
+        [int]$HotDays = 365
+    )
+    if ($HotDays -lt 1) { throw "Invalid hot window: $HotDays day(s)" }
+    $cutoff = $Now.AddDays(-[double]$HotDays)
+    $chain = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($table in @($IncrementalTables)) { [void]$chain.Add($table) }
+    $excluded = [Collections.Generic.List[string]]::new()
+    $refused = [Collections.Generic.List[string]]::new()
+    $refusals = [Collections.Generic.List[object]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+
+    function Test-ChainFreshness([string]$HotTable) {
+        # Returns $null when the twin may be excluded, or the reason it may not.
+        if (-not $chain.Contains($HotTable)) {
+            return "its hot table $HotTable has no incremental chunk chain, so nothing else carries the rows"
+        }
+        $watermark = $null
+        if ($null -ne $ChainWatermarks -and $ChainWatermarks.ContainsKey($HotTable)) { $watermark = $ChainWatermarks[$HotTable] }
+        if ($null -eq $watermark) {
+            return "the incremental chain state for $HotTable is missing or unreadable, so its watermark cannot be trusted"
+        }
+        $mark = [DateTimeOffset]$watermark
+        if ($mark -lt $cutoff) {
+            return ("the incremental chain for $HotTable has not advanced since {0:yyyy-MM-dd} -- older than the {1}-day tier hot window, so rows the tier job moved were never exported" -f `
+                $mark.UtcDateTime, $HotDays)
+        }
+        return $null
+    }
+
+    if ($IncrementalSucceeded) {
+        foreach ($table in @($IncrementalTables)) { if ($seen.Add($table)) { $excluded.Add($table) } }
+    }
+    # A twin is excluded whether or not THIS run's export succeeded -- its rows
+    # were captured by earlier runs of the chain, not by tonight's -- but only
+    # while that chain is still keeping up with the tier cutoff.
+    foreach ($table in @($IncrementalTables)) {
+        $twin = "${table}_cold"
+        $reason = Test-ChainFreshness $table
+        if ($reason) {
+            if (-not $refused.Contains($twin)) {
+                $refused.Add($twin)
+                $refusals.Add([pscustomobject]@{ Table = $twin; HotTable = $table; Source = 'tier_policy'; Reason = $reason })
+            }
+            continue
+        }
+        if ($seen.Add($twin)) { $excluded.Add($twin) }
+    }
+    foreach ($entry in @($ConfiguredExclusions)) {
+        if ($entry.EndsWith('_cold')) {
+            $hot = $entry.Substring(0, $entry.Length - 5)
+            $reason = Test-ChainFreshness $hot
+            if ($reason) {
+                if (-not $refused.Contains($entry)) {
+                    $refused.Add($entry)
+                    $refusals.Add([pscustomobject]@{ Table = $entry; HotTable = $hot; Source = 'operator_override'; Reason = $reason })
+                }
+                continue
+            }
+        }
+        if ($seen.Add($entry)) { $excluded.Add($entry) }
+    }
+    return [pscustomobject]@{ Excluded = $excluded.ToArray(); Refused = $refused.ToArray(); Refusals = $refusals.ToArray() }
+}
+
 function ConvertTo-Bytes {
     # Accepts either a plain byte count or a "<number><unit>" string
     # (KB/MB/GB, binary units) so runtime.env can express sizes readably.
@@ -168,7 +329,32 @@ if ($incrementalSpecs.Count -gt 0) {
         $incrementalError = $_.Exception.Message
     }
 }
-$excludedTableData = if ($null -eq $incrementalError) { @($incrementalSpecs | ForEach-Object Table) } else { @() }
+# The tier hot window, as the tier job uses it: a row older than this may be
+# moved into the cold twin tonight. The dump may only leave a twin out while the
+# hot table's chunk chain has already exported past that cutoff, so the two
+# numbers have to be the same one. STORAGE_TIER_HOT_DAYS is what the operator
+# sets when the tier job's window is narrowed (database-storage-tiers.py
+# --hot-days); left unset both sides use 365.
+$tierHotDays = if ($config['STORAGE_TIER_HOT_DAYS']) { [int]$config['STORAGE_TIER_HOT_DAYS'] } else { 365 }
+if ($tierHotDays -lt 1) { throw "Invalid STORAGE_TIER_HOT_DAYS in ${RuntimeEnv}: $($config['STORAGE_TIER_HOT_DAYS'])" }
+# Read AFTER the export above, so a chain that advanced tonight counts as fresh
+# and one that has been stuck since March reads as stuck.
+$chainWatermarks = @{}
+foreach ($spec in $incrementalSpecs) {
+    $chainWatermarks[$spec.Table] = Get-StockIncrementalChainWatermark -BackupRoot $backupRoot -Table $spec.Table
+}
+$exclusionDecision = Resolve-StockBackupExcludedTableData `
+    -IncrementalTables @($incrementalSpecs | ForEach-Object Table) `
+    -IncrementalSucceeded ($null -eq $incrementalError) `
+    -ConfiguredExclusions @(Get-StockBackupExcludedTableData -Value $config['STOCK_BACKUP_EXCLUDE_TABLE_DATA']) `
+    -ChainWatermarks $chainWatermarks -Now ([DateTimeOffset]::Now) -HotDays $tierHotDays
+$excludedTableData = @($exclusionDecision.Excluded)
+$refusedExclusions = @($exclusionDecision.Refused)
+foreach ($refusal in @($exclusionDecision.Refusals)) {
+    # Loud, and in the run record: honouring this would take the table out of
+    # every future dump while nothing else carries its rows.
+    Write-Warning "Keeping $($refusal.Table) in the nightly dump: $($refusal.Reason)."
+}
 
 $dumpFile = Join-Path $dayDir "$($config['PGDATABASE'])-$today.dump"
 if (Test-Path -LiteralPath $dumpFile) {
@@ -179,6 +365,8 @@ if (Test-Path -LiteralPath $dumpFile) {
         status = if ($incrementalError) { 'failed' } else { 'skipped' }
         reason = 'backup already exists for today'; dump_file = $dumpFile
         incremental = $incrementalResults.ToArray(); incremental_error = $incrementalError
+        refused_table_data_exclusions = $refusedExclusions
+        refused_table_data_exclusion_reasons = @($exclusionDecision.Refusals)
     }
     Write-BackupRecord -Record $record
     [pscustomobject]$record
@@ -229,6 +417,9 @@ $summary = @{
     free_bytes_after = $freeBytes - $sizeBytes
     pruned_days = $removed
     excluded_table_data = $excludedTableData
+    refused_table_data_exclusions = $refusedExclusions
+    refused_table_data_exclusion_reasons = @($exclusionDecision.Refusals)
+    tier_hot_days = $tierHotDays
     incremental = $incrementalResults.ToArray()
     incremental_error = $incrementalError
 }

@@ -12,9 +12,42 @@ sys.path.insert(0,str(ROOT/'quant-service'))
 from app.db_dsn import connection_params
 
 
+DEFAULT_HOT_DATA_DIR='G:/StockPlatform/data/postgresql16'
+DEFAULT_COLD_TABLESPACE_DIR='G:/StockPlatform/data/pg-cold'
+
+
 def read(base,path):
     with build_opener(ProxyHandler({})).open(base+path,timeout=30) as r:
         return json.load(r)
+
+
+def read_env_file(path):
+    file=Path(path)
+    if not file.is_file():
+        return {}
+    return dict(l.split('=',1) for l in file.read_text(encoding='utf-8-sig').splitlines()
+                if '=' in l and not l.startswith('#'))
+
+
+def storage_layout(config):
+    """Where the owner database actually is, per docs/OWNER_DATABASE_STORAGE.md.
+
+    The hot cluster (tables, indexes, WAL, temp) moved off the G: HDD onto the
+    NVMe tier; rows older than the hot window live in the `stock_cold`
+    tablespace on G:, and the backup chain stays on G: plus off-site. Reporting
+    only the old G: path here would send an agent to the wrong directory.
+    """
+    hot=(config.get('PGDATA_DIR') or DEFAULT_HOT_DATA_DIR).strip().replace('\\','/')
+    cold=(config.get('PGDATA_COLD_TABLESPACE_DIR') or DEFAULT_COLD_TABLESPACE_DIR).strip().replace('\\','/')
+    budget=(config.get('PGDATA_BUDGET_BYTES') or str(500*1024**3)).strip()
+    try:
+        budget_bytes=int(budget)
+    except ValueError:
+        budget_bytes=None
+    return {'hot_data_directory':hot,'hot_budget_bytes':budget_bytes,
+            'cold_tablespace':'stock_cold','cold_tablespace_directory':cold,
+            'backup_root':'G:/StockPlatform/backups',
+            'notice':'冷层 quant.*_cold 与 quant.*_all 视图只供运维查询，应用代码不得引用。'}
 
 
 def main():
@@ -40,7 +73,10 @@ def main():
     # exactly what this block exists to prevent.
     drift={k:readiness.get(k) for k in ('by_exchange','gating_exchanges','ungated_exchanges','all_a',
         'expected_previous_trading_day','expected_previous_daily_rows','expected_delta','expected_sources')}
-    output={'system':'trading_hareness','authoritative_database':'G:/StockPlatform/data/postgresql16',
+    config=read_env_file(a.env_file)
+    layout=storage_layout(config)
+    output={'system':'trading_hareness','authoritative_database':layout['hot_data_directory'],
+            'database_storage':layout,
             'run_id':run.get('run_id'),'as_of_date':run.get('as_of_date'),
             'requested_date':a.date,'date_matches':not a.date or a.date==str(run.get('as_of_date')),
             'source_sha256':report.get('source_sha256'),
@@ -54,7 +90,8 @@ def main():
         code=a.symbol.split('.')[0].removeprefix('sh').removeprefix('sz')
         if len(code)!=6 or not code.isdigit():
             p.error('symbol must be a six-digit stock code or canonical code')
-        config=dict(l.split('=',1) for l in Path(a.env_file).read_text(encoding='utf-8-sig').splitlines() if '=' in l and not l.startswith('#'))
+        if not config:
+            p.error('missing or empty runtime environment file: '+str(a.env_file))
         with psycopg.connect(**connection_params(config),row_factory=dict_row,
                             options='-c default_transaction_read_only=on -c statement_timeout=15000') as db:
             history=db.execute('''SELECT source_table,source_row_key,effective_at,available_at,payload_sha256,payload
