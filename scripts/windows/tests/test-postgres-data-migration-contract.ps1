@@ -24,7 +24,7 @@ $source = [IO.File]::ReadAllText($scriptPath, [Text.Encoding]::UTF8)
 
 # --- the declared switches --------------------------------------------------
 $parameters = $ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
-foreach ($name in 'WhatIf', 'Rollback', 'Force', 'TargetDataDir', 'KeepOldName') {
+foreach ($name in 'WhatIf', 'Rollback', 'Force', 'TargetDataDir', 'KeepOldName', 'AcceptDataLoss') {
     Assert-True ($parameters -contains $name) "-$name must be a declared parameter"
 }
 
@@ -81,6 +81,30 @@ Assert-True ($startPostgres -lt $rename) 'the old directory is only renamed once
 Assert-True ($source -match 'trading-hareness-dashboard-runtime') 'the dashboard watcher task must be handled by name'
 Assert-True ($source -match 'Stop-ScheduledTask -TaskName \$task') 'the watcher tasks must actually be stopped, not only disabled'
 
+# --- the platform shutdown order --------------------------------------------
+# Stop-ScheduledTask kills the task's whole job object at once, so running it
+# before the graceful stop script means Request-RuntimeStop never writes its
+# stop marker and the runtime-state file keeps claiming 'healthy' for a dead
+# PID. publish-stock-release.ps1's Stop-ProductionRuntime documents the rule;
+# the order here must be Disable -> graceful stop -> Stop (backstop).
+$stopFunction = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Stop-PlatformRuntimes' }, $true)
+Assert-True ($null -ne $stopFunction) 'Stop-PlatformRuntimes must exist'
+$stopBody = $stopFunction.Extent.Text
+function Get-StopPosition([string]$Pattern, [string]$What) {
+    $match = [regex]::Match($stopBody, $Pattern)
+    Assert-True ($match.Success) "expected to find $What in Stop-PlatformRuntimes"
+    return $match.Index
+}
+$disableCall = Get-StopPosition 'Disable-ScheduledTask -TaskName \$task' 'the Disable-ScheduledTask call'
+$gracefulCall = Get-StopPosition '& \$stop -PlatformRoot \$platform' 'the graceful stop-stock-dashboard.ps1 call'
+$stopTaskCall = Get-StopPosition 'Stop-ScheduledTask -TaskName \$task' 'the Stop-ScheduledTask backstop'
+Assert-True ($disableCall -lt $gracefulCall) 'the tasks must be disabled before the graceful stop, so nothing restarts behind it'
+Assert-True ($gracefulCall -lt $stopTaskCall) 'the graceful stop must run before Stop-ScheduledTask, or the runtime state is left claiming healthy for a dead PID'
+# The shared-peer tunnels are deliberately left alone: stopping PostgreSQL
+# already severs every peer session and the tunnels reconnect by themselves.
+Assert-True ($source -match 'trading-hareness-shared-peer-tunnels[^\r\n]*\r?\n') 'the decision to leave the shared-peer tunnels running must be written down'
+Assert-True ($source -notmatch "'trading-hareness-shared-peer-tunnels',") 'the shared-peer tunnels must not be in the disabled-task list'
+
 # The migration may only run outside the exchange session, which is the same
 # 04:00-08:00 maintenance window the nightly database jobs were moved into.
 # Each of them would run against a stopped or half-copied cluster.
@@ -99,6 +123,11 @@ Assert-True ($source -match 'kept for rollback') 'the rename must say why the ol
 
 # --- the copy is verified on three independent signals ----------------------
 Assert-True ($source -match '/COPY:DAT') 'robocopy must preserve data, attributes and timestamps'
+# Without /XJ robocopy follows <PGDATA>\pg_tblspc\<oid> and copies the whole
+# cold tier from the G: HDD onto the 500 GB hot volume.
+Assert-True ($source -match '/E /XJ /COPY:DAT') 'robocopy must exclude junctions with /XJ, or a second migration copies the cold tier onto the hot volume'
+Assert-True ($source -match 'New-Item -ItemType Junction') 'the tablespace junctions skipped by /XJ must be recreated at the target'
+Assert-True ($source -match 'Failed to recreate the tablespace junction') 'a junction that could not be recreated must fail the migration, not the cluster start'
 Assert-True ($source -match '\$robocopyExit -ge 8') 'robocopy exit codes 8 and above are failures'
 Assert-True ($source -match 'pg_control') 'the copy must be checked against the cluster control file checksum'
 Assert-True ($source -match "Refusing to switch PGDATA_DIR before the copy is verified") 'the switch must fail closed when verification did not run'
@@ -114,7 +143,7 @@ Assert-True ($source -match 'Row count for \$table changed across the migration'
 
 # --- -WhatIf must not write anything ----------------------------------------
 foreach ($guarded in @(
-    'if \(-not \$WhatIf\) \{ Set-StockPlatformEnvValue -Path \$RuntimeEnv',
+    'if \(-not \$WhatIf\) \{\s*\r?\n?\s*Set-StockPlatformEnvValue -Path \$RuntimeEnv',
     'if \(-not \$WhatIf\) \{\s*\r?\n?\s*Rename-Item',
     'if \(-not \$WhatIf\) \{\s*\r?\n?\s*New-Item -ItemType Directory -Force -Path \$logs'
 )) {
@@ -133,13 +162,141 @@ Assert-True ($source -match '\$env:PGOPTIONS = "-c statement_timeout=') 'the sta
 Assert-True ($source -notmatch '-c "SET statement_timeout') 'the statement timeout must not be a second -c command'
 Assert-True ($source -match 'Remove-Item Env:PGOPTIONS') 'PGOPTIONS must be cleared after use'
 
+# --- the source directory must be copyable faithfully -----------------------
+# Get-DirectoryFootprint and Assert-CopyableSource are pure; exercise them
+# against a real junction instead of trusting the enumeration's default.
+$footprintAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-DirectoryFootprint' }, $true)
+$copyableAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-CopyableSource' }, $true)
+Assert-True ($null -ne $footprintAst -and $null -ne $copyableAst) 'Get-DirectoryFootprint and Assert-CopyableSource must exist'
+. ([scriptblock]::Create($footprintAst.Extent.Text))
+. ([scriptblock]::Create($copyableAst.Extent.Text))
+
+$sandbox = Join-Path ([IO.Path]::GetTempPath()) ('pgdata-footprint-' + [guid]::NewGuid().ToString('N'))
+try {
+    $fakeData = Join-Path $sandbox 'pgdata'
+    $cold = Join-Path $sandbox 'cold'
+    New-Item -ItemType Directory -Force -Path (Join-Path $fakeData 'base\1'), (Join-Path $fakeData 'pg_tblspc'), (Join-Path $cold 'PG_16_202209061') | Out-Null
+    [IO.File]::WriteAllBytes((Join-Path $fakeData 'base\1\16384'), (New-Object byte[] 100))
+    [IO.File]::WriteAllBytes((Join-Path $cold 'PG_16_202209061\99999'), (New-Object byte[] 40960))
+    New-Item -ItemType Junction -Path (Join-Path $fakeData 'pg_tblspc\16400') -Target $cold | Out-Null
+
+    $footprint = Get-DirectoryFootprint -Path $fakeData
+    Assert-True ($footprint.Files -eq 1 -and $footprint.Bytes -eq 100) `
+        "the footprint must not follow the tablespace junction (got $($footprint.Files) files / $($footprint.Bytes) bytes)"
+    Assert-True (@($footprint.ReparsePoints).Count -eq 1) 'the tablespace junction must be reported'
+    Assert-True (@($footprint.ReparsePoints)[0].Relative -eq 'pg_tblspc\16400') 'the reparse point must be reported by its relative path'
+    Assert-True (@($footprint.ReparsePoints)[0].Target -eq $cold) 'the junction target must be reported so it can be recreated'
+    Assert-True (@(Assert-CopyableSource -Footprint $footprint).Count -eq 1) 'a pg_tblspc junction is copyable: the script recreates it'
+
+    # Anything else would be silently dropped by /XJ.
+    New-Item -ItemType Junction -Path (Join-Path $fakeData 'rogue') -Target $cold | Out-Null
+    $refused = $false
+    try { [void](Assert-CopyableSource -Footprint (Get-DirectoryFootprint -Path $fakeData)) } catch { $refused = $_.Exception.Message -match 'reparse points outside pg_tblspc' }
+    Assert-True $refused 'a reparse point outside pg_tblspc must make the migration refuse the source'
+} finally {
+    foreach ($link in 'pgdata\pg_tblspc\16400', 'pgdata\rogue') {
+        $path = Join-Path $sandbox $link
+        if (Test-Path -LiteralPath $path) { [IO.Directory]::Delete($path) }
+    }
+    Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# --- dating a cluster image (exercised read-only against the live cluster) ---
+$checkpointAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-ClusterCheckpointTime' }, $true)
+Assert-True ($null -ne $checkpointAst) 'Get-ClusterCheckpointTime must exist'
+. ([scriptblock]::Create($checkpointAst.Extent.Text))
+$livePlatform = 'G:\StockPlatform'
+$pgControlData = Join-Path $livePlatform 'runtime\postgresql-16.15\bin\pg_controldata.exe'
+$liveData = ''
+if (Test-Path -LiteralPath (Join-Path $livePlatform 'config\runtime.env') -PathType Leaf) {
+    Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'postgres-managed-config.psm1') -Force
+    $liveData = Resolve-StockPlatformDataDirectory -PlatformRoot $livePlatform
+}
+$checkpointExercised = $false
+if ($liveData -and (Test-Path -LiteralPath (Join-Path $liveData 'global\pg_control') -PathType Leaf)) {
+    $age = Get-ClusterCheckpointTime -DataDirectory $liveData
+    Assert-True ($null -ne $age.CheckpointTime) 'the checkpoint time of a real cluster must be readable'
+    Assert-True ($age.Source -in @('pg_controldata', 'pg_control_mtime')) "the checkpoint source must be named (got $($age.Source))"
+    Assert-True ($age.CheckpointTime -gt [DateTime]::new(2020, 1, 1) -and $age.CheckpointTime -lt [DateTime]::Now.AddDays(1)) `
+        "the checkpoint time must be plausible (got $($age.CheckpointTime))"
+    $checkpointExercised = $true
+}
+# A directory that is not a cluster has no checkpoint at all: the rollback gate
+# must see 'unavailable', never a silently wrong recent date.
+$noCluster = Get-ClusterCheckpointTime -DataDirectory (Join-Path ([IO.Path]::GetTempPath()) ('absent-' + [guid]::NewGuid().ToString('N')))
+Assert-True ($noCluster.Source -eq 'unavailable' -and $null -eq $noCluster.CheckpointTime) 'a missing cluster must report an unavailable checkpoint time'
+
 # --- rollback ---------------------------------------------------------------
 Assert-True ($source -match '(?s)if \(\$Rollback\)') 'the -Rollback switch must have its own flow'
 Assert-True ($source -match 'Rollback target is not a PostgreSQL data directory') 'rollback must refuse a target that is not a cluster'
 Assert-True ($source -match 'rollback_command') 'the receipt must state how to roll the migration back'
 
+$rollbackStart = Get-Position '(?s)if \(\$Rollback\) \{' 'the rollback flow'
+$rollbackBody = $source.Substring($rollbackStart, (Get-Position 'step 1/8 preflight' 'the preflight step marker') - $rollbackStart)
+function Get-RollbackPosition([string]$Pattern, [string]$What) {
+    $match = [regex]::Match($rollbackBody, $Pattern)
+    Assert-True ($match.Success) "expected to find $What in the rollback flow"
+    return $match.Index
+}
+# Rollback starts an image frozen at the cutover. It must say how much it
+# discards, refuse without an explicit acknowledgement, and never touch
+# anything before both of those happened.
+$gapPrinted = Get-RollbackPosition 'would discard about' 'the age gap the rollback would discard'
+$acceptGate = Get-RollbackPosition '-not \$AcceptDataLoss' 'the -AcceptDataLoss gate'
+$tablespaceGate = Get-RollbackPosition 'Get-TablespaceLinkCount -DataDirectory \$currentDataDir' 'the cold-tablespace check'
+$rollbackStop = Get-RollbackPosition 'Stop-PostgresCluster -DataDirectory \$currentDataDir' 'the rollback stop of the live cluster'
+Assert-True ($gapPrinted -lt $acceptGate) 'the age gap must be printed before the refusal, so the operator sees the number'
+Assert-True ($tablespaceGate -lt $acceptGate) 'the cold-tablespace check must run before the -AcceptDataLoss gate'
+Assert-True ($acceptGate -lt $rollbackStop) 'nothing may be stopped before -AcceptDataLoss has been accepted'
+Assert-True ($rollbackBody -match 'Refusing to roll back to \$restoreTarget without -AcceptDataLoss') 'rollback must refuse by name without -AcceptDataLoss'
+Assert-True ($rollbackBody -match 'predates their creation') 'rollback must refuse outright when the image predates the stock_cold tablespace'
+Assert-True ($rollbackBody -match 'Get-ClusterCheckpointTime -DataDirectory \$restoreTarget') "the rollback target's age must come from its own control file"
+Assert-True ($rollbackBody -match 'postgres-data-rollback-') 'a rollback must leave a receipt of its own'
+# The receipt must not hand the operator a pre-armed data-loss command.
+Assert-True ($source -notmatch 'rollback_command[^\r\n]*-AcceptDataLoss') 'the printed rollback command must not pre-arm -AcceptDataLoss'
+Assert-True ($source -match 'rollback_note') 'the receipt must say what a rollback costs'
+
+# --- failure recovery -------------------------------------------------------
+# Steps 2-8 leave PostgreSQL stopped and five scheduled tasks disabled. A
+# failure anywhere in there must put the platform back before it rethrows.
+$recoveryAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-FailureRecovery' }, $true)
+Assert-True ($null -ne $recoveryAst) 'Invoke-FailureRecovery must exist'
+$recoveryBody = $recoveryAst.Extent.Text
+function Get-RecoveryPosition([string]$Pattern, [string]$What) {
+    $match = [regex]::Match($recoveryBody, $Pattern)
+    Assert-True ($match.Success) "expected to find $What in Invoke-FailureRecovery"
+    return $match.Index
+}
+$stopTargetStep = Get-RecoveryPosition 'Stop-PostgresClusterIfRunning -DataDirectory \$TargetDataDirectory' 'stopping whatever runs from the target'
+$envRestoreStep = Get-RecoveryPosition "Set-StockPlatformEnvValue -Path \`$RuntimeEnv -Name 'PGDATA_DIR' -Value \`$authoritative" 'restoring PGDATA_DIR'
+$configStep = Get-RecoveryPosition 'Write-StockPlatformManagedConfig -DataDirectory \$authoritative' 'regenerating the managed configuration'
+$startStep = Get-RecoveryPosition 'Start-PostgresCluster -DataDirectory \$authoritative' 'restarting the original cluster'
+$platformStep = Get-RecoveryPosition 'Start-PlatformRuntimes' 're-enabling the platform'
+Assert-True ($stopTargetStep -lt $envRestoreStep) 'the half-migrated target must be stopped before PGDATA_DIR is put back'
+Assert-True ($envRestoreStep -lt $configStep) 'PGDATA_DIR must be restored before the managed configuration is regenerated for it'
+Assert-True ($configStep -lt $startStep) 'the configuration must point at the original directory before it is started'
+Assert-True ($startStep -lt $platformStep) 'the database must be back before the platform tasks are re-enabled'
+Assert-True ($recoveryBody -match '\$script:OldDirectoryRenamed') 'recovery must not abandon a target that already became authoritative'
+
+# The main flow must use it, and rethrow afterwards.
+$catchStart = Get-BodyPosition '\} catch \{' 'the recovery catch block'
+$finallyStart = Get-BodyPosition '\} finally \{' 'the transcript finally block'
+Assert-True ($catchStart -lt $finallyStart) 'the catch must come before the finally'
+$catchBody = $body.Substring($catchStart, $finallyStart - $catchStart)
+Assert-True ($catchBody -match 'Invoke-FailureRecovery -SourceDataDirectory \$currentDataDir -TargetDataDirectory \$target') 'the catch must run the recovery'
+Assert-True ($catchBody -match '\.failure\.json') 'a failed migration must leave a failure receipt'
+$recoveryCall = [regex]::Match($catchBody, 'Invoke-FailureRecovery').Index
+$receiptWrite = [regex]::Match($catchBody, '\$failurePath').Index
+$rethrow = [regex]::Match($catchBody, '(?m)^\s*throw\s*$').Index
+Assert-True ($recoveryCall -lt $receiptWrite) 'the platform must be recovered before the receipt is written'
+Assert-True ($receiptWrite -lt $rethrow) 'the receipt must be written before the failure propagates'
+Assert-True ($rethrow -gt 0) 'the original failure must be rethrown after the recovery'
+
 [pscustomobject]@{
     passed = $true
-    scope = 'Static contract for migrate-postgres-data-directory.ps1 plus its pure trading-session guard; nothing was stopped, copied or migrated'
-    ordering_verified = 'watcher stop -> pg_ctl stop -> robocopy -> copy verification -> PGDATA_DIR switch -> start+verify -> rename old'
+    scope = 'Static contract for migrate-postgres-data-directory.ps1, plus its pure trading-session guard, footprint/reparse handling exercised against a real junction, and the control-file reader exercised read-only against the live cluster; nothing was stopped, copied or migrated'
+    ordering_verified = 'disable tasks -> graceful stop -> stop tasks -> pg_ctl stop -> robocopy /XJ -> copy verification -> junction recreation -> PGDATA_DIR switch -> start+verify -> rename old'
+    recovery_verified = 'stop target -> PGDATA_DIR back -> regenerate conf -> start source -> re-enable platform -> failure receipt -> rethrow'
+    rollback_gate_verified = 'age gap printed -> cold-tablespace refusal -> -AcceptDataLoss -> stop'
+    live_checkpoint_exercised = $checkpointExercised
 }
