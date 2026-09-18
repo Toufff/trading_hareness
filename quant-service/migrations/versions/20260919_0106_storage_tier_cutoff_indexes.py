@@ -21,6 +21,19 @@ Both directions run ``CONCURRENTLY`` inside an ``op.get_context()
 .autocommit_block()`` -- the 0084/0100 pattern -- because these tables are
 written to continuously and an ``ACCESS EXCLUSIVE`` index build would stall the
 ingestion path.
+
+**Repair is ``install``'s job, not this migration's.**  A ``CREATE INDEX
+CONCURRENTLY`` that is cancelled (lock timeout, statement timeout, a killed
+backend) leaves an index with ``indisvalid = false`` holding the name.  The
+planner ignores it and ``IF NOT EXISTS`` matches it, so this migration is a
+no-op against a database in that state -- deliberately, because a migration
+must not spend two hours rebuilding a 19 GB index while a release is gated on
+it.  ``_install_cutoff_index`` in ``scripts/database-storage-tiers.py`` looks
+the name up in ``pg_index``, drops an invalid one with ``DROP INDEX
+CONCURRENTLY`` and rebuilds it (``rebuilt_invalid``), or reports
+``invalid_index_present`` and finishes ``partial`` when it cannot take the
+lock.  ``plan``/``status`` surface the same condition as
+``cutoff_index_valid = false``.
 """
 
 from alembic import op

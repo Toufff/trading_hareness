@@ -23,13 +23,18 @@ database:
   script's policy so ``install`` and a rebuilt database create the same five
   index names.
 
-The end-to-end behaviour (conservation, interruption, quarantine, deadline,
-drift) is exercised against a scratch database; see the branch report.
+``ScratchDatabaseMoveTest`` does need a cluster and says so: it is skipped
+unless ``STORAGE_TIERS_SCRATCH_TEST=1`` and the usual ``PG*`` variables are in
+the environment, and it then creates its own database, runs ``_move_table``
+against it (conflict, clamp, ``FOR UPDATE``) and drops it again.  Everything the
+default run asserts about the move is a *statement shape*; the behaviour is
+executed only by that test and by the branch's end-to-end script.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -193,13 +198,14 @@ class ApplyStatusTest(unittest.TestCase):
     """One run, several things wrong: the receipt must name the worst of them."""
 
     @staticmethod
-    def _record(tables=(), errors=(), space="ok", quarantined=0, deadline=False):
+    def _record(tables=(), errors=(), space="ok", quarantined=0, deadline=False, missed=False):
         return {
             "tables": [{"status": status} for status in tables],
             "errors": list(errors),
             "space_policy": {"status": space},
             "quarantined_rows": quarantined,
             "deadline_reached": deadline,
+            "deadline_missed": missed,
         }
 
     def test_a_clean_run_is_ok(self):
@@ -230,6 +236,38 @@ class ApplyStatusTest(unittest.TestCase):
     def test_a_working_space_status_is_not_degraded(self):
         for space in ("ok", "reduce", "capped"):
             self.assertEqual(tiers._apply_status(self._record(tables=["ok"], space=space)), "ok", space)
+
+    def test_a_deadline_already_past_at_the_start_is_not_a_normal_ending(self):
+        # The machine was off at 06:00 and Windows starts the task on a Saturday
+        # at 10:00: the deadline chain resolves 08:00 today, the loop breaks on
+        # the first table and the old code exited 0 with 'deadline_reached',
+        # indistinguishable in the log from a run that worked until 08:00.
+        record = self._record(tables=[], deadline=True, missed=True)
+        self.assertEqual(tiers._apply_status(record), "deadline_missed")
+        self.assertEqual(tiers.exit_code_for("deadline_missed"), 1)
+
+    def test_an_uninstalled_tier_is_never_a_green_night(self):
+        # This is today's production state: no twins, no quarantine table. The
+        # job moves nothing at all and the scheduled task used to show success.
+        for status in sorted(tiers.NOT_INSTALLED_TABLE_STATUSES):
+            self.assertEqual(tiers._apply_status(self._record(tables=[status, "ok"])), "partial", status)
+            self.assertEqual(tiers.exit_code_for("partial"), 1)
+
+    def test_a_broken_backup_chain_or_an_unsupported_index_needs_a_human(self):
+        for status in sorted(tiers.BLOCKING_TABLE_STATUSES):
+            self.assertEqual(tiers._apply_status(self._record(tables=[status])), "partial", status)
+
+    def test_chain_behind_is_a_working_state_not_a_failure(self):
+        # The clamp did exactly its job; the run is still 'ok' and exits 0. It
+        # alerts (see the alert ladder) so nobody has to read the receipt.
+        self.assertEqual(tiers._apply_status(self._record(tables=["chain_behind", "ok"])), "ok")
+        self.assertNotIn("chain_behind", tiers.BLOCKING_TABLE_STATUSES)
+
+    def test_the_two_skipped_statuses_are_exactly_the_uninstalled_ones(self):
+        self.assertEqual(
+            tiers.NOT_INSTALLED_TABLE_STATUSES,
+            frozenset({"skipped_missing_table", "skipped_missing_quarantine"}),
+        )
 
 
 class ExitCodeTest(unittest.TestCase):
@@ -457,6 +495,202 @@ class SchemaDriftTest(unittest.TestCase):
         self.assertEqual(drift["type_mismatch"][0]["column"], "observed_at")
 
 
+class IncrementalSpecTest(unittest.TestCase):
+    """Same grammar and same default as Get-StockIncrementalTableSpecs (psm1)."""
+
+    def test_the_documented_default_covers_raw_market_observations(self):
+        self.assertEqual(
+            tiers.parse_incremental_specs(None),
+            {"quant.raw_market_observations": ("created_at", "updated_at")},
+        )
+        self.assertEqual(tiers.parse_incremental_specs(""), tiers.parse_incremental_specs(None))
+        self.assertEqual(
+            tiers.DEFAULT_INCREMENTAL_TABLES, "quant.raw_market_observations:created_at:updated_at"
+        )
+
+    def test_none_disables_the_chain_and_therefore_the_clamp(self):
+        for value in ("none", "NONE", " None "):
+            self.assertEqual(tiers.parse_incremental_specs(value), {}, value)
+
+    def test_several_tables_with_and_without_an_update_column(self):
+        self.assertEqual(
+            tiers.parse_incremental_specs("quant.a:created_at;quant.b:ts:touched_at"),
+            {"quant.a": ("created_at", None), "quant.b": ("ts", "touched_at")},
+        )
+
+    def test_a_malformed_or_duplicated_spec_is_refused_not_guessed(self):
+        # Guessing would turn the clamp off for the one table it protects.
+        for value in ("raw_market_observations:created_at", "quant.a", "quant.a:", "quant.a:b:c:d",
+                      "quant.a:x;quant.a:y"):
+            with self.assertRaises(ValueError, msg=value):
+                tiers.parse_incremental_specs(value)
+
+
+class ChainWatermarkTest(unittest.TestCase):
+    """The dump excludes a twin's data; the chain's watermark is why that is safe."""
+
+    def test_the_psm1_state_shape_parses_to_an_aware_utc_instant(self):
+        watermark = tiers.parse_chain_watermark(
+            {"table": "quant.raw_market_observations", "watermark": "2026-09-18T12:00:03.098279Z",
+             "updated_at": "2026-09-18T20:30:42.0022860+08:00"}
+        )
+        self.assertEqual(watermark, datetime(2026, 9, 18, 12, 0, 3, 98279, tzinfo=timezone.utc))
+
+    def test_an_offset_watermark_is_normalised_to_utc(self):
+        self.assertEqual(
+            tiers.parse_chain_watermark({"watermark": "2026-09-18T20:00:00+08:00"}),
+            datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc),
+        )
+
+    def test_a_missing_or_empty_watermark_is_none_and_garbage_raises(self):
+        for payload in ({}, {"watermark": None}, {"watermark": "  "}, None, "not a dict"):
+            self.assertIsNone(tiers.parse_chain_watermark(payload), payload)
+        with self.assertRaises(ValueError):
+            tiers.parse_chain_watermark({"watermark": "yesterday"})
+
+    def test_the_state_path_is_the_layout_the_backup_module_writes(self):
+        path = tiers.chain_state_path(r"G:\StockPlatform\backups", "quant.raw_market_observations")
+        self.assertEqual(
+            path, Path(r"G:\StockPlatform\backups") / "incremental" / "quant.raw_market_observations"
+            / "state.json"
+        )
+        self.assertIn("incremental", str(tiers.chain_state_path(None, "quant.a")))
+        self.assertTrue(str(tiers.chain_state_path(None, "quant.a")).startswith(tiers.DEFAULT_BACKUP_ROOT))
+
+    def test_a_readable_state_file_yields_its_watermark(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = tiers.chain_state_path(directory, "quant.raw_market_observations")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"table": "quant.raw_market_observations", '
+                            '"watermark": "2026-09-18T12:00:03.098279Z"}', encoding="utf-8")
+            state = tiers.read_chain_state(directory, "quant.raw_market_observations")
+        self.assertEqual(state["watermark"], datetime(2026, 9, 18, 12, 0, 3, 98279, tzinfo=timezone.utc))
+        self.assertIsNone(state["reason"])
+
+    def test_every_unreadable_state_is_the_same_answer_no_watermark_and_a_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = tiers.read_chain_state(directory, "quant.raw_market_observations")
+            broken = tiers.chain_state_path(directory, "quant.b")
+            broken.parent.mkdir(parents=True, exist_ok=True)
+            broken.write_text("{not json", encoding="utf-8")
+            unreadable = tiers.read_chain_state(directory, "quant.b")
+            empty = tiers.chain_state_path(directory, "quant.c")
+            empty.parent.mkdir(parents=True, exist_ok=True)
+            empty.write_text('{"table": "quant.c"}', encoding="utf-8")
+            no_watermark = tiers.read_chain_state(directory, "quant.c")
+        for state, fragment in ((missing, "never completed"), (unreadable, "unreadable"),
+                                (no_watermark, "no watermark")):
+            self.assertIsNone(state["watermark"])
+            self.assertIn(fragment, state["reason"])
+
+    def test_resolve_settings_reads_the_backup_root_and_the_incremental_tables(self):
+        args = tiers.build_parser().parse_args(["apply"])
+        settings = tiers.resolve_settings(args, {"STOCK_BACKUP_ROOT": r"D:\b"})
+        self.assertEqual(settings["backup_root"], r"D:\b")
+        self.assertEqual(
+            settings["incremental_specs"], {"quant.raw_market_observations": ("created_at", "updated_at")}
+        )
+        args = tiers.build_parser().parse_args(["apply", "--backup-root", r"E:\override"])
+        self.assertEqual(
+            tiers.resolve_settings(args, {"STOCK_BACKUP_ROOT": r"D:\b"})["backup_root"], r"E:\override"
+        )
+        self.assertEqual(
+            tiers.resolve_settings(args, {"STOCK_BACKUP_INCREMENTAL_TABLES": "none"})["incremental_specs"],
+            {},
+        )
+
+
+class ChainGuardTest(unittest.TestCase):
+    """_chain_guard decides, per table, between clamp, pass-through and refusal."""
+
+    POLICY = tiers.TIER_POLICY[0]  # quant.raw_market_observations
+    COLUMNS = ["observation_id", "available_at", "created_at", "updated_at"]
+
+    @staticmethod
+    def _settings(root, specs=None):
+        return {
+            "backup_root": str(root),
+            "incremental_specs": tiers.parse_incremental_specs(specs),
+        }
+
+    def test_a_table_without_a_chunk_chain_moves_unclamped(self):
+        result, record = {}, {"errors": []}
+        chain = tiers._chain_guard(
+            tiers.TIER_POLICY[2], ["observation_id"], self._settings("x"), result, record
+        )
+        self.assertEqual(chain, ((), {}))
+        self.assertFalse(result["chain_protected"])
+        self.assertEqual(record["errors"], [])
+
+    def test_a_chained_table_is_clamped_to_its_watermark(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = tiers.chain_state_path(directory, self.POLICY.qualified)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"watermark": "2026-09-18T12:00:03.098279Z"}', encoding="utf-8")
+            result, record = {}, {"errors": []}
+            columns, params = tiers._chain_guard(
+                self.POLICY, self.COLUMNS, self._settings(directory), result, record
+            )
+        self.assertEqual(columns, ("created_at", "updated_at"))
+        self.assertEqual(params["chain_watermark"], datetime(2026, 9, 18, 12, 0, 3, 98279, tzinfo=timezone.utc))
+        self.assertTrue(result["chain_protected"])
+        self.assertEqual(result["chain_watermark"], "2026-09-18T12:00:03.098279+00:00")
+
+    def test_a_missing_state_file_moves_nothing_and_says_why(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result, record = {}, {"errors": []}
+            chain = tiers._chain_guard(
+                self.POLICY, self.COLUMNS, self._settings(directory), result, record
+            )
+        self.assertIsNone(chain, "no watermark must mean no row leaves the hot table")
+        self.assertEqual(result["status"], "chain_missing")
+        self.assertIn("never completed", result["detail"])
+        self.assertEqual(len(record["errors"]), 1)
+
+    def test_a_spec_naming_a_column_the_table_lacks_refuses_rather_than_moving_unclamped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result, record = {}, {"errors": []}
+            chain = tiers._chain_guard(
+                self.POLICY, ["observation_id", "available_at"], self._settings(directory), result, record
+            )
+        self.assertIsNone(chain)
+        self.assertEqual(result["status"], "chain_columns_missing")
+        self.assertIn("created_at", result["detail"])
+
+
+class ReadOnlyStatusTest(unittest.TestCase):
+    """plan/status must not answer 'ok' while install has never run."""
+
+    @staticmethod
+    def _report(space="ok", tablespace=True, quarantine=True, tables=()):
+        return {
+            "space_policy": {"status": space},
+            "tablespace_installed": tablespace,
+            "quarantine_table_installed": quarantine,
+            "tables": list(tables),
+        }
+
+    def test_a_fully_installed_tier_within_budget_is_ok(self):
+        report = self._report(tables=[{"exists": True, "cold_exists": True}])
+        self.assertEqual(tiers._read_only_status(report), "ok")
+
+    def test_a_missing_tablespace_or_quarantine_table_is_degraded(self):
+        for kwargs in ({"tablespace": False}, {"quarantine": False}):
+            report = self._report(**kwargs)
+            self.assertEqual(tiers._read_only_status(report), "degraded", kwargs)
+            self.assertEqual(tiers.exit_code_for("degraded"), 2)
+            self.assertIn("install has not run", report["reason"])
+
+    def test_a_hot_table_without_its_twin_is_degraded(self):
+        report = self._report(tables=[{"exists": True, "cold_exists": False}])
+        self.assertEqual(tiers._read_only_status(report), "degraded")
+        self.assertIn("cold twin", report["reason"])
+
+    def test_an_unmeasurable_directory_still_outranks_everything(self):
+        for space in sorted(tiers.DEGRADED_SPACE_STATUSES):
+            self.assertEqual(tiers._read_only_status(self._report(space=space)), "degraded", space)
+
+
 @contextmanager
 def _temp_tree():
     with tempfile.TemporaryDirectory() as directory:
@@ -601,9 +835,11 @@ class SpaceVerdictTest(unittest.TestCase):
 class MoveStatementShapeTest(unittest.TestCase):
     """The move is insert-first-then-delete-by-PK with explicit column lists.
 
-    ``psycopg.sql`` objects are rendered without a connection here; that is
-    enough to pin the shape the safety argument depends on.  The behaviour is
-    proven against a scratch database separately.
+    ``psycopg.sql`` objects are rendered without a connection here.  That pins
+    the *shape* the safety argument depends on and nothing more: no statement in
+    this class is ever executed, and no row is ever moved.  The behaviour is
+    executed by ``ScratchDatabaseMoveTest`` (opt-in, see the module docstring)
+    and by the branch's end-to-end script against a scratch database.
     """
 
     POLICY = tiers.TIER_POLICY[2]  # quant.intraday_quote_observations
@@ -624,6 +860,35 @@ class MoveStatementShapeTest(unittest.TestCase):
         self.assertNotIn("SELECT *", rendered)
         self.assertIn('"observed_at" < %(cutoff)s', rendered)
         self.assertIn("LIMIT %(batch)s", rendered)
+
+    def test_the_snapshot_locks_the_rows_it_is_about_to_delete(self):
+        # Without FOR UPDATE an UPDATE committed between the snapshot and the
+        # delete-by-PK is lost: the twin keeps the pre-update version and the
+        # DELETE removes the newer one.  These tables have upsert paths.
+        rendered = self._render(tiers.snapshot_batch_sql(self.POLICY, self.COLUMNS))
+        self.assertTrue(rendered.rstrip().endswith("FOR UPDATE"), rendered[-80:])
+        self.assertLess(rendered.index("LIMIT %(batch)s"), rendered.index("FOR UPDATE"))
+
+    def test_the_chain_clamp_is_off_unless_the_table_has_a_chunk_chain(self):
+        self.assertNotIn("chain_watermark", self._render(tiers.snapshot_batch_sql(self.POLICY, self.COLUMNS)))
+
+    def test_the_chain_clamp_withholds_rows_the_backup_chain_has_not_exported(self):
+        rendered = self._render(
+            tiers.snapshot_batch_sql(self.POLICY, self.COLUMNS, ("created_at", "updated_at"))
+        )
+        # NULL never reaches the watermark, so a row with no update stamp is not
+        # withheld by that column.
+        self.assertIn('("created_at" IS NULL OR "created_at" < %(chain_watermark)s)', rendered)
+        self.assertIn('("updated_at" IS NULL OR "updated_at" < %(chain_watermark)s)', rendered)
+        self.assertLess(rendered.index("chain_watermark"), rendered.index("ORDER BY"))
+        self.assertTrue(rendered.rstrip().endswith("FOR UPDATE"))
+
+    def test_the_withheld_probe_is_the_exact_negation_and_is_bounded(self):
+        rendered = self._render(tiers.withheld_by_chain_sql(self.POLICY, ("created_at",)))
+        self.assertIn('NOT (TRUE AND ("created_at" IS NULL OR "created_at" < %(chain_watermark)s))', rendered)
+        self.assertIn('"observed_at" < %(cutoff)s', rendered)
+        self.assertIn("LIMIT %(probe)s", rendered)
+        self.assertEqual(tiers.CHAIN_PROBE_ROWS, 100_000)
 
     def test_the_conflict_scan_covers_every_unique_key_and_compares_whole_rows(self):
         rendered = self._render(tiers.conflict_scan_sql(self.POLICY, self.PK, self.KEYS))
@@ -723,6 +988,69 @@ class TimeoutsTest(unittest.TestCase):
         self.assertGreaterEqual(tiers.INSTALL_STATEMENT_TIMEOUT_MS, 30 * 60 * 1000)
         self.assertGreaterEqual(tiers.INDEX_STATEMENT_TIMEOUT_MS, tiers.INSTALL_STATEMENT_TIMEOUT_MS)
         self.assertEqual(tiers.LOCK_TIMEOUT_MS, 30_000)
+
+    def test_the_vacuum_gets_its_own_ceiling_well_above_the_batch_timeout(self):
+        # The first drain of a 19 GB table with six indexes vacuums for longer
+        # than one 20 000-row batch is allowed to take; under the batch timeout
+        # that turned a completely successful move into 'failed' for the table.
+        self.assertEqual(tiers.VACUUM_STATEMENT_TIMEOUT_MS, 30 * 60 * 1000)
+        self.assertGreater(tiers.VACUUM_STATEMENT_TIMEOUT_MS, tiers.DEFAULT_STATEMENT_TIMEOUT_MS)
+
+
+class VacuumIsolationTest(unittest.TestCase):
+    """A vacuum that overruns must not fail a move whose rows are already moved."""
+
+    POLICY = tiers.TIER_POLICY[0]
+
+    class _Conn:
+        def __init__(self, fail=None):
+            self.statements: list[str] = []
+            self.fail = fail
+
+        def execute(self, statement, params=None):
+            text = statement if isinstance(statement, str) else statement.as_string(None)
+            self.statements.append(text)
+            if self.fail is not None and "VACUUM" in text:
+                raise self.fail
+            return self
+
+    SETTINGS = {"statement_timeout_ms": tiers.DEFAULT_STATEMENT_TIMEOUT_MS}
+
+    def test_nothing_is_vacuumed_when_nothing_moved(self):
+        conn = self._Conn()
+        result = {"deleted_rows": 0}
+        tiers._vacuum_after_move(conn, self.POLICY, self.SETTINGS, result)
+        self.assertEqual(conn.statements, [])
+        self.assertNotIn("vacuum", result)
+
+    def test_the_vacuum_raises_the_timeout_and_puts_it_back(self):
+        conn = self._Conn()
+        result = {"deleted_rows": 5}
+        tiers._vacuum_after_move(conn, self.POLICY, self.SETTINGS, result)
+        self.assertEqual(result["vacuum"], "ok")
+        self.assertTrue(result["vacuumed"])
+        self.assertIn(f"SET \"statement_timeout\" = '{tiers.VACUUM_STATEMENT_TIMEOUT_MS}ms'", conn.statements[0])
+        self.assertIn("VACUUM (ANALYZE)", conn.statements[1])
+        self.assertIn(f"'{tiers.DEFAULT_STATEMENT_TIMEOUT_MS}ms'", conn.statements[2])
+
+    def test_a_timed_out_vacuum_is_recorded_not_raised(self):
+        import psycopg
+
+        conn = self._Conn(fail=psycopg.errors.QueryCanceled("canceling statement"))
+        result = {"deleted_rows": 5, "status": "ok"}
+        tiers._vacuum_after_move(conn, self.POLICY, self.SETTINGS, result)
+        self.assertEqual(result["vacuum"], "timed_out")
+        self.assertFalse(result["vacuumed"])
+        self.assertEqual(result["status"], "ok", "the move's correctness does not depend on the vacuum")
+        self.assertIn(f"'{tiers.DEFAULT_STATEMENT_TIMEOUT_MS}ms'", conn.statements[-1])
+
+    def test_any_other_vacuum_failure_is_recorded_too(self):
+        conn = self._Conn(fail=RuntimeError("disk full"))
+        result = {"deleted_rows": 5, "status": "ok"}
+        tiers._vacuum_after_move(conn, self.POLICY, self.SETTINGS, result)
+        self.assertEqual(result["vacuum"], "failed")
+        self.assertIn("disk full", result["vacuum_error"])
+        self.assertEqual(result["status"], "ok")
 
 
 def _migration_statements(function):
@@ -840,6 +1168,244 @@ class ReadEnvFileTest(unittest.TestCase):
         self.assertEqual(
             values, {"PGDATA_DIR": "F:\\StockPlatformDB\\postgresql16", "PGDATA_BUDGET_BYTES": "500GB"}
         )
+
+
+SCRATCH_ENABLED = os.environ.get("STORAGE_TIERS_SCRATCH_TEST") == "1"
+SCRATCH_DB = os.environ.get("STORAGE_TIERS_SCRATCH_DB", "trading_hareness_tiers_unittest")
+
+
+@unittest.skipUnless(
+    SCRATCH_ENABLED,
+    "set STORAGE_TIERS_SCRATCH_TEST=1 (plus PGHOST/PGPORT/PGADMINUSER/PGADMINPASSWORD) to run the "
+    "move against a scratch database it creates and drops itself",
+)
+class ScratchDatabaseMoveTest(unittest.TestCase):
+    """The move, executed -- not rendered -- against a database of its own.
+
+    Everything else in this file asserts statement *shapes*.  This one creates
+    ``STORAGE_TIERS_SCRATCH_DB``, builds a hot table, a twin and the quarantine
+    table by hand, and runs ``_move_table`` over them, so the three claims the
+    design rests on are observed rather than argued:
+
+    * hot + cold + quarantine is conserved, and no primary key is in two halves;
+    * a natural-key collision with *different* content lands in quarantine
+      instead of being swallowed by ``ON CONFLICT DO NOTHING``;
+    * the chain clamp withholds exactly the rows the backup chain has not
+      exported, and reports ``chain_behind`` rather than moving them.
+
+    It never touches the production database beyond ``CREATE``/``DROP
+    DATABASE``, and it drops what it made in ``tearDownClass``.
+    """
+
+    SETUP_SQL = """
+    CREATE SCHEMA IF NOT EXISTS quant;
+    CREATE TABLE quant.raw_market_observations (
+        observation_id bigint PRIMARY KEY,
+        symbol text NOT NULL,
+        available_at timestamptz NOT NULL,
+        created_at timestamptz NOT NULL,
+        updated_at timestamptz,
+        payload_sha256 text NOT NULL,
+        UNIQUE (symbol, payload_sha256)
+    );
+    CREATE TABLE quant.raw_market_observations_cold
+        (LIKE quant.raw_market_observations INCLUDING DEFAULTS INCLUDING INDEXES);
+    CREATE TABLE quant.storage_tier_conflicts (
+        conflict_id bigserial PRIMARY KEY,
+        table_name text NOT NULL,
+        hot_pk jsonb NOT NULL,
+        hot_row jsonb NOT NULL,
+        cold_row jsonb NOT NULL,
+        detected_at timestamptz NOT NULL DEFAULT now()
+    );
+    """
+
+    @classmethod
+    def _admin(cls, dbname):
+        import psycopg
+
+        return psycopg.connect(
+            host=os.environ["PGHOST"],
+            port=os.environ["PGPORT"],
+            dbname=dbname,
+            user=os.environ.get("PGADMINUSER") or os.environ["PGUSER"],
+            password=os.environ.get("PGADMINPASSWORD") or os.environ.get("PGPASSWORD", ""),
+            autocommit=True,
+            application_name="tiers-unittest",
+        )
+
+    @classmethod
+    def _drop(cls):
+        with cls._admin("postgres") as conn:
+            conn.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s", (SCRATCH_DB,)
+            )
+            conn.execute(f'DROP DATABASE IF EXISTS "{SCRATCH_DB}"')
+
+    @classmethod
+    def setUpClass(cls):
+        cls._drop()
+        with cls._admin("postgres") as conn:
+            conn.execute(f'CREATE DATABASE "{SCRATCH_DB}"')
+        cls.conn = cls._admin(SCRATCH_DB)
+        cls.conn.execute(cls.SETUP_SQL)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.conn.close()
+        cls._drop()
+
+    def setUp(self):
+        self.conn.execute("TRUNCATE quant.raw_market_observations, "
+                          "quant.raw_market_observations_cold, quant.storage_tier_conflicts")
+        self.now = datetime(2026, 9, 19, 6, 0, tzinfo=timezone.utc)
+        self.policy = tiers.TIER_POLICY[0]
+
+    def _seed(self, rows):
+        self.conn.cursor().executemany(
+            "INSERT INTO quant.raw_market_observations "
+            "(observation_id, symbol, available_at, created_at, updated_at, payload_sha256) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            rows,
+        )
+
+    def _settings(self, backup_root, specs=None, batch=100):
+        return {
+            "batch_rows": batch,
+            "statement_timeout_ms": 60_000,
+            "max_batches": 0,
+            "backup_root": str(backup_root),
+            "incremental_specs": tiers.parse_incremental_specs(specs),
+        }
+
+    def _counts(self):
+        def one(sql_text):
+            return self.conn.execute(sql_text).fetchone()[0]
+
+        return {
+            "hot": one("SELECT count(*) FROM quant.raw_market_observations"),
+            "cold": one("SELECT count(*) FROM quant.raw_market_observations_cold"),
+            "quarantined": one("SELECT count(*) FROM quant.storage_tier_conflicts"),
+        }
+
+    def _no_row_in_both_halves(self):
+        both = self.conn.execute(
+            "SELECT count(*) FROM quant.raw_market_observations h "
+            "JOIN quant.raw_market_observations_cold c USING (observation_id)"
+        ).fetchone()[0]
+        self.assertEqual(both, 0, "a primary key must never be in the hot table and the twin at once")
+
+    def test_a_move_conserves_every_row_and_leaves_the_window_alone(self):
+        old = self.now - timedelta(days=400)
+        fresh = self.now - timedelta(days=10)
+        self._seed([(i, f"60000{i}", old, old, None, f"sha{i}") for i in range(20)]
+                   + [(100 + i, f"70000{i}", fresh, fresh, None, f"fresh{i}") for i in range(5)])
+        record = {"errors": []}
+        result = tiers._move_table(
+            self.conn, self.policy, self.now, 365, self._settings("no-chain", specs="none"), record
+        )
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["deleted_rows"], 20)
+        self.assertEqual(result["inserted_rows"], 20)
+        self.assertEqual(self._counts(), {"hot": 5, "cold": 20, "quarantined": 0})
+        self.assertEqual(record["errors"], [])
+        self._no_row_in_both_halves()
+        self.assertEqual(result["vacuum"], "ok")
+
+    def test_a_natural_key_collision_is_quarantined_whole_not_swallowed(self):
+        old = self.now - timedelta(days=400)
+        self._seed([(1, "600519", old, old, None, "shaA"), (2, "600520", old, old, None, "shaB")])
+        # Same (symbol, payload_sha256) as the hot row, different content: the
+        # unique index would make ON CONFLICT DO NOTHING drop the hot row.
+        self.conn.execute(
+            "INSERT INTO quant.raw_market_observations_cold "
+            "(observation_id, symbol, available_at, created_at, updated_at, payload_sha256) "
+            "VALUES (99, '600519', %s, %s, NULL, 'shaA')", (old, old),
+        )
+        record = {"errors": []}
+        result = tiers._move_table(
+            self.conn, self.policy, self.now, 365, self._settings("no-chain", specs="none"), record
+        )
+        self.assertEqual(result["status"], "conflicts", result)
+        self.assertEqual(result["quarantined_rows"], 1)
+        self.assertEqual(self._counts(), {"hot": 0, "cold": 2, "quarantined": 1})
+        row = self.conn.execute(
+            "SELECT table_name, hot_pk, hot_row, cold_row FROM quant.storage_tier_conflicts"
+        ).fetchone()
+        self.assertEqual(row[0], "quant.raw_market_observations")
+        self.assertEqual(row[1], {"observation_id": 1})
+        self.assertNotEqual(row[2]["observation_id"], row[3]["observation_id"])
+        self._no_row_in_both_halves()
+
+    def test_the_chain_clamp_withholds_unexported_rows_and_reports_chain_behind(self):
+        old = self.now - timedelta(days=400)
+        # created_at straddles the watermark: 10 rows are exported, 10 are not,
+        # and one of the unexported ones is unexported only via updated_at.
+        exported = self.now - timedelta(days=3)
+        unexported = self.now - timedelta(hours=1)
+        watermark = self.now - timedelta(days=1)
+        self._seed(
+            [(i, f"60000{i}", old, exported, None, f"sha{i}") for i in range(10)]
+            + [(50 + i, f"80000{i}", old, unexported, None, f"late{i}") for i in range(9)]
+            + [(90, "800099", old, exported, unexported, "touched")]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = tiers.chain_state_path(directory, self.policy.qualified)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"table": self.policy.qualified,
+                                        "watermark": watermark.isoformat().replace("+00:00", "Z")}),
+                            encoding="utf-8")
+            record = {"errors": []}
+            result = tiers._move_table(
+                self.conn, self.policy, self.now, 365, self._settings(directory), record
+            )
+        self.assertEqual(result["status"], "chain_behind", result)
+        self.assertTrue(result["chain_protected"])
+        self.assertEqual(result["deleted_rows"], 10, "only the exported rows may leave")
+        self.assertEqual(result["chain_withheld_rows"], 10)
+        self.assertEqual(self._counts(), {"hot": 10, "cold": 10, "quarantined": 0})
+        still_hot = self.conn.execute(
+            "SELECT count(*) FROM quant.raw_market_observations WHERE created_at >= %s "
+            "OR updated_at >= %s", (watermark, watermark)
+        ).fetchone()[0]
+        self.assertEqual(still_hot, 10, "no row past the watermark may be in the twin")
+        self._no_row_in_both_halves()
+
+    def test_a_missing_chain_state_file_moves_nothing_at_all(self):
+        old = self.now - timedelta(days=400)
+        self._seed([(i, f"60000{i}", old, old, None, f"sha{i}") for i in range(5)])
+        with tempfile.TemporaryDirectory() as directory:
+            record = {"errors": []}
+            result = tiers._move_table(
+                self.conn, self.policy, self.now, 365, self._settings(directory), record
+            )
+        self.assertEqual(result["status"], "chain_missing")
+        self.assertEqual(self._counts(), {"hot": 5, "cold": 0, "quarantined": 0})
+        self.assertEqual(len(record["errors"]), 1)
+
+    def test_the_snapshot_really_locks_its_rows(self):
+        # FOR UPDATE inside CREATE TEMPORARY TABLE AS is the whole point of the
+        # lost-update fix, and PostgreSQL has to accept it in that position.
+        old = self.now - timedelta(days=400)
+        self._seed([(1, "600519", old, old, None, "shaA")])
+        statement = tiers.snapshot_batch_sql(
+            self.policy,
+            ["observation_id", "symbol", "available_at", "created_at", "updated_at", "payload_sha256"],
+        )
+        with self.conn.transaction():
+            self.conn.execute(statement, {"cutoff": self.now - timedelta(days=365), "batch": 10})
+            self.assertEqual(self.conn.execute("SELECT count(*) FROM tier_batch").fetchone()[0], 1)
+            blocked = self._admin(SCRATCH_DB)
+            try:
+                blocked.execute("SET lock_timeout = '500ms'")
+                with self.assertRaises(Exception) as caught:
+                    blocked.execute(
+                        "UPDATE quant.raw_market_observations SET symbol = 'X' WHERE observation_id = 1"
+                    )
+                self.assertIn("lock", str(caught.exception).lower())
+            finally:
+                blocked.close()
+        self.conn.execute("DROP TABLE IF EXISTS tier_batch")
 
 
 if __name__ == "__main__":

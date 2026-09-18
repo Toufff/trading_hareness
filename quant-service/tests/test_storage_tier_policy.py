@@ -178,6 +178,81 @@ class TieredTablesExistInTheSchemaTest(unittest.TestCase):
                 self.assertIsNone(create_table_body(policy.all_view))
 
 
+def unique_index_statements(qualified: str) -> list[str]:
+    """Every ``CREATE UNIQUE INDEX ... ON <qualified> ...`` in the DDL corpus.
+
+    Terminated by the first ``;`` or blank line, which is how these statements
+    are written in ``app/database.py`` and in the migrations.
+    """
+    pattern = re.compile(
+        r"CREATE\s+UNIQUE\s+INDEX[^;]*?\bON\s+" + re.escape(qualified) + r"\b[^;]*",
+        re.IGNORECASE | re.DOTALL,
+    )
+    return [" ".join(match.group(0).split()) for match in pattern.finditer(SQL_CORPUS)]
+
+
+class TieredTablesHaveNoUniqueIndexTheMoveCannotReasonAboutTest(unittest.TestCase):
+    """A partial or expression unique index would make the move drop rows silently.
+
+    ``unique_key_columns`` in the script skips unique indexes with a predicate
+    (``WHERE ...``) or an expression key, because the conflict scan joins the
+    batch to the twin on a *column list* and neither of those is one.  But
+    ``CREATE TABLE ... (LIKE <hot> INCLUDING INDEXES)`` copies them to the twin
+    verbatim, so a hot row colliding on such an index would be swallowed by
+    ``ON CONFLICT DO NOTHING`` and then counted as a benign
+    ``already_in_cold_rows``.
+
+    ``_move_table`` refuses the table at run time with
+    ``unsupported_unique_index``.  That refusal is correct but it is a 06:00
+    surprise; this guard makes the migration that would introduce one fail in
+    the release gate instead.  None of the five tiered tables has one today (all
+    nine of their unique indexes are plain), so this is a fence, not a fix.
+    """
+
+    def test_no_tiered_table_declares_a_partial_or_expression_unique_index(self):
+        offenders = []
+        for policy in tiers.TIER_POLICY:
+            for statement in unique_index_statements(policy.qualified):
+                # "ON quant.t (a, b)" is fine; "ON quant.t (lower(a))" and
+                # "... WHERE deleted_at IS NULL" are not.
+                key = re.search(r"\(\s*(.*?)\s*\)\s*(WHERE\b.*)?$", statement, re.IGNORECASE)
+                predicate = re.search(r"\)\s*WHERE\b", statement, re.IGNORECASE)
+                expression = bool(key and "(" in key.group(1))
+                if predicate or expression:
+                    offenders.append(f"{policy.qualified}: {statement}")
+        self.assertEqual(
+            offenders,
+            [],
+            "a partial or expression UNIQUE index on a tiered table makes the storage-tier move "
+            "refuse that table (status unsupported_unique_index): the conflict scan joins on column "
+            "lists only. Give the table a plain unique key, or teach conflict_scan_sql the new shape.",
+        )
+
+    def test_the_inline_unique_constraints_of_the_tiered_tables_are_plain_column_lists(self):
+        # UNIQUE(...) written inside CREATE TABLE is the common form here and is
+        # copied to the twin the same way.
+        offenders = []
+        for policy in tiers.TIER_POLICY:
+            body = create_table_body(policy.qualified) or ""
+            for match in re.finditer(r"\bUNIQUE\s*\(([^)]*)\)", body, re.IGNORECASE):
+                columns = match.group(1)
+                if not re.fullmatch(r"[\s\w,]*", columns):
+                    offenders.append(f"{policy.qualified}: UNIQUE({columns})")
+        self.assertEqual(offenders, [], "an expression inside an inline UNIQUE(...) has the same effect")
+
+    def test_the_guard_would_actually_catch_one(self):
+        # The regexes above are the whole test; pin them against samples so a
+        # future rewrite cannot quietly turn the guard into a no-op.
+        partial = "CREATE UNIQUE INDEX x ON quant.raw_market_observations (symbol) WHERE symbol IS NOT NULL"
+        expression = "CREATE UNIQUE INDEX y ON quant.raw_market_observations (lower(symbol))"
+        plain = "CREATE UNIQUE INDEX z ON quant.raw_market_observations (symbol, available_at)"
+        self.assertIsNotNone(re.search(r"\)\s*WHERE\b", partial, re.IGNORECASE))
+        self.assertIsNone(re.search(r"\)\s*WHERE\b", plain, re.IGNORECASE))
+        for statement, expected in ((expression, True), (plain, False)):
+            key = re.search(r"\(\s*(.*?)\s*\)\s*(WHERE\b.*)?$", statement, re.IGNORECASE)
+            self.assertEqual("(" in key.group(1), expected, statement)
+
+
 class ApplicationCodeNeverReadsTheColdTierTest(unittest.TestCase):
     """The twins have no foreign keys and no triggers; only operations reads them."""
 
