@@ -32,7 +32,7 @@ from typing import Any
 from ..short_term_lanes.risk import MIN_VOLATILITY_BUFFER_PCT, volatility_buffer_pct
 from .contracts import Action, Confirm, Derivation, Line, Sizing, eval_expression
 
-TEMPLATE_VERSION = "trade-discipline-templates-v2"
+TEMPLATE_VERSION = "trade-discipline-templates-v3"
 
 TARGET_EXPOSURE_PCT: dict[str, Decimal] = {
     "crash_rebound": Decimal("20"), "broken": Decimal("0"), "breakout_hold": Decimal("25"),
@@ -64,7 +64,6 @@ STOP_PCT_MIN = 0.015
 STOP_PCT_MAX = 0.12
 STOP_PCT_TARGET = 0.02
 TRAIL_ARM_ATR_MULTIPLE = 1.0
-TRAIL_ATR_MULTIPLE = 1.5
 # A soft stop needs room on both sides: at least half an ATR above the hard
 # stop and half an ATR below the reference price, otherwise one day's noise
 # fires it and it says nothing the hard stop does not.
@@ -84,7 +83,7 @@ EXTRA_CONDITION_TEXT: dict[str, str] = {
     "sector_change_negative": "行业当日翻绿", "sector_not_weak": "行业当日不走弱",
     "amount_ge_prev_day": "成交额不低于前一日", "volume_expand_1_5x": "放量至前5日均量1.5倍",
     "volume_contract_0_7x": "缩量至前5日均量0.7倍以下", "below_vwap": "最新价跌破当日VWAP",
-    "after_volume_climax": "出现天量滞涨",
+    "after_volume_climax": "当日成交量为20日最大量且收在振幅下半",
 }
 
 PRIORITY: dict[str, int] = {
@@ -103,18 +102,18 @@ STRUCTURE_RULE: dict[str, tuple[str, tuple[str, ...]]] = {
     "base_platform": ("low10_close", ("low10_close",)),
     "unclassified": TWO_DAY_LOW_RULE,
 }
-STRUCTURE_LABEL: dict[str, str] = {
-    "crash_rebound": "急跌反弹段：最近20个交易日的最低价（急跌低点）",
-    "broken": "破位段：当日与昨日真实低点的较低者",
-    "pullback_hold": "回踩段：近5日收盘低点",
-    "trend_hold": "趋势段：MA10 下方半个百分点",
-    "breakout_hold": "突破段：前5日收盘平台下方半个百分点",
-    "base_platform": "平台段：10日最低收盘",
-    "unclassified": "未分类：当日与昨日真实低点的较低者（最保守）",
+STAGE_STRUCTURE_NAME: dict[str, str] = {
+    "crash_rebound": "急跌反弹段", "broken": "破位段", "pullback_hold": "回踩段", "trend_hold": "趋势段",
+    "breakout_hold": "突破段", "base_platform": "平台段", "unclassified": "未分类（最保守）",
 }
 # The crash low is the only structure that a rebound leaves behind; when it is
 # already beyond the sizing band the nearer approved structure takes over.
-CRASH_FALLBACK_LABEL = "急跌反弹段：急跌低点已超出止损距离上限，改用当日与昨日真实低点的较低者"
+CRASH_FALLBACK_LABEL = "已超出止损距离上限，改用当日与昨日真实低点的较低者"
+# The four ``min`` terms of the hard stop, in the order a tie is attributed:
+# the structure point is the stop's reason for being, the other three only
+# widen it.  ``derivation.inputs.binding_term`` records which one bound.
+HARD_STOP_TERMS: tuple[str, ...] = ("structure", "buffer", "atr", "pct")
+WIDENING_TERM_TEXT: dict[str, str] = {"atr": f"{ATR_TARGET_MULTIPLE}×ATR14", "pct": f"{STOP_PCT_TARGET:.0%}"}
 
 
 def _money(value: float | Decimal) -> Decimal:
@@ -199,8 +198,60 @@ def hard_stop_price(stage: str, metrics: dict[str, Any], reference_price: Decima
     formula = (f"min({expression}, reference_price * (1 - buffer_pct), "
                f"reference_price - atr_target_multiple * atr14, reference_price * (1 - stop_pct_target))")
     price = eval_expression(formula, inputs)
+    # Which of the four terms bound.  The structure point wins a tie: the other
+    # three exist only to widen it, and the label must say when they did.
+    terms = {
+        "structure": eval_expression(expression, inputs),
+        "buffer": reference * (1 - inputs["buffer_pct"]),
+        "atr": reference - ATR_TARGET_MULTIPLE * atr14,
+        "pct": reference * (1 - STOP_PCT_TARGET),
+    }
+    inputs["structure_value"] = terms["structure"]
+    inputs["binding_term"] = next(name for name in HARD_STOP_TERMS if terms[name] <= price + 1e-9)
     derivation = Derivation(rule_id=f"hard_stop.{stage}", inputs=inputs, formula=formula)
     return _money_down(price), derivation
+
+
+def _price_text(value: float | Decimal) -> str:
+    return format(_money(value), "f")
+
+
+def structure_text(stage: str, inputs: dict[str, Any]) -> str:
+    """The structure point the hard stop is anchored on, with its value, in plain Chinese."""
+    if stage == "crash_rebound":
+        if inputs.get("structure_source") == "two_day_low":
+            two_day = min(inputs["today_low"], inputs["prev_low"])
+            return f"急跌低点{_price_text(inputs['low20'])}{CRASH_FALLBACK_LABEL}{_price_text(two_day)}"
+        return f"最近20个交易日最低价{_price_text(inputs['low20'])}"
+    if stage == "pullback_hold":
+        return f"近5日收盘低点{_price_text(inputs['recent_low'])}"
+    if stage == "trend_hold":
+        return f"MA10 {_price_text(inputs['ma10'])}下方半个百分点{_price_text(_money_down(inputs['structure_value']))}"
+    if stage == "breakout_hold":
+        return (f"突破平台{_price_text(inputs['prior_high'])}下方半个百分点"
+                f"{_price_text(_money_down(inputs['structure_value']))}")
+    if stage == "base_platform":
+        return f"10日最低收盘{_price_text(inputs['low10_close'])}"
+    two_day = min(inputs["today_low"], inputs["prev_low"])
+    return f"当日与昨日真实低点的较低者{_price_text(two_day)}"
+
+
+def hard_stop_note(stage: str, derivation: Derivation) -> str:
+    """The parenthesis after the hard-stop sentence: which term actually bound.
+
+    A stop that sits on the structure point says so; a stop that had to be
+    widened below it names the structure it left and the term that pulled it
+    down, so a reader never mistakes a ``0.9 x ATR14`` number for a low.
+    """
+    inputs = derivation.inputs
+    stage_name = STAGE_STRUCTURE_NAME.get(stage, STAGE_STRUCTURE_NAME["unclassified"])
+    structure = structure_text(stage, inputs)
+    binding = inputs.get("binding_term", "structure")
+    if binding == "structure":
+        return f"{stage_name}，结构点：{structure}"
+    widened_by = (f"波动缓冲{inputs['buffer_pct'] * 100:.2f}%" if binding == "buffer"
+                  else WIDENING_TERM_TEXT[binding])
+    return f"{stage_name}，结构点{structure}距离不足最小止损距离，按 {widened_by} 向下加宽"
 
 
 def soft_stop_window(hard_stop: Decimal, reference_price: Decimal, atr14: float) -> tuple[Decimal, Decimal]:
@@ -209,13 +260,17 @@ def soft_stop_window(hard_stop: Decimal, reference_price: Decimal, atr14: float)
     return _money(hard_stop + gap), _money(reference_price - gap)
 
 
-def trail_stop_price(*, arm_price: Decimal, atr14: float, low3: float, floor_price: Decimal,
+def trail_stop_price(*, anchor_price: Decimal, floor_price: Decimal,
                      previous_trail: Decimal | None = None) -> Decimal:
-    """``max(prev, min(3-day low, arm - 1.5 x ATR))``; a trail never moves down."""
-    candidate = min(Decimal(str(low3)), arm_price - Decimal(str(TRAIL_ATR_MULTIPLE * atr14)))
-    lifted = max(_money(candidate), floor_price)
+    """``max(prev, max(hard_stop, anchor))``: break-even once armed; a trail never moves down.
+
+    The anchor is the average cost of a holding or the trigger price of a new
+    buy, so the first trail step is "the position can no longer lose money",
+    not a fraction of the arm price that could still sit under the cost.
+    """
+    lifted = max(_money(anchor_price), floor_price)
     if previous_trail is not None:
-        lifted = max(lifted, previous_trail)
+        lifted = max(lifted, _money(previous_trail))
     return lifted
 
 
@@ -329,10 +384,8 @@ def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any]
             priority=PRIORITY["exposure"]))
 
     hard_stop, hard_derivation = hard_stop_price(stage, metrics, reference)
-    structure_note = (CRASH_FALLBACK_LABEL if hard_derivation.inputs.get("structure_source") == "two_day_low"
-                      else STRUCTURE_LABEL.get(stage, STRUCTURE_LABEL["unclassified"]))
     lines.append(Line(
-        kind="hard_stop", label=f"日线收盘跌破{hard_stop}即全部退出（{structure_note}）",
+        kind="hard_stop", label=f"日线收盘跌破{hard_stop}即全部退出（{hard_stop_note(stage, hard_derivation)}）",
         metric="daily_close", op="<", price=hard_stop, confirm=Confirm(bars=1, basis="daily"),
         extra=[], action=Action(type="exit_all"), derivation=hard_derivation,
         priority=PRIORITY["hard_stop"]))
@@ -363,11 +416,20 @@ def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any]
                                   formula="ma5"),
             priority=PRIORITY["soft_stop"]))
     else:
+        # Two different refusals: a window that does not exist (the stop is
+        # nearer than one ATR, so no price has half an ATR on both sides) and a
+        # window that exists but does not contain MA5.
+        if soft_floor > soft_ceiling:
+            reason = (f"软止损区间为空（下限 {soft_floor} > 上限 {soft_ceiling}，"
+                      f"止损距离 {_money(reference - hard_stop)} < {2 * SOFT_STOP_SEPARATION_ATR:.1f}×ATR14 "
+                      f"{_money(atr14)}），不生成")
+        else:
+            reason = (f"MA5 {soft_reference} 不在 [硬止损 + {SOFT_STOP_SEPARATION_ATR}×ATR14, "
+                      f"参考价 − {SOFT_STOP_SEPARATION_ATR}×ATR14] = [{soft_floor}, {soft_ceiling}] 内，"
+                      "软止损与现价或硬止损间距不足，一日噪音即触发，故不生成")
         omitted.append({
             "kind": "soft_stop",
-            "reason": (f"MA5 {soft_reference} 不在 [硬止损 + {SOFT_STOP_SEPARATION_ATR}×ATR14, "
-                       f"参考价 − {SOFT_STOP_SEPARATION_ATR}×ATR14] = [{soft_floor}, {soft_ceiling}] 内，"
-                       "软止损与现价或硬止损间距不足，一日噪音即触发，故不生成"),
+            "reason": reason,
             "inputs": {"ma5": float(metrics["ma5"]), "hard_stop": float(hard_stop),
                        "reference_price": float(reference), "atr14": atr14,
                        "separation_atr": SOFT_STOP_SEPARATION_ATR,
@@ -375,22 +437,25 @@ def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any]
         })
 
     if stage in TAKE_PARTIAL_STAGES:
+        # The extra conditions are the substance of this line; the price test
+        # only says "and not while it is still rising", so it is read last.
+        partial_extra = ["after_volume_climax", "below_vwap"]
+        partial_conditions = "且".join(EXTRA_CONDITION_TEXT[name] for name in partial_extra)
         lines.append(Line(
             kind="take_partial",
-            label=f"出现天量滞涨且最新价跌破当日VWAP时，在{reference}下方减半仓",
+            label=f"{partial_conditions}、且最新价低于{reference}时，减半仓",
             metric="last", op="<", price=reference, confirm=Confirm(bars=1, basis="minute"),
-            extra=["after_volume_climax", "below_vwap"],
+            extra=partial_extra,
             action=Action(type="reduce_by_pct", value=Decimal("50")),
             derivation=Derivation(rule_id=f"take_partial.{stage}",
                                   inputs={"reference_price": float(reference)}, formula="reference_price"),
             priority=PRIORITY["take_partial"]))
 
-    anchor = _anchor_price(position, reference, plan_kind)
+    anchor, anchor_source = _anchor_price(position, reference, plan_kind)
     arm_price = _money(max(anchor, reference) + Decimal(str(TRAIL_ARM_ATR_MULTIPLE * atr14)))
-    trail_stop = trail_stop_price(arm_price=arm_price, atr14=atr14, low3=float(metrics["low3"]),
-                                  floor_price=hard_stop, previous_trail=previous_trail)
-    trail_inputs = {"arm_price": float(arm_price), "atr14": atr14, "trail_multiple": TRAIL_ATR_MULTIPLE,
-                    "low3": float(metrics["low3"]), "floor_price": float(hard_stop)}
+    trail_stop = trail_stop_price(anchor_price=anchor, floor_price=hard_stop, previous_trail=previous_trail)
+    trail_inputs: dict[str, Any] = {"anchor_price": float(anchor), "anchor_source": anchor_source,
+                                    "floor_price": float(hard_stop)}
     if sizing.target_exposure_pct == 0:
         omitted.append({"kind": "trail",
                         "reason": f"{stage} 阶段目标仓位为 0%，仓位线已要求清仓，移动止损无意义，故不生成",
@@ -398,20 +463,25 @@ def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any]
                                    "trail_stop": float(trail_stop)}})
     elif trail_stop <= hard_stop:
         omitted.append({"kind": "trail",
-                        "reason": (f"计算出的移动止损 {trail_stop} 不高于硬止损 {hard_stop}，"
-                                   "“上移”不会改变止损，故不生成"),
+                        "reason": (f"保本目标 max(硬止损 {hard_stop}, {ANCHOR_TEXT[anchor_source]} {_money(anchor)}) "
+                                   f"= {trail_stop} 不高于硬止损 {hard_stop}，“上移”不会改变止损，故不生成"),
                         "inputs": {**trail_inputs, "trail_stop": float(trail_stop),
                                    "previous_trail": float(previous_trail) if previous_trail is not None else None}})
     else:
         # ``previous_trail`` enters the formula only when there is one: the
         # formula grammar has no null, and a fabricated 0 would be a lie.
-        action_formula = "max(floor_price, min(low3, arm_price - trail_multiple * atr14))"
+        action_formula = "max(floor_price, anchor_price)"
+        target_text = f"{ANCHOR_TEXT[anchor_source]}{trail_stop}"
         if previous_trail is not None:
             trail_inputs["previous_trail"] = float(previous_trail)
             action_formula = f"max(previous_trail, {action_formula})"
+            if previous_trail > max(_money(anchor), hard_stop):
+                target_text = f"前序移动止损{trail_stop}（已高于{ANCHOR_TEXT[anchor_source]}{_money(anchor)}）"
+        arm_text = "成本/现价孰高" if anchor_source == "average_cost" else ANCHOR_TEXT[anchor_source]
         lines.append(Line(
-            kind="trail", label=f"最新价站上{arm_price}（成本/现价孰高 + 1×ATR）后，把止损上移到{trail_stop}，只上移不下移",
-            metric="last", op=">=", price=arm_price, confirm=Confirm(bars=1, basis="daily"),
+            kind="trail",
+            label=f"日线收盘站上{arm_price}（{arm_text} + 1×ATR14）后，把止损上移到{target_text}，只上移不下移",
+            metric="daily_close", op=">=", price=arm_price, confirm=Confirm(bars=1, basis="daily"),
             extra=[], action=Action(type="move_stop_to", value=trail_stop),
             derivation=Derivation(
                 rule_id=f"trail.{stage}",
@@ -482,13 +552,19 @@ def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any]
     return TemplateResult(lines=sorted(lines, key=lambda line: (line.priority, line.kind)), omitted=omitted)
 
 
-def _anchor_price(position: dict[str, Any] | None, reference: Decimal, plan_kind: str) -> Decimal:
+ANCHOR_TEXT: dict[str, str] = {
+    "average_cost": "成本价", "trigger_reference": "触发参考价", "reference_price": "参考价",
+}
+
+
+def _anchor_price(position: dict[str, Any] | None, reference: Decimal, plan_kind: str) -> tuple[Decimal, str]:
+    """``(price, source)``: the average cost of a holding, the trigger price of a new buy."""
     if plan_kind == "new_buy":
-        return reference
+        return reference, "trigger_reference"
     cost = (position or {}).get("average_cost")
     if cost is None:
-        return reference
-    return Decimal(str(cost))
+        return reference, "reference_price"
+    return Decimal(str(cost)), "average_cost"
 
 
 def new_buy_reference(metrics: dict[str, Any], lane: dict[str, Any] | None) -> Decimal:
@@ -529,14 +605,14 @@ def _new_buy_lines(stage: str, metrics: dict[str, Any], sizing: Sizing, lane: di
 
 
 __all__ = [
-    "ATR_MAX_MULTIPLE", "ATR_MIN_MULTIPLE", "ATR_TARGET_MULTIPLE", "CONFIRM_REFERENCE",
+    "ANCHOR_TEXT", "ATR_MAX_MULTIPLE", "ATR_MIN_MULTIPLE", "ATR_TARGET_MULTIPLE", "CONFIRM_REFERENCE",
     "CRASH_FALLBACK_LABEL", "DEFAULT_RISK_PER_TRADE_PCT", "DEFAULT_TIME_STOP_DAYS", "EXTRA_CONDITION_TEXT",
-    "HOLIDAY_CLOSURE_DAYS", "HOLIDAY_EXPOSURE_PCT", "LOT_SIZE",
-    "MIN_BUFFER_PCT", "NO_ADD_REFERENCE", "PRIORITY", "SOFT_STOP_SEPARATION_ATR", "STOP_PCT_MAX",
-    "STOP_PCT_MIN", "STOP_PCT_TARGET", "STRUCTURE_RULE", "TAKE_PARTIAL_STAGES", "TARGET_EXPOSURE_PCT",
-    "TEMPLATE_VERSION", "TIME_STOP_DAYS", "TRAIL_ARM_ATR_MULTIPLE", "TRAIL_ATR_MULTIPLE", "TWO_DAY_LOW_RULE",
-    "TemplateResult", "WEEKEND_CLOSURE_DAYS",
+    "HARD_STOP_TERMS", "HOLIDAY_CLOSURE_DAYS", "HOLIDAY_EXPOSURE_PCT", "LOT_SIZE",
+    "MIN_BUFFER_PCT", "NO_ADD_REFERENCE", "PRIORITY", "SOFT_STOP_SEPARATION_ATR", "STAGE_STRUCTURE_NAME",
+    "STOP_PCT_MAX", "STOP_PCT_MIN", "STOP_PCT_TARGET", "STRUCTURE_RULE", "TAKE_PARTIAL_STAGES",
+    "TARGET_EXPOSURE_PCT", "TEMPLATE_VERSION", "TIME_STOP_DAYS", "TRAIL_ARM_ATR_MULTIPLE", "TWO_DAY_LOW_RULE",
+    "TemplateResult", "WEEKEND_CLOSURE_DAYS", "WIDENING_TERM_TEXT",
     "buffer_pct", "build_lines", "build_sizing", "build_template", "closure_within", "closures_within",
-    "hard_stop_price", "is_ordinary_weekend", "lot_shares", "new_buy_reference", "soft_stop_window",
-    "stop_beyond_band", "stop_distance_terms", "trail_stop_price",
+    "hard_stop_note", "hard_stop_price", "is_ordinary_weekend", "lot_shares", "new_buy_reference",
+    "soft_stop_window", "stop_beyond_band", "stop_distance_terms", "structure_text", "trail_stop_price",
 ]

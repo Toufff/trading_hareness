@@ -1,6 +1,6 @@
 # 交易纪律模块（trade_discipline）设计合同 v1
 
-状态：设计已定，实施中（2026-09-18）；第二轮审查（600613 纪律卡）及其复审后于同日修订，见文末“迭代记录”。本文件是实现的唯一合同；实现与本文冲突时先改本文再改代码。
+状态：设计已定，实施中（2026-09-18）；第二轮审查（600613 纪律卡）、其复审与第二轮 dry-run 验收（G1–G5）后于同日修订，见文末“迭代记录”。本文件是实现的唯一合同；实现与本文冲突时先改本文再改代码。
 
 ## 目的
 
@@ -135,13 +135,14 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 每个 stage 一个模板函数 `build_lines(stage, metrics, position, sizing, calendar) -> list[Line]`。共性：
 
 - `hard_stop`（必有，priority 1）：`metric=daily_close, op="<", confirm(bars=1, daily)`，价格 = `min(structure_low, reference_price × (1 − buffer), reference_price − 0.9 × ATR14, reference_price × (1 − 2%))`，四项全部以 inputs 记入 derivation（`buffer_pct`、`atr_target_multiple=0.9`、`stop_pct_target=0.02`），formula 逐项写出——即结构点只允许**下移**到最小距离，永远不许被抬到结构点之上；结构比 3×ATR14 / 12% 还远时价格保持不动，由 `hard_stop_distance_sane` 判不过、按原则 9 落库为 `rejected_by_quality`。其中 structure_low 按 stage 取：crash_rebound 用 `low20`（最近 20 个交易日的最低价，即急跌低点）——但急跌低点是一个固定点，正常反弹会离它越来越远，而 stage 判定（回撤 ≤ −25%）仍停留在 crash_rebound；因此当 `low20` 已超出止损距离上限（距参考价 > 3×ATR14 或 > 12%，与质量门同一算式）时，改用第二个认可的结构点 `min(当日低点, 昨日低点)`，`derivation.inputs.structure_source` 记 `"low20"` 或 `"two_day_low"`，`low20` 两种情形都记入 inputs，label 注明改用；两日低点也超出上限时保持不动、照常被 `hard_stop_distance_sane` 拒绝；broken/unclassified 用 `min(当日低点, 昨日低点)`；pullback 用 `recent_low`（近 5 日收盘低）；trend 用 `MA10 × (1 − 0.5%)`；breakout 用 `突破平台 prior_high × (1 − 0.5%)`；base_platform 用 10 日最低收盘。buffer = `max(1.5%, 0.6 × 日波动率%)`（与 risk.py 一致）。另给一个盘中副本 `metric=minute_close, confirm(bars=3, minute)`，同价，label 标“盘中版”。
-- `soft_stop`（可选，priority 2）：价格 = MA5，允许 extra 条件，action=reduce_by_pct 50。**仅当** `hard_stop + 0.5 × ATR14 <= MA5 <= reference_price − 0.5 × ATR14` 时生成；否则不生成，并把 `{kind:"soft_stop", reason, inputs:{ma5, hard_stop, reference_price, atr14, window_low, window_high}}` 写入 `metrics.omitted_lines`。理由：软止损离现价不足半个 ATR 时下一日噪音即触发，离硬止损不足半个 ATR 时与硬止损无差别。推论：硬止损恒 ≤ 参考价 − 0.9×ATR14，窗口非空要求止损距离 ≥ 1.0×ATR14，所以 0.9×ATR 项起约束作用的计划（如 600613 09-18：距离 0.78 < 0.856）天然没有软止损——是设计使然，不是缺陷。
+  - **label 必须说出真正绑定的项。** `derivation.inputs.binding_term ∈ {structure, buffer, atr, pct}` 记录四个 `min` 项里实际取到最小值的那一项（并列时归 `structure`，其余三项只负责加宽），`inputs.structure_value` 记结构点本身的值。label 按它动态生成：结构点绑定时写“（急跌反弹段，结构点：最近20个交易日最低价7.92）”；被加宽时写“（急跌反弹段，结构点最近20个交易日最低价7.92距离不足最小止损距离，按 0.9×ATR14 向下加宽）”，加宽项分别写作 `0.9×ATR14` / `2%` / `波动缓冲x.xx%`。不再有按 stage 静态写死的“结构低点”字样：600613 09-18 的 7.63 是 `8.41 − 0.9×ATR14` 而非 `low20` 7.92，卡上必须能看出来。
+- `soft_stop`（可选，priority 2）：价格 = MA5，允许 extra 条件，action=reduce_by_pct 50。**仅当** `hard_stop + 0.5 × ATR14 <= MA5 <= reference_price − 0.5 × ATR14` 时生成；否则不生成，并把 `{kind:"soft_stop", reason, inputs:{ma5, hard_stop, reference_price, atr14, window_low, window_high}}` 写入 `metrics.omitted_lines`。理由：软止损离现价不足半个 ATR 时下一日噪音即触发，离硬止损不足半个 ATR 时与硬止损无差别。推论：硬止损恒 ≤ 参考价 − 0.9×ATR14，窗口非空要求止损距离 ≥ 1.0×ATR14，所以 0.9×ATR 项起约束作用的计划（如 600613 09-18：距离 0.78 < 0.856）天然没有软止损——是设计使然，不是缺陷。`reason` 分两种写法：区间为空（下限 > 上限）时写“软止损区间为空（下限 8.06 > 上限 7.98，止损距离 0.78 < 1.0×ATR14 0.86），不生成”，不得写成“MA5 不在 [8.06, 7.98] 内”；区间非空但 MA5 在区间外时写“MA5 8.44 不在 [硬止损 + 0.5×ATR14, 参考价 − 0.5×ATR14] = [8.28, 8.34] 内，软止损与现价或硬止损间距不足，一日噪音即触发，故不生成”。
 - `time_stop`（必有）：crash_rebound/broken 3 个交易日、其余 5 个交易日内“收盘未站回确认线（stage 相应的 MA10 或 prior_high）”则 exit_all；execute_by=time，execute_at="T+N_close"。
 - `exposure`（当 current_exposure_pct > target_exposure_pct 时必有，priority 0）：`execute_by=time, execute_at="next_open+15m"`，action=reduce_to_shares(sizing.recommended_shares)。
 - `holiday`（valid_until 内存在 ≥5 自然日休市时必有；3 天的节日长周末不出线，但必须留痕：有效期内每个非普通周末（周五收盘后的周六+周日不算）且 <5 天的缺口写入 `metrics.omitted_lines` `{kind:"holiday", reason, inputs:{closed_days, last_trading_date, resume_date, threshold_days}}`）：最后交易日收盘前把仓位降到 `holiday_exposure_pct` = 阶段目标仓位的一半（由 `TARGET_EXPOSURE_PCT / 2` 派生而非手抄：crash_rebound 10、broken 0、breakout_hold 12.5、trend_hold 15、pullback_hold 15、base_platform 10、unclassified 7.5）。休市缺口只能由**真实开市日**起算：生成日若本身闭市，不得作为 `last_trading_date`。生成器把读到的日历冻结为 `metrics.calendar = {closure_gaps, sessions}`。
 - `no_add`（crash_rebound/broken 必有；其余可选）：直到 `daily_close >= MA10`（crash_rebound）或 MA5 前 block_add。
-- `trail`：当 `last >= max(成本, reference_price) + 1 × ATR14`（= arm_price）后启用，action=move_stop_to，目标价 = `max(previous_trail, max(hard_stop, min(近 3 日最低, arm_price − 1.5 × ATR14)))`，该式写入 `derivation.action_formula`、各项写入 `action_inputs`（无前序 trail 时公式不含 previous_trail 项）；只上移。**不生成**的两种情形（原因写入 `omitted_lines`）：`target_exposure_pct == 0`（仓位线已要求清仓，移动止损无意义）；计算出的目标价 `<= hard_stop`（“上移”不会改变止损，零信息）。
-- `take_partial`：`after_volume_climax` + `below_vwap` → reduce_by_pct 50（breakout/trend/crash_rebound 用）。
+- `trail`：`metric=daily_close, op=">=", confirm(bars=1, daily)`，触发价 arm_price = `max(anchor_price, reference_price) + 1 × ATR14`；action=move_stop_to，目标价 = `max(previous_trail, max(hard_stop, anchor_price))`，语义是“涨到 锚 + 1×ATR14 后止损上移到保本”。锚 `anchor_price`：持仓计划 = 快照平均成本（`anchor_source="average_cost"`；快照无成本时退回参考价，`"reference_price"`），新买计划 = 触发参考价（`"trigger_reference"`）。该式写入 `derivation.action_formula`、`anchor_price / anchor_source / floor_price`（及有前序时的 `previous_trail`）写入 `action_inputs`（无前序 trail 时公式不含 previous_trail 项）；只上移。label 写“日线收盘站上9.35（成本/现价孰高 + 1×ATR14）后，把止损上移到成本价8.49，只上移不下移”（新买计划写“触发参考价10.45”；前序 trail 更高时写“前序移动止损8.50（已高于成本价8.49）”）。此前的 `min(近 3 日最低, arm − 1.5×ATR)` 已废弃：600613 在 +11% 触发后止损只到 8.04、仍低于成本 8.49，锁定的是亏损，且 low3 是生成时刻的静态值。**不生成**的两种情形（原因写入 `omitted_lines`）：`target_exposure_pct == 0`（仓位线已要求清仓，移动止损无意义）；目标价 `<= hard_stop`（成本已在硬止损之下，“上移到保本”不会改变止损，零信息；reason 写“保本目标 max(硬止损 12.53, 成本价 11.90) = 12.53 不高于硬止损 12.53”）。评估器按线自带的 `metric/confirm` 判定，故 trail 与硬止损一样只在日线口径、按已收盘的日 K 收盘价确认，盘中冲高不算。
+- `take_partial`：`after_volume_climax` + `below_vwap` → reduce_by_pct 50（breakout/trend/crash_rebound 用）。原文表述把 extra 条件放在前面、价格条件放在最后：“当日成交量为20日最大量且收在振幅下半且最新价跌破当日VWAP、且最新价低于8.41时，减半仓”，不写成“在 8.41 下方减半仓”——价格是最弱的一项，不是主条件。
 - new_buy 计划另有 `trigger`（`daily_close >= reference` + `amount_ge_prev_day` + `sector_not_weak`）与 `cancel`（`daily_close < cancel_price` + `volume_expand_1_5x`），reference/cancel 直接取 lane 的 reference/support。
 
 `target_exposure_pct`：crash_rebound 20、broken 0（即 exposure 线 = 清仓）、breakout_hold 25、trend_hold 30、pullback_hold 30、base_platform 20、unclassified 15。`risk_per_trade_pct` 默认 1.0。
@@ -180,7 +181,7 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 
 ## 报告与 CLI
 
-- `report.py`：为每个计划生成 Markdown 纪律卡与 JSON：头部（股票、阶段、持仓、有效期、状态），仓位表（equity、单笔风险比例与其并排的 `current_risk_pct`、风险预算、止损距离、max/recommended shares、当前持仓股数、`sellable_quantity`、仓位比例按参考价与按快照市值 `market_value / equity` 两行），仓位表下当 `metrics.t1_locked_shares > 0`（即同日快照且 `sellable < quantity`）时一句“生成日不可卖 N 股（T+1，按 MM-DD HH:MM 快照），价格线自下一交易日起可执行”，线表（kind、条件人话、价格、执行方式、优先级、rule_id、formula），线表后的“未生成的线及原因”（来自 `metrics.omitted_lines`），推导表（价格与动作值各自复算；无价格的时间线 exposure/holiday 复算股数并与 `action.value` 比较，“一致”列与质量门 `every_line_has_derivation` 同一容差），质量门结果，证据引用。写到 `<output_root>/<trading_date>/<symbol>-<plan_key>.md/.json`，默认 `G:/StockPlatform/reports/discipline/`。
+- `report.py`：为每个计划生成 Markdown 纪律卡与 JSON：头部（股票、阶段、持仓、有效期、状态），仓位表（equity、单笔风险比例与其并排的 `current_risk_pct`、风险预算、止损距离、max/recommended shares、当前持仓股数、`sellable_quantity`、仓位比例按参考价与按快照市值 `market_value / equity` 两行），仓位表下当 `metrics.t1_locked_shares > 0`（即同日快照且 `sellable < quantity`）时一句“生成日不可卖 N 股（T+1，按 MM-DD HH:MM 快照），价格线自下一交易日起可执行”，线表（kind、条件人话、价格、执行方式、优先级、rule_id、formula；“条件”列带 extra 的线先列 extra 条件、再列价格条件，如“当日成交量为20日最大量且收在振幅下半（天量滞涨）、最新价跌破当日VWAP，且最新价低于 8.41（分钟确认）”），线表后的“未生成的线及原因”（来自 `metrics.omitted_lines`），推导表（价格与动作值各自复算；无价格的时间线 exposure/holiday 复算股数并与 `action.value` 比较，“一致”列与质量门 `every_line_has_derivation` 同一容差），质量门结果，证据引用。写到 `<output_root>/<trading_date>/<symbol>-<plan_key>.md/.json`，默认 `G:/StockPlatform/reports/discipline/`。
 - `inputs.py` 的日线口径：`canonical_bars_daily` 已有 `as_of` 当日已结算 bar 时，**无论几点**都直接用已结算 bar、不读实时行情（bar 存在本身证明该交易日已收盘，任何实时报价都属于更晚的交易日），`evidence_refs` 记 `bars_basis:settled`；只有当日 bar 缺席、**且 `as_of` 的上海日期就是当前交易日**（`collect(session_today=...)`，默认上海今天）才允许用 live_quote + 分钟线合成 forming bar，记 `bars_basis:settled_plus_forming` 与 `forming_bar:<source>:<date>`——回填历史 `--as-of` 永远不会把今晚的报价盖上历史日期；两者都没有记 `bars_basis:settled_only`。开市日既无当日 bar 又无 forming bar（15:00 至日线入库前、`--no-live`、行情源故障）时计划会落在上一交易日，另记 `bars_stale_day:<as_of 日>:last_settled:<最后 bar 日>`，CLI 回执 `plans[].warnings` 用白话重复一遍；闭市日（周末跑）不算 stale。
 - `scripts/trade-discipline.py`：入口先 `sys.stdout/stderr.reconfigure(encoding="utf-8")`，回执里的中文名在 Windows 控制台不得变成乱码。
   - `generate --account-key citics-primary [--symbol 600613.SH ...] [--as-of ISO] [--dry-run] [--output-dir DIR] [--env-file ...]`：dry-run 只读 DB、只写文件，stdout 打印 JSON 回执（每只 symbol：stage、status、失败检查、报告路径）。非 dry-run 落库后读回校验。
@@ -206,7 +207,7 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
   - F5 硬止损：formula 逐项写出四个 min 项；crash_rebound 的结构点改为 `low20`（近 20 个交易日最低价）。
   - F6 CLI stdout/stderr 强制 UTF-8。
   - F7 已结算日线优先于实时合成（见“报告与 CLI”一节）。
-  - 版本号：templates v2、generator v2、report v2；contract 仍为 trade-discipline-v1（只增字段，旧行可读）。
+  - 版本号：templates v2、generator v2、report v2；contract 仍为 trade-discipline-v1（只增字段，旧行可读）。（templates/report 后于 G1–G5 升到 v3。）
 - 2026-09-18 第二轮复审（对 F1–F7 实现的审查，本文已同步）：
   - F5 引入的“拒绝悬崖”：600613 收盘 ≥ 9.00 时 `low20` 7.92 超出 12% 上限，一个正常反弹让 active 翻成 rejected。修法：crash_rebound 的 `low20` 超出止损距离上限时改用两日低点（见模板 hard_stop 一节），`structure_source` 留痕；两日低点也超限时仍拒绝。
   - F7 的守卫是按时间而非按证据：历史 `--as-of 14:30` 会拉今晚实时报价盖掉当日已结算 bar。修法：当日已结算 bar 存在即不读实时；`as_of` 非当前交易日亦不读实时。
@@ -216,6 +217,13 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
   - 开市日无当日 bar 又无实时 bar 时计划落在上一交易日而无提示：加 `bars_stale_day` 证据引用与 CLI 回执 warnings。
   - `HOLIDAY_EXPOSURE_PCT` 由 `TARGET_EXPOSURE_PCT / 2` 派生。
   - 软止损与 lines_monotonic 无互斥组合（复审确认），仅补充文档说明。
+- 2026-09-18 第二轮 dry-run 验收（600613 主用例 aae99fb2b687，另 603823/000977/600664；本文已同步）：
+  - G1 硬止损 label：四张卡都写“结构低点”，实际都是 `reference − 0.9×ATR14` 绑定（600613 low20 7.92、止损 7.63）。修法：`derivation.inputs.binding_term`（structure/buffer/atr/pct）+ `structure_value`，label 按绑定项动态生成，静态 `STRUCTURE_LABEL` 删除。
+  - G2 移动止损目标价：原 `max(floor, min(low3, arm − 1.5×ATR))` 在 +11% 触发后只到 8.04、低于成本 8.49。修法：`max(hard_stop, anchor_price)`，锚 = 持仓成本 / 新买触发价，`action_inputs` 带 `anchor_source`；不高于硬止损时仍省略。
+  - G3 trail 触发条件：`metric=last` 配日线确认是口径混合。修法：`metric=daily_close, confirm(1, daily)`，评估器按线声明判定，盘中冲高不触发。
+  - G4 软止损省略文案：区间为空时不再打印“MA5 不在 [8.06, 7.98] 内”，改为“软止损区间为空（下限 8.06 > 上限 7.98，止损距离 0.78 < 1.0×ATR14 0.86），不生成”；区间非空、MA5 在外时保留原文案。
+  - G5 减半仓原文表述：extra 条件在前、价格条件在后；卡片“条件”列同样先 extra 后价格。
+  - 版本号：templates v3、report v3；generator 仍 v2、contract 仍 trade-discipline-v1（只增 inputs 字段，旧行可读；旧行 trail 的 `metric=last` 评估器仍按 close 读取）。
 
 ## 后续（不在 v1）
 
