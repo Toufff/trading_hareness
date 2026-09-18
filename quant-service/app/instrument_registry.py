@@ -80,7 +80,20 @@ ENSURE_INSTRUMENTS_SQL = (
 
 
 def normalized_symbols(symbols: Iterable[Any]) -> list[str]:
-    """Return the client-side deduplicated, blank-free, ascending symbol list.
+    """Return exactly the registry keys that will be written, ascending.
+
+    **Contract: this helper transforms, and what it returns is what is
+    written.**  It strips surrounding whitespace, drops ``None`` and blanks,
+    deduplicates and sorts, so the returned list -- not the caller's input --
+    is the authoritative set of ``quant.instruments.symbol`` values.  A caller
+    that also writes a child row carrying
+    ``REFERENCES quant.instruments(symbol)`` in the same transaction **must
+    write back these strings** (or the pairs ``ensure_instruments`` returns),
+    never its own raw list.  Registering ``"000001.SZ"`` here while writing
+    ``" 000001.SZ "`` into the child row is a mid-transaction foreign-key
+    failure of an otherwise good batch: precisely the desynchronisation the
+    case rule below refuses to introduce, so the transformation is made
+    observable by returning its result rather than left implicit.
 
     Sorting is the shared lock order described in the module docstring; the
     deduplication also keeps one statement from touching the same conflict
@@ -108,6 +121,21 @@ def normalized_symbols(symbols: Iterable[Any]) -> list[str]:
     return sorted(unique)
 
 
+def instrument_pairs(
+    symbols: Iterable[Any],
+    *,
+    exchange_for: Callable[[str], str] = default_exchange_for,
+) -> list[tuple[str, str]]:
+    """Return the ``(symbol, exchange)`` rows ``ensure_instruments`` will write.
+
+    Pure: the same normalization and the same ascending order as the write,
+    with the exchange resolved by the caller's own resolver.  It exists so a
+    caller can compute the registry rows without a connection -- and so the
+    write path and any caller-side assertion cannot drift apart.
+    """
+    return [(symbol, exchange_for(symbol)) for symbol in normalized_symbols(symbols)]
+
+
 def ensure_instruments(
     connection: Any,
     symbols: Iterable[Any],
@@ -115,29 +143,37 @@ def ensure_instruments(
     *,
     exchange_for: Callable[[str], str] = default_exchange_for,
     chunk_size: int = INSTRUMENT_CHUNK_SIZE,
-) -> list[str]:
+) -> list[tuple[str, str]]:
     """Register every symbol of one payload in ``quant.instruments``.
 
     Existing rows are left untouched (``ON CONFLICT DO NOTHING``), so this is
-    safe to call for a mixed payload of known and unknown symbols.  Returns
-    the normalized symbol list actually sent, so a caller can assert on it.
+    safe to call for a mixed payload of known and unknown symbols.
+
+    Returns **the ``(symbol, exchange)`` pairs actually written**, in the
+    order they were written, not the caller's input.  Per
+    ``normalized_symbols``' contract, a caller that writes a child row
+    referencing ``quant.instruments(symbol)`` in the same transaction takes
+    its symbols from this return value; anything the helper dropped (blank,
+    ``None``) or rewrote (surrounding whitespace) has no instrument row and
+    would fail that foreign key.
     """
-    ordered = normalized_symbols(symbols)
-    if not ordered:
+    pairs = instrument_pairs(symbols, exchange_for=exchange_for)
+    if not pairs:
         return []
     size = max(1, int(chunk_size))
-    for start in range(0, len(ordered), size):
-        chunk = ordered[start:start + size]
+    for start in range(0, len(pairs), size):
+        chunk = pairs[start:start + size]
         connection.execute(
             ENSURE_INSTRUMENTS_SQL,
-            (source, chunk, [exchange_for(symbol) for symbol in chunk]),
+            (source, [symbol for symbol, _exchange in chunk], [exchange for _symbol, exchange in chunk]),
         )
-    return ordered
+    return pairs
 
 
 __all__ = [
     "ENSURE_INSTRUMENTS_SQL",
     "INSTRUMENT_CHUNK_SIZE",
     "ensure_instruments",
+    "instrument_pairs",
     "normalized_symbols",
 ]

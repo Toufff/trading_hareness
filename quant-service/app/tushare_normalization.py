@@ -9,6 +9,72 @@ import re
 from psycopg.types.json import Json
 
 from .daily_bar_batch_repository import upsert_daily_bars
+from .instrument_registry import INSTRUMENT_CHUNK_SIZE
+
+
+#: One statement per ``stock_basic`` chunk, in the shared ascending symbol
+#: order, in place of one ``ON CONFLICT DO UPDATE`` per symbol.
+#:
+#: ``stock_basic`` is the *strongest* writer of ``quant.instruments`` on the
+#: production Longhu post-close path: ``longhu_market_repository
+#: .persist_full_market_close`` calls ``persist_rows(..., 'stock_basic', ...)``
+#: before ``persist_rows(..., 'daily', ...)`` inside one caller-owned
+#: transaction, so this statement takes its locks first and
+#: ``upsert_daily_bars`` merely re-locks rows it already holds.  ``DO UPDATE``
+#: row-locks every EXISTING conflicting row (the whole cross-section on any
+#: day after the first), so this order is the one the transaction is actually
+#: judged by -- sorting the later array while leaving ~5,500 sequential
+#: statements in payload order would have fixed nothing.
+STOCK_BASIC_INSTRUMENTS_SQL = (
+    "INSERT INTO quant.instruments(symbol,exchange,name,industry,list_date,delist_date,is_st,source) "
+    "SELECT t.symbol,t.exchange,t.name,t.industry,t.list_date,t.delist_date,t.is_st,%s "
+    "FROM unnest(%s::text[],%s::text[],%s::text[],%s::text[],%s::date[],%s::date[],%s::boolean[]) "
+    "AS t(symbol,exchange,name,industry,list_date,delist_date,is_st) "
+    "ORDER BY 1 "
+    "ON CONFLICT(symbol) DO UPDATE SET exchange=EXCLUDED.exchange,"
+    "name=coalesce(EXCLUDED.name,quant.instruments.name),"
+    "industry=coalesce(EXCLUDED.industry,quant.instruments.industry),"
+    "list_date=coalesce(EXCLUDED.list_date,quant.instruments.list_date),"
+    "delist_date=coalesce(EXCLUDED.delist_date,quant.instruments.delist_date),"
+    "is_st=EXCLUDED.is_st,source=EXCLUDED.source,updated_at=now()"
+)
+
+
+def _text_or_none(value: Any) -> str | None:
+    """Keep a text-column value a text-column value.
+
+    The per-row form let psycopg adapt each parameter on its own; an array
+    parameter is adapted as a whole, so a payload whose ``name`` is not a
+    string would otherwise decide the array's element type for every row.
+    ``None`` is preserved because ``coalesce(EXCLUDED.name, ...)`` in the
+    conflict clause distinguishes it from the empty string.
+    """
+    return None if value is None else str(value)
+
+
+def persist_stock_basic_instruments(
+    connection: Any, instruments: dict[str, tuple[Any, ...]], provider_key: str,
+    *, chunk_size: int = INSTRUMENT_CHUNK_SIZE,
+) -> list[str]:
+    """Write one ``stock_basic`` payload's instrument rows, ascending.
+
+    ``instruments`` maps symbol -> (exchange, name, industry, list_date,
+    delist_date, is_st); building it by plain assignment while walking the
+    payload is what preserves the previous last-duplicate-wins behaviour of
+    ~5,500 sequential ``DO UPDATE`` statements.  Returns the symbols written,
+    in the order they were written.
+    """
+    ordered = sorted(instruments)
+    size = max(1, int(chunk_size))
+    for start in range(0, len(ordered), size):
+        chunk = ordered[start:start + size]
+        values = [instruments[symbol] for symbol in chunk]
+        connection.execute(STOCK_BASIC_INSTRUMENTS_SQL, (
+            provider_key, chunk,
+            [row[0] for row in values], [row[1] for row in values], [row[2] for row in values],
+            [row[3] for row in values], [row[4] for row in values], [row[5] for row in values],
+        ))
+    return ordered
 
 
 def normalize_rows(
@@ -36,14 +102,19 @@ def normalize_rows(
     # a second ~5,500-element array statement writing rows that are rewritten
     # seconds later:
     #   trade_cal            - carries no symbols at all;
-    #   stock_basic          - the row loop writes full instrument rows itself;
-    #   daily / index_daily  - the bars are deferred to ``upsert_daily_bars``
-    #       (and, if that raises, to the per-row ``upsert_bar`` fallback), and
-    #       both upsert every instrument in the payload.  Nothing inside the
-    #       row loop needs the foreign key before then: the bars only land in
-    #       ``pending_bars``, and ``quant.data_quality_issues`` has no symbol
-    #       column.  Excluding them also keeps "an instrument is registered
-    #       before its row is validated" out of the hot path.
+    #   stock_basic          - ``persist_stock_basic_instruments`` below writes
+    #       full instrument rows for the whole payload in one sorted
+    #       statement, which is a strict superset of what a pre-pass would do;
+    #   daily / index_daily  - nothing inside the row loop needs the foreign
+    #       key: the bars only accumulate in ``pending_bars`` and
+    #       ``quant.data_quality_issues`` has no symbol column.  On the
+    #       success path ``upsert_daily_bars`` owns the registration (it
+    #       upserts every instrument of the payload before writing bars).  On
+    #       a database-level failure the whole transaction is aborted, so
+    #       neither bars nor instruments are written and a pre-pass would have
+    #       bought nothing.  (The per-row ``upsert_bar`` fallback below does
+    #       not change that reasoning either way; see its own comment for what
+    #       it can and cannot recover.)
     if api_name not in {"trade_cal", "stock_basic", "daily", "index_daily"}:
         ensure_instruments(connection, [
             symbol for symbol in (str(row.get("ts_code") or "").upper() for row in rows)
@@ -54,6 +125,12 @@ def normalize_rows(
     # actual persistence is deferred to one batched call after the loop
     # instead of ``upsert_bar`` running its 5-6 statements per row.
     pending_bars: list[Any] = []
+    # ``stock_basic`` rows are collected the same way and written after the
+    # loop by ``persist_stock_basic_instruments``: one sorted statement per
+    # payload instead of ~5,500 per-row ``ON CONFLICT DO UPDATE`` statements
+    # in payload order.  Plain assignment keyed by symbol reproduces the
+    # previous last-duplicate-wins outcome of those sequential statements.
+    stock_basic_instruments: dict[str, tuple[Any, ...]] = {}
     for row in rows:
         try:
             if api_name == "trade_cal":
@@ -68,10 +145,12 @@ def normalize_rows(
                 symbol = str(row.get("ts_code") or "").upper()
                 if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
                     raise ValueError("stock_basic row has invalid ts_code")
-                connection.execute("""INSERT INTO quant.instruments(symbol,exchange,name,industry,list_date,delist_date,is_st,source)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
-                       ON CONFLICT(symbol) DO UPDATE SET exchange=EXCLUDED.exchange,name=coalesce(EXCLUDED.name,quant.instruments.name), industry=coalesce(EXCLUDED.industry,quant.instruments.industry),list_date=coalesce(EXCLUDED.list_date,quant.instruments.list_date), delist_date=coalesce(EXCLUDED.delist_date,quant.instruments.delist_date),is_st=EXCLUDED.is_st, source=EXCLUDED.source,updated_at=now()""",
-                    (symbol, str(row.get("exchange") or exchange_for(symbol)), row.get("name"), row.get("industry"), date_parser(row.get("list_date")), date_parser(row.get("delist_date")), is_st_security_name(row.get("name")), provider_key))
+                stock_basic_instruments[symbol] = (
+                    str(row.get("exchange") or exchange_for(symbol)),
+                    _text_or_none(row.get("name")), _text_or_none(row.get("industry")),
+                    date_parser(row.get("list_date")), date_parser(row.get("delist_date")),
+                    bool(is_st_security_name(row.get("name"))),
+                )
             elif api_name == "suspend_d":
                 symbol = str(row.get("ts_code") or "").upper()
                 suspend_date = date_parser(row.get("trade_date") or row.get("suspend_date"))
@@ -119,6 +198,15 @@ def normalize_rows(
         except Exception as error:
             connection.execute("""INSERT INTO quant.data_quality_issues(capability,severity,code,message,details)
                    VALUES(%s,'warning','tushare_normalization_failed',%s,%s)""", (api_name, safe_error_detail(str(error), 500), Json({"row": row})))
+    if stock_basic_instruments:
+        # Every row above was already counted once it parsed (the same
+        # "parsed -> counted" contract the bars branch uses).  There is no
+        # per-row fallback here and deliberately so: the only failures left
+        # are server-side, and a server-side failure aborts the transaction,
+        # so a retry loop could not execute one statement -- nor could the
+        # per-row form this replaces, whose ``data_quality_issues`` warning
+        # would itself have failed on the aborted transaction.
+        persist_stock_basic_instruments(connection, stock_basic_instruments, provider_key)
     if pending_bars:
         # Each bar already incremented ``normalized`` above once it parsed
         # successfully (matching every other branch's "parsed -> counted"
@@ -128,10 +216,21 @@ def normalize_rows(
         try:
             upsert_daily_bars(connection, pending_bars)
         except Exception:
-            # A batch-level failure (a genuine constraint violation, not a
-            # parse error -- those were already isolated above) degrades to
-            # the previous one-statement-set-per-bar path so one bad bar
-            # cannot silently drop the rest of a full-market cross-section.
+            # Degrade to the previous one-statement-set-per-bar path so one
+            # bad bar cannot silently drop the rest of a full-market
+            # cross-section.  Be precise about the reach of this fallback:
+            # ``Database.transaction()`` yields a plain psycopg connection
+            # inside one ``connection.transaction()`` with no per-bar
+            # savepoint, so once the SERVER has raised (a genuine constraint
+            # violation) the transaction is aborted and the first fallback
+            # statement fails too -- the loop below then re-raises out of
+            # ``normalize_rows`` exactly as the batch did.  What it does
+            # recover is a failure raised client-side while
+            # ``upsert_daily_bars`` builds its arrays (model_dump, sha256,
+            # decimal handling) on one malformed bar, where the connection is
+            # still usable and the remaining bars can be written one by one.
+            # Widening it to server-side errors would require wrapping each
+            # bar in a nested ``connection.transaction()`` savepoint.
             for bar in pending_bars:
                 try:
                     upsert_bar(connection, bar)
@@ -146,4 +245,4 @@ def normalize_rows(
     return normalized
 
 
-__all__ = ["normalize_rows"]
+__all__ = ["STOCK_BASIC_INSTRUMENTS_SQL", "normalize_rows", "persist_stock_basic_instruments"]

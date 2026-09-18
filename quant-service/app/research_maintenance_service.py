@@ -58,8 +58,22 @@ def update_universe_members(payload: Any, deps: ResearchMaintenanceDependencies)
         # ascending symbol order (see ``app/instrument_registry.py``), instead
         # of one ``INSERT ... ON CONFLICT DO NOTHING`` per symbol inside the
         # membership loop below.  The exchange resolver stays injected.
-        ensure_instruments(connection, payload.symbols, "universe", exchange_for=deps.exchange_for)
-        for symbol in payload.symbols:
+        #
+        # The membership loop then walks the symbols the registry actually
+        # WROTE rather than ``payload.symbols``: ``quant.universe_members
+        # .symbol`` references ``quant.instruments(symbol)`` and the registry
+        # strips surrounding whitespace and drops blanks, so writing the raw
+        # input here would fail that foreign key mid-transaction for exactly
+        # the inputs the registry rewrote.  On the HTTP path the two lists are
+        # already identical (``UniverseUpdateRequest`` sorts, upper-cases,
+        # deduplicates and regex-checks); this closes the gap for any other
+        # caller and is the contract stated in ``instrument_registry``.
+        registered = [
+            symbol for symbol, _exchange in ensure_instruments(
+                connection, payload.symbols, "universe", exchange_for=deps.exchange_for,
+            )
+        ]
+        for symbol in registered:
             connection.execute(
                 """INSERT INTO quant.universe_members(universe_key,symbol,enabled,priority,source,updated_at)
                    VALUES(%s,%s,%s,%s,'api',now()) ON CONFLICT(universe_key,symbol) DO UPDATE SET enabled=EXCLUDED.enabled,
@@ -75,7 +89,9 @@ def update_universe_members(payload: Any, deps: ResearchMaintenanceDependencies)
             [str(row["symbol"]) for row in active], source="universe-members-api", priority=payload.priority,
         )
     return {
-        "universe_key": payload.universe_key, "updated": len(payload.symbols), "enabled": payload.enabled,
+        # ``updated`` counts the membership rows actually written, which is
+        # the registered list, not the raw payload length.
+        "universe_key": payload.universe_key, "updated": len(registered), "enabled": payload.enabled,
         "history": history,
     }
 

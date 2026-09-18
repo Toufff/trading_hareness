@@ -17,7 +17,12 @@ provider response directly to a live threshold or order path.
   writes its own evidence must use `ensure_instruments` — one statement per
   5,000-symbol chunk, client-side deduplicated, sorted ascending so every
   writer takes the same lock order — and must not reintroduce a per-row
-  `INSERT INTO quant.instruments ... DO NOTHING` loop. It is **not** yet the
+  `INSERT INTO quant.instruments ... DO NOTHING` loop. `ensure_instruments`
+  returns the `(symbol, exchange)` pairs it actually wrote, and that return
+  value is the contract: the helper strips and drops blanks, so a caller that
+  writes a child row referencing `quant.instruments(symbol)` in the same
+  transaction takes its symbols from the return value, never from its own raw
+  input. It is **not** yet the
   only writer of that table, so do not assume instrument writes are globally
   centralised or globally ordered:
   - Converted to the helper: `tushare_normalization` (non-bar APIs),
@@ -26,17 +31,21 @@ provider response directly to a live threshold or order path.
     `intraday_minute_capture_actions`, `offline_minute_import_service`,
     `research_maintenance_service.update_universe_members`, and
     `remote_archive` (message and report signals).
-  - Sorted in place but keeping their own SQL because they write more than the
-    symbol: `daily_bar_batch_repository` (`ON CONFLICT DO UPDATE`, the
-    strongest lock on this table — it locks every existing conflicting row,
-    where `DO NOTHING` locks only newly inserted ones) and the two
-    `annual_daily_backfill` stage inserts (`ORDER BY 1`).
+  - Set-based and sorted but keeping their own SQL because they write more
+    than the symbol (`ON CONFLICT DO UPDATE` — the strongest lock on this
+    table: it locks every existing conflicting row, where `DO NOTHING` locks
+    only newly inserted ones): `daily_bar_batch_repository` (sorted array),
+    `tushare_normalization.persist_stock_basic_instruments` (one sorted
+    `unnest` statement per `stock_basic` payload, `ORDER BY 1`), and every
+    `INSERT INTO quant.instruments` in `annual_daily_backfill` — the two
+    stage inserts and `_persist_stock_basic` — each with `ORDER BY 1`, pinned
+    by `test_instrument_registry.SharedLockOrderAcrossWritersTests`.
   - **Not converted**, each still a per-row or attribute-carrying write:
-    `annual_daily_backfill._persist_stock_basic`, `broker_order_repository`,
+    `broker_order_repository`,
     `broker_trade_repository`, `claim_review_service`, `daily_bar_repository`,
     `intraday_watchlist_service`, `main.py` (akshare, single symbol),
     `personal_decision_repository` (two sites), `strategy_decision_service`,
-    the `stock_basic` branch of `tushare_normalization`, and the injected
+    and the injected
     per-row `ensure_instrument` that `main.persist_eastmoney_sector_members`
     hands to `sector_membership_repository.persist_observed_snapshot`. Most carry a
     name/industry that the `DO NOTHING` helper cannot express; several are
