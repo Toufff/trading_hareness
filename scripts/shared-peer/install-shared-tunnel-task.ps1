@@ -61,6 +61,12 @@ if ($WhatIf) {
         ScriptArguments = $scriptArguments
         Forwards = @($tunnelProfile.Forwards)
         SshOptions = @($tunnelProfile.SshOptions)
+        Compression = [bool]$tunnelProfile.Compression
+        # The whole vector, so a dry run shows the multiplexing options that
+        # make "its own TCP connection" true rather than assumed. The
+        # destination shown is the fallback alias; the real one is resolved at
+        # launch by Resolve-OwnerTunnelSshTarget.
+        SshArguments = @(Get-SharedTunnelSshArgument -TunnelProfile $tunnelProfile -Destination $SshAlias)
         ReclaimablePorts = @($tunnelProfile.RemotePorts)
         HealthCheck = $tunnelProfile.HealthCheck
         LogonType = $LogonType
@@ -70,6 +76,33 @@ if ($WhatIf) {
         RuntimeStateTouched = $false
     }
     return
+}
+function Stop-TunnelInstallOnFailure {
+    # Intraday is a dependency: a failed install must stay registered so the
+    # two-minute supervising trigger keeps trying to bring the platform's only
+    # owner->peer connection back. Batch is an optimization, and
+    # install-shared-tunnel-tasks.ps1 swallows its throw, so a registered batch
+    # task that cannot pass its health check would retry every two minutes for
+    # as long as the host is up - reclaiming ports, spawning ssh clients and
+    # writing events that nobody asked for, with nothing to stop it. Disable it
+    # here so the failure is bounded: the task stays registered (an operator can
+    # read it and re-enable it) but stops running.
+    param([Parameter(Mandatory)][string]$Message)
+    if ($tunnelProfile.Name -eq 'batch') {
+        try {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+            [void](Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
+            [void](Write-RuntimeEvent -PlatformRoot $PlatformRoot -Service $service `
+                -Event 'install_health_failed' -Level 'error' -Data @{
+                    task_name = $TaskName
+                    task_disabled = $true
+                    reason = $Message
+                })
+        } catch {
+            Write-Warning "Could not disable the failed batch tunnel task '$TaskName': $($_.Exception.Message)"
+        }
+    }
+    throw $Message
 }
 
 Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -120,6 +153,10 @@ $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -MultipleInstances IgnoreNew
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType $LogonType -RunLevel Limited
+# Everything the health check accepts as evidence must post-date this instant,
+# or a leftover 'healthy' state file from an earlier run would pass for proof
+# that THIS install came up.
+$installStartedAt = [DateTimeOffset]::Now
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
     -Settings $settings -Principal $principal -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
@@ -130,22 +167,32 @@ do {
 } while ($task.State -ne 'Running' -and [DateTime]::UtcNow -lt $deadline)
 if ($task.State -ne 'Running') {
     $info = Get-ScheduledTaskInfo -TaskName $TaskName
-    throw "Shared peer tunnel task did not stay running; last result $($info.LastTaskResult)"
+    Stop-TunnelInstallOnFailure -Message "Shared peer tunnel task did not stay running; last result $($info.LastTaskResult)"
 }
 Start-Sleep -Seconds 2
 $task = Get-ScheduledTask -TaskName $TaskName
 if ($task.State -ne 'Running') {
     $info = Get-ScheduledTaskInfo -TaskName $TaskName
-    throw "Shared peer tunnel task exited during startup; last result $($info.LastTaskResult)"
+    Stop-TunnelInstallOnFailure -Message "Shared peer tunnel task exited during startup; last result $($info.LastTaskResult)"
 }
 
 # Health is profile-specific. The intraday tunnel carries the owner API, so an
 # HTTP 200 through it proves the whole chain. The batch tunnel carries only the
-# database forward and there is no HTTP endpoint behind it, so the equivalent
-# owner-side evidence is that sshd actually published the reserved loopback
-# listener - an open port is a weaker claim than HTTP 200 and is reported as
-# such. The peer-side proof that a query really flows through 5433 is
-# deploy-batch-tunnel-port.py's authenticated SELECT 1, which runs on the peer.
+# database forward and there is no HTTP endpoint behind it, so no owner-side
+# probe can prove end to end that a query flows; that proof is
+# deploy-batch-tunnel-port.py's authenticated SELECT 1 + inet_server_port() from
+# the peer's quant-research container, which runs on the peer.
+#
+# What the batch check CAN prove, and now does, is that the listener on 15433 is
+# THIS install's listener rather than any process that happens to hold the port:
+#   1. lightServer publishes a loopback listener on 15433 (`ss -ltn`), and
+#   2. a local ssh.exe whose command line carries this profile's exact
+#      forwarding tuple is alive, and
+#   3. the supervised runtime state was written by this install (its
+#      requested_at is not older than the moment the task was registered).
+# Without (2) and (3) a foreign process that grabbed 15433 between the reclaim
+# and the probe was reported as health='remote_listener_open'. The claim is
+# still weaker than the intraday HTTP 200 and is still labelled as such.
 $healthDeadline = [DateTime]::UtcNow.AddSeconds(30)
 $sshPath = (Get-Command ssh.exe).Source
 if ($tunnelProfile.HealthCheck -eq 'remote_api_http') {
@@ -158,29 +205,49 @@ if ($tunnelProfile.HealthCheck -eq 'remote_api_http') {
         Start-Sleep -Seconds 1
     } while ([DateTime]::UtcNow -lt $healthDeadline)
     if ($remoteHealth -ne '200') {
-        throw "Shared peer tunnel task is running, but remote API health returned '$remoteHealth' instead of 200"
+        Stop-TunnelInstallOnFailure -Message "Shared peer tunnel task is running, but remote API health returned '$remoteHealth' instead of 200"
     }
     $healthLabel = 'remote_api_http_200'
 } else {
     $batchPort = $tunnelProfile.RemoteDatabasePort
     $listenerUp = $false
+    $localClient = $null
     do {
         $probe = Invoke-ConsoleFreeCommand -FilePath $sshPath -Arguments @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', $SshAlias,
             "ss -ltn 'sport = :$batchPort' | tail -n +2 | grep -q .") -TimeoutSeconds 12
-        $listenerUp = $probe.ExitCode -eq 0
+        # An open remote port is not evidence on its own: `ss` reports whoever
+        # holds it. Only accept it together with a live local client of this
+        # profile, so the listener is attributable to this tunnel.
+        $localClient = @(Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { Test-SharedTunnelCommandLine -TunnelProfile $tunnelProfile -CommandLine $_.CommandLine }) |
+            Select-Object -First 1
+        $listenerUp = ($probe.ExitCode -eq 0) -and $null -ne $localClient
         if ($listenerUp) { break }
         Start-Sleep -Seconds 1
     } while ([DateTime]::UtcNow -lt $healthDeadline)
     if (-not $listenerUp) {
-        throw "Batch tunnel task is running, but lightServer published no loopback listener on $batchPort"
+        $detail = if ($null -eq $localClient) { 'no local ssh client owns the batch forward' }
+                  else { "lightServer published no loopback listener on $batchPort" }
+        Stop-TunnelInstallOnFailure -Message "Batch tunnel task is running, but $detail"
     }
     $remoteHealth = "listening:$batchPort"
-    $healthLabel = 'remote_listener_open'
+    $healthLabel = 'remote_listener_open_owned_by_local_client'
 }
 
 $state = Get-RuntimeState -PlatformRoot $PlatformRoot -Service $service
 if (-not $state -or -not $state.PSObject.Properties['run_id']) {
-    throw 'Shared peer tunnel became reachable without a supervised runtime state'
+    Stop-TunnelInstallOnFailure -Message 'Shared peer tunnel became reachable without a supervised runtime state'
+}
+if ($tunnelProfile.HealthCheck -ne 'remote_api_http') {
+    # Third leg of the batch claim: the state must belong to this install.
+    $requestedAt = $null
+    if ($state.PSObject.Properties['requested_at'] -and $state.requested_at) {
+        [void][DateTimeOffset]::TryParse([string]$state.requested_at, [ref]$requestedAt)
+    }
+    if ($null -eq $requestedAt -or $requestedAt -lt $installStartedAt.AddSeconds(-1)) {
+        Stop-TunnelInstallOnFailure -Message ("Batch tunnel health used a stale runtime state (requested_at " +
+            "'$($state.requested_at)' predates this install at '$($installStartedAt.ToString('o'))')")
+    }
 }
 $healthyState = @{}
 foreach ($property in $state.PSObject.Properties) {
@@ -202,4 +269,7 @@ $healthyState.remote_database_port = $tunnelProfile.RemoteDatabasePort
         remote_api_port = $tunnelProfile.RemoteApiPort
         remote_database_port = $tunnelProfile.RemoteDatabasePort
     })
-$task | Select-Object TaskName,State,@{Name='RemoteApiHealth';Expression={$remoteHealth}}
+$task | Select-Object TaskName,State,
+    @{Name='Profile';Expression={$tunnelProfile.Name}},
+    @{Name='Health';Expression={$healthLabel}},
+    @{Name='RemoteApiHealth';Expression={$remoteHealth}}

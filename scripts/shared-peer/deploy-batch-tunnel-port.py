@@ -4,25 +4,51 @@ Run as root ON THE PEER HOST, after the owner's batch tunnel task
 (``trading-hareness-shared-peer-batch-tunnel``) is publishing
 ``127.0.0.1:15433``.  Modelled on ``deploy-private-tunnel.py``: bounded, backs
 everything it touches up first, recreates **only** ``db-tunnel``, and restores
-the backup on any failure.
+what it changed on any failure.
 
 What it changes, and nothing else:
 
 * ``.env``            - adds ``PEER_BATCH_DB_PORT`` / ``PEER_BATCH_REMOTE_PORT``
-* ``compose.yaml``    - passes those two variables into ``db-tunnel``
-* ``ssh-tunnel-entrypoint.sh`` - the reviewed version with the optional third
-  ``-L`` forward (the image bakes the entrypoint, hence the rebuild)
+* ``compose.yaml``    - passes those two variables into ``db-tunnel`` (and, for
+  the states that need it, ``PEER_LOCAL_BIND_ADDRESS``)
+* ``ssh-tunnel-entrypoint.sh`` - gains the optional third ``-L`` forward (the
+  image bakes the entrypoint, hence the rebuild)
 
-Why a second connection at all: SSH multiplexes every forward over one TCP
-connection, so the existing ``-L 5432`` and a hypothetical ``-L 5433`` on the
-same sidecar connection would still share one window and one queue.  The owner
-side therefore dials a *separate* SSH connection for 15433, and this script
-only exposes its far end to the peer's containers.
+It never writes the repo's entrypoint over a peer file it has not recognised.
+The peer's deployed tree and this repository have drifted apart before, and the
+two differ in exactly the place that matters: the peer's live entrypoint binds
+its forwards to ``0.0.0.0`` literally, while the repo copy binds
+``${PEER_LOCAL_BIND_ADDRESS:-127.0.0.1}`` and expects compose to set that
+variable.  Overwriting one with the other on a peer whose compose does not set
+it moves 5432/5681 into the sidecar's own network namespace: every sibling
+container loses the database and the gateway, and a healthcheck that runs
+*inside* that same container still passes.  So this script reads the peer's
+ACTUAL deployed state first - the entrypoint's SHA-256, the rendered
+``db-tunnel`` healthcheck, its environment keys and its image - and refuses
+unless that state is one of ``KNOWN_PEER_STATES``.  Each known state carries the
+strategy it may be changed with: ``patch`` (insert the batch block into the
+peer's own file, keeping its bind address) or ``repo_copy`` (write this repo's
+entrypoint, and then ``PEER_LOCAL_BIND_ADDRESS`` must be present in, or is added
+to, the compose environment).
 
-The verification is an authenticated ``SELECT 1`` through 5433 that also
-reports ``inet_server_port()``: an open socket proves nothing about what is
-behind it, and 55432 is the only answer that proves the owner's PostgreSQL.
+Rollback: the running image is tagged ``:pre-batch-<stamp>`` **before** the
+build, because ``docker compose build db-tunnel`` retags the image the running
+container came from.  The printed rollback command restores the configuration
+files *and* re-points that tag, which is the only reason rollback is a real
+option rather than a promise.
+
+The verification runs from ``quant-research``, not from the sidecar: the
+sidecar's image is ``openssh-client`` + ``netcat`` with no PostgreSQL client and
+no database credentials, so a probe there can only ever fail.  ``quant-research``
+has psycopg and the ``PG*`` environment, and being outside the sidecar is the
+point - it proves the path the peer's containers actually use.  The probe is an
+authenticated ``SELECT 1, inet_server_port()``: an open socket proves nothing
+about what is behind it, and 55432 is the only answer that proves the owner's
+PostgreSQL.  5432 is probed the same way before the change and again after the
+recreate, so a batch port that works while the intraday path broke cannot be
+reported as success.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -35,16 +61,76 @@ D = ['sudo', '-u', 'stockpeer', 'env', 'XDG_RUNTIME_DIR=/run/user/1002',
      'DOCKER_HOST=unix:///run/user/1002/docker.sock', 'docker']
 HERE = Path(__file__).resolve().parent
 ROOT = Path('/home/stockpeer/trading_hareness/deploy/shared-peer')
-TAG = 'trading-hareness-peer-db-tunnel:batch-20260919'
+STAMP = time.strftime('%Y%m%dT%H%M%S')
 BATCH_LOCAL_PORT = os.environ.get('PEER_BATCH_DB_PORT', '5433')
 BATCH_REMOTE_PORT = os.environ.get('PEER_BATCH_REMOTE_PORT', '15433')
+INTRADAY_LOCAL_PORT = '5432'
 SERVICE = 'db-tunnel'
+VERIFIER = 'quant-research'
 NAMES = ['.env', 'compose.yaml', 'ssh-tunnel-entrypoint.sh']
 C = D + ['compose', '--env-file', str(ROOT / '.env'), '-f', str(ROOT / 'compose.yaml'),
          '-f', str(ROOT / 'compose.intraday-owner.yaml')]
 
 ENV_BLOCK = ('      PEER_BATCH_DB_PORT: ${PEER_BATCH_DB_PORT:-}\n'
              '      PEER_BATCH_REMOTE_PORT: ${PEER_BATCH_REMOTE_PORT:-15433}\n')
+LOCAL_BIND_BLOCK = '      PEER_LOCAL_BIND_ADDRESS: "0.0.0.0"\n'
+COMPOSE_ANCHOR = '      REMOTE_API_PORT: ${REMOTE_API_PORT:-15681}\n'
+
+# Every state this script is allowed to change, keyed by the SHA-256 of the
+# peer's deployed ssh-tunnel-entrypoint.sh (LF-normalised).  Anything else is a
+# refusal, not a guess: add the new state here, with its own strategy, after
+# reading the peer's file.
+#
+# 'nc-legacy-20260917' is what lightServer is actually running (measured
+# read-only on 2026-09-19: 1694 bytes, md5 257573f7..., healthcheck
+# `nc -z 127.0.0.1 5432 && nc -z 127.0.0.1 5681`, db-tunnel has no `image:` key
+# so compose builds and tags trading-hareness-peer-db-tunnel:latest, and the
+# forwards are bound to 0.0.0.0 literally).  deploy-private-tunnel.py has NOT
+# been applied to the peer's shared-peer stack: the richer
+# /usr/local/bin/ssh-tunnel-healthcheck does not exist there.
+#
+# 'private-tunnel-repo' is the state the peer would be in after this
+# repository's deploy/shared-peer/ tree is deployed as-is.  It is listed so the
+# script keeps working after that happens; it has never been observed on the
+# peer, and the script says so when it matches.
+KNOWN_PEER_STATES = {
+    'nc-legacy-20260917': {
+        'entrypoint_sha256': 'b0aa1e02c60b7d0951e16b91250d863716ebaa554ee60ba0f18797469448072c',
+        'healthcheck_test': ['CMD-SHELL', 'nc -z 127.0.0.1 5432 && nc -z 127.0.0.1 5681'],
+        'environment_keys': ['PEER_SSH_HOST', 'PEER_SSH_HOST_KEY_ALIAS', 'PEER_SSH_PORT',
+                             'PEER_SSH_USER', 'REMOTE_API_PORT', 'REMOTE_DB_PORT'],
+        'image': None,
+        'strategy': 'patch',
+        # The peer's own file hardcodes 0.0.0.0 on both existing forwards; the
+        # batch forward must match it, not introduce a variable the peer's
+        # compose does not set.
+        'batch_bind_address': '0.0.0.0',
+        'entrypoint_anchor': 'exec ssh "$@" \\\n',
+        'observed': True,
+    },
+    'private-tunnel-repo': {
+        'entrypoint_sha256': 'ffee3be873f009d69e0ac46f5cdc32c25ab13f207b336a49b1ba56332d7f0a18',
+        'healthcheck_test': ['CMD', '/usr/local/bin/ssh-tunnel-healthcheck'],
+        'environment_keys': ['PEER_LOCAL_BIND_ADDRESS', 'PEER_SSH_HOST', 'PEER_SSH_HOST_KEY_ALIAS',
+                             'PEER_SSH_PORT', 'PEER_SSH_USER', 'PGDATABASE', 'PGPASSWORD',
+                             'PGUSER', 'REMOTE_API_PORT', 'REMOTE_DB_PORT'],
+        'image': 'trading-hareness-peer-db-tunnel:private-20260914',
+        'strategy': 'repo_copy',
+        'batch_bind_address': '${PEER_LOCAL_BIND_ADDRESS:-127.0.0.1}',
+        'entrypoint_anchor': 'exec ssh -NT \\\n',
+        'observed': False,
+    },
+}
+
+# psycopg, not psql: the sidecar has no PostgreSQL client at all, and
+# quant-research ships psycopg 3 (measured 3.2.6) rather than the psql binary.
+# Credentials come from the container's own PG* environment and never appear on
+# a command line or in this script's output.
+PROBE = ("import psycopg;"
+         "c=psycopg.connect(host='db-tunnel',port=%s,connect_timeout=5,"
+         "options='-c statement_timeout=8000');"
+         "r=c.execute('SELECT 1, inet_server_port()').fetchone();"
+         "print('%%s|%%s' %% (r[0], r[1]))")
 
 
 def config():
@@ -55,24 +141,143 @@ def compose_run(*arguments, **kwargs):
     return subprocess.run(C + list(arguments), check=True, **kwargs)
 
 
+def sha256_text(text):
+    return hashlib.sha256(text.replace('\r\n', '\n').encode('utf-8')).hexdigest()
+
+
 def set_env_keys(text, updates):
     lines = [line for line in text.splitlines() if line.split('=', 1)[0] not in updates]
     lines.extend(key + '=' + value for key, value in updates.items())
     return '\n'.join(lines) + '\n'
 
 
-def add_compose_environment(text):
-    """Insert the two variables into db-tunnel's environment, once."""
+def add_compose_environment(text, with_local_bind):
+    """Insert the batch variables into db-tunnel's environment, once."""
     if 'PEER_BATCH_DB_PORT' in text:
         return text
-    anchor = '      REMOTE_API_PORT: ${REMOTE_API_PORT:-15681}\n'
-    assert text.count(anchor) == 1, 'db-tunnel REMOTE_API_PORT anchor is not unique'
-    return text.replace(anchor, anchor + ENV_BLOCK, 1)
+    assert text.count(COMPOSE_ANCHOR) == 1, 'db-tunnel REMOTE_API_PORT anchor is not unique'
+    block = ENV_BLOCK
+    if with_local_bind and 'PEER_LOCAL_BIND_ADDRESS' not in text:
+        # Only reachable on a repo_copy state: the repo entrypoint binds
+        # ${PEER_LOCAL_BIND_ADDRESS:-127.0.0.1}, and 127.0.0.1 inside the
+        # sidecar is invisible to every sibling container.
+        block = LOCAL_BIND_BLOCK + block
+    return text.replace(COMPOSE_ANCHOR, COMPOSE_ANCHOR + block, 1)
+
+
+def patch_entrypoint(text, bind_address, anchor):
+    """Add the optional batch forward to the peer's OWN entrypoint."""
+    if 'PEER_BATCH_DB_PORT' in text:
+        return text
+    assert text.count(anchor) == 1, 'entrypoint exec anchor is not unique: ' + repr(anchor)
+    block = (
+        '\n'
+        '# Optional third forward: the owner\'s batch tunnel (a separate SSH connection\n'
+        '# on the owner side, reserved remote port 15433) so bulk/COPY jobs stop sharing\n'
+        '# the intraday connection\'s TCP window. Unset means "not deployed" and this\n'
+        '# container behaves exactly as before.\n'
+        '#\n'
+        '# A -L forward binds locally and does not require the far end to be listening,\n'
+        '# so ExitOnForwardFailure=yes does not make the sidecar depend on the owner\'s\n'
+        '# batch tunnel being up: if the owner side is down, connections to the batch\n'
+        '# port fail individually while 5432/5681 keep working. That is also why the\n'
+        '# healthcheck is deliberately left alone - gating container health on an\n'
+        '# optimization would turn it into an outage.\n'
+        '#\n'
+        '# The bind address is copied from this file\'s existing forwards on purpose:\n'
+        '# a socket bound to 127.0.0.1 lives in this container\'s network namespace and\n'
+        '# is unreachable from the sibling containers that are supposed to use it.\n'
+        'if [ -n "${PEER_BATCH_DB_PORT:-}" ]; then\n'
+        '  set -- "$@" -L \\\n'
+        '    "%s:${PEER_BATCH_DB_PORT}:127.0.0.1:${PEER_BATCH_REMOTE_PORT:-15433}"\n'
+        'fi\n'
+        '\n' % bind_address)
+    return text.replace(anchor, block + anchor, 1)
+
+
+def inspect_peer_state():
+    """Read-only. Returns (state_name, known_state, rendered db-tunnel service)."""
+    for name in NAMES + ['compose.intraday-owner.yaml']:
+        assert (ROOT / name).exists(), 'missing peer file: ' + str(ROOT / name)
+    entrypoint_hash = sha256_text((ROOT / 'ssh-tunnel-entrypoint.sh').read_text())
+    service = config()['services'][SERVICE]
+    observed = {
+        'entrypoint_sha256': entrypoint_hash,
+        'healthcheck_test': list(service.get('healthcheck', {}).get('test') or []),
+        'environment_keys': sorted((service.get('environment') or {}).keys()),
+        'image': service.get('image'),
+    }
+    if 'PEER_BATCH_DB_PORT' in observed['environment_keys']:
+        raise SystemExit('the batch port is already deployed on this peer; nothing to do:\n'
+                         + json.dumps(observed, indent=2))
+    matches = [(key, value) for key, value in KNOWN_PEER_STATES.items()
+               if value['entrypoint_sha256'] == entrypoint_hash]
+    if not matches:
+        raise SystemExit(
+            'refusing to touch the peer: its ssh-tunnel-entrypoint.sh is not a state this '
+            'script knows how to change.\n'
+            'observed: ' + json.dumps(observed, indent=2) + '\n'
+            'supported entrypoint hashes: '
+            + json.dumps({k: v['entrypoint_sha256'] for k, v in KNOWN_PEER_STATES.items()}, indent=2)
+            + '\nRead the peer file, decide the strategy by hand, and add it to '
+              'KNOWN_PEER_STATES before running this again.')
+    name, known = matches[0]
+    mismatch = {key: {'expected': known[key], 'observed': observed[key]}
+                for key in ('healthcheck_test', 'environment_keys', 'image')
+                if known[key] != observed[key]}
+    if mismatch:
+        raise SystemExit(
+            'refusing to touch the peer: its entrypoint matches known state %r but the rest '
+            'of the deployed db-tunnel service does not.\n%s'
+            % (name, json.dumps(mismatch, indent=2)))
+    if not known['observed']:
+        print('note: matched known state %r, which has never been observed on this peer.' % name,
+              file=sys.stderr)
+    return name, known
+
+
+def container_id(service_name):
+    return subprocess.check_output(C + ['ps', '-q', service_name], text=True).strip()
+
+
+def probe_port(port):
+    """Authenticated SELECT 1 through db-tunnel:<port>, from quant-research."""
+    out = subprocess.check_output(
+        C + ['exec', '-T', VERIFIER, 'python', '-c', PROBE % port],
+        text=True, timeout=60).strip()
+    assert out == '1|55432', (
+        'db-tunnel:%s did not reach the owner database (expected 1|55432): %r' % (port, out))
+    return out
+
+
+def assert_preconditions():
+    """Everything that can refuse must refuse BEFORE the first backup or write."""
+    verifier = container_id(VERIFIER)
+    assert verifier, (
+        '%s is not running; it is the only container with a PostgreSQL client and the PG* '
+        'environment, so without it the change cannot be verified' % VERIFIER)
+    env_keys = set((config()['services'][VERIFIER].get('environment') or {}).keys())
+    missing = sorted({'PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD'} - env_keys)
+    assert not missing, '%s is missing the credentials to verify with: %s' % (VERIFIER, missing)
+    subprocess.check_output(C + ['exec', '-T', VERIFIER, 'python', '-c', 'import psycopg'],
+                            text=True, timeout=60)
+    # The owner side must already be publishing the far end, or this deploy
+    # produces a port that cannot work and will roll itself back after a
+    # rebuild and a recreate of the live sidecar.
+    listener = subprocess.run(['ss', '-ltn', 'sport = :' + BATCH_REMOTE_PORT],
+                              capture_output=True, text=True)
+    assert len(listener.stdout.strip().splitlines()) > 1, (
+        'nothing is listening on 127.0.0.1:%s: install the owner-side batch tunnel task '
+        '(install-shared-tunnel-task.ps1 -Profile batch) first' % BATCH_REMOTE_PORT)
+    # Baseline: the intraday path works right now, so "5432 broke" after the
+    # recreate can only mean this change broke it.
+    baseline = probe_port(INTRADAY_LOCAL_PORT)
+    return {'verifier_container': verifier, 'intraday_baseline': baseline}
 
 
 def wait_healthy(timeout=180):
     deadline = time.time() + timeout
-    container = subprocess.check_output(C + ['ps', '-q', SERVICE], text=True).strip()
+    container = container_id(SERVICE)
     assert container, 'db-tunnel container id not found after recreate'
     while time.time() < deadline:
         state = json.loads(subprocess.check_output(D + ['inspect', container], text=True))[0]['State']
@@ -85,63 +290,91 @@ def wait_healthy(timeout=180):
     raise SystemExit('db-tunnel did not become healthy within %ds' % timeout)
 
 
-def verify_batch_port():
-    """Authenticated SELECT 1 through 5433, inside the sidecar."""
-    probe = ("PGPORT=%s PGCONNECT_TIMEOUT=5 PGOPTIONS='-c statement_timeout=8000' "
-             "psql -X -w -A -t -v ON_ERROR_STOP=1 "
-             "-c 'SELECT 1, inet_server_port()'" % BATCH_LOCAL_PORT)
-    out = subprocess.check_output(
-        C + ['exec', '-T', SERVICE, 'sh', '-c', 'timeout 20 env ' + probe], text=True).strip()
-    assert out == '1|55432', 'batch port did not reach the owner database: ' + repr(out)
-    return out
-
-
 def main():
     if os.geteuid() != 0:
         raise SystemExit('run as root on the peer host')
+    state_name, known = inspect_peer_state()
+    preconditions = assert_preconditions()
     before = config()
+
+    # `docker compose build db-tunnel` retags the image the running container
+    # came from (this peer's compose has no `image:` key, so the built tag is
+    # the project default and the known-good image becomes dangling and
+    # untagged). Capture and pin it BEFORE the build, or there is nothing to
+    # roll back to.
+    running = json.loads(subprocess.check_output(
+        D + ['inspect', container_id(SERVICE)], text=True))[0]
+    running_image_ref = known['image'] or running['Config']['Image']
+    running_image_id = running['Image']
+    preserved_tag = running_image_ref.split(':')[0] + ':pre-batch-' + STAMP
+    subprocess.run(D + ['tag', running_image_id, preserved_tag], check=True)
+    batch_tag = running_image_ref.split(':')[0] + ':batch-' + STAMP
+
     backup = (Path('/home/stockpeer/.local/share/trading-hareness/incident-backups') /
-              time.strftime('%Y%m%dT%H%M%S-batch-tunnel-port'))
+              (STAMP + '-batch-tunnel-port'))
     backup.mkdir(parents=True, mode=0o700)
     for name in NAMES:
         if (ROOT / name).exists():
             shutil.copy2(ROOT / name, backup / name)
-    rollback = ('cp %s/* %s/ && ' % (backup, ROOT)) + ' '.join(
-        C + ['up', '-d', '--no-deps', '--no-build', SERVICE])
+    rollback = ('cp %s/* %s/ && ' % (backup, ROOT)
+                + ' '.join(D + ['tag', preserved_tag, running_image_ref]) + ' && '
+                + ' '.join(C + ['up', '-d', '--no-deps', '--no-build', SERVICE]))
+    built = False
     try:
         (ROOT / '.env').write_text(set_env_keys((ROOT / '.env').read_text(), {
             'PEER_BATCH_DB_PORT': BATCH_LOCAL_PORT,
             'PEER_BATCH_REMOTE_PORT': BATCH_REMOTE_PORT,
         }))
-        (ROOT / 'compose.yaml').write_text(add_compose_environment((ROOT / 'compose.yaml').read_text()))
-        (ROOT / 'ssh-tunnel-entrypoint.sh').write_text(
-            (HERE / '..' / '..' / 'deploy' / 'shared-peer' / 'ssh-tunnel-entrypoint.sh')
-            .resolve().read_text().replace('\r\n', '\n'))
+        (ROOT / 'compose.yaml').write_text(add_compose_environment(
+            (ROOT / 'compose.yaml').read_text(),
+            with_local_bind=known['strategy'] == 'repo_copy'))
+        if known['strategy'] == 'patch':
+            (ROOT / 'ssh-tunnel-entrypoint.sh').write_text(patch_entrypoint(
+                (ROOT / 'ssh-tunnel-entrypoint.sh').read_text(),
+                known['batch_bind_address'], known['entrypoint_anchor']))
+        else:
+            (ROOT / 'ssh-tunnel-entrypoint.sh').write_text(
+                (HERE / '..' / '..' / 'deploy' / 'shared-peer' / 'ssh-tunnel-entrypoint.sh')
+                .resolve().read_text().replace('\r\n', '\n'))
         after = config()
         # Nothing but db-tunnel may move. The peer runs two writer profiles on
         # this stack; recreating quant-research here would be an outage.
-        for name, service in before['services'].items():
+        for name, rendered in before['services'].items():
             if name != SERVICE:
-                assert service == after['services'][name], 'Unexpected service change: ' + name
-        for key in ['volumes', 'ports', 'networks', 'restart']:
+                assert rendered == after['services'][name], 'Unexpected service change: ' + name
+        for key in ['volumes', 'ports', 'networks', 'restart', 'healthcheck']:
             assert before['services'][SERVICE].get(key) == after['services'][SERVICE].get(key), key
-        # The entrypoint is baked into the image, so this one service is
-        # rebuilt under a new tag; the previous tag stays intact for rollback.
+        assert after['services'][SERVICE].get('environment', {}).get('PEER_BATCH_DB_PORT') \
+            == BATCH_LOCAL_PORT, 'the batch port did not reach the rendered db-tunnel environment'
         compose_run('build', SERVICE)
-        subprocess.run(D + ['tag', after['services'][SERVICE]['image'], TAG], check=False)
+        built = True
+        subprocess.run(D + ['tag', after['services'][SERVICE].get('image') or running_image_ref,
+                            batch_tag], check=False)
         compose_run('up', '-d', '--no-deps', '--no-build', SERVICE)
         container = wait_healthy()
-        query = verify_batch_port()
+        # Both paths, in this order: a batch port that works while the
+        # intraday path broke is a failure, not a success.
+        batch_query = probe_port(BATCH_LOCAL_PORT)
+        intraday_query = probe_port(INTRADAY_LOCAL_PORT)
     except BaseException:
         for name in NAMES:
             if (backup / name).exists():
                 shutil.copy2(backup / name, ROOT / name)
-        print('restored the previous configuration; re-run the rollback command '
+        if built:
+            subprocess.run(D + ['tag', preserved_tag, running_image_ref], check=False)
+        print('restored the previous configuration and image tag; re-run the rollback command '
               'if the container was already recreated:\n  ' + rollback, file=sys.stderr)
         raise
     result = {'deployed': True, 'service': SERVICE, 'container': container, 'backup': str(backup),
+              'peer_state': state_name, 'strategy': known['strategy'],
               'batch_local_port': BATCH_LOCAL_PORT, 'batch_remote_port': BATCH_REMOTE_PORT,
-              'verified_select': query, 'rollback': rollback}
+              'verifier': VERIFIER,
+              'intraday_baseline': preconditions['intraday_baseline'],
+              'verified_batch_select': batch_query,
+              'verified_intraday_select': intraday_query,
+              'previous_image_tag': preserved_tag, 'previous_image_id': running_image_id,
+              'new_image_tag': batch_tag, 'image_ref': running_image_ref,
+              'rollback': rollback}
     (HERE / 'batch-tunnel-deployment.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2))
     print('\nrollback:\n  ' + rollback)

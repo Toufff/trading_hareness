@@ -22,6 +22,7 @@ Set-StrictMode -Version Latest
 $installer = Join-Path $PSScriptRoot 'install-shared-tunnel-task.ps1'
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')).TrimEnd('\')
 Import-Module (Join-Path $repository 'scripts\windows\runtime-observability.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'shared-tunnel-profiles.psm1') -Force
 
 $common = @{
     ScriptPath = $ScriptPath
@@ -58,9 +59,63 @@ try {
     }
 }
 
+# --- the point of the whole feature, observed rather than assumed ------------
+#
+# `-o ControlMaster=no -o ControlPath=none` in shared-tunnel-profiles.psm1 makes
+# it impossible for ssh_config to multiplex the batch session onto the intraday
+# connection. That is a claim about the command line. This is the measurement:
+# find each profile's live ssh.exe by its forwarding tuples, read the TCP
+# connections the OS says that process owns, and require the two sets to be
+# disjoint. If they are not - or if one of them cannot be observed at all - the
+# batch tunnel is not buying a second congestion window and the operator must
+# hear about it. It stays non-fatal for the same reason a batch install failure
+# is: batch is an optimization and must not be able to fail a release.
+$connectionVerdict = $null
+if (-not $WhatIf -and $null -ne $batch) {
+    try {
+        $profiles = @{}
+        $pids = @{}
+        $connections = @{}
+        foreach ($name in 'intraday', 'batch') {
+            $profiles[$name] = Get-SharedTunnelProfile -Name $name `
+                -RemoteDatabasePort $RemoteDatabasePort -RemoteApiPort $RemoteApiPort `
+                -RemoteBatchDatabasePort $RemoteBatchDatabasePort `
+                -LocalDatabasePort $LocalDatabasePort -LocalApiPort $LocalApiPort
+            $process = @(Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { Test-SharedTunnelCommandLine -TunnelProfile $profiles[$name] -CommandLine $_.CommandLine }) |
+                Select-Object -First 1
+            $pids[$name] = if ($process) { [int]$process.ProcessId } else { 0 }
+            $connections[$name] = if ($pids[$name] -ne 0) {
+                @(Get-NetTCPConnection -OwningProcess $pids[$name] -State Established -ErrorAction SilentlyContinue)
+            } else { @() }
+        }
+        $connectionVerdict = Get-SharedTunnelConnectionVerdict `
+            -IntradayConnections $connections['intraday'] -BatchConnections $connections['batch'] `
+            -IntradayProcessId $pids['intraday'] -BatchProcessId $pids['batch']
+        [void](Write-RuntimeEvent -PlatformRoot $PlatformRoot -Service 'shared-peer-batch-tunnel' `
+            -Event 'tunnel_connection_separation_checked' `
+            -Level $(if ($connectionVerdict.distinct) { 'info' } else { 'warning' }) -Data @{
+                distinct = [bool]$connectionVerdict.distinct
+                reason = $connectionVerdict.reason
+                shared_endpoints = @($connectionVerdict.shared_endpoints)
+                intraday_ssh_pid = $pids['intraday']
+                batch_ssh_pid = $pids['batch']
+            })
+        if (-not $connectionVerdict.distinct) {
+            $separationError = "The intraday and batch tunnels do not own distinct TCP connections ($($connectionVerdict.reason)); batch traffic is not getting its own congestion window."
+            if ($RequireBatch) { throw $separationError }
+            Write-Warning $separationError
+        }
+    } catch {
+        if ($RequireBatch) { throw }
+        Write-Warning "Could not verify that the two tunnels own distinct TCP connections: $($_.Exception.Message)"
+    }
+}
+
 [pscustomobject][ordered]@{
     intraday = $intraday
     batch = $batch
     batch_error = $batchError
     batch_required = [bool]$RequireBatch
+    connection_separation = $connectionVerdict
 }

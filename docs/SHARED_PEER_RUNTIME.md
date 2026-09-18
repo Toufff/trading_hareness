@@ -158,15 +158,32 @@ scheduled task, supervised runtime service, state file and lock file:
 | runtime service | `shared-peer-tunnels` | `shared-peer-batch-tunnel` |
 | forwards | `-R 15432:55432`, `-R 15681:5681` | `-R 15433:55432` |
 | compression | off | `-o Compression=yes` |
-| health claim | remote API HTTP 200 | remote loopback listener on 15433 |
+| health claim | remote API HTTP 200 | remote loopback listener on 15433, owned by this install's local ssh client |
 | peer address | `db-tunnel:5432` | `db-tunnel:5433` |
 
 Both reach the same database on the same port 55432; only the transport differs.
 Compression is on for batch alone because bulk result sets compress well and the
-link is latency- rather than CPU-bound. The intraday profile is byte-for-byte
-what it was, and `scripts/windows/tests/test-shared-tunnel-profiles.ps1` pins its
-ssh argument vector literally so a later edit here cannot quietly change the
-live intraday tunnel.
+link is latency- rather than CPU-bound, and it is declared as an explicit
+`Compression` property on the profile so the recorded runtime metadata reports
+what was configured rather than inferring it from "does this profile carry any
+ssh option at all".
+
+"Its own TCP connection" is pinned on the command line, not inherited from the
+host: both profiles pass `-o ControlMaster=no -o ControlPath=none`. Without them
+a single `ControlMaster auto` + `ControlPath` pair in `~/.ssh/config` — a routine
+latency tweak on a 52.5 ms link — would make the batch client open a channel on
+the intraday client's existing socket, putting bulk traffic straight back into the
+window it was moved out of, with nothing failing and nothing to see. This is the
+one deliberate change to the intraday ssh argument vector; it is a no-op against
+the current host configuration (`ssh -G lightServer1` already reports
+`controlmaster false`) and the pinned vector in
+`scripts/windows/tests/test-shared-tunnel-profiles.ps1` was updated with it. After
+installing both, `install-shared-tunnel-tasks.ps1` reads the TCP connections each
+profile's `ssh.exe` owns (`Get-NetTCPConnection -OwningProcess`) and warns —
+recording a `tunnel_connection_separation_checked` runtime event — if they are not
+disjoint. Apart from those two options the intraday profile is byte-for-byte what
+it was, and the test pins its vector literally so a later edit cannot quietly
+change the live intraday tunnel.
 
 Install both from the owner side:
 
@@ -186,13 +203,18 @@ Two operational consequences worth stating plainly:
   fail the caller unless it passed `-RequireBatch`. On the peer side the
   `db-tunnel` healthcheck deliberately still checks only 5432 and 5681 — gating
   container health on an optimization would turn it into an outage.
-- **`permitlisten` must list 15433** if the restricted owner-tunnel key is ever
-  enabled (the four `OWNER_TUNNEL_SSH_*` keys in `runtime.env`).
-  `install-owner-tunnel-key.sh` now includes it, but that script does not
-  rewrite an `authorized_keys` entry that already exists. With
-  `-o ExitOnForwardFailure=yes` a missing `permitlisten` is not "slower batch
-  traffic": the ssh process exits within seconds and the two-minute supervising
-  trigger retries into the same refusal indefinitely. While those four keys are
+- **15433 must appear on both sides of the key restrictions.** On the owner side
+  it is `permitlisten` in `install-owner-tunnel-key.sh`, which matters if the
+  restricted owner-tunnel key is ever enabled (the four `OWNER_TUNNEL_SSH_*`
+  keys in `runtime.env`): with `-o ExitOnForwardFailure=yes` a missing
+  `permitlisten` is not "slower batch traffic", the ssh process exits within
+  seconds and the two-minute supervising trigger retries into the same refusal
+  indefinitely. On the peer side it is `permitopen` in
+  `provision-lightserver-rootless.sh`, and there the failure is silent instead:
+  the sidecar's `-L 5433` is a local bind that always succeeds, so the container
+  stays healthy while every connection through it is refused with
+  "administratively prohibited: open failed". Neither script rewrites an
+  `authorized_keys` entry that already exists. While the four owner keys are
   unset both tunnels fall back to the unrestricted `lightServer1` alias, where
   15433 binds with no extra setup.
 
@@ -205,7 +227,14 @@ change: it backs up `.env`/`compose.yaml`/the entrypoint, asserts that no
 service other than `db-tunnel` moves, rebuilds and recreates only `db-tunnel`,
 then proves the path with an authenticated `SELECT 1, inet_server_port()`
 through 5433 — `55432` is the only answer that proves the owner's PostgreSQL
-rather than an open socket — and prints its rollback command.
+rather than an open socket — and prints its rollback command. It refuses to run
+unless the peer's deployed state (entrypoint hash, `db-tunnel` healthcheck,
+environment keys, image) matches one of the states it explicitly supports.
+
+The peer rollout itself — what the release scripts must call, what the peer is
+actually running today, and the ordered steps — is
+[PEER_BATCH_TUNNEL_ROLLOUT.md](PEER_BATCH_TUNNEL_ROLLOUT.md). Read it before
+running anything against lightServer.
 
 ## Verifying the access path
 
@@ -379,8 +408,14 @@ task only, which is what it did before the batch profile existed.
 
 **Existing `authorized_keys` entries on lightServer are not updated in place**:
 re-running `provision-lightserver-rootless.sh` with `AUTHORIZED_KEY_FILE` set
-regenerates the peer's entry with the `restrict,port-forwarding,permitopen=...`
-prefix, but an existing unrestricted entry does not update itself.
+regenerates the peer's entry with the
+`restrict,port-forwarding,permitopen="127.0.0.1:15432",permitopen="127.0.0.1:15433",permitopen="127.0.0.1:15681"`
+prefix, but an existing unrestricted entry does not update itself. `permitopen`
+now covers the batch database path (15433) as well; an entry provisioned before
+that was added keeps the old two-port list, and the sidecar's `-L 5433` forward
+then binds successfully while every connection through it is refused with
+"administratively prohibited: open failed" - the container stays healthy and the
+batch path simply never works.
 
 > This is the procedure for restricting the peer key, not a statement that the
 > peer key is restricted. The owner has decided to keep the collaborator fully
@@ -400,7 +435,8 @@ OWNER_TUNNEL_PUBLIC_KEY_FILE=/path/to/owner_tunnel_ed25519.pub \
 
 This provisions a dedicated `stockowner` account (default) with an
 `authorized_keys` entry restricted to
-`restrict,port-forwarding,permitlisten="127.0.0.1:15432",permitlisten="127.0.0.1:15680",permitlisten="127.0.0.1:15681"`.
+`restrict,port-forwarding,permitlisten="127.0.0.1:15432",permitlisten="127.0.0.1:15433",permitlisten="127.0.0.1:15680",permitlisten="127.0.0.1:15681"`
+(four ports: owner database, batch database, dashboard, owner API).
 Copy the resulting private key to the Windows workstation (for example
 `G:\StockPlatform\peer\secrets\owner_tunnel_ed25519`) and add these four keys
 to `G:\StockPlatform\config\runtime.env`:
@@ -428,7 +464,7 @@ verification commands use the existing operator alias through
 `Resolve-OwnerTunnelControlSshTarget`. This keeps the unattended credentials
 non-interactive without breaking `ss`, `curl`, `fuser` or the collaborator's
 complete gateway probe. The four variables may be enabled after the public-key
-fingerprint and all three `permitlisten` entries have been verified.
+fingerprint and all four `permitlisten` entries have been verified.
 
 The scheduled tunnel tasks run hidden and publish the owner database (15432),
 the owner API (15681) and, once the batch task is installed, the batch database

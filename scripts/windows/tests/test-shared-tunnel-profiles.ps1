@@ -50,12 +50,22 @@ try { [void](Get-SharedTunnelProfile -Name 'bulk') } catch { $rejected = $true }
 Assert-True $rejected 'an unknown profile name must be rejected, not silently treated as intraday'
 
 # --- intraday ssh vector, pinned literally ---------------------------------
+# DELIBERATE CHANGE to the pinned intraday vector, made once and recorded here:
+# '-o ControlMaster=no -o ControlPath=none' were added to BOTH profiles. Without
+# them "batch gets its own TCP connection" is a property of ~/.ssh/config, not of
+# this code: one 'ControlMaster auto' + 'ControlPath' pair there and the batch
+# client opens a channel on the intraday client's socket, silently undoing the
+# whole feature. The options are a no-op against the current host (ssh -G
+# lightServer1 reports controlmaster false); nothing else about the intraday
+# vector may change without the same kind of note.
 $expectedIntraday = @(
     '-NT',
     '-o', 'BatchMode=yes',
     '-o', 'ExitOnForwardFailure=yes',
     '-o', 'ServerAliveInterval=30',
     '-o', 'ServerAliveCountMax=3',
+    '-o', 'ControlMaster=no',
+    '-o', 'ControlPath=none',
     '-R', '127.0.0.1:15432:127.0.0.1:55432',
     '-R', '127.0.0.1:15681:127.0.0.1:5681',
     'lightServer1'
@@ -78,6 +88,8 @@ $expectedBatch = @(
     '-o', 'ExitOnForwardFailure=yes',
     '-o', 'ServerAliveInterval=30',
     '-o', 'ServerAliveCountMax=3',
+    '-o', 'ControlMaster=no',
+    '-o', 'ControlPath=none',
     '-o', 'Compression=yes',
     '-R', '127.0.0.1:15433:127.0.0.1:55432',
     'lightServer1'
@@ -90,6 +102,46 @@ Assert-True (-not ($actualIntraday -contains 'Compression=yes')) 'compression mu
 foreach ($required in 'BatchMode=yes', 'ExitOnForwardFailure=yes', 'ServerAliveInterval=30', 'ServerAliveCountMax=3') {
     Assert-True ($actualBatch -contains $required) "batch must keep the shared ssh contract '$required'"
 }
+
+# --- connection separation, pinned on the command line ---------------------
+# Neither profile may inherit multiplexing from ssh_config: a shared
+# ControlMaster socket would put bulk traffic back on the intraday connection's
+# congestion window while every other signal in this file still looked correct.
+foreach ($required in 'ControlMaster=no', 'ControlPath=none') {
+    Assert-True ($actualIntraday -contains $required) "intraday must pin '$required' so ssh_config cannot multiplex it"
+    Assert-True ($actualBatch -contains $required) "batch must pin '$required' so it cannot be collapsed onto the intraday connection"
+}
+
+# --- compression is declared, not inferred ---------------------------------
+# The runtime metadata used to derive this from 'SshOptions.Count -gt 0', which
+# is only true while compression is the only option either profile carries.
+Assert-True ($intraday.PSObject.Properties['Compression'] -and $intraday.Compression -eq $false) 'intraday must declare Compression = $false explicitly'
+Assert-True ($batch.PSObject.Properties['Compression'] -and $batch.Compression -eq $true) 'batch must declare Compression = $true explicitly'
+
+# --- the distinct-connection judge -----------------------------------------
+function New-TestConnection([string]$LocalPort, [string]$RemotePort) {
+    return [pscustomobject]@{ LocalAddress = '192.168.1.10'; LocalPort = $LocalPort; RemoteAddress = '203.0.113.7'; RemotePort = $RemotePort }
+}
+$distinct = Get-SharedTunnelConnectionVerdict -IntradayConnections @((New-TestConnection '51001' '3535')) `
+    -BatchConnections @((New-TestConnection '51002' '3535')) -IntradayProcessId 11 -BatchProcessId 22
+Assert-True $distinct.distinct 'two ssh processes on two sockets are two connections'
+Assert-True ($distinct.reason -eq 'distinct_tcp_connections') 'the distinct verdict names itself'
+
+$multiplexed = Get-SharedTunnelConnectionVerdict -IntradayConnections @((New-TestConnection '51001' '3535')) `
+    -BatchConnections @((New-TestConnection '51001' '3535')) -IntradayProcessId 11 -BatchProcessId 22
+Assert-True (-not $multiplexed.distinct) 'a shared four-tuple is one connection wearing two hats'
+Assert-True ($multiplexed.reason -eq 'shared_tcp_connection') 'a shared socket is reported as such'
+Assert-True (@($multiplexed.shared_endpoints).Count -eq 1) 'the shared endpoint is named so an operator can find it'
+
+$samePid = Get-SharedTunnelConnectionVerdict -IntradayConnections @((New-TestConnection '51001' '3535')) `
+    -BatchConnections @((New-TestConnection '51002' '3535')) -IntradayProcessId 11 -BatchProcessId 11
+Assert-True (-not $samePid.distinct) 'one ssh process cannot own both profiles'
+Assert-True ($samePid.reason -eq 'same_ssh_process') 'a shared owning process is reported as such'
+
+$unobserved = Get-SharedTunnelConnectionVerdict -IntradayConnections @((New-TestConnection '51001' '3535')) `
+    -BatchConnections @() -IntradayProcessId 11 -BatchProcessId 0
+Assert-True (-not $unobserved.distinct) 'an unobserved pair must never be reported as proven distinct'
+Assert-True ($unobserved.reason -eq 'no_connection_observed') 'absence of evidence is reported as absence of evidence'
 
 # --- process identification ------------------------------------------------
 $intradayCommandLine = 'C:\Windows\System32\OpenSSH\ssh.exe -NT -o BatchMode=yes -R 127.0.0.1:15432:127.0.0.1:55432 -R 127.0.0.1:15681:127.0.0.1:5681 lightServer1'
@@ -129,6 +181,8 @@ foreach ($pair in @(@{ Name = 'start-shared-tunnels.ps1'; Text = $starter }, @{ 
 }
 Assert-True ($starter -match 'Get-SharedTunnelSshArgument') 'the starter must build its ssh vector through the shared helper'
 Assert-True ($starter -notmatch 'Compression=yes') 'the compression flag belongs to the profile definition, not to the starter'
+Assert-True ($starter -match 'compression = \[bool\]\$tunnelProfile\.Compression') 'the starter must record the declared Compression property, not infer it from the option count'
+Assert-True ($starter -notmatch 'SshOptions\.Count') 'nothing may infer compression from how many ssh options a profile happens to carry'
 Assert-True ($installer -match '\[switch\]\$WhatIf') 'the installer must offer a dry run'
 # The dry run must return before anything mutates the host.
 $whatIfIndex = $installer.IndexOf('if ($WhatIf) {')
@@ -139,6 +193,33 @@ Assert-True ($bothInstaller -match '-Profile intraday' -and $bothInstaller -matc
 Assert-True ($bothInstaller.IndexOf('-Profile intraday') -lt $bothInstaller.IndexOf('-Profile batch')) 'intraday must be installed first'
 Assert-True ($bothInstaller -match 'RequireBatch') 'a batch failure must be non-fatal unless the caller demands it'
 
+# A batch install that cannot prove its health must not be left registered with
+# a two-minute trigger retrying into the same failure for as long as the host is
+# up. Intraday is the opposite case and must keep retrying, so the disable is
+# scoped to the batch profile.
+Assert-True ($installer -match 'function Stop-TunnelInstallOnFailure') 'the installer must route install failures through one helper'
+Assert-True ($installer -match "(?s)function Stop-TunnelInstallOnFailure.*?\`$tunnelProfile\.Name -eq 'batch'.*?Disable-ScheduledTask") 'a failed batch install must disable its own task before rethrowing'
+Assert-True ($installer -notmatch '(?m)^\s*throw "(Shared peer tunnel task|Batch tunnel task)') 'no install failure path may throw without going through the helper'
+Assert-True ($installer -match 'remote_listener_open_owned_by_local_client') 'the batch health label must state the stronger claim it now proves'
+Assert-True ($installer -match 'requested_at') 'the batch health check must prove the runtime state belongs to this install'
+Assert-True ($installer -match '\$installStartedAt') 'the installer must timestamp the install so stale state cannot pass for health'
+
+# --- peer key restrictions, both directions --------------------------------
+# permitlisten (owner -R) and permitopen (peer -L) fail in completely different
+# ways, and 15433 must be in both default option strings or the batch path dies
+# loudly on one side and silently on the other.
+$ownerKeyScript = Get-Content (Join-Path $sharedPeer 'install-owner-tunnel-key.sh') -Raw
+$peerKeyScript = Get-Content (Join-Path $sharedPeer 'provision-lightserver-rootless.sh') -Raw
+Assert-True ($ownerKeyScript -match 'permitlisten=\\"127\.0\.0\.1:15433\\"') 'the owner tunnel key must be allowed to listen on 15433'
+Assert-True ($peerKeyScript -match 'permitopen=\\"127\.0\.0\.1:15433\\"') 'the peer key must be allowed to open 15433'
+foreach ($keptPort in '15432', '15681') {
+    Assert-True ($peerKeyScript -match "permitopen=\\`"127\.0\.0\.1:$keptPort\\`"") "the peer key must keep permitopen for $keptPort"
+}
+$runtimeDoc = Get-Content (Join-Path $repository 'docs\SHARED_PEER_RUNTIME.md') -Raw
+Assert-True ($runtimeDoc -match 'permitopen="127\.0\.0\.1:15433"') 'the runtime doc must show the four-port permitopen default'
+Assert-True ($runtimeDoc -match 'permitlisten="127\.0\.0\.1:15433"') 'the runtime doc must show the four-port permitlisten default'
+Assert-True ($runtimeDoc -notmatch 'all three `permitlisten` entries') 'the runtime doc must stop saying there are three permitlisten entries'
+
 # --- peer side -------------------------------------------------------------
 $entrypoint = Get-Content (Join-Path $repository 'deploy\shared-peer\ssh-tunnel-entrypoint.sh') -Raw
 Assert-True ($entrypoint -match '\$\{PEER_BATCH_DB_PORT:-\}') 'the peer entrypoint must treat the batch forward as optional'
@@ -148,10 +229,52 @@ $composeText = Get-Content (Join-Path $repository 'deploy\shared-peer\compose.ya
 Assert-True ($composeText -match 'PEER_BATCH_DB_PORT: \$\{PEER_BATCH_DB_PORT:-\}') 'compose must default the batch port to off'
 Assert-True ($composeText -match 'ssh-tunnel-healthcheck') 'the db-tunnel healthcheck must not start depending on the optional batch port'
 
+# --- peer deploy script ----------------------------------------------------
+# The peer's deployed tree and this repository have drifted apart before, and
+# they differ in exactly the place that matters: the peer's live entrypoint
+# binds 0.0.0.0 literally while the repo copy binds
+# ${PEER_LOCAL_BIND_ADDRESS:-127.0.0.1}. Writing one over the other on a peer
+# whose compose does not set that variable is a total, undetectable peer outage,
+# so the deploy script must recognise the peer's ACTUAL state first.
+$deployScript = Get-Content (Join-Path $sharedPeer 'deploy-batch-tunnel-port.py') -Raw
+Assert-True ($deployScript -match 'KNOWN_PEER_STATES') 'the peer deploy script must enumerate the states it supports'
+Assert-True ($deployScript -match "(?s)def inspect_peer_state.*?entrypoint_sha256.*?healthcheck_test.*?environment_keys.*?service\.get\('image'\)") 'it must read the hash, healthcheck, environment keys and image of the deployed service'
+Assert-True ($deployScript -match "(?s)if not matches:.*?refusing to touch the peer") 'an unrecognised peer state must be a refusal, not a guess'
+Assert-True ($deployScript -match "'strategy': 'patch'") 'the observed peer state must be patched, never overwritten with the repo copy'
+Assert-True ($deployScript -match "(?s)def patch_entrypoint.*?text\.replace\(anchor, block \+ anchor, 1\)") 'the script must insert the batch block into the peer entrypoint rather than replace the file'
+Assert-True ($deployScript -match "(?s)if known\['strategy'\] == 'patch':\s*\r?\n\s*\(ROOT / 'ssh-tunnel-entrypoint\.sh'\)\.write_text\(patch_entrypoint\(") 'the patch strategy must be the one applied to the observed peer state'
+Assert-True ($deployScript -match "(?s)with_local_bind and 'PEER_LOCAL_BIND_ADDRESS' not in text") 'a repo-copy write must also supply PEER_LOCAL_BIND_ADDRESS'
+Assert-True ($deployScript -notmatch "\[SERVICE\]\['image'\]") 'a build-only service has no image key; .get must be used'
+Assert-True ($deployScript -match "\.get\('image'\)") 'the rendered image must be read with .get'
+# The running image id has to be pinned BEFORE the build, because the build
+# retags it in place and the known-good image would otherwise become dangling.
+$preserveIndex = $deployScript.IndexOf("preserved_tag")
+$buildIndex = $deployScript.IndexOf("compose_run('build'")
+Assert-True ($preserveIndex -gt 0 -and $preserveIndex -lt $buildIndex) 'the running image must be tagged pre-batch-<stamp> before the build'
+Assert-True ($deployScript -match "pre-batch-") 'the preserved tag must name itself'
+Assert-True ($deployScript -match "(?s)rollback = .*?'tag', preserved_tag, running_image_ref") 'the printed rollback must restore the image tag, not only the files'
+# Preconditions must refuse before the first backup or write.
+$preconditionIndex = $deployScript.IndexOf('preconditions = assert_preconditions()')
+$backupIndex = $deployScript.IndexOf('backup.mkdir(')
+Assert-True ($preconditionIndex -gt 0 -and $preconditionIndex -lt $backupIndex) 'preconditions must be asserted before any backup or rewrite'
+# Verification runs from quant-research (psycopg + PG*), not from the sidecar,
+# which has no PostgreSQL client at all - and 5432 must still answer afterwards.
+Assert-True ($deployScript -match "VERIFIER = 'quant-research'") 'the probe must run from the container that actually has a database client'
+Assert-True ($deployScript -match "host='db-tunnel'") 'the probe must target db-tunnel explicitly rather than a unix socket'
+Assert-True ($deployScript -match 'SELECT 1, inet_server_port') 'the probe must prove what is behind the socket, not that the socket is open'
+Assert-True ($deployScript -match "1\|55432") '55432 is the only answer that proves the owner PostgreSQL'
+Assert-True ($deployScript -match "(?s)batch_query = probe_port\(BATCH_LOCAL_PORT\).*?intraday_query = probe_port\(INTRADAY_LOCAL_PORT\)") 'the intraday port must be re-proven after the recreate'
+
 [pscustomobject]@{
     passed = $true
     intraday_vector_pinned = $true
+    control_master_pinned_both_profiles = $true
+    compression_declared_not_inferred = $true
+    connection_verdict_covered = $true
     batch_compression_only = $true
     reclaim_sets_disjoint = $true
     installer_dry_run = $true
+    batch_install_failure_disables_task = $true
+    permitopen_and_permitlisten_cover_15433 = $true
+    peer_deploy_refuses_unknown_state = $true
 }

@@ -108,7 +108,10 @@ $run = Start-RuntimeSupervisor -PlatformRoot $PlatformRoot -RepositoryRoot $repo
         remote_api_port = $tunnelProfile.RemoteApiPort
         local_database_port = $tunnelProfile.LocalDatabasePort
         local_api_port = $tunnelProfile.LocalApiPort
-        compression = [bool]($tunnelProfile.SshOptions.Count -gt 0)
+        # The profile's own declared property, not "does it have any ssh
+        # option at all" - the latter was true only as long as compression
+        # happened to be the only option either profile carried.
+        compression = [bool]$tunnelProfile.Compression
         stop_with_owner = $true
     }
 while (Get-Process -Id ([int]$run.supervisor_pid) -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 2 }
