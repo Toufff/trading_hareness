@@ -57,6 +57,11 @@ CREATE TABLE quant.drill_observations (
 CREATE FUNCTION quant.drill_touch() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN NEW.updated_at := clock_timestamp(); RETURN NEW; END; $$;
 CREATE TRIGGER drill_touch BEFORE UPDATE ON quant.drill_observations FOR EACH ROW EXECUTE FUNCTION quant.drill_touch();
+-- The cold twin the storage tier creates for a tiered table. Its rows were
+-- exported while they were still in the hot table, so the nightly dump leaves
+-- its data out -- but it has no incremental chunk chain of its own, which is
+-- exactly the case that used to make every such dump unrestorable.
+CREATE TABLE quant.drill_observations_cold (LIKE quant.drill_observations INCLUDING DEFAULTS INCLUDING INDEXES);
 INSERT INTO quant.drill_runs VALUES (1), (2);
 INSERT INTO quant.drill_observations(run_id, available_at, payload, note, created_at)
 SELECT CASE WHEN g % 2 = 0 THEN 1 ELSE 2 END,
@@ -65,6 +70,7 @@ SELECT CASE WHEN g % 2 = 0 THEN 1 ELSE 2 END,
        CASE WHEN g % 5 = 0 THEN NULL ELSE E'note\r\nwith \\. marker' END,
        now() - make_interval(hours => g)
   FROM generate_series(1, 80) g;
+INSERT INTO quant.drill_observations_cold SELECT * FROM quant.drill_observations LIMIT 3;
 '@)
     $lag = [TimeSpan]::FromSeconds(1)
     Start-Sleep -Seconds 2
@@ -128,6 +134,11 @@ INSERT INTO quant.drill_observations(run_id, available_at, payload) SELECT 1, no
     $record = Get-Content -LiteralPath (Join-Path (Join-Path $platformDrill 'logs') 'stock-backup.jsonl') -Encoding UTF8 | Select-Object -Last 1 | ConvertFrom-Json
     Assert-True ($record.status -eq 'backed_up') "the nightly script records backed_up (got $($record.status): $($record.incremental_error))"
     Assert-True (@($record.excluded_table_data) -contains $spec.Table) 'the nightly dump excludes the incremental table data'
+    # The exclusion is computed from the incremental spec list at dump time, so
+    # the twin of a table WITH a chain is excluded and nothing else is.
+    Assert-True (@($record.excluded_table_data) -contains "$($spec.Table)_cold") 'the nightly dump excludes the cold twin of the incremental table'
+    Assert-True (@($record.excluded_table_data).Count -eq 2) "only the incremental table and its twin are excluded (got $(@($record.excluded_table_data) -join ','))"
+    Assert-True (@($record.refused_table_data_exclusions).Count -eq 0) 'nothing was refused: every excluded twin has a chain behind it'
     Assert-True (@($record.incremental)[0].rows -eq 81) "a fresh chain exports every row older than the 30-minute safety lag: 80 history rows and the 2-hour-old one, not the 5 just inserted (got $(ConvertTo-Json -InputObject $record.incremental -Compress))"
     Assert-True (Test-Path -LiteralPath "$($record.dump_file).excluded-table-data.json" -PathType Leaf) 'the dump records which table data it excludes'
     $rerun = & pwsh -NoLogo -NoProfile -NonInteractive -File (Join-Path (Split-Path -Parent $PSScriptRoot) 'backup-stock-database.ps1') -RuntimeEnv $drillEnv -PlatformRoot $platformDrill
@@ -138,12 +149,28 @@ INSERT INTO quant.drill_observations(run_id, available_at, payload) SELECT 1, no
     # The restore entry point on the nightly output: a new database, base dump,
     # then the chunk chain.  It must equal every source row older than the
     # watermark (the rows inside the safety lag are the next night's work).
+    # An excluded table with no chunk directory (the cold twin) must be skipped
+    # and reported, never thrown on: the throw used to land AFTER the restore
+    # had created the database and replayed the base dump, which made every
+    # dump taken with a cold twin excluded unrestorable.
+    $nightlyBackupRoot = Join-Path $platformDrill 'backups'
+    $twinSpec = @(Get-StockIncrementalTableSpecs -Value "$($spec.Table)_cold:created_at")[0]
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $nightlyBackupRoot 'incremental') $twinSpec.Table))) 'the cold twin has no chunk directory'
+    $twinImport = Import-StockIncrementalChunks -Connection $target -Spec $twinSpec -BackupRoot $nightlyBackupRoot
+    Assert-True ($twinImport.status -eq 'no_chunk_chain') "an excluded table without a chunk chain must be skipped, not thrown on (got $($twinImport.status))"
+    Assert-True ($twinImport.chunks -eq 0 -and $twinImport.rows_applied -eq 0) 'a skipped table applies nothing'
+
     $restoreDb = "stock_backup_drill_rst_$suffix"
     $restoreScript = Join-Path (Split-Path -Parent $PSScriptRoot) 'restore-stock-database.ps1'
     $restoreResult = & pwsh -NoLogo -NoProfile -NonInteractive -File $restoreScript -DumpFile $record.dump_file -TargetDatabase $restoreDb `
-        -RuntimeEnv $drillEnv -PlatformRoot $platformDrill
+        -RuntimeEnv $drillEnv -PlatformRoot $platformDrill 2>&1
     if ($LASTEXITCODE -ne 0) { throw "restore script failed with exit code ${LASTEXITCODE}: $restoreResult" }
+    $restoreText = ($restoreResult | Out-String)
+    Assert-True ($restoreText -match 'no_chunk_chain') "the restore must report the skipped chain: $restoreText"
+    Assert-True ($restoreText -match [regex]::Escape("$($spec.Table)_cold")) 'the restore must name the table it skipped'
     $restoreConnection = $base.Clone(); $restoreConnection.Database = $restoreDb
+    Assert-True ((Invoke-StockPsqlScalar -Connection $restoreConnection -Sql "SELECT count(*) FROM $($spec.Table)_cold") -eq '0') `
+        'the cold twin is restored as an empty table: its data was excluded from the dump and carried by the hot chain'
     $watermark = ConvertTo-StockSqlTimestamp (ConvertTo-StockDateTimeOffset @($rerunRecord.incremental)[0].watermark)
     $sourceBeforeWatermark = Invoke-StockPsqlScalar -Connection $source -Sql ($fingerprint.Replace(' FROM quant.drill_observations t', " FROM quant.drill_observations t WHERE created_at < $watermark"))
     $restoredByScript = Invoke-StockPsqlScalar -Connection $restoreConnection -Sql $fingerprint
@@ -165,6 +192,8 @@ INSERT INTO quant.drill_observations(run_id, available_at, payload) SELECT 1, no
         restored_rows_applied = $restored.rows_applied
         restored_fingerprint_matches = $true
         tampered_chunk_rejected = $true
+        cold_twin_excluded_from_dump = $true
+        excluded_table_without_chunks_skipped = 'no_chunk_chain'
     }
 } finally {
     foreach ($database in $sourceDb, $targetDb, "stock_backup_drill_rst_$suffix") {

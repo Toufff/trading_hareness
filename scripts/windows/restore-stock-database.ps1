@@ -58,10 +58,20 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "pg_restore failed with exit code $LASTEXITCODE" }
 } finally { Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue }
 
-$tables = foreach ($spec in $specs) { Import-StockIncrementalChunks -Connection $target -Spec $spec -BackupRoot $BackupRoot }
+# Import-StockIncrementalChunks reports 'no_chunk_chain' instead of throwing for
+# an excluded table that never had a chain of its own (the cold twins: their
+# rows left through the hot table's chain). Those are surfaced here so a restore
+# is never silently incomplete, but they must not abort a restore that has
+# already created the database and replayed the base dump.
+$tables = @(foreach ($spec in $specs) { Import-StockIncrementalChunks -Connection $target -Spec $spec -BackupRoot $BackupRoot })
+$skipped = @($tables | Where-Object { $_.status -eq 'no_chunk_chain' } | ForEach-Object { $_.table })
+foreach ($table in $skipped) {
+    Write-Warning "No incremental chunk chain for excluded table $table under $BackupRoot\incremental; its rows are whatever the base dump and the other chains carry."
+}
 [pscustomobject]@{
     status = 'restored'
     target_database = $TargetDatabase
     dump_file = $DumpFile
-    incremental_tables = @($tables)
+    incremental_tables = $tables
+    skipped_no_chunks = $skipped
 }

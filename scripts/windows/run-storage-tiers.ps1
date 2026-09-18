@@ -7,6 +7,19 @@ param(
     # has to match the schema the running API expects.
     [string]$ReleaseRoot = 'G:\StockPlatform\current',
     [ValidateSet('apply', 'plan', 'status', 'install')][string]$Command = 'apply',
+    # Hard stop for the nightly move, as a local HH:MM wall clock. The job
+    # checks it between batches and between tables, finishes the batch in
+    # flight, writes its receipt with status 'deadline_reached' and exits 0; the
+    # move is idempotent and resumable, so the next night continues. Without it
+    # a year-long first migration keeps issuing large DELETE/INSERT batches and
+    # VACUUMs straight into the 09:30 opening auction until Task Scheduler kills
+    # the process -- and a killed process writes no receipt at all.
+    [string]$Deadline = '08:00',
+    # Belt and braces for a run that starts late (StartWhenAvailable replays a
+    # missed 06:00 trigger) or crosses midnight: never run longer than this
+    # regardless of the wall clock. 06:00 -> 08:00 is two hours; the scheduled
+    # task's ExecutionTimeLimit is 2h15m, so the job always stops itself first.
+    [int]$MaxSeconds = 7200,
     # Run even inside a trading session. The task is scheduled at 06:00; this
     # only matters when Windows replays a missed run (StartWhenAvailable) or an
     # operator triggers it by hand.
@@ -81,13 +94,25 @@ foreach ($name in 'http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS
 # The credentials stay in the file: database-storage-tiers.py reads --env-file
 # itself, so nothing secret ever reaches this process environment, the command
 # line or the log.
-$arguments = @($tierScript, $Command, '--env-file', $RuntimeEnv) + $CliArguments
+$arguments = @($tierScript, $Command, '--env-file', $RuntimeEnv)
+# Only `apply` moves rows, and only an explicit caller value wins over the
+# defaults (so `-Command apply --deadline 07:00` still works).
+if ($Command -eq 'apply') {
+    if ($Deadline -and -not ($CliArguments -contains '--deadline')) { $arguments += @('--deadline', $Deadline) }
+    if ($MaxSeconds -gt 0 -and -not ($CliArguments -contains '--max-seconds')) { $arguments += @('--max-seconds', [string]$MaxSeconds) }
+}
+$arguments += $CliArguments
 
 Write-TierLog "start: $Command (release $release)"
 $previousErrorAction = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'   # native stderr must be logged, not thrown
 # The task host console is GBK; the CLI prints ASCII-only JSON, but a Python
-# traceback can still carry UTF-8 text.
+# traceback can still carry UTF-8 text. PowerShell 7 decodes a native command's
+# output with [Console]::OutputEncoding, so the producer has to be told to use
+# the same encoding: redirected into a pipeline, Python otherwise encodes
+# stdout/stderr with locale.getpreferredencoding() -- cp936 on this host -- and
+# exactly the non-ASCII failure diagnostics arrive as mojibake in the tier log.
+$env:PYTHONIOENCODING = 'utf-8'
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { }
 $exitCode = 1
 try {

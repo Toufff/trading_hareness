@@ -60,9 +60,9 @@ function Get-StockBackupExcludedTableData {
     # Pure decision function.  Parses STOCK_BACKUP_EXCLUDE_TABLE_DATA, a
     # semicolon separated list of "schema.table" whose *data* the nightly dump
     # leaves out (the schema is still dumped, so a restore recreates the empty
-    # table).  Production lists the cold-tier twins (quant.<table>_cold): their
-    # rows already left the hot table through the incremental chunk chain, so
-    # dumping them again would double the nightly dump for no extra recovery.
+    # table).  This is the OPERATOR OVERRIDE only: the cold-tier twins are
+    # computed at dump time by Resolve-StockBackupExcludedTableData, which is
+    # what decides whether an exclusion is safe.  Production seeds no value.
     # Identifiers must be lower-case schema.table -- a typo must fail the run
     # rather than silently widen what the backup omits.  Repeats are collapsed
     # (listing a table twice is harmless, unlike an unparseable name).
@@ -83,6 +83,60 @@ function Get-StockBackupExcludedTableData {
         if ($seen.Add($item)) { $tables.Add($item) }
     }
     return $tables.ToArray()
+}
+
+function Resolve-StockBackupExcludedTableData {
+    # Pure decision function: which tables' data this run's dump may leave out.
+    #
+    # A cold-tier twin (quant.<table>_cold) holds rows that were moved out of
+    # quant.<table>.  Leaving the twin's data out of the nightly dump is only
+    # safe when those rows are carried by something else, and the only
+    # something else is the hot table's incremental chunk chain: the rows were
+    # exported by window while they were still hot, and chunks are never
+    # pruned.  Excluding a twin whose hot table has no chain deletes the table
+    # from the backup chain entirely -- roughly two months later (14 daily plus
+    # 8 weekly dumps) its only copy is the live cold tablespace on the G: HDD.
+    #
+    # So the exclusion is COMPUTED here, at dump time, from the incremental
+    # spec list rather than seeded as a static list by the installer:
+    #   * every incremental table's own data (it is in the chain by definition,
+    #     and only when this run's export succeeded -- a failed export degrades
+    #     to a full dump instead of a hole);
+    #   * the twin of every incremental table;
+    #   * anything else the operator listed in STOCK_BACKUP_EXCLUDE_TABLE_DATA,
+    #     which stays an override -- except a twin whose hot table has no
+    #     chain, which is refused and reported rather than silently honoured.
+    [CmdletBinding()]
+    param(
+        [string[]]$IncrementalTables = @(),
+        [bool]$IncrementalSucceeded = $true,
+        [string[]]$ConfiguredExclusions = @()
+    )
+    $chain = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($table in @($IncrementalTables)) { [void]$chain.Add($table) }
+    $excluded = [Collections.Generic.List[string]]::new()
+    $refused = [Collections.Generic.List[string]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    if ($IncrementalSucceeded) {
+        foreach ($table in @($IncrementalTables)) { if ($seen.Add($table)) { $excluded.Add($table) } }
+    }
+    # The twins are excluded whether or not THIS run's export succeeded: their
+    # rows were captured by earlier runs of the chain, not by tonight's.
+    foreach ($table in @($IncrementalTables)) {
+        $twin = "${table}_cold"
+        if ($seen.Add($twin)) { $excluded.Add($twin) }
+    }
+    foreach ($entry in @($ConfiguredExclusions)) {
+        if ($entry.EndsWith('_cold')) {
+            $hot = $entry.Substring(0, $entry.Length - 5)
+            if (-not $chain.Contains($hot)) {
+                if (-not $refused.Contains($entry)) { $refused.Add($entry) }
+                continue
+            }
+        }
+        if ($seen.Add($entry)) { $excluded.Add($entry) }
+    }
+    return [pscustomobject]@{ Excluded = $excluded.ToArray(); Refused = $refused.ToArray() }
 }
 
 function ConvertTo-Bytes {
@@ -197,11 +251,17 @@ if ($incrementalSpecs.Count -gt 0) {
         $incrementalError = $_.Exception.Message
     }
 }
-$excludedTableData = if ($null -eq $incrementalError) { @($incrementalSpecs | ForEach-Object Table) } else { @() }
-# Statically configured exclusions (the cold-tier twins) do not depend on this
-# run's incremental export: their rows were already captured on the hot side,
-# so they stay out of the dump even when the incremental export failed.
-$excludedTableData = @(($excludedTableData + @(Get-StockBackupExcludedTableData -Value $config['STOCK_BACKUP_EXCLUDE_TABLE_DATA'])) | Select-Object -Unique)
+$exclusionDecision = Resolve-StockBackupExcludedTableData `
+    -IncrementalTables @($incrementalSpecs | ForEach-Object Table) `
+    -IncrementalSucceeded ($null -eq $incrementalError) `
+    -ConfiguredExclusions @(Get-StockBackupExcludedTableData -Value $config['STOCK_BACKUP_EXCLUDE_TABLE_DATA'])
+$excludedTableData = @($exclusionDecision.Excluded)
+$refusedExclusions = @($exclusionDecision.Refused)
+foreach ($table in $refusedExclusions) {
+    # Loud, and in the run record: honouring this would take the table out of
+    # every future dump while nothing else carries its rows.
+    Write-Warning "Ignoring STOCK_BACKUP_EXCLUDE_TABLE_DATA entry ${table}: its hot table has no incremental chunk chain, so excluding it would leave the rows with no backup."
+}
 
 $dumpFile = Join-Path $dayDir "$($config['PGDATABASE'])-$today.dump"
 if (Test-Path -LiteralPath $dumpFile) {
@@ -212,6 +272,7 @@ if (Test-Path -LiteralPath $dumpFile) {
         status = if ($incrementalError) { 'failed' } else { 'skipped' }
         reason = 'backup already exists for today'; dump_file = $dumpFile
         incremental = $incrementalResults.ToArray(); incremental_error = $incrementalError
+        refused_table_data_exclusions = $refusedExclusions
     }
     Write-BackupRecord -Record $record
     [pscustomobject]$record
@@ -262,6 +323,7 @@ $summary = @{
     free_bytes_after = $freeBytes - $sizeBytes
     pruned_days = $removed
     excluded_table_data = $excludedTableData
+    refused_table_data_exclusions = $refusedExclusions
     incremental = $incrementalResults.ToArray()
     incremental_error = $incrementalError
 }

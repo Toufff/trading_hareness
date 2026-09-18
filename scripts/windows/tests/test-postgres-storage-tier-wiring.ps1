@@ -146,6 +146,29 @@ Assert-True ($runner -match 'logs\\storage-tiers') 'the tier job must log under 
 foreach ($proxy in 'http_proxy', 'https_proxy', 'all_proxy') {
     Assert-True ($runner -match "'$proxy'") "the tier job must clear $proxy before touching the local database"
 }
+# PowerShell 7 decodes native output with [Console]::OutputEncoding (UTF-8 here),
+# so Python must be told to produce UTF-8 as well; left to the cp936 locale it is
+# exactly the non-ASCII failure diagnostics that arrive as mojibake.
+Assert-True ($runner -match "\`$env:PYTHONIOENCODING = 'utf-8'") 'the tier runner must pin the Python output encoding to match the console'
+
+# The nightly move must stop by itself. Without a deadline it keeps issuing
+# large DELETE/INSERT batches and VACUUMs into the opening auction until Task
+# Scheduler kills the process -- and a killed process writes no receipt.
+Assert-True ($runner -match "\`$Deadline = '08:00'") 'the tier runner must default the nightly deadline to 08:00'
+Assert-True ($runner -match "'--deadline', \`$Deadline") 'the tier runner must pass --deadline to the CLI'
+Assert-True ($runner -match "'--max-seconds', \[string\]\`$MaxSeconds") 'the tier runner must pass --max-seconds as well'
+Assert-True ($runner -match '\$MaxSeconds = 7200') 'the wall-clock backstop must be two hours, inside the task time limit'
+$tierInstaller = [IO.File]::ReadAllText((Join-Path $windows 'install-storage-tiers-task.ps1'), [Text.Encoding]::UTF8)
+Assert-True ($tierInstaller -match 'New-TimeSpan -Hours 2 -Minutes 15') 'the tier task must allow 2h15m: fifteen minutes of slack over the 06:00-08:00 deadline, no more'
+
+# Both new installers register an absolute Execute path; defaulting it to the
+# checkout they happen to run from registers a task that dies with the worktree.
+foreach ($installerName in 'install-storage-tiers-task.ps1', 'install-postgres-io-window-task.ps1') {
+    $installer = [IO.File]::ReadAllText((Join-Path $windows $installerName), [Text.Encoding]::UTF8)
+    Assert-True ($installer -match [regex]::Escape("`$RepositoryRoot = 'G:\StockPlatform\current'")) "$installerName must default -RepositoryRoot to the published release"
+    Assert-True ($installer -match [regex]::Escape("`$HostRoot = 'G:\StockPlatform\current'")) "$installerName must default -HostRoot to the published release"
+    Assert-True ($installer -match 'Execute = \$registeredAction\.Execute') "$installerName must print the Execute path it stored"
+}
 
 # Its window guard is pure; exercise it.
 $runnerAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $windows 'run-storage-tiers.ps1'), [ref]$null, [ref]$null)
@@ -176,13 +199,38 @@ foreach ($flag in '--env-file', '--hot-days', '--budget-bytes', '--batch', '--ta
 # The runner writes a human log per day; the JSONL run record is the CLI's.
 Assert-True ($tierScript -match 'storage-tiers\.jsonl') 'the tier CLI must default its run record to logs\storage-tiers.jsonl'
 
-# --- the dump exclusions must match the tier policy -------------------------
+# --- the dump exclusions are computed, never seeded --------------------------
+# A cold twin may only be left out of the nightly dump when the hot table it was
+# filled from has an incremental chunk chain; otherwise the last dump holding
+# those rows falls out of retention about two months later and the live cold
+# tablespace on the G: HDD becomes their only copy. The rule therefore lives in
+# backup-stock-database.ps1 and is evaluated at dump time against
+# STOCK_BACKUP_INCREMENTAL_TABLES, instead of being seeded as a static list.
 $twins = [regex]::Matches($tierScript, 'TierPolicy\("([a-z_]+)",\s*"([a-z_]+)"') |
     ForEach-Object { "$($_.Groups[1].Value).$($_.Groups[2].Value)_cold" }
+$hotTables = [regex]::Matches($tierScript, 'TierPolicy\("([a-z_]+)",\s*"([a-z_]+)"') |
+    ForEach-Object { "$($_.Groups[1].Value).$($_.Groups[2].Value)" }
 Assert-True ($twins.Count -eq 5) 'the tier policy must still describe five tiered tables'
-$seeded = [regex]::Match($initSource, "Name 'STOCK_BACKUP_EXCLUDE_TABLE_DATA' -Value \(@\(([^)]+)\)").Groups[1].Value
-$seededTables = [regex]::Matches($seeded, "'([a-z_.]+)'") | ForEach-Object { $_.Groups[1].Value }
-Assert-True ((($seededTables | Sort-Object) -join ';') -eq (($twins | Sort-Object) -join ';')) 'the seeded STOCK_BACKUP_EXCLUDE_TABLE_DATA must list exactly the cold twins of the tier policy'
+Assert-True ($initSource -notmatch "Set-StockPlatformEnvDefault[^\r\n]*STOCK_BACKUP_EXCLUDE_TABLE_DATA") `
+    'the initializer must not seed a static exclusion list: a twin whose hot table has no chunk chain would lose its only backup'
+Assert-True ($initSource -match 'STOCK_BACKUP_EXCLUDE_TABLE_DATA is deliberately NOT seeded') 'the initializer must say why it seeds no exclusion list'
+
+$backupSource = [IO.File]::ReadAllText((Join-Path $windows 'backup-stock-database.ps1'), [Text.Encoding]::UTF8)
+$backupAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $windows 'backup-stock-database.ps1'), [ref]$null, [ref]$null)
+$resolveAst = $backupAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Resolve-StockBackupExcludedTableData' }, $true)
+Assert-True ($null -ne $resolveAst) 'backup-stock-database.ps1 must compute the exclusions through Resolve-StockBackupExcludedTableData'
+. ([scriptblock]::Create($resolveAst.Extent.Text))
+Assert-True ($backupSource -match 'Resolve-StockBackupExcludedTableData `?\r?\n?\s*-IncrementalTables') 'the nightly dump must call the rule with this run''s incremental tables'
+
+# The rule, fed the tier policy's own tables, must yield exactly the twins the
+# retired static default listed -- and nothing when no chain exists.
+$decided = Resolve-StockBackupExcludedTableData -IncrementalTables $hotTables -IncrementalSucceeded $true -ConfiguredExclusions @()
+$decidedTwins = @($decided.Excluded | Where-Object { $_.EndsWith('_cold') })
+Assert-True ((($decidedTwins | Sort-Object) -join ';') -eq (($twins | Sort-Object) -join ';')) `
+    'with every tiered table in the chunk chain the rule must exclude exactly the cold twins of the tier policy'
+$defaultChain = @('quant.raw_market_observations')   # the shipped STOCK_BACKUP_INCREMENTAL_TABLES default
+$shipped = Resolve-StockBackupExcludedTableData -IncrementalTables $defaultChain -IncrementalSucceeded $true -ConfiguredExclusions $twins
+Assert-True (@($shipped.Refused).Count -eq 4) 'with only the default chain, the four twins without one must be refused rather than excluded'
 
 [pscustomobject]@{
     passed = $true
