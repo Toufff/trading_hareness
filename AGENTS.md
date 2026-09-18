@@ -99,6 +99,9 @@ provider response directly to a live threshold or order path.
   not as the intended shape. **New behaviour must never be added here** — it
   belongs in a focused router/repository/rules module and is only wired up
   from `main.py`.
+- `quant-service/app/adjustment_factor_maintenance.py`: the out-of-band
+  cumulative adjustment-factor repair lane (04:00-08:00 window), driven by
+  `scripts/adjustment-factor-maintenance.py`; never a post-close stage.
 - `quant-service/migrations/versions/`: all production schema changes (Alembic).
 - `frontend/src/App.vue`: current Vue dashboard; keep API calls typed and label
   research-only/replay-only values visibly.
@@ -121,6 +124,23 @@ provider response directly to a live threshold or order path.
 - Fail closed on missing bars, stale providers, incomplete sector mappings and
   insufficient samples. Do not invent Top10s, prices or regression coefficients.
 - Keep author replay outcomes separate from strategy-available outcomes.
+- **Bar tables never receive a placeholder adjustment factor.**
+  `quant.canonical_bars_daily.adj_factor` and `quant.market_bars_daily.adj_factor`
+  are cumulative (hfq-style) corporate-action factors: `close * adj_factor` must
+  be comparable across dates. A vendor that publishes no corporate-action
+  history emits no `adj_factor` rows at all — never an identity `1`, because
+  `1.0` is neither NULL nor `<= 0` and therefore sails past every fail-closed
+  adjustment consumer while silently yielding an unadjusted series. NULL is the
+  honest value for "not fetched yet"; those dates are filled out of band by
+  `scripts/adjustment-factor-maintenance.py sync`, invoked automatically twice:
+  as the non-gating `adjustment_factors` post-close stage and by the daily
+  04:30 `trading-hareness-adjustment-factors` scheduled task. A coverage or
+  readiness check must not read a NULL factor as a missing bar. Promotion onto
+  a bar requires BOTH halves of
+  `tushare_normalization.promotable_adjustment_factor`: a tushare provider AND
+  absent/`corporate_action_cumulative` semantics — a vendor that merely omits
+  the marker is refused by the provider half. See
+  `docs/ADJUSTMENT_FACTOR_SEMANTICS.md`.
 - Application code never reads a `*_cold` twin or a `*_all` view. Those are the
   storage tier's operations surface: the twins carry no foreign keys and no
   triggers, so a router reading one bypasses every referential guarantee the hot
@@ -235,6 +255,13 @@ this file and `docs/ARCHITECTURE.md` in the same change:
   `quant-service/app` fails here (bare or module-qualified call), and
   `daily_bar_batch_repository`'s own `market_bars_daily` /
   `canonical_bars_daily` statements must send their keys ascending.
+- `quant-service/tests/test_adjustment_factor_semantics_guard.py` — enforces
+  "bar tables never receive a placeholder adjustment factor": no module may
+  build a `factor_semantics: same_day_identity_only` row, only the pinned
+  writers may `SET adj_factor` on a bar table, EVERY write site (the enclosing
+  function of each match, not the file) must contain one of its module's
+  pinned guards, and (with `PGHOST`) the release leak query is exercised
+  against real PostgreSQL.
 
 The same convention covers the Windows runtime. These PowerShell guard tests are
 standalone (no database, no venv, no scheduled task) and run as
@@ -288,6 +315,11 @@ before every release:
   twin whose hot table has no chain (refused and reported, never silently
   honoured), plus `Get-StockIncrementalChainWatermark` against real `state.json`
   files on disk.
+- `scripts/windows/tests/test-adjustment-factor-task-contract.ps1` — static
+  contract for the 04:30 `trading-hareness-adjustment-factors` task: daily
+  trigger, release-rooted hidden launcher, no restart-on-failure, cleared
+  proxy variables, dated log file and the exit-code rule the schedule relies
+  on. Registers no task and touches no database.
 
 Two tests in this family are **not** in the release gate and must be run by hand:
 

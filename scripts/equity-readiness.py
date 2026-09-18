@@ -9,7 +9,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'quant-service'))
-from app.daily_control_plane import status_query, status_payload
+from app.daily_control_plane import adjustment_retirement_details, status_query, status_payload
 from app.db_dsn import connection_params
 
 
@@ -27,12 +27,17 @@ def main():
     with psycopg.connect(**connection_params(config), row_factory=dict_row, connect_timeout=10,
                         options='-c default_transaction_read_only=on -c statement_timeout=30000') as c:
         sql, params = status_query(a.date)
+        rows = c.execute(sql, params).fetchall()
+        # A date the blocked-date ledger has retired is labelled 'retired' with
+        # the run_key to clear, exactly as the per-symbol readiness view labels
+        # it -- never 'pending', which would promise a repair nobody will make.
+        retired = adjustment_retirement_details(c, rows)
         # ASCII-only on purpose: run-post-close-pipeline.ps1 parses this stdout
         # with ConvertFrom-Json under whatever console codepage the scheduled
         # task host gives pwsh (GBK on this machine). Raw UTF-8 Chinese in the
         # reason text was decoded as GBK there and broke the JSON string
         # (2026-09-18 20:40 preflight failure); \uXXXX escapes survive any codepage.
-        print(json.dumps({'daily_control_plane': status_payload(c.execute(sql, params).fetchall())},
+        print(json.dumps({'daily_control_plane': status_payload(rows, retired_dates=retired)},
                          ensure_ascii=True))
 
 

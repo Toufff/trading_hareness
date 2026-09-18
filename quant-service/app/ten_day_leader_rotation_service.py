@@ -39,6 +39,7 @@ def run_ten_day_leader_rotation(request: Any, dependencies: TenDayLeaderRotation
                 "daily_symbols": inputs.daily_symbols,
                 "expected_daily_symbols": inputs.expected_daily_symbols,
                 "minimum_required_symbols": required_coverage,
+                "adjustment_covered_symbols": inputs.adjustment_covered_symbols,
             },
         }
     ranked = dependencies.rank_candidates(
@@ -62,9 +63,17 @@ def run_ten_day_leader_rotation(request: Any, dependencies: TenDayLeaderRotation
         "reason": ranked.get("reason"),
     }
     run_key = hashlib.sha256(f"{MODEL_VERSION}:{as_of_date}".encode()).hexdigest()
+    # Coverage of the lane's SETTLED bars is what gates it (see
+    # ten_day_leader_rotation_repository.latest_full_market_date), so the
+    # adjustment coverage has to be reported next to daily_symbols or it is
+    # invisible in production -- the factor lane is exactly what runs late.
+    source_status = {
+        **(ranked.get("source_status") or {}),
+        "adjustment_covered_symbols": inputs.adjustment_covered_symbols,
+    }
     run_id = dependencies.persist(
         run_key=run_key, as_of_date=as_of_date, strategy_available_at=inputs.strategy_available_at,
-        model_version=MODEL_VERSION, status=ranked["status"], source_status=ranked.get("source_status") or {},
+        model_version=MODEL_VERSION, status=ranked["status"], source_status=source_status,
         summary=summary, candidates=candidates, json_safe=dependencies.json_safe,
     )
     return {
@@ -73,7 +82,7 @@ def run_ten_day_leader_rotation(request: Any, dependencies: TenDayLeaderRotation
             inputs.strategy_available_at.isoformat() if inputs.strategy_available_at else None
         ),
         "status": ranked["status"], "reason": ranked.get("reason"),
-        "scope": "research_only_no_orders", "source_status": ranked.get("source_status") or {},
+        "scope": "research_only_no_orders", "source_status": source_status,
         "summary": summary, "candidates": candidates,
     }
 
