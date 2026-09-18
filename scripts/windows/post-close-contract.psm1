@@ -13,6 +13,26 @@ function Get-ContractValue([object]$Value, [string]$Path) {
     return $Value
 }
 
+# Get-ContractValue cannot answer 'is this field there?': PowerShell unrolls a
+# returned empty array to $null, so a completed plan with missing_symbols=@()
+# and a projection that never wrote the field look identical to the caller.
+# Fail-closed decisions need that distinction, so this returns a hashtable
+# (never unrolled) carrying presence alongside the value.
+function Get-ContractSlot([object]$Value, [string]$Path) {
+    foreach ($part in $Path.Split('.')) {
+        if ($null -eq $Value) { return @{ present = $false; value = $null } }
+        if ($Value -is [System.Collections.IDictionary]) {
+            if (-not $Value.Contains($part)) { return @{ present = $false; value = $null } }
+            $Value = $Value[$part]
+        } else {
+            $property = $Value.PSObject.Properties[$part]
+            if (-not $property) { return @{ present = $false; value = $null } }
+            $Value = $property.Value
+        }
+    }
+    return @{ present = ($null -ne $Value); value = $Value }
+}
+
 function Test-EquityDateReady([object]$Health, [string]$TradeDate) {
     return ((Get-ContractValue $Health 'daily_control_plane.trade_date') -eq $TradeDate -and
         (Get-ContractValue $Health 'daily_control_plane.state') -eq 'ready')
@@ -39,12 +59,18 @@ function New-PostCloseResearchStatus {
         [Parameter(Mandatory)][ValidatePattern('^\d{4}-\d{2}-\d{2}$')][string]$TradeDate
     )
     $missing = @()
-    if ($null -ne $ReviewCoverage) {
-        $raw = Get-ContractValue $ReviewCoverage 'missing_symbols'
-        if ($null -ne $raw) { $missing = @($raw) }
-    }
-    # Unknown coverage is not evidence of completed research: fail closed.
-    $due = ($null -eq $ReviewCoverage) -or ($missing.Count -gt 0)
+    $missingSlot = Get-ContractSlot $ReviewCoverage 'missing_symbols'
+    $plannedSlot = Get-ContractSlot $ReviewCoverage 'planned'
+    $completedSlot = Get-ContractSlot $ReviewCoverage 'completed'
+    if ($missingSlot.present) { $missing = @($missingSlot.value) }
+    # Unknown coverage is not evidence of completed research: fail closed. A
+    # present-but-unusable projection counts as unknown too -- an absent or JSON
+    # null missing_symbols, an absent planned/completed pair, or a plan whose
+    # completed count falls short is exactly the {planned: 9, completed: 0}
+    # shape this change exists to stop recording as a finished round.
+    $due = ($null -eq $ReviewCoverage) -or (-not $missingSlot.present) -or ($missing.Count -gt 0) -or
+        (-not $plannedSlot.present) -or (-not $completedSlot.present) -or
+        ([int]$completedSlot.value -lt [int]$plannedSlot.value)
     $result = @{ research_status = $(if ($due) { 'research_due' } else { 'complete' }) }
     if ($due) {
         $deadline = [datetime]::ParseExact($TradeDate, 'yyyy-MM-dd', $null).AddHours(21).AddMinutes(30)

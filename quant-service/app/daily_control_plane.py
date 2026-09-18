@@ -27,6 +27,14 @@ MINIMUM_ALL_A_COVERAGE_RATIO = 0.95
 #: universe, so BJ stays observed-but-ungated until a BJ daily source exists.
 GATED_EXCHANGES = ('SH', 'SZ')
 
+#: The *only* exchanges allowed to sit outside the gate.  Both the readiness
+#: payload and :func:`daily_row_count` decide membership from this one tuple by
+#: exclusion, never by listing the gated exchanges: an inclusion list silently
+#: drops any suffix nobody enumerated (an unsuffixed symbol, a future board)
+#: from the expected population on one side and keeps it on the other, so the
+#: sync and the gate could disagree about the same session.
+UNGATED_EXCHANGES = ('BJ',)
+
 #: ``|expected_delta|`` above this share of the expected population is a
 #: universe drift the reason text has to name, not background churn.
 EXPECTED_DELTA_REPORT_RATIO = 0.02
@@ -84,6 +92,7 @@ EQUITY_DAILY_CONTROL_STATUS_SQL = """WITH equity_bars AS (
              FROM latest JOIN quant.universe_membership_history membership
                ON membership.universe_key='all_a'
               AND membership.effective_from=latest.trading_date
+              AND (membership.effective_to IS NULL OR membership.effective_to>=latest.trading_date)
             GROUP BY 1) grouped
    ) SELECT expected.trading_date,expected.exchange,expected.expected_daily_rows,
        count(DISTINCT bar.symbol)::int AS daily_rows,
@@ -129,20 +138,25 @@ def _format_expected_sources(sources: Mapping[str, Any]) -> str:
     return ', '.join(f"{name} {int(count)}" for name, count in ordered)
 
 
-def status_payload(
-    rows: Mapping[str, Any] | Iterable[Mapping[str, Any]] | None,
-) -> dict[str, Any]:
+def status_payload(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
     """Return an explicit fail-closed readiness result from the per-exchange rows.
 
-    The gate is decided by :data:`GATED_EXCHANGES` only.  Every other exchange
-    is still reported in ``by_exchange``/``ungated_exchanges`` so a report can
-    show that, say, BJ has no daily source, instead of silently diluting the
-    SH/SZ coverage ratio that actually decides whether the session is usable.
+    The gate excludes :data:`UNGATED_EXCHANGES` only.  Every other exchange is
+    still reported in ``by_exchange``/``ungated_exchanges`` so a report can show
+    that, say, BJ has no daily source, instead of silently diluting the SH/SZ
+    coverage ratio that actually decides whether the session is usable.
+
+    The SQL returns one row per exchange, so a caller that still says
+    ``fetchone()`` would hand over a single arbitrary exchange (``BJ`` first,
+    alphabetically) and get a confidently wrong ``blocked`` verdict.  That
+    mistake raises here instead of being papered over with a single-row branch.
     """
     if rows is None:
         return _absent_payload()
-    candidates = [rows] if isinstance(rows, Mapping) else list(rows)
-    dated = [row for row in candidates if row and row.get("trading_date") is not None]
+    if isinstance(rows, Mapping):
+        raise TypeError(
+            "status_payload takes every per-exchange row (cursor.fetchall()), not a single row")
+    dated = [row for row in rows if row and row.get("trading_date") is not None]
     if not dated:
         return _absent_payload()
 
@@ -156,7 +170,7 @@ def status_payload(
         bucket["adjustment"] += int(row.get("adjustment_rows") or 0)
         bucket["limit"] += int(row.get("limit_rows") or 0)
     for exchange, bucket in by_exchange.items():
-        bucket["gated"] = exchange in GATED_EXCHANGES or exchange == UNKNOWN_EXCHANGE
+        bucket["gated"] = exchange not in UNGATED_EXCHANGES
         bucket["ratio"] = round(bucket["daily"] / bucket["expected"], 4) if bucket["expected"] else 0.0
 
     gated = {name: bucket for name, bucket in by_exchange.items() if bucket["gated"]}
@@ -208,9 +222,14 @@ def status_payload(
         f"{item['exchange']} {item['daily']}/{item['expected']} 未参与门槛" for item in ungated)
     if drift:
         source_text = _format_expected_sources(sources)
+        # The delta is a net difference between two point-in-time populations;
+        # the source grouping counts membership rows that *start* on this date,
+        # re-affirmations of an existing member included.  The two are related
+        # but never equal, so they are labelled as two separate quantities
+        # rather than joined into one arithmetic a reader would try to balance.
         parts.append(
             f"all_a 预期较上一交易日 {expected_delta:+d}"
-            + (f"（来源分组：{source_text}）" if source_text else ""))
+            + (f"（当日新增 {sum(sources.values())}，来源分组：{source_text}）" if source_text else ""))
     reason = '；'.join(parts) if (not ready or drift) else None
 
     return {
@@ -240,18 +259,20 @@ def daily_row_count(database: Any, trade_date: date) -> int:
     The controls synchronizer must never make a partially fetched daily date
     appear ready merely because its local rows have matching controls.  The
     expected population is the point-in-time all-A membership for this date,
-    restricted to :data:`GATED_EXCHANGES` for the same reason the readiness
-    gate is: an exchange with no daily source must not shrink this ratio.
+    minus :data:`UNGATED_EXCHANGES` for the same reason the readiness gate
+    excludes them: an exchange with no daily source must not shrink this ratio.
+    Exclusion, not inclusion, is what keeps this count and
+    :func:`status_payload` from disagreeing about an unclassifiable symbol.
     """
-    gated = list(GATED_EXCHANGES)
+    ungated = list(UNGATED_EXCHANGES)
     with database.transaction() as connection:
         row = connection.execute(
-            """WITH expected AS (
+            f"""WITH expected AS (
                    SELECT count(DISTINCT symbol)::int AS expected_rows
                      FROM quant.universe_membership_history
                     WHERE universe_key='all_a' AND effective_from<=%s
                       AND (effective_to IS NULL OR effective_to>=%s)
-                      AND upper(split_part(symbol,'.',2))=ANY(%s)
+                      AND coalesce(nullif(upper(split_part(symbol,'.',2)),''),'{UNKNOWN_EXCHANGE}')<>ALL(%s)
                ), actual AS (
                    SELECT count(DISTINCT bar.symbol)::int AS actual_rows
                      FROM quant.canonical_bars_daily bar
@@ -260,9 +281,9 @@ def daily_row_count(database: Any, trade_date: date) -> int:
                       AND membership.effective_from<=%s
                       AND (membership.effective_to IS NULL OR membership.effective_to>=%s)
                     WHERE bar.trading_date=%s AND bar.quality_status IN ('fresh','partial')
-                      AND upper(split_part(bar.symbol,'.',2))=ANY(%s)
+                      AND coalesce(nullif(upper(split_part(bar.symbol,'.',2)),''),'{UNKNOWN_EXCHANGE}')<>ALL(%s)
                ) SELECT expected_rows,actual_rows FROM expected CROSS JOIN actual""",
-            (trade_date, trade_date, gated, trade_date, trade_date, trade_date, gated),
+            (trade_date, trade_date, ungated, trade_date, trade_date, trade_date, ungated),
         ).fetchone()
     expected = int((row or {}).get("expected_rows") or 0)
     actual = int((row or {}).get("actual_rows") or 0)
@@ -345,5 +366,5 @@ async def sync_full_market_daily_controls(
 
 __all__ = [
     "EQUITY_DAILY_CONTROL_STATUS_SQL", "EXPECTED_DELTA_REPORT_RATIO", "GATED_EXCHANGES",
-    "MINIMUM_ALL_A_COVERAGE_RATIO", "status_payload", "status_query",
+    "MINIMUM_ALL_A_COVERAGE_RATIO", "UNGATED_EXCHANGES", "status_payload", "status_query",
 ]

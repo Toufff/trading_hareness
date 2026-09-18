@@ -7,6 +7,7 @@ from app.daily_control_plane import (
     DailyControlPlaneSyncDependencies,
     EQUITY_DAILY_CONTROL_STATUS_SQL,
     GATED_EXCHANGES,
+    UNGATED_EXCHANGES,
     daily_row_count,
     status_payload,
     sync_full_market_daily_controls,
@@ -69,6 +70,13 @@ class DailyControlPlaneTests(unittest.TestCase):
         self.assertIsNone(payload['trade_date'])
         self.assertEqual(payload['state'], 'absent')
 
+    def test_a_single_row_is_rejected_instead_of_scored_as_one_exchange(self):
+        """A stale ``fetchone()`` caller must fail, not report a wrong verdict."""
+        single = _row("BJ", 342, 0)
+        with self.assertRaises(TypeError):
+            status_payload(single)
+        self.assertEqual(status_payload([single])["state"], "blocked")
+
 
 class PerExchangeGateTests(unittest.TestCase):
     """The 2026-09-18 regression: 312 BJ codes joined all_a with no BJ daily source."""
@@ -116,8 +124,12 @@ class PerExchangeGateTests(unittest.TestCase):
                          {"stock-basic-all-a:tushare_super_get": 312, "longhuvip_composite": 12})
         self.assertIn("SH+SZ 5122/5221=98.1% ready", payload["reason"])
         self.assertIn("all_a 预期较上一交易日 +305", payload["reason"])
-        self.assertIn("来源分组：stock-basic-all-a:tushare_super_get 312, longhuvip_composite 12",
+        # The grouping counts membership rows starting that day (312+12=324), which
+        # is not the net delta; the text must not read as if the two must balance.
+        self.assertIn("（当日新增 324，来源分组："
+                      "stock-basic-all-a:tushare_super_get 312, longhuvip_composite 12）",
                       payload["reason"])
+        self.assertNotIn("+305（来源分组", payload["reason"])
 
     def test_ordinary_daily_churn_is_not_reported_as_drift(self):
         payload = status_payload([
@@ -136,6 +148,15 @@ class PerExchangeGateTests(unittest.TestCase):
         self.assertEqual(payload["ungated_exchanges"], [])
         self.assertEqual(payload["expected_daily_rows"], 2_600)
         self.assertEqual(payload["state"], "blocked")
+
+    def test_only_the_ungated_exchanges_leave_the_gate(self):
+        """The payload decides the gate by exclusion, exactly as daily_row_count does."""
+        payload = status_payload([_row("SH", 10, 10), _row("BJ", 10, 0), _row(None, 10, 0)])
+        self.assertEqual(
+            {name: bucket["gated"] for name, bucket in payload["by_exchange"].items()},
+            {"SH": True, "BJ": False, "UNKNOWN": True})
+        self.assertEqual([item["exchange"] for item in payload["ungated_exchanges"]],
+                         list(UNGATED_EXCHANGES))
 
     def test_missing_previous_session_leaves_the_delta_unknown_instead_of_zero(self):
         payload = status_payload([_row("SH", 2_300, 2_290), _row("SZ", 2_921, 2_910)])
@@ -159,6 +180,11 @@ class EquityStatusSqlShapeTests(unittest.TestCase):
         self.assertIn("expected_previous_trading_day", EQUITY_DAILY_CONTROL_STATUS_SQL)
         self.assertIn("membership.effective_from=latest.trading_date", EQUITY_DAILY_CONTROL_STATUS_SQL)
         self.assertIn("jsonb_object_agg(grouped.source,grouped.symbols)", EQUITY_DAILY_CONTROL_STATUS_SQL)
+        # A membership retired on the same day it started is not an addition.
+        grouping = EQUITY_DAILY_CONTROL_STATUS_SQL.split('expected_sources AS (', 1)[1]
+        self.assertIn("AND (membership.effective_to IS NULL"
+                      " OR membership.effective_to>=latest.trading_date)",
+                      grouping.split(') SELECT', 1)[0])
 
     def test_status_sql_takes_no_parameters_until_a_date_is_requested(self):
         self.assertNotIn('%s', EQUITY_DAILY_CONTROL_STATUS_SQL)
@@ -185,16 +211,21 @@ class DailyRowCountTests(unittest.TestCase):
         database = _fake_database({"expected_rows": 5000, "actual_rows": 4000})
         self.assertEqual(daily_row_count(database, date(2026, 8, 21)), 0)
 
-    def test_expected_population_is_restricted_to_the_gated_exchanges(self):
+    def test_expected_population_excludes_only_the_ungated_exchanges(self):
+        """Excluding BJ, rather than including SH/SZ, keeps an unsuffixed symbol
+        inside both this count and ``status_payload``'s gate."""
         database = _fake_database({"expected_rows": 5221, "actual_rows": 5122})
         self.assertEqual(daily_row_count(database, date(2026, 9, 18)), 5122)
         connection = database.transaction.return_value.__enter__.return_value
         sql, params = connection.execute.call_args[0]
         self.assertEqual(sql.count('%s'), len(params))
-        self.assertEqual([value for value in params if value == list(GATED_EXCHANGES)],
-                         [list(GATED_EXCHANGES), list(GATED_EXCHANGES)])
-        self.assertIn("upper(split_part(symbol,'.',2))=ANY(%s)", sql)
-        self.assertIn("upper(split_part(bar.symbol,'.',2))=ANY(%s)", sql)
+        self.assertEqual([value for value in params if value == list(UNGATED_EXCHANGES)],
+                         [list(UNGATED_EXCHANGES), list(UNGATED_EXCHANGES)])
+        self.assertNotIn('ANY(%s)', sql)
+        self.assertIn("coalesce(nullif(upper(split_part(symbol,'.',2)),''),'UNKNOWN')<>ALL(%s)", sql)
+        self.assertIn(
+            "coalesce(nullif(upper(split_part(bar.symbol,'.',2)),''),'UNKNOWN')<>ALL(%s)", sql)
+        self.assertEqual(sorted(set(GATED_EXCHANGES) & set(UNGATED_EXCHANGES)), [])
 
 
 class SyncFullMarketDailyControlsTests(unittest.TestCase):
