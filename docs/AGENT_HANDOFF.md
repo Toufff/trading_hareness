@@ -206,10 +206,34 @@ of the following hold:
   `<PlatformRoot>\current\...`, so `tunnel_release` means "last installed from",
   never "will run from next"; the two diverge as soon as one publish skips, and
   comparing against only one of them is unsound. When the tunnel's supervised
-  run started at or after the active release was published the live process
-  demonstrably came from `current`, and the gate refreshes the pin to the active
-  release (`tunnel_release_pin_refreshed` / `tunnel_release_pin_reason` in the
-  plan and in the skip event).
+  run started at or after `current` was moved, the live process started from
+  `current`, and the gate refreshes the pin to the active release
+  (`tunnel_release_pin_refreshed` / `tunnel_release_pin_reason` /
+  `activation_instant_source` in the plan and in the skip event). "When
+  `current` was moved" is `release-state.json`'s `activated_at`, written by
+  publish and switch the moment `Set-StockCurrentRelease` returns — **not** the
+  release id's `yyyyMMddTHHmmss` prefix, which is stamped before the test suite
+  runs and can precede activation by tens of minutes, a window in which
+  `current` still resolved to the previous release. `activated_at` counts as
+  exact only while the `current` junction really resolves to `active_release`:
+  switch moves the junction before it writes state and only warns when its own
+  revert fails, so a recorded instant can describe a release `current` has
+  demonstrably left, and there it is treated as superseded. On state files
+  written before `activated_at` existed — and whenever it is superseded that
+  way — the gate falls back to the `current` junction's own creation time (exact:
+  the junction is recreated on every switch, and it too is used only when the
+  junction resolves to the active release) and only then to the id stamp; with
+  that approximate instant the pin is still moved
+  forward but the plan carries `tunnel_release_pin_uncertain = true`, the reason
+  `tunnel_release_pin_uncertain`, and decides **reinstall** — an uncertain pin
+  never buys a skip.
+  No stale pin has been observed in production: the live runtime state on
+  2026-09-18 (`started_at` 21:35:59, `verified_at` 21:36:02, both written by
+  `install-shared-tunnel-task.ps1`) shows a tunnel installed by its own publish,
+  from `current` = the active release. The refresh has only been exercised
+  against a synthetic pin; the case it protects is a tunnel that relaunched, or
+  was reinstalled by a manual `install-shared-tunnel-task.ps1` run, between two
+  publishes — or a rollback whose `Set-StockReleaseState` never landed.
   The file list is the transitive closure of the execution chain: task action →
   `stock-background-host.exe` build inputs → `start-shared-tunnels.ps1` → its
   `Import-Module` targets → `Start-RuntimeSupervisor` →
@@ -219,7 +243,26 @@ of the following hold:
   one, so a new import anywhere on the chain fails the test instead of silently
   leaving the gate under-detecting. The parser also follows expandable strings
   (`"$PSScriptRoot\x.psm1"`) and **throws** on a variable it cannot resolve
-  statically, so an invisible chain element is loud rather than silent.
+  statically, so an invisible chain element is loud rather than silent. A path
+  literal that names a subdirectory (`Join-Path $PSScriptRoot 'sub\helper.psm1'`)
+  is resolved against the release root first and then against the directory of
+  the file that mentions it; one that spells out a path and resolves in neither
+  place **throws** as well, instead of being dropped into a file list that then
+  silently matches the declared one. `/` and `\` are the same separator here, so
+  both readings and the loud rule cover either spelling, and every candidate is
+  collapsed back to its canonical release-root-relative form, so a
+  `..`-carrying literal enters the chain under the name the declared list uses
+  instead of as a second spelling of the same file. A relative literal whose
+  candidates *all* collapse to outside the release root **throws** under the
+  same loud rule — it is spelled as a reference into this tree yet produced no
+  chain element; a deliberately out-of-tree reference is absolute or UNC, and
+  those stay a quiet drop. Only a literal
+  whose **whole** value is a path counts: an operator message that merely ends
+  in one (`throw 'Run scripts\windows\tests\test-shared-tunnel-recovery.ps1'`)
+  names a file this tree need not carry and must not become a hard error — paths
+  on this chain never contain whitespace. A bare file name with no separator is
+  still dropped quietly — it is as likely to be a message or a build output as a
+  path.
   `stock-background-host.exe` is not hashed, because csc.exe recompiles it
   non-deterministically on every publish; its tracked build inputs are hashed in
   its place, and `build-background-task-host.ps1` writes
@@ -275,9 +318,11 @@ reinstalled_after_degraded_verification`, or
 `reinstall_after_degraded_verification_failed` when that repair reinstall itself
 threw and nothing was in fact reinstalled);
 `switch-stock-release.ps1` does the same around its own
-`verify-shared-runtime.ps1` call. Only a skip that survived activation, health
-verification *and* the `release-state.json` write — i.e. written after
-`$activated = $true`, past every path that can still roll back — writes the
+`verify-shared-runtime.ps1` call, and writes its receipt after its own
+`Set-StockReleaseState` on both the forward and the revert path. Only a skip
+that survived activation, health verification *and* the `release-state.json`
+write — in publish, after `$activated = $true`, past every path that can still
+roll back — writes the
 `tunnel_reinstall_skipped` runtime event, so grepping `lifecycle-<date>.jsonl`
 for it cannot produce a false positive from a publish that later rolled back and
 reinstalled after all. The publish/switch result and `release-state.json`'s
