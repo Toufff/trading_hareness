@@ -233,18 +233,36 @@ Assert-True ($runner -notmatch '--skip-role-settings') 'the production runner mu
 # normal night (including a deadline stop), 1 wants a human but the tier is
 # intact, 2 means the 500 GB guard is not guarding. A runner that translated 2
 # into a generic failure to retry would hammer an unmeasurable directory nightly.
-foreach ($pair in @(
+$exitCodePairs = @(
     @{ Status = 'ok'; Code = 0 },
     @{ Status = 'deadline_reached'; Code = 0 },
+    # deadline_missed is NOT deadline_reached: the window was already shut before
+    # the first table, so nothing was attempted. It must not read as a green night.
+    @{ Status = 'deadline_missed'; Code = 1 },
     @{ Status = 'partial'; Code = 1 },
     @{ Status = 'conflicts'; Code = 1 },
     @{ Status = 'schema_drift'; Code = 1 },
     @{ Status = 'degraded'; Code = 2 },
     @{ Status = 'failed'; Code = 2 }
-)) {
+)
+foreach ($pair in $exitCodePairs) {
     Assert-True ($tierScript -match ('"{0}":\s*{1},' -f $pair.Status, $pair.Code)) `
         "the tier CLI must map status $($pair.Status) to exit code $($pair.Code)"
 }
+
+# The list above is hand-maintained, so pin it to the CLI's own table: a status
+# added to EXIT_CODES without a line here would otherwise go unchecked forever,
+# which is exactly how deadline_missed arrived unpinned in the first place.
+$exitCodeBlock = [regex]::Match($tierScript, 'EXIT_CODES\s*=\s*\{(?<body>[^}]*)\}')
+Assert-True $exitCodeBlock.Success 'the tier CLI must declare an EXIT_CODES map the runner contract can read'
+$declaredStatuses = [regex]::Matches($exitCodeBlock.Groups['body'].Value, '"(?<name>[a-z_]+)"\s*:\s*(?<code>[0-2])') |
+    ForEach-Object { $_.Groups['name'].Value }
+foreach ($declared in $declaredStatuses) {
+    Assert-True ($exitCodePairs.Status -contains $declared) `
+        "EXIT_CODES declares status '$declared' that this test does not pin to an exit code"
+}
+Assert-True ($declaredStatuses.Count -eq $exitCodePairs.Count) `
+    'every status this test pins must exist in the CLI EXIT_CODES map and vice versa'
 Assert-True ($runner -match '\$exitCode = \$LASTEXITCODE') 'the runner must take the CLI exit code'
 Assert-True ($runner -match 'exit \$exitCode') 'the runner must exit with the CLI code, never translate it'
 
@@ -312,6 +330,24 @@ Assert-True (@($frozen.Refused).Count -eq $twins.Count) 'every stalled twin must
 # the same hot window the tier job is configured with.
 Assert-True ($backupSource -match 'Get-StockIncrementalChainWatermark') 'the nightly dump must read each chain watermark before deciding'
 Assert-True ($backupSource -match 'STORAGE_TIER_HOT_DAYS') 'the dump must take the tier hot window from runtime.env, not assume 365'
+
+# STOCK_BACKUP_INCREMENTAL_TABLES is unset in production, so BOTH sides fall back
+# to their own hard-coded default -- the dump decides which twins it may leave
+# out, the tier job decides which moves it must clamp to a chain watermark. Two
+# copies of one string in two languages, with nothing pinning them together:
+# if they drift, the dump excludes a twin whose rows the tier job moved
+# unclamped, which is the exact hole the clamp exists to prevent.
+$incrementalModule = [IO.File]::ReadAllText((Join-Path $windows 'stock-incremental-backup.psm1'), [Text.Encoding]::UTF8)
+$psDefault = [regex]::Match($incrementalModule, "if \(-not \`$text\) \{ \`$text = '(?<spec>[^']+)' \}")
+Assert-True $psDefault.Success 'Get-StockIncrementalTableSpecs must carry a literal STOCK_BACKUP_INCREMENTAL_TABLES default'
+$pyDefault = [regex]::Match($tierScript, 'DEFAULT_INCREMENTAL_TABLES\s*=\s*"(?<spec>[^"]+)"')
+Assert-True $pyDefault.Success 'the tier CLI must carry a literal STOCK_BACKUP_INCREMENTAL_TABLES default'
+Assert-True ($psDefault.Groups['spec'].Value -eq $pyDefault.Groups['spec'].Value) `
+    ("the PowerShell and Python defaults for STOCK_BACKUP_INCREMENTAL_TABLES must be identical " +
+     "(psm1 '$($psDefault.Groups['spec'].Value)' vs CLI '$($pyDefault.Groups['spec'].Value)')")
+# And the tier job has to parse that string the same way the psm1 does.
+Assert-True ($tierScript -match 'def parse_incremental_specs') 'the tier CLI must parse STOCK_BACKUP_INCREMENTAL_TABLES itself, not assume one table'
+Assert-True ($tierScript -match 'STOCK_BACKUP_ROOT') 'the tier CLI must read the backup root the chain state files live under'
 
 [pscustomobject]@{
     passed = $true

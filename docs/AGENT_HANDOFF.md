@@ -67,7 +67,11 @@ Peer credentials, exports and staging
   索引、`quant.storage_tier_conflicts` 表，也没有 `stock_cold` 表空间；
   `runtime.env` 里也还没有 `PGDATA_DIR` / `PGDATA_BUDGET_BYTES` /
   `PGDATA_COLD_TABLESPACE_DIR` / `STOCK_BACKUP_INCREMENTAL_TABLES` /
-  `STOCK_BACKUP_EXCLUDE_TABLE_DATA` 任何一个。活机上什么都还没被改动。
+  `STOCK_BACKUP_EXCLUDE_TABLE_DATA` / `STORAGE_TIER_HOT_DAYS` 任何一个。
+  活机上什么都还没被改动。
+  **因此现在跑 `status` / `plan` 会答 `degraded` 退出 2，跑 `apply` 会答 `partial` 退出 1**
+  ——这是设计出来的答案，说的就是"`install` 还没跑"，不是回归。
+  从前这种状态报 `ok` 退出 0，任务计划程序上一片绿而守卫一夜没守过。
 - **两个新任务还没注册**：`trading-hareness-storage-tiers`（每日 06:00，
   `run-storage-tiers.ps1 -Command apply`，`ExecutionTimeLimit` 2h15m）和
   `trading-hareness-postgres-io-window`（每 15 分钟）。两个安装器的
@@ -77,22 +81,35 @@ Peer credentials, exports and staging
 - **作业自己会停**：runner 给 `apply` 传 `--deadline 08:00` 和 `--max-seconds 7200`，
   到点写一条 `status='deadline_reached'` 的回执并以 **0** 退出，明晚接着搬。
   2h15m 的 `ExecutionTimeLimit` 只是兜底——被它杀掉的进程不写任何回执。
+  起跑时截止时间**已经过去**（`-StartWhenAvailable` 补跑到了窗口之外）是另一回事：
+  记 `deadline_missed`、告警、退出 **1**，因为那一夜一张表都没碰。
 - **退出码：0 = 正常（含 `deadline_reached`）；1 = 需要人看但分层完好
-  （`partial` / `conflicts` / `schema_drift`）；2 = 500 GB 守卫失效
-  （`degraded`：用量测不出来、热窗到底、或棘轮停在 `needs_repack`）。
-  不要给它加自动重试，尤其不要把 2 当成"重试一下就好"。**
+  （`deadline_missed` / `partial` / `conflicts` / `schema_drift`）；2 = 500 GB 守卫失效
+  （`degraded`：用量测不出来、热窗到底、棘轮停在 `needs_repack`，或 `install` 没跑过）。
+  不要给它加自动重试，尤其不要把 2 当成"重试一下就好"。
+  任务本身也刻意**不注册失败重启**：每跑一次最多砍某张表 7 天热窗口，重启两次就是 21 天，
+  而每份回执单看都"合规"。**
+- **分层作业会读增量备份链的水位线**（`<STOCK_BACKUP_ROOT>\incremental\<表>\state.json`），
+  绝不把任何一行搬到水位线之上。链落后时记 `chain_behind`（退出 0，钳位干活了），
+  链读不出来时**那张表一行都不搬**并记 `chain_missing`（退出 1）。
+  所以增量导出连着失败不只是备份的问题，修它优先于调分层策略。
 - **`stock_peer` 角色超时已于 2026-09-19 在生产集群生效**：
   `statement_timeout = 15min`、`idle_in_transaction_session_timeout = 5min`。
   这是集群级设置，peer 侧的长查询会被打断，需要更久请显式 `SET LOCAL`。
 - **第一次 `apply` 会搬 0 行，这是正确结果。** 最老的热行约 156 天，热窗 365 天，
   用量约 33 GB / 500 GB；未来七个月左右都会是 0 行。
 - **别手工往 `STOCK_BACKUP_EXCLUDE_TABLE_DATA` 里加冷孪生表。** 每夜 dump 的排除列表
-  是在 dump 时按 `STOCK_BACKUP_INCREMENTAL_TABLES` 算出来的，没有分块链的孪生表会被拒绝
-  并告警；`quant.storage_tier_conflicts` 永远不能进排除列表（它可能是某行热数据的唯一副本）。
-- **数据目录迁移 `-Rollback` 需要 `-AcceptDataLoss`**，而且在活集群已有 `stock_cold`
-  表空间、镜像早于它时**绝对拒绝**（没有开关可绕）。迁移回执里打印的回滚命令故意不带
-  `-AcceptDataLoss`，照抄会被拒绝。迁移**不停** `trading-hareness-shared-peer-tunnels`
-  （停 PostgreSQL 本身已经切断了 peer 会话）。
+  是在 dump 时按 `STOCK_BACKUP_INCREMENTAL_TABLES` 算出来的：没有分块链、**或链的水位线
+  已经落到分层截止线之前**的孪生表都会被拒绝并告警（热窗口取 `STORAGE_TIER_HOT_DAYS`，
+  默认 365；调窄 `--hot-days` 时必须同步设它）；
+  `quant.storage_tier_conflicts` 永远不能进排除列表（它可能是某行热数据的唯一副本）。
+- **数据目录迁移 `-Rollback` 需要 `-AcceptDataLoss`**，而且有两条**绝对拒绝**（没有开关可绕）：
+  活集群已有 `stock_cold` 表空间而镜像早于它；或者两边 `pg_tblspc` 指向**同一个**表空间目录
+  而活集群的 checkpoint 更新（冷层从来没被复制或版本化过，那种回滚是自相矛盾的集群）。
+  每次 `-Rollback` 都会打印并记录 `stock_cold_reverted: false`。
+  迁移回执里打印的回滚命令故意不带 `-AcceptDataLoss`，照抄会被拒绝。
+  迁移**不停** `trading-hareness-shared-peer-tunnels`（停 PostgreSQL 本身已经切断了 peer 会话），
+  行数快照在**停机窗口内**抓，失败时会把留在目标目录的半成品拷贝删掉再退出。
 
 持仓同步契约见 [BROKER_HOLDINGS_SYNC.md](BROKER_HOLDINGS_SYNC.md)：现在只由用户主动触发，文件导出优先，桌面 UI 读取必须直接交给 Luna 子 agent。不得创建每日调度、自动登录或自动唤醒 MuMu；未指定券商时不得默认中信。当前 THS 桌面读取尚未真实验收，旧 `citics-mumu-sync` 仅为退休兼容入口。
 

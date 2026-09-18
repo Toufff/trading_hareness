@@ -40,7 +40,7 @@
 
 ### runtime.env 新增键
 
-三个键都可选，都有文档化默认值，写在 `G:\StockPlatform\config\runtime.env`：
+这些键都可选，都有文档化默认值，写在 `G:\StockPlatform\config\runtime.env`：
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
@@ -48,7 +48,14 @@
 | `PGDATA_BUDGET_BYTES` | `536870912000`（500 GB） | 热层预算。仅在缺失时由初始化脚本补写（`Set-StockPlatformEnvDefault`），不会覆盖运维已调过的值。 |
 | `PGDATA_COLD_TABLESPACE_DIR` | `G:\StockPlatform\data\pg-cold` | `stock_cold` 表空间目录。同样只补写不覆盖。 |
 | `STOCK_BACKUP_EXCLUDE_TABLE_DATA` | **无默认值（初始化脚本刻意不补写）** | 纯运维覆盖项。每夜 dump 真正跳过哪些表的数据是**在 dump 时按增量链算出来的**，不是配置出来的；这个键只用于额外追加，且无增量链、或链已停滞的冷孪生表会被拒绝。见第 5 节。 |
-| `STOCK_BACKUP_EXCLUDE_TABLE_DATA` 的配套键 `STORAGE_TIER_HOT_DAYS` | `365` | 分层热窗口天数。`backup-stock-database.ps1` 用它判断增量链水位线是否还追得上分层截止线；调窄分层热窗口（`database-storage-tiers.py --hot-days`）时必须同步设置它。 |
+| `STORAGE_TIER_HOT_DAYS` | `365` | 分层热窗口天数。`backup-stock-database.ps1` 用它判断增量链水位线是否还追得上分层截止线；调窄分层热窗口（`database-storage-tiers.py --hot-days`）时必须同步设置它，否则备份侧仍按 365 天判"够新"。 |
+
+分层作业还会读两个**属于备份链的**既有键，用来把搬运钳制在分块链水位线上（见 2.4 的"增量链钳位"）：
+
+| 键 | 默认值 | 分层作业拿它做什么 |
+|---|---|---|
+| `STOCK_BACKUP_INCREMENTAL_TABLES` | `quant.raw_market_observations:created_at:updated_at` | 哪些热表的行由分块链带走。凡是列在这里的表，它的搬运会被钳制在链的水位线之前——正是这些表的冷孪生会被 dump 排除。解析由 `parse_incremental_specs` 完成，与 `Get-StockIncrementalTableSpecs` 逐字同构（含 `none` 形式），两边的默认值由 `test-postgres-storage-tier-wiring.ps1` 钉死成同一个字符串。 |
+| `STOCK_BACKUP_ROOT` | `G:\StockPlatform\backups` | 到哪儿读 `incremental\<表>\state.json`。CLI 的 `--backup-root` 可以覆盖它（演练用，免得指到生产备份根上）。 |
 
 ---
 
@@ -126,8 +133,11 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS <表>_tier_cutoff_idx ON quant.<表> (<�
 
 ```sql
 -- 1) 冻结这一批（显式列名，不用 SELECT *；ORDER BY 时间列走 2.6 的 cutoff 索引）
+--    FOR UPDATE 写在 ORDER BY / LIMIT 之后：这一批的行被锁住，直到本事务提交
 CREATE TEMPORARY TABLE tier_batch ON COMMIT DROP AS
-  SELECT <显式列> FROM quant.T WHERE <列> < %(cutoff)s ORDER BY <列> LIMIT %(batch)s;
+  SELECT <显式列> FROM quant.T WHERE <列> < %(cutoff)s
+    [AND (<创建列> IS NULL OR <创建列> < %(chain_watermark)s)]   -- 见"增量链钳位"
+  ORDER BY <列> LIMIT %(batch)s FOR UPDATE;
 
 -- 2) 找出"自然键已经在冷表里、但内容不同"的行（逐个唯一键扫一遍）
 CREATE TEMPORARY TABLE tier_conflicts ON COMMIT DROP AS
@@ -155,8 +165,65 @@ DELETE FROM quant.T h USING tier_batch b WHERE <主键相等>;
   `lock_timeout` 30 秒（每条连接都带，不可关）。
 - 幂等且可续跑：中断后重跑继续搬剩下的行；第 4 步的 `ON CONFLICT DO NOTHING`
   命中说明上一次跑到一半被打断（同键同内容），回执记 `already_in_cold_rows`，不是丢数据。
+- **快照带 `FOR UPDATE`**，否则会丢更新：快照与删除之间提交的一次 `UPDATE`，
+  冷表会拿到更新前的版本，而 `DELETE` 按主键删掉的是更新后的那一行——两个版本都不剩。
+  批次上限 2 万行、`lock_timeout` 30 秒，所以这把锁是有界的：拿不到就整批放弃重来，
+  而不是让写方无声地输掉。一个单测和一次 scratch 库演练都真的执行过：
+  快照开着时并发 `UPDATE` 会撞 `lock_timeout`，不会被悄悄吞掉。
 - 搬动 ≥1 行后对热表执行 `VACUUM (ANALYZE)`（**不是** `VACUUM FULL`，后者要 ACCESS EXCLUSIVE 锁）。
+  它跑在每表 `try` 的**外面**，自带 30 分钟 `statement_timeout`（`VACUUM_STATEMENT_TIMEOUT_MS`），
+  结束后在 `finally` 里把批次超时恢复成配置值（不是恢复成默认值，`--timeout-ms` 因此不会失效）。
+  超时记 `vacuum: 'timed_out'`、其它失败记 `'failed'` ＋ `vacuum_error`，
+  **都不改变该表的状态**：搬运的正确性不依赖 vacuum。
+  第一次搬 19 GB 的 `raw_market_observations` 时 vacuum 超过 10 分钟是很可能的，
+  以前那会把一次完全成功的搬运记成 `failed`。
 - 绝不搬运比 cutoff 新的行；cutoff 由 `hot_cutoff(now, hot_days)` 计算，`now` 必须带时区。
+
+#### 增量链钳位（为什么搬运要看备份链的水位线）
+
+第 5.1 节的规则允许把一张冷孪生表的数据排除出每夜 dump——前提是那些行**已经**被热表的
+分块链导出过。备份侧现在会检查这个前提（水位线够新才排除），但那是**事后**的补救：
+链停滞的那几夜，行已经被搬走了。所以搬运侧也有一道闸，两边一起才封得住这个洞。
+
+凡是出现在 `STOCK_BACKUP_INCREMENTAL_TABLES` 里的表，`_move_table` 会先读
+`<STOCK_BACKUP_ROOT>\incremental\<表>\state.json`（就是 `Invoke-StockIncrementalBackup` 写的那份），
+取出水位线，加进快照谓词：`(<创建列> IS NULL OR <创建列> < 水位线)`，更新列同理。
+**没有任何一行会被搬到水位线之上。** 三种结果：
+
+| 情况 | 每表 `status` | 行为 | 运行结果 |
+|---|---|---|---|
+| 钳位确实扣下了行（链落后于 cutoff） | `chain_behind` ＋ `chain_withheld_rows` | 钳位之前的行照常搬，之后的留在热表 | 告警；**退出码 0**——钳位干了它该干的活，这是工作状态 |
+| `state.json` 缺失、读不出、或没有水位线 | `chain_missing` | **这张表一行都不搬** | 告警，`partial`，**退出码 1** |
+| `STOCK_BACKUP_INCREMENTAL_TABLES` 写了张表没有的列 | `chain_columns_missing` | **这张表一行都不搬** | 告警，`partial`，**退出码 1** |
+
+后两种进 `BLOCKING_TABLE_STATUSES`，要人来看：一张表的孪生被 dump 排除、而它的分块链读不出来，
+这是**备份出了问题**，分层作业每夜对最大的那张表默默什么都不做，正是最贵的那种"绿色"。
+
+`chain_withheld_rows` 是**有界探测**（`CHAIN_PROBE_ROWS = 100000`），超出时记
+`chain_withheld_rows_capped: true`。回执需要的是"扣下了一些，大概多少"；
+对一张链冻了几个月的表做无界 count 就是在维护窗里做一次全表扫描。
+另外 `chain_behind` **不会覆盖 `conflicts`**：被隔离的行是更紧急的发现，
+那种情况下钳位由 `chain_withheld_rows` 和 detail 自己说明。
+
+#### 搬运看不懂的唯一索引：拒绝，不猜
+
+`unique_key_columns` 只认普通唯一索引（`indpred IS NULL AND indexprs IS NULL`），
+因为冲突扫描没法对"部分索引"和"表达式索引"给出正确的自然键。而
+`LIKE ... INCLUDING INDEXES` 会把这类索引原样复制到孪生表上——于是第 4 步的
+`ON CONFLICT DO NOTHING` 可能悄悄丢掉一行，还被记成良性的 `already_in_cold_rows`。
+
+所以 `unsupported_unique_indexes(conn, table)` 在**热表和孪生表两侧**都查一遍，
+发现任何一个就把这张表记 `unsupported_unique_index`、点名那个索引、**一行都不搬**
+（同样进 `BLOCKING_TABLE_STATUSES`，`partial`，退出码 1）；`plan` / `status` 的每表输出里
+也带 `unsupported_unique_indexes` 列表。热表侧也查，是因为 `INCLUDING INDEXES` 会让
+今天的热表索引变成下次 `install` 之后的孪生表索引——在索引出现的那一夜 06:00 就失败，
+好过在 `install` 跑过之后的那一夜才失败。
+
+今天五张分层表的九个唯一索引全是普通索引，所以这是**潜在**而不是现存问题。
+`quant-service/tests/test_storage_tier_policy.py` 的
+`TieredTablesHaveNoUniqueIndexTheMoveCannotReasonAboutTest` 会扫冻结 DDL 和每一个迁移，
+哪天有人给分层表加了个部分／表达式唯一索引，发布门就会红——顺带还有一个测试把识别用的
+正则钉在已知的正反样本上，免得有人重写时把守卫变成空操作。
 
 #### 冲突隔离表 `quant.storage_tier_conflicts`
 
@@ -231,6 +298,14 @@ PostgreSQL 会愉快地把新插入写回这些页，但截断不了文件尾部
 **每搬完一张表就重新测量一次目录**；只要真的搬了行、而用量没有下降至少 1 %
 （`MIN_USAGE_DROP_RATIO`），棘轮立刻停下，状态 `needs_repack`、`alert=true`、退出码 2。
 
+**那 1 % 量的是 `tiering_usage_bytes`，不是 `usage_bytes`**——也就是空间策略自己判定用的
+那个不含 WAL 的量。搬几百万行 `DELETE` ＋ `INSERT` ＋ `VACUUM` 会写出几 GB 的 WAL，
+`max_wal_size` 是 4 GB，所以拿含 WAL 的总量去算，降幅很容易是**负**的，
+棘轮会因为一个完全不相干的理由停在 `needs_repack`。棘轮每一步的回执里记四个数：
+`tiering_usage_before_bytes` / `tiering_usage_after_bytes`（判定用的）和
+`wal_before_bytes` / `wal_after_bytes`（解释"为什么总量没动"的），
+`needs_repack` 的原因文本把这四个数都点出来。
+
 > **这个作业永远不会自己跑 `VACUUM FULL` 或 `pg_repack`。**
 > 两者都要长时间的 ACCESS EXCLUSIVE 锁或额外等量磁盘，属于运维在自己的维护窗里
 > 明确决定的动作。看到 `needs_repack` 的正确反应是：先确认滚动窗口已经把增长封住了
@@ -263,14 +338,38 @@ raw_market_availability_basis_idx`，也就是每批扫一遍全表。建索引�
 - `database-storage-tiers.py install`：在 autocommit 连接上 `CREATE INDEX CONCURRENTLY`，
   `lock_timeout` 30 秒、`statement_timeout` 2 小时（19 GB 要两遍全表）。
   这一步排在 `install` 的**最后**，而且是**逐目标容错**的：某个索引拿不到锁就记
-  `skipped_locked`（并可能留下一个 INVALID 索引，重跑 `install` 会重建），
-  不影响孪生表、视图和表空间搬迁。
+  `skipped_locked`，不影响孪生表、视图和表空间搬迁。
 - Alembic 迁移 `20260919_0106_storage_tier_cutoff_indexes`（`down_revision = 20260918_0105`）：
   在 `op.get_context().autocommit_block()` 里用 `postgresql_concurrently=True` ＋
   `if_not_exists=True` 建同样五个，这样**从迁移链重建出来的库**一开始就有它们。
   一个测试把迁移里的索引集合钉死在 `TIER_POLICY` 上，两边不可能漂移。
 
-`plan` 和 `status` 的每表输出里有 `cutoff_index_present`，可以直接看有没有建上。
+#### INVALID 索引：`install` 会真的重建它
+
+`CREATE INDEX CONCURRENTLY` 被打断（`lock_timeout`、`statement_timeout`、手工取消）会留下一个
+`indisvalid = false` 的索引，**名字已经被它占住了**。这是第一次在 19 GB 表上建索引时
+最现实的失败形态，而 `IF NOT EXISTS` 只看名字不看有效性——它会发一条 notice 然后什么都不做，
+`install` 从前会照样把结果记成 `created`，规划器却继续不用这个索引，每批退回全表扫描。
+迁移侧同理：`if_not_exists=True` 也修不了它。
+
+现在 `install` 不问"有没有这个名字"，问的是 `cutoff_index_state`（直接查 `pg_index` 的
+`indisvalid`）：
+
+| 发现 | `install` 做什么 | 回执 `result` |
+|---|---|---|
+| 名字存在且有效 | 什么都不做 | `already_present` |
+| 名字不存在，但有别的有效索引以时间列打头 | 什么都不做（沿用旧行为） | `already_present` |
+| 名字存在但 **INVALID** | `DROP INDEX CONCURRENTLY` 后重建 | `rebuilt_invalid` |
+| INVALID，且 `DROP` 拿不到 ShareUpdateExclusive 锁 | 放弃，等下次 | `invalid_index_present` |
+| 新建之后**读回来**发现还是 INVALID（第二遍扫描后才失败的情况） | 不假设成功，如实报告 | `invalid_index_present` |
+
+出现任何 `invalid_index_present` 时 `install` 整体是 **`partial`**（退出码 1），
+不会被报成 `ok`；名字汇总在回执的 `invalid_indexes` 里。
+迁移的 docstring 现在写明了**修复是 `install` 的职责**，以及迁移为什么对这个状态刻意保持 no-op
+（`autocommit_block` 里一次 DROP＋重建无法回滚，而迁移必须是可重放的）。
+
+`plan` 和 `status` 的每表输出里有 `cutoff_index_present` **和 `cutoff_index_valid`**：
+前者回答"有没有"，后者回答"能不能用"。只看前者会把一个 INVALID 索引读成健康的。
 
 ---
 
@@ -357,6 +456,14 @@ runner 里不出现它）。
 今晚停在哪儿明晚从哪儿继续。第一次大迁移本来就会连着好几夜才搬完。
 （`--deadline` / `--max-seconds` 只加给 `apply`——`plan` / `status` / `install` 不搬行；
 显式传的值优先，`-Command apply --deadline 07:00` 仍然有效。）
+
+**但"窗口已经关了"和"干到窗口关"不是一回事。** `-StartWhenAvailable` 会补跑一个错过的触发：
+机器周五夜里关着，周六 10:00 开机补跑，窗口守卫放行（周末不是交易时段），
+`resolve_deadline` 算出来的 08:00 **已经过去了**。`command_apply` 因此在碰第一张表之前
+就检查一次截止时间，已经过期就记 `deadline_missed`（原因里同时点出"现在几点"和"截止几点"），
+状态 `deadline_missed`、告警、**退出码 1**。
+以前这种情况和"一路干到 08:00"一样报 `deadline_reached` 退出 0，
+回执上完全看不出这一夜其实一行都没搬。
 
 I/O 窗任务会在 08:00 后把 PostgreSQL 降到 `BelowNormal`，但那是降级不是停止，
 不能替代上面的截止时间。**第一次真实运行仍然请人工盯一次。**
@@ -465,6 +572,13 @@ G: 冷表空间上的一份活数据。所以规则会读这份 `state.json`：�
 把分层热窗口调窄（`--hot-days`）时**必须同时设这个键**，否则备份侧仍按 365 天判"够新"。
 
 被拒绝时夜间 dump **照常跑完**：一条配置意见不该让每夜备份停摆。
+
+> **这道闸只是两道之一。** 备份侧判新鲜度是**事后**补救：链停滞的那几夜，行已经被搬走了，
+> 备份侧能做的只是从下一夜起把孪生表重新放回 dump。所以搬运侧有配套的一道闸——
+> `database-storage-tiers.py` 读同一份 `state.json`，**绝不把任何一行搬到水位线之上**，
+> 读不出来就一行都不搬（`chain_missing`，退出码 1）。见 2.4 的"增量链钳位"。
+> 两边读的是同一个 `STOCK_BACKUP_INCREMENTAL_TABLES`，两边的默认值由
+> `test-postgres-storage-tier-wiring.ps1` 钉死成同一个字符串。
 
 结果是：`STOCK_BACKUP_EXCLUDE_TABLE_DATA` 现在**没有默认值**，
 `initialize-stock-platform.ps1` **不再补写**任何冷孪生表（脚本里写明了原因），
@@ -670,7 +784,9 @@ $envf = 'G:\StockPlatform\config\runtime.env'
 公共参数：`--env-file`、`--hot-days N`、`--budget-bytes 500GB`、`--batch N`、
 `--table T`（可重复，接受 `quant.x` 或 `x`）、`--pgdata-dir`、`--cold-dir`、`--tablespace`、
 `--timeout-ms`、`--max-batches`、`--max-space-days N`（默认 7）、`--deadline HH:MM`（默认无）、
-`--max-seconds N`、`--log-file`。
+`--max-seconds N`、`--log-file`、`--backup-root`（读 `incremental\<表>\state.json` 的根目录，
+默认 `STOCK_BACKUP_ROOT` 或 `G:\StockPlatform\backups`；**演练时务必指到 scratch 目录**，
+免得钳位读到生产备份根）。
 子命令专有：`plan --day-limit N`（默认 30）、`install --skip-role-settings`
 （**只在 scratch 库演练时用**，见第 3 节）。
 四个子命令都只输出**一行 ASCII JSON**（任务宿主控制台是 GBK，所以回执强制 ASCII 转义）。
@@ -684,16 +800,44 @@ $envf = 'G:\StockPlatform\config\runtime.env'
 |---|---|---|---|
 | **0** | `ok` | 正常完成 | 无 |
 | **0** | `deadline_reached` | 到点自己停的，搬到哪算哪 | 无。明晚继续 |
-| **1** | `partial` | 某张表失败了，其余表正常（错误在 `errors` 里） | 看一眼；明晚会自动重试，分层本身完好 |
+| **1** | `deadline_missed` | 起跑时截止时间**已经过去**，一张表都没碰 | 看为什么补跑到了窗口之外（见 4.1）。不是"搬完了" |
+| **1** | `partial` | 某张表失败了或被拒绝了，其余表正常 | 看一眼；下面那张表说明是哪一类 |
 | **1** | `conflicts` | 有行被隔离进 `quant.storage_tier_conflicts` | 按 2.4 末尾处理隔离行 |
 | **1** | `schema_drift` | 某张冷孪生表与热表不可自动调和 | **下次运行之前**必须人工处理（见 2.3） |
-| **2** | `degraded` | **500 GB 守卫没在守**：用量测不出来（`unknown`）、热窗已到 30 天下限（`exhausted`）、或棘轮停在 `needs_repack` | 真要处理的一档：加盘、或安排一次 `VACUUM FULL`/`pg_repack` 维护窗、或改分层策略 |
+| **2** | `degraded` | **500 GB 守卫没在守**：用量测不出来（`unknown`）、热窗已到 30 天下限（`exhausted`）、棘轮停在 `needs_repack`，**或 `install` 根本没跑过**（只在 `plan` / `status` 上） | 真要处理的一档：加盘、或安排一次 `VACUUM FULL`/`pg_repack` 维护窗、或先把 `install` 跑了 |
 | **2** | `failed` | 命令本身抛异常（回执里只有 `error`） | 看日志 |
 
-`status` 的优先级是 `degraded > schema_drift > partial > conflicts > deadline_reached > ok`。
+`status` 的优先级是
+`degraded > schema_drift > partial > conflicts > deadline_missed > deadline_reached > ok`。
 `schema_drift` 压过 `partial`，因为别的每表失败明晚重试一次就没了，而漂移的孪生表不会自己好。
 `run-storage-tiers.ps1` **原样透传** Python 的退出码，不做任何翻译
-（由 `test-postgres-storage-tier-wiring.ps1` 逐条钉死状态→码的映射）。
+（由 `test-postgres-storage-tier-wiring.ps1` 逐条钉死状态→码的映射，
+并把这份清单反向钉在 CLI 的 `EXIT_CODES` 上：新加一个状态而忘了在测试里定码，发布门会红）。
+
+#### 哪些每表状态会把整次运行拉成 `partial`
+
+`apply` 的 `status` 不只看 `errors`。以下每表状态**无条件**让运行至少是 `partial`（退出码 1）：
+
+| 每表 `status` | 含义 | 归属 |
+|---|---|---|
+| `skipped_missing_table` | 孪生表不存在 | `NOT_INSTALLED_TABLE_STATUSES` |
+| `skipped_missing_quarantine` | `quant.storage_tier_conflicts` 不存在 | `NOT_INSTALLED_TABLE_STATUSES` |
+| `chain_missing` | 分块链的 `state.json` 读不出来（见 2.4） | `BLOCKING_TABLE_STATUSES` |
+| `chain_columns_missing` | 增量配置写了张表没有的列 | `BLOCKING_TABLE_STATUSES` |
+| `unsupported_unique_index` | 部分／表达式唯一索引，搬运看不懂（见 2.4） | `BLOCKING_TABLE_STATUSES` |
+
+前两个的意思都是"`install` 没跑过"——**而那正是今天生产的状态**。
+从前它们不在任何一条阶梯上，于是一次什么都没搬的运行报 `ok` 退出 0，
+任务计划程序上一片绿，而 500 GB 守卫其实一夜也没守过。
+
+同一件事在只读侧：`plan` 和 `status` 会先查表空间、隔离表、以及每张存在的热表是否有孪生表
+（`_read_only_status`）。缺任何一样就答 **`degraded`（退出码 2）**，
+并在 `not_installed` / `reason` 里点名缺的是什么。
+孪生表单独查，是因为 `install` 是**逐表容错**的：装了一半是真会发生的状态，
+后果和完全没装一样——`apply` 对那张表什么都搬不了。
+
+> 所以**今天**在生产上跑：`status` / `plan` 答 `degraded` 退出 2，`apply` 答 `partial` 退出 1。
+> 这是正确的，不是回归——它说的是"`install` 还没跑"。跑完 `install` 之后才该看到 `ok`。
 
 PowerShell 入口（任务用的就是它；清代理、写日志、带窗口守卫）：
 
@@ -732,7 +876,8 @@ SELECT count(*) FROM quant.raw_market_observations_cold
 WHERE available_at >= now() - interval '365 days';
 
 -- 五个 cutoff 索引都建上了吗（应当返回 5 行，且 indisvalid 全为 t；
--- CONCURRENTLY 中途失败会留下 indisvalid = f 的索引，重跑 install 会重建）
+-- CONCURRENTLY 中途失败会留下 indisvalid = f 的索引，重跑 install 会 DROP CONCURRENTLY
+-- 后重建并把结果记成 rebuilt_invalid；plan/status 的 cutoff_index_valid 也看得到）
 SELECT c.relname, i.indisvalid
 FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -759,6 +904,24 @@ G:\StockPlatform\current\.venv\Scripts\python.exe -m pytest `
     tests/test_storage_tier_policy.py tests/test_database_storage_tiers.py `
     tests/test_migration_contracts.py -q   # cwd = quant-service
 ```
+
+上面这些**都不碰数据库**，所以发布门跑得起。真正执行一次搬运的测试是
+`ScratchDatabaseMoveTest`（在 `test_database_storage_tiers.py` 里），它**默认跳过**，
+需要一个可连的集群和 `CREATE DATABASE` 权限，发布门两样都没有。手工跑：
+
+```powershell
+$env:STORAGE_TIERS_SCRATCH_TEST = '1'          # 不设就跳过
+# 另外需要 PG* 连接变量（从 runtime.env 载进进程环境，值绝不打印）
+# 库名默认 trading_hareness_tiers_unittest，由测试自己建、自己删
+G:\StockPlatform\current\.venv\Scripts\python.exe -m pytest `
+    tests/test_database_storage_tiers.py -k ScratchDatabaseMove -q   # cwd = quant-service
+```
+
+它真的执行 `_move_table`：行数守恒、自然键冲突被隔离、增量链钳位正好扣下未导出的那些行、
+`state.json` 缺失时一行都不搬、以及一把真实的 `FOR UPDATE` 锁挡住并发 `UPDATE`。
+**这类测试是必要的**：它第一次跑就抓到了一个 `NameError`（`unique_keys` 未定义），
+而那条路径上所有"语句形状"断言全都视而不见地通过了——
+字符串断言只能证明 SQL 长什么样，证明不了它跑得起来。
 
 ---
 
@@ -813,6 +976,12 @@ G:\StockPlatform\current\.venv\Scripts\python.exe -m pytest `
 | **D22** | 分层任务**不注册失败重启** | runner 原样透传 CLI 退出码，任务计划程序分不清"暂时性失败"和"需要人来看"；而每跑一次最多砍 7 天热窗口，重启两次就是 21 天，且每份回执单看都合规。要重试就在 runner 里按状态分流，不能交给调度器 |
 | **D23** | 迁移的行数快照挪进停机窗口（第 3 步），预检只报告"枚举不到的条目" | 预检那一刻业主 API、看板运行时、隧道和三个维护窗作业都还在写库，在那里抓的数会被合法写入推翻，让一次成功的迁移中止在最后一步 |
 | **D24** | 失败恢复会删掉本次运行留在目标目录的半成品；回滚闸改成比对**表空间 location** 而不是联接数量 | 不删，重试会被自己的残渣挡在预检外；只数联接则看不见"两个镜像指向同一个 `pg-cold`"——那种回滚会拿旧目录录去描述已被改写的冷层文件 |
+| **D25** | 搬运侧也钳位到分块链水位线（`chain_behind` / `chain_missing` / `chain_columns_missing`），不只在备份侧判新鲜度 | 备份侧的新鲜度检查是事后补救：链停滞的那几夜行已经搬走了。两边一起才封得住"行既不在热表、也不在链里、dump 又排除了孪生"这个洞。`chain_behind` 退出 0（钳位干活了），后两个退出 1（读不出链＝备份出问题，而作业每夜对最大的表默默什么都不做） |
+| **D26** | `install` 没跑过时：`plan` / `status` 答 `degraded`（退出 2），`apply` 因 `skipped_missing_*` 至少是 `partial`（退出 1） | 这是**今天生产的真实状态**。从前它报 `ok` 退出 0——一个一行都没搬、守卫一夜没守过的运行，在任务计划程序上是绿的。孪生表单独查，是因为 `install` 逐表容错，装了一半的后果和没装一样 |
+| **D27** | `install` 对 INVALID 的 cutoff 索引 `DROP CONCURRENTLY` 后重建（`rebuilt_invalid`），拿不到锁记 `invalid_index_present` 并让 `install` 收在 `partial`；新建后**读回**有效性而不是假设成功 | `IF NOT EXISTS` 只看名字：一个被打断的 `CONCURRENTLY` 留下的 INVALID 索引会永远占着名字，`install` 报 `created`，规划器却继续全表扫描。迁移刻意不修（`autocommit_block` 里 DROP＋重建不可回滚，而迁移必须可重放），职责写进 docstring |
+| **D28** | 快照带 `FOR UPDATE`；`VACUUM` 移出每表 `try`，自带 30 分钟上限，失败只记不改状态 | 没有行锁就会丢更新：快照与删除之间的一次 `UPDATE`，冷表存旧版本、`DELETE` 删新版本，两个都不剩。反过来 `VACUUM` 超时不该把一次**已经成功**的搬运记成 `failed`——19 GB 表第一次搬完，vacuum 超过 10 分钟很正常 |
+| **D29** | 部分／表达式唯一索引 → 拒绝搬这张表（`unsupported_unique_index`），热表和孪生表两侧都查 | 冲突扫描对这类索引给不出正确的自然键，而 `LIKE ... INCLUDING INDEXES` 会把它复制到孪生表上，于是 `ON CONFLICT DO NOTHING` 可能悄悄丢一行、还被记成良性的 `already_in_cold_rows`。查热表侧，是为了在索引出现的那一夜就失败，而不是等下次 `install` 把它复制过去之后 |
+| **D30** | 棘轮的 1 % 量 `tiering_usage_bytes`（不含 WAL），回执同时记 WAL 前后值 | 搬几百万行写出几 GB WAL，`max_wal_size` 4 GB，含 WAL 的降幅很容易是负的——棘轮会因为一个和分层完全无关的理由停在 `needs_repack`。判定要用和策略同一个量 |
 
 ---
 
@@ -838,7 +1007,12 @@ G:\StockPlatform\current\.venv\Scripts\python.exe -m pytest `
   `scripts/windows/postgres-managed-config.psm1` 的 `Get-StockPlatformManagedSettings`，
   然后重跑初始化或迁移脚本；手改 `postgresql-stock-platform.conf` 会被下一次生成覆盖。
 - **退出码 2 不是"重试一下就好"。** 它表示 500 GB 守卫本身失效了（用量测不出来、
-  热窗到底、或棘轮停在 `needs_repack`）。给分层作业加自动重试等于每晚重复同一个失败。
+  热窗到底、棘轮停在 `needs_repack`，或者 `install` 压根没跑过）。
+  给分层作业加自动重试等于每晚重复同一个失败——任务也因此**刻意不注册失败重启**（D22）。
+- **分层作业依赖增量备份链。** 它读 `<STOCK_BACKUP_ROOT>\incremental\<表>\state.json`
+  把搬运钳制在水位线之前。所以增量导出连着失败不只是备份的问题：
+  从第二夜起分层作业就会报 `chain_behind`，链彻底读不出时报 `chain_missing` 并**停止搬运那张表**。
+  修增量导出比调分层策略优先。
 - **不要手工往 `STOCK_BACKUP_EXCLUDE_TABLE_DATA` 里加冷孪生表。**
   排除是每夜按增量链算出来的；没有链的孪生表会被拒绝并告警。想让某张表的孪生不进 dump，
   正确动作是把那张**热表**加进 `STOCK_BACKUP_INCREMENTAL_TABLES`。
@@ -849,6 +1023,9 @@ G:\StockPlatform\current\.venv\Scripts\python.exe -m pytest `
 - 生产 `trading_hareness` 里**还没有**任何 `*_cold` 表、`*_tier_cutoff_idx` 索引、
   `quant.storage_tier_conflicts` 表，也没有 `stock_cold` 表空间——`install` 尚未运行。
   第一次 `install` 会直接按上面描述的形态建出来，不需要迁就任何历史形状。
+- **因此现在跑 `status` / `plan` 会答 `degraded` 退出 2，跑 `apply` 会答 `partial` 退出 1**
+  （见第 7 节）。这是设计出来的答案，不是故障：它说的就是"`install` 还没跑"。
+  `install` 跑完之后才该看到 `ok`。
 - 生产 `G:\StockPlatform\config\runtime.env` 里目前**没有** `PGDATA_DIR`、
   `PGDATA_BUDGET_BYTES`、`PGDATA_COLD_TABLESPACE_DIR`、`STOCK_BACKUP_INCREMENTAL_TABLES`、
   `STOCK_BACKUP_EXCLUDE_TABLE_DATA` 中的任何一个，所以活机上什么都还没被改动，
