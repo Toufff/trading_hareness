@@ -63,6 +63,7 @@ function Get-BodyPosition([string]$Pattern, [string]$What) {
 }
 
 $stopRuntimes = Get-BodyPosition 'Stop-PlatformRuntimes' 'the runtime/watcher stop call'
+$snapshotTaken = Get-BodyPosition '\$snapshot = Get-RowCountSnapshot' 'the row-count snapshot'
 $stopPostgres = Get-BodyPosition 'Stop-PostgresCluster -DataDirectory' 'the PostgreSQL stop call'
 $robocopy = Get-BodyPosition 'robocopy\.exe \$currentDataDir \$target' 'the robocopy call'
 $copyVerified = Get-BodyPosition 'Copy verification failed' 'the copy verification'
@@ -71,6 +72,15 @@ $startPostgres = Get-BodyPosition 'Start-PostgresCluster -DataDirectory \$target
 $rename = Get-BodyPosition 'Rename-Item -LiteralPath \$currentDataDir' 'the rename of the old data directory'
 
 Assert-True ($stopRuntimes -lt $stopPostgres) 'the dashboard watcher task must be stopped before PostgreSQL, or it restarts the server mid-migration'
+# The smoke snapshot belongs INSIDE the outage. Taken in the preflight it counts
+# rows while the owner API, the dashboard runtime, the shared-peer tunnels and
+# the 04:10/05:10/06:00 jobs are all still writing, and any row they legitimately
+# insert before the shutdown aborts a migration that worked -- in exactly the
+# window this script's own header says those jobs fire in.
+Assert-True ($stopRuntimes -lt $snapshotTaken) 'the row-count snapshot must be taken after the platform runtimes are stopped'
+Assert-True ($snapshotTaken -lt $stopPostgres) 'the row-count snapshot must be taken immediately before the cluster stops, while it can still be queried'
+$preflight = $source.Substring(0, (Get-Position 'step 2/8' 'the step 2 marker'))
+Assert-True ($preflight -notmatch '\$snapshot = Get-RowCountSnapshot') 'the preflight must not snapshot row counts while the platform is still writing'
 Assert-True ($stopPostgres -lt $robocopy) 'the cluster must be stopped before it is copied'
 Assert-True ($robocopy -lt $copyVerified) 'the copy must be verified after it is made'
 Assert-True ($copyVerified -lt $envSwitch) 'the copy must be verified before anything points PGDATA_DIR at it'
@@ -187,6 +197,24 @@ try {
     Assert-True (@($footprint.ReparsePoints)[0].Relative -eq 'pg_tblspc\16400') 'the reparse point must be reported by its relative path'
     Assert-True (@($footprint.ReparsePoints)[0].Target -eq $cold) 'the junction target must be reported so it can be recreated'
     Assert-True (@(Assert-CopyableSource -Footprint $footprint).Count -eq 1) 'a pg_tblspc junction is copyable: the script recreates it'
+    # A readable tree must report zero skipped entries -- the count is one half
+    # of the copy verification and a silent default of "some" would be useless.
+    Assert-True ($footprint.Skipped -eq 0 -and @($footprint.SkippedEntries).Count -eq 0) 'a fully readable directory must report no skipped entries'
+
+    # Anything the enumeration cannot read must be COUNTED and NAMED, not
+    # dropped. Dropped, it appears on one side of the step-4 file/byte
+    # comparison and not the other, and the migration fails with "Copy
+    # verification failed" and nothing to explain it. An absent path is the
+    # deterministic way to make the enumeration error (a denied ACE depends on
+    # whether the session is elevated).
+    $unreadable = Get-DirectoryFootprint -Path (Join-Path $sandbox ('absent-' + [guid]::NewGuid().ToString('N')))
+    Assert-True ($unreadable.Skipped -eq 1) "an unreadable path must be counted, not dropped (got $($unreadable.Skipped))"
+    Assert-True ([bool]@($unreadable.SkippedEntries)[0].Path) 'a skipped entry must be reported by path'
+    Assert-True ([bool]@($unreadable.SkippedEntries)[0].Error) 'a skipped entry must carry the reason it could not be read'
+    Assert-True ($unreadable.Files -eq 0 -and $unreadable.Bytes -eq 0) 'nothing readable means nothing counted'
+    # The counts are useless unless the failure message prints them.
+    Assert-True ($source -match 'Copy verification failed:[^\r\n]*unreadable') 'the copy-verification failure must name the unreadable counts'
+    Assert-True ($source -match 'unreadable_entries') 'the receipt must carry the unreadable entries'
 
     # Anything else would be silently dropped by /XJ.
     New-Item -ItemType Junction -Path (Join-Path $fakeData 'rogue') -Target $cold | Out-Null
@@ -243,13 +271,53 @@ function Get-RollbackPosition([string]$Pattern, [string]$What) {
 # anything before both of those happened.
 $gapPrinted = Get-RollbackPosition 'would discard about' 'the age gap the rollback would discard'
 $acceptGate = Get-RollbackPosition '-not \$AcceptDataLoss' 'the -AcceptDataLoss gate'
-$tablespaceGate = Get-RollbackPosition 'Get-TablespaceLinkCount -DataDirectory \$currentDataDir' 'the cold-tablespace check'
+$tablespaceGate = Get-RollbackPosition 'Get-TablespaceLinkMap -DataDirectory \$currentDataDir' 'the cold-tablespace check'
 $rollbackStop = Get-RollbackPosition 'Stop-PostgresCluster -DataDirectory \$currentDataDir' 'the rollback stop of the live cluster'
 Assert-True ($gapPrinted -lt $acceptGate) 'the age gap must be printed before the refusal, so the operator sees the number'
 Assert-True ($tablespaceGate -lt $acceptGate) 'the cold-tablespace check must run before the -AcceptDataLoss gate'
 Assert-True ($acceptGate -lt $rollbackStop) 'nothing may be stopped before -AcceptDataLoss has been accepted'
 Assert-True ($rollbackBody -match 'Refusing to roll back to \$restoreTarget without -AcceptDataLoss') 'rollback must refuse by name without -AcceptDataLoss'
 Assert-True ($rollbackBody -match 'predates their creation') 'rollback must refuse outright when the image predates the stock_cold tablespace'
+
+# --- the shared cold tablespace ---------------------------------------------
+# The link COUNT only catches the case where the target image has no pg_tblspc
+# at all. Once both images carry junctions they point at the SAME
+# G:\StockPlatform\data\pg-cold, which the migration neither copies nor
+# versions: starting the older catalogue over cold files the newer cluster has
+# already rewritten is not a revert, and no switch makes it one.
+$sharedRefusal = Get-RollbackPosition '\$sharedTablespaces\.Count -gt 0 -and \$liveIsNewer' 'the shared-tablespace refusal'
+Assert-True ($sharedRefusal -lt $acceptGate) 'the shared-tablespace refusal must run before the -AcceptDataLoss gate'
+Assert-True ($rollbackBody -match 'shares \$\(\$sharedTablespaces\.Count\) tablespace') 'the refusal must name the shared tablespace locations'
+Assert-True ($rollbackBody -match 'No switch') 'the shared-tablespace refusal must say that no switch overrides it'
+Assert-True ($rollbackBody -notmatch '(?s)\$sharedTablespaces\.Count -gt 0[^\r\n]*AcceptDataLoss') 'the shared-tablespace refusal must not be gated behind -AcceptDataLoss'
+# It is a refusal, so it must be a throw, not a warning the operator can miss.
+$sharedBlock = $rollbackBody.Substring($sharedRefusal)
+Assert-True ($sharedBlock -match '^[^\r\n]*\r?\n\s*throw ') 'the shared-tablespace refusal must throw'
+# The comparison is on the tablespace LOCATION, not on the link count: both
+# images carrying one junction each is exactly the case the count cannot see.
+$sharedAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-SharedTablespaceLocation' }, $true)
+Assert-True ($null -ne $sharedAst) 'Get-SharedTablespaceLocation must exist'
+. ([scriptblock]::Create($sharedAst.Extent.Text))
+$liveExample = @([pscustomobject]@{ Oid = '16400'; Location = 'G:\StockPlatform\data\pg-cold' })
+$sameExample = @([pscustomobject]@{ Oid = '16400'; Location = 'g:\stockplatform\data\pg-cold' })
+$otherExample = @([pscustomobject]@{ Oid = '16400'; Location = 'G:\StockPlatform\data\pg-cold-2026' })
+Assert-True (@(Get-SharedTablespaceLocation -LiveLinks $liveExample -TargetLinks $sameExample).Count -eq 1) `
+    'two images pointing at the same cold directory must be reported as sharing it, whatever the path case'
+Assert-True (@(Get-SharedTablespaceLocation -LiveLinks $liveExample -TargetLinks $otherExample).Count -eq 0) `
+    'a target with its own tablespace directory shares nothing'
+Assert-True (@(Get-SharedTablespaceLocation -LiveLinks $liveExample -TargetLinks @()).Count -eq 0) `
+    'a target with no tablespace at all is the other refusal, not this one'
+Assert-True (@(Get-SharedTablespaceLocation -LiveLinks $liveExample -TargetLinks @([pscustomobject]@{ Oid = '16400'; Location = '' })).Count -eq 0) `
+    'a junction whose target could not be read must not be reported as shared'
+# Printed on EVERY rollback attempt, refused or not: "rollback" does not include
+# the cold tier, and an operator who assumes it does loses the difference.
+$coldNotice = Get-RollbackPosition 'the stock_cold tablespace is NOT reverted' 'the stock_cold notice'
+Assert-True ($coldNotice -lt $sharedRefusal -and $coldNotice -lt $acceptGate) 'the stock_cold notice must be printed before any refusal, on every attempt'
+Assert-True ($rollbackBody -match 'stock_cold_reverted = \$false') 'the rollback receipt must record that stock_cold was not reverted'
+# And the forward receipt has to carry the catalogue the gate compares against.
+Assert-True ($source -match 'function Get-TablespaceCatalogue') 'the migration must read pg_tablespace from the running cluster'
+Assert-True ($source -match "pg_tablespace_location\(oid\)") 'the catalogue must carry each tablespace location, not only its oid'
+Assert-True ($source -match '(?m)^\s*tablespaces = \$tablespaces') 'the migration receipt must record the tablespace oids and locations'
 Assert-True ($rollbackBody -match 'Get-ClusterCheckpointTime -DataDirectory \$restoreTarget') "the rollback target's age must come from its own control file"
 Assert-True ($rollbackBody -match 'postgres-data-rollback-') 'a rollback must leave a receipt of its own'
 # The receipt must not hand the operator a pre-armed data-loss command.
@@ -278,6 +346,30 @@ Assert-True ($configStep -lt $startStep) 'the configuration must point at the or
 Assert-True ($startStep -lt $platformStep) 'the database must be back before the platform tasks are re-enabled'
 Assert-True ($recoveryBody -match '\$script:OldDirectoryRenamed') 'recovery must not abandon a target that already became authoritative'
 
+# A failed run leaves a half-filled target directory, and the preflight of the
+# retry refuses a target that "exists and is not empty" -- the script blocking
+# itself with its own debris. The recovery must take it away again, and only
+# after the platform is provably back on the source.
+$cleanupStep = Get-RecoveryPosition 'Remove-PartialTargetDirectory -Path \$TargetDataDirectory' 'removing the partial copy'
+Assert-True ($startStep -lt $cleanupStep) 'the source cluster must be running again before the partial copy is removed'
+$removeAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Remove-PartialTargetDirectory' }, $true)
+Assert-True ($null -ne $removeAst) 'Remove-PartialTargetDirectory must exist'
+$removeBody = $removeAst.Extent.Text
+# Three independent guards on the only deletion in this script.
+Assert-True ($removeBody -match 'if \(-not \$script:TargetDirectoryOwned\)') 'the removal must refuse a directory this run did not create'
+Assert-True ($removeBody -match 'if \(\$script:OldDirectoryRenamed\)') 'the removal must refuse once the target has become the authoritative cluster'
+Assert-True ($removeBody -match 'it is the source cluster') 'the removal must refuse a path that resolves to the source'
+# A recursive delete that followed a recreated pg_tblspc junction would take the
+# live cold tablespace on G: with it.
+Assert-True ($removeBody -match 'ReparsePoint') 'the removal must unlink the tablespace junctions before deleting recursively'
+$junctionUnlink = [regex]::Match($removeBody, 'ReparsePoint').Index
+$recursiveDelete = [regex]::Match($removeBody, 'Remove-Item -LiteralPath \$full -Recurse').Index
+Assert-True ($junctionUnlink -lt $recursiveDelete) 'the junctions must be unlinked before the recursive delete, never after'
+Assert-True ($source -match '\$script:TargetDirectoryOwned = \$true') 'step 4 must take ownership of the target before it writes into it'
+$ownershipTaken = Get-BodyPosition '\$script:TargetDirectoryOwned = \$true' 'the ownership marker'
+$robocopyCall = Get-BodyPosition 'robocopy\.exe \$currentDataDir \$target' 'the robocopy call'
+Assert-True ($ownershipTaken -lt $robocopyCall) 'ownership must be recorded before the first byte is written to the target'
+
 # The main flow must use it, and rethrow afterwards.
 $catchStart = Get-BodyPosition '\} catch \{' 'the recovery catch block'
 $finallyStart = Get-BodyPosition '\} finally \{' 'the transcript finally block'
@@ -296,7 +388,9 @@ Assert-True ($rethrow -gt 0) 'the original failure must be rethrown after the re
     passed = $true
     scope = 'Static contract for migrate-postgres-data-directory.ps1, plus its pure trading-session guard, footprint/reparse handling exercised against a real junction, and the control-file reader exercised read-only against the live cluster; nothing was stopped, copied or migrated'
     ordering_verified = 'disable tasks -> graceful stop -> stop tasks -> pg_ctl stop -> robocopy /XJ -> copy verification -> junction recreation -> PGDATA_DIR switch -> start+verify -> rename old'
-    recovery_verified = 'stop target -> PGDATA_DIR back -> regenerate conf -> start source -> re-enable platform -> failure receipt -> rethrow'
-    rollback_gate_verified = 'age gap printed -> cold-tablespace refusal -> -AcceptDataLoss -> stop'
+    recovery_verified = 'stop target -> PGDATA_DIR back -> regenerate conf -> start source -> remove the partial copy -> re-enable platform -> failure receipt -> rethrow'
+    rollback_gate_verified = 'age gap printed -> stock_cold-not-reverted notice -> missing-tablespace refusal -> shared-tablespace refusal (no override) -> -AcceptDataLoss -> stop'
+    snapshot_taken_inside_the_outage = $true
+    footprint_reports_unreadable_entries = $true
     live_checkpoint_exercised = $checkpointExercised
 }
