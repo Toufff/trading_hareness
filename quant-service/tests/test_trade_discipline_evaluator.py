@@ -2,9 +2,11 @@
 
 The plan under evaluation is the 神奇制药 600613.SH acceptance fixture from
 ``test_trade_discipline_core``: stage ``crash_rebound``, hard stop 7.75 (daily
-plus a 3-minute copy), soft stop 8.38 gated on the sector, take-partial gated on
-``after_volume_climax`` + ``below_vwap``, trail arm 9.22, no-add / time-stop
-confirmation 8.70 and a next-open exposure cut to 1500 shares.
+plus a 3-minute copy), take-partial gated on ``after_volume_climax`` +
+``below_vwap``, trail arm 9.22, no-add / time-stop confirmation 8.70 and a
+next-open exposure cut to 1500 shares.  The soft stop is refused on that fixture
+(MA5 sits within half an ATR of the close), so the soft-stop cases use the
+``rally_inputs`` variant, where it is drawn.
 
 Every case states the tape explicitly, so a failure names the rule, not a mood.
 """
@@ -28,6 +30,8 @@ from test_trade_discipline_core import (
     STAGE_CLOSES,
     UPCOMING,
     bar,
+    rally_bars,
+    rally_inputs,
     series_from_closes,
     shenqi_bars,
     shenqi_inputs,
@@ -157,7 +161,7 @@ class DailyBasisTests(unittest.TestCase):
     def test_the_session_of_the_plan_itself_is_never_re_evaluated(self):
         evaluation = evaluate(self.plan, inputs(as_of=datetime(2026, 9, 18, 16, 0, tzinfo=SH)))
         self.assertEqual(evaluation.plan_state, "active")
-        for kind in ("hard_stop", "soft_stop", "no_add", "trail"):
+        for kind in ("hard_stop", "no_add", "trail"):
             self.assertEqual(state_of(evaluation, kind, "daily").state, "armed")
         self.assertIn("no closed daily observation", state_of(evaluation, "hard_stop", "daily")
                       .evidence["not_evaluated"])
@@ -174,16 +178,26 @@ class DailyBasisTests(unittest.TestCase):
         self.assertIn("this run is daily", minute_copy.evidence["not_evaluated"])
 
     def test_a_sector_gated_soft_stop_stays_armed_when_the_sector_is_unknown(self):
-        blind = evaluate(self.plan, inputs(bars=[*shenqi_bars(), BREAKDOWN_BAR], sector_change_pct=None))
+        plan = generate(rally_inputs())
+        self.assertTrue(plan.lines_of("soft_stop"))
+        blind = evaluate(plan, inputs(bars=[*rally_bars(), BREAKDOWN_BAR], sector_change_pct=None))
         soft = state_of(blind, "soft_stop", "daily")
         self.assertEqual(soft.state, "armed")
         self.assertIn("sector_change_negative", soft.evidence["not_evaluated"])
 
     def test_a_sector_that_did_not_fall_leaves_the_soft_stop_unmet(self):
-        strong = evaluate(self.plan, inputs(bars=[*shenqi_bars(), BREAKDOWN_BAR], sector_change_pct=1.4))
+        plan = generate(rally_inputs())
+        strong = evaluate(plan, inputs(bars=[*rally_bars(), BREAKDOWN_BAR], sector_change_pct=1.4))
         soft = state_of(strong, "soft_stop", "daily")
         self.assertEqual(soft.state, "armed")
         self.assertEqual(soft.evidence["extra_unmet"], ["sector_change_negative"])
+        weak = evaluate(plan, inputs(bars=[*rally_bars(), BREAKDOWN_BAR], sector_change_pct=-1.2))
+        self.assertEqual(state_of(weak, "soft_stop", "daily").state, "triggered")
+
+    def test_a_refused_soft_stop_has_no_state_to_evaluate(self):
+        evaluation = evaluate(self.plan, inputs(bars=[*shenqi_bars(), BREAKDOWN_BAR]))
+        self.assertNotIn("soft_stop", {state.kind for state in evaluation.line_states})
+        self.assertEqual([item["kind"] for item in self.plan.metrics["omitted_lines"]], ["soft_stop"])
 
     def test_the_trail_arms_on_the_latest_close_not_on_an_intraday_spike(self):
         rally = bar("2026-09-21", 8.60, 9.60, 8.55, 9.40, 12000)
@@ -295,8 +309,18 @@ class TimeLineTests(unittest.TestCase):
         due = evaluate(plan, inputs(as_of=datetime(2026, 9, 30, 14, 55, tzinfo=SH), **args))
         self.assertEqual(state_of(early, "holiday").state, "armed")
         self.assertEqual(state_of(due, "holiday").state, "triggered")
-        # crash_rebound goes flat over a long closure, so the holiday cut is an exit
+        # crash_rebound keeps half its target (10% = 1100 shares) over a long
+        # closure, so the holiday cut is a reduction, not an exit
         self.assertEqual(state_of(due, "holiday").evidence["execute_at"], "2026-09-30_before_close")
+        self.assertEqual(plan.lines_of("holiday")[0].action.value, 1100)
+        self.assertEqual(due.plan_state, "reduce_signalled")
+
+    def test_a_broken_stage_holiday_cut_is_still_an_exit(self):
+        plan = generate(stage_inputs("broken", calendar=HOLIDAY_CALENDAR))
+        self.assertEqual(plan.lines_of("holiday")[0].action.value, 0)
+        due = evaluate(plan, inputs(as_of=datetime(2026, 9, 30, 14, 55, tzinfo=SH),
+                                    bars=stage_bars("broken"), calendar=HOLIDAY_CALENDAR))
+        self.assertEqual(state_of(due, "holiday").state, "triggered")
         self.assertEqual(due.plan_state, "exit_signalled")
 
     def test_the_time_stop_counts_trading_days_and_falls_due_at_the_third_close(self):

@@ -25,14 +25,14 @@ from .stage import classify_stage, daily_metrics
 from .templates import (
     DEFAULT_RISK_PER_TRADE_PCT,
     TEMPLATE_VERSION,
-    build_lines,
     build_sizing,
+    build_template,
     closure_within,
     hard_stop_price,
     new_buy_reference,
 )
 
-GENERATOR_VERSION = "trade-discipline-generator-v1"
+GENERATOR_VERSION = "trade-discipline-generator-v2"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 VALIDITY_TRADING_DAYS = 5
 SESSION_CLOSE = time(15, 0)
@@ -105,6 +105,18 @@ def _position_ref(position: dict[str, Any] | None, observed_default: datetime) -
     )
 
 
+def t1_locked_shares_for(position: PositionRef | None, trading_date: date) -> int:
+    """Shares the T+1 rule locks on ``trading_date``: ``quantity - sellable`` of a same-day snapshot.
+
+    A snapshot from an earlier day describes a lock that has already lapsed
+    (everything it held is sellable by the plan's trading date), so it counts
+    as zero rather than as a lock the card would falsely assert.
+    """
+    if position is None or position.observed_at.astimezone(SHANGHAI).date() != trading_date:
+        return 0
+    return max(0, position.quantity - position.sellable_quantity)
+
+
 def _validity(calendar: CalendarInfo, as_of: datetime) -> tuple[datetime, str]:
     upcoming = sorted(calendar.upcoming_trading_dates)
     if not upcoming:
@@ -158,23 +170,7 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
     sector = inputs.sector or {}
     sector_available = bool(sector.get("code"))
 
-    frozen = dict(metrics)
-    frozen.update({
-        "reference_price": float(reference_price),
-        "sector": {"code": sector.get("code"), "name": sector.get("name"),
-                   "taxonomy": sector.get("taxonomy") or "longhu_ths_industry"} if sector_available else None,
-        "sector_available": sector_available,
-        "previous_hard_stop": float(previous["hard_stop"]) if previous.get("hard_stop") is not None else None,
-        "previous_trail": float(previous["trail"]) if previous.get("trail") is not None else None,
-        "closure_required": closure is not None,
-        "closure": closure,
-        "valid_until_limit": valid_until_limit,
-        "stage_decision": {"stage": stage, "rule_id": decision["rule_id"], "reason": decision["reason"],
-                           "lane": decision["lane"], "evidence": decision["evidence"]},
-        "risk_per_trade_pct": float(inputs.risk_per_trade_pct),
-    })
-
-    lines = build_lines(
+    template = build_template(
         stage, metrics, inputs.position, sizing, calendar_payload,
         plan_kind=plan_kind, lane=inputs.lane, sector_available=sector_available,
         previous_trail=_decimal(previous.get("trail")),
@@ -182,6 +178,36 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
     )
 
     trading_date = date.fromisoformat(str(metrics["trading_date"]))
+    frozen = dict(metrics)
+    frozen.update({
+        "reference_price": float(reference_price),
+        # T+1: shares bought today cannot be sold today.  A price line drawn on
+        # the generation day is executable from the next session on; the card
+        # says so instead of implying an immediate exit is possible.  Only a
+        # snapshot taken on the plan's own trading date can describe that lock.
+        "t1_locked_shares": t1_locked_shares_for(position, trading_date),
+        "t1_snapshot_at": position.observed_at.astimezone(SHANGHAI).isoformat() if position is not None else None,
+        # Lines the template deliberately did not draw, each with the rule that
+        # refused it.  An absent line is never a silent absence.
+        "omitted_lines": template.omitted,
+        "sector": {"code": sector.get("code"), "name": sector.get("name"),
+                   "taxonomy": sector.get("taxonomy") or "longhu_ths_industry"} if sector_available else None,
+        "sector_available": sector_available,
+        "previous_hard_stop": float(previous["hard_stop"]) if previous.get("hard_stop") is not None else None,
+        "previous_trail": float(previous["trail"]) if previous.get("trail") is not None else None,
+        "closure_required": closure is not None,
+        "closure": closure,
+        # The calendar the holiday rule read, frozen so the gate re-derives the
+        # requirement from the plan itself instead of trusting the flag above.
+        "calendar": calendar_payload,
+        "valid_until_limit": valid_until_limit,
+        "stage_decision": {"stage": stage, "rule_id": decision["rule_id"], "reason": decision["reason"],
+                           "lane": decision["lane"], "evidence": decision["evidence"]},
+        "risk_per_trade_pct": float(inputs.risk_per_trade_pct),
+    })
+
+    lines = template.lines
+
     # The key carries the evidence, not only the day: re-running on the same
     # evidence re-derives the same key and stays idempotent, while a run against
     # changed evidence (a moved forming bar, a new snapshot) becomes a new row
@@ -207,4 +233,4 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
 
 
 __all__ = ["CalendarInfo", "GENERATOR_VERSION", "GenerationInputs", "PLAN_KEY_HASH_CHARS",
-           "SESSION_CLOSE", "VALIDITY_TRADING_DAYS", "generate"]
+           "SESSION_CLOSE", "VALIDITY_TRADING_DAYS", "generate", "t1_locked_shares_for"]

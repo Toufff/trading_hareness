@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from functools import partial
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
@@ -27,6 +27,7 @@ from .generator import CalendarInfo, GenerationInputs
 from .templates import DEFAULT_RISK_PER_TRADE_PCT
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+SESSION_CLOSE = time(15, 0)
 SECTOR_TAXONOMY = "longhu_ths_industry"
 DAILY_BAR_COUNT = 60
 CALENDAR_LOOKAHEAD = 10
@@ -121,17 +122,33 @@ def forming_bar(day: date, quote: dict[str, Any] | None, minutes: dict[str, Any]
     }
 
 
-def merge_forming_bar(settled: list[dict[str, Any]],
-                      forming: dict[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def settled_bar_for(bars: list[dict[str, Any]], day: date) -> dict[str, Any] | None:
+    """The settled (non-forming) canonical row for ``day``, if the series has one."""
+    wanted = day.isoformat()
+    for row in bars:
+        if str(row.get("trading_date"))[:10] == wanted and not row.get("forming"):
+            return row
+    return None
+
+
+def after_session_close(as_of: datetime) -> bool:
+    return as_of.astimezone(SHANGHAI).time() >= SESSION_CLOSE
+
+
+def merge_forming_bar(settled: list[dict[str, Any]], forming: dict[str, Any] | None,
+                      *, settled_day: date | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Append today's forming bar, replacing a settled row for the same date.
 
     Returns the merged series and the basis note that goes into the frozen
-    inputs: ``settled_only`` is a legitimate outcome (no live quote, after
-    hours, provider down), not an error.
+    inputs.  ``settled`` means the day's own settled canonical bar is the last
+    row; ``settled_only`` means no live data and no bar for the day yet (after
+    hours before the canonical load, provider down, a closed day) - a
+    legitimate outcome, not an error.
     """
     rows = sorted(settled, key=lambda row: str(row.get("trading_date")))
     if forming is None:
-        return rows, {"bars_basis": "settled_only", "forming_source": None, "forming_date": None,
+        basis = "settled" if settled_day is not None and settled_bar_for(rows, settled_day) else "settled_only"
+        return rows, {"bars_basis": basis, "forming_source": None, "forming_date": None,
                       "settled_bars": len(rows)}
     day = str(forming["trading_date"])
     merged = [row for row in rows if str(row.get("trading_date")) != day] + [dict(forming)]
@@ -365,10 +382,14 @@ def gather_evidence(connection: Any, *, account_key: str, symbol: str, as_of: da
     sector = sector_membership(connection, symbol, day, as_of)
     calendar, day_is_open = trading_calendar(connection, day)
     equity, cash = account_equity(snapshot)
+    # Through ``day`` inclusive: once the canonical load has settled today's
+    # bar it is the evidence, and a live quote must not overwrite it.
+    bars = settled_daily_bars(connection, symbol, day + timedelta(days=1))
     return {
         "trading_day": day, "day_is_open": day_is_open,
+        "settled_today": settled_bar_for(bars, day) is not None,
         "snapshot": snapshot, "position": holding, "equity": equity, "cash": cash,
-        "bars": settled_daily_bars(connection, symbol, day),
+        "bars": bars,
         "sector": ({**sector, "change_pct": sector_daily_change(connection, sector["taxonomy"], sector["code"], day)}
                    if sector else None),
         "lane": lane_membership(connection, symbol, as_of),
@@ -396,17 +417,42 @@ async def live_forming_bar(symbol: str, day: date, *,
     return forming_bar(day, quotes.get(symbol), tape if isinstance(tape, dict) and "status" not in tape else None)
 
 
+STALE_DAY_PREFIX = "bars_stale_day:"
+
+
+def stale_day_ref(evidence: dict[str, Any], bars: list[dict[str, Any]],
+                  forming: dict[str, Any] | None) -> str | None:
+    """``bars_stale_day:<as_of day>:last_settled:<date>`` when an open day has no bar of its own.
+
+    Between the close and the canonical load (or under ``--no-live`` / a
+    provider failure) the series ends on the previous session, so the plan
+    will be dated the day before ``as_of``.  That is a legitimate outcome, but
+    a silent one is a trap for the post-close operator, so it is named.
+    """
+    if forming is not None or not evidence.get("day_is_open") or evidence.get("settled_today"):
+        return None
+    day = _as_date(evidence.get("trading_day"))
+    last = max((str(row.get("trading_date"))[:10] for row in bars), default="")
+    if day is None or not last or last >= day.isoformat():
+        return None
+    return f"{STALE_DAY_PREFIX}{day.isoformat()}:last_settled:{last}"
+
+
 def build_generation_inputs(*, run_id: str, account_key: str, symbol: str, as_of: datetime,
                             evidence: dict[str, Any], forming: dict[str, Any] | None = None,
                             risk_per_trade_pct: Any = DEFAULT_RISK_PER_TRADE_PCT,
                             lowered_reason: str | None = None) -> GenerationInputs:
     """Freeze gathered evidence into the hashable input record.  Pure."""
-    bars, basis = merge_forming_bar(evidence.get("bars") or [], forming)
+    bars, basis = merge_forming_bar(evidence.get("bars") or [], forming,
+                                    settled_day=_as_date(evidence.get("trading_day")))
     snapshot = evidence.get("snapshot") or {}
     position = evidence.get("position")
     refs = [f"bars_basis:{basis['bars_basis']}"]
     if basis["forming_source"]:
         refs.append(f"forming_bar:{basis['forming_source']}:{basis['forming_date']}")
+    stale = stale_day_ref(evidence, bars, forming)
+    if stale:
+        refs.append(stale)
     if evidence.get("recommendation"):
         refs.append(f"recommendation_decision:{evidence['recommendation']['decision_id']}")
     if snapshot.get("source_snapshot_key"):
@@ -442,15 +488,43 @@ def collect_evidence(connection_factory: Callable[[], Any], *, account_key: str,
         return gather_evidence(connection, account_key=account_key, symbol=symbol, as_of=as_of)
 
 
+def live_quote_allowed(evidence: dict[str, Any], as_of: datetime, *, session_today: date) -> bool:
+    """Whether a live quote may stand in for the ``as_of`` day's bar.  Pure.
+
+    Two facts decide it, neither of them the clock on the wall:
+
+    * a settled canonical bar for the day exists - it can only exist after
+      that session closed, so any live quote belongs to a later session and
+      must not replace it (``bars_basis:settled``);
+    * the ``as_of`` day is the session the provider is actually quoting.  A
+      back-dated run (``--as-of`` on an earlier day) must never stamp tonight's
+      price with that day's date.
+    """
+    if not evidence.get("day_is_open") or evidence.get("settled_today"):
+        return False
+    return as_of.astimezone(SHANGHAI).date() == session_today
+
+
 async def collect(connection_factory: Callable[[], Any], *, run_id: str, account_key: str, symbol: str,
                   as_of: datetime, risk_per_trade_pct: Any = DEFAULT_RISK_PER_TRADE_PCT,
                   lowered_reason: str | None = None, allow_live: bool = True,
-                  **live_sources: Any) -> GenerationInputs:
-    """Read the database off the loop, add today's forming bar when the session is open."""
+                  session_today: date | None = None, **live_sources: Any) -> GenerationInputs:
+    """Read the database off the loop, add today's forming bar when the session is open.
+
+    A settled canonical bar for the day is the evidence and no live read is
+    made (``bars_basis:settled``), whatever the time of day: the bar's presence
+    proves the session is over.  Only while the day's bar is still absent, and
+    only when ``as_of`` falls on the current session, may a forming bar be
+    synthesised from the live quote and the minute tape
+    (``bars_basis:settled_plus_forming``).  ``session_today`` is the exchange
+    date the provider is quoting; it defaults to today in Shanghai and is a
+    parameter so the rule stays testable without a clock.
+    """
     read = partial(collect_evidence, connection_factory, account_key=account_key, symbol=symbol, as_of=as_of)
     evidence = await run_database_blocking(read, timeout_seconds=DATABASE_READ_TIMEOUT_SECONDS)
     forming = None
-    if allow_live and evidence["day_is_open"]:
+    today = session_today or datetime.now(SHANGHAI).date()
+    if allow_live and live_quote_allowed(evidence, as_of, session_today=today):
         forming = await live_forming_bar(symbol, evidence["trading_day"], **live_sources)
     return build_generation_inputs(run_id=run_id, account_key=account_key, symbol=symbol, as_of=as_of,
                                    evidence=evidence, forming=forming,
@@ -458,11 +532,12 @@ async def collect(connection_factory: Callable[[], Any], *, run_id: str, account
 
 
 __all__ = [
-    "CALENDAR_LOOKAHEAD", "DAILY_BAR_COUNT", "SECTOR_TAXONOMY", "account_equity", "broker_positions",
+    "CALENDAR_LOOKAHEAD", "DAILY_BAR_COUNT", "SECTOR_TAXONOMY", "SESSION_CLOSE", "STALE_DAY_PREFIX",
+    "account_equity", "after_session_close", "broker_positions",
     "DATABASE_READ_TIMEOUT_SECONDS", "build_generation_inputs", "canonical_json", "closure_gaps",
     "collect", "collect_evidence", "forming_bar",
     "gather_evidence", "instrument_name", "inputs_hash", "lane_membership", "latest_broker_snapshot",
-    "live_forming_bar", "merge_forming_bar", "position_for", "previous_active_plan",
-    "recommendation_note", "sector_daily_change", "sector_membership", "settled_daily_bars",
-    "summarize_previous_plan", "table_exists", "trading_calendar",
+    "live_forming_bar", "live_quote_allowed", "merge_forming_bar", "position_for", "previous_active_plan",
+    "recommendation_note", "sector_daily_change", "sector_membership", "settled_bar_for",
+    "settled_daily_bars", "stale_day_ref", "summarize_previous_plan", "table_exists", "trading_calendar",
 ]

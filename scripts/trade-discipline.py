@@ -44,6 +44,19 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def _utf8_streams(*streams):
+    """Force UTF-8 on the receipt streams.
+
+    The receipt is ``ensure_ascii=False`` JSON carrying instrument names; on a
+    Windows console the default code page turns them into mojibake or raises.
+    A stream without ``reconfigure`` (a captured StringIO) is left alone.
+    """
+    for stream in streams:
+        reconfigure = getattr(stream, 'reconfigure', None)
+        if reconfigure is not None:
+            reconfigure(encoding='utf-8')
+
+
 def _shanghai(text, fallback):
     """Parse an ISO stamp as an exchange-local time; naive input means 'here'."""
     if not text:
@@ -135,6 +148,22 @@ def _unplanned_fills(connection, account_key, planned_symbols, start, end):
             for row in rows if row['symbol'] not in planned_symbols]
 
 
+def _generation_warnings(plan, inputs_module):
+    """Receipt warnings a post-close operator must not miss.
+
+    A plan dated the previous session because the day's bar is not loaded yet
+    (and no live bar was synthesised) is valid but easy to misread as today's
+    card; the evidence ref that records it is repeated here in plain words.
+    """
+    warnings = []
+    for ref in plan.evidence_refs:
+        if ref.startswith(inputs_module.STALE_DAY_PREFIX):
+            warnings.append(f'stale_day: plan dated {plan.trading_date.isoformat()} on an open session '
+                            f'whose bar is not settled yet ({ref}); rerun after the canonical load '
+                            f'or without --no-live')
+    return warnings
+
+
 # --------------------------------------------------------------------------
 # generate
 # --------------------------------------------------------------------------
@@ -169,12 +198,13 @@ def command_generate(args, db):
         hard_stop = plan.sizing.hard_stop if plan.sizing else None
         receipts.append({
             'symbol': symbol, 'name': plan.name, 'stage': plan.stage, 'plan_kind': plan.plan_kind,
-            'status': plan.status, 'plan_key': plan.plan_key,
+            'status': plan.status, 'plan_key': plan.plan_key, 'trading_date': plan.trading_date.isoformat(),
             'quality_failed': [check.check_id for check in plan.quality if not check.passed],
             'hard_stop': hard_stop, 'reference_price': plan.sizing.reference_price if plan.sizing else None,
             'recommended_shares': plan.sizing.recommended_shares if plan.sizing else None,
             'lines': len(plan.lines), 'valid_until': plan.valid_until.isoformat(),
             'inputs_hash': plan.inputs_hash, 'evidence_refs': plan.evidence_refs,
+            'warnings': _generation_warnings(plan, inputs_module),
             'plan_id': None, 'persisted': 'skipped_dry_run', **written,
         })
 
@@ -444,6 +474,7 @@ def build_parser():
 
 
 def main(argv=None):
+    _utf8_streams(sys.stdout, sys.stderr)
     args = build_parser().parse_args(argv)
     load_dotenv(args.env_file, override=True)
 

@@ -20,10 +20,10 @@ from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from app.trade_discipline.contracts import DisciplinePlan
+from app.trade_discipline.contracts import Action, DisciplinePlan
 from app.trade_discipline.evaluator import EvaluationInputs, evaluate
 from app.trade_discipline.generator import CalendarInfo, generate
-from app.trade_discipline.quality import CHECK_IDS
+from app.trade_discipline.quality import CHECK_IDS, evaluate_quality
 from app.trade_discipline.reconcile import reconcile
 from app.trade_discipline.report import (
     CHECK_LABEL,
@@ -36,10 +36,21 @@ from app.trade_discipline.report import (
     quality_rows,
     render_markdown,
     report_paths,
+    sizing_notes,
+    sizing_rows,
     slug,
+    t1_locked_shares,
     write_report,
 )
-from test_trade_discipline_core import UPCOMING, bar, shenqi_bars, shenqi_inputs, stage_inputs
+from test_trade_discipline_core import (
+    SHENQI_POSITION,
+    UPCOMING,
+    bar,
+    rally_inputs,
+    shenqi_bars,
+    shenqi_inputs,
+    stage_inputs,
+)
 
 SH = ZoneInfo("Asia/Shanghai")
 CALENDAR = CalendarInfo(upcoming_trading_dates=UPCOMING, closure_gaps=[])
@@ -137,7 +148,7 @@ class WordingTests(unittest.TestCase):
         self.assertIn("连续 3 根分钟确认", condition_text(intraday))
 
     def test_extra_conditions_are_spelled_out_in_chinese(self):
-        soft = self.plan.lines_of("soft_stop")[0]
+        soft = generate(rally_inputs()).lines_of("soft_stop")[0]
         self.assertIn("所属行业当日翻绿", condition_text(soft))
 
     def test_a_time_line_states_its_deadline_rather_than_a_price_comparison(self):
@@ -146,6 +157,106 @@ class WordingTests(unittest.TestCase):
         self.assertIn("减到", action_text(exposure))
         time_stop = self.plan.lines_of("time_stop")[0]
         self.assertIn("个交易日内收盘仍未站回", condition_text(time_stop))
+
+
+class DisclosureTests(unittest.TestCase):
+    """What the card must say about the position and about the lines it refused."""
+
+    def test_the_sizing_table_states_sellable_shares_and_the_t1_lock(self):
+        locked = plan_fixture(position={**SHENQI_POSITION, "sellable_quantity": 0})
+        self.assertEqual(locked.metrics["t1_locked_shares"], 5800)
+        card = render_markdown(locked)
+        self.assertIn("| 当日可卖 sellable_quantity | 0 股 |", card)
+        self.assertIn("生成日不可卖 5800 股（T+1，按 09-18 15:05 快照），价格线自下一交易日起可执行。", card)
+        payload = plan_payload(locked)
+        self.assertEqual(payload["t1_locked_shares"], 5800)
+        self.assertEqual(len(payload["sizing_notes"]), 1)
+        # nothing about the lock turns the plan away: it is a disclosure, not a gate
+        self.assertEqual(locked.status, "active")
+
+        free = plan_fixture()
+        self.assertEqual(free.metrics["t1_locked_shares"], 0)
+        self.assertNotIn("生成日不可卖", render_markdown(free))
+        self.assertIn("| 当日可卖 sellable_quantity | 5800 股 |", render_markdown(free))
+
+    def test_a_snapshot_from_an_earlier_day_never_asserts_a_t1_lock(self):
+        """The Monday trap: reusing Friday's 15:10 snapshot must not print a lock that has lapsed."""
+        stale = plan_fixture(position={**SHENQI_POSITION, "sellable_quantity": 0,
+                                       "observed_at": "2026-09-17T15:10:00+08:00"})
+        self.assertEqual(stale.metrics["t1_locked_shares"], 0)
+        self.assertEqual(sizing_notes(stale), [])
+        card = render_markdown(stale)
+        self.assertNotIn("生成日不可卖", card)
+        self.assertIn("| 当日可卖 sellable_quantity | 0 股 |", card)     # the snapshot itself is still shown
+        self.assertEqual(plan_payload(stale)["t1_locked_shares"], 0)
+        # a row stored before ``t1_locked_shares`` existed is judged the same way from its position
+        legacy = stale.model_copy(update={"metrics": {key: value for key, value in stale.metrics.items()
+                                                      if key not in {"t1_locked_shares", "t1_snapshot_at"}}})
+        self.assertEqual(t1_locked_shares(legacy), 0)
+        self.assertEqual(sizing_notes(legacy), [])
+
+    def test_the_derivation_table_flags_a_share_count_that_does_not_recompute(self):
+        """The gate recomputes exposure/holiday share counts; the card's 一致 column must say the same."""
+        plan = generate(rally_inputs())
+        exposure = plan.lines_of("exposure")[0]
+        tampered = plan.model_copy(update={"lines": [
+            line.model_copy(update={"action": Action(type="reduce_to_shares", value=exposure.action.value + 100)})
+            if line.kind == "exposure" else line for line in plan.lines]})
+        row = [row for row in derivation_rows(tampered) if row["kind"] == "exposure"][0]
+        self.assertEqual(row["compared_to"], "action_value")
+        self.assertEqual(row["compared_value"], str(exposure.action.value + 100))
+        self.assertEqual(row["recomputed"], float(exposure.action.value))
+        self.assertIs(row["matches"], False)
+        self.assertFalse({check.check_id: check for check in evaluate_quality(tampered)}
+                         ["every_line_has_derivation"].passed)
+        derivation_section = render_markdown(tampered).split("## 三、")[1].split("## 四、")[0]
+        table_row = next(line for line in derivation_section.splitlines()
+                         if line.startswith(f"| {row['index']} | 仓位 |"))
+        self.assertIn("| 否 |", table_row)
+        self.assertIn(f"| {row['compared_value']} | {row['recomputed']:.0f} | 否 |", table_row)
+        honest = [row for row in derivation_rows(plan) if row["kind"] == "exposure"][0]
+        self.assertIs(honest["matches"], True)
+        self.assertEqual(honest["compared_value"], str(exposure.action.value))
+        priced = [row for row in derivation_rows(plan) if row["kind"] == "hard_stop"][0]
+        self.assertEqual((priced["compared_to"], priced["compared_value"]), ("price", priced["price"]))
+
+    def test_the_sizing_table_prints_both_exposure_bases_and_the_open_risk(self):
+        plan = plan_fixture()
+        rows = {row["key"]: row for row in sizing_rows(plan)}
+        self.assertEqual(rows["current_risk_pct"]["value"], f"{plan.sizing.current_risk_pct}%")
+        self.assertIn("按参考价", rows["current_exposure_pct"]["label"])
+        self.assertEqual(rows["current_exposure_pct"]["value"], "48.96%")
+        self.assertIn("按快照市值", rows["snapshot_exposure_pct"]["label"])
+        self.assertEqual(rows["snapshot_exposure_pct"]["value"], "48.96%")   # 48778 / 99632
+        keys = [row["key"] for row in sizing_rows(plan)]
+        self.assertEqual(keys.index("current_risk_pct"), keys.index("risk_per_trade_pct") + 1)
+        card = render_markdown(plan)
+        self.assertIn("current_risk_pct", card)
+        self.assertIn("市值 market_value / equity", card)
+
+    def test_the_card_lists_the_lines_it_refused_and_why(self):
+        plan = plan_fixture()
+        card = render_markdown(plan)
+        self.assertIn("未生成的线及原因：", card)
+        self.assertIn("| 软止损 |", card)
+        self.assertIn("间距不足", card)
+        rows = plan_payload(plan)["omitted_lines"]
+        self.assertEqual([row["kind"] for row in rows], ["soft_stop"])
+        self.assertEqual(rows[0]["inputs"]["hard_stop"], float(plan.sizing.hard_stop))
+        broken = generate(stage_inputs("broken"))
+        self.assertIn("移动止损", render_markdown(broken).split("未生成的线及原因：")[1].split("## 三")[0])
+        complete = generate(rally_inputs())
+        self.assertIn("无（模板中的每条可选线都已生成）", render_markdown(complete))
+
+    def test_the_derivation_table_recomputes_the_trail_target_too(self):
+        plan = plan_fixture()
+        trail = [row for row in derivation_rows(plan) if row["kind"] == "trail"][0]
+        self.assertTrue(trail["action_formula"])
+        self.assertTrue(trail["action_matches"])
+        self.assertIn(trail["action_formula"], render_markdown(plan))
+        exposure = [row for row in derivation_rows(plan) if row["kind"] == "exposure"][0]
+        self.assertEqual(exposure["action_formula"], "")
+        self.assertIsNone(exposure["action_matches"])
 
 
 class JsonContractTests(unittest.TestCase):

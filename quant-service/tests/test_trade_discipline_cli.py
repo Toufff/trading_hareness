@@ -11,6 +11,7 @@ not to write.
 from __future__ import annotations
 
 import importlib.util
+import io
 import unittest
 from contextlib import contextmanager
 from datetime import date, time
@@ -91,6 +92,30 @@ class ParserTests(unittest.TestCase):
     def test_a_missing_subcommand_is_rejected(self):
         with self.assertRaises(SystemExit):
             cli.build_parser().parse_args([])
+
+
+class StreamEncodingTests(unittest.TestCase):
+    """The receipt carries Chinese instrument names; the console must not mangle them."""
+
+    def test_the_receipt_streams_are_forced_to_utf8(self):
+        out = io.TextIOWrapper(io.BytesIO(), encoding="gbk")
+        err = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        cli._utf8_streams(out, err)
+        self.assertEqual((out.encoding, err.encoding), ("utf-8", "utf-8"))
+        out.write(cli._json({"name": "神奇制药"}))
+        out.flush()
+        self.assertIn("神奇制药".encode("utf-8"), out.buffer.getvalue())
+
+    def test_a_captured_stream_without_reconfigure_is_left_alone(self):
+        captured = io.StringIO()
+        cli._utf8_streams(captured)      # must not raise
+        captured.write("ok")
+        self.assertEqual(captured.getvalue(), "ok")
+
+    def test_main_reconfigures_before_parsing(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        body = source.split("def main(argv=None):", 1)[1]
+        self.assertLess(body.index("_utf8_streams(sys.stdout, sys.stderr)"), body.index("parse_args"))
 
 
 class ReceiptTests(unittest.TestCase):
@@ -187,6 +212,25 @@ class TradeRowTests(unittest.TestCase):
             cli.build_parser().parse_args(["reconcile", "--dry-run", "--date", "2026-09-21"]),
             FakeDatabase())
         self.assertEqual(receipt["unplanned_fills"], [])
+
+
+class GenerationWarningTests(unittest.TestCase):
+    """A plan dated the previous session on an open day is valid but must not pass unnoticed."""
+
+    def test_a_stale_day_evidence_ref_becomes_a_plain_words_receipt_warning(self):
+        from app.trade_discipline import inputs as inputs_module
+        from app.trade_discipline.generator import generate
+        from test_trade_discipline_core import shenqi_inputs
+
+        fresh = generate(shenqi_inputs())
+        self.assertEqual(cli._generation_warnings(fresh, inputs_module), [])
+        stale = generate(shenqi_inputs(evidence_refs=["bars_basis:settled_only",
+                                                      "bars_stale_day:2026-09-21:last_settled:2026-09-18"]))
+        warnings = cli._generation_warnings(stale, inputs_module)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("stale_day", warnings[0])
+        self.assertIn("2026-09-18", warnings[0])
+        self.assertIn("bars_stale_day:2026-09-21:last_settled:2026-09-18", warnings[0])
 
 
 if __name__ == "__main__":

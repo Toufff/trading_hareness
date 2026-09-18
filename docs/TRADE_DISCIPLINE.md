@@ -1,6 +1,6 @@
 # 交易纪律模块（trade_discipline）设计合同 v1
 
-状态：设计已定，实施中（2026-09-18）。本文件是实现的唯一合同；实现与本文冲突时先改本文再改代码。
+状态：设计已定，实施中（2026-09-18）；第二轮审查（600613 纪律卡）及其复审后于同日修订，见文末“迭代记录”。本文件是实现的唯一合同；实现与本文冲突时先改本文再改代码。
 
 ## 目的
 
@@ -29,17 +29,17 @@ quant-service/migrations/versions/20260918_0105_trade_discipline.py
 quant-service/tests/test_trade_discipline_*.py
 ```
 
-复用而不是重写：`app/short_term_lanes/conditions.py`、`risk.py`、`rules.py`（metrics 口径：ma5/ma10 为收盘简单均值、prior_high=前5日收盘最高、recent_low=近5日收盘最低）；`app/agent_paper/context.py` 的 `daily_bars`/`fetch_minutes`/`fetch_live_quotes`；`app/stock_workbench_indicators.py` 的 `_atr`；`app/disclosure_day_watch.next_trading_session` 或 `intraday_outcome_settlement._next_calendar_trading_date` 取交易日历；`quant.sector_membership_history`（taxonomy `longhu_ths_industry`）取板块归属；`quant.broker_portfolio_snapshots` + `quant.broker_position_snapshots` 取持仓；`quant.broker_trade_records` 取成交；`quant.recommendation_pool_decisions.result.recommended[]` 取推荐 note；最近一次 `quant.post_close_strategy_candidates` / `quant.intraday_strategy_scans` 取策略归属与 formal_state。
+复用而不是重写：`app/short_term_lanes/conditions.py`、`risk.py`、`rules.py`（metrics 口径：ma5/ma10 为收盘简单均值、prior_high=前5日收盘最高、recent_low=近5日收盘最低、low20=近20个交易日最低价）；`app/agent_paper/context.py` 的 `daily_bars`/`fetch_minutes`/`fetch_live_quotes`；`app/stock_workbench_indicators.py` 的 `_atr`；`app/disclosure_day_watch.next_trading_session` 或 `intraday_outcome_settlement._next_calendar_trading_date` 取交易日历；`quant.sector_membership_history`（taxonomy `longhu_ths_industry`）取板块归属；`quant.broker_portfolio_snapshots` + `quant.broker_position_snapshots` 取持仓；`quant.broker_trade_records` 取成交；`quant.recommendation_pool_decisions.result.recommended[]` 取推荐 note；最近一次 `quant.post_close_strategy_candidates` / `quant.intraday_strategy_scans` 取策略归属与 formal_state。
 
 ## 核心原则（质量门据此写成断言）
 
 1. **均线管状态，结构点管动作。** MA5/MA10/MA20 只用于阶段判定与“软线”；硬止损、取消、触发必须来自结构点：近 N 日真实低点/收盘低点、当日低点、突破平台、急跌日低点，再加波动缓冲。
 2. **硬线单条件，软线可多条件。** 硬止损只看一个可评估指标（日收盘或连续 3 分钟收盘），不附加板块/量能条件。多条件只允许出现在减仓/提醒类软线。
 3. **每条线可评估。** 每条线声明 metric（daily_close / minute_close / last / low / high）、op、price 或 pct、confirm（bars、basis）、extra 条件只能取系统能计算的枚举（见下）。系统算不出的条件不许写进去。
-4. **每条线可追溯。** `derivation = {rule_id, inputs: {...}, formula: "..."}`，任何价格都能从 inputs 复算。
+4. **每条线可追溯。** `derivation = {rule_id, inputs: {...}, formula: "...", action_inputs: {...}, action_formula: "..."}`，任何价格都能从 inputs 复算；动作值本身是推导数（trail 的 move_stop_to 目标）时，同样能从 action_inputs 复算。模板按规则**不生成**的线也要留痕：`metrics.omitted_lines = [{kind, reason, inputs}]`，缺席的线必须能区分“规则拒绝”与“模板遗漏”。
 5. **仓位由止损距离反推。** `max_shares = floor(equity × risk_per_trade_pct / (reference_price − hard_stop) / 100) × 100`；同时受 stage 的 `target_exposure_pct` 上限约束。仓位调整线（exposure）按**时间**执行，不看价格。
 6. **只上移不下移。** trail 线每日重算，`new = max(prev, candidate)`；任何后续计划的硬止损不得低于前一计划（除非 supersede 记录里给出 `lowered_reason`，且质量门标红）。
-7. **时间线必填。** time_stop（N 个交易日无确认即退出）、valid_until、以及休市 ≥3 个自然日前的 holiday 线。
+7. **时间线必填。** time_stop（N 个交易日无确认即退出）、valid_until、以及休市 ≥5 个自然日（劳动节/国庆/春节级别；周五休一天+周末的 3 天缺口不算）前的 holiday 线。
 8. **不可变。** 计划、评估、对账、评审全部追加写；改计划 = 新计划 + `supersedes_plan_id`。`plan_key = account:symbol:trading_date:plan_kind:inputs_hash[:12]`，同证据重跑幂等，证据变化（盘中重算）即为新计划，同日也能 supersede。
 9. **失败要落库。** 质量门不过的计划照样写入，status=`rejected_by_quality`，quality 字段列出失败项；不允许静默丢弃或降级成文本。
 
@@ -63,7 +63,9 @@ ExtraCondition = Literal[
 ActionType = Literal["exit_all","reduce_to_shares","reduce_by_pct","move_stop_to","block_add","alert","buy_up_to_shares"]
 
 class Confirm(BaseModel): bars: int = 1; basis: Literal["daily","minute"] = "daily"
-class Derivation(BaseModel): rule_id: str; inputs: dict[str, Any]; formula: str
+class Derivation(BaseModel):
+    rule_id: str; inputs: dict[str, Any]; formula: str
+    action_inputs: dict[str, Any] = {}; action_formula: str = ""   # move_stop_to 目标的推导
 class Action(BaseModel): type: ActionType; value: Decimal | int | None = None
 class Line(BaseModel):
     kind: LineKind; label: str
@@ -80,6 +82,7 @@ class Sizing(BaseModel):
     equity: Decimal; risk_per_trade_pct: Decimal; reference_price: Decimal; hard_stop: Decimal
     stop_distance: Decimal; risk_amount: Decimal; max_shares: int; target_exposure_pct: Decimal
     current_shares: int; current_exposure_pct: Decimal; recommended_shares: int
+    current_risk_pct: Decimal | None      # current_shares × stop_distance / equity，披露项，不设门
 class PositionRef(BaseModel):
     snapshot_id: str; observed_at: datetime; quantity: int; sellable_quantity: int
     average_cost: Decimal | None; market_price: Decimal | None; market_value: Decimal | None
@@ -90,7 +93,10 @@ class DisciplinePlan(BaseModel):
     stage: str; template_key: str; template_version: str
     as_of_at: datetime; trading_date: date; valid_until: datetime
     position: PositionRef | None
-    metrics: dict[str, Any]           # 生成时冻结的指标快照（ma5/ma10/ma20/atr14/hi20/lo20/recent_low/prior_high/drawdown/...）
+    metrics: dict[str, Any]           # 生成时冻结的指标快照（ma5/ma10/ma20/atr14/hi20/lo20/low20/recent_low/prior_high/drawdown/...）
+                                      # 另含 omitted_lines（规则拒绝的线）、calendar（休市规则读到的 closure_gaps + sessions，质量门据此重算）、
+                                      # t1_locked_shares（生成日不可卖股数 = quantity − sellable_quantity，**仅当快照 observed_at 的上海日期 == trading_date**，否则为 0）
+                                      # 与 t1_snapshot_at（该快照时间，卡片引用它）
     sizing: Sizing | None
     lines: list[Line]                 # 至少含 hard_stop + time_stop（holding）或 trigger + cancel + hard_stop + time_stop（new_buy）
     evidence_refs: list[str]          # snapshot_id / run_id / decision_id / bars provider+date
@@ -128,13 +134,13 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 
 每个 stage 一个模板函数 `build_lines(stage, metrics, position, sizing, calendar) -> list[Line]`。共性：
 
-- `hard_stop`（必有，priority 1）：`metric=daily_close, op="<", confirm(bars=1, daily)`，价格 = `min(structure_low, reference_price × (1 − buffer), reference_price − 0.9 × ATR14, reference_price × (1 − 2%))`——即结构点只允许**下移**到最小距离，永远不许被抬到结构点之上；结构比 3×ATR14 / 12% 还远时价格保持不动，由 `hard_stop_distance_sane` 判不过、按原则 9 落库为 `rejected_by_quality`。其中 structure_low 按 stage 取：crash_rebound/broken 用 `min(当日低点, 昨日低点)`；pullback 用 `recent_low`（近 5 日收盘低）；trend 用 `MA10 × (1 − 0.5%)`；breakout 用 `突破平台 prior_high × (1 − 0.5%)`；base_platform 用 10 日最低收盘。buffer = `max(1.5%, 0.6 × 日波动率%)`（与 risk.py 一致）。另给一个盘中副本 `metric=minute_close, confirm(bars=3, minute)`，同价，label 标“盘中版”。
-- `soft_stop`（可选，priority 2）：MA5 或 lane 参考线，允许 extra 条件，action=reduce_by_pct 50。
+- `hard_stop`（必有，priority 1）：`metric=daily_close, op="<", confirm(bars=1, daily)`，价格 = `min(structure_low, reference_price × (1 − buffer), reference_price − 0.9 × ATR14, reference_price × (1 − 2%))`，四项全部以 inputs 记入 derivation（`buffer_pct`、`atr_target_multiple=0.9`、`stop_pct_target=0.02`），formula 逐项写出——即结构点只允许**下移**到最小距离，永远不许被抬到结构点之上；结构比 3×ATR14 / 12% 还远时价格保持不动，由 `hard_stop_distance_sane` 判不过、按原则 9 落库为 `rejected_by_quality`。其中 structure_low 按 stage 取：crash_rebound 用 `low20`（最近 20 个交易日的最低价，即急跌低点）——但急跌低点是一个固定点，正常反弹会离它越来越远，而 stage 判定（回撤 ≤ −25%）仍停留在 crash_rebound；因此当 `low20` 已超出止损距离上限（距参考价 > 3×ATR14 或 > 12%，与质量门同一算式）时，改用第二个认可的结构点 `min(当日低点, 昨日低点)`，`derivation.inputs.structure_source` 记 `"low20"` 或 `"two_day_low"`，`low20` 两种情形都记入 inputs，label 注明改用；两日低点也超出上限时保持不动、照常被 `hard_stop_distance_sane` 拒绝；broken/unclassified 用 `min(当日低点, 昨日低点)`；pullback 用 `recent_low`（近 5 日收盘低）；trend 用 `MA10 × (1 − 0.5%)`；breakout 用 `突破平台 prior_high × (1 − 0.5%)`；base_platform 用 10 日最低收盘。buffer = `max(1.5%, 0.6 × 日波动率%)`（与 risk.py 一致）。另给一个盘中副本 `metric=minute_close, confirm(bars=3, minute)`，同价，label 标“盘中版”。
+- `soft_stop`（可选，priority 2）：价格 = MA5，允许 extra 条件，action=reduce_by_pct 50。**仅当** `hard_stop + 0.5 × ATR14 <= MA5 <= reference_price − 0.5 × ATR14` 时生成；否则不生成，并把 `{kind:"soft_stop", reason, inputs:{ma5, hard_stop, reference_price, atr14, window_low, window_high}}` 写入 `metrics.omitted_lines`。理由：软止损离现价不足半个 ATR 时下一日噪音即触发，离硬止损不足半个 ATR 时与硬止损无差别。推论：硬止损恒 ≤ 参考价 − 0.9×ATR14，窗口非空要求止损距离 ≥ 1.0×ATR14，所以 0.9×ATR 项起约束作用的计划（如 600613 09-18：距离 0.78 < 0.856）天然没有软止损——是设计使然，不是缺陷。
 - `time_stop`（必有）：crash_rebound/broken 3 个交易日、其余 5 个交易日内“收盘未站回确认线（stage 相应的 MA10 或 prior_high）”则 exit_all；execute_by=time，execute_at="T+N_close"。
 - `exposure`（当 current_exposure_pct > target_exposure_pct 时必有，priority 0）：`execute_by=time, execute_at="next_open+15m"`，action=reduce_to_shares(sizing.recommended_shares)。
-- `holiday`（valid_until 内存在 ≥3 自然日休市时必有）：最后交易日收盘前把仓位降到 `holiday_exposure_pct`（crash_rebound/broken 0%，其余 target 的一半）。休市缺口只能由**真实开市日**起算：生成日若本身闭市，不得作为 `last_trading_date`。
+- `holiday`（valid_until 内存在 ≥5 自然日休市时必有；3 天的节日长周末不出线，但必须留痕：有效期内每个非普通周末（周五收盘后的周六+周日不算）且 <5 天的缺口写入 `metrics.omitted_lines` `{kind:"holiday", reason, inputs:{closed_days, last_trading_date, resume_date, threshold_days}}`）：最后交易日收盘前把仓位降到 `holiday_exposure_pct` = 阶段目标仓位的一半（由 `TARGET_EXPOSURE_PCT / 2` 派生而非手抄：crash_rebound 10、broken 0、breakout_hold 12.5、trend_hold 15、pullback_hold 15、base_platform 10、unclassified 7.5）。休市缺口只能由**真实开市日**起算：生成日若本身闭市，不得作为 `last_trading_date`。生成器把读到的日历冻结为 `metrics.calendar = {closure_gaps, sessions}`。
 - `no_add`（crash_rebound/broken 必有；其余可选）：直到 `daily_close >= MA10`（crash_rebound）或 MA5 前 block_add。
-- `trail`：当 `last >= reference_price + 1 × ATR14` 后启用，价格 = `max(prev, min(近 3 日最低, last − 1.5 × ATR14))`，action=move_stop_to；只上移。
+- `trail`：当 `last >= max(成本, reference_price) + 1 × ATR14`（= arm_price）后启用，action=move_stop_to，目标价 = `max(previous_trail, max(hard_stop, min(近 3 日最低, arm_price − 1.5 × ATR14)))`，该式写入 `derivation.action_formula`、各项写入 `action_inputs`（无前序 trail 时公式不含 previous_trail 项）；只上移。**不生成**的两种情形（原因写入 `omitted_lines`）：`target_exposure_pct == 0`（仓位线已要求清仓，移动止损无意义）；计算出的目标价 `<= hard_stop`（“上移”不会改变止损，零信息）。
 - `take_partial`：`after_volume_climax` + `below_vwap` → reduce_by_pct 50（breakout/trend/crash_rebound 用）。
 - new_buy 计划另有 `trigger`（`daily_close >= reference` + `amount_ge_prev_day` + `sector_not_weak`）与 `cancel`（`daily_close < cancel_price` + `volume_expand_1_5x`），reference/cancel 直接取 lane 的 reference/support。
 
@@ -146,10 +152,10 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 
 - `has_hard_stop`、`has_time_stop`、`hard_stop_below_price`、`hard_stop_single_condition`（extra 为空）
 - `hard_stop_distance_sane`：距离在 [0.8 × ATR14, 3 × ATR14] 且在 [1.5%, 12%]
-- `soft_above_hard`、`lines_monotonic`（hard < soft < close；trail 触发价 > close）
+- `soft_above_hard`、`soft_stop_separation`（存在 soft_stop 时校验 `hard_stop + 0.5×ATR14 <= soft <= reference − 0.5×ATR14`）、`lines_monotonic`（hard < soft < close；trail 触发价 > close）
 - `every_line_evaluable`（metric/op/price 或 execute_by=time 三者之一完整；extra 仅取枚举；sector 条件要求 DB 有归属）
-- `every_line_has_derivation`（inputs 非空、formula 非空、用 inputs 复算 price 误差 ≤ 0.01）
-- `exposure_line_when_over_cap`、`holiday_line_when_closure`、`no_add_when_crash_or_broken`
+- `every_line_has_derivation`（inputs 非空、formula 非空、用 inputs 复算 price 误差 ≤ 0.01；无 price 的时间线（exposure/holiday）用 formula 复算 action.value 的股数；action=move_stop_to 的线必须带 action_formula/action_inputs 且复算 action.value 误差 ≤ 0.01）
+- `exposure_line_when_over_cap`、`holiday_line_when_closure`（有效期内存在 ≥5 自然日休市时必须有 holiday 线；用模板同一个 `closure_within` 对冻结的 `metrics.calendar` 与计划自身的 `valid_until` 重新推导，**两个方向都不信** `metrics.closure_required`；没有 `metrics.calendar` 的旧行退回按 `metrics.closure.closed_days` 判定）、`no_add_when_crash_or_broken`
 - `sizing_consistent`（max_shares 按公式复算相等；recommended_shares ≤ max_shares 且 ≤ target 上限）
 - `not_lowered_vs_previous`（有前序 active 计划时 hard_stop 不低于其值，否则需 lowered_reason）
 - `valid_until_within_5_trading_days`
@@ -174,8 +180,9 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 
 ## 报告与 CLI
 
-- `report.py`：为每个计划生成 Markdown 纪律卡与 JSON：头部（股票、阶段、持仓、有效期、状态），仓位表（equity、风险预算、止损距离、max/recommended shares），线表（kind、条件人话、价格、执行方式、优先级、rule_id、formula），质量门结果，证据引用。写到 `<output_root>/<trading_date>/<symbol>-<plan_key>.md/.json`，默认 `G:/StockPlatform/reports/discipline/`。
-- `scripts/trade-discipline.py`：
+- `report.py`：为每个计划生成 Markdown 纪律卡与 JSON：头部（股票、阶段、持仓、有效期、状态），仓位表（equity、单笔风险比例与其并排的 `current_risk_pct`、风险预算、止损距离、max/recommended shares、当前持仓股数、`sellable_quantity`、仓位比例按参考价与按快照市值 `market_value / equity` 两行），仓位表下当 `metrics.t1_locked_shares > 0`（即同日快照且 `sellable < quantity`）时一句“生成日不可卖 N 股（T+1，按 MM-DD HH:MM 快照），价格线自下一交易日起可执行”，线表（kind、条件人话、价格、执行方式、优先级、rule_id、formula），线表后的“未生成的线及原因”（来自 `metrics.omitted_lines`），推导表（价格与动作值各自复算；无价格的时间线 exposure/holiday 复算股数并与 `action.value` 比较，“一致”列与质量门 `every_line_has_derivation` 同一容差），质量门结果，证据引用。写到 `<output_root>/<trading_date>/<symbol>-<plan_key>.md/.json`，默认 `G:/StockPlatform/reports/discipline/`。
+- `inputs.py` 的日线口径：`canonical_bars_daily` 已有 `as_of` 当日已结算 bar 时，**无论几点**都直接用已结算 bar、不读实时行情（bar 存在本身证明该交易日已收盘，任何实时报价都属于更晚的交易日），`evidence_refs` 记 `bars_basis:settled`；只有当日 bar 缺席、**且 `as_of` 的上海日期就是当前交易日**（`collect(session_today=...)`，默认上海今天）才允许用 live_quote + 分钟线合成 forming bar，记 `bars_basis:settled_plus_forming` 与 `forming_bar:<source>:<date>`——回填历史 `--as-of` 永远不会把今晚的报价盖上历史日期；两者都没有记 `bars_basis:settled_only`。开市日既无当日 bar 又无 forming bar（15:00 至日线入库前、`--no-live`、行情源故障）时计划会落在上一交易日，另记 `bars_stale_day:<as_of 日>:last_settled:<最后 bar 日>`，CLI 回执 `plans[].warnings` 用白话重复一遍；闭市日（周末跑）不算 stale。
+- `scripts/trade-discipline.py`：入口先 `sys.stdout/stderr.reconfigure(encoding="utf-8")`，回执里的中文名在 Windows 控制台不得变成乱码。
   - `generate --account-key citics-primary [--symbol 600613.SH ...] [--as-of ISO] [--dry-run] [--output-dir DIR] [--env-file ...]`：dry-run 只读 DB、只写文件，stdout 打印 JSON 回执（每只 symbol：stage、status、失败检查、报告路径）。非 dry-run 落库后读回校验。
   - `evaluate --date YYYY-MM-DD [--basis daily|minute]`、`reconcile --date`、`show --symbol`。
   - 与 `scripts/agent-paper-trader.py` 相同的启动方式（`load_dotenv(env_file)`、`Database()`）。
@@ -187,6 +194,28 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 2. 合同测试：migration 线性链；router composition；`ruff check app tests`；`git diff --check`。
 3. 用例：`generate --dry-run --symbol 600613.SH --account-key citics-primary`（真实 DB 只读）生成神奇制药的纪律卡，交由人工/上层审查；审查不过 → 改模板或质量门 → 重新生成，形成迭代记录。
 4. 落库验收在发布后进行：非 dry-run 生成 → 数据库读回 → `GET /api/v1/discipline/plans/latest` 同轮一致。
+
+## 迭代记录
+
+- 2026-09-18 第一轮：600613/603823/000977/600664 dry-run 纪律卡，结构合格，审查列出 7 项缺陷。
+- 2026-09-18 第二轮（本文已同步）：
+  - F1 休市线：阈值 3→5 自然日；比例改为阶段目标的一半（broken 仍 0）。此前中秋 3 天缺口把 crash_rebound 持仓在 09-24 前清到 0 股，使整张卡其余的线失效。
+  - F2 软止损：仅当 MA5 与硬止损、参考价各相距 ≥0.5×ATR14 时生成，否则记入 `omitted_lines`；新增 `soft_stop_separation` 检查；卡片增加“未生成的线及原因”。
+  - F3 移动止损：目标仓位 0 或目标价不高于硬止损时不生成；`move_stop_to` 目标带 action_formula/action_inputs，质量门复算。
+  - F4 披露：仓位表加 sellable_quantity、T+1 不可卖说明（`metrics.t1_locked_shares`）、`current_risk_pct`、按参考价/按快照市值两种仓位比例；均为披露，不新增会打成 rejected 的检查。
+  - F5 硬止损：formula 逐项写出四个 min 项；crash_rebound 的结构点改为 `low20`（近 20 个交易日最低价）。
+  - F6 CLI stdout/stderr 强制 UTF-8。
+  - F7 已结算日线优先于实时合成（见“报告与 CLI”一节）。
+  - 版本号：templates v2、generator v2、report v2；contract 仍为 trade-discipline-v1（只增字段，旧行可读）。
+- 2026-09-18 第二轮复审（对 F1–F7 实现的审查，本文已同步）：
+  - F5 引入的“拒绝悬崖”：600613 收盘 ≥ 9.00 时 `low20` 7.92 超出 12% 上限，一个正常反弹让 active 翻成 rejected。修法：crash_rebound 的 `low20` 超出止损距离上限时改用两日低点（见模板 hard_stop 一节），`structure_source` 留痕；两日低点也超限时仍拒绝。
+  - F7 的守卫是按时间而非按证据：历史 `--as-of 14:30` 会拉今晚实时报价盖掉当日已结算 bar。修法：当日已结算 bar 存在即不读实时；`as_of` 非当前交易日亦不读实时。
+  - F4 的 T+1 说明读的是最新快照而不核对快照日期，周一复用周五快照会断言一个已失效的锁。修法：仅同日快照计入 `t1_locked_shares`，卡片引用快照时间。
+  - 休市规则不可审计：<5 天的缺口无痕、`closure_gaps` 未冻结、质量门只在 `closure_required=True` 时才收紧。修法：冻结 `metrics.calendar`，质量门重新推导、不信标记，节日短缺口写入 `omitted_lines`。
+  - 推导表对无价格线的“一致”列打 `—`：改为按 `action.value` 复算股数，与质量门同一容差。
+  - 开市日无当日 bar 又无实时 bar 时计划落在上一交易日而无提示：加 `bars_stale_day` 证据引用与 CLI 回执 warnings。
+  - `HOLIDAY_EXPOSURE_PCT` 由 `TARGET_EXPOSURE_PCT / 2` 派生。
+  - 软止损与 lines_monotonic 无互斥组合（复审确认），仅补充文档说明。
 
 ## 后续（不在 v1）
 

@@ -108,14 +108,25 @@ class Confirm(BaseModel):
 
 
 class Derivation(BaseModel):
-    """Every derived price must be recomputable from ``inputs`` via ``formula``."""
+    """Every derived price must be recomputable from ``inputs`` via ``formula``.
+
+    A line whose ``action.value`` is itself a derived number (the trail's
+    ``move_stop_to`` target) carries a second pair, ``action_formula`` over
+    ``action_inputs``, so the value the human is told to act on is as auditable
+    as the price that triggers it.
+    """
 
     rule_id: str = Field(min_length=1, max_length=120)
     inputs: dict[str, Any] = Field(default_factory=dict)
     formula: str = Field(default="", max_length=600)
+    action_inputs: dict[str, Any] = Field(default_factory=dict)
+    action_formula: str = Field(default="", max_length=600)
 
     def recompute(self) -> float:
         return eval_expression(self.formula, self.inputs)
+
+    def recompute_action(self) -> float:
+        return eval_expression(self.action_formula, self.action_inputs)
 
 
 class Action(BaseModel):
@@ -159,6 +170,9 @@ class Sizing(BaseModel):
     current_shares: int = Field(ge=0)
     current_exposure_pct: Decimal = Field(ge=0)
     recommended_shares: int = Field(ge=0)
+    # ``current_shares x stop_distance / equity``: the risk the position already
+    # carries, printed next to the 1% budget.  Disclosure only, never a gate.
+    current_risk_pct: Decimal | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_stop(self) -> "Sizing":

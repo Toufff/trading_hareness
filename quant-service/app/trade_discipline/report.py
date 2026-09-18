@@ -22,9 +22,10 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import ComplianceRecord, DisciplinePlan, Evaluation, FormulaError, Line
-from .quality import CHECK_IDS
+from .generator import t1_locked_shares_for
+from .quality import CHECK_IDS, DERIVATION_TOLERANCE
 
-REPORT_VERSION = "trade-discipline-report-v1"
+REPORT_VERSION = "trade-discipline-report-v2"
 RESEARCH_NOTICE = "研究用途，仅作人工决策依据：系统不连券商、不下单、不改持仓。"
 DASH = "—"
 
@@ -78,11 +79,12 @@ CHECK_LABEL: dict[str, str] = {
     "hard_stop_single_condition": "硬止损只带单一条件",
     "hard_stop_distance_sane": "止损距离落在 ATR 与百分比的合理区间",
     "soft_above_hard": "软止损高于硬止损",
+    "soft_stop_separation": "软止损与硬止损、参考价各相距至少 0.5×ATR14",
     "lines_monotonic": "硬止损 < 软止损 < 参考价，移动止损触发价在上方",
     "every_line_evaluable": "每条线都可被系统评估",
-    "every_line_has_derivation": "每条线都能从 inputs 复算出价格",
+    "every_line_has_derivation": "每条线都能从 inputs 复算出价格与动作值",
     "exposure_line_when_over_cap": "仓位超上限时必须给出减仓线",
-    "holiday_line_when_closure": "有效期内有长假时必须给出休市线",
+    "holiday_line_when_closure": "有效期内有 ≥5 个自然日休市时必须给出休市线",
     "no_add_when_crash_or_broken": "急跌/破位阶段必须禁加仓",
     "sizing_consistent": "仓位公式可复算且不超上限",
     "not_lowered_vs_previous": "硬止损不得低于前序计划（除非记录下调理由）",
@@ -170,6 +172,15 @@ def _recomputed(line: Line) -> Any:
         return None
 
 
+def _recomputed_action(line: Line) -> Any:
+    if not line.derivation.action_formula.strip() or not line.derivation.action_inputs:
+        return None
+    try:
+        return round(line.derivation.recompute_action(), 4)
+    except FormulaError:
+        return None
+
+
 # --------------------------------------------------------------------------
 # Structured rows shared by the Markdown card and the JSON payload
 # --------------------------------------------------------------------------
@@ -200,14 +211,45 @@ def header_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
     ]
 
 
+def _current_risk_pct(sizing: Any) -> Decimal:
+    if sizing.current_risk_pct is not None:
+        return sizing.current_risk_pct
+    return (Decimal(sizing.current_shares) * sizing.stop_distance / sizing.equity * Decimal("100")).quantize(
+        Decimal("0.01"))
+
+
+def t1_locked_shares(plan: DisciplinePlan) -> int:
+    """Shares held but not sellable on the plan's trading date (T+1), per a same-day snapshot."""
+    recorded = (plan.metrics or {}).get("t1_locked_shares")
+    if recorded is not None:
+        return int(recorded)
+    return t1_locked_shares_for(plan.position, plan.trading_date)
+
+
+def _snapshot_stamp(plan: DisciplinePlan) -> str:
+    """``MM-DD HH:MM`` of the broker snapshot the T+1 note is based on."""
+    recorded = (plan.metrics or {}).get("t1_snapshot_at")
+    if recorded:
+        return str(recorded)[5:16].replace("T", " ")
+    if plan.position is not None:
+        return plan.position.observed_at.strftime("%m-%d %H:%M")
+    return DASH
+
+
 def sizing_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
     sizing = plan.sizing
     if sizing is None:
         return []
+    position = plan.position
     distance_pct = (sizing.stop_distance / sizing.reference_price * Decimal("100")).quantize(Decimal("0.01"))
+    snapshot_exposure = (
+        (position.market_value / sizing.equity * Decimal("100")).quantize(Decimal("0.01"))
+        if position is not None and position.market_value is not None else None)
     return [
         {"key": "equity", "label": "账户权益 equity", "value": _fmt(sizing.equity)},
         {"key": "risk_per_trade_pct", "label": "单笔风险比例", "value": _pct(sizing.risk_per_trade_pct)},
+        {"key": "current_risk_pct", "label": "当前持仓风险 current_risk_pct = 持仓股数 × 止损距离 / equity",
+         "value": _pct(_current_risk_pct(sizing))},
         {"key": "risk_amount", "label": "风险预算 = equity × risk%", "value": _fmt(sizing.risk_amount)},
         {"key": "reference_price", "label": "参考价", "value": _fmt(sizing.reference_price)},
         {"key": "hard_stop", "label": "硬止损", "value": _fmt(sizing.hard_stop)},
@@ -215,11 +257,38 @@ def sizing_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
          "value": f"{_fmt(sizing.stop_distance)}（{_fmt(distance_pct)}%）"},
         {"key": "max_shares", "label": "风险上限 max_shares", "value": _fmt(sizing.max_shares)},
         {"key": "target_exposure_pct", "label": "阶段仓位上限", "value": _pct(sizing.target_exposure_pct)},
-        {"key": "current_shares", "label": "当前持仓",
-         "value": f"{_fmt(sizing.current_shares)} 股（{_fmt(sizing.current_exposure_pct)}%）"},
+        {"key": "current_shares", "label": "当前持仓", "value": f"{_fmt(sizing.current_shares)} 股"},
+        {"key": "sellable_quantity", "label": "当日可卖 sellable_quantity",
+         "value": f"{_fmt(position.sellable_quantity)} 股" if position is not None else DASH},
+        {"key": "current_exposure_pct", "label": "当前仓位比例（按参考价）",
+         "value": _pct(sizing.current_exposure_pct)},
+        {"key": "snapshot_exposure_pct", "label": "当前仓位比例（按快照市值 market_value / equity）",
+         "value": _pct(snapshot_exposure)},
         {"key": "recommended_shares", "label": "建议持仓 recommended_shares",
          "value": _fmt(sizing.recommended_shares)},
     ]
+
+
+def sizing_notes(plan: DisciplinePlan) -> list[str]:
+    """Sentences printed under the sizing table; today only the T+1 lock."""
+    locked = t1_locked_shares(plan)
+    if locked <= 0:
+        return []
+    return [f"生成日不可卖 {locked} 股（T+1，按 {_snapshot_stamp(plan)} 快照），价格线自下一交易日起可执行。"]
+
+
+def omitted_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
+    """Lines the template refused to draw, with the rule and the numbers behind it."""
+    rows: list[dict[str, Any]] = []
+    for item in (plan.metrics or {}).get("omitted_lines") or []:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or DASH)
+        inputs = item.get("inputs") if isinstance(item.get("inputs"), dict) else {}
+        rows.append({"kind": kind, "kind_label": KIND_LABEL.get(kind, kind),
+                     "reason": str(item.get("reason") or DASH),
+                     "inputs": {key: inputs[key] for key in sorted(inputs)}})
+    return rows
 
 
 def line_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
@@ -242,11 +311,26 @@ def line_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
     return rows
 
 
+def _compared_value(line: Line) -> tuple[str, Any]:
+    """What ``formula`` recomputes: the price, or the share count of a price-less time line.
+
+    Mirrors ``quality._derivation_problem`` so the card's ``一致`` column and
+    the gate's verdict can never disagree about the same line.
+    """
+    if line.price is not None:
+        return "price", line.price
+    if line.action.value is not None:
+        return "action_value", line.action.value
+    return "price", None
+
+
 def derivation_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
     """The audit table: rule, recorded inputs, formula and the recomputed value."""
     rows: list[dict[str, Any]] = []
     for index, line in enumerate(plan.lines, start=1):
         recomputed = _recomputed(line)
+        action_recomputed = _recomputed_action(line)
+        compared_to, compared = _compared_value(line)
         rows.append({
             "index": index, "kind": line.kind, "kind_label": KIND_LABEL.get(line.kind, line.kind),
             "rule_id": line.derivation.rule_id,
@@ -254,8 +338,17 @@ def derivation_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
             "formula": line.derivation.formula,
             "price": None if line.price is None else str(line.price),
             "recomputed": recomputed,
-            "matches": None if recomputed is None or line.price is None
-            else abs(recomputed - float(line.price)) <= 0.01 + 1e-9,
+            "compared_to": compared_to,
+            "compared_value": None if compared is None else str(compared),
+            "matches": None if recomputed is None or compared is None
+            else abs(recomputed - float(compared)) <= DERIVATION_TOLERANCE,
+            "action_inputs": {key: line.derivation.action_inputs[key]
+                              for key in sorted(line.derivation.action_inputs)},
+            "action_formula": line.derivation.action_formula,
+            "action_value": None if line.action.value is None else str(line.action.value),
+            "action_recomputed": action_recomputed,
+            "action_matches": None if action_recomputed is None or line.action.value is None
+            else abs(action_recomputed - float(line.action.value)) <= DERIVATION_TOLERANCE,
         })
     return rows
 
@@ -339,7 +432,10 @@ def plan_payload(plan: DisciplinePlan, *, evaluation: Evaluation | None = None,
         "boundary": "research_only_human_decision_support",
         "header": header_rows(plan),
         "sizing": sizing_rows(plan),
+        "sizing_notes": sizing_notes(plan),
+        "t1_locked_shares": t1_locked_shares(plan),
         "lines": line_rows(plan),
+        "omitted_lines": omitted_rows(plan),
         "derivations": derivation_rows(plan),
         "quality": {"passed": not failed, "failed": failed, "checks": quality_rows(plan)},
         "evidence_refs": list(plan.evidence_refs),
@@ -367,6 +463,10 @@ def render_markdown(plan: DisciplinePlan, *, evaluation: Evaluation | None = Non
     sizing = sizing_rows(plan)
     if sizing:
         out += _table(["项目", "数值"], [[row["label"], row["value"]] for row in sizing])
+        notes = sizing_notes(plan)
+        if notes:
+            out.append("")
+            out.extend(f"> {note}" for note in notes)
     else:
         out.append("本计划没有 sizing（无权益或无参考价）。")
 
@@ -377,11 +477,24 @@ def render_markdown(plan: DisciplinePlan, *, evaluation: Evaluation | None = Non
     out += ["", "原文表述：", ""]
     out.extend(f"{row['index']}. **{row['kind_label']}**：{row['label']}" for row in line_rows(plan))
 
-    out += ["", "## 三、推导表（每个价格都可复算）", ""]
-    out += _table(["#", "类型", "rule_id", "inputs", "formula", "价格", "复算值", "一致"],
+    out += ["", "未生成的线及原因：", ""]
+    omitted = omitted_rows(plan)
+    if omitted:
+        out += _table(["类型", "原因", "inputs"],
+                      [[row["kind_label"], row["reason"], _canonical(row["inputs"])] for row in omitted])
+    else:
+        out.append("- 无（模板中的每条可选线都已生成）")
+
+    out += ["", "## 三、推导表（每个价格与动作值都可复算；无价格的时间线复算的是股数）", ""]
+    out += _table(["#", "类型", "rule_id", "inputs", "formula", "价格/股数", "复算值", "一致",
+                   "action_formula", "动作值", "动作复算值", "一致"],
                   [[row["index"], row["kind_label"], row["rule_id"], _canonical(row["inputs"]),
-                    row["formula"], row["price"], row["recomputed"],
-                    DASH if row["matches"] is None else ("是" if row["matches"] else "否")]
+                    row["formula"], row["compared_value"], row["recomputed"],
+                    DASH if row["matches"] is None else ("是" if row["matches"] else "否"),
+                    (f"{row['action_formula']} over {_canonical(row['action_inputs'])}"
+                     if row["action_formula"] else DASH),
+                    row["action_value"], row["action_recomputed"],
+                    DASH if row["action_matches"] is None else ("是" if row["action_matches"] else "否")]
                    for row in derivation_rows(plan)])
 
     out += ["", "## 四、质量门", ""]
@@ -455,6 +568,7 @@ def write_report(plan: DisciplinePlan, *, output_root: Any, evaluation: Evaluati
 __all__ = [
     "CHECK_LABEL", "EXTRA_LABEL", "KIND_LABEL", "METRIC_LABEL", "OP_LABEL", "REPORT_VERSION",
     "STAGE_LABEL", "STATUS_LABEL", "VERDICT_LABEL", "action_text", "compliance_rows", "condition_text",
-    "derivation_rows", "evaluation_rows", "execution_text", "header_rows", "line_rows", "plan_payload",
-    "quality_rows", "render_markdown", "report_paths", "sizing_rows", "slug", "write_report",
+    "derivation_rows", "evaluation_rows", "execution_text", "header_rows", "line_rows", "omitted_rows",
+    "plan_payload", "quality_rows", "render_markdown", "report_paths", "sizing_notes", "sizing_rows", "slug",
+    "t1_locked_shares", "write_report",
 ]
