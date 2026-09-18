@@ -51,8 +51,10 @@ function Set-StockReleaseState {
     $layout = Get-StockReleaseLayout -PlatformRoot $PlatformRoot
     # tunnel_release / tunnel_ssh_target_sha256 describe the shared-peer tunnel's
     # own lifecycle, which is deliberately decoupled from the release lifecycle
-    # by the reinstall gate below: the tunnel keeps running out of whatever
-    # release it was last really installed from. Every other key in this payload
+    # by the reinstall gate below: tunnel_release is the release the tunnel was
+    # LAST INSTALLED FROM and is therefore still executing out of, while the
+    # registered task action points at <PlatformRoot>\current, so the next
+    # relaunch starts it from whatever `current` resolves to then. Every other key in this payload
     # is reset to its default unless the caller supplies it, so these two are
     # seeded from the existing state instead -- a caller that is not changing the
     # tunnel must not be able to silently erase the pin that keeps that release
@@ -77,6 +79,45 @@ function Set-StockReleaseState {
     $payload.updated_at = [DateTimeOffset]::Now.ToString('o')
     Write-ReleaseAtomicJson -Path $layout.StatePath -Value $payload
     return [pscustomobject]$payload
+}
+
+function Get-StockTextSha256 {
+    # SHA-256 of a UTF-8 string, lower-case hex. Used for the synthetic
+    # hash-set entries that describe things which are NOT release files (the
+    # owner-tunnel SSH target, the scheduled task's PowerShell host, the task
+    # principal), so they can ride through the same comparison as real files.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))
+        return ([BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
+    } finally { $sha.Dispose() }
+}
+
+function Get-StockBytesSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($Bytes)) -replace '-', '').ToLowerInvariant()
+    } finally { $sha.Dispose() }
+}
+
+function Get-StockScheduledTaskLogonType {
+    # The logon type a (re)install would register for the background tasks.
+    # S4U needs an elevated session (Register-ScheduledTask otherwise fails with
+    # access denied); Interactive works unelevated but only while the operator
+    # is logged on. publish-stock-release.ps1, switch-stock-release.ps1 and the
+    # tunnel reinstall gate must all answer this the same way, or the gate would
+    # compare the registered principal against a value no caller would register.
+    [CmdletBinding()]
+    param()
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    if (([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        return 'S4U'
+    }
+    return 'Interactive'
 }
 
 function Assert-StockReleaseId {
@@ -162,11 +203,18 @@ function Get-StockReleaseRetentionPlan {
     # directory retention is about to delete.
     #
     # TunnelRelease is the release the shared-peer tunnel's supervisor,
-    # background host and ssh client are ACTUALLY executing out of (see
-    # release-state.json's tunnel_release). It is pinned unconditionally: after
-    # a run of consecutive skipped publishes it is neither the active nor the
-    # previous release, and without this pin the {active, previous} + fill-to-N
-    # policy deletes the live tunnel's own tree.
+    # background host and ssh client are currently executing out of, i.e. the
+    # one it was last really installed from (see release-state.json's
+    # tunnel_release). It is pinned unconditionally: after a run of consecutive
+    # skipped publishes it is neither the active nor the previous release, and
+    # without this pin the {active, previous} + fill-to-N policy deletes the
+    # live tunnel's own tree.
+    #
+    # A pinned name that does not correspond to an existing release directory is
+    # ignored rather than kept: a phantom pin (a release already pruned by hand,
+    # or a stale id in release-state.json) would otherwise consume one of the
+    # Max(2, RetainCount) slots and silently evict one more real release than
+    # the retention policy intends.
     [CmdletBinding()]
     param(
         [string[]]$ReleaseNames = @(),
@@ -176,8 +224,12 @@ function Get-StockReleaseRetentionPlan {
         [int]$RetainCount = 3
     )
     $keep = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $known = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @($ReleaseNames)) {
+        if ($name) { [void]$known.Add([string]$name) }
+    }
     foreach ($pinned in $ActiveRelease, $PreviousRelease, $TunnelRelease) {
-        if ($pinned) { [void]$keep.Add([string]$pinned) }
+        if ($pinned -and $known.Contains([string]$pinned)) { [void]$keep.Add([string]$pinned) }
     }
     foreach ($name in @($ReleaseNames)) {
         if (-not $name) { continue }
@@ -193,6 +245,22 @@ function Get-StockReleaseRetentionPlan {
     }
 }
 
+function Get-StockReleaseDirectoryName {
+    # The release directories retention is allowed to consider, newest first.
+    # Releases that never activated successfully are renamed to "<id>.failed"
+    # by the publish script's rollback path; they are excluded here so the
+    # retention policy only ever considers releases that were actually
+    # activated, not a crash-looping publish's leftovers.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$PlatformRoot)
+    $layout = Get-StockReleaseLayout -PlatformRoot $PlatformRoot
+    if (-not (Test-Path -LiteralPath $layout.ReleasesRoot -PathType Container)) { return @() }
+    return @(Get-ChildItem -LiteralPath $layout.ReleasesRoot -Directory -Force |
+        Where-Object { $_.Name -notlike '.staging-*' -and $_.Name -notlike '*.failed' } |
+        Sort-Object LastWriteTimeUtc -Descending |
+        ForEach-Object { $_.Name })
+}
+
 function Get-StockReleaseRetentionState {
     # The I/O half of the retention decision: which release directories exist
     # (newest first, excluding staging and "<id>.failed" leftovers) and which
@@ -202,19 +270,8 @@ function Get-StockReleaseRetentionState {
         [Parameter(Mandatory)][string]$PlatformRoot,
         [int]$RetainCount = 3
     )
-    $layout = Get-StockReleaseLayout -PlatformRoot $PlatformRoot
     $state = Get-StockReleaseState -PlatformRoot $PlatformRoot
-    $names = @()
-    if (Test-Path -LiteralPath $layout.ReleasesRoot -PathType Container) {
-        # Releases that never activated successfully are renamed to "<id>.failed"
-        # by the publish script's rollback path; exclude them here so the
-        # retention policy only ever considers releases that were actually
-        # activated, not a crash-looping publish's leftovers.
-        $names = @(Get-ChildItem -LiteralPath $layout.ReleasesRoot -Directory -Force |
-            Where-Object { $_.Name -notlike '.staging-*' -and $_.Name -notlike '*.failed' } |
-            Sort-Object LastWriteTimeUtc -Descending |
-            ForEach-Object { $_.Name })
-    }
+    $names = @(Get-StockReleaseDirectoryName -PlatformRoot $PlatformRoot)
     $read = {
         param($Name)
         if ($state.PSObject.Properties[$Name]) { [string]$state.$Name } else { '' }
@@ -332,16 +389,32 @@ function Test-StockReleaseIntegrity {
 # question and nothing else.
 #
 # IMPORTANT consequence of a 'skip': the supervisor process, the background
-# host executable and the ssh client keep running out of the PREVIOUS release
-# directory until the next real restart (a code change, a tunnel fault, the
-# 2-minute supervising trigger after a drop, or a reboot). That release is
-# therefore pinned, not merely assumed to survive: every real reinstall records
-# it as `tunnel_release` in release-state.json, Get-StockReleaseRetentionPlan
-# keeps that release unconditionally, and the gate below refuses to skip when
-# tunnel_release is unknown, no longer on disk, or not in the retained set. A
-# skip can never outlive the directory it is running from. It is still not a
-# licence to delete a release directory by hand while its tunnel supervisor is
-# attached to it.
+# host executable and the ssh client keep running out of the release they were
+# LAST INSTALLED FROM (release-state.json's `tunnel_release`) until the next
+# real restart. But the registered task action is
+# <PlatformRoot>\current\scripts\windows\bin\stock-background-host.exe, so that
+# restart -- a tunnel fault plus the 2-minute supervising trigger, a logon, a
+# reboot -- RELAUNCHES FROM `current`, i.e. from the active release, without
+# writing anything to release-state.json. `tunnel_release` is therefore "last
+# installed from", never "will run from next".
+#
+# Two consequences are handled below:
+#   * a skip requires the new tree to be byte-identical to BOTH the pinned tree
+#     (what the live process came from) AND the `current` junction's tree (what
+#     the next relaunch will come from). Comparing only the pin would let a
+#     relaunch silently adopt code the gate never compared;
+#   * when the tunnel's supervised run started after the active release was
+#     published, the running process demonstrably came from `current`, so
+#     Get-StockTunnelPinRefresh moves the pin forward to the active release.
+#
+# The pinned release is not merely assumed to survive: every real reinstall
+# records it as `tunnel_release`, Get-StockReleaseRetentionPlan keeps it
+# unconditionally, and the gate below independently re-derives the retained set
+# from the release directories plus the {active, previous} pins ONLY and
+# refuses to skip when tunnel_release is unknown, no longer on disk, or outside
+# that set. That independent check also bounds how far the live tunnel may drift
+# behind `current`. It is still not a licence to delete a release directory by
+# hand while its tunnel supervisor is attached to it.
 #
 # The file list is the transitive closure of the tunnel's execution chain, and
 # Get-StockTunnelExecutionChainFile below re-derives it by parsing that chain
@@ -411,13 +484,43 @@ $script:StockTunnelChainEntryPoints = @(
 # stored or logged; the resolved values themselves are not.
 $script:StockTunnelSshTargetKey = 'config:owner_tunnel_ssh_target'
 
-# Presence-only: recorded as 'present'/'missing' rather than hashed. A release
-# that does not carry the host executable at all must never be allowed to skip,
-# because the next scheduled launch resolves through the `current` junction and
-# would find nothing to run.
+# Synthetic hash-set entry for the PowerShell host baked into the registered
+# task action. Get-InstalledPowerShell (background-process.psm1) falls back to
+# the Appx package when no MSI PowerShell is installed, which bakes a
+# version-pinned
+# C:\Program Files\WindowsApps\Microsoft.PowerShell_<version>_x64__<id>\pwsh.exe
+# into the action; the Store removes that directory when it updates PowerShell,
+# and only a reinstall re-resolves it. Hashing the path this publish WOULD
+# register against the one the task actually carries forces that reinstall.
+$script:StockTunnelTaskHostShellKey = 'config:task_host_pwsh'
+
+# Synthetic hash-set entry for the task principal. install-shared-tunnel-task.ps1
+# registers New-ScheduledTaskPrincipal -UserId <user> -LogonType <S4U|Interactive>,
+# chosen at publish time from the session's elevation; a skip never re-registers
+# it, so the gate compares the principal this publish would register against the
+# one the registered task carries.
+$script:StockTunnelTaskPrincipalKey = 'config:tunnel_task_principal'
+
+# Keys in the hash set that do not come from a release tree. They are compared
+# against the values recorded at the last real reinstall, never against the
+# `current` junction's tree (which says nothing about them).
+$script:StockTunnelSyntheticKeyPrefix = 'config:'
+
+# Presence-only: the background host executable is not hashed (csc.exe embeds a
+# fresh module GUID, so two builds of identical sources differ byte for byte).
+# It is recorded through build-background-task-host.ps1's build receipt instead
+# -- see Get-StockTunnelHostBuildEvidence -- which is deterministic for
+# deterministic sources and, unlike bare presence, cannot be satisfied by a
+# truncated or stale copy. A release that does not carry the host executable at
+# all must never be allowed to skip, because the next scheduled launch resolves
+# through the `current` junction and would find nothing to run.
 $script:StockTunnelPresenceOnlyFiles = @(
     'scripts\windows\bin\stock-background-host.exe'
 )
+
+# Values that are never evidence of an unchanged input, even when both trees
+# report the same one.
+$script:StockTunnelNeverEqualValues = @('missing', 'unresolved', 'receipt_mismatch')
 
 function Get-StockTunnelAffectingFile {
     [CmdletBinding()]
@@ -432,6 +535,46 @@ function Get-StockTunnelPresenceOnlyFile {
     [CmdletBinding()]
     param()
     return @($script:StockTunnelPresenceOnlyFiles)
+}
+
+function Resolve-StockTunnelChainExpandableString {
+    # PURE. An expandable string such as "$PSScriptRoot\shared-tunnel-profiles.psm1"
+    # or "$repository\scripts\shared-peer\$name.ps1" is part of the execution
+    # chain exactly as much as a plain literal, but it is not a
+    # StringConstantExpressionAst, so a walk that only visits constants would
+    # never see it -- the parsed chain would still equal the declared list,
+    # test-stock-release-safety.ps1 would pass, and the gate would silently
+    # under-detect a change to that file. That is precisely the failure this
+    # parser exists to prevent.
+    #
+    # Only an explicitly enumerated set of root variables can be resolved
+    # statically: $PSScriptRoot (the directory of the file that mentions it) and
+    # the repository-root names used on this chain. Anything else -- a loop
+    # variable, an environment variable, a computed name -- is an unresolvable
+    # chain element, and this throws so the omission is loud rather than silent.
+    # Returns $null for an expandable string that does not name a script, module
+    # or C# source at all.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Relative
+    )
+    if ($Text -notmatch '\.(ps1|psm1|cs|exe)$') { return $null }
+    $parent = Split-Path -Parent $Relative
+    $resolved = $Text
+    foreach ($reference in [regex]::Matches($Text, '\$\{?([A-Za-z_][A-Za-z0-9_:]*)\}?')) {
+        $name = $reference.Groups[1].Value
+        $replacement = $null
+        if ($name -ieq 'PSScriptRoot') { $replacement = $parent }
+        elseif ($name -imatch '^(repository|repositoryRoot|root|runtimeRoot|releaseRoot|source|sourceRoot)$') { $replacement = '' }
+        if ($null -eq $replacement) {
+            throw ("Tunnel execution chain file '$Relative' references '$Text', whose variable `$$name cannot be " +
+                'resolved statically. Use a plain string literal for the path, or teach ' +
+                'Resolve-StockTunnelChainExpandableString about that variable, so the reinstall gate can see the file.')
+        }
+        $resolved = $resolved.Replace($reference.Value, $replacement)
+    }
+    return $resolved.TrimStart('\')
 }
 
 function Get-StockTunnelExecutionChainFile {
@@ -455,14 +598,19 @@ function Get-StockTunnelExecutionChainFile {
     # Returns Hashed/PresenceOnly/All so a test can assert equality with
     # $script:StockTunnelAffectingFiles.
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$RuntimeRoot)
+    param(
+        [Parameter(Mandatory)][string]$RuntimeRoot,
+        # Test seam: the chain's roots. Defaults to the real entry points.
+        [string[]]$EntryPoint = @()
+    )
     $root = [IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
     $binPrefix = 'scripts\windows\bin\'
+    $entryPoints = if (@($EntryPoint).Count -gt 0) { @($EntryPoint) } else { @($script:StockTunnelChainEntryPoints) }
     $hashed = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $presence = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $queue = [Collections.Generic.Queue[string]]::new()
-    foreach ($seed in $script:StockTunnelChainEntryPoints) {
+    foreach ($seed in $entryPoints) {
         if ($seen.Add($seed)) { $queue.Enqueue($seed) }
     }
     while ($queue.Count -gt 0) {
@@ -480,11 +628,18 @@ function Get-StockTunnelExecutionChainFile {
             throw "Could not parse tunnel execution chain file $relative`: $(@($parseErrors)[0].Message)"
         }
         $literals = @($ast.FindAll({
-            param($node) $node -is [Management.Automation.Language.StringConstantExpressionAst]
+            param($node)
+            $node -is [Management.Automation.Language.StringConstantExpressionAst] -or
+            $node -is [Management.Automation.Language.ExpandableStringExpressionAst]
         }, $true))
         $parent = Split-Path -Parent $relative
         foreach ($literal in $literals) {
-            $value = [string]$literal.Value
+            if ($literal -is [Management.Automation.Language.ExpandableStringExpressionAst]) {
+                $value = Resolve-StockTunnelChainExpandableString -Text ([string]$literal.Value) -Relative $relative
+                if ($null -eq $value) { continue }
+            } else {
+                $value = [string]$literal.Value
+            }
             if ($value -notmatch '\.(ps1|psm1|cs|exe)$') { continue }
             if ($value -match '[*?"<>|]') { continue }
             if ($value -match '^[A-Za-z]:' -or $value.StartsWith('\\')) { continue }
@@ -536,6 +691,201 @@ function Get-StockTunnelTaskActionPlacement {
     return 'yes'
 }
 
+function Get-StockTunnelTaskActionPath {
+    # PURE. Every absolute path the registered action names: the Execute binary
+    # plus every quoted token in Arguments that is an absolute Windows path.
+    # These are the paths Task Scheduler will actually try to launch or hand to
+    # the host, and only a reinstall re-resolves them -- which matters because
+    # Get-InstalledPowerShell bakes a version-pinned
+    # C:\Program Files\WindowsApps\Microsoft.PowerShell_<version>_..._x64\pwsh.exe
+    # into the action on a host with no MSI PowerShell, and the Store deletes
+    # that directory when it updates PowerShell. The caller tests existence;
+    # this function only says which paths must exist.
+    [CmdletBinding()]
+    param([string]$Execute = '', [string]$Arguments = '')
+    $paths = [Collections.Generic.List[string]]::new()
+    $collect = {
+        param($Value)
+        $text = ([string]$Value).Trim()
+        if ($text.StartsWith('"') -and $text.EndsWith('"') -and $text.Length -ge 2) {
+            $text = $text.Substring(1, $text.Length - 2)
+        }
+        if (-not $text) { return }
+        if ($text -match '^[A-Za-z]:\\' -or $text.StartsWith('\\')) { [void]$paths.Add($text) }
+    }
+    & $collect $Execute
+    foreach ($match in [regex]::Matches([string]$Arguments, '"([^"]*)"')) {
+        & $collect $match.Groups[1].Value
+    }
+    return @($paths)
+}
+
+function Get-StockTunnelTaskActionShell {
+    # PURE. The PowerShell host the registered action launches: the first quoted
+    # token in Arguments naming pwsh.exe / powershell.exe. Empty when the action
+    # names none, which the decision treats as unresolved, i.e. a change.
+    [CmdletBinding()]
+    param([string]$Arguments = '')
+    foreach ($match in [regex]::Matches([string]$Arguments, '"([^"]*)"')) {
+        $value = $match.Groups[1].Value
+        if ($value -match '(?i)(^|[\\/])(pwsh|powershell)\.exe$') { return $value }
+    }
+    return ''
+}
+
+function Get-StockTunnelPathHash {
+    # PURE. SHA-256 of a normalized (lower-cased, trailing-separator-free) path,
+    # or 'unresolved' for an empty one. The decision compares hashes
+    # case-insensitively anyway; normalizing here keeps a differently-cased but
+    # identical path from reading as a rotation.
+    [CmdletBinding()]
+    param([string]$Path = '')
+    $text = ([string]$Path).Trim().TrimEnd('\')
+    if (-not $text) { return 'unresolved' }
+    return Get-StockTextSha256 -Text $text.ToLowerInvariant()
+}
+
+function Get-StockTunnelTaskPrincipalHash {
+    # PURE. SHA-256 over the scheduled task principal (LogonType + UserId)
+    # either a (re)install would register or a registered task already carries.
+    # The user name is compared bare: Get-ScheduledTask may report
+    # '<COMPUTER>\brave' where New-ScheduledTaskPrincipal was given '$env:USERNAME'.
+    [CmdletBinding()]
+    param([string]$LogonType = '', [string]$UserId = '')
+    $logon = ([string]$LogonType).Trim()
+    $user = ([string]$UserId).Trim()
+    if ($user.Contains('\')) { $user = $user.Substring($user.LastIndexOf('\') + 1) }
+    if (-not $logon -or -not $user) { return 'unresolved' }
+    return Get-StockTextSha256 -Text ('logon=' + $logon.ToLowerInvariant() + "`nuser=" + $user.ToLowerInvariant())
+}
+
+function Get-StockReleaseStamp {
+    # PURE. The timestamp embedded in a release id
+    # (yyyyMMddTHHmmss-<short head>-clean|dirty), as a round-trip ('o') local
+    # timestamp; '' when the id carries none (hand-made ids, test fixtures).
+    [CmdletBinding()]
+    param([string]$ReleaseId = '')
+    $match = [regex]::Match([string]$ReleaseId, '^(\d{8})T(\d{6})')
+    if (-not $match.Success) { return '' }
+    [datetime]$parsed = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact(($match.Groups[1].Value + $match.Groups[2].Value), 'yyyyMMddHHmmss',
+            [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+        return ''
+    }
+    return ([DateTimeOffset]::new($parsed, [TimeZoneInfo]::Local.GetUtcOffset($parsed))).ToString('o')
+}
+
+function Get-StockTunnelPinRefresh {
+    # PURE. release-state.json's tunnel_release records where the tunnel was
+    # LAST INSTALLED FROM. The registered task action is
+    # <PlatformRoot>\current\..., so every relaunch -- the 2-minute supervising
+    # trigger after a drop, a logon, a reboot -- starts the tunnel from whatever
+    # `current` resolves to at that moment, i.e. the active release, and writes
+    # nothing to release-state.json. When the supervised run started at or after
+    # the active release was published, the live process demonstrably came from
+    # `current`, so the pin is refreshed to the active release; anything else
+    # leaves the recorded pin alone (an unreadable start time is not evidence).
+    [CmdletBinding()]
+    param(
+        [string]$PinnedRelease = '',
+        [string]$ActiveRelease = '',
+        # Round-trip timestamp of the active release (its id stamp, or the
+        # release directory's creation time when the id carries none).
+        [string]$ActiveReleaseStamp = '',
+        # The runtime state file's started_at for the tunnel service.
+        [string]$RuntimeStartedAt = ''
+    )
+    $unchanged = {
+        param($Reason)
+        [pscustomobject]@{ Release = [string]$PinnedRelease; Refreshed = $false; Reason = [string]$Reason }
+    }
+    if (-not $PinnedRelease) { return (& $unchanged 'no_pin') }
+    if (-not $ActiveRelease) { return (& $unchanged 'no_active_release') }
+    if (([string]$ActiveRelease).Equals([string]$PinnedRelease, [StringComparison]::OrdinalIgnoreCase)) {
+        return (& $unchanged 'pin_is_active_release')
+    }
+    [DateTimeOffset]$startedAt = [DateTimeOffset]::MinValue
+    if (-not $RuntimeStartedAt -or -not [DateTimeOffset]::TryParse($RuntimeStartedAt,
+            [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$startedAt)) {
+        return (& $unchanged 'runtime_start_unknown')
+    }
+    [DateTimeOffset]$activeAt = [DateTimeOffset]::MinValue
+    if (-not $ActiveReleaseStamp -or -not [DateTimeOffset]::TryParse($ActiveReleaseStamp,
+            [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$activeAt)) {
+        return (& $unchanged 'active_release_time_unknown')
+    }
+    if ($startedAt -ge $activeAt) {
+        return [pscustomobject]@{
+            Release = [string]$ActiveRelease
+            Refreshed = $true
+            Reason = 'runtime_started_after_active_release'
+        }
+    }
+    return (& $unchanged 'runtime_predates_active_release')
+}
+
+function Get-StockTunnelHostBuildEvidence {
+    # The value recorded for the presence-only background host executable.
+    # Hashing the executable itself is impossible (csc.exe embeds a fresh module
+    # GUID per build) and bare presence is too weak: with -SkipTests
+    # build-background-task-host.ps1 never runs while Copy-DirectorySnapshot
+    # still copies whatever sits in the source tree's bin, so a truncated or
+    # stale executable would pass as 'present'. build-background-task-host.ps1
+    # therefore writes <name>.build.json next to it (input SHA-256s + output
+    # length), which IS deterministic for deterministic sources.
+    #
+    #   'missing'          the executable is not in this tree
+    #   'present'          it is there but carries no build receipt (a release
+    #                      published before the receipt existed)
+    #   'receipt_mismatch' the receipt disagrees with the file on disk, or is
+    #                      unreadable -- never equal to anything
+    #   'receipt:<sha256>' SHA-256 of the receipt's bytes
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RuntimeRoot,
+        [Parameter(Mandatory)][string]$Relative
+    )
+    $path = Join-Path $RuntimeRoot $Relative
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return 'missing' }
+    $receiptPath = [IO.Path]::ChangeExtension($path, '.build.json')
+    if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) { return 'present' }
+    try {
+        $bytes = [IO.File]::ReadAllBytes($receiptPath)
+        $receipt = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
+        if (-not $receipt -or -not $receipt.PSObject.Properties['output_length']) { return 'receipt_mismatch' }
+        if ([int64]$receipt.output_length -ne (Get-Item -LiteralPath $path -Force).Length) { return 'receipt_mismatch' }
+        return 'receipt:' + (Get-StockBytesSha256 -Bytes $bytes)
+    } catch {
+        return 'receipt_mismatch'
+    }
+}
+
+function Resolve-StockTunnelHostBuildComparison {
+    # PURE. A release published before build-background-task-host.ps1 wrote a
+    # build receipt reports 'present', and there is nothing for a receipt to be
+    # compared against, so both sides degrade to presence -- but ONLY when the
+    # OLD tree is the one without the receipt. A NEW tree that lost its receipt
+    # is a regression and is never excused.
+    [CmdletBinding()]
+    param([string]$CurrentValue = '', [string]$NewValue = '')
+    $current = [string]$CurrentValue
+    $new = [string]$NewValue
+    if ($current -eq 'present' -and $new.StartsWith('receipt:', [StringComparison]::OrdinalIgnoreCase)) {
+        $new = 'present'
+    }
+    return [pscustomobject]@{ Current = $current; New = $new }
+}
+
+function Test-StockTunnelHashChanged {
+    # PURE. The single comparison rule, used for both baselines (the pinned tree
+    # and the `current` junction's tree) so they can never drift apart.
+    [CmdletBinding()]
+    param([string]$CurrentValue = '', [string]$NewValue = '')
+    $pair = Resolve-StockTunnelHostBuildComparison -CurrentValue $CurrentValue -NewValue $NewValue
+    if ($script:StockTunnelNeverEqualValues -contains $pair.New) { return $true }
+    return -not ([string]$pair.New).Equals([string]$pair.Current, [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-StockTunnelSshTargetHash {
     # SHA-256 over the resolved owner-tunnel SSH target (mode + destination +
     # connection arguments). Returns 'unresolved' when it cannot be computed,
@@ -550,11 +900,7 @@ function Get-StockTunnelSshTargetHash {
         $target = Resolve-OwnerTunnelSshTarget -RuntimeEnv $runtimeEnv -FallbackAlias $FallbackAlias -WarningAction SilentlyContinue
         $material = @([string]$target.Mode, [string]$target.Destination) +
             @(@($target.ConnectionArguments) | ForEach-Object { [string]$_ })
-        $sha = [Security.Cryptography.SHA256]::Create()
-        try {
-            $digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($material -join "`n")))
-            return ([BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
-        } finally { $sha.Dispose() }
+        return Get-StockTextSha256 -Text ($material -join "`n")
     } catch {
         return 'unresolved'
     }
@@ -578,8 +924,7 @@ function Get-StockTunnelFileHash {
         }
     }
     foreach ($relative in $script:StockTunnelPresenceOnlyFiles) {
-        $path = Join-Path $RuntimeRoot $relative
-        $hashes[$relative] = if (Test-Path -LiteralPath $path -PathType Leaf) { 'present' } else { 'missing' }
+        $hashes[$relative] = Get-StockTunnelHostBuildEvidence -RuntimeRoot $RuntimeRoot -Relative $relative
     }
     return $hashes
 }
@@ -592,6 +937,13 @@ function Get-StockTunnelReinstallDecision {
     param(
         [hashtable]$CurrentHashes = @{},
         [hashtable]$NewHashes = @{},
+        # The `current` junction's tree, i.e. the tree the tunnel's NEXT
+        # relaunch will start from (the registered action points at
+        # <PlatformRoot>\current). It differs from CurrentHashes as soon as one
+        # publish has skipped, and a skip is only safe when the new tree is
+        # byte-identical to both. Synthetic 'config:' entries are excluded: they
+        # describe the installed task and the resolved SSH identity, not a tree.
+        [hashtable]$JunctionHashes = @{},
         [string]$TaskState = '',
         [string]$RuntimeStatus = '',
         [string]$RemoteHealthStatus = '',
@@ -600,10 +952,14 @@ function Get-StockTunnelReinstallDecision {
         [string]$TunnelReleaseState = '',
         # 'yes' only when the registered task action runs out of
         # <PlatformRoot>\current\ (see Get-StockTunnelTaskActionPlacement).
-        [string]$TaskActionUnderCurrent = ''
+        [string]$TaskActionUnderCurrent = '',
+        # 'ok' only when every absolute path the registered action names still
+        # exists (see Get-StockTunnelTaskActionPath).
+        [string]$TaskActionPathState = ''
     )
     if ($null -eq $CurrentHashes) { $CurrentHashes = @{} }
     if ($null -eq $NewHashes) { $NewHashes = @{} }
+    if ($null -eq $JunctionHashes) { $JunctionHashes = @{} }
     $names = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($key in $CurrentHashes.Keys) { [void]$names.Add([string]$key) }
     foreach ($key in $NewHashes.Keys) { [void]$names.Add([string]$key) }
@@ -614,18 +970,35 @@ function Get-StockTunnelReinstallDecision {
         # A file missing from the new release is always a change: the tunnel
         # must never be left running against a tree that no longer carries the
         # code it is supposed to execute. 'unresolved' is the same for the
-        # synthetic SSH-target entry: an identity we could not read is never
-        # evidence that the identity is unchanged.
-        if ($newValue -eq 'missing' -or $newValue -eq 'unresolved' -or
-            -not $newValue.Equals($currentValue, [StringComparison]::OrdinalIgnoreCase)) {
-            $changed += $name
+        # synthetic entries (SSH target, task host pwsh, task principal): an
+        # input we could not read is never evidence that it is unchanged.
+        if (Test-StockTunnelHashChanged -CurrentValue $currentValue -NewValue $newValue) { $changed += $name }
+    }
+    # Second baseline: the tree a relaunch would pick up through `current`.
+    $junctionNames = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($key in $JunctionHashes.Keys) {
+        if (-not ([string]$key).StartsWith($script:StockTunnelSyntheticKeyPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            [void]$junctionNames.Add([string]$key)
         }
+    }
+    foreach ($key in $NewHashes.Keys) {
+        if (-not ([string]$key).StartsWith($script:StockTunnelSyntheticKeyPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            [void]$junctionNames.Add([string]$key)
+        }
+    }
+    $junctionChanged = @()
+    foreach ($name in $junctionNames) {
+        $junctionValue = if ($JunctionHashes.ContainsKey($name)) { [string]$JunctionHashes[$name] } else { 'missing' }
+        $newValue = if ($NewHashes.ContainsKey($name)) { [string]$NewHashes[$name] } else { 'missing' }
+        if (Test-StockTunnelHashChanged -CurrentValue $junctionValue -NewValue $newValue) { $junctionChanged += $name }
     }
     $reasons = @()
     # No hashes at all means no comparable current release (first publish, or
     # a caller that could not resolve the running tree): reinstall.
     if ($names.Count -eq 0) { $reasons += 'no_tunnel_files_hashed' }
     if ($changed.Count -gt 0) { $reasons += 'tunnel_files_changed' }
+    if ($JunctionHashes.Count -eq 0) { $reasons += 'no_junction_files_hashed' }
+    elseif ($junctionChanged.Count -gt 0) { $reasons += 'current_junction_files_changed' }
     if ($TaskState -ne 'Running') { $reasons += 'task_not_running' }
     if ($RuntimeStatus -ne 'healthy') { $reasons += 'runtime_state_not_healthy' }
     if ($RemoteHealthStatus -ne '200') { $reasons += 'remote_health_not_200' }
@@ -639,6 +1012,10 @@ function Get-StockTunnelReinstallDecision {
         default { $reasons += 'tunnel_release_unknown' }
     }
     if ($TaskActionUnderCurrent -ne 'yes') { $reasons += 'task_action_not_under_current' }
+    # A version-pinned WindowsApps pwsh.exe that the Store has since removed
+    # leaves an action Task Scheduler can no longer launch; only a reinstall
+    # re-resolves it.
+    if ($TaskActionPathState -ne 'ok') { $reasons += 'task_action_path_missing' }
     $currentOrdered = [ordered]@{}
     $newOrdered = [ordered]@{}
     foreach ($name in $names) {
@@ -649,11 +1026,13 @@ function Get-StockTunnelReinstallDecision {
         decision = if ($reasons.Count -eq 0) { 'skip' } else { 'reinstall' }
         reasons = $reasons
         changed_files = $changed
+        junction_changed_files = $junctionChanged
         task_state = $TaskState
         runtime_status = $RuntimeStatus
         remote_health_status = $RemoteHealthStatus
         tunnel_release_state = $TunnelReleaseState
         task_action_under_current = $TaskActionUnderCurrent
+        task_action_path_state = $TaskActionPathState
         current_hashes = $currentOrdered
         new_hashes = $newOrdered
     }
@@ -682,12 +1061,17 @@ function Invoke-StockTunnelRemoteHealthProbe {
 function Resolve-StockTunnelReinstallPlan {
     # Collects the observations and hands them to the pure decision.
     #
-    # The comparison tree is the release the tunnel is REALLY running from
-    # (release-state.json's tunnel_release), not `current`. Those differ by
-    # construction as soon as one publish skips, and comparing against `current`
-    # is only equivalent while the file list never changes: R1->R2 having been
-    # judged identical under yesterday's list says nothing about R1 == R2 under
-    # a list that has since gained a file.
+    # TWO comparison trees, because a skip has two futures to answer for:
+    #   * the release the live tunnel processes were last installed from
+    #     (release-state.json's tunnel_release) -- the code running right now;
+    #   * the `current` junction's tree -- the code the NEXT relaunch starts
+    #     from, because the registered task action is
+    #     <PlatformRoot>\current\scripts\windows\bin\stock-background-host.exe.
+    # Those diverge by construction as soon as one publish skips. Comparing only
+    # `current` says nothing about the running process under a file list that
+    # has since gained a file; comparing only the pin says nothing about the
+    # tree the 2-minute supervising trigger picks up after the next drop. A skip
+    # requires byte-equality against both.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$PlatformRoot,
@@ -704,23 +1088,69 @@ function Resolve-StockTunnelReinstallPlan {
         [string]$TaskName = 'trading-hareness-shared-peer-tunnels',
         [string]$SshAlias = 'lightServer1',
         [int]$RemoteApiPort = 15681,
+        # The principal a (re)install by THIS caller would register. Defaults to
+        # what publish/switch derive from the session, so a diagnostic run
+        # compares against the same thing a real publish would.
+        [string]$TaskLogonType = '',
+        [string]$TaskUserId = '',
         # Test seams. Both default to the real scheduler / real SSH probe; the
         # contract test injects them so it can drive this function (not just the
         # pure decision) against a temporary platform root without a scheduled
         # task or a network. ScheduledTaskProvider receives the task name and
-        # returns $null or an object with State/Execute/Arguments;
-        # RemoteHealthProbe returns the HTTP status text.
+        # returns $null or an object with State/Execute/Arguments (optionally
+        # LogonType/UserId); RemoteHealthProbe returns the HTTP status text.
         [scriptblock]$ScheduledTaskProvider = $null,
         [scriptblock]$RemoteHealthProbe = $null
     )
     $platform = [IO.Path]::GetFullPath($PlatformRoot).TrimEnd('\')
-    $state = Get-StockReleaseState -PlatformRoot $platform
-    if (-not $TunnelReleaseId -and $state.PSObject.Properties['tunnel_release']) {
-        $TunnelReleaseId = [string]$state.tunnel_release
+    $layout = Get-StockReleaseLayout -PlatformRoot $platform
+    $releaseState = Get-StockReleaseState -PlatformRoot $platform
+    $readState = {
+        param($Name)
+        if ($releaseState -and $releaseState.PSObject.Properties[$Name]) { [string]$releaseState.$Name } else { '' }
     }
-    if (-not $TunnelSshTargetSha256 -and $state.PSObject.Properties['tunnel_ssh_target_sha256']) {
-        $TunnelSshTargetSha256 = [string]$state.tunnel_ssh_target_sha256
+    if (-not $TunnelReleaseId) { $TunnelReleaseId = & $readState 'tunnel_release' }
+    if (-not $TunnelSshTargetSha256) { $TunnelSshTargetSha256 = & $readState 'tunnel_ssh_target_sha256' }
+    if (-not $TaskLogonType) { $TaskLogonType = Get-StockScheduledTaskLogonType }
+    if (-not $TaskUserId) { $TaskUserId = [string]$env:USERNAME }
+    $activeRelease = & $readState 'active_release'
+    $previousRelease = & $readState 'previous_release'
+
+    # The tunnel's own runtime state, read before anything else needs it: its
+    # status is one observation, and its started_at is what tells us whether the
+    # live process really came from the pinned release or from `current`.
+    $runtimeStatus = 'missing'
+    $runtimeStartedAt = ''
+    $runtimeStatePath = Join-Path $platform 'logs\runtime\shared-peer-tunnels.current.json'
+    if (Test-Path -LiteralPath $runtimeStatePath -PathType Leaf) {
+        try {
+            $runtimeState = Get-Content -LiteralPath $runtimeStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $runtimeStatus = if ($runtimeState -and $runtimeState.PSObject.Properties['status']) { [string]$runtimeState.status } else { 'unknown' }
+            if ($runtimeState -and $runtimeState.PSObject.Properties['started_at']) { $runtimeStartedAt = [string]$runtimeState.started_at }
+        } catch { $runtimeStatus = 'unreadable' }
     }
+
+    # tunnel_release is "last installed from". Every relaunch starts from
+    # `current`, so when the supervised run began at or after the active release
+    # was published, the pin is stale and the active release is what the tunnel
+    # is really executing.
+    $activeStamp = Get-StockReleaseStamp -ReleaseId $activeRelease
+    if (-not $activeStamp -and $activeRelease) {
+        $activeDir = Join-Path $layout.ReleasesRoot $activeRelease
+        if (Test-Path -LiteralPath $activeDir -PathType Container) {
+            $activeStamp = ([DateTimeOffset](Get-Item -LiteralPath $activeDir -Force).CreationTime).ToString('o')
+        }
+    }
+    $pinRefresh = Get-StockTunnelPinRefresh -PinnedRelease $TunnelReleaseId -ActiveRelease $activeRelease `
+        -ActiveReleaseStamp $activeStamp -RuntimeStartedAt $runtimeStartedAt
+    $TunnelReleaseId = [string]$pinRefresh.Release
+
+    # Deliberately NOT Get-StockReleaseRetentionState: that reads tunnel_release
+    # out of the same state file and pins it unconditionally, so the keep set
+    # would always contain the id being checked and tunnel_release_not_retained
+    # could never fire. The retained set here is derived from the release
+    # directories plus the {active, previous} pins ONLY, which also bounds how
+    # far behind `current` a chain of skips may leave the live tunnel.
     $tunnelReleaseState = 'unknown'
     $tunnelRuntimeRoot = $CurrentRuntimeRoot
     if ($TunnelReleaseId) {
@@ -731,8 +1161,9 @@ function Resolve-StockTunnelReinstallPlan {
             $tunnelReleaseState = 'missing'
             $tunnelRuntimeRoot = ''
         } else {
-            $retention = Get-StockReleaseRetentionState -PlatformRoot $platform -RetainCount $RetainCount
-            $retained = @($retention.Keep) | Where-Object { $_ -and ([string]$_).Equals($TunnelReleaseId, [StringComparison]::OrdinalIgnoreCase) }
+            $independent = Get-StockReleaseRetentionPlan -ReleaseNames (Get-StockReleaseDirectoryName -PlatformRoot $platform) `
+                -ActiveRelease $activeRelease -PreviousRelease $previousRelease -RetainCount $RetainCount
+            $retained = @($independent.Keep) | Where-Object { $_ -and ([string]$_).Equals($TunnelReleaseId, [StringComparison]::OrdinalIgnoreCase) }
             if (@($retained).Count -eq 0) {
                 $tunnelReleaseState = 'not_retained'
                 $tunnelRuntimeRoot = ''
@@ -742,16 +1173,19 @@ function Resolve-StockTunnelReinstallPlan {
             }
         }
     }
+
     $newHashes = Get-StockTunnelFileHash -RuntimeRoot $NewRuntimeRoot
     $currentHashes = Get-StockTunnelFileHash -RuntimeRoot $tunnelRuntimeRoot
-    # The SSH identity is not in either tree; it is resolved now and compared
-    # against the value recorded at the last real reinstall.
-    $newHashes[$script:StockTunnelSshTargetKey] = Get-StockTunnelSshTargetHash -PlatformRoot $platform -FallbackAlias $SshAlias
-    if ($currentHashes.Count -gt 0) {
-        $currentHashes[$script:StockTunnelSshTargetKey] = if ($TunnelSshTargetSha256) { $TunnelSshTargetSha256 } else { 'missing' }
-    }
+    $junctionRoot = ''
+    try { $junctionRoot = [string](Get-StockCurrentReleaseTarget -PlatformRoot $platform) } catch { $junctionRoot = '' }
+    $junctionHashes = Get-StockTunnelFileHash -RuntimeRoot $junctionRoot
+
     $taskState = 'not_registered'
     $taskActionUnderCurrent = 'unknown'
+    $taskActionPathState = 'unknown'
+    $taskActionMissingPaths = @()
+    $registeredShell = ''
+    $registeredPrincipal = 'unresolved'
     try {
         $observed = if ($ScheduledTaskProvider) { & $ScheduledTaskProvider $TaskName } else {
             $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
@@ -760,22 +1194,44 @@ function Resolve-StockTunnelReinstallPlan {
                 State = [string]$task.State
                 Execute = if ($action) { [string]$action.Execute } else { '' }
                 Arguments = if ($action) { [string]$action.Arguments } else { '' }
+                LogonType = if ($task.Principal) { [string]$task.Principal.LogonType } else { '' }
+                UserId = if ($task.Principal) { [string]$task.Principal.UserId } else { '' }
             }
         }
         if ($observed) {
-            $taskState = [string]$observed.State
-            $taskActionUnderCurrent = Get-StockTunnelTaskActionPlacement -Execute ([string]$observed.Execute) `
-                -Arguments ([string]$observed.Arguments) -ExpectedPrefix (Join-Path $platform 'current')
+            $read = {
+                param($Name)
+                if ($observed.PSObject.Properties[$Name]) { [string]$observed.$Name } else { '' }
+            }
+            $taskState = & $read 'State'
+            $execute = & $read 'Execute'
+            $arguments = & $read 'Arguments'
+            $taskActionUnderCurrent = Get-StockTunnelTaskActionPlacement -Execute $execute `
+                -Arguments $arguments -ExpectedPrefix (Join-Path $platform 'current')
+            $actionPaths = @(Get-StockTunnelTaskActionPath -Execute $execute -Arguments $arguments)
+            if ($actionPaths.Count -gt 0) {
+                $taskActionMissingPaths = @($actionPaths | Where-Object { -not (Test-Path -LiteralPath $_) })
+                $taskActionPathState = if ($taskActionMissingPaths.Count -gt 0) { 'missing' } else { 'ok' }
+            }
+            $registeredShell = Get-StockTunnelTaskActionShell -Arguments $arguments
+            $registeredPrincipal = Get-StockTunnelTaskPrincipalHash -LogonType (& $read 'LogonType') -UserId (& $read 'UserId')
         }
     } catch { $taskState = 'not_registered' }
-    $runtimeStatus = 'missing'
-    $statePath = Join-Path ([IO.Path]::GetFullPath($PlatformRoot).TrimEnd('\')) 'logs\runtime\shared-peer-tunnels.current.json'
-    if (Test-Path -LiteralPath $statePath -PathType Leaf) {
-        try {
-            $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $runtimeStatus = if ($state -and $state.PSObject.Properties['status']) { [string]$state.status } else { 'unknown' }
-        } catch { $runtimeStatus = 'unreadable' }
+
+    # Synthetic entries: things the running tunnel depends on that live in no
+    # release tree. They are compared against the pinned side only (the
+    # `current` junction says nothing about them).
+    $newHashes[$script:StockTunnelSshTargetKey] = Get-StockTunnelSshTargetHash -PlatformRoot $platform -FallbackAlias $SshAlias
+    $resolvedShell = ''
+    try { $resolvedShell = [string](Get-InstalledPowerShell) } catch { $resolvedShell = '' }
+    $newHashes[$script:StockTunnelTaskHostShellKey] = Get-StockTunnelPathHash -Path $resolvedShell
+    $newHashes[$script:StockTunnelTaskPrincipalKey] = Get-StockTunnelTaskPrincipalHash -LogonType $TaskLogonType -UserId $TaskUserId
+    if ($currentHashes.Count -gt 0) {
+        $currentHashes[$script:StockTunnelSshTargetKey] = if ($TunnelSshTargetSha256) { $TunnelSshTargetSha256 } else { 'missing' }
+        $currentHashes[$script:StockTunnelTaskHostShellKey] = Get-StockTunnelPathHash -Path $registeredShell
+        $currentHashes[$script:StockTunnelTaskPrincipalKey] = $registeredPrincipal
     }
+
     # The SSH round trip is the only expensive observation, and it cannot
     # change a decision that is already 'reinstall'. Ask the pure function
     # first with the health condition satisfied; probe only if nothing else
@@ -783,10 +1239,12 @@ function Resolve-StockTunnelReinstallPlan {
     $observations = @{
         CurrentHashes = $currentHashes
         NewHashes = $newHashes
+        JunctionHashes = $junctionHashes
         TaskState = $taskState
         RuntimeStatus = $runtimeStatus
         TunnelReleaseState = $tunnelReleaseState
         TaskActionUnderCurrent = $taskActionUnderCurrent
+        TaskActionPathState = $taskActionPathState
     }
     $withoutProbe = Get-StockTunnelReinstallDecision @observations -RemoteHealthStatus '200'
     $health = 'not_probed'
@@ -799,13 +1257,19 @@ function Resolve-StockTunnelReinstallPlan {
         decision = $plan.decision
         reasons = $plan.reasons
         changed_files = $plan.changed_files
+        junction_changed_files = $plan.junction_changed_files
         task_state = $plan.task_state
         runtime_status = $plan.runtime_status
         remote_health_status = $plan.remote_health_status
         tunnel_release_state = $plan.tunnel_release_state
         task_action_under_current = $plan.task_action_under_current
+        task_action_path_state = $plan.task_action_path_state
+        task_action_missing_paths = @($taskActionMissingPaths)
         tunnel_release = $TunnelReleaseId
+        tunnel_release_pin_refreshed = [bool]$pinRefresh.Refreshed
+        tunnel_release_pin_reason = [string]$pinRefresh.Reason
         tunnel_runtime_root = $tunnelRuntimeRoot
+        junction_runtime_root = $junctionRoot
         current_hashes = $plan.current_hashes
         new_hashes = $plan.new_hashes
     }
@@ -815,12 +1279,14 @@ function Write-StockTunnelReinstallSkipEvent {
     # Only a skip is recorded: a reinstall is the pre-existing behaviour and
     # already leaves its own install/healthy events behind.
     #
-    # Callers must invoke this only AFTER activation and post-switch
-    # verification have succeeded. The documented acceptance check is "grep
-    # lifecycle-<date>.jsonl for tunnel_reinstall_skipped"; writing it before
-    # the switch would leave a skip receipt behind for a publish that then
-    # rolled back and unconditionally reinstalled the tunnel, i.e. a receipt
-    # the log itself contradicts.
+    # Callers must invoke this only AFTER activation, post-switch verification
+    # AND the release-state write have all succeeded -- in publish that means
+    # after `$activated = $true`, because everything before it is still on the
+    # rollback path. The documented acceptance check is "grep
+    # lifecycle-<date>.jsonl for tunnel_reinstall_skipped"; writing it earlier
+    # would leave a skip receipt behind for a publish that then rolled back and
+    # unconditionally reinstalled the tunnel, i.e. a receipt the log itself
+    # contradicts.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$PlatformRoot,
@@ -837,10 +1303,14 @@ function Write-StockTunnelReinstallSkipEvent {
                 remote_health_status = [string]$Plan.remote_health_status
                 tunnel_release = if ($Plan.PSObject.Properties['tunnel_release']) { [string]$Plan.tunnel_release } else { '' }
                 tunnel_release_state = [string]$Plan.tunnel_release_state
+                tunnel_release_pin_refreshed = if ($Plan.PSObject.Properties['tunnel_release_pin_refreshed']) { [bool]$Plan.tunnel_release_pin_refreshed } else { $false }
+                tunnel_release_pin_reason = if ($Plan.PSObject.Properties['tunnel_release_pin_reason']) { [string]$Plan.tunnel_release_pin_reason } else { '' }
                 task_action_under_current = [string]$Plan.task_action_under_current
+                task_action_path_state = if ($Plan.PSObject.Properties['task_action_path_state']) { [string]$Plan.task_action_path_state } else { '' }
                 current_hashes = $Plan.current_hashes
                 new_hashes = $Plan.new_hashes
                 changed_files = @($Plan.changed_files)
+                junction_changed_files = if ($Plan.PSObject.Properties['junction_changed_files']) { @($Plan.junction_changed_files) } else { @() }
             })
     } catch {
         # Observability must never fail a release.
@@ -855,15 +1325,28 @@ Export-ModuleMember -Function @(
     'Get-StockReleaseAppPath',
     'Get-StockCurrentReleaseTarget',
     'Set-StockCurrentRelease',
+    'Get-StockReleaseDirectoryName',
     'Get-StockReleaseRetentionPlan',
     'Get-StockReleaseRetentionState',
+    'Get-StockReleaseStamp',
+    'Get-StockScheduledTaskLogonType',
+    'Get-StockTextSha256',
     'Remove-ExpiredStockReleases',
     'Test-StockReleaseFileHashes',
     'Test-StockReleaseIntegrity',
     'Get-StockTunnelAffectingFile',
     'Get-StockTunnelPresenceOnlyFile',
     'Get-StockTunnelExecutionChainFile',
+    'Resolve-StockTunnelChainExpandableString',
     'Get-StockTunnelTaskActionPlacement',
+    'Get-StockTunnelTaskActionPath',
+    'Get-StockTunnelTaskActionShell',
+    'Get-StockTunnelTaskPrincipalHash',
+    'Get-StockTunnelPathHash',
+    'Get-StockTunnelPinRefresh',
+    'Get-StockTunnelHostBuildEvidence',
+    'Resolve-StockTunnelHostBuildComparison',
+    'Test-StockTunnelHashChanged',
     'Get-StockTunnelSshTargetHash',
     'Get-StockTunnelFileHash',
     'Get-StockTunnelReinstallDecision',

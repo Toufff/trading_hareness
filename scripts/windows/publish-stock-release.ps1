@@ -30,10 +30,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $source '.git') -PathType Container)
 Import-Module (Join-Path $source 'scripts\windows\stock-release-management.psm1') -Force
 
 if (-not $TaskLogonType) {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $elevated = ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    $TaskLogonType = if ($elevated) { 'S4U' } else { 'Interactive' }
-    if (-not $elevated) {
+    # Shared with switch-stock-release.ps1 and with the tunnel reinstall gate,
+    # which compares the principal a reinstall WOULD register against the one
+    # the registered task carries; all three must answer this the same way.
+    $TaskLogonType = Get-StockScheduledTaskLogonType
+    if ($TaskLogonType -ne 'S4U') {
         Write-Verbose 'Using Interactive logon with the console-free GUI launcher; S4U requires elevation.'
     }
 }
@@ -391,7 +392,8 @@ try {
     $tunnelPlan = $null
     try {
         $tunnelPlan = Resolve-StockTunnelReinstallPlan -PlatformRoot $platform `
-            -NewRuntimeRoot $newApp -TunnelReleaseId $previousTunnelRelease -RetainCount $RetainCount
+            -NewRuntimeRoot $newApp -TunnelReleaseId $previousTunnelRelease -RetainCount $RetainCount `
+            -TaskLogonType $TaskLogonType
     } catch {
         Write-Warning "Tunnel reinstall gate could not be evaluated, reinstalling: $($_.Exception.Message)"
     }
@@ -421,16 +423,17 @@ try {
             $tunnelStartupError = ''
         } catch {
             $tunnelStartupError = $_.Exception.Message
+            # The receipt has to match what actually happened: nothing was
+            # reinstalled, so 'reinstalled_after_degraded_verification' would be
+            # a false claim in both the result object and release-state.json's
+            # last_verification. The pin is cleared below because
+            # $tunnelStartupError is set, so the next publish cannot skip on a
+            # tunnel whose state nothing has proven.
+            $tunnelOutcome = 'reinstall_after_degraded_verification_failed'
             Write-Warning "Shared-peer tunnel reinstall after a degraded verification also failed: $tunnelStartupError"
         }
         $healthVerification = Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
             -SharedPeerStartupError $tunnelStartupError
-    }
-    if ($keepTunnel) {
-        # Written only now: activation and verification have both succeeded, so
-        # the receipt in lifecycle-<date>.jsonl cannot contradict a rollback
-        # that reinstalled the tunnel after all.
-        Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $tunnelPlan -Context 'publish-stock-release.ps1'
     }
     $verification = [ordered]@{
         verified_at = [DateTimeOffset]::Now.ToString('o')
@@ -443,12 +446,16 @@ try {
         shared_peer_tunnel = $tunnelOutcome
         shared_peer_tunnel_gate = if ($tunnelPlan) { @($tunnelPlan.reasons) } else { @('gate_not_evaluated') }
     }
-    # Pin the release the tunnel is actually executing out of. On a skip that is
-    # still the previously recorded one; on a reinstall it is this release --
-    # unless the reinstall itself failed, in which case the pin is cleared so
-    # the next publish cannot skip on an unproven tunnel.
+    # Pin the release the tunnel was last installed from and is therefore still
+    # executing out of. On a skip that is the gate's own answer -- which is the
+    # recorded pin, or the active release when the gate observed that the tunnel
+    # had relaunched from `current` since then. On a reinstall it is this
+    # release -- unless the reinstall itself failed, in which case the pin is
+    # cleared so the next publish cannot skip on an unproven tunnel.
     $tunnelReleaseAfter = if ($keepTunnel) {
-        if ($previousTunnelRelease) { $previousTunnelRelease } else { $null }
+        $pinned = if ($tunnelPlan -and $tunnelPlan.PSObject.Properties['tunnel_release']) { [string]$tunnelPlan.tunnel_release } else { '' }
+        if (-not $pinned) { $pinned = $previousTunnelRelease }
+        if ($pinned) { $pinned } else { $null }
     } elseif ($tunnelStartupError) { $null } else { $releaseId }
     $tunnelSshTargetAfter = if ($keepTunnel) {
         if ($previousState.PSObject.Properties['tunnel_ssh_target_sha256']) { $previousState.tunnel_ssh_target_sha256 } else { $null }
@@ -466,6 +473,14 @@ try {
         tunnel_ssh_target_sha256 = $tunnelSshTargetAfter
     })
     $activated = $true
+    if ($keepTunnel) {
+        # Written only now, AFTER $activated = $true. Everything above this line
+        # -- including the Set-StockReleaseState call -- can still throw into
+        # the catch below, and that rollback path deliberately reinstalls the
+        # tunnel unconditionally; a receipt written earlier would be one the
+        # log's own rollback events contradict.
+        Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $tunnelPlan -Context 'publish-stock-release.ps1'
+    }
     $removed = @(Remove-ExpiredStockReleases -PlatformRoot $platform -RetainCount $RetainCount)
     [pscustomobject]@{
         status = 'published'

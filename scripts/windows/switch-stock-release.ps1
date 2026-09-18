@@ -1,13 +1,22 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ReleaseId,
-    [string]$PlatformRoot = 'G:\StockPlatform'
+    [string]$PlatformRoot = 'G:\StockPlatform',
+    # Same meaning as in publish-stock-release.ps1. Empty = pick S4U when
+    # elevated, else Interactive. This script used to leave
+    # install-shared-tunnel-task.ps1's own 'S4U' default in place, which both
+    # fails outright in an unelevated session and disagrees with what publish
+    # registers -- and the tunnel reinstall gate now compares the principal a
+    # reinstall would register against the one the registered task carries, so
+    # the two callers have to answer it identically.
+    [ValidateSet('', 'S4U', 'Interactive')][string]$TaskLogonType = ''
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')).TrimEnd('\')
 Import-Module (Join-Path $repository 'scripts\windows\stock-release-management.psm1') -Force
+if (-not $TaskLogonType) { $TaskLogonType = Get-StockScheduledTaskLogonType }
 $platform = [IO.Path]::GetFullPath($PlatformRoot).TrimEnd('\')
 $layout = Get-StockReleaseLayout -PlatformRoot $platform
 $target = Get-StockReleaseAppPath -PlatformRoot $platform -ReleaseId $ReleaseId
@@ -25,6 +34,23 @@ if ($oldRelease -eq $ReleaseId) { [pscustomobject]@{ status = 'already_active'; 
 $tunnelRelease = if ($state.PSObject.Properties['tunnel_release']) { [string]$state.tunnel_release } else { '' }
 $keepTunnel = $false
 
+function Get-LogonTypeArguments {
+    # The revert path runs the PREVIOUS release's installer, and older releases'
+    # copies have no -LogonType parameter; only forward it when declared.
+    param([string]$Installer)
+    $command = Get-Command -Name $Installer -ErrorAction Stop
+    if ($command.Parameters.ContainsKey('LogonType')) { return @{ LogonType = $TaskLogonType } }
+    return @{}
+}
+
+function Install-SharedPeerTunnelTask {
+    param([Parameter(Mandatory)][string]$RuntimeRoot)
+    $installer = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+    $extra = Get-LogonTypeArguments -Installer $installer
+    & $installer -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
+        -PlatformRoot $platform @extra | Out-Null
+}
+
 function Resolve-TunnelGate {
     # Returns the reinstall plan, or $null when the gate could not be
     # evaluated (which the caller must treat as 'reinstall').
@@ -41,7 +67,8 @@ function Resolve-TunnelGate {
     param([Parameter(Mandatory)][string]$NewRuntimeRoot, [string]$TunnelReleaseId)
     try {
         return Resolve-StockTunnelReinstallPlan -PlatformRoot $platform `
-            -NewRuntimeRoot $NewRuntimeRoot -TunnelReleaseId ([string]$TunnelReleaseId)
+            -NewRuntimeRoot $NewRuntimeRoot -TunnelReleaseId ([string]$TunnelReleaseId) `
+            -TaskLogonType $TaskLogonType
     } catch {
         Write-Warning "Tunnel reinstall gate could not be evaluated, reinstalling: $($_.Exception.Message)"
         return $null
@@ -69,6 +96,11 @@ try {
     [void](Test-StockReleaseIntegrity -PlatformRoot $platform -ReleaseId $ReleaseId)
     $tunnelPlan = Resolve-TunnelGate -NewRuntimeRoot $target -TunnelReleaseId $tunnelRelease
     $keepTunnel = ($null -ne $tunnelPlan) -and ([string]$tunnelPlan.decision -eq 'skip')
+    # The gate may have refreshed the pin: tunnel_release records where the
+    # tunnel was last installed from, but every relaunch starts it from
+    # `current`, so a run that began after the active release was published came
+    # from the active release. Carry the gate's answer, not the stale record.
+    if ($keepTunnel -and [string]$tunnelPlan.tunnel_release) { $tunnelRelease = [string]$tunnelPlan.tunnel_release }
     # Graceful stop (of the currently-active/failed target) before
     # Stop-ScheduledTask: see the matching comment in
     # publish-stock-release.ps1's Stop-ProductionRuntime for why the order
@@ -82,7 +114,7 @@ try {
     if ($keepTunnel) {
         Write-Verbose 'Shared-peer tunnel task left untouched by the reinstall gate.'
     } else {
-        & (Join-Path $layout.CurrentPath 'scripts\shared-peer\install-shared-tunnel-task.ps1') -ScriptPath (Join-Path $layout.CurrentPath 'scripts\shared-peer\start-shared-tunnels.ps1') -PlatformRoot $platform | Out-Null
+        Install-SharedPeerTunnelTask -RuntimeRoot $layout.CurrentPath
         $tunnelRelease = $ReleaseId
     }
     $deadline = [DateTime]::UtcNow.AddSeconds(150)
@@ -112,7 +144,7 @@ try {
         Write-Warning "Shared runtime verification failed after a skipped tunnel reinstall; reinstalling the shared-peer tunnel and re-verifying: $($_.Exception.Message)"
         $keepTunnel = $false
         $tunnelOutcome = 'reinstalled_after_degraded_verification'
-        & (Join-Path $layout.CurrentPath 'scripts\shared-peer\install-shared-tunnel-task.ps1') -ScriptPath (Join-Path $layout.CurrentPath 'scripts\shared-peer\start-shared-tunnels.ps1') -PlatformRoot $platform | Out-Null
+        Install-SharedPeerTunnelTask -RuntimeRoot $layout.CurrentPath
         $tunnelRelease = $ReleaseId
         & (Join-Path $layout.CurrentPath 'scripts\shared-peer\verify-shared-runtime.ps1') | Out-Null
     }
@@ -149,12 +181,13 @@ try {
             # skips too and the tunnel is never touched by a failed switch.
             $revertPlan = Resolve-TunnelGate -NewRuntimeRoot $revertTarget -TunnelReleaseId $tunnelRelease
             $keepTunnelRevert = ($null -ne $revertPlan) -and ([string]$revertPlan.decision -eq 'skip')
+            if ($keepTunnelRevert -and [string]$revertPlan.tunnel_release) { $tunnelRelease = [string]$revertPlan.tunnel_release }
             [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $oldRelease)
             & (Join-Path $layout.CurrentPath 'scripts\windows\install-stock-dashboard-task.ps1') -RepositoryRoot $layout.CurrentPath -PlatformRoot $platform | Out-Null
             if ($keepTunnelRevert) {
                 Write-Verbose 'Shared-peer tunnel task left untouched by the reinstall gate during revert.'
             } else {
-                & (Join-Path $layout.CurrentPath 'scripts\shared-peer\install-shared-tunnel-task.ps1') -ScriptPath (Join-Path $layout.CurrentPath 'scripts\shared-peer\start-shared-tunnels.ps1') -PlatformRoot $platform | Out-Null
+                Install-SharedPeerTunnelTask -RuntimeRoot $layout.CurrentPath
                 $tunnelRelease = $oldRelease
             }
             $revertDeadline = [DateTime]::UtcNow.AddSeconds(150)
