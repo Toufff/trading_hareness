@@ -8,18 +8,21 @@ complete bars and limits while its factors are still missing.  It runs in the
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 import os
 import unittest
 
+import app.adjustment_factor_maintenance as module
 from app.adjustment_factor_maintenance import (
     AdjustmentFactorMaintenanceDependencies,
     BLOCKED_DATE_TASK_KEY,
+    CHINA,
     MAX_CONSECUTIVE_BLOCKED_RUNS,
     PENDING_COVERAGE_RATIO,
     POST_CLOSE_LOOKBACK_DAYS,
     POST_CLOSE_TERMINAL_LANE_STATUSES,
     blocked_date_run_key,
+    blocked_ledger_day,
     china_today,
     clear_blocked_date,
     pending_and_retired_dates_between,
@@ -47,30 +50,84 @@ class _Result:
         return self.rows[0] if self.rows else None
 
 
+class _BlockedDateLedger:
+    """An in-memory twin of ``_RECORD_BLOCKED_DATE_SQL``'s (date, day) key.
+
+    The statement itself is what production runs and it is proved on real
+    PostgreSQL by :class:`BlockedDateLedgerPostgresTests`; this model exists so
+    the LANE can be driven through a dozen invocations an evening for five
+    evenings -- the shape that retired a date in one evening before the key was
+    fixed -- without a database.  ``day`` is the ledger day "now" belongs to and
+    the test moves it, which is exactly what a new evening does.
+    """
+
+    def __init__(self, day=date(2026, 9, 15)):
+        self.day = day
+        self.rows: dict[str, dict] = {}
+        self.receipts: list[tuple] = []
+
+    def record(self, run_key: str, as_of_date, reason: str) -> dict:
+        row = self.rows.setdefault(run_key, {
+            "as_of_date": as_of_date, "run_key": run_key,
+            "output_summary": {"consecutive_blocked_runs": 0, "blocked_days": []}})
+        summary = row["output_summary"]
+        if str(self.day) not in summary["blocked_days"]:
+            summary["blocked_days"] = [*summary["blocked_days"], str(self.day)]
+            summary["consecutive_blocked_runs"] += 1
+        summary["reason"] = reason
+        summary["last_blocked_at"] = f"{self.day} 20:00:00"
+        return dict(summary)
+
+    def retired(self, run_keys) -> list[dict]:
+        return [row for key, row in self.rows.items()
+                if key in set(run_keys)
+                and row["output_summary"]["consecutive_blocked_runs"] >= MAX_CONSECUTIVE_BLOCKED_RUNS]
+
+    def mark_receipt_written(self, run_key: str) -> None:
+        self.rows[run_key]["output_summary"]["retirement_receipt_written"] = True
+
+    def clear(self, run_key: str) -> None:
+        if run_key in self.rows:
+            self.rows[run_key]["output_summary"].update(
+                {"consecutive_blocked_runs": 0, "blocked_days": [],
+                 "retirement_receipt_written": False})
+
+
 class _Connection:
     """A connection that answers per statement rather than one canned result."""
 
-    def __init__(self, rows, ledger_rows=None, blocked_summary=None):
+    def __init__(self, rows, ledger_rows=None, blocked_summary=None, ledger=None):
         self.rows = rows
         self.ledger_rows = ledger_rows or []
         self.blocked_summary = blocked_summary or {"consecutive_blocked_runs": 1}
+        self.ledger = ledger
         self.calls: list[tuple[str, tuple]] = []
 
     def execute(self, sql, params=None):
         text = " ".join(str(sql).split())
         self.calls.append((text, params))
         if "quant.automation_runs" in text and text.startswith("SELECT as_of_date"):
+            if self.ledger is not None:
+                return _Result(self.ledger.retired(params[1]))
             return _Result(self.ledger_rows)
         if "INSERT INTO quant.automation_runs" in text:
+            if self.ledger is not None:
+                return _Result([{"output_summary": self.ledger.record(params[1], params[2], params[5])}])
             return _Result([{"output_summary": dict(self.blocked_summary)}])
+        if self.ledger is not None and "data_quality_issues" in text and text.startswith("INSERT"):
+            self.ledger.receipts.append(params)
+        if self.ledger is not None and "'retirement_receipt_written', true" in text:
+            self.ledger.mark_receipt_written(params[0])
+        if self.ledger is not None and "'cleared_at'" in text:
+            self.ledger.clear(params[0])
         if "quant.automation_runs" in text or "data_quality_issues" in text:
             return _Result([])
         return _Result(self.rows)
 
 
 class _Database:
-    def __init__(self, rows, ledger_rows=None, blocked_summary=None):
-        self.connection = _Connection(rows, ledger_rows, blocked_summary)
+    def __init__(self, rows, ledger_rows=None, blocked_summary=None, ledger=None):
+        self.connection = _Connection(rows, ledger_rows, blocked_summary, ledger)
 
     def transaction(self):
         class Context:
@@ -149,13 +206,15 @@ class PendingDatesTests(unittest.TestCase):
             [{"trading_date": date(2026, 9, 4)}, {"trading_date": date(2026, 9, 15)}],
             ledger_rows=[{"as_of_date": date(2026, 9, 15), "run_key": "adjustment-factor-blocked:2026-09-15",
                           "output_summary": {"consecutive_blocked_runs": 6, "reason": "thin cross-section",
+                                             "blocked_days": ["2026-09-15", "2026-09-16"],
                                              "retired_at": "2026-09-18 04:31:00"}}])
         pending, retired = pending_and_retired_dates_between(
             connection, date(2026, 9, 1), date(2026, 9, 18))
         self.assertEqual(pending, [date(2026, 9, 4)])
         self.assertEqual(retired[date(2026, 9, 15)], {
             "run_key": "adjustment-factor-blocked:2026-09-15", "reason": "thin cross-section",
-            "consecutive_blocked_runs": 6, "retired_at": "2026-09-18 04:31:00"})
+            "consecutive_blocked_runs": 6, "blocked_days": ["2026-09-15", "2026-09-16"],
+            "retired_at": "2026-09-18 04:31:00"})
 
     def test_retired_details_fall_back_to_the_run_key_and_a_default_reason(self):
         connection = _Connection([], ledger_rows=[{"as_of_date": date(2026, 9, 15)}])
@@ -270,6 +329,59 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["results"][0]["reason"], "full-market daily bars are not ready")
         self.assertEqual(result["results"][0]["ledger"]["consecutive_blocked_runs"], 1)
         self.assertFalse(result["results"][0]["ledger"]["retired"])
+
+    async def test_an_evenings_repetitions_do_not_retire_a_date_but_five_evenings_do(self):
+        """The retirement rule, driven through the real lane, as it really runs.
+
+        The post-close stage repeats every ``RetryIntervalMinutes`` until
+        ~22:40, so one coverage-blocked date reaches ``post_close_sync`` about a
+        dozen times in an evening.  While the ledger counted invocations, that
+        retired the date at repetition 5 of the FIRST evening -- after which the
+        lane found no work, returned ``unchanged`` and sealed its receipt, so
+        the retry behaviour switched itself off two and a half hours in.
+        """
+        import app.adjustment_factor_maintenance as module
+
+        ledger = _BlockedDateLedger(day=date(2026, 9, 15))
+        database = _Database([{"trading_date": date(2026, 9, 11)}], ledger=ledger)
+        dependencies = self._dependencies(database)
+
+        async def fake_sync(trade_date, **_kwargs):
+            return {"status": "blocked", "trade_date": str(trade_date),
+                    "blocked_by": COVERAGE_BLOCK_REASON,
+                    "reason": "full-market daily bars are not ready"}
+
+        original = module.sync_daily_controls
+        module.sync_daily_controls = fake_sync
+        try:
+            for offset in range(MAX_CONSECUTIVE_BLOCKED_RUNS - 1):
+                ledger.day = date(2026, 9, 15) + timedelta(days=offset)
+                for repetition in range(12):  # one evening of pipeline repetitions
+                    result = await post_close_sync(dependencies, today=date(2026, 9, 19))
+                    self.assertEqual(result["status"], "blocked", f"evening {offset}/{repetition}")
+                    self.assertTrue(result["retryable"])
+                    self.assertEqual(result["unrepaired_dates"], ["2026-09-11"])
+                    # Every repetition of one evening is the SAME ledger day, so
+                    # the counter moves once per evening, not once per run.
+                    self.assertEqual(result["results"][0]["ledger"]["consecutive_blocked_runs"],
+                                     offset + 1)
+            self.assertEqual(ledger.receipts, [], "four evenings must not retire anything")
+
+            # The fifth evening -- not the fifth invocation -- retires it, on its
+            # first repetition; the rest of that evening finds nothing to do.
+            ledger.day = date(2026, 9, 19)
+            retiring = await post_close_sync(dependencies, today=date(2026, 9, 19))
+            after = await post_close_sync(dependencies, today=date(2026, 9, 19))
+        finally:
+            module.sync_daily_controls = original
+
+        self.assertEqual(retiring["status"], "blocked")
+        self.assertEqual(retiring["results"][0]["ledger"]["consecutive_blocked_runs"],
+                         MAX_CONSECUTIVE_BLOCKED_RUNS)
+        self.assertTrue(retiring["results"][0]["ledger"]["retired"])
+        self.assertEqual(len(ledger.receipts), 1)
+        self.assertEqual(after["retired_dates"], ["2026-09-11"])
+        self.assertEqual(after["lane_status"], "unchanged")
 
     async def test_a_provider_block_is_a_failure_not_a_skip(self):
         database = _Database([{"trading_date": date(2026, 9, 17)}])
@@ -644,6 +756,86 @@ class BlockedDateLedgerTests(unittest.TestCase):
         self.assertEqual([call for call in connection.calls if "data_quality_issues" in call[0]], [])
 
 
+class BlockedLedgerDayTests(unittest.TestCase):
+    """The second half of the ledger key: which day a refusal belongs to."""
+
+    def test_one_evening_and_the_dawn_run_that_serves_it_are_one_ledger_day(self):
+        """The 12:00 CST boundary is what makes the counter mean "evenings".
+
+        The post-close pipeline repeats every ``RetryIntervalMinutes`` from
+        ~15:30 to ~22:40, and the 04:30 maintenance task works the SAME backlog
+        before the next session.  All of them must land on one ledger day, or
+        five "days" would be reached in two and a half evenings.
+        """
+        evening = datetime(2026, 9, 15, 15, 31, tzinfo=CHINA)
+        self.assertEqual(blocked_ledger_day(evening), date(2026, 9, 15))
+        self.assertEqual(blocked_ledger_day(datetime(2026, 9, 15, 22, 40, tzinfo=CHINA)),
+                         date(2026, 9, 15))
+        self.assertEqual(blocked_ledger_day(datetime(2026, 9, 16, 4, 30, tzinfo=CHINA)),
+                         date(2026, 9, 15))
+        # The next evening is a new ledger day.
+        self.assertEqual(blocked_ledger_day(datetime(2026, 9, 16, 15, 31, tzinfo=CHINA)),
+                         date(2026, 9, 16))
+        # A caller in another timezone gets the exchange-local answer.
+        self.assertEqual(
+            blocked_ledger_day(datetime(2026, 9, 15, 14, 0, tzinfo=timezone.utc)),  # 22:00 CST
+            date(2026, 9, 15))
+
+    def test_the_statement_keys_the_counter_on_the_day_not_the_invocation(self):
+        """A regression to ``coalesce(...)+1`` would pass every fake; not this.
+
+        ``BlockedDateLedgerPostgresTests`` proves the statement's behaviour;
+        this pins its shape so an edit cannot quietly restore the unconditional
+        increment that made five runs mean one evening.
+        """
+        statement = " ".join(module._RECORD_BLOCKED_DATE_SQL.split())
+        self.assertIn("'blocked_days'", statement)
+        self.assertIn("@>", statement)  # "have we already counted this day?"
+        self.assertIn(f"interval '{module.BLOCKED_LEDGER_DAY_BOUNDARY_HOUR} hours'", statement)
+        # The increment is inside the "not counted on this day yet" branch...
+        self.assertIn("'consecutive_blocked_runs', CASE WHEN", statement)
+        # ...and the unconditional per-invocation form is gone.
+        self.assertNotIn("'consecutive_blocked_runs', coalesce", statement)
+        # A fresh row starts its own day list rather than a bare counter.
+        self.assertIn("'blocked_days', jsonb_build_array(", statement)
+
+    def test_repeating_the_same_evening_a_dozen_times_counts_once(self):
+        """The exact shape that retired a date inside one evening."""
+        ledger = _BlockedDateLedger(day=date(2026, 9, 15))
+        connection = _Connection([], ledger=ledger)
+        for _repetition in range(12):
+            state = record_blocked_date(connection, date(2026, 9, 11), "thin cross-section")
+            self.assertEqual(state["consecutive_blocked_runs"], 1)
+            self.assertEqual(state["blocked_days"], ["2026-09-15"])
+            self.assertFalse(state["retired"])
+        self.assertEqual(ledger.receipts, [])
+        self.assertEqual(retired_dates(connection, [date(2026, 9, 11)]), set())
+
+    def test_five_separate_evenings_retire_the_date_exactly_once(self):
+        ledger = _BlockedDateLedger(day=date(2026, 9, 15))
+        connection = _Connection([], ledger=ledger)
+        seen = []
+        for offset in range(MAX_CONSECUTIVE_BLOCKED_RUNS):
+            ledger.day = date(2026, 9, 15) + timedelta(days=offset)
+            for _repetition in range(12):  # one evening of pipeline repetitions
+                state = record_blocked_date(connection, date(2026, 9, 11), "thin cross-section")
+            seen.append(state["consecutive_blocked_runs"])
+            self.assertEqual(state["retired"], offset + 1 == MAX_CONSECUTIVE_BLOCKED_RUNS)
+        self.assertEqual(seen, [1, 2, 3, 4, 5])
+        self.assertEqual(state["blocked_days"],
+                         ["2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-19"])
+        self.assertEqual(len(ledger.receipts), 1, "the receipt is written on the retiring day only")
+        self.assertIn("2026-09-15, 2026-09-16", ledger.receipts[0][0])
+        self.assertEqual(retired_dates(connection, [date(2026, 9, 11)]), {date(2026, 9, 11)})
+
+        # A sixth evening stays silent, and a successful fetch re-opens the date.
+        ledger.day = date(2026, 9, 20)
+        record_blocked_date(connection, date(2026, 9, 11), "thin cross-section")
+        self.assertEqual(len(ledger.receipts), 1)
+        clear_blocked_date(connection, date(2026, 9, 11))
+        self.assertEqual(retired_dates(connection, [date(2026, 9, 11)]), set())
+
+
 @unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
 class BlockedDateLedgerPostgresTests(unittest.TestCase):
     """The ledger SQL itself, on real PostgreSQL, on a fixture-only key.
@@ -655,6 +847,10 @@ class BlockedDateLedgerPostgresTests(unittest.TestCase):
 
     trade_date = date(2099, 4, 2)
 
+    #: How many times the post-close stage reaches one date in one evening
+    #: (every ``RetryIntervalMinutes`` from ~15:30 to ~22:40).
+    repetitions_per_evening = 12
+
     def _cleanup(self, connection) -> None:
         connection.execute(
             "DELETE FROM quant.automation_runs WHERE run_key=%s",
@@ -662,6 +858,52 @@ class BlockedDateLedgerPostgresTests(unittest.TestCase):
         connection.execute(
             "DELETE FROM quant.data_quality_issues WHERE code='adjustment_factor_date_retired' "
             "AND trading_date=%s", (self.trade_date,))
+
+    def _end_the_evening(self, connection) -> None:
+        """Age the ledger by one day, which is what tomorrow does to it.
+
+        The statement asks PostgreSQL for "today"; nothing in the test may
+        change the server's clock, so the evenings already recorded are moved
+        one day into the past instead.  The next invocation then sees exactly
+        the row yesterday's evening would have left behind.
+        """
+        connection.execute(
+            """UPDATE quant.automation_runs
+                  SET output_summary = output_summary || jsonb_build_object('blocked_days',
+                      (SELECT coalesce(jsonb_agg((day::date - 1)::text ORDER BY day::date),'[]'::jsonb)
+                         FROM jsonb_array_elements_text(output_summary->'blocked_days') AS day))
+                WHERE run_key=%s""",
+            (blocked_date_run_key(self.trade_date),))
+
+    def test_the_ledger_day_is_the_same_in_sql_and_in_python(self):
+        """The counter is decided in SQL; every caller names the day in Python."""
+        from app.adjustment_factor_maintenance import _LEDGER_DAY_SQL
+        from app.main import db
+
+        with db.transaction() as connection:
+            row = connection.execute(f"SELECT {_LEDGER_DAY_SQL} AS ledger_day").fetchone()
+        self.assertEqual(row["ledger_day"], blocked_ledger_day())
+
+    def test_a_whole_evening_of_repetitions_counts_as_one_day(self):
+        """The blocker: MAX_CONSECUTIVE_BLOCKED_RUNS must mean evenings."""
+        from app.main import db
+
+        with db.transaction() as connection:
+            self._cleanup(connection)
+            try:
+                for repetition in range(self.repetitions_per_evening):
+                    state = record_blocked_date(connection, self.trade_date, "thin cross-section")
+                    self.assertEqual(state["consecutive_blocked_runs"], 1, f"repetition {repetition}")
+                    self.assertEqual(state["blocked_days"], [str(blocked_ledger_day())])
+                    self.assertFalse(state["retired"])
+                self.assertEqual(retired_dates(connection, [self.trade_date]), set())
+                receipts = connection.execute(
+                    "SELECT count(*)::int AS rows FROM quant.data_quality_issues "
+                    "WHERE code='adjustment_factor_date_retired' AND trading_date=%s",
+                    (self.trade_date,)).fetchone()["rows"]
+                self.assertEqual(receipts, 0)
+            finally:
+                self._cleanup(connection)
 
     def test_the_counter_retires_once_and_a_success_clears_it(self):
         from app.adjustment_factor_maintenance import clear_blocked_date
@@ -671,13 +913,22 @@ class BlockedDateLedgerPostgresTests(unittest.TestCase):
             self._cleanup(connection)
             try:
                 for expected in range(1, MAX_CONSECUTIVE_BLOCKED_RUNS + 1):
-                    state = record_blocked_date(connection, self.trade_date, "thin cross-section")
-                    self.assertEqual(state["consecutive_blocked_runs"], expected)
+                    if expected > 1:
+                        self._end_the_evening(connection)
+                    written = 0
+                    for repetition in range(self.repetitions_per_evening):
+                        state = record_blocked_date(
+                            connection, self.trade_date, "thin cross-section")
+                        written += int(state["retirement_receipt_written"])
+                        self.assertEqual(state["consecutive_blocked_runs"], expected,
+                                         f"evening {expected}, repetition {repetition}")
+                        self.assertEqual(len(state["blocked_days"]), expected)
+                        self.assertEqual(state["last_blocked_day"], str(blocked_ledger_day()))
                     self.assertEqual(state["retired"], expected >= MAX_CONSECUTIVE_BLOCKED_RUNS)
                     self.assertEqual(
-                        state["retirement_receipt_written"],
-                        expected == MAX_CONSECUTIVE_BLOCKED_RUNS,
-                        "the retirement receipt must be written on exactly the retiring run")
+                        written, int(expected == MAX_CONSECUTIVE_BLOCKED_RUNS),
+                        "the retirement receipt must be written on exactly the retiring evening, "
+                        "once, however many times the stage runs that evening")
 
                 self.assertEqual(retired_dates(connection, [self.trade_date]), {self.trade_date})
                 receipts = connection.execute(
@@ -686,10 +937,21 @@ class BlockedDateLedgerPostgresTests(unittest.TestCase):
                     (self.trade_date,)).fetchone()["rows"]
                 self.assertEqual(receipts, 1)
 
-                # One more blocked run stays silent rather than alerting again.
+                # One more run the same evening changes nothing at all.
+                same = record_blocked_date(connection, self.trade_date, "thin cross-section")
+                self.assertEqual(same["consecutive_blocked_runs"], MAX_CONSECUTIVE_BLOCKED_RUNS)
+                self.assertFalse(same["retirement_receipt_written"])
+
+                # A sixth evening counts, and stays silent rather than alerting again.
+                self._end_the_evening(connection)
                 again = record_blocked_date(connection, self.trade_date, "thin cross-section")
                 self.assertEqual(again["consecutive_blocked_runs"], MAX_CONSECUTIVE_BLOCKED_RUNS + 1)
                 self.assertFalse(again["retirement_receipt_written"])
+                receipts = connection.execute(
+                    "SELECT count(*)::int AS rows FROM quant.data_quality_issues "
+                    "WHERE code='adjustment_factor_date_retired' AND trading_date=%s",
+                    (self.trade_date,)).fetchone()["rows"]
+                self.assertEqual(receipts, 1)
 
                 # The retired date carries its ledger evidence, and the work
                 # list stops reporting it as pending.
@@ -716,7 +978,45 @@ class BlockedDateLedgerPostgresTests(unittest.TestCase):
                     (blocked_date_run_key(self.trade_date),)).fetchone()
                 self.assertEqual(row["status"], "completed")
                 self.assertEqual(row["output_summary"]["consecutive_blocked_runs"], 0)
+                self.assertEqual(row["output_summary"]["blocked_days"], [])
                 self.assertFalse(row["output_summary"]["retirement_receipt_written"])
+
+                # ...and the cleared row starts counting from today again,
+                # rather than resuming the retired count on its next refusal.
+                restarted = record_blocked_date(connection, self.trade_date, "thin cross-section")
+                self.assertEqual(restarted["consecutive_blocked_runs"], 1)
+                self.assertEqual(restarted["blocked_days"], [str(blocked_ledger_day())])
+            finally:
+                self._cleanup(connection)
+
+    def test_a_row_written_before_the_day_key_keeps_its_count(self):
+        """The ledger predates ``blocked_days``; an upgrade must not reset it.
+
+        A row from the invocation-counting era has no ``blocked_days`` at all.
+        It must neither lose its progress (a reset would give a permanently
+        thin date five more evenings) nor double-count (two entries for one
+        evening would retire it sooner than the rule says).
+        """
+        from app.main import db
+
+        with db.transaction() as connection:
+            self._cleanup(connection)
+            try:
+                connection.execute(
+                    """INSERT INTO quant.automation_runs(
+                           task_key,run_key,cadence,as_of_date,status,methodology_version,
+                           input_summary,output_summary,finished_at)
+                       VALUES(%s,%s,'daily',%s,'blocked',%s,'{}'::jsonb,
+                              '{"consecutive_blocked_runs": 3, "reason": "legacy"}'::jsonb,now())""",
+                    (BLOCKED_DATE_TASK_KEY, blocked_date_run_key(self.trade_date),
+                     self.trade_date, BLOCKED_DATE_TASK_KEY))
+                first = record_blocked_date(connection, self.trade_date, "thin cross-section")
+                self.assertEqual(first["consecutive_blocked_runs"], 4)
+                self.assertEqual(first["blocked_days"], [str(blocked_ledger_day())])
+                repeat = record_blocked_date(connection, self.trade_date, "thin cross-section")
+                self.assertEqual(repeat["consecutive_blocked_runs"], 4)
+                self.assertEqual(repeat["blocked_days"], [str(blocked_ledger_day())])
+                self.assertFalse(repeat["retired"])
             finally:
                 self._cleanup(connection)
 

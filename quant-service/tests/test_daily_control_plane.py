@@ -84,7 +84,91 @@ class DailyControlPlaneTests(unittest.TestCase):
         payload = status_payload(None)
         self.assertEqual(payload["adjustment_state"], "absent")
         self.assertEqual(payload["adjustment_pending_rows"], 0)
+        self.assertIsNone(payload["adjustment_retirement"])
         self.assertFalse(payload["research_adjustment_ready"])
+
+    def test_a_retired_date_is_labelled_retired_here_too_not_pending(self):
+        """The control plane must not promise a repair the ledger gave up on.
+
+        ``stock_window_readiness`` has said ``retired`` for such a date since
+        the ledger existed, while this payload -- the one the health probe,
+        scripts/equity-readiness.py and scripts/verify-equity-control-recovery.py
+        read -- still said ``pending``, i.e. "queued, it will arrive".
+        """
+        rows = [_row("SH", 3_447, 3_447, adjustment=0, vendor_sourced=3_447)]
+        details = {
+            "2026-09-18": {
+                "run_key": "adjustment-factor-blocked:2026-09-18",
+                "reason": "full-market daily bars are not ready",
+                "consecutive_blocked_runs": 5,
+                "blocked_days": ["2026-09-14", "2026-09-15", "2026-09-16",
+                                 "2026-09-17", "2026-09-18"],
+            },
+        }
+        payload = status_payload(rows, retired_dates=details)
+        self.assertEqual(payload["adjustment_state"], "retired")
+        # Still non-gating, exactly as 'pending' is.
+        self.assertEqual(payload["state"], "ready")
+        self.assertFalse(payload["research_adjustment_ready"])
+        self.assertEqual(payload["adjustment_pending_rows"], 3_447)
+        self.assertEqual(payload["adjustment_retirement"]["run_key"],
+                         "adjustment-factor-blocked:2026-09-18")
+        self.assertEqual(len(payload["adjustment_retirement"]["blocked_days"]), 5)
+        # The reason names the action (clear this ledger row), not a wait.
+        self.assertIn("复权因子 retired", payload["reason"])
+        self.assertIn("adjustment-factor-blocked:2026-09-18", payload["reason"])
+        self.assertNotIn("复权因子 pending", payload["reason"])
+
+    def test_another_dates_retirement_does_not_relabel_this_session(self):
+        rows = [_row("SH", 3_447, 3_447, adjustment=0, vendor_sourced=3_447)]
+        payload = status_payload(rows, retired_dates={"2026-09-11": {"run_key": "x"}})
+        self.assertEqual(payload["adjustment_state"], "pending")
+        self.assertIsNone(payload["adjustment_retirement"])
+
+    def test_a_bare_list_of_retired_dates_is_accepted_and_names_the_default_run_key(self):
+        rows = [_row("SH", 3_447, 3_447, adjustment=0, vendor_sourced=3_447)]
+        payload = status_payload(rows, retired_dates=[date(2026, 9, 18)])
+        self.assertEqual(payload["adjustment_state"], "retired")
+        self.assertEqual(payload["adjustment_retirement"]["run_key"],
+                         "adjustment-factor-blocked:2026-09-18")
+
+    def test_a_complete_session_ignores_a_stale_ledger_row(self):
+        """The factors arrived: the ledger row is history, not a verdict."""
+        payload = status_payload([_row("SH", 3_447, 3_447)],
+                                 retired_dates={"2026-09-18": {"run_key": "x"}})
+        self.assertEqual(payload["adjustment_state"], "complete")
+        self.assertIsNone(payload["adjustment_retirement"])
+        self.assertTrue(payload["research_adjustment_ready"])
+        self.assertIsNone(payload["reason"])
+
+    def test_the_ledger_is_asked_only_about_the_dates_in_these_rows(self):
+        from app.adjustment_factor_maintenance import BLOCKED_DATE_TASK_KEY
+        from app.daily_control_plane import adjustment_retirement_details
+
+        class _Cursor:
+            def fetchall(self):
+                return [{"as_of_date": date(2026, 9, 18),
+                         "run_key": "adjustment-factor-blocked:2026-09-18",
+                         "output_summary": {"consecutive_blocked_runs": 5, "reason": "thin"}}]
+
+        class _Connection:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params=None):
+                self.calls.append((sql, params))
+                return _Cursor()
+
+        connection = _Connection()
+        details = adjustment_retirement_details(
+            connection, [_row("SH", 10, 10), _row("SZ", 10, 10)])
+        self.assertEqual(details["2026-09-18"]["run_key"], "adjustment-factor-blocked:2026-09-18")
+        self.assertEqual(len(connection.calls), 1)
+        self.assertEqual(connection.calls[0][1][0], BLOCKED_DATE_TASK_KEY)
+        # One row per exchange, one date: the ledger is asked once, for it.
+        self.assertEqual(connection.calls[0][1][1], ["adjustment-factor-blocked:2026-09-18"])
+        # No rows, no query.
+        self.assertEqual(adjustment_retirement_details(_Connection(), []), {})
 
     def test_status_sql_projects_the_vendor_sourced_count(self):
         from app.daily_control_plane import PROVIDERS_WITHOUT_ADJUSTMENT_FACTORS

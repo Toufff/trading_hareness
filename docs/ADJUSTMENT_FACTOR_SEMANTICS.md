@@ -60,14 +60,23 @@
    `apis` 中做闸门。**只跑 adj_factor 的任务绝不会清掉当日停牌标记。**
 6. `app/adjustment_factor_maintenance.py`（新）：`pending_dates()` / `sync()` /
    `post_close_sync()`，对覆盖率不足的交易日以 `apis=('adj_factor',)` 逐日补取；
-   覆盖率被拒的日期记 `skipped` 并累计"连续被拒次数"，见第 5 节。
+   覆盖率被拒的日期记 `skipped` 并累计"连续被拒**天数**"（按晚上计，不是按调用次数
+   计——post-close 流水线一晚上要跑十几次），见第 5 节。
 7. `app/capability_registry.py`：`adj_factor` 独立分支，
    `preferred_providers=('super_get','super','primary')`、`status='verified'`
    （`tushare_primary` 的 adj_factor 当前是 `failed`/ConnectError）。
-8. `app/daily_control_plane.py` `status_payload()`：`limits_ready` 与三态
-   `adjustment_state ∈ {complete, pending, absent}` 拆开；
+8. `app/daily_control_plane.py` `status_payload()`：`limits_ready` 与四态
+   `adjustment_state ∈ {complete, pending, retired, absent}` 拆开；
    **`ready` 不再包含复权项**；新增 `adjustment_state`、`adjustment_pending_rows`、
-   `research_adjustment_ready`。
+   `adjustment_retirement`、`research_adjustment_ready`。
+   `retired` 与第 12 项的个股窗口就绪度**用的是同一个词、同一份证据**：该交易日已被
+   退休台账剔出工作清单，说 `pending`（"已排队，会来"）就是假承诺。证据由
+   `adjustment_retirement_details(connection, rows)` 单独查一次台账拿到，再以
+   `status_payload(rows, retired_dates=...)` 传进来——`status_payload` 仍然是纯函数，
+   只吃行、不吃连接。`reason` 里直接写出要清的 `run_key`；退休**同样不阻断**门槛
+   （`state` 与 `ready` 不受影响），只是把"等"换成"该做什么"。
+   调用方：`app/main.py:full_market_daily_control_status()`（与行同一个事务里查台账）、
+   `scripts/equity-readiness.py`、`scripts/verify-equity-control-recovery.py`。
 9. `app/ten_day_leader_rotation_repository.py`：两处覆盖度判定去掉
    `adj_factor IS NOT NULL`（改由 `quality_status` 回答"是否有结算 bar"）；
    `latest_full_market_date` 的 CTE 列改名 `adjusted_symbols` → `settled_symbols`
@@ -406,20 +415,35 @@ python scripts/adjustment-factor-maintenance.py sync \
 - **退出码：只有 `status='failed'` 才返回 1**，其余（`completed` / `planned` /
   `unchanged` / `skipped`）返回 0。原因：这条车道修不了别人家的日线截面，
   一个永远过不了覆盖率闸门的日期会让计划任务**每晚**报错，报到没人再看。
-- **连续被拒 5 次后退出清单**：每个被覆盖率拒绝的日期在
+- **连续被拒 5 个"台账日"后退出清单**：每个被覆盖率拒绝的日期在
   `quant.automation_runs`（`task_key='adjustment_factor_maintenance.blocked_date'`，
   `run_key='adjustment-factor-blocked:<date>'`）累计 `consecutive_blocked_runs`。
+  **计数单位是天，不是调用次数。** 台账的键是 `(交易日, 被拒当天)`：同一行里
+  `output_summary.blocked_days` 是这个交易日被拒过的"台账日"集合，`consecutive_blocked_runs`
+  就是它的大小；`_RECORD_BLOCKED_DATE_SQL` 在 `ON CONFLICT` 分支里先问
+  `blocked_days @> 今天` 再决定要不要 +1，所以同一晚跑多少次都只算一次（判定在**同一条
+  语句内**，两个并发调用也不会各加一次）。
+  一个"台账日"从 CST **12:00** 起算（`BLOCKED_LEDGER_DAY_BOUNDARY_HOUR`）：
+  post-close 流水线 15:30→22:40 每 `RetryIntervalMinutes` 跑一遍（一晚上十几次）、
+  凌晨 04:30 维护任务再扫同一批欠账，这两者属于**同一个**台账日。
+  没有这条键，`MAX_CONSECUTIVE_BLOCKED_RUNS = 5` 等于两个半小时而不是五天——
+  一个交易日会在**当晚**就被退休，之后车道报 `unchanged`、回执落定，
+  重试机制把自己关掉。`blocked_ledger_day()` 是这条规则的 Python 版本（给报表和测试用），
+  真正算数的是 SQL；两者由 `BlockedDateLedgerPostgresTests` 在真 PostgreSQL 上对齐。
+  升级不丢账：老行没有 `blocked_days`，读作空数组，计数原样保留，下一个台账日才 +1。
   达到 `MAX_CONSECUTIVE_BLOCKED_RUNS = 5` 时**写一次**
   `quant.data_quality_issues` 回执（`code='adjustment_factor_date_retired'`）
   并从此不再出现在工作清单里（`sync()` 结果的 `retired_dates`）。之后再被拒不再重复
-  告警。任何一次抓取成功都会把计数清零，该日期重新回到清单，同时
+  告警（回执消息里列出那 5 个被拒日）。任何一次抓取成功都会把计数与 `blocked_days`
+  一起清零，该日期重新回到清单、并从下一个台账日重新数起，同时
   `clear_blocked_date()` 在同一个事务里把那条 `adjustment_factor_date_retired`
   回执置 `resolved_at=now()`——否则它是一条**永远无人能关**的告警。
   要手动让一个日期回到清单：先修当天的日线覆盖率，再删掉那一行 `automation_runs`
   （或等下一次成功抓取自动清零）。
-  退休期间它对使用者是可见的：`pending_dates_between()` 默认把退休日期从"待补"
-  里剔除，个股窗口就绪度对该日期报 `retired` 并给出 `run_key` 与被拒原因
-  （第 2 节第 12 项），而不是继续说"已排队"。
+  退休期间它对使用者是可见的，而且**三个界面用同一个词**：`pending_dates_between()`
+  默认把退休日期从"待补"里剔除；个股窗口就绪度对该日期报 `retired` 并给出 `run_key`
+  与被拒原因（第 2 节第 12 项）；日控制面 `status_payload` 也报
+  `adjustment_state='retired'`（第 2 节第 8 项），而不是继续说"已排队"。
 - `--dry-run` 只解析并打印待处理日期，不发 provider 请求、不写库。
 - stdout 是 ASCII-only JSON（任务宿主控制台是 GBK）；env 文件只写进 `os.environ`，
   任何凭据值都不会被打印或落盘。

@@ -7,7 +7,19 @@ import psycopg
 from psycopg.rows import dict_row
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'quant-service'))
-from app.daily_control_plane import EQUITY_DAILY_CONTROL_STATUS_SQL, status_payload, status_query
+from app.adjustment_factor_maintenance import (
+    BLOCKED_DATE_TASK_KEY,
+    MAX_CONSECUTIVE_BLOCKED_RUNS,
+    RETIRED_DATES_SQL,
+    blocked_date_run_key,
+    retired_date_details_from_rows,
+)
+from app.daily_control_plane import (
+    EQUITY_DAILY_CONTROL_STATUS_SQL,
+    adjustment_retirement_details,
+    status_payload,
+    status_query,
+)
 from app.db_dsn import connection_params
 
 
@@ -40,10 +52,35 @@ def main():
         pending = status_payload(db.execute(pending_sql.replace('quant.', 'pg_temp.'), pending_params).fetchall())
         assert pending['state']=='ready' and pending['adjustment_state']=='pending', pending
         assert pending['adjustment_pending_rows']==1 and not pending['research_adjustment_ready'], pending
+        assert pending['adjustment_retirement'] is None, pending
+        # The SAME date once the blocked-date ledger has retired it: refused on
+        # MAX_CONSECUTIVE_BLOCKED_RUNS separate days, so no repair is queued and
+        # the control plane must say 'retired' (with the run_key an operator
+        # clears), never 'pending'. The ledger row lives in an isolated
+        # pg_temp.automation_runs and is read by the production query and the
+        # production row->details mapper, not by a hand-built dict.
+        run_key = blocked_date_run_key(__import__('datetime').date(2026,9,15))
+        db.execute('CREATE TEMP TABLE automation_runs(task_key text,run_key text,as_of_date date,output_summary jsonb)')
+        db.execute('INSERT INTO automation_runs VALUES(%s,%s,%s,%s::jsonb)', (
+            BLOCKED_DATE_TASK_KEY, run_key, __import__('datetime').date(2026,9,15),
+            json.dumps({'consecutive_blocked_runs': MAX_CONSECUTIVE_BLOCKED_RUNS,
+                        'reason': 'daily cross-section below the coverage gate',
+                        'blocked_days': ['2026-09-15','2026-09-16','2026-09-17','2026-09-18','2026-09-19']})))
+        ledger = retired_date_details_from_rows(db.execute(
+            RETIRED_DATES_SQL.replace('quant.', 'pg_temp.'),
+            (BLOCKED_DATE_TASK_KEY, [run_key], MAX_CONSECUTIVE_BLOCKED_RUNS)).fetchall())
+        assert list(ledger) == [__import__('datetime').date(2026,9,15)], ledger
+        retired = status_payload(db.execute(pending_sql.replace('quant.', 'pg_temp.'), pending_params).fetchall(),
+                                 retired_dates={str(k): v for k, v in ledger.items()})
+        assert retired['state']=='ready' and retired['adjustment_state']=='retired', retired
+        assert retired['adjustment_retirement']['run_key']==run_key, retired
+        assert run_key in retired['reason'] and not retired['research_adjustment_ready'], retired
+        assert len(retired['adjustment_retirement']['blocked_days'])==MAX_CONSECUTIVE_BLOCKED_RUNS, retired
         db.rollback()  # all fixtures disappear, production tables untouched
         db.execute('SET TRANSACTION READ ONLY')
-        actual = status_payload(db.execute(EQUITY_DAILY_CONTROL_STATUS_SQL).fetchall())
-        print(json.dumps({'isolated_postgresql_cases_passed': 5, 'actual_equity_readiness': actual}, ensure_ascii=False))
+        rows = db.execute(EQUITY_DAILY_CONTROL_STATUS_SQL).fetchall()
+        actual = status_payload(rows, retired_dates=adjustment_retirement_details(db, rows))
+        print(json.dumps({'isolated_postgresql_cases_passed': 6, 'actual_equity_readiness': actual}, ensure_ascii=False))
         db.rollback()
 
 

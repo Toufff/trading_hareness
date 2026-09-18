@@ -137,6 +137,7 @@ def _absent_payload() -> dict[str, Any]:
         "daily_rows": 0, "expected_daily_rows": 0, "minimum_required_rows": 0,
         "coverage_ratio": 0.0, "adjustment_rows": 0, "limit_rows": 0,
         "adjustment_state": "absent", "adjustment_pending_rows": 0,
+        "adjustment_retirement": None,
         "research_adjustment_ready": False,
         "by_exchange": {}, "gating_exchanges": list(GATED_EXCHANGES), "ungated_exchanges": [],
         "all_a": {"expected_daily_rows": 0, "daily_rows": 0},
@@ -151,7 +152,69 @@ def _format_expected_sources(sources: Mapping[str, Any]) -> str:
     return ', '.join(f"{name} {int(count)}" for name, count in ordered)
 
 
-def status_payload(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
+def adjustment_retirement_details(
+    connection: Any, rows: Iterable[Mapping[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """Blocked-date ledger evidence for the trading dates in these status rows.
+
+    The control plane is the surface operators read (the health probe,
+    ``scripts/equity-readiness.py``, ``scripts/verify-equity-control-recovery.py``),
+    and a retired date is one nobody is going to repair.  Reading the ledger is
+    a separate query rather than a join inside
+    :data:`EQUITY_DAILY_CONTROL_STATUS_SQL` because ``status_payload`` stays
+    pure -- it is handed rows, never a connection -- and because the ledger is
+    owned by ``adjustment_factor_maintenance``, which imports this module.
+    That import direction is why the import below is local: the dependency
+    stays one-way at module load time.
+    """
+    from .adjustment_factor_maintenance import retired_date_details
+
+    dates = sorted({row["trading_date"] for row in (rows or [])
+                    if row and row.get("trading_date") is not None})
+    if not dates:
+        return {}
+    return {str(key): dict(value)
+            for key, value in retired_date_details(connection, dates).items()}
+
+
+def _retirement_for(
+    retired: Mapping[str, Mapping[str, Any]] | Iterable[Any] | None, trade_date: Any,
+) -> dict[str, Any] | None:
+    """Normalize the caller's retired-date evidence for ONE trading date.
+
+    A mapping of ``{date: ledger details}`` is the useful form (it can name the
+    ``run_key`` an operator clears), but a bare iterable of dates is accepted so
+    a caller that only knows *that* a date is retired can still say so.
+    """
+    from .adjustment_factor_maintenance import (  # local: see adjustment_retirement_details
+        RETIRED_DATE_DEFAULT_REASON,
+        blocked_date_run_key,
+    )
+
+    if not retired:
+        return None
+    key = str(trade_date)
+    if isinstance(retired, Mapping):
+        details = {str(name): value for name, value in retired.items()}.get(key)
+        if details is None:
+            return None
+        detail_map = dict(details) if isinstance(details, Mapping) else {}
+    elif key in {str(value) for value in retired}:
+        detail_map = {}
+    else:
+        return None
+    return {
+        "run_key": str(detail_map.get("run_key") or blocked_date_run_key(key)),
+        "reason": str(detail_map.get("reason") or RETIRED_DATE_DEFAULT_REASON),
+        "consecutive_blocked_runs": int(detail_map.get("consecutive_blocked_runs") or 0),
+        "blocked_days": [str(value) for value in (detail_map.get("blocked_days") or [])],
+    }
+
+
+def status_payload(
+    rows: Iterable[Mapping[str, Any]] | None,
+    *, retired_dates: Mapping[str, Mapping[str, Any]] | Iterable[Any] | None = None,
+) -> dict[str, Any]:
     """Return an explicit fail-closed readiness result from the per-exchange rows.
 
     The gate excludes :data:`UNGATED_EXCHANGES` only.  Every other exchange is
@@ -163,6 +226,14 @@ def status_payload(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
     ``fetchone()`` would hand over a single arbitrary exchange (``BJ`` first,
     alphabetically) and get a confidently wrong ``blocked`` verdict.  That
     mistake raises here instead of being papered over with a single-row branch.
+
+    ``retired_dates`` is the blocked-date ledger's verdict (see
+    :func:`adjustment_retirement_details`).  A date it names gets
+    ``adjustment_state='retired'`` instead of ``'pending'``: "pending" promises
+    a repair is queued, and for a retired date that promise is false.  It is
+    the same label ``stock_window_readiness`` gives the same date, so the
+    control plane and the per-symbol readiness view cannot disagree.  A caller
+    that passes nothing keeps the pre-ledger behaviour.
     """
     if rows is None:
         return _absent_payload()
@@ -213,8 +284,17 @@ def status_payload(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
     # never do is call a session adjusted when no factor exists -- that is why
     # this is a tri-state label instead of a silent placeholder factor.
     adjustment_pending_rows = max(daily_rows - adjustment_rows, 0)
+    first = dated[0]
+    retirement = _retirement_for(retired_dates, first["trading_date"])
     if daily_rows > 0 and adjustment_rows == daily_rows:
         adjustment_state = "complete"
+        # The factors arrived after all: the ledger row is stale evidence, not
+        # a reason to withhold a complete session from research.
+        retirement = None
+    elif retirement is not None:
+        # The blocked-date ledger has dropped this date from the factor work
+        # list, so no repair is queued for it.  'pending' would promise one.
+        adjustment_state = "retired"
     elif vendor_sourced_rows > 0:
         # The cross-section came from a provider that publishes no
         # corporate-action history; the factor lane has not run for this date yet.
@@ -223,7 +303,6 @@ def status_payload(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
         adjustment_state = "absent"
     ready = daily_rows > 0 and cross_section_ready and limits_ready
 
-    first = dated[0]
     previous_day = first.get("expected_previous_trading_day")
     previous_expected = first.get("expected_previous_daily_rows")
     previous_expected = int(previous_expected) if previous_expected is not None else None
@@ -250,9 +329,18 @@ def status_payload(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
     if adjustment_state != "complete":
         # Reported, never gating: research/adjusted-price consumers fail
         # closed on a NULL factor on their own, per symbol and per window.
+        note = "：不阻断个股决策门槛，跨日复权研究口径不可用"
+        if retirement is not None:
+            # Name the action instead of the wait: this date is off the work
+            # list and only an operator can put it back.
+            note = (
+                f"：该日已被复权因子工作清单退休（连续 {retirement['consecutive_blocked_runs']} 天"
+                f"被拒：{retirement['reason']}），不会再自动补；修好当日日线截面后清掉台账"
+                f" {retirement['run_key']} 才会重新排队。不阻断个股决策门槛，"
+                "跨日复权研究口径不可用")
         parts.append(
             f"复权因子 {adjustment_state}（{adjustment_rows}/{daily_rows}，待补 {adjustment_pending_rows}）"
-            f"：不阻断个股决策门槛，跨日复权研究口径不可用")
+            + note)
     parts.extend(
         f"{item['exchange']} {item['daily']}/{item['expected']} 未参与门槛" for item in ungated)
     if drift:
@@ -278,6 +366,7 @@ def status_payload(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
         "limit_rows": limit_rows,
         "adjustment_state": adjustment_state,
         "adjustment_pending_rows": adjustment_pending_rows,
+        "adjustment_retirement": retirement,
         "research_adjustment_ready": adjustment_state == "complete",
         "by_exchange": by_exchange,
         "gating_exchanges": [name for name in GATED_EXCHANGES],
@@ -417,5 +506,5 @@ async def sync_full_market_daily_controls(
 __all__ = [
     "EQUITY_DAILY_CONTROL_STATUS_SQL", "EXPECTED_DELTA_REPORT_RATIO", "GATED_EXCHANGES",
     "MINIMUM_ALL_A_COVERAGE_RATIO", "PROVIDERS_WITHOUT_ADJUSTMENT_FACTORS", "UNGATED_EXCHANGES",
-    "status_payload", "status_query",
+    "adjustment_retirement_details", "status_payload", "status_query",
 ]

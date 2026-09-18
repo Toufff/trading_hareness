@@ -1514,7 +1514,10 @@ def full_market_daily_control_status() -> dict[str, Any]:
     """Expose latest daily control coverage without requesting a provider."""
     with db.transaction() as connection:
         rows = connection.execute(EQUITY_DAILY_CONTROL_STATUS_SQL).fetchall()
-    return daily_control_plane_status_payload(rows)
+        # Read in the same transaction as the rows, so the adjustment label and
+        # the blocked-date ledger evidence behind it describe one moment.
+        retired = daily_control_plane.adjustment_retirement_details(connection, rows)
+    return daily_control_plane_status_payload(rows, retired_dates=retired)
 
 
 def _daily_control_plane_sync_dependencies() -> DailyControlPlaneSyncDependencies:

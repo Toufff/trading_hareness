@@ -140,11 +140,11 @@ def pending_dates_between(
     """Settled trading dates in the window whose factor coverage is incomplete.
 
     "Pending" means *a repair is still queued for this date*.  A date the
-    blocked-date ledger has RETIRED (:data:`MAX_CONSECUTIVE_BLOCKED_RUNS`
-    consecutive coverage refusals) has dropped off the work list and will not
-    be fetched again until its daily cross-section is repaired and the ledger
-    row is cleared, so reporting it as pending promises a repair that nobody
-    is going to attempt.  The ledger is therefore consulted here, at the one
+    blocked-date ledger has RETIRED (coverage refused on
+    :data:`MAX_CONSECUTIVE_BLOCKED_RUNS` separate days) has dropped off the
+    work list and will not be fetched again until its daily cross-section is
+    repaired and the ledger row is cleared, so reporting it as pending
+    promises a repair that nobody is going to attempt.  The ledger is therefore consulted here, at the one
     place every caller goes through, rather than in each caller.
 
     ``include_retired=True`` returns the raw coverage list and is for the one
@@ -207,26 +207,68 @@ def pending_dates(
 BLOCKED_DATE_TASK_KEY = "adjustment_factor_maintenance.blocked_date"
 BLOCKED_DATE_RUN_KEY_PREFIX = "adjustment-factor-blocked"
 
-#: After this many CONSECUTIVE coverage-blocked runs, a date drops off the work
-#: list.  ``pending_dates`` recomputes the same list from real factor coverage
-#: on every run, so without this a permanently thin session would be retried --
+#: After this many CONSECUTIVE coverage-blocked LEDGER DAYS -- five separate
+#: evenings, not five stage invocations -- a date drops off the work list.
+#: ``pending_dates`` recomputes the same list from real factor coverage on
+#: every run, so without this a permanently thin session would be retried --
 #: and, before this change, reported as a failure -- every night forever.
+#:
+#: The unit is a day because the lane runs many times per evening: the
+#: post-close pipeline task repeats every ``RetryIntervalMinutes`` until ~22:40
+#: (about a dozen invocations), and the 04:30 maintenance task runs once more
+#: over the same backlog.  Counting invocations would retire a date inside a
+#: single evening -- two and a half hours instead of five days.
 MAX_CONSECUTIVE_BLOCKED_RUNS = 5
 
-_RECORD_BLOCKED_DATE_SQL = """
+#: A ledger day starts at this CST hour.  The window 12:00 -> 12:00 holds one
+#: whole evening: the post-close pipeline (15:30-22:40, all repetitions) plus
+#: the 04:30 maintenance run that works the same backlog before the next
+#: session opens.  All of them share one ``blocked_days`` entry, so
+#: :data:`MAX_CONSECUTIVE_BLOCKED_RUNS` really does mean five evenings.
+BLOCKED_LEDGER_DAY_BOUNDARY_HOUR = 12
+
+#: The ledger day of "now", as SQL and as Python.  The SQL expression is
+#: authoritative (the counter is decided inside one statement, so two
+#: concurrent invocations cannot both count); :func:`blocked_ledger_day` is the
+#: same rule for callers and tests, and ``BlockedDateLedgerPostgresTests`` pins
+#: the two to each other on real PostgreSQL.
+_LEDGER_DAY_SQL = (
+    f"((now() AT TIME ZONE 'Asia/Shanghai') "
+    f"- interval '{BLOCKED_LEDGER_DAY_BOUNDARY_HOUR} hours')::date")
+_LEDGER_DAY_JSON_SQL = f"to_jsonb({_LEDGER_DAY_SQL}::text)"
+
+#: The days this date has already been blocked on.  A row written before this
+#: key existed has no ``blocked_days`` at all, so it reads as an empty array
+#: and keeps its counter: an upgrade never resets nor double-counts a ledger.
+_BLOCKED_DAYS_SQL = (
+    "CASE WHEN jsonb_typeof(quant.automation_runs.output_summary->'blocked_days')='array' "
+    "THEN quant.automation_runs.output_summary->'blocked_days' ELSE '[]'::jsonb END")
+_COUNTED_TODAY_SQL = f"(({_BLOCKED_DAYS_SQL}) @> {_LEDGER_DAY_JSON_SQL})"
+_BLOCKED_RUNS_SQL = (
+    "coalesce((quant.automation_runs.output_summary->>'consecutive_blocked_runs')::int,0)")
+
+_RECORD_BLOCKED_DATE_SQL = f"""
 INSERT INTO quant.automation_runs(
         task_key,run_key,cadence,as_of_date,status,methodology_version,input_summary,output_summary,finished_at)
-     VALUES(%s,%s,'daily',%s,'blocked',%s,%s,%s,now())
+     VALUES(%s,%s,'daily',%s,'blocked',%s,%s,
+            jsonb_build_object(
+                'consecutive_blocked_runs', 1, 'reason', %s::text,
+                'blocked_days', jsonb_build_array({_LEDGER_DAY_SQL}::text),
+                'last_blocked_at', now()::text),
+            now())
 ON CONFLICT(run_key) DO UPDATE SET
      status='blocked', finished_at=now(), updated_at=now(),
      output_summary = quant.automation_runs.output_summary || jsonb_build_object(
          'consecutive_blocked_runs',
-         coalesce((quant.automation_runs.output_summary->>'consecutive_blocked_runs')::int,0)+1,
+         CASE WHEN {_COUNTED_TODAY_SQL} THEN {_BLOCKED_RUNS_SQL} ELSE {_BLOCKED_RUNS_SQL}+1 END,
+         'blocked_days',
+         CASE WHEN {_COUNTED_TODAY_SQL} THEN ({_BLOCKED_DAYS_SQL})
+              ELSE ({_BLOCKED_DAYS_SQL}) || {_LEDGER_DAY_JSON_SQL} END,
          'reason', EXCLUDED.output_summary->>'reason',
          'last_blocked_at', now()::text)
 RETURNING output_summary"""
 
-_RETIRED_DATES_SQL = """SELECT as_of_date,run_key,output_summary FROM quant.automation_runs
+RETIRED_DATES_SQL = """SELECT as_of_date,run_key,output_summary FROM quant.automation_runs
      WHERE task_key=%s AND run_key = ANY(%s)
        AND coalesce((output_summary->>'consecutive_blocked_runs')::int,0) >= %s"""
 
@@ -236,25 +278,36 @@ def blocked_date_run_key(trade_date: date) -> str:
     return f"{BLOCKED_DATE_RUN_KEY_PREFIX}:{trade_date}"
 
 
+def blocked_ledger_day(now: datetime | None = None) -> date:
+    """The ledger day "now" belongs to -- the second half of the ledger's key.
+
+    The ledger is keyed by ``(trading date, blocked-on day)``: every refusal of
+    one trading date within one ledger day is the same entry, so the evening's
+    repetitions count once.  The day boundary is
+    :data:`BLOCKED_LEDGER_DAY_BOUNDARY_HOUR` CST rather than midnight so that
+    the 04:30 maintenance run belongs to the evening whose backlog it is
+    working, not to the next one.
+
+    This is the Python twin of :data:`_LEDGER_DAY_SQL`; the statement decides
+    the counter, this exists so a caller, a report or a test can name the same
+    day without a database round trip.
+    """
+    local = (now or datetime.now(CHINA)).astimezone(CHINA)
+    return (local - timedelta(hours=BLOCKED_LEDGER_DAY_BOUNDARY_HOUR)).date()
+
+
 #: What a caller may say about a retired date without re-reading the ledger.
 RETIRED_DATE_DEFAULT_REASON = "coverage gate refused this date"
 
 
-def retired_date_details(connection: Any, dates: list[date]) -> dict[date, dict[str, Any]]:
-    """Ledger evidence for every date that has dropped off the work list.
+def retired_date_details_from_rows(rows: Any) -> dict[date, dict[str, Any]]:
+    """Shape :data:`RETIRED_DATES_SQL`'s rows into per-date ledger evidence.
 
-    Returned per date so a human-facing label can name *why* the repair is not
-    queued -- the ledger ``run_key`` an operator clears to re-open it, the
-    coverage reason the daily-controls gate gave, and how many consecutive
-    refusals retired it.
+    Separate from the query so a fixture harness -- ``scripts/verify-equity-
+    control-recovery.py`` runs the same statement against ``pg_temp`` tables --
+    reads a retired date exactly as production does, instead of hand-building a
+    dict that can drift from this one.
     """
-    if not dates:
-        return {}
-    rows = connection.execute(
-        _RETIRED_DATES_SQL,
-        (BLOCKED_DATE_TASK_KEY, [blocked_date_run_key(value) for value in dates],
-         MAX_CONSECUTIVE_BLOCKED_RUNS),
-    ).fetchall()
     details: dict[date, dict[str, Any]] = {}
     for row in rows:
         summary = dict(row.get("output_summary") or {})
@@ -262,9 +315,29 @@ def retired_date_details(connection: Any, dates: list[date]) -> dict[date, dict[
             "run_key": row.get("run_key") or blocked_date_run_key(row["as_of_date"]),
             "reason": str(summary.get("reason") or RETIRED_DATE_DEFAULT_REASON),
             "consecutive_blocked_runs": int(summary.get("consecutive_blocked_runs") or 0),
+            # The days the counter is made of, so a reader can check that a
+            # retirement really took five evenings rather than one.
+            "blocked_days": [str(value) for value in (summary.get("blocked_days") or [])],
             "retired_at": summary.get("retired_at"),
         }
     return details
+
+
+def retired_date_details(connection: Any, dates: list[date]) -> dict[date, dict[str, Any]]:
+    """Ledger evidence for every date that has dropped off the work list.
+
+    Returned per date so a human-facing label can name *why* the repair is not
+    queued -- the ledger ``run_key`` an operator clears to re-open it, the
+    coverage reason the daily-controls gate gave, and the days on which it was
+    refused.
+    """
+    if not dates:
+        return {}
+    return retired_date_details_from_rows(connection.execute(
+        RETIRED_DATES_SQL,
+        (BLOCKED_DATE_TASK_KEY, [blocked_date_run_key(value) for value in dates],
+         MAX_CONSECUTIVE_BLOCKED_RUNS),
+    ).fetchall())
 
 
 def retired_dates(connection: Any, dates: list[date]) -> set[date]:
@@ -273,23 +346,32 @@ def retired_dates(connection: Any, dates: list[date]) -> set[date]:
 
 
 def record_blocked_date(connection: Any, trade_date: date, reason: str) -> dict[str, Any]:
-    """Count one coverage-blocked run, and retire the date once at the limit.
+    """Count one coverage-blocked DAY, and retire the date once at the limit.
+
+    The ledger is keyed by ``(trading date, blocked-on day)``: the row is one
+    trading date, and ``blocked_days`` inside it is the set of ledger days
+    (see :func:`blocked_ledger_day`) on which that date was refused.  The
+    counter is that set's size, so the evening's ~12 pipeline repetitions --
+    and the 04:30 maintenance run working the same backlog -- move it by one,
+    not by thirteen.  Every invocation still refreshes ``last_blocked_at`` and
+    the reason, so the row stays a truthful record of the latest attempt.
 
     Returns the ledger state for this date.  The retirement receipt is written
     exactly once (``retirement_receipt_written`` in the same ledger row), so a
-    retired date is loud on the run that retires it and silent afterwards
+    retired date is loud on the day that retires it and silent afterwards
     rather than alerting every night.
     """
     summary = connection.execute(
         _RECORD_BLOCKED_DATE_SQL,
         (BLOCKED_DATE_TASK_KEY, blocked_date_run_key(trade_date), trade_date,
-         BLOCKED_DATE_TASK_KEY, Json({"trade_date": str(trade_date)}),
-         Json({"consecutive_blocked_runs": 1, "reason": reason,
-               "last_blocked_at": None})),
+         BLOCKED_DATE_TASK_KEY, Json({"trade_date": str(trade_date)}), reason),
     ).fetchone()["output_summary"]
     blocked_runs = int(summary.get("consecutive_blocked_runs") or 0)
+    blocked_days = [str(value) for value in (summary.get("blocked_days") or [])]
     state = {
         "consecutive_blocked_runs": blocked_runs,
+        "blocked_days": blocked_days,
+        "last_blocked_day": blocked_days[-1] if blocked_days else None,
         "retired": blocked_runs >= MAX_CONSECUTIVE_BLOCKED_RUNS,
         "retirement_receipt_written": False,
     }
@@ -298,11 +380,12 @@ def record_blocked_date(connection: Any, trade_date: date, reason: str) -> dict[
             """INSERT INTO quant.data_quality_issues(capability,severity,code,message,details,trading_date)
                    VALUES('adj_factor','warning','adjustment_factor_date_retired',%s,%s,%s)""",
             (f"{trade_date} was refused by the daily-controls coverage gate on "
-             f"{blocked_runs} consecutive adjustment-factor maintenance runs and has been "
-             "dropped from the work list; its adj_factor stays NULL until the date's daily "
-             "cross-section is repaired and the ledger row is cleared",
+             f"{blocked_runs} separate days ({', '.join(blocked_days) or 'see ledger'}) and has "
+             "been dropped from the adjustment-factor work list; its adj_factor stays NULL until "
+             "the date's daily cross-section is repaired and the ledger row is cleared",
              Json({"trade_date": str(trade_date), "reason": reason,
                    "consecutive_blocked_runs": blocked_runs,
+                   "blocked_days": blocked_days,
                    "run_key": blocked_date_run_key(trade_date)}),
              trade_date),
         )
@@ -331,7 +414,7 @@ def clear_blocked_date(connection: Any, trade_date: date) -> None:
               SET status='completed', finished_at=now(), updated_at=now(),
                   output_summary = output_summary || jsonb_build_object(
                       'consecutive_blocked_runs', 0, 'retirement_receipt_written', false,
-                      'cleared_at', now()::text)
+                      'blocked_days', '[]'::jsonb, 'cleared_at', now()::text)
             WHERE run_key=%s""",
         (blocked_date_run_key(trade_date),),
     )
@@ -384,7 +467,8 @@ async def sync(
     with its reason and does not fail the run: the factor lane cannot repair a
     thin daily cross-section, and a scheduled task that exits non-zero for a
     condition it cannot fix would alert every night forever.  After
-    :data:`MAX_CONSECUTIVE_BLOCKED_RUNS` such runs the date drops off the work
+    :data:`MAX_CONSECUTIVE_BLOCKED_RUNS` such DAYS -- the ledger counts one per
+    evening however many times the stage runs -- the date drops off the work
     list with a one-time durable receipt.  Only a provider error or an
     exception makes the run itself fail.
     """
@@ -565,13 +649,16 @@ def _clear_blocked_date(database: Any, trade_date: date) -> None:
 
 
 __all__ = [
-    "AdjustmentFactorMaintenanceDependencies", "BLOCKED_DATE_TASK_KEY", "FAILED_STATUS",
+    "AdjustmentFactorMaintenanceDependencies", "BLOCKED_DATE_TASK_KEY",
+    "BLOCKED_LEDGER_DAY_BOUNDARY_HOUR", "FAILED_STATUS",
     "GUARDED_BAR_TABLES", "IDENTITY_FACTOR_LEAK_SQL_TEMPLATE", "MAX_CONSECUTIVE_BLOCKED_RUNS",
     "PENDING_COVERAGE_RATIO", "PENDING_DATES_SQL", "POST_CLOSE_LOOKBACK_DAYS",
     "POST_CLOSE_NON_GATING_REASON", "POST_CLOSE_TERMINAL_LANE_STATUSES",
-    "REAL_FACTOR_PREDICATE_SQL", "RETIRED_DATE_DEFAULT_REASON", "SUCCESS_STATUSES",
-    "blocked_date_run_key", "china_today", "clear_blocked_date", "identity_factor_leak_sql",
+    "REAL_FACTOR_PREDICATE_SQL", "RETIRED_DATES_SQL", "RETIRED_DATE_DEFAULT_REASON",
+    "SUCCESS_STATUSES",
+    "blocked_date_run_key", "blocked_ledger_day", "china_today", "clear_blocked_date",
+    "identity_factor_leak_sql",
     "pending_and_retired_dates_between", "pending_dates", "pending_dates_between",
     "post_close_stage_receipt", "post_close_sync", "record_blocked_date",
-    "retired_date_details", "retired_dates", "sync",
+    "retired_date_details", "retired_date_details_from_rows", "retired_dates", "sync",
 ]
