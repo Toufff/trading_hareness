@@ -24,11 +24,12 @@ code page):
   timestamp per table.
 
 Exit codes: 0 ok (including ``deadline_reached``), 1 something needs a human
-but the tier is intact (``partial``, ``conflicts``, ``schema_drift``), 2 the
-budget guard is not doing its job (``degraded``: usage unmeasurable, the hot
-window exhausted, or the ratchet stalled -> ``needs_repack``).
+but the tier is intact (``partial``, ``conflicts``, ``schema_drift``,
+``deadline_missed``), 2 the budget guard is not doing its job (``degraded``:
+usage unmeasurable, the hot window exhausted, the ratchet stalled ->
+``needs_repack``, or -- for ``plan``/``status`` -- ``install`` has not run).
 
-Three properties this job must keep, and how:
+Four properties this job must keep, and how:
 
 1. **No row is ever in neither table.**  A batch is snapshotted into a TEMP
    table, inserted into the twin with an explicit column list, and only then
@@ -53,11 +54,24 @@ Three properties this job must keep, and how:
    ``status='needs_repack'`` (never running VACUUM FULL or pg_repack itself)
    when the measured usage does not fall by at least 1 %.  Reclaiming the
    existing bloat is an operator decision with its own maintenance window.
+   The 1 % is measured on ``tiering_usage_bytes`` (the WAL-free quantity the
+   policy itself is expressed in), because the move's own WAL would otherwise
+   make the drop negative and stop the ratchet for the wrong reason.
+4. **A moved row is always in some backup.**  The nightly ``pg_dump`` excludes
+   the data of every table in ``STOCK_BACKUP_INCREMENTAL_TABLES`` and of its
+   ``_cold`` twin, because the chunk chain under
+   ``<backup root>\\incremental\\<table>\\`` holds their history instead.  That
+   is only true up to the chain's watermark, so for such a table the move is
+   clamped: no row whose ``created_at`` (or ``updated_at``) has reached the
+   watermark is moved, the run reports ``chain_behind`` when the clamp actually
+   withheld rows, and a table whose ``state.json`` cannot be read moves nothing
+   at all (``chain_missing``, with an alert).
 
 The planning functions (``hot_cutoff``, ``select_tables``, ``plan_space_moves``,
-``parse_bytes``, ``resolve_deadline``, ``effective_budget``, ``schema_drift``)
-are pure and unit tested without a database; every database import is lazy so
-those tests never need psycopg.
+``parse_bytes``, ``resolve_deadline``, ``effective_budget``, ``schema_drift``,
+``parse_incremental_specs``, ``parse_chain_watermark``) are pure and unit tested
+without a database; every database import is lazy so those tests never need
+psycopg.
 
 Run with the platform venv:
     G:\\StockPlatform\\current\\.venv\\Scripts\\python.exe scripts/database-storage-tiers.py status
@@ -82,6 +96,13 @@ DEFAULT_COLD_DIR = r"G:\StockPlatform\data\pg-cold"
 DEFAULT_PGDATA_DIR = r"G:\StockPlatform\data\postgresql16"
 DEFAULT_LOG_FILE = r"G:\StockPlatform\logs\storage-tiers.jsonl"
 DEFAULT_ENV_FILE = r"G:\StockPlatform\config\runtime.env"
+DEFAULT_BACKUP_ROOT = r"G:\StockPlatform\backups"
+# scripts/windows/stock-incremental-backup.psm1 exports these tables by window
+# into backups\incremental\<table>\, so the nightly dump excludes their data --
+# and, once a twin exists, the twin's data too.  Same spelling and same default
+# as Get-StockIncrementalTableSpecs, because the two must agree about which
+# tables are covered by a chunk chain.
+DEFAULT_INCREMENTAL_TABLES = "quant.raw_market_observations:created_at:updated_at"
 DEFAULT_BUDGET_BYTES = 500 * 1024**3
 DEFAULT_BATCH_ROWS = 20_000
 DEFAULT_STATEMENT_TIMEOUT_MS = 10 * 60 * 1000
@@ -117,14 +138,37 @@ DEFAULT_MAX_SPACE_DAYS = 7
 # normal outcome and the ratchet must stop instead of cutting more history.
 MIN_USAGE_DROP_RATIO = 0.01
 
+# The "how many rows is the chain holding back" probe stops counting here: the
+# receipt only needs to say "some, and roughly how many", and an unbounded count
+# over a table whose chain froze months ago is a full scan.
+CHAIN_PROBE_ROWS = 100_000
+
+# VACUUM is not part of the move's correctness -- the rows are already in the
+# twin when it runs -- so it gets its own ceiling instead of the batch timeout.
+VACUUM_STATEMENT_TIMEOUT_MS = 30 * 60 * 1000
+
 # Space verdicts that mean the 500 GB guard is not actually guarding anything.
 # They make the whole run 'degraded' (exit 2) so the scheduled task reports it.
 DEGRADED_SPACE_STATUSES = frozenset({"unknown", "exhausted", "needs_repack"})
+
+# Per-table outcomes that mean `install` has not run (or has not finished), so
+# the budget guard moved nothing at all.  A run that reports these must never
+# exit 0: today's production state is exactly this, and a green scheduled task
+# would hide it forever.
+NOT_INSTALLED_TABLE_STATUSES = frozenset({"skipped_missing_table", "skipped_missing_quarantine"})
+
+# Per-table outcomes that need a human before the next run: either the backup
+# chain that the twin's dump exclusion depends on is not where it should be, or
+# the twin carries a unique index this job cannot reason about.
+BLOCKING_TABLE_STATUSES = frozenset(
+    {"chain_missing", "chain_columns_missing", "unsupported_unique_index"}
+)
 
 # Receipt status -> process exit code.
 EXIT_CODES = {
     "ok": 0,
     "deadline_reached": 0,
+    "deadline_missed": 1,
     "partial": 1,
     "conflicts": 1,
     "schema_drift": 1,
@@ -485,6 +529,106 @@ def schema_drift(hot_columns, cold_columns):
     }
 
 
+def parse_incremental_specs(value):
+    """Pure.  ``STOCK_BACKUP_INCREMENTAL_TABLES`` -> ``{table: (created, updated|None)}``.
+
+    The same grammar ``Get-StockIncrementalTableSpecs`` parses in
+    ``scripts/windows/stock-incremental-backup.psm1``:
+    ``schema.table:created_column[:updated_column]`` entries separated by
+    ``;``, an empty value meaning the documented default and the literal
+    ``none`` meaning "no table is exported incrementally".
+
+    Why this script cares: the nightly ``pg_dump`` excludes the *data* of these
+    tables and of their ``_cold`` twins, because the chunk chain is what holds
+    their history.  A row this job moves into a twin before the chain has
+    exported it would therefore be in no backup at all, so the move is clamped
+    to the chain's watermark (see :func:`chain_clamp`).
+
+    A malformed entry raises: guessing what an operator meant would silently
+    turn the clamp off for the one table it exists to protect.
+    """
+    text = "" if value is None else str(value).strip()
+    if not text:
+        text = DEFAULT_INCREMENTAL_TABLES
+    if text.lower() == "none":
+        return {}
+    specs: dict[str, tuple[str, str | None]] = {}
+    for entry in text.split(";"):
+        item = entry.strip()
+        if not item:
+            continue
+        parts = [part.strip() for part in item.split(":")]
+        if len(parts) not in (2, 3) or parts[0].count(".") != 1 or not all(parts):
+            raise ValueError(
+                f"invalid incremental table spec {item!r}; expected schema.table:created_column"
+                "[:updated_column]"
+            )
+        table = parts[0].lower()
+        if table in specs:
+            raise ValueError(f"duplicate incremental table spec for {table}")
+        specs[table] = (parts[1], parts[2] if len(parts) == 3 else None)
+    return specs
+
+
+def parse_chain_watermark(payload):
+    """Pure.  The ``watermark`` of a chunk chain's ``state.json``, or ``None``.
+
+    ``Invoke-StockIncrementalBackup`` writes
+    ``{"table": ..., "watermark": "YYYY-MM-DDTHH:MM:SS.ffffffZ", "updated_at": ...}``
+    and advances the watermark only after a chunk's row count was verified, so
+    everything strictly below it is exported.  The value is always UTC; a
+    naive or unparsable one is refused rather than guessed, because a wrong
+    clamp either moves unbacked rows or freezes the tier job.
+    """
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("watermark")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    text = str(raw).strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def chain_state_path(backup_root, qualified: str) -> Path:
+    """``<backup root>\\incremental\\<schema.table>\\state.json`` -- the psm1 layout."""
+    return Path(backup_root or DEFAULT_BACKUP_ROOT) / "incremental" / qualified / "state.json"
+
+
+def read_chain_state(backup_root, qualified: str) -> dict:
+    """The chunk chain's watermark for one table, and why it is missing if it is.
+
+    A missing directory, a missing file, unreadable JSON or a state without a
+    watermark all mean the same thing operationally: this run cannot prove the
+    chain has exported anything, so it must not move rows whose only remaining
+    copy would be the dump-excluded twin.
+    """
+    path = chain_state_path(backup_root, qualified)
+    entry = {"table": qualified, "state_file": str(path), "watermark": None, "reason": None}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        entry["reason"] = "no chunk-chain state file; the incremental export has never completed"
+        return entry
+    except (OSError, ValueError) as error:
+        entry["reason"] = f"chunk-chain state file unreadable: {_error_text(error)}"
+        return entry
+    try:
+        watermark = parse_chain_watermark(payload)
+    except ValueError as error:
+        entry["reason"] = f"chunk-chain watermark unparsable: {_error_text(error)}"
+        return entry
+    if watermark is None:
+        entry["reason"] = "chunk-chain state file carries no watermark"
+        return entry
+    entry["watermark"] = watermark
+    return entry
+
+
 # --------------------------------------------------------------------------
 # Environment, filesystem and connection helpers
 # --------------------------------------------------------------------------
@@ -657,6 +801,10 @@ def resolve_settings(args, env) -> dict:
         "max_batches": int(getattr(args, "max_batches", None) or 0),
         "max_space_days": int(getattr(args, "max_space_days", None) or DEFAULT_MAX_SPACE_DAYS),
         "log_file": getattr(args, "log_file", None) or env.get("PGDATA_TIERS_LOG_FILE") or DEFAULT_LOG_FILE,
+        "backup_root": getattr(args, "backup_root", None) or env.get("STOCK_BACKUP_ROOT") or DEFAULT_BACKUP_ROOT,
+        # Which tables the nightly dump exports through a chunk chain instead of
+        # its own data; their twins' moves are clamped to the chain watermark.
+        "incremental_specs": parse_incremental_specs(env.get("STOCK_BACKUP_INCREMENTAL_TABLES")),
     }
 
 
@@ -753,6 +901,58 @@ def unique_key_columns(conn, qualified: str) -> list[tuple[str, ...]]:
     return keys
 
 
+def unsupported_unique_indexes(conn, qualified: str) -> list[str]:
+    """Valid unique indexes this job cannot reason about: partial or expression.
+
+    :func:`unique_key_columns` deliberately skips them -- a partial index'
+    predicate and an expression index' key are not a column list, so the
+    conflict scan cannot join on them -- but ``LIKE ... INCLUDING INDEXES``
+    copies them to the twin verbatim.  A row whose *unfiltered* key matched one
+    of those would be swallowed by ``ON CONFLICT DO NOTHING`` and then counted
+    as a benign ``already_in_cold_rows``.  So the move refuses the table
+    instead; the name is returned so the receipt can say which index.
+    """
+    if _regclass(conn, qualified) is None:
+        return []
+    rows = conn.execute(
+        """
+        SELECT i.indexrelid::regclass::text
+        FROM pg_index i
+        WHERE i.indrelid = %s::regclass AND i.indisunique AND i.indisvalid
+          AND (i.indpred IS NOT NULL OR i.indexprs IS NOT NULL)
+        ORDER BY 1
+        """,
+        (qualified,),
+    ).fetchall()
+    return [name for (name,) in rows]
+
+
+def cutoff_index_state(conn, policy: TierPolicy) -> dict:
+    """Our own cutoff index, looked up *by name* rather than by leading column.
+
+    ``has_cutoff_index`` asks whether any valid index leads with the policy
+    column, which is the question the planner cares about.  It is the wrong
+    question for repair: a ``CREATE INDEX CONCURRENTLY`` that was cancelled
+    leaves an index with ``indisvalid = false`` holding the name, which reads as
+    "absent" there, while ``CREATE INDEX ... IF NOT EXISTS`` matches on the
+    relation name regardless of validity and quietly does nothing.  Install
+    would then report ``created`` forever without ever rebuilding it.
+    """
+    row = conn.execute(
+        """
+        SELECT i.indisvalid, i.indisready
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE i.indrelid = %s::regclass AND n.nspname = %s AND c.relname = %s
+        """,
+        (policy.qualified, policy.schema, policy.cutoff_index),
+    ).fetchone()
+    if row is None:
+        return {"exists": False, "valid": None, "ready": None}
+    return {"exists": True, "valid": bool(row[0]), "ready": bool(row[1])}
+
+
 def has_cutoff_index(conn, policy: TierPolicy) -> bool:
     """Any index whose *leading* column is the policy column (not just ours)."""
     row = conn.execute(
@@ -803,14 +1003,65 @@ def _join_on(columns, left="b", right="c"):
     )
 
 
-def snapshot_batch_sql(policy: TierPolicy, columns):
-    """Step 1: the batch, frozen into a TEMP table inside the move transaction."""
+def _chain_predicate(chain_columns):
+    """``AND (c IS NULL OR c < %(chain_watermark)s)`` for every chain column.
+
+    ``NULL`` never satisfies ``>= watermark``, so a row with no update stamp is
+    inside the exported range as far as that column is concerned.
+    """
+    from psycopg import sql
+
+    return sql.SQL("").join(
+        sql.SQL(" AND ({c} IS NULL OR {c} < %(chain_watermark)s)").format(c=sql.Identifier(name))
+        for name in chain_columns or ()
+    )
+
+
+def snapshot_batch_sql(policy: TierPolicy, columns, chain_columns=()):
+    """Step 1: the batch, frozen into a TEMP table inside the move transaction.
+
+    ``FOR UPDATE`` is what makes step 5 safe.  Without it the snapshot takes no
+    row locks, so an ``UPDATE`` committed between the snapshot and the
+    delete-by-primary-key is lost: the twin keeps the pre-update version and the
+    ``DELETE`` removes the newer one.  These tables have upsert paths (the
+    unique keys the conflict scan joins on), so that is a real sequence, not a
+    theoretical one.  The batch is bounded (20 000 rows by default) and the
+    transaction already carries ``lock_timeout = 30 s``, so a contended row
+    fails the batch instead of queueing behind a writer.
+
+    ``chain_columns`` clamps the batch to the incremental-backup chain: see
+    :func:`parse_incremental_specs`.
+    """
     from psycopg import sql
 
     return sql.SQL(
         "CREATE TEMPORARY TABLE tier_batch ON COMMIT DROP AS "
-        "SELECT {cols} FROM {hot} WHERE {column} < %(cutoff)s ORDER BY {column} LIMIT %(batch)s"
-    ).format(cols=_columns_sql(columns), hot=_ident(policy.qualified), column=sql.Identifier(policy.column))
+        "SELECT {cols} FROM {hot} WHERE {column} < %(cutoff)s{chain} "
+        "ORDER BY {column} LIMIT %(batch)s FOR UPDATE"
+    ).format(
+        cols=_columns_sql(columns),
+        hot=_ident(policy.qualified),
+        column=sql.Identifier(policy.column),
+        chain=_chain_predicate(chain_columns),
+    )
+
+
+def withheld_by_chain_sql(policy: TierPolicy, chain_columns):
+    """How many rows past the cutoff the chain watermark is holding back.
+
+    Bounded by ``%(probe)s`` so a table whose chain froze months ago costs one
+    index range scan, not a count over millions of rows.
+    """
+    from psycopg import sql
+
+    return sql.SQL(
+        "SELECT count(*) FROM (SELECT 1 FROM {hot} WHERE {column} < %(cutoff)s "
+        "AND NOT (TRUE{chain}) LIMIT %(probe)s) s"
+    ).format(
+        hot=_ident(policy.qualified),
+        column=sql.Identifier(policy.column),
+        chain=_chain_predicate(chain_columns),
+    )
 
 
 def conflict_scan_sql(policy: TierPolicy, pk_columns, unique_keys):
@@ -905,6 +1156,11 @@ def table_stats(conn, policies, *, now=None, with_counts: bool = False) -> dict:
             "view_exists": _regclass(conn, policy.all_view) is not None,
             "cutoff_index": policy.cutoff_index,
             "cutoff_index_present": None,
+            # None = no index of that name; False = a cancelled CONCURRENTLY
+            # build left an INVALID one, which the planner ignores and
+            # CREATE INDEX ... IF NOT EXISTS will never replace.  `install`
+            # repairs it (DROP INDEX CONCURRENTLY, then rebuild).
+            "cutoff_index_valid": None,
             "size_bytes": None,
             "cold_size_bytes": None,
             "oldest_hot_at": None,
@@ -914,6 +1170,9 @@ def table_stats(conn, policies, *, now=None, with_counts: bool = False) -> dict:
         if entry["exists"]:
             entry["size_bytes"] = _scalar(conn, "SELECT pg_total_relation_size(%s)", (policy.qualified,))
             entry["cutoff_index_present"] = has_cutoff_index(conn, policy)
+            index_state = cutoff_index_state(conn, policy)
+            entry["cutoff_index_valid"] = index_state["valid"]
+            entry["unsupported_unique_indexes"] = unsupported_unique_indexes(conn, policy.qualified)
             oldest = _scalar(conn, _sql_min_column(policy), default=None)
             if oldest is not None:
                 entry["oldest_hot_at"] = oldest.isoformat()
@@ -922,6 +1181,10 @@ def table_stats(conn, policies, *, now=None, with_counts: bool = False) -> dict:
                 entry["hot_rows"], entry["hot_rows_basis"] = _count_rows(conn, policy.qualified)
         if entry["cold_exists"]:
             entry["cold_size_bytes"] = _scalar(conn, "SELECT pg_total_relation_size(%s)", (policy.cold_table,))
+            entry["unsupported_unique_indexes"] = sorted(
+                set(entry.get("unsupported_unique_indexes") or [])
+                | set(unsupported_unique_indexes(conn, policy.cold_table))
+            )
             if with_counts:
                 entry["cold_rows"], entry["cold_rows_basis"] = _count_rows(conn, policy.cold_table)
         if entry["exists"] and entry["cold_exists"]:
@@ -1044,12 +1307,17 @@ def command_install(args, env) -> dict:
         "actions": [],
         "errors": [],
         "skipped_locked": [],
+        # Cutoff indexes that an interrupted CONCURRENTLY build left INVALID and
+        # that this run could not rebuild; install finishes 'partial' for them.
+        "invalid_indexes": [],
     }
 
     def note(action: str, target: str, result: str, **extra):
         report["actions"].append({"action": action, "target": target, "result": result, **extra})
         if result == "skipped_locked":
             report["skipped_locked"].append(target)
+        if result == "invalid_index_present":
+            report["invalid_indexes"].append(target)
 
     # CREATE TABLESPACE and CREATE INDEX CONCURRENTLY cannot run inside a
     # transaction block, hence the autocommit connection for the whole of
@@ -1140,7 +1408,7 @@ def command_install(args, env) -> dict:
 
     if report["errors"]:
         report["status"] = "failed"
-    elif report["skipped_locked"]:
+    elif report["skipped_locked"] or report["invalid_indexes"]:
         report["status"] = "partial"
     else:
         report["status"] = "ok"
@@ -1178,14 +1446,56 @@ def _install_cutoff_index(conn, policy: TierPolicy, note):
 
     Migration 20260919_0106 creates the same five indexes with the same names so
     a database rebuilt from the chain already has them; ``IF NOT EXISTS`` makes
-    whichever runs second a no-op.
+    whichever runs second a no-op.  Repairing a *cancelled* build is this
+    function's job and nobody else's (the migration's docstring says so): a
+    ``CREATE INDEX CONCURRENTLY`` that is interrupted -- and on the 19 GB
+    ``quant.raw_market_observations`` an interruption is the likely first
+    outcome -- leaves an index with ``indisvalid = false`` holding the name.
+    The planner ignores it, ``IF NOT EXISTS`` matches it and does nothing, and
+    the previous version of this function reported ``created`` while nothing had
+    been built.  So: look the name up, drop an invalid one CONCURRENTLY, rebuild.
     """
     from psycopg import sql
 
     if _regclass(conn, policy.qualified) is None:
         note("create_cutoff_index", policy.cutoff_index, "hot_table_missing")
         return
-    if has_cutoff_index(conn, policy):
+    state = cutoff_index_state(conn, policy)
+    if state["exists"] and not state["valid"]:
+        dropped = _lock_guarded(
+            conn, note, "drop_invalid_cutoff_index", policy.cutoff_index,
+            lambda: conn.execute(
+                sql.SQL("DROP INDEX CONCURRENTLY IF EXISTS {}").format(
+                    sql.Identifier(policy.schema, policy.cutoff_index)
+                )
+            ),
+        )
+        if dropped is None:
+            # The drop needs a ShareUpdateExclusiveLock it could not take.  The
+            # table still has no usable cutoff index, so say exactly that and
+            # let install finish 'partial' rather than 'ok'.
+            note(
+                "create_cutoff_index",
+                policy.cutoff_index,
+                "invalid_index_present",
+                detail="an INVALID index holds the name and DROP INDEX CONCURRENTLY could not take "
+                "its lock; re-run install when the table is quiet",
+            )
+            return
+        done = _lock_guarded(
+            conn, note, "create_cutoff_index", policy.cutoff_index,
+            lambda: conn.execute(
+                sql.SQL("CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {hot} ({column})").format(
+                    name=sql.Identifier(policy.cutoff_index),
+                    hot=_ident(policy.qualified),
+                    column=sql.Identifier(policy.column),
+                )
+            ),
+        )
+        if done is not None:
+            note("create_cutoff_index", policy.cutoff_index, "rebuilt_invalid")
+        return
+    if state["exists"] or has_cutoff_index(conn, policy):
         note("create_cutoff_index", policy.cutoff_index, "already_present")
         return
     done = _lock_guarded(
@@ -1198,8 +1508,20 @@ def _install_cutoff_index(conn, policy: TierPolicy, note):
             )
         ),
     )
-    if done is not None:
-        note("create_cutoff_index", policy.cutoff_index, "created")
+    if done is None:
+        return
+    # A CONCURRENTLY build that fails *after* its second pass leaves the index
+    # invalid without raising here, so the claim is read back rather than assumed.
+    after = cutoff_index_state(conn, policy)
+    if after["exists"] and not after["valid"]:
+        note(
+            "create_cutoff_index",
+            policy.cutoff_index,
+            "invalid_index_present",
+            detail="the CONCURRENTLY build left an INVALID index; the next install rebuilds it",
+        )
+        return
+    note("create_cutoff_index", policy.cutoff_index, "created")
 
 
 def _install_twin(conn, policy: TierPolicy, tablespace: str, note):
@@ -1387,8 +1709,45 @@ def command_plan(args, env) -> dict:
                 entry["days"] = _rows_per_day(conn, policy, cutoff, int(getattr(args, "day_limit", 0) or 30))
             report["tables"].append(entry)
         report["space_policy"] = space_verdict(usage, stats, max_days_per_table=settings["max_space_days"])
-    report["status"] = "degraded" if report["space_policy"]["status"] in DEGRADED_SPACE_STATUSES else "ok"
+        _note_installation(conn, report, settings)
+    report["status"] = _read_only_status(report)
     return report
+
+
+def _note_installation(conn, report: dict, settings) -> None:
+    """Record whether ``install`` has actually run, for ``plan`` and ``status``.
+
+    Without the tablespace or the quarantine table ``apply`` moves nothing at
+    all, so a read-only command that answers "ok" is describing a budget guard
+    that is not guarding anything.
+    """
+    report["tablespace_installed"] = bool(
+        conn.execute(
+            "SELECT 1 FROM pg_tablespace WHERE spcname = %s", (settings["tablespace"],)
+        ).fetchone()
+    )
+    report["quarantine_table_installed"] = _regclass(conn, QUARANTINE_TABLE) is not None
+
+
+def _read_only_status(report: dict) -> str:
+    """``plan``/``status`` verdict: degraded (exit 2) when the guard cannot run."""
+    if report["space_policy"]["status"] in DEGRADED_SPACE_STATUSES:
+        return "degraded"
+    missing = []
+    if report.get("tablespace_installed") is False:
+        missing.append("the cold tablespace")
+    if report.get("quarantine_table_installed") is False:
+        missing.append(QUARANTINE_TABLE)
+    if any(entry.get("exists") and not entry.get("cold_exists") for entry in report.get("tables", [])):
+        missing.append("at least one cold twin")
+    if missing:
+        report["not_installed"] = missing
+        report["reason"] = (
+            "install has not run: " + ", ".join(missing) + " is missing, so apply would move no rows "
+            "and the hot budget is unguarded"
+        )
+        return "degraded"
+    return "ok"
 
 
 def _rows_per_day(conn, policy: TierPolicy, cutoff, limit: int):
@@ -1421,10 +1780,21 @@ def command_apply(args, env) -> dict:
         "max_space_days": settings["max_space_days"],
         "deadline": None if deadline is None else deadline.isoformat(),
         "deadline_reached": False,
+        # The deadline was already behind us when the run started: nothing was
+        # attempted at all.  A machine that was off at 06:00 and comes up on a
+        # Saturday at 10:00 hits exactly this, and it must not be filed next to
+        # a run that worked until 08:00.
+        "deadline_missed": False,
         "usage_before": usage_before,
         "tables": [],
         "errors": [],
     }
+    if _deadline_passed(deadline):
+        record["deadline_missed"] = True
+        record["deadline_missed_reason"] = (
+            f"the deadline {record['deadline']} was already past when the run started "
+            f"({started_at.isoformat()}); no table was attempted"
+        )
     with connect(env, autocommit=True, statement_timeout_ms=settings["statement_timeout_ms"]) as conn:
         stats_before = table_stats(conn, policies, now=started_at)
         record["space_policy_before"] = space_verdict(
@@ -1458,11 +1828,16 @@ def command_apply(args, env) -> dict:
     record["moved_rows"] = sum(entry["deleted_rows"] for entry in record["tables"])
     record["quarantined_rows"] = sum(entry.get("quarantined_rows", 0) for entry in record["tables"])
     record["status"] = _apply_status(record)
+    table_statuses = {entry.get("status") for entry in record["tables"]}
     record["alert"] = bool(
         record["space_policy"].get("alert")
         or record["space_policy_before"].get("alert")
         or record["quarantined_rows"]
-        or record["status"] in ("degraded", "schema_drift", "partial")
+        or record["deadline_missed"]
+        # chain_behind is a working state (the clamp did its job), but a chain
+        # that is behind enough to withhold rows is an operator problem.
+        or table_statuses & (BLOCKING_TABLE_STATUSES | NOT_INSTALLED_TABLE_STATUSES | {"chain_behind"})
+        or record["status"] in ("degraded", "schema_drift", "partial", "deadline_missed")
     )
     _append_jsonl(settings["log_file"], record)
     return record
@@ -1474,14 +1849,27 @@ def _apply_status(record) -> str:
     ``schema_drift`` outranks ``partial`` because it names the one failure an
     operator must act on before the next run: every other per-table failure is
     retried harmlessly tomorrow, a drifted twin is not.
+
+    Two of these rungs exist because a green scheduled task is the most
+    expensive kind of wrong:
+
+    * ``deadline_missed`` -- the deadline was already behind us before the first
+      table, so nothing was even attempted.  ``deadline_reached`` (exit 0) means
+      "worked until the window closed"; this one means "the window was shut",
+      and the two must not look the same in the log.
+    * ``partial`` for any ``skipped_missing_table`` / ``skipped_missing_quarantine``
+      -- those mean ``install`` has not run, which is exactly today's production
+      state, and a run that moved nothing at all is not a success.
     """
     statuses = {entry.get("status") for entry in record["tables"]}
     status = "ok"
     if record.get("deadline_reached") or "deadline_reached" in statuses:
         status = "deadline_reached"
+    if record.get("deadline_missed"):
+        status = "deadline_missed"
     if record.get("quarantined_rows"):
         status = "conflicts"
-    if record["errors"]:
+    if record["errors"] or statuses & NOT_INSTALLED_TABLE_STATUSES or statuses & BLOCKING_TABLE_STATUSES:
         status = "partial"
     if "schema_drift" in statuses:
         status = "schema_drift"
@@ -1534,9 +1922,20 @@ def _run_space_ratchet(conn, policies, verdict, results, started_at, settings, r
             merged["space_policy_hot_days"] = hot_days
             if extra["status"] not in ("ok",):
                 merged["status"] = extra["status"]
+        # Measured on tiering_usage_bytes -- the WAL-free quantity the policy is
+        # expressed in and that space_verdict feeds plan_space_moves.  Against
+        # total usage_bytes the drop was routinely *negative*: moving a week of
+        # a 19 GB table is millions of DELETE+INSERT rows plus a VACUUM, which
+        # writes gigabytes of WAL into the same directory, so pg_wal grew by more
+        # than the heap could ever give back and the ratchet stopped with
+        # 'needs_repack' for a reason that had nothing to do with repacking.
+        # wal_before/wal_after are in the receipt so that is visible rather than
+        # inferred.
         dropped = None
-        if before["measured"] and after["measured"] and before["usage_bytes"] > 0:
-            dropped = (before["usage_bytes"] - after["usage_bytes"]) / before["usage_bytes"]
+        tiering_before = before.get("tiering_usage_bytes")
+        tiering_after = after.get("tiering_usage_bytes")
+        if before["measured"] and after["measured"] and (tiering_before or 0) > 0:
+            dropped = (tiering_before - tiering_after) / tiering_before
         ratchet["tables"].append(
             {
                 "table": name,
@@ -1544,6 +1943,10 @@ def _run_space_ratchet(conn, policies, verdict, results, started_at, settings, r
                 "moved_rows": extra["deleted_rows"],
                 "usage_before_bytes": before["usage_bytes"],
                 "usage_after_bytes": after["usage_bytes"],
+                "tiering_usage_before_bytes": tiering_before,
+                "tiering_usage_after_bytes": tiering_after,
+                "wal_before_bytes": before.get("wal_bytes"),
+                "wal_after_bytes": after.get("wal_bytes"),
                 "usage_drop_ratio": None if dropped is None else round(dropped, 6),
             }
         )
@@ -1552,13 +1955,65 @@ def _run_space_ratchet(conn, policies, verdict, results, started_at, settings, r
             record["space_policy"]["status"] = "needs_repack"
             record["space_policy"]["alert"] = True
             record["space_policy"]["reason"] = (
-                f"moved {extra['deleted_rows']} rows out of {name} and the hot directory did not shrink by "
-                f"{MIN_USAGE_DROP_RATIO:.0%}; plain VACUUM cannot return front-of-heap pages to the "
+                f"moved {extra['deleted_rows']} rows out of {name} and the hot directory's non-WAL "
+                f"usage did not fall by {MIN_USAGE_DROP_RATIO:.0%} "
+                f"({tiering_before} -> {tiering_after} bytes, WAL {before.get('wal_bytes')} -> "
+                f"{after.get('wal_bytes')}); plain VACUUM cannot return front-of-heap pages to the "
                 "filesystem, so the ratchet stopped. New inserts will reuse the freed pages (growth is "
                 "bounded), but reclaiming the existing bloat needs VACUUM FULL or pg_repack in a "
                 "maintenance window, or more disk. This job never runs either by itself."
             )
             break
+
+
+def _chain_guard(policy: TierPolicy, hot_columns, settings, result: dict, record: dict):
+    """Clamp one table's move to its incremental-backup chain, or refuse it.
+
+    The nightly ``pg_dump`` excludes the data of every table in
+    ``STOCK_BACKUP_INCREMENTAL_TABLES`` *and* the data of its ``_cold`` twin,
+    because the chunk chain under ``backups\\incremental\\<table>\\`` is what
+    holds their history.  That is only true for rows the chain has actually
+    exported.  The chain's upper bound lags ``now()`` by 30 minutes and the
+    04:10 run is two hours before this job, so a row created after ~03:40 and
+    moved at 06:00 would be in the twin -- excluded from the dump -- with no
+    chunk behind it.  Nothing would ever notice until a restore.
+
+    Returns ``(chain_columns, params)`` for the snapshot predicate, or ``None``
+    when the caller must stop: a table whose chain state cannot be read moves
+    nothing at all, because "no watermark" and "the chain is up to date" are
+    indistinguishable from here and only one of them is safe.
+    """
+    specs = settings.get("incremental_specs") or {}
+    spec = specs.get(policy.qualified.lower())
+    result["chain_protected"] = spec is not None
+    if spec is None:
+        return ((), {})
+    created_column, updated_column = spec
+    present = {name for name in hot_columns}
+    absent = [name for name in (created_column, updated_column) if name and name not in present]
+    if absent:
+        # The env file names a column this table does not have, so the clamp
+        # cannot be built.  Refusing beats moving unclamped rows out of a table
+        # whose twin the dump excludes.
+        result["status"] = "chain_columns_missing"
+        result["detail"] = (
+            f"STOCK_BACKUP_INCREMENTAL_TABLES names column(s) {absent} that {policy.qualified} "
+            "does not have, so the chain clamp cannot be built"
+        )
+        record["errors"].append({"table": policy.qualified, "error": result["detail"]})
+        return None
+    state = read_chain_state(settings.get("backup_root"), policy.qualified)
+    result["chain_state_file"] = state["state_file"]
+    if state["watermark"] is None:
+        result["status"] = "chain_missing"
+        result["detail"] = state["reason"]
+        record["errors"].append(
+            {"table": policy.qualified, "error": f"chain watermark unavailable: {state['reason']}"}
+        )
+        return None
+    result["chain_watermark"] = state["watermark"].isoformat()
+    columns = tuple(name for name in (created_column, updated_column) if name)
+    return (columns, {"chain_watermark": state["watermark"]})
 
 
 def _move_table(conn, policy: TierPolicy, now, hot_days: int, settings, record,
@@ -1569,8 +2024,6 @@ def _move_table(conn, policy: TierPolicy, now, hot_days: int, settings, record,
     transaction (see the module docstring), so a kill at any instant loses
     nothing and duplicates nothing.
     """
-    from psycopg import sql
-
     cutoff = hot_cutoff(now, hot_days)
     result = {
         "table": policy.qualified,
@@ -1607,9 +2060,34 @@ def _move_table(conn, policy: TierPolicy, now, hot_days: int, settings, record,
         if not pk_columns:
             result["status"] = "skipped_no_primary_key"
             return result
+        unsupported = sorted(
+            set(unsupported_unique_indexes(conn, policy.qualified))
+            | set(unsupported_unique_indexes(conn, policy.cold_table))
+        )
+        if unsupported:
+            # The conflict scan joins on column lists; a partial or expression
+            # unique index has neither, so the twin could silently swallow a
+            # differing row through ON CONFLICT DO NOTHING and this job would
+            # count it as a benign 'already_in_cold_rows'.
+            result["status"] = "unsupported_unique_index"
+            result["unsupported_unique_indexes"] = unsupported
+            result["detail"] = (
+                "a partial or expression unique index exists on the hot table or its twin; the "
+                "conflict scan cannot join on it, so the move is refused rather than risking a "
+                "silently dropped row"
+            )
+            record["errors"].append(
+                {"table": policy.qualified, "error": f"unsupported unique index(es): {unsupported}"}
+            )
+            return result
+
+        chain = _chain_guard(policy, columns, settings, result, record)
+        if chain is None:
+            return result
+        chain_columns, chain_params = chain
         unique_keys = unique_key_columns(conn, policy.cold_table) or [tuple(pk_columns)]
 
-        snapshot = snapshot_batch_sql(policy, columns)
+        snapshot = snapshot_batch_sql(policy, columns, chain_columns)
         scan = conflict_scan_sql(policy, pk_columns, unique_keys)
         quarantine = quarantine_sql(pk_columns)
         insert = insert_batch_sql(policy, columns, pk_columns)
@@ -1623,7 +2101,9 @@ def _move_table(conn, policy: TierPolicy, now, hot_days: int, settings, record,
             with conn.transaction():
                 _set_local(conn, "statement_timeout", str(settings["statement_timeout_ms"]))
                 _set_local(conn, "lock_timeout", str(LOCK_TIMEOUT_MS))
-                conn.execute(snapshot, {"cutoff": cutoff, "batch": settings["batch_rows"]})
+                conn.execute(
+                    snapshot, {"cutoff": cutoff, "batch": settings["batch_rows"], **chain_params}
+                )
                 batch_rows = conn.execute("SELECT count(*) FROM tier_batch").fetchone()[0]
                 if batch_rows:
                     conn.execute(scan)
@@ -1649,16 +2129,70 @@ def _move_table(conn, policy: TierPolicy, now, hot_days: int, settings, record,
             result["already_in_cold_rows"] = skipped
         if result["quarantined_rows"] and result["status"] == "ok":
             result["status"] = "conflicts"
-        if result["deleted_rows"] > 0:
-            # ANALYZE keeps the planner honest; VACUUM lets the freed pages be
-            # reused by new inserts.  Neither returns bytes to the filesystem.
-            conn.execute(sql.SQL("VACUUM (ANALYZE) {}").format(_ident(policy.qualified)))
-            result["vacuumed"] = True
+        if chain_columns and result["status"] in ("ok", "conflicts"):
+            # The loop ended because no *unclamped* row was left.  Anything still
+            # older than the cutoff is being held back by the chain watermark:
+            # name it, because the move is silently doing less than the receipt's
+            # cutoff implies, and a chain that froze weeks ago is an operator problem.
+            withheld = _scalar(
+                conn,
+                withheld_by_chain_sql(policy, chain_columns),
+                {"cutoff": cutoff, "probe": CHAIN_PROBE_ROWS, **chain_params},
+            )
+            if withheld:
+                result["chain_withheld_rows"] = int(withheld)
+                result["chain_withheld_rows_capped"] = int(withheld) >= CHAIN_PROBE_ROWS
+                result["detail"] = (
+                    f"{int(withheld)}+ row(s) older than the cutoff stay hot because the "
+                    f"incremental backup chain has only exported up to "
+                    f"{result.get('chain_watermark')}; moving them would put them in a "
+                    "dump-excluded twin with no chunk behind them"
+                )
+                # 'conflicts' is the more urgent finding and keeps the status;
+                # chain_withheld_rows carries the clamp on its own in that case.
+                if result["status"] == "ok":
+                    result["status"] = "chain_behind"
     except Exception as error:  # noqa: BLE001 - per-table isolation is the contract
         result["status"] = "failed"
         result["error"] = _error_text(error)
         record["errors"].append({"table": policy.qualified, "error": result["error"]})
+    _vacuum_after_move(conn, policy, settings, result)
     return result
+
+
+def _vacuum_after_move(conn, policy: TierPolicy, settings, result: dict):
+    """``VACUUM (ANALYZE)`` with its own ceiling, outside the move's try.
+
+    The rows are already in the twin and already gone from the hot table when
+    this runs, so the move's correctness does not depend on it -- but it was
+    issued on a connection carrying the 10-minute *batch* ``statement_timeout``,
+    and the first drain of a 19 GB table with six indexes takes longer than
+    that.  A timeout there turned a completely successful move into
+    ``failed`` for the table and ``partial`` for the whole run.  Now it gets
+    30 minutes of its own and is recorded as ``vacuum: timed_out``.
+    """
+    import psycopg
+    from psycopg import sql
+
+    if result["deleted_rows"] <= 0:
+        return
+    try:
+        _set_session(conn, "statement_timeout", f"{VACUUM_STATEMENT_TIMEOUT_MS}ms")
+        try:
+            # ANALYZE keeps the planner honest; VACUUM lets the freed pages be
+            # reused by new inserts.  Neither returns bytes to the filesystem.
+            conn.execute(sql.SQL("VACUUM (ANALYZE) {}").format(_ident(policy.qualified)))
+            result["vacuum"] = "ok"
+            result["vacuumed"] = True
+        finally:
+            _set_session(conn, "statement_timeout", f"{int(settings['statement_timeout_ms'])}ms")
+    except psycopg.errors.QueryCanceled:
+        result["vacuum"] = "timed_out"
+        result["vacuumed"] = False
+    except Exception as error:  # noqa: BLE001 - a vacuum never fails the move
+        result["vacuum"] = "failed"
+        result["vacuum_error"] = _error_text(error)
+        result["vacuumed"] = False
 
 
 def command_status(args, env) -> dict:
@@ -1704,7 +2238,7 @@ def command_status(args, env) -> dict:
             for qualified in WHOLE_TABLE_COLD
         ]
         report["space_policy"] = space_verdict(usage, stats, max_days_per_table=settings["max_space_days"])
-    report["status"] = "degraded" if report["space_policy"]["status"] in DEGRADED_SPACE_STATUSES else "ok"
+    report["status"] = _read_only_status(report)
     return report
 
 
@@ -1779,6 +2313,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     common.add_argument("--max-seconds", type=int, help="relative deadline in seconds; the earlier of the two wins")
     common.add_argument("--log-file", help=f"apply run log (default {DEFAULT_LOG_FILE})")
+    common.add_argument(
+        "--backup-root",
+        help="backup root holding incremental\\<table>\\state.json; the move of a table whose twin "
+        f"the nightly dump excludes is clamped to that watermark (default STOCK_BACKUP_ROOT or "
+        f"{DEFAULT_BACKUP_ROOT})",
+    )
 
     parser = argparse.ArgumentParser(
         prog="database-storage-tiers",
