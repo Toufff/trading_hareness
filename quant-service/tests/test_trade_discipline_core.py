@@ -26,6 +26,8 @@ from app.trade_discipline.templates import (
     buffer_pct,
     build_sizing,
     hard_stop_price,
+    lot_shares,
+    soft_stop_window,
     trail_stop_price,
 )
 
@@ -107,6 +109,18 @@ SHENQI_POSITION = {
 }
 SHENQI_SECTOR = {"code": "881140", "name": "化学制药", "taxonomy": "longhu_ths_industry"}
 
+# The same history with a rally on the plan day: the close sits more than half
+# an ATR above MA5 and the crash low leaves room below, so this is the fixture
+# on which a soft stop is *allowed* (the plain 09-18 close is too near MA5).
+RALLY_BAR = bar("2026-09-18", 8.27, 9.00, 8.20, 8.90, 13000)
+MID_AUTUMN_GAP = {"last_trading_date": "2026-09-24", "resume_date": "2026-09-28", "closed_days": 3}
+
+
+def rally_bars():
+    bars = shenqi_bars()
+    bars[-1] = RALLY_BAR
+    return bars
+
 
 def shenqi_inputs(**overrides):
     payload = {
@@ -119,6 +133,10 @@ def shenqi_inputs(**overrides):
     }
     payload.update(overrides)
     return GenerationInputs(**payload)
+
+
+def rally_inputs(**overrides):
+    return shenqi_inputs(bars=rally_bars(), **overrides)
 
 
 # --- one realistic series per stage -------------------------------------------
@@ -275,8 +293,114 @@ class StageTemplateQualityTests(unittest.TestCase):
         holiday = plan.lines_of("holiday")[0]
         self.assertEqual(holiday.execute_by, "time")
         self.assertEqual(holiday.execute_at, "2026-09-30_before_close")
-        self.assertEqual(holiday.action.value, 0)  # crash_rebound goes flat over a long closure
+        # crash_rebound keeps half its 20% target over the break: 10% of 99632 at 8.41 = 1100 shares
+        self.assertEqual(holiday.derivation.inputs["holiday_exposure_pct"], 10.0)
+        self.assertEqual(holiday.action.value, 1100)
         self.assertEqual(plan.status, "active", failed_checks(plan.quality))
+
+    def test_a_three_day_festival_weekend_never_forces_a_holiday_line(self):
+        """Mid-Autumn 2026: Friday 09-25 closed plus the weekend is a 3-day gap, not a long closure."""
+        calendar = CalendarInfo(upcoming_trading_dates=[date(2026, 9, 21), date(2026, 9, 22),
+                                                        date(2026, 9, 23), date(2026, 9, 24),
+                                                        date(2026, 9, 28)],
+                               closure_gaps=[MID_AUTUMN_GAP])
+        for stage_name, inputs in (("crash_rebound", shenqi_inputs(calendar=calendar)),
+                                   ("broken", stage_inputs("broken", calendar=calendar))):
+            with self.subTest(stage=stage_name):
+                plan = generate(inputs)
+                self.assertEqual(plan.stage, stage_name)
+                self.assertEqual(plan.lines_of("holiday"), [])
+                self.assertFalse(plan.metrics["closure_required"])
+                self.assertIsNone(plan.metrics["closure"])
+                verdict = {check.check_id: check for check in plan.quality}["holiday_line_when_closure"]
+                self.assertTrue(verdict.passed, verdict.detail)
+
+    def test_an_eight_day_national_day_closure_cuts_every_stage_to_half_its_target(self):
+        calendar = CalendarInfo(upcoming_trading_dates=[date(2026, 9, 28), date(2026, 9, 29),
+                                                        date(2026, 9, 30), date(2026, 10, 9),
+                                                        date(2026, 10, 12)],
+                               closure_gaps=[NATIONAL_DAY_GAP])
+        expected = {"crash_rebound": 10.0, "broken": 0.0, "breakout_hold": 12.5, "trend_hold": 15.0,
+                    "pullback_hold": 15.0, "base_platform": 10.0, "unclassified": 7.5}
+        for stage_name, pct in expected.items():
+            with self.subTest(stage=stage_name):
+                inputs = (shenqi_inputs(calendar=calendar) if stage_name == "crash_rebound"
+                          else stage_inputs(stage_name, calendar=calendar))
+                plan = generate(inputs)
+                self.assertEqual(plan.stage, stage_name)
+                holiday = plan.lines_of("holiday")
+                self.assertEqual(len(holiday), 1)
+                self.assertEqual(holiday[0].derivation.inputs["closed_days"], 8)
+                self.assertEqual(holiday[0].derivation.inputs["holiday_exposure_pct"], pct)
+                self.assertEqual(float(TARGET_EXPOSURE_PCT[stage_name]) / 2, pct)
+                self.assertEqual(holiday[0].action.value, 0 if stage_name == "broken"
+                                 else min(plan.sizing.current_shares,
+                                          lot_shares(plan.sizing.equity, Decimal(str(pct)),
+                                                     plan.sizing.reference_price)))
+                self.assertLessEqual(abs(holiday[0].derivation.recompute() - holiday[0].action.value), 0.01)
+
+    def test_a_soft_stop_is_only_drawn_with_half_an_atr_on_each_side(self):
+        """09-18 closed 8.41 with MA5 8.38: a 0.36% soft stop would fire on noise, so it is omitted."""
+        plain = generate(shenqi_inputs())
+        self.assertEqual(plain.lines_of("soft_stop"), [])
+        omitted = {item["kind"]: item for item in plain.metrics["omitted_lines"]}
+        self.assertIn("soft_stop", omitted)
+        self.assertIn("间距不足", omitted["soft_stop"]["reason"])
+        self.assertEqual(omitted["soft_stop"]["inputs"]["ma5"], plain.metrics["ma5"])
+        self.assertEqual(omitted["soft_stop"]["inputs"]["hard_stop"], float(plain.sizing.hard_stop))
+        self.assertEqual(plain.status, "active", failed_checks(plain.quality))
+
+        rally = generate(rally_inputs())
+        self.assertEqual(rally.stage, "crash_rebound")
+        soft = rally.lines_of("soft_stop")
+        self.assertEqual(len(soft), 1)
+        atr14 = rally.metrics["atr14"]
+        hard, reference = float(rally.sizing.hard_stop), float(rally.sizing.reference_price)
+        self.assertGreaterEqual(float(soft[0].price) + 1e-9, hard + 0.5 * atr14)
+        self.assertLessEqual(float(soft[0].price) - 1e-9, reference - 0.5 * atr14)
+        self.assertNotIn("soft_stop", {item["kind"] for item in rally.metrics["omitted_lines"]})
+        self.assertEqual(rally.status, "active", failed_checks(rally.quality))
+
+    def test_soft_stop_separation_is_the_same_rule_in_the_template_and_the_gate(self):
+        window_low, window_high = soft_stop_window(Decimal("7.75"), Decimal("8.41"), 0.73)
+        self.assertEqual((window_low, window_high), (Decimal("8.12"), Decimal("8.05")))  # empty: no soft stop
+        window_low, window_high = soft_stop_window(Decimal("7.92"), Decimal("8.90"), 0.746)
+        self.assertLess(window_low, window_high)
+
+    def test_the_trail_is_omitted_when_it_would_not_move_the_stop(self):
+        """A flat-target stage and a trail no higher than the hard stop both say nothing."""
+        for stage_name in ("broken", "breakout_hold"):
+            with self.subTest(stage=stage_name):
+                plan = generate(stage_inputs(stage_name))
+                self.assertEqual(plan.stage, stage_name)
+                self.assertEqual(plan.lines_of("trail"), [])
+                omitted = {item["kind"]: item for item in plan.metrics["omitted_lines"]}
+                self.assertIn("trail", omitted)
+                self.assertIn("trail_stop", omitted["trail"]["inputs"])
+                self.assertEqual(plan.status, "active", failed_checks(plan.quality))
+        broken = {item["kind"]: item for item in generate(stage_inputs("broken")).metrics["omitted_lines"]}
+        self.assertIn("目标仓位为 0%", broken["trail"]["reason"])
+        breakout = generate(stage_inputs("breakout_hold"))
+        reason = {item["kind"]: item for item in breakout.metrics["omitted_lines"]}["trail"]
+        self.assertIn("不高于硬止损", reason["reason"])
+        self.assertLessEqual(reason["inputs"]["trail_stop"], float(breakout.sizing.hard_stop))
+
+    def test_the_trail_target_has_its_own_derivation(self):
+        plan = generate(shenqi_inputs())
+        trail = plan.lines_of("trail")[0]
+        self.assertEqual(trail.derivation.action_formula,
+                         "max(floor_price, min(low3, arm_price - trail_multiple * atr14))")
+        self.assertEqual(set(trail.derivation.action_inputs),
+                         {"arm_price", "atr14", "trail_multiple", "low3", "floor_price"})
+        self.assertLessEqual(abs(trail.derivation.recompute_action() - float(trail.action.value)), 0.01)
+        self.assertLessEqual(abs(trail.derivation.recompute() - float(trail.price)), 0.01)
+        ratcheted = generate(shenqi_inputs(previous_plan={"plan_id": "prev", "hard_stop": 7.60, "trail": 8.50}))
+        trail = ratcheted.lines_of("trail")[0]
+        self.assertEqual(trail.action.value, Decimal("8.50"))
+        self.assertTrue(trail.derivation.action_formula.startswith("max(previous_trail, "))
+        self.assertEqual(trail.derivation.action_inputs["previous_trail"], 8.5)
+        self.assertLessEqual(abs(trail.derivation.recompute_action() - 8.5), 0.01)
+        self.assertEqual(ratcheted.status, "active", failed_checks(ratcheted.quality))
 
     def test_new_buy_plan_adds_a_trigger_and_a_cancel_line(self):
         plan = generate(stage_inputs("breakout_hold", position=None,
@@ -295,6 +419,10 @@ class StageTemplateQualityTests(unittest.TestCase):
                 self.assertTrue(line.derivation.formula)
                 if line.price is not None:
                     self.assertLessEqual(abs(line.derivation.recompute() - float(line.price)), 0.01)
+                elif line.action.value is not None:   # exposure / holiday: the formula is the share count
+                    self.assertLessEqual(abs(line.derivation.recompute() - float(line.action.value)), 0.01)
+                if line.action.type == "move_stop_to":
+                    self.assertLessEqual(abs(line.derivation.recompute_action() - float(line.action.value)), 0.01)
 
 
 class SizingTests(unittest.TestCase):
@@ -308,6 +436,15 @@ class SizingTests(unittest.TestCase):
         self.assertEqual(sizing.target_exposure_pct, Decimal("20"))
         self.assertEqual(sizing.recommended_shares, 1500)  # tighter than the 20% exposure cap
         self.assertEqual(sizing.current_exposure_pct, Decimal("48.96"))
+        self.assertEqual(sizing.current_risk_pct, Decimal("3.84"))   # 5800 x 0.66 / 99632
+
+    def test_current_risk_pct_is_the_open_risk_of_the_snapshot_position(self):
+        """The 600613 card: 5800 shares, stop distance 0.77 on 99632.26 equity = 4.48%."""
+        sizing = build_sizing(stage="crash_rebound", equity=Decimal("99632.26"),
+                              risk_per_trade_pct=Decimal("1.0"), reference_price=Decimal("8.41"),
+                              hard_stop=Decimal("7.64"), current_shares=5800)
+        self.assertEqual(sizing.current_risk_pct, Decimal("4.48"))
+        self.assertGreater(sizing.current_risk_pct, sizing.risk_per_trade_pct)
 
     def test_exposure_cap_can_bind_before_the_risk_budget(self):
         sizing = build_sizing(stage="broken", equity=Decimal("99632"), risk_per_trade_pct=Decimal("1.0"),
@@ -361,8 +498,11 @@ class QualityGateFailureTests(unittest.TestCase):
     """Every assertion in the gate needs one example that makes it fail."""
 
     def setUp(self):
-        self.plan = generate(shenqi_inputs())
+        # the rally fixture carries every optional line, including the soft stop
+        self.plan = generate(rally_inputs())
         self.assertEqual(self.plan.status, "active", failed_checks(self.plan.quality))
+        self.assertTrue(self.plan.lines_of("soft_stop"))
+        self.assertTrue(self.plan.lines_of("trail"))
         self.covered: set[str] = set()
 
     def verdicts(self, **update) -> dict[str, QualityCheck]:
@@ -391,6 +531,8 @@ class QualityGateFailureTests(unittest.TestCase):
                           lines=self.replace("hard_stop", extra=["volume_expand_1_5x"]))
         self.assert_fails("hard_stop_distance_sane", lines=self.replace("hard_stop", price=Decimal("8.40")))
         self.assert_fails("soft_above_hard", lines=self.replace("soft_stop", price=Decimal("7.00")))
+        crowded = self.plan.sizing.hard_stop + Decimal("0.05")   # inside half an ATR of the hard stop
+        self.assert_fails("soft_stop_separation", lines=self.replace("soft_stop", price=crowded))
         self.assert_fails("lines_monotonic", lines=self.replace("soft_stop", price=Decimal("9.50")))
         self.assert_fails("every_line_evaluable", lines=self.replace("soft_stop", op=None))
         self.assert_fails("every_line_has_derivation",
@@ -410,6 +552,32 @@ class QualityGateFailureTests(unittest.TestCase):
     def test_a_sector_condition_without_a_stored_membership_is_not_evaluable(self):
         verdicts = self.verdicts(metrics=self.metrics_with(sector_available=False))
         self.assertFalse(verdicts["every_line_evaluable"].passed)
+
+    def test_a_soft_stop_too_near_the_reference_price_fails_separation(self):
+        """The 600613 defect: MA5 0.36% under the close is not a line, it is noise."""
+        reference = self.plan.sizing.reference_price
+        verdicts = self.verdicts(lines=self.replace("soft_stop", price=reference - Decimal("0.03")))
+        self.assertFalse(verdicts["soft_stop_separation"].passed)
+        self.assertIn("0.5×ATR14", verdicts["soft_stop_separation"].detail)
+
+    def test_a_trail_whose_target_does_not_recompute_fails_the_derivation_gate(self):
+        trail = self.plan.lines_of("trail")[0]
+        wrong_value = self.replace("trail", action=Action(type="move_stop_to", value=trail.action.value + 1))
+        self.assertFalse(self.verdicts(lines=wrong_value)["every_line_has_derivation"].passed)
+        no_formula = self.replace("trail", derivation=trail.derivation.model_copy(
+            update={"action_formula": "", "action_inputs": {}}))
+        self.assertFalse(self.verdicts(lines=no_formula)["every_line_has_derivation"].passed)
+
+    def test_an_exposure_line_whose_share_count_does_not_recompute_fails_the_derivation_gate(self):
+        exposure = self.plan.lines_of("exposure")[0]
+        wrong = self.replace("exposure", action=Action(type="reduce_to_shares", value=exposure.action.value + 100))
+        self.assertFalse(self.verdicts(lines=wrong)["every_line_has_derivation"].passed)
+
+    def test_a_short_closure_never_demands_a_holiday_line_even_if_flagged(self):
+        verdicts = self.verdicts(metrics=self.metrics_with(closure_required=True, closure=MID_AUTUMN_GAP))
+        self.assertTrue(verdicts["holiday_line_when_closure"].passed)
+        verdicts = self.verdicts(metrics=self.metrics_with(closure_required=True, closure=NATIONAL_DAY_GAP))
+        self.assertFalse(verdicts["holiday_line_when_closure"].passed)
 
     def test_a_lowered_hard_stop_is_allowed_only_with_a_recorded_reason(self):
         lowered = self.plan.model_copy(update={"metrics": self.metrics_with(previous_hard_stop=8.10),
@@ -450,8 +618,9 @@ class ShenqiFixtureTests(unittest.TestCase):
         self.assertEqual(plan.stage, "crash_rebound")
         self.assertEqual(plan.trading_date, date(2026, 9, 18))
         self.assertEqual(plan.valid_until.date(), date(2026, 9, 25))
-        self.assertEqual(plan.template_key, "crash_rebound@trade-discipline-templates-v1")
+        self.assertEqual(plan.template_key, "crash_rebound@trade-discipline-templates-v2")
         self.assertEqual(plan.position.quantity, 5800)
+        self.assertEqual(plan.metrics["t1_locked_shares"], 0)
         self.assertEqual(len(plan.inputs_hash), 64)
         self.assertIn("position_snapshot:broker-snapshot-2026-09-18", plan.evidence_refs)
         self.assertIn("sector:longhu_ths_industry:881140", plan.evidence_refs)
@@ -470,13 +639,38 @@ class ShenqiFixtureTests(unittest.TestCase):
     def test_hard_stop_comes_from_the_real_structure_low_and_stays_in_the_sane_band(self):
         price, derivation = hard_stop_price("crash_rebound", self.plan.metrics, Decimal("8.41"))
         self.assertEqual(derivation.rule_id, "hard_stop.crash_rebound")
-        self.assertEqual(derivation.inputs["today_low"], 8.12)
-        self.assertEqual(derivation.inputs["prev_low"], 8.13)
+        # crash_rebound anchors on the crash low: the lowest low of the last 20 sessions (09-14, 7.92)
+        self.assertEqual(derivation.inputs["low20"], 7.92)
+        self.assertEqual(self.plan.metrics["low20"], 7.92)
+        self.assertNotIn("today_low", derivation.inputs)
         self.assertLessEqual(abs(derivation.recompute() - float(price)), 0.01)
         atr14 = self.plan.metrics["atr14"]
         distance = 8.41 - float(price)
         self.assertTrue(0.8 * atr14 <= distance <= 3 * atr14)
         self.assertTrue(0.015 <= distance / 8.41 <= 0.12)
+
+    def test_the_hard_stop_formula_carries_all_four_contract_terms(self):
+        _, derivation = hard_stop_price("crash_rebound", self.plan.metrics, Decimal("8.41"))
+        for term in ("low20", "reference_price * (1 - buffer_pct)",
+                     "reference_price - atr_target_multiple * atr14", "reference_price * (1 - stop_pct_target)"):
+            self.assertIn(term, derivation.formula)
+        self.assertEqual(derivation.inputs["stop_pct_target"], 0.02)
+        self.assertEqual(derivation.inputs["atr_target_multiple"], 0.9)
+        # structure 0.5% away, ATR term 0.45% away, buffer 1.5%: the 2% term is the one that binds
+        calm = {**self.plan.metrics, "low20": 9.95, "atr14": 0.05, "volatility": 0.5}
+        price, derivation = hard_stop_price("crash_rebound", calm, Decimal("10.00"))
+        self.assertEqual(derivation.inputs["buffer_pct"], 0.015)
+        self.assertEqual(price, Decimal("9.80"))
+        self.assertLessEqual(abs(derivation.recompute() - 9.80), 0.01)
+
+    def test_other_stages_keep_their_structure_points(self):
+        metrics = {**self.plan.metrics, "low": 8.12, "prev_low": 8.13, "low20": 7.92}
+        _, broken = hard_stop_price("broken", metrics, Decimal("8.41"))
+        self.assertTrue(broken.formula.startswith("min(min(today_low, prev_low)"))
+        self.assertEqual((broken.inputs["today_low"], broken.inputs["prev_low"]), (8.12, 8.13))
+        self.assertNotIn("low20", broken.inputs)
+        _, pullback = hard_stop_price("pullback_hold", metrics, Decimal("8.41"))
+        self.assertTrue(pullback.formula.startswith("min(recent_low"))
 
     def test_sizing_cuts_the_position_roughly_in_four(self):
         sizing = self.plan.sizing
@@ -488,8 +682,10 @@ class ShenqiFixtureTests(unittest.TestCase):
 
     def test_the_plan_states_every_required_line_kind(self):
         kinds = {line.kind for line in self.plan.lines}
-        self.assertTrue({"exposure", "hard_stop", "soft_stop", "take_partial", "trail",
-                         "no_add", "time_stop"} <= kinds)
+        self.assertTrue({"exposure", "hard_stop", "take_partial", "trail", "no_add", "time_stop"} <= kinds)
+        # the soft stop is refused on this fixture and the refusal is on record
+        self.assertNotIn("soft_stop", kinds)
+        self.assertEqual([item["kind"] for item in self.plan.metrics["omitted_lines"]], ["soft_stop"])
         self.assertEqual([line.priority for line in self.plan.lines],
                          sorted(line.priority for line in self.plan.lines))
 
@@ -502,13 +698,13 @@ class ShenqiFixtureTests(unittest.TestCase):
 class HardStopStructureTests(unittest.TestCase):
     """The hard stop is a structure point; nothing may lift it back into the range."""
 
-    WIDE = {"low": 9.00, "prev_low": 8.80, "recent_low": 9.10, "ma10": 9.50, "prior_high": 10.50,
-            "low10_close": 8.90, "atr14": 0.30, "volatility": 1.0}
+    WIDE = {"low": 9.00, "prev_low": 8.80, "low20": 8.80, "recent_low": 9.10, "ma10": 9.50,
+            "prior_high": 10.50, "low10_close": 8.90, "atr14": 0.30, "volatility": 1.0}
 
     def test_a_structure_wider_than_three_atr_is_kept_not_raised_into_the_range(self):
         price, derivation = hard_stop_price("crash_rebound", self.WIDE, Decimal("10.00"))
-        self.assertEqual(price, Decimal("8.80"))                      # min(today_low, prev_low)
-        self.assertLessEqual(price, Decimal(str(self.WIDE["prev_low"])))
+        self.assertEqual(price, Decimal("8.80"))                      # the 20-day crash low
+        self.assertLessEqual(price, Decimal(str(self.WIDE["low20"])))
         self.assertLess(price, Decimal(str(self.WIDE["low"])))        # never above today's own low
         self.assertNotIn("band_low)", derivation.formula)
         self.assertLessEqual(abs(derivation.recompute() - float(price)), 0.01)
@@ -526,7 +722,7 @@ class HardStopStructureTests(unittest.TestCase):
         self.assertIn("hard_stop_distance_sane", failed_checks(plan.quality))
 
     def test_a_structure_too_close_may_still_be_widened_but_never_tightened(self):
-        tight = {**self.WIDE, "low": 9.98, "prev_low": 9.97}
+        tight = {**self.WIDE, "low": 9.98, "prev_low": 9.97, "low20": 9.97}
         price, _ = hard_stop_price("crash_rebound", tight, Decimal("10.00"))
         self.assertLess(price, Decimal("9.97"))                       # widened below the structure
         self.assertLessEqual(float(price), 10.00 - 0.9 * tight["atr14"] + 0.01)
@@ -556,8 +752,8 @@ class LineWordingTests(unittest.TestCase):
     """The sentence a human reads and the conditions a machine evaluates are one source."""
 
     def test_the_soft_stop_claims_an_industry_condition_only_when_it_carries_one(self):
-        with_sector = generate(shenqi_inputs()).lines_of("soft_stop")[0]
-        without = generate(shenqi_inputs(sector=None)).lines_of("soft_stop")[0]
+        with_sector = generate(rally_inputs()).lines_of("soft_stop")[0]
+        without = generate(rally_inputs(sector=None)).lines_of("soft_stop")[0]
         self.assertEqual(with_sector.extra, ["sector_change_negative"])
         self.assertIn("行业当日翻绿", with_sector.label)
         self.assertEqual(without.extra, [])

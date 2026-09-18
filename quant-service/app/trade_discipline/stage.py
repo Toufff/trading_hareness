@@ -110,6 +110,8 @@ def daily_metrics(bars: list[dict[str, Any]]) -> dict[str, Any]:
         "ma5": fmean(closes[-5:]), "ma10": fmean(closes[-10:]), "ma20": fmean(window20),
         "atr14": float(atr14),
         "hi20": hi20, "lo20": min(window20),
+        # the real crash low: the lowest *low* of the last 20 sessions (``lo20`` is the lowest close)
+        "low20": min(lows[-20:]),
         "prior_high": max(closes[-6:-1]), "prior_high_prev": max(closes[-7:-2]),
         "recent_low": min(closes[-5:]),
         "low10_close": min(window10), "high10_close": max(window10),

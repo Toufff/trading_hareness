@@ -44,6 +44,19 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def _utf8_streams(*streams):
+    """Force UTF-8 on the receipt streams.
+
+    The receipt is ``ensure_ascii=False`` JSON carrying instrument names; on a
+    Windows console the default code page turns them into mojibake or raises.
+    A stream without ``reconfigure`` (a captured StringIO) is left alone.
+    """
+    for stream in streams:
+        reconfigure = getattr(stream, 'reconfigure', None)
+        if reconfigure is not None:
+            reconfigure(encoding='utf-8')
+
+
 def _shanghai(text, fallback):
     """Parse an ISO stamp as an exchange-local time; naive input means 'here'."""
     if not text:
@@ -444,6 +457,7 @@ def build_parser():
 
 
 def main(argv=None):
+    _utf8_streams(sys.stdout, sys.stderr)
     args = build_parser().parse_args(argv)
     load_dotenv(args.env_file, override=True)
 

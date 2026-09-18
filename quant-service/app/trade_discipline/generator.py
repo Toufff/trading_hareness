@@ -25,14 +25,14 @@ from .stage import classify_stage, daily_metrics
 from .templates import (
     DEFAULT_RISK_PER_TRADE_PCT,
     TEMPLATE_VERSION,
-    build_lines,
     build_sizing,
+    build_template,
     closure_within,
     hard_stop_price,
     new_buy_reference,
 )
 
-GENERATOR_VERSION = "trade-discipline-generator-v1"
+GENERATOR_VERSION = "trade-discipline-generator-v2"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 VALIDITY_TRADING_DAYS = 5
 SESSION_CLOSE = time(15, 0)
@@ -158,9 +158,23 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
     sector = inputs.sector or {}
     sector_available = bool(sector.get("code"))
 
+    template = build_template(
+        stage, metrics, inputs.position, sizing, calendar_payload,
+        plan_kind=plan_kind, lane=inputs.lane, sector_available=sector_available,
+        previous_trail=_decimal(previous.get("trail")),
+        valid_until_date=valid_until.date().isoformat(),
+    )
+
     frozen = dict(metrics)
     frozen.update({
         "reference_price": float(reference_price),
+        # T+1: shares bought today cannot be sold today.  A price line drawn on
+        # the generation day is executable from the next session on; the card
+        # says so instead of implying an immediate exit is possible.
+        "t1_locked_shares": (position.quantity - position.sellable_quantity) if position is not None else 0,
+        # Lines the template deliberately did not draw, each with the rule that
+        # refused it.  An absent line is never a silent absence.
+        "omitted_lines": template.omitted,
         "sector": {"code": sector.get("code"), "name": sector.get("name"),
                    "taxonomy": sector.get("taxonomy") or "longhu_ths_industry"} if sector_available else None,
         "sector_available": sector_available,
@@ -174,12 +188,7 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
         "risk_per_trade_pct": float(inputs.risk_per_trade_pct),
     })
 
-    lines = build_lines(
-        stage, metrics, inputs.position, sizing, calendar_payload,
-        plan_kind=plan_kind, lane=inputs.lane, sector_available=sector_available,
-        previous_trail=_decimal(previous.get("trail")),
-        valid_until_date=valid_until.date().isoformat(),
-    )
+    lines = template.lines
 
     trading_date = date.fromisoformat(str(metrics["trading_date"]))
     # The key carries the evidence, not only the day: re-running on the same

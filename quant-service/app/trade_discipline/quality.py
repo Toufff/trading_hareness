@@ -18,19 +18,21 @@ from .contracts import SECTOR_CONDITIONS, DisciplinePlan, FormulaError, Line, Qu
 from .templates import (
     ATR_MAX_MULTIPLE,
     ATR_MIN_MULTIPLE,
+    HOLIDAY_CLOSURE_DAYS,
     LOT_SIZE,
     STOP_PCT_MAX,
     STOP_PCT_MIN,
     lot_shares,
+    soft_stop_window,
 )
 
 DERIVATION_TOLERANCE = 0.01 + 1e-9
 CHECK_IDS = (
     "has_hard_stop", "has_time_stop", "hard_stop_below_price", "hard_stop_single_condition",
-    "hard_stop_distance_sane", "soft_above_hard", "lines_monotonic", "every_line_evaluable",
-    "every_line_has_derivation", "exposure_line_when_over_cap", "holiday_line_when_closure",
-    "no_add_when_crash_or_broken", "sizing_consistent", "not_lowered_vs_previous",
-    "valid_until_within_5_trading_days",
+    "hard_stop_distance_sane", "soft_above_hard", "soft_stop_separation", "lines_monotonic",
+    "every_line_evaluable", "every_line_has_derivation", "exposure_line_when_over_cap",
+    "holiday_line_when_closure", "no_add_when_crash_or_broken", "sizing_consistent",
+    "not_lowered_vs_previous", "valid_until_within_5_trading_days",
 )
 
 
@@ -62,19 +64,38 @@ def _line_evaluable(line: Line, sector_available: bool) -> str:
 
 
 def _derivation_problem(line: Line) -> str:
+    """Recompute the price from ``formula`` and, where the action carries a
+    derived number, the action value from ``action_formula``.
+
+    A price-less time line (exposure / holiday) records the share count in its
+    ``formula``; that count is recomputed against ``action.value`` so the number
+    the human is told to trade is the number the inputs produce.
+    """
     derivation = line.derivation
     if not derivation.inputs:
         return f"{line.kind} 的 derivation.inputs 为空"
     if not derivation.formula.strip():
         return f"{line.kind} 的 derivation.formula 为空"
-    if line.price is None:
-        return ""
     try:
         recomputed = derivation.recompute()
     except FormulaError as error:
         return f"{line.kind} 的 formula 无法复算：{error}"
-    if abs(recomputed - float(line.price)) > DERIVATION_TOLERANCE:
-        return f"{line.kind} 复算得到 {recomputed:.4f}，与记录的 {line.price} 不符"
+    if line.price is not None:
+        if abs(recomputed - float(line.price)) > DERIVATION_TOLERANCE:
+            return f"{line.kind} 复算得到 {recomputed:.4f}，与记录的 {line.price} 不符"
+    elif line.action.value is not None and abs(recomputed - float(line.action.value)) > DERIVATION_TOLERANCE:
+        return f"{line.kind} 复算股数 {recomputed:.0f}，与动作值 {line.action.value} 不符"
+    if line.action.type == "move_stop_to":
+        if not derivation.action_formula.strip() or not derivation.action_inputs:
+            return f"{line.kind} 的 move_stop_to 目标缺少 action_formula/action_inputs"
+        if line.action.value is None:
+            return f"{line.kind} 的 move_stop_to 没有目标价"
+        try:
+            target = derivation.recompute_action()
+        except FormulaError as error:
+            return f"{line.kind} 的 action_formula 无法复算：{error}"
+        if abs(target - float(line.action.value)) > DERIVATION_TOLERANCE:
+            return f"{line.kind} 动作值复算得到 {target:.4f}，与记录的 {line.action.value} 不符"
     return ""
 
 
@@ -127,6 +148,19 @@ def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
         checks.append(_check("soft_above_hard", not bad,
                              f"软止损 {bad} 不高于硬止损 {hard_stop}" if bad else "软止损均高于硬止损"))
 
+    if not soft_stops:
+        checks.append(_check("soft_stop_separation", True, "未使用软止损线"))
+    elif hard_stop is None or reference is None or not atr14:
+        checks.append(_check("soft_stop_separation", False, "无法校验软止损间距：缺少 hard_stop、参考价或 ATR14"))
+    else:
+        window_low, window_high = soft_stop_window(hard_stop, reference, float(atr14))
+        crowded = [str(line.price) for line in soft_stops
+                   if line.price is not None and not window_low <= line.price <= window_high]
+        checks.append(_check(
+            "soft_stop_separation", not crowded,
+            f"软止损 {crowded} 不在 [{window_low}, {window_high}]（硬止损+0.5×ATR14, 参考价−0.5×ATR14）内"
+            if crowded else f"软止损与硬止损、参考价各相距至少 0.5×ATR14（[{window_low}, {window_high}]）"))
+
     monotonic_problems: list[str] = []
     if hard_stop is not None and reference is not None:
         if hard_stop >= reference:
@@ -163,11 +197,18 @@ def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
         checks.append(_check("exposure_line_when_over_cap", True,
                              f"当前仓位 {sizing.current_exposure_pct}% 未超过上限 {sizing.target_exposure_pct}%"))
 
-    closure_required = bool(metrics.get("closure_required"))
+    # The gate re-derives the requirement from the frozen closure instead of
+    # trusting the generator's flag: a closure shorter than the threshold (a
+    # three-day festival weekend) never demands a holiday line.
+    closure = metrics.get("closure") if isinstance(metrics.get("closure"), dict) else None
+    closure_required = bool(metrics.get("closure_required")) and (
+        closure is None or int(closure.get("closed_days") or 0) >= HOLIDAY_CLOSURE_DAYS)
     holiday_lines = plan.lines_of("holiday")
     checks.append(_check("holiday_line_when_closure", (not closure_required) or bool(holiday_lines),
-                         "有效期内有长假且已给出休市线" if closure_required and holiday_lines
-                         else ("有效期内有长假但缺少休市线" if closure_required else "有效期内无长假")))
+                         f"有效期内有 ≥{HOLIDAY_CLOSURE_DAYS} 个自然日的休市且已给出休市线"
+                         if closure_required and holiday_lines
+                         else (f"有效期内有 ≥{HOLIDAY_CLOSURE_DAYS} 个自然日的休市但缺少休市线"
+                               if closure_required else f"有效期内无 ≥{HOLIDAY_CLOSURE_DAYS} 个自然日的休市")))
 
     needs_no_add = plan.stage in {"crash_rebound", "broken"}
     no_add_lines = plan.lines_of("no_add")

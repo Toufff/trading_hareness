@@ -30,7 +30,7 @@ from test_trade_discipline_evaluator import (
     plan_fixture,
     stage_bars,
 )
-from test_trade_discipline_core import bar, shenqi_bars, stage_inputs
+from test_trade_discipline_core import bar, rally_bars, rally_inputs, shenqi_bars, stage_inputs
 
 SH = ZoneInfo("Asia/Shanghai")
 PLAN_ID = "plan-600613-2026-09-18"
@@ -65,13 +65,21 @@ class SignalTests(unittest.TestCase):
         self.signals = signals_from(self.plan, breakdown_evaluations(self.plan))
 
     def test_triggered_lines_become_expected_fills(self):
+        # no soft stop on this fixture: MA5 sits within half an ATR of the close and the line is refused
         self.assertEqual({signal.line_kind for signal in self.signals},
-                         {"exposure", "hard_stop", "soft_stop", "no_add"})
+                         {"exposure", "hard_stop", "no_add"})
         expected = {signal.line_kind: (signal.side, signal.expected_quantity) for signal in self.signals}
         self.assertEqual(expected["hard_stop"], ("sell", 5800))       # exit_all on the whole position
         self.assertEqual(expected["exposure"], ("sell", 4300))        # 5800 -> 1500 recommended shares
-        self.assertEqual(expected["soft_stop"], ("sell", 2900))       # reduce_by_pct 50, whole lots
         self.assertEqual(expected["no_add"], (None, None))            # a prohibition expects no fill
+
+    def test_a_drawn_soft_stop_expects_a_half_position_fill(self):
+        plan = generate(rally_inputs())
+        evaluations = [evaluate(plan, inputs(bars=[*rally_bars(), BREAKDOWN_BAR],
+                                             as_of=datetime(2026, 9, 21, 15, 30, tzinfo=SH)))]
+        expected = {signal.line_kind: (signal.side, signal.expected_quantity)
+                    for signal in signals_from(plan, evaluations)}
+        self.assertEqual(expected["soft_stop"], ("sell", 2900))       # reduce_by_pct 50, whole lots
 
     def test_the_daily_hard_stop_and_its_minute_copy_collapse_into_one_expectation(self):
         hard = [signal for signal in self.signals if signal.line_kind == "hard_stop"]
@@ -193,7 +201,7 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(early.deviation["price_actual"], 8.30)
         self.assertEqual(early.deviation["quantity_actual"], 2000)
         self.assertEqual(early.deviation["distance_to_lines"]["hard_stop:7.75"], 0.55)
-        self.assertEqual(early.deviation["distance_to_lines"]["soft_stop:8.38"], -0.08)
+        self.assertFalse([key for key in early.deviation["distance_to_lines"] if key.startswith("soft_stop")])
 
     def test_against_plan_is_a_buy_while_the_no_add_block_is_in_force(self):
         records = self.run_reconcile(self.triggered,

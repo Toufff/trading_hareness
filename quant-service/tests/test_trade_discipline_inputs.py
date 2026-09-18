@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from app.trade_discipline.generator import CalendarInfo, GenerationInputs, generate
 from app.trade_discipline.inputs import (
     account_equity,
+    after_session_close,
     build_generation_inputs,
     canonical_json,
     closure_gaps,
@@ -30,6 +31,7 @@ from app.trade_discipline.inputs import (
     previous_active_plan,
     recommendation_note,
     sector_membership,
+    settled_bar_for,
     settled_daily_bars,
     summarize_previous_plan,
     trading_calendar,
@@ -411,6 +413,74 @@ class EndToEndAssemblyTests(unittest.TestCase):
                                      account_key="citics-primary", symbol=SYMBOL, as_of=AS_OF,
                                      fetch_quotes=boom, fetch_minute=boom))
         self.assertIn("bars_basis:settled_only", inputs.evidence_refs)
+
+
+class SettledBarPriorityTests(unittest.TestCase):
+    """After the close, the day's settled canonical bar beats any live synthesis."""
+
+    TODAY_ROW = {"symbol": SYMBOL, "trading_date": date(2026, 9, 18), "open": 8.12, "high": 8.70, "low": 8.12,
+                 "close": 8.41, "pre_close": 8.54, "volume": 99_570_000.0, "amount": 8.4e8,
+                 "is_suspended": False, "quality_status": "fresh"}
+
+    @staticmethod
+    async def quotes(_symbols):
+        return {SYMBOL: {"price": 8.55, "cumulative_volume_lot": 412_000, "cumulative_amount": 3.41e8}}
+
+    @staticmethod
+    async def minutes(_symbols, _day):
+        return {SYMBOL: {"open": 8.33, "high": 8.62, "low": 8.12, "last": 8.55, "vwap": 8.37}}
+
+    def test_after_the_close_a_settled_bar_for_the_day_is_used_and_no_live_read_is_made(self):
+        connection = FakeConnection(bars=[*settled_rows(), self.TODAY_ROW])
+
+        async def boom(*_args, **_kwargs):
+            raise AssertionError("a settled bar for today must not be overwritten by a live read")
+
+        evidence = gather_evidence(connection, account_key="citics-primary", symbol=SYMBOL, as_of=AS_OF)
+        self.assertTrue(evidence["settled_today"])
+        self.assertEqual(evidence["bars"][-1]["trading_date"], "2026-09-18")
+        inputs = asyncio.run(collect(connection.factory, run_id="88888888-8888-8888-8888-888888888888",
+                                     account_key="citics-primary", symbol=SYMBOL, as_of=AS_OF,
+                                     fetch_quotes=boom, fetch_minute=boom))
+        last = inputs.bars[-1]
+        self.assertEqual((last["trading_date"], last["close"], last["forming"]), ("2026-09-18", 8.41, False))
+        self.assertIn("bars_basis:settled", inputs.evidence_refs)
+        self.assertNotIn("bars_basis:settled_plus_forming", inputs.evidence_refs)
+        self.assertFalse([ref for ref in inputs.evidence_refs if ref.startswith("forming_bar:")])
+        self.assertEqual(generate(inputs).metrics["close"], 8.41)
+
+    def test_after_the_close_without_a_settled_bar_the_forming_bar_is_still_synthesised(self):
+        connection = FakeConnection()          # the series ends on 09-17: no bar for the day yet
+        evidence = gather_evidence(connection, account_key="citics-primary", symbol=SYMBOL, as_of=AS_OF)
+        self.assertFalse(evidence["settled_today"])
+        inputs = asyncio.run(collect(connection.factory, run_id="99999999-9999-9999-9999-999999999999",
+                                     account_key="citics-primary", symbol=SYMBOL, as_of=AS_OF,
+                                     fetch_quotes=self.quotes, fetch_minute=self.minutes))
+        last = inputs.bars[-1]
+        self.assertEqual((last["trading_date"], last["close"], last["forming"]), ("2026-09-18", 8.55, True))
+        self.assertIn("bars_basis:settled_plus_forming", inputs.evidence_refs)
+        self.assertIn("forming_bar:live_quote+minutes:2026-09-18", inputs.evidence_refs)
+
+    def test_before_the_close_the_live_session_still_wins_over_a_stale_settled_row(self):
+        connection = FakeConnection(bars=[*settled_rows(), self.TODAY_ROW])
+        morning = datetime(2026, 9, 18, 10, 30, tzinfo=SH)
+        inputs = asyncio.run(collect(connection.factory, run_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                                     account_key="citics-primary", symbol=SYMBOL, as_of=morning,
+                                     fetch_quotes=self.quotes, fetch_minute=self.minutes))
+        self.assertTrue(inputs.bars[-1]["forming"])
+        self.assertIn("bars_basis:settled_plus_forming", inputs.evidence_refs)
+
+    def test_the_basis_helpers_are_explicit_about_what_they_see(self):
+        rows = [{"trading_date": "2026-09-17", "close": 8.3}, {"trading_date": "2026-09-18", "close": 8.41}]
+        self.assertEqual(settled_bar_for(rows, date(2026, 9, 18))["close"], 8.41)
+        self.assertIsNone(settled_bar_for(rows, date(2026, 9, 19)))
+        self.assertIsNone(settled_bar_for([{**rows[1], "forming": True}], date(2026, 9, 18)))
+        self.assertEqual(merge_forming_bar(rows, None, settled_day=date(2026, 9, 18))[1]["bars_basis"], "settled")
+        self.assertEqual(merge_forming_bar(rows, None, settled_day=date(2026, 9, 21))[1]["bars_basis"],
+                         "settled_only")
+        self.assertTrue(after_session_close(datetime(2026, 9, 18, 15, 0, tzinfo=SH)))
+        self.assertFalse(after_session_close(datetime(2026, 9, 18, 14, 59, tzinfo=SH)))
+        self.assertTrue(after_session_close(datetime(2026, 9, 18, 7, 5, tzinfo=ZoneInfo("UTC"))))   # 15:05 Shanghai
 
 
 if __name__ == "__main__":
