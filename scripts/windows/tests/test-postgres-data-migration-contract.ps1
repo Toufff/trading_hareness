@@ -370,12 +370,46 @@ $ownershipTaken = Get-BodyPosition '\$script:TargetDirectoryOwned = \$true' 'the
 $robocopyCall = Get-BodyPosition 'robocopy\.exe \$currentDataDir \$target' 'the robocopy call'
 Assert-True ($ownershipTaken -lt $robocopyCall) 'ownership must be recorded before the first byte is written to the target'
 
+# A fourth guard, and the only one that does not depend on the caller passing
+# the right arguments: a directory holding PG_VERSION is a live cluster, and the
+# single cluster this function may ever delete is the one robocopy wrote into
+# the path step 4 created. Anything else -- above all the pre-migration image a
+# failed -Rollback hands in, which is the only copy of the database from before
+# the cutover -- is refused outright.
+Assert-True ($removeBody -match "Test-Path -LiteralPath \(Join-Path \`$full 'PG_VERSION'\)") 'the removal must ask whether the directory is a cluster'
+Assert-True ($removeBody -match '\$script:TargetDirectoryCreated') 'the PG_VERSION guard must compare against the path this run itself created'
+Assert-True ($removeBody -match 'holds a PostgreSQL cluster \(PG_VERSION\) this run did not create') 'the PG_VERSION guard must refuse by name'
+$pgVersionGuard = [regex]::Match($removeBody, "Join-Path \`$full 'PG_VERSION'").Index
+Assert-True ($pgVersionGuard -lt $recursiveDelete) 'the PG_VERSION guard must run before the recursive delete, never after'
+# The guard is a throw, not a return: a caller that reached it asked for
+# something it must not get, and a quiet 'refused' would be recovered over.
+$pgVersionBlock = $removeBody.Substring($pgVersionGuard)
+Assert-True ($pgVersionBlock -match '(?s)^.{0,400}?throw ') 'the PG_VERSION guard must throw'
+Assert-True ($source -match '\$script:TargetDirectoryCreated = \$target') 'step 4 must record WHICH directory it created, not only that it created one'
+$createdRecorded = Get-BodyPosition '\$script:TargetDirectoryCreated = \$target' 'the created-path marker'
+Assert-True ($createdRecorded -lt $robocopyCall) 'the created path must be recorded before the first byte is written to the target'
+
+# --- a failed rollback can never reach the deletion -------------------------
+# -Rollback restarts the pre-migration image, so Invoke-FailureRecovery's
+# $TargetDataDirectory is that image, not this run's debris. The cleanup step is
+# gated on an explicit switch which the rollback call site passes as $false; the
+# PG_VERSION guard above is the second, independent stop.
+$recoveryParameters = $recoveryAst.Body.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }
+Assert-True ($recoveryParameters -contains 'MayRemoveTarget') 'Invoke-FailureRecovery must take an explicit -MayRemoveTarget switch'
+$mayRemoveGate = Get-RecoveryPosition 'if \(\$MayRemoveTarget\) \{' 'the -MayRemoveTarget gate'
+Assert-True ($mayRemoveGate -lt $cleanupStep) 'the gate must come before the removal it guards, not after it'
+Assert-True ($rollbackBody -match '(?s)Invoke-FailureRecovery.{0,400}?-MayRemoveTarget:\$false') 'the rollback catch must call the recovery with -MayRemoveTarget:$false'
+Assert-True ($rollbackBody -notmatch 'Remove-PartialTargetDirectory') 'the rollback flow must never reach the deletion by any other route'
+
 # The main flow must use it, and rethrow afterwards.
 $catchStart = Get-BodyPosition '\} catch \{' 'the recovery catch block'
 $finallyStart = Get-BodyPosition '\} finally \{' 'the transcript finally block'
 Assert-True ($catchStart -lt $finallyStart) 'the catch must come before the finally'
 $catchBody = $body.Substring($catchStart, $finallyStart - $catchStart)
 Assert-True ($catchBody -match 'Invoke-FailureRecovery -SourceDataDirectory \$currentDataDir -TargetDataDirectory \$target') 'the catch must run the recovery'
+# The forward migration is the one call site whose target really is this run's
+# own debris, so it -- and only it -- asks for the cleanup.
+Assert-True ($catchBody -match '(?s)Invoke-FailureRecovery.{0,400}?-MayRemoveTarget(?!:)') 'the forward catch must pass -MayRemoveTarget'
 Assert-True ($catchBody -match '\.failure\.json') 'a failed migration must leave a failure receipt'
 $recoveryCall = [regex]::Match($catchBody, 'Invoke-FailureRecovery').Index
 $receiptWrite = [regex]::Match($catchBody, '\$failurePath').Index
@@ -388,7 +422,8 @@ Assert-True ($rethrow -gt 0) 'the original failure must be rethrown after the re
     passed = $true
     scope = 'Static contract for migrate-postgres-data-directory.ps1, plus its pure trading-session guard, footprint/reparse handling exercised against a real junction, and the control-file reader exercised read-only against the live cluster; nothing was stopped, copied or migrated'
     ordering_verified = 'disable tasks -> graceful stop -> stop tasks -> pg_ctl stop -> robocopy /XJ -> copy verification -> junction recreation -> PGDATA_DIR switch -> start+verify -> rename old'
-    recovery_verified = 'stop target -> PGDATA_DIR back -> regenerate conf -> start source -> remove the partial copy -> re-enable platform -> failure receipt -> rethrow'
+    recovery_verified = 'stop target -> PGDATA_DIR back -> regenerate conf -> start source -> remove the partial copy (only with -MayRemoveTarget, and never a PG_VERSION directory this run did not create) -> re-enable platform -> failure receipt -> rethrow'
+    rollback_cannot_delete_the_old_cluster = $true
     rollback_gate_verified = 'age gap printed -> stock_cold-not-reverted notice -> missing-tablespace refusal -> shared-tablespace refusal (no override) -> -AcceptDataLoss -> stop'
     snapshot_taken_inside_the_outage = $true
     footprint_reports_unreadable_entries = $true

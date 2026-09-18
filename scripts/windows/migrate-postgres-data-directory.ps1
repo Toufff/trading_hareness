@@ -111,6 +111,12 @@ $script:OldDirectoryRenamed = $false
 # through the copy must take it away again, or its own leftovers fail the
 # "target exists and is not empty" preflight of every retry.
 $script:TargetDirectoryOwned = $false
+# The exact path step 4 created, recorded separately from the flag above. The
+# flag says "this run made a directory"; this says WHICH one, and the deletion
+# refuses any cluster (a directory holding PG_VERSION) that is not it. -Rollback
+# reaches the same recovery helper with the pre-migration image as its target,
+# and that image is the only old copy of the database.
+$script:TargetDirectoryCreated = ''
 
 function Write-Step {
     param([Parameter(Mandatory)][string]$Message, [string]$Level = 'info')
@@ -468,14 +474,15 @@ function Remove-PartialTargetDirectory {
     <#
         Take away the half-filled copy this run made, and nothing else.
 
-        Three independent guards, because this is the only deletion in the
+        Four independent guards, because this is the only deletion in the
         script: it runs only when $script:TargetDirectoryOwned says step 4
         created it, only when the old directory has NOT been renamed (after the
-        rename the target IS the cluster), and never on a path that resolves to
-        the source. Junctions are unlinked one by one before the recursive
-        delete: a pg_tblspc junction recreated at the target points at the live
-        cold tablespace on G:, and a recursive delete that followed it would
-        take the cold tier with it.
+        rename the target IS the cluster), never on a path that resolves to the
+        source, and never on a directory that already holds a PostgreSQL cluster
+        this run did not itself create. Junctions are unlinked one by one before
+        the recursive delete: a pg_tblspc junction recreated at the target points
+        at the live cold tablespace on G:, and a recursive delete that followed
+        it would take the cold tier with it.
     #>
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$SourceDirectory)
     if (-not $script:TargetDirectoryOwned) { return 'not_owned_by_this_run' }
@@ -483,6 +490,18 @@ function Remove-PartialTargetDirectory {
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     if ($full -eq [IO.Path]::GetFullPath($SourceDirectory).TrimEnd('\')) {
         throw "Refusing to remove $full : it is the source cluster"
+    }
+    # PG_VERSION means a cluster lives here. Step 4 creates an EMPTY directory
+    # and the preflight proved the target was absent or empty, so the only
+    # PG_VERSION this function may ever delete is one robocopy wrote into the
+    # very path this run created. Anything else -- most of all the pre-migration
+    # image a failed -Rollback would hand in, which is the only other copy of the
+    # database -- is refused outright rather than recovered over.
+    if (Test-Path -LiteralPath (Join-Path $full 'PG_VERSION') -PathType Leaf) {
+        $created = if ($script:TargetDirectoryCreated) { [IO.Path]::GetFullPath($script:TargetDirectoryCreated).TrimEnd('\') } else { '' }
+        if (-not $created -or $full -ne $created) {
+            throw "Refusing to remove $full : it holds a PostgreSQL cluster (PG_VERSION) this run did not create"
+        }
     }
     if (-not (Test-Path -LiteralPath $full -PathType Container)) { return 'absent' }
     foreach ($item in @(Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue)) {
@@ -508,11 +527,20 @@ function Invoke-FailureRecovery {
         Every action is best effort and recorded; the caller rethrows the
         original failure afterwards, so a recovery that itself fails never hides
         the reason the migration stopped.
+
+        -MayRemoveTarget says whether $TargetDataDirectory is debris this run
+        made and may therefore take away again. It is true for the forward
+        migration only. A failed -Rollback calls the same helper with the
+        PRE-MIGRATION image as its target -- the only old copy of the database,
+        never created by this run -- and passes $false so the cleanup step is
+        never even reached. Remove-PartialTargetDirectory refuses that path a
+        second time on its own (PG_VERSION guard); this switch is the first.
     #>
     param(
         [Parameter(Mandatory)][string]$SourceDataDirectory,
         [Parameter(Mandatory)][string]$TargetDataDirectory,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$RenamedSourceDirectory
+        [Parameter(Mandatory)][AllowEmptyString()][string]$RenamedSourceDirectory,
+        [switch]$MayRemoveTarget
     )
     $steps = [System.Collections.Generic.List[object]]::new()
     function Add-RecoveryStep([string]$Name, [scriptblock]$Action) {
@@ -554,9 +582,14 @@ function Invoke-FailureRecovery {
         # cluster while the recovery could still fail, and leaving it behind
         # fails the preflight of the retry with "target exists and is not
         # empty" -- the script blocking itself with its own debris.
-        Add-RecoveryStep "remove the partial copy at $TargetDataDirectory" {
-            $outcome = Remove-PartialTargetDirectory -Path $TargetDataDirectory -SourceDirectory $SourceDataDirectory
-            Write-Step "partial target directory: $outcome"
+        if ($MayRemoveTarget) {
+            Add-RecoveryStep "remove the partial copy at $TargetDataDirectory" {
+                $outcome = Remove-PartialTargetDirectory -Path $TargetDataDirectory -SourceDirectory $SourceDataDirectory
+                Write-Step "partial target directory: $outcome"
+            }
+        } else {
+            Write-Step "leaving $TargetDataDirectory in place: this run did not create it" 'warning'
+            $steps.Add([ordered]@{ step = "remove the partial copy at $TargetDataDirectory"; result = 'not_this_runs_directory' })
         }
     }
     $platformState = 'not_attempted'
@@ -711,7 +744,12 @@ if ($Rollback) {
     } catch {
         # The same recovery as the forward migration: whatever happens, the
         # platform must not be left down with its tasks disabled.
-        $recovery = Invoke-FailureRecovery -SourceDataDirectory $currentDataDir -TargetDataDirectory $restoreTarget -RenamedSourceDirectory ''
+        # -MayRemoveTarget:$false is the point of the switch here: $restoreTarget
+        # is the pre-migration cluster image, the only copy of the database from
+        # before the cutover. The forward migration's cleanup step must never be
+        # reached with it.
+        $recovery = Invoke-FailureRecovery -SourceDataDirectory $currentDataDir -TargetDataDirectory $restoreTarget `
+            -RenamedSourceDirectory '' -MayRemoveTarget:$false
         Write-Step "rollback failed: $($_.Exception.Message); recovery platform state $($recovery.platform)" 'warning'
         throw
     }
@@ -831,6 +869,7 @@ try {
         # absent or empty), so a failure below may -- and must -- take it away
         # again instead of leaving debris that blocks the retry's preflight.
         $script:TargetDirectoryOwned = $true
+        $script:TargetDirectoryCreated = $target
         # /XJ: without it robocopy follows <PGDATA>\pg_tblspc\<oid> and copies the
         # whole cold tier from the G: HDD onto the 500 GB hot volume (and the
         # free-space preflight, which does not follow junctions either, would
@@ -996,7 +1035,8 @@ try {
     $failure = $_
     Write-Step "migration FAILED: $($failure.Exception.Message)" 'warning'
     $keptPathForReceipt = if ($script:OldDirectoryRenamed) { Join-Path (Split-Path -Parent $currentDataDir) $KeepOldName } else { '' }
-    $recovery = Invoke-FailureRecovery -SourceDataDirectory $currentDataDir -TargetDataDirectory $target -RenamedSourceDirectory $keptPathForReceipt
+    $recovery = Invoke-FailureRecovery -SourceDataDirectory $currentDataDir -TargetDataDirectory $target `
+        -RenamedSourceDirectory $keptPathForReceipt -MayRemoveTarget
     if (-not $WhatIf) {
         try {
             $failureReceipt = [ordered]@{
