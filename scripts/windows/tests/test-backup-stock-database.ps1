@@ -17,7 +17,7 @@ if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { throw "Missing $
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$parseErrors)
 if ($parseErrors -and $parseErrors.Count -gt 0) { throw "Failed to parse $scriptPath" }
-foreach ($name in 'Select-StockBackupRetentionRemovals', 'ConvertTo-Bytes') {
+foreach ($name in 'Select-StockBackupRetentionRemovals', 'ConvertTo-Bytes', 'Get-StockBackupExcludedTableData') {
     $functionAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if (-not $functionAst) { throw "$name function not found in $scriptPath" }
     . ([scriptblock]::Create($functionAst.Extent.Text))
@@ -27,6 +27,29 @@ foreach ($name in 'Select-StockBackupRetentionRemovals', 'ConvertTo-Bytes') {
 Assert-True ((ConvertTo-Bytes -Value '' -Default 123) -eq 123) 'ConvertTo-Bytes must fall back to the default when no value is given'
 Assert-True ((ConvertTo-Bytes -Value '5GB' -Default 0) -eq 5GB) 'ConvertTo-Bytes must parse a GB-suffixed value'
 Assert-True ((ConvertTo-Bytes -Value '512' -Default 0) -eq 512) 'ConvertTo-Bytes must parse a bare byte count'
+
+# --- Get-StockBackupExcludedTableData ---
+# STOCK_BACKUP_EXCLUDE_TABLE_DATA names the tables whose data the nightly dump
+# skips (production: the cold-tier twins).  An unset value must exclude nothing,
+# so a deployment that has not been migrated yet keeps dumping everything.
+Assert-True (@(Get-StockBackupExcludedTableData -Value $null).Count -eq 0) 'an unset exclusion list excludes nothing'
+Assert-True (@(Get-StockBackupExcludedTableData -Value '   ').Count -eq 0) 'a blank exclusion list excludes nothing'
+$excluded = @(Get-StockBackupExcludedTableData -Value 'quant.raw_market_observations_cold; quant.edge_evidence_changes_cold ;')
+Assert-True ($excluded.Count -eq 2 -and $excluded[0] -eq 'quant.raw_market_observations_cold' -and
+    $excluded[1] -eq 'quant.edge_evidence_changes_cold') 'a semicolon list parses, trims and ignores empty entries'
+$deduplicated = @(Get-StockBackupExcludedTableData -Value 'quant.a_cold;quant.a_cold;quant.b_cold')
+Assert-True ($deduplicated.Count -eq 2 -and $deduplicated[0] -eq 'quant.a_cold' -and $deduplicated[1] -eq 'quant.b_cold') 'a repeated table is collapsed, keeping the first position'
+foreach ($bad in 'raw_market_observations_cold', 'quant.a.b', 'quant.A_cold', 'Quant.a_cold', 'quant.', '.a_cold', 'quant.a-cold', 'quant.a_cold;bad') {
+    $rejected = $false
+    try { [void](Get-StockBackupExcludedTableData -Value $bad) } catch { $rejected = $true }
+    Assert-True $rejected "invalid excluded table '$bad' must be rejected"
+}
+
+# The dump argument list is built from the union of the incremental tables and
+# the configured exclusions, so both kinds reach pg_dump as --exclude-table-data.
+$union = @((@('quant.raw_market_observations') + @(Get-StockBackupExcludedTableData -Value 'quant.raw_market_observations_cold;quant.raw_market_observations')) | Select-Object -Unique)
+Assert-True ($union.Count -eq 2 -and $union -contains 'quant.raw_market_observations' -and
+    $union -contains 'quant.raw_market_observations_cold') 'the incremental and configured exclusions merge without duplicates'
 
 # --- Select-StockBackupRetentionRemovals ---
 # Fixed "now" so week-boundary math is deterministic regardless of when the
@@ -99,6 +122,8 @@ Assert-True ($appendOnlySql -notmatch ' OR ') 'a spec without an update column s
     incremental_windows_contiguous_by_local_day = $true
     incremental_select_includes_modified_rows = $true
     convert_to_bytes_ok = $true
+    excluded_table_data_parsed = $true
+    excluded_table_data_merges_with_incremental = $true
     retention_keeps_daily_window = $true
     retention_keeps_one_per_weekly_window = $true
     retention_prunes_beyond_both_windows = $true

@@ -56,6 +56,35 @@ function Select-StockBackupRetentionRemovals {
     return @($names | Where-Object { -not $keep.Contains($_) })
 }
 
+function Get-StockBackupExcludedTableData {
+    # Pure decision function.  Parses STOCK_BACKUP_EXCLUDE_TABLE_DATA, a
+    # semicolon separated list of "schema.table" whose *data* the nightly dump
+    # leaves out (the schema is still dumped, so a restore recreates the empty
+    # table).  Production lists the cold-tier twins (quant.<table>_cold): their
+    # rows already left the hot table through the incremental chunk chain, so
+    # dumping them again would double the nightly dump for no extra recovery.
+    # Identifiers must be lower-case schema.table -- a typo must fail the run
+    # rather than silently widen what the backup omits.  Repeats are collapsed
+    # (listing a table twice is harmless, unlike an unparseable name).
+    [CmdletBinding()]
+    param([string]$Value)
+    $text = if ($null -eq $Value) { '' } else { $Value.Trim() }
+    if (-not $text) { return @() }
+    $pattern = '^[a-z_][a-z0-9_]*$'
+    $tables = [Collections.Generic.List[string]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($entry in $text.Split(';')) {
+        $item = $entry.Trim()
+        if (-not $item) { continue }
+        $parts = $item.Split('.')
+        if ($parts.Count -ne 2 -or @($parts | Where-Object { $_ -cnotmatch $pattern }).Count -gt 0) {
+            throw "Invalid excluded table '$item': expected lower-case schema.table"
+        }
+        if ($seen.Add($item)) { $tables.Add($item) }
+    }
+    return $tables.ToArray()
+}
+
 function ConvertTo-Bytes {
     # Accepts either a plain byte count or a "<number><unit>" string
     # (KB/MB/GB, binary units) so runtime.env can express sizes readably.
@@ -169,6 +198,10 @@ if ($incrementalSpecs.Count -gt 0) {
     }
 }
 $excludedTableData = if ($null -eq $incrementalError) { @($incrementalSpecs | ForEach-Object Table) } else { @() }
+# Statically configured exclusions (the cold-tier twins) do not depend on this
+# run's incremental export: their rows were already captured on the hot side,
+# so they stay out of the dump even when the incremental export failed.
+$excludedTableData = @(($excludedTableData + @(Get-StockBackupExcludedTableData -Value $config['STOCK_BACKUP_EXCLUDE_TABLE_DATA'])) | Select-Object -Unique)
 
 $dumpFile = Join-Path $dayDir "$($config['PGDATABASE'])-$today.dump"
 if (Test-Path -LiteralPath $dumpFile) {
