@@ -143,7 +143,176 @@ follow, and they are the ones that matter operationally:
 - **The kill switch is unilateral and immediate.** Stopping the
   `trading-hareness-shared-peer-tunnels` task removes `15432`/`15681` within
   seconds. It needs no password change, no key removal, and no access to the
-  collaborator's host.
+  collaborator's host. Since the batch tunnel was added there is a second task
+  to stop as well — see "Revocation".
+
+## The batch tunnel (second connection, 15433)
+
+Everything above describes **one** SSH connection carrying both forwards. That
+is exactly the problem the batch tunnel solves, and the reason it had to be a
+second connection rather than a third `-R` on the existing one:
+
+SSH multiplexes every forward as a *channel* over a single TCP connection. The
+channels share that connection's congestion window and its ordering, so a bulk
+job — a `COPY`, a full-table export, a backfill — fills the window and intraday
+queries queue behind bytes nobody is waiting on. The peer author measured
+**52.5 ms RTT** on this link, so that queueing is not a rounding error. Adding
+`-R 15433` to the existing ssh process would have put the bulk traffic on the
+same window and changed nothing.
+
+There are therefore two independent owner-side connections, each with its own
+scheduled task, supervised runtime service, state file and lock file:
+
+| | intraday | batch |
+| --- | --- | --- |
+| scheduled task | `trading-hareness-shared-peer-tunnels` | `trading-hareness-shared-peer-batch-tunnel` |
+| runtime service | `shared-peer-tunnels` | `shared-peer-batch-tunnel` |
+| forwards | `-R 15432:55432`, `-R 15681:5681` | `-R 15433:55432` |
+| compression | off | `-o Compression=yes` |
+| health claim | remote API HTTP 200 | remote loopback listener on 15433, owned by this install's local ssh client, backed by a runtime state that belongs to this install: a new `run_id`, a `started_at` that post-dates the install, **and** a status that is not a stopping or terminal one |
+| peer address | `db-tunnel:5432` | `db-tunnel:5433` |
+
+The batch claim's third leg is keyed on `started_at` because that is the field
+`scripts/windows/supervise-runtime-process.ps1` writes into
+`logs/runtime/<service>.current.json`. `requested_at` exists only on the object
+`Start-RuntimeSupervisor` returns — the lock-owning supervisor is the only writer
+of current state and never carries it — so a gate keyed on it can never pass.
+`Get-SharedTunnelStateFreshnessVerdict` (in `shared-tunnel-profiles.psm1`) makes
+that judgement, and reads every field, including the one in the failure message,
+through `PSObject.Properties`: under `Set-StrictMode -Version Latest` a direct
+read of an absent property throws, and that throw would escape
+`Stop-TunnelInstallOnFailure`, leaving the failed batch task enabled and retrying
+every two minutes — the exact unbounded failure the helper exists to prevent.
+
+A timestamp alone is not the whole claim.
+
+* The installer keeps the `run_id` it read *before* the install (the return of
+  `Request-RuntimeStop`) and passes it as `-PreviousRunId`. This install's
+  supervisor mints a new one, so a state still carrying the old id was not
+  written by this install whatever its clock says — no tolerance window, no
+  clock skew, nothing to get wrong.
+* The state's own `status` is judged **first**, before the `run_id` and clock
+  branches. A state that says the run it names is stopping or already over
+  (`stop_requested`, `stopped`, `unexpected_exit`, `supervisor_failed`,
+  `start_failed`) is never fresh, whichever run it names. Two cases fall out of
+  that, and they are deliberately reported differently:
+  * the **previous** run's id ⇒ `previous_run_stopping`. The installer's own
+    `Request-RuntimeStop` wrote that status before the task was registered, so
+    this is the handover this install started and has not finished.
+  * **this install's own** new run_id ⇒ `run_ended_before_health_was_proved`.
+    `supervise-runtime-process.ps1` writes `unexpected_exit` (or
+    `supervisor_failed`, `stopped`) with this install's run_id and a `started_at`
+    that post-dates the install, which the run-id and clock branches on their own
+    read as proof of a healthy install. The listener probe passed seconds
+    earlier, so without this check the install would certify a tunnel that had
+    already died.
+* **There is no weak accept.** Earlier revisions accepted a state that still
+  carried the previous `run_id` whenever a live process still owned that run —
+  the `duplicate_start_skipped` case, where `supervise-runtime-process.ps1`
+  exits 0 without writing state because it cannot take `<service>.lock` — and
+  labelled it `duplicate_supervisor_still_serving` /
+  `remote_listener_open_owned_by_live_supervisor`. That branch could never fire
+  from the installer: `Request-RuntimeStop` runs before the task is registered
+  and leaves every previous-run state in a stopping or terminal status, so the
+  accept was unreachable while this document promised it. It has been deleted
+  rather than left as a promise. `fresh` is the whole gate.
+* Refusing is **not** the same as disabling. `previous_run_stopping` carries
+  `handover_in_progress`, and the installer passes `-KeepTaskEnabled` for it:
+  the install fails (it certifies nothing it cannot prove) but the batch task
+  stays enabled, and its two-minute trigger finishes the handover with no
+  operator involved. That is what the deleted weak accept was invented to
+  protect against and could not actually deliver. Every other refusal is a
+  broken install and disables the task as before.
+* `Get-SharedTunnelSupervisorLiveness` is now a **receipt**, not a gate. The
+  `supervisor_pid` must name a running process whose start time sits beside the
+  state's own `started_at`, so a recycled pid proves nothing; its verdict
+  (`supervisor_process_owns_this_run`, `supervisor_pid_reused`,
+  `process_start_time_unavailable`, …) and the pid it was taken against are
+  written to the runtime state and the `healthy` event as `supervisor_liveness`
+  and `supervisor_pid_checked`. A refused install writes no state at all, so its
+  failure message carries the same two values instead. Nothing is admitted on
+  the strength of a live pid any more.
+* The verdict is **polled** until a 30 s deadline, re-reading the state each
+  second. The ssh client that satisfies legs 1 and 2 can be up before the
+  supervisor's state write lands; judging once turned that race into a disabled
+  batch task. The poll breaks on `fresh` and on nothing else, and no earlier
+  verdict is kept as a fallback: the refusal the install ends on is the verdict
+  the last read produced.
+
+Both reach the same database on the same port 55432; only the transport differs.
+Compression is on for batch alone because bulk result sets compress well and the
+link is latency- rather than CPU-bound, and it is declared as an explicit
+`Compression` property on the profile so the recorded runtime metadata reports
+what was configured rather than inferring it from "does this profile carry any
+ssh option at all".
+
+"Its own TCP connection" is pinned on the command line, not inherited from the
+host: both profiles pass `-o ControlMaster=no -o ControlPath=none`. Without them
+a single `ControlMaster auto` + `ControlPath` pair in `~/.ssh/config` — a routine
+latency tweak on a 52.5 ms link — would make the batch client open a channel on
+the intraday client's existing socket, putting bulk traffic straight back into the
+window it was moved out of, with nothing failing and nothing to see. This is the
+one deliberate change to the intraday ssh argument vector; it is a no-op against
+the current host configuration (`ssh -G lightServer1` already reports
+`controlmaster false`) and the pinned vector in
+`scripts/windows/tests/test-shared-tunnel-profiles.ps1` was updated with it. After
+installing both, `install-shared-tunnel-tasks.ps1` reads the TCP connections each
+profile's `ssh.exe` owns (`Get-NetTCPConnection -OwningProcess`) and warns —
+recording a `tunnel_connection_separation_checked` runtime event — if they are not
+disjoint. Apart from those two options the intraday profile is byte-for-byte what
+it was, and the test pins its vector literally so a later edit cannot quietly
+change the live intraday tunnel.
+
+Install both from the owner side:
+
+```powershell
+pwsh .\scripts\shared-peer\install-shared-tunnel-tasks.ps1
+```
+
+`install-shared-tunnel-task.ps1 -Profile batch` installs the batch task alone,
+and `-WhatIf` on either prints the plan (task name, action, forwards, reclaim
+set) while touching no scheduled task, no runtime state and no ssh process.
+
+Two operational consequences worth stating plainly:
+
+- **Batch is optional and must stay optional.** `install-shared-tunnel-tasks.ps1`
+  installs intraday first and unguarded; a batch failure is warned about and
+  recorded as a `shared-peer-batch-tunnel` `install_failed` event but does not
+  fail the caller unless it passed `-RequireBatch`. On the peer side the
+  `db-tunnel` healthcheck deliberately still checks only 5432 and 5681 — gating
+  container health on an optimization would turn it into an outage.
+- **15433 must appear on both sides of the key restrictions.** On the owner side
+  it is `permitlisten` in `install-owner-tunnel-key.sh`, which matters if the
+  restricted owner-tunnel key is ever enabled (the four `OWNER_TUNNEL_SSH_*`
+  keys in `runtime.env`): with `-o ExitOnForwardFailure=yes` a missing
+  `permitlisten` is not "slower batch traffic", the ssh process exits within
+  seconds and the two-minute supervising trigger retries into the same refusal
+  indefinitely. On the peer side it is `permitopen` in
+  `provision-lightserver-rootless.sh`, and there the failure is silent instead:
+  the sidecar's `-L 5433` is a local bind that always succeeds, so the container
+  stays healthy while every connection through it is refused with
+  "administratively prohibited: open failed". Neither script rewrites an
+  `authorized_keys` entry that already exists. While the four owner keys are
+  unset both tunnels fall back to the unrestricted `lightServer1` alias, where
+  15433 binds with no extra setup.
+
+On the peer the batch port stays off until `PEER_BATCH_DB_PORT` is set in
+`deploy/shared-peer/.env`. `-L` binds locally and does not require the far end
+to be listening, so enabling it while the owner batch tunnel is down means
+connections to `db-tunnel:5433` fail individually; 5432 and 5681 are unaffected.
+`scripts/shared-peer/deploy-batch-tunnel-port.py` performs that peer-side
+change: it backs up `.env`/`compose.yaml`/the entrypoint, asserts that no
+service other than `db-tunnel` moves, rebuilds and recreates only `db-tunnel`,
+then proves the path with an authenticated `SELECT 1, inet_server_port()`
+through 5433 — `55432` is the only answer that proves the owner's PostgreSQL
+rather than an open socket — and prints its rollback command. It refuses to run
+unless the peer's deployed state (entrypoint hash, `db-tunnel` healthcheck,
+environment keys, image) matches one of the states it explicitly supports.
+
+The peer rollout itself — what the release scripts must call, what the peer is
+actually running today, and the ordered steps — is
+[PEER_BATCH_TUNNEL_ROLLOUT.md](PEER_BATCH_TUNNEL_ROLLOUT.md). Read it before
+running anything against lightServer.
 
 ## Verifying the access path
 
@@ -321,13 +490,23 @@ pwsh .\scripts\shared-peer\new-peer-ssh-key.ps1
 scp -P 3535 .\scripts\shared-peer\provision-lightserver-rootless.sh lightServer1:/root/
 scp -P 3535 G:\StockPlatform\peer\secrets\stockpeer_ed25519.pub lightServer1:/root/
 ssh lightServer1 "AUTHORIZED_KEY_FILE=/root/stockpeer_ed25519.pub bash /root/provision-lightserver-rootless.sh"
-pwsh .\scripts\shared-peer\install-shared-tunnel-task.ps1
+pwsh .\scripts\shared-peer\install-shared-tunnel-tasks.ps1
 ```
+
+`install-shared-tunnel-tasks.ps1` installs both tunnel profiles (intraday and
+batch). `install-shared-tunnel-task.ps1` on its own still installs the intraday
+task only, which is what it did before the batch profile existed.
 
 **Existing `authorized_keys` entries on lightServer are not updated in place**:
 re-running `provision-lightserver-rootless.sh` with `AUTHORIZED_KEY_FILE` set
-regenerates the peer's entry with the `restrict,port-forwarding,permitopen=...`
-prefix, but an existing unrestricted entry does not update itself.
+regenerates the peer's entry with the
+`restrict,port-forwarding,permitopen="127.0.0.1:15432",permitopen="127.0.0.1:15433",permitopen="127.0.0.1:15681"`
+prefix, but an existing unrestricted entry does not update itself. `permitopen`
+now covers the batch database path (15433) as well; an entry provisioned before
+that was added keeps the old two-port list, and the sidecar's `-L 5433` forward
+then binds successfully while every connection through it is refused with
+"administratively prohibited: open failed" - the container stays healthy and the
+batch path simply never works.
 
 > This is the procedure for restricting the peer key, not a statement that the
 > peer key is restricted. The owner has decided to keep the collaborator fully
@@ -347,7 +526,8 @@ OWNER_TUNNEL_PUBLIC_KEY_FILE=/path/to/owner_tunnel_ed25519.pub \
 
 This provisions a dedicated `stockowner` account (default) with an
 `authorized_keys` entry restricted to
-`restrict,port-forwarding,permitlisten="127.0.0.1:15432",permitlisten="127.0.0.1:15680",permitlisten="127.0.0.1:15681"`.
+`restrict,port-forwarding,permitlisten="127.0.0.1:15432",permitlisten="127.0.0.1:15433",permitlisten="127.0.0.1:15680",permitlisten="127.0.0.1:15681"`
+(four ports: owner database, batch database, dashboard, owner API).
 Copy the resulting private key to the Windows workstation (for example
 `G:\StockPlatform\peer\secrets\owner_tunnel_ed25519`) and add these four keys
 to `G:\StockPlatform\config\runtime.env`:
@@ -375,15 +555,20 @@ verification commands use the existing operator alias through
 `Resolve-OwnerTunnelControlSshTarget`. This keeps the unattended credentials
 non-interactive without breaking `ss`, `curl`, `fuser` or the collaborator's
 complete gateway probe. The four variables may be enabled after the public-key
-fingerprint and all three `permitlisten` entries have been verified.
+fingerprint and all four `permitlisten` entries have been verified.
 
-The scheduled tunnel task runs hidden and publishes the owner database and
-owner API as lightServer loopback ports. The peer API is a third loopback-only
-listener created by rootless Compose. Verify all three with:
+The scheduled tunnel tasks run hidden and publish the owner database (15432),
+the owner API (15681) and, once the batch task is installed, the batch database
+path (15433) as lightServer loopback ports. The peer API is a further
+loopback-only listener created by rootless Compose. Verify them with:
 
 ```powershell
-ssh lightServer1 "ss -lnt | grep -E '127.0.0.1:(15432|15681|15682)'"
+ssh lightServer1 "ss -lnt | grep -E '127.0.0.1:(15432|15433|15681|15682)'"
 ```
+
+`15433` is absent until `install-shared-tunnel-tasks.ps1` (or
+`install-shared-tunnel-task.ps1 -Profile batch`) has run; its absence does not
+affect the other three.
 
 ## Peer deployment
 
@@ -602,12 +787,16 @@ The fastest lever is owner-side and needs no access to the collaborator's host
 peer's database sessions and gateway calls fail immediately:
 
 ```powershell
-Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels'
-Disable-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels'
+foreach ($task in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-shared-peer-batch-tunnel') {
+    Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+    Disable-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+}
 ```
 
-`Disable` matters: the task carries a two-minute supervising trigger that would
-otherwise bring the tunnel straight back up.
+`Disable` matters: each task carries a two-minute supervising trigger that would
+otherwise bring its tunnel straight back up. **Both** tasks must be stopped:
+the batch task publishes 15433, which reaches the same database as 15432, so
+stopping only the intraday task is not a revocation.
 
 To revoke at the database instead:
 

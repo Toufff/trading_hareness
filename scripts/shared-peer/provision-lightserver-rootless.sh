@@ -4,9 +4,19 @@ set -euo pipefail
 PEER_USER="${PEER_USER:-stockpeer}"
 AUTHORIZED_KEY_FILE="${AUTHORIZED_KEY_FILE:-}"
 # Restricts the peer key so it cannot get an interactive shell and can only
-# forward (-L/-R) to the two loopback ports the peer runtime actually needs:
-# the Postgres tunnel (15432) and the read-only licensed gateway (15681).
-AUTHORIZED_KEY_OPTIONS="${AUTHORIZED_KEY_OPTIONS:-restrict,port-forwarding,permitopen=\"127.0.0.1:15432\",permitopen=\"127.0.0.1:15681\"}"
+# forward (-L/-R) to the loopback ports the peer runtime actually needs: the
+# Postgres tunnel (15432), the read-only licensed gateway (15681) and the
+# batch/bulk database path (15433).
+#
+# 15433 belongs here for the same reason install-owner-tunnel-key.sh lists it in
+# permitlisten, but the failure looks completely different on this side. The
+# sidecar's batch forward is `-L 0.0.0.0:5433:127.0.0.1:15433`: a LOCAL bind,
+# so it succeeds at startup whatever authorized_keys says, and
+# -o ExitOnForwardFailure=yes never fires. Nothing reports itself as broken -
+# the container is healthy and 5433 is open - while every single connection to
+# db-tunnel:5433 is refused per connection with
+# "administratively prohibited: open failed".
+AUTHORIZED_KEY_OPTIONS="${AUTHORIZED_KEY_OPTIONS:-restrict,port-forwarding,permitopen=\"127.0.0.1:15432\",permitopen=\"127.0.0.1:15433\",permitopen=\"127.0.0.1:15681\"}"
 ROOTLESS_DOCKER_VERSION="${ROOTLESS_DOCKER_VERSION:-29.7.2}"
 # SHA256 of docker-${ROOTLESS_DOCKER_VERSION}.tgz (linux/static/stable/x86_64).
 # Obtain it from Docker's published checksums, e.g.:

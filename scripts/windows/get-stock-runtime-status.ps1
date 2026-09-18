@@ -31,7 +31,12 @@ function Test-JsonHealth([string]$Url) {
 $root = [IO.Path]::GetFullPath($PlatformRoot).TrimEnd('\')
 $apiHealth = Test-JsonHealth -Url "http://127.0.0.1:$ApiPort/health"
 $adapterHealth = Test-JsonHealth -Url "http://127.0.0.1:$AdapterPort/health"
-$services = foreach ($service in 'quant-api', 'dashboard-adapter', 'dashboard-tunnel', 'shared-peer-tunnels') {
+# 'shared-peer-batch-tunnel' is the optional bulk-traffic connection. It
+# legitimately has no state file until it has been installed; a missing state
+# already renders as a service with a null state rather than as a failure, and
+# leaving it off this list would make the second tunnel invisible to the only
+# diagnostic view operators are told to use.
+$services = foreach ($service in 'quant-api', 'dashboard-adapter', 'dashboard-tunnel', 'shared-peer-tunnels', 'shared-peer-batch-tunnel') {
     $state = Get-RuntimeState -PlatformRoot $root -Service $service
     $alive = [bool](Test-PidProperty -State $state -Property 'supervisor_pid')
     $reachable = switch ($service) { 'quant-api' { $apiHealth.reachable }; 'dashboard-adapter' { $adapterHealth.reachable }; default { $null } }
