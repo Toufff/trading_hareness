@@ -17,7 +17,8 @@ if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { throw "Missing $
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$parseErrors)
 if ($parseErrors -and $parseErrors.Count -gt 0) { throw "Failed to parse $scriptPath" }
-foreach ($name in 'Select-StockBackupRetentionRemovals', 'ConvertTo-Bytes', 'Get-StockBackupExcludedTableData', 'Resolve-StockBackupExcludedTableData') {
+foreach ($name in 'Select-StockBackupRetentionRemovals', 'ConvertTo-Bytes', 'Get-StockBackupExcludedTableData',
+    'Resolve-StockBackupExcludedTableData', 'Get-StockIncrementalChainWatermark') {
     $functionAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if (-not $functionAst) { throw "$name function not found in $scriptPath" }
     . ([scriptblock]::Create($functionAst.Extent.Text))
@@ -51,49 +52,174 @@ foreach ($bad in 'raw_market_observations_cold', 'quant.a.b', 'quant.A_cold', 'Q
 # they were moved out of, so a twin whose hot table has no chain must never be
 # excluded: the last dump that still carried it falls out of retention about two
 # months later and the live cold tablespace on G: becomes its only copy.
-$none = Resolve-StockBackupExcludedTableData -IncrementalTables @() -IncrementalSucceeded $true -ConfiguredExclusions @()
+#
+# Existence of a chain is not enough either: the chain has to have EXPORTED past
+# the tier cutoff. A fixed "now" and a fixed hot window make that deterministic.
+$now = [DateTimeOffset]::new(2026, 9, 19, 4, 10, 0, [TimeSpan]::Zero)
+$hotDays = 365
+function Fresh([int]$DaysBehindCutoff = 30) {
+    # A watermark comfortably newer than now - hotDays.
+    return $now.AddDays(-$hotDays + $DaysBehindCutoff)
+}
+$freshChain = @{ 'quant.raw_market_observations' = Fresh }
+
+$none = Resolve-StockBackupExcludedTableData -IncrementalTables @() -IncrementalSucceeded $true -ConfiguredExclusions @() `
+    -ChainWatermarks @{} -Now $now -HotDays $hotDays
 Assert-True (@($none.Excluded).Count -eq 0 -and @($none.Refused).Count -eq 0) 'without an incremental chain nothing is excluded'
 
-$one = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true -ConfiguredExclusions @()
+$one = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true `
+    -ConfiguredExclusions @() -ChainWatermarks $freshChain -Now $now -HotDays $hotDays
 Assert-True (@($one.Excluded) -contains 'quant.raw_market_observations') 'a table in the chain is excluded from the dump'
 Assert-True (@($one.Excluded) -contains 'quant.raw_market_observations_cold') "the twin of a table in the chain is excluded too"
 Assert-True (@($one.Excluded).Count -eq 2) 'nothing else is excluded'
 
 # A failed export degrades to a full dump for the hot table, but the twin's rows
-# were captured by EARLIER runs of the chain, so the twin stays excluded.
-$failed = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $false -ConfiguredExclusions @()
+# were captured by EARLIER runs of the chain, so the twin stays excluded -- as
+# long as those earlier runs got past the tier cutoff.
+$failed = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $false `
+    -ConfiguredExclusions @() -ChainWatermarks $freshChain -Now $now -HotDays $hotDays
 Assert-True (@($failed.Excluded) -notcontains 'quant.raw_market_observations') "a failed incremental export must dump the hot table's data"
 Assert-True (@($failed.Excluded).Count -eq 1 -and @($failed.Excluded)[0] -eq 'quant.raw_market_observations_cold') 'the twin stays excluded when tonight''s export failed'
+
+# --- the chain has to be FRESH, not merely present --------------------------
+# The reviewed scenario: the incremental export starts failing, its watermark
+# freezes, and the tier job keeps moving rows the chain never exported. Once the
+# watermark falls behind the tier cutoff the twin must go back into the dump.
+$stale = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $false `
+    -ConfiguredExclusions @() -ChainWatermarks @{ 'quant.raw_market_observations' = $now.AddDays(-$hotDays - 1) } -Now $now -HotDays $hotDays
+Assert-True (@($stale.Excluded) -notcontains 'quant.raw_market_observations_cold') 'a twin whose chain stopped before the tier cutoff must stay in the dump'
+Assert-True (@($stale.Refused) -contains 'quant.raw_market_observations_cold') 'the stale twin must be reported as refused'
+Assert-True ((@($stale.Refusals) | Where-Object { $_.Table -eq 'quant.raw_market_observations_cold' }).Reason -match 'has not advanced') `
+    'the refusal must say the chain stopped advancing, not that the chain is missing'
+
+# Exactly at the cutoff the chain still covers every row the tier job may move.
+$atCutoff = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true `
+    -ConfiguredExclusions @() -ChainWatermarks @{ 'quant.raw_market_observations' = $now.AddDays(-$hotDays) } -Now $now -HotDays $hotDays
+Assert-True (@($atCutoff.Excluded) -contains 'quant.raw_market_observations_cold') 'a watermark exactly at the cutoff is still fresh enough'
+
+# No state.json at all (or an unreadable one) reads as $null and is refused: the
+# safe direction is a bigger dump, never a hole.
+foreach ($missing in @(@{}, @{ 'quant.raw_market_observations' = $null })) {
+    $noState = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true `
+        -ConfiguredExclusions @() -ChainWatermarks $missing -Now $now -HotDays $hotDays
+    Assert-True (@($noState.Refused) -contains 'quant.raw_market_observations_cold') 'a twin with no readable chain state must be refused'
+    Assert-True (@($noState.Excluded).Count -eq 1 -and @($noState.Excluded)[0] -eq 'quant.raw_market_observations') 'the hot table is still excluded: this run exported it'
+    Assert-True ((@($noState.Refusals) | Where-Object { $_.Table -eq 'quant.raw_market_observations_cold' }).Reason -match 'missing or unreadable') `
+        'the refusal must name the missing chain state'
+}
+
+# A narrowed hot window (the space ratchet cutting the tier window) moves the
+# cutoff forward, so the SAME watermark can flip from fresh to stale.
+$watermark = @{ 'quant.raw_market_observations' = $now.AddDays(-200) }
+$wide = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true `
+    -ConfiguredExclusions @() -ChainWatermarks $watermark -Now $now -HotDays 365
+$narrow = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true `
+    -ConfiguredExclusions @() -ChainWatermarks $watermark -Now $now -HotDays 90
+Assert-True (@($wide.Excluded) -contains 'quant.raw_market_observations_cold') 'with a 365-day window a 200-day-old watermark is fresh'
+Assert-True (@($narrow.Refused) -contains 'quant.raw_market_observations_cold') 'with a 90-day window the same watermark is stale and the twin goes back into the dump'
+$badWindow = $false
+try {
+    [void](Resolve-StockBackupExcludedTableData -IncrementalTables @() -ChainWatermarks @{} -Now $now -HotDays 0)
+} catch { $badWindow = $true }
+Assert-True $badWindow 'a hot window of zero days must be rejected rather than excluding everything'
 
 # The operator override: honoured, except for a twin with no chain behind it.
 # This is the shipped-and-reviewed blocker: five twins were seeded statically
 # while only raw_market_observations had a chain.
 $policyTwins = @('quant.raw_market_observations_cold', 'quant.tushare_raw_records_cold', 'quant.intraday_quote_observations_cold',
     'quant.intraday_rule_input_snapshots_cold', 'quant.edge_evidence_changes_cold')
-$override = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true -ConfiguredExclusions $policyTwins
+$override = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true `
+    -ConfiguredExclusions $policyTwins -ChainWatermarks $freshChain -Now $now -HotDays $hotDays
 Assert-True (@($override.Refused).Count -eq 4) "a twin without a chunk chain must be refused (got $(@($override.Refused) -join ','))"
 Assert-True (@($override.Refused) -notcontains 'quant.raw_market_observations_cold') 'the twin that does have a chain is not refused'
 foreach ($twin in $policyTwins | Where-Object { $_ -ne 'quant.raw_market_observations_cold' }) {
     Assert-True (@($override.Excluded) -notcontains $twin) "$twin has no chunk chain and must stay in the dump"
     Assert-True (@($override.Refused) -contains $twin) "$twin must be reported as a refused exclusion"
+    $reason = (@($override.Refusals) | Where-Object { $_.Table -eq $twin }).Reason
+    Assert-True ($reason -match 'no incremental chunk chain') "the refusal of $twin must name the missing chain"
 }
+Assert-True ((@($override.Refusals) | Where-Object { $_.Source -eq 'operator_override' }).Count -eq 4) `
+    'a refused override must be attributed to the operator, not to the tier policy'
 Assert-True (@($override.Excluded).Count -eq 2) 'the override adds nothing beyond the chain and its twin'
 
-# All five in the chain: all five twins may be excluded, and the list is the
-# same one the retired static default used to carry.
+# All five in the chain and all five chains fresh: all five twins may go.
 $allFive = @('quant.raw_market_observations', 'quant.tushare_raw_records', 'quant.intraday_quote_observations',
     'quant.intraday_rule_input_snapshots', 'quant.edge_evidence_changes')
-$full = Resolve-StockBackupExcludedTableData -IncrementalTables $allFive -IncrementalSucceeded $true -ConfiguredExclusions @()
+$allFresh = @{}
+foreach ($table in $allFive) { $allFresh[$table] = Fresh }
+$full = Resolve-StockBackupExcludedTableData -IncrementalTables $allFive -IncrementalSucceeded $true -ConfiguredExclusions @() `
+    -ChainWatermarks $allFresh -Now $now -HotDays $hotDays
 Assert-True (((@($full.Excluded) | Where-Object { $_.EndsWith('_cold') } | Sort-Object) -join ';') -eq (($policyTwins | Sort-Object) -join ';')) `
     'with every tiered table in the chain the rule yields exactly the five cold twins'
-Assert-True (@($full.Refused).Count -eq 0) 'nothing is refused when every twin has a chain'
+Assert-True (@($full.Refused).Count -eq 0) 'nothing is refused when every twin has a fresh chain'
+
+# One stale chain among five must only cost that one twin.
+$oneStale = $allFresh.Clone()
+$oneStale['quant.tushare_raw_records'] = $now.AddDays(-$hotDays - 5)
+$mixed = Resolve-StockBackupExcludedTableData -IncrementalTables $allFive -IncrementalSucceeded $true -ConfiguredExclusions @() `
+    -ChainWatermarks $oneStale -Now $now -HotDays $hotDays
+Assert-True (@($mixed.Refused).Count -eq 1 -and @($mixed.Refused)[0] -eq 'quant.tushare_raw_records_cold') 'only the twin of the stalled chain is refused'
+Assert-True ((@($mixed.Excluded) | Where-Object { $_.EndsWith('_cold') }).Count -eq 4) 'the other four twins are unaffected'
 
 # A non-twin override is the operator's own call and passes through; a repeat of
 # something the rule already produced is collapsed.
 $other = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true `
-    -ConfiguredExclusions @('quant.scratch_table', 'quant.raw_market_observations_cold')
+    -ConfiguredExclusions @('quant.scratch_table', 'quant.raw_market_observations_cold') -ChainWatermarks $freshChain -Now $now -HotDays $hotDays
 Assert-True (@($other.Excluded) -contains 'quant.scratch_table') 'a non-twin override is honoured'
 Assert-True (@($other.Excluded | Where-Object { $_ -eq 'quant.raw_market_observations_cold' }).Count -eq 1) 'an override that repeats the computed exclusion is collapsed'
+
+# --- Get-StockIncrementalChainWatermark (the one filesystem read) -----------
+# state.json is written by Invoke-StockIncrementalBackup after every verified
+# chunk; the shape asserted here is the one that module writes.
+$watermarkSandbox = Join-Path ([IO.Path]::GetTempPath()) ('backup-watermark-' + [guid]::NewGuid().ToString('N'))
+try {
+    $chainDir = Join-Path (Join-Path $watermarkSandbox 'incremental') 'quant.raw_market_observations'
+    New-Item -ItemType Directory -Force -Path $chainDir | Out-Null
+    Assert-True ($null -eq (Get-StockIncrementalChainWatermark -BackupRoot $watermarkSandbox -Table 'quant.raw_market_observations')) `
+        'a chain directory without state.json has no watermark'
+    Assert-True ($null -eq (Get-StockIncrementalChainWatermark -BackupRoot $watermarkSandbox -Table 'quant.absent')) `
+        'a table that was never exported has no watermark'
+    Assert-True ($null -eq (Get-StockIncrementalChainWatermark -BackupRoot '' -Table 'quant.raw_market_observations')) `
+        'no backup root means no watermark, never an assumption that one exists'
+
+    $statePath = Join-Path $chainDir 'state.json'
+    [IO.File]::WriteAllText($statePath, '{"table":"quant.raw_market_observations","watermark":"2026-03-01T16:00:00.000000Z","updated_at":"2026-03-01T16:05:00+08:00"}',
+        [Text.UTF8Encoding]::new($false))
+    $read = Get-StockIncrementalChainWatermark -BackupRoot $watermarkSandbox -Table 'quant.raw_market_observations'
+    Assert-True ($null -ne $read -and $read.UtcDateTime -eq ([DateTime]::new(2026, 3, 1, 16, 0, 0, [DateTimeKind]::Utc))) `
+        "the watermark must be read back as the UTC instant the module wrote (got $read)"
+
+    # Corrupt or empty state must read as "no watermark", not as an exception
+    # that fails the nightly backup and not as a silently fresh chain.
+    foreach ($bad in '{', '{"table":"quant.raw_market_observations"}', '{"watermark":"not a timestamp"}', '') {
+        [IO.File]::WriteAllText($statePath, $bad, [Text.UTF8Encoding]::new($false))
+        Assert-True ($null -eq (Get-StockIncrementalChainWatermark -BackupRoot $watermarkSandbox -Table 'quant.raw_market_observations')) `
+            "unreadable chain state ('$bad') must read as no watermark"
+    }
+
+    # End to end: a real stale state.json on disk keeps the twin in the dump.
+    [IO.File]::WriteAllText($statePath, '{"table":"quant.raw_market_observations","watermark":"2025-01-02T16:00:00.000000Z"}',
+        [Text.UTF8Encoding]::new($false))
+    $fromDisk = @{ 'quant.raw_market_observations' = Get-StockIncrementalChainWatermark -BackupRoot $watermarkSandbox -Table 'quant.raw_market_observations' }
+    $endToEnd = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true `
+        -ConfiguredExclusions @() -ChainWatermarks $fromDisk -Now $now -HotDays $hotDays
+    Assert-True (@($endToEnd.Refused) -contains 'quant.raw_market_observations_cold') `
+        'a state.json frozen more than the hot window ago must keep its twin in the dump'
+} finally {
+    Remove-Item -LiteralPath $watermarkSandbox -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# The nightly dump must actually wire the freshness data in, and read the window
+# from runtime.env rather than assuming the shipped 365.
+$backupSource = [IO.File]::ReadAllText($scriptPath, [Text.Encoding]::UTF8)
+Assert-True ($backupSource -match 'STORAGE_TIER_HOT_DAYS') 'the dump must read the tier hot window from runtime.env'
+Assert-True ($backupSource -match "\`$tierHotDays = if \(\`$config\['STORAGE_TIER_HOT_DAYS'\]\) \{ \[int\]\`$config\['STORAGE_TIER_HOT_DAYS'\] \} else \{ 365 \}") `
+    'the tier hot window must default to 365 days'
+Assert-True ($backupSource -match 'Get-StockIncrementalChainWatermark -BackupRoot \$backupRoot -Table \$spec\.Table') `
+    'the dump must read each chain watermark off the backup root'
+Assert-True ($backupSource -match '-ChainWatermarks \$chainWatermarks -Now \(\[DateTimeOffset\]::Now\) -HotDays \$tierHotDays') `
+    'the dump must hand the watermarks and the window to the exclusion rule'
+Assert-True ($backupSource -match 'refused_table_data_exclusion_reasons') 'a refused exclusion must reach the run record with its reason'
 
 # --- Select-StockBackupRetentionRemovals ---
 # Fixed "now" so week-boundary math is deterministic regardless of when the
@@ -169,6 +295,10 @@ Assert-True ($appendOnlySql -notmatch ' OR ') 'a spec without an update column s
     excluded_table_data_parsed = $true
     cold_twin_exclusion_requires_chunk_chain = $true
     cold_twin_exclusion_without_chain_refused = $true
+    cold_twin_exclusion_requires_fresh_watermark = $true
+    cold_twin_exclusion_refused_when_state_json_missing = $true
+    chain_watermark_read_from_state_json = $true
+    tier_hot_window_read_from_runtime_env = $true
     retention_keeps_daily_window = $true
     retention_keeps_one_per_weekly_window = $true
     retention_prunes_beyond_both_windows = $true
