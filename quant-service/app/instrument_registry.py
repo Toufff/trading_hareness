@@ -23,20 +23,40 @@ Both are addressed by the two properties this module owns:
    rather than a Python-level loop of ``execute`` calls.  The ``unnest`` form
    is used here because it keeps ``ON CONFLICT (symbol) DO NOTHING`` on one
    statement.
-2. **A consistent lock order.**  ``INSERT ... ON CONFLICT DO NOTHING`` takes a
-   row-level lock on each inserted or conflicting key, so two transactions
-   that insert the same two new symbols in opposite orders can wait on each
-   other.  The PostgreSQL manual's deadlock section and the PostgreSQL wiki's
+2. **A consistent lock order.**  Be precise about what each conflict action
+   actually locks, because the two are not equivalent:
+
+   * ``ON CONFLICT DO NOTHING`` (this statement) takes a row-level lock only
+     on the rows it genuinely *inserts*.  An already-committed conflicting
+     row is not locked at all; the one thing it can wait on is the
+     *speculative insertion token* of a concurrent transaction inserting the
+     same new key.  So its deadlock exposure is limited to two writers
+     introducing overlapping **new** symbols in opposite orders -- which is
+     exactly the 2026-09-18 pattern (a trading day's first sight of a batch
+     of new listings), but nothing more.
+   * ``ON CONFLICT DO UPDATE`` (``daily_bar_batch_repository``,
+     ``daily_bar_repository`` and the other name/industry writers)
+     additionally row-locks **every existing conflicting row**, i.e. the
+     whole payload on any day after the first.  Those writers are therefore
+     the ones that most need the shared order, and they must sort their
+     arrays too -- registering symbols in ascending order here does not
+     protect a DO UPDATE writer that re-locks the same table in payload
+     order later in the same transaction.
+
+   The PostgreSQL manual's deadlock section and the PostgreSQL wiki's
    deadlock/lock-monitoring advice both give the same remedy: make every
    application acquire locks on multiple objects in a consistent order.
-   Sorting the symbols ascending before the write gives every writer in this
-   platform one global order, which removes that deadlock cycle by
-   construction -- it is a correctness property, not a cosmetic detail, and
-   must not be "optimized away" by preserving caller order.
+   Sorting the symbols ascending before the write gives every writer that
+   uses this helper one global order -- it is a correctness property, not a
+   cosmetic detail, and must not be "optimized away" by preserving caller
+   order.
 
 The helper is deliberately not a repository method and not part of
-``main.py``: it is a single shared write primitive that ingestion
-repositories, services and runtime actions all call.
+``main.py``: it is the shared write primitive for *bare symbol
+registration*, called by ingestion repositories, services and runtime
+actions.  It is not the only writer of ``quant.instruments``: the paths that
+also carry name/industry/list-date attributes still use their own
+``DO UPDATE`` statements (see the list in ``AGENTS.md``).
 """
 
 from __future__ import annotations
@@ -65,6 +85,20 @@ def normalized_symbols(symbols: Iterable[Any]) -> list[str]:
     Sorting is the shared lock order described in the module docstring; the
     deduplication also keeps one statement from touching the same conflict
     target twice.
+
+    Case is deliberately **preserved**, not upper-cased.  Every caller writes
+    the very same symbol string into a child table that carries
+    ``REFERENCES quant.instruments(symbol)`` (minute sessions, market events,
+    sector memberships, universe members) in the same transaction, so
+    upper-casing only here would desynchronize the registry key from the row
+    that references it and turn a caller-side normalization bug into a
+    mid-transaction foreign-key failure of an otherwise good batch.
+    Normalization therefore stays at each entry boundary, where it already
+    is: ``request_models`` validates and upper-cases every API-supplied
+    symbol against ``\\d{6}\\.(SH|SZ|BJ)``, and
+    ``tushare_normalization`` / ``public_market_repository`` /
+    ``sector_membership_repository`` / ``offline_minute_import_service``
+    each ``.upper()`` and regex-check before calling this helper.
     """
     unique = {
         text

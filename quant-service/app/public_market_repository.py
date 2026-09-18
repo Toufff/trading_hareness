@@ -229,6 +229,15 @@ def persist_market_events(database: Any, provider: str, rows: list[dict[str, Any
         # references is registered in one batched statement below instead of
         # one INSERT ... ON CONFLICT per event.  A row rejected here still
         # registers no instrument, exactly as the per-row write did.
+        #
+        # Memory bound: this buffers every accepted row's serialized body in
+        # ``prepared`` before the first write, where the old code streamed one
+        # row at a time -- roughly double the peak for the duration of the
+        # call, since each event's payload is held by both ``payload`` and
+        # ``values``.  Fine for daily volumes (hundreds to a few thousand
+        # events); an announcement backfill of tens of thousands of events
+        # should be chunked (prepare + register + write in slices of ~2,000)
+        # rather than prepared whole.
         prepared: list[tuple[str, str | None, tuple[Any, ...]]] = []
         for row in rows:
             symbol = str(row.get("ts_code") or "").upper()

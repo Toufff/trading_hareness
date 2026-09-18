@@ -168,8 +168,14 @@ def import_csv(
         if not items:
             return
         with database.transaction() as connection:
+            # One registration statement for the whole 1,000-row slice, in the
+            # shared ascending symbol order, instead of one per CSV row in
+            # file order.  ``ensure_instruments`` dedups and sorts, so a chunk
+            # of a single-symbol file costs one statement rather than 1,000,
+            # and a concurrent ingestion transaction touching the same new
+            # symbols cannot deadlock against this one.
+            ensure_instruments(connection, [item["symbol"] for item in items], exchange_for=exchange_for)
             for item in items:
-                ensure_instrument(connection, item["symbol"], exchange_for=exchange_for)
                 connection.execute(
                     """INSERT INTO quant.market_bars_minute(symbol,bar_time,open,high,low,close,volume,amount,source_name,import_id,source_available_at,available_at,raw)
                        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),%s)

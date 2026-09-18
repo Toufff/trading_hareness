@@ -217,6 +217,12 @@ def _persist_raw(
 
 
 def _persist_instruments_from_stage(connection: Any, provider_key: str) -> None:
+    # ``ORDER BY 1`` is the shared ascending lock order that
+    # ``app/instrument_registry.py`` documents: without it the rows reach
+    # ``quant.instruments`` in whatever order the DISTINCT node emits them,
+    # and a backfill running next to a live ingestion transaction can take
+    # the same new symbols in the opposite order.  It is a correctness
+    # property here, not a cosmetic sort of the output.
     connection.execute(
         """INSERT INTO quant.instruments(symbol,exchange,source)
            SELECT DISTINCT upper(row_data->>'ts_code'),
@@ -225,6 +231,7 @@ def _persist_instruments_from_stage(connection: Any, provider_key: str) -> None:
                   %s
              FROM annual_daily_stage
             WHERE upper(row_data->>'ts_code') ~ '^\\d{6}\\.(SH|SZ|BJ)$'
+            ORDER BY 1
            ON CONFLICT(symbol) DO NOTHING""",
         (provider_key,),
     )
@@ -233,12 +240,15 @@ def _persist_instruments_from_stage(connection: Any, provider_key: str) -> None:
 def _persist_daily(connection: Any, provider_key: str, available_at: datetime, ingested_at: datetime,
                    availability_basis: str, *, index_mode: bool = False) -> None:
     if index_mode:
+        # ``ORDER BY 1``: same shared ascending lock order as
+        # ``_persist_instruments_from_stage`` above.
         connection.execute(
             """INSERT INTO quant.instruments(symbol,exchange,source)
                SELECT DISTINCT upper(row_data->>'ts_code'),
                       CASE right(upper(row_data->>'ts_code'),2) WHEN 'SH' THEN 'SSE' ELSE 'SZSE' END,%s
                  FROM annual_daily_stage
                 WHERE upper(row_data->>'ts_code') ~ '^\\d{6}\\.(SH|SZ)$'
+                ORDER BY 1
                ON CONFLICT(symbol) DO NOTHING""",
             (provider_key,),
         )

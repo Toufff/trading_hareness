@@ -27,10 +27,24 @@ def normalize_rows(
     normalized = 0
     # Register every symbol this payload will reference in one batched
     # statement before the row loop, instead of one INSERT ... ON CONFLICT per
-    # row.  A full cross-section is ~5,500 symbols; the same client-side
-    # filter as the loop below is applied here so an unparsable ``ts_code``
-    # still produces only a row-level data-quality warning and no instrument.
-    if api_name not in {"trade_cal", "stock_basic"}:
+    # row.  The same client-side filter as the loop below is applied here so
+    # an unparsable ``ts_code`` still produces only a row-level data-quality
+    # warning and no instrument.
+    #
+    # Four APIs are excluded because another statement in this very
+    # transaction already owns their instrument rows, so a pre-pass would be
+    # a second ~5,500-element array statement writing rows that are rewritten
+    # seconds later:
+    #   trade_cal            - carries no symbols at all;
+    #   stock_basic          - the row loop writes full instrument rows itself;
+    #   daily / index_daily  - the bars are deferred to ``upsert_daily_bars``
+    #       (and, if that raises, to the per-row ``upsert_bar`` fallback), and
+    #       both upsert every instrument in the payload.  Nothing inside the
+    #       row loop needs the foreign key before then: the bars only land in
+    #       ``pending_bars``, and ``quant.data_quality_issues`` has no symbol
+    #       column.  Excluding them also keeps "an instrument is registered
+    #       before its row is validated" out of the hot path.
+    if api_name not in {"trade_cal", "stock_basic", "daily", "index_daily"}:
         ensure_instruments(connection, [
             symbol for symbol in (str(row.get("ts_code") or "").upper() for row in rows)
             if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol)

@@ -92,7 +92,17 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
             entry["is_st"] = bar.is_st
         entry["source"] = bar.source
     inst_symbols, inst_exchanges, inst_names, inst_industries, inst_is_st, inst_sources = [], [], [], [], [], []
-    for symbol, entry in instrument_entries.items():
+    # Ascending symbol order, not payload/dict-insertion order.  This is the
+    # strongest ``quant.instruments`` lock in the platform: ``ON CONFLICT DO
+    # UPDATE`` row-locks every EXISTING conflicting row -- the whole
+    # cross-section on any day after the first -- where the ``DO NOTHING``
+    # registration in ``instrument_registry`` locks only genuinely new rows.
+    # Two concurrent ``normalize_tushare_rows`` transactions (a 'daily'
+    # cross-section and an 'index_daily'/partial refresh sharing symbols)
+    # deadlock here unless both take the rows in the same order -- that is
+    # the 2026-09-18 cycle.  Keep this ``sorted``: it is the same global
+    # order ``instrument_registry.normalized_symbols`` uses.
+    for symbol, entry in sorted(instrument_entries.items()):
         old = existing_instruments.get(symbol)
         inst_symbols.append(symbol)
         inst_exchanges.append(exchange_for(symbol))

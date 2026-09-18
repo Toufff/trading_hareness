@@ -11,11 +11,38 @@ provider response directly to a live threshold or order path.
 
 - `quant-service/app/routers/`: HTTP boundary and request validation.
 - `quant-service/app/*_repository.py`: database read/write projections.
-- `quant-service/app/instrument_registry.py`: the single shared
-  `quant.instruments` write primitive. Ingestion paths register a payload's
-  symbols through `ensure_instruments` (one statement, client-side
-  deduplicated, sorted so every writer takes the same lock order); do not
-  reintroduce a per-row `INSERT INTO quant.instruments ... DO NOTHING`.
+- `quant-service/app/instrument_registry.py`: the shared primitive for **bare
+  symbol registration** in `quant.instruments` (symbol + exchange + source,
+  `ON CONFLICT DO NOTHING`). A path that only needs the row to exist before it
+  writes its own evidence must use `ensure_instruments` — one statement per
+  5,000-symbol chunk, client-side deduplicated, sorted ascending so every
+  writer takes the same lock order — and must not reintroduce a per-row
+  `INSERT INTO quant.instruments ... DO NOTHING` loop. It is **not** yet the
+  only writer of that table, so do not assume instrument writes are globally
+  centralised or globally ordered:
+  - Converted to the helper: `tushare_normalization` (non-bar APIs),
+    `public_market_repository.persist_market_events`,
+    `sector_membership_repository.persist_ths_snapshot`,
+    `intraday_minute_capture_actions`, `offline_minute_import_service`,
+    `research_maintenance_service.update_universe_members`, and
+    `remote_archive` (message and report signals).
+  - Sorted in place but keeping their own SQL because they write more than the
+    symbol: `daily_bar_batch_repository` (`ON CONFLICT DO UPDATE`, the
+    strongest lock on this table — it locks every existing conflicting row,
+    where `DO NOTHING` locks only newly inserted ones) and the two
+    `annual_daily_backfill` stage inserts (`ORDER BY 1`).
+  - **Not converted**, each still a per-row or attribute-carrying write:
+    `annual_daily_backfill._persist_stock_basic`, `broker_order_repository`,
+    `broker_trade_repository`, `claim_review_service`, `daily_bar_repository`,
+    `intraday_watchlist_service`, `main.py` (akshare, single symbol),
+    `personal_decision_repository` (two sites), `strategy_decision_service`,
+    the `stock_basic` branch of `tushare_normalization`, and the injected
+    per-row `ensure_instrument` that `main.persist_eastmoney_sector_members`
+    hands to `sector_membership_repository.persist_observed_snapshot`. Most carry a
+    name/industry that the `DO NOTHING` helper cannot express; several are
+    genuinely single-symbol. They do not share the ascending lock order, so a
+    deadlock between one of them and a batched writer is still possible until
+    they are converted.
 - `quant-service/app/*_scheduler.py`: timing, retry windows and idempotency only.
 - `quant-service/app/*_rules.py` / `*_research.py`: pure or research-only rules.
 - `quant-service/app/main.py`: composition root by design, but historically
