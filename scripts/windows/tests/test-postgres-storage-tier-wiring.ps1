@@ -161,6 +161,18 @@ Assert-True ($runner -match '\$MaxSeconds = 7200') 'the wall-clock backstop must
 $tierInstaller = [IO.File]::ReadAllText((Join-Path $windows 'install-storage-tiers-task.ps1'), [Text.Encoding]::UTF8)
 Assert-True ($tierInstaller -match 'New-TimeSpan -Hours 2 -Minutes 15') 'the tier task must allow 2h15m: fifteen minutes of slack over the 06:00-08:00 deadline, no more'
 
+# The tier job must NOT be restarted on failure. The runner exits with the CLI's
+# own exit code, so Task Scheduler sees the receipt's status verbatim -- and
+# every non-zero status this job produces (partial, conflicts, schema_drift,
+# degraded, failed) wants a human, not another pass. Each pass may shave
+# DEFAULT_MAX_SPACE_DAYS = 7 days off a table's hot window, so two restarts turn
+# the documented "at most 7 days per table per run" into 21 while each receipt
+# still reads compliant on its own.
+Assert-True ($tierInstaller -notmatch '-RestartCount') 'the tier task must not be restarted on failure: a retry triples the per-run hot-window budget'
+Assert-True ($tierInstaller -notmatch '-RestartInterval') 'the tier task must declare no restart interval either'
+# A genuinely missed 06:00 trigger (the machine asleep) should still run once.
+Assert-True ($tierInstaller -match '-StartWhenAvailable') 'a missed 06:00 trigger must still run once'
+Assert-True ($tierInstaller -match 'NO restart-on-failure') 'the installer must record why it registers no restart'
 
 # Both new installers register an absolute Execute path; defaulting it to the
 # checkout they happen to run from registers a task that dies with the worktree.
