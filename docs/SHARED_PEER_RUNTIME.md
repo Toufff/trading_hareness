@@ -158,7 +158,7 @@ scheduled task, supervised runtime service, state file and lock file:
 | runtime service | `shared-peer-tunnels` | `shared-peer-batch-tunnel` |
 | forwards | `-R 15432:55432`, `-R 15681:5681` | `-R 15433:55432` |
 | compression | off | `-o Compression=yes` |
-| health claim | remote API HTTP 200 | remote loopback listener on 15433, owned by this install's local ssh client, backed by a runtime state that belongs to this install (a new `run_id` **and** a `started_at` that post-dates it) or, failing that, to a run a live supervisor still owns |
+| health claim | remote API HTTP 200 | remote loopback listener on 15433, owned by this install's local ssh client, backed by a runtime state that belongs to this install: a new `run_id`, a `started_at` that post-dates the install, **and** a status that is not a stopping or terminal one |
 | peer address | `db-tunnel:5432` | `db-tunnel:5433` |
 
 The batch claim's third leg is keyed on `started_at` because that is the field
@@ -173,45 +173,60 @@ read of an absent property throws, and that throw would escape
 `Stop-TunnelInstallOnFailure`, leaving the failed batch task enabled and retrying
 every two minutes — the exact unbounded failure the helper exists to prevent.
 
-A timestamp alone is not the whole claim, in either direction.
+A timestamp alone is not the whole claim.
 
 * The installer keeps the `run_id` it read *before* the install (the return of
   `Request-RuntimeStop`) and passes it as `-PreviousRunId`. This install's
   supervisor mints a new one, so a state still carrying the old id was not
   written by this install whatever its clock says — no tolerance window, no
   clock skew, nothing to get wrong.
-* `supervise-runtime-process.ps1` exits 0 with `duplicate_start_skipped` and
-  writes **no** state when it cannot take `<service>.lock`. If the previous
-  supervisor still holds that lock, the state keeps the previous `run_id`
-  indefinitely while the tunnel is up and serving. Disabling that task would be
-  a self-inflicted outage, so the verdict accepts it — as
-  `duplicate_supervisor_still_serving`, reported in the health label
-  `remote_listener_open_owned_by_live_supervisor` and in the `state_freshness`
-  field of the runtime state and the `healthy` event, never as this install's
-  own state. `Get-SharedTunnelSupervisorLiveness` is what vouches for it: the
+* The state's own `status` is judged **first**, before the `run_id` and clock
+  branches. A state that says the run it names is stopping or already over
+  (`stop_requested`, `stopped`, `unexpected_exit`, `supervisor_failed`,
+  `start_failed`) is never fresh, whichever run it names. Two cases fall out of
+  that, and they are deliberately reported differently:
+  * the **previous** run's id ⇒ `previous_run_stopping`. The installer's own
+    `Request-RuntimeStop` wrote that status before the task was registered, so
+    this is the handover this install started and has not finished.
+  * **this install's own** new run_id ⇒ `run_ended_before_health_was_proved`.
+    `supervise-runtime-process.ps1` writes `unexpected_exit` (or
+    `supervisor_failed`, `stopped`) with this install's run_id and a `started_at`
+    that post-dates the install, which the run-id and clock branches on their own
+    read as proof of a healthy install. The listener probe passed seconds
+    earlier, so without this check the install would certify a tunnel that had
+    already died.
+* **There is no weak accept.** Earlier revisions accepted a state that still
+  carried the previous `run_id` whenever a live process still owned that run —
+  the `duplicate_start_skipped` case, where `supervise-runtime-process.ps1`
+  exits 0 without writing state because it cannot take `<service>.lock` — and
+  labelled it `duplicate_supervisor_still_serving` /
+  `remote_listener_open_owned_by_live_supervisor`. That branch could never fire
+  from the installer: `Request-RuntimeStop` runs before the task is registered
+  and leaves every previous-run state in a stopping or terminal status, so the
+  accept was unreachable while this document promised it. It has been deleted
+  rather than left as a promise. `fresh` is the whole gate.
+* Refusing is **not** the same as disabling. `previous_run_stopping` carries
+  `handover_in_progress`, and the installer passes `-KeepTaskEnabled` for it:
+  the install fails (it certifies nothing it cannot prove) but the batch task
+  stays enabled, and its two-minute trigger finishes the handover with no
+  operator involved. That is what the deleted weak accept was invented to
+  protect against and could not actually deliver. Every other refusal is a
+  broken install and disables the task as before.
+* `Get-SharedTunnelSupervisorLiveness` is now a **receipt**, not a gate. The
   `supervisor_pid` must name a running process whose start time sits beside the
-  state's own `started_at`, so a recycled pid proves nothing. Its verdict
+  state's own `started_at`, so a recycled pid proves nothing; its verdict
   (`supervisor_process_owns_this_run`, `supervisor_pid_reused`,
   `process_start_time_unavailable`, …) and the pid it was taken against are
   written to the runtime state and the `healthy` event as `supervisor_liveness`
-  and `supervisor_pid_checked`; a refused install writes no state at all, so its
-  failure message carries the same two values instead.
-* A live pid is **not enough on its own**, because the installer's own
-  `Request-RuntimeStop` rewrites that same state with `status = 'stop_requested'`
-  before the task is registered. A state whose status says the run is stopping or
-  already over (`stop_requested`, `stopped`, `unexpected_exit`,
-  `supervisor_failed`, `start_failed`) can therefore never carry the weak claim:
-  that is the run this install is tearing down, not a tunnel that is serving. The
-  verdict is `previous_run_stopping`, and the install refuses.
+  and `supervisor_pid_checked`. A refused install writes no state at all, so its
+  failure message carries the same two values instead. Nothing is admitted on
+  the strength of a live pid any more.
 * The verdict is **polled** until a 30 s deadline, re-reading the state each
   second. The ssh client that satisfies legs 1 and 2 can be up before the
   supervisor's state write lands; judging once turned that race into a disabled
-  batch task. The poll breaks on `fresh` — this install's own state — and keeps
-  an accept-but-not-fresh verdict only as a **fallback**, applied when the whole
-  deadline passed without this install's supervisor writing anything. Breaking on
-  `accept` let the previous run win the race in the first second, on a state the
-  installer had just marked `stop_requested`. `accept`, not `fresh`, is still
-  what the installer gates on once the poll is over.
+  batch task. The poll breaks on `fresh` and on nothing else, and no earlier
+  verdict is kept as a fallback: the refusal the install ends on is the verdict
+  the last read produced.
 
 Both reach the same database on the same port 55432; only the transport differs.
 Compression is on for batch alone because bulk result sets compress well and the

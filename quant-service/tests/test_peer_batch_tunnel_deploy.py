@@ -106,7 +106,13 @@ class PatchEntrypointTests(unittest.TestCase):
             deploy.patch_entrypoint(
                 "#!/bin/sh\necho no anchor here\n", "0.0.0.0", self.known["entrypoint_anchor"])
 
-    @unittest.skipUnless(shutil.which("sh"), "no POSIX sh on this host")
+    # The reason names what is missing, not the host: this repository's own
+    # Windows dev box HAS a POSIX sh (Git's), and whether the case runs depends
+    # only on whether it is on PATH in the session that ran pytest. A reason of
+    # "no POSIX sh on this host" made a PATH difference look like a platform
+    # fact, and a count of skips look stable when it is not.
+    @unittest.skipUnless(shutil.which("sh"),
+                         "no POSIX sh on PATH (shutil.which('sh') found nothing)")
     def test_patched_entrypoint_is_valid_shell(self):
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / "entrypoint.sh"
@@ -133,23 +139,32 @@ class ComposeEnvironmentTests(unittest.TestCase):
         self.assertIn('PEER_LOCAL_BIND_ADDRESS: "0.0.0.0"', patched)
 
 
-class FakeImageStore:
-    """Just enough docker for the already-deployed short-circuit's image check.
+class FakePeerContainer:
+    """Just enough docker for the already-deployed short-circuit.
 
-    It models the one relation that matters there: a tag resolves to an image id,
-    and the running container has an image id of its own.  "The files say
-    deployed" is then separable from "the running image came from a build that
-    included them", which is exactly what the short-circuit has to tell apart.
+    It models the one relation that matters there: the container currently
+    running ``db-tunnel`` has an ssh process at pid 1, and that process either
+    carries the batch ``-L`` forward or it does not.  "The files say deployed"
+    is then separable from "this peer is forwarding the port right now", which
+    is what the short-circuit has to tell apart.
+
+    The previous version of this fake modelled a tag -> image -> container chain
+    instead, because the evidence used to be a ``:batch-<stamp>`` image tag.  A
+    rebuild of ``db-tunnel`` - the peer's own documented release step - produces
+    a new image and strands that tag while the forward is still there, so the
+    evidence moved to the running process and this fake moved with it.
     """
 
-    IMAGE_REF = "trading-hareness-peer-db-tunnel:latest"
-    BUILT_IMAGE = "sha256:" + "b1" * 32
-    OTHER_IMAGE = "sha256:" + "0f" * 32
+    CONTAINER = "container-db-tunnel"
+    BASE_ARGV = ["ssh", "-NT", "-o", "ExitOnForwardFailure=yes",
+                 "-L", "0.0.0.0:5432:127.0.0.1:15432",
+                 "-L", "0.0.0.0:5681:127.0.0.1:15681"]
+    BATCH_ARGV = ["-L", "0.0.0.0:5433:127.0.0.1:15433"]
 
-    def __init__(self, tags=None, running_image=None, container="container-db-tunnel"):
-        self.tags = dict(tags or {})
-        self.running_image = running_image if running_image is not None else self.BUILT_IMAGE
+    def __init__(self, argv=None, container=CONTAINER, exec_error=None):
+        self.argv = list(self.BASE_ARGV + self.BATCH_ARGV) if argv is None else list(argv)
         self.container = container
+        self.exec_error = exec_error
         self.calls = []
 
     def container_id(self, service_name):
@@ -159,16 +174,17 @@ class FakeImageStore:
     def check_output(self, argv, **kwargs):
         argv = list(argv)
         self.calls.append(argv)
-        if "image" in argv and "ls" in argv:
-            reference = next(part for part in argv if part.startswith("reference="))
-            prefix = reference[len("reference="):].rstrip("*")
-            return "".join(tag + "\n" for tag in sorted(self.tags) if tag.startswith(prefix))
-        if "image" in argv and "inspect" in argv:
-            return json.dumps([{"Id": self.tags[argv[-1]]}])
-        if "inspect" in argv:
-            return json.dumps([{"Config": {"Image": self.IMAGE_REF},
-                                "Image": self.running_image}])
+        if "exec" in argv:
+            if self.exec_error is not None:
+                raise self.exec_error
+            # The read must be of THIS container's pid 1, not of an image.
+            assert argv[-3:] == [self.container, "cat", "/proc/1/cmdline"], argv
+            # /proc/<pid>/cmdline is NUL-separated and NUL-terminated.
+            return "\0".join(self.argv) + "\0"
         return ""
+
+    def image_calls(self):
+        return [argv for argv in self.calls if "image" in argv]
 
 
 class InspectPeerStateTests(unittest.TestCase):
@@ -191,16 +207,16 @@ class InspectPeerStateTests(unittest.TestCase):
         # hash is never the reason a case fails for an unrelated reason.
         self.compose_sha256 = deploy.sha256_text(text)
 
-    def inspect(self, service=None, known=None, compose_sha256=None, images=None):
+    def inspect(self, service=None, known=None, compose_sha256=None, container=None):
         known = known or self.known
         service = service if service is not None else rendered_service(known)
         patched_state = dict(known, compose_sha256=compose_sha256 or self.compose_sha256)
         states = dict(deploy.KNOWN_PEER_STATES, **{STATE: patched_state})
-        self.images = images if images is not None else FakeImageStore()
+        self.container = container if container is not None else FakePeerContainer()
         with patch.object(deploy, "ROOT", self.root), \
                 patch.object(deploy, "KNOWN_PEER_STATES", states), \
-                patch.object(deploy, "subprocess", self.images), \
-                patch.object(deploy, "container_id", self.images.container_id), \
+                patch.object(deploy, "subprocess", self.container), \
+                patch.object(deploy, "container_id", self.container.container_id), \
                 patch.object(deploy, "config", lambda: {"services": {deploy.SERVICE: service}}):
             return deploy.inspect_peer_state()
 
@@ -246,20 +262,22 @@ class InspectPeerStateTests(unittest.TestCase):
         return deploy.patch_entrypoint(FIXTURE.read_text(), self.known["batch_bind_address"],
                                        self.known["entrypoint_anchor"])
 
-    def deployed_service(self):
+    def deployed_service(self, remote_port="15433"):
         service = rendered_service(self.known)
         service["environment"]["PEER_BATCH_DB_PORT"] = "5433"
+        if remote_port is not None:
+            service["environment"]["PEER_BATCH_REMOTE_PORT"] = remote_port
         return service
 
-    def deployed_images(self, **overrides):
-        """What a completed deploy leaves in the image store: a :batch- tag."""
-        settings = {"tags": {FakeImageStore.IMAGE_REF: FakeImageStore.BUILT_IMAGE,
-                             "trading-hareness-peer-db-tunnel:batch-20260919T101500":
-                                 FakeImageStore.BUILT_IMAGE,
-                             "trading-hareness-peer-db-tunnel:pre-batch-20260919T101500":
-                                 FakeImageStore.OTHER_IMAGE}}
-        settings.update(overrides)
-        return FakeImageStore(**settings)
+    def assert_refused(self, **kwargs):
+        (self.root / "ssh-tunnel-entrypoint.sh").write_text(self.deployed_entrypoint())
+        kwargs.setdefault("service", self.deployed_service())
+        with self.assertRaises(SystemExit) as raised:
+            self.inspect(**kwargs)
+        self.assertNotEqual(raised.exception.code, 0)
+        message = str(raised.exception)
+        self.assertIn("refusing to touch the peer", message)
+        return message
 
     def test_a_finished_deploy_exits_zero_even_though_its_entrypoint_is_unknown(self):
         # The idempotent re-run - the natural thing to do after a partial
@@ -267,50 +285,89 @@ class InspectPeerStateTests(unittest.TestCase):
         # peer no longer matches any KNOWN_PEER_STATES hash, so this is judged
         # AFTER the lookup, on the evidence a real deploy leaves behind.
         (self.root / "ssh-tunnel-entrypoint.sh").write_text(self.deployed_entrypoint())
-        images = self.deployed_images()
+        container = FakePeerContainer()
         with contextlib.redirect_stdout(io.StringIO()) as out:
             with self.assertRaises(SystemExit) as raised:
-                self.inspect(service=self.deployed_service(), images=images)
+                self.inspect(service=self.deployed_service(), container=container)
         self.assertEqual(raised.exception.code, 0)
-        # The tag it accepted as evidence is named, not merely counted.
-        self.assertIn("batch-20260919T101500", out.getvalue())
-        self.assertIn("image", str(images.calls))
+        # The live forward it accepted as evidence is named, not merely counted.
+        self.assertIn("0.0.0.0:5433:127.0.0.1:15433", out.getvalue())
+        self.assertIn("/proc/1/cmdline", str(container.calls))
 
-    def test_files_deployed_but_the_image_never_built_is_refused(self):
+    def test_a_rebuilt_peer_is_still_recognised_as_deployed(self):
+        # The finding. `docker compose ... up -d --build db-tunnel` is this
+        # repository's own peer release step (SHARED_PEER_RUNTIME.md): it builds
+        # a NEW image from the same batch-carrying files and recreates the
+        # container from it. The old evidence - a :batch-<stamp> tag resolving to
+        # the running image id - is destroyed by exactly that, and the refusal it
+        # produced told the operator to restore the three files from a backup,
+        # which would have stripped a working batch forward off the peer.
+        #
+        # A different container id, no image tags in existence at all, same live
+        # forward: still deployed.
+        (self.root / "ssh-tunnel-entrypoint.sh").write_text(self.deployed_entrypoint())
+        container = FakePeerContainer(container="container-db-tunnel-rebuilt")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as raised:
+                self.inspect(service=self.deployed_service(), container=container)
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("0.0.0.0:5433:127.0.0.1:15433", out.getvalue())
+        # And nothing may creep back to judging this by an image or a tag.
+        self.assertEqual(container.image_calls(), [],
+                         "the already-deployed evidence must not depend on image tags")
+
+    def test_files_deployed_but_the_container_does_not_forward_is_refused(self):
         # SIGKILL / OOM / power loss between the entrypoint write and
         # `compose build` bypasses the except-BaseException restore and leaves
         # .env, compose.yaml and the entrypoint all carrying the batch forward
-        # while the container still runs an image without it. File state alone
+        # while the running container has no such forward. File state alone
         # reported that as a finished deploy; the port it reported cannot answer.
-        (self.root / "ssh-tunnel-entrypoint.sh").write_text(self.deployed_entrypoint())
-        images = FakeImageStore(tags={FakeImageStore.IMAGE_REF: FakeImageStore.BUILT_IMAGE})
-        with self.assertRaises(SystemExit) as raised:
-            self.inspect(service=self.deployed_service(), images=images)
-        self.assertNotEqual(raised.exception.code, 0)
-        message = str(raised.exception)
-        self.assertIn("refusing to touch the peer", message)
-        self.assertIn("does not come from a build that included it", message)
-        self.assertIn("interrupted", message)
+        message = self.assert_refused(
+            container=FakePeerContainer(argv=FakePeerContainer.BASE_ARGV))
+        self.assertIn("the container running db-tunnel does not", message)
+        self.assertIn("nothing ending in", message)
+        # Both explanations, because they want opposite repairs and the script
+        # refuses to guess between them.
         self.assertIn(str(deploy.BACKUP_ROOT), message)
+        self.assertIn("up -d --build db-tunnel", message)
 
-    def test_a_batch_tag_for_a_different_image_is_not_evidence(self):
-        # A leftover tag from an EARLIER deploy resolves fine but points at an
-        # image the container is not running: the batch forward it carries is
-        # not the one on disk now.
-        (self.root / "ssh-tunnel-entrypoint.sh").write_text(self.deployed_entrypoint())
-        images = self.deployed_images(running_image=FakeImageStore.OTHER_IMAGE)
-        with self.assertRaises(SystemExit) as raised:
-            self.inspect(service=self.deployed_service(), images=images)
-        self.assertNotEqual(raised.exception.code, 0)
-        self.assertIn("does not come from a build that included it", str(raised.exception))
+    def test_a_forward_on_another_port_is_not_the_batch_forward(self):
+        # A -L that does not publish the rendered PEER_BATCH_DB_PORT is somebody
+        # else's forward, not evidence for this one.
+        message = self.assert_refused(container=FakePeerContainer(
+            argv=FakePeerContainer.BASE_ARGV + ["-L", "0.0.0.0:5434:127.0.0.1:15433"]))
+        self.assertIn("nothing ending in", message)
+        self.assertIn("5434", message)
+
+    def test_a_bare_argument_that_is_not_a_forward_is_not_evidence(self):
+        # The tuple has to be the value of a -L, not just a string that happens
+        # to appear on the command line (a ProxyCommand, a comment, a host alias).
+        message = self.assert_refused(container=FakePeerContainer(
+            argv=FakePeerContainer.BASE_ARGV + ["0.0.0.0:5433:127.0.0.1:15433"]))
+        self.assertIn("nothing ending in", message)
 
     def test_a_stopped_db_tunnel_cannot_vouch_for_a_deploy_either(self):
+        message = self.assert_refused(container=FakePeerContainer(container=""))
+        self.assertIn("not running at all", message)
+
+    def test_a_container_that_cannot_be_read_is_refused_not_assumed(self):
+        # An exec that fails (the container is restarting, the daemon said no)
+        # is the absence of evidence, and must be reported as what it is rather
+        # than swallowed into either verdict.
+        message = self.assert_refused(container=FakePeerContainer(
+            exec_error=subprocess.CalledProcessError(1, ["docker", "exec"])))
+        self.assertIn("pid 1 command line could not be read", message)
+        self.assertIn("CalledProcessError", message)
+
+    def test_the_remote_port_defaults_to_15433_when_the_peer_does_not_render_it(self):
+        # The peer entrypoint writes ${PEER_BATCH_REMOTE_PORT:-15433}, so an
+        # unset variable is 15433 there and must be 15433 here too.
         (self.root / "ssh-tunnel-entrypoint.sh").write_text(self.deployed_entrypoint())
-        images = self.deployed_images(container="")
-        with self.assertRaises(SystemExit) as raised:
-            self.inspect(service=self.deployed_service(), images=images)
-        self.assertNotEqual(raised.exception.code, 0)
-        self.assertIn("not running at all", str(raised.exception))
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                self.inspect(service=self.deployed_service(remote_port=""),
+                             container=FakePeerContainer())
+        self.assertEqual(raised.exception.code, 0)
 
     def test_a_declared_but_empty_batch_port_is_not_a_deploy(self):
         # `PEER_BATCH_DB_PORT: ${PEER_BATCH_DB_PORT:-}` in this repository's own

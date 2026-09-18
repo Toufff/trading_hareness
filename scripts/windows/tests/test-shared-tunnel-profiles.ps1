@@ -200,6 +200,12 @@ Assert-True ($bothInstaller -match 'RequireBatch') 'a batch failure must be non-
 Assert-True ($installer -match 'function Stop-TunnelInstallOnFailure') 'the installer must route install failures through one helper'
 Assert-True ($installer -match "(?s)function Stop-TunnelInstallOnFailure.*?\`$tunnelProfile\.Name -eq 'batch'.*?Disable-ScheduledTask") 'a failed batch install must disable its own task before rethrowing'
 Assert-True ($installer -notmatch '(?m)^\s*throw "(Shared peer tunnel task|Batch tunnel task)') 'no install failure path may throw without going through the helper'
+# ...except the unfinished handover, which the two-minute trigger finishes on its
+# own. Disabling the task there is the outage the deleted weak accept was
+# invented to prevent - and, unlike that accept, this path is reachable.
+Assert-True ($installer -match '(?s)function Stop-TunnelInstallOnFailure[\s\S]*?\[switch\]\$KeepTaskEnabled') 'the failure helper must be able to refuse without disabling the task'
+Assert-True ($installer -match '(?s)if \(\$KeepTaskEnabled\) \{[\s\S]*?task_disabled = \$false[\s\S]*?\} else \{[\s\S]*?Disable-ScheduledTask') 'a non-disabling refusal must still be recorded as an event, with task_disabled false'
+Assert-True ($installer -match 'Stop-TunnelInstallOnFailure -Message \(\$freshness\.message \+ \$livenessDetail\) `?\s*-KeepTaskEnabled:\(\[bool\]\$freshness\.handover_in_progress\)') 'only the verdict that says the handover is unfinished may keep the task enabled'
 Assert-True ($installer -match 'remote_listener_open_owned_by_local_client') 'the batch health label must state the stronger claim it now proves'
 Assert-True ($installer -match '(?s)Get-SharedTunnelStateFreshnessVerdict -State \$state `?\s*-InstallStartedAt \$installStartedAt -PreviousRunId \$previousRunId') 'the batch health check must judge state freshness through the pure function the tests below execute, against the pre-install run_id'
 Assert-True ($installer -match '\$installStartedAt') 'the installer must timestamp the install so stale state cannot pass for health'
@@ -211,24 +217,23 @@ Assert-True ($installer -match "(?s)\`$previousRunId = if \(\`$previousState") '
 # batch task that was coming up. It must be polled.
 Assert-True ($installer -match '\$freshnessDeadline = \[DateTime\]::UtcNow\.AddSeconds\(30\)') 'the freshness verdict must be given a deadline to poll against'
 Assert-True ($installer -match '(?s)do \{[^}]*Get-RuntimeState -PlatformRoot \$PlatformRoot -Service \$service[\s\S]*?\} while \(\[DateTime\]::UtcNow -lt \$freshnessDeadline\)') 'the freshness verdict must be re-taken from a re-read state until the deadline'
-# accept, not fresh: a duplicate_start_skipped supervisor leaves the previous
-# run''s state in place while the tunnel is up, and disabling it would be the
-# worse failure.
-Assert-True ($installer -match 'if \(\$null -ne \$freshness -and -not \$freshness\.accept\)') 'the installer must gate on accept, so a live older supervisor is not treated as a failed install'
-# ...but the POLL must break on fresh. Breaking on accept let the weaker claim
-# win a race against this install's own state - and the state it accepted is the
-# one Request-RuntimeStop had just stamped 'stop_requested'.
+# fresh, and nothing weaker. The 'duplicate_supervisor_still_serving' accept the
+# installer used to fall back on could never fire from here - Request-RuntimeStop
+# has already stamped the previous run's state 'stop_requested' or found it
+# terminal - so it was deleted rather than left as a promise in a comment.
+Assert-True ($installer -match 'if \(\$null -ne \$freshness -and -not \$freshness\.fresh\)') 'the installer must gate on fresh: nothing weaker can be proved from here'
 Assert-True ($installer -match '(?m)^\s*if \(\$freshness\.fresh\) \{ break \}') 'the freshness poll must keep polling until this install''s OWN state arrives'
-Assert-True ($installer -notmatch 'if \(\$freshness\.accept\) \{ break \}') 'the poll must not stop on the weaker accept'
-Assert-True ($installer -match '\$acceptedFallback') 'an accept-but-not-fresh verdict must be kept as a fallback rather than discarded'
-Assert-True ($installer -match '(?s)if \(-not \$freshness\.fresh -and \$null -ne \$acceptedFallback\) \{[\s\S]*?\$freshness = \$acceptedFallback\.Freshness') 'the fallback must be restored only after the deadline expires'
+Assert-True ($installer -notmatch '\$freshness\.accept') 'the weak accept is gone; nothing may gate or break on it'
+Assert-True ($installer -notmatch '\$acceptedFallback') 'and no fallback may keep it alive under another name'
+Assert-True ($installer -notmatch '-SupervisorAlive') 'a live pid must no longer be an input to the freshness verdict'
 # The liveness verdict is half the claim and used to be computed and thrown away.
 Assert-True ($installer -match '\$healthyState\.supervisor_liveness = \$livenessReason') 'the supervisor liveness verdict must reach the runtime state the acceptance step reads'
 Assert-True ($installer -match '\$eventData\.supervisor_liveness = \$livenessReason') 'and the lifecycle event, which is where an operator looks for one install'
 Assert-True ($installer -match '\$healthyState\.supervisor_pid_checked') 'the pid the liveness verdict was taken against must be recorded with it'
 Assert-True ($installer -match '(?s)\$livenessDetail = if \(\$null -ne \$liveness\)[\s\S]*?Stop-TunnelInstallOnFailure -Message \(\$freshness\.message \+ \$livenessDetail\)') 'a refused install writes no state, so its message must carry the liveness reason'
-Assert-True ($installer -notmatch 'if \(-not \$freshness\.fresh\) \{\s*\r?\n\s*Stop-TunnelInstallOnFailure') 'nothing may disable the task purely because the state is not this install''s own'
-Assert-True ($installer -match 'remote_listener_open_owned_by_live_supervisor') 'the weaker accepted claim must get its own health label'
+Assert-True ($installer -notmatch 'remote_listener_open_owned_by_live_supervisor') 'the label for the deleted weak accept must be gone from the installer, not left reachable'
+$profileModule = Get-Content (Join-Path $sharedPeer 'shared-tunnel-profiles.psm1') -Raw
+Assert-True ($profileModule -notmatch "'duplicate_supervisor_still_serving'") 'and the verdict that produced it must be gone from the module too'
 # The first version of this gate asserted on requested_at, a field only the
 # object Start-RuntimeSupervisor RETURNS ever carries; the supervisor that
 # writes <service>.current.json writes started_at. Nothing may go back to it.
@@ -271,7 +276,7 @@ try {
     $freshVerdict = Get-SharedTunnelStateFreshnessVerdict -State $freshState `
         -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId
     Assert-True $freshVerdict.fresh 'a state whose started_at post-dates the install is this install''s state'
-    Assert-True $freshVerdict.accept 'this install''s own state must be accepted'
+    Assert-True (-not $freshVerdict.handover_in_progress) 'this install''s own state is not a handover to wait out'
     Assert-True ($freshVerdict.reason -eq 'state_belongs_to_install') 'the fresh verdict names itself'
     Assert-True ($freshVerdict.field -eq 'started_at') 'the gate must key off the field the supervisor actually writes'
     Assert-True ($freshVerdict.run_id_changed) 'a new run_id is what makes the state this install''s own'
@@ -282,21 +287,33 @@ try {
     $sameRunVerdict = Get-SharedTunnelStateFreshnessVerdict -State $freshState `
         -InstallStartedAt $installStartedAt -PreviousRunId ([string]$freshState.run_id)
     Assert-True (-not $sameRunVerdict.fresh) 'a state still carrying the pre-install run_id is not this install''s state'
-    Assert-True (-not $sameRunVerdict.accept) 'and with no live supervisor to vouch for it, it must not be accepted'
     Assert-True ($sameRunVerdict.reason -eq 'run_id_unchanged') 'an unchanged run_id is reported as such'
+    Assert-True (-not $sameRunVerdict.handover_in_progress) 'a run that is not stopping is not an unfinished handover'
 
-    # 1c. duplicate_start_skipped: the new supervisor could not take the lock and
-    #     wrote nothing, so the state still names the PREVIOUS run - which is
-    #     alive and serving. Disabling that task would take down a working
-    #     tunnel, so the verdict accepts without claiming freshness.
-    $duplicateVerdict = Get-SharedTunnelStateFreshnessVerdict -State $freshState `
-        -InstallStartedAt $installStartedAt -PreviousRunId ([string]$freshState.run_id) -SupervisorAlive $true
-    Assert-True (-not $duplicateVerdict.fresh) 'a duplicate_start_skipped state is still not this install''s own state'
-    Assert-True $duplicateVerdict.accept 'a live supervisor owning the run must not be reported as a failed install'
-    Assert-True ($duplicateVerdict.reason -eq 'duplicate_supervisor_still_serving') 'the weaker accepted claim must name itself'
+    # 1c. The deleted weak accept. A live supervisor still owning the run the
+    #     state names used to be accepted as 'duplicate_supervisor_still_serving'
+    #     - the duplicate_start_skipped case. The function no longer takes that
+    #     evidence at all, because the installer could never present it: its own
+    #     Request-RuntimeStop has already stamped the previous run's state
+    #     'stop_requested' or found it terminal. Nothing may resurrect the accept
+    #     under another spelling, and the input it rested on must be gone rather
+    #     than silently ignored.
+    $noWeakAccept = Get-SharedTunnelStateFreshnessVerdict -State $freshState `
+        -InstallStartedAt $installStartedAt -PreviousRunId ([string]$freshState.run_id)
+    Assert-True (-not $noWeakAccept.fresh) 'a previous run, however alive, is not this install''s state'
+    Assert-True ($noWeakAccept.reason -ne 'duplicate_supervisor_still_serving') 'the weak accept must not come back'
+    Assert-True (-not $noWeakAccept.PSObject.Properties['accept']) 'the verdict must no longer carry an accept field for a caller to gate on'
+    Assert-True ([bool]$noWeakAccept.PSObject.Properties['handover_in_progress']) 'it must carry instead the one distinction the installer needs: is this refusal self-healing'
+    $weakAcceptRejected = $false
+    try { [void](Get-SharedTunnelStateFreshnessVerdict -State $freshState `
+            -InstallStartedAt $installStartedAt -PreviousRunId ([string]$freshState.run_id) `
+            -SupervisorAlive $true) } catch { $weakAcceptRejected = $true }
+    Assert-True $weakAcceptRejected 'the -SupervisorAlive input must be gone, not merely ignored'
 
     # 1d. The liveness judge itself: pid present and the process start time sits
-    #     beside the state's started_at, versus a recycled pid.
+    #     beside the state's started_at, versus a recycled pid. It is a RECEIPT
+    #     now - the installer writes it into the state, the event and the failure
+    #     message - and no longer an input to the verdict above.
     $liveProcess = [pscustomobject]@{ Id = 4242; StartTime = $installStartedAt.AddSeconds(2).LocalDateTime }
     $liveness = Get-SharedTunnelSupervisorLiveness -State $freshState -Process $liveProcess
     Assert-True $liveness.alive 'a supervisor process that started beside the state''s started_at owns that run'
@@ -307,19 +324,13 @@ try {
     Assert-True ($reused.reason -eq 'supervisor_pid_reused') 'pid reuse is reported as pid reuse'
     $gone = Get-SharedTunnelSupervisorLiveness -State $freshState -Process $null
     Assert-True ((-not $gone.alive) -and $gone.reason -eq 'supervisor_pid_not_running') 'a dead supervisor pid vouches for nothing'
-    # And the accept path is genuinely gated on it: the same unchanged run_id
-    # with a dead supervisor must NOT be accepted.
-    $deadDuplicate = Get-SharedTunnelStateFreshnessVerdict -State $freshState `
-        -InstallStartedAt $installStartedAt -PreviousRunId ([string]$freshState.run_id) -SupervisorAlive $gone.alive
-    Assert-True (-not $deadDuplicate.accept) 'an unchanged run_id with no live supervisor must still fail the gate'
 
-    # 1e. The race the accept-break lost. install-shared-tunnel-tasks.ps1 runs
-    #     both profiles, and the supervising trigger fires every two minutes, so
-    #     a batch run started seconds ago is still alive on its pid when this
-    #     install begins - and Request-RuntimeStop has just stamped THAT state
-    #     'stop_requested' (runtime-observability.psm1:231). A live pid plus the
-    #     previous run_id is therefore also the shape of "the run this install is
-    #     tearing down", and accepting it certifies a tunnel that is going away.
+    # 1e. The status is judged BEFORE the run-id and clock branches, and that is
+    #     the whole fix. install-shared-tunnel-tasks.ps1 runs both profiles and
+    #     the supervising trigger fires every two minutes, so a batch run started
+    #     seconds ago is still alive on its pid when this install begins - and
+    #     Request-RuntimeStop has just stamped THAT state 'stop_requested'
+    #     (runtime-observability.psm1:231).
     $stoppingState = $null
     [void](Write-FakeRuntimeState @{
         schema_version = 1; service = $batchService; status = 'stop_requested'
@@ -330,11 +341,13 @@ try {
     })
     $stoppingState = Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService
     $stoppingVerdict = Get-SharedTunnelStateFreshnessVerdict -State $stoppingState `
-        -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId -SupervisorAlive $true
-    Assert-True (-not $stoppingVerdict.accept) 'the state this install just asked to stop must never pass for health, however alive its pid is'
+        -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId
+    Assert-True (-not $stoppingVerdict.fresh) 'the state this install just asked to stop must never pass for health'
     Assert-True ($stoppingVerdict.reason -eq 'previous_run_stopping') 'a stopping previous run names itself'
     Assert-True ($stoppingVerdict.status -eq 'stop_requested') 'the verdict must record the status it judged'
     Assert-True ($stoppingVerdict.message -match 'stopping or already over') 'the message must say why a live pid was not enough'
+    Assert-True $stoppingVerdict.handover_in_progress 'an unfinished handover must be marked as one so the installer leaves the task enabled'
+    Assert-True ($stoppingVerdict.message -match 'left enabled') 'and the message must say the task was left able to retry'
     foreach ($terminal in 'stopped', 'unexpected_exit', 'supervisor_failed', 'start_failed') {
         [void](Write-FakeRuntimeState @{
             schema_version = 1; service = $batchService; status = $terminal
@@ -343,12 +356,12 @@ try {
         })
         $terminalVerdict = Get-SharedTunnelStateFreshnessVerdict `
             -State (Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService) `
-            -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId -SupervisorAlive $true
-        Assert-True (-not $terminalVerdict.accept) "a '$terminal' previous run must not be accepted as a serving tunnel"
+            -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId
+        Assert-True (-not $terminalVerdict.fresh) "a '$terminal' previous run must not be accepted as a serving tunnel"
         Assert-True ($terminalVerdict.reason -eq 'previous_run_stopping') "a '$terminal' previous run is reported as stopping or over"
     }
-    # A previous run that is genuinely still serving keeps the weak accept: this
-    # is duplicate_start_skipped, and disabling that task is the worse failure.
+    # A previous run that is NOT stopping and is not this install's own is simply
+    # a state this install did not write. There is no weaker verdict for it.
     [void](Write-FakeRuntimeState @{
         schema_version = 1; service = $batchService; status = 'process_started'
         run_id = $previousRunId; supervisor_pid = 4242; launcher_pid = 4243
@@ -356,48 +369,67 @@ try {
     })
     $servingState = Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService
     $servingVerdict = Get-SharedTunnelStateFreshnessVerdict -State $servingState `
-        -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId -SupervisorAlive $true
-    Assert-True ($servingVerdict.accept -and -not $servingVerdict.fresh) 'a live supervisor on a running previous run still carries the weaker claim'
-    Assert-True ($servingVerdict.reason -eq 'duplicate_supervisor_still_serving') 'and it is still named as the weaker claim'
+        -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId
+    Assert-True (-not $servingVerdict.fresh) 'a running previous run is still not this install''s state'
+    Assert-True ($servingVerdict.reason -eq 'run_id_unchanged') 'and it is reported by what is actually wrong with it'
+    Assert-True (-not $servingVerdict.handover_in_progress) 'a run nobody asked to stop is not a handover in progress'
+
+    # 1e-2. THE CASE THE OLD ORDERING MISSED ENTIRELY: this install's OWN run,
+    #       already over. supervise-runtime-process.ps1 writes exactly this on an
+    #       unexpected exit - a NEW run_id (so run_id_changed), a started_at that
+    #       post-dates the install (so the clock branch is satisfied), and
+    #       status='unexpected_exit'. The old judge applied the stopping check
+    #       only inside the unchanged-run_id branch, so this was reported fresh:
+    #       the installer wrote a 'healthy' state for a tunnel that had died
+    #       seconds earlier, and the listener probe it had passed moments before
+    #       is exactly what makes that believable.
+    foreach ($ownTerminal in 'unexpected_exit', 'supervisor_failed', 'stopped', 'start_failed') {
+        [void](Write-FakeRuntimeState @{
+            schema_version = 1; service = $batchService; status = $ownTerminal
+            run_id = '20260919T040000000-newrun01'; supervisor_pid = 4242; launcher_pid = 4243
+            exit_code = 255; expected_exit = $false
+            reason = 'process_exited_without_stop_request'
+            started_at = $installStartedAt.AddSeconds(3).ToString('o')
+            ended_at = $installStartedAt.AddSeconds(9).ToString('o')
+        })
+        $ownDeadVerdict = Get-SharedTunnelStateFreshnessVerdict `
+            -State (Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService) `
+            -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId
+        Assert-True ($ownDeadVerdict.run_id_changed) "this case must genuinely carry this install's own new run_id ('$ownTerminal')"
+        Assert-True (-not $ownDeadVerdict.fresh) "a '$ownTerminal' run of this install's own must not certify the tunnel"
+        Assert-True ($ownDeadVerdict.reason -eq 'run_ended_before_health_was_proved') "and it must be reported as a run that ended ('$ownTerminal')"
+        Assert-True (-not $ownDeadVerdict.handover_in_progress) 'this install''s own run dying is a broken install, so the task must be disabled'
+        Assert-True ($ownDeadVerdict.message -match 'own run already over') 'the message must name whose run it was'
+    }
 
     # 1f. The poll as the installer runs it, driven over a SEQUENCE of state
-    #     files. The installer's loop is inline, so this models it exactly -
-    #     break on fresh, keep an accept as a fallback, restore the fallback only
-    #     when the deadline passed without a fresh verdict - and the regexes
-    #     above pin the installer to this shape.
-    function Invoke-FreshnessPoll([object[]]$States, [bool[]]$Alive) {
-        $fallback = $null
+    #     files. The installer's loop is inline, so this models it exactly - it
+    #     breaks on fresh and on nothing else - and the regexes above pin the
+    #     installer to that shape.
+    function Invoke-FreshnessPoll([object[]]$States) {
         $verdict = $null
-        for ($i = 0; $i -lt $States.Count; $i++) {
-            $verdict = Get-SharedTunnelStateFreshnessVerdict -State $States[$i] `
-                -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId `
-                -SupervisorAlive $Alive[$i]
+        foreach ($candidate in $States) {
+            $verdict = Get-SharedTunnelStateFreshnessVerdict -State $candidate `
+                -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId
             if ($verdict.fresh) { break }
-            if ($verdict.accept) { $fallback = $verdict }
         }
-        if (-not $verdict.fresh -and $null -ne $fallback) { $verdict = $fallback }
         return $verdict
     }
-    # The race itself: iteration 1 reads the stopping previous run (live pid),
-    # iteration 2 reads this install's own state. The old poll broke on
-    # iteration 1 and certified the run it had just stopped.
-    $raceVerdict = Invoke-FreshnessPoll -States @($stoppingState, $freshState) -Alive @($true, $true)
+    # The race: iteration 1 reads the stopping previous run (live pid),
+    # iteration 2 reads this install's own state.
+    $raceVerdict = Invoke-FreshnessPoll -States @($stoppingState, $freshState)
     Assert-True $raceVerdict.fresh 'this install''s own state must win the race against the run it stopped'
     Assert-True ($raceVerdict.reason -eq 'state_belongs_to_install') 'and the accepted verdict must be the fresh one'
     Assert-True ($raceVerdict.run_id -eq [string]$freshState.run_id) 'the verdict must name this install''s run'
-    # Even a genuinely serving previous run must not stop the poll early: if this
-    # install's supervisor writes a state one iteration later, that is the one.
-    $lateVerdict = Invoke-FreshnessPoll -States @($servingState, $servingState, $freshState) -Alive @($true, $true, $true)
-    Assert-True ($lateVerdict.fresh -and $lateVerdict.reason -eq 'state_belongs_to_install') 'a duplicate_start_skipped read must not stop the poll while this install''s state is still coming'
-    # And when nothing fresher ever arrives, the fallback is what the install is
-    # accepted on - including when the LAST read is a non-accepting one.
-    $fallbackVerdict = Invoke-FreshnessPoll -States @($servingState, $stoppingState) -Alive @($true, $true)
-    Assert-True ($fallbackVerdict.accept -and -not $fallbackVerdict.fresh) 'an earlier live-supervisor accept must survive a later non-accepting read'
-    Assert-True ($fallbackVerdict.reason -eq 'duplicate_supervisor_still_serving') 'the fallback must be the weaker accept, not the refusal'
-    # A poll that only ever sees the stopping run refuses, and that is the
-    # bounded failure: the batch task is disabled rather than certified.
-    $refusedVerdict = Invoke-FreshnessPoll -States @($stoppingState, $stoppingState) -Alive @($true, $true)
-    Assert-True (-not $refusedVerdict.accept) 'a poll that only ever sees the stopped run must refuse'
+    # A previous run that is still serving must not stop the poll either.
+    $lateVerdict = Invoke-FreshnessPoll -States @($servingState, $servingState, $freshState)
+    Assert-True ($lateVerdict.fresh -and $lateVerdict.reason -eq 'state_belongs_to_install') 'a previous-run read must not stop the poll while this install''s state is still coming'
+    # And when nothing fresher ever arrives, the LAST verdict is what the install
+    # is refused on - no earlier weaker verdict may be resurrected as a fallback.
+    $refusedVerdict = Invoke-FreshnessPoll -States @($servingState, $stoppingState)
+    Assert-True (-not $refusedVerdict.fresh) 'a poll that never sees this install''s own state must refuse'
+    Assert-True ($refusedVerdict.reason -eq 'previous_run_stopping') 'the refusal must be the verdict the poll actually ended on'
+    Assert-True $refusedVerdict.handover_in_progress 'and an unfinished handover must still be the non-disabling kind of refusal'
 
     # 2. Stale: yesterday's run left a state file behind and the task never came up.
     [void](Write-FakeRuntimeState @{
@@ -410,7 +442,7 @@ try {
         -State (Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService) `
         -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId
     Assert-True (-not $staleVerdict.fresh) 'yesterday''s leftover state must never pass for this install''s health'
-    Assert-True (-not $staleVerdict.accept) 'and it must not be accepted either'
+    Assert-True (-not $staleVerdict.handover_in_progress) 'and a leftover state is a broken install, not an unfinished handover'
     Assert-True ($staleVerdict.reason -eq 'state_predates_install') 'a stale state is reported as predating the install'
     Assert-True ($staleVerdict.message -match 'stale runtime state') 'the stale failure message must say what happened'
 
@@ -431,7 +463,7 @@ try {
     catch { $threw = $true }
     Assert-True (-not $threw) 'a state file without the field must not throw under StrictMode'
     Assert-True (-not $missingVerdict.fresh) 'an absent timestamp is not evidence that this install produced the state'
-    Assert-True (-not $missingVerdict.accept) 'nor is it something to accept'
+    Assert-True (-not $missingVerdict.handover_in_progress) 'nor is it something to wait out'
     Assert-True ($missingVerdict.reason -eq 'field_missing') 'a missing field is reported as missing'
     Assert-True ($missingVerdict.message -match '<absent>') 'the failure message must be buildable without the field'
     # The liveness judge reads the same state and must not throw either.
@@ -442,20 +474,20 @@ try {
     # 4. No state file at all, and an unparsable stamp.
     $noStateVerdict = Get-SharedTunnelStateFreshnessVerdict -State $null `
         -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId
-    Assert-True ((-not $noStateVerdict.fresh) -and (-not $noStateVerdict.accept) -and $noStateVerdict.reason -eq 'no_runtime_state') 'a missing state file is reported as such'
+    Assert-True ((-not $noStateVerdict.fresh) -and (-not $noStateVerdict.handover_in_progress) -and $noStateVerdict.reason -eq 'no_runtime_state') 'a missing state file is reported as such'
     $noStateLiveness = Get-SharedTunnelSupervisorLiveness -State $null -Process $null
     Assert-True ((-not $noStateLiveness.alive) -and $noStateLiveness.reason -eq 'no_supervisor_pid') 'no state means no supervisor to vouch for it'
     [void](Write-FakeRuntimeState @{ schema_version = 1; service = $batchService; run_id = 'x'; started_at = 'not a timestamp' })
     $badVerdict = Get-SharedTunnelStateFreshnessVerdict `
         -State (Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService) `
         -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId
-    Assert-True ((-not $badVerdict.fresh) -and (-not $badVerdict.accept) -and $badVerdict.reason -eq 'field_unparsable') 'an unreadable timestamp is not proof of freshness'
+    Assert-True ((-not $badVerdict.fresh) -and (-not $badVerdict.handover_in_progress) -and $badVerdict.reason -eq 'field_unparsable') 'an unreadable timestamp is not proof of freshness'
 
     # 5. First install of all: there was no previous run at all, so there is no
     #    run_id to be confused with and a post-dating stamp is the whole claim.
     $firstVerdict = Get-SharedTunnelStateFreshnessVerdict -State $freshState `
         -InstallStartedAt $installStartedAt -PreviousRunId ''
-    Assert-True ($firstVerdict.fresh -and $firstVerdict.accept) 'a first install has no previous run_id and must still be able to pass'
+    Assert-True ($firstVerdict.fresh) 'a first install has no previous run_id and must still be able to pass'
     Assert-True ($firstVerdict.reason -eq 'state_belongs_to_install') 'a first install''s state belongs to it'
 } finally {
     Remove-Item -LiteralPath $stateRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -558,14 +590,33 @@ $recreatedBranchIndex = $deployScript.IndexOf('if recreated:', $tagRestoredIndex
 Assert-True ($tagRestoredIndex -gt 0 -and $recreatedBranchIndex -gt $tagRestoredIndex) 'the retag verdict must be taken before either rollback branch uses it'
 # The already-deployed short-circuit reads file state, and the files are written
 # BEFORE the build: a run killed in that window leaves them behind on a peer
-# whose image never included the forward. The image tag is the build's own trace.
-Assert-True ($deployScript -match "def find_batch_image_tag") 'the short-circuit must be able to look for the tag a completed build leaves'
-Assert-True ($deployScript -match "D \+ \['image', 'ls', '--filter', 'reference=' \+ pattern") 'the batch tags must be narrowed with a docker image ls reference filter'
-Assert-True ($deployScript -match "(?s)def find_batch_image_tag[\s\S]*?D \+ \['image', 'inspect', tag\][\s\S]*?if resolved == image_id:") 'and each candidate tag must resolve to the image the container is actually running'
-Assert-True ($deployScript -match "(?s)if batch_value and BATCH_FORWARD_MARKER in entrypoint_text:[\s\S]*?batch_tag = find_batch_image_tag\([\s\S]*?if batch_tag:") 'already-deployed must additionally require the batch image tag to exist'
-Assert-True ($deployScript -match 'a build that included it') 'an interrupted deploy must be refused by name, not reported as deployed'
-Assert-True ($deployScript -match 'interrupted between the entrypoint write and') 'the refusal must name the interrupted-deploy case so the operator knows what to restore'
-Assert-True ($deployScript -match "batch_tag\], check=True\)") 'the batch tag is now evidence a later run reads, so failing to create it must fail the deploy'
+# whose image never included the forward. The third piece of evidence must
+# therefore come from the peer's RUNNING CONTAINER - and it must be evidence a
+# rebuild cannot destroy. It used to be a ':batch-<stamp>' image tag resolving to
+# the running image id; `up -d --build db-tunnel`, which is this repository's own
+# documented peer release step, produces a new image and strands that tag while
+# the forward is still there, and the refusal it produced told the operator to
+# restore three files from a backup - stripping a working batch forward off the
+# peer. The live process's own argument vector survives the rebuild instead.
+Assert-True ($deployScript -match "def running_batch_forward") 'the short-circuit must read the forward the running container actually carries'
+Assert-True ($deployScript -match "D \+ \['exec', container, 'cat', '/proc/1/cmdline'\]") 'and it must read it from pid 1 of that container, which is the ssh client itself'
+Assert-True ($deployScript -match "(?s)def running_batch_forward[\s\S]*?forwards = \[part for index, part in enumerate\(argv\)[\s\S]*?argv\[index - 1\] == '-L'\][\s\S]*?if forward\.endswith\(suffix\):") 'the tuple must be the value of a -L and must name the rendered batch port, not merely appear on the command line'
+Assert-True ($deployScript -match "(?s)if batch_value and BATCH_FORWARD_MARKER in entrypoint_text:[\s\S]*?forward, detail = running_batch_forward\([\s\S]*?if forward:") 'already-deployed must additionally require the running container to forward the port'
+Assert-True ($deployScript -notmatch "def find_batch_image_tag") 'the image-tag evidence a rebuild destroys must be gone, not kept alongside'
+$forwardFunction = [regex]::Match($deployScript, "(?s)def running_batch_forward.*?(?=
+?
+def )").Value
+Assert-True ($forwardFunction.Length -gt 0) 'the evidence function must be findable as its own definition'
+Assert-True ($forwardFunction -notmatch "\['image'") 'and nothing inside it may consult an image or a tag again'
+# The refusal has to be true to what was observed, and it must not prescribe a
+# repair for the wrong one of the two situations that produce this shape.
+Assert-True ($deployScript -match 'the container running db-tunnel does not') 'the refusal must say what is actually missing: the running container, not "a build"'
+Assert-True ($deployScript -match 'interrupted between the file writes and') 'it must still name the interrupted-deploy case'
+Assert-True ($deployScript -match 'the container has not been recreated from them') 'and the case a rebuild-less peer is actually in, which wants the opposite repair'
+Assert-True ($deployScript -match 'up -d --build db-tunnel') 'so the recreate the second case needs is spelled out'
+Assert-True ($deployScript -match 'will not guess between them') 'and the script says plainly that it is not choosing for the operator'
+Assert-True ($deployScript -match "batch_tag\], check=True\)") 'the batch tag still names the built image, and failing to apply it fails the deploy while the rollback is still cheap'
+Assert-True ($deployScript -match 'It is NOT evidence of a\n# deployed forward') 'but the tag must be documented as a name, not as evidence'
 # The idempotent re-run must not look like a failure to a wrapper - but the mere
 # PRESENCE of the key is not evidence of a deploy. This repository's own compose
 # declares it unconditionally with an empty default.
@@ -577,7 +628,10 @@ Assert-True ($deployScript -match "batch_value = str\(environment\.get\('PEER_BA
 Assert-True ($deployScript -match "if batch_value and BATCH_FORWARD_MARKER in entrypoint_text:") 'and it must also require the batch forward to be in the deployed entrypoint'
 Assert-True ($deployScript -notmatch "if 'PEER_BATCH_DB_PORT' in observed\['environment_keys'\]") 'the key-presence short-circuit must be gone'
 
-[pscustomobject]@{
+# The receipt. It is COUNTED here rather than by whoever reads the output: a
+# previous round reported "21 True receipts" for a run that printed 24, and a
+# hand count is exactly the kind of number that drifts once nothing produces it.
+$receipts = [ordered]@{
     passed = $true
     intraday_vector_pinned = $true
     control_master_pinned_both_profiles = $true
@@ -587,20 +641,28 @@ Assert-True ($deployScript -notmatch "if 'PEER_BATCH_DB_PORT' in observed\['envi
     reclaim_sets_disjoint = $true
     installer_dry_run = $true
     batch_install_failure_disables_task_in_source = $true
+    batch_install_handover_refusal_keeps_the_task_enabled = $true
     batch_health_gate_executed_fresh_and_stale = $true
     batch_health_gate_survives_missing_field = $true
     batch_health_gate_checks_run_id_not_only_the_clock = $true
-    batch_health_gate_accepts_a_live_duplicate_supervisor = $true
+    batch_health_gate_weak_accept_deleted_not_merely_unused = $true
     batch_health_gate_refuses_a_stopping_previous_run = $true
-    batch_health_gate_poll_breaks_on_fresh_not_accept = $true
+    batch_health_gate_refuses_this_installs_own_ended_run = $true
+    batch_health_gate_poll_breaks_on_fresh_only = $true
     batch_health_gate_race_against_the_stopped_run_executed = $true
-    batch_health_gate_weak_accept_kept_as_fallback = $true
     batch_health_gate_polls_until_deadline_in_source = $true
     installer_persists_supervisor_liveness_receipt = $true
-    peer_deploy_already_deployed_needs_value_entrypoint_and_image_tag = $true
+    peer_deploy_already_deployed_needs_value_entrypoint_and_live_forward = $true
+    peer_deploy_already_deployed_evidence_survives_a_rebuild = $true
+    peer_deploy_refusal_names_both_repairs = $true
     peer_deploy_rollback_verifies_the_restored_image = $true
     peer_deploy_rollback_verifies_the_retag_without_a_recreate = $true
     permitopen_and_permitlisten_cover_15433 = $true
     peer_deploy_refusal_wired_in_source = $true
-    peer_deploy_behaviour_tested_in = 'quant-service/tests/test_peer_batch_tunnel_deploy.py'
 }
+$receipt = [pscustomobject]$receipts
+$receipt | Add-Member -NotePropertyName true_receipt_count `
+    -NotePropertyValue (@($receipts.Values | Where-Object { $_ -is [bool] -and $_ }).Count)
+$receipt | Add-Member -NotePropertyName peer_deploy_behaviour_tested_in `
+    -NotePropertyValue 'quant-service/tests/test_peer_batch_tunnel_deploy.py'
+$receipt

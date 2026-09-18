@@ -108,45 +108,56 @@ pwsh .\scripts\shared-peer\install-shared-tunnel-tasks.ps1
 - 复数安装脚本会自己读 `Get-NetTCPConnection -OwningProcess`，若两者共用同一条
   TCP 连接会 `Write-Warning` 并记事件。
 
-批量健康检查失败时，`install-shared-tunnel-task.ps1` 会**先禁用批量任务再抛错**，
+批量健康检查失败时，`install-shared-tunnel-task.ps1` 默认会**先禁用批量任务再抛错**，
 所以不会留下一个每 2 分钟重试同一个失败的任务。修好后需要手工
 `Enable-ScheduledTask -TaskName trading-hareness-shared-peer-batch-tunnel`
-或重跑安装脚本。
+或重跑安装脚本。**只有一个例外**，见下面第 3 点。
 
-这条「失败就禁用」的规则很硬，所以判定必须站得住：健康判据的第三条
-（运行时状态属于本次安装）现在**同时**看 `run_id` 和 `started_at`，
-并且在 30 秒内**反复重读状态文件**，而不是只判一次——
-先起来的是 ssh 客户端，supervisor 写状态文件要晚一点，判一次就会把一条
-正在起来的隧道判成失败并禁用。另一头也补上了：
-`supervise-runtime-process.ps1` 抢不到 `<service>.lock` 时会以
-`duplicate_start_skipped` 退出并且**不写状态**，此时状态文件里仍是上一轮的
-`run_id`，而那条隧道是好的；只要 `supervisor_pid` 指向的进程还活着
-（且它的启动时间和状态里的 `started_at` 对得上，防止 pid 复用），
-就按 `duplicate_supervisor_still_serving` 接受，健康标签记为
-`remote_listener_open_owned_by_live_supervisor`，
-并把 `state_freshness` / `previous_run_id` / `state_status` /
-`supervisor_liveness` / `supervisor_pid_checked` 写进运行时状态和 `healthy`
-事件里——**绝不会因为这个把一条正在服务的批量隧道禁用掉**。
+这条「失败就禁用」的规则很硬，所以判定必须站得住。健康判据的第三条
+（运行时状态属于本次安装）现在看三样东西——`run_id`、`started_at`、以及状态自己的
+`status`——并且在 30 秒内**反复重读状态文件**，而不是只判一次：先起来的是 ssh
+客户端，supervisor 写状态文件要晚一点，判一次就会把一条正在起来的隧道判成失败并禁用。
 
-但这条「弱接受」有两个硬约束，缺一不可：
+1. **`status` 第一个判，而且对所有分支都生效。** 状态里写着
+   `stop_requested` / `stopped` / `unexpected_exit` / `supervisor_failed` /
+   `start_failed` 的，一律不算 fresh。这里分两种情况，报法不同：
+   - `run_id` 还是上一轮的 ⇒ `previous_run_stopping`。安装脚本自己在注册任务之前
+     就调了 `Request-RuntimeStop`，那一步会把同一个状态文件改写成
+     `stop_requested`，所以这正是「本次安装刚刚下令停掉的那一轮」。
+   - `run_id` 是**本次安装自己的新 id** ⇒ `run_ended_before_health_was_proved`。
+     `supervise-runtime-process.ps1` 在进程意外退出时写的就是这个形状：新 `run_id`、
+     晚于安装时刻的 `started_at`、`status = 'unexpected_exit'`。只看 `run_id` 和
+     时钟的旧判法会把它当成健康——而监听探测几秒前刚刚通过，所以这条错得毫无破绽。
+     上一轮把 `status` 检查只放在「`run_id` 没变」那个分支里，漏掉的就是这一种。
+2. **没有「弱接受」了。** 早先的版本会在「`run_id` 还是上一轮 + `supervisor_pid`
+   指的进程还活着」时按 `duplicate_supervisor_still_serving` 接受，健康标签记
+   `remote_listener_open_owned_by_live_supervisor`，用来兜住
+   `duplicate_start_skipped`（supervisor 抢不到 `<service>.lock` 就退出且不写状态，
+   此时状态里还是上一轮的 `run_id`，而隧道是好的）。**那条分支从安装脚本里根本走不到**：
+   `Request-RuntimeStop` 在注册任务之前就跑了，于是安装脚本能读到的「上一轮状态」
+   一律带着停止类 `status`。代码、模块注释和两份文档一起承诺了一件代码做不到的事，
+   所以这一轮把它**删掉**，而不是修补。现在的闸门就是 `fresh` 一条。
+3. **拒绝 ≠ 禁用。** `previous_run_stopping` 这一种会带上 `handover_in_progress`，
+   安装脚本对它调 `Stop-TunnelInstallOnFailure -KeepTaskEnabled`：安装仍然失败
+   （证不出来的东西不写 `healthy`），但**批量任务保持启用**，2 分钟触发器会自己把这次
+   交接跑完。这恰恰是当初发明弱接受要保护的场景，而弱接受实际上保护不到。
+   其余所有拒绝照旧禁用任务。
+4. **轮询只以 `fresh` 跳出，且不留兜底。** 读到本次安装自己的状态
+   （新 `run_id` + 新 `started_at` + 非停止类 `status`）才提前 break；
+   30 秒走完都没等到，就按**最后一次读到的判定**拒绝，不会把前面某次较弱的判定
+   翻出来当兜底。
 
-1. **看 `status`。** 安装脚本自己在注册任务之前就调了 `Request-RuntimeStop`，
-   而那一步会把同一个状态文件改写成 `status = 'stop_requested'`。于是
-   「pid 还活着 + `run_id` 还是上一轮的」同时也正是「本次安装刚刚下令停掉的那一轮」
-   的形状。所以状态里写着 `stop_requested` / `stopped` / `unexpected_exit` /
-   `supervisor_failed` / `start_failed` 的，一律不给弱接受，判定为
-   `previous_run_stopping`。
-2. **轮询以 `fresh` 为准，不是 `accept`。** 轮询只在读到**本次安装自己的状态**
-   （新 `run_id` + 新 `started_at`）时提前跳出；弱接受只是被记下来当兜底，
-   等 30 秒走完都没等到本次安装的状态时才启用。之前一读到弱接受就 break，
-   于是在两个 profile 一起装、或 2 分钟触发器刚跑过时，第一次循环就把
-   「刚被自己停掉的那一轮」认成了健康。
+`Get-SharedTunnelSupervisorLiveness` 现在只是**回执**，不再是闸门：它仍然把
+`supervisor_liveness` / `supervisor_pid_checked`（连同 `state_freshness` /
+`previous_run_id` / `state_status`）写进运行时状态和 `healthy` 事件，被拒绝的安装
+不写状态，就把这两个值写进失败信息里。
 
 第一次真装完，`G:\StockPlatform\logs\runtime\shared-peer-batch-tunnel.current.json`
 里应当看到 `state_freshness = state_belongs_to_install`、
 `supervisor_liveness = supervisor_process_owns_this_run`。若 `supervisor_liveness`
 是 `process_start_time_unavailable`（supervisor 属于另一个账户，读不到 StartTime），
-弱接受那条路就会退化成拒绝——这正是要在第一次安装时核对这个字段的原因。
+现在**不会**再因此改变判定——该字段只是回执；但它仍然值得在第一次安装时核对，
+因为读不到 StartTime 说明这台机器上的 supervisor 不属于当前账户，那本身就要查。
 
 ### 2.2 授权 key 的端口白名单
 
@@ -188,18 +199,34 @@ python3 scripts/shared-peer/deploy-batch-tunnel-port.py
    （部署完成的 peer 的 entrypoint 哈希本来就不在表里），
    并且**只认三条同时成立的证据**：渲染后的 `PEER_BATCH_DB_PORT` 的**值非空**、
    peer 的 entrypoint 里确实有批量转发那一行（`BATCH_FORWARD_MARKER`），
-   以及**当前容器所用镜像上挂着 `…:batch-<stamp>` 标签**
-   （`docker image ls --filter reference=…:batch-*` 选候选，
-   再逐个 `docker image inspect` 比对镜像 id）。
+   以及**当前正在跑的 `db-tunnel` 容器确实在转发这个端口**——
+   `docker exec <container> cat /proc/1/cmdline`（entrypoint 最后是
+   `exec ssh "$@"`，所以容器里的 pid 1 就是 ssh 本身），
+   argv 里必须有一个紧跟在 `-L` 后面、且以
+   `:<PEER_BATCH_DB_PORT>:127.0.0.1:<PEER_BATCH_REMOTE_PORT>` 结尾的参数。
    前两条都是**文件状态**，而文件是在 `docker compose build` **之前**写的：
    被 SIGKILL / OOM / 断电打断在那个窗口里的一次运行（这些都进不了
    `except BaseException` 的恢复分支）留下的正是这个形状，而容器跑的镜像里
    根本没有那条转发——旧逻辑会 `exit 0` 报告一次「已部署」，
-   而它报告的那个端口根本不会应答。镜像标签是构建**自己**留下的痕迹，
-   所以它是必需的一条；相应地，那个 `:batch-<stamp>` 标签现在用
-   `check=True` 打，打不上就当场失败（此时还在 `up -d` 之前，回滚只是文件和标签）。
-   证据不齐时**不是** `exit 0`，而是一条点名「部署被打断」的拒绝，
-   并告诉操作者去 `incident-backups` 里恢复那三个文件后重跑。
+   而它报告的那个端口根本不会应答。
+
+   第三条证据**上一轮是 `…:batch-<stamp>` 镜像标签**，那是错的，而且错得有破坏性：
+   本仓库自己写的 peer 发布步骤就是
+   `docker compose … up -d --build db-tunnel`（见 SHARED_PEER_RUNTIME.md），
+   重建会用同一套带批量转发的文件产出**新的镜像 id**——转发还在，标签却不指向它了，
+   于是脚本会对一台好端端的 peer 报出「部署被中断，请从 incident-backups 恢复那三个文件」
+   的拒绝，而照着做正好会把一条正常工作的批量转发从 peer 上抹掉。
+   进程自己的 argv 不会被重建作废：保留了转发的重建会连转发一起重建容器，
+   而**丢掉**转发的重建正是这条检查要抓的。那个 `:batch-<stamp>` 标签仍然会打
+   （`check=True`，打不上就当场失败，此时还在 `up -d` 之前，回滚只是文件和标签），
+   但它现在只是「这次构建产物的名字」和事后排查的抓手，**不再是判据**。
+
+   证据不齐时**不是** `exit 0`，而是一条拒绝，并且**把两种可能都说出来**，
+   因为它们要的修法正好相反：(a) 文件写完但 build / `up -d` 被打断——
+   去 `incident-backups` 恢复那三个文件后重跑；(b) 文件是对的但容器没按它重建过
+   （手工改过，或 build 之后 `up -d` 没跑）——用 peer 自己的发布步骤
+   `up -d --build db-tunnel` 重建后再跑一次确认。脚本不替操作者在两者之间猜。
+   容器没在跑、或者 `docker exec` 读不到 pid 1 的命令行，也都各自点名报出来。
    只看「键在不在」是不够的：本仓库自己的 compose 无条件声明
    `PEER_BATCH_DB_PORT: ${PEER_BATCH_DB_PORT:-}`，而 `.env.example` 里这个变量是
    注释掉的，所以在一台什么都没部署过的 peer 上 `docker compose config` 照样会

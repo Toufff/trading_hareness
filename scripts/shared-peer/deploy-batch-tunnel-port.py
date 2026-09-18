@@ -54,13 +54,28 @@ the next restart would start the peer from the rejected build.
 
 A finished deploy is recognised by three pieces of evidence, not by the files
 alone: the rendered ``PEER_BATCH_DB_PORT`` has a value, the deployed entrypoint
-carries ``BATCH_FORWARD_MARKER``, and the running container's image carries a
-``:batch-<stamp>`` tag (``docker image ls`` + ``docker image inspect``).  The
-first two are written before the build, so a run killed in that window - SIGKILL,
-an OOM kill, a power loss, none of which reach the ``except BaseException``
-restore - leaves them both behind on a peer whose image never included the
-forward.  The image tag is what a build actually produces, so it is required,
-and the batch tag is therefore created with ``check=True``.
+carries ``BATCH_FORWARD_MARKER``, and **the container currently running
+db-tunnel is actually forwarding that port** - its pid 1 (the entrypoint
+``exec``s ssh, so pid 1 IS the ssh client) carries a ``-L`` argument ending in
+``:<batch port>:127.0.0.1:<remote port>``, read with ``docker exec ... cat
+/proc/1/cmdline``.  The first two are written before the build, so a run killed
+in that window - SIGKILL, an OOM kill, a power loss, none of which reach the
+``except BaseException`` restore - leaves them both behind on a peer whose image
+never included the forward.
+
+The third piece used to be a ``:batch-<stamp>`` image tag resolving to the
+running container's image id.  That was wrong in a way that mattered: this
+repository's own peer release step is ``docker compose ... up -d --build
+db-tunnel`` (SHARED_PEER_RUNTIME.md), and a rebuild produces a NEW image id from
+the same batch-carrying files - so the forward is still there, the tag is not,
+and the script refused a perfectly good peer with a diagnosis ("a deploy was
+interrupted before the build; restore these three files from the backup") whose
+instructions would have stripped the working batch forward off it.  The running
+process's own argument vector cannot be invalidated that way: a rebuild that
+keeps the forward recreates the container with it, and a rebuild that loses it
+is exactly what this check is for.  The ``:batch-<stamp>`` tag is still created,
+as a name for the image the deploy built and a handle for forensics, but nothing
+is judged by it.
 
 The verification runs from ``quant-research``, not from the sidecar: the
 sidecar's image is ``openssh-client`` + ``netcat`` with no PostgreSQL client and
@@ -108,9 +123,10 @@ COMPOSE_ANCHOR = '      REMOTE_API_PORT: ${REMOTE_API_PORT:-15681}\n'
 # ``PEER_BATCH_DB_PORT`` is not enough: a half-finished edit, or a comment
 # mentioning the variable, contains it too.
 BATCH_FORWARD_MARKER = ':${PEER_BATCH_DB_PORT}:127.0.0.1:${PEER_BATCH_REMOTE_PORT:-15433}"'
-# A completed deploy tags the image it built ``<repository>:batch-<stamp>``. That
-# tag is the only on-peer evidence that a BUILD ran, as opposed to configuration
-# files having been written; the already-deployed short-circuit requires it.
+# A completed deploy tags the image it built ``<repository>:batch-<stamp>``, so
+# the build has a name after ``:latest`` has moved on.  It is NOT evidence of a
+# deployed forward: the next ``up -d --build db-tunnel`` produces a different
+# image and leaves this tag pointing at the old one.  See the module docstring.
 BATCH_TAG_PREFIX = 'batch-'
 
 # Every state this script is allowed to change, keyed by the SHA-256 of the
@@ -288,33 +304,42 @@ def inspect_peer_state():
             # in it. That used to exit 0 reporting a deploy whose image was
             # never built, and the port it reported simply does not answer.
             #
-            # So require evidence from the IMAGE as well: the running container
-            # must come from an image that carries a :batch-<stamp> tag, which
-            # only a deploy that got past `compose build` can have created.
-            image_reference, image_identifier = running_service_image()
-            batch_tag = find_batch_image_tag(image_reference, image_identifier)
-            if batch_tag:
+            # So require the evidence to come from the RUNNING CONTAINER: the
+            # ssh process it is running must itself carry the -L forward. That
+            # is the claim - "this peer forwards the batch port right now" - and
+            # unlike the :batch-<stamp> image tag this check used to rely on, a
+            # later `up -d --build db-tunnel` (the documented peer release step)
+            # cannot destroy it.
+            remote_value = (str(environment.get('PEER_BATCH_REMOTE_PORT') or '').strip()
+                            or '15433')
+            forward, detail = running_batch_forward(
+                container_id(SERVICE), batch_value, remote_value)
+            if forward:
                 # Success, not a refusal: re-running to confirm idempotency, or
                 # after a rollback was completed by hand, must not look like a
                 # deploy failure to a wrapper reading the exit code.
                 print('the batch port is already deployed on this peer; nothing to do:\n'
                       + json.dumps(dict(observed, batch_local_port=batch_value,
-                                        batch_image_tag=batch_tag,
-                                        running_image_id=image_identifier), indent=2))
+                                        batch_remote_port=remote_value,
+                                        running_batch_forward=forward,
+                                        evidence=detail), indent=2))
                 raise SystemExit(0)
-            why = ('db-tunnel is not running at all, so nothing can vouch for the image'
-                   if image_reference is None else
-                   'the running db-tunnel image does not come from a build that included it '
-                   '(no %s:%s* tag resolves to image %r)'
-                   % (image_reference.split(':')[0], BATCH_TAG_PREFIX, image_identifier))
             raise SystemExit(
                 'refusing to touch the peer: its .env, compose.yaml and ssh-tunnel-entrypoint.sh '
-                'all carry the batch forward, but %s.\n'
-                'That is the shape a deploy interrupted between the entrypoint write and '
-                '`docker compose build` leaves behind: the port is configured on disk and '
-                'nothing serves it. Restore the three files from the newest backup under %s '
-                '(the interrupted run left one) and run this script again.\n'
-                'observed: ' % (why, BACKUP_ROOT)
+                'all carry the batch forward, but the container running db-tunnel does not - %s.\n'
+                'Two different situations leave that shape, and they want opposite repairs, so '
+                'this script will not guess between them:\n'
+                '  * a run interrupted between the file writes and `docker compose build` / '
+                '`up -d` (SIGKILL, OOM, power loss - none of them reach this script\'s restore). '
+                'The port is configured on disk and nothing serves it. Restore the three files '
+                'from the newest backup under %s (the interrupted run left one) and run this '
+                'script again.\n'
+                '  * the files are right but the container has not been recreated from them - a '
+                'hand edit, or a build whose `up -d` never ran. Recreate db-tunnel with the '
+                'peer\'s own release step (`docker compose --env-file .env -f compose.yaml -f '
+                'compose.intraday-owner.yaml up -d --build db-tunnel`) and run this script again '
+                'to confirm.\n'
+                'observed: ' % (detail, BACKUP_ROOT)
                 + json.dumps(observed, indent=2))
         raise SystemExit(
             'refusing to touch the peer: its ssh-tunnel-entrypoint.sh is not a state this '
@@ -343,38 +368,39 @@ def container_id(service_name):
     return subprocess.check_output(C + ['ps', '-q', service_name], text=True).strip()
 
 
-def running_service_image():
-    """(reference, image id) of the container currently running ``db-tunnel``."""
-    container = container_id(SERVICE)
-    if not container:
-        return None, None
-    running = json.loads(subprocess.check_output(D + ['inspect', container], text=True))[0]
-    return running['Config']['Image'], running['Image']
+def running_batch_forward(container, local_port, remote_port):
+    """``(forward, detail)`` for the batch ``-L`` the RUNNING container carries.
 
+    Read-only.  The evidence is the live process, not a file and not a tag: the
+    entrypoint ends in ``exec ssh "$@"``, so pid 1 inside the container is the
+    ssh client itself and ``/proc/1/cmdline`` is the forward list it was started
+    with.  A rebuild of ``db-tunnel`` - which the peer's own release step does -
+    recreates this container from the new image, so the check follows the peer
+    instead of expiring with a tag; and a rebuild that *dropped* the forward is
+    precisely what it has to catch.
 
-def find_batch_image_tag(image_reference, image_id):
-    """The ``:batch-<stamp>`` tag pointing at ``image_id``, or None.
-
-    Read-only.  ``docker image ls`` narrows the candidates and ``docker image
-    inspect`` resolves each one, because a tag is only evidence when it resolves
-    to the image the container is actually running: a batch tag left over from an
-    earlier deploy of a DIFFERENT image proves nothing about this one.
+    ``forward`` is the matching argument, or ``None``; ``detail`` always says
+    what was observed, because it is what the refusal has to print.
     """
-    if not image_reference or not image_id:
-        return None
-    pattern = image_reference.split(':')[0] + ':' + BATCH_TAG_PREFIX + '*'
-    listed = subprocess.check_output(
-        D + ['image', 'ls', '--filter', 'reference=' + pattern,
-             '--format', '{{.Repository}}:{{.Tag}}'], text=True)
-    for tag in [line.strip() for line in listed.splitlines() if line.strip()]:
-        try:
-            resolved = json.loads(subprocess.check_output(
-                D + ['image', 'inspect', tag], text=True))[0]['Id']
-        except BaseException:   # noqa: BLE001 - a tag that cannot be resolved is not evidence
-            continue
-        if resolved == image_id:
-            return tag
-    return None
+    if not container:
+        return None, ('db-tunnel is not running at all, so nothing can vouch for what this '
+                      'peer forwards')
+    try:
+        raw = subprocess.check_output(
+            D + ['exec', container, 'cat', '/proc/1/cmdline'], text=True, timeout=60)
+    except BaseException as error:   # noqa: BLE001 - reported, never masked
+        return None, ("its pid 1 command line could not be read (%s: %s)"
+                      % (type(error).__name__, error))
+    # /proc/<pid>/cmdline is NUL-separated and NUL-terminated.
+    argv = [part for part in raw.split('\0') if part]
+    suffix = ':%s:127.0.0.1:%s' % (local_port, remote_port)
+    forwards = [part for index, part in enumerate(argv)
+                if index and argv[index - 1] == '-L']
+    for forward in forwards:
+        if forward.endswith(suffix):
+            return forward, 'the ssh process in the running db-tunnel container forwards it'
+    return None, ('the ssh process it is running forwards %s, nothing ending in %r'
+                  % (forwards or 'nothing', suffix))
 
 
 def probe_port(port):
@@ -485,12 +511,14 @@ def main():
             == BATCH_LOCAL_PORT, 'the batch port did not reach the rendered db-tunnel environment'
         compose_run('build', SERVICE)
         built = True
-        # check=True, not fire-and-forget: this tag is now the evidence a later
-        # run reads to tell "already deployed" from "interrupted before the
-        # build" (see inspect_peer_state). A deploy whose batch tag was never
-        # created would leave the peer in a state its own script refuses to
-        # recognise, so it fails here instead - before `up -d`, where the
-        # rollback is just the files and the restored tag.
+        # Names the image this deploy built, so it can still be found after the
+        # next build moves `:latest` off it; it is written into the receipt.
+        # It is NOT what a later run reads to recognise a finished deploy - that
+        # is the running container's own forward list (see inspect_peer_state),
+        # because a rebuild replaces the image and would strand this tag.
+        # check=True anyway: a tag that cannot be applied means the daemon is in
+        # a state nothing after this point should be attempted in, and here the
+        # rollback is still only the files and the restored tag.
         subprocess.run(D + ['tag', after['services'][SERVICE].get('image') or running_image_ref,
                             batch_tag], check=True)
         compose_run('up', '-d', '--no-deps', '--no-build', SERVICE)

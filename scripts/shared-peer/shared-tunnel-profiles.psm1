@@ -204,38 +204,45 @@ function Get-SharedTunnelStateFreshnessVerdict {
     # absent stamp is the same evidence as an old one: no proof that this
     # install produced the state.
     #
-    # A timestamp alone is still not enough in BOTH directions, which is why
-    # -PreviousRunId and -SupervisorAlive exist:
+    # A timestamp alone is still not enough, which is why -PreviousRunId exists.
+    # A clock that moved, or a state file whose started_at happens to sit inside
+    # the tolerance window, can pass on time alone. The run_id the installer
+    # already holds (Request-RuntimeStop returns the PRE-install state) settles
+    # it with no clock at all: this install's supervisor minted a new run_id, so
+    # a state still carrying the previous one was not written by this install,
+    # whatever its stamp says.
     #
-    #  * Too weak. A clock that moved, or a state file whose started_at happens
-    #    to sit inside the tolerance window, can pass on time alone. The run_id
-    #    the installer already holds (Request-RuntimeStop returns the PRE-install
-    #    state) settles it with no clock at all: this install's supervisor minted
-    #    a new run_id, so a state still carrying the previous one was not
-    #    written by this install, whatever its stamp says.
+    # THERE IS NO WEAK ACCEPT ANY MORE, and why it was deleted rather than
+    # repaired is worth keeping. Earlier revisions accepted - as healthy, under
+    # the health label 'remote_listener_open_owned_by_live_supervisor' - a state
+    # that still carried the previous run_id whenever a live process still owned
+    # that run. The case is real: supervise-runtime-process.ps1 exits 0 with
+    # `duplicate_start_skipped` and writes NO state when it cannot take
+    # <service>.lock, so a previous run_id can persist while a tunnel is up. The
+    # branch was nevertheless unreachable from the installer, and not by
+    # accident. The installer calls Request-RuntimeStop before it registers the
+    # task, and Request-RuntimeStop either stamps this very file 'stop_requested'
+    # or returns a state that is already terminal
+    # (runtime-observability.psm1:197-235). Every state the installer can then
+    # read for the PREVIOUS run therefore carries a stopping status, and only one
+    # run_id ever holds a non-stopping status at a time - this install's own,
+    # which is `fresh`. A branch that cannot fire is not a safety net; it is a
+    # promise in a comment. Both docs made that promise too, and both were wrong.
     #
-    #  * Too strong. scripts\windows\supervise-runtime-process.ps1 exits 0 with
-    #    `duplicate_start_skipped` and writes NO state when it cannot take
-    #    <service>.lock. If the previous supervisor still holds that lock, the
-    #    state keeps the previous run_id forever and a timestamp-only (or
-    #    run_id-only) gate would call a tunnel that is up and serving a failure -
-    #    and, for the batch profile, DISABLE its task. So when the caller can
-    #    show that the run named by the state is still supervised by a live
-    #    process, that is accepted: not fresh, but healthy. `accept`, not
-    #    `fresh`, is what the installer must gate on.
+    # So the status is judged FIRST, before the run-id and clock branches, and it
+    # disqualifies every claim rather than one branch of them. That also closes
+    # the case the old ordering missed entirely: this install's OWN run dying
+    # between the listener probe and the state read. supervise-runtime-process.ps1
+    # writes status='unexpected_exit' (or 'supervisor_failed', 'stopped') with
+    # THIS install's run_id and a started_at that post-dates the install - which
+    # the run-id and clock branches both read as proof of a healthy install. It
+    # is reported as 'run_ended_before_health_was_proved' instead.
     #
-    # The weak accept has one more condition, and it is not optional. The
-    # installer calls Request-RuntimeStop before it registers the task, and that
-    # call REWRITES this very state file with status 'stop_requested'
-    # (runtime-observability.psm1:231). A live supervisor process plus the
-    # previous run_id is therefore also the exact shape of "the run this install
-    # just asked to die, whose supervisor has not noticed yet" - accepting it
-    # would let the installer certify a tunnel it is in the middle of tearing
-    # down. So a state whose own status says the run is stopping or already over
-    # ('stop_requested', 'stopped', 'unexpected_exit', 'supervisor_failed',
-    # 'start_failed') can never carry the weak claim, however alive its pid is.
-    # It is a bounded refusal, not a stall: this install's own supervisor writes
-    # 'process_started' with a new run_id moments later, and the installer polls.
+    # Refusing is not the same as condemning the install. 'previous_run_stopping'
+    # says the handover this install started has not finished yet, and the
+    # two-minute supervising trigger finishes it without anyone's help, so that
+    # verdict alone carries `handover_in_progress` and the installer refuses
+    # WITHOUT disabling the batch task. Every other refusal is a broken install.
     [CmdletBinding()]
     param(
         [AllowNull()][psobject]$State,
@@ -243,12 +250,10 @@ function Get-SharedTunnelStateFreshnessVerdict {
         # The run_id read BEFORE this install started, or '' when there was no
         # previous state at all (then any run_id is a new one).
         [AllowNull()][string]$PreviousRunId,
-        # Tri-state: $true - the run named by $State is still owned by a live
-        # supervisor process; $false - it is not; $null - not measured.
-        [AllowNull()][object]$SupervisorAlive = $null,
-        # Statuses that disqualify the weak 'a live supervisor still serves this
-        # run' accept. See the note above: the installer's own Request-RuntimeStop
-        # stamps 'stop_requested' on this file before the task is registered.
+        # Statuses that say the run this state names is stopping or already over.
+        # A parameter only so a caller can widen it; the default is every status
+        # supervise-runtime-process.ps1 and Request-RuntimeStop write for such a
+        # run.
         [string[]]$StoppingStatus = @('stop_requested', 'stopped', 'unexpected_exit',
             'supervisor_failed', 'start_failed'),
         [string]$Field = 'started_at',
@@ -267,60 +272,70 @@ function Get-SharedTunnelStateFreshnessVerdict {
     $previous = if ($null -ne $PreviousRunId) { [string]$PreviousRunId } else { '' }
     # No previous state means nothing to be confused with, so any run_id is new.
     $runIdChanged = [string]::IsNullOrWhiteSpace($previous) -or ($runId -ne $previous)
-    $alive = ($SupervisorAlive -is [bool]) -and [bool]$SupervisorAlive
     # The state's own status, read the same defensive way as every other field.
-    # $StoppingStatus is a parameter only so a caller can widen it; the default
-    # is every status supervise-runtime-process.ps1 and Request-RuntimeStop
-    # write for a run that is stopping or already over.
     $statusProperty = if ($null -ne $State) { $State.PSObject.Properties['status'] } else { $null }
     $status = if ($null -ne $statusProperty -and $null -ne $statusProperty.Value) { [string]$statusProperty.Value } else { '' }
     $stopping = $status -in @($StoppingStatus)
     $fresh = $false
-    $accept = $false
     if ($null -eq $State) { $reason = 'no_runtime_state' }
+    elseif ($stopping) {
+        # Judged before the run-id and clock branches on purpose: a run that is
+        # stopping or already over cannot be the proof of a serving tunnel, and
+        # that is true of this install's own run_id as much as of the previous
+        # one. Which of the two it is decides whether the install is broken
+        # (its own run died) or merely unfinished (the handover it started).
+        $reason = if ($runIdChanged) { 'run_ended_before_health_was_proved' } else { 'previous_run_stopping' }
+    }
     elseif (-not $hasValue) { $reason = 'field_missing' }
     elseif (-not $parsedOk) { $reason = 'field_unparsable' }
     elseif (-not $runIdChanged) {
-        # The supervisor never replaced the state. Either it has not run yet
-        # (the installer polls, so this verdict may be re-taken), or it exited
-        # via duplicate_start_skipped because the run below still owns the lock,
-        # or it is the run THIS install just asked to stop.
-        if ($stopping) { $reason = 'previous_run_stopping' }
-        elseif ($alive) { $accept = $true; $reason = 'duplicate_supervisor_still_serving' }
-        else { $reason = 'run_id_unchanged' }
+        # The supervisor of this install has not replaced the state yet. The
+        # installer polls, so this verdict may still be re-taken.
+        $reason = 'run_id_unchanged'
     }
     elseif ($parsed -lt $floor) { $reason = 'state_predates_install' }
-    else { $fresh = $true; $accept = $true; $reason = 'state_belongs_to_install' }
+    else { $fresh = $true; $reason = 'state_belongs_to_install' }
+    # Only the unfinished handover self-heals; every other refusal is a broken
+    # install and the caller is expected to treat it as one.
+    $handover = $reason -eq 'previous_run_stopping'
     $observed = if ($hasValue) { $rawText } else { '<absent>' }
     $statusObserved = if ([string]::IsNullOrWhiteSpace($status)) { '<absent>' } else { $status }
-    $message = if ($accept) {
+    $message = if ($fresh) {
         ("Batch tunnel runtime state accepted ({0} '{1}', run_id '{2}', status '{3}' [{4}])") -f `
             $Field, $observed, $runId, $statusObserved, $reason
-    } elseif ($reason -eq 'previous_run_stopping') {
+    } elseif ($handover) {
         # Not "stale": this state is the run the install itself just stopped, and
         # saying so is the difference between an operator re-running the install
         # and an operator hunting a tunnel that was never up.
         ("Batch tunnel health found only the previous run's state ({0} '{1}', run_id '{2}', " +
             "status '{3}' [{4}]): that run is stopping or already over, so a live pid does not " +
             "make it a serving tunnel. This install's supervisor never wrote a state of its own " +
-            "before the deadline at '{5}'.") -f `
+            "before the deadline at '{5}'. The handover is unfinished, not broken, so the task " +
+            "is left enabled and its two-minute trigger will finish it.") -f `
             $Field, $observed, $runId, $statusObserved, $reason, $InstallStartedAt.ToString('o')
+    } elseif ($reason -eq 'run_ended_before_health_was_proved') {
+        # This install's OWN run, already over by the time the state was read.
+        # The listener probe passed moments earlier, so "the tunnel was up" and
+        # "the tunnel is up" have to be told apart here or nowhere.
+        ("Batch tunnel health found this install's own run already over ({0} '{1}', run_id " +
+            "'{2}' (new since '{3}'), status '{4}' [{5}]): the supervisor started and exited " +
+            "before its health could be proved, so nothing is serving the batch port now.") -f `
+            $Field, $observed, $runId, $previous, $statusObserved, $reason
     } else {
         ("Batch tunnel health used a stale runtime state ({0} '{1}', run_id '{2}' vs previous " +
-            "'{3}', status '{4}' [{5}] does not post-date this install at '{6}', and no live " +
-            "supervisor owns that run)") -f $Field, $observed, $runId, $previous, $statusObserved,
-            $reason, $InstallStartedAt.ToString('o')
+            "'{3}', status '{4}' [{5}] does not post-date this install at '{6}')") -f `
+            $Field, $observed, $runId, $previous, $statusObserved, $reason,
+            $InstallStartedAt.ToString('o')
     }
     return [pscustomobject][ordered]@{
         fresh = $fresh
-        accept = $accept
         reason = $reason
+        handover_in_progress = $handover
         field = $Field
         observed = $observed
         run_id = $runId
         previous_run_id = $previous
         run_id_changed = $runIdChanged
-        supervisor_alive = $SupervisorAlive
         status = $statusObserved
         install_started_at = $InstallStartedAt.ToString('o')
         message = $message
@@ -329,6 +344,14 @@ function Get-SharedTunnelStateFreshnessVerdict {
 
 function Get-SharedTunnelSupervisorLiveness {
     # Pure judge for "is the run named by this state still supervised?".
+    #
+    # This is a RECEIPT, not a gate. It used to be the evidence behind the weak
+    # accept in Get-SharedTunnelStateFreshnessVerdict; that accept is gone (see
+    # the note there), so nothing is admitted on the strength of a live pid any
+    # more. What it still answers is the first question an operator asks about a
+    # batch install that did not pass - was anything supervising the run the
+    # state names? - which is why the installer writes its verdict into the
+    # runtime state, the `healthy` event and the failure message.
     #
     # The caller passes the process it found for $State.supervisor_pid (or
     # $null). A bare "the pid exists" is not enough: pids are reused, and after a

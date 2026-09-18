@@ -87,19 +87,40 @@ function Stop-TunnelInstallOnFailure {
     # writing events that nobody asked for, with nothing to stop it. Disable it
     # here so the failure is bounded: the task stays registered (an operator can
     # read it and re-enable it) but stops running.
-    param([Parameter(Mandatory)][string]$Message)
+    #
+    # -KeepTaskEnabled is the one exception, and it exists because not every
+    # refusal is a broken install. When the gate below refuses with
+    # 'previous_run_stopping' the state still names the run THIS install asked
+    # Request-RuntimeStop to end: the handover is unfinished, not broken, and the
+    # two-minute supervising trigger finishes it with no operator at all.
+    # Disabling the task there would turn a self-healing thirty seconds into a
+    # tunnel that stays down until somebody notices - the very outcome the
+    # deleted weak accept was invented to prevent, and the one it could not
+    # actually deliver. The install still fails (it certifies nothing it cannot
+    # prove); it just leaves the task able to retry.
+    param([Parameter(Mandatory)][string]$Message, [switch]$KeepTaskEnabled)
     if ($tunnelProfile.Name -eq 'batch') {
         try {
-            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-            [void](Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
-            [void](Write-RuntimeEvent -PlatformRoot $PlatformRoot -Service $service `
-                -Event 'install_health_failed' -Level 'error' -Data @{
-                    task_name = $TaskName
-                    task_disabled = $true
-                    reason = $Message
-                })
+            if ($KeepTaskEnabled) {
+                [void](Write-RuntimeEvent -PlatformRoot $PlatformRoot -Service $service `
+                    -Event 'install_health_failed' -Level 'warning' -Data @{
+                        task_name = $TaskName
+                        task_disabled = $false
+                        task_left_enabled_reason = 'handover_in_progress'
+                        reason = $Message
+                    })
+            } else {
+                Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+                [void](Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
+                [void](Write-RuntimeEvent -PlatformRoot $PlatformRoot -Service $service `
+                    -Event 'install_health_failed' -Level 'error' -Data @{
+                        task_name = $TaskName
+                        task_disabled = $true
+                        reason = $Message
+                    })
+            }
         } catch {
-            Write-Warning "Could not disable the failed batch tunnel task '$TaskName': $($_.Exception.Message)"
+            Write-Warning "Could not record the failed batch tunnel task '$TaskName': $($_.Exception.Message)"
         }
     }
     throw $Message
@@ -195,15 +216,15 @@ if ($task.State -ne 'Running') {
 #   1. lightServer publishes a loopback listener on 15433 (`ss -ltn`), and
 #   2. a local ssh.exe whose command line carries this profile's exact
 #      forwarding tuple is alive, and
-#   3. the supervised runtime state was written by this install - a run_id
-#      different from the one read before the install AND a started_at not older
-#      than the moment the task was registered - or, failing that, the run the
-#      state names is still owned by a live supervisor process (the
-#      duplicate_start_skipped case, where the tunnel is up but the previous
-#      supervisor still holds the lock and therefore the state).
-#      started_at is the field supervise-runtime-process.ps1 writes; an earlier
-#      version of this gate asserted on requested_at, which never reaches the
-#      state file, so it could not pass.
+#   3. the supervised runtime state was written by this install AND names a run
+#      that is still going - a run_id different from the one read before the
+#      install, a started_at not older than the moment the task was registered,
+#      and a status that is not one of the stopping/terminal ones. started_at is
+#      the field supervise-runtime-process.ps1 writes; an earlier version of this
+#      gate asserted on requested_at, which never reaches the state file, so it
+#      could not pass. Nothing weaker is accepted: the live-supervisor accept
+#      this gate used to carry could never fire (see the note in
+#      Get-SharedTunnelStateFreshnessVerdict) and has been deleted.
 # Without (2) and (3) a foreign process that grabbed 15433 between the reclaim
 # and the probe was reported as health='remote_listener_open'. The claim is
 # still weaker than the intraday HTTP 200 and is still labelled as such.
@@ -264,35 +285,31 @@ if ($tunnelProfile.HealthCheck -eq 'remote_api_http') {
     # 1 and 2 can be up before that write lands. Judging once turned that race
     # into a disabled batch task.
     #
-    # Two pieces of evidence, both of which this script already has:
-    #   * $previousRunId - the run_id from before the install. This install's
-    #     supervisor mints a new one, so a state still carrying the old id was
-    #     not written by this install, no matter what its clock says.
-    #   * the liveness of the supervisor named by the state. A supervisor that
-    #     cannot take the lock exits via duplicate_start_skipped and writes
-    #     nothing (supervise-runtime-process.ps1:27-32), so the previous run_id
-    #     can legitimately persist while the tunnel is up and serving. That is
-    #     accepted - as 'duplicate_supervisor_still_serving', not as this
-    #     install's own state - because disabling a healthy batch tunnel is a
-    #     worse failure than accepting an older run that demonstrably owns it.
+    # $previousRunId - the run_id from before the install - is what makes the
+    # judgement clock-free: this install's supervisor mints a new one, so a state
+    # still carrying the old id was not written by this install, no matter what
+    # its stamp says.
     #
-    # The poll therefore breaks on `fresh`, NOT on `accept`. Breaking on accept
-    # let the weaker claim win a race against this install's own state: a run
-    # started minutes ago (the two-minute supervising trigger, or
-    # install-shared-tunnel-tasks.ps1 doing both profiles) is still alive on its
-    # pid for the first seconds of this install, so iteration one accepted the
-    # previous run and stopped looking - and the state it accepted is by
-    # construction the one Request-RuntimeStop above just stamped
-    # 'stop_requested'. The judge now refuses a stopping state outright
-    # ('previous_run_stopping'), and the weaker accept is kept as a FALLBACK: it
-    # is only used when the whole 30 s elapsed without this install's own
-    # supervisor writing anything, which is the genuine duplicate_start_skipped
-    # case. The cost is that a real duplicate_start_skipped install polls for the
-    # full deadline; that is 30 seconds once, on an install, and it buys the
-    # guarantee that this install's own state always wins when it is going to
-    # arrive at all.
+    # The poll breaks on `fresh` and on nothing else, and there is no longer any
+    # weaker verdict for it to break on. An earlier revision kept one - a live
+    # supervisor process still owning the run the state named, accepted as
+    # 'duplicate_supervisor_still_serving' - for the case where this install's
+    # supervisor cannot take <service>.lock, exits via duplicate_start_skipped
+    # and writes nothing. That accept could never fire from here: Request-
+    # RuntimeStop above has already stamped the previous run's state
+    # 'stop_requested' (or found it terminal), so every previous-run state this
+    # loop can read carries a stopping status. It has been deleted rather than
+    # left as a promise the code does not keep.
+    #
+    # The supervisor liveness verdict is still taken every iteration, because it
+    # is the receipt an operator reads afterwards - it just no longer decides
+    # anything.
+    #
+    # The cost of gating on `fresh` alone is that an install whose supervisor
+    # genuinely cannot take the lock polls the full 30 s and then refuses. That
+    # refusal does NOT disable the task (see Stop-TunnelInstallOnFailure): the
+    # handover finishes on the next two-minute tick.
     $freshnessDeadline = [DateTime]::UtcNow.AddSeconds(30)
-    $acceptedFallback = $null
     do {
         $state = Get-RuntimeState -PlatformRoot $PlatformRoot -Service $service
         $supervisorProcess = $null
@@ -309,42 +326,24 @@ if ($tunnelProfile.HealthCheck -eq 'remote_api_http') {
         }
         $liveness = Get-SharedTunnelSupervisorLiveness -State $state -Process $supervisorProcess
         $freshness = Get-SharedTunnelStateFreshnessVerdict -State $state `
-            -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId `
-            -SupervisorAlive $liveness.alive
+            -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId
         if ($freshness.fresh) { break }
-        if ($freshness.accept) {
-            # Remember the whole triple, not just the verdict: the state and the
-            # liveness reason that go into the receipt below must be the ones
-            # this verdict was taken against.
-            $acceptedFallback = [pscustomobject]@{
-                Freshness = $freshness; State = $state; Liveness = $liveness
-            }
-        }
         Start-Sleep -Seconds 1
     } while ([DateTime]::UtcNow -lt $freshnessDeadline)
-    if (-not $freshness.fresh -and $null -ne $acceptedFallback) {
-        $freshness = $acceptedFallback.Freshness
-        $state = $acceptedFallback.State
-        $liveness = $acceptedFallback.Liveness
-    }
 }
 if (-not $state -or -not $state.PSObject.Properties['run_id']) {
     Stop-TunnelInstallOnFailure -Message 'Shared peer tunnel became reachable without a supervised runtime state'
 }
-if ($null -ne $freshness -and -not $freshness.accept) {
+if ($null -ne $freshness -and -not $freshness.fresh) {
     # Why the supervisor could not vouch for the run is the first thing an
     # operator needs here, and a refused install writes no runtime state, so the
     # message is the only place it can be recorded.
     $livenessDetail = if ($null -ne $liveness) {
         " (supervisor liveness: $($liveness.reason), pid '$($liveness.supervisor_pid)')"
     } else { '' }
-    Stop-TunnelInstallOnFailure -Message ($freshness.message + $livenessDetail)
-}
-if ($null -ne $freshness -and -not $freshness.fresh) {
-    # Accepted, but by the weaker claim. Say so in the health label rather than
-    # reporting the same string as an install whose own supervisor wrote the
-    # state.
-    $healthLabel = 'remote_listener_open_owned_by_live_supervisor'
+    # An unfinished handover is the one refusal that must not disable the task.
+    Stop-TunnelInstallOnFailure -Message ($freshness.message + $livenessDetail) `
+        -KeepTaskEnabled:([bool]$freshness.handover_in_progress)
 }
 $healthyState = @{}
 foreach ($property in $state.PSObject.Properties) {
