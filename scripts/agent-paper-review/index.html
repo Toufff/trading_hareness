@@ -3,54 +3,66 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Agent 模拟盘复盘</title>
+<title>模拟盘对照复盘</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📈</text></svg>">
 <style>
 :root{--bg:#f6f7f9;--panel:#fff;--fg:#1c1e21;--mute:#6b7280;--line:#e5e7eb;--soft:#f1f3f6;--accent:#2563eb;
-  --up:#d92d20;--down:#15803d;--warn:#b45309;--warn-bg:#fef3c7;--ok-bg:#e8f5ec;--bad-bg:#fdecea;--info-bg:#e8effd;--code:#f4f5f7}
+  --up:#d92d20;--down:#15803d;--warn:#b45309;--warn-bg:#fef3c7;--ok-bg:#e8f5ec;--bad-bg:#fdecea;--info-bg:#e8effd;--code:#f4f5f7;
+  --me:#7c3aed;--me-bg:#f1e9fe;--a1:#2563eb;--a1-bg:#e8effd;--a2:#0f766e;--a2-bg:#e3f5f2}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1115;--panel:#171a21;--fg:#e6e8eb;--mute:#9aa3ae;--line:#2a2f38;
-  --soft:#1e222a;--accent:#6ea0ff;--up:#ff6b5e;--down:#4ade80;--warn:#fbbf24;--warn-bg:#3a2f12;--ok-bg:#15291c;--bad-bg:#3a1a18;--info-bg:#18233a;--code:#12151b}}
+  --soft:#1e222a;--accent:#6ea0ff;--up:#ff6b5e;--down:#4ade80;--warn:#fbbf24;--warn-bg:#3a2f12;--ok-bg:#15291c;--bad-bg:#3a1a18;--info-bg:#18233a;--code:#12151b;
+  --me:#c4b5fd;--me-bg:#2a2140;--a1:#8ab4ff;--a1-bg:#16233c;--a2:#5eead4;--a2-bg:#10302c}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
-header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line)}
-.bar{max-width:1400px;margin:0 auto;padding:10px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-h1{font-size:17px;margin:0 12px 0 0}
-select,button{font:inherit;color:var(--fg);background:var(--soft);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer}
-button:hover:not(:disabled){border-color:var(--accent)}
+header{position:sticky;top:0;z-index:6;background:var(--panel);border-bottom:1px solid var(--line)}
+.bar{max-width:1280px;margin:0 auto;padding:10px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+h1{font-size:16px;margin:0 8px 0 0;white-space:nowrap}
+select,button{font:inherit;color:var(--fg);background:var(--soft);border:1px solid var(--line);border-radius:7px;padding:4px 10px;cursor:pointer}
+button:hover:not(:disabled),select:hover{border-color:var(--accent)}
 button:disabled{opacity:.45;cursor:not-allowed}
-.muted{color:var(--mute)}.small{font-size:12px}
-main{max-width:1400px;margin:0 auto;padding:16px}
-.score{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px}
+.tabs{display:flex;gap:4px;margin-left:auto;flex-wrap:wrap}
+.tabs button[aria-selected="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.muted{color:var(--mute)}.small{font-size:12px}.nowrap{white-space:nowrap}
+main{max-width:1280px;margin:0 auto;padding:14px 16px 60px}
+.score{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin-bottom:14px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
-.card h3{margin:0 0 4px;font-size:13px;color:var(--mute);font-weight:500}
-.big{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
+.card.me{border-left:3px solid var(--me)}.card.a1{border-left:3px solid var(--a1)}.card.a2{border-left:3px solid var(--a2)}
+.card h3{margin:0 0 2px;font-size:13px;font-weight:600;display:flex;justify-content:space-between;gap:6px;align-items:baseline}
+.big{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.25}
 .pos{color:var(--up)}.neg{color:var(--down)}
-.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:16px;align-items:start}
-@media (max-width:520px){.cols{grid-template-columns:1fr}}
-.col h2{font-size:16px;margin:0 0 8px;display:flex;justify-content:space-between;align-items:baseline;gap:8px}
-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
-th,td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
-th{color:var(--mute);font-weight:500;font-size:12px}
+.spark{display:block;margin-top:6px;width:100%;height:34px}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;background:var(--panel)}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{background:var(--panel);color:var(--mute);font-weight:500;font-size:12px}
+tbody tr:hover{background:var(--soft)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:14px}
+.panel>h2{font-size:14px;margin:0;padding:9px 12px;border-bottom:1px solid var(--line);background:var(--soft);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .scroll{overflow-x:auto}
-.decision{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin:10px 0;overflow:hidden}
-.dhead{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 12px;background:var(--soft);border-bottom:1px solid var(--line)}
-.dhead .t{font-weight:600;font-variant-numeric:tabular-nums}
-.dbody{padding:10px 12px}
+.who{display:inline-block;font-size:12px;border-radius:6px;padding:0 7px;line-height:20px;font-weight:600;white-space:nowrap}
+.who.me{background:var(--me-bg);color:var(--me)}.who.a1{background:var(--a1-bg);color:var(--a1)}.who.a2{background:var(--a2-bg);color:var(--a2)}
 .badge{display:inline-block;font-size:12px;border-radius:999px;padding:0 8px;line-height:20px;white-space:nowrap}
 .b-ok{background:var(--ok-bg);color:var(--down)}.b-bad{background:var(--bad-bg);color:var(--up)}
 .b-warn{background:var(--warn-bg);color:var(--warn)}.b-info{background:var(--info-bg);color:var(--accent)}
-.view{margin:0 0 8px}
-.order{border-left:3px solid var(--line);padding:6px 10px;margin:8px 0;background:var(--soft);border-radius:0 6px 6px 0}
-.order.buy{border-left-color:var(--up)}.order.sell{border-left-color:var(--down)}
+.side-buy{color:var(--up);font-weight:600}.side-sell{color:var(--down);font-weight:600}
+.why{white-space:pre-wrap;word-break:break-word;color:var(--fg)}
+.clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
+.clamp.open{-webkit-line-clamp:unset;display:block}
+.filters{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.filters button[aria-pressed="true"]{border-color:var(--accent);background:var(--info-bg)}
+.round{border-bottom:1px solid var(--line);padding:9px 12px}
+.round:last-child{border-bottom:0}
+.rhead{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.rhead .t{font-weight:650;font-variant-numeric:tabular-nums}
+.order{border-left:3px solid var(--line);padding:5px 9px;margin:6px 0;background:var(--soft);border-radius:0 7px 7px 0}
+.order.buy{border-left-color:var(--up)}.order.sell{border-left-color:var(--down)}.order.cancel{border-left-color:var(--warn)}
 .order .line{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-weight:600}
-.order .why{margin-top:4px;white-space:pre-wrap;word-break:break-word;font-weight:400}
-details.notes summary{cursor:pointer;color:var(--mute)}
+details.more{margin-top:5px}details.more>summary{cursor:pointer;color:var(--mute);font-size:12px}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .chip{font-size:12px;background:var(--info-bg);color:var(--accent);border-radius:6px;padding:1px 8px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
-.actions button{font-size:12px;padding:2px 8px}
-.empty{color:var(--mute);padding:8px 0}
+.actions{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap}.actions button{font-size:12px;padding:2px 8px}
+.empty{color:var(--mute);padding:12px}
 .error{background:var(--bad-bg);color:var(--up);padding:8px 12px;border-radius:8px;margin-bottom:12px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
 dialog{width:min(1000px,96vw);max-height:90vh;border:1px solid var(--line);border-radius:12px;padding:0;background:var(--panel);color:var(--fg)}
 dialog::backdrop{background:rgba(0,0,0,.45)}
 .dlghead{position:sticky;top:0;background:var(--panel);display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line)}
@@ -61,133 +73,278 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 .tree .leaf{margin-left:14px;white-space:pre-wrap;word-break:break-word}
 .tx{border:1px solid var(--line);border-radius:8px;margin:8px 0;padding:6px 10px}
 .tx pre{white-space:pre-wrap;word-break:break-word;background:var(--code);padding:8px;border-radius:6px;margin:6px 0 0;font:12px/1.5 ui-monospace,Consolas,monospace;max-height:420px;overflow:auto}
+@media (max-width:640px){.big{font-size:20px}}
 </style>
 </head>
 <body>
 <header><div class="bar">
-  <h1>Agent 模拟盘复盘</h1>
-  <label class="muted">交易日 <select id="day"></select></label>
+  <h1>模拟盘对照复盘</h1>
+  <label class="muted small">交易日 <select id="day"></select></label>
   <button id="refresh">刷新</button>
   <span id="stamp" class="muted small"></span>
+  <nav class="tabs" id="tabs" role="tablist">
+    <button role="tab" data-view="timeline" aria-selected="true">总览时间线</button>
+    <button role="tab" data-view="symbols" aria-selected="false">逐笔对照</button>
+    <button role="tab" data-view="rounds" aria-selected="false">决策明细</button>
+    <button role="tab" data-view="book" aria-selected="false">持仓与净值</button>
+  </nav>
 </div></header>
 <main>
   <div id="error" class="error" hidden></div>
   <section id="score" class="score"></section>
-  <section id="cols" class="cols"></section>
+  <section id="view"></section>
 </main>
 <dialog id="dlg"><div class="dlghead"><strong id="dlgtitle"></strong><button id="dlgclose">关闭</button></div><div id="dlgbody" class="dlgbody"></div></dialog>
 <script>
 const $=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const num=(v,d=2)=>v==null||v===''?'—':Number(v).toLocaleString('zh-CN',{minimumFractionDigits:d,maximumFractionDigits:d});
+const int=v=>v==null?'—':Number(v).toLocaleString('zh-CN');
 const pct=v=>v==null?'—':(v>0?'+':'')+Number(v).toFixed(2)+'%';
 const sign=v=>v==null?'':v>0?'pos':v<0?'neg':'';
 const hm=s=>s?new Date(s).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'—';
 const NAMES={'agent-claude-opus':'Claude Opus','agent-dsh':'DSH'};
-const SIDE={buy:'买',sell:'卖',cancel:'撤单'};
-const STATUS={filled:['成交','b-ok'],partially_filled:['部分成交','b-warn'],open:['挂单中','b-info'],rejected:['拒绝','b-bad'],cancelled:['已撤','b-warn'],expired:['收盘未成交','b-warn']};
+const SIDE={buy:'买入',sell:'卖出',cancel:'撤单'};
+const STATUS={filled:['成交','b-ok'],partially_filled:['部分成交','b-warn'],open:['挂单中','b-info'],rejected:['被拒','b-bad'],cancelled:['已撤','b-warn'],expired:['收盘未成','b-warn']};
 const REASONS={no_live_quote:'无实时行情',not_board_lot:'不是整百股',limit_not_marketable:'限价未到可成交价',no_ask_depth:'卖盘无量',no_bid_depth:'买盘无量',no_depth:'盘口无量',
   limit_up_or_no_ask_depth:'涨停或卖盘无量',limit_down_or_no_bid_depth:'跌停或买盘无量',insufficient_cash:'资金不足',insufficient_sellable_quantity:'可卖数量不足',
   t_plus_one_or_insufficient_sellable_quantity:'T+1 或可卖数量不足',invalid_symbol:'代码无效',non_positive_quantity:'数量无效',cancel_unknown_order:'找不到要撤的单',
   limit_price_required:'限价单缺价格',reason_required:'缺少理由',order_not_object:'订单格式错误',unsupported_action:'不支持的操作',unsupported_order_type:'不支持的订单类型'};
 const reason=r=>REASONS[r]||REASONS[String(r).split(':')[0]]||r;
-let current=null,lastBody='',timer=null;
+const CLS={me:'me'};
+let current=null,lastBody='',view='timeline',actorFilter=new Set(),roundAccount=null;
 
 async function api(path){const r=await fetch(path,{cache:'no-store'});const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j;}
 
-async function loadDays(){
-  const {days}=await api('/api/days');const sel=$('#day');const keep=sel.value;
-  sel.innerHTML=days.map(d=>`<option>${d}</option>`).join('');
-  if(keep&&days.includes(keep))sel.value=keep;
+function actors(d){
+  const list=[{key:'me',label:'你（实盘）',cls:'me'}];
+  d.accounts.forEach((a,i)=>list.push({key:a.account_key,label:NAMES[a.account_key]||a.account_key,cls:i?'a2':'a1',account:a}));
+  return list;
 }
-async function load(){
-  try{
-    const day=$('#day').value;const body=await api('/api/day'+(day?`?date=${day}`:''));
-    $('#error').hidden=true;$('#stamp').textContent=`更新于 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`+(body.day===body.latest_day?' · 每 20 秒自动刷新':'');
-    const text=JSON.stringify(body);if(text!==lastBody){lastBody=text;current=body;render(body);}
-  }catch(e){$('#error').hidden=false;$('#error').textContent='读取失败：'+e.message;}
-}
+function whoTag(a){return `<span class="who ${a.cls}">${esc(a.label)}</span>`;}
 
-function render(d){
-  const cards=[];
-  const h=d.human;
-  cards.push(`<div class="card"><h3>你（实盘）</h3><div class="big">${h&&h.equity!=null?num(h.equity):'—'}</div>
-    <div class="${sign(h?.return_pct)}">${pct(h?.return_pct)}</div><div class="muted small">${h?.comparable?(h.basis==='broker_close_snapshot'?'收盘后券商快照':'快照+成交重建'):'当日收盘数据未齐，暂不可比'}</div></div>`);
+/* ---------- scoreboard ---------- */
+function sparkline(navs){
+  const points=(navs||[]).map(n=>Number(n.equity)).filter(Number.isFinite);
+  if(points.length<2)return '';
+  const min=Math.min(...points),max=Math.max(...points),span=(max-min)||1;
+  const step=100/(points.length-1);
+  const path=points.map((v,i)=>`${i?'L':'M'}${(i*step).toFixed(2)},${(30-(v-min)/span*28).toFixed(2)}`).join(' ');
+  const rising=points.at(-1)>=points[0];
+  return `<svg class="spark" viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true"><path d="${path}" fill="none"
+    stroke="${rising?'var(--up)':'var(--down)'}" stroke-width="1.4" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function scoreboard(d){
+  const h=d.human,daily=(d.accounts[0]||{}).daily||{};
+  const missing=(daily.human_missing_prices||[]).length;
+  const cards=[`<div class="card me"><h3>你（实盘）<span class="muted small">券商账户</span></h3>
+    <div class="big">${h&&h.equity!=null?num(h.equity):'待同步'}</div>
+    <div class="${sign(h?.return_pct)}">${h&&h.return_pct!=null?pct(h.return_pct):'&nbsp;'}</div>
+    <div class="muted small">${h?.comparable?(h.basis==='broker_close_snapshot'?'收盘后券商快照':'快照+成交重建')
+      :`收盘同步后可比${daily.human_fills_imported_through?`；成交已导入至 ${esc(daily.human_fills_imported_through)}`:''}${missing?`；缺 ${missing} 只收盘价`:''}`}</div>
+    <div class="muted small">今日成交 ${(d.human_trades?.orders||[]).length} 笔 · 复盘记录 ${(d.human_trades?.journal||[]).length} 条</div></div>`];
   for(const a of d.accounts){
-    const x=a.daily||{};const nav=a.navs.at(-1);
+    const x=a.daily||{},nav=a.navs.at(-1);
     const filled=a.orders.filter(o=>['filled','partially_filled'].includes(o.status)).length;
-    const ok=a.decisions.filter(z=>z.status==='decided').length;
-    cards.push(`<div class="card"><h3>${esc(NAMES[a.account_key]||a.account_key)} <span class="small">${esc(a.model)}</span></h3>
-      <div class="big">${nav?num(nav.equity):'—'}</div><div class="${sign(x.agent_return_pct)}">${pct(x.agent_return_pct)}</div>
-      <div class="muted small">决策 ${ok}/${a.decisions.length} 轮 · 成交 ${filled} 笔 · 现金 ${num(nav?nav.cash:a.cash)}</div></div>`);
+    const failed=a.decisions.filter(z=>z.status!=='decided').length;
+    const total=nav?((nav.equity/a.initial_equity-1)*100):null;
+    cards.push(`<div class="card ${a===d.accounts[0]?'a1':'a2'}"><h3>${esc(NAMES[a.account_key]||a.account_key)}<span class="muted small">${esc(a.model)}</span></h3>
+      <div class="big">${nav?num(nav.equity):'—'}</div>
+      <div><span class="${sign(x.agent_return_pct)}">今日 ${pct(x.agent_return_pct)}</span>
+        <span class="muted small">· 累计 <span class="${sign(total)}">${pct(total)}</span></span></div>
+      <div class="muted small">决策 ${a.decisions.length-failed}/${a.decisions.length} 轮${failed?`（失败 ${failed}）`:''} · 成交 ${filled} 笔 · 现金 ${int(nav?nav.cash:a.cash)}</div>
+      ${sparkline(a.navs)}</div>`);
   }
   $('#score').innerHTML=cards.join('');
-  $('#cols').innerHTML=humanColumn(d.human_trades)+(d.accounts.map(column).join('')||'<p class="empty">还没有模拟账户。</p>');
 }
 
-function humanColumn(h){
-  if(!h)return '';
-  const notes=Object.fromEntries((h.journal||[]).map(j=>[j.symbol,j]));
-  const lastOrder={};for(const o of h.orders||[])lastOrder[o.symbol]=o;
-  const orders=(h.orders||[]).slice().reverse().map(o=>{
-    const j=lastOrder[o.symbol]===o?notes[o.symbol]:null;
-    const plan=j&&(j.plans||[])[0];
-    return `<article class="decision"><div class="dhead"><span class="t">${esc(String(o.first_fill_time).slice(0,8))}</span>
-        <span class="badge ${o.side==='buy'?'b-bad':'b-ok'}">${SIDE[o.side]||esc(o.side)}</span>
-        <span class="muted small">券商成交${o.fills>1?' · 分 '+o.fills+' 笔':''}${o.order_time?' · 委托 '+esc(o.order_time):''}</span></div>
-      <div class="dbody"><div class="order ${esc(o.side)}"><div class="line">${SIDE[o.side]||o.side} ${esc(o.symbol)} ${esc(o.name??'')} ${esc(o.quantity)} 股 · 均价 ${num(o.avg_price,3)}</div>
-        ${j&&j.body?`<div class="why"><strong>当时意图：</strong>${esc(j.body)}</div>`:''}</div>
-        ${plan?`<p class="view"><strong>次日计划：</strong>${esc(plan.plan)}</p>`:''}
-        ${j?'<p class="muted small">以上为你本人在复盘时的陈述，非系统推断。</p>':''}</div></article>`;
-  }).join('')||'<p class="empty">这一天没有导入的券商成交。</p>';
-  const unmatched=(h.journal||[]).filter(j=>!lastOrder[j.symbol]).map(j=>`<article class="decision"><div class="dhead"><span class="badge b-info">复盘记录</span> ${esc(j.title)}</div>
-      <div class="dbody"><div class="why">${esc(j.body)}</div>${(j.plans||[])[0]?`<p class="view"><strong>次日计划：</strong>${esc(j.plans[0].plan)}</p>`:''}</div></article>`).join('');
-  return `<div class="col"><h2><span>你（实盘）</span><span class="muted small">成交 ${(h.orders||[]).length} 笔委托 · 复盘记录 ${(h.journal||[]).length} 条</span></h2>${unmatched}${orders}</div>`;
+/* ---------- merged timeline ---------- */
+function events(d){
+  const rows=[];
+  const journal=Object.fromEntries((d.human_trades?.journal||[]).map(j=>[j.symbol,j]));
+  for(const o of d.human_trades?.orders||[]){
+    const j=journal[o.symbol];
+    rows.push({at:`${d.day}T${o.first_fill_time}+08:00`,actor:'me',side:o.side,symbol:o.symbol,name:o.name,
+      quantity:o.quantity,price:o.avg_price,status:'filled',
+      note:o.fills>1?`分 ${o.fills} 笔成交`+(o.order_time?` · 委托 ${o.order_time}`:''):(o.order_time?`委托 ${o.order_time}`:''),
+      why:j?j.body:'',plan:j&&(j.plans||[])[0]?j.plans[0].plan:''});
+  }
+  for(const a of d.accounts){
+    const byId=Object.fromEntries(a.decisions.flatMap(z=>(z.ledger_orders||[]).map(o=>[o.order_id,z])));
+    for(const o of a.orders){
+      const z=byId[o.order_id];
+      rows.push({at:o.placed_at,actor:a.account_key,side:o.side,symbol:o.symbol,name:o.name,quantity:o.quantity,
+        price:o.fill_price??o.limit_price,status:o.status,
+        note:[o.order_type==='limit'?`限价 ${num(o.limit_price)}`:'市价',o.filled_quantity?`成交 ${int(o.filled_quantity)} 股`:'',
+              (o.reject_reasons||[]).map(reason).join('、')].filter(Boolean).join(' · '),
+        why:o.reason,round:z?hm(z.decided_at):''});
+    }
+    for(const z of a.decisions){
+      for(const o of z.outcomes||[]){
+        if(o.order_id)continue;
+        const raw=o.order||{};
+        rows.push({at:z.decided_at,actor:a.account_key,side:raw.action,symbol:raw.symbol,name:'',quantity:raw.quantity,
+          price:raw.limit_price,status:o.status==='cancelled'?'cancelled':'rejected',
+          note:'下单前被规则拒绝 · '+(o.reasons||[]).map(reason).join('、'),why:raw.reason});
+      }
+    }
+  }
+  return rows.sort((x,y)=>String(y.at).localeCompare(String(x.at)));
+}
+function timelineView(d){
+  const all=actors(d);
+  const chips=[`<button data-actor="all" aria-pressed="${actorFilter.size===0}">全部</button>`,
+    ...all.map(a=>`<button data-actor="${esc(a.key)}" aria-pressed="${actorFilter.has(a.key)}">只看${esc(a.label)}</button>`)].join('');
+  const rows=events(d).filter(e=>actorFilter.size===0||actorFilter.has(e.actor));
+  const byKey=Object.fromEntries(all.map(a=>[a.key,a]));
+  const body=rows.map((e,i)=>{
+    const [label,cls]=STATUS[e.status]||[e.status,'b-info'];
+    const a=byKey[e.actor]||{label:e.actor,cls:''};
+    return `<tr><td class="nowrap">${hm(e.at)}${e.round&&e.round!==hm(e.at)?`<div class="muted small">轮次 ${e.round}</div>`:''}</td>
+      <td class="nowrap">${whoTag(a)}</td>
+      <td class="nowrap"><span class="side-${esc(e.side)}">${SIDE[e.side]||esc(e.side)}</span> ${esc(e.name||'')}<div class="muted small">${esc(e.symbol||'')}</div></td>
+      <td class="nowrap">${int(e.quantity)} 股<div class="muted small">${e.price!=null?num(e.price,3):'—'}</div></td>
+      <td class="nowrap"><span class="badge ${cls}">${label}</span><div class="muted small">${esc(e.note||'')}</div></td>
+      <td>${e.why?`<div class="why clamp" data-clamp>${esc(e.why)}</div>`:'<span class="muted small">—</span>'}
+        ${e.plan?`<details class="more"><summary>次日计划</summary><div class="why">${esc(e.plan)}</div></details>`:''}</td></tr>`;
+  }).join('');
+  return `<div class="panel"><h2><span>当日操作时间线（最新在上）</span><span class="filters">${chips}</span></h2>
+    <div class="scroll"><table><thead><tr><th>时间</th><th>谁</th><th>操作</th><th>数量 / 价格</th><th>状态</th><th>理由（点击展开）</th></tr></thead>
+    <tbody>${body||'<tr><td colspan="6" class="empty">这一天没有操作记录。</td></tr>'}</tbody></table></div></div>`;
 }
 
-function column(a){
-  const marks=Object.fromEntries(((a.navs.at(-1)||{}).positions||[]).map(p=>[p.symbol,p.price]));
-  const pos=(a.positions||[]).filter(p=>Number(p.quantity)>0);
-  const posTable=pos.length?`<div class="scroll"><table><tr><th>代码</th><th>名称</th><th>数量</th><th>可卖</th><th>成本</th><th>记账价</th></tr>${pos.map(p=>`<tr><td>${esc(p.symbol)}</td><td>${esc(p.name??'')}</td><td>${esc(p.quantity)}</td><td>${esc(p.sellable_quantity??'—')}</td><td>${num(p.average_cost??p.avg_cost,3)}</td><td>${(p.price||marks[p.symbol])?num(p.price||marks[p.symbol]):'—'}</td></tr>`).join('')}</table></div>`:'<p class="empty">空仓</p>';
-  const decisions=a.decisions.length?a.decisions.slice().reverse().map(z=>decision(a,z)).join(''):'<p class="empty">这一天没有决策记录。</p>';
-  return `<div class="col"><h2><span>${esc(NAMES[a.account_key]||a.account_key)}</span><span class="muted small">起始 ${esc(a.start_date)} · 初始 ${num(a.initial_equity)}</span></h2>
-    <div class="card"><h3>持仓${a.navs.length?'（'+hm(a.navs.at(-1).as_of)+' 记账）':''}</h3>${posTable}</div>${decisions}</div>`;
+/* ---------- per-symbol comparison ---------- */
+function symbolsView(d){
+  const all=actors(d);
+  const marks={},names={};
+  for(const a of d.accounts)for(const p of (a.navs.at(-1)||{}).positions||[]){marks[p.symbol]=p.price;}
+  const cells={};
+  const put=(symbol,actor,side,qty,amount,name)=>{
+    names[symbol]=names[symbol]||name||'';
+    const cell=(cells[symbol]=cells[symbol]||{});
+    const it=(cell[actor]=cell[actor]||{buy:0,buyAmt:0,sell:0,sellAmt:0});
+    if(side==='buy'){it.buy+=qty;it.buyAmt+=amount;}else if(side==='sell'){it.sell+=qty;it.sellAmt+=amount;}
+  };
+  for(const o of d.human_trades?.orders||[])put(o.symbol,'me',o.side,Number(o.quantity),Number(o.quantity)*Number(o.avg_price),o.name);
+  for(const a of d.accounts)for(const o of a.orders){
+    if(!Number(o.filled_quantity))continue;
+    put(o.symbol,a.account_key,o.side,Number(o.filled_quantity),Number(o.filled_quantity)*Number(o.fill_price),o.name);
+  }
+  const held={};
+  for(const a of d.accounts)for(const p of a.positions||[])if(Number(p.quantity)>0)((held[p.symbol]=held[p.symbol]||{})[a.account_key]=Number(p.quantity));
+  const symbols=[...new Set([...Object.keys(cells),...Object.keys(held)])].sort();
+  const head=all.map(a=>`<th>${esc(a.label)}</th>`).join('');
+  const body=symbols.map(symbol=>{
+    const tds=all.map(a=>{
+      const it=(cells[symbol]||{})[a.key],hold=(held[symbol]||{})[a.key];
+      if(!it&&!hold)return '<td class="muted small">—</td>';
+      const parts=[];
+      if(it&&it.buy)parts.push(`<div><span class="side-buy">买 ${int(it.buy)}</span> @${num(it.buyAmt/it.buy,3)}</div>`);
+      if(it&&it.sell)parts.push(`<div><span class="side-sell">卖 ${int(it.sell)}</span> @${num(it.sellAmt/it.sell,3)}</div>`);
+      if(hold)parts.push(`<div class="muted small">持仓 ${int(hold)} 股</div>`);
+      return `<td class="nowrap">${parts.join('')}</td>`;
+    }).join('');
+    return `<tr><td class="nowrap"><strong>${esc(names[symbol]||'')}</strong><div class="muted small">${esc(symbol)}</div></td>
+      <td class="nowrap">${marks[symbol]?num(marks[symbol],3):'—'}</td>${tds}</tr>`;
+  }).join('');
+  return `<div class="panel"><h2><span>同一只票，三方各自怎么做的</span><span class="muted small">价格为最近一次记账价</span></h2>
+    <div class="scroll"><table><thead><tr><th>标的</th><th>记账价</th>${head}</tr></thead>
+    <tbody>${body||'<tr><td colspan="5" class="empty">这一天没有成交。</td></tr>'}</tbody></table></div></div>`;
 }
 
-function decision(a,z){
+/* ---------- rounds ---------- */
+function roundsView(d){
+  if(!d.accounts.length)return '<div class="panel"><p class="empty">还没有模拟账户。</p></div>';
+  roundAccount=d.accounts.some(a=>a.account_key===roundAccount)?roundAccount:d.accounts[0].account_key;
+  const picker=d.accounts.map(a=>`<button data-account="${esc(a.account_key)}" aria-pressed="${a.account_key===roundAccount}">${esc(NAMES[a.account_key]||a.account_key)}</button>`).join('');
+  const a=d.accounts.find(x=>x.account_key===roundAccount);
+  const rounds=a.decisions.slice().reverse().map(z=>round(z)).join('')||'<p class="empty">这一天没有决策记录。</p>';
+  return `<div class="panel"><h2><span>逐轮决策（最新在上）</span><span class="filters">${picker}</span></h2>${rounds}</div>`;
+}
+function round(z){
   const st=z.status==='decided'?'<span class="badge b-ok">已决策</span>':`<span class="badge b-bad">${esc(z.status)}</span>`;
   const orders=[];
-  for(const o of z.ledger_orders){
+  for(const o of z.ledger_orders||[]){
     const [label,cls]=STATUS[o.status]||[o.status,'b-info'];
-    const fill=o.filled_quantity?` ${o.filled_quantity}@${num(o.fill_price)}`:'';
+    const fill=o.filled_quantity?` ${int(o.filled_quantity)}@${num(o.fill_price,3)}`:'';
     const rej=(o.reject_reasons||[]).map(reason).join('、');
-    orders.push(`<div class="order ${esc(o.side)}"><div class="line">${SIDE[o.side]||o.side} ${esc(o.symbol)} ${esc(o.name??'')} ${esc(o.quantity)} 股 · ${o.order_type==='limit'?'限价 '+num(o.limit_price):'市价'}
-      <span class="badge ${cls}">${label}${fill}</span>${rej?`<span class="muted small">${esc(rej)}</span>`:''}</div><div class="why">${esc(o.reason)}</div></div>`);
+    orders.push(`<div class="order ${esc(o.side)}"><div class="line"><span class="side-${esc(o.side)}">${SIDE[o.side]||o.side}</span> ${esc(o.name??'')} ${esc(o.symbol)} ${int(o.quantity)} 股
+      · ${o.order_type==='limit'?'限价 '+num(o.limit_price,3):'市价'} <span class="badge ${cls}">${label}${fill}</span>${rej?`<span class="muted small">${esc(rej)}</span>`:''}</div>
+      <div class="why clamp" data-clamp>${esc(o.reason)}</div></div>`);
   }
   for(const o of z.outcomes||[]){
     if(o.order_id)continue;
     const raw=o.order||{};
-    orders.push(`<div class="order ${esc(raw.action)}"><div class="line">${SIDE[raw.action]||esc(raw.action)} ${esc(raw.symbol)} ${esc(raw.quantity)} 股
-      <span class="badge b-bad">${o.status==='cancelled'?'已撤':'下单前被规则拒绝'}</span><span class="muted small">${esc((o.reasons||[]).map(reason).join('、'))}</span></div><div class="why">${esc(raw.reason)}</div></div>`);
+    orders.push(`<div class="order ${esc(raw.action)}"><div class="line"><span class="side-${esc(raw.action)}">${SIDE[raw.action]||esc(raw.action)}</span> ${esc(raw.symbol)} ${int(raw.quantity)} 股
+      <span class="badge b-bad">${o.status==='cancelled'?'已撤':'下单前被拒'}</span><span class="muted small">${esc((o.reasons||[]).map(reason).join('、'))}</span></div>
+      <div class="why clamp" data-clamp>${esc(raw.reason)}</div></div>`);
   }
-  if(!z.outcomes&&z.proposed.length>z.ledger_orders.length){
-    orders.push(`<p class="muted small">模型提出 ${z.proposed.length} 笔，入账 ${z.ledger_orders.length} 笔；其余被规则拒绝，旧记录没有保存拒绝原因。</p>`);
-  }
-  const chips=z.searches.length?`<div class="chips">${z.searches.map(s=>`<span class="chip" title="${esc(s.target)}">${s.tool==='WebSearch'?'🔍':'🌐'} ${esc(s.target)}</span>`).join('')}</div>`:'';
-  const noTrail=!z.has_context?'<span class="muted small">该轮未存输入原文</span>':'';
-  return `<article class="decision"><div class="dhead"><span class="t">${hm(z.decided_at)}</span>${st}
-      <span class="muted small">${z.duration_ms?(z.duration_ms/1000).toFixed(0)+' 秒':''}${z.context_chars?' · 输入 '+(z.context_chars/1000).toFixed(1)+' 千字':''}${z.cost_usd?' · $'+Number(z.cost_usd).toFixed(3):''}${z.tool_calls?' · 查询 '+z.tool_calls+' 次':''}</span></div>
-    <div class="dbody">${z.error?`<div class="error">${esc(z.error)}</div>`:''}
-      ${z.market_view?`<p class="view"><strong>盘面判断：</strong>${esc(z.market_view)}</p>`:''}
-      ${z.analysis?`<details class="notes" open><summary>推理过程</summary><div class="why">${esc(z.analysis)}</div></details>`:''}
-      ${orders.join('')||(z.status==='decided'?'<p class="muted small">本轮不操作。</p>':'')}
-      ${z.notes?`<details class="notes"><summary>备注 / 计划</summary><div class="why">${esc(z.notes)}</div></details>`:''}
-      ${chips}
-      <div class="actions">
-        <button data-part="context" data-id="${z.decision_id}" ${z.has_context?'':'disabled'}>看输入</button>
-        <button data-part="transcript" data-id="${z.decision_id}" ${z.has_transcript?'':'disabled'}>看过程</button>
-        <button data-part="output" data-id="${z.decision_id}">原始输出</button>${noTrail}
-      </div></div></article>`;
+  if(!z.outcomes&&(z.proposed||[]).length>(z.ledger_orders||[]).length)
+    orders.push(`<p class="muted small">模型提出 ${z.proposed.length} 笔，入账 ${z.ledger_orders.length} 笔；其余被规则拒绝，旧记录没有保存原因。</p>`);
+  const meta=[z.duration_ms?`${(z.duration_ms/1000).toFixed(0)} 秒`:'',z.context_chars?`输入 ${(z.context_chars/1000).toFixed(1)} 千字`:'',
+              z.cost_usd?`$${Number(z.cost_usd).toFixed(3)}`:'',z.tool_calls?`查询 ${z.tool_calls} 次`:''].filter(Boolean).join(' · ');
+  const chips=(z.searches||[]).length?`<div class="chips">${z.searches.map(s=>`<span class="chip" title="${esc(s.target)}">${s.tool==='WebSearch'?'🔍':'🌐'} ${esc(s.target)}</span>`).join('')}</div>`:'';
+  return `<article class="round"><div class="rhead"><span class="t">${hm(z.decided_at)}</span>${st}<span class="muted small">${esc(meta)}</span></div>
+    ${z.error?`<div class="error">${esc(z.error)}</div>`:''}
+    ${z.market_view?`<p style="margin:6px 0"><strong>盘面：</strong>${esc(z.market_view)}</p>`:''}
+    ${z.analysis?`<div class="why clamp" data-clamp><strong>决策依据：</strong>${esc(z.analysis)}</div>`:''}
+    ${orders.join('')||(z.status==='decided'?'<p class="muted small">本轮不操作。</p>':'')}
+    ${z.notes?`<details class="more"><summary>留给下一轮的笔记</summary><div class="why">${esc(z.notes)}</div></details>`:''}
+    ${chips}
+    <div class="actions">
+      <button data-part="context" data-id="${z.decision_id}" ${z.has_context?'':'disabled'}>看输入</button>
+      <button data-part="transcript" data-id="${z.decision_id}" ${z.has_transcript?'':'disabled'}>看过程</button>
+      <button data-part="output" data-id="${z.decision_id}">原始输出</button>
+      ${z.has_context?'':'<span class="muted small">该轮未存输入原文</span>'}
+    </div></article>`;
+}
+
+/* ---------- positions & nav ---------- */
+function bookView(d){
+  const blocks=d.accounts.map(a=>{
+    const marks=Object.fromEntries(((a.navs.at(-1)||{}).positions||[]).map(p=>[p.symbol,p.price]));
+    const pos=(a.positions||[]).filter(p=>Number(p.quantity)>0);
+    const rows=pos.map(p=>{
+      const price=Number(p.price||marks[p.symbol]||0),cost=Number(p.average_cost??p.avg_cost??0);
+      const ret=price&&cost?(price/cost-1)*100:null;
+      return `<tr><td class="nowrap"><strong>${esc(p.name??'')}</strong><div class="muted small">${esc(p.symbol)}</div></td>
+        <td>${int(p.quantity)}</td><td>${int(p.sellable_quantity??0)}</td><td>${num(cost,3)}</td><td>${price?num(price,3):'—'}</td>
+        <td class="${sign(ret)}">${pct(ret)}</td></tr>`;
+    }).join('');
+    const nav=a.navs.at(-1);
+    return `<div class="panel"><h2><span>${esc(NAMES[a.account_key]||a.account_key)} 持仓</span>
+      <span class="muted small">${nav?`${hm(nav.as_of)} 记账 · 现金 ${int(nav.cash)} · 市值 ${int(nav.market_value)}`:''}</span></h2>
+      <div class="scroll"><table><thead><tr><th>标的</th><th>数量</th><th>可卖</th><th>成本</th><th>记账价</th><th>浮动</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="6" class="empty">空仓</td></tr>'}</tbody></table></div>
+      <div class="scroll"><table><thead><tr><th>净值时点</th><th>净值</th><th>现金</th><th>市值</th><th>计价</th></tr></thead><tbody>
+        ${a.navs.slice().reverse().slice(0,8).map(n=>`<tr><td class="nowrap">${hm(n.as_of)}</td><td>${num(n.equity)}</td><td>${int(n.cash)}</td><td>${int(n.market_value)}</td><td class="muted small">${esc(n.price_basis)}</td></tr>`).join('')}
+      </tbody></table></div></div>`;
+  }).join('');
+  const mine=(d.human_trades?.journal||[]).map(j=>`<div class="panel"><h2><span>${esc(j.title)}</span><span class="muted small">你的复盘记录</span></h2>
+    <div style="padding:10px 12px"><div class="why">${esc(j.body)}</div>
+    ${(j.plans||[])[0]?`<p style="margin:8px 0 0"><strong>次日计划：</strong>${esc(j.plans[0].plan)}</p>`:''}
+    <p class="muted small">你本人的陈述，非系统推断。</p></div></div>`).join('');
+  return `<div class="grid2">${blocks}</div>${mine}`;
+}
+
+/* ---------- shell ---------- */
+function render(d){
+  scoreboard(d);
+  $('#view').innerHTML=view==='timeline'?timelineView(d):view==='symbols'?symbolsView(d):view==='rounds'?roundsView(d):bookView(d);
+}
+async function loadDays(){
+  const {days}=await api('/api/days');const sel=$('#day');const keep=sel.value;
+  sel.innerHTML=days.map(x=>`<option>${x}</option>`).join('');
+  if(keep&&days.includes(keep))sel.value=keep;
+}
+async function load(force){
+  try{
+    const day=$('#day').value;const body=await api('/api/day'+(day?`?date=${day}`:''));
+    $('#error').hidden=true;
+    $('#stamp').textContent=`更新于 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`+(body.day===body.latest_day?' · 每 20 秒自动刷新':'');
+    const text=JSON.stringify(body);
+    if(force||text!==lastBody){lastBody=text;current=body;render(body);}
+  }catch(e){$('#error').hidden=false;$('#error').textContent='读取失败：'+e.message;}
 }
 
 function tree(value,key,open){
@@ -200,7 +357,6 @@ function tree(value,key,open){
   const label=Array.isArray(value)?`[${entries.length}]`:`{${entries.length}}`;
   return `<details ${open?'open':''}><summary>${k}<span class="muted">${label}</span></summary>${entries.map(([kk,v])=>tree(v,kk,false)).join('')}</details>`;
 }
-
 function transcript(items){
   return items.map(e=>{
     if(e.type==='tool_use')return `<div class="tx"><span class="badge b-info">${esc(e.name)}</span> ${esc(e.input?.query||e.input?.url||'')}<pre>${esc(JSON.stringify(e.input,null,1))}</pre></div>`;
@@ -210,9 +366,8 @@ function transcript(items){
     return `<details class="tx" ${e.type==='stdout'?'open':''}><summary><span class="badge b-info">${esc(e.type)}</span></summary><pre>${esc(e.text)}</pre></details>`;
   }).join('')||'<p class="empty">没有过程记录。</p>';
 }
-
 async function openDetail(id,part){
-  const titles={context:'当时的输入（模型看到的全部数据）',transcript:'决策过程（文字、搜索与抓取）',output:'模型原始输出'};
+  const titles={context:'当时的输入（模型看到的全部数据）',transcript:'决策过程',output:'模型原始输出'};
   $('#dlgtitle').textContent=titles[part];$('#dlgbody').innerHTML='<p class="empty">读取中…</p>';$('#dlg').showModal();
   try{
     const d=await api(`/api/decision/${id}?part=${part}`);
@@ -221,12 +376,26 @@ async function openDetail(id,part){
   }catch(e){$('#dlgbody').innerHTML=`<div class="error">${esc(e.message)}</div>`;}
 }
 
-document.addEventListener('click',e=>{const b=e.target.closest('button[data-part]');if(b)openDetail(b.dataset.id,b.dataset.part);});
+document.addEventListener('click',e=>{
+  const detail=e.target.closest('button[data-part]');
+  if(detail)return openDetail(detail.dataset.id,detail.dataset.part);
+  const tab=e.target.closest('#tabs button');
+  if(tab){view=tab.dataset.view;for(const b of document.querySelectorAll('#tabs button'))b.setAttribute('aria-selected',String(b===tab));return render(current);}
+  const actor=e.target.closest('button[data-actor]');
+  // A chip isolates one actor; clicking the active chip (or 全部) shows everyone.
+  if(actor){const key=actor.dataset.actor;
+    actorFilter=(key==='all'||(actorFilter.size===1&&actorFilter.has(key)))?new Set():new Set([key]);
+    return render(current);}
+  const account=e.target.closest('button[data-account]');
+  if(account){roundAccount=account.dataset.account;return render(current);}
+  const clamp=e.target.closest('[data-clamp]');
+  if(clamp)clamp.classList.toggle('open');
+});
 $('#dlgclose').onclick=()=>$('#dlg').close();
-$('#refresh').onclick=()=>{lastBody='';loadDays().then(load);};
-$('#day').onchange=()=>{lastBody='';load();};
-(async()=>{await loadDays();await load();
-  timer=setInterval(async()=>{if(!current||current.day!==current.latest_day)return;await loadDays();if($('#day').value===current.latest_day||!$('#day').value)load();},20000);})();
+$('#refresh').onclick=()=>load(true);
+$('#day').onchange=()=>load(true);
+(async()=>{await loadDays();await load(true);
+  setInterval(async()=>{if(!current||current.day!==current.latest_day)return;await loadDays();if($('#day').value===current.latest_day||!$('#day').value)load();},20000);})();
 </script>
 </body>
 </html>
