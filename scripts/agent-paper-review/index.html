@@ -61,6 +61,10 @@ details.more{margin-top:5px}details.more>summary{cursor:pointer;color:var(--mute
 .chip{font-size:12px;background:var(--info-bg);color:var(--accent);border-radius:6px;padding:1px 8px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .actions{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap}.actions button{font-size:12px;padding:2px 8px}
 .empty{color:var(--mute);padding:12px}
+.noteform{display:grid;gap:4px;margin-top:8px}
+.noteform textarea{font:inherit;color:var(--fg);background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:7px 9px;resize:vertical;width:100%}
+.noteform textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.noterow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:2px}
 .error{background:var(--bad-bg);color:var(--up);padding:8px 12px;border-radius:8px;margin-bottom:12px}
 .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
 dialog{width:min(1000px,96vw);max-height:90vh;border:1px solid var(--line);border-radius:12px;padding:0;background:var(--panel);color:var(--fg)}
@@ -163,12 +167,14 @@ function scoreboard(d){
 function events(d){
   const rows=[];
   const journal=Object.fromEntries((d.human_trades?.journal||[]).map(j=>[j.symbol,j]));
+  const notes=d.human_trades?.notes||{};
   for(const o of d.human_trades?.orders||[]){
-    const j=journal[o.symbol];
+    const note=notes[o.order_number]||{},fallback=journal[o.symbol];
     rows.push({at:`${d.day}T${o.first_fill_time}+08:00`,actor:'me',side:o.side,symbol:o.symbol,name:o.name,
-      quantity:o.quantity,price:o.avg_price,status:'filled',
+      quantity:o.quantity,price:o.avg_price,status:'filled',order_number:o.order_number,
       note:o.fills>1?`分 ${o.fills} 笔成交`+(o.order_time?` · 委托 ${o.order_time}`:''):(o.order_time?`委托 ${o.order_time}`:''),
-      why:j?j.body:'',plan:j&&(j.plans||[])[0]?j.plans[0].plan:''});
+      why:note.body||(fallback?fallback.body:''),plan:note.plan||(fallback&&(fallback.plans||[])[0]?fallback.plans[0].plan:''),
+      saved_at:note.saved_at||null,editable:Boolean(o.order_number)});
   }
   for(const a of d.accounts){
     const byId=Object.fromEntries(a.decisions.flatMap(z=>(z.ledger_orders||[]).map(o=>[o.order_id,z])));
@@ -275,7 +281,7 @@ function lanesView(d){
       `<text x="8" y="${y+16}" font-size="10" fill="var(--mute)">${count} 笔</text>${marks}</g>`;
   }).join('');
   return `<div class="panel"><h2><span>按时间看三方的动作</span>
-      <span class="muted small">▲ 买入 ▼ 卖出 · 实心=已成交 空心=未成交或撤单 · 黄虚线=午休</span></h2>
+      <span class="muted small">▲ 买入 ▼ 卖出 · 实心=已成交 空心=未成交或撤单 · 黄虚线=午休 · 点你自己的成交可写复盘</span></h2>
     <div class="scroll" style="padding:8px 0 0">
       <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;min-width:780px" role="img" aria-label="三方操作时间轴">
         ${ticks.join('')}${lunch}${laneRows}
@@ -296,8 +302,38 @@ function laneDetailHtml(index){
       <span class="side-${esc(e.side)}">${SIDE[e.side]||esc(e.side)} ${esc(e.name||'')} ${esc(e.symbol||'')} ${int(e.quantity)} 股</span>
       <span>${e.price!=null?num(e.price,3):'—'}</span><span class="badge ${cls}">${label}</span>
       <span class="muted small">${esc(e.note||'')}</span></div>
-    ${e.why?`<div class="why" style="margin-top:6px">${esc(e.why)}</div>`:'<div class="muted small">没有记录理由。</div>'}
-    ${e.plan?`<div class="why" style="margin-top:6px"><strong>次日计划：</strong>${esc(e.plan)}</div>`:''}`;
+    ${e.actor==='me'&&e.editable?noteEditor(e,index):
+      (e.why?`<div class="why" style="margin-top:6px">${esc(e.why)}</div>`:'<div class="muted small">没有记录理由。</div>')+
+      (e.plan?`<div class="why" style="margin-top:6px"><strong>次日计划：</strong>${esc(e.plan)}</div>`:'')}`;
+}
+function noteEditor(e,index){
+  return `<form class="noteform" data-note-index="${index}">
+      <label class="muted small" for="noteIntent">当时的想法：看到什么、为什么这么做</label>
+      <textarea id="noteIntent" name="intent" rows="4" placeholder="例：跌破16.4，16.4上方近两万手买单撤回，不等反弹先减仓">${esc(e.why||'')}</textarea>
+      <label class="muted small" for="notePlan">后续计划 / 条件</label>
+      <textarea id="notePlan" name="plan" rows="3" placeholder="例：明天跌破5日线且站不回就减仓；高开看挂单和量价">${esc(e.plan||'')}</textarea>
+      <div class="noterow"><button type="submit">保存</button>
+        <span class="muted small">写入本地数据库，标记为你本人的陈述；留空并保存即删除。</span>
+        <span class="muted small" data-note-state>${e.saved_at?`已保存于 ${hm(e.saved_at)}`:'未填写'}</span></div>
+    </form>`;
+}
+async function saveNote(form){
+  const index=Number(form.dataset.noteIndex),e=laneEvents[index];
+  const state=form.querySelector('[data-note-state]'),button=form.querySelector('button');
+  if(!e||!e.order_number)return;
+  button.disabled=true;state.textContent='保存中…';
+  try{
+    const response=await fetch('/api/human-note',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({date:current.day,symbol:e.symbol,order_number:e.order_number,
+        intent:form.intent.value,plan:form.plan.value})});
+    const result=await response.json();
+    if(!response.ok)throw new Error(result.error||response.status);
+    e.why=form.intent.value.trim();e.plan=form.plan.value.trim();
+    e.saved_at=result.saved_at||null;
+    state.textContent=result.status==='deleted'?'已清空':`已保存于 ${hm(result.saved_at)}`;
+    lastBody='';                                  // 下一次轮询重新渲染，带上落库结果
+  }catch(error){state.textContent='保存失败：'+error.message;}
+  finally{button.disabled=false;}
 }
 
 /* ---------- per-symbol comparison ---------- */
@@ -479,6 +515,10 @@ document.addEventListener('click',e=>{
   if(mark)return laneDetail(Number(mark.dataset.laneEvent));
   const clamp=e.target.closest('[data-clamp]');
   if(clamp)clamp.classList.toggle('open');
+});
+document.addEventListener('submit',e=>{
+  const form=e.target.closest('form.noteform');
+  if(form){e.preventDefault();saveNote(form);}
 });
 $('#dlgclose').onclick=()=>$('#dlg').close();
 $('#refresh').onclick=()=>load(true);

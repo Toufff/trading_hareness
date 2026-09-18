@@ -1,8 +1,10 @@
-"""Local-only, read-only review server for the agent paper accounts (127.0.0.1).
+"""Local-only review server for the agent paper accounts (127.0.0.1).
 
 Serves one page plus JSON reads straight from the database, so the page shows
-new decisions as soon as a runner writes them.  Nothing here writes to the
-ledger, the broker tables or any strategy.
+new decisions as soon as a runner writes them.  The only write is the owner's
+own per-order review note (``POST /api/human-note`` into
+``quant.personal_journal_entries``): never the ledger, the broker tables, an
+agent decision or any strategy.
 """
 
 from __future__ import annotations
@@ -10,14 +12,19 @@ from __future__ import annotations
 import argparse
 from datetime import date, datetime
 from decimal import Decimal
+from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import sys
 import threading
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 import uuid
+from zoneinfo import ZoneInfo
+
+from psycopg.types.json import Json
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "quant-service"))
@@ -25,6 +32,8 @@ from dotenv import load_dotenv  # noqa: E402
 
 PAGE = Path(__file__).resolve().parent / "agent-paper-review" / "index.html"
 SEARCH_TOOLS = {"WebSearch": "query", "WebFetch": "url"}
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+JOURNAL_SOURCE = "human_review_session"
 
 
 def _default(value: Any) -> Any:
@@ -123,10 +132,62 @@ def human_view(connection: Any, day: date) -> dict[str, Any]:
     for order in orders.values():
         order["avg_price"] = round(order["amount"] / order["quantity"], 4) if order["quantity"] else None
     journal = [dict(row) for row in connection.execute(
-        """SELECT entry_date,title,body,actions,plans,metadata->>'symbol' AS symbol,metadata->>'name' AS name,created_at
+        """SELECT entry_date,title,body,actions,plans,metadata->>'symbol' AS symbol,metadata->>'name' AS name,
+                  metadata->>'order_number' AS order_number,created_at
              FROM quant.personal_journal_entries
             WHERE source='human_review_session' AND entry_date=%s ORDER BY created_at""", (day,)).fetchall()]
-    return {"orders": sorted(orders.values(), key=lambda o: o["first_fill_time"]), "journal": journal}
+    notes = {row["order_number"]: {"body": row["body"],
+                                   "plan": (row["plans"] or [{}])[0].get("plan") if row["plans"] else None,
+                                   "saved_at": row["created_at"]}
+             for row in journal if row["order_number"]}
+    return {"orders": sorted(orders.values(), key=lambda o: o["first_fill_time"]),
+            "journal": [row for row in journal if not row["order_number"]], "notes": notes}
+
+
+TEXT_LIMIT = 4000
+
+
+def save_note(connection: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """Store one owner-written note for one broker order; the owner's words, never a system inference."""
+    day = date.fromisoformat(str(payload.get("date") or ""))
+    symbol = str(payload.get("symbol") or "").upper()
+    order_number = str(payload.get("order_number") or "").strip()
+    intent = str(payload.get("intent") or "").strip()[:TEXT_LIMIT]
+    plan = str(payload.get("plan") or "").strip()[:TEXT_LIMIT]
+    if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
+        raise ValueError("symbol 无效")
+    if not re.fullmatch(r"[0-9A-Za-z_-]{1,40}", order_number):
+        raise ValueError("order_number 无效")
+    fill = connection.execute(
+        """SELECT name,side,quantity,price,trade_time FROM quant.broker_trade_records
+            WHERE account_key='citics-primary' AND trade_date=%s AND symbol=%s AND metadata->>'order_number'=%s
+            ORDER BY trade_time LIMIT 1""", (day, symbol, order_number)).fetchone()
+    if fill is None:
+        raise ValueError("这一天没有该委托号的成交记录")
+    key = f"citics-primary:{day.isoformat()}:{symbol}:{order_number}"
+    if not intent and not plan:
+        connection.execute("DELETE FROM quant.personal_journal_entries WHERE source=%s AND source_record_key=%s",
+                           (JOURNAL_SOURCE, key))
+        return {"status": "deleted", "order_number": order_number}
+    actions = [{"order_number": order_number, "side": fill["side"], "quantity": int(fill["quantity"]),
+                "price": float(fill["price"]), "fill_time": str(fill["trade_time"])}]
+    plans = [{"for": "next_trading_day", "plan": plan}] if plan else []
+    metadata = {"account_key": "citics-primary", "symbol": symbol, "name": fill["name"],
+                "order_number": order_number, "semantics": "owner_statement_not_system_inference",
+                "written_via": "review_page"}
+    canonical = json.dumps({"body": intent, "actions": actions, "plans": plans, "metadata": metadata},
+                           ensure_ascii=False, sort_keys=True, default=str)
+    content_hash = sha256(canonical.encode("utf-8")).hexdigest()
+    connection.execute("DELETE FROM quant.personal_journal_entries WHERE source=%s AND source_record_key=%s",
+                       (JOURNAL_SOURCE, key))
+    connection.execute(
+        """INSERT INTO quant.personal_journal_entries(
+               entry_date,entry_type,title,body,actions,plans,source,source_record_key,content_hash,metadata)
+           VALUES(%s,'trade',%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (day, f"{fill['name']} {symbol} {order_number}", intent, Json(actions), Json(plans),
+         JOURNAL_SOURCE, key, content_hash, Json(metadata)))
+    return {"status": "saved", "order_number": order_number, "symbol": symbol,
+            "saved_at": datetime.now(SHANGHAI).isoformat()}
 
 
 def decision_detail(connection: Any, decision_id: str, part: str) -> dict[str, Any] | None:
@@ -183,6 +244,27 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(detail or {"error": "not found"}, 200 if detail else 404)
             return self._json({"error": "not found"}, 404)
         except ValueError as error:
+            return self._json({"error": str(error)}, 400)
+        except Exception as error:  # keep the resident server alive; the page shows the error
+            return self._json({"error": f"{type(error).__name__}: {error}"}, 500)
+
+    def do_POST(self) -> None:
+        url = urlsplit(self.path)
+        try:
+            if url.path != "/api/human-note":
+                return self._json({"error": "not found"}, 404)
+            # Loopback only: this is the single write path in an otherwise read-only server.
+            if self.client_address[0] not in {"127.0.0.1", "::1"}:
+                return self._json({"error": "local access only"}, 403)
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= 64_000:
+                return self._json({"error": "invalid body length"}, 400)
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(payload, dict):
+                return self._json({"error": "body must be an object"}, 400)
+            with self.lock, self.database.transaction() as connection:
+                return self._json(save_note(connection, payload))
+        except (ValueError, KeyError, UnicodeDecodeError) as error:
             return self._json({"error": str(error)}, 400)
         except Exception as error:  # keep the resident server alive; the page shows the error
             return self._json({"error": f"{type(error).__name__}: {error}"}, 500)
