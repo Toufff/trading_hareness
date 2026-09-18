@@ -146,8 +146,14 @@ $bundleState = if ($laneState) { $laneState.Value.PSObject.Properties['report_bu
 if (-not $Force -and (Test-EquityDateReady $health $today) -and $laneState -and
     $laneState.Value.as_of_date -eq $today -and $laneState.Value.status -eq 'completed' -and
     $laneState.Value.version -eq 'short-term-lanes-discovery-split-2026-09-13' -and $selectionState -and
-    $selectionState.Value -eq 'scan-first-review-selection-2026-09-04' -and $bundleState -and
-    $bundleState.Value.version -eq 'strategy-report-bundle-results-first-2026-09-11') {
+    $selectionState.Value -eq 'shared-research-coverage-2026-09-16' -and $bundleState -and
+    $bundleState.Value.version -eq 'strategy-report-bundle-decision-first-2026-09-16') {
+    # These three literals must equal app.short_term_lanes.VERSION,
+    # app.short_term_lanes.selection.VERSION and app.short_term_lanes.reports.VERSION
+    # (tests/test_strategy_publication.py pins them). When they drift, no retry
+    # ever skips: every half hour re-runs the market refresh, the same-day scan
+    # evidence hash changes and the published recommendation decision goes stale
+    # (observed 2026-09-17 and 2026-09-18).
     & (Join-Path $root '.venv\Scripts\python.exe') (Join-Path $root 'scripts\verify-short-term-lanes.py') --date $today --base-url $ApiBase --report-dir $reportDir --reports-only
     if ($LASTEXITCODE -eq 0) {
         return Write-PipelineRecord -Record @{ status = 'skipped'; reason = 'same-date market, strategies and all report files verified'; trade_date = $landed }

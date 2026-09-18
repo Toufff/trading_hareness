@@ -78,7 +78,14 @@ def test_same_date_retry_only_verifies_and_never_redispatches_governance():
     root = Path(__file__).resolve().parents[2]
     script = (root / 'scripts/windows/run-post-close-pipeline.ps1').read_text(encoding='utf-8')
     preflight = script[script.index("if (-not $Force -and (Test-EquityDateReady"):script.index("$stage = 'equity_ingestion'")]
-    assert "strategy-report-bundle-results-first-2026-09-11" in preflight
+    # The skip literals must track the live version constants: when they drift
+    # no retry ever skips, and each half-hour re-run of the market refresh
+    # marks the same-day recommendation decision stale (2026-09-17/18).
+    from app import short_term_lanes
+    from app.short_term_lanes import reports, selection
+    assert f"'{short_term_lanes.VERSION}'" in preflight
+    assert f"'{selection.VERSION}'" in preflight
+    assert f"'{reports.VERSION}'" in preflight
     assert 'verify-short-term-lanes.py' in preflight
     assert 'Start-IndependentGovernance' not in preflight
 
