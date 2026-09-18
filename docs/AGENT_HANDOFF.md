@@ -196,8 +196,11 @@ of the following hold:
   both readings and the loud rule cover either spelling, and every candidate is
   collapsed back to its canonical release-root-relative form, so a
   `..`-carrying literal enters the chain under the name the declared list uses
-  instead of as a second spelling of the same file (one that collapses to
-  outside the release root is dropped, like an absolute path). Only a literal
+  instead of as a second spelling of the same file. A relative literal whose
+  candidates *all* collapse to outside the release root **throws** under the
+  same loud rule — it is spelled as a reference into this tree yet produced no
+  chain element; a deliberately out-of-tree reference is absolute or UNC, and
+  those stay a quiet drop. Only a literal
   whose **whole** value is a path counts: an operator message that merely ends
   in one (`throw 'Run scripts\windows\tests\test-shared-tunnel-recovery.ps1'`)
   names a file this tree need not carry and must not become a hard error — paths

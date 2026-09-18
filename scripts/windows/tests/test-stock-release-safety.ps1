@@ -242,12 +242,22 @@ try {
     Assert-Throws { Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\windows\entry.ps1') } `
         'a path literal that resolves neither at the release root nor beside the mentioning file must throw instead of leaving the gate a file list that is quietly missing it'
     # A bare name with no separator stays lenient: it is as likely to be a
-    # message or a build-script output as a path into the tree.
+    # message or a build-script output as a path into the tree. The literal must
+    # be whitespace-free, or the whole-token rule rejects it one branch earlier
+    # and the leniency this asserts is never reached -- which is what a
+    # 'rebuilt by build-something.ps1' literal used to do here.
     [IO.File]::WriteAllText((Join-Path $chainScripts 'entry.ps1'),
-        "Write-Verbose 'rebuilt by build-something.ps1'", [Text.UTF8Encoding]::new($false))
+        "Write-Verbose 'build-something.ps1'", [Text.UTF8Encoding]::new($false))
     $bare = Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\windows\entry.ps1')
     Assert-True (@($bare.Hashed).Count -eq 1) `
         'a bare file name that names nothing in the tree must be dropped quietly, not turned into a hard failure'
+    # The whole-token rule is the separate rule, covered separately: the same
+    # bare name inside a sentence is not a path at all.
+    [IO.File]::WriteAllText((Join-Path $chainScripts 'entry.ps1'),
+        "Write-Verbose 'rebuilt by build-something.ps1'", [Text.UTF8Encoding]::new($false))
+    $prose = Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\windows\entry.ps1')
+    Assert-True (@($prose.Hashed).Count -eq 1) `
+        'a literal that merely ends in a file name is prose, not a path, and must be ignored before any path reading'
 
     # '/' and '\' are the same separator to PowerShell. Keyed on '\' alone, a
     # forward-slash literal was tried ONLY beside the mentioning file and then
@@ -279,14 +289,29 @@ try {
         'no chain entry may carry a `..` segment, which can never match the declared file list'
     Assert-True (@($normalized.Hashed).Count -eq 2) `
         'a parent-relative literal must not double-count the file it names'
-    # And one that climbs out of the release root is not a file this release
-    # carries at all, so it is dropped like an absolute path rather than
-    # becoming a hard error about a tree the gate does not own.
+    # And one that overshoots the release root is loud, not silent. A relative
+    # literal is a reference INTO this tree by construction -- a deliberately
+    # out-of-tree reference is absolute or UNC and was dropped long before this
+    # branch -- so one whose every candidate lands outside the root is a chain
+    # element the gate would never hash while the declared list still matched:
+    # exactly the silent drop this parser exists to end. One `..` too many
+    # (candidates that split, one inside and one outside) already threw; two too
+    # many used to collapse both candidates outside and pass in silence.
+    [IO.File]::WriteAllText((Join-Path $chainShared 'parentrel.ps1'),
+        "Import-Module (Join-Path `$PSScriptRoot '..\..\windows\chained.psm1')", [Text.UTF8Encoding]::new($false))
+    Assert-Throws { Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\shared-peer\parentrel.ps1') } `
+        'a parent-relative literal with one `..` too many must throw, not be dropped'
     [IO.File]::WriteAllText((Join-Path $chainShared 'parentrel.ps1'),
         "Import-Module (Join-Path `$PSScriptRoot '..\..\..\outside\chained.psm1')", [Text.UTF8Encoding]::new($false))
-    $escaped = Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\shared-peer\parentrel.ps1')
-    Assert-True (@($escaped.Hashed).Count -eq 1) `
-        'a path literal that resolves outside the release root must be dropped quietly, like an absolute path'
+    Assert-Throws { Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\shared-peer\parentrel.ps1') } `
+        'a relative path literal whose candidates all resolve outside the release root must throw instead of disappearing'
+    # ...while an absolute or UNC reference, which is how a deliberate
+    # out-of-tree mention is spelled, stays quiet.
+    [IO.File]::WriteAllText((Join-Path $chainShared 'parentrel.ps1'),
+        "Import-Module 'C:\outside\chained.psm1'`nImport-Module '\\peer\share\chained.psm1'", [Text.UTF8Encoding]::new($false))
+    $outOfTree = Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\shared-peer\parentrel.ps1')
+    Assert-True (@($outOfTree.Hashed).Count -eq 1) `
+        'an absolute or UNC path literal names a tree the gate does not own and must stay a quiet drop'
     Remove-Item -LiteralPath (Join-Path $chainShared 'parentrel.ps1') -Force
 
     # The loud rule must fire on PATHS, not on prose. An operator message that

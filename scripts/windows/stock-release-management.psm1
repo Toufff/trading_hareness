@@ -628,9 +628,12 @@ function Get-StockTunnelExecutionChainFile {
     #     before it is used as a key, so a parent-relative literal
     #     (Join-Path $PSScriptRoot '..\windows\x.psm1') enters the chain as
     #     scripts\windows\x.psm1 rather than as a second, '..'-carrying spelling
-    #     of a file the declared list already names. A candidate that collapses
-    #     to somewhere OUTSIDE the release root is dropped quietly, like an
-    #     absolute path: the gate cannot hash what the release does not carry;
+    #     of a file the declared list already names. A separator-carrying
+    #     literal whose candidates ALL collapse to somewhere outside the release
+    #     root throws under the same loud rule: the gate cannot hash what the
+    #     release does not carry, and staying quiet about it is the silent drop
+    #     this function exists to end. A reference that is deliberately outside
+    #     the tree is absolute or UNC and never reaches that branch;
     #   * a bare file name is resolved next to the file that mentions it
     #     (Join-Path $PSScriptRoot 'process-lifetime.cs'), and is dropped
     #     quietly when it resolves nowhere: with no separator it is as likely to
@@ -726,7 +729,21 @@ function Get-StockTunnelExecutionChainFile {
                 ForEach-Object { [string](& $toReleaseRelative $_) } |
                 Where-Object { $_ } |
                 Select-Object -Unique)
-            if ($candidates.Count -eq 0) { continue }
+            if ($candidates.Count -eq 0) {
+                # Every candidate climbed out of the release root. For a
+                # separator-carrying literal that is the same under-detection as
+                # a dead in-tree path: something spelled as a path into this
+                # tree produced no chain element, and the declared list would
+                # still match. An out-of-tree reference that is MEANT to be one
+                # is absolute or UNC and was already dropped above, so this
+                # branch only ever sees an overshooting relative literal.
+                if ($hasSeparator) {
+                    throw ("Tunnel execution chain file '$relative' references '$value', which resolves " +
+                        'outside the release root. Fix the reference, or teach ' +
+                        'Get-StockTunnelExecutionChainFile how to resolve it, so the reinstall gate can see the file.')
+                }
+                continue
+            }
             $candidate = [string]$candidates[0]
             if ($candidate.StartsWith($binPrefix, [StringComparison]::OrdinalIgnoreCase) -and
                 $candidate.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) {
