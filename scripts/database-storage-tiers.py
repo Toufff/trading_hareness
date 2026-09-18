@@ -13,18 +13,51 @@ console is GBK, so every receipt is escaped to ASCII rather than trusting the
 code page):
 
 * ``install``  create the tablespace, the cold twins, the access views, the
-  role timeouts and the whole-table cold placements.  Idempotent.
+  cutoff indexes, the quarantine table, the role timeouts and the whole-table
+  cold placements.  Idempotent, and it reconciles a twin whose hot table gained
+  columns since the twin was created.
 * ``plan``     what ``apply`` would move, per table and per day, plus the space
   policy verdict.  Opens a read-only transaction and writes nothing.
 * ``apply``    move the rows, then enforce the space budget, then append one
-  JSON object to the run log.  Exit 0 on success, 1 when some table failed
-  (a per-table failure never stops the other tables).
+  JSON object to the run log.
 * ``status``   usage vs budget, hot/cold row counts and the oldest hot
   timestamp per table.
 
+Exit codes: 0 ok (including ``deadline_reached``), 1 something needs a human
+but the tier is intact (``partial``, ``conflicts``, ``schema_drift``), 2 the
+budget guard is not doing its job (``degraded``: usage unmeasurable, the hot
+window exhausted, or the ratchet stalled -> ``needs_repack``).
+
+Three properties this job must keep, and how:
+
+1. **No row is ever in neither table.**  A batch is snapshotted into a TEMP
+   table, inserted into the twin with an explicit column list, and only then
+   deleted from the hot table by primary key -- all inside one transaction.
+   A crash anywhere rolls the whole batch back; the run resumes from the same
+   cutoff next time.
+2. **A natural-key collision never silently destroys a row.**  A hot row whose
+   unique key already exists in the twin with *different* content is copied
+   into ``quant.storage_tier_conflicts`` (hot primary key, whole hot row, whole
+   cold row) before it leaves the hot table, and the run reports
+   ``status='conflicts'`` with ``alert``.  Quarantined rows are removed from hot
+   so they are not retried forever; ``quant.storage_tier_conflicts`` lives in
+   the *default* tablespace on purpose, so the nightly ``pg_dump`` captures it
+   (it is not a ``_cold`` twin and is never in the dump exclusion list).
+3. **The space ratchet is bounded and honest.**  Plain ``VACUUM`` (never FULL)
+   does not return pages to the filesystem: deleting the oldest rows frees pages
+   at the *front* of the heap, which PostgreSQL happily reuses for new inserts
+   but cannot truncate.  So a rolling window bounds growth -- the files stop
+   growing -- while the measured directory size does not fall.  The job
+   therefore takes at most ``--max-space-days`` days per table per run,
+   re-measures after every table, and stops the ratchet with
+   ``status='needs_repack'`` (never running VACUUM FULL or pg_repack itself)
+   when the measured usage does not fall by at least 1 %.  Reclaiming the
+   existing bloat is an operator decision with its own maintenance window.
+
 The planning functions (``hot_cutoff``, ``select_tables``, ``plan_space_moves``,
-``parse_bytes``) are pure and unit tested without a database; every database
-import is lazy so those tests never need psycopg.
+``parse_bytes``, ``resolve_deadline``, ``effective_budget``, ``schema_drift``)
+are pure and unit tested without a database; every database import is lazy so
+those tests never need psycopg.
 
 Run with the platform venv:
     G:\\StockPlatform\\current\\.venv\\Scripts\\python.exe scripts/database-storage-tiers.py status
@@ -35,6 +68,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import stat as stat_module
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -51,6 +86,18 @@ DEFAULT_BUDGET_BYTES = 500 * 1024**3
 DEFAULT_BATCH_ROWS = 20_000
 DEFAULT_STATEMENT_TIMEOUT_MS = 10 * 60 * 1000
 LOCK_TIMEOUT_MS = 30_000
+# ALTER TABLE ... SET TABLESPACE on quant.legacy_source_records rewrites 2.6 GB
+# under AccessExclusiveLock; CREATE INDEX CONCURRENTLY on the 19 GB
+# raw_market_observations is two full passes.  Both need a ceiling that is
+# generous enough to finish inside the maintenance window and small enough that
+# a wedged statement cannot run into the trading session.
+INSTALL_STATEMENT_TIMEOUT_MS = 60 * 60 * 1000
+INDEX_STATEMENT_TIMEOUT_MS = 2 * 60 * 60 * 1000
+
+# The quarantine table: a hot row whose natural key collides with a *different*
+# row already in the twin.  Default tablespace on purpose -- see the module
+# docstring.
+QUARANTINE_TABLE = "quant.storage_tier_conflicts"
 
 # Space policy thresholds.  Above HIGH_WATER the job gives up the oldest day of
 # the largest tiered table until usage is back below TARGET; above ALERT the run
@@ -62,6 +109,28 @@ TARGET_RATIO = 0.75
 ALERT_RATIO = 0.95
 MIN_HOT_DAYS = 30
 MAX_SPACE_STEPS = 10_000
+# At most a week of history leaves a single table in one run: the estimate of
+# "bytes per day" is a guess, and a run that guesses badly must not be able to
+# hand a year of history to the cold tier before anybody reads the receipt.
+DEFAULT_MAX_SPACE_DAYS = 7
+# Plain VACUUM cannot shrink the files, so "the measurement did not move" is the
+# normal outcome and the ratchet must stop instead of cutting more history.
+MIN_USAGE_DROP_RATIO = 0.01
+
+# Space verdicts that mean the 500 GB guard is not actually guarding anything.
+# They make the whole run 'degraded' (exit 2) so the scheduled task reports it.
+DEGRADED_SPACE_STATUSES = frozenset({"unknown", "exhausted", "needs_repack"})
+
+# Receipt status -> process exit code.
+EXIT_CODES = {
+    "ok": 0,
+    "deadline_reached": 0,
+    "partial": 1,
+    "conflicts": 1,
+    "schema_drift": 1,
+    "degraded": 2,
+    "failed": 2,
+}
 
 
 @dataclass(frozen=True)
@@ -84,6 +153,15 @@ class TierPolicy:
     @property
     def all_view(self) -> str:
         return f"{self.schema}.{self.table}_all"
+
+    @property
+    def cutoff_index(self) -> str:
+        """Index that makes ``WHERE <column> < cutoff ORDER BY <column>`` a range scan.
+
+        Without it every 20 000-row batch re-scans and re-sorts a whole index;
+        ``install`` and migration 20260919_0106 create exactly this name.
+        """
+        return f"{self.table}_tier_cutoff_idx"
 
     def with_hot_days(self, hot_days: int) -> "TierPolicy":
         return TierPolicy(self.schema, self.table, self.column, int(hot_days))
@@ -130,6 +208,48 @@ def hot_cutoff(now: datetime, hot_days: int) -> datetime:
     if days < 1:
         raise ValueError("hot_days must be >= 1")
     return now - timedelta(days=days)
+
+
+def parse_clock(value: str) -> tuple[int, int]:
+    """``HH:MM`` -> ``(hour, minute)``; anything else is an error."""
+    text = str(value or "").strip()
+    hour_text, _, minute_text = text.partition(":")
+    try:
+        hour, minute = int(hour_text), int(minute_text)
+    except ValueError as error:
+        raise ValueError(f"invalid clock time {value!r}; expected HH:MM") from error
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"invalid clock time {value!r}; expected HH:MM")
+    return hour, minute
+
+
+def resolve_deadline(now: datetime, clock=None, max_seconds=None):
+    """The instant at which ``apply`` must stop, or ``None`` for no deadline.
+
+    ``clock`` is a wall-clock ``HH:MM`` read in ``now``'s own timezone -- the
+    maintenance window is a local-time concept ("stop at 08:00", before the
+    pre-open jobs want the disk).  A clock time that has already passed today is
+    taken literally (the deadline is behind us, so the run stops immediately and
+    writes its receipt) *unless* it is more than twelve hours behind, which is
+    the "started at 23:00, stop at 08:00" case and means tomorrow.
+
+    ``max_seconds`` is a relative cap; when both are given the earlier wins.
+    """
+    if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+        raise ValueError("resolve_deadline needs a timezone-aware now")
+    candidates = []
+    if clock:
+        hour, minute = parse_clock(clock)
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= now and (now - candidate) >= timedelta(hours=12):
+            candidate = candidate + timedelta(days=1)
+        candidates.append(candidate)
+    if max_seconds:
+        seconds = int(max_seconds)
+        if seconds <= 0:
+            raise ValueError("max_seconds must be positive")
+        candidates.append(now + timedelta(seconds=seconds))
+    return min(candidates) if candidates else None
 
 
 def select_tables(policies, names=None) -> tuple[TierPolicy, ...]:
@@ -185,6 +305,28 @@ def parse_bytes(value, default=None):
     return parsed
 
 
+def effective_budget(configured, usage, volume_free):
+    """Pure.  The budget the space policy may actually spend.
+
+    ``PGDATA_BUDGET_BYTES`` is an assumption about a drive nobody asked.  The
+    real ceiling is what the volume can still deliver, ``usage + free``: a
+    500 GB budget on a 480 GB volume would report "within the high-water mark"
+    right up to the PANIC.  Returns the effective budget and whether the
+    configured one fits; ``fits`` is ``None`` when the volume is unknown.
+    """
+    configured_bytes = int(configured or 0)
+    if configured_bytes <= 0:
+        raise ValueError("configured budget must be positive")
+    if usage is None or volume_free is None:
+        return {"effective_bytes": configured_bytes, "fits_volume": None, "capacity_bytes": None}
+    capacity = max(0, int(usage)) + max(0, int(volume_free))
+    return {
+        "effective_bytes": min(configured_bytes, capacity),
+        "fits_volume": capacity >= configured_bytes,
+        "capacity_bytes": capacity,
+    }
+
+
 def plan_space_moves(
     usage,
     budget,
@@ -192,6 +334,7 @@ def plan_space_moves(
     oldest_days,
     *,
     min_hot_days: int = MIN_HOT_DAYS,
+    max_days_per_table: int = DEFAULT_MAX_SPACE_DAYS,
     high_water_ratio: float = HIGH_WATER_RATIO,
     target_ratio: float = TARGET_RATIO,
     alert_ratio: float = ALERT_RATIO,
@@ -208,6 +351,11 @@ def plan_space_moves(
     assumes the table's bytes are spread evenly over its hot span -- good enough
     to order the steps, and the caller re-measures the directory afterwards.
 
+    ``max_days_per_table`` bounds one run: a table gives up at most that many
+    days however wrong the estimate is, and the remainder waits for tomorrow.
+    When the cap (rather than the ``min_hot_days`` floor) is what stopped the
+    plan the status is ``capped``, which is a working state, not a failure.
+
     Returns a verdict dict; ``table_hot_days`` is what ``apply`` acts on: the
     reduced hot window per table, never below ``min_hot_days``.
     """
@@ -217,6 +365,9 @@ def plan_space_moves(
     usage_bytes = float(usage)
     if usage_bytes < 0:
         raise ValueError("usage_bytes must not be negative")
+    day_cap = int(max_days_per_table)
+    if day_cap < 1:
+        raise ValueError("max_days_per_table must be >= 1")
 
     ratio = usage_bytes / budget_bytes
     verdict = {
@@ -227,6 +378,7 @@ def plan_space_moves(
         "target_ratio": target_ratio,
         "alert_ratio": alert_ratio,
         "min_hot_days": int(min_hot_days),
+        "max_days_per_table": day_cap,
         "status": "ok",
         "alert": ratio > alert_ratio,
         "steps": [],
@@ -243,18 +395,23 @@ def plan_space_moves(
     for name in sizes:
         age = (oldest_days or {}).get(name)
         days[name] = None if age is None else int(age)
+    spent: dict[str, int] = {name: 0 for name in sizes}
 
     # A one-byte tolerance: the per-day estimates are floats, so an exact
     # landing on the target must not cost one more day of history to rounding.
     target_bytes = budget_bytes * target_ratio + 1.0
     remaining = usage_bytes
     steps: list[dict] = []
+    capped = False
     while remaining > target_bytes and len(steps) < MAX_SPACE_STEPS:
-        candidates = [
-            name
-            for name, size in sizes.items()
-            if size > 0 and days.get(name) is not None and days[name] > min_hot_days
-        ]
+        candidates = []
+        for name, size in sizes.items():
+            if size <= 0 or days.get(name) is None or days[name] <= min_hot_days:
+                continue
+            if spent[name] >= day_cap:
+                capped = True
+                continue
+            candidates.append(name)
         if not candidates:
             break
         # Largest table first; the name breaks ties so the plan is deterministic.
@@ -263,6 +420,7 @@ def plan_space_moves(
         per_day = sizes[name] / span
         sizes[name] = max(0.0, sizes[name] - per_day)
         days[name] = span - 1
+        spent[name] += 1
         remaining = max(0.0, remaining - per_day)
         steps.append(
             {
@@ -281,6 +439,12 @@ def plan_space_moves(
     if met_target:
         verdict["status"] = "reduce"
         verdict["reason"] = "usage above the high-water mark; shortening the hot window of the largest tables"
+    elif capped:
+        verdict["status"] = "capped"
+        verdict["reason"] = (
+            f"usage above the high-water mark; every candidate table already gives up its {day_cap}-day "
+            "per-run maximum, the rest waits for the next run"
+        )
     else:
         verdict["status"] = "exhausted"
         verdict["alert"] = True
@@ -289,6 +453,36 @@ def plan_space_moves(
             "hot days; the hot budget needs more disk or a new tier policy"
         )
     return verdict
+
+
+def schema_drift(hot_columns, cold_columns):
+    """Pure.  Compare two ``[(name, type), ...]`` column lists.
+
+    The twin is filled with an explicit column list and read through a view with
+    an explicit column list, so a hot table that gained a column is repairable
+    (``ADD COLUMN`` on the twin, recreate the view) while a twin that has a
+    column the hot table lost, or a type that changed underneath, is not: that
+    one has to stop the move rather than write into the wrong column.
+    """
+    hot = list(hot_columns or [])
+    cold = list(cold_columns or [])
+    hot_types = dict(hot)
+    cold_types = dict(cold)
+    missing_in_cold = [name for name, _ in hot if name not in cold_types]
+    extra_in_cold = [name for name, _ in cold if name not in hot_types]
+    type_mismatch = [
+        {"column": name, "hot": hot_types[name], "cold": cold_types[name]}
+        for name, _ in hot
+        if name in cold_types and hot_types[name] != cold_types[name]
+    ]
+    return {
+        "missing_in_cold": missing_in_cold,
+        "extra_in_cold": extra_in_cold,
+        "type_mismatch": type_mismatch,
+        # Repairable by install: the twin only lacks columns the hot table has.
+        "repairable": bool(missing_in_cold) and not extra_in_cold and not type_mismatch,
+        "blocking": bool(extra_in_cold or type_mismatch or missing_in_cold),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -326,7 +520,9 @@ def connect(env, *, autocommit: bool = False, read_only: bool = False, statement
 
     ``read_only`` is enforced by the server (``default_transaction_read_only``)
     rather than by this script's good intentions, so ``plan``/``status`` cannot
-    write to production even through a mistake.
+    write to production even through a mistake.  Every connection carries a
+    ``lock_timeout``: this job takes AccessExclusiveLock on multi-gigabyte
+    tables and must queue behind nobody.
     """
     import psycopg
 
@@ -341,21 +537,49 @@ def connect(env, *, autocommit: bool = False, read_only: bool = False, statement
     if env.get("PGADMINUSER"):
         params["user"] = env["PGADMINUSER"]
         params["password"] = env.get("PGADMINPASSWORD", "")
-    options = []
+    options = [f"-c lock_timeout={LOCK_TIMEOUT_MS}"]
     if read_only:
         options.append("-c default_transaction_read_only=on")
     if statement_timeout_ms:
         options.append(f"-c statement_timeout={int(statement_timeout_ms)}")
-    if options:
-        params["options"] = " ".join(options)
+    params["options"] = " ".join(options)
     return psycopg.connect(**params, autocommit=autocommit, application_name="database-storage-tiers")
 
 
-def directory_size_bytes(path):
-    """Recursive on-disk size of the hot data directory, or None if unreadable.
+_REPARSE_POINT = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
-    Files vanish under a live cluster (WAL recycling, temp files), so a failed
-    stat skips that entry instead of failing the whole measurement.
+
+def is_reparse_point(entry) -> bool:
+    """True for a junction, a symlink or anything whose type cannot be read.
+
+    PostgreSQL on Windows puts ``PGDATA\\pg_tblspc\\<oid>`` as a *directory
+    junction* pointing at the tablespace -- for this cluster, the whole cold
+    tier on the G: HDD.  ``os.scandir`` walks straight through a junction, so a
+    naive recursive size would count the cold tier as hot usage and the 500 GB
+    cap would be measured against the wrong number.  An entry whose attributes
+    cannot be read is treated as a reparse point too: skipping bytes is a
+    smaller error than counting a whole other volume.
+    """
+    is_junction = getattr(entry, "is_junction", None)
+    try:
+        if is_junction is not None and is_junction():
+            return True
+        if entry.is_symlink():
+            return True
+        attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
+    except OSError:
+        return True
+    return bool(attributes & _REPARSE_POINT)
+
+
+def directory_size_bytes(path, *, collect_reparse_points=None):
+    """Recursive on-disk size of a directory, or None when it is unreadable.
+
+    Reparse points (junctions, symlinks) are never descended and never counted:
+    see :func:`is_reparse_point`.  Files vanish under a live cluster (WAL
+    recycling, temp files), so a failed stat skips that entry instead of failing
+    the whole measurement.  ``collect_reparse_points`` receives the relative path
+    of every skipped reparse point so the receipt can name them.
     """
     if not path:
         return None
@@ -370,6 +594,10 @@ def directory_size_bytes(path):
             with os.scandir(current) as entries:
                 for entry in entries:
                     try:
+                        if is_reparse_point(entry):
+                            if collect_reparse_points is not None:
+                                collect_reparse_points.append(os.path.relpath(entry.path, str(root)))
+                            continue
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(entry.path)
                         elif entry.is_file(follow_symlinks=False):
@@ -379,6 +607,37 @@ def directory_size_bytes(path):
         except OSError:
             continue
     return total
+
+
+def measure_pgdata(pgdata_dir) -> dict:
+    """Hot usage, WAL usage and the volume behind the hot data directory.
+
+    ``pg_wal`` is measured separately and excluded from the tiering decision:
+    its size is bounded by ``max_wal_size``/``wal_keep_size``, a backfill can
+    spike it by tens of gigabytes for an hour, and moving evidence rows into the
+    cold tier cannot shrink it.  It is still part of ``usage_bytes`` because it
+    is genuinely occupying the hot volume.
+    """
+    root = Path(pgdata_dir) if pgdata_dir else None
+    reparse: list[str] = []
+    total = directory_size_bytes(root, collect_reparse_points=reparse)
+    wal = None if total is None else directory_size_bytes(Path(root) / "pg_wal")
+    volume_total = volume_free = None
+    if root is not None:
+        try:
+            usage = shutil.disk_usage(str(root))
+            volume_total, volume_free = int(usage.total), int(usage.free)
+        except OSError:
+            volume_total = volume_free = None
+    return {
+        "measured": total is not None,
+        "usage_bytes": total,
+        "wal_bytes": wal,
+        "tiering_usage_bytes": None if total is None else max(0, total - (wal or 0)),
+        "excluded_reparse_points": sorted(reparse),
+        "volume_total_bytes": volume_total,
+        "volume_free_bytes": volume_free,
+    }
 
 
 def resolve_settings(args, env) -> dict:
@@ -396,6 +655,7 @@ def resolve_settings(args, env) -> dict:
         "batch_rows": int(getattr(args, "batch", None) or DEFAULT_BATCH_ROWS),
         "statement_timeout_ms": int(getattr(args, "timeout_ms", None) or DEFAULT_STATEMENT_TIMEOUT_MS),
         "max_batches": int(getattr(args, "max_batches", None) or 0),
+        "max_space_days": int(getattr(args, "max_space_days", None) or DEFAULT_MAX_SPACE_DAYS),
         "log_file": getattr(args, "log_file", None) or env.get("PGDATA_TIERS_LOG_FILE") or DEFAULT_LOG_FILE,
     }
 
@@ -431,6 +691,84 @@ def _scalar(conn, query, params=None, default=None):
 
 
 # --------------------------------------------------------------------------
+# Catalog reads: columns, keys, indexes
+# --------------------------------------------------------------------------
+
+
+def table_columns(conn, qualified: str) -> list[tuple[str, str]]:
+    """``[(name, formatted type), ...]`` in attribute order, dropped ones excluded."""
+    rows = conn.execute(
+        """
+        SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+        FROM pg_attribute a
+        WHERE a.attrelid = %s::regclass AND a.attnum > 0 AND NOT a.attisdropped
+        ORDER BY a.attnum
+        """,
+        (qualified,),
+    ).fetchall()
+    return [(name, kind) for name, kind in rows]
+
+
+def primary_key_columns(conn, qualified: str) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT a.attname
+        FROM pg_index i
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey::smallint[])
+        WHERE i.indrelid = %s::regclass AND i.indisprimary
+        ORDER BY array_position(i.indkey::smallint[], a.attnum)
+        """,
+        (qualified,),
+    ).fetchall()
+    return [name for (name,) in rows]
+
+
+def unique_key_columns(conn, qualified: str) -> list[tuple[str, ...]]:
+    """Every unique (non-partial, non-expression) key, primary key first.
+
+    These are the keys a move can collide on, because the twin inherits the hot
+    table's unique constraints through ``LIKE ... INCLUDING INDEXES``.
+    """
+    rows = conn.execute(
+        """
+        SELECT i.indexrelid::regclass::text, i.indisprimary,
+               array_agg(a.attname ORDER BY array_position(i.indkey::smallint[], a.attnum)) AS columns,
+               i.indnkeyatts
+        FROM pg_index i
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey::smallint[])
+        WHERE i.indrelid = %s::regclass AND i.indisunique AND i.indisvalid
+          AND i.indpred IS NULL AND i.indexprs IS NULL
+        GROUP BY i.indexrelid, i.indisprimary, i.indnkeyatts
+        ORDER BY i.indisprimary DESC, 1
+        """,
+        (qualified,),
+    ).fetchall()
+    keys: list[tuple[str, ...]] = []
+    for _name, _primary, columns, nkeyatts in rows:
+        if len(columns) != int(nkeyatts):
+            continue  # an INCLUDE column would make the join wrong
+        key = tuple(columns)
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def has_cutoff_index(conn, policy: TierPolicy) -> bool:
+    """Any index whose *leading* column is the policy column (not just ours)."""
+    row = conn.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM pg_index i
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+            WHERE i.indrelid = %s::regclass AND i.indisvalid AND a.attname = %s
+        )
+        """,
+        (policy.qualified, policy.column),
+    ).fetchone()[0]
+    return bool(row)
+
+
+# --------------------------------------------------------------------------
 # SQL builders (identifiers come from the frozen policy above)
 # --------------------------------------------------------------------------
 
@@ -442,35 +780,109 @@ def _ident(name: str):
     return sql.Identifier(schema, table) if table else sql.Identifier(schema)
 
 
-def move_batch_sql(policy: TierPolicy):
-    """One bounded, resumable move: delete a batch and insert it in one statement.
+def _columns_sql(columns, prefix=None):
+    from psycopg import sql
 
-    The ``DELETE ... RETURNING`` feeds the ``INSERT`` inside a single statement,
-    so there is no window in which the rows exist in neither table.  The outer
-    SELECT counts both sides: a row already present in the twin is deleted from
-    hot and skipped by ``ON CONFLICT DO NOTHING``, which is a resumed run
-    finishing an interrupted batch, not a loss.
+    if prefix is None:
+        return sql.SQL(", ").join(sql.Identifier(name) for name in columns)
+    return sql.SQL(", ").join(sql.SQL("{}.{}").format(sql.Identifier(prefix), sql.Identifier(name))
+                              for name in columns)
+
+
+def _join_on(columns, left="b", right="c"):
+    """``b.k = c.k AND ...`` -- plain ``=`` because that is what a unique index does.
+
+    A NULL in a unique key never collides in PostgreSQL, so ``IS NOT DISTINCT
+    FROM`` here would quarantine rows the twin would happily have accepted.
     """
     from psycopg import sql
 
+    return sql.SQL(" AND ").join(
+        sql.SQL("{l}.{c} = {r}.{c}").format(l=sql.Identifier(left), r=sql.Identifier(right), c=sql.Identifier(name))
+        for name in columns
+    )
+
+
+def snapshot_batch_sql(policy: TierPolicy, columns):
+    """Step 1: the batch, frozen into a TEMP table inside the move transaction."""
+    from psycopg import sql
+
     return sql.SQL(
-        """
-        WITH batch AS (
-            SELECT ctid FROM {hot} WHERE {column} < %(cutoff)s ORDER BY {column} LIMIT %(batch)s
-        ), moved AS (
-            DELETE FROM {hot} WHERE ctid IN (SELECT ctid FROM batch) RETURNING *
-        ), inserted AS (
-            INSERT INTO {cold} SELECT * FROM moved ON CONFLICT DO NOTHING RETURNING 1
-        )
-        SELECT (SELECT count(*) FROM moved)::bigint, (SELECT count(*) FROM inserted)::bigint
-        """
-    ).format(hot=_ident(policy.qualified), cold=_ident(policy.cold_table), column=sql.Identifier(policy.column))
+        "CREATE TEMPORARY TABLE tier_batch ON COMMIT DROP AS "
+        "SELECT {cols} FROM {hot} WHERE {column} < %(cutoff)s ORDER BY {column} LIMIT %(batch)s"
+    ).format(cols=_columns_sql(columns), hot=_ident(policy.qualified), column=sql.Identifier(policy.column))
+
+
+def conflict_scan_sql(policy: TierPolicy, pk_columns, unique_keys):
+    """Step 2: the batch rows whose unique key is already in the twin with other content.
+
+    ``to_jsonb(row)`` compares the whole row by column *name*, so a twin whose
+    physical column order differs is still compared correctly; a twin whose
+    column *set* differs is refused before we get here (schema drift).
+    """
+    from psycopg import sql
+
+    branches = [
+        sql.SQL(
+            "SELECT {pk}, to_jsonb(b.*) AS hot_row, to_jsonb(c.*) AS cold_row "
+            "FROM tier_batch b JOIN {cold} c ON {on} "
+            "WHERE to_jsonb(b.*) IS DISTINCT FROM to_jsonb(c.*)"
+        ).format(pk=_columns_sql(pk_columns, prefix="b"), cold=_ident(policy.cold_table), on=_join_on(key))
+        for key in unique_keys
+    ]
+    return sql.SQL(
+        "CREATE TEMPORARY TABLE tier_conflicts ON COMMIT DROP AS "
+        "SELECT DISTINCT ON ({pk}) {pk}, hot_row, cold_row FROM ({branches}) s ORDER BY {pk}"
+    ).format(pk=_columns_sql(pk_columns), branches=sql.SQL(" UNION ALL ").join(branches))
+
+
+def quarantine_sql(pk_columns):
+    """Step 3: the conflicting rows, preserved whole before they leave the hot table."""
+    from psycopg import sql
+
+    pk_json = sql.SQL(", ").join(
+        sql.SQL("{}, q.{}").format(sql.Literal(name), sql.Identifier(name)) for name in pk_columns
+    )
+    return sql.SQL(
+        "INSERT INTO {quarantine} (table_name, hot_pk, hot_row, cold_row) "
+        "SELECT %(table)s, jsonb_build_object({pk}), q.hot_row, q.cold_row FROM tier_conflicts q"
+    ).format(quarantine=_ident(QUARANTINE_TABLE), pk=pk_json)
+
+
+def insert_batch_sql(policy: TierPolicy, columns, pk_columns):
+    """Step 4: the non-conflicting rows, with an explicit column list (never ``*``)."""
+    from psycopg import sql
+
+    return sql.SQL(
+        "INSERT INTO {cold} ({cols}) SELECT {b_cols} FROM tier_batch b "
+        "WHERE NOT EXISTS (SELECT 1 FROM tier_conflicts q WHERE {on}) ON CONFLICT DO NOTHING"
+    ).format(
+        cold=_ident(policy.cold_table),
+        cols=_columns_sql(columns),
+        b_cols=_columns_sql(columns, prefix="b"),
+        on=_join_on(pk_columns, left="b", right="q"),
+    )
+
+
+def delete_batch_sql(policy: TierPolicy, pk_columns):
+    """Step 5: delete by primary key -- only after the twin holds the rows."""
+    from psycopg import sql
+
+    return sql.SQL("DELETE FROM {hot} h USING tier_batch b WHERE {on}").format(
+        hot=_ident(policy.qualified), on=_join_on(pk_columns, left="h", right="b")
+    )
 
 
 def _set_local(conn, name: str, value: str):
     from psycopg import sql
 
     conn.execute(sql.SQL("SET LOCAL {} = {}").format(sql.Identifier(name), sql.Literal(value)))
+
+
+def _set_session(conn, name: str, value: str):
+    from psycopg import sql
+
+    conn.execute(sql.SQL("SET {} = {}").format(sql.Identifier(name), sql.Literal(value)))
 
 
 # --------------------------------------------------------------------------
@@ -491,18 +903,18 @@ def table_stats(conn, policies, *, now=None, with_counts: bool = False) -> dict:
             "cold_table": policy.cold_table,
             "cold_exists": _regclass(conn, policy.cold_table) is not None,
             "view_exists": _regclass(conn, policy.all_view) is not None,
+            "cutoff_index": policy.cutoff_index,
+            "cutoff_index_present": None,
             "size_bytes": None,
             "cold_size_bytes": None,
             "oldest_hot_at": None,
             "oldest_hot_days": None,
+            "schema_drift": None,
         }
         if entry["exists"]:
             entry["size_bytes"] = _scalar(conn, "SELECT pg_total_relation_size(%s)", (policy.qualified,))
-            oldest = _scalar(
-                conn,
-                _sql_min_column(policy),
-                default=None,
-            )
+            entry["cutoff_index_present"] = has_cutoff_index(conn, policy)
+            oldest = _scalar(conn, _sql_min_column(policy), default=None)
             if oldest is not None:
                 entry["oldest_hot_at"] = oldest.isoformat()
                 entry["oldest_hot_days"] = max(0, int((now - oldest).total_seconds() // 86400))
@@ -512,6 +924,9 @@ def table_stats(conn, policies, *, now=None, with_counts: bool = False) -> dict:
             entry["cold_size_bytes"] = _scalar(conn, "SELECT pg_total_relation_size(%s)", (policy.cold_table,))
             if with_counts:
                 entry["cold_rows"], entry["cold_rows_basis"] = _count_rows(conn, policy.cold_table)
+        if entry["exists"] and entry["cold_exists"]:
+            drift = schema_drift(table_columns(conn, policy.qualified), table_columns(conn, policy.cold_table))
+            entry["schema_drift"] = drift if drift["blocking"] else None
         stats[policy.qualified] = entry
     return stats
 
@@ -536,35 +951,82 @@ def _count_rows(conn, qualified: str):
 
 
 def usage_report(settings) -> dict:
-    usage = directory_size_bytes(settings["pgdata_dir"])
-    budget = settings["budget_bytes"]
-    return {
+    """Measured hot usage plus the budget the space policy may actually spend."""
+    measured = measure_pgdata(settings["pgdata_dir"])
+    configured = settings["budget_bytes"]
+    budget = effective_budget(configured, measured["usage_bytes"], measured["volume_free_bytes"])
+    effective = budget["effective_bytes"]
+    report = {
         "pgdata_dir": str(settings["pgdata_dir"]),
-        "usage_bytes": usage,
-        "budget_bytes": budget,
-        "usage_ratio": None if usage is None else round(usage / budget, 6),
-        "measured": usage is not None,
+        "configured_budget_bytes": configured,
+        "effective_budget_bytes": effective,
+        "budget_bytes": effective,
+        "budget_fits_volume": budget["fits_volume"],
+        "volume_capacity_bytes": budget["capacity_bytes"],
     }
+    report.update(measured)
+    report["usage_ratio"] = None if measured["usage_bytes"] is None else round(
+        measured["usage_bytes"] / effective, 6
+    )
+    return report
 
 
-def space_verdict(usage: dict, stats: dict) -> dict:
+def space_verdict(usage: dict, stats: dict, *, max_days_per_table: int = DEFAULT_MAX_SPACE_DAYS) -> dict:
     """Apply the pure space policy to the measured usage, or say why we cannot."""
     if not usage["measured"]:
+        # An unmeasurable hot directory means the 500 GB cap is not being
+        # enforced at all, which must never read as a green night.
         return {
             "status": "unknown",
-            "alert": False,
+            "alert": True,
             "steps": [],
             "table_hot_days": {},
             "reason": f"hot data directory not readable: {usage['pgdata_dir']}",
         }
     sizes = {name: entry["size_bytes"] or 0 for name, entry in stats.items() if entry["exists"]}
     oldest = {name: stats[name]["oldest_hot_days"] for name in sizes}
-    return plan_space_moves(usage["usage_bytes"], usage["budget_bytes"], sizes, oldest)
+    # pg_wal is excluded from the tiering decision: moving evidence rows cannot
+    # shrink it, and a backfill spike must not be read as permanent growth.
+    verdict = plan_space_moves(
+        usage["tiering_usage_bytes"],
+        usage["budget_bytes"],
+        sizes,
+        oldest,
+        max_days_per_table=max_days_per_table,
+    )
+    verdict["wal_bytes"] = usage.get("wal_bytes")
+    verdict["excluded_reparse_points"] = usage.get("excluded_reparse_points", [])
+    if usage.get("budget_fits_volume") is False:
+        verdict["alert"] = True
+        verdict["budget_exceeds_volume"] = True
+        verdict["reason"] = (
+            f"{verdict['reason']}; the configured budget "
+            f"({usage['configured_budget_bytes']} bytes) does not fit the volume behind "
+            f"{usage['pgdata_dir']} ({usage['volume_capacity_bytes']} bytes usable), so the effective "
+            "budget was lowered to what the drive can deliver"
+        )
+    return verdict
 
 
 # --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
+
+
+def _lock_guarded(conn, note, action: str, target: str, run):
+    """Run one DDL step; a lock we cannot take is recorded, not fatal.
+
+    ``install`` takes AccessExclusiveLock on multi-gigabyte tables.  With a
+    30 s ``lock_timeout`` a blocked step gives up and the rest of ``install``
+    still completes, so the operator retries one target instead of the lot.
+    """
+    import psycopg
+
+    try:
+        return run()
+    except (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled) as error:
+        note(action, target, "skipped_locked", detail=_error_text(error))
+        return None
 
 
 def command_install(args, env) -> dict:
@@ -577,16 +1039,23 @@ def command_install(args, env) -> dict:
         "command": "install",
         "tablespace": tablespace,
         "tablespace_dir": str(settings["cold_dir"]),
+        "lock_timeout_ms": LOCK_TIMEOUT_MS,
+        "statement_timeout_ms": INSTALL_STATEMENT_TIMEOUT_MS,
         "actions": [],
         "errors": [],
+        "skipped_locked": [],
     }
 
     def note(action: str, target: str, result: str, **extra):
         report["actions"].append({"action": action, "target": target, "result": result, **extra})
+        if result == "skipped_locked":
+            report["skipped_locked"].append(target)
 
-    with connect(env, autocommit=True) as conn:
-        # CREATE TABLESPACE cannot run inside a transaction block, hence the
-        # autocommit connection for the whole of install.
+    # CREATE TABLESPACE and CREATE INDEX CONCURRENTLY cannot run inside a
+    # transaction block, hence the autocommit connection for the whole of
+    # install; the timeouts are session settings for the same reason.
+    with connect(env, autocommit=True, statement_timeout_ms=INSTALL_STATEMENT_TIMEOUT_MS) as conn:
+        _set_session(conn, "lock_timeout", f"{LOCK_TIMEOUT_MS}ms")
         exists = conn.execute("SELECT 1 FROM pg_tablespace WHERE spcname = %s", (tablespace,)).fetchone()
         if exists:
             note("create_tablespace", tablespace, "already_exists")
@@ -615,16 +1084,25 @@ def command_install(args, env) -> dict:
         )
         note("alter_tablespace_options", tablespace, "applied")
 
+        _install_quarantine_table(conn, note)
+
         for role, setting, value in ROLE_SETTINGS:
+            if getattr(args, "skip_role_settings", False):
+                note("alter_role", f"{role}.{setting}", "skipped_by_flag")
+                continue
             if not conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone():
                 note("alter_role", f"{role}.{setting}", "role_missing")
                 continue
-            conn.execute(
-                sql.SQL("ALTER ROLE {} SET {} = {}").format(
-                    sql.Identifier(role), sql.Identifier(setting), sql.Literal(value)
-                )
+            applied = _lock_guarded(
+                conn, note, "alter_role", f"{role}.{setting}",
+                lambda role=role, setting=setting, value=value: conn.execute(
+                    sql.SQL("ALTER ROLE {} SET {} = {}").format(
+                        sql.Identifier(role), sql.Identifier(setting), sql.Literal(value)
+                    )
+                ),
             )
-            note("alter_role", f"{role}.{setting}", "applied", value=value)
+            if applied is not None:
+                note("alter_role", f"{role}.{setting}", "applied", value=value)
 
         for policy in policies:
             try:
@@ -638,6 +1116,16 @@ def command_install(args, env) -> dict:
             except Exception as error:  # noqa: BLE001
                 report["errors"].append({"target": qualified, "error": _error_text(error)})
 
+        # Cutoff indexes last: CONCURRENTLY is the slowest step and it must not
+        # delay the twins, and a failure here only costs the job speed.
+        _set_session(conn, "statement_timeout", f"{INDEX_STATEMENT_TIMEOUT_MS}ms")
+        for policy in policies:
+            try:
+                _install_cutoff_index(conn, policy, note)
+            except Exception as error:  # noqa: BLE001
+                report["errors"].append({"target": policy.cutoff_index, "error": _error_text(error)})
+        _set_session(conn, "statement_timeout", f"{INSTALL_STATEMENT_TIMEOUT_MS}ms")
+
         preload = conn.execute("SHOW shared_preload_libraries").fetchone()[0] or ""
         if "pg_stat_statements" in preload:
             conn.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
@@ -650,8 +1138,68 @@ def command_install(args, env) -> dict:
                 detail="shared_preload_libraries must list pg_stat_statements and the cluster restarted",
             )
 
-    report["status"] = "failed" if report["errors"] else "ok"
+    if report["errors"]:
+        report["status"] = "failed"
+    elif report["skipped_locked"]:
+        report["status"] = "partial"
+    else:
+        report["status"] = "ok"
     return report
+
+
+def _install_quarantine_table(conn, note):
+    """The quarantine table, deliberately in the *default* (hot, backed up) tablespace."""
+    from psycopg import sql
+
+    created = _regclass(conn, QUARANTINE_TABLE) is None
+    conn.execute(
+        sql.SQL(
+            """
+            CREATE TABLE IF NOT EXISTS {quarantine} (
+                conflict_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                table_name text NOT NULL,
+                hot_pk jsonb NOT NULL,
+                hot_row jsonb NOT NULL,
+                cold_row jsonb NOT NULL,
+                detected_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        ).format(quarantine=_ident(QUARANTINE_TABLE))
+    )
+    conn.execute(
+        sql.SQL("CREATE INDEX IF NOT EXISTS storage_tier_conflicts_table_detected_idx ON {quarantine} "
+                "(table_name, detected_at DESC)").format(quarantine=_ident(QUARANTINE_TABLE))
+    )
+    note("create_quarantine_table", QUARANTINE_TABLE, "created" if created else "already_exists")
+
+
+def _install_cutoff_index(conn, policy: TierPolicy, note):
+    """``CREATE INDEX CONCURRENTLY`` on the policy column (autocommit connection).
+
+    Migration 20260919_0106 creates the same five indexes with the same names so
+    a database rebuilt from the chain already has them; ``IF NOT EXISTS`` makes
+    whichever runs second a no-op.
+    """
+    from psycopg import sql
+
+    if _regclass(conn, policy.qualified) is None:
+        note("create_cutoff_index", policy.cutoff_index, "hot_table_missing")
+        return
+    if has_cutoff_index(conn, policy):
+        note("create_cutoff_index", policy.cutoff_index, "already_present")
+        return
+    done = _lock_guarded(
+        conn, note, "create_cutoff_index", policy.cutoff_index,
+        lambda: conn.execute(
+            sql.SQL("CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {hot} ({column})").format(
+                name=sql.Identifier(policy.cutoff_index),
+                hot=_ident(policy.qualified),
+                column=sql.Identifier(policy.column),
+            )
+        ),
+    )
+    if done is not None:
+        note("create_cutoff_index", policy.cutoff_index, "created")
 
 
 def _install_twin(conn, policy: TierPolicy, tablespace: str, note):
@@ -681,19 +1229,69 @@ def _install_twin(conn, policy: TierPolicy, tablespace: str, note):
             conn.execute("RESET default_tablespace")
     note("create_cold_twin", policy.cold_table, "created" if created else "already_exists")
 
-    moved_indexes = _move_indexes_to_cold(conn, policy.cold_table, tablespace)
+    hot_columns = table_columns(conn, policy.qualified)
+    drift = schema_drift(hot_columns, table_columns(conn, policy.cold_table))
+    if drift["repairable"]:
+        # The hot table gained columns (an Alembic migration); reconcile the twin
+        # rather than letting the next apply write into the wrong columns.  The
+        # copy is nullable and keeps no NOT NULL: the rows already in the twin
+        # predate the column and have nothing to put there.
+        types = dict(hot_columns)
+        for column in drift["missing_in_cold"]:
+            _lock_guarded(
+                conn, note, "reconcile_cold_twin", f"{policy.cold_table}.{column}",
+                lambda column=column: conn.execute(
+                    sql.SQL("ALTER TABLE {cold} ADD COLUMN IF NOT EXISTS {column} ").format(
+                        cold=_ident(policy.cold_table), column=sql.Identifier(column)
+                    ) + sql.SQL(types[column])  # noqa: S608 - format_type output from pg_attribute
+                ),
+            )
+        note("reconcile_cold_twin", policy.cold_table, "columns_added", columns=drift["missing_in_cold"])
+        drift = schema_drift(hot_columns, table_columns(conn, policy.cold_table))
+    if drift["blocking"]:
+        # Not repairable in place (the twin has a column the hot table lost, or
+        # a type moved underneath).  Say so loudly; `apply` refuses this table.
+        note("reconcile_cold_twin", policy.cold_table, "schema_drift", detail=json.dumps(drift, default=str))
+
+    moved_indexes = _move_indexes_to_cold(conn, policy.cold_table, tablespace, note)
     if moved_indexes:
         note("move_indexes", policy.cold_table, "moved", indexes=moved_indexes)
 
-    conn.execute(
-        sql.SQL("CREATE OR REPLACE VIEW {view} AS SELECT * FROM {hot} UNION ALL SELECT * FROM {cold}").format(
-            view=_ident(policy.all_view), hot=_ident(policy.qualified), cold=_ident(policy.cold_table)
-        )
+    if drift["blocking"]:
+        note("create_view", policy.all_view, "skipped_schema_drift")
+    else:
+        _create_all_view(conn, policy, [name for name, _ in hot_columns], note)
+
+
+def _create_all_view(conn, policy: TierPolicy, columns, note):
+    """``SELECT <explicit columns>`` -- never ``*``, which PostgreSQL freezes at creation.
+
+    ``CREATE OR REPLACE VIEW`` refuses to change a view's column list, so a view
+    whose shape moved is dropped and rebuilt.  Nothing in ``app/`` may depend on
+    it (guard test), so dropping it is safe.
+    """
+    from psycopg import sql
+    import psycopg
+
+    statement = sql.SQL(
+        "CREATE OR REPLACE VIEW {view} AS SELECT {cols} FROM {hot} UNION ALL SELECT {cols} FROM {cold}"
+    ).format(
+        view=_ident(policy.all_view),
+        cols=_columns_sql(columns),
+        hot=_ident(policy.qualified),
+        cold=_ident(policy.cold_table),
     )
-    note("create_view", policy.all_view, "applied")
+    try:
+        conn.execute(statement)
+    except psycopg.Error:
+        conn.execute(sql.SQL("DROP VIEW IF EXISTS {}").format(_ident(policy.all_view)))
+        conn.execute(statement)
+        note("create_view", policy.all_view, "recreated", columns=list(columns))
+        return
+    note("create_view", policy.all_view, "applied", columns=list(columns))
 
 
-def _move_indexes_to_cold(conn, qualified: str, tablespace: str) -> list[str]:
+def _move_indexes_to_cold(conn, qualified: str, tablespace: str, note) -> list[str]:
     from psycopg import sql
 
     rows = conn.execute(
@@ -710,12 +1308,16 @@ def _move_indexes_to_cold(conn, qualified: str, tablespace: str) -> list[str]:
     ).fetchall()
     moved = []
     for schema, index_name in rows:
-        conn.execute(
-            sql.SQL("ALTER INDEX {} SET TABLESPACE {}").format(
-                sql.Identifier(schema, index_name), sql.Identifier(tablespace)
-            )
+        done = _lock_guarded(
+            conn, note, "move_index", f"{schema}.{index_name}",
+            lambda schema=schema, index_name=index_name: conn.execute(
+                sql.SQL("ALTER INDEX {} SET TABLESPACE {}").format(
+                    sql.Identifier(schema, index_name), sql.Identifier(tablespace)
+                )
+            ),
         )
-        moved.append(f"{schema}.{index_name}")
+        if done is not None:
+            moved.append(f"{schema}.{index_name}")
     return moved
 
 
@@ -736,11 +1338,16 @@ def _install_whole_table_cold(conn, qualified: str, tablespace: str, note):
     if current == tablespace:
         note("move_table_to_cold", qualified, "already_cold")
     else:
-        conn.execute(
-            sql.SQL("ALTER TABLE {} SET TABLESPACE {}").format(_ident(qualified), sql.Identifier(tablespace))
+        done = _lock_guarded(
+            conn, note, "move_table_to_cold", qualified,
+            lambda: conn.execute(
+                sql.SQL("ALTER TABLE {} SET TABLESPACE {}").format(_ident(qualified), sql.Identifier(tablespace))
+            ),
         )
+        if done is None:
+            return
         note("move_table_to_cold", qualified, "moved")
-    moved_indexes = _move_indexes_to_cold(conn, qualified, tablespace)
+    moved_indexes = _move_indexes_to_cold(conn, qualified, tablespace, note)
     if moved_indexes:
         note("move_indexes", qualified, "moved", indexes=moved_indexes)
 
@@ -779,8 +1386,8 @@ def command_plan(args, env) -> dict:
                 )
                 entry["days"] = _rows_per_day(conn, policy, cutoff, int(getattr(args, "day_limit", 0) or 30))
             report["tables"].append(entry)
-        report["space_policy"] = space_verdict(usage, stats)
-    report["status"] = "ok"
+        report["space_policy"] = space_verdict(usage, stats, max_days_per_table=settings["max_space_days"])
+    report["status"] = "degraded" if report["space_policy"]["status"] in DEGRADED_SPACE_STATUSES else "ok"
     return report
 
 
@@ -803,56 +1410,165 @@ def command_apply(args, env) -> dict:
     settings = resolve_settings(args, env)
     policies = _policies(args)
     started_at = datetime.now(timezone.utc)
+    deadline = resolve_deadline(
+        datetime.now().astimezone(), getattr(args, "deadline", None), getattr(args, "max_seconds", None)
+    )
     usage_before = usage_report(settings)
     record = {
         "command": "apply",
         "started_at": started_at.isoformat(),
         "batch_rows": settings["batch_rows"],
+        "max_space_days": settings["max_space_days"],
+        "deadline": None if deadline is None else deadline.isoformat(),
+        "deadline_reached": False,
         "usage_before": usage_before,
         "tables": [],
         "errors": [],
     }
     with connect(env, autocommit=True, statement_timeout_ms=settings["statement_timeout_ms"]) as conn:
         stats_before = table_stats(conn, policies, now=started_at)
-        record["space_policy_before"] = space_verdict(usage_before, stats_before)
+        record["space_policy_before"] = space_verdict(
+            usage_before, stats_before, max_days_per_table=settings["max_space_days"]
+        )
 
         results: dict[str, dict] = {}
         for policy in policies:
-            results[policy.qualified] = _move_table(conn, policy, started_at, policy.hot_days, settings, record)
+            if _deadline_passed(deadline):
+                record["deadline_reached"] = True
+                break
+            moved = _move_table(
+                conn, policy, started_at, policy.hot_days, settings, record, deadline=deadline
+            )
+            # Re-measure after every table: the space verdict below must see what
+            # these moves actually did to the directory, not an estimate.
+            moved["usage_after_bytes"] = usage_report(settings)["usage_bytes"]
+            results[policy.qualified] = moved
 
         usage_mid = usage_report(settings)
         stats_mid = table_stats(conn, policies, now=started_at)
-        verdict = space_verdict(usage_mid, stats_mid)
+        verdict = space_verdict(usage_mid, stats_mid, max_days_per_table=settings["max_space_days"])
         record["usage_after_time_moves"] = usage_mid
         record["space_policy"] = verdict
-        by_name = {policy.qualified: policy for policy in policies}
-        for name, hot_days in sorted(verdict.get("table_hot_days", {}).items()):
-            policy = by_name.get(name)
-            if policy is None:
-                continue
-            extra = _move_table(conn, policy, started_at, hot_days, settings, record, reason="space_policy")
-            merged = results.get(name)
-            if merged is None:
-                results[name] = extra
-            else:
-                merged["deleted_rows"] += extra["deleted_rows"]
-                merged["inserted_rows"] += extra["inserted_rows"]
-                merged["batches"] += extra["batches"]
-                merged["space_policy_hot_days"] = hot_days
+        _run_space_ratchet(conn, policies, verdict, results, started_at, settings, record, deadline)
 
         record["tables"] = [results[policy.qualified] for policy in policies if policy.qualified in results]
         record["usage_after"] = usage_report(settings)
 
     record["finished_at"] = datetime.now(timezone.utc).isoformat()
     record["moved_rows"] = sum(entry["deleted_rows"] for entry in record["tables"])
-    record["status"] = "partial" if record["errors"] else "ok"
-    record["alert"] = bool(record["space_policy"].get("alert") or record["space_policy_before"].get("alert"))
+    record["quarantined_rows"] = sum(entry.get("quarantined_rows", 0) for entry in record["tables"])
+    record["status"] = _apply_status(record)
+    record["alert"] = bool(
+        record["space_policy"].get("alert")
+        or record["space_policy_before"].get("alert")
+        or record["quarantined_rows"]
+        or record["status"] in ("degraded", "schema_drift", "partial")
+    )
     _append_jsonl(settings["log_file"], record)
     return record
 
 
-def _move_table(conn, policy: TierPolicy, now, hot_days: int, settings, record, reason: str = "hot_window") -> dict:
-    """Move everything older than the cutoff, one bounded batch per transaction."""
+def _apply_status(record) -> str:
+    """Most severe wins: degraded > schema_drift > partial > conflicts > deadline > ok.
+
+    ``schema_drift`` outranks ``partial`` because it names the one failure an
+    operator must act on before the next run: every other per-table failure is
+    retried harmlessly tomorrow, a drifted twin is not.
+    """
+    statuses = {entry.get("status") for entry in record["tables"]}
+    status = "ok"
+    if record.get("deadline_reached") or "deadline_reached" in statuses:
+        status = "deadline_reached"
+    if record.get("quarantined_rows"):
+        status = "conflicts"
+    if record["errors"]:
+        status = "partial"
+    if "schema_drift" in statuses:
+        status = "schema_drift"
+    if record["space_policy"].get("status") in DEGRADED_SPACE_STATUSES:
+        status = "degraded"
+    return status
+
+
+def _deadline_passed(deadline) -> bool:
+    return deadline is not None and datetime.now(timezone.utc) >= deadline
+
+
+def _run_space_ratchet(conn, policies, verdict, results, started_at, settings, record, deadline):
+    """Take at most ``max_space_days`` days per table, re-measuring after each one.
+
+    Plain VACUUM cannot give the pages back to the filesystem, so the measured
+    directory usually does not shrink at all.  That is expected -- the freed
+    pages are reused by new inserts, which is what bounds growth -- but it means
+    a naive "keep cutting until usage falls" loop would eat the whole hot window
+    in one night.  When the measurement does not fall by at least
+    ``MIN_USAGE_DROP_RATIO`` after rows actually moved, the ratchet stops with
+    ``needs_repack``: reclaiming existing bloat needs VACUUM FULL or pg_repack
+    in a maintenance window, and this job never runs either by itself.
+    """
+    by_name = {policy.qualified: policy for policy in policies}
+    steps = verdict.get("table_hot_days", {})
+    ratchet = {"status": verdict.get("status"), "tables": []}
+    record["space_ratchet"] = ratchet
+    for name, hot_days in sorted(steps.items()):
+        policy = by_name.get(name)
+        if policy is None:
+            continue
+        if _deadline_passed(deadline):
+            record["deadline_reached"] = True
+            ratchet["status"] = "deadline_reached"
+            break
+        before = usage_report(settings)
+        extra = _move_table(
+            conn, policy, started_at, hot_days, settings, record, reason="space_policy", deadline=deadline
+        )
+        after = usage_report(settings)
+        merged = results.get(name)
+        if merged is None:
+            results[name] = extra
+        else:
+            merged["deleted_rows"] += extra["deleted_rows"]
+            merged["inserted_rows"] += extra["inserted_rows"]
+            merged["quarantined_rows"] = merged.get("quarantined_rows", 0) + extra.get("quarantined_rows", 0)
+            merged["batches"] += extra["batches"]
+            merged["space_policy_hot_days"] = hot_days
+            if extra["status"] not in ("ok",):
+                merged["status"] = extra["status"]
+        dropped = None
+        if before["measured"] and after["measured"] and before["usage_bytes"] > 0:
+            dropped = (before["usage_bytes"] - after["usage_bytes"]) / before["usage_bytes"]
+        ratchet["tables"].append(
+            {
+                "table": name,
+                "hot_days": hot_days,
+                "moved_rows": extra["deleted_rows"],
+                "usage_before_bytes": before["usage_bytes"],
+                "usage_after_bytes": after["usage_bytes"],
+                "usage_drop_ratio": None if dropped is None else round(dropped, 6),
+            }
+        )
+        if extra["deleted_rows"] > 0 and (dropped is None or dropped < MIN_USAGE_DROP_RATIO):
+            ratchet["status"] = "needs_repack"
+            record["space_policy"]["status"] = "needs_repack"
+            record["space_policy"]["alert"] = True
+            record["space_policy"]["reason"] = (
+                f"moved {extra['deleted_rows']} rows out of {name} and the hot directory did not shrink by "
+                f"{MIN_USAGE_DROP_RATIO:.0%}; plain VACUUM cannot return front-of-heap pages to the "
+                "filesystem, so the ratchet stopped. New inserts will reuse the freed pages (growth is "
+                "bounded), but reclaiming the existing bloat needs VACUUM FULL or pg_repack in a "
+                "maintenance window, or more disk. This job never runs either by itself."
+            )
+            break
+
+
+def _move_table(conn, policy: TierPolicy, now, hot_days: int, settings, record,
+                reason: str = "hot_window", deadline=None) -> dict:
+    """Move everything older than the cutoff, one bounded batch per transaction.
+
+    Every batch is insert-first-then-delete-by-primary-key inside one
+    transaction (see the module docstring), so a kill at any instant loses
+    nothing and duplicates nothing.
+    """
     from psycopg import sql
 
     cutoff = hot_cutoff(now, hot_days)
@@ -864,6 +1580,7 @@ def _move_table(conn, policy: TierPolicy, now, hot_days: int, settings, record, 
         "reason": reason,
         "deleted_rows": 0,
         "inserted_rows": 0,
+        "quarantined_rows": 0,
         "batches": 0,
         "status": "ok",
     }
@@ -871,27 +1588,70 @@ def _move_table(conn, policy: TierPolicy, now, hot_days: int, settings, record, 
         if _regclass(conn, policy.qualified) is None or _regclass(conn, policy.cold_table) is None:
             result["status"] = "skipped_missing_table"
             return result
-        statement = move_batch_sql(policy)
+        if _regclass(conn, QUARANTINE_TABLE) is None:
+            result["status"] = "skipped_missing_quarantine"
+            result["detail"] = f"{QUARANTINE_TABLE} is missing; run install first"
+            return result
+
+        hot_columns = table_columns(conn, policy.qualified)
+        drift = schema_drift(hot_columns, table_columns(conn, policy.cold_table))
+        if drift["blocking"]:
+            # Writing a hot row into a twin whose columns moved would put values
+            # in the wrong place, and no receipt would say so.
+            result["status"] = "schema_drift"
+            result["schema_drift"] = drift
+            record["errors"].append({"table": policy.qualified, "error": f"schema drift: {drift}"})
+            return result
+        columns = [name for name, _ in hot_columns]
+        pk_columns = primary_key_columns(conn, policy.qualified)
+        if not pk_columns:
+            result["status"] = "skipped_no_primary_key"
+            return result
+        unique_keys = unique_key_columns(conn, policy.cold_table) or [tuple(pk_columns)]
+
+        snapshot = snapshot_batch_sql(policy, columns)
+        scan = conflict_scan_sql(policy, pk_columns, unique_keys)
+        quarantine = quarantine_sql(pk_columns)
+        insert = insert_batch_sql(policy, columns, pk_columns)
+        delete = delete_batch_sql(policy, pk_columns)
         max_batches = int(settings.get("max_batches") or 0)
         while True:
+            if _deadline_passed(deadline):
+                result["status"] = "deadline_reached"
+                record["deadline_reached"] = True
+                break
             with conn.transaction():
                 _set_local(conn, "statement_timeout", str(settings["statement_timeout_ms"]))
                 _set_local(conn, "lock_timeout", str(LOCK_TIMEOUT_MS))
-                deleted, inserted = conn.execute(
-                    statement, {"cutoff": cutoff, "batch": settings["batch_rows"]}
-                ).fetchone()
+                conn.execute(snapshot, {"cutoff": cutoff, "batch": settings["batch_rows"]})
+                batch_rows = conn.execute("SELECT count(*) FROM tier_batch").fetchone()[0]
+                if batch_rows:
+                    conn.execute(scan)
+                    quarantined = conn.execute("SELECT count(*) FROM tier_conflicts").fetchone()[0]
+                    if quarantined:
+                        conn.execute(quarantine, {"table": policy.qualified})
+                    inserted = conn.execute(insert).rowcount
+                    deleted = conn.execute(delete).rowcount
+                else:
+                    quarantined = inserted = deleted = 0
             result["deleted_rows"] += int(deleted)
             result["inserted_rows"] += int(inserted)
+            result["quarantined_rows"] += int(quarantined)
             result["batches"] += 1
-            if int(deleted) == 0:
+            if int(batch_rows) == 0:
                 break
             if max_batches and result["batches"] >= max_batches:
                 result["status"] = "batch_limit_reached"
                 break
-        if result["deleted_rows"] > result["inserted_rows"]:
-            # Rows the twin already held: an earlier interrupted run finished.
-            result["already_in_cold_rows"] = result["deleted_rows"] - result["inserted_rows"]
+        skipped = result["deleted_rows"] - result["inserted_rows"] - result["quarantined_rows"]
+        if skipped > 0:
+            # Byte-identical rows the twin already held: a resumed run.
+            result["already_in_cold_rows"] = skipped
+        if result["quarantined_rows"] and result["status"] == "ok":
+            result["status"] = "conflicts"
         if result["deleted_rows"] > 0:
+            # ANALYZE keeps the planner honest; VACUUM lets the freed pages be
+            # reused by new inserts.  Neither returns bytes to the filesystem.
             conn.execute(sql.SQL("VACUUM (ANALYZE) {}").format(_ident(policy.qualified)))
             result["vacuumed"] = True
     except Exception as error:  # noqa: BLE001 - per-table isolation is the contract
@@ -922,6 +1682,12 @@ def command_status(args, env) -> dict:
         ).fetchone()
         report["tablespace_installed"] = row is not None
         report["tablespace_location"] = None if row is None else row[1]
+        report["quarantine_table_installed"] = _regclass(conn, QUARANTINE_TABLE) is not None
+        report["quarantined_rows"] = (
+            _scalar(conn, f"SELECT count(*) FROM {QUARANTINE_TABLE}")
+            if report["quarantine_table_installed"]
+            else None
+        )
         stats = table_stats(conn, policies, now=now, with_counts=True)
         report["tables"] = [stats[policy.qualified] for policy in policies]
         report["whole_table_cold"] = [
@@ -937,8 +1703,8 @@ def command_status(args, env) -> dict:
             }
             for qualified in WHOLE_TABLE_COLD
         ]
-        report["space_policy"] = space_verdict(usage, stats)
-    report["status"] = "ok"
+        report["space_policy"] = space_verdict(usage, stats, max_days_per_table=settings["max_space_days"])
+    report["status"] = "degraded" if report["space_policy"]["status"] in DEGRADED_SPACE_STATUSES else "ok"
     return report
 
 
@@ -980,6 +1746,10 @@ COMMANDS = {
 }
 
 
+def exit_code_for(status) -> int:
+    return EXIT_CODES.get(status, 1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--env-file", default=DEFAULT_ENV_FILE, help="runtime.env to load into the process env")
@@ -997,6 +1767,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     common.add_argument("--timeout-ms", type=int, help="statement_timeout for reads and move batches")
     common.add_argument("--max-batches", type=int, help="stop a table after this many move batches (0 = unlimited)")
+    common.add_argument(
+        "--max-space-days",
+        type=int,
+        help=f"space policy: most days of history one table may give up per run (default {DEFAULT_MAX_SPACE_DAYS})",
+    )
+    common.add_argument(
+        "--deadline",
+        help="local wall-clock HH:MM at which apply stops between batches and writes its receipt "
+        "(default none); the scheduled 06:00 run passes 08:00",
+    )
+    common.add_argument("--max-seconds", type=int, help="relative deadline in seconds; the earlier of the two wins")
     common.add_argument("--log-file", help=f"apply run log (default {DEFAULT_LOG_FILE})")
 
     parser = argparse.ArgumentParser(
@@ -1004,7 +1785,15 @@ def build_parser() -> argparse.ArgumentParser:
         description="Owner PostgreSQL hot/cold storage tiers: install, plan, apply, status.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("install", parents=[common], help="create the cold tablespace, twins, views and role timeouts")
+    install = sub.add_parser(
+        "install", parents=[common], help="create the cold tablespace, twins, views and role timeouts"
+    )
+    install.add_argument(
+        "--skip-role-settings",
+        action="store_true",
+        help="do not issue the ALTER ROLE statements. They are cluster-wide, not per-database, so an "
+        "install exercised against a scratch database would otherwise reach into the live cluster.",
+    )
     plan = sub.add_parser("plan", parents=[common], help="what apply would move; writes nothing")
     plan.add_argument("--day-limit", type=int, default=30, help="how many oldest days to break down per table")
     sub.add_parser("apply", parents=[common], help="move the rows and enforce the space budget")
@@ -1021,9 +1810,9 @@ def main(argv=None) -> int:
     except Exception as error:  # noqa: BLE001 - the receipt is the interface, including on failure
         print(json.dumps({"command": args.command, "status": "failed", "error": _error_text(error)},
                          ensure_ascii=True, default=str))
-        return 2
+        return EXIT_CODES["failed"]
     print(json.dumps(report, ensure_ascii=True, default=str))
-    return 1 if report.get("status") not in ("ok",) else 0
+    return exit_code_for(report.get("status"))
 
 
 if __name__ == "__main__":
