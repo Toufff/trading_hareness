@@ -35,7 +35,7 @@ SYSTEM_PROMPT = """你是一名 A 股短线交易员，在操作自己的模拟�
 - 只输出符合 schema 的 JSON，不要输出其他文字。
 
 输出字段：
-- analysis：本轮的推理过程，300 字以内。按“看到的关键数据（带数值）→ 由此得出的判断 → 所以做什么/不做什么”写，用来事后复盘你当时的思路。CLI 不保存模型内部思考，这个字段是唯一的推理记录。
+- analysis：本轮的决策依据说明，300 字以内。按“关键数据（写出数值）→ 由此得出的判断 → 因此操作或不操作”写清楚，供人类事后复核这次决策是否站得住。
 - market_view：一两句话，当前盘面判断。
 - orders：订单数组，可为空。buy/sell 需要 symbol（如 600664.SH）、quantity（股数）、order_type（market 或 limit）、limit_price（limit 时必填）、reason；cancel 需要 order_id 和 reason。
 - focus_symbols：下次想重点看盘口和分钟线的股票代码（最多 15 个，持仓会自动包含）。
