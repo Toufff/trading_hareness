@@ -215,6 +215,18 @@ Assert-True ($installer -match '(?s)do \{[^}]*Get-RuntimeState -PlatformRoot \$P
 # run''s state in place while the tunnel is up, and disabling it would be the
 # worse failure.
 Assert-True ($installer -match 'if \(\$null -ne \$freshness -and -not \$freshness\.accept\)') 'the installer must gate on accept, so a live older supervisor is not treated as a failed install'
+# ...but the POLL must break on fresh. Breaking on accept let the weaker claim
+# win a race against this install's own state - and the state it accepted is the
+# one Request-RuntimeStop had just stamped 'stop_requested'.
+Assert-True ($installer -match '(?m)^\s*if \(\$freshness\.fresh\) \{ break \}') 'the freshness poll must keep polling until this install''s OWN state arrives'
+Assert-True ($installer -notmatch 'if \(\$freshness\.accept\) \{ break \}') 'the poll must not stop on the weaker accept'
+Assert-True ($installer -match '\$acceptedFallback') 'an accept-but-not-fresh verdict must be kept as a fallback rather than discarded'
+Assert-True ($installer -match '(?s)if \(-not \$freshness\.fresh -and \$null -ne \$acceptedFallback\) \{[\s\S]*?\$freshness = \$acceptedFallback\.Freshness') 'the fallback must be restored only after the deadline expires'
+# The liveness verdict is half the claim and used to be computed and thrown away.
+Assert-True ($installer -match '\$healthyState\.supervisor_liveness = \$livenessReason') 'the supervisor liveness verdict must reach the runtime state the acceptance step reads'
+Assert-True ($installer -match '\$eventData\.supervisor_liveness = \$livenessReason') 'and the lifecycle event, which is where an operator looks for one install'
+Assert-True ($installer -match '\$healthyState\.supervisor_pid_checked') 'the pid the liveness verdict was taken against must be recorded with it'
+Assert-True ($installer -match '(?s)\$livenessDetail = if \(\$null -ne \$liveness\)[\s\S]*?Stop-TunnelInstallOnFailure -Message \(\$freshness\.message \+ \$livenessDetail\)') 'a refused install writes no state, so its message must carry the liveness reason'
 Assert-True ($installer -notmatch 'if \(-not \$freshness\.fresh\) \{\s*\r?\n\s*Stop-TunnelInstallOnFailure') 'nothing may disable the task purely because the state is not this install''s own'
 Assert-True ($installer -match 'remote_listener_open_owned_by_live_supervisor') 'the weaker accepted claim must get its own health label'
 # The first version of this gate asserted on requested_at, a field only the
@@ -300,6 +312,92 @@ try {
     $deadDuplicate = Get-SharedTunnelStateFreshnessVerdict -State $freshState `
         -InstallStartedAt $installStartedAt -PreviousRunId ([string]$freshState.run_id) -SupervisorAlive $gone.alive
     Assert-True (-not $deadDuplicate.accept) 'an unchanged run_id with no live supervisor must still fail the gate'
+
+    # 1e. The race the accept-break lost. install-shared-tunnel-tasks.ps1 runs
+    #     both profiles, and the supervising trigger fires every two minutes, so
+    #     a batch run started seconds ago is still alive on its pid when this
+    #     install begins - and Request-RuntimeStop has just stamped THAT state
+    #     'stop_requested' (runtime-observability.psm1:231). A live pid plus the
+    #     previous run_id is therefore also the shape of "the run this install is
+    #     tearing down", and accepting it certifies a tunnel that is going away.
+    $stoppingState = $null
+    [void](Write-FakeRuntimeState @{
+        schema_version = 1; service = $batchService; status = 'stop_requested'
+        run_id = $previousRunId; supervisor_pid = 4242; launcher_pid = 4243
+        started_at = $installStartedAt.AddSeconds(-40).ToString('o')
+        stop_requested_at = $installStartedAt.ToString('o')
+        stop_reason = 'task_reinstall'; stop_requested_by = 'install-shared-tunnel-task.ps1'
+    })
+    $stoppingState = Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService
+    $stoppingVerdict = Get-SharedTunnelStateFreshnessVerdict -State $stoppingState `
+        -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId -SupervisorAlive $true
+    Assert-True (-not $stoppingVerdict.accept) 'the state this install just asked to stop must never pass for health, however alive its pid is'
+    Assert-True ($stoppingVerdict.reason -eq 'previous_run_stopping') 'a stopping previous run names itself'
+    Assert-True ($stoppingVerdict.status -eq 'stop_requested') 'the verdict must record the status it judged'
+    Assert-True ($stoppingVerdict.message -match 'stopping or already over') 'the message must say why a live pid was not enough'
+    foreach ($terminal in 'stopped', 'unexpected_exit', 'supervisor_failed', 'start_failed') {
+        [void](Write-FakeRuntimeState @{
+            schema_version = 1; service = $batchService; status = $terminal
+            run_id = $previousRunId; supervisor_pid = 4242
+            started_at = $installStartedAt.AddSeconds(-40).ToString('o')
+        })
+        $terminalVerdict = Get-SharedTunnelStateFreshnessVerdict `
+            -State (Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService) `
+            -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId -SupervisorAlive $true
+        Assert-True (-not $terminalVerdict.accept) "a '$terminal' previous run must not be accepted as a serving tunnel"
+        Assert-True ($terminalVerdict.reason -eq 'previous_run_stopping') "a '$terminal' previous run is reported as stopping or over"
+    }
+    # A previous run that is genuinely still serving keeps the weak accept: this
+    # is duplicate_start_skipped, and disabling that task is the worse failure.
+    [void](Write-FakeRuntimeState @{
+        schema_version = 1; service = $batchService; status = 'process_started'
+        run_id = $previousRunId; supervisor_pid = 4242; launcher_pid = 4243
+        started_at = $installStartedAt.AddSeconds(-40).ToString('o')
+    })
+    $servingState = Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService
+    $servingVerdict = Get-SharedTunnelStateFreshnessVerdict -State $servingState `
+        -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId -SupervisorAlive $true
+    Assert-True ($servingVerdict.accept -and -not $servingVerdict.fresh) 'a live supervisor on a running previous run still carries the weaker claim'
+    Assert-True ($servingVerdict.reason -eq 'duplicate_supervisor_still_serving') 'and it is still named as the weaker claim'
+
+    # 1f. The poll as the installer runs it, driven over a SEQUENCE of state
+    #     files. The installer's loop is inline, so this models it exactly -
+    #     break on fresh, keep an accept as a fallback, restore the fallback only
+    #     when the deadline passed without a fresh verdict - and the regexes
+    #     above pin the installer to this shape.
+    function Invoke-FreshnessPoll([object[]]$States, [bool[]]$Alive) {
+        $fallback = $null
+        $verdict = $null
+        for ($i = 0; $i -lt $States.Count; $i++) {
+            $verdict = Get-SharedTunnelStateFreshnessVerdict -State $States[$i] `
+                -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId `
+                -SupervisorAlive $Alive[$i]
+            if ($verdict.fresh) { break }
+            if ($verdict.accept) { $fallback = $verdict }
+        }
+        if (-not $verdict.fresh -and $null -ne $fallback) { $verdict = $fallback }
+        return $verdict
+    }
+    # The race itself: iteration 1 reads the stopping previous run (live pid),
+    # iteration 2 reads this install's own state. The old poll broke on
+    # iteration 1 and certified the run it had just stopped.
+    $raceVerdict = Invoke-FreshnessPoll -States @($stoppingState, $freshState) -Alive @($true, $true)
+    Assert-True $raceVerdict.fresh 'this install''s own state must win the race against the run it stopped'
+    Assert-True ($raceVerdict.reason -eq 'state_belongs_to_install') 'and the accepted verdict must be the fresh one'
+    Assert-True ($raceVerdict.run_id -eq [string]$freshState.run_id) 'the verdict must name this install''s run'
+    # Even a genuinely serving previous run must not stop the poll early: if this
+    # install's supervisor writes a state one iteration later, that is the one.
+    $lateVerdict = Invoke-FreshnessPoll -States @($servingState, $servingState, $freshState) -Alive @($true, $true, $true)
+    Assert-True ($lateVerdict.fresh -and $lateVerdict.reason -eq 'state_belongs_to_install') 'a duplicate_start_skipped read must not stop the poll while this install''s state is still coming'
+    # And when nothing fresher ever arrives, the fallback is what the install is
+    # accepted on - including when the LAST read is a non-accepting one.
+    $fallbackVerdict = Invoke-FreshnessPoll -States @($servingState, $stoppingState) -Alive @($true, $true)
+    Assert-True ($fallbackVerdict.accept -and -not $fallbackVerdict.fresh) 'an earlier live-supervisor accept must survive a later non-accepting read'
+    Assert-True ($fallbackVerdict.reason -eq 'duplicate_supervisor_still_serving') 'the fallback must be the weaker accept, not the refusal'
+    # A poll that only ever sees the stopping run refuses, and that is the
+    # bounded failure: the batch task is disabled rather than certified.
+    $refusedVerdict = Invoke-FreshnessPoll -States @($stoppingState, $stoppingState) -Alive @($true, $true)
+    Assert-True (-not $refusedVerdict.accept) 'a poll that only ever sees the stopped run must refuse'
 
     # 2. Stale: yesterday's run left a state file behind and the task never came up.
     [void](Write-FakeRuntimeState @{
@@ -448,6 +546,26 @@ Assert-True ($deployScript -match "(?s)if recreated:.*?probe_port\(INTRADAY_LOCA
 Assert-True ($deployScript -match "retag = subprocess\.run\(D \+ \['tag', preserved_tag, running_image_ref\], check=False\)") 'the rollback retag result must be kept, not discarded'
 Assert-True ($deployScript -match "restored_image_id != running_image_id") 'the recreated container image id must be compared with the preserved one'
 Assert-True ($deployScript -match "(?s)preserved image id:.*?recreated image id:") 'both image ids must be printed so the rollback claim can be checked'
+# The build retags the reference whether or not a container is recreated, so the
+# retag has to be read back on BOTH paths. This branch used to print "nothing
+# else changed on this peer" without ever looking at retag.returncode.
+Assert-True ($deployScript -match "(?s)if built:[\s\S]*?D \+ \['image', 'inspect', running_image_ref\]") 'the restored tag must be resolved with docker image inspect, not inferred from docker tag''s exit code'
+Assert-True ($deployScript -match "tag_restored = built and retag\.returncode == 0 and retagged_image_id == running_image_id") 'the tag is restored only when the reference resolves to the preserved image'
+Assert-True ($deployScript -match "elif built and not tag_restored:") 'a build-but-no-recreate failure must judge the retag too'
+Assert-True ($deployScript -match 'IMAGE TAG NOT RESTORED') 'and it must say so loudly instead of claiming nothing else changed'
+$tagRestoredIndex = $deployScript.IndexOf('tag_restored = built')
+$recreatedBranchIndex = $deployScript.IndexOf('if recreated:', $tagRestoredIndex)
+Assert-True ($tagRestoredIndex -gt 0 -and $recreatedBranchIndex -gt $tagRestoredIndex) 'the retag verdict must be taken before either rollback branch uses it'
+# The already-deployed short-circuit reads file state, and the files are written
+# BEFORE the build: a run killed in that window leaves them behind on a peer
+# whose image never included the forward. The image tag is the build's own trace.
+Assert-True ($deployScript -match "def find_batch_image_tag") 'the short-circuit must be able to look for the tag a completed build leaves'
+Assert-True ($deployScript -match "D \+ \['image', 'ls', '--filter', 'reference=' \+ pattern") 'the batch tags must be narrowed with a docker image ls reference filter'
+Assert-True ($deployScript -match "(?s)def find_batch_image_tag[\s\S]*?D \+ \['image', 'inspect', tag\][\s\S]*?if resolved == image_id:") 'and each candidate tag must resolve to the image the container is actually running'
+Assert-True ($deployScript -match "(?s)if batch_value and BATCH_FORWARD_MARKER in entrypoint_text:[\s\S]*?batch_tag = find_batch_image_tag\([\s\S]*?if batch_tag:") 'already-deployed must additionally require the batch image tag to exist'
+Assert-True ($deployScript -match 'a build that included it') 'an interrupted deploy must be refused by name, not reported as deployed'
+Assert-True ($deployScript -match 'interrupted between the entrypoint write and') 'the refusal must name the interrupted-deploy case so the operator knows what to restore'
+Assert-True ($deployScript -match "batch_tag\], check=True\)") 'the batch tag is now evidence a later run reads, so failing to create it must fail the deploy'
 # The idempotent re-run must not look like a failure to a wrapper - but the mere
 # PRESENCE of the key is not evidence of a deploy. This repository's own compose
 # declares it unconditionally with an empty default.
@@ -473,9 +591,15 @@ Assert-True ($deployScript -notmatch "if 'PEER_BATCH_DB_PORT' in observed\['envi
     batch_health_gate_survives_missing_field = $true
     batch_health_gate_checks_run_id_not_only_the_clock = $true
     batch_health_gate_accepts_a_live_duplicate_supervisor = $true
+    batch_health_gate_refuses_a_stopping_previous_run = $true
+    batch_health_gate_poll_breaks_on_fresh_not_accept = $true
+    batch_health_gate_race_against_the_stopped_run_executed = $true
+    batch_health_gate_weak_accept_kept_as_fallback = $true
     batch_health_gate_polls_until_deadline_in_source = $true
-    peer_deploy_already_deployed_needs_value_and_entrypoint = $true
+    installer_persists_supervisor_liveness_receipt = $true
+    peer_deploy_already_deployed_needs_value_entrypoint_and_image_tag = $true
     peer_deploy_rollback_verifies_the_restored_image = $true
+    peer_deploy_rollback_verifies_the_retag_without_a_recreate = $true
     permitopen_and_permitlisten_cover_15433 = $true
     peer_deploy_refusal_wired_in_source = $true
     peer_deploy_behaviour_tested_in = 'quant-service/tests/test_peer_batch_tunnel_deploy.py'

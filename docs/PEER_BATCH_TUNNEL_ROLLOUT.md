@@ -124,8 +124,29 @@ pwsh .\scripts\shared-peer\install-shared-tunnel-tasks.ps1
 （且它的启动时间和状态里的 `started_at` 对得上，防止 pid 复用），
 就按 `duplicate_supervisor_still_serving` 接受，健康标签记为
 `remote_listener_open_owned_by_live_supervisor`，
-并把 `state_freshness` / `previous_run_id` 写进运行时状态和 `healthy` 事件里
-——**绝不会因为这个把一条正在服务的批量隧道禁用掉**。
+并把 `state_freshness` / `previous_run_id` / `state_status` /
+`supervisor_liveness` / `supervisor_pid_checked` 写进运行时状态和 `healthy`
+事件里——**绝不会因为这个把一条正在服务的批量隧道禁用掉**。
+
+但这条「弱接受」有两个硬约束，缺一不可：
+
+1. **看 `status`。** 安装脚本自己在注册任务之前就调了 `Request-RuntimeStop`，
+   而那一步会把同一个状态文件改写成 `status = 'stop_requested'`。于是
+   「pid 还活着 + `run_id` 还是上一轮的」同时也正是「本次安装刚刚下令停掉的那一轮」
+   的形状。所以状态里写着 `stop_requested` / `stopped` / `unexpected_exit` /
+   `supervisor_failed` / `start_failed` 的，一律不给弱接受，判定为
+   `previous_run_stopping`。
+2. **轮询以 `fresh` 为准，不是 `accept`。** 轮询只在读到**本次安装自己的状态**
+   （新 `run_id` + 新 `started_at`）时提前跳出；弱接受只是被记下来当兜底，
+   等 30 秒走完都没等到本次安装的状态时才启用。之前一读到弱接受就 break，
+   于是在两个 profile 一起装、或 2 分钟触发器刚跑过时，第一次循环就把
+   「刚被自己停掉的那一轮」认成了健康。
+
+第一次真装完，`G:\StockPlatform\logs\runtime\shared-peer-batch-tunnel.current.json`
+里应当看到 `state_freshness = state_belongs_to_install`、
+`supervisor_liveness = supervisor_process_owns_this_run`。若 `supervisor_liveness`
+是 `process_start_time_unavailable`（supervisor 属于另一个账户，读不到 StartTime），
+弱接受那条路就会退化成拒绝——这正是要在第一次安装时核对这个字段的原因。
 
 ### 2.2 授权 key 的端口白名单
 
@@ -165,8 +186,20 @@ python3 scripts/shared-peer/deploy-batch-tunnel-port.py
    **已经部署过则打印状态并 `exit 0`**：部分失败后重跑确认幂等是常规动作，
    不该和真正的拒绝一样返回非零。这个判断放在 `KNOWN_PEER_STATES` 查表**之后**
    （部署完成的 peer 的 entrypoint 哈希本来就不在表里），
-   并且**只认两条同时成立的证据**：渲染后的 `PEER_BATCH_DB_PORT` 的**值非空**，
-   且 peer 的 entrypoint 里确实有批量转发那一行（`BATCH_FORWARD_MARKER`）。
+   并且**只认三条同时成立的证据**：渲染后的 `PEER_BATCH_DB_PORT` 的**值非空**、
+   peer 的 entrypoint 里确实有批量转发那一行（`BATCH_FORWARD_MARKER`），
+   以及**当前容器所用镜像上挂着 `…:batch-<stamp>` 标签**
+   （`docker image ls --filter reference=…:batch-*` 选候选，
+   再逐个 `docker image inspect` 比对镜像 id）。
+   前两条都是**文件状态**，而文件是在 `docker compose build` **之前**写的：
+   被 SIGKILL / OOM / 断电打断在那个窗口里的一次运行（这些都进不了
+   `except BaseException` 的恢复分支）留下的正是这个形状，而容器跑的镜像里
+   根本没有那条转发——旧逻辑会 `exit 0` 报告一次「已部署」，
+   而它报告的那个端口根本不会应答。镜像标签是构建**自己**留下的痕迹，
+   所以它是必需的一条；相应地，那个 `:batch-<stamp>` 标签现在用
+   `check=True` 打，打不上就当场失败（此时还在 `up -d` 之前，回滚只是文件和标签）。
+   证据不齐时**不是** `exit 0`，而是一条点名「部署被打断」的拒绝，
+   并告诉操作者去 `incident-backups` 里恢复那三个文件后重跑。
    只看「键在不在」是不够的：本仓库自己的 compose 无条件声明
    `PEER_BATCH_DB_PORT: ${PEER_BATCH_DB_PORT:-}`，而 `.env.example` 里这个变量是
    注释掉的，所以在一台什么都没部署过的 peer 上 `docker compose config` 照样会
@@ -204,10 +237,21 @@ python3 scripts/shared-peer/deploy-batch-tunnel-port.py
 如果不重建，lightServer 会继续用脚本刚刚判定为坏的镜像对外提供数据库，
 而脚本却声称自己回滚了。
 
+**标签这一步在两条路径上都要验，不只是重建那条。** `compose build` 已经把
+`:latest` 指向新镜像了，所以即使失败发生在构建之后、`up -d` 之前（容器压根没动过），
+重打标签失败也意味着这个引用还指着那个被判定为坏的构建：peer 现在还在用旧镜像，
+但下一次 `up -d`、重启或开机就会**静悄悄地**从坏镜像起来。
+所以只要构建跑过，脚本就会用 `docker image inspect <原标签>` 把引用**读回来**
+（`docker tag` 返回 0 只说明命令执行了，不说明引用现在指向哪里），
+和构建前保存的镜像 id 比对，并把 `preserved image id` / `now resolves to` /
+`retag exit code` 三行都打出来。没重建但标签没回去的那条路，
+打印的是醒目的 `IMAGE TAG NOT RESTORED` 加人工回滚命令，
+而不是原来那句「nothing else changed on this peer」。
+
 重建之后脚本**不相信自己**：`docker tag` 的退出码被保留，
 重建出来的容器再用 `docker inspect` 读一次镜像 id，
 和构建前保存的那一个**逐字比较**，两个 id 都会打印出来
-（`preserved image id` / `recreated image id` / `retag exit code`）。
+（上面那三行加上 `recreated image id`）。
 这是必须的一步——`up -d --no-build` 解析的是**此刻**标签指向的镜像，
 所以如果重打标签失败（`:pre-batch-<stamp>` 被并发的 `docker image prune` 清掉、
 daemon 报错、磁盘满），`up -d` 依然返回 0，容器却是从那个刚被判定为坏的镜像起来的。

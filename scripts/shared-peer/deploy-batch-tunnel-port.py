@@ -43,9 +43,24 @@ files *and* re-points that tag, which is the only reason rollback is a real
 option rather than a promise.  The automatic rollback does the same, and - when
 the failure happened after ``up -d`` - also recreates the container, because
 retagging an image does nothing to a container that is already running from it.
-The retag's exit code is kept and the recreated container's image id is read
-back and compared with the preserved one (both are printed); only when they
-match does the script re-probe 5432 and report the peer as back.
+The retag's exit code is kept, the reference is read back with ``docker image
+inspect`` and the recreated container's image id is compared with the preserved
+one (all of them are printed); only when they match does the script re-probe
+5432 and report the peer as back.  The read-back happens whether or not a
+container was recreated, because ``compose build`` has already repointed the
+reference: a failure between the build and ``up -d`` leaves nothing to recreate
+but everything to re-tag, and "nothing else changed on this peer" is a lie when
+the next restart would start the peer from the rejected build.
+
+A finished deploy is recognised by three pieces of evidence, not by the files
+alone: the rendered ``PEER_BATCH_DB_PORT`` has a value, the deployed entrypoint
+carries ``BATCH_FORWARD_MARKER``, and the running container's image carries a
+``:batch-<stamp>`` tag (``docker image ls`` + ``docker image inspect``).  The
+first two are written before the build, so a run killed in that window - SIGKILL,
+an OOM kill, a power loss, none of which reach the ``except BaseException``
+restore - leaves them both behind on a peer whose image never included the
+forward.  The image tag is what a build actually produces, so it is required,
+and the batch tag is therefore created with ``check=True``.
 
 The verification runs from ``quant-research``, not from the sidecar: the
 sidecar's image is ``openssh-client`` + ``netcat`` with no PostgreSQL client and
@@ -93,6 +108,10 @@ COMPOSE_ANCHOR = '      REMOTE_API_PORT: ${REMOTE_API_PORT:-15681}\n'
 # ``PEER_BATCH_DB_PORT`` is not enough: a half-finished edit, or a comment
 # mentioning the variable, contains it too.
 BATCH_FORWARD_MARKER = ':${PEER_BATCH_DB_PORT}:127.0.0.1:${PEER_BATCH_REMOTE_PORT:-15433}"'
+# A completed deploy tags the image it built ``<repository>:batch-<stamp>``. That
+# tag is the only on-peer evidence that a BUILD ran, as opposed to configuration
+# files having been written; the already-deployed short-circuit requires it.
+BATCH_TAG_PREFIX = 'batch-'
 
 # Every state this script is allowed to change, keyed by the SHA-256 of the
 # peer's deployed ssh-tunnel-entrypoint.sh (LF-normalised).  Anything else is a
@@ -261,12 +280,42 @@ def inspect_peer_state():
         # happened.  Both now fall through to the refusal below.
         batch_value = str(environment.get('PEER_BATCH_DB_PORT') or '').strip()
         if batch_value and BATCH_FORWARD_MARKER in entrypoint_text:
-            # Success, not a refusal: re-running to confirm idempotency, or
-            # after a rollback was completed by hand, must not look like a
-            # deploy failure to a wrapper reading the exit code.
-            print('the batch port is already deployed on this peer; nothing to do:\n'
-                  + json.dumps(dict(observed, batch_local_port=batch_value), indent=2))
-            raise SystemExit(0)
+            # Both of those are FILE state, and the files are written before the
+            # build: a run killed between the entrypoint write and
+            # `compose build` (SIGKILL, OOM, power loss - none of which reach
+            # the `except BaseException` restore) leaves exactly this shape on
+            # disk while the container still runs an image with no batch forward
+            # in it. That used to exit 0 reporting a deploy whose image was
+            # never built, and the port it reported simply does not answer.
+            #
+            # So require evidence from the IMAGE as well: the running container
+            # must come from an image that carries a :batch-<stamp> tag, which
+            # only a deploy that got past `compose build` can have created.
+            image_reference, image_identifier = running_service_image()
+            batch_tag = find_batch_image_tag(image_reference, image_identifier)
+            if batch_tag:
+                # Success, not a refusal: re-running to confirm idempotency, or
+                # after a rollback was completed by hand, must not look like a
+                # deploy failure to a wrapper reading the exit code.
+                print('the batch port is already deployed on this peer; nothing to do:\n'
+                      + json.dumps(dict(observed, batch_local_port=batch_value,
+                                        batch_image_tag=batch_tag,
+                                        running_image_id=image_identifier), indent=2))
+                raise SystemExit(0)
+            why = ('db-tunnel is not running at all, so nothing can vouch for the image'
+                   if image_reference is None else
+                   'the running db-tunnel image does not come from a build that included it '
+                   '(no %s:%s* tag resolves to image %r)'
+                   % (image_reference.split(':')[0], BATCH_TAG_PREFIX, image_identifier))
+            raise SystemExit(
+                'refusing to touch the peer: its .env, compose.yaml and ssh-tunnel-entrypoint.sh '
+                'all carry the batch forward, but %s.\n'
+                'That is the shape a deploy interrupted between the entrypoint write and '
+                '`docker compose build` leaves behind: the port is configured on disk and '
+                'nothing serves it. Restore the three files from the newest backup under %s '
+                '(the interrupted run left one) and run this script again.\n'
+                'observed: ' % (why, BACKUP_ROOT)
+                + json.dumps(observed, indent=2))
         raise SystemExit(
             'refusing to touch the peer: its ssh-tunnel-entrypoint.sh is not a state this '
             'script knows how to change.\n'
@@ -292,6 +341,40 @@ def inspect_peer_state():
 
 def container_id(service_name):
     return subprocess.check_output(C + ['ps', '-q', service_name], text=True).strip()
+
+
+def running_service_image():
+    """(reference, image id) of the container currently running ``db-tunnel``."""
+    container = container_id(SERVICE)
+    if not container:
+        return None, None
+    running = json.loads(subprocess.check_output(D + ['inspect', container], text=True))[0]
+    return running['Config']['Image'], running['Image']
+
+
+def find_batch_image_tag(image_reference, image_id):
+    """The ``:batch-<stamp>`` tag pointing at ``image_id``, or None.
+
+    Read-only.  ``docker image ls`` narrows the candidates and ``docker image
+    inspect`` resolves each one, because a tag is only evidence when it resolves
+    to the image the container is actually running: a batch tag left over from an
+    earlier deploy of a DIFFERENT image proves nothing about this one.
+    """
+    if not image_reference or not image_id:
+        return None
+    pattern = image_reference.split(':')[0] + ':' + BATCH_TAG_PREFIX + '*'
+    listed = subprocess.check_output(
+        D + ['image', 'ls', '--filter', 'reference=' + pattern,
+             '--format', '{{.Repository}}:{{.Tag}}'], text=True)
+    for tag in [line.strip() for line in listed.splitlines() if line.strip()]:
+        try:
+            resolved = json.loads(subprocess.check_output(
+                D + ['image', 'inspect', tag], text=True))[0]['Id']
+        except BaseException:   # noqa: BLE001 - a tag that cannot be resolved is not evidence
+            continue
+        if resolved == image_id:
+            return tag
+    return None
 
 
 def probe_port(port):
@@ -402,8 +485,14 @@ def main():
             == BATCH_LOCAL_PORT, 'the batch port did not reach the rendered db-tunnel environment'
         compose_run('build', SERVICE)
         built = True
+        # check=True, not fire-and-forget: this tag is now the evidence a later
+        # run reads to tell "already deployed" from "interrupted before the
+        # build" (see inspect_peer_state). A deploy whose batch tag was never
+        # created would leave the peer in a state its own script refuses to
+        # recognise, so it fails here instead - before `up -d`, where the
+        # rollback is just the files and the restored tag.
         subprocess.run(D + ['tag', after['services'][SERVICE].get('image') or running_image_ref,
-                            batch_tag], check=False)
+                            batch_tag], check=True)
         compose_run('up', '-d', '--no-deps', '--no-build', SERVICE)
         recreated = True
         container = wait_healthy()
@@ -416,6 +505,7 @@ def main():
             if (backup / name).exists():
                 shutil.copy2(backup / name, ROOT / name)
         retag = None
+        retagged_image_id = None
         if built:
             # Fire-and-forget used to be enough because nothing downstream
             # depended on it. It does now: the recreate below resolves
@@ -425,6 +515,25 @@ def main():
             # the container from the REJECTED image while this script printed
             # "rolled back". Keep the result and verify the outcome instead.
             retag = subprocess.run(D + ['tag', preserved_tag, running_image_ref], check=False)
+            # And verify it on BOTH paths, not only when a container was
+            # recreated. `docker compose build` already repointed
+            # running_image_ref at the rejected image, so a failed retag leaves
+            # that reference poisoned even when this run never touched the
+            # container: the peer keeps serving from the old image until the
+            # next `up -d`, restart or reboot silently starts it from the build
+            # this script rejected. `docker tag` exiting 0 is not the same claim
+            # as "the reference resolves to the preserved image", so read it
+            # back rather than trusting the exit code.
+            try:
+                retagged_image_id = json.loads(subprocess.check_output(
+                    D + ['image', 'inspect', running_image_ref], text=True))[0]['Id']
+            except BaseException as inspect_error:   # noqa: BLE001 - reported below
+                retagged_image_id = 'inspect failed: %s: %s' % (
+                    type(inspect_error).__name__, inspect_error)
+            print('preserved image id:  %s\n%s now resolves to:  %s\nretag exit code:     %s'
+                  % (running_image_id, running_image_ref, retagged_image_id, retag.returncode),
+                  file=sys.stderr)
+        tag_restored = built and retag.returncode == 0 and retagged_image_id == running_image_id
         if recreated:
             # Restoring the files and re-pointing the tag is NOT a rollback once
             # `up -d` has run: the live container was created from the new image
@@ -451,10 +560,7 @@ def main():
                 except BaseException as inspect_error:   # noqa: BLE001 - reported below
                     restored_image_id = 'inspect failed: %s: %s' % (
                         type(inspect_error).__name__, inspect_error)
-            print('preserved image id:  %s\nrecreated image id:  %s\nretag exit code:     %s'
-                  % (running_image_id, restored_image_id,
-                     'not attempted (no build ran)' if retag is None else retag.returncode),
-                  file=sys.stderr)
+            print('recreated image id:  %s' % restored_image_id, file=sys.stderr)
             if back.returncode != 0 or restored_image_id != running_image_id:
                 print('AUTOMATIC ROLLBACK FAILED: db-tunnel is NOT running the preserved image '
                       '(up -d exit %s, retag exit %s, expected image %s, got %s). The peer may '
@@ -471,6 +577,18 @@ def main():
                     print('ROLLED BACK BUT THE INTRADAY PATH IS STILL DOWN (%s: %s). The peer '
                           'has no database connection; investigate before anything else.'
                           % (type(probe_error).__name__, probe_error), file=sys.stderr)
+        elif built and not tag_restored:
+            # The failure landed between `compose build` and `up -d`: the files
+            # are back, the container was never touched, but the tag the peer
+            # will be recreated from next is still the rejected build. Saying
+            # "nothing else changed on this peer" here - which is what this
+            # branch used to print unconditionally - is exactly wrong.
+            print('IMAGE TAG NOT RESTORED: the container was never recreated, so db-tunnel is '
+                  'still RUNNING the previous image - but %s now resolves to %s instead of the '
+                  'preserved %s (retag exit %s). The next up -d, restart or reboot would start '
+                  'the peer from the REJECTED build. Run:\n  '
+                  % (running_image_ref, retagged_image_id, running_image_id, retag.returncode)
+                  + rollback, file=sys.stderr)
         else:
             print('restored the previous configuration and image tag; the container was never '
                   'recreated, so nothing else changed on this peer.', file=sys.stderr)

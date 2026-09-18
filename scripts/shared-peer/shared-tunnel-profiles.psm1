@@ -223,6 +223,19 @@ function Get-SharedTunnelStateFreshnessVerdict {
     #    show that the run named by the state is still supervised by a live
     #    process, that is accepted: not fresh, but healthy. `accept`, not
     #    `fresh`, is what the installer must gate on.
+    #
+    # The weak accept has one more condition, and it is not optional. The
+    # installer calls Request-RuntimeStop before it registers the task, and that
+    # call REWRITES this very state file with status 'stop_requested'
+    # (runtime-observability.psm1:231). A live supervisor process plus the
+    # previous run_id is therefore also the exact shape of "the run this install
+    # just asked to die, whose supervisor has not noticed yet" - accepting it
+    # would let the installer certify a tunnel it is in the middle of tearing
+    # down. So a state whose own status says the run is stopping or already over
+    # ('stop_requested', 'stopped', 'unexpected_exit', 'supervisor_failed',
+    # 'start_failed') can never carry the weak claim, however alive its pid is.
+    # It is a bounded refusal, not a stall: this install's own supervisor writes
+    # 'process_started' with a new run_id moments later, and the installer polls.
     [CmdletBinding()]
     param(
         [AllowNull()][psobject]$State,
@@ -233,6 +246,11 @@ function Get-SharedTunnelStateFreshnessVerdict {
         # Tri-state: $true - the run named by $State is still owned by a live
         # supervisor process; $false - it is not; $null - not measured.
         [AllowNull()][object]$SupervisorAlive = $null,
+        # Statuses that disqualify the weak 'a live supervisor still serves this
+        # run' accept. See the note above: the installer's own Request-RuntimeStop
+        # stamps 'stop_requested' on this file before the task is registered.
+        [string[]]$StoppingStatus = @('stop_requested', 'stopped', 'unexpected_exit',
+            'supervisor_failed', 'start_failed'),
         [string]$Field = 'started_at',
         # Clock granularity only. The installer stamps $InstallStartedAt before
         # Register-ScheduledTask, so a legitimate run's started_at post-dates it.
@@ -250,6 +268,13 @@ function Get-SharedTunnelStateFreshnessVerdict {
     # No previous state means nothing to be confused with, so any run_id is new.
     $runIdChanged = [string]::IsNullOrWhiteSpace($previous) -or ($runId -ne $previous)
     $alive = ($SupervisorAlive -is [bool]) -and [bool]$SupervisorAlive
+    # The state's own status, read the same defensive way as every other field.
+    # $StoppingStatus is a parameter only so a caller can widen it; the default
+    # is every status supervise-runtime-process.ps1 and Request-RuntimeStop
+    # write for a run that is stopping or already over.
+    $statusProperty = if ($null -ne $State) { $State.PSObject.Properties['status'] } else { $null }
+    $status = if ($null -ne $statusProperty -and $null -ne $statusProperty.Value) { [string]$statusProperty.Value } else { '' }
+    $stopping = $status -in @($StoppingStatus)
     $fresh = $false
     $accept = $false
     if ($null -eq $State) { $reason = 'no_runtime_state' }
@@ -258,20 +283,33 @@ function Get-SharedTunnelStateFreshnessVerdict {
     elseif (-not $runIdChanged) {
         # The supervisor never replaced the state. Either it has not run yet
         # (the installer polls, so this verdict may be re-taken), or it exited
-        # via duplicate_start_skipped because the run below still owns the lock.
-        if ($alive) { $accept = $true; $reason = 'duplicate_supervisor_still_serving' }
+        # via duplicate_start_skipped because the run below still owns the lock,
+        # or it is the run THIS install just asked to stop.
+        if ($stopping) { $reason = 'previous_run_stopping' }
+        elseif ($alive) { $accept = $true; $reason = 'duplicate_supervisor_still_serving' }
         else { $reason = 'run_id_unchanged' }
     }
     elseif ($parsed -lt $floor) { $reason = 'state_predates_install' }
     else { $fresh = $true; $accept = $true; $reason = 'state_belongs_to_install' }
     $observed = if ($hasValue) { $rawText } else { '<absent>' }
+    $statusObserved = if ([string]::IsNullOrWhiteSpace($status)) { '<absent>' } else { $status }
     $message = if ($accept) {
-        ("Batch tunnel runtime state accepted ({0} '{1}', run_id '{2}' [{3}])") -f `
-            $Field, $observed, $runId, $reason
+        ("Batch tunnel runtime state accepted ({0} '{1}', run_id '{2}', status '{3}' [{4}])") -f `
+            $Field, $observed, $runId, $statusObserved, $reason
+    } elseif ($reason -eq 'previous_run_stopping') {
+        # Not "stale": this state is the run the install itself just stopped, and
+        # saying so is the difference between an operator re-running the install
+        # and an operator hunting a tunnel that was never up.
+        ("Batch tunnel health found only the previous run's state ({0} '{1}', run_id '{2}', " +
+            "status '{3}' [{4}]): that run is stopping or already over, so a live pid does not " +
+            "make it a serving tunnel. This install's supervisor never wrote a state of its own " +
+            "before the deadline at '{5}'.") -f `
+            $Field, $observed, $runId, $statusObserved, $reason, $InstallStartedAt.ToString('o')
     } else {
         ("Batch tunnel health used a stale runtime state ({0} '{1}', run_id '{2}' vs previous " +
-            "'{3}' [{4}] does not post-date this install at '{5}', and no live supervisor owns " +
-            "that run)") -f $Field, $observed, $runId, $previous, $reason, $InstallStartedAt.ToString('o')
+            "'{3}', status '{4}' [{5}] does not post-date this install at '{6}', and no live " +
+            "supervisor owns that run)") -f $Field, $observed, $runId, $previous, $statusObserved,
+            $reason, $InstallStartedAt.ToString('o')
     }
     return [pscustomobject][ordered]@{
         fresh = $fresh
@@ -283,6 +321,7 @@ function Get-SharedTunnelStateFreshnessVerdict {
         previous_run_id = $previous
         run_id_changed = $runIdChanged
         supervisor_alive = $SupervisorAlive
+        status = $statusObserved
         install_started_at = $InstallStartedAt.ToString('o')
         message = $message
     }

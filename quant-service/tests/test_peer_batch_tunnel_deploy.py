@@ -133,6 +133,44 @@ class ComposeEnvironmentTests(unittest.TestCase):
         self.assertIn('PEER_LOCAL_BIND_ADDRESS: "0.0.0.0"', patched)
 
 
+class FakeImageStore:
+    """Just enough docker for the already-deployed short-circuit's image check.
+
+    It models the one relation that matters there: a tag resolves to an image id,
+    and the running container has an image id of its own.  "The files say
+    deployed" is then separable from "the running image came from a build that
+    included them", which is exactly what the short-circuit has to tell apart.
+    """
+
+    IMAGE_REF = "trading-hareness-peer-db-tunnel:latest"
+    BUILT_IMAGE = "sha256:" + "b1" * 32
+    OTHER_IMAGE = "sha256:" + "0f" * 32
+
+    def __init__(self, tags=None, running_image=None, container="container-db-tunnel"):
+        self.tags = dict(tags or {})
+        self.running_image = running_image if running_image is not None else self.BUILT_IMAGE
+        self.container = container
+        self.calls = []
+
+    def container_id(self, service_name):
+        self.calls.append(["container_id", service_name])
+        return self.container
+
+    def check_output(self, argv, **kwargs):
+        argv = list(argv)
+        self.calls.append(argv)
+        if "image" in argv and "ls" in argv:
+            reference = next(part for part in argv if part.startswith("reference="))
+            prefix = reference[len("reference="):].rstrip("*")
+            return "".join(tag + "\n" for tag in sorted(self.tags) if tag.startswith(prefix))
+        if "image" in argv and "inspect" in argv:
+            return json.dumps([{"Id": self.tags[argv[-1]]}])
+        if "inspect" in argv:
+            return json.dumps([{"Config": {"Image": self.IMAGE_REF},
+                                "Image": self.running_image}])
+        return ""
+
+
 class InspectPeerStateTests(unittest.TestCase):
     """Drives the refusal gate with in-memory peer files - no docker, no peer."""
 
@@ -153,13 +191,16 @@ class InspectPeerStateTests(unittest.TestCase):
         # hash is never the reason a case fails for an unrelated reason.
         self.compose_sha256 = deploy.sha256_text(text)
 
-    def inspect(self, service=None, known=None, compose_sha256=None):
+    def inspect(self, service=None, known=None, compose_sha256=None, images=None):
         known = known or self.known
         service = service if service is not None else rendered_service(known)
         patched_state = dict(known, compose_sha256=compose_sha256 or self.compose_sha256)
         states = dict(deploy.KNOWN_PEER_STATES, **{STATE: patched_state})
+        self.images = images if images is not None else FakeImageStore()
         with patch.object(deploy, "ROOT", self.root), \
                 patch.object(deploy, "KNOWN_PEER_STATES", states), \
+                patch.object(deploy, "subprocess", self.images), \
+                patch.object(deploy, "container_id", self.images.container_id), \
                 patch.object(deploy, "config", lambda: {"services": {deploy.SERVICE: service}}):
             return deploy.inspect_peer_state()
 
@@ -205,17 +246,71 @@ class InspectPeerStateTests(unittest.TestCase):
         return deploy.patch_entrypoint(FIXTURE.read_text(), self.known["batch_bind_address"],
                                        self.known["entrypoint_anchor"])
 
+    def deployed_service(self):
+        service = rendered_service(self.known)
+        service["environment"]["PEER_BATCH_DB_PORT"] = "5433"
+        return service
+
+    def deployed_images(self, **overrides):
+        """What a completed deploy leaves in the image store: a :batch- tag."""
+        settings = {"tags": {FakeImageStore.IMAGE_REF: FakeImageStore.BUILT_IMAGE,
+                             "trading-hareness-peer-db-tunnel:batch-20260919T101500":
+                                 FakeImageStore.BUILT_IMAGE,
+                             "trading-hareness-peer-db-tunnel:pre-batch-20260919T101500":
+                                 FakeImageStore.OTHER_IMAGE}}
+        settings.update(overrides)
+        return FakeImageStore(**settings)
+
     def test_a_finished_deploy_exits_zero_even_though_its_entrypoint_is_unknown(self):
         # The idempotent re-run - the natural thing to do after a partial
         # failure - must not be indistinguishable from a refusal. A deployed
         # peer no longer matches any KNOWN_PEER_STATES hash, so this is judged
         # AFTER the lookup, on the evidence a real deploy leaves behind.
         (self.root / "ssh-tunnel-entrypoint.sh").write_text(self.deployed_entrypoint())
-        service = rendered_service(self.known)
-        service["environment"]["PEER_BATCH_DB_PORT"] = "5433"
-        with self.assertRaises(SystemExit) as raised:
-            self.inspect(service=service)
+        images = self.deployed_images()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaises(SystemExit) as raised:
+                self.inspect(service=self.deployed_service(), images=images)
         self.assertEqual(raised.exception.code, 0)
+        # The tag it accepted as evidence is named, not merely counted.
+        self.assertIn("batch-20260919T101500", out.getvalue())
+        self.assertIn("image", str(images.calls))
+
+    def test_files_deployed_but_the_image_never_built_is_refused(self):
+        # SIGKILL / OOM / power loss between the entrypoint write and
+        # `compose build` bypasses the except-BaseException restore and leaves
+        # .env, compose.yaml and the entrypoint all carrying the batch forward
+        # while the container still runs an image without it. File state alone
+        # reported that as a finished deploy; the port it reported cannot answer.
+        (self.root / "ssh-tunnel-entrypoint.sh").write_text(self.deployed_entrypoint())
+        images = FakeImageStore(tags={FakeImageStore.IMAGE_REF: FakeImageStore.BUILT_IMAGE})
+        with self.assertRaises(SystemExit) as raised:
+            self.inspect(service=self.deployed_service(), images=images)
+        self.assertNotEqual(raised.exception.code, 0)
+        message = str(raised.exception)
+        self.assertIn("refusing to touch the peer", message)
+        self.assertIn("does not come from a build that included it", message)
+        self.assertIn("interrupted", message)
+        self.assertIn(str(deploy.BACKUP_ROOT), message)
+
+    def test_a_batch_tag_for_a_different_image_is_not_evidence(self):
+        # A leftover tag from an EARLIER deploy resolves fine but points at an
+        # image the container is not running: the batch forward it carries is
+        # not the one on disk now.
+        (self.root / "ssh-tunnel-entrypoint.sh").write_text(self.deployed_entrypoint())
+        images = self.deployed_images(running_image=FakeImageStore.OTHER_IMAGE)
+        with self.assertRaises(SystemExit) as raised:
+            self.inspect(service=self.deployed_service(), images=images)
+        self.assertNotEqual(raised.exception.code, 0)
+        self.assertIn("does not come from a build that included it", str(raised.exception))
+
+    def test_a_stopped_db_tunnel_cannot_vouch_for_a_deploy_either(self):
+        (self.root / "ssh-tunnel-entrypoint.sh").write_text(self.deployed_entrypoint())
+        images = self.deployed_images(container="")
+        with self.assertRaises(SystemExit) as raised:
+            self.inspect(service=self.deployed_service(), images=images)
+        self.assertNotEqual(raised.exception.code, 0)
+        self.assertIn("not running at all", str(raised.exception))
 
     def test_a_declared_but_empty_batch_port_is_not_a_deploy(self):
         # `PEER_BATCH_DB_PORT: ${PEER_BATCH_DB_PORT:-}` in this repository's own
@@ -256,11 +351,14 @@ class FakeComposeRunner:
     NEW_IMAGE = "sha256:new0new0new0new0new0new0new0new0new0new0new0new0new0new0new0new0"
     IMAGE_REF = "trading-hareness-peer-db-tunnel:latest"
 
-    def __init__(self, rollback_retag_fails=False):
+    def __init__(self, rollback_retag_fails=False, fail_on_up=False):
         self.calls = []
         self.tags = {self.IMAGE_REF: self.OLD_IMAGE}
         self.container_image = self.OLD_IMAGE
         self.rollback_retag_fails = rollback_retag_fails
+        # The failure that lands between `compose build` and `up -d`: built is
+        # true, recreated is false, and the container is never touched.
+        self.fail_on_up = fail_on_up
         self.built = False
 
     # --- the two subprocess entry points the script uses directly ----------
@@ -288,6 +386,10 @@ class FakeComposeRunner:
     def check_output(self, argv, **kwargs):
         argv = list(argv)
         self.calls.append(argv)
+        if "image" in argv and "inspect" in argv:
+            # `docker image inspect <reference>` - what the reference resolves
+            # to NOW, which is the only way to check that a retag took effect.
+            return json.dumps([{"Id": self.tags[argv[-1]]}])
         if "inspect" in argv:
             return json.dumps([{
                 "Config": {"Image": self.IMAGE_REF},
@@ -304,6 +406,8 @@ class FakeComposeRunner:
             self.tags[self.IMAGE_REF] = self.NEW_IMAGE
             self.built = True
         elif arguments[0] == "up":
+            if self.fail_on_up:
+                raise subprocess.CalledProcessError(1, ["docker", "compose", "up"])
             self.container_image = self.tags[self.IMAGE_REF]
         return subprocess.CompletedProcess(list(arguments), 0)
 
@@ -391,7 +495,7 @@ class RollbackExecutionTests(unittest.TestCase):
                 "PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD")}},
         }}
 
-    def drive(self, runner):
+    def drive(self, runner, expected=AssertionError):
         """Run main() with every outside edge replaced by `runner`."""
         states = dict(deploy.KNOWN_PEER_STATES, **{
             STATE: dict(self.known, compose_sha256=deploy.sha256_text(self.compose_before))})
@@ -408,7 +512,7 @@ class RollbackExecutionTests(unittest.TestCase):
                 patch.object(deploy, "wait_healthy", runner.wait_healthy), \
                 patch.object(deploy, "probe_port", runner.probe_port), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            with self.assertRaises(AssertionError) as raised:
+            with self.assertRaises(expected) as raised:
                 deploy.main()
         return raised.exception, out.getvalue(), err.getvalue()
 
@@ -480,6 +584,44 @@ class RollbackExecutionTests(unittest.TestCase):
         for name in deploy.NAMES:
             self.assertEqual((self.root / name).read_bytes(),
                              (self.backup_directory() / name).read_bytes())
+
+    def test_a_failure_between_build_and_up_verifies_the_retag_too(self):
+        # `compose build` has already repointed :latest at the new image, so the
+        # retag is load-bearing even though no container was recreated. The
+        # happy version of this path must say the tag is back, and it must have
+        # READ it back rather than trusting `docker tag`'s exit code.
+        runner = FakeComposeRunner(fail_on_up=True)
+        error, out, err = self.drive(runner, expected=subprocess.CalledProcessError)
+        self.assertEqual(runner.container_image, FakeComposeRunner.OLD_IMAGE,
+                         "the container must never have been recreated")
+        self.assertEqual(runner.tags[FakeComposeRunner.IMAGE_REF], FakeComposeRunner.OLD_IMAGE)
+        self.assertIn("preserved image id", err)
+        self.assertIn("now resolves to", err)
+        self.assertIn("restored the previous configuration and image tag", err)
+        self.assertNotIn("IMAGE TAG NOT RESTORED", err)
+        self.assertNotIn("recreated image id", err)
+        trace = runner.argv_names()
+        self.assertIn("compose_run build", trace)
+        self.assertNotIn("docker compose up", trace)
+        for name in deploy.NAMES:
+            self.assertEqual((self.root / name).read_bytes(),
+                             (self.backup_directory() / name).read_bytes())
+
+    def test_a_failed_retag_without_a_recreate_is_still_reported(self):
+        # The finding: this branch printed "nothing else changed on this peer"
+        # without ever looking at the retag's result. :latest is left pointing
+        # at the rejected build, so the peer keeps serving the old image only
+        # until the next up -d, restart or reboot.
+        runner = FakeComposeRunner(fail_on_up=True, rollback_retag_fails=True)
+        error, out, err = self.drive(runner, expected=subprocess.CalledProcessError)
+        self.assertEqual(runner.tags[FakeComposeRunner.IMAGE_REF], FakeComposeRunner.NEW_IMAGE,
+                         "this case must genuinely leave the reference poisoned")
+        self.assertIn("IMAGE TAG NOT RESTORED", err)
+        self.assertIn(FakeComposeRunner.NEW_IMAGE, err)
+        self.assertIn("REJECTED build", err)
+        self.assertNotIn("nothing else changed on this peer", err)
+        # The manual rollback command is the way out, and it must be printed.
+        self.assertIn("pre-batch-", err)
 
 
 if __name__ == "__main__":

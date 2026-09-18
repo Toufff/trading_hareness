@@ -249,6 +249,7 @@ if ($tunnelProfile.HealthCheck -eq 'remote_api_http') {
 }
 
 $freshness = $null
+$liveness = $null
 if ($tunnelProfile.HealthCheck -eq 'remote_api_http') {
     $state = Get-RuntimeState -PlatformRoot $PlatformRoot -Service $service
 } else {
@@ -274,7 +275,24 @@ if ($tunnelProfile.HealthCheck -eq 'remote_api_http') {
     #     accepted - as 'duplicate_supervisor_still_serving', not as this
     #     install's own state - because disabling a healthy batch tunnel is a
     #     worse failure than accepting an older run that demonstrably owns it.
+    #
+    # The poll therefore breaks on `fresh`, NOT on `accept`. Breaking on accept
+    # let the weaker claim win a race against this install's own state: a run
+    # started minutes ago (the two-minute supervising trigger, or
+    # install-shared-tunnel-tasks.ps1 doing both profiles) is still alive on its
+    # pid for the first seconds of this install, so iteration one accepted the
+    # previous run and stopped looking - and the state it accepted is by
+    # construction the one Request-RuntimeStop above just stamped
+    # 'stop_requested'. The judge now refuses a stopping state outright
+    # ('previous_run_stopping'), and the weaker accept is kept as a FALLBACK: it
+    # is only used when the whole 30 s elapsed without this install's own
+    # supervisor writing anything, which is the genuine duplicate_start_skipped
+    # case. The cost is that a real duplicate_start_skipped install polls for the
+    # full deadline; that is 30 seconds once, on an install, and it buys the
+    # guarantee that this install's own state always wins when it is going to
+    # arrive at all.
     $freshnessDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    $acceptedFallback = $null
     do {
         $state = Get-RuntimeState -PlatformRoot $PlatformRoot -Service $service
         $supervisorProcess = $null
@@ -293,15 +311,34 @@ if ($tunnelProfile.HealthCheck -eq 'remote_api_http') {
         $freshness = Get-SharedTunnelStateFreshnessVerdict -State $state `
             -InstallStartedAt $installStartedAt -PreviousRunId $previousRunId `
             -SupervisorAlive $liveness.alive
-        if ($freshness.accept) { break }
+        if ($freshness.fresh) { break }
+        if ($freshness.accept) {
+            # Remember the whole triple, not just the verdict: the state and the
+            # liveness reason that go into the receipt below must be the ones
+            # this verdict was taken against.
+            $acceptedFallback = [pscustomobject]@{
+                Freshness = $freshness; State = $state; Liveness = $liveness
+            }
+        }
         Start-Sleep -Seconds 1
     } while ([DateTime]::UtcNow -lt $freshnessDeadline)
+    if (-not $freshness.fresh -and $null -ne $acceptedFallback) {
+        $freshness = $acceptedFallback.Freshness
+        $state = $acceptedFallback.State
+        $liveness = $acceptedFallback.Liveness
+    }
 }
 if (-not $state -or -not $state.PSObject.Properties['run_id']) {
     Stop-TunnelInstallOnFailure -Message 'Shared peer tunnel became reachable without a supervised runtime state'
 }
 if ($null -ne $freshness -and -not $freshness.accept) {
-    Stop-TunnelInstallOnFailure -Message $freshness.message
+    # Why the supervisor could not vouch for the run is the first thing an
+    # operator needs here, and a refused install writes no runtime state, so the
+    # message is the only place it can be recorded.
+    $livenessDetail = if ($null -ne $liveness) {
+        " (supervisor liveness: $($liveness.reason), pid '$($liveness.supervisor_pid)')"
+    } else { '' }
+    Stop-TunnelInstallOnFailure -Message ($freshness.message + $livenessDetail)
 }
 if ($null -ne $freshness -and -not $freshness.fresh) {
     # Accepted, but by the weaker claim. Say so in the health label rather than
@@ -332,8 +369,22 @@ if ($null -ne $freshness) {
     # point of the gate - keep the receipt where an operator will find it.
     $healthyState.state_freshness = [string]$freshness.reason
     $healthyState.previous_run_id = [string]$freshness.previous_run_id
+    $healthyState.state_status = [string]$freshness.status
     $eventData.state_freshness = [string]$freshness.reason
     $eventData.previous_run_id = [string]$freshness.previous_run_id
+    $eventData.state_status = [string]$freshness.status
+    # The liveness verdict is the OTHER half of the claim, and the branch's own
+    # rollout notes tell the operator to check it on the first real install
+    # ("the receipt should say supervisor_process_owns_this_run, not
+    # process_start_time_unavailable"). It was computed and thrown away, so that
+    # receipt did not exist anywhere. Persist both the verdict and the pid it was
+    # taken against, in the state file and in the lifecycle event.
+    $livenessReason = if ($null -ne $liveness) { [string]$liveness.reason } else { 'not_measured' }
+    $livenessPid = if ($null -ne $liveness) { [string]$liveness.supervisor_pid } else { '' }
+    $healthyState.supervisor_liveness = $livenessReason
+    $healthyState.supervisor_pid_checked = $livenessPid
+    $eventData.supervisor_liveness = $livenessReason
+    $eventData.supervisor_pid_checked = $livenessPid
 }
 [void](Set-RuntimeState -PlatformRoot $PlatformRoot -Service $service -State $healthyState)
 [void](Write-RuntimeEvent -PlatformRoot $PlatformRoot -Service $service -Event 'healthy' `

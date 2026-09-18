@@ -190,11 +190,28 @@ A timestamp alone is not the whole claim, in either direction.
   field of the runtime state and the `healthy` event, never as this install's
   own state. `Get-SharedTunnelSupervisorLiveness` is what vouches for it: the
   `supervisor_pid` must name a running process whose start time sits beside the
-  state's own `started_at`, so a recycled pid proves nothing.
+  state's own `started_at`, so a recycled pid proves nothing. Its verdict
+  (`supervisor_process_owns_this_run`, `supervisor_pid_reused`,
+  `process_start_time_unavailable`, …) and the pid it was taken against are
+  written to the runtime state and the `healthy` event as `supervisor_liveness`
+  and `supervisor_pid_checked`; a refused install writes no state at all, so its
+  failure message carries the same two values instead.
+* A live pid is **not enough on its own**, because the installer's own
+  `Request-RuntimeStop` rewrites that same state with `status = 'stop_requested'`
+  before the task is registered. A state whose status says the run is stopping or
+  already over (`stop_requested`, `stopped`, `unexpected_exit`,
+  `supervisor_failed`, `start_failed`) can therefore never carry the weak claim:
+  that is the run this install is tearing down, not a tunnel that is serving. The
+  verdict is `previous_run_stopping`, and the install refuses.
 * The verdict is **polled** until a 30 s deadline, re-reading the state each
   second. The ssh client that satisfies legs 1 and 2 can be up before the
   supervisor's state write lands; judging once turned that race into a disabled
-  batch task. `accept`, not `fresh`, is what the installer gates on.
+  batch task. The poll breaks on `fresh` — this install's own state — and keeps
+  an accept-but-not-fresh verdict only as a **fallback**, applied when the whole
+  deadline passed without this install's supervisor writing anything. Breaking on
+  `accept` let the previous run win the race in the first second, on a state the
+  installer had just marked `stop_requested`. `accept`, not `fresh`, is still
+  what the installer gates on once the poll is over.
 
 Both reach the same database on the same port 55432; only the transport differs.
 Compression is on for batch alone because bulk result sets compress well and the
