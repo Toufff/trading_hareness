@@ -151,6 +151,21 @@ class WordingTests(unittest.TestCase):
         soft = generate(rally_inputs()).lines_of("soft_stop")[0]
         self.assertIn("所属行业当日翻绿", condition_text(soft))
 
+    def test_a_multi_condition_line_reads_its_extra_conditions_before_the_price_test(self):
+        """The price clause is the weakest condition on a take-partial line; the card must not lead with it."""
+        partial = self.plan.lines_of("take_partial")[0]
+        self.assertEqual(condition_text(partial),
+                         "当日成交量为20日最大量且收在振幅下半（天量滞涨）、最新价跌破当日VWAP，"
+                         "且最新价低于 8.41（分钟确认）")
+        soft = generate(rally_inputs()).lines_of("soft_stop")[0]
+        self.assertEqual(condition_text(soft), f"所属行业当日翻绿，且日线收盘价低于 {soft.price}（日线确认）")
+        card = render_markdown(self.plan)
+        table_row = next(line for line in card.splitlines() if line.startswith("| 4 | 减半仓 |"))
+        self.assertLess(table_row.index("VWAP"), table_row.index("最新价低于 8.41"))
+        self.assertIn("4. **减半仓**：当日成交量为20日最大量且收在振幅下半且最新价跌破当日VWAP、且最新价低于8.41时，减半仓",
+                      card)
+        self.assertIn("把止损上移到成本价8.49", card)
+
     def test_a_time_line_states_its_deadline_rather_than_a_price_comparison(self):
         exposure = self.plan.lines_of("exposure")[0]
         self.assertEqual(condition_text(exposure), "到点执行：下一交易日开盘后15分钟内")
@@ -239,7 +254,7 @@ class DisclosureTests(unittest.TestCase):
         card = render_markdown(plan)
         self.assertIn("未生成的线及原因：", card)
         self.assertIn("| 软止损 |", card)
-        self.assertIn("间距不足", card)
+        self.assertIn("软止损区间为空（下限 8.12 > 上限 8.04，止损距离 0.66 < 1.0×ATR14 0.73），不生成", card)
         rows = plan_payload(plan)["omitted_lines"]
         self.assertEqual([row["kind"] for row in rows], ["soft_stop"])
         self.assertEqual(rows[0]["inputs"]["hard_stop"], float(plan.sizing.hard_stop))

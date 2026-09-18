@@ -200,11 +200,25 @@ class DailyBasisTests(unittest.TestCase):
         self.assertEqual([item["kind"] for item in self.plan.metrics["omitted_lines"]], ["soft_stop"])
 
     def test_the_trail_arms_on_the_latest_close_not_on_an_intraday_spike(self):
+        trail_line = self.plan.lines_of("trail")[0]
+        self.assertEqual((trail_line.metric, trail_line.confirm.basis, trail_line.confirm.bars),
+                         ("daily_close", "daily", 1))
+        # a spike to 9.60 that closes back at 9.10, under the 9.22 arm, is not a confirmation
+        spike = bar("2026-09-21", 8.60, 9.60, 8.55, 9.10, 12000)
+        untriggered = evaluate(self.plan, inputs(bars=[*shenqi_bars(), spike], sector_change_pct=0.8))
+        self.assertEqual(state_of(untriggered, "trail", "daily").state, "armed")
+        self.assertEqual(state_of(untriggered, "trail", "daily").evidence["last_observation"]["value"], 9.10)
         rally = bar("2026-09-21", 8.60, 9.60, 8.55, 9.40, 12000)
         evaluation = evaluate(self.plan, inputs(bars=[*shenqi_bars(), rally], sector_change_pct=0.8))
         trail = state_of(evaluation, "trail", "daily")
         self.assertEqual(trail.state, "triggered")
         self.assertEqual(trail.trigger_price, Decimal("9.4"))
+        self.assertEqual(trail.evidence["metric"], "daily_close")
+        self.assertEqual(trail.evidence["confirmed_at"], "2026-09-21")
+        # a minute run never judges it, exactly like the daily hard stop
+        intraday = evaluate(self.plan, inputs(basis="minute", minutes=minutes(("0930", 9.50), ("0931", 9.55)),
+                                              as_of=datetime(2026, 9, 21, 10, 5, tzinfo=SH)))
+        self.assertIn("this run is minute", state_of(intraday, "trail", "daily").evidence["not_evaluated"])
         # moving a stop up is not itself a reduce signal; the exposure cut that
         # came due at 09:45 on the same session is what drives the plan state
         self.assertEqual(state_of(evaluation, "hard_stop", "daily").state, "armed")

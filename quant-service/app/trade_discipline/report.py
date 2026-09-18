@@ -25,7 +25,7 @@ from .contracts import ComplianceRecord, DisciplinePlan, Evaluation, FormulaErro
 from .generator import t1_locked_shares_for
 from .quality import CHECK_IDS, DERIVATION_TOLERANCE
 
-REPORT_VERSION = "trade-discipline-report-v2"
+REPORT_VERSION = "trade-discipline-report-v3"
 RESEARCH_NOTICE = "研究用途，仅作人工决策依据：系统不连券商、不下单、不改持仓。"
 DASH = "—"
 
@@ -53,7 +53,7 @@ EXTRA_LABEL: dict[str, str] = {
     "sector_change_negative": "所属行业当日翻绿", "sector_not_weak": "所属行业当日不弱（涨幅≥0）",
     "amount_ge_prev_day": "成交额不低于前一日", "volume_expand_1_5x": "成交量≥前5日均量1.5倍",
     "volume_contract_0_7x": "成交量≤前5日均量0.7倍", "below_vwap": "最新价跌破当日VWAP",
-    "after_volume_climax": "天量滞涨（量为20日最大且收在振幅下半）",
+    "after_volume_climax": "当日成交量为20日最大量且收在振幅下半（天量滞涨）",
 }
 ACTION_LABEL: dict[str, str] = {
     "exit_all": "全部退出", "reduce_to_shares": "减到 {value} 股", "reduce_by_pct": "减仓 {value}%",
@@ -134,7 +134,12 @@ def _pct(value: Any) -> str:
 # Line wording
 # --------------------------------------------------------------------------
 def condition_text(line: Line) -> str:
-    """The line's trigger condition in plain Chinese, never a template dump."""
+    """The line's trigger condition in plain Chinese, never a template dump.
+
+    The ``extra`` conditions are read first: on a multi-condition line they are
+    the substance (a volume climax, a sector turning red) and the price test is
+    the weakest clause, so it closes the sentence instead of opening it.
+    """
     if line.execute_by == "time":
         when = EXECUTE_AT_LABEL.get(line.execute_at or "", line.execute_at or DASH)
         if line.kind == "time_stop" and line.trading_days:
@@ -148,8 +153,10 @@ def condition_text(line: Line) -> str:
     confirm = (f"，连续 {line.confirm.bars} 根{'分钟' if line.confirm.basis == 'minute' else '日线'}确认"
                if line.confirm.bars > 1 else
                f"（{'分钟' if line.confirm.basis == 'minute' else '日线'}确认）")
-    extras = "，且" + "、".join(EXTRA_LABEL.get(name, name) for name in line.extra) if line.extra else ""
-    return f"{metric}{op} {threshold}{confirm}{extras}"
+    price_clause = f"{metric}{op} {threshold}{confirm}"
+    if not line.extra:
+        return price_clause
+    return "、".join(EXTRA_LABEL.get(name, name) for name in line.extra) + f"，且{price_clause}"
 
 
 def action_text(line: Line) -> str:

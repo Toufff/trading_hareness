@@ -22,6 +22,7 @@ from app.short_term_lanes.risk import volatility_buffer_pct
 from app.short_term_lanes.rules import features as rules_features
 from app.trade_discipline.templates import (
     CRASH_FALLBACK_LABEL,
+    HARD_STOP_TERMS,
     HOLIDAY_CLOSURE_DAYS,
     HOLIDAY_EXPOSURE_PCT,
     LOT_SIZE,
@@ -376,12 +377,12 @@ class StageTemplateQualityTests(unittest.TestCase):
                 self.assertLessEqual(abs(holiday[0].derivation.recompute() - holiday[0].action.value), 0.01)
 
     def test_a_soft_stop_is_only_drawn_with_half_an_atr_on_each_side(self):
-        """09-18 closed 8.41 with MA5 8.38: a 0.36% soft stop would fire on noise, so it is omitted."""
+        """09-18 closed 8.41 with a 0.66 stop distance under one ATR: no price has half an ATR on both sides."""
         plain = generate(shenqi_inputs())
         self.assertEqual(plain.lines_of("soft_stop"), [])
         omitted = {item["kind"]: item for item in plain.metrics["omitted_lines"]}
         self.assertIn("soft_stop", omitted)
-        self.assertIn("间距不足", omitted["soft_stop"]["reason"])
+        self.assertIn("软止损区间为空", omitted["soft_stop"]["reason"])
         self.assertEqual(omitted["soft_stop"]["inputs"]["ma5"], plain.metrics["ma5"])
         self.assertEqual(omitted["soft_stop"]["inputs"]["hard_stop"], float(plain.sizing.hard_stop))
         self.assertEqual(plain.status, "active", failed_checks(plain.quality))
@@ -396,6 +397,32 @@ class StageTemplateQualityTests(unittest.TestCase):
         self.assertLessEqual(float(soft[0].price) - 1e-9, reference - 0.5 * atr14)
         self.assertNotIn("soft_stop", {item["kind"] for item in rally.metrics["omitted_lines"]})
         self.assertEqual(rally.status, "active", failed_checks(rally.quality))
+
+    def test_the_soft_stop_refusal_names_an_empty_window_and_an_outside_ma5_differently(self):
+        """An empty window (stop nearer than one ATR) and a real window that MA5 misses are two refusals."""
+        plain = generate(shenqi_inputs())
+        empty = {item["kind"]: item for item in plain.metrics["omitted_lines"]}["soft_stop"]
+        hard, reference, atr14 = plain.sizing.hard_stop, plain.sizing.reference_price, plain.metrics["atr14"]
+        self.assertGreater(empty["inputs"]["window_low"], empty["inputs"]["window_high"])
+        self.assertEqual(empty["reason"],
+                         f"软止损区间为空（下限 {empty['inputs']['window_low']:.2f} > 上限 "
+                         f"{empty['inputs']['window_high']:.2f}，止损距离 {reference - hard} < 1.0×ATR14 "
+                         f"{Decimal(str(atr14)).quantize(Decimal('0.01'))}），不生成")
+        self.assertNotIn("不在", empty["reason"])
+        # a close of 8.70 leaves a real window [8.28, 8.34] under MA5 8.44: the window exists, MA5 is outside
+        bars = shenqi_bars()
+        bars[-1] = bar("2026-09-18", 8.27, 8.75, 8.20, 8.70, 9000)
+        outside_plan = generate(shenqi_inputs(bars=bars))
+        self.assertEqual(outside_plan.stage, "crash_rebound")
+        self.assertEqual(outside_plan.lines_of("soft_stop"), [])
+        outside = {item["kind"]: item for item in outside_plan.metrics["omitted_lines"]}["soft_stop"]
+        self.assertLessEqual(outside["inputs"]["window_low"], outside["inputs"]["window_high"])
+        self.assertNotIn("区间为空", outside["reason"])
+        self.assertIn(f"MA5 {Decimal(str(outside['inputs']['ma5'])).quantize(Decimal('0.01'))} 不在", outside["reason"])
+        self.assertIn(f"[{outside['inputs']['window_low']:.2f}, {outside['inputs']['window_high']:.2f}] 内",
+                      outside["reason"])
+        self.assertIn("间距不足", outside["reason"])
+        self.assertTrue(float(outside["inputs"]["ma5"]) > outside["inputs"]["window_high"])
 
     def test_soft_stop_separation_is_the_same_rule_in_the_template_and_the_gate(self):
         window_low, window_high = soft_stop_window(Decimal("7.75"), Decimal("8.41"), 0.73)
@@ -424,19 +451,66 @@ class StageTemplateQualityTests(unittest.TestCase):
     def test_the_trail_target_has_its_own_derivation(self):
         plan = generate(shenqi_inputs())
         trail = plan.lines_of("trail")[0]
-        self.assertEqual(trail.derivation.action_formula,
-                         "max(floor_price, min(low3, arm_price - trail_multiple * atr14))")
-        self.assertEqual(set(trail.derivation.action_inputs),
-                         {"arm_price", "atr14", "trail_multiple", "low3", "floor_price"})
+        self.assertEqual(trail.derivation.action_formula, "max(floor_price, anchor_price)")
+        self.assertEqual(set(trail.derivation.action_inputs), {"anchor_price", "anchor_source", "floor_price"})
         self.assertLessEqual(abs(trail.derivation.recompute_action() - float(trail.action.value)), 0.01)
         self.assertLessEqual(abs(trail.derivation.recompute() - float(trail.price)), 0.01)
         ratcheted = generate(shenqi_inputs(previous_plan={"plan_id": "prev", "hard_stop": 7.60, "trail": 8.50}))
         trail = ratcheted.lines_of("trail")[0]
         self.assertEqual(trail.action.value, Decimal("8.50"))
-        self.assertTrue(trail.derivation.action_formula.startswith("max(previous_trail, "))
+        self.assertEqual(trail.derivation.action_formula, "max(previous_trail, max(floor_price, anchor_price))")
         self.assertEqual(trail.derivation.action_inputs["previous_trail"], 8.5)
         self.assertLessEqual(abs(trail.derivation.recompute_action() - 8.5), 0.01)
+        self.assertIn("前序移动止损8.50", trail.label)
         self.assertEqual(ratcheted.status, "active", failed_checks(ratcheted.quality))
+
+    def test_the_trail_moves_the_stop_to_break_even_not_to_a_fraction_of_the_arm_price(self):
+        """The 600613 defect: after an 11% rally the old trail parked the stop at 8.04, under the 8.49 cost."""
+        plan = generate(shenqi_inputs())
+        trail = plan.lines_of("trail")[0]
+        cost = Decimal(SHENQI_POSITION["average_cost"])
+        self.assertEqual(trail.action.type, "move_stop_to")
+        self.assertEqual(trail.action.value, cost.quantize(Decimal("0.01")))          # 8.49, the average cost
+        self.assertGreater(trail.action.value, plan.sizing.hard_stop)
+        self.assertGreater(trail.action.value, Decimal(str(plan.metrics["low3"])))     # no longer the 3-day low
+        self.assertEqual(trail.derivation.action_inputs["anchor_price"], float(cost))
+        self.assertEqual(trail.derivation.action_inputs["anchor_source"], "average_cost")
+        self.assertEqual(trail.derivation.action_inputs["floor_price"], float(plan.sizing.hard_stop))
+        self.assertIn("把止损上移到成本价8.49", trail.label)
+        self.assertIn("成本/现价孰高 + 1×ATR14", trail.label)
+        # a new-buy plan anchors on the trigger price it will be filled at
+        new_buy = generate(stage_inputs("breakout_hold", position=None,
+                                        lane={"lane": "contraction", "reference": "10.45", "support": "9.90"}))
+        trail = new_buy.lines_of("trail")[0]
+        self.assertEqual(trail.action.value, Decimal("10.45"))
+        self.assertEqual(trail.derivation.action_inputs["anchor_source"], "trigger_reference")
+        self.assertIn("把止损上移到触发参考价10.45", trail.label)
+        self.assertIn("触发参考价 + 1×ATR14", trail.label)
+        self.assertEqual(new_buy.status, "active", failed_checks(new_buy.quality))
+        # a holding whose cost already sits under the hard stop gains nothing from break-even: omitted
+        profitable = generate(stage_inputs("trend_hold"))
+        self.assertEqual(profitable.lines_of("trail"), [])
+        reason = {item["kind"]: item for item in profitable.metrics["omitted_lines"]}["trail"]
+        self.assertIn("保本目标 max(硬止损", reason["reason"])
+        self.assertIn("不高于硬止损", reason["reason"])
+        self.assertEqual(reason["inputs"]["anchor_source"], "average_cost")
+        self.assertLess(reason["inputs"]["anchor_price"], float(profitable.sizing.hard_stop))
+
+    def test_the_trail_is_confirmed_on_the_daily_close_like_every_other_daily_line(self):
+        for plan in (generate(shenqi_inputs()), generate(rally_inputs())):
+            trail = plan.lines_of("trail")[0]
+            self.assertEqual((trail.metric, trail.op), ("daily_close", ">="))
+            self.assertEqual((trail.confirm.bars, trail.confirm.basis), (1, "daily"))
+            self.assertTrue(trail.label.startswith("日线收盘站上"))
+
+    def test_the_take_partial_sentence_leads_with_the_conditions_that_carry_it(self):
+        plan = generate(shenqi_inputs())
+        partial = plan.lines_of("take_partial")[0]
+        self.assertEqual(partial.extra, ["after_volume_climax", "below_vwap"])
+        self.assertEqual(partial.label,
+                         "当日成交量为20日最大量且收在振幅下半且最新价跌破当日VWAP、且最新价低于8.41时，减半仓")
+        self.assertLess(partial.label.index("VWAP"), partial.label.index("最新价低于8.41"))
+        self.assertNotIn("下方减半仓", partial.label)
 
     def test_new_buy_plan_adds_a_trigger_and_a_cancel_line(self):
         plan = generate(stage_inputs("breakout_hold", position=None,
@@ -500,25 +574,30 @@ class SizingTests(unittest.TestCase):
 class TrailTests(unittest.TestCase):
     def test_trail_never_moves_down(self):
         previous = Decimal("8.90")
-        lowered = trail_stop_price(arm_price=Decimal("9.00"), atr14=0.70, low3=7.50,
-                                   floor_price=Decimal("7.20"), previous_trail=previous)
+        lowered = trail_stop_price(anchor_price=Decimal("8.49"), floor_price=Decimal("7.20"),
+                                   previous_trail=previous)
         self.assertEqual(lowered, previous)
-        raised = trail_stop_price(arm_price=Decimal("11.00"), atr14=0.70, low3=9.80,
-                                  floor_price=Decimal("7.20"), previous_trail=previous)
+        raised = trail_stop_price(anchor_price=Decimal("9.80"), floor_price=Decimal("7.20"),
+                                  previous_trail=previous)
         self.assertEqual(raised, Decimal("9.80"))
         self.assertGreater(raised, previous)
 
     def test_trail_never_sits_below_the_hard_stop(self):
-        value = trail_stop_price(arm_price=Decimal("9.00"), atr14=1.20, low3=6.00,
-                                 floor_price=Decimal("7.75"), previous_trail=None)
+        value = trail_stop_price(anchor_price=Decimal("6.00"), floor_price=Decimal("7.75"), previous_trail=None)
         self.assertEqual(value, Decimal("7.75"))
 
-    def test_trail_is_monotonic_across_a_declining_sequence(self):
+    def test_trail_is_the_anchor_rounded_to_the_tick(self):
+        self.assertEqual(trail_stop_price(anchor_price=Decimal("8.4907"), floor_price=Decimal("7.75")),
+                         Decimal("8.49"))
+        self.assertEqual(trail_stop_price(anchor_price=Decimal("8.495"), floor_price=Decimal("7.75")),
+                         Decimal("8.50"))
+
+    def test_trail_is_monotonic_across_a_moving_anchor_and_floor(self):
         current, seen = None, []
-        for arm, low3 in ((Decimal("9.20"), 8.04), (Decimal("9.60"), 8.60), (Decimal("9.10"), 7.90),
-                          (Decimal("10.20"), 9.10), (Decimal("8.80"), 7.40)):
-            current = trail_stop_price(arm_price=arm, atr14=0.73, low3=low3,
-                                       floor_price=Decimal("7.75"), previous_trail=current)
+        for anchor, floor_price in ((Decimal("8.49"), Decimal("7.75")), (Decimal("8.49"), Decimal("8.60")),
+                                    (Decimal("8.20"), Decimal("7.90")), (Decimal("9.10"), Decimal("8.00")),
+                                    (Decimal("8.49"), Decimal("7.40"))):
+            current = trail_stop_price(anchor_price=anchor, floor_price=floor_price, previous_trail=current)
             seen.append(current)
         self.assertEqual(seen, sorted(seen))
 
@@ -674,7 +753,7 @@ class ShenqiFixtureTests(unittest.TestCase):
         self.assertEqual(plan.stage, "crash_rebound")
         self.assertEqual(plan.trading_date, date(2026, 9, 18))
         self.assertEqual(plan.valid_until.date(), date(2026, 9, 25))
-        self.assertEqual(plan.template_key, "crash_rebound@trade-discipline-templates-v2")
+        self.assertEqual(plan.template_key, "crash_rebound@trade-discipline-templates-v3")
         self.assertEqual(plan.position.quantity, 5800)
         self.assertEqual(plan.metrics["t1_locked_shares"], 0)
         self.assertEqual(len(plan.inputs_hash), 64)
@@ -838,6 +917,52 @@ class HardStopStructureTests(unittest.TestCase):
         price, _ = hard_stop_price("crash_rebound", tight, Decimal("10.00"))
         self.assertLess(price, Decimal("9.97"))                       # widened below the structure
         self.assertLessEqual(float(price), 10.00 - 0.9 * tight["atr14"] + 0.01)
+
+    def test_the_derivation_records_which_of_the_four_terms_bound(self):
+        """``binding_term`` is the label's source: it must name the term that actually produced the price."""
+        # 600613 on 09-18: low20 7.92 sits 0.49 above the close, the 0.9 x ATR14 term (0.66) pulls it down
+        plan = generate(shenqi_inputs())
+        daily = next(line for line in plan.lines_of("hard_stop") if line.confirm.basis == "daily")
+        self.assertEqual(daily.derivation.inputs["binding_term"], "atr")
+        self.assertEqual(daily.derivation.inputs["structure_value"], 7.92)
+        self.assertLess(float(daily.price), 7.92)
+        # the rally close 8.90 leaves the crash low as the nearest term: the structure binds
+        rally = generate(rally_inputs())
+        daily = next(line for line in rally.lines_of("hard_stop") if line.confirm.basis == "daily")
+        self.assertEqual(daily.derivation.inputs["binding_term"], "structure")
+        self.assertEqual(daily.price, Decimal("7.92"))
+        # the calm fixture from the formula test: the flat 2% term binds; a wide buffer binds the fourth
+        calm = {**plan.metrics, "low20": 9.95, "atr14": 0.05, "volatility": 0.5}
+        _, derivation = hard_stop_price("crash_rebound", calm, Decimal("10.00"))
+        self.assertEqual(derivation.inputs["binding_term"], "pct")
+        volatile = {**plan.metrics, "low20": 9.95, "atr14": 0.05, "volatility": 9.0}   # buffer 5.4%
+        _, derivation = hard_stop_price("crash_rebound", volatile, Decimal("10.00"))
+        self.assertEqual(derivation.inputs["binding_term"], "buffer")
+        self.assertEqual(HARD_STOP_TERMS, ("structure", "buffer", "atr", "pct"))
+
+    def test_the_hard_stop_label_names_the_term_that_bound_not_a_static_structure_name(self):
+        """Four cards all said 结构低点 while the stop was reference - 0.9 x ATR14; the label must say which."""
+        widened = generate(shenqi_inputs())
+        daily = next(line for line in widened.lines_of("hard_stop") if line.confirm.basis == "daily")
+        self.assertEqual(daily.label,
+                         "日线收盘跌破7.75即全部退出（急跌反弹段，结构点最近20个交易日最低价7.92"
+                         "距离不足最小止损距离，按 0.9×ATR14 向下加宽）")
+        anchored = generate(rally_inputs())
+        daily = next(line for line in anchored.lines_of("hard_stop") if line.confirm.basis == "daily")
+        self.assertEqual(daily.label, "日线收盘跌破7.92即全部退出（急跌反弹段，结构点：最近20个交易日最低价7.92）")
+        self.assertNotIn("加宽", daily.label)
+        # every other stage names its own structure point with its value
+        for stage_name, fragment in (("broken", "当日与昨日真实低点的较低者"), ("breakout_hold", "突破平台10.30下方半个百分点"),
+                                     ("trend_hold", "MA10 12.91下方半个百分点"), ("pullback_hold", "近5日收盘低点11.20"),
+                                     ("base_platform", "10日最低收盘9.98"), ("unclassified", "当日与昨日真实低点的较低者")):
+            with self.subTest(stage=stage_name):
+                plan = generate(stage_inputs(stage_name))
+                daily = next(line for line in plan.lines_of("hard_stop") if line.confirm.basis == "daily")
+                self.assertIn(fragment, daily.label)
+                binding = daily.derivation.inputs["binding_term"]
+                self.assertEqual("加宽" in daily.label, binding != "structure")
+                if binding == "atr":
+                    self.assertIn("按 0.9×ATR14 向下加宽", daily.label)
 
 
 class PlanKeyTests(unittest.TestCase):
