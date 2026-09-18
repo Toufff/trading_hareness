@@ -101,7 +101,12 @@ def _finish_stage_receipt(db: Any, run_id: str, status: str, result: Any) -> Non
             # Persist the normalized status computed by the wrapper rather
             # than trusting every legacy action to return one consistently.
             output_summary={"status": status, **{
-                key: result[key] for key in ('reason', 'error', 'trade_date', 'as_of_date', 'provider',
+                # ``lane_status``/``retryable``: a stage whose own vocabulary is
+                # wider than the four statuses above (the adjustment-factor
+                # lane) records what it really decided next to the normalized
+                # status, so the receipt can be read without parsing prose.
+                key: result[key] for key in ('reason', 'error', 'lane_status', 'retryable',
+                    'trade_date', 'as_of_date', 'provider',
                     'daily_rows', 'flow_rows', 'board_rows', 'coverage', 'quote_count', 'universe_count',
                     'quality_flags', 'candidate_dossiers', 'passed_candidates', 'incomplete_candidates',
                     'holding_dossiers', 'trade_plans', 'depends_on_broker')

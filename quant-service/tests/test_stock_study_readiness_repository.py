@@ -8,7 +8,7 @@ from app.stock_study_readiness_repository import stock_study_claims, stock_windo
 
 class StockStudyReadinessRepositoryTests(unittest.TestCase):
     @staticmethod
-    def _database(pending_rows, adjustment=None):
+    def _database(pending_rows, adjustment=None, ledger_rows=()):
         class Result:
             def __init__(self, row, rows=()): self.row, self.rows = row, list(rows)
             def fetchone(self): return self.row
@@ -18,6 +18,8 @@ class StockStudyReadinessRepositoryTests(unittest.TestCase):
             def __init__(self): self.calls = []
             def execute(self, sql, params):
                 self.calls.append((sql, params))
+                if sql.lstrip().startswith("SELECT as_of_date"):
+                    return Result(None, ledger_rows)
                 if "factored.symbol IS NOT NULL" in sql:
                     return Result(None, pending_rows)
                 if "uncovered_dates" in sql:
@@ -98,6 +100,46 @@ class StockStudyReadinessRepositoryTests(unittest.TestCase):
                             "uncovered_dates": []}))
         self.assertEqual(never["status"], "missing")
         self.assertEqual(never["rows"], 0)
+
+    def test_a_retired_date_is_reported_as_retired_with_its_ledger_reason(self) -> None:
+        """A date the factor job gave up on must not read as "queued".
+
+        After MAX_CONSECUTIVE_BLOCKED_RUNS coverage refusals the maintenance
+        lane drops the date, so nothing is going to repair it; the label has to
+        say so, and say which ledger row an operator clears to re-open it.
+        """
+        retired = self._adjustment_item(self._database(
+            [{"trading_date": date(2026, 8, 20)}],
+            adjustment={"rows": 3, "latest_date": date(2026, 8, 19), "settled_sessions": 4,
+                        "uncovered_dates": [date(2026, 8, 20)]},
+            ledger_rows=[{"as_of_date": date(2026, 8, 20),
+                          "run_key": "adjustment-factor-blocked:2026-08-20",
+                          "output_summary": {"consecutive_blocked_runs": 5,
+                                             "reason": "thin cross-section"}}]))
+        self.assertEqual(retired["status"], "retired")
+        self.assertEqual(retired["retired_dates"], ["2026-08-20"])
+        # It is neither queued nor silently folded into "missing".
+        self.assertEqual(retired["pending_dates"], [])
+        self.assertEqual(retired["missing_dates"], [])
+        self.assertIn("thin cross-section", retired["note"])
+        self.assertIn("adjustment-factor-blocked:2026-08-20", retired["note"])
+        self.assertIn("no repair is queued", retired["note"])
+        self.assertNotIn("queued for the adjustment-factor maintenance job", retired["note"])
+
+    def test_a_retired_date_beside_a_queued_one_still_fails_closed(self) -> None:
+        mixed = self._adjustment_item(self._database(
+            [{"trading_date": date(2026, 8, 19)}, {"trading_date": date(2026, 8, 20)}],
+            adjustment={"rows": 2, "latest_date": date(2026, 8, 18), "settled_sessions": 4,
+                        "uncovered_dates": [date(2026, 8, 19), date(2026, 8, 20)]},
+            ledger_rows=[{"as_of_date": date(2026, 8, 20),
+                          "run_key": "adjustment-factor-blocked:2026-08-20",
+                          "output_summary": {"consecutive_blocked_runs": 7,
+                                             "reason": "thin cross-section"}}]))
+        # The window can never complete, so it is not "pending"; the retired
+        # date is named because it is the one an operator has to act on.
+        self.assertEqual(mixed["status"], "retired")
+        self.assertEqual(mixed["retired_dates"], ["2026-08-20"])
+        self.assertEqual(mixed["pending_dates"], ["2026-08-19"])
 
     def test_the_adjustment_count_excludes_placeholder_evidence(self) -> None:
         database = self._database([])

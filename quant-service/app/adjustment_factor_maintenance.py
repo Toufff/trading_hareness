@@ -135,28 +135,70 @@ def china_today(now: datetime | None = None) -> date:
 
 def pending_dates_between(
     connection: Any, start_date: date, end_date: date,
-    *, minimum_ratio: float = PENDING_COVERAGE_RATIO,
+    *, minimum_ratio: float = PENDING_COVERAGE_RATIO, include_retired: bool = False,
 ) -> list[date]:
-    """Settled trading dates in the window whose factor coverage is incomplete."""
+    """Settled trading dates in the window whose factor coverage is incomplete.
+
+    "Pending" means *a repair is still queued for this date*.  A date the
+    blocked-date ledger has RETIRED (:data:`MAX_CONSECUTIVE_BLOCKED_RUNS`
+    consecutive coverage refusals) has dropped off the work list and will not
+    be fetched again until its daily cross-section is repaired and the ledger
+    row is cleared, so reporting it as pending promises a repair that nobody
+    is going to attempt.  The ledger is therefore consulted here, at the one
+    place every caller goes through, rather than in each caller.
+
+    ``include_retired=True`` returns the raw coverage list and is for the one
+    caller that reports the two sets separately: :func:`sync`, which needs the
+    retired dates in order to name them in its own receipt.
+    """
     rows = connection.execute(
         PENDING_DATES_SQL,
         (start_date, end_date, start_date, end_date, float(minimum_ratio)),
     ).fetchall()
-    return [row["trading_date"] for row in rows]
+    dates = [row["trading_date"] for row in rows]
+    if include_retired:
+        return dates
+    # ``retired_dates`` is defined below with the rest of the ledger; it asks
+    # nothing of the database when the coverage list is empty.
+    retired = retired_dates(connection, dates)
+    return [value for value in dates if value not in retired]
+
+
+def pending_and_retired_dates_between(
+    connection: Any, start_date: date, end_date: date,
+    *, minimum_ratio: float = PENDING_COVERAGE_RATIO,
+) -> tuple[list[date], dict[date, dict[str, Any]]]:
+    """Split one window's coverage list into "still queued" and "retired".
+
+    Readiness labels need both halves: a date that is queued is expected to
+    arrive, a retired one never will, and the caller must be able to say which
+    with the ledger's own evidence (run_key + reason) rather than guessing.
+    """
+    dates = pending_dates_between(
+        connection, start_date, end_date, minimum_ratio=minimum_ratio, include_retired=True)
+    retired = retired_date_details(connection, dates)
+    return [value for value in dates if value not in retired], retired
 
 
 def pending_dates(
     database: Any, *, lookback_days: int = 30, today: date | None = None,
-    minimum_ratio: float = PENDING_COVERAGE_RATIO,
+    minimum_ratio: float = PENDING_COVERAGE_RATIO, include_retired: bool = False,
 ) -> list[date]:
-    """Read-only work list for the maintenance job and the readiness labels."""
+    """Read-only work list for the maintenance job and the readiness labels.
+
+    ``include_retired`` is passed straight through to
+    :func:`pending_dates_between` and defaults to excluding retired dates, so a
+    caller that has not thought about the ledger cannot promise a repair that
+    has already been given up on.
+    """
     if lookback_days < 0:
         raise ValueError("lookback_days must not be negative")
     end_date = today or china_today()
     start_date = end_date - timedelta(days=lookback_days)
     with database.transaction() as connection:
         return pending_dates_between(
-            connection, start_date, end_date, minimum_ratio=minimum_ratio)
+            connection, start_date, end_date, minimum_ratio=minimum_ratio,
+            include_retired=include_retired)
 
 
 #: Durable ledger for a date the controls sync refuses on coverage grounds.
@@ -184,7 +226,7 @@ ON CONFLICT(run_key) DO UPDATE SET
          'last_blocked_at', now()::text)
 RETURNING output_summary"""
 
-_RETIRED_DATES_SQL = """SELECT as_of_date FROM quant.automation_runs
+_RETIRED_DATES_SQL = """SELECT as_of_date,run_key,output_summary FROM quant.automation_runs
      WHERE task_key=%s AND run_key = ANY(%s)
        AND coalesce((output_summary->>'consecutive_blocked_runs')::int,0) >= %s"""
 
@@ -194,16 +236,40 @@ def blocked_date_run_key(trade_date: date) -> str:
     return f"{BLOCKED_DATE_RUN_KEY_PREFIX}:{trade_date}"
 
 
-def retired_dates(connection: Any, dates: list[date]) -> set[date]:
-    """Dates that have been coverage-blocked often enough to drop off the list."""
+#: What a caller may say about a retired date without re-reading the ledger.
+RETIRED_DATE_DEFAULT_REASON = "coverage gate refused this date"
+
+
+def retired_date_details(connection: Any, dates: list[date]) -> dict[date, dict[str, Any]]:
+    """Ledger evidence for every date that has dropped off the work list.
+
+    Returned per date so a human-facing label can name *why* the repair is not
+    queued -- the ledger ``run_key`` an operator clears to re-open it, the
+    coverage reason the daily-controls gate gave, and how many consecutive
+    refusals retired it.
+    """
     if not dates:
-        return set()
+        return {}
     rows = connection.execute(
         _RETIRED_DATES_SQL,
         (BLOCKED_DATE_TASK_KEY, [blocked_date_run_key(value) for value in dates],
          MAX_CONSECUTIVE_BLOCKED_RUNS),
     ).fetchall()
-    return {row["as_of_date"] for row in rows}
+    details: dict[date, dict[str, Any]] = {}
+    for row in rows:
+        summary = dict(row.get("output_summary") or {})
+        details[row["as_of_date"]] = {
+            "run_key": row.get("run_key") or blocked_date_run_key(row["as_of_date"]),
+            "reason": str(summary.get("reason") or RETIRED_DATE_DEFAULT_REASON),
+            "consecutive_blocked_runs": int(summary.get("consecutive_blocked_runs") or 0),
+            "retired_at": summary.get("retired_at"),
+        }
+    return details
+
+
+def retired_dates(connection: Any, dates: list[date]) -> set[date]:
+    """Dates that have been coverage-blocked often enough to drop off the list."""
+    return set(retired_date_details(connection, dates))
 
 
 def record_blocked_date(connection: Any, trade_date: date, reason: str) -> dict[str, Any]:
@@ -253,7 +319,13 @@ def record_blocked_date(connection: Any, trade_date: date, reason: str) -> dict[
 
 
 def clear_blocked_date(connection: Any, trade_date: date) -> None:
-    """Reset the consecutive-block counter once a date is fetched successfully."""
+    """Reset the consecutive-block counter once a date is fetched successfully.
+
+    The retirement receipt is resolved in the same transaction: the issue said
+    "this date is dropped from the work list", and a date that has just been
+    fetched is back on it, so leaving the row open would keep an unresolvable
+    warning in ``quant.data_quality_issues`` forever.
+    """
     connection.execute(
         """UPDATE quant.automation_runs
               SET status='completed', finished_at=now(), updated_at=now(),
@@ -262,6 +334,12 @@ def clear_blocked_date(connection: Any, trade_date: date) -> None:
                       'cleared_at', now()::text)
             WHERE run_key=%s""",
         (blocked_date_run_key(trade_date),),
+    )
+    connection.execute(
+        """UPDATE quant.data_quality_issues SET resolved_at=now()
+            WHERE code='adjustment_factor_date_retired' AND trading_date=%s
+              AND resolved_at IS NULL""",
+        (trade_date,),
     )
 
 
@@ -310,8 +388,12 @@ async def sync(
     list with a one-time durable receipt.  Only a provider error or an
     exception makes the run itself fail.
     """
+    # The raw coverage list: this job is the one caller that reports the
+    # retired dates itself (``plan['retired_dates']`` below), so it asks for
+    # them rather than letting the helper drop them.
     dates = await dependencies.run_database(functools.partial(
         pending_dates, dependencies.database, lookback_days=lookback_days, today=today,
+        include_retired=True,
     ))
     retired = await dependencies.run_database(functools.partial(
         _retired_dates, dependencies.database, dates,
@@ -381,6 +463,70 @@ async def sync(
     return plan
 
 
+#: Base explanation carried by every post-close receipt of this lane.
+POST_CLOSE_NON_GATING_REASON = (
+    "adjustment factors are repaired on their own lane; this stage never gates the pipeline")
+
+#: The only lane verdicts whose post-close receipt may become DURABLE.
+#:
+#: ``post_close_refresh.record_stage_with_receipt`` normalizes any status it
+#: does not recognise to ``completed`` and then refuses to run the stage again
+#: for the same trade date, because a ``completed`` receipt is the pipeline's
+#: "this work is done" marker.  The pipeline task repeats every
+#: ``RetryIntervalMinutes`` until ~22:40, so a receipt that says ``completed``
+#: while dates are still unrepaired burns the whole evening's retries.  Only a
+#: run that left nothing behind may stick.
+POST_CLOSE_TERMINAL_LANE_STATUSES = ("completed", "unchanged")
+
+
+def post_close_stage_receipt(result: dict[str, Any]) -> dict[str, Any]:
+    """Translate one lane result into a post-close stage status.
+
+    Pure, so the mapping can be pinned without a database:
+
+    ================================  ===========  ====================================
+    lane verdict                      stage status durable receipt?
+    ================================  ===========  ====================================
+    ``completed`` (nothing left)      completed    yes -- the dates were repaired
+    ``unchanged`` (no work found)     unchanged    yes -- nothing was pending
+    ``completed`` with skipped dates  blocked      no  -- a mixed run still owes work
+    ``skipped`` (coverage refused)    blocked      no  -- retry on the next repetition
+    ``failed``                        failed       no  -- retry on the next repetition
+    anything else (e.g. ``planned``)  blocked      no  -- never let an unknown stick
+    ================================  ===========  ====================================
+
+    ``blocked`` and ``failed`` are both statuses ``record_stage_with_receipt``
+    recognises, so ``automation_runs`` keeps the real verdict instead of a
+    normalized ``completed``, and ``start_or_resume_run`` re-opens the row on
+    the next repetition.  Both also land in the run's
+    ``non_gating_stages_needing_attention`` list, and neither can make the run
+    ``partial`` -- ``NON_GATING_STAGES`` excludes this stage from
+    ``deferred_stages``.
+    """
+    lane_status = str(result.get("status") or "")
+    skipped = int(result.get("skipped_dates") or 0)
+    failed = int(result.get("failed_dates") or 0)
+    unrepaired = [str(item.get("trade_date")) for item in (result.get("results") or [])
+                  if isinstance(item, dict) and item.get("outcome") in {"skipped", "failed"}]
+    if lane_status == FAILED_STATUS or failed:
+        status = "failed"
+    elif lane_status == "skipped" or skipped:
+        status = "blocked"
+    elif lane_status in POST_CLOSE_TERMINAL_LANE_STATUSES:
+        status = lane_status
+    else:
+        status = "blocked"
+    retryable = status not in POST_CLOSE_TERMINAL_LANE_STATUSES
+    reason = POST_CLOSE_NON_GATING_REASON
+    if retryable:
+        reason = (
+            f"{reason}; {len(unrepaired) or skipped + failed} date(s) are still unrepaired "
+            f"({', '.join(unrepaired) or 'see results'}), so this stage's durable receipt stays "
+            "open and the next pipeline repetition re-evaluates them")
+    return {"status": status, "lane_status": lane_status, "retryable": retryable,
+            "unrepaired_dates": unrepaired, "reason": reason}
+
+
 async def post_close_sync(
     dependencies: AdjustmentFactorMaintenanceDependencies,
     *, lookback_days: int = POST_CLOSE_LOOKBACK_DAYS, today: date | None = None,
@@ -393,12 +539,14 @@ async def post_close_sync(
     availability must not be able to push the evening pipeline to ``partial``.
     ``post_close_refresh.NON_GATING_STAGES`` is what enforces that, and this
     payload states it so the receipt is self-describing.
+
+    The status is NOT the lane's own verdict: it is
+    :func:`post_close_stage_receipt`'s translation of it into the durable
+    receipt vocabulary, so a run that skipped a date for coverage is retried by
+    the evening's later repetitions instead of being sealed as ``completed``.
     """
     result = await sync(dependencies, lookback_days=lookback_days, today=today)
-    return {
-        **result, "non_gating": True,
-        "reason": "adjustment factors are repaired on their own lane; this stage never gates the pipeline",
-    }
+    return {**result, **post_close_stage_receipt(result), "non_gating": True}
 
 
 def _retired_dates(database: Any, dates: list[date]) -> set[date]:
@@ -420,8 +568,10 @@ __all__ = [
     "AdjustmentFactorMaintenanceDependencies", "BLOCKED_DATE_TASK_KEY", "FAILED_STATUS",
     "GUARDED_BAR_TABLES", "IDENTITY_FACTOR_LEAK_SQL_TEMPLATE", "MAX_CONSECUTIVE_BLOCKED_RUNS",
     "PENDING_COVERAGE_RATIO", "PENDING_DATES_SQL", "POST_CLOSE_LOOKBACK_DAYS",
-    "REAL_FACTOR_PREDICATE_SQL", "SUCCESS_STATUSES",
+    "POST_CLOSE_NON_GATING_REASON", "POST_CLOSE_TERMINAL_LANE_STATUSES",
+    "REAL_FACTOR_PREDICATE_SQL", "RETIRED_DATE_DEFAULT_REASON", "SUCCESS_STATUSES",
     "blocked_date_run_key", "china_today", "clear_blocked_date", "identity_factor_leak_sql",
-    "pending_dates", "pending_dates_between", "post_close_sync", "record_blocked_date",
-    "retired_dates", "sync",
+    "pending_and_retired_dates_between", "pending_dates", "pending_dates_between",
+    "post_close_stage_receipt", "post_close_sync", "record_blocked_date",
+    "retired_date_details", "retired_dates", "sync",
 ]

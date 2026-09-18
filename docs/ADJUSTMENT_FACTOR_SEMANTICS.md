@@ -86,9 +86,15 @@
 12. `app/stock_study_readiness_repository.py`：`adj_factor` 条目改为**按 symbol 判定**。
     计数只算**真因子**（`provider LIKE 'tushare%'` 且语义可提升），因为第 4 节步骤 4
     只给占位行打标注、从不删除，`count(*) > 0` 会在恰恰还没修好的 symbol 上永远报
-    `ready`。三态：该 symbol 窗口内所有结算日都有真因子 → `ready`；缺的日期**全部**
-    在维护任务的待办清单上 → `pending`；否则（含混合情况）→ `missing`，失败关闭。
-    条目另带 `settled_sessions` / `pending_dates` / `missing_dates`。
+    `ready`。四态：该 symbol 窗口内所有结算日都有真因子 → `ready`；缺的日期里**有任何
+    一天已被工作清单退休**（见 5.3 的"连续被拒 5 次"）→ `retired`，note 里带该日期的
+    `run_key` 与被拒原因——它不会被补，再说"排队中"就是假承诺；缺的日期**全部**在
+    维护任务的待办清单上 → `pending`；否则（含混合情况）→ `missing`，失败关闭。
+    条目另带 `settled_sessions` / `pending_dates` / `retired_dates` / `missing_dates`。
+    判定用 `adjustment_factor_maintenance.pending_and_retired_dates_between()`；
+    `pending_dates_between()` 本身**默认就查退休账本并剔除退休日期**——"pending"
+    是一句"有人会来修"的承诺，只有 `sync()`（它自己分别上报两份清单）用
+    `include_retired=True` 取原始覆盖率清单。
 13. `scripts/adjustment-factor-maintenance.py`：
     `sync --lookback-days N --env-file ... --dry-run`，ASCII-only stdout；
     依赖组装挪到 `app.main.adjustment_factor_maintenance_dependencies()`，
@@ -324,6 +330,28 @@ SELECT count(*)::bigint AS identity_leaks
 - 它**不在** `POST_CLOSE_STAGE_DEPENDENCIES` 的任何一边：既不被谁阻塞，也不阻塞谁。
 - 它与 `controls_ready` 无关（那只看 `core_daily_controls`）。
 
+**阶段状态 ≠ 车道状态。** 盘后任务带 repetition（约 16:40–22:40 每隔
+`RetryIntervalMinutes` 重发同一个 `trade_date`），而
+`post_close_refresh.record_stage_with_receipt` 会跳过 `quant.automation_runs` 里已
+`completed` 的阶段，并且把它**不认识的状态（含 `skipped` / `unchanged`）一律归一成
+`completed`**。所以 `post_close_sync()` 上报的 `status` 是
+`post_close_stage_receipt()` 把车道结论翻译成回执词汇后的结果，原始结论另存
+`lane_status`：
+
+| 车道结论 | 阶段 `status` | 回执是否落定 |
+|---|---|---|
+| `completed`（没有留下任何日期） | `completed` | 是 |
+| `unchanged`（本来就没有待补日期） | `unchanged` → 归一成 `completed` | 是 |
+| `completed` 但 `skipped_dates > 0`（混合轮） | `blocked` | 否 |
+| `skipped`（覆盖率闸门拒绝） | `blocked` | 否 |
+| `failed` | `failed` | 否 |
+| 其它（如 `planned`） | `blocked` | 否 |
+
+`blocked`/`failed` 都是 `record_stage_with_receipt` 认识的状态，`start_or_resume_run`
+只对 `completed` 保留回执，所以**一个因覆盖率跳过的因子轮会在当晚后续 repetition 里
+重新评估**，而不是被一张"已完成"的回执封死一整晚。payload 里另有 `retryable` 与
+`unrepaired_dates`，回执 `reason` 直接写明还欠哪几天。
+
 理由：复权因子是另一条 provider 路线，它的可用性绝不能拖慢或拖垮晚间收盘流水线；
 但"今晚就补一次"能让绝大多数交易日在当晚就拿到真因子。
 
@@ -384,9 +412,14 @@ python scripts/adjustment-factor-maintenance.py sync \
   达到 `MAX_CONSECUTIVE_BLOCKED_RUNS = 5` 时**写一次**
   `quant.data_quality_issues` 回执（`code='adjustment_factor_date_retired'`）
   并从此不再出现在工作清单里（`sync()` 结果的 `retired_dates`）。之后再被拒不再重复
-  告警。任何一次抓取成功都会把计数清零，该日期重新回到清单。
+  告警。任何一次抓取成功都会把计数清零，该日期重新回到清单，同时
+  `clear_blocked_date()` 在同一个事务里把那条 `adjustment_factor_date_retired`
+  回执置 `resolved_at=now()`——否则它是一条**永远无人能关**的告警。
   要手动让一个日期回到清单：先修当天的日线覆盖率，再删掉那一行 `automation_runs`
   （或等下一次成功抓取自动清零）。
+  退休期间它对使用者是可见的：`pending_dates_between()` 默认把退休日期从"待补"
+  里剔除，个股窗口就绪度对该日期报 `retired` 并给出 `run_key` 与被拒原因
+  （第 2 节第 12 项），而不是继续说"已排队"。
 - `--dry-run` 只解析并打印待处理日期，不发 provider 请求、不写库。
 - stdout 是 ASCII-only JSON（任务宿主控制台是 GBK）；env 文件只写进 `os.environ`，
   任何凭据值都不会被打印或落盘。

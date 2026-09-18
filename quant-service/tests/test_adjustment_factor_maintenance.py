@@ -18,16 +18,22 @@ from app.adjustment_factor_maintenance import (
     MAX_CONSECUTIVE_BLOCKED_RUNS,
     PENDING_COVERAGE_RATIO,
     POST_CLOSE_LOOKBACK_DAYS,
+    POST_CLOSE_TERMINAL_LANE_STATUSES,
     blocked_date_run_key,
     china_today,
+    clear_blocked_date,
+    pending_and_retired_dates_between,
     pending_dates,
     pending_dates_between,
+    post_close_stage_receipt,
     post_close_sync,
     record_blocked_date,
+    retired_date_details,
     retired_dates,
     sync,
 )
 from app.full_market_daily_controls_sync import COVERAGE_BLOCK_REASON, PROVIDER_BLOCK_REASON
+from app.post_close_refresh import record_stage_with_receipt
 
 
 class _Result:
@@ -113,6 +119,50 @@ class PendingDatesTests(unittest.TestCase):
             [date(2026, 9, 4)])
         self.assertEqual(connection.calls[0][1][:4],
                          (date(2026, 9, 1), date(2026, 9, 18), date(2026, 9, 1), date(2026, 9, 18)))
+
+    def test_a_retired_date_is_not_reported_as_pending(self):
+        """"Pending" is a promise that a repair is queued; a retired date is not.
+
+        The readiness labels read this helper directly, so a date the ledger
+        retired used to be shown as "queued for the adjustment-factor
+        maintenance job" forever, although the job had stopped fetching it.
+        """
+        connection = _Connection(
+            [{"trading_date": date(2026, 9, 4)}, {"trading_date": date(2026, 9, 15)}],
+            ledger_rows=[{"as_of_date": date(2026, 9, 15), "run_key": "adjustment-factor-blocked:2026-09-15",
+                          "output_summary": {"consecutive_blocked_runs": 5, "reason": "thin cross-section"}}])
+        self.assertEqual(
+            pending_dates_between(connection, date(2026, 9, 1), date(2026, 9, 18)),
+            [date(2026, 9, 4)])
+        # The ledger really was consulted, with the documented threshold.
+        ledger_call = next(call for call in connection.calls if call[0].startswith("SELECT as_of_date"))
+        self.assertEqual(ledger_call[1][0], BLOCKED_DATE_TASK_KEY)
+        self.assertEqual(ledger_call[1][2], MAX_CONSECUTIVE_BLOCKED_RUNS)
+        # The maintenance job asks for the raw list because it reports the two
+        # sets separately in its own receipt.
+        self.assertEqual(
+            pending_dates_between(connection, date(2026, 9, 1), date(2026, 9, 18), include_retired=True),
+            [date(2026, 9, 4), date(2026, 9, 15)])
+
+    def test_the_split_helper_returns_the_ledger_evidence_for_a_retired_date(self):
+        connection = _Connection(
+            [{"trading_date": date(2026, 9, 4)}, {"trading_date": date(2026, 9, 15)}],
+            ledger_rows=[{"as_of_date": date(2026, 9, 15), "run_key": "adjustment-factor-blocked:2026-09-15",
+                          "output_summary": {"consecutive_blocked_runs": 6, "reason": "thin cross-section",
+                                             "retired_at": "2026-09-18 04:31:00"}}])
+        pending, retired = pending_and_retired_dates_between(
+            connection, date(2026, 9, 1), date(2026, 9, 18))
+        self.assertEqual(pending, [date(2026, 9, 4)])
+        self.assertEqual(retired[date(2026, 9, 15)], {
+            "run_key": "adjustment-factor-blocked:2026-09-15", "reason": "thin cross-section",
+            "consecutive_blocked_runs": 6, "retired_at": "2026-09-18 04:31:00"})
+
+    def test_retired_details_fall_back_to_the_run_key_and_a_default_reason(self):
+        connection = _Connection([], ledger_rows=[{"as_of_date": date(2026, 9, 15)}])
+        details = retired_date_details(connection, [date(2026, 9, 15)])
+        self.assertEqual(details[date(2026, 9, 15)]["run_key"],
+                         blocked_date_run_key(date(2026, 9, 15)))
+        self.assertTrue(details[date(2026, 9, 15)]["reason"])
 
     def test_exchange_local_today_is_shanghai(self):
         self.assertIsInstance(china_today(), date)
@@ -291,8 +341,10 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
 
         original = module.pending_dates
 
-        def capture(_database, *, lookback_days, today=None, minimum_ratio=PENDING_COVERAGE_RATIO):
+        def capture(_database, *, lookback_days, today=None, minimum_ratio=PENDING_COVERAGE_RATIO,
+                    include_retired=False):
             seen["lookback_days"] = lookback_days
+            seen["include_retired"] = include_retired
             return []
 
         module.pending_dates = capture
@@ -302,8 +354,234 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
             module.pending_dates = original
 
         self.assertEqual(seen["lookback_days"], POST_CLOSE_LOOKBACK_DAYS)
+        # The job reports the retired dates itself, so it is the one caller
+        # that asks for the raw coverage list.
+        self.assertTrue(seen["include_retired"])
         self.assertTrue(result["non_gating"])
+        # Nothing was pending: this is the one post-close verdict that may
+        # seal a durable receipt.
         self.assertEqual(result["status"], "unchanged")
+        self.assertEqual(result["lane_status"], "unchanged")
+        self.assertFalse(result["retryable"])
+
+
+class _AutomationRunsLedger:
+    """A stand-in for quant.automation_runs that honours the real statements.
+
+    Only three statements reach it, and each is implemented exactly as
+    ``automation_run_repository`` writes it, including the ON CONFLICT rule
+    that makes a ``completed`` receipt sticky and every other status
+    re-openable.  Nothing about the stage wrapper is faked: the tests below run
+    the real ``record_stage_with_receipt`` against this ledger.
+    """
+
+    def __init__(self):
+        self.rows: dict[str, dict] = {}
+
+    @staticmethod
+    def _plain(value):
+        # finish_run wraps the summary in psycopg's Json adapter.
+        return getattr(value, "obj", value)
+
+    def execute(self, sql, params=None):
+        text = " ".join(str(sql).split())
+        if text.startswith("INSERT INTO quant.automation_runs"):
+            run_key = params[1]
+            row = self.rows.get(run_key)
+            if row is None:
+                row = {"run_id": f"run-{len(self.rows) + 1}", "status": "running",
+                       "output_summary": {}, "run_key": run_key}
+                self.rows[run_key] = row
+            elif row["status"] != "completed":
+                row["status"] = "running"
+            return _Result([dict(row)])
+        if text.startswith("UPDATE quant.automation_runs SET status=%s,output_summary=%s"):
+            status, summary, run_id = params
+            row = next(item for item in self.rows.values() if item["run_id"] == run_id)
+            row["status"], row["output_summary"] = status, self._plain(summary)
+            return _Result([])
+        if text.startswith("UPDATE quant.automation_runs SET status='failed'"):
+            row = next(item for item in self.rows.values() if item["run_id"] == params[2])
+            row["status"], row["error_message"] = "failed", params[1]
+            return _Result([])
+        raise AssertionError(f"unexpected statement against the ledger: {text}")
+
+
+class _LedgerDatabase:
+    def __init__(self, ledger):
+        self.connection = ledger
+
+    def transaction(self):
+        class Context:
+            def __init__(self, connection): self.connection = connection
+            def __enter__(self): return self.connection
+            def __exit__(self, *_args): return False
+        return Context(self.connection)
+
+
+class PostCloseStageReceiptTests(unittest.IsolatedAsyncioTestCase):
+    """The lane's verdict as the post-close pipeline's DURABLE receipt.
+
+    ``install-post-close-pipeline-task.ps1`` gives the pipeline task a
+    repetition (~16:40-22:40) and ``run-post-close-pipeline.ps1`` re-POSTs the
+    same ``trade_date`` on every repetition, while
+    ``post_close_refresh.record_stage_with_receipt`` skips any stage whose
+    ``quant.automation_runs`` row already says ``completed`` -- and normalizes
+    every status it does not recognise, ``skipped`` included, to exactly that.
+    So a coverage-skipped factor run recorded as ``completed`` burns the whole
+    evening's remaining retries for that date.
+    """
+
+    def _dependencies(self, database, **overrides):
+        base = dict(
+            database=database, run_database=_run_database,
+            call_tushare_api=None, parse_tushare_date=None, persist_tushare_rows=None,
+            persist_blocked=None, safe_error_detail=lambda value, _limit: value,
+            executor_saturated_error=RuntimeError, record_provider_success=None,
+            record_provider_failure=None, record_provider_api_capability=None,
+        )
+        base.update(overrides)
+        return AdjustmentFactorMaintenanceDependencies(**base)
+
+    async def _lane(self, outcomes, pending=(date(2026, 9, 17),)):
+        """One real ``post_close_sync`` payload, with the provider replaced."""
+        database = _Database([{"trading_date": value} for value in pending])
+        import app.adjustment_factor_maintenance as module
+
+        async def fake_sync(trade_date, **_kwargs):
+            return dict(outcomes[str(trade_date)], trade_date=str(trade_date))
+
+        original = module.sync_daily_controls
+        module.sync_daily_controls = fake_sync
+        try:
+            return await post_close_sync(self._dependencies(database), today=date(2026, 9, 19))
+        finally:
+            module.sync_daily_controls = original
+
+    @staticmethod
+    async def _record(ledger, payload, *, calls):
+        """Drive the real stage wrapper, i.e. the receipt normalization path."""
+        async def run_database_blocking(action, *args, **_kwargs):
+            return action(*args)
+
+        async def stage_action():
+            calls.append(payload)
+            return payload
+
+        return await record_stage_with_receipt(
+            "adjustment_factors", date(2026, 9, 18), stage_action,
+            db=_LedgerDatabase(ledger), run_database_blocking=run_database_blocking,
+            safe_error_detail=lambda value, _limit: value,
+        )
+
+    @staticmethod
+    def _receipt(ledger) -> dict:
+        self_row = next(iter(ledger.rows.values()))
+        return self_row
+
+    async def test_the_wrapper_really_does_normalize_an_unknown_status_to_completed(self):
+        """The mechanism the mapping exists for, pinned rather than assumed."""
+        ledger, calls = _AutomationRunsLedger(), []
+        await self._record(ledger, {"status": "skipped", "reason": "coverage"}, calls=calls)
+        self.assertEqual(self._receipt(ledger)["status"], "completed")
+        # ... and a 'completed' row makes the next repetition skip the stage.
+        second = await self._record(ledger, {"status": "skipped"}, calls=calls)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(second["resumed_from_receipt"])
+
+    async def test_a_coverage_skipped_run_is_recorded_blocked_and_runs_again(self):
+        payload = await self._lane({"2026-09-17": {
+            "status": "blocked", "blocked_by": COVERAGE_BLOCK_REASON,
+            "reason": "full-market daily bars are not ready"}})
+        self.assertEqual(payload["lane_status"], "skipped")
+        self.assertEqual(payload["status"], "blocked")
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(payload["unrepaired_dates"], ["2026-09-17"])
+        self.assertIn("2026-09-17", payload["reason"])
+
+        ledger, calls = _AutomationRunsLedger(), []
+        await self._record(ledger, payload, calls=calls)
+        receipt = self._receipt(ledger)
+        self.assertEqual(receipt["status"], "blocked")
+        self.assertEqual(receipt["output_summary"]["status"], "blocked")
+        self.assertIn("still unrepaired", receipt["output_summary"]["reason"])
+        # The lane's own verdict survives beside the normalized status, so the
+        # receipt says 'this was a coverage skip', not just 'blocked'.
+        self.assertEqual(receipt["output_summary"]["lane_status"], "skipped")
+        self.assertTrue(receipt["output_summary"]["retryable"])
+
+        # The next pipeline repetition re-opens the row and runs the stage.
+        result = await self._record(ledger, payload, calls=calls)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("resumed_from_receipt", result)
+        self.assertEqual(self._receipt(ledger)["status"], "blocked")
+
+    async def test_a_repaired_run_seals_the_receipt_for_the_rest_of_the_evening(self):
+        payload = await self._lane({"2026-09-17": {"status": "completed"}})
+        self.assertEqual((payload["status"], payload["lane_status"]), ("completed", "completed"))
+        self.assertFalse(payload["retryable"])
+
+        ledger, calls = _AutomationRunsLedger(), []
+        await self._record(ledger, payload, calls=calls)
+        self.assertEqual(self._receipt(ledger)["status"], "completed")
+        resumed = await self._record(ledger, payload, calls=calls)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(resumed["resumed_from_receipt"])
+
+    async def test_a_mixed_run_that_still_owes_one_date_is_not_sealed(self):
+        """The lane calls a run with one repair and one skip 'completed'."""
+        payload = await self._lane(
+            {"2026-09-17": {"status": "completed"},
+             "2026-09-18": {"status": "blocked", "blocked_by": COVERAGE_BLOCK_REASON,
+                            "reason": "thin cross-section"}},
+            pending=(date(2026, 9, 17), date(2026, 9, 18)))
+        self.assertEqual(payload["lane_status"], "completed")
+        self.assertEqual(payload["skipped_dates"], 1)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["unrepaired_dates"], ["2026-09-18"])
+
+        ledger, calls = _AutomationRunsLedger(), []
+        await self._record(ledger, payload, calls=calls)
+        self.assertEqual(self._receipt(ledger)["status"], "blocked")
+        await self._record(ledger, payload, calls=calls)
+        self.assertEqual(len(calls), 2)
+
+    async def test_a_provider_failure_is_recorded_failed_and_runs_again(self):
+        payload = await self._lane({"2026-09-17": {
+            "status": "blocked", "blocked_by": PROVIDER_BLOCK_REASON,
+            "reason": "adj_factor route refused"}})
+        self.assertEqual((payload["lane_status"], payload["status"]), ("failed", "failed"))
+
+        ledger, calls = _AutomationRunsLedger(), []
+        await self._record(ledger, payload, calls=calls)
+        self.assertEqual(self._receipt(ledger)["status"], "failed")
+        await self._record(ledger, payload, calls=calls)
+        self.assertEqual(len(calls), 2)
+
+    async def test_nothing_pending_is_the_only_other_sealed_verdict(self):
+        payload = await self._lane({}, pending=())
+        self.assertEqual((payload["lane_status"], payload["status"]), ("unchanged", "unchanged"))
+        ledger, calls = _AutomationRunsLedger(), []
+        await self._record(ledger, payload, calls=calls)
+        # 'unchanged' is not one of the four statuses the wrapper recognises,
+        # so it is normalized to 'completed' -- which is correct here and only
+        # here: no date was left behind.
+        self.assertEqual(self._receipt(ledger)["status"], "completed")
+
+    def test_the_mapping_table_is_pinned(self):
+        self.assertEqual(POST_CLOSE_TERMINAL_LANE_STATUSES, ("completed", "unchanged"))
+        cases = {
+            "completed": "completed", "unchanged": "unchanged", "skipped": "blocked",
+            "failed": "failed", "planned": "blocked", "": "blocked",
+        }
+        for lane_status, expected in cases.items():
+            with self.subTest(lane_status=lane_status):
+                self.assertEqual(post_close_stage_receipt({"status": lane_status})["status"], expected)
+        # Counters win over a lane verdict that looks harmless.
+        self.assertEqual(
+            post_close_stage_receipt({"status": "completed", "skipped_dates": 1})["status"], "blocked")
+        self.assertEqual(
+            post_close_stage_receipt({"status": "completed", "failed_dates": 1})["status"], "failed")
 
 
 class BlockedDateLedgerTests(unittest.TestCase):
@@ -342,6 +620,21 @@ class BlockedDateLedgerTests(unittest.TestCase):
         self.assertFalse(again["retirement_receipt_written"])
         self.assertEqual(
             len([call for call in connection.calls if "data_quality_issues" in call[0]]), 1)
+
+    def test_clearing_a_date_also_resolves_its_retirement_receipt(self):
+        """A retired date that is fetched again is back on the work list.
+
+        Leaving the ``adjustment_factor_date_retired`` row open would keep a
+        warning in quant.data_quality_issues that nothing can ever resolve.
+        """
+        connection = _Connection([])
+        clear_blocked_date(connection, date(2026, 9, 4))
+        resolved = [call for call in connection.calls
+                    if "data_quality_issues SET resolved_at" in call[0]]
+        self.assertEqual(len(resolved), 1)
+        self.assertIn("code='adjustment_factor_date_retired'", resolved[0][0])
+        self.assertIn("resolved_at IS NULL", resolved[0][0])
+        self.assertEqual(resolved[0][1], (date(2026, 9, 4),))
 
     def test_below_the_threshold_nothing_is_retired_and_no_receipt_is_written(self):
         connection = _Connection([], blocked_summary={
@@ -398,9 +691,26 @@ class BlockedDateLedgerPostgresTests(unittest.TestCase):
                 self.assertEqual(again["consecutive_blocked_runs"], MAX_CONSECUTIVE_BLOCKED_RUNS + 1)
                 self.assertFalse(again["retirement_receipt_written"])
 
-                # A successful fetch puts the date back on the work list.
+                # The retired date carries its ledger evidence, and the work
+                # list stops reporting it as pending.
+                details = retired_date_details(connection, [self.trade_date])
+                self.assertEqual(details[self.trade_date]["run_key"],
+                                 blocked_date_run_key(self.trade_date))
+                self.assertEqual(details[self.trade_date]["reason"], "thin cross-section")
+                self.assertGreaterEqual(
+                    details[self.trade_date]["consecutive_blocked_runs"],
+                    MAX_CONSECUTIVE_BLOCKED_RUNS)
+
+                # A successful fetch puts the date back on the work list and
+                # resolves the one-time retirement warning.
                 clear_blocked_date(connection, self.trade_date)
                 self.assertEqual(retired_dates(connection, [self.trade_date]), set())
+                self.assertEqual(retired_date_details(connection, [self.trade_date]), {})
+                open_receipts = connection.execute(
+                    "SELECT count(*)::int AS rows FROM quant.data_quality_issues "
+                    "WHERE code='adjustment_factor_date_retired' AND trading_date=%s "
+                    "AND resolved_at IS NULL", (self.trade_date,)).fetchone()["rows"]
+                self.assertEqual(open_receipts, 0)
                 row = connection.execute(
                     "SELECT status,output_summary FROM quant.automation_runs WHERE run_key=%s",
                     (blocked_date_run_key(self.trade_date),)).fetchone()
