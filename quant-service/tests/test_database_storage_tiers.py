@@ -1053,6 +1053,265 @@ class VacuumIsolationTest(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
 
 
+class _Rows:
+    """The slice of a psycopg cursor these code paths actually use."""
+
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class CutoffIndexRepairTest(unittest.TestCase):
+    """Repairing a cancelled CREATE INDEX CONCURRENTLY, by statement shape.
+
+    ``IF NOT EXISTS`` matches an INVALID index by name and does nothing, so the
+    repair has to drop it first -- and CONCURRENTLY, because the plain form takes
+    an AccessExclusiveLock on a 19 GB table in the middle of the night.  Nothing
+    here is executed: the fake connection records the statement text and answers
+    the catalog reads from a scripted list of ``cutoff_index_state`` rows.
+    """
+
+    POLICY = tiers.TIER_POLICY[0]  # quant.raw_market_observations
+
+    class _Conn:
+        def __init__(self, states, *, lock_refuses=()):
+            self.statements: list[str] = []
+            self._states = list(states)
+            self._lock_refuses = tuple(lock_refuses)
+
+        def execute(self, statement, params=None):
+            import psycopg
+
+            text = statement if isinstance(statement, str) else statement.as_string(None)
+            self.statements.append(text)
+            for token in self._lock_refuses:
+                if token in text:
+                    raise psycopg.errors.LockNotAvailable(f"could not obtain lock for {token}")
+            if "to_regclass" in text:
+                return _Rows([("quant.raw_market_observations",)])
+            if "i.indisvalid, i.indisready" in text:
+                state = self._states.pop(0) if self._states else None
+                return _Rows([] if state is None else [state])
+            if "SELECT EXISTS" in text:
+                return _Rows([(False,)])
+            return _Rows([])
+
+    @staticmethod
+    def _notes():
+        actions: list[dict] = []
+
+        def note(action, target, result, **extra):
+            actions.append({"action": action, "target": target, "result": result, **extra})
+
+        return actions, note
+
+    def _run(self, states, **kwargs):
+        conn = self._Conn(states, **kwargs)
+        actions, note = self._notes()
+        tiers._install_cutoff_index(conn, self.POLICY, note)
+        return conn, actions
+
+    @staticmethod
+    def _index_results(actions):
+        return [a["result"] for a in actions if a["action"] == "create_cutoff_index"]
+
+    def test_an_invalid_index_is_dropped_concurrently_before_it_is_rebuilt(self):
+        # exists-but-invalid, then a valid index after the rebuild.
+        conn, actions = self._run([(False, True), (True, True)])
+        drops = [s for s in conn.statements if "DROP INDEX" in s]
+        creates = [s for s in conn.statements if "CREATE INDEX" in s]
+        self.assertEqual(len(drops), 1, conn.statements)
+        self.assertEqual(len(creates), 1, conn.statements)
+        self.assertIn("DROP INDEX CONCURRENTLY IF EXISTS", drops[0])
+        self.assertIn(f'"{self.POLICY.cutoff_index}"', drops[0])
+        self.assertIn("CREATE INDEX CONCURRENTLY IF NOT EXISTS", creates[0])
+        self.assertIn(f'"{self.POLICY.column}"', creates[0])
+        # The order is the whole point: IF NOT EXISTS matches the invalid index
+        # by name, so a CREATE issued first would silently do nothing.
+        self.assertLess(
+            conn.statements.index(drops[0]),
+            conn.statements.index(creates[0]),
+            "the invalid index must be dropped before the rebuild is attempted",
+        )
+        # CONCURRENTLY on both sides: a plain DROP INDEX takes an
+        # AccessExclusiveLock on the hot table the platform is still reading.
+        self.assertNotIn("DROP INDEX IF EXISTS", drops[0])
+        self.assertEqual(self._index_results(actions), ["rebuilt_invalid"])
+
+    def test_a_drop_that_cannot_take_its_lock_never_claims_a_rebuild(self):
+        conn, actions = self._run([(False, True)], lock_refuses=("DROP INDEX",))
+        self.assertEqual(
+            [s for s in conn.statements if "CREATE INDEX" in s],
+            [],
+            "nothing may be built while the invalid index still holds the name",
+        )
+        self.assertEqual(self._index_results(actions), ["invalid_index_present"])
+        self.assertIn("re-run install", actions[-1]["detail"])
+        # _lock_guarded records the refusal itself, so install finishes 'partial'.
+        self.assertIn("skipped_locked", [a["result"] for a in actions])
+
+    def test_a_rebuild_that_lands_invalid_again_is_not_reported_as_repaired(self):
+        # The second pass of a CONCURRENTLY build can fail without raising, and
+        # the readback is the only way to tell.  Reporting 'rebuilt_invalid'
+        # here would tell the operator the repair worked while the table still
+        # has no usable cutoff index.
+        conn, actions = self._run([(False, True), (False, True)])
+        self.assertEqual(len(conn.statements), 5, conn.statements)
+        self.assertEqual(self._index_results(actions), ["invalid_index_present"])
+        self.assertNotIn("rebuilt_invalid", self._index_results(actions))
+        self.assertIn("the next install", actions[-1]["detail"])
+
+    def test_the_readback_is_a_second_state_query_after_the_create(self):
+        conn, _ = self._run([(False, True), (True, True)])
+        states = [i for i, s in enumerate(conn.statements) if "i.indisvalid, i.indisready" in s]
+        create = next(i for i, s in enumerate(conn.statements) if "CREATE INDEX" in s)
+        self.assertEqual(len(states), 2, conn.statements)
+        self.assertLess(states[0], create)
+        self.assertLess(create, states[1], "the claim must be read back, not assumed")
+
+
+class _MoveConn:
+    """A connection just real enough to walk ``_move_table`` to its chain probe.
+
+    Every statement is recorded as text and answered from fixed rows; the batch
+    loop is handed an empty snapshot, so one pass reaches the probe with nothing
+    moved.  No statement is executed and no row exists.
+    """
+
+    COLUMNS = [
+        ("observation_id", "bigint"),
+        ("available_at", "timestamp with time zone"),
+        ("created_at", "timestamp with time zone"),
+        ("updated_at", "timestamp with time zone"),
+    ]
+
+    def __init__(self, *, unsupported=(), probe_error=None, probe_rows=0):
+        self.statements: list[str] = []
+        self.unsupported = list(unsupported)
+        self.probe_error = probe_error
+        self.probe_rows = probe_rows
+
+    @contextmanager
+    def transaction(self):
+        yield self
+
+    def execute(self, statement, params=None):
+        text = statement if isinstance(statement, str) else statement.as_string(None)
+        self.statements.append(text)
+        if "%(probe)s" in text:
+            if self.probe_error is not None:
+                raise self.probe_error
+            return _Rows([(self.probe_rows,)])
+        if "to_regclass" in text:
+            return _Rows([("present",)])
+        if "format_type" in text:
+            return _Rows(list(self.COLUMNS))
+        if "indpred IS NOT NULL" in text:
+            return _Rows([(name,) for name in self.unsupported])
+        if "indnkeyatts" in text:
+            return _Rows([("pk", True, ["observation_id"], 1)])
+        if "indisprimary" in text:
+            return _Rows([("observation_id",)])
+        if "FROM tier_batch" in text:
+            return _Rows([(0,)])
+        return _Rows([])
+
+
+class MoveRefusalAndProbeTest(unittest.TestCase):
+    """The two ways _move_table stops short, driven through a fake connection."""
+
+    POLICY = tiers.TIER_POLICY[0]  # quant.raw_market_observations
+    NOW = datetime(2026, 9, 19, 6, 0, tzinfo=timezone.utc)
+
+    @contextmanager
+    def _settings(self, *, chain=True):
+        with tempfile.TemporaryDirectory() as directory:
+            if chain:
+                path = tiers.chain_state_path(directory, self.POLICY.qualified)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('{"watermark": "2026-09-19T03:40:00Z"}', encoding="utf-8")
+            yield {
+                "backup_root": directory,
+                "incremental_specs": tiers.parse_incremental_specs(None),
+                "statement_timeout_ms": tiers.DEFAULT_STATEMENT_TIMEOUT_MS,
+                "batch_rows": 1000,
+                "max_batches": 0,
+            }
+
+    def _move(self, conn, settings):
+        record = {"errors": []}
+        result = tiers._move_table(
+            conn, self.POLICY, self.NOW, self.POLICY.hot_days, settings, record
+        )
+        return result, record
+
+    # --- a partial or expression unique index refuses the table -------------
+
+    def test_the_unsupported_index_probe_asks_for_valid_partial_or_expression_uniques(self):
+        conn = _MoveConn(unsupported=["quant.raw_obs_recent_uq"])
+        tiers.unsupported_unique_indexes(conn, self.POLICY.qualified)
+        probe = conn.statements[-1]
+        self.assertIn("i.indisunique", probe)
+        # An INVALID index enforces nothing, so it cannot swallow a row; asking
+        # about it would refuse tables that are perfectly movable.
+        self.assertIn("i.indisvalid", probe)
+        self.assertIn("(i.indpred IS NOT NULL OR i.indexprs IS NOT NULL)", probe)
+        self.assertNotIn("indpred IS NULL", probe, "that is the other query, the one for usable keys")
+
+    def test_a_partial_or_expression_unique_index_refuses_the_move_and_is_named(self):
+        conn = _MoveConn(unsupported=["quant.raw_obs_recent_uq"])
+        with self._settings() as settings:
+            result, record = self._move(conn, settings)
+        self.assertEqual(result["status"], "unsupported_unique_index")
+        self.assertEqual(result["unsupported_unique_indexes"], ["quant.raw_obs_recent_uq"])
+        self.assertIn("conflict scan cannot join on it", result["detail"])
+        self.assertEqual(len(record["errors"]), 1, record["errors"])
+        self.assertEqual(record["errors"][0]["table"], self.POLICY.qualified)
+        self.assertIn("quant.raw_obs_recent_uq", record["errors"][0]["error"])
+        # The refusal is before any row moves: no snapshot, no delete.
+        self.assertEqual([s for s in conn.statements if "tier_batch" in s], [])
+        self.assertEqual(result["deleted_rows"], 0)
+
+    # --- the chain probe ----------------------------------------------------
+
+    def test_a_probe_that_cannot_be_answered_reports_the_clamp_as_unknown(self):
+        import psycopg
+
+        conn = _MoveConn(probe_error=psycopg.errors.QueryCanceled("canceling statement due to timeout"))
+        with self._settings() as settings:
+            result, record = self._move(conn, settings)
+        # _scalar would have swallowed this to None, which reads exactly like
+        # "nothing withheld" -- the opposite finding.
+        self.assertEqual(result["status"], "chain_behind")
+        self.assertIn("chain_withheld_rows", result)
+        self.assertIsNone(result["chain_withheld_rows"])
+        self.assertIn("unknown, not zero", result["detail"])
+        self.assertIn("QueryCanceled", result["detail"])
+        # A probe is not a move failure: the rows that did move are fine.
+        self.assertEqual(record["errors"], [])
+        self.assertNotIn("error", result)
+
+    def test_a_probe_that_answers_zero_leaves_the_run_ok(self):
+        conn = _MoveConn(probe_rows=0)
+        with self._settings() as settings:
+            result, _ = self._move(conn, settings)
+        self.assertEqual(result["status"], "ok")
+        self.assertNotIn("chain_withheld_rows", result)
+
+    def test_a_probe_that_finds_withheld_rows_reports_chain_behind_with_the_count(self):
+        conn = _MoveConn(probe_rows=42)
+        with self._settings() as settings:
+            result, _ = self._move(conn, settings)
+        self.assertEqual(result["status"], "chain_behind")
+        self.assertEqual(result["chain_withheld_rows"], 42)
+        self.assertFalse(result["chain_withheld_rows_capped"])
+
+
 def _migration_statements(function):
     statements: list[str] = []
     autocommit: list[str] = []

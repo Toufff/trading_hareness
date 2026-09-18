@@ -1492,8 +1492,24 @@ def _install_cutoff_index(conn, policy: TierPolicy, note):
                 )
             ),
         )
-        if done is not None:
-            note("create_cutoff_index", policy.cutoff_index, "rebuilt_invalid")
+        if done is None:
+            return
+        # Read back for the same reason the fresh-build path below does: a
+        # CONCURRENTLY build that fails after its second pass leaves an INVALID
+        # index without raising here, and on the 19 GB table that is the likely
+        # outcome twice in a row.  Reporting 'rebuilt_invalid' on a rebuild that
+        # produced another invalid index would tell the operator the repair
+        # worked when the table still has no usable cutoff index.
+        rebuilt = cutoff_index_state(conn, policy)
+        if not rebuilt["exists"] or not rebuilt["valid"]:
+            note(
+                "create_cutoff_index",
+                policy.cutoff_index,
+                "invalid_index_present",
+                detail="the rebuild left an INVALID index; the next install drops and rebuilds it again",
+            )
+            return
+        note("create_cutoff_index", policy.cutoff_index, "rebuilt_invalid")
         return
     if state["exists"] or has_cutoff_index(conn, policy):
         note("create_cutoff_index", policy.cutoff_index, "already_present")
@@ -2134,11 +2150,35 @@ def _move_table(conn, policy: TierPolicy, now, hot_days: int, settings, record,
             # older than the cutoff is being held back by the chain watermark:
             # name it, because the move is silently doing less than the receipt's
             # cutoff implies, and a chain that froze weeks ago is an operator problem.
-            withheld = _scalar(
-                conn,
-                withheld_by_chain_sql(policy, chain_columns),
-                {"cutoff": cutoff, "probe": CHAIN_PROBE_ROWS, **chain_params},
-            )
+            # Deliberately NOT through _scalar: its swallow-to-None turns a
+            # probe that timed out into the same answer as a probe that found
+            # nothing, and those are opposite findings.  "Nothing withheld"
+            # means the move finished the cutoff; "could not tell" means the
+            # receipt cannot claim that, so the clamp is reported as unknown.
+            import psycopg
+
+            try:
+                with conn.transaction():
+                    row = conn.execute(
+                        withheld_by_chain_sql(policy, chain_columns),
+                        {"cutoff": cutoff, "probe": CHAIN_PROBE_ROWS, **chain_params},
+                    ).fetchone()
+                withheld = 0 if row is None else int(row[0] or 0)
+            except psycopg.Error as error:
+                result["chain_withheld_rows"] = None
+                result["detail"] = (
+                    "the move stopped at the incremental backup chain's watermark "
+                    f"({result.get('chain_watermark')}) and the probe for how many rows that "
+                    f"withholds could not be answered ({_error_text(error)}); the count is "
+                    "unknown, not zero"
+                )
+                # Same precedence as the answered case: 'conflicts' is the more
+                # urgent finding and keeps the status.  Everything else becomes
+                # chain_behind, because a clamp that cannot be measured is still
+                # a clamp and the receipt must not read as a finished cutoff.
+                if result["status"] == "ok":
+                    result["status"] = "chain_behind"
+                withheld = 0
             if withheld:
                 result["chain_withheld_rows"] = int(withheld)
                 result["chain_withheld_rows_capped"] = int(withheld) >= CHAIN_PROBE_ROWS
@@ -2185,6 +2225,14 @@ def _vacuum_after_move(conn, policy: TierPolicy, settings, result: dict):
             result["vacuum"] = "ok"
             result["vacuumed"] = True
         finally:
+            # SET, not SET LOCAL, on both sides -- and that is why the restore
+            # has to be explicit.  VACUUM cannot run inside a transaction block,
+            # so this connection is in autocommit and there is no transaction
+            # for SET LOCAL to be scoped to (it would warn and change nothing).
+            # A plain SET therefore lasts for the whole session, so the 30-minute
+            # ceiling raised above would silently outlive this table and follow
+            # the batch loop of every later one.  The batches use _set_local
+            # inside their own transaction precisely because they must not.
             _set_session(conn, "statement_timeout", f"{int(settings['statement_timeout_ms'])}ms")
     except psycopg.errors.QueryCanceled:
         result["vacuum"] = "timed_out"
