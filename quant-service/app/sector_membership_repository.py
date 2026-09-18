@@ -79,21 +79,21 @@ def persist_ths_snapshot(
     provider_key: str,
     observed_at: datetime,
     *,
-    ensure_instrument: Callable[[Any, str], None],
+    ensure_instruments: Callable[[Any, list[str]], None],
     parse_date: Callable[[Any], date | None],
 ) -> int:
     """Store one complete THS constituent response with explicit time basis."""
     active_members: set[str] = set()
     # Rows are collected here and written in one batched upsert below instead
     # of one INSERT per constituent (a THS concept/index snapshot can carry
-    # hundreds of members).  ``ensure_instrument`` stays per-row: it is an
-    # injected dependency owned outside this file.
+    # hundreds of members).  Instrument registration is batched the same way:
+    # the injected dependency now takes the whole symbol list, so a snapshot
+    # costs one registry statement in one sorted lock order instead of N.
     to_write: dict[tuple[str, date], tuple[Any, ...]] = {}
     for row in rows:
         symbol = str(row.get("con_code") or "").upper()
         if len(symbol) != 9 or symbol[6:] not in {".SH", ".SZ", ".BJ"} or not symbol[:6].isdigit():
             continue
-        ensure_instrument(connection, symbol)
         effective_from, effective_to, from_basis, to_basis = membership_interval(
             row, observed_at, parse_date=parse_date,
         )
@@ -101,6 +101,7 @@ def persist_ths_snapshot(
         if effective_to is None:
             active_members.add(symbol)
     if to_write:
+        ensure_instruments(connection, [symbol for symbol, _effective_from in to_write])
         entries = list(to_write.values())
         connection.execute(
             """INSERT INTO quant.sector_membership_history(
@@ -148,9 +149,19 @@ def persist_observed_snapshot(
     observed_at: datetime,
     *,
     member_symbol: Callable[[dict[str, Any]], str | None],
-    ensure_instrument: Callable[[Any, str, dict[str, Any]], None],
+    ensure_instruments: Callable[[Any, list[tuple[str, dict[str, Any]]]], None],
 ) -> int:
-    """Store a provider snapshot that has no historical membership interval."""
+    """Store a provider snapshot that has no historical membership interval.
+
+    ``ensure_instruments`` is called ONCE with every ``(symbol, row)`` pair
+    of the snapshot, not once per member.  The per-member form this replaces
+    let the injected writer take one ``quant.instruments`` lock per board
+    constituent in provider order -- a public board snapshot is hundreds of
+    symbols in one transaction -- which is exactly the lock order
+    ``app/instrument_registry.py`` exists to make uniform.  An injected
+    writer that needs a per-row payload (the eastmoney one reads the
+    display name out of it) therefore receives the rows, not just symbols.
+    """
     members: set[str] = set()
     stored = 0
     effective_from = observed_exchange_date(observed_at)
@@ -161,14 +172,17 @@ def persist_observed_snapshot(
     # within one call, and PostgreSQL rejects an ON CONFLICT DO UPDATE that
     # would affect the same target row twice in a single statement.
     raw_by_symbol: dict[str, dict[str, Any]] = {}
+    member_rows: list[tuple[str, dict[str, Any]]] = []
     for row in rows:
         symbol = member_symbol(row)
         if not symbol:
             continue
-        ensure_instrument(connection, symbol, row)
+        member_rows.append((symbol, row))
         raw_by_symbol[symbol] = row
         members.add(symbol)
         stored += 1
+    if member_rows:
+        ensure_instruments(connection, member_rows)
     if raw_by_symbol:
         symbols = list(raw_by_symbol)
         connection.execute(

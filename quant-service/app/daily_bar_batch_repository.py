@@ -92,7 +92,20 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
             entry["is_st"] = bar.is_st
         entry["source"] = bar.source
     inst_symbols, inst_exchanges, inst_names, inst_industries, inst_is_st, inst_sources = [], [], [], [], [], []
-    for symbol, entry in instrument_entries.items():
+    # Ascending symbol order, not payload/dict-insertion order.  This is the
+    # strongest ``quant.instruments`` lock in the platform: ``ON CONFLICT DO
+    # UPDATE`` row-locks every EXISTING conflicting row -- the whole
+    # cross-section on any day after the first -- where the ``DO NOTHING``
+    # registration in ``instrument_registry`` locks only genuinely new rows.
+    # Two concurrent ``normalize_tushare_rows`` transactions (a 'daily'
+    # cross-section and an 'index_daily'/partial refresh sharing symbols)
+    # deadlock here unless both take the rows in the same order -- that is
+    # the 2026-09-18 cycle.  Keep this ``sorted``: it is the same global
+    # order ``instrument_registry.normalized_symbols`` uses.  The statement
+    # below also carries ``ORDER BY 1``: the array is already ascending, so
+    # the server sort is free, and it is what makes "every writer sorts in
+    # the statement" checkable by a test rather than by reading each loop.
+    for symbol, entry in sorted(instrument_entries.items()):
         old = existing_instruments.get(symbol)
         inst_symbols.append(symbol)
         inst_exchanges.append(exchange_for(symbol))
@@ -103,6 +116,7 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
     connection.execute(
         """INSERT INTO quant.instruments(symbol,exchange,name,industry,is_st,source)
            SELECT * FROM unnest(%s::text[],%s::text[],%s::text[],%s::text[],%s::boolean[],%s::text[])
+           ORDER BY 1
            ON CONFLICT(symbol) DO UPDATE SET exchange=EXCLUDED.exchange,name=EXCLUDED.name,
              industry=EXCLUDED.industry,is_st=EXCLUDED.is_st,source=EXCLUDED.source,updated_at=now()""",
         (inst_symbols, inst_exchanges, inst_names, inst_industries, inst_is_st, inst_sources),
@@ -176,7 +190,19 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
             "source": bar.source, "available_at": available_at_utc[index],
         }
         last_index_by_key[key] = index
-    keys = list(mb_final.keys())
+    # Ascending ``(symbol, trading_date)``, not dict-insertion (= provider
+    # payload) order, for the same reason the instruments array above is
+    # sorted: this statement is ``ON CONFLICT DO UPDATE``, so it row-locks
+    # every EXISTING ``quant.market_bars_daily`` row it touches, and
+    # ``(symbol, trading_date)`` is the conflict key those locks are taken
+    # on.  Two ingestion transactions covering overlapping symbols in
+    # different payload orders is the 2026-09-18 deadlock cycle, one table
+    # further down.  ``in_instrument_lock_order``'s docstring names these two
+    # tables as the reason its key carries ``trading_date`` at all; the key
+    # list is sorted ONCE here and every array below is built from it, so the
+    # rows cannot drift apart and no stored value moves (``mb_final`` has
+    # already resolved last-write-wins per key).
+    keys = sorted(mb_final)
     connection.execute(
         """INSERT INTO quant.market_bars_daily(symbol,trading_date,open,high,low,close,pre_close,volume,amount,adj_factor,is_suspended,limit_up,limit_down,source,available_at)
            SELECT * FROM unnest(%s::text[],%s::date[],%s::numeric[],%s::numeric[],%s::numeric[],%s::numeric[],%s::numeric[],
@@ -288,6 +314,15 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
             "available_at": available_at_utc[winning_index],
         }
         replace_keys.append(key)
+
+    # The same ascending lock order for ``quant.canonical_bars_daily``: the
+    # INSERT below is ``ON CONFLICT DO UPDATE`` and the UPDATE below it locks
+    # the rows it matches, both keyed on ``(symbol, trading_date)``.  The two
+    # lists are disjoint and each is sorted once, before any array is built
+    # from it, so ordering changes which lock is taken first and nothing
+    # else -- ``canonical_final`` already holds the folded result per key.
+    replace_keys.sort()
+    update_only_keys.sort()
 
     if conflict_symbols:
         connection.execute(

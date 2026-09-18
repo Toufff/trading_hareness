@@ -151,8 +151,14 @@ class LegacyStockBrainRepository:
         with cursor.copy("COPY stock_brain_instrument_stage(symbol,exchange,name,source) FROM STDIN") as copy:
             for row in deduped.values():
                 copy.write_row((row["symbol"], row["exchange"], row.get("name"), row.get("source", "stock-brain")))
+        # ``ORDER BY 1``: the shared ascending lock order that
+        # ``quant-service/app/instrument_registry.py`` documents, and this is
+        # the strong ``DO UPDATE`` class, so it row-locks every existing
+        # conflicting row -- the whole staged cross-section on any import
+        # after the first -- in whatever order the stage table is scanned.
         cursor.execute("""INSERT INTO quant.instruments(symbol,exchange,name,source)
             SELECT symbol,exchange,name,source FROM stock_brain_instrument_stage
+            ORDER BY 1
             ON CONFLICT(symbol) DO UPDATE SET
                 exchange=CASE WHEN quant.instruments.exchange IN ('','UNKNOWN')
                               THEN excluded.exchange ELSE quant.instruments.exchange END,

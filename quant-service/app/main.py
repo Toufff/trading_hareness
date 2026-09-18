@@ -58,7 +58,7 @@ from .async_provider_circuit_repository import open_provider_keys as read_async_
 from .async_market_session_repository import realtime_market_session as read_async_realtime_market_session
 from .async_market_session_repository import sse_calendar_open as read_async_sse_calendar_open
 from .async_market_session_repository import sse_calendar_status as read_async_sse_calendar_status
-from .daily_bar_repository import exchange_for, upsert_daily_bar
+from .daily_bar_repository import exchange_for, in_instrument_lock_order, upsert_daily_bar
 from .sector_membership_repository import (
     persist_observed_snapshot as persist_observed_sector_snapshot,
     persist_ths_snapshot as persist_ths_sector_snapshot,
@@ -84,6 +84,7 @@ from .research_maintenance_service import (
     update_analyst_profile as update_analyst_research_profile_isolated,
     update_universe_members as update_universe_members_isolated,
 )
+from .instrument_registry import ensure_instruments, named_instrument_rows
 from .intraday_watchlist_service import (
     IntradayWatchlistDependencies,
     WatchlistHistoryHydrationDependencies,
@@ -986,7 +987,11 @@ def persist_daily_bar_batch(bars: list[DailyBar]) -> int:
     if not bars:
         return 0
     with db.transaction() as connection:
-        for bar in bars:
+        # Ascending (symbol, trading_date), not provider order.  A single
+        # response can span the whole QUANT_UNIVERSE cross-section, and every
+        # bar re-locks quant.instruments with ON CONFLICT DO UPDATE inside
+        # THIS one transaction -- see daily_bar_repository.in_instrument_lock_order.
+        for bar in in_instrument_lock_order(bars):
             upsert_bar(connection, bar)
     return len(bars)
 
@@ -1327,11 +1332,14 @@ def tushare_date(value: Any) -> date | None:
     return None
 
 
+def ensure_tushare_instruments(connection: Any, symbols: list[str]) -> None:
+    """Register a whole Tushare payload's symbols in one batched statement."""
+    ensure_instruments(connection, symbols, "tushare", exchange_for=exchange_for)
+
+
 def ensure_tushare_instrument(connection: Any, symbol: str) -> None:
-    connection.execute(
-        "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,'tushare') ON CONFLICT(symbol) DO NOTHING",
-        (symbol, exchange_for(symbol)),
-    )
+    """Single-symbol compatibility wrapper over the batched registry helper."""
+    ensure_tushare_instruments(connection, [symbol])
 
 
 def offline_data_root() -> Path:
@@ -1368,6 +1376,10 @@ def offline_minute_row(row: dict[str, Any]) -> dict[str, Any]:
     return offline_minute_import_service.minute_row(row, decimal_or_none=decimal_or_none)
 
 
+def ensure_offline_instruments(connection: Any, symbols: list[str]) -> None:
+    offline_minute_import_service.ensure_instruments(connection, symbols, exchange_for=exchange_for)
+
+
 def ensure_offline_instrument(connection: Any, symbol: str) -> None:
     offline_minute_import_service.ensure_instrument(connection, symbol, exchange_for=exchange_for)
 
@@ -1398,7 +1410,7 @@ def normalize_tushare_rows(connection: Any, api_name: str, rows: list[dict[str, 
     return pure_normalize_tushare_rows(
         connection, api_name, rows, available_at,
         core_apis=CORE_NORMALIZED_APIS, date_parser=tushare_date, exchange_for=exchange_for,
-        is_st_security_name=is_st_security_name, ensure_instrument=ensure_tushare_instrument,
+        is_st_security_name=is_st_security_name, ensure_instruments=ensure_tushare_instruments,
         upsert_bar=upsert_bar, daily_bar_type=DailyBar, decimal_or_none=decimal_or_none,
         safe_error_detail=safe_error_detail, provider_key=provider_key,
     )
@@ -1553,7 +1565,7 @@ def persist_ths_sector_members(connection: Any, taxonomy_key: str, sector_key: s
     """Persist one complete response without inventing a historical start date."""
     return persist_ths_sector_snapshot(
         connection, taxonomy_key, sector_key, rows, provider_key, available_at,
-        ensure_instrument=ensure_tushare_instrument, parse_date=tushare_date,
+        ensure_instruments=ensure_tushare_instruments, parse_date=tushare_date,
     )
 
 
@@ -1566,16 +1578,33 @@ def eastmoney_member_symbol(row: dict[str, Any]) -> str | None:
 def persist_eastmoney_sector_members(connection: Any, taxonomy_key: str, sector_key: str, rows: list[dict[str, Any]],
                                      available_at: datetime) -> int:
     """Persist a current-snapshot response with its real observation date."""
-    def ensure_instrument(connection: Any, symbol: str, row: dict[str, Any]) -> None:
+    def ensure_instruments(connection: Any, member_rows: list[tuple[str, dict[str, Any]]]) -> None:
+        # One ascending statement for the whole board, not one per
+        # constituent: a public board snapshot is hundreds of symbols inside
+        # a single transaction.  ``named_instrument_rows`` supplies the same
+        # resolution the sequential loop had (last non-blank name wins) plus
+        # the shared ascending order; the conflict clause stays byte-for-byte
+        # what it was, including ``updated_at=now()``, which the generic
+        # ``ensure_named_instruments`` helper deliberately does not touch.
+        prepared = named_instrument_rows(
+            [(symbol, str(row.get("名称") or row.get("name") or "").strip() or None)
+             for symbol, row in member_rows],
+            exchange_for=exchange_for,
+        )
+        if not prepared:
+            return
         connection.execute(
-            "INSERT INTO quant.instruments(symbol,exchange,name,source) VALUES(%s,%s,%s,'akshare') "
+            "INSERT INTO quant.instruments(symbol,exchange,name,source) "
+            "SELECT t.symbol,t.exchange,t.name,'akshare' "
+            "FROM unnest(%s::text[],%s::text[],%s::text[]) AS t(symbol,exchange,name) "
+            "ORDER BY 1 "
             "ON CONFLICT(symbol) DO UPDATE SET name=coalesce(EXCLUDED.name,quant.instruments.name),updated_at=now()",
-            (symbol, exchange_for(symbol), str(row.get("名称") or row.get("name") or "").strip() or None),
+            ([row[0] for row in prepared], [row[1] for row in prepared], [row[2] for row in prepared]),
         )
 
     return persist_observed_sector_snapshot(
         connection, taxonomy_key, sector_key, rows, "akshare", available_at,
-        member_symbol=eastmoney_member_symbol, ensure_instrument=ensure_instrument,
+        member_symbol=eastmoney_member_symbol, ensure_instruments=ensure_instruments,
     )
 
 
@@ -2473,7 +2502,7 @@ async def capture_intraday_minute_sessions(symbols: list[str]) -> dict[str, Any]
         fetch_minutes=intraday_longhu_minutes,
         run_database=run_database_blocking,
         parse_minute=offline_minute_row,
-        ensure_instrument=ensure_offline_instrument,
+        ensure_instruments=ensure_offline_instruments,
         retention_days=intraday_minute_profile_retention_days,
     )
 
@@ -4752,7 +4781,10 @@ app.include_router(build_research_actions_router(ResearchActionDependencies(
 
 def import_bars(payload: BarsImport) -> dict[str, int]:
     with db.transaction() as connection:
-        for bar in payload.bars:
+        # Operator-supplied payloads arrive in whatever order the file had;
+        # two concurrent imports over overlapping symbols is the same lock
+        # cycle as an ingestion run, so take the shared ascending order.
+        for bar in in_instrument_lock_order(payload.bars):
             upsert_bar(connection, bar)
     return {"imported": len(payload.bars)}
 

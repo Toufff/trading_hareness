@@ -172,6 +172,41 @@ class PersistMarketEventsNaiveTimestampTests(unittest.TestCase):
         self.assertIn("coalesce(quant.market_events.availability_basis,'unknown')=coalesce(EXCLUDED.availability_basis,'unknown')", insert_sql)
 
 
+class PersistMarketEventsInstrumentBatchingTests(unittest.TestCase):
+    """Event ingestion registered its instrument once per event; that per-row
+    INSERT is now one batched, sorted statement per payload."""
+
+    def _instrument_calls(self, db: "_RecordingDatabase") -> list[tuple[str, tuple[Any, ...]]]:
+        return [(sql, params) for sql, params in db.connection.executed
+                if "INSERT INTO quant.instruments" in sql]
+
+    def test_one_sorted_registry_statement_for_the_whole_payload(self) -> None:
+        db = _RecordingDatabase()
+        stored = persist_market_events(db, "akshare", [
+            {"ts_code": "600000.SH", "title": "涨停：甲", "published_at": "2026-09-01T15:30:00+08:00"},
+            {"ts_code": "000001.SZ", "title": "涨停：乙", "published_at": "2026-09-01T15:31:00+08:00"},
+            {"ts_code": "600000.SH", "title": "涨停：丙", "published_at": "2026-09-01T15:32:00+08:00"},
+        ])
+        self.assertEqual(stored, 3)
+        calls = self._instrument_calls(db)
+        self.assertEqual(len(calls), 1)
+        sql, params = calls[0]
+        self.assertIn("unnest(%s::text[],%s::text[])", " ".join(sql.split()))
+        self.assertEqual(params[0], "akshare")
+        self.assertEqual(params[1], ["000001.SZ", "600000.SH"])
+        self.assertEqual(params[2], ["SZ", "SH"])
+
+    def test_rejected_rows_register_no_instrument(self) -> None:
+        db = _RecordingDatabase()
+        stored = persist_market_events(db, "akshare", [
+            {"ts_code": "600000.SH", "title": "涨停：示例", "published_at": "2026-09-01T00:00:00"},  # naive
+            {"ts_code": "bad-code", "title": "涨停：示例"},
+            {"ts_code": "000001.SZ", "title": ""},
+        ])
+        self.assertEqual(stored, 0)
+        self.assertEqual(self._instrument_calls(db), [])
+
+
 class PersistFreeQuotesBatchingTests(unittest.TestCase):
     """persist_free_quotes previously ran one INSERT per quote; it is now one
     set-based upsert regardless of batch size (see the WP10 N+1 fix)."""

@@ -19,7 +19,8 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Json
 
 from .analysis import as_utc
-from .daily_bar_repository import exchange_for
+from .daily_bar_repository import in_instrument_lock_order
+from .instrument_registry import ensure_instruments
 from .market_flow_features import market_event_identity_key
 from .market_rules import cn_today
 from .repo_common import SYMBOL_RE
@@ -189,7 +190,14 @@ def persist_free_daily(
     if not valid_bars and not unsettled_rejections and not malformed_count:
         return 0
     with database.transaction() as connection:
-        for bar in valid_bars:
+        # Ascending (symbol, trading_date), not the provider's row order: the
+        # injected ``upsert_bar`` re-locks quant.instruments with ON CONFLICT
+        # DO UPDATE once per bar inside this one transaction, so this loop --
+        # not that statement's own ORDER BY 1 -- owns the lock order.  Sorting
+        # here rather than hoisting an ensure_instruments call keeps the
+        # exchange/source/updated_at maintenance that DO UPDATE performs and
+        # DO NOTHING would drop.
+        for bar in in_instrument_lock_order(valid_bars):
             upsert_bar(connection, bar)
         for symbol, trading_date in unsettled_rejections:
             _record_unsettled_daily_row_issue(connection, provider, symbol, trading_date)
@@ -225,6 +233,20 @@ def persist_market_events(database: Any, provider: str, rows: list[dict[str, Any
     """
     stored = 0
     with database.transaction() as connection:
+        # Accepted rows are prepared first so every symbol this payload
+        # references is registered in one batched statement below instead of
+        # one INSERT ... ON CONFLICT per event.  A row rejected here still
+        # registers no instrument, exactly as the per-row write did.
+        #
+        # Memory bound: this buffers every accepted row's serialized body in
+        # ``prepared`` before the first write, where the old code streamed one
+        # row at a time -- roughly double the peak for the duration of the
+        # call, since each event's payload is held by both ``payload`` and
+        # ``values``.  Fine for daily volumes (hundreds to a few thousand
+        # events); an announcement backfill of tens of thousands of events
+        # should be chunked (prepare + register + write in slices of ~2,000)
+        # rather than prepared whole.
+        prepared: list[tuple[str, str | None, tuple[Any, ...]]] = []
         for row in rows:
             symbol = str(row.get("ts_code") or "").upper()
             title = str(row.get("title") or row.get("short_title") or "").strip()
@@ -248,15 +270,14 @@ def persist_market_events(database: Any, provider: str, rows: list[dict[str, Any
             identity_key = str(row.get("event_identity_key") or "").strip() or market_event_identity_key(
                 provider, event_type, symbol, occurred_date,
             )
-            connection.execute(
-                "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,%s) ON CONFLICT(symbol) DO NOTHING",
-                (symbol, exchange_for(symbol), provider),
-            )
             values = (
                 uuid.uuid4(), symbol, event_type, published_at, published_at, provider, title,
                 json.dumps(row.get("raw") or row, ensure_ascii=False, default=str), url, content_sha256, identity_key,
                 availability_basis,
             )
+            prepared.append((symbol, identity_key, values))
+        ensure_instruments(connection, [symbol for symbol, _identity_key, _values in prepared], provider)
+        for _symbol, identity_key, values in prepared:
             # available_at (and its basis) is only merged toward the earlier
             # value when both writes share the same availability_basis
             # (NULL treated as its own "unknown" basis); a write derived a

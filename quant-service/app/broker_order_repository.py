@@ -14,6 +14,7 @@ from psycopg.types.json import Json
 
 from .broker_order_export_parser import ParsedOrderExport, parse_order_export
 from .broker_order_timeline import map_execution_to_bars
+from .instrument_registry import ensure_named_instruments
 
 
 def _archive(path: Path, parsed: ParsedOrderExport, archive_root: Path) -> Path:
@@ -97,14 +98,19 @@ def import_order_export(
     import_id = imported["import_id"]
     execution_keys = {row["source_event_key"]: row["execution_key"] for row in parsed.executions}
     inserted = idempotent = 0
+    # One ascending statement for the whole export, ahead of the event loop,
+    # in place of one ``ON CONFLICT DO UPDATE`` per event in export order.  A
+    # single .xls covers many symbols and the events arrive in the order the
+    # broker printed them, so the per-row form took the strongest lock class
+    # on ``quant.instruments`` in an order no other writer shares.  The rows
+    # are registered before any ``broker_order_events`` row references them,
+    # which is the only ordering this function needs.
+    ensure_named_instruments(
+        connection,
+        [(event["symbol"], event["name"]) for event in parsed.events if event["symbol"]],
+        "ths_order_query_export",
+    )
     for event in parsed.events:
-        if event["symbol"]:
-            connection.execute(
-                    """INSERT INTO quant.instruments(symbol,exchange,name,source)
-                       VALUES(%s,%s,%s,'ths_order_query_export')
-                       ON CONFLICT(symbol) DO UPDATE SET name=COALESCE(NULLIF(EXCLUDED.name,''),quant.instruments.name)""",
-                    (event["symbol"], event["symbol"].rsplit(".", 1)[-1], event["name"]),
-            )
         result = connection.execute(
                 """INSERT INTO quant.broker_order_events(
                        account_key,event_key,first_import_id,source_sha256,order_date,order_at,symbol,raw_symbol,name,

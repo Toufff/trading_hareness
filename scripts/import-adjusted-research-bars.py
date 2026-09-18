@@ -107,10 +107,17 @@ def import_bars(source: Path, platform_root: Path) -> dict[str, Any]:
                         row.normalized_symbol, row.date, number(row.open), number(row.high),
                         number(row.low), number(row.close), number(row.vol), number(row.pct_chg),
                     ))
+            # ``ORDER BY 1``: the shared ascending lock order that
+            # ``quant-service/app/instrument_registry.py`` documents.  Without
+            # it the rows reach ``quant.instruments`` in whatever order the
+            # HashAggregate under DISTINCT emits, so a research-bar import
+            # that introduces new symbols alongside a live ingestion
+            # transaction can take the same new rows in the opposite order.
             cursor.execute("""
                 INSERT INTO quant.instruments(symbol,exchange,source)
                 SELECT DISTINCT symbol,split_part(symbol,'.',2),'stock_brain_tencent_qfq'
                   FROM adjusted_bar_stage
+                 ORDER BY 1
                 ON CONFLICT(symbol) DO NOTHING
             """)
             cursor.execute("""

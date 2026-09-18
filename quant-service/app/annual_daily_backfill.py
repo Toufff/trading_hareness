@@ -217,6 +217,12 @@ def _persist_raw(
 
 
 def _persist_instruments_from_stage(connection: Any, provider_key: str) -> None:
+    # ``ORDER BY 1`` is the shared ascending lock order that
+    # ``app/instrument_registry.py`` documents: without it the rows reach
+    # ``quant.instruments`` in whatever order the DISTINCT node emits them,
+    # and a backfill running next to a live ingestion transaction can take
+    # the same new symbols in the opposite order.  It is a correctness
+    # property here, not a cosmetic sort of the output.
     connection.execute(
         """INSERT INTO quant.instruments(symbol,exchange,source)
            SELECT DISTINCT upper(row_data->>'ts_code'),
@@ -225,6 +231,7 @@ def _persist_instruments_from_stage(connection: Any, provider_key: str) -> None:
                   %s
              FROM annual_daily_stage
             WHERE upper(row_data->>'ts_code') ~ '^\\d{6}\\.(SH|SZ|BJ)$'
+            ORDER BY 1
            ON CONFLICT(symbol) DO NOTHING""",
         (provider_key,),
     )
@@ -233,12 +240,15 @@ def _persist_instruments_from_stage(connection: Any, provider_key: str) -> None:
 def _persist_daily(connection: Any, provider_key: str, available_at: datetime, ingested_at: datetime,
                    availability_basis: str, *, index_mode: bool = False) -> None:
     if index_mode:
+        # ``ORDER BY 1``: same shared ascending lock order as
+        # ``_persist_instruments_from_stage`` above.
         connection.execute(
             """INSERT INTO quant.instruments(symbol,exchange,source)
                SELECT DISTINCT upper(row_data->>'ts_code'),
                       CASE right(upper(row_data->>'ts_code'),2) WHEN 'SH' THEN 'SSE' ELSE 'SZSE' END,%s
                  FROM annual_daily_stage
                 WHERE upper(row_data->>'ts_code') ~ '^\\d{6}\\.(SH|SZ)$'
+                ORDER BY 1
                ON CONFLICT(symbol) DO NOTHING""",
             (provider_key,),
         )
@@ -488,6 +498,15 @@ def _persist_trade_calendar(connection: Any, provider_key: str, available_at: da
 
 
 def _persist_stock_basic(connection: Any, provider_key: str, available_at: datetime) -> None:
+    # ``ORDER BY 1`` for the same reason as the two stage inserts above, and
+    # with more at stake here: this statement is ``ON CONFLICT DO UPDATE``, so
+    # it row-locks every EXISTING conflicting row -- essentially the whole
+    # cross-section on any run after the first -- where a ``DO NOTHING``
+    # insert locks only the rows it genuinely adds.  Sorting the weak
+    # statements and leaving the strongest lock on this table in seq-scan
+    # order of the stage table is exactly the mistake this file already made
+    # once.  ``annual_daily_stage`` is a temp table, so no parallel plan can
+    # reorder the feed under the sort.
     connection.execute(
         """INSERT INTO quant.instruments(symbol,exchange,name,industry,list_date,delist_date,is_st,source)
            SELECT upper(row_data->>'ts_code'),
@@ -500,6 +519,7 @@ def _persist_stock_basic(connection: Any, provider_key: str, available_at: datet
                   coalesce(row_data->>'name','') ~* '(^|\\*)ST',%s
              FROM annual_daily_stage
             WHERE upper(row_data->>'ts_code') ~ '^\\d{6}\\.(SH|SZ|BJ)$'
+            ORDER BY 1
            ON CONFLICT(symbol) DO UPDATE SET
              exchange=EXCLUDED.exchange,name=coalesce(EXCLUDED.name,quant.instruments.name),
              industry=coalesce(EXCLUDED.industry,quant.instruments.industry),
@@ -511,6 +531,15 @@ def _persist_stock_basic(connection: Any, provider_key: str, available_at: datet
     # Keep the three stock_basic list-status cross-sections as immutable
     # evidence.  ``quant.instruments`` is intentionally only the current
     # projection, while this table is what a ten-year replay can inspect.
+    #
+    # Four placeholders, four parameters: provider, observed_at, the
+    # ``status_date`` fallback for a row without ``trade_date``, and
+    # ``available_at``.  The fourth was missing, so psycopg raised
+    # ``the query has 4 placeholders but 3 parameters were passed`` on every
+    # call and ``bootstrap()`` could never get past its first stock_basic
+    # cross-section.  Pre-existing at ba717c8; found by the DB-backed test
+    # added for the ``ORDER BY 1`` above, which is the first thing ever to
+    # execute this function against a real server.
     connection.execute(
         """INSERT INTO quant.instrument_lifecycle_evidence(
                symbol,provider,observed_at,status_date,list_status,list_date,delist_date,is_st,available_at,raw)
@@ -528,7 +557,7 @@ def _persist_stock_basic(connection: Any, provider_key: str, available_at: datet
            ON CONFLICT(symbol,provider,status_date,list_status) DO UPDATE SET
              list_date=EXCLUDED.list_date,delist_date=EXCLUDED.delist_date,
              is_st=EXCLUDED.is_st,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
-        (provider_key, available_at, available_at),
+        (provider_key, available_at, available_at, available_at),
     )
 
 

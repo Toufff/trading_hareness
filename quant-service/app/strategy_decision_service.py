@@ -91,15 +91,33 @@ async def run(
                        "regime_metrics": regime_metrics, "decision_eligible": False,
                        "notice": "研究候选池，不构成自动交易指令"})),
             )
+            # One ascending statement for the whole candidate list, ahead of
+            # the loop, in place of one insert per candidate in RANK order --
+            # i.e. the order the scoring happened to produce, which no other
+            # writer of this table shares.  ``DO NOTHING`` is kept (the helper
+            # in ``instrument_registry`` that carries a name upserts it, which
+            # would let a research candidate relabel an instrument), so the
+            # first sighting of a repeated symbol wins, as it did per row.
+            # ``ORDER BY 1`` is the shared lock order, applied by the server
+            # to the rows this statement actually inserts.
+            candidate_names: dict[str, Any] = {}
+            for candidate in candidates:
+                candidate_names.setdefault(candidate["symbol"], candidate.get("name"))
+            ordered_candidates = sorted(candidate_names)
+            connection.execute(
+                """INSERT INTO quant.instruments(symbol,exchange,name,source)
+                   SELECT t.symbol,t.exchange,t.name,'strategy_decision'
+                     FROM unnest(%s::text[],%s::text[],%s::text[]) AS t(symbol,exchange,name)
+                    ORDER BY 1
+                   ON CONFLICT(symbol) DO NOTHING""",
+                (ordered_candidates, [exchange_for(symbol) for symbol in ordered_candidates],
+                 [candidate_names[symbol] for symbol in ordered_candidates]),
+            )
             for rank, candidate in enumerate(candidates, start=1):
                 flags = list(candidate["risk_flags"])
                 if not coverage_complete:
                     flags.append("incomplete_board_mapping")
                 event_context_rows = events.get(candidate["symbol"], [])
-                connection.execute(
-                    "INSERT INTO quant.instruments(symbol,exchange,name,source) VALUES(%s,%s,%s,'strategy_decision') ON CONFLICT(symbol) DO NOTHING",
-                    (candidate["symbol"], exchange_for(candidate["symbol"]), candidate.get("name")),
-                )
                 connection.execute(
                     """INSERT INTO quant.recommendations(run_id,rank,symbol,decision,score,score_breakdown,explanation,risk_flags,
                           direction,horizon_days,confidence,valid_until,invalidation)
