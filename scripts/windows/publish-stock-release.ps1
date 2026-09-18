@@ -66,10 +66,26 @@ function Stop-ProductionRuntime {
     # supervisor observes an expected exit and records it correctly; by the
     # time Stop-ScheduledTask runs afterward there is normally nothing left
     # for it to do.
-    param([string]$RuntimeRoot)
+    #
+    # -KeepTunnelTask is the shared-peer tunnel reinstall gate (decided by
+    # Resolve-StockTunnelReinstallPlan in stock-release-management.psm1 and
+    # passed in by the caller). When the new release's tunnel-affecting files
+    # are byte-identical to the running release's, the task is Running, its
+    # runtime state file says 'healthy' and the remote API probe returns 200,
+    # the tunnel is left completely alone: not stopped here, and not
+    # reinstalled in Start-ProductionRuntime. Its supervisor, background host
+    # and ssh client then keep running out of the PREVIOUS release directory
+    # until their next real restart (a tunnel-code change, a tunnel fault, the
+    # task's 2-minute supervising trigger after a drop, or a reboot). That is
+    # safe because release directories are immutable and retained -- the
+    # active and previous releases are never pruned, and the skip is only ever
+    # taken when the files that process would re-read are identical anyway.
+    param([string]$RuntimeRoot, [switch]$KeepTunnelTask)
     $stop = Join-Path $RuntimeRoot 'scripts\windows\stop-stock-dashboard.ps1'
     if (Test-Path -LiteralPath $stop -PathType Leaf) { & $stop -PlatformRoot $platform | Out-Null }
-    Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels' -ErrorAction SilentlyContinue
+    if (-not $KeepTunnelTask) {
+        Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels' -ErrorAction SilentlyContinue
+    }
     Stop-ScheduledTask -TaskName 'trading-hareness-dashboard-runtime' -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName 'trading-hareness-post-close-pipeline' -ErrorAction SilentlyContinue
 }
@@ -111,7 +127,10 @@ function Enter-ProductionPublishLock {
 }
 
 function Start-ProductionRuntime {
-    param([string]$RuntimeRoot)
+    # -KeepTunnelTask: see Stop-ProductionRuntime. The already-running tunnel
+    # task is neither stopped nor re-registered; the post-switch health
+    # verification below still has to prove the remote surface is up.
+    param([string]$RuntimeRoot, [switch]$KeepTunnelTask)
     # Migrations can legitimately take minutes on the archival HDD. Finish
     # them under the lifecycle lock before starting a watchdog/HTTP deadline;
     # otherwise the watchdog repeatedly aborts a healthy index build at 90s.
@@ -121,16 +140,20 @@ function Start-ProductionRuntime {
     $tunnelInstaller = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
     $postCloseInstaller = Join-Path $RuntimeRoot 'scripts\windows\install-post-close-pipeline-task.ps1'
     $dashboardExtra = Get-LogonTypeArguments -Installer $dashboardInstaller
-    $tunnelExtra = Get-LogonTypeArguments -Installer $tunnelInstaller
     $postCloseExtra = Get-LogonTypeArguments -Installer $postCloseInstaller
     & $dashboardInstaller -RepositoryRoot $RuntimeRoot -PlatformRoot $platform @dashboardExtra | Out-Null
     $sharedPeerStartupError = $null
-    try {
-        & $tunnelInstaller -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
-            -PlatformRoot $platform @tunnelExtra | Out-Null
-    } catch {
-        $sharedPeerStartupError = $_.Exception.Message
-        Write-Warning "Local runtime was installed, but shared-peer tunnel startup is degraded: $sharedPeerStartupError"
+    if ($KeepTunnelTask) {
+        Write-Verbose 'Shared-peer tunnel task left untouched by the reinstall gate.'
+    } else {
+        $tunnelExtra = Get-LogonTypeArguments -Installer $tunnelInstaller
+        try {
+            & $tunnelInstaller -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
+                -PlatformRoot $platform @tunnelExtra | Out-Null
+        } catch {
+            $sharedPeerStartupError = $_.Exception.Message
+            Write-Warning "Local runtime was installed, but shared-peer tunnel startup is degraded: $sharedPeerStartupError"
+        }
     }
     & $postCloseInstaller -RepositoryRoot $RuntimeRoot -PlatformRoot $platform @postCloseExtra | Out-Null
     $newsInstaller = Join-Path $RuntimeRoot 'scripts\windows\install-event-research-delivery-task.ps1'
@@ -342,9 +365,26 @@ try {
     Move-Item -LiteralPath $stagingRoot -Destination $finalRoot
     $newApp = Join-Path $finalRoot 'app'
     $activationAttempted = $true
-    Stop-ProductionRuntime -RuntimeRoot $fallbackRoot
+    # Decide the shared-peer tunnel's fate BEFORE anything is stopped: the
+    # task state, the runtime state file and the remote health probe only mean
+    # something while the current release is still live. $previousTarget (not
+    # $fallbackRoot) is the comparison tree on purpose -- with no previously
+    # activated release there is nothing to compare against and the gate must
+    # fall back to the unconditional stop + reinstall.
+    $tunnelPlan = $null
+    try {
+        $tunnelPlan = Resolve-StockTunnelReinstallPlan -PlatformRoot $platform `
+            -NewRuntimeRoot $newApp -CurrentRuntimeRoot ([string]$previousTarget)
+    } catch {
+        Write-Warning "Tunnel reinstall gate could not be evaluated, reinstalling: $($_.Exception.Message)"
+    }
+    $keepTunnel = ($null -ne $tunnelPlan) -and ([string]$tunnelPlan.decision -eq 'skip')
+    if ($keepTunnel) {
+        Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $tunnelPlan -Context 'publish-stock-release.ps1'
+    }
+    Stop-ProductionRuntime -RuntimeRoot $fallbackRoot -KeepTunnelTask:$keepTunnel
     [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $releaseId)
-    $startup = Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath
+    $startup = Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath -KeepTunnelTask:$keepTunnel
     $healthVerification = Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
         -SharedPeerStartupError ([string]$startup.shared_peer_startup_error)
     $verification = [ordered]@{
@@ -355,6 +395,8 @@ try {
         remote_owner_api = $healthVerification.remote_owner_api
         remote_peer_api = $healthVerification.remote_peer_api
         shared_error = $healthVerification.shared_error
+        shared_peer_tunnel = if ($keepTunnel) { 'reused_without_reinstall' } else { 'reinstalled' }
+        shared_peer_tunnel_gate = if ($tunnelPlan) { @($tunnelPlan.reasons) } else { @('gate_not_evaluated') }
     }
     [void](Set-StockReleaseState -PlatformRoot $platform -State @{
         active_release = $releaseId
@@ -371,6 +413,7 @@ try {
         current = $layout.CurrentPath
         target = $newApp
         previous_release = $previousRelease
+        shared_peer_tunnel = if ($keepTunnel) { 'reused_without_reinstall' } else { 'reinstalled' }
         retained_release_count = [Math]::Max(2, $RetainCount)
         pruned_releases = $removed
         dirty_snapshot = $dirty
@@ -385,6 +428,10 @@ try {
             # above already flipped the junction to this (failing) release, that
             # is this release's own app path, so its own stop script is used to
             # tear down its own processes before anything is switched back.
+            # The tunnel reinstall gate is deliberately NOT applied on this
+            # path: activation has already failed, the observations it relies
+            # on are no longer trustworthy, and a rollback is exactly the case
+            # where a clean tunnel reinstall is worth the short interruption.
             Stop-ProductionRuntime -RuntimeRoot $(if (Test-Path -LiteralPath $layout.CurrentPath) { $layout.CurrentPath } else { $fallbackRoot })
             if ($KeepStoppedOnFailure) {
                 foreach ($taskName in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-dashboard-runtime') {

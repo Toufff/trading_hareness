@@ -129,6 +129,44 @@ automatically attempts to restore the previous release.
 
 Do not pass `-SkipTests` for a production promotion.
 
+### The shared-peer tunnel is not restarted unless it has to be
+
+Publishing used to stop `trading-hareness-shared-peer-tunnels` and re-run
+`install-shared-tunnel-task.ps1` every time. That dropped the owner->peer
+reverse SSH tunnel for roughly 15 seconds and reset every peer database
+connection through it (measured 2026-09-18: 21/23/5 PostgreSQL client resets at
+19:42/20:50/21:35) even when no tunnel code had changed.
+
+Both `publish-stock-release.ps1` and `switch-stock-release.ps1` now ask
+`Resolve-StockTunnelReinstallPlan` (in `scripts\windows\stock-release-management.psm1`)
+*before* stopping anything. The tunnel is left completely alone only when all
+of the following hold:
+
+- every tunnel-affecting file is byte-identical between the new and the running
+  release (`start-shared-tunnels.ps1`, `install-shared-tunnel-task.ps1`,
+  `runtime-observability.psm1`, `background-process.psm1` and the three build
+  inputs of `stock-background-host.exe`, which is presence-checked instead of
+  hashed because csc.exe recompiles it non-deterministically on every publish);
+- the scheduled task state is `Running`;
+- `G:\StockPlatform\logs\runtime\shared-peer-tunnels.current.json` says
+  `status: healthy`;
+- the same remote probe `install-shared-tunnel-task.ps1` uses returns HTTP 200.
+
+Anything else — a changed file, a stopped task, a non-healthy state file, a
+non-200 probe, no comparable previous release, or an error while evaluating the
+gate — keeps the old unconditional stop + reinstall. A skip writes a
+`tunnel_reinstall_skipped` runtime event carrying the hashes it compared, and
+the release's own post-switch health verification still has to pass. The
+publish/switch result and `release-state.json`'s `last_verification` record
+`shared_peer_tunnel` as `reused_without_reinstall` or `reinstalled`.
+
+After a skip the tunnel's supervisor, background host and `ssh` client keep
+running out of the **previous** release directory until their next real restart
+(a tunnel-code change, a tunnel fault, the task's 2-minute supervising trigger
+after a drop, or a reboot). That is safe because release directories are
+immutable and the active and previous releases are never pruned — but it is one
+more reason never to delete a release directory by hand.
+
 ## Rollback
 
 List releases:
@@ -146,6 +184,9 @@ pwsh .\scripts\windows\switch-stock-release.ps1 -ReleaseId '<release-id>'
 The switch command stops both scheduled services, changes the junction, starts
 the selected release and reruns shared-runtime verification. Never copy files
 over `G:\StockPlatform\current` and never recursively delete a release by hand.
+The tunnel reinstall gate described above applies here too, on the forward
+switch and on the automatic revert, so a rollback between two releases that do
+not differ in tunnel code leaves the reverse SSH tunnel untouched.
 
 ## Evidence and diagnosis
 
