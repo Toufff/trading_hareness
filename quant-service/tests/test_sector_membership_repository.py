@@ -60,10 +60,12 @@ class SectorMembershipRepositoryTests(unittest.TestCase):
 
 class PersistThsSnapshotBatchingTests(unittest.TestCase):
     """persist_ths_snapshot previously ran one INSERT per constituent; it is
-    now one batched upsert regardless of member count."""
+    now one batched upsert regardless of member count, and its instrument
+    registration is one batched call for the whole snapshot as well."""
 
     def test_valid_members_are_written_in_one_statement(self) -> None:
         connection = _RecordingConnection()
+        registered: list[list[str]] = []
         observed_at = datetime(2026, 8, 31, 1, tzinfo=timezone.utc)
         active = persist_ths_snapshot(
             connection, "ths_concept_flow", "885001.TI",
@@ -73,7 +75,7 @@ class PersistThsSnapshotBatchingTests(unittest.TestCase):
                 {"con_code": "bad-code"},
             ],
             "tushare_super_sdk", observed_at,
-            ensure_instrument=lambda *_a: None,
+            ensure_instruments=lambda _connection, symbols: registered.append(list(symbols)),
             parse_date=lambda value: date(2020, 1, 2) if value == "20200102" else (
                 date(2020, 1, 3) if value == "20200103" else None
             ),
@@ -86,16 +88,21 @@ class PersistThsSnapshotBatchingTests(unittest.TestCase):
         self.assertEqual(set(params["symbols"]), {"000001.SZ", "600000.SH"})
         update_calls = [sql for sql, _params in connection.calls if sql.startswith("UPDATE")]
         self.assertEqual(len(update_calls), 1)
+        self.assertEqual(len(registered), 1)
+        self.assertEqual(set(registered[0]), {"000001.SZ", "600000.SH"})
 
     def test_no_valid_members_issues_no_insert(self) -> None:
         connection = _RecordingConnection()
+        registered: list[list[str]] = []
         observed_at = datetime(2026, 8, 31, 1, tzinfo=timezone.utc)
         active = persist_ths_snapshot(
             connection, "ths_concept_flow", "885001.TI", [{"con_code": "bad"}], "tushare_super_sdk", observed_at,
-            ensure_instrument=lambda *_a: None, parse_date=lambda _value: None,
+            ensure_instruments=lambda _connection, symbols: registered.append(list(symbols)),
+            parse_date=lambda _value: None,
         )
         self.assertEqual(active, 0)
         self.assertFalse(any("INSERT INTO quant.sector_membership_history" in sql for sql, _params in connection.calls))
+        self.assertEqual(registered, [])
 
 
 class PersistObservedSnapshotBatchingTests(unittest.TestCase):

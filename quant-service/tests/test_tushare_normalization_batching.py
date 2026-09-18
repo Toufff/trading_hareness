@@ -35,14 +35,14 @@ class _RecordingConnection:
         return None
 
 
-def _call(connection, rows, api_name="daily", upsert_bar=None):
+def _call(connection, rows, api_name="daily", upsert_bar=None, ensure_instruments=None):
     return normalize_rows(
         connection, api_name, rows, datetime(2026, 8, 20, tzinfo=timezone.utc),
         core_apis=frozenset({"daily", "index_daily", "adj_factor"}),
         date_parser=lambda value: date(2026, 8, 20) if value else None,
         exchange_for=lambda symbol: symbol.rsplit(".", 1)[1],
         is_st_security_name=lambda _name: False,
-        ensure_instrument=lambda *_args: None,
+        ensure_instruments=ensure_instruments or (lambda *_args: None),
         upsert_bar=upsert_bar or (lambda *_args: None),
         daily_bar_type=DailyBar,
         decimal_or_none=_decimal_or_none,
@@ -108,6 +108,55 @@ class TushareNormalizationDailyBatchingTests(unittest.TestCase):
         self.assertEqual(normalized, 1)
         batched.assert_not_called()
         self.assertTrue(any("daily_adjustment_factors" in sql for sql, _params in connection.calls))
+
+
+class TushareNormalizationInstrumentRegistrationTests(unittest.TestCase):
+    """The instrument registration behind the foreign keys was the other
+    per-row statement in this loop; it is now one call per payload."""
+
+    def test_payload_symbols_are_registered_once_before_the_row_loop(self) -> None:
+        connection = _RecordingConnection()
+        registered: list[list[str]] = []
+        rows = [
+            {"ts_code": "600000.SH", "trade_date": "20260820", "close": "12.0"},
+            {"ts_code": "000001.SZ", "trade_date": "20260820", "close": "10.5"},
+            {"ts_code": "000001.SZ", "trade_date": "20260819", "close": "10.1"},
+        ]
+        with patch("app.tushare_normalization.upsert_daily_bars"):
+            _call(connection, rows, ensure_instruments=lambda _c, symbols: registered.append(list(symbols)))
+        self.assertEqual(len(registered), 1)
+        self.assertEqual(sorted(registered[0]), ["000001.SZ", "000001.SZ", "600000.SH"])
+
+    def test_unparsable_ts_code_registers_no_instrument(self) -> None:
+        connection = _RecordingConnection()
+        registered: list[list[str]] = []
+        with patch("app.tushare_normalization.upsert_daily_bars"):
+            normalized = _call(
+                connection, [{"ts_code": "not-a-symbol", "trade_date": "20260820"}],
+                ensure_instruments=lambda _c, symbols: registered.append(list(symbols)),
+            )
+        self.assertEqual(normalized, 0)
+        self.assertEqual(registered, [[]])
+        self.assertTrue(any("data_quality_issues" in sql for sql, _params in connection.calls))
+
+    def test_trade_cal_and_stock_basic_do_not_pre_register_instruments(self) -> None:
+        for api_name in ("trade_cal", "stock_basic"):
+            with self.subTest(api_name=api_name):
+                connection = _RecordingConnection()
+                registered: list[list[str]] = []
+                normalize_rows(
+                    connection, api_name, [{"ts_code": "000001.SZ", "cal_date": "20260820", "is_open": "1"}],
+                    datetime(2026, 8, 20, tzinfo=timezone.utc),
+                    core_apis=frozenset({"trade_cal", "stock_basic"}),
+                    date_parser=lambda value: date(2026, 8, 20) if value else None,
+                    exchange_for=lambda symbol: symbol.rsplit(".", 1)[1],
+                    is_st_security_name=lambda _name: False,
+                    ensure_instruments=lambda _c, symbols: registered.append(list(symbols)),
+                    upsert_bar=lambda *_args: None, daily_bar_type=DailyBar,
+                    decimal_or_none=_decimal_or_none,
+                    safe_error_detail=lambda message, limit: message[:limit],
+                )
+                self.assertEqual(registered, [])
 
 
 if __name__ == "__main__":

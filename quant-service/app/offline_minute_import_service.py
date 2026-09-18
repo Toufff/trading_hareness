@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
 
+from .instrument_registry import ensure_instruments as ensure_registry_instruments
+
 
 def data_root(environ: Mapping[str, str] | None = None) -> Path:
     values = os.environ if environ is None else environ
@@ -109,11 +111,14 @@ def recovery_action(existing: Mapping[str, Any] | None, *, now: datetime, stale_
     return "resume_stale_running"
 
 
+def ensure_instruments(connection: Any, symbols: list[str], *, exchange_for: Callable[[str], str]) -> None:
+    """Register a whole offline/minute-capture basket in one batched statement."""
+    ensure_registry_instruments(connection, symbols, "offline-import", exchange_for=exchange_for)
+
+
 def ensure_instrument(connection: Any, symbol: str, *, exchange_for: Callable[[str], str]) -> None:
-    connection.execute(
-        "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,'offline-import') ON CONFLICT(symbol) DO NOTHING",
-        (symbol, exchange_for(symbol)),
-    )
+    """Single-symbol compatibility wrapper over the batched registry helper."""
+    ensure_instruments(connection, [symbol], exchange_for=exchange_for)
 
 
 def import_csv(
@@ -211,6 +216,6 @@ def import_csv(
 
 
 __all__ = [
-    "data_root", "ensure_instrument", "import_csv", "import_path", "minute_row", "minute_timestamp",
+    "data_root", "ensure_instrument", "ensure_instruments", "import_csv", "import_path", "minute_row", "minute_timestamp",
     "recovery_action", "sha256_file", "source_available_at", "stale_seconds",
 ]

@@ -84,6 +84,7 @@ from .research_maintenance_service import (
     update_analyst_profile as update_analyst_research_profile_isolated,
     update_universe_members as update_universe_members_isolated,
 )
+from .instrument_registry import ensure_instruments
 from .intraday_watchlist_service import (
     IntradayWatchlistDependencies,
     WatchlistHistoryHydrationDependencies,
@@ -1327,11 +1328,14 @@ def tushare_date(value: Any) -> date | None:
     return None
 
 
+def ensure_tushare_instruments(connection: Any, symbols: list[str]) -> None:
+    """Register a whole Tushare payload's symbols in one batched statement."""
+    ensure_instruments(connection, symbols, "tushare", exchange_for=exchange_for)
+
+
 def ensure_tushare_instrument(connection: Any, symbol: str) -> None:
-    connection.execute(
-        "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,'tushare') ON CONFLICT(symbol) DO NOTHING",
-        (symbol, exchange_for(symbol)),
-    )
+    """Single-symbol compatibility wrapper over the batched registry helper."""
+    ensure_tushare_instruments(connection, [symbol])
 
 
 def offline_data_root() -> Path:
@@ -1368,6 +1372,10 @@ def offline_minute_row(row: dict[str, Any]) -> dict[str, Any]:
     return offline_minute_import_service.minute_row(row, decimal_or_none=decimal_or_none)
 
 
+def ensure_offline_instruments(connection: Any, symbols: list[str]) -> None:
+    offline_minute_import_service.ensure_instruments(connection, symbols, exchange_for=exchange_for)
+
+
 def ensure_offline_instrument(connection: Any, symbol: str) -> None:
     offline_minute_import_service.ensure_instrument(connection, symbol, exchange_for=exchange_for)
 
@@ -1398,7 +1406,7 @@ def normalize_tushare_rows(connection: Any, api_name: str, rows: list[dict[str, 
     return pure_normalize_tushare_rows(
         connection, api_name, rows, available_at,
         core_apis=CORE_NORMALIZED_APIS, date_parser=tushare_date, exchange_for=exchange_for,
-        is_st_security_name=is_st_security_name, ensure_instrument=ensure_tushare_instrument,
+        is_st_security_name=is_st_security_name, ensure_instruments=ensure_tushare_instruments,
         upsert_bar=upsert_bar, daily_bar_type=DailyBar, decimal_or_none=decimal_or_none,
         safe_error_detail=safe_error_detail, provider_key=provider_key,
     )
@@ -1553,7 +1561,7 @@ def persist_ths_sector_members(connection: Any, taxonomy_key: str, sector_key: s
     """Persist one complete response without inventing a historical start date."""
     return persist_ths_sector_snapshot(
         connection, taxonomy_key, sector_key, rows, provider_key, available_at,
-        ensure_instrument=ensure_tushare_instrument, parse_date=tushare_date,
+        ensure_instruments=ensure_tushare_instruments, parse_date=tushare_date,
     )
 
 
@@ -2473,7 +2481,7 @@ async def capture_intraday_minute_sessions(symbols: list[str]) -> dict[str, Any]
         fetch_minutes=intraday_longhu_minutes,
         run_database=run_database_blocking,
         parse_minute=offline_minute_row,
-        ensure_instrument=ensure_offline_instrument,
+        ensure_instruments=ensure_offline_instruments,
         retention_days=intraday_minute_profile_retention_days,
     )
 

@@ -16,7 +16,7 @@ def normalize_rows(
     *,
     core_apis: set[str] | frozenset[str],
     date_parser: Callable[[Any], Any], exchange_for: Callable[[str], str],
-    is_st_security_name: Callable[[Any], bool], ensure_instrument: Callable[[Any, str], None],
+    is_st_security_name: Callable[[Any], bool], ensure_instruments: Callable[[Any, list[str]], None],
     upsert_bar: Callable[[Any, Any], None], daily_bar_type: Callable[..., Any],
     decimal_or_none: Callable[[Any], Any], safe_error_detail: Callable[[str, int], str],
     provider_key: str = "tushare",
@@ -25,6 +25,16 @@ def normalize_rows(
     if api_name not in core_apis:
         return 0
     normalized = 0
+    # Register every symbol this payload will reference in one batched
+    # statement before the row loop, instead of one INSERT ... ON CONFLICT per
+    # row.  A full cross-section is ~5,500 symbols; the same client-side
+    # filter as the loop below is applied here so an unparsable ``ts_code``
+    # still produces only a row-level data-quality warning and no instrument.
+    if api_name not in {"trade_cal", "stock_basic"}:
+        ensure_instruments(connection, [
+            symbol for symbol in (str(row.get("ts_code") or "").upper() for row in rows)
+            if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol)
+        ])
     # ``daily``/``index_daily`` rows are the post-close full-market hot path
     # (~5,500 symbols per call).  Their bars are parsed here as before but the
     # actual persistence is deferred to one batched call after the loop
@@ -53,7 +63,6 @@ def normalize_rows(
                 suspend_date = date_parser(row.get("trade_date") or row.get("suspend_date"))
                 if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) or not suspend_date:
                     raise ValueError("suspend_d row needs ts_code and trade_date")
-                ensure_instrument(connection, symbol)
                 resume_date = date_parser(row.get("resume_date"))
                 connection.execute("""INSERT INTO quant.security_suspensions(symbol,suspend_date,resume_date,suspend_reason,provider,available_at,raw) VALUES(%s,%s,%s,%s,%s,%s,%s)
                        ON CONFLICT(symbol,suspend_date,provider) DO UPDATE SET resume_date=EXCLUDED.resume_date,suspend_reason=EXCLUDED.suspend_reason, available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
@@ -74,7 +83,6 @@ def normalize_rows(
                 trading_date = date_parser(row.get("trade_date"))
                 if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) or not trading_date:
                     raise ValueError(f"{api_name} row needs ts_code and trade_date")
-                ensure_instrument(connection, symbol)
                 if api_name in {"daily", "index_daily"}:
                     pending_bars.append(daily_bar_type(symbol=symbol, trading_date=trading_date, open=decimal_or_none(row.get("open")), high=decimal_or_none(row.get("high")), low=decimal_or_none(row.get("low")), close=decimal_or_none(row.get("close")), pre_close=decimal_or_none(row.get("pre_close")), volume=decimal_or_none(row.get("vol")), amount=decimal_or_none(row.get("amount")), source=provider_key, available_at=available_at))
                 elif api_name == "adj_factor":

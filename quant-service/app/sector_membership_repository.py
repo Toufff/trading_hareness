@@ -79,21 +79,21 @@ def persist_ths_snapshot(
     provider_key: str,
     observed_at: datetime,
     *,
-    ensure_instrument: Callable[[Any, str], None],
+    ensure_instruments: Callable[[Any, list[str]], None],
     parse_date: Callable[[Any], date | None],
 ) -> int:
     """Store one complete THS constituent response with explicit time basis."""
     active_members: set[str] = set()
     # Rows are collected here and written in one batched upsert below instead
     # of one INSERT per constituent (a THS concept/index snapshot can carry
-    # hundreds of members).  ``ensure_instrument`` stays per-row: it is an
-    # injected dependency owned outside this file.
+    # hundreds of members).  Instrument registration is batched the same way:
+    # the injected dependency now takes the whole symbol list, so a snapshot
+    # costs one registry statement in one sorted lock order instead of N.
     to_write: dict[tuple[str, date], tuple[Any, ...]] = {}
     for row in rows:
         symbol = str(row.get("con_code") or "").upper()
         if len(symbol) != 9 or symbol[6:] not in {".SH", ".SZ", ".BJ"} or not symbol[:6].isdigit():
             continue
-        ensure_instrument(connection, symbol)
         effective_from, effective_to, from_basis, to_basis = membership_interval(
             row, observed_at, parse_date=parse_date,
         )
@@ -101,6 +101,7 @@ def persist_ths_snapshot(
         if effective_to is None:
             active_members.add(symbol)
     if to_write:
+        ensure_instruments(connection, [symbol for symbol, _effective_from in to_write])
         entries = list(to_write.values())
         connection.execute(
             """INSERT INTO quant.sector_membership_history(

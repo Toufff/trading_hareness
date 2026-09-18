@@ -11,6 +11,11 @@ provider response directly to a live threshold or order path.
 
 - `quant-service/app/routers/`: HTTP boundary and request validation.
 - `quant-service/app/*_repository.py`: database read/write projections.
+- `quant-service/app/instrument_registry.py`: the single shared
+  `quant.instruments` write primitive. Ingestion paths register a payload's
+  symbols through `ensure_instruments` (one statement, client-side
+  deduplicated, sorted so every writer takes the same lock order); do not
+  reintroduce a per-row `INSERT INTO quant.instruments ... DO NOTHING`.
 - `quant-service/app/*_scheduler.py`: timing, retry windows and idempotency only.
 - `quant-service/app/*_rules.py` / `*_research.py`: pure or research-only rules.
 - `quant-service/app/main.py`: composition root by design, but historically
