@@ -17,34 +17,49 @@ $oldRelease = if ($state.PSObject.Properties['active_release']) { [string]$state
 $oldTarget = Get-StockCurrentReleaseTarget -PlatformRoot $platform
 if ($oldRelease -eq $ReleaseId) { [pscustomobject]@{ status = 'already_active'; release_id = $ReleaseId; target = $target }; return }
 
-# Tracks the release tree the shared-peer tunnel task is actually running
-# from. It starts as the currently-active target and only moves when a
-# reinstall really happens, so the rollback path below compares against the
+# The release the shared-peer tunnel task is actually running from, as recorded
+# by the last real reinstall. It is NOT necessarily the active release: a
+# skipped publish leaves it behind while `current` moves on. It only moves here
+# when a reinstall really happens, so the revert path below compares against the
 # tree the tunnel is running now, not the one it ran before this script began.
-$tunnelRuntimeRoot = [string]$oldTarget
+$tunnelRelease = if ($state.PSObject.Properties['tunnel_release']) { [string]$state.tunnel_release } else { '' }
 $keepTunnel = $false
 
 function Resolve-TunnelGate {
-    # Returns $true when the already-running tunnel task may be left alone.
+    # Returns the reinstall plan, or $null when the gate could not be
+    # evaluated (which the caller must treat as 'reinstall').
     # See Resolve-StockTunnelReinstallPlan in stock-release-management.psm1:
-    # identical tunnel-affecting files + task Running + runtime state healthy
-    # + remote API health 200. Must be evaluated BEFORE anything is stopped.
+    # identical tunnel-affecting files and SSH target + task Running under
+    # <PlatformRoot>\current + runtime state healthy + remote API health 200 +
+    # a tunnel_release that is still on disk and still retained. Must be
+    # evaluated BEFORE anything is stopped.
     #
-    # After a skip the tunnel's supervisor, background host and ssh client
-    # keep running out of the previous release directory until their next real
-    # restart; release directories are immutable and retained, so that is safe.
-    param([Parameter(Mandatory)][string]$NewRuntimeRoot, [string]$CurrentRuntimeRoot, [string]$Context)
-    $plan = $null
+    # After a skip the tunnel's supervisor, background host and ssh client keep
+    # running out of the tunnel_release directory until their next real restart;
+    # that release is pinned in the retention policy, so it cannot be pruned
+    # out from under the running process.
+    param([Parameter(Mandatory)][string]$NewRuntimeRoot, [string]$TunnelReleaseId)
     try {
-        $plan = Resolve-StockTunnelReinstallPlan -PlatformRoot $platform `
-            -NewRuntimeRoot $NewRuntimeRoot -CurrentRuntimeRoot ([string]$CurrentRuntimeRoot)
+        return Resolve-StockTunnelReinstallPlan -PlatformRoot $platform `
+            -NewRuntimeRoot $NewRuntimeRoot -TunnelReleaseId ([string]$TunnelReleaseId)
     } catch {
         Write-Warning "Tunnel reinstall gate could not be evaluated, reinstalling: $($_.Exception.Message)"
-        return $false
+        return $null
     }
-    if ([string]$plan.decision -ne 'skip') { return $false }
-    Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $plan -Context $Context
-    return $true
+}
+
+function Get-TunnelSshTargetPin {
+    # SHA-256 of the SSH identity the tunnel was just (re)installed against.
+    $resolved = Get-StockTunnelSshTargetHash -PlatformRoot $platform
+    if ($resolved -eq 'unresolved') { return $null }
+    return $resolved
+}
+
+function Get-CarriedTunnelSshTargetPin {
+    # After a skip the tunnel is still connected with the identity recorded at
+    # its last real reinstall; that recorded value must survive this write.
+    if ($state.PSObject.Properties['tunnel_ssh_target_sha256']) { return $state.tunnel_ssh_target_sha256 }
+    return $null
 }
 
 try {
@@ -52,8 +67,8 @@ try {
     # outright if the target release's own files no longer match the
     # SHA-256 manifest captured when it was published.
     [void](Test-StockReleaseIntegrity -PlatformRoot $platform -ReleaseId $ReleaseId)
-    $keepTunnel = Resolve-TunnelGate -NewRuntimeRoot $target -CurrentRuntimeRoot $tunnelRuntimeRoot `
-        -Context 'switch-stock-release.ps1'
+    $tunnelPlan = Resolve-TunnelGate -NewRuntimeRoot $target -TunnelReleaseId $tunnelRelease
+    $keepTunnel = ($null -ne $tunnelPlan) -and ([string]$tunnelPlan.decision -eq 'skip')
     # Graceful stop (of the currently-active/failed target) before
     # Stop-ScheduledTask: see the matching comment in
     # publish-stock-release.ps1's Stop-ProductionRuntime for why the order
@@ -68,7 +83,7 @@ try {
         Write-Verbose 'Shared-peer tunnel task left untouched by the reinstall gate.'
     } else {
         & (Join-Path $layout.CurrentPath 'scripts\shared-peer\install-shared-tunnel-task.ps1') -ScriptPath (Join-Path $layout.CurrentPath 'scripts\shared-peer\start-shared-tunnels.ps1') -PlatformRoot $platform | Out-Null
-        $tunnelRuntimeRoot = $target
+        $tunnelRelease = $ReleaseId
     }
     $deadline = [DateTime]::UtcNow.AddSeconds(150)
     do {
@@ -84,19 +99,43 @@ try {
     # (propagated because both scripts run with $ErrorActionPreference =
     # 'Stop'), so checking $LASTEXITCODE afterward would only reflect
     # whatever native command it happened to run last.
-    & (Join-Path $layout.CurrentPath 'scripts\shared-peer\verify-shared-runtime.ps1') | Out-Null
+    $tunnelOutcome = if ($keepTunnel) { 'reused_without_reinstall' } else { 'reinstalled' }
+    try {
+        & (Join-Path $layout.CurrentPath 'scripts\shared-peer\verify-shared-runtime.ps1') | Out-Null
+    } catch {
+        # A skip is only as good as the verification that follows it: when the
+        # gate spared the tunnel, the spared tunnel is a prime suspect for the
+        # failure and nothing else in this run would ever restart it. Reinstall
+        # and verify again before failing. Without a skip this is the
+        # pre-existing behaviour: the failure propagates to the revert path.
+        if (-not $keepTunnel) { throw }
+        Write-Warning "Shared runtime verification failed after a skipped tunnel reinstall; reinstalling the shared-peer tunnel and re-verifying: $($_.Exception.Message)"
+        $keepTunnel = $false
+        $tunnelOutcome = 'reinstalled_after_degraded_verification'
+        & (Join-Path $layout.CurrentPath 'scripts\shared-peer\install-shared-tunnel-task.ps1') -ScriptPath (Join-Path $layout.CurrentPath 'scripts\shared-peer\start-shared-tunnels.ps1') -PlatformRoot $platform | Out-Null
+        $tunnelRelease = $ReleaseId
+        & (Join-Path $layout.CurrentPath 'scripts\shared-peer\verify-shared-runtime.ps1') | Out-Null
+    }
+    if ($keepTunnel) {
+        # Only now: activation and verification have both succeeded, so the
+        # lifecycle receipt cannot contradict a revert that reinstalled after all.
+        Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $tunnelPlan -Context 'switch-stock-release.ps1'
+    }
     [void](Set-StockReleaseState -PlatformRoot $platform -State @{
         active_release = $ReleaseId
         previous_release = if ($oldRelease) { $oldRelease } else { $null }
-        last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = 'verified_after_switch' }
+        last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = 'verified_after_switch'; shared_peer_tunnel = $tunnelOutcome }
         last_failed_release = $null
+        tunnel_release = if ($tunnelRelease) { $tunnelRelease } else { $null }
+        tunnel_ssh_target_sha256 = if ($keepTunnel) { Get-CarriedTunnelSshTargetPin } else { Get-TunnelSshTargetPin }
     })
     [pscustomobject]@{
         status = 'switched'
         release_id = $ReleaseId
         previous_release = $oldRelease
         target = $target
-        shared_peer_tunnel = if ($keepTunnel) { 'reused_without_reinstall' } else { 'reinstalled' }
+        shared_peer_tunnel = $tunnelOutcome
+        tunnel_release = $tunnelRelease
     }
 } catch {
     $failure = $_
@@ -105,18 +144,18 @@ try {
             [void](Test-StockReleaseIntegrity -PlatformRoot $platform -ReleaseId $oldRelease)
             $revertTarget = Get-StockReleaseAppPath -PlatformRoot $platform -ReleaseId $oldRelease
             # Same gate on the way back. If the forward path already skipped,
-            # $tunnelRuntimeRoot still names the release the tunnel is running
+            # $tunnelRelease still names the release the tunnel is running
             # from, which is normally the one being reverted to, so the revert
             # skips too and the tunnel is never touched by a failed switch.
-            $keepTunnelRevert = Resolve-TunnelGate -NewRuntimeRoot $revertTarget `
-                -CurrentRuntimeRoot $tunnelRuntimeRoot -Context 'switch-stock-release.ps1:revert'
+            $revertPlan = Resolve-TunnelGate -NewRuntimeRoot $revertTarget -TunnelReleaseId $tunnelRelease
+            $keepTunnelRevert = ($null -ne $revertPlan) -and ([string]$revertPlan.decision -eq 'skip')
             [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $oldRelease)
             & (Join-Path $layout.CurrentPath 'scripts\windows\install-stock-dashboard-task.ps1') -RepositoryRoot $layout.CurrentPath -PlatformRoot $platform | Out-Null
             if ($keepTunnelRevert) {
                 Write-Verbose 'Shared-peer tunnel task left untouched by the reinstall gate during revert.'
             } else {
                 & (Join-Path $layout.CurrentPath 'scripts\shared-peer\install-shared-tunnel-task.ps1') -ScriptPath (Join-Path $layout.CurrentPath 'scripts\shared-peer\start-shared-tunnels.ps1') -PlatformRoot $platform | Out-Null
-                $tunnelRuntimeRoot = $revertTarget
+                $tunnelRelease = $oldRelease
             }
             $revertDeadline = [DateTime]::UtcNow.AddSeconds(150)
             do {
@@ -128,12 +167,17 @@ try {
                 } catch { }
             } while ([DateTime]::UtcNow -lt $revertDeadline)
             if ([DateTime]::UtcNow -ge $revertDeadline) { throw 'Reverted release did not become healthy' }
+            if ($keepTunnelRevert) {
+                Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $revertPlan -Context 'switch-stock-release.ps1:revert'
+            }
             [void](Set-StockReleaseState -PlatformRoot $platform -State @{
                 active_release = $oldRelease
                 previous_release = if ($state.PSObject.Properties['previous_release']) { $state.previous_release } else { $null }
                 last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = 'verified_after_switch_revert' }
                 last_failed_release = $ReleaseId
                 failure_message = $failure.Exception.Message
+                tunnel_release = if ($tunnelRelease) { $tunnelRelease } else { $null }
+                tunnel_ssh_target_sha256 = if ($keepTunnelRevert) { Get-CarriedTunnelSshTargetPin } else { Get-TunnelSshTargetPin }
             })
         } catch { Write-Warning "Automatic revert to $oldRelease also failed: $($_.Exception.Message)" }
     }

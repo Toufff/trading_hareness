@@ -142,30 +142,70 @@ Both `publish-stock-release.ps1` and `switch-stock-release.ps1` now ask
 *before* stopping anything. The tunnel is left completely alone only when all
 of the following hold:
 
-- every tunnel-affecting file is byte-identical between the new and the running
-  release (`start-shared-tunnels.ps1`, `install-shared-tunnel-task.ps1`,
-  `runtime-observability.psm1`, `background-process.psm1` and the three build
-  inputs of `stock-background-host.exe`, which is presence-checked instead of
-  hashed because csc.exe recompiles it non-deterministically on every publish);
-- the scheduled task state is `Running`;
+- every tunnel-affecting file is byte-identical between the new release and the
+  release the tunnel is **actually running from** (`release-state.json`'s
+  `tunnel_release`, not `current` — those diverge as soon as one publish skips).
+  The file list is the transitive closure of the execution chain: task action →
+  `stock-background-host.exe` build inputs → `start-shared-tunnels.ps1` → its
+  `Import-Module` targets → `Start-RuntimeSupervisor` →
+  `supervise-runtime-process.ps1` → its `Import-Module`/`Add-Type` targets.
+  `Get-StockTunnelExecutionChainFile` re-derives it by parsing that chain and
+  `test-stock-release-safety.ps1` asserts the declared list *equals* the parsed
+  one, so a new import anywhere on the chain fails the test instead of silently
+  leaving the gate under-detecting. `stock-background-host.exe` is
+  presence-checked rather than hashed, because csc.exe recompiles it
+  non-deterministically on every publish; its tracked build inputs are hashed
+  in its place;
+- the SHA-256 of the resolved owner-tunnel SSH target
+  (`Resolve-OwnerTunnelSshTarget`'s destination plus connection arguments, i.e.
+  the `OWNER_TUNNEL_SSH_*` values in `config\runtime.env`) matches the one
+  recorded at the last real reinstall, so rotating the key, host or port forces
+  a reinstall even though no release byte changed;
+- `tunnel_release` names a release that is still on disk and still inside the
+  retention keep set;
+- the scheduled task state is `Running`, **and** its registered action
+  (`Execute` plus every `.ps1` in `Arguments`) resolves under
+  `<PlatformRoot>\current\`. A task left pointing at the F: development checkout
+  by a manual `install-shared-tunnel-task.ps1` run is only healed by a
+  reinstall, so skipping is refused there;
 - `G:\StockPlatform\logs\runtime\shared-peer-tunnels.current.json` says
-  `status: healthy`;
+  `status: healthy`. That field records the **last verified install**, not live
+  health; the remote probe below is what speaks for the tunnel's current state;
 - the same remote probe `install-shared-tunnel-task.ps1` uses returns HTTP 200.
 
-Anything else — a changed file, a stopped task, a non-healthy state file, a
-non-200 probe, no comparable previous release, or an error while evaluating the
-gate — keeps the old unconditional stop + reinstall. A skip writes a
-`tunnel_reinstall_skipped` runtime event carrying the hashes it compared, and
-the release's own post-switch health verification still has to pass. The
+Anything else — a changed file or SSH target, a stopped or misplaced task, a
+non-healthy state file, a non-200 probe, an unknown/pruned `tunnel_release`, or
+an error while evaluating the gate — keeps the old unconditional stop +
+reinstall.
+
+After activation, the post-switch shared-runtime verification decides whether a
+skip stands. `Wait-ProductionHealth` deliberately downgrades a failed
+`verify-shared-runtime.ps1` to `shared_runtime = degraded` so a lightServer
+outage cannot roll back a healthy local release — but when the gate spared the
+tunnel, a degraded result now **reinstalls the tunnel and verifies again**
+before the publish returns success (`shared_peer_tunnel =
+reinstalled_after_degraded_verification`); `switch-stock-release.ps1` does the
+same around its own `verify-shared-runtime.ps1` call. Only a skip that survived
+activation *and* verification writes the `tunnel_reinstall_skipped` runtime
+event, so grepping `lifecycle-<date>.jsonl` for it cannot produce a false
+positive from a publish that later rolled back and reinstalled after all. The
 publish/switch result and `release-state.json`'s `last_verification` record
-`shared_peer_tunnel` as `reused_without_reinstall` or `reinstalled`.
+`shared_peer_tunnel` as `reused_without_reinstall`, `reinstalled` or
+`reinstalled_after_degraded_verification`.
 
 After a skip the tunnel's supervisor, background host and `ssh` client keep
-running out of the **previous** release directory until their next real restart
-(a tunnel-code change, a tunnel fault, the task's 2-minute supervising trigger
-after a drop, or a reboot). That is safe because release directories are
-immutable and the active and previous releases are never pruned — but it is one
-more reason never to delete a release directory by hand.
+running out of the `tunnel_release` directory until their next real restart (a
+tunnel-code change, a tunnel fault, the task's 2-minute supervising trigger
+after a drop, or a reboot). That release is **pinned**: every real reinstall
+writes `tunnel_release` into `release-state.json`,
+`Get-StockReleaseRetentionPlan` keeps it unconditionally alongside the active
+and previous releases, and the gate refuses to skip when it is unknown, gone or
+no longer retained. A skip therefore can never outlive its own directory — but
+it is still one more reason never to delete a release directory by hand.
+
+Because `tunnel_release` is only written by a real reinstall, the **first**
+publish after this change always reinstalls (`tunnel_release_unknown`); the one
+after that is the first that can skip.
 
 ## Rollback
 

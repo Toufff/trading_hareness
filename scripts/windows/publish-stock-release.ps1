@@ -74,12 +74,12 @@ function Stop-ProductionRuntime {
     # runtime state file says 'healthy' and the remote API probe returns 200,
     # the tunnel is left completely alone: not stopped here, and not
     # reinstalled in Start-ProductionRuntime. Its supervisor, background host
-    # and ssh client then keep running out of the PREVIOUS release directory
-    # until their next real restart (a tunnel-code change, a tunnel fault, the
-    # task's 2-minute supervising trigger after a drop, or a reboot). That is
-    # safe because release directories are immutable and retained -- the
-    # active and previous releases are never pruned, and the skip is only ever
-    # taken when the files that process would re-read are identical anyway.
+    # and ssh client then keep running out of the release named by
+    # release-state.json's tunnel_release until their next real restart (a
+    # tunnel-code change, a tunnel fault, the task's 2-minute supervising
+    # trigger after a drop, or a reboot). That release is pinned by
+    # Get-StockReleaseRetentionPlan and re-checked by the gate, so retention
+    # can never delete the tree the live tunnel is executing from.
     param([string]$RuntimeRoot, [switch]$KeepTunnelTask)
     $stop = Join-Path $RuntimeRoot 'scripts\windows\stop-stock-dashboard.ps1'
     if (Test-Path -LiteralPath $stop -PathType Leaf) { & $stop -PlatformRoot $platform | Out-Null }
@@ -126,10 +126,23 @@ function Enter-ProductionPublishLock {
     } while ($true)
 }
 
+function Install-SharedPeerTunnelTask {
+    # Stops, re-registers and health-gates the shared-peer tunnel task from
+    # $RuntimeRoot. Used both by the normal start path and by the post-switch
+    # repair below, which reinstalls a tunnel the gate spared when shared
+    # runtime verification then came back degraded.
+    param([string]$RuntimeRoot)
+    $tunnelInstaller = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+    $tunnelExtra = Get-LogonTypeArguments -Installer $tunnelInstaller
+    & $tunnelInstaller -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
+        -PlatformRoot $platform @tunnelExtra | Out-Null
+}
+
 function Start-ProductionRuntime {
     # -KeepTunnelTask: see Stop-ProductionRuntime. The already-running tunnel
     # task is neither stopped nor re-registered; the post-switch health
-    # verification below still has to prove the remote surface is up.
+    # verification below still has to prove the remote surface is up, and a
+    # degraded result reinstalls it after all.
     param([string]$RuntimeRoot, [switch]$KeepTunnelTask)
     # Migrations can legitimately take minutes on the archival HDD. Finish
     # them under the lifecycle lock before starting a watchdog/HTTP deadline;
@@ -137,7 +150,6 @@ function Start-ProductionRuntime {
     $platformStarter = Join-Path $RuntimeRoot 'scripts\windows\start-stock-platform.ps1'
     & $platformStarter -RepositoryRoot $RuntimeRoot -PlatformRoot $platform | Out-Null
     $dashboardInstaller = Join-Path $RuntimeRoot 'scripts\windows\install-stock-dashboard-task.ps1'
-    $tunnelInstaller = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
     $postCloseInstaller = Join-Path $RuntimeRoot 'scripts\windows\install-post-close-pipeline-task.ps1'
     $dashboardExtra = Get-LogonTypeArguments -Installer $dashboardInstaller
     $postCloseExtra = Get-LogonTypeArguments -Installer $postCloseInstaller
@@ -146,10 +158,8 @@ function Start-ProductionRuntime {
     if ($KeepTunnelTask) {
         Write-Verbose 'Shared-peer tunnel task left untouched by the reinstall gate.'
     } else {
-        $tunnelExtra = Get-LogonTypeArguments -Installer $tunnelInstaller
         try {
-            & $tunnelInstaller -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
-                -PlatformRoot $platform @tunnelExtra | Out-Null
+            Install-SharedPeerTunnelTask -RuntimeRoot $RuntimeRoot
         } catch {
             $sharedPeerStartupError = $_.Exception.Message
             Write-Warning "Local runtime was installed, but shared-peer tunnel startup is degraded: $sharedPeerStartupError"
@@ -272,6 +282,12 @@ $previousState = Get-StockReleaseState -PlatformRoot $platform
 $previousRelease = if ($previousState.PSObject.Properties['active_release']) { [string]$previousState.active_release } else { '' }
 $previousTarget = Get-StockCurrentReleaseTarget -PlatformRoot $platform
 $fallbackRoot = if ($previousTarget) { $previousTarget } else { $source }
+# The release the shared-peer tunnel is really executing out of. It is NOT
+# necessarily `current`: every skipped publish leaves it behind while `current`
+# moves on. Comparing the new tree against `current` would only be equivalent
+# while the tunnel-affecting file list never changes, so the gate compares
+# against this instead, and treats an unknown/pruned value as a reinstall.
+$previousTunnelRelease = if ($previousState.PSObject.Properties['tunnel_release']) { [string]$previousState.tunnel_release } else { '' }
 $activated = $false
 $activationAttempted = $false
 
@@ -367,26 +383,55 @@ try {
     $activationAttempted = $true
     # Decide the shared-peer tunnel's fate BEFORE anything is stopped: the
     # task state, the runtime state file and the remote health probe only mean
-    # something while the current release is still live. $previousTarget (not
-    # $fallbackRoot) is the comparison tree on purpose -- with no previously
-    # activated release there is nothing to compare against and the gate must
-    # fall back to the unconditional stop + reinstall.
+    # something while the current release is still live. The comparison tree is
+    # the tunnel's own release ($previousTunnelRelease), resolved inside the
+    # gate -- with no recorded tunnel release there is nothing trustworthy to
+    # compare against and the gate falls back to the unconditional stop +
+    # reinstall.
     $tunnelPlan = $null
     try {
         $tunnelPlan = Resolve-StockTunnelReinstallPlan -PlatformRoot $platform `
-            -NewRuntimeRoot $newApp -CurrentRuntimeRoot ([string]$previousTarget)
+            -NewRuntimeRoot $newApp -TunnelReleaseId $previousTunnelRelease -RetainCount $RetainCount
     } catch {
         Write-Warning "Tunnel reinstall gate could not be evaluated, reinstalling: $($_.Exception.Message)"
     }
     $keepTunnel = ($null -ne $tunnelPlan) -and ([string]$tunnelPlan.decision -eq 'skip')
-    if ($keepTunnel) {
-        Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $tunnelPlan -Context 'publish-stock-release.ps1'
-    }
     Stop-ProductionRuntime -RuntimeRoot $fallbackRoot -KeepTunnelTask:$keepTunnel
     [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $releaseId)
     $startup = Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath -KeepTunnelTask:$keepTunnel
+    $tunnelStartupError = [string]$startup.shared_peer_startup_error
     $healthVerification = Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
-        -SharedPeerStartupError ([string]$startup.shared_peer_startup_error)
+        -SharedPeerStartupError $tunnelStartupError
+    # A skip is only as good as the verification that follows it.
+    # Wait-ProductionHealth deliberately downgrades a failed
+    # verify-shared-runtime.ps1 to shared_runtime='degraded' and lets the
+    # publish succeed, so a lightServer outage cannot roll back a healthy local
+    # release -- but when the gate spared the tunnel, "degraded" is exactly the
+    # case where the spared tunnel may be the thing that is broken, and nothing
+    # else in this run would ever restart it. Reinstall it and verify again
+    # before returning success.
+    $tunnelOutcome = if ($keepTunnel) { 'reused_without_reinstall' } else { 'reinstalled' }
+    if ($keepTunnel -and [string]$healthVerification.shared_runtime -ne 'ok') {
+        Write-Warning ('Shared runtime verification is degraded after a skipped tunnel reinstall; ' +
+            "reinstalling the shared-peer tunnel and re-verifying: $($healthVerification.shared_error)")
+        $keepTunnel = $false
+        $tunnelOutcome = 'reinstalled_after_degraded_verification'
+        try {
+            Install-SharedPeerTunnelTask -RuntimeRoot $layout.CurrentPath
+            $tunnelStartupError = ''
+        } catch {
+            $tunnelStartupError = $_.Exception.Message
+            Write-Warning "Shared-peer tunnel reinstall after a degraded verification also failed: $tunnelStartupError"
+        }
+        $healthVerification = Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
+            -SharedPeerStartupError $tunnelStartupError
+    }
+    if ($keepTunnel) {
+        # Written only now: activation and verification have both succeeded, so
+        # the receipt in lifecycle-<date>.jsonl cannot contradict a rollback
+        # that reinstalled the tunnel after all.
+        Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $tunnelPlan -Context 'publish-stock-release.ps1'
+    }
     $verification = [ordered]@{
         verified_at = [DateTimeOffset]::Now.ToString('o')
         local_api = $healthVerification.local_api
@@ -395,8 +440,21 @@ try {
         remote_owner_api = $healthVerification.remote_owner_api
         remote_peer_api = $healthVerification.remote_peer_api
         shared_error = $healthVerification.shared_error
-        shared_peer_tunnel = if ($keepTunnel) { 'reused_without_reinstall' } else { 'reinstalled' }
+        shared_peer_tunnel = $tunnelOutcome
         shared_peer_tunnel_gate = if ($tunnelPlan) { @($tunnelPlan.reasons) } else { @('gate_not_evaluated') }
+    }
+    # Pin the release the tunnel is actually executing out of. On a skip that is
+    # still the previously recorded one; on a reinstall it is this release --
+    # unless the reinstall itself failed, in which case the pin is cleared so
+    # the next publish cannot skip on an unproven tunnel.
+    $tunnelReleaseAfter = if ($keepTunnel) {
+        if ($previousTunnelRelease) { $previousTunnelRelease } else { $null }
+    } elseif ($tunnelStartupError) { $null } else { $releaseId }
+    $tunnelSshTargetAfter = if ($keepTunnel) {
+        if ($previousState.PSObject.Properties['tunnel_ssh_target_sha256']) { $previousState.tunnel_ssh_target_sha256 } else { $null }
+    } elseif ($tunnelStartupError) { $null } else {
+        $resolvedSshTarget = Get-StockTunnelSshTargetHash -PlatformRoot $platform
+        if ($resolvedSshTarget -eq 'unresolved') { $null } else { $resolvedSshTarget }
     }
     [void](Set-StockReleaseState -PlatformRoot $platform -State @{
         active_release = $releaseId
@@ -404,6 +462,8 @@ try {
         last_verification = $verification
         last_failed_release = $null
         content_manifest_sha256 = $contentDigest
+        tunnel_release = $tunnelReleaseAfter
+        tunnel_ssh_target_sha256 = $tunnelSshTargetAfter
     })
     $activated = $true
     $removed = @(Remove-ExpiredStockReleases -PlatformRoot $platform -RetainCount $RetainCount)
@@ -413,7 +473,8 @@ try {
         current = $layout.CurrentPath
         target = $newApp
         previous_release = $previousRelease
-        shared_peer_tunnel = if ($keepTunnel) { 'reused_without_reinstall' } else { 'reinstalled' }
+        shared_peer_tunnel = $tunnelOutcome
+        tunnel_release = $tunnelReleaseAfter
         retained_release_count = [Math]::Max(2, $RetainCount)
         pruned_releases = $removed
         dirty_snapshot = $dirty
@@ -452,12 +513,22 @@ try {
                     [void](Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
                         -SharedPeerStartupError ([string]$rollbackStartup.shared_peer_startup_error))
                 }
+                # The rollback path always reinstalls the tunnel (see the
+                # comment in Stop-ProductionRuntime's caller above), so on a
+                # started rollback the tunnel now runs from $previousRelease.
+                # When production is left stopped, nothing is running and the
+                # pin is cleared so the next publish cannot skip.
                 [void](Set-StockReleaseState -PlatformRoot $platform -State @{
                     active_release = $previousRelease
                     previous_release = if ($previousState.PSObject.Properties['previous_release']) { $previousState.previous_release } else { $null }
                     last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = $(if ($KeepStoppedOnFailure) { 'disabled_after_failed_activation' } else { 'verified_after_automatic_rollback' }) }
                     last_failed_release = $releaseId
                     failure_message = $failure.Exception.Message
+                    tunnel_release = if ($KeepStoppedOnFailure) { $null } else { $previousRelease }
+                    tunnel_ssh_target_sha256 = if ($KeepStoppedOnFailure) { $null } else {
+                        $rollbackSshTarget = Get-StockTunnelSshTargetHash -PlatformRoot $platform
+                        if ($rollbackSshTarget -eq 'unresolved') { $null } else { $rollbackSshTarget }
+                    }
                 })
             } elseif ($previousRelease -and (Test-Path -LiteralPath (Join-Path $finalRoot 'app') -PathType Container)) {
                 # Never activate old code that cannot recognize an applied DB
@@ -471,6 +542,8 @@ try {
                     last_failed_release = $releaseId
                     last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = 'stopped_schema_incompatible_rollback' }
                     failure_message = $failure.Exception.Message
+                    tunnel_release = $null
+                    tunnel_ssh_target_sha256 = $null
                 })
                 Write-Warning 'Rollback refused: prior code cannot recognize the database schema; runtime stopped for forward repair.'
             } else {
@@ -491,6 +564,8 @@ try {
                     last_verification = if ($previousState.PSObject.Properties['last_verification']) { $previousState.last_verification } else { $null }
                     last_failed_release = $releaseId
                     failure_message = $failure.Exception.Message
+                    tunnel_release = $null
+                    tunnel_ssh_target_sha256 = $null
                 })
             }
         } catch { Write-Warning "Automatic rollback also failed: $($_.Exception.Message)" }
