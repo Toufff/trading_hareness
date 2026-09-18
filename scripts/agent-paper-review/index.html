@@ -83,7 +83,8 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
   <button id="refresh">刷新</button>
   <span id="stamp" class="muted small"></span>
   <nav class="tabs" id="tabs" role="tablist">
-    <button role="tab" data-view="timeline" aria-selected="true">总览时间线</button>
+    <button role="tab" data-view="lanes" aria-selected="true">时间轴泳道</button>
+    <button role="tab" data-view="timeline" aria-selected="false">操作明细</button>
     <button role="tab" data-view="symbols" aria-selected="false">逐笔对照</button>
     <button role="tab" data-view="rounds" aria-selected="false">决策明细</button>
     <button role="tab" data-view="book" aria-selected="false">持仓与净值</button>
@@ -112,7 +113,7 @@ const REASONS={no_live_quote:'无实时行情',not_board_lot:'不是整百股',l
   limit_price_required:'限价单缺价格',reason_required:'缺少理由',order_not_object:'订单格式错误',unsupported_action:'不支持的操作',unsupported_order_type:'不支持的订单类型'};
 const reason=r=>REASONS[r]||REASONS[String(r).split(':')[0]]||r;
 const CLS={me:'me'};
-let current=null,lastBody='',view='timeline',actorFilter=new Set(),roundAccount=null;
+let current=null,lastBody='',view='lanes',actorFilter=new Set(),roundAccount=null;
 
 async function api(path){const r=await fetch(path,{cache:'no-store'});const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j;}
 
@@ -211,6 +212,92 @@ function timelineView(d){
   return `<div class="panel"><h2><span>当日操作时间线（最新在上）</span><span class="filters">${chips}</span></h2>
     <div class="scroll"><table><thead><tr><th>时间</th><th>谁</th><th>操作</th><th>数量 / 价格</th><th>状态</th><th>理由（点击展开）</th></tr></thead>
     <tbody>${body||'<tr><td colspan="6" class="empty">这一天没有操作记录。</td></tr>'}</tbody></table></div></div>`;
+}
+
+/* ---------- lane chart: one row per actor on a shared session clock ---------- */
+const SESSION=[[9*60+30,11*60+30],[13*60,15*60]];
+const SESSION_MINUTES=240;
+function sessionMinute(at){
+  const local=new Date(at).toLocaleTimeString('en-GB',{timeZone:'Asia/Shanghai',hour12:false});
+  const [h,m]=local.split(':').map(Number);
+  const minutes=h*60+m;
+  let passed=0;
+  for(const [from,to] of SESSION){
+    if(minutes<from)return passed;
+    if(minutes<=to)return passed+(minutes-from);
+    passed+=to-from;
+  }
+  return SESSION_MINUTES;
+}
+function laneClock(m){
+  const minutes=m<120?(9*60+30+m):(13*60+m-120);
+  return `${String(Math.floor(minutes/60)).padStart(2,'0')}:${String(minutes%60).padStart(2,'0')}`;
+}
+let laneEvents=[],laneSelected=null;
+function lanesView(d){
+  const all=actors(d);
+  const rows=events(d).slice().reverse();
+  laneEvents=rows;
+  const L=96,R=22,W=1000,LANE=84,TOP=34,PAD=12;
+  const H=TOP+all.length*LANE+28;
+  const x=m=>L+PAD+(W-L-R-PAD*2)*(m/SESSION_MINUTES);
+  const ticks=[];
+  for(let m=0;m<=SESSION_MINUTES;m+=30){
+    ticks.push(`<line x1="${x(m)}" y1="${TOP-10}" x2="${x(m)}" y2="${H-26}" stroke="var(--line)" stroke-width="1"/>`+
+      `<text x="${x(m)}" y="${TOP-16}" font-size="11" text-anchor="middle" fill="var(--mute)">${laneClock(m)}</text>`);
+  }
+  const lunch=`<line x1="${x(120)}" y1="${TOP-10}" x2="${x(120)}" y2="${H-26}" stroke="var(--warn)" stroke-width="1.2" stroke-dasharray="4 3"/>`+
+    `<text x="${x(120)}" y="${H-12}" font-size="11" text-anchor="middle" fill="var(--warn)">午休</text>`;
+  const laneRows=all.map((a,i)=>{
+    const y=TOP+i*LANE+LANE/2;
+    const stacks={};let labelledAt=-99;
+    const marks=rows.map((e,index)=>[e,index]).filter(([e])=>e.actor===a.key).map(([e,index])=>{
+      const cx=x(sessionMinute(e.at)),key=Math.round(cx/14);
+      const slot=(stacks[key]=(stacks[key]||0)+1)-1;
+      const cy=y-24+slot*16;
+      // Labels only where they fit: a dense cluster keeps the marker and its tooltip.
+      const label9=(slot===0&&cx-labelledAt>44)?esc((e.name||e.symbol||'').slice(0,4)):'';
+      if(label9)labelledAt=cx;
+      const buy=e.side==='buy',done=e.status==='filled'||e.status==='partially_filled';
+      const color=e.side==='cancel'?'var(--warn)':buy?'var(--up)':'var(--down)';
+      const shape=buy?`M${cx},${cy-6} L${cx+6},${cy+5} L${cx-6},${cy+5} Z`:`M${cx},${cy+6} L${cx+6},${cy-5} L${cx-6},${cy-5} Z`;
+      const [label]=STATUS[e.status]||[e.status];
+      return `<g class="mk" data-lane-event="${index}" tabindex="0" role="button" style="cursor:pointer">`+
+        `<title>${esc(hm(e.at))} ${esc(a.label)} ${SIDE[e.side]||e.side} ${esc(e.name||e.symbol||'')} ${int(e.quantity)} 股 @${e.price!=null?num(e.price,3):'—'} · ${label}</title>`+
+        `<path d="${shape}" fill="${done?color:'var(--panel)'}" stroke="${color}" stroke-width="1.6"/>`+
+        (label9?`<text x="${cx}" y="${cy+17}" font-size="10" text-anchor="middle" fill="var(--mute)">${label9}</text>`:'')+`</g>`;
+    }).join('');
+    const count=rows.filter(e=>e.actor===a.key).length;
+    const colour=a.cls==='me'?'var(--me)':a.cls==='a1'?'var(--a1)':'var(--a2)';
+    return `<g><rect x="${L}" y="${TOP+i*LANE}" width="${W-L-R}" height="${LANE}" fill="${i%2?'var(--soft)':'transparent'}"/>`+
+      `<line x1="${L}" y1="${TOP+i*LANE+LANE}" x2="${W-R}" y2="${TOP+i*LANE+LANE}" stroke="var(--line)"/>`+
+      `<text x="8" y="${y}" font-size="12" font-weight="600" fill="${colour}">${esc(a.label)}</text>`+
+      `<text x="8" y="${y+16}" font-size="10" fill="var(--mute)">${count} 笔</text>${marks}</g>`;
+  }).join('');
+  return `<div class="panel"><h2><span>按时间看三方的动作</span>
+      <span class="muted small">▲ 买入 ▼ 卖出 · 实心=已成交 空心=未成交或撤单 · 黄虚线=午休</span></h2>
+    <div class="scroll" style="padding:8px 0 0">
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;min-width:780px" role="img" aria-label="三方操作时间轴">
+        ${ticks.join('')}${lunch}${laneRows}
+      </svg></div>
+    <div id="laneDetail" style="padding:10px 12px;border-top:1px solid var(--line)">${laneSelected!=null&&rows[laneSelected]?laneDetailHtml(laneSelected):`<span class="muted small">${rows.length?'点任一标记，看这笔的完整理由。':'这一天没有操作记录。'}</span>`}</div></div>`;
+}
+function laneDetail(index){
+  // Keep the selection across the 20-second auto refresh.
+  laneSelected=index;
+  const html=laneDetailHtml(index);
+  if(html)$('#laneDetail').innerHTML=html;
+}
+function laneDetailHtml(index){
+  const e=laneEvents[index];if(!e)return '';
+  const who=actors(current).find(a=>a.key===e.actor)||{label:e.actor,cls:''};
+  const [label,cls]=STATUS[e.status]||[e.status,'b-info'];
+  return `<div class="rhead"><span class="t">${hm(e.at)}</span>${whoTag(who)}
+      <span class="side-${esc(e.side)}">${SIDE[e.side]||esc(e.side)} ${esc(e.name||'')} ${esc(e.symbol||'')} ${int(e.quantity)} 股</span>
+      <span>${e.price!=null?num(e.price,3):'—'}</span><span class="badge ${cls}">${label}</span>
+      <span class="muted small">${esc(e.note||'')}</span></div>
+    ${e.why?`<div class="why" style="margin-top:6px">${esc(e.why)}</div>`:'<div class="muted small">没有记录理由。</div>'}
+    ${e.plan?`<div class="why" style="margin-top:6px"><strong>次日计划：</strong>${esc(e.plan)}</div>`:''}`;
 }
 
 /* ---------- per-symbol comparison ---------- */
@@ -330,7 +417,7 @@ function bookView(d){
 /* ---------- shell ---------- */
 function render(d){
   scoreboard(d);
-  $('#view').innerHTML=view==='timeline'?timelineView(d):view==='symbols'?symbolsView(d):view==='rounds'?roundsView(d):bookView(d);
+  $('#view').innerHTML=view==='lanes'?lanesView(d):view==='timeline'?timelineView(d):view==='symbols'?symbolsView(d):view==='rounds'?roundsView(d):bookView(d);
 }
 async function loadDays(){
   const {days}=await api('/api/days');const sel=$('#day');const keep=sel.value;
@@ -388,6 +475,8 @@ document.addEventListener('click',e=>{
     return render(current);}
   const account=e.target.closest('button[data-account]');
   if(account){roundAccount=account.dataset.account;return render(current);}
+  const mark=e.target.closest('[data-lane-event]');
+  if(mark)return laneDetail(Number(mark.dataset.laneEvent));
   const clamp=e.target.closest('[data-clamp]');
   if(clamp)clamp.classList.toggle('open');
 });
