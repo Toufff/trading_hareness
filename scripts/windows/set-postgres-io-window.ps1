@@ -89,24 +89,48 @@ if (Test-Path -LiteralPath $logPath -PathType Leaf) {
 
 $changed = @()
 $failures = @()
+$ioPriorityErrors = @()
+$ioPriorityApplied = 0
 $inspected = 0
+# The priority CLASS and the I/O priority are two independent knobs and are
+# decided independently.
+#
+# The class can be read back, so it is only assigned when it differs. The I/O
+# priority cannot: there is no supported way to query ProcessIoPriority, so the
+# only way to know it is right is to set it. Skipping the call whenever the
+# class already matched is what let a single failed NtSetInformationProcess --
+# a hardened ntdll, a handle the run could not open, an OS update moving the
+# information class -- persist silently forever: every later run saw the class
+# already at BelowNormal, returned early, and reported nothing. Re-issuing it is
+# one cheap, idempotent syscall per postgres.exe every fifteen minutes.
 foreach ($process in @(Get-Process -Name 'postgres' -ErrorAction SilentlyContinue)) {
     $inspected++
     try {
         $current = [string]$process.PriorityClass
-        if ($current -eq $targets.PriorityClass) { continue }
+        $classNeedsChange = ($current -ne $targets.PriorityClass)
         if ($WhatIf) {
-            $changed += [pscustomobject]@{ pid = $process.Id; from = $current; to = $targets.PriorityClass; applied = $false }
+            if ($classNeedsChange) {
+                $changed += [pscustomobject]@{ pid = $process.Id; from = $current; to = $targets.PriorityClass; applied = $false }
+            }
             continue
         }
-        $process.PriorityClass = [Diagnostics.ProcessPriorityClass]$targets.PriorityClass
+        if ($classNeedsChange) {
+            $process.PriorityClass = [Diagnostics.ProcessPriorityClass]$targets.PriorityClass
+        }
         $ioPriorityError = ''
         try {
             Set-ProcessIoPriority -Handle $process.Handle -Priority ([int]$targets.IoPriority)
+            $ioPriorityApplied++
         } catch {
             $ioPriorityError = $_.Exception.Message
+            $ioPriorityErrors += [pscustomobject]@{ pid = $process.Id; io_priority = $targets.IoPriority; error = $ioPriorityError }
         }
-        $changed += [pscustomobject]@{ pid = $process.Id; from = $current; to = $targets.PriorityClass; applied = $true; io_priority_error = $ioPriorityError }
+        # A run that only re-issued an I/O priority that was already right is not
+        # a transition and stays out of the log; a run that failed to set it is,
+        # and is carried by $ioPriorityErrors into $shouldLog below.
+        if ($classNeedsChange -or $ioPriorityError) {
+            $changed += [pscustomobject]@{ pid = $process.Id; from = $current; to = $targets.PriorityClass; applied = $true; io_priority_error = $ioPriorityError }
+        }
     } catch {
         # A backend can exit between the enumeration and the assignment; that is
         # normal and must not fail the run.
@@ -121,6 +145,8 @@ $record = [ordered]@{
     priority_class = $targets.PriorityClass
     io_priority = $targets.IoPriority
     postgres_processes = $inspected
+    io_priority_applied = $ioPriorityApplied
+    io_priority_errors = @($ioPriorityErrors)
     changed = @($changed)
     failures = @($failures)
     forced_mode = [bool]$Mode
@@ -129,7 +155,13 @@ $record = [ordered]@{
 
 # Only a real transition is worth a line: this runs every 15 minutes and a
 # steady-state entry every quarter hour would bury the transitions.
-$shouldLog = (-not $WhatIf) -and (($changed.Count -gt 0) -or ($failures.Count -gt 0) -or ($previousMode -ne $windowMode))
+#
+# io_priority_errors is one of the conditions on purpose. It is the only signal
+# that the knob the header calls the point of this script is not being set at
+# all, and it recurs every run rather than once, so an operator reading the log
+# sees a standing failure instead of silence.
+$shouldLog = (-not $WhatIf) -and (($changed.Count -gt 0) -or ($failures.Count -gt 0) -or
+    ($ioPriorityErrors.Count -gt 0) -or ($previousMode -ne $windowMode))
 if ($shouldLog) {
     try {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $logPath) | Out-Null
