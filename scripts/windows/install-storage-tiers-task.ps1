@@ -1,7 +1,13 @@
 [CmdletBinding()]
 param(
     [string]$TaskName = 'trading-hareness-storage-tiers',
-    [string]$RepositoryRoot = '',
+    # The registered task stores an absolute Execute path and working directory.
+    # They default to the published release, never to the checkout this script
+    # happens to be run from: a task registered from an F: worktree stops
+    # working the moment the worktree is removed, and the failure only shows up
+    # at 06:00 in production. Pass -RepositoryRoot explicitly to register a
+    # development copy on purpose.
+    [string]$RepositoryRoot = 'G:\StockPlatform\current',
     [string]$PlatformRoot = 'G:\StockPlatform',
     [string]$ReleaseRoot = 'G:\StockPlatform\current',
     [string]$RuntimeEnv = '',
@@ -10,8 +16,8 @@ param(
     # running backup.
     [string]$StartTime = '06:00',
     # A long-lived task host must not lock the checkout's bin directory that
-    # publishing rebuilds; production passes the published release here.
-    [string]$HostRoot = '',
+    # publishing rebuilds, so the host executable also comes from the release.
+    [string]$HostRoot = 'G:\StockPlatform\current',
     [ValidateSet('', 'S4U', 'Interactive', 'Password')][string]$LogonType = '',
     [PSCredential]$Credential
 )
@@ -44,12 +50,13 @@ $action = New-HiddenPowerShellTaskAction -RepositoryRoot $RepositoryRoot -Script
     -ScriptArguments @('-RuntimeEnv', $RuntimeEnv, '-PlatformRoot', $platform, '-ReleaseRoot', $release)
 
 $trigger = New-ScheduledTaskTrigger -Daily -At $StartTime
-# A single pass moves bounded batches and is resumable, but a year-long first
-# migration of five tables can take hours on the cold HDD; killing it midway is
-# safe (every batch is its own transaction) yet wasteful, so the limit is
-# generous and the job simply continues on the next night.
+# The job stops ITSELF at the 08:00 deadline run-storage-tiers.ps1 passes, and
+# writes its receipt when it does. This limit is only the backstop for a hung
+# process: 06:00 + 2h15m leaves fifteen minutes of slack over the deadline, so a
+# healthy run is never the one Task Scheduler kills -- and a killed run writes no
+# receipt, which is exactly what must not happen every night.
 $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 4) -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 30) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 2 -Minutes 15) -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 30) `
     -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 $description = 'Move owner-database rows older than the hot window into the stock_cold tablespace on G:, enforce the hot-tier space budget, and record the run in logs\storage-tiers.jsonl.'
 
@@ -63,4 +70,15 @@ if ($LogonType -in @('S4U', 'Interactive')) {
         -Settings $settings -Description $description -Force | Out-Null
 }
 
-Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName, State
+# Print what was actually stored: the Execute path is the one thing a wrong
+# -RepositoryRoot/-HostRoot silently breaks, and it is invisible until the task
+# fails at 06:00 with "the system cannot find the file specified".
+$registered = Get-ScheduledTask -TaskName $TaskName
+$registeredAction = @($registered.Actions)[0]
+[pscustomobject]@{
+    TaskName = $registered.TaskName
+    State = $registered.State
+    Execute = $registeredAction.Execute
+    WorkingDirectory = $registeredAction.WorkingDirectory
+    Arguments = $registeredAction.Arguments
+}

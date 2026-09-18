@@ -1,12 +1,17 @@
 [CmdletBinding()]
 param(
     [string]$TaskName = 'trading-hareness-postgres-io-window',
-    [string]$RepositoryRoot = '',
+    # Defaults to the published release, not to the checkout this script is run
+    # from: the task stores an absolute Execute path and working directory, and
+    # a path inside a development worktree disappears with the worktree.
+    [string]$RepositoryRoot = 'G:\StockPlatform\current',
     [string]$PlatformRoot = 'G:\StockPlatform',
     # Fine enough to follow the window boundaries (09:00, 15:40, 16:30, 23:00,
     # 04:00, 08:00) within a quarter of an hour, coarse enough to be free.
     [int]$IntervalMinutes = 15,
-    [string]$HostRoot = '',
+    # The task host executable also comes from the release: a long-lived host
+    # must not lock a checkout's bin directory that publishing rebuilds.
+    [string]$HostRoot = 'G:\StockPlatform\current',
     [ValidateSet('', 'S4U', 'Interactive', 'Password')][string]$LogonType = '',
     [PSCredential]$Credential
 )
@@ -56,4 +61,14 @@ if ($LogonType -in @('S4U', 'Interactive')) {
         -Settings $settings -Description $description -Force | Out-Null
 }
 
-Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName, State
+# Print the stored Execute path: a wrong -RepositoryRoot/-HostRoot is otherwise
+# invisible until the task starts failing silently every 15 minutes.
+$registered = Get-ScheduledTask -TaskName $TaskName
+$registeredAction = @($registered.Actions)[0]
+[pscustomobject]@{
+    TaskName = $registered.TaskName
+    State = $registered.State
+    Execute = $registeredAction.Execute
+    WorkingDirectory = $registeredAction.WorkingDirectory
+    Arguments = $registeredAction.Arguments
+}
