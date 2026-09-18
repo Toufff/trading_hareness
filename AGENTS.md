@@ -29,12 +29,19 @@ provider response directly to a live threshold or order path.
   `quant-service/tests/test_instrument_writer_lock_order.py` walks every `.py`
   outside tests and vendored trees — `quant-service` (including
   `database_bootstrap.py` and `entrypoint.py`, which open the same database
-  from outside `app/`), `scripts`, `legacy`, `workflows`, `deploy` — matches
-  the statement case-insensitively, and fails on the first exception. There is
-  no allow-list to add a new writer to, so a per-row `VALUES(...) ON CONFLICT`
-  loop fails on the day it is written, and so does an
-  `f"INSERT INTO {SCHEMA}.instruments(...)"` that would hide from the search.
-  Do not answer that failure by listing the writer somewhere.
+  from outside `app/`), `scripts`, `legacy`, `workflows`, `deploy` — reading
+  the parsed source rather than the raw text, so it matches the statement
+  whatever the case, whitespace or identifier quoting (`quant."instruments"`),
+  each match ends with its own string literal instead of borrowing a later
+  statement's `ON CONFLICT` clause, and a file that does not parse is reported
+  as a failure of that file rather than as an unrelated error. There is no
+  allow-list to add a new writer to, so a per-row `VALUES(...) ON CONFLICT`
+  loop fails on the day it is written, and so does a table name built at
+  runtime in any of its four spellings — `f"INSERT INTO {SCHEMA}.instruments"`
+  (column list or not), `"INSERT INTO " + SCHEMA + ".instruments(...)"`,
+  `"INSERT INTO %s.instruments(...)" % SCHEMA` and the `.format()` twin — each
+  of which would otherwise hide from the search. Do not answer that failure by
+  listing the writer somewhere.
 
   `ORDER BY 1` is the shared ascending lock order, and it is a correctness
   property, not a tidy-output habit: `ON CONFLICT DO UPDATE` row-locks every
@@ -67,7 +74,13 @@ provider response directly to a live threshold or order path.
     `(symbol, trading_date)` — rather than their payload order; pinned by
     `quant-service/tests/test_daily_bar_caller_lock_order.py`, which also
     fails any *new* loop under `quant-service/app` that drives a one-bar
-    writer over an unordered iterable. They sort rather than hoisting one
+    writer over an unordered iterable — whether the writer is called by a
+    bare name or module-qualified (`daily_bar_repository.upsert_daily_bar`).
+    That file also pins the two tables `daily_bar_batch_repository` writes in
+    one statement, `market_bars_daily` and `canonical_bars_daily`: both are
+    `ON CONFLICT DO UPDATE` on `(symbol, trading_date)` and both sort their
+    key list, because no caller can fix a batch's order from outside it.
+    They sort rather than hoisting one
     `ensure_instruments` call because that primitive cannot carry `industry`,
     the three-valued `is_st`, or the `exchange`/`source`/`updated_at` refresh
     their `ON CONFLICT DO UPDATE` performs; a lock-order fix must not change
@@ -172,14 +185,17 @@ this file and `docs/ARCHITECTURE.md` in the same change:
   `.py` in the repository outside tests and vendored trees and requires each
   write to `quant.instruments` to live in `app/instrument_registry.py` or
   carry `ORDER BY 1` before its `ON CONFLICT` clause, to sit outside any
-  loop, and to spell its table name literally. The match ignores case and
-  whitespace. No allow-list: a new writer fails here until it takes the
-  shared ascending lock order.
+  loop, and to spell its table name literally. It reads the parsed source:
+  the match ignores case, whitespace and identifier quoting, ends with its
+  own literal, and an unparseable file is named as such. No allow-list: a new
+  writer fails here until it takes the shared ascending lock order.
 - `quant-service/tests/test_daily_bar_caller_lock_order.py` — the half the
   guard above cannot see: the four callers that drive
   `daily_bar_repository.upsert_daily_bar` once per bar must iterate
-  `in_instrument_lock_order(bars)`, and any fifth such loop under
-  `quant-service/app` fails here.
+  `in_instrument_lock_order(bars)`, any fifth such loop under
+  `quant-service/app` fails here (bare or module-qualified call), and
+  `daily_bar_batch_repository`'s own `market_bars_daily` /
+  `canonical_bars_daily` statements must send their keys ascending.
 
 ## Review automation
 

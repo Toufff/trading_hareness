@@ -36,14 +36,27 @@ make it pass are the two ways that are correct: call
 ``instrument_registry.ensure_instruments`` / ``ensure_named_instruments``, or
 write a set-based statement that carries ``ORDER BY 1``.  There is
 deliberately no third way, and no mechanism for granting one.
+
+**Everything here reads the parsed source, not the file's raw text.**  A
+statement lives in a string literal, so that is where it is looked for: a
+match can then never run past the end of the literal it was found in and
+borrow an unrelated later statement's ``ON CONFLICT`` clause (the round-4
+finding), and adjacent-literal concatenation -- ``"INSERT INTO quant."
+"instruments(...)"``, which no text search can see -- is already one
+``ast.Constant`` by the time the parser is done.  The one thing the raw text
+had over this is that it did not need the file to parse, which is handled
+instead by reporting an unparseable file as a failure of that file.
 """
 
 from __future__ import annotations
 
 import ast
+import functools
 import os
 import re
+import tempfile
 from pathlib import Path
+from typing import Iterable
 import unittest
 
 #: ``quant-service/tests/`` -> the repository root.
@@ -63,20 +76,47 @@ SCANNED_ROOTS = (REPO_ROOT,)
 #: this entry cannot quietly become a way to opt out).
 REGISTRY = REPO_ROOT / "quant-service" / "app" / "instrument_registry.py"
 
-#: Case-insensitive and whitespace-tolerant on purpose.  A contiguous
-#: ``str.find("INSERT INTO quant.instruments")`` matched exactly one
-#: spelling, so a lowercase statement -- or ``INSERT  INTO quant . instruments``
-#: -- walked straight past the guard.  SQL keywords and whitespace are not
-#: significant to the server, so they must not be significant here either.
-NEEDLE = re.compile(r"insert\s+into\s+quant\s*\.\s*instruments", re.IGNORECASE)
+#: Case-insensitive, whitespace-tolerant and quoting-tolerant on purpose.  A
+#: contiguous ``str.find("INSERT INTO quant.instruments")`` matched exactly
+#: one spelling, so a lowercase statement -- or ``INSERT  INTO quant .
+#: instruments``, or the equally valid ``quant."instruments"`` /
+#: ``"quant"."instruments"`` -- walked straight past the guard.  SQL keywords,
+#: whitespace and identifier quoting are not significant to the server, so
+#: they must not be significant here either.  The ``\b`` sits BEFORE the
+#: closing quote so it still anchors when the quote is there: it is what
+#: keeps ``quant.instrument_lifecycle_evidence`` and any future
+#: ``quant.instruments_cold`` sibling out.
+NEEDLE = re.compile(r"insert\s+into\s+\"?quant\"?\s*\.\s*\"?instruments\b\"?", re.IGNORECASE)
 
-#: The fingerprint an interpolated statement always leaves behind, whatever
-#: it builds the schema name out of.  A writer composed at runtime
-#: (``f"INSERT INTO {SCHEMA}.instruments(...)"``) is invisible to ``NEEDLE``
-#: by construction, because the table name is not in the source at all.  The
-#: schema here is fixed, so there is no legitimate reason to build one: it is
-#: rejected outright rather than checked for ``ORDER BY 1``.
-INTERPOLATED_TABLE = ".instruments("
+#: What an interpolated field becomes when a string expression is rendered as
+#: the statement it will be at runtime: an f-string's ``{...}``, a ``+``
+#: operand that is not a literal, a ``%s`` in a ``%``-formatted template, a
+#: ``{}`` field in a ``.format()`` template.  A private-use code point, so it
+#: cannot collide with anything a real statement contains.
+PLACEHOLDER = ""
+
+#: The fingerprint an instrument writer leaves in its rendered statement.  A
+#: writer composed at runtime (``f"INSERT INTO {SCHEMA}.instruments(...)"``,
+#: ``"INSERT INTO %s.instruments(...)" % schema``,
+#: ``"INSERT INTO {}.instruments(...)".format(schema)``) is invisible to
+#: ``NEEDLE`` by construction, because the table name is not in the source at
+#: all.  The schema here is fixed, so there is no legitimate reason to build
+#: one: a match whose schema part carries ``PLACEHOLDER`` is rejected
+#: outright rather than checked for ``ORDER BY 1``.  The column list is NOT
+#: part of the fingerprint -- ``f"INSERT INTO {S}.instruments SELECT ..."``
+#: has none and is the same evasion.
+RUNTIME_TABLE = re.compile(
+    r"insert\s+into\s+(?P<schema>[^\s;()]*)\s*\.\s*\"?instruments\b\"?",
+    re.IGNORECASE,
+)
+
+#: ``%``-style and ``str.format`` fields, replaced by ``PLACEHOLDER`` before a
+#: template is matched.  Applied ONLY to a literal that is actually the left
+#: operand of ``%`` or the receiver of ``.format()``: every psycopg statement
+#: in this repository is full of ``%s`` parameter markers, and those are not
+#: interpolation -- the value never reaches the SQL text.
+PERCENT_FIELD = re.compile(r"%(?:\([^)]*\))?[-+ #0]*[0-9*]*(?:\.[0-9*]+)?[hlL]?[a-zA-Z%]")
+FORMAT_FIELD = re.compile(r"\{[^{}]*\}")
 
 #: Pruned whole, never descended into: build output, vendored trees, and
 #: tests.  Test fixtures are out of scope on purpose -- a test that seeds an
@@ -97,55 +137,140 @@ def _python_files() -> list[Path]:
     return files
 
 
-def _occurrences() -> list[tuple[Path, int, str]]:
+def _parse(paths: Iterable[Path]) -> tuple[list[tuple[Path, ast.Module]], list[str]]:
+    """Parse every file, and report the ones that cannot be read or parsed.
+
+    The walk covers ~760 files across five trees, so it will sooner or later
+    meet a file that is not valid UTF-8 or not valid Python for this
+    interpreter.  Letting that escape turns a lock-order guard into an
+    unrelated ``SyntaxError`` from whichever test happened to reach the file
+    first, which says nothing about lock order and does not even say which
+    file it was.  Each failure is named here instead and asserted on by
+    ``test_the_walk_reaches_every_tree_that_can_hold_a_writer``, so the guard
+    still fails loudly -- for the right reason, about the right file.
+    """
+    trees: list[tuple[Path, ast.Module]] = []
+    failures: list[str] = []
+    for path in paths:
+        try:
+            name = path.relative_to(REPO_ROOT).as_posix()
+        except ValueError:  # pragma: no cover - only synthetic probes
+            name = path.as_posix()
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            failures.append(f"{name}: unreadable as utf-8 ({type(error).__name__}: {error})")
+            continue
+        try:
+            trees.append((path, ast.parse(source, filename=str(path))))
+        except SyntaxError as error:
+            failures.append(f"{name}:{error.lineno}: does not parse ({error.msg})")
+    return trees, failures
+
+
+@functools.lru_cache(maxsize=1)
+def _parsed() -> tuple[tuple[tuple[Path, ast.Module], ...], tuple[str, ...]]:
+    """The whole walk, parsed once for every check in this file."""
+    trees, failures = _parse(_python_files())
+    return tuple(trees), tuple(failures)
+
+
+def _string_constants(tree: ast.AST) -> list[ast.Constant]:
+    return [node for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+
+
+def _occurrences_in(path: Path, tree: ast.AST) -> list[tuple[Path, int, str]]:
     """Every occurrence as ``(path, line number, the text that follows it)``.
 
-    The trailing text is cut at the next occurrence so a statement missing
-    its ``ON CONFLICT`` clause cannot borrow the next statement's.
+    The trailing text ends where the statement's own string literal ends, or
+    at the next occurrence inside that same literal -- never later.  Bounding
+    it at the next occurrence *in the file* (what this did before) let the
+    last writer in a file read to EOF, so an unrelated statement further down
+    could hand it an ``ON CONFLICT`` clause it does not have.
     """
     found: list[tuple[Path, int, str]] = []
-    for path in _python_files():
-        text = path.read_text(encoding="utf-8")
-        matches = list(NEEDLE.finditer(text))
+    for node in _string_constants(tree):
+        value = node.value
+        matches = list(NEEDLE.finditer(value))
         for index, match in enumerate(matches):
-            stop = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-            tail = text[match.end():stop]
-            found.append((path, text.count("\n", 0, match.start()) + 1, " ".join(tail.split())))
+            stop = matches[index + 1].start() if index + 1 < len(matches) else len(value)
+            # Newlines inside the literal are real source lines; implicit
+            # concatenation of several literals is not, so this is the first
+            # line of the literal plus what the value itself accounts for.
+            line = node.lineno + value.count("\n", 0, match.start())
+            found.append((path, line, " ".join(value[match.end():stop].split())))
     return found
+
+
+def _render(node: ast.AST) -> str:
+    """The text a string expression will have at runtime, interpolations blanked."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else PLACEHOLDER
+    if isinstance(node, ast.JoinedStr):
+        return "".join(_render(value) for value in node.values)
+    if isinstance(node, ast.FormattedValue):
+        return PLACEHOLDER
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _render(node.left) + _render(node.right)
+    return PLACEHOLDER
+
+
+def _is_template(node: ast.AST) -> bool:
+    return (isinstance(node, ast.Constant) and isinstance(node.value, str)) \
+        or isinstance(node, ast.JoinedStr)
+
+
+def _runtime_table_statements_in(path: Path, tree: ast.AST) -> list[tuple[Path, int, str]]:
+    """String expressions that build a ``<something>.instruments`` write at runtime.
+
+    Four spellings reach this table without ever naming it in the source:
+    an f-string, ``+`` concatenation, ``%`` formatting and ``str.format``.
+    All four are rendered to the statement they produce and matched there, so
+    the check is about what runs rather than about how it was typed.
+    """
+    found: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            text = _render(node)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            text = _render(node)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod) and _is_template(node.left):
+            text = PERCENT_FIELD.sub(PLACEHOLDER, _render(node.left))
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr == "format" and _is_template(node.func.value)):
+            text = FORMAT_FIELD.sub(PLACEHOLDER, _render(node.func.value))
+        else:
+            continue
+        for match in RUNTIME_TABLE.finditer(text):
+            # A schema spelled out in the source -- ``quant``, or a migration's
+            # ``REFERENCES quant.instruments(symbol)`` sitting inside an
+            # otherwise interpolated statement -- is an ordinary literal that
+            # ``NEEDLE`` can see.  What is rejected here is the schema
+            # arriving from outside the text, which is what makes a writer
+            # unsearchable.
+            if PLACEHOLDER in match.group("schema"):
+                found[node.lineno] = " ".join(text.split())
+    return [(path, line, text) for line, text in sorted(found.items())]
+
+
+def _occurrences() -> list[tuple[Path, int, str]]:
+    trees, _failures = _parsed()
+    return sorted(
+        occurrence for path, tree in trees for occurrence in _occurrences_in(path, tree)
+    )
 
 
 def _interpolated_statement_parts() -> list[tuple[Path, int, str]]:
-    """String literals that build a ``*.instruments(...)`` statement at runtime.
+    trees, _failures = _parsed()
+    return sorted(
+        part for path, tree in trees for part in _runtime_table_statements_in(path, tree)
+    )
 
-    ``f"INSERT INTO {SCHEMA}.instruments(...)"`` and
-    ``"INSERT INTO " + SCHEMA + ".instruments(...)"`` both write this table
-    and neither can be found by a search over the source, because the table
-    name is never in the source.  Both leave the same fragment behind.
-    """
-    found: list[tuple[Path, int, str]] = []
-    for path in _python_files():
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.JoinedStr):
-                pieces = [value for value in node.values
-                          if isinstance(value, ast.Constant) and isinstance(value.value, str)]
-            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-                pieces = [value for value in ast.walk(node)
-                          if isinstance(value, ast.Constant) and isinstance(value.value, str)]
-            else:
-                continue
-            for piece in pieces:
-                index = piece.value.find(INTERPOLATED_TABLE)
-                # A fragment whose ``.instruments(`` is already preceded by
-                # ``quant`` inside the SAME literal spelled its table name
-                # out -- it is an ordinary constant that happens to sit in an
-                # interpolated statement (a migration's ``REFERENCES
-                # quant.instruments(symbol)``), and ``NEEDLE`` can see it.
-                # What is rejected here is the schema arriving from outside
-                # the literal, which is what makes a writer unsearchable.
-                if index != -1 and not piece.value[:index].rstrip().lower().endswith("quant"):
-                    found.append((path, piece.lineno, piece.value))
-    return found
+
+def _probe(source: str, name: str = "probe.py") -> tuple[Path, ast.Module]:
+    """Parse a synthetic module, for the negative controls below."""
+    return Path(name), ast.parse(source, filename=name)
 
 
 class InstrumentWriterLockOrderTests(unittest.TestCase):
@@ -179,6 +304,18 @@ class InstrumentWriterLockOrderTests(unittest.TestCase):
         # ...and the pruned directories really are pruned, so the walk stays
         # a guard and does not turn into a scan of vendored trees.
         self.assertFalse([path for path in scanned if SKIP_PARTS & set(path.parts)])
+        trees, failures = _parsed()
+        # Every file that is in the walk must be READABLE by the walk, or the
+        # rest of this file is checking a smaller repository than it thinks.
+        self.assertEqual(list(failures), [], "\n".join([
+            "",
+            "These files are inside the lock-order walk but could not be read as",
+            "utf-8 Python, so no check in this file looked at them.  Fix the file,",
+            "or add its directory to SKIP_PARTS if it is not a tree that can hold a",
+            "quant.instruments writer.",
+            *failures,
+        ]))
+        self.assertEqual(len(trees), len(scanned))
         occurrences = _occurrences()
         self.assertTrue(any(path == REGISTRY for path, _line, _tail in occurrences))
         self.assertTrue(
@@ -186,23 +323,47 @@ class InstrumentWriterLockOrderTests(unittest.TestCase):
             "the scripts tree had no instrument writer -- the walk or the needle is wrong",
         )
 
-    def test_the_needle_ignores_case_and_whitespace(self) -> None:
-        """The two spellings that used to walk straight past the guard.
+    def test_an_unreadable_file_is_named_rather_than_raising_somewhere_else(self) -> None:
+        """The report says which file, and the other files still get parsed."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            good = root / "good.py"
+            good.write_text("SQL = 'INSERT INTO quant.instruments(symbol)'\n", encoding="utf-8")
+            broken = root / "broken.py"
+            broken.write_text("def f(:\n", encoding="utf-8")
+            undecodable = root / "undecodable.py"
+            undecodable.write_bytes(b"x = '\xff\xfe not utf-8'\n")
+            trees, failures = _parse([good, broken, undecodable])
+        self.assertEqual([path for path, _tree in trees], [good])
+        self.assertEqual(len(failures), 2, failures)
+        self.assertTrue(any("broken.py" in failure and "does not parse" in failure
+                            for failure in failures), failures)
+        self.assertTrue(any("undecodable.py" in failure and "utf-8" in failure
+                            for failure in failures), failures)
+
+    def test_the_needle_ignores_case_whitespace_and_quoting(self) -> None:
+        """The spellings that used to walk straight past the guard.
 
         A contiguous case-sensitive ``str.find`` is not a search for this
-        statement, it is a search for one way of typing it -- and both of
-        these reach exactly the same table.
+        statement, it is a search for one way of typing it -- and every one
+        of these reaches exactly the same table.
         """
         for spelling in (
             "insert into quant.instruments(symbol,exchange,source) values(%s,%s,%s)",
             "INSERT  INTO   quant . instruments (symbol) VALUES(%s)",
             "Insert Into quant.Instruments(symbol)",
+            'INSERT INTO quant."instruments"(symbol) VALUES(%s)',
+            'INSERT INTO "quant"."instruments"(symbol) VALUES(%s)',
+            'INSERT INTO "quant" . "instruments" SELECT * FROM staging',
         ):
             self.assertIsNotNone(NEEDLE.search(spelling), spelling)
         for innocent in (
             "SELECT symbol FROM quant.instruments",
             "INSERT INTO quant.instrument_lifecycle_evidence(symbol)",
             "INSERT INTO other.instruments(symbol)",
+            # The storage-tier twin naming convention, which is a different
+            # table and must not be reported as this one.
+            "INSERT INTO quant.instruments_cold(symbol)",
         ):
             self.assertIsNone(NEEDLE.search(innocent), innocent)
 
@@ -232,6 +393,61 @@ class InstrumentWriterLockOrderTests(unittest.TestCase):
             *offenders,
         ]))
 
+    def test_a_writer_cannot_borrow_a_later_statements_conflict_clause(self) -> None:
+        """The round-4 hole: a tail that ran to the end of the FILE.
+
+        The last needle in a file had no next needle to stop at, so its tail
+        was everything after it -- and any later, unrelated statement
+        carrying ``ORDER BY 1 ... ON CONFLICT`` silently satisfied the check
+        for a writer that has no conflict clause at all.  Each match now ends
+        with its own literal.
+        """
+        path, tree = _probe(
+            'BARE = "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,%s)"\n'
+            'OTHER = ("INSERT INTO quant.other_table(symbol) '
+            'SELECT * FROM unnest(%s::text[]) ORDER BY 1 ON CONFLICT(symbol) DO NOTHING")\n'
+        )
+        occurrences = _occurrences_in(path, tree)
+        self.assertEqual(len(occurrences), 1, occurrences)
+        _path, line, tail = occurrences[0]
+        self.assertEqual(line, 1)
+        self.assertNotIn("ON CONFLICT", tail.upper())
+        # ...and two writers inside ONE literal still bound each other, so a
+        # first statement cannot read into the second either.
+        path, tree = _probe(
+            'SQL = """\n'
+            'INSERT INTO quant.instruments(symbol) VALUES(%s);\n'
+            'INSERT INTO quant.instruments(symbol) SELECT * FROM unnest(%s::text[])\n'
+            '  ORDER BY 1 ON CONFLICT(symbol) DO NOTHING;\n'
+            '"""\n'
+        )
+        first, second = _occurrences_in(path, tree)
+        self.assertEqual((first[1], second[1]), (2, 3))
+        self.assertNotIn("ON CONFLICT", first[2].upper())
+        self.assertIn("ORDER BY 1", second[2].upper())
+
+    def test_adjacent_literal_concatenation_is_one_statement(self) -> None:
+        """What reading the parsed source buys: the spelling no text search sees.
+
+        ``"INSERT INTO quant." "instruments(...)"`` is a single string by the
+        time the parser is done, so it is matched -- and its ``ON CONFLICT``
+        clause, written in yet another adjacent literal, is found in the same
+        value rather than in "the text after the match".
+        """
+        path, tree = _probe(
+            'SQL = (\n'
+            '    "INSERT INTO quant."\n'
+            '    "instruments(symbol,exchange) "\n'
+            '    "SELECT * FROM unnest(%s::text[],%s::text[]) ORDER BY 1 "\n'
+            '    "ON CONFLICT(symbol) DO NOTHING"\n'
+            ')\n'
+        )
+        occurrences = _occurrences_in(path, tree)
+        self.assertEqual(len(occurrences), 1, occurrences)
+        head, sep, _rest = occurrences[0][2].upper().partition("ON CONFLICT")
+        self.assertTrue(sep)
+        self.assertIn("ORDER BY 1", head)
+
     def test_no_writer_sits_inside_a_loop(self) -> None:
         """``ORDER BY 1`` is necessary but not sufficient.
 
@@ -252,10 +468,10 @@ class InstrumentWriterLockOrderTests(unittest.TestCase):
         regression that actually keeps happening.
         """
         offenders: list[str] = []
-        for path in _python_files():
+        trees, _failures = _parsed()
+        for path, tree in trees:
             if path == REGISTRY:
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if not isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
                     continue
@@ -295,6 +511,62 @@ class InstrumentWriterLockOrderTests(unittest.TestCase):
             "write 'INSERT INTO quant.instruments' out with ORDER BY 1.",
             *offenders,
         ]))
+
+    def test_every_interpolation_spelling_is_rejected(self) -> None:
+        """Four ways to compose the table name, one answer to all four.
+
+        The check used to see only an f-string and a ``+`` concatenation, and
+        only when the fragment carried a column list, so
+        ``"INSERT INTO %s.instruments(...)" % schema``,
+        ``"INSERT INTO {}.instruments(...)".format(schema)`` and a
+        column-less ``f"INSERT INTO {S}.instruments SELECT ..."`` all walked
+        past it.
+        """
+        tail = ' SELECT * FROM unnest(%s::text[]) ORDER BY 1 ON CONFLICT(symbol) DO NOTHING'
+        for label, source in (
+            ("f-string", f'SQL = f"INSERT INTO {{SCHEMA}}.instruments(symbol){tail}"\n'),
+            ("f-string, no column list", f'SQL = f"INSERT INTO {{SCHEMA}}.instruments{tail}"\n'),
+            ("f-string, quoted identifier",
+             f'SQL = f\'INSERT INTO {{SCHEMA}}."instruments"(symbol){tail}\'\n'),
+            ("concatenation", f'SQL = "INSERT INTO " + SCHEMA + ".instruments(symbol){tail}"\n'),
+            ("percent format", f'SQL = "INSERT INTO %s.instruments(symbol){tail}" % SCHEMA\n'),
+            ("percent format, named",
+             f'SQL = "INSERT INTO %(schema)s.instruments(symbol){tail}" % {{"schema": S}}\n'),
+            ("str.format", f'SQL = "INSERT INTO {{}}.instruments(symbol){tail}".format(SCHEMA)\n'),
+            ("str.format, named",
+             f'SQL = "INSERT INTO {{schema}}.instruments(symbol){tail}".format(schema=S)\n'),
+        ):
+            with self.subTest(label):
+                self.assertEqual(len(_runtime_table_statements_in(*_probe(source))), 1, source)
+
+    def test_a_literal_statement_is_not_mistaken_for_an_interpolated_one(self) -> None:
+        """The check must not fire on what ``NEEDLE`` can already see.
+
+        Every psycopg statement in this repository is full of ``%s``
+        parameter markers and many are f-strings for unrelated reasons; a
+        guard that reported those would be turned off within a week.
+        """
+        for label, source in (
+            # ``%s`` parameters in a plain literal: not interpolation at all.
+            ("parameter markers",
+             'SQL = "INSERT INTO quant.instruments(symbol) VALUES(%s) ON CONFLICT DO NOTHING"\n'),
+            # The schema is spelled out; the f-string interpolates something else.
+            ("literal table in an f-string",
+             'SQL = f"INSERT INTO quant.instruments(symbol) VALUES({value})"\n'),
+            ("literal quoted table in an f-string",
+             'SQL = f\'INSERT INTO quant."instruments"(symbol) VALUES({value})\'\n'),
+            # A migration's foreign key inside an interpolated DDL statement.
+            ("references clause",
+             'SQL = f"CREATE TABLE {SCHEMA}.child(symbol text REFERENCES quant.instruments(symbol))"\n'),
+            # A READ is not a writer; this guard is about the write path.
+            ("interpolated read", 'SQL = f"SELECT symbol FROM {SCHEMA}.instruments"\n'),
+            # A different table that merely starts the same way.
+            ("sibling table", 'SQL = f"INSERT INTO {SCHEMA}.instruments_cold(symbol) VALUES(%s)"\n'),
+            # ``%s`` in a template that formats something else entirely.
+            ("unrelated percent format", 'MESSAGE = "wrote %s rows to quant.instruments" % count\n'),
+        ):
+            with self.subTest(label):
+                self.assertEqual(_runtime_table_statements_in(*_probe(source)), [], source)
 
     def test_the_registry_itself_is_not_an_exemption(self) -> None:
         """``instrument_registry`` is skipped above because its statements are
