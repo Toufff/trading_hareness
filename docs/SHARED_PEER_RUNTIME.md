@@ -132,7 +132,80 @@ follow, and they are the ones that matter operationally:
 - **The kill switch is unilateral and immediate.** Stopping the
   `trading-hareness-shared-peer-tunnels` task removes `15432`/`15681` within
   seconds. It needs no password change, no key removal, and no access to the
-  collaborator's host.
+  collaborator's host. Since the batch tunnel was added there is a second task
+  to stop as well — see "Revocation".
+
+## The batch tunnel (second connection, 15433)
+
+Everything above describes **one** SSH connection carrying both forwards. That
+is exactly the problem the batch tunnel solves, and the reason it had to be a
+second connection rather than a third `-R` on the existing one:
+
+SSH multiplexes every forward as a *channel* over a single TCP connection. The
+channels share that connection's congestion window and its ordering, so a bulk
+job — a `COPY`, a full-table export, a backfill — fills the window and intraday
+queries queue behind bytes nobody is waiting on. The peer author measured
+**52.5 ms RTT** on this link, so that queueing is not a rounding error. Adding
+`-R 15433` to the existing ssh process would have put the bulk traffic on the
+same window and changed nothing.
+
+There are therefore two independent owner-side connections, each with its own
+scheduled task, supervised runtime service, state file and lock file:
+
+| | intraday | batch |
+| --- | --- | --- |
+| scheduled task | `trading-hareness-shared-peer-tunnels` | `trading-hareness-shared-peer-batch-tunnel` |
+| runtime service | `shared-peer-tunnels` | `shared-peer-batch-tunnel` |
+| forwards | `-R 15432:55432`, `-R 15681:5681` | `-R 15433:55432` |
+| compression | off | `-o Compression=yes` |
+| health claim | remote API HTTP 200 | remote loopback listener on 15433 |
+| peer address | `db-tunnel:5432` | `db-tunnel:5433` |
+
+Both reach the same database on the same port 55432; only the transport differs.
+Compression is on for batch alone because bulk result sets compress well and the
+link is latency- rather than CPU-bound. The intraday profile is byte-for-byte
+what it was, and `scripts/windows/tests/test-shared-tunnel-profiles.ps1` pins its
+ssh argument vector literally so a later edit here cannot quietly change the
+live intraday tunnel.
+
+Install both from the owner side:
+
+```powershell
+pwsh .\scripts\shared-peer\install-shared-tunnel-tasks.ps1
+```
+
+`install-shared-tunnel-task.ps1 -Profile batch` installs the batch task alone,
+and `-WhatIf` on either prints the plan (task name, action, forwards, reclaim
+set) while touching no scheduled task, no runtime state and no ssh process.
+
+Two operational consequences worth stating plainly:
+
+- **Batch is optional and must stay optional.** `install-shared-tunnel-tasks.ps1`
+  installs intraday first and unguarded; a batch failure is warned about and
+  recorded as a `shared-peer-batch-tunnel` `install_failed` event but does not
+  fail the caller unless it passed `-RequireBatch`. On the peer side the
+  `db-tunnel` healthcheck deliberately still checks only 5432 and 5681 — gating
+  container health on an optimization would turn it into an outage.
+- **`permitlisten` must list 15433** if the restricted owner-tunnel key is ever
+  enabled (the four `OWNER_TUNNEL_SSH_*` keys in `runtime.env`).
+  `install-owner-tunnel-key.sh` now includes it, but that script does not
+  rewrite an `authorized_keys` entry that already exists. With
+  `-o ExitOnForwardFailure=yes` a missing `permitlisten` is not "slower batch
+  traffic": the ssh process exits within seconds and the two-minute supervising
+  trigger retries into the same refusal indefinitely. While those four keys are
+  unset both tunnels fall back to the unrestricted `lightServer1` alias, where
+  15433 binds with no extra setup.
+
+On the peer the batch port stays off until `PEER_BATCH_DB_PORT` is set in
+`deploy/shared-peer/.env`. `-L` binds locally and does not require the far end
+to be listening, so enabling it while the owner batch tunnel is down means
+connections to `db-tunnel:5433` fail individually; 5432 and 5681 are unaffected.
+`scripts/shared-peer/deploy-batch-tunnel-port.py` performs that peer-side
+change: it backs up `.env`/`compose.yaml`/the entrypoint, asserts that no
+service other than `db-tunnel` moves, rebuilds and recreates only `db-tunnel`,
+then proves the path with an authenticated `SELECT 1, inet_server_port()`
+through 5433 — `55432` is the only answer that proves the owner's PostgreSQL
+rather than an open socket — and prints its rollback command.
 
 ## Verifying the access path
 
@@ -297,8 +370,12 @@ pwsh .\scripts\shared-peer\new-peer-ssh-key.ps1
 scp -P 3535 .\scripts\shared-peer\provision-lightserver-rootless.sh lightServer1:/root/
 scp -P 3535 G:\StockPlatform\peer\secrets\stockpeer_ed25519.pub lightServer1:/root/
 ssh lightServer1 "AUTHORIZED_KEY_FILE=/root/stockpeer_ed25519.pub bash /root/provision-lightserver-rootless.sh"
-pwsh .\scripts\shared-peer\install-shared-tunnel-task.ps1
+pwsh .\scripts\shared-peer\install-shared-tunnel-tasks.ps1
 ```
+
+`install-shared-tunnel-tasks.ps1` installs both tunnel profiles (intraday and
+batch). `install-shared-tunnel-task.ps1` on its own still installs the intraday
+task only, which is what it did before the batch profile existed.
 
 **Existing `authorized_keys` entries on lightServer are not updated in place**:
 re-running `provision-lightserver-rootless.sh` with `AUTHORIZED_KEY_FILE` set
@@ -353,13 +430,18 @@ non-interactive without breaking `ss`, `curl`, `fuser` or the collaborator's
 complete gateway probe. The four variables may be enabled after the public-key
 fingerprint and all three `permitlisten` entries have been verified.
 
-The scheduled tunnel task runs hidden and publishes the owner database and
-owner API as lightServer loopback ports. The peer API is a third loopback-only
-listener created by rootless Compose. Verify all three with:
+The scheduled tunnel tasks run hidden and publish the owner database (15432),
+the owner API (15681) and, once the batch task is installed, the batch database
+path (15433) as lightServer loopback ports. The peer API is a further
+loopback-only listener created by rootless Compose. Verify them with:
 
 ```powershell
-ssh lightServer1 "ss -lnt | grep -E '127.0.0.1:(15432|15681|15682)'"
+ssh lightServer1 "ss -lnt | grep -E '127.0.0.1:(15432|15433|15681|15682)'"
 ```
+
+`15433` is absent until `install-shared-tunnel-tasks.ps1` (or
+`install-shared-tunnel-task.ps1 -Profile batch`) has run; its absence does not
+affect the other three.
 
 ## Peer deployment
 
@@ -578,12 +660,16 @@ The fastest lever is owner-side and needs no access to the collaborator's host
 peer's database sessions and gateway calls fail immediately:
 
 ```powershell
-Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels'
-Disable-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels'
+foreach ($task in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-shared-peer-batch-tunnel') {
+    Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+    Disable-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+}
 ```
 
-`Disable` matters: the task carries a two-minute supervising trigger that would
-otherwise bring the tunnel straight back up.
+`Disable` matters: each task carries a two-minute supervising trigger that would
+otherwise bring its tunnel straight back up. **Both** tasks must be stopped:
+the batch task publishes 15433, which reaches the same database as 15432, so
+stopping only the intraday task is not a revocation.
 
 To revoke at the database instead:
 

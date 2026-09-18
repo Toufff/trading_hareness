@@ -1,14 +1,25 @@
 param(
-    [string]$TaskName = "trading-hareness-shared-peer-tunnels",
+    # 'intraday' installs the historical task unchanged. 'batch' installs the
+    # separate bulk-traffic tunnel (see shared-tunnel-profiles.psm1). The two
+    # are independent scheduled tasks, runtime services and lock files; one can
+    # be reinstalled or stopped without touching the other.
+    [ValidateSet('intraday', 'batch')][string]$Profile = 'intraday',
+    # Empty means "the profile's own name". An explicit value still wins so an
+    # operator can stage a second task, as before.
+    [string]$TaskName = '',
     [string]$ScriptPath = (Join-Path $PSScriptRoot "start-shared-tunnels.ps1"),
     [string]$PlatformRoot = 'G:\StockPlatform',
     [string]$SshAlias = 'lightServer1',
     [int]$RemoteDatabasePort = 15432,
     [int]$RemoteApiPort = 15681,
+    [int]$RemoteBatchDatabasePort = 15433,
     [int]$LocalDatabasePort = 55432,
     [int]$LocalApiPort = 5681,
     # Both modes use a GUI launcher; Interactive must also remain console-free.
-    [ValidateSet('S4U', 'Interactive')][string]$LogonType = 'S4U'
+    [ValidateSet('S4U', 'Interactive')][string]$LogonType = 'S4U',
+    # Report the plan and exit. Registers nothing, stops nothing, kills nothing
+    # and writes no runtime state - safe to run on the live host.
+    [switch]$WhatIf
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,18 +28,59 @@ $resolved = (Resolve-Path -LiteralPath $ScriptPath).Path
 $repository = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $resolved) '..\..')).TrimEnd('\')
 Import-Module (Join-Path $repository 'scripts\windows\runtime-observability.psm1') -Force
 Import-Module (Join-Path $repository 'scripts\windows\background-process.psm1') -Force
-Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-$state = Request-RuntimeStop -PlatformRoot $PlatformRoot -Service 'shared-peer-tunnels' -Reason 'task_reinstall' -RequestedBy 'install-shared-tunnel-task.ps1'
-# State may point to yesterday's dead PID. Reconcile only live ssh processes
-# whose command line owns both exact forwarding tuples; never kill by stale PID.
-Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.CommandLine -match "127\.0\.0\.1:$RemoteDatabasePort`:127\.0\.0\.1:$LocalDatabasePort" -and
-        $_.CommandLine -match "127\.0\.0\.1:$RemoteApiPort`:127\.0\.0\.1:$LocalApiPort"
-    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-$action = New-HiddenPowerShellTaskAction -RepositoryRoot $repository -ScriptPath $resolved -ScriptArguments @(
+Import-Module (Join-Path $repository 'scripts\shared-peer\shared-tunnel-profiles.psm1') -Force
+$tunnelProfile = Get-SharedTunnelProfile -Name $Profile `
+    -RemoteDatabasePort $RemoteDatabasePort -RemoteApiPort $RemoteApiPort `
+    -RemoteBatchDatabasePort $RemoteBatchDatabasePort `
+    -LocalDatabasePort $LocalDatabasePort -LocalApiPort $LocalApiPort
+$service = $tunnelProfile.Service
+if (-not $TaskName) { $TaskName = $tunnelProfile.TaskName }
+$scriptArguments = @(
+    '-Profile', $tunnelProfile.Name,
     '-PlatformRoot', $PlatformRoot, '-SshAlias', $SshAlias, '-RemoteDatabasePort', "$RemoteDatabasePort",
-    '-RemoteApiPort', "$RemoteApiPort", '-LocalDatabasePort', "$LocalDatabasePort", '-LocalApiPort', "$LocalApiPort")
+    '-RemoteApiPort', "$RemoteApiPort", '-RemoteBatchDatabasePort', "$RemoteBatchDatabasePort",
+    '-LocalDatabasePort', "$LocalDatabasePort", '-LocalApiPort', "$LocalApiPort")
+
+if ($WhatIf) {
+    # The scheduled action can only be materialized where the native task host
+    # has been built (publishing builds it; a fresh checkout has not). Report
+    # that honestly instead of failing the dry run or pretending it exists.
+    $taskHost = Join-Path $repository 'scripts\windows\bin\stock-background-host.exe'
+    $plannedAction = if (Test-Path -LiteralPath $taskHost -PathType Leaf) {
+        $built = New-HiddenPowerShellTaskAction -RepositoryRoot $repository -ScriptPath $resolved -ScriptArguments $scriptArguments
+        [pscustomobject]@{ Execute = $built.Execute; Arguments = $built.Arguments }
+    } else {
+        [pscustomobject]@{ Execute = "$taskHost (not built in this checkout)"; Arguments = ($scriptArguments -join ' ') }
+    }
+    [pscustomobject][ordered]@{
+        WhatIf = $true
+        Profile = $tunnelProfile.Name
+        TaskName = $TaskName
+        Service = $service
+        ScriptPath = $resolved
+        ScriptArguments = $scriptArguments
+        Forwards = @($tunnelProfile.Forwards)
+        SshOptions = @($tunnelProfile.SshOptions)
+        ReclaimablePorts = @($tunnelProfile.RemotePorts)
+        HealthCheck = $tunnelProfile.HealthCheck
+        LogonType = $LogonType
+        SuperviseIntervalMinutes = 2
+        PlannedAction = $plannedAction
+        ScheduledTasksTouched = $false
+        RuntimeStateTouched = $false
+    }
+    return
+}
+
+Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+$state = Request-RuntimeStop -PlatformRoot $PlatformRoot -Service $service -Reason 'task_reinstall' -RequestedBy 'install-shared-tunnel-task.ps1'
+# State may point to yesterday's dead PID. Reconcile only live ssh processes
+# whose command line owns this profile's exact forwarding tuples; never kill by
+# stale PID, and never kill the other profile's connection.
+Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { Test-SharedTunnelCommandLine -TunnelProfile $tunnelProfile -CommandLine $_.CommandLine } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+$action = New-HiddenPowerShellTaskAction -RepositoryRoot $repository -ScriptPath $resolved -ScriptArguments $scriptArguments
 # Two triggers on purpose.
 #
 # -RestartCount/-RestartInterval below do NOT cover the failure that actually
@@ -87,20 +139,46 @@ if ($task.State -ne 'Running') {
     throw "Shared peer tunnel task exited during startup; last result $($info.LastTaskResult)"
 }
 
+# Health is profile-specific. The intraday tunnel carries the owner API, so an
+# HTTP 200 through it proves the whole chain. The batch tunnel carries only the
+# database forward and there is no HTTP endpoint behind it, so the equivalent
+# owner-side evidence is that sshd actually published the reserved loopback
+# listener - an open port is a weaker claim than HTTP 200 and is reported as
+# such. The peer-side proof that a query really flows through 5433 is
+# deploy-batch-tunnel-port.py's authenticated SELECT 1, which runs on the peer.
 $healthDeadline = [DateTime]::UtcNow.AddSeconds(30)
-$remoteHealth = ''
-do {
-    $probe = Invoke-ConsoleFreeCommand -FilePath (Get-Command ssh.exe).Source -Arguments @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', $SshAlias,
-        "curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:$RemoteApiPort/health") -TimeoutSeconds 12
-    $remoteHealth = $probe.Stdout.Trim()
-    if ($remoteHealth -eq '200') { break }
-    Start-Sleep -Seconds 1
-} while ([DateTime]::UtcNow -lt $healthDeadline)
-if ($remoteHealth -ne '200') {
-    throw "Shared peer tunnel task is running, but remote API health returned '$remoteHealth' instead of 200"
+$sshPath = (Get-Command ssh.exe).Source
+if ($tunnelProfile.HealthCheck -eq 'remote_api_http') {
+    $remoteHealth = ''
+    do {
+        $probe = Invoke-ConsoleFreeCommand -FilePath $sshPath -Arguments @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', $SshAlias,
+            "curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:$($tunnelProfile.RemoteApiPort)/health") -TimeoutSeconds 12
+        $remoteHealth = $probe.Stdout.Trim()
+        if ($remoteHealth -eq '200') { break }
+        Start-Sleep -Seconds 1
+    } while ([DateTime]::UtcNow -lt $healthDeadline)
+    if ($remoteHealth -ne '200') {
+        throw "Shared peer tunnel task is running, but remote API health returned '$remoteHealth' instead of 200"
+    }
+    $healthLabel = 'remote_api_http_200'
+} else {
+    $batchPort = $tunnelProfile.RemoteDatabasePort
+    $listenerUp = $false
+    do {
+        $probe = Invoke-ConsoleFreeCommand -FilePath $sshPath -Arguments @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', $SshAlias,
+            "ss -ltn 'sport = :$batchPort' | tail -n +2 | grep -q .") -TimeoutSeconds 12
+        $listenerUp = $probe.ExitCode -eq 0
+        if ($listenerUp) { break }
+        Start-Sleep -Seconds 1
+    } while ([DateTime]::UtcNow -lt $healthDeadline)
+    if (-not $listenerUp) {
+        throw "Batch tunnel task is running, but lightServer published no loopback listener on $batchPort"
+    }
+    $remoteHealth = "listening:$batchPort"
+    $healthLabel = 'remote_listener_open'
 }
 
-$state = Get-RuntimeState -PlatformRoot $PlatformRoot -Service 'shared-peer-tunnels'
+$state = Get-RuntimeState -PlatformRoot $PlatformRoot -Service $service
 if (-not $state -or -not $state.PSObject.Properties['run_id']) {
     throw 'Shared peer tunnel became reachable without a supervised runtime state'
 }
@@ -111,15 +189,17 @@ foreach ($property in $state.PSObject.Properties) {
     }
 }
 $healthyState.status = 'healthy'
-$healthyState.health = 'remote_api_http_200'
+$healthyState.health = $healthLabel
 $healthyState.verified_at = [DateTimeOffset]::Now.ToString('o')
-$healthyState.remote_api_port = $RemoteApiPort
-$healthyState.remote_database_port = $RemoteDatabasePort
-[void](Set-RuntimeState -PlatformRoot $PlatformRoot -Service 'shared-peer-tunnels' -State $healthyState)
-[void](Write-RuntimeEvent -PlatformRoot $PlatformRoot -Service 'shared-peer-tunnels' -Event 'healthy' `
+$healthyState.tunnel_profile = $tunnelProfile.Name
+$healthyState.remote_api_port = $tunnelProfile.RemoteApiPort
+$healthyState.remote_database_port = $tunnelProfile.RemoteDatabasePort
+[void](Set-RuntimeState -PlatformRoot $PlatformRoot -Service $service -State $healthyState)
+[void](Write-RuntimeEvent -PlatformRoot $PlatformRoot -Service $service -Event 'healthy' `
     -RunId ([string]$state.run_id) -Data @{
-        health = 'remote_api_http_200'
-        remote_api_port = $RemoteApiPort
-        remote_database_port = $RemoteDatabasePort
+        health = $healthLabel
+        tunnel_profile = $tunnelProfile.Name
+        remote_api_port = $tunnelProfile.RemoteApiPort
+        remote_database_port = $tunnelProfile.RemoteDatabasePort
     })
 $task | Select-Object TaskName,State,@{Name='RemoteApiHealth';Expression={$remoteHealth}}
