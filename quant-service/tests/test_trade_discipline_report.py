@@ -20,10 +20,10 @@ from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from app.trade_discipline.contracts import DisciplinePlan
+from app.trade_discipline.contracts import Action, DisciplinePlan
 from app.trade_discipline.evaluator import EvaluationInputs, evaluate
 from app.trade_discipline.generator import CalendarInfo, generate
-from app.trade_discipline.quality import CHECK_IDS
+from app.trade_discipline.quality import CHECK_IDS, evaluate_quality
 from app.trade_discipline.reconcile import reconcile
 from app.trade_discipline.report import (
     CHECK_LABEL,
@@ -36,8 +36,10 @@ from app.trade_discipline.report import (
     quality_rows,
     render_markdown,
     report_paths,
+    sizing_notes,
     sizing_rows,
     slug,
+    t1_locked_shares,
     write_report,
 )
 from test_trade_discipline_core import (
@@ -165,7 +167,7 @@ class DisclosureTests(unittest.TestCase):
         self.assertEqual(locked.metrics["t1_locked_shares"], 5800)
         card = render_markdown(locked)
         self.assertIn("| 当日可卖 sellable_quantity | 0 股 |", card)
-        self.assertIn("生成日不可卖 5800 股（T+1），价格线自下一交易日起可执行。", card)
+        self.assertIn("生成日不可卖 5800 股（T+1，按 09-18 15:05 快照），价格线自下一交易日起可执行。", card)
         payload = plan_payload(locked)
         self.assertEqual(payload["t1_locked_shares"], 5800)
         self.assertEqual(len(payload["sizing_notes"]), 1)
@@ -176,6 +178,47 @@ class DisclosureTests(unittest.TestCase):
         self.assertEqual(free.metrics["t1_locked_shares"], 0)
         self.assertNotIn("生成日不可卖", render_markdown(free))
         self.assertIn("| 当日可卖 sellable_quantity | 5800 股 |", render_markdown(free))
+
+    def test_a_snapshot_from_an_earlier_day_never_asserts_a_t1_lock(self):
+        """The Monday trap: reusing Friday's 15:10 snapshot must not print a lock that has lapsed."""
+        stale = plan_fixture(position={**SHENQI_POSITION, "sellable_quantity": 0,
+                                       "observed_at": "2026-09-17T15:10:00+08:00"})
+        self.assertEqual(stale.metrics["t1_locked_shares"], 0)
+        self.assertEqual(sizing_notes(stale), [])
+        card = render_markdown(stale)
+        self.assertNotIn("生成日不可卖", card)
+        self.assertIn("| 当日可卖 sellable_quantity | 0 股 |", card)     # the snapshot itself is still shown
+        self.assertEqual(plan_payload(stale)["t1_locked_shares"], 0)
+        # a row stored before ``t1_locked_shares`` existed is judged the same way from its position
+        legacy = stale.model_copy(update={"metrics": {key: value for key, value in stale.metrics.items()
+                                                      if key not in {"t1_locked_shares", "t1_snapshot_at"}}})
+        self.assertEqual(t1_locked_shares(legacy), 0)
+        self.assertEqual(sizing_notes(legacy), [])
+
+    def test_the_derivation_table_flags_a_share_count_that_does_not_recompute(self):
+        """The gate recomputes exposure/holiday share counts; the card's 一致 column must say the same."""
+        plan = generate(rally_inputs())
+        exposure = plan.lines_of("exposure")[0]
+        tampered = plan.model_copy(update={"lines": [
+            line.model_copy(update={"action": Action(type="reduce_to_shares", value=exposure.action.value + 100)})
+            if line.kind == "exposure" else line for line in plan.lines]})
+        row = [row for row in derivation_rows(tampered) if row["kind"] == "exposure"][0]
+        self.assertEqual(row["compared_to"], "action_value")
+        self.assertEqual(row["compared_value"], str(exposure.action.value + 100))
+        self.assertEqual(row["recomputed"], float(exposure.action.value))
+        self.assertIs(row["matches"], False)
+        self.assertFalse({check.check_id: check for check in evaluate_quality(tampered)}
+                         ["every_line_has_derivation"].passed)
+        derivation_section = render_markdown(tampered).split("## 三、")[1].split("## 四、")[0]
+        table_row = next(line for line in derivation_section.splitlines()
+                         if line.startswith(f"| {row['index']} | 仓位 |"))
+        self.assertIn("| 否 |", table_row)
+        self.assertIn(f"| {row['compared_value']} | {row['recomputed']:.0f} | 否 |", table_row)
+        honest = [row for row in derivation_rows(plan) if row["kind"] == "exposure"][0]
+        self.assertIs(honest["matches"], True)
+        self.assertEqual(honest["compared_value"], str(exposure.action.value))
+        priced = [row for row in derivation_rows(plan) if row["kind"] == "hard_stop"][0]
+        self.assertEqual((priced["compared_to"], priced["compared_value"]), ("price", priced["price"]))
 
     def test_the_sizing_table_prints_both_exposure_bases_and_the_open_risk(self):
         plan = plan_fixture()

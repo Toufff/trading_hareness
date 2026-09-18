@@ -13,6 +13,7 @@ from __future__ import annotations
 from decimal import Decimal
 from math import floor
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .contracts import SECTOR_CONDITIONS, DisciplinePlan, FormulaError, Line, QualityCheck
 from .templates import (
@@ -22,11 +23,14 @@ from .templates import (
     LOT_SIZE,
     STOP_PCT_MAX,
     STOP_PCT_MIN,
+    closure_within,
     lot_shares,
     soft_stop_window,
+    stop_distance_terms,
 )
 
 DERIVATION_TOLERANCE = 0.01 + 1e-9
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
 CHECK_IDS = (
     "has_hard_stop", "has_time_stop", "hard_stop_below_price", "hard_stop_single_condition",
     "hard_stop_distance_sane", "soft_above_hard", "soft_stop_separation", "lines_monotonic",
@@ -99,6 +103,25 @@ def _derivation_problem(line: Line) -> str:
     return ""
 
 
+def _required_closure(plan: DisciplinePlan) -> dict[str, Any] | None:
+    """The closure that demands a holiday line, re-derived from the frozen calendar.
+
+    The gate never trusts ``metrics.closure_required``: it runs the template's
+    own ``closure_within`` over ``metrics.calendar`` (the gaps and the open
+    sessions the generator saw) against the plan's ``valid_until``.  A plan
+    stored before the calendar was frozen falls back to the recorded closure,
+    still re-checked against the threshold.
+    """
+    metrics: dict[str, Any] = plan.metrics or {}
+    calendar = metrics.get("calendar")
+    if isinstance(calendar, dict):
+        return closure_within(calendar, plan.valid_until.astimezone(_SHANGHAI).date().isoformat())
+    closure = metrics.get("closure") if isinstance(metrics.get("closure"), dict) else None
+    if closure is not None and int(closure.get("closed_days") or 0) >= HOLIDAY_CLOSURE_DAYS:
+        return closure
+    return None
+
+
 def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
     """Return every assertion's verdict, in a stable order."""
     metrics: dict[str, Any] = plan.metrics or {}
@@ -129,8 +152,7 @@ def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
     if hard_stop is None or reference is None or not atr14:
         checks.append(_check("hard_stop_distance_sane", False, "无法计算止损距离：缺少 ATR14 或参考价"))
     else:
-        distance = float(reference - hard_stop)
-        pct = distance / float(reference)
+        distance, pct = stop_distance_terms(reference, hard_stop)
         atr_ok = ATR_MIN_MULTIPLE * float(atr14) <= distance <= ATR_MAX_MULTIPLE * float(atr14)
         pct_ok = STOP_PCT_MIN <= pct <= STOP_PCT_MAX
         checks.append(_check(
@@ -197,17 +219,15 @@ def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
         checks.append(_check("exposure_line_when_over_cap", True,
                              f"当前仓位 {sizing.current_exposure_pct}% 未超过上限 {sizing.target_exposure_pct}%"))
 
-    # The gate re-derives the requirement from the frozen closure instead of
-    # trusting the generator's flag: a closure shorter than the threshold (a
-    # three-day festival weekend) never demands a holiday line.
-    closure = metrics.get("closure") if isinstance(metrics.get("closure"), dict) else None
-    closure_required = bool(metrics.get("closure_required")) and (
-        closure is None or int(closure.get("closed_days") or 0) >= HOLIDAY_CLOSURE_DAYS)
+    closure = _required_closure(plan)
+    closure_required = closure is not None
     holiday_lines = plan.lines_of("holiday")
+    closure_note = (f"{closure['last_trading_date']} 起休市 {closure['closed_days']} 个自然日"
+                    if closure else "")
     checks.append(_check("holiday_line_when_closure", (not closure_required) or bool(holiday_lines),
-                         f"有效期内有 ≥{HOLIDAY_CLOSURE_DAYS} 个自然日的休市且已给出休市线"
+                         f"有效期内有 ≥{HOLIDAY_CLOSURE_DAYS} 个自然日的休市（{closure_note}）且已给出休市线"
                          if closure_required and holiday_lines
-                         else (f"有效期内有 ≥{HOLIDAY_CLOSURE_DAYS} 个自然日的休市但缺少休市线"
+                         else (f"有效期内有 ≥{HOLIDAY_CLOSURE_DAYS} 个自然日的休市（{closure_note}）但缺少休市线"
                                if closure_required else f"有效期内无 ≥{HOLIDAY_CLOSURE_DAYS} 个自然日的休市")))
 
     needs_no_add = plan.stage in {"crash_rebound", "broken"}

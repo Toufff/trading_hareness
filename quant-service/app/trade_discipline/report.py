@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import ComplianceRecord, DisciplinePlan, Evaluation, FormulaError, Line
-from .quality import CHECK_IDS
+from .generator import t1_locked_shares_for
+from .quality import CHECK_IDS, DERIVATION_TOLERANCE
 
 REPORT_VERSION = "trade-discipline-report-v2"
 RESEARCH_NOTICE = "研究用途，仅作人工决策依据：系统不连券商、不下单、不改持仓。"
@@ -218,12 +219,21 @@ def _current_risk_pct(sizing: Any) -> Decimal:
 
 
 def t1_locked_shares(plan: DisciplinePlan) -> int:
-    """Shares held but not sellable on the generation day (T+1)."""
+    """Shares held but not sellable on the plan's trading date (T+1), per a same-day snapshot."""
     recorded = (plan.metrics or {}).get("t1_locked_shares")
     if recorded is not None:
         return int(recorded)
-    position = plan.position
-    return max(0, position.quantity - position.sellable_quantity) if position is not None else 0
+    return t1_locked_shares_for(plan.position, plan.trading_date)
+
+
+def _snapshot_stamp(plan: DisciplinePlan) -> str:
+    """``MM-DD HH:MM`` of the broker snapshot the T+1 note is based on."""
+    recorded = (plan.metrics or {}).get("t1_snapshot_at")
+    if recorded:
+        return str(recorded)[5:16].replace("T", " ")
+    if plan.position is not None:
+        return plan.position.observed_at.strftime("%m-%d %H:%M")
+    return DASH
 
 
 def sizing_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
@@ -264,7 +274,7 @@ def sizing_notes(plan: DisciplinePlan) -> list[str]:
     locked = t1_locked_shares(plan)
     if locked <= 0:
         return []
-    return [f"生成日不可卖 {locked} 股（T+1），价格线自下一交易日起可执行。"]
+    return [f"生成日不可卖 {locked} 股（T+1，按 {_snapshot_stamp(plan)} 快照），价格线自下一交易日起可执行。"]
 
 
 def omitted_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
@@ -301,12 +311,26 @@ def line_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
     return rows
 
 
+def _compared_value(line: Line) -> tuple[str, Any]:
+    """What ``formula`` recomputes: the price, or the share count of a price-less time line.
+
+    Mirrors ``quality._derivation_problem`` so the card's ``一致`` column and
+    the gate's verdict can never disagree about the same line.
+    """
+    if line.price is not None:
+        return "price", line.price
+    if line.action.value is not None:
+        return "action_value", line.action.value
+    return "price", None
+
+
 def derivation_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
     """The audit table: rule, recorded inputs, formula and the recomputed value."""
     rows: list[dict[str, Any]] = []
     for index, line in enumerate(plan.lines, start=1):
         recomputed = _recomputed(line)
         action_recomputed = _recomputed_action(line)
+        compared_to, compared = _compared_value(line)
         rows.append({
             "index": index, "kind": line.kind, "kind_label": KIND_LABEL.get(line.kind, line.kind),
             "rule_id": line.derivation.rule_id,
@@ -314,15 +338,17 @@ def derivation_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
             "formula": line.derivation.formula,
             "price": None if line.price is None else str(line.price),
             "recomputed": recomputed,
-            "matches": None if recomputed is None or line.price is None
-            else abs(recomputed - float(line.price)) <= 0.01 + 1e-9,
+            "compared_to": compared_to,
+            "compared_value": None if compared is None else str(compared),
+            "matches": None if recomputed is None or compared is None
+            else abs(recomputed - float(compared)) <= DERIVATION_TOLERANCE,
             "action_inputs": {key: line.derivation.action_inputs[key]
                               for key in sorted(line.derivation.action_inputs)},
             "action_formula": line.derivation.action_formula,
             "action_value": None if line.action.value is None else str(line.action.value),
             "action_recomputed": action_recomputed,
             "action_matches": None if action_recomputed is None or line.action.value is None
-            else abs(action_recomputed - float(line.action.value)) <= 0.01 + 1e-9,
+            else abs(action_recomputed - float(line.action.value)) <= DERIVATION_TOLERANCE,
         })
     return rows
 
@@ -459,11 +485,11 @@ def render_markdown(plan: DisciplinePlan, *, evaluation: Evaluation | None = Non
     else:
         out.append("- 无（模板中的每条可选线都已生成）")
 
-    out += ["", "## 三、推导表（每个价格与动作值都可复算）", ""]
-    out += _table(["#", "类型", "rule_id", "inputs", "formula", "价格", "复算值", "一致",
+    out += ["", "## 三、推导表（每个价格与动作值都可复算；无价格的时间线复算的是股数）", ""]
+    out += _table(["#", "类型", "rule_id", "inputs", "formula", "价格/股数", "复算值", "一致",
                    "action_formula", "动作值", "动作复算值", "一致"],
                   [[row["index"], row["kind_label"], row["rule_id"], _canonical(row["inputs"]),
-                    row["formula"], row["price"], row["recomputed"],
+                    row["formula"], row["compared_value"], row["recomputed"],
                     DASH if row["matches"] is None else ("是" if row["matches"] else "否"),
                     (f"{row['action_formula']} over {_canonical(row['action_inputs'])}"
                      if row["action_formula"] else DASH),

@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 from app.trade_discipline.generator import CalendarInfo, GenerationInputs, generate
 from app.trade_discipline.inputs import (
+    STALE_DAY_PREFIX,
     account_equity,
     after_session_close,
     build_generation_inputs,
@@ -26,6 +27,7 @@ from app.trade_discipline.inputs import (
     inputs_hash,
     lane_membership,
     live_forming_bar,
+    live_quote_allowed,
     merge_forming_bar,
     position_for,
     previous_active_plan,
@@ -33,6 +35,7 @@ from app.trade_discipline.inputs import (
     sector_membership,
     settled_bar_for,
     settled_daily_bars,
+    stale_day_ref,
     summarize_previous_plan,
     trading_calendar,
 )
@@ -398,10 +401,32 @@ class EndToEndAssemblyTests(unittest.TestCase):
 
         inputs = asyncio.run(collect(connection.factory, run_id="66666666-6666-6666-6666-666666666666",
                                      account_key="citics-primary", symbol=SYMBOL, as_of=AS_OF,
-                                     fetch_quotes=quotes, fetch_minute=minutes))
+                                     session_today=date(2026, 9, 18), fetch_quotes=quotes, fetch_minute=minutes))
         self.assertEqual(inputs.bars[-1]["trading_date"], "2026-09-18")
         self.assertTrue(inputs.bars[-1]["forming"])
         self.assertIn("forming_bar:live_quote+minutes:2026-09-18", inputs.evidence_refs)
+        self.assertFalse([ref for ref in inputs.evidence_refs if ref.startswith(STALE_DAY_PREFIX)])
+
+    def test_an_open_day_without_its_own_bar_and_no_live_bar_is_marked_stale(self):
+        """15:00-16:41 with --no-live (or a provider failure): the plan is dated the previous session."""
+        connection = FakeConnection()          # the series ends on 09-17
+        inputs = asyncio.run(collect(connection.factory, run_id="cccccccc-cccc-cccc-cccc-cccccccccccc",
+                                     account_key="citics-primary", symbol=SYMBOL, as_of=AS_OF, allow_live=False))
+        self.assertIn("bars_basis:settled_only", inputs.evidence_refs)
+        self.assertIn("bars_stale_day:2026-09-18:last_settled:2026-09-17", inputs.evidence_refs)
+        plan = generate(inputs)
+        self.assertEqual(plan.trading_date, date(2026, 9, 17))
+        self.assertEqual(plan.as_of_at.date(), date(2026, 9, 18))
+        self.assertIn("bars_stale_day:2026-09-18:last_settled:2026-09-17", plan.evidence_refs)
+        # a closed day (weekend run) is dated the previous session by design and is not stale
+        closed = asyncio.run(collect(FakeConnection(day_is_open=False).factory,
+                                     run_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
+                                     account_key="citics-primary", symbol=SYMBOL, as_of=AS_OF, allow_live=False))
+        self.assertFalse([ref for ref in closed.evidence_refs if ref.startswith(STALE_DAY_PREFIX)])
+        self.assertIsNone(stale_day_ref({"day_is_open": True, "settled_today": True, "trading_day": date(2026, 9, 18)},
+                                        [{"trading_date": "2026-09-18"}], None))
+        self.assertIsNone(stale_day_ref({"day_is_open": True, "settled_today": False, "trading_day": date(2026, 9, 18)},
+                                        [{"trading_date": "2026-09-17"}], {"trading_date": "2026-09-18"}))
 
     def test_a_closed_session_never_asks_the_provider(self):
         connection = FakeConnection(day_is_open=False)
@@ -455,20 +480,55 @@ class SettledBarPriorityTests(unittest.TestCase):
         self.assertFalse(evidence["settled_today"])
         inputs = asyncio.run(collect(connection.factory, run_id="99999999-9999-9999-9999-999999999999",
                                      account_key="citics-primary", symbol=SYMBOL, as_of=AS_OF,
+                                     session_today=date(2026, 9, 18),
                                      fetch_quotes=self.quotes, fetch_minute=self.minutes))
         last = inputs.bars[-1]
         self.assertEqual((last["trading_date"], last["close"], last["forming"]), ("2026-09-18", 8.55, True))
         self.assertIn("bars_basis:settled_plus_forming", inputs.evidence_refs)
         self.assertIn("forming_bar:live_quote+minutes:2026-09-18", inputs.evidence_refs)
 
-    def test_before_the_close_the_live_session_still_wins_over_a_stale_settled_row(self):
+    def test_a_settled_bar_for_the_day_wins_whatever_the_clock_says(self):
+        """A back-dated ``--as-of 14:30`` on a day whose bar is settled must not fetch tonight's quote.
+
+        The bar's presence proves that session is over; a live quote can only
+        belong to a later one.  The old time-based guard replaced the settled
+        09-17 close with the 09-18 quote and changed ma5/atr14/inputs_hash.
+        """
         connection = FakeConnection(bars=[*settled_rows(), self.TODAY_ROW])
         morning = datetime(2026, 9, 18, 10, 30, tzinfo=SH)
+
+        async def boom(*_args, **_kwargs):
+            raise AssertionError("a settled bar for the as_of day must not be overwritten by a live read")
+
         inputs = asyncio.run(collect(connection.factory, run_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                                      account_key="citics-primary", symbol=SYMBOL, as_of=morning,
-                                     fetch_quotes=self.quotes, fetch_minute=self.minutes))
-        self.assertTrue(inputs.bars[-1]["forming"])
-        self.assertIn("bars_basis:settled_plus_forming", inputs.evidence_refs)
+                                     session_today=date(2026, 9, 18), fetch_quotes=boom, fetch_minute=boom))
+        last = inputs.bars[-1]
+        self.assertEqual((last["trading_date"], last["close"], last["forming"]), ("2026-09-18", 8.41, False))
+        self.assertIn("bars_basis:settled", inputs.evidence_refs)
+        self.assertFalse([ref for ref in inputs.evidence_refs if ref.startswith("forming_bar:")])
+        self.assertFalse(live_quote_allowed({"day_is_open": True, "settled_today": True}, morning,
+                                            session_today=date(2026, 9, 18)))
+
+    def test_a_back_dated_run_never_stamps_a_live_quote_with_an_earlier_day(self):
+        """``--as-of 2026-09-17T14:30`` run on 09-18: no bar for 09-17 in the series, still no live read."""
+        connection = FakeConnection(bars=settled_rows()[:-1])       # the series ends on 09-16
+        back_dated = datetime(2026, 9, 17, 14, 30, tzinfo=SH)
+
+        async def boom(*_args, **_kwargs):
+            raise AssertionError("a live quote belongs to the current session, never to an earlier as_of day")
+
+        inputs = asyncio.run(collect(connection.factory, run_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                                     account_key="citics-primary", symbol=SYMBOL, as_of=back_dated,
+                                     session_today=date(2026, 9, 18), fetch_quotes=boom, fetch_minute=boom))
+        self.assertIn("bars_basis:settled_only", inputs.evidence_refs)
+        self.assertEqual(inputs.bars[-1]["trading_date"], "2026-09-16")
+        self.assertTrue(live_quote_allowed({"day_is_open": True, "settled_today": False}, back_dated,
+                                           session_today=date(2026, 9, 17)))
+        self.assertFalse(live_quote_allowed({"day_is_open": True, "settled_today": False}, back_dated,
+                                            session_today=date(2026, 9, 18)))
+        self.assertFalse(live_quote_allowed({"day_is_open": False, "settled_today": False}, back_dated,
+                                            session_today=date(2026, 9, 17)))
 
     def test_the_basis_helpers_are_explicit_about_what_they_see(self):
         rows = [{"trading_date": "2026-09-17", "close": 8.3}, {"trading_date": "2026-09-18", "close": 8.41}]

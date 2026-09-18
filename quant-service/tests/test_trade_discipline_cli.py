@@ -214,5 +214,24 @@ class TradeRowTests(unittest.TestCase):
         self.assertEqual(receipt["unplanned_fills"], [])
 
 
+class GenerationWarningTests(unittest.TestCase):
+    """A plan dated the previous session on an open day is valid but must not pass unnoticed."""
+
+    def test_a_stale_day_evidence_ref_becomes_a_plain_words_receipt_warning(self):
+        from app.trade_discipline import inputs as inputs_module
+        from app.trade_discipline.generator import generate
+        from test_trade_discipline_core import shenqi_inputs
+
+        fresh = generate(shenqi_inputs())
+        self.assertEqual(cli._generation_warnings(fresh, inputs_module), [])
+        stale = generate(shenqi_inputs(evidence_refs=["bars_basis:settled_only",
+                                                      "bars_stale_day:2026-09-21:last_settled:2026-09-18"]))
+        warnings = cli._generation_warnings(stale, inputs_module)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("stale_day", warnings[0])
+        self.assertIn("2026-09-18", warnings[0])
+        self.assertIn("bars_stale_day:2026-09-21:last_settled:2026-09-18", warnings[0])
+
+
 if __name__ == "__main__":
     unittest.main()

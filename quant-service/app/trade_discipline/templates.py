@@ -13,13 +13,18 @@ raised above the structure point, because a stop sitting inside the current
 trading range is not a structure point any more.  A structure that is wider than
 ``3 x ATR14`` or ``12%`` is therefore left where it is and fails
 ``hard_stop_distance_sane``, which is the contract's own way of saying "this
-structure is too far away to size".  The widening is part of the recorded
-``Derivation.formula``; it is never silently applied.
+structure is too far away to size".  The one exception is ``crash_rebound``,
+whose primary anchor (the 20-day crash low) is a *fixed* point that a normal
+rebound walks away from: when it is already beyond the sizing band the template
+falls back to the nearer approved structure, the two-day low, and records which
+one it used in ``structure_source``.  The widening and the fallback are part of
+the recorded ``Derivation``; neither is silently applied.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from math import floor
 from typing import Any
@@ -35,11 +40,8 @@ TARGET_EXPOSURE_PCT: dict[str, Decimal] = {
     "unclassified": Decimal("15"),
 }
 # Half of the stage target over a long closure; ``broken`` is flat anyway.
-HOLIDAY_EXPOSURE_PCT: dict[str, Decimal] = {
-    "crash_rebound": Decimal("10"), "broken": Decimal("0"), "breakout_hold": Decimal("12.5"),
-    "trend_hold": Decimal("15"), "pullback_hold": Decimal("15"), "base_platform": Decimal("10"),
-    "unclassified": Decimal("7.5"),
-}
+# Derived, not copied, so the two tables cannot drift apart.
+HOLIDAY_EXPOSURE_PCT: dict[str, Decimal] = {stage: pct / Decimal("2") for stage, pct in TARGET_EXPOSURE_PCT.items()}
 DEFAULT_RISK_PER_TRADE_PCT = Decimal("1.0")
 TIME_STOP_DAYS: dict[str, int] = {"crash_rebound": 3, "broken": 3}
 DEFAULT_TIME_STOP_DAYS = 5
@@ -69,8 +71,11 @@ TRAIL_ATR_MULTIPLE = 1.5
 SOFT_STOP_SEPARATION_ATR = 0.5
 # Only a Labour Day / National Day / Spring Festival sized closure (>= 5
 # calendar days) forces a holiday line; a long weekend around a one-day
-# festival (3 days) does not.
+# festival (3 days) does not - but it is recorded in ``omitted_lines`` so the
+# refusal is auditable.  An ordinary Saturday+Sunday gap is not a closure the
+# rule ever considers and leaves no record.
 HOLIDAY_CLOSURE_DAYS = 5
+WEEKEND_CLOSURE_DAYS = 2
 LOT_SIZE = 100
 
 # One phrase per ExtraCondition, so a label and its ``extra`` list are always
@@ -88,14 +93,15 @@ PRIORITY: dict[str, int] = {
 }
 
 # stage -> (structure sub-expression, metric keys the expression reads)
+TWO_DAY_LOW_RULE: tuple[str, tuple[str, ...]] = ("min(today_low, prev_low)", ("today_low", "prev_low"))
 STRUCTURE_RULE: dict[str, tuple[str, tuple[str, ...]]] = {
     "crash_rebound": ("low20", ("low20",)),
-    "broken": ("min(today_low, prev_low)", ("today_low", "prev_low")),
+    "broken": TWO_DAY_LOW_RULE,
     "pullback_hold": ("recent_low", ("recent_low",)),
     "trend_hold": ("ma10 * (1 - ma_buffer)", ("ma10", "ma_buffer")),
     "breakout_hold": ("prior_high * (1 - ma_buffer)", ("prior_high", "ma_buffer")),
     "base_platform": ("low10_close", ("low10_close",)),
-    "unclassified": ("min(today_low, prev_low)", ("today_low", "prev_low")),
+    "unclassified": TWO_DAY_LOW_RULE,
 }
 STRUCTURE_LABEL: dict[str, str] = {
     "crash_rebound": "急跌反弹段：最近20个交易日的最低价（急跌低点）",
@@ -106,6 +112,9 @@ STRUCTURE_LABEL: dict[str, str] = {
     "base_platform": "平台段：10日最低收盘",
     "unclassified": "未分类：当日与昨日真实低点的较低者（最保守）",
 }
+# The crash low is the only structure that a rebound leaves behind; when it is
+# already beyond the sizing band the nearer approved structure takes over.
+CRASH_FALLBACK_LABEL = "急跌反弹段：急跌低点已超出止损距离上限，改用当日与昨日真实低点的较低者"
 
 
 def _money(value: float | Decimal) -> Decimal:
@@ -127,6 +136,22 @@ def lot_shares(equity: Decimal, exposure_pct: Decimal, price: Decimal) -> int:
     return int(floor(equity * exposure_pct / Decimal("100") / price / LOT_SIZE)) * LOT_SIZE
 
 
+def stop_distance_terms(reference_price: Decimal, stop_price: Decimal) -> tuple[float, float]:
+    """``(distance, fraction of the reference)`` exactly as ``hard_stop_distance_sane`` computes them.
+
+    The template's fallback decision and the gate's verdict must be the same
+    arithmetic, or a structure could be kept here and rejected there.
+    """
+    distance = float(reference_price - stop_price)
+    return distance, distance / float(reference_price)
+
+
+def stop_beyond_band(reference_price: Decimal, stop_price: Decimal, atr14: float) -> bool:
+    """True when the stop is further away than ``3 x ATR14`` or ``12%`` - too far to size."""
+    distance, fraction = stop_distance_terms(reference_price, stop_price)
+    return distance > ATR_MAX_MULTIPLE * atr14 or fraction > STOP_PCT_MAX
+
+
 def hard_stop_price(stage: str, metrics: dict[str, Any], reference_price: Decimal) -> tuple[Decimal, Derivation]:
     """``min(structure_low, ref x (1 - buffer), ref - 0.9 x ATR14, ref x (1 - 2%))``.
 
@@ -137,6 +162,13 @@ def hard_stop_price(stage: str, metrics: dict[str, Any], reference_price: Decima
     stays where it is and is rejected by ``hard_stop_distance_sane`` instead of
     being turned into a pure ATR number inside today's range.  Every term is a
     recorded input, so the derivation table shows which one bound.
+
+    ``crash_rebound`` is anchored on the 20-day crash low, a fixed point the
+    stage keeps for as long as the drawdown says "crash" while the price walks
+    away from it.  Once that low is beyond the band the template switches to
+    the two-day low - the structure ``broken``/``unclassified`` use - instead
+    of rejecting a normal rebound; ``inputs.structure_source`` says which one
+    was used and ``low20`` stays recorded either way.
     """
     expression, keys = STRUCTURE_RULE.get(stage, STRUCTURE_RULE["unclassified"])
     reference = float(reference_price)
@@ -148,7 +180,16 @@ def hard_stop_price(stage: str, metrics: dict[str, Any], reference_price: Decima
         "prior_high": float(metrics["prior_high"]), "low10_close": float(metrics["low10_close"]),
         "ma_buffer": MA_STRUCTURE_BUFFER,
     }
-    inputs: dict[str, Any] = {key: available[key] for key in keys}
+    inputs: dict[str, Any] = {}
+    if stage == "crash_rebound":
+        crash_low = _money_down(available["low20"])
+        if stop_beyond_band(reference_price, crash_low, atr14):
+            expression, keys = TWO_DAY_LOW_RULE
+            inputs["structure_source"] = "two_day_low"
+            inputs["low20"] = available["low20"]
+        else:
+            inputs["structure_source"] = "low20"
+    inputs.update({key: available[key] for key in keys})
     inputs.update({
         "reference_price": reference, "buffer_pct": buffer_pct(metrics), "atr14": atr14,
         "atr_target_multiple": ATR_TARGET_MULTIPLE, "stop_pct_target": STOP_PCT_TARGET,
@@ -200,23 +241,42 @@ def build_sizing(*, stage: str, equity: Decimal, risk_per_trade_pct: Decimal, re
     )
 
 
-def closure_within(calendar: dict[str, Any], valid_until_date: str) -> dict[str, Any] | None:
-    """First market closure of >= ``HOLIDAY_CLOSURE_DAYS`` calendar days inside the validity window.
+def closures_within(calendar: dict[str, Any], valid_until_date: str) -> list[dict[str, Any]]:
+    """Every market closure inside the validity window, in calendar order.
 
     When ``calendar`` carries the known open ``sessions``, a gap whose
     ``last_trading_date`` is not one of them is refused: a holiday line must
     execute before a close that the exchange actually holds.
     """
     sessions = {str(value)[:10] for value in (calendar.get("sessions") or [])}
+    found: list[dict[str, Any]] = []
     for gap in calendar.get("closure_gaps") or []:
         closed_days = int(gap.get("closed_days") or 0)
         last_session = str(gap.get("last_trading_date") or "")
         if sessions and last_session not in sessions:
             continue
-        if closed_days >= HOLIDAY_CLOSURE_DAYS and last_session and last_session <= valid_until_date:
-            return {"last_trading_date": last_session, "resume_date": gap.get("resume_date"),
-                    "closed_days": closed_days}
+        if closed_days >= 1 and last_session and last_session <= valid_until_date:
+            found.append({"last_trading_date": last_session, "resume_date": gap.get("resume_date"),
+                          "closed_days": closed_days})
+    return sorted(found, key=lambda gap: gap["last_trading_date"])
+
+
+def closure_within(calendar: dict[str, Any], valid_until_date: str) -> dict[str, Any] | None:
+    """First market closure of >= ``HOLIDAY_CLOSURE_DAYS`` calendar days inside the validity window."""
+    for gap in closures_within(calendar, valid_until_date):
+        if gap["closed_days"] >= HOLIDAY_CLOSURE_DAYS:
+            return gap
     return None
+
+
+def is_ordinary_weekend(gap: dict[str, Any]) -> bool:
+    """A Saturday+Sunday gap after a Friday session: not a closure the holiday rule considers."""
+    if int(gap.get("closed_days") or 0) != WEEKEND_CLOSURE_DAYS:
+        return False
+    try:
+        return date.fromisoformat(str(gap.get("last_trading_date"))[:10]).weekday() == 4
+    except ValueError:
+        return False
 
 
 @dataclass
@@ -269,7 +329,8 @@ def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any]
             priority=PRIORITY["exposure"]))
 
     hard_stop, hard_derivation = hard_stop_price(stage, metrics, reference)
-    structure_note = STRUCTURE_LABEL.get(stage, STRUCTURE_LABEL["unclassified"])
+    structure_note = (CRASH_FALLBACK_LABEL if hard_derivation.inputs.get("structure_source") == "two_day_low"
+                      else STRUCTURE_LABEL.get(stage, STRUCTURE_LABEL["unclassified"]))
     lines.append(Line(
         kind="hard_stop", label=f"日线收盘跌破{hard_stop}即全部退出（{structure_note}）",
         metric="daily_close", op="<", price=hard_stop, confirm=Confirm(bars=1, basis="daily"),
@@ -385,7 +446,20 @@ def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any]
         priority=PRIORITY["time_stop"]))
 
     closure = closure_within(calendar, valid_until_date)
-    if closure:
+    if closure is None:
+        # A festival gap shorter than the threshold is a rule refusal, not a
+        # silence: the Mid-Autumn three-day gap must be findable on the card.
+        for gap in closures_within(calendar, valid_until_date):
+            if is_ordinary_weekend(gap):
+                continue
+            omitted.append({
+                "kind": "holiday",
+                "reason": (f"{gap['last_trading_date']} 起休市 {gap['closed_days']} 个自然日，"
+                           f"少于 {HOLIDAY_CLOSURE_DAYS} 个自然日的休市线阈值，不生成"),
+                "inputs": {"closed_days": gap["closed_days"], "last_trading_date": gap["last_trading_date"],
+                           "resume_date": gap.get("resume_date"), "threshold_days": HOLIDAY_CLOSURE_DAYS},
+            })
+    else:
         holiday_pct = HOLIDAY_EXPOSURE_PCT.get(stage, HOLIDAY_EXPOSURE_PCT["unclassified"])
         holiday_shares = min(sizing.current_shares, lot_shares(equity, holiday_pct, reference))
         lines.append(Line(
@@ -456,11 +530,13 @@ def _new_buy_lines(stage: str, metrics: dict[str, Any], sizing: Sizing, lane: di
 
 __all__ = [
     "ATR_MAX_MULTIPLE", "ATR_MIN_MULTIPLE", "ATR_TARGET_MULTIPLE", "CONFIRM_REFERENCE",
-    "DEFAULT_RISK_PER_TRADE_PCT", "DEFAULT_TIME_STOP_DAYS", "EXTRA_CONDITION_TEXT",
+    "CRASH_FALLBACK_LABEL", "DEFAULT_RISK_PER_TRADE_PCT", "DEFAULT_TIME_STOP_DAYS", "EXTRA_CONDITION_TEXT",
     "HOLIDAY_CLOSURE_DAYS", "HOLIDAY_EXPOSURE_PCT", "LOT_SIZE",
     "MIN_BUFFER_PCT", "NO_ADD_REFERENCE", "PRIORITY", "SOFT_STOP_SEPARATION_ATR", "STOP_PCT_MAX",
     "STOP_PCT_MIN", "STOP_PCT_TARGET", "STRUCTURE_RULE", "TAKE_PARTIAL_STAGES", "TARGET_EXPOSURE_PCT",
-    "TEMPLATE_VERSION", "TIME_STOP_DAYS", "TRAIL_ARM_ATR_MULTIPLE", "TRAIL_ATR_MULTIPLE", "TemplateResult",
-    "buffer_pct", "build_lines", "build_sizing", "build_template", "closure_within", "hard_stop_price",
-    "lot_shares", "new_buy_reference", "soft_stop_window", "trail_stop_price",
+    "TEMPLATE_VERSION", "TIME_STOP_DAYS", "TRAIL_ARM_ATR_MULTIPLE", "TRAIL_ATR_MULTIPLE", "TWO_DAY_LOW_RULE",
+    "TemplateResult", "WEEKEND_CLOSURE_DAYS",
+    "buffer_pct", "build_lines", "build_sizing", "build_template", "closure_within", "closures_within",
+    "hard_stop_price", "is_ordinary_weekend", "lot_shares", "new_buy_reference", "soft_stop_window",
+    "stop_beyond_band", "stop_distance_terms", "trail_stop_price",
 ]
