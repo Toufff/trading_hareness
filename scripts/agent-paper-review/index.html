@@ -179,6 +179,7 @@ function decision(a,z){
       <span class="muted small">${z.duration_ms?(z.duration_ms/1000).toFixed(0)+' 秒':''}${z.context_chars?' · 输入 '+(z.context_chars/1000).toFixed(1)+' 千字':''}${z.cost_usd?' · $'+Number(z.cost_usd).toFixed(3):''}${z.tool_calls?' · 查询 '+z.tool_calls+' 次':''}</span></div>
     <div class="dbody">${z.error?`<div class="error">${esc(z.error)}</div>`:''}
       ${z.market_view?`<p class="view"><strong>盘面判断：</strong>${esc(z.market_view)}</p>`:''}
+      ${z.analysis?`<details class="notes" open><summary>推理过程</summary><div class="why">${esc(z.analysis)}</div></details>`:''}
       ${orders.join('')||(z.status==='decided'?'<p class="muted small">本轮不操作。</p>':'')}
       ${z.notes?`<details class="notes"><summary>备注 / 计划</summary><div class="why">${esc(z.notes)}</div></details>`:''}
       ${chips}

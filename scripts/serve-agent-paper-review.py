@@ -85,6 +85,7 @@ def day_view(connection: Any, day: date) -> dict[str, Any]:
             decisions.append({
                 "decision_id": str(row["decision_id"]), "decided_at": row["decided_at"], "status": row["status"],
                 "error": row["error"], "duration_ms": row["duration_ms"], "context_chars": row["context_chars"],
+                "analysis": output.get("analysis"),
                 "market_view": output.get("market_view"), "notes": output.get("notes"),
                 "focus_symbols": output.get("focus_symbols") or [], "proposed": output.get("orders") or [],
                 "outcomes": row["outcomes"], "ledger_orders": by_decision.get(str(row["decision_id"]), []),

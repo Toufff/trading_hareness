@@ -20,7 +20,6 @@ from typing import Any
 
 DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_TIMEOUT_SECONDS = 240
-DEFAULT_THINKING_TOKENS = 4000
 
 SYSTEM_PROMPT = """你是一名 A 股短线交易员，在操作自己的模拟账户，目标是在控制回撤的前提下取得尽量高的收益，并与一位人类交易员的实盘收益比较。
 
@@ -36,6 +35,7 @@ SYSTEM_PROMPT = """你是一名 A 股短线交易员，在操作自己的模拟�
 - 只输出符合 schema 的 JSON，不要输出其他文字。
 
 输出字段：
+- analysis：本轮的推理过程，300 字以内。按“看到的关键数据（带数值）→ 由此得出的判断 → 所以做什么/不做什么”写，用来事后复盘你当时的思路。CLI 不保存模型内部思考，这个字段是唯一的推理记录。
 - market_view：一两句话，当前盘面判断。
 - orders：订单数组，可为空。buy/sell 需要 symbol（如 600664.SH）、quantity（股数）、order_type（market 或 limit）、limit_price（limit 时必填）、reason；cancel 需要 order_id 和 reason。
 - focus_symbols：下次想重点看盘口和分钟线的股票代码（最多 15 个，持仓会自动包含）。
@@ -44,6 +44,8 @@ SYSTEM_PROMPT = """你是一名 A 股短线交易员，在操作自己的模拟�
 OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        # Optional so a pre-2026-09-18 decision and any malformed round stay readable.
+        "analysis": {"type": "string"},
         "market_view": {"type": "string"},
         "orders": {"type": "array", "items": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["buy", "sell", "cancel"]},
@@ -181,11 +183,6 @@ class ClaudeCliModel:
     def environment(self) -> dict[str, str]:
         """The CLI reaches Anthropic only through the user's terminal proxy; nothing else inherits it."""
         env = dict(os.environ)
-        # Thinking is off in the CLI unless a budget is set; the review page
-        # needs the reasoning behind each order.  0 turns it back off.
-        thinking_tokens = int(os.environ.get("AGENT_PAPER_THINKING_TOKENS") or DEFAULT_THINKING_TOKENS)
-        if thinking_tokens > 0:
-            env["MAX_THINKING_TOKENS"] = str(thinking_tokens)
         if self.proxy:
             for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                 env[name] = self.proxy
