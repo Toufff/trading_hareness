@@ -216,7 +216,15 @@ def command_generate(args, db):
                 connection, run_id=run_id, account_key=args.account_key, as_of_at=as_of,
                 trading_date=plans[0].trading_date, generator_version=GENERATOR_VERSION,
                 inputs_hash=inputs_module.inputs_hash(run_payload), inputs=run_payload, status='generated')
-            for plan, receipt in zip(plans, receipts):
+            # Ascending symbol order, not the order --symbol was typed.  Every
+            # persist_plan registers its instrument with ON CONFLICT DO UPDATE,
+            # the strongest lock class on quant.instruments, and all of these
+            # calls share ONE transaction -- so two operators running this
+            # command over overlapping holdings in different argument orders
+            # is exactly the lock cycle app/instrument_registry.py documents.
+            # The receipts are mutated in place, so the reported order (and
+            # the order the reports were written) is unchanged.
+            for plan, receipt in sorted(zip(plans, receipts), key=lambda pair: pair[0].symbol):
                 try:
                     stored = repository.persist_plan(connection, plan, run_id=run_id)
                 except repository.DisciplineFactConflict as conflict:

@@ -106,6 +106,24 @@ class PersistThsSnapshotBatchingTests(unittest.TestCase):
 
 
 class PersistObservedSnapshotBatchingTests(unittest.TestCase):
+    def test_the_injected_instrument_writer_is_called_once_with_every_member(self) -> None:
+        """It used to be called once per constituent, inside the loop, so the
+        injected writer took one ``quant.instruments`` lock per member in
+        provider order -- hundreds of them in one transaction for a public
+        board snapshot.  It now receives the whole ``(symbol, row)`` list once,
+        which is what lets the caller batch and sort them."""
+        connection = _RecordingConnection()
+        seen: list[list[tuple[str, dict]]] = []
+        persist_observed_snapshot(
+            connection, "ths_concept_flow", "885001.TI",
+            [{"symbol": "600000.SH"}, {"symbol": "000001.SZ"}, {"symbol": None}],
+            "tushare_super_sdk", datetime(2026, 8, 31, 1, tzinfo=timezone.utc),
+            member_symbol=lambda row: row.get("symbol"),
+            ensure_instruments=lambda _connection, member_rows: seen.append(list(member_rows)),
+        )
+        self.assertEqual(len(seen), 1)
+        self.assertEqual([symbol for symbol, _row in seen[0]], ["600000.SH", "000001.SZ"])
+
     def test_members_are_written_in_one_statement(self) -> None:
         connection = _RecordingConnection()
         observed_at = datetime(2026, 8, 31, 1, tzinfo=timezone.utc)
@@ -114,7 +132,7 @@ class PersistObservedSnapshotBatchingTests(unittest.TestCase):
             [{"symbol": "000001.SZ"}, {"symbol": "600000.SH"}, {"symbol": None}],
             "tushare_super_sdk", observed_at,
             member_symbol=lambda row: row.get("symbol"),
-            ensure_instrument=lambda *_a: None,
+            ensure_instruments=lambda *_a: None,
         )
         self.assertEqual(stored, 2)
         insert_calls = [(sql, params) for sql, params in connection.calls
@@ -131,7 +149,7 @@ class PersistObservedSnapshotBatchingTests(unittest.TestCase):
             [{"symbol": "000001.SZ", "v": 1}, {"symbol": "000001.SZ", "v": 2}],
             "tushare_super_sdk", observed_at,
             member_symbol=lambda row: row.get("symbol"),
-            ensure_instrument=lambda *_a: None,
+            ensure_instruments=lambda *_a: None,
         )
         self.assertEqual(stored, 2)
         _sql, params = [(sql, params) for sql, params in connection.calls

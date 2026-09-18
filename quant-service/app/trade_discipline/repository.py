@@ -20,6 +20,7 @@ from typing import Any
 
 from psycopg.types.json import Json
 
+from ..instrument_registry import ensure_named_instruments
 from ..personal_decision_repository import ImmutableDecisionFactConflict
 from .contracts import ComplianceRecord, DisciplinePlan, Evaluation, Review
 
@@ -90,12 +91,14 @@ def persist_plan(connection: Any, plan: DisciplinePlan, *, run_id: str | None = 
             raise DisciplineFactConflict("plan_key already exists with different content")
         return {"status": "idempotent", "plan_id": str(existing["plan_id"]), "content_hash": digest,
                 "plan": read_plan(connection, str(existing["plan_id"]))}
-    connection.execute(
-        """INSERT INTO quant.instruments(symbol,exchange,name,source)
-           VALUES(%s,%s,%s,'trade_discipline')
-           ON CONFLICT(symbol) DO UPDATE SET name=COALESCE(NULLIF(EXCLUDED.name,''),quant.instruments.name)""",
-        (plan.symbol, plan.symbol.rsplit(".", 1)[-1], plan.name),
-    )
+    # ``persist_plan`` is single-symbol, but ``scripts/trade-discipline.py``
+    # calls it once per plan inside ONE transaction, so the order of those
+    # calls -- not this statement -- is what fixes the transaction's lock
+    # order on ``quant.instruments``.  The driver therefore persists plans in
+    # ascending symbol order; this call keeps the write itself set-based and
+    # sorted so a future multi-plan caller inherits the property instead of
+    # having to remember it.
+    ensure_named_instruments(connection, [(plan.symbol, plan.name)], "trade_discipline")
     row = _one(connection, """
         INSERT INTO quant.discipline_plans(
             run_id,plan_key,contract_version,account_key,symbol,name,plan_kind,stage,template_key,

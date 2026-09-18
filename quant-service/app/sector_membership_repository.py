@@ -149,9 +149,19 @@ def persist_observed_snapshot(
     observed_at: datetime,
     *,
     member_symbol: Callable[[dict[str, Any]], str | None],
-    ensure_instrument: Callable[[Any, str, dict[str, Any]], None],
+    ensure_instruments: Callable[[Any, list[tuple[str, dict[str, Any]]]], None],
 ) -> int:
-    """Store a provider snapshot that has no historical membership interval."""
+    """Store a provider snapshot that has no historical membership interval.
+
+    ``ensure_instruments`` is called ONCE with every ``(symbol, row)`` pair
+    of the snapshot, not once per member.  The per-member form this replaces
+    let the injected writer take one ``quant.instruments`` lock per board
+    constituent in provider order -- a public board snapshot is hundreds of
+    symbols in one transaction -- which is exactly the lock order
+    ``app/instrument_registry.py`` exists to make uniform.  An injected
+    writer that needs a per-row payload (the eastmoney one reads the
+    display name out of it) therefore receives the rows, not just symbols.
+    """
     members: set[str] = set()
     stored = 0
     effective_from = observed_exchange_date(observed_at)
@@ -162,14 +172,17 @@ def persist_observed_snapshot(
     # within one call, and PostgreSQL rejects an ON CONFLICT DO UPDATE that
     # would affect the same target row twice in a single statement.
     raw_by_symbol: dict[str, dict[str, Any]] = {}
+    member_rows: list[tuple[str, dict[str, Any]]] = []
     for row in rows:
         symbol = member_symbol(row)
         if not symbol:
             continue
-        ensure_instrument(connection, symbol, row)
+        member_rows.append((symbol, row))
         raw_by_symbol[symbol] = row
         members.add(symbol)
         stored += 1
+    if member_rows:
+        ensure_instruments(connection, member_rows)
     if raw_by_symbol:
         symbols = list(raw_by_symbol)
         connection.execute(

@@ -12,12 +12,18 @@ from __future__ import annotations
 
 import os
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 from app.instrument_registry import (
     INSTRUMENT_CHUNK_SIZE,
+    NAMED_INSTRUMENTS_SQL,
     ensure_instruments,
+    ensure_named_instruments,
     instrument_pairs,
+    named_instrument_rows,
     normalized_symbols,
+    symbol_suffix_exchange,
 )
 
 
@@ -76,9 +82,10 @@ class EnsureInstrumentsTests(unittest.TestCase):
         order is the *precondition* for the shared lock order; whether the
         2026-09-18 deadlock cycle is actually gone additionally depends on
         every other writer of ``quant.instruments`` taking the same order
-        (see ``SharedLockOrderAcrossWritersTests`` below and the unconverted
-        list in ``AGENTS.md``) and can only be observed against a real
-        database.
+        (``SharedLockOrderAcrossWritersTests`` below covers the writers that
+        keep their own SQL, and ``test_instrument_writer_lock_order.py``
+        holds every writer in the repository to the rule) and can only be
+        observed against a real database.
         """
         first, second = _RecordingConnection(), _RecordingConnection()
         ensure_instruments(first, ["600519.SH", "000001.SZ", "300750.SZ"], "tushare")
@@ -357,6 +364,197 @@ class SharedLockOrderAcrossWritersTests(unittest.TestCase):
         self.assertEqual([symbol for chunk in chunks for symbol in chunk], symbols)
 
 
+class EnsureNamedInstrumentsTests(unittest.TestCase):
+    """The second primitive: symbol + display name, ``DO UPDATE`` on the name.
+
+    Five writers (broker order imports, broker trade imports, both
+    personal-decision sites and trade discipline) each carried a byte-identical
+    per-row copy of this statement, and three of the five loop over many
+    symbols inside one transaction in operator/provider order.  A per-row
+    ``DO UPDATE`` is the strongest lock class on this table, so those loops
+    were the ones most able to deadlock against a batched writer.
+    """
+
+    def test_one_sorted_statement_per_payload(self) -> None:
+        connection = _RecordingConnection()
+        written = ensure_named_instruments(
+            connection,
+            [("600000.SH", "浦发银行"), ("000001.SZ", "平安银行")],
+            "ths_desktop_export",
+        )
+        self.assertEqual(written, [("000001.SZ", "SZ", "平安银行"), ("600000.SH", "SH", "浦发银行")])
+        self.assertEqual(len(connection.calls), 1)
+        sql, params = connection.calls[0]
+        self.assertIn("unnest(%s::text[],%s::text[],%s::text[])", sql)
+        self.assertNotIn("VALUES(%s,%s", sql)
+        self.assertIn("ORDER BY 1", sql.split("ON CONFLICT")[0])
+        self.assertEqual(params, ("ths_desktop_export", ["000001.SZ", "600000.SH"], ["SZ", "SH"],
+                                  ["平安银行", "浦发银行"]))
+
+    def test_the_conflict_clause_touches_only_the_name(self) -> None:
+        """The per-row statements it replaces did not update ``exchange``,
+        ``source`` or ``updated_at``, so neither may this one: batching is a
+        lock-order and round-trip change, not a data change."""
+        self.assertIn(
+            "ON CONFLICT(symbol) DO UPDATE SET "
+            "name=COALESCE(NULLIF(EXCLUDED.name,''),quant.instruments.name)",
+            NAMED_INSTRUMENTS_SQL,
+        )
+        after = NAMED_INSTRUMENTS_SQL.split("ON CONFLICT")[1]
+        for column in ("exchange=", "source=", "updated_at="):
+            self.assertNotIn(column, after)
+
+    def test_a_repeated_symbol_keeps_the_last_non_blank_name(self) -> None:
+        """PostgreSQL rejects a ``DO UPDATE`` that would affect the same row
+        twice, so the per-row loops' last-non-blank-wins resolution has to
+        happen client-side.  A symbol seen only with blank names keeps a blank,
+        which the conflict clause turns back into the stored name."""
+        self.assertEqual(
+            named_instrument_rows([("000001.SZ", "old"), ("000001.SZ", "new")]),
+            [("000001.SZ", "SZ", "new")],
+        )
+        self.assertEqual(
+            named_instrument_rows([("000001.SZ", "kept"), ("000001.SZ", "  "), ("000001.SZ", None)]),
+            [("000001.SZ", "SZ", "kept")],
+        )
+        self.assertEqual(
+            named_instrument_rows([("000001.SZ", None), ("000001.SZ", "")]),
+            [("000001.SZ", "SZ", None)],
+        )
+
+    def test_blanks_are_dropped_and_an_empty_payload_writes_nothing(self) -> None:
+        connection = _RecordingConnection()
+        self.assertEqual(ensure_named_instruments(connection, [], "x"), [])
+        self.assertEqual(ensure_named_instruments(connection, [(None, "a"), ("  ", "b")], "x"), [])
+        self.assertEqual(connection.calls, [])
+
+    def test_the_payload_is_chunked_like_the_bare_helper(self) -> None:
+        symbols = [f"{index:06d}.SZ" for index in range(1, 11)]
+        connection = _RecordingConnection()
+        ensure_named_instruments(
+            connection, [(symbol, None) for symbol in reversed(symbols)], "x", chunk_size=4,
+        )
+        chunks = [params[1] for _sql, params in connection.calls]
+        self.assertEqual([len(chunk) for chunk in chunks], [4, 4, 2])
+        self.assertEqual([symbol for chunk in chunks for symbol in chunk], symbols)
+
+    def test_the_suffix_exchange_resolver_is_what_the_callers_stored(self) -> None:
+        """``exchange_for`` would write ``SZSE``; these five writers have
+        stored ``SZ`` since before it existed, and their conflict clause never
+        updates ``exchange``, so changing it would only show up on a genuinely
+        new row -- silently, and only sometimes."""
+        self.assertEqual(symbol_suffix_exchange("000001.SZ"), "SZ")
+        self.assertEqual(symbol_suffix_exchange("600000.SH"), "SH")
+        self.assertEqual(symbol_suffix_exchange("430047.BJ"), "BJ")
+
+
+class _CallerFake:
+    """A connection fake for the converted multi-symbol callers.
+
+    ``rows`` maps a substring of the statement to the row its ``fetchone``
+    should return; anything else returns ``None``, which is what drives these
+    repositories down their "not stored yet" path.
+    """
+
+    def __init__(self, rows=None) -> None:
+        self.calls: list[tuple[str, object]] = []
+        self._rows = rows or {}
+        self._last = ""
+
+    def execute(self, sql, params=None):
+        self._last = " ".join(sql.split())
+        self.calls.append((self._last, params))
+        return self
+
+    def fetchone(self):
+        for needle, row in self._rows.items():
+            if needle in self._last:
+                return row
+        return None
+
+    def fetchall(self):
+        return []
+
+    def registrations(self):
+        return [(sql, params) for sql, params in self.calls
+                if sql.startswith("INSERT INTO quant.instruments")]
+
+
+class NamedWriterCallersTests(unittest.TestCase):
+    """The converted multi-symbol callers issue ONE registration per payload.
+
+    The statement shape is guarded repository-wide by
+    ``test_instrument_writer_lock_order.py``; what only a caller-level test can
+    show is that the *loop* is gone -- that the registration was hoisted out of
+    the per-record body rather than merely rewritten in place.
+    """
+
+    def test_broker_trade_batch_registers_every_record_once_ascending(self) -> None:
+        from app.broker_trade_repository import persist_trade_batch
+
+        records = [
+            {"symbol": "600000.SH", "name": "浦发银行", "trade_key": "a" * 64, "side": "buy",
+             "trade_date": "2026-09-18", "quantity": 100, "price": 10, "metadata": {}},
+            {"symbol": "000001.SZ", "name": "平安银行", "trade_key": "b" * 64, "side": "sell",
+             "trade_date": "2026-09-18", "quantity": 100, "price": 10, "metadata": {}},
+        ]
+        connection = _CallerFake({"SELECT count(*)": {"n": len(records)}})
+        snapshot = SimpleNamespace(
+            account_key="acct", observed_at=None,
+            metadata={"account_identity": {"broker": "ths"}},
+        )
+        persist_trade_batch(
+            connection,
+            {"source_sha256": "s" * 64, "source": "ths_desktop_export", "records": records},
+            snapshot,
+        )
+        self.assertEqual(len(connection.registrations()), 1)
+        sql, params = connection.registrations()[0]
+        self.assertIn("ORDER BY 1", sql.split("ON CONFLICT")[0])
+        self.assertEqual(params[1], ["000001.SZ", "600000.SH"])
+        self.assertEqual(params[3], ["平安银行", "浦发银行"])
+
+    def test_upsert_instruments_false_still_registers_nothing(self) -> None:
+        from app.broker_trade_repository import persist_trade_batch
+
+        records = [{"symbol": "600000.SH", "name": "浦发银行", "trade_key": "a" * 64, "side": "buy",
+                    "trade_date": "2026-09-18", "quantity": 100, "price": 10, "metadata": {}}]
+        connection = _CallerFake({"SELECT count(*)": {"n": len(records)}})
+        persist_trade_batch(
+            connection,
+            {"source_sha256": "s" * 64, "source": "ths_desktop_export", "records": records},
+            SimpleNamespace(account_key="acct", observed_at=None,
+                            metadata={"account_identity": {"broker": "ths"}}),
+            upsert_instruments=False,
+        )
+        self.assertEqual(connection.registrations(), [])
+
+    def test_personal_snapshot_registers_every_position_once_ascending(self) -> None:
+        from app.personal_decision_repository import persist_broker_snapshot
+
+        def _position(symbol: str, name: str):
+            return SimpleNamespace(
+                symbol=symbol, name=name, quantity=1, sellable_quantity=1, average_cost=1,
+                market_price=1, market_value=1, unrealized_pnl=0, position_weight_pct=1, metadata={},
+            )
+
+        connection = _CallerFake({
+            "RETURNING snapshot_id": {"snapshot_id": "snap-1", "observed_at": None, "verification": {}},
+        })
+        snapshot = SimpleNamespace(
+            account_key="acct", source="manual_entry", source_snapshot_key="k",
+            observed_at=None, verification={}, cash=0, total_asset=0, total_market_value=0,
+            metadata={}, positions=[_position("600000.SH", "浦发银行"), _position("000001.SZ", "平安银行")],
+            model_dump=lambda mode="json": {"account_key": "acct"},
+        )
+        persist_broker_snapshot(connection, snapshot)
+        self.assertEqual(len(connection.registrations()), 1)
+        sql, params = connection.registrations()[0]
+        self.assertIn("ORDER BY 1", sql.split("ON CONFLICT")[0])
+        self.assertEqual(params[0], "manual_entry")
+        self.assertEqual(params[1], ["000001.SZ", "600000.SH"])
+
+
 @unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
 class EnsureInstrumentsAgainstPostgresTests(unittest.TestCase):
     """Execute ``ENSURE_INSTRUMENTS_SQL`` against a real PostgreSQL server.
@@ -572,6 +770,146 @@ class SortedDoUpdateWritersAgainstPostgresTests(unittest.TestCase):
             finally:
                 connection.execute("DROP TABLE IF EXISTS annual_daily_stage")
                 self._cleanup(connection)
+
+
+@unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
+class NewlySortedWritersAgainstPostgresTests(SortedDoUpdateWritersAgainstPostgresTests):
+    """Execute the statements this round converted, on a real server.
+
+    Every one of them puts ``ORDER BY 1`` between a row source and
+    ``ON CONFLICT`` -- a position only a server can confirm parses -- and two
+    of them additionally keep a scalar placeholder *inside* the conflict
+    clause while the row source is an array.  A recording fake cannot see
+    either property.  Run against a scratch database, never production.
+    """
+
+    symbols = ("999821.SZ", "999822.SH", "999823.SZ")
+
+    def test_named_helper_inserts_then_updates_only_the_name(self) -> None:
+        with self._connect() as connection:
+            try:
+                self._cleanup(connection)
+                written = ensure_named_instruments(
+                    connection,
+                    [(symbol, f"first-{symbol}") for symbol in reversed(self.symbols)],
+                    "named-db-test",
+                )
+                connection.commit()
+                self.assertEqual([row[0] for row in written], sorted(self.symbols))
+                rows = connection.execute(
+                    "SELECT symbol,exchange,name,source FROM quant.instruments "
+                    "WHERE symbol=ANY(%s) ORDER BY symbol", (list(self.symbols),),
+                ).fetchall()
+                self.assertEqual([row["symbol"] for row in rows], sorted(self.symbols))
+                self.assertEqual({row["exchange"] for row in rows}, {"SZ", "SH"})
+                self.assertEqual({row["source"] for row in rows}, {"named-db-test"})
+
+                # A second payload with a blank name for one symbol: the
+                # conflict clause must keep the stored name and must not
+                # rewrite exchange or source.
+                ensure_named_instruments(
+                    connection,
+                    [(self.symbols[0], ""), (self.symbols[1], "second")],
+                    "named-db-test-2",
+                )
+                connection.commit()
+                after = {row["symbol"]: row for row in connection.execute(
+                    "SELECT symbol,exchange,name,source FROM quant.instruments "
+                    "WHERE symbol=ANY(%s)", (list(self.symbols),),
+                ).fetchall()}
+                self.assertEqual(after[self.symbols[0]]["name"], f"first-{self.symbols[0]}")
+                self.assertEqual(after[self.symbols[1]]["name"], "second")
+                self.assertEqual({row["source"] for row in after.values()}, {"named-db-test"})
+            finally:
+                self._cleanup(connection)
+
+    def test_upsert_daily_bar_keeps_its_null_is_st_distinction(self) -> None:
+        """The single-bar writer now sends arrays but still passes ``is_st``
+        a second time as a scalar inside the conflict clause, because
+        ``coalesce(is_st,false)`` in the row source destroys the "provider
+        said nothing" case before ``EXCLUDED`` can see it."""
+        from datetime import date, datetime, timezone
+        from decimal import Decimal
+
+        from app.daily_bar_repository import upsert_daily_bar
+        from app.request_models import DailyBar
+
+        symbol = self.symbols[0]
+
+        def bar(is_st):
+            return DailyBar(
+                symbol=symbol, trading_date=date(2026, 9, 18), open=Decimal("10"), high=Decimal("10"),
+                low=Decimal("10"), close=Decimal("10"), volume=Decimal("1000"), amount=Decimal("10000"),
+                source="daily-bar-db-test", is_st=is_st, name="名称", industry="行业",
+                available_at=datetime(2026, 9, 18, 8, tzinfo=timezone.utc),
+            )
+
+        with self._connect() as connection:
+            try:
+                self._cleanup(connection)
+                connection.execute("DELETE FROM quant.market_bars_daily WHERE symbol=%s", (symbol,))
+                upsert_daily_bar(connection, bar(True))
+                connection.commit()
+                self.assertIs(connection.execute(
+                    "SELECT is_st FROM quant.instruments WHERE symbol=%s", (symbol,),
+                ).fetchone()["is_st"], True)
+
+                upsert_daily_bar(connection, bar(None))
+                connection.commit()
+                self.assertIs(connection.execute(
+                    "SELECT is_st FROM quant.instruments WHERE symbol=%s", (symbol,),
+                ).fetchone()["is_st"], True, "a NULL is_st must leave the stored flag alone")
+            finally:
+                connection.execute("DELETE FROM quant.raw_market_observations WHERE symbol=%s", (symbol,))
+                connection.execute("DELETE FROM quant.canonical_bars_daily WHERE symbol=%s", (symbol,))
+                connection.execute("DELETE FROM quant.market_bars_daily WHERE symbol=%s", (symbol,))
+                connection.commit()
+                self._cleanup(connection)
+
+    def test_the_two_script_stage_statements_parse_and_run(self) -> None:
+        """The ``scripts/`` writers are not importable here (one needs pandas
+        and a CLI, the other a legacy package), so their statement is read out
+        of the file and EXECUTED.  That is a real parse proof of the position
+        ``ORDER BY 1`` now occupies -- not a substring assertion about it --
+        and it fails if either file's statement drifts into something the
+        server rejects."""
+        import re
+
+        repo_root = Path(__file__).resolve().parents[2]
+        cases = (
+            (repo_root / "scripts" / "import-adjusted-research-bars.py",
+             "CREATE TEMP TABLE adjusted_bar_stage(symbol text)",
+             "INSERT INTO adjusted_bar_stage(symbol) VALUES(%s)"),
+            (repo_root / "scripts" / "legacy" / "stock_brain" / "legacy_stock_brain_repository.py",
+             "CREATE TEMP TABLE stock_brain_instrument_stage(symbol text,exchange text,name text,source text)",
+             "INSERT INTO stock_brain_instrument_stage VALUES(%s,'SZ','名称','stage-db-test')"),
+        )
+        for path, create_stage, seed in cases:
+            with self.subTest(script=path.name):
+                source = path.read_text(encoding="utf-8")
+                match = re.search(
+                    r"(INSERT INTO quant\.instruments\(.*?updated_at=now\(\)|"
+                    r"INSERT INTO quant\.instruments\(.*?DO NOTHING)",
+                    source, re.DOTALL,
+                )
+                self.assertIsNotNone(match, f"no instrument statement found in {path.name}")
+                statement = match.group(1)
+                self.assertIn("ORDER BY 1", statement.split("ON CONFLICT")[0])
+                with self._connect() as connection:
+                    try:
+                        self._cleanup(connection)
+                        connection.execute(create_stage)
+                        for symbol in reversed(self.symbols):
+                            connection.execute(seed, (symbol,))
+                        connection.execute(statement)
+                        connection.commit()
+                        rows = connection.execute(
+                            "SELECT symbol FROM quant.instruments WHERE symbol=ANY(%s) ORDER BY symbol",
+                            (list(self.symbols),),
+                        ).fetchall()
+                        self.assertEqual([row["symbol"] for row in rows], sorted(self.symbols))
+                    finally:
+                        self._cleanup(connection)
 
 
 if __name__ == "__main__":

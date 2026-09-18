@@ -11,47 +11,44 @@ provider response directly to a live threshold or order path.
 
 - `quant-service/app/routers/`: HTTP boundary and request validation.
 - `quant-service/app/*_repository.py`: database read/write projections.
-- `quant-service/app/instrument_registry.py`: the shared primitive for **bare
-  symbol registration** in `quant.instruments` (symbol + exchange + source,
-  `ON CONFLICT DO NOTHING`). A path that only needs the row to exist before it
-  writes its own evidence must use `ensure_instruments` — one statement per
-  5,000-symbol chunk, client-side deduplicated, sorted ascending so every
-  writer takes the same lock order — and must not reintroduce a per-row
-  `INSERT INTO quant.instruments ... DO NOTHING` loop. `ensure_instruments`
-  returns the `(symbol, exchange)` pairs it actually wrote, and that return
-  value is the contract: the helper strips and drops blanks, so a caller that
-  writes a child row referencing `quant.instruments(symbol)` in the same
-  transaction takes its symbols from the return value, never from its own raw
-  input. It is **not** yet the
-  only writer of that table, so do not assume instrument writes are globally
-  centralised or globally ordered:
-  - Converted to the helper: `tushare_normalization` (non-bar APIs),
-    `public_market_repository.persist_market_events`,
-    `sector_membership_repository.persist_ths_snapshot`,
-    `intraday_minute_capture_actions`, `offline_minute_import_service`,
-    `research_maintenance_service.update_universe_members`, and
-    `remote_archive` (message and report signals).
-  - Set-based and sorted but keeping their own SQL because they write more
-    than the symbol (`ON CONFLICT DO UPDATE` — the strongest lock on this
-    table: it locks every existing conflicting row, where `DO NOTHING` locks
-    only newly inserted ones): `daily_bar_batch_repository` (sorted array),
-    `tushare_normalization.persist_stock_basic_instruments` (one sorted
-    `unnest` statement per `stock_basic` payload, `ORDER BY 1`), and every
-    `INSERT INTO quant.instruments` in `annual_daily_backfill` — the two
-    stage inserts and `_persist_stock_basic` — each with `ORDER BY 1`, pinned
-    by `test_instrument_registry.SharedLockOrderAcrossWritersTests`.
-  - **Not converted**, each still a per-row or attribute-carrying write:
-    `broker_order_repository`,
-    `broker_trade_repository`, `claim_review_service`, `daily_bar_repository`,
-    `intraday_watchlist_service`, `main.py` (akshare, single symbol),
-    `personal_decision_repository` (two sites), `strategy_decision_service`,
-    and the injected
-    per-row `ensure_instrument` that `main.persist_eastmoney_sector_members`
-    hands to `sector_membership_repository.persist_observed_snapshot`. Most carry a
-    name/industry that the `DO NOTHING` helper cannot express; several are
-    genuinely single-symbol. They do not share the ascending lock order, so a
-    deadlock between one of them and a batched writer is still possible until
-    they are converted.
+- `quant-service/app/instrument_registry.py`: the shared write primitives for
+  `quant.instruments` — `ensure_instruments` for bare symbol registration
+  (symbol + exchange + source, `ON CONFLICT DO NOTHING`) and
+  `ensure_named_instruments` for symbol + display name (`ON CONFLICT DO UPDATE`
+  on the name alone). Both take one statement per 5,000-symbol chunk,
+  deduplicate client-side and sort ascending. Both return the rows they
+  actually wrote, and that return value is the contract: they strip and drop
+  blanks, so a caller that writes a child row referencing
+  `quant.instruments(symbol)` in the same transaction takes its symbols from
+  the return value, never from its own raw input.
+
+  **The rule, which is enforced and not a roster:** every write to
+  `quant.instruments` anywhere under `quant-service/app` or `scripts` either
+  goes through this module or is a set-based statement carrying `ORDER BY 1`
+  between itself and its `ON CONFLICT` clause.
+  `quant-service/tests/test_instrument_writer_lock_order.py` walks both trees
+  and fails on the first exception; there is no allow-list to add a new writer
+  to, so a per-row `VALUES(...) ON CONFLICT` loop fails on the day it is
+  written. Do not answer that failure by listing the writer somewhere.
+
+  `ORDER BY 1` is the shared ascending lock order, and it is a correctness
+  property, not a tidy-output habit: `ON CONFLICT DO UPDATE` row-locks every
+  **existing** conflicting row (the whole cross-section on any run after the
+  first) while `DO NOTHING` locks only the rows it genuinely inserts, so two
+  transactions touching an overlapping symbol set in different orders
+  deadlock — three times in the owner PostgreSQL log on 2026-09-18. The sort
+  belongs in the SQL even when the array was already sorted in Python: the
+  server sort is then free, and it is what makes the property checkable
+  without reading each caller's loop. A single-symbol writer sorts one row and
+  still carries it, because "big enough to need it" is the judgement call that
+  produced three rounds of drift.
+
+  What the rule does not cover, and what still needs judgement: a writer that
+  registers symbols in one statement and then re-locks the same rows later in
+  the same transaction is ordered only if **both** statements are. And a
+  writer whose symbols come from a caller loop — `persist_plan` called once
+  per plan by `scripts/trade-discipline.py` — is ordered by that loop, not by
+  its own statement, so the loop sorts.
 - `quant-service/app/*_scheduler.py`: timing, retry windows and idempotency only.
 - `quant-service/app/*_rules.py` / `*_research.py`: pure or research-only rules.
 - `quant-service/app/main.py`: composition root by design, but historically
@@ -144,6 +141,11 @@ this file and `docs/ARCHITECTURE.md` in the same change:
 - `quant-service/tests/test_repository_workflow_policy.py` — keeps the clean
   commit/release boundary, secret-state ignores and live-acceptance wording in
   the repository contract.
+- `quant-service/tests/test_instrument_writer_lock_order.py` — walks every
+  `.py` under `quant-service/app` and `scripts` and requires each write to
+  `quant.instruments` to live in `app/instrument_registry.py` or carry
+  `ORDER BY 1` before its `ON CONFLICT` clause. No allow-list: a new writer
+  fails here until it takes the shared ascending lock order.
 
 ## Review automation
 

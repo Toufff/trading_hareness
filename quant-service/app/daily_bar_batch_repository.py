@@ -101,7 +101,10 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
     # cross-section and an 'index_daily'/partial refresh sharing symbols)
     # deadlock here unless both take the rows in the same order -- that is
     # the 2026-09-18 cycle.  Keep this ``sorted``: it is the same global
-    # order ``instrument_registry.normalized_symbols`` uses.
+    # order ``instrument_registry.normalized_symbols`` uses.  The statement
+    # below also carries ``ORDER BY 1``: the array is already ascending, so
+    # the server sort is free, and it is what makes "every writer sorts in
+    # the statement" checkable by a test rather than by reading each loop.
     for symbol, entry in sorted(instrument_entries.items()):
         old = existing_instruments.get(symbol)
         inst_symbols.append(symbol)
@@ -113,6 +116,7 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
     connection.execute(
         """INSERT INTO quant.instruments(symbol,exchange,name,industry,is_st,source)
            SELECT * FROM unnest(%s::text[],%s::text[],%s::text[],%s::text[],%s::boolean[],%s::text[])
+           ORDER BY 1
            ON CONFLICT(symbol) DO UPDATE SET exchange=EXCLUDED.exchange,name=EXCLUDED.name,
              industry=EXCLUDED.industry,is_st=EXCLUDED.is_st,source=EXCLUDED.source,updated_at=now()""",
         (inst_symbols, inst_exchanges, inst_names, inst_industries, inst_is_st, inst_sources),

@@ -189,15 +189,26 @@ def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
         source=bar.source, amount=bar.amount, volume=bar.volume, close=bar.close,
     )
     promoted_amount = None if amount_mismatch else bar.amount
+    # Single bar, so ``ORDER BY 1`` sorts one row -- but this is the
+    # ``ON CONFLICT DO UPDATE`` class, and ``main.py`` drives this function
+    # one bar at a time, so the set-based form is what a future batching of
+    # that caller would need.  ``is_st`` is still carried twice on purpose:
+    # the array element supplies ``EXCLUDED.is_st`` while the scalar keeps
+    # the "provider said nothing, leave the stored flag alone" distinction,
+    # which ``coalesce(...,false)`` erases before ``EXCLUDED`` can see it.
     connection.execute(
         """INSERT INTO quant.instruments(symbol,exchange,name,industry,is_st,source)
-           VALUES(%s,%s,%s,%s,coalesce(%s,false),%s)
+           SELECT t.symbol,t.exchange,t.name,t.industry,coalesce(t.is_st,false),t.source
+             FROM unnest(%s::text[],%s::text[],%s::text[],%s::text[],%s::boolean[],%s::text[])
+               AS t(symbol,exchange,name,industry,is_st,source)
+            ORDER BY 1
            ON CONFLICT(symbol) DO UPDATE SET exchange=EXCLUDED.exchange,
               name=coalesce(EXCLUDED.name,quant.instruments.name),
               industry=coalesce(EXCLUDED.industry,quant.instruments.industry),
               is_st=CASE WHEN %s::boolean IS NULL THEN quant.instruments.is_st ELSE EXCLUDED.is_st END,
               source=EXCLUDED.source, updated_at=now()""",
-        (bar.symbol, exchange_for(bar.symbol), bar.name, bar.industry, bar.is_st, bar.source, bar.is_st),
+        ([bar.symbol], [exchange_for(bar.symbol)], [bar.name], [bar.industry], [bar.is_st], [bar.source],
+         bar.is_st),
     )
     connection.execute(
         """INSERT INTO quant.market_bars_daily(symbol,trading_date,open,high,low,close,pre_close,volume,amount,adj_factor,is_suspended,limit_up,limit_down,source,available_at)

@@ -10,6 +10,7 @@ from psycopg.types.json import Json
 
 from .personal_decision_contracts import BrokerPortfolioSnapshotInput, PersonalTradePlanInput
 from .broker_desktop_evidence import SOURCES as DESKTOP_SOURCES, verify_account_binding, verify_artifacts
+from .instrument_registry import ensure_named_instruments
 
 
 class ImmutableDecisionFactConflict(ValueError):
@@ -41,13 +42,13 @@ def persist_broker_snapshot(connection: Any, snapshot: BrokerPortfolioSnapshotIn
             raise ImmutableDecisionFactConflict("source_snapshot_key already exists with different content")
         return {"status": "idempotent", "snapshot_id": existing["snapshot_id"], "content_hash": content_hash}
 
-    for position in snapshot.positions:
-        connection.execute(
-            """INSERT INTO quant.instruments(symbol,exchange,name,source)
-               VALUES(%s,%s,%s,%s)
-               ON CONFLICT(symbol) DO UPDATE SET name=COALESCE(NULLIF(EXCLUDED.name,''),quant.instruments.name)""",
-            (position.symbol, position.symbol.rsplit(".", 1)[-1], position.name, snapshot.source),
-        )
+    # One ascending statement for the whole holdings snapshot, in place of
+    # one ``ON CONFLICT DO UPDATE`` per position in broker display order.
+    ensure_named_instruments(
+        connection,
+        [(position.symbol, position.name) for position in snapshot.positions],
+        snapshot.source,
+    )
     row = connection.execute(
         """INSERT INTO quant.broker_portfolio_snapshots(
                account_key,source,source_snapshot_key,observed_at,verification,cash,total_asset,
@@ -90,12 +91,7 @@ def persist_trade_plan(connection: Any, plan: PersonalTradePlanInput) -> dict[st
         if str(existing["content_hash"]) != content_hash:
             raise ImmutableDecisionFactConflict("plan_key already exists with different content")
         return {"status": "idempotent", "plan_id": existing["plan_id"], "content_hash": content_hash}
-    connection.execute(
-        """INSERT INTO quant.instruments(symbol,exchange,name,source)
-           VALUES(%s,%s,%s,'personal_trade_plan')
-           ON CONFLICT(symbol) DO UPDATE SET name=COALESCE(NULLIF(EXCLUDED.name,''),quant.instruments.name)""",
-        (plan.symbol, plan.symbol.rsplit(".", 1)[-1], plan.name),
-    )
+    ensure_named_instruments(connection, [(plan.symbol, plan.name)], "personal_trade_plan")
     row = connection.execute(
         """INSERT INTO quant.personal_trade_plans(
                plan_key,plan_kind,symbol,name,as_of_at,valid_until,action,entry_zone,add_trigger,

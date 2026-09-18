@@ -54,9 +54,19 @@ Both are addressed by the two properties this module owns:
 The helper is deliberately not a repository method and not part of
 ``main.py``: it is the shared write primitive for *bare symbol
 registration*, called by ingestion repositories, services and runtime
-actions.  It is not the only writer of ``quant.instruments``: the paths that
-also carry name/industry/list-date attributes still use their own
-``DO UPDATE`` statements (see the list in ``AGENTS.md``).
+actions.  ``ensure_named_instruments`` below is its sibling for the second
+recurring shape -- symbol + exchange + a display ``name`` -- so the broker,
+personal-decision and trade-discipline paths no longer each own a per-row
+``DO UPDATE``.
+
+Writers that carry more than that (industry, list/delist dates, ST flag)
+still own their SQL, but they are no longer free-form: every
+``quant.instruments`` writer under ``quant-service/app`` and ``scripts``
+either lives in this module or sorts its rows in the statement itself with
+``ORDER BY 1`` ahead of its ``ON CONFLICT`` clause, and
+``tests/test_instrument_writer_lock_order.py`` walks the repository and
+fails on the first exception.  That test, not a list in a document, is what
+keeps the property true.
 """
 
 from __future__ import annotations
@@ -75,8 +85,42 @@ INSTRUMENT_CHUNK_SIZE = 5000
 ENSURE_INSTRUMENTS_SQL = (
     "INSERT INTO quant.instruments(symbol,exchange,source) "
     "SELECT t.symbol,t.exchange,%s FROM unnest(%s::text[],%s::text[]) AS t(symbol,exchange) "
+    "ORDER BY 1 "
     "ON CONFLICT(symbol) DO NOTHING"
 )
+
+#: The second shape: symbol + exchange + a provider-supplied display ``name``,
+#: with ``ON CONFLICT DO UPDATE`` touching **only** the name and only when the
+#: incoming one is non-empty.  Five writers (broker order imports, broker trade
+#: imports, both personal-decision sites and trade discipline) each owned a
+#: byte-identical per-row copy of this statement; a per-row ``DO UPDATE`` is
+#: the strongest lock class on this table, and the callers that loop over many
+#: symbols in one transaction were taking those locks in operator/payload
+#: order.  Note what the conflict clause deliberately does **not** touch:
+#: ``exchange``, ``source`` and ``updated_at`` stay as they were, exactly as
+#: the per-row statements left them, so this is a lock-order and round-trip
+#: change and not a data change.
+NAMED_INSTRUMENTS_SQL = (
+    "INSERT INTO quant.instruments(symbol,exchange,name,source) "
+    "SELECT t.symbol,t.exchange,t.name,%s "
+    "FROM unnest(%s::text[],%s::text[],%s::text[]) AS t(symbol,exchange,name) "
+    "ORDER BY 1 "
+    "ON CONFLICT(symbol) DO UPDATE SET "
+    "name=COALESCE(NULLIF(EXCLUDED.name,''),quant.instruments.name)"
+)
+
+
+def symbol_suffix_exchange(symbol: Any) -> str:
+    """Return the bare Tushare suffix (``600519.SH`` -> ``SH``).
+
+    Not the same value as ``daily_bar_repository.exchange_for`` (``SSE``):
+    the broker, personal-decision and trade-discipline writers have stored
+    the suffix form since before ``exchange_for`` existed, and their conflict
+    clause never updates ``exchange``, so only a genuinely new row is
+    affected by the difference.  Keeping the suffix resolver here means
+    batching those writers changes no stored value.
+    """
+    return str(symbol).rsplit(".", 1)[-1]
 
 
 def normalized_symbols(symbols: Iterable[Any]) -> list[str]:
@@ -170,10 +214,77 @@ def ensure_instruments(
     return pairs
 
 
+def named_instrument_rows(
+    rows: Iterable[tuple[Any, Any]],
+    *,
+    exchange_for: Callable[[str], str] = symbol_suffix_exchange,
+) -> list[tuple[str, str, str | None]]:
+    """Return the ``(symbol, exchange, name)`` rows the named write will send.
+
+    Pure, and it encodes the one semantic the per-row loops had for free.
+    Those loops ran one statement per row, so a repeated symbol ended the
+    transaction with the **last non-empty** name it was given (each statement
+    applied ``COALESCE(NULLIF(new,''), current)`` to the result of the one
+    before).  A single statement cannot reproduce that by replaying
+    duplicates -- PostgreSQL rejects an ``ON CONFLICT DO UPDATE`` that would
+    affect the same target row twice -- so the resolution moves here: walk
+    the caller's order, keep the first sighting, and let any later non-blank
+    name overwrite it.  A symbol whose every sighting is blank keeps a blank,
+    which the conflict clause then turns back into the stored name.
+
+    The result is sorted ascending: the same global lock order
+    ``normalized_symbols`` fixes, which is the point of batching a
+    ``DO UPDATE`` writer at all.
+    """
+    names: dict[str, str | None] = {}
+    for symbol, name in rows:
+        if symbol is None:
+            continue
+        key = str(symbol).strip()
+        if not key:
+            continue
+        text = None if name is None else str(name)
+        if key not in names or (text or "").strip():
+            names[key] = text
+    return [(symbol, exchange_for(symbol), names[symbol]) for symbol in sorted(names)]
+
+
+def ensure_named_instruments(
+    connection: Any,
+    rows: Iterable[tuple[Any, Any]],
+    source: str,
+    *,
+    exchange_for: Callable[[str], str] = symbol_suffix_exchange,
+    chunk_size: int = INSTRUMENT_CHUNK_SIZE,
+) -> list[tuple[str, str, str | None]]:
+    """Register ``(symbol, name)`` pairs, ascending, one statement per chunk.
+
+    Returns the rows actually written, in the order they were written.  Same
+    contract as ``ensure_instruments``: a caller writing a child row that
+    references ``quant.instruments(symbol)`` in the same transaction takes
+    its symbols from this return value, not from its own raw input.
+    """
+    prepared = named_instrument_rows(rows, exchange_for=exchange_for)
+    if not prepared:
+        return []
+    size = max(1, int(chunk_size))
+    for start in range(0, len(prepared), size):
+        chunk = prepared[start:start + size]
+        connection.execute(
+            NAMED_INSTRUMENTS_SQL,
+            (source, [row[0] for row in chunk], [row[1] for row in chunk], [row[2] for row in chunk]),
+        )
+    return prepared
+
+
 __all__ = [
     "ENSURE_INSTRUMENTS_SQL",
     "INSTRUMENT_CHUNK_SIZE",
+    "NAMED_INSTRUMENTS_SQL",
     "ensure_instruments",
+    "ensure_named_instruments",
     "instrument_pairs",
+    "named_instrument_rows",
     "normalized_symbols",
+    "symbol_suffix_exchange",
 ]

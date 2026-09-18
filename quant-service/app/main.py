@@ -84,7 +84,7 @@ from .research_maintenance_service import (
     update_analyst_profile as update_analyst_research_profile_isolated,
     update_universe_members as update_universe_members_isolated,
 )
-from .instrument_registry import ensure_instruments
+from .instrument_registry import ensure_instruments, named_instrument_rows
 from .intraday_watchlist_service import (
     IntradayWatchlistDependencies,
     WatchlistHistoryHydrationDependencies,
@@ -1574,16 +1574,33 @@ def eastmoney_member_symbol(row: dict[str, Any]) -> str | None:
 def persist_eastmoney_sector_members(connection: Any, taxonomy_key: str, sector_key: str, rows: list[dict[str, Any]],
                                      available_at: datetime) -> int:
     """Persist a current-snapshot response with its real observation date."""
-    def ensure_instrument(connection: Any, symbol: str, row: dict[str, Any]) -> None:
+    def ensure_instruments(connection: Any, member_rows: list[tuple[str, dict[str, Any]]]) -> None:
+        # One ascending statement for the whole board, not one per
+        # constituent: a public board snapshot is hundreds of symbols inside
+        # a single transaction.  ``named_instrument_rows`` supplies the same
+        # resolution the sequential loop had (last non-blank name wins) plus
+        # the shared ascending order; the conflict clause stays byte-for-byte
+        # what it was, including ``updated_at=now()``, which the generic
+        # ``ensure_named_instruments`` helper deliberately does not touch.
+        prepared = named_instrument_rows(
+            [(symbol, str(row.get("名称") or row.get("name") or "").strip() or None)
+             for symbol, row in member_rows],
+            exchange_for=exchange_for,
+        )
+        if not prepared:
+            return
         connection.execute(
-            "INSERT INTO quant.instruments(symbol,exchange,name,source) VALUES(%s,%s,%s,'akshare') "
+            "INSERT INTO quant.instruments(symbol,exchange,name,source) "
+            "SELECT t.symbol,t.exchange,t.name,'akshare' "
+            "FROM unnest(%s::text[],%s::text[],%s::text[]) AS t(symbol,exchange,name) "
+            "ORDER BY 1 "
             "ON CONFLICT(symbol) DO UPDATE SET name=coalesce(EXCLUDED.name,quant.instruments.name),updated_at=now()",
-            (symbol, exchange_for(symbol), str(row.get("名称") or row.get("name") or "").strip() or None),
+            ([row[0] for row in prepared], [row[1] for row in prepared], [row[2] for row in prepared]),
         )
 
     return persist_observed_sector_snapshot(
         connection, taxonomy_key, sector_key, rows, "akshare", available_at,
-        member_symbol=eastmoney_member_symbol, ensure_instrument=ensure_instrument,
+        member_symbol=eastmoney_member_symbol, ensure_instruments=ensure_instruments,
     )
 
 
