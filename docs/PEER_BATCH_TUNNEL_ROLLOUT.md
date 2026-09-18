@@ -140,9 +140,16 @@ python3 scripts/shared-peer/deploy-batch-tunnel-port.py
 
 脚本的执行顺序（任何一步失败都会回滚并打印回滚命令）：
 
-1. **只读识别 peer 状态**：entrypoint SHA-256、渲染后的 `db-tunnel`
-   healthcheck / 环境变量键 / 镜像。对不上 `KNOWN_PEER_STATES` 就拒绝，
-   不猜、不覆盖。已经部署过则直接退出。
+1. **只读识别 peer 状态**：entrypoint SHA-256、`compose.yaml` 原文 SHA-256
+   （按 LF 归一化）、渲染后的 `db-tunnel` healthcheck / 环境变量键 / 镜像。
+   对不上 `KNOWN_PEER_STATES` 就拒绝，不猜、不覆盖。
+   `compose.yaml` 必须按**原文**钉住而不是只看渲染结果：脚本是在
+   `      REMOTE_API_PORT: ${REMOTE_API_PORT:-15681}` 这一行字面量上插入变量的，
+   而 `REMOTE_API_PORT: "15681"`、改缩进、改用 `env_file`，渲染出来完全一样——
+   少了原文哈希，重排过的 compose 会通过状态闸门，然后在 `.env` 已经改完之后
+   用一句裸 `AssertionError` 死在写入中途。
+   **已经部署过（渲染环境里已有 `PEER_BATCH_DB_PORT`）则打印状态并 `exit 0`**：
+   部分失败后重跑确认幂等是常规动作，不该和真正的拒绝一样返回非零。
 2. **前置断言（在任何备份和改写之前）**：`quant-research` 在跑、有 psycopg、
    有 `PG*` 凭据；本机 15433 已有监听；并先用
    `SELECT 1, inet_server_port()` 打通 `db-tunnel:5432` 拿到基线
@@ -163,6 +170,17 @@ python3 scripts/shared-peer/deploy-batch-tunnel-port.py
    随后**再验一次 5432**，确认重建没有打断原有通路。
 9. 写 `batch-tunnel-deployment.json` 并打印回滚命令
    （恢复配置文件 + `docker tag <pre-batch> <原标签>` + 重建容器）。
+
+失败时的**自动回滚**：恢复三个配置文件、把 `:pre-batch-<stamp>` 重新指回原标签；
+如果失败发生在第 7 步 `up -d` **之后**（脚本用 `recreated` 标记记录这一点），
+还会**再执行一次 `up -d --no-deps --no-build db-tunnel` 把容器重建回旧镜像**，
+并**重新探测一次 5432**，打印 peer 是否已经恢复。
+只改标签是不够的：重打标签对已经在跑的容器没有任何作用，
+所以 `wait_healthy` 超时、5433 探测失败、以及最关键的
+「5432 探测失败」（探测顺序正是为了抓这一种）这三条路径，
+如果不重建，lightServer 会继续用脚本刚刚判定为坏的镜像对外提供数据库，
+而脚本却声称自己回滚了。若自动重建本身也失败，脚本会明确打印
+「AUTOMATIC ROLLBACK FAILED」并要求人工执行下面第 3 节的命令。
 
 ### 2.4 让消费方用上 5433
 
@@ -198,7 +216,13 @@ intraday 隧道、`shared-peer-tunnels` 运行时服务、其状态文件与锁�
 - 批量隧道从未真正启动过：没有证据证明 lightServer 的 sshd 会为当前 key
   发布 `127.0.0.1:15433`，也还没有任何吞吐量收益的实测数据。
 - `deploy-batch-tunnel-port.py` 从未在 peer 上执行过。它已经会先核对 peer 的
-  真实状态再动手，但「拒绝」与「patch」两条路径都只在本地用 peer 文件的只读
-  副本验证过（patch 结果 `sh -n` 通过且幂等，compose 插入后 YAML 可解析）。
+  真实状态再动手，「拒绝」与「patch」两条路径现在由
+  `quant-service/tests/test_peer_batch_tunnel_deploy.py` 真正执行：
+  夹具 `quant-service/tests/fixtures/peer-ssh-tunnel-entrypoint-nc-legacy-20260917.sh`
+  是 peer 现网 entrypoint 的逐字节副本（1694 字节，SHA-256 `b0aa1e02…4072c`，
+  2026-09-19 只读取回），测试断言 patch 结果 `sh -n` 通过、沿用 `0.0.0.0` 绑定、
+  幂等，并用内存中的渲染服务驱动 `inspect_peer_state` 的各条拒绝路径。
+  **peer 文件一旦变化，夹具哈希断言和 `KNOWN_PEER_STATES` 会同时失败**——
+  这是有意的：两者必须一起更新。自动回滚里的「重建容器」分支同样没有真跑过。
 - 批量任务还没有对应的 kill-and-recover 验收（intraday 有
   `test-shared-tunnel-recovery.ps1`）。装好之后值得跑一次。

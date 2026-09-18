@@ -25,7 +25,12 @@ container loses the database and the gateway, and a healthcheck that runs
 *inside* that same container still passes.  So this script reads the peer's
 ACTUAL deployed state first - the entrypoint's SHA-256, the rendered
 ``db-tunnel`` healthcheck, its environment keys and its image - and refuses
-unless that state is one of ``KNOWN_PEER_STATES``.  Each known state carries the
+unless that state is one of ``KNOWN_PEER_STATES``.  ``compose.yaml`` is pinned
+by its own LF-normalised SHA-256 rather than by its rendered form, because
+``add_compose_environment`` rewrites the raw text at a literal anchor and every
+reformatting of that one line renders identically: without the raw pin a
+reformatted compose passes the gate and then dies mid-write.  Each known state
+carries the
 strategy it may be changed with: ``patch`` (insert the batch block into the
 peer's own file, keeping its bind address) or ``repo_copy`` (write this repo's
 entrypoint, and then ``PEER_LOCAL_BIND_ADDRESS`` must be present in, or is added
@@ -35,7 +40,10 @@ Rollback: the running image is tagged ``:pre-batch-<stamp>`` **before** the
 build, because ``docker compose build db-tunnel`` retags the image the running
 container came from.  The printed rollback command restores the configuration
 files *and* re-points that tag, which is the only reason rollback is a real
-option rather than a promise.
+option rather than a promise.  The automatic rollback does the same, and - when
+the failure happened after ``up -d`` - also recreates the container, because
+retagging an image does nothing to a container that is already running from it;
+it then re-probes 5432 and reports whether the peer is back.
 
 The verification runs from ``quant-research``, not from the sidecar: the
 sidecar's image is ``openssh-client`` + ``netcat`` with no PostgreSQL client and
@@ -96,6 +104,16 @@ COMPOSE_ANCHOR = '      REMOTE_API_PORT: ${REMOTE_API_PORT:-15681}\n'
 KNOWN_PEER_STATES = {
     'nc-legacy-20260917': {
         'entrypoint_sha256': 'b0aa1e02c60b7d0951e16b91250d863716ebaa554ee60ba0f18797469448072c',
+        # The rendered compose is not enough to protect the literal text
+        # rewrite: `REMOTE_API_PORT: ${REMOTE_API_PORT:-15681}`,
+        # `REMOTE_API_PORT: "15681"`, a different indentation and a value from
+        # an env_file all render identically, while add_compose_environment
+        # anchors on the raw line and would die mid-write on a bare
+        # AssertionError - after .env had already been rewritten. So the raw
+        # file is pinned too, and a reformatted compose is the same printed
+        # refusal as a drifted entrypoint.  (Measured read-only on the peer,
+        # 2026-09-19: 4145 bytes, no CR bytes.)
+        'compose_sha256': '39614927a2c6659724f1496659ca3cc126db8b9436bb7324689166b432019886',
         'healthcheck_test': ['CMD-SHELL', 'nc -z 127.0.0.1 5432 && nc -z 127.0.0.1 5681'],
         'environment_keys': ['PEER_SSH_HOST', 'PEER_SSH_HOST_KEY_ALIAS', 'PEER_SSH_PORT',
                              'PEER_SSH_USER', 'REMOTE_API_PORT', 'REMOTE_DB_PORT'],
@@ -110,6 +128,10 @@ KNOWN_PEER_STATES = {
     },
     'private-tunnel-repo': {
         'entrypoint_sha256': 'ffee3be873f009d69e0ac46f5cdc32c25ab13f207b336a49b1ba56332d7f0a18',
+        # deploy/shared-peer/compose.yaml as of ba717c8, the revision whose
+        # entrypoint hashes to ffee3be8 - i.e. the pair that is deployed
+        # together. Both hashes move together or this state is a new one.
+        'compose_sha256': '0a32b45c756a8e60c85345419d430de8dfe0f6c68e1101ad0a50ad87c84e5689',
         'healthcheck_test': ['CMD', '/usr/local/bin/ssh-tunnel-healthcheck'],
         'environment_keys': ['PEER_LOCAL_BIND_ADDRESS', 'PEER_SSH_HOST', 'PEER_SSH_HOST_KEY_ALIAS',
                              'PEER_SSH_PORT', 'PEER_SSH_USER', 'PGDATABASE', 'PGPASSWORD',
@@ -203,13 +225,18 @@ def inspect_peer_state():
     service = config()['services'][SERVICE]
     observed = {
         'entrypoint_sha256': entrypoint_hash,
+        'compose_sha256': sha256_text((ROOT / 'compose.yaml').read_text()),
         'healthcheck_test': list(service.get('healthcheck', {}).get('test') or []),
         'environment_keys': sorted((service.get('environment') or {}).keys()),
         'image': service.get('image'),
     }
     if 'PEER_BATCH_DB_PORT' in observed['environment_keys']:
-        raise SystemExit('the batch port is already deployed on this peer; nothing to do:\n'
-                         + json.dumps(observed, indent=2))
+        # Success, not a refusal: re-running to confirm idempotency, or after a
+        # rollback was completed by hand, must not look like a deploy failure to
+        # a wrapper reading the exit code.
+        print('the batch port is already deployed on this peer; nothing to do:\n'
+              + json.dumps(observed, indent=2))
+        raise SystemExit(0)
     matches = [(key, value) for key, value in KNOWN_PEER_STATES.items()
                if value['entrypoint_sha256'] == entrypoint_hash]
     if not matches:
@@ -223,7 +250,7 @@ def inspect_peer_state():
               'KNOWN_PEER_STATES before running this again.')
     name, known = matches[0]
     mismatch = {key: {'expected': known[key], 'observed': observed[key]}
-                for key in ('healthcheck_test', 'environment_keys', 'image')
+                for key in ('compose_sha256', 'healthcheck_test', 'environment_keys', 'image')
                 if known[key] != observed[key]}
     if mismatch:
         raise SystemExit(
@@ -320,6 +347,7 @@ def main():
                 + ' '.join(D + ['tag', preserved_tag, running_image_ref]) + ' && '
                 + ' '.join(C + ['up', '-d', '--no-deps', '--no-build', SERVICE]))
     built = False
+    recreated = False
     try:
         (ROOT / '.env').write_text(set_env_keys((ROOT / '.env').read_text(), {
             'PEER_BATCH_DB_PORT': BATCH_LOCAL_PORT,
@@ -351,6 +379,7 @@ def main():
         subprocess.run(D + ['tag', after['services'][SERVICE].get('image') or running_image_ref,
                             batch_tag], check=False)
         compose_run('up', '-d', '--no-deps', '--no-build', SERVICE)
+        recreated = True
         container = wait_healthy()
         # Both paths, in this order: a batch port that works while the
         # intraday path broke is a failure, not a success.
@@ -362,8 +391,36 @@ def main():
                 shutil.copy2(backup / name, ROOT / name)
         if built:
             subprocess.run(D + ['tag', preserved_tag, running_image_ref], check=False)
-        print('restored the previous configuration and image tag; re-run the rollback command '
-              'if the container was already recreated:\n  ' + rollback, file=sys.stderr)
+        if recreated:
+            # Restoring the files and re-pointing the tag is NOT a rollback once
+            # `up -d` has run: the live container was created from the new image
+            # and retagging :latest does not touch a running container. Every
+            # failure that can reach here - wait_healthy timing out, the batch
+            # probe failing, and above all the intraday probe failing, which is
+            # the case the probe ordering exists to catch - would otherwise
+            # leave lightServer serving the peer's database through an image
+            # this script just decided was bad, while claiming it rolled back.
+            # So recreate from the restored files and preserved tag, and say
+            # plainly whether 5432 answers afterwards.
+            print('failure after the container was recreated: restoring the previous container',
+                  file=sys.stderr)
+            back = subprocess.run(C + ['up', '-d', '--no-deps', '--no-build', SERVICE], check=False)
+            if back.returncode != 0:
+                print('AUTOMATIC ROLLBACK FAILED: db-tunnel could not be recreated from the '
+                      'preserved image. The peer is serving from the NEW image. Run:\n  '
+                      + rollback, file=sys.stderr)
+            else:
+                try:
+                    print('rolled back; intraday probe: ' + probe_port(INTRADAY_LOCAL_PORT),
+                          file=sys.stderr)
+                except BaseException as probe_error:   # noqa: BLE001 - reported, never masks
+                    print('ROLLED BACK BUT THE INTRADAY PATH IS STILL DOWN (%s: %s). The peer '
+                          'has no database connection; investigate before anything else.'
+                          % (type(probe_error).__name__, probe_error), file=sys.stderr)
+        else:
+            print('restored the previous configuration and image tag; the container was never '
+                  'recreated, so nothing else changed on this peer.', file=sys.stderr)
+        print('rollback command (idempotent, safe to re-run):\n  ' + rollback, file=sys.stderr)
         raise
     result = {'deployed': True, 'service': SERVICE, 'container': container, 'backup': str(backup),
               'peer_state': state_name, 'strategy': known['strategy'],

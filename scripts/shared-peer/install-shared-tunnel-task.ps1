@@ -189,7 +189,10 @@ if ($task.State -ne 'Running') {
 #   2. a local ssh.exe whose command line carries this profile's exact
 #      forwarding tuple is alive, and
 #   3. the supervised runtime state was written by this install (its
-#      requested_at is not older than the moment the task was registered).
+#      started_at is not older than the moment the task was registered).
+#      started_at is the field supervise-runtime-process.ps1 writes; an earlier
+#      version of this gate asserted on requested_at, which never reaches the
+#      state file, so it could not pass.
 # Without (2) and (3) a foreign process that grabbed 15433 between the reclaim
 # and the probe was reported as health='remote_listener_open'. The claim is
 # still weaker than the intraday HTTP 200 and is still labelled as such.
@@ -239,14 +242,14 @@ if (-not $state -or -not $state.PSObject.Properties['run_id']) {
     Stop-TunnelInstallOnFailure -Message 'Shared peer tunnel became reachable without a supervised runtime state'
 }
 if ($tunnelProfile.HealthCheck -ne 'remote_api_http') {
-    # Third leg of the batch claim: the state must belong to this install.
-    $requestedAt = $null
-    if ($state.PSObject.Properties['requested_at'] -and $state.requested_at) {
-        [void][DateTimeOffset]::TryParse([string]$state.requested_at, [ref]$requestedAt)
-    }
-    if ($null -eq $requestedAt -or $requestedAt -lt $installStartedAt.AddSeconds(-1)) {
-        Stop-TunnelInstallOnFailure -Message ("Batch tunnel health used a stale runtime state (requested_at " +
-            "'$($state.requested_at)' predates this install at '$($installStartedAt.ToString('o'))')")
+    # Third leg of the batch claim: the state must belong to this install. The
+    # judgement (and the failure message) is built by a pure function that reads
+    # every field through PSObject.Properties, so a state file missing the field
+    # produces a bounded failure instead of a StrictMode throw that would skip
+    # Stop-TunnelInstallOnFailure and leave the task retrying every two minutes.
+    $freshness = Get-SharedTunnelStateFreshnessVerdict -State $state -InstallStartedAt $installStartedAt
+    if (-not $freshness.fresh) {
+        Stop-TunnelInstallOnFailure -Message $freshness.message
     }
 }
 $healthyState = @{}

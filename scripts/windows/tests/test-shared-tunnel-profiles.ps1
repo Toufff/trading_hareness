@@ -201,8 +201,91 @@ Assert-True ($installer -match 'function Stop-TunnelInstallOnFailure') 'the inst
 Assert-True ($installer -match "(?s)function Stop-TunnelInstallOnFailure.*?\`$tunnelProfile\.Name -eq 'batch'.*?Disable-ScheduledTask") 'a failed batch install must disable its own task before rethrowing'
 Assert-True ($installer -notmatch '(?m)^\s*throw "(Shared peer tunnel task|Batch tunnel task)') 'no install failure path may throw without going through the helper'
 Assert-True ($installer -match 'remote_listener_open_owned_by_local_client') 'the batch health label must state the stronger claim it now proves'
-Assert-True ($installer -match 'requested_at') 'the batch health check must prove the runtime state belongs to this install'
+Assert-True ($installer -match 'Get-SharedTunnelStateFreshnessVerdict -State \$state -InstallStartedAt \$installStartedAt') 'the batch health check must judge state freshness through the pure function the tests below execute'
 Assert-True ($installer -match '\$installStartedAt') 'the installer must timestamp the install so stale state cannot pass for health'
+# The first version of this gate asserted on requested_at, a field only the
+# object Start-RuntimeSupervisor RETURNS ever carries; the supervisor that
+# writes <service>.current.json writes started_at. Nothing may go back to it.
+$installerCode = (($installer -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+Assert-True ($installerCode -notmatch 'requested_at') 'no code path may assert on requested_at, which never reaches the runtime state file (the comment explaining that may name it)'
+$supervisor = Get-Content (Join-Path $windowsScripts 'supervise-runtime-process.ps1') -Raw
+Assert-True ($supervisor -match "status = 'process_started'[\s\S]{0,400}started_at = ") 'the supervisor must still write started_at into the state the gate reads'
+
+# --- the batch health gate, executed against a real state file --------------
+# Everything above about the gate is a regex over source text. These cases write
+# an actual <service>.current.json, read it back through Get-RuntimeState (the
+# same call the installer makes) and drive the judge, so a gate that can never
+# pass cannot report green here again.
+$stateRoot = Join-Path ([IO.Path]::GetTempPath()) ("tunnel-gate-" + [Guid]::NewGuid().ToString('N'))
+try {
+    $batchService = $batch.Service
+    $installStartedAt = [DateTimeOffset]::Now
+
+    function Write-FakeRuntimeState([hashtable]$Payload) {
+        $path = Join-Path $stateRoot 'logs\runtime'
+        New-Item -ItemType Directory -Force -Path $path | Out-Null
+        $file = Join-Path $path "$batchService.current.json"
+        ($Payload | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $file -Encoding UTF8
+        return $file
+    }
+
+    # 1. Fresh: the supervisor started this run after the task was registered.
+    $fresh = Write-FakeRuntimeState @{
+        schema_version = 1; service = $batchService; status = 'process_started'
+        run_id = '20260919T040000000-abcdef12'; supervisor_pid = 4242; launcher_pid = 4243
+        started_at = $installStartedAt.AddSeconds(3).ToString('o')
+        updated_at = $installStartedAt.AddSeconds(3).ToString('o')
+    }
+    Assert-True (Test-Path -LiteralPath $fresh -PathType Leaf) 'the fake runtime state file must exist where Get-RuntimeState looks for it'
+    $freshState = Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService
+    Assert-True ($null -ne $freshState -and [bool]$freshState.PSObject.Properties['run_id']) 'the installer run_id precondition must be satisfied by a real supervised state'
+    $freshVerdict = Get-SharedTunnelStateFreshnessVerdict -State $freshState -InstallStartedAt $installStartedAt
+    Assert-True $freshVerdict.fresh 'a state whose started_at post-dates the install is this install''s state'
+    Assert-True ($freshVerdict.reason -eq 'state_belongs_to_install') 'the fresh verdict names itself'
+    Assert-True ($freshVerdict.field -eq 'started_at') 'the gate must key off the field the supervisor actually writes'
+
+    # 2. Stale: yesterday's run left a state file behind and the task never came up.
+    [void](Write-FakeRuntimeState @{
+        schema_version = 1; service = $batchService; status = 'healthy'
+        run_id = '20260918T030000000-0badbeef'; supervisor_pid = 1111; launcher_pid = 1112
+        started_at = $installStartedAt.AddDays(-1).ToString('o')
+        updated_at = $installStartedAt.AddDays(-1).ToString('o')
+    })
+    $staleVerdict = Get-SharedTunnelStateFreshnessVerdict `
+        -State (Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService) -InstallStartedAt $installStartedAt
+    Assert-True (-not $staleVerdict.fresh) 'yesterday''s leftover state must never pass for this install''s health'
+    Assert-True ($staleVerdict.reason -eq 'state_predates_install') 'a stale state is reported as predating the install'
+    Assert-True ($staleVerdict.message -match 'stale runtime state') 'the stale failure message must say what happened'
+
+    # 3. The field is simply absent - the shape the old gate died on. Under
+    #    Set-StrictMode -Version Latest a direct property read throws here, the
+    #    throw escapes Stop-TunnelInstallOnFailure, and the batch task stays
+    #    enabled retrying every two minutes. The verdict must be an ordinary
+    #    failure instead, message included.
+    [void](Write-FakeRuntimeState @{
+        schema_version = 1; service = $batchService; status = 'process_started'
+        run_id = '20260919T040000000-cafe0001'; supervisor_pid = 5150
+    })
+    $missingState = Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService
+    Assert-True (-not $missingState.PSObject.Properties['started_at']) 'this case must genuinely lack the field'
+    $threw = $false
+    try { $missingVerdict = Get-SharedTunnelStateFreshnessVerdict -State $missingState -InstallStartedAt $installStartedAt }
+    catch { $threw = $true }
+    Assert-True (-not $threw) 'a state file without the field must not throw under StrictMode'
+    Assert-True (-not $missingVerdict.fresh) 'an absent timestamp is not evidence that this install produced the state'
+    Assert-True ($missingVerdict.reason -eq 'field_missing') 'a missing field is reported as missing'
+    Assert-True ($missingVerdict.message -match '<absent>') 'the failure message must be buildable without the field'
+
+    # 4. No state file at all, and an unparsable stamp.
+    $noStateVerdict = Get-SharedTunnelStateFreshnessVerdict -State $null -InstallStartedAt $installStartedAt
+    Assert-True ((-not $noStateVerdict.fresh) -and $noStateVerdict.reason -eq 'no_runtime_state') 'a missing state file is reported as such'
+    [void](Write-FakeRuntimeState @{ schema_version = 1; service = $batchService; run_id = 'x'; started_at = 'not a timestamp' })
+    $badVerdict = Get-SharedTunnelStateFreshnessVerdict `
+        -State (Get-RuntimeState -PlatformRoot $stateRoot -Service $batchService) -InstallStartedAt $installStartedAt
+    Assert-True ((-not $badVerdict.fresh) -and $badVerdict.reason -eq 'field_unparsable') 'an unreadable timestamp is not proof of freshness'
+} finally {
+    Remove-Item -LiteralPath $stateRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # --- peer key restrictions, both directions --------------------------------
 # permitlisten (owner -R) and permitopen (peer -L) fail in completely different
@@ -236,7 +319,19 @@ Assert-True ($composeText -match 'ssh-tunnel-healthcheck') 'the db-tunnel health
 # ${PEER_LOCAL_BIND_ADDRESS:-127.0.0.1}. Writing one over the other on a peer
 # whose compose does not set that variable is a total, undetectable peer outage,
 # so the deploy script must recognise the peer's ACTUAL state first.
+#
+# These are STRUCTURAL assertions only - they prove the wiring is in the file,
+# not that the transforms work. The behaviour is executed by
+# quant-service/tests/test_peer_batch_tunnel_deploy.py against a committed
+# byte-identical copy of the peer's live entrypoint; this suite must not report
+# the peer deploy as proven on its own.
 $deployScript = Get-Content (Join-Path $sharedPeer 'deploy-batch-tunnel-port.py') -Raw
+$deployTest = Join-Path $repository 'quant-service\tests\test_peer_batch_tunnel_deploy.py'
+$deployFixture = Join-Path $repository 'quant-service\tests\fixtures\peer-ssh-tunnel-entrypoint-nc-legacy-20260917.sh'
+Assert-True (Test-Path -LiteralPath $deployTest -PathType Leaf) 'the peer deploy transforms must have an executing test, not only regexes over their source'
+Assert-True (Test-Path -LiteralPath $deployFixture -PathType Leaf) 'that test must run against a committed copy of the peer entrypoint'
+$fixtureHash = (Get-FileHash -LiteralPath $deployFixture -Algorithm SHA256).Hash.ToLowerInvariant()
+Assert-True ($deployScript -match [regex]::Escape($fixtureHash)) 'the committed fixture must hash to the state KNOWN_PEER_STATES pins'
 Assert-True ($deployScript -match 'KNOWN_PEER_STATES') 'the peer deploy script must enumerate the states it supports'
 Assert-True ($deployScript -match "(?s)def inspect_peer_state.*?entrypoint_sha256.*?healthcheck_test.*?environment_keys.*?service\.get\('image'\)") 'it must read the hash, healthcheck, environment keys and image of the deployed service'
 Assert-True ($deployScript -match "(?s)if not matches:.*?refusing to touch the peer") 'an unrecognised peer state must be a refusal, not a guess'
@@ -264,6 +359,16 @@ Assert-True ($deployScript -match "host='db-tunnel'") 'the probe must target db-
 Assert-True ($deployScript -match 'SELECT 1, inet_server_port') 'the probe must prove what is behind the socket, not that the socket is open'
 Assert-True ($deployScript -match "1\|55432") '55432 is the only answer that proves the owner PostgreSQL'
 Assert-True ($deployScript -match "(?s)batch_query = probe_port\(BATCH_LOCAL_PORT\).*?intraday_query = probe_port\(INTRADAY_LOCAL_PORT\)") 'the intraday port must be re-proven after the recreate'
+# compose.yaml is rewritten at a literal anchor, so its rendered form is not
+# enough evidence: a reformatted-but-equivalent compose passes a rendered check
+# and then dies mid-write, after .env has already been changed.
+Assert-True ($deployScript -match "'compose_sha256':") 'each known peer state must pin the raw compose.yaml it may be rewritten in'
+Assert-True ($deployScript -match "(?s)mismatch = .*?'compose_sha256'") 'the compose pin must be checked in the refusal gate'
+# Retagging an image does nothing to a container already running from it.
+Assert-True ($deployScript -match "(?s)recreated = True.*?except BaseException:.*?if recreated:") 'a failure after up -d must recreate the container, not only restore files and tags'
+Assert-True ($deployScript -match "(?s)if recreated:.*?probe_port\(INTRADAY_LOCAL_PORT\)") 'the rollback must re-probe 5432 and report whether the peer is back'
+# The idempotent re-run must not look like a failure to a wrapper.
+Assert-True ($deployScript -match "(?s)already deployed on this peer.*?raise SystemExit\(0\)") 'already-deployed must print and exit 0'
 
 [pscustomobject]@{
     passed = $true
@@ -274,7 +379,10 @@ Assert-True ($deployScript -match "(?s)batch_query = probe_port\(BATCH_LOCAL_POR
     batch_compression_only = $true
     reclaim_sets_disjoint = $true
     installer_dry_run = $true
-    batch_install_failure_disables_task = $true
+    batch_install_failure_disables_task_in_source = $true
+    batch_health_gate_executed_fresh_and_stale = $true
+    batch_health_gate_survives_missing_field = $true
     permitopen_and_permitlisten_cover_15433 = $true
-    peer_deploy_refuses_unknown_state = $true
+    peer_deploy_refusal_wired_in_source = $true
+    peer_deploy_behaviour_tested_in = 'quant-service/tests/test_peer_batch_tunnel_deploy.py'
 }

@@ -180,10 +180,67 @@ function Get-SharedTunnelConnectionVerdict {
     }
 }
 
+function Get-SharedTunnelStateFreshnessVerdict {
+    # Pure judge for the third leg of the batch health claim: "the supervised
+    # runtime state was written by THIS install".
+    #
+    # It is keyed off `started_at` because that is the field
+    # scripts\windows\supervise-runtime-process.ps1 actually writes into
+    # <service>.current.json (line 55, the `process_started` Set-RuntimeState
+    # call). The first version of this gate read `requested_at`, which only ever
+    # exists on the object Start-RuntimeSupervisor RETURNS - the lock-owning
+    # supervisor is the only writer of current state and it never carries that
+    # key - so the gate could never pass and every batch install failed.
+    #
+    # Every read goes through PSObject.Properties, including the one that builds
+    # the failure message: this function runs under Set-StrictMode -Version
+    # Latest in the installer, where `$State.started_at` on a state file that
+    # does not carry the key throws PropertyNotFoundException. That throw would
+    # escape Stop-TunnelInstallOnFailure, so the failure path would leave the
+    # batch task enabled and retrying every two minutes - exactly the unbounded
+    # failure the helper exists to prevent.
+    #
+    # A state whose timestamp is unreadable is never fresh. An unparsable or
+    # absent stamp is the same evidence as an old one: no proof that this
+    # install produced the state.
+    [CmdletBinding()]
+    param(
+        [AllowNull()][psobject]$State,
+        [Parameter(Mandatory)][DateTimeOffset]$InstallStartedAt,
+        [string]$Field = 'started_at',
+        # Clock granularity only. The installer stamps $InstallStartedAt before
+        # Register-ScheduledTask, so a legitimate run's started_at post-dates it.
+        [double]$ToleranceSeconds = 1
+    )
+    $property = if ($null -ne $State) { $State.PSObject.Properties[$Field] } else { $null }
+    $rawText = if ($null -ne $property -and $null -ne $property.Value) { [string]$property.Value } else { '' }
+    $hasValue = -not [string]::IsNullOrWhiteSpace($rawText)
+    $parsed = [DateTimeOffset]::MinValue
+    $parsedOk = $hasValue -and [DateTimeOffset]::TryParse($rawText, [ref]$parsed)
+    $floor = $InstallStartedAt.AddSeconds(-$ToleranceSeconds)
+    $fresh = $false
+    if ($null -eq $State) { $reason = 'no_runtime_state' }
+    elseif (-not $hasValue) { $reason = 'field_missing' }
+    elseif (-not $parsedOk) { $reason = 'field_unparsable' }
+    elseif ($parsed -lt $floor) { $reason = 'state_predates_install' }
+    else { $fresh = $true; $reason = 'state_belongs_to_install' }
+    $observed = if ($hasValue) { $rawText } else { '<absent>' }
+    return [pscustomobject][ordered]@{
+        fresh = $fresh
+        reason = $reason
+        field = $Field
+        observed = $observed
+        install_started_at = $InstallStartedAt.ToString('o')
+        message = ("Batch tunnel health used a stale runtime state ({0} '{1}' [{2}] does not " +
+            "post-date this install at '{3}')") -f $Field, $observed, $reason, $InstallStartedAt.ToString('o')
+    }
+}
+
 Export-ModuleMember -Function @(
     'Get-SharedTunnelProfile',
     'Get-SharedTunnelSshArgument',
     'Get-SharedTunnelProcessPattern',
     'Test-SharedTunnelCommandLine',
-    'Get-SharedTunnelConnectionVerdict'
+    'Get-SharedTunnelConnectionVerdict',
+    'Get-SharedTunnelStateFreshnessVerdict'
 )

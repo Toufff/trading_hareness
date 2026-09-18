@@ -158,8 +158,20 @@ scheduled task, supervised runtime service, state file and lock file:
 | runtime service | `shared-peer-tunnels` | `shared-peer-batch-tunnel` |
 | forwards | `-R 15432:55432`, `-R 15681:5681` | `-R 15433:55432` |
 | compression | off | `-o Compression=yes` |
-| health claim | remote API HTTP 200 | remote loopback listener on 15433, owned by this install's local ssh client |
+| health claim | remote API HTTP 200 | remote loopback listener on 15433, owned by this install's local ssh client, backed by a runtime state whose `started_at` post-dates the install |
 | peer address | `db-tunnel:5432` | `db-tunnel:5433` |
+
+The batch claim's third leg is keyed on `started_at` because that is the field
+`scripts/windows/supervise-runtime-process.ps1` writes into
+`logs/runtime/<service>.current.json`. `requested_at` exists only on the object
+`Start-RuntimeSupervisor` returns — the lock-owning supervisor is the only writer
+of current state and never carries it — so a gate keyed on it can never pass.
+`Get-SharedTunnelStateFreshnessVerdict` (in `shared-tunnel-profiles.psm1`) makes
+that judgement, and reads every field, including the one in the failure message,
+through `PSObject.Properties`: under `Set-StrictMode -Version Latest` a direct
+read of an absent property throws, and that throw would escape
+`Stop-TunnelInstallOnFailure`, leaving the failed batch task enabled and retrying
+every two minutes — the exact unbounded failure the helper exists to prevent.
 
 Both reach the same database on the same port 55432; only the transport differs.
 Compression is on for batch alone because bulk result sets compress well and the
