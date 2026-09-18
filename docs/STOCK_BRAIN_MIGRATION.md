@@ -170,7 +170,10 @@ Source-only unit tests are necessary but never sufficient for cutover.
 ## Implemented runtime and audit endpoints
 
 The Windows runtime uses PostgreSQL 16 on `127.0.0.1:55432`; its data directory
-is `G:\StockPlatform\data\postgresql16`.  Runtime configuration is external to
+is `PGDATA_DIR` from `runtime.env` (production `F:\StockPlatformDB\postgresql16`
+since the 2026-09-19 NVMe migration, with the cold tier in the `stock_cold`
+tablespace on `G:\StockPlatform\data\pg-cold` — see
+[OWNER_DATABASE_STORAGE.md](OWNER_DATABASE_STORAGE.md)).  Runtime configuration is external to
 Git under `G:\StockPlatform\config`, and large imports and raw research files
 remain under `G:\StockPlatform\data`.  The repository must contain only code,
 migrations, bounded fixtures and documentation.

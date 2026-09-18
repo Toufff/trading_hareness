@@ -53,11 +53,25 @@ intraday watchlist service, intraday replay). **New behaviour must never be
 added here** — it belongs in a focused module, then is injected from
 `main.py`; production modules must not import `app.main`.
 
+The owner PostgreSQL cluster underneath this map is itself tiered. The cluster —
+all tables, indexes, WAL and temp files — lives on an NVMe hot tier addressed by
+`PGDATA_DIR` (production `F:\StockPlatformDB\postgresql16`) under a 500 GB soft
+budget, while rows older than the hot window (365 days for five append-only
+evidence tables) are moved nightly into `quant.<table>_cold` twins in the
+`stock_cold` tablespace on the G: HDD, unioned by a `quant.<table>_all` view for
+the rare full-history query. The platform root, the cold tablespace and every
+backup stay on G:. Application code reads the hot table only; the twins carry no
+foreign keys and no triggers and are an operations surface. The layout, the space
+policy, the 04:00-08:00 maintenance window, the backup chain and the
+migration/rollback runbook are defined in
+[`OWNER_DATABASE_STORAGE.md`](OWNER_DATABASE_STORAGE.md), which is the
+authoritative document for anything that touches database placement.
+
 Every rule in the table below is enforced by a test, not just documented —
 see "Architecture guard tests" in `AGENTS.md` for the current list
 (`tests/test_router_composition.py`, `tests/test_migration_contracts.py`,
-`tests/test_async_database_boundaries.py`). Adding a new architectural rule
-without an accompanying test is incomplete.
+`tests/test_async_database_boundaries.py`, `tests/test_storage_tier_policy.py`).
+Adding a new architectural rule without an accompanying test is incomplete.
 
 ## Ownership boundaries
 
@@ -74,6 +88,7 @@ without an accompanying test is incomplete.
 | Strategy contracts | `app/platform/strategy_registry.py` | Every strategy declares its model/input contract, runtime owner, retained evidence and `live_effect=none`; startup rejects missing or mismatched materialized model versions. |
 | Decision products | `app/short_term_lanes/`, `app/recommendation_pool/` | Nine-lane screening, primary-source company review and formal recommendation are separate persisted states. Retired G0--G7 dossiers remain migration history only and have no active route or UI projection. |
 | Schema | `migrations/versions/` | New production schema changes use Alembic only. |
+| Physical placement | `scripts/database-storage-tiers.py`, `docs/OWNER_DATABASE_STORAGE.md` | Hot tier (NVMe, `PGDATA_DIR`, 500 GB budget) vs `stock_cold` tablespace on G:. A new large evidence table registers a tier policy; `app/` never reads a `*_cold` twin or a `*_all` view. |
 | Legacy bootstrap | `app/database.py` | Disabled by default; only an explicit recovery operator may enable it. |
 | Frontend transport | `frontend/src/api/http.ts` | All JSON responses produce a readable non-JSON proxy error. |
 | Frontend lifecycle | `frontend/src/composables/` | Timers and subscriptions are owned and stopped by the mounting shell. |

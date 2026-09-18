@@ -22,8 +22,10 @@ Immutable production releases
   G:\StockPlatform\releases\<release-id>\app
 Active production junction
   G:\StockPlatform\current
-Authoritative PostgreSQL data
-  G:\StockPlatform\data\postgresql16          (127.0.0.1:55432)
+Authoritative PostgreSQL data, hot tier (PGDATA_DIR in runtime.env)
+  F:\StockPlatformDB\postgresql16             (127.0.0.1:55432)
+Same database, cold tier (tablespace stock_cold)
+  G:\StockPlatform\data\pg-cold               docs/OWNER_DATABASE_STORAGE.md
 Private runtime configuration
   G:\StockPlatform\config\runtime.env
 Runtime logs and lifecycle evidence

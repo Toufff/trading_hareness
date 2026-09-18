@@ -42,8 +42,11 @@ Active production junction
 Release state
   G:\StockPlatform\release-state.json
 
-Authoritative PostgreSQL data
-  G:\StockPlatform\data\postgresql16
+Authoritative PostgreSQL data, hot tier (NVMe)
+  F:\StockPlatformDB\postgresql16        <- PGDATA_DIR in runtime.env; never hardcode it
+
+Same database, cold tier (tablespace stock_cold, HDD)
+  G:\StockPlatform\data\pg-cold
 
 Private runtime configuration
   G:\StockPlatform\config\runtime.env
@@ -54,6 +57,11 @@ Runtime logs and lifecycle evidence
 Peer credentials, exports and staging
   G:\StockPlatform\peer
 ```
+
+数据库的物理布局（热层预算、冷层表空间、维护窗、备份链、数据目录迁移与回滚）以
+[OWNER_DATABASE_STORAGE.md](OWNER_DATABASE_STORAGE.md) 为准。动数据目录、备份、
+定时维护任务或任何分层表之前先读它；上面的路径只是速查，权威值是 `runtime.env` 里的
+`PGDATA_DIR`。
 
 持仓同步契约见 [BROKER_HOLDINGS_SYNC.md](BROKER_HOLDINGS_SYNC.md)：现在只由用户主动触发，文件导出优先，桌面 UI 读取必须直接交给 Luna 子 agent。不得创建每日调度、自动登录或自动唤醒 MuMu；未指定券商时不得默认中信。当前 THS 桌面读取尚未真实验收，旧 `citics-mumu-sync` 仅为退休兼容入口。
 

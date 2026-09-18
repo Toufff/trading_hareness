@@ -43,6 +43,16 @@ provider response directly to a live threshold or order path.
 - Fail closed on missing bars, stale providers, incomplete sector mappings and
   insufficient samples. Do not invent Top10s, prices or regression coefficients.
 - Keep author replay outcomes separate from strategy-available outcomes.
+- Application code never reads a `*_cold` twin or a `*_all` view. Those are the
+  storage tier's operations surface: the twins carry no foreign keys and no
+  triggers, so a router reading one bypasses every referential guarantee the hot
+  table has. A query that genuinely needs the full history goes through the
+  `quant.<table>_all` view from an operations script, never from `app/`.
+- A new large, append-only evidence table must register a tier policy in
+  `scripts/database-storage-tiers.py` (and in the policy table of
+  `docs/OWNER_DATABASE_STORAGE.md`, which is guard-tested against it). An
+  unregistered table grows against the hot-tier budget until the space policy
+  starts taking history away from the tables that did register.
 
 ## Agent workflow
 
@@ -62,6 +72,12 @@ provider response directly to a live threshold or order path.
    change; `npm run api:check` verifies the checked-in generated type is current.
 9. Read `docs/ARCHITECTURE.md` before a cross-domain change; it is the concise
    ownership map, while this file remains the operational checklist.
+10. Read `docs/OWNER_DATABASE_STORAGE.md` before touching the database layout,
+    backups, scheduled maintenance or any table listed in the tier policy. The
+    owner cluster is split across a 500 GB NVMe hot tier (`PGDATA_DIR`, production
+    `F:\StockPlatformDB\postgresql16`) and a `stock_cold` tablespace on G:; the
+    data directory, the backup exclusions, the maintenance window (04:00-08:00)
+    and the role timeouts are all defined there, not here.
 
 ## Version-control and release discipline
 
@@ -103,6 +119,28 @@ this file and `docs/ARCHITECTURE.md` in the same change:
 - `quant-service/tests/test_repository_workflow_policy.py` — keeps the clean
   commit/release boundary, secret-state ignores and live-acceptance wording in
   the repository contract.
+- `quant-service/tests/test_storage_tier_policy.py` — every table in the storage
+  tier policy exists in the frozen DDL or a migration and its cutoff column is a
+  `timestamptz` of that table; no file under `app/` references a `*_cold` twin or
+  a `*_all` view; the policy table in `docs/OWNER_DATABASE_STORAGE.md` lists
+  exactly the tables the script acts on.
+
+The same convention covers the Windows runtime. These PowerShell guard tests are
+standalone (no database, no venv, no scheduled task) and run as
+`pwsh -NoProfile -File <test>.ps1`; `publish-stock-release.ps1` executes them
+before every release:
+
+- `scripts/windows/tests/test-postgres-storage-tier-wiring.ps1` — the PowerShell
+  runner and the Python CLI cannot drift: every `-Command` the runner offers is a
+  real subcommand of `scripts/database-storage-tiers.py`, the documented flags
+  still exist, the run record stays at `logs\storage-tiers.jsonl`, and the dump
+  exclusions seeded by the initializer are exactly `TIER_POLICY`'s cold twins.
+- `scripts/windows/tests/test-postgres-io-window.ps1` — the pure window function
+  `Get-PostgresIoWindowMode` across every boundary.
+- `scripts/windows/tests/test-postgres-data-migration-contract.ps1` — the
+  data-directory migration keeps its safety order (stop the watcher and every
+  scheduled database job first, verify the copy before switching `PGDATA_DIR`,
+  rename the old directory instead of deleting it).
 
 ## Review automation
 
