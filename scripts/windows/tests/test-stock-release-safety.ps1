@@ -248,6 +248,58 @@ try {
     $bare = Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\windows\entry.ps1')
     Assert-True (@($bare.Hashed).Count -eq 1) `
         'a bare file name that names nothing in the tree must be dropped quietly, not turned into a hard failure'
+
+    # '/' and '\' are the same separator to PowerShell. Keyed on '\' alone, a
+    # forward-slash literal was tried ONLY beside the mentioning file and then
+    # dropped in silence -- the exact under-detection the loud rule was written
+    # to end -- so the root-relative reading must cover either spelling.
+    [IO.File]::WriteAllText((Join-Path $chainShared 'forward.ps1'),
+        "Import-Module 'scripts/windows/chained.psm1'", [Text.UTF8Encoding]::new($false))
+    $forward = Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\shared-peer\forward.ps1')
+    Assert-True ($forward.Hashed -contains 'scripts\windows\chained.psm1') `
+        'a release-root-relative path literal spelled with forward slashes must resolve exactly like one spelled with backslashes'
+    # ...and so must the loud rule, or a forward-slash dead path is the one
+    # spelling that still disappears quietly.
+    [IO.File]::WriteAllText((Join-Path $chainShared 'forward.ps1'),
+        "Import-Module 'scripts/windows/not-here.psm1'", [Text.UTF8Encoding]::new($false))
+    Assert-Throws { Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\shared-peer\forward.ps1') } `
+        'a forward-slash path literal that resolves nowhere must throw like its backslash spelling, not be dropped'
+    Remove-Item -LiteralPath (Join-Path $chainShared 'forward.ps1') -Force
+
+    # A parent-relative literal resolves, but its raw spelling carries '..' and
+    # is a SECOND key for a file the declared list already names under its
+    # canonical one: the equality assertion would fail on a spelling, or the
+    # chain would hold the same file twice.
+    [IO.File]::WriteAllText((Join-Path $chainShared 'parentrel.ps1'),
+        "Import-Module (Join-Path `$PSScriptRoot '..\windows\chained.psm1')", [Text.UTF8Encoding]::new($false))
+    $normalized = Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\shared-peer\parentrel.ps1')
+    Assert-True ($normalized.Hashed -contains 'scripts\windows\chained.psm1') `
+        'a parent-relative path literal must enter the chain under its canonical release-root-relative spelling'
+    Assert-True (@($normalized.Hashed | Where-Object { $_ -like '*..*' }).Count -eq 0) `
+        'no chain entry may carry a `..` segment, which can never match the declared file list'
+    Assert-True (@($normalized.Hashed).Count -eq 2) `
+        'a parent-relative literal must not double-count the file it names'
+    # And one that climbs out of the release root is not a file this release
+    # carries at all, so it is dropped like an absolute path rather than
+    # becoming a hard error about a tree the gate does not own.
+    [IO.File]::WriteAllText((Join-Path $chainShared 'parentrel.ps1'),
+        "Import-Module (Join-Path `$PSScriptRoot '..\..\..\outside\chained.psm1')", [Text.UTF8Encoding]::new($false))
+    $escaped = Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\shared-peer\parentrel.ps1')
+    Assert-True (@($escaped.Hashed).Count -eq 1) `
+        'a path literal that resolves outside the release root must be dropped quietly, like an absolute path'
+    Remove-Item -LiteralPath (Join-Path $chainShared 'parentrel.ps1') -Force
+
+    # The loud rule must fire on PATHS, not on prose. An operator message that
+    # merely ends in a path names a file the parsed tree need not carry (a test
+    # script, a doc-referenced helper), and turning that into a hard error makes
+    # the safety suite fail for a harmless string.
+    [IO.File]::WriteAllText((Join-Path $chainScripts 'entry.ps1'),
+        "throw 'Run scripts\windows\tests\test-shared-tunnel-recovery.ps1 by hand'" + "`n" +
+        "Write-Host 'see docs/SHARED_PEER_RUNTIME.md and scripts/windows/tests/test-runtime-observability.ps1'" + "`n" +
+        "Write-Verbose `"rerun `$PSScriptRoot\missing-helper.ps1`"", [Text.UTF8Encoding]::new($false))
+    $message = Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\windows\entry.ps1')
+    Assert-True (@($message.Hashed).Count -eq 1) `
+        'an operator message that merely ends in a path must be neither hashed nor turned into a hard failure by the loud rule'
 } finally {
     $resolvedChain = [IO.Path]::GetFullPath($chainSandbox)
     $tempChain = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
@@ -872,6 +924,23 @@ try {
         'with no recorded activation instant and a junction that does not resolve to the active release, the pin refresh must be reported as uncertain'
     Assert-True ($refreshed.decision -eq 'reinstall' -and ($refreshed.reasons -contains 'tunnel_release_pin_uncertain')) `
         'an uncertain pin must force the tunnel reinstall instead of skipping against a tree the live process may never have run'
+
+    # A RECORDED activated_at does not rescue that either while `current` still
+    # resolves somewhere else. switch-stock-release.ps1 moves the junction
+    # before it writes state and swallows a failed revert with a warning, so
+    # active_release/activated_at can describe a release `current` has
+    # demonstrably left; taken as exact, that stale instant makes a tunnel which
+    # started from the OTHER tree look like a relaunch from the active one and
+    # buys a skip it has not earned.
+    [void](Set-StockReleaseState -PlatformRoot $planSandbox -State @{
+        active_release = 'rel-001'; previous_release = 'rel-000'; tunnel_release = 'rel-000'
+        activated_at = ([DateTimeOffset]::Now.AddDays(-1).ToString('o'))
+        tunnel_ssh_target_sha256 = (Get-StockTunnelSshTargetHash -PlatformRoot $planSandbox) })
+    $staleActivated = Resolve-StockTunnelReinstallPlan @resolveArgs
+    Assert-True ($staleActivated.activation_instant_source -ne 'activated_at' -and $staleActivated.tunnel_release_pin_uncertain) `
+        'a recorded activated_at must not be treated as exact while the `current` junction does not resolve to the active release'
+    Assert-True ($staleActivated.decision -eq 'reinstall' -and ($staleActivated.reasons -contains 'tunnel_release_pin_uncertain')) `
+        'a superseded activated_at must buy a reinstall, not a skip'
 
     # With the junction really moved and activated_at recorded the same refresh
     # is exact, and the skip it enables is the one this whole gate exists for.

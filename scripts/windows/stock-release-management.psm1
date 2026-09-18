@@ -573,13 +573,15 @@ function Resolve-StockTunnelChainExpandableString {
     # variable, an environment variable, a computed name -- is an unresolvable
     # chain element, and this throws so the omission is loud rather than silent.
     # Returns $null for an expandable string that does not name a script, module
-    # or C# source at all.
+    # or C# source at all -- including a MESSAGE that merely ends in one
+    # ("Rerun $name.ps1 by hand"), which must not reach the unresolvable-variable
+    # throw below. A path on this chain is a single whitespace-free token.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Relative
     )
-    if ($Text -notmatch '\.(ps1|psm1|cs|exe)$') { return $null }
+    if ($Text -notmatch '^\S+\.(ps1|psm1|cs|exe)$') { return $null }
     $parent = Split-Path -Parent $Relative
     $resolved = $Text
     foreach ($reference in [regex]::Matches($Text, '\$\{?([A-Za-z_][A-Za-z0-9_:]*)\}?')) {
@@ -603,6 +605,16 @@ function Get-StockTunnelExecutionChainFile {
     # from $script:StockTunnelChainEntryPoints it takes the transitive closure
     # of every script/module/source-file path literal in each file's AST:
     #
+    #   * only a literal whose WHOLE value is a path is considered at all: an
+    #     operator message that merely ends in one ('Run scripts\windows\tests\
+    #     test-shared-tunnel-recovery.ps1') names a file the parsed tree need
+    #     not carry, and would otherwise trip the loud rule below into a hard
+    #     error. Paths on this chain never contain whitespace;
+    #   * '/' and '\' are the same separator to PowerShell, so a value is
+    #     normalized to '\' before anything keys on one. Keyed on '\' alone, a
+    #     forward-slash literal got neither the root-relative reading nor the
+    #     loud rule, i.e. exactly the silent under-detection this parser exists
+    #     to end;
     #   * a literal containing a directory separator is tried release-root
     #     relative first ('scripts\windows\supervise-runtime-process.ps1' in
     #     runtime-observability.psm1's Start-RuntimeSupervisor) and then
@@ -612,6 +624,13 @@ function Get-StockTunnelExecutionChainFile {
     #     the second form, which is a real chain element the gate would then
     #     never hash, so a separator-carrying literal that resolves NOWHERE now
     #     throws instead of disappearing;
+    #   * every candidate is collapsed back to a release-root-relative spelling
+    #     before it is used as a key, so a parent-relative literal
+    #     (Join-Path $PSScriptRoot '..\windows\x.psm1') enters the chain as
+    #     scripts\windows\x.psm1 rather than as a second, '..'-carrying spelling
+    #     of a file the declared list already names. A candidate that collapses
+    #     to somewhere OUTSIDE the release root is dropped quietly, like an
+    #     absolute path: the gate cannot hash what the release does not carry;
     #   * a bare file name is resolved next to the file that mentions it
     #     (Join-Path $PSScriptRoot 'process-lifetime.cs'), and is dropped
     #     quietly when it resolves nowhere: with no separator it is as likely to
@@ -633,6 +652,19 @@ function Get-StockTunnelExecutionChainFile {
     )
     $root = [IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
     $binPrefix = 'scripts\windows\bin\'
+    # Collapses a candidate to its canonical release-root-relative spelling, or
+    # to '' when it leaves the release root. Without this a '..'-carrying
+    # literal becomes a second key for a file the declared list already names:
+    # the equality assertion then fails for a spelling difference, or -- worse
+    # when the file is NOT declared -- the chain quietly holds the same file
+    # twice under two names.
+    $toReleaseRelative = {
+        param([string]$Candidate)
+        $full = ''
+        try { $full = [IO.Path]::GetFullPath((Join-Path $root $Candidate)).TrimEnd('\') } catch { return '' }
+        if (-not $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { return '' }
+        return $full.Substring($root.Length + 1)
+    }
     $entryPoints = if (@($EntryPoint).Count -gt 0) { @($EntryPoint) } else { @($script:StockTunnelChainEntryPoints) }
     $hashed = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $presence = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -668,7 +700,15 @@ function Get-StockTunnelExecutionChainFile {
             } else {
                 $value = [string]$literal.Value
             }
-            if ($value -notmatch '\.(ps1|psm1|cs|exe)$') { continue }
+            # '/' and '\' name the same separator to PowerShell, so neither the
+            # root-relative reading nor the loud rule below may key on one
+            # spelling of it.
+            $value = $value.Replace('/', '\')
+            # The whole value must BE a path, not merely end in one: a message
+            # ('Run scripts\windows\tests\test-shared-tunnel-recovery.ps1')
+            # names a file this tree need not carry and must not become a hard
+            # error. No path on this chain contains whitespace.
+            if ($value -notmatch '^\S+\.(ps1|psm1|cs|exe)$') { continue }
             if ($value -match '[*?"<>|]') { continue }
             if ($value -match '^[A-Za-z]:' -or $value.StartsWith('\\')) { continue }
             # Root-relative first (the historical reading), then relative to the
@@ -679,8 +719,14 @@ function Get-StockTunnelExecutionChainFile {
             $besideMentioningFile = if ($parent) { Join-Path $parent $trimmed } else { $trimmed }
             # @(...) around the whole conditional: a one-element array assigned
             # out of an `if` is unrolled to a bare string, and indexing that
-            # would walk its characters.
-            $candidates = @(if ($hasSeparator) { $trimmed; $besideMentioningFile } else { $besideMentioningFile })
+            # would walk its characters. Normalizing here (not at the end) keeps
+            # the .exe rules, the Test-Path probe and the queued key on one
+            # canonical spelling.
+            $candidates = @(@(if ($hasSeparator) { $trimmed; $besideMentioningFile } else { $besideMentioningFile }) |
+                ForEach-Object { [string](& $toReleaseRelative $_) } |
+                Where-Object { $_ } |
+                Select-Object -Unique)
+            if ($candidates.Count -eq 0) { continue }
             $candidate = [string]$candidates[0]
             if ($candidate.StartsWith($binPrefix, [StringComparison]::OrdinalIgnoreCase) -and
                 $candidate.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) {
@@ -841,7 +887,19 @@ function Resolve-StockReleaseActivationInstant {
     #
     # Sources, best first:
     #   activated_at           - recorded by publish/switch right after
-    #                            Set-StockCurrentRelease returned. Exact.
+    #                            Set-StockCurrentRelease returned. Exact, but
+    #                            only while `current` still resolves to the
+    #                            active release: switch moves the junction
+    #                            before it writes state, and if it dies in
+    #                            between (its revert failure is only a warning)
+    #                            or the junction is moved by hand, the recorded
+    #                            instant belongs to a release `current` has
+    #                            demonstrably left. Judged against that stale
+    #                            instant, a tunnel that started from the NEW
+    #                            tree looks like a relaunch from the active one
+    #                            and buys a skip it has not earned, so the same
+    #                            junction check that guards the source below
+    #                            guards this one.
     #   current_junction_created - the junction's own creation time. Exact:
     #                            Set-StockCurrentRelease builds a fresh junction
     #                            under a staging name and renames it into place
@@ -865,7 +923,9 @@ function Resolve-StockReleaseActivationInstant {
         param($Stamp, $Source, $Exact)
         [pscustomobject]@{ Stamp = [string]$Stamp; Source = [string]$Source; Exact = [bool]$Exact }
     }
-    if ([string]$RecordedActivatedAt) { return (& $answer $RecordedActivatedAt 'activated_at' $true) }
+    if ($JunctionMatchesActiveRelease -and [string]$RecordedActivatedAt) {
+        return (& $answer $RecordedActivatedAt 'activated_at' $true)
+    }
     if ($JunctionMatchesActiveRelease -and [string]$JunctionCreatedAt) {
         return (& $answer $JunctionCreatedAt 'current_junction_created' $true)
     }
