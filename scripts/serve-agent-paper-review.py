@@ -67,9 +67,18 @@ def day_view(connection: Any, day: date) -> dict[str, Any]:
     result = {"day": day.isoformat(), "latest_day": latest_day.isoformat(), "accounts": [], "human": None}
     for key in accounts:
         report = status(connection, account_key=key, day=day, decisions=0)
-        daily = next((row for row in report["daily"] if row["trading_date"] == day.isoformat()), None)
+        index = next((i for i, row in enumerate(report["daily"]) if row["trading_date"] == day.isoformat()), None)
+        daily = report["daily"][index] if index is not None else None
+        # ``*_return_pct`` from the report is cumulative against the comparison start;
+        # the previous trading day's close is what makes a same-day number possible.
+        previous = report["daily"][index - 1] if index else None
+        if daily is not None:
+            daily = {**daily, "previous_trading_date": previous["trading_date"] if previous else None,
+                     "previous_agent_equity": previous["agent_equity"] if previous else None,
+                     "previous_human_equity": previous["human_equity"] if previous else None}
         if daily and result["human"] is None:
-            result["human"] = {"equity": daily.get("human_equity"), "return_pct": daily.get("human_return_pct"),
+            result["human"] = {"equity": daily.get("human_equity"), "total_return_pct": daily.get("human_return_pct"),
+                               "previous_equity": daily.get("previous_human_equity"),
                                "basis": daily.get("human_basis"), "comparable": daily.get("human_comparable")}
         navs = [dict(row) for row in connection.execute(
             """SELECT as_of,equity,cash,market_value,price_basis,positions FROM quant.agent_paper_nav

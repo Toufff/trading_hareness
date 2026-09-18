@@ -142,20 +142,25 @@ function sparkline(navs){
 function scoreboard(d){
   const h=d.human,daily=(d.accounts[0]||{}).daily||{};
   const missing=(daily.human_missing_prices||[]).length;
+  const dayReturn=(equity,previous)=>equity!=null&&previous?((equity/previous-1)*100):null;
+  const myToday=dayReturn(h?.equity,h?.previous_equity);
   const cards=[`<div class="card me"><h3>你（实盘）<span class="muted small">券商账户</span></h3>
     <div class="big">${h&&h.equity!=null?num(h.equity):'待同步'}</div>
-    <div class="${sign(h?.return_pct)}">${h&&h.return_pct!=null?pct(h.return_pct):'&nbsp;'}</div>
+    <div>${h&&h.equity!=null?`<span class="${sign(myToday)}">今日 ${pct(myToday)}</span>
+      <span class="muted small">· 累计 <span class="${sign(h.total_return_pct)}">${pct(h.total_return_pct)}</span></span>`:'&nbsp;'}</div>
     <div class="muted small">${h?.comparable?(h.basis==='broker_close_snapshot'?'收盘后券商快照':'快照+成交重建')
       :`收盘同步后可比${daily.human_fills_imported_through?`；成交已导入至 ${esc(daily.human_fills_imported_through)}`:''}${missing?`；缺 ${missing} 只收盘价`:''}`}</div>
-    <div class="muted small">今日成交 ${(d.human_trades?.orders||[]).length} 笔 · 复盘记录 ${(d.human_trades?.journal||[]).length} 条</div></div>`];
+    <div class="muted small">今日成交 ${(d.human_trades?.orders||[]).length} 笔 · 复盘记录 ${Object.keys(d.human_trades?.notes||{}).length+(d.human_trades?.journal||[]).length} 条</div>
+    <div class="muted small">今日=对比${h?.previous_equity?'前一交易日收盘':'（缺前一日基准）'}；累计=对比 ${esc((d.accounts[0]||{}).start_date||'')} 对照起点</div></div>`];
   for(const a of d.accounts){
     const x=a.daily||{},nav=a.navs.at(-1);
     const filled=a.orders.filter(o=>['filled','partially_filled'].includes(o.status)).length;
     const failed=a.decisions.filter(z=>z.status!=='decided').length;
-    const total=nav?((nav.equity/a.initial_equity-1)*100):null;
+    const total=x.agent_return_pct;
+    const today=dayReturn(nav?nav.equity:null,x.previous_agent_equity);
     cards.push(`<div class="card ${a===d.accounts[0]?'a1':'a2'}"><h3>${esc(NAMES[a.account_key]||a.account_key)}<span class="muted small">${esc(a.model)}</span></h3>
       <div class="big">${nav?num(nav.equity):'—'}</div>
-      <div><span class="${sign(x.agent_return_pct)}">今日 ${pct(x.agent_return_pct)}</span>
+      <div><span class="${sign(today)}">今日 ${pct(today)}</span>
         <span class="muted small">· 累计 <span class="${sign(total)}">${pct(total)}</span></span></div>
       <div class="muted small">决策 ${a.decisions.length-failed}/${a.decisions.length} 轮${failed?`（失败 ${failed}）`:''} · 成交 ${filled} 笔 · 现金 ${int(nav?nav.cash:a.cash)}</div>
       ${sparkline(a.navs)}</div>`);
