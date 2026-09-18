@@ -273,15 +273,25 @@ function lanesView(d){
         `<path d="${shape}" fill="${done?color:'var(--panel)'}" stroke="${color}" stroke-width="1.6"/>`+
         (label9?`<text x="${cx}" y="${cy+17}" font-size="10" text-anchor="middle" fill="var(--mute)">${label9}</text>`:'')+`</g>`;
     }).join('');
+    const rounds=(a.account||{}).decisions||[];
+    const roundMarks=rounds.map((z,ri)=>{
+      const cx=x(sessionMinute(z.decided_at)),cy=TOP+i*LANE+LANE-9;
+      const acted=(z.ledger_orders||[]).length>0||(z.outcomes||[]).some(o=>!o.order_id);
+      const failed=z.status!=='decided';
+      const fill=failed?'var(--warn)':acted?'var(--accent)':'var(--panel)';
+      return `<g class="mk" data-lane-round="${esc(a.key)}|${ri}" tabindex="0" role="button" style="cursor:pointer">`+
+        `<title>${esc(hm(z.decided_at))} ${esc(a.label)} ${failed?esc(z.status):acted?'有操作':'本轮不操作'}</title>`+
+        `<circle cx="${cx}" cy="${cy}" r="3.4" fill="${fill}" stroke="${failed?'var(--warn)':'var(--accent)'}" stroke-width="1.2"/></g>`;
+    }).join('');
     const count=rows.filter(e=>e.actor===a.key).length;
     const colour=a.cls==='me'?'var(--me)':a.cls==='a1'?'var(--a1)':'var(--a2)';
     return `<g><rect x="${L}" y="${TOP+i*LANE}" width="${W-L-R}" height="${LANE}" fill="${i%2?'var(--soft)':'transparent'}"/>`+
       `<line x1="${L}" y1="${TOP+i*LANE+LANE}" x2="${W-R}" y2="${TOP+i*LANE+LANE}" stroke="var(--line)"/>`+
       `<text x="8" y="${y}" font-size="12" font-weight="600" fill="${colour}">${esc(a.label)}</text>`+
-      `<text x="8" y="${y+16}" font-size="10" fill="var(--mute)">${count} 笔</text>${marks}</g>`;
+      `<text x="8" y="${y+16}" font-size="10" fill="var(--mute)">${count} 笔${rounds.length?` · ${rounds.length} 轮`:''}</text>${roundMarks}${marks}</g>`;
   }).join('');
   return `<div class="panel"><h2><span>按时间看三方的动作</span>
-      <span class="muted small">▲ 买入 ▼ 卖出 · 实心=已成交 空心=未成交或撤单 · 黄虚线=午休 · 点你自己的成交可写复盘</span></h2>
+      <span class="muted small">▲ 买入 ▼ 卖出（实心=已成交） · 底部圆点=决策轮次（蓝实心有操作、空心不操作、黄色失败） · 黄虚线=午休 · 点标记看理由，点自己的成交可写复盘</span></h2>
     <div class="scroll" style="padding:8px 0 0">
       <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;min-width:780px" role="img" aria-label="三方操作时间轴">
         ${ticks.join('')}${lunch}${laneRows}
@@ -293,6 +303,22 @@ function laneDetail(index){
   laneSelected=index;
   const html=laneDetailHtml(index);
   if(html)$('#laneDetail').innerHTML=html;
+}
+function laneRoundDetail(token){
+  const [key,index]=token.split('|');
+  const account=current.accounts.find(a=>a.account_key===key);
+  const z=account&&account.decisions[Number(index)];
+  if(!z)return;
+  laneSelected=null;
+  const who=actors(current).find(a=>a.key===key)||{label:key,cls:''};
+  const acted=(z.ledger_orders||[]).length;
+  $('#laneDetail').innerHTML=`<div class="rhead"><span class="t">${hm(z.decided_at)}</span>${whoTag(who)}
+      <span class="badge ${z.status==='decided'?'b-ok':'b-bad'}">${z.status==='decided'?(acted?`下单 ${acted} 笔`:'本轮不操作'):esc(z.status)}</span>
+      <span class="muted small">${[z.duration_ms?`${(z.duration_ms/1000).toFixed(0)} 秒`:'',z.cost_usd?`$${Number(z.cost_usd).toFixed(3)}`:''].filter(Boolean).join(' · ')}</span></div>
+    ${z.error?`<div class="error" style="margin-top:6px">${esc(z.error)}</div>`:''}
+    ${z.market_view?`<div style="margin-top:6px"><strong>盘面：</strong>${esc(z.market_view)}</div>`:''}
+    ${z.analysis?`<div class="why" style="margin-top:6px"><strong>决策依据：</strong>${esc(z.analysis)}</div>`:'<div class="muted small" style="margin-top:6px">该轮没有决策依据字段（9/18 中午前的轮次）。</div>'}
+    ${z.notes?`<details class="more"><summary>留给下一轮的笔记</summary><div class="why">${esc(z.notes)}</div></details>`:''}`;
 }
 function laneDetailHtml(index){
   const e=laneEvents[index];if(!e)return '';
@@ -513,6 +539,8 @@ document.addEventListener('click',e=>{
   if(account){roundAccount=account.dataset.account;return render(current);}
   const mark=e.target.closest('[data-lane-event]');
   if(mark)return laneDetail(Number(mark.dataset.laneEvent));
+  const dot=e.target.closest('[data-lane-round]');
+  if(dot)return laneRoundDetail(dot.dataset.laneRound);
   const clamp=e.target.closest('[data-clamp]');
   if(clamp)clamp.classList.toggle('open');
 });
