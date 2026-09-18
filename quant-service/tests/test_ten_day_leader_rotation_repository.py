@@ -78,19 +78,26 @@ class TenDayLeaderRotationRepositoryTests(unittest.TestCase):
         covered = sql[sql.index("covered AS ("):sql.index(") SELECT expected.trading_date")]
         self.assertNotIn("bar.adj_factor IS NOT NULL", covered)
         self.assertIn("bar.quality_status IN ('fresh','partial')", covered)
+        # The CTE column counts settled bars, so it is named for that.  While
+        # it was still called adjusted_symbols, the gate below read as an
+        # adjustment-coverage gate it no longer is.
+        self.assertIn("count(DISTINCT bar.symbol)::int AS settled_symbols", covered)
+        self.assertNotIn("adjusted_symbols", sql)
+        self.assertIn("WHERE covered.settled_symbols>=%s", sql)
 
         database = _Database([
-            _Result(row={"daily_symbols": 5_101, "adjusted_symbols": 0,
+            _Result(row={"daily_symbols": 5_101, "adjustment_covered_symbols": 0,
                          "expected_daily_symbols": 5_221, "strategy_available_at": None}),
             _Result(rows=[]),
         ])
         inputs = load_ten_day_ranking_inputs(database, date(2026, 9, 18))
         self.assertEqual(inputs.daily_symbols, 5_101)
-        self.assertEqual(inputs.adjusted_symbols, 0)
+        self.assertEqual(inputs.adjustment_covered_symbols, 0)
         coverage_sql = database.calls[0][0]
         self.assertIn("count(DISTINCT bar.symbol)::int AS daily_symbols", coverage_sql)
         self.assertIn(
-            "count(DISTINCT bar.symbol) FILTER (WHERE bar.adj_factor IS NOT NULL)::int AS adjusted_symbols",
+            "count(DISTINCT bar.symbol) FILTER (WHERE bar.adj_factor IS NOT NULL)::int "
+            "AS adjustment_covered_symbols",
             coverage_sql)
         self.assertNotIn(
             "count(DISTINCT bar.symbol) FILTER (WHERE bar.adj_factor IS NOT NULL)::int AS daily_symbols",

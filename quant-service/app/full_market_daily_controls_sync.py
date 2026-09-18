@@ -19,6 +19,18 @@ CONTROL_APIS = ("adj_factor", "daily_basic", "stk_limit", "suspend_d")
 CONTROL_PERSIST_TIMEOUT_SECONDS = 180
 _A_SHARE = re.compile(r"\d{6}\.(SH|SZ|BJ)$")
 
+#: ``blocked_by`` values carried by a refusal, so a caller can tell "this date's
+#: own cross-section is not good enough for a promotion" from "the provider
+#: failed".  Only the second is that caller's failure: the controls sync cannot
+#: repair a thin daily cross-section, and neither can whoever called it.
+COVERAGE_BLOCK_REASON = "coverage"
+PROVIDER_BLOCK_REASON = "provider"
+EXECUTOR_BLOCK_REASON = "executor_saturated"
+
+
+class ControlCoverageError(ValueError):
+    """The requested cross-section does not cover enough of the settled date."""
+
 
 def valid_rows(api_name: str, rows: list[dict[str, Any]], trade_date: date, parse_date: Callable[[Any], date | None]) -> list[dict[str, Any]]:
     """Keep only the requested A-share cross-section and remove duplicate codes."""
@@ -67,7 +79,9 @@ async def sync(
         raise ValueError(f"apis must be a non-empty subset of {CONTROL_APIS}; got {apis!r}")
     expected = await run_database_blocking(expected_daily_rows, trade_date)
     if expected <= 0:
-        return {"status": "blocked", "trade_date": str(trade_date), "reason": "full-market daily bars are not ready"}
+        return {"status": "blocked", "trade_date": str(trade_date),
+                "blocked_by": COVERAGE_BLOCK_REASON,
+                "reason": "full-market daily bars are not ready"}
 
     stamp = trade_date.strftime("%Y%m%d")
     started = asyncio.get_running_loop().time()
@@ -78,15 +92,24 @@ async def sync(
             result = await call_tushare_api(api_name, {"trade_date": stamp}, None, "auto")
             rows = valid_rows(api_name, result.rows, trade_date, parse_date)
             if api_name != "suspend_d" and len(rows) < max(1, int(expected * 0.95)):
-                raise ValueError(f"{api_name} returned {len(rows)} valid rows; expected at least 95% of {expected}")
+                raise ControlCoverageError(f"{api_name} returned {len(rows)} valid rows; expected at least 95% of {expected}")
             results[api_name] = result
             rows_by_api[api_name] = rows
+    except ControlCoverageError as error:
+        # The provider answered; the answer is simply too thin to promote.
+        # Distinguishing this from a provider failure is what lets the
+        # adjustment-factor maintenance job skip a date it cannot repair
+        # instead of reporting a nightly failure it can never clear.
+        return {"status": "blocked", "trade_date": str(trade_date),
+                "blocked_by": COVERAGE_BLOCK_REASON, "reason": safe_error_detail(str(error), 500)}
     except executor_saturated_error as error:
         request_key = hashlib.sha256(json.dumps({"capability": "daily_controls_all_a", "trade_date": stamp}, sort_keys=True).encode()).hexdigest()
         await run_database_blocking(persist_blocked, request_key, error)
-        return {"status": "blocked", "trade_date": str(trade_date), "reason": safe_error_detail(str(error), 500)}
+        return {"status": "blocked", "trade_date": str(trade_date),
+                "blocked_by": EXECUTOR_BLOCK_REASON, "reason": safe_error_detail(str(error), 500)}
     except Exception as error:  # provider result is intentionally not promoted partially
-        return {"status": "blocked", "trade_date": str(trade_date), "reason": safe_error_detail(str(error), 500)}
+        return {"status": "blocked", "trade_date": str(trade_date),
+                "blocked_by": PROVIDER_BLOCK_REASON, "reason": safe_error_detail(str(error), 500)}
 
     observed_at = datetime.now(timezone.utc)
     latency_ms = round((asyncio.get_running_loop().time() - started) * 1000)
@@ -165,4 +188,8 @@ async def sync(
     }
 
 
-__all__ = ["CONTROL_APIS", "CONTROL_PERSIST_TIMEOUT_SECONDS", "sync", "valid_rows"]
+__all__ = [
+    "CONTROL_APIS", "CONTROL_PERSIST_TIMEOUT_SECONDS", "COVERAGE_BLOCK_REASON",
+    "EXECUTOR_BLOCK_REASON", "PROVIDER_BLOCK_REASON", "ControlCoverageError",
+    "sync", "valid_rows",
+]

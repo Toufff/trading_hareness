@@ -32,8 +32,16 @@ from .database import Database
 from .daily_bar_repository import quarantine_tushare_daily_amount_mismatches
 from .runtime_resources import DEFAULT_HOT_DATABASE_SOFT_BYTES, bounded_storage_budget_bytes
 from .sector_flow_repository import rebuild_sector_flow_daily_features
+from .tushare_normalization import promotable_factor_predicate_sql, promotable_factor_provider
 from .tushare_providers import ProviderCallError, call_provider, provider_configs, safe_error_detail
 from .universe_history import rebuild_historical_membership_from_canonical
+
+
+#: The set-based twin of ``tushare_normalization.promotable_adjustment_factor``'s
+#: semantics half, rendered once so the guard test can point at one name.  A
+#: stage row that declares anything but absent/cumulative semantics stays
+#: evidence in ``quant.daily_adjustment_factors`` and never reaches a bar.
+_PROMOTABLE_FACTOR_SQL = promotable_factor_predicate_sql("stage")
 
 
 # Exchange suffix alone is not enough: stk_limit also returns funds and other
@@ -364,6 +372,16 @@ def _persist_adj_factor(connection: Any, provider_key: str, available_at: dateti
              adj_factor=EXCLUDED.adj_factor,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
         (provider_key, available_at),
     )
+    # This is a second factor-row -> bar-field promotion and it obeys the same
+    # rule as ``tushare_normalization``: only a tushare route may set a bar's
+    # adj_factor, and only for a row whose declared semantics are absent or
+    # cumulative.  The provider half is a scalar for the whole stage table and
+    # is checked here; the per-row half rides along as ``_PROMOTABLE_FACTOR_SQL``.
+    # Without this a backfill run replaying a vendor placeholder would write
+    # adj_factor=1 straight back onto both bar tables, exactly the defect this
+    # branch removed from the post-close path.
+    if not promotable_factor_provider(provider_key):
+        return
     for table in ("market_bars_daily", "canonical_bars_daily"):
         connection.execute(
             f"""WITH stage AS (
@@ -373,7 +391,8 @@ def _persist_adj_factor(connection: Any, provider_key: str, available_at: dateti
                ) UPDATE quant.{table} bar SET adj_factor=nullif(stage.row_data->>'adj_factor','')::numeric
                   FROM stage
                  WHERE bar.symbol=upper(stage.row_data->>'ts_code')
-                   AND bar.trading_date=to_date(stage.row_data->>'trade_date','YYYYMMDD')"""
+                   AND bar.trading_date=to_date(stage.row_data->>'trade_date','YYYYMMDD')
+                   AND {_PROMOTABLE_FACTOR_SQL}"""
         )
 
 
@@ -1029,6 +1048,11 @@ class AnnualDailyBackfill:
                                  -- placeholder was the only candidate and won,
                                  -- writing adj_factor=1 back onto the bar.  A
                                  -- date with no real factor must stay NULL.
+                                 -- Both halves of the promotion rule apply, so
+                                 -- a vendor that merely OMITS the marker is
+                                 -- refused by the provider predicate instead of
+                                 -- reaching the bar through the ELSE 9 branch.
+                                 AND provider LIKE 'tushare%%'
                                  AND coalesce(raw->>'factor_semantics','') <> 'same_day_identity_only'
                                ORDER BY symbol,trading_date,
                                         CASE provider

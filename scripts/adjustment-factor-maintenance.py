@@ -59,36 +59,21 @@ def main(argv: list[str] | None = None) -> int:
     load_env_file(args.env_file)
 
     # Imported after the env file is loaded: the composition root builds its
-    # connection pool at import time from these variables.
-    from app.adjustment_factor_maintenance import (  # noqa: E402
-        AdjustmentFactorMaintenanceDependencies, sync,
-    )
-    from app.main import (  # noqa: E402
-        ExecutorSaturatedError, call_tushare_api, db, persist_tushare_fetch_blocked,
-        persist_tushare_rows, record_provider_api_capability, record_provider_failure,
-        record_provider_success, run_database_blocking, safe_error_detail, tushare_date,
-    )
+    # connection pool at import time from these variables.  The dependency set
+    # itself lives in app.main so the scheduled task, the post-close stage and
+    # this CLI cannot drift into three different compositions.
+    from app.adjustment_factor_maintenance import FAILED_STATUS  # noqa: E402
+    from app.main import sync_adjustment_factors  # noqa: E402
 
-    dependencies = AdjustmentFactorMaintenanceDependencies(
-        database=db,
-        run_database=run_database_blocking,
-        call_tushare_api=call_tushare_api,
-        parse_tushare_date=tushare_date,
-        persist_tushare_rows=persist_tushare_rows,
-        persist_blocked=persist_tushare_fetch_blocked,
-        safe_error_detail=safe_error_detail,
-        executor_saturated_error=ExecutorSaturatedError,
-        record_provider_success=record_provider_success,
-        record_provider_failure=record_provider_failure,
-        record_provider_api_capability=record_provider_api_capability,
-    )
-    result = asyncio.run(sync(
-        dependencies, lookback_days=args.lookback_days, dry_run=args.dry_run,
-    ))
+    result = asyncio.run(sync_adjustment_factors(args.lookback_days, dry_run=args.dry_run))
     # ASCII-only on purpose: a blocked reason can carry Chinese text and the
     # task host decodes this stdout under GBK.
     print(json.dumps(result, ensure_ascii=True, default=str))
-    return 0 if result.get("status") in {"completed", "planned", "unchanged"} else 1
+    # Only a provider error or an exception is this job's failure.  A date the
+    # daily-controls coverage gate refuses is reported as skipped with its
+    # reason and exits 0, because the factor lane cannot repair a thin daily
+    # cross-section and a nightly non-zero exit for it would alert forever.
+    return 1 if result.get("status") == FAILED_STATUS else 0
 
 
 if __name__ == "__main__":

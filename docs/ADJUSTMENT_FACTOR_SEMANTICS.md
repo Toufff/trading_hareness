@@ -44,17 +44,23 @@
    `fetch_runs` 回执里的 `control_semantics.adj_factor` 改为
    `not_supplied_by_vendor; fetched separately from tushare adj_factor`。
 3. `app/tushare_normalization.py`：因子行写入 `daily_adjustment_factors` 仍保留为证据，
-   但只有 `promotable_adjustment_factor(row)` 为真（未声明 `factor_semantics`，
-   或声明为 `corporate_action_cumulative`）才会 `UPDATE canonical_bars_daily`。
-   这是"按语义"而不是"按 provider 白名单"的防御，未来任何厂商占位都会被构造性拦住。
+   但只有 `promotable_adjustment_factor(row, provider_key=...)` 为真才会
+   `UPDATE canonical_bars_daily`。**两个条件必须同时成立**：provider 以
+   `tushare` 开头（`PROMOTABLE_FACTOR_PROVIDER_PREFIX`），**且**
+   `factor_semantics` 缺省/为空或等于 `corporate_action_cumulative`。
+   只看语义是不够的：一个**干脆不写 `factor_semantics`** 的厂商占位
+   （`{'ts_code':…, 'adj_factor':'1'}`）会原样复现最初的缺陷，只是少了一个键；
+   provider 这一半让新来源默认被拒，必须显式加入才可能被提升。
+   集合式写入用同一条规则的 SQL 孪生 `promotable_factor_predicate_sql()`。
 4. `app/daily_control_plane.py` `_longhu_control_status()`：短路门槛按控制项拆分，
    去掉 `factor_rows` 项，回执带 `satisfied_by_vendor` / `pending_controls` /
    `adjustment_state`。
 5. `app/full_market_daily_controls_sync.py`：`sync()` 新增 `apis` 参数；两条
    `is_suspended=false` 复位、涨跌停回填、停牌回填、复权回填分别按各自 API 是否在
    `apis` 中做闸门。**只跑 adj_factor 的任务绝不会清掉当日停牌标记。**
-6. `app/adjustment_factor_maintenance.py`（新）：`pending_dates()` / `sync()`，
-   对覆盖率不足的交易日以 `apis=('adj_factor',)` 逐日补取。
+6. `app/adjustment_factor_maintenance.py`（新）：`pending_dates()` / `sync()` /
+   `post_close_sync()`，对覆盖率不足的交易日以 `apis=('adj_factor',)` 逐日补取；
+   覆盖率被拒的日期记 `skipped` 并累计"连续被拒次数"，见第 5 节。
 7. `app/capability_registry.py`：`adj_factor` 独立分支，
    `preferred_providers=('super_get','super','primary')`、`status='verified'`
    （`tushare_primary` 的 adj_factor 当前是 `failed`/ConnectError）。
@@ -63,16 +69,35 @@
    **`ready` 不再包含复权项**；新增 `adjustment_state`、`adjustment_pending_rows`、
    `research_adjustment_ready`。
 9. `app/ten_day_leader_rotation_repository.py`：两处覆盖度判定去掉
-   `adj_factor IS NOT NULL`（改由 `quality_status` 回答"是否有结算 bar"）。
+   `adj_factor IS NOT NULL`（改由 `quality_status` 回答"是否有结算 bar"）；
+   `latest_full_market_date` 的 CTE 列改名 `adjusted_symbols` → `settled_symbols`
+   （它数的就是结算 bar）；`TenDayRankingInputs.adjusted_symbols` 改名
+   `adjustment_covered_symbols`，并由 `ten_day_leader_rotation_service` 写进
+   `source_status`，所以轮动车道的复权覆盖率在落库的 run 里可见，而不是只存不读。
 10. `app/effectiveness/execution.py` `simulate()`：`adj_factor` 移出必填字段，
     `NULL` 返回 `adjustment_pending`，只有全部有因子且不一致才是
     `corporate_action_unmodeled`。
-11. `app/annual_daily_backfill.py` `reconcile_suspensions()`：候选行排除
-    `raw->>'factor_semantics' = 'same_day_identity_only'`。**没有这条，下面的修复不持久。**
-12. `app/stock_study_readiness_repository.py`：`adj_factor` 条目新增 `note`，
-    区分 `pending`（等待补取）与 `missing`（从未取过）。
+11. `app/annual_daily_backfill.py`：
+    - `reconcile_suspensions()`：候选行要求 `provider LIKE 'tushare%'` 且排除
+      `raw->>'factor_semantics' = 'same_day_identity_only'`。**没有这条，下面的修复不持久。**
+    - `_persist_adj_factor()`：这是**第二处**"因子行 → bar 字段"的提升，原本对两张 bar 表
+      完全没有任何 provider / 语义 / 排除条件，是被修掉的那个缺陷的同一形状。现在
+      provider 不是 tushare 就直接返回，bar `UPDATE` 再带上 `{_PROMOTABLE_FACTOR_SQL}`。
+12. `app/stock_study_readiness_repository.py`：`adj_factor` 条目改为**按 symbol 判定**。
+    计数只算**真因子**（`provider LIKE 'tushare%'` 且语义可提升），因为第 4 节步骤 4
+    只给占位行打标注、从不删除，`count(*) > 0` 会在恰恰还没修好的 symbol 上永远报
+    `ready`。三态：该 symbol 窗口内所有结算日都有真因子 → `ready`；缺的日期**全部**
+    在维护任务的待办清单上 → `pending`；否则（含混合情况）→ `missing`，失败关闭。
+    条目另带 `settled_sessions` / `pending_dates` / `missing_dates`。
 13. `scripts/adjustment-factor-maintenance.py`：
-    `sync --lookback-days N --env-file ... --dry-run`，ASCII-only stdout。
+    `sync --lookback-days N --env-file ... --dry-run`，ASCII-only stdout；
+    依赖组装挪到 `app.main.adjustment_factor_maintenance_dependencies()`，
+    所以 CLI、盘后阶段、计划任务三个入口不会各自漂移。
+14. `app/post_close_refresh.py` / `post_close_refresh_service.py` / `app/main.py`：
+    新增**非门控**盘后阶段 `adjustment_factors`，见第 5 节。
+15. `app/full_market_daily_controls_sync.py`：每个 `blocked` 回执带 `blocked_by`
+    ∈ {`coverage`, `provider`, `executor_saturated`}，覆盖率不足单独抛
+    `ControlCoverageError`。调用方据此区分"这一天的日线截面不够"与"provider 挂了"。
 
 ---
 
@@ -86,6 +111,9 @@
    （十日龙头谓词）**同一次发布**生效。发布后先跑一次只读校验：
    `python scripts/equity-readiness.py --date 2026-09-18`
    应当仍是 `state='ready'`（此时复权行还是占位的 1，`adjustment_state='complete'`）。
+1b. **装计划任务**：`pwsh scripts\windows\install-adjustment-factor-task.ps1`
+   （每天 04:30，见 5.2）。盘后非门控阶段随发布自动生效，不需要另外安装。
+   两者都装好之后，新交易日不再需要人工补取；下面的步骤 2-6 只是**一次性修复**。
 2. **补取缺失日期**：在 04:00-08:00 维护窗里跑
    `python scripts/adjustment-factor-maintenance.py sync --lookback-days 30 --env-file G:\StockPlatform\config\runtime.env`
    把 09-01 ~ 09-18 里还没有 tushare 因子的日期补齐。
@@ -253,24 +281,74 @@ SELECT b.trading_date,
 
 ### 步骤 6 —— 守护查询（CI / 每次发布前，必须返回 0）
 
+判定条件已经**放宽**为"这张 bar 带着因子，存在因子证据，但**没有任何一行可提升的证据**"，
+而不是原来的"存在那一个 `same_day_identity_only` 标记"。一个不写标记的厂商占位
+原本对这条守护查询是隐形的，现在同样会被抓到。
+
 ```sql
 SELECT count(*)::bigint AS identity_leaks
-  FROM quant.canonical_bars_daily b
- WHERE b.adj_factor IS NOT NULL
-   AND EXISTS (SELECT 1 FROM quant.daily_adjustment_factors ident
-                WHERE ident.symbol = b.symbol AND ident.trading_date = b.trading_date
-                  AND ident.raw->>'factor_semantics' = 'same_day_identity_only')
-   AND NOT EXISTS (SELECT 1 FROM quant.daily_adjustment_factors f
-                WHERE f.symbol = b.symbol AND f.trading_date = b.trading_date
-                  AND f.provider LIKE 'tushare%');
--- 修复前返回 35573；步骤 1 之后必须是 0，并永远保持 0。
+  FROM quant.canonical_bars_daily bar
+ WHERE bar.adj_factor IS NOT NULL
+   AND EXISTS (SELECT 1 FROM quant.daily_adjustment_factors evidence
+                WHERE evidence.symbol = bar.symbol AND evidence.trading_date = bar.trading_date)
+   AND NOT EXISTS (SELECT 1 FROM quant.daily_adjustment_factors promotable
+                WHERE promotable.symbol = bar.symbol AND promotable.trading_date = bar.trading_date
+                  AND promotable.provider LIKE 'tushare%'
+                  AND coalesce(promotable.raw->>'factor_semantics','')
+                      IN ('','corporate_action_cumulative'));
+-- 修复前返回 35573（放宽前后在当前生产库上同为 35573，只读实测 2026-09-19；
+-- market_bars_daily 两者同为 0）；步骤 1 之后必须是 0，并永远保持 0。
 -- 同一条 SQL：app/adjustment_factor_maintenance.identity_factor_leak_sql('canonical_bars_daily')
 -- market_bars_daily 用同一函数换表名即可。
 ```
 
 ---
 
-## 5. 维护任务：`scripts/adjustment-factor-maintenance.py`
+## 5. 自动触发：两个入口
+
+修复上线后，longhu 晚上没有任何厂商提供公司行为历史，因此**必须有自动触发**，
+否则每个新交易日的 `adj_factor` 永久为 `NULL`，整个复权价栈天天失败关闭而无人补救。
+这里有两个入口，职责不同：
+
+### 5.1 盘后非门控阶段 `adjustment_factors`
+
+`POST_CLOSE_STAGE_ORDER` 里排在 `full_market_daily` → `core_daily_controls` **之后**
+（因子抓取要先有当日结算截面），执行 `app.main.sync_adjustment_factors_post_close()`
+→ `adjustment_factor_maintenance.post_close_sync()`，回看 `POST_CLOSE_LOOKBACK_DAYS = 5` 天。
+
+**它不判断任何东西。** 具体保证：
+
+- 它在 `post_close_refresh.NON_GATING_STAGES` 里，所以 `run_refresh` 计算
+  `deferred_stages` 时把它排除 → 它 `blocked`/`failed` **不会**把整轮变成 `partial`；
+  仍然出现在 `stages` 里，并另外列进 `non_gating_stages_needing_attention`。
+- 它**不在** `POST_CLOSE_STAGE_DEPENDENCIES` 的任何一边：既不被谁阻塞，也不阻塞谁。
+- 它与 `controls_ready` 无关（那只看 `core_daily_controls`）。
+
+理由：复权因子是另一条 provider 路线，它的可用性绝不能拖慢或拖垮晚间收盘流水线；
+但"今晚就补一次"能让绝大多数交易日在当晚就拿到真因子。
+
+### 5.2 计划任务 `trading-hareness-adjustment-factors`（每天 04:30）
+
+```
+pwsh scripts\windows\install-adjustment-factor-task.ps1
+# 默认 RepositoryRoot/HostRoot = G:\StockPlatform\current，LookbackDays = 30
+```
+
+- `scripts/windows/run-adjustment-factor-maintenance.ps1`：先清掉继承来的
+  `http_proxy`/`https_proxy`/`all_proxy`（桌面代理会把一条能用的 tushare 路线
+  变成每晚的假失败），再用**当前 venv** 的 python 调
+  `scripts/adjustment-factor-maintenance.py sync --lookback-days 30 --env-file ...`，
+  逐行写入 `G:\StockPlatform\logs\adjustment-factors\<date>.log`，并透传退出码。
+  runtime.env 只以**路径**交给 Python，PowerShell 侧从不读出任何凭据值。
+- 安装器沿用其它任务一样的隐藏启动器（`New-HiddenPowerShellTaskAction`
+  + `stock-background-host.exe`），`-Hidden -MultipleInstances IgnoreNew`，
+  执行时限 45 分钟，**没有 restart-on-failure、没有 repetition**：工作清单每次
+  都从真实因子覆盖率重算，漏跑一晚下一晚自然补上；重试一条挂掉的 provider
+  只会成倍增加请求。
+- 契约测试：`scripts/windows/tests/test-adjustment-factor-task-contract.ps1`
+  （不注册任务、不连库、不发请求）。
+
+### 5.3 CLI 与退出码
 
 ```
 python scripts/adjustment-factor-maintenance.py sync \
@@ -279,21 +357,39 @@ python scripts/adjustment-factor-maintenance.py sync \
     [--dry-run]
 ```
 
-- **在盘后流水线之外运行**，属于 04:00-08:00 维护窗，以及本次一次性修复。
-  复权因子来自另一个 provider，它的可用性绝不能拖慢或拖垮晚间收盘流水线。
 - `pending_dates()`：回看窗口内、`quant.market_trade_calendar` 判定为开市日、
   `quality_status IN ('fresh','partial')` 的结算 bar 中，
-  **在 `quant.daily_adjustment_factors` 里有真实 tushare 累计因子**（provider 以
-  `tushare` 开头且 `factor_semantics` 不是 `same_day_identity_only`）的比例低于
-  `ceil(0.95 * count(*))` 的交易日。阈值复用
+  **在 `quant.daily_adjustment_factors` 里有真实累计因子**的比例低于
+  `ceil(0.95 * count(*))` 的交易日。"真实"用的是和写入方同一条正向规则
+  （`REAL_FACTOR_PREDICATE_SQL`：provider 以 `tushare` 开头，且语义缺省或
+  `corporate_action_cumulative`），不是"不等于那一个占位标记"——否则一个
+  不写标记的厂商占位同样能冒充覆盖。阈值复用
   `daily_control_plane.MINIMUM_ALL_A_COVERAGE_RATIO`。
   判定问的是因子表而不是 bar 上的 `adj_factor`，所以修复前后都成立。
 - 每个待补日期调用 `full_market_daily_controls_sync.sync(date, apis=('adj_factor',), ...)`，
-  单日失败不终止整轮（`status` 变为 `partial`）。
+  单日失败不终止整轮。每个日期归为三种 `outcome` 之一：
+
+  | outcome | 触发条件 | 影响 |
+  |---|---|---|
+  | `completed` | 抓取并提升成功 | 清掉该日期的"连续被拒"计数 |
+  | `skipped` | `blocked` 且 `blocked_by='coverage'`（当日日线截面不够 95%） | **不算失败**，带 `reason` 上报 |
+  | `failed` | 抛异常，或 `blocked_by` 是 `provider` / `executor_saturated` | 整轮 `status='failed'` |
+
+- **退出码：只有 `status='failed'` 才返回 1**，其余（`completed` / `planned` /
+  `unchanged` / `skipped`）返回 0。原因：这条车道修不了别人家的日线截面，
+  一个永远过不了覆盖率闸门的日期会让计划任务**每晚**报错，报到没人再看。
+- **连续被拒 5 次后退出清单**：每个被覆盖率拒绝的日期在
+  `quant.automation_runs`（`task_key='adjustment_factor_maintenance.blocked_date'`，
+  `run_key='adjustment-factor-blocked:<date>'`）累计 `consecutive_blocked_runs`。
+  达到 `MAX_CONSECUTIVE_BLOCKED_RUNS = 5` 时**写一次**
+  `quant.data_quality_issues` 回执（`code='adjustment_factor_date_retired'`）
+  并从此不再出现在工作清单里（`sync()` 结果的 `retired_dates`）。之后再被拒不再重复
+  告警。任何一次抓取成功都会把计数清零，该日期重新回到清单。
+  要手动让一个日期回到清单：先修当天的日线覆盖率，再删掉那一行 `automation_runs`
+  （或等下一次成功抓取自动清零）。
 - `--dry-run` 只解析并打印待处理日期，不发 provider 请求、不写库。
 - stdout 是 ASCII-only JSON（任务宿主控制台是 GBK）；env 文件只写进 `os.environ`，
   任何凭据值都不会被打印或落盘。
-- 退出码：`completed` / `planned` / `unchanged` → 0；`partial` → 1。
 
 ---
 
@@ -341,4 +437,7 @@ python scripts/adjustment-factor-maintenance.py sync \
 - **覆盖率闸门错配**：`full_market_daily_controls_sync.sync()` 要求截面覆盖 ≥95% 的
   `daily_row_count()`，后者本身在 canonical 覆盖率不足 95% 时返回 0。longhu 日的 canonical
   截面约 5,130，all_a（已排除 BJ）期望约 5,248，通常能过；但若某天不过，
-  只跑 adj_factor 的任务会在开始前就被拒绝并报 `blocked`。届时先修当日 daily 覆盖。
+  只跑 adj_factor 的任务会在开始前就被拒绝并报 `blocked`，`blocked_by='coverage'`。
+  这类日期现在**记为 `skipped` 而不是失败**（退出码仍是 0），连续 5 次被拒后带一次性
+  回执退出工作清单（见 5.3）。**届时该修的仍然是当日 daily 覆盖**：这条车道修不了它，
+  退出清单只是让告警不再每晚重复，不是把问题解决掉。

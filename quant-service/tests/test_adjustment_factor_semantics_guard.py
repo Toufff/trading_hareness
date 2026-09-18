@@ -18,6 +18,7 @@ DB-backed suite.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import unittest
@@ -32,16 +33,23 @@ from app.adjustment_factor_maintenance import (
 APP = Path(__file__).resolve().parents[1] / "app"
 
 #: Every module allowed to promote a factor onto a bar table (``SET
-#: adj_factor``), with the guard that keeps a vendor placeholder out of that
+#: adj_factor``), with the guards that keep a non-promotable factor out of that
 #: write.  The bar upsert repositories are deliberately absent: they carry a
 #: value forward from the bar payload itself and never read a factor row.
+#:
+#: The check is per WRITE SITE, not per file: the enclosing function of every
+#: match must contain one of its module's guards.  A file-level substring match
+#: was what let ``annual_daily_backfill._persist_adj_factor`` -- a second,
+#: completely unguarded promotion into both bar tables -- pass while only
+#: ``reconcile_suspensions`` in the same file carried a guard.
 PINNED_BAR_FACTOR_WRITERS = {
-    # The single factor-row -> bar-field promotion; gated on declared semantics.
-    "tushare_normalization.py": "promotable_adjustment_factor(row)",
-    # Range reconciliation; excludes identity rows from the DISTINCT ON candidates.
-    "annual_daily_backfill.py": "<> 'same_day_identity_only'",
+    # The per-row factor-row -> bar-field promotion; gated on provider + semantics.
+    "tushare_normalization.py": ("promotable_adjustment_factor(row, provider_key=provider_key)",),
+    # Two set-based write sites: the stage promotion embeds the SQL twin of the
+    # semantics rule, the range reconciliation excludes identity candidates.
+    "annual_daily_backfill.py": ("_PROMOTABLE_FACTOR_SQL", "<> 'same_day_identity_only'"),
     # Copies only the provider that actually answered this fetch (a tushare route).
-    "full_market_daily_controls_sync.py": 'results["adj_factor"].provider.key',
+    "full_market_daily_controls_sync.py": ('results["adj_factor"].provider.key',),
 }
 
 #: The producer form the rule forbids outright: no code may build a row that
@@ -55,6 +63,32 @@ _BAR_FACTOR_WRITE = re.compile(
     r"SET\s+adj_factor[^;]{0,400}?(canonical_bars_daily|market_bars_daily)",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+def bar_factor_write_sites(text: str) -> dict[str, str]:
+    """Return {enclosing function name: its source} for every bar-factor write.
+
+    The innermost enclosing function wins, so a guard sitting in some unrelated
+    part of the same module cannot vouch for this write.  A write at module
+    level (there are none today) falls back to the whole module.
+    """
+    if not _BAR_FACTOR_WRITE.search(text):
+        return {}
+    sites: dict[str, str] = {}
+    for node in ast.walk(ast.parse(text)):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        segment = ast.get_source_segment(text, node)
+        if segment and _BAR_FACTOR_WRITE.search(segment):
+            # Keep the tightest slice when functions are nested.
+            existing = sites.get(node.name)
+            if existing is None or len(segment) < len(existing):
+                sites[node.name] = segment
+    # Drop an outer function whose write lives in a nested one: the nested
+    # function is the real write site and the tighter slice.
+    inner = {name: segment for name, segment in sites.items()
+             if not any(other is not segment and other in segment for other in sites.values())}
+    return inner or sites or {"<module>": text}
 
 
 class BarFactorWriterAllowlistTests(unittest.TestCase):
@@ -71,10 +105,45 @@ class BarFactorWriterAllowlistTests(unittest.TestCase):
             "a module started writing adj_factor onto a bar table; pin it here together "
             "with the guard that keeps a vendor placeholder out of that write")
 
-    def test_each_pinned_writer_still_carries_its_placeholder_guard(self):
-        for name, guard in PINNED_BAR_FACTOR_WRITERS.items():
-            with self.subTest(module=name):
-                self.assertIn(guard, (APP / name).read_text(encoding="utf-8"))
+    def test_every_write_site_carries_a_guard_inside_its_own_slice(self):
+        for name, guards in PINNED_BAR_FACTOR_WRITERS.items():
+            text = (APP / name).read_text(encoding="utf-8")
+            sites = bar_factor_write_sites(text)
+            self.assertTrue(sites, f"{name} no longer has a recognisable bar-factor write site")
+            for site_name, segment in sites.items():
+                with self.subTest(module=name, site=site_name):
+                    self.assertTrue(
+                        any(guard in segment for guard in guards),
+                        f"{name}:{site_name} writes adj_factor onto a bar table with none of "
+                        f"the pinned guards {guards} inside that function; a guard elsewhere in "
+                        "the same file does not protect this write")
+
+    def test_every_pinned_guard_is_actually_used_by_a_write_site(self):
+        # Keeps the allowlist honest in the other direction: a guard that no
+        # write site uses any more is a stale pin, not extra safety.
+        for name, guards in PINNED_BAR_FACTOR_WRITERS.items():
+            sites = bar_factor_write_sites((APP / name).read_text(encoding="utf-8"))
+            for guard in guards:
+                with self.subTest(module=name, guard=guard):
+                    self.assertTrue(
+                        any(guard in segment for segment in sites.values()),
+                        f"{name} pins guard {guard!r} that no bar-factor write site contains")
+
+    def test_the_slice_check_rejects_an_unguarded_second_write_site(self):
+        # The exact shape of the defect this replaced a file-level substring
+        # match for: one guarded promotion and one unguarded one in one module.
+        source = (
+            "def guarded(connection):\n"
+            "    if promotable:\n"
+            "        connection.execute('UPDATE quant.canonical_bars_daily SET adj_factor=1')\n"
+            "\n"
+            "def unguarded(connection):\n"
+            "    connection.execute('UPDATE quant.market_bars_daily SET adj_factor=1')\n"
+        )
+        sites = bar_factor_write_sites(source)
+        self.assertEqual(set(sites), {"guarded", "unguarded"})
+        self.assertIn("if promotable:", sites["guarded"])
+        self.assertNotIn("if promotable:", sites["unguarded"])
 
     def test_no_code_path_produces_an_identity_adjustment_factor_row(self):
         for path in sorted(APP.rglob("*.py")):
@@ -111,6 +180,15 @@ class BarFactorWriterAllowlistTests(unittest.TestCase):
             self.assertIn(f"quant.{table} bar", identity_factor_leak_sql(table))
         with self.assertRaises(ValueError):
             identity_factor_leak_sql("instruments")
+
+    def test_the_leak_query_asks_for_promotable_evidence_not_one_marker(self):
+        # "no promotable evidence exists" rather than "the one placeholder
+        # marker exists": a vendor that simply omits factor_semantics must be
+        # visible to the guard too.
+        sql = identity_factor_leak_sql("canonical_bars_daily")
+        self.assertIn("promotable.provider LIKE 'tushare%'", sql)
+        self.assertIn("IN ('','corporate_action_cumulative')", sql)
+        self.assertNotIn("same_day_identity_only", sql)
 
 
 @unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")

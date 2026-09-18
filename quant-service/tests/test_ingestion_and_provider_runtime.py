@@ -1342,11 +1342,27 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
         self.assertEqual(len(promotion), 1)
         self.assertEqual(promotion[0][0], Decimal("12.3456"))
 
+        # A vendor that simply OMITS factor_semantics is the same defect with
+        # one key removed, so the provider half of the rule has to refuse it.
+        silent = {"ts_code": "600664.SH", "trade_date": "20260918", "adj_factor": "1",
+                  "_provider": "longhuvip_composite"}
+        count, statements = run(silent)
+        self.assertEqual(count, 1)
+        self.assertTrue([sql for sql, _ in statements
+                         if "INSERT INTO quant.daily_adjustment_factors" in sql])
+        self.assertFalse([sql for sql, _ in statements
+                          if "UPDATE quant.canonical_bars_daily SET adj_factor" in sql])
+
         cumulative = dict(real, factor_semantics="corporate_action_cumulative")
-        self.assertTrue(promotable_adjustment_factor(cumulative))
-        self.assertTrue(promotable_adjustment_factor(real))
-        self.assertFalse(promotable_adjustment_factor(placeholder))
-        self.assertFalse(promotable_adjustment_factor({"factor_semantics": "anything_else"}))
+        tushare = {"provider_key": "tushare_super_get"}
+        self.assertTrue(promotable_adjustment_factor(cumulative, **tushare))
+        self.assertTrue(promotable_adjustment_factor(real, **tushare))
+        self.assertFalse(promotable_adjustment_factor(placeholder, **tushare))
+        self.assertFalse(promotable_adjustment_factor({"factor_semantics": "anything_else"}, **tushare))
+        # Both halves are required: a tushare-shaped row from another provider
+        # is evidence, never a bar field.
+        self.assertFalse(promotable_adjustment_factor(real, provider_key="longhuvip_composite"))
+        self.assertFalse(promotable_adjustment_factor(cumulative, provider_key=""))
 
     def test_adj_factor_capability_prefers_the_working_super_routes(self):
         """tushare_primary's adj_factor route is the one that fails with

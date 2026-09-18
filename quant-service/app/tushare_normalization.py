@@ -18,15 +18,48 @@ from .daily_bar_batch_repository import upsert_daily_bars
 #: placeholder -- is evidence about what a vendor did NOT supply.
 CUMULATIVE_FACTOR_SEMANTICS = "corporate_action_cumulative"
 
+#: The only provider family that publishes a corporate-action history for this
+#: market.  The semantics check below cannot stand on its own: a vendor that
+#: simply OMITS ``factor_semantics`` while sending ``adj_factor='1'`` would be
+#: promoted exactly like a real cumulative factor, which is the original defect
+#: with one key removed.  Requiring the provider as well means a new vendor is
+#: refused by default and has to be added here deliberately.
+PROMOTABLE_FACTOR_PROVIDER_PREFIX = "tushare"
 
-def promotable_adjustment_factor(row: dict[str, Any]) -> bool:
+#: Absent/empty semantics keep the historical behaviour for a plain tushare
+#: cross-section row, which carries no marker at all.
+PROMOTABLE_FACTOR_SEMANTICS = ("", CUMULATIVE_FACTOR_SEMANTICS)
+
+
+def promotable_factor_provider(provider_key: Any) -> bool:
+    """Return whether this provider may ever set ``adj_factor`` on a bar."""
+    return str(provider_key or "").startswith(PROMOTABLE_FACTOR_PROVIDER_PREFIX)
+
+
+def promotable_factor_predicate_sql(alias: str = "stage", column: str = "row_data") -> str:
+    """Return the SQL twin of :func:`promotable_adjustment_factor`'s semantics test.
+
+    Set-based writers (``annual_daily_backfill``) cannot call the Python
+    predicate per row, so they embed this fragment instead of copying the
+    literal.  The provider half of the rule is a scalar there and is checked
+    with :func:`promotable_factor_provider` before the statement runs.
+    """
+    values = ",".join(f"'{value}'" for value in PROMOTABLE_FACTOR_SEMANTICS)
+    return f"coalesce({alias}.{column}->>'factor_semantics','') IN ({values})"
+
+
+def promotable_adjustment_factor(row: dict[str, Any], *, provider_key: str) -> bool:
     """Return whether one ``adj_factor`` row may be written onto a daily bar.
 
-    A row that declares no ``factor_semantics`` at all is a plain tushare
-    cross-section row and keeps the historical behaviour.  A row that
-    declares something other than :data:`CUMULATIVE_FACTOR_SEMANTICS` is
-    stored as evidence but never promoted.
+    Both halves must hold.  ``provider_key`` must be a tushare route -- the
+    only family that publishes corporate-action history -- and the declared
+    semantics must be absent (a plain tushare cross-section row) or
+    :data:`CUMULATIVE_FACTOR_SEMANTICS`.  A row that fails either half is
+    still stored in ``quant.daily_adjustment_factors`` as evidence of what a
+    vendor did or did not supply; it simply never becomes a bar field.
     """
+    if not promotable_factor_provider(provider_key):
+        return False
     semantics = row.get("factor_semantics")
     if semantics in (None, ""):
         return True
@@ -109,11 +142,12 @@ def normalize_rows(
                     # becomes a bar field, and it used to be provider-agnostic:
                     # any vendor placeholder overwrote the bar exactly like a
                     # real cumulative tushare factor.  A row that declares its
-                    # own non-cumulative semantics stays evidence only.  The
-                    # check is on the declared semantics, not on a provider
-                    # allowlist, so a future vendor placeholder is caught by
-                    # construction rather than by remembering to extend a list.
-                    if promotable_adjustment_factor(row):
+                    # own non-cumulative semantics stays evidence only, and so
+                    # does any row from a provider that publishes no
+                    # corporate-action history -- a vendor that merely OMITS
+                    # the marker is refused by the provider half of the rule
+                    # rather than promoted like the original defect.
+                    if promotable_adjustment_factor(row, provider_key=provider_key):
                         connection.execute("UPDATE quant.canonical_bars_daily SET adj_factor=%s,canonicalized_at=now() WHERE symbol=%s AND trading_date=%s", (adj_factor, symbol, trading_date))
                 elif api_name == "daily_basic":
                     connection.execute("""INSERT INTO quant.daily_fundamentals(symbol,trading_date,close,turnover_rate,volume_ratio,pe,pb,total_share,float_share,total_mv,circ_mv,provider,available_at,raw)
@@ -155,4 +189,8 @@ def normalize_rows(
     return normalized
 
 
-__all__ = ["CUMULATIVE_FACTOR_SEMANTICS", "normalize_rows", "promotable_adjustment_factor"]
+__all__ = [
+    "CUMULATIVE_FACTOR_SEMANTICS", "PROMOTABLE_FACTOR_PROVIDER_PREFIX", "PROMOTABLE_FACTOR_SEMANTICS",
+    "normalize_rows", "promotable_adjustment_factor", "promotable_factor_predicate_sql",
+    "promotable_factor_provider",
+]

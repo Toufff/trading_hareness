@@ -48,6 +48,11 @@ from .capability_registry import api_capability
 from .database import AsyncDatabase, Database
 from .settings import Settings
 from . import daily_control_plane
+from .adjustment_factor_maintenance import (
+    AdjustmentFactorMaintenanceDependencies,
+    post_close_sync as adjustment_factor_post_close_sync,
+    sync as adjustment_factor_sync,
+)
 from .daily_control_plane import (
     DailyControlPlaneSyncDependencies,
     EQUITY_DAILY_CONTROL_STATUS_SQL,
@@ -1527,6 +1532,30 @@ async def sync_full_market_daily_controls(trade_date: date) -> dict[str, Any]:
     return await daily_control_plane.sync_full_market_daily_controls(
         trade_date, _daily_control_plane_sync_dependencies(),
     )
+
+
+def adjustment_factor_maintenance_dependencies() -> AdjustmentFactorMaintenanceDependencies:
+    """Compose the factor-repair lane's boundaries; no provider client is owned here."""
+    return AdjustmentFactorMaintenanceDependencies(
+        database=db, run_database=run_database_blocking,
+        call_tushare_api=call_tushare_api, parse_tushare_date=tushare_date,
+        persist_tushare_rows=persist_tushare_rows, persist_blocked=persist_tushare_fetch_blocked,
+        safe_error_detail=safe_error_detail, executor_saturated_error=ExecutorSaturatedError,
+        record_provider_success=record_provider_success, record_provider_failure=record_provider_failure,
+        record_provider_api_capability=record_provider_api_capability,
+    )
+
+
+async def sync_adjustment_factors(lookback_days: int = 30, *, dry_run: bool = False) -> dict[str, Any]:
+    """Maintenance-window entry point (scripts/adjustment-factor-maintenance.py)."""
+    return await adjustment_factor_sync(
+        adjustment_factor_maintenance_dependencies(), lookback_days=lookback_days, dry_run=dry_run,
+    )
+
+
+async def sync_adjustment_factors_post_close() -> dict[str, Any]:
+    """Non-gating post-close invocation of the same lane (see POST_CLOSE_STAGE_ORDER)."""
+    return await adjustment_factor_post_close_sync(adjustment_factor_maintenance_dependencies())
 
 
 def upsert_sector_taxonomy(connection: Any, taxonomy_key: str, label: str, provider_key: str, metadata: dict[str, Any]) -> None:
@@ -3686,7 +3715,9 @@ def _post_close_refresh_dependencies() -> PostCloseRefreshDependencies:
         rebuild_market_flow_features=rebuild_stored_market_flow_features,
         refresh_pattern_sources=refresh_strategy_pattern_sources, run_pattern_mining=run_strategy_pattern_mining,
         persist_settled_limit_pool=persist_settled_limit_pool,
-        sync_daily_controls=sync_full_market_daily_controls, sync_cninfo_announcements=sync_cninfo_announcements,
+        sync_daily_controls=sync_full_market_daily_controls,
+        sync_adjustment_factors=sync_adjustment_factors_post_close,
+        sync_cninfo_announcements=sync_cninfo_announcements,
         run_board_report=run_intraday_board_report, run_strategy_decision=run_strategy_decision,
         persist_close_review=_persist_close_review, recompute_outcomes=recompute_outcomes,
         recompute_intraday_outcomes=recompute_analyst_intraday_outcomes_for_date,

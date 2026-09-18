@@ -19,6 +19,16 @@ logger = get_logger(__name__)
 
 POST_CLOSE_RECEIPT_VERSION = "post-close-refresh-v6-dated-evidence"
 
+#: Stages that run inside the pipeline but never judge it.  A non-gating stage
+#: still gets its own durable receipt and still reports its own status in
+#: ``stages``, but it is excluded from ``deferred_stages`` and therefore from
+#: the run's ``partial`` verdict, and it must never appear in
+#: ``stage_dependencies`` on either side.  The only member today is the
+#: adjustment-factor lane: its provider is a separate route whose availability
+#: must not be able to fail the evening close path (see
+#: ``app/adjustment_factor_maintenance.py``).
+NON_GATING_STAGES = frozenset({"adjustment_factors"})
+
 
 async def record_stage_with_receipt(
     name: str,
@@ -119,6 +129,7 @@ async def run_refresh(
     stage_dependencies: dict[str, tuple[str, ...]] | None = None,
     record_stage: Callable[[str, date, Callable[[], Any]], Awaitable[Any]] | None = None,
     check_lease_fence: Callable[[Any, str, int], Awaitable[Any]] | None = None,
+    non_gating_stages: frozenset[str] | set[str] = NON_GATING_STAGES,
 ) -> dict[str, Any]:
     """Run durable post-close stages in their existing dependency order.
 
@@ -232,7 +243,18 @@ async def run_refresh(
             "sina": "not used for full-market close; bounded stock-study fallback only",
             "xinhua_finance": "skipped: no licensed endpoint/authentication configured",
         }
-        deferred = [name for name, item in stages.items() if item.get("status") in {"blocked", "failed"}]
+        # A non-gating stage reports its own status in ``stages`` but never
+        # turns the run into 'partial': it is not a correctness prerequisite
+        # for anything downstream, and a lane with its own provider must not be
+        # able to make a complete evening close look damaged.
+        deferred = [
+            name for name, item in stages.items()
+            if item.get("status") in {"blocked", "failed"} and name not in non_gating_stages
+        ]
+        non_gating_attention = [
+            name for name, item in stages.items()
+            if item.get("status") in {"blocked", "failed"} and name in non_gating_stages
+        ]
         daily = stages.get("full_market_daily", {"status": "blocked"})
         daily_ready = daily.get("status") in {"completed", "unchanged"}
         controls = stages.get("core_daily_controls", {"status": "blocked"})
@@ -247,6 +269,7 @@ async def run_refresh(
             "status": "completed" if not deferred else "partial", "trade_date": str(trade_date),
             "started_at": started_at.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat(),
             "daily_ready": daily_ready, "controls_ready": controls_ready, "deferred_stages": deferred,
+            "non_gating_stages_needing_attention": non_gating_attention,
             "retry_hint": retry_hint,
             "sources": sources, "stages": stages,
             "notice": "一键更新只保存研究证据和候选，不会自动下单或发送交易指令。",
@@ -266,4 +289,6 @@ async def run_refresh(
             )
 
 
-__all__ = ["POST_CLOSE_RECEIPT_VERSION", "record_stage_with_receipt", "run_refresh"]
+__all__ = [
+    "NON_GATING_STAGES", "POST_CLOSE_RECEIPT_VERSION", "record_stage_with_receipt", "run_refresh",
+]

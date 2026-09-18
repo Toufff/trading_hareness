@@ -6,7 +6,13 @@ from types import SimpleNamespace
 
 from pydantic import ValidationError
 
-from app.full_market_daily_controls_sync import CONTROL_PERSIST_TIMEOUT_SECONDS, sync, valid_rows
+from app.full_market_daily_controls_sync import (
+    CONTROL_PERSIST_TIMEOUT_SECONDS,
+    COVERAGE_BLOCK_REASON,
+    PROVIDER_BLOCK_REASON,
+    sync,
+    valid_rows,
+)
 from app.request_models import FullMarketDailyControlsSyncRequest
 
 
@@ -52,7 +58,46 @@ class FullMarketDailyControlsSyncTests(unittest.IsolatedAsyncioTestCase):
             record_provider_api_capability=lambda *_args, **_kwargs: None,
         )
         self.assertEqual(result["status"], "blocked")
+        # The caller has to be able to tell "this date's own cross-section is
+        # not good enough" from "the provider failed": only the second is the
+        # factor-maintenance job's failure.
+        self.assertEqual(result["blocked_by"], COVERAGE_BLOCK_REASON)
         self.assertFalse(called)
+
+    async def test_a_thin_cross_section_is_a_coverage_block_and_a_bad_route_is_a_provider_block(self):
+        async def run_db(action, *args, **_kwargs):
+            return action(*args)
+
+        def parse(value):
+            return date.fromisoformat(f"{str(value)[:4]}-{str(value)[4:6]}-{str(value)[6:8]}")
+
+        async def thin(_api_name, _params, _fields, _provider):
+            return SimpleNamespace(
+                rows=[{"ts_code": "000001.SZ", "trade_date": "20260918"}],
+                provider=SimpleNamespace(key="super_get"), failed_providers=())
+
+        async def refused(*_args, **_kwargs):
+            raise ConnectionError("adj_factor route is unavailable")
+
+        common = dict(
+            apis=("adj_factor",), parse_date=parse, persist_tushare_rows=lambda *_args: 1,
+            persist_blocked=lambda *_args: None, run_database_blocking=run_db, db=object(),
+            safe_error_detail=lambda value, _limit: value, executor_saturated_error=RuntimeError,
+            record_provider_success=lambda *_args: None, record_provider_failure=lambda *_args: None,
+            record_provider_api_capability=lambda *_args, **_kwargs: None,
+        )
+        coverage = await sync(
+            date(2026, 9, 18), expected_daily_rows=lambda _day: 5_000,
+            call_tushare_api=thin, **common)
+        self.assertEqual(coverage["status"], "blocked")
+        self.assertEqual(coverage["blocked_by"], COVERAGE_BLOCK_REASON)
+        self.assertIn("expected at least 95%", coverage["reason"])
+
+        provider = await sync(
+            date(2026, 9, 18), expected_daily_rows=lambda _day: 1,
+            call_tushare_api=refused, **common)
+        self.assertEqual(provider["status"], "blocked")
+        self.assertEqual(provider["blocked_by"], PROVIDER_BLOCK_REASON)
 
     async def test_complete_controls_reset_suspension_then_promote_all_apis(self):
         trade_date = date(2026, 8, 21)

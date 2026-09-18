@@ -54,8 +54,14 @@ provider response directly to a live threshold or order path.
   `1.0` is neither NULL nor `<= 0` and therefore sails past every fail-closed
   adjustment consumer while silently yielding an unadjusted series. NULL is the
   honest value for "not fetched yet"; those dates are filled out of band by
-  `scripts/adjustment-factor-maintenance.py sync`. A coverage or readiness check
-  must not read a NULL factor as a missing bar. See
+  `scripts/adjustment-factor-maintenance.py sync`, invoked automatically twice:
+  as the non-gating `adjustment_factors` post-close stage and by the daily
+  04:30 `trading-hareness-adjustment-factors` scheduled task. A coverage or
+  readiness check must not read a NULL factor as a missing bar. Promotion onto
+  a bar requires BOTH halves of
+  `tushare_normalization.promotable_adjustment_factor`: a tushare provider AND
+  absent/`corporate_action_cumulative` semantics — a vendor that merely omits
+  the marker is refused by the provider half. See
   `docs/ADJUSTMENT_FACTOR_SEMANTICS.md`.
 
 ## Agent workflow
@@ -120,9 +126,15 @@ this file and `docs/ARCHITECTURE.md` in the same change:
 - `quant-service/tests/test_adjustment_factor_semantics_guard.py` — enforces
   "bar tables never receive a placeholder adjustment factor": no module may
   build a `factor_semantics: same_day_identity_only` row, only the pinned
-  writers may `SET adj_factor` on a bar table and each must still carry its
-  placeholder guard, and (with `PGHOST`) the release leak query is exercised
+  writers may `SET adj_factor` on a bar table, EVERY write site (the enclosing
+  function of each match, not the file) must contain one of its module's
+  pinned guards, and (with `PGHOST`) the release leak query is exercised
   against real PostgreSQL.
+- `scripts/windows/tests/test-adjustment-factor-task-contract.ps1` — static
+  contract for the 04:30 `trading-hareness-adjustment-factors` task: daily
+  trigger, release-rooted hidden launcher, no restart-on-failure, cleared
+  proxy variables, dated log file and the exit-code rule the schedule relies
+  on. Registers no task and touches no database.
 
 ## Review automation
 

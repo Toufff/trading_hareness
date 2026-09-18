@@ -5,7 +5,37 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from .adjustment_factor_maintenance import pending_dates_between
+from .adjustment_factor_maintenance import REAL_FACTOR_PREDICATE_SQL, pending_dates_between
+
+
+#: Symbol-scoped adjustment coverage for one study window.
+#:
+#: The count deliberately excludes placeholders (it asks for a REAL cumulative
+#: factor, i.e. a tushare row whose declared semantics are absent or
+#: cumulative), because the repair runbook only ANNOTATES the placeholder rows
+#: and never deletes them: a bare ``count(*) > 0`` would report ``ready``
+#: forever on exactly the symbols and dates that are still damaged.
+#:
+#: ``uncovered_dates`` is the settled exchange sessions of THIS symbol that have
+#: no such factor, which is what turns the market-wide maintenance work list
+#: into a per-symbol verdict.
+ADJUSTMENT_WINDOW_SQL = f"""WITH settled AS (
+       SELECT bar.trading_date FROM quant.canonical_bars_daily bar
+        WHERE bar.symbol=%s AND bar.trading_date BETWEEN %s AND %s
+          AND bar.quality_status IN ('fresh','partial')
+          AND EXISTS (SELECT 1 FROM quant.market_trade_calendar calendar
+                       WHERE calendar.calendar_date=bar.trading_date AND calendar.is_open)
+   ), factored AS (
+       SELECT DISTINCT factor.trading_date
+         FROM quant.daily_adjustment_factors factor
+        WHERE factor.symbol=%s AND factor.trading_date BETWEEN %s AND %s
+          AND {REAL_FACTOR_PREDICATE_SQL}
+   ) SELECT (SELECT count(*) FROM factored)::int AS rows,
+            (SELECT max(trading_date) FROM factored) AS latest_date,
+            (SELECT count(*) FROM settled)::int AS settled_sessions,
+            coalesce((SELECT array_agg(trading_date ORDER BY trading_date) FROM settled
+                       WHERE trading_date NOT IN (SELECT trading_date FROM factored)),
+                     ARRAY[]::date[]) AS uncovered_dates"""
 
 
 _SPECS = (
@@ -33,13 +63,53 @@ def raw_api_window_summary(connection: Any, api_name: str, symbol: str, start_da
     return {"rows": int(row["rows"] or 0), "latest_date": row["latest_date"]}
 
 
+def _adjustment_item(label: str, priority: str, adjustment: Any,
+                     adjustment_pending: set[date]) -> dict[str, Any]:
+    """Derive the adj_factor readiness item from real, symbol-scoped coverage.
+
+    ``ready`` means every settled session of THIS symbol in the window carries
+    a real cumulative factor.  ``pending`` means the ones that do not are all
+    on the maintenance job's work list, so they are expected to arrive.
+    Anything else is ``missing`` -- including the mixed case, which fails
+    closed rather than advertising a window the factor job will not complete.
+    """
+    rows = int((adjustment or {}).get("rows") or 0)
+    latest_date = (adjustment or {}).get("latest_date")
+    settled_sessions = int((adjustment or {}).get("settled_sessions") or 0)
+    uncovered = list((adjustment or {}).get("uncovered_dates") or [])
+    queued = [value for value in uncovered if value in adjustment_pending]
+    if not uncovered and settled_sessions and rows:
+        status, note = "ready", (
+            f"complete: all {settled_sessions} settled session(s) in this window carry a real "
+            "cumulative factor for this symbol")
+    elif uncovered and len(queued) == len(uncovered):
+        status, note = "pending", (
+            f"pending: {len(uncovered)} of {settled_sessions} settled session(s) have no real "
+            "cumulative factor yet and are queued for the adjustment-factor maintenance job "
+            "(scripts/adjustment-factor-maintenance.py sync)")
+    elif uncovered:
+        status, note = "missing", (
+            f"missing: {len(uncovered)} of {settled_sessions} settled session(s) have no real "
+            f"cumulative factor and only {len(queued)} of them are on the maintenance work list; "
+            "adjusted prices over this window fail closed")
+    else:
+        status, note = "missing", (
+            "missing: no settled session in this window carries a real cumulative factor "
+            "(placeholder rows are deliberately not counted)")
+    return {"api_name": "adj_factor", "label": label, "priority": priority, "rows": rows,
+            "latest_date": str(latest_date) if latest_date else None, "status": status,
+            "settled_sessions": settled_sessions,
+            "pending_dates": [str(value) for value in queued],
+            "missing_dates": [str(value) for value in uncovered if value not in adjustment_pending],
+            "note": note}
+
+
 def stock_window_readiness(database: Any, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
     """Report only locally persisted evidence; never trigger a provider call."""
     table_by_api = {
         "daily": "quant.canonical_bars_daily",
         "daily_basic": "quant.daily_fundamentals",
         "stk_limit": "quant.daily_trade_limits",
-        "adj_factor": "quant.daily_adjustment_factors",
     }
     with database.transaction() as connection:
         # Adjustment factors arrive on their own maintenance lane, so an empty
@@ -48,9 +118,16 @@ def stock_window_readiness(database: Any, symbol: str, start_date: date, end_dat
         # read as a bare "missing" -- and before the identity placeholder was
         # removed they both read as a false "ready".
         adjustment_pending = set(pending_dates_between(connection, start_date, end_date))
+        adjustment = connection.execute(
+            ADJUSTMENT_WINDOW_SQL,
+            (symbol, start_date, end_date, symbol, start_date, end_date),
+        ).fetchone()
         items: list[dict[str, Any]] = []
         for api_name, label, priority in _SPECS:
             table = table_by_api.get(api_name)
+            if api_name == "adj_factor":
+                items.append(_adjustment_item(label, priority, adjustment, adjustment_pending))
+                continue
             if table is not None:
                 row = connection.execute(
                     f"""SELECT count(*)::int rows,max(trading_date) latest_date
@@ -62,20 +139,9 @@ def stock_window_readiness(database: Any, symbol: str, start_date: date, end_dat
             else:
                 summary = raw_api_window_summary(connection, api_name, symbol, start_date, end_date)
                 rows, latest_date = summary["rows"], summary["latest_date"]
-            item = {"api_name": api_name, "label": label, "priority": priority, "rows": rows,
-                    "latest_date": str(latest_date) if latest_date else None,
-                    "status": "ready" if rows > 0 else "missing"}
-            if api_name == "adj_factor":
-                item["note"] = (
-                    f"pending: {len(adjustment_pending)} settled trade date(s) in this window are "
-                    "queued for the adjustment-factor maintenance job "
-                    "(scripts/adjustment-factor-maintenance.py sync)"
-                    if adjustment_pending else
-                    "missing: no cumulative factor has ever been fetched for this window"
-                    if rows == 0 else
-                    "complete: every settled trade date in this window carries a cumulative factor"
-                )
-            items.append(item)
+            items.append({"api_name": api_name, "label": label, "priority": priority, "rows": rows,
+                          "latest_date": str(latest_date) if latest_date else None,
+                          "status": "ready" if rows > 0 else "missing"})
     blockers = [item["api_name"] for item in items if item["priority"] == "P0" and item["status"] != "ready"]
     return {"symbol": symbol, "window_start": str(start_date), "window_end": str(end_date),
             "mode": "on_demand_single_stock_window", "decision_ready": not blockers,
@@ -108,4 +174,6 @@ def stock_study_claims(database: Any, symbol: str) -> tuple[list[dict[str, Any]]
     }
 
 
-__all__ = ["raw_api_window_summary", "stock_study_claims", "stock_window_readiness"]
+__all__ = [
+    "ADJUSTMENT_WINDOW_SQL", "raw_api_window_summary", "stock_study_claims", "stock_window_readiness",
+]
