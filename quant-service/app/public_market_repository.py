@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Json
 
 from .analysis import as_utc
+from .daily_bar_repository import in_instrument_lock_order
 from .instrument_registry import ensure_instruments
 from .market_flow_features import market_event_identity_key
 from .market_rules import cn_today
@@ -189,7 +190,14 @@ def persist_free_daily(
     if not valid_bars and not unsettled_rejections and not malformed_count:
         return 0
     with database.transaction() as connection:
-        for bar in valid_bars:
+        # Ascending (symbol, trading_date), not the provider's row order: the
+        # injected ``upsert_bar`` re-locks quant.instruments with ON CONFLICT
+        # DO UPDATE once per bar inside this one transaction, so this loop --
+        # not that statement's own ORDER BY 1 -- owns the lock order.  Sorting
+        # here rather than hoisting an ensure_instruments call keeps the
+        # exchange/source/updated_at maintenance that DO UPDATE performs and
+        # DO NOTHING would drop.
+        for bar in in_instrument_lock_order(valid_bars):
             upsert_bar(connection, bar)
         for symbol, trading_date in unsettled_rejections:
             _record_unsettled_daily_row_issue(connection, provider, symbol, trading_date)

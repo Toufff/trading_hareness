@@ -23,13 +23,18 @@ provider response directly to a live threshold or order path.
   the return value, never from its own raw input.
 
   **The rule, which is enforced and not a roster:** every write to
-  `quant.instruments` anywhere under `quant-service/app` or `scripts` either
-  goes through this module or is a set-based statement carrying `ORDER BY 1`
-  between itself and its `ON CONFLICT` clause.
-  `quant-service/tests/test_instrument_writer_lock_order.py` walks both trees
-  and fails on the first exception; there is no allow-list to add a new writer
-  to, so a per-row `VALUES(...) ON CONFLICT` loop fails on the day it is
-  written. Do not answer that failure by listing the writer somewhere.
+  `quant.instruments` anywhere in this repository either goes through this
+  module or is a set-based statement carrying `ORDER BY 1` between itself and
+  its `ON CONFLICT` clause, and it spells its table name literally.
+  `quant-service/tests/test_instrument_writer_lock_order.py` walks every `.py`
+  outside tests and vendored trees — `quant-service` (including
+  `database_bootstrap.py` and `entrypoint.py`, which open the same database
+  from outside `app/`), `scripts`, `legacy`, `workflows`, `deploy` — matches
+  the statement case-insensitively, and fails on the first exception. There is
+  no allow-list to add a new writer to, so a per-row `VALUES(...) ON CONFLICT`
+  loop fails on the day it is written, and so does an
+  `f"INSERT INTO {SCHEMA}.instruments(...)"` that would hide from the search.
+  Do not answer that failure by listing the writer somewhere.
 
   `ORDER BY 1` is the shared ascending lock order, and it is a correctness
   property, not a tidy-output habit: `ON CONFLICT DO UPDATE` row-locks every
@@ -46,9 +51,31 @@ provider response directly to a live threshold or order path.
   What the rule does not cover, and what still needs judgement: a writer that
   registers symbols in one statement and then re-locks the same rows later in
   the same transaction is ordered only if **both** statements are. And a
-  writer whose symbols come from a caller loop — `persist_plan` called once
-  per plan by `scripts/trade-discipline.py` — is ordered by that loop, not by
-  its own statement, so the loop sorts.
+  single-symbol writer driven once per item by a caller loop is ordered by
+  that loop, not by its own statement, so **the loop sorts**. Both shapes
+  exist today and both are covered by a caller-level test rather than by the
+  guard, which cannot see them:
+
+  - `trade_discipline.repository.persist_plan`, driven once per plan by
+    `scripts/trade-discipline.py:219`. Sorts on `plan.symbol`; pinned by
+    `GenerateLockOrderTests` in `quant-service/tests/test_trade_discipline_cli.py`.
+  - `daily_bar_repository.upsert_daily_bar`, driven once per bar by four
+    multi-symbol callers: `main.persist_daily_bar_batch`, `main.import_bars`,
+    `public_market_repository.persist_free_daily` and
+    `tushare_normalization`'s per-row fallback. All four iterate
+    `daily_bar_repository.in_instrument_lock_order(bars)` — ascending
+    `(symbol, trading_date)` — rather than their payload order; pinned by
+    `quant-service/tests/test_daily_bar_caller_lock_order.py`, which also
+    fails any *new* loop under `quant-service/app` that drives a one-bar
+    writer over an unordered iterable. They sort rather than hoisting one
+    `ensure_instruments` call because that primitive cannot carry `industry`,
+    the three-valued `is_st`, or the `exchange`/`source`/`updated_at` refresh
+    their `ON CONFLICT DO UPDATE` performs; a lock-order fix must not change
+    what is stored.
+
+  If you add a caller loop of your own, add its test here too. The list above
+  is a map of the two known shapes, not a partition of the writers — the
+  partition is the guard test, and it has no allow-list.
 - `quant-service/app/*_scheduler.py`: timing, retry windows and idempotency only.
 - `quant-service/app/*_rules.py` / `*_research.py`: pure or research-only rules.
 - `quant-service/app/main.py`: composition root by design, but historically
@@ -142,10 +169,17 @@ this file and `docs/ARCHITECTURE.md` in the same change:
   commit/release boundary, secret-state ignores and live-acceptance wording in
   the repository contract.
 - `quant-service/tests/test_instrument_writer_lock_order.py` — walks every
-  `.py` under `quant-service/app` and `scripts` and requires each write to
-  `quant.instruments` to live in `app/instrument_registry.py` or carry
-  `ORDER BY 1` before its `ON CONFLICT` clause. No allow-list: a new writer
-  fails here until it takes the shared ascending lock order.
+  `.py` in the repository outside tests and vendored trees and requires each
+  write to `quant.instruments` to live in `app/instrument_registry.py` or
+  carry `ORDER BY 1` before its `ON CONFLICT` clause, to sit outside any
+  loop, and to spell its table name literally. The match ignores case and
+  whitespace. No allow-list: a new writer fails here until it takes the
+  shared ascending lock order.
+- `quant-service/tests/test_daily_bar_caller_lock_order.py` — the half the
+  guard above cannot see: the four callers that drive
+  `daily_bar_repository.upsert_daily_bar` once per bar must iterate
+  `in_instrument_lock_order(bars)`, and any fifth such loop under
+  `quant-service/app` fails here.
 
 ## Review automation
 

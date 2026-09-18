@@ -58,7 +58,7 @@ from .async_provider_circuit_repository import open_provider_keys as read_async_
 from .async_market_session_repository import realtime_market_session as read_async_realtime_market_session
 from .async_market_session_repository import sse_calendar_open as read_async_sse_calendar_open
 from .async_market_session_repository import sse_calendar_status as read_async_sse_calendar_status
-from .daily_bar_repository import exchange_for, upsert_daily_bar
+from .daily_bar_repository import exchange_for, in_instrument_lock_order, upsert_daily_bar
 from .sector_membership_repository import (
     persist_observed_snapshot as persist_observed_sector_snapshot,
     persist_ths_snapshot as persist_ths_sector_snapshot,
@@ -987,7 +987,11 @@ def persist_daily_bar_batch(bars: list[DailyBar]) -> int:
     if not bars:
         return 0
     with db.transaction() as connection:
-        for bar in bars:
+        # Ascending (symbol, trading_date), not provider order.  A single
+        # response can span the whole QUANT_UNIVERSE cross-section, and every
+        # bar re-locks quant.instruments with ON CONFLICT DO UPDATE inside
+        # THIS one transaction -- see daily_bar_repository.in_instrument_lock_order.
+        for bar in in_instrument_lock_order(bars):
             upsert_bar(connection, bar)
     return len(bars)
 
@@ -4777,7 +4781,10 @@ app.include_router(build_research_actions_router(ResearchActionDependencies(
 
 def import_bars(payload: BarsImport) -> dict[str, int]:
     with db.transaction() as connection:
-        for bar in payload.bars:
+        # Operator-supplied payloads arrive in whatever order the file had;
+        # two concurrent imports over overlapping symbols is the same lock
+        # cycle as an ingestion run, so take the shared ascending order.
+        for bar in in_instrument_lock_order(payload.bars):
             upsert_bar(connection, bar)
     return {"imported": len(payload.bars)}
 

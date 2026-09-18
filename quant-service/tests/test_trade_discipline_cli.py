@@ -233,5 +233,105 @@ class GenerationWarningTests(unittest.TestCase):
         self.assertIn("bars_stale_day:2026-09-21:last_settled:2026-09-18", warnings[0])
 
 
+class _FakePlan:
+    """Only the attributes ``command_generate``'s persist block reads."""
+
+    def __init__(self, symbol):
+        self.symbol = symbol
+        self.name = symbol
+        self.stage = "hold"
+        self.plan_kind = "position"
+        self.status = "active"
+        self.plan_key = f"key:{symbol}"
+        self.trading_date = date(2026, 9, 18)
+        self.valid_until = date(2026, 9, 19)
+        self.quality = []
+        self.sizing = None
+        self.lines = []
+        self.inputs_hash = f"hash:{symbol}"
+        self.evidence_refs = []
+        self.supersedes_plan_id = None
+
+    def model_dump(self, **_kwargs):
+        return {"symbol": self.symbol}
+
+
+class GenerateLockOrderTests(unittest.TestCase):
+    """The persist loop's order is a lock order, and nothing else pins it.
+
+    Every ``persist_plan`` registers its instrument through
+    ``ensure_named_instruments`` -- ``ON CONFLICT DO UPDATE``, the strongest
+    lock class on ``quant.instruments`` -- and all of these calls share ONE
+    transaction, so two operators running this command over overlapping
+    holdings in different ``--symbol`` orders is the cycle
+    ``app/instrument_registry.py`` documents.  ``persist_plan`` is
+    single-symbol, so every repository-level test passes either way, and the
+    repository-wide guard cannot see the sort at all: its loop check is
+    lexical and the SQL literal lives in ``app/instrument_registry.py``, not
+    here.  Deleting the ``sorted(...)`` in ``command_generate`` therefore
+    left the whole suite green until this test existed.
+    """
+
+    def _run(self, symbols):
+        from unittest.mock import patch
+
+        from app.trade_discipline import inputs as inputs_module
+        from app.trade_discipline import repository
+
+        persisted = []
+
+        def persist_plan(_connection, plan, **_kwargs):
+            persisted.append(plan.symbol)
+            return {"plan_id": f"id:{plan.symbol}", "status": "active", "content_hash": "c",
+                    "plan": {"plan_key": plan.plan_key, "content_hash": "c", "status": "active"}}
+
+        async def collect(*_args, **kwargs):
+            symbol = kwargs["symbol"]
+
+            class _Inputs:
+                def model_dump(self, **_k):
+                    return {"symbol": symbol}
+
+            return _Inputs()
+
+        args = cli.build_parser().parse_args(
+            ["generate", *[token for symbol in symbols for token in ("--symbol", symbol)],
+             "--as-of", "2026-09-18T15:30"])
+        with patch.object(inputs_module, "collect", collect), \
+             patch.object(inputs_module, "inputs_hash", lambda _payload: "run-hash"), \
+             patch("app.trade_discipline.generator.generate",
+                   side_effect=lambda generation_inputs: _FakePlan(generation_inputs.model_dump()["symbol"])), \
+             patch("app.trade_discipline.report.write_report", return_value={}), \
+             patch.object(repository, "persist_generation_run", lambda *_a, **_k: None), \
+             patch.object(repository, "persist_plan", persist_plan):
+            receipt = cli.command_generate(args, FakeDatabase())
+        return receipt, persisted
+
+    def test_plans_are_persisted_in_ascending_symbol_order(self):
+        receipt, persisted = self._run(["600613.SH", "000001.SZ"])
+        self.assertEqual(persisted, ["000001.SZ", "600613.SH"])
+        self.assertEqual(receipt["errors"], [])
+
+    def test_the_reported_order_still_follows_the_symbols_as_typed(self):
+        """The sort is a lock order, not an output order.
+
+        The receipts are mutated in place, so the operator's JSON -- and the
+        report files already written above the transaction -- must still read
+        in the order ``--symbol`` was given.
+        """
+        receipt, _persisted = self._run(["600613.SH", "000001.SZ"])
+        self.assertEqual([plan["symbol"] for plan in receipt["plans"]], ["600613.SH", "000001.SZ"])
+        self.assertEqual(receipt["symbols"], ["600613.SH", "000001.SZ"])
+        self.assertEqual([plan["plan_id"] for plan in receipt["plans"]],
+                         ["id:600613.SH", "id:000001.SZ"])
+
+    def test_the_order_is_the_same_whichever_way_the_operator_types_it(self):
+        """Two operators, opposite argument orders, one lock order."""
+        _forward_receipt, forward = self._run(["000001.SZ", "300750.SZ", "600613.SH"])
+        _reverse_receipt, reverse = self._run(["600613.SH", "300750.SZ", "000001.SZ"])
+        self.assertEqual(forward, ["000001.SZ", "300750.SZ", "600613.SH"])
+        self.assertEqual(forward, reverse)
+
+
 if __name__ == "__main__":
     unittest.main()

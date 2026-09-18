@@ -9,6 +9,7 @@ import re
 from psycopg.types.json import Json
 
 from .daily_bar_batch_repository import upsert_daily_bars
+from .daily_bar_repository import in_instrument_lock_order
 from .instrument_registry import INSTRUMENT_CHUNK_SIZE
 
 
@@ -231,7 +232,13 @@ def normalize_rows(
             # still usable and the remaining bars can be written one by one.
             # Widening it to server-side errors would require wrapping each
             # bar in a nested ``connection.transaction()`` savepoint.
-            for bar in pending_bars:
+            # Ascending (symbol, trading_date): the batch statement this
+            # falls back from registers the whole cross-section in one
+            # sorted statement, and the degraded path must take the same
+            # order rather than the provider's.  Sorting instead of hoisting
+            # an ensure_instruments call is what keeps the fallback's stored
+            # values identical to the batch path's (name/industry/is_st).
+            for bar in in_instrument_lock_order(pending_bars):
                 try:
                     upsert_bar(connection, bar)
                 except Exception as bar_error:

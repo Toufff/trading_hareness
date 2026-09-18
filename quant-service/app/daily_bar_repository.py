@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Iterable
 
 from psycopg.types.json import Json
 
@@ -183,16 +183,63 @@ def quarantine_tushare_daily_amount_mismatches(
     return len(rows)
 
 
+def in_instrument_lock_order(bars: Iterable[DailyBar]) -> list[DailyBar]:
+    """Return ``bars`` in the shared ascending lock order.
+
+    ``upsert_daily_bar`` writes ONE bar per call, so its own ``ORDER BY 1``
+    sorts a single row and decides nothing: when a caller drives it over a
+    multi-symbol payload inside one transaction, the order the transaction
+    takes its ``quant.instruments`` row locks in is the order of that
+    caller's loop.  And this is the strongest lock class on the table --
+    ``ON CONFLICT DO UPDATE`` row-locks every **existing** conflicting row,
+    i.e. the whole cross-section on any day after the first, where the
+    ``DO NOTHING`` registration in ``instrument_registry`` locks only rows it
+    genuinely inserts.  Two ingestion transactions covering overlapping
+    symbols in different payload orders is exactly the cycle behind the three
+    deadlocks in the owner PostgreSQL log of 2026-09-18.
+
+    So every multi-symbol caller of ``upsert_daily_bar`` funnels its payload
+    through here rather than each re-deriving the key: the order is one
+    decision in one place, and ``tests/test_daily_bar_caller_lock_order.py``
+    pins the four callers to it.
+
+    The sort is on ``(symbol, trading_date)`` and Python's sort is stable, so
+    duplicate ``(symbol, trading_date)`` pairs keep their relative payload
+    order and last-write-wins is unchanged -- no stored value moves.
+    ``trading_date`` is in the key because ``market_bars_daily`` and
+    ``canonical_bars_daily`` are locked per ``(symbol, trading_date)`` in the
+    same transaction, so ordering on the symbol alone would leave the
+    multi-date windows (the 45-day controlled endpoint, an operator import)
+    with an arbitrary order on the second half of those keys.
+
+    Why these callers sort instead of hoisting one
+    ``instrument_registry.ensure_instruments`` call to the top: that
+    primitive registers symbol + exchange + source with
+    ``ON CONFLICT DO NOTHING``, and ``ensure_named_instruments`` adds only a
+    display name.  Neither can carry ``industry`` or the three-valued
+    ``is_st`` that the statement below maintains, and neither updates
+    ``exchange``/``source``/``updated_at`` on an existing row the way its
+    ``DO UPDATE`` does.  Hoisting would therefore change what is stored,
+    which is not what a lock-order fix is allowed to do.
+    """
+    return sorted(bars, key=lambda bar: (bar.symbol, bar.trading_date))
+
+
 def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
-    """Persist one licensed/unadjusted daily bar and its immutable evidence."""
+    """Persist one licensed/unadjusted daily bar and its immutable evidence.
+
+    Writing more than one bar in a transaction?  Iterate
+    ``in_instrument_lock_order(bars)``, never the raw payload.
+    """
     amount_mismatch = daily_amount_unit_mismatch(
         source=bar.source, amount=bar.amount, volume=bar.volume, close=bar.close,
     )
     promoted_amount = None if amount_mismatch else bar.amount
-    # Single bar, so ``ORDER BY 1`` sorts one row -- but this is the
-    # ``ON CONFLICT DO UPDATE`` class, and ``main.py`` drives this function
-    # one bar at a time, so the set-based form is what a future batching of
-    # that caller would need.  ``is_st`` is still carried twice on purpose:
+    # Single bar, so ``ORDER BY 1`` sorts one row and the real lock order is
+    # the caller's -- see ``in_instrument_lock_order`` above, which every
+    # multi-symbol caller drives this function through.  The set-based form
+    # is kept because it is also what a future batching of those callers
+    # would need.  ``is_st`` is still carried twice on purpose:
     # the array element supplies ``EXCLUDED.is_st`` while the scalar keeps
     # the "provider said nothing, leave the stored flag alone" distinction,
     # which ``coalesce(...,false)`` erases before ``EXCLUDED`` can see it.
@@ -272,7 +319,7 @@ def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
 __all__ = [
     "DAILY_AMOUNT_GUARD_EXEMPT_SOURCES", "SHARES_PER_LOT", "TUSHARE_DAILY_AMOUNT_RATIO_MAX",
     "TUSHARE_DAILY_AMOUNT_RATIO_MIN", "TUSHARE_DAILY_AMOUNT_SOURCES", "YUAN_PER_THOUSAND_YUAN",
-    "daily_amount_unit_mismatch", "exchange_for", "provider_priority",
+    "daily_amount_unit_mismatch", "exchange_for", "in_instrument_lock_order", "provider_priority",
     "quarantine_tushare_daily_amount_mismatches", "shares_to_lots", "upsert_daily_bar",
     "yuan_to_thousand_yuan",
 ]
