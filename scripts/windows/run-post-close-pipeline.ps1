@@ -89,7 +89,8 @@ function Start-IndependentGovernance {
     try {
         $registry = Join-Path $platform 'config\governance-actors.json'
         if (-not (Test-Path -LiteralPath $registry)) {
-            [void](Write-PipelineRecord -Record @{status='governance_waiting'; reason='Provisioned independent role registry is absent; no model started'})
+            [void](Write-PipelineRecord -Record @{status='strategy_governance_waiting';
+                reason='策略治理侧车，不是公司研究：Provisioned independent role registry is absent; no model started'})
             return
         }
         $python = Join-Path $root '.venv\Scripts\pythonw.exe'
@@ -104,10 +105,12 @@ function Start-IndependentGovernance {
         $child = Start-Process -FilePath $python -ArgumentList $arguments -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput (Join-Path $logDir "$executionId.stdout.log") `
             -RedirectStandardError (Join-Path $logDir "$executionId.stderr.log")
-        [void](Write-PipelineRecord -Record @{status='governance_dispatched'; process_id=$child.Id;
-            reason='Independent bounded worker launched; not a completed-governance assertion'; live_effect='none'})
+        [void](Write-PipelineRecord -Record @{status='strategy_governance_dispatched'; process_id=$child.Id;
+            reason='策略治理侧车，不是公司研究：Independent bounded worker launched; not a completed-governance assertion';
+            live_effect='none'})
     } catch {
-        [void](Write-PipelineRecord -Record @{status='governance_dispatch_failed'; reason=$_.Exception.Message; live_effect='none'})
+        [void](Write-PipelineRecord -Record @{status='strategy_governance_dispatch_failed';
+            reason='策略治理侧车，不是公司研究：' + $_.Exception.Message; live_effect='none'})
     }
 }
 
@@ -265,13 +268,20 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "review page export failed: $($pageOutput | Select-Object -Last 1)" }
         $record['review_page'] = ([string]($pageOutput | Select-Object -Last 1) | ConvertFrom-Json).file
     } catch { $record['review_page_error'] = $_.Exception.Message }
-    $record['strategy_status'] = 'completed'
-    $record['status'] = if ($record.ContainsKey('market_refresh_error') -or $record.ContainsKey('ingestion_error')) { 'partial' } else { 'completed' }
     $record['report_count'] = $readback.run.summary.strategy_lanes.report_bundle.reports.Count
     $record['strategy_run_id'] = $scan.run_id
     $record['lane_counts'] = @($readback.run.summary.strategy_lanes.lanes | ForEach-Object { @{ name=$_.label; matches=$_.total_matches } })
     $record['company_review_coverage'] = $readback.run.summary.strategy_lanes.review_coverage
-    $record['research_status'] = if ($record['company_review_coverage'].missing_symbols.Count -eq 0) { 'complete' } else { 'screening_only' }
+    # Scan/publication success and company-research closure are separate
+    # claims: strategy_status stays 'completed' while the round's research
+    # obligation is recorded, owned and deadlined on the same record.
+    foreach ($field in (New-PostCloseResearchStatus -ReviewCoverage $record['company_review_coverage'] -TradeDate $today).GetEnumerator()) {
+        $record[$field.Key] = $field.Value
+    }
+    $record['strategy_status'] = 'completed'
+    $record['status'] = Get-PostClosePipelineStatus `
+        -Degraded ($record.ContainsKey('market_refresh_error') -or $record.ContainsKey('ingestion_error')) `
+        -ResearchStatus $record['research_status']
     # Independent scopes: a successful scan is not a published recommendation.
     $record['recommendation_status'] = Get-ContractValue $readback 'run.summary.recommendation_pool.status'
     $record['recommendation_decision_id'] = Get-ContractValue $readback 'run.summary.recommendation_pool.decision_id'
@@ -302,5 +312,6 @@ if ($record.ContainsKey('strategy_status') -and $record['strategy_status'] -eq '
 }
 
 # A failed scan/readback remains retryable even when market ingestion worked.
-if ($record['status'] -ne 'completed') { exit 1 }
+# An owed company research round is not a retryable pipeline failure.
+if (-not (Test-PostClosePipelineCompleted $record['status'])) { exit 1 }
 [pscustomobject]$record

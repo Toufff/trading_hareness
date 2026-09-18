@@ -1504,8 +1504,8 @@ def full_market_daily_row_count(trade_date: date) -> int:
 def full_market_daily_control_status() -> dict[str, Any]:
     """Expose latest daily control coverage without requesting a provider."""
     with db.transaction() as connection:
-        row = connection.execute(EQUITY_DAILY_CONTROL_STATUS_SQL).fetchone()
-    return daily_control_plane_status_payload(row)
+        rows = connection.execute(EQUITY_DAILY_CONTROL_STATUS_SQL).fetchall()
+    return daily_control_plane_status_payload(rows)
 
 
 def _daily_control_plane_sync_dependencies() -> DailyControlPlaneSyncDependencies:
