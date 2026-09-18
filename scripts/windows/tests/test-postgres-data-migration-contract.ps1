@@ -81,6 +81,15 @@ Assert-True ($startPostgres -lt $rename) 'the old directory is only renamed once
 Assert-True ($source -match 'trading-hareness-dashboard-runtime') 'the dashboard watcher task must be handled by name'
 Assert-True ($source -match 'Stop-ScheduledTask -TaskName \$task') 'the watcher tasks must actually be stopped, not only disabled'
 
+# The migration may only run outside the exchange session, which is the same
+# 04:00-08:00 maintenance window the nightly database jobs were moved into.
+# Each of them would run against a stopped or half-copied cluster.
+foreach ($job in 'trading-hareness-post-close-pipeline', 'trading-hareness-storage-tiers', 'trading-hareness-stock-backup', 'trading-hareness-stock-backup-offsite') {
+    Assert-True ($source -match [regex]::Escape($job)) "the maintenance-window job $job must be stopped for the migration"
+}
+Assert-True ($source -match "State -ne 'Disabled'") 'a task that was already disabled must not be recorded for re-enabling'
+Assert-True ($source -match '\$script:DisabledTasks') 'step 8 must re-enable only the tasks this run disabled'
+
 # --- the old data directory is never removed --------------------------------
 foreach ($destructive in 'Remove-Item[^\r\n]*\$currentDataDir', 'rm -r', 'Remove-Item[^\r\n]*-Recurse[^\r\n]*data') {
     Assert-True ($source -notmatch $destructive) "the migration must never delete the old data directory ($destructive)"

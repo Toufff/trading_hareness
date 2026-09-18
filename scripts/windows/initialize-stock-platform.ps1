@@ -110,6 +110,19 @@ if (-not (Test-Path -LiteralPath $envPath -PathType Leaf)) {
 Set-StockPlatformEnvValue -Path $envPath -Name 'PGDATA_DIR' -Value $data
 [void](Set-StockPlatformEnvDefault -Path $envPath -Name 'PGDATA_BUDGET_BYTES' -Value ([string]500GB))
 [void](Set-StockPlatformEnvDefault -Path $envPath -Name 'PGDATA_COLD_TABLESPACE_DIR' -Value (Join-Path $root 'data\pg-cold'))
+# The cold twins created by scripts/database-storage-tiers.py hold rows the
+# nightly dump already captured on the hot side before they were moved, and
+# the incremental chunk chain carries them off-site. Dumping them again would
+# add the whole cold tier to every night's dump for no recovery value, so
+# their data is excluded (the table definitions are still dumped). This list
+# must stay in step with TIER_POLICY in scripts/database-storage-tiers.py.
+[void](Set-StockPlatformEnvDefault -Path $envPath -Name 'STOCK_BACKUP_EXCLUDE_TABLE_DATA' -Value (@(
+    'quant.raw_market_observations_cold',
+    'quant.tushare_raw_records_cold',
+    'quant.intraday_quote_observations_cold',
+    'quant.intraday_rule_input_snapshots_cold',
+    'quant.edge_evidence_changes_cold'
+) -join ';'))
 
 # Cold-tier rows and every backup stay on G:; only the hot cluster moves.
 New-Item -ItemType Directory -Force -Path (Get-StockPlatformColdTablespaceDirectory -PlatformRoot $root -RuntimeEnv $envPath) | Out-Null

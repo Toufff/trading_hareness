@@ -158,7 +158,33 @@ Assert-True ((Get-StorageTierRunWindowDecision -Now $wednesday -Force $true) -eq
 Assert-True ((Get-StorageTierRunWindowDecision -Now ([DateTime]::ParseExact('2026-09-16 06:00', 'yyyy-MM-dd HH:mm', $null))) -eq 'run') 'the 06:00 scheduled run must proceed'
 Assert-True ((Get-StorageTierRunWindowDecision -Now ([DateTime]::ParseExact('2026-09-19 11:00', 'yyyy-MM-dd HH:mm', $null))) -eq 'run') 'a weekend run has no session to protect'
 
+# --- the runner and the Python CLI must agree -------------------------------
+# They were written on separate branches; a command the runner offers but the
+# CLI does not have fails only at 06:00 in production, so pin it here.
+$tierScript = [IO.File]::ReadAllText((Join-Path $root 'scripts\database-storage-tiers.py'), [Text.Encoding]::UTF8)
+$subcommands = [regex]::Matches($tierScript, 'sub\.add_parser\("([a-z]+)"') | ForEach-Object { $_.Groups[1].Value }
+Assert-True ($subcommands.Count -ge 4) 'the tier CLI must expose its subcommands through add_parser'
+$validateSet = [regex]::Match($runner, "\[ValidateSet\(([^)]+)\)\]").Groups[1].Value
+$runnerCommands = [regex]::Matches($validateSet, "'([a-z]+)'") | ForEach-Object { $_.Groups[1].Value }
+foreach ($command in $runnerCommands) {
+    Assert-True ($subcommands -contains $command) "run-storage-tiers.ps1 offers -Command $command but database-storage-tiers.py has no such subcommand"
+}
+Assert-True ($runnerCommands -contains 'apply') 'the runner must be able to drive the nightly apply'
+foreach ($flag in '--env-file', '--hot-days', '--budget-bytes', '--batch', '--table') {
+    Assert-True ($tierScript -match [regex]::Escape("`"$flag`"")) "the tier CLI must keep the documented flag $flag"
+}
+# The runner writes a human log per day; the JSONL run record is the CLI's.
+Assert-True ($tierScript -match 'storage-tiers\.jsonl') 'the tier CLI must default its run record to logs\storage-tiers.jsonl'
+
+# --- the dump exclusions must match the tier policy -------------------------
+$twins = [regex]::Matches($tierScript, 'TierPolicy\("([a-z_]+)",\s*"([a-z_]+)"') |
+    ForEach-Object { "$($_.Groups[1].Value).$($_.Groups[2].Value)_cold" }
+Assert-True ($twins.Count -eq 5) 'the tier policy must still describe five tiered tables'
+$seeded = [regex]::Match($initSource, "Name 'STOCK_BACKUP_EXCLUDE_TABLE_DATA' -Value \(@\(([^)]+)\)").Groups[1].Value
+$seededTables = [regex]::Matches($seeded, "'([a-z_.]+)'") | ForEach-Object { $_.Groups[1].Value }
+Assert-True ((($seededTables | Sort-Object) -join ';') -eq (($twins | Sort-Object) -join ';')) 'the seeded STOCK_BACKUP_EXCLUDE_TABLE_DATA must list exactly the cold twins of the tier policy'
+
 [pscustomobject]@{
     passed = $true
-    scope = 'Generated PostgreSQL settings, PGDATA_DIR resolution, tier-job wiring and maintenance-window schedules; no database, no scheduled task, no production file was touched'
+    scope = 'Generated PostgreSQL settings, PGDATA_DIR resolution, tier-job wiring, runner/CLI agreement, dump exclusions and maintenance-window schedules; no database, no scheduled task, no production file was touched'
 }

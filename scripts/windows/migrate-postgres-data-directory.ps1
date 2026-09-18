@@ -57,7 +57,23 @@ $psql = Join-Path $pgBin 'psql.exe'
 $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
 if (-not $KeepOldName) { $KeepOldName = 'postgresql16.pre-nvme-' + (Get-Date).ToString('yyyyMMdd') }
 $smokeTables = @('quant.instruments', 'quant.canonical_bars_daily', 'quant.raw_market_observations')
-$watcherTasks = @('trading-hareness-dashboard-runtime', 'trading-hareness-post-close-pipeline', 'trading-hareness-storage-tiers')
+# Every scheduled job that touches PostgreSQL and can fire while the migration
+# runs. The migration is only allowed outside the exchange session, which in
+# practice means the 04:00-08:00 maintenance window -- exactly when the nightly
+# dump (04:10), the off-site upload (05:10) and the tier job (06:00) are
+# scheduled. A backup starting against a stopped or half-copied cluster would
+# fail the night and, worse, leave a truncated dump behind, so they are stopped
+# and disabled with the watcher and restored afterwards.
+$watcherTasks = @(
+    'trading-hareness-dashboard-runtime',
+    'trading-hareness-post-close-pipeline',
+    'trading-hareness-storage-tiers',
+    'trading-hareness-stock-backup',
+    'trading-hareness-stock-backup-offsite'
+)
+# Tasks this run disabled, so step 8 re-enables only those and never turns on a
+# job the operator had deliberately left disabled.
+$script:DisabledTasks = [System.Collections.Generic.List[string]]::new()
 
 function Write-Step {
     param([Parameter(Mandatory)][string]$Message, [string]$Level = 'info')
@@ -127,8 +143,13 @@ function Stop-PlatformRuntimes {
     foreach ($task in $watcherTasks) {
         Write-Step "stopping scheduled task $task"
         if (-not $WhatIf) {
+            $existing = Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+            if (-not $existing) { continue }
             Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
-            Disable-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Out-Null
+            if ($existing.State -ne 'Disabled') {
+                Disable-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Out-Null
+                $script:DisabledTasks.Add($task)
+            }
         }
     }
     $stop = Join-Path $PSScriptRoot 'stop-stock-dashboard.ps1'
@@ -141,7 +162,8 @@ function Stop-PlatformRuntimes {
 }
 
 function Start-PlatformRuntimes {
-    foreach ($task in $watcherTasks) {
+    $toEnable = if ($WhatIf) { $watcherTasks } else { @($script:DisabledTasks) }
+    foreach ($task in $toEnable) {
         Write-Step "re-enabling scheduled task $task"
         if (-not $WhatIf) { Enable-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Out-Null }
     }
