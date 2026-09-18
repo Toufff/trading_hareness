@@ -47,7 +47,8 @@
 | `PGDATA_DIR` | `G:\StockPlatform\data\postgresql16` | 热数据目录；生产为 `F:\StockPlatformDB\postgresql16`。由 `initialize-stock-platform.ps1` 写入，由数据目录迁移脚本改写。 |
 | `PGDATA_BUDGET_BYTES` | `536870912000`（500 GB） | 热层预算。仅在缺失时由初始化脚本补写（`Set-StockPlatformEnvDefault`），不会覆盖运维已调过的值。 |
 | `PGDATA_COLD_TABLESPACE_DIR` | `G:\StockPlatform\data\pg-cold` | `stock_cold` 表空间目录。同样只补写不覆盖。 |
-| `STOCK_BACKUP_EXCLUDE_TABLE_DATA` | **无默认值（初始化脚本刻意不补写）** | 纯运维覆盖项。每夜 dump 真正跳过哪些表的数据是**在 dump 时按增量链算出来的**，不是配置出来的；这个键只用于额外追加，且无增量链的冷孪生表会被拒绝。见第 5 节。 |
+| `STOCK_BACKUP_EXCLUDE_TABLE_DATA` | **无默认值（初始化脚本刻意不补写）** | 纯运维覆盖项。每夜 dump 真正跳过哪些表的数据是**在 dump 时按增量链算出来的**，不是配置出来的；这个键只用于额外追加，且无增量链、或链已停滞的冷孪生表会被拒绝。见第 5 节。 |
+| `STOCK_BACKUP_EXCLUDE_TABLE_DATA` 的配套键 `STORAGE_TIER_HOT_DAYS` | `365` | 分层热窗口天数。`backup-stock-database.ps1` 用它判断增量链水位线是否还追得上分层截止线；调窄分层热窗口（`database-storage-tiers.py --hot-days`）时必须同步设置它。 |
 
 ---
 
@@ -350,6 +351,7 @@ runner 里不出现它）。
 | `--deadline 08:00` | 本地墙钟 HH:MM，runner 默认传给 `apply` | **作业自己** | 每批之间、每张表之间、棘轮每一步之间检查；手上这一批跑完，写回执 `status='deadline_reached'`，**退出码 0** |
 | `--max-seconds 7200` | 相对上限，runner 默认传给 `apply` | 作业自己 | 同上，两者**谁先到算谁**（Windows 补跑一个错过的 06:00 触发、或跨午夜时，墙钟可能已经没有意义） |
 | `ExecutionTimeLimit 2h15m` | 任务计划程序 | 操作系统 | **兜底，不该被用到**：06:00 起跑 ＋ 08:00 截止 ＝ 2 小时，留 15 分钟余量。被它杀掉的进程**不写任何回执** |
+| **没有失败重启** | 任务里刻意不设 `-RestartCount` / `-RestartInterval` | —— | runner 原样透传 CLI 退出码，任务计划程序看到的"上次运行结果"就是回执状态本身；而这个作业每跑一次最多可以把某张表的热窗口砍掉 `DEFAULT_MAX_SPACE_DAYS = 7` 天，重启两次就是 21 天，而每份回执单看都"合规"。`-StartWhenAvailable` 保留：真正错过的 06:00 触发仍然要补跑一次 |
 
 `deadline_reached` 退出码是 0 而不是错误码，因为它是**正常结果**：搬运幂等可续跑，
 今晚停在哪儿明晚从哪儿继续。第一次大迁移本来就会连着好几夜才搬完。
@@ -449,8 +451,18 @@ Execute  : G:\StockPlatform\current\scripts\windows\bin\stock-background-host.ex
 | 条目 | 何时排除 |
 |---|---|
 | 增量表自身的数据（如 `quant.raw_market_observations`） | **仅当本次增量导出成功**。失败则退化为全量 dump（`degraded_full_dump`），不留空洞 |
-| 增量表的冷孪生（`quant.<表>_cold`） | **无条件排除**。它的行是被**之前几次**的分块链捕获的，不取决于今晚这一次 |
-| 运维在 `STOCK_BACKUP_EXCLUDE_TABLE_DATA` 里额外列的表 | 照办——**除非**它是 `_cold` 结尾而对应热表不在增量链里，那种条目被**拒绝**、告警，并记进本次运行记录的 `refused_table_data_exclusions` |
+| 增量表的冷孪生（`quant.<表>_cold`） | **仅当对应热表的分块链既存在、又没有落后于分层截止线**。不取决于今晚这一次导出成功与否（它的行是被**之前几次**的分块链捕获的），但取决于那几次确实追到了截止线 |
+| 运维在 `STOCK_BACKUP_EXCLUDE_TABLE_DATA` 里额外列的表 | 照办——**除非**它是 `_cold` 结尾而对应热表不在增量链里、或那条链已经停滞，那种条目被**拒绝**、告警，并记进本次运行记录的 `refused_table_data_exclusions` |
+
+**"有链"不等于"链是新的"。** 分层作业把超过热窗口的行搬进冷孪生表，而分块链只带走它
+**已经导出到**的那一段。增量导出一旦开始每夜失败（坏分块、备份盘满、行数对不上），
+`<备份根>\incremental\<热表>\state.json` 里的水位线就冻住，而分层作业照搬不误——
+被搬走的行于是既不在热表、也不在分块链里，dump 又把冷孪生排除掉，那些行就只剩
+G: 冷表空间上的一份活数据。所以规则会读这份 `state.json`：水位线缺失、读不出，
+或早于 `now - 热窗口`，冷孪生一律**退回 dump**，并记进本次运行记录的
+`refused_table_data_exclusion_reasons`（带上具体原因）。
+热窗口取 runtime.env 的 `STORAGE_TIER_HOT_DAYS`，默认 365，与分层策略是同一个数；
+把分层热窗口调窄（`--hot-days`）时**必须同时设这个键**，否则备份侧仍按 365 天判"够新"。
 
 被拒绝时夜间 dump **照常跑完**：一条配置意见不该让每夜备份停摆。
 
@@ -461,8 +473,10 @@ Execute  : G:\StockPlatform\current\scripts\windows\bin\stock-background-host.ex
 另外四张冷孪生表的数据**仍然每夜进 dump**。
 
 规则本身由 `scripts/windows/tests/test-postgres-storage-tier-wiring.ps1`（把规则喂进
-`TIER_POLICY` 的五张表，必须正好得到五张冷孪生表；只喂默认链时必须拒绝另外四张）
-和 `test-backup-stock-database.ps1`（链有/无、导出失败、运维覆盖被拒）双向钉死。
+`TIER_POLICY` 的五张表 ＋ 新鲜水位线，必须正好得到五张冷孪生表；只喂默认链时必须拒绝另外
+四张；水位线冻在截止线之前时必须一张都不排除）和 `test-backup-stock-database.ps1`
+（链有/无、水位线新/旧/缺失/损坏、热窗口调窄、导出失败、运维覆盖被拒，外加
+`Get-StockIncrementalChainWatermark` 对真实 `state.json` 的读取）双向钉死。
 
 > `quant.storage_tier_conflicts` **不是** `_cold` 结尾，规则天然不会排除它。
 > 它可能持有某行热数据的唯一副本，**任何人都不要手工把它加进排除列表**。
@@ -516,8 +530,11 @@ pwsh -NoProfile -File F:\AIWorkflow\trading_hareness\scripts\windows\migrate-pos
 1. **预检**（只读）：pwsh 7；`PGDATA_DIR` 不等于目标；不在交易时段（除非 `-Force`）；
    当前目录确实是集群（有 `PG_VERSION`）；`pg_ctl status` 证明服务器正在从该目录运行；
    目标目录不存在或为空；目标盘剩余空间 ≥ 源目录大小 ＋ 50 GB（`-FreeSpaceMarginGB`）；
-   `runtime.env` 可写；`robocopy` 存在；抓取 `quant.instruments`、`quant.canonical_bars_daily`、
-   `quant.raw_market_observations` 的行数快照。
+   `runtime.env` 可写；`robocopy` 存在；报告源目录里**枚举不到**的条目数（不再静默丢弃，
+   否则第 4 步的文件／字节对比会莫名其妙地失败）。
+   **行数快照不在这一步抓**：此刻业主 API、看板运行时、共享对端隧道和 04:10／05:10／06:00
+   三个维护窗作业都还在写库，在这里抓的数会被它们合法写入的行推翻，让一次本来成功的迁移
+   中止。快照挪到第 3 步。
 2. **先停看门狗任务**，顺序是 **`Disable-ScheduledTask` → 优雅停 → `Stop-ScheduledTask` 兜底**，
    这个顺序由 `test-postgres-data-migration-contract.ps1` 断言：
    1. `Disable-ScheduledTask`：只阻止**新**实例启动，不杀任何正在跑的东西；
@@ -540,7 +557,10 @@ pwsh -NoProfile -File F:\AIWorkflow\trading_hareness\scripts\windows\migrate-pos
    **`trading-hareness-shared-peer-tunnels` 故意不停**，理由写在脚本里也由测试断言：
    停 PostgreSQL 本身就已经切断了所有 peer 会话，隧道留着只是一条没人用的空管道；
    多停一个任务就多一个"忘了再打开"的失败面，而且第 8 步的恢复路径也就多一个分支。
-3. `pg_ctl stop -m fast -w`，并确认没有 `postgres.exe` 残留（否则直接失败）。
+3. **在停机窗口内**抓 `quant.instruments`、`quant.canonical_bars_daily`、
+   `quant.raw_market_observations` 的行数快照——此刻平台运行时已经停了、集群还在，
+   下一句就把它停掉，所以这份数正是第 6 步该对上的数；对不上就只可能是真差异。
+   然后 `pg_ctl stop -m fast -w`，并确认没有 `postgres.exe` 残留（否则直接失败）。
 4. `robocopy <旧> <新> /E /COPY:DAT /DCOPY:DAT /XJ /R:2 /W:2 /MT:8 /NP /LOG+:<日志>`，
    随后**三重校验**：robocopy 退出码 < 8、源与副本的递归文件数与字节数完全相等、
    `global\pg_control` 的 SHA-256 相等。校验没过就绝不进入下一步。
@@ -568,7 +588,11 @@ pwsh -NoProfile -File F:\AIWorkflow\trading_hareness\scripts\windows\migrate-pos
 每一步都是尽力而为、逐条记录，**最后重新抛出原始异常**——恢复本身失败也绝不掩盖停下来的原因：
 
 - **还没给旧目录改名**（第 7 步之前）：旧目录仍是权威副本。停掉可能从目标目录起来的服务器、
-  把 `PGDATA_DIR` 写回旧目录、重新生成托管配置、从旧目录启动 PostgreSQL。
+  把 `PGDATA_DIR` 写回旧目录、重新生成托管配置、从旧目录启动 PostgreSQL，**最后**把本次运行
+  在目标目录留下的半成品拷贝删掉——顺序不能反：源集群确认起来之前不能动另一份数据。
+  不删的话，重试时会被预检的"目标目录存在且非空"挡住，脚本等于被自己的残渣卡死。
+  这个删除有三道互相独立的闸（只删本次运行建的、旧目录尚未改名、路径不等于源目录），
+  并且先逐个解除 `pg_tblspc` 联接再递归删，免得跟着联接把 G: 上的冷表空间一起删掉。
 - **已经改名**（第 7 步之后）：新目录已经被启动并校验过，数据在 NVMe 上，**不能抛弃**。
   这时只恢复平台，**绝不把 `PGDATA_DIR` 指回一个已经不装着集群的目录**。
 - 两种情况都会再跑一次 `Start-PlatformRuntimes`（重新启用**本次运行禁用过的**任务并拉起平台），
@@ -594,9 +618,20 @@ pwsh -NoProfile -File ...\migrate-postgres-data-directory.ps1 `
    绝不因为格式问题而"放行"；目标目录根本不是集群时报 `unavailable`。
 2. **`-AcceptDataLoss` 是硬性要求**：不加就拒绝执行（`-WhatIf` 下打印
    `refused = accept_data_loss_required` 并返回，真跑时在停任何东西**之前**就抛出）。
-3. **冷表空间闸，绝对拒绝，没有开关可绕**：一旦活集群已经有 `stock_cold` 表空间、
-   而镜像早于它的创建时间，回滚会让每一行搬进冷层的数据凭空消失——
-   这不是重启能挽回的，只能从备份恢复。这一条 `-Force` 和 `-AcceptDataLoss` 都绕不过去。
+3. **冷表空间闸，绝对拒绝，没有开关可绕**，两种情形：
+   - 活集群已经有 `stock_cold` 表空间、而镜像早于它的创建时间（镜像的 `pg_tblspc` 是空的）：
+     回滚会让每一行搬进冷层的数据凭空消失；
+   - 两边的 `pg_tblspc` 都有联接、且**指向同一个目录**，而活集群的 checkpoint 比镜像新：
+     冷表空间既不在任何一个数据目录里，也从来没被迁移复制或版本化过，
+     用旧目录起来就是拿一份旧目录录去描述已经被新集群改写过的冷层文件——
+     那不是回退，是一个自相矛盾的集群。
+
+   这两条 `-Force` 和 `-AcceptDataLoss` 都绕不过去。为此迁移回执里记了
+   `tablespaces`（`pg_tablespace` 的 oid、名字、location），回滚闸就是拿它和两边
+   `pg_tblspc` 里的联接目标比对的。
+
+   **另外：回滚从来不回退 `stock_cold` 本身。** 不管闸放不放行，每一次
+   `-Rollback` 都会打印这句话，回执里也记 `stock_cold_reverted: false`。
 
 过了闸之后：停任务与 PostgreSQL，把 `PGDATA_DIR` 指回旧目录，重新生成配置，从旧目录启动，
 再把平台拉起来，并写自己的回执。NVMe 上的副本保留在原地供检查，不会被删除。
@@ -774,6 +809,10 @@ G:\StockPlatform\current\.venv\Scripts\python.exe -m pytest `
 | **D18** | 备份排除在 **dump 时按增量链算**，初始化脚本不再补写任何默认值 | 静态排除一张没有增量链的冷孪生表，等于两个月后（14 天 ＋ 8 周保留期）把它的唯一副本变成 G: 上的在线数据。规则必须跟着 `STOCK_BACKUP_INCREMENTAL_TABLES` 走，不能是一份会过期的配置 |
 | **D19** | 数据目录迁移**不停** `trading-hareness-shared-peer-tunnels` | 停 PostgreSQL 本身已经切断了所有 peer 会话，隧道只是空管道；少停一个任务就少一个"忘了再打开"的失败面和一条恢复分支 |
 | **D20** | `-Rollback` 要 `-AcceptDataLoss`，并在冷表空间比镜像新时**绝对拒绝**（无开关可绕） | 普通的"镜像有点旧"可以由人知情后接受；但镜像早于 `stock_cold` 创建时，每一行搬进冷层的数据会凭空消失，这不是重启能挽回的，只能从备份恢复 |
+| **D21** | 冷孪生表的排除还要看增量链**水位线是否追得上分层截止线**，不只看链在不在；热窗口从 runtime.env 的 `STORAGE_TIER_HOT_DAYS` 读（默认 365） | 分层作业只看行的年龄，不看链导出到哪儿。链一旦停滞（坏分块、盘满、行数对不上），被搬走的行既不在热表、也不在链里，而 dump 还照排除不误——没有任何症状，直到需要恢复 |
+| **D22** | 分层任务**不注册失败重启** | runner 原样透传 CLI 退出码，任务计划程序分不清"暂时性失败"和"需要人来看"；而每跑一次最多砍 7 天热窗口，重启两次就是 21 天，且每份回执单看都合规。要重试就在 runner 里按状态分流，不能交给调度器 |
+| **D23** | 迁移的行数快照挪进停机窗口（第 3 步），预检只报告"枚举不到的条目" | 预检那一刻业主 API、看板运行时、隧道和三个维护窗作业都还在写库，在那里抓的数会被合法写入推翻，让一次成功的迁移中止在最后一步 |
+| **D24** | 失败恢复会删掉本次运行留在目标目录的半成品；回滚闸改成比对**表空间 location** 而不是联接数量 | 不删，重试会被自己的残渣挡在预检外；只数联接则看不见"两个镜像指向同一个 `pg-cold`"——那种回滚会拿旧目录录去描述已被改写的冷层文件 |
 
 ---
 

@@ -161,6 +161,19 @@ Assert-True ($runner -match '\$MaxSeconds = 7200') 'the wall-clock backstop must
 $tierInstaller = [IO.File]::ReadAllText((Join-Path $windows 'install-storage-tiers-task.ps1'), [Text.Encoding]::UTF8)
 Assert-True ($tierInstaller -match 'New-TimeSpan -Hours 2 -Minutes 15') 'the tier task must allow 2h15m: fifteen minutes of slack over the 06:00-08:00 deadline, no more'
 
+# The tier job must NOT be restarted on failure. The runner exits with the CLI's
+# own exit code, so Task Scheduler sees the receipt's status verbatim -- and
+# every non-zero status this job produces (partial, conflicts, schema_drift,
+# degraded, failed) wants a human, not another pass. Each pass may shave
+# DEFAULT_MAX_SPACE_DAYS = 7 days off a table's hot window, so two restarts turn
+# the documented "at most 7 days per table per run" into 21 while each receipt
+# still reads compliant on its own.
+Assert-True ($tierInstaller -notmatch '-RestartCount') 'the tier task must not be restarted on failure: a retry triples the per-run hot-window budget'
+Assert-True ($tierInstaller -notmatch '-RestartInterval') 'the tier task must declare no restart interval either'
+# A genuinely missed 06:00 trigger (the machine asleep) should still run once.
+Assert-True ($tierInstaller -match '-StartWhenAvailable') 'a missed 06:00 trigger must still run once'
+Assert-True ($tierInstaller -match 'NO restart-on-failure') 'the installer must record why it registers no restart'
+
 # Both new installers register an absolute Execute path; defaulting it to the
 # checkout they happen to run from registers a task that dies with the worktree.
 foreach ($installerName in 'install-storage-tiers-task.ps1', 'install-postgres-io-window-task.ps1') {
@@ -268,15 +281,37 @@ Assert-True ($null -ne $resolveAst) 'backup-stock-database.ps1 must compute the 
 . ([scriptblock]::Create($resolveAst.Extent.Text))
 Assert-True ($backupSource -match 'Resolve-StockBackupExcludedTableData `?\r?\n?\s*-IncrementalTables') 'the nightly dump must call the rule with this run''s incremental tables'
 
-# The rule, fed the tier policy's own tables, must yield exactly the twins the
-# retired static default listed -- and nothing when no chain exists.
-$decided = Resolve-StockBackupExcludedTableData -IncrementalTables $hotTables -IncrementalSucceeded $true -ConfiguredExclusions @()
+# The rule, fed the tier policy's own tables AND a chain that has actually kept
+# up with the tier cutoff, must yield exactly the twins the retired static
+# default listed -- and nothing when no chain exists.
+$tierNow = [DateTimeOffset]::new(2026, 9, 19, 4, 10, 0, [TimeSpan]::Zero)
+$tierHotDays = 365
+$freshWatermarks = @{}
+foreach ($hot in $hotTables) { $freshWatermarks[$hot] = $tierNow.AddDays(-30) }
+$decided = Resolve-StockBackupExcludedTableData -IncrementalTables $hotTables -IncrementalSucceeded $true -ConfiguredExclusions @() `
+    -ChainWatermarks $freshWatermarks -Now $tierNow -HotDays $tierHotDays
 $decidedTwins = @($decided.Excluded | Where-Object { $_.EndsWith('_cold') })
 Assert-True ((($decidedTwins | Sort-Object) -join ';') -eq (($twins | Sort-Object) -join ';')) `
     'with every tiered table in the chunk chain the rule must exclude exactly the cold twins of the tier policy'
 $defaultChain = @('quant.raw_market_observations')   # the shipped STOCK_BACKUP_INCREMENTAL_TABLES default
-$shipped = Resolve-StockBackupExcludedTableData -IncrementalTables $defaultChain -IncrementalSucceeded $true -ConfiguredExclusions $twins
+$shipped = Resolve-StockBackupExcludedTableData -IncrementalTables $defaultChain -IncrementalSucceeded $true -ConfiguredExclusions $twins `
+    -ChainWatermarks $freshWatermarks -Now $tierNow -HotDays $tierHotDays
 Assert-True (@($shipped.Refused).Count -eq 4) 'with only the default chain, the four twins without one must be refused rather than excluded'
+
+# Existence of a chain is not enough: a chain whose watermark froze before the
+# tier cutoff no longer carries the rows the tier job keeps moving, so every
+# twin goes back into the dump even though all five tables are "in the chain".
+$frozenWatermarks = @{}
+foreach ($hot in $hotTables) { $frozenWatermarks[$hot] = $tierNow.AddDays(-$tierHotDays - 1) }
+$frozen = Resolve-StockBackupExcludedTableData -IncrementalTables $hotTables -IncrementalSucceeded $true -ConfiguredExclusions @() `
+    -ChainWatermarks $frozenWatermarks -Now $tierNow -HotDays $tierHotDays
+Assert-True (@($frozen.Excluded | Where-Object { $_.EndsWith('_cold') }).Count -eq 0) `
+    'a chain that stopped advancing before the tier cutoff must exclude no twin at all'
+Assert-True (@($frozen.Refused).Count -eq $twins.Count) 'every stalled twin must be reported, not silently kept'
+# And the dump has to read that freshness off the chain's own state file, with
+# the same hot window the tier job is configured with.
+Assert-True ($backupSource -match 'Get-StockIncrementalChainWatermark') 'the nightly dump must read each chain watermark before deciding'
+Assert-True ($backupSource -match 'STORAGE_TIER_HOT_DAYS') 'the dump must take the tier hot window from runtime.env, not assume 365'
 
 [pscustomobject]@{
     passed = $true

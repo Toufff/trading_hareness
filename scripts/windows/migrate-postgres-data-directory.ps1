@@ -36,7 +36,9 @@ param(
 #      restarts PostgreSQL on its own and would happily start a second server
 #      on the half-copied directory -- in the order Disable (no new start),
 #      graceful stop script (clean runtime state), Stop-ScheduledTask (backstop);
-#   3. stop PostgreSQL and prove no postgres.exe survives;
+#   3. snapshot the smoke-test row counts INSIDE the outage (nothing can write
+#      any more, so the step-6 comparison can only fail on a real difference),
+#      then stop PostgreSQL and prove no postgres.exe survives;
 #   4. copy with robocopy /XJ and VERIFY the copy (exit code, recursive file and
 #      byte totals, SHA-256 of global\pg_control) BEFORE anything points at it,
 #      then recreate the tablespace junctions at the target;
@@ -49,9 +51,10 @@ param(
 #
 # Any failure between step 2 and step 8 is caught: the run puts PGDATA_DIR back
 # if it had already been switched, restarts PostgreSQL from the directory that
-# still holds the authoritative cluster, re-enables every task this run
-# disabled, writes a failure receipt and rethrows. A migration must never end
-# with the database down and the platform disabled.
+# still holds the authoritative cluster, removes the partial copy it made at the
+# target (so its own debris does not fail the retry's preflight), re-enables
+# every task this run disabled, writes a failure receipt and rethrows. A
+# migration must never end with the database down and the platform disabled.
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -102,6 +105,12 @@ $script:RuntimesStopped = $false
 $script:PostgresStopped = $false
 $script:EnvSwitched = $false
 $script:OldDirectoryRenamed = $false
+# Set once step 4 has taken ownership of the target directory. The preflight
+# already proved the target was absent or empty, so everything under it from
+# that moment on was put there by this run -- and a run that fails half way
+# through the copy must take it away again, or its own leftovers fail the
+# "target exists and is not empty" preflight of every retry.
+$script:TargetDirectoryOwned = $false
 
 function Write-Step {
     param([Parameter(Mandatory)][string]$Message, [string]$Level = 'info')
@@ -132,13 +141,27 @@ function Get-DirectoryFootprint {
         Get-ChildItem -Recurse does not descend into a reparse point unless
         -FollowSymlink is passed; the explicit skip below documents that and
         keeps the behaviour if that default ever changes.
+
+        Anything the enumeration could NOT read is counted and returned rather
+        than dropped. This footprint is one half of the copy verification, so an
+        entry silently missing from one side and present on the other is read as
+        "Copy verification failed" with no way to tell which file it was; with
+        the count in hand the message says so, and the operator can see whether
+        the mismatch is a real short copy or an unreadable entry on either side.
     #>
     param([Parameter(Mandatory)][string]$Path)
     $files = 0
     $bytes = [long]0
     $root = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     $links = [System.Collections.Generic.List[object]]::new()
-    foreach ($item in Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue) {
+    $enumErrors = $null
+    $items = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable enumErrors)
+    $skipped = [System.Collections.Generic.List[object]]::new()
+    foreach ($enumError in @($enumErrors)) {
+        $subject = if ($enumError.TargetObject) { [string]$enumError.TargetObject } else { $Path }
+        $skipped.Add([pscustomobject]@{ Path = $subject; Error = $enumError.Exception.Message })
+    }
+    foreach ($item in $items) {
         if ($item.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
             $target = if ($item.PSObject.Properties['LinkTarget'] -and $item.LinkTarget) { [string]$item.LinkTarget } else { [string]($item.Target | Select-Object -First 1) }
             $links.Add([pscustomobject]@{
@@ -153,7 +176,10 @@ function Get-DirectoryFootprint {
             $bytes += $item.Length
         }
     }
-    return [pscustomobject]@{ Path = $Path; Files = $files; Bytes = $bytes; ReparsePoints = $links.ToArray() }
+    return [pscustomobject]@{
+        Path = $Path; Files = $files; Bytes = $bytes; ReparsePoints = $links.ToArray()
+        Skipped = $skipped.Count; SkippedEntries = $skipped.ToArray()
+    }
 }
 
 function Assert-CopyableSource {
@@ -175,11 +201,57 @@ function Assert-CopyableSource {
     return $links
 }
 
-function Get-TablespaceLinkCount {
+function Get-TablespaceLinkMap {
+    <#
+        Every <PGDATA>\pg_tblspc\<oid> junction with the location it points at,
+        read off a STOPPED cluster image (the rollback target cannot be queried).
+        The oid is the directory name, which is exactly pg_tablespace.oid, so the
+        map lines up with the `tablespaces` block the migration receipt records
+        from the live catalogue.
+    #>
     param([Parameter(Mandatory)][string]$DataDirectory)
     $path = Join-Path $DataDirectory 'pg_tblspc'
-    if (-not (Test-Path -LiteralPath $path -PathType Container)) { return 0 }
-    return @(Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue).Count
+    $links = [System.Collections.Generic.List[object]]::new()
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) { return $links.ToArray() }
+    foreach ($item in Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue) {
+        $target = if ($item.PSObject.Properties['LinkTarget'] -and $item.LinkTarget) { [string]$item.LinkTarget } else { [string]($item.Target | Select-Object -First 1) }
+        $location = ''
+        if ($target) {
+            try { $location = [IO.Path]::GetFullPath($target).TrimEnd('\') } catch { $location = $target }
+        }
+        $links.Add([pscustomobject]@{ Oid = $item.Name; Location = $location })
+    }
+    return $links.ToArray()
+}
+
+function Get-TablespaceLinkCount {
+    param([Parameter(Mandatory)][string]$DataDirectory)
+    return @(Get-TablespaceLinkMap -DataDirectory $DataDirectory).Count
+}
+
+function Get-SharedTablespaceLocation {
+    <#
+        The locations BOTH cluster images link to.
+
+        A tablespace is not part of either data directory: pg_tblspc holds a
+        junction, and the files live wherever it points -- for stock_cold, one
+        single G:\StockPlatform\data\pg-cold that the migration copies nothing
+        of and versions nothing about. So a rollback that starts an older
+        catalogue does NOT get an older tablespace: it gets today's cold files,
+        already rewritten by every tier move the newer cluster made, described
+        by a catalogue that predates them. That is not a revert, it is a split
+        cluster, and no switch makes it safe.
+    #>
+    param([Parameter(Mandatory)]$LiveLinks, [Parameter(Mandatory)]$TargetLinks)
+    $liveLocations = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($link in @($LiveLinks)) { if ($link.Location) { [void]$liveLocations.Add($link.Location) } }
+    $shared = [System.Collections.Generic.List[object]]::new()
+    foreach ($link in @($TargetLinks)) {
+        if ($link.Location -and $liveLocations.Contains($link.Location)) {
+            $shared.Add([pscustomobject]@{ Oid = $link.Oid; Location = $link.Location })
+        }
+    }
+    return $shared.ToArray()
 }
 
 function Get-ClusterCheckpointTime {
@@ -241,6 +313,35 @@ function Invoke-AdminPsql {
         Remove-Item Env:PGCONNECT_TIMEOUT -ErrorAction SilentlyContinue
         Remove-Item Env:PGOPTIONS -ErrorAction SilentlyContinue
     }
+}
+
+function Get-TablespaceCatalogue {
+    <#
+        pg_tablespace as the running server sees it: oid, name and location.
+
+        This is what the receipt has to carry. A future -Rollback can only read
+        pg_tblspc junctions off a stopped image, and a junction whose target
+        directory has since been removed or repointed reads as nothing at all;
+        the receipt is the record of what the tablespaces WERE at the cutover,
+        and it is what makes "the rollback target shares stock_cold with the
+        live cluster" a statement about the catalogue rather than about NTFS.
+        pg_default and pg_global have no location and are reported as ''.
+    #>
+    $rows = Invoke-AdminPsql -Sql ("SELECT oid || '|' || spcname || '|' || coalesce(pg_tablespace_location(oid), '') " +
+        'FROM pg_tablespace ORDER BY oid')
+    $catalogue = [System.Collections.Generic.List[object]]::new()
+    foreach ($line in @(([string]$rows) -split "`n")) {
+        $text = $line.Trim()
+        if (-not $text) { continue }
+        $parts = $text.Split('|', 3)
+        if ($parts.Count -ne 3) { continue }
+        $location = $parts[2].Trim()
+        if ($location) {
+            try { $location = [IO.Path]::GetFullPath($location).TrimEnd('\') } catch { }
+        }
+        $catalogue.Add([pscustomobject]@{ Oid = $parts[0].Trim(); Name = $parts[1].Trim(); Location = $location })
+    }
+    return $catalogue.ToArray()
 }
 
 function Get-RowCountSnapshot {
@@ -363,6 +464,37 @@ function Start-PostgresCluster {
     $script:PostgresStopped = $false
 }
 
+function Remove-PartialTargetDirectory {
+    <#
+        Take away the half-filled copy this run made, and nothing else.
+
+        Three independent guards, because this is the only deletion in the
+        script: it runs only when $script:TargetDirectoryOwned says step 4
+        created it, only when the old directory has NOT been renamed (after the
+        rename the target IS the cluster), and never on a path that resolves to
+        the source. Junctions are unlinked one by one before the recursive
+        delete: a pg_tblspc junction recreated at the target points at the live
+        cold tablespace on G:, and a recursive delete that followed it would
+        take the cold tier with it.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$SourceDirectory)
+    if (-not $script:TargetDirectoryOwned) { return 'not_owned_by_this_run' }
+    if ($script:OldDirectoryRenamed) { return 'target_is_authoritative' }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if ($full -eq [IO.Path]::GetFullPath($SourceDirectory).TrimEnd('\')) {
+        throw "Refusing to remove $full : it is the source cluster"
+    }
+    if (-not (Test-Path -LiteralPath $full -PathType Container)) { return 'absent' }
+    foreach ($item in @(Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction SilentlyContinue)) {
+        if ($item.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
+            try { [IO.Directory]::Delete($item.FullName) } catch { [IO.File]::Delete($item.FullName) }
+        }
+    }
+    Remove-Item -LiteralPath $full -Recurse -Force
+    $script:TargetDirectoryOwned = $false
+    return 'removed'
+}
+
 function Invoke-FailureRecovery {
     <#
         Put the platform back after a failure anywhere in steps 2-8.
@@ -416,6 +548,15 @@ function Invoke-FailureRecovery {
         Add-RecoveryStep "start PostgreSQL from $authoritative" {
             & $pgCtl status -D $authoritative *> $null
             if ($LASTEXITCODE -ne 0) { Start-PostgresCluster -DataDirectory $authoritative }
+        }
+        # Last, once the platform is provably back on the source: clear the
+        # partial copy. Doing it earlier would delete the only other copy of the
+        # cluster while the recovery could still fail, and leaving it behind
+        # fails the preflight of the retry with "target exists and is not
+        # empty" -- the script blocking itself with its own debris.
+        Add-RecoveryStep "remove the partial copy at $TargetDataDirectory" {
+            $outcome = Remove-PartialTargetDirectory -Path $TargetDataDirectory -SourceDirectory $SourceDataDirectory
+            Write-Step "partial target directory: $outcome"
         }
     }
     $platformState = 'not_attempted'
@@ -477,13 +618,38 @@ if ($Rollback) {
     # relation that has since been moved into the cold tier would be missing
     # from the cluster it starts. That is not recoverable by restarting, so it
     # is refused outright -- not behind a switch.
-    $liveTablespaces = Get-TablespaceLinkCount -DataDirectory $currentDataDir
-    $targetTablespaces = Get-TablespaceLinkCount -DataDirectory $restoreTarget
+    $liveLinks = @(Get-TablespaceLinkMap -DataDirectory $currentDataDir)
+    $targetLinks = @(Get-TablespaceLinkMap -DataDirectory $restoreTarget)
+    $liveTablespaces = $liveLinks.Count
+    $targetTablespaces = $targetLinks.Count
     Write-Step "tablespace links: live $liveTablespaces, rollback target $targetTablespaces"
+    foreach ($link in $liveLinks) { Write-Step "  live pg_tblspc\$($link.Oid) -> $($link.Location)" }
+    foreach ($link in $targetLinks) { Write-Step "  target pg_tblspc\$($link.Oid) -> $($link.Location)" }
+    # Printed on EVERY rollback, refused or not, because it is the one thing the
+    # word "rollback" does not cover: the cold tier is a directory outside both
+    # data directories and nothing here reverts it.
+    Write-Step ('the stock_cold tablespace is NOT reverted by a rollback: its files stay exactly as the live ' +
+        'cluster left them, and only the catalogue that describes them is replaced') 'warning'
     if ($liveTablespaces -gt 0 -and $targetTablespaces -eq 0) {
         throw ("Refusing to roll back to $restoreTarget : the live cluster has $liveTablespaces tablespace(s) " +
             '(stock_cold) and the target image predates their creation, so every row moved into the cold tier ' +
             'would be missing from the cluster this would start. Restore from a backup instead.')
+    }
+    # Both images carrying junctions is the case the link count above cannot
+    # see: they point at the SAME directory, so the older catalogue would be
+    # started over cold files the newer cluster has already rewritten. Refused
+    # outright -- there is no -AcceptDataLoss for it, because the loss is not
+    # bounded by "writes since the cutover": it is an inconsistent cluster.
+    $sharedTablespaces = @(Get-SharedTablespaceLocation -LiveLinks $liveLinks -TargetLinks $targetLinks)
+    $liveIsNewer = ($null -ne $liveAge.CheckpointTime -and $null -ne $targetAge.CheckpointTime -and
+        $liveAge.CheckpointTime -gt $targetAge.CheckpointTime)
+    if ($sharedTablespaces.Count -gt 0 -and $liveIsNewer) {
+        throw ("Refusing to roll back to $restoreTarget : it shares $($sharedTablespaces.Count) tablespace " +
+            "location(s) with the live cluster ($(($sharedTablespaces | ForEach-Object { $_.Location }) -join ', ')) " +
+            "and the live cluster checkpointed at $($liveAge.CheckpointTime), later than the target's " +
+            "$($targetAge.CheckpointTime). The shared cold files were rewritten by tier moves this image knows " +
+            'nothing about, so starting it would pair an old catalogue with new tablespace data. No switch ' +
+            'overrides this; restore from a backup instead.')
     }
 
     if (-not $AcceptDataLoss) {
@@ -496,6 +662,8 @@ if ($Rollback) {
                 data_directory = $restoreTarget; live_data_directory = $currentDataDir
                 discarded_hours = $gapHours
                 live_checkpoint = $liveAge; rollback_checkpoint = $targetAge
+                tablespace_links = @{ live = $liveLinks; rollback_target = $targetLinks; shared = $sharedTablespaces }
+                stock_cold_reverted = $false
             }
         }
         throw $refusal
@@ -524,7 +692,13 @@ if ($Rollback) {
             data_directory = $restoreTarget; abandoned_directory = $currentDataDir; platform = $runtimeState
             accepted_data_loss = $true; discarded_hours = $gapHours
             live_checkpoint = $liveAge; rollback_checkpoint = $targetAge
-            tablespace_links = @{ live = $liveTablespaces; rollback_target = $targetTablespaces }
+            tablespace_links = @{
+                live = $liveLinks; rollback_target = $targetLinks; shared = $sharedTablespaces
+                live_count = $liveTablespaces; rollback_target_count = $targetTablespaces
+            }
+            # Said in the receipt as well as on the console: an operator reading
+            # this file later must not assume the cold tier went back with it.
+            stock_cold_reverted = $false
         }
         if (-not $WhatIf) {
             $rollbackPath = Join-Path $logs "postgres-data-rollback-$stamp.json"
@@ -589,19 +763,28 @@ foreach ($link in $tablespaceLinks) {
 $targetRoot = [IO.Path]::GetPathRoot($target)
 $freeBytes = [IO.DriveInfo]::new($targetRoot).AvailableFreeSpace
 $requiredBytes = $sourceFootprint.Bytes + ([long]$FreeSpaceMarginGB * 1GB)
-Write-Step ('source: {0:N0} files, {1:N1} GB, {2} tablespace junction(s) not counted; target volume {3} free {4:N1} GB, required {5:N1} GB' -f `
-    $sourceFootprint.Files, ($sourceFootprint.Bytes / 1GB), $tablespaceLinks.Count, $targetRoot, ($freeBytes / 1GB), ($requiredBytes / 1GB))
+Write-Step ('source: {0:N0} files, {1:N1} GB, {2} tablespace junction(s) not counted, {3} unreadable entr(y/ies); target volume {4} free {5:N1} GB, required {6:N1} GB' -f `
+    $sourceFootprint.Files, ($sourceFootprint.Bytes / 1GB), $tablespaceLinks.Count, $sourceFootprint.Skipped, $targetRoot, ($freeBytes / 1GB), ($requiredBytes / 1GB))
+foreach ($skippedEntry in @($sourceFootprint.SkippedEntries)) {
+    # Not fatal -- an entry the enumeration cannot read is still copied by
+    # robocopy, which runs with its own error handling -- but it makes the
+    # file/byte comparison in step 4 approximate, so it is named here rather
+    # than surfacing later as an unexplained verification failure.
+    Write-Step "source entry could not be enumerated: $($skippedEntry.Path) -- $($skippedEntry.Error)" 'warning'
+}
 if ($freeBytes -lt $requiredBytes) {
     throw "Target volume $targetRoot has $([math]::Round($freeBytes / 1GB, 1)) GB free, needs $([math]::Round($requiredBytes / 1GB, 1)) GB"
 }
 
+# The row-count snapshot is NOT taken here. At this point the owner API, the
+# dashboard runtime, the shared-peer tunnels and the maintenance-window jobs are
+# all still running and still writing; a count taken now and compared after the
+# cutover fails the migration on any row they legitimately inserted in between,
+# in exactly the window this script's own comment says those jobs fire in. It is
+# taken in step 3 instead, after Stop-PlatformRuntimes and immediately before
+# pg_ctl stop, when nothing can still write.
 $snapshot = [ordered]@{}
-if ($WhatIf) {
-    Write-Step "would snapshot row counts of $($smokeTables -join ', ')"
-} else {
-    $snapshot = Get-RowCountSnapshot
-    foreach ($entry in $snapshot.GetEnumerator()) { Write-Step "snapshot $($entry.Key) = $($entry.Value)" }
-}
+Write-Step "row counts of $($smokeTables -join ', ') will be snapshotted inside the outage, just before the cluster stops"
 
 $transcript = Join-Path $logs "postgres-data-migration-$stamp.transcript.log"
 if (-not $WhatIf) {
@@ -617,9 +800,19 @@ try {
     Stop-PlatformRuntimes
 
     # ----------------------------------------------------------------------
-    # step 3: stop PostgreSQL
+    # step 3: snapshot the row counts inside the outage, then stop PostgreSQL
     # ----------------------------------------------------------------------
-    Write-Step 'step 3/8 stopping PostgreSQL'
+    Write-Step 'step 3/8 snapshotting row counts, then stopping PostgreSQL'
+    # Here and nowhere earlier: step 2 has stopped the owner API, the dashboard
+    # runtime and every maintenance-window task, the cluster is still up, and
+    # the next statement stops it. Anything this counts is what the new cluster
+    # must count, so the step-6 comparison can only fail on a real difference.
+    if ($WhatIf) {
+        Write-Step "would snapshot row counts of $($smokeTables -join ', ')"
+    } else {
+        $snapshot = Get-RowCountSnapshot
+        foreach ($entry in $snapshot.GetEnumerator()) { Write-Step "snapshot $($entry.Key) = $($entry.Value)" }
+    }
     Stop-PostgresCluster -DataDirectory $currentDataDir
 
     # ----------------------------------------------------------------------
@@ -634,6 +827,10 @@ try {
         Write-Step "would recreate $($tablespaceLinks.Count) tablespace junction(s) under $target\pg_tblspc"
     } else {
         New-Item -ItemType Directory -Force -Path $target | Out-Null
+        # From here the target belongs to this run (the preflight proved it was
+        # absent or empty), so a failure below may -- and must -- take it away
+        # again instead of leaving debris that blocks the retry's preflight.
+        $script:TargetDirectoryOwned = $true
         # /XJ: without it robocopy follows <PGDATA>\pg_tblspc\<oid> and copies the
         # whole cold tier from the G: HDD onto the 500 GB hot volume (and the
         # free-space preflight, which does not follow junctions either, would
@@ -644,8 +841,16 @@ try {
         $copiedFootprint = Get-DirectoryFootprint -Path $target
         $sourceAfter = Get-DirectoryFootprint -Path $currentDataDir
         if ($copiedFootprint.Files -ne $sourceAfter.Files -or $copiedFootprint.Bytes -ne $sourceAfter.Bytes) {
-            throw ("Copy verification failed: source {0} files / {1} bytes, copy {2} files / {3} bytes" -f `
-                $sourceAfter.Files, $sourceAfter.Bytes, $copiedFootprint.Files, $copiedFootprint.Bytes)
+            # The unreadable counts are part of the message: a difference of
+            # exactly the entries one side could not enumerate is a measurement
+            # problem, not a short copy, and an operator who cannot see the
+            # numbers has no way to tell those apart.
+            throw ("Copy verification failed: source {0} files / {1} bytes ({2} unreadable), copy {3} files / {4} bytes ({5} unreadable){6}" -f `
+                $sourceAfter.Files, $sourceAfter.Bytes, $sourceAfter.Skipped,
+                $copiedFootprint.Files, $copiedFootprint.Bytes, $copiedFootprint.Skipped,
+                $(if ($sourceAfter.Skipped -gt 0 -or $copiedFootprint.Skipped -gt 0) {
+                    '; unreadable: ' + ((@($sourceAfter.SkippedEntries) + @($copiedFootprint.SkippedEntries) | ForEach-Object { $_.Path }) -join ', ')
+                } else { '' }))
         }
         $controlSource = (Get-FileHash -LiteralPath (Join-Path $currentDataDir 'global\pg_control') -Algorithm SHA256).Hash
         $controlTarget = (Get-FileHash -LiteralPath (Join-Path $target 'global\pg_control') -Algorithm SHA256).Hash
@@ -669,11 +874,13 @@ try {
         $copyVerification = [ordered]@{
             verified = $true; robocopy_exit_code = $robocopyExit
             files = $copiedFootprint.Files; bytes = $copiedFootprint.Bytes
+            source_unreadable_entries = @($sourceAfter.SkippedEntries)
+            target_unreadable_entries = @($copiedFootprint.SkippedEntries)
             pg_control_sha256 = $controlTarget
             tablespace_links = $recreatedLinks.ToArray()
         }
-        Write-Step ('copy verified: {0:N0} files, {1:N1} GB, pg_control checksum equal, {2} tablespace junction(s) recreated' -f `
-            $copiedFootprint.Files, ($copiedFootprint.Bytes / 1GB), $recreatedLinks.Count)
+        Write-Step ('copy verified: {0:N0} files, {1:N1} GB, {2}/{3} unreadable entr(y/ies) source/copy, pg_control checksum equal, {4} tablespace junction(s) recreated' -f `
+            $copiedFootprint.Files, ($copiedFootprint.Bytes / 1GB), $sourceAfter.Skipped, $copiedFootprint.Skipped, $recreatedLinks.Count)
     }
 
     # ----------------------------------------------------------------------
@@ -694,8 +901,10 @@ try {
     Write-Step 'step 6/8 starting PostgreSQL from the new data directory and verifying it'
     Start-PostgresCluster -DataDirectory $target
     $verification = [ordered]@{}
+    $tablespaces = @()
     if ($WhatIf) {
         Write-Step 'would verify: SHOW data_directory, SHOW work_mem, pg_stat_statements in shared_preload_libraries, row counts'
+        Write-Step 'would record pg_tablespace (oid, name, location) in the receipt for the rollback gate'
     } else {
         $reportedDataDir = Invoke-AdminPsql -Sql 'SHOW data_directory'
         if ([IO.Path]::GetFullPath($reportedDataDir).TrimEnd('\').TrimEnd('/') -ne $target) {
@@ -710,6 +919,14 @@ try {
             if ([long]$after[$table] -ne [long]$snapshot[$table]) {
                 throw "Row count for $table changed across the migration: $($snapshot[$table]) -> $($after[$table])"
             }
+        }
+        # The tablespaces as the cluster now describes them. This is what a later
+        # -Rollback needs to decide whether the image it would start shares a
+        # tablespace location with the live cluster; the junctions under
+        # pg_tblspc are the same information, but only while they still exist.
+        $tablespaces = @(Get-TablespaceCatalogue)
+        foreach ($space in $tablespaces) {
+            Write-Step "tablespace $($space.Name) (oid $($space.Oid)) -> $(if ($space.Location) { $space.Location } else { '<in the data directory>' })"
         }
         $verification = [ordered]@{
             data_directory = $reportedDataDir; work_mem = $workMem
@@ -735,10 +952,18 @@ try {
         old_data_directory = $currentDataDir
         old_data_directory_renamed = $keptPath
         new_data_directory = $target
-        source_footprint = @{ files = $sourceFootprint.Files; bytes = $sourceFootprint.Bytes }
+        source_footprint = @{
+            files = $sourceFootprint.Files; bytes = $sourceFootprint.Bytes
+            unreadable_entries = @($sourceFootprint.SkippedEntries)
+        }
         copy_verification = $copyVerification
         startup_verification = $verification
+        # pg_tablespace at the cutover: the rollback gate reads this to tell a
+        # tablespace the target image shares with the live cluster (refused
+        # outright) from one it never had (refused for a different reason).
+        tablespaces = $tablespaces
         row_count_snapshot = $snapshot
+        row_count_snapshot_taken = 'after the platform runtimes stopped, immediately before pg_ctl stop'
         forced = [bool]$Force
         what_if = [bool]$WhatIf
     }
@@ -762,7 +987,7 @@ try {
     # prints how many hours of writes it would discard and then refuses. Adding
     # the switch is the operator's explicit acknowledgement of that number.
     $receipt['rollback_command'] = "pwsh -NoProfile -File $PSCommandPath -Rollback -RollbackDataDir $keptPath"
-    $receipt['rollback_note'] = 'Rollback discards every write made since this migration finished. The command above refuses unless -AcceptDataLoss is added, and refuses outright once the stock_cold tablespace exists but the image predates it. After the first hours, restore from a backup instead.'
+    $receipt['rollback_note'] = 'Rollback discards every write made since this migration finished, and it does NOT revert the stock_cold tablespace: those files live outside both data directories and stay as the live cluster left them. The command above refuses unless -AcceptDataLoss is added, and refuses outright -- no switch overrides it -- when the image predates the stock_cold tablespace, or when it shares a tablespace location with a live cluster that has checkpointed later. After the first hours, restore from a backup instead.'
     [pscustomobject]$receipt
 } catch {
     # Steps 2-8 leave the database stopped and the nightly tasks disabled; the
@@ -789,6 +1014,9 @@ try {
                     postgres_stopped = $script:PostgresStopped
                     pgdata_dir_switched = $script:EnvSwitched
                     old_directory_renamed = $script:OldDirectoryRenamed
+                    # $false after a successful cleanup: the target is gone and
+                    # the retry's preflight will see an absent directory again.
+                    partial_target_directory_kept = $script:TargetDirectoryOwned
                 }
                 recovery = $recovery
             }

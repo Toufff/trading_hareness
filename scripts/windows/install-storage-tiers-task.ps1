@@ -55,8 +55,19 @@ $trigger = New-ScheduledTaskTrigger -Daily -At $StartTime
 # process: 06:00 + 2h15m leaves fifteen minutes of slack over the deadline, so a
 # healthy run is never the one Task Scheduler kills -- and a killed run writes no
 # receipt, which is exactly what must not happen every night.
+#
+# NO restart-on-failure. run-storage-tiers.ps1 exits with the CLI's own exit
+# code, so Task Scheduler's "Last Run Result" is the receipt's status verbatim
+# -- and every non-zero status this job can produce is a reason to stop, not to
+# retry. A retry would run `apply` again the same night, and each run is allowed
+# to shave DEFAULT_MAX_SPACE_DAYS = 7 days off a table's hot window: two
+# restarts turn the documented "at most 7 days per table per run" into 21, with
+# every receipt still reading compliant on its own. -StartWhenAvailable stays,
+# because a genuinely missed 06:00 trigger (machine asleep) should still run
+# once. If a retry is ever wanted, gate it in the runner for the transient
+# statuses only -- never here, where the scheduler cannot tell them apart.
 $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 2 -Minutes 15) -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 30) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 2 -Minutes 15) `
     -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 $description = 'Move owner-database rows older than the hot window into the stock_cold tablespace on G:, enforce the hot-tier space budget, and record the run in logs\storage-tiers.jsonl.'
 
