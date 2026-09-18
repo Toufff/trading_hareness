@@ -17,7 +17,7 @@ if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { throw "Missing $
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$parseErrors)
 if ($parseErrors -and $parseErrors.Count -gt 0) { throw "Failed to parse $scriptPath" }
-foreach ($name in 'Select-StockBackupRetentionRemovals', 'ConvertTo-Bytes', 'Get-StockBackupExcludedTableData') {
+foreach ($name in 'Select-StockBackupRetentionRemovals', 'ConvertTo-Bytes', 'Get-StockBackupExcludedTableData', 'Resolve-StockBackupExcludedTableData') {
     $functionAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if (-not $functionAst) { throw "$name function not found in $scriptPath" }
     . ([scriptblock]::Create($functionAst.Extent.Text))
@@ -45,11 +45,55 @@ foreach ($bad in 'raw_market_observations_cold', 'quant.a.b', 'quant.A_cold', 'Q
     Assert-True $rejected "invalid excluded table '$bad' must be rejected"
 }
 
-# The dump argument list is built from the union of the incremental tables and
-# the configured exclusions, so both kinds reach pg_dump as --exclude-table-data.
-$union = @((@('quant.raw_market_observations') + @(Get-StockBackupExcludedTableData -Value 'quant.raw_market_observations_cold;quant.raw_market_observations')) | Select-Object -Unique)
-Assert-True ($union.Count -eq 2 -and $union -contains 'quant.raw_market_observations' -and
-    $union -contains 'quant.raw_market_observations_cold') 'the incremental and configured exclusions merge without duplicates'
+# --- Resolve-StockBackupExcludedTableData -----------------------------------
+# The rule that decides what may be left out of the nightly dump. A cold twin's
+# rows are only recoverable through the incremental chunk chain of the HOT table
+# they were moved out of, so a twin whose hot table has no chain must never be
+# excluded: the last dump that still carried it falls out of retention about two
+# months later and the live cold tablespace on G: becomes its only copy.
+$none = Resolve-StockBackupExcludedTableData -IncrementalTables @() -IncrementalSucceeded $true -ConfiguredExclusions @()
+Assert-True (@($none.Excluded).Count -eq 0 -and @($none.Refused).Count -eq 0) 'without an incremental chain nothing is excluded'
+
+$one = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true -ConfiguredExclusions @()
+Assert-True (@($one.Excluded) -contains 'quant.raw_market_observations') 'a table in the chain is excluded from the dump'
+Assert-True (@($one.Excluded) -contains 'quant.raw_market_observations_cold') "the twin of a table in the chain is excluded too"
+Assert-True (@($one.Excluded).Count -eq 2) 'nothing else is excluded'
+
+# A failed export degrades to a full dump for the hot table, but the twin's rows
+# were captured by EARLIER runs of the chain, so the twin stays excluded.
+$failed = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $false -ConfiguredExclusions @()
+Assert-True (@($failed.Excluded) -notcontains 'quant.raw_market_observations') "a failed incremental export must dump the hot table's data"
+Assert-True (@($failed.Excluded).Count -eq 1 -and @($failed.Excluded)[0] -eq 'quant.raw_market_observations_cold') 'the twin stays excluded when tonight''s export failed'
+
+# The operator override: honoured, except for a twin with no chain behind it.
+# This is the shipped-and-reviewed blocker: five twins were seeded statically
+# while only raw_market_observations had a chain.
+$policyTwins = @('quant.raw_market_observations_cold', 'quant.tushare_raw_records_cold', 'quant.intraday_quote_observations_cold',
+    'quant.intraday_rule_input_snapshots_cold', 'quant.edge_evidence_changes_cold')
+$override = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true -ConfiguredExclusions $policyTwins
+Assert-True (@($override.Refused).Count -eq 4) "a twin without a chunk chain must be refused (got $(@($override.Refused) -join ','))"
+Assert-True (@($override.Refused) -notcontains 'quant.raw_market_observations_cold') 'the twin that does have a chain is not refused'
+foreach ($twin in $policyTwins | Where-Object { $_ -ne 'quant.raw_market_observations_cold' }) {
+    Assert-True (@($override.Excluded) -notcontains $twin) "$twin has no chunk chain and must stay in the dump"
+    Assert-True (@($override.Refused) -contains $twin) "$twin must be reported as a refused exclusion"
+}
+Assert-True (@($override.Excluded).Count -eq 2) 'the override adds nothing beyond the chain and its twin'
+
+# All five in the chain: all five twins may be excluded, and the list is the
+# same one the retired static default used to carry.
+$allFive = @('quant.raw_market_observations', 'quant.tushare_raw_records', 'quant.intraday_quote_observations',
+    'quant.intraday_rule_input_snapshots', 'quant.edge_evidence_changes')
+$full = Resolve-StockBackupExcludedTableData -IncrementalTables $allFive -IncrementalSucceeded $true -ConfiguredExclusions @()
+Assert-True (((@($full.Excluded) | Where-Object { $_.EndsWith('_cold') } | Sort-Object) -join ';') -eq (($policyTwins | Sort-Object) -join ';')) `
+    'with every tiered table in the chain the rule yields exactly the five cold twins'
+Assert-True (@($full.Refused).Count -eq 0) 'nothing is refused when every twin has a chain'
+
+# A non-twin override is the operator's own call and passes through; a repeat of
+# something the rule already produced is collapsed.
+$other = Resolve-StockBackupExcludedTableData -IncrementalTables @('quant.raw_market_observations') -IncrementalSucceeded $true `
+    -ConfiguredExclusions @('quant.scratch_table', 'quant.raw_market_observations_cold')
+Assert-True (@($other.Excluded) -contains 'quant.scratch_table') 'a non-twin override is honoured'
+Assert-True (@($other.Excluded | Where-Object { $_ -eq 'quant.raw_market_observations_cold' }).Count -eq 1) 'an override that repeats the computed exclusion is collapsed'
 
 # --- Select-StockBackupRetentionRemovals ---
 # Fixed "now" so week-boundary math is deterministic regardless of when the
@@ -123,7 +167,8 @@ Assert-True ($appendOnlySql -notmatch ' OR ') 'a spec without an update column s
     incremental_select_includes_modified_rows = $true
     convert_to_bytes_ok = $true
     excluded_table_data_parsed = $true
-    excluded_table_data_merges_with_incremental = $true
+    cold_twin_exclusion_requires_chunk_chain = $true
+    cold_twin_exclusion_without_chain_refused = $true
     retention_keeps_daily_window = $true
     retention_keeps_one_per_weekly_window = $true
     retention_prunes_beyond_both_windows = $true
