@@ -20,6 +20,7 @@ from app.adjustment_factor_maintenance import (
     MAX_CONSECUTIVE_BLOCKED_RUNS,
     PENDING_COVERAGE_RATIO,
     POST_CLOSE_LOOKBACK_DAYS,
+    POST_CLOSE_LOOKBACK_SESSIONS,
     POST_CLOSE_TERMINAL_LANE_STATUSES,
     blocked_date_run_key,
     blocked_ledger_day,
@@ -28,6 +29,8 @@ from app.adjustment_factor_maintenance import (
     pending_and_retired_dates_between,
     pending_dates,
     pending_dates_between,
+    post_close_lookback_days,
+    post_close_lookback_days_from_calendar,
     post_close_stage_receipt,
     post_close_sync,
     record_blocked_date,
@@ -96,16 +99,22 @@ class _BlockedDateLedger:
 class _Connection:
     """A connection that answers per statement rather than one canned result."""
 
-    def __init__(self, rows, ledger_rows=None, blocked_summary=None, ledger=None):
+    def __init__(self, rows, ledger_rows=None, blocked_summary=None, ledger=None,
+                 sessions=None):
         self.rows = rows
         self.ledger_rows = ledger_rows or []
         self.blocked_summary = blocked_summary or {"consecutive_blocked_runs": 1}
         self.ledger = ledger
+        #: What the trade calendar answers the post-close window query with.
+        self.sessions = sessions
         self.calls: list[tuple[str, tuple]] = []
 
     def execute(self, sql, params=None):
         text = " ".join(str(sql).split())
         self.calls.append((text, params))
+        if "quant.market_trade_calendar" in text and "oldest_session" in text:
+            return _Result([self.sessions if self.sessions is not None
+                            else {"oldest_session": None, "sessions": 0}])
         if "quant.automation_runs" in text and text.startswith("SELECT as_of_date"):
             if self.ledger is not None:
                 return _Result(self.ledger.retired(params[1]))
@@ -126,8 +135,8 @@ class _Connection:
 
 
 class _Database:
-    def __init__(self, rows, ledger_rows=None, blocked_summary=None, ledger=None):
-        self.connection = _Connection(rows, ledger_rows, blocked_summary, ledger)
+    def __init__(self, rows, ledger_rows=None, blocked_summary=None, ledger=None, sessions=None):
+        self.connection = _Connection(rows, ledger_rows, blocked_summary, ledger, sessions)
 
     def transaction(self):
         class Context:
@@ -465,7 +474,10 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
         finally:
             module.pending_dates = original
 
+        # No usable calendar answer: the window falls back to the documented
+        # floor rather than to something shorter than the retirement rule.
         self.assertEqual(seen["lookback_days"], POST_CLOSE_LOOKBACK_DAYS)
+        self.assertEqual(result["lookback_days"], POST_CLOSE_LOOKBACK_DAYS)
         # The job reports the retired dates itself, so it is the one caller
         # that asks for the raw coverage list.
         self.assertTrue(seen["include_retired"])
@@ -475,6 +487,120 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "unchanged")
         self.assertEqual(result["lane_status"], "unchanged")
         self.assertFalse(result["retryable"])
+
+
+class PostCloseLookbackWindowTests(unittest.IsolatedAsyncioTestCase):
+    """The post-close window has to outlive the retirement counter.
+
+    The counter's unit is a ledger DAY, and a date is only refused -- so only
+    counted -- while it is still inside the lookback window.  Five CALENDAR
+    days meant that under the only schedule installed (post-close, ``-Daily -At
+    16:40`` with repetitions until ~22:40, returning early on Sat/Sun) a date
+    blocked on a Tuesday was seen on four lane evenings and then left the
+    window, so ``MAX_CONSECUTIVE_BLOCKED_RUNS = 5`` was unreachable and the
+    date was retried every night forever.
+    """
+
+    @staticmethod
+    def _lane_evenings(start: date, count: int) -> list[date]:
+        """The evenings the installed post-close task actually reaches a date on."""
+        evenings: list[date] = []
+        cursor = start
+        while len(evenings) < count:
+            if cursor.weekday() < 5:  # run-post-close-pipeline.ps1: weekend -> skipped
+                evenings.append(cursor)
+            cursor += timedelta(days=1)
+        return evenings
+
+    def test_the_window_still_holds_a_date_on_the_evening_that_retires_it(self):
+        for offset in range(7):
+            trade_date = date(2026, 9, 14) + timedelta(days=offset)  # Mon .. Sun
+            if trade_date.weekday() >= 5:
+                continue  # no session, so no date to repair
+            retiring_evening = self._lane_evenings(
+                trade_date, MAX_CONSECUTIVE_BLOCKED_RUNS)[-1]
+            span = (retiring_evening - trade_date).days
+            self.assertLessEqual(
+                span, POST_CLOSE_LOOKBACK_DAYS,
+                f"{trade_date} leaves the post-close window {span - POST_CLOSE_LOOKBACK_DAYS} "
+                "day(s) before it can accumulate MAX_CONSECUTIVE_BLOCKED_RUNS ledger days")
+
+    def test_the_old_five_day_window_is_what_made_retirement_unreachable(self):
+        """The negative control for the constant above."""
+        tuesday = date(2026, 9, 15)
+        retiring_evening = self._lane_evenings(tuesday, MAX_CONSECUTIVE_BLOCKED_RUNS)[-1]
+        self.assertEqual(retiring_evening, date(2026, 9, 21))  # the following Monday
+        self.assertGreater((retiring_evening - tuesday).days, 5)
+
+    def test_the_pure_rule_never_narrows_the_window(self):
+        today = date(2026, 9, 19)
+        # No calendar coverage at all.
+        self.assertEqual(post_close_lookback_days(today), POST_CLOSE_LOOKBACK_DAYS)
+        # A calendar that cannot produce the requested number of sessions is
+        # not evidence of a short window; it is no evidence at all.
+        self.assertEqual(
+            post_close_lookback_days(today, date(2026, 9, 17), sessions_found=2),
+            POST_CLOSE_LOOKBACK_DAYS)
+        # An ordinary week: the span is shorter than the floor, so the floor wins.
+        self.assertEqual(
+            post_close_lookback_days(today, date(2026, 9, 11),
+                                     sessions_found=POST_CLOSE_LOOKBACK_SESSIONS),
+            POST_CLOSE_LOOKBACK_DAYS)
+        # A holiday week (six sessions spanning 20 days): the window grows.
+        self.assertEqual(
+            post_close_lookback_days(today, date(2026, 8, 30),
+                                     sessions_found=POST_CLOSE_LOOKBACK_SESSIONS),
+            20)
+        # A calendar whose rows are in the future is ignored rather than
+        # producing a negative window.
+        self.assertEqual(
+            post_close_lookback_days(today, date(2026, 9, 25),
+                                     sessions_found=POST_CLOSE_LOOKBACK_SESSIONS),
+            POST_CLOSE_LOOKBACK_DAYS)
+
+    def test_the_window_covers_one_session_more_than_the_retirement_rule(self):
+        self.assertEqual(POST_CLOSE_LOOKBACK_SESSIONS, MAX_CONSECUTIVE_BLOCKED_RUNS + 1)
+        self.assertGreaterEqual(POST_CLOSE_LOOKBACK_DAYS, 14)
+
+    def test_the_calendar_query_counts_distinct_open_sessions(self):
+        connection = _Connection([], sessions={"oldest_session": date(2026, 8, 30), "sessions": 6})
+        self.assertEqual(
+            post_close_lookback_days_from_calendar(connection, date(2026, 9, 19)), 20)
+        sql, params = connection.calls[0]
+        self.assertEqual(params, (date(2026, 9, 19), POST_CLOSE_LOOKBACK_SESSIONS))
+        self.assertIn("SELECT DISTINCT calendar_date", sql)
+        self.assertIn("WHERE is_open AND calendar_date<=%s", sql)
+        self.assertEqual(sql.count("%s"), len(params))
+
+    async def test_post_close_sync_resolves_its_window_from_the_calendar(self):
+        database = _Database([], sessions={"oldest_session": date(2026, 8, 30), "sessions": 6})
+        dependencies = AdjustmentFactorMaintenanceDependencies(
+            database=database, run_database=_run_database,
+            call_tushare_api=None, parse_tushare_date=None, persist_tushare_rows=None,
+            persist_blocked=None, safe_error_detail=lambda value, _limit: value,
+            executor_saturated_error=RuntimeError, record_provider_success=None,
+            record_provider_failure=None, record_provider_api_capability=None,
+        )
+        result = await post_close_sync(dependencies, today=date(2026, 9, 19))
+        self.assertEqual(result["lookback_days"], 20)
+        work_list = next(call for call in database.connection.calls
+                         if "FROM quant.canonical_bars_daily bar" in call[0])
+        self.assertEqual(work_list[1][0], date(2026, 8, 30))
+
+    async def test_an_explicit_window_still_wins(self):
+        database = _Database([], sessions={"oldest_session": date(2026, 8, 30), "sessions": 6})
+        dependencies = AdjustmentFactorMaintenanceDependencies(
+            database=database, run_database=_run_database,
+            call_tushare_api=None, parse_tushare_date=None, persist_tushare_rows=None,
+            persist_blocked=None, safe_error_detail=lambda value, _limit: value,
+            executor_saturated_error=RuntimeError, record_provider_success=None,
+            record_provider_failure=None, record_provider_api_capability=None,
+        )
+        result = await post_close_sync(dependencies, lookback_days=3, today=date(2026, 9, 19))
+        self.assertEqual(result["lookback_days"], 3)
+        self.assertEqual([call for call in database.connection.calls
+                          if "quant.market_trade_calendar" in call[0]
+                          and "oldest_session" in call[0]], [])
 
 
 class _AutomationRunsLedger:
@@ -781,23 +907,60 @@ class BlockedLedgerDayTests(unittest.TestCase):
             blocked_ledger_day(datetime(2026, 9, 15, 14, 0, tzinfo=timezone.utc)),  # 22:00 CST
             date(2026, 9, 15))
 
-    def test_the_statement_keys_the_counter_on_the_day_not_the_invocation(self):
-        """A regression to ``coalesce(...)+1`` would pass every fake; not this.
+    def test_the_statement_shape_keys_the_counter_on_the_day_not_the_invocation(self):
+        """SHAPE ONLY -- the statement's BEHAVIOUR is proved by PostgreSQL.
 
-        ``BlockedDateLedgerPostgresTests`` proves the statement's behaviour;
-        this pins its shape so an edit cannot quietly restore the unconditional
-        increment that made five runs mean one evening.
+        Under plain pytest nothing executes ``_RECORD_BLOCKED_DATE_SQL``: the
+        counting decision in every test above comes from
+        :class:`_BlockedDateLedger`, a hand-written model of it, and the real
+        ``ON CONFLICT`` branch runs only in
+        :class:`BlockedDateLedgerPostgresTests` (``PGHOST``).  This test is
+        therefore the whole default gate on the statement itself, so it pins
+        the two CASE arms by their exact bodies, assembled from the module's
+        own fragments.  Keying only on the word ``CASE WHEN`` let an INVERTED
+        statement -- increment when the day IS already counted -- pass, which
+        is exactly the blocker it exists to catch.
         """
         statement = " ".join(module._RECORD_BLOCKED_DATE_SQL.split())
-        self.assertIn("'blocked_days'", statement)
-        self.assertIn("@>", statement)  # "have we already counted this day?"
+        counted = " ".join(module._COUNTED_TODAY_SQL.split())
+        runs = " ".join(module._BLOCKED_RUNS_SQL.split())
+        days = " ".join(module._BLOCKED_DAYS_SQL.split())
+        ledger_day = " ".join(module._LEDGER_DAY_JSON_SQL.split())
+        self.assertIn("@>", counted)  # "have we already counted this day?"
         self.assertIn(f"interval '{module.BLOCKED_LEDGER_DAY_BOUNDARY_HOUR} hours'", statement)
-        # The increment is inside the "not counted on this day yet" branch...
-        self.assertIn("'consecutive_blocked_runs', CASE WHEN", statement)
+        # The counter: +1 belongs to the ELSE arm, and ONLY to it.
+        self.assertIn(
+            f"'consecutive_blocked_runs', CASE WHEN {counted} THEN {runs} ELSE {runs}+1 END",
+            statement)
+        # The day list: the new day is appended in the same ELSE arm, so the
+        # counter and the days it is made of can never disagree by branch.
+        self.assertIn(
+            f"'blocked_days', CASE WHEN {counted} THEN ({days}) "
+            f"ELSE ({days}) || {ledger_day} END",
+            statement)
         # ...and the unconditional per-invocation form is gone.
         self.assertNotIn("'consecutive_blocked_runs', coalesce", statement)
         # A fresh row starts its own day list rather than a bare counter.
         self.assertIn("'blocked_days', jsonb_build_array(", statement)
+
+    def test_an_inverted_case_fails_the_shape_test(self):
+        """The negative control for the test above, executed.
+
+        Swapping the two arms restores the original blocker (every invocation
+        counts once the day is recorded).  The assertions must not survive it.
+        """
+        counted = " ".join(module._COUNTED_TODAY_SQL.split())
+        runs = " ".join(module._BLOCKED_RUNS_SQL.split())
+        inverted = " ".join(module._RECORD_BLOCKED_DATE_SQL.split()).replace(
+            f"'consecutive_blocked_runs', CASE WHEN {counted} THEN {runs} ELSE {runs}+1 END",
+            f"'consecutive_blocked_runs', CASE WHEN {counted} THEN {runs}+1 ELSE {runs} END")
+        self.assertNotEqual(inverted, " ".join(module._RECORD_BLOCKED_DATE_SQL.split()),
+                            "the replacement must actually match the shipped statement")
+        # The old assertion could not tell the two apart; the new one can.
+        self.assertIn("'consecutive_blocked_runs', CASE WHEN", inverted)
+        self.assertNotIn(
+            f"'consecutive_blocked_runs', CASE WHEN {counted} THEN {runs} ELSE {runs}+1 END",
+            inverted)
 
     def test_repeating_the_same_evening_a_dozen_times_counts_once(self):
         """The exact shape that retired a date inside one evening."""
@@ -834,6 +997,40 @@ class BlockedLedgerDayTests(unittest.TestCase):
         self.assertEqual(len(ledger.receipts), 1)
         clear_blocked_date(connection, date(2026, 9, 11))
         self.assertEqual(retired_dates(connection, [date(2026, 9, 11)]), set())
+
+    def test_the_receipt_says_which_of_the_two_numbers_it_is_showing(self):
+        """A row carried over from the invocation era retires with one day.
+
+        ``consecutive_blocked_runs`` is deliberately ahead of ``blocked_days``
+        on such a row (the count is kept, the days start now), so printing the
+        list inside "on 5 separate days (...)" contradicts itself.  The receipt
+        is the durable, human-facing record of the retirement; it has to say
+        what it can prove.
+        """
+        phrase = module._blocked_days_receipt_phrase
+        self.assertEqual(phrase(2, ["2026-09-15", "2026-09-16"]), "(2026-09-15, 2026-09-16)")
+        self.assertIn("recorded days: 2026-09-19", phrase(5, ["2026-09-19"]))
+        self.assertIn("predate the day key", phrase(5, ["2026-09-19"]))
+        self.assertIn("none", phrase(5, []))
+
+        ledger = _BlockedDateLedger(day=date(2026, 9, 19))
+        run_key = blocked_date_run_key(date(2026, 9, 11))
+        # The shape an upgrade leaves behind: a count, no day list.
+        ledger.rows[run_key] = {
+            "as_of_date": date(2026, 9, 11), "run_key": run_key,
+            "output_summary": {"consecutive_blocked_runs": MAX_CONSECUTIVE_BLOCKED_RUNS - 1,
+                               "blocked_days": []}}
+        connection = _Connection([], ledger=ledger)
+        state = record_blocked_date(connection, date(2026, 9, 11), "thin cross-section")
+        self.assertEqual(state["consecutive_blocked_runs"], MAX_CONSECUTIVE_BLOCKED_RUNS)
+        self.assertEqual(state["blocked_days"], ["2026-09-19"])
+        self.assertTrue(state["retired"])
+        message = ledger.receipts[0][0]
+        self.assertIn(f"on {MAX_CONSECUTIVE_BLOCKED_RUNS} separate days", message)
+        self.assertIn("recorded days: 2026-09-19", message)
+        self.assertNotIn(
+            f"on {MAX_CONSECUTIVE_BLOCKED_RUNS} separate days (2026-09-19)", message,
+            "five days and one listed day must not be printed as if they agreed")
 
 
 @unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
@@ -1019,6 +1216,63 @@ class BlockedDateLedgerPostgresTests(unittest.TestCase):
                 self.assertFalse(repeat["retired"])
             finally:
                 self._cleanup(connection)
+
+    def test_a_legacy_row_that_retires_says_only_what_it_can_prove(self):
+        """The receipt must not read as "5 days (one date)" on an upgraded row."""
+        from app.main import db
+
+        with db.transaction() as connection:
+            self._cleanup(connection)
+            try:
+                connection.execute(
+                    """INSERT INTO quant.automation_runs(
+                           task_key,run_key,cadence,as_of_date,status,methodology_version,
+                           input_summary,output_summary,finished_at)
+                       VALUES(%s,%s,'daily',%s,'blocked',%s,'{}'::jsonb,%s::jsonb,now())""",
+                    (BLOCKED_DATE_TASK_KEY, blocked_date_run_key(self.trade_date),
+                     self.trade_date, BLOCKED_DATE_TASK_KEY,
+                     f'{{"consecutive_blocked_runs": {MAX_CONSECUTIVE_BLOCKED_RUNS - 1}, '
+                     '"reason": "legacy"}'))
+                state = record_blocked_date(connection, self.trade_date, "thin cross-section")
+                self.assertEqual(state["consecutive_blocked_runs"], MAX_CONSECUTIVE_BLOCKED_RUNS)
+                self.assertEqual(state["blocked_days"], [str(blocked_ledger_day())])
+                self.assertTrue(state["retired"])
+                message = connection.execute(
+                    "SELECT message FROM quant.data_quality_issues "
+                    "WHERE code='adjustment_factor_date_retired' AND trading_date=%s",
+                    (self.trade_date,)).fetchone()["message"]
+                self.assertIn(f"on {MAX_CONSECUTIVE_BLOCKED_RUNS} separate days", message)
+                self.assertIn(f"recorded days: {blocked_ledger_day()}", message)
+                self.assertNotIn(
+                    f"on {MAX_CONSECUTIVE_BLOCKED_RUNS} separate days ({blocked_ledger_day()})",
+                    message)
+            finally:
+                self._cleanup(connection)
+
+    def test_the_post_close_window_query_executes_on_postgres(self):
+        """The window statement is new SQL; nothing else executes it.
+
+        The answer depends on this database's calendar coverage, so the
+        assertion is on the CONTRACT, not on a number: whatever comes back, the
+        window is never shorter than the documented floor and never negative.
+        """
+        from app.adjustment_factor_maintenance import (
+            POST_CLOSE_LOOKBACK_SESSIONS,
+            POST_CLOSE_LOOKBACK_SESSIONS_SQL,
+            post_close_lookback_days_from_calendar,
+        )
+        from app.main import db
+
+        with db.transaction() as connection:
+            row = connection.execute(
+                POST_CLOSE_LOOKBACK_SESSIONS_SQL,
+                (china_today(), POST_CLOSE_LOOKBACK_SESSIONS)).fetchone()
+            days = post_close_lookback_days_from_calendar(connection, china_today())
+        self.assertEqual(sorted(row), ["oldest_session", "sessions"])
+        self.assertGreaterEqual(days, POST_CLOSE_LOOKBACK_DAYS)
+        # A calendar that can answer must cover at least the retirement rule.
+        if row["sessions"] == POST_CLOSE_LOOKBACK_SESSIONS:
+            self.assertGreaterEqual(days, (china_today() - row["oldest_session"]).days)
 
     def test_the_work_list_and_readiness_window_queries_execute_on_postgres(self):
         from app.main import db

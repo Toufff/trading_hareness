@@ -345,6 +345,26 @@ def retired_dates(connection: Any, dates: list[date]) -> set[date]:
     return set(retired_date_details(connection, dates))
 
 
+def _blocked_days_receipt_phrase(blocked_runs: int, blocked_days: list[str]) -> str:
+    """Name the days the counter is made of, WITHOUT claiming more than exists.
+
+    The counter and the day list are deliberately out of step on one row: a
+    ledger written before ``blocked_days`` existed carries its count from the
+    invocation-counting era and gains its first recorded day only now, so a
+    row can legitimately retire at ``consecutive_blocked_runs = 5`` while
+    listing one day.  Printing that list inside "on 5 separate days (...)"
+    reads as a contradiction and invites the reader to distrust the count, so
+    the parenthesis says which of the two it is showing whenever they differ.
+    """
+    joined = ', '.join(blocked_days)
+    if blocked_days and len(blocked_days) == blocked_runs:
+        return f"({joined})"
+    if blocked_days:
+        return (f"(recorded days: {joined}; the earlier ones predate the day key and were "
+                "counted per invocation)")
+    return "(recorded days: none -- this row predates the day key)"
+
+
 def record_blocked_date(connection: Any, trade_date: date, reason: str) -> dict[str, Any]:
     """Count one coverage-blocked DAY, and retire the date once at the limit.
 
@@ -380,7 +400,8 @@ def record_blocked_date(connection: Any, trade_date: date, reason: str) -> dict[
             """INSERT INTO quant.data_quality_issues(capability,severity,code,message,details,trading_date)
                    VALUES('adj_factor','warning','adjustment_factor_date_retired',%s,%s,%s)""",
             (f"{trade_date} was refused by the daily-controls coverage gate on "
-             f"{blocked_runs} separate days ({', '.join(blocked_days) or 'see ledger'}) and has "
+             f"{blocked_runs} separate days {_blocked_days_receipt_phrase(blocked_runs, blocked_days)} "
+             "and has "
              "been dropped from the adjustment-factor work list; its adj_factor stays NULL until "
              "the date's daily cross-section is repaired and the ledger row is cleared",
              Json({"trade_date": str(trade_date), "reason": reason,
@@ -435,7 +456,67 @@ SUCCESS_STATUSES = ("completed", "planned", "unchanged", "skipped")
 #: A shorter window for the non-gating post-close invocation: the evening run
 #: repairs the session that just landed (and the handful before it), while the
 #: 04:30 maintenance task owns the full backlog.
-POST_CLOSE_LOOKBACK_DAYS = 5
+#:
+#: This is the FLOOR and the fallback, in calendar days, and it may never be
+#: shorter than :data:`MAX_CONSECUTIVE_BLOCKED_RUNS` lane evenings.  The
+#: counter that retires a date counts ledger DAYS, and a date only reaches the
+#: lane while it is inside this window, so a window shorter than the retirement
+#: rule means the date silently leaves the work list before it can ever retire.
+#: Under the only schedule that is actually installed -- the post-close
+#: pipeline, ``-Daily -At 16:40`` with repetitions until ~22:40, which returns
+#: early on Sat/Sun -- five lane evenings starting on a Friday end on the
+#: following Thursday, seven calendar days later; with one missed evening of
+#: slack, eight.  Fourteen is that with room for a holiday-shortened week, and
+#: is what a host that has been off for a day or two still needs.
+POST_CLOSE_LOOKBACK_DAYS = 14
+
+#: The same window expressed in the unit that actually matters: exchange
+#: sessions.  A date must still be inside the post-close window on the evening
+#: of its :data:`MAX_CONSECUTIVE_BLOCKED_RUNS`-th refusal, and the lane reaches
+#: it once per trading evening, so the window covers that many sessions plus
+#: one evening of slack.  Counted from ``quant.market_trade_calendar`` so a
+#: Spring Festival or National Day week -- nine calendar days with no session
+#: -- widens the window instead of quietly dropping a date off it.
+POST_CLOSE_LOOKBACK_SESSIONS = MAX_CONSECUTIVE_BLOCKED_RUNS + 1
+
+#: The most recent :data:`POST_CLOSE_LOOKBACK_SESSIONS` open sessions, oldest
+#: first.  ``DISTINCT`` because the calendar is keyed by ``(exchange, date)``
+#: and the work-list query above is exchange-agnostic about the same table:
+#: counting one date twice would halve the window.
+POST_CLOSE_LOOKBACK_SESSIONS_SQL = """SELECT min(session) AS oldest_session,
+            count(*)::int AS sessions
+       FROM (SELECT DISTINCT calendar_date AS session FROM quant.market_trade_calendar
+              WHERE is_open AND calendar_date<=%s
+              ORDER BY 1 DESC LIMIT %s) recent"""
+
+
+def post_close_lookback_days(
+    today: date, oldest_session: date | None = None, *, sessions_found: int = 0,
+    sessions: int = POST_CLOSE_LOOKBACK_SESSIONS, floor_days: int = POST_CLOSE_LOOKBACK_DAYS,
+) -> int:
+    """How far back the post-close invocation looks, in calendar days.
+
+    Pure, so the rule can be pinned without a database.  The answer is never
+    shorter than :data:`POST_CLOSE_LOOKBACK_DAYS` -- a calendar that has not
+    been backfilled, or one whose last rows predate today, must widen the
+    window, never narrow it -- and grows to whatever span the requested number
+    of sessions actually occupies, which is what makes the window survive a
+    holiday week.
+    """
+    if oldest_session is None or sessions_found < sessions or oldest_session > today:
+        return floor_days
+    return max(floor_days, (today - oldest_session).days)
+
+
+def post_close_lookback_days_from_calendar(
+    connection: Any, today: date, *,
+    sessions: int = POST_CLOSE_LOOKBACK_SESSIONS, floor_days: int = POST_CLOSE_LOOKBACK_DAYS,
+) -> int:
+    """Resolve :func:`post_close_lookback_days` against the trade calendar."""
+    row = connection.execute(POST_CLOSE_LOOKBACK_SESSIONS_SQL, (today, sessions)).fetchone() or {}
+    return post_close_lookback_days(
+        today, row.get("oldest_session"), sessions_found=int(row.get("sessions") or 0),
+        sessions=sessions, floor_days=floor_days)
 
 
 def _classify(outcome: dict[str, Any]) -> str:
@@ -613,7 +694,7 @@ def post_close_stage_receipt(result: dict[str, Any]) -> dict[str, Any]:
 
 async def post_close_sync(
     dependencies: AdjustmentFactorMaintenanceDependencies,
-    *, lookback_days: int = POST_CLOSE_LOOKBACK_DAYS, today: date | None = None,
+    *, lookback_days: int | None = None, today: date | None = None,
 ) -> dict[str, Any]:
     """Run the factor lane as a NON-GATING post-close stage.
 
@@ -628,9 +709,25 @@ async def post_close_sync(
     :func:`post_close_stage_receipt`'s translation of it into the durable
     receipt vocabulary, so a run that skipped a date for coverage is retried by
     the evening's later repetitions instead of being sealed as ``completed``.
+
+    ``lookback_days=None`` (the default, and what production uses) resolves the
+    window from the trade calendar via :func:`post_close_lookback_days_from_calendar`,
+    so it always covers :data:`MAX_CONSECUTIVE_BLOCKED_RUNS` lane evenings and a
+    refused date can actually reach the retirement rule instead of falling out
+    of the window first.  The resolved value is reported as ``lookback_days``
+    in the receipt.
     """
-    result = await sync(dependencies, lookback_days=lookback_days, today=today)
+    end_date = today or china_today()
+    if lookback_days is None:
+        lookback_days = await dependencies.run_database(functools.partial(
+            _post_close_lookback_days, dependencies.database, end_date))
+    result = await sync(dependencies, lookback_days=lookback_days, today=end_date)
     return {**result, **post_close_stage_receipt(result), "non_gating": True}
+
+
+def _post_close_lookback_days(database: Any, today: date) -> int:
+    with database.transaction() as connection:
+        return post_close_lookback_days_from_calendar(connection, today)
 
 
 def _retired_dates(database: Any, dates: list[date]) -> set[date]:
@@ -653,12 +750,14 @@ __all__ = [
     "BLOCKED_LEDGER_DAY_BOUNDARY_HOUR", "FAILED_STATUS",
     "GUARDED_BAR_TABLES", "IDENTITY_FACTOR_LEAK_SQL_TEMPLATE", "MAX_CONSECUTIVE_BLOCKED_RUNS",
     "PENDING_COVERAGE_RATIO", "PENDING_DATES_SQL", "POST_CLOSE_LOOKBACK_DAYS",
+    "POST_CLOSE_LOOKBACK_SESSIONS", "POST_CLOSE_LOOKBACK_SESSIONS_SQL",
     "POST_CLOSE_NON_GATING_REASON", "POST_CLOSE_TERMINAL_LANE_STATUSES",
     "REAL_FACTOR_PREDICATE_SQL", "RETIRED_DATES_SQL", "RETIRED_DATE_DEFAULT_REASON",
     "SUCCESS_STATUSES",
     "blocked_date_run_key", "blocked_ledger_day", "china_today", "clear_blocked_date",
     "identity_factor_leak_sql",
     "pending_and_retired_dates_between", "pending_dates", "pending_dates_between",
+    "post_close_lookback_days", "post_close_lookback_days_from_calendar",
     "post_close_stage_receipt", "post_close_sync", "record_blocked_date",
     "retired_date_details", "retired_date_details_from_rows", "retired_dates", "sync",
 ]

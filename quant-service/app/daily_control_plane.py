@@ -435,6 +435,14 @@ class DailyControlPlaneSyncDependencies:
 
 def _longhu_control_status(database: Any, trade_date: date) -> dict[str, Any] | None:
     with database.transaction() as connection:
+        # The blocked-date ledger, read in the SAME transaction as the counts
+        # below.  This dict is the return value of
+        # :func:`sync_full_market_daily_controls`, so it lands in the
+        # ``core_daily_controls`` post-close receipt: its adjustment label has
+        # to agree with :func:`status_payload` and ``stock_window_readiness``
+        # about the same date instead of promising a repair of its own.
+        retirement = _retirement_for(
+            adjustment_retirement_details(connection, [{"trading_date": trade_date}]), trade_date)
         row = connection.execute(
             """WITH daily AS (
                    SELECT count(*)::int AS rows FROM quant.canonical_bars_daily
@@ -460,19 +468,43 @@ def _longhu_control_status(database: Any, trade_date: date) -> dict[str, Any] | 
     # short-circuit never fires again and every post-close would try a full
     # four-API tushare sync whose adj_factor route is currently failing.
     if daily_rows >= LONGHU_MINIMUM_DAILY_ROWS and limit_rows >= minimum_control_rows:
+        note = (
+            "adj_factor is not supplied by this vendor and is fetched on its own lane by "
+            "adjustment_factor_maintenance; limits are board-rule derived and retain "
+            "IPO/resumption warnings"
+        )
+        if retirement is not None:
+            # The factor lane has given this date up: no repair is queued, so
+            # 'pending' and a pending control would both be false promises.
+            # Name the ledger row an operator clears instead of the wait.
+            return {
+                "status": "completed", "trade_date": str(trade_date),
+                "provider": "longhuvip_composite", "expected_daily_rows": daily_rows,
+                "rows": {"adj_factor": 0, "stk_limit": limit_rows, "suspend_d": 0},
+                "satisfied_by_vendor": ["stk_limit", "daily_basic"],
+                "pending_controls": [],
+                "retired_controls": ["adj_factor"],
+                "vendor_factor_rows": factor_rows,
+                "adjustment_state": "retired",
+                "adjustment_retirement": retirement,
+                "quality_note": (
+                    f"{note}; that lane has RETIRED this date after "
+                    f"{retirement['consecutive_blocked_runs']} refused days "
+                    f"({retirement['reason']}), so adj_factor stays NULL and nothing is queued "
+                    f"for it until the ledger row {retirement['run_key']} is cleared"
+                ),
+            }
         return {
             "status": "completed", "trade_date": str(trade_date),
             "provider": "longhuvip_composite", "expected_daily_rows": daily_rows,
             "rows": {"adj_factor": 0, "stk_limit": limit_rows, "suspend_d": 0},
             "satisfied_by_vendor": ["stk_limit", "daily_basic"],
             "pending_controls": ["adj_factor"],
+            "retired_controls": [],
             "vendor_factor_rows": factor_rows,
             "adjustment_state": "pending",
-            "quality_note": (
-                "adj_factor is not supplied by this vendor and is fetched on its own lane by "
-                "adjustment_factor_maintenance; limits are board-rule derived and retain "
-                "IPO/resumption warnings"
-            ),
+            "adjustment_retirement": None,
+            "quality_note": note,
         }
     return None
 

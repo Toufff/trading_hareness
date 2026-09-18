@@ -54,7 +54,13 @@
    集合式写入用同一条规则的 SQL 孪生 `promotable_factor_predicate_sql()`。
 4. `app/daily_control_plane.py` `_longhu_control_status()`：短路门槛按控制项拆分，
    去掉 `factor_rows` 项，回执带 `satisfied_by_vendor` / `pending_controls` /
-   `adjustment_state`。
+   `adjustment_state`。这个 dict 就是 `sync_full_market_daily_controls()` 的返回值，
+   会原样落进盘后 `core_daily_controls` 阶段回执，所以它**也必须和退休台账一致**：
+   在同一个事务里读一次台账（`adjustment_retirement_details`），该日期已退休时
+   `adjustment_state='retired'`、`pending_controls=[]`、`retired_controls=['adj_factor']`、
+   另带 `adjustment_retirement`（含要清的 `run_key`），`quality_note` 写明"不会再自动补"；
+   未退休时 `pending_controls=['adj_factor']`、`retired_controls=[]`、
+   `adjustment_retirement=None`，与改动前一致。
 5. `app/full_market_daily_controls_sync.py`：`sync()` 新增 `apis` 参数；两条
    `is_suspended=false` 复位、涨跌停回填、停牌回填、复权回填分别按各自 API 是否在
    `apis` 中做闸门。**只跑 adj_factor 的任务绝不会清掉当日停牌标记。**
@@ -77,6 +83,13 @@
    （`state` 与 `ready` 不受影响），只是把"等"换成"该做什么"。
    调用方：`app/main.py:full_market_daily_control_status()`（与行同一个事务里查台账）、
    `scripts/equity-readiness.py`、`scripts/verify-equity-control-recovery.py`。
+   这两件事各有测试兜底：`FullMarketDailyControlStatusWiringTests` 直接驱动
+   `app.main.full_market_daily_control_status()`（替换 `main.db`），断言台账查询与行查询
+   **在同一个事务的同一条连接上**、问的正是这些行里的日期、并且答案真的进了 `status_payload`；
+   `StatusPayloadCallSiteGuardTests` 用 AST 走 `quant-service/app` 与 `scripts` 下所有
+   `.py`，要求每一个 `status_payload(...)` 调用都显式传 `retired_dates=`——
+   固定装置里没有台账的用例写 `retired_dates={}`，即"这里确实没有台账"，
+   而不是忘了传。漏传的新调用方会当场失败，而不是悄悄又说回 `pending`。
 9. `app/ten_day_leader_rotation_repository.py`：两处覆盖度判定去掉
    `adj_factor IS NOT NULL`（改由 `quality_status` 回答"是否有结算 bar"）；
    `latest_full_market_date` 的 CTE 列改名 `adjusted_symbols` → `settled_symbols`
@@ -329,7 +342,24 @@ SELECT count(*)::bigint AS identity_leaks
 
 `POST_CLOSE_STAGE_ORDER` 里排在 `full_market_daily` → `core_daily_controls` **之后**
 （因子抓取要先有当日结算截面），执行 `app.main.sync_adjustment_factors_post_close()`
-→ `adjustment_factor_maintenance.post_close_sync()`，回看 `POST_CLOSE_LOOKBACK_DAYS = 5` 天。
+→ `adjustment_factor_maintenance.post_close_sync()`。
+
+**回看窗口必须活得比退休计数器久。** 计数单位是"台账日"，而一个日期只有还在回看窗口里
+才会被再次尝试、才会再记一天。旧的 `POST_CLOSE_LOOKBACK_DAYS = 5`（**日历日**）在真实
+排程下永远凑不满 5 天：只有 post-close 这一个任务被装了（`-Daily -At 16:40` + 每
+`RetryIntervalMinutes` 重复到约 22:40），而 `run-post-close-pipeline.ps1` 周六周日直接
+`skipped`，所以周二被拒的日期只经过周二~周五 4 个晚上就掉出窗口，`MAX_CONSECUTIVE_BLOCKED_RUNS = 5`
+不可达，这个日期每晚被重试到天荒地老。现在窗口这样算（`post_close_lookback_days()`，纯函数）：
+
+- `POST_CLOSE_LOOKBACK_SESSIONS = MAX_CONSECUTIVE_BLOCKED_RUNS + 1 = 6`
+  **个交易日**（多一个晚上的余量），用 `quant.market_trade_calendar` 里
+  `is_open` 的 `DISTINCT calendar_date` 倒数第 6 个作为窗口起点，
+  所以春节/国庆那种连休九天的周不会把日期挤出窗口；
+- 下限 `POST_CLOSE_LOOKBACK_DAYS = 14` **日历日**：日历没回填、日历答不满 6 个交易日、
+  或日历行比今天还新时一律取它。按装好的排程，5 个"车道晚上"最长跨到周五 + 6 天
+  （周五被拒 → 下周四第 5 晚），再留一个晚上余量是 8 天，14 天是这个数加上假期余量；
+- 两者取**大**，窗口只会变宽不会变窄。窗口解析结果写进回执的 `lookback_days`。
+- `post_close_sync(lookback_days=...)` 显式传值时不查日历（给测试和一次性排障用）。
 
 **它不判断任何东西。** 具体保证：
 
@@ -430,11 +460,20 @@ python scripts/adjustment-factor-maintenance.py sync \
   一个交易日会在**当晚**就被退休，之后车道报 `unchanged`、回执落定，
   重试机制把自己关掉。`blocked_ledger_day()` 是这条规则的 Python 版本（给报表和测试用），
   真正算数的是 SQL；两者由 `BlockedDateLedgerPostgresTests` 在真 PostgreSQL 上对齐。
+  **没有 `PGHOST` 时那条语句不会被执行**：默认跑的用例里计数决策来自测试文件里的
+  `_BlockedDateLedger`（手写孪生），语句本身只由
+  `test_the_statement_shape_keys_the_counter_on_the_day_not_the_invocation` 做**形状**校验——
+  它用模块自己的片段拼出两个 CASE 分支的完整正文来断言（`THEN 计数 ELSE 计数+1`、
+  `THEN 旧数组 ELSE 旧数组 || 今天`），所以把两个分支对调（即恢复"每次调用都 +1"的缺陷）
+  会当场失败；`test_an_inverted_case_fails_the_shape_test` 就是这条负控本身。
   升级不丢账：老行没有 `blocked_days`，读作空数组，计数原样保留，下一个台账日才 +1。
   达到 `MAX_CONSECUTIVE_BLOCKED_RUNS = 5` 时**写一次**
   `quant.data_quality_issues` 回执（`code='adjustment_factor_date_retired'`）
   并从此不再出现在工作清单里（`sync()` 结果的 `retired_dates`）。之后再被拒不再重复
-  告警（回执消息里列出那 5 个被拒日）。任何一次抓取成功都会把计数与 `blocked_days`
+  告警。回执消息里的天数与日期清单**只说它能证明的**（`_blocked_days_receipt_phrase()`）：
+  两者一致时直接列出那 5 个被拒日；升级行的计数来自"按调用计"的旧时代、日期清单只有
+  新记的那几天，此时写成 `recorded days: <日期>；更早的那些早于这条键，是按调用计的`，
+  不会把"5 天"和"1 个日期"并排印成自相矛盾的一句。任何一次抓取成功都会把计数与 `blocked_days`
   一起清零，该日期重新回到清单、并从下一个台账日重新数起，同时
   `clear_blocked_date()` 在同一个事务里把那条 `adjustment_factor_date_retired`
   回执置 `resolved_at=now()`——否则它是一条**永远无人能关**的告警。
