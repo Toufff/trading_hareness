@@ -194,6 +194,42 @@ Assert-True ((Get-StorageTierRunWindowDecision -Now $wednesday -Force $true) -eq
 Assert-True ((Get-StorageTierRunWindowDecision -Now ([DateTime]::ParseExact('2026-09-16 06:00', 'yyyy-MM-dd HH:mm', $null))) -eq 'run') 'the 06:00 scheduled run must proceed'
 Assert-True ((Get-StorageTierRunWindowDecision -Now ([DateTime]::ParseExact('2026-09-19 11:00', 'yyyy-MM-dd HH:mm', $null))) -eq 'run') 'a weekend run has no session to protect'
 
+# --- the hot window is one number, read from runtime.env by both jobs --------
+# The mover decides which rows leave the hot table; backup-stock-database.ps1
+# decides whether a cold twin's chunk chain has caught up far enough for the
+# dump to keep excluding its data. Narrow the window on the tier side alone and
+# the backup side still measures freshness against 365 days, excluding a twin
+# that holds rows the chain never exported. So the runner must take the number
+# from the same key, not leave the CLI on its own default.
+$hotDaysAst = $runnerAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-StorageTierHotDays' }, $true)
+Assert-True ($null -ne $hotDaysAst) 'the tier runner must read STORAGE_TIER_HOT_DAYS itself'
+. ([scriptblock]::Create($hotDaysAst.Extent.Text))
+Assert-True ((Get-StorageTierHotDays -Lines @()) -eq 365) 'an env file without the key means the documented default of 365'
+Assert-True ((Get-StorageTierHotDays -Lines @('PGPORT=55432', '# STORAGE_TIER_HOT_DAYS=90')) -eq 365) 'a commented-out key is not a setting'
+Assert-True ((Get-StorageTierHotDays -Lines @('STORAGE_TIER_HOT_DAYS=180')) -eq 180) 'the key must be read'
+Assert-True ((Get-StorageTierHotDays -Lines @('  STORAGE_TIER_HOT_DAYS = "180" ')) -eq 180) 'quotes and whitespace must be tolerated, as in the backup reader'
+Assert-True ((Get-StorageTierHotDays -Lines @('STORAGE_TIER_HOT_DAYS=180', 'STORAGE_TIER_HOT_DAYS=90')) -eq 90) 'the last assignment wins, the way sourcing the file would read it'
+foreach ($bad in 'STORAGE_TIER_HOT_DAYS=0', 'STORAGE_TIER_HOT_DAYS=-5', 'STORAGE_TIER_HOT_DAYS=ninety') {
+    $refused = $false
+    try { [void](Get-StorageTierHotDays -Lines @($bad)) } catch { $refused = $_.Exception.Message -match 'Invalid STORAGE_TIER_HOT_DAYS' }
+    # Falling back to 365 on a typo would move a year of history the operator
+    # meant to keep hot, with nothing in the receipt to say the key was ignored.
+    Assert-True $refused "a malformed hot window must be refused, not defaulted ($bad)"
+}
+# Reading the key must not mean loading the credentials that sit beside it.
+Assert-True ($runner -notmatch 'Read-StockPlatformEnvFile') 'the runner must not slurp runtime.env into this process'
+Assert-True ($runner -match "Get-StorageTierHotDays -Lines \(\[IO\.File\]::ReadAllLines\(\`$RuntimeEnv\)\)") 'the hot window must come from the runtime.env the job was pointed at'
+Assert-True ($runner -match "\`$arguments \+= @\('--hot-days'") 'the runner must pass --hot-days to the CLI'
+$hotDaysPassed = [regex]::Match($runner, "\`$arguments \+= @\('--hot-days'").Index
+$pythonCall = [regex]::Match($runner, '& \$python @arguments').Index
+Assert-True ($hotDaysPassed -lt $pythonCall) 'the flag must be added before the CLI is invoked'
+# An explicit --hot-days from the operator still wins, or a one-off narrow run
+# would silently be overridden by the env file.
+Assert-True ($runner -match "if \(-not \(\`$CliArguments -contains '--hot-days'\)\)") 'an explicit --hot-days on the command line must win over the env file'
+# Both readers, same key, same default -- the backup side is pinned again where
+# its source is read, further down.
+Assert-True ($runner -match '365') 'the runner default must be the documented 365 days'
+
 # --- the runner and the Python CLI must agree -------------------------------
 # They were written on separate branches; a command the runner offers but the
 # CLI does not have fails only at 06:00 in production, so pin it here.

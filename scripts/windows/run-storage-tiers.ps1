@@ -55,6 +55,42 @@ function Get-StorageTierRunWindowDecision {
     return 'run'
 }
 
+function Get-StorageTierHotDays {
+    <#
+        The tier hot window, taken from runtime.env rather than from the CLI's
+        own default.
+
+        Two jobs read STORAGE_TIER_HOT_DAYS and they must read the same number:
+        this one decides which rows leave the hot table, and
+        backup-stock-database.ps1 decides whether a cold twin's incremental
+        chunk chain has caught up far enough for the nightly dump to keep
+        excluding its data. Narrow the window here only -- by passing
+        --hot-days on the command line and leaving the key alone -- and the
+        backup side still measures freshness against 365 days, so it goes on
+        excluding a twin holding rows the chain never exported. Unset, both
+        sides use 365, which is the policy in scripts/database-storage-tiers.py.
+
+        Pure: it takes the file's lines, reads this one key out of them and
+        nothing else, so the credentials in runtime.env never reach this process
+        or its command line.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Lines)
+    $value = ''
+    foreach ($line in $Lines) {
+        $match = [regex]::Match($line, '^\s*STORAGE_TIER_HOT_DAYS\s*=\s*(.*?)\s*$')
+        # Last assignment wins, the way a shell sourcing the file would read it.
+        if ($match.Success) { $value = $match.Groups[1].Value.Trim([char]'"', [char]"'") }
+    }
+    if (-not $value) { return 365 }
+    $days = 0
+    if (-not [int]::TryParse($value, [ref]$days) -or $days -lt 1) {
+        # Refuse rather than fall back to 365: a typo here would silently move a
+        # year of history the operator meant to keep hot, or the reverse.
+        throw "Invalid STORAGE_TIER_HOT_DAYS: $value"
+    }
+    return $days
+}
+
 $platform = [IO.Path]::GetFullPath($PlatformRoot).TrimEnd('\')
 $release = [IO.Path]::GetFullPath($ReleaseRoot).TrimEnd('\')
 if (-not (Test-Path -LiteralPath $RuntimeEnv -PathType Leaf)) { throw "Missing runtime environment file: $RuntimeEnv" }
@@ -95,6 +131,13 @@ foreach ($name in 'http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS
 # itself, so nothing secret ever reaches this process environment, the command
 # line or the log.
 $arguments = @($tierScript, $Command, '--env-file', $RuntimeEnv)
+# The hot window is a runtime.env setting, not a CLI default, because the backup
+# job reads the same key (see Get-StorageTierHotDays). Passed on every command
+# so plan/status describe the window apply will actually use.
+if (-not ($CliArguments -contains '--hot-days')) {
+    $hotDays = Get-StorageTierHotDays -Lines ([IO.File]::ReadAllLines($RuntimeEnv))
+    $arguments += @('--hot-days', [string]$hotDays)
+}
 # Only `apply` moves rows, and only an explicit caller value wins over the
 # defaults (so `-Command apply --deadline 07:00` still works).
 if ($Command -eq 'apply') {

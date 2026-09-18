@@ -48,7 +48,7 @@
 | `PGDATA_BUDGET_BYTES` | `536870912000`（500 GB） | 热层预算。仅在缺失时由初始化脚本补写（`Set-StockPlatformEnvDefault`），不会覆盖运维已调过的值。 |
 | `PGDATA_COLD_TABLESPACE_DIR` | `G:\StockPlatform\data\pg-cold` | `stock_cold` 表空间目录。同样只补写不覆盖。 |
 | `STOCK_BACKUP_EXCLUDE_TABLE_DATA` | **无默认值（初始化脚本刻意不补写）** | 纯运维覆盖项。每夜 dump 真正跳过哪些表的数据是**在 dump 时按增量链算出来的**，不是配置出来的；这个键只用于额外追加，且无增量链、或链已停滞的冷孪生表会被拒绝。见第 5 节。 |
-| `STORAGE_TIER_HOT_DAYS` | `365` | 分层热窗口天数。`backup-stock-database.ps1` 用它判断增量链水位线是否还追得上分层截止线；调窄分层热窗口（`database-storage-tiers.py --hot-days`）时必须同步设置它，否则备份侧仍按 365 天判"够新"。 |
+| `STORAGE_TIER_HOT_DAYS` | `365` | 分层热窗口天数，**一个键驱动两侧**：`run-storage-tiers.ps1` 读它并把 `--hot-days` 传给分层 CLI（决定哪些行离开热表），`backup-stock-database.ps1` 读同一个键判断增量链水位线是否还追得上分层截止线（决定冷孪生能不能继续被 dump 排除）。所以改热窗口**只改这个键**即可，两侧自动一致；反过来，只在命令行上传 `--hot-days` 而不动这个键，备份侧仍按 365 天判"够新"，会排除一份链根本没导出过的冷孪生。键缺失时两侧都用 365；写成非正整数或非数字，两侧都拒绝运行而不是回退默认值。 |
 
 分层作业还会读两个**属于备份链的**既有键，用来把搬运钳制在分块链水位线上（见 2.4 的"增量链钳位"）：
 
@@ -440,6 +440,11 @@ runner 里不出现它）。
 顺序不是随意的：**分层作业排在两个备份之后**，这样每一夜的 dump 里，那些即将被搬走的行
 还在热表上被完整捕获过一次（关于这一点的真实局限，见第 5 节的风险提示）。
 
+runner 还会从 runtime.env 读 `STORAGE_TIER_HOT_DAYS`（默认 365），把它作为 `--hot-days`
+传给每一条子命令——同一个键，`backup-stock-database.ps1` 也拿它判断冷孪生的新鲜度，
+两侧因此不可能各走各的（见第 1 节的配置键表与第 5 节的"有链不等于链是新的"）。它只从文件里挑这一个键，
+runtime.env 里的凭据不会进到 runner 进程或命令行；命令行上显式传的 `--hot-days` 仍然优先。
+
 `run-storage-tiers.ps1` 自带窗口守卫：`Get-StorageTierRunWindowDecision` 在
 周一至周五 09:00–15:30 直接跳过（记一行 `skipped: skip_trading_session` 后 exit 0），
 除非传 `-Force`。这条守卫**只在启动时检查一次**，所以真正保证作业不会闯进开盘的是
@@ -568,8 +573,10 @@ Execute  : G:\StockPlatform\current\scripts\windows\bin\stock-background-host.ex
 G: 冷表空间上的一份活数据。所以规则会读这份 `state.json`：水位线缺失、读不出，
 或早于 `now - 热窗口`，冷孪生一律**退回 dump**，并记进本次运行记录的
 `refused_table_data_exclusion_reasons`（带上具体原因）。
-热窗口取 runtime.env 的 `STORAGE_TIER_HOT_DAYS`，默认 365，与分层策略是同一个数；
-把分层热窗口调窄（`--hot-days`）时**必须同时设这个键**，否则备份侧仍按 365 天判"够新"。
+热窗口取 runtime.env 的 `STORAGE_TIER_HOT_DAYS`，默认 365，与分层策略是同一个数——
+字面意义上的同一个：`run-storage-tiers.ps1` 也读这个键，并把 `--hot-days` 传给分层 CLI，
+所以调窄热窗口**只需改这个键**，搬运侧和备份侧一起跟着走。只在命令行上临时传
+`--hot-days` 而不动这个键（那条路径仍然保留，命令行优先），备份侧就还按 365 天判"够新"。
 
 被拒绝时夜间 dump **照常跑完**：一条配置意见不该让每夜备份停摆。
 
