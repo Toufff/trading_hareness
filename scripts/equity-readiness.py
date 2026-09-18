@@ -27,8 +27,13 @@ def main():
     with psycopg.connect(**connection_params(config), row_factory=dict_row, connect_timeout=10,
                         options='-c default_transaction_read_only=on -c statement_timeout=30000') as c:
         sql, params = status_query(a.date)
+        # ASCII-only on purpose: run-post-close-pipeline.ps1 parses this stdout
+        # with ConvertFrom-Json under whatever console codepage the scheduled
+        # task host gives pwsh (GBK on this machine). Raw UTF-8 Chinese in the
+        # reason text was decoded as GBK there and broke the JSON string
+        # (2026-09-18 20:40 preflight failure); \uXXXX escapes survive any codepage.
         print(json.dumps({'daily_control_plane': status_payload(c.execute(sql, params).fetchall())},
-                         ensure_ascii=False))
+                         ensure_ascii=True))
 
 
 if __name__ == '__main__':
