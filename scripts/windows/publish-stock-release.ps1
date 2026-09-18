@@ -291,6 +291,9 @@ $fallbackRoot = if ($previousTarget) { $previousTarget } else { $source }
 $previousTunnelRelease = if ($previousState.PSObject.Properties['tunnel_release']) { [string]$previousState.tunnel_release } else { '' }
 $activated = $false
 $activationAttempted = $false
+# Set when the `current` junction is actually moved, so the rollback paths can
+# tell whether it ever moved at all. Empty means it never did.
+$activatedAt = ''
 
 try {
     $app = Join-Path $stagingRoot 'app'
@@ -400,6 +403,13 @@ try {
     $keepTunnel = ($null -ne $tunnelPlan) -and ([string]$tunnelPlan.decision -eq 'skip')
     Stop-ProductionRuntime -RuntimeRoot $fallbackRoot -KeepTunnelTask:$keepTunnel
     [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $releaseId)
+    # The instant `current` actually moved. $releaseId's own yyyyMMddTHHmmss
+    # prefix was stamped far above, BEFORE the PowerShell suites, pytest and the
+    # npm builds, so it can precede this line by tens of minutes -- and for all
+    # of that window `current` still resolved to the previous release. The
+    # tunnel pin refresh has to compare the live tunnel's started_at against
+    # this, so it is recorded in release-state.json below.
+    $activatedAt = [DateTimeOffset]::Now.ToString('o')
     $startup = Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath -KeepTunnelTask:$keepTunnel
     $tunnelStartupError = [string]$startup.shared_peer_startup_error
     $healthVerification = Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
@@ -466,6 +476,7 @@ try {
     [void](Set-StockReleaseState -PlatformRoot $platform -State @{
         active_release = $releaseId
         previous_release = if ($previousRelease -and $previousRelease -ne $releaseId) { $previousRelease } else { $null }
+        activated_at = $activatedAt
         last_verification = $verification
         last_failed_release = $null
         content_manifest_sha256 = $contentDigest
@@ -523,6 +534,7 @@ try {
             if ($rollbackCompatible) {
                 [void](Test-StockReleaseIntegrity -PlatformRoot $platform -ReleaseId $previousRelease)
                 [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $previousRelease)
+                $activatedAt = [DateTimeOffset]::Now.ToString('o')
                 if (-not $KeepStoppedOnFailure) {
                     $rollbackStartup = Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath
                     [void](Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
@@ -536,6 +548,7 @@ try {
                 [void](Set-StockReleaseState -PlatformRoot $platform -State @{
                     active_release = $previousRelease
                     previous_release = if ($previousState.PSObject.Properties['previous_release']) { $previousState.previous_release } else { $null }
+                    activated_at = $activatedAt
                     last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = $(if ($KeepStoppedOnFailure) { 'disabled_after_failed_activation' } else { 'verified_after_automatic_rollback' }) }
                     last_failed_release = $releaseId
                     failure_message = $failure.Exception.Message
@@ -554,6 +567,9 @@ try {
                 [void](Set-StockReleaseState -PlatformRoot $platform -State @{
                     active_release = $releaseId
                     previous_release = $previousRelease
+                    # `current` was already moved to this release above and is
+                    # left there for forward repair; empty only if it never was.
+                    activated_at = if ($activatedAt) { $activatedAt } else { $null }
                     last_failed_release = $releaseId
                     last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = 'stopped_schema_incompatible_rollback' }
                     failure_message = $failure.Exception.Message
@@ -576,6 +592,8 @@ try {
                 [void](Set-StockReleaseState -PlatformRoot $platform -State @{
                     active_release = $null
                     previous_release = if ($previousState.PSObject.Properties['previous_release']) { $previousState.previous_release } else { $null }
+                    # The junction was just removed: nothing is activated.
+                    activated_at = $null
                     last_verification = if ($previousState.PSObject.Properties['last_verification']) { $previousState.last_verification } else { $null }
                     last_failed_release = $releaseId
                     failure_message = $failure.Exception.Message

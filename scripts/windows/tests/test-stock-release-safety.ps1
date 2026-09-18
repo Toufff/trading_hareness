@@ -215,6 +215,39 @@ try {
         '& "$env:SOMEWHERE\mystery.ps1"', [Text.UTF8Encoding]::new($false))
     Assert-Throws { Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\windows\entry.ps1') } `
         'a path expression the parser cannot resolve statically must throw loudly instead of silently dropping a chain element'
+
+    # A literal naming a subdirectory of the MENTIONING file's directory
+    # (Join-Path $PSScriptRoot 'sub\helper.psm1') used to be read as
+    # release-root relative only, resolve nowhere, and be dropped in silence:
+    # the parsed chain still equalled the declared list, the equality assertion
+    # above still passed, and the gate never hashed a file the tunnel executes.
+    $chainShared = Join-Path $chainSandbox 'scripts\shared-peer'
+    New-Item -ItemType Directory -Force -Path (Join-Path $chainShared 'sub') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $chainShared 'sub\helper.psm1'), '# reached only beside its mentioning file', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $chainShared 'entry2.ps1'),
+        "Import-Module (Join-Path `$PSScriptRoot 'sub\helper.psm1')", [Text.UTF8Encoding]::new($false))
+    $relative = Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\shared-peer\entry2.ps1')
+    Assert-True ($relative.Hashed -contains 'scripts\shared-peer\sub\helper.psm1') `
+        'a path literal naming a subdirectory must be resolved relative to the directory of the file that mentions it, not only against the release root'
+    # Root-relative keeps precedence, so the historical reading is unchanged.
+    [IO.File]::WriteAllText((Join-Path $chainScripts 'entry.ps1'),
+        "& 'scripts\windows\chained.psm1'", [Text.UTF8Encoding]::new($false))
+    $rootRelative = Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\windows\entry.ps1')
+    Assert-True ($rootRelative.Hashed -contains 'scripts\windows\chained.psm1') `
+        'a release-root-relative path literal must keep resolving against the release root'
+    # And a spelled-out path that resolves in NEITHER place is a chain element
+    # this tree does not carry: loud, not dropped.
+    [IO.File]::WriteAllText((Join-Path $chainScripts 'entry.ps1'),
+        "& 'scripts\windows\not-here.ps1'", [Text.UTF8Encoding]::new($false))
+    Assert-Throws { Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\windows\entry.ps1') } `
+        'a path literal that resolves neither at the release root nor beside the mentioning file must throw instead of leaving the gate a file list that is quietly missing it'
+    # A bare name with no separator stays lenient: it is as likely to be a
+    # message or a build-script output as a path into the tree.
+    [IO.File]::WriteAllText((Join-Path $chainScripts 'entry.ps1'),
+        "Write-Verbose 'rebuilt by build-something.ps1'", [Text.UTF8Encoding]::new($false))
+    $bare = Get-StockTunnelExecutionChainFile -RuntimeRoot $chainSandbox -EntryPoint @('scripts\windows\entry.ps1')
+    Assert-True (@($bare.Hashed).Count -eq 1) `
+        'a bare file name that names nothing in the tree must be dropped quietly, not turned into a hard failure'
 } finally {
     $resolvedChain = [IO.Path]::GetFullPath($chainSandbox)
     $tempChain = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
@@ -605,9 +638,58 @@ Assert-True ($circularKeep.Keep -contains 'rel-000') `
 # The task action is <PlatformRoot>\current\..., so a relaunch after a drop
 # starts the tunnel from the ACTIVE release without writing release-state.json.
 $stale = Get-StockTunnelPinRefresh -PinnedRelease 'rel-000' -ActiveRelease 'rel-003' `
-    -ActiveReleaseStamp '2026-09-18T21:32:15+08:00' -RuntimeStartedAt '2026-09-18T21:35:59+08:00'
+    -ActiveReleaseStamp '2026-09-18T21:32:15+08:00' -ActivationInstantIsExact $true `
+    -RuntimeStartedAt '2026-09-18T21:35:59+08:00'
 Assert-True ($stale.Refreshed -and $stale.Release -eq 'rel-003') `
-    'a tunnel run that started after the active release was published came from `current` and must refresh the pin'
+    'a tunnel run that started after `current` moved came from `current` and must refresh the pin'
+Assert-True (-not $stale.Uncertain) `
+    'a refresh judged against the real activation instant is not uncertain'
+
+# --- the instant compared against must be the junction move, not the id ------
+# publish stamps the release id before eight PowerShell suites, pytest and three
+# npm builds, and only switches `current` afterwards. Judged against that stamp,
+# a tunnel that started during the test run looks like a relaunch from `current`
+# while it was in fact still executing out of the pinned tree, and refreshing
+# the pin on that evidence hands the gate the wrong baseline to compare against.
+# The pin is still moved forward -- a pin naming a tree nothing runs from is no
+# better -- but the answer is marked uncertain and an uncertain pin cannot skip.
+$approximate = Get-StockTunnelPinRefresh -PinnedRelease 'rel-000' -ActiveRelease 'rel-003' `
+    -ActiveReleaseStamp '2026-09-18T21:32:15+08:00' -RuntimeStartedAt '2026-09-18T21:35:59+08:00'
+Assert-True ($approximate.Refreshed -and $approximate.Uncertain) `
+    'with only the release-id stamp to compare against, a refresh must be marked uncertain'
+Assert-True ((Get-Decision @{ TunnelPinUncertain = $true }).decision -eq 'reinstall') `
+    'an uncertain pin must force the tunnel reinstall: CurrentHashes may describe a tree the live process never ran'
+Assert-True ((Get-Decision @{ TunnelPinUncertain = $true }).reasons -contains 'tunnel_release_pin_uncertain') `
+    'the decision must record that it could not tell which tree the live tunnel came from'
+Assert-True ((Get-StockTunnelPinRefresh -PinnedRelease 'rel-000' -ActiveRelease 'rel-003' `
+    -ActiveReleaseStamp '2026-09-18T21:32:15+08:00' -RuntimeStartedAt '2026-09-18T20:00:00+08:00').Uncertain -eq $false) `
+    'a run that predates even the early id stamp predates the junction move too, so nothing is uncertain about leaving the pin alone'
+
+# Resolve-StockReleaseActivationInstant picks that instant and says how good it
+# is. activated_at is what publish/switch record the moment
+# Set-StockCurrentRelease returns; the junction's own creation time is equally
+# exact (Set-StockCurrentRelease builds a fresh junction and renames it into
+# place on every switch) but only when the junction really resolves to the
+# active release; the id stamp and the staged directory's creation time are both
+# EARLIER than activation and only ever approximate.
+$fromRecord = Resolve-StockReleaseActivationInstant -RecordedActivatedAt '2026-09-18T21:40:00+08:00' `
+    -JunctionCreatedAt '2026-09-18T21:39:00+08:00' -JunctionMatchesActiveRelease $true `
+    -ReleaseIdStamp '2026-09-18T21:32:15+08:00'
+Assert-True ($fromRecord.Source -eq 'activated_at' -and $fromRecord.Exact -and $fromRecord.Stamp -eq '2026-09-18T21:40:00+08:00') `
+    'release-state.json''s activated_at is the authoritative activation instant'
+$fromJunction = Resolve-StockReleaseActivationInstant -JunctionCreatedAt '2026-09-18T21:39:00+08:00' `
+    -JunctionMatchesActiveRelease $true -ReleaseIdStamp '2026-09-18T21:32:15+08:00'
+Assert-True ($fromJunction.Source -eq 'current_junction_created' -and $fromJunction.Exact) `
+    'without activated_at the junction''s own creation time is still the moment it moved'
+$fromId = Resolve-StockReleaseActivationInstant -JunctionCreatedAt '2026-09-18T21:39:00+08:00' `
+    -JunctionMatchesActiveRelease $false -ReleaseIdStamp '2026-09-18T21:32:15+08:00'
+Assert-True ($fromId.Source -eq 'release_id' -and (-not $fromId.Exact)) `
+    'a junction that does not resolve to the active release says nothing about when that release was activated'
+$fromDirectory = Resolve-StockReleaseActivationInstant -ReleaseDirectoryCreatedAt '2026-09-18T21:00:00+08:00'
+Assert-True ($fromDirectory.Source -eq 'release_directory_created' -and (-not $fromDirectory.Exact)) `
+    'an id without an embedded stamp falls back to the staged directory time, which is approximate too'
+Assert-True ((Resolve-StockReleaseActivationInstant).Source -eq 'unknown') `
+    'with no source at all the activation instant must be reported as unknown, not invented'
 $fresh = Get-StockTunnelPinRefresh -PinnedRelease 'rel-000' -ActiveRelease 'rel-003' `
     -ActiveReleaseStamp '2026-09-18T21:32:15+08:00' -RuntimeStartedAt '2026-09-18T20:00:00+08:00'
 Assert-True ((-not $fresh.Refreshed) -and $fresh.Release -eq 'rel-000') `
@@ -783,9 +865,42 @@ try {
     $refreshed = Resolve-StockTunnelReinstallPlan @resolveArgs
     Assert-True ($refreshed.tunnel_release -eq 'rel-001' -and $refreshed.tunnel_release_pin_refreshed) `
         'a tunnel run that started after the active release was published must move the pin to the active release'
+    # Here the state carries no activated_at and the junction still resolves to
+    # rel-000, so the only instant available is approximate: the refresh happens
+    # but must not buy a skip.
+    Assert-True ($refreshed.activation_instant_source -eq 'release_directory_created' -and $refreshed.tunnel_release_pin_uncertain) `
+        'with no recorded activation instant and a junction that does not resolve to the active release, the pin refresh must be reported as uncertain'
+    Assert-True ($refreshed.decision -eq 'reinstall' -and ($refreshed.reasons -contains 'tunnel_release_pin_uncertain')) `
+        'an uncertain pin must force the tunnel reinstall instead of skipping against a tree the live process may never have run'
+
+    # With the junction really moved and activated_at recorded the same refresh
+    # is exact, and the skip it enables is the one this whole gate exists for.
+    [void](Set-StockCurrentRelease -PlatformRoot $planSandbox -ReleaseId 'rel-001')
+    [void](Set-StockReleaseState -PlatformRoot $planSandbox -State @{
+        active_release = 'rel-001'; previous_release = 'rel-000'; tunnel_release = 'rel-000'
+        activated_at = ([DateTimeOffset]::Now.AddDays(-1).ToString('o'))
+        tunnel_ssh_target_sha256 = (Get-StockTunnelSshTargetHash -PlatformRoot $planSandbox) })
+    $exactRefresh = Resolve-StockTunnelReinstallPlan @resolveArgs
+    Assert-True ($exactRefresh.activation_instant_source -eq 'activated_at' -and (-not $exactRefresh.tunnel_release_pin_uncertain)) `
+        'release-state.json''s activated_at must be preferred over the release id''s own timestamp'
+    Assert-True ($exactRefresh.tunnel_release -eq 'rel-001' -and $exactRefresh.decision -eq 'skip') `
+        'a refresh judged against the moment the junction actually moved must still allow the skip'
+    # An unrelated state write must not erase when the junction last moved, or
+    # every later gate evaluation would fall back to an approximate instant.
+    [void](Set-StockReleaseState -PlatformRoot $planSandbox -State @{ active_release = 'rel-001'; previous_release = 'rel-000' })
+    Assert-True ([string](Get-StockReleaseState -PlatformRoot $planSandbox).activated_at -ne '') `
+        'activated_at must survive a state write that does not mention it'
+    # Without activated_at, the junction's own creation time is still exact.
+    [void](Set-StockReleaseState -PlatformRoot $planSandbox -State @{
+        active_release = 'rel-001'; previous_release = 'rel-000'; tunnel_release = 'rel-000'; activated_at = $null
+        tunnel_ssh_target_sha256 = (Get-StockTunnelSshTargetHash -PlatformRoot $planSandbox) })
+    $fromJunctionTime = Resolve-StockTunnelReinstallPlan @resolveArgs
+    Assert-True ($fromJunctionTime.activation_instant_source -eq 'current_junction_created' -and (-not $fromJunctionTime.tunnel_release_pin_uncertain)) `
+        'a state file written before activated_at existed must fall back to the junction''s creation time, which is exact, not to the release id stamp'
+    [void](Set-StockCurrentRelease -PlatformRoot $planSandbox -ReleaseId 'rel-000')
     [IO.File]::WriteAllText($runtimeStatePath, '{"status":"healthy"}', [Text.UTF8Encoding]::new($false))
     [void](Set-StockReleaseState -PlatformRoot $planSandbox -State @{
-        active_release = 'rel-000'; previous_release = $null; tunnel_release = 'rel-000'
+        active_release = 'rel-000'; previous_release = $null; tunnel_release = 'rel-000'; activated_at = $null
         tunnel_ssh_target_sha256 = (Get-StockTunnelSshTargetHash -PlatformRoot $planSandbox) })
 
     # A stopped task must not even pay for the probe.
@@ -921,6 +1036,17 @@ Assert-True ($publishSource -match "(?s)if \(\`$keepTunnel -and \[string\]\`$hea
     'publish-stock-release.ps1 must treat a degraded shared runtime as a trigger to reinstall the tunnel the gate spared'
 Assert-True ($publishSource.Contains('tunnel_release = $tunnelReleaseAfter')) `
     'publish-stock-release.ps1 must persist the release the tunnel is running from in release-state.json'
+# The release id's own yyyyMMddTHHmmss prefix is stamped before the test suite
+# runs; `current` only moves tens of minutes later, and everything in between
+# still resolves to the PREVIOUS release. The pin refresh needs the real moment.
+$publishJunctionIndex = $publishSource.IndexOf('Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $releaseId')
+$publishActivatedStampIndex = $publishSource.IndexOf('$activatedAt = [DateTimeOffset]::Now')
+Assert-True ($publishJunctionIndex -ge 0 -and $publishActivatedStampIndex -gt $publishJunctionIndex) `
+    'publish-stock-release.ps1 must take the activation instant after Set-StockCurrentRelease returns, not from the release id'
+Assert-True ($publishSource.Contains('activated_at = $activatedAt')) `
+    'publish-stock-release.ps1 must record activated_at in release-state.json'
+Assert-True ($publishActivatedStampIndex -lt $publishSource.IndexOf('activated_at = $activatedAt')) `
+    'the recorded activated_at must be the stamp taken at the junction move'
 
 $switchScript = Join-Path $windowsScripts 'switch-stock-release.ps1'
 $switchSource = Get-Content -LiteralPath $switchScript -Raw -Encoding UTF8
@@ -942,6 +1068,26 @@ $switchVerifyIndex = $switchSource.IndexOf('verify-shared-runtime.ps1')
 $switchSkipEventIndex = $switchSource.IndexOf('Write-StockTunnelReinstallSkipEvent -PlatformRoot')
 Assert-True ($switchVerifyIndex -ge 0 -and $switchSkipEventIndex -gt $switchVerifyIndex) `
     'switch-stock-release.ps1 must write the tunnel_reinstall_skipped event only after shared-runtime verification succeeds'
+# ...and only after the release-state write, which is what
+# Write-StockTunnelReinstallSkipEvent's own contract requires and what publish
+# already did: that write can still throw (a locked state file, a full disk) and
+# this script's catch then reverts, possibly reinstalling the tunnel, so an
+# earlier receipt would be one the revert's own events contradict. Both paths:
+# the forward one (first occurrence) and the revert one (last).
+$switchStateWrite = 'Set-StockReleaseState -PlatformRoot $platform -State @{'
+$switchStateWriteIndex = $switchSource.IndexOf($switchStateWrite)
+$switchRevertStateWriteIndex = $switchSource.LastIndexOf($switchStateWrite)
+$switchRevertSkipEventIndex = $switchSource.LastIndexOf('Write-StockTunnelReinstallSkipEvent -PlatformRoot')
+Assert-True ($switchStateWriteIndex -ge 0 -and $switchSkipEventIndex -gt $switchStateWriteIndex) `
+    'switch-stock-release.ps1 must write the tunnel_reinstall_skipped event only after its own Set-StockReleaseState, not before it'
+Assert-True ($switchRevertStateWriteIndex -gt $switchStateWriteIndex -and $switchRevertSkipEventIndex -gt $switchRevertStateWriteIndex) `
+    'the revert path must write its tunnel_reinstall_skipped event after the revert''s own Set-StockReleaseState too'
+Assert-True ($switchSource.Contains('activated_at = $activatedAt') -and $switchSource.Contains('activated_at = $revertActivatedAt')) `
+    'switch-stock-release.ps1 must record when the junction actually moved on both the forward and the revert path, or the pin refresh has only the release id''s own timestamp to compare against'
+$switchJunctionIndex = $switchSource.IndexOf('Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $ReleaseId')
+$switchActivatedStampIndex = $switchSource.IndexOf('$activatedAt = [DateTimeOffset]::Now')
+Assert-True ($switchJunctionIndex -ge 0 -and $switchActivatedStampIndex -gt $switchJunctionIndex) `
+    'the recorded activation instant must be taken after Set-StockCurrentRelease returns, or it is not the moment the junction moved'
 Assert-True ($switchSource.Contains("`$tunnelOutcome = 'reinstalled_after_degraded_verification'")) `
     'switch-stock-release.ps1 must reinstall the spared tunnel and re-verify when shared-runtime verification fails after a skip'
 Assert-True ($switchSource.Contains('tunnel_release = if ($tunnelRelease)')) `
@@ -988,4 +1134,9 @@ Assert-True ($statusSource.Contains('last_installed_from') -and $statusSource.Co
     failed_degraded_repair_reported_distinctly = $true
     background_host_build_receipt_hashed_not_presence = $true
     chain_parser_follows_expandable_strings = $true
+    chain_parser_resolves_paths_beside_the_mentioning_file = $true
+    chain_parser_fails_loudly_on_a_missing_referenced_file = $true
+    pin_refresh_compares_against_the_recorded_junction_move = $true
+    uncertain_pin_forces_reinstall = $true
+    switch_skip_event_written_after_its_release_state_write = $true
 }
