@@ -10,8 +10,10 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $env:AGENT_PAPER_CLI_PROXY = $CliProxy
-# DSH answers slowly (up to ~4 min observed); give it room inside the 5-minute cadence.
-if ($Backend -eq 'dsh') { $env:AGENT_PAPER_TIMEOUT_SECONDS = '290' }
+# DSH answers slowly: 2026-09-18 it averaged 100-200s and lost two rounds to the
+# 290s cap. The loop only checks whether the last decision is 5 minutes old, so a
+# longer call delays the next round instead of overlapping it.
+if ($Backend -eq 'dsh') { $env:AGENT_PAPER_TIMEOUT_SECONDS = '420' }
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $arguments = @((Join-Path $root 'scripts\agent-paper-trader.py'), $Command, '--env-file', $RuntimeEnv,
     '--platform-root', $PlatformRoot, '--account-key', $AccountKey, '--backend', $Backend)
