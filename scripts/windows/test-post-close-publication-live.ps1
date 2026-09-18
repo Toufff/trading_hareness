@@ -8,6 +8,7 @@ param(
 # Uses a disposable non-recurring task; the normal schedule is never edited.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'post-close-contract.psm1') -Force
 $original = Get-ScheduledTask -TaskName 'trading-hareness-post-close-pipeline'
 if ($original.State -eq 'Running') { throw 'Production close task is running; avoid concurrent publication' }
 $action = $original.Actions[0]
@@ -34,14 +35,20 @@ try {
         ForEach-Object { $_ | ConvertFrom-Json } | Where-Object {
             $_.trading_date -eq $TradeDate -and [datetimeoffset]$_.recorded_at -ge [datetimeoffset]$started
         })
-    $terminal = @($records | Where-Object { $_.status -in @('completed','failed','partial') }) | Select-Object -Last 1
+    $terminalStatuses = @(Get-PostClosePipelineCompletedStatus) + @('failed','partial')
+    $terminal = @($records | Where-Object { $_.status -in $terminalStatuses }) | Select-Object -Last 1
     $receiptPath = Join-Path $PlatformRoot ('reports\short-term\' + $TradeDate + '_report_publication.json')
     $receipt = if (Test-Path $receiptPath) { Get-Content $receiptPath -Raw | ConvertFrom-Json } else { $null }
-    $passed = ($info.LastTaskResult -eq 0 -and $null -ne $terminal -and $terminal.status -eq 'completed' -and
+    # 'completed_research_due' is a published, verified round that still owes
+    # company research; publication acceptance must not read it as a failure.
+    $passed = ($info.LastTaskResult -eq 0 -and $null -ne $terminal -and
+        (Test-PostClosePipelineCompleted $terminal.status) -and
         $null -ne $receipt -and $receipt.passed -and (Get-Item $receiptPath).LastWriteTime -ge $started)
     $result = [ordered]@{ passed=$passed; tested_at=(Get-Date).ToString('o'); trade_date=$TradeDate;
         actual_scheduled_host=$action.Execute; task_exit_code=$info.LastTaskResult;
         production_schedule_unchanged=$true; terminal=$terminal; publication=$receipt;
+        research_status=(Get-ContractValue $terminal 'research_status');
+        research_deadline=(Get-ContractValue $terminal 'research_deadline');
         scope='Full production scheduled entry using settled historical date; not next scheduled execution or profitability' }
     [IO.File]::WriteAllText($evidence, ($result | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
     [pscustomobject]@{passed=$passed; task_exit_code=$info.LastTaskResult; evidence=$evidence}

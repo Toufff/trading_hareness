@@ -19,21 +19,21 @@ def main():
     with psycopg.connect(**connection_params(config), row_factory=dict_row, connect_timeout=10) as db:
         db.execute('SET statement_timeout=30000')
         db.execute('CREATE TEMP TABLE canonical_bars_daily(symbol text,trading_date date,quality_status text,adj_factor numeric,limit_up numeric,limit_down numeric)')
-        db.execute('CREATE TEMP TABLE universe_membership_history(universe_key text,symbol text,effective_from date,effective_to date)')
+        db.execute('CREATE TEMP TABLE universe_membership_history(universe_key text,symbol text,effective_from date,effective_to date,source text)')
         sql = EQUITY_DAILY_CONTROL_STATUS_SQL.replace('quant.', 'pg_temp.')
-        assert status_payload(db.execute(sql).fetchone())['trade_date'] is None
-        db.execute("INSERT INTO universe_membership_history VALUES ('all_a','600664.SH','2026-09-01',NULL)")
+        assert status_payload(db.execute(sql).fetchall())['trade_date'] is None
+        db.execute("INSERT INTO universe_membership_history VALUES ('all_a','600664.SH','2026-09-01',NULL,'longhuvip_composite')")
         db.execute("INSERT INTO canonical_bars_daily VALUES ('600664.SH','2026-09-04','fresh',1,11,9),('000001.SH','2026-09-09','fresh',NULL,NULL,NULL)")
-        result = status_payload(db.execute(sql).fetchone())
+        result = status_payload(db.execute(sql).fetchall())
         assert result['trade_date'] == '2026-09-04' and result['daily_rows'] == 1, result
         db.execute("INSERT INTO canonical_bars_daily VALUES ('600664.SH','2026-09-09','fresh',1,11,9)")
-        assert status_payload(db.execute(sql).fetchone())['trade_date'] == '2026-09-09'
+        assert status_payload(db.execute(sql).fetchall())['trade_date'] == '2026-09-09'
         dated_sql, params = status_query(__import__('datetime').date(2026,9,4))
-        historical = status_payload(db.execute(dated_sql.replace('quant.', 'pg_temp.'), params).fetchone())
+        historical = status_payload(db.execute(dated_sql.replace('quant.', 'pg_temp.'), params).fetchall())
         assert historical['trade_date']=='2026-09-04' and historical['state']=='ready', historical
         db.rollback()  # all fixtures disappear, production tables untouched
         db.execute('SET TRANSACTION READ ONLY')
-        actual = status_payload(db.execute(EQUITY_DAILY_CONTROL_STATUS_SQL).fetchone())
+        actual = status_payload(db.execute(EQUITY_DAILY_CONTROL_STATUS_SQL).fetchall())
         print(json.dumps({'isolated_postgresql_cases_passed': 4, 'actual_equity_readiness': actual}, ensure_ascii=False))
         db.rollback()
 

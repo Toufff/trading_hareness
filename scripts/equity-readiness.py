@@ -14,6 +14,10 @@ from app.db_dsn import connection_params
 
 
 def main():
+    # The reason text names exchanges and universe sources in Chinese; a
+    # console codepage must not turn a readiness probe into a UnicodeEncodeError.
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--date', type=date.fromisoformat)
     p.add_argument('--env-file', default=r'G:\StockPlatform\config\runtime.env')
@@ -23,7 +27,8 @@ def main():
     with psycopg.connect(**connection_params(config), row_factory=dict_row, connect_timeout=10,
                         options='-c default_transaction_read_only=on -c statement_timeout=30000') as c:
         sql, params = status_query(a.date)
-        print(json.dumps({'daily_control_plane': status_payload(c.execute(sql, params).fetchone())}))
+        print(json.dumps({'daily_control_plane': status_payload(c.execute(sql, params).fetchall())},
+                         ensure_ascii=False))
 
 
 if __name__ == '__main__':

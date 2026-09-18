@@ -34,11 +34,17 @@ def main():
     run=result.get('run') or {}
     lanes=(run.get('summary') or {}).get('strategy_lanes') or {}
     report=lanes.get('report_bundle') or {}
+    readiness=health.get('daily_control_plane') or {}
+    # Pass the per-exchange gate and the universe-drift diagnostics through
+    # verbatim: a 'missing 113 daily bars' reading of a denominator change is
+    # exactly what this block exists to prevent.
+    drift={k:readiness.get(k) for k in ('by_exchange','gating_exchanges','ungated_exchanges','all_a',
+        'expected_previous_trading_day','expected_previous_daily_rows','expected_delta','expected_sources')}
     output={'system':'trading_hareness','authoritative_database':'G:/StockPlatform/data/postgresql16',
             'run_id':run.get('run_id'),'as_of_date':run.get('as_of_date'),
             'requested_date':a.date,'date_matches':not a.date or a.date==str(run.get('as_of_date')),
             'source_sha256':report.get('source_sha256'),
-            'equity_readiness':health.get('daily_control_plane'),
+            'equity_readiness':readiness,'equity_universe_drift':drift,
             'strategy_status':lanes.get('status'),
             'market':lanes.get('market'),'review_coverage':lanes.get('review_coverage'),
             'reports':[{'key':r['key'],'file':str(Path('G:/StockPlatform/reports/short-term')/r['filename']),
