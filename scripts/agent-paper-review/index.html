@@ -204,6 +204,7 @@ function transcript(items){
   return items.map(e=>{
     if(e.type==='tool_use')return `<div class="tx"><span class="badge b-info">${esc(e.name)}</span> ${esc(e.input?.query||e.input?.url||'')}<pre>${esc(JSON.stringify(e.input,null,1))}</pre></div>`;
     if(e.type==='tool_result')return `<details class="tx"><summary><span class="badge ${e.is_error?'b-bad':'b-ok'}">工具返回</span> <span class="muted small">${esc(String(e.content).slice(0,120))}</span></summary><pre>${esc(e.content)}</pre></details>`;
+    if(e.type==='thinking')return `<details class="tx"><summary><span class="badge b-warn">思考</span> <span class="muted small">${esc(String(e.text).slice(0,120))}</span></summary><pre>${esc(e.text)}</pre></details>`;
     if(e.type==='text')return `<div class="tx"><span class="badge b-warn">模型</span><pre>${esc(e.text)}</pre></div>`;
     return `<details class="tx" ${e.type==='stdout'?'open':''}><summary><span class="badge b-info">${esc(e.type)}</span></summary><pre>${esc(e.text)}</pre></details>`;
   }).join('')||'<p class="empty">没有过程记录。</p>';

@@ -20,6 +20,7 @@ from typing import Any
 
 DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_TIMEOUT_SECONDS = 240
+DEFAULT_THINKING_TOKENS = 4000
 
 SYSTEM_PROMPT = """你是一名 A 股短线交易员，在操作自己的模拟账户，目标是在控制回撤的前提下取得尽量高的收益，并与一位人类交易员的实盘收益比较。
 
@@ -149,6 +150,11 @@ def parse_cli_stream(stdout: str) -> tuple[str, list[dict[str, Any]]]:
                 continue
             if block.get("type") == "text" and block.get("text"):
                 transcript.append({"role": kind, "type": "text", "text": _clip(block["text"])})
+            elif block.get("type") in {"thinking", "redacted_thinking"}:
+                # The reasoning that led to an order is review evidence; a
+                # redacted block is kept as an explicit placeholder, not dropped.
+                transcript.append({"role": "assistant", "type": "thinking",
+                                   "text": _clip(block.get("thinking") or "[redacted_thinking]")})
             elif block.get("type") == "tool_use":
                 transcript.append({"role": "assistant", "type": "tool_use", "id": block.get("id"), "name": block.get("name"),
                                    "input": _clip(block.get("input"))})
@@ -175,6 +181,11 @@ class ClaudeCliModel:
     def environment(self) -> dict[str, str]:
         """The CLI reaches Anthropic only through the user's terminal proxy; nothing else inherits it."""
         env = dict(os.environ)
+        # Thinking is off in the CLI unless a budget is set; the review page
+        # needs the reasoning behind each order.  0 turns it back off.
+        thinking_tokens = int(os.environ.get("AGENT_PAPER_THINKING_TOKENS") or DEFAULT_THINKING_TOKENS)
+        if thinking_tokens > 0:
+            env["MAX_THINKING_TOKENS"] = str(thinking_tokens)
         if self.proxy:
             for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                 env[name] = self.proxy

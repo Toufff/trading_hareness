@@ -220,16 +220,18 @@ class AgentPaperModelTests(unittest.TestCase):
         from app.agent_paper.model import parse_cli_result, parse_cli_stream
         lines = [
             {"type": "system", "subtype": "init"},
-            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "WebSearch", "input": {"query": "华天科技 公告"}}]}},
+            {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "先看半导体资金方向"},
+                                                          {"type": "tool_use", "id": "t1", "name": "WebSearch", "input": {"query": "华天科技 公告"}}]}},
             {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "x" * 7000}]}]}},
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}},
             {"type": "result", "is_error": False, "structured_output": {"market_view": "v", "orders": []}, "usage": {}},
         ]
         result, transcript = parse_cli_stream("\n".join(json.dumps(line, ensure_ascii=False) for line in lines))
         self.assertEqual(parse_cli_result(result)[0]["market_view"], "v")
-        self.assertEqual([e["type"] for e in transcript], ["tool_use", "tool_result", "text"])
-        self.assertEqual(transcript[0]["input"], {"query": "华天科技 公告"})
-        self.assertIn("truncated 1000 chars", transcript[1]["content"])
+        self.assertEqual([e["type"] for e in transcript], ["thinking", "tool_use", "tool_result", "text"])
+        self.assertEqual(transcript[0]["text"], "先看半导体资金方向")
+        self.assertEqual(transcript[1]["input"], {"query": "华天科技 公告"})
+        self.assertIn("truncated 1000 chars", transcript[2]["content"])
 
     def test_cli_errors_fail_closed(self):
         with self.assertRaises(ModelFailure) as caught:
