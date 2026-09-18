@@ -185,19 +185,65 @@ Assert-True ((Get-StorageTierRunWindowDecision -Now ([DateTime]::ParseExact('202
 # They were written on separate branches; a command the runner offers but the
 # CLI does not have fails only at 06:00 in production, so pin it here.
 $tierScript = [IO.File]::ReadAllText((Join-Path $root 'scripts\database-storage-tiers.py'), [Text.Encoding]::UTF8)
-$subcommands = [regex]::Matches($tierScript, 'sub\.add_parser\("([a-z]+)"') | ForEach-Object { $_.Groups[1].Value }
+# The argument list may be wrapped onto the next line (install is), so allow it.
+$subcommands = @([regex]::Matches($tierScript, 'sub\.add_parser\(\s*"([a-z]+)"') | ForEach-Object { $_.Groups[1].Value })
 Assert-True ($subcommands.Count -ge 4) 'the tier CLI must expose its subcommands through add_parser'
+foreach ($expected in 'install', 'plan', 'apply', 'status') {
+    Assert-True ($subcommands -contains $expected) "the tier CLI must keep the documented subcommand $expected"
+}
 $validateSet = [regex]::Match($runner, "\[ValidateSet\(([^)]+)\)\]").Groups[1].Value
 $runnerCommands = [regex]::Matches($validateSet, "'([a-z]+)'") | ForEach-Object { $_.Groups[1].Value }
 foreach ($command in $runnerCommands) {
     Assert-True ($subcommands -contains $command) "run-storage-tiers.ps1 offers -Command $command but database-storage-tiers.py has no such subcommand"
 }
 Assert-True ($runnerCommands -contains 'apply') 'the runner must be able to drive the nightly apply'
-foreach ($flag in '--env-file', '--hot-days', '--budget-bytes', '--batch', '--table') {
+# --deadline and --max-seconds are in this list because the runner PASSES them:
+# a flag the runner sends and the CLI does not declare makes argparse exit 2 at
+# 06:00 with "unrecognized arguments", and no row is ever moved again.
+foreach ($flag in '--env-file', '--hot-days', '--budget-bytes', '--batch', '--table',
+    '--pgdata-dir', '--cold-dir', '--tablespace', '--timeout-ms', '--max-batches',
+    '--max-space-days', '--deadline', '--max-seconds', '--log-file') {
     Assert-True ($tierScript -match [regex]::Escape("`"$flag`"")) "the tier CLI must keep the documented flag $flag"
 }
+# Whatever the runner hands to the CLI must be one of them, however it is spelled.
+$runnerFlags = @([regex]::Matches($runner, "'(--[a-z-]+)'") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+foreach ($flag in $runnerFlags) {
+    Assert-True ($tierScript -match [regex]::Escape("`"$flag`"")) "run-storage-tiers.ps1 passes $flag but database-storage-tiers.py declares no such flag"
+}
+Assert-True ($runnerFlags -contains '--deadline' -and $runnerFlags -contains '--max-seconds') 'the runner must still pass both stop conditions'
+Assert-True ($tierScript -match [regex]::Escape('"--skip-role-settings"')) 'install must keep --skip-role-settings for scratch-database exercises'
+# ALTER ROLE ... SET is cluster-wide; skipping it in production would silently
+# leave stock_peer without the 15min/5min timeouts documented in section 3.
+Assert-True ($runner -notmatch '--skip-role-settings') 'the production runner must never skip the role settings'
+
+# Exit codes are a contract with Task Scheduler and with the operator: 0 is a
+# normal night (including a deadline stop), 1 wants a human but the tier is
+# intact, 2 means the 500 GB guard is not guarding. A runner that translated 2
+# into a generic failure to retry would hammer an unmeasurable directory nightly.
+foreach ($pair in @(
+    @{ Status = 'ok'; Code = 0 },
+    @{ Status = 'deadline_reached'; Code = 0 },
+    @{ Status = 'partial'; Code = 1 },
+    @{ Status = 'conflicts'; Code = 1 },
+    @{ Status = 'schema_drift'; Code = 1 },
+    @{ Status = 'degraded'; Code = 2 },
+    @{ Status = 'failed'; Code = 2 }
+)) {
+    Assert-True ($tierScript -match ('"{0}":\s*{1},' -f $pair.Status, $pair.Code)) `
+        "the tier CLI must map status $($pair.Status) to exit code $($pair.Code)"
+}
+Assert-True ($runner -match '\$exitCode = \$LASTEXITCODE') 'the runner must take the CLI exit code'
+Assert-True ($runner -match 'exit \$exitCode') 'the runner must exit with the CLI code, never translate it'
+
 # The runner writes a human log per day; the JSONL run record is the CLI's.
 Assert-True ($tierScript -match 'storage-tiers\.jsonl') 'the tier CLI must default its run record to logs\storage-tiers.jsonl'
+Assert-True ($runner -match "'yyyy-MM-dd'") 'the runner must keep one plain-text log per day beside the JSONL receipt'
+
+# The quarantine table can hold the ONLY copy of a hot row, so it lives in the
+# hot (dumped) tier and must never be spelled as a _cold twin -- the dynamic
+# exclusion rule only ever drops names ending in _cold.
+Assert-True ($tierScript -match 'quant\.storage_tier_conflicts') 'the CLI must quarantine a natural-key conflict into quant.storage_tier_conflicts'
+Assert-True ($tierScript -notmatch 'storage_tier_conflicts_cold') 'the quarantine table must not be a cold twin: the nightly dump has to keep it'
 
 # --- the dump exclusions are computed, never seeded --------------------------
 # A cold twin may only be left out of the nightly dump when the hot table it was

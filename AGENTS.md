@@ -124,6 +124,16 @@ this file and `docs/ARCHITECTURE.md` in the same change:
   `timestamptz` of that table; no file under `app/` references a `*_cold` twin or
   a `*_all` view; the policy table in `docs/OWNER_DATABASE_STORAGE.md` lists
   exactly the tables the script acts on.
+- `quant-service/tests/test_database_storage_tiers.py` — the storage tier job's
+  pure functions and every statement it renders: hot-usage measurement skips
+  reparse points (exercised against a real directory junction, because the
+  `pg_tblspc` junction points at the cold tier) and reports `pg_wal` separately;
+  the effective budget is capped by the volume; the space ratchet is bounded per
+  run and stops at `needs_repack` instead of running `VACUUM FULL`; every move
+  statement uses explicit column lists (never `SELECT *`, never `ctid`) and
+  inserts into the twin before deleting from hot; deadline resolution; the
+  schema-drift comparison; the status → exit-code mapping; and the cutoff-index
+  set of migration `20260919_0106` pinned against `TIER_POLICY`.
 
 The same convention covers the Windows runtime. These PowerShell guard tests are
 standalone (no database, no venv, no scheduled task) and run as
@@ -132,15 +142,36 @@ before every release:
 
 - `scripts/windows/tests/test-postgres-storage-tier-wiring.ps1` — the PowerShell
   runner and the Python CLI cannot drift: every `-Command` the runner offers is a
-  real subcommand of `scripts/database-storage-tiers.py`, the documented flags
-  still exist, the run record stays at `logs\storage-tiers.jsonl`, and the dump
-  exclusions seeded by the initializer are exactly `TIER_POLICY`'s cold twins.
+  real subcommand of `scripts/database-storage-tiers.py`; every flag the runner
+  passes (including `--deadline` and `--max-seconds`) is a flag the CLI declares;
+  the `status` → exit-code map stays 0 (`ok`/`deadline_reached`) / 1 (`partial`,
+  `conflicts`, `schema_drift`) / 2 (`degraded`, `failed`) and the runner reports
+  it verbatim; the run record stays at `logs\storage-tiers.jsonl`; the initializer
+  seeds **no** dump exclusions and `backup-stock-database.ps1` computes them at
+  dump time, so a cold twin is only left out when its hot table has an
+  incremental chunk chain; and `quant.storage_tier_conflicts` is never a `_cold`
+  name, because the nightly dump must keep it.
 - `scripts/windows/tests/test-postgres-io-window.ps1` — the pure window function
   `Get-PostgresIoWindowMode` across every boundary.
 - `scripts/windows/tests/test-postgres-data-migration-contract.ps1` — the
-  data-directory migration keeps its safety order (stop the watcher and every
-  scheduled database job first, verify the copy before switching `PGDATA_DIR`,
-  rename the old directory instead of deleting it).
+  data-directory migration keeps its safety order (`Disable-ScheduledTask` →
+  graceful `stop-stock-dashboard.ps1` → `Stop-ScheduledTask` backstop, verify the
+  copy before switching `PGDATA_DIR`, rename the old directory instead of
+  deleting it), recovers the platform from a failure in any step and rethrows,
+  copies with `/XJ` while recreating the `pg_tblspc` junctions, and gates
+  `-Rollback` behind `-AcceptDataLoss` plus an absolute refusal when the image
+  predates the `stock_cold` tablespace.
+- `scripts/windows/tests/test-backup-stock-database.ps1` — the computed dump
+  exclusion rule itself: chain present/absent, a failed incremental export, and
+  an operator override naming a twin whose hot table has no chain (refused and
+  reported, never silently honoured).
+
+One Windows test in this family is **not** standalone and is not run by
+`publish-stock-release.ps1`: `scripts/windows/tests/test-stock-incremental-backup-drill.ps1`
+starts the real PostgreSQL runtime and creates throw-away databases (dropped
+afterwards) to prove a nightly dump with exclusions can actually be restored,
+including the `no_chunk_chain` skip. Run it by hand after changing the backup or
+restore path.
 
 ## Review automation
 

@@ -61,7 +61,38 @@ Peer credentials, exports and staging
 数据库的物理布局（热层预算、冷层表空间、维护窗、备份链、数据目录迁移与回滚）以
 [OWNER_DATABASE_STORAGE.md](OWNER_DATABASE_STORAGE.md) 为准。动数据目录、备份、
 定时维护任务或任何分层表之前先读它；上面的路径只是速查，权威值是 `runtime.env` 里的
-`PGDATA_DIR`。
+`PGDATA_DIR`。接手时必须知道的几条：
+
+- **分层作业还没跑过 `install`。** 生产库里没有任何 `*_cold` 表、`*_tier_cutoff_idx`
+  索引、`quant.storage_tier_conflicts` 表，也没有 `stock_cold` 表空间；
+  `runtime.env` 里也还没有 `PGDATA_DIR` / `PGDATA_BUDGET_BYTES` /
+  `PGDATA_COLD_TABLESPACE_DIR` / `STOCK_BACKUP_INCREMENTAL_TABLES` /
+  `STOCK_BACKUP_EXCLUDE_TABLE_DATA` 任何一个。活机上什么都还没被改动。
+- **两个新任务还没注册**：`trading-hareness-storage-tiers`（每日 06:00，
+  `run-storage-tiers.ps1 -Command apply`，`ExecutionTimeLimit` 2h15m）和
+  `trading-hareness-postgres-io-window`（每 15 分钟）。两个安装器的
+  `-RepositoryRoot` / `-HostRoot` 默认就是 `G:\StockPlatform\current`，
+  必须在带这些脚本的 release 发布之后从 `current` 手工运行一次；
+  它们会把实际写进任务的 `Execute` 路径打印出来。
+- **作业自己会停**：runner 给 `apply` 传 `--deadline 08:00` 和 `--max-seconds 7200`，
+  到点写一条 `status='deadline_reached'` 的回执并以 **0** 退出，明晚接着搬。
+  2h15m 的 `ExecutionTimeLimit` 只是兜底——被它杀掉的进程不写任何回执。
+- **退出码：0 = 正常（含 `deadline_reached`）；1 = 需要人看但分层完好
+  （`partial` / `conflicts` / `schema_drift`）；2 = 500 GB 守卫失效
+  （`degraded`：用量测不出来、热窗到底、或棘轮停在 `needs_repack`）。
+  不要给它加自动重试，尤其不要把 2 当成"重试一下就好"。**
+- **`stock_peer` 角色超时已于 2026-09-19 在生产集群生效**：
+  `statement_timeout = 15min`、`idle_in_transaction_session_timeout = 5min`。
+  这是集群级设置，peer 侧的长查询会被打断，需要更久请显式 `SET LOCAL`。
+- **第一次 `apply` 会搬 0 行，这是正确结果。** 最老的热行约 156 天，热窗 365 天，
+  用量约 33 GB / 500 GB；未来七个月左右都会是 0 行。
+- **别手工往 `STOCK_BACKUP_EXCLUDE_TABLE_DATA` 里加冷孪生表。** 每夜 dump 的排除列表
+  是在 dump 时按 `STOCK_BACKUP_INCREMENTAL_TABLES` 算出来的，没有分块链的孪生表会被拒绝
+  并告警；`quant.storage_tier_conflicts` 永远不能进排除列表（它可能是某行热数据的唯一副本）。
+- **数据目录迁移 `-Rollback` 需要 `-AcceptDataLoss`**，而且在活集群已有 `stock_cold`
+  表空间、镜像早于它时**绝对拒绝**（没有开关可绕）。迁移回执里打印的回滚命令故意不带
+  `-AcceptDataLoss`，照抄会被拒绝。迁移**不停** `trading-hareness-shared-peer-tunnels`
+  （停 PostgreSQL 本身已经切断了 peer 会话）。
 
 持仓同步契约见 [BROKER_HOLDINGS_SYNC.md](BROKER_HOLDINGS_SYNC.md)：现在只由用户主动触发，文件导出优先，桌面 UI 读取必须直接交给 Luna 子 agent。不得创建每日调度、自动登录或自动唤醒 MuMu；未指定券商时不得默认中信。当前 THS 桌面读取尚未真实验收，旧 `citics-mumu-sync` 仅为退休兼容入口。
 
