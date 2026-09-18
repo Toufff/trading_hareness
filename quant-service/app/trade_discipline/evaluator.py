@@ -285,13 +285,21 @@ def _time_line_state(plan: DisciplinePlan, line: Line, inputs: EvaluationInputs,
                                 "deadline": deadline.isoformat() if deadline else None,
                                 "as_of": inputs.as_of.isoformat()}
     if line.kind == "time_stop" and line.price is not None:
-        reclaim = [observation for observation in daily_observations(plan, bars, inputs.as_of, "daily_close")
-                   if observation.value >= float(line.price)]
+        closes = daily_observations(plan, bars, inputs.as_of, "daily_close")
+        # A reclaim only cancels the line while the deadline has not passed.  A
+        # close back above the confirmation price on a later session cannot undo
+        # a T+N exit that already fired: the record is append-only, so the state
+        # stays ``triggered`` and the late reclaim is recorded as evidence.
+        reclaim = [observation for observation in closes
+                   if observation.value >= float(line.price)
+                   and (deadline is None or observation.at <= deadline)]
         evidence["confirm_price"] = float(line.price)
         if reclaim:
             evidence.update({"reclaimed_on": reclaim[0].label, "reclaim_close": reclaim[0].value, "due": False})
             return LineState(kind=line.kind, label=line.label, state="cancelled", basis="time", evidence=evidence)
-        closes = daily_observations(plan, bars, inputs.as_of, "daily_close")
+        late = [observation for observation in closes if observation.value >= float(line.price)]
+        if late:
+            evidence["reclaimed_after_deadline_on"] = late[0].label
         evidence["sessions_observed"] = [observation.label for observation in closes]
         evidence["last_close"] = closes[-1].value if closes else None
     if deadline is None:

@@ -244,6 +244,36 @@ class PlanPersistenceTests(unittest.TestCase):
         self.assertEqual(read_plan(self.connection, old["plan_id"])["sizing"]["hard_stop"], "7.75")
 
 
+    def test_two_generations_on_one_trading_day_both_persist_and_the_first_is_superseded(self):
+        """Principle 8 must be reachable inside a session, not only across days.
+
+        ``plan_key`` carries the evidence digest, so the 10:00 run and the 14:00
+        run of the same day are two storable rows rather than one conflict that
+        drops the newer plan on the floor.
+        """
+        morning = persist_plan(self.connection, plan(
+            plan_key="citics-primary:600613.SH:2026-09-18:holding:aaaaaaaaaaaa",
+            as_of=datetime(2026, 9, 18, 10, 0, tzinfo=SH)))
+        afternoon = persist_plan(self.connection, plan(
+            plan_key="citics-primary:600613.SH:2026-09-18:holding:bbbbbbbbbbbb",
+            as_of=datetime(2026, 9, 18, 14, 0, tzinfo=SH), hard_stop="7.90"))
+        self.assertEqual((morning["status"], afternoon["status"]), ("created", "created"))
+        self.assertNotEqual(morning["plan_id"], afternoon["plan_id"])
+        self.assertTrue(mark_superseded(self.connection, morning["plan_id"], by_plan_id=afternoon["plan_id"]))
+        self.assertEqual(read_plan(self.connection, morning["plan_id"])["status"], "superseded")
+        self.assertEqual(read_plan(self.connection, afternoon["plan_id"])["status"], "active")
+        self.assertEqual(len(self.connection.tables["discipline_plans"]), 2)
+
+    def test_the_same_day_key_with_identical_content_is_still_idempotent(self):
+        key = "citics-primary:600613.SH:2026-09-18:holding:aaaaaaaaaaaa"
+        first = persist_plan(self.connection, plan(plan_key=key))
+        again = persist_plan(self.connection, plan(plan_key=key))
+        self.assertEqual(again["status"], "idempotent")
+        self.assertEqual(again["plan_id"], first["plan_id"])
+        with self.assertRaises(DisciplineFactConflict):
+            persist_plan(self.connection, plan(plan_key=key, hard_stop="7.90"))
+
+
 class GenerationRunTests(unittest.TestCase):
     def setUp(self):
         self.connection = Connection()

@@ -55,6 +55,9 @@ class _DirectAsyncRepositoryCallVisitor(ast.NodeVisitor):
         "resolve_sync_symbols", "ensure_catalog_capabilities", "watchlist_daily_factors", "stock_window_readiness",
         "strategy_event_context", "strategy_tushare_lhb_context", "strategy_source_readiness",
         "persist_daily_bar_batch",
+        # trade_discipline's evidence reads own a blocking transaction; an async
+        # caller must hand them to run_database_blocking, never run them inline.
+        "gather_evidence", "collect_evidence",
     }
 
     def __init__(self) -> None:
@@ -135,6 +138,35 @@ class AsyncDatabaseBoundaryTests(unittest.TestCase):
             visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
             hits.extend(f"{path.relative_to(app_root)}:{line}:{function}:{call}" for function, line, call in visitor.hits)
         self.assertEqual(hits, [], "async DB transactions must use run_database_blocking: " + ", ".join(hits))
+
+    def test_an_evidence_read_owned_by_a_coroutine_is_flagged(self) -> None:
+        """The shape trade_discipline.collect used to have must not come back.
+
+        A coroutine that opens ``with connection_factory() as connection`` and
+        runs the synchronous evidence reads inside it blocks the loop thread,
+        and the factory arrives as an opaque parameter, so only naming the read
+        entrypoints keeps the rule enforceable.
+        """
+        offending = (
+            "async def collect(connection_factory, *, account_key, symbol, as_of):\n"
+            "    with connection_factory() as connection:\n"
+            "        evidence = gather_evidence(connection, account_key=account_key,\n"
+            "                                   symbol=symbol, as_of=as_of)\n"
+            "    return evidence\n"
+        )
+        visitor = _DirectAsyncRepositoryCallVisitor()
+        visitor.visit(ast.parse(offending))
+        self.assertEqual([call for _function, _line, call in visitor.hits], ["gather_evidence"])
+
+        bounded = (
+            "async def collect(connection_factory, *, account_key, symbol, as_of):\n"
+            "    read = partial(collect_evidence, connection_factory, account_key=account_key,\n"
+            "                   symbol=symbol, as_of=as_of)\n"
+            "    return await run_database_blocking(read, timeout_seconds=30)\n"
+        )
+        clean = _DirectAsyncRepositoryCallVisitor()
+        clean.visit(ast.parse(bounded))
+        self.assertEqual(clean.hits, [])
 
     def test_async_functions_offload_known_synchronous_repository_operations(self) -> None:
         app_root = Path(__file__).resolve().parents[1] / "app"

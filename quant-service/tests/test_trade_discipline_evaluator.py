@@ -330,6 +330,38 @@ class TimeLineTests(unittest.TestCase):
         self.assertEqual(time_stop.evidence["reclaim_close"], 8.85)
         self.assertFalse(time_stop.evidence["due"])
 
+    def test_a_reclaim_after_the_deadline_does_not_undo_a_time_stop_that_already_fired(self):
+        """T+3 is 09-23; a close back above the confirmation line on 09-24 is too late.
+
+        The record is append-only: an exit that fell due cannot be retracted by
+        later tape, so the state stays ``triggered`` and the late reclaim is
+        recorded as evidence instead of flipping the plan back to ``active``.
+        """
+        bars = [*shenqi_bars(), bar("2026-09-21", 8.30, 8.40, 8.10, 8.20, 9000),
+                bar("2026-09-22", 8.20, 8.30, 8.00, 8.10, 9000),
+                bar("2026-09-23", 8.10, 8.20, 7.90, 8.00, 9000),
+                bar("2026-09-24", 8.05, 9.60, 8.00, 9.50, 12000)]
+        due = evaluate(self.plan, inputs(as_of=datetime(2026, 9, 23, 15, 0, tzinfo=SH),
+                                         bars=bars[:-1], sector_change_pct=0.5))
+        later = evaluate(self.plan, inputs(as_of=datetime(2026, 9, 24, 15, 0, tzinfo=SH),
+                                           bars=bars, sector_change_pct=0.5))
+        self.assertEqual(state_of(due, "time_stop").state, "triggered")
+        self.assertEqual(state_of(later, "time_stop").state, "triggered")
+        self.assertTrue(state_of(later, "time_stop").evidence["due"])
+        self.assertNotIn("reclaimed_on", state_of(later, "time_stop").evidence)
+        self.assertEqual(state_of(later, "time_stop").evidence["reclaimed_after_deadline_on"], "2026-09-24")
+        self.assertEqual(state_of(later, "time_stop").triggered_at, datetime(2026, 9, 23, 15, 0, tzinfo=SH))
+        self.assertEqual(later.plan_state, "exit_signalled")
+
+    def test_a_reclaim_on_the_deadline_session_itself_still_cancels(self):
+        bars = [*shenqi_bars(), bar("2026-09-21", 8.30, 8.40, 8.10, 8.20, 9000),
+                bar("2026-09-22", 8.20, 8.30, 8.00, 8.10, 9000),
+                bar("2026-09-23", 8.10, 9.10, 8.05, 9.00, 12000)]
+        evaluation = evaluate(self.plan, inputs(as_of=datetime(2026, 9, 23, 15, 0, tzinfo=SH),
+                                                bars=bars, sector_change_pct=0.5))
+        self.assertEqual(state_of(evaluation, "time_stop").state, "cancelled")
+        self.assertEqual(state_of(evaluation, "time_stop").evidence["reclaimed_on"], "2026-09-23")
+
 
 class PlanStateTests(unittest.TestCase):
     def test_an_untriggered_plan_past_its_validity_expires(self):

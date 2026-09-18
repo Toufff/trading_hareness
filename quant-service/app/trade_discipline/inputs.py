@@ -17,10 +17,12 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date, datetime
+from functools import partial
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 from ..agent_paper.context import fetch_live_quotes, fetch_minutes
+from ..runtime_executors import run_database_blocking
 from .generator import CalendarInfo, GenerationInputs
 from .templates import DEFAULT_RISK_PER_TRADE_PCT
 
@@ -30,6 +32,7 @@ DAILY_BAR_COUNT = 60
 CALENDAR_LOOKAHEAD = 10
 EXCHANGE = "SSE"
 PLANS_TABLE = "discipline_plans"
+DATABASE_READ_TIMEOUT_SECONDS = 30
 SECTOR_FLOW_TABLE = "sector_flow_daily_features"
 VERIFIED_EXACT = "verified_exact"
 
@@ -307,8 +310,12 @@ def trading_calendar(connection: Any, day: date, *, lookahead: int = CALENDAR_LO
     upcoming = [value for value in (_as_date(row["calendar_date"]) for row in rows) if value is not None]
     today = _one(connection, """
         SELECT is_open FROM quant.market_trade_calendar WHERE exchange=%s AND calendar_date=%s""", (exchange, day))
-    return CalendarInfo(upcoming_trading_dates=upcoming,
-                        closure_gaps=closure_gaps([day, *upcoming])), bool((today or {}).get("is_open"))
+    day_is_open = bool((today or {}).get("is_open"))
+    # Only an open session may seed the gap series.  Seeding it with a closed
+    # day would name that day as the "last trading date" of a holiday line whose
+    # deadline is already in the past, so the line would be born due.
+    sessions = [day, *upcoming] if day_is_open else list(upcoming)
+    return CalendarInfo(upcoming_trading_dates=upcoming, closure_gaps=closure_gaps(sessions)), day_is_open
 
 
 def previous_active_plan(connection: Any, account_key: str, symbol: str) -> dict[str, Any] | None:
@@ -423,13 +430,25 @@ def build_generation_inputs(*, run_id: str, account_key: str, symbol: str, as_of
     )
 
 
+def collect_evidence(connection_factory: Callable[[], Any], *, account_key: str, symbol: str,
+                     as_of: datetime) -> dict[str, Any]:
+    """Open one read-only transaction and gather the evidence.  Synchronous.
+
+    This is deliberately *not* a coroutine: it blocks on the database driver, so
+    an async caller must hand it to ``run_database_blocking`` (or a thread)
+    instead of running it on the event loop.
+    """
+    with connection_factory() as connection:
+        return gather_evidence(connection, account_key=account_key, symbol=symbol, as_of=as_of)
+
+
 async def collect(connection_factory: Callable[[], Any], *, run_id: str, account_key: str, symbol: str,
                   as_of: datetime, risk_per_trade_pct: Any = DEFAULT_RISK_PER_TRADE_PCT,
                   lowered_reason: str | None = None, allow_live: bool = True,
                   **live_sources: Any) -> GenerationInputs:
-    """Read the database once, add today's forming bar when the session is open."""
-    with connection_factory() as connection:
-        evidence = gather_evidence(connection, account_key=account_key, symbol=symbol, as_of=as_of)
+    """Read the database off the loop, add today's forming bar when the session is open."""
+    read = partial(collect_evidence, connection_factory, account_key=account_key, symbol=symbol, as_of=as_of)
+    evidence = await run_database_blocking(read, timeout_seconds=DATABASE_READ_TIMEOUT_SECONDS)
     forming = None
     if allow_live and evidence["day_is_open"]:
         forming = await live_forming_bar(symbol, evidence["trading_day"], **live_sources)
@@ -440,7 +459,8 @@ async def collect(connection_factory: Callable[[], Any], *, run_id: str, account
 
 __all__ = [
     "CALENDAR_LOOKAHEAD", "DAILY_BAR_COUNT", "SECTOR_TAXONOMY", "account_equity", "broker_positions",
-    "build_generation_inputs", "canonical_json", "closure_gaps", "collect", "forming_bar",
+    "DATABASE_READ_TIMEOUT_SECONDS", "build_generation_inputs", "canonical_json", "closure_gaps",
+    "collect", "collect_evidence", "forming_bar",
     "gather_evidence", "instrument_name", "inputs_hash", "lane_membership", "latest_broker_snapshot",
     "live_forming_bar", "merge_forming_bar", "position_for", "previous_active_plan",
     "recommendation_note", "sector_daily_change", "sector_membership", "settled_daily_bars",

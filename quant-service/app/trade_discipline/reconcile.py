@@ -7,7 +7,8 @@ trade rows (``quant.broker_trade_records`` shape).  Output is one
 ``followed``    a same-direction fill within one trading day of the trigger
 ``late``        the same fill, but more than one trading day later
 ``missed``      the line triggered and nothing was filled before ``valid_until``
-``early``       a sell with no triggered line behind it
+``early``       a sell no triggered line accounts for -- either nothing had
+                triggered yet, or the triggered lines' quantity was already filled
 ``against_plan`` a buy while a ``no_add`` block was in effect
 ``unplanned``   a fill this plan never covered (other symbol, outside the window)
 
@@ -234,34 +235,52 @@ def reconcile(plan: DisciplinePlan, evaluations: list[Evaluation], trades: list[
         else:
             in_window.append(trade)
 
-    # A signal is matched against the earliest same-direction fill after it, and
-    # a fill is never consumed: one full exit satisfies the hard stop, the soft
-    # stop and the exposure cut at once, and ``quantity_diff`` says by how much.
+    # A signal is matched against every same-direction fill from the trigger on,
+    # until the quantity it expects is filled: a stop-out taken in two tranches
+    # is one obeyed instruction, not one obedience plus one violation.  A fill is
+    # never consumed exclusively, so one full exit still satisfies the hard stop,
+    # the soft stop and the exposure cut at once, and ``quantity_diff`` carries
+    # the running difference against what the line asked for.
+    signals = signals_from(plan, evaluations)
     consumed: set[str] = set()
-    for signal in signals_from(plan, evaluations):
+    for signal in signals:
         if signal.side is None:
             continue
         trigger_date = signal.triggered_at.astimezone(SHANGHAI).date()
         candidates = [trade for trade in in_window
                       if trade.side == signal.side and trade.trade_date >= trigger_date]
-        if candidates:
-            trade = candidates[0]
+        if not candidates:
+            if as_of >= plan.valid_until:
+                records.append(ComplianceRecord(
+                    plan_id=resolved_plan_id, trade_record_id=None, line_kind=signal.line_kind,
+                    verdict="missed", deviation=_deviation(trade=None, signal=signal, sessions=sessions),
+                    notes=(f"{signal.line_kind} 于 {signal.triggered_at.isoformat()} 触发，"
+                           f"直到有效期 {plan.valid_until.isoformat()} 仍无{signal.side}成交")))
+            continue
+        expected = signal.expected_quantity
+        filled = 0
+        for tranche, trade in enumerate(candidates, start=1):
             consumed.add(trade.trade_record_id)
+            filled += trade.quantity
             days, _ = _trading_days_between(sessions, trigger_date, trade.trade_date)
             verdict = "followed" if days <= FOLLOW_WINDOW_TRADING_DAYS else "late"
+            tranche_note = f"（第{tranche}笔，累计{filled}股）" if len(candidates) > 1 else ""
             records.append(ComplianceRecord(
                 plan_id=resolved_plan_id, trade_record_id=trade.trade_record_id, line_kind=signal.line_kind,
-                verdict=verdict, deviation=_deviation(trade=trade, signal=signal, sessions=sessions),
+                verdict=verdict,
+                deviation=_deviation(trade=trade, signal=signal, sessions=sessions,
+                                     extra={"tranche": tranche, "quantity_filled_cumulative": filled,
+                                            "quantity_diff": None if expected is None else filled - expected}),
                 notes=(f"{signal.line_kind} 于 {signal.triggered_at.isoformat()} 触发，"
-                       f"{days} 个交易日后成交" if verdict == "late"
-                       else f"{signal.line_kind} 触发后 {days} 个交易日内同方向成交")))
-        elif as_of >= plan.valid_until:
-            records.append(ComplianceRecord(
-                plan_id=resolved_plan_id, trade_record_id=None, line_kind=signal.line_kind,
-                verdict="missed", deviation=_deviation(trade=None, signal=signal, sessions=sessions),
-                notes=(f"{signal.line_kind} 于 {signal.triggered_at.isoformat()} 触发，"
-                       f"直到有效期 {plan.valid_until.isoformat()} 仍无{signal.side}成交")))
+                       f"{days} 个交易日后成交{tranche_note}" if verdict == "late"
+                       else f"{signal.line_kind} 触发后 {days} 个交易日内同方向成交{tranche_note}")))
+            if expected is None or filled >= expected:
+                break
 
+    sell_triggered_on = [signal.triggered_at.astimezone(SHANGHAI).date()
+                         for signal in signals if signal.side == "sell"]
+    first_sell_trigger = min(sell_triggered_on) if sell_triggered_on else None
+    triggered_kinds = sorted({signal.line_kind for signal in signals})
     release = no_add_release(plan, evaluations)
     blocks = bool(plan.lines_of("no_add"))
     for trade in in_window:
@@ -277,12 +296,22 @@ def reconcile(plan: DisciplinePlan, evaluations: list[Evaluation], trades: list[
                                             "distance_to_lines": _distance_to_lines(plan, trade)}),
                 notes=("禁止加仓期间买入" + (f"（{release.isoformat()} 才解除）" if release else "（计划期内未解除）"))))
         elif trade.side == "sell":
+            # The note is derived from what actually triggered, never asserted.
+            if first_sell_trigger is None:
+                note = "计划内无任何线触发，却已卖出"
+            elif trade.trade_date < first_sell_trigger:
+                note = (f"最早的卖出信号在 {first_sell_trigger.isoformat()}（{'/'.join(triggered_kinds)}），"
+                        f"这笔卖出早于任何触发")
+            else:
+                note = (f"已触发的线（{'/'.join(triggered_kinds)}）要求的数量已成交完毕，"
+                        f"这笔卖出超出计划数量")
             records.append(ComplianceRecord(
                 plan_id=resolved_plan_id, trade_record_id=trade.trade_record_id, line_kind=None,
                 verdict="early",
                 deviation=_deviation(trade=trade, signal=None, sessions=sessions,
-                                     extra={"distance_to_lines": _distance_to_lines(plan, trade)}),
-                notes="计划内无任何线触发，却已卖出"))
+                                     extra={"distance_to_lines": _distance_to_lines(plan, trade),
+                                            "triggered_lines": triggered_kinds}),
+                notes=note))
         else:
             records.append(ComplianceRecord(
                 plan_id=resolved_plan_id, trade_record_id=trade.trade_record_id, line_kind=None,

@@ -36,6 +36,7 @@ GENERATOR_VERSION = "trade-discipline-generator-v1"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 VALIDITY_TRADING_DAYS = 5
 SESSION_CLOSE = time(15, 0)
+PLAN_KEY_HASH_CHARS = 12
 
 
 class CalendarInfo(BaseModel):
@@ -147,7 +148,11 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
                           current_shares=position.quantity if position else 0)
 
     valid_until, valid_until_limit = _validity(inputs.calendar, inputs.as_of)
-    calendar_payload = {"closure_gaps": inputs.calendar.closure_gaps}
+    calendar_payload = {
+        "closure_gaps": inputs.calendar.closure_gaps,
+        "sessions": [str(metrics["trading_date"])[:10],
+                     *(day.isoformat() for day in inputs.calendar.upcoming_trading_dates)],
+    }
     closure = closure_within(calendar_payload, valid_until.date().isoformat())
     previous = inputs.previous_plan or {}
     sector = inputs.sector or {}
@@ -177,9 +182,16 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
     )
 
     trading_date = date.fromisoformat(str(metrics["trading_date"]))
+    # The key carries the evidence, not only the day: re-running on the same
+    # evidence re-derives the same key and stays idempotent, while a run against
+    # changed evidence (a moved forming bar, a new snapshot) becomes a new row
+    # that supersedes the previous one.  A day-granular key made the documented
+    # "改计划 = 新计划 + supersedes_plan_id" path unreachable inside one session.
+    fingerprint = inputs.fingerprint()
     plan = DisciplinePlan(
         contract_version=CONTRACT_VERSION,
-        plan_key=f"{inputs.account_key}:{inputs.symbol}:{trading_date.isoformat()}:{plan_kind}",
+        plan_key=(f"{inputs.account_key}:{inputs.symbol}:{trading_date.isoformat()}"
+                  f":{plan_kind}:{fingerprint[:PLAN_KEY_HASH_CHARS]}"),
         run_id=inputs.run_id, account_key=inputs.account_key, symbol=inputs.symbol, name=inputs.name,
         plan_kind=plan_kind, stage=stage, template_key=f"{stage}@{TEMPLATE_VERSION}",
         template_version=TEMPLATE_VERSION, as_of_at=inputs.as_of, trading_date=trading_date,
@@ -187,12 +199,12 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
         evidence_refs=_evidence_refs(inputs, metrics, position),
         quality=[], status="active",
         supersedes_plan_id=previous.get("plan_id"), lowered_reason=inputs.lowered_reason,
-        inputs_hash=inputs.fingerprint(), generator_version=GENERATOR_VERSION,
+        inputs_hash=fingerprint, generator_version=GENERATOR_VERSION,
     )
     checks = evaluate_quality(plan)
     return plan.model_copy(update={"quality": checks,
                                    "status": "active" if quality_passed(checks) else "rejected_by_quality"})
 
 
-__all__ = ["CalendarInfo", "GENERATOR_VERSION", "GenerationInputs", "SESSION_CLOSE",
-           "VALIDITY_TRADING_DAYS", "generate"]
+__all__ = ["CalendarInfo", "GENERATOR_VERSION", "GenerationInputs", "PLAN_KEY_HASH_CHARS",
+           "SESSION_CLOSE", "VALIDITY_TRADING_DAYS", "generate"]

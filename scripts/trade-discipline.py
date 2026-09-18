@@ -94,15 +94,45 @@ def _minute_tape(symbol, day):
 
 
 def _trade_rows(connection, account_key, symbol, start, end):
+    """Fills for one symbol, plus the ids of the rows that carry no usable price.
+
+    ``quant.broker_trade_records.price`` is nullable and may be zero, and a
+    ``TradeRecord`` demands a positive price.  Such a row is still a real trade,
+    so it is never dropped in silence: it is reported back to the caller and
+    surfaces in the receipt instead of turning into a phantom ``missed``.
+    """
     rows = connection.execute("""
         SELECT record_id,trade_date,trade_time,symbol,name,side,quantity,price
           FROM quant.broker_trade_records
          WHERE account_key=%s AND symbol=%s AND trade_date BETWEEN %s AND %s
          ORDER BY trade_date,trade_time,record_id""", (account_key, symbol, start, end)).fetchall()
-    return [{'trade_record_id': str(row['record_id']), 'trade_date': row['trade_date'],
-             'trade_time': row['trade_time'], 'symbol': row['symbol'], 'name': row['name'] or '',
-             'side': row['side'], 'quantity': int(row['quantity']),
-             'price': Decimal(str(row['price'] or 0))} for row in rows if row['price']]
+    priced = [{'trade_record_id': str(row['record_id']), 'trade_date': row['trade_date'],
+               'trade_time': row['trade_time'], 'symbol': row['symbol'], 'name': row['name'] or '',
+               'side': row['side'], 'quantity': int(row['quantity']),
+               'price': Decimal(str(row['price']))} for row in rows if row['price']]
+    unpriced = [{'trade_record_id': str(row['record_id']), 'trade_date': str(row['trade_date']),
+                 'side': row['side'], 'quantity': int(row['quantity']), 'price': None}
+                for row in rows if not row['price']]
+    return priced, unpriced
+
+
+def _unplanned_fills(connection, account_key, planned_symbols, start, end):
+    """Account fills in the window whose symbol no plan of this run covers.
+
+    ``discipline_compliance.plan_id`` is NOT NULL, so an account-scoped verdict
+    has no row to hang on; the fills are reported in the receipt instead of
+    disappearing because the per-plan query filtered them out by symbol.
+    """
+    rows = connection.execute("""
+        SELECT record_id,trade_date,trade_time,symbol,name,side,quantity,price
+          FROM quant.broker_trade_records
+         WHERE account_key=%s AND trade_date BETWEEN %s AND %s
+         ORDER BY trade_date,trade_time,record_id""", (account_key, start, end)).fetchall()
+    return [{'trade_record_id': str(row['record_id']), 'trade_date': str(row['trade_date']),
+             'symbol': row['symbol'], 'name': row['name'] or '', 'side': row['side'],
+             'quantity': int(row['quantity']), 'verdict': 'unplanned',
+             'notes': f"{row['symbol']} 当日无纪律计划覆盖"}
+            for row in rows if row['symbol'] not in planned_symbols]
 
 
 # --------------------------------------------------------------------------
@@ -277,8 +307,10 @@ def command_reconcile(args, db):
     as_of = _shanghai(args.as_of, datetime.combine(day, SESSION_CLOSE, tzinfo=SHANGHAI))
 
     judged, receipts, errors = [], [], []
+    unplanned, window = [], []
     with _read_only(db) as connection:
-        for row in _stored_plans(connection, args, repository):
+        stored_rows = _stored_plans(connection, args, repository)
+        for row in stored_rows:
             plan_id = str(row['plan_id'])
             try:
                 plan = repository.plan_from_row(row)
@@ -288,9 +320,10 @@ def command_reconcile(args, db):
                                           inputs_hash=item['inputs_hash'])
                                for item in repository.plan_evaluations(connection, plan_id)]
                 calendar, _ = inputs_module.trading_calendar(connection, plan.trading_date)
-                trades = _trade_rows(connection, args.account_key, plan.symbol, plan.trading_date,
-                                     plan.valid_until.astimezone(SHANGHAI).date()
-                                     + timedelta(days=UNPLANNED_TAIL_DAYS))
+                window_end = plan.valid_until.astimezone(SHANGHAI).date() + timedelta(days=UNPLANNED_TAIL_DAYS)
+                trades, unpriced = _trade_rows(connection, args.account_key, plan.symbol,
+                                               plan.trading_date, window_end)
+                window.append((plan.symbol, plan.trading_date, window_end))
                 records = reconcile(plan, evaluations, trades, as_of=as_of, calendar=calendar, plan_id=plan_id)
             except Exception as error:  # noqa: BLE001
                 errors.append({'plan_id': plan_id, 'error': f'{type(error).__name__}: {str(error)[:300]}'})
@@ -299,13 +332,23 @@ def command_reconcile(args, db):
             verdicts = {}
             for record in records:
                 verdicts[record.verdict] = verdicts.get(record.verdict, 0) + 1
+            if unpriced:
+                errors.append({'plan_id': plan_id,
+                               'error': 'trade_price_missing: ' + ','.join(item['trade_record_id']
+                                                                          for item in unpriced)})
             receipts.append({'plan_id': plan_id, 'symbol': plan.symbol, 'name': plan.name,
                              'evaluations': len(evaluations), 'trades': len(trades),
                              'records': len(records), 'verdicts': verdicts,
+                             'unpriced_trades': unpriced,
                              'details': [{'verdict': record.verdict, 'line_kind': record.line_kind,
                                           'trade_record_id': record.trade_record_id, 'notes': record.notes}
                                          for record in records],
                              'persisted': 'skipped_dry_run'})
+        if window:
+            planned = {symbol for symbol, _, _ in window}
+            unplanned = _unplanned_fills(connection, args.account_key, planned,
+                                         min(start for _, start, _ in window),
+                                         max(end for _, _, end in window))
 
     if not args.dry_run and judged:
         with db.transaction() as connection:
@@ -320,7 +363,7 @@ def command_reconcile(args, db):
 
     return {'command': 'reconcile', 'dry_run': bool(args.dry_run), 'account_key': args.account_key,
             'date': day.isoformat(), 'as_of': as_of.isoformat(), 'output_root': str(args.output_dir),
-            'reconciled': len(receipts), 'plans': receipts, 'errors': errors,
+            'reconciled': len(receipts), 'plans': receipts, 'unplanned_fills': unplanned, 'errors': errors,
             'live_orders': False, 'boundary': BOUNDARY}
 
 

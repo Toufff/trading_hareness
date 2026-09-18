@@ -1,6 +1,19 @@
 """Unified risk envelope, intentionally independent from signal scoring."""
 from __future__ import annotations
 
+MIN_VOLATILITY_BUFFER_PCT = 0.015
+VOLATILITY_BUFFER_FACTOR = 0.006
+
+
+def volatility_buffer_pct(metrics: dict) -> float:
+    """The one definition of the structural buffer, as a fraction of price.
+
+    ``short_term_lanes`` and ``trade_discipline`` quote the same structure to the
+    same reader, so they must not each carry their own copy of this constant.
+    """
+    volatility = max(0.0, float(metrics.get("volatility") or 0.0))
+    return max(MIN_VOLATILITY_BUFFER_PCT, volatility * VOLATILITY_BUFFER_FACTOR)
+
 
 def risk_envelope(lane: str, metrics: dict, regime: dict) -> dict:
     close = float(metrics["close"])
@@ -11,7 +24,7 @@ def risk_envelope(lane: str, metrics: dict, regime: dict) -> dict:
     budget = float(regime.get("research_budget", 0.0))
     max_position = round(base_cap * budget, 2)
     structure = float(metrics.get("recent_low") or close)
-    volatility_buffer = close * max(0.015, volatility * 0.006)
+    volatility_buffer = close * volatility_buffer_pct(metrics)
     failure_reference = round(min(structure, close - volatility_buffer), 2)
     return {
         "research_only": True,
@@ -27,4 +40,4 @@ def risk_envelope(lane: str, metrics: dict, regime: dict) -> dict:
     }
 
 
-__all__ = ["risk_envelope"]
+__all__ = ["MIN_VOLATILITY_BUFFER_PCT", "VOLATILITY_BUFFER_FACTOR", "risk_envelope", "volatility_buffer_pct"]

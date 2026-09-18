@@ -13,6 +13,8 @@ from __future__ import annotations
 import importlib.util
 import unittest
 from contextlib import contextmanager
+from datetime import date, time
+from decimal import Decimal
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "trade-discipline.py"
@@ -134,6 +136,57 @@ class ReceiptTests(unittest.TestCase):
         self.assertTrue(receipt["dry_run"])
         self.assertFalse([statement for statement in self.db.statements
                           if statement.upper().startswith("INSERT")])
+
+
+class TradeRowTests(unittest.TestCase):
+    """A real fill must never vanish between the query and the verdict."""
+
+    ROWS = [
+        {"record_id": "r-1", "trade_date": date(2026, 9, 21), "trade_time": time(14, 50),
+         "symbol": "600613.SH", "name": "神奇制药", "side": "sell", "quantity": 3000,
+         "price": Decimal("7.62")},
+        {"record_id": "r-2", "trade_date": date(2026, 9, 21), "trade_time": time(14, 55),
+         "symbol": "600613.SH", "name": "神奇制药", "side": "sell", "quantity": 2800, "price": None},
+        {"record_id": "r-3", "trade_date": date(2026, 9, 22), "trade_time": time(9, 40),
+         "symbol": "600000.SH", "name": "浦发银行", "side": "buy", "quantity": 1000,
+         "price": Decimal("0")},
+    ]
+
+    def connection(self, rows):
+        class Rows:
+            def fetchall(self_inner):
+                return rows
+
+        class Connection:
+            def execute(self_inner, _sql, _params=None):
+                return Rows()
+        return Connection()
+
+    def test_a_fill_without_a_usable_price_is_reported_rather_than_dropped(self):
+        priced, unpriced = cli._trade_rows(self.connection(self.ROWS[:2]), "citics-primary",
+                                           "600613.SH", date(2026, 9, 18), date(2026, 9, 30))
+        self.assertEqual([row["trade_record_id"] for row in priced], ["r-1"])
+        self.assertEqual([row["trade_record_id"] for row in unpriced], ["r-2"])
+        self.assertEqual(unpriced[0]["quantity"], 2800)
+        self.assertIsNone(unpriced[0]["price"])
+
+    def test_a_zero_price_counts_as_missing_and_is_surfaced_too(self):
+        _, unpriced = cli._trade_rows(self.connection(self.ROWS[2:]), "citics-primary",
+                                      "600000.SH", date(2026, 9, 18), date(2026, 9, 30))
+        self.assertEqual([row["trade_record_id"] for row in unpriced], ["r-3"])
+
+    def test_a_fill_in_a_symbol_no_plan_covers_is_listed_as_unplanned(self):
+        fills = cli._unplanned_fills(self.connection(self.ROWS), "citics-primary",
+                                     {"600613.SH"}, date(2026, 9, 18), date(2026, 9, 30))
+        self.assertEqual([row["trade_record_id"] for row in fills], ["r-3"])
+        self.assertEqual(fills[0]["verdict"], "unplanned")
+        self.assertIn("600000.SH", fills[0]["notes"])
+
+    def test_the_reconcile_receipt_always_carries_the_unplanned_channel(self):
+        receipt = cli.command_reconcile(
+            cli.build_parser().parse_args(["reconcile", "--dry-run", "--date", "2026-09-21"]),
+            FakeDatabase())
+        self.assertEqual(receipt["unplanned_fills"], [])
 
 
 if __name__ == "__main__":

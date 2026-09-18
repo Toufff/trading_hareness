@@ -145,6 +145,44 @@ class VerdictTests(unittest.TestCase):
         records = self.run_reconcile(self.triggered, [], as_of=datetime(2026, 9, 22, 15, 0, tzinfo=SH))
         self.assertEqual(records, [])
 
+    def test_a_two_tranche_exit_after_one_trigger_is_obedience_all_the_way_through(self):
+        """5800 shares sold in two tranches answer one hard stop, not one plus a violation."""
+        records = self.run_reconcile(self.triggered, [
+            trade("t-9a", "2026-09-21", "14:40:00", "sell", 3000, "7.62"),
+            trade("t-9b", "2026-09-21", "14:55:00", "sell", 2800, "7.58"),
+        ])
+        hard = [record for record in records if record.line_kind == "hard_stop"]
+        self.assertEqual([record.verdict for record in hard], ["followed", "followed"])
+        self.assertEqual([record.trade_record_id for record in hard], ["t-9a", "t-9b"])
+        self.assertEqual([record.deviation["tranche"] for record in hard], [1, 2])
+        self.assertEqual([record.deviation["quantity_filled_cumulative"] for record in hard], [3000, 5800])
+        self.assertEqual([record.deviation["quantity_diff"] for record in hard], [-2800, 0])
+        self.assertNotIn("early", {record.verdict for record in records})
+        for record in records:
+            self.assertNotIn("计划内无任何线触发", record.notes)
+
+    def test_a_sell_beyond_what_the_triggered_lines_asked_for_says_so(self):
+        """Past the expected quantity the verdict is still ``early`` - with an honest note."""
+        records = self.run_reconcile(self.triggered, [
+            trade("t-10a", "2026-09-21", "14:40:00", "sell", 5800, "7.62"),
+            trade("t-10b", "2026-09-22", "09:40:00", "sell", 200, "7.40"),
+        ])
+        extra = [record for record in records if record.trade_record_id == "t-10b"]
+        self.assertEqual([record.verdict for record in extra], ["early"])
+        self.assertIn("已成交完毕", extra[0].notes)
+        self.assertIn("hard_stop", extra[0].deviation["triggered_lines"])
+        self.assertNotIn("计划内无任何线触发", extra[0].notes)
+
+    def test_a_sell_before_any_trigger_names_the_first_signal_instead_of_denying_it(self):
+        records = self.run_reconcile(self.triggered, [
+            trade("t-11", "2026-09-18", "14:20:00", "sell", 1000, "8.45"),
+            trade("t-12", "2026-09-21", "14:50:00", "sell", 5800, "7.62"),
+        ])
+        early = [record for record in records if record.trade_record_id == "t-11"]
+        self.assertEqual([record.verdict for record in early], ["early"])
+        self.assertIn("2026-09-21", early[0].notes)
+        self.assertIn("早于任何触发", early[0].notes)
+
     def test_early_is_a_sell_with_no_line_behind_it(self):
         records = self.run_reconcile(self.quiet,
                                      [trade("t-4", "2026-09-22", "10:20:00", "sell", 2000, "8.30")])

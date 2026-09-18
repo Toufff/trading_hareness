@@ -34,6 +34,7 @@ from app.trade_discipline.inputs import (
     summarize_previous_plan,
     trading_calendar,
 )
+from app.trade_discipline.templates import closure_within
 
 SH = ZoneInfo("Asia/Shanghai")
 AS_OF = datetime(2026, 9, 18, 15, 30, tzinfo=SH)
@@ -202,6 +203,32 @@ class CalendarGapTests(unittest.TestCase):
                       calendar.closure_gaps)
         self.assertIn({"last_trading_date": "2026-09-30", "resume_date": "2026-10-09", "closed_days": 8},
                       calendar.closure_gaps)
+
+
+    def test_a_closed_day_never_becomes_the_last_trading_date_of_a_holiday_gap(self):
+        """Run on a Saturday inside the National Day break: the gap starts at a real session.
+
+        Seeding the series with the closed day would name it as the holiday
+        line's "last trading date", whose before-close deadline is already in
+        the past, so the line would be born due.
+        """
+        connection = FakeConnection(day_is_open=False,
+                                    calendar=[date(2026, 10, 9), date(2026, 10, 12), date(2026, 10, 13)])
+        calendar, day_is_open = trading_calendar(connection, date(2026, 10, 3))
+        self.assertFalse(day_is_open)
+        self.assertNotIn("2026-10-03", [gap["last_trading_date"] for gap in calendar.closure_gaps])
+        for gap in calendar.closure_gaps:
+            self.assertIn(date.fromisoformat(gap["last_trading_date"]), calendar.upcoming_trading_dates)
+
+    def test_a_holiday_line_is_refused_when_its_last_session_is_not_an_open_one(self):
+        stale = {"closure_gaps": [{"last_trading_date": "2026-10-03", "resume_date": "2026-10-09",
+                                   "closed_days": 5}],
+                 "sessions": ["2026-10-09", "2026-10-12"]}
+        self.assertIsNone(closure_within(stale, "2026-10-12"))
+        fresh = {"closure_gaps": [{"last_trading_date": "2026-09-30", "resume_date": "2026-10-09",
+                                   "closed_days": 8}],
+                 "sessions": ["2026-09-30", "2026-10-09"]}
+        self.assertEqual(closure_within(fresh, "2026-10-09")["closed_days"], 8)
 
 
 class FormingBarTests(unittest.TestCase):

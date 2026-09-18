@@ -40,7 +40,7 @@ quant-service/tests/test_trade_discipline_*.py
 5. **仓位由止损距离反推。** `max_shares = floor(equity × risk_per_trade_pct / (reference_price − hard_stop) / 100) × 100`；同时受 stage 的 `target_exposure_pct` 上限约束。仓位调整线（exposure）按**时间**执行，不看价格。
 6. **只上移不下移。** trail 线每日重算，`new = max(prev, candidate)`；任何后续计划的硬止损不得低于前一计划（除非 supersede 记录里给出 `lowered_reason`，且质量门标红）。
 7. **时间线必填。** time_stop（N 个交易日无确认即退出）、valid_until、以及休市 ≥3 个自然日前的 holiday 线。
-8. **不可变。** 计划、评估、对账、评审全部追加写；改计划 = 新计划 + `supersedes_plan_id`。
+8. **不可变。** 计划、评估、对账、评审全部追加写；改计划 = 新计划 + `supersedes_plan_id`。`plan_key = account:symbol:trading_date:plan_kind:inputs_hash[:12]`，同证据重跑幂等，证据变化（盘中重算）即为新计划，同日也能 supersede。
 9. **失败要落库。** 质量门不过的计划照样写入，status=`rejected_by_quality`，quality 字段列出失败项；不允许静默丢弃或降级成文本。
 
 ## 合同（contracts.py）
@@ -128,11 +128,11 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 
 每个 stage 一个模板函数 `build_lines(stage, metrics, position, sizing, calendar) -> list[Line]`。共性：
 
-- `hard_stop`（必有，priority 1）：`metric=daily_close, op="<", confirm(bars=1, daily)`，价格 = `min(structure_low, reference_price × (1 − buffer))`，其中 structure_low 按 stage 取：crash_rebound/broken 用 `min(当日低点, 昨日低点)`；pullback 用 `recent_low`（近 5 日收盘低）；trend 用 `MA10 × (1 − 0.5%)`；breakout 用 `突破平台 prior_high × (1 − 0.5%)`；base_platform 用 10 日最低收盘。buffer = `max(1.5%, 0.6 × 日波动率%)`（与 risk.py 一致）。另给一个盘中副本 `metric=minute_close, confirm(bars=3, minute)`，同价，label 标“盘中版”。
+- `hard_stop`（必有，priority 1）：`metric=daily_close, op="<", confirm(bars=1, daily)`，价格 = `min(structure_low, reference_price × (1 − buffer), reference_price − 0.9 × ATR14, reference_price × (1 − 2%))`——即结构点只允许**下移**到最小距离，永远不许被抬到结构点之上；结构比 3×ATR14 / 12% 还远时价格保持不动，由 `hard_stop_distance_sane` 判不过、按原则 9 落库为 `rejected_by_quality`。其中 structure_low 按 stage 取：crash_rebound/broken 用 `min(当日低点, 昨日低点)`；pullback 用 `recent_low`（近 5 日收盘低）；trend 用 `MA10 × (1 − 0.5%)`；breakout 用 `突破平台 prior_high × (1 − 0.5%)`；base_platform 用 10 日最低收盘。buffer = `max(1.5%, 0.6 × 日波动率%)`（与 risk.py 一致）。另给一个盘中副本 `metric=minute_close, confirm(bars=3, minute)`，同价，label 标“盘中版”。
 - `soft_stop`（可选，priority 2）：MA5 或 lane 参考线，允许 extra 条件，action=reduce_by_pct 50。
 - `time_stop`（必有）：crash_rebound/broken 3 个交易日、其余 5 个交易日内“收盘未站回确认线（stage 相应的 MA10 或 prior_high）”则 exit_all；execute_by=time，execute_at="T+N_close"。
 - `exposure`（当 current_exposure_pct > target_exposure_pct 时必有，priority 0）：`execute_by=time, execute_at="next_open+15m"`，action=reduce_to_shares(sizing.recommended_shares)。
-- `holiday`（valid_until 内存在 ≥3 自然日休市时必有）：最后交易日收盘前把仓位降到 `holiday_exposure_pct`（crash_rebound/broken 0%，其余 target 的一半）。
+- `holiday`（valid_until 内存在 ≥3 自然日休市时必有）：最后交易日收盘前把仓位降到 `holiday_exposure_pct`（crash_rebound/broken 0%，其余 target 的一半）。休市缺口只能由**真实开市日**起算：生成日若本身闭市，不得作为 `last_trading_date`。
 - `no_add`（crash_rebound/broken 必有；其余可选）：直到 `daily_close >= MA10`（crash_rebound）或 MA5 前 block_add。
 - `trail`：当 `last >= reference_price + 1 × ATR14` 后启用，价格 = `max(prev, min(近 3 日最低, last − 1.5 × ATR14))`，action=move_stop_to；只上移。
 - `take_partial`：`after_volume_climax` + `below_vwap` → reduce_by_pct 50（breakout/trend/crash_rebound 用）。
@@ -157,8 +157,8 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 ## 评估（evaluator.py）与对账（reconcile.py）
 
 - 日线评估：每个交易日收盘后对所有 active 计划跑一次；分钟评估：可选，输入分钟序列，按 confirm.bars 连续判定。
-- 状态机：`active → reduce_signalled / exit_signalled → (对账后) closed`；`valid_until` 过则 expired；time_stop 用交易日历数天。
-- 对账：成交按 symbol/日期匹配计划，verdict 规则：触发后 1 个交易日内同方向成交 = followed；无触发但卖出 = early（记录当时距各线的距离）；触发后超过 1 个交易日才成交 = late；触发且到 valid_until 无成交 = missed；no_add 生效期间买入 = against_plan；无计划的成交 = unplanned。deviation 记录价差、时间差、数量差。
+- 状态机：`active → reduce_signalled / exit_signalled → (对账后) closed`；`valid_until` 过则 expired；time_stop 用交易日历数天。time_stop 的“站回确认线”只看**截止日当日及之前**的收盘；截止日之后才站回不撤销已触发的退出。
+- 对账：成交按 symbol/日期匹配计划，verdict 规则：触发后 1 个交易日内同方向成交 = followed（一次触发按 `expected_quantity` 依次吃掉多笔同方向成交，分批止损整体算遵守，`quantity_diff` 记累计差额）；无触发或已成交满触发线要求的数量后仍卖出 = early（记录当时距各线的距离与已触发线）；触发后超过 1 个交易日才成交 = late；触发且到 valid_until 无成交 = missed；no_add 生效期间买入 = against_plan；无计划的成交 = unplanned。deviation 记录价差、时间差、数量差。
 
 ## 落库（migration 20260918_0105）
 

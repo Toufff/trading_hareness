@@ -18,9 +18,12 @@ from app.trade_discipline.contracts import Action, Confirm, Derivation, Line, Qu
 from app.trade_discipline.generator import CalendarInfo, GenerationInputs, generate
 from app.trade_discipline.quality import CHECK_IDS, evaluate_quality, failed_checks, quality_passed
 from app.trade_discipline.stage import classify_stage, daily_metrics, normalize_bars
+from app.short_term_lanes.risk import volatility_buffer_pct
+from app.short_term_lanes.rules import features as rules_features
 from app.trade_discipline.templates import (
     LOT_SIZE,
     TARGET_EXPOSURE_PCT,
+    buffer_pct,
     build_sizing,
     hard_stop_price,
     trail_stop_price,
@@ -494,6 +497,106 @@ class ShenqiFixtureTests(unittest.TestCase):
         again = generate(shenqi_inputs())
         self.assertEqual(again.inputs_hash, self.plan.inputs_hash)
         self.assertEqual(again.model_dump(mode="json"), self.plan.model_dump(mode="json"))
+
+
+class HardStopStructureTests(unittest.TestCase):
+    """The hard stop is a structure point; nothing may lift it back into the range."""
+
+    WIDE = {"low": 9.00, "prev_low": 8.80, "recent_low": 9.10, "ma10": 9.50, "prior_high": 10.50,
+            "low10_close": 8.90, "atr14": 0.30, "volatility": 1.0}
+
+    def test_a_structure_wider_than_three_atr_is_kept_not_raised_into_the_range(self):
+        price, derivation = hard_stop_price("crash_rebound", self.WIDE, Decimal("10.00"))
+        self.assertEqual(price, Decimal("8.80"))                      # min(today_low, prev_low)
+        self.assertLessEqual(price, Decimal(str(self.WIDE["prev_low"])))
+        self.assertLess(price, Decimal(str(self.WIDE["low"])))        # never above today's own low
+        self.assertNotIn("band_low)", derivation.formula)
+        self.assertLessEqual(abs(derivation.recompute() - float(price)), 0.01)
+
+    def test_such_a_plan_is_rejected_by_the_distance_gate_rather_than_silently_retuned(self):
+        """Principle 9: the gate says "this structure is too far to size", and it is stored."""
+        closes = [10.6, 10.5, 10.45, 10.4, 10.3, 10.2, 10.15, 10.1, 10.05, 10.0,
+                  9.95, 9.9, 9.85, 9.8, 9.75, 9.7, 9.65, 9.6, 9.55, 9.5,
+                  9.45, 9.4, 9.35, 9.3, 9.25, 9.2, 9.15, 9.1, 9.05, 9.0]
+        bars = series_from_closes(closes)
+        bars[-1] = {**bars[-1], "low": 7.60}       # a real crash low far below the buffer
+        plan = generate(stage_inputs("broken", bars=bars))
+        self.assertLessEqual(float(plan.sizing.hard_stop), 7.60)
+        self.assertEqual(plan.status, "rejected_by_quality")
+        self.assertIn("hard_stop_distance_sane", failed_checks(plan.quality))
+
+    def test_a_structure_too_close_may_still_be_widened_but_never_tightened(self):
+        tight = {**self.WIDE, "low": 9.98, "prev_low": 9.97}
+        price, _ = hard_stop_price("crash_rebound", tight, Decimal("10.00"))
+        self.assertLess(price, Decimal("9.97"))                       # widened below the structure
+        self.assertLessEqual(float(price), 10.00 - 0.9 * tight["atr14"] + 0.01)
+
+
+class PlanKeyTests(unittest.TestCase):
+    """Principle 8: a re-derivation on the same day must be storable, not a conflict."""
+
+    def test_the_same_evidence_re_derives_the_same_key(self):
+        self.assertEqual(generate(shenqi_inputs()).plan_key, generate(shenqi_inputs()).plan_key)
+
+    def test_a_second_run_on_the_same_day_with_moved_evidence_gets_its_own_key(self):
+        morning = generate(shenqi_inputs(as_of=datetime(2026, 9, 18, 10, 0, tzinfo=SH)))
+        bars = shenqi_bars()
+        bars[-1] = {**bars[-1], "close": 8.35, "low": 8.05}       # the forming bar moved
+        afternoon = generate(shenqi_inputs(as_of=datetime(2026, 9, 18, 14, 0, tzinfo=SH), bars=bars))
+        self.assertEqual(morning.trading_date, afternoon.trading_date)
+        self.assertNotEqual(morning.plan_key, afternoon.plan_key)
+        self.assertNotEqual(morning.inputs_hash, afternoon.inputs_hash)
+        for plan in (morning, afternoon):
+            head, _, digest = plan.plan_key.rpartition(":")
+            self.assertEqual(head, "citics-primary:600613.SH:2026-09-18:holding")
+            self.assertEqual(digest, plan.inputs_hash[:12])
+
+
+class LineWordingTests(unittest.TestCase):
+    """The sentence a human reads and the conditions a machine evaluates are one source."""
+
+    def test_the_soft_stop_claims_an_industry_condition_only_when_it_carries_one(self):
+        with_sector = generate(shenqi_inputs()).lines_of("soft_stop")[0]
+        without = generate(shenqi_inputs(sector=None)).lines_of("soft_stop")[0]
+        self.assertEqual(with_sector.extra, ["sector_change_negative"])
+        self.assertIn("行业当日翻绿", with_sector.label)
+        self.assertEqual(without.extra, [])
+        self.assertNotIn("行业", without.label)
+        self.assertIn("减半仓", without.label)
+
+    def test_the_new_buy_trigger_names_exactly_the_conditions_it_evaluates(self):
+        payload = {"position": None, "lane": {"lane": "reclaim", "reference": 8.60, "support": 8.05}}
+        with_sector = generate(shenqi_inputs(**payload)).lines_of("trigger")[0]
+        without = generate(shenqi_inputs(sector=None, **payload)).lines_of("trigger")[0]
+        self.assertIn("sector_not_weak", with_sector.extra)
+        self.assertIn("行业当日不走弱", with_sector.label)
+        self.assertEqual(without.extra, ["amount_ge_prev_day"])
+        self.assertNotIn("行业", without.label)
+        self.assertIn("成交额不低于前一日", without.label)
+
+
+class SharedMetricDefinitionTests(unittest.TestCase):
+    """The lane report and the discipline card must never quote different numbers."""
+
+    def test_the_volatility_buffer_has_one_definition(self):
+        for volatility in (0.0, 1.5, 2.5, 4.0, 9.0):
+            metrics = {"volatility": volatility}
+            self.assertEqual(buffer_pct(metrics), volatility_buffer_pct(metrics))
+            self.assertAlmostEqual(volatility_buffer_pct(metrics), max(0.015, volatility * 0.006), places=12)
+
+    def test_stage_metrics_agree_with_the_lane_features_on_the_shared_keys(self):
+        closes = STAGE_CLOSES["trend_hold"]
+        bars = series_from_closes(closes)
+        days = [row["trading_date"] for row in bars]
+        lane_rows = [{"trade_date": row["trading_date"], "close": row["close"], "amount": row["amount"],
+                      "main_net": 0.0,
+                      "pct_chg": round((row["close"] / previous["close"] - 1) * 100, 2),
+                      "turnover_rate": 1.0}
+                     for previous, row in zip(bars, bars[1:])]
+        lane = rules_features(lane_rows, days[1:])
+        stage = daily_metrics(bars)
+        for key in ("ma5", "ma10", "prior_high", "recent_low"):
+            self.assertAlmostEqual(stage[key], lane[key], places=9, msg=key)
 
 
 if __name__ == "__main__":
