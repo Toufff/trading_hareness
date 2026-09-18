@@ -23,10 +23,15 @@ def simulate(bars, sessions, costs=Costs()):
     if len(sessions)<2:return out('t1_blocked')
     if sessions!=sorted(set(sessions)):raise ValueError('Ordered distinct exchange sessions required')
     by={b['date']:b for b in bars};path=[by.get(d) for d in sessions]
-    fields=('open','high','low','close','limit_up','limit_down','adj_factor')
+    # ``adj_factor`` is deliberately NOT in this tuple: a factor that has not
+    # been fetched yet is a known-pending control on its own lane, not a data
+    # outage, and reporting it as 'missing_execution_data' hid that difference.
+    fields=('open','high','low','close','limit_up','limit_down')
     if any(not b or any(numeric(b.get(k)) is None or float(b[k])<=0 for k in fields) or b.get('is_suspended') is None for b in path):
         return out('missing_execution_data')
     if any(b['is_suspended'] for b in path):return out('suspended')
+    if any(numeric(b.get('adj_factor')) is None or float(b['adj_factor'])<=0 for b in path):
+        return out('adjustment_pending')
     if len({float(b['adj_factor']) for b in path})!=1:return out('corporate_action_unmodeled')
     first,last=path[0],path[-1]
     if first['open']>=first['limit_up']-.011 or first['open']<=first['limit_down']+.011:

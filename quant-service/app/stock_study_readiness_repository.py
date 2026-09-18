@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from .adjustment_factor_maintenance import pending_dates_between
+
 
 _SPECS = (
     ("daily", "日线行情", "P0"),
@@ -40,6 +42,12 @@ def stock_window_readiness(database: Any, symbol: str, start_date: date, end_dat
         "adj_factor": "quant.daily_adjustment_factors",
     }
     with database.transaction() as connection:
+        # Adjustment factors arrive on their own maintenance lane, so an empty
+        # window here has two very different meanings: the date was never
+        # fetched at all, or it is queued for the factor job.  Both used to
+        # read as a bare "missing" -- and before the identity placeholder was
+        # removed they both read as a false "ready".
+        adjustment_pending = set(pending_dates_between(connection, start_date, end_date))
         items: list[dict[str, Any]] = []
         for api_name, label, priority in _SPECS:
             table = table_by_api.get(api_name)
@@ -54,9 +62,20 @@ def stock_window_readiness(database: Any, symbol: str, start_date: date, end_dat
             else:
                 summary = raw_api_window_summary(connection, api_name, symbol, start_date, end_date)
                 rows, latest_date = summary["rows"], summary["latest_date"]
-            items.append({"api_name": api_name, "label": label, "priority": priority, "rows": rows,
-                          "latest_date": str(latest_date) if latest_date else None,
-                          "status": "ready" if rows > 0 else "missing"})
+            item = {"api_name": api_name, "label": label, "priority": priority, "rows": rows,
+                    "latest_date": str(latest_date) if latest_date else None,
+                    "status": "ready" if rows > 0 else "missing"}
+            if api_name == "adj_factor":
+                item["note"] = (
+                    f"pending: {len(adjustment_pending)} settled trade date(s) in this window are "
+                    "queued for the adjustment-factor maintenance job "
+                    "(scripts/adjustment-factor-maintenance.py sync)"
+                    if adjustment_pending else
+                    "missing: no cumulative factor has ever been fetched for this window"
+                    if rows == 0 else
+                    "complete: every settled trade date in this window carries a cumulative factor"
+                )
+            items.append(item)
     blockers = [item["api_name"] for item in items if item["priority"] == "P0" and item["status"] != "ready"]
     return {"symbol": symbol, "window_start": str(start_date), "window_end": str(end_date),
             "mode": "on_demand_single_stock_window", "decision_ready": not blockers,

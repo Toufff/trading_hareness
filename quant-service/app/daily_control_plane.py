@@ -49,9 +49,19 @@ LONGHU_MINIMUM_DAILY_ROWS = 3500
 #: able to leave the decision gate by hiding in an ungated bucket.
 UNKNOWN_EXCHANGE = 'UNKNOWN'
 
+#: Selected providers that publish a settled cross-section but no
+#: corporate-action history.  A bar sourced from one of them legitimately has
+#: no ``adj_factor`` until the separate tushare factor lane fills it in, which
+#: is what makes a missing factor ``pending`` rather than ``absent``.
+PROVIDERS_WITHOUT_ADJUSTMENT_FACTORS = ('longhuvip_composite',)
 
-EQUITY_DAILY_CONTROL_STATUS_SQL = """WITH equity_bars AS (
+_VENDOR_PROVIDER_SQL_LIST = ','.join(
+    "'" + name.replace("'", "''") + "'" for name in PROVIDERS_WITHOUT_ADJUSTMENT_FACTORS)
+
+
+EQUITY_DAILY_CONTROL_STATUS_SQL = f"""WITH equity_bars AS (
        SELECT bar.symbol,bar.trading_date,bar.adj_factor,bar.limit_up,bar.limit_down,
+              bar.selected_provider,
               coalesce(nullif(upper(split_part(bar.symbol,'.',2)),''),'UNKNOWN') AS exchange
          FROM quant.canonical_bars_daily bar
         WHERE bar.quality_status IN ('fresh','partial')
@@ -98,6 +108,7 @@ EQUITY_DAILY_CONTROL_STATUS_SQL = """WITH equity_bars AS (
        count(DISTINCT bar.symbol)::int AS daily_rows,
        count(DISTINCT bar.symbol) FILTER (WHERE bar.adj_factor IS NOT NULL)::int AS adjustment_rows,
        count(DISTINCT bar.symbol) FILTER (WHERE bar.limit_up IS NOT NULL AND bar.limit_down IS NOT NULL)::int AS limit_rows,
+       count(DISTINCT bar.symbol) FILTER (WHERE bar.selected_provider IN ({_VENDOR_PROVIDER_SQL_LIST}))::int AS vendor_sourced_rows,
        expected_previous.trading_date AS expected_previous_trading_day,
        expected_previous.expected_daily_rows AS expected_previous_daily_rows,
        expected_sources.sources AS expected_sources
@@ -125,6 +136,8 @@ def _absent_payload() -> dict[str, Any]:
         "state": "absent", "trade_date": None,
         "daily_rows": 0, "expected_daily_rows": 0, "minimum_required_rows": 0,
         "coverage_ratio": 0.0, "adjustment_rows": 0, "limit_rows": 0,
+        "adjustment_state": "absent", "adjustment_pending_rows": 0,
+        "research_adjustment_ready": False,
         "by_exchange": {}, "gating_exchanges": list(GATED_EXCHANGES), "ungated_exchanges": [],
         "all_a": {"expected_daily_rows": 0, "daily_rows": 0},
         "expected_previous_trading_day": None, "expected_previous_daily_rows": None,
@@ -164,11 +177,12 @@ def status_payload(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
     for row in dated:
         exchange = str(row.get("exchange") or UNKNOWN_EXCHANGE).upper()
         bucket = by_exchange.setdefault(
-            exchange, {"expected": 0, "daily": 0, "adjustment": 0, "limit": 0})
+            exchange, {"expected": 0, "daily": 0, "adjustment": 0, "limit": 0, "vendor_sourced": 0})
         bucket["daily"] += int(row.get("daily_rows") or 0)
         bucket["expected"] += int(row.get("expected_daily_rows") or row.get("daily_rows") or 0)
         bucket["adjustment"] += int(row.get("adjustment_rows") or 0)
         bucket["limit"] += int(row.get("limit_rows") or 0)
+        bucket["vendor_sourced"] += int(row.get("vendor_sourced_rows") or 0)
     for exchange, bucket in by_exchange.items():
         bucket["gated"] = exchange not in UNGATED_EXCHANGES
         bucket["ratio"] = round(bucket["daily"] / bucket["expected"], 4) if bucket["expected"] else 0.0
@@ -184,14 +198,30 @@ def status_payload(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
     expected_daily_rows = sum(bucket["expected"] for bucket in gated.values())
     adjustment_rows = sum(bucket["adjustment"] for bucket in gated.values())
     limit_rows = sum(bucket["limit"] for bucket in gated.values())
+    vendor_sourced_rows = sum(bucket["vendor_sourced"] for bucket in gated.values())
     all_a_expected = sum(bucket["expected"] for bucket in by_exchange.values())
     all_a_daily = sum(bucket["daily"] for bucket in by_exchange.values())
 
     minimum_required_rows = math.ceil(expected_daily_rows * MINIMUM_ALL_A_COVERAGE_RATIO)
     coverage_ratio = round(daily_rows / expected_daily_rows, 4) if expected_daily_rows else 0.0
     cross_section_ready = daily_rows >= minimum_required_rows
-    controls_ready = adjustment_rows == daily_rows and limit_rows == daily_rows
-    ready = daily_rows > 0 and cross_section_ready and controls_ready
+    limits_ready = limit_rows == daily_rows
+    # Adjustment factors are a separate lane with their own provider and their
+    # own maintenance job (``adjustment_factor_maintenance``), so a session
+    # whose cross-section and limits are complete is usable for execution-side
+    # decisions while the factors are still being fetched.  What the gate must
+    # never do is call a session adjusted when no factor exists -- that is why
+    # this is a tri-state label instead of a silent placeholder factor.
+    adjustment_pending_rows = max(daily_rows - adjustment_rows, 0)
+    if daily_rows > 0 and adjustment_rows == daily_rows:
+        adjustment_state = "complete"
+    elif vendor_sourced_rows > 0:
+        # The cross-section came from a provider that publishes no
+        # corporate-action history; the factor lane has not run for this date yet.
+        adjustment_state = "pending"
+    else:
+        adjustment_state = "absent"
+    ready = daily_rows > 0 and cross_section_ready and limits_ready
 
     first = dated[0]
     previous_day = first.get("expected_previous_trading_day")
@@ -208,16 +238,21 @@ def status_payload(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
     parts = [
         f"{gated_label} {daily_rows}/{expected_daily_rows}="
         f"{(daily_rows / expected_daily_rows if expected_daily_rows else 0.0):.1%} "
-        f"{'ready' if cross_section_ready and controls_ready else 'blocked'}"
+        f"{'ready' if ready else 'blocked'}"
     ]
     if not cross_section_ready:
         parts.append(
             f"低于 {MINIMUM_ALL_A_COVERAGE_RATIO:.0%} 的 point-in-time all-A 门槛"
             f"（至少 {minimum_required_rows} 只）")
-    elif not controls_ready:
+    elif not limits_ready:
         parts.append(
-            f"missing same-date adjustment or limit controls："
-            f"复权 {adjustment_rows}/{daily_rows}、涨跌停 {limit_rows}/{daily_rows}")
+            f"missing same-date limit controls：涨跌停 {limit_rows}/{daily_rows}")
+    if adjustment_state != "complete":
+        # Reported, never gating: research/adjusted-price consumers fail
+        # closed on a NULL factor on their own, per symbol and per window.
+        parts.append(
+            f"复权因子 {adjustment_state}（{adjustment_rows}/{daily_rows}，待补 {adjustment_pending_rows}）"
+            f"：不阻断个股决策门槛，跨日复权研究口径不可用")
     parts.extend(
         f"{item['exchange']} {item['daily']}/{item['expected']} 未参与门槛" for item in ungated)
     if drift:
@@ -230,7 +265,7 @@ def status_payload(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
         parts.append(
             f"all_a 预期较上一交易日 {expected_delta:+d}"
             + (f"（当日新增 {sum(sources.values())}，来源分组：{source_text}）" if source_text else ""))
-    reason = '；'.join(parts) if (not ready or drift) else None
+    reason = '；'.join(parts) if (not ready or drift or adjustment_state != "complete") else None
 
     return {
         "state": "ready" if ready else "blocked",
@@ -241,6 +276,9 @@ def status_payload(rows: Iterable[Mapping[str, Any]] | None) -> dict[str, Any]:
         "coverage_ratio": coverage_ratio,
         "adjustment_rows": adjustment_rows,
         "limit_rows": limit_rows,
+        "adjustment_state": adjustment_state,
+        "adjustment_pending_rows": adjustment_pending_rows,
+        "research_adjustment_ready": adjustment_state == "complete",
         "by_exchange": by_exchange,
         "gating_exchanges": [name for name in GATED_EXCHANGES],
         "ungated_exchanges": ungated,
@@ -326,13 +364,25 @@ def _longhu_control_status(database: Any, trade_date: date) -> dict[str, Any] | 
     factor_rows = int((row or {}).get("factor_rows") or 0)
     limit_rows = int((row or {}).get("limit_rows") or 0)
     minimum_control_rows = math.ceil(daily_rows * MINIMUM_ALL_A_COVERAGE_RATIO)
-    if daily_rows >= LONGHU_MINIMUM_DAILY_ROWS and factor_rows >= minimum_control_rows and limit_rows >= minimum_control_rows:
+    # Satisfaction is now judged per control.  The vendor supplies limits and
+    # fundamentals but no corporate-action history, so ``factor_rows`` is 0 by
+    # design (it used to be a same-day identity placeholder that this gate
+    # counted as a real control).  Keeping it in the gate would mean the
+    # short-circuit never fires again and every post-close would try a full
+    # four-API tushare sync whose adj_factor route is currently failing.
+    if daily_rows >= LONGHU_MINIMUM_DAILY_ROWS and limit_rows >= minimum_control_rows:
         return {
             "status": "completed", "trade_date": str(trade_date),
             "provider": "longhuvip_composite", "expected_daily_rows": daily_rows,
-            "rows": {"adj_factor": factor_rows, "stk_limit": limit_rows, "suspend_d": 0},
+            "rows": {"adj_factor": 0, "stk_limit": limit_rows, "suspend_d": 0},
+            "satisfied_by_vendor": ["stk_limit", "daily_basic"],
+            "pending_controls": ["adj_factor"],
+            "vendor_factor_rows": factor_rows,
+            "adjustment_state": "pending",
             "quality_note": (
-                "adj_factor is same-day identity only; limits are board-rule derived and retain IPO/resumption warnings"
+                "adj_factor is not supplied by this vendor and is fetched on its own lane by "
+                "adjustment_factor_maintenance; limits are board-rule derived and retain "
+                "IPO/resumption warnings"
             ),
         }
     return None
@@ -366,5 +416,6 @@ async def sync_full_market_daily_controls(
 
 __all__ = [
     "EQUITY_DAILY_CONTROL_STATUS_SQL", "EXPECTED_DELTA_REPORT_RATIO", "GATED_EXCHANGES",
-    "MINIMUM_ALL_A_COVERAGE_RATIO", "UNGATED_EXCHANGES", "status_payload", "status_query",
+    "MINIMUM_ALL_A_COVERAGE_RATIO", "PROVIDERS_WITHOUT_ADJUSTMENT_FACTORS", "UNGATED_EXCHANGES",
+    "status_payload", "status_query",
 ]

@@ -14,13 +14,14 @@ from app.daily_control_plane import (
 )
 
 
-def _row(exchange, expected, daily, *, adjustment=None, limit=None,
+def _row(exchange, expected, daily, *, adjustment=None, limit=None, vendor_sourced=0,
          trading_date=date(2026, 9, 18), previous_day=None, previous_expected=None, sources=None):
     return {
         "trading_date": trading_date, "exchange": exchange,
         "expected_daily_rows": expected, "daily_rows": daily,
         "adjustment_rows": daily if adjustment is None else adjustment,
         "limit_rows": daily if limit is None else limit,
+        "vendor_sourced_rows": vendor_sourced,
         "expected_previous_trading_day": previous_day,
         "expected_previous_daily_rows": previous_expected,
         "expected_sources": sources,
@@ -45,10 +46,51 @@ class DailyControlPlaneTests(unittest.TestCase):
         self.assertIsNone(payload["reason"])
         self.assertEqual(payload["minimum_required_rows"], 4_750)
 
-    def test_missing_equity_controls_remain_fail_closed(self):
-        payload = status_payload([_row("SH", 3_447, 3_447, adjustment=3_446)])
+    def test_missing_limit_controls_remain_fail_closed(self):
+        payload = status_payload([_row("SH", 3_447, 3_447, limit=3_446)])
         self.assertEqual(payload["state"], "blocked")
-        self.assertIn("missing", payload["reason"])
+        self.assertIn("missing same-date limit controls", payload["reason"])
+
+    def test_missing_adjustment_no_longer_blocks_the_equity_gate_but_is_labelled(self):
+        """Factors are a separate provider lane; a pending factor is not an outage.
+
+        This is the contract that has to ship together with the ten-day-leader
+        predicate change: the moment the identity placeholders become NULL,
+        every vendor-sourced session would otherwise report ``blocked``.
+        """
+        payload = status_payload([
+            _row("SH", 3_447, 3_447, adjustment=0, vendor_sourced=3_447)])
+        self.assertEqual(payload["state"], "ready")
+        self.assertEqual(payload["adjustment_state"], "pending")
+        self.assertEqual(payload["adjustment_rows"], 0)
+        self.assertEqual(payload["adjustment_pending_rows"], 3_447)
+        self.assertFalse(payload["research_adjustment_ready"])
+        self.assertIn("复权因子 pending", payload["reason"])
+
+    def test_adjustment_is_absent_when_no_vendor_sourced_bar_explains_it(self):
+        payload = status_payload([_row("SH", 3_447, 3_447, adjustment=3_400)])
+        self.assertEqual(payload["state"], "ready")
+        self.assertEqual(payload["adjustment_state"], "absent")
+        self.assertEqual(payload["adjustment_pending_rows"], 47)
+        self.assertIn("复权因子 absent", payload["reason"])
+
+    def test_complete_adjustment_reports_research_ready_and_no_reason(self):
+        payload = status_payload([_row("SH", 3_447, 3_447)])
+        self.assertEqual(payload["adjustment_state"], "complete")
+        self.assertTrue(payload["research_adjustment_ready"])
+        self.assertIsNone(payload["reason"])
+
+    def test_absent_payload_carries_the_tri_state_keys(self):
+        payload = status_payload(None)
+        self.assertEqual(payload["adjustment_state"], "absent")
+        self.assertEqual(payload["adjustment_pending_rows"], 0)
+        self.assertFalse(payload["research_adjustment_ready"])
+
+    def test_status_sql_projects_the_vendor_sourced_count(self):
+        from app.daily_control_plane import PROVIDERS_WITHOUT_ADJUSTMENT_FACTORS
+        self.assertIn("vendor_sourced_rows", EQUITY_DAILY_CONTROL_STATUS_SQL)
+        for provider in PROVIDERS_WITHOUT_ADJUSTMENT_FACTORS:
+            self.assertIn(f"'{provider}'", EQUITY_DAILY_CONTROL_STATUS_SQL)
 
     def test_incomplete_daily_cross_section_remains_blocked_even_with_complete_local_controls(self):
         payload = status_payload([_row("SH", 2_549, 1_447), _row("SZ", 3_000, 2_000)])
@@ -101,7 +143,8 @@ class PerExchangeGateTests(unittest.TestCase):
         self.assertEqual(payload["coverage_ratio"], 0.981)
         self.assertEqual(payload["all_a"], {"expected_daily_rows": 5_563, "daily_rows": 5_122})
         self.assertEqual(payload["by_exchange"]["BJ"], {
-            "expected": 342, "daily": 0, "adjustment": 0, "limit": 0, "gated": False, "ratio": 0.0})
+            "expected": 342, "daily": 0, "adjustment": 0, "limit": 0, "vendor_sourced": 0,
+            "gated": False, "ratio": 0.0})
         self.assertEqual(payload["ungated_exchanges"],
                          [{"exchange": "BJ", "expected": 342, "daily": 0, "ratio": 0.0}])
 
@@ -253,6 +296,30 @@ class SyncFullMarketDailyControlsTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["provider"], "longhuvip_composite")
+
+    def test_vendor_short_circuit_no_longer_needs_factor_rows(self):
+        """The vendor writes no factor rows at all now; the gate is per control.
+
+        Keeping ``factor_rows`` in the gate would mean the short-circuit could
+        never fire again, forcing a full four-API tushare sync every post-close
+        through a currently failing adj_factor route.
+        """
+        async def run_database(action):
+            return action()
+
+        database = _fake_database({"daily_rows": 5_100, "factor_rows": 0, "limit_rows": 5_100})
+        dependencies = self._dependencies(
+            database=database, longhu_vendor_configured=lambda: True, run_database=run_database,
+        )
+
+        result = asyncio.run(sync_full_market_daily_controls(date(2026, 9, 18), dependencies))
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["rows"]["adj_factor"], 0)
+        self.assertEqual(result["satisfied_by_vendor"], ["stk_limit", "daily_basic"])
+        self.assertEqual(result["pending_controls"], ["adj_factor"])
+        self.assertEqual(result["adjustment_state"], "pending")
+        self.assertNotIn("same-day identity", result["quality_note"])
 
     def test_falls_through_to_tushare_sync_when_longhu_is_not_configured(self):
         called = {}

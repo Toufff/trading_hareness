@@ -108,6 +108,45 @@ class PersistFullMarketCloseQuoteBatchingTests(unittest.TestCase):
         self.assertEqual(result["quote_rows"], 0)
         self.assertFalse(any("raw_market_observations" in sql for sql, _params in connection.calls))
 
+    def test_no_adjustment_factor_is_ever_persisted_for_this_vendor(self) -> None:
+        """The vendor supplies no corporate-action history.
+
+        The identity placeholder it used to write was promoted onto
+        ``quant.canonical_bars_daily.adj_factor`` exactly like a real
+        cumulative tushare factor, so every cross-date price adjustment on a
+        vendor day silently produced an unadjusted series.
+        """
+        connection = _RecordingConnection(fetch_run_id="run-1")
+        persisted: list[str] = []
+
+        def persist_rows(_connection, api_name, *_args, **_kwargs):
+            persisted.append(api_name)
+            return 0
+
+        result = persist_full_market_close(
+            connection,
+            trade_date=date(2026, 9, 18),
+            request_key="req-1",
+            observed_at=datetime(2026, 9, 18, 7, tzinfo=timezone.utc),
+            merged=MergedCrossSection(
+                daily_rows=[{"ts_code": "600664.SH", "trade_date": "20260918", "pre_close": 10,
+                             "name": "test"}],
+                fundamental_rows=[], flow_rows=[], quote_rows=[], coverage=1.0, close_conflicts=(),
+            ),
+            source_health={},
+            board_rows=[],
+            persist_rows=persist_rows,
+            persist_flow_rows=lambda *_a, **_k: 0,
+        )
+        self.assertNotIn("adj_factor", persisted)
+        self.assertIn("stk_limit", persisted)
+        self.assertNotIn("adj_factor", result.get("normalized", {}))
+        receipt = [params for sql, params in connection.calls
+                   if "UPDATE quant.fetch_runs SET status='completed'" in sql][0]
+        semantics = receipt[1].obj["control_semantics"]
+        self.assertNotEqual(semantics["adj_factor"], "same_day_identity_only")
+        self.assertIn("not_supplied_by_vendor", semantics["adj_factor"])
+
     def test_duplicate_symbol_and_payload_pairs_are_deduplicated(self) -> None:
         connection = _RecordingConnection()
         quote = {"ts_code": "000001.SZ", "price": 10.0}

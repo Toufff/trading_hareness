@@ -1022,6 +1022,14 @@ class AnnualDailyBackfill:
                                      symbol,trading_date,adj_factor
                                 FROM quant.daily_adjustment_factors
                                WHERE trading_date BETWEEN %s AND %s
+                                 -- A same-day identity placeholder is evidence
+                                 -- that a vendor supplied no corporate-action
+                                 -- history.  The provider ranking below prefers
+                                 -- tushare, but where no tushare row exists the
+                                 -- placeholder was the only candidate and won,
+                                 -- writing adj_factor=1 back onto the bar.  A
+                                 -- date with no real factor must stay NULL.
+                                 AND coalesce(raw->>'factor_semantics','') <> 'same_day_identity_only'
                                ORDER BY symbol,trading_date,
                                         CASE provider
                                           WHEN 'tushare_super_sdk' THEN 0

@@ -63,6 +63,39 @@ class TenDayLeaderRotationRepositoryTests(unittest.TestCase):
         self.assertIn("ceil(expected.expected_symbols*0.95)", sql)
         self.assertEqual(params, (5_000,))
 
+    def test_lane_coverage_is_settled_bars_not_adjustment_coverage(self) -> None:
+        """Adjustment factors arrive on a separate, slower provider lane.
+
+        Both coverage queries used to require ``adj_factor IS NOT NULL``, so
+        the moment the identity placeholders became honest NULLs this lane
+        would have reported zero covered dates and silently produced nothing
+        for the whole repaired window -- which is why this ships in the same
+        commit as the readiness-contract change.
+        """
+        database = _Database([_Result(row={"trading_date": date(2026, 9, 18)})])
+        latest_full_market_date(database, 5_000)
+        sql = database.calls[0][0]
+        covered = sql[sql.index("covered AS ("):sql.index(") SELECT expected.trading_date")]
+        self.assertNotIn("bar.adj_factor IS NOT NULL", covered)
+        self.assertIn("bar.quality_status IN ('fresh','partial')", covered)
+
+        database = _Database([
+            _Result(row={"daily_symbols": 5_101, "adjusted_symbols": 0,
+                         "expected_daily_symbols": 5_221, "strategy_available_at": None}),
+            _Result(rows=[]),
+        ])
+        inputs = load_ten_day_ranking_inputs(database, date(2026, 9, 18))
+        self.assertEqual(inputs.daily_symbols, 5_101)
+        self.assertEqual(inputs.adjusted_symbols, 0)
+        coverage_sql = database.calls[0][0]
+        self.assertIn("count(DISTINCT bar.symbol)::int AS daily_symbols", coverage_sql)
+        self.assertIn(
+            "count(DISTINCT bar.symbol) FILTER (WHERE bar.adj_factor IS NOT NULL)::int AS adjusted_symbols",
+            coverage_sql)
+        self.assertNotIn(
+            "count(DISTINCT bar.symbol) FILTER (WHERE bar.adj_factor IS NOT NULL)::int AS daily_symbols",
+            coverage_sql)
+
     def test_persists_run_and_replaces_only_its_candidates(self) -> None:
         database = _Database([_Result(row={"run_id": "run-1"}), _Result(), _Result()])
         run_id = persist_ten_day_rotation_run(

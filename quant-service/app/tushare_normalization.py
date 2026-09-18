@@ -11,6 +11,28 @@ from psycopg.types.json import Json
 from .daily_bar_batch_repository import upsert_daily_bars
 
 
+#: The only ``factor_semantics`` value whose factor may reach a bar table.
+#: ``quant.canonical_bars_daily.adj_factor`` is consumed as a cumulative
+#: (hfq-style) corporate-action factor: ``close * adj_factor`` must be
+#: comparable across dates.  Anything else -- above all a same-day identity
+#: placeholder -- is evidence about what a vendor did NOT supply.
+CUMULATIVE_FACTOR_SEMANTICS = "corporate_action_cumulative"
+
+
+def promotable_adjustment_factor(row: dict[str, Any]) -> bool:
+    """Return whether one ``adj_factor`` row may be written onto a daily bar.
+
+    A row that declares no ``factor_semantics`` at all is a plain tushare
+    cross-section row and keeps the historical behaviour.  A row that
+    declares something other than :data:`CUMULATIVE_FACTOR_SEMANTICS` is
+    stored as evidence but never promoted.
+    """
+    semantics = row.get("factor_semantics")
+    if semantics in (None, ""):
+        return True
+    return str(semantics) == CUMULATIVE_FACTOR_SEMANTICS
+
+
 def normalize_rows(
     connection: Any, api_name: str, rows: list[dict[str, Any]], available_at: datetime,
     *,
@@ -83,7 +105,16 @@ def normalize_rows(
                         raise ValueError("adj_factor row has no positive adj_factor")
                     connection.execute("""INSERT INTO quant.daily_adjustment_factors(symbol,trading_date,adj_factor,provider,available_at,raw) VALUES(%s,%s,%s,%s,%s,%s)
                            ON CONFLICT(symbol,trading_date,provider) DO UPDATE SET adj_factor=EXCLUDED.adj_factor,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""", (symbol, trading_date, adj_factor, provider_key, available_at, Json(row)))
-                    connection.execute("UPDATE quant.canonical_bars_daily SET adj_factor=%s,canonicalized_at=now() WHERE symbol=%s AND trading_date=%s", (adj_factor, symbol, trading_date))
+                    # The canonical UPDATE below is the only place a factor row
+                    # becomes a bar field, and it used to be provider-agnostic:
+                    # any vendor placeholder overwrote the bar exactly like a
+                    # real cumulative tushare factor.  A row that declares its
+                    # own non-cumulative semantics stays evidence only.  The
+                    # check is on the declared semantics, not on a provider
+                    # allowlist, so a future vendor placeholder is caught by
+                    # construction rather than by remembering to extend a list.
+                    if promotable_adjustment_factor(row):
+                        connection.execute("UPDATE quant.canonical_bars_daily SET adj_factor=%s,canonicalized_at=now() WHERE symbol=%s AND trading_date=%s", (adj_factor, symbol, trading_date))
                 elif api_name == "daily_basic":
                     connection.execute("""INSERT INTO quant.daily_fundamentals(symbol,trading_date,close,turnover_rate,volume_ratio,pe,pb,total_share,float_share,total_mv,circ_mv,provider,available_at,raw)
                            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
@@ -124,4 +155,4 @@ def normalize_rows(
     return normalized
 
 
-__all__ = ["normalize_rows"]
+__all__ = ["CUMULATIVE_FACTOR_SEMANTICS", "normalize_rows", "promotable_adjustment_factor"]

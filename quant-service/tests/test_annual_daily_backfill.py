@@ -198,6 +198,25 @@ class AnnualDailyBackfillTests(unittest.TestCase):
         self.assertNotIn("factor.provider='tushare_primary'", reconciliation)
         self.assertNotIn("limits.provider='tushare_primary'", reconciliation)
 
+    def test_reconciliation_never_rewrites_an_identity_placeholder_onto_a_bar(self):
+        """Without this exclusion the SQL repair is not durable.
+
+        The provider ranking prefers tushare, but on a (symbol, trading_date)
+        whose ONLY factor row is a vendor same-day identity placeholder that
+        placeholder is the only DISTINCT ON candidate and wins -- so any
+        annual/range backfill over the damaged window writes adj_factor=1
+        straight back onto the bar it was just repaired out of.
+        """
+        source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
+        reconciliation = source[source.index("def reconcile_suspensions"):
+                                source.index("def promote_stored_sector_flows")]
+        exclusion = "AND coalesce(raw->>'factor_semantics','') <> 'same_day_identity_only'"
+        factor_block = reconciliation[:reconciliation.index("quant.daily_trade_limits")]
+        self.assertIn(exclusion, factor_block)
+        # One f-string statement applied to both bar tables by the loop above it.
+        self.assertEqual(reconciliation.count(exclusion), 1)
+        self.assertIn('for table in ("market_bars_daily", "canonical_bars_daily")', reconciliation)
+
     def test_reprojection_is_local_only_and_preserves_dual_clock_evidence(self):
         source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
         self.assertIn("def reproject_stored_historical_clocks", source)

@@ -102,6 +102,72 @@ class FullMarketDailyControlsSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("UPDATE quant.canonical_bars_daily SET is_suspended=false,canonicalized_at=now() WHERE trading_date=%s", statements)
         self.assertIn("UPDATE quant.market_bars_daily SET is_suspended=false WHERE trading_date=%s", statements)
 
+    async def _run_subset(self, apis):
+        trade_date = date(2026, 9, 18)
+        requested: list[str] = []
+        statements: list[str] = []
+
+        class Connection:
+            def execute(self, statement, *_args):
+                statements.append(" ".join(statement.split()))
+
+        class Database:
+            def transaction(self):
+                class Context:
+                    def __enter__(self): return Connection()
+                    def __exit__(self, *_args): return False
+                return Context()
+
+        async def run_db(action, *args, **_kwargs):
+            return action(*args)
+
+        async def fetch(api_name, _params, _fields, _provider):
+            requested.append(api_name)
+            return SimpleNamespace(
+                rows=[{"ts_code": "000001.SZ", "trade_date": "20260918"}],
+                provider=SimpleNamespace(key="super_get"), failed_providers=())
+
+        def parse(value):
+            return date.fromisoformat(f"{str(value)[:4]}-{str(value)[4:6]}-{str(value)[6:8]}")
+
+        result = await sync(
+            trade_date, apis=apis, expected_daily_rows=lambda _day: 1, call_tushare_api=fetch,
+            parse_date=parse, persist_tushare_rows=lambda *_args: 1,
+            persist_blocked=lambda *_args: None, run_database_blocking=run_db, db=Database(),
+            safe_error_detail=lambda value, _limit: value, executor_saturated_error=RuntimeError,
+            record_provider_success=lambda *_args: None, record_provider_failure=lambda *_args: None,
+            record_provider_api_capability=lambda *_args, **_kwargs: None,
+        )
+        return result, requested, statements
+
+    async def test_adj_factor_only_run_never_clears_the_dates_suspension_flags(self):
+        """The reset belongs to ``suspend_d``.
+
+        An adj_factor-only run that reused the old unconditional body would
+        clear every suspension flag for the whole trading date and then have
+        no suspend_d rows to re-apply -- the session's suspension evidence
+        would simply be gone.
+        """
+        result, requested, statements = await self._run_subset(("adj_factor",))
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(requested, ["adj_factor"])
+        self.assertEqual(result["apis"], ["adj_factor"])
+        self.assertFalse([sql for sql in statements if "is_suspended" in sql])
+        self.assertFalse([sql for sql in statements if "daily_trade_limits" in sql])
+        self.assertTrue([sql for sql in statements if "daily_adjustment_factors" in sql])
+
+    async def test_limit_only_run_promotes_limits_and_nothing_else(self):
+        _result, requested, statements = await self._run_subset(("stk_limit",))
+        self.assertEqual(requested, ["stk_limit"])
+        self.assertFalse([sql for sql in statements if "is_suspended" in sql])
+        self.assertFalse([sql for sql in statements if "daily_adjustment_factors" in sql])
+        self.assertTrue([sql for sql in statements if "daily_trade_limits" in sql])
+
+    async def test_unknown_or_empty_api_subset_is_rejected(self):
+        for apis in ((), ("adj_factor", "nonexistent")):
+            with self.assertRaises(ValueError):
+                await self._run_subset(apis)
+
 
 if __name__ == "__main__":
     unittest.main()

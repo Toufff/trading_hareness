@@ -15,6 +15,10 @@ class TenDayRankingInputs:
     daily_symbols: int
     strategy_available_at: datetime | None
     expected_daily_symbols: int = 0
+    #: Reported only.  Settled-bar coverage decides whether the lane runs;
+    #: adjustment coverage is a separate, slower control lane and the ranking
+    #: rejects a symbol with a missing factor on its own.
+    adjusted_symbols: int = 0
 
 
 def latest_full_market_date(database: Any, minimum_full_market_symbols: int) -> date | None:
@@ -31,13 +35,21 @@ def latest_full_market_date(database: Any, minimum_full_market_symbols: int) -> 
                       AND (member.effective_to IS NULL OR member.effective_to>=dates.trading_date)
                     GROUP BY dates.trading_date
                ), covered AS (
+                   -- Coverage asks "does a settled bar exist for this date",
+                   -- which ``quality_status`` already answers.  This used to
+                   -- also require a non-NULL ``adj_factor``, which tied the
+                   -- whole lane to a control fetched on a separate, slower
+                   -- lane: an honest NULL factor emptied the rotation instead
+                   -- of degrading it.  Adjustment stays a per-symbol concern
+                   -- in the research window below, where ten_day_leader_ranking
+                   -- already rejects a symbol whose factor is missing.
                    SELECT bar.trading_date,count(DISTINCT bar.symbol)::int AS adjusted_symbols
                      FROM quant.canonical_bars_daily bar
                      JOIN quant.universe_membership_history member
                        ON member.universe_key='all_a' AND member.symbol=bar.symbol
                       AND member.effective_from<=bar.trading_date
                       AND (member.effective_to IS NULL OR member.effective_to>=bar.trading_date)
-                    WHERE bar.quality_status IN ('fresh','partial') AND bar.adj_factor IS NOT NULL
+                    WHERE bar.quality_status IN ('fresh','partial')
                     GROUP BY bar.trading_date
                ) SELECT expected.trading_date
                      FROM expected JOIN covered USING(trading_date)
@@ -58,7 +70,11 @@ def load_ten_day_ranking_inputs(database: Any, as_of_date: date) -> TenDayRankin
                     WHERE universe_key='all_a' AND effective_from<=%s
                       AND (effective_to IS NULL OR effective_to>=%s)
                ) SELECT count(DISTINCT active.symbol)::int AS expected_daily_symbols,
-                      count(DISTINCT bar.symbol) FILTER (WHERE bar.adj_factor IS NOT NULL)::int AS daily_symbols,
+                      -- Settled-bar coverage, not adjustment coverage (see
+                      -- ``latest_full_market_date``): a NULL adj_factor is a
+                      -- pending control, not a missing bar.
+                      count(DISTINCT bar.symbol)::int AS daily_symbols,
+                      count(DISTINCT bar.symbol) FILTER (WHERE bar.adj_factor IS NOT NULL)::int AS adjusted_symbols,
                       max(bar.available_at) AS strategy_available_at
                  FROM active LEFT JOIN quant.canonical_bars_daily bar
                    ON bar.symbol=active.symbol AND bar.trading_date=%s
@@ -94,6 +110,7 @@ def load_ten_day_ranking_inputs(database: Any, as_of_date: date) -> TenDayRankin
         daily_symbols=int((coverage or {}).get("daily_symbols") or 0),
         strategy_available_at=max(timestamps, default=None),
         expected_daily_symbols=int((coverage or {}).get("expected_daily_symbols") or 0),
+        adjusted_symbols=int((coverage or {}).get("adjusted_symbols") or 0),
     )
 
 

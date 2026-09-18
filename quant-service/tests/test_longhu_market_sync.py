@@ -30,7 +30,10 @@ class LonghuMarketSyncTests(unittest.TestCase):
         self.assertEqual(result.flow_rows[0]["net_amount"], 83_000_000)
         self.assertEqual(result.quote_rows[0]["provider_basis"], "longhuvip_licensed_dated_ohlc")
 
-    def test_control_rows_use_transparent_identity_factor_and_board_limits(self):
+    def test_control_rows_carry_board_limits_and_no_adjustment_factor_key(self):
+        # The vendor publishes no corporate-action history.  An identity
+        # placeholder was promoted onto canonical bars exactly like a real
+        # cumulative tushare factor, so the honest contract is to emit nothing.
         daily = [
             {"ts_code": "600664.SH", "trade_date": "20260901", "pre_close": 10, "name": "哈药股份"},
             {"ts_code": "300001.SZ", "trade_date": "20260901", "pre_close": 10, "name": "特锐德"},
@@ -41,7 +44,8 @@ class LonghuMarketSyncTests(unittest.TestCase):
         self.assertEqual(by_symbol["600664.SH"]["up_limit"], "11.00")
         self.assertEqual(by_symbol["300001.SZ"]["up_limit"], "12.00")
         self.assertEqual(by_symbol["600001.SH"]["up_limit"], "10.50")
-        self.assertTrue(all(row["factor_semantics"] == "same_day_identity_only" for row in controls["adj_factor"]))
+        self.assertNotIn("adj_factor", controls)
+        self.assertEqual(set(controls), {"stk_limit"})
 
     def test_star_market_st_name_keeps_20_percent_not_5(self):
         # A substring match on "ST" used to force any registration-board ST
