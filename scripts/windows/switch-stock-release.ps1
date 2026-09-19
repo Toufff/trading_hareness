@@ -121,7 +121,7 @@ try {
     do {
         Start-Sleep -Seconds 2
         try {
-            $api = Invoke-RestMethod 'http://127.0.0.1:5681/health' -TimeoutSec 3
+            $api = Invoke-RestMethod 'http://127.0.0.1:5681/health' -TimeoutSec 20
             $adapter = Invoke-RestMethod 'http://127.0.0.1:5680/health' -TimeoutSec 3
             if ($api.status -eq 'ok' -and $adapter.status -eq 'ok') { break }
         } catch { }
@@ -194,7 +194,7 @@ try {
             do {
                 Start-Sleep -Seconds 2
                 try {
-                    $api = Invoke-RestMethod 'http://127.0.0.1:5681/health' -TimeoutSec 3
+                    $api = Invoke-RestMethod 'http://127.0.0.1:5681/health' -TimeoutSec 20
                     $adapter = Invoke-RestMethod 'http://127.0.0.1:5680/health' -TimeoutSec 3
                     if ($api.status -eq 'ok' -and $adapter.status -eq 'ok') { break }
                 } catch { }

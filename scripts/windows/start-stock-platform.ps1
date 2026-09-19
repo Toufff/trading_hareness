@@ -84,7 +84,7 @@ try {
         if (-not (Test-ExpectedApiProcess -ProcessId $listener.OwningProcess -Repository $repository -Port $ApiPort)) {
             throw "Port $ApiPort belongs to an unexpected process $($listener.OwningProcess)"
         }
-        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 5
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 20
         [IO.File]::WriteAllText($pidPath, [string]$listener.OwningProcess, [Text.UTF8Encoding]::new($false))
         $current = Get-RuntimeState -PlatformRoot $root -Service 'quant-api'
         $currentStatus = if ($current -and $current.PSObject.Properties['status']) { [string]$current.status } else { '' }
@@ -164,10 +164,14 @@ $runtimeRun = Start-RuntimeSupervisor -PlatformRoot $root -RepositoryRoot $repos
     -Environment $environment -Metadata @{ port = $ApiPort; profile = 'research' }
 $stderr = [string]$runtimeRun.stderr
 
-$deadline = [DateTime]::UtcNow.AddSeconds(75)
+# /health walks the artifact store (runtime_resources.managed_directory_bytes)
+# on every call; measured 4.3-4.9 s on the G: HDD on 2026-09-19, which made a
+# 2-second probe fail forever and turned a healthy publish into a forward
+# repair. The probe must outlast one slow walk; the outer deadline bounds it.
+$deadline = [DateTime]::UtcNow.AddSeconds(120)
 do {
     try {
-        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 2
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 20
         $listener = Get-ApiListener -Port $ApiPort
         if (-not $listener -or -not (Test-ExpectedApiProcess -ProcessId $listener.OwningProcess -Repository $repository -Port $ApiPort)) {
             throw 'health endpoint responded without the expected listener process'
@@ -204,7 +208,7 @@ Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
     reason = 'health_timeout'
     stderr = $stderr
 })
-throw "quant API did not become healthy within 75 seconds; inspect $stderr`n$errorTail"
+throw "quant API did not become healthy within 120 seconds; inspect $stderr`n$errorTail"
 }
 finally {
     [void]$mutex.ReleaseMutex()
