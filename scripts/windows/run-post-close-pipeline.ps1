@@ -16,7 +16,7 @@ param(
     # Earliest the exchange publishes a usable end-of-day cross-section. Before
     # this the daily bars exist but the limit pools do not, and a run would
     # record a partial date as done.
-    [string]$AfterHHmm = '1630',
+    [string]$AfterHHmm = '1600',
     [string]$UntilHHmm = '2330',
     # Run even outside the window / on a weekend / when the date already
     # landed. For operators backfilling by hand.
