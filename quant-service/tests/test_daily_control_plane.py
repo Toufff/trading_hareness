@@ -36,6 +36,7 @@ class DailyControlPlaneTests(unittest.TestCase):
         sql, params = status_query(date(2026, 9, 7))
         self.assertEqual(params, (date(2026, 9, 7),))
         self.assertNotIn('max(trading_date) AS trading_date FROM equity_bars', sql)
+        self.assertNotIn('max(trading_date) AS trading_date FROM qualifying_dates', sql)
         self.assertIn('SELECT %s::date AS trading_date', sql)
         self.assertEqual(sql.count('%s'), len(params))
         self.assertEqual(status_query(), (EQUITY_DAILY_CONTROL_STATUS_SQL, ()))
@@ -317,6 +318,24 @@ class EquityStatusSqlShapeTests(unittest.TestCase):
 
     def test_status_sql_takes_no_parameters_until_a_date_is_requested(self):
         self.assertNotIn('%s', EQUITY_DAILY_CONTROL_STATUS_SQL)
+
+    def test_sql_finds_dates_first_and_reads_bars_for_the_latest_date_only(self):
+        # /health ran this on every call; the old whole-table equity_bars CTE
+        # cost 2.2-2.6 s on production (2026-09-19). The bar rows must be
+        # joined to the one latest date, and latest/previous must come from
+        # the per-date qualifying walk, never from a scan of every bar.
+        from app.daily_control_plane import LATEST_TRADING_DATE_SQL
+        sql = EQUITY_DAILY_CONTROL_STATUS_SQL
+        self.assertTrue(sql.startswith('WITH RECURSIVE bar_dates AS ('))
+        self.assertEqual(sql.count(LATEST_TRADING_DATE_SQL), 1)
+        equity_bars = sql.split('equity_bars AS (', 1)[1].split('), expected AS (', 1)[0]
+        self.assertIn('JOIN latest ON bar.trading_date=latest.trading_date', equity_bars)
+        self.assertIn('FROM qualifying_dates prior CROSS JOIN latest', sql)
+        self.assertNotIn('FROM equity_bars prior', sql)
+        # Qualification is the same predicate the bar rows use.
+        qualifying = sql.split('qualifying_dates AS (', 1)[1].split('), latest AS (', 1)[0]
+        self.assertIn("bar.quality_status IN ('fresh','partial')", qualifying)
+        self.assertIn("membership.universe_key='all_a'", qualifying)
 
 
 class _Cursor:
