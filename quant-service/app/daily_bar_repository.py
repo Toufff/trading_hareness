@@ -67,6 +67,10 @@ def provider_priority(provider: str) -> int:
     return {
         "tushare": 10, "tushare_primary": 10, "tushare_super_get": 15,
         "tushare_super_sdk": 20, "tushare_super": 25,
+        # Exchange values from the licensed L2 history snapshot (the gap
+        # backfill): ranked above the evening composite, whose OHLC for a
+        # PAST date is the vendor's forward-adjusted kline.
+        "longhuvip_l2history_pankou": 24,
         "longhuvip_composite": 25, "longhuvip": 26, "baostock": 30, "tushare_backup": 40, "eastmoney_free": 45,
         "longhuvip_index": 45,
         # Selected on rows written before 2026-09-18; no current writer uses them.
