@@ -78,15 +78,6 @@ async def run_pipeline(
     sentiment_cycle = (await run_database_blocking(materialize_sentiment_cycle, as_of_date,
                                                    timeout_seconds=60)
                        if materialize_sentiment_cycle is not None else None)
-    # Ledger materialization reads whatever each strategy's own table already
-    # holds for as_of_date; it does not require those strategies to run here.
-    ledger = (await run_database_blocking(materialize_candidate_ledger, as_of_date, timeout_seconds=30)
-             if materialize_candidate_ledger is not None else None)
-    # Proposals are read after the ledger materializes so they see today's
-    # candidates; this never writes into intraday_watchlists (see
-    # watchlist_candidate_proposals.py for why).
-    watchlist_proposals = (await run_database_blocking(materialize_watchlist_proposals, as_of_date, timeout_seconds=30)
-                           if materialize_watchlist_proposals is not None else None)
     # Settling turns accumulated leader-flow observations into an evaluable
     # record.  Re-running refreshes: the next session's bars do not exist yet
     # at this point, so the forward columns fill in on the following day's run.
@@ -98,6 +89,20 @@ async def run_pipeline(
     # budget it used to carry cancelled the stage every run, which is why the
     # pipeline reported an internal error at the very last step.
     result = await run_database_blocking(generate_recommendations, payload, timeout_seconds=180)
+    # Ledger materialization reads whatever each strategy's own table already
+    # holds for as_of_date -- including ``quant.recommendations`` for the
+    # ``daily_recommendation`` key -- so it must run AFTER generate_recommendations,
+    # or day D's recommendation rows only reach the ledger on a rerun.  Nothing
+    # above depends on the ledger: recompute_outcomes settles only candidates
+    # whose entry (first bar strictly after their as_of_date) already exists,
+    # which a day-D candidate never has on day D.
+    ledger = (await run_database_blocking(materialize_candidate_ledger, as_of_date, timeout_seconds=30)
+             if materialize_candidate_ledger is not None else None)
+    # Proposals are read after the ledger materializes so they see today's
+    # candidates; this never writes into intraday_watchlists (see
+    # watchlist_candidate_proposals.py for why).
+    watchlist_proposals = (await run_database_blocking(materialize_watchlist_proposals, as_of_date, timeout_seconds=30)
+                           if materialize_watchlist_proposals is not None else None)
     # Minute bars for the session's boards and benchmarks, gathered last. The
     # route is slow and only partly available - stk_mins answered ~55% of
     # sampled boards over three closed sessions and 0% intraday - so it runs

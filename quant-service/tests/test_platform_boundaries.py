@@ -56,7 +56,7 @@ class PlatformBoundaryTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(blocking.await_count, 1)
 
-    def test_daily_pipeline_materializes_regime_and_ledger_before_settling_outcomes(self):
+    def test_daily_pipeline_materializes_regime_before_outcomes_and_ledger_after_recommendations(self):
         async def sync(_payload):
             return {"status": "completed"}
 
@@ -92,9 +92,13 @@ class PlatformBoundaryTests(unittest.TestCase):
         self.assertEqual(result["regime"], {"state": "trend_recovery"})
         self.assertEqual(result["candidate_ledger"], {"materialize_post_close_candidates": 3})
         self.assertEqual(result["watchlist_proposals"], 5)
-        # Regime and ledger must materialize before outcomes settle against them.
+        # Regime must materialize before outcomes settle against it.
         self.assertLess(call_order.index(materialize_regime), call_order.index(recompute_outcomes))
-        self.assertLess(call_order.index(materialize_ledger), call_order.index(recompute_outcomes))
+        # The ledger copies today's quant.recommendations (daily_recommendation),
+        # so it must run after they are generated, not only on a rerun.  A
+        # day-D ledger row has no entry session (first bar > D) on day D, so
+        # settling outcomes first loses nothing.
+        self.assertLess(call_order.index(generate_recommendations), call_order.index(materialize_ledger))
         # Proposals must be read after the ledger materializes (they read from it).
         self.assertLess(call_order.index(materialize_ledger), call_order.index(materialize_proposals))
 

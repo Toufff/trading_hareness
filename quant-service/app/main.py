@@ -1009,7 +1009,7 @@ def recompute_scorecards(as_of_date: date | None = None) -> dict[str, Any]:
     return recompute_scorecards_isolated(as_of_date, cn_today=cn_today, db=db, readiness=analyst_scorecard_readiness)
 
 
-FEATURE_VERSION = "multi-source-feature-v3"
+FEATURE_VERSION = "multi-source-feature-v4"  # v4 (2026-09-19): snapshot reads the settled same-day close
 MODEL_VERSION = "multi-source-direction-v1"
 ANALYST_TEXT_FACTOR_VERSION = DEFAULT_FACTOR_VERSION
 
