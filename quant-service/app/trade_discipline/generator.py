@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, Field, field_validator
 
 from .contracts import CONTRACT_VERSION, DisciplinePlan, PositionRef
+from .exposure_calibration import board_key, load_calibration, lookup
 from .quality import evaluate_quality, quality_passed
 from .stage import classify_stage, daily_metrics
 from .templates import (
@@ -32,7 +33,7 @@ from .templates import (
     new_buy_entry,
 )
 
-GENERATOR_VERSION = "trade-discipline-generator-v3"
+GENERATOR_VERSION = "trade-discipline-generator-v4"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 VALIDITY_TRADING_DAYS = 5
 SESSION_CLOSE = time(15, 0)
@@ -75,6 +76,10 @@ class GenerationInputs(BaseModel):
     # version must not collide with the stored plan of the previous version
     # (``persist_plan`` would raise a content conflict instead of superseding).
     generator_version: str = GENERATOR_VERSION
+    # Price-limit regime of the symbol on the plan day ({key, is_st, source}); None -> symbol rule, no ST.
+    board: dict[str, Any] | None = None
+    # The exposure-cap calibration artifact the caps are read from; its version is evidence.
+    exposure_calibration_version: str = Field(default_factory=lambda: load_calibration()["version"])
 
     @field_validator("as_of")
     @classmethod
@@ -186,9 +191,18 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
                        if entry is None else Decimal(str(entry["entry_price"])).quantize(Decimal("0.01")))
 
     hard_stop, _ = hard_stop_price(stage, metrics, reference_price)
+    calibration = load_calibration()
+    if calibration["version"] != inputs.exposure_calibration_version:
+        raise ValueError(f"exposure calibration {inputs.exposure_calibration_version} is not the loaded "
+                         f"artifact {calibration['version']}")
+    board = (inputs.board or {}).get("key") or board_key(inputs.symbol, False)
+    exposure_basis = {**lookup(calibration, stage, board),
+                      "board_source": (inputs.board or {}).get("source", "symbol_rule_no_st_evidence")}
+    holiday_basis = lookup(calibration, stage, board, holiday=True) if calibration.get("holiday_cells") else None
     sizing = build_sizing(stage=stage, equity=inputs.equity, risk_per_trade_pct=inputs.risk_per_trade_pct,
                           reference_price=reference_price, hard_stop=hard_stop,
-                          current_shares=position.quantity if position else 0)
+                          current_shares=position.quantity if position else 0,
+                          cap_pct=exposure_basis["cap_pct"], exposure_basis=exposure_basis)
 
     valid_until, valid_until_limit = _validity(inputs.calendar, inputs.as_of)
     calendar_payload = {
@@ -205,7 +219,7 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
         stage, metrics, inputs.position, sizing, calendar_payload,
         plan_kind=plan_kind, lane=inputs.lane, sector_available=sector_available,
         previous_trail=_decimal(previous.get("trail")),
-        valid_until_date=valid_until.date().isoformat(), entry=entry,
+        valid_until_date=valid_until.date().isoformat(), entry=entry, holiday_basis=holiday_basis,
     )
 
     trading_date = date.fromisoformat(str(metrics["trading_date"]))
@@ -235,6 +249,8 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
         "stage_decision": {"stage": stage, "rule_id": decision["rule_id"], "reason": decision["reason"],
                            "lane": decision["lane"], "evidence": decision["evidence"]},
         "risk_per_trade_pct": float(inputs.risk_per_trade_pct),
+        # Where the per-name cap and the holiday cap came from (calibration cell, q99, samples, fallback).
+        "exposure_calibration": {"stage": exposure_basis, "holiday": holiday_basis},
     })
     if entry is not None:
         # lane_reference / last_close / entry_price and where each came from,

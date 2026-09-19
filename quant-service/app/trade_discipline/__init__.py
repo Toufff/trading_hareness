@@ -41,7 +41,6 @@ from .report import (
 )
 from .stage import InsufficientBars, classify_stage, daily_metrics, normalize_bars
 from .templates import (
-    TARGET_EXPOSURE_PCT,
     TEMPLATE_VERSION,
     build_lines,
     build_sizing,
@@ -54,7 +53,7 @@ __all__ = [
     "Derivation", "DisciplinePlan", "EVALUATOR_VERSION", "Evaluation", "EvaluationInputs",
     "FormulaError", "GENERATOR_VERSION", "GenerationInputs", "InsufficientBars", "Line", "LineState",
     "PositionRef", "QualityCheck", "RECONCILER_VERSION", "REPORT_VERSION", "Review", "Sizing",
-    "TARGET_EXPOSURE_PCT", "TEMPLATE_VERSION", "TradeRecord", "build_lines", "build_sizing",
+    "TEMPLATE_VERSION", "TradeRecord", "build_lines", "build_sizing",
     "classify_stage", "daily_metrics", "eval_expression", "evaluate", "evaluate_quality",
     "extra_conditions", "failed_checks", "generate", "hard_stop_price", "normalize_bars",
     "plan_payload", "quality_passed", "reconcile", "render_markdown", "report_paths",

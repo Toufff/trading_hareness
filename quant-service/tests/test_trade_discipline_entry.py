@@ -90,7 +90,8 @@ class RealPoolEntryPriceTests(unittest.TestCase):
             metrics = generate(real_inputs(symbol, name, lane, reference, support)).metrics
             old_stop, _ = hard_stop_price("breakout_hold", metrics, Decimal(reference))
             old = build_sizing(stage="breakout_hold", equity=EQUITY, risk_per_trade_pct=Decimal("1.0"),
-                               reference_price=Decimal(reference), hard_stop=old_stop, current_shares=0)
+                               reference_price=Decimal(reference), hard_stop=old_stop, current_shares=0,
+                               cap_pct=25)
             real_distance = close - float(old_stop)
             worst_distance_pct = max(worst_distance_pct, real_distance / close * 100)
             worst_risk_pct = max(worst_risk_pct, old.max_shares * real_distance / float(EQUITY) * 100)

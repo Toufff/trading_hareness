@@ -27,6 +27,8 @@ from app.trade_discipline.evaluator import (
 )
 from app.trade_discipline.generator import CalendarInfo, generate
 from test_trade_discipline_core import (
+    calibrated,
+    synthetic_calibration,
     STAGE_CLOSES,
     UPCOMING,
     bar,
@@ -316,21 +318,22 @@ class TimeLineTests(unittest.TestCase):
         self.assertIsNone(state_of(blind, "time_stop").evidence["due"])
 
     def test_the_holiday_line_is_due_before_the_close_of_the_last_session(self):
-        plan = plan_fixture(calendar=HOLIDAY_CALENDAR)
+        with calibrated(synthetic_calibration(stage_cap=25, holiday_cap=10)):
+            plan = plan_fixture(calendar=HOLIDAY_CALENDAR)
         self.assertEqual(plan.lines_of("holiday")[0].execute_at, "2026-09-30_before_close")
         args = {"bars": shenqi_bars(), "calendar": HOLIDAY_CALENDAR}
         early = evaluate(plan, inputs(as_of=datetime(2026, 9, 30, 13, 0, tzinfo=SH), **args))
         due = evaluate(plan, inputs(as_of=datetime(2026, 9, 30, 14, 55, tzinfo=SH), **args))
         self.assertEqual(state_of(early, "holiday").state, "armed")
         self.assertEqual(state_of(due, "holiday").state, "triggered")
-        # crash_rebound keeps half its target (10% = 1100 shares) over a long
-        # closure, so the holiday cut is a reduction, not an exit
+        # a 10% holiday cap (1100 shares) over a long closure is a reduction, not an exit
         self.assertEqual(state_of(due, "holiday").evidence["execute_at"], "2026-09-30_before_close")
         self.assertEqual(plan.lines_of("holiday")[0].action.value, 1100)
         self.assertEqual(due.plan_state, "reduce_signalled")
 
     def test_a_broken_stage_holiday_cut_is_still_an_exit(self):
-        plan = generate(stage_inputs("broken", calendar=HOLIDAY_CALENDAR))
+        with calibrated(synthetic_calibration(stage_cap=25, holiday_cap=0)):
+            plan = generate(stage_inputs("broken", calendar=HOLIDAY_CALENDAR))
         self.assertEqual(plan.lines_of("holiday")[0].action.value, 0)
         due = evaluate(plan, inputs(as_of=datetime(2026, 9, 30, 14, 55, tzinfo=SH),
                                     bars=stage_bars("broken"), calendar=HOLIDAY_CALENDAR))

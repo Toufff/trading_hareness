@@ -25,7 +25,7 @@ from .contracts import ComplianceRecord, DisciplinePlan, Evaluation, FormulaErro
 from .generator import t1_locked_shares_for
 from .quality import CHECK_IDS, DERIVATION_TOLERANCE
 
-REPORT_VERSION = "trade-discipline-report-v4"
+REPORT_VERSION = "trade-discipline-report-v5"
 RESEARCH_NOTICE = "研究用途，仅作人工决策依据：系统不连券商、不下单、不改持仓。"
 DASH = "—"
 
@@ -266,7 +266,13 @@ def sizing_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
         {"key": "stop_distance", "label": "止损距离",
          "value": f"{_fmt(sizing.stop_distance)}（{_fmt(distance_pct)}%）"},
         {"key": "max_shares", "label": "风险上限 max_shares", "value": _fmt(sizing.max_shares)},
-        {"key": "target_exposure_pct", "label": "阶段仓位上限", "value": _pct(sizing.target_exposure_pct)},
+        {"key": "target_exposure_pct", "label": "阶段仓位上限（校准）", "value": _pct(sizing.target_exposure_pct)},
+        {"key": "cap_basis", "label": "上限依据",
+         "value": _cap_basis_text(sizing.exposure_basis) if sizing.exposure_basis else DASH},
+        {"key": "cap_shares", "label": "阶段上限股数", "value": _fmt(sizing.cap_shares)},
+        {"key": "binding_constraint", "label": "起约束的限制",
+         "value": {"risk": "风险上限（1%÷止损距离）", "cap": "阶段上限（极端亏损5%）"}.get(
+             sizing.binding_constraint or "", DASH)},
         {"key": "current_shares", "label": "当前持仓", "value": f"{_fmt(sizing.current_shares)} 股"},
         {"key": "sellable_quantity", "label": "当日可卖 sellable_quantity",
          "value": f"{_fmt(position.sellable_quantity)} 股" if position is not None else DASH},
@@ -301,6 +307,14 @@ def recommendation_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
              "note": str(conditions.get("note") or "研究条件，非系统线"),
              "decision_id": conditions.get("decision_id"), "as_of_date": conditions.get("as_of_date")}
             for key, label in labels if conditions.get(key)]
+
+
+def _cap_basis_text(basis: dict[str, Any]) -> str:
+    fallback = "，样本不足，按同板块全部阶段合并" if basis.get("fallback") else ""
+    return (f"{basis.get('stage')} × {basis.get('board_label') or basis.get('board')}：两日最大跌幅 99% 分位 "
+            f"{basis.get('q99_loss_pct')}%（{basis.get('samples')} 个样本{fallback}），"
+            f"上限 = {basis.get('tolerance_pct')}% ÷ {basis.get('q99_loss_pct')}% 向下取 5 的倍数 = {basis.get('cap_pct')}%；"
+            f"校准 {basis.get('calibration_version')}")
 
 
 def sizing_notes(plan: DisciplinePlan) -> list[str]:

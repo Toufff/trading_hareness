@@ -32,16 +32,11 @@ from typing import Any
 from ..short_term_lanes.risk import MIN_VOLATILITY_BUFFER_PCT, volatility_buffer_pct
 from .contracts import Action, Confirm, Derivation, Line, Sizing, eval_expression
 
-TEMPLATE_VERSION = "trade-discipline-templates-v4"
+TEMPLATE_VERSION = "trade-discipline-templates-v5"
 
-TARGET_EXPOSURE_PCT: dict[str, Decimal] = {
-    "crash_rebound": Decimal("20"), "broken": Decimal("0"), "breakout_hold": Decimal("25"),
-    "trend_hold": Decimal("30"), "pullback_hold": Decimal("30"), "base_platform": Decimal("20"),
-    "unclassified": Decimal("15"),
-}
-# Half of the stage target over a long closure; ``broken`` is flat anyway.
-# Derived, not copied, so the two tables cannot drift apart.
-HOLIDAY_EXPOSURE_PCT: dict[str, Decimal] = {stage: pct / Decimal("2") for stage, pct in TARGET_EXPOSURE_PCT.items()}
+# The per-name exposure cap is no longer a hand-picked stage table: it is read from the calibration
+# artifact (exposure_calibration.json, see exposure_calibration.py) for the plan's stage x board, and
+# the holiday cap from the same artifact's holiday cells.
 DEFAULT_RISK_PER_TRADE_PCT = Decimal("1.0")
 TIME_STOP_DAYS: dict[str, int] = {"crash_rebound": 3, "broken": 3}
 DEFAULT_TIME_STOP_DAYS = 5
@@ -284,9 +279,15 @@ def trail_stop_price(*, anchor_price: Decimal, floor_price: Decimal,
 
 
 def build_sizing(*, stage: str, equity: Decimal, risk_per_trade_pct: Decimal, reference_price: Decimal,
-                 hard_stop: Decimal, current_shares: int) -> Sizing:
-    """``max_shares = floor(equity x risk% / stop_distance / 100) x 100``, capped by the stage exposure."""
-    target_pct = TARGET_EXPOSURE_PCT.get(stage, TARGET_EXPOSURE_PCT["unclassified"])
+                 hard_stop: Decimal, current_shares: int, cap_pct: Decimal | int | float,
+                 exposure_basis: dict[str, Any] | None = None) -> Sizing:
+    """``recommended = min(risk-based max_shares, cap-based shares)``.
+
+    * risk: ``max_shares = floor(equity x risk% / stop_distance / 100) x 100`` (the 1% rule);
+    * cap: ``floor(equity x cap% / reference / 100) x 100`` where ``cap%`` is the calibrated
+      extreme-loss cap of the plan's stage x board (``exposure_basis`` says which cell).
+    """
+    target_pct = Decimal(str(cap_pct))
     stop_distance = reference_price - hard_stop
     risk_amount = (equity * risk_per_trade_pct / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     max_shares = int(floor(risk_amount / stop_distance / LOT_SIZE)) * LOT_SIZE
@@ -302,7 +303,23 @@ def build_sizing(*, stage: str, equity: Decimal, risk_per_trade_pct: Decimal, re
         current_exposure_pct=current_exposure_pct,
         recommended_shares=min(max_shares, exposure_shares),
         current_risk_pct=current_risk_pct,
+        cap_shares=exposure_shares, binding_constraint="risk" if max_shares <= exposure_shares else "cap",
+        exposure_basis=exposure_basis,
     )
+
+
+def exposure_text(sizing: Sizing) -> str:
+    """Both limits with their numbers and which one binds, in one sentence."""
+    basis = sizing.exposure_basis or {}
+    q99 = basis.get("q99_loss_pct")
+    board = basis.get("board_label") or basis.get("board") or "该板块"
+    cap_reason = (f"极端亏损{basis.get('tolerance_pct', 5):g}%÷该阶段{board}{basis.get('percentile', 99):g}%两日最大跌幅"
+                  f"{q99:.2f}%={sizing.target_exposure_pct}%" if q99 is not None else f"上限{sizing.target_exposure_pct}%")
+    if basis.get("fallback"):
+        cap_reason += "，样本不足，按同板块全部阶段合并"
+    risk = f"风险上限 {sizing.max_shares} 股（{sizing.risk_per_trade_pct}%÷止损距离）"
+    cap = f"阶段上限 {sizing.cap_shares} 股（{cap_reason}）"
+    return f"{risk} / {cap}，取较小 {sizing.recommended_shares} 股"
 
 
 def closures_within(calendar: dict[str, Any], valid_until_date: str) -> list[dict[str, Any]]:
@@ -359,17 +376,19 @@ class TemplateResult:
 def build_lines(stage: str, metrics: dict[str, Any], position: dict[str, Any] | None, sizing: Sizing,
                 calendar: dict[str, Any], *, plan_kind: str = "holding", lane: dict[str, Any] | None = None,
                 sector_available: bool = False, previous_trail: Decimal | None = None,
-                valid_until_date: str = "", entry: dict[str, Any] | None = None) -> list[Line]:
+                valid_until_date: str = "", entry: dict[str, Any] | None = None,
+                holiday_basis: dict[str, Any] | None = None) -> list[Line]:
     """The lines only; ``build_template`` also returns the omissions."""
     return build_template(stage, metrics, position, sizing, calendar, plan_kind=plan_kind, lane=lane,
                           sector_available=sector_available, previous_trail=previous_trail,
-                          valid_until_date=valid_until_date, entry=entry).lines
+                          valid_until_date=valid_until_date, entry=entry, holiday_basis=holiday_basis).lines
 
 
 def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any] | None, sizing: Sizing,
                    calendar: dict[str, Any], *, plan_kind: str = "holding", lane: dict[str, Any] | None = None,
                    sector_available: bool = False, previous_trail: Decimal | None = None,
-                   valid_until_date: str = "", entry: dict[str, Any] | None = None) -> TemplateResult:
+                   valid_until_date: str = "", entry: dict[str, Any] | None = None,
+                   holiday_basis: dict[str, Any] | None = None) -> TemplateResult:
     lines: list[Line] = []
     omitted: list[dict[str, Any]] = []
     reference = sizing.reference_price
@@ -377,18 +396,22 @@ def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any]
     equity = sizing.equity
     lane = lane or {}
 
-    if sizing.current_exposure_pct > sizing.target_exposure_pct:
+    if sizing.current_shares > sizing.recommended_shares:
         lines.append(Line(
             kind="exposure",
-            label=(f"仓位超出{stage}阶段上限{sizing.target_exposure_pct}%（当前{sizing.current_exposure_pct}%），"
-                   f"下一交易日开盘15分钟内减到{sizing.recommended_shares}股"),
+            label=(f"当前 {sizing.current_shares} 股超出上限：{exposure_text(sizing)}；"
+                   f"下一交易日开盘15分钟内减到{sizing.recommended_shares}股")[:200],
             metric=None, op=None, price=None, execute_by="time", execute_at="next_open+15m",
             action=Action(type="reduce_to_shares", value=sizing.recommended_shares),
             derivation=Derivation(
                 rule_id=f"exposure.{stage}",
                 inputs={"equity": float(equity), "reference_price": float(reference),
                         "target_exposure_pct": float(sizing.target_exposure_pct),
-                        "max_shares": sizing.max_shares, "current_shares": sizing.current_shares},
+                        "max_shares": sizing.max_shares, "current_shares": sizing.current_shares,
+                        "cap_shares": sizing.cap_shares, "binding_constraint": sizing.binding_constraint,
+                        "cap_q99_loss_pct": (sizing.exposure_basis or {}).get("q99_loss_pct"),
+                        "cap_samples": (sizing.exposure_basis or {}).get("samples"),
+                        "cap_cell": (sizing.exposure_basis or {}).get("cell")},
                 formula="min(max_shares, floor(equity * target_exposure_pct / 100 / reference_price / 100) * 100)"),
             priority=PRIORITY["exposure"]))
 
@@ -538,13 +561,26 @@ def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any]
                 "inputs": {"closed_days": gap["closed_days"], "last_trading_date": gap["last_trading_date"],
                            "resume_date": gap.get("resume_date"), "threshold_days": HOLIDAY_CLOSURE_DAYS},
             })
+    elif holiday_basis is None or Decimal(str(holiday_basis["cap_pct"])) >= sizing.target_exposure_pct:
+        # The calibrated holiday cap is not tighter than the stage cap: a line would ask for nothing.
+        holiday_cap = None if holiday_basis is None else holiday_basis["cap_pct"]
+        omitted.append({
+            "kind": "holiday",
+            "reason": (f"{closure['last_trading_date']} 起休市 {closure['closed_days']} 个自然日，但休市上限"
+                       f"{'' if holiday_cap is None else f' {holiday_cap}%'}不低于阶段上限 {sizing.target_exposure_pct}%"
+                       f"（{'无休市校准' if holiday_basis is None else '复开后两日99%跌幅 ' + format(holiday_basis['q99_loss_pct'], '.2f') + '%'}），不生成"),
+            "inputs": {"closed_days": closure["closed_days"], "last_trading_date": closure["last_trading_date"],
+                       "holiday_cap_pct": holiday_cap, "stage_cap_pct": float(sizing.target_exposure_pct),
+                       "holiday_basis": holiday_basis},
+        })
     else:
-        holiday_pct = HOLIDAY_EXPOSURE_PCT.get(stage, HOLIDAY_EXPOSURE_PCT["unclassified"])
+        holiday_pct = Decimal(str(holiday_basis["cap_pct"]))
         holiday_shares = min(sizing.current_shares, lot_shares(equity, holiday_pct, reference))
         lines.append(Line(
             kind="holiday",
             label=(f"{closure['last_trading_date']} 起休市{closure['closed_days']}个自然日，"
-                   f"该日收盘前把仓位降到{holiday_pct}%（{holiday_shares}股）"),
+                   f"该日收盘前把仓位降到{holiday_pct}%（{holiday_shares}股；休市后两日99%跌幅"
+                   f"{holiday_basis['q99_loss_pct']:.2f}%）"),
             metric=None, op=None, price=None, execute_by="time",
             execute_at=f"{closure['last_trading_date']}_before_close",
             action=Action(type="reduce_to_shares", value=holiday_shares),
@@ -552,7 +588,9 @@ def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any]
                 rule_id=f"holiday.{stage}",
                 inputs={"equity": float(equity), "reference_price": float(reference),
                         "holiday_exposure_pct": float(holiday_pct), "closed_days": closure["closed_days"],
-                        "current_shares": sizing.current_shares},
+                        "current_shares": sizing.current_shares,
+                        "holiday_q99_loss_pct": holiday_basis["q99_loss_pct"],
+                        "holiday_samples": holiday_basis["samples"], "holiday_cell": holiday_basis["cell"]},
                 formula="min(current_shares, floor(equity * holiday_exposure_pct / 100 / reference_price / 100) * 100)"),
             priority=PRIORITY["holiday"]))
 
@@ -680,12 +718,12 @@ def _new_buy_lines(stage: str, metrics: dict[str, Any], sizing: Sizing, lane: di
 __all__ = [
     "ANCHOR_TEXT", "ATR_MAX_MULTIPLE", "CHASE_CAP_ATR_MULTIPLE", "ATR_MIN_MULTIPLE", "ATR_TARGET_MULTIPLE", "CONFIRM_REFERENCE",
     "CRASH_FALLBACK_LABEL", "DEFAULT_RISK_PER_TRADE_PCT", "DEFAULT_TIME_STOP_DAYS", "EXTRA_CONDITION_TEXT",
-    "HARD_STOP_TERMS", "HOLIDAY_CLOSURE_DAYS", "HOLIDAY_EXPOSURE_PCT", "LOT_SIZE",
+    "HARD_STOP_TERMS", "HOLIDAY_CLOSURE_DAYS", "LOT_SIZE",
     "MIN_BUFFER_PCT", "NO_ADD_REFERENCE", "PRIORITY", "SOFT_STOP_SEPARATION_ATR", "STAGE_STRUCTURE_NAME",
     "STOP_PCT_MAX", "STOP_PCT_MIN", "STOP_PCT_TARGET", "STRUCTURE_RULE", "TAKE_PARTIAL_STAGES",
-    "TARGET_EXPOSURE_PCT", "TEMPLATE_VERSION", "TIME_STOP_DAYS", "TRAIL_ARM_ATR_MULTIPLE", "TWO_DAY_LOW_RULE",
+    "TEMPLATE_VERSION", "TIME_STOP_DAYS", "TRAIL_ARM_ATR_MULTIPLE", "TWO_DAY_LOW_RULE",
     "TRIGGER_STOP_GAP_ATR", "TemplateResult", "WEEKEND_CLOSURE_DAYS", "WIDENING_TERM_TEXT",
-    "buffer_pct", "build_lines", "build_sizing", "build_template", "closure_within", "closures_within",
+    "buffer_pct", "build_lines", "build_sizing", "build_template", "closure_within", "closures_within", "exposure_text",
     "hard_stop_note", "hard_stop_price", "is_ordinary_weekend", "lot_shares", "new_buy_entry", "new_buy_reference",
     "soft_stop_window", "stop_beyond_band", "stop_distance_terms", "structure_text", "trail_stop_price",
 ]
