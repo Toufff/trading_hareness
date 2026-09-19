@@ -24,6 +24,7 @@ import { shouldRedownloadRetryMedia } from './retry-media.mjs';
 import { parsePaperIngestIds } from './paper-ingest-command.mjs';
 import { parsePaperFeedback } from './paper-feedback-command.mjs';
 import { personalDecisionResearchPaths } from './personal-decision-routes.mjs';
+import { disciplineResearchPaths, resolveDisciplinePlanPath } from './discipline-routes.mjs';
 import { createOperatorAuth, isMutatingApiRoute, isSameOriginRequest, resolveOperatorAuthConfig } from './dashboard-auth.mjs';
 import { createOauthStateStore } from './oauth-state.mjs';
 import { createStockWorkbenchControl, stockWorkbenchControlVocabulary } from './stock-workbench-control.mjs';
@@ -1258,6 +1259,7 @@ const researchPaths = new Map([
 	['/api/research/paper/status', '/api/v1/paper/status'],
 	['/api/research/agent-paper/status', '/api/v1/agent-paper/status'],
 	...personalDecisionResearchPaths,
+	...disciplineResearchPaths,
 	['/api/research/strategy/contracts', '/api/v1/strategy/contracts'],
 	['/api/research/strategy/funnel', '/api/v1/strategy/funnel'],
 	['/api/research/intraday/services/status', '/api/v1/intraday/services/status'],
@@ -1369,6 +1371,11 @@ const dashboard = createServer((request, response) => {
 	const researchPath = researchPaths.get(url.pathname);
 	if (researchPath && request.method === 'GET') {
 		void proxyResearch(researchPath, url.search, response).catch(routeErrorHandler(response, 503));
+		return;
+	}
+	const disciplinePlanPath = resolveDisciplinePlanPath(request.method, url.pathname);
+	if (disciplinePlanPath) {
+		void proxyResearch(disciplinePlanPath, url.search, response).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	const researchAction = researchActions.get(url.pathname);
