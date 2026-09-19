@@ -6,6 +6,7 @@ import ResearchOnlyBadge from '../components/ResearchOnlyBadge.vue';
 import StockResearchWorkbench from '../components/StockResearchWorkbench.vue';
 import EventResearchLive from '../components/EventResearchLive.vue';
 import RecommendationPoolPanel from '../components/RecommendationPoolPanel.vue';
+import DisciplineBoard from '../components/discipline/DisciplineBoard.vue';
 
 const props = withDefaults(defineProps<{ mode?: 'market' | 'holdings' }>(), { mode: 'market' });
 const isMarketView = computed(() => props.mode === 'market');
@@ -146,6 +147,9 @@ function compactMoney(value: unknown): string {
         <div class="status-tile"><span>账户持仓</span><el-tag :type="workspace.brief.delivery.holding_actions_eligible ? 'success' : 'danger'">{{ workspace.brief.delivery.holding_actions_eligible ? '当前且可用' : '同步不可用' }}</el-tag></div>
         <div class="status-tile"><span>精确读取时间</span><strong>{{ displayValue(workspace.brief.holdings.portfolio_observed_at) }}</strong></div>
       </div>
+
+      <!-- 持仓页主区块：先今日动作汇总，再每只股票的纪律卡；下面的账户持仓建议为旧版文本计划。 -->
+      <DisciplineBoard v-if="isHoldingsView" class="section-gap" :account-key="workspace.accountKey" :snapshot-observed-at="workspace.brief.holdings.portfolio_observed_at ?? null" />
 
       <!-- 选股优先：正式重点在最前，扫描候选紧随其后；盘面与消息只作背景，折叠在页面底部。 -->
       <RecommendationPoolPanel v-if="isMarketView" :value="workspace.formalRecommendation" />

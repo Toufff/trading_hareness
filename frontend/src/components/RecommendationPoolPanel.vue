@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import DisciplinePoolCard from './discipline/DisciplinePoolCard.vue';
 type Pick = { symbol: string; name: string; priority: number; stage: string; why_now: string; comparison: string; trigger: string; invalidation: string; company_risk: string; recommendation_note?: Note; ranking_reference?: RankingReference };
 type SectorProxy = { kind: string; symbol?: string; name?: string; url?: string; published_date?: string };
 type SectorView = { assessment: string; trend: string; volume_price: string; proxy: SectorProxy };
@@ -55,6 +56,7 @@ const download = () => {
         <p>{{ p.why_now }}</p><p><strong>为什么优先：</strong>{{ p.comparison }}</p>
         <p><strong>观察触发：</strong>{{ p.trigger }}</p><p><strong>取消条件：</strong>{{ p.invalidation }}</p>
         <details><summary>公司风险</summary><p>{{ p.company_risk }}</p></details>
+        <DisciplinePoolCard :symbol="p.symbol" :name="p.name" />
         <details v-if="p.recommendation_note && p.ranking_reference"><summary>推荐说明</summary>
           <p><strong>系统排名：</strong>{{ p.ranking_reference.lane_rankings.map(r => `${r.lane} 第${r.rank}/${r.population}`).join('；') || '本轮九策略均未入选' }}<template v-if="p.ranking_reference.sector_position">；{{ p.ranking_reference.sector_label }} 候选第{{ p.ranking_reference.sector_position }}/{{ p.ranking_reference.sector_candidates }}</template></p>
           <p v-if="p.ranking_reference.outranked_count"><strong>同板块有 {{ p.ranking_reference.outranked_count }} 只候选排在它前面。</strong></p>

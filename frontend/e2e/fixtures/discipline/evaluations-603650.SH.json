@@ -1,0 +1,65 @@
+{
+ "plan_id": "566cbd33-e4cc-5fae-861e-469fc13b9bea",
+ "count": 0,
+ "evaluations": [],
+ "lines": [
+  {
+   "index": 0,
+   "kind": "hard_stop",
+   "label": "日线收盘跌破70.37即全部退出（突破段，结构点突破平台72.25下方半个百分点71.88距离不足最小止损距离，按 0.9×ATR14 向下加宽）",
+   "basis": "daily",
+   "states": []
+  },
+  {
+   "index": 1,
+   "kind": "hard_stop",
+   "label": "盘中版：连续3根分钟收盘低于70.37即全部退出",
+   "basis": "minute",
+   "states": []
+  },
+  {
+   "index": 2,
+   "kind": "take_partial",
+   "label": "当日成交量为20日最大量且收在振幅下半且最新价跌破当日VWAP、且最新价低于73.55时，减半仓",
+   "basis": "minute",
+   "states": []
+  },
+  {
+   "index": 3,
+   "kind": "trail",
+   "label": "日线收盘站上77.08（入场参考价 + 1×ATR14）后，把止损上移到入场参考价73.55，只上移不下移",
+   "basis": "daily",
+   "states": []
+  },
+  {
+   "index": 4,
+   "kind": "time_stop",
+   "label": "5个交易日内收盘仍未站回确认线72.25（PRIOR_HIGH）则退出",
+   "basis": "daily",
+   "states": []
+  },
+  {
+   "index": 5,
+   "kind": "cancel",
+   "label": "日线收盘放量跌破63.25则本计划作废",
+   "basis": "daily",
+   "states": []
+  },
+  {
+   "index": 6,
+   "kind": "trigger",
+   "label": "日线收盘站上69.31（结构确认）且成交额不低于前一日且行业当日不走弱且不高于追高上限75.31，最多买到300股；高于75.31为追高，不买",
+   "basis": "daily",
+   "states": []
+  },
+  {
+   "index": 7,
+   "kind": "chase_cap",
+   "label": "日线收盘高于75.31（入场参考73.55 + 0.5×ATR14）即已越过追高上限，不买",
+   "basis": "daily",
+   "states": []
+  }
+ ],
+ "transitions": [],
+ "plan_state_changes": []
+}

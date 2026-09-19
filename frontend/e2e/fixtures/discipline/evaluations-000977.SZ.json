@@ -1,0 +1,47 @@
+{
+ "plan_id": "e4e0032d-dda0-47de-8c31-484700043f05",
+ "plan_status": "active",
+ "count": 0,
+ "evaluations": [],
+ "lines": [
+  {
+   "index": 0,
+   "kind": "exposure",
+   "label": "仓位超出broken阶段上限0%（当前21.78%），下一交易日开盘15分钟内减到0股",
+   "basis": "daily",
+   "states": []
+  },
+  {
+   "index": 1,
+   "kind": "hard_stop",
+   "label": "日线收盘跌破68.99即全部退出（破位段，结构点当日与昨日真实低点的较低者69.52距离不足最小止损距离，按 0.9×ATR14 向下加宽）",
+   "basis": "daily",
+   "states": []
+  },
+  {
+   "index": 2,
+   "kind": "hard_stop",
+   "label": "盘中版：连续3根分钟收盘低于68.99即全部退出",
+   "basis": "minute",
+   "states": []
+  },
+  {
+   "index": 3,
+   "kind": "no_add",
+   "label": "日线收盘站回70.08（MA5）之前禁止加仓",
+   "basis": "daily",
+   "states": []
+  },
+  {
+   "index": 4,
+   "kind": "time_stop",
+   "label": "3个交易日内收盘仍未站回确认线70.98（MA10）则退出",
+   "basis": "daily",
+   "states": []
+  }
+ ],
+ "transitions": [],
+ "plan_state_changes": [],
+ "live_orders": false,
+ "boundary": "research_only_human_decision_support"
+}

@@ -62,8 +62,12 @@ describe('PersonalDecisionView', () => {
     expect(wrapper.text()).toContain('我的持仓');
     expect(wrapper.text()).toContain('账户持仓建议');
     expect(wrapper.text()).not.toContain('全市场扫描观察');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]?.[0]).toContain('/api/research/personal/holding-advice/latest');
+    // Besides the holding advice, only the read-only discipline board is loaded - no market or scan endpoint.
+    const urls = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(urls.filter((url) => !url.startsWith('/api/research/discipline/'))).toEqual([
+      expect.stringContaining('/api/research/personal/holding-advice/latest')]);
+    expect(urls.some((url) => url.startsWith('/api/research/discipline/plans/latest?account_key=citics-primary'))).toBe(true);
+    expect(wrapper.find('[data-testid=discipline-board]').exists()).toBe(true);
   });
 
   it('explains that stale holdings require a user-initiated sync and shows observed_at', async () => {
