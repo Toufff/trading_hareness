@@ -5,10 +5,10 @@
  "items": [
   {
    "account_key": "citics-primary",
-   "as_of_at": "2026-09-19T19:26:40.551433+08:00",
+   "as_of_at": "2026-09-19T19:46:18.416612+08:00",
    "contract_version": "trade-discipline-v1",
    "evidence_refs": [
-    "run:914040e8-fe51-45af-a56c-ab74d27f1652",
+    "run:c2069ad4-ecb9-473f-9808-a57fcbac220b",
     "bars:60:2026-09-18",
     "sector:longhu_ths_industry:881117",
     "lane_run:fbb9b2f9-d24c-4d0b-b2c6-8e97d0c54ccb",
@@ -17,7 +17,7 @@
     "broker_snapshot_key:7a4f6eeb243acdfdcef1b236f4afa255342a543f030a4f1812e3ddf4ad8b0393"
    ],
    "generator_version": "trade-discipline-generator-v3",
-   "inputs_hash": "1bc29f94d8d4ede8f2fd3045d34d275b4d8bb5335f255c1673f37256748192d1",
+   "inputs_hash": "27f57de692064235d8ee74b988d5ab0d1ace71d31b31e5eb39b38ed693975f11",
    "lines": [
     {
      "action": {
@@ -245,16 +245,19 @@
      "derivation": {
       "action_formula": "",
       "action_inputs": {},
-      "formula": "reference",
+      "formula": "max(lane_reference, hard_stop + stop_gap_atr * atr14)",
       "inputs": {
        "atr14": 2.4307142857142865,
+       "binding_term": "stop_gap",
        "chase_atr_multiple": 0.5,
        "entry_price": 41.52,
+       "hard_stop": 38.46,
        "lane_reference": 37.94,
        "last_close": 41.52,
        "price_cap": 42.74,
-       "reference": 37.94,
-       "source": "lane.reference"
+       "source": "lane.reference",
+       "stop_gap_atr": 0.5,
+       "stop_gap_floor": 39.675357142857145
       },
       "rule_id": "trigger.breakout_hold"
      },
@@ -265,11 +268,11 @@
       "sector_not_weak"
      ],
      "kind": "trigger",
-     "label": "日线收盘站上37.94（结构确认）且成交额不低于前一日且行业当日不走弱且不高于追高上限42.74，最多买到300股；高于42.74为追高，不买",
+     "label": "日线收盘在39.68–42.74之间且成交额不低于前一日且行业当日不走弱，最多买到300股（下沿=硬止损38.46 + 0.5×ATR14，高于 lane 结构参考37.94；高于42.74为追高，不买）",
      "metric": "daily_close",
      "op": ">=",
      "pct": null,
-     "price": "37.94",
+     "price": "39.68",
      "priority": 9,
      "trading_days": null
     },
@@ -452,7 +455,7 @@
     "volume": 681492.0
    },
    "name": "冰轮环境",
-   "plan_key": "citics-primary:000811.SZ:2026-09-18:new_buy:1bc29f94d8d4",
+   "plan_key": "citics-primary:000811.SZ:2026-09-18:new_buy:27f57de69206",
    "plan_kind": "new_buy",
    "position": null,
    "quality": [
@@ -537,12 +540,17 @@
      "passed": true
     },
     {
+     "check_id": "buy_zone_valid",
+     "detail": "买入区间 [39.68, 42.74]，硬止损 38.46",
+     "passed": true
+    },
+    {
      "check_id": "entry_reference_current",
      "detail": "入场参考价 41.52 = max(lane 参考 37.94, 2026-09-18 收盘 41.52)，仓位与止损均按它计算",
      "passed": true
     }
    ],
-   "run_id": "914040e8-fe51-45af-a56c-ab74d27f1652",
+   "run_id": "c2069ad4-ecb9-473f-9808-a57fcbac220b",
    "sizing": {
     "current_exposure_pct": "0.00",
     "current_risk_pct": "0.00",
@@ -565,15 +573,15 @@
    "template_version": "trade-discipline-templates-v4",
    "trading_date": "2026-09-18",
    "valid_until": "2026-09-28T15:00:00+08:00",
-   "plan_id": "23b30b43-af7f-55ee-9717-1238cc1eed56",
+   "plan_id": "c198e29f-4894-52f5-9c72-b6728a83e871",
    "content_hash": "dry-run",
-   "created_at": "2026-09-19T19:26:40.551433+08:00"
+   "created_at": "2026-09-19T19:46:18.416612+08:00"
   }
  ],
  "ladder": [
   {
-   "plan_id": "23b30b43-af7f-55ee-9717-1238cc1eed56",
-   "plan_key": "citics-primary:000811.SZ:2026-09-18:new_buy:1bc29f94d8d4",
+   "plan_id": "c198e29f-4894-52f5-9c72-b6728a83e871",
+   "plan_key": "citics-primary:000811.SZ:2026-09-18:new_buy:27f57de69206",
    "status": "active",
    "plan_kind": "new_buy",
    "trading_date": "2026-09-18",

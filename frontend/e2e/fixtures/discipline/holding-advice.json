@@ -1,6 +1,6 @@
 {
  "contract_version": "holding-advice-v1",
- "as_of_at": "2026-09-19T11:27:34.030349+00:00",
+ "as_of_at": "2026-09-19T11:46:46.541345+00:00",
  "status": "blocked",
  "portfolio_observed_at": "2026-09-18T15:10:04.575229+08:00",
  "reference_trade_date": "2026-09-18",
@@ -8,7 +8,7 @@
  "sync_mode": "manual",
  "subsequent_trades": "unknown",
  "freshness_status": "current",
- "age_seconds": 101849,
+ "age_seconds": 103001,
  "actions": [],
  "delivery": {
   "eligible": false

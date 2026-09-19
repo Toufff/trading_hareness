@@ -28,6 +28,12 @@ export const KIND_LABEL: Record<string, string> = {
 export const LINE_STATE_LABEL: Record<string, string> = {
   armed: '等待', triggered: '已触发', expired: '已失效', cancelled: '已失效', capped: '已越过追高上限，不买',
 };
+/** The extra conditions of a buy trigger, worded as the generator words them. */
+export const EXTRA_TEXT: Record<string, string> = {
+  amount_ge_prev_day: '成交额不低于前一日', sector_not_weak: '行业当日不走弱', sector_change_negative: '行业当日翻绿',
+  volume_expand_1_5x: '放量至前5日均量1.5倍', volume_contract_0_7x: '缩量至前5日均量0.7倍以下', below_vwap: '最新价跌破当日VWAP',
+  after_volume_climax: '当日成交量为20日最大量且收在振幅下半',
+};
 export const VERDICT_LABEL: Record<string, string> = {
   followed: '遵守', early: '提前动手', late: '迟于纪律', missed: '该做未做', against_plan: '违反纪律', unplanned: '计划外',
 };
@@ -39,7 +45,7 @@ export const CHECK_LABEL: Record<string, string> = {
   every_line_has_derivation: '每条线都能从 inputs 复算', exposure_line_when_over_cap: '超仓时必须有减仓线',
   holiday_line_when_closure: '长休市前必须有休市线', no_add_when_crash_or_broken: '急跌/破位必须禁加仓',
   sizing_consistent: '仓位公式可复算且不超上限', not_lowered_vs_previous: '硬止损不低于前序计划',
-  valid_until_within_5_trading_days: '有效期不超过 5 个交易日', entry_reference_current: '新买入场价取计划日收盘或更晚',
+  valid_until_within_5_trading_days: '有效期不超过 5 个交易日', entry_reference_current: '新买入场价取计划日收盘或更晚', buy_zone_valid: '买入区间有效（硬止损 < 触发下沿 ≤ 追高上限）',
 };
 
 /** Visual family of a line on the chart (colour / dash follow the spec's legend). */
@@ -148,7 +154,7 @@ export function lineTag(line: PriceLine | MergedLine): string {
   const names = kinds.map((kind) => KIND_LABEL[kind] ?? kind).join(' / ');
   const tail: Record<string, string> = {
     hard_stop: '收盘跌破全部退出', soft_stop: '收盘跌破减半', trail: '站上后止损上移', take_partial: '天量滞涨减半',
-    time_stop: '限期站回', no_add: '站回前不加仓', trigger: '收盘站上可买', chase_cap: '高于不买', cancel: '放量跌破作废',
+    time_stop: '限期站回', no_add: '站回前不加仓', trigger: '可买区间下沿', chase_cap: '高于不买', cancel: '放量跌破作废',
   };
   const note = kinds.map((kind) => tail[kind]).filter(Boolean)[0];
   return note ? `${names} ${priceText} · ${note}` : `${names} ${priceText}`;
@@ -335,12 +341,14 @@ export function todayAction(plan: DisciplinePlan, evaluations?: EvaluationsRespo
       return { headline: '已越过追高上限，不买', short: '追高不买', timing: '—', tone: 'warning', relatedKinds: ['trigger', 'chase_cap'] };
     }
     const shares = num(trigger?.action.value) ?? plan.sizing?.recommended_shares ?? 0;
-    const capText = cap ? `、不高于 ${price2(cap.price)} ` : ' ';
+    const zone = cap ? `收盘在 ${price2(trigger?.price)}–${price2(cap.price)} 之间` : `收盘站上 ${price2(trigger?.price)}`;
+    const extras = (trigger?.extra ?? []).map((name) => EXTRA_TEXT[name] ?? name);
+    const conditions = extras.length ? `且${extras.join('且')}` : '';
     if (triggerIndex >= 0 && states.get(triggerIndex) === 'triggered') {
       return { headline: `已触发：最多买 ${shares} 股（价格不高于 ${price2(cap?.price)}）`, short: `可买${shares}股`,
         timing: '触发后下一交易日', tone: 'success', relatedKinds: ['trigger', 'chase_cap', 'hard_stop'] };
     }
-    return { headline: `等待触发：收盘站上 ${price2(trigger?.price)}${capText}时最多买 ${shares} 股`, short: '等待触发',
+    return { headline: `等待触发：${zone}${conditions}，最多买 ${shares} 股`, short: '等待触发',
       timing: '日线收盘确认', tone: 'info', relatedKinds: ['trigger', 'chase_cap', 'cancel', 'hard_stop'] };
   }
   const exposure = plan.lines.find((line) => line.kind === 'exposure');

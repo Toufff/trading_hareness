@@ -38,7 +38,7 @@ describe('daily discipline option', () => {
   });
 
   it('shades the closure, marks low20 on its bar and the real fills as B/S', () => {
-    const option = buildDailyOption({ ...base, trades: reconciliations.trades as unknown as TradeFill[],
+    const option = buildDailyOption({ ...base, trades: (reconciliations.trades as unknown as TradeFill[]).filter((trade) => trade.symbol === '600613.SH'),
       deadline: { date: '2026-09-23', label: 'T+3 收盘未站回 8.69 → 退出' } });
     const candle = seriesOf(option)[0]!;
     expect(candle.type).toBe('candlestick');
@@ -47,7 +47,18 @@ describe('daily discipline option', () => {
     expect(JSON.stringify(candle.markArea!.data)).toContain('休市');
     const points = candle.markPoint!.data;
     expect(points.find((point) => point.name === 'low20 7.92')!.coord).toEqual(['2026-09-14', 7.92]);
-    expect(points.filter((point) => point.name.startsWith('买 ')).length).toBeGreaterThan(0);
+    // the four real buys of 09-18 are ONE marker under the candle, not four circles stacked on the body
+    const fills = points.filter((point) => (point as { markerKind?: string }).markerKind === 'fill');
+    const buys0918 = fills.filter((point) => point.coord?.[0] === '2026-09-18');
+    expect(buys0918).toHaveLength(1);
+    const marker = buys0918[0] as unknown as { name: string; coord: [string, number]; label: { formatter: string }; detail: string };
+    expect(marker.label.formatter).toBe('B×4');
+    expect(marker.coord[1]).toBe(8.12);                                  // the 09-18 low: outside the candle body
+    expect(marker.name).toBe('买入 4 笔 5800 股（尚未对账）');
+    expect(marker.detail.split(String.fromCharCode(10))).toHaveLength(5);
+    expect(marker.detail).toContain('09:49 买 1500 股 @ 8.37（尚未对账）');
+    // every marker explains itself
+    for (const point of points) expect(typeof (point as { detail?: unknown }).detail).toBe('string');
     expect(JSON.stringify(candle.markLine!.data)).toContain('T+3 收盘未站回 8.69 → 退出');
   });
 

@@ -82,6 +82,45 @@ export function lineSegments(input: Pick<DailyOptionInput, 'axis' | 'lines' | 'p
   return out;
 }
 
+const VERDICT_TEXT: Record<string, string> = {
+  followed: '遵守', early: '提前动手', late: '迟于纪律', missed: '该做未做', against_plan: '违反纪律', unplanned: '计划外',
+};
+
+/**
+ * Real fills as one B / S marker per session and side, placed just outside the candle (buys under the
+ * low, sells over the high) so several same-day fills never pile up into an unreadable ring on the body.
+ * The label says how many fills and shares; ``detail`` lists every fill with its reconciliation verdict.
+ */
+export function groupFills(trades: TradeFill[], bars: Map<string, ChartBar>) {
+  const groups = new Map<string, TradeFill[]>();
+  for (const trade of trades) {
+    if (!bars.has(trade.trade_date) || !Number.isFinite(Number(trade.price))) continue;
+    const key = `${trade.trade_date}|${trade.side === 'buy' ? 'buy' : 'sell'}`;
+    groups.set(key, [...(groups.get(key) ?? []), trade]);
+  }
+  return [...groups.entries()].map(([key, fills]) => {
+    const [day, side] = key.split('|') as [string, 'buy' | 'sell'];
+    const bar = bars.get(day)!;
+    const buy = side === 'buy';
+    const shares = fills.reduce((sum, fill) => sum + Number(fill.quantity), 0);
+    const verdicts = [...new Set(fills.flatMap((fill) => fill.verdicts.map((item) => VERDICT_TEXT[item.verdict] ?? item.verdict)))];
+    const text = `${buy ? 'B' : 'S'}${fills.length > 1 ? `×${fills.length}` : ''}`;
+    const detail = [
+      `${day} 真实${buy ? '买入' : '卖出'} ${fills.length} 笔，共 ${shares} 股`,
+      ...fills.map((fill) => `${String(fill.trade_time ?? '').slice(0, 5)} ${buy ? '买' : '卖'} ${Number(fill.quantity)} 股 @ ${Number(fill.price).toFixed(2)}`
+        + `（${fill.verdicts.map((item) => VERDICT_TEXT[item.verdict] ?? item.verdict).join('、') || '尚未对账'}）`),
+    ].join(String.fromCharCode(10));
+    return {
+      name: `${buy ? '买入' : '卖出'} ${fills.length} 笔 ${shares} 股（${verdicts.join('、') || '尚未对账'}）`,
+      coord: [day, buy ? bar.low : bar.high], symbol: 'triangle', symbolRotate: buy ? 0 : 180, symbolSize: 11,
+      symbolOffset: [0, buy ? 26 : -22], itemStyle: { color: buy ? '#dc2626' : '#15803d' },
+      label: { show: true, formatter: text, position: 'right', color: buy ? '#b91c1c' : '#166534',
+        fontSize: 11, fontWeight: 'bold', distance: 3, backgroundColor: 'rgba(255,255,255,0.85)', padding: [0, 2] },
+      markerKind: 'fill', detail,
+    };
+  });
+}
+
 export function buildDailyOption(input: DailyOptionInput): EChartsOption {
   const { chart, axis, layers } = input;
   const bars = new Map(chart.bars.map((bar) => [bar.date, bar]));
@@ -152,12 +191,20 @@ export function buildDailyOption(input: DailyOptionInput): EChartsOption {
   }
 
   const markPoints: Array<unknown> = [];
-  for (const point of chart.structure_points) {
-    if (!point.date || !bars.has(point.date)) continue;
-    markPoints.push({ name: point.label, coord: [point.date, point.price], symbol: 'triangle', symbolSize: 9,
+  // Structure points on neighbouring bars (today's and yesterday's low) put their labels on opposite
+  // sides instead of printing over each other; the fill markers below take the space under the candle.
+  const located = chart.structure_points.filter((point) => point.date && bars.has(point.date))
+    .sort((a, b) => dates.indexOf(a.date!) - dates.indexOf(b.date!));
+  located.forEach((point, index) => {
+    const previous = located[index - 1];
+    const next = located[index + 1];
+    const near = (other: typeof point | undefined) => other !== undefined && Math.abs(dates.indexOf(other.date!) - dates.indexOf(point.date!)) <= 2;
+    const position = near(next) ? 'left' : near(previous) ? 'right' : 'bottom';
+    markPoints.push({ name: point.label, markerKind: 'structure', detail: `结构点 ${point.label}（${point.date}，来源 ${point.source}）`,
+      coord: [point.date, point.price], symbol: 'triangle', symbolSize: 9,
       symbolOffset: [0, 8], itemStyle: { color: '#475569' },
-      label: { show: true, formatter: point.label, position: 'bottom', color: '#334155', fontSize: 10, distance: 8 } });
-  }
+      label: { show: true, formatter: point.label, position, color: '#334155', fontSize: 10, distance: 8 } });
+  });
   if (layers.evaluations) {
     for (const item of input.transitions ?? []) {
       const day = item.date ?? item.trading_date;
@@ -166,7 +213,8 @@ export function buildDailyOption(input: DailyOptionInput): EChartsOption {
       if (!bar) continue;
       const up = item.kind === 'trigger' || item.kind === 'trail';
       markPoints.push({
-        name: `${KIND_LABEL[item.kind] ?? item.kind}${item.to === 'capped' ? '越过追高上限' : '触发'}`,
+        name: `${KIND_LABEL[item.kind] ?? item.kind}${item.to === 'capped' ? '越过追高上限' : '触发'}`, markerKind: 'evaluation',
+        detail: `${day} 评估：${KIND_LABEL[item.kind] ?? item.kind} ${item.from} → ${item.to}${item.trigger_price === null ? '' : `，确认价 ${fmt(item.trigger_price)}`}`,
         coord: [day, up ? bar.low : bar.high], symbol: up ? 'triangle' : 'pin', symbolRotate: up ? 0 : 180,
         symbolSize: 14, symbolOffset: [0, up ? 12 : -12], itemStyle: { color: up ? '#1a9e5a' : '#d93026' },
         label: { show: true, formatter: `${up ? '▲' : '▼'}${KIND_LABEL[item.kind] ?? item.kind}`, position: up ? 'bottom' : 'top', fontSize: 10,
@@ -175,19 +223,7 @@ export function buildDailyOption(input: DailyOptionInput): EChartsOption {
     }
   }
   if (layers.trades) {
-    for (const trade of input.trades ?? []) {
-      const price = Number(trade.price);
-      if (!dates.includes(trade.trade_date) || !Number.isFinite(price)) continue;
-      const buy = trade.side === 'buy';
-      const verdict = trade.verdicts.map((item) => item.verdict).join('、') || '未对账';
-      markPoints.push({
-        name: `${buy ? '买' : '卖'} ${trade.quantity} 股 @ ${price.toFixed(2)}（${verdict}）`,
-        coord: [trade.trade_date, price], symbol: 'circle', symbolSize: 16,
-        itemStyle: { color: buy ? '#dc2626' : '#15803d', borderColor: '#fff', borderWidth: 1 },
-        label: { show: true, formatter: buy ? 'B' : 'S', color: '#fff', fontSize: 10, fontWeight: 'bold' },
-        tradeRecordId: trade.record_id, verdict,
-      });
-    }
+    for (const group of groupFills(input.trades ?? [], bars)) markPoints.push(group);
   }
 
   const series: Array<Record<string, unknown>> = [
@@ -230,7 +266,8 @@ export function buildDailyOption(input: DailyOptionInput): EChartsOption {
       name: '止损阶梯', type: 'line', step: 'end', symbol: 'none', xAxisIndex: 0, yAxisIndex: 0, data: values,
       lineStyle: { width: 1.2, color: '#b91c1c', opacity: 0.45 }, itemStyle: { color: '#b91c1c' }, silent: true,
       markPoint: { data: lowered.map((step) => ({
-        name: `止损下移 ${fmt(step.previous_hard_stop)}→${fmt(step.hard_stop)}：${step.lowered_reason || '未记录理由'}`,
+        name: `止损下移 ${fmt(step.previous_hard_stop)}→${fmt(step.hard_stop)}：${step.lowered_reason || '未记录理由'}`, markerKind: 'ladder',
+        detail: `${step.trading_date} 硬止损下移 ${fmt(step.previous_hard_stop)} → ${fmt(step.hard_stop)}：${step.lowered_reason || '未记录理由'}`,
         coord: [step.trading_date, step.hard_stop], symbol: 'diamond', symbolSize: 11, itemStyle: { color: '#eab308' },
         label: { show: true, formatter: '下移', color: '#854d0e', fontSize: 10, position: 'bottom' } })) },
     });

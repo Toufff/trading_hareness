@@ -66,6 +66,8 @@ test('holdings page: action summary first, discipline card with lines on the K-l
   const chart = detail.getByTestId('discipline-chart');
   await expect(chart.locator('canvas').first()).toBeVisible();
   await expect(chart).toHaveAttribute('data-labels', /^[1-9]/);          // right-hand price tags were placed
+  // the fill markers explain themselves: legend entry here, per-fill detail on hover
+  await expect(detail.getByTestId('marker-legend')).toContainText('真实成交（×N 为当日笔数');
   const table = detail.getByTestId('discipline-line-table');
   await expect(table.locator('tr[data-kind="hard_stop"]').first()).toContainText('7.63');
   await expect(table.locator('tr[data-kind="time_stop"]')).toContainText('8.69');
@@ -125,7 +127,7 @@ test('recommendation pool: each pick expands its new-buy discipline card', async
   await pick.getByRole('button', { name: '纪律卡' }).click();
   const card = page.locator('[data-testid=pool-discipline-panel][data-symbol="000811.SZ"]').getByTestId('discipline-detail');
   await expect(card).toContainText('新买计划');
-  await expect(card.getByTestId('today-action')).toContainText('等待触发：收盘站上 37.94、不高于 42.74 时最多买 300 股');
+  await expect(card.getByTestId('today-action')).toContainText('等待触发：收盘在 39.68–42.74 之间且成交额不低于前一日且行业当日不走弱，最多买 300 股');
   await expect(card.getByTestId('discipline-line-table').locator('tr[data-kind="chase_cap"]')).toContainText('已越过追高上限，不买');
   await expect(card.getByTestId('sizing')).toContainText('41.52 = max(lane 结构参考 37.94，2026-09-18 收盘 41.52)');
   if (SHOTS) { await page.waitForTimeout(800); await page.screenshot({ path: `${SHOTS}/e2e-pool-new-buy.png` }); }

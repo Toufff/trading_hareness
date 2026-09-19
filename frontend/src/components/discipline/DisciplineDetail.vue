@@ -393,6 +393,33 @@ const chain = computed(() => [...(history.value?.items ?? [])].sort((a, b) => b.
             @hover-line="highlightKey = $event"
             @click-line="onChartClick"
           />
+          <ul
+            class="marker-legend"
+            data-testid="marker-legend"
+            aria-label="图例"
+          >
+            <li v-if="layers.trades && symbolTrades.length">
+              <i class="m-buy">▲B</i><i class="m-sell">▼S</i>真实成交（×N 为当日笔数，悬停看每笔价格、股数与对账结论）
+            </li>
+            <li v-if="chartData.structure_points.length">
+              <i class="m-struct">▲</i>结构点（如 low20）
+            </li>
+            <li v-if="layers.evaluations">
+              <i class="m-eval">▼▲</i>评估触发（线由等待→触发的那天）
+            </li>
+            <li v-if="layers.ladder">
+              <i class="m-ladder">◆</i>止损阶梯下移（附理由）
+            </li>
+            <li v-if="chartData.closures.length">
+              <i class="m-closed">▇</i>休市
+            </li>
+            <li v-if="deadline">
+              <i class="m-deadline">┆</i>时间止损截止日
+            </li>
+            <li v-if="buyBand">
+              <i class="m-band">▇</i>可买区间（触发下沿–追高上限）
+            </li>
+          </ul>
           <p class="basis-note">
             口径：{{ chartData.price_basis.note }}<template v-if="chartData.price_basis.corporate_actions.length">
               窗口内除权/除息日：{{ chartData.price_basis.corporate_actions.map((item) => item.date).join('、') }}（未复权显示）。
@@ -674,6 +701,10 @@ const chain = computed(() => [...(history.value?.items ?? [])].sort((a, b) => b.
 .minute-date { width: 140px; }
 .streak { font-size: 13px; color: var(--el-text-color-regular); }
 .streak.danger { color: #b91c1c; font-weight: 600; }
+.marker-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 4px 0 0; padding: 0; list-style: none; font-size: 12px; color: var(--el-text-color-regular); }
+.marker-legend i { margin-right: 3px; font-style: normal; font-weight: 700; }
+.m-buy { color: #dc2626; } .m-sell { color: #15803d; margin-left: 2px; } .m-struct { color: #475569; } .m-eval { color: #d93026; }
+.m-ladder { color: #eab308; } .m-closed { color: #cbd5e1; } .m-deadline { color: #8a94a6; } .m-band { color: #bfe8d1; }
 .basis-note { margin: 4px 0 0; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }
 .sizing-grid, .evidence { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 16px; margin: 0; }
 .sizing-grid .wide, .evidence div { grid-column: span 1; }

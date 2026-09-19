@@ -94,7 +94,7 @@ describe('today action wording', () => {
   });
   it('a new buy waits for its trigger under the chase cap', () => {
     const action = todayAction(plan('000811.SZ'), null, '2026-09-19');
-    expect(action.headline).toBe('等待触发：收盘站上 37.94、不高于 42.74 时最多买 300 股');
+    expect(action.headline).toBe('等待触发：收盘在 39.68–42.74 之间且成交额不低于前一日且行业当日不走弱，最多买 300 股');
     expect([...defaultVisibleKinds(plan('000811.SZ'), action)]).toEqual(expect.arrayContaining(['trigger', 'chase_cap', 'cancel', 'hard_stop']));
   });
   it('a capped trigger says do not buy', () => {

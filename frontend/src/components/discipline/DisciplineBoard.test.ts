@@ -121,7 +121,7 @@ describe('DisciplinePoolCard', () => {
     const panel = document.querySelector('[data-testid=pool-discipline-panel]')!;
     expect(panel).not.toBeNull();
     expect(panel.textContent).toContain('新买计划');
-    expect(panel.textContent).toContain('等待触发：收盘站上 37.94、不高于 42.74 时最多买 300 股');
+    expect(panel.textContent).toContain('等待触发：收盘在 39.68–42.74 之间且成交额不低于前一日且行业当日不走弱，最多买 300 股');
     expect(panel.textContent).toContain('追高上限');
     wrapper.unmount();
   });

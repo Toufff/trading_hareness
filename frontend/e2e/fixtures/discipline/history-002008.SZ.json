@@ -5,10 +5,10 @@
  "items": [
   {
    "account_key": "citics-primary",
-   "as_of_at": "2026-09-19T19:26:40.551433+08:00",
+   "as_of_at": "2026-09-19T19:46:18.416612+08:00",
    "contract_version": "trade-discipline-v1",
    "evidence_refs": [
-    "run:914040e8-fe51-45af-a56c-ab74d27f1652",
+    "run:c2069ad4-ecb9-473f-9808-a57fcbac220b",
     "bars:60:2026-09-18",
     "sector:longhu_ths_industry:881171",
     "lane_run:fbb9b2f9-d24c-4d0b-b2c6-8e97d0c54ccb",
@@ -17,7 +17,7 @@
     "broker_snapshot_key:7a4f6eeb243acdfdcef1b236f4afa255342a543f030a4f1812e3ddf4ad8b0393"
    ],
    "generator_version": "trade-discipline-generator-v3",
-   "inputs_hash": "8c4782756394ae697ef4964299f865481f77ac410e068740fe8fcb341166f965",
+   "inputs_hash": "b5a112a22ca3f929b004d3e0210e80a9198f34d4818af1fc847094f866618fcc",
    "lines": [
     {
      "action": {
@@ -245,16 +245,19 @@
      "derivation": {
       "action_formula": "",
       "action_inputs": {},
-      "formula": "reference",
+      "formula": "max(lane_reference, hard_stop + stop_gap_atr * atr14)",
       "inputs": {
        "atr14": 5.295714285714285,
+       "binding_term": "stop_gap",
        "chase_atr_multiple": 0.5,
        "entry_price": 99.6,
+       "hard_stop": 94.83,
        "lane_reference": 95.72,
        "last_close": 99.6,
        "price_cap": 102.25,
-       "reference": 95.72,
-       "source": "lane.reference"
+       "source": "lane.reference",
+       "stop_gap_atr": 0.5,
+       "stop_gap_floor": 97.47785714285715
       },
       "rule_id": "trigger.breakout_hold"
      },
@@ -265,11 +268,11 @@
       "sector_not_weak"
      ],
      "kind": "trigger",
-     "label": "日线收盘站上95.72（结构确认）且成交额不低于前一日且行业当日不走弱且不高于追高上限102.25，最多买到200股；高于102.25为追高，不买",
+     "label": "日线收盘在97.48–102.25之间且成交额不低于前一日且行业当日不走弱，最多买到200股（下沿=硬止损94.83 + 0.5×ATR14，高于 lane 结构参考95.72；高于102.25为追高，不买）",
      "metric": "daily_close",
      "op": ">=",
      "pct": null,
-     "price": "95.72",
+     "price": "97.48",
      "priority": 9,
      "trading_days": null
     },
@@ -452,7 +455,7 @@
     "volume": 596502.0
    },
    "name": "大族激光",
-   "plan_key": "citics-primary:002008.SZ:2026-09-18:new_buy:8c4782756394",
+   "plan_key": "citics-primary:002008.SZ:2026-09-18:new_buy:b5a112a22ca3",
    "plan_kind": "new_buy",
    "position": null,
    "quality": [
@@ -537,12 +540,17 @@
      "passed": true
     },
     {
+     "check_id": "buy_zone_valid",
+     "detail": "买入区间 [97.48, 102.25]，硬止损 94.83",
+     "passed": true
+    },
+    {
      "check_id": "entry_reference_current",
      "detail": "入场参考价 99.6 = max(lane 参考 95.72, 2026-09-18 收盘 99.6)，仓位与止损均按它计算",
      "passed": true
     }
    ],
-   "run_id": "914040e8-fe51-45af-a56c-ab74d27f1652",
+   "run_id": "c2069ad4-ecb9-473f-9808-a57fcbac220b",
    "sizing": {
     "current_exposure_pct": "0.00",
     "current_risk_pct": "0.00",
@@ -565,15 +573,15 @@
    "template_version": "trade-discipline-templates-v4",
    "trading_date": "2026-09-18",
    "valid_until": "2026-09-28T15:00:00+08:00",
-   "plan_id": "3860e54d-2977-5663-a30e-011249695b7f",
+   "plan_id": "7a6837f6-8bcc-5339-8701-1347e0988d9d",
    "content_hash": "dry-run",
-   "created_at": "2026-09-19T19:26:40.551433+08:00"
+   "created_at": "2026-09-19T19:46:18.416612+08:00"
   }
  ],
  "ladder": [
   {
-   "plan_id": "3860e54d-2977-5663-a30e-011249695b7f",
-   "plan_key": "citics-primary:002008.SZ:2026-09-18:new_buy:8c4782756394",
+   "plan_id": "7a6837f6-8bcc-5339-8701-1347e0988d9d",
+   "plan_key": "citics-primary:002008.SZ:2026-09-18:new_buy:b5a112a22ca3",
    "status": "active",
    "plan_kind": "new_buy",
    "trading_date": "2026-09-18",

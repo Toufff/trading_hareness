@@ -113,7 +113,14 @@ const lineKeyOf = (params: LineEvent): string | null => {
   const data = params.data as { lineKey?: unknown } | null | undefined;
   return params.componentType === 'markLine' && data && typeof data.lineKey === 'string' ? data.lineKey : null;
 };
-function onMouseOver(params: LineEvent) {
+// Every marker carries its own explanation (``detail``); hovering shows it next to the pointer.
+const markerNote = ref<{ text: string; x: number; y: number } | null>(null);
+function onMouseOver(params: LineEvent & { event?: { offsetX?: number; offsetY?: number } }) {
+  const data = params.data as { detail?: unknown } | null | undefined;
+  if (params.componentType === 'markPoint' && data && typeof data.detail === 'string') {
+    markerNote.value = { text: data.detail, x: params.event?.offsetX ?? 80, y: params.event?.offsetY ?? 80 };
+    return;
+  }
   const key = lineKeyOf(params);
   if (key) {
     hovered.value = key;
@@ -121,6 +128,7 @@ function onMouseOver(params: LineEvent) {
   }
 }
 function onMouseOut(params: LineEvent) {
+  if (params.componentType === 'markPoint') markerNote.value = null;
   if (params.componentType === 'markLine') {
     hovered.value = null;
     emit('hover-line', null);
@@ -155,6 +163,15 @@ const termColor = LINE_STYLE.hard.color;
       @click="onClick"
     />
     <div
+      v-if="markerNote"
+      class="marker-note"
+      role="tooltip"
+      data-testid="marker-note"
+      :style="{ left: '66px', top: '6px' }"
+    >
+      {{ markerNote.text }}
+    </div>
+    <div
       v-if="showTerms && hardStopTerms"
       class="terms-card"
       role="tooltip"
@@ -183,6 +200,8 @@ const termColor = LINE_STYLE.hard.color;
 .terms-card { position: absolute; left: 66px; top: 36px; z-index: 3; max-width: min(360px, 80%); padding: 10px 12px; border: 1px solid #fecaca;
   border-radius: 8px; background: rgba(255,255,255,.97); box-shadow: 0 6px 18px rgba(15,23,42,.12); font-size: 12px; pointer-events: none; }
 .terms-card strong { display: block; margin-bottom: 4px; }
+.marker-note { position: absolute; z-index: 6; border-left: 3px solid #dc2626; max-width: 300px; padding: 6px 9px; border: 1px solid #cbd5e1; border-radius: 6px; background: rgba(255,255,255,.97);
+  box-shadow: 0 4px 12px rgba(15,23,42,.14); font-size: 12px; line-height: 1.5; white-space: pre-line; pointer-events: none; }
 .terms-card code { display: block; margin-bottom: 6px; white-space: normal; word-break: break-all; color: #475569; font-size: 11px; }
 .terms-card table { border-collapse: collapse; width: 100%; }
 .terms-card td { padding: 2px 6px 2px 0; }

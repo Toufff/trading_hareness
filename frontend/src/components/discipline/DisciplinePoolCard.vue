@@ -47,17 +47,60 @@ function toggle() {
 </script>
 
 <template>
-  <div class="pool-discipline" :data-symbol="symbol">
-    <button type="button" class="toggle" :aria-expanded="open" @click="toggle">纪律卡</button>
+  <div
+    class="pool-discipline"
+    :data-symbol="symbol"
+  >
+    <button
+      type="button"
+      class="toggle"
+      :aria-expanded="open"
+      @click="toggle"
+    >
+      纪律卡
+    </button>
     <!-- A pick card is too narrow for a K-line; the card opens full width in a drawer. -->
-    <el-drawer v-model="open" size="min(1240px, 96vw)" direction="rtl" :title="`${name || symbol}（${symbol}）新买纪律卡`" append-to-body>
-      <div class="panel" data-testid="pool-discipline-panel" :data-symbol="symbol">
-        <el-skeleton v-if="loading" :rows="5" animated />
-        <el-alert v-else-if="error" type="error" :closable="false" show-icon :title="error">
-          <el-button size="small" @click="load(true)">重试</el-button>
+    <el-drawer
+      v-model="open"
+      size="min(1240px, 96vw)"
+      direction="rtl"
+      :title="`${name || symbol}（${symbol}）新买纪律卡`"
+      append-to-body
+    >
+      <div
+        class="panel"
+        data-testid="pool-discipline-panel"
+        :data-symbol="symbol"
+      >
+        <el-skeleton
+          v-if="loading"
+          :rows="5"
+          animated
+        />
+        <el-alert
+          v-else-if="error"
+          type="error"
+          :closable="false"
+          show-icon
+          :title="error"
+        >
+          <el-button
+            size="small"
+            @click="load(true)"
+          >
+            重试
+          </el-button>
         </el-alert>
-        <el-empty v-else-if="loaded && !plan" :image-size="44" :description="`${name || symbol} 尚未生成新买纪律卡，运行 stock-discipline 生成`" />
-        <DisciplineDetail v-else-if="plan" :plan="plan" :today="shanghaiToday()" />
+        <el-empty
+          v-else-if="loaded && !plan"
+          :image-size="44"
+          :description="`${name || symbol} 尚未生成新买纪律卡，运行 stock-discipline 生成`"
+        />
+        <DisciplineDetail
+          v-else-if="plan"
+          :plan="plan"
+          :today="shanghaiToday()"
+        />
       </div>
     </el-drawer>
   </div>
