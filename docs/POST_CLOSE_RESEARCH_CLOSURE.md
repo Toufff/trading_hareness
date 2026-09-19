@@ -77,6 +77,51 @@
   记录里带 `late_datasets`（含 expected/stored 与 reason）便于事后判读。
 - 刷新后必须**重新探一次** readiness：`$after` 是在市场刷新之前读的，看不到本轮刚派生出的池子。
 
+## 修改 E：推荐模型使用当日收盘（2026-09-19）
+
+**2026-09-19 用户决定：推荐模型使用当日收盘（available_at 约束保留，次日开盘入场），推翻 9/3 审计的严格小于。**
+
+文件：`quant-service/app/feature_snapshot_repository.py`、`quant-service/app/daily_pipeline.py`，
+测试 `tests/test_feature_snapshot_repository_pit.py`、`tests/test_daily_pipeline_stage_order.py`、
+`tests/test_platform_boundaries.py`、`tests/test_ingestion_and_provider_runtime.py`。
+
+- 背景：多源推荐（`multi-source-feature-v3` / `multi-source-direction-v1`，`/api/v1/pipeline/daily`
+  的最后一个决策阶段）一直滞后一个交易日——2026-09-18 的运行 `explanation.market_data_date`
+  是 2026-09-17。原因是 2e996ca（9/3 审计）把特征快照的日线、基础指标、ST 生命周期查询从 `<=`
+  改成了 `trading_date < as_of_date`。
+- 为什么不是前视：盘后流水线传入的 `as_of` 就是已结算的交易日 D；推荐结果归因
+  （`outcome_recomputation.py`）和策略候选账本结算都以**严格晚于 run_date 的第一根日线**
+  （D+1 开盘）入场，所以特征日期 D 永远早于入场日期 D+1。测试
+  `SameDayFeatureNextSessionEntryTests` 把这两半钉在一起。
+- 新谓词（日线与 `daily_fundamentals`）：
+  `trading_date <= as_of AND available_at <= observed_at AND (trading_date < as_of OR available_at >= as_of 15:05 上海)`。
+  `available_at <= observed_at` 原样保留（防历史回放读到之后补录/更正的行）；
+  追加的结算条件复用 `public_market_repository.SESSION_SETTLED_TIME`（15:05）：
+  当日行只有在收盘结算后才可用。ST 生命周期证据是状态而非当日结果，只改为
+  `status_date <= as_of`，`available_at` 约束不变。
+- 盘中调用方核查：没有定时任务在盘中调用 `materialize_feature_snapshot`，唯一入口是
+  `build_feature_snapshot`（`/api/v1/features/build`、`/api/v1/recommendations/generate`、日流水线）。
+  但前端研究台“构建特征/生成推荐”按钮不带 `as_of_date`，会以 `cn_today()` 在盘中任意时刻触发；
+  而 `canonical_bars_daily` 只有公开源路径（`persist_free_daily`）拒收未结算当日行，
+  Tushare 兼容归一化、`persist_daily_bar_batch` 等路径没有该守卫，且默认 `observed_at`
+  是当日 23:59:59。单靠 `available_at <= observed_at` 拦不住一根 10:30 写入的盘中日线，
+  所以加了上面的 15:05 结算条件：15:05 前的盘中调用行为与旧的严格小于完全一致。
+- 生产只读核对（2026-09-19，all_a 5571 个启用成员）：旧谓词下 2026-09-18 快照最新日线全部是
+  09-17（读到 9/18 行 0 条）；新谓词下 5122 只的最新日线为 09-18，9/18 行 5122 条，
+  `available_at` 全部为 2026-09-18 16:41:35（均晚于 15:05，结算条件不剔除任何一条）；
+  9/18 `daily_fundamentals` 5122 只全部可用；9/18 ST 生命周期证据 0 条（回退当前状态，与原逻辑一致）。
+  8/1—9/18 的 canonical 日线中有 244 行 `available_at` 早于其交易日 15:05
+  （243 行 `legacy:yahoo_chart` 每日约 9 只、时间戳 14:35，1 行 `legacy:longhuvip:GetStockPanKou`），
+  这些行在以其自身交易日为 as_of 的回放里会退回前一交易日（fail closed），作为前一日特征不受影响。
+- 同时修正日流水线顺序：`materialize_candidate_ledger` 会把当日 `quant.recommendations`
+  写入 `daily_recommendation` 账本行，原先排在 `generate_recommendations` 之前，
+  当日推荐只有重跑才进账本。现改为 `generate_recommendations → materialize_candidate_ledger →
+  materialize_watchlist_proposals`。中间阶段不依赖账本：`recompute_outcomes` 只结算入场日
+  （严格晚于候选日期的第一根日线）已存在的账本行，当日候选当日不可能有入场日。
+  副作用：推荐阶段若抛错，账本/观察建议也不再执行（原先推荐抛错整轮同样失败，重跑补齐）。
+- 注意：feature_version 未改名（仍为 `multi-source-feature-v3`），但 9/19 之后的快照与之前的在
+  as_of 语义上相差一个交易日；跨该日期比较 run 级指标时需按 `market_data_date` 对齐。
+
 ## 验收
 
 1. `pytest tests/test_daily_control_plane.py tests/test_migration_contracts.py tests/test_repository_workflow_policy.py -q` 通过；`ruff check app tests` 通过；`git diff --check` 通过。
@@ -87,3 +132,6 @@
    `expected_symbols` 与 `stored_symbols` 相等（2026-09-18 为 80/80，2026-09-15 为 31/31）；
    `pytest tests/test_post_close_refresh.py -q` 与
    `pwsh -File scripts/windows/tests/test-post-close-pipeline-contract.ps1` 通过。
+6. 修改 E：`pytest tests -q` 全绿；生产只读查询 2026-09-18 新谓词读到 9/18 日线 5122 行（旧谓词 0 行）；
+   发布后首个盘后流水线的 `quant.recommendations.explanation->>'market_data_date'` 等于 run 的 `as_of_date`，
+   且 `strategy_daily_candidates` 当日即出现 `daily_recommendation` 行（无需重跑）。

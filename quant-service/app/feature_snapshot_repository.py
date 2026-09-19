@@ -8,6 +8,7 @@ from statistics import mean
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from .public_market_repository import SESSION_SETTLED_TIME
 from .stable_json import stable_dumps, stable_json
 
 from .research_prices import adjusted_bars, carried_forward_sessions
@@ -23,18 +24,39 @@ def materialize_feature_snapshot(
 ) -> dict[str, Any]:
     """Materialize one universe's feature snapshot as of ``as_of_date``.
 
-    Both batched reads below are point-in-time bounded: ``trading_date`` is
-    strictly before ``as_of_date`` (a same-day row is that date's own outcome,
-    not a prior-session feature), and ``available_at`` must not be later than
-    ``observed_at`` -- a bar can be re-dated by a later backfill/correction
-    whose ``available_at`` postdates a historical replay's own ``as_of_date``,
-    which a ``trading_date`` bound alone would not catch.  ``observed_at``
-    defaults to the end of ``as_of_date`` (Asia/Shanghai), which is exactly
-    "any time up to and including that date" for a live/current-day snapshot
-    and the correct fail-closed default for a historical replay call that did
-    not pass one explicitly.
+    Same-day rule (2026-09-19 user decision, reversing the 2026-09-03 audit's
+    strict ``trading_date < as_of_date``): bars and fundamentals are read with
+    ``trading_date <= as_of_date``, so the post-close pipeline -- which passes
+    the settled session D as ``as_of_date`` -- scores on D's own close and
+    ``market_data_date == as_of_date``.  This is not look-ahead: every outcome
+    consumer (``outcome_recomputation``, the strategy candidate ledger) enters
+    at the first bar strictly after the run date, i.e. D+1's open, so the
+    feature date is always earlier than the entry date.
+
+    Every read stays point-in-time bounded:
+
+    * ``available_at <= observed_at`` -- a bar can be re-dated by a later
+      backfill/correction whose ``available_at`` postdates a historical
+      replay's own ``as_of_date``, which a ``trading_date`` bound alone would
+      not catch.
+    * A same-day bar/fundamental row counts only once the session has settled:
+      ``trading_date < as_of_date OR available_at >= as_of_date 15:05``
+      (Asia/Shanghai, ``SESSION_SETTLED_TIME``).  Not every writer of
+      ``canonical_bars_daily`` rejects a still-running intraday bar, so an
+      intraday call (e.g. the dashboard's manual build/generate button, which
+      defaults ``as_of_date`` to today) must not pick one up just because its
+      ``available_at`` is earlier than ``observed_at``.  Before 15:05 such a
+      call therefore behaves exactly as the old strict rule did.
+    * ST/lifecycle evidence is a status, not a session outcome, so a same-day
+      ``status_date`` row is used whenever ``available_at <= observed_at``.
+
+    ``observed_at`` defaults to the end of ``as_of_date`` (Asia/Shanghai),
+    which is exactly "any time up to and including that date" for a
+    live/current-day snapshot and the correct fail-closed default for a
+    historical replay call that did not pass one explicitly.
     """
     observed_at = observed_at or datetime.combine(as_of_date, time(23, 59, 59), tzinfo=ZoneInfo("Asia/Shanghai"))
+    settled_at = datetime.combine(as_of_date, SESSION_SETTLED_TIME, tzinfo=ZoneInfo("Asia/Shanghai"))
     members = connection.execute(
         """SELECT m.symbol,i.name,i.industry,i.is_st FROM quant.universe_members m
            JOIN quant.instruments i ON i.symbol=m.symbol
@@ -48,8 +70,8 @@ def materialize_feature_snapshot(
     # Batched once for every member instead of two extra round trips per
     # symbol (previously ~2 * len(members) queries for a full universe).
     # The per-symbol "most recent N rows as of as_of_date" shape is kept
-    # identical via a ranked CTE; only the loop structure below changed, not
-    # the date condition, so a later date-boundary fix stays a one-line edit.
+    # identical via a ranked CTE.  See the docstring for the same-day rule:
+    # ``trading_date<=as_of`` plus the settled-session guard on the as_of row.
     all_symbols = [str(member["symbol"]) for member in members]
     bars_by_symbol: dict[str, list[dict[str, Any]]] = {}
     for row in connection.execute(
@@ -58,11 +80,12 @@ def materialize_feature_snapshot(
                       limit_up,limit_down,selected_provider,
                       row_number() OVER (PARTITION BY symbol ORDER BY trading_date DESC) AS rn
                  FROM quant.canonical_bars_daily
-                WHERE symbol=ANY(%s) AND trading_date<%s AND available_at<=%s
+                WHERE symbol=ANY(%s) AND trading_date<=%s AND available_at<=%s
+                  AND (trading_date<%s OR available_at>=%s)
            )
            SELECT symbol,trading_date,close,pre_close,high,low,volume,amount,adj_factor,is_suspended,limit_up,limit_down,selected_provider
              FROM ranked WHERE rn<=60 ORDER BY symbol,trading_date DESC""",
-        (all_symbols, as_of_date, observed_at),
+        (all_symbols, as_of_date, observed_at, as_of_date, settled_at),
     ).fetchall():
         bars_by_symbol.setdefault(str(row["symbol"]), []).append(dict(row))
     fundamentals_by_symbol: dict[str, dict[str, Any]] = {}
@@ -71,10 +94,11 @@ def materialize_feature_snapshot(
                SELECT symbol,turnover_rate,volume_ratio,pe,pb,total_mv,circ_mv,
                       row_number() OVER (PARTITION BY symbol ORDER BY trading_date DESC) AS rn
                  FROM quant.daily_fundamentals
-                WHERE symbol=ANY(%s) AND trading_date<%s AND available_at<=%s
+                WHERE symbol=ANY(%s) AND trading_date<=%s AND available_at<=%s
+                  AND (trading_date<%s OR available_at>=%s)
            )
            SELECT symbol,turnover_rate,volume_ratio,pe,pb,total_mv,circ_mv FROM ranked WHERE rn=1""",
-        (all_symbols, as_of_date, observed_at),
+        (all_symbols, as_of_date, observed_at, as_of_date, settled_at),
     ).fetchall():
         row = dict(row)
         symbol_key = str(row.pop("symbol"))
@@ -94,7 +118,7 @@ def materialize_feature_snapshot(
                SELECT symbol,is_st,
                       row_number() OVER (PARTITION BY symbol ORDER BY status_date DESC,observed_at DESC) AS rn
                  FROM quant.instrument_lifecycle_evidence
-                WHERE symbol=ANY(%s) AND status_date<%s AND available_at<=%s AND is_st IS NOT NULL
+                WHERE symbol=ANY(%s) AND status_date<=%s AND available_at<=%s AND is_st IS NOT NULL
            )
            SELECT symbol,is_st FROM ranked WHERE rn=1""",
         (all_symbols, as_of_date, observed_at),
