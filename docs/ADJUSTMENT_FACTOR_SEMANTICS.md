@@ -168,9 +168,41 @@
 
 ## 4. 修复 SQL
 
-> 范围从 **2026-09-01** 开始，不是 09-04。09-01 同样是 longhu 占位日（5,235 行受污染的
-> canonical 行 / 5,266 行 NULL 的 market 行），漏掉它会在每个 60 日窗口中间留下一天未复权空洞，
-> 而且它是最便宜的一天：`tushare_primary` 已经有当天 5,567 只的完整截面。
+### 步骤 -1 —— 推导修复窗口（只读，必须先跑）
+
+窗口不是写死的日期，而是**从数据里推导**出来的：受污染的范围就是"还没有被标注
+`superseded_at` 的 longhu 占位证据"所覆盖的交易日区间。写死日期会和步骤 6 的守护查询
+（不带窗口、且要求恒等于 0）失配——只要占位证据落在窗口之外，步骤 1 就补不到它，而守护
+查询照样会看见它。
+
+```sql
+SELECT min(trading_date) AS from_date, max(trading_date) AS to_date
+  FROM quant.daily_adjustment_factors
+ WHERE provider = 'longhuvip_composite'
+   AND raw->>'factor_semantics' = 'same_day_identity_only'
+   AND raw->>'superseded_at' IS NULL
+\gset
+```
+
+`\gset` 把结果写进 psql 变量 `:from_date` / `:to_date`，下面每一条语句都用它们，不再出现
+任何字面日期。用其他客户端跑时把这两个值原样绑定进去即可
+（`scratchpad\release2-operator.ps1` 的内嵌 Python 程序就是这么做的：
+`CAST(%(from_date)s AS date)`）。
+
+**一致性前置断言**：步骤 0 在推导出的窗口内的 `would_null` 合计，必须等于步骤 6 那条
+不带窗口的守护查询在 `canonical_bars_daily` 上的返回值。两者不等，说明窗口没有覆盖全部
+污染行——此时**不要**执行步骤 1，先查清差额来自哪些交易日。
+
+> 2026-09 的实测值（只读实测 2026-09-19，生产库）：推导结果是
+> **2026-09-01 ~ 2026-09-18**，未标注的占位证据 61,600 行；步骤 0 合计
+> `identity_rows=61,558`、`would_refill=25,985`、`would_null=35,573`；步骤 6 守护查询
+> `canonical_bars_daily=35,573`、`market_bars_daily=0`——`would_null` 与守护值一致，前置
+> 断言通过。
+>
+> 顺带记下当时为什么范围要从 **2026-09-01** 开始而不是 09-04：09-01 同样是 longhu 占位日
+> （5,235 行受污染的 canonical 行 / 5,266 行 NULL 的 market 行），漏掉它会在每个 60 日窗口
+> 中间留下一天未复权空洞，而且它是最便宜的一天：`tushare_primary` 已经有当天 5,567 只的
+> 完整截面。推导查询自己就会把 09-01 包进来——这正是推导优于手写日期的理由。
 
 ### 步骤 0 —— DRY RUN（只读）
 
@@ -195,7 +227,7 @@ SELECT b.trading_date,
                                   WHEN 'tushare_primary' THEN 2 ELSE 9 END,
                   f.available_at DESC
          LIMIT 1) t ON TRUE
- WHERE b.trading_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-18'
+ WHERE b.trading_date BETWEEN CAST(:'from_date' AS date) AND CAST(:'to_date' AS date)
    AND b.adj_factor = 1
  GROUP BY 1 ORDER BY 1;
 ```
@@ -208,7 +240,7 @@ SELECT b.trading_date,
 BEGIN;
 UPDATE quant.canonical_bars_daily b
    SET adj_factor = NULL, canonicalized_at = now()
- WHERE b.trading_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-18'
+ WHERE b.trading_date BETWEEN CAST(:'from_date' AS date) AND CAST(:'to_date' AS date)
    AND b.adj_factor = 1
    AND EXISTS (SELECT 1 FROM quant.daily_adjustment_factors ident
                 WHERE ident.symbol = b.symbol AND ident.trading_date = b.trading_date
@@ -232,7 +264,7 @@ UPDATE quant.canonical_bars_daily b
    SET adj_factor = t.adj_factor, canonicalized_at = now()
   FROM (SELECT DISTINCT ON (symbol, trading_date) symbol, trading_date, adj_factor
           FROM quant.daily_adjustment_factors
-         WHERE trading_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-18'
+         WHERE trading_date BETWEEN CAST(:'from_date' AS date) AND CAST(:'to_date' AS date)
            AND provider LIKE 'tushare%'
            AND coalesce(raw->>'factor_semantics','') <> 'same_day_identity_only'
          ORDER BY symbol, trading_date,
@@ -241,7 +273,7 @@ UPDATE quant.canonical_bars_daily b
                   available_at DESC) t
  WHERE b.symbol = t.symbol
    AND b.trading_date = t.trading_date
-   AND b.trading_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-18'
+   AND b.trading_date BETWEEN CAST(:'from_date' AS date) AND CAST(:'to_date' AS date)
    AND b.adj_factor IS DISTINCT FROM t.adj_factor;
 COMMIT;
 ```
@@ -258,7 +290,7 @@ UPDATE quant.market_bars_daily b
    SET adj_factor = t.adj_factor
   FROM (SELECT DISTINCT ON (symbol, trading_date) symbol, trading_date, adj_factor
           FROM quant.daily_adjustment_factors
-         WHERE trading_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-18'
+         WHERE trading_date BETWEEN CAST(:'from_date' AS date) AND CAST(:'to_date' AS date)
            AND provider LIKE 'tushare%'
            AND coalesce(raw->>'factor_semantics','') <> 'same_day_identity_only'
          ORDER BY symbol, trading_date,
@@ -267,7 +299,7 @@ UPDATE quant.market_bars_daily b
                   available_at DESC) t
  WHERE b.symbol = t.symbol
    AND b.trading_date = t.trading_date
-   AND b.trading_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-18'
+   AND b.trading_date BETWEEN CAST(:'from_date' AS date) AND CAST(:'to_date' AS date)
    AND b.adj_factor IS DISTINCT FROM t.adj_factor;
 COMMIT;
 ```
@@ -300,7 +332,7 @@ SELECT b.trading_date,
        count(*) FILTER (WHERE b.adj_factor = 1)::bigint AS eq1,
        count(*) FILTER (WHERE b.adj_factor IS NOT NULL AND b.adj_factor <> 1)::bigint AS real_factor
   FROM quant.canonical_bars_daily b
- WHERE b.trading_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-18'
+ WHERE b.trading_date BETWEEN CAST(:'from_date' AS date) AND CAST(:'to_date' AS date)
  GROUP BY 1 ORDER BY 1;
 ```
 
