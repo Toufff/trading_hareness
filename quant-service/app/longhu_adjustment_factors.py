@@ -34,17 +34,20 @@ and from the canonical bar itself:
 Rule (:func:`decide_step`), applied to every consecutive pair of canonical
 bars of one symbol:
 
-1. a CQ record on the later date is an action.  The step is
-   ``prev_close / pre_close`` when the bar's pre_close agrees with the CQ
-   reference price within one tick (exchange value preferred), otherwise
-   ``prev_close / cq_reference``;
+1. a CQ record on the later date is an action.  When the bar's pre_close
+   moved by at least one tick the step is ``prev_close / pre_close`` (the
+   published price wins; a CQ reference more than a tick away is flagged);
+   with no pre_close at all it is ``prev_close / cq_reference``; when the
+   pre_close did NOT move, the CQ step is taken only if the qfq series shows
+   the same resolvable step (``cq_qfq``, a missed signature), else 1;
 2. no CQ, but ``pre_close`` differs from the previous close by at least one
-   tick: accepted only when the qfq step confirms it
-   (:data:`QFQ_CONFIRM_TOLERANCE`), else rejected as a false signature; with
-   no qfq evidence at all it is accepted and flagged ``pre_close_only``;
-3. neither: a qfq step beyond :data:`QFQ_ONLY_ACTION_THRESHOLD` is taken and
-   flagged ``qfq_only`` (the vendor recorded no CQ and the exchange price did
-   not move, but the adjusted series did);
+   tick: a falling step is rejected (corporate actions only raise the
+   factor); a rising one is accepted only when the qfq step resolvably
+   confirms it (:data:`QFQ_CONFIRM_TOLERANCE`); with no qfq evidence at all it
+   is accepted and flagged ``pre_close_only`` -- unless uncovered sessions sit
+   between the two bars, where the step is ``unresolved`` and the chain stops;
+3. neither: a rising qfq step beyond :data:`QFQ_ONLY_ACTION_THRESHOLD` is
+   taken and flagged ``qfq_only``;
 4. otherwise the step is exactly ``1`` -- snapped, so ordinary days can never
    drift the cumulative series.
 
