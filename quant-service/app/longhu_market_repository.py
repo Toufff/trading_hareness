@@ -172,8 +172,8 @@ def persist_full_market_close(
         # No ``adj_factor`` entry by design: the vendor supplies no
         # corporate-action history, and an identity placeholder would be
         # promoted into the bar tables exactly like a real cumulative factor
-        # (see build_control_rows).  Factors arrive on their own lane from
-        # the tushare ``adj_factor`` route.
+        # (see build_control_rows).  Factors arrive on their own lane,
+        # derived from the licensed longhu kline by adjustment_factor_maintenance.
         "stk_limit": persist_rows(
             connection, "stk_limit", request_key + ":stk_limit", controls["stk_limit"], PROVIDER_KEY, observed_at,
         ),
@@ -281,7 +281,7 @@ def persist_full_market_close(
             "industry_memberships": industry_membership_count,
             "source_health": source_health, "close_conflicts": list(merged.close_conflicts[:20]),
             "control_semantics": {
-                "adj_factor": "not_supplied_by_vendor; fetched separately from tushare adj_factor",
+                "adj_factor": "not_supplied_by_vendor; derived separately from the longhu kline (longhu_qfq_derived)",
                 "stk_limit": "derived_from_preclose_board_rule_with_exception_warning",
                 "trade_calendar": "observed_open_from_coverage_gated_settled_close",
             },

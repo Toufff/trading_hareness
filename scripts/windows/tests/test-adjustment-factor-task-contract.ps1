@@ -89,7 +89,7 @@ Assert-True 'runner_loads_runtime_env_by_path_only' (
 Assert-True 'runner_clears_inherited_proxy_variables' (
     $runnerSource.Contains('foreach ($name in @(''http_proxy''') -and
     $runnerSource.Contains('SetEnvironmentVariable($name, $null, ''Process'')')) `
-    'An inherited desktop proxy turns a working tushare route into a nightly false failure'
+    'An inherited desktop proxy turns a working longhu route into a nightly false failure'
 Assert-True 'runner_logs_to_a_dated_file_under_the_platform_logs' (
     $runnerSource.Contains('Join-Path $platform ''logs\adjustment-factors''') -and
     $runnerSource.Contains('(Get-Date).ToString(''yyyy-MM-dd'') + ''.log''')) `

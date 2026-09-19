@@ -44,9 +44,10 @@ $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew `
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType $LogonType -RunLevel Limited
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal `
     -Settings $settings -Force `
-    -Description ('Cumulative adjustment-factor backlog: fetch quant.daily_adjustment_factors for every settled ' +
-                  'trading date still missing a real tushare factor, then promote it onto the daily bars. ' +
-                  'Read/write to the local database and the tushare adj_factor route only; no broker operation, ' +
-                  'no order, and no post-close pipeline stage depends on it.') | Out-Null
+    -Description ('Cumulative adjustment-factor backlog: derive quant.daily_adjustment_factors from the licensed ' +
+                  'longhu daily kline (provider longhu_qfq_derived) for every settled trading date still missing ' +
+                  'a real factor, then promote it onto the daily bars. Read/write to the local database and the ' +
+                  'longhu kline route only (no tushare call); no broker operation, no order, and no post-close ' +
+                  'pipeline stage depends on it.') | Out-Null
 
 Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName, State

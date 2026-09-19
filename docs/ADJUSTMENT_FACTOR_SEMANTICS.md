@@ -1,8 +1,235 @@
-# 复权因子语义与一次性修复手册（2026-09-19）
+# 复权因子语义与修复手册（2026-09-19，因子车道已完全去掉 tushare）
 
-本文件是 `adj_factor` 语义的权威说明，以及 2026-09-01 ~ 2026-09-18 占位因子污染的
-一次性修复流程。**本分支没有执行过任何修复 SQL，也没有对生产库做任何写入。**
-下面的 SQL 是给运维步骤用的脚本，必须按第 3 节的顺序在发布之后执行。
+本文件是 `adj_factor` 语义的权威说明。**第 0 节是现行做法**：因子只来自 longhu（开盘啦授权
+接口），修复与回补用 `scripts/adjustment-factor-maintenance.py repair`。第 3、4 节是
+release 2 时代基于 tushare 原始记录的一次性修复 SQL，**已被第 0 节取代，不要再执行**，
+保留只为审计链。**本分支没有对生产库做任何写入**；第 0.5 节的数字全部来自只读连接
+（`default_transaction_read_only=on`）。
+
+---
+
+## 0. 现行：因子从 longhu 推导（用户决定："完全去掉 tushare，用 longhu 来处理"）
+
+### 0.1 范围
+
+- **不再调用 tushare 的**：`app/adjustment_factor_maintenance.py`（`sync` / `post_close_sync` /
+  `repair` / `validate`）、盘后非门控阶段 `adjustment_factors`、04:30 计划任务
+  `trading-hareness-adjustment-factors`、一次性修复。`AdjustmentFactorMaintenanceDependencies`
+  里没有任何 tushare 字段（`tests/test_longhu_adjustment_factors.py::NoTushareOnTheFactorLaneTests`
+  钉住）。owner `runtime.env` 自 2026-09-03 起就没有 `TUSHARE_*`，旧车道每晚都以
+  `no configured provider supports adj_factor` 失败——这就是改造的起因。
+- **没有删的**：仓库里其它 tushare 路线（资金流、涨跌停列表、目录等）。peer 跑同一套代码，
+  可能仍在用。仍然触及因子/日控制面的 tushare 依赖见 0.7。
+- **库里已有的 tushare 因子**只被**读**：作为每只票的锚点和窗口内的校验点，绝不被推导值覆盖。
+
+### 0.2 证据（一次调用，`GetKLineDay_W14`）
+
+实测（2026-09-19，只读）：
+
+1. `y[i][1]` 是**前复权（qfq）收盘**，以最新一根为基准。`Is_FS` 参数被忽略（0/1/2/不传
+   返回同一条序列），`app/longhu_vendor_source.parse_daily_kline_payload` 注释里的
+   "unadjusted" 与事实不符（见 0.8 风险）。复权方式是**减法**：`qfq = (raw - 每股现金) / (1 + 每股送转)`，
+   不是乘法；所以同一除权段内 `qfq/raw` 会随价格漂移，"比值之比"在普通交易日也会出现
+   `股息率 × 当日涨跌幅` 量级的假台阶。qfq 只做交叉校验，不做主信号。
+2. `CQ[i]` 是**厂商自己的除权记录**，落在除权日：`"每10股送转,f1,f2,每10股派现"`。配合前一日
+   原始收盘即可复现交易所除权参考价（四舍五入到 0.01）：001388.SZ 07-17 `4.8,0,0,5` → 22.49，
+   688399.SH 07-10 `4.8,0,0,0` → 30.22，603155.SH 07-16 `4.5,0,0,3.5` → 16.83，均与公布的
+   pre_close 一致。`f1/f2`（配股字段）在样本里只出现一次（300176.SZ `0,4,33.6,0`），语义未验证，
+   带 `rights_fields_unverified` 标记。
+3. bar 自己的 `pre_close`：tushare 时代是交易所公布值；longhu 时代是**同一份 qfq 当晚的前一根**，
+   即除权参考价取整到分。两种情况下 `前一日原始收盘 / pre_close` 都等于 tushare 的台阶——
+   但厂商的取整与交易所不同：半分时厂商向下（600517.SH 09-17：4.98-0.045=4.935，厂商 4.93，
+   交易所 4.94），所以厂商 pre_close 与 CQ 参考价相差 1 分以内时取 CQ 参考价（四舍五入，交易所规则）。
+4. **补抓的 longhu bar 是前复权价**：longhu bar 的 close/pre_close 是**抓取当天**的 qfq 序列。
+   当晚抓的最新一根等于原始价；但若某个交易日是在其后的除权日**之后**才补抓，其间每一次除权都已被
+   减掉。生产实例：09-07、09-08、09-09 的 longhu bar（约 5,000 根/日）都是 09-10 12:09~12:38 才落库
+   （`available_at` = 09-10），002073.SZ 09-07 的 close/pre_close 是 5.83/5.83，而 09-04 原始收盘 5.85——
+   0.02 的派息 09-09 才除权。
+
+### 0.3 规则（`app/longhu_adjustment_factors.decide_step`，逐对相邻 bar）
+
+累计因子沿用 tushare 口径：`factor_d = factor_{d-1} × step_d`。
+
+| 条件 | step | basis |
+|---|---|---|
+| 有 CQ，pre_close 相对前收动了 ≥1 分 | `前收 / pre_close`（公布价优先；与 CQ 参考价差 >1 分时带 `cq_reference_disagrees`）。**厂商 bar** 上 pre_close 与参考价差 ≤1 分时改用 `前收 / CQ参考价`（带 `vendor_pre_close_rounding`） | `cq_pre_close` / `pre_close_over_cq` |
+| 有 CQ，没有 pre_close | `前收 / CQ参考价` | `cq` |
+| 有 CQ，pre_close 没动，但 **qfq 自己可分辨地动了**（`|q_step-1|` > 舍入界）且与 CQ 台阶同幅 | `前收 / CQ参考价`，带 `pre_close_missed_action` | `cq_qfq` |
+| 有 CQ 的 `cq_qfq`/`cq` 台阶，前 5 根 bar 内已有一次同幅（≤0.2%）的**无 CQ** 台阶 | 1，带 `duplicate_of_earlier_step`（同一次除权不数两次） | `cq_already_counted` |
+| 有 CQ，价格没动，qfq 也没动（小于 1 分的派息） | 1 | `cq_no_move` |
+| 无 CQ，pre_close 动了且 step>1，qfq 可分辨地同向同幅 | `前收 / pre_close` | `pre_close_qfq` |
+| 无 CQ，pre_close 动了但 step<1 | 1（公司行为只会让累计因子变大；这是坏收盘，如 600664.SH 08-31 的 9.00 vs 9.12） | `none` + `decreasing_step_rejected` |
+| 无 CQ，也没有 longhu 数据（抓取失败） | `前收 / pre_close`，带 `pre_close_only` | `pre_close_only` |
+| 无 CQ、无 pre_close 信号，qfq 台阶 > 1% + 3×舍入界 | qfq 台阶，带 `qfq_only` | `qfq_only` |
+| 其它 | **恰好 1**（普通交易日永不漂移） | `none` |
+
+舍入界：qfq 取整到 0.01，单日比值误差 ≤ `0.0051/qfq_prev + 0.0051/qfq_cur`。
+
+**补抓 bar 的还原**（`restore_vendor_bars`，在一切台阶判断之前）：`selected_provider='longhuvip_composite'`
+的 bar 带上抓取日（`available_at` 的北京日期）。对每个 `bar 日 < CQ 日 ≤ 抓取日` 的厂商除权记录，按
+`raw = qfq×(1+送转) + 派现` 从新到旧逆推 close 与 pre_close，四舍五入到分；只有当厂商**今天**的 qfq
+序列（撤销其后全部 CQ 后）隐含的原始收盘离还原值比离库存值更近时才采用，否则原样保留并记录。
+还原只用于推导，**不回写 bar**。本窗口 18 只票 33 根 bar 被还原（全部是 09-07..09-09、抓取日 09-10），
+全部通过校验。审查前的实现没有这一步：这些 bar 在 09-07 产生假的 `pre_close_qfq` 台阶，再在真实
+除权日由 `cq_qfq` 记第二次，同一次派息被数两次（14 只票），当时只是被 09-07/09-09/09-10/09-17 的
+tushare 校验点掩盖。
+
+**`cq_qfq` 的确认**：审查前只检查"CQ 台阶超过舍入界"，平的 qfq 序列（`q_step = 1`）会"确认"任何
+小于约 0.3%~0.47% 的派息；现在要求 qfq 台阶本身超出舍入界。
+
+**canonical 缺 bar 的处理**（`fill_bar_gaps`）：2026-09-07 只有 5,035 根 bar（前后约 5,140），
+次日 bar 的 pre_close 指向的是缺失那天的收盘。厂商当天有成交时，用 qfq 收盘乘下一根的帧比例、
+再逆向撤销其间的每条 CQ 重建那天的原始收盘，作为**虚拟 bar** 参与台阶计算，**永不写入**。
+厂商当天也没有 K 线（真停牌）则不插，复牌日的 pre_close 仍是有效证据。
+没有任何 longhu 数据、且中间有交易所日历上的交易日时，pre_close 的变动无法区分行情与除权：
+该步 `unresolved`，**链条在此截断**，之后的日期不写（留给下次有证据时补），不猜。
+
+**锚点**：每只票窗口开始前最新一条可提升因子（tushare 或 `longhu_qfq_derived`），且当天必须有
+canonical bar。完全没有锚点、且第一根 bar 在窗口内的是新股，从 1.0 起（tushare 口径），证据里
+写明 `new_listing_starts_at_one`；有历史 bar 却从无因子的（指数：000001.SH、000300.SH、000688.SH、
+399001.SZ、399006.SZ）记为 `no_factor_lineage`，不写。
+
+**窗口内已存的 tushare 因子 = 校验点**：推导值与之比较（>0.2% 记为分歧并在报告里列出），
+bar 上写**已存的 tushare 值**（按库里的 numeric 原值，不经 float），链条从它继续——真实数据永不被覆盖。
+**唯一例外：价格否定的校验点**。从上一个被采用的已存值（或锚点）到本日，比较三个量：已存序列自己的
+变动、推导台阶之积、交易所自己的台阶之积（`前收 / pre_close`）。已存值的变动与价格不符（>0.2%）而推导
+与价格相符时，**不采用**该已存值：bar 写推导值，已存行原样保留不动，报告的 `stored_factor_conflicts`
+列出该票，需要人工决定。生产里只有 300176.SZ：交易所 08-21 配股除权（pre_close 4.72 vs 前收 5.23），
+tushare 一直到 09-07 都是 4.5917，09-09 才跳到 5.0878，而 09-08 4.59 → 09-09 4.58（pre_close 4.59）
+没有任何价格断点；照写会在 09-09 制造 +10.6% 的假涨幅。缺 pre_close（或经过虚拟 bar）时没有裁决，
+仍采用已存值。本车道自己写过的 `longhu_qfq_derived` 行永不受此裁决。同一天多条 tushare 路线
+数值只差第 5~7 位时（600601.SH 08-31：`tushare_primary` 6471.278 vs `tushare_super_sdk` 6471.28），
+优先 bar 上已经带着的那条，避免换值制造舍入抖动。
+
+**来源命名**（来源名必须与真实来源一致）：推导行写 `quant.daily_adjustment_factors`，
+`provider='longhu_qfq_derived'`，`raw` 带 `factor_semantics='corporate_action_cumulative'`、
+`source='longhuvip:GetKLineDay_W14'`、`method='longhu_cq_preclose_qfq_v2'`、锚点、step、basis、
+flags 与逐日证据（前收、pre_close、qfq、CQ、参考价）；`available_at` 是写入时刻，从不回填过去。
+`tushare_normalization.promotable_adjustment_factor` 把 `longhu_qfq_derived` 作为**唯一**的非 tushare
+可提升来源，而且要求**显式**声明累计语义（缺省即拒）；发布守护查询、工作清单、个股窗口就绪度
+都改用同一个 SQL 孪生 `promotable_factor_evidence_sql()`。
+
+### 0.4 写入（`longhu_adjustment_factors.persist_factor_date`，每个交易日一个事务）
+
+同一事务内：upsert 推导证据行（值不变不改 `available_at`）→ 同值写 `canonical_bars_daily` 与
+`market_bars_daily`（只改确实不同的行）→ 对本日没有计划行的票（无血缘/截断/longhu 抓取失败）清掉
+**没有任何可提升证据行带着同一数值**的因子（按**值**判断：tushare 行旁边的占位 1 也会被清；NULL 是诚实的
+"未知"）→ 给本日 `longhuvip_composite` 占位证据打 `superseded_at` 标注（不删），`superseded_by` 写
+**实际提升到该票 bar 上的那一行的 provider**（tushare 校验点就写 tushare 路线；没有替换则写
+`none: no factor promoted onto this bar`）→（repair）清掉该日的退休台账。
+
+longhu 抓取失败的票（≤5% 时整轮不算失败）**不再**只凭 pre_close 推导：没有 CQ、没有 qfq，会漏掉所有
+无价格信号的除权，而且写下的行会变成以后没人重看的校验点。这些票在本轮保持 NULL（`held=longhu_fetch_failed`），
+下一轮的 hole 补洞带着证据重试。**绝不存在"先整体 NULL 化、稍后再回填"的中间态**，
+所以任何时刻都不会让研究窗口成片失败关闭。该函数已登记进
+`tests/test_adjustment_factor_semantics_guard.py` 的 `PINNED_BAR_FACTOR_WRITERS`。
+
+### 0.5 实测（生产库只读，2026-09-19）
+
+**验证模式**（`validate --from 2026-06-01 --to 2026-08-26`，用 longhu 证据重算，与库里的
+tushare 因子逐步比较；5,555 只，longhu 抓取失败 0）：
+
+| 指标 | 数值 |
+|---|---|
+| 相邻 bar 对 | 221,117 |
+| tushare 真实除权（\|台阶-1\|>1e-5） | 863 |
+| 命中（台阶误差 ≤0.2%） | **863（100%）** |
+| 漏检 / 幅度错 | 0 / 0 |
+| 误报 | 3（300176.SZ 配股：交易所 08-21 除权、pre_close 4.72 vs 前收 5.23，tushare 当天没变；603221.SH +0.11%；688757.SH +0.10%——后两者 longhu 与交易所都显示小额派息而 tushare 没记） |
+| tushare 自身舍入抖动（±1e-6 来回） | 30 对，不计为除权 |
+| 链式累计误差（窗口首日锚定，推到末日） | 中位 0，p99 3.6e-5，>0.2% 的只有 300176.SZ（10.8%，即上面的配股） |
+
+按 basis：`cq_pre_close` 838/838、`pre_close_over_cq` 25/26（另 1 条是 300176 配股）；
+`none` 220,241 步全部正确。
+
+**修复 dry run**（`repair`，审查修正后重跑，2026-09-19 下午，只读；窗口从数据推导：08-27 有
+5,551/5,552 根 NULL，09-01、09-04..09-18 带未标注占位证据 → `2026-08-27 .. 2026-09-18`，17 个交易日）：
+
+- 5,566 只票；longhu 抓取失败 0；新股 11 只从 1.0 起；截断 0；无血缘 5 只（指数）。
+- 补抓 bar 还原：18 只票 33 根（全部校验通过，0 根被拒）。
+- 窗口内识别除权 248 次：`cq_pre_close` 244（其中 8 次厂商 pre_close 半分取整、改用 CQ 参考价）、
+  `cq` 2、`pre_close_over_cq` 2；**`pre_close_qfq` 0、`cq_qfq` 0**（审查前的 18 + 14 次全部是补抓 bar
+  造成的假台阶及其重复计数）。拒绝：`decreasing_step_rejected` 7、`pre_close_signature_rejected_by_qfq` 4。
+- 与窗口内已存 tushare 因子比较 53,731 次，分歧 3 次，全是 300176.SZ（09-09、09-10、09-17，
+  价格否定、未采用，见上）。审查前报告的"7 只票 09-07 tushare 晚一天"是**推导的错**，不是 tushare 的：
+  tushare 在厂商 CQ 日（09-08/09-09/09-10）变值是对的；600517.SH 09-17 的 0.203% 是厂商 pre_close 取整，
+  也已修正。
+- **只用 longhu 的回放**（只保留 09-04 之前的 tushare 校验点、推到 09-17，再与库里 09-17 的 tushare
+  因子比）：5,145 只里偏差 >0.1% 的只剩 300176.SZ（-9.75%，即 tushare 事后补记的配股）；审查前是 15 只。
+- 每日计划：08-27 回填 5,546 个 NULL（全部来自已存 tushare 行）；09-01、09-02/03、09-07、09-09、
+  09-10、09-17 以已存 tushare 截面为主（300176.SZ 在 09-09/09-10/09-17 写推导值）；09-04、09-08、09-11、
+  09-14~09-16、09-18 每天约 5,000~5,100 行 `longhu_qfq_derived`。`market_bars_daily` 同步约 5,000~5,500 行/日。
+- 守护查询：现在 `canonical_bars_daily=35,573`、`market_bars_daily=0`，**应用后预计 0 / 0**。
+- **值校验**（新）：bar 的因子不等于当日任何可提升证据行的，窗口内现在 61,087 根（其中 09-01/07/09/10/17
+  约 25k 根是 tushare 行旁边的占位 1，守护查询看不见），**应用后预计 0**；窗口外（2026-01-01..08-26）为 0。
+- 窗口内 NULL：现在 5,645 根，应用后 72 根，全部是上面 5 只指数（`no_factor_lineage`）。
+
+### 0.6 运维
+
+```
+# 只读：方法验收（可随时重跑）
+python scripts/adjustment-factor-maintenance.py validate --env-file G:\StockPlatform\config\runtime.env
+
+# 只读：一次性修复的计划（窗口自动推导；--from/--to 可覆盖）
+python scripts/adjustment-factor-maintenance.py repair --env-file G:\StockPlatform\config\runtime.env
+
+# 写入：每个交易日一个事务，结束后守护查询 + 值校验 + 逐日回读；任一非 0 则退出码 1
+python scripts/adjustment-factor-maintenance.py repair --apply --env-file G:\StockPlatform\config\runtime.env
+
+# 应用后验收（只读）：status 的 identity_factor_leaks 0/0 且 factor_value_mismatches 0/0，
+# 再跑一次 repair dry run：plan 里每天 replaces_other_value=0、fills_null=0（只剩 5 只指数的 NULL）
+python scripts/adjustment-factor-maintenance.py status --lookback-days 30 --env-file G:\StockPlatform\config\runtime.env
+
+# 夜间车道（盘后阶段与 04:30 任务走同一个入口）
+python scripts/adjustment-factor-maintenance.py sync --lookback-days 30 --env-file G:\StockPlatform\config\runtime.env
+```
+
+- `repair` 不带 `--apply` 时根本不 import `app.main`，用 `default_transaction_read_only=on` 的独立连接，
+  服务端拒绝任何写入——dry run 对生产安全是**构造保证**，不是靠小心。
+- `repair` 幂等：锚点取窗口开始前的因子，窗口内自己写过的推导行会被重算（同值不改）。
+- 夜间 `sync`：工作清单与退休台账语义不变（覆盖率 <95% 的日期；覆盖率被拒=skipped；
+  longhu 失败或推导覆盖不足=failed，退出码 1）。另外，回看窗口里"覆盖率已够、但仍有带血缘票为 NULL"
+  或"bar 的值不等于任何证据行"（值校验）的日期作为 `hole_dates`，只补这些 bar、不进台账——抓取失败、
+  截断留下的洞，以及一次性修复之前夜间车道先跑时 tushare 日上残留的占位 1，下次自动补上。
+- 守护查询只问"有没有可提升证据"，看不见 tushare 行旁边的错值；`status` 与 `repair --apply` 的回读
+  都带窗口内的值校验 `factor_value_mismatches`，`repair --apply` 在它非 0 时同样退出码 1。
+- 全市场一次抓取约 5,500 次调用（16 并发，实测 95~105 秒），无人为限速；单票失败按轮重试 3 次；
+  超过 5% 的票失败则整轮算 provider 失败、不写。
+- 盘后阶段顺序、非门控、回执语义都不变（第 5 节）。
+
+### 0.7 仍然触及因子/日控制面的 tushare 依赖（本次有意未删）
+
+1. `app/daily_control_plane.sync_full_market_daily_controls`：longhu 截面不满足短路条件（或 longhu
+   未配置）时回落到 `full_market_daily_controls_sync.sync` 的四 API tushare 拉取
+   （`adj_factor`/`daily_basic`/`stk_limit`/`suspend_d`）。owner 上 longhu 日会短路，不会走到。
+2. `app/full_market_daily_controls_sync.py` 本身（上面的回落路径，含 `market_bars_daily` 镜像）。
+3. `app/tushare_normalization.normalize_rows` 的 `adj_factor` 分支：任何仍到达的 tushare 因子行照旧入证据并提升。
+4. `app/annual_daily_backfill.py` 的历史年度回补（tushare 截面的集合式提升）。
+5. `app/intraday_watchlist_service.py`：自选股入池时 `fetch_supplemental("watchlist_adj_factor", adj_factor)`。
+6. `app/capability_registry.py` 的 `adj_factor` 条目（`super_get/super/primary`）——状态报告已不再引用它。
+7. `app/stock_study_readiness_repository.raw_api_window_summary` 读 `quant.tushare_raw_records`
+   （P1 项的原始记录摘要；`adj_factor` 条目本身按因子表判定）。
+8. `app/core_daily_control_sync.py`（`main.sync_tushare_core_endpoint`，ingestion 路由 `sync_tushare_core`）：
+   对显式股票池逐只拉 tushare `adj_factor`/`daily_basic`/`stk_limit`/`suspend_d`，经 `fetch_catalog` →
+   `normalize_rows` 入证据并提升；tushare 可达时会改写 bar 上的因子。owner 没有 tushare key，手动调用才会走到。
+9. 04:30 计划任务的**注册描述**（`scripts/windows/install-adjustment-factor-task.ps1`）已改为 longhu；
+   已安装的任务要重新运行安装脚本才会刷新描述文字（动作与参数不变，不重装也照常工作）。
+
+### 0.8 已知风险与分歧
+
+- **300176.SZ 需要人工决定**：tushare 漏记 08-21 配股、09-09 才补记。修复写推导值（沿用 4.5917，
+  窗口内无假跳变），08-21 的真实除权在 tushare 时代的 bar 上仍未体现（08-20→08-21 复权序列有约 -10%
+  的假跌，修复前就存在）。可选：人工把 08-21..最新的因子按 08-21 的 pre_close 证据重锚到 5.0878（需改写
+  tushare 时代的 bar，本次不做）。
+- **09-07..09-09 的 bar 价格本身仍是前复权**：还原只用于推导，不回写 bar。18 只票 33 根 bar 的 close
+  比原始价低一次派息（0.05%~0.5%），`close×adj_factor` 在这几根上有同样大小的误差。修正需要改写
+  bar 价格，不在因子车道范围内。
+- **配股字段未验证**：`f1/f2` 语义只有 1 个样本；有 pre_close 时以公布价为准。
+- **补抓的 longhu bar**：推导已按抓取日还原（见 0.3），但依赖 `available_at` 如实记录抓取时刻；
+  若某次补抓只改价格不改 `available_at`，还原不会触发（厂商序列校验只能拒绝错误还原，不能发现漏掉的）。
+  建议后续把 `parse_daily_kline_payload` 的 "unadjusted" 注释改正，并让补抓历史日时就用 CQ 反推原始价入库。
+- **longhu 单源**：CQ 缺失且 pre_close 也不动的除权（验证期 0 例）只能靠 qfq-only 阈值（>1%）兜底。
+- **没有 tushare 之后的校验**：从今往后没有新的独立真值；`validate` 只能对历史 tushare 期重跑。
 
 ---
 
@@ -26,7 +253,7 @@
 
 | 取值 | 含义 | 下游行为 |
 |---|---|---|
-| 真实累计因子（> 0） | 已取到 tushare 累计因子 | 正常复权 |
+| 真实累计因子（> 0） | 已存的 tushare 累计因子，或 `longhu_qfq_derived` 推导值（第 0 节） | 正常复权 |
 | `NULL` | 尚未取到（待补） | 窗口**末尾**的短缺口且无除权迹象时按第 1.1 节顺延（`adj_factor_carried_forward`）；否则失败关闭：`adj_factor_missing` / `data_quality_blocked` / `adjustment_pending` |
 | `1`（伪造占位） | **禁止** | 静默产生未复权序列 |
 
@@ -101,7 +328,7 @@
   "举手"（`pre_close ≠ 前收`）。所以对一段没有举手的短末尾缺口，
   "因子不变"是**正确的中性假设**，而依据是行情本身，不是猜测。
 - **绝不回写**：顺延只活在一次请求的研究视图里。
-  `quant.canonical_bars_daily.adj_factor` 保持 `NULL` 直到 tushare 给出真因子，
+  `quant.canonical_bars_daily.adj_factor` 保持 `NULL` 直到因子车道推导出真因子，
   `tests/test_adjustment_factor_semantics_guard.py` 守护的正是这一条。
 
 **顺延不扣分**：`app/recommendation_generation.py` 的 `UNPENALIZED_FLAGS` 把
@@ -238,7 +465,7 @@
 
 ---
 
-## 3. 执行顺序（必须严格按此顺序）
+## 3. 执行顺序（release 2 历史；已被第 0.6 节 `repair` 取代，不要再执行）
 
 > **顺序就是全部风险。** 第 4 节的 NULL 化一旦先于第 8/9 项代码上线，
 > 每个 longhu 交易日的 `status_payload` 立刻变成 `state='blocked'`，
@@ -275,7 +502,7 @@
 
 ---
 
-## 4. 修复 SQL
+## 4. 修复 SQL（release 2 历史；基于 tushare 原始记录，已被第 0 节取代，不要再执行）
 
 ### 步骤 -1 —— 推导修复窗口（只读，必须先跑）
 
@@ -575,7 +802,7 @@ pwsh scripts\windows\install-adjustment-factor-task.ps1
 ```
 
 - `scripts/windows/run-adjustment-factor-maintenance.ps1`：先清掉继承来的
-  `http_proxy`/`https_proxy`/`all_proxy`（桌面代理会把一条能用的 tushare 路线
+  `http_proxy`/`https_proxy`/`all_proxy`（桌面代理会把一条能用的 longhu 路线
   变成每晚的假失败），再用**当前 venv** 的 python 调
   `scripts/adjustment-factor-maintenance.py sync --lookback-days 30 --env-file ...`，
   逐行写入 `G:\StockPlatform\logs\adjustment-factors\<date>.log`，并透传退出码。
@@ -601,19 +828,22 @@ python scripts/adjustment-factor-maintenance.py sync \
   `quality_status IN ('fresh','partial')` 的结算 bar 中，
   **在 `quant.daily_adjustment_factors` 里有真实累计因子**的比例低于
   `ceil(0.95 * count(*))` 的交易日。"真实"用的是和写入方同一条正向规则
-  （`REAL_FACTOR_PREDICATE_SQL`：provider 以 `tushare` 开头，且语义缺省或
+  （`REAL_FACTOR_PREDICATE_SQL` = `promotable_factor_evidence_sql()`：`longhu_qfq_derived` 且显式累计语义，
+  或 provider 以 `tushare` 开头，且语义缺省或
   `corporate_action_cumulative`），不是"不等于那一个占位标记"——否则一个
   不写标记的厂商占位同样能冒充覆盖。阈值复用
   `daily_control_plane.MINIMUM_ALL_A_COVERAGE_RATIO`。
   判定问的是因子表而不是 bar 上的 `adj_factor`，所以修复前后都成立。
-- 每个待补日期调用 `full_market_daily_controls_sync.sync(date, apis=('adj_factor',), ...)`，
+- 每个待补日期交给 `repair_factor_date(session, date)`（2026-09-19 前是
+  `full_market_daily_controls_sync.sync(date, apis=('adj_factor',))` 的 tushare 拉取）：整轮只读一次
+  窗口、抓一次 longhu、推导一次（`FactorLaneSession`），再按日期逐个事务写入（第 0.4 节）。
   单日失败不终止整轮。每个日期归为三种 `outcome` 之一：
 
   | outcome | 触发条件 | 影响 |
   |---|---|---|
-  | `completed` | 抓取并提升成功 | 清掉该日期的"连续被拒"计数 |
-  | `skipped` | `blocked` 且 `blocked_by='coverage'`（当日日线截面不够 95%） | **不算失败**，带 `reason` 上报 |
-  | `failed` | 抛异常，或 `blocked_by` 是 `provider` / `executor_saturated` | 整轮 `status='failed'` |
+  | `completed` | 推导并写入成功 | 清掉该日期的"连续被拒"计数 |
+  | `skipped` | `blocked` 且 `blocked_by='coverage'`（当日日线截面不够 95%，`daily_row_count()` 为 0） | **不算失败**，带 `reason` 上报 |
+  | `failed` | 抛异常，或 `blocked_by='provider'`（longhu 抓取失败超过 5% 的票，或推导覆盖不足当日 95%） | 整轮 `status='failed'` |
 
 - **退出码：只有 `status='failed'` 才返回 1**，其余（`completed` / `planned` /
   `unchanged` / `skipped`）返回 0。原因：这条车道修不了别人家的日线截面，
@@ -678,12 +908,12 @@ python scripts/adjustment-factor-maintenance.py status \
 
 | 字段 | 内容 |
 |---|---|
-| `dates[]` | 窗口内每个开市结算日的 `daily_rows` / `adjustment_rows`（真实 tushare 因子）/ `coverage_ratio` / `pending` / `retired` |
+| `dates[]` | 窗口内每个开市结算日的 `daily_rows` / `adjustment_rows`（真实因子：tushare 历史行或 `longhu_qfq_derived`）/ `coverage_ratio` / `pending` / `retired` |
 | `dates[].retired` | 已退休时带 `run_key`（要清的那一行）、`reason`、`blocked_days`、`consecutive_blocked_runs` |
 | `pending_dates` / `retired_dates` | 与车道工作清单同源的两份清单 |
 | `identity_factor_leaks` | 第 4 节步骤 6 的守护查询，**不带窗口**（它是发布门槛，必须全表为 0；带窗口的版本会在污染落在窗口外时假装通过），两张 bar 表各一个数 |
 | `factor_fetch_runs[]` | 最近几条 `capability='adj_factor'` 的 `quant.fetch_runs`：provider / status / row_count / 时间 / `error_class`。**不含 `last_error` 正文**——那是形状不受控的 provider 文本，这份报告会被贴进工单 |
-| `provider_capability` | `capability_registry.api_capability('adj_factor')`：`preferred_providers`、`status`，`available` 即 `status == 'verified'`（"已有真实截面从这条路线落地"，不是一句声明） |
+| `provider_capability` | `adjustment_factor_maintenance.longhu_factor_route()`：唯一路线 `longhu_qfq_derived`，`status='verified'` 只表示本机配置了 longhu 授权源；因子是否真的落地看 `factor_fetch_runs` 与逐日覆盖（2026-09-19 前读的是 tushare 的 capability registry） |
 | `provider_health[]` | `quant.provider_health` 里该 capability 的每条路线：连续失败数、熔断是否打开、最近成功/失败时间 |
 | `post_close_stage_receipt` | 最近一条非门控盘后阶段回执（`task_key='post_close_refresh.stage'`、`run_key LIKE '%:adjustment_factors:%'`），只摘 `status` / `lane_status` / `retryable` / `unrepaired_dates` / `lookback_days` / `reason` |
 | `summary` | 一行人读的小结（纯函数 `status_summary()`，由单测钉住，不会和上面的数字走散） |

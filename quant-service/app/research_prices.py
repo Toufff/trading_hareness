@@ -160,7 +160,7 @@ def resolve_factors(rows: list[dict[str, Any]]) -> FactorResolution:
 
     Nothing here is ever written back: the carried factor lives in one
     request's research view.  ``quant.canonical_bars_daily.adj_factor`` stays
-    NULL until tushare supplies the real cumulative factor, which is what
+    NULL until the factor lane derives the real cumulative factor, which is what
     ``tests/test_adjustment_factor_semantics_guard.py`` protects.
     """
     if not rows:

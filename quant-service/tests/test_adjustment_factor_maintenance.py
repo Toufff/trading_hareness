@@ -131,6 +131,9 @@ class _Connection:
             self.ledger.clear(params[0])
         if "quant.automation_runs" in text or "data_quality_issues" in text:
             return _Result([])
+        if "factor.adj_factor = bar.adj_factor" in text:
+            # The value-mismatch query: this estate has none.
+            return _Result([])
         return _Result(self.rows)
 
 
@@ -148,6 +151,32 @@ class _Database:
 
 async def _run_database(action, *args, **_kwargs):
     return action(*args)
+
+
+def _no_longhu():
+    raise AssertionError("these tests replace the per-date repair; nothing may reach longhu")
+
+
+async def _no_public_call(*_args, **_kwargs):
+    raise AssertionError("these tests replace the per-date repair; nothing may fetch")
+
+
+def _per_date(fake):
+    """Adapt a per-date fake to :func:`repair_factor_date`'s ``(session, date)``.
+
+    The lane's per-date unit used to be the tushare controls sync; it is now
+    the longhu derivation.  The fakes below describe per-date OUTCOMES (the
+    contract the ledger and the receipt depend on), so they are reused as-is.
+    """
+    import inspect
+
+    async def repair(_session, trade_date):
+        result = fake(trade_date, apis=("adj_factor",))
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    return repair
 
 
 class PendingDatesTests(unittest.TestCase):
@@ -240,10 +269,8 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
     def _dependencies(self, database, **overrides):
         base = dict(
             database=database, run_database=_run_database,
-            call_tushare_api=None, parse_tushare_date=None, persist_tushare_rows=None,
-            persist_blocked=None, safe_error_detail=lambda value, _limit: value,
-            executor_saturated_error=RuntimeError, record_provider_success=None,
-            record_provider_failure=None, record_provider_api_capability=None,
+            longhu_source=_no_longhu, run_public=_no_public_call,
+            safe_error_detail=lambda value, _limit: value,
         )
         base.update(overrides)
         return AdjustmentFactorMaintenanceDependencies(**base)
@@ -253,15 +280,15 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
         import app.adjustment_factor_maintenance as module
 
         def explode(*_args, **_kwargs):
-            raise AssertionError("a dry run must not reach the controls sync")
+            raise AssertionError("a dry run must not reach the per-date repair")
 
-        original = module.sync_daily_controls
-        module.sync_daily_controls = explode
+        original = module.repair_factor_date
+        module.repair_factor_date = _per_date(explode)
         try:
             result = await sync(self._dependencies(database), lookback_days=30, dry_run=True,
                                 today=date(2026, 9, 19))
         finally:
-            module.sync_daily_controls = original
+            module.repair_factor_date = original
 
         self.assertEqual(result["status"], "planned")
         self.assertEqual(result["pending_dates"], ["2026-09-17"])
@@ -278,12 +305,12 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
             seen.append((trade_date, kwargs["apis"]))
             return {"status": "completed", "trade_date": str(trade_date)}
 
-        original = module.sync_daily_controls
-        module.sync_daily_controls = fake_sync
+        original = module.repair_factor_date
+        module.repair_factor_date = _per_date(fake_sync)
         try:
             result = await sync(self._dependencies(database), today=date(2026, 9, 19))
         finally:
-            module.sync_daily_controls = original
+            module.repair_factor_date = original
 
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["completed_dates"], 2)
@@ -300,12 +327,12 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("provider refused")
             return {"status": "completed", "trade_date": str(trade_date)}
 
-        original = module.sync_daily_controls
-        module.sync_daily_controls = fake_sync
+        original = module.repair_factor_date
+        module.repair_factor_date = _per_date(fake_sync)
         try:
             result = await sync(self._dependencies(database), today=date(2026, 9, 19))
         finally:
-            module.sync_daily_controls = original
+            module.repair_factor_date = original
 
         self.assertEqual(result["status"], "failed")
         self.assertEqual((result["completed_dates"], result["skipped_dates"], result["failed_dates"]),
@@ -322,12 +349,12 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
                     "blocked_by": COVERAGE_BLOCK_REASON,
                     "reason": "full-market daily bars are not ready"}
 
-        original = module.sync_daily_controls
-        module.sync_daily_controls = fake_sync
+        original = module.repair_factor_date
+        module.repair_factor_date = _per_date(fake_sync)
         try:
             result = await sync(self._dependencies(database), today=date(2026, 9, 19))
         finally:
-            module.sync_daily_controls = original
+            module.repair_factor_date = original
 
         # The factor lane cannot repair a thin daily cross-section, so this is
         # a report, not a failure: a scheduled task must not alert forever.
@@ -360,8 +387,8 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
                     "blocked_by": COVERAGE_BLOCK_REASON,
                     "reason": "full-market daily bars are not ready"}
 
-        original = module.sync_daily_controls
-        module.sync_daily_controls = fake_sync
+        original = module.repair_factor_date
+        module.repair_factor_date = _per_date(fake_sync)
         try:
             for offset in range(MAX_CONSECUTIVE_BLOCKED_RUNS - 1):
                 ledger.day = date(2026, 9, 15) + timedelta(days=offset)
@@ -382,7 +409,7 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
             retiring = await post_close_sync(dependencies, today=date(2026, 9, 19))
             after = await post_close_sync(dependencies, today=date(2026, 9, 19))
         finally:
-            module.sync_daily_controls = original
+            module.repair_factor_date = original
 
         self.assertEqual(retiring["status"], "blocked")
         self.assertEqual(retiring["results"][0]["ledger"]["consecutive_blocked_runs"],
@@ -400,12 +427,12 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
             return {"status": "blocked", "trade_date": str(trade_date),
                     "blocked_by": PROVIDER_BLOCK_REASON, "reason": "adj_factor route refused"}
 
-        original = module.sync_daily_controls
-        module.sync_daily_controls = fake_sync
+        original = module.repair_factor_date
+        module.repair_factor_date = _per_date(fake_sync)
         try:
             result = await sync(self._dependencies(database), today=date(2026, 9, 19))
         finally:
-            module.sync_daily_controls = original
+            module.repair_factor_date = original
 
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["results"][0]["outcome"], "failed")
@@ -419,12 +446,12 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
         def explode(*_args, **_kwargs):
             raise AssertionError("a retired date must not be fetched again")
 
-        original = module.sync_daily_controls
-        module.sync_daily_controls = explode
+        original = module.repair_factor_date
+        module.repair_factor_date = _per_date(explode)
         try:
             result = await sync(self._dependencies(database), today=date(2026, 9, 19))
         finally:
-            module.sync_daily_controls = original
+            module.repair_factor_date = original
 
         self.assertEqual(result["status"], "unchanged")
         self.assertEqual(result["pending_dates"], ["2026-09-17"])
@@ -438,12 +465,12 @@ class SyncTests(unittest.IsolatedAsyncioTestCase):
         async def fake_sync(trade_date, **_kwargs):
             return {"status": "completed", "trade_date": str(trade_date)}
 
-        original = module.sync_daily_controls
-        module.sync_daily_controls = fake_sync
+        original = module.repair_factor_date
+        module.repair_factor_date = _per_date(fake_sync)
         try:
             await sync(self._dependencies(database), today=date(2026, 9, 19))
         finally:
-            module.sync_daily_controls = original
+            module.repair_factor_date = original
 
         cleared = [call for call in database.connection.calls
                    if "'consecutive_blocked_runs', 0" in call[0]]
@@ -576,10 +603,8 @@ class PostCloseLookbackWindowTests(unittest.IsolatedAsyncioTestCase):
         database = _Database([], sessions={"oldest_session": date(2026, 8, 30), "sessions": 6})
         dependencies = AdjustmentFactorMaintenanceDependencies(
             database=database, run_database=_run_database,
-            call_tushare_api=None, parse_tushare_date=None, persist_tushare_rows=None,
-            persist_blocked=None, safe_error_detail=lambda value, _limit: value,
-            executor_saturated_error=RuntimeError, record_provider_success=None,
-            record_provider_failure=None, record_provider_api_capability=None,
+            longhu_source=_no_longhu, run_public=_no_public_call,
+            safe_error_detail=lambda value, _limit: value,
         )
         result = await post_close_sync(dependencies, today=date(2026, 9, 19))
         self.assertEqual(result["lookback_days"], 20)
@@ -591,10 +616,8 @@ class PostCloseLookbackWindowTests(unittest.IsolatedAsyncioTestCase):
         database = _Database([], sessions={"oldest_session": date(2026, 8, 30), "sessions": 6})
         dependencies = AdjustmentFactorMaintenanceDependencies(
             database=database, run_database=_run_database,
-            call_tushare_api=None, parse_tushare_date=None, persist_tushare_rows=None,
-            persist_blocked=None, safe_error_detail=lambda value, _limit: value,
-            executor_saturated_error=RuntimeError, record_provider_success=None,
-            record_provider_failure=None, record_provider_api_capability=None,
+            longhu_source=_no_longhu, run_public=_no_public_call,
+            safe_error_detail=lambda value, _limit: value,
         )
         result = await post_close_sync(dependencies, lookback_days=3, today=date(2026, 9, 19))
         self.assertEqual(result["lookback_days"], 3)
@@ -673,10 +696,8 @@ class PostCloseStageReceiptTests(unittest.IsolatedAsyncioTestCase):
     def _dependencies(self, database, **overrides):
         base = dict(
             database=database, run_database=_run_database,
-            call_tushare_api=None, parse_tushare_date=None, persist_tushare_rows=None,
-            persist_blocked=None, safe_error_detail=lambda value, _limit: value,
-            executor_saturated_error=RuntimeError, record_provider_success=None,
-            record_provider_failure=None, record_provider_api_capability=None,
+            longhu_source=_no_longhu, run_public=_no_public_call,
+            safe_error_detail=lambda value, _limit: value,
         )
         base.update(overrides)
         return AdjustmentFactorMaintenanceDependencies(**base)
@@ -689,12 +710,12 @@ class PostCloseStageReceiptTests(unittest.IsolatedAsyncioTestCase):
         async def fake_sync(trade_date, **_kwargs):
             return dict(outcomes[str(trade_date)], trade_date=str(trade_date))
 
-        original = module.sync_daily_controls
-        module.sync_daily_controls = fake_sync
+        original = module.repair_factor_date
+        module.repair_factor_date = _per_date(fake_sync)
         try:
             return await post_close_sync(self._dependencies(database), today=date(2026, 9, 19))
         finally:
-            module.sync_daily_controls = original
+            module.repair_factor_date = original
 
     @staticmethod
     async def _record(ledger, payload, *, calls):
@@ -1352,6 +1373,11 @@ class StatusSummaryTests(unittest.TestCase):
             "no post-close factor-stage receipt")
         self.assertNotIn("\n", summary)
 
+    def test_value_mismatches_are_reported_when_the_report_carries_them(self):
+        summary = module.status_summary(self._report(
+            factor_value_mismatches={"canonical_bars_daily": 25145, "market_bars_daily": 0}))
+        self.assertIn("identity factor leaks 0; factor value mismatches 25145;", summary)
+
     def test_a_leak_on_either_guarded_table_is_reported(self):
         summary = module.status_summary(self._report(
             identity_factor_leaks={"canonical_bars_daily": 35573, "market_bars_daily": 0}))
@@ -1400,6 +1426,27 @@ class MaintenanceCliTests(unittest.TestCase):
         # A report must not be able to fetch or repair anything, so it carries
         # no switch that could turn it into one.
         self.assertFalse(hasattr(module.parse_args(["status"]), "dry_run"))
+
+    def test_cli_parses_the_repair_and_validate_contracts(self):
+        module = self._module()
+        dry = module.parse_args(["repair"])
+        self.assertEqual((dry.command, dry.apply, dry.from_date, dry.to_date), ("repair", False, None, None))
+        applied = module.parse_args(["repair", "--from", "2026-08-27", "--to", "2026-09-18", "--apply"])
+        self.assertEqual((applied.from_date, applied.to_date, applied.apply),
+                         (date(2026, 8, 27), date(2026, 9, 18), True))
+        validate = module.parse_args(["validate"])
+        self.assertEqual((validate.from_date, validate.to_date), (date(2026, 6, 1), date(2026, 8, 26)))
+
+    def test_the_dry_run_and_validation_use_a_server_enforced_read_only_connection(self):
+        from pathlib import Path
+
+        source = Path(self._module().__file__).read_text(encoding="utf-8")
+        self.assertIn("default_transaction_read_only=on", source)
+        # The write path (app.main's pool) is imported only after both read-only
+        # branches have returned.
+        read_only_branch = source.index('if args.command == "repair" and not args.apply:')
+        self.assertLess(read_only_branch, source.index("from app.main import"))
+        self.assertLess(source.index('if args.command == "validate":'), source.index("from app.main import"))
 
     def test_env_file_loader_never_echoes_a_value(self):
         import os

@@ -51,7 +51,7 @@ UNKNOWN_EXCHANGE = 'UNKNOWN'
 
 #: Selected providers that publish a settled cross-section but no
 #: corporate-action history.  A bar sourced from one of them legitimately has
-#: no ``adj_factor`` until the separate tushare factor lane fills it in, which
+#: no ``adj_factor`` until the separate (longhu-derived) factor lane fills it in, which
 #: is what makes a missing factor ``pending`` rather than ``absent``.
 PROVIDERS_WITHOUT_ADJUSTMENT_FACTORS = ('longhuvip_composite',)
 
@@ -513,7 +513,7 @@ def _longhu_control_status(database: Any, trade_date: date) -> dict[str, Any] | 
     # four-API tushare sync whose adj_factor route is currently failing.
     if daily_rows >= LONGHU_MINIMUM_DAILY_ROWS and limit_rows >= minimum_control_rows:
         note = (
-            "adj_factor is not supplied by this vendor and is fetched on its own lane by "
+            "adj_factor is not supplied by this vendor and is derived from the longhu kline on its own lane by "
             "adjustment_factor_maintenance; limits are board-rule derived and retain "
             "IPO/resumption warnings"
         )

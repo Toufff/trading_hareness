@@ -97,10 +97,44 @@ PROMOTABLE_FACTOR_PROVIDER_PREFIX = "tushare"
 #: cross-section row, which carries no marker at all.
 PROMOTABLE_FACTOR_SEMANTICS = ("", CUMULATIVE_FACTOR_SEMANTICS)
 
+#: The one non-tushare provider allowed to set ``adj_factor`` on a bar: the
+#: cumulative series continued from the licensed longhu kline
+#: (``app.longhu_adjustment_factors``, 2026-09-19, after tushare was removed
+#: from the factor lane).  It was added here deliberately, as the rule above
+#: demands, and is held to a STRICTER semantics test than a legacy tushare
+#: row: it must declare ``corporate_action_cumulative`` explicitly -- a
+#: derived row that omits the marker is refused.  It is deliberately NOT part
+#: of :func:`promotable_factor_provider`, whose one caller
+#: (``annual_daily_backfill``) promotes tushare cross-sections with the
+#: legacy "absent semantics is fine" half of the rule.
+DERIVED_FACTOR_PROVIDER = "longhu_qfq_derived"
+
 
 def promotable_factor_provider(provider_key: Any) -> bool:
-    """Return whether this provider may ever set ``adj_factor`` on a bar."""
+    """Return whether this tushare-family provider may set ``adj_factor`` on a bar."""
     return str(provider_key or "").startswith(PROMOTABLE_FACTOR_PROVIDER_PREFIX)
+
+
+def promotable_factor_evidence_sql(alias: str = "factor", column: str = "raw") -> str:
+    """SQL for "this ``daily_adjustment_factors`` row may back a bar factor".
+
+    Both halves of :func:`promotable_adjustment_factor` against a factor-table
+    alias: a tushare route with absent or cumulative semantics, OR the derived
+    longhu provider with EXPLICIT cumulative semantics.  The release guard, the
+    work list and the readiness coverage all ask this one question.  Written
+    for statements WITHOUT bound parameters; a statement that binds parameters
+    uses :func:`promotable_factor_evidence_sql_param`.
+    """
+    semantics = f"coalesce({alias}.{column}->>'factor_semantics','')"
+    values = ",".join(f"'{value}'" for value in PROMOTABLE_FACTOR_SEMANTICS)
+    return (f"(({alias}.provider LIKE '{PROMOTABLE_FACTOR_PROVIDER_PREFIX}%' AND {semantics} IN ({values}))"
+            f" OR ({alias}.provider = '{DERIVED_FACTOR_PROVIDER}'"
+            f" AND {semantics} = '{CUMULATIVE_FACTOR_SEMANTICS}'))")
+
+
+def promotable_factor_evidence_sql_param(alias: str = "factor", column: str = "raw") -> str:
+    """:func:`promotable_factor_evidence_sql` with ``%`` doubled for bound statements."""
+    return promotable_factor_evidence_sql(alias, column).replace("%", "%%")
 
 
 def promotable_factor_predicate_sql(alias: str = "stage", column: str = "row_data") -> str:
@@ -124,10 +158,15 @@ def promotable_adjustment_factor(row: dict[str, Any], *, provider_key: str) -> b
     :data:`CUMULATIVE_FACTOR_SEMANTICS`.  A row that fails either half is
     still stored in ``quant.daily_adjustment_factors`` as evidence of what a
     vendor did or did not supply; it simply never becomes a bar field.
+
+    :data:`DERIVED_FACTOR_PROVIDER` is the one non-tushare exception and must
+    carry :data:`CUMULATIVE_FACTOR_SEMANTICS` explicitly.
     """
+    semantics = row.get("factor_semantics")
+    if str(provider_key or "") == DERIVED_FACTOR_PROVIDER:
+        return str(semantics or "") == CUMULATIVE_FACTOR_SEMANTICS
     if not promotable_factor_provider(provider_key):
         return False
-    semantics = row.get("factor_semantics")
     if semantics in (None, ""):
         return True
     return str(semantics) == CUMULATIVE_FACTOR_SEMANTICS
@@ -318,7 +357,8 @@ def normalize_rows(
 
 
 __all__ = [
-    "CUMULATIVE_FACTOR_SEMANTICS", "PROMOTABLE_FACTOR_PROVIDER_PREFIX", "PROMOTABLE_FACTOR_SEMANTICS",
+    "CUMULATIVE_FACTOR_SEMANTICS", "DERIVED_FACTOR_PROVIDER", "PROMOTABLE_FACTOR_PROVIDER_PREFIX",
+    "PROMOTABLE_FACTOR_SEMANTICS", "promotable_factor_evidence_sql", "promotable_factor_evidence_sql_param",
     "STOCK_BASIC_INSTRUMENTS_SQL", "normalize_rows", "persist_stock_basic_instruments",
     "promotable_adjustment_factor", "promotable_factor_predicate_sql", "promotable_factor_provider",
 ]
