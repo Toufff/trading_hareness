@@ -119,8 +119,8 @@
   materialize_watchlist_proposals`。中间阶段不依赖账本：`recompute_outcomes` 只结算入场日
   （严格晚于候选日期的第一根日线）已存在的账本行，当日候选当日不可能有入场日。
   副作用：推荐阶段若抛错，账本/观察建议也不再执行（原先推荐抛错整轮同样失败，重跑补齐）。
-- 注意：feature_version 未改名（仍为 `multi-source-feature-v3`），但 9/19 之后的快照与之前的在
-  as_of 语义上相差一个交易日；跨该日期比较 run 级指标时需按 `market_data_date` 对齐。
+- feature_version 随此改动升为 `multi-source-feature-v4`：v4 快照读当日收盘，v3 快照只读到前一交易日，
+  两者在 as_of 语义上相差一个交易日；跨版本比较 run 级指标时按 `market_data_date` 对齐。
 
 ## 验收
 
