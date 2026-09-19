@@ -88,6 +88,11 @@ from .tushare_normalization import (
 PROVIDER_KEY = DERIVED_FACTOR_PROVIDER
 SOURCE = "longhuvip:GetKLineDay_W14"
 METHOD_VERSION = "longhu_cq_preclose_qfq_v2"
+#: ``raw->>'method'`` prefix of a derived-provider row an OPERATOR wrote by
+#: hand (300176.SZ ``manual_reanchor_rights_issue``, 2026-09-19).  It is a
+#: decision, not this lane's output: the repair never recomputes it, it is a
+#: checkpoint like any stored real factor.
+MANUAL_METHOD_PREFIX = "manual_"
 
 #: A-share price tick.
 PRICE_TICK = 0.01
@@ -537,6 +542,13 @@ class Checkpoint:
     #: The stored numeric exactly as read, so a promoted checkpoint equals its
     #: evidence row bit for bit (a float round trip can drop digits).
     value: Decimal | None = None
+    #: ``raw->>'method'`` of the stored row ('' when absent).
+    method: str = ""
+
+    @property
+    def manual(self) -> bool:
+        """An operator's hand-written row: never re-derived by the repair."""
+        return self.method.startswith(MANUAL_METHOD_PREFIX)
 
     @property
     def exact(self) -> Decimal:
@@ -907,7 +919,8 @@ SELECT bar.symbol, bar.trading_date, bar.close, bar.pre_close, bar.adj_factor,
 CHECKPOINTS_SQL = f"""
 SELECT DISTINCT ON (factor.symbol, factor.trading_date)
        factor.symbol, factor.trading_date, factor.adj_factor, factor.provider,
-       coalesce(factor.raw->>'factor_semantics','') AS factor_semantics
+       coalesce(factor.raw->>'factor_semantics','') AS factor_semantics,
+       coalesce(factor.raw->>'method','') AS method
   FROM quant.daily_adjustment_factors factor
   JOIN unnest(%(symbols)s::text[], %(starts)s::date[]) AS wanted(symbol, start_date)
     ON wanted.symbol = factor.symbol
@@ -915,6 +928,8 @@ SELECT DISTINCT ON (factor.symbol, factor.trading_date)
    AND factor.adj_factor > 0
    AND {promotable_factor_evidence_sql_param('factor', 'raw')}
  ORDER BY factor.symbol, factor.trading_date,
+          -- An operator's manual row outranks everything else on its date.
+          (coalesce(factor.raw->>'method','') LIKE '{MANUAL_METHOD_PREFIX}%%') DESC,
           -- The row the bar already carries wins: tushare routes disagree in
           -- the 5th-7th digit (tushare_primary 6471.278 vs tushare_super_sdk
           -- 6471.28 for 600601.SH 08-31) and swapping one real value for
@@ -964,7 +979,7 @@ def read_window(connection: Any, from_date: date, to_date: date, *,
     for row in connection.execute(CHECKPOINTS_SQL, {"symbols": names, "starts": starts, "to_date": to_date}).fetchall():
         stored.setdefault(row["symbol"], {})[row["trading_date"]] = Checkpoint(
             row["trading_date"], float(row["adj_factor"]), row["provider"], row["factor_semantics"],
-            Decimal(str(row["adj_factor"])))
+            Decimal(str(row["adj_factor"])), row.get("method") or "")
     market = {(row["symbol"], row["trading_date"]): row["adj_factor"] for row in connection.execute(
         MARKET_BARS_SQL, {"from_date": from_date, "to_date": to_date, "symbols": names}).fetchall()}
     earliest = min([value for value in starts if value is not None] or [from_date])
@@ -1025,7 +1040,10 @@ def build_plan(
     already wrote on dates it is not re-working) or is recomputed (the repair:
     idempotent re-runs recompute the same values from the same anchor).
     tushare rows are ALWAYS checkpoints: a real stored factor is never
-    overwritten by a derivation.
+    overwritten by a derivation -- unless it is marked ``superseded_at``, in
+    which case it is not read as a checkpoint at all (CHECKPOINTS_SQL).  A
+    derived-provider row an operator wrote by hand (:data:`MANUAL_METHOD_PREFIX`)
+    is a checkpoint too, in the repair as well.
 
     ``null_only_dates`` are extra dates on which a row is written ONLY where
     the bar has no factor at all (the nightly lane closing a hole a failed
@@ -1056,7 +1074,7 @@ def build_plan(
         stored = inputs.stored.get(symbol, {})
         checkpoints = {
             value: checkpoint for value, checkpoint in stored.items()
-            if checkpoint.provider != PROVIDER_KEY
+            if checkpoint.provider != PROVIDER_KEY or checkpoint.manual
             or (not rederive_derived and value not in target_set)
         }
         first_bar = anchor.get("first_bar_date")
@@ -1296,6 +1314,7 @@ SELECT DISTINCT ON (factor.symbol, factor.trading_date)
  WHERE factor.trading_date BETWEEN %(from_date)s AND %(to_date)s
    AND factor.provider LIKE 'tushare%%' AND factor.adj_factor > 0
    AND coalesce(factor.raw->>'factor_semantics','') IN ('', '{CUMULATIVE_FACTOR_SEMANTICS}')
+   AND factor.raw->>'superseded_at' IS NULL
    AND factor.symbol ~ '{A_SHARE_SQL_PATTERN}'
  ORDER BY factor.symbol, factor.trading_date,
           {PROVIDER_PREFERENCE_SQL.format(alias='factor')}, factor.available_at DESC"""
