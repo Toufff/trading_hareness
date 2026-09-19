@@ -41,4 +41,4 @@
 1. `pytest tests/test_daily_control_plane.py tests/test_migration_contracts.py tests/test_repository_workflow_policy.py -q` 通过；`ruff check app tests` 通过；`git diff --check` 通过。
 2. PowerShell：`pwsh -File scripts/windows/tests/test-post-close-pipeline-contract.ps1` 通过，且现有 `test-*.ps1` 不受影响。
 3. 用生产库只读跑 `scripts/equity-readiness.py --date 2026-09-18`：期望 `state=ready`，`by_exchange.BJ` 显示 0 覆盖且未参与门槛，`expected_delta=+305` 并带来源分组。
-4. 发布后 16:40—22:40 重试窗口外用 `-Force` 重跑一次流水线，日志出现 `research_status=research_due` 与 `research_deadline`，随后由会话完成研究闭环，再次读回应为 `complete`。
+4. 发布后 16:00—23:00 重试窗口（2026-09-19 起；原 16:40—22:40）外用 `-Force` 重跑一次流水线，日志出现 `research_status=research_due` 与 `research_deadline`，随后由会话完成研究闭环，再次读回应为 `complete`。

@@ -7,10 +7,14 @@ param(
     # First attempt of the day, in exchange time. The pipeline is idempotent
     # and run-post-close-pipeline.ps1 no-ops once the date has landed, so the
     # repetition below is free insurance against a transient upstream failure
-    # rather than repeated work.
-    [string]$StartTime = '16:40',
+    # rather than repeated work. 16:00 (user decision 2026-09-19): the licensed
+    # close cross-section was complete by 16:03 on 2026-09-15 and 2026-09-17,
+    # and a run that finds the date not ready records that and the next
+    # repetition retries. Seven hours keeps the last retry at 23:00, inside
+    # run-post-close-pipeline.ps1's -UntilHHmm window.
+    [string]$StartTime = '16:00',
     [int]$RetryIntervalMinutes = 30,
-    [int]$RetryWindowHours = 6,
+    [int]$RetryWindowHours = 7,
     [ValidateSet('S4U', 'Interactive', 'Password')][string]$LogonType = 'S4U',
     [PSCredential]$Credential
 )
