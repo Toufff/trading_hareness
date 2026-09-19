@@ -442,12 +442,19 @@ function Test-StockReleaseIntegrity {
 # Import-Module/Add-Type anywhere on the chain fails the test instead of
 # silently leaving the gate under-detecting):
 #
+#   install-shared-tunnel-tasks.ps1 (the fan-out publish/switch call: intraday
+#   first and unguarded, then batch, then the TCP-separation measurement)
+#     -> install-shared-tunnel-task.ps1 -Profile <intraday|batch>
+#        -> shared-tunnel-profiles.psm1 (ports, forwarding tuples, service and
+#           task names, lock files, health and state-freshness judges -- one
+#           module shared by BOTH tunnels)
 #   scheduled task action (stock-background-host.exe, registered by
 #   install-shared-tunnel-task.ps1 via New-HiddenPowerShellTaskAction in
 #   background-process.psm1)
 #     -> the executable's build inputs (build-background-task-host.ps1 ->
 #        process-lifetime.cs, background-task-host.cs)
-#     -> start-shared-tunnels.ps1 (the script the host launches)
+#     -> start-shared-tunnels.ps1 (the script the host launches, for both
+#        profiles)
 #        -> Import-Module runtime-observability.psm1, background-process.psm1
 #        -> Start-RuntimeSupervisor (runtime-observability.psm1)
 #           -> scripts\windows\supervise-runtime-process.ps1, which owns the
@@ -460,6 +467,14 @@ $script:StockTunnelAffectingFiles = @(
     'scripts\shared-peer\start-shared-tunnels.ps1',
     # Defines the task action, triggers, settings and the health gate itself.
     'scripts\shared-peer\install-shared-tunnel-task.ps1',
+    # The fan-out publish/switch actually invoke: it installs the intraday task
+    # and then the batch one, and it is where "a batch failure must not fail a
+    # release" is decided. A change here changes what a reinstall would produce.
+    'scripts\shared-peer\install-shared-tunnel-tasks.ps1',
+    # Both profiles' ports, forwarding tuples, service/task names, lock files,
+    # health judge and state-freshness judge. Shared by BOTH tunnels, which is
+    # why a change to it must never be spared by a skip on either of them.
+    'scripts\shared-peer\shared-tunnel-profiles.psm1',
     # Supervisor, runtime state/event writers and the ssh target resolution
     # used by the tunnel script.
     'scripts\windows\runtime-observability.psm1',
@@ -484,11 +499,16 @@ $script:StockTunnelAffectingFiles = @(
     'scripts\windows\build-background-task-host.ps1'
 )
 
-# Where Get-StockTunnelExecutionChainFile starts walking. These two are the
-# chain's roots and cannot be discovered from inside it: the installer defines
-# the task action, and the build script defines what the action's executable is
-# compiled from.
+# Where Get-StockTunnelExecutionChainFile starts walking. These three are the
+# chain's roots and cannot be discovered from inside it: the fan-out installer
+# is what publish/switch call, the per-profile installer defines the task
+# action, and the build script defines what the action's executable is compiled
+# from. The per-profile installer is listed explicitly as well as being reached
+# from the fan-out, because the fan-out invokes it through the `$installer`
+# variable (`& $installer -Profile intraday @common`) rather than by literal
+# path, and an entry point costs nothing when it is already in the closure.
 $script:StockTunnelChainEntryPoints = @(
+    'scripts\shared-peer\install-shared-tunnel-tasks.ps1',
     'scripts\shared-peer\install-shared-tunnel-task.ps1',
     'scripts\windows\build-background-task-host.ps1'
 )
@@ -1160,7 +1180,25 @@ function Get-StockTunnelReinstallDecision {
         # was only approximate (see Get-StockTunnelPinRefresh). CurrentHashes
         # then describes a tree that may not be the one the process is executing
         # out of, which is not a baseline a skip may rest on.
-        [bool]$TunnelPinUncertain = $false
+        [bool]$TunnelPinUncertain = $false,
+        # The OTHER supervised tunnel tasks a (re)install would register -- today
+        # exactly one, the batch profile. Each entry is
+        #   @{ Name = 'batch'; TaskState = ...; RuntimeStatus = ...;
+        #      TaskActionUnderCurrent = ...; TaskActionPathState = ... }
+        # and is held to the same four conditions as the intraday task above,
+        # with the profile name prefixed onto the reason so a receipt says WHICH
+        # tunnel refused the skip. The file hashes are deliberately NOT repeated
+        # per task: both profiles execute the same chain out of the same tree
+        # (install-shared-tunnel-tasks.ps1 -> install-shared-tunnel-task.ps1 ->
+        # shared-tunnel-profiles.psm1 -> start-shared-tunnels.ps1), which is why
+        # that module is in $script:StockTunnelAffectingFiles.
+        #
+        # An empty list means the caller observed no other task. That is the
+        # honest reading of "no observation", not "all clear":
+        # Resolve-StockTunnelReinstallPlan always passes the batch profile, and
+        # test-stock-release-safety.ps1 asserts that it does, so the empty
+        # default cannot quietly become production's behaviour.
+        [hashtable[]]$AdditionalTasks = @()
     )
     if ($null -eq $CurrentHashes) { $CurrentHashes = @{} }
     if ($null -eq $NewHashes) { $NewHashes = @{} }
@@ -1222,6 +1260,34 @@ function Get-StockTunnelReinstallDecision {
     # leaves an action Task Scheduler can no longer launch; only a reinstall
     # re-resolves it.
     if ($TaskActionPathState -ne 'ok') { $reasons += 'task_action_path_missing' }
+    # The other tunnel tasks, judged by exactly the same four rules. A batch
+    # tunnel that is not registered, not running, not healthy or whose action no
+    # longer resolves is a reinstall reason: the fan-out installer is what would
+    # put it back, and it can only run if this publish does not skip.
+    $additionalOrdered = [ordered]@{}
+    foreach ($entry in @($AdditionalTasks)) {
+        if ($null -eq $entry) { continue }
+        $prefix = if ($entry.ContainsKey('Name')) { [string]$entry['Name'] } else { '' }
+        if (-not $prefix) { $prefix = 'additional' }
+        $readEntry = {
+            param($Key)
+            if ($entry.ContainsKey($Key)) { [string]$entry[$Key] } else { '' }
+        }
+        $entryTaskState = & $readEntry 'TaskState'
+        $entryRuntimeStatus = & $readEntry 'RuntimeStatus'
+        $entryUnderCurrent = & $readEntry 'TaskActionUnderCurrent'
+        $entryPathState = & $readEntry 'TaskActionPathState'
+        if ($entryTaskState -ne 'Running') { $reasons += ($prefix + '_task_not_running') }
+        if ($entryRuntimeStatus -ne 'healthy') { $reasons += ($prefix + '_runtime_state_not_healthy') }
+        if ($entryUnderCurrent -ne 'yes') { $reasons += ($prefix + '_task_action_not_under_current') }
+        if ($entryPathState -ne 'ok') { $reasons += ($prefix + '_task_action_path_missing') }
+        $additionalOrdered[$prefix] = [ordered]@{
+            task_state = $entryTaskState
+            runtime_status = $entryRuntimeStatus
+            task_action_under_current = $entryUnderCurrent
+            task_action_path_state = $entryPathState
+        }
+    }
     $currentOrdered = [ordered]@{}
     $newOrdered = [ordered]@{}
     foreach ($name in $names) {
@@ -1240,6 +1306,7 @@ function Get-StockTunnelReinstallDecision {
         task_action_under_current = $TaskActionUnderCurrent
         task_action_path_state = $TaskActionPathState
         tunnel_release_pin_uncertain = [bool]$TunnelPinUncertain
+        additional_tasks = $additionalOrdered
         current_hashes = $currentOrdered
         new_hashes = $newOrdered
     }
@@ -1293,6 +1360,14 @@ function Resolve-StockTunnelReinstallPlan {
         [string]$CurrentRuntimeRoot = '',
         [int]$RetainCount = 3,
         [string]$TaskName = 'trading-hareness-shared-peer-tunnels',
+        [string]$RuntimeService = 'shared-peer-tunnels',
+        # The second supervised tunnel, installed by the same fan-out. Its task,
+        # runtime state and action placement are observed and judged; its
+        # started_at deliberately does NOT drive the release pin refresh (see
+        # below). Pass an empty name to judge the intraday tunnel alone, which is
+        # what a release tree predating the batch profile amounts to.
+        [string]$BatchTaskName = 'trading-hareness-shared-peer-batch-tunnel',
+        [string]$BatchRuntimeService = 'shared-peer-batch-tunnel',
         [string]$SshAlias = 'lightServer1',
         [int]$RemoteApiPort = 15681,
         # The principal a (re)install by THIS caller would register. Defaults to
@@ -1326,16 +1401,30 @@ function Resolve-StockTunnelReinstallPlan {
     # The tunnel's own runtime state, read before anything else needs it: its
     # status is one observation, and its started_at is what tells us whether the
     # live process really came from the pinned release or from `current`.
-    $runtimeStatus = 'missing'
-    $runtimeStartedAt = ''
-    $runtimeStatePath = Join-Path $platform 'logs\runtime\shared-peer-tunnels.current.json'
-    if (Test-Path -LiteralPath $runtimeStatePath -PathType Leaf) {
-        try {
-            $runtimeState = Get-Content -LiteralPath $runtimeStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $runtimeStatus = if ($runtimeState -and $runtimeState.PSObject.Properties['status']) { [string]$runtimeState.status } else { 'unknown' }
-            if ($runtimeState -and $runtimeState.PSObject.Properties['started_at']) { $runtimeStartedAt = [string]$runtimeState.started_at }
-        } catch { $runtimeStatus = 'unreadable' }
+    $readRuntimeState = {
+        param([string]$Service)
+        $status = 'missing'
+        $startedAt = ''
+        if ($Service) {
+            $statePath = Join-Path $platform ('logs\runtime\' + $Service + '.current.json')
+            if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+                try {
+                    $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $status = if ($state -and $state.PSObject.Properties['status']) { [string]$state.status } else { 'unknown' }
+                    if ($state -and $state.PSObject.Properties['started_at']) { $startedAt = [string]$state.started_at }
+                } catch { $status = 'unreadable' }
+            }
+        }
+        [pscustomobject]@{ Status = $status; StartedAt = $startedAt }
     }
+    $intradayRuntime = & $readRuntimeState $RuntimeService
+    $runtimeStatus = [string]$intradayRuntime.Status
+    # Only the intraday tunnel's started_at refreshes the release pin. There is
+    # one tunnel_release for both tasks (the fan-out installs them together), and
+    # a skip already requires byte-equality against BOTH the pinned tree and the
+    # `current` junction's tree, so a batch tunnel that relaunched on its own is
+    # covered by the junction comparison without being able to move the pin.
+    $runtimeStartedAt = [string]$intradayRuntime.StartedAt
 
     # tunnel_release is "last installed from". Every relaunch starts from
     # `current`, so when the supervised run began at or after the junction
@@ -1409,43 +1498,78 @@ function Resolve-StockTunnelReinstallPlan {
     try { $junctionRoot = [string](Get-StockCurrentReleaseTarget -PlatformRoot $platform) } catch { $junctionRoot = '' }
     $junctionHashes = Get-StockTunnelFileHash -RuntimeRoot $junctionRoot
 
-    $taskState = 'not_registered'
-    $taskActionUnderCurrent = 'unknown'
-    $taskActionPathState = 'unknown'
-    $taskActionMissingPaths = @()
-    $registeredShell = ''
-    $registeredPrincipal = 'unresolved'
-    try {
-        $observed = if ($ScheduledTaskProvider) { & $ScheduledTaskProvider $TaskName } else {
-            $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-            $action = @($task.Actions)[0]
-            [pscustomobject]@{
-                State = [string]$task.State
-                Execute = if ($action) { [string]$action.Execute } else { '' }
-                Arguments = if ($action) { [string]$action.Arguments } else { '' }
-                LogonType = if ($task.Principal) { [string]$task.Principal.LogonType } else { '' }
-                UserId = if ($task.Principal) { [string]$task.Principal.UserId } else { '' }
-            }
+    # One observation routine, run once per supervised tunnel task. Both tasks
+    # are registered by the same fan-out installer out of the same tree, so they
+    # are held to the same placement and path rules; only the intraday task's
+    # registered shell and principal feed the synthetic 'config:' hash entries,
+    # because a reinstall registers both with the identical pair.
+    $observeTask = {
+        param([string]$Name)
+        $result = [ordered]@{
+            TaskState = 'not_registered'
+            TaskActionUnderCurrent = 'unknown'
+            TaskActionPathState = 'unknown'
+            MissingPaths = @()
+            RegisteredShell = ''
+            RegisteredPrincipal = 'unresolved'
         }
-        if ($observed) {
-            $read = {
-                param($Name)
-                if ($observed.PSObject.Properties[$Name]) { [string]$observed.$Name } else { '' }
+        if (-not $Name) { return $result }
+        try {
+            $observed = if ($ScheduledTaskProvider) { & $ScheduledTaskProvider $Name } else {
+                $task = Get-ScheduledTask -TaskName $Name -ErrorAction Stop
+                $action = @($task.Actions)[0]
+                [pscustomobject]@{
+                    State = [string]$task.State
+                    Execute = if ($action) { [string]$action.Execute } else { '' }
+                    Arguments = if ($action) { [string]$action.Arguments } else { '' }
+                    LogonType = if ($task.Principal) { [string]$task.Principal.LogonType } else { '' }
+                    UserId = if ($task.Principal) { [string]$task.Principal.UserId } else { '' }
+                }
             }
-            $taskState = & $read 'State'
-            $execute = & $read 'Execute'
-            $arguments = & $read 'Arguments'
-            $taskActionUnderCurrent = Get-StockTunnelTaskActionPlacement -Execute $execute `
-                -Arguments $arguments -ExpectedPrefix (Join-Path $platform 'current')
-            $actionPaths = @(Get-StockTunnelTaskActionPath -Execute $execute -Arguments $arguments)
-            if ($actionPaths.Count -gt 0) {
-                $taskActionMissingPaths = @($actionPaths | Where-Object { -not (Test-Path -LiteralPath $_) })
-                $taskActionPathState = if ($taskActionMissingPaths.Count -gt 0) { 'missing' } else { 'ok' }
+            if ($observed) {
+                $read = {
+                    param($Property)
+                    if ($observed.PSObject.Properties[$Property]) { [string]$observed.$Property } else { '' }
+                }
+                $result['TaskState'] = & $read 'State'
+                $execute = & $read 'Execute'
+                $arguments = & $read 'Arguments'
+                $result['TaskActionUnderCurrent'] = Get-StockTunnelTaskActionPlacement -Execute $execute `
+                    -Arguments $arguments -ExpectedPrefix (Join-Path $platform 'current')
+                $actionPaths = @(Get-StockTunnelTaskActionPath -Execute $execute -Arguments $arguments)
+                if ($actionPaths.Count -gt 0) {
+                    $missing = @($actionPaths | Where-Object { -not (Test-Path -LiteralPath $_) })
+                    $result['MissingPaths'] = $missing
+                    $result['TaskActionPathState'] = if ($missing.Count -gt 0) { 'missing' } else { 'ok' }
+                }
+                $result['RegisteredShell'] = Get-StockTunnelTaskActionShell -Arguments $arguments
+                $result['RegisteredPrincipal'] = Get-StockTunnelTaskPrincipalHash -LogonType (& $read 'LogonType') -UserId (& $read 'UserId')
             }
-            $registeredShell = Get-StockTunnelTaskActionShell -Arguments $arguments
-            $registeredPrincipal = Get-StockTunnelTaskPrincipalHash -LogonType (& $read 'LogonType') -UserId (& $read 'UserId')
-        }
-    } catch { $taskState = 'not_registered' }
+        } catch { $result['TaskState'] = 'not_registered' }
+        return $result
+    }
+
+    $intradayTask = & $observeTask $TaskName
+    $taskState = [string]$intradayTask['TaskState']
+    $taskActionUnderCurrent = [string]$intradayTask['TaskActionUnderCurrent']
+    $taskActionPathState = [string]$intradayTask['TaskActionPathState']
+    $taskActionMissingPaths = @($intradayTask['MissingPaths'])
+    $registeredShell = [string]$intradayTask['RegisteredShell']
+    $registeredPrincipal = [string]$intradayTask['RegisteredPrincipal']
+
+    $additionalTasks = @()
+    $batchObservation = $null
+    if ($BatchTaskName) {
+        $batchObservation = & $observeTask $BatchTaskName
+        $batchRuntime = & $readRuntimeState $BatchRuntimeService
+        $additionalTasks = @(@{
+            Name = 'batch'
+            TaskState = [string]$batchObservation['TaskState']
+            RuntimeStatus = [string]$batchRuntime.Status
+            TaskActionUnderCurrent = [string]$batchObservation['TaskActionUnderCurrent']
+            TaskActionPathState = [string]$batchObservation['TaskActionPathState']
+        })
+    }
 
     # Synthetic entries: things the running tunnel depends on that live in no
     # release tree. They are compared against the pinned side only (the
@@ -1475,6 +1599,7 @@ function Resolve-StockTunnelReinstallPlan {
         TaskActionUnderCurrent = $taskActionUnderCurrent
         TaskActionPathState = $taskActionPathState
         TunnelPinUncertain = [bool]$pinRefresh.Uncertain
+        AdditionalTasks = $additionalTasks
     }
     $withoutProbe = Get-StockTunnelReinstallDecision @observations -RemoteHealthStatus '200'
     $health = 'not_probed'
@@ -1495,6 +1620,9 @@ function Resolve-StockTunnelReinstallPlan {
         task_action_under_current = $plan.task_action_under_current
         task_action_path_state = $plan.task_action_path_state
         task_action_missing_paths = @($taskActionMissingPaths)
+        additional_tasks = $plan.additional_tasks
+        batch_task_name = $BatchTaskName
+        batch_task_action_missing_paths = if ($batchObservation) { @($batchObservation['MissingPaths']) } else { @() }
         tunnel_release = $TunnelReleaseId
         tunnel_release_pin_refreshed = [bool]$pinRefresh.Refreshed
         tunnel_release_pin_reason = [string]$pinRefresh.Reason
@@ -1541,6 +1669,9 @@ function Write-StockTunnelReinstallSkipEvent {
                 activation_instant_source = if ($Plan.PSObject.Properties['activation_instant_source']) { [string]$Plan.activation_instant_source } else { '' }
                 task_action_under_current = [string]$Plan.task_action_under_current
                 task_action_path_state = if ($Plan.PSObject.Properties['task_action_path_state']) { [string]$Plan.task_action_path_state } else { '' }
+                # The batch tunnel was spared by the same decision, so its
+                # observations belong in the same receipt.
+                additional_tasks = if ($Plan.PSObject.Properties['additional_tasks']) { $Plan.additional_tasks } else { [ordered]@{} }
                 current_hashes = $Plan.current_hashes
                 new_hashes = $Plan.new_hashes
                 changed_files = @($Plan.changed_files)

@@ -111,6 +111,26 @@ Peer credentials, exports and staging
   迁移**不停** `trading-hareness-shared-peer-tunnels`（停 PostgreSQL 本身已经切断了 peer 会话），
   行数快照在**停机窗口内**抓，失败时会把留在目标目录的半成品拷贝删掉再退出。
 
+复权因子（`adj_factor`）以 [ADJUSTMENT_FACTOR_SEMANTICS.md](ADJUSTMENT_FACTOR_SEMANTICS.md)
+为准，动 bar 表的 `adj_factor`、盘后 `adjustment_factors` 阶段或 04:30 的
+`trading-hareness-adjustment-factors` 任务之前先读它。接手时必须知道的：
+
+- **bar 表上的 `adj_factor` 是累计公司行为因子，不是"当日不变"的 1。** 不供应
+  公司行为历史的数据源一行都不写；`NULL` 才是"尚未取到"。占位的 `1` 能通过每一个
+  本应失败关闭的检查，静默产生未复权序列。
+- **2026-09-01 ~ 09-18 的 35,573 行 canonical 占位因子仍然在生产库里。**
+  修复 SQL 写在该文第 4 节，**必须在本次发布之后**、并严格按第 3 节顺序执行；
+  倒过来跑会让十日龙头轮动车道静默停产。守护查询（第 4 节步骤 6）修复后必须恒为 `0`。
+- **修复会带来一段"特征黑屏"与"打分悬崖"**（该文第 6 节），这是正确行为，
+  但必须提前通知使用者，否则看起来像故障。
+- **两个自动入口**：盘后非门控阶段 `adjustment_factors`（随发布自动生效，
+  `blocked`/`failed` 都不会把整轮变成 `partial`）与 04:30 的计划任务
+  （`pwsh scripts\windows\install-adjustment-factor-task.ps1`，默认从
+  `G:\StockPlatform\current` 安装，`LookbackDays = 30`，**发布之后要手工装一次**）。
+  覆盖率被拒的日期连续 5 个"台账日"后退出工作清单并写一条
+  `quant.data_quality_issues`（`code='adjustment_factor_date_retired'`）；
+  **没有任何东西轮询那张表**，要告警得自己接。
+
 持仓同步契约见 [BROKER_HOLDINGS_SYNC.md](BROKER_HOLDINGS_SYNC.md)：现在只由用户主动触发，文件导出优先，桌面 UI 读取必须直接交给 Luna 子 agent。不得创建每日调度、自动登录或自动唤醒 MuMu；未指定券商时不得默认中信。当前 THS 桌面读取尚未真实验收，旧 `citics-mumu-sync` 仅为退休兼容入口。
 
 The scheduled production services must execute only from
@@ -135,7 +155,7 @@ pwsh .\scripts\windows\get-stock-release-status.ps1
 pwsh G:\StockPlatform\current\scripts\windows\get-stock-runtime-status.ps1
 pwsh G:\StockPlatform\current\scripts\shared-peer\verify-shared-runtime.ps1
 
-Get-ScheduledTask -TaskName 'trading-hareness-dashboard-runtime','trading-hareness-shared-peer-tunnels' |
+Get-ScheduledTask -TaskName 'trading-hareness-dashboard-runtime','trading-hareness-shared-peer-tunnels','trading-hareness-shared-peer-batch-tunnel' |
   Select-Object TaskName,State
 ```
 
@@ -145,7 +165,8 @@ Expected production services and ports:
 |---|---|---|
 | quant owner API | `127.0.0.1:5681` | lightServer `127.0.0.1:15681` |
 | dashboard adapter | `127.0.0.1:5680` | lightServer `127.0.0.1:15680` |
-| PostgreSQL | `127.0.0.1:55432` | lightServer `127.0.0.1:15432` |
+| PostgreSQL (intraday) | `127.0.0.1:55432` | lightServer `127.0.0.1:15432` |
+| PostgreSQL (bulk/backfill) | `127.0.0.1:55432` | lightServer `127.0.0.1:15433`, peer-side `5433` |
 | collaborator API | remote only | lightServer `127.0.0.1:15682` |
 
 The public dashboard gateway intentionally splits dynamic routes.  Browser
@@ -185,7 +206,36 @@ automatically attempts to restore the previous release.
 
 Do not pass `-SkipTests` for a production promotion.
 
-### The shared-peer tunnel is not restarted unless it has to be
+### There are two owner->peer tunnels, and a release installs both
+
+`trading-hareness-shared-peer-tunnels` carries the intraday request path
+(remote 15432 -> local 55432, remote 15681 -> local 5681).
+`trading-hareness-shared-peer-batch-tunnel` carries bulk/backfill/COPY traffic
+(remote 15433 -> local 55432, peer-side 5433) on its own TCP connection
+(`-o ControlMaster=no -o ControlPath=none`), so a bulk transfer cannot take the
+intraday path's congestion window. Separate tasks, separate runtime services,
+separate state files (`shared-peer-tunnels.current.json` /
+`shared-peer-batch-tunnel.current.json`) and separate lock files; the ports,
+task names, health judge and state-freshness judge for **both** live in
+`scripts\shared-peer\shared-tunnel-profiles.psm1`.
+
+`publish-stock-release.ps1` and `switch-stock-release.ps1` install them through
+one fan-out, `scripts\shared-peer\install-shared-tunnel-tasks.ps1` (plural).
+The intraday install is unguarded: its failure fails the publish exactly as it
+did when there was one task. The batch install is wrapped — its failure is
+warned, written as a `shared-peer-batch-tunnel` / `install_failed` runtime event
+and carried in the result, but never raised, because batch is a throughput
+optimization and must not be able to turn a good release into a failed one.
+Pass `-RequireBatch` only for a deliberate acceptance run. Both release scripts
+keep the **singular** `install-shared-tunnel-task.ps1` as a fallback, because the
+rollback path runs the *previous* release's tree and a release published before
+the batch profile existed carries only the singular script.
+
+Both tasks are stopped together and disabled together on every failure path, and
+both are spared together — see the gate below. Rollout and peer-side steps:
+[PEER_BATCH_TUNNEL_ROLLOUT.md](PEER_BATCH_TUNNEL_ROLLOUT.md).
+
+### The shared-peer tunnels are not restarted unless they have to be
 
 Publishing used to stop `trading-hareness-shared-peer-tunnels` and re-run
 `install-shared-tunnel-task.ps1` every time. That dropped the owner->peer
@@ -301,6 +351,25 @@ of the following hold:
 - `G:\StockPlatform\logs\runtime\shared-peer-tunnels.current.json` says
   `status: healthy`. That field records the **last verified install**, not live
   health; the remote probe below is what speaks for the tunnel's current state;
+- **the same four conditions hold for the batch tunnel task**
+  (`trading-hareness-shared-peer-batch-tunnel` and
+  `shared-peer-batch-tunnel.current.json`): Running, `status: healthy`, action
+  under `current`, every action path present. Each failure is its own reason,
+  prefixed so the receipt says which of the two refused —
+  `batch_task_not_running`, `batch_runtime_state_not_healthy`,
+  `batch_task_action_not_under_current`, `batch_task_action_path_missing` — and
+  the observations are copied verbatim into the plan's and the skip event's
+  `additional_tasks.batch`. A batch tunnel that has never been installed has no
+  state file, which reads as `missing`, not `healthy`, so the first publish after
+  this change reinstalls and that reinstall is what finally registers the batch
+  task. The file hashes are deliberately **not** repeated per task: both profiles
+  execute the same chain out of the same tree, which is why
+  `install-shared-tunnel-tasks.ps1` and `shared-tunnel-profiles.psm1` are in
+  `$script:StockTunnelAffectingFiles`. Only the intraday tunnel's `started_at`
+  refreshes the release pin (there is one `tunnel_release` for both tasks, and a
+  skip already requires byte-equality against the `current` junction's tree).
+  Passing an empty `-BatchTaskName` is the "this tree predates the batch profile"
+  case and judges the intraday tunnel alone;
 - the same remote probe `install-shared-tunnel-task.ps1` uses returns HTTP 200.
 
 Anything else — a changed file or SSH target, a stopped or misplaced task, a

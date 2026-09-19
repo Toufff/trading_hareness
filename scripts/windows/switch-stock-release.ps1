@@ -44,8 +44,17 @@ function Get-LogonTypeArguments {
 }
 
 function Install-SharedPeerTunnelTask {
+    # The plural fan-out installs the intraday tunnel (unguarded) and then the
+    # batch tunnel (reported, not raised). The singular fallback exists for the
+    # revert path, which runs the PREVIOUS release's tree: a release published
+    # before the batch profile existed carries only the singular script, and
+    # reverting to it must still install the tunnel it does have. Same reason as
+    # Get-LogonTypeArguments above.
     param([Parameter(Mandatory)][string]$RuntimeRoot)
-    $installer = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+    $installer = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-tasks.ps1'
+    if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+        $installer = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+    }
     $extra = Get-LogonTypeArguments -Installer $installer
     & $installer -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
         -PlatformRoot $platform @extra | Out-Null
@@ -107,7 +116,13 @@ try {
     # matters (Stop-ScheduledTask kills the supervisor before it can record
     # an expected exit).
     if ($oldTarget) { & (Join-Path $oldTarget 'scripts\windows\stop-stock-dashboard.ps1') -PlatformRoot $platform | Out-Null }
-    if (-not $keepTunnel) { Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels' -ErrorAction SilentlyContinue }
+    # Both tunnels are stopped together and spared together: the gate judges
+    # both tasks, so a skip already proved the batch one Running, healthy and
+    # rooted under `current`.
+    if (-not $keepTunnel) {
+        Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels' -ErrorAction SilentlyContinue
+        Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-batch-tunnel' -ErrorAction SilentlyContinue
+    }
     Stop-ScheduledTask -TaskName 'trading-hareness-dashboard-runtime' -ErrorAction SilentlyContinue
     [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $ReleaseId)
     # The instant `current` actually moved, recorded in release-state.json

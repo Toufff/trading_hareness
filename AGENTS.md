@@ -176,6 +176,21 @@ provider response directly to a live threshold or order path.
     `F:\StockPlatformDB\postgresql16`) and a `stock_cold` tablespace on G:; the
     data directory, the backup exclusions, the maintenance window (04:00-08:00)
     and the role timeouts are all defined there, not here.
+11. Read `docs/SHARED_PEER_RUNTIME.md` and `docs/PEER_BATCH_TUNNEL_ROLLOUT.md`
+    before touching anything owner -> peer. There are **two** reverse SSH
+    tunnels, not one: `trading-hareness-shared-peer-tunnels` (intraday request
+    path) and `trading-hareness-shared-peer-batch-tunnel` (bulk/backfill, peer
+    port 5433). They are separate tasks, services, state files and lock files,
+    they are installed together by
+    `scripts/shared-peer/install-shared-tunnel-tasks.ps1`, and the publish
+    reinstall gate judges both. A batch tunnel failure is reported and recorded,
+    never raised: it must not be able to fail a release. Any file on either
+    profile's execution chain must appear in `$script:StockTunnelAffectingFiles`
+    (`scripts/windows/stock-release-management.psm1`), or the gate silently
+    under-detects a change to it.
+12. Read `docs/ADJUSTMENT_FACTOR_SEMANTICS.md` before touching `adj_factor` on
+    any bar table, the post-close `adjustment_factors` stage or the 04:30
+    `trading-hareness-adjustment-factors` task.
 
 ## Version-control and release discipline
 
@@ -255,6 +270,13 @@ this file and `docs/ARCHITECTURE.md` in the same change:
   `quant-service/app` fails here (bare or module-qualified call), and
   `daily_bar_batch_repository`'s own `market_bars_daily` /
   `canonical_bars_daily` statements must send their keys ascending.
+- `quant-service/tests/test_peer_batch_tunnel_deploy.py` — the peer-side batch
+  port deploy: the committed fixture is a byte-for-byte copy of lightServer's
+  live `ssh-tunnel-entrypoint.sh`, so a peer that changes fails the fixture hash
+  and `KNOWN_PEER_STATES` together (intentional: both must be updated in one
+  change); the patch result must pass `sh -n`, keep the peer's own `0.0.0.0`
+  bind and be idempotent; and the already-deployed short-circuit must rest on
+  the running container's own argv, never on an image tag a rebuild invalidates.
 - `quant-service/tests/test_adjustment_factor_semantics_guard.py` — enforces
   "bar tables never receive a placeholder adjustment factor": no module may
   build a `factor_semantics: same_day_identity_only` row, only the pinned
@@ -315,6 +337,11 @@ before every release:
   twin whose hot table has no chain (refused and reported, never silently
   honoured), plus `Get-StockIncrementalChainWatermark` against real `state.json`
   files on disk.
+- `scripts/windows/tests/test-shared-tunnel-profiles.ps1` — the two tunnel
+  profiles cannot collide or drift: distinct ports, forwarding tuples, service
+  names, task names and lock files; the batch profile refuses to multiplex onto
+  the intraday connection; and the install-time state-freshness judge refuses to
+  certify a run whose own status says it is stopping or already over.
 - `scripts/windows/tests/test-adjustment-factor-task-contract.ps1` — static
   contract for the 04:30 `trading-hareness-adjustment-factors` task: daily
   trigger, release-rooted hidden launcher, no restart-on-failure, cleared

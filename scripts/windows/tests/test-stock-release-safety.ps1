@@ -855,6 +855,13 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $planSandbox 'logs\runtime') | Out-Null
     $runtimeStatePath = Join-Path $planSandbox 'logs\runtime\shared-peer-tunnels.current.json'
     [IO.File]::WriteAllText($runtimeStatePath, '{"status":"healthy"}', [Text.UTF8Encoding]::new($false))
+    # The batch tunnel is the SECOND supervised task the same fan-out installs.
+    # It has its own scheduled task, its own runtime service and its own state
+    # file, and the gate has to judge it too: a skip that leaves a dead batch
+    # tunnel dead is exactly the hole this integration closes, because nothing
+    # else in a publish would ever bring that task back.
+    $batchStatePath = Join-Path $planSandbox 'logs\runtime\shared-peer-batch-tunnel.current.json'
+    [IO.File]::WriteAllText($batchStatePath, '{"status":"healthy"}', [Text.UTF8Encoding]::new($false))
     # The `current` junction is the second tree the gate compares against, and
     # the tree every relaunch of the tunnel actually starts from.
     [void](Set-StockCurrentRelease -PlatformRoot $planSandbox -ReleaseId 'rel-000')
@@ -867,7 +874,8 @@ try {
     # register: the same PowerShell host Get-InstalledPowerShell resolves and
     # the same principal publish/switch derive from the session's elevation.
     $registeredShell = Get-InstalledPowerShell
-    $runningTask = { param($Name) [pscustomobject]@{
+    $script:taskNamesAsked = [System.Collections.Generic.List[string]]::new()
+    $runningTask = { param($Name) $script:taskNamesAsked.Add([string]$Name); [pscustomobject]@{
         State = 'Running'
         Execute = (Join-Path $planSandbox 'current\scripts\windows\bin\stock-background-host.exe')
         Arguments = ('"' + $registeredShell + '" "' + (Join-Path $planSandbox 'current\scripts\shared-peer\start-shared-tunnels.ps1') + '"')
@@ -889,6 +897,93 @@ try {
     Assert-True ($livePlan.task_action_path_state -eq 'ok') 'every absolute path the registered action names must be observed to exist'
     Assert-True ($livePlan.junction_runtime_root -and @($livePlan.junction_changed_files).Count -eq 0) `
         'the plan must hash the `current` junction tree too, and report it as unchanged when it matches'
+
+    # --- the batch tunnel is judged too, not just the intraday one -----------
+    # publish/switch now install both tasks through
+    # install-shared-tunnel-tasks.ps1, and a skip stops BOTH from being
+    # reinstalled. If the gate only looked at the intraday task, a batch tunnel
+    # that had stopped, gone unhealthy or been re-registered out of a developer
+    # checkout would stay that way across every later publish.
+    Assert-True ($script:taskNamesAsked -contains 'trading-hareness-shared-peer-tunnels') `
+        'the plan must observe the intraday tunnel task'
+    Assert-True ($script:taskNamesAsked -contains 'trading-hareness-shared-peer-batch-tunnel') `
+        'the plan must observe the batch tunnel task as well; a gate that never asks about it can never refuse a skip on its behalf'
+    Assert-True ($livePlan.additional_tasks -and $livePlan.additional_tasks.Contains('batch')) `
+        'the plan must report the batch tunnel''s own observations'
+    Assert-True ([string]$livePlan.additional_tasks['batch'].task_state -eq 'Running' -and
+                 [string]$livePlan.additional_tasks['batch'].runtime_status -eq 'healthy' -and
+                 [string]$livePlan.additional_tasks['batch'].task_action_under_current -eq 'yes' -and
+                 [string]$livePlan.additional_tasks['batch'].task_action_path_state -eq 'ok') `
+        'the batch observations the skip rests on must be recorded verbatim, not summarized into the decision'
+
+    # Each of the four batch conditions on its own must be enough to refuse.
+    $batchStoppedProvider = {
+        param($Name)
+        if ($Name -eq 'trading-hareness-shared-peer-batch-tunnel') {
+            return [pscustomobject]@{ State = 'Ready'; Execute = ''; Arguments = '' }
+        }
+        & $runningTask $Name
+    }
+    $batchStopped = Resolve-StockTunnelReinstallPlan @resolveArgs -ScheduledTaskProvider $batchStoppedProvider
+    Assert-True ($batchStopped.decision -eq 'reinstall') 'a batch tunnel task that is not Running must force the tunnel reinstall'
+    Assert-True ($batchStopped.reasons -contains 'batch_task_not_running') `
+        'the reason must name the batch tunnel, so an operator reading the receipt knows which of the two refused'
+    Assert-True (-not ($batchStopped.reasons -contains 'task_not_running')) `
+        'a healthy intraday task must not be blamed for the batch tunnel''s state'
+
+    $batchStrayProvider = {
+        param($Name)
+        if ($Name -eq 'trading-hareness-shared-peer-batch-tunnel') {
+            return [pscustomobject]@{
+                State = 'Running'
+                Execute = 'F:\AIWorkflow\trading_hareness\scripts\windows\bin\stock-background-host.exe'
+                Arguments = '"pwsh.exe" "F:\AIWorkflow\trading_hareness\scripts\shared-peer\start-shared-tunnels.ps1"'
+            }
+        }
+        & $runningTask $Name
+    }
+    $batchStray = Resolve-StockTunnelReinstallPlan @resolveArgs -ScheduledTaskProvider $batchStrayProvider
+    Assert-True ($batchStray.decision -eq 'reinstall' -and ($batchStray.reasons -contains 'batch_task_action_not_under_current')) `
+        'a batch tunnel task registered out of a developer checkout must force the tunnel reinstall'
+
+    $batchVanishedShell = Join-Path $planSandbox 'no-such-dir\pwsh.exe'
+    $batchVanishedProvider = {
+        param($Name)
+        if ($Name -eq 'trading-hareness-shared-peer-batch-tunnel') {
+            return [pscustomobject]@{
+                State = 'Running'
+                Execute = (Join-Path $planSandbox 'current\scripts\windows\bin\stock-background-host.exe')
+                Arguments = ('"' + $batchVanishedShell + '" "' + (Join-Path $planSandbox 'current\scripts\shared-peer\start-shared-tunnels.ps1') + '"')
+                LogonType = (Get-StockScheduledTaskLogonType)
+                UserId = $env:USERNAME
+            }
+        }
+        & $runningTask $Name
+    }
+    $batchVanished = Resolve-StockTunnelReinstallPlan @resolveArgs -ScheduledTaskProvider $batchVanishedProvider
+    Assert-True ($batchVanished.decision -eq 'reinstall' -and ($batchVanished.reasons -contains 'batch_task_action_path_missing')) `
+        'a batch tunnel action naming a path that no longer exists must force the tunnel reinstall'
+    Assert-True (@($batchVanished.batch_task_action_missing_paths) -contains $batchVanishedShell) `
+        'the plan must name the batch action path that is gone'
+
+    [IO.File]::WriteAllText($batchStatePath, '{"status":"unexpected_exit"}', [Text.UTF8Encoding]::new($false))
+    $batchUnhealthy = Resolve-StockTunnelReinstallPlan @resolveArgs
+    Assert-True ($batchUnhealthy.decision -eq 'reinstall' -and ($batchUnhealthy.reasons -contains 'batch_runtime_state_not_healthy')) `
+        'a batch tunnel whose own runtime state is not healthy must force the tunnel reinstall'
+    Remove-Item -LiteralPath $batchStatePath -Force
+    $batchNoState = Resolve-StockTunnelReinstallPlan @resolveArgs
+    Assert-True ($batchNoState.decision -eq 'reinstall' -and ($batchNoState.reasons -contains 'batch_runtime_state_not_healthy')) `
+        'a batch tunnel that has never been installed (no state file at all) must force the reinstall that installs it'
+    [IO.File]::WriteAllText($batchStatePath, '{"status":"healthy"}', [Text.UTF8Encoding]::new($false))
+    Assert-True ((Resolve-StockTunnelReinstallPlan @resolveArgs).decision -eq 'skip') `
+        'restoring the batch tunnel''s health must restore the skip'
+
+    # An explicitly empty batch task name is the "this tree has no batch
+    # profile" case (a release published before it existed); the intraday
+    # tunnel must still be judgeable on its own.
+    $intradayOnly = Resolve-StockTunnelReinstallPlan @resolveArgs -BatchTaskName ''
+    Assert-True ($intradayOnly.decision -eq 'skip' -and (@($intradayOnly.additional_tasks.Keys).Count -eq 0)) `
+        'with no batch task name the gate must judge the intraday tunnel alone and report no additional task'
 
     # An action naming a path that no longer exists -- the WindowsApps pwsh.exe
     # the Store removed when it updated PowerShell -- must never skip.
@@ -1150,7 +1245,7 @@ Assert-True ($switchGateIndex -ge 0) 'switch-stock-release.ps1 must evaluate the
 Assert-True ($switchStopIndex -ge 0) 'switch-stock-release.ps1 must still be able to stop the tunnel task'
 Assert-True ($switchGateIndex -lt $switchStopIndex) `
     'switch-stock-release.ps1 must evaluate the tunnel reinstall gate before Stop-ScheduledTask of the tunnel task'
-Assert-True ($switchSource.Contains('if (-not $keepTunnel) { ' + $tunnelStop)) `
+Assert-True ($switchSource -match ('(?s)if \(-not \$keepTunnel\) \{\s*' + [regex]::Escape($tunnelStop))) `
     'switch-stock-release.ps1 must only stop the shared-peer tunnel task when the gate asked for a reinstall'
 Assert-True ($switchSource.Contains('Resolve-TunnelGate -NewRuntimeRoot $revertTarget')) `
     'switch-stock-release.ps1 must apply the same gate on the rollback/revert path'
@@ -1178,6 +1273,55 @@ Assert-True ($switchRevertStateWriteIndex -gt $switchStateWriteIndex -and $switc
     'the revert path must write its tunnel_reinstall_skipped event after the revert''s own Set-StockReleaseState too'
 Assert-True ($switchSource.Contains('activated_at = $activatedAt') -and $switchSource.Contains('activated_at = $revertActivatedAt')) `
     'switch-stock-release.ps1 must record when the junction actually moved on both the forward and the revert path, or the pin refresh has only the release id''s own timestamp to compare against'
+# --- both release scripts must carry the BATCH tunnel too -------------------
+# docs/PEER_BATCH_TUNNEL_ROLLOUT.md section 1 is the contract: the release
+# scripts install both tunnels through the plural fan-out, stop the batch task
+# alongside the intraday one, disable it alongside the intraday one on the
+# failure paths, and the gate's file list covers the two files the two profiles
+# share. Until this branch there was no automatic path to the batch tunnel at
+# all -- it could only be installed by hand.
+$batchTaskName = 'trading-hareness-shared-peer-batch-tunnel'
+$batchStop = "Stop-ScheduledTask -TaskName '$batchTaskName'"
+$pluralInstaller = 'scripts\shared-peer\install-shared-tunnel-tasks.ps1'
+$singularInstaller = 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+
+Assert-True ((@(Get-StockTunnelAffectingFile)) -contains 'scripts\shared-peer\shared-tunnel-profiles.psm1') `
+    'the tunnel-affecting file list must include shared-tunnel-profiles.psm1: both profiles read their ports, task names, lock files and health judge out of it, so a change there changes both tunnels'
+Assert-True ((@(Get-StockTunnelAffectingFile)) -contains $pluralInstaller) `
+    'the tunnel-affecting file list must include the fan-out installer publish/switch actually run'
+
+Assert-True ($stopBody.Contains($batchStop)) `
+    'publish-stock-release.ps1 must stop the batch tunnel task alongside the intraday one'
+Assert-True ($stopBody -match ('(?s)if \(-not \$KeepTunnelTask\) \{[^}]*' + [regex]::Escape($batchStop))) `
+    'the batch tunnel must be stopped inside the same gate branch as the intraday one: a skip spares both or neither'
+$publishInstallMatch = [regex]::Match($publishSource, '(?s)function Install-SharedPeerTunnelTask \{.*?\n\}')
+Assert-True $publishInstallMatch.Success 'publish-stock-release.ps1 must still install the shared-peer tunnel through one function'
+Assert-True ($publishInstallMatch.Value.Contains($pluralInstaller)) `
+    'publish-stock-release.ps1 must install the tunnels through install-shared-tunnel-tasks.ps1, or the batch tunnel is never installed by a release'
+Assert-True ($publishInstallMatch.Value.Contains($singularInstaller)) `
+    'publish-stock-release.ps1 must keep the singular installer as a fallback: the rollback path runs a previous release tree that may predate the batch profile'
+$pluralIndex = $publishInstallMatch.Value.IndexOf($pluralInstaller)
+$fallbackIndex = $publishInstallMatch.Value.IndexOf('if (-not (Test-Path -LiteralPath $tunnelInstaller -PathType Leaf))')
+Assert-True ($pluralIndex -ge 0 -and $fallbackIndex -gt $pluralIndex) `
+    'the plural installer must be the first choice and the singular one only the fallback, not the other way round'
+Assert-True (-not ($publishSource -match ("(?m)^\s*foreach \(\`$taskName in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-dashboard-runtime'\)"))) `
+    'every Disable-ScheduledTask list in publish-stock-release.ps1 must name the batch tunnel too, or a failed publish leaves it enabled and retrying against a stopped platform'
+$publishDisableLists = @([regex]::Matches($publishSource, '(?m)^\s*foreach \(\$taskName in [^\)]*\) \{'))
+Assert-True ($publishDisableLists.Count -ge 2) 'publish-stock-release.ps1 must still have both task-disabling loops'
+foreach ($list in $publishDisableLists) {
+    Assert-True ($list.Value.Contains($batchTaskName)) `
+        "the task-disabling loop '$($list.Value.Trim())' must name the batch tunnel task"
+}
+
+Assert-True ($switchSource.Contains($batchStop)) `
+    'switch-stock-release.ps1 must stop the batch tunnel task alongside the intraday one'
+Assert-True ($switchSource -match ('(?s)if \(-not \$keepTunnel\) \{[^}]*' + [regex]::Escape($batchStop))) `
+    'switch-stock-release.ps1 must stop the batch tunnel inside the same gate branch as the intraday one'
+$switchInstallMatch = [regex]::Match($switchSource, '(?s)function Install-SharedPeerTunnelTask \{.*?\n\}')
+Assert-True $switchInstallMatch.Success 'switch-stock-release.ps1 must still install the shared-peer tunnel through one function'
+Assert-True ($switchInstallMatch.Value.Contains($pluralInstaller) -and $switchInstallMatch.Value.Contains($singularInstaller)) `
+    'switch-stock-release.ps1 must install through the plural fan-out and keep the singular fallback for a revert to an older tree'
+
 $switchJunctionIndex = $switchSource.IndexOf('Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $ReleaseId')
 $switchActivatedStampIndex = $switchSource.IndexOf('$activatedAt = [DateTimeOffset]::Now')
 Assert-True ($switchJunctionIndex -ge 0 -and $switchActivatedStampIndex -gt $switchJunctionIndex) `
@@ -1233,4 +1377,6 @@ Assert-True ($statusSource.Contains('last_installed_from') -and $statusSource.Co
     pin_refresh_compares_against_the_recorded_junction_move = $true
     uncertain_pin_forces_reinstall = $true
     switch_skip_event_written_after_its_release_state_write = $true
+    batch_tunnel_judged_by_the_same_gate = $true
+    batch_tunnel_installed_stopped_and_disabled_by_both_release_scripts = $true
 }

@@ -4,9 +4,11 @@
 要怎么真正上线。设计原因、端口表、健康判据写在
 [SHARED_PEER_RUNTIME.md](SHARED_PEER_RUNTIME.md)，这里不重复。
 
-本分支**没有**改 `publish-stock-release.ps1` / `switch-stock-release.ps1`
-（另一个分支持有这两个文件），也**没有**对 lightServer 做任何部署。下面第 1 节
-是集成时必须由编排方补进发布脚本的改动，第 2 节是 peer 侧的实际上线步骤。
+`tunnel-batch` 分支本身**没有**改 `publish-stock-release.ps1` /
+`switch-stock-release.ps1`，也**没有**对 lightServer 做任何部署。
+**第 1 节的四点改动已在 release 2 集成时（2026-09-19）施加完毕**，发布脚本现在
+会自动带起批量隧道；该节保留为「改了什么、由哪条断言守着」的记录。
+第 2 节的 peer 侧上线步骤仍然**没有**执行过。
 
 ---
 
@@ -45,10 +47,12 @@
 
 ---
 
-## 1. 发布脚本必须补的调用（由编排方在集成时施加）
+## 1. 发布脚本的调用（release 2 集成时已施加）
 
-本分支不改这两个文件。集成时请按下面四点修改，改完批量隧道才会随发布起来；
-在此之前批量任务只能手工安装。
+下面四点在 release 2 集成（2026-09-19）里已经改完，批量隧道现在随发布自动起来，
+不再需要手工安装。每一点都由 `scripts\windows\tests\test-stock-release-safety.ps1`
+末尾的一组静态断言守着（`batch_tunnel_installed_stopped_and_disabled_by_both_release_scripts`
+与 `batch_tunnel_judged_by_the_same_gate`），改回去会当场失败。
 
 ### 1.1 `scripts/windows/publish-stock-release.ps1`
 
@@ -63,17 +67,35 @@
    `trading-hareness-shared-peer-batch-tunnel`。
 3. **禁用**：两处 `Disable-ScheduledTask` 循环的任务名列表都要加入
    `trading-hareness-shared-peer-batch-tunnel`。
-4. 若 `publish-tunnel-gate` 分支的复用闸门也合进来：批量隧道任务与 intraday
+4. `publish-tunnel-gate` 的复用闸门也合进来了。批量隧道任务与 intraday
    共用 `start-shared-tunnels.ps1` 与 `shared-tunnel-profiles.psm1`，
-   **这两个文件必须出现在 `$script:StockTunnelAffectingFiles` 里**，
-   否则闸门会漏判批量隧道的代码变更。
+   所以 `$script:StockTunnelAffectingFiles` 加了
+   `install-shared-tunnel-tasks.ps1` 与 `shared-tunnel-profiles.psm1` 两项，
+   `$script:StockTunnelChainEntryPoints` 也把复数安装器加为链的起点
+   （复数脚本是用 `& $installer` 变量调用单数脚本的，AST 解析器看不见字面路径）。
+   **闸门还会判批量任务本身**：`Resolve-StockTunnelReinstallPlan` 观察
+   `trading-hareness-shared-peer-batch-tunnel` 的任务状态、
+   `shared-peer-batch-tunnel.current.json` 的 `status`、动作是否落在 `current` 下、
+   动作路径是否都还在，四条里任何一条不成立都会以
+   `batch_task_not_running` / `batch_runtime_state_not_healthy` /
+   `batch_task_action_not_under_current` / `batch_task_action_path_missing`
+   拒绝 skip，并把观测原样写进 plan 与 skip 事件的 `additional_tasks.batch`。
+   **因此批量任务从来没装过 = 没有状态文件 = `missing`，第一次发布必然 reinstall，
+   那次 reinstall 就是它真正被装上的时刻。**
+   文件哈希不按任务重复计算：两条隧道执行的是同一棵树上的同一条链。
+   release pin 只跟 intraday 的 `started_at` 走（两条任务共用一个 `tunnel_release`）。
 
 ### 1.2 `scripts/windows/switch-stock-release.ps1`
 
-同样三处：第 31 行附近的停止列表，第 35 行与第 65 行两处重装调用
-（都换成复数脚本）。
+同样三处，均已改完：停止列表加了批量任务（与 intraday 在同一个
+`if (-not $keepTunnel)` 分支里——一次 skip 要么两条都饶过，要么两条都重装），
+`Install-SharedPeerTunnelTask` 改调复数脚本。
 
-### 1.3 验收
+**两个脚本都保留单数 `install-shared-tunnel-task.ps1` 作为回退**：回滚路径跑的是
+**上一个** release 的树，而批量 profile 出现之前发布的 release 里只有单数脚本，
+回退到它时仍然必须把它有的那条隧道装起来。测试断言复数在前、单数只作回退。
+
+### 1.3 验收（尚未执行）
 
 发布后应能看到：
 
@@ -82,7 +104,9 @@
   的 `effective_status` 为 `running`、`health` 为
   `remote_listener_open_owned_by_local_client`；
 - 运行时事件里有一条 `tunnel_connection_separation_checked`
-  且 `distinct = true`（即两条隧道确实占着两条 TCP 连接）。
+  且 `distinct = true`（即两条隧道确实占着两条 TCP 连接）；
+- `release-state.json` 的 `last_verification.shared_peer_tunnel` 为
+  `reinstalled`（本次发布改了隧道链上的文件，闸门本来就不该 skip）。
 
 ---
 

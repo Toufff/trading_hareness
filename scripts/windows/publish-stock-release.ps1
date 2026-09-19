@@ -81,11 +81,18 @@ function Stop-ProductionRuntime {
     # trigger after a drop, or a reboot). That release is pinned by
     # Get-StockReleaseRetentionPlan and re-checked by the gate, so retention
     # can never delete the tree the live tunnel is executing from.
+    #
+    # Both tunnels are stopped together, and both are spared together: they are
+    # registered by the same fan-out installer out of the same tree, and the
+    # gate judges both tasks (Get-StockTunnelReinstallDecision's AdditionalTasks),
+    # so a 'skip' already means the batch task is Running, healthy and rooted
+    # under `current` as well.
     param([string]$RuntimeRoot, [switch]$KeepTunnelTask)
     $stop = Join-Path $RuntimeRoot 'scripts\windows\stop-stock-dashboard.ps1'
     if (Test-Path -LiteralPath $stop -PathType Leaf) { & $stop -PlatformRoot $platform | Out-Null }
     if (-not $KeepTunnelTask) {
         Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels' -ErrorAction SilentlyContinue
+        Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-batch-tunnel' -ErrorAction SilentlyContinue
     }
     Stop-ScheduledTask -TaskName 'trading-hareness-dashboard-runtime' -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName 'trading-hareness-post-close-pipeline' -ErrorAction SilentlyContinue
@@ -128,12 +135,30 @@ function Enter-ProductionPublishLock {
 }
 
 function Install-SharedPeerTunnelTask {
-    # Stops, re-registers and health-gates the shared-peer tunnel task from
+    # Stops, re-registers and health-gates the shared-peer tunnel tasks from
     # $RuntimeRoot. Used both by the normal start path and by the post-switch
     # repair below, which reinstalls a tunnel the gate spared when shared
     # runtime verification then came back degraded.
+    #
+    # The plural install-shared-tunnel-tasks.ps1 is the entry point: it installs
+    # the intraday tunnel first and unguarded (its failure still throws exactly
+    # as it did when this was the only task), then the batch tunnel, whose
+    # failure it reports and records rather than raising -- batch traffic is a
+    # throughput optimization and must never turn a good release into a failed
+    # one. The degraded-startup try/catch around this call therefore keeps its
+    # old meaning. Passing -RequireBatch would change that and is deliberately
+    # not done here; see docs/PEER_BATCH_TUNNEL_ROLLOUT.md section 1.
+    #
+    # The singular fallback is for the rollback path, which runs the PREVIOUS
+    # release's copy of this script against the PREVIOUS release's tree: a
+    # release published before the batch profile existed has no plural script,
+    # and reverting to it must still install the tunnel it does have. Same
+    # reason as Get-LogonTypeArguments above.
     param([string]$RuntimeRoot)
-    $tunnelInstaller = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+    $tunnelInstaller = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-tasks.ps1'
+    if (-not (Test-Path -LiteralPath $tunnelInstaller -PathType Leaf)) {
+        $tunnelInstaller = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+    }
     $tunnelExtra = Get-LogonTypeArguments -Installer $tunnelInstaller
     & $tunnelInstaller -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
         -PlatformRoot $platform @tunnelExtra | Out-Null
@@ -521,7 +546,7 @@ try {
             # where a clean tunnel reinstall is worth the short interruption.
             Stop-ProductionRuntime -RuntimeRoot $(if (Test-Path -LiteralPath $layout.CurrentPath) { $layout.CurrentPath } else { $fallbackRoot })
             if ($KeepStoppedOnFailure) {
-                foreach ($taskName in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-dashboard-runtime') {
+                foreach ($taskName in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-shared-peer-batch-tunnel', 'trading-hareness-dashboard-runtime') {
                     Disable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
                 }
             }
@@ -561,7 +586,7 @@ try {
             } elseif ($previousRelease -and (Test-Path -LiteralPath (Join-Path $finalRoot 'app') -PathType Container)) {
                 # Never activate old code that cannot recognize an applied DB
                 # migration. Keep the new tree addressable for forward repair.
-                foreach ($taskName in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-dashboard-runtime') {
+                foreach ($taskName in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-shared-peer-batch-tunnel', 'trading-hareness-dashboard-runtime') {
                     Disable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
                 }
                 [void](Set-StockReleaseState -PlatformRoot $platform -State @{

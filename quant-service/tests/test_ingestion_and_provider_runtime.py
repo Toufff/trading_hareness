@@ -1314,7 +1314,11 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
                     f"{str(value)[:4]}-{str(value)[4:6]}-{str(value)[6:8]}"),
                 exchange_for=lambda symbol: symbol.split(".")[1],
                 is_st_security_name=lambda _name: False,
-                ensure_instrument=lambda *_args: None,
+                # instruments-batch renamed this seam while this test was being
+                # written on another branch: registration is now one batched,
+                # sorted statement per payload instead of one call per row, so
+                # the callable takes (connection, symbols).
+                ensure_instruments=lambda *_args: None,
                 upsert_bar=lambda *_args: None, daily_bar_type=DailyBar,
                 decimal_or_none=lambda value: Decimal(str(value)) if value is not None else None,
                 safe_error_detail=lambda value, _limit: value,
