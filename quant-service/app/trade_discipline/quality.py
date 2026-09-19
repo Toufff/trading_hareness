@@ -36,8 +36,10 @@ CHECK_IDS = (
     "hard_stop_distance_sane", "soft_above_hard", "soft_stop_separation", "lines_monotonic",
     "every_line_evaluable", "every_line_has_derivation", "exposure_line_when_over_cap",
     "holiday_line_when_closure", "no_add_when_crash_or_broken", "sizing_consistent",
-    "not_lowered_vs_previous", "valid_until_within_5_trading_days",
+    "not_lowered_vs_previous", "valid_until_within_5_trading_days", "entry_reference_current",
 )
+STALE_DAY_PREFIX = "bars_stale_day:"
+ENTRY_TOLERANCE = 0.01 + 1e-9
 
 
 def _check(check_id: str, passed: bool, detail: str) -> QualityCheck:
@@ -120,6 +122,40 @@ def _required_closure(plan: DisciplinePlan) -> dict[str, Any] | None:
     if closure is not None and int(closure.get("closed_days") or 0) >= HOLIDAY_CLOSURE_DAYS:
         return closure
     return None
+
+
+def _entry_problem(plan: DisciplinePlan) -> str:
+    """Why a new buy's entry price is not a current, recomputable close (``""`` when it is).
+
+    ``entry_price`` must be ``max(lane_reference, last_close)`` where
+    ``last_close`` is the plan trading date's own close (settled, or a later
+    forming bar), and the sizing must be taken on exactly that price.  A plan
+    that sized off the lane's structural reference - the pre-v3 behaviour that
+    put 13.9% between 000811.SZ's real entry and its stop - carries no
+    ``metrics.entry`` and fails here.
+    """
+    entry = (plan.metrics or {}).get("entry")
+    if not isinstance(entry, dict):
+        return "缺少 metrics.entry：入场参考价不是按 max(lane 结构参考价, 最新已结算收盘) 推导的"
+    try:
+        lane_reference = float(entry["lane_reference"])
+        last_close = float(entry["last_close"])
+        entry_price = float(entry["entry_price"])
+    except (KeyError, TypeError, ValueError):
+        return "metrics.entry 缺少 lane_reference / last_close / entry_price"
+    close_day = str(entry.get("last_close_date") or "")[:10]
+    if close_day < plan.trading_date.isoformat():
+        return f"入场参考收盘日 {close_day or '缺失'} 早于计划交易日 {plan.trading_date.isoformat()}"
+    stale = [ref for ref in plan.evidence_refs if ref.startswith(STALE_DAY_PREFIX)]
+    if stale:
+        return f"当日日线尚未结算，入场参考价取自更早的收盘（{stale[0]}）"
+    expected = max(lane_reference, last_close)
+    if abs(entry_price - expected) > ENTRY_TOLERANCE:
+        return f"entry_price {entry_price} 与 max(lane 参考 {lane_reference}, 收盘 {last_close}) = {expected} 不符"
+    if plan.sizing is None or abs(float(plan.sizing.reference_price) - entry_price) > ENTRY_TOLERANCE:
+        sized = None if plan.sizing is None else plan.sizing.reference_price
+        return f"仓位按 {sized} 计算，而不是入场参考价 {entry_price}"
+    return ""
 
 
 def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
@@ -274,6 +310,16 @@ def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
     else:
         checks.append(_check("valid_until_within_5_trading_days", plan.valid_until.date().isoformat() <= limit,
                              f"valid_until {plan.valid_until.date().isoformat()}，第5个交易日 {limit}"))
+
+    if plan.plan_kind != "new_buy":
+        checks.append(_check("entry_reference_current", True, "持仓计划：参考价即最新收盘，不适用"))
+    else:
+        problem = _entry_problem(plan)
+        entry = (metrics.get("entry") or {}) if not problem else {}
+        checks.append(_check(
+            "entry_reference_current", not problem,
+            problem or (f"入场参考价 {entry.get('entry_price')} = max(lane 参考 {entry.get('lane_reference')}, "
+                        f"{entry.get('last_close_date')} 收盘 {entry.get('last_close')})，仓位与止损均按它计算")))
     return checks
 
 
@@ -285,4 +331,4 @@ def failed_checks(checks: list[QualityCheck]) -> list[str]:
     return [check.check_id for check in checks if not check.passed]
 
 
-__all__ = ["CHECK_IDS", "DERIVATION_TOLERANCE", "evaluate_quality", "failed_checks", "quality_passed"]
+__all__ = ["CHECK_IDS", "DERIVATION_TOLERANCE", "ENTRY_TOLERANCE", "evaluate_quality", "failed_checks", "quality_passed"]

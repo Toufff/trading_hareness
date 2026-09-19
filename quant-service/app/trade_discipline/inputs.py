@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 from ..agent_paper.context import fetch_live_quotes, fetch_minutes
 from ..runtime_executors import run_database_blocking
 from .generator import CalendarInfo, GenerationInputs
+from .quality import STALE_DAY_PREFIX as QUALITY_STALE_DAY_PREFIX
 from .templates import DEFAULT_RISK_PER_TRADE_PCT
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -417,7 +418,8 @@ async def live_forming_bar(symbol: str, day: date, *,
     return forming_bar(day, quotes.get(symbol), tape if isinstance(tape, dict) and "status" not in tape else None)
 
 
-STALE_DAY_PREFIX = "bars_stale_day:"
+# One definition, shared with the ``entry_reference_current`` quality check.
+STALE_DAY_PREFIX = QUALITY_STALE_DAY_PREFIX
 
 
 def stale_day_ref(evidence: dict[str, Any], bars: list[dict[str, Any]],
@@ -472,7 +474,7 @@ def build_generation_inputs(*, run_id: str, account_key: str, symbol: str, as_of
         calendar=evidence.get("calendar") or CalendarInfo(),
         previous_plan=evidence.get("previous_plan"),
         risk_per_trade_pct=risk_per_trade_pct, lowered_reason=lowered_reason,
-        evidence_refs=refs,
+        evidence_refs=refs, recommendation=evidence.get("recommendation"),
     )
 
 

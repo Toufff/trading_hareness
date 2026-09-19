@@ -29,14 +29,16 @@ from .templates import (
     build_template,
     closure_within,
     hard_stop_price,
-    new_buy_reference,
+    new_buy_entry,
 )
 
-GENERATOR_VERSION = "trade-discipline-generator-v2"
+GENERATOR_VERSION = "trade-discipline-generator-v3"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 VALIDITY_TRADING_DAYS = 5
 SESSION_CLOSE = time(15, 0)
 PLAN_KEY_HASH_CHARS = 12
+RESEARCH_CONDITION_NOTE = "研究条件，非系统线"
+RECOMMENDATION_TEXT_KEYS = ("priority", "stage", "why_now", "trigger", "invalidation")
 
 
 class CalendarInfo(BaseModel):
@@ -65,6 +67,14 @@ class GenerationInputs(BaseModel):
     risk_per_trade_pct: Decimal = Field(default=DEFAULT_RISK_PER_TRADE_PCT, gt=0, le=10)
     lowered_reason: str | None = Field(default=None, max_length=400)
     evidence_refs: list[str] = Field(default_factory=list, max_length=40)
+    # The reviewed pool's human wording for this symbol (trigger / invalidation
+    # text).  Context for the reader of a new-buy card, never a price source.
+    recommendation: dict[str, Any] | None = None
+    # Part of the fingerprint on purpose: ``plan_key`` is derived from the
+    # inputs hash, so the same evidence run through a different generator
+    # version must not collide with the stored plan of the previous version
+    # (``persist_plan`` would raise a content conflict instead of superseding).
+    generator_version: str = GENERATOR_VERSION
 
     @field_validator("as_of")
     @classmethod
@@ -117,6 +127,20 @@ def t1_locked_shares_for(position: PositionRef | None, trading_date: date) -> in
     return max(0, position.quantity - position.sellable_quantity)
 
 
+def recommendation_conditions(recommendation: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The pool's trigger/invalidation sentences, labelled as research wording, not system lines."""
+    if not isinstance(recommendation, dict):
+        return None
+    texts = {key: recommendation.get(key) for key in RECOMMENDATION_TEXT_KEYS
+             if recommendation.get(key) not in (None, "")}
+    if not texts.get("trigger") and not texts.get("invalidation"):
+        return None
+    return {"decision_id": str(recommendation.get("decision_id") or ""),
+            "as_of_date": str(recommendation.get("as_of_date") or ""),
+            **{key: str(value) for key, value in texts.items()},
+            "note": RESEARCH_CONDITION_NOTE, "evaluable": False}
+
+
 def _validity(calendar: CalendarInfo, as_of: datetime) -> tuple[datetime, str]:
     upcoming = sorted(calendar.upcoming_trading_dates)
     if not upcoming:
@@ -151,8 +175,15 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
 
     position = _position_ref(inputs.position, inputs.as_of)
     plan_kind = "holding" if position is not None else "new_buy"
+    # A new buy is sized on ``entry_price = max(lane.reference, latest close)``:
+    # the lane reference is a structure level the stock may already be far
+    # above, and a stop/share count taken from it understates the real risk.
+    latest_bar = next((row for row in inputs.bars
+                       if str(row.get("trading_date"))[:10] == str(metrics["trading_date"])[:10]), {})
+    entry = (new_buy_entry(metrics, inputs.lane, last_close_forming=bool(latest_bar.get("forming")))
+             if plan_kind == "new_buy" else None)
     reference_price = (Decimal(str(metrics["close"])).quantize(Decimal("0.01"))
-                       if plan_kind == "holding" else new_buy_reference(metrics, inputs.lane))
+                       if entry is None else Decimal(str(entry["entry_price"])).quantize(Decimal("0.01")))
 
     hard_stop, _ = hard_stop_price(stage, metrics, reference_price)
     sizing = build_sizing(stage=stage, equity=inputs.equity, risk_per_trade_pct=inputs.risk_per_trade_pct,
@@ -174,7 +205,7 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
         stage, metrics, inputs.position, sizing, calendar_payload,
         plan_kind=plan_kind, lane=inputs.lane, sector_available=sector_available,
         previous_trail=_decimal(previous.get("trail")),
-        valid_until_date=valid_until.date().isoformat(),
+        valid_until_date=valid_until.date().isoformat(), entry=entry,
     )
 
     trading_date = date.fromisoformat(str(metrics["trading_date"]))
@@ -205,6 +236,13 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
                            "lane": decision["lane"], "evidence": decision["evidence"]},
         "risk_per_trade_pct": float(inputs.risk_per_trade_pct),
     })
+    if entry is not None:
+        # lane_reference / last_close / entry_price and where each came from,
+        # so the sizing basis of a new buy is recomputable from the card.
+        frozen["entry"] = entry
+        conditions = recommendation_conditions(inputs.recommendation)
+        if conditions is not None:
+            frozen["recommendation_conditions"] = conditions
 
     lines = template.lines
 
@@ -233,4 +271,5 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
 
 
 __all__ = ["CalendarInfo", "GENERATOR_VERSION", "GenerationInputs", "PLAN_KEY_HASH_CHARS",
-           "SESSION_CLOSE", "VALIDITY_TRADING_DAYS", "generate", "t1_locked_shares_for"]
+           "RESEARCH_CONDITION_NOTE", "SESSION_CLOSE", "VALIDITY_TRADING_DAYS", "generate",
+           "recommendation_conditions", "t1_locked_shares_for"]

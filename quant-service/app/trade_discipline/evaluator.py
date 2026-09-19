@@ -376,6 +376,37 @@ def _signal(state: LineState, line: Line) -> str | None:
     return None
 
 
+CAPPED_REASON = "已越过追高上限，不买"
+
+
+def _chase_cap(plan: DisciplinePlan, trigger: Line) -> float | None:
+    """The new-buy chase cap: the ``chase_cap`` line's price, else the trigger's recorded ``price_cap``."""
+    for line in plan.lines:
+        if line.kind == "chase_cap" and line.price is not None:
+            return float(line.price)
+    raw = trigger.derivation.inputs.get("price_cap")
+    return _number(raw)
+
+
+def _apply_chase_cap(plan: DisciplinePlan, states: list[LineState]) -> list[LineState]:
+    """A trigger confirmed by a close above the chase cap is ``capped``, not a buy.
+
+    The plan was sized on ``entry_price``; a confirming close more than half an
+    ATR above it would put the fill (and so the real stop distance) outside
+    what the sizing promised.  The state says so instead of signalling a buy.
+    """
+    out: list[LineState] = []
+    for line, state in zip(plan.lines, states, strict=True):
+        if line.kind == "trigger" and state.state == "triggered" and state.trigger_price is not None:
+            cap = _chase_cap(plan, line)
+            if cap is not None and float(state.trigger_price) > cap + 1e-9:
+                state = state.model_copy(update={
+                    "state": "capped",
+                    "evidence": {**state.evidence, "price_cap": cap, "capped_reason": CAPPED_REASON}})
+        out.append(state)
+    return out
+
+
 def evaluate(plan: DisciplinePlan, inputs: EvaluationInputs) -> Evaluation:
     """Evaluate every line of ``plan`` against the supplied tape.  Pure."""
     as_of_date = inputs.as_of.astimezone(SHANGHAI).date()
@@ -397,6 +428,7 @@ def evaluate(plan: DisciplinePlan, inputs: EvaluationInputs) -> Evaluation:
         else:
             states.append(_price_line_state(plan, line, inputs, conditions))
 
+    states = _apply_chase_cap(plan, states)
     expired = inputs.as_of > plan.valid_until
     cancelled = any(state.state == "triggered" and line.kind == "cancel"
                     for line, state in zip(plan.lines, states, strict=True))
@@ -432,7 +464,7 @@ def evaluate(plan: DisciplinePlan, inputs: EvaluationInputs) -> Evaluation:
 
 
 __all__ = [
-    "BUY_ACTIONS", "CLIMAX_WINDOW", "EVALUATOR_VERSION", "EXIT_ACTIONS", "EXPOSURE_ACTION_TIME",
+    "BUY_ACTIONS", "CAPPED_REASON", "CLIMAX_WINDOW", "EVALUATOR_VERSION", "EXIT_ACTIONS", "EXPOSURE_ACTION_TIME",
     "EvaluationInputs", "Observation", "REDUCE_ACTIONS", "SELL_ACTIONS", "SESSION_CLOSE",
     "VOLUME_CONTRACT_MULTIPLE", "VOLUME_EXPAND_MULTIPLE", "daily_observations", "evaluate",
     "extra_conditions", "minute_observations",

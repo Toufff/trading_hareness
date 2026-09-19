@@ -25,7 +25,7 @@ from .contracts import ComplianceRecord, DisciplinePlan, Evaluation, FormulaErro
 from .generator import t1_locked_shares_for
 from .quality import CHECK_IDS, DERIVATION_TOLERANCE
 
-REPORT_VERSION = "trade-discipline-report-v3"
+REPORT_VERSION = "trade-discipline-report-v4"
 RESEARCH_NOTICE = "研究用途，仅作人工决策依据：系统不连券商、不下单、不改持仓。"
 DASH = "—"
 
@@ -42,7 +42,7 @@ STATUS_LABEL: dict[str, str] = {
 KIND_LABEL: dict[str, str] = {
     "exposure": "仓位", "hard_stop": "硬止损", "soft_stop": "软止损", "trail": "移动止损",
     "time_stop": "时间止损", "no_add": "禁加仓", "take_partial": "减半仓", "holiday": "休市减仓",
-    "trigger": "买入触发", "cancel": "计划作废",
+    "trigger": "买入触发", "cancel": "计划作废", "chase_cap": "追高上限",
 }
 METRIC_LABEL: dict[str, str] = {
     "daily_close": "日线收盘价", "minute_close": "分钟收盘价", "last": "最新价",
@@ -63,6 +63,7 @@ ACTION_LABEL: dict[str, str] = {
 EXECUTE_AT_LABEL: dict[str, str] = {"next_open+15m": "下一交易日开盘后15分钟内"}
 LINE_STATE_LABEL: dict[str, str] = {
     "armed": "待触发", "triggered": "已触发", "expired": "已过期", "cancelled": "已取消",
+    "capped": "已越过追高上限，不买",
 }
 PLAN_STATE_LABEL: dict[str, str] = {
     "active": "仍在计划内", "exit_signalled": "已发出退出信号", "reduce_signalled": "已发出减仓信号",
@@ -89,6 +90,7 @@ CHECK_LABEL: dict[str, str] = {
     "sizing_consistent": "仓位公式可复算且不超上限",
     "not_lowered_vs_previous": "硬止损不得低于前序计划（除非记录下调理由）",
     "valid_until_within_5_trading_days": "有效期不超过5个交易日",
+    "entry_reference_current": "新买入场参考价取计划交易日收盘或更晚，仓位与止损按它计算",
 }
 
 
@@ -276,12 +278,40 @@ def sizing_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
     ]
 
 
-def sizing_notes(plan: DisciplinePlan) -> list[str]:
-    """Sentences printed under the sizing table; today only the T+1 lock."""
-    locked = t1_locked_shares(plan)
-    if locked <= 0:
+def entry_note(plan: DisciplinePlan) -> str | None:
+    """How a new buy's entry price was chosen, in one recomputable sentence."""
+    entry = (plan.metrics or {}).get("entry")
+    if plan.plan_kind != "new_buy" or not isinstance(entry, dict):
+        return None
+    source = "最新收盘" if entry.get("entry_source") == "last_close" else "lane 结构参考价"
+    return (f"入场参考价 {_fmt(entry.get('entry_price'))} = max(lane 结构参考价 {_fmt(entry.get('lane_reference'))}"
+            f"（{entry.get('lane_reference_source')}），{entry.get('last_close_date')} 收盘 {_fmt(entry.get('last_close'))}"
+            f"（{'盘中形成中' if entry.get('last_close_basis') == 'forming' else '已结算'}））；取{source}。"
+            "硬止损、止损距离、股数、移动止损与减半仓均以它为基准。")
+
+
+def recommendation_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
+    """The pool's human trigger/invalidation wording; research conditions, never system lines."""
+    conditions = (plan.metrics or {}).get("recommendation_conditions")
+    if not isinstance(conditions, dict):
         return []
-    return [f"生成日不可卖 {locked} 股（T+1，按 {_snapshot_stamp(plan)} 快照），价格线自下一交易日起可执行。"]
+    labels = (("trigger", "观察触发"), ("invalidation", "取消条件"), ("why_now", "为什么是现在"))
+    return [{"key": key, "label": label, "value": str(conditions[key]),
+             "note": str(conditions.get("note") or "研究条件，非系统线"),
+             "decision_id": conditions.get("decision_id"), "as_of_date": conditions.get("as_of_date")}
+            for key, label in labels if conditions.get(key)]
+
+
+def sizing_notes(plan: DisciplinePlan) -> list[str]:
+    """Sentences printed under the sizing table: the new-buy entry basis and the T+1 lock."""
+    notes: list[str] = []
+    entry = entry_note(plan)
+    if entry:
+        notes.append(entry)
+    locked = t1_locked_shares(plan)
+    if locked > 0:
+        notes.append(f"生成日不可卖 {locked} 股（T+1，按 {_snapshot_stamp(plan)} 快照），价格线自下一交易日起可执行。")
+    return notes
 
 
 def omitted_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
@@ -443,6 +473,7 @@ def plan_payload(plan: DisciplinePlan, *, evaluation: Evaluation | None = None,
         "t1_locked_shares": t1_locked_shares(plan),
         "lines": line_rows(plan),
         "omitted_lines": omitted_rows(plan),
+        "recommendation_conditions": recommendation_rows(plan),
         "derivations": derivation_rows(plan),
         "quality": {"passed": not failed, "failed": failed, "checks": quality_rows(plan)},
         "evidence_refs": list(plan.evidence_refs),
@@ -491,6 +522,11 @@ def render_markdown(plan: DisciplinePlan, *, evaluation: Evaluation | None = Non
                       [[row["kind_label"], row["reason"], _canonical(row["inputs"])] for row in omitted])
     else:
         out.append("- 无（模板中的每条可选线都已生成）")
+
+    conditions = recommendation_rows(plan)
+    if conditions:
+        out += ["", f"推荐池研究条件（{conditions[0]['note']}，决策 {str(conditions[0]['decision_id'] or '')[:12]}）：", ""]
+        out.extend(f"- {row['label']}：{row['value']}" for row in conditions)
 
     out += ["", "## 三、推导表（每个价格与动作值都可复算；无价格的时间线复算的是股数）", ""]
     out += _table(["#", "类型", "rule_id", "inputs", "formula", "价格/股数", "复算值", "一致",
@@ -575,7 +611,7 @@ def write_report(plan: DisciplinePlan, *, output_root: Any, evaluation: Evaluati
 __all__ = [
     "CHECK_LABEL", "EXTRA_LABEL", "KIND_LABEL", "METRIC_LABEL", "OP_LABEL", "REPORT_VERSION",
     "STAGE_LABEL", "STATUS_LABEL", "VERDICT_LABEL", "action_text", "compliance_rows", "condition_text",
-    "derivation_rows", "evaluation_rows", "execution_text", "header_rows", "line_rows", "omitted_rows",
-    "plan_payload", "quality_rows", "render_markdown", "report_paths", "sizing_notes", "sizing_rows", "slug",
+    "derivation_rows", "entry_note", "evaluation_rows", "execution_text", "header_rows", "line_rows", "omitted_rows",
+    "plan_payload", "quality_rows", "recommendation_rows", "render_markdown", "report_paths", "sizing_notes", "sizing_rows", "slug",
     "t1_locked_shares", "write_report",
 ]
