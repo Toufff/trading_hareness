@@ -197,8 +197,22 @@ pwsh .\scripts\shared-peer\install-shared-tunnel-tasks.ps1
 | owner 缺 `permitlisten` | `-R` 是远端绑定，`ExitOnForwardFailure=yes` 让 ssh 几秒内退出，2 分钟触发器无限重试同一个拒绝——吵，但看得见 |
 | peer 缺 `permitopen` | `-L` 是本地绑定，一定成功；容器 healthy、5433 端口开着，但每一条连接都被 `administratively prohibited: open failed` 拒绝——**完全静默** |
 
-当前 `OWNER_TUNNEL_SSH_*` 四个变量未设置，两条隧道都走未受限的 `lightServer1`
-别名，15433 无需额外授权即可绑定。启用受限 key 时必须先核对这两份白名单。
+**生产实际走的是受限 key**（2026-09-19 核实，此前本节写反了）：owner 的
+`runtime.env` 设置了全部四个 `OWNER_TUNNEL_SSH_*` 变量，两条隧道都用
+`owner_tunnel_ed25519` 登录 `stockowner`。该 key 在服务器上的条目是 9/3 手工装的，
+只放行 15432/15680/15681，所以第一次安装批量隧道时 ssh 报
+`remote port forwarding failed for listen port 15433`，发布随即把批量任务置为
+Disabled。9/19 已在 `/home/stockowner/.ssh/authorized_keys` 该条目追加
+`permitlisten="127.0.0.1:15433"`（原文件备份为 `authorized_keys.bak-20260919-batch`）。
+以后新增任何 owner 侧 `-R` 端口，先改这条白名单再发布。
+
+运维脚本的两个坑（9/19 的临时 operator 踩过，仓库内脚本已核查无同类写法）：
+
+- PowerShell 7 的 `Start-Process -Wait` 等待的是**整棵进程树**。发布会拉起常驻的运行时
+  supervisor，所以包住发布的脚本永远不返回。要等发布结束，用 `-PassThru` 拿到进程，再
+  `$p.WaitForExit()`（先访问一次 `$p.Handle`，退出码才保得住）。
+- 在 Windows 上把字符串管道给 `ssh … 'bash -s'`，PowerShell 会给每一行补 CRLF，远端路径
+  末尾多出 `\r`。远端脚本改用 base64 传：`ssh host "echo <b64> | base64 -d | bash"`。
 
 ### 2.3 peer 侧部署批量端口
 
