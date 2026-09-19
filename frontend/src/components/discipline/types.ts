@@ -25,10 +25,19 @@ export type DisciplineLine = {
   priority: number;
 };
 
+/** Where the per-name cap came from: a cell of the exposure calibration artifact. */
+export type ExposureBasis = {
+  stage: string; board: string; board_label?: string; cell: string; cap_pct: number; q99_loss_pct: number;
+  q95_loss_pct: number; samples: number; fallback: string | null; source_cell?: string; tolerance_pct: number;
+  percentile: number; horizon_sessions: number; calibration_version: string;
+  data_window?: { first_date: string; last_date: string }; board_source?: string;
+};
+
 export type DisciplineSizing = {
   equity: Num; risk_per_trade_pct: Num; reference_price: Num; hard_stop: Num; stop_distance: Num;
   risk_amount: Num; max_shares: number; target_exposure_pct: Num; current_shares: number;
   current_exposure_pct: Num; recommended_shares: number; current_risk_pct?: Num;
+  cap_shares?: number | null; binding_constraint?: 'risk' | 'cap' | null; exposure_basis?: ExposureBasis | null;
 };
 
 export type DisciplinePosition = {

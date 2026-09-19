@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import plansFixture from '../../../e2e/fixtures/discipline/plans-latest.json';
 import chart600613 from '../../../e2e/fixtures/discipline/chart-600613.SH.json';
 import {
-  buildAxis, clipSegment, defaultVisibleKinds, distance, effectiveStatus, lastClosedSession, lineTag, mergeLines,
+  buildAxis, capSummary, clipSegment, defaultVisibleKinds, distance, effectiveStatus, lastClosedSession, lineTag, mergeLines,
   nearestPendingLine, priceLines, snapshotWarnings, staggerLabels, timeStopDeadline, todayAction, totalRiskPct,
   trailingBelow, validityRemaining,
 } from './discipline-model';
@@ -137,5 +137,30 @@ describe('board summary', () => {
     expect(nearestPendingLine(plan('600613.SH'), 8.41)?.kind).toBe('no_add');
     expect(trailingBelow([7.7, 7.6, 7.62, 7.61], 7.63)).toBe(3);
     expect(trailingBelow([7.6, 7.7], 7.63)).toBe(0);
+  });
+});
+
+describe('calibrated cap summary', () => {
+  const calibrated = {
+    ...plan('600613.SH').sizing!, target_exposure_pct: '25', cap_shares: 2900, max_shares: 1200, recommended_shares: 1200,
+    binding_constraint: 'risk' as const,
+    exposure_basis: { stage: 'crash_rebound', board: 'main_10', board_label: '主板（10%）', cell: 'crash_rebound|main_10',
+      cap_pct: 25, q99_loss_pct: 18.9882, q95_loss_pct: 14.4553, samples: 64218, fallback: null, tolerance_pct: 5,
+      percentile: 99, horizon_sessions: 2, calibration_version: 'discipline-exposure-calibration-v1:bc72676e05cc' },
+  };
+  it('names the cap, its data basis and the binding limit (600613 dry-run numbers)', () => {
+    const summary = capSummary(calibrated)!;
+    expect(summary.cap).toBe('阶段上限 25%（2900 股）');
+    expect(summary.basis).toBe('急跌反弹 × 主板（10%）：两日最大跌幅 99% 分位 18.99%（64,218 个样本），上限 = 极端亏损 5% ÷ 18.99% 向下取 5 的倍数 = 25%');
+    expect(summary.binding).toBe('风险上限 1200 股（1.0%÷止损距离） / 阶段上限 25%（2900 股），风险上限更小，建议 1200 股');
+  });
+  it('says when the cap binds and when a cell fell back', () => {
+    const capBound = capSummary({ ...calibrated, binding_constraint: 'cap', recommended_shares: 500, cap_shares: 500,
+      exposure_basis: { ...calibrated.exposure_basis, fallback: 'board_pooled_across_stages' } })!;
+    expect(capBound.binding).toContain('阶段上限更小，建议 500 股');
+    expect(capBound.basis).toContain('样本不足按同板块合并');
+  });
+  it('labels a plan stored before the calibration as hand-picked', () => {
+    expect(capSummary(plan('600613.SH').sizing)!.basis).toBe('无校准依据（旧版计划：手填阶段上限）');
   });
 });

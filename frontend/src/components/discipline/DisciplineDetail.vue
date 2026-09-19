@@ -11,7 +11,7 @@ import { DEFAULT_LAYERS, buildDailyOption, buildMinuteOption, type ChartLayers }
 import {
   CHECK_LABEL, KIND_LABEL, LINE_STYLE, STAGE_LABEL, STAGE_TONE, STATUS_LABEL, buildAxis, dateOnly, defaultVisibleKinds,
   distance, effectiveStatus, hardStopPrice, latestLineStates, latestPrice, lineTag, mergeLines, num, price2, priceLines,
-  shanghaiStamp, timeStopDeadline, todayAction, trailingBelow, validityRemaining, atrOf,
+  shanghaiStamp, timeStopDeadline, capSummary, todayAction, trailingBelow, validityRemaining, atrOf,
 } from './discipline-model';
 import { errorText, fetchDailyChart, fetchEvaluations, fetchHistory, fetchMinuteChart, fetchReconciliations } from './discipline-api';
 import type { DailyChart, DisciplinePlan, EvaluationsResponse, HistoryResponse, MinuteChart, TradeFill } from './types';
@@ -200,6 +200,7 @@ function onChartClick(key: string) {
 
 // ---- sizing / evidence
 const sizing = computed(() => props.plan.sizing ?? null);
+const caps = computed(() => capSummary(props.plan.sizing ?? null));
 const overCap = computed(() => (sizing.value ? (num(sizing.value.current_exposure_pct) ?? 0) > (num(sizing.value.target_exposure_pct) ?? 0) : false));
 const maxSharesFormula = computed(() => {
   const s = sizing.value;
@@ -266,6 +267,11 @@ const chain = computed(() => [...(history.value?.items ?? [])].sort((a, b) => b.
       <strong>{{ action.headline }}</strong>
       <span class="today-timing">执行时点：{{ action.timing }}</span>
       <span class="today-stop">硬止损 {{ price2(hardStop) }} · 距现价 {{ hardGap?.text ?? '—' }}</span>
+      <span
+        v-if="caps"
+        class="today-stop"
+        data-testid="today-caps"
+      >仓位：{{ caps.binding }}</span>
     </section>
 
     <section class="chart-block">
@@ -501,7 +507,18 @@ const chain = computed(() => [...(history.value?.items ?? [])].sort((a, b) => b.
           <div class="wide">
             <dt>max_shares</dt><dd><code>{{ maxSharesFormula }}</code></dd>
           </div>
-          <div><dt>阶段上限</dt><dd>{{ sizing.target_exposure_pct }}%</dd></div>
+          <div data-testid="cap-basis">
+            <dt>阶段上限（数据校准）</dt><dd>{{ caps?.cap }}<small v-if="sizing.exposure_basis?.fallback">（fallback）</small></dd>
+          </div>
+          <div class="wide">
+            <dt>上限依据</dt><dd>{{ caps?.basis }}</dd>
+          </div>
+          <div
+            class="wide"
+            data-testid="binding-constraint"
+          >
+            <dt>起约束的限制</dt><dd :class="{ binding: true }">{{ caps?.binding }}</dd>
+          </div>
           <div><dt>建议股数</dt><dd>{{ sizing.recommended_shares }} 股</dd></div>
           <div><dt>当前持仓 / 可卖</dt><dd>{{ plan.position?.quantity ?? 0 }} / {{ plan.position?.sellable_quantity ?? 0 }} 股<small v-if="t1Locked > 0">（生成日 T+1 锁定 {{ t1Locked }} 股，下一交易日可卖）</small></dd></div>
           <div>
@@ -691,7 +708,7 @@ const chain = computed(() => [...(history.value?.items ?? [])].sort((a, b) => b.
 .kind-chip { background: #eff6ff; color: #1d4ed8; }
 .today { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; padding: 14px 16px; border-radius: 10px; border-left: 5px solid; background: var(--el-fill-color-light); }
 .today strong { font-size: 20px; line-height: 1.4; }
-.today-label { grid-row: span 3; align-self: center; font-size: 12px; color: var(--el-text-color-secondary); writing-mode: horizontal-tb; }
+.today-label { grid-row: span 4; align-self: center; font-size: 12px; color: var(--el-text-color-secondary); writing-mode: horizontal-tb; }
 .today-timing, .today-stop { color: var(--el-text-color-regular); font-size: 13px; }
 .today.tone-danger { border-color: #d93026; background: #fef2f2; }
 .today.tone-warning { border-color: #f08c00; background: #fff7ed; }
@@ -712,6 +729,7 @@ const chain = computed(() => [...(history.value?.items ?? [])].sort((a, b) => b.
 .sizing-grid dt, .evidence dt { color: var(--el-text-color-secondary); font-size: 12px; }
 .sizing-grid dd, .evidence dd { margin: 2px 0 0; overflow-wrap: anywhere; }
 .sizing-grid dd.over { color: #b91c1c; font-weight: 600; }
+.sizing-grid dd.binding { font-weight: 600; }
 .sizing-grid small { color: var(--el-text-color-secondary); }
 .plain-list { margin: 0; padding-left: 18px; line-height: 1.7; }
 .muted { color: var(--el-text-color-secondary); }

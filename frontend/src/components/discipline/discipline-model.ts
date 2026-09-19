@@ -438,6 +438,26 @@ export function barByDate(bars: ChartBar[]): Map<string, ChartBar> {
   return new Map(bars.map((bar) => [bar.date, bar]));
 }
 
+/** The per-name cap, its data basis and which of the two share limits binds, in one sentence each. */
+export function capSummary(sizing: DisciplinePlan['sizing']): { cap: string; basis: string; binding: string } | null {
+  if (!sizing) return null;
+  const basis = sizing.exposure_basis;
+  const capShares = sizing.cap_shares ?? null;
+  const cap = `阶段上限 ${sizing.target_exposure_pct}%${capShares === null ? '' : `（${capShares} 股）`}`;
+  const basisText = basis
+    ? `${STAGE_LABEL[basis.stage] ?? basis.stage} × ${basis.board_label ?? basis.board}：两日最大跌幅 ${basis.percentile}% 分位 `
+      + `${basis.q99_loss_pct.toFixed(2)}%（${basis.samples.toLocaleString('en-US')} 个样本${basis.fallback ? '，样本不足按同板块合并' : ''}），`
+      + `上限 = 极端亏损 ${basis.tolerance_pct}% ÷ ${basis.q99_loss_pct.toFixed(2)}% 向下取 5 的倍数 = ${basis.cap_pct}%`
+    : '无校准依据（旧版计划：手填阶段上限）';
+  const risk = `风险上限 ${sizing.max_shares} 股（${sizing.risk_per_trade_pct}%÷止损距离）`;
+  const binding = sizing.binding_constraint === 'cap'
+    ? `${risk} / ${cap}，阶段上限更小，建议 ${sizing.recommended_shares} 股`
+    : sizing.binding_constraint === 'risk'
+      ? `${risk} / ${cap}，风险上限更小，建议 ${sizing.recommended_shares} 股`
+      : `建议 ${sizing.recommended_shares} 股`;
+  return { cap, basis: basisText, binding };
+}
+
 /** Consecutive minute closes below the stop at the end of the tape (display count for the 3-bar rule). */
 export function trailingBelow(closes: number[], stop: number | null): number {
   if (stop === null) return 0;
