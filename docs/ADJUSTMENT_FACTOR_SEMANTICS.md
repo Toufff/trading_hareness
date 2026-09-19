@@ -101,6 +101,19 @@ tushare 一直到 09-07 都是 4.5917，09-09 才跳到 5.0878，而 09-08 4.59 
 数值只差第 5~7 位时（600601.SH 08-31：`tushare_primary` 6471.278 vs `tushare_super_sdk` 6471.28），
 优先 bar 上已经带着的那条，避免换值制造舍入抖动。
 
+**被取代的证据行不算数**（2026-09-19）：`raw` 带 `superseded_at` 的行（占位行的车道标注，或运维对错误
+tushare 行的人工标注）**只是证据**——不是校验点、不是锚点、不算"真实因子"覆盖（工作清单、status、
+个股就绪度）、不能支撑发布守护与值校验、也不可提升。规则只在一处：`promotable_factor_evidence_sql()`
+（及 `_param` 孪生、`REAL_FACTOR_PREDICATE_SQL`）末尾整体追加 `AND raw->>'superseded_at' IS NULL`；
+Python 孪生 `promotable_adjustment_factor` 同样拒绝；另外两处不走该谓词的读取也加了同一条件：
+`VALIDATION_TRUTH_SQL`（validate 的 tushare 真值）与 `annual_daily_backfill.reconcile_suspensions`。
+推论：一根 bar 若只有被取代的行带着它的值，守护与值校验会把它报出来（本该如此）。
+
+**运维手写行 = 校验点**：`provider='longhu_qfq_derived'` 且 `raw->>'method'` 以 `manual_` 开头的行
+（`MANUAL_METHOD_PREFIX`）是人工决定，不是本车道输出。`repair`（`rederive_derived=True`）只重算本车道
+自己的行，**不重算**手写行；它和 tushare 行一样作为校验点被采用（本车道 provider，不做价格裁决），
+同日有多条可提升行时手写行优先（`CHECKPOINTS_SQL` 排序第一键）。
+
 **来源命名**（来源名必须与真实来源一致）：推导行写 `quant.daily_adjustment_factors`，
 `provider='longhu_qfq_derived'`，`raw` 带 `factor_semantics='corporate_action_cumulative'`、
 `source='longhuvip:GetKLineDay_W14'`、`method='longhu_cq_preclose_qfq_v2'`、锚点、step、basis、
@@ -217,10 +230,8 @@ python scripts/adjustment-factor-maintenance.py sync --lookback-days 30 --env-fi
 
 ### 0.8 已知风险与分歧
 
-- **300176.SZ 需要人工决定**：tushare 漏记 08-21 配股、09-09 才补记。修复写推导值（沿用 4.5917，
-  窗口内无假跳变），08-21 的真实除权在 tushare 时代的 bar 上仍未体现（08-20→08-21 复权序列有约 -10%
-  的假跌，修复前就存在）。可选：人工把 08-21..最新的因子按 08-21 的 pre_close 证据重锚到 5.0878（需改写
-  tushare 时代的 bar，本次不做）。
+- **300176.SZ 已由运维重锚（2026-09-19，见 0.9）**：tushare 漏记 08-21 配股、09-09 才补记；
+  08-21..09-18 的 bar 已改为 5.0878，错误的 tushare 行已标注 `superseded_at`。
 - **09-07..09-09 的 bar 价格本身仍是前复权**：还原只用于推导，不回写 bar。18 只票 33 根 bar 的 close
   比原始价低一次派息（0.05%~0.5%），`close×adj_factor` 在这几根上有同样大小的误差。修正需要改写
   bar 价格，不在因子车道范围内。
@@ -230,6 +241,28 @@ python scripts/adjustment-factor-maintenance.py sync --lookback-days 30 --env-fi
   建议后续把 `parse_daily_kline_payload` 的 "unadjusted" 注释改正，并让补抓历史日时就用 CQ 反推原始价入库。
 - **longhu 单源**：CQ 缺失且 pre_close 也不动的除权（验证期 0 例）只能靠 qfq-only 阈值（>1%）兜底。
 - **没有 tushare 之后的校验**：从今往后没有新的独立真值；`validate` 只能对历史 tushare 期重跑。
+
+### 0.9 决策记录
+
+- **2026-09-19 300176.SZ 重锚与"被取代证据不算数"**。事实：08-21 配股除权（CQ `0,4,33.6,0`；
+  08-13..08-20 停牌；08-12 收 5.23，08-21 交易所 pre_close 4.72，台阶 1.108051）；tushare 到 09-08
+  仍发 4.5917，自 09-09 起自己发 5.0878。用户决定按 pre_close 证据重锚：运维把 canonical/market 的
+  `adj_factor` 在 08-21..09-18 设为 5.0878，写入 `longhu_qfq_derived` 行（`factor_semantics=
+  corporate_action_cumulative`，`method=manual_reanchor_rights_issue`，证据写在 `raw.evidence`），
+  并给 14 条错误 tushare 行（4.5917，08-21..09-07）打 `superseded_at` / `superseded_by=
+  longhu_qfq_derived` / `superseded_reason`。
+  重锚后旧代码只读 `repair --from 2026-08-21 --to 2026-09-18` 计划 08-21..09-08 每天
+  `replaces_other_value=1`（13 行，全是 300176.SZ）。实测原因：repair 丢掉本车道行重算，推导出
+  4.5917×1.108051 = **5.087837**（6 位），与手写的 5.0878 不等，直到 09-09 的 tushare 5.0878 校验点才
+  被采用——即重跑会把手写值改成未舍入的推导值；而已被取代的 4.5917 当时只是因为 bar 带着 5.0878、
+  `DISTINCT ON` 先选了推导行才没被当作校验点（bar 值一旦变化，按 provider 偏好 tushare 会胜出）。
+  规则（见 0.3）：被取代的行不再参与任何校验点/锚点/覆盖/守护/提升；`manual_` 手写行是校验点，repair
+  不重算。修复后生产只读实测：该窗口 `replaces_other_value=0`、`fills_null=0`（111485 行全部
+  unchanged）；默认 `repair` dry run 无损坏日期、无写入（`status=unchanged`）；`status --lookback-days 30`
+  `identity_factor_leaks` 0/0、`factor_value_mismatches` 0/0。
+- 仍然成立的旁路：tushare 归一化/年度回填若**重新抓取**同一 `(symbol, date, provider)`，
+  `ON CONFLICT ... raw=EXCLUDED.raw` 会覆盖掉 `superseded_at` 标注。因子车道已不调用 tushare，这条路径
+  目前只剩手动回填；再用前需要先保留标注。
 
 ---
 

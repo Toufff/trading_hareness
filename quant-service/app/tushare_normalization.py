@@ -110,6 +110,14 @@ PROMOTABLE_FACTOR_SEMANTICS = ("", CUMULATIVE_FACTOR_SEMANTICS)
 #: legacy "absent semantics is fine" half of the rule.
 DERIVED_FACTOR_PROVIDER = "longhu_qfq_derived"
 
+#: ``raw`` key an operator (or the placeholder annotation) sets on a stored
+#: factor row that a later decision replaced.  The row stays as evidence of
+#: what the vendor published, but it is no longer evidence FOR a bar factor:
+#: never a checkpoint, an anchor, a "real factor" for coverage or the release
+#: guard, nor promotable.  300176.SZ 2026-08-21..09-07: tushare's 4.5917 missed
+#: the 08-21 rights issue and was superseded by the re-anchored 5.0878.
+SUPERSEDED_MARKER = "superseded_at"
+
 
 def promotable_factor_provider(provider_key: Any) -> bool:
     """Return whether this tushare-family provider may set ``adj_factor`` on a bar."""
@@ -121,16 +129,18 @@ def promotable_factor_evidence_sql(alias: str = "factor", column: str = "raw") -
 
     Both halves of :func:`promotable_adjustment_factor` against a factor-table
     alias: a tushare route with absent or cumulative semantics, OR the derived
-    longhu provider with EXPLICIT cumulative semantics.  The release guard, the
+    longhu provider with EXPLICIT cumulative semantics -- and in both cases
+    not marked :data:`SUPERSEDED_MARKER`.  The release guard, the
     work list and the readiness coverage all ask this one question.  Written
     for statements WITHOUT bound parameters; a statement that binds parameters
     uses :func:`promotable_factor_evidence_sql_param`.
     """
     semantics = f"coalesce({alias}.{column}->>'factor_semantics','')"
     values = ",".join(f"'{value}'" for value in PROMOTABLE_FACTOR_SEMANTICS)
-    return (f"(({alias}.provider LIKE '{PROMOTABLE_FACTOR_PROVIDER_PREFIX}%' AND {semantics} IN ({values}))"
+    return (f"((({alias}.provider LIKE '{PROMOTABLE_FACTOR_PROVIDER_PREFIX}%' AND {semantics} IN ({values}))"
             f" OR ({alias}.provider = '{DERIVED_FACTOR_PROVIDER}'"
-            f" AND {semantics} = '{CUMULATIVE_FACTOR_SEMANTICS}'))")
+            f" AND {semantics} = '{CUMULATIVE_FACTOR_SEMANTICS}'))"
+            f" AND {alias}.{column}->>'{SUPERSEDED_MARKER}' IS NULL)")
 
 
 def promotable_factor_evidence_sql_param(alias: str = "factor", column: str = "raw") -> str:
@@ -156,13 +166,16 @@ def promotable_adjustment_factor(row: dict[str, Any], *, provider_key: str) -> b
     Both halves must hold.  ``provider_key`` must be a tushare route -- the
     only family that publishes corporate-action history -- and the declared
     semantics must be absent (a plain tushare cross-section row) or
-    :data:`CUMULATIVE_FACTOR_SEMANTICS`.  A row that fails either half is
+    :data:`CUMULATIVE_FACTOR_SEMANTICS`.  A row carrying
+    :data:`SUPERSEDED_MARKER` is never promotable.  A row that fails either half is
     still stored in ``quant.daily_adjustment_factors`` as evidence of what a
     vendor did or did not supply; it simply never becomes a bar field.
 
     :data:`DERIVED_FACTOR_PROVIDER` is the one non-tushare exception and must
     carry :data:`CUMULATIVE_FACTOR_SEMANTICS` explicitly.
     """
+    if row.get(SUPERSEDED_MARKER):
+        return False
     semantics = row.get("factor_semantics")
     if str(provider_key or "") == DERIVED_FACTOR_PROVIDER:
         return str(semantics or "") == CUMULATIVE_FACTOR_SEMANTICS
@@ -368,7 +381,7 @@ def normalize_rows(
 
 __all__ = [
     "CUMULATIVE_FACTOR_SEMANTICS", "DERIVED_FACTOR_PROVIDER", "PROMOTABLE_FACTOR_PROVIDER_PREFIX",
-    "PROMOTABLE_FACTOR_SEMANTICS", "promotable_factor_evidence_sql", "promotable_factor_evidence_sql_param",
+    "PROMOTABLE_FACTOR_SEMANTICS", "SUPERSEDED_MARKER", "promotable_factor_evidence_sql", "promotable_factor_evidence_sql_param",
     "STOCK_BASIC_INSTRUMENTS_SQL", "normalize_rows", "persist_stock_basic_instruments",
     "promotable_adjustment_factor", "promotable_factor_predicate_sql", "promotable_factor_provider",
 ]

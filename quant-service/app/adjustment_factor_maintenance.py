@@ -1038,7 +1038,9 @@ async def repair(
     tushare factors inside the window (the 08-27 hole's evidence, the
     09-02/09-03 bars, the 09-07/09-09/09-10/09-17 cross-sections) are
     checkpoints -- compared with the derivation, reported when they disagree,
-    kept as they are.  ``apply`` writes one transaction per trading date
+    kept as they are.  A row marked ``superseded_at`` is never a checkpoint or
+    an anchor; an operator's ``manual_*`` derived row is one and is never
+    recomputed.  ``apply`` writes one transaction per trading date
     (derived rows + both bar tables + placeholder annotation + ledger clear),
     then re-runs the guard and reads back every date.  Without ``apply`` not a
     single write is issued: the dry run is safe on a read-only connection.

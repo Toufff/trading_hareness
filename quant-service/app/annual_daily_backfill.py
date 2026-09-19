@@ -1090,6 +1090,9 @@ class AnnualDailyBackfill:
                                  -- reaching the bar through the ELSE 9 branch.
                                  AND provider LIKE 'tushare%%'
                                  AND coalesce(raw->>'factor_semantics','') <> 'same_day_identity_only'
+                                 -- A row a later decision superseded (raw
+                                 -- superseded_at) is evidence only.
+                                 AND raw->>'superseded_at' IS NULL
                                ORDER BY symbol,trading_date,
                                         CASE provider
                                           WHEN 'tushare_super_sdk' THEN 0
