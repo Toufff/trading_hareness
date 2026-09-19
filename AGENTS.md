@@ -139,8 +139,13 @@ provider response directly to a live threshold or order path.
   a bar requires BOTH halves of
   `tushare_normalization.promotable_adjustment_factor`: a tushare provider AND
   absent/`corporate_action_cumulative` semantics — a vendor that merely omits
-  the marker is refused by the provider half. See
-  `docs/ADJUSTMENT_FACTOR_SEMANTICS.md`.
+  the marker is refused by the provider half. A NULL sitting in the trailing
+  gap of a research window is resolved *on read only*, by the one shared rule
+  in `app/research_prices.resolve_factors`: carry the last real factor across
+  at most five sessions, and only while each carried session's `pre_close`
+  still equals the previous close. That flags `adj_factor_carried_forward`,
+  which is recorded, never penalised, and never written back to a bar table.
+  See `docs/ADJUSTMENT_FACTOR_SEMANTICS.md` (§1.1).
 - Application code never reads a `*_cold` twin or a `*_all` view. Those are the
   storage tier's operations surface: the twins carry no foreign keys and no
   triggers, so a router reading one bypasses every referential guarantee the hot

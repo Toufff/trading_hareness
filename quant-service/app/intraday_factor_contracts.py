@@ -58,7 +58,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         factor_key="daily_rebound_state", version="v1", frequency="daily",
         inputs=("canonical_bars_daily.research_close", "daily_market_summary"),
         availability_clock="daily_bar_available_at", minimum_history=60,
-        quality_flags=("adj_factor_missing", "insufficient_history_60"),
+        quality_flags=("adj_factor_missing", "adj_factor_carried_forward", "insufficient_history_60"),
         description="Prior completed-day countertrend state; no same-day daily close is consumed intraday.",
     ),
 }

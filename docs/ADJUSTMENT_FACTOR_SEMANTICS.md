@@ -27,12 +27,71 @@
 | 取值 | 含义 | 下游行为 |
 |---|---|---|
 | 真实累计因子（> 0） | 已取到 tushare 累计因子 | 正常复权 |
-| `NULL` | 尚未取到（待补） | 失败关闭：`adj_factor_missing` / `data_quality_blocked` / `adjustment_pending` |
+| `NULL` | 尚未取到（待补） | 窗口**末尾**的短缺口且无除权迹象时按第 1.1 节顺延（`adj_factor_carried_forward`）；否则失败关闭：`adj_factor_missing` / `data_quality_blocked` / `adjustment_pending` |
 | `1`（伪造占位） | **禁止** | 静默产生未复权序列 |
 
 > `1` 本身并不一定是错的：新上市个股确有合法的 `adj_factor = 1`。判定范围的谓词
 > 永远是"该 symbol+date 存在 `same_day_identity_only` 占位证据且没有任何
 > tushare 行"，**不是** `adj_factor = 1`。2026-09-04 之前有 96,134 行合法的 1.0。
+
+---
+
+## 1.1 末尾缺口顺延（carry-forward）：`NULL` 不等于"整只股票黑屏"
+
+因子抓取是**独立于行情的另一条车道**（第 5 节），所以 longhu 收盘后最新的一两个交易日
+必然先落地为 `adj_factor IS NULL`。如果每个跨日消费者都对这种"车道晚了一步"失败关闭，
+那么被扣分、被剔除的是**全市场每一只股票**，与个股自身毫无关系 —— 一只更好的股票会
+因为平台的数据时序而被挤出推荐池。这条规则就是为了消除那种误伤。
+
+**规则（唯一实现：`quant-service/app/research_prices.py` 的 `resolve_factors()`，
+`adjusted_bars()` / `ten_day_leader_ranking` / `effectiveness.simulate` 都调它）**
+
+某个窗口里的 `NULL` 因子，**同时**满足以下四条时，按"窗口内最后一个真实因子"顺延：
+
+1. **只在末尾**：`NULL` 之后不再有真实因子。窗口中间的 `NULL`（后面还有真因子）
+   是历史缺口，不是车道滞后，**继续失败关闭** `adj_factor_missing`；
+2. **有锚**：窗口内至少存在一个真实因子（`> 0`）。整窗全 `NULL` 无从顺延；
+3. **有界**：顺延不超过 `MAX_CARRIED_FACTOR_SESSIONS = 5` 个交易日。超过就不再是
+   "抓取晚了一两天"，而是"没人在抓"，必须失败关闭；
+4. **无除权迹象**：缺口内每一天的 `pre_close` 与前一交易日 `close` 之差
+   ≤ `CORPORATE_ACTION_PRICE_TOLERANCE = 0.01`（A 股报价到分）。任何一天对不上，
+   就是交易所在告诉我们当天除权除息，**改判** `corporate_action_unresolved`。
+   窗口里**根本没有 `pre_close`** 时什么也证明不了，同样失败关闭 `adj_factor_missing`。
+
+满足时返回标记 `adj_factor_carried_forward`，顺延天数经
+`research_adj_factor_carried`（逐行）/ `carried_forward_sessions()` 向上暴露。
+
+**为什么这不是当年那个 `1.0` 占位：**
+
+- `1.0` 占位在**绝对值上就是错的**：它宣称累计因子等于 1，`close * adj_factor`
+  变成一条未复权序列，与它前面那段已复权的历史**不可比**，而且悄无声息。
+  顺延保留的是**窗口内其余各日同一个基准**，所以该窗口里每一个跨日比值
+  与最后一个已抓取交易日当时同样有效。
+- 公司行为很稀有（全市场约 5,500 只，每天个位数），而且**不是不可见的**：
+  交易所会按复权后的价位重新发布当日 `pre_close`，除权除息日因此自己
+  "举手"（`pre_close ≠ 前收`）。所以对一段没有举手的短末尾缺口，
+  "因子不变"是**正确的中性假设**，而依据是行情本身，不是猜测。
+- **绝不回写**：顺延只活在一次请求的研究视图里。
+  `quant.canonical_bars_daily.adj_factor` 保持 `NULL` 直到 tushare 给出真因子，
+  `tests/test_adjustment_factor_semantics_guard.py` 守护的正是这一条。
+
+**顺延不扣分**：`app/recommendation_generation.py` 的 `UNPENALIZED_FLAGS` 把
+`adj_factor_carried_forward` 排除在扣分计数之外，也不在 `hard_flags` 里 ——
+它描述的是平台抓取状态，不是个股缺陷；但它照样写进 `risk_flags`，读的人能看见基准。
+`adj_factor_missing`（完全没有可用基准）与 `corporate_action_unresolved`
+（有除权迹象且无法建模）仍然是硬标记，仍然扣分。
+
+**顺延的上界依赖盘后顺序**：`POST_CLOSE_STAGE_ORDER` 里 `adjustment_factors`
+排在 `close_strategy_decision` / `post_close_strategy` / `watchlist_main_wave` /
+`research_snapshot` **之前**，当晚才有机会先把真因子抓回来；
+由 `tests/test_post_close_refresh.py::test_the_factor_fetch_precedes_every_stage_that_reads_a_factor`
+钉住。
+
+**覆盖范围（有意为之的边界）**：`app/factor_lab.py` 的 `adjusted_price(row)` 是
+逐行接口，一行数据没有相邻交易日的收盘可比，按 `adjusted_value()` 保持严格；
+`app/factor_sql_lab.py` 在 SQL 里用 `WHERE bar.adj_factor>0` 过滤，属于集合式实现，
+本轮未纳入；`app/watchlist_main_wave.py` 的 `normalize_bars()` 对 `NULL` 因子是
+**丢弃该 bar**（365 日回测窗口缩短一两天，不是黑屏），本轮同样未改。
 
 ---
 
@@ -97,8 +156,8 @@
    `adjustment_covered_symbols`，并由 `ten_day_leader_rotation_service` 写进
    `source_status`，所以轮动车道的复权覆盖率在落库的 run 里可见，而不是只存不读。
 10. `app/effectiveness/execution.py` `simulate()`：`adj_factor` 移出必填字段，
-    `NULL` 返回 `adjustment_pending`，只有全部有因子且不一致才是
-    `corporate_action_unmodeled`。
+    无法解析的 `NULL` 返回 `adjustment_pending`，因子不一致（或缺口内出现除权迹象）
+    才是 `corporate_action_unmodeled`。判定统一交给第 16 项的 `resolve_factors()`。
 11. `app/annual_daily_backfill.py`：
     - `reconcile_suspensions()`：候选行要求 `provider LIKE 'tushare%'` 且排除
       `raw->>'factor_semantics' = 'same_day_identity_only'`。**没有这条，下面的修复不持久。**
@@ -126,6 +185,17 @@
 15. `app/full_market_daily_controls_sync.py`：每个 `blocked` 回执带 `blocked_by`
     ∈ {`coverage`, `provider`, `executor_saturated`}，覆盖率不足单独抛
     `ControlCoverageError`。调用方据此区分"这一天的日线截面不够"与"provider 挂了"。
+16. **末尾缺口顺延（第 1.1 节）**：`app/research_prices.py` 新增
+    `resolve_factors()` / `FactorResolution` / `carried_forward_sessions()`，
+    `adjusted_bars()` 改为走它；`ten_day_leader_ranking` 与
+    `effectiveness/execution.simulate()` 也改调同一条规则（不再各自判 `adj_factor`）。
+    `recommendation_generation.UNPENALIZED_FLAGS` 让顺延不扣分；
+    `feature_snapshot_repository` 报 `research_price_status='carried_forward'`；
+    `intraday_factor_contracts` 的 `daily_rebound_state` 声明该标记。
+    规则要读 `pre_close`，所以 `feature_snapshot_repository`、
+    `watchlist_daily_factors`（两条查询）、`post_close_strategy_service`、
+    `event_research`、`effectiveness/service.py` 的 bar 查询都补上了 `pre_close` 列
+    —— 少这一列的窗口证明不了"没有除权"，只会一直失败关闭。
 
 ---
 
@@ -234,7 +304,8 @@ SELECT b.trading_date,
 
 ### 步骤 1 —— NULL 化（只有占位证据的行）
 
-`NULL` = "没有复权信息"，正是 `app/research_prices.py` 的 `adjusted_bars()` 设计要识别的状态。
+`NULL` = "没有复权信息"，正是 `app/research_prices.py` 的 `resolve_factors()` /
+`adjusted_bars()` 设计要识别的状态（末尾短缺口按第 1.1 节顺延，其余失败关闭）。
 
 ```sql
 BEGIN;
@@ -523,27 +594,50 @@ python scripts/adjustment-factor-maintenance.py sync \
 
 ## 6. 修复后的预期影响（必须提前通知使用者）
 
-### 特征黑屏窗口
+### 不会出现全市场黑屏（第 1.1 节的末尾缺口顺延）
 
-因子变 `NULL` 之后，只要窗口里包含任意一个 `NULL` 日，所有 `adjusted_bars` 消费者都会
-**失败关闭**（这是正确行为，但看起来像故障）：
+**最初的设计是"只要窗口里有一个 `NULL` 日就整窗失败关闭"。那一版会在因子车道
+落后的每一个晚上把全市场一起黑掉，误伤与个股无关 —— 现在不再是那样。**
 
-- `app/feature_snapshot_repository.py`：`research_price_status='blocked'`，sma/return 全为 `None`
-- `app/watchlist_daily_factors.py`：`data_quality_blocked`
-- `app/post_close_structures.py`（30/15 日窗口）：`data_quality_blocked`
-- `app/factor_lab.py`：跨日比值全部为 `None`
-- `app/ten_day_leader_ranking.py`：缺因子的个股被逐只剔除
-- `app/factor_sql_lab.py`：`WHERE bar.adj_factor>0` 自动把 `NULL` 行排除出源 CTE
+因子车道晚一两天时（最常见的情况：longhu 收盘、当晚 `adjustment_factors` 还没成功），
+`NULL` 落在窗口**末尾**、缺口 ≤ 5 个交易日、且缺口内每天 `pre_close` 与前收连续，
+则窗口按最后一个真实因子顺延计算，只带一个 `adj_factor_carried_forward` 标记：
 
-步骤 2/3 回填后，已回填日期立即恢复；只有确实没有 tushare 因子的日期会持续黑屏，
-直到维护任务补齐。
+- `app/feature_snapshot_repository.py`：`research_price_status='carried_forward'`，
+  并给出 `research_adj_factor_carried_sessions`；sma/return 照常有值
+- `app/watchlist_daily_factors.py`、`app/post_close_structures.py`（30/15 日窗口）：
+  `status` 照常产出，`quality_flags` 带 `adj_factor_carried_forward`
+- `app/ten_day_leader_ranking.py`：个股不再被剔除，
+  `source_status.carried_forward_factor_symbols` 记录有多少只走了顺延
+- `app/effectiveness/execution.py`：`simulated`，回执带
+  `adjustment_basis='carried_forward'` 与 `carried_factor_sessions`
 
-### 打分悬崖
+**仍然失败关闭的只有三种**（这才是真正该报警的）：
+
+1. 缺口内出现除权迹象（`pre_close ≠ 前收`）→ `corporate_action_unresolved`；
+2. 末尾缺口超过 5 个交易日，或窗口中间有洞、或整窗无真实因子 → `adj_factor_missing`
+   （`feature_snapshot` 仍为 `research_price_status='blocked'`，
+   `watchlist_daily_factors` / `post_close_structures` 仍为 `data_quality_blocked`）；
+3. 窗口里没有 `pre_close` 可比 → 同上 `adj_factor_missing`。
+
+未纳入顺延、行为不变的两处：`app/factor_lab.py`（逐行接口，跨日比值仍为 `None`）与
+`app/factor_sql_lab.py`（`WHERE bar.adj_factor>0` 在 SQL 里排除 `NULL` 行）。
+
+步骤 2/3 回填后，已回填日期立即回到"真实因子"路径；顺延只是给车道留出最多 5 天，
+**不是**替代补齐 —— 超过 5 天仍然黑屏，就是在催维护任务。
+
+### 打分：顺延不扣分，缺失照扣
 
 `app/recommendation_generation.py` 把 `adj_factor_missing` 与
-`corporate_action_unresolved` 列为硬标记，每个扣 0.07、上限 0.35。今天它们在 longhu 日
-从不触发；修复后在因子补齐之前会对几乎所有候选触发，推荐分数会整体下沉。
-**这是正确行为，但如果不提前通知，看起来就像系统故障。**
+`corporate_action_unresolved` 列为硬标记（降级为 `watch`，每个标记扣 0.07、上限 0.35）。
+`adj_factor_carried_forward` **既不是硬标记也不参与扣分计数**
+（`UNPENALIZED_FLAGS`），因为它描述的是平台抓取状态而不是个股缺陷；扣它等于在
+车道落后的晚上把整个候选池一起压低，本来更好的股票会因此输给一只"恰好窗口完整"的。
+它仍然写进 `risk_flags`，读的人能看到这一票是按顺延基准算的。
+
+因此修复后**不存在**原先预告的"全市场打分悬崖"：只有真正除权未建模、或缺口超过
+5 天的个股才会下沉。这条由
+`tests/test_recommendation_carried_factor_scoring.py` 钉住。
 
 ### 已落库的错误结论不会被这次 SQL 修复
 

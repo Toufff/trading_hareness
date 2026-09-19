@@ -75,6 +75,29 @@ class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
         for dependencies in POST_CLOSE_STAGE_DEPENDENCIES.values():
             self.assertNotIn("adjustment_factors", dependencies)
 
+    async def test_the_factor_fetch_precedes_every_stage_that_reads_a_factor(self):
+        """Ordering is the whole reason the carry-forward stays a short gap.
+
+        ``app/research_prices.resolve_factors`` carries the last real factor
+        across at most five trailing sessions.  That bound only holds if the
+        evening actually tries to fetch today's factor BEFORE the stages that
+        consume it: run the strategy and recommendation stages first and every
+        evening would score on a window that is one session staler than it
+        needed to be, and a longer outage would reach the bound and black the
+        window out instead of carrying it.  These four are the consumers:
+        close_strategy_decision and post_close_strategy go through
+        ``post_close_structures``, watchlist_main_wave normalises adjusted
+        bars itself, and research_snapshot materialises the feature snapshot
+        the recommendation scorer reads.
+        """
+        order = list(POST_CLOSE_STAGE_ORDER)
+        factor_index = order.index("adjustment_factors")
+        for consumer in ("close_strategy_decision", "post_close_strategy",
+                         "watchlist_main_wave", "research_snapshot"):
+            self.assertIn(consumer, order)
+            self.assertLess(factor_index, order.index(consumer),
+                            f"adjustment_factors must run before {consumer}")
+
     async def test_a_failing_non_gating_stage_keeps_the_run_completed(self):
         async def run_db(action, *args, **_kwargs):
             return action(*args)

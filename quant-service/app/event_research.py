@@ -288,7 +288,7 @@ def research_post_close_backtest(connection: Any, start_date: date, end_date: da
         day_had_data = False
         for batch in symbol_batches:
             rows = connection.execute(
-                """SELECT symbol,trading_date,open,high,low,close,volume,amount,adj_factor,is_suspended,limit_up,limit_down
+                """SELECT symbol,trading_date,open,high,low,close,pre_close,volume,amount,adj_factor,is_suspended,limit_up,limit_down
                      FROM quant.canonical_bars_daily
                     WHERE symbol=ANY(%s) AND trading_date<=%s AND trading_date>%s::date - (%s+15)
                     ORDER BY symbol,trading_date""",
