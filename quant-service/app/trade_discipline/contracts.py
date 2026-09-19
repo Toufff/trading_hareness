@@ -69,7 +69,7 @@ def eval_expression(expression: str, inputs: dict[str, Any]) -> float:
 
 LineKind = Literal[
     "exposure", "hard_stop", "soft_stop", "trail", "time_stop", "no_add",
-    "take_partial", "holiday", "trigger", "cancel",
+    "take_partial", "holiday", "trigger", "cancel", "chase_cap",
 ]
 Metric = Literal["daily_close", "minute_close", "last", "low", "high", "vwap"]
 Op = Literal["<", "<=", ">", ">="]
@@ -250,7 +250,9 @@ class DisciplinePlan(BaseModel):
 class LineState(BaseModel):
     kind: LineKind
     label: str
-    state: Literal["armed", "triggered", "expired", "cancelled"]
+    # ``capped``: a new-buy trigger whose confirming close sat above the
+    # chase cap (entry_price + 0.5 x ATR14) - "已越过追高上限，不买".
+    state: Literal["armed", "triggered", "expired", "cancelled", "capped"]
     triggered_at: datetime | None = None
     trigger_price: Decimal | None = None
     basis: str = "daily"

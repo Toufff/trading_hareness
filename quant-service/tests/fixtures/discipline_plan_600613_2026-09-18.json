@@ -1,0 +1,510 @@
+{
+ "plan_id": "699144a6-00e4-42a2-bdf7-168e601bfef0",
+ "run_id": "c2b6acde-0b7a-442b-9df1-e06fe6693086",
+ "plan_key": "citics-primary:600613.SH:2026-09-18:holding:9cec46ab3494",
+ "contract_version": "trade-discipline-v1",
+ "account_key": "citics-primary",
+ "symbol": "600613.SH",
+ "name": "神奇制药",
+ "plan_kind": "holding",
+ "stage": "crash_rebound",
+ "template_key": "crash_rebound@trade-discipline-templates-v3",
+ "template_version": "trade-discipline-templates-v3",
+ "as_of_at": "2026-09-18T21:26:43.842735+08:00",
+ "trading_date": "2026-09-18",
+ "valid_until": "2026-09-28T15:00:00+08:00",
+ "position": {
+  "quantity": 5800,
+  "observed_at": "2026-09-18T15:10:04.575229+08:00",
+  "snapshot_id": "b6e7d141-0f55-42ab-a169-89fadb241c6c",
+  "average_cost": "8.4907",
+  "market_price": "8.4100",
+  "market_value": "48778.0000",
+  "sellable_quantity": 0
+ },
+ "metrics": {
+  "low": 8.12,
+  "ma5": 8.382,
+  "hi20": 12.4,
+  "high": 8.7,
+  "lo20": 8.1,
+  "low3": 8.04,
+  "ma10": 8.686,
+  "ma20": 9.603,
+  "open": 8.12,
+  "atr14": 0.8564285714285716,
+  "close": 8.41,
+  "low20": 7.92,
+  "amount": 839259.082,
+  "sector": {
+   "code": "881140",
+   "name": "化学制药",
+   "taxonomy": "longhu_ths_industry"
+  },
+  "volume": 995681.0,
+  "closure": null,
+  "calendar": {
+   "sessions": [
+    "2026-09-18",
+    "2026-09-21",
+    "2026-09-22",
+    "2026-09-23",
+    "2026-09-24",
+    "2026-09-28",
+    "2026-09-29",
+    "2026-09-30",
+    "2026-10-08",
+    "2026-10-09",
+    "2026-10-12"
+   ],
+   "closure_gaps": [
+    {
+     "closed_days": 2,
+     "resume_date": "2026-09-21",
+     "last_trading_date": "2026-09-18"
+    },
+    {
+     "closed_days": 3,
+     "resume_date": "2026-09-28",
+     "last_trading_date": "2026-09-24"
+    },
+    {
+     "closed_days": 7,
+     "resume_date": "2026-10-08",
+     "last_trading_date": "2026-09-30"
+    },
+    {
+     "closed_days": 2,
+     "resume_date": "2026-10-12",
+     "last_trading_date": "2026-10-09"
+    }
+   ]
+  },
+  "prev_low": 8.13,
+  "bars_used": 58,
+  "prev_high": 9.02,
+  "prev_close": 8.54,
+  "prior_high": 8.54,
+  "recent_low": 8.2,
+  "volatility": 4.895244690163827,
+  "low10_close": 8.1,
+  "range10_pct": 22.345679012345677,
+  "drawdown_pct": -32.17741935483871,
+  "high10_close": 9.91,
+  "max_volume20": 1981620.68,
+  "trading_date": "2026-09-18",
+  "omitted_lines": [
+   {
+    "kind": "soft_stop",
+    "inputs": {
+     "ma5": 8.382,
+     "atr14": 0.8564285714285716,
+     "hard_stop": 7.63,
+     "window_low": 8.06,
+     "window_high": 7.98,
+     "separation_atr": 0.5,
+     "reference_price": 8.41
+    },
+    "reason": "软止损区间为空（下限 8.06 > 上限 7.98，止损距离 0.78 < 1.0×ATR14 0.86），不生成"
+   },
+   {
+    "kind": "holiday",
+    "inputs": {
+     "closed_days": 3,
+     "resume_date": "2026-09-28",
+     "threshold_days": 5,
+     "last_trading_date": "2026-09-24"
+    },
+    "reason": "2026-09-24 起休市 3 个自然日，少于 5 个自然日的休市线阈值，不生成"
+   }
+  ],
+  "previous_trail": null,
+  "stage_decision": {
+   "lane": "expansion",
+   "stage": "crash_rebound",
+   "reason": "距20日最高回撤-32.2%（≤-25%）且短均线未修复",
+   "rule_id": "stage.crash_rebound",
+   "evidence": {
+    "ma5": 8.382,
+    "lane": "expansion",
+    "ma10": 8.686,
+    "ma20": 9.603,
+    "close": 8.41,
+    "prior_high": 8.54,
+    "range10_pct": 22.345679012345677,
+    "drawdown_pct": -32.17741935483871,
+    "formal_state": null
+   }
+  },
+  "synthetic_bars": 0,
+  "t1_snapshot_at": "2026-09-18T15:10:04.575229+08:00",
+  "prior_high_prev": 8.53,
+  "reference_price": 8.41,
+  "closure_required": false,
+  "sector_available": true,
+  "t1_locked_shares": 5800,
+  "valid_until_limit": "2026-09-28",
+  "previous_hard_stop": null,
+  "prior_volume_mean5": 735207.8,
+  "risk_per_trade_pct": 1.0
+ },
+ "sizing": {
+  "equity": "98996.26",
+  "hard_stop": "7.63",
+  "max_shares": 1200,
+  "risk_amount": "989.96",
+  "stop_distance": "0.78",
+  "current_shares": 5800,
+  "reference_price": "8.41",
+  "current_risk_pct": "4.57",
+  "recommended_shares": 1200,
+  "risk_per_trade_pct": "1.0",
+  "target_exposure_pct": "20",
+  "current_exposure_pct": "49.27"
+ },
+ "lines": [
+  {
+   "op": null,
+   "pct": null,
+   "kind": "exposure",
+   "extra": [],
+   "label": "仓位超出crash_rebound阶段上限20%（当前49.27%），下一交易日开盘15分钟内减到1200股",
+   "price": null,
+   "action": {
+    "type": "reduce_to_shares",
+    "value": 1200
+   },
+   "metric": null,
+   "confirm": {
+    "bars": 1,
+    "basis": "daily"
+   },
+   "priority": 0,
+   "derivation": {
+    "inputs": {
+     "equity": 98996.26,
+     "max_shares": 1200,
+     "current_shares": 5800,
+     "reference_price": 8.41,
+     "target_exposure_pct": 20.0
+    },
+    "formula": "min(max_shares, floor(equity * target_exposure_pct / 100 / reference_price / 100) * 100)",
+    "rule_id": "exposure.crash_rebound",
+    "action_inputs": {},
+    "action_formula": ""
+   },
+   "execute_at": "next_open+15m",
+   "execute_by": "time",
+   "trading_days": null
+  },
+  {
+   "op": "<",
+   "pct": null,
+   "kind": "hard_stop",
+   "extra": [],
+   "label": "日线收盘跌破7.63即全部退出（急跌反弹段，结构点最近20个交易日最低价7.92距离不足最小止损距离，按 0.9×ATR14 向下加宽）",
+   "price": "7.63",
+   "action": {
+    "type": "exit_all",
+    "value": null
+   },
+   "metric": "daily_close",
+   "confirm": {
+    "bars": 1,
+    "basis": "daily"
+   },
+   "priority": 1,
+   "derivation": {
+    "inputs": {
+     "atr14": 0.8564285714285716,
+     "low20": 7.92,
+     "band_low": 7.4008,
+     "band_high": 7.724857142857143,
+     "buffer_pct": 0.029371468140982966,
+     "binding_term": "atr",
+     "reference_price": 8.41,
+     "stop_pct_target": 0.02,
+     "structure_value": 7.92,
+     "structure_source": "low20",
+     "atr_target_multiple": 0.9
+    },
+    "formula": "min(low20, reference_price * (1 - buffer_pct), reference_price - atr_target_multiple * atr14, reference_price * (1 - stop_pct_target))",
+    "rule_id": "hard_stop.crash_rebound",
+    "action_inputs": {},
+    "action_formula": ""
+   },
+   "execute_at": null,
+   "execute_by": "price",
+   "trading_days": null
+  },
+  {
+   "op": "<",
+   "pct": null,
+   "kind": "hard_stop",
+   "extra": [],
+   "label": "盘中版：连续3根分钟收盘低于7.63即全部退出",
+   "price": "7.63",
+   "action": {
+    "type": "exit_all",
+    "value": null
+   },
+   "metric": "minute_close",
+   "confirm": {
+    "bars": 3,
+    "basis": "minute"
+   },
+   "priority": 1,
+   "derivation": {
+    "inputs": {
+     "atr14": 0.8564285714285716,
+     "low20": 7.92,
+     "band_low": 7.4008,
+     "band_high": 7.724857142857143,
+     "buffer_pct": 0.029371468140982966,
+     "binding_term": "atr",
+     "reference_price": 8.41,
+     "stop_pct_target": 0.02,
+     "structure_value": 7.92,
+     "structure_source": "low20",
+     "atr_target_multiple": 0.9
+    },
+    "formula": "min(low20, reference_price * (1 - buffer_pct), reference_price - atr_target_multiple * atr14, reference_price * (1 - stop_pct_target))",
+    "rule_id": "hard_stop.crash_rebound.intraday",
+    "action_inputs": {},
+    "action_formula": ""
+   },
+   "execute_at": null,
+   "execute_by": "price",
+   "trading_days": null
+  },
+  {
+   "op": "<",
+   "pct": null,
+   "kind": "take_partial",
+   "extra": [
+    "after_volume_climax",
+    "below_vwap"
+   ],
+   "label": "当日成交量为20日最大量且收在振幅下半且最新价跌破当日VWAP、且最新价低于8.41时，减半仓",
+   "price": "8.41",
+   "action": {
+    "type": "reduce_by_pct",
+    "value": "50"
+   },
+   "metric": "last",
+   "confirm": {
+    "bars": 1,
+    "basis": "minute"
+   },
+   "priority": 4,
+   "derivation": {
+    "inputs": {
+     "reference_price": 8.41
+    },
+    "formula": "reference_price",
+    "rule_id": "take_partial.crash_rebound",
+    "action_inputs": {},
+    "action_formula": ""
+   },
+   "execute_at": null,
+   "execute_by": "price",
+   "trading_days": null
+  },
+  {
+   "op": ">=",
+   "pct": null,
+   "kind": "trail",
+   "extra": [],
+   "label": "日线收盘站上9.35（成本/现价孰高 + 1×ATR14）后，把止损上移到成本价8.49，只上移不下移",
+   "price": "9.35",
+   "action": {
+    "type": "move_stop_to",
+    "value": "8.49"
+   },
+   "metric": "daily_close",
+   "confirm": {
+    "bars": 1,
+    "basis": "daily"
+   },
+   "priority": 5,
+   "derivation": {
+    "inputs": {
+     "atr14": 0.8564285714285716,
+     "anchor_price": 8.4907,
+     "arm_multiple": 1.0,
+     "reference_price": 8.41
+    },
+    "formula": "max(anchor_price, reference_price) + arm_multiple * atr14",
+    "rule_id": "trail.crash_rebound",
+    "action_inputs": {
+     "floor_price": 7.63,
+     "anchor_price": 8.4907,
+     "anchor_source": "average_cost"
+    },
+    "action_formula": "max(floor_price, anchor_price)"
+   },
+   "execute_at": null,
+   "execute_by": "price",
+   "trading_days": null
+  },
+  {
+   "op": "<",
+   "pct": null,
+   "kind": "no_add",
+   "extra": [],
+   "label": "日线收盘站回8.69（MA10）之前禁止加仓",
+   "price": "8.69",
+   "action": {
+    "type": "block_add",
+    "value": null
+   },
+   "metric": "daily_close",
+   "confirm": {
+    "bars": 1,
+    "basis": "daily"
+   },
+   "priority": 6,
+   "derivation": {
+    "inputs": {
+     "ma10": 8.686
+    },
+    "formula": "ma10",
+    "rule_id": "no_add.crash_rebound",
+    "action_inputs": {},
+    "action_formula": ""
+   },
+   "execute_at": null,
+   "execute_by": "price",
+   "trading_days": null
+  },
+  {
+   "op": "<",
+   "pct": null,
+   "kind": "time_stop",
+   "extra": [],
+   "label": "3个交易日内收盘仍未站回确认线8.69（MA10）则退出",
+   "price": "8.69",
+   "action": {
+    "type": "exit_all",
+    "value": null
+   },
+   "metric": "daily_close",
+   "confirm": {
+    "bars": 1,
+    "basis": "daily"
+   },
+   "priority": 7,
+   "derivation": {
+    "inputs": {
+     "ma10": 8.686,
+     "trading_days": 3
+    },
+    "formula": "ma10",
+    "rule_id": "time_stop.crash_rebound",
+    "action_inputs": {},
+    "action_formula": ""
+   },
+   "execute_at": "T+3_close",
+   "execute_by": "time",
+   "trading_days": 3
+  }
+ ],
+ "evidence_refs": [
+  "run:c2b6acde-0b7a-442b-9df1-e06fe6693086",
+  "bars:58:2026-09-18",
+  "position_snapshot:b6e7d141-0f55-42ab-a169-89fadb241c6c",
+  "sector:longhu_ths_industry:881140",
+  "lane_run:fbb9b2f9-d24c-4d0b-b2c6-8e97d0c54ccb",
+  "bars_basis:settled",
+  "broker_snapshot_key:7a4f6eeb243acdfdcef1b236f4afa255342a543f030a4f1812e3ddf4ad8b0393"
+ ],
+ "quality": [
+  {
+   "detail": "hard_stop 线 2 条",
+   "passed": true,
+   "check_id": "has_hard_stop"
+  },
+  {
+   "detail": "time_stop T+3_close",
+   "passed": true,
+   "check_id": "has_time_stop"
+  },
+  {
+   "detail": "hard_stop 7.63 vs 参考价 8.41",
+   "passed": true,
+   "check_id": "hard_stop_below_price"
+  },
+  {
+   "detail": "hard_stop 只含单一可评估条件",
+   "passed": true,
+   "check_id": "hard_stop_single_condition"
+  },
+  {
+   "detail": "距离 0.780（9.27%），ATR14 0.856 允许区间 [0.685, 2.569]",
+   "passed": true,
+   "check_id": "hard_stop_distance_sane"
+  },
+  {
+   "detail": "未使用软止损线",
+   "passed": true,
+   "check_id": "soft_above_hard"
+  },
+  {
+   "detail": "未使用软止损线",
+   "passed": true,
+   "check_id": "soft_stop_separation"
+  },
+  {
+   "detail": "hard < soft < 参考价，trail 触发价在上方",
+   "passed": true,
+   "check_id": "lines_monotonic"
+  },
+  {
+   "detail": "7 条线全部可评估",
+   "passed": true,
+   "check_id": "every_line_evaluable"
+  },
+  {
+   "detail": "7 条线均可从 inputs 复算",
+   "passed": true,
+   "check_id": "every_line_has_derivation"
+  },
+  {
+   "detail": "当前仓位 49.27% 超过上限 20%，已给出减仓线",
+   "passed": true,
+   "check_id": "exposure_line_when_over_cap"
+  },
+  {
+   "detail": "有效期内无 ≥5 个自然日的休市",
+   "passed": true,
+   "check_id": "holiday_line_when_closure"
+  },
+  {
+   "detail": "crash_rebound 需要禁加仓线，已给出",
+   "passed": true,
+   "check_id": "no_add_when_crash_or_broken"
+  },
+  {
+   "detail": "max_shares 1200，建议 1200 股",
+   "passed": true,
+   "check_id": "sizing_consistent"
+  },
+  {
+   "detail": "无前序 active 计划可比较",
+   "passed": true,
+   "check_id": "not_lowered_vs_previous"
+  },
+  {
+   "detail": "valid_until 2026-09-28，第5个交易日 2026-09-28",
+   "passed": true,
+   "check_id": "valid_until_within_5_trading_days"
+  }
+ ],
+ "status": "active",
+ "supersedes_plan_id": null,
+ "lowered_reason": null,
+ "inputs_hash": "9cec46ab34947863fc35c128da802d145c25fa9c016abbfa830561b260cddbcb",
+ "generator_version": "trade-discipline-generator-v2",
+ "content_hash": "a6bdfb32664048a7af4746997a39e398134e346d3df5c47be37c1a36c55ceaee",
+ "created_at": "2026-09-18T21:26:45.481420+08:00"
+}

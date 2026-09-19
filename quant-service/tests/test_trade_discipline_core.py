@@ -478,14 +478,14 @@ class StageTemplateQualityTests(unittest.TestCase):
         self.assertEqual(trail.derivation.action_inputs["floor_price"], float(plan.sizing.hard_stop))
         self.assertIn("把止损上移到成本价8.49", trail.label)
         self.assertIn("成本/现价孰高 + 1×ATR14", trail.label)
-        # a new-buy plan anchors on the trigger price it will be filled at
+        # a new-buy plan anchors on the entry price it is sized on: max(lane reference 10.45, close 11.00)
         new_buy = generate(stage_inputs("breakout_hold", position=None,
                                         lane={"lane": "contraction", "reference": "10.45", "support": "9.90"}))
         trail = new_buy.lines_of("trail")[0]
-        self.assertEqual(trail.action.value, Decimal("10.45"))
-        self.assertEqual(trail.derivation.action_inputs["anchor_source"], "trigger_reference")
-        self.assertIn("把止损上移到触发参考价10.45", trail.label)
-        self.assertIn("触发参考价 + 1×ATR14", trail.label)
+        self.assertEqual(trail.action.value, Decimal("11.00"))
+        self.assertEqual(trail.derivation.action_inputs["anchor_source"], "entry_price")
+        self.assertIn("把止损上移到入场参考价11.00", trail.label)
+        self.assertIn("入场参考价 + 1×ATR14", trail.label)
         self.assertEqual(new_buy.status, "active", failed_checks(new_buy.quality))
         # a holding whose cost already sits under the hard stop gains nothing from break-even: omitted
         profitable = generate(stage_inputs("trend_hold"))
@@ -516,7 +516,9 @@ class StageTemplateQualityTests(unittest.TestCase):
         plan = generate(stage_inputs("breakout_hold", position=None,
                                      lane={"lane": "contraction", "reference": "10.45", "support": "9.90"}))
         self.assertEqual(plan.plan_kind, "new_buy")
-        self.assertEqual(plan.lines_of("trigger")[0].price, Decimal("10.45"))
+        # trigger floor = max(lane reference 10.45, hard stop 10.24 + 0.5 x ATR14) = 10.46 (the stop gap binds)
+        self.assertEqual(plan.lines_of("trigger")[0].price, Decimal("10.46"))
+        self.assertEqual(plan.lines_of("trigger")[0].derivation.inputs["binding_term"], "stop_gap")
         self.assertEqual(plan.lines_of("cancel")[0].price, Decimal("9.90"))
         self.assertIn("amount_ge_prev_day", plan.lines_of("trigger")[0].extra)
         self.assertEqual(plan.status, "active", failed_checks(plan.quality))
@@ -668,6 +670,9 @@ class QualityGateFailureTests(unittest.TestCase):
                           metrics=self.metrics_with(previous_hard_stop=8.10))
         self.assert_fails("valid_until_within_5_trading_days",
                           metrics=self.metrics_with(valid_until_limit="2026-09-22"))
+        # a new buy sized on the lane's structure level (pre-v3, no metrics.entry)
+        self.assert_fails("entry_reference_current", plan_kind="new_buy")
+        self.assert_fails("buy_zone_valid", plan_kind="new_buy")      # no trigger / chase cap at all
         self.assertEqual(self.covered, set(CHECK_IDS))
 
     def test_a_sector_condition_without_a_stored_membership_is_not_evaluable(self):
@@ -753,7 +758,7 @@ class ShenqiFixtureTests(unittest.TestCase):
         self.assertEqual(plan.stage, "crash_rebound")
         self.assertEqual(plan.trading_date, date(2026, 9, 18))
         self.assertEqual(plan.valid_until.date(), date(2026, 9, 25))
-        self.assertEqual(plan.template_key, "crash_rebound@trade-discipline-templates-v3")
+        self.assertEqual(plan.template_key, "crash_rebound@trade-discipline-templates-v4")
         self.assertEqual(plan.position.quantity, 5800)
         self.assertEqual(plan.metrics["t1_locked_shares"], 0)
         self.assertEqual(len(plan.inputs_hash), 64)

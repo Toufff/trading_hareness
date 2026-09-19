@@ -1,0 +1,61 @@
+{
+ "plan_id": "699144a6-00e4-42a2-bdf7-168e601bfef0",
+ "plan_status": "active",
+ "count": 0,
+ "evaluations": [],
+ "lines": [
+  {
+   "index": 0,
+   "kind": "exposure",
+   "label": "仓位超出crash_rebound阶段上限20%（当前49.27%），下一交易日开盘15分钟内减到1200股",
+   "basis": "daily",
+   "states": []
+  },
+  {
+   "index": 1,
+   "kind": "hard_stop",
+   "label": "日线收盘跌破7.63即全部退出（急跌反弹段，结构点最近20个交易日最低价7.92距离不足最小止损距离，按 0.9×ATR14 向下加宽）",
+   "basis": "daily",
+   "states": []
+  },
+  {
+   "index": 2,
+   "kind": "hard_stop",
+   "label": "盘中版：连续3根分钟收盘低于7.63即全部退出",
+   "basis": "minute",
+   "states": []
+  },
+  {
+   "index": 3,
+   "kind": "take_partial",
+   "label": "当日成交量为20日最大量且收在振幅下半且最新价跌破当日VWAP、且最新价低于8.41时，减半仓",
+   "basis": "minute",
+   "states": []
+  },
+  {
+   "index": 4,
+   "kind": "trail",
+   "label": "日线收盘站上9.35（成本/现价孰高 + 1×ATR14）后，把止损上移到成本价8.49，只上移不下移",
+   "basis": "daily",
+   "states": []
+  },
+  {
+   "index": 5,
+   "kind": "no_add",
+   "label": "日线收盘站回8.69（MA10）之前禁止加仓",
+   "basis": "daily",
+   "states": []
+  },
+  {
+   "index": 6,
+   "kind": "time_stop",
+   "label": "3个交易日内收盘仍未站回确认线8.69（MA10）则退出",
+   "basis": "daily",
+   "states": []
+  }
+ ],
+ "transitions": [],
+ "plan_state_changes": [],
+ "live_orders": false,
+ "boundary": "research_only_human_decision_support"
+}

@@ -128,14 +128,18 @@ def test_an_unevaluated_plan_is_a_404_and_a_bad_basis_is_a_422():
         f"/api/v1/discipline/evaluations/latest?plan_id={PLAN_ID}&basis=hourly").status_code == 422
 
 
-def test_the_router_exposes_exactly_the_three_documented_read_routes():
+def test_the_router_exposes_exactly_the_documented_read_routes():
     app = client().app
     routes = {(tuple(sorted(route.methods)), route.path) for route in app.routes
               if getattr(route, "path", "").startswith("/api/v1/discipline")}
     assert routes == {
         (("GET",), "/api/v1/discipline/plans/latest"),
+        (("GET",), "/api/v1/discipline/plans/history"),
         (("GET",), "/api/v1/discipline/plans/{plan_id}"),
+        (("GET",), "/api/v1/discipline/plans/{plan_id}/chart"),
+        (("GET",), "/api/v1/discipline/plans/{plan_id}/evaluations"),
         (("GET",), "/api/v1/discipline/evaluations/latest"),
+        (("GET",), "/api/v1/discipline/reconciliations"),
     }
 
 

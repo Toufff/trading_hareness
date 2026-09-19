@@ -319,6 +319,7 @@ from .longhu_market_data import (
     LonghuMarketDataError,
     longhu_daily,
     longhu_index_daily,
+    longhu_intraday_minute_session,
     longhu_order_book_quotes,
 )
 from .market_source_names import LONGHU_MINUTE_FEATURE, LONGHU_PROVIDER
@@ -529,7 +530,7 @@ from .routers.paper_reads import build_paper_reads_router
 from .routers.agent_paper_reads import build_agent_paper_reads_router
 from .routers.paper_actions import build_paper_actions_router
 from .routers.personal_decisions import PersonalDecisionDependencies, build_personal_decisions_router
-from .routers.trade_discipline import TradeDisciplineDependencies, build_trade_discipline_router
+from .routers.trade_discipline import build_trade_discipline_router
 from .routers.broker_order_history import build_broker_order_history_router
 from .routers.analyst_prompt_lab import build_analyst_prompt_lab_router
 from .routers.strategy_pattern_reads import build_strategy_pattern_reads_router
@@ -702,9 +703,7 @@ from .async_personal_decision_repository import (
     latest_market_advice,
     latest_personal_decision_brief,
 )
-from .async_trade_discipline_read_repository import latest_evaluation as read_async_latest_discipline_evaluation
-from .async_trade_discipline_read_repository import latest_plans as read_async_latest_discipline_plans
-from .async_trade_discipline_read_repository import read_plan as read_async_discipline_plan
+from .async_trade_discipline_read_repository import router_dependencies as trade_discipline_dependencies
 from .broker_order_repository import order_history_summary, order_history_timeline
 from .provider_rate_limits import provider_request_spacing_seconds, reserve_provider_rate_limit_slot
 from .runtime_leases import (
@@ -4255,12 +4254,8 @@ app.include_router(build_personal_decisions_router(PersonalDecisionDependencies(
     latest_market_advice=latest_market_advice,
     latest_holding_advice=latest_holding_advice,
 )))
-app.include_router(build_trade_discipline_router(TradeDisciplineDependencies(
-    async_database=async_db,
-    latest_plans=read_async_latest_discipline_plans,
-    read_plan=read_async_discipline_plan,
-    latest_evaluation=read_async_latest_discipline_evaluation,
-)))
+app.include_router(build_trade_discipline_router(
+    trade_discipline_dependencies(async_db, live_minutes=longhu_intraday_minute_session)))
 app.include_router(build_broker_order_history_router(
     async_db, order_history_summary, order_history_timeline,
 ))

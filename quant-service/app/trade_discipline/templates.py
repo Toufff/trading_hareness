@@ -32,7 +32,7 @@ from typing import Any
 from ..short_term_lanes.risk import MIN_VOLATILITY_BUFFER_PCT, volatility_buffer_pct
 from .contracts import Action, Confirm, Derivation, Line, Sizing, eval_expression
 
-TEMPLATE_VERSION = "trade-discipline-templates-v3"
+TEMPLATE_VERSION = "trade-discipline-templates-v4"
 
 TARGET_EXPOSURE_PCT: dict[str, Decimal] = {
     "crash_rebound": Decimal("20"), "broken": Decimal("0"), "breakout_hold": Decimal("25"),
@@ -64,6 +64,15 @@ STOP_PCT_MIN = 0.015
 STOP_PCT_MAX = 0.12
 STOP_PCT_TARGET = 0.02
 TRAIL_ARM_ATR_MULTIPLE = 1.0
+# A new buy is sized off ``entry_price``; buying further above it than half an
+# ATR would carry more than the 1% risk the sizing promised, so the trigger is
+# capped there and a close beyond the cap reads "已越过追高上限，不买".
+CHASE_CAP_ATR_MULTIPLE = 0.5
+# The buy trigger must sit clearly above the hard stop: a close that satisfies
+# "buy" must never already be a close that says "exit".  Its floor is
+# max(lane.reference, hard_stop + 0.5 x ATR14); the buy zone is
+# [trigger floor, chase cap] and an empty zone is a quality rejection.
+TRIGGER_STOP_GAP_ATR = 0.5
 # A soft stop needs room on both sides: at least half an ATR above the hard
 # stop and half an ATR below the reference price, otherwise one day's noise
 # fires it and it says nothing the hard stop does not.
@@ -88,7 +97,7 @@ EXTRA_CONDITION_TEXT: dict[str, str] = {
 
 PRIORITY: dict[str, int] = {
     "exposure": 0, "hard_stop": 1, "holiday": 2, "soft_stop": 3, "take_partial": 4,
-    "trail": 5, "no_add": 6, "time_stop": 7, "cancel": 8, "trigger": 9,
+    "trail": 5, "no_add": 6, "time_stop": 7, "cancel": 8, "trigger": 9, "chase_cap": 10,
 }
 
 # stage -> (structure sub-expression, metric keys the expression reads)
@@ -350,17 +359,17 @@ class TemplateResult:
 def build_lines(stage: str, metrics: dict[str, Any], position: dict[str, Any] | None, sizing: Sizing,
                 calendar: dict[str, Any], *, plan_kind: str = "holding", lane: dict[str, Any] | None = None,
                 sector_available: bool = False, previous_trail: Decimal | None = None,
-                valid_until_date: str = "") -> list[Line]:
+                valid_until_date: str = "", entry: dict[str, Any] | None = None) -> list[Line]:
     """The lines only; ``build_template`` also returns the omissions."""
     return build_template(stage, metrics, position, sizing, calendar, plan_kind=plan_kind, lane=lane,
                           sector_available=sector_available, previous_trail=previous_trail,
-                          valid_until_date=valid_until_date).lines
+                          valid_until_date=valid_until_date, entry=entry).lines
 
 
 def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any] | None, sizing: Sizing,
                    calendar: dict[str, Any], *, plan_kind: str = "holding", lane: dict[str, Any] | None = None,
                    sector_available: bool = False, previous_trail: Decimal | None = None,
-                   valid_until_date: str = "") -> TemplateResult:
+                   valid_until_date: str = "", entry: dict[str, Any] | None = None) -> TemplateResult:
     lines: list[Line] = []
     omitted: list[dict[str, Any]] = []
     reference = sizing.reference_price
@@ -548,19 +557,26 @@ def build_template(stage: str, metrics: dict[str, Any], position: dict[str, Any]
             priority=PRIORITY["holiday"]))
 
     if plan_kind == "new_buy":
-        lines.extend(_new_buy_lines(stage, metrics, sizing, lane, sector_available))
+        lines.extend(_new_buy_lines(stage, metrics, sizing, lane, sector_available,
+                                    entry or new_buy_entry(metrics, lane)))
     return TemplateResult(lines=sorted(lines, key=lambda line: (line.priority, line.kind)), omitted=omitted)
 
 
 ANCHOR_TEXT: dict[str, str] = {
     "average_cost": "成本价", "trigger_reference": "触发参考价", "reference_price": "参考价",
+    "entry_price": "入场参考价",
 }
 
 
 def _anchor_price(position: dict[str, Any] | None, reference: Decimal, plan_kind: str) -> tuple[Decimal, str]:
-    """``(price, source)``: the average cost of a holding, the trigger price of a new buy."""
+    """``(price, source)``: the average cost of a holding, the entry price of a new buy.
+
+    ``reference`` of a new buy *is* its ``entry_price`` (the sizing basis), so
+    break-even is measured from the price the plan expects to be filled at,
+    not from a structural level the stock may already be far above.
+    """
     if plan_kind == "new_buy":
-        return reference, "trigger_reference"
+        return reference, "entry_price"
     cost = (position or {}).get("average_cost")
     if cost is None:
         return reference, "reference_price"
@@ -568,32 +584,89 @@ def _anchor_price(position: dict[str, Any] | None, reference: Decimal, plan_kind
 
 
 def new_buy_reference(metrics: dict[str, Any], lane: dict[str, Any] | None) -> Decimal:
-    """Planned entry for a ``new_buy`` plan: the lane reference, else the real platform high."""
+    """The structural confirmation level of a ``new_buy`` plan: the lane reference, else the platform high.
+
+    Since generator v3 this is **not** the entry price: it is the level the
+    trigger line confirms (a close back above the breakout structure).  The
+    entry price the plan is sized on comes from ``new_buy_entry``.
+    """
     raw = (lane or {}).get("reference")
     return _money(raw if raw is not None else metrics["prior_high"])
 
 
+def new_buy_entry(metrics: dict[str, Any], lane: dict[str, Any] | None, *,
+                  last_close_forming: bool = False) -> dict[str, Any]:
+    """``entry_price = max(lane.reference, latest close)``, with every term recorded.
+
+    A lane reference sits near the breakout structure; once the stock has run
+    away from it (2026-09-18: 000811.SZ reference 37.94, close 41.52) a stop
+    and a share count derived from the reference understate the real stop
+    distance by the whole run-up.  The entry therefore never sits below the
+    latest close the plan was derived from, and the reference is kept as the
+    structure the trigger line confirms.
+    """
+    raw = (lane or {}).get("reference")
+    lane_reference = float(_money(raw if raw is not None else metrics["prior_high"]))
+    last_close = float(_money(metrics["close"]))
+    entry_price = max(lane_reference, last_close)
+    return {
+        "lane_reference": lane_reference,
+        "lane_reference_source": "lane.reference" if raw is not None else "metrics.prior_high",
+        "last_close": last_close,
+        "last_close_date": str(metrics["trading_date"])[:10],
+        "last_close_basis": "forming" if last_close_forming else "settled",
+        "entry_price": entry_price,
+        "entry_source": "last_close" if last_close >= lane_reference else "lane_reference",
+        "formula": "max(lane_reference, last_close)",
+    }
+
+
 def _new_buy_lines(stage: str, metrics: dict[str, Any], sizing: Sizing, lane: dict[str, Any],
-                   sector_available: bool) -> list[Line]:
-    reference_raw = lane.get("reference")
+                   sector_available: bool, entry: dict[str, Any]) -> list[Line]:
     support_raw = lane.get("support")
-    reference_source = "lane.reference" if reference_raw is not None else "metrics.prior_high"
+    reference_source = entry["lane_reference_source"]
     support_source = "lane.support" if support_raw is not None else "metrics.recent_low"
-    trigger_price = new_buy_reference(metrics, lane)
+    entry_price = _money(entry["entry_price"])
+    atr14 = float(metrics["atr14"])
+    cap_price = _money(entry_price + Decimal(str(CHASE_CAP_ATR_MULTIPLE * atr14)))
+    hard_stop = float(sizing.hard_stop)
+    lane_reference = float(entry["lane_reference"])
+    stop_gap_floor = hard_stop + TRIGGER_STOP_GAP_ATR * atr14
+    # Never clamped to the cap: an empty zone stays empty and buy_zone_valid rejects the plan.
+    trigger_price = _money(max(lane_reference, stop_gap_floor))
+    trigger_binding = "lane_reference" if lane_reference >= stop_gap_floor else "stop_gap"
+    floor_text = ("lane 结构参考价" if trigger_binding == "lane_reference"
+                  else f"硬止损{_money(hard_stop)} + {TRIGGER_STOP_GAP_ATR}×ATR14，高于 lane 结构参考{_money(lane_reference)}")
     cancel_price = _money(support_raw if support_raw is not None else metrics["recent_low"])
     trigger_extra: list[str] = ["amount_ge_prev_day"]
     if sector_available:
         trigger_extra.append("sector_not_weak")
     trigger_notes = "".join(f"且{EXTRA_CONDITION_TEXT[name]}" for name in trigger_extra)
+    entry_inputs = {"lane_reference": entry["lane_reference"], "last_close": entry["last_close"],
+                    "entry_price": entry["entry_price"], "atr14": atr14,
+                    "chase_atr_multiple": CHASE_CAP_ATR_MULTIPLE}
     return [
         Line(kind="trigger",
-             label=f"日线收盘站上{trigger_price}{trigger_notes}，最多买到{sizing.recommended_shares}股",
+             label=(f"日线收盘在{trigger_price}–{cap_price}之间{trigger_notes}，最多买到{sizing.recommended_shares}股"
+                    f"（下沿={floor_text}；高于{cap_price}为追高，不买）"),
              metric="daily_close", op=">=", price=trigger_price, confirm=Confirm(bars=1, basis="daily"),
              extra=trigger_extra, action=Action(type="buy_up_to_shares", value=sizing.recommended_shares),
              derivation=Derivation(rule_id=f"trigger.{stage}",
-                                   inputs={"reference": float(trigger_price), "source": reference_source},
-                                   formula="reference"),
+                                   inputs={"source": reference_source, "price_cap": float(cap_price),
+                                           **entry_inputs, "hard_stop": hard_stop,
+                                           "stop_gap_atr": TRIGGER_STOP_GAP_ATR,
+                                           "stop_gap_floor": stop_gap_floor,
+                                           "binding_term": trigger_binding},
+                                   formula="max(lane_reference, hard_stop + stop_gap_atr * atr14)"),
              priority=PRIORITY["trigger"]),
+        Line(kind="chase_cap",
+             label=(f"日线收盘高于{cap_price}（入场参考{entry_price} + {CHASE_CAP_ATR_MULTIPLE}×ATR14）"
+                    "即已越过追高上限，不买"),
+             metric="daily_close", op=">", price=cap_price, confirm=Confirm(bars=1, basis="daily"),
+             extra=[], action=Action(type="block_add"),
+             derivation=Derivation(rule_id=f"chase_cap.{stage}", inputs=entry_inputs,
+                                   formula="entry_price + chase_atr_multiple * atr14"),
+             priority=PRIORITY["chase_cap"]),
         Line(kind="cancel", label=f"日线收盘放量跌破{cancel_price}则本计划作废",
              metric="daily_close", op="<", price=cancel_price, confirm=Confirm(bars=1, basis="daily"),
              extra=["volume_expand_1_5x"], action=Action(type="alert"),
@@ -605,14 +678,14 @@ def _new_buy_lines(stage: str, metrics: dict[str, Any], sizing: Sizing, lane: di
 
 
 __all__ = [
-    "ANCHOR_TEXT", "ATR_MAX_MULTIPLE", "ATR_MIN_MULTIPLE", "ATR_TARGET_MULTIPLE", "CONFIRM_REFERENCE",
+    "ANCHOR_TEXT", "ATR_MAX_MULTIPLE", "CHASE_CAP_ATR_MULTIPLE", "ATR_MIN_MULTIPLE", "ATR_TARGET_MULTIPLE", "CONFIRM_REFERENCE",
     "CRASH_FALLBACK_LABEL", "DEFAULT_RISK_PER_TRADE_PCT", "DEFAULT_TIME_STOP_DAYS", "EXTRA_CONDITION_TEXT",
     "HARD_STOP_TERMS", "HOLIDAY_CLOSURE_DAYS", "HOLIDAY_EXPOSURE_PCT", "LOT_SIZE",
     "MIN_BUFFER_PCT", "NO_ADD_REFERENCE", "PRIORITY", "SOFT_STOP_SEPARATION_ATR", "STAGE_STRUCTURE_NAME",
     "STOP_PCT_MAX", "STOP_PCT_MIN", "STOP_PCT_TARGET", "STRUCTURE_RULE", "TAKE_PARTIAL_STAGES",
     "TARGET_EXPOSURE_PCT", "TEMPLATE_VERSION", "TIME_STOP_DAYS", "TRAIL_ARM_ATR_MULTIPLE", "TWO_DAY_LOW_RULE",
-    "TemplateResult", "WEEKEND_CLOSURE_DAYS", "WIDENING_TERM_TEXT",
+    "TRIGGER_STOP_GAP_ATR", "TemplateResult", "WEEKEND_CLOSURE_DAYS", "WIDENING_TERM_TEXT",
     "buffer_pct", "build_lines", "build_sizing", "build_template", "closure_within", "closures_within",
-    "hard_stop_note", "hard_stop_price", "is_ordinary_weekend", "lot_shares", "new_buy_reference",
+    "hard_stop_note", "hard_stop_price", "is_ordinary_weekend", "lot_shares", "new_buy_entry", "new_buy_reference",
     "soft_stop_window", "stop_beyond_band", "stop_distance_terms", "structure_text", "trail_stop_price",
 ]

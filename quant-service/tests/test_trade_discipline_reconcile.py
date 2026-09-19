@@ -256,7 +256,8 @@ class NewBuyReconcileTests(unittest.TestCase):
     def setUp(self):
         self.plan = generate(stage_inputs("breakout_hold", position=None,
                                           lane={"lane": "contraction", "reference": "10.45", "support": "9.90"}))
-        entry = bar("2026-09-21", 11.00, 11.50, 10.90, 11.40, 8000)
+        # closes 11.15: above the 10.45 structure and under the 11.22 chase cap (entry 11.00 + 0.5 x ATR14)
+        entry = bar("2026-09-21", 11.00, 11.30, 10.90, 11.15, 8000)
         self.evaluations = [evaluate(self.plan, inputs(plan_id="plan-new-buy", bars=[*stage_bars(), entry],
                                                        sector_change_pct=0.6))]
 
@@ -270,7 +271,7 @@ class NewBuyReconcileTests(unittest.TestCase):
         self.assertEqual(entry_record.deviation["quantity_expected"], self.plan.sizing.recommended_shares)
         self.assertEqual(entry_record.deviation["quantity_diff"], 0)
         self.assertEqual(entry_record.deviation["trading_days_diff"], 1)
-        self.assertEqual(entry_record.deviation["price_expected"], 10.45)
+        self.assertEqual(entry_record.deviation["price_expected"], 10.46)   # the trigger floor
 
     def test_a_new_buy_plan_never_reports_a_buy_as_against_plan(self):
         records = reconcile(self.plan, self.evaluations,

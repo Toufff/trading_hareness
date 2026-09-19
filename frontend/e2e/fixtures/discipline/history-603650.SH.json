@@ -1,0 +1,596 @@
+{
+ "account_key": "citics-primary",
+ "symbol": "603650.SH",
+ "count": 1,
+ "items": [
+  {
+   "account_key": "citics-primary",
+   "as_of_at": "2026-09-19T19:46:18.416612+08:00",
+   "contract_version": "trade-discipline-v1",
+   "evidence_refs": [
+    "run:c2069ad4-ecb9-473f-9808-a57fcbac220b",
+    "bars:60:2026-09-18",
+    "sector:longhu_ths_industry:881110",
+    "lane_run:fbb9b2f9-d24c-4d0b-b2c6-8e97d0c54ccb",
+    "bars_basis:settled_only",
+    "recommendation_decision:7d9e52c8e6d13d6cf83658c36e212bb7e1172b8af623c3488357626c187a1fe1",
+    "broker_snapshot_key:7a4f6eeb243acdfdcef1b236f4afa255342a543f030a4f1812e3ddf4ad8b0393"
+   ],
+   "generator_version": "trade-discipline-generator-v3",
+   "inputs_hash": "525e455268dcf2a06dd250eca25947ff56d40dc3342d6bb7670f53132b716825",
+   "lines": [
+    {
+     "action": {
+      "type": "exit_all",
+      "value": null
+     },
+     "confirm": {
+      "bars": 1,
+      "basis": "daily"
+     },
+     "derivation": {
+      "action_formula": "",
+      "action_inputs": {},
+      "formula": "min(prior_high * (1 - ma_buffer), reference_price * (1 - buffer_pct), reference_price - atr_target_multiple * atr14, reference_price * (1 - stop_pct_target))",
+      "inputs": {
+       "atr14": 3.5285714285714262,
+       "atr_target_multiple": 0.9,
+       "band_high": 70.72714285714285,
+       "band_low": 64.724,
+       "binding_term": "atr",
+       "buffer_pct": 0.019698825836458867,
+       "ma_buffer": 0.005,
+       "prior_high": 72.25,
+       "reference_price": 73.55,
+       "stop_pct_target": 0.02,
+       "structure_value": 71.88875
+      },
+      "rule_id": "hard_stop.breakout_hold"
+     },
+     "execute_at": null,
+     "execute_by": "price",
+     "extra": [],
+     "kind": "hard_stop",
+     "label": "日线收盘跌破70.37即全部退出（突破段，结构点突破平台72.25下方半个百分点71.88距离不足最小止损距离，按 0.9×ATR14 向下加宽）",
+     "metric": "daily_close",
+     "op": "<",
+     "pct": null,
+     "price": "70.37",
+     "priority": 1,
+     "trading_days": null
+    },
+    {
+     "action": {
+      "type": "exit_all",
+      "value": null
+     },
+     "confirm": {
+      "bars": 3,
+      "basis": "minute"
+     },
+     "derivation": {
+      "action_formula": "",
+      "action_inputs": {},
+      "formula": "min(prior_high * (1 - ma_buffer), reference_price * (1 - buffer_pct), reference_price - atr_target_multiple * atr14, reference_price * (1 - stop_pct_target))",
+      "inputs": {
+       "atr14": 3.5285714285714262,
+       "atr_target_multiple": 0.9,
+       "band_high": 70.72714285714285,
+       "band_low": 64.724,
+       "binding_term": "atr",
+       "buffer_pct": 0.019698825836458867,
+       "ma_buffer": 0.005,
+       "prior_high": 72.25,
+       "reference_price": 73.55,
+       "stop_pct_target": 0.02,
+       "structure_value": 71.88875
+      },
+      "rule_id": "hard_stop.breakout_hold.intraday"
+     },
+     "execute_at": null,
+     "execute_by": "price",
+     "extra": [],
+     "kind": "hard_stop",
+     "label": "盘中版：连续3根分钟收盘低于70.37即全部退出",
+     "metric": "minute_close",
+     "op": "<",
+     "pct": null,
+     "price": "70.37",
+     "priority": 1,
+     "trading_days": null
+    },
+    {
+     "action": {
+      "type": "reduce_by_pct",
+      "value": "50"
+     },
+     "confirm": {
+      "bars": 1,
+      "basis": "minute"
+     },
+     "derivation": {
+      "action_formula": "",
+      "action_inputs": {},
+      "formula": "reference_price",
+      "inputs": {
+       "reference_price": 73.55
+      },
+      "rule_id": "take_partial.breakout_hold"
+     },
+     "execute_at": null,
+     "execute_by": "price",
+     "extra": [
+      "after_volume_climax",
+      "below_vwap"
+     ],
+     "kind": "take_partial",
+     "label": "当日成交量为20日最大量且收在振幅下半且最新价跌破当日VWAP、且最新价低于73.55时，减半仓",
+     "metric": "last",
+     "op": "<",
+     "pct": null,
+     "price": "73.55",
+     "priority": 4,
+     "trading_days": null
+    },
+    {
+     "action": {
+      "type": "move_stop_to",
+      "value": "73.55"
+     },
+     "confirm": {
+      "bars": 1,
+      "basis": "daily"
+     },
+     "derivation": {
+      "action_formula": "max(floor_price, anchor_price)",
+      "action_inputs": {
+       "anchor_price": 73.55,
+       "anchor_source": "entry_price",
+       "floor_price": 70.37
+      },
+      "formula": "max(anchor_price, reference_price) + arm_multiple * atr14",
+      "inputs": {
+       "anchor_price": 73.55,
+       "arm_multiple": 1.0,
+       "atr14": 3.5285714285714262,
+       "reference_price": 73.55
+      },
+      "rule_id": "trail.breakout_hold"
+     },
+     "execute_at": null,
+     "execute_by": "price",
+     "extra": [],
+     "kind": "trail",
+     "label": "日线收盘站上77.08（入场参考价 + 1×ATR14）后，把止损上移到入场参考价73.55，只上移不下移",
+     "metric": "daily_close",
+     "op": ">=",
+     "pct": null,
+     "price": "77.08",
+     "priority": 5,
+     "trading_days": null
+    },
+    {
+     "action": {
+      "type": "exit_all",
+      "value": null
+     },
+     "confirm": {
+      "bars": 1,
+      "basis": "daily"
+     },
+     "derivation": {
+      "action_formula": "",
+      "action_inputs": {},
+      "formula": "prior_high",
+      "inputs": {
+       "prior_high": 72.25,
+       "trading_days": 5
+      },
+      "rule_id": "time_stop.breakout_hold"
+     },
+     "execute_at": "T+5_close",
+     "execute_by": "time",
+     "extra": [],
+     "kind": "time_stop",
+     "label": "5个交易日内收盘仍未站回确认线72.25（PRIOR_HIGH）则退出",
+     "metric": "daily_close",
+     "op": "<",
+     "pct": null,
+     "price": "72.25",
+     "priority": 7,
+     "trading_days": 5
+    },
+    {
+     "action": {
+      "type": "alert",
+      "value": null
+     },
+     "confirm": {
+      "bars": 1,
+      "basis": "daily"
+     },
+     "derivation": {
+      "action_formula": "",
+      "action_inputs": {},
+      "formula": "support",
+      "inputs": {
+       "source": "lane.support",
+       "support": 63.25
+      },
+      "rule_id": "cancel.breakout_hold"
+     },
+     "execute_at": null,
+     "execute_by": "price",
+     "extra": [
+      "volume_expand_1_5x"
+     ],
+     "kind": "cancel",
+     "label": "日线收盘放量跌破63.25则本计划作废",
+     "metric": "daily_close",
+     "op": "<",
+     "pct": null,
+     "price": "63.25",
+     "priority": 8,
+     "trading_days": null
+    },
+    {
+     "action": {
+      "type": "buy_up_to_shares",
+      "value": 300
+     },
+     "confirm": {
+      "bars": 1,
+      "basis": "daily"
+     },
+     "derivation": {
+      "action_formula": "",
+      "action_inputs": {},
+      "formula": "max(lane_reference, hard_stop + stop_gap_atr * atr14)",
+      "inputs": {
+       "atr14": 3.5285714285714262,
+       "binding_term": "stop_gap",
+       "chase_atr_multiple": 0.5,
+       "entry_price": 73.55,
+       "hard_stop": 70.37,
+       "lane_reference": 69.31,
+       "last_close": 73.55,
+       "price_cap": 75.31,
+       "source": "lane.reference",
+       "stop_gap_atr": 0.5,
+       "stop_gap_floor": 72.13428571428572
+      },
+      "rule_id": "trigger.breakout_hold"
+     },
+     "execute_at": null,
+     "execute_by": "price",
+     "extra": [
+      "amount_ge_prev_day",
+      "sector_not_weak"
+     ],
+     "kind": "trigger",
+     "label": "日线收盘在72.13–75.31之间且成交额不低于前一日且行业当日不走弱，最多买到300股（下沿=硬止损70.37 + 0.5×ATR14，高于 lane 结构参考69.31；高于75.31为追高，不买）",
+     "metric": "daily_close",
+     "op": ">=",
+     "pct": null,
+     "price": "72.13",
+     "priority": 9,
+     "trading_days": null
+    },
+    {
+     "action": {
+      "type": "block_add",
+      "value": null
+     },
+     "confirm": {
+      "bars": 1,
+      "basis": "daily"
+     },
+     "derivation": {
+      "action_formula": "",
+      "action_inputs": {},
+      "formula": "entry_price + chase_atr_multiple * atr14",
+      "inputs": {
+       "atr14": 3.5285714285714262,
+       "chase_atr_multiple": 0.5,
+       "entry_price": 73.55,
+       "lane_reference": 69.31,
+       "last_close": 73.55
+      },
+      "rule_id": "chase_cap.breakout_hold"
+     },
+     "execute_at": null,
+     "execute_by": "price",
+     "extra": [],
+     "kind": "chase_cap",
+     "label": "日线收盘高于75.31（入场参考73.55 + 0.5×ATR14）即已越过追高上限，不买",
+     "metric": "daily_close",
+     "op": ">",
+     "pct": null,
+     "price": "75.31",
+     "priority": 10,
+     "trading_days": null
+    }
+   ],
+   "lowered_reason": null,
+   "metrics": {
+    "amount": 2041606.839,
+    "atr14": 3.5285714285714262,
+    "bars_used": 60,
+    "calendar": {
+     "closure_gaps": [
+      {
+       "closed_days": 3,
+       "last_trading_date": "2026-09-24",
+       "resume_date": "2026-09-28"
+      },
+      {
+       "closed_days": 7,
+       "last_trading_date": "2026-09-30",
+       "resume_date": "2026-10-08"
+      },
+      {
+       "closed_days": 2,
+       "last_trading_date": "2026-10-09",
+       "resume_date": "2026-10-12"
+      }
+     ],
+     "sessions": [
+      "2026-09-18",
+      "2026-09-21",
+      "2026-09-22",
+      "2026-09-23",
+      "2026-09-24",
+      "2026-09-28",
+      "2026-09-29",
+      "2026-09-30",
+      "2026-10-08",
+      "2026-10-09",
+      "2026-10-12"
+     ]
+    },
+    "close": 73.55,
+    "closure": null,
+    "closure_required": false,
+    "drawdown_pct": 0.0,
+    "entry": {
+     "entry_price": 73.55,
+     "entry_source": "last_close",
+     "formula": "max(lane_reference, last_close)",
+     "lane_reference": 69.31,
+     "lane_reference_source": "lane.reference",
+     "last_close": 73.55,
+     "last_close_basis": "settled",
+     "last_close_date": "2026-09-18"
+    },
+    "hi20": 73.55,
+    "high": 74.13,
+    "high10_close": 73.55,
+    "lo20": 57.16,
+    "low": 70.37,
+    "low10_close": 58.81,
+    "low20": 56.72,
+    "low3": 66.9,
+    "ma10": 66.16900000000001,
+    "ma20": 63.802499999999995,
+    "ma5": 70.122,
+    "max_volume20": 361468.0,
+    "omitted_lines": [
+     {
+      "inputs": {
+       "atr14": 3.5285714285714262,
+       "hard_stop": 70.37,
+       "ma5": 70.122,
+       "reference_price": 73.55,
+       "separation_atr": 0.5,
+       "window_high": 71.79,
+       "window_low": 72.13
+      },
+      "kind": "soft_stop",
+      "reason": "软止损区间为空（下限 72.13 > 上限 71.79，止损距离 3.18 < 1.0×ATR14 3.53），不生成"
+     },
+     {
+      "inputs": {
+       "closed_days": 3,
+       "last_trading_date": "2026-09-24",
+       "resume_date": "2026-09-28",
+       "threshold_days": 5
+      },
+      "kind": "holiday",
+      "reason": "2026-09-24 起休市 3 个自然日，少于 5 个自然日的休市线阈值，不生成"
+     }
+    ],
+    "open": 73.06,
+    "prev_close": 72.25,
+    "prev_high": 75.96,
+    "prev_low": 69.0,
+    "previous_hard_stop": null,
+    "previous_trail": null,
+    "prior_high": 72.25,
+    "prior_high_prev": 69.31,
+    "prior_volume_mean5": 285652.2,
+    "range10_pct": 25.063764665873144,
+    "recent_low": 66.8,
+    "recommendation_conditions": {
+     "as_of_date": "2026-09-18",
+     "decision_id": "7d9e52c8e6d13d6cf83658c36e212bb7e1172b8af623c3488357626c187a1fe1",
+     "evaluable": false,
+     "invalidation": "收盘跌破69.0元（9月17日低点）且反抽不能收复72.25元；或H股招股定价折价过大导致放量低开跌破70.1元5日线；或成交额连续两日低于前5日均值0.7倍同时板块上涨占比回落到50%以下。",
+     "note": "研究条件，非系统线",
+     "priority": "1",
+     "stage": "initial_breakout",
+     "trigger": "下一交易日（9月21日）两种情形之一才算触发：A. 回踩70.4—70.1元（9月18日低点至5日线）缩量守住，随后放量重新收回72.25元（9月17日收盘）以上；B. 放量有效突破9月17日高点75.96元且成交额不低于25.9亿元。高开直接站上75元以上不追；H股招股价公告出来前不重仓。参考位，不是买单。",
+     "why_now": "9月18日收73.55元、涨1.80%，盘中最低70.37元（较开盘-3.7%）后收回，收盘站在9月17日收盘72.25元之上；成交20.4亿元，为9月17日25.9亿元的0.79倍、前5日均值的1.06倍，是突破次日的缩量整理而不是放量出货。MA5 70.12、MA10 66.17多头排列，10日涨28.7%、5日主力净流入3.56亿元（占成交3.4%）、5日4阳。当日新增公告级信息：公司9月18日公告已在港交所刊发H股聆讯后资料集（PHIP），H股发行进入招股定价前的最后阶段，是30天内最明确的催化时点。主线趋势第4/153，今日未进放量启动是因为缩量未创新高，与整理结构一致。"
+    },
+    "reference_price": 73.55,
+    "risk_per_trade_pct": 1.0,
+    "sector": {
+     "code": "881110",
+     "name": "化工合成材料",
+     "taxonomy": "longhu_ths_industry"
+    },
+    "sector_available": true,
+    "stage_decision": {
+     "evidence": {
+      "close": 73.55,
+      "drawdown_pct": 0.0,
+      "formal_state": null,
+      "lane": "expansion",
+      "ma10": 66.16900000000001,
+      "ma20": 63.802499999999995,
+      "ma5": 70.122,
+      "prior_high": 72.25,
+      "range10_pct": 25.063764665873144
+     },
+     "lane": "expansion",
+     "reason": "收盘越过前5日收盘平台72.25且站上MA570.12≥MA1066.17",
+     "rule_id": "stage.breakout_hold",
+     "stage": "breakout_hold"
+    },
+    "synthetic_bars": 0,
+    "t1_locked_shares": 0,
+    "t1_snapshot_at": null,
+    "trading_date": "2026-09-18",
+    "valid_until_limit": "2026-09-28",
+    "volatility": 3.283137639409811,
+    "volume": 282606.0
+   },
+   "name": "彤程新材",
+   "plan_key": "citics-primary:603650.SH:2026-09-18:new_buy:525e455268dc",
+   "plan_kind": "new_buy",
+   "position": null,
+   "quality": [
+    {
+     "check_id": "has_hard_stop",
+     "detail": "hard_stop 线 2 条",
+     "passed": true
+    },
+    {
+     "check_id": "has_time_stop",
+     "detail": "time_stop T+5_close",
+     "passed": true
+    },
+    {
+     "check_id": "hard_stop_below_price",
+     "detail": "hard_stop 70.37 vs 参考价 73.55",
+     "passed": true
+    },
+    {
+     "check_id": "hard_stop_single_condition",
+     "detail": "hard_stop 只含单一可评估条件",
+     "passed": true
+    },
+    {
+     "check_id": "hard_stop_distance_sane",
+     "detail": "距离 3.180（4.32%），ATR14 3.529 允许区间 [2.823, 10.586]",
+     "passed": true
+    },
+    {
+     "check_id": "soft_above_hard",
+     "detail": "未使用软止损线",
+     "passed": true
+    },
+    {
+     "check_id": "soft_stop_separation",
+     "detail": "未使用软止损线",
+     "passed": true
+    },
+    {
+     "check_id": "lines_monotonic",
+     "detail": "hard < soft < 参考价，trail 触发价在上方",
+     "passed": true
+    },
+    {
+     "check_id": "every_line_evaluable",
+     "detail": "8 条线全部可评估",
+     "passed": true
+    },
+    {
+     "check_id": "every_line_has_derivation",
+     "detail": "8 条线均可从 inputs 复算",
+     "passed": true
+    },
+    {
+     "check_id": "exposure_line_when_over_cap",
+     "detail": "当前仓位 0.00% 未超过上限 25%",
+     "passed": true
+    },
+    {
+     "check_id": "holiday_line_when_closure",
+     "detail": "有效期内无 ≥5 个自然日的休市",
+     "passed": true
+    },
+    {
+     "check_id": "no_add_when_crash_or_broken",
+     "detail": "breakout_hold 不强制禁加仓线",
+     "passed": true
+    },
+    {
+     "check_id": "sizing_consistent",
+     "detail": "max_shares 300，建议 300 股",
+     "passed": true
+    },
+    {
+     "check_id": "not_lowered_vs_previous",
+     "detail": "无前序 active 计划可比较",
+     "passed": true
+    },
+    {
+     "check_id": "valid_until_within_5_trading_days",
+     "detail": "valid_until 2026-09-28，第5个交易日 2026-09-28",
+     "passed": true
+    },
+    {
+     "check_id": "buy_zone_valid",
+     "detail": "买入区间 [72.13, 75.31]，硬止损 70.37",
+     "passed": true
+    },
+    {
+     "check_id": "entry_reference_current",
+     "detail": "入场参考价 73.55 = max(lane 参考 69.31, 2026-09-18 收盘 73.55)，仓位与止损均按它计算",
+     "passed": true
+    }
+   ],
+   "run_id": "c2069ad4-ecb9-473f-9808-a57fcbac220b",
+   "sizing": {
+    "current_exposure_pct": "0.00",
+    "current_risk_pct": "0.00",
+    "current_shares": 0,
+    "equity": "98996.26",
+    "hard_stop": "70.37",
+    "max_shares": 300,
+    "recommended_shares": 300,
+    "reference_price": "73.55",
+    "risk_amount": "989.96",
+    "risk_per_trade_pct": "1.0",
+    "stop_distance": "3.18",
+    "target_exposure_pct": "25"
+   },
+   "stage": "breakout_hold",
+   "status": "active",
+   "supersedes_plan_id": null,
+   "symbol": "603650.SH",
+   "template_key": "breakout_hold@trade-discipline-templates-v4",
+   "template_version": "trade-discipline-templates-v4",
+   "trading_date": "2026-09-18",
+   "valid_until": "2026-09-28T15:00:00+08:00",
+   "plan_id": "9538dc46-ee02-5502-886e-c75084a20181",
+   "content_hash": "dry-run",
+   "created_at": "2026-09-19T19:46:18.416612+08:00"
+  }
+ ],
+ "ladder": [
+  {
+   "plan_id": "9538dc46-ee02-5502-886e-c75084a20181",
+   "plan_key": "citics-primary:603650.SH:2026-09-18:new_buy:525e455268dc",
+   "status": "active",
+   "plan_kind": "new_buy",
+   "trading_date": "2026-09-18",
+   "until": "2026-09-28",
+   "hard_stop": 70.37,
+   "previous_hard_stop": null,
+   "lowered": false,
+   "lowered_reason": null,
+   "supersedes_plan_id": null
+  }
+ ]
+}
