@@ -39,12 +39,17 @@ $action = New-HiddenPowerShellTaskAction -RepositoryRoot $RepositoryRoot -Script
 
 # A daily trigger cannot carry a repetition directly; borrow it from a
 # throwaway one-time trigger, the way install-post-close-pipeline-task.ps1 does.
-# The repetition is indefinite: the script is a cheap idempotent no-op whenever
-# the mode has not changed.
+# The daily trigger re-arms the repetition every midnight; an unbounded
+# RepetitionDuration ([TimeSpan]::MaxValue) is rejected by Task Scheduler as out
+# of range (measured 2026-09-19: "Duration:P99999999DT23H59M59S"), so the
+# repetition covers 23h58m and StopAtDurationEnd is off, the same shape
+# install-shared-tunnel-task.ps1 uses. The script is a cheap idempotent no-op
+# whenever the mode has not changed.
 $trigger = New-ScheduledTaskTrigger -Daily -At '00:02'
 $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At '00:02' `
     -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
-    -RepetitionDuration ([TimeSpan]::MaxValue)).Repetition
+    -RepetitionDuration (New-TimeSpan -Hours 23 -Minutes 58)).Repetition
+$trigger.Repetition.StopAtDurationEnd = $false
 
 $settings = New-ScheduledTaskSettingsSet -Hidden -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
