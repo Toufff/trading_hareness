@@ -119,6 +119,10 @@ class FakeConnection:
             return Result([self.snapshot] if self.snapshot else [])
         if "quant.broker_position_snapshots" in sql:
             return Result(list(self.positions))
+        if "quant.canonical_bars_daily" in sql and "limit_down" in sql:
+            # the board read: the latest bar's own limit-down band (main board, 10%)
+            return Result([{"trading_date": date(2026, 9, 18), "pre_close": Decimal("8.54"),
+                            "limit_down": Decimal("7.69")}])
         if "quant.canonical_bars_daily" in sql:
             return Result([row for row in self.bars if row["trading_date"] < params[1]][-params[2]:])
         if "quant.sector_membership_history" in sql:

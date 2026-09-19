@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 from ..agent_paper.context import fetch_live_quotes, fetch_minutes
 from ..runtime_executors import run_database_blocking
+from .exposure_calibration import board_key, st_from_limit_band
 from .generator import CalendarInfo, GenerationInputs
 from .quality import STALE_DAY_PREFIX as QUALITY_STALE_DAY_PREFIX
 from .templates import DEFAULT_RISK_PER_TRADE_PCT
@@ -366,6 +367,25 @@ def summarize_previous_plan(row: dict[str, Any]) -> dict[str, Any]:
             "hard_stop": _number(sizing.get("hard_stop")), "trail": trail}
 
 
+def board_evidence(connection: Any, symbol: str, day: date) -> dict[str, Any]:
+    """The price-limit regime on the plan day, the same way the exposure calibration read it.
+
+    The ST flag is point in time: the latest settled bar's own limit-down band (5% on a main-board ST
+    name).  Only when that bar has no usable band does the current ``instruments.is_st`` flag decide.
+    """
+    bar = _one(connection, """
+        SELECT trading_date,pre_close,limit_down FROM quant.canonical_bars_daily
+         WHERE symbol=%s AND trading_date<=%s AND NOT coalesce(is_suspended,false)
+         ORDER BY trading_date DESC LIMIT 1""", (symbol, day))
+    is_st = st_from_limit_band(symbol, _number((bar or {}).get("pre_close")), _number((bar or {}).get("limit_down")))
+    source = f"limit_band:{(bar or {}).get('trading_date')}"
+    if is_st is None:
+        row = _one(connection, "SELECT is_st FROM quant.instruments WHERE symbol=%s", (symbol,))
+        is_st = bool((row or {}).get("is_st"))
+        source = "instruments.is_st(current)"
+    return {"key": board_key(symbol, is_st), "is_st": is_st, "source": source}
+
+
 def instrument_name(connection: Any, symbol: str) -> str | None:
     row = _one(connection, "SELECT name FROM quant.instruments WHERE symbol=%s", (symbol,))
     return (row or {}).get("name")
@@ -398,6 +418,7 @@ def gather_evidence(connection: Any, *, account_key: str, symbol: str, as_of: da
         "calendar": calendar,
         "previous_plan": previous_active_plan(connection, account_key, symbol),
         "name": (holding or {}).get("name") or instrument_name(connection, symbol),
+        "board": board_evidence(connection, symbol, day),
     }
 
 
@@ -474,7 +495,7 @@ def build_generation_inputs(*, run_id: str, account_key: str, symbol: str, as_of
         calendar=evidence.get("calendar") or CalendarInfo(),
         previous_plan=evidence.get("previous_plan"),
         risk_per_trade_pct=risk_per_trade_pct, lowered_reason=lowered_reason,
-        evidence_refs=refs, recommendation=evidence.get("recommendation"),
+        evidence_refs=refs, recommendation=evidence.get("recommendation"), board=evidence.get("board"),
     )
 
 

@@ -10,7 +10,9 @@ so.  It must classify as ``crash_rebound`` and pass the whole quality gate.
 from __future__ import annotations
 
 import unittest
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
+from unittest.mock import patch
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -24,9 +26,7 @@ from app.trade_discipline.templates import (
     CRASH_FALLBACK_LABEL,
     HARD_STOP_TERMS,
     HOLIDAY_CLOSURE_DAYS,
-    HOLIDAY_EXPOSURE_PCT,
     LOT_SIZE,
-    TARGET_EXPOSURE_PCT,
     buffer_pct,
     build_sizing,
     closures_within,
@@ -172,6 +172,32 @@ STAGE_CLOSES = {
 }
 
 
+def synthetic_calibration(*, stage_cap, holiday_cap, q99=12.0, holiday_q99=9.0):
+    """A calibration artifact with the same shape as exposure_calibration.json, one cap for every cell."""
+    from app.trade_discipline.exposure_calibration import BOARD_LABEL
+    from app.trade_discipline.stage import STAGES
+
+    def cells(cap, q99_pct):
+        out = {f"{stage}|{board}": {"samples": 1000, "q99_loss_pct": q99_pct, "q95_loss_pct": q99_pct / 2,
+                                    "cap_pct": cap, "fallback": None, "source_cell": f"{stage}|{board}"}
+               for stage in STAGES for board in BOARD_LABEL}
+        out.update({f"*|{board}": {"samples": 7000, "q99_loss_pct": q99_pct, "q95_loss_pct": q99_pct / 2,
+                                   "cap_pct": cap, "fallback": None, "source_cell": f"*|{board}"}
+                    for board in BOARD_LABEL})
+        return out
+    return {"version": f"synthetic:{stage_cap}:{holiday_cap}", "tolerance_pct": 5.0, "percentile": 99.0,
+            "horizon_sessions": 2, "data_window": {"first_date": "2023-08-15", "last_date": "2026-09-18"},
+            "stage_cells": cells(stage_cap, q99), "holiday_cells": cells(holiday_cap, holiday_q99)}
+
+
+@contextmanager
+def calibrated(calibration):
+    """Point the generator at a synthetic calibration for the duration of the block."""
+    from app.trade_discipline import generator as generator_module
+    with patch.object(generator_module, "load_calibration", lambda: calibration):
+        yield
+
+
 def stage_inputs(stage, **overrides):
     closes = STAGE_CLOSES[stage]
     payload = {
@@ -232,8 +258,6 @@ class StageClassificationTests(unittest.TestCase):
         metrics = daily_metrics(series_from_closes(STAGE_CLOSES["unclassified"]))
         decision = classify_stage(metrics)
         self.assertEqual(decision["stage"], "unclassified")
-        holding_stages = {stage: pct for stage, pct in TARGET_EXPOSURE_PCT.items() if pct > 0}
-        self.assertEqual(min(holding_stages, key=holding_stages.__getitem__), "unclassified")
 
     def test_lane_attribution_never_overrides_the_data_branch(self):
         metrics = daily_metrics(shenqi_bars())
@@ -299,7 +323,8 @@ class StageTemplateQualityTests(unittest.TestCase):
                                                         date(2026, 9, 30), date(2026, 10, 9),
                                                         date(2026, 10, 12)],
                                closure_gaps=[NATIONAL_DAY_GAP])
-        plan = generate(shenqi_inputs(calendar=calendar))
+        with calibrated(synthetic_calibration(stage_cap=25, holiday_cap=10)):
+            plan = generate(shenqi_inputs(calendar=calendar))
         holiday = plan.lines_of("holiday")[0]
         self.assertEqual(holiday.execute_by, "time")
         self.assertEqual(holiday.execute_at, "2026-09-30_before_close")
@@ -347,34 +372,33 @@ class StageTemplateQualityTests(unittest.TestCase):
         self.assertEqual(closures_within({"closure_gaps": [WEEKEND_GAP, MID_AUTUMN_GAP, NATIONAL_DAY_GAP]},
                                          "2026-09-25"), [WEEKEND_GAP, MID_AUTUMN_GAP])
 
-    def test_the_holiday_exposure_table_is_half_the_stage_target_by_construction(self):
-        self.assertEqual(set(HOLIDAY_EXPOSURE_PCT), set(TARGET_EXPOSURE_PCT))
-        for stage_name, pct in TARGET_EXPOSURE_PCT.items():
-            self.assertEqual(HOLIDAY_EXPOSURE_PCT[stage_name] * 2, pct)
-
-    def test_an_eight_day_national_day_closure_cuts_every_stage_to_half_its_target(self):
+    def test_a_national_day_closure_uses_the_calibrated_holiday_cap_or_records_why_not(self):
+        """The holiday line is the calibrated holiday cap, drawn only when it is tighter than the stage cap."""
         calendar = CalendarInfo(upcoming_trading_dates=[date(2026, 9, 28), date(2026, 9, 29),
                                                         date(2026, 9, 30), date(2026, 10, 9),
                                                         date(2026, 10, 12)],
                                closure_gaps=[NATIONAL_DAY_GAP])
-        expected = {"crash_rebound": 10.0, "broken": 0.0, "breakout_hold": 12.5, "trend_hold": 15.0,
-                    "pullback_hold": 15.0, "base_platform": 10.0, "unclassified": 7.5}
-        for stage_name, pct in expected.items():
-            with self.subTest(stage=stage_name):
-                inputs = (shenqi_inputs(calendar=calendar) if stage_name == "crash_rebound"
-                          else stage_inputs(stage_name, calendar=calendar))
-                plan = generate(inputs)
-                self.assertEqual(plan.stage, stage_name)
-                holiday = plan.lines_of("holiday")
-                self.assertEqual(len(holiday), 1)
-                self.assertEqual(holiday[0].derivation.inputs["closed_days"], 8)
-                self.assertEqual(holiday[0].derivation.inputs["holiday_exposure_pct"], pct)
-                self.assertEqual(float(TARGET_EXPOSURE_PCT[stage_name]) / 2, pct)
-                self.assertEqual(holiday[0].action.value, 0 if stage_name == "broken"
-                                 else min(plan.sizing.current_shares,
-                                          lot_shares(plan.sizing.equity, Decimal(str(pct)),
-                                                     plan.sizing.reference_price)))
-                self.assertLessEqual(abs(holiday[0].derivation.recompute() - holiday[0].action.value), 0.01)
+        tight = synthetic_calibration(stage_cap=25, holiday_cap=10)
+        with calibrated(tight):
+            plan = generate(shenqi_inputs(calendar=calendar))
+        holiday = plan.lines_of("holiday")
+        self.assertEqual(len(holiday), 1, failed_checks(plan.quality))
+        self.assertEqual(holiday[0].derivation.inputs["holiday_exposure_pct"], 10.0)
+        self.assertEqual(holiday[0].derivation.inputs["closed_days"], 8)
+        self.assertEqual(holiday[0].action.value,
+                         min(plan.sizing.current_shares,
+                             lot_shares(plan.sizing.equity, Decimal("10"), plan.sizing.reference_price)))
+        self.assertLessEqual(abs(holiday[0].derivation.recompute() - holiday[0].action.value), 0.01)
+        self.assertIn("休市后两日99%跌幅", holiday[0].label)
+        self.assertEqual(plan.status, "active", failed_checks(plan.quality))
+        # not tighter than the stage cap: no line, the refusal is on record, the gate accepts it
+        with calibrated(synthetic_calibration(stage_cap=25, holiday_cap=30)):
+            loose = generate(shenqi_inputs(calendar=calendar))
+        self.assertEqual(loose.lines_of("holiday"), [])
+        refusal = {item["kind"]: item for item in loose.metrics["omitted_lines"]}["holiday"]
+        self.assertIn("不低于阶段上限 25%", refusal["reason"])
+        self.assertEqual(refusal["inputs"]["holiday_cap_pct"], 30)
+        self.assertEqual(loose.status, "active", failed_checks(loose.quality))
 
     def test_a_soft_stop_is_only_drawn_with_half_an_atr_on_each_side(self):
         """09-18 closed 8.41 with a 0.66 stop distance under one ATR: no price has half an ATR on both sides."""
@@ -432,7 +456,11 @@ class StageTemplateQualityTests(unittest.TestCase):
 
     def test_the_trail_is_omitted_when_it_would_not_move_the_stop(self):
         """A flat-target stage and a trail no higher than the hard stop both say nothing."""
-        for stage_name in ("broken", "breakout_hold"):
+        with calibrated(synthetic_calibration(stage_cap=0, holiday_cap=0)):
+            flat = generate(stage_inputs("broken"))
+        flat_reason = {item["kind"]: item for item in flat.metrics["omitted_lines"]}["trail"]["reason"]
+        self.assertIn("目标仓位为 0%", flat_reason)
+        for stage_name in ("breakout_hold",):
             with self.subTest(stage=stage_name):
                 plan = generate(stage_inputs(stage_name))
                 self.assertEqual(plan.stage, stage_name)
@@ -441,8 +469,6 @@ class StageTemplateQualityTests(unittest.TestCase):
                 self.assertIn("trail", omitted)
                 self.assertIn("trail_stop", omitted["trail"]["inputs"])
                 self.assertEqual(plan.status, "active", failed_checks(plan.quality))
-        broken = {item["kind"]: item for item in generate(stage_inputs("broken")).metrics["omitted_lines"]}
-        self.assertIn("目标仓位为 0%", broken["trail"]["reason"])
         breakout = generate(stage_inputs("breakout_hold"))
         reason = {item["kind"]: item for item in breakout.metrics["omitted_lines"]}["trail"]
         self.assertIn("不高于硬止损", reason["reason"])
@@ -541,12 +567,14 @@ class SizingTests(unittest.TestCase):
     def test_sizing_formula_is_driven_by_the_stop_distance(self):
         sizing = build_sizing(stage="crash_rebound", equity=Decimal("99632"),
                               risk_per_trade_pct=Decimal("1.0"), reference_price=Decimal("8.41"),
-                              hard_stop=Decimal("7.75"), current_shares=5800)
+                              hard_stop=Decimal("7.75"), current_shares=5800, cap_pct=20)
         self.assertEqual(sizing.risk_amount, Decimal("996.32"))
         self.assertEqual(sizing.stop_distance, Decimal("0.66"))
         self.assertEqual(sizing.max_shares, 1500)          # floor(996.32 / 0.66 / 100) * 100
         self.assertEqual(sizing.target_exposure_pct, Decimal("20"))
         self.assertEqual(sizing.recommended_shares, 1500)  # tighter than the 20% exposure cap
+        self.assertEqual(sizing.cap_shares, 2300)          # floor(99632 x 20% / 8.41 / 100) x 100
+        self.assertEqual(sizing.binding_constraint, "risk")
         self.assertEqual(sizing.current_exposure_pct, Decimal("48.96"))
         self.assertEqual(sizing.current_risk_pct, Decimal("3.84"))   # 5800 x 0.66 / 99632
 
@@ -554,21 +582,23 @@ class SizingTests(unittest.TestCase):
         """The 600613 card: 5800 shares, stop distance 0.77 on 99632.26 equity = 4.48%."""
         sizing = build_sizing(stage="crash_rebound", equity=Decimal("99632.26"),
                               risk_per_trade_pct=Decimal("1.0"), reference_price=Decimal("8.41"),
-                              hard_stop=Decimal("7.64"), current_shares=5800)
+                              hard_stop=Decimal("7.64"), current_shares=5800, cap_pct=20)
         self.assertEqual(sizing.current_risk_pct, Decimal("4.48"))
         self.assertGreater(sizing.current_risk_pct, sizing.risk_per_trade_pct)
 
     def test_exposure_cap_can_bind_before_the_risk_budget(self):
         sizing = build_sizing(stage="broken", equity=Decimal("99632"), risk_per_trade_pct=Decimal("1.0"),
                               reference_price=Decimal("8.41"), hard_stop=Decimal("7.75"),
-                              current_shares=5800)
-        self.assertEqual(sizing.target_exposure_pct, Decimal("0"))
-        self.assertEqual(sizing.recommended_shares, 0)
+                              current_shares=5800, cap_pct=5)
+        self.assertEqual(sizing.target_exposure_pct, Decimal("5"))
+        self.assertEqual(sizing.cap_shares, 500)           # floor(99632 x 5% / 8.41 / 100) x 100
+        self.assertEqual(sizing.recommended_shares, 500)   # the cap binds before the 1500-share risk limit
+        self.assertEqual(sizing.binding_constraint, "cap")
 
     def test_recommended_shares_always_round_down_to_whole_lots(self):
         sizing = build_sizing(stage="trend_hold", equity=Decimal("200000"),
                               risk_per_trade_pct=Decimal("1.0"), reference_price=Decimal("12.86"),
-                              hard_stop=Decimal("12.50"), current_shares=0)
+                              hard_stop=Decimal("12.50"), current_shares=0, cap_pct=45)
         self.assertEqual(sizing.recommended_shares % LOT_SIZE, 0)
         self.assertLessEqual(sizing.recommended_shares, sizing.max_shares)
 
@@ -615,8 +645,10 @@ class QualityGateFailureTests(unittest.TestCase):
     """Every assertion in the gate needs one example that makes it fail."""
 
     def setUp(self):
-        # the rally fixture carries every optional line, including the soft stop
-        self.plan = generate(rally_inputs())
+        # the rally fixture carries every optional line, including the soft stop; a calibration whose
+        # holiday cap (10%) is tighter than the stage cap (25%) keeps the holiday rule binding here
+        with calibrated(synthetic_calibration(stage_cap=25, holiday_cap=10)):
+            self.plan = generate(rally_inputs())
         self.assertEqual(self.plan.status, "active", failed_checks(self.plan.quality))
         self.assertTrue(self.plan.lines_of("soft_stop"))
         self.assertTrue(self.plan.lines_of("trail"))
@@ -758,7 +790,7 @@ class ShenqiFixtureTests(unittest.TestCase):
         self.assertEqual(plan.stage, "crash_rebound")
         self.assertEqual(plan.trading_date, date(2026, 9, 18))
         self.assertEqual(plan.valid_until.date(), date(2026, 9, 25))
-        self.assertEqual(plan.template_key, "crash_rebound@trade-discipline-templates-v4")
+        self.assertEqual(plan.template_key, "crash_rebound@trade-discipline-templates-v5")
         self.assertEqual(plan.position.quantity, 5800)
         self.assertEqual(plan.metrics["t1_locked_shares"], 0)
         self.assertEqual(len(plan.inputs_hash), 64)

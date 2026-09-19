@@ -249,17 +249,27 @@ def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
     exposure_lines = plan.lines_of("exposure")
     if sizing is None:
         checks.append(_check("exposure_line_when_over_cap", not exposure_lines, "无 sizing，不应出现仓位线"))
-    elif sizing.current_exposure_pct > sizing.target_exposure_pct:
+    elif sizing.current_shares > sizing.recommended_shares:
         matched = [line for line in exposure_lines
                    if line.action.type == "reduce_to_shares" and line.action.value == sizing.recommended_shares]
         checks.append(_check("exposure_line_when_over_cap", bool(matched),
-                             f"当前仓位 {sizing.current_exposure_pct}% 超过上限 {sizing.target_exposure_pct}%，"
+                             f"当前 {sizing.current_shares} 股超过建议 {sizing.recommended_shares} 股（风险上限 "
+                             f"{sizing.max_shares} / 阶段上限 {sizing.cap_shares} 股），"
                              f"{'已给出减仓线' if matched else '缺少减到 ' + str(sizing.recommended_shares) + ' 股的仓位线'}"))
     else:
-        checks.append(_check("exposure_line_when_over_cap", True,
-                             f"当前仓位 {sizing.current_exposure_pct}% 未超过上限 {sizing.target_exposure_pct}%"))
+        checks.append(_check("exposure_line_when_over_cap", not exposure_lines,
+                             f"当前 {sizing.current_shares} 股未超过建议 {sizing.recommended_shares} 股"
+                             + ("，却给出了减仓线" if exposure_lines else "")))
 
     closure = _required_closure(plan)
+    holiday_basis = ((metrics.get("exposure_calibration") or {}).get("holiday")
+                     if isinstance(metrics.get("exposure_calibration"), dict) else None)
+    holiday_not_tighter = (isinstance(holiday_basis, dict) and sizing is not None
+                           and Decimal(str(holiday_basis.get("cap_pct"))) >= sizing.target_exposure_pct)
+    if closure is not None and holiday_not_tighter:
+        # The calibrated holiday cap is not tighter than the stage cap: no line is required
+        # (the template records the refusal in omitted_lines).
+        closure = None
     closure_required = closure is not None
     holiday_lines = plan.lines_of("holiday")
     closure_note = (f"{closure['last_trading_date']} 起休市 {closure['closed_days']} 个自然日"
@@ -294,6 +304,9 @@ def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
             problems.append(f"recommended_shares {sizing.recommended_shares} 超过 max_shares {sizing.max_shares}")
         if sizing.recommended_shares > cap_shares:
             problems.append(f"recommended_shares {sizing.recommended_shares} 超过仓位上限 {cap_shares} 股")
+        if sizing.cap_shares is not None and sizing.recommended_shares != min(expected_max, cap_shares):
+            problems.append(f"recommended_shares {sizing.recommended_shares} 不等于 min(风险上限 {expected_max}, "
+                            f"阶段上限 {cap_shares})")
         checks.append(_check("sizing_consistent", not problems,
                              "；".join(problems) if problems else
                              f"max_shares {sizing.max_shares}，建议 {sizing.recommended_shares} 股"))

@@ -173,6 +173,11 @@ class Sizing(BaseModel):
     # ``current_shares x stop_distance / equity``: the risk the position already
     # carries, printed next to the 1% budget.  Disclosure only, never a gate.
     current_risk_pct: Decimal | None = Field(default=None, ge=0)
+    # Calibrated cap (``target_exposure_pct``) expressed in shares, which of the two limits binds
+    # (``risk``: 1% / stop distance, ``cap``: extreme-loss cap) and the calibration cell behind the cap.
+    cap_shares: int | None = Field(default=None, ge=0)
+    binding_constraint: Literal["risk", "cap"] | None = None
+    exposure_basis: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def validate_stop(self) -> "Sizing":
