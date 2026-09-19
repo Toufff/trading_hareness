@@ -87,9 +87,11 @@ and rooted under `current`. See
 `quant.canonical_bars_daily.adj_factor` and `quant.market_bars_daily.adj_factor`
 are cumulative corporate-action factors, never a same-day identity placeholder:
 a vendor without corporate-action history emits no factor row at all and the
-date is filled out of band by `scripts/adjustment-factor-maintenance.py sync`.
+date is filled out of band by `scripts/adjustment-factor-maintenance.py sync`,
+which derives the factor from the licensed longhu kline (no tushare call).
 [`ADJUSTMENT_FACTOR_SEMANTICS.md`](ADJUSTMENT_FACTOR_SEMANTICS.md) is
-authoritative for that lane, including the repair SQL for the identity factors
+authoritative for that lane, including the one-time repair
+(`scripts/adjustment-factor-maintenance.py repair`) of the identity factors
 already written to canonical bars.
 
 Every rule in the table below is enforced by a test, not just documented —
@@ -117,7 +119,7 @@ Adding a new architectural rule without an accompanying test is incomplete.
 | Strategy contracts | `app/platform/strategy_registry.py` | Every strategy declares its model/input contract, runtime owner, retained evidence and `live_effect=none`; startup rejects missing or mismatched materialized model versions. |
 | Decision products | `app/short_term_lanes/`, `app/recommendation_pool/` | Nine-lane screening, primary-source company review and formal recommendation are separate persisted states. Retired G0--G7 dossiers remain migration history only and have no active route or UI projection. |
 | Instrument registration | `app/instrument_registry.py` | Every write to `quant.instruments` goes through this module in one sorted, batched statement, and every per-bar caller iterates `in_instrument_lock_order(bars)`, so concurrent ingestion transactions take the same ascending row-lock order. |
-| Adjustment factors | `scripts/adjustment-factor-maintenance.py`, `docs/ADJUSTMENT_FACTOR_SEMANTICS.md` | Bar tables take a cumulative corporate-action factor or nothing; a vendor placeholder is stored as raw evidence and never promoted. |
+| Adjustment factors | `scripts/adjustment-factor-maintenance.py`, `app/longhu_adjustment_factors.py`, `docs/ADJUSTMENT_FACTOR_SEMANTICS.md` | Bar tables take a cumulative corporate-action factor or nothing; factors are derived from longhu (`longhu_qfq_derived`), a vendor placeholder is stored as raw evidence and never promoted. |
 | Owner -> peer tunnels | `scripts/shared-peer/shared-tunnel-profiles.psm1`, `install-shared-tunnel-tasks.ps1` | Two profiles (intraday, batch) with their own tasks, services, state and lock files, installed together and judged together by the publish reinstall gate. Batch is an optimization and can never fail a release. |
 | Schema | `migrations/versions/` | New production schema changes use Alembic only. |
 | Physical placement | `scripts/database-storage-tiers.py`, `docs/OWNER_DATABASE_STORAGE.md` | Hot tier (NVMe, `PGDATA_DIR`, 500 GB budget) vs `stock_cold` tablespace on G:. A new large evidence table registers a tier policy; `app/` never reads a `*_cold` twin or a `*_all` view. |

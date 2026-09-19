@@ -50,6 +50,11 @@ PINNED_BAR_FACTOR_WRITERS = {
     "annual_daily_backfill.py": ("_PROMOTABLE_FACTOR_SQL", "<> 'same_day_identity_only'"),
     # Copies only the provider that actually answered this fetch (a tushare route).
     "full_market_daily_controls_sync.py": ('results["adj_factor"].provider.key',),
+    # The longhu-derived factor lane: every value passes the SAME per-row rule
+    # for its own provider (a derived row must declare cumulative semantics
+    # explicitly), and the one NULL-ing statement only touches bars with no
+    # promotable evidence.
+    "longhu_adjustment_factors.py": ("promotable_adjustment_factor(",),
 }
 
 #: The producer form the rule forbids outright: no code may build a row that
@@ -189,6 +194,23 @@ class BarFactorWriterAllowlistTests(unittest.TestCase):
         self.assertIn("promotable.provider LIKE 'tushare%'", sql)
         self.assertIn("IN ('','corporate_action_cumulative')", sql)
         self.assertNotIn("same_day_identity_only", sql)
+
+    def test_the_derived_longhu_provider_is_promotable_only_with_explicit_semantics(self):
+        # The one non-tushare provider allowed onto a bar is held to the
+        # STRICTER half of the rule: it may not omit its semantics.
+        from app.tushare_normalization import DERIVED_FACTOR_PROVIDER, promotable_adjustment_factor
+
+        sql = identity_factor_leak_sql("canonical_bars_daily")
+        self.assertIn(f"promotable.provider = '{DERIVED_FACTOR_PROVIDER}'", sql)
+        self.assertIn("= 'corporate_action_cumulative'", sql)
+        self.assertTrue(promotable_adjustment_factor(
+            {"factor_semantics": "corporate_action_cumulative"}, provider_key=DERIVED_FACTOR_PROVIDER))
+        self.assertFalse(promotable_adjustment_factor({}, provider_key=DERIVED_FACTOR_PROVIDER))
+        self.assertFalse(promotable_adjustment_factor(
+            {"factor_semantics": "same_day_identity_only"}, provider_key=DERIVED_FACTOR_PROVIDER))
+        # The vendor's own close-feed provider stays refused, marker or not.
+        self.assertFalse(promotable_adjustment_factor(
+            {"factor_semantics": "corporate_action_cumulative"}, provider_key="longhuvip_composite"))
 
 
 @unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")

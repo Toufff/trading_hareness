@@ -8,24 +8,25 @@ param(
 
 # Maintenance-window runner for the cumulative adjustment-factor lane.
 #
-# The settled full-market cross-section and the corporate-action factor come
-# from different providers, so a longhu evening lands with complete bars and
-# limits while its adj_factor is still missing. The post-close pipeline runs
-# the same lane as a NON-GATING stage; this task is the backlog owner, because
-# a route that is unavailable at 17:00 is usually available at 04:30 and the
-# evening pipeline must never wait for it.
+# A longhu evening lands with complete bars and limits while its adj_factor is
+# still missing. Since 2026-09-19 the factor is DERIVED from the licensed longhu
+# daily kline (CQ corporate-action record + qfq series + the bar pre_close);
+# the lane makes no tushare call. The post-close pipeline runs the same lane as
+# a NON-GATING stage; this task is the backlog owner, and the evening pipeline
+# must never wait for it.
 #
 # Exit code: 0 for completed / planned / unchanged / skipped, 1 only when a
-# date actually failed (provider error or exception). A date the daily-controls
-# coverage gate refuses is reported as skipped with its reason -- this lane
-# cannot repair a thin daily cross-section and must not alert every night for
-# it (scripts/adjustment-factor-maintenance.py owns that rule).
+# date actually failed (longhu fetch failure or exception). A date whose own
+# settled cross-section is too thin is reported as skipped with its reason --
+# this lane cannot repair a thin daily cross-section and must not alert every
+# night for it (scripts/adjustment-factor-maintenance.py owns that rule).
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# tushare is reached directly; an inherited desktop proxy turns a working route
-# into a nightly "provider refused" and would be recorded as a real failure.
+# The licensed longhu route (and the local owner API) are reached directly; an
+# inherited desktop proxy turns a working route into a nightly "provider
+# refused" and would be recorded as a real failure.
 foreach ($name in @('http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY')) {
     [Environment]::SetEnvironmentVariable($name, $null, 'Process')
 }

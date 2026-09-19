@@ -134,11 +134,15 @@ provider response directly to a live threshold or order path.
   honest value for "not fetched yet"; those dates are filled out of band by
   `scripts/adjustment-factor-maintenance.py sync`, invoked automatically twice:
   as the non-gating `adjustment_factors` post-close stage and by the daily
-  04:30 `trading-hareness-adjustment-factors` scheduled task. A coverage or
+  04:30 `trading-hareness-adjustment-factors` scheduled task. The lane makes NO
+  tushare call: every factor is derived from the licensed longhu kline
+  (`app/longhu_adjustment_factors.py`, provider `longhu_qfq_derived`) and
+  stored tushare factors are only read as anchors/checkpoints. A coverage or
   readiness check must not read a NULL factor as a missing bar. Promotion onto
   a bar requires BOTH halves of
-  `tushare_normalization.promotable_adjustment_factor`: a tushare provider AND
-  absent/`corporate_action_cumulative` semantics — a vendor that merely omits
+  `tushare_normalization.promotable_adjustment_factor`: a tushare provider with
+  absent/`corporate_action_cumulative` semantics, or `longhu_qfq_derived` with
+  EXPLICIT `corporate_action_cumulative` semantics — a vendor that merely omits
   the marker is refused by the provider half. A NULL sitting in the trailing
   gap of a research window is resolved *on read only*, by the one shared rule
   in `app/research_prices.resolve_factors`: carry the last real factor across

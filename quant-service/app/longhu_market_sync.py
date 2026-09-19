@@ -144,8 +144,8 @@ def build_control_rows(daily_rows: list[dict[str, Any]]) -> dict[str, list[dict[
     ``quant.canonical_bars_daily.adj_factor`` exactly like a real cumulative
     tushare factor and made every cross-date price adjustment silently
     compute an unadjusted series instead of failing closed.  A missing
-    factor is the honest contract; it is fetched separately from the tushare
-    ``adj_factor`` route by ``adjustment_factor_maintenance``.
+    factor is the honest contract; it is derived separately from the licensed
+    longhu kline (``longhu_qfq_derived``) by ``adjustment_factor_maintenance``.
     """
     limits: list[dict[str, Any]] = []
     for row in daily_rows:

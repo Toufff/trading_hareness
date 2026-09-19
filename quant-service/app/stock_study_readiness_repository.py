@@ -14,8 +14,9 @@ from .adjustment_factor_maintenance import (
 #: Symbol-scoped adjustment coverage for one study window.
 #:
 #: The count deliberately excludes placeholders (it asks for a REAL cumulative
-#: factor, i.e. a tushare row whose declared semantics are absent or
-#: cumulative), because the repair runbook only ANNOTATES the placeholder rows
+#: factor, i.e. a tushare row whose declared semantics are absent or cumulative,
+#: or a ``longhu_qfq_derived`` row declaring cumulative semantics -- the
+#: writers' own rule), because the repair runbook only ANNOTATES the placeholder rows
 #: and never deletes them: a bare ``count(*) > 0`` would report ``ready``
 #: forever on exactly the symbols and dates that are still damaged.
 #:

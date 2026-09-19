@@ -50,7 +50,9 @@ from .settings import Settings
 from . import daily_control_plane
 from .adjustment_factor_maintenance import (
     AdjustmentFactorMaintenanceDependencies,
+    longhu_factor_route,
     post_close_sync as adjustment_factor_post_close_sync,
+    repair as adjustment_factor_repair,
     status as adjustment_factor_status_report,
     sync as adjustment_factor_sync,
 )
@@ -1551,14 +1553,15 @@ async def sync_full_market_daily_controls(trade_date: date) -> dict[str, Any]:
 
 
 def adjustment_factor_maintenance_dependencies() -> AdjustmentFactorMaintenanceDependencies:
-    """Compose the factor-repair lane's boundaries; no provider client is owned here."""
+    """Compose the factor lane's boundaries: the database and the longhu route only.
+
+    No tushare client is part of this composition (the factor lane derives
+    every factor from the licensed longhu kline).
+    """
     return AdjustmentFactorMaintenanceDependencies(
         database=db, run_database=run_database_blocking,
-        call_tushare_api=call_tushare_api, parse_tushare_date=tushare_date,
-        persist_tushare_rows=persist_tushare_rows, persist_blocked=persist_tushare_fetch_blocked,
-        safe_error_detail=safe_error_detail, executor_saturated_error=ExecutorSaturatedError,
-        record_provider_success=record_provider_success, record_provider_failure=record_provider_failure,
-        record_provider_api_capability=record_provider_api_capability,
+        longhu_source=longhu_intraday_source, run_public=run_akshare_blocking,
+        safe_error_detail=safe_error_detail,
     )
 
 
@@ -1566,6 +1569,17 @@ async def sync_adjustment_factors(lookback_days: int = 30, *, dry_run: bool = Fa
     """Maintenance-window entry point (scripts/adjustment-factor-maintenance.py)."""
     return await adjustment_factor_sync(
         adjustment_factor_maintenance_dependencies(), lookback_days=lookback_days, dry_run=dry_run,
+    )
+
+
+async def repair_adjustment_factors(
+    *, apply: bool = False, from_date: date | None = None, to_date: date | None = None,
+    lookback_sessions: int = 60,
+) -> dict[str, Any]:
+    """One-time backfill entry point (scripts/adjustment-factor-maintenance.py repair --apply)."""
+    return await adjustment_factor_repair(
+        adjustment_factor_maintenance_dependencies(), apply=apply, from_date=from_date,
+        to_date=to_date, lookback_sessions=lookback_sessions,
     )
 
 
@@ -1578,12 +1592,12 @@ async def adjustment_factor_status(lookback_days: int = 30) -> dict[str, Any]:
     """Read-only status of the factor lane; writes nothing, fetches nothing.
 
     Shares the same composition root as the repair lane so the report and the
-    work list cannot drift apart, and hands the capability registry's answer
-    in rather than letting the maintenance module reach for it.
+    work list cannot drift apart, and describes the lane's one route (longhu)
+    rather than the tushare capability registry the lane no longer uses.
     """
     return await adjustment_factor_status_report(
         adjustment_factor_maintenance_dependencies(), lookback_days=lookback_days,
-        capability=api_capability("adj_factor"),
+        capability=longhu_factor_route(longhu_vendor_configured()),
     )
 
 

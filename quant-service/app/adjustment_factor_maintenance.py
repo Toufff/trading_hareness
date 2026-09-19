@@ -1,38 +1,43 @@
-"""Maintenance-window repair lane for cumulative daily adjustment factors.
+"""Maintenance lane for cumulative daily adjustment factors -- longhu only.
 
 ``quant.canonical_bars_daily.adj_factor`` is a cumulative (hfq-style)
 corporate-action factor: ``close * adj_factor`` must be comparable across
-dates.  The settled full-market cross-section and the factor now come from
-different providers, so a trading date can legitimately land with complete
-bars and limits while its factors are still missing.  Filling that gap is
-this module's only job.
+dates.  The settled full-market cross-section lands without a factor, so a
+trading date can legitimately have complete bars and limits while its factors
+are still missing.  Filling that gap is this module's only job.
 
-It deliberately runs OUTSIDE the post-close pipeline (the 04:00-08:00
-maintenance window, or a one-time repair), because the factor route is a
-separate provider whose availability must not be able to delay or fail the
-evening close path.  Nothing here interprets prices; it re-uses
-``full_market_daily_controls_sync.sync`` with ``apis=('adj_factor',)`` so the
-fetch, coverage gate, provenance receipts and promotion stay in exactly one
-place.
+Since 2026-09-19 the lane has NO tushare dependency (user decision: "完全去掉
+tushare，用 longhu 来处理").  Every factor is derived by
+``app.longhu_adjustment_factors`` from the licensed longhu daily kline
+(``GetKLineDay_W14``: the vendor's CQ corporate-action record and its qfq
+series) plus the bar's own pre_close, continuing each symbol's stored
+cumulative series from its last real factor.  Derived rows are stored under
+provider ``longhu_qfq_derived`` with their evidence; stored tushare factors are
+only ever READ, as anchors and checkpoints.
+
+The lane runs as a non-gating post-close stage and at 04:30 (the maintenance
+window); :func:`repair` is the idempotent one-time backfill of the damaged
+2026-08/09 window, with a read-only dry run.
 """
 
 from __future__ import annotations
 
 import functools
+import hashlib
+import json
+import math
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
 
+from . import longhu_adjustment_factors as derivation
 from .daily_control_plane import MINIMUM_ALL_A_COVERAGE_RATIO, daily_row_count
-from .full_market_daily_controls_sync import COVERAGE_BLOCK_REASON, sync as sync_daily_controls
-from .tushare_normalization import (
-    PROMOTABLE_FACTOR_PROVIDER_PREFIX,
-    promotable_factor_predicate_sql,
-)
+from .full_market_daily_controls_sync import COVERAGE_BLOCK_REASON, PROVIDER_BLOCK_REASON
+from .tushare_normalization import promotable_factor_evidence_sql
 
 #: One trading date is considered still pending while fewer than this share of
 #: its settled bars carry a factor.  Same ratio as the equity readiness gate:
@@ -44,7 +49,8 @@ CHINA = ZoneInfo("Asia/Shanghai")
 
 #: Release/CI guard: no bar row may carry a factor that no promotable evidence
 #: supports.  "Promotable" is the same rule the writers obey -- a tushare route
-#: whose declared semantics are absent or cumulative -- so the guard is not
+#: whose declared semantics are absent or cumulative, or the derived longhu
+#: provider declaring cumulative semantics explicitly -- so the guard is not
 #: limited to the one placeholder marker this branch happened to find.  A
 #: vendor that simply omits ``factor_semantics`` is caught by the same query.
 #: Must return 0.  ``{table}`` is injected by :func:`identity_factor_leak_sql`
@@ -61,8 +67,7 @@ IDENTITY_FACTOR_LEAK_SQL_TEMPLATE = f"""SELECT count(*)::bigint AS identity_leak
       -- promote onto a bar.
       AND NOT EXISTS (SELECT 1 FROM quant.daily_adjustment_factors promotable
                    WHERE promotable.symbol = bar.symbol AND promotable.trading_date = bar.trading_date
-                     AND promotable.provider LIKE '{PROMOTABLE_FACTOR_PROVIDER_PREFIX}%'
-                     AND {promotable_factor_predicate_sql("promotable", "raw")})"""
+                     AND {promotable_factor_evidence_sql("promotable", "raw")})"""
 
 #: The only tables the leak guard may be pointed at.
 GUARDED_BAR_TABLES = ("canonical_bars_daily", "market_bars_daily")
@@ -84,10 +89,7 @@ def identity_factor_leak_sql(table: str = "canonical_bars_daily") -> str:
 #: obey, expressed against ``quant.daily_adjustment_factors`` under the alias
 #: ``factor``.  Written for statements that carry parameters, so the ``LIKE``
 #: wildcard is doubled for psycopg.
-REAL_FACTOR_PREDICATE_SQL = (
-    f"factor.provider LIKE '{PROMOTABLE_FACTOR_PROVIDER_PREFIX}%%' "
-    f"AND {promotable_factor_predicate_sql('factor', 'raw')}"
-)
+REAL_FACTOR_PREDICATE_SQL = promotable_factor_evidence_sql("factor", "raw").replace("%", "%%")
 
 PENDING_DATES_SQL = f"""WITH settled AS (
        SELECT bar.trading_date, bar.symbol FROM quant.canonical_bars_daily bar
@@ -113,19 +115,19 @@ PENDING_DATES_SQL = f"""WITH settled AS (
 
 @dataclass(frozen=True)
 class AdjustmentFactorMaintenanceDependencies:
-    """Everything one factor-repair run needs; no provider client is owned here."""
+    """Everything one factor run needs; no tushare client, by construction.
+
+    ``longhu_source`` returns an object with the licensed ``raw_call``
+    contract (``longhu_vendor_source.intraday_source``); ``run_public`` runs
+    the blocking all-symbol fetch in the bounded public-source executor.
+    """
 
     database: Any
     run_database: Callable[..., Awaitable[Any]]
-    call_tushare_api: Callable[..., Awaitable[Any]]
-    parse_tushare_date: Callable[[Any], date | None]
-    persist_tushare_rows: Callable[..., int]
-    persist_blocked: Callable[..., Any]
+    longhu_source: Callable[[], Any]
+    run_public: Callable[..., Awaitable[Any]]
     safe_error_detail: Callable[[str, int], str]
-    executor_saturated_error: type[BaseException]
-    record_provider_success: Callable[..., Any]
-    record_provider_failure: Callable[..., Any]
-    record_provider_api_capability: Callable[..., Any]
+    now: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc))
 
 
 def china_today(now: datetime | None = None) -> date:
@@ -520,11 +522,12 @@ def post_close_lookback_days_from_calendar(
 
 
 def _classify(outcome: dict[str, Any]) -> str:
-    """Map one controls-sync result onto completed / skipped / failed.
+    """Map one per-date result onto completed / skipped / failed.
 
-    ``full_market_daily_controls_sync`` reports every refusal as ``blocked``;
-    ``blocked_by`` says whether the cross-section was simply not good enough
-    for a promotion (``coverage``) or whether the provider itself errored.
+    ``blocked`` with ``blocked_by='coverage'`` means the date's own settled
+    cross-section is not good enough (the lane cannot repair that); every
+    other refusal -- the longhu fetch failed, the derivation covered too little
+    of the date -- is this lane's failure.
     """
     status = str(outcome.get("status") or "")
     if status in {"completed", "unchanged"}:
@@ -534,68 +537,154 @@ def _classify(outcome: dict[str, Any]) -> str:
     return "failed"
 
 
+#: More longhu fetch failures than this share of the window's symbols is a
+#: provider failure for the whole run (nothing is written); fewer, and the
+#: failed symbols are derived from the bar pre_close alone and flagged
+#: ``longhu_missing`` in their evidence.
+MAX_FETCH_FAILURE_RATIO = 0.05
+#: Budget for the one all-symbol longhu fetch (about 5,500 calls, ~95 s
+#: measured 2026-09-19 with 16 workers).
+LONGHU_FETCH_TIMEOUT_SECONDS = 1800
+#: Budget for the window read and for each date's write transaction.
+FACTOR_DB_TIMEOUT_SECONDS = 600
+#: Parallel longhu calls.  No artificial throttle (the licensed wrapper has no
+#: call-count or rate limit).
+LONGHU_FETCH_WORKERS = 16
+
+
+class FactorLaneSession:
+    """One lane run: read the window once, fetch longhu once, plan once.
+
+    The per-date loop in :func:`sync` asks this session for each date; the
+    derivation is built lazily on the first date that needs it, over the
+    whole work list, because one symbol's chain spans all of those dates.
+    """
+
+    def __init__(self, dependencies: AdjustmentFactorMaintenanceDependencies,
+                 work: list[date], today: date, holes: list[date] | None = None) -> None:
+        self.dependencies = dependencies
+        self.work = sorted(work)
+        #: Complete dates that still carry NULL factors of symbols with a
+        #: factor history: filled where NULL, never re-worked otherwise.
+        self.holes = sorted(set(holes or ()) - set(work))
+        self.window = sorted(set(self.work) | set(self.holes))
+        self.today = today
+        self.plan: derivation.FactorPlan | None = None
+        self.failure: str | None = None
+        self.fetch_errors: dict[str, str] = {}
+        self.written: dict[str, dict[str, int]] = {}
+        self.available_at = dependencies.now()
+
+    async def ensure_plan(self) -> derivation.FactorPlan | None:
+        if self.plan is not None or self.failure is not None:
+            return self.plan
+        deps = self.dependencies
+        inputs = await deps.run_database(
+            functools.partial(_read_window, deps.database, self.window[0], self.window[-1]),
+            timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
+        sessions = derivation.sessions_to_fetch(inputs, self.today)
+        try:
+            source = deps.longhu_source()
+            longhu, errors = await deps.run_public(
+                derivation.fetch_longhu_evidence, source, sessions,
+                timeout_seconds=LONGHU_FETCH_TIMEOUT_SECONDS, workers=LONGHU_FETCH_WORKERS)
+        except Exception as error:  # noqa: BLE001 - reported as a provider failure
+            self.failure = deps.safe_error_detail(f"longhu fetch failed: {error}", 500)
+            return None
+        self.fetch_errors = dict(errors)
+        if sessions and len(errors) > MAX_FETCH_FAILURE_RATIO * len(sessions):
+            self.failure = (f"longhu kline failed for {len(errors)} of {len(sessions)} symbols "
+                            f"(limit {MAX_FETCH_FAILURE_RATIO:.0%})")
+            return None
+        self.plan = derivation.build_plan(
+            inputs, longhu, write_dates=self.work, fetch_errors=errors, rederive_derived=False,
+            null_only_dates=self.holes)
+        return self.plan
+
+
+async def repair_factor_date(session: FactorLaneSession, trade_date: date) -> dict[str, Any]:
+    """Derive and write one pending date; the per-date unit of :func:`sync`."""
+    deps = session.dependencies
+    expected = await deps.run_database(daily_row_count, deps.database, trade_date)
+    if expected <= 0:
+        return {"status": "blocked", "trade_date": str(trade_date),
+                "blocked_by": COVERAGE_BLOCK_REASON,
+                "reason": "full-market daily bars are not ready"}
+    plan = await session.ensure_plan()
+    if plan is None:
+        return {"status": "blocked", "trade_date": str(trade_date),
+                "blocked_by": PROVIDER_BLOCK_REASON, "reason": session.failure}
+    rows = plan.rows.get(trade_date, [])
+    if len(rows) < math.ceil(expected * PENDING_COVERAGE_RATIO):
+        return {"status": "blocked", "trade_date": str(trade_date),
+                "blocked_by": PROVIDER_BLOCK_REASON,
+                "reason": (f"derived factors for {len(rows)} symbols; the date needs at least "
+                           f"{PENDING_COVERAGE_RATIO:.0%} of {expected}")}
+    counts = await deps.run_database(
+        functools.partial(_persist_date, deps.database, trade_date, rows,
+                          list(plan.clear.get(trade_date, [])), session.available_at),
+        timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
+    session.written[str(trade_date)] = counts
+    derived_rows = sum(1 for row in rows if row.provider == derivation.PROVIDER_KEY)
+    return {"status": "completed", "trade_date": str(trade_date), "expected_daily_rows": expected,
+            "provider": derivation.PROVIDER_KEY, "rows": len(rows), "derived_rows": derived_rows,
+            "writes": counts}
+
+
 async def sync(
     dependencies: AdjustmentFactorMaintenanceDependencies,
     *, lookback_days: int = 30, dry_run: bool = False, today: date | None = None,
 ) -> dict[str, Any]:
-    """Fetch the missing cumulative factors for every pending settled date.
+    """Derive the missing cumulative factors for every pending settled date.
 
     ``dry_run`` resolves and reports the work list without issuing a single
-    provider call or write, which is what the one-time repair runbook uses to
-    confirm the scope before anything touches the database.
+    provider call or write.
 
-    A date the daily-controls coverage gate refuses is reported as *skipped*
-    with its reason and does not fail the run: the factor lane cannot repair a
-    thin daily cross-section, and a scheduled task that exits non-zero for a
-    condition it cannot fix would alert every night forever.  After
-    :data:`MAX_CONSECUTIVE_BLOCKED_RUNS` such DAYS -- the ledger counts one per
-    evening however many times the stage runs -- the date drops off the work
-    list with a one-time durable receipt.  Only a provider error or an
-    exception makes the run itself fail.
+    A date whose own settled cross-section is too thin is reported as
+    *skipped* with its reason and does not fail the run: the factor lane
+    cannot repair a thin daily cross-section, and a scheduled task that exits
+    non-zero for a condition it cannot fix would alert every night forever.
+    After :data:`MAX_CONSECUTIVE_BLOCKED_RUNS` such DAYS -- the ledger counts
+    one per evening however many times the stage runs -- the date drops off
+    the work list with a one-time durable receipt.  Only a longhu failure or
+    an exception makes the run itself fail.
     """
     # The raw coverage list: this job is the one caller that reports the
     # retired dates itself (``plan['retired_dates']`` below), so it asks for
     # them rather than letting the helper drop them.
+    end_date = today or china_today()
     dates = await dependencies.run_database(functools.partial(
-        pending_dates, dependencies.database, lookback_days=lookback_days, today=today,
+        pending_dates, dependencies.database, lookback_days=lookback_days, today=end_date,
         include_retired=True,
     ))
     retired = await dependencies.run_database(functools.partial(
         _retired_dates, dependencies.database, dates,
     ))
     work = [value for value in dates if value not in retired]
+    holes = await dependencies.run_database(functools.partial(
+        _hole_dates, dependencies.database, end_date - timedelta(days=lookback_days), end_date,
+    ), timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
+    holes = [value for value in holes if value not in set(dates)]
     plan: dict[str, Any] = {
         "status": "planned" if dry_run else "completed",
         "lookback_days": int(lookback_days),
+        "provider": derivation.PROVIDER_KEY,
         "pending_dates": [str(value) for value in dates],
+        "hole_dates": [str(value) for value in holes],
         "retired_dates": [str(value) for value in dates if value in retired],
         "dry_run": bool(dry_run),
     }
-    if dry_run or not work:
+    if dry_run or not (work or holes):
         plan["results"] = []
         if not work:
             plan["status"] = "planned" if dry_run else "unchanged"
         return plan
 
+    session = FactorLaneSession(dependencies, work, end_date, holes)
     results: list[dict[str, Any]] = []
     for trade_date in work:
         try:
-            outcome = await sync_daily_controls(
-                trade_date,
-                apis=("adj_factor",),
-                expected_daily_rows=lambda date_: daily_row_count(dependencies.database, date_),
-                call_tushare_api=dependencies.call_tushare_api,
-                parse_date=dependencies.parse_tushare_date,
-                persist_tushare_rows=dependencies.persist_tushare_rows,
-                persist_blocked=dependencies.persist_blocked,
-                run_database_blocking=dependencies.run_database,
-                db=dependencies.database,
-                safe_error_detail=dependencies.safe_error_detail,
-                executor_saturated_error=dependencies.executor_saturated_error,
-                record_provider_success=dependencies.record_provider_success,
-                record_provider_failure=dependencies.record_provider_failure,
-                record_provider_api_capability=dependencies.record_provider_api_capability,
-            )
+            outcome = await repair_factor_date(session, trade_date)
         except Exception as error:  # noqa: BLE001 - one date must not end the run
             outcome = {
                 "status": "failed", "trade_date": str(trade_date),
@@ -614,6 +703,25 @@ async def sync(
             ))
         results.append(outcome)
 
+    # Holes on otherwise complete dates: filled where NULL, outside the
+    # work-list ledger (a hole never retires a date and never fails the run).
+    hole_fills: dict[str, Any] = {}
+    if session.holes and session.plan is None and session.failure is None:
+        await session.ensure_plan()
+    if session.plan is not None:
+        for value in session.holes:
+            rows = session.plan.rows.get(value, [])
+            if not rows:
+                continue
+            try:
+                hole_fills[str(value)] = await dependencies.run_database(
+                    functools.partial(_persist_date, dependencies.database, value, rows, [],
+                                      session.available_at),
+                    timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
+            except Exception as error:  # noqa: BLE001 - a hole is retried next run
+                hole_fills[str(value)] = {"error": dependencies.safe_error_detail(str(error), 300)}
+    plan["hole_fills"] = hole_fills
+
     counts = {name: sum(1 for item in results if item["outcome"] == name)
               for name in ("completed", "skipped", "failed")}
     plan["results"] = results
@@ -622,10 +730,358 @@ async def sync(
     plan["failed_dates"] = counts["failed"]
     plan["status"] = (
         FAILED_STATUS if counts["failed"] else
-        "skipped" if not counts["completed"] else
-        "completed"
+        "skipped" if counts["skipped"] and not counts["completed"] else
+        "completed" if counts["completed"] else
+        # No pending date, only holes: filled (or nothing to fill) unless the
+        # longhu fetch itself failed.
+        FAILED_STATUS if session.failure is not None else
+        "completed" if hole_fills else "unchanged"
     )
+    if session.failure is not None:
+        plan["reason"] = session.failure
+    if session.plan is not None:
+        summary = derivation.plan_summary(session.plan, detail_limit=10)
+        plan["derivation"] = {key: summary[key] for key in (
+            "symbols", "held_symbols", "anchors_missing", "new_listings", "actions_by_basis",
+            "flags", "action_samples", "stored_factor_comparisons",
+            "stored_factor_disagreements", "longhu_fetch_errors")}
+    if session.plan is not None or session.failure is not None:
+        await dependencies.run_database(functools.partial(
+            _record_fetch_run, dependencies.database, session, plan))
     return plan
+
+
+#: Dates in a window that are complete by coverage but still carry a NULL
+#: factor on an A-share bar whose symbol HAS a promotable factor before it --
+#: the hole a failed fetch or an unresolved step leaves behind.
+HOLE_DATES_SQL = f"""SELECT DISTINCT bar.trading_date FROM quant.canonical_bars_daily bar
+ WHERE bar.trading_date BETWEEN %s AND %s AND bar.adj_factor IS NULL
+   AND bar.quality_status IN ('fresh','partial')
+   AND bar.symbol ~ '{derivation.A_SHARE_SQL_PATTERN}'
+   AND EXISTS (SELECT 1 FROM quant.market_trade_calendar calendar
+                WHERE calendar.calendar_date=bar.trading_date AND calendar.is_open)
+   AND EXISTS (SELECT 1 FROM quant.daily_adjustment_factors factor
+                WHERE factor.symbol=bar.symbol AND factor.trading_date<bar.trading_date
+                  AND factor.adj_factor > 0 AND {REAL_FACTOR_PREDICATE_SQL})
+ ORDER BY 1"""
+
+
+def _hole_dates(database: Any, start_date: date, end_date: date) -> list[date]:
+    with database.transaction() as connection:
+        return [row["trading_date"] for row in connection.execute(
+            HOLE_DATES_SQL, (start_date, end_date)).fetchall()]
+
+
+def _read_window(database: Any, from_date: date, to_date: date) -> derivation.WindowInputs:
+    with database.transaction() as connection:
+        return derivation.read_window(connection, from_date, to_date)
+
+
+def _persist_date(database: Any, trade_date: date, rows: list[Any], clear: list[str],
+                  available_at: datetime) -> dict[str, int]:
+    """One trading date, one transaction (the ordering rule of the repair)."""
+    with database.transaction() as connection:
+        return derivation.persist_factor_date(
+            connection, trade_date, rows, available_at=available_at, clear_symbols=clear)
+
+
+def _record_fetch_run(database: Any, session: FactorLaneSession, result: dict[str, Any]) -> None:
+    """One ``quant.fetch_runs`` receipt per lane run, under the REAL provider name."""
+    stamp = session.available_at.isoformat()
+    request_key = hashlib.sha256(json.dumps(
+        {"capability": "adj_factor", "provider": derivation.PROVIDER_KEY,
+         "dates": [str(value) for value in session.window], "at": stamp},
+        sort_keys=True).encode()).hexdigest()
+    rows = sum(int(item.get("rows") or 0) for item in result.get("results") or []
+               if isinstance(item, dict))
+    status = ("failed" if session.failure is not None or result.get("status") == FAILED_STATUS
+              else "completed" if result.get("status") == "completed" else "partial")
+    with database.transaction() as connection:
+        connection.execute(
+            """INSERT INTO quant.fetch_runs(provider_key,capability,trade_date,request_key,status,
+                   attempt_count,row_count,started_at,finished_at,error_class,error_message,metadata)
+               VALUES(%s,'adj_factor',%s,%s,%s,1,%s,%s,now(),%s,%s,%s)
+               ON CONFLICT(request_key) DO NOTHING""",
+            (derivation.PROVIDER_KEY, session.window[-1], request_key, status, rows,
+             session.available_at,
+             "LonghuFactorDerivationError" if session.failure else None,
+             session.failure,
+             Json({"source": derivation.SOURCE, "method": derivation.METHOD_VERSION,
+                   "dates": [str(value) for value in session.work],
+                   "longhu_fetch_errors": len(session.fetch_errors),
+                   "writes": session.written})))
+
+
+# --------------------------------------------------------------------------
+# One-time repair (idempotent) and validation
+# --------------------------------------------------------------------------
+
+#: How far back the repair looks for a damaged date when no window is given.
+REPAIR_LOOKBACK_SESSIONS = 60
+#: A date is damaged when more of its A-share bars than this lack a factor
+#: (the healthy baseline is a handful of suspended/unfactored symbols a day),
+#: or when any bar carries a factor that no promotable evidence supports.
+REPAIR_NULL_SHARE = 0.05
+
+#: Data-derived repair window: every recent open session whose A-share bars
+#: are damaged, plus every date still carrying un-annotated placeholder
+#: evidence.  No literal date anywhere.
+REPAIR_DAMAGED_DATES_SQL = f"""
+WITH recent AS (
+    SELECT DISTINCT calendar_date AS trading_date FROM quant.market_trade_calendar
+     WHERE is_open AND calendar_date <= %(today)s
+     ORDER BY 1 DESC LIMIT %(sessions)s
+), per_date AS (
+    SELECT bar.trading_date,
+           count(*)::bigint AS bars,
+           count(*) FILTER (WHERE bar.adj_factor IS NULL)::bigint AS null_factor,
+           count(*) FILTER (WHERE bar.adj_factor IS NOT NULL
+               AND EXISTS (SELECT 1 FROM quant.daily_adjustment_factors evidence
+                            WHERE evidence.symbol=bar.symbol AND evidence.trading_date=bar.trading_date)
+               AND NOT EXISTS (SELECT 1 FROM quant.daily_adjustment_factors factor
+                            WHERE factor.symbol=bar.symbol AND factor.trading_date=bar.trading_date
+                              AND {REAL_FACTOR_PREDICATE_SQL}))::bigint AS unsupported_factor
+      FROM quant.canonical_bars_daily bar JOIN recent USING (trading_date)
+     WHERE bar.quality_status IN ('fresh','partial')
+       AND bar.symbol ~ '{derivation.A_SHARE_SQL_PATTERN}'
+     GROUP BY bar.trading_date
+)
+SELECT trading_date, bars, null_factor, unsupported_factor FROM per_date
+ WHERE null_factor > %(null_share)s * bars OR unsupported_factor > 0
+UNION
+SELECT DISTINCT placeholder.trading_date, NULL::bigint, NULL::bigint, NULL::bigint
+  FROM quant.daily_adjustment_factors placeholder
+ WHERE placeholder.provider='longhuvip_composite'
+   AND placeholder.raw->>'factor_semantics'='same_day_identity_only'
+   AND placeholder.raw->>'superseded_at' IS NULL
+ ORDER BY 1"""
+
+LATEST_SETTLED_DATE_SQL = f"""SELECT max(bar.trading_date) AS latest FROM quant.canonical_bars_daily bar
+ WHERE bar.quality_status IN ('fresh','partial') AND bar.symbol ~ '{derivation.A_SHARE_SQL_PATTERN}'
+   AND bar.trading_date <= %s
+   AND EXISTS (SELECT 1 FROM quant.market_trade_calendar calendar
+                WHERE calendar.calendar_date=bar.trading_date AND calendar.is_open)"""
+
+WINDOW_SESSIONS_SQL = f"""SELECT DISTINCT bar.trading_date FROM quant.canonical_bars_daily bar
+ WHERE bar.trading_date BETWEEN %s AND %s AND bar.quality_status IN ('fresh','partial')
+   AND bar.symbol ~ '{derivation.A_SHARE_SQL_PATTERN}'
+   AND EXISTS (SELECT 1 FROM quant.market_trade_calendar calendar
+                WHERE calendar.calendar_date=bar.trading_date AND calendar.is_open)
+ ORDER BY 1"""
+
+#: Bars in the window that the release guard counts today.
+WINDOW_LEAKS_SQL = f"""SELECT bar.symbol, bar.trading_date FROM quant.canonical_bars_daily bar
+ WHERE bar.trading_date BETWEEN %s AND %s AND bar.adj_factor IS NOT NULL
+   AND EXISTS (SELECT 1 FROM quant.daily_adjustment_factors evidence
+                WHERE evidence.symbol=bar.symbol AND evidence.trading_date=bar.trading_date)
+   AND NOT EXISTS (SELECT 1 FROM quant.daily_adjustment_factors factor
+                WHERE factor.symbol=bar.symbol AND factor.trading_date=bar.trading_date
+                  AND {REAL_FACTOR_PREDICATE_SQL})"""
+
+WINDOW_NULLS_SQL = f"""SELECT bar.symbol, bar.trading_date FROM quant.canonical_bars_daily bar
+ WHERE bar.trading_date BETWEEN %s AND %s AND bar.adj_factor IS NULL
+   AND bar.quality_status IN ('fresh','partial') AND bar.symbol ~ '{derivation.A_SHARE_SQL_PATTERN}'
+   AND EXISTS (SELECT 1 FROM quant.market_trade_calendar calendar
+                WHERE calendar.calendar_date=bar.trading_date AND calendar.is_open)"""
+
+READBACK_SQL = f"""SELECT bar.trading_date, count(*)::bigint AS bars,
+       count(*) FILTER (WHERE bar.adj_factor IS NULL)::bigint AS null_factor,
+       count(*) FILTER (WHERE bar.adj_factor = 1)::bigint AS eq1,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM quant.daily_adjustment_factors factor
+            WHERE factor.symbol=bar.symbol AND factor.trading_date=bar.trading_date
+              AND factor.provider=%s))::bigint AS derived
+  FROM quant.canonical_bars_daily bar
+ WHERE bar.trading_date BETWEEN %s AND %s AND bar.quality_status IN ('fresh','partial')
+   AND bar.symbol ~ '{derivation.A_SHARE_SQL_PATTERN}'
+ GROUP BY 1 ORDER BY 1"""
+
+
+def repair_window(
+    connection: Any, *, today: date, from_date: date | None = None, to_date: date | None = None,
+    lookback_sessions: int = REPAIR_LOOKBACK_SESSIONS,
+) -> dict[str, Any]:
+    """Resolve the repair window from the data (explicit bounds win)."""
+    damaged = connection.execute(REPAIR_DAMAGED_DATES_SQL, {
+        "today": today, "sessions": int(lookback_sessions), "null_share": REPAIR_NULL_SHARE,
+    }).fetchall()
+    latest = (connection.execute(LATEST_SETTLED_DATE_SQL, (today,)).fetchone() or {}).get("latest")
+    derived_from = min((row["trading_date"] for row in damaged), default=None)
+    start = from_date or derived_from
+    end = to_date or latest
+    sessions = [] if start is None or end is None else [
+        row["trading_date"] for row in connection.execute(WINDOW_SESSIONS_SQL, (start, end)).fetchall()]
+    return {
+        "from_date": start, "to_date": end, "derived_from_date": derived_from,
+        "latest_settled_date": latest, "sessions": sessions,
+        "damaged_dates": [{"trading_date": str(row["trading_date"]),
+                           "bars": row["bars"], "null_factor": row["null_factor"],
+                           "unsupported_factor": row["unsupported_factor"]} for row in damaged],
+    }
+
+
+def guard_counts(connection: Any) -> dict[str, int]:
+    return {table: int(connection.execute(identity_factor_leak_sql(table)).fetchone()["identity_leaks"])
+            for table in GUARDED_BAR_TABLES}
+
+
+def repair_projection(connection: Any, plan: derivation.FactorPlan) -> dict[str, Any]:
+    """What the guard and the NULL count WILL be once the plan is applied."""
+    written = {(row.symbol, value) for value, rows in plan.rows.items() for row in rows}
+    cleared = {(symbol, value) for value, symbols in plan.clear.items() for symbol in symbols}
+    leaks = [(row["symbol"], row["trading_date"]) for row in connection.execute(
+        WINDOW_LEAKS_SQL, (plan.from_date, plan.to_date)).fetchall()]
+    remaining_leaks = [key for key in leaks if key not in written and key not in cleared]
+    guard = guard_counts(connection)
+    nulls = [(row["symbol"], row["trading_date"]) for row in connection.execute(
+        WINDOW_NULLS_SQL, (plan.from_date, plan.to_date)).fetchall()]
+    placeholder_nulls = [key for key in leaks if key in cleared and key not in written]
+    left_null: dict[str, dict[str, Any]] = {}
+    for symbol, value in [*[key for key in nulls if key not in written], *placeholder_nulls]:
+        entry = left_null.setdefault(symbol, {
+            "reason": plan.held.get(symbol) or (
+                "unresolved_step_across_bar_gap" if symbol in plan.truncated
+                else "longhu_fetch_failed" if symbol in plan.fetch_errors
+                else "no_derivation_for_this_bar"),
+            "dates": []})
+        entry["dates"].append(str(value))
+    for entry in left_null.values():
+        entry["dates"] = sorted(set(entry["dates"]))
+    outside = guard["canonical_bars_daily"] - len(leaks)
+    return {
+        "guard_now": guard,
+        "guard_leaks_in_window": len(leaks),
+        "guard_leaks_outside_window": outside,
+        "guard_after_apply_projected": {
+            "canonical_bars_daily": outside + len(remaining_leaks),
+            # The market table gets the same values and never carried placeholders.
+            "market_bars_daily": guard["market_bars_daily"]},
+        "null_bars_now": len(nulls),
+        "null_bars_after_apply": sum(len(entry["dates"]) for entry in left_null.values()),
+        "symbols_left_null": dict(sorted(left_null.items())),
+    }
+
+
+async def repair(
+    dependencies: AdjustmentFactorMaintenanceDependencies, *,
+    apply: bool = False, from_date: date | None = None, to_date: date | None = None,
+    today: date | None = None, lookback_sessions: int = REPAIR_LOOKBACK_SESSIONS,
+) -> dict[str, Any]:
+    """Backfill real factors over the damaged window; idempotent, dry run by default.
+
+    Every symbol continues from its last stored promotable factor BEFORE the
+    window (tushare-era in practice) through the latest settled bar; stored
+    tushare factors inside the window (the 08-27 hole's evidence, the
+    09-02/09-03 bars, the 09-07/09-09/09-10/09-17 cross-sections) are
+    checkpoints -- compared with the derivation, reported when they disagree,
+    kept as they are.  ``apply`` writes one transaction per trading date
+    (derived rows + both bar tables + placeholder annotation + ledger clear),
+    then re-runs the guard and reads back every date.  Without ``apply`` not a
+    single write is issued: the dry run is safe on a read-only connection.
+    """
+    end_date = today or china_today()
+    database = dependencies.database
+    window = await dependencies.run_database(
+        functools.partial(_repair_window, database, end_date, from_date, to_date, lookback_sessions),
+        timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
+    report: dict[str, Any] = {
+        "mode": "apply" if apply else "dry_run", "provider": derivation.PROVIDER_KEY,
+        "method": derivation.METHOD_VERSION,
+        "window": {key: (str(value) if isinstance(value, date) else value)
+                   for key, value in window.items() if key != "sessions"},
+    }
+    if window["from_date"] is None or not window["sessions"]:
+        report["status"] = "unchanged"
+        report["reason"] = "no damaged date and no un-annotated placeholder evidence"
+        return report
+    inputs = await dependencies.run_database(
+        functools.partial(_read_window, database, window["from_date"], window["to_date"]),
+        timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
+    sessions = derivation.sessions_to_fetch(inputs, end_date)
+    source = dependencies.longhu_source()
+    longhu, errors = await dependencies.run_public(
+        derivation.fetch_longhu_evidence, source, sessions,
+        timeout_seconds=LONGHU_FETCH_TIMEOUT_SECONDS, workers=LONGHU_FETCH_WORKERS)
+    if sessions and len(errors) > MAX_FETCH_FAILURE_RATIO * len(sessions):
+        report["status"] = FAILED_STATUS
+        report["reason"] = f"longhu kline failed for {len(errors)} of {len(sessions)} symbols"
+        return report
+    plan = derivation.build_plan(inputs, longhu, write_dates=window["sessions"],
+                                 fetch_errors=errors, rederive_derived=True)
+    report["plan"] = derivation.plan_summary(plan)
+    report["projection"] = await dependencies.run_database(
+        functools.partial(_repair_projection, database, plan), timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
+    if not apply:
+        report["status"] = "planned"
+        return report
+    available_at = dependencies.now()
+    applied: dict[str, dict[str, int]] = {}
+    for value in plan.write_dates:
+        applied[str(value)] = await dependencies.run_database(
+            functools.partial(_apply_repair_date, database, value, plan.rows.get(value, []),
+                              list(plan.clear.get(value, [])), available_at),
+            timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
+    report["applied"] = applied
+    report["after"] = await dependencies.run_database(
+        functools.partial(_repair_readback, database, plan.from_date, plan.to_date),
+        timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
+    guard = report["after"]["guard"]
+    report["status"] = "completed" if not any(guard.values()) else FAILED_STATUS
+    if any(guard.values()):
+        report["reason"] = f"release guard is not 0 after the repair: {guard}"
+    return report
+
+
+def _repair_window(database: Any, today: date, from_date: date | None, to_date: date | None,
+                   lookback_sessions: int) -> dict[str, Any]:
+    with database.transaction() as connection:
+        return repair_window(connection, today=today, from_date=from_date, to_date=to_date,
+                             lookback_sessions=lookback_sessions)
+
+
+def _repair_projection(database: Any, plan: derivation.FactorPlan) -> dict[str, Any]:
+    with database.transaction() as connection:
+        return repair_projection(connection, plan)
+
+
+def _apply_repair_date(database: Any, trade_date: date, rows: list[Any], clear: list[str],
+                       available_at: datetime) -> dict[str, int]:
+    with database.transaction() as connection:
+        counts = derivation.persist_factor_date(
+            connection, trade_date, rows, available_at=available_at, clear_symbols=clear)
+        clear_blocked_date(connection, trade_date)
+        return counts
+
+
+def _repair_readback(database: Any, from_date: date, to_date: date) -> dict[str, Any]:
+    with database.transaction() as connection:
+        rows = connection.execute(READBACK_SQL, (derivation.PROVIDER_KEY, from_date, to_date)).fetchall()
+        return {"guard": guard_counts(connection),
+                "dates": [{key: (str(value) if isinstance(value, date) else int(value))
+                           for key, value in dict(row).items()} for row in rows]}
+
+
+async def validate(
+    dependencies: AdjustmentFactorMaintenanceDependencies, *,
+    from_date: date, to_date: date, today: date | None = None,
+) -> dict[str, Any]:
+    """Read-only: re-derive a stored tushare period and score the method."""
+    end_date = today or china_today()
+
+    def read() -> tuple[Any, Any]:
+        with dependencies.database.transaction() as connection:
+            return derivation.read_validation_inputs(connection, from_date, to_date)
+
+    bars, truth = await dependencies.run_database(read, timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
+    symbols = sorted(symbol for symbol in bars if symbol in truth)
+    # Sessions from the period start to today, with slack; one call per symbol.
+    span = min(derivation.MAX_SESSIONS_PER_CALL, int((end_date - from_date).days * 5 / 7) + 20)
+    source = dependencies.longhu_source()
+    longhu, errors = await dependencies.run_public(
+        derivation.fetch_longhu_evidence, source, {symbol: span for symbol in symbols},
+        timeout_seconds=LONGHU_FETCH_TIMEOUT_SECONDS, workers=LONGHU_FETCH_WORKERS)
+    report = derivation.validate(bars, truth, longhu)
+    return {"from_date": str(from_date), "to_date": str(to_date), "symbols": len(symbols),
+            "longhu_fetch_errors": len(errors), "method": derivation.METHOD_VERSION, **report}
 
 
 #: Base explanation carried by every post-close receipt of this lane.
@@ -869,6 +1325,31 @@ def status_report(
     return report
 
 
+@dataclass(frozen=True)
+class FactorRoute:
+    """The factor lane's own route, in the shape the status report reads."""
+
+    frequency: str
+    status: str
+    decision_eligible: bool
+    preferred_providers: tuple[str, ...]
+    note: str
+
+
+def longhu_factor_route(configured: bool) -> FactorRoute:
+    """Describe the ONE route this lane uses (no tushare registry entry).
+
+    verified only says the licensed longhu source is configured on this
+    host; whether factors actually landed is what factor_fetch_runs and
+    the per-date coverage in the same report answer.
+    """
+    return FactorRoute(
+        frequency="daily", status="verified" if configured else "unconfigured",
+        decision_eligible=True, preferred_providers=(derivation.PROVIDER_KEY,),
+        note=(f"derived from {derivation.SOURCE} (CQ record + qfq series) and the bar pre_close; "
+              "no tushare call"))
+
+
 def _capability_payload(capability: Any) -> dict[str, Any]:
     """Describe the declared adj_factor route without importing a registry here.
 
@@ -987,4 +1468,8 @@ __all__ = [
     "post_close_stage_receipt", "post_close_sync", "record_blocked_date",
     "retired_date_details", "retired_date_details_from_rows", "retired_dates",
     "status", "status_report", "status_summary", "sync",
+    "FactorLaneSession", "LONGHU_FETCH_WORKERS", "MAX_FETCH_FAILURE_RATIO",
+    "REPAIR_DAMAGED_DATES_SQL", "REPAIR_LOOKBACK_SESSIONS", "guard_counts", "repair",
+    "repair_factor_date", "repair_projection", "repair_window", "validate",
+    "FactorRoute", "HOLE_DATES_SQL", "longhu_factor_route",
 ]
