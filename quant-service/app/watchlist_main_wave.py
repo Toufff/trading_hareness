@@ -17,6 +17,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from .market_rules import LIMIT_TOLERANCE
+from .research_prices import CARRIED_FORWARD_FLAG, resolve_factors
 from .strategy_thresholds import MAX_ENTRY_INTRADAY_GAIN_PCT
 
 
@@ -97,29 +98,63 @@ def _feature_row(rows: list[dict[str, Any]], index: int) -> dict[str, float] | N
 
 
 def normalize_bars(rows: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Build adjusted research bars without changing raw execution prices."""
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    """Build adjusted research bars without changing raw execution prices.
+
+    The adjustment basis comes from the one shared rule,
+    ``research_prices.resolve_factors``, applied to each symbol's window in
+    ascending trading-date order.  This used to drop every bar whose
+    ``adj_factor`` was NULL, one row at a time, which was wrong in two
+    directions at once: on a longhu evening the factor lane is a session or
+    two behind, so the newest bars -- the only ones a live score is built from
+    -- disappeared for the whole market; and when the NULL was an interior hole
+    the surviving rows were spliced into a series that *looks* consecutive,
+    so a 60-session feature silently reached across missing history.
+
+    Now a symbol whose window resolves (complete, or a bounded trailing gap
+    with no corporate-action signature) keeps every bar, and the carried rows
+    are marked ``adj_factor_carried`` so the flag reaches the current row's
+    payload instead of being lost.  A window the rule refuses -- an interior
+    hole, no anchor, a gap past the bound, or a real ex-rights signature --
+    drops that symbol entirely, which is the fail-closed answer the splice was
+    hiding.
+    """
+    collected: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for raw in rows:
         symbol = str(raw.get("symbol") or "")
-        factor = _finite(raw.get("adj_factor"))
         open_price, high, low, close = (_finite(raw.get(key)) for key in ("open", "high", "low", "close"))
         volume = _finite(raw.get("volume"))
         amount = _finite(raw.get("amount"))
-        if (not symbol or factor is None or factor <= 0 or open_price is None or high is None or low is None
+        if (not symbol or open_price is None or high is None or low is None
                 or close is None or min(open_price, high, low, close) <= 0 or volume is None):
             continue
-        grouped[symbol].append({
+        collected[symbol].append({
             "symbol": symbol, "name": raw.get("name"), "trading_date": raw["trading_date"],
             "raw_open": open_price, "raw_high": high, "raw_low": low, "raw_close": close,
-            "adjusted_open": open_price * factor, "adjusted_high": high * factor,
-            "adjusted_low": low * factor, "adjusted_close": close * factor,
+            # resolve_factors reads these three names; they are carried through
+            # so the rule sees the same bar the caller stored.
+            "close": close, "pre_close": _finite(raw.get("pre_close")),
+            "adj_factor": _finite(raw.get("adj_factor")),
             "volume": volume, "amount": amount if amount is not None else close * volume,
             "is_suspended": bool(raw.get("is_suspended")),
             "limit_up": _finite(raw.get("limit_up")), "limit_down": _finite(raw.get("limit_down")),
         })
-    for symbol in grouped:
-        grouped[symbol].sort(key=lambda item: item["trading_date"])
-    return dict(grouped)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for symbol, bars in collected.items():
+        bars.sort(key=lambda item: item["trading_date"])
+        resolution = resolve_factors(bars)
+        if resolution.factors is None:
+            continue
+        carried = set(resolution.carried_positions)
+        prepared: list[dict[str, Any]] = []
+        for index, bar in enumerate(bars):
+            factor = resolution.factors[index]
+            prepared.append({
+                **bar, "adj_factor": factor, "adj_factor_carried": index in carried,
+                "adjusted_open": bar["raw_open"] * factor, "adjusted_high": bar["raw_high"] * factor,
+                "adjusted_low": bar["raw_low"] * factor, "adjusted_close": bar["raw_close"] * factor,
+            })
+        grouped[symbol] = prepared
+    return grouped
 
 
 def build_examples(grouped: dict[str, list[dict[str, Any]]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -141,6 +176,9 @@ def build_examples(grouped: dict[str, list[dict[str, Any]]]) -> tuple[list[dict[
             base = {
                 "symbol": symbol, "name": bars[index].get("name"),
                 "signal_date": bars[index]["trading_date"], "features": features,
+                # The reader of a live score must be able to see that this row
+                # was priced on a carried factor rather than a fetched one.
+                "quality_flags": [CARRIED_FORWARD_FLAG] if bars[index].get("adj_factor_carried") else [],
             }
             if index == len(bars) - 1:
                 current.append(base)
@@ -375,6 +413,10 @@ def research_from_rows(rows: Iterable[dict[str, Any]], start_date: date, end_dat
     metrics = {
         "sample_rows": len(examples), "evaluable_dates": len({item["signal_date"] for item in examples}),
         "symbols": len(grouped), "walk_forward": walk_forward, "split_contract": split_contract,
+        # How much of the live cross-section is priced on a carried factor
+        # tonight; visible in the persisted run rather than only in each row.
+        "carried_forward_factor_symbols": sum(
+            1 for bars in grouped.values() if bars and bars[-1].get("adj_factor_carried")),
         "pattern_summary": pattern_summary(splits["train"], evaluation_model),
         "promotion_gate": {"status": "eligible_for_manual_review" if promotion_ready else "shadow_only",
                            "checks": gate_checks,
@@ -409,7 +451,11 @@ def run_watchlist_main_wave_research(connection: Any, end_date: date | None = No
                 "metrics": {"reason": "watchlist_has_no_daily_bars"}, "parameters": {}, "equity_curve": [], "trades": []}
     start_date = selected_end - timedelta(days=365)
     rows = connection.execute(
-        """SELECT b.symbol,i.name,b.trading_date,b.open,b.high,b.low,b.close,b.volume,b.amount,b.adj_factor,
+        # pre_close is the carry-forward rule's only corporate-action
+        # evidence (app/research_prices.resolve_factors); without it a window
+        # with a trailing factor gap can only fail closed.
+        """SELECT b.symbol,i.name,b.trading_date,b.open,b.high,b.low,b.close,b.pre_close,
+                  b.volume,b.amount,b.adj_factor,
                   b.is_suspended,b.limit_up,b.limit_down
              FROM quant.canonical_bars_daily b
              JOIN quant.intraday_watchlists w ON w.symbol=b.symbol AND w.enabled

@@ -106,6 +106,68 @@ class ResolveFactorsTests(unittest.TestCase):
         self.assertEqual(resolution.factors, ())
         self.assertEqual(resolution.flags, ())
 
+    def test_the_carried_positions_are_reported_for_an_ascending_window(self):
+        resolution = resolve_factors(bars([1.3, 1.3, None, None]))
+        self.assertEqual(resolution.carried_positions, (2, 3))
+
+
+class DescendingWindowTests(unittest.TestCase):
+    """The rule reads consecutive sessions, so the order is a precondition.
+
+    Every statement inside ``resolve_factors`` -- "the gap is at the end",
+    "this bar's pre_close is the previous bar's close" -- is about
+    chronological neighbours.  A window handed over newest-first used to invert
+    all of them silently: a lagging fetch looked like a *leading* hole and was
+    refused, and the continuity test compared each session against the wrong
+    neighbour.  The precondition is now enforced by sorting, and the answer
+    comes back in the caller's own row order.
+    """
+
+    def test_a_trailing_gap_is_still_trailing_when_the_window_is_newest_first(self):
+        window = list(reversed(bars([1.3, 1.3, None, None])))
+        resolution = resolve_factors(window)
+        self.assertEqual(resolution.flags, (CARRIED_FORWARD_FLAG,))
+        self.assertEqual(resolution.factors, (1.3, 1.3, 1.3, 1.3))
+        self.assertEqual(resolution.carried_sessions, 2)
+        # Newest-first: the carried sessions are the FIRST two rows the caller
+        # passed in, not the last two.
+        self.assertEqual(resolution.carried_positions, (0, 1))
+
+    def test_a_complete_window_keeps_the_callers_row_order(self):
+        resolution = resolve_factors(list(reversed(bars([1.2, 1.2, 1.25]))))
+        self.assertEqual(resolution.factors, (1.25, 1.2, 1.2))
+        self.assertEqual(resolution.flags, ())
+
+    def test_an_ex_rights_signature_is_found_in_a_newest_first_window(self):
+        window = list(reversed(bars([1.4, 1.4, None, None], closes=[10.0, 10.2, 9.2, 9.3],
+                                    pre_closes=[10.0, 10.0, 9.2, 9.2])))
+        resolution = resolve_factors(window)
+        self.assertIsNone(resolution.factors)
+        self.assertEqual(resolution.flags, (CORPORATE_ACTION_UNRESOLVED_FLAG,))
+
+    def test_an_interior_hole_is_still_refused_when_reversed(self):
+        resolution = resolve_factors(list(reversed(bars([1.5, None, 1.5, 1.5]))))
+        self.assertIsNone(resolution.factors)
+        self.assertEqual(resolution.flags, (ADJUSTMENT_MISSING_FLAG,))
+
+    def test_adjusted_bars_marks_the_carried_rows_of_a_reversed_window(self):
+        window = list(reversed(bars([1.2, 1.2, None])))
+        prepared, flags = adjusted_bars(window)
+        self.assertEqual(flags, [CARRIED_FORWARD_FLAG])
+        self.assertTrue(prepared[0]["research_adj_factor_carried"])
+        self.assertNotIn("research_adj_factor_carried", prepared[1])
+        self.assertEqual(carried_forward_sessions(prepared), 1)
+        self.assertEqual([row["research_close"] for row in prepared],
+                         [row["close"] * 1.2 for row in window])
+
+    def test_a_window_without_trading_dates_keeps_the_callers_order(self):
+        window = bars([1.2, 1.2, None])
+        for row in window:
+            row.pop("trading_date")
+        resolution = resolve_factors(window)
+        self.assertEqual(resolution.flags, (CARRIED_FORWARD_FLAG,))
+        self.assertEqual(resolution.carried_positions, (2,))
+
 
 class AdjustedBarsTests(unittest.TestCase):
     def test_carried_rows_are_prepared_on_the_carried_factor_and_marked(self):

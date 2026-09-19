@@ -61,6 +61,35 @@
 满足时返回标记 `adj_factor_carried_forward`，顺延天数经
 `research_adj_factor_carried`（逐行）/ `carried_forward_sessions()` 向上暴露。
 
+**窗口必须按交易日升序**：第 1 条"只在末尾"、第 4 条"与前一交易日 `close` 比"
+说的都是**相邻交易日**，所以时间顺序是这条规则的前置条件，不是调用习惯。
+过去它是一条没写下来的默认，倒序（最新在前）的窗口会把每一句都悄悄读反：
+车道滞后看起来像**开头**的洞而被拒，连续性检查也在和错的邻居比。
+现在 `resolve_factors()` 自己按 `trading_date` 排序（`ascending_order()`），
+并把 `factors` 与新增的 `carried_positions` **按调用方给的行序**返回——
+倒序窗口里被顺延的是**前**几行，调用方不能再假定它们是末尾几行。
+窗口里的行没有可比较的 `trading_date` 时保持调用方顺序（无从排起，凭空造序更糟）。
+
+**这条护栏到底建立在什么之上**（写出来，读的人才好给残余风险定价）：
+
+- **唯一证据就是 `pre_close` 连续性**，没有别的。这条路径上没有分红送转数据源，
+  公司行为只因为"后一天的 `pre_close` 与前一天的 `close` 对不上"而被发现。
+- **longhu 晚上的 `pre_close` 是厂商推导的**，不是交易所字段：
+  `longhuvip_composite` 的 bar 带的是厂商自己的前收。用 2026-09-10 ~ 09-17
+  的公司行为实测，特征出现在 **76 例中的 74 例**——探测器够用，但不是保证。
+- **漏检的公司行为在幅度上有界**（不是"不存在"）：它必须让 `pre_close` 偏离
+  小于 `CORPORATE_ACTION_PRICE_TOLERANCE = 0.01`，即相对幅度小于
+  `CORPORATE_ACTION_PRICE_TOLERANCE / close`。100 元的票是 1 个基点，
+  **2 元以下的票约 1%**——残余误差就住在这里。
+- **五个交易日的上界数的是窗口里的 bar 行**，不是日历日、也不是交易所日历上的
+  session：窗口稀疏（个股停牌、或查询本身漏了行）时顺延的是五**行**，
+  可能横跨更多实际交易日。需要日历含义的调用方必须传稠密窗口。
+- **盘后阶段顺序只保证"先尝试"**：`POST_CLOSE_STAGE_ORDER` 把
+  `adjustment_factors` 排在所有读因子的阶段之前，并由
+  `tests/test_post_close_refresh.py::test_the_factor_fetch_precedes_every_stage_that_reads_a_factor`
+  钉住，但它是**非门控**阶段——抓取失败或被覆盖率拒绝时，末尾的 `NULL`
+  照样留给这条规则去回答。顺序不等于因子已经到手。
+
 **为什么这不是当年那个 `1.0` 占位：**
 
 - `1.0` 占位在**绝对值上就是错的**：它宣称累计因子等于 1，`close * adj_factor`
@@ -81,17 +110,27 @@
 `adj_factor_missing`（完全没有可用基准）与 `corporate_action_unresolved`
 （有除权迹象且无法建模）仍然是硬标记，仍然扣分。
 
-**顺延的上界依赖盘后顺序**：`POST_CLOSE_STAGE_ORDER` 里 `adjustment_factors`
+**顺延的上界只是"先尝试"**：`POST_CLOSE_STAGE_ORDER` 里 `adjustment_factors`
 排在 `close_strategy_decision` / `post_close_strategy` / `watchlist_main_wave` /
 `research_snapshot` **之前**，当晚才有机会先把真因子抓回来；
 由 `tests/test_post_close_refresh.py::test_the_factor_fetch_precedes_every_stage_that_reads_a_factor`
-钉住。
+钉住。但该阶段是非门控的（第 5.1 节），顺序保证的是**尝试次序**，不是因子已到手。
 
 **覆盖范围（有意为之的边界）**：`app/factor_lab.py` 的 `adjusted_price(row)` 是
 逐行接口，一行数据没有相邻交易日的收盘可比，按 `adjusted_value()` 保持严格；
 `app/factor_sql_lab.py` 在 SQL 里用 `WHERE bar.adj_factor>0` 过滤，属于集合式实现，
-本轮未纳入；`app/watchlist_main_wave.py` 的 `normalize_bars()` 对 `NULL` 因子是
-**丢弃该 bar**（365 日回测窗口缩短一两天，不是黑屏），本轮同样未改。
+本轮未纳入。
+
+`app/watchlist_main_wave.py` 的 `normalize_bars()` **已改为走同一条规则**
+（原先逐行丢弃 `NULL` 因子的 bar）：按 symbol 取升序窗口调 `resolve_factors()`，
+可解析（完整，或"有界末尾缺口且无除权迹象"）就保留**全部** bar，被顺延的行带
+`adj_factor_carried`，并经 `build_examples()` 把 `adj_factor_carried_forward`
+写进当前行 payload（`metrics.current_scores[*].quality_flags`），
+整轮再报一个 `metrics.carried_forward_factor_symbols`。
+被规则拒绝的窗口（中间有洞 / 无锚 / 超界 / 有除权迹象）**整只剔除**——
+逐行丢弃会把幸存的行拼成一条"看起来连续"的序列，60 日特征于是悄悄跨过缺失历史，
+那才是真正危险的那一半。因为要读 `pre_close`，
+`run_watchlist_main_wave_research()` 的 bar 查询补上了 `b.pre_close` 列。
 
 ---
 
@@ -611,6 +650,9 @@ python scripts/adjustment-factor-maintenance.py sync \
   `source_status.carried_forward_factor_symbols` 记录有多少只走了顺延
 - `app/effectiveness/execution.py`：`simulated`，回执带
   `adjustment_basis='carried_forward'` 与 `carried_factor_sessions`
+- `app/watchlist_main_wave.py`：末尾 `NULL` 的 bar 不再被丢弃，当前行 payload 带
+  `quality_flags=['adj_factor_carried_forward']`，整轮带
+  `metrics.carried_forward_factor_symbols`
 
 **仍然失败关闭的只有三种**（这才是真正该报警的）：
 
