@@ -348,8 +348,13 @@ def minute_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         time_text = _minute_time(row) or _minute_time(raw)
         values = {key: _number(row.get(key) if row.get(key) is not None else raw.get(key))
                   for key in ("open", "high", "low", "close")}
-        if time_text is None or any(value is None for value in values.values()):
+        if time_text is None or values["close"] is None:
             continue
+        # The licensed Longhu trend feed carries one price per minute (the minute close), no
+        # open/high/low; such a row is kept as a close-only point, never given invented extremes.
+        close_only = any(values[key] is None for key in ("open", "high", "low"))
+        if close_only:
+            values = {"open": None, "high": None, "low": None, "close": values["close"]}
         volume_lot = _number(next((value for value in (raw.get("volume_lot"), row.get("volume_lot"), row.get("volume"))
                                    if value is not None), None))
         amount = _number(row.get("amount") if row.get("amount") is not None else raw.get("amount"))
@@ -359,7 +364,8 @@ def minute_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         vendor_vwap = _number(raw.get("vwap") if raw else row.get("vwap"))
         vwap = vendor_vwap if vendor_vwap else (cumulative_amount / cumulative_shares if cumulative_shares else None)
         out.append({"time": time_text, **values, "volume": volume_lot, "amount": amount,
-                    "vwap": _round(vwap), "is_complete": raw.get("is_complete", row.get("is_complete"))})
+                    "vwap": _round(vwap), "close_only": close_only,
+                    "is_complete": raw.get("is_complete", row.get("is_complete"))})
     out.sort(key=lambda item: item["time"])
     return out
 
@@ -371,6 +377,9 @@ def minute_chart(plan: dict[str, Any], *, day: date, rows: list[dict[str, Any]],
         "basis": "minute", "plan_id": _iso(plan.get("plan_id")), "symbol": plan.get("symbol"),
         "date": day.isoformat(), "source": source if bars else None,
         "rows": bars, "count": len(bars),
+        # ``close_only``: the tape has one price per minute (Longhu trend), drawn as a line, not candles.
+        "bar_type": "close_only" if bars and all(row["close_only"] or row["open"] == row["high"] == row["low"]
+                                                 == row["close"] for row in bars) else "ohlc",
         "reason": None if bars else (reason or "该交易日没有已入库的 longhu 分钟线"),
         "price_basis": {"kind": "raw_unadjusted", "note": "分钟线为当日原始成交价，与日线未复权口径一致"},
         "live_orders": False,

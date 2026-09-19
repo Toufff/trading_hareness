@@ -174,6 +174,7 @@ def test_stored_longhu_minutes_come_back_with_vwap():
     assert ("minutes", "600613.SH", date(2026, 9, 18)) in calls
     assert payload["basis"] == "minute"
     assert payload["count"] == 2 and payload["reason"] is None
+    assert payload["bar_type"] == "ohlc"
     assert payload["rows"][0]["vwap"] == 8.12
     # no vendor VWAP on the second minute: cumulative amount / (lots x 100)
     assert abs(payload["rows"][1]["vwap"] - (1624000.0 + 818000.0) / 300000.0) < 1e-4
@@ -189,12 +190,13 @@ def test_no_minutes_is_an_empty_list_with_the_reason():
 
 def test_the_live_longhu_tape_is_used_only_for_its_own_session():
     async def live(symbol):
+        # the real Longhu trend shape: one close per minute, no open/high/low
         return {"session_date": "2026-09-18", "rows": [
-            {"time": "0930", "open": 8.12, "high": 8.12, "low": 8.12, "close": 8.12, "vwap": 8.12,
-             "volume_lot": 100.0, "amount": 81200.0}]}
+            {"time": "0930", "close": 8.12, "vwap": 8.12, "volume_lot": 100.0, "amount": 81200.0}]}
     client = make_client(live=live)
     same = client.get(f"/api/v1/discipline/plans/{PLAN_ID}/chart?basis=minute&date=2026-09-18").json()
     assert same["source"] == "longhu_intraday_minutes:live" and same["count"] == 1
+    assert same["bar_type"] == "close_only"
     other = client.get(f"/api/v1/discipline/plans/{PLAN_ID}/chart?basis=minute&date=2026-09-17").json()
     assert other["rows"] == [] and "只提供最新交易日 2026-09-18" in other["reason"]
 
