@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Json
 
 from .request_models import TushareFetchRequest, TushareSyncRequest
+from .instrument_lock_retry import execute_instrument_write
 from .user_tracking_research import has_active_user_tracking_tag
 
 #: Model version stamped on every persisted factor snapshot; bump when the
@@ -90,13 +91,15 @@ async def upsert(symbol: str, payload: Any, deps: IntradayWatchlistDependencies)
             # nothing.  The set-based form is what makes the shared lock
             # order a mechanical property of every writer instead of a
             # judgement call about which ones are "big enough" to need it.
-            connection.execute(
+            execute_instrument_write(
+                connection,
                 """INSERT INTO quant.instruments(symbol,exchange,name,source)
                    SELECT t.symbol,t.exchange,t.name,'intraday_watchlist'
                      FROM unnest(%s::text[],%s::text[],%s::text[]) AS t(symbol,exchange,name)
                     ORDER BY 1
                    ON CONFLICT(symbol) DO NOTHING""",
                 ([symbol], [deps.exchange_for(symbol)], [payload.label]),
+                writer="intraday_watchlist_service.upsert",
             )
             return connection.execute(
                 """INSERT INTO quant.intraday_watchlists(symbol,label,enabled,alert_on_entry,alert_on_exit,entry_price,available_quantity,hard_stop,take_profit,metadata)

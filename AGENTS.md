@@ -43,10 +43,31 @@ provider response directly to a live threshold or order path.
   of which would otherwise hide from the search. Do not answer that failure by
   listing the writer somewhere.
 
+  **And every such statement is executed through
+  `app/instrument_lock_retry.execute_instrument_write`**, never by a bare
+  `connection.execute`/`cursor.execute` — the same guard test enforces it for
+  literals and for SQL constants, across modules. The helper runs the
+  statement under a savepoint with `SET LOCAL lock_timeout` (300 ms,
+  `QUANT_INSTRUMENT_LOCK_TIMEOUT_MS`, forced below the server's
+  `deadlock_timeout`), rolls back to the savepoint and retries with jittered
+  backoff on `55P03`/`40P01` only (at most 60 attempts / 60 s,
+  `QUANT_INSTRUMENT_LOCK_MAX_ATTEMPTS` / `QUANT_INSTRUMENT_LOCK_BUDGET_SECONDS`),
+  restores the caller's previous `lock_timeout`, and raises
+  `InstrumentLockRetryExhausted` when the budget runs out. Sorting binds only
+  writers that sort; the peer's per-row registration does not, and against it
+  (owner sorted, peer old) the 2026-09-19 simulation measured the owner close
+  failing 19/30 rounds. The retry keeps the owner's lock waits below
+  `deadlock_timeout`, so PostgreSQL never picks the owner as the deadlock
+  victim, and its savepoint rollback releases the locks that close the cycle.
+  Retries and exhaustion are logged on `app.instrument_lock_retry` with the
+  writer name and the sessions holding write locks on the table.
+
   `ORDER BY 1` is the shared ascending lock order, and it is a correctness
   property, not a tidy-output habit: `ON CONFLICT DO UPDATE` row-locks every
   **existing** conflicting row (the whole cross-section on any run after the
-  first) while `DO NOTHING` locks only the rows it genuinely inserts, so two
+  first) while `DO NOTHING` locks only the rows it genuinely inserts — but
+  `DO NOTHING` still *waits* for any open transaction that inserted or
+  UPDATEd (including via `DO UPDATE`) a conflicting row, so two
   transactions touching an overlapping symbol set in different orders
   deadlock — three times in the owner PostgreSQL log on 2026-09-18. The sort
   belongs in the SQL even when the array was already sorted in Python: the
@@ -268,7 +289,8 @@ this file and `docs/ARCHITECTURE.md` in the same change:
   `.py` in the repository outside tests and vendored trees and requires each
   write to `quant.instruments` to live in `app/instrument_registry.py` or
   carry `ORDER BY 1` before its `ON CONFLICT` clause, to sit outside any
-  loop, and to spell its table name literally. It reads the parsed source:
+  loop, to spell its table name literally, and to be executed only through
+  `instrument_lock_retry.execute_instrument_write` (the registry included). It reads the parsed source:
   the match ignores case, whitespace and identifier quoting, ends with its
   own literal, and an unparseable file is named as such. No allow-list: a new
   writer fails here until it takes the shared ascending lock order.

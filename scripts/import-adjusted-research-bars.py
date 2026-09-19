@@ -12,6 +12,7 @@ import math
 import os
 import re
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,14 @@ from typing import Any
 import pandas as pd
 import psycopg
 from psycopg.rows import dict_row
+
+# ``quant-service`` on sys.path for the shared ``quant.instruments`` write
+# primitive (stdlib + psycopg only, so this pulls in nothing else).
+_QUANT_SERVICE_ROOT = Path(__file__).resolve().parents[1] / "quant-service"
+if str(_QUANT_SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_QUANT_SERVICE_ROOT))
+
+from app.instrument_lock_retry import execute_instrument_write  # noqa: E402
 
 
 MAINBOARD = re.compile(r"^(sh(?:600|601|603|605)|sz(?:000|001|002|003))\d{3}$")
@@ -113,13 +122,13 @@ def import_bars(source: Path, platform_root: Path) -> dict[str, Any]:
             # HashAggregate under DISTINCT emits, so a research-bar import
             # that introduces new symbols alongside a live ingestion
             # transaction can take the same new rows in the opposite order.
-            cursor.execute("""
+            execute_instrument_write(cursor, """
                 INSERT INTO quant.instruments(symbol,exchange,source)
                 SELECT DISTINCT symbol,split_part(symbol,'.',2),'stock_brain_tencent_qfq'
                   FROM adjusted_bar_stage
                  ORDER BY 1
                 ON CONFLICT(symbol) DO NOTHING
-            """)
+            """, writer="scripts.import-adjusted-research-bars")
             cursor.execute("""
                 INSERT INTO quant.research_adjusted_bars_daily(
                     symbol,trading_date,open,high,low,close,volume,pct_change,

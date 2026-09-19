@@ -29,6 +29,7 @@ from decimal import Decimal
 from typing import Any, Sequence
 
 from .analysis import as_utc
+from .instrument_lock_retry import execute_instrument_write
 from .daily_bar_repository import (
     TUSHARE_DAILY_AMOUNT_RATIO_MAX,
     TUSHARE_DAILY_AMOUNT_RATIO_MIN,
@@ -113,13 +114,15 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
         inst_industries.append(entry["industry"] if entry["industry"] is not None else (old["industry"] if old else None))
         inst_is_st.append(entry["is_st"] if entry["is_st"] is not None else (old["is_st"] if old else False))
         inst_sources.append(entry["source"])
-    connection.execute(
+    execute_instrument_write(
+        connection,
         """INSERT INTO quant.instruments(symbol,exchange,name,industry,is_st,source)
            SELECT * FROM unnest(%s::text[],%s::text[],%s::text[],%s::text[],%s::boolean[],%s::text[])
            ORDER BY 1
            ON CONFLICT(symbol) DO UPDATE SET exchange=EXCLUDED.exchange,name=EXCLUDED.name,
              industry=EXCLUDED.industry,is_st=EXCLUDED.is_st,source=EXCLUDED.source,updated_at=now()""",
         (inst_symbols, inst_exchanges, inst_names, inst_industries, inst_is_st, inst_sources),
+        writer="daily_bar_batch_repository.upsert_daily_bars",
     )
 
     # --- per-bar computed fields shared by market_bars_daily/canonical/raw evidence ---

@@ -93,6 +93,7 @@ from .research_maintenance_service import (
     update_universe_members as update_universe_members_isolated,
 )
 from .instrument_registry import ensure_instruments, named_instrument_rows
+from .instrument_lock_retry import execute_instrument_write
 from .intraday_watchlist_service import (
     IntradayWatchlistDependencies,
     WatchlistHistoryHydrationDependencies,
@@ -1653,13 +1654,15 @@ def persist_eastmoney_sector_members(connection: Any, taxonomy_key: str, sector_
         )
         if not prepared:
             return
-        connection.execute(
+        execute_instrument_write(
+            connection,
             "INSERT INTO quant.instruments(symbol,exchange,name,source) "
             "SELECT t.symbol,t.exchange,t.name,'akshare' "
             "FROM unnest(%s::text[],%s::text[],%s::text[]) AS t(symbol,exchange,name) "
             "ORDER BY 1 "
             "ON CONFLICT(symbol) DO UPDATE SET name=coalesce(EXCLUDED.name,quant.instruments.name),updated_at=now()",
             ([row[0] for row in prepared], [row[1] for row in prepared], [row[2] for row in prepared]),
+            writer="main.persist_eastmoney_sector_members",
         )
 
     return persist_observed_sector_snapshot(

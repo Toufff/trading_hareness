@@ -4,11 +4,21 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import os
+from pathlib import Path
+import sys
 from typing import Any, Iterator, Mapping, Sequence
 from uuid import UUID
 
 import psycopg
 from psycopg.types.json import Jsonb
+
+# Same bootstrap as ``legacy_stock_brain_contracts``: ``quant-service`` on
+# sys.path for the shared ``quant.instruments`` write primitive.
+_QUANT_SERVICE_ROOT = Path(__file__).resolve().parents[3] / "quant-service"
+if str(_QUANT_SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_QUANT_SERVICE_ROOT))
+
+from app.instrument_lock_retry import execute_instrument_write  # noqa: E402
 
 
 class LegacyStockBrainRepository:
@@ -156,13 +166,14 @@ class LegacyStockBrainRepository:
         # the strong ``DO UPDATE`` class, so it row-locks every existing
         # conflicting row -- the whole staged cross-section on any import
         # after the first -- in whatever order the stage table is scanned.
-        cursor.execute("""INSERT INTO quant.instruments(symbol,exchange,name,source)
+        execute_instrument_write(cursor, """INSERT INTO quant.instruments(symbol,exchange,name,source)
             SELECT symbol,exchange,name,source FROM stock_brain_instrument_stage
             ORDER BY 1
             ON CONFLICT(symbol) DO UPDATE SET
                 exchange=CASE WHEN quant.instruments.exchange IN ('','UNKNOWN')
                               THEN excluded.exchange ELSE quant.instruments.exchange END,
-                name=coalesce(NULLIF(quant.instruments.name,''),excluded.name),updated_at=now()""")
+                name=coalesce(NULLIF(quant.instruments.name,''),excluded.name),updated_at=now()""",
+            writer="scripts.legacy_stock_brain_repository.upsert_instruments")
 
     @staticmethod
     def upsert_money_flows(cursor: psycopg.Cursor, rows: Sequence[Mapping[str, Any]]) -> None:

@@ -17,6 +17,7 @@ from typing import Any, Iterable
 from psycopg.types.json import Json
 
 from .analysis import as_utc
+from .instrument_lock_retry import execute_instrument_write
 from .request_models import DailyBar
 
 
@@ -243,7 +244,8 @@ def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
     # the array element supplies ``EXCLUDED.is_st`` while the scalar keeps
     # the "provider said nothing, leave the stored flag alone" distinction,
     # which ``coalesce(...,false)`` erases before ``EXCLUDED`` can see it.
-    connection.execute(
+    execute_instrument_write(
+        connection,
         """INSERT INTO quant.instruments(symbol,exchange,name,industry,is_st,source)
            SELECT t.symbol,t.exchange,t.name,t.industry,coalesce(t.is_st,false),t.source
              FROM unnest(%s::text[],%s::text[],%s::text[],%s::text[],%s::boolean[],%s::text[])
@@ -256,6 +258,7 @@ def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
               source=EXCLUDED.source, updated_at=now()""",
         ([bar.symbol], [exchange_for(bar.symbol)], [bar.name], [bar.industry], [bar.is_st], [bar.source],
          bar.is_st),
+        writer="daily_bar_repository.upsert_daily_bar",
     )
     connection.execute(
         """INSERT INTO quant.market_bars_daily(symbol,trading_date,open,high,low,close,pre_close,volume,amount,adj_factor,is_suspended,limit_up,limit_down,source,available_at)

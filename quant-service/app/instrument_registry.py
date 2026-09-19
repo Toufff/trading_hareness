@@ -27,13 +27,28 @@ Both are addressed by the two properties this module owns:
    actually locks, because the two are not equivalent:
 
    * ``ON CONFLICT DO NOTHING`` (this statement) takes a row-level lock only
-     on the rows it genuinely *inserts*.  An already-committed conflicting
-     row is not locked at all; the one thing it can wait on is the
-     *speculative insertion token* of a concurrent transaction inserting the
-     same new key.  So its deadlock exposure is limited to two writers
-     introducing overlapping **new** symbols in opposite orders -- which is
-     exactly the 2026-09-18 pattern (a trading day's first sight of a batch
-     of new listings), but nothing more.
+     on the rows it genuinely *inserts*, but that does NOT mean it can only
+     wait on a concurrent insert of a new key.  While it checks the unique
+     index it has to know whether the conflicting row is live, so it waits
+     for the transaction that last *wrote* that row to finish.  It therefore
+     blocks on
+
+     - the speculative-insertion token of a concurrent transaction inserting
+       the same new key, and
+     - an EXISTING row that another still-open transaction has UPDATEd --
+       including through ``INSERT ... ON CONFLICT DO UPDATE``, i.e. every
+       ``DO UPDATE`` writer below and ``upsert_daily_bar`` -- where the wait
+       is on that transaction's xid ("waits for ShareLock on transaction
+       ... while inserting index tuple ... in relation instruments", the
+       wording of all four 2026-09-18 reports).
+
+     It does not block on a plain ``SELECT``, ``SELECT ... FOR UPDATE`` /
+     ``FOR KEY SHARE`` (a lock-only xmax) or another ``DO NOTHING`` that hit
+     the same existing row: verified with two sessions on PostgreSQL 16.15
+     against the production schema (the 2026-09-19 ``mech_check`` probe).
+     So a ``DO NOTHING`` writer's deadlock exposure is any overlap with a
+     concurrent writer that inserted OR updated one of its symbols, not only
+     a batch of new listings.
    * ``ON CONFLICT DO UPDATE`` (``daily_bar_batch_repository``,
      ``daily_bar_repository`` and the other name/industry writers)
      additionally row-locks **every existing conflicting row**, i.e. the
@@ -51,6 +66,16 @@ Both are addressed by the two properties this module owns:
    cosmetic detail, and must not be "optimized away" by preserving caller
    order.
 
+Sorting is only half of the protection, because it binds only writers
+that sort.  A writer outside this repository (the peer's per-row
+registration in payload order) can still close a cycle with any sorted
+writer, so every statement that writes this table is also executed through
+``instrument_lock_retry.execute_instrument_write``: a savepoint with a
+``lock_timeout`` below ``deadlock_timeout`` and a bounded, jittered retry,
+which keeps the owner from ever being the deadlock victim and releases its
+locks so the cycle breaks.  The same repository-wide guard test enforces
+that no writer executes its statement any other way.
+
 The helper is deliberately not a repository method and not part of
 ``main.py``: it is the shared write primitive for *bare symbol
 registration*, called by ingestion repositories, services and runtime
@@ -63,7 +88,8 @@ Writers that carry more than that (industry, list/delist dates, ST flag)
 still own their SQL, but they are no longer free-form: every
 ``quant.instruments`` writer under ``quant-service/app`` and ``scripts``
 either lives in this module or sorts its rows in the statement itself with
-``ORDER BY 1`` ahead of its ``ON CONFLICT`` clause, and
+``ORDER BY 1`` ahead of its ``ON CONFLICT`` clause and runs it through
+``execute_instrument_write``, and
 ``tests/test_instrument_writer_lock_order.py`` walks the repository and
 fails on the first exception.  That test, not a list in a document, is what
 keeps the property true.
@@ -74,6 +100,7 @@ from __future__ import annotations
 from typing import Any, Callable, Iterable
 
 from .daily_bar_repository import exchange_for as default_exchange_for
+from .instrument_lock_retry import execute_instrument_write
 
 #: Symbols per statement.  A whole A-share cross-section (~5,500) still fits in
 #: one round trip, while a historical backfill that hands over a much larger
@@ -207,9 +234,10 @@ def ensure_instruments(
     size = max(1, int(chunk_size))
     for start in range(0, len(pairs), size):
         chunk = pairs[start:start + size]
-        connection.execute(
-            ENSURE_INSTRUMENTS_SQL,
+        execute_instrument_write(
+            connection, ENSURE_INSTRUMENTS_SQL,
             (source, [symbol for symbol, _exchange in chunk], [exchange for _symbol, exchange in chunk]),
+            writer=f"instrument_registry.ensure_instruments:{source}",
         )
     return pairs
 
@@ -270,9 +298,10 @@ def ensure_named_instruments(
     size = max(1, int(chunk_size))
     for start in range(0, len(prepared), size):
         chunk = prepared[start:start + size]
-        connection.execute(
-            NAMED_INSTRUMENTS_SQL,
+        execute_instrument_write(
+            connection, NAMED_INSTRUMENTS_SQL,
             (source, [row[0] for row in chunk], [row[1] for row in chunk], [row[2] for row in chunk]),
+            writer=f"instrument_registry.ensure_named_instruments:{source}",
         )
     return prepared
 

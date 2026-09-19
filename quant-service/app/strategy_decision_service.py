@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Json
 
 from .request_models import IntradaySectorReportRequest
+from .instrument_lock_retry import execute_instrument_write
 
 
 async def run(
@@ -104,7 +105,8 @@ async def run(
             for candidate in candidates:
                 candidate_names.setdefault(candidate["symbol"], candidate.get("name"))
             ordered_candidates = sorted(candidate_names)
-            connection.execute(
+            execute_instrument_write(
+                connection,
                 """INSERT INTO quant.instruments(symbol,exchange,name,source)
                    SELECT t.symbol,t.exchange,t.name,'strategy_decision'
                      FROM unnest(%s::text[],%s::text[],%s::text[]) AS t(symbol,exchange,name)
@@ -112,6 +114,7 @@ async def run(
                    ON CONFLICT(symbol) DO NOTHING""",
                 (ordered_candidates, [exchange_for(symbol) for symbol in ordered_candidates],
                  [candidate_names[symbol] for symbol in ordered_candidates]),
+                writer="strategy_decision_service.candidate_instruments",
             )
             for rank, candidate in enumerate(candidates, start=1):
                 flags = list(candidate["risk_flags"])
