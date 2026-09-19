@@ -83,6 +83,70 @@ function Read-RequestedEquityStatus {
     return ($json | ConvertFrom-Json)
 }
 
+function Invoke-AdjustmentFactorLane {
+    # The adjustment-factor lane is the one stage a same-date skip would
+    # otherwise never reach. The skip returns before the market refresh, and
+    # that refresh is the only caller of the non-gating `adjustment_factors`
+    # post-close stage (app/post_close_refresh_service.py). So a session whose
+    # ingestion and publication both landed on the first attempt -- the good
+    # case -- kept its adj_factor NULL until the 04:30 maintenance task, and
+    # every cross-session research window in between was answered by the
+    # carry-forward rule instead of by a real factor.
+    #
+    # There is no HTTP entry point for that stage alone: app/main.py exposes
+    # sync_adjustment_factors_post_close() only inside
+    # POST /api/v1/market/post-close/refresh, which this branch deliberately
+    # does not call. The real entry point is therefore the same CLI the 04:30
+    # task uses, run with this repository's venv python.
+    #
+    # It is non-gating here exactly as it is inside the refresh: every failure
+    # is caught and recorded as the lane's own receipt. Nothing it returns can
+    # change the skip decision.
+    $saved = @{}
+    try {
+        $python = Join-Path $root '.venv\Scripts\python.exe'
+        $worker = Join-Path $root 'scripts\adjustment-factor-maintenance.py'
+        foreach ($path in @($python, $worker, $RuntimeEnv)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing $path" }
+        }
+        # tushare is reached directly; an inherited desktop proxy turns a
+        # working route into a "provider refused" that would be recorded as a
+        # real lane failure (same reason as run-adjustment-factor-maintenance.ps1).
+        foreach ($name in @('http_proxy','https_proxy','HTTP_PROXY','HTTPS_PROXY','all_proxy','ALL_PROXY')) {
+            $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        }
+        # The lane resolves its work list from china_today(), so a one-day
+        # window only contains the session that just closed. An operator
+        # backfilling an older -TradeDate needs the window to actually reach
+        # that date; it is still bounded by the lane's own post-close window.
+        $age = [int]($now.Date - [datetime]::ParseExact($today,'yyyy-MM-dd',$null)).TotalDays
+        $lookback = [Math]::Min(14, [Math]::Max(1, $age + 1))
+        $output = & $python $worker sync --lookback-days $lookback --env-file $RuntimeEnv 2>&1
+        $exitCode = $LASTEXITCODE
+        $lastLine = [string]($output | Select-Object -Last 1)
+        if ($exitCode -ne 0) { throw "adjustment factor lane exited ${exitCode}: $lastLine" }
+        $lane = $lastLine | ConvertFrom-Json
+        $pendingValue = Get-ContractValue $lane 'pending_dates'
+        $pending = if ($null -eq $pendingValue) { @() } else { @($pendingValue) }
+        $fetched = [int](Get-ContractValue $lane 'completed_dates')
+        $skipped = [int](Get-ContractValue $lane 'skipped_dates')
+        $reason = if ($pending.Count -eq 0) {
+            'no settled date in the lookback window is missing a real cumulative factor'
+        } else {
+            "pending dates: $($pending -join ', ')"
+        }
+        return @{ status = [string]$lane.status; fetched = $fetched; skipped = $skipped;
+                  lookback_days = $lookback; reason = $reason }
+    } catch {
+        # A factor route that is down is a condition for the 04:30 backlog
+        # owner, never a reason to re-run a verified session.
+        return @{ status = 'error'; fetched = 0; skipped = 0; reason = $_.Exception.Message }
+    } finally {
+        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+    }
+}
+
 function Start-IndependentGovernance {
     # Governance is a bounded, independent sidecar AFTER publication. Never let
     # model availability, quota or governance errors invalidate market reports.
@@ -156,7 +220,11 @@ if (-not $Force -and (Test-EquityDateReady $health $today) -and $laneState -and
     # (observed 2026-09-17 and 2026-09-18).
     & (Join-Path $root '.venv\Scripts\python.exe') (Join-Path $root 'scripts\verify-short-term-lanes.py') --date $today --base-url $ApiBase --report-dir $reportDir --reports-only
     if ($LASTEXITCODE -eq 0) {
-        return Write-PipelineRecord -Record @{ status = 'skipped'; reason = 'same-date market, strategies and all report files verified'; trade_date = $landed }
+        # Run the non-gating factor lane BEFORE recording the skip: this branch
+        # is the only path that never reaches the post-close refresh, and its
+        # verdict must not be able to change the skip decision.
+        $factorLane = Invoke-AdjustmentFactorLane
+        return Write-PipelineRecord -Record @{ status = 'skipped'; reason = 'same-date market, strategies and all report files verified'; trade_date = $landed; factor_lane = $factorLane }
     }
 }
 

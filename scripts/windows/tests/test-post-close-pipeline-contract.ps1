@@ -91,6 +91,35 @@ if (([regex]::Matches($block, '策略治理侧车，不是公司研究')).Count 
 }
 if ($block -match "\`$record\['status'\]") { throw 'The governance sidecar must never reclassify the scan' }
 
+# --- the same-date skip still runs the non-gating factor lane -------------
+# The skip returns before the market refresh, and that refresh is the only
+# caller of the non-gating `adjustment_factors` post-close stage. Without this
+# the good case -- ingestion and publication both landing on the first attempt
+# -- left adj_factor NULL until the 04:30 maintenance task.
+if ($source -notmatch 'function Invoke-AdjustmentFactorLane \{') { throw 'The factor lane helper is missing' }
+$lane = ($source -split 'function Invoke-AdjustmentFactorLane \{', 2)[1]
+$lane = ($lane -split "`nfunction ", 2)[0]
+if ($lane -notmatch 'adjustment-factor-maintenance\.py') { throw 'The lane must call the real maintenance entry point' }
+if ($lane -notmatch "\`$worker sync --lookback-days \`$lookback") { throw 'The lane must invoke the bounded sync subcommand' }
+if ($lane -notmatch '--env-file \$RuntimeEnv') { throw 'The lane must hand the env file over by path, never a credential value' }
+if ($lane -notmatch "return @\{ status = 'error'") { throw 'A lane failure must be caught and reported, never thrown' }
+foreach ($field in @('status','fetched','skipped','reason')) {
+    if ($lane -notmatch "(?m)^\s*.*\b$field\s*=") { throw "The lane receipt must carry '$field'" }
+}
+if ($lane -match "\`$record\[") { throw 'The lane must never touch the pipeline record directly' }
+
+$skipBranch = ($source -split "same-date market, strategies and all report files verified", 2)[0]
+$skipBranch = ($skipBranch -split 'verify-short-term-lanes\.py', 3)[1]
+if ($skipBranch -notmatch '\$factorLane = Invoke-AdjustmentFactorLane') {
+    throw 'The same-date skip must invoke the factor lane before it records the skip'
+}
+if ($source -notmatch "reason = 'same-date market, strategies and all report files verified'; trade_date = \`$landed; factor_lane = \`$factorLane") {
+    throw 'The skipped record must carry the factor lane receipt'
+}
+if ($source -match "if \(\`$factorLane" -or $source -match "\`$factorLane\.status -ne") {
+    throw 'The skip decision must never read the factor lane verdict'
+}
+
 $liveSource = [IO.File]::ReadAllText($live, [Text.Encoding]::UTF8)
 if ($liveSource -match "\`$terminal\.status -eq 'completed'") { throw 'Publication acceptance still uses a raw completed equality' }
 if ($liveSource -notmatch 'Test-PostClosePipelineCompleted \$terminal\.status') { throw 'Publication acceptance must accept completed_research_due' }

@@ -536,6 +536,37 @@ SELECT count(*)::bigint AS identity_leaks
 理由：复权因子是另一条 provider 路线，它的可用性绝不能拖慢或拖垮晚间收盘流水线；
 但"今晚就补一次"能让绝大多数交易日在当晚就拿到真因子。
 
+### 5.1b 同日重试的 `skipped` 分支也必须跑这条车道
+
+`scripts/windows/run-post-close-pipeline.ps1` 在"当日行情、策略与全部报告文件都已核对"
+时直接 `return` 一条 `status='skipped'` 的记录。这条分支**在市场刷新之前就返回**，
+而 5.1 那个非门控阶段的**唯一**调用方就是市场刷新
+（`POST /api/v1/market/post-close/refresh` → `post_close_refresh_service`）。
+结果是最顺利的那种晚上——入库与发布第一次就成功——反而**整晚碰不到因子车道**，
+`adj_factor` 要等到次日 04:30 的维护任务才被补上，中间所有跨日研究窗口都只能靠
+第 1.1 节的顺延来回答。
+
+现在该分支在写 `skipped` 记录**之前**先调 `Invoke-AdjustmentFactorLane`：
+
+- 入口是**真实的那一个**：`app/main.py` 只在 post-close refresh 内部暴露
+  `sync_adjustment_factors_post_close()`，没有单独的 HTTP 端点，所以这里用
+  04:30 任务用的同一个 CLI（本仓库 venv 的 python 调
+  `scripts/adjustment-factor-maintenance.py sync --lookback-days N --env-file <path>`）。
+  runtime.env 仍然只以**路径**交给 Python，PowerShell 侧不读出任何凭据值。
+- 调用前清掉继承来的 `http_proxy`/`https_proxy`/`all_proxy`（理由同 5.2），
+  退出后在 `finally` 里原样还原。
+- 窗口默认 1 天（刚收盘的那个交易日）；用 `-TradeDate` 回补更早日期时按
+  `今天 - 交易日 + 1` 放宽，上限 14 天，因为车道的工作清单是从 `china_today()`
+  往回算的，1 天的窗口根本不包含那个日期。
+- **它绝不改变 skip 判定**：整个函数包在 `try/catch` 里，任何失败都归为
+  `factor_lane.status='error'` 并带上原因，记录进同一条 `skipped` 记录的
+  `factor_lane`（`status` / `fetched` / `skipped` / `lookback_days` / `reason`）。
+  一条挂掉的 provider 路线是 04:30 那个欠账负责人的事，绝不是重跑一个已核对完毕
+  的交易日的理由。
+- 契约测试：`scripts/windows/tests/test-post-close-pipeline-contract.ps1`
+  （纯静态：断言该分支在写 `skipped` 记录前调用车道、车道调的是真实入口、
+  失败被 `catch` 成回执而不是抛出、且 skip 判定从不读车道结论）。
+
 ### 5.2 计划任务 `trading-hareness-adjustment-factors`（每天 04:30）
 
 ```
