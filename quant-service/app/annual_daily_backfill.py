@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Json, Jsonb
 
 from .database import Database
+from .instrument_lock_retry import execute_instrument_write
 from .daily_bar_repository import quarantine_tushare_daily_amount_mismatches
 from .runtime_resources import DEFAULT_HOT_DATABASE_SOFT_BYTES, bounded_storage_budget_bytes
 from .sector_flow_repository import rebuild_sector_flow_daily_features
@@ -231,7 +232,8 @@ def _persist_instruments_from_stage(connection: Any, provider_key: str) -> None:
     # and a backfill running next to a live ingestion transaction can take
     # the same new symbols in the opposite order.  It is a correctness
     # property here, not a cosmetic sort of the output.
-    connection.execute(
+    execute_instrument_write(
+        connection,
         """INSERT INTO quant.instruments(symbol,exchange,source)
            SELECT DISTINCT upper(row_data->>'ts_code'),
                   CASE right(upper(row_data->>'ts_code'),2)
@@ -242,6 +244,7 @@ def _persist_instruments_from_stage(connection: Any, provider_key: str) -> None:
             ORDER BY 1
            ON CONFLICT(symbol) DO NOTHING""",
         (provider_key,),
+        writer="annual_daily_backfill.persist_instruments_from_stage",
     )
 
 
@@ -250,7 +253,8 @@ def _persist_daily(connection: Any, provider_key: str, available_at: datetime, i
     if index_mode:
         # ``ORDER BY 1``: same shared ascending lock order as
         # ``_persist_instruments_from_stage`` above.
-        connection.execute(
+        execute_instrument_write(
+            connection,
             """INSERT INTO quant.instruments(symbol,exchange,source)
                SELECT DISTINCT upper(row_data->>'ts_code'),
                       CASE right(upper(row_data->>'ts_code'),2) WHEN 'SH' THEN 'SSE' ELSE 'SZSE' END,%s
@@ -259,6 +263,7 @@ def _persist_daily(connection: Any, provider_key: str, available_at: datetime, i
                 ORDER BY 1
                ON CONFLICT(symbol) DO NOTHING""",
             (provider_key,),
+            writer="annual_daily_backfill.persist_daily_index_instruments",
         )
     else:
         _persist_instruments_from_stage(connection, provider_key)
@@ -526,7 +531,8 @@ def _persist_stock_basic(connection: Any, provider_key: str, available_at: datet
     # order of the stage table is exactly the mistake this file already made
     # once.  ``annual_daily_stage`` is a temp table, so no parallel plan can
     # reorder the feed under the sort.
-    connection.execute(
+    execute_instrument_write(
+        connection,
         """INSERT INTO quant.instruments(symbol,exchange,name,industry,list_date,delist_date,is_st,source)
            SELECT upper(row_data->>'ts_code'),
                   coalesce(nullif(row_data->>'exchange',''),
@@ -546,6 +552,7 @@ def _persist_stock_basic(connection: Any, provider_key: str, available_at: datet
              delist_date=coalesce(EXCLUDED.delist_date,quant.instruments.delist_date),
              is_st=EXCLUDED.is_st,source=EXCLUDED.source,updated_at=now()""",
         (provider_key,),
+        writer="annual_daily_backfill.persist_stock_basic",
     )
     # Keep the three stock_basic list-status cross-sections as immutable
     # evidence.  ``quant.instruments`` is intentionally only the current

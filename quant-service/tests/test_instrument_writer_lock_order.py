@@ -268,9 +268,146 @@ def _interpolated_statement_parts() -> list[tuple[Path, int, str]]:
     )
 
 
+#: The one function every writer statement is executed through.  Sorting is
+#: only a property of writers that sort; the peer's old per-row registration
+#: does not, and against it the owner needs a lock wait that stays below
+#: ``deadlock_timeout`` and a savepoint to roll back to (see
+#: ``app/instrument_lock_retry.py``).  So the guard also requires that no
+#: statement found by ``NEEDLE`` is ever handed to a bare ``execute``.
+LOCK_RETRY_HELPER = "execute_instrument_write"
+
+#: What "executed directly" means: psycopg's execution entry points.
+DIRECT_EXECUTION = frozenset({"execute", "executemany", "copy", "stream"})
+
+
+def _call_name(call: ast.Call) -> str | None:
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return None
+
+
+def _helper_query(call: ast.AST | None) -> ast.AST | None:
+    """The ``query`` argument of an ``execute_instrument_write(target, query, ...)`` call."""
+    if not isinstance(call, ast.Call) or _call_name(call) != LOCK_RETRY_HELPER:
+        return None
+    if len(call.args) >= 2:
+        return call.args[1]
+    return next((keyword.value for keyword in call.keywords if keyword.arg == "query"), None)
+
+
+def _parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    return {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+
+def _is_docstring(node: ast.Constant, parents: dict[ast.AST, ast.AST]) -> bool:
+    """Prose about the statement, never executed."""
+    statement = parents.get(node)
+    owner = parents.get(statement) if statement is not None else None
+    return (
+        isinstance(statement, ast.Expr)
+        and isinstance(owner, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        and bool(owner.body) and owner.body[0] is statement
+    )
+
+
+def _referenced_name(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _writer_constants_in(tree: ast.Module) -> dict[str, int]:
+    """Module-level ``NAME = "<instrument writer SQL>"`` bindings -> line."""
+    found: dict[str, int] = {}
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            target, value = statement.targets[0], statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            target, value = statement.target, statement.value
+        else:
+            continue
+        if isinstance(target, ast.Name) and isinstance(value, ast.Constant) \
+                and isinstance(value.value, str) and NEEDLE.search(value.value):
+            found[target.id] = statement.lineno
+    return found
+
+
+def _display(path: Path) -> str:
+    try:
+        return path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _unrouted_writers_in(files: Iterable[tuple[Path, ast.Module]]) -> list[str]:
+    """Every instrument-writer statement not executed through the retry helper.
+
+    Three shapes are accepted and nothing else:
+
+    * the literal IS the ``query`` argument of ``execute_instrument_write``;
+    * the literal is bound to a module-level constant, that constant is the
+      ``query`` argument of ``execute_instrument_write`` somewhere in its own
+      module, and nowhere in the walk -- that module or one importing it --
+      is it handed to a bare ``execute``/``executemany``/``copy``/``stream``;
+    * the literal is a docstring (prose, never executed).
+
+    A literal held in a local variable, a list or a dict, or passed straight
+    to ``execute``, is reported: none of those can be seen to be routed.
+    """
+    files = list(files)
+    offenders: list[str] = []
+    constants: dict[str, str] = {}
+    for path, tree in files:
+        where = _display(path)
+        parents = _parent_map(tree)
+        module_constants = _writer_constants_in(tree)
+        for name, line in module_constants.items():
+            constants[name] = f"{where}:{line}"
+        for node in _string_constants(tree):
+            if not NEEDLE.search(node.value):
+                continue
+            parent = parents.get(node)
+            call = parents.get(parent) if isinstance(parent, ast.keyword) else parent
+            if _helper_query(call) is node or _is_docstring(node, parents):
+                continue
+            if isinstance(parent, (ast.Assign, ast.AnnAssign)) and parent in tree.body:
+                targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+                if len(targets) == 1 and isinstance(targets[0], ast.Name) and targets[0].id in module_constants:
+                    continue
+            offenders.append(f"{where}:{node.lineno}: executed outside {LOCK_RETRY_HELPER}")
+        routed_names = {
+            _referenced_name(_helper_query(call))
+            for call in ast.walk(tree) if isinstance(call, ast.Call)
+        }
+        for name, line in module_constants.items():
+            if name not in routed_names:
+                offenders.append(f"{where}:{line}: {name} is never passed to {LOCK_RETRY_HELPER}")
+    for path, tree in files:
+        where = _display(path)
+        for call in ast.walk(tree):
+            if not isinstance(call, ast.Call) or _call_name(call) not in DIRECT_EXECUTION:
+                continue
+            for argument in [*call.args, *(keyword.value for keyword in call.keywords)]:
+                name = _referenced_name(argument)
+                if name in constants:
+                    offenders.append(
+                        f"{where}:{call.lineno}: {name} ({constants[name]}) passed to "
+                        f".{_call_name(call)}() instead of {LOCK_RETRY_HELPER}"
+                    )
+    return sorted(set(offenders))
+
+
 def _probe(source: str, name: str = "probe.py") -> tuple[Path, ast.Module]:
     """Parse a synthetic module, for the negative controls below."""
     return Path(name), ast.parse(source, filename=name)
+
+
+#: A well-formed writer statement for the routing negative controls.
+STATEMENT_PROBE = "INSERT INTO quant.instruments(symbol) SELECT * FROM unnest(%s::text[]) ORDER BY 1 ON CONFLICT(symbol) DO NOTHING"
 
 
 class InstrumentWriterLockOrderTests(unittest.TestCase):
@@ -586,6 +723,81 @@ class InstrumentWriterLockOrderTests(unittest.TestCase):
         actions = [tail.upper().partition("ON CONFLICT")[2][:40] for tail in statements]
         self.assertEqual(sum("DO NOTHING" in action for action in actions), 1)
         self.assertEqual(sum("DO UPDATE" in action for action in actions), 1)
+
+    def test_every_instrument_writer_runs_through_the_lock_retry_helper(self) -> None:
+        """No exemption, the registry included: its two constants are routed too."""
+        trees, _failures = _parsed()
+        offenders = _unrouted_writers_in(trees)
+        self.assertEqual(offenders, [], "\n".join([
+            "",
+            "These quant.instruments writers execute their statement directly.  Pass it",
+            "to app/instrument_lock_retry.execute_instrument_write(connection, SQL, params,",
+            "writer=...) instead -- the bounded savepoint/lock_timeout retry is what keeps",
+            "the owner from being the victim of a cycle with a per-row writer it does",
+            "not control.  There is no allow-list.",
+            *offenders,
+        ]))
+        registry_tree = dict(trees)[REGISTRY]
+        routed = {
+            _referenced_name(_helper_query(call))
+            for call in ast.walk(registry_tree) if _helper_query(call) is not None
+        }
+        self.assertLessEqual({"ENSURE_INSTRUMENTS_SQL", "NAMED_INSTRUMENTS_SQL"}, routed)
+        # And the walk really found routed writers outside the registry, in
+        # both app/ and scripts/, so a green result is not a vacuous one.
+        routed_files = {
+            path for path, tree in trees
+            if any(isinstance(call, ast.Call) and _helper_query(call) is not None for call in ast.walk(tree))
+        }
+        self.assertIn(REPO_ROOT / "quant-service" / "app" / "tushare_normalization.py", routed_files)
+        self.assertIn(REPO_ROOT / "scripts" / "import-adjusted-research-bars.py", routed_files)
+
+    def test_the_routing_check_rejects_each_way_around_the_helper(self) -> None:
+        statement = STATEMENT_PROBE
+        for label, source in (
+            ("bare connection.execute", f'def f(c):\n    c.execute("{statement}", (x,))\n'),
+            ("cursor.execute", f'def f(cur):\n    cur.execute("{statement}")\n'),
+            ("executemany", f'def f(c):\n    c.executemany("{statement}", rows)\n'),
+            ("local variable",
+             f'def f(c):\n    sql = "{statement}"\n    execute_instrument_write(c, sql, writer="x")\n'),
+            ("literal as a parameter, not the query",
+             f'def f(c):\n    execute_instrument_write(c, other, ("{statement}",), writer="x")\n'),
+            ("constant executed directly", f'SQL = "{statement}"\ndef f(c):\n    c.execute(SQL, (x,))\n'),
+            ("constant never routed", f'SQL = "{statement}"\n'),
+            ("constant routed once, executed directly once",
+             f'SQL = "{statement}"\ndef f(c):\n    execute_instrument_write(c, SQL, writer="x")\n'
+             '    c.execute(SQL)\n'),
+        ):
+            with self.subTest(label):
+                self.assertTrue(_unrouted_writers_in([_probe(source)]), source)
+
+    def test_the_routing_check_accepts_the_routed_shapes(self) -> None:
+        statement = STATEMENT_PROBE
+        for label, source in (
+            ("routed literal",
+             f'def f(c):\n    execute_instrument_write(c, "{statement}", (x,), writer="x")\n'),
+            ("routed literal via module",
+             f'def f(c):\n    m.execute_instrument_write(c, "{statement}", writer="x")\n'),
+            ("routed keyword query",
+             f'def f(c):\n    execute_instrument_write(c, query="{statement}", writer="x")\n'),
+            ("routed constant",
+             f'SQL = "{statement}"\ndef f(c):\n    execute_instrument_write(c, SQL, writer="x")\n'),
+            ("docstring", f'def f(c):\n    """Replaces {statement}."""\n'),
+        ):
+            with self.subTest(label):
+                self.assertEqual(_unrouted_writers_in([_probe(source)]), [], source)
+
+    def test_an_imported_constant_executed_directly_elsewhere_is_caught(self) -> None:
+        """The constant's own module routes it; a second module must not bypass that."""
+        statement = STATEMENT_PROBE
+        owner = _probe(
+            f'SQL = "{statement}"\ndef f(c):\n    execute_instrument_write(c, SQL, writer="x")\n', "owner.py",
+        )
+        importer = _probe("from owner import SQL\ndef g(c):\n    c.execute(SQL, (1,))\n", "importer.py")
+        qualified = _probe("import owner\ndef g(c):\n    c.execute(owner.SQL)\n", "qualified.py")
+        self.assertEqual(_unrouted_writers_in([owner]), [])
+        self.assertTrue(_unrouted_writers_in([owner, importer]))
+        self.assertTrue(_unrouted_writers_in([owner, qualified]))
 
     def test_agents_md_states_the_rule_rather_than_a_roster(self) -> None:
         """The document that used to carry the roster must point at this test.

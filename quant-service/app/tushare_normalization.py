@@ -11,6 +11,7 @@ from psycopg.types.json import Json
 from .daily_bar_batch_repository import upsert_daily_bars
 from .daily_bar_repository import in_instrument_lock_order
 from .instrument_registry import INSTRUMENT_CHUNK_SIZE
+from .instrument_lock_retry import InstrumentLockRetryExhausted, execute_instrument_write
 
 
 #: One statement per ``stock_basic`` chunk, in the shared ascending symbol
@@ -70,11 +71,11 @@ def persist_stock_basic_instruments(
     for start in range(0, len(ordered), size):
         chunk = ordered[start:start + size]
         values = [instruments[symbol] for symbol in chunk]
-        connection.execute(STOCK_BASIC_INSTRUMENTS_SQL, (
+        execute_instrument_write(connection, STOCK_BASIC_INSTRUMENTS_SQL, (
             provider_key, chunk,
             [row[0] for row in values], [row[1] for row in values], [row[2] for row in values],
             [row[3] for row in values], [row[4] for row in values], [row[5] for row in values],
-        ))
+        ), writer=f"tushare_normalization.persist_stock_basic_instruments:{provider_key}")
     return ordered
 
 
@@ -320,6 +321,13 @@ def normalize_rows(
         # fallback, so the two paths agree on the final count.
         try:
             upsert_daily_bars(connection, pending_bars)
+        except InstrumentLockRetryExhausted:
+            # Not a malformed bar: another transaction held overlapping
+            # instrument rows for the whole lock-retry budget.  The per-bar
+            # fallback would only spend that budget again once per bar
+            # (~5,500 times on a full cross-section), so it is not a fallback
+            # for this.  Propagate and let the caller's transaction fail.
+            raise
         except Exception:
             # Degrade to the previous one-statement-set-per-bar path so one
             # bad bar cannot silently drop the rest of a full-market
@@ -345,6 +353,8 @@ def normalize_rows(
             for bar in in_instrument_lock_order(pending_bars):
                 try:
                     upsert_bar(connection, bar)
+                except InstrumentLockRetryExhausted:
+                    raise
                 except Exception as bar_error:
                     normalized -= 1
                     connection.execute(
