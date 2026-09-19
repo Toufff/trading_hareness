@@ -131,6 +131,9 @@ class _Connection:
             self.ledger.clear(params[0])
         if "quant.automation_runs" in text or "data_quality_issues" in text:
             return _Result([])
+        if "factor.adj_factor = bar.adj_factor" in text:
+            # The value-mismatch query: this estate has none.
+            return _Result([])
         return _Result(self.rows)
 
 
@@ -1369,6 +1372,11 @@ class StatusSummaryTests(unittest.TestCase):
             "identity factor leaks 0; no adj_factor fetch run on record; "
             "no post-close factor-stage receipt")
         self.assertNotIn("\n", summary)
+
+    def test_value_mismatches_are_reported_when_the_report_carries_them(self):
+        summary = module.status_summary(self._report(
+            factor_value_mismatches={"canonical_bars_daily": 25145, "market_bars_daily": 0}))
+        self.assertIn("identity factor leaks 0; factor value mismatches 25145;", summary)
 
     def test_a_leak_on_either_guarded_table_is_reported(self):
         summary = module.status_summary(self._report(

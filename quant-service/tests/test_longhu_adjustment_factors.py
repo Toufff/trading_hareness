@@ -255,17 +255,168 @@ class ChainTests(unittest.TestCase):
                                        anchor_date=date(2026, 9, 9), anchor_factor=2.0).held_reason,
                          "anchor_bar_missing")
 
-    def test_a_stored_factor_inside_the_window_wins_and_is_compared(self):
-        bars = [_bar("2026-09-01", 9.0), _bar("2026-09-02", 9.2, 9.0), _bar("2026-09-03", 9.3, 9.2)]
+    def test_a_stored_factor_the_prices_support_wins_and_is_compared(self):
+        # The pre_close says 9.00 -> 8.57 (a 5% action); the flat qfq series
+        # rejected it, tushare has it.  The stored value wins.
+        bars = [_bar("2026-09-01", 9.0), _bar("2026-09-02", 9.2, 8.57), _bar("2026-09-03", 9.3, 9.2)]
+        longhu = {bar.trading_date: LonghuDay(bar.trading_date, bar.close) for bar in bars}
+        stored = {date(2026, 9, 2): Checkpoint(date(2026, 9, 2), 1.05, "tushare_super_sdk",
+                                               value=Decimal("1.050000"))}
+        result = derive_symbol("600000.SH", bars, longhu, anchor_date=date(2026, 9, 1),
+                               anchor_factor=1.0, checkpoints=stored)
+        first, second = result.factors
+        self.assertEqual((first.provider, first.adj_factor), ("tushare_super_sdk", Decimal("1.050000")))
+        self.assertEqual(str(first.adj_factor), "1.050000", "the stored numeric, not a float round trip")
+        self.assertFalse(result.checkpoints_compared[0]["agrees"])
+        self.assertTrue(result.checkpoints_compared[0]["adopted"])
+        # ... and the chain continues from the stored value, never from the guess.
+        self.assertEqual((second.provider, second.adj_factor), (lh.PROVIDER_KEY, Decimal("1.05")))
+
+    def test_without_a_pre_close_there_is_no_verdict_and_the_stored_factor_wins(self):
+        bars = [_bar("2026-09-01", 9.0), _bar("2026-09-02", 9.2), _bar("2026-09-03", 9.3, 9.2)]
         longhu = {bar.trading_date: LonghuDay(bar.trading_date, bar.close) for bar in bars}
         stored = {date(2026, 9, 2): Checkpoint(date(2026, 9, 2), 1.05, "tushare_super_sdk")}
         result = derive_symbol("600000.SH", bars, longhu, anchor_date=date(2026, 9, 1),
                                anchor_factor=1.0, checkpoints=stored)
-        first, second = result.factors
-        self.assertEqual((first.provider, first.adj_factor), ("tushare_super_sdk", Decimal("1.05")))
-        self.assertFalse(result.checkpoints_compared[0]["agrees"])
-        # ... and the chain continues from the stored value, never from the guess.
-        self.assertEqual((second.provider, second.adj_factor), (lh.PROVIDER_KEY, Decimal("1.05")))
+        self.assertEqual(result.factors[0].provider, "tushare_super_sdk")
+
+    def test_300176_a_stored_jump_the_prices_contradict_is_reported_not_written(self):
+        # tushare kept 4.5917 through 09-07 and jumped to 5.0878 on 09-09 with
+        # no price discontinuity (09-08 4.59, 09-09 4.58 on pre_close 4.59):
+        # writing it would put a fake +10.6% into every adjusted window.
+        bars = [_bar("2026-09-07", 4.60, 4.60), _bar("2026-09-08", 4.59, 4.60),
+                _bar("2026-09-09", 4.58, 4.59), _bar("2026-09-10", 4.61, 4.58)]
+        longhu = {bar.trading_date: LonghuDay(bar.trading_date, bar.close) for bar in bars}
+        stored = {date(2026, 9, 9): Checkpoint(date(2026, 9, 9), 5.0878, "tushare_super_sdk"),
+                  date(2026, 9, 10): Checkpoint(date(2026, 9, 10), 5.0878, "tushare_super_sdk")}
+        result = derive_symbol("300176.SZ", bars, longhu, anchor_date=date(2026, 9, 7),
+                               anchor_factor=4.5917, anchor_provider="tushare_super_sdk",
+                               checkpoints=stored)
+        self.assertEqual([(row.provider, row.adj_factor) for row in result.factors],
+                         [(lh.PROVIDER_KEY, Decimal("4.5917"))] * 3)
+        self.assertEqual([item["adopted"] for item in result.checkpoints_compared], [False, False])
+        self.assertTrue(result.checkpoints_compared[0]["price_check"]["stored_contradicts_prices"])
+        self.assertIn("stored_factor_not_adopted", result.factors[1].evidence_row())
+
+
+class LateFetchedVendorBarTests(unittest.TestCase):
+    """Review 2026-09-19: bars backfilled after a later ex-date are forward-adjusted.
+
+    002073.SZ, production: 09-07..09-09 were loaded on 09-10 from the vendor's
+    qfq series, after the 0.02 dividend went ex on 09-09.  Stored: 09-04 5.85
+    (fetched that evening), 09-07 5.83/5.83, 09-08 5.86/5.83, 09-09 5.84/5.86.
+    tushare: one step on 09-09 (5.88/5.86).  Before the fix the derivation took
+    a false pre_close step on 09-07 AND the CQ step on 09-09.
+    """
+
+    LATE = date(2026, 9, 10)
+
+    def _bars(self):
+        return [BarPoint(date(2026, 9, 4), 5.85, 5.84, vendor_fetched_on=date(2026, 9, 4)),
+                BarPoint(date(2026, 9, 7), 5.83, 5.83, vendor_fetched_on=self.LATE),
+                BarPoint(date(2026, 9, 8), 5.86, 5.83, vendor_fetched_on=self.LATE),
+                BarPoint(date(2026, 9, 9), 5.84, 5.86, vendor_fetched_on=self.LATE)]
+
+    @staticmethod
+    def _longhu():
+        return {date(2026, 9, 4): LonghuDay(date(2026, 9, 4), 5.83),
+                date(2026, 9, 7): LonghuDay(date(2026, 9, 7), 5.83),
+                date(2026, 9, 8): LonghuDay(date(2026, 9, 8), 5.86),
+                date(2026, 9, 9): LonghuDay(date(2026, 9, 9), 5.84, "0,0,0,0.2")}
+
+    def test_the_forward_adjustment_is_undone_on_close_and_pre_close(self):
+        restored, notes = lh.restore_vendor_bars(self._bars(), self._longhu())
+        self.assertEqual([(bar.close, bar.pre_close) for bar in restored],
+                         [(5.85, 5.84), (5.85, 5.85), (5.88, 5.85), (5.84, 5.86)])
+        self.assertEqual([bar.restored for bar in restored], [False, True, True, False],
+                         "the ex-date bar itself and a same-evening bar are left alone")
+        self.assertTrue(all(note["verified"] for note in notes))
+
+    def test_one_dividend_is_counted_once_on_its_ex_date(self):
+        result = derive_symbol("002073.SZ", self._bars(), self._longhu(),
+                               anchor_date=date(2026, 9, 4), anchor_factor=2.0)
+        actions = [(decision.trading_date, decision.basis) for decision in result.decisions
+                   if decision.is_action]
+        self.assertEqual(actions, [(date(2026, 9, 9), "cq_pre_close")])
+        self.assertEqual(result.factors[-1].adj_factor, lh.factor_value(2.0 * 5.88 / 5.86))
+        self.assertEqual(len(result.restorations), 2)
+
+    def test_a_bar_the_vendor_series_does_not_confirm_is_not_restored(self):
+        # The stored close already equals the raw close today's qfq implies.
+        bars = [BarPoint(date(2026, 9, 7), 5.85, 5.85, vendor_fetched_on=self.LATE)]
+        restored, notes = lh.restore_vendor_bars(bars, self._longhu())
+        self.assertEqual(restored, bars)
+        self.assertFalse(notes[0]["restored"])
+
+    def test_exchange_published_bars_are_never_touched(self):
+        bars = [BarPoint(date(2026, 9, 7), 5.83, 5.83)]
+        self.assertEqual(lh.restore_vendor_bars(bars, self._longhu())[0], bars)
+
+
+class ReviewStepRuleTests(unittest.TestCase):
+    def test_a_flat_qfq_series_confirms_no_record(self):
+        # 002073.SZ 09-09 WITHOUT the restoration: pre_close did not move and
+        # qfq == close on both days (q_step exactly 1).  The old test compared
+        # the CQ step with the rounding bound and "confirmed" it.
+        decision = decide_step(
+            _bar("2026-09-08", 5.86, 5.83), _bar("2026-09-09", 5.84, 5.86),
+            _day("2026-09-08", 5.86), _day("2026-09-09", 5.84, "0,0,0,0.2"))
+        self.assertEqual((decision.step, decision.basis), (1.0, "cq_no_move"))
+
+    def test_a_vendor_pre_close_a_tick_off_the_reference_yields_to_the_cq_reference(self):
+        # 600517.SH 2026-09-17: 4.98 - 0.045 = 4.935 -> vendor 4.93, exchange
+        # 4.94; tushare's step 23.2571/23.0703 = 4.98/4.94.
+        vendor = BarPoint(date(2026, 9, 17), 4.95, 4.93, vendor_fetched_on=date(2026, 9, 17))
+        decision = decide_step(_bar("2026-09-16", 4.98), vendor,
+                               _day("2026-09-16", 4.93), _day("2026-09-17", 4.95, "0,0,0,0.45"))
+        self.assertEqual(decision.basis, "cq_pre_close")
+        self.assertIn("vendor_pre_close_rounding", decision.flags)
+        self.assertAlmostEqual(decision.step, 4.98 / 4.94, places=12)
+        _close_to(self, decision.step, 23.2571 / 23.0703, 1e-4)
+        # The same numbers on an exchange-published bar keep the published price.
+        published = decide_step(_bar("2026-09-16", 4.98), _bar("2026-09-17", 4.95, 4.93),
+                                _day("2026-09-16", 4.93), _day("2026-09-17", 4.95, "0,0,0,0.45"))
+        self.assertAlmostEqual(published.step, 4.98 / 4.93, places=12)
+
+    def test_a_record_after_an_unrecorded_step_of_the_same_size_is_not_counted_again(self):
+        first = lh.StepDecision(date(2026, 9, 7), date(2026, 9, 4), 1.00343, "pre_close_qfq")
+        record = lh.StepDecision(date(2026, 9, 9), date(2026, 9, 8), 1.00342, "cq_qfq",
+                                 ("pre_close_missed_action",))
+        refused = lh._refuse_double_count(record, 3, [(1, first.step)])
+        self.assertEqual((refused.step, refused.basis), (1.0, "cq_already_counted"))
+        self.assertIn("duplicate_of_earlier_step", refused.flags)
+        self.assertIs(lh._refuse_double_count(record, 9, [(1, first.step)]), record,
+                      "too far back to be the same action")
+        other = lh.StepDecision(date(2026, 9, 9), date(2026, 9, 8), 1.02, "cq_qfq")
+        self.assertIs(lh._refuse_double_count(other, 3, [(1, first.step)]), other)
+
+
+class ReviewSqlAndWriterTests(unittest.TestCase):
+    def test_the_anchor_bar_is_read_even_before_the_trade_calendar_starts(self):
+        self.assertIn("bar.trading_date = wanted.start_date OR EXISTS", " ".join(lh.BARS_SQL.split()))
+        self.assertIn("vendor_fetched_on", lh.BARS_SQL)
+
+    def test_a_placeholder_names_the_provider_actually_promoted_onto_its_bar(self):
+        connection = _RecordingConnection()
+        rows = [lh.DerivedFactor("600000.SH", date(2026, 9, 7), Decimal("2.1"), "tushare_super_sdk", "",
+                                 None, {}),
+                lh.DerivedFactor("600001.SH", date(2026, 9, 7), Decimal("3"), lh.PROVIDER_KEY,
+                                 "corporate_action_cumulative", None, {})]
+        persist_factor_date(connection, date(2026, 9, 7), rows,
+                            available_at=datetime(2026, 9, 19, tzinfo=timezone.utc))
+        sql, params = next((sql, params) for sql, params in connection.calls if "'superseded_by'" in sql)
+        self.assertEqual(params["symbols"], ["600000.SH", "600001.SH"])
+        self.assertEqual(params["providers"], ["tushare_super_sdk", lh.PROVIDER_KEY])
+        self.assertEqual(params["not_replaced"], lh.NOT_REPLACED)
+        self.assertNotIn("%(provider)s", sql)
+
+    def test_a_held_bar_is_cleared_unless_an_evidence_row_carries_its_exact_value(self):
+        connection = _RecordingConnection()
+        persist_factor_date(connection, date(2026, 9, 7), [],
+                            available_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
+                            clear_symbols=["600000.SH"])
+        sql = next(sql for sql, _ in connection.calls if "SET adj_factor=NULL" in sql)
+        self.assertIn("factor.adj_factor = bar.adj_factor", sql)
 
 
 def _inputs(**overrides) -> WindowInputs:
@@ -308,6 +459,20 @@ class PlanTests(unittest.TestCase):
                           null_only_dates=[date(2026, 9, 2), date(2026, 9, 3)])
         self.assertEqual(plan.rows[date(2026, 9, 2)], [], "the bar already carries a value")
         self.assertEqual([row.symbol for row in plan.rows[date(2026, 9, 3)]], ["600000.SH"])
+
+    def test_a_symbol_whose_longhu_fetch_failed_is_held_not_derived_from_pre_close_alone(self):
+        plan = build_plan(_inputs(), {}, write_dates=[date(2026, 9, 2), date(2026, 9, 3)],
+                          fetch_errors={"600000.SH": "UpstreamStockApiError: HTTP 503"})
+        self.assertEqual(plan.held["600000.SH"], "longhu_fetch_failed")
+        self.assertEqual(plan.rows[date(2026, 9, 2)], [])
+        self.assertIn("600000.SH", plan.clear[date(2026, 9, 3)])
+
+    def test_a_hole_date_also_replaces_a_value_no_evidence_row_carries(self):
+        longhu = {"600000.SH": {bar.trading_date: LonghuDay(bar.trading_date, bar.close)
+                                for bar in _inputs().bars["600000.SH"]}}
+        plan = build_plan(_inputs(), longhu, write_dates=[], null_only_dates=[date(2026, 9, 2)],
+                          also_replace=[("600000.SH", date(2026, 9, 2))])
+        self.assertEqual([row.adj_factor for row in plan.rows[date(2026, 9, 2)]], [Decimal("2.0")])
 
     def test_the_nightly_lane_keeps_its_earlier_derivation_on_dates_it_is_not_reworking(self):
         stored = {"600000.SH": {date(2026, 9, 2): Checkpoint(
@@ -499,6 +664,16 @@ class RepairTests(unittest.IsolatedAsyncioTestCase):
         report = await maintenance.repair(_Deps(fetch=self._fetch), apply=True, today=date(2026, 9, 19))
         self.assertEqual(self.applied, [date(2026, 9, 2), date(2026, 9, 3)])
         self.assertEqual(report["status"], "completed")
+
+    async def test_a_value_no_evidence_row_carries_after_apply_fails_the_repair(self):
+        # The guard only asks whether evidence EXISTS; a placeholder 1 next to
+        # a real tushare row passes it.  The value check does not.
+        maintenance._repair_readback = lambda _db, _start, _end: {
+            "guard": {"canonical_bars_daily": 0, "market_bars_daily": 0},
+            "value_mismatches": {"canonical_bars_daily": 5144, "market_bars_daily": 0}, "dates": []}
+        report = await maintenance.repair(_Deps(fetch=self._fetch), apply=True, today=date(2026, 9, 19))
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("equals no evidence row", report["reason"])
 
     async def test_a_guard_above_zero_after_apply_fails_the_repair(self):
         maintenance._repair_readback = lambda _db, _start, _end: {

@@ -31,15 +31,25 @@ and from the canonical bar itself:
   ex-rights reference price rounded to a tick.  Either way
   ``previous raw close / pre_close`` is the tushare step on an action day.
 
+Before any step is decided, a vendor bar fetched AFTER a later ex-date (a
+backfill: 2026-09-07..09-09 were loaded on 09-10) has that forward adjustment
+undone on its close and pre_close (:func:`restore_vendor_bars`); otherwise
+the early pre_close move and the real ex-date's record count one dividend
+twice.
+
 Rule (:func:`decide_step`), applied to every consecutive pair of canonical
 bars of one symbol:
 
 1. a CQ record on the later date is an action.  When the bar's pre_close
    moved by at least one tick the step is ``prev_close / pre_close`` (the
    published price wins; a CQ reference more than a tick away is flagged);
+   on a VENDOR bar whose pre_close is within a tick of the CQ reference the
+   reference wins (the vendor rounds a half tick down, the exchange up);
    with no pre_close at all it is ``prev_close / cq_reference``; when the
-   pre_close did NOT move, the CQ step is taken only if the qfq series shows
-   the same resolvable step (``cq_qfq``, a missed signature), else 1;
+   pre_close did NOT move, the CQ step is taken only if the qfq series itself
+   moves resolvably by the same step (``cq_qfq``, a missed signature), else
+   1 -- and never when an unrecorded step of the same size was taken in the
+   previous few bars (:func:`_refuse_double_count`);
 2. no CQ, but ``pre_close`` differs from the previous close by at least one
    tick: a falling step is rejected (corporate actions only raise the
    factor); a rising one is accepted only when the qfq step resolvably
@@ -77,7 +87,7 @@ from .tushare_normalization import (
 #: be the real source).  Defined next to the promotion rule it has to satisfy.
 PROVIDER_KEY = DERIVED_FACTOR_PROVIDER
 SOURCE = "longhuvip:GetKLineDay_W14"
-METHOD_VERSION = "longhu_cq_preclose_qfq_v1"
+METHOD_VERSION = "longhu_cq_preclose_qfq_v2"
 
 #: A-share price tick.
 PRICE_TICK = 0.01
@@ -150,6 +160,15 @@ class BarPoint:
     #: A session the canonical series is missing but the vendor traded,
     #: reconstructed by :func:`fill_bar_gaps`.  Never written anywhere.
     virtual: bool = False
+    #: Vendor (qfq) bars only: the CST date the canonical row was fetched on.
+    #: Its close and pre_close are the vendor's forward-adjusted candles AS OF
+    #: that date, so every corporate action after the bar and up to this date
+    #: is already subtracted from them (:func:`restore_vendor_bars`), and its
+    #: pre_close is the vendor's rounding of the ex-rights price, not the
+    #: exchange's.  ``None`` for exchange-published bars.
+    vendor_fetched_on: date | None = None
+    #: Set by :func:`restore_vendor_bars` when close/pre_close were un-adjusted.
+    restored: bool = False
 
 
 @dataclass(frozen=True)
@@ -321,6 +340,17 @@ def decide_step(
             # the share ratio, or one that lists only the cash half of a
             # bonus+cash action) the pre_close step was tushare's step exactly.
             if reference > 0 and abs(pre_close - reference) <= REFERENCE_AGREEMENT_TICKS:
+                if current.vendor_fetched_on is not None and cq_step is not None:
+                    # A vendor pre_close is NOT the published price: it is the
+                    # vendor's own rounding of the ex-rights price, and it
+                    # rounds a half tick DOWN where the exchange rounds up
+                    # (600517.SH 2026-09-17: 4.98 - 0.045 -> vendor 4.93,
+                    # exchange 4.94, tushare step 4.98/4.94).  Within a tick
+                    # the CQ reference (half-up, the exchange rule) is the
+                    # better price.
+                    if abs(pre_close - reference) > 1e-9:
+                        flags.append("vendor_pre_close_rounding")
+                    return done(cq_step, "cq_pre_close")
                 return done(pc_step, "cq_pre_close")
             flags.append("cq_reference_disagrees")
             return done(pc_step, "pre_close_over_cq")
@@ -335,8 +365,12 @@ def decide_step(
         # A CQ record but the price did NOT move.  On exchange-published bars
         # this is the vendor recording a dividend smaller than the tick (tushare
         # kept its factor); on vendor bars it can be a missed signature.  The
-        # qfq series decides: it must show the same step, resolvably.
-        if (q_step is not None and abs(cq_step - 1.0) > (q_tolerance or 0.0)
+        # qfq series decides: IT must move resolvably (a flat qfq series
+        # "confirms" nothing -- testing the CQ step against the rounding bound
+        # instead let q_step == 1 confirm any dividend under ~0.3%), and by the
+        # same amount.
+        if (q_step is not None and abs(q_step - 1.0) > (q_tolerance or 0.0)
+                and abs(cq_step - 1.0) > (q_tolerance or 0.0)
                 and abs(q_step / cq_step - 1.0) <= (q_tolerance or 0.0) + QFQ_CONFIRM_TOLERANCE):
             flags.append("pre_close_missed_action")
             return done(cq_step, "cq_qfq")
@@ -372,6 +406,74 @@ def decide_step(
 def invert_action(adjusted: float, action: CorporateAction) -> float:
     """Undo one forward (qfq) adjustment: ``raw = qfq * (1 + shares) + cash``."""
     return adjusted * (1.0 + action.shares_per10 / 10.0) + action.cash_per10 / 10.0
+
+
+def restore_vendor_bars(
+    bars: Sequence[BarPoint], longhu: Mapping[date, LonghuDay],
+) -> tuple[list[BarPoint], list[dict[str, Any]]]:
+    """Undo the forward adjustment a LATE-fetched vendor bar carries.
+
+    A vendor bar holds the qfq candle of its date as the vendor served it on
+    ``vendor_fetched_on``: every corporate action dated after the bar and up
+    to that day is already subtracted from its close AND its pre_close.  On a
+    normal evening the two dates are equal and nothing is subtracted.  A bar
+    backfilled later is different -- 2026-09-07..09-09 were loaded on 09-10,
+    so 002073.SZ's 09-07 close and pre_close were 5.83 against a raw 09-04
+    close of 5.85 (its 0.02 dividend went ex on 09-09): a false pre_close
+    signature on 09-07 and, with the real ex-date's CQ, the same dividend
+    counted twice.
+
+    Each such action is inverted (latest first, rounded to the tick) on both
+    prices.  The restoration is taken only when the vendor's CURRENT series
+    agrees: the raw close implied by today's qfq close (every later action
+    undone) must be closer to the restored close than to the stored one.
+    Returns the bars and one note per bar that was examined.
+    """
+    if not longhu:
+        return list(bars), []
+    actions = [(value, parse_corporate_action(longhu[value].cq)) for value in sorted(longhu)]
+    actions = [(value, action) for value, action in actions if action is not None]
+    if not actions:
+        return list(bars), []
+    result: list[BarPoint] = []
+    notes: list[dict[str, Any]] = []
+    for bar in bars:
+        fetched = bar.vendor_fetched_on
+        applied = [] if fetched is None else [
+            (value, action) for value, action in actions if bar.trading_date < value <= fetched]
+        if not applied:
+            result.append(bar)
+            continue
+        close = bar.close
+        for _value, action in reversed(applied):
+            close = invert_action(close, action)
+        close = round_to_tick(close)
+        day = longhu.get(bar.trading_date)
+        implied_raw: float | None = None
+        if day is not None and day.qfq_close:
+            implied_raw = day.qfq_close
+            for _value, action in reversed([item for item in actions if item[0] > bar.trading_date]):
+                implied_raw = invert_action(implied_raw, action)
+        note = {"trading_date": str(bar.trading_date), "fetched_on": str(fetched),
+                "actions": [f"{value}:{action.raw}" for value, action in applied],
+                "stored_close": bar.close, "restored_close": close,
+                "vendor_implied_raw_close": _rounded(implied_raw, 4)}
+        if implied_raw is not None and not abs(close - implied_raw) < abs(bar.close - implied_raw):
+            note["restored"] = False
+            notes.append(note)
+            result.append(bar)
+            continue
+        pre_close = bar.pre_close
+        if pre_close:
+            for _value, action in reversed(applied):
+                pre_close = invert_action(pre_close, action)
+            pre_close = round_to_tick(pre_close)
+        note.update({"restored": True, "verified": implied_raw is not None,
+                     "stored_pre_close": bar.pre_close, "restored_pre_close": pre_close})
+        notes.append(note)
+        result.append(BarPoint(bar.trading_date, close, pre_close, bar.virtual,
+                               bar.vendor_fetched_on, restored=True))
+    return result, notes
 
 
 def fill_bar_gaps(bars: Sequence[BarPoint], longhu: Mapping[date, LonghuDay]) -> list[BarPoint]:
@@ -432,6 +534,13 @@ class Checkpoint:
     adj_factor: float
     provider: str
     factor_semantics: str = ""
+    #: The stored numeric exactly as read, so a promoted checkpoint equals its
+    #: evidence row bit for bit (a float round trip can drop digits).
+    value: Decimal | None = None
+
+    @property
+    def exact(self) -> Decimal:
+        return self.value if self.value is not None else Decimal(str(self.adj_factor))
 
 
 @dataclass(frozen=True)
@@ -459,6 +568,7 @@ class DerivedFactor:
             "flags": [] if decision is None else list(decision.flags),
             "previous_date": None if decision is None else str(decision.previous_date),
             "evidence": {} if decision is None else dict(decision.evidence),
+            **({"stored_factor_not_adopted": dict(self.checkpoint)} if self.checkpoint else {}),
         }
 
 
@@ -472,6 +582,8 @@ class SymbolDerivation:
     anchor: Mapping[str, Any] | None = None
     #: Dates after an unresolved step: left unwritten on purpose.
     truncated_dates: list[date] = field(default_factory=list)
+    #: Late-fetched vendor bars whose forward adjustment was undone.
+    restorations: list[dict[str, Any]] = field(default_factory=list)
 
 
 def derive_symbol(
@@ -519,12 +631,20 @@ def derive_symbol(
         return SymbolDerivation(symbol, [], [], [], "no_factor_lineage", None)
     lh = longhu or {}
     longhu_dates = sorted(lh)
+    ordered, restorations = restore_vendor_bars(ordered, lh)
     ordered = fill_bar_gaps(ordered, lh)
     open_sessions = sorted(set(calendar))
     factors: list[DerivedFactor] = []
     decisions: list[StepDecision] = []
     compared: list[dict[str, Any]] = []
     truncated: list[date] = []
+    #: Recent steps taken WITHOUT a vendor record: (bar index, step).
+    unrecorded_steps: list[tuple[int, float]] = []
+    #: Since the last ADOPTED stored value (or the anchor): that value, and
+    #: the products of the derived steps and of the exchange's price steps.
+    last_stored = factor
+    derived_product = price_product = 1.0
+    prices_complete = True
     for index in range(start, len(ordered)):
         current = ordered[index]
         if truncated:
@@ -545,12 +665,20 @@ def derive_symbol(
             decision = decide_step(
                 previous, current, lh.get(previous.trading_date), lh.get(current.trading_date),
                 gap_actions=gap, longhu_available=bool(lh), sessions_between=between)
+            decision = _refuse_double_count(decision, index, unrecorded_steps)
             decisions.append(decision)
             if "unresolved" in decision.flags:
                 if not current.virtual:
                     truncated.append(current.trading_date)
                 continue
+            if decision.is_action and decision.basis in UNRECORDED_ACTION_BASES:
+                unrecorded_steps.append((index, decision.step))
             factor = factor * decision.step
+            derived_product *= decision.step
+            if current.pre_close and current.pre_close > 0:
+                price_product *= previous.close / current.pre_close
+            else:
+                prices_complete = False
         if current.virtual:
             continue
         stored = checkpoints.get(current.trading_date)
@@ -562,17 +690,91 @@ def derive_symbol(
                 "provider": stored.provider, "relative_error": _rounded(error),
                 "agrees": error is not None and abs(error) <= CHECKPOINT_AGREEMENT,
                 "basis": decision.basis if decision else None,
+                "adopted": True,
             }
+            # Only a foreign stored value is judged; this lane's own earlier
+            # rows are what the bars already carry and the chain continues
+            # from them unconditionally.
+            if (not comparison["agrees"] and stored.provider != PROVIDER_KEY
+                    and last_stored > 0 and prices_complete):
+                verdict = _checkpoint_price_verdict(
+                    stored.adj_factor / last_stored, derived_product, price_product)
+                comparison["price_check"] = verdict
+                if verdict.get("stored_contradicts_prices"):
+                    # A stored factor that jumps where the prices show no such
+                    # action (300176.SZ 2026-09-09: tushare 4.5917 -> 5.0878
+                    # with 4.59 -> 4.58 on pre_close 4.59) would write a fake
+                    # +10.6% into every adjusted window.  The derived value is
+                    # written instead; the stored row is kept, untouched, and
+                    # the conflict is reported for an operator decision.
+                    comparison["adopted"] = False
             compared.append(comparison)
-            factor = float(stored.adj_factor)
+            if comparison["adopted"]:
+                factor = last_stored = float(stored.adj_factor)
+                derived_product = price_product = 1.0
+                prices_complete = True
+                factors.append(DerivedFactor(
+                    symbol, current.trading_date, stored.exact, stored.provider,
+                    stored.factor_semantics, decision, anchor, comparison))
+                continue
             factors.append(DerivedFactor(
-                symbol, current.trading_date, Decimal(str(stored.adj_factor)), stored.provider,
-                stored.factor_semantics, decision, anchor, comparison))
+                symbol, current.trading_date, factor_value(factor), PROVIDER_KEY,
+                CUMULATIVE_FACTOR_SEMANTICS, decision, anchor, comparison))
             continue
         factors.append(DerivedFactor(
             symbol, current.trading_date, factor_value(factor), PROVIDER_KEY,
             CUMULATIVE_FACTOR_SEMANTICS, decision, anchor))
-    return SymbolDerivation(symbol, factors, decisions, compared, None, anchor, truncated)
+    return SymbolDerivation(symbol, factors, decisions, compared, None, anchor, truncated,
+                            [note for note in restorations if note.get("restored")])
+
+
+#: Steps taken on price evidence with NO vendor record on that date.
+UNRECORDED_ACTION_BASES = frozenset({"pre_close_qfq", "pre_close_only", "qfq_only"})
+#: Steps taken on a vendor record while the pre_close did NOT move.
+RECORD_WITHOUT_PRICE_BASES = frozenset({"cq_qfq", "cq"})
+#: How many bars back an unrecorded step can be the same action as a record.
+DOUBLE_COUNT_LOOKBACK_BARS = 5
+
+
+def _refuse_double_count(decision: StepDecision, index: int,
+                         unrecorded: Sequence[tuple[int, float]]) -> StepDecision:
+    """Never count one action twice: once on prices, again on its record.
+
+    A vendor record whose ex-date shows no price move, arriving a few bars
+    after a step of the same size that had no record, is that same action (a
+    bar that still carried the vendor's forward adjustment moved the pre_close
+    early).  The record is then worth exactly 1.
+    """
+    if decision.basis not in RECORD_WITHOUT_PRICE_BASES or not decision.is_action:
+        return decision
+    for position, step in reversed(unrecorded):
+        if index - position > DOUBLE_COUNT_LOOKBACK_BARS:
+            break
+        if abs(decision.step / step - 1.0) <= CHECKPOINT_AGREEMENT:
+            evidence = {**decision.evidence, "already_counted_step": _rounded(step),
+                        "refused_step": _rounded(decision.step)}
+            return StepDecision(decision.trading_date, decision.previous_date, 1.0,
+                                "cq_already_counted",
+                                (*decision.flags, "duplicate_of_earlier_step"), evidence)
+    return decision
+
+
+def _checkpoint_price_verdict(stored_ratio: float, derived_product: float,
+                              price_product: float) -> dict[str, Any]:
+    """Does a disagreeing stored factor, or the derivation, match the prices?
+
+    All three numbers run from the last ADOPTED stored value (or the anchor)
+    to this bar: the stored series' own move, the product of the derived
+    steps, and the product of the exchange's statement of each step
+    (``previous close / pre_close``).  The stored value contradicts the prices
+    when its move is far from theirs while the derived move is within it;
+    then, and only then, it is not adopted.
+    """
+    stored_ok = abs(stored_ratio / price_product - 1.0) <= CHECKPOINT_AGREEMENT
+    derived_ok = abs(derived_product / price_product - 1.0) <= CHECKPOINT_AGREEMENT
+    return {"stored_move": _rounded(stored_ratio), "derived_move": _rounded(derived_product),
+            "price_move": _rounded(price_product),
+            "stored_contradicts_prices": derived_ok and not stored_ok}
 
 
 # --------------------------------------------------------------------------
@@ -673,19 +875,33 @@ SELECT ws.symbol, anchor.trading_date AS anchor_date, anchor.adj_factor AS ancho
                        WHERE anchor_bar.symbol = factor.symbol
                          AND anchor_bar.trading_date = factor.trading_date
                          AND anchor_bar.close > 0)
-        ORDER BY factor.trading_date DESC, {PROVIDER_PREFERENCE_SQL.format(alias='factor')},
-                 factor.available_at DESC
+        ORDER BY factor.trading_date DESC,
+                 -- the value the bar carries wins, as in CHECKPOINTS_SQL: after
+                 -- a reported stored-factor conflict the bar carries the
+                 -- derived value and the chain must continue from it
+                 (EXISTS (SELECT 1 FROM quant.canonical_bars_daily carried
+                           WHERE carried.symbol=factor.symbol AND carried.trading_date=factor.trading_date
+                             AND carried.adj_factor=factor.adj_factor)) DESC,
+                 {PROVIDER_PREFERENCE_SQL.format(alias='factor')}, factor.available_at DESC
         LIMIT 1) anchor ON TRUE
  ORDER BY ws.symbol"""
 
+#: The canonical provider whose close/pre_close are the vendor's qfq candles.
+VENDOR_BAR_PROVIDER = "longhuvip_composite"
+
+#: The anchor row is always read, even on a date the trade calendar does not
+#: carry (the calendar starts 2026-01-05; an anchor of a symbol suspended
+#: since 2025 would otherwise vanish and the symbol be held forever).
 BARS_SQL = f"""
-SELECT bar.symbol, bar.trading_date, bar.close, bar.pre_close, bar.adj_factor
+SELECT bar.symbol, bar.trading_date, bar.close, bar.pre_close, bar.adj_factor,
+       CASE WHEN bar.selected_provider = '{VENDOR_BAR_PROVIDER}'
+            THEN (bar.available_at AT TIME ZONE 'Asia/Shanghai')::date END AS vendor_fetched_on
   FROM quant.canonical_bars_daily bar
   JOIN unnest(%(symbols)s::text[], %(starts)s::date[]) AS wanted(symbol, start_date)
     ON wanted.symbol = bar.symbol
  WHERE bar.trading_date >= wanted.start_date AND bar.trading_date <= %(to_date)s
    AND bar.close > 0
-   AND {_OPEN_SESSION_SQL.format(alias='bar')}
+   AND (bar.trading_date = wanted.start_date OR {_OPEN_SESSION_SQL.format(alias='bar')})
  ORDER BY bar.symbol, bar.trading_date"""
 
 CHECKPOINTS_SQL = f"""
@@ -741,12 +957,14 @@ def read_window(connection: Any, from_date: date, to_date: date, *,
     for row in connection.execute(BARS_SQL, {"symbols": names, "starts": starts, "to_date": to_date}).fetchall():
         bars[row["symbol"]].append(BarPoint(
             row["trading_date"], float(row["close"]),
-            float(row["pre_close"]) if row["pre_close"] is not None else None))
+            float(row["pre_close"]) if row["pre_close"] is not None else None,
+            vendor_fetched_on=row.get("vendor_fetched_on")))
         current[(row["symbol"], row["trading_date"])] = row["adj_factor"]
     stored: dict[str, dict[date, Checkpoint]] = {}
     for row in connection.execute(CHECKPOINTS_SQL, {"symbols": names, "starts": starts, "to_date": to_date}).fetchall():
         stored.setdefault(row["symbol"], {})[row["trading_date"]] = Checkpoint(
-            row["trading_date"], float(row["adj_factor"]), row["provider"], row["factor_semantics"])
+            row["trading_date"], float(row["adj_factor"]), row["provider"], row["factor_semantics"],
+            Decimal(str(row["adj_factor"])))
     market = {(row["symbol"], row["trading_date"]): row["adj_factor"] for row in connection.execute(
         MARKET_BARS_SQL, {"from_date": from_date, "to_date": to_date, "symbols": names}).fetchall()}
     earliest = min([value for value in starts if value is not None] or [from_date])
@@ -798,6 +1016,7 @@ def build_plan(
     fetch_errors: Mapping[str, str] | None = None,
     rederive_derived: bool = True,
     null_only_dates: Iterable[date] = (),
+    also_replace: Iterable[tuple[str, date]] = (),
 ) -> FactorPlan:
     """Derive every symbol and keep the rows that fall on ``write_dates``.
 
@@ -810,8 +1029,11 @@ def build_plan(
 
     ``null_only_dates`` are extra dates on which a row is written ONLY where
     the bar has no factor at all (the nightly lane closing a hole a failed
-    fetch left behind on an otherwise complete date).
+    fetch left behind on an otherwise complete date), or where the bar's
+    ``(symbol, date)`` is in ``also_replace`` -- a value no evidence row
+    carries.
     """
+    replace_keys = set(also_replace)
     null_only = set(null_only_dates) - set(write_dates)
     targets = sorted(set(write_dates) | null_only)
     target_set = set(targets)
@@ -820,7 +1042,17 @@ def build_plan(
     truncated: dict[str, list[date]] = {}
     held: dict[str, str] = {}
     derivations: dict[str, SymbolDerivation] = {}
+    failed_fetch = dict(fetch_errors or {})
     for symbol, anchor in sorted(inputs.symbols.items()):
+        if symbol in failed_fetch:
+            # No CQ record and no qfq series: a derivation from the pre_close
+            # alone would miss every action without a price signature, and a
+            # written row becomes a checkpoint nobody revisits.  Leave the
+            # bars NULL; the next run's hole fill retries with evidence.
+            held[symbol] = "longhu_fetch_failed"
+            for value in targets:
+                clear[value].append(symbol)
+            continue
         stored = inputs.stored.get(symbol, {})
         checkpoints = {
             value: checkpoint for value, checkpoint in stored.items()
@@ -851,7 +1083,8 @@ def build_plan(
             if row.trading_date not in target_set:
                 continue
             if (row.trading_date in null_only
-                    and inputs.current_bar_factor.get((symbol, row.trading_date)) is not None):
+                    and inputs.current_bar_factor.get((symbol, row.trading_date)) is not None
+                    and (symbol, row.trading_date) not in replace_keys):
                 continue
             rows[row.trading_date].append(row)
     return FactorPlan(inputs.from_date, inputs.to_date, targets, rows, held, derivations,
@@ -903,6 +1136,10 @@ def plan_summary(plan: FactorPlan, *, detail_limit: int = 40) -> dict[str, Any]:
                 for item in derivation.checkpoints_compared
                 if item["trading_date"] and date.fromisoformat(item["trading_date"]) in write_set]
     disagreements = [item for item in compared if not item["agrees"]]
+    conflicts = [item for item in compared if not item.get("adopted", True)]
+    restorations = [{"symbol": derivation.symbol, **note}
+                    for derivation in plan.derivations.values() for note in derivation.restorations
+                    if date.fromisoformat(note["trading_date"]) in write_set]
     errors = [abs(item["relative_error"]) for item in compared if item["relative_error"] is not None]
     return {
         "from_date": str(plan.from_date), "to_date": str(plan.to_date),
@@ -923,6 +1160,15 @@ def plan_summary(plan: FactorPlan, *, detail_limit: int = 40) -> dict[str, Any]:
         "stored_factor_disagreements": len(disagreements),
         "stored_factor_max_relative_error": round(max(errors), 8) if errors else None,
         "disagreement_samples": disagreements[:detail_limit],
+        # Stored factors NOT written because the prices contradict them: each
+        # symbol needs an operator decision (see ADJUSTMENT_FACTOR_SEMANTICS).
+        "stored_factor_conflicts": len(conflicts),
+        "stored_factor_conflict_symbols": sorted({item["symbol"] for item in conflicts}),
+        "stored_factor_conflict_samples": conflicts[:detail_limit],
+        # Late-fetched vendor bars whose forward adjustment was undone.
+        "vendor_bars_restored": len(restorations),
+        "vendor_bars_restored_symbols": len({item["symbol"] for item in restorations}),
+        "vendor_bar_restoration_samples": restorations[:detail_limit],
         "longhu_fetch_errors": len(plan.fetch_errors),
         "longhu_fetch_error_samples": dict(list(sorted(plan.fetch_errors.items()))[:10]),
     }
@@ -940,15 +1186,32 @@ ON CONFLICT(symbol,trading_date,provider) DO UPDATE
    SET adj_factor=EXCLUDED.adj_factor, available_at=EXCLUDED.available_at, raw=EXCLUDED.raw
  WHERE quant.daily_adjustment_factors.adj_factor IS DISTINCT FROM EXCLUDED.adj_factor"""
 
+#: What a placeholder says when no row replaced it on its bar in this run.
+NOT_REPLACED = "none: no factor promoted onto this bar"
+
+#: Each placeholder names the provider of the row ACTUALLY promoted onto its
+#: symbol's bar that date (user rule: a source name is the real source) --
+#: a stored tushare checkpoint is not a longhu derivation.
 ANNOTATE_PLACEHOLDERS_SQL = """
-UPDATE quant.daily_adjustment_factors
-   SET raw = raw || jsonb_build_object(
+WITH promoted AS (
+    SELECT DISTINCT ON (symbol) symbol, provider
+      FROM unnest(%(symbols)s::text[], %(providers)s::text[]) AS t(symbol, provider)
+), targets AS (
+    SELECT candidate.symbol, coalesce(promoted.provider, %(not_replaced)s::text) AS superseded_by
+      FROM (SELECT DISTINCT symbol FROM quant.daily_adjustment_factors
+             WHERE trading_date=%(trading_date)s AND provider='longhuvip_composite') candidate
+      LEFT JOIN promoted USING (symbol)
+)
+UPDATE quant.daily_adjustment_factors placeholder
+   SET raw = placeholder.raw || jsonb_build_object(
            'superseded_at', now()::text,
            'superseded_reason', 'same_day_identity_only placeholder is never promoted to bar tables',
-           'superseded_by', %(provider)s::text)
- WHERE trading_date=%(trading_date)s AND provider='longhuvip_composite'
-   AND raw->>'factor_semantics'='same_day_identity_only'
-   AND raw->>'superseded_at' IS NULL"""
+           'superseded_by', targets.superseded_by)
+  FROM targets
+ WHERE targets.symbol = placeholder.symbol
+   AND placeholder.trading_date=%(trading_date)s AND placeholder.provider='longhuvip_composite'
+   AND placeholder.raw->>'factor_semantics'='same_day_identity_only'
+   AND placeholder.raw->>'superseded_at' IS NULL"""
 
 
 def persist_factor_date(
@@ -964,9 +1227,11 @@ def persist_factor_date(
     "never promote an identity placeholder" rule hold here exactly as they do
     in ``tushare_normalization``.  In the same transaction: the placeholder
     evidence of this date is ANNOTATED (never deleted), and a bar whose symbol
-    could not be derived loses a factor that no promotable evidence supports
-    (NULL is the honest "not yet known"), so no step ever leaves a bar
-    carrying an unsupported value or a window NULLed without its replacement.
+    could not be derived loses a value that no promotable evidence row
+    carries (NULL is the honest "not yet known") -- a VALUE check, not "some
+    row exists": a placeholder 1 next to a real tushare row is still cleared
+    -- so no step ever leaves a bar carrying an unsupported value or a
+    window NULLed without its replacement.
     """
     promoted = [row for row in rows if promotable_adjustment_factor(
         {"factor_semantics": row.factor_semantics}, provider_key=row.provider)]
@@ -1009,10 +1274,13 @@ def persist_factor_date(
                    AND bar.adj_factor IS NOT NULL
                    AND NOT EXISTS (SELECT 1 FROM quant.daily_adjustment_factors factor
                                     WHERE factor.symbol=bar.symbol AND factor.trading_date=bar.trading_date
+                                      AND factor.adj_factor = bar.adj_factor
                                       AND {promotable_factor_evidence_sql_param('factor', 'raw')})""",
             (trading_date, held))
         counts["unsupported_cleared"] = int(getattr(result, "rowcount", 0) or 0)
-    result = connection.execute(ANNOTATE_PLACEHOLDERS_SQL, {"trading_date": trading_date, "provider": PROVIDER_KEY})
+    result = connection.execute(ANNOTATE_PLACEHOLDERS_SQL, {
+        "trading_date": trading_date, "symbols": [row.symbol for row in promoted],
+        "providers": [row.provider for row in promoted], "not_replaced": NOT_REPLACED})
     counts["placeholders_annotated"] = int(getattr(result, "rowcount", 0) or 0)
     return counts
 

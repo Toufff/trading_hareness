@@ -561,12 +561,16 @@ class FactorLaneSession:
     """
 
     def __init__(self, dependencies: AdjustmentFactorMaintenanceDependencies,
-                 work: list[date], today: date, holes: list[date] | None = None) -> None:
+                 work: list[date], today: date, holes: list[date] | None = None,
+                 mismatched: set[tuple[str, date]] | None = None) -> None:
         self.dependencies = dependencies
         self.work = sorted(work)
         #: Complete dates that still carry NULL factors of symbols with a
-        #: factor history: filled where NULL, never re-worked otherwise.
+        #: factor history, or bar values no evidence row carries: filled
+        #: there, never re-worked otherwise.
         self.holes = sorted(set(holes or ()) - set(work))
+        #: (symbol, date) bars whose value equals no promotable evidence row.
+        self.mismatched = set(mismatched or ())
         self.window = sorted(set(self.work) | set(self.holes))
         self.today = today
         self.plan: derivation.FactorPlan | None = None
@@ -598,7 +602,7 @@ class FactorLaneSession:
             return None
         self.plan = derivation.build_plan(
             inputs, longhu, write_dates=self.work, fetch_errors=errors, rederive_derived=False,
-            null_only_dates=self.holes)
+            null_only_dates=self.holes, also_replace=self.mismatched)
         return self.plan
 
 
@@ -664,6 +668,13 @@ async def sync(
     holes = await dependencies.run_database(functools.partial(
         _hole_dates, dependencies.database, end_date - timedelta(days=lookback_days), end_date,
     ), timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
+    # Bars whose value no evidence row carries (a placeholder next to a real
+    # tushare row): their dates are holes too, so the nightly lane heals them
+    # even if the one-time repair has not been applied yet.
+    mismatched = await dependencies.run_database(functools.partial(
+        _value_mismatch_keys, dependencies.database, end_date - timedelta(days=lookback_days), end_date,
+    ), timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
+    holes = sorted(set(holes) | {value for _symbol, value in mismatched})
     holes = [value for value in holes if value not in set(dates)]
     plan: dict[str, Any] = {
         "status": "planned" if dry_run else "completed",
@@ -671,6 +682,7 @@ async def sync(
         "provider": derivation.PROVIDER_KEY,
         "pending_dates": [str(value) for value in dates],
         "hole_dates": [str(value) for value in holes],
+        "value_mismatches": len(mismatched),
         "retired_dates": [str(value) for value in dates if value in retired],
         "dry_run": bool(dry_run),
     }
@@ -680,7 +692,7 @@ async def sync(
             plan["status"] = "planned" if dry_run else "unchanged"
         return plan
 
-    session = FactorLaneSession(dependencies, work, end_date, holes)
+    session = FactorLaneSession(dependencies, work, end_date, holes, set(mismatched))
     results: list[dict[str, Any]] = []
     for trade_date in work:
         try:
@@ -711,11 +723,15 @@ async def sync(
     if session.plan is not None:
         for value in session.holes:
             rows = session.plan.rows.get(value, [])
-            if not rows:
+            # A held symbol's bar is cleared on a hole date only where its
+            # value is one no evidence row carries (never a real value).
+            clear = [symbol for symbol in session.plan.clear.get(value, [])
+                     if (symbol, value) in session.mismatched]
+            if not rows and not clear:
                 continue
             try:
                 hole_fills[str(value)] = await dependencies.run_database(
-                    functools.partial(_persist_date, dependencies.database, value, rows, [],
+                    functools.partial(_persist_date, dependencies.database, value, rows, clear,
                                       session.available_at),
                     timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
             except Exception as error:  # noqa: BLE001 - a hole is retried next run
@@ -764,6 +780,12 @@ HOLE_DATES_SQL = f"""SELECT DISTINCT bar.trading_date FROM quant.canonical_bars_
                 WHERE factor.symbol=bar.symbol AND factor.trading_date<bar.trading_date
                   AND factor.adj_factor > 0 AND {REAL_FACTOR_PREDICATE_SQL})
  ORDER BY 1"""
+
+
+def _value_mismatch_keys(database: Any, start_date: date, end_date: date) -> list[tuple[str, date]]:
+    with database.transaction() as connection:
+        return [(row["symbol"], row["trading_date"]) for row in connection.execute(
+            factor_value_mismatch_sql("canonical_bars_daily"), (start_date, end_date)).fetchall()]
 
 
 def _hole_dates(database: Any, start_date: date, end_date: date) -> list[date]:
@@ -884,6 +906,34 @@ WINDOW_NULLS_SQL = f"""SELECT bar.symbol, bar.trading_date FROM quant.canonical_
    AND EXISTS (SELECT 1 FROM quant.market_trade_calendar calendar
                 WHERE calendar.calendar_date=bar.trading_date AND calendar.is_open)"""
 
+#: The value check the identity-leak guard cannot make: an A-share bar whose
+#: factor equals NO promotable evidence row of its own date.  The guard only
+#: asks whether promotable evidence EXISTS, so a placeholder 1 sitting next to
+#: a real tushare row (about 25k bars on 2026-09-01/07/09/10/17) is invisible
+#: to it; this query sees it.  Must be 0 over the repaired window.
+FACTOR_VALUE_MISMATCH_TEMPLATE = f"""SELECT bar.symbol, bar.trading_date FROM quant.{{table}} bar
+ WHERE bar.trading_date BETWEEN %s AND %s AND bar.adj_factor IS NOT NULL
+   AND bar.symbol ~ '{derivation.A_SHARE_SQL_PATTERN}'
+   AND NOT EXISTS (SELECT 1 FROM quant.daily_adjustment_factors factor
+                    WHERE factor.symbol=bar.symbol AND factor.trading_date=bar.trading_date
+                      AND factor.adj_factor = bar.adj_factor
+                      AND {REAL_FACTOR_PREDICATE_SQL})"""
+
+
+def factor_value_mismatch_sql(table: str = "canonical_bars_daily") -> str:
+    """Rows of one pinned bar table whose factor no evidence row carries."""
+    if table not in GUARDED_BAR_TABLES:
+        raise ValueError(f"table must be one of {GUARDED_BAR_TABLES}; got {table!r}")
+    # replace, not format: the symbol pattern carries literal braces.
+    return FACTOR_VALUE_MISMATCH_TEMPLATE.replace("{table}", table)
+
+
+def factor_value_mismatches(connection: Any, start_date: date, end_date: date) -> dict[str, int]:
+    return {table: len(connection.execute(
+                factor_value_mismatch_sql(table), (start_date, end_date)).fetchall())
+            for table in GUARDED_BAR_TABLES}
+
+
 READBACK_SQL = f"""SELECT bar.trading_date, count(*)::bigint AS bars,
        count(*) FILTER (WHERE bar.adj_factor IS NULL)::bigint AS null_factor,
        count(*) FILTER (WHERE bar.adj_factor = 1)::bigint AS eq1,
@@ -894,6 +944,13 @@ READBACK_SQL = f"""SELECT bar.trading_date, count(*)::bigint AS bars,
  WHERE bar.trading_date BETWEEN %s AND %s AND bar.quality_status IN ('fresh','partial')
    AND bar.symbol ~ '{derivation.A_SHARE_SQL_PATTERN}'
  GROUP BY 1 ORDER BY 1"""
+
+
+def _count_by_date(keys: list[tuple[str, date]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for _symbol, value in keys:
+        counts[str(value)] = counts.get(str(value), 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def repair_window(
@@ -947,7 +1004,15 @@ def repair_projection(connection: Any, plan: derivation.FactorPlan) -> dict[str,
     for entry in left_null.values():
         entry["dates"] = sorted(set(entry["dates"]))
     outside = guard["canonical_bars_daily"] - len(leaks)
+    mismatches = [(row["symbol"], row["trading_date"]) for row in connection.execute(
+        factor_value_mismatch_sql("canonical_bars_daily"), (plan.from_date, plan.to_date)).fetchall()]
+    # A planned row sets the value from its evidence; a cleared bar keeps a
+    # value only if an equal evidence row exists, i.e. was never a mismatch.
+    remaining_mismatches = [key for key in mismatches if key not in written and key not in cleared]
     return {
+        "value_mismatches_now": len(mismatches),
+        "value_mismatches_after_apply_projected": len(remaining_mismatches),
+        "value_mismatch_dates_now": _count_by_date(mismatches),
         "guard_now": guard,
         "guard_leaks_in_window": len(leaks),
         "guard_leaks_outside_window": outside,
@@ -1025,9 +1090,15 @@ async def repair(
         functools.partial(_repair_readback, database, plan.from_date, plan.to_date),
         timeout_seconds=FACTOR_DB_TIMEOUT_SECONDS)
     guard = report["after"]["guard"]
-    report["status"] = "completed" if not any(guard.values()) else FAILED_STATUS
+    mismatches = report["after"].get("value_mismatches") or {}
+    failures = []
     if any(guard.values()):
-        report["reason"] = f"release guard is not 0 after the repair: {guard}"
+        failures.append(f"release guard is not 0 after the repair: {guard}")
+    if any(mismatches.values()):
+        failures.append(f"bars whose factor equals no evidence row remain in the window: {mismatches}")
+    report["status"] = FAILED_STATUS if failures else "completed"
+    if failures:
+        report["reason"] = "; ".join(failures)
     return report
 
 
@@ -1056,6 +1127,7 @@ def _repair_readback(database: Any, from_date: date, to_date: date) -> dict[str,
     with database.transaction() as connection:
         rows = connection.execute(READBACK_SQL, (derivation.PROVIDER_KEY, from_date, to_date)).fetchall()
         return {"guard": guard_counts(connection),
+                "value_mismatches": factor_value_mismatches(connection, from_date, to_date),
                 "dates": [{key: (str(value) if isinstance(value, date) else int(value))
                            for key, value in dict(row).items()} for row in rows]}
 
@@ -1287,6 +1359,7 @@ def status_report(
         table: int(connection.execute(identity_factor_leak_sql(table)).fetchone()["identity_leaks"])
         for table in GUARDED_BAR_TABLES
     }
+    mismatches = factor_value_mismatches(connection, start_date, end_date)
     runs = [
         {key: _text(value) for key, value in dict(row).items()}
         for row in connection.execute(FACTOR_FETCH_RUNS_SQL, (int(fetch_runs),)).fetchall()
@@ -1316,6 +1389,9 @@ def status_report(
         "pending_dates": [str(value) for value in pending],
         "retired_dates": sorted(str(value) for value in retired),
         "identity_factor_leaks": leaks,
+        # Windowed (the guard above is not): bars whose factor equals no
+        # promotable evidence row of their date.  0 after a correct repair.
+        "factor_value_mismatches": mismatches,
         "factor_fetch_runs": runs,
         "provider_capability": dict(_capability_payload(capability)),
         "provider_health": health,
@@ -1390,6 +1466,9 @@ def status_summary(report: dict[str, Any]) -> str:
         f"{complete} complete, {pending} pending, {retired} retired",
         f"identity factor leaks {leaks}",
     ]
+    if "factor_value_mismatches" in report:
+        parts.append("factor value mismatches "
+                     f"{sum(int(value) for value in (report.get('factor_value_mismatches') or {}).values())}")
     runs = list(report.get("factor_fetch_runs") or [])
     if runs:
         last = runs[0]
@@ -1472,4 +1551,5 @@ __all__ = [
     "REPAIR_DAMAGED_DATES_SQL", "REPAIR_LOOKBACK_SESSIONS", "guard_counts", "repair",
     "repair_factor_date", "repair_projection", "repair_window", "validate",
     "FactorRoute", "HOLE_DATES_SQL", "longhu_factor_route",
+    "FACTOR_VALUE_MISMATCH_TEMPLATE", "factor_value_mismatch_sql", "factor_value_mismatches",
 ]
