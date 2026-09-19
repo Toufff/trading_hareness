@@ -1290,6 +1290,86 @@ class BlockedDateLedgerPostgresTests(unittest.TestCase):
         self.assertEqual(list(row["uncovered_dates"]), [])
 
 
+class StatusSummaryTests(unittest.TestCase):
+    """The one line an operator reads instead of opening the JSON.
+
+    Pure on purpose: the sentence is assembled from the report it is handed,
+    so it can be pinned here and cannot quietly start disagreeing with the
+    numbers printed above it.
+    """
+
+    @staticmethod
+    def _report(**overrides):
+        report = {
+            "generated_for": {"start_date": "2026-09-05", "end_date": "2026-09-19",
+                              "minimum_coverage_ratio": 0.95},
+            "dates": [
+                {"trading_date": "2026-09-17", "daily_rows": 5200, "adjustment_rows": 5200,
+                 "pending": False, "retired": None},
+                {"trading_date": "2026-09-18", "daily_rows": 5200, "adjustment_rows": 0,
+                 "pending": True, "retired": None},
+                {"trading_date": "2026-09-19", "daily_rows": 5100, "adjustment_rows": 0,
+                 "pending": False, "retired": {"run_key": "adjustment-factor-blocked:2026-09-19",
+                                               "reason": "coverage", "blocked_days": [],
+                                               "consecutive_blocked_runs": 5, "retired_at": None}},
+            ],
+            "pending_dates": ["2026-09-18"],
+            "retired_dates": ["2026-09-19"],
+            "identity_factor_leaks": {"canonical_bars_daily": 0, "market_bars_daily": 0},
+            "factor_fetch_runs": [{"provider_key": "tushare_super_get", "status": "completed",
+                                   "row_count": 5567, "finished_at": "2026-09-19 04:31:02+08:00"}],
+            "provider_capability": {"available": True,
+                                    "preferred_providers": ["super_get", "super", "primary"]},
+            "post_close_stage_receipt": {"status": "blocked", "as_of_date": "2026-09-18"},
+        }
+        report.update(overrides)
+        return report
+
+    def test_the_summary_names_the_window_the_counts_and_the_last_fetch(self):
+        self.assertEqual(
+            module.status_summary(self._report()),
+            "2026-09-05..2026-09-19: 3 settled date(s), 1 complete, 1 pending, 1 retired; "
+            "identity factor leaks 0; "
+            "last fetch tushare_super_get completed rows=5567 at 2026-09-19 04:31:02+08:00; "
+            "route available (super_get, super, primary); "
+            "post-close receipt blocked for 2026-09-18")
+
+    def test_a_retired_date_is_never_counted_as_complete(self):
+        # It has no factors and nobody is going to fetch them; calling it
+        # complete is the one reading that would let an operator stop looking.
+        summary = module.status_summary(self._report())
+        self.assertIn("1 complete, 1 pending, 1 retired", summary)
+
+    def test_an_empty_estate_still_produces_one_readable_line(self):
+        summary = module.status_summary(self._report(
+            dates=[], pending_dates=[], retired_dates=[], factor_fetch_runs=[],
+            provider_capability={"available": None, "note": "not consulted"},
+            post_close_stage_receipt=None))
+        self.assertEqual(
+            summary,
+            "2026-09-05..2026-09-19: 0 settled date(s), 0 complete, 0 pending, 0 retired; "
+            "identity factor leaks 0; no adj_factor fetch run on record; "
+            "no post-close factor-stage receipt")
+        self.assertNotIn("\n", summary)
+
+    def test_a_leak_on_either_guarded_table_is_reported(self):
+        summary = module.status_summary(self._report(
+            identity_factor_leaks={"canonical_bars_daily": 35573, "market_bars_daily": 0}))
+        self.assertIn("identity factor leaks 35573", summary)
+
+    def test_the_summary_is_ascii_only_because_the_task_console_is_gbk(self):
+        # A blocked reason can carry Chinese text; it must never reach the line.
+        summary = module.status_summary(self._report(
+            post_close_stage_receipt={"status": "blocked", "as_of_date": "2026-09-18",
+                                      "output_summary": {"reason": "覆盖率不足"}}))
+        summary.encode("ascii")
+
+    def test_a_declared_but_unverified_route_is_not_reported_as_available(self):
+        summary = module.status_summary(self._report(
+            provider_capability={"available": False, "preferred_providers": ["primary"]}))
+        self.assertIn("route unverified (primary)", summary)
+
+
 class MaintenanceCliTests(unittest.TestCase):
     """The CLI wrapper is the 04:00-08:00 entry point and the repair tool."""
 
@@ -1311,6 +1391,15 @@ class MaintenanceCliTests(unittest.TestCase):
                          ("sync", 45, "x.env", True))
         defaults = module.parse_args(["sync"])
         self.assertEqual((defaults.lookback_days, defaults.dry_run), (30, False))
+
+    def test_cli_parses_the_read_only_status_contract(self):
+        module = self._module()
+        args = module.parse_args(["status", "--lookback-days", "7", "--env-file", "x.env"])
+        self.assertEqual((args.command, args.lookback_days, args.env_file), ("status", 7, "x.env"))
+        self.assertEqual(module.parse_args(["status"]).lookback_days, 30)
+        # A report must not be able to fetch or repair anything, so it carries
+        # no switch that could turn it into one.
+        self.assertFalse(hasattr(module.parse_args(["status"]), "dry_run"))
 
     def test_env_file_loader_never_echoes_a_value(self):
         import os

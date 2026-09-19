@@ -660,6 +660,40 @@ python scripts/adjustment-factor-maintenance.py sync \
 - stdout 是 ASCII-only JSON（任务宿主控制台是 GBK）；env 文件只写进 `os.environ`，
   任何凭据值都不会被打印或落盘。
 
+### 5.4 `status` 子命令（只读报告）
+
+```
+python scripts/adjustment-factor-maintenance.py status \
+    --lookback-days 14 \
+    --env-file G:\StockPlatform\config\runtime.env
+```
+
+只读：不发 provider 请求、不写库、没有自己的退出码语义（永远 0）。
+"这条车道现在到底处在什么状态"以前要靠手写 SQL 拼出来，于是每个人拼的定义都略有不同；
+这个子命令把**和车道完全相同的那些定义**印出来
+（`REAL_FACTOR_PREDICATE_SQL` 算覆盖、`pending_and_retired_dates_between()` 算工作清单与
+退休台账、`identity_factor_leak_sql()` 就是发布守护查询本身）。
+
+输出是一个 ASCII-only JSON 文档（`app.adjustment_factor_maintenance.status_report()`）：
+
+| 字段 | 内容 |
+|---|---|
+| `dates[]` | 窗口内每个开市结算日的 `daily_rows` / `adjustment_rows`（真实 tushare 因子）/ `coverage_ratio` / `pending` / `retired` |
+| `dates[].retired` | 已退休时带 `run_key`（要清的那一行）、`reason`、`blocked_days`、`consecutive_blocked_runs` |
+| `pending_dates` / `retired_dates` | 与车道工作清单同源的两份清单 |
+| `identity_factor_leaks` | 第 4 节步骤 6 的守护查询，**不带窗口**（它是发布门槛，必须全表为 0；带窗口的版本会在污染落在窗口外时假装通过），两张 bar 表各一个数 |
+| `factor_fetch_runs[]` | 最近几条 `capability='adj_factor'` 的 `quant.fetch_runs`：provider / status / row_count / 时间 / `error_class`。**不含 `last_error` 正文**——那是形状不受控的 provider 文本，这份报告会被贴进工单 |
+| `provider_capability` | `capability_registry.api_capability('adj_factor')`：`preferred_providers`、`status`，`available` 即 `status == 'verified'`（"已有真实截面从这条路线落地"，不是一句声明） |
+| `provider_health[]` | `quant.provider_health` 里该 capability 的每条路线：连续失败数、熔断是否打开、最近成功/失败时间 |
+| `post_close_stage_receipt` | 最近一条非门控盘后阶段回执（`task_key='post_close_refresh.stage'`、`run_key LIKE '%:adjustment_factors:%'`），只摘 `status` / `lane_status` / `retryable` / `unrepaired_dates` / `lookback_days` / `reason` |
+| `summary` | 一行人读的小结（纯函数 `status_summary()`，由单测钉住，不会和上面的数字走散） |
+
+> 2026-09-19 只读实测（生产库，修复 SQL 尚未执行）：
+> `2026-09-05..2026-09-19: 10 settled date(s), 4 complete, 6 pending, 0 retired;`
+> `identity factor leaks 35573; last fetch tushare_primary blocked rows=0 at`
+> `2026-09-18 15:29:36+08:00; route available (super_get, super, primary);`
+> `no post-close factor-stage receipt` —— 守护值 35,573 与第 4 节步骤 6 的记录一致。
+
 ---
 
 ## 6. 修复后的预期影响（必须提前通知使用者）

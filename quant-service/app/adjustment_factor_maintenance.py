@@ -725,6 +725,230 @@ async def post_close_sync(
     return {**result, **post_close_stage_receipt(result), "non_gating": True}
 
 
+#: Per-date coverage for the read-only report: how many settled bars the date
+#: has, and how many of them a REAL cumulative factor exists for.  Deliberately
+#: the same ``REAL_FACTOR_PREDICATE_SQL`` the work list uses, so the report can
+#: never disagree with the lane about what "covered" means.
+STATUS_DATES_SQL = f"""WITH settled AS (
+       SELECT bar.trading_date, bar.symbol FROM quant.canonical_bars_daily bar
+        WHERE bar.trading_date BETWEEN %s AND %s
+          AND bar.quality_status IN ('fresh','partial')
+          AND EXISTS (SELECT 1 FROM quant.market_trade_calendar calendar
+                       WHERE calendar.calendar_date=bar.trading_date AND calendar.is_open)
+   ), factored AS (
+       SELECT DISTINCT factor.trading_date, factor.symbol
+         FROM quant.daily_adjustment_factors factor
+        WHERE factor.trading_date BETWEEN %s AND %s
+          AND {REAL_FACTOR_PREDICATE_SQL}
+   ) SELECT settled.trading_date,
+            count(*)::bigint AS daily_rows,
+            count(*) FILTER (WHERE factored.symbol IS NOT NULL)::bigint AS adjustment_rows
+       FROM settled LEFT JOIN factored USING (trading_date, symbol)
+      GROUP BY settled.trading_date ORDER BY settled.trading_date"""
+
+#: The factor route's own fetch receipts.  ``last_error`` is deliberately NOT
+#: selected: it is provider text of unbounded shape and this report is printed
+#: on an operator console and pasted into tickets.  The shape of the failure
+#: (``error_class``) answers the operational question without carrying a URL or
+#: a token into a log.
+FACTOR_FETCH_RUNS_SQL = """SELECT provider_key,status,row_count,trade_date,attempt_count,
+            error_class,started_at,finished_at,created_at
+       FROM quant.fetch_runs WHERE capability='adj_factor'
+      ORDER BY coalesce(finished_at,started_at,created_at) DESC LIMIT %s"""
+
+FACTOR_PROVIDER_HEALTH_SQL = """SELECT provider_key,market,consecutive_failures,circuit_open_until,
+            last_success_at,last_failure_at,last_row_count,last_latency_ms
+       FROM quant.provider_health WHERE capability='adj_factor' ORDER BY provider_key"""
+
+#: The durable receipt the non-gating post-close stage leaves behind.  The
+#: ``run_key`` shape is ``<receipt version>:<stage>:<trade date>``
+#: (``post_close_refresh.record_stage_with_receipt``); the pattern is passed as
+#: a parameter rather than inlined so no ``%`` escaping is involved.
+POST_CLOSE_STAGE_TASK_KEY = "post_close_refresh.stage"
+POST_CLOSE_FACTOR_RECEIPT_PATTERN = "%:adjustment_factors:%"
+POST_CLOSE_FACTOR_RECEIPT_SQL = """SELECT run_key,as_of_date,status,methodology_version,
+            output_summary,started_at,finished_at,updated_at
+       FROM quant.automation_runs WHERE task_key=%s AND run_key LIKE %s
+      ORDER BY as_of_date DESC NULLS LAST, updated_at DESC LIMIT 1"""
+
+#: The fields of a post-close receipt worth reprinting.  The whole
+#: ``output_summary`` carries the lane's full per-date results and would bury
+#: the answer; these are the ones that say what the stage decided.
+POST_CLOSE_RECEIPT_FIELDS = (
+    "status", "lane_status", "retryable", "unrepaired_dates", "lookback_days", "reason")
+
+
+def _text(value: Any) -> Any:
+    """Stringify dates and timestamps; leave JSON-native values alone."""
+    return value if value is None or isinstance(value, (bool, int, float, str)) else str(value)
+
+
+def status_report(
+    connection: Any, start_date: date, end_date: date,
+    *, minimum_ratio: float = PENDING_COVERAGE_RATIO, fetch_runs: int = 5,
+    capability: Any = None,
+) -> dict[str, Any]:
+    """Read-only answer to "where does the factor lane actually stand?".
+
+    Every number here is read through the same helpers the lane itself uses --
+    :data:`REAL_FACTOR_PREDICATE_SQL` for coverage,
+    :func:`pending_and_retired_dates_between` for the work list and the
+    retirement ledger, :func:`identity_factor_leak_sql` for the release guard
+    -- so an operator reading this report and the lane making decisions can
+    never be looking at two different definitions of the same word.
+
+    Nothing is written.  The identity-leak guard is deliberately UNWINDOWED:
+    it is a release gate that must return 0 over the whole table, and a
+    windowed version of it would pass while pollution sits one day outside.
+    """
+    coverage = connection.execute(
+        STATUS_DATES_SQL, (start_date, end_date, start_date, end_date)).fetchall()
+    pending, retired = pending_and_retired_dates_between(
+        connection, start_date, end_date, minimum_ratio=minimum_ratio)
+    pending_set = set(pending)
+    dates: list[dict[str, Any]] = []
+    for row in coverage:
+        trading_date = row["trading_date"]
+        entry: dict[str, Any] = {
+            "trading_date": str(trading_date),
+            "daily_rows": int(row["daily_rows"] or 0),
+            "adjustment_rows": int(row["adjustment_rows"] or 0),
+            "pending": trading_date in pending_set,
+            "retired": None,
+        }
+        entry["coverage_ratio"] = round(
+            entry["adjustment_rows"] / entry["daily_rows"], 6) if entry["daily_rows"] else None
+        ledger = retired.get(trading_date)
+        if ledger is not None:
+            entry["retired"] = {
+                "run_key": ledger["run_key"], "reason": str(ledger["reason"]),
+                "blocked_days": list(ledger["blocked_days"]),
+                "consecutive_blocked_runs": int(ledger["consecutive_blocked_runs"]),
+                "retired_at": _text(ledger.get("retired_at")),
+            }
+        dates.append(entry)
+    leaks = {
+        table: int(connection.execute(identity_factor_leak_sql(table)).fetchone()["identity_leaks"])
+        for table in GUARDED_BAR_TABLES
+    }
+    runs = [
+        {key: _text(value) for key, value in dict(row).items()}
+        for row in connection.execute(FACTOR_FETCH_RUNS_SQL, (int(fetch_runs),)).fetchall()
+    ]
+    health = []
+    for row in connection.execute(FACTOR_PROVIDER_HEALTH_SQL).fetchall():
+        item = {key: _text(value) for key, value in dict(row).items()}
+        item["circuit_open"] = bool(row.get("circuit_open_until"))
+        health.append(item)
+    receipt_row = connection.execute(
+        POST_CLOSE_FACTOR_RECEIPT_SQL,
+        (POST_CLOSE_STAGE_TASK_KEY, POST_CLOSE_FACTOR_RECEIPT_PATTERN),
+    ).fetchone()
+    receipt: dict[str, Any] | None = None
+    if receipt_row is not None:
+        summary = dict(receipt_row.get("output_summary") or {})
+        receipt = {key: _text(receipt_row.get(key)) for key in
+                   ("run_key", "as_of_date", "status", "methodology_version",
+                    "started_at", "finished_at", "updated_at")}
+        receipt["output_summary"] = {
+            key: _text(summary[key]) if not isinstance(summary.get(key), (list, dict)) else summary[key]
+            for key in POST_CLOSE_RECEIPT_FIELDS if key in summary}
+    report: dict[str, Any] = {
+        "generated_for": {"start_date": str(start_date), "end_date": str(end_date),
+                          "minimum_coverage_ratio": float(minimum_ratio)},
+        "dates": dates,
+        "pending_dates": [str(value) for value in pending],
+        "retired_dates": sorted(str(value) for value in retired),
+        "identity_factor_leaks": leaks,
+        "factor_fetch_runs": runs,
+        "provider_capability": dict(_capability_payload(capability)),
+        "provider_health": health,
+        "post_close_stage_receipt": receipt,
+    }
+    report["summary"] = status_summary(report)
+    return report
+
+
+def _capability_payload(capability: Any) -> dict[str, Any]:
+    """Describe the declared adj_factor route without importing a registry here.
+
+    The caller passes the registry's answer in, so this module keeps its single
+    dependency direction (nothing in ``app`` imports it back) and the report can
+    be built in a test without the registry at all.
+    """
+    if capability is None:
+        return {"available": None, "note": "capability registry was not consulted"}
+    return {
+        "api": "adj_factor",
+        "frequency": getattr(capability, "frequency", None),
+        "status": getattr(capability, "status", None),
+        "decision_eligible": bool(getattr(capability, "decision_eligible", False)),
+        "preferred_providers": list(getattr(capability, "preferred_providers", ()) or ()),
+        "note": getattr(capability, "note", None),
+        # "verified" is the registry saying a real cross-section has landed
+        # through this route; anything else is a declaration, not evidence.
+        "available": getattr(capability, "status", None) == "verified",
+    }
+
+
+def status_summary(report: dict[str, Any]) -> str:
+    """One ASCII line an operator can read without opening the JSON.
+
+    Pure: it reads the assembled report and nothing else, so the sentence can
+    be pinned by a unit test and cannot drift from the numbers above it.
+    """
+    dates = list(report.get("dates") or [])
+    pending = len(report.get("pending_dates") or [])
+    retired = len(report.get("retired_dates") or [])
+    complete = sum(1 for item in dates
+                   if not item.get("pending") and item.get("retired") is None)
+    leaks = sum(int(value) for value in (report.get("identity_factor_leaks") or {}).values())
+    window = report.get("generated_for") or {}
+    parts = [
+        f"{window.get('start_date')}..{window.get('end_date')}: {len(dates)} settled date(s), "
+        f"{complete} complete, {pending} pending, {retired} retired",
+        f"identity factor leaks {leaks}",
+    ]
+    runs = list(report.get("factor_fetch_runs") or [])
+    if runs:
+        last = runs[0]
+        parts.append(
+            f"last fetch {last.get('provider_key')} {last.get('status')} "
+            f"rows={last.get('row_count')} at {last.get('finished_at') or last.get('started_at')}")
+    else:
+        parts.append("no adj_factor fetch run on record")
+    capability = report.get("provider_capability") or {}
+    if capability.get("available") is not None:
+        parts.append(
+            f"route {'available' if capability.get('available') else 'unverified'} "
+            f"({', '.join(capability.get('preferred_providers') or []) or 'no preferred provider'})")
+    receipt = report.get("post_close_stage_receipt")
+    if receipt:
+        parts.append(f"post-close receipt {receipt.get('status')} for {receipt.get('as_of_date')}")
+    else:
+        parts.append("no post-close factor-stage receipt")
+    return "; ".join(parts)
+
+
+async def status(
+    dependencies: AdjustmentFactorMaintenanceDependencies,
+    *, lookback_days: int = 30, today: date | None = None, capability: Any = None,
+) -> dict[str, Any]:
+    """Read-only status of the factor lane over one lookback window."""
+    if lookback_days < 0:
+        raise ValueError("lookback_days must not be negative")
+    end_date = today or china_today()
+    start_date = end_date - timedelta(days=lookback_days)
+    report = await dependencies.run_database(functools.partial(
+        _status_report, dependencies.database, start_date, end_date, capability))
+    return {"lookback_days": int(lookback_days), **report}
+
+
+def _status_report(database: Any, start_date: date, end_date: date, capability: Any) -> dict[str, Any]:
+    with database.transaction() as connection:
+        return status_report(connection, start_date, end_date, capability=capability)
+
+
 def _post_close_lookback_days(database: Any, today: date) -> int:
     with database.transaction() as connection:
         return post_close_lookback_days_from_calendar(connection, today)
@@ -751,13 +975,16 @@ __all__ = [
     "GUARDED_BAR_TABLES", "IDENTITY_FACTOR_LEAK_SQL_TEMPLATE", "MAX_CONSECUTIVE_BLOCKED_RUNS",
     "PENDING_COVERAGE_RATIO", "PENDING_DATES_SQL", "POST_CLOSE_LOOKBACK_DAYS",
     "POST_CLOSE_LOOKBACK_SESSIONS", "POST_CLOSE_LOOKBACK_SESSIONS_SQL",
-    "POST_CLOSE_NON_GATING_REASON", "POST_CLOSE_TERMINAL_LANE_STATUSES",
+    "POST_CLOSE_FACTOR_RECEIPT_PATTERN", "POST_CLOSE_FACTOR_RECEIPT_SQL",
+    "POST_CLOSE_NON_GATING_REASON", "POST_CLOSE_RECEIPT_FIELDS",
+    "POST_CLOSE_STAGE_TASK_KEY", "POST_CLOSE_TERMINAL_LANE_STATUSES",
     "REAL_FACTOR_PREDICATE_SQL", "RETIRED_DATES_SQL", "RETIRED_DATE_DEFAULT_REASON",
-    "SUCCESS_STATUSES",
+    "STATUS_DATES_SQL", "SUCCESS_STATUSES",
     "blocked_date_run_key", "blocked_ledger_day", "china_today", "clear_blocked_date",
     "identity_factor_leak_sql",
     "pending_and_retired_dates_between", "pending_dates", "pending_dates_between",
     "post_close_lookback_days", "post_close_lookback_days_from_calendar",
     "post_close_stage_receipt", "post_close_sync", "record_blocked_date",
-    "retired_date_details", "retired_date_details_from_rows", "retired_dates", "sync",
+    "retired_date_details", "retired_date_details_from_rows", "retired_dates",
+    "status", "status_report", "status_summary", "sync",
 ]

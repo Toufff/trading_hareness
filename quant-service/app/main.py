@@ -51,6 +51,7 @@ from . import daily_control_plane
 from .adjustment_factor_maintenance import (
     AdjustmentFactorMaintenanceDependencies,
     post_close_sync as adjustment_factor_post_close_sync,
+    status as adjustment_factor_status_report,
     sync as adjustment_factor_sync,
 )
 from .daily_control_plane import (
@@ -1571,6 +1572,19 @@ async def sync_adjustment_factors(lookback_days: int = 30, *, dry_run: bool = Fa
 async def sync_adjustment_factors_post_close() -> dict[str, Any]:
     """Non-gating post-close invocation of the same lane (see POST_CLOSE_STAGE_ORDER)."""
     return await adjustment_factor_post_close_sync(adjustment_factor_maintenance_dependencies())
+
+
+async def adjustment_factor_status(lookback_days: int = 30) -> dict[str, Any]:
+    """Read-only status of the factor lane; writes nothing, fetches nothing.
+
+    Shares the same composition root as the repair lane so the report and the
+    work list cannot drift apart, and hands the capability registry's answer
+    in rather than letting the maintenance module reach for it.
+    """
+    return await adjustment_factor_status_report(
+        adjustment_factor_maintenance_dependencies(), lookback_days=lookback_days,
+        capability=api_capability("adj_factor"),
+    )
 
 
 def upsert_sector_taxonomy(connection: Any, taxonomy_key: str, label: str, provider_key: str, metadata: dict[str, Any]) -> None:

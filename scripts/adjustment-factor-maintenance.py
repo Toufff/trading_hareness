@@ -7,6 +7,10 @@ documented in ``docs/ADJUSTMENT_FACTOR_SEMANTICS.md``; it is deliberately not
 a post-close stage, because the adjustment-factor provider must never be able
 to delay or fail the evening close pipeline.
 
+``sync`` is the repair; ``status`` is the read-only report that answers where
+the lane stands without fetching or writing anything, so it is safe against
+production during a release.
+
 stdout is ASCII-only JSON: the scheduled-task host console is GBK.  No
 credential value is ever printed; the env file is loaded into ``os.environ``
 and nothing reads it back out.
@@ -37,6 +41,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sync_command.add_argument(
         "--dry-run", action="store_true",
         help="resolve and print the pending dates without any provider call or write")
+    status_command = subcommands.add_parser(
+        "status",
+        help="print where the factor lane stands; reads only, fetches nothing, writes nothing")
+    status_command.add_argument("--lookback-days", type=int, default=30)
+    status_command.add_argument("--env-file", default=DEFAULT_ENV_FILE)
     return parser.parse_args(argv)
 
 
@@ -63,7 +72,17 @@ def main(argv: list[str] | None = None) -> int:
     # itself lives in app.main so the scheduled task, the post-close stage and
     # this CLI cannot drift into three different compositions.
     from app.adjustment_factor_maintenance import FAILED_STATUS  # noqa: E402
-    from app.main import sync_adjustment_factors  # noqa: E402
+    from app.main import adjustment_factor_status, sync_adjustment_factors  # noqa: E402
+
+    if args.command == "status":
+        # Read-only: no provider call, no write, no exit code of its own.  An
+        # operator asking "where does this stand?" must never be the reason a
+        # date gets fetched or a ledger row moves.  The one-line human summary
+        # travels inside the document as ``summary`` so stdout stays a single
+        # parseable JSON object.
+        report = asyncio.run(adjustment_factor_status(args.lookback_days))
+        print(json.dumps(report, ensure_ascii=True, default=str))
+        return 0
 
     result = asyncio.run(sync_adjustment_factors(args.lookback_days, dry_run=args.dry_run))
     # ASCII-only on purpose: a blocked reason can carry Chinese text and the
