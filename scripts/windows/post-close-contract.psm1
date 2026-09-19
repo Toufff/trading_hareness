@@ -38,6 +38,68 @@ function Test-EquityDateReady([object]$Health, [string]$TradeDate) {
         (Get-ContractValue $Health 'daily_control_plane.state') -eq 'ready')
 }
 
+# Datasets that land *after* the bars the readiness gate counts.
+#
+# The exchange cross-section is what the 16:00 floor waits for, and
+# Test-EquityDateReady already fails closed on a half-fetched one. The close
+# limit pool is different: quant-service derives it from those same bars
+# (settled_limit_pool_repository.persist_settled_limit_pool), so it is not
+# late relative to the vendor -- it is late relative to *us*, whenever the
+# limit_ladder stage ran before the settled bars arrived or came back blocked.
+# Nothing in the same-date skip condition looked at it, so a run that published
+# lanes over a short pool was recorded 'completed' and every later repetition
+# skipped the date for the rest of the evening.
+#
+# The expectation therefore comes from the bars we already hold -- how many
+# symbols closed at their limit -- and never from the wall clock. A pool larger
+# than expected is not a defect (an upsert never deletes, so a revised limit
+# price can leave an extra row behind); only a short pool means work is owed.
+function Get-PostCloseLateDatasetState {
+    param(
+        [Parameter(Mandatory)][AllowNull()][object]$Health,
+        [Parameter(Mandatory)][ValidatePattern('^\d{4}-\d{2}-\d{2}$')][string]$TradeDate
+    )
+    $state = @{ ready = $false; reason = $null; trade_date = $TradeDate
+        expected_limit_up_symbols = $null; stored_limit_pool_symbols = $null }
+    $probeSlot = Get-ContractSlot $Health 'late_datasets'
+    if (-not $probeSlot.present) {
+        # An absent probe is not evidence that the pool landed: a runner paired
+        # with an older equity-readiness.py must keep retrying, not seal a date
+        # it cannot check.
+        $state['reason'] = 'late-dataset probe is absent from the readiness payload'
+        return $state
+    }
+    $probedDate = Get-ContractValue $probeSlot.value 'trade_date'
+    if ($probedDate -ne $TradeDate) {
+        $state['reason'] = "late-dataset probe reports $probedDate, not the requested session"
+        return $state
+    }
+    $expectedSlot = Get-ContractSlot $probeSlot.value 'limit_pool.expected_symbols'
+    $storedSlot = Get-ContractSlot $probeSlot.value 'limit_pool.stored_symbols'
+    if (-not $expectedSlot.present -or -not $storedSlot.present) {
+        $state['reason'] = 'late-dataset probe carries no limit-pool counts'
+        return $state
+    }
+    $expected = [int]$expectedSlot.value
+    $stored = [int]$storedSlot.value
+    $state['expected_limit_up_symbols'] = $expected
+    $state['stored_limit_pool_symbols'] = $stored
+    if ($expected -gt 0 -and $stored -lt $expected) {
+        $state['reason'] = "close limit pool holds $stored of the $expected symbols the settled bars show closing at their limit"
+        return $state
+    }
+    $state['ready'] = $true
+    return $state
+}
+
+function Test-PostCloseLateDatasetsReady {
+    param(
+        [Parameter(Mandatory)][AllowNull()][object]$Health,
+        [Parameter(Mandatory)][ValidatePattern('^\d{4}-\d{2}-\d{2}$')][string]$TradeDate
+    )
+    return [bool]((Get-PostCloseLateDatasetState -Health $Health -TradeDate $TradeDate)['ready'])
+}
+
 # A published scan whose company research is still owed is a *successful* run
 # with an open obligation, not a failure and not a silent 'completed'. Every
 # reader of post-close-pipeline.jsonl has to treat both spellings as terminal
@@ -90,5 +152,6 @@ function Get-PostClosePipelineStatus {
 }
 
 Export-ModuleMember -Function Get-ContractValue, Test-EquityDateReady,
+    Get-PostCloseLateDatasetState, Test-PostCloseLateDatasetsReady,
     Get-PostClosePipelineCompletedStatus, Test-PostClosePipelineCompleted,
     New-PostCloseResearchStatus, Get-PostClosePipelineStatus

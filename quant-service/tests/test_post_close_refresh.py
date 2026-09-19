@@ -14,6 +14,45 @@ from app.post_close_refresh_service import (
     run_post_close_refresh,
 )
 from app.request_models import PostCloseRefreshRequest
+from app.settled_limit_pool_repository import (
+    CLOSED_AT_LIMIT_PREDICATE,
+    SETTLED_LIMIT_POOL_STATUS_SQL,
+    SOURCE as SETTLED_LIMIT_POOL_SOURCE,
+    settled_limit_pool_payload,
+    settled_limit_pool_query,
+)
+
+
+class SettledLimitPoolProbeTests(unittest.TestCase):
+    """The completeness probe must judge the pool by the rule that filled it."""
+
+    def test_probe_reuses_the_writer_predicate_and_counts_distinct_symbols(self):
+        # daily_trade_limits holds one row per provider, so the join fans out;
+        # counting join rows instead of symbols made a complete 2026-09-18 pool
+        # look like 80 of 155.
+        self.assertIn(CLOSED_AT_LIMIT_PREDICATE, SETTLED_LIMIT_POOL_STATUS_SQL)
+        self.assertIn("count(DISTINCT bar.symbol)", SETTLED_LIMIT_POOL_STATUS_SQL)
+
+    def test_query_scopes_stored_rows_to_the_requested_session(self):
+        sql, params = settled_limit_pool_query(date(2026, 9, 18))
+        self.assertEqual(sql, SETTLED_LIMIT_POOL_STATUS_SQL)
+        # The derived rows are dated by the bar's availability, which rolls past
+        # midnight on a repaired session, so the identity key is the only safe
+        # way to scope them to a trade date.
+        self.assertEqual(
+            params,
+            (date(2026, 9, 18), f"{SETTLED_LIMIT_POOL_SOURCE}:limit_up_pool:%:2026-09-18"),
+        )
+
+    def test_payload_shape_is_what_the_pipeline_guard_reads(self):
+        payload = settled_limit_pool_payload(
+            {"expected_symbols": 80, "stored_symbols": 31}, date(2026, 9, 18))
+        self.assertEqual(payload["trade_date"], "2026-09-18")
+        self.assertEqual(payload["limit_pool"], {"expected_symbols": 80, "stored_symbols": 31})
+
+    def test_absent_row_reads_as_zero_rather_than_raising(self):
+        payload = settled_limit_pool_payload(None, date(2026, 9, 18))
+        self.assertEqual(payload["limit_pool"], {"expected_symbols": 0, "stored_symbols": 0})
 
 
 class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):

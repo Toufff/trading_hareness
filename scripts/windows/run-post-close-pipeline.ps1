@@ -13,9 +13,14 @@ param(
     # provider response. Point a curated pool
     # here instead once one is actually maintained (POST /api/v1/universes/members).
     [string]$UniverseKey = 'all_a',
-    # Earliest the exchange publishes a usable end-of-day cross-section. Before
-    # this the daily bars exist but the limit pools do not, and a run would
-    # record a partial date as done.
+    # Wall-clock floor only: the earliest the licensed close cross-section has
+    # ever been complete (15:58 on 2026-09-15, 16:02 on 2026-09-11, 16:04 on
+    # 2026-09-17). It is not a readiness claim. Nothing downstream trusts the
+    # clock -- Test-EquityDateReady fails closed on a half-fetched cross-section
+    # and Test-PostCloseLateDatasetsReady fails closed while the derived close
+    # limit pool is still shorter than those bars say it should be -- so an
+    # early run records what is missing and the 30-minute repetition retries it
+    # rather than sealing a partial date.
     [string]$AfterHHmm = '1600',
     [string]$UntilHHmm = '2330',
     # Run even outside the window / on a weekend / when the date already
@@ -143,7 +148,8 @@ $laneState = $null
 if (Get-ContractValue $latest 'run.summary') { $laneState = $latest.run.summary.PSObject.Properties['strategy_lanes'] }
 $selectionState = if ($laneState) { $laneState.Value.PSObject.Properties['review_selection_version'] } else { $null }
 $bundleState = if ($laneState) { $laneState.Value.PSObject.Properties['report_bundle'] } else { $null }
-if (-not $Force -and (Test-EquityDateReady $health $today) -and $laneState -and
+$lateSkip = Get-PostCloseLateDatasetState -Health $health -TradeDate $today
+if (-not $Force -and (Test-EquityDateReady $health $today) -and $lateSkip['ready'] -and $laneState -and
     $laneState.Value.as_of_date -eq $today -and $laneState.Value.status -eq 'completed' -and
     $laneState.Value.version -eq 'short-term-lanes-discovery-split-2026-09-13' -and $selectionState -and
     $selectionState.Value -eq 'shared-research-coverage-2026-09-16' -and $bundleState -and
@@ -168,7 +174,7 @@ $response = $null
 $requestError = $null
 try {
     $stage = 'equity_ingestion'
-    [void](Write-PipelineRecord -Record @{status='running'})
+    [void](Write-PipelineRecord -Record @{status='running'; late_datasets=$lateSkip})
     if (-not (Test-EquityDateReady $health $today)) {
       $response = Invoke-RestMethod -Method Post -Uri "$ApiBase/api/v1/pipeline/daily" `
         -Headers @{ 'X-Quant-Write-Key' = $config['QUANT_WRITE_API_KEY']; 'Content-Type' = 'application/json' } `
@@ -225,10 +231,15 @@ if (Test-EquityDateReady $after $today) {
         }
     }
     } catch { $record['market_refresh_error'] = $_.Exception.Message }
+    # Re-probe: $after was read before the refresh ran limit_ladder, so it
+    # cannot see the pool this run just derived.
+    $lateDatasets = Get-PostCloseLateDatasetState -Health (Read-RequestedEquityStatus) -TradeDate $today
 } else {
     $record['ingestion_error'] = 'Requested equity cross-section incomplete; independent flow strategies still run against their own coverage gate'
     $record['equity_readiness'] = Get-ContractValue $after 'daily_control_plane'
+    $lateDatasets = Get-PostCloseLateDatasetState -Health $after -TradeDate $today
 }
+$record['late_datasets'] = $lateDatasets
 
 try {
     # Persist the independently reviewable strategy lists and their reports.
@@ -285,8 +296,13 @@ try {
         $record[$field.Key] = $field.Value
     }
     $record['strategy_status'] = 'completed'
+    # A short close limit pool degrades the run even when lanes published: the
+    # date must not be recorded as landed, so the half-hourly repetition sees
+    # the skip condition fail and re-runs the refresh (and its limit_ladder
+    # stage) instead of skipping the same partial evening away.
     $record['status'] = Get-PostClosePipelineStatus `
-        -Degraded ($record.ContainsKey('market_refresh_error') -or $record.ContainsKey('ingestion_error')) `
+        -Degraded ($record.ContainsKey('market_refresh_error') -or $record.ContainsKey('ingestion_error') -or
+            -not $lateDatasets['ready']) `
         -ResearchStatus $record['research_status']
     # Independent scopes: a successful scan is not a published recommendation.
     $record['recommendation_status'] = Get-ContractValue $readback 'run.summary.recommendation_pool.status'

@@ -54,6 +54,60 @@ if ((New-PostCloseResearchStatus -ReviewCoverage $parsedOpen -TradeDate '2026-09
     throw 'An empty missing_symbols list must not override a plan with zero completed reviews'
 }
 
+# --- late-arriving datasets: function level -------------------------------
+# The close limit pool is derived from the same session's bars, so "how many
+# symbols should be in it" comes from those bars, never from the wall clock.
+function New-ReadinessPayload([int]$Expected, [int]$Stored, [string]$Date = '2026-09-18') {
+    return ("{""daily_control_plane"":{""trade_date"":""$Date"",""state"":""ready""}," +
+        """late_datasets"":{""trade_date"":""$Date"",""source"":""longhuvip_composite_close_limit_derived""," +
+        """limit_pool"":{""expected_symbols"":$Expected,""stored_symbols"":$Stored}}}") | ConvertFrom-Json
+}
+
+$full = Get-PostCloseLateDatasetState -Health (New-ReadinessPayload 80 80) -TradeDate '2026-09-18'
+if (-not $full['ready']) { throw 'A pool matching the bars-derived expectation must be ready' }
+if ($full['reason']) { throw 'A ready late-dataset state must not carry a reason' }
+if ($full['expected_limit_up_symbols'] -ne 80 -or $full['stored_limit_pool_symbols'] -ne 80) {
+    throw 'The state must carry both counts for the pipeline record'
+}
+
+# The defect this guard exists for: lanes publish, the derived pool is short,
+# and every later repetition used to skip the date for the rest of the evening.
+$short = Get-PostCloseLateDatasetState -Health (New-ReadinessPayload 80 0) -TradeDate '2026-09-18'
+if ($short['ready']) { throw 'An empty pool on a day whose bars show 80 limit-ups must not be ready' }
+if ($short['reason'] -notmatch '0 of the 80') { throw 'A short pool must name both counts in its reason' }
+if ((Get-PostCloseLateDatasetState -Health (New-ReadinessPayload 80 79) -TradeDate '2026-09-18')['ready']) {
+    throw 'A partially derived pool is still short, not merely smaller'
+}
+
+# An upsert never deletes, so a revised limit price can leave an extra row
+# behind. Only a short pool means the stage still owes work.
+if (-not (Test-PostCloseLateDatasetsReady (New-ReadinessPayload 80 81) '2026-09-18')) {
+    throw 'A pool larger than the current expectation is not a defect'
+}
+# A genuine no-limit-up session has no bars-derived expectation to violate.
+if (-not (Test-PostCloseLateDatasetsReady (New-ReadinessPayload 0 0) '2026-09-18')) {
+    throw 'Zero expected limit-ups must not block a date forever'
+}
+
+# Fail closed on anything unusable: an absent probe (an older
+# equity-readiness.py), a probe for a different session, or missing counts.
+$absent = Get-PostCloseLateDatasetState -Health ('{"daily_control_plane":{"trade_date":"2026-09-18","state":"ready"}}' | ConvertFrom-Json) -TradeDate '2026-09-18'
+if ($absent['ready']) { throw 'An absent late-dataset probe must fail closed' }
+if ($absent['reason'] -notmatch 'absent') { throw 'An absent probe must say so' }
+if ((Get-PostCloseLateDatasetState -Health $null -TradeDate '2026-09-18')['ready']) {
+    throw 'A null readiness payload must fail closed' }
+$wrongDate = Get-PostCloseLateDatasetState -Health (New-ReadinessPayload 80 80 '2026-09-17') -TradeDate '2026-09-18'
+if ($wrongDate['ready']) { throw 'A probe for another session must not clear the requested date' }
+foreach ($shape in @(
+    '{"late_datasets":{"trade_date":"2026-09-18","limit_pool":{}}}',
+    '{"late_datasets":{"trade_date":"2026-09-18","limit_pool":{"expected_symbols":80}}}',
+    '{"late_datasets":{"trade_date":"2026-09-18"}}'
+)) {
+    if ((Get-PostCloseLateDatasetState -Health ($shape | ConvertFrom-Json) -TradeDate '2026-09-18')['ready']) {
+        throw "An unusable late-dataset shape must fail closed: $shape"
+    }
+}
+
 # --- top-level status: function level -------------------------------------
 if ((Get-PostClosePipelineStatus -Degraded $false -ResearchStatus 'complete') -ne 'completed') { throw 'Closed round must stay completed' }
 if ((Get-PostClosePipelineStatus -Degraded $false -ResearchStatus 'research_due') -ne 'completed_research_due') {
@@ -80,6 +134,17 @@ if ($source -notmatch "\`$record\['strategy_status'\] = 'completed'") { throw 's
 if ($source -notmatch "\`$record\['status'\] = Get-PostClosePipelineStatus") { throw 'Top-level status must come from the shared rule' }
 if ($source -notmatch 'Test-PostClosePipelineCompleted \$record\[''status''\]') { throw 'Exit gate must accept an owed-research completion' }
 if ($source -match "if \(\`$record\['status'\] -ne 'completed'\)") { throw 'A raw completed equality survived in the exit gate' }
+
+# --- the late-dataset guard is actually wired into both paths --------------
+if ($source -notmatch "\`$lateSkip\['ready'\] -and") { throw 'The same-date skip must require the late datasets too' }
+if ($source -notmatch "-not \`$lateDatasets\['ready'\]") {
+    throw 'A short late dataset must degrade the recorded status, not be recorded as completed'
+}
+if ($source -notmatch "\`$record\['late_datasets'\] = \`$lateDatasets") {
+    throw 'The pipeline record must carry what the late-dataset probe saw'
+}
+# The wall-clock floor is a floor, not a readiness claim; 16:30 was the old one.
+if ($source -notmatch "\[string\]\`$AfterHHmm = '1600',") { throw 'The post-close floor must be 16:00' }
 
 foreach ($name in @('strategy_governance_dispatched','strategy_governance_dispatch_failed','strategy_governance_waiting')) {
     if ($source -notmatch [regex]::Escape($name)) { throw "Governance sidecar status '$name' is missing" }

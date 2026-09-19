@@ -11,6 +11,7 @@ from psycopg.rows import dict_row
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'quant-service'))
 from app.daily_control_plane import status_query, status_payload
 from app.db_dsn import connection_params
+from app.settled_limit_pool_repository import settled_limit_pool_payload, settled_limit_pool_query
 
 
 def main():
@@ -27,13 +28,22 @@ def main():
     with psycopg.connect(**connection_params(config), row_factory=dict_row, connect_timeout=10,
                         options='-c default_transaction_read_only=on -c statement_timeout=30000') as c:
         sql, params = status_query(a.date)
+        payload = {'daily_control_plane': status_payload(c.execute(sql, params).fetchall())}
+        # The close limit pool is derived from the bars above rather than fetched,
+        # so its expected size is a property of this same cross-section. Reporting
+        # both numbers lets the pipeline runner refuse to call the date landed
+        # while the derived pool is still short, instead of trusting a clock.
+        # Undated invocations have no session to compare against and get no block.
+        if a.date is not None:
+            pool_sql, pool_params = settled_limit_pool_query(a.date)
+            payload['late_datasets'] = settled_limit_pool_payload(
+                c.execute(pool_sql, pool_params).fetchone(), a.date)
         # ASCII-only on purpose: run-post-close-pipeline.ps1 parses this stdout
         # with ConvertFrom-Json under whatever console codepage the scheduled
         # task host gives pwsh (GBK on this machine). Raw UTF-8 Chinese in the
         # reason text was decoded as GBK there and broke the JSON string
         # (2026-09-18 20:40 preflight failure); \uXXXX escapes survive any codepage.
-        print(json.dumps({'daily_control_plane': status_payload(c.execute(sql, params).fetchall())},
-                         ensure_ascii=True))
+        print(json.dumps(payload, ensure_ascii=True))
 
 
 if __name__ == '__main__':

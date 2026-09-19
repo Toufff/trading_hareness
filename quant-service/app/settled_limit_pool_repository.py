@@ -11,6 +11,57 @@ from typing import Any
 
 SOURCE = "longhuvip_composite_close_limit_derived"
 
+#: The one predicate that decides "this symbol closed at its limit".  Both the
+#: writer below and the read-only completeness probe use it, so the pool can
+#: never be judged complete against a different rule than the one that filled
+#: it.  ``daily_trade_limits`` holds one row per provider, so a symbol that has
+#: both a licensed and a Tushare limit row joins twice: the writer collapses the
+#: duplicates through ``event_identity_key`` and the probe must therefore count
+#: DISTINCT symbols, not join rows.
+CLOSED_AT_LIMIT_PREDICATE = """bar.trading_date=%s AND bar.close IS NOT NULL
+   AND limits.limit_up IS NOT NULL AND bar.close >= limits.limit_up - 0.005"""
+
+SETTLED_LIMIT_POOL_STATUS_SQL = f"""SELECT
+     (SELECT count(DISTINCT bar.symbol)::int
+        FROM quant.canonical_bars_daily bar
+        JOIN quant.daily_trade_limits limits
+          ON limits.symbol=bar.symbol AND limits.trading_date=bar.trading_date
+       WHERE {CLOSED_AT_LIMIT_PREDICATE}) AS expected_symbols,
+     (SELECT count(*)::int FROM quant.market_events
+       WHERE event_identity_key LIKE %s) AS stored_symbols"""
+
+
+def settled_limit_pool_query(trade_date: date) -> tuple[str, tuple]:
+    """Return the read-only completeness probe for one date's close limit pool.
+
+    The pool is *derived* from bars and limits this database already holds, so
+    its expected size is knowable from the same rows rather than from the wall
+    clock: whatever the vendor publishes late, a pool that is smaller than the
+    bars say it should be means the ``limit_ladder`` stage has not run against
+    the settled cross-section yet.
+    """
+    return SETTLED_LIMIT_POOL_STATUS_SQL, (
+        trade_date, f"{SOURCE}:limit_up_pool:%:{trade_date.isoformat()}")
+
+
+def settled_limit_pool_payload(row: Any, trade_date: date) -> dict[str, Any]:
+    """Shape the probe row for the pipeline runner's late-dataset decision.
+
+    ``stored`` may legitimately exceed ``expected`` (an upsert never deletes, so
+    a revised limit price leaves yesterday's row behind); only a *short* pool is
+    evidence that the stage still owes work, and the PowerShell guard decides
+    that, not this function.
+    """
+    values = dict(row or {})
+    return {
+        "trade_date": trade_date.isoformat(),
+        "source": SOURCE,
+        "limit_pool": {
+            "expected_symbols": int(values.get("expected_symbols") or 0),
+            "stored_symbols": int(values.get("stored_symbols") or 0),
+        },
+    }
+
 
 def persist_settled_limit_pool(database: Any, trade_date: date) -> dict[str, Any]:
     """Persist close-at-limit facts without claiming intraday sealing history.
@@ -21,7 +72,7 @@ def persist_settled_limit_pool(database: Any, trade_date: date) -> dict[str, Any
     """
     with database.transaction() as connection:
         rows = connection.execute(
-            """SELECT bar.symbol,instrument.name,bar.close,bar.high,bar.volume,bar.amount,
+            f"""SELECT bar.symbol,instrument.name,bar.close,bar.high,bar.volume,bar.amount,
                       limits.limit_up,bar.available_at,
                       fundamentals.turnover_rate,fundamentals.volume_ratio
                  FROM quant.canonical_bars_daily bar
@@ -35,9 +86,7 @@ def persist_settled_limit_pool(database: Any, trade_date: date) -> dict[str, Any
                     ORDER BY CASE WHEN item.provider=bar.selected_provider THEN 0 ELSE 1 END,
                              item.available_at DESC LIMIT 1
                  ) fundamentals ON true
-                WHERE bar.trading_date=%s AND bar.close IS NOT NULL
-                  AND limits.limit_up IS NOT NULL
-                  AND bar.close >= limits.limit_up - 0.005
+                WHERE {CLOSED_AT_LIMIT_PREDICATE}
                 ORDER BY bar.symbol""",
             (trade_date,),
         ).fetchall()
@@ -89,4 +138,7 @@ def persist_settled_limit_pool(database: Any, trade_date: date) -> dict[str, Any
     }
 
 
-__all__ = ["SOURCE", "persist_settled_limit_pool"]
+__all__ = [
+    "CLOSED_AT_LIMIT_PREDICATE", "SETTLED_LIMIT_POOL_STATUS_SQL", "SOURCE",
+    "persist_settled_limit_pool", "settled_limit_pool_payload", "settled_limit_pool_query",
+]

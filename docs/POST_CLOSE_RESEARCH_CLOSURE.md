@@ -36,9 +36,54 @@
 
 由 Claude 会话的 cron 承担：工作日 17:20 触发 `/stock-scan 盘后研究`，去重标记 `tail-done` 同款，读取 `post-close-pipeline.jsonl` 最新一轮；`research_status=research_due` 时按 `references/research-closure.md` 完成 review_plan 全部对象、`--review-file` 落库、重建报告，再按用户既有授权走 `$stock-pool` 决策与 `$ths-watchlist` 同步。仓库内只需保证修改 B 的字段可读。
 
+## 修改 D：16:00 起跑与迟到数据集闸门（2026-09-19）
+
+文件：`scripts/windows/install-post-close-pipeline-task.ps1`、`scripts/windows/run-post-close-pipeline.ps1`、
+`scripts/windows/post-close-contract.psm1`、`scripts/equity-readiness.py`、
+`quant-service/app/settled_limit_pool_repository.py`，及两侧测试。
+
+- 首跑时间 16:40 → **16:00**，重试窗口 6h → 7h（末次 23:00，仍在 `-UntilHHmm 2330` 内）；
+  `run-post-close-pipeline.ps1` 的 `-AfterHHmm` 默认同步改为 `1600`。
+- `-AfterHHmm` **只是时钟下限，不是就绪判断**。旧注释写的“16:30 之前日线有了但涨停池还没有”，
+  在当前开盘啦（longhu）链路上已经不成立：收盘涨停池由
+  `settled_limit_pool_repository.persist_settled_limit_pool` 从本库已有的
+  `canonical_bars_daily` + `daily_trade_limits` **派生**，不向任何厂商再取一次数，
+  因此它相对厂商不会迟到，只会相对**我们自己**迟到——当 `limit_ladder` 阶段跑在结算日线到齐之前、
+  或该阶段返回 blocked 时，池子会比日线该有的短。
+- 实测（10 个交易日，只读）：授权收盘截面最早可用时间在 15:58—16:41 之间浮动，
+  16:00 不保证到齐；但 `Test-EquityDateReady` 对半截截面本来就 fail closed
+  （2026-09-18 即如此：16:43—18:42 连续记 `partial`，20:29 才 `completed`）。
+  派生涨停池在 12 个 longhu 结算日上 expected 与 stored **全部相等**，未观察到偏差。
+- 缺口在**同日跳过条件**：它只校验 equity readiness + lane 版本三连 + 报告文件回读，
+  从不看 `limit_ladder`。而顶层 `status` 的 `Degraded` 只取 `market_refresh_error` /
+  `ingestion_error`（都是异常/截面闸门），刷新返回体里 `stages.limit_ladder.status='blocked'`
+  只写进 `refresh_stage_diagnostics`、不降级。两者相加：一轮池子残缺的运行会被记成
+  `completed`，随后每半小时都 `skipped`，把残缺的一天封存到收盘窗口结束。
+- 闸门做法：`scripts/equity-readiness.py` 在 `--date` 模式下多返回一段
+  `late_datasets.limit_pool = {expected_symbols, stored_symbols}`。
+  `expected_symbols` 用**写入池子的同一条谓词**（`CLOSED_AT_LIMIT_PREDICATE`，
+  `close >= limit_up - 0.005`）从**已有日线**里数，绝不看时钟；
+  `daily_trade_limits` 一个 symbol 有多家 provider 行，join 会扇出，所以必须
+  `count(DISTINCT bar.symbol)`（2026-09-18 用 join 行数会把完整的 80 只误读成 155）。
+  `stored_symbols` 按 `event_identity_key`（含交易日）统计，不按 `occurred_at` 的日期——
+  派生行的时间戳取自日线 `available_at`，补历史时会跨到次日。
+- 判定放在纯 PowerShell 的 `Get-PostCloseLateDatasetState` / `Test-PostCloseLateDatasetsReady`
+  （`post-close-contract.psm1`），一律 fail closed：探针缺失、探针日期对不上、计数字段缺失都算未就绪；
+  `expected > 0 且 stored < expected` 算未就绪；`stored > expected` **不算缺陷**
+  （upsert 不删行，限价修正会留下旧行）；`expected = 0` 没有可违反的期望，放行。
+- 接线两处：同日跳过条件加 `$lateSkip['ready']`；记录路径把
+  `-not $lateDatasets['ready']` 并入 `Degraded`，于是该轮记 `partial`（非终态成功）、
+  `exit 1`，下一次半小时重试因跳过条件不成立而重新跑刷新与 `limit_ladder`。
+  记录里带 `late_datasets`（含 expected/stored 与 reason）便于事后判读。
+- 刷新后必须**重新探一次** readiness：`$after` 是在市场刷新之前读的，看不到本轮刚派生出的池子。
+
 ## 验收
 
 1. `pytest tests/test_daily_control_plane.py tests/test_migration_contracts.py tests/test_repository_workflow_policy.py -q` 通过；`ruff check app tests` 通过；`git diff --check` 通过。
 2. PowerShell：`pwsh -File scripts/windows/tests/test-post-close-pipeline-contract.ps1` 通过，且现有 `test-*.ps1` 不受影响。
 3. 用生产库只读跑 `scripts/equity-readiness.py --date 2026-09-18`：期望 `state=ready`，`by_exchange.BJ` 显示 0 覆盖且未参与门槛，`expected_delta=+305` 并带来源分组。
 4. 发布后 16:00—23:00 重试窗口（2026-09-19 起；原 16:40—22:40）外用 `-Force` 重跑一次流水线，日志出现 `research_status=research_due` 与 `research_deadline`，随后由会话完成研究闭环，再次读回应为 `complete`。
+5. 修改 D：`scripts/equity-readiness.py --date <交易日>` 只读跑生产库，`late_datasets.limit_pool` 的
+   `expected_symbols` 与 `stored_symbols` 相等（2026-09-18 为 80/80，2026-09-15 为 31/31）；
+   `pytest tests/test_post_close_refresh.py -q` 与
+   `pwsh -File scripts/windows/tests/test-post-close-pipeline-contract.ps1` 通过。
