@@ -135,9 +135,19 @@ def _limit_ratio(symbol: str, name: str) -> tuple[Decimal, str]:
 
 
 def build_control_rows(daily_rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Build transparent same-day controls without claiming corporate-action history."""
+    """Build only the same-day controls this vendor can actually derive.
+
+    The vendor publishes no corporate-action history, so no ``adj_factor``
+    key is returned at all.  Emitting an identity ``1`` placeholder used to
+    look honest (it carried ``factor_semantics='same_day_identity_only'``)
+    but nothing downstream read that marker: it was promoted into
+    ``quant.canonical_bars_daily.adj_factor`` exactly like a real cumulative
+    tushare factor and made every cross-date price adjustment silently
+    compute an unadjusted series instead of failing closed.  A missing
+    factor is the honest contract; it is fetched separately from the tushare
+    ``adj_factor`` route by ``adjustment_factor_maintenance``.
+    """
     limits: list[dict[str, Any]] = []
-    factors: list[dict[str, Any]] = []
     for row in daily_rows:
         symbol, name = str(row["ts_code"]), str(row.get("name") or "")
         pre_close = _decimal(row.get("pre_close"))
@@ -152,12 +162,7 @@ def build_control_rows(daily_rows: list[dict[str, Any]]) -> dict[str, list[dict[
             "derivation": "preclose_times_board_limit_ratio", "board_rule": rule,
             "exception_warning": "IPO/resumption/no-limit exceptions are not inferred",
         })
-        factors.append({
-            "ts_code": symbol, "trade_date": row["trade_date"], "adj_factor": "1",
-            "factor_semantics": "same_day_identity_only",
-            "warning": "not a historical corporate-action adjustment factor",
-        })
-    return {"stk_limit": limits, "adj_factor": factors}
+    return {"stk_limit": limits}
 
 
 __all__ = [

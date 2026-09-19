@@ -44,8 +44,24 @@ function Get-LogonTypeArguments {
 }
 
 function Install-SharedPeerTunnelTask {
+    # The plural fan-out installs the intraday tunnel (unguarded) and then the
+    # batch tunnel (reported, not raised). The singular fallback exists for the
+    # revert path, which runs the PREVIOUS release's tree: a release published
+    # before the batch profile existed carries only the singular script, and
+    # reverting to it must still install the tunnel it does have. Same reason as
+    # Get-LogonTypeArguments above.
     param([Parameter(Mandatory)][string]$RuntimeRoot)
-    $installer = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+    $installer = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-tasks.ps1'
+    if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+        $installer = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+        # Reverting to a tree that predates the batch profile: nothing in it can
+        # install, verify or supervise the batch tunnel, so the task a newer
+        # release registered is disabled instead of being left enabled and
+        # pointed at a tree with no batch profile. SilentlyContinue because
+        # "never registered" is the ordinary case, not an error.
+        Get-ScheduledTask -TaskName 'trading-hareness-shared-peer-batch-tunnel' -ErrorAction SilentlyContinue |
+            Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+    }
     $extra = Get-LogonTypeArguments -Installer $installer
     & $installer -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
         -PlatformRoot $platform @extra | Out-Null
@@ -107,9 +123,19 @@ try {
     # matters (Stop-ScheduledTask kills the supervisor before it can record
     # an expected exit).
     if ($oldTarget) { & (Join-Path $oldTarget 'scripts\windows\stop-stock-dashboard.ps1') -PlatformRoot $platform | Out-Null }
-    if (-not $keepTunnel) { Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels' -ErrorAction SilentlyContinue }
+    # Both tunnels are stopped together and spared together: the gate judges
+    # both tasks, so a skip already proved the batch one Running, healthy and
+    # rooted under `current`.
+    if (-not $keepTunnel) {
+        Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels' -ErrorAction SilentlyContinue
+        Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-batch-tunnel' -ErrorAction SilentlyContinue
+    }
     Stop-ScheduledTask -TaskName 'trading-hareness-dashboard-runtime' -ErrorAction SilentlyContinue
     [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $ReleaseId)
+    # The instant `current` actually moved, recorded in release-state.json
+    # below. The release id's own timestamp is not it (it is stamped before the
+    # publish's test suite runs), and the tunnel pin refresh needs the real one.
+    $activatedAt = [DateTimeOffset]::Now.ToString('o')
     & (Join-Path $layout.CurrentPath 'scripts\windows\install-stock-dashboard-task.ps1') -RepositoryRoot $layout.CurrentPath -PlatformRoot $platform | Out-Null
     if ($keepTunnel) {
         Write-Verbose 'Shared-peer tunnel task left untouched by the reinstall gate.'
@@ -148,19 +174,25 @@ try {
         $tunnelRelease = $ReleaseId
         & (Join-Path $layout.CurrentPath 'scripts\shared-peer\verify-shared-runtime.ps1') | Out-Null
     }
-    if ($keepTunnel) {
-        # Only now: activation and verification have both succeeded, so the
-        # lifecycle receipt cannot contradict a revert that reinstalled after all.
-        Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $tunnelPlan -Context 'switch-stock-release.ps1'
-    }
     [void](Set-StockReleaseState -PlatformRoot $platform -State @{
         active_release = $ReleaseId
         previous_release = if ($oldRelease) { $oldRelease } else { $null }
+        activated_at = $activatedAt
         last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = 'verified_after_switch'; shared_peer_tunnel = $tunnelOutcome }
         last_failed_release = $null
         tunnel_release = if ($tunnelRelease) { $tunnelRelease } else { $null }
         tunnel_ssh_target_sha256 = if ($keepTunnel) { Get-CarriedTunnelSshTargetPin } else { Get-TunnelSshTargetPin }
     })
+    if ($keepTunnel) {
+        # Only now: activation, post-switch verification AND the release-state
+        # write have all succeeded, which is what Write-StockTunnelReinstallSkipEvent's
+        # own contract requires. The state write can still throw (a state file
+        # locked by a concurrent get-stock-release-status run, a full disk), and
+        # this script's catch then reverts and may reinstall the tunnel, so a
+        # receipt written before it would be one the revert's own events
+        # contradict. Same ordering as publish-stock-release.ps1's.
+        Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $tunnelPlan -Context 'switch-stock-release.ps1'
+    }
     [pscustomobject]@{
         status = 'switched'
         release_id = $ReleaseId
@@ -183,6 +215,7 @@ try {
             $keepTunnelRevert = ($null -ne $revertPlan) -and ([string]$revertPlan.decision -eq 'skip')
             if ($keepTunnelRevert -and [string]$revertPlan.tunnel_release) { $tunnelRelease = [string]$revertPlan.tunnel_release }
             [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $oldRelease)
+            $revertActivatedAt = [DateTimeOffset]::Now.ToString('o')
             & (Join-Path $layout.CurrentPath 'scripts\windows\install-stock-dashboard-task.ps1') -RepositoryRoot $layout.CurrentPath -PlatformRoot $platform | Out-Null
             if ($keepTunnelRevert) {
                 Write-Verbose 'Shared-peer tunnel task left untouched by the reinstall gate during revert.'
@@ -200,18 +233,21 @@ try {
                 } catch { }
             } while ([DateTime]::UtcNow -lt $revertDeadline)
             if ([DateTime]::UtcNow -ge $revertDeadline) { throw 'Reverted release did not become healthy' }
-            if ($keepTunnelRevert) {
-                Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $revertPlan -Context 'switch-stock-release.ps1:revert'
-            }
             [void](Set-StockReleaseState -PlatformRoot $platform -State @{
                 active_release = $oldRelease
                 previous_release = if ($state.PSObject.Properties['previous_release']) { $state.previous_release } else { $null }
+                activated_at = $revertActivatedAt
                 last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = 'verified_after_switch_revert' }
                 last_failed_release = $ReleaseId
                 failure_message = $failure.Exception.Message
                 tunnel_release = if ($tunnelRelease) { $tunnelRelease } else { $null }
                 tunnel_ssh_target_sha256 = if ($keepTunnelRevert) { Get-CarriedTunnelSshTargetPin } else { Get-TunnelSshTargetPin }
             })
+            # After the revert's own release-state write, for the same reason as
+            # on the forward path: until it lands, nothing here is a fact.
+            if ($keepTunnelRevert) {
+                Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $revertPlan -Context 'switch-stock-release.ps1:revert'
+            }
         } catch { Write-Warning "Automatic revert to $oldRelease also failed: $($_.Exception.Message)" }
     }
     throw $failure

@@ -81,11 +81,18 @@ function Stop-ProductionRuntime {
     # trigger after a drop, or a reboot). That release is pinned by
     # Get-StockReleaseRetentionPlan and re-checked by the gate, so retention
     # can never delete the tree the live tunnel is executing from.
+    #
+    # Both tunnels are stopped together, and both are spared together: they are
+    # registered by the same fan-out installer out of the same tree, and the
+    # gate judges both tasks (Get-StockTunnelReinstallDecision's AdditionalTasks),
+    # so a 'skip' already means the batch task is Running, healthy and rooted
+    # under `current` as well.
     param([string]$RuntimeRoot, [switch]$KeepTunnelTask)
     $stop = Join-Path $RuntimeRoot 'scripts\windows\stop-stock-dashboard.ps1'
     if (Test-Path -LiteralPath $stop -PathType Leaf) { & $stop -PlatformRoot $platform | Out-Null }
     if (-not $KeepTunnelTask) {
         Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-tunnels' -ErrorAction SilentlyContinue
+        Stop-ScheduledTask -TaskName 'trading-hareness-shared-peer-batch-tunnel' -ErrorAction SilentlyContinue
     }
     Stop-ScheduledTask -TaskName 'trading-hareness-dashboard-runtime' -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName 'trading-hareness-post-close-pipeline' -ErrorAction SilentlyContinue
@@ -128,12 +135,39 @@ function Enter-ProductionPublishLock {
 }
 
 function Install-SharedPeerTunnelTask {
-    # Stops, re-registers and health-gates the shared-peer tunnel task from
+    # Stops, re-registers and health-gates the shared-peer tunnel tasks from
     # $RuntimeRoot. Used both by the normal start path and by the post-switch
     # repair below, which reinstalls a tunnel the gate spared when shared
     # runtime verification then came back degraded.
+    #
+    # The plural install-shared-tunnel-tasks.ps1 is the entry point: it installs
+    # the intraday tunnel first and unguarded (its failure still throws exactly
+    # as it did when this was the only task), then the batch tunnel, whose
+    # failure it reports and records rather than raising -- batch traffic is a
+    # throughput optimization and must never turn a good release into a failed
+    # one. The degraded-startup try/catch around this call therefore keeps its
+    # old meaning. Passing -RequireBatch would change that and is deliberately
+    # not done here; see docs/PEER_BATCH_TUNNEL_ROLLOUT.md section 1.
+    #
+    # The singular fallback is for the rollback path, which runs the PREVIOUS
+    # release's copy of this script against the PREVIOUS release's tree: a
+    # release published before the batch profile existed has no plural script,
+    # and reverting to it must still install the tunnel it does have. Same
+    # reason as Get-LogonTypeArguments above.
     param([string]$RuntimeRoot)
-    $tunnelInstaller = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+    $tunnelInstaller = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-tasks.ps1'
+    if (-not (Test-Path -LiteralPath $tunnelInstaller -PathType Leaf)) {
+        $tunnelInstaller = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+        # The tree being installed from predates the batch profile, so nothing
+        # here can install, verify or supervise the batch tunnel -- but a
+        # newer release may well have left its task registered and enabled.
+        # Leaving it enabled points a launcher at a tree with no batch profile
+        # in it, so it is disabled alongside the install rather than left to
+        # retry. SilentlyContinue because "never registered" is the ordinary
+        # case and is not an error.
+        Get-ScheduledTask -TaskName 'trading-hareness-shared-peer-batch-tunnel' -ErrorAction SilentlyContinue |
+            Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+    }
     $tunnelExtra = Get-LogonTypeArguments -Installer $tunnelInstaller
     & $tunnelInstaller -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
         -PlatformRoot $platform @tunnelExtra | Out-Null
@@ -291,6 +325,9 @@ $fallbackRoot = if ($previousTarget) { $previousTarget } else { $source }
 $previousTunnelRelease = if ($previousState.PSObject.Properties['tunnel_release']) { [string]$previousState.tunnel_release } else { '' }
 $activated = $false
 $activationAttempted = $false
+# Set when the `current` junction is actually moved, so the rollback paths can
+# tell whether it ever moved at all. Empty means it never did.
+$activatedAt = ''
 
 try {
     $app = Join-Path $stagingRoot 'app'
@@ -400,6 +437,13 @@ try {
     $keepTunnel = ($null -ne $tunnelPlan) -and ([string]$tunnelPlan.decision -eq 'skip')
     Stop-ProductionRuntime -RuntimeRoot $fallbackRoot -KeepTunnelTask:$keepTunnel
     [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $releaseId)
+    # The instant `current` actually moved. $releaseId's own yyyyMMddTHHmmss
+    # prefix was stamped far above, BEFORE the PowerShell suites, pytest and the
+    # npm builds, so it can precede this line by tens of minutes -- and for all
+    # of that window `current` still resolved to the previous release. The
+    # tunnel pin refresh has to compare the live tunnel's started_at against
+    # this, so it is recorded in release-state.json below.
+    $activatedAt = [DateTimeOffset]::Now.ToString('o')
     $startup = Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath -KeepTunnelTask:$keepTunnel
     $tunnelStartupError = [string]$startup.shared_peer_startup_error
     $healthVerification = Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
@@ -466,6 +510,7 @@ try {
     [void](Set-StockReleaseState -PlatformRoot $platform -State @{
         active_release = $releaseId
         previous_release = if ($previousRelease -and $previousRelease -ne $releaseId) { $previousRelease } else { $null }
+        activated_at = $activatedAt
         last_verification = $verification
         last_failed_release = $null
         content_manifest_sha256 = $contentDigest
@@ -510,7 +555,7 @@ try {
             # where a clean tunnel reinstall is worth the short interruption.
             Stop-ProductionRuntime -RuntimeRoot $(if (Test-Path -LiteralPath $layout.CurrentPath) { $layout.CurrentPath } else { $fallbackRoot })
             if ($KeepStoppedOnFailure) {
-                foreach ($taskName in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-dashboard-runtime') {
+                foreach ($taskName in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-shared-peer-batch-tunnel', 'trading-hareness-dashboard-runtime') {
                     Disable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
                 }
             }
@@ -523,6 +568,7 @@ try {
             if ($rollbackCompatible) {
                 [void](Test-StockReleaseIntegrity -PlatformRoot $platform -ReleaseId $previousRelease)
                 [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $previousRelease)
+                $activatedAt = [DateTimeOffset]::Now.ToString('o')
                 if (-not $KeepStoppedOnFailure) {
                     $rollbackStartup = Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath
                     [void](Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
@@ -536,6 +582,7 @@ try {
                 [void](Set-StockReleaseState -PlatformRoot $platform -State @{
                     active_release = $previousRelease
                     previous_release = if ($previousState.PSObject.Properties['previous_release']) { $previousState.previous_release } else { $null }
+                    activated_at = $activatedAt
                     last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = $(if ($KeepStoppedOnFailure) { 'disabled_after_failed_activation' } else { 'verified_after_automatic_rollback' }) }
                     last_failed_release = $releaseId
                     failure_message = $failure.Exception.Message
@@ -548,12 +595,15 @@ try {
             } elseif ($previousRelease -and (Test-Path -LiteralPath (Join-Path $finalRoot 'app') -PathType Container)) {
                 # Never activate old code that cannot recognize an applied DB
                 # migration. Keep the new tree addressable for forward repair.
-                foreach ($taskName in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-dashboard-runtime') {
+                foreach ($taskName in 'trading-hareness-shared-peer-tunnels', 'trading-hareness-shared-peer-batch-tunnel', 'trading-hareness-dashboard-runtime') {
                     Disable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
                 }
                 [void](Set-StockReleaseState -PlatformRoot $platform -State @{
                     active_release = $releaseId
                     previous_release = $previousRelease
+                    # `current` was already moved to this release above and is
+                    # left there for forward repair; empty only if it never was.
+                    activated_at = if ($activatedAt) { $activatedAt } else { $null }
                     last_failed_release = $releaseId
                     last_verification = @{ verified_at = [DateTimeOffset]::Now.ToString('o'); result = 'stopped_schema_incompatible_rollback' }
                     failure_message = $failure.Exception.Message
@@ -576,6 +626,8 @@ try {
                 [void](Set-StockReleaseState -PlatformRoot $platform -State @{
                     active_release = $null
                     previous_release = if ($previousState.PSObject.Properties['previous_release']) { $previousState.previous_release } else { $null }
+                    # The junction was just removed: nothing is activated.
+                    activated_at = $null
                     last_verification = if ($previousState.PSObject.Properties['last_verification']) { $previousState.last_verification } else { $null }
                     last_failed_release = $releaseId
                     failure_message = $failure.Exception.Message

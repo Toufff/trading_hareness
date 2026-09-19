@@ -5,6 +5,41 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from .adjustment_factor_maintenance import (
+    REAL_FACTOR_PREDICATE_SQL,
+    pending_and_retired_dates_between,
+)
+
+
+#: Symbol-scoped adjustment coverage for one study window.
+#:
+#: The count deliberately excludes placeholders (it asks for a REAL cumulative
+#: factor, i.e. a tushare row whose declared semantics are absent or
+#: cumulative), because the repair runbook only ANNOTATES the placeholder rows
+#: and never deletes them: a bare ``count(*) > 0`` would report ``ready``
+#: forever on exactly the symbols and dates that are still damaged.
+#:
+#: ``uncovered_dates`` is the settled exchange sessions of THIS symbol that have
+#: no such factor, which is what turns the market-wide maintenance work list
+#: into a per-symbol verdict.
+ADJUSTMENT_WINDOW_SQL = f"""WITH settled AS (
+       SELECT bar.trading_date FROM quant.canonical_bars_daily bar
+        WHERE bar.symbol=%s AND bar.trading_date BETWEEN %s AND %s
+          AND bar.quality_status IN ('fresh','partial')
+          AND EXISTS (SELECT 1 FROM quant.market_trade_calendar calendar
+                       WHERE calendar.calendar_date=bar.trading_date AND calendar.is_open)
+   ), factored AS (
+       SELECT DISTINCT factor.trading_date
+         FROM quant.daily_adjustment_factors factor
+        WHERE factor.symbol=%s AND factor.trading_date BETWEEN %s AND %s
+          AND {REAL_FACTOR_PREDICATE_SQL}
+   ) SELECT (SELECT count(*) FROM factored)::int AS rows,
+            (SELECT max(trading_date) FROM factored) AS latest_date,
+            (SELECT count(*) FROM settled)::int AS settled_sessions,
+            coalesce((SELECT array_agg(trading_date ORDER BY trading_date) FROM settled
+                       WHERE trading_date NOT IN (SELECT trading_date FROM factored)),
+                     ARRAY[]::date[]) AS uncovered_dates"""
+
 
 _SPECS = (
     ("daily", "日线行情", "P0"),
@@ -31,18 +66,101 @@ def raw_api_window_summary(connection: Any, api_name: str, symbol: str, start_da
     return {"rows": int(row["rows"] or 0), "latest_date": row["latest_date"]}
 
 
+def _retired_note(retired: list[date], adjustment_retired: dict[date, dict[str, Any]]) -> str:
+    """Name the ledger evidence for a date nobody is going to repair."""
+    reasons = sorted({str(adjustment_retired[value].get("reason") or "") for value in retired
+                      if adjustment_retired.get(value)})
+    run_keys = [str(adjustment_retired[value].get("run_key") or "") for value in retired
+                if adjustment_retired.get(value)]
+    return (f"retired: {len(retired)} settled session(s) were refused by the daily-controls "
+            "coverage gate often enough to be dropped from the adjustment-factor work list, so "
+            "no repair is queued for them (" + "; ".join(reasons) + "). Clear the ledger row(s) "
+            + ", ".join(run_keys) + " after the daily cross-section is repaired.")
+
+
+def _adjustment_item(label: str, priority: str, adjustment: Any,
+                     adjustment_pending: set[date],
+                     adjustment_retired: dict[date, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Derive the adj_factor readiness item from real, symbol-scoped coverage.
+
+    ``ready`` means every settled session of THIS symbol in the window carries
+    a real cumulative factor.  ``pending`` means the ones that do not are all
+    on the maintenance job's work list, so they are expected to arrive.
+    ``retired`` means at least one of them has been dropped from that list by
+    the blocked-date ledger, so claiming a repair is queued would be false --
+    the verdict is separated from ``missing`` because the operator action is
+    different (repair the daily cross-section and clear the ledger row, rather
+    than wait).  Anything else is ``missing`` -- including the mixed case,
+    which fails closed rather than advertising a window the factor job will
+    not complete.
+    """
+    retired_details = adjustment_retired or {}
+    rows = int((adjustment or {}).get("rows") or 0)
+    latest_date = (adjustment or {}).get("latest_date")
+    settled_sessions = int((adjustment or {}).get("settled_sessions") or 0)
+    uncovered = list((adjustment or {}).get("uncovered_dates") or [])
+    queued = [value for value in uncovered if value in adjustment_pending]
+    retired = [value for value in uncovered if value in retired_details]
+    if not uncovered and settled_sessions and rows:
+        status, note = "ready", (
+            f"complete: all {settled_sessions} settled session(s) in this window carry a real "
+            "cumulative factor for this symbol")
+    elif retired:
+        status, note = "retired", _retired_note(retired, retired_details)
+    elif uncovered and len(queued) == len(uncovered):
+        status, note = "pending", (
+            f"pending: {len(uncovered)} of {settled_sessions} settled session(s) have no real "
+            "cumulative factor yet and are queued for the adjustment-factor maintenance job "
+            "(scripts/adjustment-factor-maintenance.py sync)")
+    elif uncovered:
+        status, note = "missing", (
+            f"missing: {len(uncovered)} of {settled_sessions} settled session(s) have no real "
+            f"cumulative factor and only {len(queued)} of them are on the maintenance work list; "
+            "adjusted prices over this window fail closed")
+    else:
+        status, note = "missing", (
+            "missing: no settled session in this window carries a real cumulative factor "
+            "(placeholder rows are deliberately not counted)")
+    return {"api_name": "adj_factor", "label": label, "priority": priority, "rows": rows,
+            "latest_date": str(latest_date) if latest_date else None, "status": status,
+            "settled_sessions": settled_sessions,
+            "pending_dates": [str(value) for value in queued],
+            "retired_dates": [str(value) for value in retired],
+            "missing_dates": [str(value) for value in uncovered
+                              if value not in adjustment_pending and value not in retired_details],
+            "note": note}
+
+
 def stock_window_readiness(database: Any, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
     """Report only locally persisted evidence; never trigger a provider call."""
     table_by_api = {
         "daily": "quant.canonical_bars_daily",
         "daily_basic": "quant.daily_fundamentals",
         "stk_limit": "quant.daily_trade_limits",
-        "adj_factor": "quant.daily_adjustment_factors",
     }
     with database.transaction() as connection:
+        # Adjustment factors arrive on their own maintenance lane, so an empty
+        # window here has three very different meanings: the date was never
+        # fetched at all, it is queued for the factor job, or the factor job
+        # has retired it and will never fetch it again.  The first two used to
+        # read as a bare "missing" -- and before the identity placeholder was
+        # removed they both read as a false "ready"; the third used to read as
+        # "pending ... queued", which promised a repair nobody was going to
+        # attempt.
+        pending, adjustment_retired = pending_and_retired_dates_between(
+            connection, start_date, end_date)
+        adjustment_pending = set(pending)
+        adjustment = connection.execute(
+            ADJUSTMENT_WINDOW_SQL,
+            (symbol, start_date, end_date, symbol, start_date, end_date),
+        ).fetchone()
         items: list[dict[str, Any]] = []
         for api_name, label, priority in _SPECS:
             table = table_by_api.get(api_name)
+            if api_name == "adj_factor":
+                items.append(_adjustment_item(
+                    label, priority, adjustment, adjustment_pending, adjustment_retired))
+                continue
             if table is not None:
                 row = connection.execute(
                     f"""SELECT count(*)::int rows,max(trading_date) latest_date
@@ -89,4 +207,6 @@ def stock_study_claims(database: Any, symbol: str) -> tuple[list[dict[str, Any]]
     }
 
 
-__all__ = ["raw_api_window_summary", "stock_study_claims", "stock_window_readiness"]
+__all__ = [
+    "ADJUSTMENT_WINDOW_SQL", "raw_api_window_summary", "stock_study_claims", "stock_window_readiness",
+]

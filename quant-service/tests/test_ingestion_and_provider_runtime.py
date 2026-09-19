@@ -1286,3 +1286,96 @@ class IngestionAndProviderRuntimeTests(unittest.TestCase):
 
         renew_calls = asyncio.run(check())
         self.assertGreaterEqual(renew_calls, 3)
+
+    def test_a_vendor_placeholder_factor_is_stored_as_evidence_but_never_promoted(self):
+        """The canonical UPDATE is the only place a factor becomes a bar field.
+
+        It used to be provider-agnostic, so a same-day identity placeholder
+        overwrote ``canonical_bars_daily.adj_factor`` exactly like a real
+        cumulative tushare factor -- and 1.0 is not NULL, so every
+        fail-closed adjustment consumer downstream sailed straight past it.
+        """
+        from app.tushare_normalization import normalize_rows, promotable_adjustment_factor
+
+        class Connection:
+            def __init__(self):
+                self.statements = []
+
+            def execute(self, statement, params=None):
+                self.statements.append((" ".join(statement.split()), params))
+                return self
+
+        def run(row):
+            connection = Connection()
+            count = normalize_rows(
+                connection, "adj_factor", [row], datetime(2026, 9, 18, tzinfo=timezone.utc),
+                core_apis={"adj_factor"},
+                date_parser=lambda value: date.fromisoformat(
+                    f"{str(value)[:4]}-{str(value)[4:6]}-{str(value)[6:8]}"),
+                exchange_for=lambda symbol: symbol.split(".")[1],
+                is_st_security_name=lambda _name: False,
+                # instruments-batch renamed this seam while this test was being
+                # written on another branch: registration is now one batched,
+                # sorted statement per payload instead of one call per row, so
+                # the callable takes (connection, symbols).
+                ensure_instruments=lambda *_args: None,
+                upsert_bar=lambda *_args: None, daily_bar_type=DailyBar,
+                decimal_or_none=lambda value: Decimal(str(value)) if value is not None else None,
+                safe_error_detail=lambda value, _limit: value,
+                provider_key=row.pop("_provider", "tushare_super_get"),
+            )
+            return count, connection.statements
+
+        placeholder = {
+            "ts_code": "600664.SH", "trade_date": "20260918", "adj_factor": "1",
+            "factor_semantics": "same_day_identity_only",
+            "_provider": "longhuvip_composite",
+        }
+        count, statements = run(placeholder)
+        self.assertEqual(count, 1)
+        self.assertTrue([sql for sql, _ in statements
+                         if "INSERT INTO quant.daily_adjustment_factors" in sql])
+        self.assertFalse([sql for sql, _ in statements
+                          if "UPDATE quant.canonical_bars_daily SET adj_factor" in sql])
+
+        real = {"ts_code": "600664.SH", "trade_date": "20260918", "adj_factor": "12.3456"}
+        count, statements = run(dict(real))
+        self.assertEqual(count, 1)
+        promotion = [params for sql, params in statements
+                     if "UPDATE quant.canonical_bars_daily SET adj_factor" in sql]
+        self.assertEqual(len(promotion), 1)
+        self.assertEqual(promotion[0][0], Decimal("12.3456"))
+
+        # A vendor that simply OMITS factor_semantics is the same defect with
+        # one key removed, so the provider half of the rule has to refuse it.
+        silent = {"ts_code": "600664.SH", "trade_date": "20260918", "adj_factor": "1",
+                  "_provider": "longhuvip_composite"}
+        count, statements = run(silent)
+        self.assertEqual(count, 1)
+        self.assertTrue([sql for sql, _ in statements
+                         if "INSERT INTO quant.daily_adjustment_factors" in sql])
+        self.assertFalse([sql for sql, _ in statements
+                          if "UPDATE quant.canonical_bars_daily SET adj_factor" in sql])
+
+        cumulative = dict(real, factor_semantics="corporate_action_cumulative")
+        tushare = {"provider_key": "tushare_super_get"}
+        self.assertTrue(promotable_adjustment_factor(cumulative, **tushare))
+        self.assertTrue(promotable_adjustment_factor(real, **tushare))
+        self.assertFalse(promotable_adjustment_factor(placeholder, **tushare))
+        self.assertFalse(promotable_adjustment_factor({"factor_semantics": "anything_else"}, **tushare))
+        # Both halves are required: a tushare-shaped row from another provider
+        # is evidence, never a bar field.
+        self.assertFalse(promotable_adjustment_factor(real, provider_key="longhuvip_composite"))
+        self.assertFalse(promotable_adjustment_factor(cumulative, provider_key=""))
+
+    def test_adj_factor_capability_prefers_the_working_super_routes(self):
+        """tushare_primary's adj_factor route is the one that fails with
+        ConnectError; the maintenance job must not inherit it as first choice."""
+        from app.capability_registry import api_capability
+
+        capability = api_capability("adj_factor")
+        self.assertEqual(capability.preferred_providers, ("super_get", "super", "primary"))
+        self.assertEqual(capability.status, "verified")
+        self.assertTrue(capability.decision_eligible)
+        # The generic daily bucket it used to share stays primary-first.
+        self.assertEqual(api_capability("stk_limit").preferred_providers, ("primary", "super"))

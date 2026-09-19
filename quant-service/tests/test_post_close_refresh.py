@@ -4,7 +4,7 @@ import asyncio
 import unittest
 from datetime import date
 
-from app.post_close_refresh import record_stage_with_receipt, run_refresh
+from app.post_close_refresh import NON_GATING_STAGES, record_stage_with_receipt, run_refresh
 from app.runtime_leases import LeaseLostError
 from app.post_close_refresh_service import (
     POST_CLOSE_STAGE_DEPENDENCIES,
@@ -55,10 +55,186 @@ class SettledLimitPoolProbeTests(unittest.TestCase):
         self.assertEqual(payload["limit_pool"], {"expected_symbols": 0, "stored_symbols": 0})
 
 
+async def _noop_async(*_args, **_kwargs):
+    return {"status": "completed"}
+
+
+async def _no_core_symbols(_limit: int):
+    return []
+
+
+def _refresh_dependencies(**overrides) -> PostCloseRefreshDependencies:
+    """A fully wired assembly whose every boundary is inert unless overridden."""
+    base = dict(
+        database=object(), china_today=lambda: date(2026, 9, 18), longhu_configured=lambda: False,
+        longhu_close_context=lambda _day: {"status": "completed"}, provider_configs=lambda: {},
+        run_database=_noop_async, reconcile_stale_fetch_runs=lambda *_: None,
+        reprocess_remote_reports=lambda *_: None, sync_market_universe=_noop_async,
+        sync_full_market_daily=_noop_async, sync_strategy_index_context=_noop_async,
+        build_market_snapshot=_noop_async, load_core_symbols=_no_core_symbols,
+        akshare_probe=_noop_async, sync_ths_industry_flow=_noop_async,
+        sync_ths_concept_flow=_noop_async, rebuild_market_flow_features=lambda *_: None,
+        refresh_pattern_sources=_noop_async, persist_settled_limit_pool=lambda *_: {"status": "completed"},
+        run_pattern_mining=_noop_async, sync_daily_controls=_noop_async,
+        sync_cninfo_announcements=_noop_async, run_board_report=_noop_async,
+        run_strategy_decision=_noop_async, persist_close_review=lambda *_: None,
+        recompute_outcomes=lambda *_: None, recompute_intraday_outcomes=lambda *_: None,
+        recompute_scorecards=lambda *_: None, rebuild_analyst_research=lambda *_: None,
+        run_post_close_strategy=lambda *_: None, persist_watchlist_main_wave=lambda *_: None,
+        build_research_snapshot=lambda *_: None, run_orchestrator=_noop_async,
+        record_stage=_noop_async, lease_key="lease", lease_seconds=lambda: 60,
+        acquire_lease=lambda *_: True, renew_lease=lambda *_: True, release_lease=lambda *_: None,
+        safe_error_detail=lambda value, _limit: value, json_safe=lambda value: value,
+    )
+    base.update(overrides)
+    return PostCloseRefreshDependencies(**base)
+
+
 class PostCloseRefreshTests(unittest.IsolatedAsyncioTestCase):
     async def test_outcome_settlement_has_explicit_long_bounded_budget(self):
         self.assertEqual(POST_CLOSE_TIMEOUT_OVERRIDES["analyst_outcomes"], 300.0)
         self.assertEqual(POST_CLOSE_TIMEOUT_OVERRIDES["analyst_intraday_outcomes"], 180.0)
+
+    async def test_adjustment_factor_stage_runs_after_the_market_refresh_and_never_gates(self):
+        """The factor lane is invoked automatically but judges nothing.
+
+        Without an automatic invocation, every longhu evening after release
+        lands with a permanently NULL adj_factor.  With one that gates, a
+        separate provider's outage would push a healthy close to 'partial'.
+        """
+        order = list(POST_CLOSE_STAGE_ORDER)
+        self.assertIn("adjustment_factors", order)
+        self.assertGreater(order.index("adjustment_factors"), order.index("full_market_daily"))
+        self.assertGreater(order.index("adjustment_factors"), order.index("core_daily_controls"))
+        self.assertIn("adjustment_factors", NON_GATING_STAGES)
+        # Neither a dependency of anything nor dependent on anything: a stage
+        # in the dependency set can block another stage or be blocked by one,
+        # which is exactly what 'non-gating' has to exclude.
+        self.assertNotIn("adjustment_factors", POST_CLOSE_STAGE_DEPENDENCIES)
+        for dependencies in POST_CLOSE_STAGE_DEPENDENCIES.values():
+            self.assertNotIn("adjustment_factors", dependencies)
+
+    async def test_the_factor_fetch_precedes_every_stage_that_reads_a_factor(self):
+        """Ordering is the whole reason the carry-forward stays a short gap.
+
+        ``app/research_prices.resolve_factors`` carries the last real factor
+        across at most five trailing sessions.  That bound only holds if the
+        evening actually tries to fetch today's factor BEFORE the stages that
+        consume it: run the strategy and recommendation stages first and every
+        evening would score on a window that is one session staler than it
+        needed to be, and a longer outage would reach the bound and black the
+        window out instead of carrying it.  These four are the consumers:
+        close_strategy_decision and post_close_strategy go through
+        ``post_close_structures``, watchlist_main_wave normalises adjusted
+        bars itself, and research_snapshot materialises the feature snapshot
+        the recommendation scorer reads.
+        """
+        order = list(POST_CLOSE_STAGE_ORDER)
+        factor_index = order.index("adjustment_factors")
+        for consumer in ("close_strategy_decision", "post_close_strategy",
+                         "watchlist_main_wave", "research_snapshot"):
+            self.assertIn(consumer, order)
+            self.assertLess(factor_index, order.index(consumer),
+                            f"adjustment_factors must run before {consumer}")
+
+    async def test_a_failing_non_gating_stage_keeps_the_run_completed(self):
+        async def run_db(action, *args, **_kwargs):
+            return action(*args)
+
+        result = await run_refresh(
+            object(), db=object(), lease_key="lease", lease_seconds=lambda: 60,
+            run_database_blocking=run_db, acquire_lease=lambda *_: True,
+            renew_lease=lambda *_: True, release_lease=lambda *_: None,
+            actions={
+                "full_market_daily": lambda: {"status": "completed"},
+                "core_daily_controls": lambda: {"status": "completed"},
+                "adjustment_factors": lambda: {"status": "failed", "error": "adj_factor route refused"},
+                "limit_ladder": lambda: {"status": "completed"},
+            },
+            stage_order=("full_market_daily", "core_daily_controls", "adjustment_factors", "limit_ladder"),
+            stage_dependencies={"limit_ladder": ("core_daily_controls",)},
+            trade_date=date(2026, 9, 18), safe_error_detail=lambda value, _limit: value,
+            json_safe=lambda value: value,
+        )
+        # Its own status is still reported, and it is still visible as needing
+        # attention -- it just does not judge the run.
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["deferred_stages"], [])
+        self.assertEqual(result["non_gating_stages_needing_attention"], ["adjustment_factors"])
+        self.assertEqual(result["stages"]["adjustment_factors"]["status"], "failed")
+        self.assertTrue(result["controls_ready"])
+        self.assertEqual(result["stages"]["limit_ladder"]["status"], "completed")
+
+    async def test_a_gating_stage_failure_still_makes_the_run_partial(self):
+        async def run_db(action, *args, **_kwargs):
+            return action(*args)
+
+        result = await run_refresh(
+            object(), db=object(), lease_key="lease", lease_seconds=lambda: 60,
+            run_database_blocking=run_db, acquire_lease=lambda *_: True,
+            renew_lease=lambda *_: True, release_lease=lambda *_: None,
+            actions={"core_daily_controls": lambda: {"status": "failed", "error": "boom"}},
+            stage_order=("core_daily_controls",), trade_date=date(2026, 9, 18),
+            safe_error_detail=lambda value, _limit: value, json_safe=lambda value: value,
+        )
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["deferred_stages"], ["core_daily_controls"])
+        self.assertEqual(result["non_gating_stages_needing_attention"], [])
+
+    async def test_the_service_routes_the_stage_to_the_injected_factor_lane(self):
+        captured: dict[str, object] = {}
+
+        async def completed(*_args, **_kwargs):
+            return {"status": "completed"}
+
+        async def factor_lane():
+            captured["called"] = True
+            return {"status": "skipped", "non_gating": True}
+
+        async def orchestrator(_request, **kwargs):
+            captured["adjustment"] = await kwargs["actions"]["adjustment_factors"]()
+            return {"status": "completed", "stages": {}}
+
+        dependencies = _refresh_dependencies(
+            run_orchestrator=orchestrator, sync_adjustment_factors=factor_lane,
+            run_database=completed, sync_market_universe=completed,
+            sync_full_market_daily=completed, sync_strategy_index_context=completed,
+            build_market_snapshot=completed, akshare_probe=completed,
+            sync_ths_industry_flow=completed, sync_ths_concept_flow=completed,
+            refresh_pattern_sources=completed, run_pattern_mining=completed,
+            sync_daily_controls=completed, sync_cninfo_announcements=completed,
+            run_board_report=completed, run_strategy_decision=completed, record_stage=completed,
+        )
+        await run_post_close_refresh(
+            PostCloseRefreshRequest(trade_date=date(2026, 9, 18), announcement_limit=7), dependencies,
+        )
+        self.assertTrue(captured["called"])
+        self.assertTrue(captured["adjustment"]["non_gating"])
+
+    async def test_an_unconfigured_factor_lane_reports_skipped_rather_than_nothing(self):
+        captured: dict[str, object] = {}
+
+        async def completed(*_args, **_kwargs):
+            return {"status": "completed"}
+
+        async def orchestrator(_request, **kwargs):
+            captured["adjustment"] = kwargs["actions"]["adjustment_factors"]()
+            return {"status": "completed", "stages": {}}
+
+        dependencies = _refresh_dependencies(
+            run_orchestrator=orchestrator, run_database=completed, sync_market_universe=completed,
+            sync_full_market_daily=completed, sync_strategy_index_context=completed,
+            build_market_snapshot=completed, akshare_probe=completed,
+            sync_ths_industry_flow=completed, sync_ths_concept_flow=completed,
+            refresh_pattern_sources=completed, run_pattern_mining=completed,
+            sync_daily_controls=completed, sync_cninfo_announcements=completed,
+            run_board_report=completed, run_strategy_decision=completed, record_stage=completed,
+        )
+        await run_post_close_refresh(
+            PostCloseRefreshRequest(trade_date=date(2026, 9, 18), announcement_limit=7), dependencies,
+        )
+        self.assertEqual(captured["adjustment"]["status"], "skipped")
+        self.assertTrue(captured["adjustment"]["non_gating"])
 
     async def test_service_assembles_same_date_stages_and_announcements_after_core_symbols(self):
         captured: dict[str, object] = {}

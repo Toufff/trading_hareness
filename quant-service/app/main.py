@@ -48,6 +48,12 @@ from .capability_registry import api_capability
 from .database import AsyncDatabase, Database
 from .settings import Settings
 from . import daily_control_plane
+from .adjustment_factor_maintenance import (
+    AdjustmentFactorMaintenanceDependencies,
+    post_close_sync as adjustment_factor_post_close_sync,
+    status as adjustment_factor_status_report,
+    sync as adjustment_factor_sync,
+)
 from .daily_control_plane import (
     DailyControlPlaneSyncDependencies,
     EQUITY_DAILY_CONTROL_STATUS_SQL,
@@ -58,7 +64,7 @@ from .async_provider_circuit_repository import open_provider_keys as read_async_
 from .async_market_session_repository import realtime_market_session as read_async_realtime_market_session
 from .async_market_session_repository import sse_calendar_open as read_async_sse_calendar_open
 from .async_market_session_repository import sse_calendar_status as read_async_sse_calendar_status
-from .daily_bar_repository import exchange_for, upsert_daily_bar
+from .daily_bar_repository import exchange_for, in_instrument_lock_order, upsert_daily_bar
 from .sector_membership_repository import (
     persist_observed_snapshot as persist_observed_sector_snapshot,
     persist_ths_snapshot as persist_ths_sector_snapshot,
@@ -84,6 +90,7 @@ from .research_maintenance_service import (
     update_analyst_profile as update_analyst_research_profile_isolated,
     update_universe_members as update_universe_members_isolated,
 )
+from .instrument_registry import ensure_instruments, named_instrument_rows
 from .intraday_watchlist_service import (
     IntradayWatchlistDependencies,
     WatchlistHistoryHydrationDependencies,
@@ -986,7 +993,11 @@ def persist_daily_bar_batch(bars: list[DailyBar]) -> int:
     if not bars:
         return 0
     with db.transaction() as connection:
-        for bar in bars:
+        # Ascending (symbol, trading_date), not provider order.  A single
+        # response can span the whole QUANT_UNIVERSE cross-section, and every
+        # bar re-locks quant.instruments with ON CONFLICT DO UPDATE inside
+        # THIS one transaction -- see daily_bar_repository.in_instrument_lock_order.
+        for bar in in_instrument_lock_order(bars):
             upsert_bar(connection, bar)
     return len(bars)
 
@@ -1327,11 +1338,14 @@ def tushare_date(value: Any) -> date | None:
     return None
 
 
+def ensure_tushare_instruments(connection: Any, symbols: list[str]) -> None:
+    """Register a whole Tushare payload's symbols in one batched statement."""
+    ensure_instruments(connection, symbols, "tushare", exchange_for=exchange_for)
+
+
 def ensure_tushare_instrument(connection: Any, symbol: str) -> None:
-    connection.execute(
-        "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,'tushare') ON CONFLICT(symbol) DO NOTHING",
-        (symbol, exchange_for(symbol)),
-    )
+    """Single-symbol compatibility wrapper over the batched registry helper."""
+    ensure_tushare_instruments(connection, [symbol])
 
 
 def offline_data_root() -> Path:
@@ -1368,6 +1382,10 @@ def offline_minute_row(row: dict[str, Any]) -> dict[str, Any]:
     return offline_minute_import_service.minute_row(row, decimal_or_none=decimal_or_none)
 
 
+def ensure_offline_instruments(connection: Any, symbols: list[str]) -> None:
+    offline_minute_import_service.ensure_instruments(connection, symbols, exchange_for=exchange_for)
+
+
 def ensure_offline_instrument(connection: Any, symbol: str) -> None:
     offline_minute_import_service.ensure_instrument(connection, symbol, exchange_for=exchange_for)
 
@@ -1398,7 +1416,7 @@ def normalize_tushare_rows(connection: Any, api_name: str, rows: list[dict[str, 
     return pure_normalize_tushare_rows(
         connection, api_name, rows, available_at,
         core_apis=CORE_NORMALIZED_APIS, date_parser=tushare_date, exchange_for=exchange_for,
-        is_st_security_name=is_st_security_name, ensure_instrument=ensure_tushare_instrument,
+        is_st_security_name=is_st_security_name, ensure_instruments=ensure_tushare_instruments,
         upsert_bar=upsert_bar, daily_bar_type=DailyBar, decimal_or_none=decimal_or_none,
         safe_error_detail=safe_error_detail, provider_key=provider_key,
     )
@@ -1509,7 +1527,10 @@ def full_market_daily_control_status() -> dict[str, Any]:
     """Expose latest daily control coverage without requesting a provider."""
     with db.transaction() as connection:
         rows = connection.execute(EQUITY_DAILY_CONTROL_STATUS_SQL).fetchall()
-    return daily_control_plane_status_payload(rows)
+        # Read in the same transaction as the rows, so the adjustment label and
+        # the blocked-date ledger evidence behind it describe one moment.
+        retired = daily_control_plane.adjustment_retirement_details(connection, rows)
+    return daily_control_plane_status_payload(rows, retired_dates=retired)
 
 
 def _daily_control_plane_sync_dependencies() -> DailyControlPlaneSyncDependencies:
@@ -1526,6 +1547,43 @@ async def sync_full_market_daily_controls(trade_date: date) -> dict[str, Any]:
     """Compatibility export backed by the daily control-plane module."""
     return await daily_control_plane.sync_full_market_daily_controls(
         trade_date, _daily_control_plane_sync_dependencies(),
+    )
+
+
+def adjustment_factor_maintenance_dependencies() -> AdjustmentFactorMaintenanceDependencies:
+    """Compose the factor-repair lane's boundaries; no provider client is owned here."""
+    return AdjustmentFactorMaintenanceDependencies(
+        database=db, run_database=run_database_blocking,
+        call_tushare_api=call_tushare_api, parse_tushare_date=tushare_date,
+        persist_tushare_rows=persist_tushare_rows, persist_blocked=persist_tushare_fetch_blocked,
+        safe_error_detail=safe_error_detail, executor_saturated_error=ExecutorSaturatedError,
+        record_provider_success=record_provider_success, record_provider_failure=record_provider_failure,
+        record_provider_api_capability=record_provider_api_capability,
+    )
+
+
+async def sync_adjustment_factors(lookback_days: int = 30, *, dry_run: bool = False) -> dict[str, Any]:
+    """Maintenance-window entry point (scripts/adjustment-factor-maintenance.py)."""
+    return await adjustment_factor_sync(
+        adjustment_factor_maintenance_dependencies(), lookback_days=lookback_days, dry_run=dry_run,
+    )
+
+
+async def sync_adjustment_factors_post_close() -> dict[str, Any]:
+    """Non-gating post-close invocation of the same lane (see POST_CLOSE_STAGE_ORDER)."""
+    return await adjustment_factor_post_close_sync(adjustment_factor_maintenance_dependencies())
+
+
+async def adjustment_factor_status(lookback_days: int = 30) -> dict[str, Any]:
+    """Read-only status of the factor lane; writes nothing, fetches nothing.
+
+    Shares the same composition root as the repair lane so the report and the
+    work list cannot drift apart, and hands the capability registry's answer
+    in rather than letting the maintenance module reach for it.
+    """
+    return await adjustment_factor_status_report(
+        adjustment_factor_maintenance_dependencies(), lookback_days=lookback_days,
+        capability=api_capability("adj_factor"),
     )
 
 
@@ -1553,7 +1611,7 @@ def persist_ths_sector_members(connection: Any, taxonomy_key: str, sector_key: s
     """Persist one complete response without inventing a historical start date."""
     return persist_ths_sector_snapshot(
         connection, taxonomy_key, sector_key, rows, provider_key, available_at,
-        ensure_instrument=ensure_tushare_instrument, parse_date=tushare_date,
+        ensure_instruments=ensure_tushare_instruments, parse_date=tushare_date,
     )
 
 
@@ -1566,16 +1624,33 @@ def eastmoney_member_symbol(row: dict[str, Any]) -> str | None:
 def persist_eastmoney_sector_members(connection: Any, taxonomy_key: str, sector_key: str, rows: list[dict[str, Any]],
                                      available_at: datetime) -> int:
     """Persist a current-snapshot response with its real observation date."""
-    def ensure_instrument(connection: Any, symbol: str, row: dict[str, Any]) -> None:
+    def ensure_instruments(connection: Any, member_rows: list[tuple[str, dict[str, Any]]]) -> None:
+        # One ascending statement for the whole board, not one per
+        # constituent: a public board snapshot is hundreds of symbols inside
+        # a single transaction.  ``named_instrument_rows`` supplies the same
+        # resolution the sequential loop had (last non-blank name wins) plus
+        # the shared ascending order; the conflict clause stays byte-for-byte
+        # what it was, including ``updated_at=now()``, which the generic
+        # ``ensure_named_instruments`` helper deliberately does not touch.
+        prepared = named_instrument_rows(
+            [(symbol, str(row.get("名称") or row.get("name") or "").strip() or None)
+             for symbol, row in member_rows],
+            exchange_for=exchange_for,
+        )
+        if not prepared:
+            return
         connection.execute(
-            "INSERT INTO quant.instruments(symbol,exchange,name,source) VALUES(%s,%s,%s,'akshare') "
+            "INSERT INTO quant.instruments(symbol,exchange,name,source) "
+            "SELECT t.symbol,t.exchange,t.name,'akshare' "
+            "FROM unnest(%s::text[],%s::text[],%s::text[]) AS t(symbol,exchange,name) "
+            "ORDER BY 1 "
             "ON CONFLICT(symbol) DO UPDATE SET name=coalesce(EXCLUDED.name,quant.instruments.name),updated_at=now()",
-            (symbol, exchange_for(symbol), str(row.get("名称") or row.get("name") or "").strip() or None),
+            ([row[0] for row in prepared], [row[1] for row in prepared], [row[2] for row in prepared]),
         )
 
     return persist_observed_sector_snapshot(
         connection, taxonomy_key, sector_key, rows, "akshare", available_at,
-        member_symbol=eastmoney_member_symbol, ensure_instrument=ensure_instrument,
+        member_symbol=eastmoney_member_symbol, ensure_instruments=ensure_instruments,
     )
 
 
@@ -2473,7 +2548,7 @@ async def capture_intraday_minute_sessions(symbols: list[str]) -> dict[str, Any]
         fetch_minutes=intraday_longhu_minutes,
         run_database=run_database_blocking,
         parse_minute=offline_minute_row,
-        ensure_instrument=ensure_offline_instrument,
+        ensure_instruments=ensure_offline_instruments,
         retention_days=intraday_minute_profile_retention_days,
     )
 
@@ -3686,7 +3761,9 @@ def _post_close_refresh_dependencies() -> PostCloseRefreshDependencies:
         rebuild_market_flow_features=rebuild_stored_market_flow_features,
         refresh_pattern_sources=refresh_strategy_pattern_sources, run_pattern_mining=run_strategy_pattern_mining,
         persist_settled_limit_pool=persist_settled_limit_pool,
-        sync_daily_controls=sync_full_market_daily_controls, sync_cninfo_announcements=sync_cninfo_announcements,
+        sync_daily_controls=sync_full_market_daily_controls,
+        sync_adjustment_factors=sync_adjustment_factors_post_close,
+        sync_cninfo_announcements=sync_cninfo_announcements,
         run_board_report=run_intraday_board_report, run_strategy_decision=run_strategy_decision,
         persist_close_review=_persist_close_review, recompute_outcomes=recompute_outcomes,
         recompute_intraday_outcomes=recompute_analyst_intraday_outcomes_for_date,
@@ -4752,7 +4829,10 @@ app.include_router(build_research_actions_router(ResearchActionDependencies(
 
 def import_bars(payload: BarsImport) -> dict[str, int]:
     with db.transaction() as connection:
-        for bar in payload.bars:
+        # Operator-supplied payloads arrive in whatever order the file had;
+        # two concurrent imports over overlapping symbols is the same lock
+        # cycle as an ingestion run, so take the shared ascending order.
+        for bar in in_instrument_lock_order(payload.bars):
             upsert_bar(connection, bar)
     return {"imported": len(payload.bars)}
 

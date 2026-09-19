@@ -11,6 +11,84 @@ provider response directly to a live threshold or order path.
 
 - `quant-service/app/routers/`: HTTP boundary and request validation.
 - `quant-service/app/*_repository.py`: database read/write projections.
+- `quant-service/app/instrument_registry.py`: the shared write primitives for
+  `quant.instruments` — `ensure_instruments` for bare symbol registration
+  (symbol + exchange + source, `ON CONFLICT DO NOTHING`) and
+  `ensure_named_instruments` for symbol + display name (`ON CONFLICT DO UPDATE`
+  on the name alone). Both take one statement per 5,000-symbol chunk,
+  deduplicate client-side and sort ascending. Both return the rows they
+  actually wrote, and that return value is the contract: they strip and drop
+  blanks, so a caller that writes a child row referencing
+  `quant.instruments(symbol)` in the same transaction takes its symbols from
+  the return value, never from its own raw input.
+
+  **The rule, which is enforced and not a roster:** every write to
+  `quant.instruments` anywhere in this repository either goes through this
+  module or is a set-based statement carrying `ORDER BY 1` between itself and
+  its `ON CONFLICT` clause, and it spells its table name literally.
+  `quant-service/tests/test_instrument_writer_lock_order.py` walks every `.py`
+  outside tests and vendored trees — `quant-service` (including
+  `database_bootstrap.py` and `entrypoint.py`, which open the same database
+  from outside `app/`), `scripts`, `legacy`, `workflows`, `deploy` — reading
+  the parsed source rather than the raw text, so it matches the statement
+  whatever the case, whitespace or identifier quoting (`quant."instruments"`),
+  each match ends with its own string literal instead of borrowing a later
+  statement's `ON CONFLICT` clause, and a file that does not parse is reported
+  as a failure of that file rather than as an unrelated error. There is no
+  allow-list to add a new writer to, so a per-row `VALUES(...) ON CONFLICT`
+  loop fails on the day it is written, and so does a table name built at
+  runtime in any of its four spellings — `f"INSERT INTO {SCHEMA}.instruments"`
+  (column list or not), `"INSERT INTO " + SCHEMA + ".instruments(...)"`,
+  `"INSERT INTO %s.instruments(...)" % SCHEMA` and the `.format()` twin — each
+  of which would otherwise hide from the search. Do not answer that failure by
+  listing the writer somewhere.
+
+  `ORDER BY 1` is the shared ascending lock order, and it is a correctness
+  property, not a tidy-output habit: `ON CONFLICT DO UPDATE` row-locks every
+  **existing** conflicting row (the whole cross-section on any run after the
+  first) while `DO NOTHING` locks only the rows it genuinely inserts, so two
+  transactions touching an overlapping symbol set in different orders
+  deadlock — three times in the owner PostgreSQL log on 2026-09-18. The sort
+  belongs in the SQL even when the array was already sorted in Python: the
+  server sort is then free, and it is what makes the property checkable
+  without reading each caller's loop. A single-symbol writer sorts one row and
+  still carries it, because "big enough to need it" is the judgement call that
+  produced three rounds of drift.
+
+  What the rule does not cover, and what still needs judgement: a writer that
+  registers symbols in one statement and then re-locks the same rows later in
+  the same transaction is ordered only if **both** statements are. And a
+  single-symbol writer driven once per item by a caller loop is ordered by
+  that loop, not by its own statement, so **the loop sorts**. Both shapes
+  exist today and both are covered by a caller-level test rather than by the
+  guard, which cannot see them:
+
+  - `trade_discipline.repository.persist_plan`, driven once per plan by
+    `scripts/trade-discipline.py:219`. Sorts on `plan.symbol`; pinned by
+    `GenerateLockOrderTests` in `quant-service/tests/test_trade_discipline_cli.py`.
+  - `daily_bar_repository.upsert_daily_bar`, driven once per bar by four
+    multi-symbol callers: `main.persist_daily_bar_batch`, `main.import_bars`,
+    `public_market_repository.persist_free_daily` and
+    `tushare_normalization`'s per-row fallback. All four iterate
+    `daily_bar_repository.in_instrument_lock_order(bars)` — ascending
+    `(symbol, trading_date)` — rather than their payload order; pinned by
+    `quant-service/tests/test_daily_bar_caller_lock_order.py`, which also
+    fails any *new* loop under `quant-service/app` that drives a one-bar
+    writer over an unordered iterable — whether the writer is called by a
+    bare name or module-qualified (`daily_bar_repository.upsert_daily_bar`).
+    That file also pins the two tables `daily_bar_batch_repository` writes in
+    one statement, `market_bars_daily` and `canonical_bars_daily`: both are
+    `ON CONFLICT DO UPDATE` on `(symbol, trading_date)` and both sort their
+    key list, because no caller can fix a batch's order from outside it.
+    They sort rather than hoisting one
+    `ensure_instruments` call because that primitive cannot carry `industry`,
+    the three-valued `is_st`, or the `exchange`/`source`/`updated_at` refresh
+    their `ON CONFLICT DO UPDATE` performs; a lock-order fix must not change
+    what is stored.
+
+  If you add a caller loop of your own, add its test here too. The list above
+  is a map of the two known shapes, not a partition of the writers — the
+  partition is the guard test, and it has no allow-list.
 - `quant-service/app/*_scheduler.py`: timing, retry windows and idempotency only.
 - `quant-service/app/*_rules.py` / `*_research.py`: pure or research-only rules.
 - `quant-service/app/main.py`: composition root by design, but historically
@@ -21,6 +99,9 @@ provider response directly to a live threshold or order path.
   not as the intended shape. **New behaviour must never be added here** — it
   belongs in a focused router/repository/rules module and is only wired up
   from `main.py`.
+- `quant-service/app/adjustment_factor_maintenance.py`: the out-of-band
+  cumulative adjustment-factor repair lane (04:00-08:00 window), driven by
+  `scripts/adjustment-factor-maintenance.py`; never a post-close stage.
 - `quant-service/migrations/versions/`: all production schema changes (Alembic).
 - `frontend/src/App.vue`: current Vue dashboard; keep API calls typed and label
   research-only/replay-only values visibly.
@@ -43,6 +124,28 @@ provider response directly to a live threshold or order path.
 - Fail closed on missing bars, stale providers, incomplete sector mappings and
   insufficient samples. Do not invent Top10s, prices or regression coefficients.
 - Keep author replay outcomes separate from strategy-available outcomes.
+- **Bar tables never receive a placeholder adjustment factor.**
+  `quant.canonical_bars_daily.adj_factor` and `quant.market_bars_daily.adj_factor`
+  are cumulative (hfq-style) corporate-action factors: `close * adj_factor` must
+  be comparable across dates. A vendor that publishes no corporate-action
+  history emits no `adj_factor` rows at all — never an identity `1`, because
+  `1.0` is neither NULL nor `<= 0` and therefore sails past every fail-closed
+  adjustment consumer while silently yielding an unadjusted series. NULL is the
+  honest value for "not fetched yet"; those dates are filled out of band by
+  `scripts/adjustment-factor-maintenance.py sync`, invoked automatically twice:
+  as the non-gating `adjustment_factors` post-close stage and by the daily
+  04:30 `trading-hareness-adjustment-factors` scheduled task. A coverage or
+  readiness check must not read a NULL factor as a missing bar. Promotion onto
+  a bar requires BOTH halves of
+  `tushare_normalization.promotable_adjustment_factor`: a tushare provider AND
+  absent/`corporate_action_cumulative` semantics — a vendor that merely omits
+  the marker is refused by the provider half. A NULL sitting in the trailing
+  gap of a research window is resolved *on read only*, by the one shared rule
+  in `app/research_prices.resolve_factors`: carry the last real factor across
+  at most five sessions, and only while each carried session's `pre_close`
+  still equals the previous close. That flags `adj_factor_carried_forward`,
+  which is recorded, never penalised, and never written back to a bar table.
+  See `docs/ADJUSTMENT_FACTOR_SEMANTICS.md` (§1.1).
 - Application code never reads a `*_cold` twin or a `*_all` view. Those are the
   storage tier's operations surface: the twins carry no foreign keys and no
   triggers, so a router reading one bypasses every referential guarantee the hot
@@ -78,6 +181,21 @@ provider response directly to a live threshold or order path.
     `F:\StockPlatformDB\postgresql16`) and a `stock_cold` tablespace on G:; the
     data directory, the backup exclusions, the maintenance window (04:00-08:00)
     and the role timeouts are all defined there, not here.
+11. Read `docs/SHARED_PEER_RUNTIME.md` and `docs/PEER_BATCH_TUNNEL_ROLLOUT.md`
+    before touching anything owner -> peer. There are **two** reverse SSH
+    tunnels, not one: `trading-hareness-shared-peer-tunnels` (intraday request
+    path) and `trading-hareness-shared-peer-batch-tunnel` (bulk/backfill, peer
+    port 5433). They are separate tasks, services, state files and lock files,
+    they are installed together by
+    `scripts/shared-peer/install-shared-tunnel-tasks.ps1`, and the publish
+    reinstall gate judges both. A batch tunnel failure is reported and recorded,
+    never raised: it must not be able to fail a release. Any file on either
+    profile's execution chain must appear in `$script:StockTunnelAffectingFiles`
+    (`scripts/windows/stock-release-management.psm1`), or the gate silently
+    under-detects a change to it.
+12. Read `docs/ADJUSTMENT_FACTOR_SEMANTICS.md` before touching `adj_factor` on
+    any bar table, the post-close `adjustment_factors` stage or the 04:30
+    `trading-hareness-adjustment-factors` task.
 
 ## Version-control and release discipline
 
@@ -142,6 +260,35 @@ this file and `docs/ARCHITECTURE.md` in the same change:
   `deadline_missed`; the schema-drift comparison; the status → exit-code mapping;
   and the cutoff-index set of migration `20260919_0106` pinned against
   `TIER_POLICY`.
+- `quant-service/tests/test_instrument_writer_lock_order.py` — walks every
+  `.py` in the repository outside tests and vendored trees and requires each
+  write to `quant.instruments` to live in `app/instrument_registry.py` or
+  carry `ORDER BY 1` before its `ON CONFLICT` clause, to sit outside any
+  loop, and to spell its table name literally. It reads the parsed source:
+  the match ignores case, whitespace and identifier quoting, ends with its
+  own literal, and an unparseable file is named as such. No allow-list: a new
+  writer fails here until it takes the shared ascending lock order.
+- `quant-service/tests/test_daily_bar_caller_lock_order.py` — the half the
+  guard above cannot see: the four callers that drive
+  `daily_bar_repository.upsert_daily_bar` once per bar must iterate
+  `in_instrument_lock_order(bars)`, any fifth such loop under
+  `quant-service/app` fails here (bare or module-qualified call), and
+  `daily_bar_batch_repository`'s own `market_bars_daily` /
+  `canonical_bars_daily` statements must send their keys ascending.
+- `quant-service/tests/test_peer_batch_tunnel_deploy.py` — the peer-side batch
+  port deploy: the committed fixture is a byte-for-byte copy of lightServer's
+  live `ssh-tunnel-entrypoint.sh`, so a peer that changes fails the fixture hash
+  and `KNOWN_PEER_STATES` together (intentional: both must be updated in one
+  change); the patch result must pass `sh -n`, keep the peer's own `0.0.0.0`
+  bind and be idempotent; and the already-deployed short-circuit must rest on
+  the running container's own argv, never on an image tag a rebuild invalidates.
+- `quant-service/tests/test_adjustment_factor_semantics_guard.py` — enforces
+  "bar tables never receive a placeholder adjustment factor": no module may
+  build a `factor_semantics: same_day_identity_only` row, only the pinned
+  writers may `SET adj_factor` on a bar table, EVERY write site (the enclosing
+  function of each match, not the file) must contain one of its module's
+  pinned guards, and (with `PGHOST`) the release leak query is exercised
+  against real PostgreSQL.
 
 The same convention covers the Windows runtime. These PowerShell guard tests are
 standalone (no database, no venv, no scheduled task) and run as
@@ -195,6 +342,16 @@ before every release:
   twin whose hot table has no chain (refused and reported, never silently
   honoured), plus `Get-StockIncrementalChainWatermark` against real `state.json`
   files on disk.
+- `scripts/windows/tests/test-shared-tunnel-profiles.ps1` — the two tunnel
+  profiles cannot collide or drift: distinct ports, forwarding tuples, service
+  names, task names and lock files; the batch profile refuses to multiplex onto
+  the intraday connection; and the install-time state-freshness judge refuses to
+  certify a run whose own status says it is stopping or already over.
+- `scripts/windows/tests/test-adjustment-factor-task-contract.ps1` — static
+  contract for the 04:30 `trading-hareness-adjustment-factors` task: daily
+  trigger, release-rooted hidden launcher, no restart-on-failure, cleared
+  proxy variables, dated log file and the exit-code rule the schedule relies
+  on. Registers no task and touches no database.
 
 Two tests in this family are **not** in the release gate and must be run by hand:
 

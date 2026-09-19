@@ -27,7 +27,7 @@ class IntradayMinuteCaptureActions:
         fetch_minutes: Callable[[str], Awaitable[list[dict[str, Any]]]],
         run_database: Callable[..., Awaitable[Any]],
         parse_minute: Callable[[dict[str, Any]], dict[str, Any]],
-        ensure_instrument: Callable[[Any, str], None],
+        ensure_instruments: Callable[[Any, list[str]], None],
         retention_days: Callable[[], int],
     ) -> dict[str, Any]:
         """Capture current-session Longhu rows through an injected persistence seam."""
@@ -55,17 +55,23 @@ class IntradayMinuteCaptureActions:
             stored_by_symbol: dict[str, int] = {}
             errors: dict[str, str] = {}
             source_status: dict[str, Any] = {}
+            # Classify the bounded basket before opening the transaction so the
+            # instrument registration below can be one batched statement for
+            # the whole basket instead of one INSERT per captured symbol.
+            captured: list[tuple[str, list[dict[str, Any]]]] = []
+            for result in results:
+                if isinstance(result, Exception):
+                    errors["unknown"] = str(result)[:300]
+                    continue
+                symbol, rows, source, error = result
+                if error:
+                    errors[symbol] = error
+                    continue
+                source_status[symbol] = source
+                captured.append((symbol, rows))
             with self._database.transaction() as connection:
-                for result in results:
-                    if isinstance(result, Exception):
-                        errors["unknown"] = str(result)[:300]
-                        continue
-                    symbol, rows, source, error = result
-                    if error:
-                        errors[symbol] = error
-                        continue
-                    source_status[symbol] = source
-                    ensure_instrument(connection, symbol)
+                ensure_instruments(connection, [symbol for symbol, _rows in captured])
+                for symbol, rows in captured:
                     stored = 0
                     for raw_row in rows:
                         try:

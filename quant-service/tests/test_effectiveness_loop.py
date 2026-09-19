@@ -71,6 +71,23 @@ def test_execution_costs_t1_missing_limits_and_adjustment():
     assert simulate(b,['2026-09-14','2026-09-15'],Costs())['status']=='corporate_action_unmodeled'
 
 
+def test_a_not_yet_fetched_factor_is_pending_not_a_data_outage():
+    # A NULL adj_factor means the separate factor lane has not run for that
+    # date yet.  Reporting it as 'missing_execution_data' made a known-pending
+    # control look like a bar outage; reporting it as 'corporate_action_unmodeled'
+    # would claim a corporate action nobody observed.
+    b=bars();b[1]['adj_factor']=None
+    assert simulate(b,['2026-09-14','2026-09-15'],Costs())['status']=='adjustment_pending'
+    b=bars();b[0]['adj_factor']=0
+    assert simulate(b,['2026-09-14','2026-09-15'],Costs())['status']=='adjustment_pending'
+    # Every other execution field is still mandatory, and two distinct real
+    # factors are still an unmodelled corporate action, not a pending one.
+    b=bars();b[1]['adj_factor']=None;b[1]['close']=None
+    assert simulate(b,['2026-09-14','2026-09-15'],Costs())['status']=='missing_execution_data'
+    b=bars();b[0]['adj_factor']=3;b[1]['adj_factor']=4
+    assert simulate(b,['2026-09-14','2026-09-15'],Costs())['status']=='corporate_action_unmodeled'
+
+
 def test_shadow_fixed_holdout_and_no_automatic_promotion():
     rows=samples(60);original=deepcopy(rows)
     result=shadow_compare(rows,'attention',Policy())

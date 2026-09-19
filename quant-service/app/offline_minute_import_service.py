@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Json
 
+from .instrument_registry import ensure_instruments as ensure_registry_instruments
+
 
 def data_root(environ: Mapping[str, str] | None = None) -> Path:
     values = os.environ if environ is None else environ
@@ -109,11 +111,14 @@ def recovery_action(existing: Mapping[str, Any] | None, *, now: datetime, stale_
     return "resume_stale_running"
 
 
+def ensure_instruments(connection: Any, symbols: list[str], *, exchange_for: Callable[[str], str]) -> None:
+    """Register a whole offline/minute-capture basket in one batched statement."""
+    ensure_registry_instruments(connection, symbols, "offline-import", exchange_for=exchange_for)
+
+
 def ensure_instrument(connection: Any, symbol: str, *, exchange_for: Callable[[str], str]) -> None:
-    connection.execute(
-        "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,'offline-import') ON CONFLICT(symbol) DO NOTHING",
-        (symbol, exchange_for(symbol)),
-    )
+    """Single-symbol compatibility wrapper over the batched registry helper."""
+    ensure_instruments(connection, [symbol], exchange_for=exchange_for)
 
 
 def import_csv(
@@ -163,8 +168,14 @@ def import_csv(
         if not items:
             return
         with database.transaction() as connection:
+            # One registration statement for the whole 1,000-row slice, in the
+            # shared ascending symbol order, instead of one per CSV row in
+            # file order.  ``ensure_instruments`` dedups and sorts, so a chunk
+            # of a single-symbol file costs one statement rather than 1,000,
+            # and a concurrent ingestion transaction touching the same new
+            # symbols cannot deadlock against this one.
+            ensure_instruments(connection, [item["symbol"] for item in items], exchange_for=exchange_for)
             for item in items:
-                ensure_instrument(connection, item["symbol"], exchange_for=exchange_for)
                 connection.execute(
                     """INSERT INTO quant.market_bars_minute(symbol,bar_time,open,high,low,close,volume,amount,source_name,import_id,source_available_at,available_at,raw)
                        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now(),%s)
@@ -211,6 +222,6 @@ def import_csv(
 
 
 __all__ = [
-    "data_root", "ensure_instrument", "import_csv", "import_path", "minute_row", "minute_timestamp",
+    "data_root", "ensure_instrument", "ensure_instruments", "import_csv", "import_path", "minute_row", "minute_timestamp",
     "recovery_action", "sha256_file", "source_available_at", "stale_seconds",
 ]

@@ -35,14 +35,14 @@ class _RecordingConnection:
         return None
 
 
-def _call(connection, rows, api_name="daily", upsert_bar=None):
+def _call(connection, rows, api_name="daily", upsert_bar=None, ensure_instruments=None):
     return normalize_rows(
         connection, api_name, rows, datetime(2026, 8, 20, tzinfo=timezone.utc),
         core_apis=frozenset({"daily", "index_daily", "adj_factor"}),
         date_parser=lambda value: date(2026, 8, 20) if value else None,
         exchange_for=lambda symbol: symbol.rsplit(".", 1)[1],
         is_st_security_name=lambda _name: False,
-        ensure_instrument=lambda *_args: None,
+        ensure_instruments=ensure_instruments or (lambda *_args: None),
         upsert_bar=upsert_bar or (lambda *_args: None),
         daily_bar_type=DailyBar,
         decimal_or_none=_decimal_or_none,
@@ -108,6 +108,168 @@ class TushareNormalizationDailyBatchingTests(unittest.TestCase):
         self.assertEqual(normalized, 1)
         batched.assert_not_called()
         self.assertTrue(any("daily_adjustment_factors" in sql for sql, _params in connection.calls))
+
+
+class TushareNormalizationInstrumentRegistrationTests(unittest.TestCase):
+    """The instrument registration behind the foreign keys was the other
+    per-row statement in this loop; it is now one call per payload."""
+
+    def test_payload_symbols_are_registered_once_before_the_row_loop(self) -> None:
+        connection = _RecordingConnection()
+        registered: list[list[str]] = []
+        rows = [
+            {"ts_code": "600000.SH", "trade_date": "20260820", "adj_factor": "1.25"},
+            {"ts_code": "000001.SZ", "trade_date": "20260820", "adj_factor": "2.5"},
+            {"ts_code": "000001.SZ", "trade_date": "20260819", "adj_factor": "2.4"},
+        ]
+        _call(connection, rows, api_name="adj_factor",
+              ensure_instruments=lambda _c, symbols: registered.append(list(symbols)))
+        self.assertEqual(len(registered), 1)
+        self.assertEqual(sorted(registered[0]), ["000001.SZ", "000001.SZ", "600000.SH"])
+
+    def test_unparsable_ts_code_registers_no_instrument(self) -> None:
+        connection = _RecordingConnection()
+        registered: list[list[str]] = []
+        normalized = _call(
+            connection, [{"ts_code": "not-a-symbol", "trade_date": "20260820", "adj_factor": "1.1"}],
+            api_name="adj_factor",
+            ensure_instruments=lambda _c, symbols: registered.append(list(symbols)),
+        )
+        self.assertEqual(normalized, 0)
+        self.assertEqual(registered, [[]])
+        self.assertTrue(any("data_quality_issues" in sql for sql, _params in connection.calls))
+
+    def test_apis_whose_instruments_another_statement_owns_skip_the_pre_pass(self) -> None:
+        """``trade_cal`` carries no symbols; for ``stock_basic``, ``daily`` and
+        ``index_daily`` another statement in the same transaction already
+        upserts every instrument of the payload
+        (``persist_stock_basic_instruments`` after the loop, and
+        ``upsert_daily_bars`` for the two bar APIs).  A pre-pass there would be
+        a second ~5,500-element array statement writing rows that are
+        rewritten seconds later."""
+        payloads = {
+            "trade_cal": {"ts_code": "000001.SZ", "cal_date": "20260820", "is_open": "1"},
+            "stock_basic": {"ts_code": "000001.SZ", "name": "平安银行"},
+            "daily": {"ts_code": "000001.SZ", "trade_date": "20260820", "close": "10.5"},
+            "index_daily": {"ts_code": "000001.SH", "trade_date": "20260820", "close": "3200.0"},
+        }
+        for api_name, row in payloads.items():
+            with self.subTest(api_name=api_name):
+                connection = _RecordingConnection()
+                registered: list[list[str]] = []
+                with patch("app.tushare_normalization.upsert_daily_bars"):
+                    normalize_rows(
+                        connection, api_name, [row], datetime(2026, 8, 20, tzinfo=timezone.utc),
+                        core_apis=frozenset(payloads),
+                        date_parser=lambda value: date(2026, 8, 20) if value else None,
+                        exchange_for=lambda symbol: symbol.rsplit(".", 1)[1],
+                        is_st_security_name=lambda _name: False,
+                        ensure_instruments=lambda _c, symbols: registered.append(list(symbols)),
+                        upsert_bar=lambda *_args: None, daily_bar_type=DailyBar,
+                        decimal_or_none=_decimal_or_none,
+                        safe_error_detail=lambda message, limit: message[:limit],
+                    )
+                self.assertEqual(registered, [])
+
+    def test_the_daily_hot_path_still_registers_its_instruments_via_the_batch_upsert(self) -> None:
+        """Dropping the pre-pass for ``daily`` is only safe because
+        ``upsert_daily_bars`` upserts every instrument of the payload itself,
+        so assert the bars really do reach it."""
+        connection = _RecordingConnection()
+        registered: list[list[str]] = []
+        rows = [
+            {"ts_code": "600000.SH", "trade_date": "20260820", "close": "12.0"},
+            {"ts_code": "000001.SZ", "trade_date": "20260820", "close": "10.5"},
+        ]
+        with patch("app.tushare_normalization.upsert_daily_bars") as batched:
+            _call(connection, rows, ensure_instruments=lambda _c, symbols: registered.append(list(symbols)))
+        self.assertEqual(registered, [])
+        batched.assert_called_once()
+        self.assertEqual({bar.symbol for bar in batched.call_args.args[1]}, {"000001.SZ", "600000.SH"})
+
+
+class TushareStockBasicBatchingTests(unittest.TestCase):
+    """``stock_basic`` used to run one ``INSERT ... ON CONFLICT DO UPDATE``
+    per symbol in payload order.  On the production Longhu post-close path
+    ``longhu_market_repository.persist_full_market_close`` calls
+    ``persist_rows(..., 'stock_basic', ...)`` BEFORE
+    ``persist_rows(..., 'daily', ...)`` inside one caller-owned transaction,
+    so this writer takes the ``quant.instruments`` locks first and its order
+    is the one that transaction is judged by.  ``DO UPDATE`` row-locks every
+    existing conflicting row, i.e. the whole cross-section."""
+
+    def _normalize(self, connection, rows):
+        return normalize_rows(
+            connection, "stock_basic", rows, datetime(2026, 8, 20, tzinfo=timezone.utc),
+            core_apis=frozenset({"stock_basic"}),
+            date_parser=lambda value: date(2026, 8, 20) if value else None,
+            exchange_for=lambda symbol: symbol.rsplit(".", 1)[1],
+            is_st_security_name=lambda name: str(name or "").startswith("ST"),
+            ensure_instruments=lambda *_args: None,
+            upsert_bar=lambda *_args: None, daily_bar_type=DailyBar,
+            decimal_or_none=_decimal_or_none,
+            safe_error_detail=lambda message, limit: message[:limit],
+        )
+
+    def _instrument_calls(self, connection):
+        return [(sql, params) for sql, params in connection.calls
+                if "INSERT INTO quant.instruments" in sql]
+
+    def test_whole_payload_is_one_sorted_set_based_statement(self) -> None:
+        connection = _RecordingConnection()
+        rows = [
+            {"ts_code": "600519.SH", "name": "moutai", "industry": "baijiu"},
+            {"ts_code": "000001.SZ", "name": "pingan", "industry": "bank"},
+            {"ts_code": "300750.SZ", "name": "catl", "industry": "battery"},
+        ]
+        normalized = self._normalize(connection, rows)
+
+        self.assertEqual(normalized, 3)
+        calls = self._instrument_calls(connection)
+        self.assertEqual(len(calls), 1)
+        sql, params = calls[0]
+        self.assertIn("unnest(", sql)
+        self.assertNotIn("VALUES(%s,%s", sql)
+        self.assertIn("ORDER BY 1", sql.split("ON CONFLICT")[0])
+        self.assertIn("ON CONFLICT(symbol) DO UPDATE", sql)
+        self.assertEqual(params[0], "tushare")
+        self.assertEqual(params[1], ["000001.SZ", "300750.SZ", "600519.SH"])
+        self.assertEqual(params[2], ["SZ", "SZ", "SH"])
+        self.assertEqual(params[3], ["pingan", "catl", "moutai"])
+
+    def test_duplicate_ts_code_keeps_the_last_row_as_the_sequential_form_did(self) -> None:
+        """~5,500 sequential ``DO UPDATE`` statements left the LAST duplicate
+        in the table; a set-based statement must not silently flip that, and
+        ``ON CONFLICT DO UPDATE`` cannot touch the same key twice in one
+        statement anyway."""
+        connection = _RecordingConnection()
+        normalized = self._normalize(connection, [
+            {"ts_code": "000001.SZ", "name": "old", "industry": "first"},
+            {"ts_code": "000001.SZ", "name": "ST new", "industry": "second"},
+        ])
+        # Both rows parsed, so both are still counted.
+        self.assertEqual(normalized, 2)
+        _sql, params = self._instrument_calls(connection)[0]
+        self.assertEqual(params[1], ["000001.SZ"])
+        self.assertEqual(params[3], ["ST new"])
+        self.assertEqual(params[4], ["second"])
+        self.assertEqual(params[7], [True])
+
+    def test_invalid_ts_code_still_warns_per_row_and_writes_no_instrument(self) -> None:
+        connection = _RecordingConnection()
+        normalized = self._normalize(connection, [
+            {"ts_code": "not-a-symbol", "name": "junk"},
+            {"ts_code": "000001.SZ", "name": "pingan"},
+        ])
+        self.assertEqual(normalized, 1)
+        _sql, params = self._instrument_calls(connection)[0]
+        self.assertEqual(params[1], ["000001.SZ"])
+        self.assertTrue(any("data_quality_issues" in sql for sql, _params in connection.calls))
+
+    def test_a_payload_with_no_valid_symbol_issues_no_instrument_statement(self) -> None:
+        connection = _RecordingConnection()
+        self.assertEqual(self._normalize(connection, [{"ts_code": "", "name": "junk"}]), 0)
+        self.assertEqual(self._instrument_calls(connection), [])
 
 
 if __name__ == "__main__":

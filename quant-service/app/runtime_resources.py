@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 GIB = 1024 ** 3
@@ -105,7 +109,8 @@ def runtime_resource_state(*, disk_free_bytes: int, min_free_bytes: int,
 
 def research_storage_governance(*, hot_database_bytes: int, artifact_bytes: int,
                                 research_budget_bytes: int, hot_database_budget_bytes: int,
-                                warning_ratio: float, stop_ratio: float) -> dict[str, Any]:
+                                warning_ratio: float, stop_ratio: float,
+                                artifact_measurement: DirectoryMeasurement | None = None) -> dict[str, Any]:
     """Classify bounded research storage without deleting any evidence.
 
     The hot PostgreSQL schema is the scarce path for high-frequency evidence,
@@ -113,6 +118,10 @@ def research_storage_governance(*, hot_database_bytes: int, artifact_bytes: int,
     locally managed research artifacts.  At the stop watermark callers must
     skip *nonessential* high-frequency capture, never delete records or stop
     watched-price/risk evaluation.
+
+    ``artifact_measurement`` does not change ``artifact_bytes`` -- it only says
+    *when* that number was measured, so a reader can tell a fresh walk from a
+    cached one (see :class:`ManagedDirectoryCache`).
     """
     used_bytes = max(0, int(hot_database_bytes)) + max(0, int(artifact_bytes))
     hot_ratio = hot_database_bytes / hot_database_budget_bytes if hot_database_budget_bytes else 1.0
@@ -134,7 +143,8 @@ def research_storage_governance(*, hot_database_bytes: int, artifact_bytes: int,
         "allow_nonessential_high_frequency": not stop,
         "hot_database": {"used_bytes": int(hot_database_bytes), "budget_bytes": int(hot_database_budget_bytes),
                          "ratio": round(hot_ratio, 6)},
-        "artifacts": {"used_bytes": int(artifact_bytes)},
+        "artifacts": {"used_bytes": int(artifact_bytes),
+                      **(artifact_measurement.freshness() if artifact_measurement else {})},
         "managed": {"used_bytes": used_bytes, "budget_bytes": int(research_budget_bytes),
                     "ratio": round(total_ratio, 6), "warning_ratio": warning_ratio, "stop_ratio": stop_ratio},
     }
@@ -157,6 +167,100 @@ def managed_directory_bytes(storage_path: Path) -> int:
     except OSError:
         return 0
     return total
+
+
+#: How long one artifact-store measurement may answer for.  The number is an
+#: admission-control signal against a 4 GiB allocation, so a minute of drift
+#: cannot move any watermark decision; a 4.5 s walk on every ``/health`` can
+#: and did.
+MANAGED_DIRECTORY_CACHE_SECONDS = 60.0
+
+
+@dataclass(frozen=True)
+class DirectoryMeasurement:
+    """One directory-size measurement and how old it is."""
+
+    used_bytes: int
+    #: When the walk that produced ``used_bytes`` finished, ISO-8601 UTC.
+    measured_at: str
+    age_seconds: float
+    #: True when this answer came from the cache instead of a fresh walk.
+    cached: bool
+    ttl_seconds: float
+
+    def freshness(self) -> dict[str, Any]:
+        """The part a health payload publishes next to the byte count."""
+        return {"measured_at": self.measured_at, "age_seconds": round(self.age_seconds, 3),
+                "cached": self.cached, "ttl_seconds": self.ttl_seconds}
+
+
+class ManagedDirectoryCache:
+    """Process-local, TTL-bounded artifact-store measurements.
+
+    ``managed_directory_bytes`` walks every file below the research directory.
+    ``/health`` asked for that on every single request, and on this host's HDD
+    the walk measured 4.3-4.9 s, which is long enough to break a release's
+    health probes -- a liveness check was being answered by a filesystem
+    inventory.
+
+    The fix is the smallest one that keeps the number honest: cache it for
+    :data:`MANAGED_DIRECTORY_CACHE_SECONDS` and publish how old it is.  The
+    number's *meaning* is unchanged -- it is still regular-file bytes below the
+    directory, measured exactly the same way -- so no watermark, ratio or
+    admission decision shifts.  What changes is that a reader can now see
+    whether they are looking at a fresh walk, and a caller that needs one can
+    ask for it (``force=True``), which is the size-on-demand path for anything
+    that must decide against the current size rather than the recent one.
+
+    The clock is injectable so the TTL can be tested without sleeping, and the
+    walk is injectable so it can be tested without a filesystem.  A lock keeps
+    two concurrent ``/health`` requests from both walking the same directory.
+    """
+
+    def __init__(self, *, ttl_seconds: float = MANAGED_DIRECTORY_CACHE_SECONDS,
+                 walk: Callable[[Path], int] = managed_directory_bytes,
+                 monotonic: Callable[[], float] = time.monotonic,
+                 wall_clock: Callable[[], datetime] | None = None) -> None:
+        self.ttl_seconds = float(ttl_seconds)
+        self._walk = walk
+        self._monotonic = monotonic
+        self._wall_clock = wall_clock or (lambda: datetime.now(timezone.utc))
+        self._entries: dict[str, tuple[float, str, int]] = {}
+        self._lock = threading.Lock()
+
+    def measure(self, storage_path: Path, *, force: bool = False) -> DirectoryMeasurement:
+        """Return the directory's size, walking it only when the TTL expired."""
+        key = str(storage_path)
+        now = self._monotonic()
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and not force and now - entry[0] < self.ttl_seconds:
+                return DirectoryMeasurement(
+                    used_bytes=entry[2], measured_at=entry[1], age_seconds=max(0.0, now - entry[0]),
+                    cached=True, ttl_seconds=self.ttl_seconds)
+        # The walk is deliberately OUTSIDE the lock: it is the slow part, and a
+        # second caller arriving mid-walk should be allowed to serve the
+        # previous answer rather than queue behind a filesystem scan.
+        used_bytes = int(self._walk(Path(storage_path)))
+        measured_at = self._wall_clock().isoformat()
+        finished = self._monotonic()
+        with self._lock:
+            self._entries[key] = (finished, measured_at, used_bytes)
+        return DirectoryMeasurement(used_bytes=used_bytes, measured_at=measured_at,
+                                    age_seconds=0.0, cached=False, ttl_seconds=self.ttl_seconds)
+
+    def invalidate(self, storage_path: Path | None = None) -> None:
+        """Drop one path's cached measurement, or all of them."""
+        with self._lock:
+            if storage_path is None:
+                self._entries.clear()
+            else:
+                self._entries.pop(str(storage_path), None)
+
+
+#: The one cache ``/health`` and the admission check share, so a walk paid for
+#: by one of them answers the other too.
+managed_directory_cache = ManagedDirectoryCache()
 
 
 def runtime_resource_status(storage_path: Path) -> dict[str, Any]:

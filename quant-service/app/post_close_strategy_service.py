@@ -51,7 +51,7 @@ def candidates(
                     WHERE trading_date=%s AND source='longhuvip_main_net'
                     ORDER BY symbol,available_at DESC
                ), ranked AS (
-                   SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.volume,b.adj_factor,i.name,
+                   SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.pre_close,b.volume,b.adj_factor,i.name,
                           b.amount,basic.row_data->>'turnover_rate' AS turnover_rate,
                           basic.row_data->>'volume_ratio' AS volume_ratio,basic.row_data->>'pe' AS pe,
                           basic.row_data->>'pb' AS pb,flow.net_amount AS main_net_amount,
@@ -60,7 +60,7 @@ def candidates(
                      LEFT JOIN latest_basic basic ON basic.symbol=b.symbol
                      LEFT JOIN latest_flow flow ON flow.symbol=b.symbol
                     WHERE b.trading_date<=%s AND b.trading_date>=%s
-                 ) SELECT symbol,trading_date,high,low,close,volume,adj_factor,name
+                 ) SELECT symbol,trading_date,high,low,close,pre_close,volume,adj_factor,name
                          ,amount,turnover_rate,volume_ratio,pe,pb,main_net_amount
                     FROM ranked WHERE rn<=30 ORDER BY symbol,trading_date""",
             (as_of_date, as_of_date, as_of_date, as_of_date - timedelta(days=70)),

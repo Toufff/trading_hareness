@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
+from .instrument_registry import ensure_instruments
+
 
 @dataclass(frozen=True)
 class ResearchMaintenanceDependencies:
@@ -52,11 +54,26 @@ def update_analyst_profile(
 def update_universe_members(payload: Any, deps: ResearchMaintenanceDependencies) -> dict[str, Any]:
     """Update explicit member flags and retain their point-in-time history."""
     with deps.database.transaction() as connection:
-        for symbol in payload.symbols:
-            connection.execute(
-                "INSERT INTO quant.instruments(symbol,exchange,source) VALUES(%s,%s,'universe') ON CONFLICT(symbol) DO NOTHING",
-                (symbol, deps.exchange_for(symbol)),
+        # One registration statement for the whole payload, in the shared
+        # ascending symbol order (see ``app/instrument_registry.py``), instead
+        # of one ``INSERT ... ON CONFLICT DO NOTHING`` per symbol inside the
+        # membership loop below.  The exchange resolver stays injected.
+        #
+        # The membership loop then walks the symbols the registry actually
+        # WROTE rather than ``payload.symbols``: ``quant.universe_members
+        # .symbol`` references ``quant.instruments(symbol)`` and the registry
+        # strips surrounding whitespace and drops blanks, so writing the raw
+        # input here would fail that foreign key mid-transaction for exactly
+        # the inputs the registry rewrote.  On the HTTP path the two lists are
+        # already identical (``UniverseUpdateRequest`` sorts, upper-cases,
+        # deduplicates and regex-checks); this closes the gap for any other
+        # caller and is the contract stated in ``instrument_registry``.
+        registered = [
+            symbol for symbol, _exchange in ensure_instruments(
+                connection, payload.symbols, "universe", exchange_for=deps.exchange_for,
             )
+        ]
+        for symbol in registered:
             connection.execute(
                 """INSERT INTO quant.universe_members(universe_key,symbol,enabled,priority,source,updated_at)
                    VALUES(%s,%s,%s,%s,'api',now()) ON CONFLICT(universe_key,symbol) DO UPDATE SET enabled=EXCLUDED.enabled,
@@ -72,7 +89,9 @@ def update_universe_members(payload: Any, deps: ResearchMaintenanceDependencies)
             [str(row["symbol"]) for row in active], source="universe-members-api", priority=payload.priority,
         )
     return {
-        "universe_key": payload.universe_key, "updated": len(payload.symbols), "enabled": payload.enabled,
+        # ``updated`` counts the membership rows actually written, which is
+        # the registered list, not the raw payload length.
+        "universe_key": payload.universe_key, "updated": len(registered), "enabled": payload.enabled,
         "history": history,
     }
 

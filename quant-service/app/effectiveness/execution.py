@@ -1,6 +1,7 @@
 """Explicit daily-open proxy, not execution of textual intraday conditions."""
 from dataclasses import dataclass, asdict
 from math import floor
+from ..research_prices import ADJUSTMENT_MISSING_FLAG, CARRIED_FORWARD_FLAG, resolve_factors
 from .rules import numeric
 
 
@@ -23,11 +24,23 @@ def simulate(bars, sessions, costs=Costs()):
     if len(sessions)<2:return out('t1_blocked')
     if sessions!=sorted(set(sessions)):raise ValueError('Ordered distinct exchange sessions required')
     by={b['date']:b for b in bars};path=[by.get(d) for d in sessions]
-    fields=('open','high','low','close','limit_up','limit_down','adj_factor')
+    # ``adj_factor`` is deliberately NOT in this tuple: a factor that has not
+    # been fetched yet is a known-pending control on its own lane, not a data
+    # outage, and reporting it as 'missing_execution_data' hid that difference.
+    fields=('open','high','low','close','limit_up','limit_down')
     if any(not b or any(numeric(b.get(k)) is None or float(b[k])<=0 for k in fields) or b.get('is_suspended') is None for b in path):
         return out('missing_execution_data')
     if any(b['is_suspended'] for b in path):return out('suspended')
-    if len({float(b['adj_factor']) for b in path})!=1:return out('corporate_action_unmodeled')
+    # The factor is a corporate-action detector here, not a price input: the
+    # simulation itself uses raw prices inside one short window. A trailing
+    # factor gap whose bars show continuous pre_close is therefore resolvable
+    # by the shared carry-forward rule (app/research_prices.resolve_factors),
+    # and only a real ex-rights signature or an unresolvable gap still refuses.
+    factors=resolve_factors(path)
+    if factors.factors is None:
+        return out('adjustment_pending' if ADJUSTMENT_MISSING_FLAG in factors.flags else 'corporate_action_unmodeled')
+    if len(set(factors.factors))!=1:return out('corporate_action_unmodeled')
+    adjustment_flags=list(factors.flags)
     first,last=path[0],path[-1]
     if first['open']>=first['limit_up']-.011 or first['open']<=first['limit_down']+.011:
         return out('entry_limit_blocked')
@@ -46,6 +59,8 @@ def simulate(bars, sessions, costs=Costs()):
     paid=buy_cost(shares);amount=shares*sell
     proceeds=amount-max(costs.minimum_commission,amount*costs.commission_rate)-amount*(costs.sell_tax_rate+costs.transfer_rate)
     return out('simulated',entry_date=sessions[0],exit_date=sessions[-1],shares=shares,
-        net_return_pct=(proceeds-paid)/paid*100,
+        net_return_pct=(proceeds-paid)/paid*100,quality_flags=adjustment_flags,
+        adjustment_basis='carried_forward' if CARRIED_FORWARD_FLAG in adjustment_flags else 'fetched',
+        carried_factor_sessions=factors.carried_sessions,
         adverse_excursion_pct=(min(b['low'] for b in path)/buy-1)*100,costs=asdict(costs),
         method='次一交易日开盘买、窗口末收盘卖的日线模拟；不是原盘中条件成交，也不是实盘收益')

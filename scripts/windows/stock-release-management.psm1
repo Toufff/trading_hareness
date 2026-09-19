@@ -49,6 +49,13 @@ function Set-StockReleaseState {
         [Parameter(Mandatory)][hashtable]$State
     )
     $layout = Get-StockReleaseLayout -PlatformRoot $PlatformRoot
+    # activated_at is the moment the `current` junction was actually moved to
+    # active_release: publish and switch record it immediately after
+    # Set-StockCurrentRelease returns. It cannot be derived from the release id,
+    # whose yyyyMMddTHHmmss prefix is stamped before the test suite runs -- i.e.
+    # minutes to tens of minutes before activation -- and the tunnel pin refresh
+    # below needs the real instant, so it is carried like the tunnel keys.
+    #
     # tunnel_release / tunnel_ssh_target_sha256 describe the shared-peer tunnel's
     # own lifecycle, which is deliberately decoupled from the release lifecycle
     # by the reinstall gate below: tunnel_release is the release the tunnel was
@@ -59,16 +66,18 @@ function Set-StockReleaseState {
     # seeded from the existing state instead -- a caller that is not changing the
     # tunnel must not be able to silently erase the pin that keeps that release
     # directory alive (which would let retention delete the tree the live tunnel
-    # is executing from).
+    # is executing from). activated_at is carried for the same reason: a state
+    # write that does not move the junction must not erase when it last moved.
     $existing = Get-StockReleaseState -PlatformRoot $PlatformRoot
     $carried = @{}
-    foreach ($key in 'tunnel_release', 'tunnel_ssh_target_sha256') {
+    foreach ($key in 'tunnel_release', 'tunnel_ssh_target_sha256', 'activated_at') {
         $carried[$key] = if ($existing.PSObject.Properties[$key]) { $existing.$key } else { $null }
     }
     $payload = [ordered]@{
         schema_version = 1
         active_release = $null
         previous_release = $null
+        activated_at = $carried['activated_at']
         updated_at = [DateTimeOffset]::Now.ToString('o')
         last_verification = $null
         last_failed_release = $null
@@ -403,9 +412,20 @@ function Test-StockReleaseIntegrity {
 #     (what the live process came from) AND the `current` junction's tree (what
 #     the next relaunch will come from). Comparing only the pin would let a
 #     relaunch silently adopt code the gate never compared;
-#   * when the tunnel's supervised run started after the active release was
-#     published, the running process demonstrably came from `current`, so
-#     Get-StockTunnelPinRefresh moves the pin forward to the active release.
+#   * when the tunnel's supervised run started after the `current` junction was
+#     moved (release-state.json's `activated_at`, written by publish/switch the
+#     moment Set-StockCurrentRelease returns), the running process started from
+#     `current`, so Get-StockTunnelPinRefresh moves the pin forward to the
+#     active release. Judged against the release id's own timestamp this would
+#     not follow: that stamp is taken before the test suite runs, and `current`
+#     still resolves to the PREVIOUS release for the whole window between the
+#     two, so a run that started there came from the pinned tree after all. With
+#     only the approximate instant available the refresh still happens but is
+#     marked uncertain, and an uncertain pin cannot buy a skip.
+#     No stale pin has been observed in production yet: the case the refresh
+#     exists for is a tunnel that relaunched (or was reinstalled by hand with
+#     scripts\shared-peer\install-shared-tunnel-task.ps1) between two publishes,
+#     or a rollback whose Set-StockReleaseState never landed.
 #
 # The pinned release is not merely assumed to survive: every real reinstall
 # records it as `tunnel_release`, Get-StockReleaseRetentionPlan keeps it
@@ -422,12 +442,19 @@ function Test-StockReleaseIntegrity {
 # Import-Module/Add-Type anywhere on the chain fails the test instead of
 # silently leaving the gate under-detecting):
 #
+#   install-shared-tunnel-tasks.ps1 (the fan-out publish/switch call: intraday
+#   first and unguarded, then batch, then the TCP-separation measurement)
+#     -> install-shared-tunnel-task.ps1 -Profile <intraday|batch>
+#        -> shared-tunnel-profiles.psm1 (ports, forwarding tuples, service and
+#           task names, lock files, health and state-freshness judges -- one
+#           module shared by BOTH tunnels)
 #   scheduled task action (stock-background-host.exe, registered by
 #   install-shared-tunnel-task.ps1 via New-HiddenPowerShellTaskAction in
 #   background-process.psm1)
 #     -> the executable's build inputs (build-background-task-host.ps1 ->
 #        process-lifetime.cs, background-task-host.cs)
-#     -> start-shared-tunnels.ps1 (the script the host launches)
+#     -> start-shared-tunnels.ps1 (the script the host launches, for both
+#        profiles)
 #        -> Import-Module runtime-observability.psm1, background-process.psm1
 #        -> Start-RuntimeSupervisor (runtime-observability.psm1)
 #           -> scripts\windows\supervise-runtime-process.ps1, which owns the
@@ -440,6 +467,14 @@ $script:StockTunnelAffectingFiles = @(
     'scripts\shared-peer\start-shared-tunnels.ps1',
     # Defines the task action, triggers, settings and the health gate itself.
     'scripts\shared-peer\install-shared-tunnel-task.ps1',
+    # The fan-out publish/switch actually invoke: it installs the intraday task
+    # and then the batch one, and it is where "a batch failure must not fail a
+    # release" is decided. A change here changes what a reinstall would produce.
+    'scripts\shared-peer\install-shared-tunnel-tasks.ps1',
+    # Both profiles' ports, forwarding tuples, service/task names, lock files,
+    # health judge and state-freshness judge. Shared by BOTH tunnels, which is
+    # why a change to it must never be spared by a skip on either of them.
+    'scripts\shared-peer\shared-tunnel-profiles.psm1',
     # Supervisor, runtime state/event writers and the ssh target resolution
     # used by the tunnel script.
     'scripts\windows\runtime-observability.psm1',
@@ -464,11 +499,16 @@ $script:StockTunnelAffectingFiles = @(
     'scripts\windows\build-background-task-host.ps1'
 )
 
-# Where Get-StockTunnelExecutionChainFile starts walking. These two are the
-# chain's roots and cannot be discovered from inside it: the installer defines
-# the task action, and the build script defines what the action's executable is
-# compiled from.
+# Where Get-StockTunnelExecutionChainFile starts walking. These three are the
+# chain's roots and cannot be discovered from inside it: the fan-out installer
+# is what publish/switch call, the per-profile installer defines the task
+# action, and the build script defines what the action's executable is compiled
+# from. The per-profile installer is listed explicitly as well as being reached
+# from the fan-out, because the fan-out invokes it through the `$installer`
+# variable (`& $installer -Profile intraday @common`) rather than by literal
+# path, and an entry point costs nothing when it is already in the closure.
 $script:StockTunnelChainEntryPoints = @(
+    'scripts\shared-peer\install-shared-tunnel-tasks.ps1',
     'scripts\shared-peer\install-shared-tunnel-task.ps1',
     'scripts\windows\build-background-task-host.ps1'
 )
@@ -553,13 +593,15 @@ function Resolve-StockTunnelChainExpandableString {
     # variable, an environment variable, a computed name -- is an unresolvable
     # chain element, and this throws so the omission is loud rather than silent.
     # Returns $null for an expandable string that does not name a script, module
-    # or C# source at all.
+    # or C# source at all -- including a MESSAGE that merely ends in one
+    # ("Rerun $name.ps1 by hand"), which must not reach the unresolvable-variable
+    # throw below. A path on this chain is a single whitespace-free token.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Relative
     )
-    if ($Text -notmatch '\.(ps1|psm1|cs|exe)$') { return $null }
+    if ($Text -notmatch '^\S+\.(ps1|psm1|cs|exe)$') { return $null }
     $parent = Split-Path -Parent $Relative
     $resolved = $Text
     foreach ($reference in [regex]::Matches($Text, '\$\{?([A-Za-z_][A-Za-z0-9_:]*)\}?')) {
@@ -583,11 +625,39 @@ function Get-StockTunnelExecutionChainFile {
     # from $script:StockTunnelChainEntryPoints it takes the transitive closure
     # of every script/module/source-file path literal in each file's AST:
     #
-    #   * a literal containing a directory separator is release-root relative
-    #     ('scripts\windows\supervise-runtime-process.ps1' in
-    #     runtime-observability.psm1's Start-RuntimeSupervisor);
+    #   * only a literal whose WHOLE value is a path is considered at all: an
+    #     operator message that merely ends in one ('Run scripts\windows\tests\
+    #     test-shared-tunnel-recovery.ps1') names a file the parsed tree need
+    #     not carry, and would otherwise trip the loud rule below into a hard
+    #     error. Paths on this chain never contain whitespace;
+    #   * '/' and '\' are the same separator to PowerShell, so a value is
+    #     normalized to '\' before anything keys on one. Keyed on '\' alone, a
+    #     forward-slash literal got neither the root-relative reading nor the
+    #     loud rule, i.e. exactly the silent under-detection this parser exists
+    #     to end;
+    #   * a literal containing a directory separator is tried release-root
+    #     relative first ('scripts\windows\supervise-runtime-process.ps1' in
+    #     runtime-observability.psm1's Start-RuntimeSupervisor) and then
+    #     relative to the directory of the file that mentions it
+    #     (Join-Path $PSScriptRoot 'sub\helper.psm1' in a script under
+    #     scripts\shared-peer). Resolving only against the root silently dropped
+    #     the second form, which is a real chain element the gate would then
+    #     never hash, so a separator-carrying literal that resolves NOWHERE now
+    #     throws instead of disappearing;
+    #   * every candidate is collapsed back to a release-root-relative spelling
+    #     before it is used as a key, so a parent-relative literal
+    #     (Join-Path $PSScriptRoot '..\windows\x.psm1') enters the chain as
+    #     scripts\windows\x.psm1 rather than as a second, '..'-carrying spelling
+    #     of a file the declared list already names. A separator-carrying
+    #     literal whose candidates ALL collapse to somewhere outside the release
+    #     root throws under the same loud rule: the gate cannot hash what the
+    #     release does not carry, and staying quiet about it is the silent drop
+    #     this function exists to end. A reference that is deliberately outside
+    #     the tree is absolute or UNC and never reaches that branch;
     #   * a bare file name is resolved next to the file that mentions it
-    #     (Join-Path $PSScriptRoot 'process-lifetime.cs');
+    #     (Join-Path $PSScriptRoot 'process-lifetime.cs'), and is dropped
+    #     quietly when it resolves nowhere: with no separator it is as likely to
+    #     be a message, a build-script output name or a doc reference as a path;
     #   * a .ps1/.psm1/.cs candidate only counts when it actually exists, which
     #     drops absolute references to things outside the tree (csc.exe) and
     #     build-script output names that are not inputs;
@@ -605,6 +675,19 @@ function Get-StockTunnelExecutionChainFile {
     )
     $root = [IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\')
     $binPrefix = 'scripts\windows\bin\'
+    # Collapses a candidate to its canonical release-root-relative spelling, or
+    # to '' when it leaves the release root. Without this a '..'-carrying
+    # literal becomes a second key for a file the declared list already names:
+    # the equality assertion then fails for a spelling difference, or -- worse
+    # when the file is NOT declared -- the chain quietly holds the same file
+    # twice under two names.
+    $toReleaseRelative = {
+        param([string]$Candidate)
+        $full = ''
+        try { $full = [IO.Path]::GetFullPath((Join-Path $root $Candidate)).TrimEnd('\') } catch { return '' }
+        if (-not $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { return '' }
+        return $full.Substring($root.Length + 1)
+    }
     $entryPoints = if (@($EntryPoint).Count -gt 0) { @($EntryPoint) } else { @($script:StockTunnelChainEntryPoints) }
     $hashed = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $presence = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -640,17 +723,69 @@ function Get-StockTunnelExecutionChainFile {
             } else {
                 $value = [string]$literal.Value
             }
-            if ($value -notmatch '\.(ps1|psm1|cs|exe)$') { continue }
+            # '/' and '\' name the same separator to PowerShell, so neither the
+            # root-relative reading nor the loud rule below may key on one
+            # spelling of it.
+            $value = $value.Replace('/', '\')
+            # The whole value must BE a path, not merely end in one: a message
+            # ('Run scripts\windows\tests\test-shared-tunnel-recovery.ps1')
+            # names a file this tree need not carry and must not become a hard
+            # error. No path on this chain contains whitespace.
+            if ($value -notmatch '^\S+\.(ps1|psm1|cs|exe)$') { continue }
             if ($value -match '[*?"<>|]') { continue }
             if ($value -match '^[A-Za-z]:' -or $value.StartsWith('\\')) { continue }
-            $candidate = if ($value.Contains('\')) { $value.TrimStart('\') } else { Join-Path $parent $value }
+            # Root-relative first (the historical reading), then relative to the
+            # mentioning file's own directory, which is what
+            # `Join-Path $PSScriptRoot 'sub\helper.psm1'` means.
+            $hasSeparator = $value.Contains('\')
+            $trimmed = $value.TrimStart('\')
+            $besideMentioningFile = if ($parent) { Join-Path $parent $trimmed } else { $trimmed }
+            # @(...) around the whole conditional: a one-element array assigned
+            # out of an `if` is unrolled to a bare string, and indexing that
+            # would walk its characters. Normalizing here (not at the end) keeps
+            # the .exe rules, the Test-Path probe and the queued key on one
+            # canonical spelling.
+            $candidates = @(@(if ($hasSeparator) { $trimmed; $besideMentioningFile } else { $besideMentioningFile }) |
+                ForEach-Object { [string](& $toReleaseRelative $_) } |
+                Where-Object { $_ } |
+                Select-Object -Unique)
+            if ($candidates.Count -eq 0) {
+                # Every candidate climbed out of the release root. For a
+                # separator-carrying literal that is the same under-detection as
+                # a dead in-tree path: something spelled as a path into this
+                # tree produced no chain element, and the declared list would
+                # still match. An out-of-tree reference that is MEANT to be one
+                # is absolute or UNC and was already dropped above, so this
+                # branch only ever sees an overshooting relative literal.
+                if ($hasSeparator) {
+                    throw ("Tunnel execution chain file '$relative' references '$value', which resolves " +
+                        'outside the release root. Fix the reference, or teach ' +
+                        'Get-StockTunnelExecutionChainFile how to resolve it, so the reinstall gate can see the file.')
+                }
+                continue
+            }
+            $candidate = [string]$candidates[0]
             if ($candidate.StartsWith($binPrefix, [StringComparison]::OrdinalIgnoreCase) -and
                 $candidate.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) {
                 [void]$presence.Add($candidate)
                 continue
             }
             if ($candidate.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) { continue }
-            if (-not (Test-Path -LiteralPath (Join-Path $root $candidate) -PathType Leaf)) { continue }
+            $resolvedCandidate = @($candidates | Where-Object { Test-Path -LiteralPath (Join-Path $root $_) -PathType Leaf })
+            if ($resolvedCandidate.Count -eq 0) {
+                # A literal that spells out a path into the tree and resolves
+                # nowhere is either a chain element this release no longer
+                # carries or one the parser mis-resolved. Either way the gate
+                # would go on hashing a file list that is missing it, and the
+                # equality test would still pass green, so say so loudly.
+                if ($hasSeparator) {
+                    throw ("Tunnel execution chain file '$relative' references '$value', which exists neither at " +
+                        "the release root nor beside it. Fix the reference, or teach " +
+                        'Get-StockTunnelExecutionChainFile how to resolve it, so the reinstall gate can see the file.')
+                }
+                continue
+            }
+            $candidate = [string]$resolvedCandidate[0]
             if ($seen.Add($candidate)) { $queue.Enqueue($candidate) }
         }
     }
@@ -775,6 +910,69 @@ function Get-StockReleaseStamp {
     return ([DateTimeOffset]::new($parsed, [TimeZoneInfo]::Local.GetUtcOffset($parsed))).ToString('o')
 }
 
+function Resolve-StockReleaseActivationInstant {
+    # PURE. Picks the instant the `current` junction actually moved to the
+    # active release, and says how good that answer is.
+    #
+    # The release id's own yyyyMMddTHHmmss prefix is NOT that instant:
+    # publish-stock-release.ps1 computes it before the eight PowerShell suites,
+    # the pytest run and three npm invocations, and only switches the junction
+    # afterwards, so the id stamp precedes activation by minutes to tens of
+    # minutes. Everything in that window still resolves through `current` to the
+    # PREVIOUS release, so a tunnel that started there did not come from the
+    # active release at all.
+    #
+    # Sources, best first:
+    #   activated_at           - recorded by publish/switch right after
+    #                            Set-StockCurrentRelease returned. Exact, but
+    #                            only while `current` still resolves to the
+    #                            active release: switch moves the junction
+    #                            before it writes state, and if it dies in
+    #                            between (its revert failure is only a warning)
+    #                            or the junction is moved by hand, the recorded
+    #                            instant belongs to a release `current` has
+    #                            demonstrably left. Judged against that stale
+    #                            instant, a tunnel that started from the NEW
+    #                            tree looks like a relaunch from the active one
+    #                            and buys a skip it has not earned, so the same
+    #                            junction check that guards the source below
+    #                            guards this one.
+    #   current_junction_created - the junction's own creation time. Exact:
+    #                            Set-StockCurrentRelease builds a fresh junction
+    #                            under a staging name and renames it into place
+    #                            on every switch, so its creation time is the
+    #                            swap. Only usable when the junction really
+    #                            resolves to the active release.
+    #   release_id             - the id stamp. Approximate, and always EARLY.
+    #   release_directory_created - the staged tree's creation time, for ids
+    #                            that carry no stamp. Approximate, also early.
+    # Returns Stamp/Source/Exact; Source 'unknown' with an empty Stamp when
+    # nothing is available.
+    [CmdletBinding()]
+    param(
+        [string]$RecordedActivatedAt = '',
+        [string]$JunctionCreatedAt = '',
+        [bool]$JunctionMatchesActiveRelease = $false,
+        [string]$ReleaseIdStamp = '',
+        [string]$ReleaseDirectoryCreatedAt = ''
+    )
+    $answer = {
+        param($Stamp, $Source, $Exact)
+        [pscustomobject]@{ Stamp = [string]$Stamp; Source = [string]$Source; Exact = [bool]$Exact }
+    }
+    if ($JunctionMatchesActiveRelease -and [string]$RecordedActivatedAt) {
+        return (& $answer $RecordedActivatedAt 'activated_at' $true)
+    }
+    if ($JunctionMatchesActiveRelease -and [string]$JunctionCreatedAt) {
+        return (& $answer $JunctionCreatedAt 'current_junction_created' $true)
+    }
+    if ([string]$ReleaseIdStamp) { return (& $answer $ReleaseIdStamp 'release_id' $false) }
+    if ([string]$ReleaseDirectoryCreatedAt) {
+        return (& $answer $ReleaseDirectoryCreatedAt 'release_directory_created' $false)
+    }
+    return (& $answer '' 'unknown' $false)
+}
+
 function Get-StockTunnelPinRefresh {
     # PURE. release-state.json's tunnel_release records where the tunnel was
     # LAST INSTALLED FROM. The registered task action is
@@ -782,22 +980,39 @@ function Get-StockTunnelPinRefresh {
     # trigger after a drop, a logon, a reboot -- starts the tunnel from whatever
     # `current` resolves to at that moment, i.e. the active release, and writes
     # nothing to release-state.json. When the supervised run started at or after
-    # the active release was published, the live process demonstrably came from
+    # the junction moved to the active release, the live process came from
     # `current`, so the pin is refreshed to the active release; anything else
     # leaves the recorded pin alone (an unreadable start time is not evidence).
+    #
+    # The comparison is only as good as the activation instant it is given (see
+    # Resolve-StockReleaseActivationInstant). With an approximate one -- the
+    # release id stamp, which is always EARLIER than the real switch -- a
+    # started_at inside that window looks like a relaunch but may be the
+    # original run, still executing out of the pinned tree. The pin is refreshed
+    # anyway, because refreshing is what keeps it from naming a tree nothing
+    # runs from, and the answer is marked Uncertain so the caller can refuse to
+    # SKIP on it: an uncertain pin buys a reinstall, never a skipped one.
     [CmdletBinding()]
     param(
         [string]$PinnedRelease = '',
         [string]$ActiveRelease = '',
-        # Round-trip timestamp of the active release (its id stamp, or the
-        # release directory's creation time when the id carries none).
+        # Round-trip timestamp of the moment `current` moved to $ActiveRelease.
         [string]$ActiveReleaseStamp = '',
+        # $true only when $ActiveReleaseStamp is the activation instant itself
+        # (release-state.json's activated_at, or the junction's creation time)
+        # rather than something that merely precedes it.
+        [bool]$ActivationInstantIsExact = $false,
         # The runtime state file's started_at for the tunnel service.
         [string]$RuntimeStartedAt = ''
     )
     $unchanged = {
         param($Reason)
-        [pscustomobject]@{ Release = [string]$PinnedRelease; Refreshed = $false; Reason = [string]$Reason }
+        [pscustomobject]@{
+            Release = [string]$PinnedRelease
+            Refreshed = $false
+            Reason = [string]$Reason
+            Uncertain = $false
+        }
     }
     if (-not $PinnedRelease) { return (& $unchanged 'no_pin') }
     if (-not $ActiveRelease) { return (& $unchanged 'no_active_release') }
@@ -818,9 +1033,13 @@ function Get-StockTunnelPinRefresh {
         return [pscustomobject]@{
             Release = [string]$ActiveRelease
             Refreshed = $true
-            Reason = 'runtime_started_after_active_release'
+            Reason = if ($ActivationInstantIsExact) { 'runtime_started_after_activation' }
+                     else { 'runtime_started_after_release_stamp_activation_time_approximate' }
+            Uncertain = (-not $ActivationInstantIsExact)
         }
     }
+    # Earlier than an instant that is itself at or before the switch: the run
+    # cannot have come from `current`, whichever source the stamp came from.
     return (& $unchanged 'runtime_predates_active_release')
 }
 
@@ -955,7 +1174,31 @@ function Get-StockTunnelReinstallDecision {
         [string]$TaskActionUnderCurrent = '',
         # 'ok' only when every absolute path the registered action names still
         # exists (see Get-StockTunnelTaskActionPath).
-        [string]$TaskActionPathState = ''
+        [string]$TaskActionPathState = '',
+        # $true when the pin refresh could not tell whether the live tunnel came
+        # from the pinned tree or from `current`, because the activation instant
+        # was only approximate (see Get-StockTunnelPinRefresh). CurrentHashes
+        # then describes a tree that may not be the one the process is executing
+        # out of, which is not a baseline a skip may rest on.
+        [bool]$TunnelPinUncertain = $false,
+        # The OTHER supervised tunnel tasks a (re)install would register -- today
+        # exactly one, the batch profile. Each entry is
+        #   @{ Name = 'batch'; TaskState = ...; RuntimeStatus = ...;
+        #      TaskActionUnderCurrent = ...; TaskActionPathState = ... }
+        # and is held to the same four conditions as the intraday task above,
+        # with the profile name prefixed onto the reason so a receipt says WHICH
+        # tunnel refused the skip. The file hashes are deliberately NOT repeated
+        # per task: both profiles execute the same chain out of the same tree
+        # (install-shared-tunnel-tasks.ps1 -> install-shared-tunnel-task.ps1 ->
+        # shared-tunnel-profiles.psm1 -> start-shared-tunnels.ps1), which is why
+        # that module is in $script:StockTunnelAffectingFiles.
+        #
+        # An empty list means the caller observed no other task. That is the
+        # honest reading of "no observation", not "all clear":
+        # Resolve-StockTunnelReinstallPlan always passes the batch profile, and
+        # test-stock-release-safety.ps1 asserts that it does, so the empty
+        # default cannot quietly become production's behaviour.
+        [hashtable[]]$AdditionalTasks = @()
     )
     if ($null -eq $CurrentHashes) { $CurrentHashes = @{} }
     if ($null -eq $NewHashes) { $NewHashes = @{} }
@@ -1011,11 +1254,40 @@ function Get-StockTunnelReinstallDecision {
         'not_retained' { $reasons += 'tunnel_release_not_retained' }
         default { $reasons += 'tunnel_release_unknown' }
     }
+    if ($TunnelPinUncertain) { $reasons += 'tunnel_release_pin_uncertain' }
     if ($TaskActionUnderCurrent -ne 'yes') { $reasons += 'task_action_not_under_current' }
     # A version-pinned WindowsApps pwsh.exe that the Store has since removed
     # leaves an action Task Scheduler can no longer launch; only a reinstall
     # re-resolves it.
     if ($TaskActionPathState -ne 'ok') { $reasons += 'task_action_path_missing' }
+    # The other tunnel tasks, judged by exactly the same four rules. A batch
+    # tunnel that is not registered, not running, not healthy or whose action no
+    # longer resolves is a reinstall reason: the fan-out installer is what would
+    # put it back, and it can only run if this publish does not skip.
+    $additionalOrdered = [ordered]@{}
+    foreach ($entry in @($AdditionalTasks)) {
+        if ($null -eq $entry) { continue }
+        $prefix = if ($entry.ContainsKey('Name')) { [string]$entry['Name'] } else { '' }
+        if (-not $prefix) { $prefix = 'additional' }
+        $readEntry = {
+            param($Key)
+            if ($entry.ContainsKey($Key)) { [string]$entry[$Key] } else { '' }
+        }
+        $entryTaskState = & $readEntry 'TaskState'
+        $entryRuntimeStatus = & $readEntry 'RuntimeStatus'
+        $entryUnderCurrent = & $readEntry 'TaskActionUnderCurrent'
+        $entryPathState = & $readEntry 'TaskActionPathState'
+        if ($entryTaskState -ne 'Running') { $reasons += ($prefix + '_task_not_running') }
+        if ($entryRuntimeStatus -ne 'healthy') { $reasons += ($prefix + '_runtime_state_not_healthy') }
+        if ($entryUnderCurrent -ne 'yes') { $reasons += ($prefix + '_task_action_not_under_current') }
+        if ($entryPathState -ne 'ok') { $reasons += ($prefix + '_task_action_path_missing') }
+        $additionalOrdered[$prefix] = [ordered]@{
+            task_state = $entryTaskState
+            runtime_status = $entryRuntimeStatus
+            task_action_under_current = $entryUnderCurrent
+            task_action_path_state = $entryPathState
+        }
+    }
     $currentOrdered = [ordered]@{}
     $newOrdered = [ordered]@{}
     foreach ($name in $names) {
@@ -1033,6 +1305,8 @@ function Get-StockTunnelReinstallDecision {
         tunnel_release_state = $TunnelReleaseState
         task_action_under_current = $TaskActionUnderCurrent
         task_action_path_state = $TaskActionPathState
+        tunnel_release_pin_uncertain = [bool]$TunnelPinUncertain
+        additional_tasks = $additionalOrdered
         current_hashes = $currentOrdered
         new_hashes = $newOrdered
     }
@@ -1086,6 +1360,14 @@ function Resolve-StockTunnelReinstallPlan {
         [string]$CurrentRuntimeRoot = '',
         [int]$RetainCount = 3,
         [string]$TaskName = 'trading-hareness-shared-peer-tunnels',
+        [string]$RuntimeService = 'shared-peer-tunnels',
+        # The second supervised tunnel, installed by the same fan-out. Its task,
+        # runtime state and action placement are observed and judged; its
+        # started_at deliberately does NOT drive the release pin refresh (see
+        # below). Pass an empty name to judge the intraday tunnel alone, which is
+        # what a release tree predating the batch profile amounts to.
+        [string]$BatchTaskName = 'trading-hareness-shared-peer-batch-tunnel',
+        [string]$BatchRuntimeService = 'shared-peer-batch-tunnel',
         [string]$SshAlias = 'lightServer1',
         [int]$RemoteApiPort = 15681,
         # The principal a (re)install by THIS caller would register. Defaults to
@@ -1119,30 +1401,66 @@ function Resolve-StockTunnelReinstallPlan {
     # The tunnel's own runtime state, read before anything else needs it: its
     # status is one observation, and its started_at is what tells us whether the
     # live process really came from the pinned release or from `current`.
-    $runtimeStatus = 'missing'
-    $runtimeStartedAt = ''
-    $runtimeStatePath = Join-Path $platform 'logs\runtime\shared-peer-tunnels.current.json'
-    if (Test-Path -LiteralPath $runtimeStatePath -PathType Leaf) {
-        try {
-            $runtimeState = Get-Content -LiteralPath $runtimeStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $runtimeStatus = if ($runtimeState -and $runtimeState.PSObject.Properties['status']) { [string]$runtimeState.status } else { 'unknown' }
-            if ($runtimeState -and $runtimeState.PSObject.Properties['started_at']) { $runtimeStartedAt = [string]$runtimeState.started_at }
-        } catch { $runtimeStatus = 'unreadable' }
+    $readRuntimeState = {
+        param([string]$Service)
+        $status = 'missing'
+        $startedAt = ''
+        if ($Service) {
+            $statePath = Join-Path $platform ('logs\runtime\' + $Service + '.current.json')
+            if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+                try {
+                    $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $status = if ($state -and $state.PSObject.Properties['status']) { [string]$state.status } else { 'unknown' }
+                    if ($state -and $state.PSObject.Properties['started_at']) { $startedAt = [string]$state.started_at }
+                } catch { $status = 'unreadable' }
+            }
+        }
+        [pscustomobject]@{ Status = $status; StartedAt = $startedAt }
     }
+    $intradayRuntime = & $readRuntimeState $RuntimeService
+    $runtimeStatus = [string]$intradayRuntime.Status
+    # Only the intraday tunnel's started_at refreshes the release pin. There is
+    # one tunnel_release for both tasks (the fan-out installs them together), and
+    # a skip already requires byte-equality against BOTH the pinned tree and the
+    # `current` junction's tree, so a batch tunnel that relaunched on its own is
+    # covered by the junction comparison without being able to move the pin.
+    $runtimeStartedAt = [string]$intradayRuntime.StartedAt
 
     # tunnel_release is "last installed from". Every relaunch starts from
-    # `current`, so when the supervised run began at or after the active release
-    # was published, the pin is stale and the active release is what the tunnel
-    # is really executing.
-    $activeStamp = Get-StockReleaseStamp -ReleaseId $activeRelease
-    if (-not $activeStamp -and $activeRelease) {
+    # `current`, so when the supervised run began at or after the junction
+    # MOVED, the pin is stale and the active release is what the tunnel is
+    # really executing. The comparison instant has to be the junction move
+    # itself: the release id's stamp is written before the test suite runs and
+    # can precede activation by tens of minutes, and `current` still resolved to
+    # the previous release for all of that window.
+    $junctionCreated = ''
+    $junctionResolved = ''
+    try {
+        $currentItem = Get-Item -LiteralPath $layout.CurrentPath -Force -ErrorAction Stop
+        $junctionCreated = ([DateTimeOffset]$currentItem.CreationTime).ToString('o')
+        $junctionResolved = [IO.Path]::GetFullPath([string]$currentItem.Target).TrimEnd('\')
+    } catch { $junctionCreated = ''; $junctionResolved = '' }
+    $activeAppPath = ''
+    if ($activeRelease) {
+        try { $activeAppPath = [IO.Path]::GetFullPath((Get-StockReleaseAppPath -PlatformRoot $platform -ReleaseId $activeRelease)).TrimEnd('\') }
+        catch { $activeAppPath = '' }
+    }
+    $releaseDirCreated = ''
+    if ($activeRelease) {
         $activeDir = Join-Path $layout.ReleasesRoot $activeRelease
         if (Test-Path -LiteralPath $activeDir -PathType Container) {
-            $activeStamp = ([DateTimeOffset](Get-Item -LiteralPath $activeDir -Force).CreationTime).ToString('o')
+            $releaseDirCreated = ([DateTimeOffset](Get-Item -LiteralPath $activeDir -Force).CreationTime).ToString('o')
         }
     }
+    $activation = Resolve-StockReleaseActivationInstant -RecordedActivatedAt (& $readState 'activated_at') `
+        -JunctionCreatedAt $junctionCreated `
+        -JunctionMatchesActiveRelease ([bool]($activeAppPath -and $junctionResolved -and
+            $junctionResolved.Equals($activeAppPath, [StringComparison]::OrdinalIgnoreCase))) `
+        -ReleaseIdStamp (Get-StockReleaseStamp -ReleaseId $activeRelease) `
+        -ReleaseDirectoryCreatedAt $releaseDirCreated
     $pinRefresh = Get-StockTunnelPinRefresh -PinnedRelease $TunnelReleaseId -ActiveRelease $activeRelease `
-        -ActiveReleaseStamp $activeStamp -RuntimeStartedAt $runtimeStartedAt
+        -ActiveReleaseStamp $activation.Stamp -ActivationInstantIsExact ([bool]$activation.Exact) `
+        -RuntimeStartedAt $runtimeStartedAt
     $TunnelReleaseId = [string]$pinRefresh.Release
 
     # Deliberately NOT Get-StockReleaseRetentionState: that reads tunnel_release
@@ -1180,43 +1498,78 @@ function Resolve-StockTunnelReinstallPlan {
     try { $junctionRoot = [string](Get-StockCurrentReleaseTarget -PlatformRoot $platform) } catch { $junctionRoot = '' }
     $junctionHashes = Get-StockTunnelFileHash -RuntimeRoot $junctionRoot
 
-    $taskState = 'not_registered'
-    $taskActionUnderCurrent = 'unknown'
-    $taskActionPathState = 'unknown'
-    $taskActionMissingPaths = @()
-    $registeredShell = ''
-    $registeredPrincipal = 'unresolved'
-    try {
-        $observed = if ($ScheduledTaskProvider) { & $ScheduledTaskProvider $TaskName } else {
-            $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-            $action = @($task.Actions)[0]
-            [pscustomobject]@{
-                State = [string]$task.State
-                Execute = if ($action) { [string]$action.Execute } else { '' }
-                Arguments = if ($action) { [string]$action.Arguments } else { '' }
-                LogonType = if ($task.Principal) { [string]$task.Principal.LogonType } else { '' }
-                UserId = if ($task.Principal) { [string]$task.Principal.UserId } else { '' }
-            }
+    # One observation routine, run once per supervised tunnel task. Both tasks
+    # are registered by the same fan-out installer out of the same tree, so they
+    # are held to the same placement and path rules; only the intraday task's
+    # registered shell and principal feed the synthetic 'config:' hash entries,
+    # because a reinstall registers both with the identical pair.
+    $observeTask = {
+        param([string]$Name)
+        $result = [ordered]@{
+            TaskState = 'not_registered'
+            TaskActionUnderCurrent = 'unknown'
+            TaskActionPathState = 'unknown'
+            MissingPaths = @()
+            RegisteredShell = ''
+            RegisteredPrincipal = 'unresolved'
         }
-        if ($observed) {
-            $read = {
-                param($Name)
-                if ($observed.PSObject.Properties[$Name]) { [string]$observed.$Name } else { '' }
+        if (-not $Name) { return $result }
+        try {
+            $observed = if ($ScheduledTaskProvider) { & $ScheduledTaskProvider $Name } else {
+                $task = Get-ScheduledTask -TaskName $Name -ErrorAction Stop
+                $action = @($task.Actions)[0]
+                [pscustomobject]@{
+                    State = [string]$task.State
+                    Execute = if ($action) { [string]$action.Execute } else { '' }
+                    Arguments = if ($action) { [string]$action.Arguments } else { '' }
+                    LogonType = if ($task.Principal) { [string]$task.Principal.LogonType } else { '' }
+                    UserId = if ($task.Principal) { [string]$task.Principal.UserId } else { '' }
+                }
             }
-            $taskState = & $read 'State'
-            $execute = & $read 'Execute'
-            $arguments = & $read 'Arguments'
-            $taskActionUnderCurrent = Get-StockTunnelTaskActionPlacement -Execute $execute `
-                -Arguments $arguments -ExpectedPrefix (Join-Path $platform 'current')
-            $actionPaths = @(Get-StockTunnelTaskActionPath -Execute $execute -Arguments $arguments)
-            if ($actionPaths.Count -gt 0) {
-                $taskActionMissingPaths = @($actionPaths | Where-Object { -not (Test-Path -LiteralPath $_) })
-                $taskActionPathState = if ($taskActionMissingPaths.Count -gt 0) { 'missing' } else { 'ok' }
+            if ($observed) {
+                $read = {
+                    param($Property)
+                    if ($observed.PSObject.Properties[$Property]) { [string]$observed.$Property } else { '' }
+                }
+                $result['TaskState'] = & $read 'State'
+                $execute = & $read 'Execute'
+                $arguments = & $read 'Arguments'
+                $result['TaskActionUnderCurrent'] = Get-StockTunnelTaskActionPlacement -Execute $execute `
+                    -Arguments $arguments -ExpectedPrefix (Join-Path $platform 'current')
+                $actionPaths = @(Get-StockTunnelTaskActionPath -Execute $execute -Arguments $arguments)
+                if ($actionPaths.Count -gt 0) {
+                    $missing = @($actionPaths | Where-Object { -not (Test-Path -LiteralPath $_) })
+                    $result['MissingPaths'] = $missing
+                    $result['TaskActionPathState'] = if ($missing.Count -gt 0) { 'missing' } else { 'ok' }
+                }
+                $result['RegisteredShell'] = Get-StockTunnelTaskActionShell -Arguments $arguments
+                $result['RegisteredPrincipal'] = Get-StockTunnelTaskPrincipalHash -LogonType (& $read 'LogonType') -UserId (& $read 'UserId')
             }
-            $registeredShell = Get-StockTunnelTaskActionShell -Arguments $arguments
-            $registeredPrincipal = Get-StockTunnelTaskPrincipalHash -LogonType (& $read 'LogonType') -UserId (& $read 'UserId')
-        }
-    } catch { $taskState = 'not_registered' }
+        } catch { $result['TaskState'] = 'not_registered' }
+        return $result
+    }
+
+    $intradayTask = & $observeTask $TaskName
+    $taskState = [string]$intradayTask['TaskState']
+    $taskActionUnderCurrent = [string]$intradayTask['TaskActionUnderCurrent']
+    $taskActionPathState = [string]$intradayTask['TaskActionPathState']
+    $taskActionMissingPaths = @($intradayTask['MissingPaths'])
+    $registeredShell = [string]$intradayTask['RegisteredShell']
+    $registeredPrincipal = [string]$intradayTask['RegisteredPrincipal']
+
+    $additionalTasks = @()
+    $batchObservation = $null
+    if ($BatchTaskName) {
+        $batchObservation = & $observeTask $BatchTaskName
+        $batchRuntime = & $readRuntimeState $BatchRuntimeService
+        $additionalTasks = @(@{
+            Name = 'batch'
+            TaskState = [string]$batchObservation['TaskState']
+            RuntimeStatus = [string]$batchRuntime.Status
+            TaskActionUnderCurrent = [string]$batchObservation['TaskActionUnderCurrent']
+            TaskActionPathState = [string]$batchObservation['TaskActionPathState']
+        })
+    }
 
     # Synthetic entries: things the running tunnel depends on that live in no
     # release tree. They are compared against the pinned side only (the
@@ -1245,6 +1598,8 @@ function Resolve-StockTunnelReinstallPlan {
         TunnelReleaseState = $tunnelReleaseState
         TaskActionUnderCurrent = $taskActionUnderCurrent
         TaskActionPathState = $taskActionPathState
+        TunnelPinUncertain = [bool]$pinRefresh.Uncertain
+        AdditionalTasks = $additionalTasks
     }
     $withoutProbe = Get-StockTunnelReinstallDecision @observations -RemoteHealthStatus '200'
     $health = 'not_probed'
@@ -1265,9 +1620,15 @@ function Resolve-StockTunnelReinstallPlan {
         task_action_under_current = $plan.task_action_under_current
         task_action_path_state = $plan.task_action_path_state
         task_action_missing_paths = @($taskActionMissingPaths)
+        additional_tasks = $plan.additional_tasks
+        batch_task_name = $BatchTaskName
+        batch_task_action_missing_paths = if ($batchObservation) { @($batchObservation['MissingPaths']) } else { @() }
         tunnel_release = $TunnelReleaseId
         tunnel_release_pin_refreshed = [bool]$pinRefresh.Refreshed
         tunnel_release_pin_reason = [string]$pinRefresh.Reason
+        tunnel_release_pin_uncertain = [bool]$pinRefresh.Uncertain
+        activation_instant = [string]$activation.Stamp
+        activation_instant_source = [string]$activation.Source
         tunnel_runtime_root = $tunnelRuntimeRoot
         junction_runtime_root = $junctionRoot
         current_hashes = $plan.current_hashes
@@ -1305,8 +1666,12 @@ function Write-StockTunnelReinstallSkipEvent {
                 tunnel_release_state = [string]$Plan.tunnel_release_state
                 tunnel_release_pin_refreshed = if ($Plan.PSObject.Properties['tunnel_release_pin_refreshed']) { [bool]$Plan.tunnel_release_pin_refreshed } else { $false }
                 tunnel_release_pin_reason = if ($Plan.PSObject.Properties['tunnel_release_pin_reason']) { [string]$Plan.tunnel_release_pin_reason } else { '' }
+                activation_instant_source = if ($Plan.PSObject.Properties['activation_instant_source']) { [string]$Plan.activation_instant_source } else { '' }
                 task_action_under_current = [string]$Plan.task_action_under_current
                 task_action_path_state = if ($Plan.PSObject.Properties['task_action_path_state']) { [string]$Plan.task_action_path_state } else { '' }
+                # The batch tunnel was spared by the same decision, so its
+                # observations belong in the same receipt.
+                additional_tasks = if ($Plan.PSObject.Properties['additional_tasks']) { $Plan.additional_tasks } else { [ordered]@{} }
                 current_hashes = $Plan.current_hashes
                 new_hashes = $Plan.new_hashes
                 changed_files = @($Plan.changed_files)
@@ -1329,6 +1694,7 @@ Export-ModuleMember -Function @(
     'Get-StockReleaseRetentionPlan',
     'Get-StockReleaseRetentionState',
     'Get-StockReleaseStamp',
+    'Resolve-StockReleaseActivationInstant',
     'Get-StockScheduledTaskLogonType',
     'Get-StockTextSha256',
     'Remove-ExpiredStockReleases',

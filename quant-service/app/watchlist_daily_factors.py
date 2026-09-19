@@ -89,7 +89,7 @@ def watchlist_daily_factors(
     observed_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
     rows = connection.execute(
         """WITH bars AS (
-               SELECT b.trading_date,b.high,b.low,b.close,b.volume,b.adj_factor,b.is_suspended,b.limit_up,b.limit_down,
+               SELECT b.trading_date,b.high,b.low,b.close,b.pre_close,b.volume,b.adj_factor,b.is_suspended,b.limit_up,b.limit_down,
                       i.is_st
                  FROM quant.canonical_bars_daily b
                  JOIN quant.instruments i ON i.symbol=b.symbol
@@ -132,7 +132,7 @@ def watchlist_daily_factors_by_symbol(
     observed_date = observed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
     rows = connection.execute(
         """WITH ranked AS (
-               SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.volume,b.adj_factor,b.is_suspended,b.limit_up,b.limit_down,
+               SELECT b.symbol,b.trading_date,b.high,b.low,b.close,b.pre_close,b.volume,b.adj_factor,b.is_suspended,b.limit_up,b.limit_down,
                       i.is_st,row_number() OVER(PARTITION BY b.symbol ORDER BY b.trading_date DESC) AS row_number
                  FROM quant.canonical_bars_daily b
                  JOIN quant.instruments i ON i.symbol=b.symbol
@@ -143,7 +143,7 @@ def watchlist_daily_factors_by_symbol(
                 WHERE symbol=ANY(%s) AND trading_date=%s
                 ORDER BY symbol,provider
            )
-           SELECT ranked.symbol,ranked.trading_date,ranked.high,ranked.low,ranked.close,ranked.volume,ranked.adj_factor,
+           SELECT ranked.symbol,ranked.trading_date,ranked.high,ranked.low,ranked.close,ranked.pre_close,ranked.volume,ranked.adj_factor,
                   ranked.is_suspended,ranked.limit_up,ranked.limit_down,ranked.is_st,
                   current_limits.current_limit_up,current_limits.current_limit_down
              FROM ranked LEFT JOIN current_limits ON current_limits.symbol=ranked.symbol

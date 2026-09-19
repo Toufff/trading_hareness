@@ -96,7 +96,19 @@ def api_capability(api_name: str) -> ApiCapability:
             status="verified",
             note="The verified super GET gateway is the canonical equity daily route; the primary provider remains a fallback.",
         )
-    if api_name in {"index_daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d", "trade_cal", "stk_auction", "stk_auction_o", "stk_auction_c"}:
+    if api_name == "adj_factor":
+        # The primary route's adj_factor capability has been failing
+        # (ConnectError) while every recent full cross-section landed through
+        # the super GET gateway, so the preference mirrors ``daily`` above
+        # rather than the generic primary-first daily bucket below.
+        return ApiCapability(
+            frequency="daily_or_auction",
+            decision_eligible=True,
+            preferred_providers=("super_get", "super", "primary"),
+            status="verified",
+            note="The verified super GET gateway is the working cumulative adjustment-factor route; the primary provider is the last fallback.",
+        )
+    if api_name in {"index_daily", "daily_basic", "stk_limit", "suspend_d", "trade_cal", "stk_auction", "stk_auction_o", "stk_auction_c"}:
         return ApiCapability(
             frequency="daily_or_auction",
             decision_eligible=True,

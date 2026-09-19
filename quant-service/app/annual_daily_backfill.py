@@ -32,8 +32,16 @@ from .database import Database
 from .daily_bar_repository import quarantine_tushare_daily_amount_mismatches
 from .runtime_resources import DEFAULT_HOT_DATABASE_SOFT_BYTES, bounded_storage_budget_bytes
 from .sector_flow_repository import rebuild_sector_flow_daily_features
+from .tushare_normalization import promotable_factor_predicate_sql, promotable_factor_provider
 from .tushare_providers import ProviderCallError, call_provider, provider_configs, safe_error_detail
 from .universe_history import rebuild_historical_membership_from_canonical
+
+
+#: The set-based twin of ``tushare_normalization.promotable_adjustment_factor``'s
+#: semantics half, rendered once so the guard test can point at one name.  A
+#: stage row that declares anything but absent/cumulative semantics stays
+#: evidence in ``quant.daily_adjustment_factors`` and never reaches a bar.
+_PROMOTABLE_FACTOR_SQL = promotable_factor_predicate_sql("stage")
 
 
 # Exchange suffix alone is not enough: stk_limit also returns funds and other
@@ -217,6 +225,12 @@ def _persist_raw(
 
 
 def _persist_instruments_from_stage(connection: Any, provider_key: str) -> None:
+    # ``ORDER BY 1`` is the shared ascending lock order that
+    # ``app/instrument_registry.py`` documents: without it the rows reach
+    # ``quant.instruments`` in whatever order the DISTINCT node emits them,
+    # and a backfill running next to a live ingestion transaction can take
+    # the same new symbols in the opposite order.  It is a correctness
+    # property here, not a cosmetic sort of the output.
     connection.execute(
         """INSERT INTO quant.instruments(symbol,exchange,source)
            SELECT DISTINCT upper(row_data->>'ts_code'),
@@ -225,6 +239,7 @@ def _persist_instruments_from_stage(connection: Any, provider_key: str) -> None:
                   %s
              FROM annual_daily_stage
             WHERE upper(row_data->>'ts_code') ~ '^\\d{6}\\.(SH|SZ|BJ)$'
+            ORDER BY 1
            ON CONFLICT(symbol) DO NOTHING""",
         (provider_key,),
     )
@@ -233,12 +248,15 @@ def _persist_instruments_from_stage(connection: Any, provider_key: str) -> None:
 def _persist_daily(connection: Any, provider_key: str, available_at: datetime, ingested_at: datetime,
                    availability_basis: str, *, index_mode: bool = False) -> None:
     if index_mode:
+        # ``ORDER BY 1``: same shared ascending lock order as
+        # ``_persist_instruments_from_stage`` above.
         connection.execute(
             """INSERT INTO quant.instruments(symbol,exchange,source)
                SELECT DISTINCT upper(row_data->>'ts_code'),
                       CASE right(upper(row_data->>'ts_code'),2) WHEN 'SH' THEN 'SSE' ELSE 'SZSE' END,%s
                  FROM annual_daily_stage
                 WHERE upper(row_data->>'ts_code') ~ '^\\d{6}\\.(SH|SZ)$'
+                ORDER BY 1
                ON CONFLICT(symbol) DO NOTHING""",
             (provider_key,),
         )
@@ -364,6 +382,16 @@ def _persist_adj_factor(connection: Any, provider_key: str, available_at: dateti
              adj_factor=EXCLUDED.adj_factor,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
         (provider_key, available_at),
     )
+    # This is a second factor-row -> bar-field promotion and it obeys the same
+    # rule as ``tushare_normalization``: only a tushare route may set a bar's
+    # adj_factor, and only for a row whose declared semantics are absent or
+    # cumulative.  The provider half is a scalar for the whole stage table and
+    # is checked here; the per-row half rides along as ``_PROMOTABLE_FACTOR_SQL``.
+    # Without this a backfill run replaying a vendor placeholder would write
+    # adj_factor=1 straight back onto both bar tables, exactly the defect this
+    # branch removed from the post-close path.
+    if not promotable_factor_provider(provider_key):
+        return
     for table in ("market_bars_daily", "canonical_bars_daily"):
         connection.execute(
             f"""WITH stage AS (
@@ -373,7 +401,8 @@ def _persist_adj_factor(connection: Any, provider_key: str, available_at: dateti
                ) UPDATE quant.{table} bar SET adj_factor=nullif(stage.row_data->>'adj_factor','')::numeric
                   FROM stage
                  WHERE bar.symbol=upper(stage.row_data->>'ts_code')
-                   AND bar.trading_date=to_date(stage.row_data->>'trade_date','YYYYMMDD')"""
+                   AND bar.trading_date=to_date(stage.row_data->>'trade_date','YYYYMMDD')
+                   AND {_PROMOTABLE_FACTOR_SQL}"""
         )
 
 
@@ -488,6 +517,15 @@ def _persist_trade_calendar(connection: Any, provider_key: str, available_at: da
 
 
 def _persist_stock_basic(connection: Any, provider_key: str, available_at: datetime) -> None:
+    # ``ORDER BY 1`` for the same reason as the two stage inserts above, and
+    # with more at stake here: this statement is ``ON CONFLICT DO UPDATE``, so
+    # it row-locks every EXISTING conflicting row -- essentially the whole
+    # cross-section on any run after the first -- where a ``DO NOTHING``
+    # insert locks only the rows it genuinely adds.  Sorting the weak
+    # statements and leaving the strongest lock on this table in seq-scan
+    # order of the stage table is exactly the mistake this file already made
+    # once.  ``annual_daily_stage`` is a temp table, so no parallel plan can
+    # reorder the feed under the sort.
     connection.execute(
         """INSERT INTO quant.instruments(symbol,exchange,name,industry,list_date,delist_date,is_st,source)
            SELECT upper(row_data->>'ts_code'),
@@ -500,6 +538,7 @@ def _persist_stock_basic(connection: Any, provider_key: str, available_at: datet
                   coalesce(row_data->>'name','') ~* '(^|\\*)ST',%s
              FROM annual_daily_stage
             WHERE upper(row_data->>'ts_code') ~ '^\\d{6}\\.(SH|SZ|BJ)$'
+            ORDER BY 1
            ON CONFLICT(symbol) DO UPDATE SET
              exchange=EXCLUDED.exchange,name=coalesce(EXCLUDED.name,quant.instruments.name),
              industry=coalesce(EXCLUDED.industry,quant.instruments.industry),
@@ -511,6 +550,15 @@ def _persist_stock_basic(connection: Any, provider_key: str, available_at: datet
     # Keep the three stock_basic list-status cross-sections as immutable
     # evidence.  ``quant.instruments`` is intentionally only the current
     # projection, while this table is what a ten-year replay can inspect.
+    #
+    # Four placeholders, four parameters: provider, observed_at, the
+    # ``status_date`` fallback for a row without ``trade_date``, and
+    # ``available_at``.  The fourth was missing, so psycopg raised
+    # ``the query has 4 placeholders but 3 parameters were passed`` on every
+    # call and ``bootstrap()`` could never get past its first stock_basic
+    # cross-section.  Pre-existing at ba717c8; found by the DB-backed test
+    # added for the ``ORDER BY 1`` above, which is the first thing ever to
+    # execute this function against a real server.
     connection.execute(
         """INSERT INTO quant.instrument_lifecycle_evidence(
                symbol,provider,observed_at,status_date,list_status,list_date,delist_date,is_st,available_at,raw)
@@ -528,7 +576,7 @@ def _persist_stock_basic(connection: Any, provider_key: str, available_at: datet
            ON CONFLICT(symbol,provider,status_date,list_status) DO UPDATE SET
              list_date=EXCLUDED.list_date,delist_date=EXCLUDED.delist_date,
              is_st=EXCLUDED.is_st,available_at=EXCLUDED.available_at,raw=EXCLUDED.raw""",
-        (provider_key, available_at, available_at),
+        (provider_key, available_at, available_at, available_at),
     )
 
 
@@ -1022,6 +1070,19 @@ class AnnualDailyBackfill:
                                      symbol,trading_date,adj_factor
                                 FROM quant.daily_adjustment_factors
                                WHERE trading_date BETWEEN %s AND %s
+                                 -- A same-day identity placeholder is evidence
+                                 -- that a vendor supplied no corporate-action
+                                 -- history.  The provider ranking below prefers
+                                 -- tushare, but where no tushare row exists the
+                                 -- placeholder was the only candidate and won,
+                                 -- writing adj_factor=1 back onto the bar.  A
+                                 -- date with no real factor must stay NULL.
+                                 -- Both halves of the promotion rule apply, so
+                                 -- a vendor that merely OMITS the marker is
+                                 -- refused by the provider predicate instead of
+                                 -- reaching the bar through the ELSE 9 branch.
+                                 AND provider LIKE 'tushare%%'
+                                 AND coalesce(raw->>'factor_semantics','') <> 'same_day_identity_only'
                                ORDER BY symbol,trading_date,
                                         CASE provider
                                           WHEN 'tushare_super_sdk' THEN 0

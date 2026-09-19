@@ -7,7 +7,21 @@ import uuid
 from datetime import date, timedelta
 from typing import Any, Callable
 
+from .research_prices import CARRIED_FORWARD_FLAG
 from .stable_json import stable_json
+
+
+#: Flags that describe *how* a usable number was produced, not a defect in the
+#: candidate.  ``adj_factor_carried_forward`` says the window was adjusted on
+#: the last real cumulative factor because the factor fetch lane is a session
+#: or two behind -- a platform-wide condition that has nothing to do with this
+#: symbol.  Scoring it would demote every candidate on exactly the evenings
+#: when the lane lags, which is how a better stock gets missed.  It is still
+#: recorded in ``risk_flags`` so a reader can see the basis, and it is
+#: deliberately NOT in ``hard_flags``: ``adj_factor_missing`` (no usable basis
+#: at all) and ``corporate_action_unresolved`` (an ex-rights signature we
+#: cannot model) stay hard and stay penalised.
+UNPENALIZED_FLAGS = frozenset({CARRIED_FORWARD_FLAG})
 
 
 def generate(
@@ -56,7 +70,7 @@ def generate(
                                        risk_penalty=risk_penalty)
             signal = (ablation["applied_score"] - 50.0) / 50.0
             hard_flags = {"ST", "suspended", "missing_market_data", "insufficient_history_20", "adj_factor_missing", "corporate_action_unresolved"}
-            penalty = min(0.35, 0.07 * len(set(flags)))
+            penalty = min(0.35, 0.07 * len(set(flags) - UNPENALIZED_FLAGS))
             score = max(0.0, min(100.0, 50 + 50 * signal - 100 * penalty))
             direction = 1 if signal >= 0.14 else -1 if signal <= -0.14 else 0
             decision = "research_candidate" if direction > 0 and score >= 58 and not hard_flags.intersection(flags) else "watch"
@@ -102,4 +116,4 @@ def generate(
     return {"run_id": str(run_id), "as_of_date": str(as_of_date), "market_regime": regime, "snapshot_key": materialized["snapshot_key"], "recommendations": candidates[:request.limit]}
 
 
-__all__ = ["generate"]
+__all__ = ["UNPENALIZED_FLAGS", "generate"]

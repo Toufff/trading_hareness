@@ -45,6 +45,85 @@ class OfflineMinuteImportRecoveryTests(unittest.TestCase):
         self.assertNotIn("from .main", source)
 
 
+class _FakeCursor:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+    def fetchall(self):
+        return []
+
+
+class _FakeConnection:
+    def __init__(self):
+        self.calls: list[tuple[str, object]] = []
+
+    def execute(self, sql, params=None):
+        flat = " ".join(str(sql).split())
+        self.calls.append((flat, params))
+        if "RETURNING import_id" in flat:
+            return _FakeCursor({"import_id": "00000000-0000-0000-0000-000000000001"})
+        return _FakeCursor(None)
+
+
+class _FakeDatabase:
+    def __init__(self):
+        self.connection = _FakeConnection()
+
+    def transaction(self):
+        connection = self.connection
+
+        class _Transaction:
+            def __enter__(self):
+                return connection
+
+            def __exit__(self, *_args):
+                return False
+
+        return _Transaction()
+
+
+class OfflineMinuteImportInstrumentBatchingTests(unittest.TestCase):
+    """The import used to call the per-symbol ``ensure_instrument`` once per
+    CSV row, in file order -- one statement per row and an order no other
+    writer of ``quant.instruments`` shares.  Each 1,000-row slice now
+    registers its symbols in one sorted, deduplicated statement."""
+
+    def test_each_slice_registers_its_symbols_once_in_ascending_order(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "batch-minute.csv"
+            lines = ["ts_code,datetime,source_available_at,open,high,low,close,vol,amount"]
+            for symbol in ("600519.SH", "000001.SZ", "600519.SH", "300750.SZ"):
+                lines.append(f"{symbol},2026-08-21 09:31:00,2026-08-21 09:31:05,10,11,9,10.5,100,1050")
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            database = _FakeDatabase()
+            result = import_csv(
+                database,
+                SimpleNamespace(file_name=path.name, source_name="batch-offline", max_rows=10),
+                root=Path(directory), exchange_for=lambda symbol: symbol.rsplit(".", 1)[1],
+                decimal_or_none=decimal_or_none, safe_error=lambda value, _limit: value,
+                stale_after_seconds=900,
+            )
+
+        self.assertEqual(result["status"], "completed")
+        instrument_calls = [
+            (sql, params) for sql, params in database.connection.calls
+            if "INSERT INTO quant.instruments" in sql
+        ]
+        self.assertEqual(len(instrument_calls), 1)
+        sql, (source, symbols, exchanges) = instrument_calls[0]
+        self.assertIn("unnest(%s::text[],%s::text[])", sql)
+        self.assertNotIn("VALUES(%s,%s", sql)
+        self.assertEqual(source, "offline-import")
+        self.assertEqual(symbols, ["000001.SZ", "300750.SZ", "600519.SH"])
+        self.assertEqual(exchanges, ["SZ", "SZ", "SH"])
+        minute_writes = [params for sql, params in database.connection.calls
+                         if "INSERT INTO quant.market_bars_minute" in sql]
+        self.assertEqual(len(minute_writes), 4)
+
+
 @unittest.skipUnless(os.getenv("PGHOST"), "requires the compose PostgreSQL service")
 class OfflineMinuteImportSqlRecoveryTests(unittest.TestCase):
     source_name = "p0-offline-import-recovery"

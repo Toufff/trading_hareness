@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from .stable_json import stable_dumps, stable_json
 
-from .research_prices import adjusted_bars
+from .research_prices import adjusted_bars, carried_forward_sessions
 
 
 def materialize_feature_snapshot(
@@ -54,13 +54,13 @@ def materialize_feature_snapshot(
     bars_by_symbol: dict[str, list[dict[str, Any]]] = {}
     for row in connection.execute(
         """WITH ranked AS (
-               SELECT symbol,trading_date,close,high,low,volume,amount,adj_factor,is_suspended,
+               SELECT symbol,trading_date,close,pre_close,high,low,volume,amount,adj_factor,is_suspended,
                       limit_up,limit_down,selected_provider,
                       row_number() OVER (PARTITION BY symbol ORDER BY trading_date DESC) AS rn
                  FROM quant.canonical_bars_daily
                 WHERE symbol=ANY(%s) AND trading_date<%s AND available_at<=%s
            )
-           SELECT symbol,trading_date,close,high,low,volume,amount,adj_factor,is_suspended,limit_up,limit_down,selected_provider
+           SELECT symbol,trading_date,close,pre_close,high,low,volume,amount,adj_factor,is_suspended,limit_up,limit_down,selected_provider
              FROM ranked WHERE rn<=60 ORDER BY symbol,trading_date DESC""",
         (all_symbols, as_of_date, observed_at),
     ).fetchall():
@@ -138,6 +138,13 @@ def materialize_feature_snapshot(
             return_20 = (research_closes[-1] / research_closes[-21] - 1
                          if has_research_price and len(research_closes) >= 21 and research_closes[-21] else None)
             volume_ratio = volumes[-1] / mean(volumes[-20:]) if len(volumes) >= 20 and mean(volumes[-20:]) else None
+            # A carried-forward basis is usable, so the features are real
+            # numbers, but it is not the same claim as a fully fetched window
+            # and says so in its own status rather than hiding inside
+            # 'complete'.  The count is what a reader needs to judge it.
+            carried = carried_forward_sessions(research_bars) if has_research_price else 0
+            research_price_status = "blocked" if not has_research_price else (
+                "carried_forward" if carried else "complete")
             # Keep raw ``close`` for audit/execution facts, but publish the
             # explicitly named research basis beside it.  Consumers must not
             # compare a raw close with an adjusted moving average across an
@@ -146,7 +153,8 @@ def materialize_feature_snapshot(
                         "market_data_date": str(latest_date), "bar_count": len(bars), "close": closes[-1],
                         "research_close": research_closes[-1] if has_research_price else None,
                         "sma_5": sma5, "sma_20": sma20, "return_5": return_5, "return_20": return_20,
-                        "research_price_status": "complete" if has_research_price else "blocked",
+                        "research_price_status": research_price_status,
+                        "research_adj_factor_carried_sessions": carried,
                         "volume_ratio": volume_ratio, "selected_provider": latest["selected_provider"]}
         fundamental = fundamentals_by_symbol.get(symbol)
         if fundamental:

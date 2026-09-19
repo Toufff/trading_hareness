@@ -169,9 +169,11 @@ def persist_full_market_close(
         "daily_basic": persist_rows(
             connection, "daily_basic", request_key + ":daily_basic", merged.fundamental_rows, PROVIDER_KEY, observed_at,
         ),
-        "adj_factor": persist_rows(
-            connection, "adj_factor", request_key + ":adj_factor", controls["adj_factor"], PROVIDER_KEY, observed_at,
-        ),
+        # No ``adj_factor`` entry by design: the vendor supplies no
+        # corporate-action history, and an identity placeholder would be
+        # promoted into the bar tables exactly like a real cumulative factor
+        # (see build_control_rows).  Factors arrive on their own lane from
+        # the tushare ``adj_factor`` route.
         "stk_limit": persist_rows(
             connection, "stk_limit", request_key + ":stk_limit", controls["stk_limit"], PROVIDER_KEY, observed_at,
         ),
@@ -279,7 +281,7 @@ def persist_full_market_close(
             "industry_memberships": industry_membership_count,
             "source_health": source_health, "close_conflicts": list(merged.close_conflicts[:20]),
             "control_semantics": {
-                "adj_factor": "same_day_identity_only",
+                "adj_factor": "not_supplied_by_vendor; fetched separately from tushare adj_factor",
                 "stk_limit": "derived_from_preclose_board_rule_with_exception_warning",
                 "trade_calendar": "observed_open_from_coverage_gated_settled_close",
             },

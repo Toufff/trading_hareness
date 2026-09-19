@@ -86,10 +86,17 @@ async def upsert(symbol: str, payload: Any, deps: IntradayWatchlistDependencies)
 
     def persist_watchlist() -> Any:
         with deps.database.transaction() as connection:
+            # Single symbol, so ``ORDER BY 1`` sorts one row and costs
+            # nothing.  The set-based form is what makes the shared lock
+            # order a mechanical property of every writer instead of a
+            # judgement call about which ones are "big enough" to need it.
             connection.execute(
-                """INSERT INTO quant.instruments(symbol,exchange,name,source) VALUES(%s,%s,%s,'intraday_watchlist')
+                """INSERT INTO quant.instruments(symbol,exchange,name,source)
+                   SELECT t.symbol,t.exchange,t.name,'intraday_watchlist'
+                     FROM unnest(%s::text[],%s::text[],%s::text[]) AS t(symbol,exchange,name)
+                    ORDER BY 1
                    ON CONFLICT(symbol) DO NOTHING""",
-                (symbol, deps.exchange_for(symbol), payload.label),
+                ([symbol], [deps.exchange_for(symbol)], [payload.label]),
             )
             return connection.execute(
                 """INSERT INTO quant.intraday_watchlists(symbol,label,enabled,alert_on_entry,alert_on_exit,entry_price,available_quantity,hard_stop,take_profit,metadata)

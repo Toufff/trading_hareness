@@ -198,6 +198,69 @@ class AnnualDailyBackfillTests(unittest.TestCase):
         self.assertNotIn("factor.provider='tushare_primary'", reconciliation)
         self.assertNotIn("limits.provider='tushare_primary'", reconciliation)
 
+    def test_reconciliation_never_rewrites_an_identity_placeholder_onto_a_bar(self):
+        """Without this exclusion the SQL repair is not durable.
+
+        The provider ranking prefers tushare, but on a (symbol, trading_date)
+        whose ONLY factor row is a vendor same-day identity placeholder that
+        placeholder is the only DISTINCT ON candidate and wins -- so any
+        annual/range backfill over the damaged window writes adj_factor=1
+        straight back onto the bar it was just repaired out of.
+        """
+        source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
+        reconciliation = source[source.index("def reconcile_suspensions"):
+                                source.index("def promote_stored_sector_flows")]
+        exclusion = "AND coalesce(raw->>'factor_semantics','') <> 'same_day_identity_only'"
+        factor_block = reconciliation[:reconciliation.index("quant.daily_trade_limits")]
+        self.assertIn(exclusion, factor_block)
+        # One f-string statement applied to both bar tables by the loop above it.
+        self.assertEqual(reconciliation.count(exclusion), 1)
+        self.assertIn('for table in ("market_bars_daily", "canonical_bars_daily")', reconciliation)
+        # Both halves of the rule: a vendor that merely OMITS the marker must
+        # not reach the bar through the ranking's ELSE 9 branch either.
+        self.assertIn("AND provider LIKE 'tushare%%'", factor_block)
+
+    def test_the_stage_factor_promotion_is_guarded_exactly_like_the_post_close_one(self):
+        """``_persist_adj_factor`` is a SECOND factor-row -> bar-field promotion.
+
+        It ran with no provider check, no semantics check and no exclusion at
+        all, into BOTH bar tables -- the same shape as the defect this branch
+        removed from ``tushare_normalization`` -- while the architecture guard
+        passed because ``reconcile_suspensions`` elsewhere in the same module
+        carried a guard string.
+        """
+        from app.annual_daily_backfill import _persist_adj_factor
+
+        source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
+        promotion = source[source.index("def _persist_adj_factor"):source.index("def _persist_daily_basic")]
+        bar_update = promotion[promotion.index('for table in ("market_bars_daily"'):]
+        self.assertIn("AND {_PROMOTABLE_FACTOR_SQL}", bar_update)
+        self.assertIn("if not promotable_factor_provider(provider_key):", promotion)
+
+        class Connection:
+            def __init__(self): self.statements: list[str] = []
+
+            def execute(self, statement, params=None):
+                self.statements.append(" ".join(str(statement).split()))
+                return self
+
+        observed = datetime(2026, 9, 18, tzinfo=timezone.utc)
+
+        # A non-tushare provider stores its evidence and touches no bar.
+        vendor = Connection()
+        _persist_adj_factor(vendor, "longhuvip_composite", observed, observed, "vendor")
+        self.assertTrue([sql for sql in vendor.statements
+                         if "INSERT INTO quant.daily_adjustment_factors" in sql])
+        self.assertFalse([sql for sql in vendor.statements if "bar SET adj_factor" in sql])
+
+        # A tushare provider promotes, but only rows whose semantics allow it.
+        tushare = Connection()
+        _persist_adj_factor(tushare, "tushare_super_get", observed, observed, "provider")
+        promotions = [sql for sql in tushare.statements if "bar SET adj_factor" in sql]
+        self.assertEqual(len(promotions), 2)
+        for statement in promotions:
+            self.assertIn("IN ('','corporate_action_cumulative')", statement)
+
     def test_reprojection_is_local_only_and_preserves_dual_clock_evidence(self):
         source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
         self.assertIn("def reproject_stored_historical_clocks", source)

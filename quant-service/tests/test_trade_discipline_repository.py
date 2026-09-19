@@ -195,7 +195,24 @@ class PlanPersistenceTests(unittest.TestCase):
         self.assertEqual(read_plan_by_key(self.connection, stored["plan_key"])["plan_id"], result["plan_id"])
 
     def instrument_symbols(self):
-        return [row[0] for row in self.connection.instruments]
+        """The registration goes through
+        ``instrument_registry.ensure_named_instruments`` now, so its parameters
+        are ``(source, symbols[], exchanges[], names[])`` rather than one
+        scalar row."""
+        return [symbol for _source, symbols, _exchanges, _names in self.connection.instruments
+                for symbol in symbols]
+
+    def test_the_registration_is_the_sorted_shared_statement(self):
+        """Not a per-row ``VALUES(...) ON CONFLICT DO UPDATE``: that is the
+        strongest lock class on ``quant.instruments``, and the CLI drives this
+        function over many symbols inside one transaction."""
+        persist_plan(self.connection, plan())
+        registrations = [sql for sql in self.connection.statements
+                         if sql.startswith("INSERT INTO quant.instruments")]
+        self.assertEqual(len(registrations), 1)
+        self.assertIn("unnest(", registrations[0])
+        self.assertNotIn("VALUES(", registrations[0])
+        self.assertIn("ORDER BY 1", registrations[0].split("ON CONFLICT")[0])
 
     def test_the_same_plan_twice_is_idempotent_and_appends_nothing(self):
         first = persist_plan(self.connection, plan())

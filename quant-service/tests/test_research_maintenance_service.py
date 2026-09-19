@@ -77,6 +77,37 @@ class ResearchMaintenanceServiceTests(unittest.TestCase):
         self.assertEqual(sync_history.call_args.args[3], ["000001.SZ", "600000.SH"])
         self.assertEqual(sync_history.call_args.kwargs["source"], "universe-members-api")
 
+    def test_instruments_are_registered_in_one_sorted_statement_not_per_symbol(self) -> None:
+        """The per-symbol ``INSERT INTO quant.instruments`` that used to sit
+        inside the membership loop wrote symbols in request order, an order no
+        other writer shares.  It is now one batched call through
+        ``instrument_registry``, with the exchange resolver still injected."""
+        statements = []
+
+        def execute(sql, params=()):
+            statements.append((" ".join(str(sql).split()), params))
+            if "SELECT symbol FROM quant.universe_members" in str(sql):
+                return MagicMock(fetchall=MagicMock(return_value=[]))
+            return MagicMock()
+
+        database = MagicMock()
+        database.transaction.return_value = _Transaction(execute)
+        payload = SimpleNamespace(
+            universe_key="core", symbols=["600519.SH", "000001.SZ", "300750.SZ"], enabled=True, priority=5,
+        )
+
+        update_universe_members(payload, _deps(database, sync_universe_membership_history=MagicMock(return_value={})))
+
+        instrument_statements = [(sql, params) for sql, params in statements
+                                 if "INSERT INTO quant.instruments" in sql]
+        self.assertEqual(len(instrument_statements), 1)
+        sql, (source, symbols, exchanges) = instrument_statements[0]
+        self.assertIn("unnest(%s::text[],%s::text[])", sql)
+        self.assertNotIn("VALUES(%s,%s", sql)
+        self.assertEqual(source, "universe")
+        self.assertEqual(symbols, ["000001.SZ", "300750.SZ", "600519.SH"])
+        self.assertEqual(exchanges, ["SZ", "SZ", "SH"])
+
     def test_stale_fetch_dry_run_never_updates_rows(self) -> None:
         statements = []
 

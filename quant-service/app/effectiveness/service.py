@@ -37,7 +37,7 @@ def load_execution(database, rows, horizon=5):
     with database.transaction() as c:
         sessions=c.execute('''SELECT calendar_date,is_open FROM quant.market_trade_calendar
             WHERE exchange='SSE' AND calendar_date>%s AND calendar_date<=%s ORDER BY calendar_date''',(start,end)).fetchall()
-        bars=c.execute('''SELECT symbol,trading_date,open,high,low,close,limit_up,limit_down,adj_factor,is_suspended
+        bars=c.execute('''SELECT symbol,trading_date,open,high,low,close,pre_close,limit_up,limit_down,adj_factor,is_suspended
             FROM quant.canonical_bars_daily WHERE symbol=ANY(%s) AND trading_date>%s AND trading_date<=%s
             ORDER BY trading_date LIMIT 250001''',(symbols,start,end)).fetchall()
     if len(bars)>250000:raise ValueError('Execution history exceeds bounded read')

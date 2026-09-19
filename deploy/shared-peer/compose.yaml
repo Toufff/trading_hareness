@@ -18,6 +18,13 @@ services:
       PGPASSWORD: ${PEER_DB_PASSWORD:?Set PEER_DB_PASSWORD}
       REMOTE_DB_PORT: ${REMOTE_DB_PORT:-15432}
       REMOTE_API_PORT: ${REMOTE_API_PORT:-15681}
+      # Batch (bulk/COPY) database path. Empty by default: the sidecar then
+      # publishes only 5432/5681 exactly as before. Set PEER_BATCH_DB_PORT=5433
+      # in .env once the owner's batch tunnel is installed; sibling containers
+      # then reach it as db-tunnel:5433 and leave the intraday connection to
+      # intraday queries.
+      PEER_BATCH_DB_PORT: ${PEER_BATCH_DB_PORT:-}
+      PEER_BATCH_REMOTE_PORT: ${PEER_BATCH_REMOTE_PORT:-15433}
     volumes:
       - ${PEER_SSH_KEY_PATH:?Set PEER_SSH_KEY_PATH}:/run/secrets/peer_ssh_key:ro
       - ${PEER_KNOWN_HOSTS_PATH:?Set PEER_KNOWN_HOSTS_PATH}:/run/secrets/known_hosts:ro

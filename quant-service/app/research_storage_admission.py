@@ -11,9 +11,10 @@ from typing import Any, Awaitable, Callable, Mapping
 from .runtime_resources import (
     DEFAULT_HOT_DATABASE_SOFT_BYTES,
     DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+    DirectoryMeasurement,
     bounded_storage_budget_bytes,
     bounded_storage_ratio,
-    managed_directory_bytes,
+    managed_directory_cache,
     research_storage_governance,
 )
 
@@ -22,9 +23,18 @@ def governance(
     database: Any,
     *,
     environ: Mapping[str, str] | None = None,
-    directory_bytes: Callable[[Path], int] = managed_directory_bytes,
+    directory_bytes: Callable[[Path], int] | None = None,
+    refresh: bool = False,
 ) -> dict[str, Any]:
-    """Measure managed research storage without mutating or pruning evidence."""
+    """Measure managed research storage without mutating or pruning evidence.
+
+    The artifact-store size comes from the shared TTL cache: ``/health`` calls
+    this on every request and the walk measured 4.3-4.9 s on the HDD, which was
+    breaking release health probes.  ``refresh=True`` is the size-on-demand
+    path for a caller that must decide against the current size rather than the
+    recent one; ``directory_bytes`` replaces the measurement entirely and is
+    for tests.
+    """
     env = os.environ if environ is None else environ
     with database.transaction() as connection:
         row = connection.execute(
@@ -33,10 +43,16 @@ def governance(
                 WHERE n.nspname='quant' AND c.relkind IN ('r','m','p')""",
         ).fetchone()
     data_dir = Path(env.get("QUANT_DATA_DIR", "/var/lib/quant"))
+    if directory_bytes is None:
+        artifacts = managed_directory_cache.measure(data_dir, force=refresh)
+    else:
+        artifacts = DirectoryMeasurement(
+            used_bytes=int(directory_bytes(data_dir)), measured_at="", age_seconds=0.0,
+            cached=False, ttl_seconds=0.0)
     warning_ratio = bounded_storage_ratio(env.get("QUANT_RESEARCH_STORAGE_WARNING_RATIO"), 0.80)
     return research_storage_governance(
         hot_database_bytes=int((row or {}).get("bytes") or 0),
-        artifact_bytes=directory_bytes(data_dir),
+        artifact_bytes=artifacts.used_bytes, artifact_measurement=artifacts,
         research_budget_bytes=bounded_storage_budget_bytes(
             env.get("QUANT_RESEARCH_STORAGE_SOFT_BYTES"), DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
             DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,

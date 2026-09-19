@@ -14,6 +14,7 @@ import math
 from typing import Any
 
 from .market_rules import is_at_limit
+from .research_prices import CARRIED_FORWARD_FLAG, resolve_factors
 
 
 def _number(value: Any) -> float | None:
@@ -69,24 +70,33 @@ def rank_ten_day_candidates(
 
     eligible: list[dict[str, Any]] = []
     incomplete = 0
+    carried_forward_symbols = 0
     for symbol, values in grouped.items():
         ordered = sorted(values, key=lambda row: row.get("trading_date") or date.min)
         if len(ordered) < 11 or ordered[-1].get("trading_date") != as_of_date:
             incomplete += 1
             continue
         window = ordered[-11:]
+        # The shared rule (app/research_prices.resolve_factors) decides the
+        # window's adjustment basis: a complete window as before, a short
+        # trailing gap with continuous pre_close on the last real factor, and
+        # anything else refused.  Dropping a whole symbol because a
+        # platform-wide factor fetch is one session behind is exactly how the
+        # board ranking loses its real leaders.
+        resolution = resolve_factors(window)
         adjusted = []
-        valid = True
-        for row in window:
-            close = _number(row.get("close"))
-            factor = _number(row.get("adj_factor"))
-            if close is None or close <= 0 or factor is None or factor <= 0:
-                valid = False
-                break
-            adjusted.append(close * factor)
-        if not valid or not adjusted or adjusted[0] <= 0:
+        if resolution.factors is not None:
+            for index, row in enumerate(window):
+                close = _number(row.get("close"))
+                if close is None or close <= 0:
+                    adjusted = []
+                    break
+                adjusted.append(close * resolution.factors[index])
+        if not adjusted or adjusted[0] <= 0:
             incomplete += 1
             continue
+        if CARRIED_FORWARD_FLAG in resolution.flags:
+            carried_forward_symbols += 1
         latest = window[-1]
         close = _number(latest.get("close"))
         pre_close = _number(latest.get("pre_close"))
@@ -113,7 +123,8 @@ def rank_ten_day_candidates(
             ),
         })
 
-    source_status.update({"eligible_symbols": len(eligible), "incomplete_history_symbols": incomplete})
+    source_status.update({"eligible_symbols": len(eligible), "incomplete_history_symbols": incomplete,
+                          "carried_forward_factor_symbols": carried_forward_symbols})
     if len(eligible) < int(minimum_full_market_symbols):
         return {
             "status": "blocked", "reason": "insufficient_complete_adjusted_ten_session_histories",

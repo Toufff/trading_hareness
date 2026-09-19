@@ -26,7 +26,16 @@ from .request_models import (
 
 
 POST_CLOSE_STAGE_ORDER = (
-    "stale_fetch_runs", "analyst_text", "all_a_universe", "full_market_daily", "core_daily_controls", "index_context",
+    "stale_fetch_runs", "analyst_text", "all_a_universe", "full_market_daily", "core_daily_controls",
+    # Runs AFTER the market refresh has settled the cross-section, because the
+    # factor fetch is gated on that date's own daily coverage.  It is listed in
+    # post_close_refresh.NON_GATING_STAGES and deliberately absent from
+    # POST_CLOSE_STAGE_DEPENDENCIES on both sides: on longhu evenings the
+    # vendor supplies no corporate-action history, so without an automatic
+    # invocation every new session would land with a permanently NULL
+    # adj_factor -- but a separate provider's availability must never push the
+    # evening close to 'partial'.
+    "adjustment_factors", "index_context",
     "close_market_snapshot", "akshare_supplements", "ths_industry_flow", "ths_concept_flow_and_limit_strength",
     "market_flow_features", "limit_ladder", "limit_lift_pattern_mining", "cninfo_announcements",
     "board_review", "close_strategy_decision", "close_review", "analyst_outcomes", "analyst_intraday_outcomes",
@@ -40,6 +49,9 @@ POST_CLOSE_TIMEOUT_OVERRIDES = {
     # Four bounded full-market control APIs run sequentially so an individual
     # provider's shared limiter remains authoritative.
     "core_daily_controls": 240.0,
+    # One bounded provider round trip per pending settled date, on a route
+    # that is slower than the four control APIs above.
+    "adjustment_factors": 240.0,
     # Outcome settlement scans retained evidence and is intentionally local.
     # Give both orchestration and the blocking repository the same bounded
     # window instead of inheriting the generic ten-second request budget.
@@ -119,6 +131,10 @@ class PostCloseRefreshDependencies:
     # does not need to import main.py's model-version constant directly.
     post_close_strategy_model_version: str = "post-close-strategy-v1"
     refresh_user_tracking: Callable[[date], Awaitable[dict[str, Any]]] | None = None
+    # Non-gating factor lane (see POST_CLOSE_STAGE_ORDER).  Optional so an
+    # assembly without a tushare route still composes; the stage then reports
+    # 'skipped' instead of silently doing nothing.
+    sync_adjustment_factors: Callable[[], Awaitable[dict[str, Any]]] | None = None
 
 
 async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDependencies) -> dict[str, Any]:
@@ -249,6 +265,12 @@ async def run_post_close_refresh(request: Any, dependencies: PostCloseRefreshDep
             StrategyPatternMiningRequest(as_of_date=trade_date, refresh_limit_sources=False),
         ),
         "core_daily_controls": lambda: dependencies.sync_daily_controls(trade_date),
+        "adjustment_factors": (
+            lambda: dependencies.sync_adjustment_factors()
+            if dependencies.sync_adjustment_factors is not None else
+            {"status": "skipped", "non_gating": True,
+             "reason": "the adjustment-factor maintenance lane is not configured on this instance"}
+        ),
         "cninfo_announcements": announcements_stage,
         "board_review": (
             lambda: dependencies.run_database(dependencies.longhu_close_context, trade_date)

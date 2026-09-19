@@ -27,10 +27,17 @@ OWNER_TUNNEL_USER="${OWNER_TUNNEL_USER:-stockowner}"
 OWNER_TUNNEL_PUBLIC_KEY_FILE="${OWNER_TUNNEL_PUBLIC_KEY_FILE:-}"
 # The owner side listens for forwarded connections (-R) rather than
 # forwarding out (-L) like the peer, so its authorized_keys entry grants
-# permitlisten on the three reserved loopback ports instead of permitopen:
-# the Postgres/API reverse tunnels (15432/15681) and the dashboard adapter
-# reverse tunnel (15680).
-AUTHORIZED_KEY_OPTIONS="${AUTHORIZED_KEY_OPTIONS:-restrict,port-forwarding,permitlisten=\"127.0.0.1:15432\",permitlisten=\"127.0.0.1:15680\",permitlisten=\"127.0.0.1:15681\"}"
+# permitlisten on the four reserved loopback ports instead of permitopen:
+# the Postgres/API reverse tunnels (15432/15681), the dashboard adapter
+# reverse tunnel (15680), and the batch database tunnel (15433).
+#
+# 15433 must be listed. The batch tunnel runs with -o ExitOnForwardFailure=yes,
+# so an entry missing it does not degrade to "batch is slower" - the ssh
+# process exits within seconds and the two-minute supervising trigger retries
+# into the same refusal indefinitely. Note that an existing authorized_keys
+# entry is not rewritten in place (see SHARED_PEER_RUNTIME.md), so a key
+# provisioned before this change keeps the old three-port option list.
+AUTHORIZED_KEY_OPTIONS="${AUTHORIZED_KEY_OPTIONS:-restrict,port-forwarding,permitlisten=\"127.0.0.1:15432\",permitlisten=\"127.0.0.1:15433\",permitlisten=\"127.0.0.1:15680\",permitlisten=\"127.0.0.1:15681\"}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "run as root" >&2

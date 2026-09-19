@@ -9,7 +9,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'quant-service'))
-from app.daily_control_plane import status_query, status_payload
+from app.daily_control_plane import adjustment_retirement_details, status_query, status_payload
 from app.db_dsn import connection_params
 from app.settled_limit_pool_repository import settled_limit_pool_payload, settled_limit_pool_query
 
@@ -28,7 +28,12 @@ def main():
     with psycopg.connect(**connection_params(config), row_factory=dict_row, connect_timeout=10,
                         options='-c default_transaction_read_only=on -c statement_timeout=30000') as c:
         sql, params = status_query(a.date)
-        payload = {'daily_control_plane': status_payload(c.execute(sql, params).fetchall())}
+        rows = c.execute(sql, params).fetchall()
+        # A date the blocked-date ledger has retired is labelled 'retired' with
+        # the run_key to clear, exactly as the per-symbol readiness view labels
+        # it -- never 'pending', which would promise a repair nobody will make.
+        retired = adjustment_retirement_details(c, rows)
+        payload = {'daily_control_plane': status_payload(rows, retired_dates=retired)}
         # The close limit pool is derived from the bars above rather than fetched,
         # so its expected size is a property of this same cross-section. Reporting
         # both numbers lets the pipeline runner refuse to call the date landed

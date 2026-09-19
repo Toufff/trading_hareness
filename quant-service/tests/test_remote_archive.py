@@ -595,5 +595,60 @@ class RemoteArchiveNormalizationTests(unittest.TestCase):
         self.assertIn("remote_analyst_messages", connection.execute.call_args_list[0].args[0])
 
 
+class RemoteArchiveInstrumentRegistrationTests(unittest.TestCase):
+    """Message and report signals used to register one instrument per
+    extracted symbol, in mention order -- an order no other writer of
+    ``quant.instruments`` shares.  Both sites now register a text's symbols in
+    one sorted, batched statement before the claim loop."""
+
+    def test_signals_are_registered_in_one_sorted_statement(self) -> None:
+        from types import SimpleNamespace
+
+        from app.remote_archive import _register_signal_instruments
+
+        calls: list[tuple[str, object]] = []
+
+        class _Connection:
+            def execute(self, sql, params=None):
+                calls.append((" ".join(str(sql).split()), params))
+                return self
+
+        signals = [
+            SimpleNamespace(symbol="600519.SH", exchange="SSE"),
+            SimpleNamespace(symbol="000001.SZ", exchange="SZSE"),
+            # A repeated symbol keeps the exchange of its FIRST signal, which
+            # is what the old per-row ``DO NOTHING`` left behind.
+            SimpleNamespace(symbol="600519.SH", exchange="WRONG"),
+        ]
+        _register_signal_instruments(_Connection(), signals, "remote-message")
+
+        self.assertEqual(len(calls), 1)
+        sql, (source, symbols, exchanges) = calls[0]
+        self.assertIn("unnest(%s::text[],%s::text[])", sql)
+        self.assertNotIn("VALUES(%s,%s", sql)
+        self.assertEqual(source, "remote-message")
+        self.assertEqual(symbols, ["000001.SZ", "600519.SH"])
+        self.assertEqual(exchanges, ["SZSE", "SSE"])
+
+    def test_no_signals_issues_no_statement(self) -> None:
+        from app.remote_archive import _register_signal_instruments
+
+        calls: list[object] = []
+
+        class _Connection:
+            def execute(self, sql, params=None):
+                calls.append(sql)
+                return self
+
+        _register_signal_instruments(_Connection(), [], "remote-report")
+        self.assertEqual(calls, [])
+
+    def test_no_per_row_instrument_insert_is_left_in_the_module(self) -> None:
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "app" / "remote_archive.py").read_text(encoding="utf-8")
+        self.assertNotIn("INSERT INTO quant.instruments(symbol,exchange,source) VALUES(", source)
+
+
 if __name__ == "__main__":
     unittest.main()
