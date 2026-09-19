@@ -59,11 +59,51 @@ _VENDOR_PROVIDER_SQL_LIST = ','.join(
     "'" + name.replace("'", "''") + "'" for name in PROVIDERS_WITHOUT_ADJUSTMENT_FACTORS)
 
 
-EQUITY_DAILY_CONTROL_STATUS_SQL = f"""WITH equity_bars AS (
+#: Date-first on purpose.  The previous form materialized ``equity_bars`` over
+#: the whole ``quant.canonical_bars_daily`` table (3.77M rows, a hash semi-join
+#: against the membership history spilling ~240 MB to temp) only to take
+#: ``max(trading_date)`` and the one before it, and made every ``GET /health``
+#: spend 2.2-2.6 s here; this form measured 0.03-0.07 s on the same production
+#: data.  ``bar_dates`` walks the distinct bar dates newest-first through
+#: ``canonical_bars_date_idx`` (a loose index scan), ``qualifying_dates`` keeps
+#: a date only when it has at least one fresh/partial bar of an ``all_a``
+#: member effective that day, and ``equity_bars`` is then read for the single
+#: ``latest`` date -- the only date the final join ever consumes.  Semantics are
+#: unchanged: ``latest`` is the newest qualifying date, ``previous`` the
+#: qualifying date before it, and old and new returned identical rows on
+#: production for the undated query and ten dated ones (weekend, future, first
+#: date, before any data among them).
+EQUITY_DAILY_CONTROL_STATUS_SQL = f"""WITH RECURSIVE bar_dates AS (
+       SELECT max(trading_date) AS trading_date FROM quant.canonical_bars_daily
+       UNION ALL
+       SELECT (SELECT max(older.trading_date) FROM quant.canonical_bars_daily older
+                WHERE older.trading_date<bar_dates.trading_date)
+         FROM bar_dates WHERE bar_dates.trading_date IS NOT NULL
+   ), qualifying_dates AS (
+       SELECT bar_dates.trading_date FROM bar_dates
+        WHERE bar_dates.trading_date IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM quant.canonical_bars_daily bar
+             WHERE bar.trading_date=bar_dates.trading_date
+               AND bar.quality_status IN ('fresh','partial')
+               AND EXISTS (
+                 SELECT 1 FROM quant.universe_membership_history membership
+                  WHERE membership.universe_key='all_a' AND membership.symbol=bar.symbol
+                    AND membership.effective_from<=bar.trading_date
+                    AND (membership.effective_to IS NULL OR membership.effective_to>=bar.trading_date)
+               )
+          )
+   ), latest AS (
+       SELECT max(trading_date) AS trading_date FROM qualifying_dates
+   ), previous AS (
+       SELECT max(prior.trading_date) AS trading_date
+         FROM qualifying_dates prior CROSS JOIN latest
+        WHERE prior.trading_date<latest.trading_date
+   ), equity_bars AS (
        SELECT bar.symbol,bar.trading_date,bar.adj_factor,bar.limit_up,bar.limit_down,
               bar.selected_provider,
               coalesce(nullif(upper(split_part(bar.symbol,'.',2)),''),'UNKNOWN') AS exchange
-         FROM quant.canonical_bars_daily bar
+         FROM quant.canonical_bars_daily bar JOIN latest ON bar.trading_date=latest.trading_date
         WHERE bar.quality_status IN ('fresh','partial')
           AND EXISTS (
             SELECT 1 FROM quant.universe_membership_history membership
@@ -71,12 +111,6 @@ EQUITY_DAILY_CONTROL_STATUS_SQL = f"""WITH equity_bars AS (
                AND membership.effective_from<=bar.trading_date
                AND (membership.effective_to IS NULL OR membership.effective_to>=bar.trading_date)
           )
-   ), latest AS (
-       SELECT max(trading_date) AS trading_date FROM equity_bars
-   ), previous AS (
-       SELECT max(prior.trading_date) AS trading_date
-         FROM equity_bars prior CROSS JOIN latest
-        WHERE prior.trading_date<latest.trading_date
    ), expected AS (
        SELECT latest.trading_date,
               coalesce(nullif(upper(split_part(membership.symbol,'.',2)),''),'UNKNOWN') AS exchange,
@@ -122,13 +156,23 @@ EQUITY_DAILY_CONTROL_STATUS_SQL = f"""WITH equity_bars AS (
     ORDER BY expected.exchange"""
 
 
+#: The ``latest`` CTE body that :func:`status_query` swaps for the requested
+#: date.  It must occur exactly once: were it renamed or duplicated, the
+#: ``str.replace`` in :func:`status_query` would silently leave a dated call
+#: answering for the newest session (or rewrite more than the ``latest`` CTE),
+#: so a mismatch fails at import instead.
+LATEST_TRADING_DATE_SQL = 'SELECT max(trading_date) AS trading_date FROM qualifying_dates'
+REQUESTED_TRADING_DATE_SQL = 'SELECT %s::date AS trading_date'
+if EQUITY_DAILY_CONTROL_STATUS_SQL.count(LATEST_TRADING_DATE_SQL) != 1:
+    raise RuntimeError('EQUITY_DAILY_CONTROL_STATUS_SQL must contain the latest-date CTE exactly once')
+
+
 def status_query(trade_date: date | None = None) -> tuple[str, tuple]:
     """Historical repairs verify their requested date, not a newer partial day."""
     if trade_date is None:
         return EQUITY_DAILY_CONTROL_STATUS_SQL, ()
     return EQUITY_DAILY_CONTROL_STATUS_SQL.replace(
-        'SELECT max(trading_date) AS trading_date FROM equity_bars',
-        'SELECT %s::date AS trading_date'), (trade_date,)
+        LATEST_TRADING_DATE_SQL, REQUESTED_TRADING_DATE_SQL), (trade_date,)
 
 
 def _absent_payload() -> dict[str, Any]:
