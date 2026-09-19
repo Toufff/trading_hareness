@@ -1322,6 +1322,32 @@ Assert-True $switchInstallMatch.Success 'switch-stock-release.ps1 must still ins
 Assert-True ($switchInstallMatch.Value.Contains($pluralInstaller) -and $switchInstallMatch.Value.Contains($singularInstaller)) `
     'switch-stock-release.ps1 must install through the plural fan-out and keep the singular fallback for a revert to an older tree'
 
+# --- the singular fallback must also put the batch task down ----------------
+# Taking the fallback means the tree being installed from predates the batch
+# profile: it has no install-shared-tunnel-tasks.ps1, no batch profile in
+# shared-tunnel-profiles.psm1 and nothing that can verify or supervise a batch
+# tunnel. The batch task itself is registered machine-wide by whichever release
+# last ran the plural installer, and it survives a rollback. Left enabled, its
+# launcher keeps firing at a tree that cannot serve it. So the fallback branch
+# disables it -- tolerantly, because "never registered" is the ordinary case.
+foreach ($pair in @(
+        @{ Name = 'publish-stock-release.ps1'; Body = $publishInstallMatch.Value },
+        @{ Name = 'switch-stock-release.ps1';  Body = $switchInstallMatch.Value })) {
+    $fallbackStart = $pair.Body.IndexOf($singularInstaller)
+    $fallbackEnd = $pair.Body.IndexOf('Get-LogonTypeArguments -Installer')
+    Assert-True ($fallbackStart -ge 0 -and $fallbackEnd -gt $fallbackStart) `
+        "$($pair.Name) must choose the installer before it forwards the logon type, or there is no fallback branch to inspect"
+    $fallbackBlock = $pair.Body.Substring($fallbackStart, $fallbackEnd - $fallbackStart)
+    Assert-True ($fallbackBlock -match 'Disable-ScheduledTask') `
+        "$($pair.Name) must disable the batch tunnel task when it falls back to the singular installer, or a rollback to a pre-batch tree leaves that task enabled and retrying against a tree with no batch profile"
+    Assert-True ($fallbackBlock.Contains($batchTaskName)) `
+        "$($pair.Name)'s singular-fallback branch must name '$batchTaskName' as the task it disables"
+    Assert-True ($fallbackBlock -match "(?s)Get-ScheduledTask[^\r\n]*$([regex]::Escape($batchTaskName))[^\r\n]*-ErrorAction SilentlyContinue") `
+        "$($pair.Name) must look the batch task up with -ErrorAction SilentlyContinue: a tree that never had the batch profile has no such task, and that is not an error"
+    Assert-True ($fallbackBlock -match '(?m)^\s*#\s*\S') `
+        "$($pair.Name)'s singular-fallback branch must say in a comment why the batch task is disabled there, or the next reader deletes it as dead code"
+}
+
 $switchJunctionIndex = $switchSource.IndexOf('Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $ReleaseId')
 $switchActivatedStampIndex = $switchSource.IndexOf('$activatedAt = [DateTimeOffset]::Now')
 Assert-True ($switchJunctionIndex -ge 0 -and $switchActivatedStampIndex -gt $switchJunctionIndex) `

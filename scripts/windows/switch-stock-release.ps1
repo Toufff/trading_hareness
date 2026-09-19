@@ -54,6 +54,13 @@ function Install-SharedPeerTunnelTask {
     $installer = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-tasks.ps1'
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
         $installer = Join-Path $RuntimeRoot 'scripts\shared-peer\install-shared-tunnel-task.ps1'
+        # Reverting to a tree that predates the batch profile: nothing in it can
+        # install, verify or supervise the batch tunnel, so the task a newer
+        # release registered is disabled instead of being left enabled and
+        # pointed at a tree with no batch profile. SilentlyContinue because
+        # "never registered" is the ordinary case, not an error.
+        Get-ScheduledTask -TaskName 'trading-hareness-shared-peer-batch-tunnel' -ErrorAction SilentlyContinue |
+            Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
     }
     $extra = Get-LogonTypeArguments -Installer $installer
     & $installer -ScriptPath (Join-Path $RuntimeRoot 'scripts\shared-peer\start-shared-tunnels.ps1') `
