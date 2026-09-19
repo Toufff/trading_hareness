@@ -271,7 +271,7 @@ class NewBuyReconcileTests(unittest.TestCase):
         self.assertEqual(entry_record.deviation["quantity_expected"], self.plan.sizing.recommended_shares)
         self.assertEqual(entry_record.deviation["quantity_diff"], 0)
         self.assertEqual(entry_record.deviation["trading_days_diff"], 1)
-        self.assertEqual(entry_record.deviation["price_expected"], 10.45)
+        self.assertEqual(entry_record.deviation["price_expected"], 10.46)   # the trigger floor
 
     def test_a_new_buy_plan_never_reports_a_buy_as_against_plan(self):
         records = reconcile(self.plan, self.evaluations,

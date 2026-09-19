@@ -128,11 +128,13 @@ class RealPoolEntryPriceTests(unittest.TestCase):
         trigger = plan.lines_of("trigger")[0]
         cap = plan.lines_of("chase_cap")[0]
         atr14 = plan.metrics["atr14"]
-        self.assertEqual(trigger.price, Decimal(reference))
+        # the lane reference 37.94 sits under the 38.46 hard stop: the floor is hard stop + 0.5 x ATR14
+        self.assertEqual(trigger.price, Decimal("39.68"))
+        self.assertEqual(trigger.derivation.inputs["binding_term"], "stop_gap")
         self.assertEqual(cap.price, Decimal(str(round(close + CHASE_CAP_ATR_MULTIPLE * atr14 + 1e-9, 2))))
         self.assertEqual((cap.metric, cap.op, cap.action.type), ("daily_close", ">", "block_add"))
         self.assertIn("已越过追高上限，不买", cap.label)
-        self.assertIn(f"不高于追高上限{cap.price}", trigger.label)
+        self.assertIn(f"日线收盘在39.68–{cap.price}之间", trigger.label)
         self.assertLessEqual(abs(cap.derivation.recompute() - float(cap.price)), 0.01)
         self.assertEqual(trigger.derivation.inputs["price_cap"], float(cap.price))
         self.assertEqual(trigger.derivation.inputs["entry_price"], close)
@@ -253,3 +255,68 @@ class ChaseCapEvaluationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# (hard stop, ATR14 floor, trigger floor, chase cap, binding term) recomputed from the real 2026-09-18 bars
+BUY_ZONES = {
+    "603650.SH": ("70.37", "72.13", "75.31", "stop_gap"),
+    "002008.SZ": ("94.83", "97.48", "102.25", "stop_gap"),
+    "000811.SZ": ("38.46", "39.68", "42.74", "stop_gap"),
+}
+
+
+class BuyZoneTests(unittest.TestCase):
+    """A close that satisfies "buy" must never already be a close that says "exit"."""
+
+    def test_the_three_pool_picks_buy_only_inside_stop_plus_half_atr_to_the_chase_cap(self):
+        for symbol, name, lane, reference, support, _ in POOL_2026_09_18:
+            with self.subTest(symbol=symbol):
+                plan = generate(real_inputs(symbol, name, lane, reference, support))
+                stop, floor, cap, binding = BUY_ZONES[symbol]
+                trigger = plan.lines_of("trigger")[0]
+                self.assertEqual(plan.sizing.hard_stop, Decimal(stop))
+                self.assertEqual(trigger.price, Decimal(floor))
+                self.assertEqual(plan.lines_of("chase_cap")[0].price, Decimal(cap))
+                self.assertGreater(trigger.price, Decimal(reference))          # the lane level alone was too low
+                self.assertGreater(trigger.price, plan.sizing.hard_stop)
+                inputs = trigger.derivation.inputs
+                self.assertEqual(inputs["binding_term"], binding)
+                self.assertEqual(inputs["lane_reference"], float(reference))
+                self.assertAlmostEqual(inputs["stop_gap_floor"], float(stop) + 0.5 * plan.metrics["atr14"], places=9)
+                self.assertLessEqual(abs(trigger.derivation.recompute() - float(trigger.price)), 0.01)
+                checks = {check.check_id: check for check in plan.quality}
+                self.assertTrue(checks["buy_zone_valid"].passed, checks["buy_zone_valid"].detail)
+                self.assertTrue(checks["lines_monotonic"].passed, checks["lines_monotonic"].detail)
+                self.assertEqual(plan.status, "active")
+
+    def test_a_lane_reference_above_the_stop_gap_binds(self):
+        symbol, name, lane, _, support, _ = POOL_2026_09_18[2]
+        plan = generate(real_inputs(symbol, name, lane, "41.00", support))
+        trigger = plan.lines_of("trigger")[0]
+        self.assertEqual(trigger.price, Decimal("41.00"))
+        self.assertEqual(trigger.derivation.inputs["binding_term"], "lane_reference")
+
+    def test_an_empty_zone_is_rejected_never_clamped(self):
+        # By construction floor = max(lane <= entry, stop + 0.5 ATR < entry + 0.5 ATR = cap), so the
+        # generator cannot produce an empty zone from these rules; the gate still refuses one (a stored
+        # row edited, or a future rule change) instead of clamping the trigger down to the cap.
+        symbol, name, lane, reference, support, _ = POOL_2026_09_18[2]
+        plan = generate(real_inputs(symbol, name, lane, reference, support))
+        squeezed = [line.model_copy(update={"price": Decimal("39.50")}) if line.kind == "chase_cap" else line
+                    for line in plan.lines]
+        check = {check.check_id: check for check in evaluate_quality(plan.model_copy(update={"lines": squeezed}))}[
+            "buy_zone_valid"]
+        self.assertFalse(check.passed)
+        self.assertIn("买入区间为空", check.detail)
+        self.assertIn("39.68", check.detail)
+
+    def test_a_trigger_at_or_under_the_stop_fails_the_zone_and_monotonic_checks(self):
+        symbol, name, lane, reference, support, _ = POOL_2026_09_18[2]
+        plan = generate(real_inputs(symbol, name, lane, reference, support))
+        lowered = [line.model_copy(update={"price": Decimal("37.94")}) if line.kind == "trigger" else line
+                   for line in plan.lines]
+        checks = {check.check_id: check for check in evaluate_quality(plan.model_copy(update={"lines": lowered}))}
+        self.assertFalse(checks["buy_zone_valid"].passed)
+        self.assertIn("不高于硬止损", checks["buy_zone_valid"].detail)
+        self.assertFalse(checks["lines_monotonic"].passed)
+        self.assertIn("买入触发 37.94 不高于硬止损 38.46", checks["lines_monotonic"].detail)

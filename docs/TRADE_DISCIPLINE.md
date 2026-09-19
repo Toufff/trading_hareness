@@ -144,7 +144,7 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 - `trail`：`metric=daily_close, op=">=", confirm(bars=1, daily)`，触发价 arm_price = `max(anchor_price, reference_price) + 1 × ATR14`；action=move_stop_to，目标价 = `max(previous_trail, max(hard_stop, anchor_price))`，语义是“涨到 锚 + 1×ATR14 后止损上移到保本”。锚 `anchor_price`：持仓计划 = 快照平均成本（`anchor_source="average_cost"`；快照无成本时退回参考价，`"reference_price"`），新买计划 = 触发参考价（`"trigger_reference"`）。该式写入 `derivation.action_formula`、`anchor_price / anchor_source / floor_price`（及有前序时的 `previous_trail`）写入 `action_inputs`（无前序 trail 时公式不含 previous_trail 项）；只上移。label 写“日线收盘站上9.35（成本/现价孰高 + 1×ATR14）后，把止损上移到成本价8.49，只上移不下移”（新买计划写“触发参考价10.45”；前序 trail 更高时写“前序移动止损8.50（已高于成本价8.49）”）。此前的 `min(近 3 日最低, arm − 1.5×ATR)` 已废弃：600613 在 +11% 触发后止损只到 8.04、仍低于成本 8.49，锁定的是亏损，且 low3 是生成时刻的静态值。**不生成**的两种情形（原因写入 `omitted_lines`）：`target_exposure_pct == 0`（仓位线已要求清仓，移动止损无意义）；目标价 `<= hard_stop`（成本已在硬止损之下，“上移到保本”不会改变止损，零信息；reason 写“保本目标 max(硬止损 12.53, 成本价 11.90) = 12.53 不高于硬止损 12.53”）。评估器按线自带的 `metric/confirm` 判定，故 trail 与硬止损一样只在日线口径、按已收盘的日 K 收盘价确认，盘中冲高不算。
 - `take_partial`：`after_volume_climax` + `below_vwap` → reduce_by_pct 50（breakout/trend/crash_rebound 用）。原文表述把 extra 条件放在前面、价格条件放在最后：“当日成交量为20日最大量且收在振幅下半且最新价跌破当日VWAP、且最新价低于8.41时，减半仓”，不写成“在 8.41 下方减半仓”——价格是最弱的一项，不是主条件。
 - new_buy 计划的**入场参考价** `entry_price = max(lane.reference, 最新收盘)`（generator v3）。lane.reference 是突破平台附近的结构价，股价已远离它时（2026-09-18：冰轮环境 参考 37.94 / 收 41.52）按它定止损与股数会把真实止损距离低估一整段涨幅（冰轮 13.9%、每笔风险 1.75–2.3% 权益）。因此硬止损、止损距离、`max_shares`、移动止损锚点（`anchor_source="entry_price"`）与减半仓参考价全部以 `entry_price` 为基准（`sizing.reference_price == entry_price`）；`metrics.entry = {lane_reference, lane_reference_source, last_close, last_close_date, last_close_basis(settled|forming), entry_price, entry_source, formula}` 可复算。lane.reference 保留为结构确认线：
-  - `trigger`：`daily_close >= lane.reference`（结构确认）+ `amount_ge_prev_day` + `sector_not_weak`，label 同时写出追高上限；
+  - `trigger`：`daily_close >= 触发下沿` + `amount_ge_prev_day` + `sector_not_weak`，触发下沿 = `max(lane.reference, hard_stop + 0.5×ATR14)`（`derivation.formula` 与 `inputs.lane_reference / hard_stop / stop_gap_floor / binding_term` 可复算）——满足“买”的收盘绝不能同时是“退出”的收盘（09-18 冰轮环境 lane 参考 37.94 低于硬止损 38.46，下沿因此为 39.68）；买入区间 = `[触发下沿, 追高上限]`，label 写作“日线收盘在 39.68–42.74 之间…”；
   - `chase_cap`（新 kind）：`daily_close > entry_price + 0.5×ATR14` → `block_add`，“已越过追高上限，不买”；`derivation.formula = entry_price + chase_atr_multiple * atr14`，trigger 的 `derivation.inputs.price_cap` 记同一价格。评估器：trigger 被一根高于追高上限的收盘确认时，状态记 `capped`（evidence `capped_reason="已越过追高上限，不买"`），不是买入信号；
   - `cancel`：`daily_close < lane.support` + `volume_expand_1_5x`；
   - 推荐池当日该股的人读 trigger/invalidation/why_now 冻结到 `metrics.recommendation_conditions`（`note="研究条件，非系统线"`、`evaluable=false`），只作阅读，不参与任何评估。
@@ -164,6 +164,7 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 - `sizing_consistent`（max_shares 按公式复算相等；recommended_shares ≤ max_shares 且 ≤ target 上限）
 - `not_lowered_vs_previous`（有前序 active 计划时 hard_stop 不低于其值，否则需 lowered_reason）
 - `valid_until_within_5_trading_days`
+- `buy_zone_valid`（仅 new_buy；持仓计划恒通过）：`hard_stop < 触发下沿 ≤ 追高上限`；区间为空或触发不高于硬止损即 `rejected_by_quality`，理由写明，绝不把触发价钳到上限。`lines_monotonic` 同时断言买入触发高于硬止损。
 - `entry_reference_current`（仅 new_buy；持仓计划恒通过）：`metrics.entry` 必须存在，`last_close_date` 不早于计划交易日、证据中没有 `bars_stale_day:`（即入场价来自计划交易日的已结算收盘或更晚的盘中形成 bar），`entry_price == max(lane_reference, last_close)`，且 `sizing.reference_price == entry_price`；否则 `rejected_by_quality`。止损距离 1.5–12%、0.8–3×ATR 自然按 entry_price 衡量（`hard_stop_distance_sane` 读 `sizing.reference_price`）。
 
 ## 评估（evaluator.py）与对账（reconcile.py）
@@ -238,6 +239,7 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 
 - 2026-09-19 第三轮（新买入场价 + 纪律卡界面）：
   - H1 新买入场价：`entry_price = max(lane.reference, 最新收盘)`，止损/距离/股数/移动止损/减半仓按它重算；新增 `chase_cap` 线与评估状态 `capped`；新增质量检查 `entry_reference_current`；推荐池人读条件冻结为 `metrics.recommendation_conditions`（研究条件，非系统线）。用 09-18 三只真实日线回归：彤程新材 73.55/70.37（4.32%，300 股，风险 0.96%）、大族激光 99.60/94.83（4.79%，200 股，0.96%）、冰轮环境 41.52/38.46（7.37%，300 股，0.93%）。
+  - H1b 复审：冰轮环境买入触发 37.94 低于硬止损 38.46（收盘 38.0 同时满足“买”与“低于止损”）。触发下沿改为 `max(lane.reference, hard_stop + 0.5×ATR14)`，新增 `buy_zone_valid`；三只真实区间：彤程新材 [72.13, 75.31]、大族激光 [97.48, 102.25]、冰轮环境 [39.68, 42.74]，均由止损间隔项起约束。
   - H2 `GenerationInputs.generator_version` 进入 inputs_hash：同一证据换生成器版本得到新的 plan_key（supersede），而不是与旧版本同 key 不同内容的冲突。
   - H3 只读接口：history / chart / evaluations / reconciliations（见“报告与 CLI”路由一节）；前端“我的持仓”纪律卡与推荐池新买纪律卡（`frontend/src/components/discipline/`）。
   - 版本号：generator v3、templates v4、report v4；contract 仍为 trade-discipline-v1（只增 kind/state/字段，旧行可读；旧 new_buy 行没有 `metrics.entry`，重新质检会判 `entry_reference_current` 不通过——这正是缺陷本身）。

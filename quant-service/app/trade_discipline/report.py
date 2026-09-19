@@ -91,6 +91,7 @@ CHECK_LABEL: dict[str, str] = {
     "not_lowered_vs_previous": "硬止损不得低于前序计划（除非记录下调理由）",
     "valid_until_within_5_trading_days": "有效期不超过5个交易日",
     "entry_reference_current": "新买入场参考价取计划交易日收盘或更晚，仓位与止损按它计算",
+    "buy_zone_valid": "新买买入区间有效：硬止损 < 触发下沿 ≤ 追高上限",
 }
 
 

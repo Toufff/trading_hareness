@@ -37,6 +37,7 @@ CHECK_IDS = (
     "every_line_evaluable", "every_line_has_derivation", "exposure_line_when_over_cap",
     "holiday_line_when_closure", "no_add_when_crash_or_broken", "sizing_consistent",
     "not_lowered_vs_previous", "valid_until_within_5_trading_days", "entry_reference_current",
+    "buy_zone_valid",
 )
 STALE_DAY_PREFIX = "bars_stale_day:"
 ENTRY_TOLERANCE = 0.01 + 1e-9
@@ -229,6 +230,9 @@ def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
         for line in plan.lines_of("trail"):
             if line.price is not None and line.price <= reference:
                 monotonic_problems.append(f"trail 触发价 {line.price} 未高于参考价 {reference}")
+        for line in plan.lines_of("trigger"):
+            if line.price is not None and line.price <= hard_stop:
+                monotonic_problems.append(f"买入触发 {line.price} 不高于硬止损 {hard_stop}")
     else:
         monotonic_problems.append("缺少 hard_stop 或参考价")
     checks.append(_check("lines_monotonic", not monotonic_problems,
@@ -310,6 +314,21 @@ def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
     else:
         checks.append(_check("valid_until_within_5_trading_days", plan.valid_until.date().isoformat() <= limit,
                              f"valid_until {plan.valid_until.date().isoformat()}，第5个交易日 {limit}"))
+
+    if plan.plan_kind != "new_buy":
+        checks.append(_check("buy_zone_valid", True, "持仓计划：没有买入区间，不适用"))
+    else:
+        trigger = next((line.price for line in plan.lines_of("trigger") if line.price is not None), None)
+        cap = next((line.price for line in plan.lines_of("chase_cap") if line.price is not None), None)
+        if trigger is None or cap is None or hard_stop is None:
+            checks.append(_check("buy_zone_valid", False, "新买计划缺少买入触发、追高上限或硬止损，无法确定买入区间"))
+        else:
+            valid = hard_stop < trigger <= cap
+            checks.append(_check(
+                "buy_zone_valid", valid,
+                f"买入区间 [{trigger}, {cap}]，硬止损 {hard_stop}" if valid else
+                (f"买入区间为空：触发下沿 {trigger} 高于追高上限 {cap}（硬止损 {hard_stop} + 0.5×ATR14 已越过追高上限），不可买"
+                 if trigger > cap else f"买入触发 {trigger} 不高于硬止损 {hard_stop}，满足买入的收盘同时满足退出")))
 
     if plan.plan_kind != "new_buy":
         checks.append(_check("entry_reference_current", True, "持仓计划：参考价即最新收盘，不适用"))

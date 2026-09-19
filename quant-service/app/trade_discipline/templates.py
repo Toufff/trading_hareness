@@ -68,6 +68,11 @@ TRAIL_ARM_ATR_MULTIPLE = 1.0
 # ATR would carry more than the 1% risk the sizing promised, so the trigger is
 # capped there and a close beyond the cap reads "已越过追高上限，不买".
 CHASE_CAP_ATR_MULTIPLE = 0.5
+# The buy trigger must sit clearly above the hard stop: a close that satisfies
+# "buy" must never already be a close that says "exit".  Its floor is
+# max(lane.reference, hard_stop + 0.5 x ATR14); the buy zone is
+# [trigger floor, chase cap] and an empty zone is a quality rejection.
+TRIGGER_STOP_GAP_ATR = 0.5
 # A soft stop needs room on both sides: at least half an ATR above the hard
 # stop and half an ATR below the reference price, otherwise one day's noise
 # fires it and it says nothing the hard stop does not.
@@ -621,10 +626,17 @@ def _new_buy_lines(stage: str, metrics: dict[str, Any], sizing: Sizing, lane: di
     support_raw = lane.get("support")
     reference_source = entry["lane_reference_source"]
     support_source = "lane.support" if support_raw is not None else "metrics.recent_low"
-    trigger_price = _money(entry["lane_reference"])
     entry_price = _money(entry["entry_price"])
     atr14 = float(metrics["atr14"])
     cap_price = _money(entry_price + Decimal(str(CHASE_CAP_ATR_MULTIPLE * atr14)))
+    hard_stop = float(sizing.hard_stop)
+    lane_reference = float(entry["lane_reference"])
+    stop_gap_floor = hard_stop + TRIGGER_STOP_GAP_ATR * atr14
+    # Never clamped to the cap: an empty zone stays empty and buy_zone_valid rejects the plan.
+    trigger_price = _money(max(lane_reference, stop_gap_floor))
+    trigger_binding = "lane_reference" if lane_reference >= stop_gap_floor else "stop_gap"
+    floor_text = ("lane 结构参考价" if trigger_binding == "lane_reference"
+                  else f"硬止损{_money(hard_stop)} + {TRIGGER_STOP_GAP_ATR}×ATR14，高于 lane 结构参考{_money(lane_reference)}")
     cancel_price = _money(support_raw if support_raw is not None else metrics["recent_low"])
     trigger_extra: list[str] = ["amount_ge_prev_day"]
     if sector_available:
@@ -635,14 +647,17 @@ def _new_buy_lines(stage: str, metrics: dict[str, Any], sizing: Sizing, lane: di
                     "chase_atr_multiple": CHASE_CAP_ATR_MULTIPLE}
     return [
         Line(kind="trigger",
-             label=(f"日线收盘站上{trigger_price}（结构确认）{trigger_notes}且不高于追高上限{cap_price}，"
-                    f"最多买到{sizing.recommended_shares}股；高于{cap_price}为追高，不买"),
+             label=(f"日线收盘在{trigger_price}–{cap_price}之间{trigger_notes}，最多买到{sizing.recommended_shares}股"
+                    f"（下沿={floor_text}；高于{cap_price}为追高，不买）"),
              metric="daily_close", op=">=", price=trigger_price, confirm=Confirm(bars=1, basis="daily"),
              extra=trigger_extra, action=Action(type="buy_up_to_shares", value=sizing.recommended_shares),
              derivation=Derivation(rule_id=f"trigger.{stage}",
-                                   inputs={"reference": float(trigger_price), "source": reference_source,
-                                           "price_cap": float(cap_price), **entry_inputs},
-                                   formula="reference"),
+                                   inputs={"source": reference_source, "price_cap": float(cap_price),
+                                           **entry_inputs, "hard_stop": hard_stop,
+                                           "stop_gap_atr": TRIGGER_STOP_GAP_ATR,
+                                           "stop_gap_floor": stop_gap_floor,
+                                           "binding_term": trigger_binding},
+                                   formula="max(lane_reference, hard_stop + stop_gap_atr * atr14)"),
              priority=PRIORITY["trigger"]),
         Line(kind="chase_cap",
              label=(f"日线收盘高于{cap_price}（入场参考{entry_price} + {CHASE_CAP_ATR_MULTIPLE}×ATR14）"
@@ -669,7 +684,7 @@ __all__ = [
     "MIN_BUFFER_PCT", "NO_ADD_REFERENCE", "PRIORITY", "SOFT_STOP_SEPARATION_ATR", "STAGE_STRUCTURE_NAME",
     "STOP_PCT_MAX", "STOP_PCT_MIN", "STOP_PCT_TARGET", "STRUCTURE_RULE", "TAKE_PARTIAL_STAGES",
     "TARGET_EXPOSURE_PCT", "TEMPLATE_VERSION", "TIME_STOP_DAYS", "TRAIL_ARM_ATR_MULTIPLE", "TWO_DAY_LOW_RULE",
-    "TemplateResult", "WEEKEND_CLOSURE_DAYS", "WIDENING_TERM_TEXT",
+    "TRIGGER_STOP_GAP_ATR", "TemplateResult", "WEEKEND_CLOSURE_DAYS", "WIDENING_TERM_TEXT",
     "buffer_pct", "build_lines", "build_sizing", "build_template", "closure_within", "closures_within",
     "hard_stop_note", "hard_stop_price", "is_ordinary_weekend", "lot_shares", "new_buy_entry", "new_buy_reference",
     "soft_stop_window", "stop_beyond_band", "stop_distance_terms", "structure_text", "trail_stop_price",

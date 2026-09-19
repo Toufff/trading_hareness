@@ -516,7 +516,9 @@ class StageTemplateQualityTests(unittest.TestCase):
         plan = generate(stage_inputs("breakout_hold", position=None,
                                      lane={"lane": "contraction", "reference": "10.45", "support": "9.90"}))
         self.assertEqual(plan.plan_kind, "new_buy")
-        self.assertEqual(plan.lines_of("trigger")[0].price, Decimal("10.45"))
+        # trigger floor = max(lane reference 10.45, hard stop 10.24 + 0.5 x ATR14) = 10.46 (the stop gap binds)
+        self.assertEqual(plan.lines_of("trigger")[0].price, Decimal("10.46"))
+        self.assertEqual(plan.lines_of("trigger")[0].derivation.inputs["binding_term"], "stop_gap")
         self.assertEqual(plan.lines_of("cancel")[0].price, Decimal("9.90"))
         self.assertIn("amount_ge_prev_day", plan.lines_of("trigger")[0].extra)
         self.assertEqual(plan.status, "active", failed_checks(plan.quality))
@@ -670,6 +672,7 @@ class QualityGateFailureTests(unittest.TestCase):
                           metrics=self.metrics_with(valid_until_limit="2026-09-22"))
         # a new buy sized on the lane's structure level (pre-v3, no metrics.entry)
         self.assert_fails("entry_reference_current", plan_kind="new_buy")
+        self.assert_fails("buy_zone_valid", plan_kind="new_buy")      # no trigger / chase cap at all
         self.assertEqual(self.covered, set(CHECK_IDS))
 
     def test_a_sector_condition_without_a_stored_membership_is_not_evaluable(self):
