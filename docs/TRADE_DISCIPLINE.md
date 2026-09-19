@@ -48,7 +48,7 @@ quant-service/tests/test_trade_discipline_*.py
 ```python
 CONTRACT_VERSION = "trade-discipline-v1"
 LineKind = Literal["exposure","hard_stop","soft_stop","trail","time_stop","no_add",
-                   "take_partial","holiday","trigger","cancel"]
+                   "take_partial","holiday","trigger","cancel","chase_cap"]
 Metric = Literal["daily_close","minute_close","last","low","high","vwap"]
 Op = Literal["<","<=",">",">="]
 ExtraCondition = Literal[
@@ -108,7 +108,7 @@ class DisciplinePlan(BaseModel):
 评估与对账合同：
 
 ```python
-class LineState(BaseModel): kind; label; state: Literal["armed","triggered","expired","cancelled"]; triggered_at: datetime|None; trigger_price: Decimal|None; basis: str; evidence: dict
+class LineState(BaseModel): kind; label; state: Literal["armed","triggered","expired","cancelled","capped"]; triggered_at: datetime|None; trigger_price: Decimal|None; basis: str; evidence: dict
 class Evaluation(BaseModel): plan_id; as_of_at; trading_date; basis: Literal["daily","minute"]; line_states: list[LineState]; plan_state: Literal["active","exit_signalled","reduce_signalled","expired"]; inputs_hash
 class ComplianceRecord(BaseModel): plan_id; trade_record_id|None; line_kind|None; verdict: Literal["followed","early","late","missed","against_plan","unplanned"]; deviation: dict; notes: str
 class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","override","reject"]; notes: str; overrides: dict
@@ -143,7 +143,11 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 - `no_add`（crash_rebound/broken 必有；其余可选）：直到 `daily_close >= MA10`（crash_rebound）或 MA5 前 block_add。
 - `trail`：`metric=daily_close, op=">=", confirm(bars=1, daily)`，触发价 arm_price = `max(anchor_price, reference_price) + 1 × ATR14`；action=move_stop_to，目标价 = `max(previous_trail, max(hard_stop, anchor_price))`，语义是“涨到 锚 + 1×ATR14 后止损上移到保本”。锚 `anchor_price`：持仓计划 = 快照平均成本（`anchor_source="average_cost"`；快照无成本时退回参考价，`"reference_price"`），新买计划 = 触发参考价（`"trigger_reference"`）。该式写入 `derivation.action_formula`、`anchor_price / anchor_source / floor_price`（及有前序时的 `previous_trail`）写入 `action_inputs`（无前序 trail 时公式不含 previous_trail 项）；只上移。label 写“日线收盘站上9.35（成本/现价孰高 + 1×ATR14）后，把止损上移到成本价8.49，只上移不下移”（新买计划写“触发参考价10.45”；前序 trail 更高时写“前序移动止损8.50（已高于成本价8.49）”）。此前的 `min(近 3 日最低, arm − 1.5×ATR)` 已废弃：600613 在 +11% 触发后止损只到 8.04、仍低于成本 8.49，锁定的是亏损，且 low3 是生成时刻的静态值。**不生成**的两种情形（原因写入 `omitted_lines`）：`target_exposure_pct == 0`（仓位线已要求清仓，移动止损无意义）；目标价 `<= hard_stop`（成本已在硬止损之下，“上移到保本”不会改变止损，零信息；reason 写“保本目标 max(硬止损 12.53, 成本价 11.90) = 12.53 不高于硬止损 12.53”）。评估器按线自带的 `metric/confirm` 判定，故 trail 与硬止损一样只在日线口径、按已收盘的日 K 收盘价确认，盘中冲高不算。
 - `take_partial`：`after_volume_climax` + `below_vwap` → reduce_by_pct 50（breakout/trend/crash_rebound 用）。原文表述把 extra 条件放在前面、价格条件放在最后：“当日成交量为20日最大量且收在振幅下半且最新价跌破当日VWAP、且最新价低于8.41时，减半仓”，不写成“在 8.41 下方减半仓”——价格是最弱的一项，不是主条件。
-- new_buy 计划另有 `trigger`（`daily_close >= reference` + `amount_ge_prev_day` + `sector_not_weak`）与 `cancel`（`daily_close < cancel_price` + `volume_expand_1_5x`），reference/cancel 直接取 lane 的 reference/support。
+- new_buy 计划的**入场参考价** `entry_price = max(lane.reference, 最新收盘)`（generator v3）。lane.reference 是突破平台附近的结构价，股价已远离它时（2026-09-18：冰轮环境 参考 37.94 / 收 41.52）按它定止损与股数会把真实止损距离低估一整段涨幅（冰轮 13.9%、每笔风险 1.75–2.3% 权益）。因此硬止损、止损距离、`max_shares`、移动止损锚点（`anchor_source="entry_price"`）与减半仓参考价全部以 `entry_price` 为基准（`sizing.reference_price == entry_price`）；`metrics.entry = {lane_reference, lane_reference_source, last_close, last_close_date, last_close_basis(settled|forming), entry_price, entry_source, formula}` 可复算。lane.reference 保留为结构确认线：
+  - `trigger`：`daily_close >= lane.reference`（结构确认）+ `amount_ge_prev_day` + `sector_not_weak`，label 同时写出追高上限；
+  - `chase_cap`（新 kind）：`daily_close > entry_price + 0.5×ATR14` → `block_add`，“已越过追高上限，不买”；`derivation.formula = entry_price + chase_atr_multiple * atr14`，trigger 的 `derivation.inputs.price_cap` 记同一价格。评估器：trigger 被一根高于追高上限的收盘确认时，状态记 `capped`（evidence `capped_reason="已越过追高上限，不买"`），不是买入信号；
+  - `cancel`：`daily_close < lane.support` + `volume_expand_1_5x`；
+  - 推荐池当日该股的人读 trigger/invalidation/why_now 冻结到 `metrics.recommendation_conditions`（`note="研究条件，非系统线"`、`evaluable=false`），只作阅读，不参与任何评估。
 
 `target_exposure_pct`：crash_rebound 20、broken 0（即 exposure 线 = 清仓）、breakout_hold 25、trend_hold 30、pullback_hold 30、base_platform 20、unclassified 15。`risk_per_trade_pct` 默认 1.0。
 
@@ -160,6 +164,7 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
 - `sizing_consistent`（max_shares 按公式复算相等；recommended_shares ≤ max_shares 且 ≤ target 上限）
 - `not_lowered_vs_previous`（有前序 active 计划时 hard_stop 不低于其值，否则需 lowered_reason）
 - `valid_until_within_5_trading_days`
+- `entry_reference_current`（仅 new_buy；持仓计划恒通过）：`metrics.entry` 必须存在，`last_close_date` 不早于计划交易日、证据中没有 `bars_stale_day:`（即入场价来自计划交易日的已结算收盘或更晚的盘中形成 bar），`entry_price == max(lane_reference, last_close)`，且 `sizing.reference_price == entry_price`；否则 `rejected_by_quality`。止损距离 1.5–12%、0.8–3×ATR 自然按 entry_price 衡量（`hard_stop_distance_sane` 读 `sizing.reference_price`）。
 
 ## 评估（evaluator.py）与对账（reconcile.py）
 
@@ -187,7 +192,13 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
   - `generate --account-key citics-primary [--symbol 600613.SH ...] [--as-of ISO] [--dry-run] [--output-dir DIR] [--env-file ...]`：dry-run 只读 DB、只写文件，stdout 打印 JSON 回执（每只 symbol：stage、status、失败检查、报告路径）。非 dry-run 落库后读回校验。
   - `evaluate --date YYYY-MM-DD [--basis daily|minute]`、`reconcile --date`、`show --symbol`。
   - 与 `scripts/agent-paper-trader.py` 相同的启动方式（`load_dotenv(env_file)`、`Database()`）。
-- 路由：`GET /api/v1/discipline/plans/latest?account_key=`、`GET /api/v1/discipline/plans/{plan_id}`、`GET /api/v1/discipline/evaluations/latest?plan_id=`；在 `main.py` 只做 include_router，逻辑在 router/repository。
+- 路由（全部 GET、只读，适配器 5680 映射到 `/api/research/discipline/...`，见 `feishu-adapter/discipline-routes.mjs`）：
+  - `GET /api/v1/discipline/plans/latest?account_key=&status=&limit=`、`GET /api/v1/discipline/plans/{plan_id}`、`GET /api/v1/discipline/evaluations/latest?plan_id=&basis=`；
+  - `GET /api/v1/discipline/plans/history?account_key=&symbol=`：同账户同股票全部计划（含 superseded/expired/rejected），按时间正序，附 `ladder`（每个计划的硬止损持续到下一计划交易日；`lowered` 标记下移及 `lowered_reason`）；
+  - `GET /api/v1/discipline/plans/{plan_id}/chart?basis=daily|minute&date=`：daily 返回与生成器**同一口径**的日 K——`quant.canonical_bars_daily` 未复权原始价，计划交易日及之前最近 60 行（停牌行在取数后剔除）+ 之后至 `min(今天, valid_until)`，同一 `normalize_bars`，附 MA5/10/20、ATR14 序列、`sessions/future_sessions`（x 轴延伸到 valid_until）、`closures`（非普通周末的休市日，如 09-25..09-27，标“休市”）、`suspensions`、`structure_points`（low20 等结构点及其所在 K 线日期）、`hard_stop_terms`（四个 min 项的复算值与起约束项）。`price_basis` 写明口径；窗口内的除权/除息日（`pre_close ≠ 前收`）列入 `corporate_actions` 且**不复权**（生成器也不复权），若发生在计划交易日之后则 `lines_comparable=false` 并给出警告。minute 返回该交易日已入库的 longhu 1 分钟线（其他来源只计数不返回）+ VWAP；未入库且为 longhu 实时接口当前会话时读取实时分钟线；都没有时 `rows=[]` + `reason`；
+  - `GET /api/v1/discipline/plans/{plan_id}/evaluations`：全部评估（两种口径），按线整理的逐日状态、`transitions`（armed→triggered 等）与 `plan_state_changes`；
+  - `GET /api/v1/discipline/reconciliations?account_key=&symbol=&from=&to=`：`items` 为对账结论（六类 verdict）连同对应成交，`trades` 为窗口内全部真实成交（附其 verdicts），无数据返回空列表；默认最近 30 天，窗口 ≤ 370 天。
+  - 在 `main.py` 只做 include_router，逻辑在 router / `app/trade_discipline/chart.py`（纯函数）/ `app/async_trade_discipline_read_repository.py`（只读 SELECT）。
 
 ## 验收
 
@@ -225,6 +236,12 @@ class Review(BaseModel): plan_id; reviewer: str; verdict: Literal["accept","over
   - G5 减半仓原文表述：extra 条件在前、价格条件在后；卡片“条件”列同样先 extra 后价格。
   - 版本号：templates v3、report v3；generator 仍 v2、contract 仍 trade-discipline-v1（只增 inputs 字段，旧行可读；旧行 trail 的 `metric=last` 评估器仍按 close 读取）。
 
-## 后续（不在 v1）
+- 2026-09-19 第三轮（新买入场价 + 纪律卡界面）：
+  - H1 新买入场价：`entry_price = max(lane.reference, 最新收盘)`，止损/距离/股数/移动止损/减半仓按它重算；新增 `chase_cap` 线与评估状态 `capped`；新增质量检查 `entry_reference_current`；推荐池人读条件冻结为 `metrics.recommendation_conditions`（研究条件，非系统线）。用 09-18 三只真实日线回归：彤程新材 73.55/70.37（4.32%，300 股，风险 0.96%）、大族激光 99.60/94.83（4.79%，200 股，0.96%）、冰轮环境 41.52/38.46（7.37%，300 股，0.93%）。
+  - H2 `GenerationInputs.generator_version` 进入 inputs_hash：同一证据换生成器版本得到新的 plan_key（supersede），而不是与旧版本同 key 不同内容的冲突。
+  - H3 只读接口：history / chart / evaluations / reconciliations（见“报告与 CLI”路由一节）；前端“我的持仓”纪律卡与推荐池新买纪律卡（`frontend/src/components/discipline/`）。
+  - 版本号：generator v3、templates v4、report v4；contract 仍为 trade-discipline-v1（只增 kind/state/字段，旧行可读；旧 new_buy 行没有 `metrics.entry`，重新质检会判 `entry_reference_current` 不通过——这正是缺陷本身）。
 
-agent_paper 上下文读取 discipline_plans；复盘页把评估时间线与真实成交叠加；前端“我的持仓”展示纪律卡；盘中分钟评估接入 `INTRADAY_ALERTING` 推送。
+## 后续
+
+agent_paper 上下文读取 discipline_plans；盘中分钟评估接入 `INTRADAY_ALERTING` 推送。

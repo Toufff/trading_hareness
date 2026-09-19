@@ -12,9 +12,11 @@ this reader.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 from uuid import UUID
 
+from .trade_discipline.chart import LONGHU_MINUTE_SOURCE, PLAN_BAR_COUNT
 from .trade_discipline.repository import ACTIVE_STATUSES, PLAN_COLUMNS
 
 EVALUATION_COLUMNS = """evaluation_id,plan_id,as_of_at,trading_date,basis,line_states,plan_state,
@@ -79,4 +81,115 @@ async def latest_evaluation(async_database: Any, plan_id: str, *, basis: str | N
     return dict(row) if row else None
 
 
-__all__ = ["EVALUATION_COLUMNS", "MAX_LIMIT", "latest_evaluation", "latest_plans", "read_plan", "valid_uuid"]
+async def plan_evaluations(async_database: Any, plan_id: str, *, limit: int = 500) -> list[dict[str, Any]]:
+    """Every stored evaluation of one plan, oldest first (both bases)."""
+    resolved = valid_uuid(plan_id)
+    if resolved is None:
+        return []
+    async with async_database.transaction() as connection:
+        result = await connection.execute(f"""
+            SELECT {EVALUATION_COLUMNS} FROM quant.discipline_evaluations
+             WHERE plan_id=%s ORDER BY as_of_at,created_at LIMIT %s""", (resolved, _limit(limit, 1000)))
+        return [dict(row) for row in await result.fetchall()]
+
+
+async def plan_history(async_database: Any, account_key: str, symbol: str, *,
+                       limit: int = MAX_LIMIT) -> list[dict[str, Any]]:
+    """Every plan of one account/symbol - superseded, expired and rejected included - oldest first."""
+    async with async_database.transaction() as connection:
+        result = await connection.execute(f"""
+            SELECT {PLAN_COLUMNS} FROM quant.discipline_plans
+             WHERE account_key=%s AND symbol=%s
+             ORDER BY as_of_at,created_at LIMIT %s""", (account_key, symbol, _limit(limit)))
+        return [dict(row) for row in await result.fetchall()]
+
+
+async def reconciliations(async_database: Any, account_key: str, *, symbol: str | None,
+                          start: date, end: date, limit: int = 500) -> dict[str, list[dict[str, Any]]]:
+    """Stored reconciliation verdicts with their fills, plus every fill in the window.
+
+    The fills are listed even when no verdict exists yet, so a chart can mark
+    the real B/S points before (or without) a reconciliation run.
+    """
+    bounded = _limit(limit, 2000)
+    async with async_database.transaction() as connection:
+        records = await connection.execute("""
+            SELECT c.compliance_id,c.plan_id,c.trade_record_id,c.line_kind,c.verdict,c.deviation,c.notes,
+                   c.created_at,p.symbol,p.plan_key,p.plan_kind,p.trading_date AS plan_trading_date,
+                   t.trade_date,t.trade_time,t.side,t.quantity,t.price,t.name
+              FROM quant.discipline_compliance c
+              JOIN quant.discipline_plans p ON p.plan_id=c.plan_id
+              LEFT JOIN quant.broker_trade_records t ON t.record_id=c.trade_record_id
+             WHERE p.account_key=%s AND (%s::text IS NULL OR p.symbol=%s)
+               AND coalesce(t.trade_date,p.trading_date) BETWEEN %s AND %s
+             ORDER BY coalesce(t.trade_date,p.trading_date),t.trade_time,c.created_at LIMIT %s""",
+                                            (account_key, symbol, symbol, start, end, bounded))
+        record_rows = [dict(row) for row in await records.fetchall()]
+        trades = await connection.execute("""
+            SELECT record_id,trade_date,trade_time,symbol,name,side,quantity,price,gross_amount,source
+              FROM quant.broker_trade_records
+             WHERE account_key=%s AND (%s::text IS NULL OR symbol=%s) AND trade_date BETWEEN %s AND %s
+             ORDER BY trade_date,trade_time,record_id LIMIT %s""",
+                                           (account_key, symbol, symbol, start, end, bounded))
+        trade_rows = [dict(row) for row in await trades.fetchall()]
+    return {"records": record_rows, "trades": trade_rows}
+
+
+async def daily_bars_for_plan(async_database: Any, symbol: str, trading_date: date, last_day: date,
+                              *, before_count: int = PLAN_BAR_COUNT) -> dict[str, list[dict[str, Any]]]:
+    """The generator's bar window (last ``before_count`` rows through the plan day) and the rows after it."""
+    columns = "trading_date,open,high,low,close,pre_close,volume,amount,is_suspended"
+    async with async_database.transaction() as connection:
+        before = await connection.execute(f"""
+            SELECT {columns} FROM quant.canonical_bars_daily
+             WHERE symbol=%s AND trading_date<=%s ORDER BY trading_date DESC LIMIT %s""",
+                                          (symbol, trading_date, before_count))
+        before_rows = [dict(row) for row in await before.fetchall()]
+        after = await connection.execute(f"""
+            SELECT {columns} FROM quant.canonical_bars_daily
+             WHERE symbol=%s AND trading_date>%s AND trading_date<=%s ORDER BY trading_date LIMIT 60""",
+                                         (symbol, trading_date, last_day))
+        after_rows = [dict(row) for row in await after.fetchall()]
+    return {"before": before_rows, "after": after_rows}
+
+
+async def open_sessions(async_database: Any, start: date, end: date, *, exchange: str = "SSE") -> list[date]:
+    """Open exchange sessions in ``[start, end]`` from ``quant.market_trade_calendar``."""
+    async with async_database.transaction() as connection:
+        result = await connection.execute("""
+            SELECT calendar_date FROM quant.market_trade_calendar
+             WHERE exchange=%s AND is_open AND calendar_date BETWEEN %s AND %s ORDER BY calendar_date""",
+                                          (exchange, start, end))
+        return [row["calendar_date"] for row in await result.fetchall()]
+
+
+async def stored_minutes(async_database: Any, symbol: str, day: date) -> dict[str, Any]:
+    """One session's stored Longhu minute bars; other vendors' rows are counted, never returned."""
+    async with async_database.transaction() as connection:
+        result = await connection.execute("""
+            SELECT minute_bucket,bar_time,open,high,low,close,volume,amount,source_name,raw
+              FROM quant.intraday_minute_sessions
+             WHERE symbol=%s AND trading_date=%s AND source_name=%s ORDER BY bar_time LIMIT 400""",
+                                          (symbol, day, LONGHU_MINUTE_SOURCE))
+        rows = [dict(row) for row in await result.fetchall()]
+        other = await connection.execute("""
+            SELECT count(*)::int AS rows FROM quant.intraday_minute_sessions
+             WHERE symbol=%s AND trading_date=%s AND source_name<>%s""", (symbol, day, LONGHU_MINUTE_SOURCE))
+        other_rows = int((await other.fetchone() or {}).get("rows") or 0)
+    return {"rows": rows, "source": LONGHU_MINUTE_SOURCE if rows else None, "other_source_rows": other_rows}
+
+
+def router_dependencies(async_database: Any, *, live_minutes: Any = None) -> Any:
+    """Every read projection the discipline router needs, wired to this module (composition helper)."""
+    from .routers.trade_discipline import TradeDisciplineDependencies
+
+    return TradeDisciplineDependencies(
+        async_database=async_database, latest_plans=latest_plans, read_plan=read_plan,
+        latest_evaluation=latest_evaluation, plan_history=plan_history, plan_evaluations=plan_evaluations,
+        reconciliations=reconciliations, daily_bars=daily_bars_for_plan, open_sessions=open_sessions,
+        stored_minutes=stored_minutes, live_minutes=live_minutes)
+
+
+__all__ = ["EVALUATION_COLUMNS", "MAX_LIMIT", "daily_bars_for_plan", "latest_evaluation", "latest_plans",
+           "open_sessions", "plan_evaluations", "plan_history", "read_plan", "reconciliations",
+           "router_dependencies", "stored_minutes", "valid_uuid"]
