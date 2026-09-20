@@ -6,6 +6,7 @@ import functools
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -38,6 +39,17 @@ class ReviewRequest(BaseModel):
     evidence_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
+class BindingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    thesis_revision: int = Field(ge=1)
+    account_key: str = Field(min_length=1, max_length=64)
+    symbol: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
+    position_episode_id: str = Field(min_length=1, max_length=200)
+    plan_id: UUID
+    binding_source: str = Field(default="manual_api", min_length=1, max_length=120)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100)
+
+
 @dataclass(frozen=True)
 class TradeThesisDependencies:
     database: Any
@@ -48,12 +60,15 @@ class TradeThesisDependencies:
     propose_change: Callable[..., dict[str, Any]]
     review_change: Callable[..., dict[str, Any]]
     evaluate_source_run: Callable[..., dict[str, Any]]
+    create_binding: Callable[..., dict[str, Any]] | None = None
+    load_bound_plan: Callable[..., dict[str, Any]] | None = None
 
 
 def runtime_trade_thesis_dependencies(database: Any, async_database: Any,
                                       run_database: Callable[..., Awaitable[Any]]) -> TradeThesisDependencies:
     from ..trade_thesis.read_repository import list_theses, thesis_timeline
     from ..trade_thesis.repository import propose_change, review_change
+    from ..trade_thesis.bindings import create_binding, load_bound_plan
 
     def evaluate_source_run(db: Any, source_run_id: str, cutoff_at: datetime | None = None,
                             symbols: list[str] | None = None, namespace: str = "shadow") -> dict[str, Any]:
@@ -64,6 +79,7 @@ def runtime_trade_thesis_dependencies(database: Any, async_database: Any,
         database=database, async_database=async_database, run_database=run_database,
         list_theses=list_theses, timeline=thesis_timeline, propose_change=propose_change,
         review_change=review_change, evaluate_source_run=evaluate_source_run,
+        create_binding=create_binding, load_bound_plan=load_bound_plan,
     )
 
 
@@ -116,6 +132,8 @@ def build_trade_thesis_router(deps: TradeThesisDependencies) -> APIRouter:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except ThesisConflict as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @router.post("/{thesis_id}/changes")
     async def propose(thesis_id: str, payload: ChangeRequest) -> dict[str, Any]:
@@ -142,8 +160,36 @@ def build_trade_thesis_router(deps: TradeThesisDependencies) -> APIRouter:
         return {**result, "active_changed": payload.verdict == "approve",
                 "decision_binding": False, "live_effect": "none"}
 
+    @router.get("/{thesis_id}/binding")
+    async def read_binding(thesis_id: str, account_key: str | None = None,
+                           symbol: str | None = None, as_of: datetime | None = None) -> dict[str, Any]:
+        if deps.load_bound_plan is None:
+            raise HTTPException(status_code=503, detail="trade thesis binding service unavailable")
+        call = functools.partial(
+            deps.load_bound_plan, deps.database, thesis_id,
+            account_key=account_key, symbol=symbol, as_of=as_of,
+        )
+        result = await deps.run_database(call, timeout_seconds=10)
+        return {**result, "as_of": as_of, "live_effect": "none"}
+
+    @router.post("/{thesis_id}/bindings")
+    async def bind(thesis_id: str, payload: BindingRequest) -> dict[str, Any]:
+        if deps.create_binding is None:
+            raise HTTPException(status_code=503, detail="trade thesis binding service unavailable")
+
+        def run() -> dict[str, Any]:
+            with deps.database.transaction() as connection:
+                return deps.create_binding(
+                    connection, thesis_id, thesis_revision=payload.thesis_revision,
+                    account_key=payload.account_key, symbol=payload.symbol,
+                    position_episode_id=payload.position_episode_id, plan_id=payload.plan_id,
+                    binding_source=payload.binding_source, evidence_refs=payload.evidence_refs,
+                )
+        result = await _write(run)
+        return {**result, "decision_binding": False, "live_effect": "none"}
+
     return router
 
 
-__all__ = ["ChangeRequest", "EvaluateRequest", "ReviewRequest", "TradeThesisDependencies",
+__all__ = ["BindingRequest", "ChangeRequest", "EvaluateRequest", "ReviewRequest", "TradeThesisDependencies",
            "build_trade_thesis_router", "runtime_trade_thesis_dependencies"]

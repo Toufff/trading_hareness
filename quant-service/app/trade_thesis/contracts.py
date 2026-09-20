@@ -87,6 +87,11 @@ def immutable_thesis(value: dict[str, Any]) -> Thesis:
     for group in ("invariants", "confirmation_scenarios", "invalidation_conditions", "entry_conditions", "cancel_conditions"):
         for condition in result.get(group, []):
             validate_condition(condition)
+    if result.get('scenario') is not None:
+        from .scenarios import Scenario
+        if not isinstance(result['scenario'], dict):
+            raise ContractError('scenario_must_be_mapping')
+        Scenario.from_dict(result['scenario'])
     return result  # type: ignore[return-value]
 
 

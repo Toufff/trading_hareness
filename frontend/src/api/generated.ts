@@ -1394,6 +1394,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/research/theses/{thesis_id}/binding": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Binding */
+        get: operations["read_binding_api_v1_research_theses__thesis_id__binding_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/research/theses/{thesis_id}/bindings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Bind */
+        post: operations["bind_api_v1_research_theses__thesis_id__bindings_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/personal/order-history/summary": {
         parameters: {
             query?: never;
@@ -3510,6 +3544,29 @@ export interface components {
              * @default ,
              */
             separator: string;
+        };
+        /** BindingRequest */
+        BindingRequest: {
+            /** Thesis Revision */
+            thesis_revision: number;
+            /** Account Key */
+            account_key: string;
+            /** Symbol */
+            symbol: string;
+            /** Position Episode Id */
+            position_episode_id: string;
+            /**
+             * Plan Id
+             * Format: uuid
+             */
+            plan_id: string;
+            /**
+             * Binding Source
+             * @default manual_api
+             */
+            binding_source: string;
+            /** Evidence Refs */
+            evidence_refs?: string[];
         };
         /** BoardResearchRunRequest */
         BoardResearchRunRequest: {
@@ -7367,6 +7424,80 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ReviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_binding_api_v1_research_theses__thesis_id__binding_get: {
+        parameters: {
+            query?: {
+                account_key?: string | null;
+                symbol?: string | null;
+                as_of?: string | null;
+            };
+            header?: never;
+            path: {
+                thesis_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    bind_api_v1_research_theses__thesis_id__bindings_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                thesis_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BindingRequest"];
             };
         };
         responses: {

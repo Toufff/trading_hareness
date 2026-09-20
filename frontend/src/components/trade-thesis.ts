@@ -59,6 +59,11 @@ export type TradeThesisSummary = {
   new_buy?: string | null;
   holding_action?: string | null;
   holding_plan_status?: string | null;
+  scenario_projection?: {
+    combined_entry_state?: string;
+    conflicts?: Array<string | { code?: string; message?: string }>;
+    execution?: { state?: string; reason?: string; earliest_session?: string | null };
+  };
   next_checks?: Array<string | Record<string, unknown>>;
   changes_since_previous?: ThesisEvidenceDelta[];
   contrary_evidence?: Array<string | Record<string, unknown>>;
@@ -150,6 +155,8 @@ export function thesisItems(payload: TradeThesisList | TradeThesisSummary[]): Tr
       available_at: row.available_at ?? asString(thesis.available_at),
       origin_mode: row.origin_mode ?? asString(thesis.origin_mode),
       holding_plan_status: row.holding_plan_status ?? holdingNote(evaluation.holding),
+      scenario_projection: row.scenario_projection ?? evaluation.scenario_projection as TradeThesisSummary['scenario_projection'],
+      chart_lines: row.chart_lines ?? evaluation.chart_lines as ThesisLine[] | undefined,
       family: row.family ?? asString(thesis.family),
       original_rankings: row.original_rankings ?? asRankings(thesis.original_rankings),
       current_rankings: row.current_rankings ?? asRankings(evaluation.current_rankings),
@@ -215,6 +222,7 @@ export function textValue(value: string | Record<string, unknown>): string {
 }
 
 const STATE_LABELS: Record<string, string> = {
+  blocked: '约束冲突，不能新增', deferred: '等待下一交易时段', unbound: '未绑定真实计划',
   pending: '待评价', supported: '支持', challenged: '受挑战', invalidated: '已失效', expired: '已到期', superseded: '已替代',
   complete: '完整', partial: '部分', stale: '陈旧', conflict: '冲突', waiting: '等待确认', eligible: '符合场景',
   suspended: '暂停', cancelled: '已取消', unknown: '未知',

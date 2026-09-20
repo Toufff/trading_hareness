@@ -275,5 +275,21 @@ def persist_binding(connection: Any, binding: dict[str, Any]) -> dict[str, Any]:
     return {"status": "idempotent", "content_hash": digest, **dict(existing or {})}
 
 
-__all__ = ["ThesisConflict", "ThesisNotFound", "active_thesis", "capture", "latest_previous_evaluation", "list_latest", "persist_binding", "persist_evaluation",
+def latest_binding(connection: Any, thesis_id: str, *, account_key: str | None = None,
+                   symbol: str | None = None, as_of: str | None = None) -> dict[str, Any] | None:
+    """Read the newest explicit binding without inferring one from scans or holdings."""
+    row = _one(connection, """
+        SELECT binding_id,account_key,symbol,position_episode_id,thesis_id,thesis_revision,
+               plan_id,binding_source,bound_at,evidence_refs,content_hash,created_at
+          FROM quant.plan_thesis_bindings
+         WHERE thesis_id=%s
+           AND (%s::text IS NULL OR account_key=%s)
+           AND (%s::text IS NULL OR symbol=%s)
+           AND (%s::timestamptz IS NULL OR bound_at<=%s)
+         ORDER BY bound_at DESC,created_at DESC,binding_id DESC LIMIT 1
+    """, (thesis_id, account_key, account_key, symbol, symbol, as_of, as_of))
+    return None if row is None else dict(row)
+
+
+__all__ = ["ThesisConflict", "ThesisNotFound", "active_thesis", "capture", "latest_binding", "latest_previous_evaluation", "list_latest", "persist_binding", "persist_evaluation",
            "persist_revision_event", "propose_change", "review_change", "stable_hash"]

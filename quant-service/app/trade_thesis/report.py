@@ -27,6 +27,8 @@ def sections(receipt, lane=None):
         facts = []
         if any(c.get('directly_comparable') is False for c in item.get('changes', [])):
             facts.append('数据口径/版本修正，前后数值不可直接解释为行情变化')
+        if item.get('holding', {}).get('status') not in (None, 'unbound'):
+            facts.append(item['holding']['note'])
         for metric, label, divisor, suffix in [('close', '收盘', 1, '元'), ('amount', '成交额', 1e8, '亿元'),
                 ('amount_ratio_previous', '较前日', 1, '倍'), ('amount_ratio_mean5', '较前5日均额', 1, '倍'),
                 ('main_net5', '5日供应商主力净额', 1e8, '亿元')]:

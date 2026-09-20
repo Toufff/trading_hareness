@@ -8,4 +8,6 @@ test('trade thesis GET and POST routes stay separately mapped', async () => {
 	assert.match(source, /\['\/api\/research\/theses\/evaluate', '\/api\/v1\/research\/theses\/evaluate'\]/);
 	assert.match(source, /thesisTimeline && request\.method === 'GET'/);
 	assert.match(source, /thesisMutation && request\.method === 'POST'/);
+	assert.match(source, /thesisBinding && request\.method === 'GET'/);
+	assert.ok(source.includes('(changes|reviews|bindings)'));
 });

@@ -1415,7 +1415,12 @@ const dashboard = createServer((request, response) => {
 		void proxyResearch(`/api/v1/research/theses/${thesisTimeline[1]}/timeline`, url.search, response).catch(routeErrorHandler(response, 503));
 		return;
 	}
-	const thesisMutation = /^\/api\/research\/theses\/([^/]+)\/(changes|reviews)$/i.exec(url.pathname);
+	const thesisBinding = /^\/api\/research\/theses\/([^/]+)\/binding$/i.exec(url.pathname);
+	if (thesisBinding && request.method === 'GET') {
+		void proxyResearch(`/api/v1/research/theses/${thesisBinding[1]}/binding`, url.search, response).catch(routeErrorHandler(response, 503));
+		return;
+	}
+	const thesisMutation = /^\/api\/research\/theses\/([^/]+)\/(changes|reviews|bindings)$/i.exec(url.pathname);
 	if (thesisMutation && request.method === 'POST') {
 		void proxyResearchAction(`/api/v1/research/theses/${thesisMutation[1]}/${thesisMutation[2]}`, request, response).catch(routeErrorHandler(response, 503));
 		return;

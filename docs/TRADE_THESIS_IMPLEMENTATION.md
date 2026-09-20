@@ -45,9 +45,13 @@ owner/adapter/公网读取的评价ID与hash一致，真实浏览器桌面/手�
 - 只读：`scripts/trade-thesis.py show --symbol 002185.SZ`；owner `/api/v1/research/theses`，adapter/公网 `/api/research/theses`。工作台入口为“量化研究台 → 个股研究 → 交易假设生命周期”。
 - 独立PG验收：`scripts/verify-trade-thesis-isolated.py`（仅创建/清理本次随机命名测试库）；线上只读验收：`scripts/verify-trade-thesis-live.py --symbol <已评价股票>`。
 - 当前代码支持精确定义的单点条件；持续分钟、聚合、复杂复合语义没有实现时返回`unsupported_contract`，绝不冒充条件已满足。自由文本买点仍保留原文，不编造成精确执行信号。
+- 显式账户接缝：`POST /api/v1/research/theses/{id}/bindings` 校验已存计划、账户、股票、修订、持仓快照引用与episode；`GET .../{id}/binding`读回。新增绑定不重写纪律计划。拟买入使用明确prospective-plan标识，不冒充持仓；未绑定、过时、多账户歧义均不能推导卖出股数。
+- `advisory.py`在每轮评价加载已绑定纪律并生成组合投影/有效计划线。`scenarios.py`只读已批准结构化scenario，与真实纪律及可执行证据取交集；独立研究state仍单列。测算价不是最高买价，研究参考位不是硬止损，日线确认不算当日已成交。
+- `effectiveness.py`按同轮真实扫描自动冻结三个研究组的原始选择、排序与生命周期状态，首个快照不随重跑刷新。`scripts/trade-thesis-effectiveness.py`读取快照，区分缺决策、未批准执行研究政策、缺成交合同；复用现有费用/可成交模拟。未批准政策不自行设TopN/买入动作。收益未知是null而不是0；原子发现仅为待审研究记录，不自动上线。
+- 真实历史只读验收：`scripts/verify-trade-thesis-history.py`，9月15—18日158个候选/对照记录，153有可评价证据、5缺当前可用证据；21组真实晚到行负测试通过。北交所真实修正行在本区间没有样本，T24不得标通过。
 - 回填旧扫描标记`reconstructed`；仅同日5分钟内的新扫描首次捕获可标`prospective`，起效时间仍为真实捕获时间。原始策略/范围/排名、结构、期限不随之后排序变化重写。
 - 单轮有界500只；影子评价不重写策略分数或成交记录。持仓意图未绑定时明确`unbound`，不能反推真实买入动机。
-- `stock-scan`与`stock-discipline`用户级技能同步要求读取假设记录，区分研究结构、新买条件和实际持仓纪律；修正旧数据库路径及历史1%风险默认描述，不修改当前5%风险配置。
+- `stock-scan`、`stock-research`与`stock-discipline`用户级技能同步要求读取假设记录，区分研究结构、新买条件和实际持仓纪律；修正旧数据库路径及历史1%风险默认描述，不修改当前5%风险配置。
 
 ## 尚不声称完成的能力
 

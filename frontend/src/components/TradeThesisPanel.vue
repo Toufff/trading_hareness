@@ -106,10 +106,13 @@ onBeforeUnmount(() => { controller?.abort(); timelineController?.abort(); pollin
           <template v-else>{{ change.label || metricLabelText(change.metric) }}：{{ observationValue(change.old_value, change.metric, change.unit) }} → {{ observationValue(change.new_value, change.metric, change.unit) }}</template>
           <small v-if="change.benchmark">基准 {{ benchmarkLabel(change.benchmark) }}</small>
         </span></dd><dd v-else>首次评价，无上轮差异</dd></div>
-        <div><dt>当前新买</dt><dd>{{ item.new_buy || stateLabel(item.entry_state) }}</dd></div>
+        <div><dt>当前新买</dt><dd>研究条件：{{ item.new_buy || stateLabel(item.entry_state) }}<small v-if="item.scenario_projection">场景与纪律交集：{{ stateLabel(item.scenario_projection.combined_entry_state) }}</small></dd></div>
         <div><dt>已有持仓</dt><dd>{{ item.holding_action || item.holding_plan_status || '未加载有效持仓计划，不能由研究结论推导动作' }}</dd></div>
         <div><dt>下一验证点</dt><dd><span v-for="(check, index) in item.next_checks ?? []" :key="index">{{ textValue(check) }}</span><span v-if="!item.next_checks?.length">未提供</span></dd></div>
       </dl>
+      <el-alert v-for="(conflict, index) in item.scenario_projection?.conflicts ?? []" :key="`conflict-${index}`"
+        type="warning" :closable="false" :title="typeof conflict === 'string' ? conflict : conflict.message || conflict.code || '场景约束待核对'" />
+      <p v-if="item.scenario_projection?.execution" class="market-date">可执行性：{{ stateLabel(item.scenario_projection.execution.state) }}；{{ item.scenario_projection.execution.reason }}<span v-if="item.scenario_projection.execution.earliest_session">；最早交易日 {{ item.scenario_projection.execution.earliest_session }}</span></p>
       <div v-if="item.observations?.length" class="facts">
         <h4>当前观察事实</h4>
         <span v-for="(fact, index) in item.observations" :key="fact.evidence_id || index">

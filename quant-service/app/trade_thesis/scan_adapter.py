@@ -291,6 +291,14 @@ def evaluate_source_run(database, source_run_id=None, cutoff_at=None, symbols=No
             evidence = market_evidence(symbol, series, flows_by.get(symbol, []),
                                        cutoff.isoformat(), expected_date, expected_days)
             intraday_observed_at = None
+            try:
+                from .bindings import load_bound_plan
+                with database.transaction() as c:
+                    c.execute('SET TRANSACTION READ ONLY')
+                    bound = load_bound_plan(c, thesis['thesis_id'], symbol=symbol, as_of=cutoff)
+            except Exception as error:
+                logging.getLogger(__name__).exception('thesis_binding_read_failed symbol=%s', symbol)
+                bound = {'status': 'unavailable', 'error_type': type(error).__name__}
             if source['kind'] == 'intraday' and current:
                 from ..strategy_origin import select_primary_origin
                 evaluation_lane = select_primary_origin(current)['lane']
@@ -311,10 +319,12 @@ def evaluate_source_run(database, source_run_id=None, cutoff_at=None, symbols=No
                     origin_primary_lane=frozen.get('origin_primary_lane'),
                     current_rankings=(current or {}).get('memberships', []), original_rankings=frozen.get('original_rankings', []),
                     missing_sessions=missing_sessions, live_effect='none', decision_binding=False,
-                    holding={'status': 'unbound', 'note': '本评价不推断实际入场意图，也不替代已生效的账户纪律计划。'},
                     original_conditions={'confirmation': frozen.get('original_confirmation'), 'invalidation': frozen.get('original_invalidation')})
+                from .advisory import project_advisory
+                result.update(project_advisory(frozen, result, bound, next_session=str(next_row['calendar_date'])))
+                result['input_hash'] = digest([result['input_hash'], result['discipline_binding'], result['scenario_projection']])
                 result['evaluation_id'] = digest([result['evaluation_id'], namespace, result['current_rankings'],
-                                                   source['run_id'], source['data_date']])[:32]
+                                                   source['run_id'], source['data_date'], result['input_hash']])[:32]
                 result['content_hash'] = digest({k: v for k, v in result.items() if k != 'content_hash'})
                 return result
             saved = capture_evaluate(database, thesis, evidence, cutoff.isoformat(), source['run_id'], namespace,
@@ -324,6 +334,8 @@ def evaluate_source_run(database, source_run_id=None, cutoff_at=None, symbols=No
                 states=saved['evaluation']['states'], data_date=expected_date,
                 claim=thesis.get('claim'), original_structure=thesis.get('original_structure'),
                 observations=saved['evaluation']['observations'],
+                holding=saved['evaluation']['holding'],
+                scenario_projection=saved['evaluation']['scenario_projection'],
                 original_rankings=thesis.get('original_rankings', []),
                 current_rankings=saved['evaluation']['current_rankings'],
                 changes=saved['evaluation']['changes_since_previous'],
@@ -350,6 +362,14 @@ def refresh_from_run(database, source_run_id, kind='post_close'):
             row = c.execute('SELECT summary FROM quant.post_close_strategy_runs WHERE run_id=%s FOR UPDATE',
                             (source_run_id,)).fetchone()
             summary = dict(row['summary'])
+            if receipt.get('status') == 'completed' and summary.get('strategy_lanes'):
+                from .effectiveness import collect_three_arm_snapshot
+                # Freeze the first actual capture for this run, never refresh its
+                # clock or pretend today's reconstruction existed on signal day.
+                if 'trade_thesis_three_arm_snapshot' not in summary:
+                    summary['trade_thesis_three_arm_snapshot'] = collect_three_arm_snapshot(
+                        summary['strategy_lanes'], receipt, captured_at=receipt['cutoff_at'])
+                receipt['three_arm_snapshot'] = summary['trade_thesis_three_arm_snapshot']
             summary['trade_thesis'] = receipt
             if summary.get('strategy_lanes'):
                 scan = {**summary['strategy_lanes'], 'trade_thesis': receipt}

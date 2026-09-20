@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { benchmarkLabel, evidenceVersionNote, isEvidenceVersionChange, metricLabelText, observationValue, rankText, textValue, thesisChartAnnotations, thesisItems } from './trade-thesis';
 
 describe('trade thesis presentation model', () => {
+  it('keeps supported research separate from a real risk exit and blocked entry', () => {
+    const item = thesisItems({ items: [{ thesis_id: 't', symbol: '600000.SH', revision: 1,
+      evaluation: { states: { thesis_state: 'supported', entry_state: 'eligible' },
+        holding: { note: '已绑定纪律触发硬风险退出；研究支持不能覆盖它' },
+        scenario_projection: { combined_entry_state: 'blocked', conflicts: [{ message: '超出计划价格范围' }],
+          execution: { state: 'unknown', reason: '没有成交证据' } },
+        chart_lines: [{ label: '有效计划硬止损', price: 10, kind: 'current_plan' }] } }] })[0]!;
+    expect(item.thesis_state).toBe('supported');
+    expect(item.entry_state).toBe('eligible');
+    expect(item.scenario_projection?.combined_entry_state).toBe('blocked');
+    expect(item.holding_plan_status).toContain('硬风险退出');
+    expect(thesisChartAnnotations([item])[0]?.price).toBe(10);
+  });
   it('projects the nested owner API contract without deriving a holding action', () => {
     const item = thesisItems({
       items: [{
