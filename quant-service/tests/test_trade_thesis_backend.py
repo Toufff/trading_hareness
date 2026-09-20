@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from app.routers.trade_thesis import ChangeRequest, TradeThesisDependencies, build_trade_thesis_router
 from app.trade_thesis import read_repository
@@ -91,3 +92,38 @@ def test_evaluate_http_model_has_no_raw_evidence_field():
     from app.routers.trade_thesis import EvaluateRequest
     with pytest.raises(ValueError):
         EvaluateRequest.model_validate({"source_run_id": "run-1", "evidence": [{"fabricated": True}]})
+
+
+def test_evaluate_route_uses_real_database_executor_signature():
+    from app.runtime_executors import run_database_blocking
+
+    captured = {}
+
+    def evaluate_source_run(database, source_run_id, *, cutoff_at, symbols, namespace):
+        captured.update(database=database, source_run_id=source_run_id, cutoff_at=cutoff_at,
+                        symbols=symbols, namespace=namespace)
+        return {"status": "completed", "evaluated": 1}
+
+    async def reads(*_args, **_kwargs): return []
+    async def timeline(*_args, **_kwargs): return None
+    database = object()
+    app = FastAPI()
+    app.include_router(build_trade_thesis_router(TradeThesisDependencies(
+        database=database, async_database=object(), run_database=run_database_blocking,
+        list_theses=reads, timeline=timeline, propose_change=lambda *_a, **_k: {},
+        review_change=lambda *_a, **_k: {}, evaluate_source_run=evaluate_source_run,
+    )))
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/research/theses/evaluate", json={
+            "source_run_id": "run-42", "cutoff_at": "2026-09-20T07:00:00Z",
+            "symbols": ["600000.SH"], "namespace": "shadow",
+        })
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "status": "completed", "evaluated": 1, "decision_binding": False, "live_effect": "none",
+    }
+    assert captured["database"] is database and captured["source_run_id"] == "run-42"
+    assert captured["symbols"] == ["600000.SH"] and captured["namespace"] == "shadow"
+    assert captured["cutoff_at"].isoformat() == "2026-09-20T07:00:00+00:00"

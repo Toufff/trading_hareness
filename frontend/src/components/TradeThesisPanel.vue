@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { usePolling } from '../composables/usePolling';
 import type { WorkbenchAnnotation } from './stock-workbench-control';
-import { benchmarkLabel, getTradeThesisTimeline, listTradeTheses, metricLabelText, rankText, stateLabel, textValue, thesisChartAnnotations, thesisItems } from './trade-thesis';
+import { benchmarkLabel, getTradeThesisTimeline, listTradeTheses, metricLabelText, observationValue, rankText, stateLabel, textValue, thesisChartAnnotations, thesisItems } from './trade-thesis';
 import type { TradeThesisSummary, TradeThesisTimeline } from './trade-thesis';
 
 const props = defineProps<{ symbol: string; asOf?: string | null; marketAsOf?: string | null }>();
@@ -101,7 +101,7 @@ onBeforeUnmount(() => { controller?.abort(); timelineController?.abort(); pollin
         <div class="state-tags"><el-tag>{{ stateLabel(item.thesis_state) }}</el-tag><el-tag type="info">证据 {{ stateLabel(item.evidence_status) }}</el-tag></div>
       </div>
       <dl class="decision-grid">
-        <div><dt>本轮证据变化</dt><dd v-if="item.changes_since_previous?.length"><span v-for="(change, index) in item.changes_since_previous" :key="index">{{ change.label || metricLabelText(change.metric) }}：{{ change.old_value ?? '—' }} → {{ change.new_value ?? '—' }} {{ change.unit || '' }}<small v-if="change.benchmark">基准 {{ benchmarkLabel(change.benchmark) }}</small></span></dd><dd v-else>首次评价，无上轮差异</dd></div>
+        <div><dt>本轮证据变化</dt><dd v-if="item.changes_since_previous?.length"><span v-for="(change, index) in item.changes_since_previous" :key="index">{{ change.label || metricLabelText(change.metric) }}：{{ observationValue(change.old_value, change.metric, change.unit) }} → {{ observationValue(change.new_value, change.metric, change.unit) }}<small v-if="change.benchmark">基准 {{ benchmarkLabel(change.benchmark) }}</small></span></dd><dd v-else>首次评价，无上轮差异</dd></div>
         <div><dt>当前新买</dt><dd>{{ item.new_buy || stateLabel(item.entry_state) }}</dd></div>
         <div><dt>已有持仓</dt><dd>{{ item.holding_action || item.holding_plan_status || '未加载有效持仓计划，不能由研究结论推导动作' }}</dd></div>
         <div><dt>下一验证点</dt><dd><span v-for="(check, index) in item.next_checks ?? []" :key="index">{{ textValue(check) }}</span><span v-if="!item.next_checks?.length">未提供</span></dd></div>
@@ -109,7 +109,7 @@ onBeforeUnmount(() => { controller?.abort(); timelineController?.abort(); pollin
       <div v-if="item.observations?.length" class="facts">
         <h4>当前观察事实</h4>
         <span v-for="(fact, index) in item.observations" :key="fact.evidence_id || index">
-          <b>{{ metricLabelText(fact.metric) }}</b>{{ fact.value ?? '—' }} {{ fact.unit || '' }}<small>基准 {{ benchmarkLabel(fact.benchmark) }}</small>
+          <b>{{ metricLabelText(fact.metric) }}</b>{{ observationValue(fact.value, fact.metric, fact.unit) }}<small>基准 {{ benchmarkLabel(fact.benchmark) }}</small>
         </span>
       </div>
       <div class="rank-grid">

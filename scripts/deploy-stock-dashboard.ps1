@@ -82,6 +82,7 @@ systemctl reload nginx
 rm -f "`${previous_snippet}"
 printf '%s\n' "`${release}"
 "@
+$activate = $activate.Replace("`r`n", "`n")
 $activatedRelease = (& ssh $Server $activate | Select-Object -Last 1)
 if ($LASTEXITCODE -ne 0 -or $activatedRelease -ne $remoteRelease) { throw 'Remote release activation failed' }
 

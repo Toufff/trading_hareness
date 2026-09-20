@@ -164,7 +164,7 @@ function asString(value: unknown): string | undefined {
 export function rankText(rank?: RankScope | null): string {
   if (!rank) return '未提供';
   const placement = rank.rank != null ? `${rank.rank}/${rank.universe_size ?? rank.population ?? '?'}` : '未排名';
-  return [rank.strategy ?? rank.lane, placement, rank.scope].filter(Boolean).join(' · ');
+  return [laneLabel(rank.strategy ?? rank.lane), placement, rank.scope].filter(Boolean).join(' · ');
 }
 
 export function thesisChartAnnotations(items: TradeThesisSummary[]): WorkbenchAnnotation[] {
@@ -202,7 +202,12 @@ function originalStructureLines(item: TradeThesisSummary): ThesisLine[] {
 
 export function textValue(value: string | Record<string, unknown>): string {
   if (typeof value === 'string') return value;
-  return String(value.label ?? value.description ?? value.metric ?? value.condition ?? JSON.stringify(value));
+  const metric = typeof value.metric === 'string' ? value.metric : typeof value.condition === 'string' ? value.condition : '';
+  const checks: Record<string, string> = {
+    close: '价格与原结构的关系待验证',
+    full_entry_scenario_confirmed: '完整入场场景未确认，不构成下单信号',
+  };
+  return String(value.label ?? value.description ?? checks[metric] ?? metricLabelText(metric) ?? JSON.stringify(value));
 }
 
 const STATE_LABELS: Record<string, string> = {
@@ -213,12 +218,36 @@ const STATE_LABELS: Record<string, string> = {
 export const stateLabel = (value?: string | null) => value ? STATE_LABELS[value] ?? value : '未核定';
 
 export function metricLabelText(metric?: string): string {
-  const labels: Record<string, string> = { amount_vs_previous: '成交额 / 前一日', amount_vs_5d_mean: '成交额 / 5日均额', close: '收盘价' };
+  const labels: Record<string, string> = {
+    amount: '成交额', low: '最低价', close: '收盘价', main_net5: '5日主力净额',
+    amount_ratio_previous: '成交额 / 前一交易日', amount_ratio_mean5: '成交额 / 前5日均额',
+    amount_vs_previous: '成交额 / 前一日', amount_vs_5d_mean: '成交额 / 5日均额',
+    full_entry_scenario_confirmed: '完整入场场景',
+  };
   return metric ? labels[metric] ?? metric : '证据';
 }
 export function benchmarkLabel(value?: string | null): string {
-  const labels: Record<string, string> = { previous_day: '前一交易日', five_day_mean: '前5日均额' };
+  const labels: Record<string, string> = {
+    previous_day: '前一交易日', previous_session: '前一交易日', five_day_mean: '前5日均额',
+    previous_5_sessions_mean: '前5个交易日均额', longhuvip_main_net_5_sessions: 'LonghuVIP近5个交易日主力净额',
+  };
   return value ? labels[value] ?? value : '未提供';
+}
+
+export function observationValue(value: unknown, metric?: string, unit?: string | null): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return value == null ? '—' : String(value);
+  if (unit === 'CNY' && ['amount', 'main_net5'].includes(metric ?? '')) return `${(value / 100_000_000).toFixed(2)} 亿元`;
+  if (unit === 'CNY') return `${value.toFixed(2)} 元`;
+  if ((metric ?? '').includes('ratio') || unit === 'ratio' || unit === 'x') return `${value.toFixed(2)} 倍`;
+  return `${value.toFixed(2)}${unit ? ` ${unit}` : ''}`;
+}
+
+function laneLabel(value?: string | null): string | undefined {
+  if (!value) return undefined;
+  const labels: Record<string, string> = {
+    accumulation: '潜伏观察', breakout: '放量启动', rotation: '轮动候选', pullback: '回踩承接', trend: '趋势跟踪', event: '事件驱动',
+  };
+  return labels[value] ?? value;
 }
 
 function holdingNote(value: unknown): string | undefined {

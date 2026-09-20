@@ -20,9 +20,13 @@ from .evidence import parse_time
 from .repository import list_latest
 from .service import capture_evaluate
 
-VERSION = 'thesis-scan-adapter-20260920'
+VERSION = 'thesis-scan-adapter-20260920.1'
 SH = ZoneInfo('Asia/Shanghai')
 MAX_SYMBOLS = 500
+# quant.canonical_bars_daily follows the Tushare-compatible persistence
+# contract: daily ``amount`` is thousand CNY.  Thesis evidence and presentation
+# use CNY, matching money-flow and intraday quote amounts.
+CANONICAL_DAILY_AMOUNT_CNY_MULTIPLIER = 1000
 
 
 def digest(value):
@@ -133,7 +137,9 @@ def market_evidence(symbol, bars, flows, cutoff_at, expected_date, expected_days
         evidence.append(item)
     for benchmark in ('original_support', 'original_reference'):
         emit('close', number(latest.get('close')), 'CNY', benchmark)
-    emit('amount', number(latest.get('amount')), 'CNY', 'current_settled_session')
+    canonical_amount = number(latest.get('amount'))
+    emit('amount', None if canonical_amount is None else canonical_amount * CANONICAL_DAILY_AMOUNT_CNY_MULTIPLIER,
+         'CNY', 'current_settled_session')
     emit('low', number(latest.get('low')), 'CNY', 'current_settled_session')
     amount = number(latest.get('amount'))
     if complete and len(rows) >= 2 and amount is not None and number(rows[-2].get('amount')):

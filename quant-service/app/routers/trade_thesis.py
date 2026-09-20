@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Literal
@@ -95,10 +96,12 @@ def build_trade_thesis_router(deps: TradeThesisDependencies) -> APIRouter:
         # This callback resolves the stored run and its PIT evidence.  The HTTP
         # contract deliberately has no raw evidence field clients could label verified.
         try:
-            result = await deps.run_database(
+            call = functools.partial(
                 deps.evaluate_source_run, deps.database, payload.source_run_id,
                 cutoff_at=payload.cutoff_at, symbols=payload.symbols, namespace=payload.namespace,
-                timeout_seconds=30,
+            )
+            result = await deps.run_database(
+                call, timeout_seconds=30,
             )
         except ThesisNotFound as error:
             raise HTTPException(status_code=404, detail=str(error)) from error

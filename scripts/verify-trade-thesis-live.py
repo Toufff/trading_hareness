@@ -1,4 +1,4 @@
-"""Read-only deployed acceptance: owner, adapter and public projection must agree."""
+"""Deployed acceptance; writes only with explicit --verify-write-idempotency."""
 from __future__ import annotations
 
 import argparse
@@ -8,7 +8,8 @@ from pathlib import Path
 import requests
 
 
-def verify(symbol, public_base, credentials_file=None):
+def verify(symbol, public_base, credentials_file=None, verify_write=False,
+           env_file='G:/StockPlatform/config/runtime.env'):
     session = requests.Session()
     session.trust_env = False
     public = requests.Session()
@@ -48,6 +49,25 @@ def verify(symbol, public_base, credentials_file=None):
                         'evaluation_id': result['evaluation_id'], 'content_hash': result['content_hash'],
                         'source_run_id': result['source_run_id'], 'cutoff_at': result['cutoff_at'],
                         'data_date': result['data_date'], 'observations': len(result['observations'])})
+    if verify_write:
+        from dotenv import dotenv_values
+        key = dotenv_values(env_file).get('QUANT_WRITE_API_KEY')
+        assert key, 'Missing owner write credential'
+        before = results[0]
+        response = session.post('http://127.0.0.1:5681/api/v1/research/theses/evaluate',
+            headers={'X-Quant-Write-Key': key}, json={
+                'source_run_id': before['source_run_id'], 'cutoff_at': before['cutoff_at'],
+                'symbols': [symbol], 'namespace': 'shadow'}, timeout=45)
+        response.raise_for_status()
+        receipt = response.json()
+        assert receipt['status'] == 'completed' and receipt['failed'] == 0, 'Evaluation failed'
+        assert receipt['items'][0]['status'] == 'idempotent', 'Repeated evaluation was not idempotent'
+        after = session.get('http://127.0.0.1:5681/api/v1/research/theses',
+                            params={'symbol': symbol}, timeout=30).json()['items'][0]['evaluation']
+        assert after['evaluation_id'] == before['evaluation_id'], 'Repeated write changed evaluation'
+        assert after['content_hash'] == before['content_hash'], 'Repeated write changed evidence'
+        results.append({'surface': 'owner_write', 'status': response.status_code,
+                        'idempotent': True, 'evaluation_id': after['evaluation_id']})
     return {'status': 'passed', 'symbol': symbol, 'decision_binding': False, 'checks': results}
 
 
@@ -57,8 +77,11 @@ def main():
     parser.add_argument('--public-base', default='https://stock.toufai.top')
     parser.add_argument('--credentials-file', default='C:/Users/brave/.stockbrain/dashboard-credentials.json')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--verify-write-idempotency', action='store_true')
+    parser.add_argument('--env-file', default='G:/StockPlatform/config/runtime.env')
     args = parser.parse_args()
-    receipt = verify(args.symbol, args.public_base, args.credentials_file)
+    receipt = verify(args.symbol, args.public_base, args.credentials_file,
+                     args.verify_write_idempotency, args.env_file)
     text = json.dumps(receipt, ensure_ascii=False, indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

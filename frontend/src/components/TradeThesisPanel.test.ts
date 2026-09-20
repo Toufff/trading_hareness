@@ -48,7 +48,7 @@ describe('TradeThesisPanel', () => {
     expect(wrapper.text()).toContain('行情数据截至 2026-09-18');
     expect(wrapper.text()).toContain('首次评价，无上轮差异');
     expect(wrapper.text()).toContain('成交额 / 前一日');
-    expect(wrapper.text()).toContain('0.81 x');
+    expect(wrapper.text()).toContain('0.81 倍');
     expect(wrapper.text()).toContain('基准 前5日均额');
     expect(wrapper.text()).toContain('受挑战');
     expect(wrapper.text()).toContain('等待确认');

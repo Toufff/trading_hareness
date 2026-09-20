@@ -9,7 +9,7 @@ const directory = process.env.THESIS_VERIFY_OUTPUT || 'G:/StockPlatform/reports/
 const credentials = JSON.parse(await readFile(process.env.THESIS_VERIFY_CREDENTIALS ||
   'C:/Users/brave/.stockbrain/dashboard-credentials.json', 'utf8'));
 await mkdir(directory, { recursive: true });
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, channel: process.env.THESIS_VERIFY_BROWSER || 'msedge' });
 try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 },
     httpCredentials: { username: credentials.username, password: credentials.password, origin: base } });
@@ -28,9 +28,11 @@ try {
   }
   await panel.scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(directory, 'desktop.png'), fullPage: true });
+  await panel.screenshot({ path: resolve(directory, 'panel-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
   await panel.scrollIntoViewIfNeeded();
   await page.screenshot({ path: resolve(directory, 'mobile.png'), fullPage: true });
+  await panel.screenshot({ path: resolve(directory, 'panel-mobile.png') });
   const response = await context.request.get(`${base}/api/research/theses?symbol=${encodeURIComponent(symbol)}`);
   if (!response.ok()) throw new Error(`API ${response.status()}`);
   const body = await response.json();
@@ -39,7 +41,7 @@ try {
   if (errors.length) throw new Error(`Browser errors: ${errors.join(';')}`);
   const receipt = { status: 'passed', url, symbol, evaluation_id: evaluation.evaluation_id,
     content_hash: evaluation.content_hash, source_run_id: evaluation.source_run_id,
-    screenshots: ['desktop.png', 'mobile.png'], page_errors: errors, mocked: false };
+    screenshots: ['desktop.png', 'mobile.png', 'panel-desktop.png', 'panel-mobile.png'], page_errors: errors, mocked: false };
   await writeFile(resolve(directory, 'receipt.json'), JSON.stringify(receipt, null, 2));
   console.log(JSON.stringify(receipt));
 } finally { await browser.close(); }

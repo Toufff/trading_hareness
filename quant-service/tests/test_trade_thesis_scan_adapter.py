@@ -39,6 +39,17 @@ def test_huatian_amount_ratios_keep_previous_and_mean5_baselines_separate():
     assert values["amount_ratio_mean5"]["benchmark"] == "previous_5_sessions_mean"
 
 
+def test_canonical_daily_amount_is_converted_from_thousand_cny_to_cny():
+    # Real accepted canonical shape: 2,412,323.87 thousand CNY =
+    # 2,412,323,870 CNY = 24.1232387亿元, not 0.024亿元.
+    rows = [bar("2026-09-18", 2_412_323.87)]
+    evidence = market_evidence("600988.SH", rows, [], CUTOFF, "2026-09-18", ["2026-09-18"])
+    amount = next(item for item in evidence if item["metric"] == "amount")
+    assert amount["unit"] == "CNY"
+    assert amount["value"] == 2_412_323_870
+    assert round(amount["value"] / 100_000_000, 4) == 24.1232
+
+
 def test_late_current_bar_is_excluded_before_ratios_and_does_not_pollute_hash():
     bars = [bar("2026-09-17", 43.22, available="2026-09-17T15:10:00+08:00"),
             bar("2026-09-18", 35.02, available="2026-09-18T16:01:00+08:00")]
@@ -122,6 +133,7 @@ def test_intraday_observations_are_separate_from_settled_daily_conditions_and_ra
     assert all(row["effective_at"] == "2026-09-18T11:30:00+08:00" for row in evidence)
     assert all(row["minute_end"] == "1130" and row["source"] == "new_intraday" for row in evidence)
     assert not {"close", "amount", "amount_ratio_previous", "amount_ratio_mean5"} & {row["metric"] for row in evidence}
+    assert next(row for row in evidence if row["metric"] == "amount_so_far")["value"] == 18.5e8
 
 
 def test_intraday_observation_without_real_timestamp_or_after_cutoff_is_not_invented():

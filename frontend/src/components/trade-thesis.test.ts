@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { rankText, thesisChartAnnotations, thesisItems } from './trade-thesis';
+import { benchmarkLabel, metricLabelText, observationValue, rankText, textValue, thesisChartAnnotations, thesisItems } from './trade-thesis';
 
 describe('trade thesis presentation model', () => {
   it('projects the nested owner API contract without deriving a holding action', () => {
@@ -30,6 +30,17 @@ describe('trade thesis presentation model', () => {
     expect(annotations.map((item) => item.price)).toEqual([16, 16.38]);
     expect(annotations.every((item) => item.label.includes('参考') && !item.label.includes('止损'))).toBe(true);
     expect(annotations.every((item) => item.detail?.includes('不是持仓硬止损'))).toBe(true);
+  });
+
+  it('presents the actual evaluation vocabulary without leaking raw machine formatting', () => {
+    expect(metricLabelText('amount_ratio_previous')).toBe('成交额 / 前一交易日');
+    expect(benchmarkLabel('previous_5_sessions_mean')).toBe('前5个交易日均额');
+    expect(observationValue(241232387, 'amount', 'CNY')).toBe('2.41 亿元');
+    expect(observationValue(44.26, 'low', 'CNY')).toBe('44.26 元');
+    expect(observationValue(0.8197726284508848, 'amount_ratio_previous', 'ratio')).toBe('0.82 倍');
+    expect(rankText({ lane: 'accumulation', rank: 1, population: 34 })).toContain('潜伏观察');
+    expect(textValue({ metric: 'close' })).toBe('价格与原结构的关系待验证');
+    expect(textValue({ metric: 'full_entry_scenario_confirmed' })).toContain('不构成下单信号');
   });
 
   it('marks changed ranking scopes as non-comparable and only charts explicit server lines', () => {
