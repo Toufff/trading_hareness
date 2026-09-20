@@ -37,7 +37,9 @@ quant-service/tests/test_trade_discipline_*.py
 2. **硬线单条件，软线可多条件。** 硬止损只看一个可评估指标（日收盘或连续 3 分钟收盘），不附加板块/量能条件。多条件只允许出现在减仓/提醒类软线。
 3. **每条线可评估。** 每条线声明 metric（daily_close / minute_close / last / low / high）、op、price 或 pct、confirm（bars、basis）、extra 条件只能取系统能计算的枚举（见下）。系统算不出的条件不许写进去。
 4. **每条线可追溯。** `derivation = {rule_id, inputs: {...}, formula: "...", action_inputs: {...}, action_formula: "..."}`，任何价格都能从 inputs 复算；动作值本身是推导数（trail 的 move_stop_to 目标）时，同样能从 action_inputs 复算。模板按规则**不生成**的线也要留痕：`metrics.omitted_lines = [{kind, reason, inputs}]`，缺席的线必须能区分“规则拒绝”与“模板遗漏”。
-5. **仓位取两个限制中较小者。** 风险上限 `max_shares = floor(equity × risk_per_trade_pct / (reference_price − hard_stop) / 100) × 100`（`risk_per_trade_pct` 来自 `app/trade_discipline/risk_policy.py` 的单只亏损容忍度，不在此处写死数字）；阶段上限 `cap_shares = floor(equity × cap% / reference_price / 100) × 100`，`cap%` 来自数据校准（见“单票仓位上限校准”）；`recommended_shares = min(max_shares, cap_shares)`，`sizing.binding_constraint` 记录起约束的一方。仓位调整线（exposure）按**时间**执行，不看价格。
+5. **仓位取两个限制中较小者，且两者都按本计划允许的最差成交价算。** `sizing_price` 为新买卡的追高上限（`entry_price + 0.5×ATR14`）、持仓卡的参考价（已建仓，没有区间）；`sizing_distance = sizing_price − hard_stop`。风险上限 `max_shares = floor(equity × risk_per_trade_pct / sizing_distance / 100) × 100`（`risk_per_trade_pct` 来自 `app/trade_discipline/risk_policy.py` 的单只亏损容忍度，不在此处写死数字）；阶段上限 `cap_shares = floor(equity × cap% / sizing_price / 100) × 100`，`cap%` 来自数据校准（见“单票仓位上限校准”）；`recommended_shares = min(max_shares, cap_shares)`，`sizing.binding_constraint` 记录起约束的一方。仓位调整线（exposure）按**时间**执行，不看价格。
+
+   按参考价定量是一个真实缺陷，不是理论问题：2026-09-18 三张新买卡承诺单笔 1%，而同一张卡的触发线允许买到追高上限，在那里实际风险是 1.30–1.50%；当时 `sizing_consistent` 也在参考价上复算，所以照样通过。现在质量门额外直接断言区间上沿处 `recommended_shares × sizing_distance / equity ≤ risk_per_trade_pct`——断言公式要交付的**性质**，而不只是公式能复算。
 6. **只上移不下移。** trail 线每日重算，`new = max(prev, candidate)`；任何后续计划的硬止损不得低于前一计划（除非 supersede 记录里给出 `lowered_reason`，且质量门标红）。
 7. **时间线必填。** time_stop（N 个交易日无确认即退出）、valid_until、以及休市 ≥5 个自然日（劳动节/国庆/春节级别；周五休一天+周末的 3 天缺口不算）前的 holiday 线。
 8. **不可变。** 计划、评估、对账、评审全部追加写；改计划 = 新计划 + `supersedes_plan_id`。`plan_key = account:symbol:trading_date:plan_kind:inputs_hash[:12]`，同证据重跑幂等，证据变化（盘中重算）即为新计划，同日也能 supersede。

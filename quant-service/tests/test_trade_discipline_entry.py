@@ -36,6 +36,7 @@ from app.trade_discipline.templates import (
     STOP_PCT_MAX,
     STOP_PCT_MIN,
     build_sizing,
+    chase_cap_price,
     hard_stop_price,
 )
 
@@ -98,6 +99,56 @@ class RealPoolEntryPriceTests(unittest.TestCase):
             worst_risk_pct = max(worst_risk_pct, old.max_shares * real_distance / float(EQUITY) * 100)
         self.assertGreater(worst_distance_pct, 12.0)
         self.assertGreater(worst_risk_pct, 1.5)
+
+    def test_sizing_at_the_reference_leaves_the_top_of_the_buy_zone_over_budget(self):
+        """The second entry-price defect, kept as evidence that it was real.
+
+        The 2026-09-18 cards sized on ``entry_price`` and then permitted a fill
+        up to ``entry + 0.5 x ATR14`` in the same breath. At 1% the three picks
+        risked 0.93-0.96% at the reference and 1.30-1.50% at the cap their own
+        trigger line authorised, and ``sizing_consistent`` recomputed at the
+        reference, so it passed.
+        """
+        worst = 0.0
+        for symbol, name, lane, reference, support, close in POOL_2026_09_18:
+            plan = generate(real_inputs(symbol, name, lane, reference, support))
+            if plan.status != "active":
+                continue
+            reference_sized = build_sizing(
+                stage=plan.stage, equity=EQUITY, risk_per_trade_pct=Decimal("1.0"),
+                reference_price=plan.sizing.reference_price, hard_stop=plan.sizing.hard_stop,
+                current_shares=0, cap_pct=plan.sizing.target_exposure_pct)
+            cap = chase_cap_price(plan.sizing.reference_price, float(plan.metrics["atr14"]))
+            at_cap = (reference_sized.max_shares * float(cap - plan.sizing.hard_stop) / float(EQUITY) * 100)
+            worst = max(worst, at_cap)
+        self.assertGreater(worst, 1.0, "the old sizing must be shown to exceed the budget it promised")
+
+    def test_shares_are_sized_at_the_worst_price_the_card_allows(self):
+        for symbol, name, lane, reference, support, close in POOL_2026_09_18:
+            with self.subTest(symbol=symbol):
+                plan = generate(real_inputs(symbol, name, lane, reference, support))
+                if plan.status != "active":
+                    continue
+                sizing = plan.sizing
+                cap = chase_cap_price(sizing.reference_price, float(plan.metrics["atr14"]))
+                self.assertEqual(sizing.sizing_price, cap)
+                self.assertEqual(sizing.sizing_distance, cap - sizing.hard_stop)
+                # The number the card prints and the number it was sized at are
+                # the same price, so the trigger line cannot authorise a fill
+                # the sizing did not survive.
+                self.assertEqual(Decimal(str(plan.lines_of("chase_cap")[0].price)), cap)
+                at_cap = (Decimal(sizing.recommended_shares) * sizing.sizing_distance
+                          / EQUITY * Decimal("100"))
+                self.assertLessEqual(at_cap, sizing.risk_per_trade_pct)
+
+    def test_a_holding_is_still_sized_at_its_reference(self):
+        # There is no buy zone on a position already held; introducing a
+        # phantom worst fill would shrink a holding's limits for no reason.
+        held = build_sizing(stage="crash_rebound", equity=EQUITY, risk_per_trade_pct=Decimal("5.0"),
+                            reference_price=Decimal("8.41"), hard_stop=Decimal("7.63"),
+                            current_shares=5800, cap_pct=25)
+        self.assertEqual(held.sizing_price, held.reference_price)
+        self.assertEqual(held.sizing_distance, held.stop_distance)
 
     def test_every_pick_is_sized_on_the_close_and_keeps_its_risk_within_the_policy(self):
         for symbol, name, lane, reference, support, close in POOL_2026_09_18:

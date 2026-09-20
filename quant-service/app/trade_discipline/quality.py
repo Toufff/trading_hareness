@@ -291,9 +291,25 @@ def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
     else:
         expected_risk = (sizing.equity * sizing.risk_per_trade_pct / Decimal("100"))
         expected_distance = sizing.reference_price - sizing.hard_stop
-        expected_max = int(floor(sizing.risk_amount / sizing.stop_distance / LOT_SIZE)) * LOT_SIZE
-        cap_shares = lot_shares(sizing.equity, sizing.target_exposure_pct, sizing.reference_price)
+        # Both limits are judged at the worst price the plan permits, not at the
+        # reference. Recomputing at the reference is precisely why this check
+        # passed on cards whose own buy zone allowed 1.5% against a 1% budget.
+        sizing_price = sizing.sizing_price if sizing.sizing_price is not None else sizing.reference_price
+        sizing_distance = (sizing.sizing_distance if sizing.sizing_distance is not None
+                           else sizing_price - sizing.hard_stop)
+        expected_max = int(floor(sizing.risk_amount / sizing_distance / LOT_SIZE)) * LOT_SIZE
+        cap_shares = lot_shares(sizing.equity, sizing.target_exposure_pct, sizing_price)
         problems: list[str] = []
+        if sizing_price < sizing.reference_price:
+            problems.append(f"定量价 {sizing_price} 低于参考价 {sizing.reference_price}")
+        if sizing_distance != sizing_price - sizing.hard_stop:
+            problems.append(f"定量距离 {sizing_distance} 与 定量价−止损 {sizing_price - sizing.hard_stop} 不符")
+        # The property the formulas exist to deliver, asserted directly: a fill
+        # anywhere the card allows must stay inside the tolerance.
+        worst_risk_pct = (Decimal(sizing.recommended_shares) * sizing_distance / sizing.equity * Decimal("100"))
+        if worst_risk_pct > sizing.risk_per_trade_pct + Decimal("0.0001"):
+            problems.append(f"区间上沿 {sizing_price} 处风险 {worst_risk_pct:.3f}% 超过容忍度 "
+                            f"{sizing.risk_per_trade_pct}%")
         if abs(expected_risk - sizing.risk_amount) > Decimal("0.01"):
             problems.append(f"风险预算 {sizing.risk_amount} 与 equity×risk% {expected_risk} 不符")
         if expected_distance != sizing.stop_distance:

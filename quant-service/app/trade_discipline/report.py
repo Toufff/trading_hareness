@@ -25,7 +25,7 @@ from .contracts import ComplianceRecord, DisciplinePlan, Evaluation, FormulaErro
 from .generator import t1_locked_shares_for
 from .quality import CHECK_IDS, DERIVATION_TOLERANCE
 
-REPORT_VERSION = "trade-discipline-report-v5"
+REPORT_VERSION = "trade-discipline-report-v6"
 RESEARCH_NOTICE = "研究用途，仅作人工决策依据：系统不连券商、不下单、不改持仓。"
 DASH = "—"
 
@@ -268,6 +268,8 @@ def sizing_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
         {"key": "hard_stop", "label": "硬止损", "value": _fmt(sizing.hard_stop)},
         {"key": "stop_distance", "label": "止损距离",
          "value": f"{_fmt(sizing.stop_distance)}（{_fmt(distance_pct)}%）"},
+        {"key": "sizing_price", "label": "定量价（本计划允许的最差成交价）",
+         "value": _sizing_price_text(sizing)},
         {"key": "max_shares", "label": "风险上限 max_shares", "value": _fmt(sizing.max_shares)},
         {"key": "target_exposure_pct", "label": "阶段仓位上限（校准）", "value": _pct(sizing.target_exposure_pct)},
         {"key": "cap_basis", "label": "上限依据",
@@ -311,6 +313,20 @@ def recommendation_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
              "note": str(conditions.get("note") or "研究条件，非系统线"),
              "decision_id": conditions.get("decision_id"), "as_of_date": conditions.get("as_of_date")}
             for key, label in labels if conditions.get(key)]
+
+
+def _sizing_price_text(sizing: Any) -> str:
+    """The price both share limits were computed at, and why it may differ.
+
+    On a new buy this is the chase cap, not the entry reference: a budget that
+    only holds at one point of a band the same card authorises is not a budget.
+    """
+    price = sizing.sizing_price
+    if price is None or price == sizing.reference_price:
+        return f"{_fmt(sizing.reference_price)}（同参考价）"
+    distance = sizing.sizing_distance if sizing.sizing_distance is not None else price - sizing.hard_stop
+    return (f"{_fmt(price)}（买入区间上沿=追高上限；止损距离 {_fmt(distance)}，"
+            f"股数按此价计算，区间内任何价位买入都不超容忍度）")
 
 
 def _risk_policy_text(policy: dict[str, Any] | None) -> str:

@@ -183,6 +183,13 @@ class Sizing(BaseModel):
     # before 2026-09-20 still load; before it existed, a default nobody had
     # chosen was indistinguishable from a decision the user had made.
     risk_policy: dict[str, Any] | None = None
+    # The highest price this plan permits a fill at, and its distance to the
+    # hard stop. Both share counts are computed here, not at reference_price,
+    # so the tolerance holds everywhere inside the buy zone the card itself
+    # authorises. Equal to reference_price on a holding. Optional so plans
+    # written before 2026-09-20 still load.
+    sizing_price: Decimal | None = Field(default=None, gt=0)
+    sizing_distance: Decimal | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def validate_stop(self) -> "Sizing":

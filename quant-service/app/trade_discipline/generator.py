@@ -27,13 +27,14 @@ from .templates import (
     DEFAULT_RISK_PER_TRADE_PCT,
     TEMPLATE_VERSION,
     build_sizing,
+    chase_cap_price,
     build_template,
     closure_within,
     hard_stop_price,
     new_buy_entry,
 )
 
-GENERATOR_VERSION = "trade-discipline-generator-v4"
+GENERATOR_VERSION = "trade-discipline-generator-v5"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 VALIDITY_TRADING_DAYS = 5
 SESSION_CLOSE = time(15, 0)
@@ -199,10 +200,17 @@ def generate(inputs: GenerationInputs) -> DisciplinePlan:
     exposure_basis = {**lookup(calibration, stage, board),
                       "board_source": (inputs.board or {}).get("source", "symbol_rule_no_st_evidence")}
     holiday_basis = lookup(calibration, stage, board, holiday=True) if calibration.get("holiday_cells") else None
+    # The worst price this plan will permit: the chase cap on a new buy, the
+    # reference on a holding that is already bought. Sizing at the reference
+    # while authorising a fill higher up is how a card can promise one number
+    # and allow another (2026-09-18: 1% promised, 1.5% reachable).
+    worst_fill_price = (chase_cap_price(reference_price, float(metrics["atr14"]))
+                        if entry is not None else reference_price)
     sizing = build_sizing(stage=stage, equity=inputs.equity, risk_per_trade_pct=inputs.risk_per_trade_pct,
                           reference_price=reference_price, hard_stop=hard_stop,
                           current_shares=position.quantity if position else 0,
-                          cap_pct=exposure_basis["cap_pct"], exposure_basis=exposure_basis)
+                          cap_pct=exposure_basis["cap_pct"], exposure_basis=exposure_basis,
+                          worst_fill_price=worst_fill_price)
 
     valid_until, valid_until_limit = _validity(inputs.calendar, inputs.as_of)
     calendar_payload = {

@@ -790,7 +790,7 @@ class ShenqiFixtureTests(unittest.TestCase):
         self.assertEqual(plan.stage, "crash_rebound")
         self.assertEqual(plan.trading_date, date(2026, 9, 18))
         self.assertEqual(plan.valid_until.date(), date(2026, 9, 25))
-        self.assertEqual(plan.template_key, "crash_rebound@trade-discipline-templates-v5")
+        self.assertEqual(plan.template_key, "crash_rebound@trade-discipline-templates-v6")
         self.assertEqual(plan.position.quantity, 5800)
         self.assertEqual(plan.metrics["t1_locked_shares"], 0)
         self.assertEqual(len(plan.inputs_hash), 64)

@@ -33,7 +33,7 @@ from ..short_term_lanes.risk import MIN_VOLATILITY_BUFFER_PCT, volatility_buffer
 from .contracts import Action, Confirm, Derivation, Line, Sizing, eval_expression
 from .risk_policy import PER_NAME_LOSS_TOLERANCE_PCT, policy_record
 
-TEMPLATE_VERSION = "trade-discipline-templates-v5"
+TEMPLATE_VERSION = "trade-discipline-templates-v6"
 
 # The per-name exposure cap is no longer a hand-picked stage table: it is read from the calibration
 # artifact (exposure_calibration.json, see exposure_calibration.py) for the plan's stage x board, and
@@ -284,19 +284,32 @@ def trail_stop_price(*, anchor_price: Decimal, floor_price: Decimal,
 
 def build_sizing(*, stage: str, equity: Decimal, risk_per_trade_pct: Decimal, reference_price: Decimal,
                  hard_stop: Decimal, current_shares: int, cap_pct: Decimal | int | float,
-                 exposure_basis: dict[str, Any] | None = None) -> Sizing:
+                 exposure_basis: dict[str, Any] | None = None,
+                 worst_fill_price: Decimal | None = None) -> Sizing:
     """``recommended = min(risk-based max_shares, cap-based shares)``.
 
-    * risk: ``max_shares = floor(equity x risk% / stop_distance / 100) x 100`` (the stop-loss
+    * risk: ``max_shares = floor(equity x risk% / sizing_distance / 100) x 100`` (the stop-loss
       lens of the per-name tolerance, risk_policy.py);
-    * cap: ``floor(equity x cap% / reference / 100) x 100`` where ``cap%`` is the calibrated
+    * cap: ``floor(equity x cap% / sizing_price / 100) x 100`` where ``cap%`` is the calibrated
       extreme-loss cap of the plan's stage x board (``exposure_basis`` says which cell).
+
+    ``worst_fill_price`` is the highest price the plan permits a fill at -- the
+    chase cap on a new buy, and the reference price on a holding, which is
+    already bought.  Both limits are computed there rather than at the
+    reference, because a budget that only holds at one point of a price band
+    the same card authorises is not a budget: the 2026-09-18 new-buy cards
+    promised 1% of equity and allowed up to 1.5% at the top of their own buy
+    zone, and ``sizing_consistent`` recomputed at the reference so it passed.
     """
     target_pct = Decimal(str(cap_pct))
     stop_distance = reference_price - hard_stop
+    sizing_price = worst_fill_price if worst_fill_price is not None else reference_price
+    if sizing_price < reference_price:
+        raise ValueError("worst_fill_price must not sit below reference_price")
+    sizing_distance = sizing_price - hard_stop
     risk_amount = (equity * risk_per_trade_pct / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    max_shares = int(floor(risk_amount / stop_distance / LOT_SIZE)) * LOT_SIZE
-    exposure_shares = lot_shares(equity, target_pct, reference_price)
+    max_shares = int(floor(risk_amount / sizing_distance / LOT_SIZE)) * LOT_SIZE
+    exposure_shares = lot_shares(equity, target_pct, sizing_price)
     current_exposure_pct = (Decimal(current_shares) * reference_price / equity * Decimal("100")).quantize(
         Decimal("0.01"), rounding=ROUND_HALF_UP)
     current_risk_pct = (Decimal(current_shares) * stop_distance / equity * Decimal("100")).quantize(
@@ -311,6 +324,7 @@ def build_sizing(*, stage: str, equity: Decimal, risk_per_trade_pct: Decimal, re
         cap_shares=exposure_shares, binding_constraint="risk" if max_shares <= exposure_shares else "cap",
         exposure_basis=exposure_basis,
         risk_policy=policy_record(risk_per_trade_pct),
+        sizing_price=sizing_price, sizing_distance=sizing_distance,
     )
 
 
@@ -665,6 +679,18 @@ def new_buy_entry(metrics: dict[str, Any], lane: dict[str, Any] | None, *,
     }
 
 
+def chase_cap_price(entry_price: Decimal, atr14: float) -> Decimal:
+    """The highest price the plan will let a new buy fill at.
+
+    Defined once because two callers need it and they must not disagree: the
+    line that prints it, and the sizing that has to survive it. Sizing at
+    ``entry_price`` while allowing a fill up to here is how the 2026-09-18
+    cards promised 1% and permitted 1.5% -- 冰轮环境 300 shares risked 0.927%
+    at 41.52 and 1.297% at the 42.74 the same card allowed.
+    """
+    return _money(entry_price + Decimal(str(CHASE_CAP_ATR_MULTIPLE * atr14)))
+
+
 def _new_buy_lines(stage: str, metrics: dict[str, Any], sizing: Sizing, lane: dict[str, Any],
                    sector_available: bool, entry: dict[str, Any]) -> list[Line]:
     support_raw = lane.get("support")
@@ -672,7 +698,7 @@ def _new_buy_lines(stage: str, metrics: dict[str, Any], sizing: Sizing, lane: di
     support_source = "lane.support" if support_raw is not None else "metrics.recent_low"
     entry_price = _money(entry["entry_price"])
     atr14 = float(metrics["atr14"])
-    cap_price = _money(entry_price + Decimal(str(CHASE_CAP_ATR_MULTIPLE * atr14)))
+    cap_price = chase_cap_price(entry_price, atr14)
     hard_stop = float(sizing.hard_stop)
     lane_reference = float(entry["lane_reference"])
     stop_gap_floor = hard_stop + TRIGGER_STOP_GAP_ATR * atr14
@@ -722,7 +748,7 @@ def _new_buy_lines(stage: str, metrics: dict[str, Any], sizing: Sizing, lane: di
 
 
 __all__ = [
-    "ANCHOR_TEXT", "ATR_MAX_MULTIPLE", "CHASE_CAP_ATR_MULTIPLE", "ATR_MIN_MULTIPLE", "ATR_TARGET_MULTIPLE", "CONFIRM_REFERENCE",
+    "ANCHOR_TEXT", "ATR_MAX_MULTIPLE", "CHASE_CAP_ATR_MULTIPLE", "ATR_MIN_MULTIPLE", "chase_cap_price", "ATR_TARGET_MULTIPLE", "CONFIRM_REFERENCE",
     "CRASH_FALLBACK_LABEL", "DEFAULT_RISK_PER_TRADE_PCT", "DEFAULT_TIME_STOP_DAYS", "EXTRA_CONDITION_TEXT",
     "HARD_STOP_TERMS", "HOLIDAY_CLOSURE_DAYS", "LOT_SIZE",
     "MIN_BUFFER_PCT", "NO_ADD_REFERENCE", "PRIORITY", "SOFT_STOP_SEPARATION_ATR", "STAGE_STRUCTURE_NAME",
