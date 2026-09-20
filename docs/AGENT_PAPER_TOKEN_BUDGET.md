@@ -1,6 +1,6 @@
 # 模拟盘 token / 额度预算
 
-面向后续接手模拟盘运维的人或 agent（预期是 Codex）。记录 `agent_paper` 两条 backend 的实际消耗结构、已做的削减、**已否决的方案及其理由**，以及踩过的坑。
+面向后续接手模拟盘运维的人或 agent（预期是 Codex）。记录 `agent_paper` 三条订阅 backend 的实际消耗结构、已做的削减、**已否决的方案及其理由**，以及踩过的坑。
 
 数据基准：2026-09-18（`agent-claude-opus` 46 轮、`agent-dsh` 34 轮 + 5 轮失败），2026-09-20 复核。
 
@@ -8,7 +8,7 @@
 
 ## 0. 先读这一条：订阅 ≠ API 计费
 
-`claude_cli` backend 用的凭据是 `C:\Users\brave\.claude\.credentials.json`，也就是**机主 Claude 订阅的 OAuth**。`runtime.env` 里没有任何 `ANTHROPIC_*` 键，环境里也没有 `ANTHROPIC_API_KEY`。
+`claude_cli` backend 用机主 Claude 订阅的 OAuth；`codex_cli` 用本机 `codex login` 已保存的 ChatGPT 登录。两者都不是 API backend。Codex 传输还会主动从子进程环境删除 `OPENAI_API_KEY` 和 `CODEX_API_KEY`，防止计划任务意外转为 API 计费。
 
 由此有三个必须记住的推论：
 
@@ -69,8 +69,11 @@ DSH 同日 34 轮里 21 轮空单（62%）—— 它因为响应慢（单轮 100
 | A | `decision_minutes` 5 → 15 | `scripts/windows/run-agent-paper-trader.ps1` 新增 `-DecisionMinutes` 参数 | 46 轮 → 约 16 轮，**约 −65%** |
 | B | 清空 `AGENT_PAPER_TOOLS` | 同上 | 实测 −10% 固定前缀，整轮约 −2% |
 | C | 连续失败熔断 | `agent_paper/runner.py` | 额度耗尽后不再无限空转 |
+| D | 完整明细只保留持仓、挂单、人工计划；纯 focus 最多 5 只且压缩分钟/日线 | `agent_paper/context.py` | 用历史同轮数据回放：Opus context −7.3%；DSH −16.9%，DSH 的 `detail_symbols` −37.3% |
+| E | DSH 用 `AGENTS.md` 首轮注入完整上下文，并用专用 patch 隐藏 coding/web/subagent 等工具 schema | `model.py`、`dsh-paper.patch.yml` | 不再读文件或因截断重读；最小实测由历史 100–200s 降至 **3.9s** |
+| F | 每轮把总字符数、分块字符数、明细级别和 backend token/字符用量写进 `usage` | `runner.py`、`model.py` | 后续能直接按轮量化优化，不再凭感觉 |
 
-**A 必须对两条 backend 同时生效。** 整件事的意义是 Opus 与 DSH 的同期对照，只改一边会让实验失去可比性。
+**A 必须对三条 backend 同时生效。** 现在比较的是 Opus、DSH 与 Codex，同一交易日必须共用 15 分钟决策间隔，否则收益和 token 对照都失真。
 
 ### 熔断的语义（`runner.run_day`）
 
@@ -83,14 +86,22 @@ DSH 同日 34 轮里 21 轮空单（62%）—— 它因为响应慢（单轮 100
 
 **恢复方式：** 手动重启任务即可，重启会重新武装熔断（再给 3 次机会）。这是有意设计 —— 额度恢复后能自愈。
 
+### 新增 Codex 对照账户（2026-09-20）
+
+- account：`agent-codex-sol`
+- backend / 模型：`codex_cli` / `gpt-5.6-sol`，reasoning effort=`high`
+- 认证：`codex login status` 回读为 ChatGPT 登录；最小真实调用 10.2s 成功、空订单
+- 基线：`citics-primary` 最新 `verified_exact` 快照（2026-09-18 15:10），起始权益 **98,996.26**；四只持仓数量、成本和可卖数量已读回一致
+- 注意：券商快照的显示现金 125.72 与 `总资产 - 持仓市值` 204.26 相差 78.54。现有基线规则优先保证总资产可对账，因此模拟账本现金是 **204.26**，并在 baseline 同时保留两个原值
+- 计划任务：`trading-hareness-agent-paper-trader-codex`，每日 09:20 启动、每 10 分钟容灾重触发、模型决策间隔仍为 15 分钟；首次运行 2026-09-21 09:20
+
 ---
 
 ## 3. 待办，按性价比排序
 
-1. **砍 `detail_symbols`**（占 43%，6 只 × 约 2,300 字符）。还没看过里面装了什么，动手前先量。和其他所有杠杆是乘法关系。
-2. **把日内不变的块挪进 `--system-prompt`** —— 见 §5，是个**未验证的假设**，但验证很便宜。
-3. **失败汇总推送**：盘后扫 `agent_paper_decisions` 里 `status != 'decided'` 的行，有就推。现在这些只落 jsonl 和库，**没有任何告警** —— 9/18 DSH 丢了 5 轮（含 09:30 开盘第一轮），没人知道。
-4. **`agent_paper` 完全没有风控**：`rules.py` 只有 `MAX_ORDERS_PER_DECISION=10` 和 `MAX_FOCUS_SYMBOLS=15`。没有止损、回撤上限、单票仓位上限、单日亏损上限。与 token 无关，但接手运维前应当知道。
+1. **把日内不变的块挪进 `--system-prompt`** —— 见 §5，是个**未验证的假设**，但验证很便宜。先用新增的 `usage.context_metrics.parts_chars` 跑一天再决定。
+2. **失败汇总推送**：盘后扫 `agent_paper_decisions` 里 `status != 'decided'` 的行，有就推。现在这些只落 jsonl 和库，**没有任何告警** —— 9/18 DSH 丢了 5 轮（含 09:30 开盘第一轮），没人知道。
+3. **`agent_paper` 仍没有组合级风控**：`rules.py` 只有 `MAX_ORDERS_PER_DECISION=10` 和 `MAX_FOCUS_SYMBOLS=5`。没有止损、回撤上限、单票仓位上限、单日亏损上限。与 token 无关，但接手运维前应当知道。
 
 ---
 
@@ -142,6 +153,12 @@ DSH 同日 34 轮里 21 轮空单（62%）—— 它因为响应慢（单轮 100
 
 模拟盘跑 `claude -p` 用的就是机主自己那份订阅凭据。任何提高轮次或上下文的改动，都会直接挤占机主本人的可用额度。
 
+Codex 同理使用机主 ChatGPT/Codex 额度。`codex_cli` 必须继续带 `--ephemeral --ignore-user-config --ignore-rules --sandbox read-only`，并使用临时目录；不要让项目规则、历史会话或写工具混进每轮请求。
+
+### DSH 的上下文不是普通输入文件
+
+DSH 的 `agent-instructions` 会在首轮自动注入工作目录下的 `AGENTS.md`。模拟盘有意利用这个机制一次性注入规则、schema 和 context；不要改回 `instructions.md + context.json` 再让模型调用文件工具读取。`DSH_CONTEXT_MAX_BYTES=60000` 是对 65,536-byte 注入上限的安全余量，超过时应 fail closed，而不是静默截断。
+
 ### 模拟盘整条链跑在开发 checkout
 
 计划任务直接指向 `F:\AIWorkflow\trading_hareness\scripts\windows\run-agent-paper-trader.ps1`，它再调同一 checkout 的 `.venv` 和 `quant-service/app/agent_paper/`。**改动不需要发布，下一轮即生效** —— 但宿主 exe 来自 `G:\StockPlatform\current`，所以改完必须提交。
@@ -155,8 +172,19 @@ DSH 同日 34 轮里 21 轮空单（62%）—— 它因为响应慢（单轮 100
 pwsh -NoProfile -File F:\AIWorkflow\trading_hareness\scripts\windows\run-agent-paper-trader.ps1 `
   -Command model-check -Backend claude_cli
 
-# 单元测试（含熔断）
-F:\AIWorkflow\trading_hareness\.venv\Scripts\python.exe -m pytest quant-service/tests/test_agent_paper.py -q
+# Codex / DSH 探针
+pwsh -NoProfile -File F:\AIWorkflow\trading_hareness\scripts\windows\run-agent-paper-trader.ps1 `
+  -Command model-check -Backend codex_cli -Model gpt-5.6-sol -ReasoningEffort high
+pwsh -NoProfile -File F:\AIWorkflow\trading_hareness\scripts\windows\run-agent-paper-trader.ps1 `
+  -Command model-check -Backend dsh
+
+# 单元测试（必须从 quant-service 运行，含熔断、Codex、DSH）
+Set-Location F:\AIWorkflow\trading_hareness\quant-service
+..\.venv\Scripts\python.exe -m pytest tests/test_agent_paper.py -q
+
+# 计划任务契约（只临时注册/回读，不调用模型）
+Set-Location F:\AIWorkflow\trading_hareness
+pwsh -NoProfile -File scripts\windows\tests\test-agent-paper-task.ps1
 ```
 
 按日统计实际消耗与空单率：
