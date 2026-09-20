@@ -1250,7 +1250,11 @@ try {
     [void](Set-StockReleaseState -PlatformRoot $planSandbox -State @{
         active_release = 'rel-003'; previous_release = 'rel-002'; tunnel_release = 'rel-000'
         tunnel_ssh_target_sha256 = (Get-StockTunnelSshTargetHash -PlatformRoot $planSandbox) })
-    $unretained = Resolve-StockTunnelReinstallPlan @resolveArgs
+    # RetainCount is pinned here rather than inherited: this asserts that the
+    # reason is reachable at all, which must not silently stop being true the
+    # next time the production default is tuned (it went 3 -> 6 on 2026-09-20,
+    # precisely to make this fire less often).
+    $unretained = Resolve-StockTunnelReinstallPlan @resolveArgs -RetainCount 2
     Assert-True ($unretained.tunnel_release_state -eq 'not_retained') `
         'a tunnel release outside the {active, previous} + fill keep set must be reported as not retained; deriving that set from release-state.json''s own tunnel_release makes the check unreachable'
     Assert-True ($unretained.reasons -contains 'tunnel_release_not_retained') `

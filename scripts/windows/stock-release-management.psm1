@@ -230,7 +230,7 @@ function Get-StockReleaseRetentionPlan {
         [string]$ActiveRelease = '',
         [string]$PreviousRelease = '',
         [string]$TunnelRelease = '',
-        [int]$RetainCount = 3
+        [int]$RetainCount = 6
     )
     $keep = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $known = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -277,7 +277,7 @@ function Get-StockReleaseRetentionState {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$PlatformRoot,
-        [int]$RetainCount = 3
+        [int]$RetainCount = 6
     )
     $state = Get-StockReleaseState -PlatformRoot $PlatformRoot
     $names = @(Get-StockReleaseDirectoryName -PlatformRoot $PlatformRoot)
@@ -296,7 +296,7 @@ function Remove-ExpiredStockReleases {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$PlatformRoot,
-        [int]$RetainCount = 3
+        [int]$RetainCount = 6
     )
     $layout = Get-StockReleaseLayout -PlatformRoot $PlatformRoot
     if (-not (Test-Path -LiteralPath $layout.ReleasesRoot -PathType Container)) { return @() }
@@ -1358,7 +1358,7 @@ function Resolve-StockTunnelReinstallPlan {
         # unknown. It cannot produce a 'skip' on its own -- an unknown
         # tunnel_release is itself a reinstall reason.
         [string]$CurrentRuntimeRoot = '',
-        [int]$RetainCount = 3,
+        [int]$RetainCount = 6,
         [string]$TaskName = 'trading-hareness-shared-peer-tunnels',
         [string]$RuntimeService = 'shared-peer-tunnels',
         # The second supervised tunnel, installed by the same fan-out. Its task,

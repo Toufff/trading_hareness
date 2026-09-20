@@ -2,7 +2,17 @@
 param(
     [string]$SourceRoot = '',
     [string]$PlatformRoot = 'G:\StockPlatform',
-    [int]$RetainCount = 3,
+    # Six, not three, because of what the tunnel reinstall gate does with it.
+    # The gate deliberately excludes the tunnel's own pin from the retained set
+    # it compares against, so a tunnel that keeps being spared falls out of the
+    # window after RetainCount-1 publishes and is reinstalled -- costing the
+    # external peer 5-7 s of dropped database connections for no change to any
+    # file the tunnel executes. At three that fired on the third publish of a
+    # working day; today it fired on the fifth. Staleness is already bounded by
+    # the independent tunnel_files_changed hash over the parsed execution
+    # chain, so this window is belt-and-braces, and a release is ~425 MB
+    # against 8.8 TB free on G:.
+    [int]$RetainCount = 6,
     [switch]$AllowDirty,
     [switch]$SkipTests,
     # Logon type for the two scheduled tasks re-registered on activation.
