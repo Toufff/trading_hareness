@@ -189,12 +189,21 @@ try {
 # The verification must classify every check it runs, or a new check would
 # silently attribute to nothing and fall through to 'unknown' forever.
 $verifyShared = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $windowsScripts) 'shared-peer\verify-shared-runtime.ps1') -Raw -Encoding UTF8
-foreach ($ownedCheck in 'local_database', 'local_api', 'licensed_quote', 'reverse_tunnel_ports', 'remote_owner_api') {
+foreach ($ownedCheck in 'local_database', 'local_api', 'licensed_quote', 'peer_contract', 'reverse_tunnel_ports', 'remote_owner_api') {
     Assert-True ($verifyShared -match "$ownedCheck\s*=\s*'owner'") "verify-shared-runtime.ps1 must classify $ownedCheck as an owner-side check"
 }
 foreach ($peerCheck in 'remote_peer_api', 'complete_stock_gateway', 'peer_api') {
     Assert-True ($verifyShared -match "$peerCheck\s*=\s*'peer'") "verify-shared-runtime.ps1 must classify $peerCheck as a peer-side check: our tunnel cannot repair it"
 }
+# /health is green whenever the process is up, which is exactly what it means
+# and exactly why it cannot speak for the peer's two endpoints. A release
+# shipped a contract endpoint returning 500 on 2026-09-20 with /health green.
+Assert-True ($verifyShared -match '/api/v1/peer/contract') `
+    'verify-shared-runtime.ps1 must exercise the peer contract endpoint, not just /health'
+Assert-True ($verifyShared -match '/api/v1/peer/errors') `
+    'verify-shared-runtime.ps1 must exercise the peer error feed, the peer''s only view of what it broke'
+Assert-True ($verifyShared -match 'no derived_rules') `
+    'the contract check must assert the document has content, not merely that the route answered'
 Assert-True ($verifyShared -match 'Write-VerificationDiagnostics -Status ''failed''') `
     'verify-shared-runtime.ps1 must write its per-check outcomes on failure, not only on success'
 Assert-True ($publishSource -match "sharedAttribution\.side -eq 'peer'") `

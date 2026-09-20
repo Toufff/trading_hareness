@@ -32,6 +32,7 @@ $script:CheckOwners = [ordered]@{
     local_database          = 'owner'
     local_api               = 'owner'
     licensed_quote          = 'owner'
+    peer_contract           = 'owner'
     reverse_tunnel_ports    = 'owner'
     remote_owner_api        = 'owner'
     remote_peer_api         = 'peer'
@@ -133,6 +134,21 @@ try {
     if (@($quote.rows).Count -ne 1) { throw 'Licensed read gateway did not return the requested quote' }
     Set-CheckResult -Name 'licensed_quote' -State 'ok' -Detail (@($quote.rows).Count)
 
+    # The peer's whole lifeline: the contract it starts against and the feed
+    # that tells it what it broke. /health cannot speak for either -- on
+    # 2026-09-20 a release shipped a contract endpoint that returned 500 to
+    # every call while /health stayed green, and it was found by hand. The
+    # contract introspects the live cluster, so a 200 here also means the
+    # catalog reads behind it still work.
+    $currentCheck = 'peer_contract'
+    $contract = Invoke-RestMethod -Uri "$ApiBase/api/v1/peer/contract" -Headers $headers -TimeoutSec 30
+    if (-not $contract.contract_version) { throw 'Peer contract returned no contract_version' }
+    if (-not $contract.objects) { throw 'Peer contract published no objects' }
+    if (-not $contract.derived_rules) { throw 'Peer contract published no derived_rules' }
+    $errorFeed = Invoke-RestMethod -Uri "$ApiBase/api/v1/peer/errors" -Headers $headers -TimeoutSec 60
+    if ($null -eq $errorFeed.groups) { throw 'Peer error feed returned no groups field' }
+    Set-CheckResult -Name 'peer_contract' -State 'ok' -Detail $contract.contract_version
+
     # The tunnel's own liveness: these loopback listeners exist on lightServer
     # only while our tunnel processes are connected. This is the check a tunnel
     # reinstall actually repairs.
@@ -179,6 +195,8 @@ try {
         local_database = $databaseIdentity
         local_api = $health.status
         licensed_quote_rows = @($quote.rows).Count
+        peer_contract_version = $contract.contract_version
+        peer_error_groups = @($errorFeed.groups).Count
         reverse_tunnel_ports = [int]$remotePorts
         remote_owner_api = [int]$remoteOwnerCode
         remote_peer_api = [int]$remotePeerCode
