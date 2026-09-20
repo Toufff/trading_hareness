@@ -88,12 +88,57 @@ message 里的数字会被归一化（字符偏移、pid、行数几乎都是位
 
 `attribution_available_since` 字段记录归属开始生效的时刻；早于该时刻的日志行没有角色信息，不会出现在任何人的回流里。
 
+## 发布公告通道（2026-09-20 新增）
+
+### 为什么不能用 HTTP 公告
+
+2026-09-20 实测三次发布：`quant-api`（peer 用的 HTTP 面）每次停 **9.3 秒**；共享隧道三次里有两次重启，停 **5–7 秒**；**PostgreSQL 一次都没重启**。
+
+十五秒对一个知道"对方在发布"的消费方是无感的，对一个不知道的就是一次静默丢失。而这件事没法用 HTTP 告诉它——**HTTP 正是那个会消失的东西**。数据库不会，所以公告写在表里。
+
+### quant.owner_deploy_events
+
+| 列 | 含义 |
+|---|---|
+| `deploy_id` | 把一次发布的各个阶段串起来 |
+| `phase` | `starting` / `completed` / `failed` |
+| `release_id`、`git_sha` | 这次发的是什么 |
+| `surfaces` | `{"http_api": true, "shared_tunnel": false}`——本次会中断哪些通路 |
+| `expected_seconds` | 由 surfaces 推出的预计窗口 |
+| `recorded_at` | 时点 |
+
+时序是关键：`starting` 在**隧道去留已经决定之后、第一次 stop 之前**写入。晚一步，消费方可能已经断线，读不到了；早一步，就不知道数据库通路会不会一起断。
+
+表是只追加的。一次被杀掉的发布会留下一个没有终结行的 `starting`——那是事实，不是缺口。
+
+`SELECT` 显式授予 `stock_peer`。它今天通过 `quant_app` 成员身份也能读到，但一个依赖隐式继承的公告通道，正是那种会悄无声息失效的东西。
+
+### 公告不许成为发布失败的原因
+
+`record()` 返回结果对象而不抛异常，解释器缺失或数据库连不上都只警告、发布继续。**一个被自己的记账卡住的发布，比一个没公告的发布更糟。**
+
+### 发布窗口
+
+两个窗口对发布关闭，在测试和构建**之前**检查（四分钟之后才拒绝，只会训练操作者条件反射地加 `-IgnoreDeployWindow`）：
+
+- **交易时段** 09:15–15:10（交易所交易日）。提前到 09:15 是因为集合竞价已经在跑；延后到 15:10 是因为盘后采集还在收尾。
+- **协作方批量窗口** 06:30–08:00（工作日），他的每日回补在这个槽位。
+
+`-IgnoreDeployWindow` 可以覆盖——必须盘中上的修复是真实存在的——但覆盖是显式的，拒绝信息里会写明踩的是哪个窗口。
+
+交易所日历对没有核验过的年份拒绝猜测；在这里那会让所有发布都被挡住，所以未核验年份退回"工作日视为交易日"并在理由里说明：**这个门只会往关的方向猜，不会往开的方向猜。**
+
 ## 代码位置
 
 - `quant-service/app/peer_contract.py` —— 契约内容与实时自省
 - `quant-service/app/peer_error_feed.py` —— 日志解析与聚合
 - `quant-service/app/routers/peer_support.py` —— 两个接口与鉴权
-- `quant-service/tests/test_peer_support.py` —— 27 个用例，日志样本取自 2026-09-20 生产日志
+- `quant-service/app/owner_deploy_events.py` —— 发布公告的写入与读回
+- `quant-service/app/deploy_window.py` —— 发布窗口策略
+- `quant-service/migrations/versions/20260920_0107_owner_deploy_events.py` —— 公告表
+- `scripts/deploy-announce.py` —— 发布脚本调用的 CLI（`check-window` / `announce` / `latest`）
+- `quant-service/tests/test_peer_support.py`、`tests/test_deploy_window_and_announcements.py` —— 用例，日志样本取自 2026-09-20 生产日志
+- `scripts/windows/tests/test-stock-release-safety.ps1` —— 公告时序与窗口门的静态守卫
 - 配置：`QUANT_POSTGRES_LOG_DIR`（默认 `G:/StockPlatform/logs`）、`QUANT_PEER_CONSUMER_ROLES`（默认 `stock_peer`）
 
 ## 改契约的规矩
