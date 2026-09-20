@@ -8,10 +8,10 @@
 <style>
 :root{--bg:#f6f7f9;--panel:#fff;--fg:#1c1e21;--mute:#6b7280;--line:#e5e7eb;--soft:#f1f3f6;--accent:#2563eb;
   --up:#d92d20;--down:#15803d;--warn:#b45309;--warn-bg:#fef3c7;--ok-bg:#e8f5ec;--bad-bg:#fdecea;--info-bg:#e8effd;--code:#f4f5f7;
-  --me:#7c3aed;--me-bg:#f1e9fe;--a1:#2563eb;--a1-bg:#e8effd;--a2:#0f766e;--a2-bg:#e3f5f2}
+  --me:#7c3aed;--me-bg:#f1e9fe;--a1:#2563eb;--a1-bg:#e8effd;--a2:#0f766e;--a2-bg:#e3f5f2;--a3:#c2410c;--a3-bg:#ffedd5}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1115;--panel:#171a21;--fg:#e6e8eb;--mute:#9aa3ae;--line:#2a2f38;
   --soft:#1e222a;--accent:#6ea0ff;--up:#ff6b5e;--down:#4ade80;--warn:#fbbf24;--warn-bg:#3a2f12;--ok-bg:#15291c;--bad-bg:#3a1a18;--info-bg:#18233a;--code:#12151b;
-  --me:#c4b5fd;--me-bg:#2a2140;--a1:#8ab4ff;--a1-bg:#16233c;--a2:#5eead4;--a2-bg:#10302c}}
+  --me:#c4b5fd;--me-bg:#2a2140;--a1:#8ab4ff;--a1-bg:#16233c;--a2:#5eead4;--a2-bg:#10302c;--a3:#fdba74;--a3-bg:#3b2415}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
 header{position:sticky;top:0;z-index:6;background:var(--panel);border-bottom:1px solid var(--line)}
@@ -26,7 +26,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 main{max-width:1280px;margin:0 auto;padding:14px 16px 60px}
 .score{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin-bottom:14px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
-.card.me{border-left:3px solid var(--me)}.card.a1{border-left:3px solid var(--a1)}.card.a2{border-left:3px solid var(--a2)}
+.card.me{border-left:3px solid var(--me)}.card.a1{border-left:3px solid var(--a1)}.card.a2{border-left:3px solid var(--a2)}.card.a3{border-left:3px solid var(--a3)}
 .card h3{margin:0 0 2px;font-size:13px;font-weight:600;display:flex;justify-content:space-between;gap:6px;align-items:baseline}
 .big{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.25}
 .pos{color:var(--up)}.neg{color:var(--down)}
@@ -39,7 +39,7 @@ tbody tr:hover{background:var(--soft)}
 .panel>h2{font-size:14px;margin:0;padding:9px 12px;border-bottom:1px solid var(--line);background:var(--soft);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .scroll{overflow-x:auto}
 .who{display:inline-block;font-size:12px;border-radius:6px;padding:0 7px;line-height:20px;font-weight:600;white-space:nowrap}
-.who.me{background:var(--me-bg);color:var(--me)}.who.a1{background:var(--a1-bg);color:var(--a1)}.who.a2{background:var(--a2-bg);color:var(--a2)}
+.who.me{background:var(--me-bg);color:var(--me)}.who.a1{background:var(--a1-bg);color:var(--a1)}.who.a2{background:var(--a2-bg);color:var(--a2)}.who.a3{background:var(--a3-bg);color:var(--a3)}
 .badge{display:inline-block;font-size:12px;border-radius:999px;padding:0 8px;line-height:20px;white-space:nowrap}
 .b-ok{background:var(--ok-bg);color:var(--down)}.b-bad{background:var(--bad-bg);color:var(--up)}
 .b-warn{background:var(--warn-bg);color:var(--warn)}.b-info{background:var(--info-bg);color:var(--accent)}
@@ -108,7 +108,9 @@ const int=v=>v==null?'—':Number(v).toLocaleString('zh-CN');
 const pct=v=>v==null?'—':(v>0?'+':'')+Number(v).toFixed(2)+'%';
 const sign=v=>v==null?'':v>0?'pos':v<0?'neg':'';
 const hm=s=>s?new Date(s).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'—';
-const NAMES={'agent-claude-opus':'Claude Opus','agent-dsh':'DSH'};
+const NAMES={'agent-claude-opus':'Claude Opus','agent-dsh':'DSH','agent-codex-sol':'Codex 5.6 Sol'};
+const AGENT_CLASSES=['a1','a2','a3'];
+const agentClass=i=>AGENT_CLASSES[i%AGENT_CLASSES.length];
 const SIDE={buy:'买入',sell:'卖出',cancel:'撤单'};
 const STATUS={filled:['成交','b-ok'],partially_filled:['部分成交','b-warn'],open:['挂单中','b-info'],rejected:['被拒','b-bad'],cancelled:['已撤','b-warn'],expired:['收盘未成','b-warn']};
 const REASONS={no_live_quote:'无实时行情',not_board_lot:'不是整百股',limit_not_marketable:'限价未到可成交价',no_ask_depth:'卖盘无量',no_bid_depth:'买盘无量',no_depth:'盘口无量',
@@ -123,7 +125,7 @@ async function api(path){const r=await fetch(path,{cache:'no-store'});const j=aw
 
 function actors(d){
   const list=[{key:'me',label:'你（实盘）',cls:'me'}];
-  d.accounts.forEach((a,i)=>list.push({key:a.account_key,label:NAMES[a.account_key]||a.account_key,cls:i?'a2':'a1',account:a}));
+  d.accounts.forEach((a,i)=>list.push({key:a.account_key,label:NAMES[a.account_key]||a.account_key,cls:agentClass(i),account:a}));
   return list;
 }
 function whoTag(a){return `<span class="who ${a.cls}">${esc(a.label)}</span>`;}
@@ -152,17 +154,19 @@ function scoreboard(d){
       :`收盘同步后可比${daily.human_fills_imported_through?`；成交已导入至 ${esc(daily.human_fills_imported_through)}`:''}${missing?`；缺 ${missing} 只收盘价`:''}`}</div>
     <div class="muted small">今日成交 ${(d.human_trades?.orders||[]).length} 笔 · 复盘记录 ${Object.keys(d.human_trades?.notes||{}).length+(d.human_trades?.journal||[]).length} 条</div>
     <div class="muted small">今日=对比${h?.previous_equity?'前一交易日收盘':'（缺前一日基准）'}；累计=对比 ${esc((d.accounts[0]||{}).start_date||'')} 对照起点</div></div>`];
-  for(const a of d.accounts){
-    const x=a.daily||{},nav=a.navs.at(-1);
+  for(const [i,a] of d.accounts.entries()){
+    const x=a.daily||{},nav=a.navs.at(-1),shownNav=nav||a.latest_nav;
+    const started=!a.start_date||d.day>=a.start_date;
     const filled=a.orders.filter(o=>['filled','partially_filled'].includes(o.status)).length;
     const failed=a.decisions.filter(z=>z.status!=='decided').length;
     const total=x.agent_return_pct;
     const today=dayReturn(nav?nav.equity:null,x.previous_agent_equity);
-    cards.push(`<div class="card ${a===d.accounts[0]?'a1':'a2'}"><h3>${esc(NAMES[a.account_key]||a.account_key)}<span class="muted small">${esc(a.model)}</span></h3>
-      <div class="big">${nav?num(nav.equity):'—'}</div>
+    cards.push(`<div class="card ${agentClass(i)}"><h3>${esc(NAMES[a.account_key]||a.account_key)}<span class="muted small">${esc(a.model)}</span></h3>
+      <div class="big">${num(started?(shownNav?shownNav.equity:a.initial_equity):null)}</div>
       <div><span class="${sign(today)}">今日 ${pct(today)}</span>
         <span class="muted small">· 累计 <span class="${sign(total)}">${pct(total)}</span></span></div>
-      <div class="muted small">决策 ${a.decisions.length-failed}/${a.decisions.length} 轮${failed?`（失败 ${failed}）`:''} · 成交 ${filled} 笔 · 现金 ${int(nav?nav.cash:a.cash)}</div>
+      <div class="muted small">决策 ${a.decisions.length-failed}/${a.decisions.length} 轮${failed?`（失败 ${failed}）`:''} · 成交 ${filled} 笔 · 现金 ${int(started?(shownNav?shownNav.cash:a.cash):null)}</div>
+      ${started?(nav?'':a.latest_nav?`<div class="muted small">尚无当日净值，显示 ${esc(a.latest_nav.trading_date)} 最近净值</div>`:'<div class="muted small">尚无盘中净值，当前显示初始权益</div>'):`<div class="muted small">账户于 ${esc(a.start_date)} 启动</div>`}
       ${sparkline(a.navs)}</div>`);
   }
   $('#score').innerHTML=cards.join('');
@@ -289,16 +293,18 @@ function lanesView(d){
         `<circle cx="${cx}" cy="${cy}" r="3.4" fill="${fill}" stroke="${failed?'var(--warn)':'var(--accent)'}" stroke-width="1.2"/></g>`;
     }).join('');
     const count=rows.filter(e=>e.actor===a.key).length;
-    const colour=a.cls==='me'?'var(--me)':a.cls==='a1'?'var(--a1)':'var(--a2)';
-    return `<g><rect x="${L}" y="${TOP+i*LANE}" width="${W-L-R}" height="${LANE}" fill="${i%2?'var(--soft)':'transparent'}"/>`+
+    const colour=`var(--${a.cls})`,laneBg=`var(--${a.cls}-bg)`;
+    const pending=a.account&&d.day<a.account.start_date?'账户尚未启动':'等待首轮决策';
+    const empty=rounds.length===0&&count===0?`<text x="${x(12)}" y="${y}" font-size="11" fill="${colour}" opacity=".78">${pending}</text>`:'';
+    return `<g><rect x="${L}" y="${TOP+i*LANE}" width="${W-L-R}" height="${LANE}" fill="${laneBg}" opacity=".26"/>`+
       `<line x1="${L}" y1="${TOP+i*LANE+LANE}" x2="${W-R}" y2="${TOP+i*LANE+LANE}" stroke="var(--line)"/>`+
       `<text x="8" y="${y}" font-size="12" font-weight="600" fill="${colour}">${esc(a.label)}</text>`+
-      `<text x="8" y="${y+16}" font-size="10" fill="var(--mute)">${count} 笔${rounds.length?` · ${rounds.length} 轮`:''}</text>${roundMarks}${marks}</g>`;
+      `<text x="8" y="${y+16}" font-size="10" fill="var(--mute)">${count} 笔${rounds.length?` · ${rounds.length} 轮`:''}</text>${empty}${roundMarks}${marks}</g>`;
   }).join('');
-  return `<div class="panel"><h2><span>按时间看三方的动作</span>
+  return `<div class="panel"><h2><span>按时间看${all.length}方的动作</span>
       <span class="muted small">▲ 买入 ▼ 卖出（实心=已成交） · 底部圆点=决策轮次（蓝实心有操作、空心不操作、黄色失败） · 黄虚线=午休 · 点标记看理由，点自己的成交可写复盘</span></h2>
     <div class="scroll" style="padding:8px 0 0">
-      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;min-width:780px" role="img" aria-label="三方操作时间轴">
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;min-width:780px" role="img" aria-label="${all.length}方操作时间轴">
         ${ticks.join('')}${lunch}${laneRows}
       </svg></div>
     <div id="laneDetail" style="padding:10px 12px;border-top:1px solid var(--line)">${laneSelected!=null&&rows[laneSelected]?laneDetailHtml(laneSelected):`<span class="muted small">${rows.length?'点任一标记，看这笔的完整理由。':'这一天没有操作记录。'}</span>`}</div></div>`;
@@ -401,9 +407,9 @@ function symbolsView(d){
     return `<tr><td class="nowrap"><strong>${esc(names[symbol]||'')}</strong><div class="muted small">${esc(symbol)}</div></td>
       <td class="nowrap">${marks[symbol]?num(marks[symbol],3):'—'}</td>${tds}</tr>`;
   }).join('');
-  return `<div class="panel"><h2><span>同一只票，三方各自怎么做的</span><span class="muted small">价格为最近一次记账价</span></h2>
+  return `<div class="panel"><h2><span>同一只票，${all.length}方各自怎么做的</span><span class="muted small">价格为最近一次记账价</span></h2>
     <div class="scroll"><table><thead><tr><th>标的</th><th>记账价</th>${head}</tr></thead>
-    <tbody>${body||'<tr><td colspan="5" class="empty">这一天没有成交。</td></tr>'}</tbody></table></div></div>`;
+    <tbody>${body||`<tr><td colspan="${2+all.length}" class="empty">这一天没有成交。</td></tr>`}</tbody></table></div></div>`;
 }
 
 /* ---------- rounds ---------- */
@@ -456,8 +462,10 @@ function round(z){
 /* ---------- positions & nav ---------- */
 function bookView(d){
   const blocks=d.accounts.map(a=>{
-    const marks=Object.fromEntries(((a.navs.at(-1)||{}).positions||[]).map(p=>[p.symbol,p.price]));
-    const pos=(a.positions||[]).filter(p=>Number(p.quantity)>0);
+    const started=!a.start_date||d.day>=a.start_date;
+    const nav=a.navs.at(-1),shownNav=nav||a.latest_nav;
+    const marks=Object.fromEntries(((shownNav||{}).positions||[]).map(p=>[p.symbol,p.price]));
+    const pos=started?(a.positions||[]).filter(p=>Number(p.quantity)>0):[];
     const rows=pos.map(p=>{
       const price=Number(p.price||marks[p.symbol]||0),cost=Number(p.average_cost??p.avg_cost??0);
       const ret=price&&cost?(price/cost-1)*100:null;
@@ -465,13 +473,13 @@ function bookView(d){
         <td>${int(p.quantity)}</td><td>${int(p.sellable_quantity??0)}</td><td>${num(cost,3)}</td><td>${price?num(price,3):'—'}</td>
         <td class="${sign(ret)}">${pct(ret)}</td></tr>`;
     }).join('');
-    const nav=a.navs.at(-1);
+    const baselineRow=nav?'':started?shownNav?`<tr><td class="nowrap">${esc(shownNav.trading_date)} ${hm(shownNav.as_of)}</td><td>${num(shownNav.equity)}</td><td>${int(shownNav.cash)}</td><td>${int(shownNav.market_value)}</td><td class="muted small">${esc(shownNav.price_basis)}</td></tr>`:`<tr><td class="nowrap">初始基线</td><td>${num(a.initial_equity)}</td><td>${int(a.cash)}</td><td>${int(Number(a.initial_equity)-Number(a.cash))}</td><td class="muted small">baseline</td></tr>`:`<tr><td colspan="5" class="empty">账户于 ${esc(a.start_date)} 启动</td></tr>`;
     return `<div class="panel"><h2><span>${esc(NAMES[a.account_key]||a.account_key)} 持仓</span>
-      <span class="muted small">${nav?`${hm(nav.as_of)} 记账 · 现金 ${int(nav.cash)} · 市值 ${int(nav.market_value)}`:''}</span></h2>
+      <span class="muted small">${nav?`${hm(nav.as_of)} 记账 · 现金 ${int(nav.cash)} · 市值 ${int(nav.market_value)}`:started?shownNav?`截至 ${esc(shownNav.trading_date)} ${hm(shownNav.as_of)} 记账 · 现金 ${int(shownNav.cash)} · 市值 ${int(shownNav.market_value)}`:`尚无盘中记账 · 初始权益 ${num(a.initial_equity)}`:`账户尚未启动`}</span></h2>
       <div class="scroll"><table><thead><tr><th>标的</th><th>数量</th><th>可卖</th><th>成本</th><th>记账价</th><th>浮动</th></tr></thead>
       <tbody>${rows||'<tr><td colspan="6" class="empty">空仓</td></tr>'}</tbody></table></div>
       <div class="scroll"><table><thead><tr><th>净值时点</th><th>净值</th><th>现金</th><th>市值</th><th>计价</th></tr></thead><tbody>
-        ${a.navs.slice().reverse().slice(0,8).map(n=>`<tr><td class="nowrap">${hm(n.as_of)}</td><td>${num(n.equity)}</td><td>${int(n.cash)}</td><td>${int(n.market_value)}</td><td class="muted small">${esc(n.price_basis)}</td></tr>`).join('')}
+        ${a.navs.slice().reverse().slice(0,8).map(n=>`<tr><td class="nowrap">${hm(n.as_of)}</td><td>${num(n.equity)}</td><td>${int(n.cash)}</td><td>${int(n.market_value)}</td><td class="muted small">${esc(n.price_basis)}</td></tr>`).join('')||baselineRow}
       </tbody></table></div></div>`;
   }).join('');
   const mine=(d.human_trades?.journal||[]).map(j=>`<div class="panel"><h2><span>${esc(j.title)}</span><span class="muted small">你的复盘记录</span></h2>

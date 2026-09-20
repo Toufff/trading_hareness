@@ -47,7 +47,9 @@ def _default(value: Any) -> Any:
 def days(connection: Any) -> list[str]:
     rows = connection.execute(
         """SELECT trading_date FROM quant.agent_paper_decisions
-           UNION SELECT trading_date FROM quant.agent_paper_nav ORDER BY 1 DESC""").fetchall()
+           UNION SELECT trading_date FROM quant.agent_paper_nav
+           UNION SELECT start_date FROM quant.agent_paper_accounts
+           ORDER BY 1 DESC""").fetchall()
     return [row["trading_date"].isoformat() for row in rows]
 
 
@@ -83,6 +85,12 @@ def day_view(connection: Any, day: date) -> dict[str, Any]:
         navs = [dict(row) for row in connection.execute(
             """SELECT as_of,equity,cash,market_value,price_basis,positions FROM quant.agent_paper_nav
                 WHERE account_key=%s AND trading_date=%s ORDER BY as_of""", (key, day)).fetchall()]
+        latest_nav_row = connection.execute(
+            """SELECT trading_date,as_of,equity,cash,market_value,price_basis,positions
+                 FROM quant.agent_paper_nav
+                WHERE account_key=%s AND trading_date<=%s
+                ORDER BY trading_date DESC,as_of DESC LIMIT 1""", (key, day)).fetchone()
+        latest_nav = dict(latest_nav_row) if latest_nav_row else None
         positions = report["positions"] if day == latest_day else (navs[-1]["positions"] if navs else [])
         orders = report["orders"]
         by_decision: dict[str, list[dict[str, Any]]] = {}
@@ -114,7 +122,7 @@ def day_view(connection: Any, day: date) -> dict[str, Any]:
         result["accounts"].append({
             "account_key": key, "model": report["model"], "start_date": report["start_date"],
             "initial_equity": report["initial_equity"], "cash": report["cash"], "daily": daily, "navs": navs,
-            "positions": positions, "orders": orders, "decisions": decisions,
+            "latest_nav": latest_nav, "positions": positions, "orders": orders, "decisions": decisions,
         })
     result["human_trades"] = human_view(connection, day)
     return result

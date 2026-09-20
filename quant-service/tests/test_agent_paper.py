@@ -294,6 +294,28 @@ class AgentPaperModelTests(unittest.TestCase):
             parse_cli_result("not json")
 
 
+class AgentPaperReviewPageTests(unittest.TestCase):
+    def test_multi_account_page_has_codex_identity_initial_equity_and_dynamic_lanes(self):
+        page = (Path(__file__).resolve().parents[2] / "scripts/agent-paper-review/index.html").read_text(encoding="utf-8")
+        self.assertIn("'agent-codex-sol':'Codex 5.6 Sol'", page)
+        self.assertIn("--a3:#c2410c", page)
+        self.assertIn("num(started?(shownNav?shownNav.equity:a.initial_equity):null)", page)
+        self.assertIn("尚无当日净值，显示 ${esc(a.latest_nav.trading_date)} 最近净值", page)
+        self.assertIn("尚无盘中净值，当前显示初始权益", page)
+        self.assertIn("等待首轮决策", page)
+        self.assertIn("账户尚未启动", page)
+        self.assertIn("按时间看${all.length}方的动作", page)
+        self.assertIn("同一只票，${all.length}方各自怎么做的", page)
+        self.assertIn('colspan="${2+all.length}"', page)
+        self.assertNotIn("cls:i?'a2':'a1'", page)
+
+    def test_review_day_list_includes_account_start_dates(self):
+        path = Path(__file__).resolve().parents[2] / "scripts/serve-agent-paper-review.py"
+        source = path.read_text(encoding="utf-8")
+        self.assertIn("UNION SELECT start_date FROM quant.agent_paper_accounts", source)
+        self.assertIn("WHERE account_key=%s AND trading_date<=%s", source)
+
+
 class _StubRunner:
     """Only the surface ``run_day`` touches; every model call fails unless ``fail_until`` says otherwise."""
 
