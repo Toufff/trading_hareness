@@ -42,6 +42,7 @@ def main():
         (args.output_dir / (name + '.json')).write_text(json.dumps(result, ensure_ascii=False, default=str, indent=2), encoding='utf-8')
         if args.command != 'show':
             (args.output_dir / (name + '.md')).write_text('\n'.join(sections(result)), encoding='utf-8')
+    db.close()
     print(json.dumps(result, ensure_ascii=False, default=str))
     return 0 if result['status'] in ('completed', 'ok') else 2
 

@@ -225,7 +225,7 @@ def evaluate_source_run(database, source_run_id=None, cutoff_at=None, symbols=No
     from .rules import evaluate_thesis
     source = load_source(database, source_run_id)
     now = datetime.now(timezone.utc)
-    cutoff = parse_time(cutoff_at, 'cutoff_at') if cutoff_at else now
+    cutoff = parse_time(str(cutoff_at), 'cutoff_at') if cutoff_at else now
     if cutoff > now or parse_time(source['available_at'], 'source_available_at') > cutoff:
         raise ValueError('source_not_available_at_cutoff')
     if namespace not in ('capture', 'shadow', 'advisory'):
