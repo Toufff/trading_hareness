@@ -60,6 +60,10 @@ class RuntimeState:
     last_fetch: datetime | None = None
     last_deepseek: datetime | None = None
     last_codex: datetime | None = None
+    last_quote_attempt_at: datetime | None = None
+    last_quote_success_at: datetime | None = None
+    last_quotes_received: int = 0
+    last_quotes_fresh: int = 0
     discipline_watermark: datetime | None = None
     pending_events: list[dict[str, Any]] = field(default_factory=list)
     pending_since: datetime | None = None
@@ -224,6 +228,11 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
             rows = await deps.fetch_quotes([item.symbol for item in scope.items], max_symbols=len(scope.items))
             fresh = [row for row in rows if _fresh(row, current)]
             state.last_fetch = current
+            state.last_quote_attempt_at = current
+            state.last_quotes_received = len(rows)
+            state.last_quotes_fresh = len(fresh)
+            if fresh:
+                state.last_quote_success_at = current
             if fresh:
                 await deps.run_database(lambda: _persist_rows(deps.database, current.astimezone(timezone.utc), fresh))
             source_by_symbol = {item.symbol: item.source for item in scope.items}
@@ -286,6 +295,16 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
             state.pending_since = None
         elif event_due:
             state.pending_since = current  # bounded retry; never busy-loop a paid model
+    # ``state`` is intentionally ``idle`` on the four local ticks between
+    # five-second acquisitions.  Keep the last acquisition evidence separate
+    # so an external opening guard can prove that real quotes are flowing
+    # without racing the one tick whose transient state is ``healthy``.
+    outcome["quote_evidence"] = {
+        "attempt_at": state.last_quote_attempt_at.isoformat() if state.last_quote_attempt_at else None,
+        "success_at": state.last_quote_success_at.isoformat() if state.last_quote_success_at else None,
+        "received": state.last_quotes_received,
+        "fresh": state.last_quotes_fresh,
+    }
     await deps.run_database(lambda: _status(
         deps.database, state=outcome["state"], account_key=key, now=current,
         scope_size=len(scope.items), details=outcome))

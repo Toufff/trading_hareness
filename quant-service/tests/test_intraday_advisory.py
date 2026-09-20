@@ -105,6 +105,46 @@ async def _deterministic_delivery_precedes_bundled_codex_analysis() -> None:
     assert calls[0] == "alert" and calls[-1] == "codex"
 
 
+def test_quote_success_evidence_survives_intermediate_idle_ticks() -> None:
+    asyncio.run(_quote_success_evidence_survives_intermediate_idle_ticks())
+
+
+async def _quote_success_evidence_survives_intermediate_idle_ticks() -> None:
+    scope = AdvisoryScope("citics-primary", (ScopeItem("600000.SH", "浦发银行", "recommendation", {}),),
+                          "snapshot", "decision", ())
+    state = RuntimeState(last_deepseek=MONDAY, last_codex=MONDAY)
+    statuses: list[dict] = []
+
+    async def run_database(call):
+        return call()
+
+    fetch = AsyncMock(return_value=[{
+        "ts_code": "600000.SH", "name": "浦发银行", "price": 10.1, "pre_close": 10,
+        "cumulative_amount": 1_000_000, "cumulative_volume_lot": 1_000,
+        "outer_volume_lot": 550, "inner_volume_lot": 450,
+        "trade_time": MONDAY.strftime("%Y%m%d%H%M%S"),
+    }])
+    deps = IntradayAdvisoryDependencies(
+        database=object(), run_database=run_database, fetch_quotes=fetch,
+        post_text=AsyncMock(return_value={"status": "sent"}),
+        post_card=AsyncMock(return_value={"status": "sent"}),
+        session_open=AsyncMock(return_value=(True, "open")), now=lambda: MONDAY,
+        account_key=lambda: "citics-primary",
+    )
+    with patch("app.intraday_advisory.runtime._scope", return_value=scope), \
+         patch("app.intraday_advisory.runtime._persist_rows", return_value=1), \
+         patch("app.intraday_advisory.runtime._discipline", return_value=[]), \
+         patch("app.intraday_advisory.runtime._status",
+               side_effect=lambda _database, **values: statuses.append(values)):
+        first = await run_intraday_advisory_cycle(deps, state, now=MONDAY)
+        second = await run_intraday_advisory_cycle(deps, state, now=MONDAY + timedelta(seconds=1))
+    assert fetch.await_count == 1
+    assert first["quote_evidence"]["fresh"] == 1
+    assert second["state"] == "idle"
+    assert second["quote_evidence"] == first["quote_evidence"]
+    assert statuses[-1]["details"]["quote_evidence"]["success_at"] == MONDAY.isoformat()
+
+
 def test_feishu_env_manager_exposes_advisory_cadence(tmp_path: Path) -> None:
     helper = Path(__file__).parents[2] / "deploy" / "intraday-edge" / "manage_feishu_env.py"
     env_file = tmp_path / "runtime.env"

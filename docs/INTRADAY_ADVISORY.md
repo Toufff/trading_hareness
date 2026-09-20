@@ -54,3 +54,15 @@ pwsh G:\StockPlatform\current\scripts\windows\test-intraday-advisory-model.ps1 -
 - DeepSeek/Codex 失败会留下失败记录，不撤销或延迟已生成的确定性告警。
 - 未配置飞书时任务不启动，不空耗模型额度。
 - 所有子进程使用隐藏窗口；Codex 只读沙箱，移除 API Key 环境变量，使用现有订阅登录。
+
+## 开盘双阶段验收
+
+生产发布会注册隐藏任务 `trading-hareness-intraday-opening-guard`：
+
+- 09:25 检查 SSE 交易日历、API/数据库、后台租约、飞书配置、纪律与盘中建议循环、非空监控范围；
+- 09:32 额外要求 20 秒内取得真实且新鲜的盘中行情。行情成功证据跨 1 秒空闲 tick 保留，避免抽样恰好落在两次 5 秒采集之间而误报；
+- 首检失败只重启一次 `trading-hareness-dashboard-runtime`，等待 20 秒后复检，不循环重启；
+- 最终结果通过真实飞书卡片发送。绿色表示当日链路已验收，红色明确列出失败项；休市日静默跳过；
+- 所有运行都追加无凭据的 JSONL 到 `G:\StockPlatform\logs\runtime\intraday-opening-guard.jsonl`。
+
+该任务只验证研究与提醒链路，不连接券商、不下单。
