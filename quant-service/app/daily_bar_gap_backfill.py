@@ -67,7 +67,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +77,7 @@ from .longhu_adjustment_factors import (
     MANUAL_METHOD_PREFIX, PROVIDER_PREFERENCE_SQL, ex_reference_price, parse_corporate_action,
 )
 from .longhu_vendor_source import longhu_security_id, normalize_stock_symbol, parse_daily_kline_payload
+from .market_rules import a_share_limit_prices
 from .request_models import DailyBar
 from .tushare_normalization import promotable_adjustment_factor, promotable_factor_evidence_sql_param
 
@@ -94,7 +95,6 @@ AVAILABILITY_BASIS = "vendor_fetched_at_backfill_v1"
 CAPABILITY = "daily_bar"
 
 TICK = Decimal("0.01")
-BEIJING_LIMIT_RATIO = Decimal("0.30")
 #: A session is written only when at least this share of the symbols the
 #: vendor traded that day produced a valid bar.
 MIN_SESSION_COVERAGE = 0.95
@@ -281,16 +281,6 @@ def is_beijing(symbol: str) -> bool:
     return symbol.endswith(".BJ")
 
 
-def beijing_limit_prices(pre_close: Decimal) -> tuple[Decimal, Decimal]:
-    """Beijing's +-30% band with the exchange's inward rounding.
-
-    Up is floored and down is ceiled to the tick (matched tushare on all 3,458
-    Beijing boundary rows; half-up rounding matched only about half).
-    """
-    return ((pre_close * (1 + BEIJING_LIMIT_RATIO)).quantize(TICK, rounding=ROUND_FLOOR),
-            (pre_close * (1 - BEIJING_LIMIT_RATIO)).quantize(TICK, rounding=ROUND_CEILING))
-
-
 def limit_prices(symbol: str, pre_close: Decimal, up_px: Any, down_px: Any) -> tuple[
         Decimal | None, Decimal | None, str]:
     """``(limit_up, limit_down, basis)`` for one stock session.
@@ -302,7 +292,7 @@ def limit_prices(symbol: str, pre_close: Decimal, up_px: Any, down_px: Any) -> t
     if not up or not down or up <= 0 or down <= 0:
         return None, None, "vendor_reports_no_limit"
     if is_beijing(symbol):
-        limit_up, limit_down = beijing_limit_prices(pre_close)
+        limit_up, limit_down = a_share_limit_prices(symbol, pre_close)
         return limit_up, limit_down, "beijing_pre_close_inward_rounding"
     return up.quantize(TICK), down.quantize(TICK), "vendor_l2history_up_down_px"
 

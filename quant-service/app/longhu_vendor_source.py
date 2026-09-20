@@ -733,13 +733,28 @@ class LonghuVendorSource:
         }
         return by_symbol, health
 
-    def fetch_full_market_evidence(self, trade_date: date) -> dict[str, Any]:
+    def fetch_full_market_evidence(
+        self, trade_date: date, extra_symbols: Iterable[str] = (),
+    ) -> dict[str, Any]:
+        """One session's plate cross-section plus dated licensed OHLC.
+
+        ``extra_symbols`` is the authoritative equity universe.  The industry
+        plates are the vendor's *classification*, not its listing roster, and
+        using them as the request roster silently bounded the market to
+        whatever the vendor had classified: on 2026-09-18 that was 90 of 345
+        BSE names, so the other 255 were never requested at all.  The licensed
+        per-symbol kline answers for them normally -- this only asks.
+        """
         catalog = self.industry_plate_catalog()
         vendor, vendor_health = self.full_market_vendor_rows(
             trade_date, plate_ids=[row["sector_key"] for row in catalog],
         )
         from .longhu_settled_quotes import fetch as fetch_settled_quotes
-        quotes, quote_health = fetch_settled_quotes(self, vendor, trade_date, workers=8)
+        off_plate = [symbol for symbol in dict.fromkeys(extra_symbols) if symbol not in vendor]
+        requested = list(vendor) + off_plate
+        quotes, quote_health = fetch_settled_quotes(self, requested, trade_date, workers=8)
+        quote_health["plate_symbols"] = len(vendor)
+        quote_health["off_plate_requested"] = len(off_plate)
         members_by_plate: dict[str, list[dict[str, Any]]] = {}
         for row in vendor.values():
             members_by_plate.setdefault(str(row["plate_id"]), []).append(row)

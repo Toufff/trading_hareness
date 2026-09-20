@@ -62,6 +62,49 @@ class LonghuMarketSyncTests(unittest.TestCase):
         by_symbol = {row["ts_code"]: row for row in controls["stk_limit"]}
         self.assertEqual(by_symbol["920819.BJ"]["up_limit"], "13.00")
 
+    def test_beijing_limits_are_one_tick_narrower_than_half_up(self):
+        # The close lane used to round every board half-up.  On 2026-09-18
+        # that put 17 of 29 Beijing up-limits and 14 down-limits a tick wide,
+        # and the limit price is what decides whether a bar is sealed.
+        daily = [{"ts_code": "920002.BJ", "trade_date": "20260918",
+                  "pre_close": "49.92", "name": "示例北交所"}]
+        row = build_control_rows(daily)["stk_limit"][0]
+        self.assertEqual((row["up_limit"], row["down_limit"]), ("64.89", "34.95"))
+        self.assertEqual(row["derivation"], "preclose_times_board_limit_ratio_with_board_rounding")
+
+    def test_a_symbol_with_a_quote_but_no_plate_row_still_gets_a_bar(self):
+        # The vendor's industry plates are its classification, not its listing
+        # roster: on 2026-09-18 they carried 90 of 345 BSE names, and tying the
+        # bar to plate membership had held the whole exchange at ~29 bars a day
+        # since 2026-09-04.
+        vendor = {"600664.SH": {"symbol": "600664.SH", "name": "哈药股份", "close": 9.49,
+                                "main_net": 1, "raw": {}}}
+        quotes = [
+            {"ts_code": "600664.SH", "trade_date": "20260901", "close": 9.49, "open": 9.3,
+             "high": 9.58, "low": 9.18, "pre_close": 9.29, "vol": 1, "amount": 1000},
+            {"ts_code": "920002.BJ", "trade_date": "20260901", "close": 50.02, "open": 49.7,
+             "high": 50.71, "low": 49.66, "pre_close": 49.92, "vol": 2, "amount": 2000},
+        ]
+        result = merge_cross_section(date(2026, 9, 1), vendor, quotes)
+
+        self.assertEqual([row["ts_code"] for row in result.daily_rows], ["600664.SH", "920002.BJ"])
+        self.assertEqual(result.off_plate_rows, 1)
+        # Price only: absence of vendor evidence is not published as a measurement.
+        self.assertEqual([row["ts_code"] for row in result.fundamental_rows], ["600664.SH"])
+        self.assertEqual([row["symbol"] for row in result.flow_rows], ["600664.SH"])
+        off_plate = [row for row in result.quote_rows if row["ts_code"] == "920002.BJ"][0]
+        self.assertEqual(off_plate["coverage_note"], "off_plate_price_only_no_vendor_cross_section")
+        # The coverage gate keeps measuring exactly what it measured before.
+        self.assertEqual(result.coverage, 1.0)
+
+    def test_an_off_plate_quote_cannot_be_mistaken_for_a_close_conflict(self):
+        quotes = [{"ts_code": "920002.BJ", "trade_date": "20260901", "close": 50.02, "open": 49.7,
+                   "high": 50.71, "low": 49.66, "pre_close": 49.92, "vol": 2, "amount": 2000}]
+        result = merge_cross_section(date(2026, 9, 1), {}, quotes)
+        self.assertEqual(result.close_conflicts, ())
+        self.assertEqual(len(result.daily_rows), 1)
+        self.assertEqual(result.coverage, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, time, timezone
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
 #: Absolute yuan tolerance a price may sit below/above a limit and still count
 #: as sealed.  Kept absolute (not a relative ``*0.999``/``*1.001`` factor) so a
 #: 100-yuan name is not given ten ticks of slack.
 LIMIT_TOLERANCE = 0.005
+
+#: The price tick every A-share board quotes to.
+PRICE_TICK = Decimal("0.01")
 
 _BARE_CODE_RE = re.compile(r"(\d{6})")
 
@@ -46,6 +50,36 @@ def a_share_limit_ratio(symbol: str, is_st: bool | None = False) -> float:
     if is_st:
         return 0.05
     return 0.10
+
+
+def a_share_limit_prices(
+    symbol: str, pre_close: Decimal, *, is_st: bool | None = False,
+) -> tuple[Decimal, Decimal]:
+    """``(limit_up, limit_down)`` for one session, with each board's own rounding.
+
+    Shanghai and Shenzhen round the band half-up to the tick.  Beijing rounds
+    **inward** -- the up limit floored, the down limit ceiled -- which is one
+    full tick narrower whenever the two rules disagree.
+
+    That is measured, not assumed.  Across every Beijing session since
+    2026-01-01 where the two rules give different answers *and* the day's
+    extreme actually reached a limit, the traded extreme matched the inward
+    value 70 times out of 70 on the up side and 8 out of 8 on the down side,
+    and the half-up value not once.  The same rule reproduces tushare's own
+    ``stk_limit`` Beijing rows exactly.
+
+    One tick is not cosmetic here.  The limit price decides whether a bar is
+    classified as sealed, and that decides fillability -- so a band one tick
+    too wide silently reports a limit-up name as tradable.
+    """
+    ratio = Decimal(str(a_share_limit_ratio(symbol, is_st=is_st)))
+    up = pre_close * (Decimal("1") + ratio)
+    down = pre_close * (Decimal("1") - ratio)
+    if _bare_code(symbol).startswith(("4", "8", "92")):
+        return (up.quantize(PRICE_TICK, rounding=ROUND_FLOOR),
+                down.quantize(PRICE_TICK, rounding=ROUND_CEILING))
+    return (up.quantize(PRICE_TICK, rounding=ROUND_HALF_UP),
+            down.quantize(PRICE_TICK, rounding=ROUND_HALF_UP))
 
 
 def is_at_limit(price: float | None, limit_price: float | None, tolerance: float = LIMIT_TOLERANCE) -> bool:

@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 from datetime import date, datetime, timezone
 
-from app.market_rules import a_share_limit_ratio, cn_today, is_at_limit, is_trading_day
+from decimal import Decimal
+
+from app.market_rules import (
+    a_share_limit_prices, a_share_limit_ratio, cn_today, is_at_limit, is_trading_day,
+)
 
 
 class ASahreLimitRatioTests(unittest.TestCase):
@@ -81,6 +85,50 @@ class IsTradingDayTests(unittest.TestCase):
     def test_weekend_is_not_a_trading_day(self):
         self.assertFalse(is_trading_day(date(2026, 9, 6)))  # Sunday
         self.assertFalse(is_trading_day(date(2026, 9, 5)))  # Saturday
+
+
+class ASharelimitPriceRoundingTests(unittest.TestCase):
+    """Rounding is part of the board rule, and Beijing's is not half-up."""
+
+    def test_beijing_rounds_the_band_inward_one_tick_narrower_than_half_up(self):
+        # Measured, not assumed.  Across every Beijing session since
+        # 2026-01-01 where the two rules disagree and the day's extreme
+        # actually reached a limit, the traded extreme matched the inward
+        # value 70/70 up and 8/8 down, and half-up not once.
+        # 920002.BJ 2026-09-18: 49.92 * 1.30 = 64.896, * 0.70 = 34.944.
+        self.assertEqual(
+            a_share_limit_prices("920002.BJ", Decimal("49.92")),
+            (Decimal("64.89"), Decimal("34.95")),
+        )
+        # 920005.BJ same session: 23.12 -> 30.056 / 16.184.
+        self.assertEqual(
+            a_share_limit_prices("920005.BJ", Decimal("23.12")),
+            (Decimal("30.05"), Decimal("16.19")),
+        )
+
+    def test_beijing_legacy_4_and_8_prefixes_round_inward_too(self):
+        self.assertEqual(
+            a_share_limit_prices("430047.BJ", Decimal("49.92"))[0], Decimal("64.89"))
+        self.assertEqual(
+            a_share_limit_prices("830799.BJ", Decimal("49.92"))[0], Decimal("64.89"))
+
+    def test_shanghai_and_shenzhen_round_half_up_both_ways(self):
+        # 9.29 * 1.10 = 10.219 -> 10.22; * 0.90 = 8.361 -> 8.36.
+        self.assertEqual(
+            a_share_limit_prices("600664.SH", Decimal("9.29")),
+            (Decimal("10.22"), Decimal("8.36")),
+        )
+        # A registration-board name keeps its 20% band.
+        self.assertEqual(
+            a_share_limit_prices("300750.SZ", Decimal("9.29")),
+            (Decimal("11.15"), Decimal("7.43")),
+        )
+
+    def test_mainboard_st_name_is_discounted_but_beijing_st_is_not(self):
+        self.assertEqual(
+            a_share_limit_prices("600001.SH", Decimal("10"), is_st=True)[0], Decimal("10.50"))
+        self.assertEqual(
+            a_share_limit_prices("920819.BJ", Decimal("10"), is_st=True)[0], Decimal("13.00"))
 
 
 if __name__ == "__main__":

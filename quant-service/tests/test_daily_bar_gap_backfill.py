@@ -17,7 +17,7 @@ from pathlib import Path
 
 from app import daily_bar_gap_backfill as backfill
 from app.daily_bar_gap_backfill import (
-    EvidenceStore, HistoryBar, KlineDay, beijing_limit_prices, continuity_flags, index_bars_from_kline,
+    EvidenceStore, HistoryBar, KlineDay, continuity_flags, index_bars_from_kline,
     kline_agrees, limit_prices, parse_kline, parse_pankou_record,
 )
 
@@ -78,8 +78,9 @@ class SnapshotParsingTests(unittest.TestCase):
 class LimitTests(unittest.TestCase):
     def test_beijing_band_rounds_inward(self):
         # 16.45 * 1.3 = 21.385 -> 21.38 (floored), 16.45 * 0.7 = 11.515 -> 11.52 (ceiled): tushare's values;
-        # the vendor served 21.37 for this one.
-        self.assertEqual(beijing_limit_prices(Decimal("16.45")), (Decimal("21.38"), Decimal("11.52")))
+        # the vendor served 21.37 for this one.  The arithmetic itself now lives in
+        # market_rules.a_share_limit_prices so this lane and the evening close lane
+        # cannot disagree about a limit price; test_market_rules covers it directly.
         self.assertEqual(limit_prices("920016.BJ", Decimal("16.45"), 21.37, 11.52)[:2],
                          (Decimal("21.38"), Decimal("11.52")))
 

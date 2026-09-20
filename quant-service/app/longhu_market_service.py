@@ -34,8 +34,18 @@ async def sync(
         "minimum_rows": MINIMUM_ROWS, "minimum_coverage": MINIMUM_COVERAGE,
     }, sort_keys=True).encode("utf-8")).hexdigest()
 
-    def prepare() -> dict[str, Any] | None:
+    def prepare() -> dict[str, Any]:
         with db.transaction() as connection:
+            # The request roster is the owner's own equity universe, not the
+            # vendor's industry classification.  Read it here, inside the
+            # transaction that already exists, so the fetch cannot be bounded
+            # by whatever the vendor happened to classify that morning.
+            universe = [
+                str(row["symbol"]) for row in connection.execute(
+                    """SELECT symbol FROM quant.universe_members
+                        WHERE universe_key='all_a' AND enabled ORDER BY symbol""",
+                ).fetchall()
+            ]
             prior = connection.execute(
                 "SELECT status,row_count,metadata FROM quant.fetch_runs WHERE request_key=%s", (request_key,),
             ).fetchone()
@@ -46,12 +56,12 @@ async def sync(
                 calendar_rows = persist_settled_trade_calendar(
                     connection, trade_date, datetime.now(timezone.utc),
                 )
-                return {
+                return {"unchanged": {
                     "status": "unchanged", "trade_date": str(trade_date),
                     "imported": int(prior["row_count"] or 0), "request_key": request_key,
                     "provider": PROVIDER_KEY, "metadata": prior["metadata"],
                     "calendar_rows": calendar_rows,
-                }
+                }, "universe": universe}
             connection.execute(
                 """INSERT INTO quant.fetch_runs(
                        provider_key,capability,trade_date,request_key,status,attempt_count,started_at,metadata)
@@ -62,17 +72,20 @@ async def sync(
                 (PROVIDER_KEY, trade_date, request_key, Json({
                     "source": "longhuvip_industry_plus_dated_licensed_ohlc",
                     "physical_vendor_page_limit": 300,
+                    "request_roster": "quant.universe_members:all_a",
+                    "request_roster_symbols": len(universe),
                 })),
             )
-        return None
+        return {"unchanged": None, "universe": universe}
 
-    unchanged = await run_database_blocking(prepare)
-    if unchanged:
-        return unchanged
+    prepared = await run_database_blocking(prepare)
+    if prepared["unchanged"]:
+        return prepared["unchanged"]
     try:
         source = source_factory()
         evidence = await run_public_blocking(
-            source.fetch_full_market_evidence, trade_date, timeout_seconds=900,
+            source.fetch_full_market_evidence, trade_date, prepared["universe"],
+            timeout_seconds=900,
         )
         merged = merge_cross_section(trade_date, evidence["vendor_rows"], evidence["quote_rows"])
         vendor_count = len(evidence["vendor_rows"])
@@ -99,6 +112,7 @@ async def sync(
         return {
             "status": "completed", "trade_date": str(trade_date), "provider": PROVIDER_KEY,
             "request_key": request_key, **persisted, "source_health": evidence["health"],
+            "off_plate_rows": merged.off_plate_rows,
             "semantic_boundary": (
                 "main_net is vendor order-size classification; not institution identity or Level-2 order cancellation"
             ),
