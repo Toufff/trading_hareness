@@ -34,12 +34,17 @@ def render_discipline_alert(plan: DisciplinePlan, line: Line, state: LineState, 
     action = ("纪律动作：不追买，等待新计划或回落后重新评估" if state.state == "capped" else
               ACTION_TEXT.get(line.action.type, "纪律动作：人工复核").format(value=_value(line.action.value)))
     observed = state.triggered_at.isoformat() if state.triggered_at else str(state.evidence.get("as_of") or "—")
+    trigger_detail = (
+        f"到期规则：{state.evidence.get('rule') or line.execute_at or '按计划时间'}"
+        if line.execute_by == "time"
+        else (f"触发价：{_value(state.trigger_price)}｜确认：连续 {line.confirm.bars} 根"
+              f"{'已完成分钟线' if line.confirm.basis == 'minute' else '已收盘日线'}")
+    )
     parts = [
         f"{title} {plan.name} {plan.symbol}",
         f"范围：{scope}｜阶段：{plan.stage}",
         f"线：{line.label}",
-        (f"触发价：{_value(state.trigger_price)}｜确认：连续 {line.confirm.bars} 根"
-         f"{'已完成分钟线' if line.confirm.basis == 'minute' else '已收盘日线'}"),
+        trigger_detail,
         f"时间：{observed}",
         action,
         "边界：研究与纪律提醒，不下单；请核对盘口、可卖数量和最新公告。",

@@ -228,7 +228,9 @@ async def run_discipline_alert_cycle(deps: DisciplineAlertRuntimeDependencies, *
         scope = await deps.run_database(lambda: _load_scope(deps.database, account_key, started))
         minute_plans = tuple(
             (plan_id, plan) for plan_id, plan in scope.plans
-            if any(line.execute_by == "price" and line.confirm.basis == "minute" for line in plan.lines)
+            if any(line.execute_by == "time" or (
+                line.execute_by == "price" and line.confirm.basis == "minute"
+            ) for line in plan.lines)
         )
         tapes, tape_errors = await _fetch_tapes(minute_plans, deps, started)
         evaluated = 0
@@ -264,7 +266,8 @@ async def run_discipline_alert_cycle(deps: DisciplineAlertRuntimeDependencies, *
             "scope_blockers": list(scope.blockers), "excluded": list(scope.excluded),
             "plan_errors": errors, "baselines": baselines, "delivery": delivery,
             "coverage": {"basis": "minute", "eligible_total": len(scope.plans),
-                         "eligible_with_minute_lines": len(minute_plans)},
+                         "eligible_with_minute_or_time_lines": len(minute_plans),
+                         "time_lines": "included"},
             "live_orders": False, "research_only": True,
         }
         completed = deps.now()
@@ -311,7 +314,9 @@ async def run_discipline_alert_daily_cycle(deps: DisciplineAlertRuntimeDependenc
     scope = await deps.run_database(lambda: _load_scope(deps.database, account_key, close_at))
     daily_plans = tuple(
         (plan_id, plan) for plan_id, plan in scope.plans
-        if any(line.execute_by == "price" and line.confirm.basis == "daily" for line in plan.lines)
+        if any(line.execute_by == "time" or (
+            line.execute_by == "price" and line.confirm.basis == "daily"
+        ) for line in plan.lines)
     )
     evaluated = emitted = baselines = 0
     errors: dict[str, str] = {}
@@ -341,7 +346,8 @@ async def run_discipline_alert_daily_cycle(deps: DisciplineAlertRuntimeDependenc
         "scope_blockers": list(scope.blockers), "excluded": list(scope.excluded),
         "plan_errors": errors, "baselines": baselines, "delivery": delivery,
         "coverage": {"basis": "daily", "eligible_total": len(scope.plans),
-                     "eligible_with_daily_lines": len(daily_plans)},
+                     "eligible_with_daily_or_time_lines": len(daily_plans),
+                     "time_lines": "included"},
         "daily_completed": not errors and not (coverage_gaps and not daily_plans),
         "live_orders": False, "research_only": True, "next_delay_seconds": 300,
     }

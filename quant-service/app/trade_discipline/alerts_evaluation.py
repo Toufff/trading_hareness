@@ -162,15 +162,23 @@ def evaluate_daily_plan(connection: Any, *, plan_id: str, plan: DisciplinePlan,
     return evaluate(plan, inputs)
 
 
-def basis_line_states(plan: DisciplinePlan, evaluation: Evaluation) -> list[tuple[int, Line, LineState]]:
+def alert_line_states(plan: DisciplinePlan, evaluation: Evaluation) -> list[tuple[int, Line, LineState]]:
+    """Return lines owned by this evaluation without duplicating price work.
+
+    Price lines belong only to their declared minute/daily basis. Time lines
+    are basis-independent and may become due in either lane; the durable line
+    key makes the first observed transition idempotent when another lane later
+    evaluates the same deadline.
+    """
     return [
         (index, line, state)
         for index, (line, state) in enumerate(zip(plan.lines, evaluation.line_states, strict=True))
-        if line.execute_by == "price" and line.confirm.basis == evaluation.basis
+        if line.execute_by == "time"
+        or (line.execute_by == "price" and line.confirm.basis == evaluation.basis)
     ]
 
 
 __all__ = [
     "MAX_COMPLETED_MINUTE_AGE", "MinuteTapeRejected", "ValidatedMinuteTape", "evaluate_daily_plan", "evaluate_minute_plan",
-    "basis_line_states", "evaluation_context", "line_key", "validate_minute_tape",
+    "alert_line_states", "evaluation_context", "line_key", "validate_minute_tape",
 ]

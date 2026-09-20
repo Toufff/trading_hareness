@@ -8,7 +8,7 @@ from typing import Any
 
 from psycopg.types.json import Json
 
-from .alerts_evaluation import basis_line_states, line_key
+from .alerts_evaluation import alert_line_states, line_key
 from .alerts_renderer import render_discipline_alert
 from .contracts import DisciplinePlan, Evaluation
 from .repository import persist_evaluation
@@ -31,7 +31,7 @@ def persist_evaluation_transitions(connection: Any, *, plan_id: str, plan: Disci
     and never delivered.  Restarting after any committed step is safe because
     both the event key and its one Feishu outbox row are unique.
     """
-    items = basis_line_states(plan, evaluation)
+    items = alert_line_states(plan, evaluation)
     existing_by_key: dict[str, dict[str, Any]] = {}
     for index, line, _state in items:
         key = line_key(index, line)

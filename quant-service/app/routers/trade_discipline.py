@@ -131,7 +131,7 @@ def build_trade_discipline_router(deps: TradeDisciplineDependencies) -> APIRoute
         return {**_json(payload), "transport_configured": configured,
                 "coverage": {"minute_price_lines": "30s_during_continuous_auction",
                              "daily_price_lines": "after_authoritative_same_day_close",
-                             "time_lines": "not_notified_by_this_price_alert_lane"},
+                             "time_lines": "notified_when_due_by_the_active_minute_or_daily_lane"},
                 "live_orders": False, "boundary": BOUNDARY}
 
     @router.get("/api/v1/discipline/plans/latest")

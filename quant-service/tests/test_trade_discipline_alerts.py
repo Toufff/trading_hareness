@@ -51,6 +51,28 @@ def evaluation(state: str, *, basis: str = "minute") -> Evaluation:
     )
 
 
+def time_alert_plan() -> DisciplinePlan:
+    line = Line(
+        kind="time_stop", label="T+2 未修复退出", execute_by="time", execute_at="T+2_close",
+        trading_days=2, confirm=Confirm(bars=1, basis="daily"), action=Action(type="exit_all"),
+        derivation=Derivation(rule_id="time-test", inputs={"trading_days": 2}, formula="T+2 close"),
+        priority=1,
+    )
+    return alert_plan().model_copy(update={"lines": [line]})
+
+
+def time_evaluation(state: str, observed: datetime) -> Evaluation:
+    return Evaluation(
+        plan_id="plan-time", as_of_at=observed, trading_date=observed.date(), basis="minute",
+        line_states=[LineState(
+            kind="time_stop", label="T+2 未修复退出", state=state, basis="time",
+            triggered_at=observed if state == "triggered" else None,
+            evidence={"rule": "T+2_close", "deadline": observed.isoformat(), "due": state == "triggered"},
+        )],
+        inputs_hash=(f"time-{state}" + "x" * 64)[:64],
+    )
+
+
 class _Result:
     def __init__(self, rows=()):
         self.rows = list(rows)
@@ -238,6 +260,23 @@ class TransitionPersistenceTests(unittest.TestCase):
                 evaluation=evaluation("triggered", basis="daily"))
         self.assertEqual(len(result["events"]), 1)
         self.assertEqual(len(connection.deliveries), 1)
+
+    def test_time_line_uses_the_same_outbox_and_renders_a_deadline_not_a_fake_price(self):
+        connection = _TransitionConnection()
+        observed = datetime(2026, 9, 23, 15, 0, tzinfo=SH)
+        plan = time_alert_plan()
+        with patch("app.trade_discipline.alerts_repository.persist_evaluation",
+                   side_effect=lambda _connection, value: {"evaluation_id": value.inputs_hash[:8]}):
+            persist_evaluation_transitions(
+                connection, plan_id="plan-time", plan=plan,
+                evaluation=time_evaluation("armed", observed))
+            result = persist_evaluation_transitions(
+                connection, plan_id="plan-time", plan=plan,
+                evaluation=time_evaluation("triggered", observed))
+        self.assertEqual(len(result["events"]), 1)
+        message = next(iter(connection.deliveries.values()))["message_text"]
+        self.assertIn("到期规则：T+2_close", message)
+        self.assertNotIn("触发价", message)
 
 
 class RuntimeCoverageTests(unittest.TestCase):
