@@ -190,6 +190,8 @@ class AgentPaperModelTests(unittest.TestCase):
             command = ClaudeCliModel(model="m").command()
         self.assertEqual(command[command.index("--tools") + 1], "WebSearch,WebFetch")
         self.assertNotIn("Bash", command)
+        # No tools still sends `--tools ""`. Dropping the flag does not mean "no tools" - it restores
+        # the CLI's full default toolset and its descriptions, measured at 9x the prompt cost.
         with patch.dict(os.environ, {"AGENT_PAPER_TOOLS": ""}):
             command = ClaudeCliModel(model="m").command()
         self.assertEqual(command[command.index("--tools") + 1], "")
@@ -239,6 +241,82 @@ class AgentPaperModelTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "cli_error")
         with self.assertRaises(ModelFailure):
             parse_cli_result("not json")
+
+
+class _StubRunner:
+    """Only the surface ``run_day`` touches; every model call fails unless ``fail_until`` says otherwise."""
+
+    def __init__(self, *, fail_rounds, max_consecutive_failures=3):
+        self.fail_rounds, self.account_key = fail_rounds, "agent-stub"
+        self.decision_minutes, self.max_consecutive_failures = 1, max_consecutive_failures
+        self.start_at = datetime(2000, 1, 1, tzinfo=SH)
+        self.calls, self.navs, self.ended = 0, 0, False
+
+    @contextmanager
+    def _tx(self):
+        yield None
+
+    def start_of_day(self, now):
+        return False
+
+    def end_of_day(self, now):
+        self.ended = True
+        return 0
+
+    async def match_open_orders(self, now):
+        return []
+
+    async def snapshot_nav(self, now, **kwargs):
+        self.navs += 1
+        return {"equity": 100.0}
+
+    async def decide(self, now):
+        self.calls += 1
+        if self.calls in self.fail_rounds:
+            return {"status": "model_failed", "error": "cli_error"}
+        return {"status": "decided", "orders": []}
+
+
+class AgentPaperCircuitBreakerTests(unittest.TestCase):
+    """An exhausted subscription must not be retried every round for the rest of the day."""
+
+    def _run(self, runner):
+        from unittest.mock import patch
+
+        from app.agent_paper import runner as runner_module
+        # 09:30 to 15:01 at one simulated minute per pass, so the loop exits without real waiting.
+        clock = {"now": datetime(2026, 9, 21, 9, 30, tzinfo=SH)}
+
+        def now_fn():
+            return clock["now"]
+
+        async def tick(_seconds):
+            clock["now"] += timedelta(minutes=1)
+
+        events = []
+        with patch.object(runner_module.repo, "last_decision_at", return_value=None):
+            asyncio.run(runner_module.run_day(runner, now_fn=now_fn, sleep=tick, log=events.append))
+        return events
+
+    def test_three_consecutive_failures_halt_decisions_but_finish_the_day(self):
+        runner = _StubRunner(fail_rounds=range(1, 500))
+        events = self._run(runner)
+        halted = [e for e in events if e["event"] == "decisions_halted"]
+        self.assertEqual(len(halted), 1, "the breaker must announce itself exactly once")
+        self.assertEqual(halted[0]["after_consecutive_failures"], 3)
+        self.assertEqual(runner.calls, 3, "no model call may happen after the breaker trips")
+        # The day still closes normally: positions are untouched and resting orders keep matching.
+        day_end = [e for e in events if e["event"] == "day_end"]
+        self.assertEqual(len(day_end), 1)
+        self.assertEqual(day_end[0]["halted"], "cli_error")
+        self.assertTrue(runner.ended)
+        self.assertGreater(runner.navs, 1, "NAV snapshots must continue after the halt")
+
+    def test_an_intervening_success_resets_the_counter(self):
+        runner = _StubRunner(fail_rounds={1, 2, 4, 5})
+        events = self._run(runner)
+        self.assertEqual([e["event"] for e in events].count("decisions_halted"), 0)
+        self.assertGreater(runner.calls, 6, "two failures then a success must not stop the day")
 
 
 def _load_migration():

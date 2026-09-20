@@ -190,6 +190,10 @@ class ClaudeCliModel:
         return env
 
     def command(self) -> list[str]:
+        # `--tools` must always be sent, including empty: it *restricts* the tool set, so dropping the
+        # flag restores the CLI's full default toolset and its descriptions. Measured 2026-09-20 over
+        # three identical model-checks: `--tools ""` $0.0405, `--tools WebSearch,WebFetch` $0.0452,
+        # omitting the flag $0.2508 - 6x the prompt for the same request.
         tools = ",".join(self.tools)
         allowed = ["--allowedTools", *self.tools] if self.tools else []
         return [self.binary, "-p", "--model", self.model, "--output-format", "stream-json", "--verbose", "--tools", tools, *allowed,

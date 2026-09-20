@@ -50,6 +50,7 @@ class Runner:
     fetch_quotes: Callable[[list[str]], Awaitable[dict[str, dict[str, Any]]]] = fetch_live_quotes
     context_builder: Callable[..., Awaitable[tuple[dict[str, Any], dict[str, dict[str, Any]]]]] = build_context
     decision_minutes: int = 5
+    max_consecutive_failures: int = 3
     clock: Callable[[], datetime] = lambda: datetime.now(SHANGHAI)
     start_at: datetime = datetime(2000, 1, 1, tzinfo=SHANGHAI)
     last_match_at: dict[str, datetime] = field(default_factory=dict)
@@ -255,16 +256,34 @@ async def run_day(runner: Runner, *, now_fn: Callable[[], datetime], sleep: Call
     with runner._tx() as connection:
         last = repo.last_decision_at(connection, runner.account_key)
     last_nav: datetime | None = None
+    # Consecutive model failures mean the cause is standing (exhausted subscription quota, a dead
+    # credential, an unreachable backend), so every further round would fail the same way and each
+    # one still costs quota. Stop calling the model, but keep the loop alive to 15:01: resting orders
+    # must still get their chance to fill, and the process has to hold its scheduler slot - exiting
+    # would let the next 10-minute trigger start a fresh run that burns three more attempts.
+    # Positions are never touched. A deliberate restart re-arms the breaker, which is how recovery
+    # works once quota is back.
+    consecutive_failures = 0
+    halted: str | None = None
     while now < end:
         if in_session(now):
             try:
                 matched = await runner.match_open_orders(now)
                 if matched:
                     log({"event": "match", "at": now.isoformat(), "results": matched})
-                if decision_due(now, last, runner.decision_minutes) and now >= runner.start_at:
+                if halted is None and decision_due(now, last, runner.decision_minutes) and now >= runner.start_at:
                     outcome = await runner.decide(now)
                     last, decisions = now, decisions + 1
                     log({"event": "decision", "at": now.isoformat(), **outcome})
+                    if outcome.get("status") == "model_failed":
+                        consecutive_failures += 1
+                        if consecutive_failures >= runner.max_consecutive_failures:
+                            halted = str(outcome.get("error") or "model_failed")
+                            log({"event": "decisions_halted", "at": now.isoformat(), "last_error": halted,
+                                 "after_consecutive_failures": consecutive_failures,
+                                 "kept": "positions and resting orders; no further model calls today"})
+                    else:
+                        consecutive_failures = 0
                 if last_nav is None or now - last_nav >= timedelta(minutes=5):
                     await runner.snapshot_nav(now)
                     last_nav = now
@@ -275,7 +294,8 @@ async def run_day(runner: Runner, *, now_fn: Callable[[], datetime], sleep: Call
     expired = runner.end_of_day(now)
     # Right at 15:00 the quote endpoint can return an empty book; retry for a few minutes.
     nav = await runner.snapshot_nav(now, price_basis="close_live_quote", attempts=6, retry_seconds=30, sleep=sleep)
-    summary = {"event": "day_end", "at": now.isoformat(), "decisions": decisions, "expired_orders": expired, **nav}
+    summary = {"event": "day_end", "at": now.isoformat(), "decisions": decisions, "expired_orders": expired,
+               **({"halted": halted, "halted_after_consecutive_failures": consecutive_failures} if halted else {}), **nav}
     log(summary)
     return summary
 
