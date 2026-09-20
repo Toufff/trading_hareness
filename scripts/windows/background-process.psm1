@@ -33,6 +33,14 @@ function Invoke-ConsoleFreeCommand {
     $info = New-ConsoleFreeStartInfo -FilePath $FilePath -Arguments $Arguments -WorkingDirectory $WorkingDirectory -Environment $Environment
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
+    # Without these, .NET decodes the child's bytes with the LAUNCHING console's
+    # code page. A scheduled task has no console and gets the OEM page, and a
+    # publish started from Git Bash gets a different one again -- so the same
+    # command yields mojibake or clean text depending on who started it. That
+    # is not hypothetical: the 2026-09-20 15:17 publish failed its own UTF-8
+    # round-trip test for exactly this reason and nothing else.
+    $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
     $process = [Diagnostics.Process]::Start($info)
     try {
         $stdout = $process.StandardOutput.ReadToEndAsync()
