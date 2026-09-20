@@ -616,6 +616,15 @@ def build_plan(
         candles = [value for value in sorted(kline) if value in session_set]
         bars: list[HistoryBar] = []
         for value in candles:
+            if (symbol, value) in existing:
+                # Already stored, so ``fetch`` deliberately never asked for its
+                # snapshot.  Classify it as what it is.  Filed under
+                # ``pankou_not_fetched`` it counted as a *lost* symbol in
+                # ``session_coverage``, and filling holes in a session that is
+                # mostly present then scored ~0.08 and was refused by the 0.95
+                # gate -- a coverage failure invented by the bookkeeping.
+                hold("canonical_row_exists", symbol, value)
+                continue
             snapshot = pankou[value].get(symbol)
             if snapshot is None:
                 hold("pankou_not_fetched", symbol, value)

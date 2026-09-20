@@ -14,10 +14,11 @@ import unittest
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 from app import daily_bar_gap_backfill as backfill
 from app.daily_bar_gap_backfill import (
-    EvidenceStore, HistoryBar, KlineDay, continuity_flags, index_bars_from_kline,
+    EvidenceStore, HistoryBar, KlineDay, Plan, continuity_flags, index_bars_from_kline,
     kline_agrees, limit_prices, parse_kline, parse_pankou_record,
 )
 
@@ -228,6 +229,37 @@ class PersistSessionDatabaseTests(unittest.TestCase):
         finally:
             with db.transaction() as connection:
                 self._cleanup(connection)
+
+
+class SessionCoverageTests(unittest.TestCase):
+    """A bar we already have is not a bar we lost."""
+
+    @staticmethod
+    def _plan(held):
+        day = date(2026, 9, 18)
+        rows = {day: [SimpleNamespace(symbol="920002.BJ"), SimpleNamespace(symbol="920005.BJ")]}
+        return Plan(day, day, [day], rows, {}, held, {}, {})
+
+    def test_an_already_stored_symbol_does_not_count_as_a_loss(self):
+        day = "2026-09-18"
+        held = {"canonical_row_exists": [(f"{i:06d}.SZ", day) for i in range(5000)]}
+        self.assertEqual(backfill.session_coverage(self._plan(held), date(2026, 9, 18)), 1.0)
+
+    def test_a_symbol_whose_snapshot_never_arrived_does_count_as_a_loss(self):
+        day = "2026-09-18"
+        held = {"pankou_not_fetched": [("600000.SH", day), ("600001.SH", day)]}
+        self.assertEqual(backfill.session_coverage(self._plan(held), date(2026, 9, 18)), 0.5)
+
+    def test_the_plan_files_an_existing_row_before_asking_for_its_snapshot(self):
+        # Filing it under pankou_not_fetched made every already-present symbol
+        # a loss, so filling holes in a mostly-present session scored ~0.08 and
+        # the 0.95 gate refused it -- a coverage failure invented by the
+        # bookkeeping rather than observed in the data.
+        source = (APP / "daily_bar_gap_backfill.py").read_text(encoding="utf-8")
+        body = source[source.index("        for value in candles:"):]
+        existing_at = body.index("if (symbol, value) in existing:")
+        snapshot_at = body.index('hold("pankou_not_fetched"')
+        self.assertLess(existing_at, snapshot_at)
 
 
 if __name__ == "__main__":
