@@ -138,6 +138,7 @@ def evaluate_thesis(thesis: dict, evidence: list[dict], cutoff_at: str, previous
     next_checks = [{"condition_id": r["condition_id"], "metric": r.get("metric"), "reason": r.get("reason", "not_yet_satisfied")}
                    for r in flat if r["result"] in {"false", "unknown"}]
     core = {"thesis_id": revision["thesis_id"], "source_run_id": revision["source_run_id"], "cutoff_at": cutoff_at,
+            "previous_evaluation_id": (previous or {}).get("evaluation_id"),
             "thesis_revision": revision["revision"], "terminal_deadline": revision["terminal_deadline"],
             "states": {"thesis_state": state, "evidence_status": status, "entry_state": entry},
             "observations": observations, "condition_results": flat, "changes_since_previous": changes,

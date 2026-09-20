@@ -55,6 +55,19 @@ describe('TradeThesisPanel', () => {
     wrapper.unmount();
   });
 
+  it('distinguishes an unchanged repeat from a first evaluation', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ items: [{
+      thesis_id: 't-repeat', symbol: '600613.SH', revision: 1, thesis: { claim: '持续观察' },
+      evaluation: { previous_evaluation_id: 'eval-before', changes_since_previous: [],
+        states: { thesis_state: 'supported', evidence_status: 'complete', entry_state: 'waiting' } },
+    }] }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const wrapper = mount(TradeThesisPanel, { props: { symbol: '600613.SH' }, global: { plugins: [ElementPlus] } });
+    await flushPromises();
+    expect(wrapper.text()).toContain('较上轮无新增证据变化');
+    expect(wrapper.text()).not.toContain('首次评价，无上轮差异');
+    wrapper.unmount();
+  });
+
   it('does not present a data version correction as a market jump', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ items: [{
       thesis_id: 't-version', symbol: '600613.SH', revision: 1, thesis: { claim: '数据修正测试' },

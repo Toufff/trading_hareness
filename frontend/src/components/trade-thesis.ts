@@ -77,6 +77,7 @@ export type TradeThesisSummary = {
   input_hash?: string | null;
   content_hash?: string | null;
   evaluation_id?: string | null;
+  previous_evaluation_id?: string | null;
   available_at?: string | null;
   origin_mode?: string | null;
   chart_lines?: ThesisLine[];
@@ -152,6 +153,7 @@ export function thesisItems(payload: TradeThesisList | TradeThesisSummary[]): Tr
       source_run_id: row.source_run_id ?? asString(evaluation.source_run_id) ?? asString(thesis.source_run_id),
       content_hash: row.content_hash ?? asString(evaluation.content_hash),
       evaluation_id: row.evaluation_id ?? asString(evaluation.evaluation_id),
+      previous_evaluation_id: row.previous_evaluation_id ?? asString(evaluation.previous_evaluation_id),
       available_at: row.available_at ?? asString(thesis.available_at),
       origin_mode: row.origin_mode ?? asString(thesis.origin_mode),
       holding_plan_status: row.holding_plan_status ?? holdingNote(evaluation.holding),

@@ -105,7 +105,7 @@ onBeforeUnmount(() => { controller?.abort(); timelineController?.abort(); pollin
           <template v-if="isEvidenceVersionChange(change)">{{ change.label || metricLabelText(change.metric) }}：当前 {{ observationValue(change.new_value, change.metric, change.unit) }}<small class="version-note">{{ evidenceVersionNote(change) }}；旧口径值见审计时间轴</small></template>
           <template v-else>{{ change.label || metricLabelText(change.metric) }}：{{ observationValue(change.old_value, change.metric, change.unit) }} → {{ observationValue(change.new_value, change.metric, change.unit) }}</template>
           <small v-if="change.benchmark">基准 {{ benchmarkLabel(change.benchmark) }}</small>
-        </span></dd><dd v-else>首次评价，无上轮差异</dd></div>
+        </span></dd><dd v-else>{{ item.previous_evaluation_id ? '较上轮无新增证据变化；排名范围另列' : '首次评价，无上轮差异' }}</dd></div>
         <div><dt>当前新买</dt><dd>研究条件：{{ item.new_buy || stateLabel(item.entry_state) }}<small v-if="item.scenario_projection">场景与纪律交集：{{ stateLabel(item.scenario_projection.combined_entry_state) }}</small></dd></div>
         <div><dt>已有持仓</dt><dd>{{ item.holding_action || item.holding_plan_status || '未加载有效持仓计划，不能由研究结论推导动作' }}</dd></div>
         <div><dt>下一验证点</dt><dd><span v-for="(check, index) in item.next_checks ?? []" :key="index">{{ textValue(check) }}</span><span v-if="!item.next_checks?.length">未提供</span></dd></div>

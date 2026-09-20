@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.routers.trade_thesis import ChangeRequest, TradeThesisDependencies, build_trade_thesis_router
 from app.trade_thesis import read_repository
-from app.trade_thesis.repository import ThesisConflict, capture, stable_hash
+from app.trade_thesis.repository import (
+    ThesisConflict,
+    active_thesis,
+    capture,
+    latest_previous_evaluation,
+    stable_hash,
+)
 from app.trade_thesis import bindings
 
 
@@ -66,6 +72,36 @@ def test_async_timeline_is_select_only_and_keeps_rejected_events():
     assert result == {"thesis_id": "HT-A", "revisions": [{"event_type": "reject"}],
                       "evaluations": [{"namespace": "shadow"}]}
     assert all(sql.startswith("SELECT") for sql, _ in database.connection.calls)
+
+
+def test_previous_evaluation_and_historical_review_conflicts_are_pit_visible_only():
+    class Connection:
+        def __init__(self): self.calls = []
+        def execute(self, sql, params):
+            self.calls.append((" ".join(sql.split()), params))
+            return Result([])
+
+    connection = Connection()
+    cutoff = "2026-09-20T07:00:00Z"
+    assert latest_previous_evaluation(connection, "HT-A", cutoff) is None
+    previous_sql, previous_params = connection.calls[-1]
+    assert "cutoff_at<%s AND created_at<=%s" in previous_sql
+    assert previous_params[-2:] == (cutoff, cutoff)
+
+    assert active_thesis(connection, "HT-A", as_of=cutoff) is None
+    active_sql, active_params = connection.calls[-1]
+    assert "conflict.created_at<=%s" in active_sql
+    assert active_params == ("HT-A", cutoff, cutoff, cutoff, cutoff)
+
+
+def test_async_list_hides_only_reviews_visible_by_as_of():
+    database = AsyncDB([])
+    asyncio.run(read_repository.list_theses(
+        database, as_of=datetime.fromisoformat("2026-09-20T07:00:00+00:00"),
+    ))
+    sql, params = database.connection.calls[0]
+    assert "conflict.created_at<=%s" in sql
+    assert len(params) == 11
 
 
 def test_router_maps_stale_expected_revision_to_409():

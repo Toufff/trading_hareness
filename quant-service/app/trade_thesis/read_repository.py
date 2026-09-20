@@ -24,7 +24,8 @@ async def list_theses(database: Any, *, symbol: str | None = None,
                  SELECT 1 FROM quant.trade_thesis_revisions conflict
                   WHERE conflict.thesis_id=r.thesis_id AND conflict.content_revision=r.content_revision
                     AND conflict.proposal_hash=r.proposal_hash
-                    AND conflict.event_type IN ('reject','needs_evidence')))
+                    AND conflict.event_type IN ('reject','needs_evidence')
+                    AND (%s::timestamptz IS NULL OR conflict.created_at<=%s)))
              AND (%s::timestamptz IS NULL OR created_at<=%s)
         ), latest_eval AS (
           SELECT DISTINCT ON (e.thesis_id) e.thesis_id,e.result,e.created_at
@@ -37,7 +38,7 @@ async def list_theses(database: Any, *, symbol: str | None = None,
                events.created_at,latest_eval.created_at AS evaluated_at
           FROM events LEFT JOIN latest_eval USING(thesis_id) WHERE events.n=1
          ORDER BY events.created_at DESC LIMIT %s
-    """, (symbol, symbol, as_of, as_of, namespace, as_of, as_of, as_of,
+    """, (symbol, symbol, as_of, as_of, as_of, as_of, namespace, as_of, as_of, as_of,
           max(1, min(limit, 500))))
 
 

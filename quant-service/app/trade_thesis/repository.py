@@ -92,9 +92,9 @@ def latest_previous_evaluation(connection: Any, thesis_id: str, cutoff_at: str,
                                namespace: str = "shadow") -> dict[str, Any] | None:
     row = _one(connection, """
         SELECT result FROM quant.trade_thesis_evaluations
-         WHERE thesis_id=%s AND namespace=%s AND cutoff_at<%s
+         WHERE thesis_id=%s AND namespace=%s AND cutoff_at<%s AND created_at<=%s
          ORDER BY cutoff_at DESC,created_at DESC LIMIT 1
-    """, (thesis_id, namespace, cutoff_at))
+    """, (thesis_id, namespace, cutoff_at, cutoff_at))
     return None if row is None else dict(row["result"])
 
 
@@ -107,9 +107,10 @@ def active_thesis(connection: Any, thesis_id: str, *, as_of: str | None = None) 
                SELECT 1 FROM quant.trade_thesis_revisions conflict
                 WHERE conflict.thesis_id=r.thesis_id AND conflict.content_revision=r.content_revision
                   AND conflict.proposal_hash=r.proposal_hash
-                  AND conflict.event_type IN ('reject','needs_evidence')))
+                  AND conflict.event_type IN ('reject','needs_evidence')
+                  AND (%s::timestamptz IS NULL OR conflict.created_at<=%s)))
          ORDER BY content_revision DESC,event_seq DESC LIMIT 1
-    """, (thesis_id, as_of, as_of))
+    """, (thesis_id, as_of, as_of, as_of, as_of))
     return None if row is None else dict(row["payload"])
 
 
