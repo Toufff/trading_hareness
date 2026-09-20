@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from . import repository as repo
 from .baseline import build_baseline
-from .context import build_context, fetch_live_quotes
+from .context import build_context, context_part_chars, fetch_live_quotes
 from .model import ModelFailure
 from .rules import (CENT, MAX_FOCUS_SYMBOLS, MAX_ORDERS_PER_DECISION, SYMBOL_RE, apply_fill, dec, equity, fees_for,
                     limit_crossed, normalize_order, tradability_reasons, walk_book)
@@ -130,13 +130,24 @@ class Runner:
                                                      open_orders=open_rows, today_orders=today, recent_decisions=recent)
         context_json = json.dumps(context, ensure_ascii=False, default=str, separators=(",", ":"))
         context_hash = hashlib.sha256(context_json.encode("utf-8")).hexdigest()
+        detail_levels: dict[str, int] = {}
+        for detail in (context.get("detail_symbols") or {}).values():
+            level = str(detail.get("detail_level") or "legacy") if isinstance(detail, dict) else "unknown"
+            detail_levels[level] = detail_levels.get(level, 0) + 1
+        context_metrics = {
+            "context_metrics": {
+                "total_chars": len(context_json),
+                "parts_chars": context_part_chars(context),
+                "detail_symbol_counts": detail_levels,
+            }
+        }
         try:
             result = await asyncio.to_thread(self.model.decide, context_json)
         except ModelFailure as failure:
             with self._tx() as connection:
                 repo.insert_decision(connection, account_key=self.account_key, decided_at=now, trading_date=day, status="model_failed",
                                      model=self.model.model, context_hash=context_hash, context_chars=len(context_json), output=None,
-                                     error=f"{failure.code}: {failure.detail}", usage=None, duration_ms=None,
+                                     error=f"{failure.code}: {failure.detail}", usage=context_metrics, duration_ms=None,
                                      context=context, transcript=failure.transcript)
             return {"status": "model_failed", "error": failure.code}
         # Orders execute against the book as it stands after the model answered.
@@ -150,7 +161,8 @@ class Runner:
             account = repo.load_account(connection, self.account_key, for_update=True)
             decision_id = repo.insert_decision(
                 connection, account_key=self.account_key, decided_at=now, trading_date=day, status="decided", model=result.model,
-                context_hash=context_hash, context_chars=len(context_json), output=output, error=None, usage=result.usage,
+                context_hash=context_hash, context_chars=len(context_json), output=output, error=None,
+                usage={**(result.usage or {}), **context_metrics},
                 duration_ms=result.duration_ms, context=context, transcript=result.transcript)
             focus = [s.upper() for s in output.get("focus_symbols") or [] if isinstance(s, str) and SYMBOL_RE.match(s.upper())]
             repo.update_memory(connection, self.account_key, {"notes": str(output.get("notes") or "")[:1200],

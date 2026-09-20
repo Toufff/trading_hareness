@@ -10,8 +10,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.agent_paper.baseline import replay_fills
-from app.agent_paper.context import summarize_minutes
-from app.agent_paper.model import ModelFailure, ModelResult, parse_cli_result
+from app.agent_paper.context import compact_minutes, context_part_chars, summarize_daily_bars, summarize_minutes
+from app.agent_paper.model import ModelFailure, ModelResult, parse_cli_result, parse_codex_stream
 from app.agent_paper.rules import apply_fill, equity, limit_crossed, limit_prices, normalize_order, tradability_reasons, walk_book
 from app.agent_paper.runner import decision_due, in_session
 
@@ -160,6 +160,18 @@ class AgentPaperRuleTests(unittest.TestCase):
         self.assertEqual((summary["high"], summary["high_time"], len(summary["last_10_minutes"])), (7.11, "0941", 10))
         self.assertEqual(summary["five_minute_buckets_time_close_high_low_amount"][0], ["0930", 7.04, 7.04, 7.0, 15.0])
 
+    def test_focus_only_detail_is_compact_and_measurable(self):
+        rows = [{"time": f"09{30 + i:02d}", "close": 7 + i / 100, "amount": 1e6, "volume_lot": 100, "vwap": 7.01}
+                for i in range(12)]
+        compact = compact_minutes(summarize_minutes(rows))
+        self.assertEqual((len(compact["last_5_minutes"]), len(compact["recent_5m_buckets"])), (5, 3))
+        self.assertNotIn("last_10_minutes", compact)
+        daily = [[f"09-{i:02d}", 10, 11, 9, 10 + i / 10, i, 1 + i] for i in range(1, 12)]
+        summary = summarize_daily_bars(daily)
+        self.assertEqual((summary["sessions"], summary["latest_mmdd_o_h_l_c_pct_amount_yi"]), (11, daily[-1]))
+        metrics = context_part_chars({"account": {"cash": 1}, "detail_symbols": {"A": compact}})
+        self.assertGreater(metrics["detail_symbols"], metrics["account"])
+
 
 class AgentPaperModelTests(unittest.TestCase):
     def test_structured_output_and_fenced_text_are_accepted(self):
@@ -169,8 +181,11 @@ class AgentPaperModelTests(unittest.TestCase):
         self.assertEqual(output, {"orders": [1]})
 
     def test_backend_selection_defaults_to_claude_cli_and_rejects_unknown(self):
-        from app.agent_paper.model import ClaudeCliModel, build_model
+        from app.agent_paper.model import ClaudeCliModel, CodexCliModel, build_model
         self.assertIsInstance(build_model("claude_cli", model="claude-opus-5"), ClaudeCliModel)
+        codex = build_model("codex_cli", model="gpt-5.6-sol", reasoning_effort="high")
+        self.assertIsInstance(codex, CodexCliModel)
+        self.assertEqual(codex.model, "gpt-5.6-sol/high")
         with self.assertRaisesRegex(ValueError, "unsupported"):
             build_model("unknown")
 
@@ -197,16 +212,17 @@ class AgentPaperModelTests(unittest.TestCase):
         self.assertEqual(command[command.index("--tools") + 1], "")
         self.assertNotIn("--allowedTools", command)
 
-    def test_dsh_backend_reads_rules_and_context_from_its_private_directory(self):
+    def test_dsh_backend_injects_rules_and_context_without_tool_reads(self):
         from unittest.mock import patch
         from app.agent_paper.model import DshHeadlessModel, build_model
         seen = {}
 
         def fake_run(command, **kwargs):
             seen["command"] = command
-            with open(os.path.join(kwargs["cwd"], "context.json"), encoding="utf-8") as stream:
-                seen["context"] = stream.read()
-            seen["rules"] = os.path.exists(os.path.join(kwargs["cwd"], "instructions.md"))
+            with open(os.path.join(kwargs["cwd"], "AGENTS.md"), encoding="utf-8") as stream:
+                seen["injected"] = stream.read()
+            seen["legacy_files"] = [os.path.exists(os.path.join(kwargs["cwd"], name))
+                                    for name in ("context.json", "instructions.md")]
 
             class Done:
                 returncode, stdout, stderr = 0, '推理…\n{"market_view":"v","orders":[],"focus_symbols":[],"notes":""}', "log"
@@ -216,7 +232,42 @@ class AgentPaperModelTests(unittest.TestCase):
         with patch("app.agent_paper.model.subprocess.run", side_effect=fake_run):
             result = DshHeadlessModel(binary="dsh").decide('{"now":"t"}')
         self.assertEqual(seen["command"][:3], ["dsh", "--profile", "headless"])
-        self.assertEqual((seen["context"], seen["rules"], result.output["orders"]), ('{"now":"t"}', True, []))
+        self.assertIn("--patch", seen["command"])
+        self.assertIn('{"now":"t"}', seen["injected"])
+        self.assertEqual((seen["legacy_files"], result.output["orders"]), ([False, False], []))
+
+    def test_codex_transport_uses_saved_login_read_only_and_parses_usage(self):
+        from unittest.mock import patch
+        from app.agent_paper.model import CodexCliModel
+        seen = {}
+
+        def fake_run(command, **kwargs):
+            seen.update(command=command, env=kwargs["env"], prompt=kwargs["input"])
+
+            class Done:
+                returncode, stderr = 0, ""
+                stdout = "\n".join([
+                    json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text":
+                               '{"analysis":"a","market_view":"v","orders":[],"focus_symbols":[],"notes":""}'}}),
+                    json.dumps({"type": "turn.completed", "usage": {"input_tokens": 12, "cached_input_tokens": 3,
+                                                                        "output_tokens": 8}}),
+                ])
+            return Done()
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "must-not-leak", "CODEX_API_KEY": "must-not-leak"}), \
+             patch("app.agent_paper.model.subprocess.run", side_effect=fake_run):
+            result = CodexCliModel(model="gpt-5.6-sol", reasoning_effort="high", binary="codex").decide('{"now":"t"}')
+        self.assertNotIn("OPENAI_API_KEY", seen["env"])
+        self.assertNotIn("CODEX_API_KEY", seen["env"])
+        self.assertIn("read-only", seen["command"])
+        self.assertIn('model_reasoning_effort="high"', seen["command"])
+        self.assertIn('{"now":"t"}', seen["prompt"])
+        self.assertEqual((result.model, result.usage["input_tokens"]), ("gpt-5.6-sol/high", 12))
+
+    def test_codex_stream_fails_closed_without_a_final_message(self):
+        with self.assertRaises(ModelFailure) as caught:
+            parse_codex_stream(json.dumps({"type": "turn.failed", "error": {"message": "nope"}}))
+        self.assertEqual(caught.exception.code, "codex_failed")
 
     def test_stream_transcript_keeps_searches_and_result(self):
         from app.agent_paper.model import parse_cli_result, parse_cli_stream

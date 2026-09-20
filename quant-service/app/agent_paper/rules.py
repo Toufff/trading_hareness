@@ -18,7 +18,7 @@ from ..market_rules import a_share_limit_ratio, is_st_security_name
 SYMBOL_RE = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
 CENT = Decimal("0.01")
 MAX_ORDERS_PER_DECISION = 10
-MAX_FOCUS_SYMBOLS = 15
+MAX_FOCUS_SYMBOLS = 5
 
 
 def dec(value: Any) -> Decimal:

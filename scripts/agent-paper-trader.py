@@ -1,7 +1,7 @@
 """Agent paper trader: initialize, run one trading day, decide once, or report.
 
 Paper-only research.  It never touches a broker, and the model only receives
-JSON context through the local Claude Code CLI.
+JSON context through a configured local model transport.
 """
 import argparse
 import asyncio
@@ -32,7 +32,8 @@ def main():
     parser.add_argument('--source-account', default='citics-primary')
     parser.add_argument('--start-at', help='ISO time in Asia/Shanghai, e.g. 2026-09-17T13:00')
     parser.add_argument('--model')
-    parser.add_argument('--backend', choices=['claude_cli', 'event_research', 'dsh'])
+    parser.add_argument('--backend', choices=['claude_cli', 'codex_cli', 'event_research', 'dsh'])
+    parser.add_argument('--reasoning-effort')
     parser.add_argument('--decision-minutes', type=int, default=5)
     parser.add_argument('--day')
     args = parser.parse_args()
@@ -55,7 +56,7 @@ def main():
     db = Database()
     try:
         if args.command == 'init':
-            model = build_model(args.backend, model=args.model)
+            model = build_model(args.backend, model=args.model, reasoning_effort=args.reasoning_effort)
             start = datetime.fromisoformat(args.start_at).replace(tzinfo=SHANGHAI) if args.start_at else datetime.now(SHANGHAI)
             result = initialize_account(db, account_key=args.account_key, model=model.model,
                                         source_account=args.source_account, start_at=start)
@@ -65,11 +66,12 @@ def main():
         if args.command == 'model-check':
             # One tiny call proving the CLI login works in this environment; no ledger change.
             from app.agent_paper.model import ModelFailure
-            model = build_model(args.backend, model=args.model)
+            model = build_model(args.backend, model=args.model, reasoning_effort=args.reasoning_effort)
             try:
                 result = model.decide(_json({'now': datetime.now(SHANGHAI).isoformat(), 'check': '连通性检查：不要下单，orders 返回空数组'}))
                 entry = {'event': 'model_check', 'status': 'ok', 'model': result.model, 'duration_ms': result.duration_ms,
-                         'orders': result.output.get('orders'), 'cost_usd': (result.usage or {}).get('total_cost_usd')}
+                         'orders': result.output.get('orders'), 'usage': result.usage,
+                         'cost_usd': (result.usage or {}).get('total_cost_usd')}
             except ModelFailure as failure:
                 entry = {'event': 'model_check', 'status': 'failed', 'model': model.model, 'error': failure.code, 'detail': failure.detail}
             log(entry)
@@ -90,7 +92,8 @@ def main():
         if account_row is None:
             raise SystemExit(f'account {args.account_key} is not initialized')
         start_at = datetime.fromisoformat(account_row['baseline'].get('start_at') or '2000-01-01T00:00:00+08:00')
-        runner = Runner(db, args.account_key, build_model(args.backend, model=args.model),
+        runner = Runner(db, args.account_key, build_model(args.backend, model=args.model,
+                                                          reasoning_effort=args.reasoning_effort),
                         decision_minutes=args.decision_minutes, start_at=start_at)
         if args.command == 'decide-once':
             runner.start_of_day(now)

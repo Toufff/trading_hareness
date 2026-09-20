@@ -4,7 +4,9 @@ param(
     [string]$PlatformRoot = 'G:\StockPlatform',
     [string]$AccountKey = 'agent-claude-opus',
     [ValidateSet('run-day','model-check')][string]$Command = 'run-day',
-    [ValidateSet('claude_cli','dsh','event_research')][string]$Backend = 'claude_cli',
+    [ValidateSet('claude_cli','codex_cli','dsh','event_research')][string]$Backend = 'claude_cli',
+    [string]$Model = '',
+    [ValidateSet('','none','minimal','low','medium','high','xhigh','max','ultra')][string]$ReasoningEffort = '',
     # 2026-09-20: was 5. On 2026-09-18 Opus spent 46 rounds to place 4 orders - 42 of 46 (91%)
     # returned no orders at all. The claude_cli backend runs on the owner's Claude subscription, the
     # same quota as their interactive sessions, so over-sampling competes with their own work.
@@ -26,5 +28,7 @@ $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $arguments = @((Join-Path $root 'scripts\agent-paper-trader.py'), $Command, '--env-file', $RuntimeEnv,
     '--platform-root', $PlatformRoot, '--account-key', $AccountKey, '--backend', $Backend,
     '--decision-minutes', $DecisionMinutes)
+if ($Model) { $arguments += @('--model', $Model) }
+if ($ReasoningEffort) { $arguments += @('--reasoning-effort', $ReasoningEffort) }
 & (Join-Path $root '.venv\Scripts\python.exe') @arguments
 exit $LASTEXITCODE
