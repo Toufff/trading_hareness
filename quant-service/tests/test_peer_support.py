@@ -16,7 +16,13 @@ from tempfile import TemporaryDirectory
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.peer_contract import NOT_PROVIDED, SUPPORTED_OBJECTS, build_contract
+from app.peer_contract import (
+    NOT_PROVIDED,
+    SUPPORTED_OBJECTS,
+    _FACTOR_COVERAGE_SQL,
+    _fetch,
+    build_contract,
+)
 from app.tushare_normalization import (
     SUPERSEDED_MARKER,
     promotable_adjustment_factor,
@@ -220,6 +226,46 @@ class _FakeConnection:
         if "inet_server_port" in text:
             return _FakeCursor([("trading_hareness", 55432, "16.15")])
         raise AssertionError(f"unexpected statement: {text}")
+
+
+class _DescribedCursor:
+    def __init__(self, rows, width):
+        self._rows = rows
+        self.description = [(f"c{i}",) for i in range(width)]
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _DescribedConnection:
+    def __init__(self, rows, width):
+        self._cursor = _DescribedCursor(rows, width)
+
+    def execute(self, sql, params=None):
+        return self._cursor
+
+
+class FetchNormalizationTests(unittest.TestCase):
+    """The service pool uses dict_row; ad-hoc scripts and these tests do not.
+
+    Shipped on 2026-09-20: three bare ``count(*)`` columns all arrive under the
+    key ``count``, the row loses two values, and every field read positionally
+    after the collision takes the wrong one. It read correctly through a plain
+    tuple connection and returned 500 in production.
+    """
+
+    def test_a_row_that_lost_a_duplicate_key_is_refused_rather_than_read_positionally(self):
+        connection = _DescribedConnection([{"count": 61614, "min": "a", "max": "b"}], width=5)
+        with self.assertRaises(ValueError) as caught:
+            _fetch(connection, "SELECT count(*), count(*), count(*), min(x), max(x) FROM t")
+        self.assertIn("alias every column", str(caught.exception))
+
+    def test_a_complete_mapping_row_still_normalizes_to_a_tuple_in_select_order(self):
+        connection = _DescribedConnection([{"a": 1, "b": 2, "c": 3}], width=3)
+        self.assertEqual(_fetch(connection, "SELECT a, b, c FROM t"), [(1, 2, 3)])
+
+    def test_the_coverage_statement_names_every_column_it_returns(self):
+        self.assertEqual(_FACTOR_COVERAGE_SQL.count(" AS "), 5)
 
 
 class ContractTests(unittest.TestCase):

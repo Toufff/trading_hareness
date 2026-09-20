@@ -273,12 +273,15 @@ SELECT DISTINCT raw->>'factor_semantics'
 #: Coverage, not just the value set.  A consumer that knows only *which* values
 #: are legal will assume every row carries one; these counts say out loud that
 #: almost none do and that the key only starts on ``first_labelled_trading_date``.
+#: Every column is aliased. Under ``dict_row`` three bare ``count(*)`` columns
+#: all arrive under the key ``count`` and collapse into one, which shifts every
+#: value after them -- silently, because a shorter row is still a valid row.
 _FACTOR_COVERAGE_SQL = """
-SELECT count(*),
-       count(*) FILTER (WHERE raw ? 'factor_semantics'),
-       count(*) FILTER (WHERE raw ? %s),
-       min(trading_date) FILTER (WHERE raw ? 'factor_semantics'),
-       max(trading_date)
+SELECT count(*)                                                    AS rows_total,
+       count(*) FILTER (WHERE raw ? 'factor_semantics')            AS rows_with_key,
+       count(*) FILTER (WHERE raw ? %s)                            AS rows_superseded,
+       min(trading_date) FILTER (WHERE raw ? 'factor_semantics')   AS first_labelled,
+       max(trading_date)                                           AS last_day
   FROM quant.daily_adjustment_factors
 """
 
@@ -300,9 +303,33 @@ def _fetch(connection: Any, sql: str, params: Sequence[Any] | None = None) -> li
     The service's own pool uses ``dict_row`` while tests and ad-hoc scripts use
     the psycopg default, and ``dict_row`` preserves the SELECT column order, so
     normalizing here keeps the queries readable as positional SQL.
+
+    It does not preserve column *count*: PostgreSQL names every bare aggregate
+    after its function, so three ``count(*)`` columns arrive as one key and the
+    row silently loses two values.  Verified on 2026-09-20 by shipping exactly
+    that -- the endpoint returned 500 in production while the same code read
+    correctly through a plain tuple connection.  A short row is caught here
+    instead of being published as a contract.
     """
     cursor = connection.execute(sql, params) if params is not None else connection.execute(sql)
-    return [tuple(row.values()) if isinstance(row, Mapping) else tuple(row) for row in cursor.fetchall()]
+    rows = cursor.fetchall()
+    width = len(cursor.description) if getattr(cursor, "description", None) else None
+    normalized: list[tuple[Any, ...]] = []
+    for row in rows:
+        if isinstance(row, Mapping):
+            values = tuple(row.values())
+            if width is not None and len(values) != width:
+                # Two columns shared a key and one of them was dropped. Reading
+                # this row positionally would take the wrong value for every
+                # field after the collision, so refuse rather than publish it.
+                raise ValueError(
+                    f"{len(values)} of {width} columns survived dict_row; alias every "
+                    f"column in this statement: {' '.join(sql.split())[:120]}"
+                )
+            normalized.append(values)
+        else:
+            normalized.append(tuple(row))
+    return normalized
 
 
 def build_contract(connection: Any, *, peer_role: str = "stock_peer") -> dict[str, Any]:
