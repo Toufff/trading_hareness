@@ -34,6 +34,9 @@ if ($oldRelease -eq $ReleaseId) { [pscustomobject]@{ status = 'already_active'; 
 $tunnelRelease = if ($state.PSObject.Properties['tunnel_release']) { [string]$state.tunnel_release } else { '' }
 $keepTunnel = $false
 
+# Same file publish-stock-release.ps1 uses; see Get-SharedRuntimeFailureAttribution.
+$sharedDiagnosticsPath = Join-Path $platform 'logs\runtime\shared-runtime-verification.json'
+
 function Get-LogonTypeArguments {
     # The revert path runs the PREVIOUS release's installer, and older releases'
     # copies have no -LogonType parameter; only forward it when declared.
@@ -158,21 +161,45 @@ try {
     # 'Stop'), so checking $LASTEXITCODE afterward would only reflect
     # whatever native command it happened to run last.
     $tunnelOutcome = if ($keepTunnel) { 'reused_without_reinstall' } else { 'reinstalled' }
+    $sharedVerificationStartedAt = [DateTimeOffset]::Now
     try {
-        & (Join-Path $layout.CurrentPath 'scripts\shared-peer\verify-shared-runtime.ps1') | Out-Null
+        & (Join-Path $layout.CurrentPath 'scripts\shared-peer\verify-shared-runtime.ps1') `
+            -DiagnosticsPath $sharedDiagnosticsPath | Out-Null
     } catch {
-        # A skip is only as good as the verification that follows it: when the
-        # gate spared the tunnel, the spared tunnel is a prime suspect for the
-        # failure and nothing else in this run would ever restart it. Reinstall
-        # and verify again before failing. Without a skip this is the
-        # pre-existing behaviour: the failure propagates to the revert path.
-        if (-not $keepTunnel) { throw }
-        Write-Warning "Shared runtime verification failed after a skipped tunnel reinstall; reinstalling the shared-peer tunnel and re-verifying: $($_.Exception.Message)"
-        $keepTunnel = $false
-        $tunnelOutcome = 'reinstalled_after_degraded_verification'
-        Install-SharedPeerTunnelTask -RuntimeRoot $layout.CurrentPath
-        $tunnelRelease = $ReleaseId
-        & (Join-Path $layout.CurrentPath 'scripts\shared-peer\verify-shared-runtime.ps1') | Out-Null
+        # Half of what verify-shared-runtime.ps1 probes is the peer's own
+        # application, which this machine cannot repair or wait for. Until
+        # 2026-09-20 a peer outage therefore failed the switch outright -- on
+        # the rollback path, meaning the peer being down could block our own
+        # rollback -- and, when the gate had spared the tunnel, restarted the
+        # tunnel first for good measure. The failing check's side now decides.
+        $attribution = Get-SharedRuntimeFailureAttribution `
+            -DiagnosticsPath $sharedDiagnosticsPath -NotOlderThan $sharedVerificationStartedAt
+        if ($attribution.side -eq 'peer') {
+            # Every owner-side check ahead of it passed. Record it and carry on:
+            # this script's job is to make our release active and healthy, and
+            # the local API and adapter were confirmed above.
+            $tunnelOutcome = "${tunnelOutcome}_peer_side_failure"
+            Write-Warning ("Shared runtime verification failed on a peer-side check " +
+                "($($attribution.failed_check)); the switch stands and the shared-peer tunnel is untouched: " +
+                "$($_.Exception.Message)")
+        } elseif (-not $keepTunnel) {
+            # Owner-side or unattributable, and the tunnel was already
+            # reinstalled in this run: pre-existing behaviour, the failure
+            # propagates to the revert path.
+            throw
+        } else {
+            # The gate spared the tunnel, so the spared tunnel is a prime
+            # suspect and nothing else in this run would ever restart it.
+            Write-Warning ("Shared runtime verification failed after a skipped tunnel reinstall " +
+                "(attribution: $($attribution.side) - $($attribution.reason)); " +
+                "reinstalling the shared-peer tunnel and re-verifying: $($_.Exception.Message)")
+            $keepTunnel = $false
+            $tunnelOutcome = 'reinstalled_after_degraded_verification'
+            Install-SharedPeerTunnelTask -RuntimeRoot $layout.CurrentPath
+            $tunnelRelease = $ReleaseId
+            & (Join-Path $layout.CurrentPath 'scripts\shared-peer\verify-shared-runtime.ps1') `
+                -DiagnosticsPath $sharedDiagnosticsPath | Out-Null
+        }
     }
     [void](Set-StockReleaseState -PlatformRoot $platform -State @{
         active_release = $ReleaseId

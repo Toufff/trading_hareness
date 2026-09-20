@@ -33,6 +33,11 @@ if (-not $platform.StartsWith('G:\', [StringComparison]::OrdinalIgnoreCase)) {
 if (-not (Test-Path -LiteralPath (Join-Path $source '.git') -PathType Container)) { throw "Source root is not a Git checkout: $source" }
 Import-Module (Join-Path $source 'scripts\windows\stock-release-management.psm1') -Force
 
+# Where verify-shared-runtime.ps1 records its per-check outcomes, and where the
+# tunnel-repair decision reads them back. Passed explicitly to the verification
+# so the writer and the reader cannot drift apart.
+$sharedDiagnosticsPath = Join-Path $platform 'logs\runtime\shared-runtime-verification.json'
+
 # Deploy-window gate and deploy announcements. Both go through
 # scripts\deploy-announce.py because the policy and the schema belong with the
 # application, not duplicated in PowerShell. Neither is allowed to be the thing
@@ -286,7 +291,8 @@ function Start-ProductionRuntime {
 }
 
 function Wait-ProductionHealth {
-    param([string]$RuntimeRoot, [int]$TimeoutSeconds = 150, [string]$SharedPeerStartupError = '')
+    param([string]$RuntimeRoot, [int]$TimeoutSeconds = 150, [string]$SharedPeerStartupError = '',
+          [string]$DiagnosticsPath = '')
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         Start-Sleep -Seconds 2
@@ -302,6 +308,10 @@ function Wait-ProductionHealth {
     # this script and the callee), so $LASTEXITCODE here would only reflect
     # whatever native command the script happened to run last, not its own
     # success/failure.
+    # Recorded before the verification runs so the diagnostics it writes can be
+    # told apart from an earlier publish's file. A stale file must never speak
+    # for this run.
+    $sharedStartedAt = [DateTimeOffset]::Now
     if ($SharedPeerStartupError) {
         return [pscustomobject]@{
             local_api = 'ok'
@@ -310,10 +320,13 @@ function Wait-ProductionHealth {
             remote_owner_api = 'unavailable'
             remote_peer_api = 'unavailable'
             shared_error = $SharedPeerStartupError
+            shared_verification_started_at = $sharedStartedAt
         }
     }
+    $verifyArguments = @{}
+    if ($DiagnosticsPath) { $verifyArguments['DiagnosticsPath'] = $DiagnosticsPath }
     try {
-        $shared = & (Join-Path $RuntimeRoot 'scripts\shared-peer\verify-shared-runtime.ps1')
+        $shared = & (Join-Path $RuntimeRoot 'scripts\shared-peer\verify-shared-runtime.ps1') @verifyArguments
         return [pscustomobject]@{
             local_api = 'ok'
             dashboard_adapter = 'ok'
@@ -321,11 +334,14 @@ function Wait-ProductionHealth {
             remote_owner_api = $shared.remote_owner_api
             remote_peer_api = $shared.remote_peer_api
             shared_error = $null
+            shared_verification_started_at = $sharedStartedAt
         }
     } catch {
         # The friend-facing reverse tunnel is an independent optional surface.
         # It must remain observable, but an outage on lightServer must not roll
         # back a release whose local API and dashboard are already healthy.
+        # Which side failed is read from the diagnostics file, not from this
+        # message: see Get-SharedRuntimeFailureAttribution.
         Write-Warning "Local release is healthy, but shared-peer verification is degraded: $($_.Exception.Message)"
         return [pscustomobject]@{
             local_api = 'ok'
@@ -334,6 +350,7 @@ function Wait-ProductionHealth {
             remote_owner_api = 'unavailable'
             remote_peer_api = 'unavailable'
             shared_error = $_.Exception.Message
+            shared_verification_started_at = $sharedStartedAt
         }
     }
 }
@@ -529,19 +546,42 @@ try {
     $startup = Start-ProductionRuntime -RuntimeRoot $layout.CurrentPath -KeepTunnelTask:$keepTunnel
     $tunnelStartupError = [string]$startup.shared_peer_startup_error
     $healthVerification = Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
-        -SharedPeerStartupError $tunnelStartupError
+        -SharedPeerStartupError $tunnelStartupError -DiagnosticsPath $sharedDiagnosticsPath
     # A skip is only as good as the verification that follows it.
     # Wait-ProductionHealth deliberately downgrades a failed
     # verify-shared-runtime.ps1 to shared_runtime='degraded' and lets the
     # publish succeed, so a lightServer outage cannot roll back a healthy local
     # release -- but when the gate spared the tunnel, "degraded" is exactly the
     # case where the spared tunnel may be the thing that is broken, and nothing
-    # else in this run would ever restart it. Reinstall it and verify again
-    # before returning success.
+    # else in this run would ever restart it.
+    #
+    # But "degraded" does not always mean the tunnel. verify-shared-runtime.ps1
+    # also probes the peer's own application, and on 2026-09-20 two of four
+    # publishes reinstalled the tunnel because that application was down --
+    # a repair that cannot work, and one that costs the peer 5-7 s of dropped
+    # database connections each time. So the failing check's side decides, read
+    # from the diagnostics the verification writes. Anything unclear attributes
+    # to 'unknown' and still reinstalls: the bias stays where it was.
     $tunnelOutcome = if ($keepTunnel) { 'reused_without_reinstall' } else { 'reinstalled' }
-    if ($keepTunnel -and [string]$healthVerification.shared_runtime -ne 'ok') {
+    $sharedDegraded = $keepTunnel -and [string]$healthVerification.shared_runtime -ne 'ok'
+    $sharedAttribution = if ($sharedDegraded) {
+        Get-SharedRuntimeFailureAttribution -DiagnosticsPath $sharedDiagnosticsPath `
+            -NotOlderThan $healthVerification.shared_verification_started_at
+    } else { $null }
+
+    if ($sharedDegraded -and $sharedAttribution.side -eq 'peer') {
+        # Every owner-side check ahead of the failing one passed, so the tunnel
+        # is demonstrably carrying traffic and nothing here can bring the peer's
+        # application back. Leave it alone.
+        $tunnelOutcome = 'reused_without_reinstall_peer_side_failure'
+        Write-Warning ('Shared runtime verification is degraded, but the failure is peer-side ' +
+            "($($sharedAttribution.failed_check)); leaving the shared-peer tunnel untouched: " +
+            "$($healthVerification.shared_error)")
+    } elseif ($sharedDegraded) {
         Write-Warning ('Shared runtime verification is degraded after a skipped tunnel reinstall; ' +
-            "reinstalling the shared-peer tunnel and re-verifying: $($healthVerification.shared_error)")
+            'reinstalling the shared-peer tunnel and re-verifying ' +
+            "(attribution: $($sharedAttribution.side) - $($sharedAttribution.reason)): " +
+            "$($healthVerification.shared_error)")
         $keepTunnel = $false
         $tunnelOutcome = 'reinstalled_after_degraded_verification'
         try {
@@ -559,7 +599,7 @@ try {
             Write-Warning "Shared-peer tunnel reinstall after a degraded verification also failed: $tunnelStartupError"
         }
         $healthVerification = Wait-ProductionHealth -RuntimeRoot $layout.CurrentPath `
-            -SharedPeerStartupError $tunnelStartupError
+            -SharedPeerStartupError $tunnelStartupError -DiagnosticsPath $sharedDiagnosticsPath
     }
     $verification = [ordered]@{
         verified_at = [DateTimeOffset]::Now.ToString('o')
@@ -571,6 +611,12 @@ try {
         shared_error = $healthVerification.shared_error
         shared_peer_tunnel = $tunnelOutcome
         shared_peer_tunnel_gate = if ($tunnelPlan) { @($tunnelPlan.reasons) } else { @('gate_not_evaluated') }
+        # Why a degraded verification did or did not cost the peer a tunnel
+        # restart. Absent when the verification passed.
+        shared_failure_attribution = if ($sharedAttribution) {
+            [ordered]@{ side = $sharedAttribution.side; failed_check = $sharedAttribution.failed_check
+                        reason = $sharedAttribution.reason; checks = @($sharedAttribution.checks) }
+        } else { $null }
     }
     # Pin the release the tunnel was last installed from and is therefore still
     # executing out of. On a skip that is the gate's own answer -- which is the

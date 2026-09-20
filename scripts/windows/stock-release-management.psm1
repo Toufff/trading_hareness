@@ -1683,7 +1683,76 @@ function Write-StockTunnelReinstallSkipEvent {
     }
 }
 
+function Get-SharedRuntimeFailureAttribution {
+    <#
+        Which side a failed shared-runtime verification implicates.
+
+        verify-shared-runtime.ps1 runs eight checks: the first five exercise
+        this machine and its tunnel, the last three exercise the peer's own
+        application. Until 2026-09-20 a failure of any of them collapsed into
+        one `degraded` string, and publish-stock-release.ps1 answered every one
+        of them by reinstalling the shared tunnel. Two of that day's four
+        publishes did exactly that while the peer application was down -- a
+        repair that cannot work, and that cost the peer 5-7 seconds of dropped
+        database connections each time.
+
+        So the verification now writes its per-check outcomes and this reads
+        them back. The bias is deliberate: anything unclear returns 'unknown'
+        and the caller reinstalls, which is the behaviour that existed before.
+        Only a diagnostics file that is present, parseable, fresh, and
+        explicitly blames a peer-side check suppresses the reinstall.
+
+        `NotOlderThan` must be the instant the verification run started: a
+        stale file from an earlier publish would otherwise speak for this one.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$DiagnosticsPath,
+        [Parameter(Mandatory)][DateTimeOffset]$NotOlderThan
+    )
+    $unknown = { param($reason) [pscustomobject]@{
+        side = 'unknown'; failed_check = ''; reason = $reason; written_at = $null; checks = @() } }
+
+    if (-not (Test-Path -LiteralPath $DiagnosticsPath -PathType Leaf)) {
+        return & $unknown 'diagnostics file is absent'
+    }
+    try {
+        $payload = [IO.File]::ReadAllText($DiagnosticsPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    } catch {
+        return & $unknown "diagnostics file could not be parsed: $($_.Exception.Message)"
+    }
+    if (-not $payload -or -not $payload.PSObject.Properties['written_at']) {
+        return & $unknown 'diagnostics file has no written_at'
+    }
+    $writtenAt = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse([string]$payload.written_at, [ref]$writtenAt)) {
+        return & $unknown "diagnostics written_at is not a timestamp: $($payload.written_at)"
+    }
+    if ($writtenAt -lt $NotOlderThan) {
+        return & $unknown "diagnostics predate this verification run ($($payload.written_at))"
+    }
+    $failedCheck = if ($payload.PSObject.Properties['failed_check']) { [string]$payload.failed_check } else { '' }
+    $failedSide = if ($payload.PSObject.Properties['failed_side']) { [string]$payload.failed_side } else { '' }
+    if (-not $failedCheck -or -not $failedSide) {
+        return & $unknown 'diagnostics name no failed check'
+    }
+    if ($failedSide -notin @('owner', 'peer')) {
+        return & $unknown "diagnostics report an unrecognized side: $failedSide"
+    }
+    $checkNames = @()
+    if ($payload.PSObject.Properties['checks'] -and $payload.checks) {
+        $checkNames = @($payload.checks.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value.state)" })
+    }
+    return [pscustomobject]@{
+        side = $failedSide
+        failed_check = $failedCheck
+        reason = "verification failed at $failedCheck ($failedSide side)"
+        written_at = [string]$payload.written_at
+        checks = $checkNames
+    }
+}
+
 Export-ModuleMember -Function @(
+    'Get-SharedRuntimeFailureAttribution',
     'Get-StockReleaseLayout',
     'Get-StockReleaseState',
     'Set-StockReleaseState',

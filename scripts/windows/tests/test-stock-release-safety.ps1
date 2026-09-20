@@ -134,6 +134,72 @@ Assert-True ($publishSource -match "Invoke-StockDeployAnnounce -Phase 'failed'")
 Assert-True ($publishSource -match 'Write-Warning "Deploy announcement \(\$Phase\) was not written') `
     'a failed announcement must warn and continue: a release blocked by its own bookkeeping is worse than an unannounced one'
 
+# --- Shared-runtime failure attribution --------------------------------------
+# Until 2026-09-20 every degraded verification reinstalled the shared-peer
+# tunnel, so a peer application that was down cost the peer 5-7 s of dropped
+# database connections for a repair that could not work. Two of that day's four
+# publishes did exactly that.
+$attributionDir = Join-Path ([IO.Path]::GetTempPath()) ('shared-attr-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $attributionDir | Out-Null
+try {
+    $diagnostics = Join-Path $attributionDir 'shared-runtime-verification.json'
+    $runStarted = [DateTimeOffset]::Now.AddMinutes(-1)
+
+    $absent = Get-SharedRuntimeFailureAttribution -DiagnosticsPath (Join-Path $attributionDir 'missing.json') -NotOlderThan $runStarted
+    Assert-True ($absent.side -eq 'unknown') 'a missing diagnostics file must attribute to unknown, so the caller still reinstalls'
+
+    [IO.File]::WriteAllText($diagnostics, 'not json at all')
+    $unparseable = Get-SharedRuntimeFailureAttribution -DiagnosticsPath $diagnostics -NotOlderThan $runStarted
+    Assert-True ($unparseable.side -eq 'unknown') 'an unparseable diagnostics file must attribute to unknown, never to peer'
+
+    $peerPayload = @{
+        schema_version = 1
+        written_at = [DateTimeOffset]::Now.ToString('o')
+        status = 'failed'
+        failed_check = 'remote_peer_api'
+        failed_side = 'peer'
+        checks = @{ reverse_tunnel_ports = @{ state = 'ok' }; remote_owner_api = @{ state = 'ok' }
+                    remote_peer_api = @{ state = 'failed' } }
+    } | ConvertTo-Json -Depth 6
+    [IO.File]::WriteAllText($diagnostics, $peerPayload)
+    $peer = Get-SharedRuntimeFailureAttribution -DiagnosticsPath $diagnostics -NotOlderThan $runStarted
+    Assert-True ($peer.side -eq 'peer') 'a peer-side failing check must attribute to peer'
+    Assert-True ($peer.failed_check -eq 'remote_peer_api') 'the attribution must name the failing check'
+
+    # The same file, but written before this run started: it describes some
+    # earlier publish and must not be allowed to suppress a reinstall.
+    $stale = Get-SharedRuntimeFailureAttribution -DiagnosticsPath $diagnostics -NotOlderThan ([DateTimeOffset]::Now.AddMinutes(10))
+    Assert-True ($stale.side -eq 'unknown') 'diagnostics older than the verification run must attribute to unknown'
+
+    $ownerPayload = @{
+        schema_version = 1
+        written_at = [DateTimeOffset]::Now.ToString('o')
+        status = 'failed'
+        failed_check = 'reverse_tunnel_ports'
+        failed_side = 'owner'
+        checks = @{ reverse_tunnel_ports = @{ state = 'failed' } }
+    } | ConvertTo-Json -Depth 6
+    [IO.File]::WriteAllText($diagnostics, $ownerPayload)
+    $owner = Get-SharedRuntimeFailureAttribution -DiagnosticsPath $diagnostics -NotOlderThan $runStarted
+    Assert-True ($owner.side -eq 'owner') 'an owner-side failing check must attribute to owner so the tunnel is reinstalled'
+} finally {
+    Remove-Item -LiteralPath $attributionDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# The verification must classify every check it runs, or a new check would
+# silently attribute to nothing and fall through to 'unknown' forever.
+$verifyShared = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $windowsScripts) 'shared-peer\verify-shared-runtime.ps1') -Raw -Encoding UTF8
+foreach ($ownedCheck in 'local_database', 'local_api', 'licensed_quote', 'reverse_tunnel_ports', 'remote_owner_api') {
+    Assert-True ($verifyShared -match "$ownedCheck\s*=\s*'owner'") "verify-shared-runtime.ps1 must classify $ownedCheck as an owner-side check"
+}
+foreach ($peerCheck in 'remote_peer_api', 'complete_stock_gateway', 'peer_api') {
+    Assert-True ($verifyShared -match "$peerCheck\s*=\s*'peer'") "verify-shared-runtime.ps1 must classify $peerCheck as a peer-side check: our tunnel cannot repair it"
+}
+Assert-True ($verifyShared -match 'Write-VerificationDiagnostics -Status ''failed''') `
+    'verify-shared-runtime.ps1 must write its per-check outcomes on failure, not only on success'
+Assert-True ($publishSource -match "sharedAttribution\.side -eq 'peer'") `
+    'publish-stock-release.ps1 must consult the attribution before reinstalling the tunnel'
+
 # --- Deploy window gate ------------------------------------------------------
 Assert-True ($publishSource -match '\[switch\]\$IgnoreDeployWindow') `
     'publish-stock-release.ps1 must expose an explicit override for the closed deploy windows'
@@ -1252,8 +1318,15 @@ Assert-True ($publishSource.Contains('Get-StockScheduledTaskLogonType')) `
     'publish-stock-release.ps1 must derive the logon type through the shared helper the gate compares against'
 Assert-True ($publishSource.Contains('Install-SharedPeerTunnelTask -RuntimeRoot $layout.CurrentPath')) `
     'publish-stock-release.ps1 must reinstall the shared-peer tunnel when post-switch shared-runtime verification is degraded after a skip'
-Assert-True ($publishSource -match "(?s)if \(\`$keepTunnel -and \[string\]\`$healthVerification\.shared_runtime -ne 'ok'\)") `
-    'publish-stock-release.ps1 must treat a degraded shared runtime as a trigger to reinstall the tunnel the gate spared'
+Assert-True ($publishSource -match "(?s)\`$sharedDegraded = \`$keepTunnel -and \[string\]\`$healthVerification\.shared_runtime -ne 'ok'") `
+    'publish-stock-release.ps1 must still treat a degraded shared runtime as the condition for repairing the tunnel the gate spared'
+# ...but a peer-side failure is not a reason to restart our tunnel. Before
+# 2026-09-20 this branch had no exception and two of that day's four publishes
+# reinstalled the tunnel while the peer application was down.
+Assert-True ($publishSource -match "(?s)\`$sharedDegraded -and \`$sharedAttribution\.side -eq 'peer'[^}]*?reused_without_reinstall_peer_side_failure") `
+    'a peer-side verification failure must leave the shared-peer tunnel untouched and say so in the receipt'
+Assert-True ($publishSource -match "(?s)\} elseif \(\`$sharedDegraded\) \{") `
+    'every other degraded verification -- including an unknown attribution -- must still reinstall'
 Assert-True ($publishSource.Contains('tunnel_release = $tunnelReleaseAfter')) `
     'publish-stock-release.ps1 must persist the release the tunnel is running from in release-state.json'
 # The release id's own yyyyMMddTHHmmss prefix is stamped before the test suite
@@ -1439,4 +1512,7 @@ Assert-True ($statusSource.Contains('last_installed_from') -and $statusSource.Co
     deploy_announced_before_the_first_stop = $true
     deploy_announcement_never_blocks_the_release = $true
     deploy_window_checked_before_the_test_phase = $true
+    peer_side_failure_does_not_restart_our_tunnel = $true
+    unclear_attribution_still_reinstalls = $true
+    stale_diagnostics_cannot_speak_for_this_run = $true
 }
