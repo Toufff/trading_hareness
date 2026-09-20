@@ -326,7 +326,8 @@ $twins = [regex]::Matches($tierScript, 'TierPolicy\("([a-z_]+)",\s*"([a-z_]+)"')
     ForEach-Object { "$($_.Groups[1].Value).$($_.Groups[2].Value)_cold" }
 $hotTables = [regex]::Matches($tierScript, 'TierPolicy\("([a-z_]+)",\s*"([a-z_]+)"') |
     ForEach-Object { "$($_.Groups[1].Value).$($_.Groups[2].Value)" }
-Assert-True ($twins.Count -eq 5) 'the tier policy must still describe five tiered tables'
+Assert-True ($twins.Count -eq 6) 'the tier policy must describe six tiered tables including thesis evaluations'
+Assert-True ($hotTables -contains 'quant.trade_thesis_evaluations') 'thesis evaluations must participate in tier and backup protection'
 Assert-True ($initSource -notmatch "Set-StockPlatformEnvDefault[^\r\n]*STOCK_BACKUP_EXCLUDE_TABLE_DATA") `
     'the initializer must not seed a static exclusion list: a twin whose hot table has no chunk chain would lose its only backup'
 Assert-True ($initSource -match 'STOCK_BACKUP_EXCLUDE_TABLE_DATA is deliberately NOT seeded') 'the initializer must say why it seeds no exclusion list'
@@ -353,7 +354,7 @@ Assert-True ((($decidedTwins | Sort-Object) -join ';') -eq (($twins | Sort-Objec
 $defaultChain = @('quant.raw_market_observations')   # the shipped STOCK_BACKUP_INCREMENTAL_TABLES default
 $shipped = Resolve-StockBackupExcludedTableData -IncrementalTables $defaultChain -IncrementalSucceeded $true -ConfiguredExclusions $twins `
     -ChainWatermarks $freshWatermarks -Now $tierNow -HotDays $tierHotDays
-Assert-True (@($shipped.Refused).Count -eq 4) 'with only the default chain, the four twins without one must be refused rather than excluded'
+Assert-True (@($shipped.Refused).Count -eq ($twins.Count - $defaultChain.Count)) 'with only the default chain, every twin without a chain must be refused rather than excluded'
 
 # Existence of a chain is not enough: a chain whose watermark froze before the
 # tier cutoff no longer carries the rows the tier job keeps moving, so every
