@@ -32,6 +32,36 @@ def persist_quote_samples(connection: Any, observed_at: datetime, rows: list[dic
     return stored
 
 
+def persist_index_samples(connection: Any, observed_at: datetime, rows: list[dict[str, Any]]) -> int:
+    stored = 0
+    for row in rows:
+        symbol = str(row.get("ts_code") or "")
+        try:
+            price, pre_close = float(row.get("price") or 0), float(row.get("pre_close") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not symbol or price <= 0 or pre_close <= 0:
+            continue
+        result = connection.execute("""
+            INSERT INTO quant.intraday_quote_observations(
+                scan_id,symbol,observed_at,source_name,price,pct_change,raw)
+            VALUES(NULL,%s,%s,'longhu_index_minute',%s,%s,%s)
+            ON CONFLICT(symbol,source_name,observed_at) DO NOTHING""",
+            (symbol, observed_at, price, (price / pre_close - 1) * 100, Json(dict(row))))
+        stored += int(result.rowcount or 0)
+    return stored
+
+
+def latest_sector_snapshot(connection: Any, *, at: datetime) -> dict[str, Any] | None:
+    row = connection.execute("""
+        SELECT snapshot_minute,observed_at,payload->'items' AS items
+          FROM quant.intraday_board_flow_snapshots
+         WHERE snapshot_minute>=date_trunc('day',%s AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai'
+           AND snapshot_minute<=%s AND status IN ('completed','partial')
+         ORDER BY snapshot_minute DESC LIMIT 1""", (at, at)).fetchone()
+    return dict(row) if row else None
+
+
 def persist_signal(connection: Any, signal: AdvisorySignal, *, scope_source: str) -> dict[str, Any] | None:
     row = connection.execute("""
         INSERT INTO quant.intraday_advisory_events(
@@ -133,5 +163,5 @@ def update_status(connection: Any, *, state: str, account_key: str, now: datetim
 
 
 __all__ = ["due_deliveries", "enqueue_delivery", "latest_delivered_deepseek_fingerprint",
-           "persist_analysis", "persist_delivery_outcome", "persist_signal", "recent_discipline_events",
-           "persist_quote_samples", "update_status"]
+           "latest_sector_snapshot", "persist_analysis", "persist_delivery_outcome", "persist_index_samples",
+           "persist_signal", "recent_discipline_events", "persist_quote_samples", "update_status"]

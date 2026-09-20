@@ -318,7 +318,7 @@ from .free_market_providers import (
 from .longhu_market_data import (
     LonghuMarketDataError,
     longhu_daily,
-    longhu_index_daily,
+    longhu_index_daily, longhu_index_quotes,
     longhu_intraday_minute_session,
     longhu_order_book_quotes,
 )
@@ -3032,7 +3032,7 @@ async def intraday_monitor_loop(interval_seconds: int) -> None:
         run_board_report=run_intraday_board_report,
     )
 discipline_alert_loop, intraday_advisory_loop = build_notification_loops(database=db, run_database=run_database_blocking,
-    fetch_minutes=longhu_intraday_minute_session, fetch_quotes=longhu_order_book_quotes, post_text=post_feishu_alert_text, post_card=post_feishu_alert_card,
+    fetch_minutes=longhu_intraday_minute_session, fetch_quotes=longhu_order_book_quotes, fetch_indices=longhu_index_quotes, post_text=post_feishu_alert_text, post_card=post_feishu_alert_card,
     session_open=lambda *args, **kwargs: realtime_market_session_async(*args, **kwargs), dashboard_url=lambda: Settings.from_environ().dashboard_public_url)
 def persist_intraday_super_get_fast_quote(symbol: str, observed_at: datetime, price: float,
                                           pct_change: float | None, row: dict[str, Any],

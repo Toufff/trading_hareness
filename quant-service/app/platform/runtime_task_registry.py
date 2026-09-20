@@ -44,10 +44,11 @@ RUNTIME_TASK_CONTRACTS: Final[dict[str, RuntimeTaskContract]] = {
     "intraday_advisory": RuntimeTaskContract(
         "intraday_advisory",
         "research",
-        "1s local tick; 5s quote acquisition; 10m DeepSeek; 30m Codex",
-        ("order_book_quote",),
-        ("intraday_advisory_events", "intraday_advisory_analysis_runs", "intraday_advisory_deliveries"),
-        "account-scoped research alerts and scheduled Feishu advisory reports; never orders",
+        "1s local tick; 5s stock quote; 15s broad-index; 1m industry board; 10m DeepSeek; 30m Codex",
+        ("order_book_quote", "index_minute", "board_flow"),
+        ("intraday_quote_observations", "intraday_board_flow_snapshots", "intraday_advisory_events",
+         "intraday_advisory_analysis_runs", "intraday_advisory_deliveries"),
+        "account-scoped stock alerts plus broad-index/industry context and scheduled Feishu reports; never orders",
         20,
     ),
     "super_get_fast_quote": RuntimeTaskContract(

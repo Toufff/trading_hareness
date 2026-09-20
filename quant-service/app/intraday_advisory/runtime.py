@@ -15,9 +15,14 @@ from ..intraday_quote_normalization import exchange_time_status
 from ..tushare_providers import safe_error_detail
 from .model import CodexAdvisoryModel, DeepSeekAdvisoryModel
 from .renderer import analysis_card, render_analysis, render_signal, signal_card
+from .market_watch import (
+    CORE_INDEX_SYMBOLS, IndexSample, SectorSample, evaluate_indices, evaluate_sectors,
+    index_sample_from_row, market_context, sector_samples_from_snapshot,
+)
 from .repository import (
-    due_deliveries, enqueue_delivery, latest_delivered_deepseek_fingerprint, persist_analysis,
-    persist_delivery_outcome, persist_quote_samples, persist_signal, recent_discipline_events, update_status,
+    due_deliveries, enqueue_delivery, latest_delivered_deepseek_fingerprint, latest_sector_snapshot,
+    persist_analysis, persist_delivery_outcome, persist_index_samples, persist_quote_samples,
+    persist_signal, recent_discipline_events, update_status,
 )
 from .rules import QuoteSample, evaluate, sample_from_row
 from .schedule import decide
@@ -45,6 +50,7 @@ class IntradayAdvisoryDependencies:
     database: Any
     run_database: DatabaseExecutor
     fetch_quotes: Callable[..., Awaitable[list[dict[str, Any]]]]
+    fetch_indices: Callable[[list[str]], Awaitable[dict[str, dict[str, Any]]]]
     post_text: Callable[[str], Awaitable[dict[str, Any]]]
     post_card: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
     session_open: Callable[..., Awaitable[tuple[bool, str]]]
@@ -64,6 +70,13 @@ class RuntimeState:
     last_quote_success_at: datetime | None = None
     last_quotes_received: int = 0
     last_quotes_fresh: int = 0
+    last_index_fetch: datetime | None = None
+    last_index_success_at: datetime | None = None
+    last_indices_received: int = 0
+    last_indices_fresh: int = 0
+    index_samples: dict[str, deque[IndexSample]] = field(default_factory=lambda: defaultdict(lambda: deque(maxlen=60)))
+    sector_samples: dict[str, deque[SectorSample]] = field(default_factory=lambda: defaultdict(lambda: deque(maxlen=15)))
+    last_sector_snapshot_at: datetime | None = None
     discipline_watermark: datetime | None = None
     pending_events: list[dict[str, Any]] = field(default_factory=list)
     pending_since: datetime | None = None
@@ -86,6 +99,16 @@ def _scope(database: Any, key: str, now: datetime) -> AdvisoryScope:
 def _persist_rows(database: Any, now: datetime, rows: list[dict[str, Any]]) -> int:
     with database.transaction() as connection:
         return persist_quote_samples(connection, now, rows)
+
+
+def _persist_index_rows(database: Any, now: datetime, rows: list[dict[str, Any]]) -> int:
+    with database.transaction() as connection:
+        return persist_index_samples(connection, now, rows)
+
+
+def _latest_sector_snapshot(database: Any, now: datetime) -> dict[str, Any] | None:
+    with database.transaction() as connection:
+        return latest_sector_snapshot(connection, at=now)
 
 
 def _persist_event_and_delivery(database: Any, signal: Any, source: str, text: str,
@@ -141,8 +164,30 @@ def _context(scope: AdvisoryScope, state: RuntimeState, now: datetime, *,
         "as_of": now.isoformat(), "trigger_kind": trigger_kind, "report_kind": report_kind,
         "research_only": True, "live_orders": False,
         "scope": latest, "scope_blockers": list(scope.blockers),
+        "market_context": market_context(state.index_samples, state.sector_samples),
         "recent_events": state.pending_events[-20:],
     }
+
+
+async def _emit_signal(deps: IntradayAdvisoryDependencies, state: RuntimeState, signal: Any,
+                       source: str, current: datetime, outcome: dict[str, Any]) -> None:
+    cooldown_key = (signal.symbol, signal.kind, signal.direction, signal.severity)
+    previous = state.last_signal_at.get(cooldown_key)
+    if previous and current - previous < timedelta(minutes=10):
+        return
+    text = render_signal(signal, source=source)
+    card = signal_card(signal, source=source)
+    event = await deps.run_database(lambda: _persist_event_and_delivery(
+        deps.database, signal, source, text, card))
+    if not event:
+        return
+    state.last_signal_at[cooldown_key] = current
+    state.pending_events.append({"event_id": str(event["event_id"]), "symbol": signal.symbol,
+                                 "kind": signal.kind, "direction": signal.direction,
+                                 "summary": signal.summary, "source": source,
+                                 "observed_at": signal.observed_at.isoformat()})
+    state.pending_since = state.pending_since or current
+    outcome["events"] += 1
 
 
 def _persist_model_result(database: Any, **kwargs: Any) -> dict[str, Any]:
@@ -222,17 +267,23 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
                       last_codex=state.last_codex)
     outcome: dict[str, Any] = {"state": "idle", "scope_size": len(scope.items), "events": 0,
                                "blockers": list(scope.blockers)}
-    if decision.fetch_quotes and scope.items:
+    if decision.fetch_quotes:
         session_open, reason = await deps.session_open("order_book_quote", current)
         if session_open:
-            rows = await deps.fetch_quotes([item.symbol for item in scope.items], max_symbols=len(scope.items))
-            fresh = [row for row in rows if _fresh(row, current)]
             state.last_fetch = current
-            state.last_quote_attempt_at = current
-            state.last_quotes_received = len(rows)
-            state.last_quotes_fresh = len(fresh)
-            if fresh:
-                state.last_quote_success_at = current
+            index_due = state.last_index_fetch is None or current - state.last_index_fetch >= timedelta(seconds=15)
+            stock_request = deps.fetch_quotes([item.symbol for item in scope.items], max_symbols=len(scope.items)) \
+                if scope.items else asyncio.sleep(0, result=[])
+            index_request = deps.fetch_indices(list(CORE_INDEX_SYMBOLS)) \
+                if index_due else asyncio.sleep(0, result={})
+            rows, index_rows = await asyncio.gather(stock_request, index_request)
+            fresh = [row for row in rows if _fresh(row, current)]
+            if scope.items:
+                state.last_quote_attempt_at = current
+                state.last_quotes_received = len(rows)
+                state.last_quotes_fresh = len(fresh)
+                if fresh:
+                    state.last_quote_success_at = current
             if fresh:
                 await deps.run_database(lambda: _persist_rows(deps.database, current.astimezone(timezone.utc), fresh))
             source_by_symbol = {item.symbol: item.source for item in scope.items}
@@ -248,25 +299,41 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
                 while series and series[0].observed_at < cutoff:
                     series.popleft()
                 for signal in evaluate(series):
-                    cooldown_key = (signal.symbol, signal.kind, signal.direction, signal.severity)
-                    previous = state.last_signal_at.get(cooldown_key)
-                    if previous and current - previous < timedelta(minutes=10):
-                        continue
                     source = source_by_symbol.get(signal.symbol, "recommendation")
-                    text = render_signal(signal, source=source)
-                    card = signal_card(signal, source=source)
-                    event = await deps.run_database(lambda signal=signal, source=source, text=text, card=card:
-                                                    _persist_event_and_delivery(deps.database, signal, source, text, card))
-                    if event:
-                        state.last_signal_at[cooldown_key] = current
-                        state.pending_events.append({"event_id": str(event["event_id"]), "symbol": signal.symbol,
-                                                     "kind": signal.kind, "direction": signal.direction,
-                                                     "summary": signal.summary, "observed_at": signal.observed_at.isoformat()})
-                        state.pending_since = state.pending_since or current
-                        outcome["events"] += 1
+                    await _emit_signal(deps, state, signal, source, current, outcome)
+
+            if index_due:
+                state.last_index_fetch = current
+                state.last_indices_received = len(index_rows)
+                accepted_rows: list[dict[str, Any]] = []
+                for row in index_rows.values():
+                    sample = index_sample_from_row(row, current)
+                    if sample is None:
+                        continue
+                    state.index_samples[sample.symbol].append(sample)
+                    accepted_rows.append(row)
+                state.last_indices_fresh = len(accepted_rows)
+                if accepted_rows:
+                    state.last_index_success_at = current
+                    await deps.run_database(lambda: _persist_index_rows(
+                        deps.database, current.astimezone(timezone.utc), accepted_rows))
+                if index_signal := evaluate_indices(state.index_samples):
+                    await _emit_signal(deps, state, index_signal, "market_index", current, outcome)
+
+            snapshot = await deps.run_database(lambda: _latest_sector_snapshot(deps.database, current))
+            snapshot_at = snapshot.get("snapshot_minute") if snapshot else None
+            if isinstance(snapshot_at, datetime) and (
+                    state.last_sector_snapshot_at is None or snapshot_at > state.last_sector_snapshot_at):
+                state.last_sector_snapshot_at = snapshot_at
+                for sample in sector_samples_from_snapshot(snapshot):
+                    state.sector_samples[sample.sector_key].append(sample)
+                if sector_signal := evaluate_sectors(state.sector_samples):
+                    await _emit_signal(deps, state, sector_signal, "sector", current, outcome)
             if outcome["events"]:
                 outcome["delivery"] = await _drain(deps)  # deterministic text goes first
-            outcome.update({"state": "healthy", "quotes_received": len(rows), "quotes_fresh": len(fresh)})
+            outcome.update({"state": "healthy", "quotes_received": len(rows), "quotes_fresh": len(fresh),
+                            "indices_received": state.last_indices_received,
+                            "indices_fresh": state.last_indices_fresh})
         else:
             outcome["reason"] = reason
 
@@ -304,6 +371,9 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
         "success_at": state.last_quote_success_at.isoformat() if state.last_quote_success_at else None,
         "received": state.last_quotes_received,
         "fresh": state.last_quotes_fresh,
+        "index_success_at": state.last_index_success_at.isoformat() if state.last_index_success_at else None,
+        "indices_received": state.last_indices_received,
+        "indices_fresh": state.last_indices_fresh,
     }
     await deps.run_database(lambda: _status(
         deps.database, state=outcome["state"], account_key=key, now=current,

@@ -28,6 +28,7 @@ def _payloads(now: datetime = NOW):
             "state": "idle", "scope_size": 7, "last_error": None, "last_tick_at": stamp,
             "details": {"blockers": [], "quote_evidence": {
                 "attempt_at": stamp, "success_at": stamp, "received": 7, "fresh": 7,
+                "index_success_at": stamp, "indices_received": 7, "indices_fresh": 7,
             }},
         },
     }

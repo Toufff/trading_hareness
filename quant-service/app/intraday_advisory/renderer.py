@@ -9,16 +9,24 @@ from .rules import AdvisorySignal
 
 
 def render_signal(signal: AdvisorySignal, *, source: str) -> str:
-    role = "持仓" if source == "holding" else "推荐池"
+    role = {"holding": "持仓", "recommendation": "推荐池", "market_index": "大盘指数",
+            "sector": "行业板块"}.get(source, source)
     metrics = "；".join(f"{key}={value}" for key, value in signal.metrics.items())
+    notice = ("来源：Longhu 核心指数分钟数据；本通知不执行交易。" if source == "market_index" else
+              "来源：东财行业板块同源快照；净流为辅助证据；本通知不执行交易。" if source == "sector" else
+              "说明：主动买卖方向仅为成交侧代理，不代表机构身份；本通知不执行交易。")
     return (f"【盘中即时提醒｜{role}】\n{signal.name or signal.symbol} {signal.symbol}\n"
             f"{signal.summary}\n证据：{metrics}\n"
-            "说明：主动买卖方向仅为成交侧代理，不代表机构身份；本通知不执行交易。")
+            f"{notice}")
 
 
 def signal_card(signal: AdvisorySignal, *, source: str) -> dict[str, Any]:
-    role = "持仓" if source == "holding" else "推荐池"
+    role = {"holding": "持仓", "recommendation": "推荐池", "market_index": "大盘指数",
+            "sector": "行业板块"}.get(source, source)
     metrics = "\n".join(f"- **{key}**：{value}" for key, value in signal.metrics.items())
+    notice = ("Longhu 核心指数分钟数据；仅供市场环境研究，不执行交易。" if source == "market_index" else
+              "东财行业板块同源快照；净流仅作辅助证据，不执行交易。" if source == "sector" else
+              "主动买卖方向仅为成交侧代理，不代表机构身份；仅供研究，不执行交易。")
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "red" if signal.severity == "high" else "orange",
@@ -27,7 +35,7 @@ def signal_card(signal: AdvisorySignal, *, source: str) -> dict[str, Any]:
             {"tag": "div", "text": {"tag": "lark_md", "content":
              f"**{signal.symbol}**\n{signal.summary}\n\n{metrics}"}},
             {"tag": "note", "elements": [{"tag": "plain_text", "content":
-             "主动买卖方向仅为成交侧代理，不代表机构身份；仅供研究，不执行交易。"}]},
+             notice}]},
         ],
     }
 

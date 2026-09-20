@@ -84,6 +84,7 @@ async def _deterministic_delivery_precedes_bundled_codex_analysis() -> None:
 
     deps = IntradayAdvisoryDependencies(
         database=object(), run_database=run_database, fetch_quotes=fetch,
+        fetch_indices=AsyncMock(return_value={}),
         post_text=AsyncMock(return_value={"status": "sent"}),
         post_card=AsyncMock(return_value={"status": "sent"}),
         session_open=AsyncMock(return_value=(True, "open")), now=lambda: MONDAY,
@@ -94,6 +95,7 @@ async def _deterministic_delivery_precedes_bundled_codex_analysis() -> None:
          patch("app.intraday_advisory.runtime._persist_event_and_delivery",
                return_value={"event_id": "event", "event_key": "key"}), \
          patch("app.intraday_advisory.runtime._discipline", return_value=[]), \
+         patch("app.intraday_advisory.runtime._latest_sector_snapshot", return_value=None), \
          patch("app.intraday_advisory.runtime._status", return_value=None), \
          patch("app.intraday_advisory.runtime._drain", new=AsyncMock(side_effect=lambda *_: calls.append("alert") or {"sent": 1})), \
          patch("app.intraday_advisory.runtime._analyze", new=AsyncMock(side_effect=lambda *_a, **_k: calls.append("codex") or {"status": "completed"})):
@@ -126,6 +128,7 @@ async def _quote_success_evidence_survives_intermediate_idle_ticks() -> None:
     }])
     deps = IntradayAdvisoryDependencies(
         database=object(), run_database=run_database, fetch_quotes=fetch,
+        fetch_indices=AsyncMock(return_value={}),
         post_text=AsyncMock(return_value={"status": "sent"}),
         post_card=AsyncMock(return_value={"status": "sent"}),
         session_open=AsyncMock(return_value=(True, "open")), now=lambda: MONDAY,
@@ -134,6 +137,7 @@ async def _quote_success_evidence_survives_intermediate_idle_ticks() -> None:
     with patch("app.intraday_advisory.runtime._scope", return_value=scope), \
          patch("app.intraday_advisory.runtime._persist_rows", return_value=1), \
          patch("app.intraday_advisory.runtime._discipline", return_value=[]), \
+         patch("app.intraday_advisory.runtime._latest_sector_snapshot", return_value=None), \
          patch("app.intraday_advisory.runtime._status",
                side_effect=lambda _database, **values: statuses.append(values)):
         first = await run_intraday_advisory_cycle(deps, state, now=MONDAY)
@@ -166,8 +170,11 @@ def test_migration_and_composition_are_declared() -> None:
                  "20260921_0110_intraday_advisory.py").read_text(encoding="utf-8")
     cards = (root / "quant-service" / "migrations" / "versions" /
              "20260921_0111_intraday_advisory_cards.py").read_text(encoding="utf-8")
+    market_scope = (root / "quant-service" / "migrations" / "versions" /
+                    "20260921_0112_intraday_market_scope.py").read_text(encoding="utf-8")
     main = (root / "quant-service" / "app" / "main.py").read_text(encoding="utf-8")
     assert "intraday_advisory_analysis_runs" in migration
     assert "message_card" in cards
+    assert "market_index" in market_scope and "sector" in market_scope
     assert '"intraday_advisory": advisory_enabled' in main
     assert "build_intraday_advisory_router" in main

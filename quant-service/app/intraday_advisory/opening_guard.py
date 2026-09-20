@@ -138,12 +138,17 @@ def evaluate_opening_guard(
     if stage == "live":
         quote = _mapping(advisory_details.get("quote_evidence"))
         success_age = _age_seconds(quote.get("success_at"), checked_at)
+        index_age = _age_seconds(quote.get("index_success_at"), checked_at)
         received = int(quote.get("received") or 0)
         fresh = int(quote.get("fresh") or 0)
+        index_fresh = int(quote.get("indices_fresh") or 0)
         checks.append(_check("live_quote_flow", success_age is not None and success_age <= 20 and
                              received > 0 and fresh > 0,
                              (f"success_age={round(success_age, 1) if success_age is not None else 'missing'}s; "
                               f"received={received}; fresh={fresh}")))
+        checks.append(_check("live_index_flow", index_age is not None and index_age <= 30 and index_fresh >= 4,
+                             (f"success_age={round(index_age, 1) if index_age is not None else 'missing'}s; "
+                              f"fresh={index_fresh}")))
 
     status = READY if all(item["passed"] for item in checks) else FAILED
     return OpeningGuardVerdict(stage, status, checked_at, tuple(checks), recovery_attempted, calendar_reason)

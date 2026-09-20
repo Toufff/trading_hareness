@@ -18,7 +18,8 @@ def build_intraday_advisory_router(async_database: Any, *, read_status: Callable
         payload = await read_status(async_database, limit=limit)
         return {
             "enabled": runtime_enabled(), "transport_configured": transport_configured(),
-            "cadence": {"quote_acquisition_seconds": 5, "local_evaluation_seconds": 1,
+            "cadence": {"quote_acquisition_seconds": 5, "index_acquisition_seconds": 15,
+                        "industry_board_source_seconds": 60, "local_evaluation_seconds": 1,
                         "deepseek_seconds": 600, "codex_seconds": 1800,
                         "special_reports": ["11:35", "14:45"]},
             **payload,
