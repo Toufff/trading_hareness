@@ -50,6 +50,17 @@ class TradeThesisRulesTests(unittest.TestCase):
         self.assertAlmostEqual(ratios["versus_mean5"], 1.06, places=2)
         self.assertNotIn("significant_selloff", ratios)
 
+    def test_corrected_evidence_version_is_not_a_market_change(self):
+        old = evaluate_thesis(thesis(), [evidence(11.5), evidence(2412323.87,
+            metric="amount", evidence_id="old-unit", version="old")], self.cutoff)
+        current = evaluate_thesis(thesis(), [evidence(11.5), evidence(2412323870,
+            metric="amount", evidence_id="fixed-unit", version="fixed")], self.cutoff, old)
+        change = next(c for c in current["changes_since_previous"] if c["metric"] == "amount")
+        self.assertEqual(change["impact"], "evidence_version_changed")
+        self.assertFalse(change["directly_comparable"])
+        self.assertEqual((change["old_version"], change["version"]), ("old", "fixed"))
+        self.assertEqual(current["states"], old["states"])
+
     def test_wording_or_source_rerun_does_not_change_deterministic_states(self):
         a = evaluate_thesis(thesis(), [evidence()], self.cutoff)
         b = evaluate_thesis(thesis(claim="用户改了问法", source_run_id="model-rerun"), [evidence()], self.cutoff)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { benchmarkLabel, metricLabelText, observationValue, rankText, textValue, thesisChartAnnotations, thesisItems } from './trade-thesis';
+import { benchmarkLabel, evidenceVersionNote, isEvidenceVersionChange, metricLabelText, observationValue, rankText, textValue, thesisChartAnnotations, thesisItems } from './trade-thesis';
 
 describe('trade thesis presentation model', () => {
   it('projects the nested owner API contract without deriving a holding action', () => {
@@ -41,6 +41,13 @@ describe('trade thesis presentation model', () => {
     expect(rankText({ lane: 'accumulation', rank: 1, population: 34 })).toContain('潜伏观察');
     expect(textValue({ metric: 'close' })).toBe('价格与原结构的关系待验证');
     expect(textValue({ metric: 'full_entry_scenario_confirmed' })).toContain('不构成下单信号');
+  });
+
+  it('distinguishes an evidence version correction from a market move', () => {
+    const change = { metric: 'amount', old_value: 241232.387, new_value: 241232387, unit: 'CNY', impact: 'evidence_version_changed', directly_comparable: false, old_version: 'legacy_thousand_cny', version: 'cny_v2' };
+    expect(isEvidenceVersionChange(change)).toBe(true);
+    expect(evidenceVersionNote(change)).toContain('数据口径/版本修正，非行情变化');
+    expect(evidenceVersionNote(change)).toContain('legacy_thousand_cny → cny_v2');
   });
 
   it('marks changed ranking scopes as non-comparable and only charts explicit server lines', () => {

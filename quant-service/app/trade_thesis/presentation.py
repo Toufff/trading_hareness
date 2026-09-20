@@ -12,7 +12,11 @@ def evaluation_summary(evaluation: dict) -> str:
     if excluded:
         parts.append("排除：" + "、".join(f"{item.get('evidence_id') or item.get('metric')}({item['reason']})" for item in excluded) + "。")
     if changes:
-        parts.append("变化：" + "；".join(f"{c['metric']} {c['old_value']}→{c['new_value']} {c.get('unit') or ''}" for c in changes) + "。")
+        parts.append("变化：" + "；".join(
+            f"{c['metric']} 数据口径/版本修正，非行情变化；当前{c['new_value']} {c.get('unit') or ''}"
+            if c.get('directly_comparable') is False else
+            f"{c['metric']} {c['old_value']}→{c['new_value']} {c.get('unit') or ''}"
+            for c in changes) + "。")
     if next_checks:
         parts.append("下一验证：" + "、".join(str(item.get("metric") or item["condition_id"]) for item in next_checks) + "。")
     return "".join(parts)

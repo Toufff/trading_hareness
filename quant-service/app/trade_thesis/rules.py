@@ -123,11 +123,14 @@ def evaluate_thesis(thesis: dict, evidence: list[dict], cutoff_at: str, previous
         if old is None and len(prior_by_metric.get(observation["metric"], [])) == 1:
             old = prior_by_metric[observation["metric"]][0]
             impact, comparable = "comparison_basis_changed", False
+        if old is not None and old.get("version") != observation.get("version"):
+            impact, comparable = "evidence_version_changed", False
         if old is not None and (old.get("value") != observation.get("value") or not comparable):
             changes.append({"metric": observation["metric"], "old_value": old.get("value"),
                             "new_value": observation.get("value"), "unit": observation.get("unit"),
                             "old_basis": old.get("basis"), "basis": observation.get("basis"),
                             "old_benchmark": old.get("benchmark"), "benchmark": observation.get("benchmark"),
+                            "old_version": old.get("version"), "version": observation.get("version"),
                             "evidence_id": observation["evidence_id"], "impact": impact,
                             "directly_comparable": comparable})
     contrary = [r for r in flat if (r["result"] == "true" and r.get("purpose") in {"invalidation", "soft_warning"}) or
@@ -144,7 +147,7 @@ def evaluate_thesis(thesis: dict, evidence: list[dict], cutoff_at: str, previous
     input_hash = _hash({"revision": revision, "eligible_evidence": eligible, "excluded": excluded,
                         "previous_evaluation_id": (previous or {}).get("evaluation_id"),
                         "previous_observations": (previous or {}).get("observations", []),
-                        "evaluator_version": "trade_thesis_rules_v1"})
+                        "evaluator_version": "trade_thesis_rules_v1.1"})
     core["input_hash"] = input_hash
     core["evaluation_id"] = _hash({"thesis_id": revision["thesis_id"], "revision": revision["revision"],
                                     "cutoff_at": cutoff_at, "input_hash": input_hash,

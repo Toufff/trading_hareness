@@ -23,6 +23,10 @@ export type ThesisEvidenceDelta = {
   benchmark?: string | null;
   evidence_id?: string | null;
   impact_scope?: string | null;
+  impact?: string | null;
+  directly_comparable?: boolean | null;
+  old_version?: string | null;
+  version?: string | null;
 };
 
 export type ThesisObservation = {
@@ -240,6 +244,15 @@ export function observationValue(value: unknown, metric?: string, unit?: string 
   if (unit === 'CNY') return `${value.toFixed(2)} 元`;
   if ((metric ?? '').includes('ratio') || unit === 'ratio' || unit === 'x') return `${value.toFixed(2)} 倍`;
   return `${value.toFixed(2)}${unit ? ` ${unit}` : ''}`;
+}
+
+export function isEvidenceVersionChange(change: ThesisEvidenceDelta): boolean {
+  return change.directly_comparable === false || change.impact === 'evidence_version_changed';
+}
+
+export function evidenceVersionNote(change: ThesisEvidenceDelta): string {
+  const versions = [change.old_version, change.version].filter(Boolean).join(' → ');
+  return `数据口径/版本修正，非行情变化${versions ? `（${versions}）` : ''}`;
 }
 
 function laneLabel(value?: string | null): string | undefined {

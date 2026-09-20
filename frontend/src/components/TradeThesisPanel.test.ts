@@ -54,4 +54,21 @@ describe('TradeThesisPanel', () => {
     expect(wrapper.text()).toContain('等待确认');
     wrapper.unmount();
   });
+
+  it('does not present a data version correction as a market jump', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ items: [{
+      thesis_id: 't-version', symbol: '600613.SH', revision: 1, thesis: { claim: '数据修正测试' },
+      evaluation: { states: { thesis_state: 'supported', evidence_status: 'complete', entry_state: 'waiting' }, changes_since_previous: [{
+        metric: 'amount', old_value: 241232.387, new_value: 241232387, unit: 'CNY',
+        impact: 'evidence_version_changed', directly_comparable: false, old_version: 'legacy_thousand_cny', version: 'cny_v2',
+      }] },
+    }] }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const wrapper = mount(TradeThesisPanel, { props: { symbol: '600613.SH' }, global: { plugins: [ElementPlus] } });
+    await flushPromises();
+    expect(wrapper.text()).toContain('当前 2.41 亿元');
+    expect(wrapper.text()).toContain('数据口径/版本修正，非行情变化');
+    expect(wrapper.text()).toContain('旧口径值见审计时间轴');
+    expect(wrapper.text()).not.toContain('2412.32 万元 →');
+    wrapper.unmount();
+  });
 });
