@@ -325,6 +325,53 @@ class DatabaseReadTests(unittest.TestCase):
         self.assertEqual((lane["source"], lane["lane"], lane["reference"], lane["support"], lane["formal_state"]),
                          ("intraday_strategy_scan", "reclaim", 8.54, 8.04, "tracking"))
 
+    def test_the_settled_post_close_candidate_wins_when_it_is_newer(self):
+        # The docstring always said the intraday scan wins "when it is newer".
+        # It never was: the intraday branch returned as soon as the latest
+        # completed scan contained the symbol, so a Friday 14:55 scan outranked
+        # that evening's settled candidate and a Monday plan quoted a reference
+        # price computed before the close it was meant to be based on.
+        scan = {"run_id": "22222222-2222-2222-2222-222222222222",
+                "cutoff": datetime(2026, 9, 18, 14, 55, tzinfo=SH),
+                "result": {"lanes": [{"key": "reclaim", "items": [
+                    {"symbol": SYMBOL, "lane": "reclaim", "state": "wait_confirmation",
+                     "formal_state": "tracking", "reference": 8.54, "support": 8.04}]}]}}
+        candidate = {"run_id": "33333333-3333-3333-3333-333333333333",
+                     "candidate_type": "base_ready_30d", "rank": 3, "score": Decimal("71"),
+                     "structure": {"metrics": {"resistance_price": 9.1, "support_price": 7.9}},
+                     "reason_codes": ["base"],
+                     "discovered_at": datetime(2026, 9, 18, 17, 0, tzinfo=SH)}
+        lane = lane_membership(FakeConnection(scan=scan, candidate=candidate), SYMBOL, AS_OF)
+        self.assertEqual((lane["source"], lane["reference"], lane["support"]),
+                         ("post_close_strategy_candidates", 9.1, 7.9))
+        self.assertEqual(lane["observed_at"], str(datetime(2026, 9, 18, 17, 0, tzinfo=SH)))
+
+    def test_a_tie_keeps_the_intraday_row_because_it_carries_reference_and_support(self):
+        same = datetime(2026, 9, 18, 15, 0, tzinfo=SH)
+        scan = {"run_id": "22222222-2222-2222-2222-222222222222", "cutoff": same,
+                "result": {"lanes": [{"key": "reclaim", "items": [
+                    {"symbol": SYMBOL, "lane": "reclaim", "reference": 8.54, "support": 8.04}]}]}}
+        candidate = {"run_id": "33333333-3333-3333-3333-333333333333",
+                     "candidate_type": "base_ready_30d", "rank": 3, "score": Decimal("71"),
+                     "structure": {"metrics": {"resistance_price": 9.1, "support_price": 7.9}},
+                     "reason_codes": ["base"], "discovered_at": same}
+        lane = lane_membership(FakeConnection(scan=scan, candidate=candidate), SYMBOL, AS_OF)
+        self.assertEqual(lane["source"], "intraday_strategy_scan")
+
+    def test_an_unorderable_pair_keeps_the_intraday_row_instead_of_guessing(self):
+        # A naive timestamp cannot be compared with an aware one; refusing to
+        # order them must not raise, and must not silently flip the choice.
+        scan = {"run_id": "22222222-2222-2222-2222-222222222222",
+                "cutoff": datetime(2026, 9, 18, 14, 55, tzinfo=SH),
+                "result": {"lanes": [{"key": "reclaim", "items": [
+                    {"symbol": SYMBOL, "lane": "reclaim", "reference": 8.54, "support": 8.04}]}]}}
+        candidate = {"run_id": "33333333-3333-3333-3333-333333333333",
+                     "candidate_type": "base_ready_30d", "rank": 3, "score": Decimal("71"),
+                     "structure": {"metrics": {}}, "reason_codes": [],
+                     "discovered_at": datetime(2026, 9, 18, 17, 0)}
+        lane = lane_membership(FakeConnection(scan=scan, candidate=candidate), SYMBOL, AS_OF)
+        self.assertEqual(lane["source"], "intraday_strategy_scan")
+
     def test_post_close_candidate_is_the_fallback_and_absence_is_none(self):
         candidate = {"run_id": "33333333-3333-3333-3333-333333333333", "candidate_type": "base_ready_30d",
                      "rank": 3, "score": Decimal("71"),

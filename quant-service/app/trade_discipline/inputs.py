@@ -268,37 +268,70 @@ def sector_daily_change(connection: Any, taxonomy: str, sector_key: str, day: da
     return _number(row.get("change_pct")) if row else None
 
 
+def _strictly_after(later: Any, earlier: Any) -> bool:
+    """Whether ``later`` is a usable timestamp strictly after ``earlier``.
+
+    Returns ``False`` when either side is missing or the two cannot be
+    compared (a naive and an aware datetime raise ``TypeError``).  Refusing to
+    order them keeps the incumbent rather than guessing, because the caller's
+    tie-break already names which row should win when the answer is unknown.
+    """
+    if later is None or earlier is None:
+        return False
+    try:
+        return bool(later > earlier)
+    except TypeError:
+        return False
+
+
 def lane_membership(connection: Any, symbol: str, at: datetime) -> dict[str, Any] | None:
-    """Lane attribution and ``formal_state`` from the latest scan that saw ``symbol``.
+    """Lane attribution and ``formal_state`` from the freshest scan that saw ``symbol``.
 
     The intraday scan wins when it is newer, because it carries the reference
     and support levels a ``new_buy`` plan needs; the post-close candidate is the
     fallback.  Stage classification only records this - it never overrides the
     branch the daily data selected.
+
+    That rule used to live only in this docstring.  The intraday branch
+    returned as soon as the latest completed scan happened to contain the
+    symbol, and the two timestamps were never compared -- so a Friday 14:55
+    scan outranked that same evening's settled post-close candidate, and a
+    Monday plan quoted a reference price computed before the close it was
+    supposed to be based on.  A tie keeps the intraday row: it is the one
+    carrying reference and support.
     """
-    intraday = _one(connection, """
+    scan = _one(connection, """
         SELECT run_id,cutoff,result FROM quant.intraday_strategy_scans
          WHERE state='completed' AND cutoff<=%s ORDER BY cutoff DESC LIMIT 1""", (at,))
-    for lane in ((intraday or {}).get("result") or {}).get("lanes") or []:
+    intraday: dict[str, Any] | None = None
+    intraday_at = None
+    for lane in ((scan or {}).get("result") or {}).get("lanes") or []:
         for item in lane.get("items") or lane.get("top") or []:
             if isinstance(item, dict) and item.get("symbol") == symbol:
-                return {
-                    "source": "intraday_strategy_scan", "run_id": str(intraday["run_id"]),
-                    "observed_at": str(intraday["cutoff"]),
+                intraday_at = scan["cutoff"]
+                intraday = {
+                    "source": "intraday_strategy_scan", "run_id": str(scan["run_id"]),
+                    "observed_at": str(intraday_at),
                     "lane": item.get("lane") or lane.get("key"), "formal_state": item.get("formal_state"),
                     "state": item.get("state"), "reference": _number(item.get("reference")),
                     "support": _number(item.get("support")), "reason": item.get("reason") or item.get("current_reason"),
                 }
+                break
+        if intraday is not None:
+            break
     candidate = _one(connection, """
         SELECT run_id,candidate_type,rank,score,structure,reason_codes,discovered_at
           FROM quant.post_close_strategy_candidates
          WHERE symbol=%s AND discovered_at<=%s ORDER BY discovered_at DESC LIMIT 1""", (symbol, at))
     if candidate is None:
-        return None
+        return intraday
+    candidate_at = candidate.get("discovered_at")
+    if intraday is not None and not _strictly_after(candidate_at, intraday_at):
+        return intraday
     metrics = (candidate.get("structure") or {}).get("metrics") or {}
     return {
         "source": "post_close_strategy_candidates", "run_id": str(candidate["run_id"]),
-        "observed_at": str(candidate["discovered_at"]), "lane": candidate.get("candidate_type"),
+        "observed_at": str(candidate_at), "lane": candidate.get("candidate_type"),
         "formal_state": None, "state": None,
         "reference": _number(metrics.get("resistance_price")), "support": _number(metrics.get("support_price")),
         "reason": ",".join(str(code) for code in (candidate.get("reason_codes") or [])) or None,
