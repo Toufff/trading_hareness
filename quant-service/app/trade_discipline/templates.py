@@ -31,13 +31,17 @@ from typing import Any
 
 from ..short_term_lanes.risk import MIN_VOLATILITY_BUFFER_PCT, volatility_buffer_pct
 from .contracts import Action, Confirm, Derivation, Line, Sizing, eval_expression
+from .risk_policy import PER_NAME_LOSS_TOLERANCE_PCT, policy_record
 
 TEMPLATE_VERSION = "trade-discipline-templates-v5"
 
 # The per-name exposure cap is no longer a hand-picked stage table: it is read from the calibration
 # artifact (exposure_calibration.json, see exposure_calibration.py) for the plan's stage x board, and
 # the holiday cap from the same artifact's holiday cells.
-DEFAULT_RISK_PER_TRADE_PCT = Decimal("1.0")
+# One policy value, two lenses; see risk_policy.py. This is the stop-loss
+# lens, the cap below is the extreme-loss lens, and both come from the same
+# tolerance so neither can drift from what the user actually set.
+DEFAULT_RISK_PER_TRADE_PCT = PER_NAME_LOSS_TOLERANCE_PCT
 TIME_STOP_DAYS: dict[str, int] = {"crash_rebound": 3, "broken": 3}
 DEFAULT_TIME_STOP_DAYS = 5
 CONFIRM_REFERENCE: dict[str, str] = {
@@ -59,9 +63,9 @@ STOP_PCT_MIN = 0.015
 STOP_PCT_MAX = 0.12
 STOP_PCT_TARGET = 0.02
 TRAIL_ARM_ATR_MULTIPLE = 1.0
-# A new buy is sized off ``entry_price``; buying further above it than half an
-# ATR would carry more than the 1% risk the sizing promised, so the trigger is
-# capped there and a close beyond the cap reads "已越过追高上限，不买".
+# A new buy is sized off ``entry_price``; buying further above it carries more
+# risk than the sizing promised, so the trigger is capped half an ATR above it
+# and a close beyond the cap reads "已越过追高上限，不买".
 CHASE_CAP_ATR_MULTIPLE = 0.5
 # The buy trigger must sit clearly above the hard stop: a close that satisfies
 # "buy" must never already be a close that says "exit".  Its floor is
@@ -283,7 +287,8 @@ def build_sizing(*, stage: str, equity: Decimal, risk_per_trade_pct: Decimal, re
                  exposure_basis: dict[str, Any] | None = None) -> Sizing:
     """``recommended = min(risk-based max_shares, cap-based shares)``.
 
-    * risk: ``max_shares = floor(equity x risk% / stop_distance / 100) x 100`` (the 1% rule);
+    * risk: ``max_shares = floor(equity x risk% / stop_distance / 100) x 100`` (the stop-loss
+      lens of the per-name tolerance, risk_policy.py);
     * cap: ``floor(equity x cap% / reference / 100) x 100`` where ``cap%`` is the calibrated
       extreme-loss cap of the plan's stage x board (``exposure_basis`` says which cell).
     """
@@ -305,6 +310,7 @@ def build_sizing(*, stage: str, equity: Decimal, risk_per_trade_pct: Decimal, re
         current_risk_pct=current_risk_pct,
         cap_shares=exposure_shares, binding_constraint="risk" if max_shares <= exposure_shares else "cap",
         exposure_basis=exposure_basis,
+        risk_policy=policy_record(risk_per_trade_pct),
     )
 
 

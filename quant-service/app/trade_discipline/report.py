@@ -257,9 +257,12 @@ def sizing_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
         if position is not None and position.market_value is not None else None)
     return [
         {"key": "equity", "label": "账户权益 equity", "value": _fmt(sizing.equity)},
-        {"key": "risk_per_trade_pct", "label": "单笔风险比例", "value": _pct(sizing.risk_per_trade_pct)},
+        {"key": "risk_per_trade_pct", "label": "单笔亏损容忍度（止损口径）", "value": _pct(sizing.risk_per_trade_pct)},
+        # The open risk stays immediately under the budget it is judged against.
         {"key": "current_risk_pct", "label": "当前持仓风险 current_risk_pct = 持仓股数 × 止损距离 / equity",
          "value": _pct(_current_risk_pct(sizing))},
+        {"key": "risk_policy", "label": "风险政策来源",
+         "value": _risk_policy_text(sizing.risk_policy)},
         {"key": "risk_amount", "label": "风险预算 = equity × risk%", "value": _fmt(sizing.risk_amount)},
         {"key": "reference_price", "label": "参考价", "value": _fmt(sizing.reference_price)},
         {"key": "hard_stop", "label": "硬止损", "value": _fmt(sizing.hard_stop)},
@@ -271,7 +274,8 @@ def sizing_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
          "value": _cap_basis_text(sizing.exposure_basis) if sizing.exposure_basis else DASH},
         {"key": "cap_shares", "label": "阶段上限股数", "value": _fmt(sizing.cap_shares)},
         {"key": "binding_constraint", "label": "起约束的限制",
-         "value": {"risk": "风险上限（1%÷止损距离）", "cap": "阶段上限（极端亏损5%）"}.get(
+         "value": {"risk": f"风险上限（{_pct(sizing.risk_per_trade_pct)}÷止损距离）",
+                   "cap": f"阶段上限（同一容忍度 {_pct(sizing.risk_per_trade_pct)} 的极端情形口径）"}.get(
              sizing.binding_constraint or "", DASH)},
         {"key": "current_shares", "label": "当前持仓", "value": f"{_fmt(sizing.current_shares)} 股"},
         {"key": "sellable_quantity", "label": "当日可卖 sellable_quantity",
@@ -307,6 +311,24 @@ def recommendation_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
              "note": str(conditions.get("note") or "研究条件，非系统线"),
              "decision_id": conditions.get("decision_id"), "as_of_date": conditions.get("as_of_date")}
             for key, label in labels if conditions.get(key)]
+
+
+def _risk_policy_text(policy: dict[str, Any] | None) -> str:
+    """Say whether the number that sized this plan is the standing policy.
+
+    Before the policy record existed, ``risk_per_trade_pct`` read the same way
+    whether the user had chosen it or it was a module default nobody had ever
+    put to them -- and for every card generated up to 2026-09-20 it was the
+    latter.
+    """
+    if not policy:
+        return "未记录（该计划早于风险政策记录）"
+    source = str(policy.get("source") or "")
+    applied = policy.get("applied_pct")
+    standing = policy.get("per_name_loss_tolerance_pct")
+    if source == "cli_override":
+        return f"命令行覆盖 {applied}%（标准政策为 {standing}%，本卡未按标准政策生成）"
+    return f"用户设定 {standing}%（{policy.get('set_at')}），正常止损与极端情形同一标准，无账户总额限制"
 
 
 def _cap_basis_text(basis: dict[str, Any]) -> str:

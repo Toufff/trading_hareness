@@ -39,11 +39,13 @@ from typing import Any, Iterable
 
 from ..market_rules import a_share_limit_ratio
 from ..research_prices import adjusted_value
+from .risk_policy import PER_NAME_LOSS_TOLERANCE_PCT
 from .stage import InsufficientBars, classify_stage, daily_metrics, normalize_bars
 
 CALIBRATION_METHOD_VERSION = "discipline-exposure-calibration-v1"
 ARTIFACT_PATH = Path(__file__).with_name("exposure_calibration.json")
-TOLERANCE_PCT = 5.0
+# The single policy value, shared with the stop-loss lens; see risk_policy.py.
+TOLERANCE_PCT = float(PER_NAME_LOSS_TOLERANCE_PCT)
 PERCENTILE = 99.0
 SECONDARY_PERCENTILE = 95.0
 HORIZON_SESSIONS = 2

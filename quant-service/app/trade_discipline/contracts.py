@@ -178,6 +178,11 @@ class Sizing(BaseModel):
     cap_shares: int | None = Field(default=None, ge=0)
     binding_constraint: Literal["risk", "cap"] | None = None
     exposure_basis: dict[str, Any] | None = None
+    # Where ``risk_per_trade_pct`` came from: the standing policy the user set,
+    # or an operator's ``--risk-per-trade-pct``. Optional so plans written
+    # before 2026-09-20 still load; before it existed, a default nobody had
+    # chosen was indistinguishable from a decision the user had made.
+    risk_policy: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def validate_stop(self) -> "Sizing":

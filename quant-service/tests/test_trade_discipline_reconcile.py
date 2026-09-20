@@ -70,7 +70,10 @@ class SignalTests(unittest.TestCase):
                          {"exposure", "hard_stop", "no_add"})
         expected = {signal.line_kind: (signal.side, signal.expected_quantity) for signal in self.signals}
         self.assertEqual(expected["hard_stop"], ("sell", 5800))       # exit_all on the whole position
-        self.assertEqual(expected["exposure"], ("sell", 4300))        # 5800 -> 1500 recommended shares
+        # 5800 -> 2900 recommended. Under the 1% default this was 5800 -> 1500;
+        # the per-name tolerance the user actually set (5%) makes the extreme-loss
+        # cap the binding limit instead of the stop-loss budget.
+        self.assertEqual(expected["exposure"], ("sell", 2900))
         self.assertEqual(expected["no_add"], (None, None))            # a prohibition expects no fill
 
     def test_a_drawn_soft_stop_expects_a_half_position_fill(self):

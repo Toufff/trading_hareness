@@ -30,6 +30,10 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'quant-service'))
 from dotenv import load_dotenv  # noqa: E402
+# The standing risk policy, not a second copy of the number: a CLI default of
+# its own is exactly how 1% ended up governing every card while the 5% the
+# user set governed none of them.
+from app.trade_discipline.risk_policy import PER_NAME_LOSS_TOLERANCE_PCT  # noqa: E402
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 SESSION_CLOSE = time(15, 0)
@@ -460,7 +464,8 @@ def build_parser():
     generate = sub.add_parser('generate', parents=[common], help='从证据推导纪律计划并生成纪律卡')
     generate.add_argument('--as-of', help='ISO time in Asia/Shanghai; default now')
     generate.add_argument('--run-id', help='reuse one generation run id (uuid)')
-    generate.add_argument('--risk-per-trade-pct', default='1.0')
+    generate.add_argument('--risk-per-trade-pct', default=str(PER_NAME_LOSS_TOLERANCE_PCT),
+                          help='覆盖标准风险政策；卡片会把来源记为 cli_override')
     generate.add_argument('--lowered-reason', help='required when the hard stop falls below the previous plan')
     generate.add_argument('--no-live', action='store_true', help='settled bars only, never a live quote')
 

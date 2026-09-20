@@ -30,6 +30,7 @@ from app.trade_discipline.generator import (
 )
 from app.trade_discipline.quality import evaluate_quality, failed_checks
 from app.trade_discipline.report import plan_payload, render_markdown
+from app.trade_discipline.risk_policy import PER_NAME_LOSS_TOLERANCE_PCT
 from app.trade_discipline.templates import (
     CHASE_CAP_ATR_MULTIPLE,
     STOP_PCT_MAX,
@@ -98,7 +99,7 @@ class RealPoolEntryPriceTests(unittest.TestCase):
         self.assertGreater(worst_distance_pct, 12.0)
         self.assertGreater(worst_risk_pct, 1.5)
 
-    def test_every_pick_is_sized_on_the_close_and_keeps_its_risk_within_one_percent(self):
+    def test_every_pick_is_sized_on_the_close_and_keeps_its_risk_within_the_policy(self):
         for symbol, name, lane, reference, support, close in POOL_2026_09_18:
             with self.subTest(symbol=symbol):
                 plan = generate(real_inputs(symbol, name, lane, reference, support))
@@ -114,8 +115,12 @@ class RealPoolEntryPriceTests(unittest.TestCase):
                 distance_pct = float(distance / plan.sizing.reference_price)
                 risk_pct = plan.sizing.max_shares * float(distance) / float(EQUITY) * 100
                 if plan.status == "active":
-                    self.assertLessEqual(risk_pct, 1.0)
-                    self.assertLessEqual(plan.sizing.recommended_shares * float(distance) / float(EQUITY) * 100, 1.0)
+                    # The standing tolerance, not a literal: the module spent its first
+                    # two days sizing to a 1% default nobody had chosen.
+                    budget = float(PER_NAME_LOSS_TOLERANCE_PCT)
+                    self.assertLessEqual(risk_pct, budget)
+                    self.assertLessEqual(
+                        plan.sizing.recommended_shares * float(distance) / float(EQUITY) * 100, budget)
                     self.assertLessEqual(distance_pct, STOP_PCT_MAX)
                     self.assertGreaterEqual(distance_pct, STOP_PCT_MIN)
                     self.assertEqual(failed_checks(plan.quality), [])
