@@ -23,6 +23,7 @@ from fastapi import APIRouter, Header, HTTPException, Query
 
 from ..peer_contract import build_contract
 from ..peer_error_feed import LOG_TIMEZONE, collect_role_errors
+from ..runtime_executors import run_database_blocking
 
 #: A feed is for noticing a problem, not for archaeology.  A consumer wanting
 #: more history should poll more often rather than ask for a year at once.
@@ -52,6 +53,7 @@ def build_peer_support_router(
     log_directory: Callable[[], str],
     allowed_roles: Callable[[], tuple[str, ...]],
     contract_builder: Callable[..., dict[str, Any]] = build_contract,
+    feed_reader: Callable[..., dict[str, Any]] = collect_role_errors,
     now: Callable[[], datetime] | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["peer-support"])
@@ -65,7 +67,7 @@ def build_peer_support_router(
             raise HTTPException(status_code=401, detail="valid X-Quant-Read-Key is required")
 
     @router.get("/api/v1/peer/contract")
-    def peer_contract(
+    async def peer_contract(
         x_quant_read_key: str | None = Header(default=None, alias="X-Quant-Read-Key"),
         role: str | None = Query(default=None, description="role whose grants to report; must be allowlisted"),
     ) -> dict[str, Any]:
@@ -76,11 +78,15 @@ def build_peer_support_router(
         target = (role or roles[0]).strip()
         if target not in roles:
             raise HTTPException(status_code=403, detail=f"role {target!r} is not published through this endpoint")
-        with database.transaction() as connection:
-            return contract_builder(connection, peer_role=target)
+
+        def _introspect() -> dict[str, Any]:
+            with database.transaction() as connection:
+                return contract_builder(connection, peer_role=target)
+
+        return await run_database_blocking(_introspect, timeout_seconds=10)
 
     @router.get("/api/v1/peer/errors")
-    def peer_errors(
+    async def peer_errors(
         x_quant_read_key: str | None = Header(default=None, alias="X-Quant-Read-Key"),
         role: str | None = Query(default=None, description="role to report on; must be allowlisted"),
         since: str | None = Query(default=None, description="ISO 8601; defaults to 24 hours ago"),
@@ -106,13 +112,18 @@ def build_peer_support_router(
         directory = Path(log_directory())
         if not directory.is_dir():
             raise HTTPException(status_code=503, detail="the owner log directory is not readable from this service")
-        payload = collect_role_errors(
-            log_dir=directory,
-            role=target,
-            since=window_since,
-            until=window_until,
-            limit=limit,
-        )
+        def _scan() -> dict[str, Any]:
+            return feed_reader(
+                log_dir=directory,
+                role=target,
+                since=window_since,
+                until=window_until,
+                limit=limit,
+            )
+
+        # Scanning up to 64 MB of log is blocking I/O, so it goes to the batch
+        # lane rather than the fast one the dashboard and /health share.
+        payload = await run_database_blocking(_scan, timeout_seconds=30, lane="batch")
         payload["live_effect"] = "none"
         return payload
 
