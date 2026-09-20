@@ -113,6 +113,37 @@ Assert-True ($publishSource -notmatch 'Start-ProductionRuntime\s+-RuntimeRoot\s+
 Assert-True ($publishSource -match '\.failed') `
     'publish-stock-release.ps1 must rename a release that never activated successfully to "<id>.failed" so the retention policy skips it'
 
+# --- Deploy announcement ordering -------------------------------------------
+# The external consumer cannot be told over HTTP that a restart is a deploy,
+# because HTTP is what goes away. The announcement goes to the database, which
+# a release does not restart -- but only if it is written while the consumer
+# can still read it, i.e. before the first stop and before any tunnel reinstall.
+$announceStartIndex = $publishSource.IndexOf("Invoke-StockDeployAnnounce -Phase 'starting'")
+$firstStopIndex = $publishSource.IndexOf('Stop-ProductionRuntime -RuntimeRoot $fallbackRoot')
+Assert-True ($announceStartIndex -ge 0 -and $firstStopIndex -ge 0) `
+    'publish-stock-release.ps1 must announce the deploy and must still stop the production runtime'
+Assert-True ($announceStartIndex -lt $firstStopIndex) `
+    'the "starting" announcement must be written before the first stop: after it, the consumer may have lost the connection it would read the announcement over'
+$keepTunnelIndex = $publishSource.IndexOf('$keepTunnel = ($null -ne $tunnelPlan)')
+Assert-True ($keepTunnelIndex -ge 0 -and $keepTunnelIndex -lt $announceStartIndex) `
+    'the tunnel gate must be decided before the announcement, so the row can say whether the database path drops too'
+Assert-True ($publishSource -match "Invoke-StockDeployAnnounce -Phase 'completed'") `
+    'publish-stock-release.ps1 must close a successful deploy out'
+Assert-True ($publishSource -match "Invoke-StockDeployAnnounce -Phase 'failed'") `
+    'publish-stock-release.ps1 must close a failed deploy out too: a consumer watching the table must learn the window ended either way'
+Assert-True ($publishSource -match 'Write-Warning "Deploy announcement \(\$Phase\) was not written') `
+    'a failed announcement must warn and continue: a release blocked by its own bookkeeping is worse than an unannounced one'
+
+# --- Deploy window gate ------------------------------------------------------
+Assert-True ($publishSource -match '\[switch\]\$IgnoreDeployWindow') `
+    'publish-stock-release.ps1 must expose an explicit override for the closed deploy windows'
+$windowCheckIndex = $publishSource.IndexOf("Invoke-StockDeployAnnounceCli -Arguments @('check-window')")
+$releaseStampIndex = $publishSource.IndexOf('$stamp = [DateTimeOffset]::Now.ToString')
+Assert-True ($windowCheckIndex -ge 0 -and $windowCheckIndex -lt $releaseStampIndex) `
+    'the deploy window must be checked before the test and build phases: refusing after four minutes of work teaches the operator to pass the override by reflex'
+Assert-True ($publishSource -match 'exit_code -eq 3') `
+    'only the deliberate window refusal (exit 3) may stop a publish; any other failure of the gate must warn and continue'
+
 Assert-True ($publishSource.Contains("`$branch = (@(& git -C `$source branch --show-current) -join '').Trim()")) `
     'publish-stock-release.ps1 must normalize an empty detached-HEAD branch result before Trim()'
 Assert-True ($publishSource.Contains("if (-not `$branch) { `$branch = 'DETACHED' }")) `
@@ -1405,4 +1436,7 @@ Assert-True ($statusSource.Contains('last_installed_from') -and $statusSource.Co
     switch_skip_event_written_after_its_release_state_write = $true
     batch_tunnel_judged_by_the_same_gate = $true
     batch_tunnel_installed_stopped_and_disabled_by_both_release_scripts = $true
+    deploy_announced_before_the_first_stop = $true
+    deploy_announcement_never_blocks_the_release = $true
+    deploy_window_checked_before_the_test_phase = $true
 }

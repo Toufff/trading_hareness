@@ -14,7 +14,11 @@ param(
     [int]$PublishLockTimeoutSeconds = 900,
     # Used for a UI-disruption repair: never restart a known-noisy old task
     # merely because activation/health verification of the new release failed.
-    [switch]$KeepStoppedOnFailure
+    [switch]$KeepStoppedOnFailure,
+    # Publish inside a closed window (the trading session, or the peer's batch
+    # slot). A fix that must ship during the session is a real thing; making it
+    # explicit is the point, so the refusal still names the window it overrode.
+    [switch]$IgnoreDeployWindow
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +32,75 @@ if (-not $platform.StartsWith('G:\', [StringComparison]::OrdinalIgnoreCase)) {
 }
 if (-not (Test-Path -LiteralPath (Join-Path $source '.git') -PathType Container)) { throw "Source root is not a Git checkout: $source" }
 Import-Module (Join-Path $source 'scripts\windows\stock-release-management.psm1') -Force
+
+# Deploy-window gate and deploy announcements. Both go through
+# scripts\deploy-announce.py because the policy and the schema belong with the
+# application, not duplicated in PowerShell. Neither is allowed to be the thing
+# that breaks a release: a missing interpreter warns and continues, and only a
+# deliberately closed window (exit 3) stops the publish.
+$deployAnnouncePython = Join-Path $source '.venv\Scripts\python.exe'
+$deployAnnounceScript = Join-Path $source 'scripts\deploy-announce.py'
+
+function Invoke-StockDeployAnnounceCli {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+    if (-not (Test-Path -LiteralPath $script:deployAnnouncePython -PathType Leaf)) {
+        return [pscustomobject]@{ ran = $false; exit_code = $null; output = "no interpreter at $script:deployAnnouncePython" }
+    }
+    # A native non-zero exit must stay a value here, not an exception: exit 3
+    # is the window refusal and is handled by the caller.
+    $previous = $PSNativeCommandUseErrorActionPreference
+    try {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $output = & $script:deployAnnouncePython $script:deployAnnounceScript @Arguments 2>&1
+        return [pscustomobject]@{ ran = $true; exit_code = $LASTEXITCODE; output = (($output | Out-String).Trim()) }
+    } catch {
+        return [pscustomobject]@{ ran = $false; exit_code = $null; output = $_.Exception.Message }
+    } finally {
+        $PSNativeCommandUseErrorActionPreference = $previous
+    }
+}
+
+function Invoke-StockDeployAnnounce {
+    <#
+        One appended phase row. An external consumer cannot tell a 15-second
+        deploy from an outage over HTTP, because HTTP is what goes away; the
+        database stays up, so the warning goes there. `starting` must be
+        written before anything is stopped -- including before a tunnel
+        reinstall -- or the consumer loses its connection before it can read it.
+    #>
+    param(
+        [Parameter(Mandatory)][ValidateSet('starting', 'completed', 'failed')][string]$Phase,
+        [Parameter(Mandatory)][string]$DeployId,
+        [Parameter(Mandatory)][string]$ReleaseId,
+        [string]$GitSha = '',
+        [switch]$TunnelReinstall,
+        [string]$Note = ''
+    )
+    $arguments = @('announce', '--phase', $Phase, '--deploy-id', $DeployId, '--release-id', $ReleaseId)
+    if ($GitSha) { $arguments += @('--git-sha', $GitSha) }
+    if ($TunnelReinstall) { $arguments += '--tunnel-reinstall' }
+    if ($Note) { $arguments += @('--note', $Note) }
+    $result = Invoke-StockDeployAnnounceCli -Arguments $arguments
+    if (-not $result.ran -or $result.exit_code -ne 0) {
+        Write-Warning "Deploy announcement ($Phase) was not written: $($result.output)"
+    } else {
+        Write-Verbose "Deploy announcement ($Phase): $($result.output)"
+    }
+    return $result
+}
+
+if ($IgnoreDeployWindow) {
+    Write-Warning 'Deploy window gate overridden by -IgnoreDeployWindow.'
+} else {
+    $windowCheck = Invoke-StockDeployAnnounceCli -Arguments @('check-window')
+    if (-not $windowCheck.ran) {
+        Write-Warning "Deploy window check skipped: $($windowCheck.output)"
+    } elseif ($windowCheck.exit_code -eq 3) {
+        throw "Refusing to publish: $($windowCheck.output) Pass -IgnoreDeployWindow to override."
+    } elseif ($windowCheck.exit_code -ne 0) {
+        Write-Warning "Deploy window check did not complete: $($windowCheck.output)"
+    }
+}
 
 if (-not $TaskLogonType) {
     # Shared with switch-stock-release.ps1 and with the tunnel reinstall gate,
@@ -279,6 +352,9 @@ $branch = (@(& git -C $source branch --show-current) -join '').Trim()
 if (-not $branch) { $branch = 'DETACHED' }
 $stamp = [DateTimeOffset]::Now.ToString('yyyyMMddTHHmmss')
 $releaseId = "$stamp-$shortHead-$(if ($dirty) { 'dirty' } else { 'clean' })"
+# Groups this publish's phase rows. Derived from the same stamp as $releaseId
+# so an announcement can be lined up with the release it belongs to.
+$deployId = "deploy-$stamp"
 $layout = Get-StockReleaseLayout -PlatformRoot $platform
 New-Item -ItemType Directory -Force -Path $layout.ReleasesRoot | Out-Null
 $stagingRoot = Join-Path $layout.ReleasesRoot ".staging-$releaseId"
@@ -435,6 +511,12 @@ try {
         Write-Warning "Tunnel reinstall gate could not be evaluated, reinstalling: $($_.Exception.Message)"
     }
     $keepTunnel = ($null -ne $tunnelPlan) -and ([string]$tunnelPlan.decision -eq 'skip')
+    # Announce before the first stop, and only here: the tunnel's fate is now
+    # known, so the row can tell the consumer whether its database path will
+    # drop too or only the HTTP surface will.
+    [void](Invoke-StockDeployAnnounce -Phase 'starting' -DeployId $deployId -ReleaseId $releaseId `
+        -GitSha $head -TunnelReinstall:(-not $keepTunnel) `
+        -Note "previous_release=$previousRelease")
     Stop-ProductionRuntime -RuntimeRoot $fallbackRoot -KeepTunnelTask:$keepTunnel
     [void](Set-StockCurrentRelease -PlatformRoot $platform -ReleaseId $releaseId)
     # The instant `current` actually moved. $releaseId's own yyyyMMddTHHmmss
@@ -527,6 +609,9 @@ try {
         Write-StockTunnelReinstallSkipEvent -PlatformRoot $platform -Plan $tunnelPlan -Context 'publish-stock-release.ps1'
     }
     $removed = @(Remove-ExpiredStockReleases -PlatformRoot $platform -RetainCount $RetainCount)
+    [void](Invoke-StockDeployAnnounce -Phase 'completed' -DeployId $deployId -ReleaseId $releaseId `
+        -GitSha $head -TunnelReinstall:(-not $keepTunnel) `
+        -Note "shared_peer_tunnel=$tunnelOutcome")
     [pscustomobject]@{
         status = 'published'
         release_id = $releaseId
@@ -543,6 +628,13 @@ try {
     }
 } catch {
     $failure = $_
+    # Close the deploy out before the rollback: a consumer watching the table
+    # must learn that the window ended, whichever way it ended. A publish that
+    # failed before the `starting` row simply has nothing to close.
+    if ($activationAttempted -and $deployId) {
+        [void](Invoke-StockDeployAnnounce -Phase 'failed' -DeployId $deployId -ReleaseId $releaseId `
+            -GitSha $head -Note ([string]$failure.Exception.Message))
+    }
     if (-not $activated -and $activationAttempted) {
         try {
             # Stop whatever is currently active first -- if Set-StockCurrentRelease

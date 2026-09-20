@@ -59,6 +59,7 @@ SUPPORTED_OBJECTS: tuple[SupportedObject, ...] = (
     SupportedObject("alembic_version", "owner migration head; pin checks against this", "read"),
     SupportedObject("intraday_board_flow_snapshots", "intraday board flow snapshots written by the peer collector", "read-write"),
     SupportedObject("runtime_leases", "background-task leases written by the peer scheduler", "read-write"),
+    SupportedObject("owner_deploy_events", "owner deployment announcements; the only channel a release does not restart", "read"),
 )
 
 COLD_TABLESPACE = "stock_cold"
@@ -156,6 +157,31 @@ NOT_PROVIDED: tuple[AbsentObject, ...] = (
         "The live value set is published under enumerations.factor_semantics.",
     ),
 )
+
+#: How a consumer learns that an interruption is a deployment and not a fault.
+#: The announcement cannot be served over HTTP, because HTTP is exactly what a
+#: release takes away; PostgreSQL is not restarted by a release, so the table is
+#: readable throughout, and the ``starting`` row is written before anything is
+#: stopped -- including before a tunnel reinstall.
+DEPLOY_CHANNEL: dict[str, Any] = {
+    "table": "quant.owner_deploy_events",
+    "phases": ["starting", "completed", "failed"],
+    "grouping_column": "deploy_id",
+    "surfaces": {
+        "http_api": "the owner HTTP surface will restart; measured 9.3 s on 2026-09-20",
+        "shared_tunnel": "the shared-peer tunnel will restart, dropping database connections; "
+                         "measured 5-7 s, and skipped entirely when the tunnel code is unchanged",
+    },
+    "how_to_use": "Poll the newest rows. A deploy_id with a 'starting' row and no 'completed' or "
+                  "'failed' row is in progress: expect failures for expected_seconds, retry rather "
+                  "than alert, and hold writes if surfaces.shared_tunnel is true.",
+    "windows_closed_to_releases": {
+        "trading_session": "09:15-15:10 Asia/Shanghai on exchange trading days",
+        "peer_batch_window": "06:30-08:00 Asia/Shanghai on weekdays",
+    },
+    "note": "A release may still be published inside a closed window when a fix has to ship; the "
+            "announcement is written either way, so the table is the truth, not the policy.",
+}
 
 #: Owner HTTP endpoints an external consumer may call, with the shared read key.
 PUBLISHED_ENDPOINTS: tuple[dict[str, str], ...] = (
@@ -314,6 +340,7 @@ def build_contract(connection: Any, *, peer_role: str = "stock_peer") -> dict[st
             {"name": item.name, "kind": item.kind, "reason": item.reason} for item in NOT_PROVIDED
         ],
         "endpoints": list(PUBLISHED_ENDPOINTS),
+        "deploy_channel": DEPLOY_CHANNEL,
         "rules": [
             "Assert only against objects[] and enumerations[]. Anything absent from this document "
             "is not part of the agreement even if your role can currently read it.",
@@ -321,6 +348,9 @@ def build_contract(connection: Any, *, peer_role: str = "stock_peer") -> dict[st
             "disagree, this contract is authoritative.",
             "A blocking startup check must have passed against this contract at least once before it "
             "is allowed to block. Run it in report-only mode first.",
+            "The owner HTTP surface restarts on every release (about 10 seconds) and the shared "
+            "tunnel sometimes with it (about 7 seconds). Retry with backoff and keep writes "
+            "idempotent; a single failed call is not an outage. See deploy_channel.",
         ],
     }
 
@@ -328,6 +358,7 @@ def build_contract(connection: Any, *, peer_role: str = "stock_peer") -> dict[st
 __all__ = [
     "AbsentObject",
     "CONTRACT_VERSION",
+    "DEPLOY_CHANNEL",
     "COLD_TABLESPACE",
     "NOT_PROVIDED",
     "PUBLISHED_ENDPOINTS",
