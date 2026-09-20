@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.research_storage_admission import ResearchStorageAdmission, governance
 from app.runtime_resources import (
+    COLD_TABLESPACE,
+    HOT_DATABASE_BYTES_SQL,
     MANAGED_DIRECTORY_CACHE_SECONDS,
     ManagedDirectoryCache,
     research_storage_governance,
@@ -57,6 +59,42 @@ class ResearchStorageAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["managed"]["used_bytes"], 300)
         self.assertEqual(result["state"], "healthy")
         self.assertTrue(result["allow_nonessential_high_frequency"])
+
+    async def test_hot_database_measurement_excludes_the_cold_tablespace(self) -> None:
+        """Charge the NVMe budget for NVMe bytes only.
+
+        ``quant`` holds both halves of every tiered table: ``t`` on the hot
+        tier and ``t_cold`` on the G: HDD, plus ``legacy_source_records``
+        wholly on the HDD.  Summing the schema charged 2.59 GiB of HDD to this
+        budget on 2026-09-20 (81.8% of the old 36 GiB), and made the ratio
+        immune to tiering -- moving a row from ``t`` to ``t_cold`` keeps it in
+        the schema, so an unfiltered sum cannot fall.
+        """
+        connection = MagicMock()
+        connection.execute.return_value.fetchone.return_value = {"bytes": 100}
+        database = MagicMock()
+        database.transaction.return_value = _Transaction(connection)
+
+        governance(database, environ={"QUANT_DATA_DIR": "/tmp/quant-test"},
+                   directory_bytes=lambda path: 0)
+
+        sql, params = connection.execute.call_args.args
+        self.assertIs(sql, HOT_DATABASE_BYTES_SQL)
+        self.assertEqual(params, (COLD_TABLESPACE,))
+        self.assertIn("pg_tablespace", sql)
+        self.assertIn("coalesce(ts.spcname, '') <> %s", sql)
+
+    def test_both_budget_call_sites_share_one_statement(self) -> None:
+        """The health panel and the backfill must measure the same thing.
+
+        They are the two places that can refuse work over this budget.  When
+        each carried its own copy of the SQL, fixing one left the other
+        charging HDD bytes to the hot tier.
+        """
+        for name in ("app/research_storage_admission.py", "app/annual_daily_backfill.py"):
+            source = Path(name).read_text(encoding="utf-8")
+            self.assertIn("HOT_DATABASE_BYTES_SQL", source, name)
+            self.assertNotIn("pg_total_relation_size", source, name)
 
 
 class _FakeClock:

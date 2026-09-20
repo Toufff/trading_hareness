@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .runtime_resources import COLD_TABLESPACE
 from .tushare_normalization import (
     CUMULATIVE_FACTOR_SEMANTICS,
     DERIVED_FACTOR_PROVIDER,
@@ -80,9 +81,6 @@ SUPPORTED_OBJECTS: tuple[SupportedObject, ...] = (
     SupportedObject("runtime_leases", "background-task leases written by the peer scheduler", "read-write"),
     SupportedObject("owner_deploy_events", "owner deployment announcements; the only channel a release does not restart", "read"),
 )
-
-COLD_TABLESPACE = "stock_cold"
-
 
 @dataclass(frozen=True)
 class AbsentObject:

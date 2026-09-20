@@ -31,7 +31,12 @@ from psycopg.types.json import Json, Jsonb
 from .database import Database
 from .instrument_lock_retry import execute_instrument_write
 from .daily_bar_repository import quarantine_tushare_daily_amount_mismatches
-from .runtime_resources import DEFAULT_HOT_DATABASE_SOFT_BYTES, bounded_storage_budget_bytes
+from .runtime_resources import (
+    COLD_TABLESPACE,
+    DEFAULT_HOT_DATABASE_SOFT_BYTES,
+    HOT_DATABASE_BYTES_SQL,
+    bounded_storage_budget_bytes,
+)
 from .sector_flow_repository import rebuild_sector_flow_daily_features
 from .tushare_normalization import promotable_factor_predicate_sql, promotable_factor_provider
 from .tushare_providers import ProviderCallError, call_provider, provider_configs, safe_error_detail
@@ -791,11 +796,7 @@ class AnnualDailyBackfill:
             DEFAULT_HOT_DATABASE_SOFT_BYTES,
         )
         with self.db.transaction() as connection:
-            row = connection.execute(
-                """SELECT coalesce(sum(pg_total_relation_size(c.oid)),0)::bigint AS bytes
-                     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                    WHERE n.nspname='quant' AND c.relkind IN ('r','m','p')""",
-            ).fetchone()
+            row = connection.execute(HOT_DATABASE_BYTES_SQL, (COLD_TABLESPACE,)).fetchone()
         used = int((row or {}).get("bytes") or 0)
         ratio = used / budget if budget else 1.0
         if used >= budget:

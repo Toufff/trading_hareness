@@ -9,20 +9,17 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         self.assertEqual(bounded_min_free_bytes("invalid"), 1024 ** 3)
         self.assertEqual(bounded_warning_free_bytes("invalid", 8 * 1024 ** 3), 10 * 1024 ** 3)
         self.assertEqual(bounded_memory_ratio("2"), 0.98)
-        self.assertEqual(
-            bounded_storage_budget_bytes(
-                str(200 * 1024 ** 3), DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
-                DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
-            ),
-            DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
-        )
-        self.assertEqual(
-            bounded_storage_budget_bytes(
-                str(40 * 1024 ** 3), DEFAULT_HOT_DATABASE_SOFT_BYTES,
-                DEFAULT_HOT_DATABASE_SOFT_BYTES,
-            ),
-            DEFAULT_HOT_DATABASE_SOFT_BYTES,
-        )
+        # An environment file may lower a budget, never raise it.  Both cases
+        # are written relative to the ceiling so that raising a default does
+        # not quietly turn this into an assertion about nothing -- which is
+        # exactly what happened to the literal 200 GiB / 40 GiB this replaces.
+        for ceiling in (DEFAULT_RESEARCH_STORAGE_SOFT_BYTES, DEFAULT_HOT_DATABASE_SOFT_BYTES):
+            self.assertEqual(
+                bounded_storage_budget_bytes(str(ceiling * 2), ceiling, ceiling), ceiling,
+            )
+            self.assertEqual(
+                bounded_storage_budget_bytes(str(ceiling // 2), ceiling, ceiling), ceiling // 2,
+            )
         state, reasons = runtime_resource_state(
             disk_free_bytes=10, min_free_bytes=100, rss_bytes=90, memory_limit_bytes=100, max_memory_ratio=0.85,
         )

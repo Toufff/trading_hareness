@@ -21,7 +21,7 @@
 | 层 | 物理位置 | 介质与角色 | 实测延迟 | 容量约束 |
 |---|---|---|---|---|
 | **L0 edge-hot** | 47 PG `quant_intraday_edge` | 实时采集+告警的工作集,**bounded**(retention+存储守卫) | 本机毫秒 | 机器仅 3.4G 内存/40G 盘,**只留活动窗口** |
-| **L1 research-hot** | 本地 Docker PG(`n8n` 库 `quant` schema) | 全历史系统记录(system of record)+ API 服务 | 点查毫秒 | 软上限 36GiB(×1.35 估算系数);**80% 触发告警并暂停非必要采集** |
+| **L1 research-hot** | 本地 Docker PG(`n8n` 库 `quant` schema) | 全历史系统记录(system of record)+ API 服务 | 点查毫秒 | 软上限 **300 GiB**(2026-09-20 由 36 GiB 上调);只计热层字节;**80% 触发告警并暂停非必要采集** |
 | **L2 warm** | 本地 `~/marketdata/`(parquet + DuckDB catalog) | 分析/回测工作集,列式扫描 | **26–34ms**(单票全历史) | 本地盘(118G 空闲),按需增长 |
 | **L3 cold** | 百度网盘 12T `/apps/股票paper存储/` | 归档+异地容灾;**parquet 可 Range 就地查询** | 单票预取 **1.9s**;随机 seek ~1s/次 | 12T,当前用 ~5GB |
 
@@ -124,11 +124,26 @@ L1 超窗 →(年度分区归档脚本)→ L3。journal 是投递日志,本地�
 
 ## 7. 容量水位协议(L1)
 
-- 预算:36 GiB 软上限,估算 = 库大小 × 1.35。
+- 预算:**300 GiB 软上限**(`QUANT_HOT_DATABASE_SOFT_BYTES`),研究总预算 320 GiB
+  (`QUANT_RESEARCH_STORAGE_SOFT_BYTES`,含 artifact)。环境变量只能下调,
+  上调必须改 `app/runtime_resources.py` 的默认值——调用方把默认值当作
+  `bounded_storage_budget_bytes` 的 `maximum` 传入。
+- **口径:只算热层。** 度量语句集中在 `runtime_resources.HOT_DATABASE_BYTES_SQL`,
+  排除 `stock_cold` 表空间。此前对整个 `quant` schema 求和,把已经搬到 G: 机械盘的
+  冷孪生表和 `legacy_source_records` 也算进热层预算,2026-09-20 实测多算 2.59 GiB;
+  更糟的是分层作业把行从 `t` 搬到 `t_cold` 时两张表都在 `quant` 里,这个比例
+  **一个字节都不会降**,也就是说唯一能降低它的作业对它无效。
+- 2026-09-20 调整原因:36 GiB / 40 GiB 是 2026-08 整个集群还和报告、备份挤在 G:
+  机械盘上时定的。热数据目录迁到独占 NVMe 之后,真正的守卫是
+  `PGDATA_BUDGET_BYTES`(500 GB,由 `scripts/database-storage-tiers.py` 按 85%
+  高水位执行),本预算退化为该层的**子额度**。500 GB 里留 300 GiB 给 `quant`
+  热层,其余留给 WAL、临时文件和一次索引重建。
 - **65% = 归档水位**:安排最大的 raw/证据表归档。
-- **80% = 告警水位**:系统自动暂停非必要高频采集(已实测触发过)——
-  到这里说明归档欠账了。
-- 当前:18 GB 库 ≈ 67.8% 预算(VACUUM `raw_market_observations` 后更低)。
+- **80% = 告警水位**;**90% = 仅暂停非必要高频采集**,不删任何证据,
+  不停风险评估——到这里说明归档欠账了。
+- 当前(2026-09-20):热层 26.87 GiB ≈ **9.0%** 预算;
+  另有 2.59 GiB 在 `stock_cold`(`legacy_source_records`),不计入。
+  上一层的 500 GB 热层守卫同时报 `status: ok`,用量 5.7%。
 
 ## 8. 网络与韧性纪律(实测教训)
 

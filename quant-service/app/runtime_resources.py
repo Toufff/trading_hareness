@@ -13,12 +13,41 @@ from typing import Any, Callable
 
 
 GIB = 1024 ** 3
-# The operator reserved 40 GiB for the complete research estate.  Daily P2
-# history is a database-resident evidence ledger, so reserve 36 GiB for that
-# hot path and 4 GiB for bounded artifacts/exports.  The total 40 GiB cap is
-# still absolute; retention jobs keep their existing bounded windows.
-DEFAULT_RESEARCH_STORAGE_SOFT_BYTES = 40 * GIB
-DEFAULT_HOT_DATABASE_SOFT_BYTES = 36 * GIB
+# The 40 GiB / 36 GiB pair these numbers replace was sized in 2026-08, when the
+# whole cluster still shared the G: HDD with reports and backups.  The hot data
+# directory now has a dedicated NVMe volume governed by its own guard
+# (``PGDATA_BUDGET_BYTES``, 500 GB, enforced by ``scripts/database-storage-tiers.py``
+# with an 85% high-water mark), so this budget is a *sub*-allocation of that
+# tier, not the estate ceiling it used to be.  300 GiB of the 500 GB tier leaves
+# room for WAL, temp files and an index rebuild, and keeps the tiering job as
+# the real backstop.  Callers pass these as the ``maximum`` of
+# :func:`bounded_storage_budget_bytes`, so an environment file can only lower
+# them -- raising the ceiling means editing this line.
+DEFAULT_RESEARCH_STORAGE_SOFT_BYTES = 320 * GIB
+DEFAULT_HOT_DATABASE_SOFT_BYTES = 300 * GIB
+
+#: Rows moved here by the tiering job leave the NVMe tier for the G: HDD.
+COLD_TABLESPACE = "stock_cold"
+
+#: Bytes the ``quant`` schema occupies **on the hot tier**.
+#:
+#: The cold twins and ``legacy_source_records`` live in the same schema but on
+#: another volume, so counting them charged ~2.6 GiB of HDD to an NVMe budget
+#: and -- worse -- made the number immune to the one job that exists to lower
+#: it: tiering moves rows from ``t`` to ``t_cold``, both in ``quant``, so an
+#: unfiltered ``sum(pg_total_relation_size)`` does not move by a single byte.
+#: Every caller must use this statement; two call sites drifting apart is what
+#: ``test_historical_backfill_enforces_the_same_hot_database_budget_as_runtime_health``
+#: exists to prevent.
+HOT_DATABASE_BYTES_SQL = """
+SELECT coalesce(sum(pg_total_relation_size(c.oid)), 0)::bigint AS bytes
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  LEFT JOIN pg_tablespace ts ON ts.oid = c.reltablespace
+ WHERE n.nspname = 'quant'
+   AND c.relkind IN ('r', 'm', 'p')
+   AND coalesce(ts.spcname, '') <> %s
+"""
 
 
 def bounded_min_free_bytes(value: str | None) -> int:

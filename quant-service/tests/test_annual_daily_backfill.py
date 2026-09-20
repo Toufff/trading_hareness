@@ -69,6 +69,11 @@ class AnnualDailyBackfillTests(unittest.TestCase):
         source = Path("app/annual_daily_backfill.py").read_text(encoding="utf-8")
         self.assertIn("def _enforce_hot_storage_budget", source)
         self.assertIn("QUANT_HOT_DATABASE_SOFT_BYTES", source)
+        # Same budget *and* same measurement: the statement lives in
+        # runtime_resources so this call site cannot drift back to summing the
+        # whole schema, cold tablespace included.
+        self.assertIn("HOT_DATABASE_BYTES_SQL", source)
+        self.assertIn("COLD_TABLESPACE", source)
         self.assertIn("hot_database_above_80_percent", source)
         self.assertIn("historical backfill stopped at hot database budget", source)
 

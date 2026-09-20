@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from .runtime_resources import (
+    COLD_TABLESPACE,
     DEFAULT_HOT_DATABASE_SOFT_BYTES,
     DEFAULT_RESEARCH_STORAGE_SOFT_BYTES,
+    HOT_DATABASE_BYTES_SQL,
     DirectoryMeasurement,
     bounded_storage_budget_bytes,
     bounded_storage_ratio,
@@ -28,6 +30,11 @@ def governance(
 ) -> dict[str, Any]:
     """Measure managed research storage without mutating or pruning evidence.
 
+    The database half counts the ``quant`` schema **on the hot tier only**
+    (:data:`HOT_DATABASE_BYTES_SQL`); rows the tiering job has moved to
+    ``stock_cold`` on the HDD are off this budget, which is what makes the
+    ratio respond to tiering at all.
+
     The artifact-store size comes from the shared TTL cache: ``/health`` calls
     this on every request and the walk measured 4.3-4.9 s on the HDD, which was
     breaking release health probes.  ``refresh=True`` is the size-on-demand
@@ -37,11 +44,7 @@ def governance(
     """
     env = os.environ if environ is None else environ
     with database.transaction() as connection:
-        row = connection.execute(
-            """SELECT coalesce(sum(pg_total_relation_size(c.oid)),0)::bigint AS bytes
-                 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-                WHERE n.nspname='quant' AND c.relkind IN ('r','m','p')""",
-        ).fetchone()
+        row = connection.execute(HOT_DATABASE_BYTES_SQL, (COLD_TABLESPACE,)).fetchone()
     data_dir = Path(env.get("QUANT_DATA_DIR", "/var/lib/quant"))
     if directory_bytes is None:
         artifacts = managed_directory_cache.measure(data_dir, force=refresh)
