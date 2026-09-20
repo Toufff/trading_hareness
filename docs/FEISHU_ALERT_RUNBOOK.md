@@ -107,3 +107,6 @@ pwsh .\scripts\windows\disable-feishu-alerting.ps1
 ## E. Codex 的监控职责
 
 Codex 监控只需要读取：edge `/health`、最近扫描时间、行情证据新鲜度、待投递 outbox、连续投递失败数和最近一次真实验收回执。它可以在确定性服务停止或数据过期时提醒/诊断，但不得自行把“看起来像触线”解释成触线，也不得以同一条已经失效的飞书通道给自身故障告警。真正触线仍由可复现规则、数据库状态转换和投递回执决定。
+# 盘中建议
+
+除纪律线外，当前发布版还提供 5 秒行情取样、10 分钟 DeepSeek 状态分析、30 分钟 Codex 固定汇报和突发事件补充分析。完整契约见 [INTRADAY_ADVISORY.md](INTRADAY_ADVISORY.md)。同一配置脚本会同时启用纪律线通知与盘中建议运行时。

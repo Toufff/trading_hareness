@@ -139,4 +139,9 @@ if ($ApplyRemoteEdge) {
     scan_interval_seconds = 30
     discipline_alert_interval_seconds = 30
     discipline_alert_account_configured = $true
+    intraday_advisory_enabled = $true
+    quote_acquisition_seconds = 5
+    local_evaluation_seconds = 1
+    deepseek_analysis_seconds = 600
+    codex_report_seconds = 1800
 } | ConvertTo-Json -Compress

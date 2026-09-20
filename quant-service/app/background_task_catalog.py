@@ -15,6 +15,7 @@ def build_specs(
     labels = (
         "intraday_monitor",
         "discipline_alerts",
+        "intraday_advisory",
         "super_get_fast_quote",
         "strategy_review",
         "post_close_strategy",

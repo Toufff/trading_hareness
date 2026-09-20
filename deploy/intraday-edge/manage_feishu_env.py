@@ -31,6 +31,14 @@ MANAGED_KEYS = (
     "QUANT_DISCIPLINE_ALERTS_ENABLED",
     "QUANT_DISCIPLINE_ALERT_INTERVAL_SECONDS",
     "QUANT_DISCIPLINE_ALERT_ACCOUNT_KEY",
+    "QUANT_INTRADAY_ADVISORY_ENABLED",
+    "QUANT_INTRADAY_ADVISORY_ACCOUNT_KEY",
+    "QUANT_INTRADAY_ADVISORY_FETCH_SECONDS",
+    "QUANT_INTRADAY_ADVISORY_LOCAL_TICK_SECONDS",
+    "QUANT_INTRADAY_ADVISORY_DEEPSEEK_SECONDS",
+    "QUANT_INTRADAY_ADVISORY_CODEX_SECONDS",
+    "INTRADAY_ADVISORY_CODEX_MODEL",
+    "INTRADAY_ADVISORY_CODEX_REASONING",
 )
 
 
@@ -120,6 +128,14 @@ def _status(path: Path) -> dict[str, Any]:
         "discipline_alerts_enabled": values.get("QUANT_DISCIPLINE_ALERTS_ENABLED", "false").lower() == "true",
         "discipline_alert_interval_seconds": int(values.get("QUANT_DISCIPLINE_ALERT_INTERVAL_SECONDS", "0") or 0),
         "discipline_alert_account_configured": bool(values.get("QUANT_DISCIPLINE_ALERT_ACCOUNT_KEY", "").strip()),
+        "intraday_advisory_enabled": values.get("QUANT_INTRADAY_ADVISORY_ENABLED", "false").lower() == "true",
+        "intraday_advisory_account_configured": bool(values.get("QUANT_INTRADAY_ADVISORY_ACCOUNT_KEY", "").strip()),
+        "intraday_advisory_cadence": {
+            "fetch_seconds": int(values.get("QUANT_INTRADAY_ADVISORY_FETCH_SECONDS", "0") or 0),
+            "local_tick_seconds": int(values.get("QUANT_INTRADAY_ADVISORY_LOCAL_TICK_SECONDS", "0") or 0),
+            "deepseek_seconds": int(values.get("QUANT_INTRADAY_ADVISORY_DEEPSEEK_SECONDS", "0") or 0),
+            "codex_seconds": int(values.get("QUANT_INTRADAY_ADVISORY_CODEX_SECONDS", "0") or 0),
+        },
         "env_file": str(path),
     }
 
@@ -155,6 +171,16 @@ def main() -> int:
             "QUANT_DISCIPLINE_ALERT_ACCOUNT_KEY": _safe_value(
                 "discipline_alert_account_key", payload.get("discipline_alert_account_key") or "citics-primary"
             ),
+            "QUANT_INTRADAY_ADVISORY_ENABLED": "true",
+            "QUANT_INTRADAY_ADVISORY_ACCOUNT_KEY": _safe_value(
+                "intraday_advisory_account_key", payload.get("discipline_alert_account_key") or "citics-primary"
+            ),
+            "QUANT_INTRADAY_ADVISORY_FETCH_SECONDS": "5",
+            "QUANT_INTRADAY_ADVISORY_LOCAL_TICK_SECONDS": "1",
+            "QUANT_INTRADAY_ADVISORY_DEEPSEEK_SECONDS": "600",
+            "QUANT_INTRADAY_ADVISORY_CODEX_SECONDS": "1800",
+            "INTRADAY_ADVISORY_CODEX_MODEL": "gpt-5.6-sol",
+            "INTRADAY_ADVISORY_CODEX_REASONING": "medium",
         }
         if transport == "custom_bot":
             webhook_url = _safe_value("webhook_url", payload.get("webhook_url"))
@@ -191,6 +217,7 @@ def main() -> int:
                 "FEISHU_ALERTS_CONFIGURED": "false",
                 "QUANT_FEISHU_DIRECT_ENABLED": "false",
                 "QUANT_DISCIPLINE_ALERTS_ENABLED": "false",
+                "QUANT_INTRADAY_ADVISORY_ENABLED": "false",
             },
         )
 

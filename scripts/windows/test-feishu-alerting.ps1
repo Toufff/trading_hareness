@@ -46,7 +46,13 @@ if ($Mode -eq 'Config') {
     if (-not $status.configured -or -not $status.credentials_present -or -not $status.enabled `
             -or $status.scan_interval_seconds -ne 30 -or -not $status.discipline_alerts_enabled `
             -or $status.discipline_alert_interval_seconds -ne 30 `
-            -or -not $status.discipline_alert_account_configured) {
+            -or -not $status.discipline_alert_account_configured `
+            -or -not $status.intraday_advisory_enabled `
+            -or -not $status.intraday_advisory_account_configured `
+            -or $status.intraday_advisory_cadence.fetch_seconds -ne 5 `
+            -or $status.intraday_advisory_cadence.local_tick_seconds -ne 1 `
+            -or $status.intraday_advisory_cadence.deepseek_seconds -ne 600 `
+            -or $status.intraday_advisory_cadence.codex_seconds -ne 1800) {
         throw 'Feishu configuration is incomplete; no credential values were printed'
     }
     $status | ConvertTo-Json -Compress

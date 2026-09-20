@@ -41,6 +41,15 @@ RUNTIME_TASK_CONTRACTS: Final[dict[str, RuntimeTaskContract]] = {
         "locally leased current-holding and formal-recommendation discipline transition notifier",
         120,
     ),
+    "intraday_advisory": RuntimeTaskContract(
+        "intraday_advisory",
+        "research",
+        "1s local tick; 5s quote acquisition; 10m DeepSeek; 30m Codex",
+        ("order_book_quote",),
+        ("intraday_advisory_events", "intraday_advisory_analysis_runs", "intraday_advisory_deliveries"),
+        "account-scoped research alerts and scheduled Feishu advisory reports; never orders",
+        20,
+    ),
     "super_get_fast_quote": RuntimeTaskContract(
         "super_get_fast_quote",
         "intraday_edge",

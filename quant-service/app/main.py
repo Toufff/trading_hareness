@@ -361,7 +361,7 @@ from .http_clients import (alert_http_client_status, close_http_clients, provide
                            public_http_client_status, remote_archive_http_client_status, start_http_clients)
 from .network_health import network_state
 from .alert_transport import feishu_alert_transport_configured, post_feishu_alert_text
-from .trade_discipline.alerts_runtime import (DisciplineAlertRuntimeDependencies, alert_account_key as discipline_alert_account_key, alert_interval_seconds as discipline_alert_interval_seconds, alerts_enabled as discipline_alerts_enabled, run_discipline_alert_loop)
+from .intraday_advisory.composition import build_notification_loops, discipline_alerts_enabled, intraday_advisory_enabled
 from .intraday_schedule import (
     intraday_board_curve_clock_session,
     intraday_board_curve_enabled,
@@ -533,6 +533,7 @@ from .routers.agent_paper_reads import build_agent_paper_reads_router
 from .routers.paper_actions import build_paper_actions_router
 from .routers.personal_decisions import PersonalDecisionDependencies, build_personal_decisions_router
 from .routers.trade_discipline import build_trade_discipline_router
+from .routers.intraday_advisory import build_intraday_advisory_router
 from .routers.trade_thesis import build_trade_thesis_router, runtime_trade_thesis_dependencies
 from .routers.broker_order_history import build_broker_order_history_router
 from .routers.analyst_prompt_lab import build_analyst_prompt_lab_router
@@ -707,6 +708,7 @@ from .async_personal_decision_repository import (
     latest_personal_decision_brief,
 )
 from .async_trade_discipline_read_repository import router_dependencies as trade_discipline_dependencies
+from .async_intraday_advisory_read_repository import status as intraday_advisory_status
 from .broker_order_repository import order_history_summary, order_history_timeline
 from .provider_rate_limits import provider_request_spacing_seconds, reserve_provider_rate_limit_slot
 from .runtime_leases import (
@@ -3029,15 +3031,9 @@ async def intraday_monitor_loop(interval_seconds: int) -> None:
         board_refresh_interval_seconds=intraday_board_refresh_interval_seconds,
         run_board_report=run_intraday_board_report,
     )
-
-
-discipline_alert_loop = lambda: run_discipline_alert_loop(DisciplineAlertRuntimeDependencies(  # noqa: E731
-    database=db, run_database=run_database_blocking, fetch_minutes=longhu_intraday_minute_session,
-    post_text=post_feishu_alert_text, session_open=realtime_market_session_async,
-    dashboard_url=lambda: Settings.from_environ().dashboard_public_url, account_key=discipline_alert_account_key,
-    now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
-    interval_seconds=discipline_alert_interval_seconds))
-
+discipline_alert_loop, intraday_advisory_loop = build_notification_loops(database=db, run_database=run_database_blocking,
+    fetch_minutes=longhu_intraday_minute_session, fetch_quotes=longhu_order_book_quotes, post_text=post_feishu_alert_text,
+    session_open=lambda *args, **kwargs: realtime_market_session_async(*args, **kwargs), dashboard_url=lambda: Settings.from_environ().dashboard_public_url)
 def persist_intraday_super_get_fast_quote(symbol: str, observed_at: datetime, price: float,
                                           pct_change: float | None, row: dict[str, Any],
                                           provider_key: str, latency_ms: int) -> None:
@@ -4022,7 +4018,8 @@ async def sync_tushare_daily_core(as_of_date: date, requested_symbols: list[str]
 def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
     """Create the uniquely-labelled leased runtime loops after local startup."""
     global_tasks_enabled, discipline_enabled = background_tasks_enabled(), discipline_alerts_enabled() and feishu_alert_transport_configured()
-    if not global_tasks_enabled and not discipline_enabled:
+    advisory_enabled = intraday_advisory_enabled() and feishu_alert_transport_configured()
+    if not global_tasks_enabled and not discipline_enabled and not advisory_enabled:
         return {}
     interval_seconds = intraday_scan_interval_seconds()
     lease_holder_id = uuid.uuid4()
@@ -4043,6 +4040,7 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
         enabled={
             "intraday_monitor": global_tasks_enabled and interval_seconds >= 30,
             "discipline_alerts": discipline_enabled,
+            "intraday_advisory": advisory_enabled,
             "super_get_fast_quote": global_tasks_enabled and interval_seconds >= 30,
             "strategy_review": global_tasks_enabled and strategy_review_automation_enabled(),
             "post_close_strategy": global_tasks_enabled and post_close_strategy_automation_enabled(),
@@ -4059,6 +4057,7 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
         loops={
             "intraday_monitor": lambda: intraday_monitor_loop(interval_seconds),
             "discipline_alerts": discipline_alert_loop,
+            "intraday_advisory": intraday_advisory_loop,
             "super_get_fast_quote": intraday_super_get_fast_quote_loop, "strategy_review": strategy_review_loop,
             "post_close_strategy": post_close_strategy_loop, "ten_day_leader_rotation": ten_day_leader_rotation_loop,
             "daily_strategy_summary": daily_strategy_summary_loop, "ths_member_backfill": ths_concept_member_backfill_loop,
@@ -4264,6 +4263,7 @@ app.include_router(build_personal_decisions_router(PersonalDecisionDependencies(
 )))
 app.include_router(build_trade_discipline_router(trade_discipline_dependencies(async_db, live_minutes=longhu_intraday_minute_session,
     alert_transport_configured=feishu_alert_transport_configured)))
+app.include_router(build_intraday_advisory_router(async_db, read_status=intraday_advisory_status, runtime_enabled=intraday_advisory_enabled, transport_configured=feishu_alert_transport_configured))
 app.include_router(build_trade_thesis_router(runtime_trade_thesis_dependencies(db, async_db, run_database_blocking)))
 app.include_router(build_broker_order_history_router(
     async_db, order_history_summary, order_history_timeline,
