@@ -8,6 +8,7 @@ import httpx
 from app.feishu_direct_alert import (
     FeishuTenantTokenCache,
     direct_feishu_alert_configured,
+    post_direct_feishu_alert_card,
     post_direct_feishu_alert_text,
 )
 
@@ -86,6 +87,30 @@ class FeishuDirectAlertTests(unittest.TestCase):
         ))
         self.assertEqual(result["status"], "failed")
         self.assertNotIn("secret", str(result))
+
+    def test_direct_transport_sends_interactive_card(self):
+        received = {}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/tenant_access_token/internal"):
+                return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+            received.update(json.loads(request.content))
+            return httpx.Response(200, json={"code": 0, "msg": "success"})
+
+        @asynccontextmanager
+        async def client_factory():
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+                yield client
+
+        card = {"header": {"title": {"tag": "plain_text", "content": "risk"}}, "elements": []}
+        result = asyncio.run(post_direct_feishu_alert_card(
+            card, environ={"QUANT_FEISHU_DIRECT_ENABLED": "true", "FEISHU_APP_ID": "app-id",
+                           "FEISHU_APP_SECRET": "secret", "FEISHU_ALERT_RECEIVE_ID": "chat-id"},
+            client_factory=client_factory, token_cache=FeishuTenantTokenCache(),
+        ))
+        self.assertEqual(result["status"], "sent")
+        self.assertEqual(received["msg_type"], "interactive")
+        self.assertEqual(json.loads(received["content"]), card)
 
 
 if __name__ == "__main__":

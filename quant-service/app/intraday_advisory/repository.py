@@ -50,19 +50,20 @@ def persist_signal(connection: Any, signal: AdvisorySignal, *, scope_source: str
 
 
 def enqueue_delivery(connection: Any, *, key: str, kind: str, text: str,
-                     event_id: Any = None, analysis_run_id: Any = None) -> dict[str, Any] | None:
+                     card: dict[str, Any], event_id: Any = None,
+                     analysis_run_id: Any = None) -> dict[str, Any] | None:
     row = connection.execute("""
         INSERT INTO quant.intraday_advisory_deliveries(
-            idempotency_key,delivery_kind,event_id,analysis_run_id,status,message_text,next_attempt_at)
-        VALUES(%s,%s,%s,%s,'pending',%s,now())
+            idempotency_key,delivery_kind,event_id,analysis_run_id,status,message_text,message_card,next_attempt_at)
+        VALUES(%s,%s,%s,%s,'pending',%s,%s,now())
         ON CONFLICT(idempotency_key) DO NOTHING RETURNING delivery_id""",
-        (key, kind, event_id, analysis_run_id, text)).fetchone()
+        (key, kind, event_id, analysis_run_id, text, Json(card))).fetchone()
     return dict(row) if row else None
 
 
 def due_deliveries(connection: Any, *, limit: int = 20) -> list[dict[str, Any]]:
     return [dict(row) for row in connection.execute("""
-        SELECT delivery_id,idempotency_key,message_text,attempt_count,delivery_kind
+        SELECT delivery_id,idempotency_key,message_text,message_card,attempt_count,delivery_kind
           FROM quant.intraday_advisory_deliveries
          WHERE status IN ('pending','failed') AND attempt_count<8
            AND coalesce(next_attempt_at,created_at)<=now()

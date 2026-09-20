@@ -8,8 +8,8 @@ from typing import Any
 import httpx
 
 from .http_clients import alert_http_client
-from .feishu_custom_bot import custom_bot_configured, post_custom_bot_text
-from .feishu_direct_alert import direct_feishu_alert_configured, post_direct_feishu_alert_text
+from .feishu_custom_bot import custom_bot_configured, post_custom_bot_card, post_custom_bot_text
+from .feishu_direct_alert import direct_feishu_alert_configured, post_direct_feishu_alert_card, post_direct_feishu_alert_text
 from .tushare_providers import safe_error_detail
 
 
@@ -36,6 +36,15 @@ async def post_feishu_alert_text(text: str) -> dict[str, Any]:
         return {"status": "failed", "error": safe_error_detail(str(error), 500)}
 
 
+async def post_feishu_alert_card(card: dict[str, Any]) -> dict[str, Any]:
+    """Deliver one native Feishu interactive card through a configured official transport."""
+    if custom_bot_configured():
+        return await post_custom_bot_card(card)
+    if direct_feishu_alert_configured():
+        return await post_direct_feishu_alert_card(card)
+    return {"status": "disabled", "reason": "native Feishu card transport is not configured"}
+
+
 def feishu_alert_transport_configured() -> bool:
     """Whether any supported Feishu notification transport is complete."""
     if custom_bot_configured() or direct_feishu_alert_configured():
@@ -45,4 +54,4 @@ def feishu_alert_transport_configured() -> bool:
     )
 
 
-__all__ = ["feishu_alert_transport_configured", "post_feishu_alert_text"]
+__all__ = ["feishu_alert_transport_configured", "post_feishu_alert_card", "post_feishu_alert_text"]

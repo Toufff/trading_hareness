@@ -360,7 +360,7 @@ from . import intraday_evidence_read_model as intraday_evidence_reads
 from .http_clients import (alert_http_client_status, close_http_clients, provider_http_client_status,
                            public_http_client_status, remote_archive_http_client_status, start_http_clients)
 from .network_health import network_state
-from .alert_transport import feishu_alert_transport_configured, post_feishu_alert_text
+from .alert_transport import feishu_alert_transport_configured, post_feishu_alert_card, post_feishu_alert_text
 from .intraday_advisory.composition import build_notification_loops, discipline_alerts_enabled, intraday_advisory_enabled
 from .intraday_schedule import (
     intraday_board_curve_clock_session,
@@ -3032,7 +3032,7 @@ async def intraday_monitor_loop(interval_seconds: int) -> None:
         run_board_report=run_intraday_board_report,
     )
 discipline_alert_loop, intraday_advisory_loop = build_notification_loops(database=db, run_database=run_database_blocking,
-    fetch_minutes=longhu_intraday_minute_session, fetch_quotes=longhu_order_book_quotes, post_text=post_feishu_alert_text,
+    fetch_minutes=longhu_intraday_minute_session, fetch_quotes=longhu_order_book_quotes, post_text=post_feishu_alert_text, post_card=post_feishu_alert_card,
     session_open=lambda *args, **kwargs: realtime_market_session_async(*args, **kwargs), dashboard_url=lambda: Settings.from_environ().dashboard_public_url)
 def persist_intraday_super_get_fast_quote(symbol: str, observed_at: datetime, price: float,
                                           pct_change: float | None, row: dict[str, Any],

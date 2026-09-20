@@ -83,7 +83,32 @@ async def post_custom_bot_text(
         return {"status": "failed", "error": safe_error_detail(str(error), 500)}
 
 
+async def post_custom_bot_card(
+    card: dict[str, Any], *, environ: Mapping[str, str] | None = None,
+    client_factory: Callable[..., Any] = alert_http_client,
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> dict[str, Any]:
+    config = custom_bot_config(environ)
+    if config is None:
+        return {"status": "disabled", "reason": "Feishu custom-bot webhook is not configured"}
+    payload: dict[str, Any] = {"msg_type": "interactive", "card": card}
+    if config.secret:
+        timestamp = int(now().timestamp())
+        payload.update({"timestamp": str(timestamp), "sign": custom_bot_signature(timestamp, config.secret)})
+    try:
+        async with client_factory() as client:
+            response = await client.post(config.webhook_url, json=payload)
+            response.raise_for_status()
+            body = response.json()
+            code = body.get("code", body.get("StatusCode", 0))
+            if int(code or 0) != 0:
+                raise ValueError(f"Feishu custom bot rejected: {str(body.get('msg') or body.get('StatusMessage'))[:200]}")
+            return {"status": "sent", "response": body}
+    except (httpx.HTTPError, ValueError, TypeError) as error:
+        return {"status": "failed", "error": safe_error_detail(str(error), 500)}
+
+
 __all__ = [
     "FeishuCustomBotConfig", "custom_bot_config", "custom_bot_configured",
-    "custom_bot_signature", "post_custom_bot_text",
+    "custom_bot_signature", "post_custom_bot_card", "post_custom_bot_text",
 ]

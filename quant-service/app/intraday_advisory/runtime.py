@@ -14,7 +14,7 @@ from ..agent_paper.model import ModelFailure
 from ..intraday_quote_normalization import exchange_time_status
 from ..tushare_providers import safe_error_detail
 from .model import CodexAdvisoryModel, DeepSeekAdvisoryModel
-from .renderer import render_analysis, render_signal
+from .renderer import analysis_card, render_analysis, render_signal, signal_card
 from .repository import (
     due_deliveries, enqueue_delivery, latest_delivered_deepseek_fingerprint, persist_analysis,
     persist_delivery_outcome, persist_quote_samples, persist_signal, recent_discipline_events, update_status,
@@ -46,6 +46,7 @@ class IntradayAdvisoryDependencies:
     run_database: DatabaseExecutor
     fetch_quotes: Callable[..., Awaitable[list[dict[str, Any]]]]
     post_text: Callable[[str], Awaitable[dict[str, Any]]]
+    post_card: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
     session_open: Callable[..., Awaitable[tuple[bool, str]]]
     now: Callable[[], datetime]
     account_key: Callable[[], str]
@@ -83,12 +84,13 @@ def _persist_rows(database: Any, now: datetime, rows: list[dict[str, Any]]) -> i
         return persist_quote_samples(connection, now, rows)
 
 
-def _persist_event_and_delivery(database: Any, signal: Any, source: str, text: str) -> dict[str, Any] | None:
+def _persist_event_and_delivery(database: Any, signal: Any, source: str, text: str,
+                                card: dict[str, Any]) -> dict[str, Any] | None:
     with database.transaction() as connection:
         event = persist_signal(connection, signal, scope_source=source)
         if event:
             enqueue_delivery(connection, key=f"signal:{event['event_key']}", kind="signal",
-                             text=text, event_id=event["event_id"])
+                             text=text, card=card, event_id=event["event_id"])
         return event
 
 
@@ -106,7 +108,8 @@ async def _drain(deps: IntradayAdvisoryDependencies) -> dict[str, int]:
     rows = await deps.run_database(lambda: _load_due(deps.database))
     counts = {"attempted": 0, "sent": 0, "failed": 0, "disabled": 0}
     for row in rows:
-        outcome = await deps.post_text(str(row["message_text"]))
+        card = row.get("message_card") if isinstance(row.get("message_card"), dict) else {}
+        outcome = await deps.post_card(card) if card else await deps.post_text(str(row["message_text"]))
         status = str(outcome.get("status") or "failed")
         if status not in counts:
             status = "failed"
@@ -148,9 +151,9 @@ def _last_ds_fingerprint(database: Any) -> str | None:
         return latest_delivered_deepseek_fingerprint(connection)
 
 
-def _enqueue_analysis(database: Any, *, run_id: str, key: str, text: str) -> None:
+def _enqueue_analysis(database: Any, *, run_id: str, key: str, text: str, card: dict[str, Any]) -> None:
     with database.transaction() as connection:
-        enqueue_delivery(connection, key=key, kind="analysis", text=text, analysis_run_id=run_id)
+        enqueue_delivery(connection, key=key, kind="analysis", text=text, card=card, analysis_run_id=run_id)
 
 
 async def _analyze(deps: IntradayAdvisoryDependencies, state: RuntimeState, scope: AdvisoryScope,
@@ -178,9 +181,11 @@ async def _analyze(deps: IntradayAdvisoryDependencies, state: RuntimeState, scop
             should_push = previous != result.output.get("state_fingerprint")
         if should_push:
             text = render_analysis(provider, result.output, report_kind=report_kind or trigger_kind, generated_at=completed)
+            card = analysis_card(provider, result.output, report_kind=report_kind or trigger_kind,
+                                 generated_at=completed)
             key = f"analysis:{provider}:{stored['analysis_run_id']}"
             await deps.run_database(lambda: _enqueue_analysis(
-                deps.database, run_id=stored["analysis_run_id"], key=key, text=text))
+                deps.database, run_id=stored["analysis_run_id"], key=key, text=text, card=card))
             await _drain(deps)
         return {"status": "completed", "provider": provider, "pushed": should_push,
                 "analysis_run_id": stored["analysis_run_id"]}
@@ -240,8 +245,9 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
                         continue
                     source = source_by_symbol.get(signal.symbol, "recommendation")
                     text = render_signal(signal, source=source)
-                    event = await deps.run_database(lambda signal=signal, source=source, text=text:
-                                                    _persist_event_and_delivery(deps.database, signal, source, text))
+                    card = signal_card(signal, source=source)
+                    event = await deps.run_database(lambda signal=signal, source=source, text=text, card=card:
+                                                    _persist_event_and_delivery(deps.database, signal, source, text, card))
                     if event:
                         state.last_signal_at[cooldown_key] = current
                         state.pending_events.append({"event_id": str(event["event_id"]), "symbol": signal.symbol,

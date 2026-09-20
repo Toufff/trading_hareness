@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app.alert_transport import post_feishu_alert_text
-from app.feishu_custom_bot import custom_bot_configured, custom_bot_signature, post_custom_bot_text
+from app.feishu_custom_bot import custom_bot_configured, custom_bot_signature, post_custom_bot_card, post_custom_bot_text
 
 
 WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/example-token"
@@ -61,6 +61,24 @@ class FeishuCustomBotTests(unittest.TestCase):
         self.assertEqual(captured["timestamp"], "1700000000")
         self.assertEqual(captured["sign"], "k5kp1+YChJjoQSV36+S5u0IJWe3a56MRrGAVEWvaHUE=")
         self.assertNotIn("top-secret", str(result))
+
+    def test_native_interactive_card_payload(self):
+        captured = {}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, json={"StatusCode": 0, "StatusMessage": "success"})
+
+        @asynccontextmanager
+        async def client_factory():
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+                yield client
+
+        card = {"header": {"title": {"tag": "plain_text", "content": "alert"}}, "elements": []}
+        result = asyncio.run(post_custom_bot_card(card, environ=CUSTOM_BOT_ENV, client_factory=client_factory))
+        self.assertEqual(result["status"], "sent")
+        self.assertEqual(captured["msg_type"], "interactive")
+        self.assertEqual(captured["card"], card)
 
     def test_transport_prefers_custom_bot_before_application_mode(self):
         with patch.dict("os.environ", CUSTOM_BOT_ENV, clear=True), \

@@ -85,6 +85,7 @@ async def _deterministic_delivery_precedes_bundled_codex_analysis() -> None:
     deps = IntradayAdvisoryDependencies(
         database=object(), run_database=run_database, fetch_quotes=fetch,
         post_text=AsyncMock(return_value={"status": "sent"}),
+        post_card=AsyncMock(return_value={"status": "sent"}),
         session_open=AsyncMock(return_value=(True, "open")), now=lambda: MONDAY,
         account_key=lambda: "citics-primary",
     )
@@ -123,7 +124,10 @@ def test_migration_and_composition_are_declared() -> None:
     root = Path(__file__).parents[2]
     migration = (root / "quant-service" / "migrations" / "versions" /
                  "20260921_0110_intraday_advisory.py").read_text(encoding="utf-8")
+    cards = (root / "quant-service" / "migrations" / "versions" /
+             "20260921_0111_intraday_advisory_cards.py").read_text(encoding="utf-8")
     main = (root / "quant-service" / "app" / "main.py").read_text(encoding="utf-8")
     assert "intraday_advisory_analysis_runs" in migration
+    assert "message_card" in cards
     assert '"intraday_advisory": advisory_enabled' in main
     assert "build_intraday_advisory_router" in main
