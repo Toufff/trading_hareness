@@ -30,7 +30,10 @@ def direct_feishu_alert_config(
 ) -> DirectFeishuAlertConfig | None:
     values = environ if environ is not None else os.environ
     enabled = str(values.get("QUANT_FEISHU_DIRECT_ENABLED", "false")).strip().lower() in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
     if not enabled:
         return None
@@ -116,7 +119,9 @@ async def post_direct_feishu_alert_text(
 
 
 async def post_direct_feishu_alert_card(
-    card: dict[str, Any], *, environ: Mapping[str, str] | None = None,
+    card: dict[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
     client_factory: Callable[..., Any] = alert_http_client,
     token_cache: FeishuTenantTokenCache = _tenant_token_cache,
 ) -> dict[str, Any]:
@@ -127,10 +132,14 @@ async def post_direct_feishu_alert_card(
         async with client_factory() as client:
             token = await token_cache.token(client, config)
             response = await client.post(
-                f"{FEISHU_OPEN_API_BASE}/im/v1/messages", params={"receive_id_type": config.receive_id_type},
+                f"{FEISHU_OPEN_API_BASE}/im/v1/messages",
+                params={"receive_id_type": config.receive_id_type},
                 headers={"Authorization": f"Bearer {token}"},
-                json={"receive_id": config.receive_id, "msg_type": "interactive",
-                      "content": json.dumps(card, ensure_ascii=False)},
+                json={
+                    "receive_id": config.receive_id,
+                    "msg_type": "interactive",
+                    "content": json.dumps(card, ensure_ascii=False),
+                },
             )
             response.raise_for_status()
             payload = response.json()
@@ -142,6 +151,10 @@ async def post_direct_feishu_alert_card(
 
 
 __all__ = [
-    "DirectFeishuAlertConfig", "FeishuTenantTokenCache", "direct_feishu_alert_config",
-    "direct_feishu_alert_configured", "post_direct_feishu_alert_card", "post_direct_feishu_alert_text",
+    "DirectFeishuAlertConfig",
+    "FeishuTenantTokenCache",
+    "direct_feishu_alert_config",
+    "direct_feishu_alert_configured",
+    "post_direct_feishu_alert_card",
+    "post_direct_feishu_alert_text",
 ]
