@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { inject } from 'vue';
+import { inject, ref } from 'vue';
 import StockResearchWorkbench from '../../components/StockResearchWorkbench.vue';
+import TradeThesisPanel from '../../components/TradeThesisPanel.vue';
+import type { WorkbenchAnnotation } from '../../components/stock-workbench-control';
 import { dashboardContextKey } from '../../dashboard-context';
 
 const dashboard = inject(dashboardContextKey);
 if (!dashboard) throw new Error('research tab requires the dashboard shell context');
+const thesisAnnotations = ref<WorkbenchAnnotation[]>([]);
 </script>
 
 <template>
@@ -32,7 +35,14 @@ if (!dashboard) throw new Error('research tab requires the dashboard shell conte
     v-if="dashboard.stockStudy"
     :workbench="dashboard.stockStudy"
     :control="dashboard.stockWorkbenchControl"
+    :thesis-annotations="thesisAnnotations"
     class="section-gap"
+  />
+  <TradeThesisPanel
+    v-if="dashboard.stockStudy"
+    :symbol="dashboard.stockStudy.symbol"
+    :market-as-of="dashboard.stockStudy.as_of_date"
+    @annotations="thesisAnnotations = $event"
   />
   <el-empty v-else-if="!dashboard.studyLoading" description="输入股票代码后打开策略研究工作台" :image-size="88" />
 </template>

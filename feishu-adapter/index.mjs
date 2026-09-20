@@ -1280,6 +1280,7 @@ const researchPaths = new Map([
 	['/api/research/paper/accounts', '/api/v1/paper/accounts'],
 	['/api/research/events/announcements', '/api/v1/events/announcements'],
 	['/api/research/events/lhb', '/api/v1/events/lhb'],
+	['/api/research/theses', '/api/v1/research/theses'],
 ]);
 
 const researchActions = new Map([
@@ -1320,6 +1321,7 @@ const researchActions = new Map([
 	['/api/research/analyst-prompt-lab/materialize', '/api/v1/analyst-prompt-lab/materialize'],
 	['/api/research/analyst-intraday-outcomes/recompute', '/api/v1/analyst-intraday-outcomes/recompute'],
 	['/api/research/analyst-research/reviews/run', '/api/v1/analyst-research/reviews/run'],
+	['/api/research/theses/evaluate', '/api/v1/research/theses/evaluate'],
 ]);
 
 async function proxyResearch(path, search, response) {
@@ -1406,6 +1408,16 @@ const dashboard = createServer((request, response) => {
 	if (stockStudy && request.method === 'POST') {
 		const symbol = stockStudy[1].toUpperCase();
 		void proxyResearchAction(`/api/v1/stocks/${encodeURIComponent(symbol)}/study`, request, response).catch(routeErrorHandler(response, 503));
+		return;
+	}
+	const thesisTimeline = /^\/api\/research\/theses\/([^/]+)\/timeline$/i.exec(url.pathname);
+	if (thesisTimeline && request.method === 'GET') {
+		void proxyResearch(`/api/v1/research/theses/${thesisTimeline[1]}/timeline`, url.search, response).catch(routeErrorHandler(response, 503));
+		return;
+	}
+	const thesisMutation = /^\/api\/research\/theses\/([^/]+)\/(changes|reviews)$/i.exec(url.pathname);
+	if (thesisMutation && request.method === 'POST') {
+		void proxyResearchAction(`/api/v1/research/theses/${thesisMutation[1]}/${thesisMutation[2]}`, request, response).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/research/workbench-control' && request.method === 'GET') {

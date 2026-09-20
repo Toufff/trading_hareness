@@ -10,6 +10,7 @@ success.
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -176,6 +177,36 @@ def run(
         "screen_observations_persisted": len(result.get("screen_observations", [])),
         "screen_observations_returned": len(response_observations),
     }
+    if lane_loader is not None and (result.get('summary', {}).get('strategy_lanes') or {}).get('lanes'):
+        from .trade_thesis.scan_adapter import refresh_from_run
+        try:
+            receipt = refresh_from_run(database, str(run_row['run_id']), 'post_close')
+        except Exception as exc:  # thesis is an advisory stage; the durable scan remains authoritative
+            logging.getLogger(__name__).exception(
+                "post_close_trade_thesis_hook_failed run_id=%s", run_row["run_id"],
+            )
+            receipt = {
+                "status": "failed", "source_run_id": str(run_row["run_id"]),
+                "error_type": type(exc).__name__, "live_effect": "none", "decision_binding": False,
+            }
+        response.setdefault('summary', {})['trade_thesis'] = receipt
+        if receipt.get("status") == "failed":
+            from .short_term_lanes.reports import make_bundle
+            lanes = response["summary"].get("strategy_lanes")
+            if lanes:
+                scan = {**lanes, "trade_thesis": receipt}
+                scan["report_bundle"] = make_bundle(scan)
+                response["summary"]["strategy_lanes"] = scan
+        else:
+            try:
+                with database.transaction() as connection:
+                    saved = connection.execute('SELECT summary FROM quant.post_close_strategy_runs WHERE run_id=%s',
+                                               (run_row['run_id'],)).fetchone()
+                response['summary'] = saved['summary']
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "post_close_trade_thesis_readback_failed run_id=%s", run_row["run_id"],
+                )
     return {**response, "run_id": str(run_row["run_id"]), "run_key": run_key, "model_version": model_version}
 
 

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import json
+import logging
 from . import engine, repository, reports, source
 from .rules import digest, validate_minute_health
 
@@ -71,9 +72,38 @@ def run(database, output_root):
         progress('reports'); paths = reports.write(result, directory)
         (directory / 'result.json').write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
         progress('database_readback'); repository.save(database, run_id, data, result)
+        from ..trade_thesis.scan_adapter import refresh_from_run
+        try:
+            thesis_receipt = refresh_from_run(database, run_id, 'intraday')
+        except Exception as exc:  # advisory stage failure must not erase a valid persisted scan
+            logging.getLogger(__name__).exception("intraday_trade_thesis_hook_failed run_id=%s", run_id)
+            thesis_receipt = {
+                "status": "failed", "source_run_id": run_id, "error_type": type(exc).__name__,
+                "live_effect": "none", "decision_binding": False,
+            }
+            try:
+                with database.transaction() as c:
+                    c.execute(
+                        "UPDATE quant.intraday_strategy_scans "
+                        "SET stage='completed_thesis_partial',error=%s WHERE run_id=%s",
+                        (json.dumps({"trade_thesis": type(exc).__name__}), run_id),
+                    )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "intraday_trade_thesis_failure_receipt_persist_failed run_id=%s", run_id,
+                )
+        try:
+            from ..trade_thesis.report import sections as thesis_sections
+            thesis_path = directory / 'trade-thesis.md'
+            thesis_path.write_text('\n'.join(thesis_sections(thesis_receipt)), encoding='utf-8')
+            thesis_receipt['report_path'] = str(thesis_path)
+        except Exception as exc:
+            thesis_receipt['report_error'] = type(exc).__name__
+            logging.getLogger(__name__).exception('intraday_thesis_report_failed run_id=%s', run_id)
         receipt = dict(run_id=run_id, cutoff=data['cutoff'], observed_at=data['observed_at'],
                        input_hash=digest(data), result_hash=digest(result), database_readback=True,
                        phase=result['phase'], market=result['market'], history_health=data['history_health'],
+                       trade_thesis=thesis_receipt,
                        minute_health=data['minute_health'], reports=paths)
         if cutoff.hour == 15:
             # Separate outcome: a comparison error cannot erase the valid scan.

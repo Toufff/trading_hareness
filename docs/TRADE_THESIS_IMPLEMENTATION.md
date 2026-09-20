@@ -25,4 +25,22 @@
 
 ## 实施状态
 
-施工中。测试数量、source commit、release、真实run/evaluation与部署后读回将在完成后追加。
+已完成规则、持久化/API、扫描挂接、报告与前端模块，正式上线证据在验收后追加。
+
+## 运行与接手
+
+- 自动入口：盘后 `post_close_strategy_service.run`、盘中 `intraday_scan.runner.run`。主扫描先持久化，跟踪阶段独立失败；原扫描哈希不被跟踪副作用改写。
+- 盘后同轮 `summary.trade_thesis`、九策略报告的原始假设附录与API读回共享评价ID。盘中 `receipt.json.trade_thesis` 保留阶段回执。
+- 补挂已存运行：生产解释器执行 `scripts/trade-thesis.py attach --source-run-id <UUID> --output-dir <report-directory>`。这不调用行情商、不重扫、不改推荐排序。
+- 只读：`scripts/trade-thesis.py show --symbol 002185.SZ`；owner `/api/v1/research/theses`，adapter/公网 `/api/research/theses`。工作台入口为“量化研究台 → 个股研究 → 交易假设生命周期”。
+- 独立PG验收：`scripts/verify-trade-thesis-isolated.py`（仅创建/清理本次随机命名测试库）；线上只读验收：`scripts/verify-trade-thesis-live.py --symbol <已评价股票>`。
+- 当前代码支持精确定义的单点条件；持续分钟、聚合、复杂复合语义没有实现时返回`unsupported_contract`，绝不冒充条件已满足。自由文本买点仍保留原文，不编造成精确执行信号。
+- 回填旧扫描标记`reconstructed`；仅同日5分钟内的新扫描首次捕获可标`prospective`，起效时间仍为真实捕获时间。原始策略/范围/排名、结构、期限不随之后排序变化重写。
+- 单轮有界500只；影子评价不重写策略分数或成交记录。持仓意图未绑定时明确`unbound`，不能反推真实买入动机。
+- `stock-scan`与`stock-discipline`用户级技能同步要求读取假设记录，区分研究结构、新买条件和实际持仓纪律；修正旧数据库路径及历史1%风险默认描述，不修改当前5%风险配置。
+
+## 尚不声称完成的能力
+
+- 5个真实交易日影子观察及用户批准的正式决策接管尚未发生；`decision_binding=false`。
+- 当前多agent共享写密钥，审查记录强制作者/审核者不同且版本与hash一致，但身份是声明值，不是独立身份提供方签名；不得宣称密码学意义的角色隔离。
+- 新模块不代替策略有效性的长期验证，也不保证避免卖飞或下一次涨停；华天案例用来检验解释一致性，而不是反向拟合一次涨停。

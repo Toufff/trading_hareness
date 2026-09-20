@@ -3,10 +3,10 @@ import { computed, ref, watch } from 'vue';
 import VChart from 'vue-echarts';
 import type { MetricKey, StockWorkbench } from './stock-workbench';
 import { displayPlanValue, metricChartOption, metricLabel, priceChartOption, relevantMessages, strategyMetrics, tradePlanAnnotations } from './stock-workbench';
-import type { StockWorkbenchControl, WorkbenchPanel } from './stock-workbench-control';
+import type { StockWorkbenchControl, WorkbenchAnnotation, WorkbenchPanel } from './stock-workbench-control';
 import { isLiveWorkbenchControl, panelIsVisible } from './stock-workbench-control';
 
-const props = defineProps<{ workbench: StockWorkbench; control?: StockWorkbenchControl | null }>();
+const props = defineProps<{ workbench: StockWorkbench; control?: StockWorkbenchControl | null; thesisAnnotations?: WorkbenchAnnotation[] }>();
 const activeStrategy = ref(props.workbench.strategies[0]?.key ?? 'accumulation');
 const timeframe = ref<'daily' | 'weekly'>('daily');
 const activeMetric = ref<MetricKey>('vendor_flow');
@@ -25,7 +25,7 @@ const metricChoices = computed(() => {
     : choices;
 });
 const messages = computed(() => relevantMessages(props.workbench.messages, activeStrategy.value));
-const chartAnnotations = computed(() => [...tradePlanAnnotations(props.workbench), ...(liveControl.value?.annotations ?? [])]);
+const chartAnnotations = computed(() => [...tradePlanAnnotations(props.workbench), ...(props.thesisAnnotations ?? []), ...(liveControl.value?.annotations ?? [])]);
 const priceOption = computed(() => priceChartOption(bars.value, strategy.value, view.value, messages.value, zoomStart.value, zoomEnd.value, chartAnnotations.value));
 const metricOption = computed(() => metricChartOption(bars.value, props.workbench, activeMetric.value));
 const requiredHealth = computed(() => (strategy.value?.required_panels ?? []).map((key) => ({ key, ...(props.workbench.data_health[key] ?? { status: 'unavailable', detail: '未声明' }) })));

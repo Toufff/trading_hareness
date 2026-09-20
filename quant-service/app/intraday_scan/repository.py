@@ -3,13 +3,7 @@ from datetime import datetime,timedelta,timezone
 from uuid import uuid4
 from psycopg.types.json import Json
 from .rules import digest
-
-STAGE_LANE = {
-    'accumulation': 'accumulation',
-    'initial_breakout': 'expansion',
-    'strong_pullback': 'pullback',
-    'post_limit': 'relay',
-}
+from ..strategy_origin import select_primary_origin
 
 
 def merge_formal_recommendations(rows, bundle):
@@ -23,10 +17,8 @@ def merge_formal_recommendations(rows, bundle):
         return rows
     result = {(r['symbol'], r['lane']): dict(r) for r in rows}
     for item in sorted(bundle.get('recommended', []), key=lambda r: (r.get('priority', 9999), r['symbol'])):
-        memberships = sorted(item.get('memberships') or [], key=lambda r: (r.get('rank', 9999), r.get('lane', '')))
-        preferred = STAGE_LANE.get(item.get('stage'))
-        lane = next((r['lane'] for r in memberships if r.get('lane') == preferred), None)
-        lane = lane or (memberships[0].get('lane') if memberships else preferred) or 'accumulation'
+        primary = select_primary_origin(item, stage=item.get('stage'), context='intraday_formal_recommendation')
+        lane = primary['lane']
         key = (item['symbol'], lane)
         existing = result.get(key, {})
         result[key] = {
@@ -41,6 +33,10 @@ def merge_formal_recommendations(rows, bundle):
             'formal_recommendation': True,
             'recommendation_priority': item.get('priority'),
             'recommendation_decision_id': bundle.get('decision_id'),
+            'primary_origin_id': primary['origin_id'],
+            'origin_primary_lane': lane,
+            'primary_origin_reason': primary['reason'],
+            'primary_origin_selector_version': primary['selector_version'],
             'recommendation_data_date': item.get('data_date') or bundle.get('as_of_date'),
             'recommendation_valid_until': bundle.get('valid_until'),
             'recommendation_trigger': item.get('trigger'),

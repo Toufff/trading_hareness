@@ -140,6 +140,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/peer/contract": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Peer Contract */
+        get: operations["peer_contract_api_v1_peer_contract_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/peer/errors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Peer Errors */
+        get: operations["peer_errors_api_v1_peer_errors_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/research-frameworks": {
         parameters: {
             query?: never;
@@ -1269,6 +1303,91 @@ export interface paths {
         get: operations["read_discipline_reconciliations_api_v1_discipline_reconciliations_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/research/theses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Theses */
+        get: operations["read_theses_api_v1_research_theses_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/research/theses/{thesis_id}/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Timeline */
+        get: operations["read_timeline_api_v1_research_theses__thesis_id__timeline_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/research/theses/evaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Evaluate */
+        post: operations["evaluate_api_v1_research_theses_evaluate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/research/theses/{thesis_id}/changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Propose */
+        post: operations["propose_api_v1_research_theses__thesis_id__changes_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/research/theses/{thesis_id}/reviews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Review */
+        post: operations["review_api_v1_research_theses__thesis_id__reviews_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3490,6 +3609,17 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** ChangeRequest */
+        ChangeRequest: {
+            /** Expected Revision */
+            expected_revision: number;
+            /** Changes */
+            changes: {
+                [key: string]: unknown;
+            };
+            /** Actor */
+            actor: string;
+        };
         /** ClaimReviewRequest */
         ClaimReviewRequest: {
             /**
@@ -3643,6 +3773,21 @@ export interface components {
              * @default false
              */
             resume: boolean;
+        };
+        /** EvaluateRequest */
+        EvaluateRequest: {
+            /** Source Run Id */
+            source_run_id: string;
+            /** Cutoff At */
+            cutoff_at?: string | null;
+            /** Symbols */
+            symbols?: string[] | null;
+            /**
+             * Namespace
+             * @default shadow
+             * @enum {string}
+             */
+            namespace: "capture" | "shadow" | "advisory";
         };
         /** FactorEvaluationRequest */
         FactorEvaluationRequest: {
@@ -4187,6 +4332,24 @@ export interface components {
              * @default 100
              */
             limit: number;
+        };
+        /** ReviewRequest */
+        ReviewRequest: {
+            /** Revision */
+            revision: number;
+            /** Proposal Hash */
+            proposal_hash: string;
+            /**
+             * Verdict
+             * @enum {string}
+             */
+            verdict: "approve" | "reject" | "needs_evidence";
+            /** Reviewer */
+            reviewer: string;
+            /** Reason */
+            reason: string;
+            /** Evidence Hash */
+            evidence_hash?: string | null;
         };
         /** SectorCatalogSyncRequest */
         SectorCatalogSyncRequest: {
@@ -4952,6 +5115,83 @@ export interface operations {
                 "application/json": components["schemas"]["StockApiCall"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    peer_contract_api_v1_peer_contract_get: {
+        parameters: {
+            query?: {
+                /** @description role whose grants to report; must be allowlisted */
+                role?: string | null;
+            };
+            header?: {
+                "X-Quant-Read-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    peer_errors_api_v1_peer_errors_get: {
+        parameters: {
+            query?: {
+                /** @description role to report on; must be allowlisted */
+                role?: string | null;
+                /** @description ISO 8601; defaults to 24 hours ago */
+                since?: string | null;
+                /** @description ISO 8601; defaults to now */
+                until?: string | null;
+                limit?: number;
+            };
+            header?: {
+                "X-Quant-Read-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -6947,6 +7187,188 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_theses_api_v1_research_theses_get: {
+        parameters: {
+            query?: {
+                symbol?: string | null;
+                as_of?: string | null;
+                namespace?: "capture" | "shadow" | "advisory";
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_timeline_api_v1_research_theses__thesis_id__timeline_get: {
+        parameters: {
+            query?: {
+                as_of?: string | null;
+                namespace?: "capture" | "shadow" | "advisory";
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                thesis_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    evaluate_api_v1_research_theses_evaluate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EvaluateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    propose_api_v1_research_theses__thesis_id__changes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                thesis_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    review_api_v1_research_theses__thesis_id__reviews_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                thesis_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReviewRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

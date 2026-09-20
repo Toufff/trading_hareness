@@ -14,6 +14,7 @@ from .tracking_report import sections as tracking_sections
 from ..effectiveness.report import sections as effectiveness_sections
 from ..event_research.report import sections as event_sections
 from .research_queue import SECTIONS
+from ..trade_thesis.report import sections as thesis_sections
 
 VERSION = 'strategy-report-bundle-decision-first-2026-09-16'
 
@@ -97,6 +98,7 @@ def overview(result: dict, strategy_reports: list[dict], repeated: list[dict]) -
         summary = report['result_summary']
         lines += [f"### [{summary['label']}]({report['filename']})", ''] + result_lines(summary, compact=True)
     lines += event_sections(result.get('event_research'))
+    lines += thesis_sections(result.get('trade_thesis'))
     lines += ['## 策略对照与独立报告', '', '| 策略 | 匹配 / 展示 | 代表候选 | 本策略研究范围 |', '|---|---:|---|---|']
     for lane, report in zip(result['lanes'], strategy_reports):
         c = report['review']['review_coverage']
@@ -136,6 +138,7 @@ def make_bundle(result: dict) -> dict:
         lines = [f"# {day} {lane['label']}独立报告", '', f"[返回总报告]({summary_file})", '',
                  '## 本次结论', ''] + result_lines(summary)
         lines += event_sections(result.get('event_research'), {s['symbol'] for s in lane['selected']+lane.get('observation_list',[])+lane.get('caution_list',[])})
+        lines += thesis_sections(result.get('trade_thesis'), key)
         lines += ['## 详细研究证据', ''] + review_sections(review) + candidates(lane)
         lines += ['## 数据与筛选说明', '', f"本策略要找什么：{lane['purpose']}。", ''] + context(result)
         lines += [f"公司证据覆盖：条件观察 {c['selected_reviewed']}/{c['selected_total']}；本策略最低覆盖 {c['completed']}/{c['planned']}。首位是下限而不是上限，不把代表复核说成全部候选完成。", '']

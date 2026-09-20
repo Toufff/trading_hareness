@@ -532,6 +532,7 @@ from .routers.agent_paper_reads import build_agent_paper_reads_router
 from .routers.paper_actions import build_paper_actions_router
 from .routers.personal_decisions import PersonalDecisionDependencies, build_personal_decisions_router
 from .routers.trade_discipline import build_trade_discipline_router
+from .routers.trade_thesis import build_trade_thesis_router, runtime_trade_thesis_dependencies
 from .routers.broker_order_history import build_broker_order_history_router
 from .routers.analyst_prompt_lab import build_analyst_prompt_lab_router
 from .routers.strategy_pattern_reads import build_strategy_pattern_reads_router
@@ -4263,6 +4264,7 @@ app.include_router(build_personal_decisions_router(PersonalDecisionDependencies(
 )))
 app.include_router(build_trade_discipline_router(
     trade_discipline_dependencies(async_db, live_minutes=longhu_intraday_minute_session)))
+app.include_router(build_trade_thesis_router(runtime_trade_thesis_dependencies(db, async_db, run_database_blocking)))
 app.include_router(build_broker_order_history_router(
     async_db, order_history_summary, order_history_timeline,
 ))

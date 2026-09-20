@@ -86,6 +86,7 @@ class TierPolicyTest(unittest.TestCase):
                 ("quant.intraday_quote_observations", "observed_at", 365),
                 ("quant.intraday_rule_input_snapshots", "observed_at", 365),
                 ("quant.edge_evidence_changes", "changed_at", 365),
+                ("quant.trade_thesis_evaluations", "created_at", 365),
             ],
         )
 
@@ -1348,10 +1349,12 @@ class CutoffIndexMigrationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.module = _load_migration(MIGRATIONS / "20260919_0106_storage_tier_cutoff_indexes.py")
+        cls.trade_thesis_module = _load_migration(MIGRATIONS / "20260920_0108_trade_thesis.py")
 
     def test_the_migration_covers_exactly_the_tier_policy(self):
         self.assertEqual(
-            [(name, table, column) for name, table, column in self.module.INDEXES],
+            [(name, table, column) for module in (self.module, self.trade_thesis_module)
+             for name, table, column in module.INDEXES],
             [(policy.cutoff_index, policy.qualified, policy.column) for policy in tiers.TIER_POLICY],
             "the migration and TIER_POLICY in scripts/database-storage-tiers.py have drifted apart",
         )

@@ -75,6 +75,7 @@
 | `quant.intraday_quote_observations` | `observed_at` | `365` | `quant.intraday_quote_observations_cold` | `quant.intraday_quote_observations_all` |
 | `quant.intraday_rule_input_snapshots` | `observed_at` | `365` | `quant.intraday_rule_input_snapshots_cold` | `quant.intraday_rule_input_snapshots_all` |
 | `quant.edge_evidence_changes` | `changed_at` | `365` | `quant.edge_evidence_changes_cold` | `quant.edge_evidence_changes_all` |
+| `quant.trade_thesis_evaluations` | `created_at` | `365` | `quant.trade_thesis_evaluations_cold` | `quant.trade_thesis_evaluations_all` |
 <!-- tier-policy-table:end -->
 
 热窗 365 天是**下限约束**，不是随手取的数字：正式验证需要 60 个交易日 ＋ 200 个成熟信号
