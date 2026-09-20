@@ -48,6 +48,16 @@ so an off workstation does not lose the following session's verification.
 
 Required secret environment values are installed directly into
 `/etc/quant-intraday-edge.env` with mode `0640`; they are not stored here.
+The current workstation runtime keeps the operator-managed copy in
+`G:\StockPlatform\config\runtime.env`. Use
+[`scripts/windows/configure-feishu-alerting.ps1`](../../scripts/windows/configure-feishu-alerting.ps1)
+to install either a custom-bot webhook/signing secret or application-bot
+credentials without putting a secret on the command line. A future dedicated
+edge can be configured explicitly with `-ApplyRemoteEdge`; it is not assumed
+to exist and is never the default target.
+`INTRADAY_SCAN_INTERVAL_SECONDS=30` is installed at the same time. See
+[`docs/FEISHU_ALERT_RUNBOOK.md`](../../docs/FEISHU_ALERT_RUNBOOK.md) for the
+mock, live acceptance and disable commands.
 The checked edge configuration uses a 10 GiB disk warning watermark and an
 8 GiB capture-protection floor. A warning is visible in the local dashboard;
 below the floor the runtime reports degraded rather than hiding the condition.

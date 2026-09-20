@@ -8,11 +8,11 @@
 | Item | Current value |
 |---|---:|
 | Composition root | `quant-service/app/main.py` |
-| `main.py` top-level functions | 403 |
-| Python modules under `app/` | 405 |
-| HTTP router modules | 41 |
-| Alembic migrations | 89 |
-| Frontend source files | 44 |
+| `main.py` top-level functions | 407 |
+| Python modules under `app/` | 592 |
+| HTTP router modules | 49 |
+| Alembic migrations | 109 |
+| Frontend source files | 107 |
 
 ## Domain naming inventory
 
@@ -22,27 +22,28 @@ New behaviour should be owned by an existing domain package/owner.
 | Domain prefix | Top-level modules |
 |---|---:|
 | `intraday` | 66 |
-| `async` | 41 |
-| `strategy` | 19 |
+| `async` | 43 |
+| `strategy` | 22 |
 | `analyst` | 17 |
-| `market` | 13 |
+| `market` | 14 |
+| `broker` | 13 |
 | `post` | 13 |
+| `stock` | 11 |
 | `ten` | 11 |
 | `board` | 9 |
+| `daily` | 8 |
 | `limit` | 8 |
-| `daily` | 7 |
+| `longhu` | 8 |
 | `tushare` | 7 |
 | `provider` | 6 |
 | `research` | 6 |
 | `watchlist` | 6 |
 | `xiaojie` | 6 |
-| `runtime` | 5 |
-| `sector` | 5 |
-| `stock` | 5 |
 
 ## Router entrypoints
 
 - `routers/__init__.py`
+- `routers/agent_paper_reads.py`
 - `routers/analyst_action_outcomes.py`
 - `routers/analyst_prompt_lab.py`
 - `routers/analyst_reads.py`
@@ -53,11 +54,13 @@ New behaviour should be owned by an existing domain package/owner.
 - `routers/board_curve_reads.py`
 - `routers/board_rotation_reads.py`
 - `routers/board_stock_mining_reads.py`
+- `routers/broker_order_history.py`
 - `routers/event_reads.py`
 - `routers/ingestion_actions.py`
 - `routers/intraday_actions.py`
 - `routers/intraday_evidence_reads.py`
 - `routers/intraday_outcome_reads.py`
+- `routers/intraday_scans.py`
 - `routers/intraday_status.py`
 - `routers/l2_research.py`
 - `routers/licensed_stock_api.py`
@@ -68,6 +71,7 @@ New behaviour should be owned by an existing domain package/owner.
 - `routers/market_result_reads.py`
 - `routers/paper_actions.py`
 - `routers/paper_reads.py`
+- `routers/peer_support.py`
 - `routers/personal_decisions.py`
 - `routers/provider_actions.py`
 - `routers/provider_status.py`
@@ -75,13 +79,17 @@ New behaviour should be owned by an existing domain package/owner.
 - `routers/research_catalog_reads.py`
 - `routers/research_readiness.py`
 - `routers/sector_actions.py`
+- `routers/sector_heat.py`
 - `routers/sector_reads.py`
 - `routers/strategy_actions.py`
+- `routers/strategy_governance.py`
 - `routers/strategy_pattern_reads.py`
 - `routers/strategy_reads.py`
 - `routers/system_control.py`
 - `routers/ten_day_leader_rotation_actions.py`
 - `routers/ten_day_leader_rotation_reads.py`
+- `routers/trade_discipline.py`
+- `routers/trade_thesis.py`
 - `routers/xiaojie_leader_flow.py`
 
 ## Frontend entrypoints
@@ -94,10 +102,63 @@ New behaviour should be owned by an existing domain package/owner.
 - `frontend/src/api/group-relay.ts`
 - `frontend/src/api/http.test.ts`
 - `frontend/src/api/http.ts`
+- `frontend/src/components/EventResearchLive.test.ts`
+- `frontend/src/components/EventResearchLive.vue`
+- `frontend/src/components/EventResearchOverlay.vue`
+- `frontend/src/components/EventResearchPanel.test.ts`
+- `frontend/src/components/EventResearchPanel.vue`
+- `frontend/src/components/IntradayScanChart.vue`
+- `frontend/src/components/ObservationFollowup.test.ts`
+- `frontend/src/components/ObservationFollowup.vue`
+- `frontend/src/components/PriceVolumeEvidence.test.ts`
+- `frontend/src/components/PriceVolumeEvidence.vue`
 - `frontend/src/components/RealtimeServicesPanel.vue`
+- `frontend/src/components/RecommendationPoolPanel.test.ts`
+- `frontend/src/components/RecommendationPoolPanel.vue`
 - `frontend/src/components/ResearchOnlyBadge.test.ts`
 - `frontend/src/components/ResearchOnlyBadge.vue`
+- `frontend/src/components/ReviewSelectionPanel.test.ts`
+- `frontend/src/components/ReviewSelectionPanel.vue`
+- `frontend/src/components/SectorHeatChart.vue`
+- `frontend/src/components/SectorHeatPanel.test.ts`
+- `frontend/src/components/SectorHeatPanel.vue`
+- `frontend/src/components/ShortTermLaneDetails.test.ts`
+- `frontend/src/components/ShortTermLaneDetails.vue`
+- `frontend/src/components/ShortTermLanesPanel.test.ts`
+- `frontend/src/components/ShortTermLanesPanel.vue`
+- `frontend/src/components/StockResearchWorkbench.vue`
+- `frontend/src/components/StrategyEffectiveness.vue`
+- `frontend/src/components/StrategyGovernancePanel.test.ts`
+- `frontend/src/components/StrategyGovernancePanel.vue`
+- `frontend/src/components/StrategyResultSummary.vue`
 - `frontend/src/components/TenDayLeaderRotationPanel.vue`
+- `frontend/src/components/TradeThesisPanel.test.ts`
+- `frontend/src/components/TradeThesisPanel.vue`
+- `frontend/src/components/discipline/DisciplineBoard.test.ts`
+- `frontend/src/components/discipline/DisciplineBoard.vue`
+- `frontend/src/components/discipline/DisciplineChart.vue`
+- `frontend/src/components/discipline/DisciplineDetail.vue`
+- `frontend/src/components/discipline/DisciplineLineTable.vue`
+- `frontend/src/components/discipline/DisciplinePoolCard.vue`
+- `frontend/src/components/discipline/discipline-api.ts`
+- `frontend/src/components/discipline/discipline-chart-option.test.ts`
+- `frontend/src/components/discipline/discipline-chart-option.ts`
+- `frontend/src/components/discipline/discipline-model.test.ts`
+- `frontend/src/components/discipline/discipline-model.ts`
+- `frontend/src/components/discipline/types.ts`
+- `frontend/src/components/price-volume-evidence.ts`
+- `frontend/src/components/sector-heat-panel.css`
+- `frontend/src/components/sector-heat-presentation.test.ts`
+- `frontend/src/components/sector-heat-presentation.ts`
+- `frontend/src/components/short-term-reports.ts`
+- `frontend/src/components/stock-workbench-control.ts`
+- `frontend/src/components/stock-workbench.test.ts`
+- `frontend/src/components/stock-workbench.ts`
+- `frontend/src/components/strategy-governance.ts`
+- `frontend/src/components/trade-thesis.test.ts`
+- `frontend/src/components/trade-thesis.ts`
+- `frontend/src/composables/research-panel-loading.test.ts`
+- `frontend/src/composables/research-panel-loading.ts`
 - `frontend/src/composables/useDashboardWorkspace.test.ts`
 - `frontend/src/composables/useDashboardWorkspace.ts`
 - `frontend/src/composables/useFeishuRelayWorkspace.test.ts`
@@ -111,16 +172,24 @@ New behaviour should be owned by an existing domain package/owner.
 - `frontend/src/dashboard-navigation.ts`
 - `frontend/src/main.ts`
 - `frontend/src/style.css`
+- `frontend/src/types/intraday-scan.ts`
+- `frontend/src/types/sector-heat.ts`
 - `frontend/src/utils/escapeHtml.test.ts`
 - `frontend/src/utils/escapeHtml.ts`
+- `frontend/src/views/AgentPaperView.test.ts`
+- `frontend/src/views/AgentPaperView.vue`
 - `frontend/src/views/FeishuWorkbenchView.vue`
 - `frontend/src/views/GroupRelayMonitorView.vue`
+- `frontend/src/views/IntradayScanView.test.ts`
+- `frontend/src/views/IntradayScanView.vue`
 - `frontend/src/views/ManualRelayView.vue`
 - `frontend/src/views/PersonalDecisionView.test.ts`
 - `frontend/src/views/PersonalDecisionView.vue`
+- `frontend/src/views/SectorHeatView.vue`
 - `frontend/src/views/research/AnalystEvidenceTab.vue`
 - `frontend/src/views/research/CatalogTab.vue`
 - `frontend/src/views/research/ClaimReviewTab.vue`
+- `frontend/src/views/research/CloseReviewTab.test.ts`
 - `frontend/src/views/research/CloseReviewTab.vue`
 - `frontend/src/views/research/FactorLabTab.vue`
 - `frontend/src/views/research/MarketSnapshotsTab.vue`
@@ -128,8 +197,10 @@ New behaviour should be owned by an existing domain package/owner.
 - `frontend/src/views/research/QualityTab.vue`
 - `frontend/src/views/research/ResearchOverviewTab.test.ts`
 - `frontend/src/views/research/ResearchOverviewTab.vue`
+- `frontend/src/views/research/StockStudyTab.test.ts`
 - `frontend/src/views/research/StockStudyTab.vue`
 - `frontend/src/views/research/StrategyTab.vue`
+- `frontend/src/vite-env.d.ts`
 
 ## Maintenance route
 

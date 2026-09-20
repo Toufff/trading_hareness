@@ -117,6 +117,10 @@ _PRODUCTS = (
     _product("analyst_evidence", "raw", "available_at", ("available_year", "evidence_type"), archive_format="jsonl_zstd", local_tier="warm", local_hot_window_days=None, replay_role="analyst_source_audit", description="content-addressed analyst evidence spans"),
     _product("analyst_market_reviews", "outcomes", "period_end", ("cadence", "review_year"), local_tier="hot", local_hot_window_days=None, replay_role="analyst_market_attribution", description="daily and weekly analyst versus market reviews"),
 
+    _product("discipline_evaluations", "outcomes", "as_of_at", ("account_key", "evaluation_year", "symbol_bucket"), local_tier="hot", local_hot_window_days=None, replay_role="account_discipline_replay", description="immutable holding and formal-recommendation discipline evaluations"),
+    _product("discipline_alert_events", "signals", "observed_at", ("account_key", "exchange_date", "symbol_bucket"), local_tier="hot", local_hot_window_days=None, replay_role="account_discipline_replay", description="first armed-to-triggered or capped discipline transitions"),
+    _product("discipline_alert_deliveries", "control", "created_at", ("channel", "created_year"), archive_format="jsonl_zstd", local_tier="hot", local_hot_window_days=None, replay_role="execution_audit_only", description="idempotent discipline notification delivery receipts"),
+
     # Operational receipts can never be market features or strategy inputs.
     _product("automation_runs", "control", "created_at", ("task_key", "created_year"), archive_format="jsonl_zstd", local_tier="hot", local_hot_window_days=None, replay_role="execution_audit_only", description="durable task execution receipts"),
     _product("retention_policies", "control", "updated_at", ("table_name",), archive_format="jsonl_zstd", local_tier="hot", local_hot_window_days=None, replay_role="execution_audit_only", description="per-table bounded-delete retention configuration and last-run receipts"),

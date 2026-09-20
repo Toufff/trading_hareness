@@ -360,7 +360,8 @@ from . import intraday_evidence_read_model as intraday_evidence_reads
 from .http_clients import (alert_http_client_status, close_http_clients, provider_http_client_status,
                            public_http_client_status, remote_archive_http_client_status, start_http_clients)
 from .network_health import network_state
-from .alert_transport import post_feishu_alert_text
+from .alert_transport import feishu_alert_transport_configured, post_feishu_alert_text
+from .trade_discipline.alerts_runtime import (DisciplineAlertRuntimeDependencies, alert_account_key as discipline_alert_account_key, alert_interval_seconds as discipline_alert_interval_seconds, alerts_enabled as discipline_alerts_enabled, run_discipline_alert_loop)
 from .intraday_schedule import (
     intraday_board_curve_clock_session,
     intraday_board_curve_enabled,
@@ -3030,6 +3031,13 @@ async def intraday_monitor_loop(interval_seconds: int) -> None:
     )
 
 
+discipline_alert_loop = lambda: run_discipline_alert_loop(DisciplineAlertRuntimeDependencies(  # noqa: E731
+    database=db, run_database=run_database_blocking, fetch_minutes=longhu_intraday_minute_session,
+    post_text=post_feishu_alert_text, session_open=realtime_market_session_async,
+    dashboard_url=lambda: Settings.from_environ().dashboard_public_url, account_key=discipline_alert_account_key,
+    now=lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")),
+    interval_seconds=discipline_alert_interval_seconds))
+
 def persist_intraday_super_get_fast_quote(symbol: str, observed_at: datetime, price: float,
                                           pct_change: float | None, row: dict[str, Any],
                                           provider_key: str, latency_ms: int) -> None:
@@ -4007,19 +4015,14 @@ async def build_stock_study(symbol: str, request: StockStudyRequest) -> dict[str
 
 async def sync_tushare_daily_core(as_of_date: date, requested_symbols: list[str] | None = None) -> dict[str, Any]:
     """Compatibility adapter for explicit-symbol, same-day controls only."""
-    return await sync_core_daily_controls_isolated(
-        as_of_date, requested_symbols,
-        CoreDailyControlDependencies(
-            resolve_symbols=resolve_sync_symbols_async,
-            fetch_catalog=fetch_tushare_catalog,
-            request=TushareFetchRequest,
-        ),
-    )
+    return await sync_core_daily_controls_isolated(as_of_date, requested_symbols, CoreDailyControlDependencies(
+        resolve_symbols=resolve_sync_symbols_async, fetch_catalog=fetch_tushare_catalog, request=TushareFetchRequest))
 
 
 def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
     """Create the uniquely-labelled leased runtime loops after local startup."""
-    if not background_tasks_enabled():
+    global_tasks_enabled, discipline_enabled = background_tasks_enabled(), discipline_alerts_enabled() and feishu_alert_transport_configured()
+    if not global_tasks_enabled and not discipline_enabled:
         return {}
     interval_seconds = intraday_scan_interval_seconds()
     lease_holder_id = uuid.uuid4()
@@ -4038,22 +4041,24 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
     specs = build_background_task_specs(
         interval_seconds=interval_seconds,
         enabled={
-            "intraday_monitor": interval_seconds >= 30,
-            "super_get_fast_quote": interval_seconds >= 30,
-            "strategy_review": strategy_review_automation_enabled(),
-            "post_close_strategy": post_close_strategy_automation_enabled(),
-            "ten_day_leader_rotation": ten_day_leader_rotation_automation_enabled(),
-            "daily_strategy_summary": daily_summary_automation_enabled(),
-            "ths_member_backfill": ths_concept_member_backfill_enabled(),
-            "all_board_member_backfill": all_board_member_backfill_enabled(),
-            "minute_profile_capture": intraday_minute_profile_capture_enabled(),
-            "longhu_order_book": intraday_order_book_enabled() and interval_seconds >= 30,
-            "board_flow_curve": intraday_board_curve_enabled(),
-            "market_event_capture": Settings.from_environ().market_event_capture_enabled,
-            "all_a_level1_snapshot": Settings.from_environ().all_a_level1_capture_enabled,
+            "intraday_monitor": global_tasks_enabled and interval_seconds >= 30,
+            "discipline_alerts": discipline_enabled,
+            "super_get_fast_quote": global_tasks_enabled and interval_seconds >= 30,
+            "strategy_review": global_tasks_enabled and strategy_review_automation_enabled(),
+            "post_close_strategy": global_tasks_enabled and post_close_strategy_automation_enabled(),
+            "ten_day_leader_rotation": global_tasks_enabled and ten_day_leader_rotation_automation_enabled(),
+            "daily_strategy_summary": global_tasks_enabled and daily_summary_automation_enabled(),
+            "ths_member_backfill": global_tasks_enabled and ths_concept_member_backfill_enabled(),
+            "all_board_member_backfill": global_tasks_enabled and all_board_member_backfill_enabled(),
+            "minute_profile_capture": global_tasks_enabled and intraday_minute_profile_capture_enabled(),
+            "longhu_order_book": global_tasks_enabled and intraday_order_book_enabled() and interval_seconds >= 30,
+            "board_flow_curve": global_tasks_enabled and intraday_board_curve_enabled(),
+            "market_event_capture": global_tasks_enabled and Settings.from_environ().market_event_capture_enabled,
+            "all_a_level1_snapshot": global_tasks_enabled and Settings.from_environ().all_a_level1_capture_enabled,
         },
         loops={
             "intraday_monitor": lambda: intraday_monitor_loop(interval_seconds),
+            "discipline_alerts": discipline_alert_loop,
             "super_get_fast_quote": intraday_super_get_fast_quote_loop, "strategy_review": strategy_review_loop,
             "post_close_strategy": post_close_strategy_loop, "ten_day_leader_rotation": ten_day_leader_rotation_loop,
             "daily_strategy_summary": daily_strategy_summary_loop, "ths_member_backfill": ths_concept_member_backfill_loop,
@@ -4064,12 +4069,7 @@ def _start_application_background_tasks() -> dict[str, asyncio.Task[None]]:
             "all_a_level1_snapshot": all_a_level1_snapshot_capture_loop,
         },
     )
-    # ``background_task_catalog.build_specs`` enumerates a fixed label tuple
-    # that does not include this task; append it directly here so a new
-    # entry does not require touching that shared, hand-enumerated catalog.
-    specs = (*specs, BackgroundTaskSpec(
-        RETENTION_MAINTENANCE_TASK_KEY, retention_maintenance_automation_enabled(), retention_maintenance_loop,
-    ))
+    specs = (*specs, BackgroundTaskSpec(RETENTION_MAINTENANCE_TASK_KEY, global_tasks_enabled and retention_maintenance_automation_enabled(), retention_maintenance_loop))
     validate_runtime_task_specs(specs)
     return start_leased_background_tasks(
         apply_background_runtime_profile(specs),
@@ -4262,8 +4262,8 @@ app.include_router(build_personal_decisions_router(PersonalDecisionDependencies(
     latest_market_advice=latest_market_advice,
     latest_holding_advice=latest_holding_advice,
 )))
-app.include_router(build_trade_discipline_router(
-    trade_discipline_dependencies(async_db, live_minutes=longhu_intraday_minute_session)))
+app.include_router(build_trade_discipline_router(trade_discipline_dependencies(async_db, live_minutes=longhu_intraday_minute_session,
+    alert_transport_configured=feishu_alert_transport_configured)))
 app.include_router(build_trade_thesis_router(runtime_trade_thesis_dependencies(db, async_db, run_database_blocking)))
 app.include_router(build_broker_order_history_router(
     async_db, order_history_summary, order_history_timeline,

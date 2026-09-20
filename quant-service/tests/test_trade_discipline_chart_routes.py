@@ -304,6 +304,7 @@ def test_every_new_route_is_get_only():
               if getattr(route, "path", "").startswith("/api/v1/discipline")}
     assert all(methods == {"GET"} for methods in routes.values())
     assert set(routes) == {
+        "/api/v1/discipline/alerts/status",
         "/api/v1/discipline/plans/latest", "/api/v1/discipline/plans/history",
         "/api/v1/discipline/plans/{plan_id}", "/api/v1/discipline/plans/{plan_id}/chart",
         "/api/v1/discipline/plans/{plan_id}/evaluations", "/api/v1/discipline/evaluations/latest",

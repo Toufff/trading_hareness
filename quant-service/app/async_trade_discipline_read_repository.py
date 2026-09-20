@@ -179,7 +179,28 @@ async def stored_minutes(async_database: Any, symbol: str, day: date) -> dict[st
     return {"rows": rows, "source": LONGHU_MINUTE_SOURCE if rows else None, "other_source_rows": other_rows}
 
 
-def router_dependencies(async_database: Any, *, live_minutes: Any = None) -> Any:
+async def alert_status(async_database: Any, *, recent_limit: int = 20) -> dict[str, Any]:
+    """Current runtime health plus bounded transition/delivery evidence."""
+    async with async_database.transaction() as connection:
+        status_result = await connection.execute("""
+            SELECT runtime_key,account_key,state,last_started_at,last_completed_at,last_session_date,
+                   eligible_plans,evaluated_plans,emitted_events,pending_deliveries,
+                   last_reason,last_error,details,updated_at
+              FROM quant.discipline_alert_runtime_status WHERE runtime_key='primary'""")
+        status_row = await status_result.fetchone()
+        event_result = await connection.execute("""
+            SELECT e.event_id,e.plan_id,e.line_kind,e.from_state,e.to_state,e.observed_at,
+                   e.payload->>'symbol' AS symbol,e.payload->>'name' AS name,
+                   d.status AS delivery_status,d.attempt_count,d.sent_at,d.error_message
+              FROM quant.discipline_alert_events e
+              LEFT JOIN quant.discipline_alert_deliveries d ON d.event_id=e.event_id AND d.channel='feishu'
+             ORDER BY e.observed_at DESC,e.created_at DESC LIMIT %s""", (_limit(recent_limit, 100),))
+        events = [dict(row) for row in await event_result.fetchall()]
+    return {"runtime": dict(status_row) if status_row else None, "recent_events": events}
+
+
+def router_dependencies(async_database: Any, *, live_minutes: Any = None,
+                        alert_transport_configured: Any = None) -> Any:
     """Every read projection the discipline router needs, wired to this module (composition helper)."""
     from .routers.trade_discipline import TradeDisciplineDependencies
 
@@ -187,9 +208,10 @@ def router_dependencies(async_database: Any, *, live_minutes: Any = None) -> Any
         async_database=async_database, latest_plans=latest_plans, read_plan=read_plan,
         latest_evaluation=latest_evaluation, plan_history=plan_history, plan_evaluations=plan_evaluations,
         reconciliations=reconciliations, daily_bars=daily_bars_for_plan, open_sessions=open_sessions,
-        stored_minutes=stored_minutes, live_minutes=live_minutes)
+        stored_minutes=stored_minutes, live_minutes=live_minutes, alert_status=alert_status,
+        alert_transport_configured=alert_transport_configured)
 
 
-__all__ = ["EVALUATION_COLUMNS", "MAX_LIMIT", "daily_bars_for_plan", "latest_evaluation", "latest_plans",
+__all__ = ["EVALUATION_COLUMNS", "MAX_LIMIT", "alert_status", "daily_bars_for_plan", "latest_evaluation", "latest_plans",
            "open_sessions", "plan_evaluations", "plan_history", "read_plan", "reconciliations",
            "router_dependencies", "stored_minutes", "valid_uuid"]

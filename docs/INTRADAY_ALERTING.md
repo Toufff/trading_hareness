@@ -4,6 +4,8 @@
 
 盘中消息是研究线索而非已验证交易信号：现有阈值尚未完成足量分钟回放验证，消息中的证据用于人工复核，不应用作自动下单依据。
 
+生产分工固定为两层：`intraday_edge` 的确定性进程按规则和分钟证据判断是否触线、落库、去重并投递；Codex 只巡视运行健康、数据新鲜度和失败原因，不以自然语言判断代替逐轮计算。即使 Codex 暂时不可用，已经配置的确定性提醒仍会继续运行。
+
 ## 数据与边界
 
 - 观察池即时行情：同花顺全 A 横截面提供涨跌、换手与量能，开盘啦逐只报价提供带交易所时间戳的决策价格，东财观察池资金流提供公开主力净流入指标（2026-09-17 及以前为腾讯全 A/批量报价）。
@@ -52,15 +54,38 @@ curl -X PUT http://127.0.0.1:5681/api/v1/intraday/watchlists/600176.SH \
   -d '{"symbol":"600176.SH","label":"中国巨石","available_quantity":0,"alert_on_entry":true,"alert_on_exit":true}'
 ```
 
-2. 若要启用飞书推送，在私有环境变量中同时设置：
+2. 启用飞书推送。首选**群自定义机器人**：建群后约几分钟即可完成，不需要 App ID、应用审核或可用范围配置；需要跨群/按用户投递时再改用**企业自建应用机器人**。当前唯一 writer 是本机 StockPlatform，凭据只写入 `G:\StockPlatform\config\runtime.env`，不会放进 Git 或命令行。将来部署独立 `intraday_edge` 时才显式复制到其私有环境；脚本不会假定该主机已经存在。
+
+   自定义机器人：
 
 ```dotenv
-QUANT_ALERT_WEBHOOK_TOKEN=<随机长值，两个服务使用同一值>
-FEISHU_ALERT_RECEIVE_ID=<明确的群 chat_id 或用户 id>
-FEISHU_ALERT_RECEIVE_ID_TYPE=chat_id
+FEISHU_ALERTS_CONFIGURED=true
+FEISHU_ALERT_TRANSPORT=custom_bot
+FEISHU_CUSTOM_BOT_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/...
+FEISHU_CUSTOM_BOT_SIGNING_SECRET=<推荐开启；可选>
+INTRADAY_SCAN_INTERVAL_SECONDS=30
+QUANT_DISCIPLINE_ALERTS_ENABLED=true
+QUANT_DISCIPLINE_ALERT_INTERVAL_SECONDS=30
+QUANT_DISCIPLINE_ALERT_ACCOUNT_KEY=citics-primary
 ```
 
-未设置接收目标时，扫描和信号仍会落库，但投递状态为 `disabled`，不会向任何群或用户发送。
+   企业自建应用机器人：
+
+```dotenv
+FEISHU_ALERTS_CONFIGURED=true
+FEISHU_ALERT_TRANSPORT=app
+QUANT_FEISHU_DIRECT_ENABLED=true
+FEISHU_APP_ID=cli_...
+FEISHU_APP_SECRET=...
+FEISHU_ALERT_RECEIVE_ID=oc_...
+FEISHU_ALERT_RECEIVE_ID_TYPE=chat_id
+INTRADAY_SCAN_INTERVAL_SECONDS=30
+QUANT_DISCIPLINE_ALERTS_ENABLED=true
+QUANT_DISCIPLINE_ALERT_INTERVAL_SECONDS=30
+QUANT_DISCIPLINE_ALERT_ACCOUNT_KEY=citics-primary
+```
+
+   未配置完整凭据或显式禁用时，扫描和信号仍会落库，但投递状态为 `disabled`，不会向任何群或用户发送。完整申请、配置、测试和停用命令见 [`FEISHU_ALERT_RUNBOOK.md`](FEISHU_ALERT_RUNBOOK.md)。
 
 若研究台有一个飞书客户端可访问的 HTTPS 地址，可额外设置：
 

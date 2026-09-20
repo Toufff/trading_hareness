@@ -8,12 +8,15 @@ from typing import Any
 import httpx
 
 from .http_clients import alert_http_client
+from .feishu_custom_bot import custom_bot_configured, post_custom_bot_text
 from .feishu_direct_alert import direct_feishu_alert_configured, post_direct_feishu_alert_text
 from .tushare_providers import safe_error_detail
 
 
 async def post_feishu_alert_text(text: str) -> dict[str, Any]:
     """Deliver through the edge-owned direct path or the local adapter."""
+    if custom_bot_configured():
+        return await post_custom_bot_text(text)
     if direct_feishu_alert_configured():
         return await post_direct_feishu_alert_text(text)
     webhook_url = (os.getenv("QUANT_ALERT_WEBHOOK_URL") or "").strip()
@@ -31,3 +34,15 @@ async def post_feishu_alert_text(text: str) -> dict[str, Any]:
             return {"status": "sent", "response": response.json()}
     except (httpx.HTTPError, ValueError) as error:
         return {"status": "failed", "error": safe_error_detail(str(error), 500)}
+
+
+def feishu_alert_transport_configured() -> bool:
+    """Whether any supported Feishu notification transport is complete."""
+    if custom_bot_configured() or direct_feishu_alert_configured():
+        return True
+    return bool(
+        (os.getenv("QUANT_ALERT_WEBHOOK_URL") or "").strip() and (os.getenv("QUANT_ALERT_WEBHOOK_TOKEN") or "").strip()
+    )
+
+
+__all__ = ["feishu_alert_transport_configured", "post_feishu_alert_text"]

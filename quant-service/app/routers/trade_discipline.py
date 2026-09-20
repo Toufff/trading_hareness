@@ -54,6 +54,8 @@ class TradeDisciplineDependencies:
     # ``(symbol) -> {"session_date": "YYYY-MM-DD", "rows": [...]}``; the licensed
     # Longhu minute tape serves only its latest session.
     live_minutes: Callable[[str], Awaitable[dict[str, Any]]] | None = None
+    alert_status: Callable[..., Awaitable[dict[str, Any]]] | None = None
+    alert_transport_configured: Callable[[], bool] | None = None
     today: Callable[[], date] | None = None
 
 
@@ -120,6 +122,17 @@ def reconciliation_payload(raw: dict[str, list[dict[str, Any]]]) -> dict[str, An
 
 def build_trade_discipline_router(deps: TradeDisciplineDependencies) -> APIRouter:
     router = APIRouter(tags=["trade-discipline"])
+
+    @router.get("/api/v1/discipline/alerts/status")
+    async def read_discipline_alert_status() -> dict[str, Any]:
+        fetch = _require(deps.alert_status, "alert status")
+        payload = await fetch(deps.async_database)
+        configured = bool(deps.alert_transport_configured and deps.alert_transport_configured())
+        return {**_json(payload), "transport_configured": configured,
+                "coverage": {"minute_price_lines": "30s_during_continuous_auction",
+                             "daily_price_lines": "after_authoritative_same_day_close",
+                             "time_lines": "not_notified_by_this_price_alert_lane"},
+                "live_orders": False, "boundary": BOUNDARY}
 
     @router.get("/api/v1/discipline/plans/latest")
     async def read_latest_discipline_plans(

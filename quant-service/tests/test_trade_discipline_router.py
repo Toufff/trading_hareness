@@ -133,6 +133,7 @@ def test_the_router_exposes_exactly_the_documented_read_routes():
     routes = {(tuple(sorted(route.methods)), route.path) for route in app.routes
               if getattr(route, "path", "").startswith("/api/v1/discipline")}
     assert routes == {
+        (("GET",), "/api/v1/discipline/alerts/status"),
         (("GET",), "/api/v1/discipline/plans/latest"),
         (("GET",), "/api/v1/discipline/plans/history"),
         (("GET",), "/api/v1/discipline/plans/{plan_id}"),

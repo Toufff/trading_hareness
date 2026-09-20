@@ -357,7 +357,7 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         }
         self.assertEqual(importers, {
             "alert_transport.py", "free_market_providers.py", "http_clients.py",
-            "feishu_direct_alert.py", "fuyao_provider.py", "main.py", "remote_archive_sync.py",
+            "feishu_custom_bot.py", "feishu_direct_alert.py", "fuyao_provider.py", "main.py", "remote_archive_sync.py",
             "remote_archive_transport.py", "tushare_providers.py",
         })
         self.assertNotIn("AsyncClient(", (app_dir / "free_market_providers.py").read_text(encoding="utf-8"))
@@ -368,6 +368,7 @@ class ProviderAndRealtimeRuleTests(unittest.TestCase):
         self.assertIn("provider_http_client(", (app_dir / "fuyao_provider.py").read_text(encoding="utf-8"))
         self.assertIn("alert_http_client()", (app_dir / "alert_transport.py").read_text(encoding="utf-8"))
         self.assertIn("alert_http_client", (app_dir / "feishu_direct_alert.py").read_text(encoding="utf-8"))
+        self.assertIn("alert_http_client", (app_dir / "feishu_custom_bot.py").read_text(encoding="utf-8"))
 
     def test_legacy_schema_bootstrap_is_explicit_opt_in(self):
         self.assertFalse(legacy_schema_bootstrap_enabled({}))

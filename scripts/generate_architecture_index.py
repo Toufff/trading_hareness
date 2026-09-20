@@ -102,7 +102,7 @@ def main() -> int:
             return 1
         print("architecture index is current")
         return 0
-    OUTPUT.write_text(rendered)
+    OUTPUT.write_text(rendered, newline="\n")
     print(OUTPUT.relative_to(ROOT))
     return 0
 
