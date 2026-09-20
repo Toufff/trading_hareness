@@ -1,4 +1,4 @@
-# owner 对外契约与错误回流（peer-contract-v1）
+# owner 对外契约与错误回流（peer-contract-v2）
 
 状态：2026-09-20 上线。本文件是 `/api/v1/peer/contract` 与 `/api/v1/peer/errors` 两个接口的合同；实现与本文冲突时先改本文再改代码。
 
@@ -31,7 +31,8 @@
 | `alembic_head` | 生产库当前迁移版本，pin 检查以它为准 |
 | `objects[]` | 被支持的关系，含真实列（类型 / nullable / default）、索引定义、表空间、该角色的实际权限 |
 | `cold_tier` | 真正在 `stock_cold` 表空间里的表；`peer_readable: false` |
-| `enumerations.factor_semantics` | `raw->>'factor_semantics'` 的实时取值集合 |
+| `enumerations.factor_semantics` | `raw->>'factor_semantics'` 的实时取值集合，**以及覆盖率**（总行数、带该键的行数、该键最早出现的交易日） |
+| `derived_rules[]` | 答案不是某一列的问题。v2 只有一条：`adjustment_factor_usable` |
 | `not_provided[]` | **不存在且不会添加**的东西，逐条给出理由 |
 | `endpoints[]` | 允许调用的 owner 接口 |
 | `rules[]` | 三条使用规则（见下） |
@@ -40,11 +41,30 @@
 
 `not_provided` 的每一条都对应 9/19 那次启动门里一条真实失败的检查。保留它们的名字，是为了让这份契约**既能当目录用，也能当反驳用**：对方可以直接删掉检查，而不是等一个永远不会来的迁移。
 
-三条规则（写在响应里）：
+规则（写在响应里）：
 
-1. 只能对 `objects[]` 和 `enumerations[]` 里的东西做断言。不在本文档里的，即使当前能读到，也不属于约定。
-2. 永远不要从交接文档的散文里推断 schema。本契约与任何文档冲突时，以本契约为准。
-3. **一个阻断性启动检查，必须先对本契约跑通过至少一次，才允许它阻断。** 先跑 report-only。
+1. 只能对 `objects[]`、`enumerations[]`、`derived_rules[]` 里的东西做断言。不在本文档里的，即使当前能读到，也不属于约定。
+2. **不要对缺失的 JSON 键 fail closed。** 缺失在这里是一个被记录的状态，不是故障；`coverage` 会说明它有多普遍，能不能用由派生规则回答，不由"键在不在"回答。
+3. 永远不要从交接文档的散文里推断 schema。本契约与任何文档冲突时，以本契约为准。
+4. **一个阻断性启动检查，必须先对本契约跑通过至少一次，才允许它阻断。** 先跑 report-only。
+
+### derived_rules.adjustment_factor_usable（2026-09-20 新增）
+
+v1 发布了因子语义**在哪里**就停住了，这是同一个缺陷退了一层。实测：
+
+- `quant.daily_adjustment_factors` 共 4,158,486 行，**只有 97,187 行（2.3%）带 `factor_semantics` 键**，该键最早出现在 2026-08-21。9/17、9/10 有一半以上的行没有它，连最近一个结算日 9/18 也还有 19 行没有。
+- 另有 **61,614 行带 `superseded_at` 标记**——被后来的决策取代的行，仍作为"厂商当时发布了什么"的证据留着，但永远不能拿来定价。v1 从没提过这个键。
+- 一行能不能给日线当 `adj_factor`，**取决于 provider 不亚于取决于语义**：`longhuvip_composite` 在表里可见，但任何情况下都不得用它定价。
+
+所以"缺语义就 fail closed"会否掉表里的绝大多数，而"只看语义"会用上被取代的行。契约现在直接把 owner 自己的判定式发出来：
+
+```sql
+(((factor.provider LIKE 'tushare%' AND coalesce(factor.raw->>'factor_semantics','') IN ('','corporate_action_cumulative'))
+  OR (factor.provider = 'longhu_qfq_derived' AND coalesce(factor.raw->>'factor_semantics','') = 'corporate_action_cumulative'))
+ AND factor.raw->>'superseded_at' IS NULL)
+```
+
+这段 SQL 由 `app/tushare_normalization.promotable_factor_evidence_sql()` 生成，和 owner 自己用的是同一份实现，**不可能漂移**。读三个输入：`provider`、`raw->>'factor_semantics'`、`raw->>'superseded_at'`。tushare 系路由缺语义＝旧口径的累计因子，可用；派生 provider `longhu_qfq_derived` 必须显式写明 `corporate_action_cumulative`；其余 provider 一律只是证据，不是价格。
 
 ## GET /api/v1/peer/errors
 

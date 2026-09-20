@@ -7,8 +7,9 @@ peer deployment repeated 5123 times on 2026-09-19 without noticing.
 
 from __future__ import annotations
 
+import json
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -16,6 +17,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.peer_contract import NOT_PROVIDED, SUPPORTED_OBJECTS, build_contract
+from app.tushare_normalization import (
+    SUPERSEDED_MARKER,
+    promotable_adjustment_factor,
+    promotable_factor_evidence_sql,
+)
 from app.peer_error_feed import (
     LOG_TIMEZONE,
     collect_role_errors,
@@ -201,6 +207,12 @@ class _FakeConnection:
             ])
         if "pg_tablespace t ON t.oid = c.reltablespace" in text or "WHERE t.spcname" in text:
             return _FakeCursor([("quant.legacy_source_records",), ("quant.raw_market_observations_cold",)])
+        if "count(*) FILTER" in text:
+            # rows_total, rows_with_key, rows_superseded, first_labelled, last_day.
+            # The shape that matters: the key is present on a small minority.
+            return _FakeCursor([(4158486, 97187, 61614, date(2026, 8, 21), date(2026, 9, 18))])
+        if "DISTINCT provider" in text:
+            return _FakeCursor([("longhu_qfq_derived",), ("longhuvip_composite",), ("tushare_primary",)])
         if "factor_semantics" in text:
             return _FakeCursor([("corporate_action_cumulative",), ("same_day_identity_only",)])
         if "alembic_version" in text:
@@ -251,6 +263,48 @@ class ContractTests(unittest.TestCase):
         values = self.contract["enumerations"]["factor_semantics"]["values"]
         self.assertEqual(values, ["corporate_action_cumulative", "same_day_identity_only"])
         self.assertNotIn("cumulative_tushare", values)
+
+    def test_the_enumeration_says_how_rare_the_key_is_not_only_what_it_may_contain(self):
+        # v1 published the value set and stopped, which reads as "every row has
+        # one of these". 97,187 of 4,158,486 rows do.
+        coverage = self.contract["enumerations"]["factor_semantics"]["coverage"]
+        self.assertEqual(coverage["rows_total"], 4158486)
+        self.assertEqual(coverage["rows_with_key"], 97187)
+        self.assertEqual(coverage["first_labelled_trading_date"], "2026-08-21")
+        self.assertEqual(coverage["last_trading_date"], "2026-09-18")
+
+    def test_the_document_is_json_serializable_so_dates_never_reach_a_consumer_as_objects(self):
+        json.dumps(self.contract)
+
+    def test_a_missing_key_is_named_as_a_documented_state_rather_than_a_fault(self):
+        absent = {item["name"]: item["reason"] for item in self.contract["not_provided"]}
+        reason = absent["quant.daily_adjustment_factors.raw->>'factor_semantics' NOT NULL"]
+        self.assertIn("not an error", reason)
+        self.assertIn("derived_rules.adjustment_factor_usable", reason)
+
+    def test_usability_is_published_as_the_owners_own_predicate_not_as_a_description(self):
+        rule = self.contract["derived_rules"]["adjustment_factor_usable"]
+        self.assertEqual(rule["sql_predicate"], promotable_factor_evidence_sql("factor", "raw"))
+
+    def test_the_predicate_accepts_the_unlabelled_majority_and_refuses_a_superseded_row(self):
+        # The three cases a semantics-only reader gets wrong.
+        rule = self.contract["derived_rules"]["adjustment_factor_usable"]
+        self.assertIn("", rule["promotable_semantics_for_prefix"])
+        self.assertEqual(rule["superseded_marker"], SUPERSEDED_MARKER)
+        self.assertEqual(rule["rows_superseded"], 61614)
+        self.assertTrue(promotable_adjustment_factor({}, provider_key="tushare_primary"))
+        self.assertFalse(promotable_adjustment_factor(
+            {"factor_semantics": "corporate_action_cumulative", SUPERSEDED_MARKER: "2026-09-07"},
+            provider_key="tushare_primary"))
+        # A provider the peer can see in the table but may never price from.
+        self.assertIn("longhuvip_composite", rule["observed_providers"])
+        self.assertFalse(promotable_adjustment_factor(
+            {"factor_semantics": "corporate_action_cumulative"}, provider_key="longhuvip_composite"))
+
+    def test_the_rules_forbid_failing_closed_on_an_absent_key(self):
+        joined = " ".join(self.contract["rules"])
+        self.assertIn("Never fail closed on a missing JSON key", joined)
+        self.assertIn("derived_rules[]", joined)
 
     def test_the_cold_tier_is_published_so_nobody_has_to_query_pg_class_for_it(self):
         self.assertIn("quant.legacy_source_records", self.contract["cold_tier"]["tables"])
@@ -341,7 +395,7 @@ class PeerRouterTests(unittest.TestCase):
         response = self.client.get("/api/v1/peer/contract", headers=self.auth)
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["contract_version"], "peer-contract-v1")
+        self.assertEqual(payload["contract_version"], "peer-contract-v2")
         self.assertEqual(payload["peer_role"], "stock_peer")
         self.assertTrue(payload["rules"])
 

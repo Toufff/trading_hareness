@@ -20,6 +20,16 @@ equally:
     consumer that inferred it can delete the check instead of waiting for a
     migration that is never coming.
 
+``derived_rules``
+    Questions whose answer is not a column.  v1 published where factor
+    semantics live and stopped there, which was the same defect one level in:
+    on 2026-09-20 only 2.3% of ``daily_adjustment_factors`` rows carried the
+    key at all, 61,614 rows carried a ``superseded_at`` marker the contract
+    never mentioned, and whether a factor may back a bar depends on the
+    provider as much as on the semantics.  A consumer reading the enumeration
+    alone had no way to reach the owner's own answer, so the owner's predicate
+    is published verbatim instead of described.
+
 The allowlist below is a deliberate curation, not everything the peer role can
 read: ``stock_peer`` inherits ``quant_app`` and can therefore SELECT more than
 200 relations, almost none of which are part of any agreement.  Publishing all
@@ -34,7 +44,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-CONTRACT_VERSION = "peer-contract-v1"
+from .tushare_normalization import (
+    CUMULATIVE_FACTOR_SEMANTICS,
+    DERIVED_FACTOR_PROVIDER,
+    PROMOTABLE_FACTOR_PROVIDER_PREFIX,
+    PROMOTABLE_FACTOR_SEMANTICS,
+    SUPERSEDED_MARKER,
+    promotable_factor_evidence_sql,
+)
+
+CONTRACT_VERSION = "peer-contract-v2"
 
 SCHEMA = "quant"
 
@@ -156,6 +175,14 @@ NOT_PROVIDED: tuple[AbsentObject, ...] = (
         "Never a valid factor semantics value in the owner database. "
         "The live value set is published under enumerations.factor_semantics.",
     ),
+    AbsentObject(
+        "quant.daily_adjustment_factors.raw->>'factor_semantics' NOT NULL",
+        "guarantee",
+        "The key is absent on most rows and its absence is not an error: for a "
+        "tushare-family provider it means the legacy cumulative semantics and the "
+        "factor is usable. A gate that fails closed on the missing key rejects the "
+        "majority of the table. Use derived_rules.adjustment_factor_usable.",
+    ),
 )
 
 #: How a consumer learns that an interruption is a deployment and not a fault.
@@ -243,6 +270,29 @@ SELECT DISTINCT raw->>'factor_semantics'
  ORDER BY 1
 """
 
+#: Coverage, not just the value set.  A consumer that knows only *which* values
+#: are legal will assume every row carries one; these counts say out loud that
+#: almost none do and that the key only starts on ``first_labelled_trading_date``.
+_FACTOR_COVERAGE_SQL = """
+SELECT count(*),
+       count(*) FILTER (WHERE raw ? 'factor_semantics'),
+       count(*) FILTER (WHERE raw ? %s),
+       min(trading_date) FILTER (WHERE raw ? 'factor_semantics'),
+       max(trading_date)
+  FROM quant.daily_adjustment_factors
+"""
+
+_FACTOR_PROVIDERS_SQL = """
+SELECT DISTINCT provider
+  FROM quant.daily_adjustment_factors
+ ORDER BY 1
+"""
+
+
+def _as_date_text(value: Any) -> str | None:
+    """Render a date/None as ISO text, so the contract stays JSON-serializable."""
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
 
 def _fetch(connection: Any, sql: str, params: Sequence[Any] | None = None) -> list[tuple[Any, ...]]:
     """Read rows as plain tuples whatever row factory the pool was built with.
@@ -306,6 +356,8 @@ def build_contract(connection: Any, *, peer_role: str = "stock_peer") -> dict[st
 
     cold_tables = [row[0] for row in _fetch(connection, _COLD_SQL, (COLD_TABLESPACE,))]
     semantics = [row[0] for row in _fetch(connection, _SEMANTICS_SQL) if row[0] is not None]
+    coverage = _fetch(connection, _FACTOR_COVERAGE_SQL, (SUPERSEDED_MARKER,))[0]
+    factor_providers = [row[0] for row in _fetch(connection, _FACTOR_PROVIDERS_SQL)]
     head_rows = _fetch(connection, f"SELECT version_num FROM {SCHEMA}.alembic_version")
     identity = _fetch(
         connection,
@@ -332,8 +384,41 @@ def build_contract(connection: Any, *, peer_role: str = "stock_peer") -> dict[st
             "factor_semantics": {
                 "source": "quant.daily_adjustment_factors.raw->>'factor_semantics'",
                 "values": semantics,
-                "note": "A row without the key, or a symbol/day with no row at all, means the factor "
-                        "is absent for that day. Absence is not an error.",
+                "coverage": {
+                    "rows_total": coverage[0],
+                    "rows_with_key": coverage[1],
+                    "first_labelled_trading_date": _as_date_text(coverage[3]),
+                    "last_trading_date": _as_date_text(coverage[4]),
+                },
+                "note": "The key is a late addition and is absent on most rows, including some "
+                        "rows of the most recent settled day. An absent key does NOT mean the "
+                        "factor is missing and is NOT an error: on a tushare-family provider it "
+                        "means the legacy cumulative semantics. Whether a row may be used is not "
+                        "answered by this enumeration alone -- see "
+                        "derived_rules.adjustment_factor_usable.",
+            },
+        },
+        "derived_rules": {
+            "adjustment_factor_usable": {
+                "question": "May this quant.daily_adjustment_factors row back a bar adj_factor?",
+                "sql_predicate": promotable_factor_evidence_sql("factor", "raw"),
+                "reads": ["factor.provider", "factor.raw->>'factor_semantics'",
+                          f"factor.raw->>'{SUPERSEDED_MARKER}'"],
+                "promotable_provider_prefix": PROMOTABLE_FACTOR_PROVIDER_PREFIX,
+                "promotable_semantics_for_prefix": list(PROMOTABLE_FACTOR_SEMANTICS),
+                "derived_provider": DERIVED_FACTOR_PROVIDER,
+                "derived_provider_required_semantics": CUMULATIVE_FACTOR_SEMANTICS,
+                "superseded_marker": SUPERSEDED_MARKER,
+                "rows_superseded": coverage[2],
+                "observed_providers": factor_providers,
+                "note": "The predicate is emitted from the owner's own implementation "
+                        "(app/tushare_normalization.promotable_factor_evidence_sql), so it cannot "
+                        "drift from what the owner actually does. Three inputs, not one: the "
+                        "provider must be a tushare-family route with absent-or-cumulative "
+                        "semantics, or the single derived provider with cumulative semantics "
+                        "stated explicitly; and a row carrying the superseded marker is never "
+                        "usable however it is labelled. Rows from any other provider are stored "
+                        "as evidence of what a vendor published and must not back a price.",
             },
         },
         "not_provided": [
@@ -342,8 +427,12 @@ def build_contract(connection: Any, *, peer_role: str = "stock_peer") -> dict[st
         "endpoints": list(PUBLISHED_ENDPOINTS),
         "deploy_channel": DEPLOY_CHANNEL,
         "rules": [
-            "Assert only against objects[] and enumerations[]. Anything absent from this document "
-            "is not part of the agreement even if your role can currently read it.",
+            "Assert only against objects[], enumerations[] and derived_rules[]. Anything absent "
+            "from this document is not part of the agreement even if your role can currently "
+            "read it.",
+            "Never fail closed on a missing JSON key. Absence is a documented state here, not a "
+            "fault; enumerations[].coverage says how common it is, and a derived rule -- not a "
+            "key test -- decides whether a row may be used.",
             "Never infer a schema from prose in a handoff document. If this contract and a document "
             "disagree, this contract is authoritative.",
             "A blocking startup check must have passed against this contract at least once before it "
