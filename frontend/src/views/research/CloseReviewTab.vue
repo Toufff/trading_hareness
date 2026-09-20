@@ -29,7 +29,7 @@ export default defineComponent({
     · <a href="/intraday">盘中九策略：分时、入场情景与收盘对照</a>
   </p>
   <GovernanceReviewPanel />
-  <ShortTermLanesPanel :summary="postCloseStrategyRun?.summary" />
+  <ShortTermLanesPanel :summary="postCloseStrategyRun?.summary" :recommendation="formalRecommendation" />
 
   <el-alert title="复盘页只读取已保存的板块报告、市场快照和龙虎榜。龙虎榜是收盘后公开的次日观察背景，不参与当天盘中评分。" type="info" :closable="false" show-icon/>
   <el-row :gutter="14" class="section-gap">

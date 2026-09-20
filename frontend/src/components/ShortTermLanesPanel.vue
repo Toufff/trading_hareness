@@ -9,7 +9,7 @@ import StrategyResultSummary from './StrategyResultSummary.vue';
 import EventResearchOverlay from './EventResearchOverlay.vue';
 import { downloadStrategyReport, type StrategyScan, type StrategyLane } from './short-term-reports';
 
-const props = defineProps<{ summary?: Record<string, unknown> }>();
+const props = defineProps<{ summary?: Record<string, unknown>; recommendation?: unknown }>();
 const scan = computed(() => props.summary?.strategy_lanes as StrategyScan | undefined);
 const selected = ref('overview');
 const reports = computed(() => scan.value?.report_bundle?.reports ?? []);
@@ -31,7 +31,7 @@ const leadName = (lane: StrategyLane) => {
       <div class="lane-heading"><div><strong>多策略短线报告</strong><p>每个策略独立展开，总报告汇总比较；观察条件不等于买入指令。</p></div>
         <el-tag :type="scan?.status === 'completed' ? 'success' : 'warning'">{{ scan?.as_of_date ?? '尚无扫描' }}</el-tag></div>
     </template>
-    <RecommendationPoolPanel :value="summary?.recommendation_pool" />
+    <RecommendationPoolPanel :value="recommendation ?? summary?.recommendation_pool" />
     <el-alert v-if="!scan || scan.status !== 'completed'" title="多策略历史数据未齐：未生成有效名单，不使用旧名单冒充今日结果。" type="warning" :closable="false"/>
     <template v-if="scan">
       <p class="lane-meta">完整历史 {{ scan.coverage.complete_history }} / {{ scan.coverage.universe }} 只主板股票。所有报告使用同一轮扫描数据。</p>

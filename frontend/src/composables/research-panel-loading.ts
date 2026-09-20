@@ -3,7 +3,7 @@
 export const RESEARCH_TAB_PANELS: Record<string, readonly string[]> = {
   overview: ['overview', 'replay-readiness', 'recommendations'],
   'market-snapshots': ['overview', 'market-snapshots', 'sectors', 'sector-flows', 'concept-signals', 'concept-candidates', 'announcements', 'provider-capabilities'],
-  'close-review': ['post-close-strategy', 'close-board-report', 'close-strategy-review', 'lhb-events', 'concept-backfill', 'pattern-mining', 'ten-day-leader-rotation', 'intraday-outcomes', 'analyst-scorecards'],
+  'close-review': ['formal-recommendation', 'post-close-strategy', 'close-board-report', 'close-strategy-review', 'lhb-events', 'concept-backfill', 'pattern-mining', 'ten-day-leader-rotation', 'intraday-outcomes', 'analyst-scorecards'],
   strategy: ['recommendations', 'universe', 'features', 'strategies'],
   'factor-lab': ['factors', 'factor-evaluations', 'strategy-experiments', 'main-wave-experiments', 'frameworks', 'training-roadmap'],
   'stock-study': ['universe'],

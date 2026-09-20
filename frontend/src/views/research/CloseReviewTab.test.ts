@@ -17,6 +17,10 @@ describe('CloseReviewTab asynchronous scan hydration', () => {
     });
     const panel = () => wrapper.findComponent(ShortTermLanesPanel);
     expect(panel().props('summary')).toBeUndefined();
+    expect(panel().props('recommendation')).toBeNull();
+    dashboard.formalRecommendation = { status: 'ready', decision_id: 'decision-1' };
+    await nextTick();
+    expect(panel().props('recommendation')).toMatchObject({ status: 'ready', decision_id: 'decision-1' });
     for (const day of ['2026-09-03', '2026-09-04']) {
       dashboard.postCloseStrategyRun = {
         status: 'completed', as_of_date: day,

@@ -9,7 +9,8 @@ describe('research tab request isolation', () => {
     const allKeys = [...source.matchAll(/key: '([^']+)'/g)].map(match => match[1]);
     expect(new Set(Object.values(RESEARCH_TAB_PANELS).flat())).toEqual(new Set(allKeys));
     const selected = panelsForResearchTab(allKeys.map(key => ({key: key!})), 'close-review');
-    expect(selected[0]?.key).toBe('post-close-strategy');
+    expect(selected[0]?.key).toBe('formal-recommendation');
+    expect(selected[1]?.key).toBe('post-close-strategy');
     expect(selected.some(item => item.key === 'strategy-experiments')).toBe(false);
     const panes = [...app.matchAll(/<el-tab-pane[^>]+name="([^"]+)"[^>]*>/g)];
     expect(panes).toHaveLength(11);

@@ -27,6 +27,16 @@ function sample(): StrategyScan {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('independent strategy reports', () => {
+  it('renders the independent formal recommendation before the large scan payload arrives', () => {
+    const recommendation = { status: 'ready', decision_id: 'decision-1', as_of_date: '2026-09-18', coverage: { candidates: 3, reviewed: 3, missing: [] }, recommended: [
+      { symbol: '002008.SZ', name: '大族激光', priority: 2, stage: 'initial_breakout', sector: '自动化设备', business: '激光及自动化设备平台型公司', why_now: '放量突破', comparison: '同板块领先', trigger: '站稳确认', invalidation: '跌回平台', company_risk: '减持风险' },
+    ] };
+    const wrapper = mount(ShortTermLanesPanel, { props: { recommendation }, global: { plugins: [ElementPlus] } });
+    expect(wrapper.text()).toContain('大族激光');
+    expect(wrapper.text()).toContain('激光及自动化设备平台型公司');
+    expect(wrapper.text()).toContain('多策略历史数据未齐');
+    wrapper.unmount();
+  });
   it('shows persisted conclusions and conditions before research process and data context', async () => {
     const wrapper = mount(ShortTermLanesPanel, { props: { summary: { strategy_lanes: sample() } }, global: { plugins: [ElementPlus] } });
     const overview = wrapper.get('[data-report-view="overview"]');
