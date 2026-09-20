@@ -42,10 +42,14 @@ def verify(symbol, public_base, credentials_file=None, verify_write=False,
         timeline = client.get(url + '/' + items[0]['thesis']['thesis_id'] + '/timeline', timeout=30)
         timeline.raise_for_status()
         assert any(e['evaluation_id'] == result['evaluation_id'] for e in timeline.json()['evaluations'])
+        binding = client.get(url + '/' + items[0]['thesis']['thesis_id'] + '/binding', timeout=30)
+        binding.raise_for_status()
+        assert isinstance(binding.json(), dict), f'{label}: invalid binding projection'
         before = client.get(url, params={'symbol': symbol, 'as_of': '2000-01-01T00:00:00Z'}, timeout=30)
         before.raise_for_status()
         assert before.json()['items'] == [], f'{label}: future record leaked into historical view'
         results.append({'surface': label, 'status': response.status_code, 'historical_filter': True,
+                        'binding_status': binding.status_code,
                         'evaluation_id': result['evaluation_id'], 'content_hash': result['content_hash'],
                         'source_run_id': result['source_run_id'], 'cutoff_at': result['cutoff_at'],
                         'data_date': result['data_date'], 'observations': len(result['observations'])})

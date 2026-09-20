@@ -311,6 +311,7 @@ def test_binding_routes_use_typed_contract_and_database_executor():
         return {"status": "created", "binding_id": "b1"}
 
     def load(_database, thesis_id, **kwargs):
+        assert _database == "connection"
         return {"status": "bound", "thesis_id": thesis_id, "plan_kind": "holding",
                 "holding": {"quantity": 100}, "risk": {"hard_risk": False}, **kwargs}
 

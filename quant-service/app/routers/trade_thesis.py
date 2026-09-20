@@ -165,11 +165,13 @@ def build_trade_thesis_router(deps: TradeThesisDependencies) -> APIRouter:
                            symbol: str | None = None, as_of: datetime | None = None) -> dict[str, Any]:
         if deps.load_bound_plan is None:
             raise HTTPException(status_code=503, detail="trade thesis binding service unavailable")
-        call = functools.partial(
-            deps.load_bound_plan, deps.database, thesis_id,
-            account_key=account_key, symbol=symbol, as_of=as_of,
-        )
-        result = await deps.run_database(call, timeout_seconds=10)
+
+        def run() -> dict[str, Any]:
+            with deps.database.transaction() as connection:
+                return deps.load_bound_plan(
+                    connection, thesis_id, account_key=account_key, symbol=symbol, as_of=as_of,
+                )
+        result = await deps.run_database(run, timeout_seconds=10)
         return {**result, "as_of": as_of, "live_effect": "none"}
 
     @router.post("/{thesis_id}/bindings")
