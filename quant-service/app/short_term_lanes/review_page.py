@@ -162,6 +162,7 @@ def _pool(pool: dict, lanes_result: dict) -> str:
         return ''.join(out)
     for p in pool.get('recommended') or []:
         out.append(f'<article class="stock"><header><strong>{stock(p)}</strong><span class="meta">优先{p.get("priority")} · {esc(p.get("stage"))} · {esc(p.get("sector"))}</span><span class="pill key">推荐</span></header><dl>'
+                   f'<dt>主营与经营</dt><dd>{esc(p.get("business") or "本轮正式研究缺少主营与经营说明")}</dd>'
                    f'<dt>为什么现在</dt><dd>{esc(p.get("why_now"))}</dd>'
                    f'<dt>触发</dt><dd>{esc(p.get("trigger"))}</dd>'
                    f'<dt>失效</dt><dd>{esc(p.get("invalidation"))}</dd>'

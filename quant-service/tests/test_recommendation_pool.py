@@ -151,6 +151,7 @@ def test_human_report_leads_with_total_scan_and_exact_pool_diff():
     assert '| 策略 | 全量匹配 | 条件观察 | 结构观察 | 风险观察 | 首位展示 |' in text
     assert '| accumulation | 0 | 1 | 0 | 0 | 0（0） |' in text
     assert '去重候选 12 只' in text
+    assert '主营与经营：products' in text
 
 
 def test_post_scan_research_projection_does_not_make_decision_stale():

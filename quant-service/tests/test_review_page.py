@@ -25,7 +25,7 @@ def payload(pool_ready=True):
     pool = {'status': 'ready', 'decision_id': 'abcdef1234567890', 'as_of_date': '2026-09-17', 'valid_until': '2026-09-18T15:00:00+08:00',
             'market_assessment': '市场判断', 'notice': '不是买入授权', 'sync_allowed': True,
             'baseline': {'推荐': ['600009.SH']}, 'target_groups': {'推荐': ['600001.SH'], '观察': ['600001.SH', '600009.SH']},
-            'recommended': [dict(symbol='600001.SH', name='甲股', priority=1, stage='initial_breakout', sector='行业甲', why_now='为什么', trigger='触发', invalidation='失效', peer_comparison='对手比较', company_risk='风险')],
+            'recommended': [dict(symbol='600001.SH', name='甲股', priority=1, stage='initial_breakout', sector='行业甲', business='主营设备制造，经营改善', why_now='为什么', trigger='触发', invalidation='失效', peer_comparison='对手比较', company_risk='风险')],
             'reviewed': [dict(symbol='600009.SH', name='旧推荐', decision='observe', comparison='降级理由', invalidation='失效线')]} if pool_ready else {'status': 'unavailable'}
     return {'run': {'run_id': 'run-1', 'as_of_date': '2026-09-17', 'summary': {'strategy_lanes': lanes, 'recommendation_pool': pool}}}
 
@@ -38,6 +38,7 @@ def test_page_leads_with_decision_and_shows_every_lane_tab():
     assert '突破&lt;平台&gt;' in html and '事实&lt;1&gt;' in html  # escaped
     assert '研究：普通观察' in html and '太小' not in html  # small sectors are not ranked
     assert '主线趋势 / 扫描' in html and '-2.73%' in html
+    assert '主营设备制造，经营改善' in html
 
 
 def test_stale_decision_is_shown_with_its_status_not_hidden():

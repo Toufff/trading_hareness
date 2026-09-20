@@ -178,6 +178,8 @@ def markdown(bundle, scan=None, names=None):
     lines += ['', *_scan_lines(scan), '## 本轮重点', '']
     for item in bundle['recommended']:
         lines += [f"### {item['priority']}. {item['name']}（{item['symbol'].split('.')[0]}）", '',
+                  f"所属行业：{item.get('sector') or '本轮未登记'}。", '',
+                  f"主营与经营：{item.get('business') or '本轮正式研究缺少主营与经营说明'}", '',
                   f"阶段：{item['stage']}。{item['why_now']}", '', f"为什么优先：{item['comparison']}", '',
                   f"同类比较：{item['peer_comparison']}", '', f"观察触发：{item['trigger']}", '',
                   f"取消条件：{item['invalidation']}", '', f"公司风险：{item['company_risk']}", '']

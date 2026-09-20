@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import DisciplinePoolCard from './discipline/DisciplinePoolCard.vue';
-type Pick = { symbol: string; name: string; priority: number; stage: string; why_now: string; comparison: string; trigger: string; invalidation: string; company_risk: string; recommendation_note?: Note; ranking_reference?: RankingReference };
+type Pick = { symbol: string; name: string; priority: number; stage: string; sector?: string; business?: string; why_now: string; comparison: string; trigger: string; invalidation: string; company_risk: string; recommendation_note?: Note; ranking_reference?: RankingReference };
 type SectorProxy = { kind: string; symbol?: string; name?: string; url?: string; published_date?: string };
 type SectorView = { assessment: string; trend: string; volume_price: string; proxy: SectorProxy };
 type Note = { rank_assessment: string; entry_reason: string; priority_reason: string; carry_over_reason?: string; weak_sector_entry_reason?: string; sector_disagreement_reason?: string; sector_view?: SectorView; sector_peers: { symbol: string; why_not: string }[]; information_checks: { topic: string; finding: string; url: string; published_date: string }[] };
@@ -53,6 +53,11 @@ const download = () => {
       <p class="meta">{{ decision.as_of_date }} · {{ decision.status }} · 完整候选 {{ decision.coverage?.candidates }}，完成深入复核 {{ decision.coverage?.reviewed }} · 编号 {{ decision.decision_id.slice(0, 12) }}</p>
       <div class="picks"><article v-for="p in decision.recommended" :key="p.symbol">
         <h3>{{ p.priority }}. {{ p.name }}（{{ p.symbol.split('.')[0] }}）</h3><span class="stage">{{ stageNames[p.stage] || p.stage }}</span>
+        <section class="company-brief" aria-label="公司与基本面">
+          <h4>公司与基本面</h4>
+          <p><strong>所属行业：</strong>{{ p.sector || '本轮未登记' }}</p>
+          <p><strong>主营与经营：</strong>{{ p.business || '本轮正式研究缺少主营与经营说明' }}</p>
+        </section>
         <p>{{ p.why_now }}</p><p><strong>为什么优先：</strong>{{ p.comparison }}</p>
         <p><strong>观察触发：</strong>{{ p.trigger }}</p><p><strong>取消条件：</strong>{{ p.invalidation }}</p>
         <details><summary>公司风险</summary><p>{{ p.company_risk }}</p></details>
@@ -92,5 +97,5 @@ const download = () => {
   </section>
 </template>
 <style scoped>
-.recommendation-decision{margin:0 0 24px;padding:22px;border:1px solid #d8e2ee;border-radius:12px;background:#f8fbff;color:#203149}.recommendation-decision header{display:flex;justify-content:space-between;gap:18px;align-items:start}.recommendation-decision h2{margin:0}.recommendation-decision p{line-height:1.7}.meta,header p{color:#61738a;font-size:13px;overflow-wrap:anywhere}.picks{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:14px}.picks article{padding:18px;background:white;border:1px solid #e0e7ef;border-radius:9px}.picks h3{margin:0 0 12px}.stage{font-size:12px;background:#e7efff;color:#234c92;padding:4px 8px;border-radius:5px}.warning{background:#fff1d9;padding:12px;color:#8b5010}.recommendation-decision button{padding:7px 12px;white-space:nowrap;border:1px solid #c6d3e4;background:white;border-radius:5px;cursor:pointer}details{margin-top:14px}summary{cursor:pointer}table.peers{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}table.peers th,table.peers td{border:1px solid #e0e7ef;padding:5px 7px;text-align:left;vertical-align:top}table.peers th{background:#eef4fb;white-space:nowrap}@media(max-width:600px){.recommendation-decision{padding:14px}.recommendation-decision header{display:block}}
+.recommendation-decision{margin:0 0 24px;padding:22px;border:1px solid #d8e2ee;border-radius:12px;background:#f8fbff;color:#203149}.recommendation-decision header{display:flex;justify-content:space-between;gap:18px;align-items:start}.recommendation-decision h2{margin:0}.recommendation-decision p{line-height:1.7}.meta,header p{color:#61738a;font-size:13px;overflow-wrap:anywhere}.picks{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:14px}.picks article{padding:18px;background:white;border:1px solid #e0e7ef;border-radius:9px}.picks h3{margin:0 0 12px}.stage{font-size:12px;background:#e7efff;color:#234c92;padding:4px 8px;border-radius:5px}.company-brief{margin:14px 0;padding:12px 14px;border-left:3px solid #4e73b8;border-radius:5px;background:#f2f6fc}.company-brief h4{margin:0 0 6px;font-size:14px}.company-brief p{margin:5px 0}.warning{background:#fff1d9;padding:12px;color:#8b5010}.recommendation-decision button{padding:7px 12px;white-space:nowrap;border:1px solid #c6d3e4;background:white;border-radius:5px;cursor:pointer}details{margin-top:14px}summary{cursor:pointer}table.peers{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}table.peers th,table.peers td{border:1px solid #e0e7ef;padding:5px 7px;text-align:left;vertical-align:top}table.peers th{background:#eef4fb;white-space:nowrap}@media(max-width:600px){.recommendation-decision{padding:14px}.recommendation-decision header{display:block}}
 </style>
