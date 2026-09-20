@@ -78,7 +78,9 @@ $payload = [ordered]@{
     discipline_alert_account_key = $AccountKey
 }
 if ($Transport -eq 'CustomBot') {
-    if (-not $WebhookUrl) { throw 'WebhookUrl is required for CustomBot transport' }
+    if (-not $WebhookUrl) {
+        $WebhookUrl = ConvertFrom-Secret (Read-Host 'Feishu custom-bot webhook URL (input is hidden)' -AsSecureString)
+    }
     if ($PromptSigningSecret -and $null -eq $SigningSecret) {
         $SigningSecret = Read-Host 'Feishu custom-bot signing secret (input is hidden)' -AsSecureString
     }

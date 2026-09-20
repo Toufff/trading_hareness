@@ -22,9 +22,10 @@
 ```powershell
 pwsh G:\StockPlatform\current\scripts\windows\configure-feishu-alerting.ps1 `
   -Transport CustomBot `
-  -WebhookUrl 'https://open.feishu.cn/open-apis/bot/v2/hook/...' `
   -PromptSigningSecret
 ```
+
+脚本会隐藏输入 Webhook 和签名密钥，避免凭据进入 PowerShell 历史。
 
 配置并重启后进行真实发送：
 
