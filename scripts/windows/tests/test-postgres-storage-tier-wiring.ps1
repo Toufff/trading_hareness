@@ -38,6 +38,9 @@ $assigned = $settings | Where-Object { $_ -match '^\s*([a-z_]+)\s*=' } | ForEach
 Assert-True ($assigned.Count -eq ($assigned | Sort-Object -Unique).Count) 'no setting may be assigned twice in the managed configuration'
 Assert-True ((Get-StockPlatformManagedSettings -Port 55432 -LogDirectory 'G:\StockPlatform\logs') -join "`n" -eq $text) 'the generated configuration must be deterministic'
 Assert-True ($text -match "log_directory = 'G:/StockPlatform/logs'") 'the log directory must be written with forward slashes'
+# Without %u@%d an error raised by stock_peer cannot be attributed back to it,
+# which is the whole point of the /api/v1/peer/errors feed.
+Assert-True ($text -match "log_line_prefix = '%m \[%p\] %q%u@%d app=%a %e '") 'the log prefix must carry role, database and SQLSTATE for attribution'
 # The old HDD-era comment claimed the database lives on a spinning disk.
 $moduleSource = [IO.File]::ReadAllText((Join-Path $windows 'postgres-managed-config.psm1'), [Text.Encoding]::UTF8)
 Assert-True ($moduleSource -notmatch 'lives on an HDD') 'the HDD-era comment must be replaced by the tiered-layout description'

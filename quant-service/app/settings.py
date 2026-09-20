@@ -39,6 +39,13 @@ class Settings:
     write_api_key: str
     allow_unauthenticated_writes: bool
     data_dir: str
+    #: Where the cluster's rotated daily logs land; the peer error feed reads
+    #: them to attribute failures back to the role that caused them.
+    postgres_log_dir: str
+    #: Roles the peer endpoints will describe or report on. The shared read key
+    #: is held by an external consumer, so this must stay an allowlist: it must
+    #: never be able to ask for the owner's own statements.
+    peer_consumer_roles: tuple[str, ...]
     legacy_schema_bootstrap_enabled: bool
     control_plane_writes_enabled: bool
     provider_global_rate_limit_max_wait_seconds: float
@@ -77,6 +84,12 @@ class Settings:
             write_api_key=env.get("QUANT_WRITE_API_KEY", "").strip(),
             allow_unauthenticated_writes=_flag(env.get("QUANT_ALLOW_UNAUTHENTICATED_WRITES"), default=False),
             data_dir=env.get("QUANT_DATA_DIR", "/var/lib/quant"),
+            postgres_log_dir=(env.get("QUANT_POSTGRES_LOG_DIR") or "G:/StockPlatform/logs").strip(),
+            peer_consumer_roles=tuple(
+                item.strip()
+                for item in (env.get("QUANT_PEER_CONSUMER_ROLES") or "stock_peer").split(",")
+                if item.strip()
+            ),
             legacy_schema_bootstrap_enabled=_flag(env.get("QUANT_LEGACY_SCHEMA_BOOTSTRAP"), default=False),
             control_plane_writes_enabled=_flag(env.get("QUANT_CONTROL_PLANE_WRITES_ENABLED"), default=True),
             provider_global_rate_limit_max_wait_seconds=rate_limit_wait,

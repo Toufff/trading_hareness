@@ -160,6 +160,11 @@ function Get-StockPlatformManagedSettings {
         "log_directory = '$logPath'"
         "log_filename = 'postgresql-%Y-%m-%d.log'"
         "log_rotation_age = '1d'"
+        # The default prefix ('%m [%p] ') carries no role, so an error raised by
+        # an external consumer such as stock_peer cannot be attributed and fed
+        # back to whoever produced it. %q suppresses the session fields for
+        # background workers. app/peer_error_feed.py parses exactly this shape.
+        "log_line_prefix = '%m [%p] %q%u@%d app=%a %e '"
         'log_min_duration_statement = 2000'
         "timezone = 'Asia/Shanghai'"
         "log_timezone = 'Asia/Shanghai'"
