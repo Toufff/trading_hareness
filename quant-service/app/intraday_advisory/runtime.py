@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from ..agent_paper.model import ModelFailure
 from ..intraday_quote_normalization import exchange_time_status
+from ..json_safe_encoding import json_safe
 from ..tushare_providers import safe_error_detail
 from .model import CodexAdvisoryModel, DeepSeekAdvisoryModel
 from .renderer import analysis_card, render_analysis, render_signal, signal_card
@@ -160,13 +161,13 @@ def _context(scope: AdvisoryScope, state: RuntimeState, now: datetime, *,
                        "cumulative_amount": sample.amount, "observed_at": sample.observed_at.isoformat()}
                       if sample else None),
         })
-    return {
+    return json_safe({
         "as_of": now.isoformat(), "trigger_kind": trigger_kind, "report_kind": report_kind,
         "research_only": True, "live_orders": False,
         "scope": latest, "scope_blockers": list(scope.blockers),
         "market_context": market_context(state.index_samples, state.sector_samples),
         "recent_events": state.pending_events[-20:],
-    }
+    })
 
 
 async def _emit_signal(deps: IntradayAdvisoryDependencies, state: RuntimeState, signal: Any,

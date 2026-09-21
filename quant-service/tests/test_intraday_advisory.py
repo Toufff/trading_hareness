@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from decimal import Decimal
 import asyncio
 import json
 from pathlib import Path
@@ -13,12 +14,28 @@ from app.intraday_advisory.rules import QuoteSample, evaluate
 from app.intraday_advisory.schedule import decide
 from app.intraday_advisory.scope import AdvisoryScope, ScopeItem
 from app.intraday_advisory.runtime import (
-    IntradayAdvisoryDependencies, RuntimeState, run_intraday_advisory_cycle,
+    IntradayAdvisoryDependencies, RuntimeState, _context, run_intraday_advisory_cycle,
 )
 
 
 TZ = ZoneInfo("Asia/Shanghai")
 MONDAY = datetime(2026, 9, 21, 10, 0, tzinfo=TZ)
+
+
+def test_model_context_normalizes_database_decimal_values() -> None:
+    scope = AdvisoryScope("test", (
+        ScopeItem("603650.SH", "彤程新材", "holding", {
+            "quantity": Decimal("100"), "market_price": Decimal("72.90"),
+        }),
+    ), "snapshot", "decision", ())
+    state = RuntimeState()
+    state.pending_events.append({"trigger_price": Decimal("72.50")})
+
+    payload = _context(scope, state, MONDAY, trigger_kind="scheduled", report_kind="ten_minute")
+
+    json.dumps(payload, ensure_ascii=False)
+    assert payload["scope"][0]["position_or_recommendation"]["market_price"] == "72.90"
+    assert payload["recent_events"][0]["trigger_price"] == "72.50"
 
 
 def test_schedule_uses_bounded_cadences_and_special_reports() -> None:
