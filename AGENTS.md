@@ -394,6 +394,15 @@ Two tests in this family are **not** in the release gate and must be run by hand
   database it creates and drops itself. Run it after changing the move: the
   statement-shape assertions prove what the SQL looks like, not that it runs.
 
+## TypeSafe integration
+
+For TypeSafe/JEV changes, first read the installed `typesafe-ai` skill
+(`C:/Users/brave/.agents/skills/typesafe-ai/SKILL.md` on this host) and its live
+official documentation. The opt-in paper pilot is documented in
+`docs/JEV_PAPER_PILOT.md`; typed judgments are not generated reasoning or profit
+probabilities. Do not silently replace existing research/decision models or
+enable a scheduler when changing the adapter.
+
 ## Review automation
 
 Analyst daily/weekly reviews are materialized by

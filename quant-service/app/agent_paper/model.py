@@ -478,6 +478,10 @@ def build_model(backend: str | None = None, *, model: str | None = None, reasoni
         return DshHeadlessModel()
     if selected == "codex_cli":
         return CodexCliModel(model=model, reasoning_effort=reasoning_effort)
+    if selected == "jev":
+        from .jev import JevPaperModel
+
+        return JevPaperModel(model=model)
     raise ValueError(f"unsupported agent paper backend: {selected}")
 
 

@@ -27,17 +27,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('command', choices=['init', 'run-day', 'decide-once', 'report', 'model-check'])
     parser.add_argument('--env-file', default='G:/StockPlatform/config/runtime.env')
+    parser.add_argument('--provider-env-file', type=Path, help='Optional private provider settings; never stored in the ledger')
     parser.add_argument('--platform-root', type=Path, default=Path('G:/StockPlatform'))
     parser.add_argument('--account-key', default='agent-claude-opus')
     parser.add_argument('--source-account', default='citics-primary')
     parser.add_argument('--start-at', help='ISO time in Asia/Shanghai, e.g. 2026-09-17T13:00')
     parser.add_argument('--model')
-    parser.add_argument('--backend', choices=['claude_cli', 'codex_cli', 'event_research', 'dsh'])
+    parser.add_argument('--backend', choices=['claude_cli', 'codex_cli', 'event_research', 'dsh', 'jev'])
     parser.add_argument('--reasoning-effort')
     parser.add_argument('--decision-minutes', type=int, default=5)
     parser.add_argument('--day')
     args = parser.parse_args()
     load_dotenv(args.env_file, override=True)
+    if args.provider_env_file:
+        load_dotenv(args.provider_env_file, override=True)
 
     from app.database import Database
     from app.event_research.trading_calendar import is_open
