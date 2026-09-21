@@ -3,11 +3,12 @@
  * "纪律卡" expander for one recommendation-pool pick: finds the newest new-buy discipline plan of the
  * symbol and renders it with the same DisciplineDetail the holdings page uses.  Read-only.
  */
-import { computed, ref } from 'vue';
-import DisciplineDetail from './DisciplineDetail.vue';
+import { computed, defineAsyncComponent, ref } from 'vue';
 import { ALL_STATUSES, errorText, fetchLatestPlans } from './discipline-api';
 import { shanghaiToday } from './discipline-model';
 import type { DisciplinePlan, PlansResponse } from './types';
+
+const DisciplineDetail = defineAsyncComponent(() => import('./DisciplineDetail.vue'));
 
 const props = defineProps<{ symbol: string; name?: string; accountKey?: string }>();
 

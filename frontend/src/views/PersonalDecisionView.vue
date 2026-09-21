@@ -4,10 +4,10 @@ import { computed, defineAsyncComponent, reactive, ref } from 'vue';
 import { usePersonalDecisionWorkspace, type TradePlan } from '../composables/usePersonalDecisionWorkspace';
 import ResearchOnlyBadge from '../components/ResearchOnlyBadge.vue';
 import RecommendationPoolPanel from '../components/RecommendationPoolPanel.vue';
-import DisciplineBoard from '../components/discipline/DisciplineBoard.vue';
 
 const StockResearchWorkbench = defineAsyncComponent(() => import('../components/StockResearchWorkbench.vue'));
 const EventResearchLive = defineAsyncComponent(() => import('../components/EventResearchLive.vue'));
+const DisciplineBoard = defineAsyncComponent(() => import('../components/discipline/DisciplineBoard.vue'));
 
 const props = withDefaults(defineProps<{ mode?: 'market' | 'holdings' }>(), { mode: 'market' });
 const isMarketView = computed(() => props.mode === 'market');

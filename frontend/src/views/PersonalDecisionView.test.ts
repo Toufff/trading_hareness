@@ -59,6 +59,9 @@ describe('PersonalDecisionView', () => {
     const wrapper = mount(PersonalDecisionView, { props: { mode: 'holdings' }, global: { plugins: [ElementPlus] } });
     await flushPromises();
     await flushPromises();
+    await vi.waitFor(() => {
+      expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/research/discipline/plans/latest?account_key=citics-primary'))).toBe(true);
+    });
 
     expect(wrapper.text()).toContain('我的持仓');
     expect(wrapper.text()).toContain('账户持仓建议');
