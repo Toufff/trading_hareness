@@ -12,12 +12,12 @@ from zoneinfo import ZoneInfo
 
 from app.intraday_advisory.rules import AdvisorySignal, QuoteSample, evaluate
 from app.intraday_advisory.renderer import analysis_card, signal_card
-from app.intraday_advisory.presentation import ensure_readable_card, metric_lines
+from app.intraday_advisory.presentation import ensure_readable_card, humanize_card, humanize_text, metric_lines
 from app.intraday_advisory.market_watch import index_sample_from_row
 from app.intraday_advisory.schedule import decide
 from app.intraday_advisory.scope import AdvisoryScope, ScopeItem
 from app.intraday_advisory.runtime import (
-    IntradayAdvisoryDependencies, RuntimeState, _analyze, _context, _deepseek_push_worthy,
+    IntradayAdvisoryDependencies, RuntimeState, _analyze, _context, _deepseek_push_worthy, _drain,
     run_intraday_advisory_cycle,
 )
 
@@ -42,13 +42,15 @@ def test_model_context_normalizes_database_decimal_values() -> None:
         }),
     ), "snapshot", "decision", ())
     state = RuntimeState()
-    state.pending_events.append({"trigger_price": Decimal("72.50")})
+    state.pending_events.append({"trigger_price": Decimal("72.50"),
+                                 "summary": "主动侧代理净流出只能作为代理信号"})
 
     payload = _context(scope, state, MONDAY, trigger_kind="scheduled", report_kind="ten_minute")
 
     json.dumps(payload, ensure_ascii=False)
     assert payload["scope"][0]["position_or_recommendation"]["market_price"] == "72.90"
     assert payload["recent_events"][0]["trigger_price"] == "72.50"
+    assert payload["recent_events"][0]["summary"] == "内盘增量占优只能作为内外盘方向信号"
 
 
 def test_schedule_uses_bounded_cadences_and_special_reports() -> None:
@@ -173,6 +175,49 @@ def test_negative_inner_outer_volume_evidence_uses_common_market_language() -> N
     rows = metric_lines({"active_ratio": -0.35})
 
     assert rows == ["近1分钟内盘增量占优，内外盘差约占成交量 35.0%"]
+
+
+def test_legacy_flow_proxy_language_is_normalized_at_presentation_boundary() -> None:
+    original = {"elements": [{"text": {"content":
+        "浪潮信息出现主动侧代理净流出；彤程新材出现主动侧成交代理偏流入"}}]}
+    normalized = humanize_card(original)
+    rendered = json.dumps(normalized, ensure_ascii=False)
+
+    assert "浪潮信息出现内盘增量占优" in rendered
+    assert "彤程新材出现外盘增量占优" in rendered
+    assert "主动侧" not in rendered and "代理净流" not in rendered
+    ensure_readable_card(normalized)
+    assert humanize_text("短周期代理信号") == "短周期内外盘信号"
+
+
+def test_delivery_drain_normalizes_cards_queued_before_deploy() -> None:
+    async def scenario() -> None:
+        calls = 0
+
+        async def run_database(call):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return [{"delivery_id": "old", "message_text": "",
+                         "message_card": {"elements": [{"text": {"content":
+                             "1分钟放量且主动侧代理净流出"}}]}}]
+            return None
+
+        deps = IntradayAdvisoryDependencies(
+            database=object(), run_database=run_database, fetch_quotes=AsyncMock(),
+            fetch_indices=AsyncMock(), post_text=AsyncMock(),
+            post_card=AsyncMock(return_value={"status": "sent"}),
+            session_open=AsyncMock(), now=lambda: MONDAY,
+            account_key=lambda: "citics-primary",
+        )
+        outcome = await _drain(deps)
+
+        assert outcome["sent"] == 1
+        sent = json.dumps(deps.post_card.await_args.args[0], ensure_ascii=False)
+        assert "内盘增量占优" in sent
+        assert "主动侧" not in sent
+
+    asyncio.run(scenario())
 
 
 def test_market_signal_metrics_are_human_readable() -> None:

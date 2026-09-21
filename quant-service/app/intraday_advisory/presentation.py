@@ -18,6 +18,23 @@ TOKEN_TEXT = {
     "quote=null": "实时行情暂未取得",
     "MARKET.INDEX": "核心市场指数",
 }
+LEGACY_FLOW_TEXT = {
+    # Historical event summaries and persisted model output used these
+    # implementation-oriented proxy labels.  Inner/outer volume is the
+    # actual observable evidence, so every human-facing path uses the common
+    # market terms instead of suggesting an identified source of funds.
+    "主动侧成交代理偏流入": "外盘增量占优",
+    "主动侧成交代理净流入": "外盘增量占优",
+    "主动侧代理偏流入": "外盘增量占优",
+    "主动侧代理净流入": "外盘增量占优",
+    "主动侧成交代理偏流出": "内盘增量占优",
+    "主动侧成交代理净流出": "内盘增量占优",
+    "主动侧代理偏流出": "内盘增量占优",
+    "主动侧代理净流出": "内盘增量占优",
+    "短周期代理信号": "短周期内外盘信号",
+    "主动侧代理信号": "内外盘方向信号",
+    "代理信号": "内外盘方向信号",
+}
 _RAW_TOKEN = re.compile(
     r"\b(?:market_state|attention_symbols|position_weight_pct|sellable_quantity|"
     r"amount_ratio|active_ratio|buy_authorized|breakout_hold|new_buy|quote=null|"
@@ -25,6 +42,7 @@ _RAW_TOKEN = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b|\b(?:intraday-advisory|quant-research|trading-hareness)\b",
     re.IGNORECASE,
 )
+_LEGACY_FLOW_TOKEN = re.compile(r"主动侧|(?:成交)?代理(?:偏|净)?流[入出]|代理信号")
 
 
 def symbol_text(symbol: str, name: str | None = None) -> str:
@@ -85,10 +103,25 @@ def metric_lines(metrics: dict[str, Any]) -> list[str]:
 
 def humanize_text(value: Any) -> str:
     text = str(value or "").strip()
+    for raw, readable in LEGACY_FLOW_TEXT.items():
+        text = text.replace(raw, readable)
     for raw, readable in TOKEN_TEXT.items():
         text = text.replace(raw, readable)
     text = re.sub(r"\b(\d{6})\.(?:SH|SZ|BJ)\b", r"\1", text, flags=re.IGNORECASE)
     return text
+
+
+def humanize_card(card: dict[str, Any]) -> dict[str, Any]:
+    """Normalize visible card strings, including cards queued before deploy."""
+    def visit(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: (humanize_text(child) if key == "content" and isinstance(child, str)
+                          else visit(child)) for key, child in value.items()}
+        if isinstance(value, list):
+            return [visit(child) for child in value]
+        return value
+
+    return visit(card)
 
 
 def ensure_readable_card(card: dict[str, Any]) -> None:
@@ -98,6 +131,9 @@ def ensure_readable_card(card: dict[str, Any]) -> None:
     match = _RAW_TOKEN.search(visible)
     if match:
         raise ValueError(f"untranslated_internal_token:{match.group(0)}")
+    legacy = _LEGACY_FLOW_TOKEN.search(visible)
+    if legacy:
+        raise ValueError(f"untranslated_flow_proxy:{legacy.group(0)}")
 
 
 def _visible_content(value: Any) -> list[str]:
@@ -126,6 +162,6 @@ def _signed_pct(value: Any) -> str:
 
 
 __all__ = [
-    "amount_text", "ensure_readable_card", "humanize_text", "metric_lines",
+    "amount_text", "ensure_readable_card", "humanize_card", "humanize_text", "metric_lines",
     "role_text", "state_text", "symbol_text",
 ]

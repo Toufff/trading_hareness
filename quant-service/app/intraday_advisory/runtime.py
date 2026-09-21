@@ -25,6 +25,7 @@ from .repository import (
     persist_analysis, persist_delivery_outcome, persist_index_samples, persist_quote_samples,
     persist_signal, recent_discipline_events, update_status,
 )
+from .presentation import ensure_readable_card, humanize_card, humanize_text
 from .rules import QuoteSample, evaluate, sample_from_row
 from .schedule import decide
 from .scope import AdvisoryScope, load_scope
@@ -138,7 +139,17 @@ async def _drain(deps: IntradayAdvisoryDependencies) -> dict[str, int]:
     counts = {"attempted": 0, "sent": 0, "failed": 0, "disabled": 0}
     for row in rows:
         card = row.get("message_card") if isinstance(row.get("message_card"), dict) else {}
-        outcome = await deps.post_card(card) if card else await deps.post_text(str(row["message_text"]))
+        try:
+            if card:
+                card = humanize_card(card)
+                ensure_readable_card(card)
+                outcome = await deps.post_card(card)
+            else:
+                message = humanize_text(row["message_text"])
+                ensure_readable_card({"content": message})
+                outcome = await deps.post_text(message)
+        except ValueError as exc:
+            outcome = {"status": "failed", "error": str(exc)}
         status = str(outcome.get("status") or "failed")
         if status not in counts:
             status = "failed"
@@ -162,12 +173,18 @@ def _context(scope: AdvisoryScope, state: RuntimeState, now: datetime, *,
                        "cumulative_amount": sample.amount, "observed_at": sample.observed_at.isoformat()}
                       if sample else None),
         })
+    recent_events = []
+    for event in state.pending_events[-20:]:
+        normalized = dict(event)
+        if normalized.get("summary") is not None:
+            normalized["summary"] = humanize_text(normalized["summary"])
+        recent_events.append(normalized)
     return json_safe({
         "as_of": now.isoformat(), "trigger_kind": trigger_kind, "report_kind": report_kind,
         "research_only": True, "live_orders": False,
         "scope": latest, "scope_blockers": list(scope.blockers),
         "market_context": market_context(state.index_samples, state.sector_samples),
-        "recent_events": state.pending_events[-20:],
+        "recent_events": recent_events,
     })
 
 
