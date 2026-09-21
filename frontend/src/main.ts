@@ -24,7 +24,9 @@ if (startupDashboardKey) {
 
 // A board review must not wait for unrelated portfolio/ingestion panels.
 const rootPath = window.location.pathname.replace(/\/$/, '');
-const rootComponent = rootPath === '/sector-heat' ? import('./views/SectorHeatView.vue')
+const rootComponent = ['', '/market', '/market-decision', '/personal', '/holdings'].includes(rootPath)
+  ? import('./views/DecisionShellView.vue')
+  : rootPath === '/sector-heat' ? import('./views/SectorHeatView.vue')
   : rootPath === '/intraday' ? import('./views/IntradayScanView.vue')
     : rootPath === '/agent-paper' ? import('./views/AgentPaperView.vue') : import('./App.vue');
 const loadingTimer = window.setTimeout(() => {
