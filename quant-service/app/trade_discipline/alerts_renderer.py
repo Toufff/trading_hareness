@@ -5,6 +5,15 @@ from __future__ import annotations
 from typing import Any
 
 from ..dashboard_links import market_decision_url
+from ..feishu_card_v2 import (
+    card as card_v2,
+    collapsible_panel,
+    content_panel,
+    markdown,
+    metric_strip,
+    open_url_button,
+    tag,
+)
 from .contracts import DisciplinePlan, Line, LineState
 from ..intraday_advisory.presentation import ensure_readable_card, symbol_text
 
@@ -76,26 +85,42 @@ def discipline_alert_card(plan: DisciplinePlan, line: Line, state: LineState, *,
     else:
         trigger = (f"触发价格 {_value(state.trigger_price)} 元；"
                    f"已按连续 {line.confirm.bars} 根{'分钟线' if line.confirm.basis == 'minute' else '日线'}确认")
-    card: dict[str, Any] = {
-        "config": {"wide_screen_mode": True},
-        "header": {"template": "red" if high_risk else "orange",
-                   "title": {"tag": "plain_text", "content": title}},
-        "elements": [
-            {"tag": "div", "text": {"tag": "lark_md", "content":
-             f"**{symbol_text(plan.symbol, plan.name)}**\n"
-             f"**发生了什么**\n{line.label}已触发。{trigger}\n\n"
-             f"**现在怎么做**\n{_action_text(plan, line, state).replace('纪律动作：', '').replace('操作提示：', '')}"}},
-            {"tag": "note", "elements": [{"tag": "plain_text", "content":
-             f"触发时间 {observed}｜请结合最新公告与可交易状态人工确认｜系统不下单"}]},
-        ],
-    }
+    action = _action_text(plan, line, state).replace("纪律动作：", "").replace("操作提示：", "")
+    urgency = "立即复核" if high_risk else "需要关注"
+    color = "red" if high_risk else "orange"
+    scope = "当前持仓" if holding else "推荐候选"
+    elements = [
+        content_panel(
+            f"**发生了什么**\n{line.label}已触发。{trigger}",
+            element_id="trigger_summary",
+            color="grey",
+        ),
+        metric_strip([
+            ("对象", scope),
+            ("优先级", urgency),
+        ], element_id="trigger_metrics"),
+        content_panel(f"**现在怎么做**\n{action}", element_id="trigger_action", color=color),
+        collapsible_panel(
+            "确认边界",
+            "请结合最新公告、盘口与可交易状态人工确认。系统只提醒，不会下单。",
+            element_id="trigger_boundary",
+        ),
+        markdown(f"触发时间 {observed} · 系统不下单", size="notation"),
+    ]
     decision_url = market_decision_url(dashboard_url)
     if decision_url:
-        card["elements"].append({"tag": "action", "actions": [{"tag": "button",
-            "text": {"tag": "plain_text", "content": "查看纪律卡"}, "type": "primary",
-            "url": decision_url}]})
-    ensure_readable_card(card)
-    return card
+        elements.append(open_url_button("查看纪律卡", decision_url, element_id="open_discipline"))
+    result = card_v2(
+        title=f"{title}｜{plan.name}",
+        subtitle=symbol_text(plan.symbol, plan.name),
+        summary=f"{urgency}：{plan.name} {line.label}已触发",
+        template=color,
+        tags=[tag(urgency, color=color), tag(scope, color="neutral")],
+        elements=elements,
+        card_url=decision_url,
+    )
+    ensure_readable_card(result)
+    return result
 
 
 __all__ = ["ACTION_TEXT", "discipline_alert_card", "render_discipline_alert"]

@@ -231,6 +231,10 @@ class TransitionPersistenceTests(unittest.TestCase):
         text = render_discipline_alert(plan, line, state)
         card = discipline_alert_card(plan, line, state)
         serialized = str(card)
+        self.assertEqual(card["schema"], "2.0")
+        self.assertEqual(card["config"]["width_mode"], "fill")
+        self.assertTrue(any(element["tag"] == "collapsible_panel"
+                            for element in card["body"]["elements"]))
         self.assertIn("暂停新买", text)
         self.assertNotIn("减仓", text)
         self.assertNotIn("退出", serialized)

@@ -96,6 +96,11 @@ def test_cards_translate_internal_fields_and_bound_model_output() -> None:
     first = signal_card(signal, source="recommendation", dashboard_url="https://stock.toufai.top")
     ensure_readable_card(first)
     serialized = json.dumps(first, ensure_ascii=False)
+    assert first["schema"] == "2.0"
+    assert first["config"]["width_mode"] == "fill"
+    assert any(element["tag"] == "collapsible_panel" for element in first["body"]["elements"])
+    assert any(element["tag"] == "button" for element in first["body"]["elements"])
+    assert "elements" not in first
     assert "amount_ratio" not in serialized and "002008.SZ" not in serialized
     assert "外盘增量占优" in serialized and "内外盘差约占成交量" in serialized
     assert "主动侧" not in serialized and "偏流入" not in serialized and "净流入" not in serialized
@@ -110,6 +115,10 @@ def test_cards_translate_internal_fields_and_bound_model_output() -> None:
     }, report_kind="ten_minute", generated_at=MONDAY)
     ensure_readable_card(report)
     rendered = json.dumps(report, ensure_ascii=False)
+    assert report["schema"] == "2.0"
+    assert len(report["header"]["text_tag_list"]) == 3
+    assert any(element["tag"] == "column_set" for element in report["body"]["elements"])
+    assert any(element["tag"] == "collapsible_panel" for element in report["body"]["elements"])
     assert "需要关注" in rendered and "当前尚未满足买入条件" in rendered
     assert "quote=null" not in rendered and "breakout_hold" not in rendered
     assert rendered.index("大盘") < rendered.index("持仓关注") < rendered.index("推荐池关注")
@@ -122,6 +131,26 @@ def test_cards_translate_internal_fields_and_bound_model_output() -> None:
     private_rendered = json.dumps(private, ensure_ascii=False)
     assert "_access/example/market-decision" not in private_rendered
     assert "https://stock.toufai.top/_access/example" in private_rendered
+
+
+def test_analysis_card_promotes_legacy_morning_guidance_into_readable_focus_panels() -> None:
+    report = analysis_card("codex", {
+        "market_state": "watch",
+        "summary": "主要指数上涨，但个股分化明显。",
+        "guidance": [
+            "持仓哈药股份现价8.25元、涨10.00%，成交额15.17亿元；重点观察午后封板承接。",
+            "推荐标的大族激光现价97.23元、跌2.38%，成交额33.45亿元；尚未满足确认条件，不追价。",
+        ],
+        "attention_symbols": ["600664.SH", "002008.SZ"],
+        "risks": ["可卖数量需要按账户快照核对。"],
+    }, report_kind="midday", generated_at=MONDAY)
+
+    rendered = json.dumps(report, ensure_ascii=False)
+    assert "哈药股份" in rendered and "大族激光" in rendered
+    assert "盘中涨停或接近涨停" in rendered and "盘中回撤" in rendered
+    assert "持仓 1" in rendered and "候选 1" in rendered
+    assert "600664.SH" not in rendered and "002008.SZ" not in rendered
+    assert any(element["tag"] == "collapsible_panel" for element in report["body"]["elements"])
 
 
 def test_deepseek_is_persisted_but_only_material_new_changes_are_push_worthy() -> None:

@@ -127,11 +127,14 @@ def humanize_card(card: dict[str, Any]) -> dict[str, Any]:
 def ensure_readable_card(card: dict[str, Any]) -> None:
     # Structural card JSON legitimately contains booleans such as
     # ``wide_screen_mode: true``.  Only user-visible string values are gated.
+    # Card JSON 2.0 markdown also permits presentation tags such as
+    # ``<text_tag>``; strip the markup before looking for leaked field names.
     visible = "\n".join(_visible_content(card))
-    match = _RAW_TOKEN.search(visible)
+    readable_text = re.sub(r"</?[a-z][a-z0-9_]*(?:\s+[^>]*)?>", "", visible, flags=re.IGNORECASE)
+    match = _RAW_TOKEN.search(readable_text)
     if match:
         raise ValueError(f"untranslated_internal_token:{match.group(0)}")
-    legacy = _LEGACY_FLOW_TOKEN.search(visible)
+    legacy = _LEGACY_FLOW_TOKEN.search(readable_text)
     if legacy:
         raise ValueError(f"untranslated_flow_proxy:{legacy.group(0)}")
 
