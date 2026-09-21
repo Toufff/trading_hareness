@@ -7,12 +7,13 @@ import { dashboardContextKey } from '../../dashboard-context';
 import TenDayLeaderRotationPanel from '../../components/TenDayLeaderRotationPanel.vue';
 import ResearchOnlyBadge from '../../components/ResearchOnlyBadge.vue';
 import ShortTermLanesPanel from '../../components/ShortTermLanesPanel.vue';
+import BusinessCoveragePanel from '../../components/BusinessCoveragePanel.vue';
 
 type BoardItem = { sector_key: string };
 
 export default defineComponent({
   name: 'CloseReviewTab',
-  components: { VChart, TenDayLeaderRotationPanel, ResearchOnlyBadge, ShortTermLanesPanel,
+  components: { VChart, TenDayLeaderRotationPanel, ResearchOnlyBadge, ShortTermLanesPanel, BusinessCoveragePanel,
     GovernanceReviewPanel: defineAsyncComponent(() => import('../../components/StrategyGovernancePanel.vue')) },
   setup() {
     const dashboard = inject(dashboardContextKey);
@@ -30,6 +31,7 @@ export default defineComponent({
     · <a href="/intraday">盘中九策略：分时、入场情景与收盘对照</a>
   </p>
   <GovernanceReviewPanel />
+  <BusinessCoveragePanel />
   <ShortTermLanesPanel :summary="postCloseStrategyRun?.summary" :recommendation="formalRecommendation" />
 
   <el-alert title="复盘页只读取已保存的板块报告、市场快照和龙虎榜。龙虎榜是收盘后公开的次日观察背景，不参与当天盘中评分。" type="info" :closable="false" show-icon/>

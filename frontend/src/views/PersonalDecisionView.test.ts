@@ -1,4 +1,4 @@
-import { flushPromises, mount } from '@vue/test-utils';
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils';
 import ElementPlus from 'element-plus';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -7,6 +7,8 @@ import PersonalDecisionView from './PersonalDecisionView.vue';
 const jsonResponse = (value: unknown) => new Response(JSON.stringify(value), {
   headers: { 'content-type': 'application/json' },
 });
+
+enableAutoUnmount(afterEach);
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -53,7 +55,7 @@ describe('PersonalDecisionView', () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({
       status: 'ready', as_of_at: '2026-09-04T15:15:00+08:00', portfolio_observed_at: '2026-09-04T15:15:00+08:00',
       freshness_status: 'current', actions: [], delivery: { eligible: true },
-    }));
+    })).mockImplementation(() => Promise.resolve(jsonResponse({ items: [] })));
     vi.stubGlobal('fetch', fetchMock);
 
     const wrapper = mount(PersonalDecisionView, { props: { mode: 'holdings' }, global: { plugins: [ElementPlus] } });
@@ -61,7 +63,7 @@ describe('PersonalDecisionView', () => {
     await flushPromises();
     await vi.waitFor(() => {
       expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/research/discipline/plans/latest?account_key=citics-primary'))).toBe(true);
-    });
+    }, { timeout: 5000 }); // The real lazily imported discipline module must finish loading.
 
     expect(wrapper.text()).toContain('我的持仓');
     expect(wrapper.text()).toContain('账户持仓建议');

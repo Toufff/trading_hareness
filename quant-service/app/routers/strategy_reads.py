@@ -29,6 +29,12 @@ def build_strategy_reads_router(database: Any, decision_model_version: str, asyn
                                 cn_today: Callable[[], date] = date.today) -> APIRouter:
     router = APIRouter(tags=["strategy-reads"])
 
+    @router.get('/api/v1/strategy/business-coverage')
+    async def business_coverage() -> dict[str, Any]:
+        from ..system_business_acceptance import collect
+        from ..runtime_executors import run_database_blocking
+        return await run_database_blocking(collect, database, timeout_seconds=45)
+
     @router.get('/api/v1/strategy/post-close/detail')
     async def post_close_detail(run_id: UUID, section: Literal['report', 'followup', 'effectiveness', 'research', 'events'],
                                 key: str | None = None, offset: int = Query(0, ge=0),

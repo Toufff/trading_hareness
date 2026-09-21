@@ -4,6 +4,13 @@ This is the authoritative entry point for an agent taking over the running
 Windows research platform. Read it together with the repository `AGENTS.md`;
 do not infer production state from the development checkout.
 
+Whole-system closure work (2026-09-22): [SYSTEM_CLOSURE_20260921.md](SYSTEM_CLOSURE_20260921.md).
+Read its business exceptions separately from code/deployment test results.
+The read-only `scripts/verify-business-coverage.py` and
+`/api/v1/strategy/business-coverage` expose coverage gaps; an HTTP 200 is not an
+all-green business result. Production release identity is always the current
+`G:/StockPlatform/release-state.json`, never a historical SHA in this document.
+
 Remote peer pool recovery (2026-09-14): see [PEER_POOL_RECOVERY_20260914.md](PEER_POOL_RECOVERY_20260914.md).
 Follow-up network fix deployed at 18:42 CST: [PEER_PRIVATE_TUNNEL_20260914.md](PEER_PRIVATE_TUNNEL_20260914.md).
 The 301-symbol compatibility regression and public `/api/config` gateway fix are documented in [PEER_LONGHU_BATCHING_20260915.md](PEER_LONGHU_BATCHING_20260915.md).
@@ -63,21 +70,12 @@ Peer credentials, exports and staging
 定时维护任务或任何分层表之前先读它；上面的路径只是速查，权威值是 `runtime.env` 里的
 `PGDATA_DIR`。接手时必须知道的几条：
 
-- **分层作业还没跑过 `install`。** 生产库里没有任何 `*_cold` 表、`*_tier_cutoff_idx`
-  索引、`quant.storage_tier_conflicts` 表，也没有 `stock_cold` 表空间；
-  `runtime.env` 里也还没有 `PGDATA_DIR` / `PGDATA_BUDGET_BYTES` /
-  `PGDATA_COLD_TABLESPACE_DIR` / `STOCK_BACKUP_INCREMENTAL_TABLES` /
-  `STOCK_BACKUP_EXCLUDE_TABLE_DATA` / `STORAGE_TIER_HOT_DAYS` 任何一个。
-  活机上什么都还没被改动。
-  **因此现在跑 `status` / `plan` 会答 `degraded` 退出 2，跑 `apply` 会答 `partial` 退出 1**
-  ——这是设计出来的答案，说的就是"`install` 还没跑"，不是回归。
-  从前这种状态报 `ok` 退出 0，任务计划程序上一片绿而守卫一夜没守过。
-- **两个新任务还没注册**：`trading-hareness-storage-tiers`（每日 06:00，
-  `run-storage-tiers.ps1 -Command apply`，`ExecutionTimeLimit` 2h15m）和
-  `trading-hareness-postgres-io-window`（每 15 分钟）。两个安装器的
-  `-RepositoryRoot` / `-HostRoot` 默认就是 `G:\StockPlatform\current`，
-  必须在带这些脚本的 release 发布之后从 `current` 手工运行一次；
-  它们会把实际写进任务的 `Execute` 路径打印出来。
+- **2026-09-22 实机核查：分层已经安装，库内有 6 张冷层表。**
+  不要再依据早期“尚未 install”的部署计划判断当前状态。热/冷目录以本节上方
+  和 `runtime.env` 的非敏感路径字段为准；`status` 的失败仍必须调查。
+- **两个维护任务已经注册且为 Ready**：`trading-hareness-storage-tiers` 与
+  `trading-hareness-postgres-io-window`。这证明已安装，不单独证明最近一次搬迁成功；
+  最近运行结果和回执要另查。正常升级不要重复迁移数据库。
 - **作业自己会停**：runner 给 `apply` 传 `--deadline 08:00` 和 `--max-seconds 7200`，
   到点写一条 `status='deadline_reached'` 的回执并以 **0** 退出，明晚接着搬。
   2h15m 的 `ExecutionTimeLimit` 只是兜底——被它杀掉的进程不写任何回执。
@@ -118,20 +116,21 @@ Peer credentials, exports and staging
 - **bar 表上的 `adj_factor` 是累计公司行为因子，不是"当日不变"的 1。** 不供应
   公司行为历史的数据源一行都不写；`NULL` 才是"尚未取到"。占位的 `1` 能通过每一个
   本应失败关闭的检查，静默产生未复权序列。
-- **2026-09-01 ~ 09-18 的 35,573 行 canonical 占位因子仍然在生产库里。**
-  修复 SQL 写在该文第 4 节，**必须在本次发布之后**、并严格按第 3 节顺序执行；
-  倒过来跑会让十日龙头轮动车道静默停产。守护查询（第 4 节步骤 6）修复后必须恒为 `0`。
+- **2026-09-22 canonical 占位因子泄漏查询为 0。** 35,573 行是早期修复前的
+  历史数量，不能再写成当前残留。未来仍执行该文的守护查询，不以本次 0 永久背书。
 - **修复会带来一段"特征黑屏"与"打分悬崖"**（该文第 6 节），这是正确行为，
   但必须提前通知使用者，否则看起来像故障。
 - **两个自动入口**：盘后非门控阶段 `adjustment_factors`（随发布自动生效，
   `blocked`/`failed` 都不会把整轮变成 `partial`）与 04:30 的计划任务
   （`pwsh scripts\windows\install-adjustment-factor-task.ps1`，默认从
-  `G:\StockPlatform\current` 安装，`LookbackDays = 30`，**发布之后要手工装一次**）。
+  `G:\StockPlatform\current` 安装，`LookbackDays = 30`；2026-09-22 已核实任务注册）。
   覆盖率被拒的日期连续 5 个"台账日"后退出工作清单并写一条
   `quant.data_quality_issues`（`code='adjustment_factor_date_retired'`）；
   **没有任何东西轮询那张表**，要告警得自己接。
 
-持仓同步契约见 [BROKER_HOLDINGS_SYNC.md](BROKER_HOLDINGS_SYNC.md)：现在只由用户主动触发，文件导出优先，桌面 UI 读取必须直接交给 Luna 子 agent。不得创建每日调度、自动登录或自动唤醒 MuMu；未指定券商时不得默认中信。当前 THS 桌面读取尚未真实验收，旧 `citics-mumu-sync` 仅为退休兼容入口。
+持仓同步以当前安装的 `broker-holdings-sync` 技能和 [BROKER_HOLDINGS_SYNC.md](BROKER_HOLDINGS_SYNC.md) 为契约。
+本轮未操作券商或改变同步频率；旧 `citics-mumu-sync` 是退休兼容入口，不可恢复。
+读取是否成功必须用该次真实截图、快照时间与入库读回证明，不能沿用历史“成功/未验收”措辞。
 
 The scheduled production services must execute only from
 `G:\StockPlatform\current`. Never edit that junction or a release directory.
@@ -139,8 +138,8 @@ Make changes in the F-drive development checkout, run tests, and publish a new
 release. Production configuration and database files never enter Git or a
 release snapshot.
 
-Production keeps three releases: the active release, the immediately previous
-known-good release, and one additional recent fallback. This is a bounded
+The publisher currently defaults to six retained releases (see its `RetainCount`
+parameter), protecting unchanged peer tunnel pins from unnecessary restarts. This is a bounded
 rollback window, not an archive. Git remains the source-code history.
 
 ## First five minutes

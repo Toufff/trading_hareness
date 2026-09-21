@@ -36,6 +36,12 @@ $admin = $base.Clone(); $admin.Database = 'postgres'
 $source = $base.Clone(); $source.Database = $sourceDb
 $target = $base.Clone(); $target.Database = $targetDb
 $backupRoot = Join-Path ([IO.Path]::GetTempPath()) "stock-incremental-drill-$suffix"
+$resolvedBackupRoot = [IO.Path]::GetFullPath($backupRoot)
+$resolvedTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+if (-not $resolvedBackupRoot.StartsWith($resolvedTempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    [IO.Path]::GetFileName($resolvedBackupRoot) -notmatch '^stock-incremental-drill-\d+_\d+$') {
+    throw "Refusing unsafe scratch directory: $resolvedBackupRoot"
+}
 $spec = @(Get-StockIncrementalTableSpecs -Value 'quant.drill_observations:created_at:updated_at')[0]
 $fingerprint = "SELECT count(*) || ':' || md5(coalesce(string_agg(t::text, '|' ORDER BY observation_id), '')) FROM quant.drill_observations t"
 
