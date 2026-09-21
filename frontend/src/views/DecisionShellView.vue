@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import zhCn from 'element-plus/es/locale/lang/zh-cn';
 import PersonalDecisionView from './PersonalDecisionView.vue';
 
-const path = window.location.pathname.replace(/\/$/, '');
-const mode = computed<'market' | 'holdings'>(() => path === '/holdings' ? 'holdings' : 'market');
+function decisionPath() {
+  return window.location.pathname.replace(/\/$/, '') === '/holdings' ? '/holdings' : '/market';
+}
+
+const activeDecisionPath = ref(decisionPath());
+const mode = computed<'market' | 'holdings'>(() => activeDecisionPath.value === '/holdings' ? 'holdings' : 'market');
 
 const navItems = [
   { path: '/market', label: '市场与选股' },
@@ -14,6 +18,21 @@ const navItems = [
   { path: '/workbench', label: '飞书工作台' },
   { path: '/relay', label: '手动投递' },
 ] as const;
+
+function navigate(event: MouseEvent, target: string) {
+  if (target !== '/market' && target !== '/holdings') return;
+  event.preventDefault();
+  if (activeDecisionPath.value === target) return;
+  window.history.pushState(null, '', target);
+  activeDecisionPath.value = target;
+}
+
+function syncFromHistory() {
+  activeDecisionPath.value = decisionPath();
+}
+
+onMounted(() => window.addEventListener('popstate', syncFromHistory));
+onBeforeUnmount(() => window.removeEventListener('popstate', syncFromHistory));
 </script>
 
 <template>
@@ -29,7 +48,8 @@ const navItems = [
             v-for="item in navItems"
             :key="item.path"
             :href="item.path"
-            :class="{ active: (mode === 'holdings' ? '/holdings' : '/market') === item.path }"
+            :class="{ active: activeDecisionPath === item.path }"
+            @click="navigate($event, item.path)"
           >{{ item.label }}</a>
         </nav>
       </header>
