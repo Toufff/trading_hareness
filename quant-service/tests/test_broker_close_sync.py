@@ -58,7 +58,8 @@ class CloseSyncTests(unittest.TestCase):
         self.assertEqual(value["account"], {"cash": "62.97", "total_asset": "98911.83", "total_market_value": "94313.00"})
         rows = {p["symbol"]: p for p in value["positions"]}
         self.assertEqual(sorted(rows), ["000977.SZ", "002185.SZ", "600664.SH", "603823.SH"])
-        self.assertIsNone(rows["600664.SH"]["average_cost"])
+        self.assertEqual(rows["600664.SH"]["average_cost"], "-6.0257")
+        self.assertNotIn("average_cost_main_field_null_reason", rows["600664.SH"]["metadata"])
         self.assertEqual((rows["002185.SZ"]["quantity"], rows["002185.SZ"]["sellable_quantity"]), ("3100", "400"))
         self.assertEqual(value["completeness"]["zero_actual_rows_excluded"], 1)
         self.assertEqual(value["evidence"][0]["sha256"], "a" * 64)

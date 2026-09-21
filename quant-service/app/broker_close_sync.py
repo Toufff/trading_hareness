@@ -185,12 +185,9 @@ def build_envelope(*, run: dict[str, Any], reads: list[dict[str, Any]], capture:
                     "displayed_sellable_quantity": row["sellable"], "displayed_frozen_quantity": row["frozen"],
                     "day_pnl": row["day_pnl"], "market_value_reconciled_from_displayed_quantity_and_price": True,
                     "source_page": 1, "visually_verified": True}
-        if cost < 0:
-            metadata.update(displayed_average_cost=row["cost"],
-                            average_cost_main_field_null_reason="schema_rejects_legitimate_negative_broker_cost")
         positions.append({"symbol": exchange_symbol(row["code"]), "name": row["name"].strip(),
                           "quantity": str(actual), "sellable_quantity": str(dec(row["sellable"], "sellable")),
-                          "average_cost": None if cost < 0 else str(cost), "market_price": str(price),
+                          "average_cost": str(cost), "market_price": str(price),
                           "market_value": str(value), "unrealized_pnl": str(dec(row["floating_pnl"], "floating_pnl")),
                           "metadata": metadata})
     if open_values != displayed_value:

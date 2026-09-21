@@ -203,7 +203,10 @@ class PositionRef(BaseModel):
     observed_at: datetime
     quantity: int = Field(ge=0)
     sellable_quantity: int = Field(ge=0)
-    average_cost: Decimal | None = Field(default=None, ge=0)
+    # Keep the broker fact intact.  A negative diluted cost is displayable but
+    # is not suitable as a stop/trigger price anchor; templates handle that
+    # distinction explicitly.
+    average_cost: Decimal | None = None
     market_price: Decimal | None = Field(default=None, ge=0)
     market_value: Decimal | None = Field(default=None, ge=0)
 

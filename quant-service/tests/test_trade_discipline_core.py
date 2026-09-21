@@ -33,6 +33,7 @@ from app.trade_discipline.templates import (
     hard_stop_price,
     is_ordinary_weekend,
     lot_shares,
+    _anchor_price,
     soft_stop_window,
     stop_beyond_band,
     trail_stop_price,
@@ -521,6 +522,18 @@ class StageTemplateQualityTests(unittest.TestCase):
         self.assertIn("不高于硬止损", reason["reason"])
         self.assertEqual(reason["inputs"]["anchor_source"], "average_cost")
         self.assertLess(reason["inputs"]["anchor_price"], float(profitable.sizing.hard_stop))
+
+    def test_negative_broker_cost_is_displayable_but_not_a_price_anchor(self):
+        position = PositionRef(
+            snapshot_id="broker-snapshot", observed_at=AS_OF, quantity=100,
+            sellable_quantity=100, average_cost=Decimal("-6.0287"),
+            market_price=Decimal("8.25"), market_value=Decimal("825"),
+        )
+        self.assertEqual(position.average_cost, Decimal("-6.0287"))
+        self.assertEqual(
+            _anchor_price({"average_cost": position.average_cost}, Decimal("8.25"), "holding"),
+            (Decimal("8.25"), "reference_price"),
+        )
 
     def test_the_trail_is_confirmed_on_the_daily_close_like_every_other_daily_line(self):
         for plan in (generate(shenqi_inputs()), generate(rally_inputs())):

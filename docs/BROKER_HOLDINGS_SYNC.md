@@ -60,6 +60,8 @@ envelope 使用 `schema_version=ths-desktop-holdings-v1`、`trigger=manual`、�
 
 每个证据文件必须有绝对路径、SHA-256、captured_at 和来源角色。UI 证据覆盖账户身份、账户总额、完整持仓页和列表末尾；空仓需 `explicit_empty=true`。总资产、现金、股票市值及每行名称/代码、数量、可卖数量、成本、现价、市值、盈亏均来自本轮证据，不能从旧快照、比例或模型推断。
 
+券商展示的摊薄成本可能为负（已实现收益超过剩余持仓成本时是合法结果）。`average_cost` 必须原样保留正负号；风险纪律若需要一个正价格锚点，应在纪律层回退到参考价，不能篡改或置空券商事实。
+
 先执行 `--validate-only`，再持久化；随后核对数据库、owner、adapter 的 snapshot/content hash、source、account、observed_at、账户字段和全部持仓行。2026-09-13 本轮证据示例：四行持仓，snapshot `ff52cde9-d1dc-47ef-966b-0faab3b1533d`，observed_at `2026-09-13T14:42:22+08:00`，receipt 在 `G:\StockPlatform\data\broker-evidence\1c3cdb69-a0e4-46d6-b028-0917d7c9c3ca\receipt.json`；私人证据不入 Git。
 
 任何缺证据、身份不匹配、窗口/截图阻断、字段不完整或读回不一致都必须失败并写 alert；旧快照只保留 stale history，不得伪装当前持仓。市场扫描和公司研究继续独立。正式生产发布及后续稳定性仍需另行验收。

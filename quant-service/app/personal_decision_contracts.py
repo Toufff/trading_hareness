@@ -67,7 +67,10 @@ class BrokerPositionInput(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     quantity: Decimal = Field(ge=0)
     sellable_quantity: Decimal = Field(ge=0)
-    average_cost: Decimal | None = Field(default=None, ge=0)
+    # A broker's displayed diluted cost can legitimately be negative after
+    # realized proceeds exceed the remaining position's cost basis.  This is
+    # an observed broker fact, not a trade price, so preserve its sign.
+    average_cost: Decimal | None = None
     market_price: Decimal | None = Field(default=None, ge=0)
     market_value: Decimal | None = Field(default=None, ge=0)
     unrealized_pnl: Decimal | None = None

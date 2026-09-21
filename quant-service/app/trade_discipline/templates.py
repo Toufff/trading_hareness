@@ -636,7 +636,7 @@ def _anchor_price(position: dict[str, Any] | None, reference: Decimal, plan_kind
     if plan_kind == "new_buy":
         return reference, "entry_price"
     cost = (position or {}).get("average_cost")
-    if cost is None:
+    if cost is None or Decimal(str(cost)) <= 0:
         return reference, "reference_price"
     return Decimal(str(cost)), "average_cost"
 

@@ -1,5 +1,6 @@
 import copy
 from datetime import datetime, timedelta, timezone, date
+from decimal import Decimal
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -57,6 +58,11 @@ class DesktopManualTests(unittest.TestCase):
         self.assertEqual(snapshot.metadata["trade_date"], "2026-09-11")
         self.assertEqual(snapshot.observed_at, self.now)
         self.assertEqual(len(snapshot.positions), 2)
+
+    def test_negative_broker_average_cost_is_preserved_as_a_fact(self):
+        self.value["positions"][0]["average_cost"] = "-6.0287"
+        snapshot = self.load()
+        self.assertEqual(snapshot.positions[0].average_cost, Decimal("-6.0287"))
 
     def test_old_capture_remains_old_on_reimport(self):
         snapshot = self.load(self.now + timedelta(days=7))
