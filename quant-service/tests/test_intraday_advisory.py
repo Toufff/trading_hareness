@@ -99,6 +99,8 @@ def test_cards_translate_internal_fields_and_bound_model_output() -> None:
     assert first["schema"] == "2.0"
     assert first["config"]["width_mode"] == "fill"
     assert any(element["tag"] == "collapsible_panel" for element in first["body"]["elements"])
+    panels = [element for element in first["body"]["elements"] if element["tag"] == "collapsible_panel"]
+    assert all(panel["header"]["padding"].count("px") == 4 for panel in panels)
     assert any(element["tag"] == "button" for element in first["body"]["elements"])
     assert "elements" not in first
     assert "amount_ratio" not in serialized and "002008.SZ" not in serialized

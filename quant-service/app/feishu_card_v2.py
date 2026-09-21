@@ -81,7 +81,10 @@ def collapsible_panel(title: str, content: str, *, element_id: str,
         "border": {"color": "grey", "corner_radius": "6px"},
         "header": {
             "title": {"tag": "markdown", "content": f"**{title}**"},
-            "padding": "4px 0px",
+            # The custom-bot validator is stricter than the public Card 2.0
+            # documentation here and rejects the otherwise documented
+            # two-value shorthand.  Keep all four sides explicit.
+            "padding": "4px 0px 4px 0px",
             "icon": {
                 "tag": "standard_icon",
                 "token": "down-small-ccm_outlined",
