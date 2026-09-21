@@ -45,3 +45,18 @@ def test_opt_in_route_keeps_default_full_and_rejects_unknown_view(monkeypatch):
     compact = client.get('/api/v1/strategy/post-close/latest?view=dashboard').json()
     assert compact['run'] == run and compact['latest_attempt']['summary_ref'] == 'run.summary'
     assert client.get('/api/v1/strategy/post-close/latest?view=unknown').status_code == 422
+
+
+def test_realistic_large_evidence_is_deferred_not_copied_to_browser():
+    pick = {'symbol':'000001.SZ','metrics':{'close':10,'amount':1e9,'history':['x'*1000]*100}, 'reason':'why'}
+    summary = {'strategy_lanes': {'lanes':[{'key':'accumulation','selected':[pick],
+               'tracking_candidates':[pick]*500}], 'followup':{'items':[pick]*3000},
+               'report_bundle':{'reports':[{'key':'overview','markdown':'x'*1000000}]}},
+               'trade_thesis':{'items':[pick]*1000}}
+    x = dashboard_post_close({'run':{'run_id':'A','summary':summary}})
+    assert len(json.dumps(x).encode()) < 500_000
+    scan = x['run']['summary']['strategy_lanes']
+    assert scan['detail_run_id'] == 'A' and scan['details_deferred']
+    assert 'followup' not in scan and 'tracking_candidates' not in scan['lanes'][0]
+    assert 'markdown' not in scan['report_bundle']['reports'][0]
+    assert summary['strategy_lanes']['report_bundle']['reports'][0]['markdown']

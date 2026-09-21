@@ -45,16 +45,18 @@ async def latest_strategy_review(async_database: Any, session: str | None) -> di
     return {"review": row, "notice": "复盘是点时证据与情景准备，不是自动委托。"}
 
 
-async def latest_post_close_strategy(async_database: Any, as_of_date=None) -> dict[str, Any]:
+async def latest_post_close_strategy(async_database: Any, as_of_date=None, dashboard=False) -> dict[str, Any]:
+    from .strategy_dashboard_projection import dashboard_summary_sql
+    summary_column = dashboard_summary_sql() if dashboard else 'summary'
     async with async_database.transaction() as connection:
         attempt_result = await connection.execute(
-            """SELECT run_id,run_key,as_of_date,model_version,status,source_status,summary,created_at,updated_at
+            f"""SELECT run_id,run_key,as_of_date,model_version,status,source_status,{summary_column},created_at,updated_at
                  FROM quant.post_close_strategy_runs WHERE (%s::date IS NULL OR as_of_date=%s)
                  ORDER BY as_of_date DESC,(summary ? 'strategy_lanes') DESC,updated_at DESC LIMIT 1""", (as_of_date,as_of_date)
         )
         latest_attempt = await attempt_result.fetchone()
         completed_result = await connection.execute(
-            """SELECT run_id,run_key,as_of_date,model_version,status,source_status,summary,created_at,updated_at
+            f"""SELECT run_id,run_key,as_of_date,model_version,status,source_status,{summary_column},created_at,updated_at
                  FROM quant.post_close_strategy_runs WHERE status IN ('completed','partial')
                    AND (%s::date IS NULL OR as_of_date=%s)
                  ORDER BY as_of_date DESC,(summary ? 'strategy_lanes') DESC,updated_at DESC LIMIT 1""", (as_of_date,as_of_date)

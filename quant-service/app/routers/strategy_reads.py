@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Callable, Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Query
+from uuid import UUID
 from fastapi.responses import Response
 
 from ..strategy_read_model import latest_post_close_strategy as sync_latest_post_close_strategy
@@ -27,6 +28,21 @@ from ..async_intraday_evidence_read_repository import watchlists as async_intrad
 def build_strategy_reads_router(database: Any, decision_model_version: str, async_database: Any | None = None,
                                 cn_today: Callable[[], date] = date.today) -> APIRouter:
     router = APIRouter(tags=["strategy-reads"])
+
+    @router.get('/api/v1/strategy/post-close/detail')
+    async def post_close_detail(run_id: UUID, section: Literal['report', 'followup', 'effectiveness', 'research', 'events'],
+                                key: str | None = None, offset: int = Query(0, ge=0),
+                                limit: int = Query(40, ge=1, le=100)) -> dict[str, Any]:
+        from ..strategy_detail_projection import read_detail, read_detail_async
+        args = (section, str(run_id), key, offset, limit)
+        if async_database is not None:
+            detail = await read_detail_async(async_database, *args)
+        else:
+            from ..runtime_executors import run_database_blocking
+            detail = await run_database_blocking(read_detail, database, *args, timeout_seconds=20)
+        if detail is None:
+            raise HTTPException(status_code=404, detail='本轮没有这项详情记录')
+        return {'run_id': str(run_id), 'section': section, 'detail': detail}
 
     @router.get("/api/v1/strategy/events/latest")
     async def event_research_latest() -> dict[str, Any]:
@@ -53,9 +69,9 @@ def build_strategy_reads_router(database: Any, decision_model_version: str, asyn
     @router.get("/api/v1/strategy/post-close/latest")
     async def post_close(as_of_date: date | None = None, view: Literal['full', 'dashboard'] = 'full') -> dict[str, Any]:
         if async_database is not None:
-            payload = await latest_post_close_strategy(async_database, as_of_date)
+            payload = await latest_post_close_strategy(async_database, as_of_date, view == 'dashboard')
         else:
-            payload = sync_latest_post_close_strategy(database, as_of_date)
+            payload = sync_latest_post_close_strategy(database, as_of_date, view == 'dashboard')
         return dashboard_post_close(payload) if view == 'dashboard' else payload
 
     @router.get("/api/v1/strategy/post-close/review-page", response_class=Response)

@@ -744,6 +744,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/strategy/post-close/detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Post Close Detail */
+        get: operations["post_close_detail_api_v1_strategy_post_close_detail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/strategy/events/latest": {
         parameters: {
             query?: never;
@@ -1190,6 +1207,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/discipline/alerts/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Discipline Alert Status */
+        get: operations["read_discipline_alert_status_api_v1_discipline_alerts_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/discipline/plans/latest": {
         parameters: {
             query?: never;
@@ -1301,6 +1335,23 @@ export interface paths {
         };
         /** Read Discipline Reconciliations */
         get: operations["read_discipline_reconciliations_api_v1_discipline_reconciliations_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/intraday/advisory/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Advisory Status */
+        get: operations["advisory_status_api_v1_intraday_advisory_status_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -6271,6 +6322,43 @@ export interface operations {
             };
         };
     };
+    post_close_detail_api_v1_strategy_post_close_detail_get: {
+        parameters: {
+            query: {
+                run_id: string;
+                section: "report" | "followup" | "effectiveness" | "research" | "events";
+                key?: string | null;
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     event_research_latest_api_v1_strategy_events_latest_get: {
         parameters: {
             query?: never;
@@ -7025,6 +7113,28 @@ export interface operations {
             };
         };
     };
+    read_discipline_alert_status_api_v1_discipline_alerts_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     read_latest_discipline_plans_api_v1_discipline_plans_latest_get: {
         parameters: {
             query: {
@@ -7238,6 +7348,39 @@ export interface operations {
                 symbol?: string | null;
                 from?: string | null;
                 to?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    advisory_status_api_v1_intraday_advisory_status_get: {
+        parameters: {
+            query?: {
+                limit?: number;
             };
             header?: never;
             path?: never;

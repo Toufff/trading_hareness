@@ -1247,6 +1247,7 @@ const researchPaths = new Map([
 	['/api/research/intraday/limit-linkage/latest', '/api/v1/intraday/limit-linkage/latest'],
 	['/api/research/strategy/reviews/latest', '/api/v1/strategy/reviews/latest'],
 	['/api/research/strategy/post-close/latest', '/api/v1/strategy/post-close/latest'],
+	['/api/research/strategy/post-close/detail', '/api/v1/strategy/post-close/detail'],
 	['/api/research/strategy/events/latest', '/api/v1/strategy/events/latest'],
 	['/api/research/strategy/post-close/watchlist/latest', '/api/v1/strategy/post-close/watchlist/latest'],
 	['/api/research/strategy/ablation/latest', '/api/v1/strategy/ablation/latest'],

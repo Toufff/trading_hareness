@@ -35,6 +35,7 @@ export type StrategyResult = {
     confirmation: string; invalidation: string; caution: string; expiry: string }[];
 };
 export type StrategyScan = ReviewProjection & {
+  detail_run_id?: string; details_deferred?: boolean;
   as_of_date: string; version: string; status: string; notice: string;
   coverage: { complete_history: number; universe: number; verified_event_symbols?: number };
   market?: { up_fraction: number; median_return10: number };

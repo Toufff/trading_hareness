@@ -3,6 +3,7 @@ import ElementPlus from 'element-plus';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ShortTermLanesPanel from './ShortTermLanesPanel.vue';
 import { downloadStrategyReport, type StrategyScan } from './short-term-reports';
+import * as http from '../api/http';
 
 function sample(): StrategyScan {
   const makePick = (name: string, symbol: string) => ({ name, symbol, reason: `${name}入选原因`,
@@ -27,6 +28,16 @@ function sample(): StrategyScan {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('independent strategy reports', () => {
+  it('loads historical evidence only on request and pins it to the displayed run', async () => {
+    const read = vi.spyOn(http, 'getJson').mockResolvedValue({detail: {status:'completed', total:0, items:[], note:'同轮记录'}});
+    const scan = sample(); scan.detail_run_id = 'fixed-run'; scan.details_deferred = true;
+    const wrapper = mount(ShortTermLanesPanel, {props:{summary:{strategy_lanes:scan}}, global:{plugins:[ElementPlus]}});
+    expect(read.mock.calls.filter(c => c[0].includes('/post-close/detail'))).toHaveLength(0);
+    await wrapper.findAll('.detail-controls button')[3]!.trigger('click');
+    await vi.waitFor(() => expect(wrapper.text()).toContain('同轮记录'));
+    expect(read.mock.calls.some(c => c[0].includes('run_id=fixed-run') && c[0].includes('section=followup'))).toBe(true);
+    wrapper.unmount();
+  });
   it('renders the independent formal recommendation before the large scan payload arrives', () => {
     const recommendation = { status: 'ready', decision_id: 'decision-1', as_of_date: '2026-09-18', coverage: { candidates: 3, reviewed: 3, missing: [] }, recommended: [
       { symbol: '002008.SZ', name: '大族激光', priority: 2, stage: 'initial_breakout', sector: '自动化设备', business: '激光及自动化设备平台型公司', why_now: '放量突破', comparison: '同板块领先', trigger: '站稳确认', invalidation: '跌回平台', company_risk: '减持风险' },
