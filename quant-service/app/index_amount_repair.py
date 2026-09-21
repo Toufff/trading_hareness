@@ -65,5 +65,21 @@ def repair_index_amounts(connection: Any, *, start, end, apply: bool = False) ->
               AND NOT EXISTS (SELECT 1 FROM quant.data_quality_issues q WHERE q.symbol=b.symbol
                  AND q.trading_date=b.trading_date AND q.resolved_at IS NULL)""",
             (row['symbol'], row['trading_date']))
+    precision = connection.execute("""SELECT issue_id,symbol,trading_date,details FROM quant.data_quality_issues
+        WHERE trading_date BETWEEN %s AND %s AND code='provider_close_conflict' AND resolved_at IS NULL
+        AND (symbol ~ '^000[0-9]{3}\\.SH$' OR symbol ~ '^399[0-9]{3}\\.SZ$')""",(start,end)).fetchall()
+    resolved_precision=[]
+    for issue in precision:
+        details=issue['details'] or {}
+        try:
+            old,new=Decimal(str(details['existing_close'])),Decimal(str(details['incoming_close']))
+            valid=old.is_finite() and new.is_finite() and old>0 and new>0 and not close_conflicts(issue['symbol'],old,new)
+        except (ArithmeticError,ValueError,KeyError):
+            valid=False
+        if valid:
+            resolved_precision.append(str(issue['issue_id']))
+            if apply:
+                connection.execute("""UPDATE quant.data_quality_issues SET resolved_at=now(),
+                    details=details || '{"repair":"index_close_rounding_tolerance_v1"}'::jsonb WHERE issue_id=%s AND resolved_at IS NULL""",(issue['issue_id'],))
     return {'mode': 'apply' if apply else 'plan', 'eligible': len(eligible),
-            'rejected': rejected, 'corrections': eligible}
+            'rejected': rejected, 'corrections': eligible,'index_precision_issues':resolved_precision}

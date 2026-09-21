@@ -232,7 +232,7 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
     for index, bar in enumerate(bars):
         if not amount_mismatch[index]:
             continue
-        implied_ratio = bar.amount / (bar.volume * bar.close)
+        implied_ratio = bar.amount / (bar.volume * bar.close) if bar.volume and bar.close else None
         issue_symbols.append(bar.symbol)
         issue_dates.append(bar.trading_date)
         issue_details.append(json.dumps({

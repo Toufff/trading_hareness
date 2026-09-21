@@ -810,7 +810,8 @@ def persist_session(
         (*columns, providers, [observation_by_symbol[bar.symbol] for bar in ordered],
          ["partial" if bad else "fresh" for bad in mismatch], available),
     ).fetchall()
-    issues = [(bar, bar.amount / (bar.volume * bar.close)) for bar, bad in zip(ordered, mismatch) if bad]
+    issues = [(bar, bar.amount / (bar.volume * bar.close) if bar.volume and bar.close and bar.amount is not None else None)
+              for bar, bad in zip(ordered, mismatch) if bad]
     for bar, ratio in issues:
         connection.execute(
             """INSERT INTO quant.data_quality_issues(capability,symbol,trading_date,severity,code,message,details)
