@@ -20,6 +20,7 @@ from app.intraday_advisory.runtime import (
     IntradayAdvisoryDependencies, RuntimeState, _analyze, _context, _deepseek_push_worthy, _drain,
     run_intraday_advisory_cycle,
 )
+from app.async_intraday_advisory_read_repository import humanize_event
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -188,6 +189,13 @@ def test_legacy_flow_proxy_language_is_normalized_at_presentation_boundary() -> 
     assert "主动侧" not in rendered and "代理净流" not in rendered
     ensure_readable_card(normalized)
     assert humanize_text("短周期代理信号") == "短周期内外盘信号"
+
+
+def test_status_read_model_does_not_expose_persisted_legacy_flow_terms() -> None:
+    event = humanize_event({"symbol": "000977.SZ",
+                            "summary": "1分钟放量且主动侧代理净流出"})
+
+    assert event["summary"] == "1分钟放量且内盘增量占优"
 
 
 def test_delivery_drain_normalizes_cards_queued_before_deploy() -> None:

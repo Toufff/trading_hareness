@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from .intraday_advisory.presentation import humanize_text
+
+
+def humanize_event(row: Any) -> dict[str, Any]:
+    event = dict(row)
+    if event.get("summary") is not None:
+        event["summary"] = humanize_text(event["summary"])
+    return event
+
 
 async def status(async_database: Any, *, limit: int = 20) -> dict[str, Any]:
     bounded = max(1, min(int(limit), 100))
@@ -15,7 +24,7 @@ async def status(async_database: Any, *, limit: int = 20) -> dict[str, Any]:
         events_result = await connection.execute("""
             SELECT event_id,symbol,name,event_kind,direction,severity,observed_at,scope_source,metrics,summary
               FROM quant.intraday_advisory_events ORDER BY observed_at DESC,created_at DESC LIMIT %s""", (bounded,))
-        events = [dict(row) for row in await events_result.fetchall()]
+        events = [humanize_event(row) for row in await events_result.fetchall()]
         analysis_result = await connection.execute("""
             SELECT analysis_run_id,provider,trigger_kind,report_kind,started_at,completed_at,status,
                    output->>'market_state' AS market_state,error_message
@@ -24,4 +33,4 @@ async def status(async_database: Any, *, limit: int = 20) -> dict[str, Any]:
     return {"runtime": dict(runtime) if runtime else None, "recent_events": events, "recent_analyses": analyses}
 
 
-__all__ = ["status"]
+__all__ = ["humanize_event", "status"]
