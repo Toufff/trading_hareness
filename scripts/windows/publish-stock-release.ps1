@@ -384,6 +384,12 @@ if ($dirty -and -not $AllowDirty) {
     throw 'The source checkout is dirty. Commit it first or explicitly pass -AllowDirty to capture a manifest-backed working-tree release.'
 }
 $head = (& git -C $source rev-parse HEAD).Trim()
+function Assert-SourcePreservesActiveRelease {
+    Invoke-Checked -FilePath (Join-Path $source '.venv\Scripts\python.exe') `
+        -Arguments @((Join-Path $source 'scripts\check-release-ancestry.py'), '--source', $source, '--platform', $platform, '--expected-head', $head) `
+        -WorkingDirectory $source
+}
+Assert-SourcePreservesActiveRelease
 $shortHead = $head.Substring(0, 12)
 $branch = (@(& git -C $source branch --show-current) -join '').Trim()
 if (-not $branch) { $branch = 'DETACHED' }
@@ -426,6 +432,8 @@ if (-not $SkipTests) {
     if ($LASTEXITCODE -ne 0) { throw 'git diff --check failed' }
 }
 
+# Recheck after tests too: another agent may have changed the source branch.
+Assert-SourcePreservesActiveRelease
 $previousState = Get-StockReleaseState -PlatformRoot $platform
 $previousRelease = if ($previousState.PSObject.Properties['active_release']) { [string]$previousState.active_release } else { '' }
 $previousTarget = Get-StockCurrentReleaseTarget -PlatformRoot $platform

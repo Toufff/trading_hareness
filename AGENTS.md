@@ -235,6 +235,11 @@ provider response directly to a live threshold or order path.
 - A production release normally comes from a clean commit.  `-AllowDirty` is an
   emergency, manifest-backed diagnostic escape hatch, not the normal publish
   path; the dirty snapshot must be committed or discarded before more work.
+- Publishing must preserve the active production commit in Git ancestry, even
+  when another agent deployed it from a different worktree. The publisher checks
+  before tests and again before snapshotting; merge deployed work first. Use the
+  explicit rollback workflow for an intentional rollback, not a normal publish.
+  `tests/test_release_ancestry.py` verifies this using real divergent Git branches.
 - Every deployment handoff records the source commit, release id, targeted test
   result, full-suite result and live readback result.  Source tests, deployment
   and live acceptance are separate claims.

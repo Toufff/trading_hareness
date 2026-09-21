@@ -61,3 +61,8 @@ pwsh -NoProfile -File scripts/windows/tests/test-stock-incremental-backup-drill.
 
 只读 API：`GET /api/v1/strategy/business-coverage`（代理路径 `/api/research/strategy/business-coverage`）。
 详情 API 必须带本页的真实 `run_id`；翻页、下载报告不得悄悄跳到更新一轮。
+
+页面验收补修：单策略历史/效果分页先按策略过滤再分页；切换策略取消旧请求并重置页码，
+明确显示已加载/全部数量，不把第一页为空说成该策略没有跟踪。
+多任务发布补修：正式发布在测试前及快照前检查当前生产提交属于待发提交的祖先；
+缺失身份、未合并的线上工作或测试期间 HEAD 变化一律拒绝。主动回退仍使用独立 rollback 工作流。
