@@ -70,6 +70,16 @@ def metric_lines(metrics: dict[str, Any]) -> list[str]:
         ratio = float(metrics["active_ratio"])
         direction = "外盘增量占优" if ratio >= 0 else "内盘增量占优"
         rows.append(f"近1分钟{direction}，内外盘差约占成交量 {abs(ratio) * 100:.1f}%")
+    if metrics.get("max_abs_daily_pct") is not None:
+        rows.append(f"核心指数最大日内幅度 {_number(metrics.get('max_abs_daily_pct'))}%")
+    if metrics.get("max_abs_60s_pct") is not None:
+        rows.append(f"核心指数最大近1分钟幅度 {_number(metrics.get('max_abs_60s_pct'))}%")
+    if metrics.get("affected_indices") is not None:
+        rows.append(f"涉及 {int(float(metrics.get('affected_indices')))} 个核心指数")
+    if metrics.get("max_abs_snapshot_delta_pct") is not None:
+        rows.append(f"行业板块相邻快照最大变化 {_number(metrics.get('max_abs_snapshot_delta_pct'))} 个百分点")
+    if metrics.get("affected_sectors") is not None:
+        rows.append(f"涉及 {int(float(metrics.get('affected_sectors')))} 个行业板块")
     return rows or ["有效行情证据暂缺"]
 
 

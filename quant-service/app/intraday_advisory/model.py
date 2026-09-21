@@ -17,24 +17,69 @@ from ..event_research.model_config import settings as event_model_settings
 
 
 SYSTEM_PROMPT = """你是 A 股盘中研究助手。输入是只读行情、持仓事实、正式推荐池、纪律事件和确定性信号。
-只做风险提示、状态解释和条件式观察建议；禁止下单、禁止声称主动买卖量代表机构身份、禁止把缺失数据补写成事实。
+只做风险提示、状态解释和条件式观察建议；禁止下单、禁止声称内外盘代表机构身份、禁止把缺失数据补写成事实。
 输出必须是 JSON。使用自然中文，不得输出变量名、JSON 路径、布尔值、空值、UUID、内部任务名。
-建议必须引用输入中的具体价格、幅度、成交额或触发线；持仓与推荐候选必须明确区分。
+建议必须引用输入中的具体价格、幅度、成交额或触发线；持仓与推荐候选必须明确分开。
 推荐候选尚未持有时，只能说暂停新买、等待确认或候选条件失效，禁止说减仓、卖出、退出。
-十分钟报告只写相较上一轮的变化，最多三个重点对象；完整报告也只保留最重要的三条建议和三条风险。
-market_state 只能是 calm、watch、risk；attention_symbols 最多 3 个；guidance 最多 3 条。"""
+
+十分钟快速检查默认静默。只有出现新的、会改变用户关注顺序或盘中应对的事项时，should_notify 才能为 true：
+1. 风险等级升高，或指数/板块出现明确加速、反转、共振；
+2. 持仓或推荐候选触及关键条件，原有判断明显强化、转弱或失效；
+3. 新纪律事件需要用户当下留意。
+普通涨跌、与上一轮相同的观察、没有新增动作、仅更换措辞，都必须 should_notify=false。
+notification_reason 要用一句人话说明为什么值得打扰用户；静默时留空。
+
+三十分钟完整检查无论有无异动都输出结构化结果：先大盘，再持仓，再推荐池，最后风险。
+holding_focus 与 recommendation_focus 各最多 2 项，只放真正需要关注的对象；没有就返回空数组。
+每项必须包含股票代码、名称、当前状态、可核对证据和条件式应对。market_state 只能是 calm、watch、risk。"""
+
+
+FOCUS_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "symbol": {"type": "string"},
+        "name": {"type": "string"},
+        "status": {"type": "string"},
+        "evidence": {"type": "string"},
+        "action": {"type": "string"},
+    },
+    "required": ["symbol", "name", "status", "evidence", "action"],
+}
 
 OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
     "properties": {
         "market_state": {"type": "string", "enum": ["calm", "watch", "risk"]},
-        "summary": {"type": "string"},
-        "attention_symbols": {"type": "array", "items": {"type": "string"}},
-        "guidance": {"type": "array", "items": {"type": "string"}},
+        "should_notify": {"type": "boolean"},
+        "notification_reason": {"type": "string"},
+        "headline": {"type": "string"},
+        "market_summary": {"type": "string"},
+        "holding_focus": {"type": "array", "items": FOCUS_ITEM_SCHEMA},
+        "recommendation_focus": {"type": "array", "items": FOCUS_ITEM_SCHEMA},
         "risks": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["market_state", "summary", "attention_symbols", "guidance", "risks"],
+    "required": [
+        "market_state", "should_notify", "notification_reason", "headline", "market_summary",
+        "holding_focus", "recommendation_focus", "risks",
+    ],
 }
+
+
+def _focus_items(value: Any) -> list[dict[str, str]]:
+    output: list[dict[str, str]] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        output.append({
+            "symbol": str(item.get("symbol") or "")[:20],
+            "name": str(item.get("name") or "")[:24],
+            "status": str(item.get("status") or "")[:60],
+            "evidence": str(item.get("evidence") or "")[:160],
+            "action": str(item.get("action") or "")[:120],
+        })
+        if len(output) >= 2:
+            break
+    return output
 
 
 def _normalize(value: Any) -> dict[str, Any]:
@@ -43,12 +88,28 @@ def _normalize(value: Any) -> dict[str, Any]:
     state = str(value.get("market_state") or "watch")
     if state not in {"calm", "watch", "risk"}:
         state = "watch"
+    holdings = _focus_items(value.get("holding_focus"))
+    recommendations = _focus_items(value.get("recommendation_focus"))
+    # Compatibility with already-persisted morning outputs.  New model calls
+    # always use the structured schema above, while the renderer can still
+    # replay the old evidence without pretending to know its portfolio role.
+    legacy_attention = [str(item)[:40] for item in (value.get("attention_symbols") or [])[:3]]
+    headline = str(value.get("headline") or value.get("summary") or "")[:100]
+    market_summary = str(value.get("market_summary") or value.get("summary") or "")[:300]
     output = {
         "market_state": state,
-        "summary": str(value.get("summary") or "")[:240],
-        "attention_symbols": [str(item)[:40] for item in (value.get("attention_symbols") or [])[:3]],
-        "guidance": [str(item)[:140] for item in (value.get("guidance") or [])[:3]],
+        "should_notify": value.get("should_notify") is True,
+        "notification_reason": str(value.get("notification_reason") or "")[:160],
+        "headline": headline,
+        "market_summary": market_summary,
+        "holding_focus": holdings,
+        "recommendation_focus": recommendations,
         "risks": [str(item)[:140] for item in (value.get("risks") or [])[:3]],
+        "attention_symbols": [
+            *(item["symbol"] for item in holdings if item["symbol"]),
+            *(item["symbol"] for item in recommendations if item["symbol"]),
+            *legacy_attention,
+        ][:6],
     }
     # Do not let harmless wording variation create a ten-minute notification.
     # A push-worthy state change is a changed risk regime or attention set;

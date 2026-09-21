@@ -9,6 +9,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.intraday_advisory.model import CodexAdvisoryModel, DeepSeekAdvisoryModel
+from app.intraday_advisory.presentation import ensure_readable_card
+from app.intraday_advisory.renderer import analysis_card
 
 PAYLOAD = {
     "as_of": "2026-09-21T10:00:00+08:00", "trigger_kind": "preflight", "report_kind": "fixed",
@@ -23,12 +25,19 @@ PAYLOAD = {
 async def main(provider: str) -> int:
     model = DeepSeekAdvisoryModel() if provider == "deepseek" else CodexAdvisoryModel()
     result = await model.analyze(PAYLOAD)
-    required = {"market_state", "summary", "attention_symbols", "guidance", "risks", "state_fingerprint"}
+    required = {
+        "market_state", "should_notify", "notification_reason", "headline", "market_summary",
+        "holding_focus", "recommendation_focus", "risks", "state_fingerprint",
+    }
     missing = sorted(required - set(result.output))
     if missing:
         raise ValueError("advisory model response missing fields: " + ",".join(missing))
+    card = analysis_card(provider, result.output, report_kind="fixed",
+                         generated_at=datetime.now(ZoneInfo("Asia/Shanghai")))
+    ensure_readable_card(card)
     print(json.dumps({"status": "passed", "provider": provider, "model": result.model,
                       "duration_ms": result.duration_ms, "market_state": result.output["market_state"],
+                      "card_readable": True,
                       "checked_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()},
                      ensure_ascii=False, sort_keys=True))
     return 0

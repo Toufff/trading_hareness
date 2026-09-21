@@ -207,6 +207,24 @@ def _enqueue_analysis(database: Any, *, run_id: str, key: str, text: str, card: 
         enqueue_delivery(connection, key=key, kind="analysis", text=text, card=card, analysis_run_id=run_id)
 
 
+def _deepseek_push_worthy(output: Mapping[str, Any], previous_fingerprint: str | None) -> bool:
+    """Require an explicit material-change judgment before interrupting the user.
+
+    DeepSeek still runs and every result is persisted at its scheduled slot.
+    Silence only affects Feishu delivery; it never hides the audit record.
+    """
+    if output.get("should_notify") is not True:
+        return False
+    fingerprint = str(output.get("state_fingerprint") or "").strip()
+    if not fingerprint or fingerprint == previous_fingerprint:
+        return False
+    reason = str(output.get("notification_reason") or "").strip()
+    has_focus = bool(output.get("holding_focus") or output.get("recommendation_focus"))
+    has_market_risk = str(output.get("market_state") or "") == "risk"
+    has_risk = bool(output.get("risks"))
+    return bool(reason and (has_focus or has_market_risk or has_risk))
+
+
 async def _analyze(deps: IntradayAdvisoryDependencies, state: RuntimeState, scope: AdvisoryScope,
                    *, provider: str, trigger_kind: str, report_kind: str | None, always_push: bool) -> dict[str, Any]:
     now = deps.now()
@@ -238,7 +256,7 @@ async def _analyze(deps: IntradayAdvisoryDependencies, state: RuntimeState, scop
         should_push = always_push
         if provider == "deepseek" and not should_push:
             previous = await deps.run_database(lambda: _last_ds_fingerprint(deps.database))
-            should_push = previous != result.output.get("state_fingerprint")
+            should_push = _deepseek_push_worthy(result.output, previous)
         if should_push:
             text = render_analysis(provider, result.output, report_kind=report_kind or trigger_kind, generated_at=completed)
             card = analysis_card(provider, result.output, report_kind=report_kind or trigger_kind,
