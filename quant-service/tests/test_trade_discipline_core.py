@@ -311,11 +311,11 @@ class StageTemplateQualityTests(unittest.TestCase):
         self.assertEqual(generate(stage_inputs("trend_hold")).lines_of("time_stop")[0].trading_days, 5)
 
     def test_exposure_line_executes_by_time_not_by_price(self):
-        plan = generate(shenqi_inputs())
+        plan = generate(shenqi_inputs(risk_per_trade_pct=Decimal("1.0")))
         exposure = plan.lines_of("exposure")[0]
         self.assertEqual((exposure.execute_by, exposure.execute_at), ("time", "next_open+15m"))
         self.assertIsNone(exposure.price)
-        self.assertEqual(exposure.action.value, plan.sizing.recommended_shares)
+        self.assertEqual(exposure.action.value, plan.sizing.max_shares)
         self.assertEqual(exposure.priority, 0)
 
     def test_holiday_line_appears_only_when_the_window_contains_a_long_closure(self):
@@ -373,8 +373,8 @@ class StageTemplateQualityTests(unittest.TestCase):
         self.assertEqual(closures_within({"closure_gaps": [WEEKEND_GAP, MID_AUTUMN_GAP, NATIONAL_DAY_GAP]},
                                          "2026-09-25"), [WEEKEND_GAP, MID_AUTUMN_GAP])
 
-    def test_a_national_day_closure_uses_the_calibrated_holiday_cap_or_records_why_not(self):
-        """The holiday line is the calibrated holiday cap, drawn only when it is tighter than the stage cap."""
+    def test_a_national_day_closure_uses_the_event_cap_only_when_current_holdings_exceed_it(self):
+        """Holiday event risk is independent of the ordinary concentration stress reference."""
         calendar = CalendarInfo(upcoming_trading_dates=[date(2026, 9, 28), date(2026, 9, 29),
                                                         date(2026, 9, 30), date(2026, 10, 9),
                                                         date(2026, 10, 12)],
@@ -392,14 +392,20 @@ class StageTemplateQualityTests(unittest.TestCase):
         self.assertLessEqual(abs(holiday[0].derivation.recompute() - holiday[0].action.value), 0.01)
         self.assertIn("休市后两日99%跌幅", holiday[0].label)
         self.assertEqual(plan.status, "active", failed_checks(plan.quality))
-        # not tighter than the stage cap: no line, the refusal is on record, the gate accepts it
+        # A looser event cap still acts while current holdings exceed it; it is
+        # no longer compared with the ordinary concentration stress reference.
         with calibrated(synthetic_calibration(stage_cap=25, holiday_cap=30)):
             loose = generate(shenqi_inputs(calendar=calendar))
-        self.assertEqual(loose.lines_of("holiday"), [])
-        refusal = {item["kind"]: item for item in loose.metrics["omitted_lines"]}["holiday"]
-        self.assertIn("不低于阶段上限 25%", refusal["reason"])
-        self.assertEqual(refusal["inputs"]["holiday_cap_pct"], 30)
-        self.assertEqual(loose.status, "active", failed_checks(loose.quality))
+        self.assertEqual(loose.lines_of("holiday")[0].action.value, 3500)
+        # At 50% this fixture is already inside the event reference; do not
+        # emit a no-op reduction, but keep the refusal auditable.
+        with calibrated(synthetic_calibration(stage_cap=25, holiday_cap=50)):
+            within = generate(shenqi_inputs(calendar=calendar))
+        self.assertEqual(within.lines_of("holiday"), [])
+        refusal = {item["kind"]: item for item in within.metrics["omitted_lines"]}["holiday"]
+        self.assertIn("当前 5800 股未超过休市事件参考", refusal["reason"])
+        self.assertEqual(refusal["inputs"]["holiday_cap_pct"], 50)
+        self.assertEqual(within.status, "active", failed_checks(within.quality))
 
     def test_a_soft_stop_is_only_drawn_with_half_an_atr_on_each_side(self):
         """09-18 closed 8.41 with a 0.66 stop distance under one ATR: no price has half an ATR on both sides."""
@@ -599,14 +605,15 @@ class SizingTests(unittest.TestCase):
         self.assertEqual(sizing.current_risk_pct, Decimal("4.48"))
         self.assertGreater(sizing.current_risk_pct, sizing.risk_per_trade_pct)
 
-    def test_exposure_cap_can_bind_before_the_risk_budget(self):
+    def test_tail_risk_reference_never_overrides_the_stop_risk_budget(self):
         sizing = build_sizing(stage="broken", equity=Decimal("99632"), risk_per_trade_pct=Decimal("1.0"),
                               reference_price=Decimal("8.41"), hard_stop=Decimal("7.75"),
                               current_shares=5800, cap_pct=5)
         self.assertEqual(sizing.target_exposure_pct, Decimal("5"))
         self.assertEqual(sizing.cap_shares, 500)           # floor(99632 x 5% / 8.41 / 100) x 100
-        self.assertEqual(sizing.recommended_shares, 500)   # the cap binds before the 1500-share risk limit
-        self.assertEqual(sizing.binding_constraint, "cap")
+        self.assertEqual(sizing.recommended_shares, 1500)  # tail reference is disclosure, not an order limit
+        self.assertEqual(sizing.binding_constraint, "risk")
+        self.assertEqual(sizing.concentration_policy, "tail_risk_advisory")
 
     def test_recommended_shares_always_round_down_to_whole_lots(self):
         sizing = build_sizing(stage="trend_hold", equity=Decimal("200000"),
@@ -705,7 +712,12 @@ class QualityGateFailureTests(unittest.TestCase):
         self.assert_fails("every_line_has_derivation",
                           lines=self.replace("time_stop",
                                              derivation=Derivation(rule_id="hand_written", inputs={}, formula="")))
-        self.assert_fails("exposure_line_when_over_cap", lines=self.without("exposure"))
+        # Force a real stop-risk breach, then omit the required reduction.
+        self.assert_fails(
+            "exposure_line_when_over_risk",
+            lines=self.without("exposure"),
+            sizing=self.plan.sizing.model_copy(update={"current_shares": self.plan.sizing.max_shares + 100}),
+        )
         self.assert_fails("holiday_line_when_closure",
                           metrics=self.metrics_with(calendar=self.frozen_calendar(IN_WINDOW_GAP)))
         self.assert_fails("no_add_when_crash_or_broken", lines=self.without("no_add"))
@@ -740,9 +752,12 @@ class QualityGateFailureTests(unittest.TestCase):
         self.assertFalse(self.verdicts(lines=no_formula)["every_line_has_derivation"].passed)
 
     def test_an_exposure_line_whose_share_count_does_not_recompute_fails_the_derivation_gate(self):
-        exposure = self.plan.lines_of("exposure")[0]
-        wrong = self.replace("exposure", action=Action(type="reduce_to_shares", value=exposure.action.value + 100))
-        self.assertFalse(self.verdicts(lines=wrong)["every_line_has_derivation"].passed)
+        plan = generate(rally_inputs(risk_per_trade_pct=Decimal("1.0")))
+        exposure = plan.lines_of("exposure")[0]
+        wrong = [line.model_copy(update={"action": Action(type="reduce_to_shares", value=exposure.action.value + 100)})
+                 if line.kind == "exposure" else line for line in plan.lines]
+        verdicts = {check.check_id: check for check in evaluate_quality(plan.model_copy(update={"lines": wrong}))}
+        self.assertFalse(verdicts["every_line_has_derivation"].passed)
 
     def test_the_holiday_gate_re_derives_the_closure_from_the_frozen_calendar_not_the_flag(self):
         """The generator's flag is ignored in both directions; the frozen calendar decides."""
@@ -803,7 +818,7 @@ class ShenqiFixtureTests(unittest.TestCase):
         self.assertEqual(plan.stage, "crash_rebound")
         self.assertEqual(plan.trading_date, date(2026, 9, 18))
         self.assertEqual(plan.valid_until.date(), date(2026, 9, 25))
-        self.assertEqual(plan.template_key, "crash_rebound@trade-discipline-templates-v6")
+        self.assertEqual(plan.template_key, "crash_rebound@trade-discipline-templates-v7")
         self.assertEqual(plan.position.quantity, 5800)
         self.assertEqual(plan.metrics["t1_locked_shares"], 0)
         self.assertEqual(len(plan.inputs_hash), 64)
@@ -858,17 +873,18 @@ class ShenqiFixtureTests(unittest.TestCase):
         _, pullback = hard_stop_price("pullback_hold", metrics, Decimal("8.41"))
         self.assertTrue(pullback.formula.startswith("min(recent_low"))
 
-    def test_sizing_cuts_the_position_roughly_in_four(self):
+    def test_sizing_reports_concentration_but_only_stop_risk_can_cut(self):
         sizing = self.plan.sizing
         self.assertEqual(sizing.equity, Decimal("99632"))
         self.assertEqual(sizing.current_shares, 5800)
         self.assertGreater(sizing.current_exposure_pct, sizing.target_exposure_pct)
-        self.assertLess(sizing.recommended_shares, sizing.current_shares)
+        self.assertEqual(sizing.recommended_shares, sizing.max_shares)
         self.assertEqual(sizing.recommended_shares % LOT_SIZE, 0)
 
     def test_the_plan_states_every_required_line_kind(self):
         kinds = {line.kind for line in self.plan.lines}
-        self.assertTrue({"exposure", "hard_stop", "take_partial", "trail", "no_add", "time_stop"} <= kinds)
+        self.assertTrue({"hard_stop", "take_partial", "trail", "no_add", "time_stop"} <= kinds)
+        self.assertNotIn("exposure", kinds)  # 5% risk budget is not breached; concentration alone is not actionable
         # the soft stop is refused on this fixture and the refusal is on record
         self.assertNotIn("soft_stop", kinds)
         self.assertEqual([item["kind"] for item in self.plan.metrics["omitted_lines"]], ["soft_stop"])

@@ -45,7 +45,7 @@ def trade(record_id, day, stamp, side, quantity, price, symbol="600613.SH"):
 
 
 def breakdown_evaluations(plan):
-    """09-21 closes at 7.60: the exposure cut, the hard stop and the soft stop all fire."""
+    """09-21 closes at 7.60; a plan with an actual risk overflow also fires exposure."""
     return [evaluate(plan, inputs(bars=BREAKDOWN_BARS, as_of=datetime(2026, 9, 21, 15, 30, tzinfo=SH)))]
 
 
@@ -61,7 +61,7 @@ def by_kind(records, verdict=None):
 
 class SignalTests(unittest.TestCase):
     def setUp(self):
-        self.plan = plan_fixture()
+        self.plan = plan_fixture(risk_per_trade_pct=Decimal("1.0"))
         self.signals = signals_from(self.plan, breakdown_evaluations(self.plan))
 
     def test_triggered_lines_become_expected_fills(self):
@@ -70,10 +70,9 @@ class SignalTests(unittest.TestCase):
                          {"exposure", "hard_stop", "no_add"})
         expected = {signal.line_kind: (signal.side, signal.expected_quantity) for signal in self.signals}
         self.assertEqual(expected["hard_stop"], ("sell", 5800))       # exit_all on the whole position
-        # 5800 -> 2900 recommended. Under the 1% default this was 5800 -> 1500;
-        # the per-name tolerance the user actually set (5%) makes the extreme-loss
-        # cap the binding limit instead of the stop-loss budget.
-        self.assertEqual(expected["exposure"], ("sell", 2900))
+        # The explicit 1% override makes the stop-risk limit 1500 shares, so
+        # the expected fill is the 4300-share reduction from 5800.
+        self.assertEqual(expected["exposure"], ("sell", 4300))
         self.assertEqual(expected["no_add"], (None, None))            # a prohibition expects no fill
 
     def test_a_drawn_soft_stop_expects_a_half_position_fill(self):

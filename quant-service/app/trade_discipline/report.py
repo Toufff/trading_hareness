@@ -25,7 +25,7 @@ from .contracts import ComplianceRecord, DisciplinePlan, Evaluation, FormulaErro
 from .generator import t1_locked_shares_for
 from .quality import CHECK_IDS, DERIVATION_TOLERANCE
 
-REPORT_VERSION = "trade-discipline-report-v6"
+REPORT_VERSION = "trade-discipline-report-v7"
 RESEARCH_NOTICE = "研究用途，仅作人工决策依据：系统不连券商、不下单、不改持仓。"
 DASH = "—"
 
@@ -84,10 +84,11 @@ CHECK_LABEL: dict[str, str] = {
     "lines_monotonic": "硬止损 < 软止损 < 参考价，移动止损触发价在上方",
     "every_line_evaluable": "每条线都可被系统评估",
     "every_line_has_derivation": "每条线都能从 inputs 复算出价格与动作值",
-    "exposure_line_when_over_cap": "仓位超上限时必须给出减仓线",
+    "exposure_line_when_over_cap": "旧版：仓位超阶段上限时必须给出减仓线",
+    "exposure_line_when_over_risk": "止损风险超预算时必须给出减仓线",
     "holiday_line_when_closure": "有效期内有 ≥5 个自然日休市时必须给出休市线",
     "no_add_when_crash_or_broken": "急跌/破位阶段必须禁加仓",
-    "sizing_consistent": "仓位公式可复算且不超上限",
+    "sizing_consistent": "止损风险仓位公式可复算；集中度压力值仅提示",
     "not_lowered_vs_previous": "硬止损不得低于前序计划（除非记录下调理由）",
     "valid_until_within_5_trading_days": "有效期不超过5个交易日",
     "entry_reference_current": "新买入场参考价取计划交易日收盘或更晚，仓位与止损按它计算",
@@ -271,14 +272,14 @@ def sizing_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
         {"key": "sizing_price", "label": "定量价（本计划允许的最差成交价）",
          "value": _sizing_price_text(sizing)},
         {"key": "max_shares", "label": "风险上限 max_shares", "value": _fmt(sizing.max_shares)},
-        {"key": "target_exposure_pct", "label": "阶段仓位上限（校准）", "value": _pct(sizing.target_exposure_pct)},
-        {"key": "cap_basis", "label": "上限依据",
+        {"key": "target_exposure_pct", "label": "集中度压力参考比例（不触发减仓）", "value": _pct(sizing.target_exposure_pct)},
+        {"key": "cap_basis", "label": "压力测试依据",
          "value": _cap_basis_text(sizing.exposure_basis) if sizing.exposure_basis else DASH},
-        {"key": "cap_shares", "label": "阶段上限股数", "value": _fmt(sizing.cap_shares)},
-        {"key": "binding_constraint", "label": "起约束的限制",
-         "value": {"risk": f"风险上限（{_pct(sizing.risk_per_trade_pct)}÷止损距离）",
-                   "cap": f"阶段上限（同一容忍度 {_pct(sizing.risk_per_trade_pct)} 的极端情形口径）"}.get(
-             sizing.binding_constraint or "", DASH)},
+        {"key": "cap_shares", "label": "压力参考股数（仅提示）", "value": _fmt(sizing.cap_shares)},
+        {"key": "tail_risk_estimated_loss_pct", "label": "当前仓位尾部情景估算损失",
+         "value": _pct(sizing.tail_risk_estimated_loss_pct)},
+        {"key": "binding_constraint", "label": "可执行股数约束",
+         "value": f"仅按止损风险预算（{_pct(sizing.risk_per_trade_pct)}÷止损距离）"},
         {"key": "current_shares", "label": "当前持仓", "value": f"{_fmt(sizing.current_shares)} 股"},
         {"key": "sellable_quantity", "label": "当日可卖 sellable_quantity",
          "value": f"{_fmt(position.sellable_quantity)} 股" if position is not None else DASH},
@@ -286,7 +287,7 @@ def sizing_rows(plan: DisciplinePlan) -> list[dict[str, Any]]:
          "value": _pct(sizing.current_exposure_pct)},
         {"key": "snapshot_exposure_pct", "label": "当前仓位比例（按快照市值 market_value / equity）",
          "value": _pct(snapshot_exposure)},
-        {"key": "recommended_shares", "label": "建议持仓 recommended_shares",
+        {"key": "recommended_shares", "label": "止损风险允许股数 recommended_shares",
          "value": _fmt(sizing.recommended_shares)},
     ]
 
@@ -344,14 +345,15 @@ def _risk_policy_text(policy: dict[str, Any] | None) -> str:
     standing = policy.get("per_name_loss_tolerance_pct")
     if source == "cli_override":
         return f"命令行覆盖 {applied}%（标准政策为 {standing}%，本卡未按标准政策生成）"
-    return f"用户设定 {standing}%（{policy.get('set_at')}），正常止损与极端情形同一标准，无账户总额限制"
+    return (f"用户设定 {standing}%（{policy.get('set_at')}），作为止损风险预算；允许高确信度重仓，"
+            "集中度尾部压力仅提示，不因仓位比例本身减仓")
 
 
 def _cap_basis_text(basis: dict[str, Any]) -> str:
     fallback = "，样本不足，按同板块全部阶段合并" if basis.get("fallback") else ""
     return (f"{basis.get('stage')} × {basis.get('board_label') or basis.get('board')}：两日最大跌幅 99% 分位 "
             f"{basis.get('q99_loss_pct')}%（{basis.get('samples')} 个样本{fallback}），"
-            f"上限 = {basis.get('tolerance_pct')}% ÷ {basis.get('q99_loss_pct')}% 向下取 5 的倍数 = {basis.get('cap_pct')}%；"
+            f"压力参考 = {basis.get('tolerance_pct')}% ÷ {basis.get('q99_loss_pct')}% 向下取 5 的倍数 = {basis.get('cap_pct')}%；"
             f"校准 {basis.get('calibration_version')}")
 
 

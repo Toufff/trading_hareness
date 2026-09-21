@@ -36,7 +36,7 @@ from .contracts import DisciplinePlan, Evaluation, Line, LineState
 from .generator import CalendarInfo
 from .stage import normalize_bars
 
-EVALUATOR_VERSION = "trade-discipline-evaluator-v1"
+EVALUATOR_VERSION = "trade-discipline-evaluator-v2"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 SESSION_CLOSE = time(15, 0)
@@ -280,6 +280,29 @@ def _time_deadline(plan: DisciplinePlan, line: Line, calendar: CalendarInfo) -> 
 def _time_line_state(plan: DisciplinePlan, line: Line, inputs: EvaluationInputs,
                      bars: list[dict[str, Any]]) -> LineState:
     """A time line is due or not due; it is never compared against a price."""
+    # Plans generated before risk-policy v2 used the calibrated stage cap as an
+    # executable position ceiling.  Do not let those immutable historical rows
+    # keep issuing mechanical reductions after the policy changed: if the
+    # position is still inside the stop-risk allowance, the old exposure line
+    # is concentration-only and therefore retired.  A genuine stop-risk breach
+    # (current_shares > max_shares) remains executable, regardless of plan age.
+    if (line.kind == "exposure" and plan.sizing is not None
+            and plan.sizing.current_shares <= plan.sizing.max_shares):
+        return LineState(
+            kind=line.kind,
+            label=line.label,
+            state="cancelled",
+            basis="time",
+            evidence={
+                "execute_by": "time",
+                "execute_at": line.execute_at,
+                "policy_override": "tail_risk_advisory_v2",
+                "reason": "集中度压力参考已改为提示；当前持仓未超过止损风险允许股数",
+                "current_shares": plan.sizing.current_shares,
+                "max_shares": plan.sizing.max_shares,
+                "as_of": inputs.as_of.isoformat(),
+            },
+        )
     deadline, note = _time_deadline(plan, line, inputs.calendar)
     evidence: dict[str, Any] = {"execute_by": "time", "execute_at": line.execute_at, "rule": note,
                                 "deadline": deadline.isoformat() if deadline else None,

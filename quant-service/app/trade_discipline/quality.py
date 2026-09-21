@@ -34,7 +34,7 @@ _SHANGHAI = ZoneInfo("Asia/Shanghai")
 CHECK_IDS = (
     "has_hard_stop", "has_time_stop", "hard_stop_below_price", "hard_stop_single_condition",
     "hard_stop_distance_sane", "soft_above_hard", "soft_stop_separation", "lines_monotonic",
-    "every_line_evaluable", "every_line_has_derivation", "exposure_line_when_over_cap",
+    "every_line_evaluable", "every_line_has_derivation", "exposure_line_when_over_risk",
     "holiday_line_when_closure", "no_add_when_crash_or_broken", "sizing_consistent",
     "not_lowered_vs_previous", "valid_until_within_5_trading_days", "entry_reference_current",
     "buy_zone_valid",
@@ -248,28 +248,27 @@ def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
 
     exposure_lines = plan.lines_of("exposure")
     if sizing is None:
-        checks.append(_check("exposure_line_when_over_cap", not exposure_lines, "无 sizing，不应出现仓位线"))
-    elif sizing.current_shares > sizing.recommended_shares:
+        checks.append(_check("exposure_line_when_over_risk", not exposure_lines, "无 sizing，不应出现仓位线"))
+    elif sizing.current_shares > sizing.max_shares:
         matched = [line for line in exposure_lines
-                   if line.action.type == "reduce_to_shares" and line.action.value == sizing.recommended_shares]
-        checks.append(_check("exposure_line_when_over_cap", bool(matched),
-                             f"当前 {sizing.current_shares} 股超过建议 {sizing.recommended_shares} 股（风险上限 "
-                             f"{sizing.max_shares} / 阶段上限 {sizing.cap_shares} 股），"
-                             f"{'已给出减仓线' if matched else '缺少减到 ' + str(sizing.recommended_shares) + ' 股的仓位线'}"))
+                   if line.action.type == "reduce_to_shares" and line.action.value == sizing.max_shares]
+        checks.append(_check("exposure_line_when_over_risk", bool(matched),
+                             f"当前 {sizing.current_shares} 股超过止损风险上限 {sizing.max_shares} 股，"
+                             f"{'已给出减仓线' if matched else '缺少减到 ' + str(sizing.max_shares) + ' 股的仓位线'}"))
     else:
-        checks.append(_check("exposure_line_when_over_cap", not exposure_lines,
-                             f"当前 {sizing.current_shares} 股未超过建议 {sizing.recommended_shares} 股"
+        checks.append(_check("exposure_line_when_over_risk", not exposure_lines,
+                             f"当前 {sizing.current_shares} 股未超过止损风险上限 {sizing.max_shares} 股；"
+                             f"集中度压力参考 {sizing.cap_shares} 股仅提示"
                              + ("，却给出了减仓线" if exposure_lines else "")))
 
     closure = _required_closure(plan)
     holiday_basis = ((metrics.get("exposure_calibration") or {}).get("holiday")
                      if isinstance(metrics.get("exposure_calibration"), dict) else None)
-    holiday_not_tighter = (isinstance(holiday_basis, dict) and sizing is not None
-                           and Decimal(str(holiday_basis.get("cap_pct"))) >= sizing.target_exposure_pct)
-    if closure is not None and holiday_not_tighter:
-        # The calibrated holiday cap is not tighter than the stage cap: no line is required
-        # (the template records the refusal in omitted_lines).
-        closure = None
+    if closure is not None and isinstance(holiday_basis, dict) and sizing is not None:
+        holiday_limit = lot_shares(sizing.equity, Decimal(str(holiday_basis.get("cap_pct"))),
+                                   sizing.reference_price)
+        if sizing.current_shares <= holiday_limit:
+            closure = None
     closure_required = closure is not None
     holiday_lines = plan.lines_of("holiday")
     closure_note = (f"{closure['last_trading_date']} 起休市 {closure['closed_days']} 个自然日"
@@ -318,11 +317,12 @@ def evaluate_quality(plan: DisciplinePlan) -> list[QualityCheck]:
             problems.append(f"max_shares {sizing.max_shares} 与公式复算 {expected_max} 不符")
         if sizing.recommended_shares > sizing.max_shares:
             problems.append(f"recommended_shares {sizing.recommended_shares} 超过 max_shares {sizing.max_shares}")
-        if sizing.recommended_shares > cap_shares:
-            problems.append(f"recommended_shares {sizing.recommended_shares} 超过仓位上限 {cap_shares} 股")
-        if sizing.cap_shares is not None and sizing.recommended_shares != min(expected_max, cap_shares):
-            problems.append(f"recommended_shares {sizing.recommended_shares} 不等于 min(风险上限 {expected_max}, "
-                            f"阶段上限 {cap_shares})")
+        if sizing.recommended_shares != expected_max:
+            problems.append(f"recommended_shares {sizing.recommended_shares} 不等于止损风险上限 {expected_max}")
+        if sizing.cap_shares is not None and sizing.cap_shares != cap_shares:
+            problems.append(f"压力参考股数 {sizing.cap_shares} 与公式复算 {cap_shares} 不符")
+        if sizing.concentration_policy != "tail_risk_advisory":
+            problems.append(f"集中仓位政策不是 tail_risk_advisory：{sizing.concentration_policy}")
         checks.append(_check("sizing_consistent", not problems,
                              "；".join(problems) if problems else
                              f"max_shares {sizing.max_shares}，建议 {sizing.recommended_shares} 股"))

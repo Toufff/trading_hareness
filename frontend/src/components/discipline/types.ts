@@ -38,6 +38,8 @@ export type DisciplineSizing = {
   risk_amount: Num; max_shares: number; target_exposure_pct: Num; current_shares: number;
   current_exposure_pct: Num; recommended_shares: number; current_risk_pct?: Num;
   cap_shares?: number | null; binding_constraint?: 'risk' | 'cap' | null; exposure_basis?: ExposureBasis | null;
+  concentration_policy?: 'tail_risk_advisory' | 'legacy_hard_cap' | null;
+  tail_risk_estimated_loss_pct?: Num | null;
 };
 
 export type DisciplinePosition = {

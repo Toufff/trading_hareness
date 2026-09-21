@@ -144,20 +144,21 @@ describe('calibrated cap summary', () => {
   const calibrated = {
     ...plan('600613.SH').sizing!, target_exposure_pct: '25', cap_shares: 2900, max_shares: 1200, recommended_shares: 1200,
     binding_constraint: 'risk' as const,
+    concentration_policy: 'tail_risk_advisory' as const,
     exposure_basis: { stage: 'crash_rebound', board: 'main_10', board_label: '主板（10%）', cell: 'crash_rebound|main_10',
       cap_pct: 25, q99_loss_pct: 18.9882, q95_loss_pct: 14.4553, samples: 64218, fallback: null, tolerance_pct: 5,
       percentile: 99, horizon_sessions: 2, calibration_version: 'discipline-exposure-calibration-v1:bc72676e05cc' },
   };
   it('names the cap, its data basis and the binding limit (600613 dry-run numbers)', () => {
     const summary = capSummary(calibrated)!;
-    expect(summary.cap).toBe('阶段上限 25%（2900 股）');
-    expect(summary.basis).toBe('急跌反弹 × 主板（10%）：两日最大跌幅 99% 分位 18.99%（64,218 个样本），上限 = 极端亏损 5% ÷ 18.99% 向下取 5 的倍数 = 25%');
-    expect(summary.binding).toBe('风险上限 1200 股（1.0%÷止损距离） / 阶段上限 25%（2900 股），风险上限更小，建议 1200 股');
+    expect(summary.cap).toBe('集中度压力参考 25%（2900 股），仅提示');
+    expect(summary.basis).toBe('急跌反弹 × 主板（10%）：两日最大跌幅 99% 分位 18.99%（64,218 个样本），压力参考 = 极端亏损 5% ÷ 18.99% 向下取 5 的倍数 = 25%');
+    expect(summary.binding).toBe('风险上限 1200 股（1.0%÷止损距离）；集中度压力参考不触发减仓，建议上限 1200 股');
   });
   it('says when the cap binds and when a cell fell back', () => {
     const capBound = capSummary({ ...calibrated, binding_constraint: 'cap', recommended_shares: 500, cap_shares: 500,
       exposure_basis: { ...calibrated.exposure_basis, fallback: 'board_pooled_across_stages' } })!;
-    expect(capBound.binding).toContain('阶段上限更小，建议 500 股');
+    expect(capBound.binding).toContain('集中度压力参考不触发减仓');
     expect(capBound.basis).toContain('样本不足按同板块合并');
   });
   it('labels a plan stored before the calibration as hand-picked', () => {

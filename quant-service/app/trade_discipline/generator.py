@@ -34,7 +34,7 @@ from .templates import (
     new_buy_entry,
 )
 
-GENERATOR_VERSION = "trade-discipline-generator-v5"
+GENERATOR_VERSION = "trade-discipline-generator-v6"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 VALIDITY_TRADING_DAYS = 5
 SESSION_CLOSE = time(15, 0)

@@ -201,7 +201,9 @@ function onChartClick(key: string) {
 // ---- sizing / evidence
 const sizing = computed(() => props.plan.sizing ?? null);
 const caps = computed(() => capSummary(props.plan.sizing ?? null));
-const overCap = computed(() => (sizing.value ? (num(sizing.value.current_exposure_pct) ?? 0) > (num(sizing.value.target_exposure_pct) ?? 0) : false));
+const overRisk = computed(() => (sizing.value
+  ? (num(sizing.value.current_risk_pct) ?? 0) > (num(sizing.value.risk_per_trade_pct) ?? 0)
+  : false));
 const maxSharesFormula = computed(() => {
   const s = sizing.value;
   if (!s) return '';
@@ -505,31 +507,34 @@ const chain = computed(() => [...(history.value?.items ?? [])].sort((a, b) => b.
           <div><dt>单笔风险预算</dt><dd>{{ sizing.risk_per_trade_pct }}% = {{ sizing.risk_amount }}</dd></div>
           <div><dt>止损距离</dt><dd>{{ price2(sizing.stop_distance) }}（{{ stopPct }}，参考 {{ price2(sizing.reference_price) }} → 硬止损 {{ price2(sizing.hard_stop) }}）</dd></div>
           <div class="wide">
-            <dt>max_shares</dt><dd><code>{{ maxSharesFormula }}</code></dd>
+            <dt>按止损风险允许的股数</dt><dd><code>{{ maxSharesFormula }}</code></dd>
           </div>
           <div data-testid="cap-basis">
-            <dt>阶段上限（数据校准）</dt><dd>{{ caps?.cap }}<small v-if="sizing.exposure_basis?.fallback">（fallback）</small></dd>
+            <dt>集中度压力参考（不触发减仓）</dt><dd>{{ caps?.cap }}<small v-if="sizing.exposure_basis?.fallback">（样本不足，使用板块合并数据）</small></dd>
           </div>
           <div class="wide">
-            <dt>上限依据</dt><dd>{{ caps?.basis }}</dd>
+            <dt>压力测试依据</dt><dd>{{ caps?.basis }}</dd>
           </div>
           <div
             class="wide"
             data-testid="binding-constraint"
           >
-            <dt>起约束的限制</dt><dd :class="{ binding: true }">{{ caps?.binding }}</dd>
+            <dt>可执行股数约束</dt><dd :class="{ binding: true }">{{ caps?.binding }}</dd>
           </div>
           <div><dt>建议股数</dt><dd>{{ sizing.recommended_shares }} 股</dd></div>
           <div><dt>当前持仓 / 可卖</dt><dd>{{ plan.position?.quantity ?? 0 }} / {{ plan.position?.sellable_quantity ?? 0 }} 股<small v-if="t1Locked > 0">（生成日 T+1 锁定 {{ t1Locked }} 股，下一交易日可卖）</small></dd></div>
           <div>
-            <dt>当前仓位</dt><dd :class="{ over: overCap }">
-              {{ sizing.current_exposure_pct }}%<small v-if="overCap">（超出阶段上限）</small>
+            <dt>当前仓位</dt><dd>
+              {{ sizing.current_exposure_pct }}%<small>（集中度仅展示，不单独触发减仓）</small>
             </dd>
           </div>
           <div>
-            <dt>当前风险比例</dt><dd :class="{ over: (num(sizing.current_risk_pct) ?? 0) > (num(sizing.risk_per_trade_pct) ?? 0) }">
-              {{ sizing.current_risk_pct ?? '—' }}%
+            <dt>当前风险比例</dt><dd :class="{ over: overRisk }">
+              {{ sizing.current_risk_pct ?? '—' }}%<small v-if="overRisk">（超过 {{ sizing.risk_per_trade_pct }}% 预算）</small>
             </dd>
+          </div>
+          <div>
+            <dt>尾部情景估算损失</dt><dd>{{ sizing.tail_risk_estimated_loss_pct ?? '—' }}%<small>（压力测试，不是减仓指令）</small></dd>
           </div>
           <div
             v-if="entry"

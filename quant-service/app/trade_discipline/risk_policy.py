@@ -1,4 +1,4 @@
-"""The one number that says how much a single name may cost, and where it came from.
+"""The executable loss budget and the user's concentration preference.
 
 Until 2026-09-20 there were two, and only one of them had ever been asked
 about.  The extreme-loss tolerance -- 5% of equity for a single name -- was
@@ -16,31 +16,28 @@ resulting position sizes were described to them as if it had.
 On 2026-09-20 the user resolved it: *"正常也是5%，我现在不需要这两个情况分开来"*
 -- one tolerance, 5%, for the ordinary case and the extreme case alike.
 
-One number, two lenses, and they are not a second policy:
+The 2026-09-21 review separated two things that had incorrectly been coupled:
 
 ``stop-loss budget``
     If the hard stop is hit and the exit fills near it, the loss is at most
     the tolerance.  This sets ``max_shares``.
 
-``extreme-loss cap``
-    If the stop does *not* work -- an overnight gap, a limit-down with no
-    bid -- the loss is still at most the tolerance at the 99th percentile of
-    the stage's two-session adverse move.  This sets ``cap_shares``
-    (``exposure_calibration.py``).
+``tail-risk stress``
+    The stage/board 99th-percentile two-session adverse move estimates what a
+    concentrated position could lose if the stop cannot execute.  It is an
+    advisory disclosure, not an order instruction and not a position cap.
 
-``recommended_shares`` is the smaller of the two, so the tolerance holds
-whether or not the stop functions.  Dropping the cap would not simplify the
-policy, it would abandon half of it: at 5% with no cap, 神奇制药 sizes to 6300
-shares -- 53.5% of equity in one name -- and a single limit-down move costs
-more than 10%.
+``recommended_shares`` follows the stop-loss budget.  A reduction is created
+only when that budget (or a separate price/time/event discipline line) is
+breached.  High concentration is permitted for a high-conviction trade; the
+tail estimate stays visible so the user can make that choice consciously.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
 
-#: What the user accepts losing on one name, in percent of account equity.
-#: Both lenses below are derived from this and nothing else.
+#: Executable hard-stop risk budget for one name, in percent of equity.
 PER_NAME_LOSS_TOLERANCE_PCT = Decimal("5.0")
 
 #: No separate account-level limit exists. The user was asked directly on
@@ -51,7 +48,8 @@ ACCOUNT_TOTAL_LIMIT_PCT: Decimal | None = None
 SOURCE_USER = "user"
 SOURCE_OVERRIDE = "cli_override"
 
-POLICY_VERSION = "discipline-risk-policy-v1"
+POLICY_VERSION = "discipline-risk-policy-v2"
+CONCENTRATION_POLICY = "tail_risk_advisory"
 
 
 def policy_record(applied_pct: Decimal) -> dict[str, object]:
@@ -71,14 +69,18 @@ def policy_record(applied_pct: Decimal) -> dict[str, object]:
         "set_at": "2026-09-20",
         "account_total_limit_pct": ACCOUNT_TOTAL_LIMIT_PCT,
         "statement": (
-            "单只股票可接受亏损为权益的 5%（用户 2026-09-20 设定）。正常止损与极端情形同一标准，"
-            "不另设账户总额限制。止损预算与极端亏损上限都由这一个数推出，取更小者。"
+            "单只股票硬止损风险预算为权益的 5%（用户 2026-09-20 设定），不另设账户总额限制。"
+            "用户 2026-09-21 明确允许高确信度重仓；阶段/板块极端跌幅只作压力测试提示，"
+            "不因仓位比例本身生成减仓动作。"
         ),
+        "concentration_policy": CONCENTRATION_POLICY,
+        "concentration_set_at": "2026-09-21",
     }
 
 
 __all__ = [
     "ACCOUNT_TOTAL_LIMIT_PCT",
+    "CONCENTRATION_POLICY",
     "PER_NAME_LOSS_TOLERANCE_PCT",
     "POLICY_VERSION",
     "SOURCE_OVERRIDE",

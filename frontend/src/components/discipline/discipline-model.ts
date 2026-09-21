@@ -42,9 +42,11 @@ export const CHECK_LABEL: Record<string, string> = {
   hard_stop_single_condition: '硬止损只带单一条件', hard_stop_distance_sane: '止损距离在 ATR 与百分比合理区间',
   soft_above_hard: '软止损高于硬止损', soft_stop_separation: '软止损与硬止损、参考价各相距 ≥0.5×ATR14',
   lines_monotonic: '硬止损 < 软止损 < 参考价', every_line_evaluable: '每条线都可被系统评估',
-  every_line_has_derivation: '每条线都能从 inputs 复算', exposure_line_when_over_cap: '超仓时必须有减仓线',
+  every_line_has_derivation: '每条线都能从 inputs 复算',
+  exposure_line_when_over_cap: '旧版：超阶段上限时必须有减仓线',
+  exposure_line_when_over_risk: '止损风险超预算时必须有减仓线',
   holiday_line_when_closure: '长休市前必须有休市线', no_add_when_crash_or_broken: '急跌/破位必须禁加仓',
-  sizing_consistent: '仓位公式可复算且不超上限', not_lowered_vs_previous: '硬止损不低于前序计划',
+  sizing_consistent: '止损风险公式可复算，集中度压力只作提示', not_lowered_vs_previous: '硬止损不低于前序计划',
   valid_until_within_5_trading_days: '有效期不超过 5 个交易日', entry_reference_current: '新买入场价取计划日收盘或更晚', buy_zone_valid: '买入区间有效（硬止损 < 触发下沿 ≤ 追高上限）',
 };
 
@@ -438,19 +440,28 @@ export function barByDate(bars: ChartBar[]): Map<string, ChartBar> {
   return new Map(bars.map((bar) => [bar.date, bar]));
 }
 
-/** The per-name cap, its data basis and which of the two share limits binds, in one sentence each. */
+/** Tail-risk concentration reference and the executable stop-risk limit. */
 export function capSummary(sizing: DisciplinePlan['sizing']): { cap: string; basis: string; binding: string } | null {
   if (!sizing) return null;
   const basis = sizing.exposure_basis;
   const capShares = sizing.cap_shares ?? null;
-  const cap = `阶段上限 ${sizing.target_exposure_pct}%${capShares === null ? '' : `（${capShares} 股）`}`;
+  // Missing policy means an immutable pre-v2 plan.  The current runtime also
+  // retires its cap-only exposure line, so present it as a legacy pressure
+  // reference instead of reviving the old executable ceiling in the UI.
+  const advisory = sizing.concentration_policy !== 'legacy_hard_cap';
+  const legacy = !sizing.concentration_policy;
+  const cap = advisory
+    ? `集中度压力参考 ${sizing.target_exposure_pct}%${capShares === null ? '' : `（${capShares} 股）`}，${legacy ? '历史计划已停用该减仓线' : '仅提示'}`
+    : `阶段上限 ${sizing.target_exposure_pct}%${capShares === null ? '' : `（${capShares} 股）`}`;
   const basisText = basis
     ? `${STAGE_LABEL[basis.stage] ?? basis.stage} × ${basis.board_label ?? basis.board}：两日最大跌幅 ${basis.percentile}% 分位 `
       + `${basis.q99_loss_pct.toFixed(2)}%（${basis.samples.toLocaleString('en-US')} 个样本${basis.fallback ? '，样本不足按同板块合并' : ''}），`
-      + `上限 = 极端亏损 ${basis.tolerance_pct}% ÷ ${basis.q99_loss_pct.toFixed(2)}% 向下取 5 的倍数 = ${basis.cap_pct}%`
+      + `${advisory ? '压力参考' : '上限'} = 极端亏损 ${basis.tolerance_pct}% ÷ ${basis.q99_loss_pct.toFixed(2)}% 向下取 5 的倍数 = ${basis.cap_pct}%`
     : '无校准依据（旧版计划：手填阶段上限）';
   const risk = `风险上限 ${sizing.max_shares} 股（${sizing.risk_per_trade_pct}%÷止损距离）`;
-  const binding = sizing.binding_constraint === 'cap'
+  const binding = advisory
+    ? `${risk}；集中度压力参考不触发减仓，建议上限 ${sizing.recommended_shares} 股`
+    : sizing.binding_constraint === 'cap'
     ? `${risk} / ${cap}，阶段上限更小，建议 ${sizing.recommended_shares} 股`
     : sizing.binding_constraint === 'risk'
       ? `${risk} / ${cap}，风险上限更小，建议 ${sizing.recommended_shares} 股`

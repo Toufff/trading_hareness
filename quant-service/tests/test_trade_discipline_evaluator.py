@@ -3,8 +3,9 @@
 The plan under evaluation is the 神奇制药 600613.SH acceptance fixture from
 ``test_trade_discipline_core``: stage ``crash_rebound``, hard stop 7.75 (daily
 plus a 3-minute copy), take-partial gated on ``after_volume_climax`` +
-``below_vwap``, trail arm 9.22, no-add / time-stop confirmation 8.70 and a
-next-open exposure cut to 1500 shares.  The soft stop is refused on that fixture
+``below_vwap``, trail arm 9.22 and no-add / time-stop confirmation 8.70. Under
+the standing 5% budget there is no exposure cut; exposure timing tests explicitly
+use a 1% override to create a real stop-risk breach. The soft stop is refused on that fixture
 (MA5 sits within half an ATR of the close), so the soft-stop cases use the
 ``rally_inputs`` variant, where it is drawn.
 
@@ -221,11 +222,11 @@ class DailyBasisTests(unittest.TestCase):
         intraday = evaluate(self.plan, inputs(basis="minute", minutes=minutes(("0930", 9.50), ("0931", 9.55)),
                                               as_of=datetime(2026, 9, 21, 10, 5, tzinfo=SH)))
         self.assertIn("this run is minute", state_of(intraday, "trail", "daily").evidence["not_evaluated"])
-        # moving a stop up is not itself a reduce signal; the exposure cut that
-        # came due at 09:45 on the same session is what drives the plan state
+        # Moving a stop up is not itself a reduce signal. This position is
+        # concentrated, but its stop risk is inside 5%, so no exposure action exists.
         self.assertEqual(state_of(evaluation, "hard_stop", "daily").state, "armed")
-        self.assertEqual(evaluation.plan_state, "reduce_signalled")
-        self.assertEqual(state_of(evaluation, "exposure").state, "triggered")
+        self.assertEqual(evaluation.plan_state, "active")
+        self.assertNotIn("exposure", {state.kind for state in evaluation.line_states})
 
 
 class MinuteBasisTests(unittest.TestCase):
@@ -298,7 +299,7 @@ class MinuteBasisTests(unittest.TestCase):
 
 class TimeLineTests(unittest.TestCase):
     def setUp(self):
-        self.plan = plan_fixture()
+        self.plan = plan_fixture(risk_per_trade_pct=Decimal("1.0"))
 
     def test_the_exposure_cut_is_due_only_from_the_next_open_plus_fifteen_minutes(self):
         before = evaluate(self.plan, inputs(as_of=datetime(2026, 9, 21, 9, 44, tzinfo=SH)))
@@ -316,6 +317,28 @@ class TimeLineTests(unittest.TestCase):
         self.assertEqual(state_of(blind, "exposure").state, "armed")
         self.assertIsNone(state_of(blind, "exposure").evidence["due"])
         self.assertIsNone(state_of(blind, "time_stop").evidence["due"])
+
+    def test_a_legacy_cap_only_exposure_line_is_retired_by_the_current_policy(self):
+        current = plan_fixture()
+        legacy_line = self.plan.lines_of("exposure")[0]
+        legacy_sizing = current.sizing.model_copy(update={
+            "recommended_shares": current.sizing.cap_shares,
+            "binding_constraint": "cap",
+            "concentration_policy": None,
+        })
+        legacy = current.model_copy(update={
+            "sizing": legacy_sizing,
+            "lines": [legacy_line, *current.lines],
+        })
+
+        evaluation = evaluate(legacy, inputs(as_of=datetime(2026, 9, 21, 9, 45, tzinfo=SH)))
+        exposure = state_of(evaluation, "exposure")
+
+        self.assertEqual(exposure.state, "cancelled")
+        self.assertEqual(exposure.evidence["policy_override"], "tail_risk_advisory_v2")
+        self.assertEqual(exposure.evidence["current_shares"], current.sizing.current_shares)
+        self.assertGreaterEqual(exposure.evidence["max_shares"], current.sizing.current_shares)
+        self.assertEqual(evaluation.plan_state, "active")
 
     def test_the_holiday_line_is_due_before_the_close_of_the_last_session(self):
         with calibrated(synthetic_calibration(stage_cap=25, holiday_cap=10)):

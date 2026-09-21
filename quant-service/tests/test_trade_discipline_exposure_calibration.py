@@ -202,7 +202,7 @@ class CommittedArtifactTests(unittest.TestCase):
 
 
 class SizingWithCapsTests(unittest.TestCase):
-    def test_recommended_is_the_smaller_of_the_risk_and_cap_limits_and_the_label_names_both(self):
+    def test_calibrated_tail_reference_is_disclosed_but_does_not_force_a_reduction(self):
         plan = generate(shenqi_inputs())        # 600613.SH main board, crash_rebound, 5800 shares
         sizing = plan.sizing
         basis = sizing.exposure_basis
@@ -211,13 +211,11 @@ class SizingWithCapsTests(unittest.TestCase):
         self.assertEqual(sizing.target_exposure_pct, Decimal(str(cell["cap_pct"])))
         self.assertEqual(basis["q99_loss_pct"], cell["q99_loss_pct"])
         self.assertEqual(basis["samples"], cell["samples"])
-        self.assertEqual(sizing.recommended_shares, min(sizing.max_shares, sizing.cap_shares))
-        self.assertEqual(sizing.binding_constraint, "risk" if sizing.max_shares <= sizing.cap_shares else "cap")
-        exposure = plan.lines_of("exposure")[0]
-        self.assertIn(f"风险上限 {sizing.max_shares} 股", exposure.label)
-        self.assertIn(f"阶段上限 {sizing.cap_shares} 股", exposure.label)
-        self.assertIn(f"{cell['q99_loss_pct']:.2f}%={sizing.target_exposure_pct}%", exposure.label)
-        self.assertIn(f"取较小 {sizing.recommended_shares} 股", exposure.label)
+        self.assertEqual(sizing.recommended_shares, sizing.max_shares)
+        self.assertEqual(sizing.binding_constraint, "risk")
+        self.assertEqual(sizing.concentration_policy, "tail_risk_advisory")
+        self.assertEqual(plan.lines_of("exposure"), [])
+        self.assertGreater(sizing.tail_risk_estimated_loss_pct, 0)
         self.assertEqual(plan.metrics["exposure_calibration"]["stage"]["cell"], "crash_rebound|main_10")
         self.assertEqual(plan.status, "active")
 
@@ -225,7 +223,7 @@ class SizingWithCapsTests(unittest.TestCase):
         plan = generate(shenqi_inputs(position={**shenqi_inputs().position, "quantity": 500, "sellable_quantity": 500}))
         self.assertLessEqual(plan.sizing.current_shares, plan.sizing.recommended_shares)
         self.assertEqual(plan.lines_of("exposure"), [])
-        self.assertTrue({check.check_id: check for check in plan.quality}["exposure_line_when_over_cap"].passed)
+        self.assertTrue({check.check_id: check for check in plan.quality}["exposure_line_when_over_risk"].passed)
 
     def test_broken_is_sized_like_any_other_stage(self):
         plan = generate(stage_inputs("broken"))
@@ -234,14 +232,23 @@ class SizingWithCapsTests(unittest.TestCase):
         self.assertGreater(plan.sizing.recommended_shares, 0)
         self.assertEqual(plan.status, "active")
 
-    def test_the_cap_binding_text_says_so(self):
+    def test_the_tail_reference_text_explicitly_says_it_is_not_actionable(self):
         sizing = build_sizing(stage="broken", equity=Decimal("99632"), risk_per_trade_pct=Decimal("1.0"),
                               reference_price=Decimal("8.41"), hard_stop=Decimal("7.75"), current_shares=5800,
                               cap_pct=5, exposure_basis={"q99_loss_pct": 60.0, "board_label": "主板（10%）",
                                                          "tolerance_pct": 5.0, "percentile": 99.0})
-        self.assertEqual(sizing.binding_constraint, "cap")
-        self.assertEqual(exposure_text(sizing), "风险上限 1500 股（1.0%÷止损距离） / 阶段上限 500 股（极端亏损5%÷该阶段"
-                                                "主板（10%）99%两日最大跌幅60.00%=5%），取较小 500 股")
+        self.assertEqual(sizing.binding_constraint, "risk")
+        self.assertEqual(exposure_text(sizing), "风险上限 1500 股（1.0%÷止损距离）；集中仓位压力参考 500 股（极端亏损5%÷该阶段"
+                                                "主板（10%）99%两日最大跌幅60.00%=5%，仅提示、不触发减仓）；可执行建议上限 1500 股")
+
+    def test_only_a_real_stop_risk_budget_breach_creates_an_exposure_line(self):
+        plan = generate(shenqi_inputs(risk_per_trade_pct=Decimal("1.0")))
+        sizing = plan.sizing
+        self.assertGreater(sizing.current_shares, sizing.max_shares)
+        exposure = plan.lines_of("exposure")[0]
+        self.assertEqual(exposure.action.value, sizing.max_shares)
+        self.assertIn("止损风险", exposure.label)
+        self.assertIn("仅提示、不触发减仓", exposure.label)
 
     def test_the_calibration_version_is_evidence(self):
         inputs = shenqi_inputs()

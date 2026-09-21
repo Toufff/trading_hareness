@@ -173,11 +173,14 @@ class Sizing(BaseModel):
     # ``current_shares x stop_distance / equity``: the risk the position already
     # carries, printed next to the 1% budget.  Disclosure only, never a gate.
     current_risk_pct: Decimal | None = Field(default=None, ge=0)
-    # Calibrated cap (``target_exposure_pct``) expressed in shares, which of the two limits binds
-    # (``risk``: 1% / stop distance, ``cap``: extreme-loss cap) and the calibration cell behind the cap.
+    # Historical tail-risk reference.  These fields used to be enforced as a
+    # second position cap.  New plans retain them for stress disclosure only:
+    # concentration by itself must never create an executable reduction.
     cap_shares: int | None = Field(default=None, ge=0)
     binding_constraint: Literal["risk", "cap"] | None = None
     exposure_basis: dict[str, Any] | None = None
+    concentration_policy: Literal["tail_risk_advisory", "legacy_hard_cap"] | None = None
+    tail_risk_estimated_loss_pct: Decimal | None = Field(default=None, ge=0)
     # Where ``risk_per_trade_pct`` came from: the standing policy the user set,
     # or an operator's ``--risk-per-trade-pct``. Optional so plans written
     # before 2026-09-20 still load; before it existed, a default nobody had

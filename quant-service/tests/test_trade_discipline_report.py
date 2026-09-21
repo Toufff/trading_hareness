@@ -104,7 +104,8 @@ class CardCompletenessTests(unittest.TestCase):
     def test_the_sizing_table_prints_the_whole_position_formula(self):
         sizing = self.plan.sizing
         for fragment in ("账户权益 equity", "风险预算", "止损距离", "风险上限 max_shares",
-                         "建议持仓 recommended_shares", str(sizing.recommended_shares)):
+                         "止损风险允许股数 recommended_shares", str(sizing.recommended_shares),
+                         "集中度压力参考比例（不触发减仓）", "尾部情景估算损失"):
             self.assertIn(fragment, self.card)
 
     def test_the_derivation_table_recomputes_every_price_it_prints(self):
@@ -160,14 +161,14 @@ class WordingTests(unittest.TestCase):
         soft = generate(rally_inputs()).lines_of("soft_stop")[0]
         self.assertEqual(condition_text(soft), f"所属行业当日翻绿，且日线收盘价低于 {soft.price}（日线确认）")
         card = render_markdown(self.plan)
-        table_row = next(line for line in card.splitlines() if line.startswith("| 4 | 减半仓 |"))
+        table_row = next(line for line in card.splitlines() if "| 减半仓 |" in line)
         self.assertLess(table_row.index("VWAP"), table_row.index("最新价低于 8.41"))
-        self.assertIn("4. **减半仓**：当日成交量为20日最大量且收在振幅下半且最新价跌破当日VWAP、且最新价低于8.41时，减半仓",
+        self.assertIn("**减半仓**：当日成交量为20日最大量且收在振幅下半且最新价跌破当日VWAP、且最新价低于8.41时，减半仓",
                       card)
         self.assertIn("把止损上移到成本价8.49", card)
 
     def test_a_time_line_states_its_deadline_rather_than_a_price_comparison(self):
-        exposure = self.plan.lines_of("exposure")[0]
+        exposure = generate(shenqi_inputs(risk_per_trade_pct=Decimal("1.0"))).lines_of("exposure")[0]
         self.assertEqual(condition_text(exposure), "到点执行：下一交易日开盘后15分钟内")
         self.assertIn("减到", action_text(exposure))
         time_stop = self.plan.lines_of("time_stop")[0]
@@ -212,7 +213,7 @@ class DisclosureTests(unittest.TestCase):
 
     def test_the_derivation_table_flags_a_share_count_that_does_not_recompute(self):
         """The gate recomputes exposure/holiday share counts; the card's 一致 column must say the same."""
-        plan = generate(rally_inputs())
+        plan = generate(rally_inputs(risk_per_trade_pct=Decimal("1.0")))
         exposure = plan.lines_of("exposure")[0]
         tampered = plan.model_copy(update={"lines": [
             line.model_copy(update={"action": Action(type="reduce_to_shares", value=exposure.action.value + 100)})
@@ -236,7 +237,7 @@ class DisclosureTests(unittest.TestCase):
         self.assertEqual((priced["compared_to"], priced["compared_value"]), ("price", priced["price"]))
 
     def test_the_sizing_table_prints_both_exposure_bases_and_the_open_risk(self):
-        plan = plan_fixture()
+        plan = generate(shenqi_inputs(risk_per_trade_pct=Decimal("1.0")))
         rows = {row["key"]: row for row in sizing_rows(plan)}
         self.assertEqual(rows["current_risk_pct"]["value"], f"{plan.sizing.current_risk_pct}%")
         self.assertIn("按参考价", rows["current_exposure_pct"]["label"])
@@ -264,7 +265,7 @@ class DisclosureTests(unittest.TestCase):
         self.assertIn("无（模板中的每条可选线都已生成）", render_markdown(complete))
 
     def test_the_derivation_table_recomputes_the_trail_target_too(self):
-        plan = plan_fixture()
+        plan = generate(shenqi_inputs(risk_per_trade_pct=Decimal("1.0")))
         trail = [row for row in derivation_rows(plan) if row["kind"] == "trail"][0]
         self.assertTrue(trail["action_formula"])
         self.assertTrue(trail["action_matches"])
