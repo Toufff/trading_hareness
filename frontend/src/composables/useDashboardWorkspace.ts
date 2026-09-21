@@ -583,7 +583,7 @@ function researchPanelEntries(): PanelEntry[] {
       postCloseStrategyRun.value = result.run ?? null; postCloseCandidates.value = result.candidates ?? [];
     } },
     { key: 'formal-recommendation', run: async () => {
-      const result = await getJson<{ recommendation_pool?: Record<string, unknown> | null }>('/api/v1/strategy/post-close/watchlist/latest');
+      const result = await getJson<{ recommendation_pool?: Record<string, unknown> | null }>('/api/research/strategy/post-close/watchlist/latest');
       formalRecommendation.value = result.recommendation_pool ?? null;
     } },
     { key: 'pattern-mining', run: async () => {

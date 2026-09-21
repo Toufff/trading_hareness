@@ -36,6 +36,27 @@ function requestUrl(input: RequestInfo | URL): string {
 }
 
 describe('useDashboardWorkspace visible-tab loading and stale flags', () => {
+  it('loads the formal recommendation through the shared adapter route locally and publicly', async () => {
+    const pool = { run_id: 'same-scan', items: [{ symbol: '600000' }] };
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.startsWith('/api/v1/')) return Promise.resolve(jsonResponse({ detail: 'Not Found' }, 404));
+      if (url === '/api/research/strategy/post-close/watchlist/latest') {
+        return Promise.resolve(jsonResponse({ recommendation_pool: pool }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const dashboard = useDashboardWorkspace();
+    dashboard.activeResearchTab = 'close-review';
+    await dashboard.loadResearch();
+    expect(dashboard.formalRecommendation).toEqual(pool);
+    expect(dashboard.panelStatus['formal-recommendation']!.stale).toBe(false);
+    const urls = fetchMock.mock.calls.map(call => requestUrl(call[0]));
+    expect(urls).toContain('/api/research/strategy/post-close/watchlist/latest');
+    expect(urls.some(url => url.startsWith('/api/v1/'))).toBe(false);
+  });
+
   it('keeps every other panel usable and only flags the failing panel as stale', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = requestUrl(input);
