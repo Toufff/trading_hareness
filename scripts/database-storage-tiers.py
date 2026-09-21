@@ -218,6 +218,7 @@ TIER_POLICY: tuple[TierPolicy, ...] = (
     TierPolicy("quant", "intraday_rule_input_snapshots", "observed_at", 365),
     TierPolicy("quant", "edge_evidence_changes", "changed_at", 365),
     TierPolicy("quant", "trade_thesis_evaluations", "created_at", 365),
+    TierPolicy("quant", "factor_maintenance_changes", "recorded_at", 365),
 )
 
 # Read rarely, never joined on a hot path: the whole table (and its indexes)

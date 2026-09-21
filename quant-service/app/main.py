@@ -1558,15 +1558,13 @@ async def sync_full_market_daily_controls(trade_date: date) -> dict[str, Any]:
 
 
 def adjustment_factor_maintenance_dependencies() -> AdjustmentFactorMaintenanceDependencies:
-    """Compose the factor lane's boundaries: the database and the longhu route only.
-
-    No tushare client is part of this composition (the factor lane derives
-    every factor from the licensed longhu kline).
+    """Compose the guarded DB and licensed longhu route; no tushare client.
     """
+    from .factor_maintenance_control import managed_run
     return AdjustmentFactorMaintenanceDependencies(
         database=db, run_database=run_database_blocking,
         longhu_source=longhu_intraday_source, run_public=run_akshare_blocking,
-        safe_error_detail=safe_error_detail,
+        safe_error_detail=safe_error_detail, control=managed_run,
     )
 
 

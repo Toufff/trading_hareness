@@ -128,6 +128,7 @@ class AdjustmentFactorMaintenanceDependencies:
     run_public: Callable[..., Awaitable[Any]]
     safe_error_detail: Callable[[str, int], str]
     now: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc))
+    control: Callable[..., Awaitable[Any]] | None = None
 
 
 def china_today(now: datetime | None = None) -> date:
@@ -653,6 +654,9 @@ async def sync(
     the work list with a one-time durable receipt.  Only a longhu failure or
     an exception makes the run itself fail.
     """
+    if not dry_run and getattr(dependencies, 'control', None) is not None:
+        return await dependencies.control(dependencies, 'sync', sync,
+            dict(lookback_days=lookback_days, dry_run=dry_run, today=today))
     # The raw coverage list: this job is the one caller that reports the
     # retired dates itself (``plan['retired_dates']`` below), so it asks for
     # them rather than letting the helper drop them.
@@ -1045,6 +1049,10 @@ async def repair(
     then re-runs the guard and reads back every date.  Without ``apply`` not a
     single write is issued: the dry run is safe on a read-only connection.
     """
+    if apply and getattr(dependencies, 'control', None) is not None:
+        return await dependencies.control(dependencies, 'repair', repair,
+            dict(apply=apply, from_date=from_date, to_date=to_date, today=today,
+                 lookback_sessions=lookback_sessions))
     end_date = today or china_today()
     database = dependencies.database
     window = await dependencies.run_database(

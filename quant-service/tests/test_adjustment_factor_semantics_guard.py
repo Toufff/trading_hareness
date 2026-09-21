@@ -55,6 +55,8 @@ PINNED_BAR_FACTOR_WRITERS = {
     # explicitly), and the one NULL-ing statement only touches bars with no
     # promotable evidence.
     "longhu_adjustment_factors.py": ("promotable_adjustment_factor(",),
+    # Recorded-value rollback, not new promotion: exact write-after CAS under row locks.
+    "factor_maintenance_control.py": ("assert_recorded_image(connection, change)",),
 }
 
 #: The producer form the rule forbids outright: no code may build a row that

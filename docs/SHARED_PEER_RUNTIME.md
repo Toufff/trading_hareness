@@ -1,5 +1,11 @@
 # Shared peer runtime
 
+2026-09-22 factor-maintainer addendum: [PEER_FACTOR_MAINTENANCE.md](PEER_FACTOR_MAINTENANCE.md).
+The owner explicitly retains broad trusted database access. Use the versioned
+one-shot maintenance bundle, not the historical read-only bootstrap below.
+Its batch database route is the live `db-batch-tunnel:5433` sidecar; licensed
+read calls still go through `db-tunnel:5681`. Existing services are not replaced.
+
 Current lightServer incident/deployment addendum: [PEER_POOL_RECOVERY_20260914.md](PEER_POOL_RECOVERY_20260914.md).
 The later same-host routing fix and repeated load/outage acceptance are in
 [PEER_PRIVATE_TUNNEL_20260914.md](PEER_PRIVATE_TUNNEL_20260914.md).

@@ -19,13 +19,17 @@ Subcommands:
               bar that would stay NULL with its reason.  ``--apply`` writes one
               transaction per trading date and reads everything back.
 ``validate``  read-only: re-derive a stored tushare period and score the method.
+``history``   read-only run receipts, including failed/interrupted writes.
+``rollback``  preview a recorded run; --apply restores it atomically with CAS.
 
 stdout is ASCII-only JSON: the scheduled-task host console is GBK.  No
 credential value is ever printed; the env file is loaded into ``os.environ``
 and nothing reads it back out.
 
 Exit codes: 0 ok (including coverage-skipped dates and a dry run); 1 a date
-failed, the repair left the release guard above 0, or the fetch failed.
+failed, the repair left the release guard above 0, or the fetch failed;
+3 another maintenance writer holds the lock. --env-file - inherits the
+environment (Linux peer); --actor labels the operator without replacing DB identity.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 import sys
+from uuid import UUID
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "quant-service"))
@@ -80,11 +85,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     validate_command.add_argument("--to", dest="to_date", type=date.fromisoformat,
                                   default=date(2026, 8, 26))
     validate_command.add_argument("--env-file", default=DEFAULT_ENV_FILE)
+    for command in (sync_command,status_command,repair_command,validate_command):
+        command.add_argument('--actor', help='Operator label; DB login is recorded separately')
+    history_command = subcommands.add_parser('history', help='read the maintenance run journal')
+    history_command.add_argument('--run-id', type=UUID)
+    history_command.add_argument('--env-file', default=DEFAULT_ENV_FILE)
+    history_command.add_argument('--actor')
+    rollback_command = subcommands.add_parser('rollback', help='preview or restore one recorded run with conflict checks')
+    rollback_command.add_argument('--run-id', type=UUID, required=True)
+    rollback_command.add_argument('--apply', action='store_true')
+    rollback_command.add_argument('--env-file', default=DEFAULT_ENV_FILE)
+    rollback_command.add_argument('--actor')
     return parser.parse_args(argv)
 
 
 def load_env_file(path: str) -> int:
     """Load KEY=VALUE lines into the process environment; never print a value."""
+    if path == '-':
+        return 0  # Peer container already has private PG/gateway variables.
     loaded = 0
     for line in Path(path).read_text(encoding="utf-8-sig").splitlines():
         if not line.strip() or line.lstrip().startswith("#") or "=" not in line:
@@ -132,10 +150,17 @@ async def _to_thread(action, *args, timeout_seconds: float | None = None, **kwar
 def read_only_dependencies():
     from app.adjustment_factor_maintenance import AdjustmentFactorMaintenanceDependencies
     from app.longhu_vendor_source import intraday_source
+    from app.tushare_providers import safe_error_detail
 
     return AdjustmentFactorMaintenanceDependencies(
         database=ReadOnlyDatabase(), run_database=_to_thread, longhu_source=intraday_source,
-        run_public=_to_thread, safe_error_detail=lambda value, limit: str(value)[:limit])
+        run_public=_to_thread, safe_error_detail=safe_error_detail)
+
+
+def write_dependencies():
+    from dataclasses import replace
+    from app.factor_maintenance_control import managed_run
+    return replace(read_only_dependencies(), database=None, control=managed_run)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -144,6 +169,25 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     load_env_file(args.env_file)
     clear_proxies()
+    if args.actor:
+        os.environ['QUANT_FACTOR_ACTOR'] = args.actor
+
+    if args.command in ('history','rollback'):
+        from app.factor_maintenance_control import history, rollback_changes, managed_run
+        if args.command == 'history':
+            with ReadOnlyDatabase().transaction() as conn:
+                report = history(conn, args.run_id)
+        elif not args.apply:
+            with ReadOnlyDatabase().transaction() as conn:
+                report = rollback_changes(conn, args.run_id, apply=False)
+        else:
+            async def restore(dependencies, source_run_id):
+                with dependencies.database.transaction() as conn:
+                    return rollback_changes(conn,source_run_id,apply=True)
+            report = asyncio.run(managed_run(write_dependencies(), 'rollback', restore,
+                                             dict(source_run_id=str(args.run_id))))
+        print(json.dumps(report,ensure_ascii=True,default=str))
+        return 3 if report.get('status') == 'busy' else 0
 
     from app.adjustment_factor_maintenance import FAILED_STATUS  # noqa: E402
 
@@ -163,30 +207,23 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, ensure_ascii=True, default=str))
         return 1 if report.get("status") == FAILED_STATUS else 0
 
-    # Imported after the env file is loaded: the composition root builds its
-    # connection pool at import time from these variables.  The dependency set
-    # itself lives in app.main so the scheduled task, the post-close stage and
-    # this CLI cannot drift into three different compositions.
-    from app.main import (  # noqa: E402
-        adjustment_factor_status,
-        repair_adjustment_factors,
-        sync_adjustment_factors,
-    )
+    from app.adjustment_factor_maintenance import status, repair, sync
 
     if args.command == "status":
         # Read-only: no provider call, no write, no exit code of its own.
-        report = asyncio.run(adjustment_factor_status(args.lookback_days))
+        report = asyncio.run(status(read_only_dependencies(),lookback_days=args.lookback_days))
         print(json.dumps(report, ensure_ascii=True, default=str))
         return 0
 
     if args.command == "repair":
-        report = asyncio.run(repair_adjustment_factors(
+        report = asyncio.run(repair(write_dependencies(),
             apply=True, from_date=args.from_date, to_date=args.to_date,
             lookback_sessions=args.lookback_sessions))
         print(json.dumps(report, ensure_ascii=True, default=str))
-        return 1 if report.get("status") == FAILED_STATUS else 0
+        return 3 if report.get('status') == 'busy' else (1 if report.get("status") == FAILED_STATUS else 0)
 
-    result = asyncio.run(sync_adjustment_factors(args.lookback_days, dry_run=args.dry_run))
+    result = asyncio.run(sync(read_only_dependencies() if args.dry_run else write_dependencies(),
+                             lookback_days=args.lookback_days, dry_run=args.dry_run))
     # ASCII-only on purpose: a reason can carry Chinese text and the task host
     # decodes this stdout under GBK.
     print(json.dumps(result, ensure_ascii=True, default=str))
@@ -194,8 +231,17 @@ def main(argv: list[str] | None = None) -> int:
     # own daily cross-section is too thin is reported as skipped with its
     # reason and exits 0, because the factor lane cannot repair it and a
     # nightly non-zero exit for it would alert forever.
+    if result.get('status') == 'busy':
+        return 3
     return 1 if result.get("status") == FAILED_STATUS else 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        # Never dump provider exceptions, SQL parameters, environment, or DSNs.
+        print(json.dumps({'status': 'failed', 'error_class': type(exc).__name__,
+                          'reason': 'command failed; inspect maintenance history and owner logs'},
+                         ensure_ascii=True))
+        raise SystemExit(1)

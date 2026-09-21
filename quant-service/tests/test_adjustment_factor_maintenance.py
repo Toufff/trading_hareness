@@ -1442,11 +1442,13 @@ class MaintenanceCliTests(unittest.TestCase):
 
         source = Path(self._module().__file__).read_text(encoding="utf-8")
         self.assertIn("default_transaction_read_only=on", source)
-        # The write path (app.main's pool) is imported only after both read-only
-        # branches have returned.
-        read_only_branch = source.index('if args.command == "repair" and not args.apply:')
-        self.assertLess(read_only_branch, source.index("from app.main import"))
-        self.assertLess(source.index('if args.command == "validate":'), source.index("from app.main import"))
+        # The CLI composes dependencies directly: importing the web app would
+        # start pools/background hooks even for a read-only command.
+        self.assertNotIn("from app.main import", source)
+        self.assertIn('validate(read_only_dependencies()', source)
+        self.assertIn('repair(read_only_dependencies(), apply=False', source)
+        self.assertIn('status(read_only_dependencies()', source)
+        self.assertIn('sync(read_only_dependencies() if args.dry_run else write_dependencies()', source)
 
     def test_env_file_loader_never_echoes_a_value(self):
         import os
