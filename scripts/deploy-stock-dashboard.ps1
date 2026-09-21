@@ -33,18 +33,26 @@ root='$RemoteRoot'
 release='$remoteRelease'
 snippet='/etc/nginx/snippets/stockbrain-local-gateway.conf'
 next_snippet="`${snippet}.next"
+site="`$(readlink -f /etc/nginx/sites-enabled/stockbrain)"
 previous="`$(readlink -f "`${root}/current" 2>/dev/null || true)"
 previous_snippet="`$(mktemp)"
+previous_site="`$(mktemp)"
 had_snippet=0
 if [ -f "`${snippet}" ]; then
   cp "`${snippet}" "`${previous_snippet}"
   had_snippet=1
 fi
 if ! grep -Rqs 'include /etc/nginx/snippets/stockbrain-local-gateway.conf' /etc/nginx/sites-enabled /etc/nginx/conf.d; then
-  rm -f "`${previous_snippet}"
+  rm -f "`${previous_snippet}" "`${previous_site}"
   echo 'active Nginx site does not include the stockbrain gateway snippet' >&2
   exit 1
 fi
+if [ ! -f "`${site}" ]; then
+  rm -f "`${previous_snippet}" "`${previous_site}"
+  echo 'active stockbrain Nginx site is missing' >&2
+  exit 1
+fi
+cp "`${site}" "`${previous_site}"
 mv "`${next_snippet}" "`${snippet}"
 
 # Asset URLs are content hashed and advertised as immutable for 30 days.  A
@@ -65,21 +73,46 @@ for asset in `$(grep -oE 'assets/[A-Za-z0-9_.-]+\.(js|css)' "`${release}/index.h
   if [ ! -f "`${release}/`${asset}" ]; then
     echo "missing release asset: `${asset}" >&2
     if [ "`${had_snippet}" -eq 1 ]; then cp "`${previous_snippet}" "`${snippet}"; else rm -f "`${snippet}"; fi
-    rm -f "`${previous_snippet}"
+    rm -f "`${previous_snippet}" "`${previous_site}"
     exit 1
   fi
 done
+
+# Hashed JavaScript and CSS contain no account data or credentials.  Keeping
+# them private forced Cloudflare to bypass its edge cache, so every cold page
+# load made many SEA-to-origin round trips.  Only the immutable /assets/
+# location is public-cacheable; HTML, magic access and every API remain private.
+private_asset_cache='add_header Cache-Control "private, max-age=2592000, immutable";'
+public_asset_cache='add_header Cache-Control "public, max-age=2592000, immutable";'
+if grep -Fq "`${private_asset_cache}" "`${site}"; then
+  sed -i "s/`${private_asset_cache}/`${public_asset_cache}/" "`${site}"
+fi
+if [ "`$(grep -Fc "`${public_asset_cache}" "`${site}")" -ne 1 ]; then
+  if [ "`${had_snippet}" -eq 1 ]; then cp "`${previous_snippet}" "`${snippet}"; else rm -f "`${snippet}"; fi
+  cp "`${previous_site}" "`${site}"
+  rm -f "`${previous_snippet}" "`${previous_site}"
+  echo 'expected exactly one public immutable /assets/ cache header' >&2
+  exit 1
+fi
 
 ln -sfn "`${release}" "`${root}/current.next"
 mv -Tf "`${root}/current.next" "`${root}/current"
 if ! nginx -t; then
   if [ -n "`${previous}" ]; then ln -sfn "`${previous}" "`${root}/current"; fi
   if [ "`${had_snippet}" -eq 1 ]; then cp "`${previous_snippet}" "`${snippet}"; else rm -f "`${snippet}"; fi
-  rm -f "`${previous_snippet}"
+  cp "`${previous_site}" "`${site}"
+  rm -f "`${previous_snippet}" "`${previous_site}"
   exit 1
 fi
-systemctl reload nginx
-rm -f "`${previous_snippet}"
+if ! systemctl reload nginx; then
+  if [ -n "`${previous}" ]; then ln -sfn "`${previous}" "`${root}/current"; fi
+  if [ "`${had_snippet}" -eq 1 ]; then cp "`${previous_snippet}" "`${snippet}"; else rm -f "`${snippet}"; fi
+  cp "`${previous_site}" "`${site}"
+  nginx -t && systemctl reload nginx || true
+  rm -f "`${previous_snippet}" "`${previous_site}"
+  exit 1
+fi
+rm -f "`${previous_snippet}" "`${previous_site}"
 printf '%s\n' "`${release}"
 "@
 $activate = $activate.Replace("`r`n", "`n")
