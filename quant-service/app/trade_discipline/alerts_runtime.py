@@ -156,7 +156,7 @@ def _calendar_open(database: Any, day: date) -> bool | None:
     return None if row is None else bool(row["is_open"])
 
 
-def _daily_cycle_completed(database: Any, account_key: str, day: date) -> bool:
+def _daily_cycle_completed(database: Any, account_key: str, day: date, as_of: datetime | None = None) -> bool:
     with database.transaction() as connection:
         row = connection.execute(
             """SELECT state,last_session_date,details
@@ -166,7 +166,10 @@ def _daily_cycle_completed(database: Any, account_key: str, day: date) -> bool:
     if not row or row["last_session_date"] != day:
         return False
     details = row.get("details") if hasattr(row, "get") else row["details"]
-    return bool(isinstance(details, dict) and details.get("daily_completed"))
+    if not isinstance(details, dict) or not details.get('daily_completed'):
+        return False
+    scope = _load_scope(database, account_key, as_of or datetime.now(SHANGHAI))
+    return details.get('scope_fingerprint') == scope.fingerprint
 
 
 async def _record_idle(deps: DisciplineAlertRuntimeDependencies, *, account_key: str,
@@ -213,7 +216,7 @@ async def run_discipline_alert_cycle(deps: DisciplineAlertRuntimeDependencies, *
             return {"status": "blocked", "reason": "trade_calendar_unavailable", "eligible": 0,
                     "evaluated": 0, "events": 0, "delivery": delivery, "next_delay_seconds": 300}
         already_completed = await deps.run_database(
-            lambda: _daily_cycle_completed(deps.database, account_key, local.date()))
+            lambda: _daily_cycle_completed(deps.database, account_key, local.date(), started))
         if already_completed:
             # Preserve the completed marker in the durable status row.  Writing
             # a fresh idle projection here would erase ``daily_completed`` and
@@ -258,13 +261,14 @@ async def run_discipline_alert_cycle(deps: DisciplineAlertRuntimeDependencies, *
             baselines += int(result["baselines"])
         delivery = await _deliver_due(deps)
         errors = {**tape_errors, **evaluation_errors}
-        coverage_gaps = bool(scope.blockers)
+        coverage_gaps = scope.has_coverage_gaps
         state = ("blocked" if coverage_gaps and not minute_plans else
                  "degraded" if errors or coverage_gaps else "healthy")
         reason = ("authoritative_scope_unavailable" if state == "blocked" else
                   "partial_scope_or_plan_failed_closed" if state == "degraded" else "cycle_completed")
         details = {
             "snapshot_id": scope.snapshot_id,
+            "scope_fingerprint": scope.fingerprint, "authoritative_coverage": scope.coverage,
             "recommendation_decision_id": scope.recommendation_decision_id,
             "scope_blockers": list(scope.blockers), "excluded": list(scope.excluded),
             "plan_errors": errors, "baselines": baselines, "delivery": delivery,
@@ -337,7 +341,8 @@ async def run_discipline_alert_daily_cycle(deps: DisciplineAlertRuntimeDependenc
         emitted += len(result["events"])
         baselines += int(result["baselines"])
     delivery = await _deliver_due(deps)
-    coverage_gaps = bool(scope.blockers)
+    current_scope = await deps.run_database(lambda: _load_scope(deps.database, account_key, started))
+    coverage_gaps = scope.has_coverage_gaps or current_scope.has_coverage_gaps
     state = ("blocked" if errors or (coverage_gaps and not daily_plans) else
              "degraded" if coverage_gaps else "healthy")
     reason = ("authoritative_daily_data_not_ready" if errors else
@@ -345,6 +350,10 @@ async def run_discipline_alert_daily_cycle(deps: DisciplineAlertRuntimeDependenc
               "partial_authoritative_scope" if state == "degraded" else "daily_cycle_completed")
     details = {
         "snapshot_id": scope.snapshot_id,
+        "scope_fingerprint": current_scope.fingerprint,
+        "authoritative_coverage": current_scope.coverage,
+        "close_evaluation_coverage": scope.coverage,
+        "current_scope_excluded": list(current_scope.excluded),
         "recommendation_decision_id": scope.recommendation_decision_id,
         "scope_blockers": list(scope.blockers), "excluded": list(scope.excluded),
         "plan_errors": errors, "baselines": baselines, "delivery": delivery,

@@ -188,6 +188,27 @@ async def alert_status(async_database: Any, *, recent_limit: int = 20) -> dict[s
                    last_reason,last_error,details,updated_at
               FROM quant.discipline_alert_runtime_status WHERE runtime_key='primary'""")
         status_row = await status_result.fetchone()
+        if status_row:
+            status_row = dict(status_row)
+            version_result = await connection.execute("""
+                SELECT EXISTS (
+                    SELECT 1 FROM quant.discipline_plans WHERE account_key=%s AND created_at>%s
+                    UNION ALL
+                    SELECT 1 FROM quant.broker_portfolio_snapshots
+                     WHERE account_key=%s AND verification='verified_exact' AND observed_at>%s
+                    UNION ALL
+                    SELECT 1 FROM quant.recommendation_pool_decisions WHERE created_at>%s
+                ) AS changed""", (status_row['account_key'], status_row['last_completed_at'],
+                                  status_row['account_key'], status_row['last_completed_at'],
+                                  status_row['last_completed_at']))
+            changed = bool((await version_result.fetchone() or {}).get('changed'))
+            if changed or not (status_row.get('details') or {}).get('scope_fingerprint'):
+                status_row['previous_state'] = status_row['state']
+                status_row['state'] = 'degraded'
+                status_row['last_reason'] = 'scope_changed_revalidation_required'
+                status_row['coverage_current'] = False
+            else:
+                status_row['coverage_current'] = True
         event_result = await connection.execute("""
             SELECT e.event_id,e.plan_id,e.line_kind,e.from_state,e.to_state,e.observed_at,
                    e.payload->>'symbol' AS symbol,e.payload->>'name' AS name,

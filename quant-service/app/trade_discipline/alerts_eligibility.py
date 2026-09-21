@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import hashlib
+import json
 from typing import Any
 
 from ..broker_snapshot_freshness import broker_freshness
@@ -26,6 +28,31 @@ class AlertScope:
     recommendation_decision_id: str | None = None
     blockers: tuple[str, ...] = ()
     excluded: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    expected_holdings: tuple[str, ...] = ()
+    expected_recommendations: tuple[str, ...] = ()
+
+    @property
+    def coverage(self) -> dict[str, Any]:
+        held = {p.symbol for _, p in self.plans if p.plan_kind == 'holding'}
+        buys = {p.symbol for _, p in self.plans if p.plan_kind == 'new_buy'}
+        def section(expected, actual):
+            expected = set(expected)
+            return {'expected': len(expected), 'covered': len(expected & actual),
+                    'expected_symbols': sorted(expected), 'covered_symbols': sorted(expected & actual),
+                    'missing_symbols': sorted(expected - actual)}
+        return {'holdings': section(self.expected_holdings, held),
+                'recommendations': section(self.expected_recommendations, held | buys)}
+
+    @property
+    def has_coverage_gaps(self) -> bool:
+        return bool(self.blockers or any(part['missing_symbols'] for part in self.coverage.values()))
+
+    @property
+    def fingerprint(self) -> str:
+        value = {'snapshot_id': self.snapshot_id, 'decision_id': self.recommendation_decision_id,
+                 'plans': sorted(str(pid) for pid, _ in self.plans), 'coverage': self.coverage,
+                 'blockers': self.blockers, 'excluded': self.excluded}
+        return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
 def _one(connection: Any, sql: str, params: tuple[Any, ...]) -> dict[str, Any] | None:
@@ -102,8 +129,9 @@ def load_alert_scope(connection: Any, *, account_key: str, as_of: datetime) -> A
           SELECT DISTINCT ON (symbol,plan_kind) {PLAN_COLUMNS}
             FROM quant.discipline_plans
            WHERE account_key=%s AND status='active' AND valid_until>=%s
+             AND as_of_at<=%s AND created_at<=%s
            ORDER BY symbol,plan_kind,as_of_at DESC,created_at DESC
-        ) latest ORDER BY symbol,plan_kind""", (account_key, as_of))
+        ) latest ORDER BY symbol,plan_kind""", (account_key, as_of, as_of, as_of))
     for row in rows:
         plan = plan_from_row(row)
         reason: str | None = None
@@ -143,7 +171,8 @@ def load_alert_scope(connection: Any, *, account_key: str, as_of: datetime) -> A
         deduped.append((plan_id, plan))
     return AlertScope(account_key=account_key, plans=tuple(deduped), snapshot_id=snapshot_id,
                       recommendation_decision_id=decision_id, blockers=tuple(blockers),
-                      excluded=tuple(excluded))
+                      excluded=tuple(excluded), expected_holdings=tuple(sorted(held_symbols)),
+                      expected_recommendations=tuple(sorted(recommended_symbols)))
 
 
 __all__ = ["AlertScope", "load_alert_scope"]
