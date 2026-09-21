@@ -26,7 +26,15 @@ for (const route of routes) {
     await expect(page.locator('main')).toBeVisible();
     // Give late-arriving real data a bounded opportunity to expose layout changes.
     await page.waitForTimeout(2500);
-    if (route === '/market') await expect(page.locator('.recommendation-decision .picks article').first()).toBeVisible();
+    if (route === '/market') {
+      await expect(page.locator('.recommendation-decision .picks article').first()).toBeVisible();
+      await expect(page.locator('.recommendation-decision').first()).toHaveCSS('background-color', 'rgb(250, 247, 239)');
+    }
+    if (route === '/agent-paper') {
+      await expect(page.locator('.agent-page')).toHaveCSS('padding-left', '16px');
+      await expect(page.locator('.metrics')).toHaveCSS('display', 'grid');
+    }
+    if (route === '/intraday') await expect(page.locator('.scan-page')).toHaveCSS('max-width', '1500px');
     if (route === '/holdings') await expect(page.locator('.discipline-board')).toBeVisible();
     if (route === '/sector-heat') await expect(page.locator('.ranking-row').first()).toBeVisible({ timeout: 15000 });
     await page.screenshot({ path: testInfo.outputPath('desktop.png') });

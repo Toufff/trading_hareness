@@ -26,11 +26,20 @@ if (startupDashboardKey) {
 
 // A board review must not wait for unrelated portfolio/ingestion panels.
 const rootPath = window.location.pathname.replace(/\/$/, '');
-const rootComponent = ['', '/market', '/market-decision', '/personal', '/holdings'].includes(rootPath)
-  ? import('./views/DecisionShellView.vue')
-  : rootPath === '/sector-heat' ? import('./views/SectorHeatView.vue')
-  : rootPath === '/intraday' ? import('./views/IntradayScanView.vue')
-    : rootPath === '/agent-paper' ? import('./views/AgentPaperView.vue') : import('./App.vue');
+// Keep each dynamic import in its own loader. Nested conditional imports can
+// be folded into one preload call whose CSS dependency list belongs to the last
+// branch; dev mode still looks correct, but production loses route-specific CSS.
+const rootLoaders = {
+  decision: () => import('./views/DecisionShellView.vue'),
+  sector: () => import('./views/SectorHeatView.vue'),
+  intraday: () => import('./views/IntradayScanView.vue'),
+  paper: () => import('./views/AgentPaperView.vue'),
+  research: () => import('./App.vue'),
+};
+const rootKey = ['', '/market', '/market-decision', '/personal', '/holdings'].includes(rootPath)
+  ? 'decision' : rootPath === '/sector-heat' ? 'sector' : rootPath === '/intraday' ? 'intraday'
+    : rootPath === '/agent-paper' ? 'paper' : 'research';
+const rootComponent = rootLoaders[rootKey]();
 const loadingTimer = window.setTimeout(() => {
   const status = document.getElementById('startup-status');
   if (status) status.textContent = '界面资源加载较慢；若持续等待，请点击重新加载。尚未开始读取数据，不代表没有分析结果。';

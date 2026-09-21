@@ -64,4 +64,7 @@ section{background:var(--gs-paper);border:1px solid var(--gs-line);border-radius
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--gs-line);white-space:nowrap}td.reason{white-space:normal;min-width:260px}
 article{border-bottom:1px solid var(--gs-line);padding:8px 0;overflow-wrap:anywhere}article.failed{color:var(--gs-up)}.error{background:var(--el-color-danger-light-9);color:var(--gs-up);padding:12px}
 @media(max-width:800px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+header > div { min-width:0; }
+header button { flex-shrink:0; white-space:nowrap; }
+.metrics strong { overflow-wrap:anywhere; }
 </style>

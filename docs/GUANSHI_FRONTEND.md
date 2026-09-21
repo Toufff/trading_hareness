@@ -15,7 +15,7 @@
 ## 验收与发布
 
 1. 前端 typecheck、完整单元测试、build。
-2. 启动 Vite，使用真实本机服务；运行 `e2e/guanshi-theme.spec.ts`，检验1440/390/320宽度、真实推荐/持仓/板块、个股K线、策略切换、研究页签和浏览器后退。只读，不点击采集、生成、写入或交易按钮。
+2. 构建后运行 `npx vite preview --host 127.0.0.1 --port 13849`，使用真实本机服务；运行 `e2e/guanshi-theme.spec.ts`，检验1440/390/320宽度、真实推荐/持仓/板块、个股K线、策略切换、研究页签和浏览器后退。必须验证生产构建，不能只测 Vite dev：曾有嵌套条件动态 import 的预加载依赖被合并，导致生产分支丢失 CSS，而开发模式正常。入口使用独立 loader 保持依赖隔离。只读，不点击采集、生成、写入或交易按钮。
 3. 提交并推送用户 fork；使用 `scripts/windows/publish-stock-release.ps1` 正式发布，不跳过测试或部署窗口。
 4. 使用 `scripts/deploy-stock-dashboard.ps1` 原子发布公网静态资源并校验网关。
 5. 将 `PLAYWRIGHT_BASE_URL` 指向公网，设置本机 `GUANSHI_CREDENTIALS_FILE` 凭据文件路径重复验收；凭据只注入 Cookie，不输出或提交。可用 `PLAYWRIGHT_CHANNEL=msedge` 使用已安装浏览器。

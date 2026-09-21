@@ -99,3 +99,12 @@ const download = () => {
 <style scoped>
 .recommendation-decision{margin:0 0 24px;padding:22px;border:1px solid #d8e2ee;border-radius:12px;background:#f8fbff;color:#203149}.recommendation-decision header{display:flex;justify-content:space-between;gap:18px;align-items:start}.recommendation-decision h2{margin:0}.recommendation-decision p{line-height:1.7}.meta,header p{color:#61738a;font-size:13px;overflow-wrap:anywhere}.picks{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:14px}.picks article{padding:18px;background:var(--gs-paper);border:1px solid var(--gs-line);border-radius:9px}.picks h3{margin:0 0 12px}.stage{font-size:12px;background:#e7efff;color:#234c92;padding:4px 8px;border-radius:5px}.company-brief{margin:14px 0;padding:12px 14px;border-left:3px solid #4e73b8;border-radius:5px;background:#f2f6fc}.company-brief h4{margin:0 0 6px;font-size:14px}.company-brief p{margin:5px 0}.warning{background:#fff1d9;padding:12px;color:#8b5010}.recommendation-decision button{padding:7px 12px;white-space:nowrap;border:1px solid #c6d3e4;background:var(--gs-paper);border-radius:5px;cursor:pointer}details{margin-top:14px}summary{cursor:pointer}table.peers{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}table.peers th,table.peers td{border:1px solid var(--gs-line);padding:5px 7px;text-align:left;vertical-align:top}table.peers th{background:#eef4fb;white-space:nowrap}@media(max-width:600px){.recommendation-decision{padding:14px}.recommendation-decision header{display:block}}
 </style>
+<style scoped>
+.recommendation-decision { background:var(--gs-paper); color:var(--gs-ink); border-color:var(--gs-line); border-top:3px solid var(--gs-gold); border-radius:5px; }
+.meta, header p { color:var(--gs-muted); }
+.stage { background:var(--gs-wash); color:var(--gs-sky); border-radius:3px; }
+.company-brief { background:var(--el-fill-color-light); border-left-color:var(--gs-gold); border-radius:0; }
+.warning { background:var(--el-color-warning-light-9); color:var(--gs-warning); }
+.recommendation-decision button { border-color:var(--gs-line); color:var(--gs-sky); }
+table.peers th { background:var(--el-fill-color-light); }
+</style>
