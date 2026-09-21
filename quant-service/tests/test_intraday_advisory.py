@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 from app.intraday_advisory.rules import QuoteSample, evaluate
+from app.intraday_advisory.market_watch import index_sample_from_row
 from app.intraday_advisory.schedule import decide
 from app.intraday_advisory.scope import AdvisoryScope, ScopeItem
 from app.intraday_advisory.runtime import (
@@ -20,6 +21,15 @@ from app.intraday_advisory.runtime import (
 
 TZ = ZoneInfo("Asia/Shanghai")
 MONDAY = datetime(2026, 9, 21, 10, 0, tzinfo=TZ)
+
+
+def test_index_sample_accepts_current_forming_minute_label() -> None:
+    fetched_at = datetime(2026, 9, 21, 10, 5, 49, tzinfo=TZ)
+    row = {
+        "ts_code": "000001.SH", "price": 3931.41, "pre_close": 3911.87,
+        "trade_date": "20260921", "minute": "10:06",
+    }
+    assert index_sample_from_row(row, fetched_at) is not None
 
 
 def test_model_context_normalizes_database_decimal_values() -> None:

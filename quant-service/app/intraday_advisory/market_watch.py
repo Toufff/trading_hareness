@@ -62,7 +62,11 @@ def index_sample_from_row(row: Mapping[str, Any], fetched_at: datetime) -> Index
     except (KeyError, TypeError, ValueError):
         return None
     age = (fetched_at.astimezone(SHANGHAI) - provider_at).total_seconds()
-    if symbol not in CORE_INDEX_SYMBOLS or price <= 0 or pre_close <= 0 or not -5 <= age <= 90:
+    # Longhu labels the currently forming index minute with its ending minute,
+    # so a quote fetched late in 10:05 can legitimately carry ``10:06``.
+    # Accept at most one minute of that vendor clock lead while retaining the
+    # 90-second stale-data ceiling.
+    if symbol not in CORE_INDEX_SYMBOLS or price <= 0 or pre_close <= 0 or not -60 <= age <= 90:
         return None
     return IndexSample(symbol, CORE_INDEX_SYMBOLS[symbol], fetched_at, price, pre_close)
 
