@@ -117,6 +117,7 @@ export type MarketScanWatchlist = {
   strategy_total_unique?: number;
   user_tracking_total?: number;
   items: MarketScanWatchItem[];
+  recommendation_pool?: Record<string, unknown> | null;
   notice?: string;
 };
 
@@ -164,14 +165,11 @@ export function usePersonalDecisionWorkspace(scope: PersonalDecisionScope = 'all
       const holdingTask: Promise<HoldingAdvice> = includeHoldings
         ? getJson<HoldingAdvice>(`/api/research/personal/holding-advice/latest?${params}`)
         : Promise.resolve({ status: 'blocked', as_of_at: now, actions: [], freshness_status: 'stale_or_unverified', delivery: { eligible: false }, diagnostics: [] });
-      const recommendationTask: Promise<Record<string, unknown> | null> = includeMarket
-        ? getJson<Record<string, unknown>>('/api/research/strategy/post-close/latest')
-        : Promise.resolve(null);
       const scanTask: Promise<MarketScanWatchlist | null> = includeMarket
         ? getJson<MarketScanWatchlist>('/api/research/strategy/post-close/watchlist/latest?limit=16')
         : Promise.resolve(null);
-      const [marketResult, holdingResult, recommendationResult, scanResult] = await Promise.allSettled([
-        marketTask, holdingTask, recommendationTask, scanTask,
+      const [marketResult, holdingResult, scanResult] = await Promise.allSettled([
+        marketTask, holdingTask, scanTask,
       ]);
       const market = marketResult.status === 'fulfilled' ? marketResult.value : {
         status: 'unavailable' as const, as_of_at: new Date().toISOString(), content: null,
@@ -201,19 +199,13 @@ export function usePersonalDecisionWorkspace(scope: PersonalDecisionScope = 'all
       };
       if (includeMarket && marketResult.status === 'rejected') marketError.value = marketResult.reason instanceof Error ? marketResult.reason.message : String(marketResult.reason);
       if (includeHoldings && holdingResult.status === 'rejected') holdingError.value = holdingResult.reason instanceof Error ? holdingResult.reason.message : String(holdingResult.reason);
-      if (recommendationResult.status === 'fulfilled') {
-        const payload = recommendationResult.value as {
-          run?: { summary?: { strategy_lanes?: { recommendation_pool?: Record<string, unknown> } } };
-          latest_completed?: { summary?: { recommendation_pool?: Record<string, unknown>; strategy_lanes?: { recommendation_pool?: Record<string, unknown> } } };
-        } | null;
-        formalRecommendation.value = payload?.run?.summary?.strategy_lanes?.recommendation_pool
-          ?? payload?.latest_completed?.summary?.recommendation_pool
-          ?? payload?.latest_completed?.summary?.strategy_lanes?.recommendation_pool
-          ?? null;
-      } else formalRecommendation.value = null;
-      if (scanResult.status === 'fulfilled') scanWatchlist.value = scanResult.value;
+      if (scanResult.status === 'fulfilled') {
+        scanWatchlist.value = scanResult.value;
+        formalRecommendation.value = scanResult.value?.recommendation_pool ?? null;
+      }
       else {
         scanWatchlist.value = null;
+        formalRecommendation.value = null;
         scanError.value = scanResult.reason instanceof Error ? scanResult.reason.message : String(scanResult.reason);
       }
     } catch (cause) {

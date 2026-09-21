@@ -93,6 +93,13 @@ QUANT_DISCIPLINE_ALERT_ACCOUNT_KEY=citics-primary
 QUANT_DASHBOARD_PUBLIC_URL=https://research.example.com
 ```
 
+飞书卡片需要免再次输入 Basic Auth 时，另设
+`QUANT_DASHBOARD_DECISION_URL`。它可以指向由 nginx 设置私有访问 Cookie
+的 magic-link；该值属于运行时秘密，不得写入 Git。Windows owner 可运行
+`scripts/windows/configure-dashboard-private-link.ps1`，脚本从
+`%USERPROFILE%\.stockbrain\dashboard-credentials.json` 读取现有访问路径，只把
+值写入 `G:\StockPlatform\config\runtime.env`，不会打印密钥。
+
 确认信号将附带该标的的决策卡链接；未配置时系统明确提示在本地研究台打开，不会伪造 `localhost` 链接。
 
 3. 运行扫描或由 n8n 调度：

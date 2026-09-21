@@ -23,11 +23,11 @@ describe('PersonalDecisionView', () => {
     };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ status: 'ready', as_of_at: '2026-09-01T15:15:00+08:00', content: {}, delivery: { eligible: true, complete: true } }))
-      .mockResolvedValueOnce(jsonResponse({ latest_completed: { summary: { recommendation_pool: recommendation } } }))
-      .mockResolvedValueOnce(jsonResponse({ as_of_date: '2026-09-01', status: 'completed', research_only: true, depends_on_holdings: false, total_unique: 1, items: [{ symbol: '600001.SH', name: '扫描股票', lane_keys: ['trend'], lane_labels: ['主线趋势'], reason: '全市场命中', confirmation: '放量突破', invalidation: '跌破平台', review_status: 'technical_observation', review_label: '量价观察，尚未升级', buy_authorized: false, depends_on_holdings: false }] }));
+      .mockResolvedValueOnce(jsonResponse({ as_of_date: '2026-09-01', status: 'completed', research_only: true, depends_on_holdings: false, total_unique: 1, recommendation_pool: recommendation, items: [{ symbol: '600001.SH', name: '扫描股票', lane_keys: ['trend'], lane_labels: ['主线趋势'], reason: '全市场命中', confirmation: '放量突破', invalidation: '跌破平台', review_status: 'technical_observation', review_label: '量价观察，尚未升级', buy_authorized: false, depends_on_holdings: false }] }));
     vi.stubGlobal('fetch', fetchMock);
 
     const wrapper = mount(PersonalDecisionView, { props: { mode: 'market' }, global: { plugins: [ElementPlus] } });
+    await flushPromises();
     await flushPromises();
 
     const recommendationCard = wrapper.find('.recommendation-decision');
@@ -57,6 +57,7 @@ describe('PersonalDecisionView', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const wrapper = mount(PersonalDecisionView, { props: { mode: 'holdings' }, global: { plugins: [ElementPlus] } });
+    await flushPromises();
     await flushPromises();
 
     expect(wrapper.text()).toContain('我的持仓');
@@ -104,9 +105,9 @@ describe('PersonalDecisionView', () => {
   it('renders a durable user tracking tag alongside later strategy tags', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ status: 'ready', as_of_at: '2026-09-05T15:15:00+08:00', content: {}, delivery: { eligible: true, complete: true } }))
-      .mockResolvedValueOnce(jsonResponse({ latest_completed: { summary: { recommendation_pool: { status: 'unavailable' } } } }))
       .mockResolvedValueOnce(jsonResponse({
         as_of_date: '2026-09-05', status: 'completed', research_only: true, depends_on_holdings: false,
+        recommendation_pool: { status: 'unavailable' },
         total_unique: 1, strategy_total_unique: 1, user_tracking_total: 1,
         items: [{
           symbol: '600664.SH', name: '哈药股份', lane_keys: ['accumulation'], lane_labels: ['潜伏观察'],
@@ -131,6 +132,7 @@ describe('PersonalDecisionView', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const wrapper = mount(PersonalDecisionView, { props: { mode: 'market' }, global: { plugins: [ElementPlus] } });
+    await flushPromises();
     await flushPromises();
 
     const card = wrapper.find('.market-scan-section');

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..dashboard_links import market_decision_url
 from .contracts import DisciplinePlan, Line, LineState
 from ..intraday_advisory.presentation import ensure_readable_card, symbol_text
 
@@ -49,8 +50,9 @@ def render_discipline_alert(plan: DisciplinePlan, line: Line, state: LineState, 
         action,
         "边界：研究与纪律提醒，不下单；请核对盘口、可卖数量和最新公告。",
     ]
-    if dashboard_url:
-        parts.append(f"纪律页：{dashboard_url.rstrip('/')}/market-decision")
+    decision_url = market_decision_url(dashboard_url)
+    if decision_url:
+        parts.append(f"纪律页：{decision_url}")
     return "\n".join(parts)
 
 
@@ -87,10 +89,11 @@ def discipline_alert_card(plan: DisciplinePlan, line: Line, state: LineState, *,
              f"触发时间 {observed}｜请结合最新公告与可交易状态人工确认｜系统不下单"}]},
         ],
     }
-    if dashboard_url:
+    decision_url = market_decision_url(dashboard_url)
+    if decision_url:
         card["elements"].append({"tag": "action", "actions": [{"tag": "button",
             "text": {"tag": "plain_text", "content": "查看纪律卡"}, "type": "primary",
-            "url": dashboard_url.rstrip("/") + "/market-decision"}]})
+            "url": decision_url}]})
     ensure_readable_card(card)
     return card
 

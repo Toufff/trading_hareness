@@ -35,6 +35,7 @@ def _clamped_int(value: str | None, *, default: int, minimum: int, maximum: int)
 class Settings:
     quant_universe: tuple[str, ...]
     dashboard_public_url: str | None
+    dashboard_decision_url: str | None
     shared_read_api_key: str
     write_api_key: str
     allow_unauthenticated_writes: bool
@@ -72,6 +73,7 @@ class Settings:
     def from_environ(cls, environ: Mapping[str, str] | None = None) -> "Settings":
         env = os.environ if environ is None else environ
         dashboard_public_url = (env.get("QUANT_DASHBOARD_PUBLIC_URL") or "").strip().rstrip("/") or None
+        dashboard_decision_url = (env.get("QUANT_DASHBOARD_DECISION_URL") or "").strip().rstrip("/") or None
         quant_universe = tuple(item.strip() for item in (env.get("QUANT_UNIVERSE") or "").split(",") if item.strip())
         try:
             rate_limit_wait = min(30.0, max(0.0, float(env.get("QUANT_PROVIDER_GLOBAL_RATE_LIMIT_MAX_WAIT_SECONDS", "5"))))
@@ -80,6 +82,7 @@ class Settings:
         return cls(
             quant_universe=quant_universe,
             dashboard_public_url=dashboard_public_url,
+            dashboard_decision_url=dashboard_decision_url,
             shared_read_api_key=env.get("QUANT_SHARED_READ_API_KEY", ""),
             write_api_key=env.get("QUANT_WRITE_API_KEY", "").strip(),
             allow_unauthenticated_writes=_flag(env.get("QUANT_ALLOW_UNAUTHENTICATED_WRITES"), default=False),

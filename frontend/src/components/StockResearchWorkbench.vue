@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import '../charts/registerResearchCharts';
 import VChart from 'vue-echarts';
 import type { MetricKey, StockWorkbench } from './stock-workbench';
 import { displayPlanValue, metricChartOption, metricLabel, priceChartOption, relevantMessages, strategyMetrics, tradePlanAnnotations } from './stock-workbench';

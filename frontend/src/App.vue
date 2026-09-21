@@ -3,9 +3,6 @@ import { defineAsyncComponent } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import zhCn from 'element-plus/es/locale/lang/zh-cn';
 import { DataAnalysis, Document, Key, Operation, Refresh, TrendCharts, UploadFilled, Wallet } from '@element-plus/icons-vue';
-import ManualRelayView from './views/ManualRelayView.vue';
-import GroupRelayMonitorView from './views/GroupRelayMonitorView.vue';
-import FeishuWorkbenchView from './views/FeishuWorkbenchView.vue';
 import { useDashboardWorkspace } from './composables/useDashboardWorkspace';
 import { getDashboardKey, setDashboardKey } from './api/http';
 
@@ -39,6 +36,9 @@ const ProviderTab = defineAsyncComponent(() => import('./views/research/Provider
 const CatalogTab = defineAsyncComponent(() => import('./views/research/CatalogTab.vue'));
 const QualityTab = defineAsyncComponent(() => import('./views/research/QualityTab.vue'));
 const PersonalDecisionView = defineAsyncComponent(() => import('./views/PersonalDecisionView.vue'));
+const ManualRelayView = defineAsyncComponent(() => import('./views/ManualRelayView.vue'));
+const GroupRelayMonitorView = defineAsyncComponent(() => import('./views/GroupRelayMonitorView.vue'));
+const FeishuWorkbenchView = defineAsyncComponent(() => import('./views/FeishuWorkbenchView.vue'));
 </script>
 
 <template>

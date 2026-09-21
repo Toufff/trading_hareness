@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from ..dashboard_links import market_decision_url
 from .rules import AdvisorySignal
 from .presentation import ensure_readable_card, humanize_text, metric_lines, role_text, state_text, symbol_text
 
@@ -74,10 +75,11 @@ def signal_card(signal: AdvisorySignal, *, source: str,
              f"{signal.observed_at:%H:%M:%S}｜内外盘仅表示成交方向，不代表主力资金｜不执行交易"}]},
         ],
     }
-    if dashboard_url:
+    decision_url = market_decision_url(dashboard_url)
+    if decision_url:
         card["elements"].append({"tag": "action", "actions": [{"tag": "button",
             "text": {"tag": "plain_text", "content": "打开决策工作台"}, "type": "primary",
-            "url": dashboard_url.rstrip("/") + "/market-decision"}]})
+            "url": decision_url}]})
     ensure_readable_card(card)
     return card
 
@@ -136,10 +138,11 @@ def analysis_card(provider: str, output: dict[str, Any], *, report_kind: str,
             "content": "**风险边界**\n" + "\n".join(f"- {item}" for item in risks)}})
     card["elements"].append({"tag": "note", "elements": [{"tag": "plain_text", "content":
         f"{generated_at:%H:%M:%S}｜{PROVIDER_TEXT.get(provider, provider)} 复核｜研究提醒，不执行交易"}]})
-    if dashboard_url:
+    decision_url = market_decision_url(dashboard_url)
+    if decision_url:
         card["elements"].append({"tag": "action", "actions": [{"tag": "button",
             "text": {"tag": "plain_text", "content": "打开决策工作台"}, "type": "primary",
-            "url": dashboard_url.rstrip("/") + "/market-decision"}]})
+            "url": decision_url}]})
     ensure_readable_card(card)
     return card
 

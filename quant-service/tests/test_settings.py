@@ -13,6 +13,7 @@ class SettingsFromEnvironDefaultsTests(unittest.TestCase):
 
         self.assertEqual(settings.quant_universe, ())
         self.assertIsNone(settings.dashboard_public_url)
+        self.assertIsNone(settings.dashboard_decision_url)
         self.assertEqual(settings.shared_read_api_key, "")
         self.assertEqual(settings.write_api_key, "")
         self.assertFalse(settings.allow_unauthenticated_writes)
@@ -43,6 +44,13 @@ class SettingsFromEnvironOverridesTests(unittest.TestCase):
     def test_dashboard_public_url_is_trimmed_and_trailing_slash_stripped(self):
         settings = Settings.from_environ({"QUANT_DASHBOARD_PUBLIC_URL": " https://x.example/ "})
         self.assertEqual(settings.dashboard_public_url, "https://x.example")
+
+    def test_private_dashboard_decision_url_is_kept_separate_and_trimmed(self):
+        settings = Settings.from_environ({
+            "QUANT_DASHBOARD_PUBLIC_URL": "https://x.example",
+            "QUANT_DASHBOARD_DECISION_URL": " https://x.example/_access/example/ ",
+        })
+        self.assertEqual(settings.dashboard_decision_url, "https://x.example/_access/example")
 
     def test_batch_sizes_clamp_to_their_historical_upper_bound_of_25(self):
         settings = Settings.from_environ({

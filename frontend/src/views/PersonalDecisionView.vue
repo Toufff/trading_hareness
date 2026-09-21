@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue';
-import { computed, reactive, ref } from 'vue';
+import { computed, defineAsyncComponent, reactive, ref } from 'vue';
 import { usePersonalDecisionWorkspace, type TradePlan } from '../composables/usePersonalDecisionWorkspace';
 import ResearchOnlyBadge from '../components/ResearchOnlyBadge.vue';
-import StockResearchWorkbench from '../components/StockResearchWorkbench.vue';
-import EventResearchLive from '../components/EventResearchLive.vue';
 import RecommendationPoolPanel from '../components/RecommendationPoolPanel.vue';
 import DisciplineBoard from '../components/discipline/DisciplineBoard.vue';
+
+const StockResearchWorkbench = defineAsyncComponent(() => import('../components/StockResearchWorkbench.vue'));
+const EventResearchLive = defineAsyncComponent(() => import('../components/EventResearchLive.vue'));
 
 const props = withDefaults(defineProps<{ mode?: 'market' | 'holdings' }>(), { mode: 'market' });
 const isMarketView = computed(() => props.mode === 'market');
@@ -140,7 +141,7 @@ function compactMoney(value: unknown): string {
     <template v-if="workspace.brief">
       <div v-if="isMarketView" class="status-grid section-gap independent-status-grid market-status-grid">
         <div class="status-tile"><span>盘面分析</span><el-tag :type="workspace.brief.market.status === 'degraded' ? 'warning' : workspace.brief.delivery.market_eligible ? 'success' : 'danger'">{{ workspace.brief.market.status === 'degraded' ? '部分可用' : workspace.brief.delivery.market_eligible ? '完整' : '缺失' }}</el-tag></div>
-        <div class="status-tile"><span>全市场观察</span><el-tag :type="workspace.scanWatchlist?.items.length ? 'success' : workspace.scanError ? 'danger' : 'info'">{{ workspace.scanWatchlist?.items.length ? `${workspace.scanWatchlist.items.length} 只` : workspace.scanError ? '读取失败' : '暂无' }}</el-tag></div>
+        <div class="status-tile"><span>全市场观察</span><el-tag :type="workspace.scanWatchlist?.items?.length ? 'success' : workspace.scanError ? 'danger' : 'info'">{{ workspace.scanWatchlist?.items?.length ? `${workspace.scanWatchlist.items.length} 只` : workspace.scanError ? '读取失败' : '暂无' }}</el-tag></div>
         <div class="status-tile"><span>正式条件重点</span><el-tag :type="workspace.formalRecommendation?.status === 'ready' ? 'success' : 'info'">{{ workspace.formalRecommendation?.status === 'ready' ? `${Array.isArray(workspace.formalRecommendation?.recommended) ? workspace.formalRecommendation.recommended.length : 0} 只` : '尚未发布' }}</el-tag></div>
       </div>
       <div v-else class="status-grid section-gap holdings-status-grid">
@@ -162,9 +163,9 @@ function compactMoney(value: unknown): string {
           </div>
         </template>
         <el-alert v-if="workspace.scanError" :title="workspace.scanError" type="error" :closable="false" show-icon />
-        <el-empty v-else-if="!workspace.scanWatchlist?.items.length" description="最新全市场扫描没有可展示的观察候选" :image-size="52" />
+        <el-empty v-else-if="!workspace.scanWatchlist?.items?.length" description="最新全市场扫描没有可展示的观察候选" :image-size="52" />
         <div v-else class="scan-grid">
-          <article v-for="item in workspace.scanWatchlist.items" :key="item.symbol" class="scan-card" :class="`scan-${item.review_status}`">
+          <article v-for="item in (workspace.scanWatchlist?.items ?? [])" :key="item.symbol" class="scan-card" :class="`scan-${item.review_status}`">
             <div class="scan-heading">
               <div><strong>{{ item.name }}</strong><span>（{{ item.symbol }}）</span></div>
               <el-button plain size="small" @click="workspace.openChart(item.symbol)">查看图形</el-button>

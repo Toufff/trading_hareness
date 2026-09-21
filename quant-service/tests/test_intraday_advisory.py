@@ -115,6 +115,14 @@ def test_cards_translate_internal_fields_and_bound_model_output() -> None:
     assert rendered.index("大盘") < rendered.index("持仓关注") < rendered.index("推荐池关注")
     assert "Codex 复核" in rendered
 
+    private = signal_card(
+        signal, source="recommendation",
+        dashboard_url="https://stock.toufai.top/_access/example",
+    )
+    private_rendered = json.dumps(private, ensure_ascii=False)
+    assert "_access/example/market-decision" not in private_rendered
+    assert "https://stock.toufai.top/_access/example" in private_rendered
+
 
 def test_deepseek_is_persisted_but_only_material_new_changes_are_push_worthy() -> None:
     routine = {"should_notify": False, "state_fingerprint": "routine", "market_state": "watch",

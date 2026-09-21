@@ -1,10 +1,6 @@
 
 import { computed, onBeforeUnmount, onMounted, provide, proxyRefs, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { use } from 'echarts/core';
-import { BarChart, CandlestickChart, LineChart, ScatterChart } from 'echarts/charts';
-import { DataZoomComponent, GridComponent, LegendComponent, MarkAreaComponent, MarkLineComponent, MarkPointComponent, TooltipComponent } from 'echarts/components';
-import { CanvasRenderer } from 'echarts/renderers';
 import type { AnalystMarketReview, AutomationRun } from '../api/analyst-contract';
 import type { components } from '../api/generated';
 import { getJson as getJsonBase, postJson } from '../api/http';
@@ -25,7 +21,6 @@ import {
 
 
 export function useDashboardWorkspace() {
-use([BarChart, CandlestickChart, LineChart, ScatterChart, DataZoomComponent, GridComponent, LegendComponent, MarkAreaComponent, MarkLineComponent, MarkPointComponent, TooltipComponent, CanvasRenderer]);
 
 type Route = { tag: string; label: string };
 type EventItem = { event_id: string; received_at: string; message_type?: string; text?: string; source_label?: string; n8n_status?: string; target_status?: string; target_batch_id?: string | null; n8n_error?: string | null };

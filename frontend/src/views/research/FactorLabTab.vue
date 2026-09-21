@@ -1,4 +1,5 @@
 <script lang="ts">
+import '../../charts/registerResearchCharts';
 import { defineComponent, inject } from 'vue';
 import VChart from 'vue-echarts';
 import { dashboardContextKey } from '../../dashboard-context';

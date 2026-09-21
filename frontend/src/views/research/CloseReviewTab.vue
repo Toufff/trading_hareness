@@ -1,4 +1,5 @@
 <script lang="ts">
+import '../../charts/registerResearchCharts';
 import { defineAsyncComponent, defineComponent, inject, reactive, toRefs } from 'vue';
 import { Refresh } from '@element-plus/icons-vue';
 import VChart from 'vue-echarts';
