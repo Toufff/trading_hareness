@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import tempfile
 import unittest
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -174,6 +175,33 @@ class AgentPaperRuleTests(unittest.TestCase):
 
 
 class AgentPaperModelTests(unittest.TestCase):
+    def test_codex_transport_finds_newest_desktop_binary_without_path(self):
+        from unittest.mock import patch
+        from app.agent_paper.model import CodexCliModel
+
+        with tempfile.TemporaryDirectory() as root:
+            old = Path(root) / "OpenAI" / "Codex" / "bin" / "old" / "codex.exe"
+            new = Path(root) / "OpenAI" / "Codex" / "bin" / "new" / "codex.exe"
+            old.parent.mkdir(parents=True)
+            new.parent.mkdir(parents=True)
+            old.touch()
+            new.touch()
+            os.utime(old, (1, 1))
+            os.utime(new, (2, 2))
+            with patch.dict(os.environ, {
+                "PATH": "", "LOCALAPPDATA": root, "AGENT_PAPER_CODEX_BIN": "",
+            }):
+                model = CodexCliModel(model="gpt-5.6-sol", reasoning_effort="high")
+        self.assertEqual(model.binary, str(new.resolve()))
+
+    def test_codex_transport_prefers_explicit_environment_binary(self):
+        from unittest.mock import patch
+        from app.agent_paper.model import CodexCliModel
+
+        with patch.dict(os.environ, {"AGENT_PAPER_CODEX_BIN": "D:/managed/codex.exe"}):
+            model = CodexCliModel(model="gpt-5.6-sol", reasoning_effort="high")
+        self.assertEqual(model.binary, "D:/managed/codex.exe")
+
     def test_structured_output_and_fenced_text_are_accepted(self):
         output, usage = parse_cli_result(json.dumps({"structured_output": {"orders": []}, "total_cost_usd": 0.4}))
         self.assertEqual((output, usage["total_cost_usd"]), ({"orders": []}, 0.4))

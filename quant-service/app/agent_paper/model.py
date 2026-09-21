@@ -25,6 +25,30 @@ DEFAULT_CODEX_REASONING_EFFORT = "high"
 DEFAULT_TIMEOUT_SECONDS = 240
 DSH_CONTEXT_MAX_BYTES = 60_000
 
+
+def find_codex_executable(environ: dict[str, str] | None = None) -> str:
+    """Find the desktop-bundled Codex CLI in Task Scheduler's minimal PATH."""
+    env = os.environ if environ is None else environ
+    configured = env.get("AGENT_PAPER_CODEX_BIN")
+    if configured:
+        return configured
+    on_path = shutil.which("codex.exe", path=env.get("PATH", "")) or shutil.which(
+        "codex", path=env.get("PATH", "")
+    )
+    if on_path:
+        return on_path
+    local_app_data = env.get("LOCALAPPDATA")
+    if local_app_data:
+        installation = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
+        candidates = sorted(
+            (path for path in installation.glob("*/codex.exe") if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            return str(candidates[0].resolve())
+    return "codex"
+
 SYSTEM_PROMPT = """你是一名 A 股短线交易员，在操作自己的模拟账户，目标是在控制回撤的前提下取得尽量高的收益，并与一位人类交易员的实盘收益比较。
 
 规则：
@@ -339,7 +363,7 @@ class CodexCliModel:
         if self.reasoning_effort not in self.VALID_REASONING_EFFORTS:
             raise ValueError(f"unsupported Codex reasoning effort: {self.reasoning_effort}")
         self.model = f"{self.model_id}/{self.reasoning_effort}"
-        self.binary = binary or os.environ.get("AGENT_PAPER_CODEX_BIN") or shutil.which("codex") or "codex"
+        self.binary = binary or find_codex_executable()
         self.timeout_seconds = int(timeout_seconds or os.environ.get("AGENT_PAPER_TIMEOUT_SECONDS") or DEFAULT_TIMEOUT_SECONDS)
 
     @staticmethod
