@@ -1,5 +1,9 @@
 # Shared peer runtime
 
+2026-09-22 minute-basket addendum: [PEER_MINUTE_BATCH_HANDOFF.md](PEER_MINUTE_BATCH_HANDOFF.md).
+Owner exposes only the compatible read endpoint; collaborator teacher scheduling and Feishu delivery stay on the peer.
+No owner SSH access, teacher code, database migration or shared-pool expansion is required.
+
 2026-09-22 factor-maintainer addendum: [PEER_FACTOR_MAINTENANCE.md](PEER_FACTOR_MAINTENANCE.md).
 The owner explicitly retains broad trusted database access. Use the versioned
 one-shot maintenance bundle, not the historical read-only bootstrap below.

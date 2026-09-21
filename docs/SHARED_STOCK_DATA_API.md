@@ -70,6 +70,7 @@ QUANT_SHARED_READ_API_KEY=<private handoff value>
 | POST | `/licensed/stock-api/call` | 通用全量调用与自动 300 分批 |
 | GET | `/licensed/longhu/quotes` | 兼容接口：标准化批量行情，逻辑总量自动按 300 分批 |
 | GET | `/licensed/longhu/minutes/{symbol}` | 兼容接口：标准化单股分钟线 |
+| GET | `/licensed/longhu/minutes?symbols=...` | 1–300 只当日分钟线聚合，截止时间、逐股错误和 gzip；见 [分钟线交接](PEER_MINUTE_BATCH_HANDOFF.md) |
 
 Swagger 与 OpenAPI：
 
@@ -233,7 +234,9 @@ X-Quant-Read-Key: <key>
 }
 ```
 
-650 个值会拆成 300、300、50 三次调用。这里要求对应上游接口本身支持列表参数；对于只接受单个 `StockID` 的接口，应逐只调用。若同时 `st=650`，则两种分批做笛卡尔组合，共 3 × 3 = 9 次物理调用。
+内部执行器可把 650 个值拆成 300、300、50，但当前 HTTP 请求模型限制 batch.values 最多 300 个；
+HTTP 调用方应自行分组。这要求上游接口本身支持列表参数；只接受单个 StockID 的接口不能用逗号拼接冒充原生批量。
+分钟线多股票读取可使用上述聚合接口，由 owner 受控并发取得单股数据。
 
 ## 9. curl 示例
 

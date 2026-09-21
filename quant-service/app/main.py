@@ -492,6 +492,7 @@ from .stock_study_readiness_repository import (
 from .intraday_status_read_model import IntradayStatusDependencies, intraday_services_status_payload as read_intraday_services_status_payload, intraday_services_status_payload_async as read_intraday_services_status_payload_async
 from .routers.provider_status import build_provider_status_router
 from .routers.longhu_reads import build_longhu_reads_router
+from .longhu_minute_batch import minute_batch_service
 from .routers.peer_support import build_peer_support_router
 from .routers.licensed_stock_api import build_licensed_stock_api_router
 from .routers.research_readiness import build_research_readiness_router
@@ -4193,6 +4194,7 @@ app.include_router(build_longhu_reads_router(
     shared_read_key=lambda: Settings.from_environ().shared_read_api_key,
     quotes=shared_longhu_quotes,
     minutes=intraday_longhu_minutes,
+    minutes_batch=minute_batch_service.read,
 ))
 app.include_router(build_licensed_stock_api_router(
     configured=longhu_vendor_configured,
