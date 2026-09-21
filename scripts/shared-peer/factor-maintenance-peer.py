@@ -33,6 +33,7 @@ def launch_spec(inspected, root, arguments, *, cpu_quota_supported=False):
     selected.update(PGHOST='db-batch-tunnel', PGPORT='5433',
                     APP_GIT_SHA=f'factor-bundle:{root.name}', QUANT_FACTOR_ACTOR='stockpeer-maintainer',
                     QUANT_FACTOR_CPU_QUOTA='2' if cpu_quota_supported else 'unavailable_in_rootless_daemon',
+                    QUANT_FACTOR_FETCH_WORKERS='4',
                     PYTHONPATH='/opt/factor/quant-service', PYTHONDONTWRITEBYTECODE='1',
                     PYTHONUNBUFFERED='1')
     networks = inspected['NetworkSettings']['Networks']
@@ -87,7 +88,8 @@ def probe():
                   contract_version=contract.get('contract_version',contract.get('version')),
                   factor_maintenance=contract.get('factor_maintenance'),
                   source_version=os.getenv('APP_GIT_SHA'), database_path='db-batch-tunnel:5433')
-    report['resource_limits'] = dict(memory_mib=1024,pids=128,cpu_quota=os.getenv('QUANT_FACTOR_CPU_QUOTA'))
+    report['resource_limits'] = dict(memory_mib=1024,pids=128,cpu_quota=os.getenv('QUANT_FACTOR_CPU_QUOTA'),
+                                    longhu_fetch_workers=int(os.environ['QUANT_FACTOR_FETCH_WORKERS']))
     print(json.dumps(report, ensure_ascii=True))
     return 0 if report['status']=='ready' else 1
 

@@ -82,6 +82,9 @@ probe 的 resource_limits 明确标记 CPU quota 不可用，不声称已经施�
 数据库走独立 `db-batch-tunnel:5433`，共享龙虎走 `http://db-tunnel:5681`。
 凭据只进入进程/容器环境，不写 argv/Git/手册；可信 Docker 管理员仍能查看环境。
 不要在工单粘贴完整 docker inspect。
+peer 固定 QUANT_FACTOR_FETCH_WORKERS=4，匹配实测 owner 共享网关 4 个工作线程，
+避免 16 路请求冲满 8 个队列席位、快速 503 后形成重试风暴。owner 直连默认仍为 16，
+不额外加休眠或改上游速率限制。以后调整网关容量时同步复测此参数（允许 1..16）。
 
 ## 命令与结果解释
 

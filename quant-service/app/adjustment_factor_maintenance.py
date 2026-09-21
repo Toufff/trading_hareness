@@ -26,6 +26,7 @@ import functools
 import hashlib
 import json
 import math
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -553,6 +554,18 @@ FACTOR_DB_TIMEOUT_SECONDS = 600
 LONGHU_FETCH_WORKERS = 16
 
 
+def longhu_fetch_workers() -> int:
+    """The shared HTTP gateway has fewer slots than the direct owner source.
+
+    Keep the direct-source default; peers explicitly match their gateway's
+    worker capacity instead of flooding its bounded queue with fast failures.
+    """
+    workers = int(os.getenv('QUANT_FACTOR_FETCH_WORKERS', str(LONGHU_FETCH_WORKERS)))
+    if not 1 <= workers <= LONGHU_FETCH_WORKERS:
+        raise ValueError('QUANT_FACTOR_FETCH_WORKERS must be between 1 and 16')
+    return workers
+
+
 class FactorLaneSession:
     """One lane run: read the window once, fetch longhu once, plan once.
 
@@ -592,7 +605,7 @@ class FactorLaneSession:
             source = deps.longhu_source()
             longhu, errors = await deps.run_public(
                 derivation.fetch_longhu_evidence, source, sessions,
-                timeout_seconds=LONGHU_FETCH_TIMEOUT_SECONDS, workers=LONGHU_FETCH_WORKERS)
+                timeout_seconds=LONGHU_FETCH_TIMEOUT_SECONDS, workers=longhu_fetch_workers())
         except Exception as error:  # noqa: BLE001 - reported as a provider failure
             self.failure = deps.safe_error_detail(f"longhu fetch failed: {error}", 500)
             return None
@@ -1075,7 +1088,7 @@ async def repair(
     source = dependencies.longhu_source()
     longhu, errors = await dependencies.run_public(
         derivation.fetch_longhu_evidence, source, sessions,
-        timeout_seconds=LONGHU_FETCH_TIMEOUT_SECONDS, workers=LONGHU_FETCH_WORKERS)
+        timeout_seconds=LONGHU_FETCH_TIMEOUT_SECONDS, workers=longhu_fetch_workers())
     if sessions and len(errors) > MAX_FETCH_FAILURE_RATIO * len(sessions):
         report["status"] = FAILED_STATUS
         report["reason"] = f"longhu kline failed for {len(errors)} of {len(sessions)} symbols"
@@ -1160,7 +1173,7 @@ async def validate(
     source = dependencies.longhu_source()
     longhu, errors = await dependencies.run_public(
         derivation.fetch_longhu_evidence, source, {symbol: span for symbol in symbols},
-        timeout_seconds=LONGHU_FETCH_TIMEOUT_SECONDS, workers=LONGHU_FETCH_WORKERS)
+        timeout_seconds=LONGHU_FETCH_TIMEOUT_SECONDS, workers=longhu_fetch_workers())
     report = derivation.validate(bars, truth, longhu)
     return {"from_date": str(from_date), "to_date": str(to_date), "symbols": len(symbols),
             "longhu_fetch_errors": len(errors), "method": derivation.METHOD_VERSION, **report}

@@ -13,6 +13,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ControlContractTests(unittest.TestCase):
+    def test_peer_concurrency_matches_gateway_without_changing_owner_default(self):
+        from app.adjustment_factor_maintenance import longhu_fetch_workers
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(longhu_fetch_workers(),16)
+        with patch.dict(os.environ, {'QUANT_FACTOR_FETCH_WORKERS':'4'}):
+            self.assertEqual(longhu_fetch_workers(),4)
+        with patch.dict(os.environ, {'QUANT_FACTOR_FETCH_WORKERS':'0'}):
+            with self.assertRaises(ValueError):
+                longhu_fetch_workers()
+
     def test_rollback_table_allowlist(self):
         from app.factor_maintenance_control import columns_for
         self.assertEqual(columns_for('canonical_bars_daily'), ('adj_factor',))
@@ -60,6 +70,7 @@ class ControlContractTests(unittest.TestCase):
         self.assertIn('sha256:fixture',command)
         self.assertIn('--read-only',command)
         self.assertEqual((env['PGHOST'],env['PGPORT']),('db-batch-tunnel','5433'))
+        self.assertEqual(env['QUANT_FACTOR_FETCH_WORKERS'],'4')
         self.assertEqual(command[-2:],['--env-file','-'])
         self.assertNotIn('--cpus',command)
         cpu_command, _ = module.launch_spec(container, Path('/bundle/fixture-sha'), ['probe'], cpu_quota_supported=True)
