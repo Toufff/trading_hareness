@@ -3,7 +3,6 @@
 Collecting evidence is not independent review. This never changes an issue's
 review state, grants a role, launches arbitrary code, or activates a strategy.
 """
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .review_evidence import load_review_packet, write_packet, code_excerpt, attach_review_packet
@@ -13,9 +12,24 @@ SOURCES = {
     'data': ('short_term_lanes/repository.py', ['def load']),
     'tracking': ('short_term_lanes/tracking_repository.py', ['def refresh', 'canonical_bars_daily']),
     'governance_config': ('strategy_governance/configuration.py', ['def code_fingerprint']),
+    'presentation': ('short_term_lanes/reports.py', ['def']),
+    'execution': ('effectiveness/execution.py', ['def']),
+    'all': ('short_term_lanes/price_volume.py', ['def']),
+    'conditional entry lifecycle and effectiveness accounting, separate from selection weights':
+        ('short_term_lanes/virtual_entry.py', ['def freeze', 'def evaluate']),
+    'accumulation only; qualification ablation separate from within-universe reranking':
+        ('short_term_lanes/accumulation_rules.py', ['def']),
     **{lane: ('short_term_lanes/rules.py', [lane]) for lane in
        ('accumulation','expansion','pullback','trend','event','relay','contraction','rotation','reclaim')},
 }
+
+
+def sources_for(scope):
+    """Exact registry or an explicit list of registered scopes, never arbitrary paths."""
+    if scope in SOURCES:
+        return [SOURCES[scope]]
+    parts = [part.strip() for part in str(scope).split(',')]
+    return [SOURCES[part] for part in parts] if parts and all(part in SOURCES for part in parts) else []
 
 
 def classify(item):
@@ -24,7 +38,7 @@ def classify(item):
         return 'predictive'
     if issue.get('change_kind') == 'ranking_config':
         return 'preference' if issue.get('proposal_purpose') == 'preference' else 'predictive'
-    if issue.get('scope') in ('data', 'tracking', 'governance_config'):
+    if issue.get('scope') in ('data', 'tracking', 'governance_config', 'presentation', 'execution'):
         return 'engineering'
     return 'engineering' if any('coverage' in e or 'symbols' in e for e in issue.get('evidence', [])) else 'needs_classification'
 
@@ -52,16 +66,16 @@ def collect_one(database, item, *, root=None):
     existing = load_review_packet(item)
     if existing['status'] == 'ready' or item['state'] != 'discovered':
         return item, existing
-    source = SOURCES.get(item['issue'].get('scope'))
+    sources = sources_for(item['issue'].get('scope'))
     evidence = item['issue'].get('evidence') or []
-    if not source or not evidence:
+    if not sources or not evidence:
         return item, {'status':'missing','reason':'no_registered_source_collector_for_scope'}
     app = Path(__file__).resolve().parents[1]
     # Explicitly retain original findings and distinguish CURRENT code from
     # historical code. Never call this a reproduction of the past incident.
     reference = write_packet(issue_key=item['issue']['dedupe_key'], question=item['issue']['problem'],
         cases=[{'finding_evidence':e} for e in evidence[:6]],
-        code=[code_excerpt(app/source[0], source[1], maximum=45)],
+        code=[code_excerpt(app/source[0], source[1], maximum=45) for source in sources],
         facts={'original_item_id':item['id'], 'original_revision':item['revision'],
                'collection_basis':'preserved_issue_evidence_and_current_source'},
         limitations=['当前源码不是历史源码；复核者必须检验问题是否仍存在。',
@@ -79,6 +93,10 @@ def prepare_queue(database, items=None):
         try:
             item, packet = collect_one(database, item)
             action = next_action(item, packet)
+            # A bounded follow-up obligation, not a changing timestamp that
+            # would manufacture a new diagnostic on every scheduler poll.
+            action['review_within_hours'] = 24 if action['action'] != 'terminal' else None
+            action['stale_escalation'] = 'operator_review_without_auto_activation'
             payload = dict(status='ready' if not action['blocker'] else 'waiting', role='coordinator',
                 reason=action['blocker'] or action['action'], system_owner=action['capability'],
                 next_step=action['action'], evidence_hash=digest([item['revision'],packet.get('evidence_hash'),action]),

@@ -21,3 +21,17 @@ def test_collected_evidence_still_requires_independent_review():
     q=next_action(item('discovered'), {'status':'ready'})
     assert q['action']=='independent_review'
     assert q['capability']=='registered_reviewer'
+
+
+def test_compound_registered_scope_can_collect_without_arbitrary_paths():
+    from app.strategy_governance.work_queue import sources_for
+    assert len(sources_for('rotation,relay'))==2
+    assert sources_for('../../credentials')==[]
+    assert sources_for('rotation,unknown')==[]
+
+
+def test_registered_sources_exist():
+    from pathlib import Path
+    from app.strategy_governance.work_queue import SOURCES
+    app=Path(__file__).resolve().parents[1]/'app'
+    assert all((app/source[0]).is_file() for source in SOURCES.values())

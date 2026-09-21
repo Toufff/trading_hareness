@@ -46,7 +46,16 @@ def eligible(doc, cutoff, lookback_days=7):
             cutoff-timedelta(days=lookback_days)<=timestamp(doc['published_at'])<=cutoff)
 
 def unique_documents(documents):
-    seen=set();out=[]
+    # A provider may correct the same item ID with a different body. Keep the
+    # immutable old document in storage, but do not feed both versions as facts.
+    revisions={}
+    unversioned=[]
     for doc in sorted(documents,key=lambda d:d['available_at']):
+        if doc.get('provider') and doc.get('provider_id'):
+            revisions[(doc['provider'],str(doc['provider_id']))]=doc
+        else:
+            unversioned.append(doc)
+    seen=set();out=[]
+    for doc in sorted([*unversioned,*revisions.values()],key=lambda d:d['available_at']):
         if doc['content_hash'] not in seen:out.append(doc);seen.add(doc['content_hash'])
     return out

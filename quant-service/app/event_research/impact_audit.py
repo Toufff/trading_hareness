@@ -40,3 +40,19 @@ def consumption(scan, context):
                     'usage':'research_context_only_no_implicit_score_change','change':e.get('change')} for e in context.get('events',[])],
         'retired_events':context.get('retired_events',[]),
         'note':'此回执证明哪些候选关联了消息，不把关联冒充已改变评分或买入建议。'}
+
+
+def at_cutoff(context, cutoff):
+    """Expire cached evidence even when no new model refresh is scheduled."""
+    events=[]; retired=list(context.get('retired_events',[]))
+    retired_ids={e['event_id'] for e in retired}
+    for event in context.get('events',[]):
+        audit=event.get('impact_audit') or {}
+        expiry=audit.get('expires_at')
+        if expiry and timestamp(expiry)<timestamp(cutoff):
+            if event['event_id'] not in retired_ids:
+                retired.append({'event_id':event['event_id'],'reason':'evidence_expired_at_read_cutoff',
+                                'recheck_symbols':audit.get('recheck_symbols',[])})
+        else:
+            events.append(event)
+    return {**context,'events':events,'retired_events':retired}

@@ -82,7 +82,8 @@ def context(db,cutoff,*,refresh=False):
             return run(db)
         if value:
             age=(cutoff-timestamp(value['cutoff'])).total_seconds()
-            return {**value,**delivery_state(value,cutoff),'age_seconds':round(age)}
+            from .impact_audit import at_cutoff
+            return {**at_cutoff(value,cutoff),**delivery_state(value,cutoff),'age_seconds':round(age)}
         return {'status':'absent','events':[],'leads':[],'summary':'本时点没有可用消息研究快照，不能判断为没有事件。'}
     except Exception as exc:
         logging.getLogger(__name__).exception('event_research_context_failed')

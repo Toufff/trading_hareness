@@ -19,3 +19,19 @@ def test_linkage_receipt_is_not_score_change_claim():
         {'run_id':'n','events':[{'event_id':'e','symbols':[{'symbol':'600664.SH'}]}]})
     assert r['records'][0]['matched_symbols']==['600664.SH']
     assert r['records'][0]['usage']=='research_context_only_no_implicit_score_change'
+
+
+def test_same_provider_correction_supersedes_old_fact_without_deleting_document():
+    from app.event_research.contracts import unique_documents
+    old=dict(provider='longhu',provider_id='1',content_hash='old',available_at='2026-09-21T01:00:00Z')
+    new={**old,'content_hash':'corrected','available_at':'2026-09-21T02:00:00Z'}
+    assert unique_documents([new,old])==[new]
+    assert old['content_hash']=='old'
+
+
+def test_cached_events_expire_without_waiting_for_another_model_call():
+    from app.event_research.impact_audit import at_cutoff
+    old={'events':[{'event_id':'e','impact_audit':{'expires_at':'2026-09-21T01:00:00Z','recheck_symbols':['600664.SH']}}]}
+    fresh=at_cutoff(old,'2026-09-22T01:00:00Z')
+    assert fresh['events']==[] and fresh['retired_events'][0]['recheck_symbols']==['600664.SH']
+    assert old['events']

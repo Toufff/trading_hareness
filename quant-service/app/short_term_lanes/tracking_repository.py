@@ -30,9 +30,10 @@ def import_published_runs(database, day):
     return persist_origins(database,records)
 
 
-def refresh(database, result, day, *, write=True):
+def refresh(database, result, day, *, write=True, import_history=True):
     if write:
-        import_published_runs(database,day)
+        if import_history:
+            import_published_runs(database,day)
         if result.get('status')=='completed':
             now=datetime.now(timezone.utc).astimezone(__import__('zoneinfo').ZoneInfo('Asia/Shanghai')).isoformat()
             persist_origins(database,origins(result,now,'live_scan'))

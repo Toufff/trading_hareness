@@ -70,7 +70,7 @@ def decision_versions(settings, app_root=None):
             files.append(root/'short_term_lanes'/'advanced_strategies.py')
         if lane == 'accumulation':
             files.append(root/'short_term_lanes'/'accumulation_rules.py')
-        active = [f for f in settings.get('ranking_factors',[]) if not f.get('strategies') or lane in f['strategies']]
+        active = [f for f in settings.get('ranking_factors',[]) if not f.get('strategies') or '*' in f['strategies'] or lane in f['strategies']]
         if active:
             files += sorted((root/'ranking_factors').glob('*.py'))
         sources = {p.relative_to(root).as_posix(): semantic_source(p.read_text(encoding='utf-8'), lane) for p in files}
