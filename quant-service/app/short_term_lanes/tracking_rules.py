@@ -4,7 +4,7 @@ import hashlib
 import json
 from math import isfinite
 
-VERSION = 'observation-followup-2026-09-11'
+VERSION = 'observation-followup-adjusted-2026-09-21'
 HORIZONS = (1, 3, 5, 10)
 
 
@@ -20,21 +20,22 @@ def digest(value):
     return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True,default=str).encode()).hexdigest()
 
 
-MUTABLE_FIELDS = ('origin_id', 'available_at', 'timing', 'company_review', 'source')
+MUTABLE_FIELDS = ('origin_id', 'available_at', 'timing', 'company_review', 'source', 'virtual_entry_contract')
 
 
 def identity_fields(record):
     """Immutable discovery facts; research, source label and timestamps are excluded."""
-    return {k: v for k, v in record.items() if k not in MUTABLE_FIELDS}
+    value = {k: v for k, v in record.items() if k not in MUTABLE_FIELDS}
+    return value
 
 
 def origins(result, available_at, source):
     day=result['as_of_date']
-    profile=digest({'version':result['version'],'settings':result.get('settings',{}),
-                    'strategy_code_hash':result.get('strategy_code_hash','legacy_unverified')})
+    from ..strategy_governance.semantic_identity import lane_profile
     emitted=[]
     reviews={r['symbol']:r for r in result.get('company_reviews',[]) if r.get('symbol')}
     for lane in result['lanes']:
+        profile = lane_profile(result, lane['key'])
         selected={r['symbol']:i+1 for i,r in enumerate(lane.get('selected',[]))}
         discovery = {r['symbol']: i+1 for i,r in enumerate(sorted(
             lane.get('tracking_candidates', []), key=lambda r: (-r.get('discovery_score', r.get('rank_score', 0)), r['symbol'])))}
@@ -59,6 +60,9 @@ def origins(result, available_at, source):
             # nor on research attached later (company_review) or on whether the same
             # discovery was read live or re-imported from the persisted run (source);
             # otherwise every retry and every review closure appended a new ledger row.
+            from .virtual_entry import freeze
+            item_origin['virtual_entry_contract'] = freeze(item_origin, m, available_at) if source == 'live_scan' else {
+                'status': 'unregistered', 'reason': 'historical_capture_not_prospective'}
             item_origin['origin_id']=digest(identity_fields(item_origin))
             timestamp=str(available_at)
             item_origin.update(available_at=timestamp,
@@ -68,6 +72,28 @@ def origins(result, available_at, source):
 
 
 def evaluate(origin, sessions, bars, as_of_date):
+    from .tracking_prices import observation_prices
+    adjusted, quality, raw = observation_prices(origin, sessions, bars, as_of_date)
+    result = _evaluate_origin_basis(origin, sessions, adjusted, as_of_date)
+    result['adjustment_status'] = quality['status']
+    result['adjustment_evidence'] = quality
+    from .virtual_entry import evaluate as evaluate_virtual
+    result['virtual_entry'] = evaluate_virtual(origin, sessions, bars, adjusted, as_of_date)
+    for point in result['series']:
+        original = raw[point['date']]
+        point['adjusted_close_on_origin_basis'] = point['close']
+        point['close'] = number(original.get('close'))
+        point['is_suspended'] = original.get('is_suspended')
+    if result['series']:
+        result['latest_close'] = result['series'][-1]['close']
+    if quality['status'] != 'ready':
+        result['path_check'] = 'adjustment_unverified'
+        if result['status'] not in ('pending', 'data_gap'):
+            result['status'] = 'adjustment_gap'
+    return result
+
+
+def _evaluate_origin_basis(origin, sessions, bars, as_of_date):
     eligible=sorted({str(d) for d in sessions if origin['signal_date']<str(d)<=as_of_date})[:10]
     by={str(b['trading_date']):b for b in bars if str(b['trading_date']) in eligible}
     base=number(origin.get('close'))
@@ -96,8 +122,8 @@ def evaluate(origin, sessions, bars, as_of_date):
     lows=[(float(b['low'])/base-1)*100 for b in available if number(b.get('low')) is not None and base]
     series=[dict(date=d,close=number(by[d].get('close')),main_net=number(by[d].get('main_net')),
         amount=number(by[d].get('amount')),pct_chg=number(by[d].get('pct_chg')),
-        limit_state='closed_limit_up' if number(by[d].get('limit_up')) and abs(float(by[d]['close'])-float(by[d]['limit_up']))<.011 else
-                    'closed_limit_down' if number(by[d].get('limit_down')) and abs(float(by[d]['close'])-float(by[d]['limit_down']))<.011 else 'not_confirmed') for d in eligible if d in by]
+        limit_state='closed_limit_up' if number(by[d].get('close')) is not None and number(by[d].get('limit_up')) and abs(float(by[d]['close'])-float(by[d]['limit_up']))<.011 else
+                    'closed_limit_down' if number(by[d].get('close')) is not None and number(by[d].get('limit_down')) and abs(float(by[d]['close'])-float(by[d]['limit_down']))<.011 else 'not_confirmed') for d in eligible if d in by]
     return dict(origin_id=origin['origin_id'],symbol=origin['symbol'],name=origin['name'],lane=origin['lane'],
         signal_date=origin['signal_date'],display_rank=origin.get('display_rank'),rank=origin['rank'],
         as_of_date=as_of_date,version=VERSION,timing=origin['timing'],windows=windows,

@@ -6,7 +6,7 @@ from .review_evidence import sanitize
 
 
 def record_diagnostic(database,item_id,payload):
-    keys=('status','role','reason','system_owner','next_step','evidence_hash','model_started')
+    keys=('status','role','reason','system_owner','next_step','evidence_hash','model_started','work_plan')
     value={k:payload.get(k) for k in keys}
     require(all(isinstance(value[k],str) and value[k] for k in ('status','role','reason','system_owner','next_step')),'Diagnostic requires actionable bounded text')
     require(type(value['model_started']) is bool,'model_started must be factual boolean')

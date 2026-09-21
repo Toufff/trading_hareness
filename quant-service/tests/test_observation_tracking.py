@@ -43,15 +43,17 @@ def test_manual_rows_registered_after_midnight_evaluate_from_scan_date():
     o['signal_date']='2026-09-11';o['manual']={'source_scan_date':'2026-09-10'}
     fixed=scan_dated(o)
     assert fixed['signal_date']=='2026-09-10' and fixed['signal_date_recorded']=='2026-09-11'
-    e=evaluate(fixed,['2026-09-11','2026-09-14'],[dict(trading_date='2026-09-11',close=103),dict(trading_date='2026-09-14',close=101)],'2026-09-14')
+    fixed['adj_factor']=1
+    e=evaluate(fixed,['2026-09-11','2026-09-14'],[dict(trading_date='2026-09-11',close=103,adj_factor=1),dict(trading_date='2026-09-14',close=101,adj_factor=1)],'2026-09-14')
     assert e['windows']['1']['return_pct']==3.0
     assert scan_dated(origins(sample(),'2026-09-10T16:00:00+08:00','live_scan')[0])['signal_date']=='2026-09-10'
 
 
 def test_success_and_failure_retained_not_trade_returns():
     o=origins(sample(),'2026-09-10T16:00:00+08:00','published')[0]
+    o['adj_factor']=1
     for close in (110,90):
-        e=evaluate(o,['2026-09-11'],[dict(trading_date='2026-09-11',close=close,high=110,low=90,open=100)],'2026-09-11')
+        e=evaluate(o,['2026-09-11'],[dict(trading_date='2026-09-11',close=close,high=110,low=90,open=100,adj_factor=1)],'2026-09-11')
         assert e['windows']['1']['return_pct']==(10 if close==110 else -10)
         assert e['path_check']=='both_touched_order_unknown'
         assert e['execution_status']=='not_verified'

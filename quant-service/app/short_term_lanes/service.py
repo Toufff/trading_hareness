@@ -93,7 +93,11 @@ def build(database: Any, day: date, *, history_fetcher=fetch_candidate_history, 
     )
     from ..strategy_governance.configuration import code_fingerprint
     result['strategy_code_hash']=code_fingerprint()
+    from ..strategy_governance.semantic_identity import decision_versions
+    result['decision_versions'] = decision_versions(result.get('settings', {}))
     result['event_research']=news
+    from ..event_research.impact_audit import consumption
+    result['news_consumption'] = consumption(result, news)
     result["company_reviews"] = list(reviews.values())
     result['flow_sensitivity'] = (compare_flow_experiments(rows, sessions, settings, features, mainboard)
         if result['status']=='completed' else {'status':'data_gap', 'production_effect':'none'})

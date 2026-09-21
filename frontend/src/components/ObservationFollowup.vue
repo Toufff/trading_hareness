@@ -5,6 +5,7 @@ export type FollowupItem = {
   display_rank: number | null; rank: number; status: string; timing: string; expected_sessions: number;
   latest_return_pct: number | null; path_check: string; original_confirmation: string; original_invalidation: string;
   original_analysis?: string | null;
+  virtual_entry?: {state: string; execution?: {net_return_pct?: number; status?: string}};
   windows: Record<string, { status: string; return_pct: number | null }>;
 };
 export type Followup = { status: string; note: string; total: number; items: FollowupItem[] };
@@ -14,6 +15,7 @@ const items = computed(() => (props.followup?.items ?? []).filter(r =>
   r.expected_sessions > 0 && (!props.lane || r.lane === props.lane) &&
   (all.value || r.display_rank != null) && `${r.name}${r.symbol}`.includes(query.value.trim())));
 const labels: Record<string,string> = { both_touched_order_unknown:'上下沿都触及，先后未知', reference_low_broken:'原下沿曾跌破', reference_high_touched:'原上沿曾触及', no_reference_touch:'未触及原上下沿', no_data:'缺后续行情' };
+const entryLabels: Record<string,string> = {unregistered:'未事前登记，不补造买点',waiting:'等待日线条件',expired:'观察期已到',invalidated:'结构已失效',data_gap:'证据有缺口',awaiting_next_session:'已确认，等待次一交易日',execution_window_pending:'模拟观察窗未结束',execution_blocked:'未通过可成交性检查',simulated:'日线代理模拟完成'};
 const value = (w: FollowupItem['windows'][string] | undefined) => w?.status === 'observed' && w.return_pct != null ? `${w.return_pct > 0 ? '+' : ''}${w.return_pct.toFixed(2)}%` : w?.status === 'not_due' ? '未到期' : '缺数据';
 </script>
 
@@ -30,7 +32,7 @@ const value = (w: FollowupItem['windows'][string] | undefined) => w?.status === 
           <td><strong>{{ r.name }}（{{ r.symbol.split('.')[0] }}）</strong><small>{{ r.signal_date }} · {{ r.timing === 'reconstructed' ? '历史补录' : '前瞻记录' }}</small></td>
           <td>{{ r.lane_label ?? r.lane }} / {{ r.display_rank ?? '未进首屏' }}</td>
           <td v-for="h in ['1','3','5','10']" :key="h">{{ value(r.windows[h]) }}</td>
-          <td><details><summary>{{ labels[r.path_check] ?? r.path_check }}</summary><p>原确认：{{ r.original_confirmation }}</p><p>原失效：{{ r.original_invalidation }}</p><p v-if="r.original_analysis">当时公司复核：{{ r.original_analysis }}</p><p>日线触线不是完整条件验证，也不是已成交。</p></details></td>
+          <td><details><summary>{{ labels[r.path_check] ?? r.path_check }}</summary><p>原确认：{{ r.original_confirmation }}</p><p>原失效：{{ r.original_invalidation }}</p><p v-if="r.original_analysis">当时公司复核：{{ r.original_analysis }}</p><p v-if="r.virtual_entry">独立买点实验：{{ entryLabels[r.virtual_entry.state] ?? '待核查' }}<span v-if="r.virtual_entry.execution?.net_return_pct != null"> · 扣费模拟 {{ r.virtual_entry.execution.net_return_pct.toFixed(2) }}%</span></p><p>日线代理实验不是原文字条件的完整确认，也不代表实际成交。</p></details></td>
         </tr>
       </tbody></table></div>
       <p v-if="!items.length">当前筛选没有到期记录。</p><button v-if="items.length>count" @click="count+=40">显示更多记录</button>

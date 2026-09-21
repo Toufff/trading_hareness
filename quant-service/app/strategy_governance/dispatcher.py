@@ -374,6 +374,13 @@ def dispatch(database, *, registry, job_root, roles=tuple(ROLE_ACTION), execute=
     os.write(descriptor,str(os.getpid()).encode()); os.close(descriptor)
     results=[]
     try:
+        from .work_queue import prepare_queue
+        try:
+            queue_receipt = prepare_queue(database)
+        except Exception as error:
+            # Existing independently ready work must not be blocked by a
+            # collector/storage outage; never report that collection passed.
+            queue_receipt = {'status':'failed','error_type':type(error).__name__,'live_effect':'none'}
         try:
             exe=find_codex_executable(executable,registry)
         except (OSError,ValueError) as error:
@@ -449,7 +456,8 @@ def dispatch(database, *, registry, job_root, roles=tuple(ROLE_ACTION), execute=
                 'job_dir':str(job_dir),'recorded_at':datetime.now(timezone.utc).isoformat()}
             _write(attempt_path,attempts)
         result={'status':'completed' if results and all(r['status'] in ('advanced','rejected') for r in results) else 'waiting' if results or waiting_roles else 'idle',
-                'live_effect':'none','jobs':results,'waiting_roles':waiting_roles,'diagnostic_errors':diagnostic_errors}
+                'live_effect':'none','jobs':results,'waiting_roles':waiting_roles,'diagnostic_errors':diagnostic_errors,
+                'work_queue':queue_receipt}
         _write(root/'latest.json',result)
         return result
     finally:

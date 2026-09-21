@@ -27,8 +27,10 @@ async function loadDetail(section: 'followup' | 'effectiveness' | 'research' | '
   if (!run || loadingDetail.value) return;
   detailController = new AbortController(); const controller = detailController;
   loadingDetail.value = true; detailError.value = '';
-  const old = section === 'followup' ? loadedDetails.value.followup?.items ?? [] : [];
-  const query = new URLSearchParams({ run_id: run, section, limit: '40', offset: String(append ? old.length : 0) });
+  const old = loadedDetails.value.followup?.items ?? [];
+  const oldGroups = loadedDetails.value.effectiveness?.groups ?? [];
+  const offset = section === 'effectiveness' ? oldGroups.length : old.length;
+  const query = new URLSearchParams({ run_id: run, section, limit: '40', offset: String(append ? offset : 0) });
   try {
     const response = await getJson<{detail: unknown}>(`/api/research/strategy/post-close/detail?${query}`, {signal: controller.signal});
     if (scan.value?.detail_run_id !== run || controller.signal.aborted) return;
@@ -36,7 +38,10 @@ async function loadDetail(section: 'followup' | 'effectiveness' | 'research' | '
     else if (section === 'followup') {
       const next = response.detail as NonNullable<StrategyScan['followup']>;
       loadedDetails.value.followup = {...next, items: append ? [...old, ...next.items] : next.items};
-    } else if (section === 'effectiveness') loadedDetails.value.effectiveness = response.detail as StrategyScan['effectiveness'];
+    } else if (section === 'effectiveness') {
+      const next = response.detail as NonNullable<StrategyScan['effectiveness']>;
+      loadedDetails.value.effectiveness = {...next, groups: append ? [...oldGroups, ...next.groups] : next.groups};
+    }
     else loadedDetails.value.event_research = response.detail as StrategyScan['event_research'];
   } catch (error) { if (!controller.signal.aborted) detailError.value = String(error); }
   finally { if (detailController === controller) loadingDetail.value = false; }
@@ -76,7 +81,7 @@ const leadName = (lane: StrategyLane) => {
       <div v-if="scan.details_deferred" class="detail-controls" aria-label="按需加载同轮证据">
         <button :disabled="loadingDetail" @click="loadDetail('research')">公司研究详情</button>
         <button :disabled="loadingDetail" @click="loadDetail('events')">消息影响详情</button>
-        <button :disabled="loadingDetail" @click="loadDetail('effectiveness')">策略效果样本</button>
+        <button :disabled="loadingDetail" @click="loadDetail('effectiveness', !!loadedDetails.effectiveness)">策略效果样本{{ loadedDetails.effectiveness ? ' · 再加载40组' : '' }}</button>
         <button :disabled="loadingDetail" @click="loadDetail('followup', !!loadedDetails.followup)">往期跟踪 · {{ loadedDetails.followup ? '再加载40条' : '加载40条' }}</button>
         <span v-if="loadingDetail" role="status">正在读取同轮证据…</span>
       </div>
