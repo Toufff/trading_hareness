@@ -53,6 +53,15 @@ class JevPaperTests(unittest.TestCase):
             else:
                 self.assertLessEqual(order['quantity'], 500)
 
+    def test_quote_clock_allows_only_bounded_capture_latency(self):
+        for stamp, allowed in [('10:00:03', True), ('10:00:10', True), ('10:00:11', False),
+                               ('09:58:00', True), ('09:57:59', False), ('20260921930030', False)]:
+            with self.subTest(stamp=stamp):
+                c = context()
+                c['detail_symbols']['000811.SZ']['quote']['quote_time'] = stamp
+                _, options = build_request(c, 'jev-1.13.0')
+                self.assertEqual(len(options) > 1, allowed)
+
     def test_overweight_alone_is_not_an_exit_rule_and_full_cash_option_exists(self):
         c = context()
         c['account']['positions'][0]['weight_pct'] = 95
@@ -86,6 +95,9 @@ class JevPaperTests(unittest.TestCase):
         def handle(request):
             seen.append(request)
             body = json.loads(request.content)
+            self.assertIsInstance(body['state'], str)
+            state = json.loads(body['state'])
+            self.assertEqual(state['market_and_account'], context())
             options = body['questions']['action']['criteria']
             return httpx.Response(200, json={'model': 'jev-1.13.0', 'usage': {'input_tokens': 50},
                 'answers': {'action': {'type': 'choice', 'choice': 'wait', 'confidence': 1,
@@ -97,6 +109,14 @@ class JevPaperTests(unittest.TestCase):
         self.assertNotIn('test-only', json.dumps(result.transcript))
         self.assertIn('request', result.transcript[0])
         self.assertEqual(result.output['orders'], [])
+
+    def test_provider_token_error_has_actionable_diagnostic(self):
+        with patch.dict('os.environ', {'TYPESAFE_API_KEY': 'test-only', 'TYPESAFE_HTTP_PROXY': ''}):
+            with self.assertRaises(ModelFailure) as raised:
+                JevPaperModel(transport=httpx.MockTransport(lambda request: httpx.Response(
+                    400, json={'detail': {'error_type': 'max_tokens_exceeded'}}))).decide(json.dumps(context()))
+        self.assertIn('max_tokens_exceeded', raised.exception.detail)
+        self.assertIn('typed_request', raised.exception.transcript[0]['type'])
 
     def test_auth_failure_is_not_retried_or_leaked(self):
         calls = []

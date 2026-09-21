@@ -40,7 +40,9 @@ def _fresh(quote: dict[str, Any], now: datetime) -> bool:
             at = datetime.fromisoformat(raw)
             if at.tzinfo is None:
                 at = at.replace(tzinfo=SH)
-        return 0 <= (now - at).total_seconds() <= 120
+        # context.now marks collection start; batched HTTP reads finish later.
+        # Permit at most 10 seconds of acquisition skew, not arbitrary future data.
+        return -10 <= (now - at).total_seconds() <= 120
     except (ValueError, TypeError):
         return False
 
@@ -169,6 +171,10 @@ class JevPaperModel:
         if not isinstance(context, dict):
             raise ModelFailure('jev_invalid_context')
         request, options = build_request(context, self.model)
+        # The API accepts state as text. Compact UTF-8 JSON is lossless and avoids
+        # the provider's expanded rendering of nested object states. The largest
+        # real 2026-09-21 sample failed as an object but used 31,102 tokens as text.
+        request['state'] = json.dumps(request['state'], ensure_ascii=False, separators=(',', ':'))
         if len(json.dumps(request, ensure_ascii=False).encode('utf-8')) > 90000:
             raise ModelFailure('jev_context_too_large', 'pilot request exceeds 90000 bytes')
         key = self._key()
@@ -188,7 +194,17 @@ class JevPaperModel:
                     time.sleep(delay)
                     continue
                 if response.status_code != 200:
-                    raise ModelFailure('jev_http_error', f'HTTP {response.status_code}', transcript)
+                    # Only expose the provider's machine-readable error category,
+                    # never echo a body that could reflect account data or keys.
+                    category = ''
+                    try:
+                        detail = response.json().get('detail')
+                        candidate = detail.get('error_type') if isinstance(detail, dict) else None
+                        if isinstance(candidate, str) and re.fullmatch(r'[a-zA-Z0-9_.-]{1,80}', candidate):
+                            category = candidate
+                    except (ValueError, AttributeError):
+                        pass
+                    raise ModelFailure('jev_http_error', f'HTTP {response.status_code} {category}'.strip(), transcript)
                 break
         try:
             payload = response.json()
