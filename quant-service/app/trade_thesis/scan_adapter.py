@@ -314,6 +314,12 @@ def evaluate_source_run(database, source_run_id=None, cutoff_at=None, symbols=No
         try:
             current = candidates.get(symbol)
             thesis = by_symbol.get(symbol)
+            # Preserve expired cycles in the append-only ledger, but permit a
+            # genuinely later discovery to start a new cycle. Replaying the
+            # same run can never renew the old deadline.
+            if thesis is not None and current and source['run_id'] != thesis['source_run_id']:
+                if parse_time(source['available_at'], 'source_available_at') > parse_time(thesis['terminal_deadline'], 'terminal_deadline'):
+                    thesis = None
             if thesis is None:
                 # Only newly produced same-day scans are prospective captures.
                 # Replaying a prior session today remains explicitly reconstructed.

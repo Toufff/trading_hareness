@@ -20,12 +20,13 @@ def digest(value):
     return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True,default=str).encode()).hexdigest()
 
 
-MUTABLE_FIELDS = ('origin_id', 'available_at', 'timing', 'company_review', 'source')
+MUTABLE_FIELDS = ('origin_id', 'available_at', 'timing', 'company_review', 'source', 'virtual_entry_contract')
 
 
 def identity_fields(record):
     """Immutable discovery facts; research, source label and timestamps are excluded."""
-    return {k: v for k, v in record.items() if k not in MUTABLE_FIELDS}
+    value = {k: v for k, v in record.items() if k not in MUTABLE_FIELDS}
+    return value
 
 
 def origins(result, available_at, source):
@@ -59,6 +60,9 @@ def origins(result, available_at, source):
             # nor on research attached later (company_review) or on whether the same
             # discovery was read live or re-imported from the persisted run (source);
             # otherwise every retry and every review closure appended a new ledger row.
+            from .virtual_entry import freeze
+            item_origin['virtual_entry_contract'] = freeze(item_origin, m, available_at) if source == 'live_scan' else {
+                'status': 'unregistered', 'reason': 'historical_capture_not_prospective'}
             item_origin['origin_id']=digest(identity_fields(item_origin))
             timestamp=str(available_at)
             item_origin.update(available_at=timestamp,
@@ -73,6 +77,8 @@ def evaluate(origin, sessions, bars, as_of_date):
     result = _evaluate_origin_basis(origin, sessions, adjusted, as_of_date)
     result['adjustment_status'] = quality['status']
     result['adjustment_evidence'] = quality
+    from .virtual_entry import evaluate as evaluate_virtual
+    result['virtual_entry'] = evaluate_virtual(origin, sessions, bars, adjusted, as_of_date)
     for point in result['series']:
         original = raw[point['date']]
         point['adjusted_close_on_origin_basis'] = point['close']
