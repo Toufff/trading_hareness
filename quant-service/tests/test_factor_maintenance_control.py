@@ -61,6 +61,9 @@ class ControlContractTests(unittest.TestCase):
         self.assertIn('--read-only',command)
         self.assertEqual((env['PGHOST'],env['PGPORT']),('db-batch-tunnel','5433'))
         self.assertEqual(command[-2:],['--env-file','-'])
+        self.assertNotIn('--cpus',command)
+        cpu_command, _ = module.launch_spec(container, Path('/bundle/fixture-sha'), ['probe'], cpu_quota_supported=True)
+        self.assertIn('--cpus',cpu_command)
 
 
 @unittest.skipUnless(os.getenv('PGDATABASE','').startswith('stock_audit_test_'), 'requires disposable stock_audit_test_ database')

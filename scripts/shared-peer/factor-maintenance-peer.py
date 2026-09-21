@@ -21,7 +21,7 @@ ENV_KEYS = frozenset({
 })
 
 
-def launch_spec(inspected, root, arguments):
+def launch_spec(inspected, root, arguments, *, cpu_quota_supported=False):
     """Pure launch plan: secret values live only in the child environment."""
     env = dict(os.environ)
     inherited = dict(item.split('=', 1) for item in inspected['Config']['Env'] if '=' in item)
@@ -32,6 +32,7 @@ def launch_spec(inspected, root, arguments):
         raise RuntimeError('reference container is missing shared database/gateway settings')
     selected.update(PGHOST='db-batch-tunnel', PGPORT='5433',
                     APP_GIT_SHA=f'factor-bundle:{root.name}', QUANT_FACTOR_ACTOR='stockpeer-maintainer',
+                    QUANT_FACTOR_CPU_QUOTA='2' if cpu_quota_supported else 'unavailable_in_rootless_daemon',
                     PYTHONPATH='/opt/factor/quant-service', PYTHONDONTWRITEBYTECODE='1',
                     PYTHONUNBUFFERED='1')
     networks = inspected['NetworkSettings']['Networks']
@@ -45,9 +46,11 @@ def launch_spec(inspected, root, arguments):
            '--label', 'stockplatform.role=factor-maintenance',
            '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
            '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
-           '--pids-limit', '128', '--memory', '1g', '--cpus', '2',
+           '--pids-limit', '128', '--memory', '1g',
            '--mount', f'type=bind,src={root},dst=/opt/factor,readonly',
            '--workdir', '/opt/factor', '--entrypoint', 'python']
+    if cpu_quota_supported:
+        cmd.extend(['--cpus', '2'])
     for key in sorted(selected):
         cmd.extend(['-e', key])
     cmd.append(inspected['Image'])  # Immutable running image ID, not a moving tag.
@@ -84,6 +87,7 @@ def probe():
                   contract_version=contract.get('contract_version',contract.get('version')),
                   factor_maintenance=contract.get('factor_maintenance'),
                   source_version=os.getenv('APP_GIT_SHA'), database_path='db-batch-tunnel:5433')
+    report['resource_limits'] = dict(memory_mib=1024,pids=128,cpu_quota=os.getenv('QUANT_FACTOR_CPU_QUOTA'))
     print(json.dumps(report, ensure_ascii=True))
     return 0 if report['status']=='ready' else 1
 
@@ -99,7 +103,8 @@ def main(argv=None):
     if any(value == '--env-file' or value.startswith('--env-file=') for value in rest):
         parser.error('the launcher always uses inherited private environment')
     inspected = json.loads(subprocess.check_output(['docker','inspect',CONTAINER]))[0]
-    command, env = launch_spec(inspected, ROOT, [args.command,*rest])
+    cpu_quota = json.loads(subprocess.check_output(['docker','info','--format','{{json .CPUCfsQuota}}']))
+    command, env = launch_spec(inspected, ROOT, [args.command,*rest], cpu_quota_supported=cpu_quota)
     return subprocess.run(command, env=env, check=False).returncode
 
 

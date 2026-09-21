@@ -76,7 +76,9 @@ probe 应返回 ready、stock_peer、SharedLonghuReadSource，五张表 CRUD 为
 它只证明连接/权限/契约，不证明因子正确，也不替代真实龙虎调用测试。
 代码包只读挂载，复用 `trading-hareness-peer-quant-research-1` 正在运行的镜像 ID 和私有配置；
 不执行镜像原 entrypoint，所以不迁移、不启动背景调度、不重建现有服务。
-单次容器退出即删除，限制 2 CPU / 1 GiB / 128 PID，临时目录 64 MiB。
+单次容器退出即删除，限制 1 GiB / 128 PID，临时目录 64 MiB。
+支持 CPU CFS quota 的 daemon 另限 2 CPU；当前 lightServer rootless 不支持该能力，
+probe 的 resource_limits 明确标记 CPU quota 不可用，不声称已经施加 CPU 硬限。
 数据库走独立 `db-batch-tunnel:5433`，共享龙虎走 `http://db-tunnel:5681`。
 凭据只进入进程/容器环境，不写 argv/Git/手册；可信 Docker 管理员仍能查看环境。
 不要在工单粘贴完整 docker inspect。
