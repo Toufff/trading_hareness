@@ -1,6 +1,6 @@
 # 协作者复权维护交接
 
-本文件面向 lightServer 上的可信协作者。开发与操作入口已实现；最终发布版本和实测结果见文末。
+本文件面向 lightServer 上的可信协作者。owner 与 peer 维护入口已部署；版本和实测结果见文末。
 范围是 StockPlatform 累计复权因子，不涉及券商下单或实盘账户操作。
 
 ## 本轮授权与方案复审
@@ -34,9 +34,9 @@
 - 开发基线：5181eed；独立工作区 F:/AIWorkflow/worktrees/peer-factor-maintenance。
 - 原目录有其他未完成的 observation-adjusted-returns 测试，未改动。
 - 开始时生产：20260921T200743-0d06d0864611-clean。
-- 相关隔离库测试：341 passed / 5 skipped / 657 subtests；5 项为既有额外存储搬迁实验。
+- 最终相关隔离库测试：342 passed / 5 skipped / 663 subtests；5 项为既有额外存储搬迁实验。
 - 完整后端首轮发现 main.py 长度守卫，已精简接线说明，未放宽守卫。
-- 最终完整测试、正式 release、peer 版本与真实读回待发布后补录；不得提前视为上线验收。
+- 最终后端 3181 passed / 127 skipped / 888 subtests；跳过项是其他模块的外部环境条件，本轮 16 个真实数据库控制测试均运行。
 
 ## 权限与责任
 
@@ -221,3 +221,93 @@ owner schema/代码验收后，git archive 同源包部署 peer 并切 current�
 | 剩余 NULL | 看 plan/projection 的证据及锚点，不填 1 |
 | rollback conflict / journal incomplete | 不强行覆盖；交付 run_id、日期范围、安全日志给 owner |
 | owner 发布期间短暂失败 | 有界退避；锁连接断开后停止本次，不续写 |
+
+## 发布与验收记录（2026-09-22）
+
+### 版本与入口
+
+- 本任务首次 owner release：`20260922T001401-cce23b4193d2-clean`，源码 `cce23b4193d2ef6c8a6b8313c900b8102a71078d`。
+- 最终整合 owner release：`20260922T010409-390a7560b431-clean`，源码 `390a7560b431`；包含同日业务闭环更新与本模块，未回退任一任务。
+- Schema：`20260921_0115`，三张表捕获触发器已安装；新审计冷表/全历史运维视图已安装，未修改角色超时。
+- peer 当前包：`1886fcf437d7344e72d724753bec63147d3a2dc8`；相对首次 owner 包增加 rootless CPU quota 能力探测、peer 4 路并发配置；最终整合 owner 已包含这些源码，owner 默认直连行为不变。
+- peer 稳定入口：`/home/stockpeer/factor-maintenance/current/scripts/shared-peer/factor-maintenance-peer.py`。
+- peer 最新交接文档：`/home/stockpeer/factor-maintenance/HANDOFF.md`，可直接交给现有 stockpeer 协作者阅读。
+- peer 历史包：`/home/stockpeer/factor-maintenance/releases/<commit>`；目录由 stockpeer 持有，可自行维护。
+- 源码分支：`codex/peer-factor-maintenance`，已合入主工作分支的 `390a756`。与同仓库另一项业务闭环任务的整合发布由“大师教教”任务协调，不能从未合入本分支的旧 HEAD 再发布而覆盖接线。
+- 最新活跃版本以 `G:/StockPlatform/current/release-manifest.json`、peer current 实际指向为准，不把本节初次发布号误当永远最新。
+
+### 已完成的验证
+
+| 层次 | 结果与边界 |
+|---|---|
+| 相关隔离 PostgreSQL | 342 passed；5 项其他存储实验跳过；16 项新 DB 场景实际执行 |
+| 全后端 | 3181 passed / 127 skipped / 888 subtests；不是声称全仓库零跳过 |
+| 前端 | 标准发布门禁 33 文件、138 用例通过，typecheck/build 通过；有既有 >500 kB chunk 告警 |
+| 最终整合发布 | 390a756 发布门禁：3188 后端、139 前端通过；typecheck/build 通过；195 条在线 OpenAPI 一致；共享端到端验证通过 |
+| Adapter | 116 / 116 通过 |
+| Windows | 标准发布契约通过；另单独执行复权 04:30 任务契约和存储 tier wiring |
+| API | 首次上线 OpenAPI 194 路径与该版本 generated.ts 一致；无新增 HTTP 写接口 |
+| Shared runtime | 首次 00:54:53、整合发布后 01:10:25 均 verified：owner/peer health 200、真实行情、契约、完整股票接口及 301 分页；凭据未回显 |
+| 权限 | 真实 stock_peer 登录，经 batch:5433，五张维护关系 CRUD 全部可用；SharedLonghuReadSource 正确选中 |
+| 跨机器互斥 | owner 持锁时 peer 正式 sync 返回 busy / exit 3；未触发重复抓取/写入 |
+| 正式 repair | 自动识别窗口返回 unchanged；没有损坏日期或未标注占位证据，未人为制造修复 |
+| rollback | 上述零变更运行预演 planned、正式回滚 completed；数据恢复细节由隔离 DB 测试证明，非生产造假因子演练 |
+| sync | 7 日预演成功；0 日空窗口正式入口 unchanged，验证运行登记，不冒充真实补齐 |
+| validate | 在只读输入边界抽取 5 只真实历史股票，CLI validate 调真实共享龙虎；5 step pairs，fetch_errors=0，累计相对误差=0；该样本无公司行动，不外推全市场算法精度 |
+| 全市场指定日 repair 预演 | 9 月 21 日真实只读预演 planned：5,420 标的、5,413 推导、5,395 不变、18 可补空值；龙虎错误 0，存量冲突 0，预期值不一致和占位泄漏均 0；7 个指数无因子链保留 NULL |
+
+最新 status 读回：最近 5 个结算日达到覆盖阈值，pending_dates=[]；两张日线的占位因子泄漏和
+因子值不一致均为 0。达到覆盖阈值不等于每个股票都已补齐：9 月 21 日 status 分母 5,420、
+有效因子 5,395（99.5387%），保留诚实缺口，不能把“complete”理解成 100% 覆盖。
+owner/adapter 本地 health 均 200；未认证公网 /api/config 返回 401，属于认证边界检查，
+不冒充已登录网页的端到端验收。
+
+全市场回执：peer `/home/stockpeer/factor-maintenance/receipts/20260922-full-preview.json`，
+owner 证据目录 `factor-peer-full-preview.json`；stderr 为 0 字节，运行约 10 分钟。
+预演投影 NULL 从 25 降至 7，但本次没有执行这个窗口的 apply，生产仍保留原值。
+18 条为可补齐候选，不是现有值错误；7 个指数为 000001.SH、000300.SH、000688.SH、
+000852.SH、000905.SH、399001.SZ、399006.SZ，原因均 no_factor_lineage。
+下一次需要补这批空值时，先重新预演再按正常授权执行 repair --apply；
+不要把本次 planned 当成已经落库，也不要为达到零 NULL 给指数填占位 1。
+
+隔离数据库覆盖：数值和 raw JSON 高精度恢复、插入/更新回滚、同一行多次写入反向恢复、
+事务失败不留变更、部分日期提交后运行失败、不同连接抢锁、断线释放锁与禁止重连续写、
+遗留 running 清理、只读预演、缺触发器拒绝、重复值不膨胀日志、后续运行阻止旧回滚、
+最新优先回滚链、直接改值冲突整次拒绝、归档/缺失日志拒绝部分回滚，以及生产入口实际调用 guard。
+
+生产审计示例：
+
+- repair：`f25a5aaa-2947-4385-8f72-31096b5396d4`，初始 unchanged，回滚后 rolled_back，change_count=0。
+- rollback：`1a719f08-f1b7-4f22-a0ca-d9cb7716cddc`，completed，change_count=0。
+- 空窗口 sync：`9ed1d47f-b47c-4f63-8b46-1099a052779c`，unchanged。
+- database_role 均为 `stock_peer`，source_version 为 peer bundle 的真实版本目录。
+
+### 首轮暴露的问题及处置
+
+1. 新隔离库夹具缺 available_at、旧测试假依赖缺 control：修正夹具及兼容接线，未放松生产校验。
+2. main.py 长度守卫、storage tier 索引/表数守卫：精简接线说明、补新表明确断言，不抬高架构上限。
+3. 懒加载前端测试过早断言：等真实 dynamic import 完成，不改业务 UI 来凑测试。
+4. 干净 release clone 缺 GUI host 编译产物：先标准 build，再完整发布；未用 SkipTests。
+5. rootless Docker 不支持 CPU CFS quota：能力探测后跳过该一项，保留内存/PID限制并在 probe 明示。
+6. 16 路远端预演导致 owner 4 worker / 8 queue 饱和，503 也被旧 peer 转成 500：实测错误正文为 capacity saturated；改 peer 为 4 路，完整共享验收恢复 verified。失败预演未写因子。
+7. 发布保留清理中有旧 GUI host 被占用的告警，保留原目录延后清理；未强杀或删除正在使用的可执行文件。标准保留策略清理 `20260921T163439-d9e8b8670ea5-clean`，可由 Git 源码重建；前一版仍保留用于代码回退。
+8. 全市场进程在 Docker 事件中 exitCode=0，但原长 SSH 连接未收回 stdout：关闭仅属于本次只读验收的滞留 SSH 客户端，改为服务器本地持久化结果。后续长任务也建议用下述方式保留回执，避免把终端连接当唯一证据。
+
+### 长任务的耐断线执行
+
+在 peer 主机 stockpeer 的交互 shell 中（沿用前面的 FACTOR / Docker 环境）：
+
+```bash
+mkdir -p /home/stockpeer/factor-maintenance/receipts
+RECEIPT=/home/stockpeer/factor-maintenance/receipts/repair-$(date +%Y%m%d-%H%M%S).json
+nohup python3 "$FACTOR" repair --from 2026-09-21 --to 2026-09-21 --actor collaborator-name >"$RECEIPT" 2>"$RECEIPT.stderr" < /dev/null &
+echo "$! $RECEIPT"
+# 完成后读取回执；这是只读预演，实际日期应根据待修复证据选择。
+```
+
+SSH 建议加 `-o ServerAliveInterval=15 -o ServerAliveCountMax=3`。不要仅因 SSH 断开就重复启动写任务；
+先查 history、持锁状态和已有进程。正式写任务的 DB 审计比 SSH stdout 更可靠。
+本轮完整证据归档于 owner `G:/StockPlatform/data/research/peer-factor-maintenance-20260922`，不含私有 env 文件。
+
+未声称的验收：未在生产写假因子测试破坏性回滚，未等到下一次 04:30 自然触发，
+未验证每个外部写入旁路都遵守新锁，未将这次维护测试当作策略盈利或交易建议验证。
