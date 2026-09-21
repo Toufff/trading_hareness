@@ -111,6 +111,20 @@ class LonghuVendorSourceTests(unittest.TestCase):
         self.assertEqual(len(parsed["asks"]), 5)
         self.assertEqual((parsed["outer_volume_lot"], parsed["inner_volume_lot"]), (948408, 1162931))
 
+    def test_stock_snapshot_normalizes_morning_vendor_clock_before_slicing(self):
+        for raw in [93003000, '93003000', '093003000', 93003000.0, '09:30:03.000', '93003']:
+            with self.subTest(raw=raw):
+                parsed = parse_stock_snapshot_payload({
+                    'code': '600664', 'day': '20260921', 'real': {'last_px': 8.25, 'time': raw}
+                }, '600664.SH')
+                self.assertEqual(parsed['trade_time'], '20260921093003')
+        for raw in ['256000000', 'not-time', '999', '126100000']:
+            with self.subTest(raw=raw):
+                parsed = parse_stock_snapshot_payload({
+                    'code': '600664', 'day': '20260921', 'real': {'last_px': 8.25, 'time': raw}
+                }, '600664.SH')
+                self.assertIsNone(parsed['trade_time'])
+
     def test_stock_minutes_are_normalized_for_existing_feature_engine(self):
         rows = parse_stock_minute_payload({
             "trend": [

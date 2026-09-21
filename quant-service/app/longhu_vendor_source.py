@@ -111,6 +111,32 @@ def _vendor_day(value: Any) -> str:
     return "".join(character for character in str(value or "") if character.isdigit())[:8]
 
 
+def _vendor_clock(value: Any) -> str:
+    """HHMMSSmmm may be numeric: 93003000 is 09:30:03, not 93:00:30.
+
+    Pad the complete vendor clock before removing milliseconds. Never create
+    a plausible timestamp by stripping arbitrary characters from malformed data.
+    """
+    raw = str(value if value is not None else '').strip()
+    clock = re.fullmatch(r'(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?', raw)
+    if clock:
+        digits = ''.join(clock.groups()).zfill(6)
+    else:
+        numeric = re.fullmatch(r'(\d+)(?:\.0+)?', raw)
+        if not numeric:
+            return ''
+        digits = numeric.group(1)
+        if len(digits) in {8, 9}:
+            digits = digits.zfill(9)[:6]
+        elif len(digits) in {5, 6}:
+            digits = digits.zfill(6)
+        else:
+            return ''
+    if int(digits[:2]) > 23 or int(digits[2:4]) > 59 or int(digits[4:6]) > 59:
+        return ''
+    return digits
+
+
 def _book_levels(weituo: Mapping[str, Any], prefix: str) -> list[dict[str, float]]:
     """Five price/size levels in board lots; an empty side stays explicit zeros."""
     levels = []
@@ -137,7 +163,7 @@ def parse_stock_snapshot_payload(payload: Mapping[str, Any], symbol: str) -> dic
     if not normalized or not code or _stock_code(payload.get("code")) != code or price is None or price <= 0:
         return None
     day = _vendor_day(payload.get("day"))
-    quote_time = "".join(character for character in str(real.get("time") or "") if character.isdigit())[:6]
+    quote_time = _vendor_clock(real.get("time"))
     weituo = payload.get("weituo") if isinstance(payload.get("weituo"), Mapping) else {}
     return {
         "ts_code": normalized,
