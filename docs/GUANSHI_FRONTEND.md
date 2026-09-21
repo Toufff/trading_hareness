@@ -21,3 +21,14 @@
 5. 将 `PLAYWRIGHT_BASE_URL` 指向公网，设置本机 `GUANSHI_CREDENTIALS_FILE` 凭据文件路径重复验收；凭据只注入 Cookie，不输出或提交。可用 `PLAYWRIGHT_CHANNEL=msedge` 使用已安装浏览器。
 
 样式通过不能代替数据链验收：持仓过期、研究不足、数据质量警告仍须如实展示。不能因为更换主题而隐藏警告或把历史数据当作实时结果。
+
+## 本次上线记录
+
+- 源提交：`7114fe8eb22d5b65edf705df757c401bbb7c915d`，已推送用户 fork `Toufff/trading_hareness`。
+- Windows 正式版本：`20260922T024805-7114fe8eb22d-clean`，清洁提交、tests=passed；02:53健康读回为相同提交。
+- 公网静态版本：`/srv/stockbrain/releases/20260921184829`，Nginx校验及原子切换成功。
+- 完整回归：后端3222通过、130跳过、890子测试通过；前端144通过；类型检查、构建通过。
+- 真实浏览器：生产构建本地12通过；公网12通过（9个主页面、11个研究页签、1440/390/320宽度、真实数据及K线）；本机最终切换后公网选股和模拟盘再次2通过。
+- 共享接口：02:53:01 `verified`，共享隧道复用、没有重装。未修改数据模型、策略评分、持仓或纪律线。
+- 截图与日志：`G:/StockPlatform/reports/reviews/2026-09-22-guanshi-public/`，同目录下 `2026-09-22-guanshi-release-final.log` 和 `2026-09-22-guanshi-public-final.log`。
+- 非阻断事项：既有大型图表分包警告仍在；旧版本 `a82e80b5eb0f` 的运行中后台程序使归档清理延期，未强杀，不影响当前版本验收。数据缺口仍按业务原状显示。
