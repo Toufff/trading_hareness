@@ -32,6 +32,11 @@ def findings(result):
     if followup.get('status') in ('failed','calendar_gap'):
         add('followup-gap','往期候选跟踪不完整','本轮候选后续评价没有完整运行。',
             '区分日历、缺行情与持久化错误，保留原样本。','tracking',{'status':followup.get('status')})
+    gaps = [r for r in followup.get('items',[]) if r.get('status') in ('data_gap','adjustment_gap','calendar_gap')]
+    if gaps:
+        add('followup-row-gap','往期候选存在逐股数据缺口','顶层跟踪完成不代表每只股票完整。',
+            '分别检查日线、复权与日历，不把缺值计作零收益。','tracking',
+            {'symbols':sorted({r['symbol'] for r in gaps}), 'coverage':dict(total=followup.get('total'),gaps=len(gaps))})
     return out
 
 
