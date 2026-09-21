@@ -20,6 +20,9 @@ if ($parseErrors -and $parseErrors.Count -gt 0) { throw "Failed to parse $script
 $functionAst = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Read-EnvFile' }, $true)
 if (-not $functionAst) { throw "Read-EnvFile function not found in $scriptPath" }
 . ([scriptblock]::Create($functionAst.Extent.Text))
+$source = [IO.File]::ReadAllText($scriptPath)
+Assert-True ($source.Contains('catch [Threading.AbandonedMutexException]')) 'an abandoned lifecycle mutex must be recovered because ownership was granted'
+Assert-True ($source.Contains('if ($mutexOwned) { [void]$mutex.ReleaseMutex() }')) 'the lifecycle mutex may only be released after this process owns it'
 
 $sentinelName = "TRADING_HARENESS_TEST_SENTINEL_$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
 $envFile = Join-Path ([IO.Path]::GetTempPath()) "trading-hareness-envfile-$([Guid]::NewGuid().ToString('N')).env"
@@ -39,6 +42,7 @@ try {
         returned_hashtable = $true
         parsed_sentinel = $result[$sentinelName]
         env_not_polluted = -not (Test-Path "Env:$sentinelName")
+        abandoned_mutex_recovery_guarded = $true
     }
 } finally {
     Remove-Item -LiteralPath $envFile -Force -ErrorAction SilentlyContinue

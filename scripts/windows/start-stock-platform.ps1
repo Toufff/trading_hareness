@@ -73,9 +73,22 @@ $environment['QUANT_RUNTIME_PROFILE'] = 'research'
 # here made otherwise reachable Chinese quote hosts fail inside the service.
 
 $mutex = [Threading.Mutex]::new($false, "Local\trading-hareness-quant-api-$ApiPort")
-if (-not $mutex.WaitOne([TimeSpan]::FromSeconds(30))) {
+$mutexOwned = $false
+try {
+    try {
+        $mutexOwned = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
+    } catch [Threading.AbandonedMutexException] {
+        # The previous publisher/process died while owning the mutex. .NET has
+        # already granted this thread ownership, so recovery may proceed.
+        $mutexOwned = $true
+        Write-Warning "Recovered abandoned quant API lifecycle lock on port $ApiPort"
+    }
+    if (-not $mutexOwned) {
+        throw "Timed out waiting for the quant API lifecycle lock on port $ApiPort"
+    }
+} catch {
     $mutex.Dispose()
-    throw "Timed out waiting for the quant API lifecycle lock on port $ApiPort"
+    throw
 }
 
 try {
@@ -211,6 +224,6 @@ Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
 throw "quant API did not become healthy within 120 seconds; inspect $stderr`n$errorTail"
 }
 finally {
-    [void]$mutex.ReleaseMutex()
+    if ($mutexOwned) { [void]$mutex.ReleaseMutex() }
     $mutex.Dispose()
 }
