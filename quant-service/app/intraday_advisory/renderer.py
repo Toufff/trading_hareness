@@ -33,7 +33,7 @@ def signal_card(signal: AdvisorySignal, *, source: str,
              f"**发生了什么**\n{humanize_text(signal.summary)}\n\n**关键证据**\n{metrics}\n\n"
              f"**现在怎么做**\n{action}"}},
             {"tag": "note", "elements": [{"tag": "plain_text", "content":
-             f"数据时间 {signal.observed_at:%H:%M:%S}｜主动侧成交仅为成交代理｜研究提醒，不执行交易"}]},
+             f"数据时间 {signal.observed_at:%H:%M:%S}｜内外盘按成交方向分类，不代表主力资金｜研究提醒，不执行交易"}]},
         ],
     }
     if dashboard_url:

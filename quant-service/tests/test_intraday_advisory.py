@@ -10,9 +10,9 @@ import sys
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from app.intraday_advisory.rules import QuoteSample, evaluate
+from app.intraday_advisory.rules import AdvisorySignal, QuoteSample, evaluate
 from app.intraday_advisory.renderer import analysis_card, signal_card
-from app.intraday_advisory.presentation import ensure_readable_card
+from app.intraday_advisory.presentation import ensure_readable_card, metric_lines
 from app.intraday_advisory.market_watch import index_sample_from_row
 from app.intraday_advisory.schedule import decide
 from app.intraday_advisory.scope import AdvisoryScope, ScopeItem
@@ -68,15 +68,18 @@ def test_schedule_uses_bounded_cadences_and_special_reports() -> None:
 
 
 def test_cards_translate_internal_fields_and_bound_model_output() -> None:
-    signal = evaluate([
-        QuoteSample("002008.SZ", MONDAY - timedelta(seconds=70), 100, 100, 1_000_000,
-                    100, 50, 50, "大族激光"),
-        QuoteSample("002008.SZ", MONDAY, 101.3, 100, 7_000_000, 900, 750, 150, "大族激光"),
-    ])[0]
+    signal = AdvisorySignal(
+        event_key="test", symbol="002008.SZ", name="大族激光", kind="amount_pulse",
+        direction="inflow", severity="medium", observed_at=MONDAY,
+        metrics={"amount_ratio": 4.2, "active_ratio": 0.3},
+        summary="1分钟成交额放大至基线 4.2 倍，外盘增量占优",
+    )
     first = signal_card(signal, source="recommendation", dashboard_url="https://stock.toufai.top")
     ensure_readable_card(first)
     serialized = json.dumps(first, ensure_ascii=False)
     assert "amount_ratio" not in serialized and "002008.SZ" not in serialized
+    assert "外盘增量占优" in serialized and "内外盘差约占成交量" in serialized
+    assert "主动侧" not in serialized and "偏流入" not in serialized and "净流入" not in serialized
     report = analysis_card("deepseek", {
         "market_state": "watch", "summary": "breakout_hold 进入复核",
         "attention_symbols": ["002008.SZ"],
@@ -127,6 +130,14 @@ def test_rules_detect_amount_pulse_without_calling_it_institutional_money() -> N
     assert pulse.direction == "inflow"
     assert pulse.metrics["amount_ratio"] >= 3
     assert "机构" not in pulse.summary and "主力" not in pulse.summary
+    assert "外盘增量占优" in pulse.summary
+    assert "主动侧" not in pulse.summary and "净流入" not in pulse.summary
+
+
+def test_negative_inner_outer_volume_evidence_uses_common_market_language() -> None:
+    rows = metric_lines({"active_ratio": -0.35})
+
+    assert rows == ["近1分钟内盘增量占优，内外盘差约占成交量 35.0%"]
 
 
 def test_deterministic_delivery_precedes_bundled_codex_analysis() -> None:

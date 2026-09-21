@@ -68,8 +68,8 @@ def metric_lines(metrics: dict[str, Any]) -> list[str]:
         rows.append(f"近1分钟成交额 {amount_text(metrics.get('amount_delta'))}")
     if metrics.get("active_ratio") is not None:
         ratio = float(metrics["active_ratio"])
-        direction = "偏流入" if ratio >= 0 else "偏流出"
-        rows.append(f"主动侧成交代理{direction}，比例约 {abs(ratio) * 100:.1f}%")
+        direction = "外盘增量占优" if ratio >= 0 else "内盘增量占优"
+        rows.append(f"近1分钟{direction}，内外盘差约占成交量 {abs(ratio) * 100:.1f}%")
     return rows or ["有效行情证据暂缺"]
 
 

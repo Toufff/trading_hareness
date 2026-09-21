@@ -123,7 +123,7 @@ def evaluate(samples: Sequence[QuoteSample]) -> tuple[AdvisorySignal, ...]:
                     {"amount_delta": round(amount_delta, 2), "amount_ratio": round(ratio, 2),
                      "active_net_lot": round(active_net, 2), "active_ratio": round(active_ratio, 4),
                      "price_change_pct": round(price_change, 3)},
-                    f"1分钟成交额放大至基线 {ratio:.1f} 倍，主动侧代理{'净流入' if active_ratio > 0 else '净流出'}",
+                    f"1分钟成交额放大至基线 {ratio:.1f} 倍，{'外盘增量占优' if active_ratio > 0 else '内盘增量占优'}",
                 ))
     # Prefer the strongest signal of each kind/direction in one evaluation.
     unique: dict[tuple[str, str], AdvisorySignal] = {}
