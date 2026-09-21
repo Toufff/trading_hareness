@@ -70,8 +70,11 @@ class SupportedObject:
 
 #: Everything outside this list is reachable by accident, not by agreement.
 SUPPORTED_OBJECTS: tuple[SupportedObject, ...] = (
-    SupportedObject("canonical_bars_daily", "settled daily bars, the single price source", "read"),
-    SupportedObject("daily_adjustment_factors", "adjustment factors; semantics live in raw->>'factor_semantics'", "read"),
+    SupportedObject("canonical_bars_daily", "settled daily bars; factor maintenance may update adj_factor only", "read-write"),
+    SupportedObject("market_bars_daily", "daily bar mirror; factor maintenance may update adj_factor only", "read-write"),
+    SupportedObject("daily_adjustment_factors", "adjustment factors; semantics live in raw->>'factor_semantics'", "read-write"),
+    SupportedObject("factor_maintenance_runs", "maintenance identities, status and recovery receipts", "read-write"),
+    SupportedObject("factor_maintenance_changes", "transactional factor before/after journal, 365-day online rollback", "read-write"),
     SupportedObject("daily_fundamentals", "per-symbol daily fundamentals", "read"),
     SupportedObject("daily_trade_limits", "per-symbol limit-up/limit-down prices", "read"),
     SupportedObject("security_suspensions", "trading suspensions", "read"),
@@ -131,7 +134,7 @@ NOT_PROVIDED: tuple[AbsentObject, ...] = (
     AbsentObject(
         "quant.canonical_bars_daily_cold",
         "table",
-        "Market-data tables are not tiered. Only the five evidence twins plus "
+        "Market-data tables are not tiered. Only registered evidence twins plus "
         "legacy_source_records live in the cold tablespace; see cold_tier.",
     ),
     AbsentObject(
@@ -214,6 +217,20 @@ PUBLISHED_ENDPOINTS: tuple[dict[str, str], ...] = (
     {"path": "/api/v1/peer/errors", "method": "GET", "purpose": "errors the owner cluster attributed to your role"},
     {"path": "/health", "method": "GET", "purpose": "owner service health"},
 )
+
+FACTOR_MAINTENANCE = {
+    'version':'peer-factor-maintenance-v1',
+    'authorization':'trusted collaborator may maintain, repair and roll back adjustment factors',
+    'cli':'scripts/adjustment-factor-maintenance.py',
+    'commands':['status','sync','repair','validate','history','rollback'],
+    'bar_write_columns':['adj_factor'],
+    'database_column_isolation':False,
+    'write_serialization':'single PostgreSQL session advisory lock; same connection for every write',
+    'rollback':'compare-and-restore newest recorded changes; reject subsequent modifications',
+    'peer_environment':'--env-file - uses existing PG and shared Longhu gateway variables',
+    'upstream_credentials_shared':False,
+    'scope_note':'This is an operational contract, not a revocation of existing SQL privileges. Direct SQL and old writers bypass its safeguards.',
+}
 
 _COLUMNS_SQL = """
 SELECT c.relname,
@@ -451,6 +468,7 @@ def build_contract(connection: Any, *, peer_role: str = "stock_peer") -> dict[st
         ],
         "endpoints": list(PUBLISHED_ENDPOINTS),
         "deploy_channel": DEPLOY_CHANNEL,
+        "factor_maintenance": FACTOR_MAINTENANCE,
         "rules": [
             "Assert only against objects[], enumerations[] and derived_rules[]. Anything absent "
             "from this document is not part of the agreement even if your role can currently "

@@ -2,6 +2,11 @@
 
 状态：2026-09-20 上线。本文件是 `/api/v1/peer/contract` 与 `/api/v1/peer/errors` 两个接口的合同；实现与本文冲突时先改本文再改代码。
 
+2026-09-22 增量扩展（仍为兼容 v2）：`factor_maintenance` 发布可信协作者的复权维护边界。
+因子表、两张日线表的复权投影与两张维护审计表列入受支持的 read-write 对象；
+日线写入约定仅为 `adj_factor`，不是数据库列级强隔离。实际权限仍看 objects 中的授权字段。
+六个命令、互斥、回滚、部署位置和验收见 [协作者复权维护交接](PEER_FACTOR_MAINTENANCE.md)。
+
 ## 为什么有这两个接口
 
 2026-09-19 协作方（peer）新 release 启动失败。直接原因是它的启动门断言了一套 owner 从未有过的 schema：交接文档里把 `adjustment_state` 描述成"健康面板按日计算出的四态值"，被读成"三张表上应该有这个列"；因子语义被读成一个叫 `factor_semantics` 的列；冷层被读成五张 `_cold` 后缀的行情表；还硬写了一个 owner 从未写过的取值 `cumulative_tushare`。
@@ -36,6 +41,7 @@
 | `not_provided[]` | **不存在且不会添加**的东西，逐条给出理由 |
 | `endpoints[]` | 允许调用的 owner 接口 |
 | `rules[]` | 三条使用规则（见下） |
+| `factor_maintenance` | 可信复权维护范围、命令、共享锁和回滚约定；不开放新的 HTTP 写路由 |
 
 `objects` 是一份**刻意收窄的清单**（`SUPPORTED_OBJECTS`），不是该角色能读到的全部。`stock_peer` 继承 `quant_app`，能 SELECT 200 多个关系，其中绝大多数不属于任何约定；把它们全发布出去，等于在更高一层重演原来的问题——暗示"今天能读到的就是被支持的"。
 

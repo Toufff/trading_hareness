@@ -11,6 +11,10 @@ The read-only `scripts/verify-business-coverage.py` and
 all-green business result. Production release identity is always the current
 `G:/StockPlatform/release-state.json`, never a historical SHA in this document.
 
+Trusted collaborator adjustment-factor maintenance (2026-09-22): see
+[PEER_FACTOR_MAINTENANCE.md](PEER_FACTOR_MAINTENANCE.md) for the shared lock,
+transactional audit, conflict-safe rollback, independent peer bundle and live evidence.
+
 Remote peer pool recovery (2026-09-14): see [PEER_POOL_RECOVERY_20260914.md](PEER_POOL_RECOVERY_20260914.md).
 Follow-up network fix deployed at 18:42 CST: [PEER_PRIVATE_TUNNEL_20260914.md](PEER_PRIVATE_TUNNEL_20260914.md).
 The 301-symbol compatibility regression and public `/api/config` gateway fix are documented in [PEER_LONGHU_BATCHING_20260915.md](PEER_LONGHU_BATCHING_20260915.md).

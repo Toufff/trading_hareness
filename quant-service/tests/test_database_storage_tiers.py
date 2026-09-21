@@ -77,7 +77,7 @@ def _load_migration(path: Path):
 class TierPolicyTest(unittest.TestCase):
     """The policy itself is a contract: the docs and the guard test read it."""
 
-    def test_five_tiered_tables_with_a_one_year_hot_window(self):
+    def test_tiered_tables_with_a_one_year_hot_window(self):
         self.assertEqual(
             [(policy.qualified, policy.column, policy.hot_days) for policy in tiers.TIER_POLICY],
             [
@@ -87,6 +87,7 @@ class TierPolicyTest(unittest.TestCase):
                 ("quant.intraday_rule_input_snapshots", "observed_at", 365),
                 ("quant.edge_evidence_changes", "changed_at", 365),
                 ("quant.trade_thesis_evaluations", "created_at", 365),
+                ("quant.factor_maintenance_changes", "recorded_at", 365),
             ],
         )
 
@@ -1350,10 +1351,11 @@ class CutoffIndexMigrationTest(unittest.TestCase):
     def setUpClass(cls):
         cls.module = _load_migration(MIGRATIONS / "20260919_0106_storage_tier_cutoff_indexes.py")
         cls.trade_thesis_module = _load_migration(MIGRATIONS / "20260920_0108_trade_thesis.py")
+        cls.factor_module = _load_migration(MIGRATIONS / "20260921_0115_factor_maintenance_audit.py")
 
     def test_the_migration_covers_exactly_the_tier_policy(self):
         self.assertEqual(
-            [(name, table, column) for module in (self.module, self.trade_thesis_module)
+            [(name, table, column) for module in (self.module, self.trade_thesis_module, self.factor_module)
              for name, table, column in module.INDEXES],
             [(policy.cutoff_index, policy.qualified, policy.column) for policy in tiers.TIER_POLICY],
             "the migration and TIER_POLICY in scripts/database-storage-tiers.py have drifted apart",
