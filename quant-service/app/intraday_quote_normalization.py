@@ -131,15 +131,29 @@ def exchange_time_status(quote: dict[str, Any] | None, observed_at: datetime, ma
     payload = quote or {}
     compact = "".join(re.findall(r"\d", str(payload.get("price_trade_time") or "")))
     date_part = "".join(re.findall(r"\d", str(payload.get("price_trade_date") or "")))
+    candidates: list[str] = []
     if len(compact) >= 14:
-        candidate = compact[:14]
+        candidates.append(compact[:14])
+        # Longhu GetStockPanKou emits ``YYYYMMDDHMMSSd`` before 10:00: the
+        # single-digit hour is not zero padded and the final digit is a
+        # decisecond. It therefore also has 14 digits, but treating it as a
+        # normal exchange timestamp produces an impossible 95:xx hour. Keep
+        # the standard form first and use this vendor variant only when that
+        # standard parse is invalid.
+        if len(compact) == 14:
+            candidates.append(f"{compact[:8]}0{compact[8:13]}")
     elif len(date_part) == 8 and len(compact) >= 6:
-        candidate = f"{date_part}{compact[:6]}"
-    else:
+        candidates.append(f"{date_part}{compact[:6]}")
+    if not candidates:
         return {"status": "missing_timestamp", "max_age_seconds": max_age_seconds}
-    try:
-        exchange_at = datetime.strptime(candidate, "%Y%m%d%H%M%S").replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-    except ValueError:
+    exchange_at = None
+    for candidate in candidates:
+        try:
+            exchange_at = datetime.strptime(candidate, "%Y%m%d%H%M%S").replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+            break
+        except ValueError:
+            continue
+    if exchange_at is None:
         return {"status": "invalid_timestamp", "max_age_seconds": max_age_seconds}
     age_seconds = (observed_at - exchange_at.astimezone(timezone.utc)).total_seconds()
     result = {"observed_trade_time": exchange_at.isoformat(), "age_seconds": round(age_seconds, 3),

@@ -59,6 +59,12 @@ class IntradayQuoteNormalizationTests(unittest.TestCase):
         self.assertEqual(quotes["a"]["main_flow_percentile"], 0.0)
         self.assertEqual(quotes["b"]["main_flow_percentile"], 1.0)
 
+    def test_timestamp_accepts_longhu_single_digit_hour_with_decisecond(self) -> None:
+        observed_at = datetime(2026, 9, 21, 1, 57, 25, tzinfo=timezone.utc)
+        fresh = exchange_time_status({"price_trade_time": "20260921957220"}, observed_at, 20)
+        self.assertEqual(fresh["status"], "fresh")
+        self.assertEqual(fresh["observed_trade_time"], "2026-09-21T09:57:22+08:00")
+
     def test_longhu_volume_is_annotated_with_its_native_unit(self) -> None:
         # Longhu's board-lot volume must not be silently mixed with Sina's
         # share-based volume under the same ambiguous "volume" key; callers
