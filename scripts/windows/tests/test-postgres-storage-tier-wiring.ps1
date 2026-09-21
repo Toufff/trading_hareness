@@ -326,8 +326,9 @@ $twins = [regex]::Matches($tierScript, 'TierPolicy\("([a-z_]+)",\s*"([a-z_]+)"')
     ForEach-Object { "$($_.Groups[1].Value).$($_.Groups[2].Value)_cold" }
 $hotTables = [regex]::Matches($tierScript, 'TierPolicy\("([a-z_]+)",\s*"([a-z_]+)"') |
     ForEach-Object { "$($_.Groups[1].Value).$($_.Groups[2].Value)" }
-Assert-True ($twins.Count -eq 6) 'the tier policy must describe six tiered tables including thesis evaluations'
+Assert-True ($twins.Count -eq 7) 'the tier policy must describe seven tiered tables including factor maintenance evidence'
 Assert-True ($hotTables -contains 'quant.trade_thesis_evaluations') 'thesis evaluations must participate in tier and backup protection'
+Assert-True ($hotTables -contains 'quant.factor_maintenance_changes') 'factor maintenance evidence must participate in tier and backup protection'
 Assert-True ($initSource -notmatch "Set-StockPlatformEnvDefault[^\r\n]*STOCK_BACKUP_EXCLUDE_TABLE_DATA") `
     'the initializer must not seed a static exclusion list: a twin whose hot table has no chunk chain would lose its only backup'
 Assert-True ($initSource -match 'STOCK_BACKUP_EXCLUDE_TABLE_DATA is deliberately NOT seeded') 'the initializer must say why it seeds no exclusion list'
