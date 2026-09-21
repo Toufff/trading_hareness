@@ -25,7 +25,11 @@ def number(value: object) -> float | None:
 class IntradayQuoteNormalizationTests(unittest.TestCase):
     def test_licensed_watch_price_overlays_cross_section_without_dropping_flow(self) -> None:
         quotes = {"000001.SZ": {"symbol": "000001.SZ", "main_net_inflow": 8.0, "raw": {"all_a": True}}}
-        merge_longhu_watch_quotes(quotes, [{"ts_code": "000001.SZ", "price": "10.2", "pre_close": "10", "trade_time": "20260817093005"}], number=number)
+        merge_longhu_watch_quotes(
+            quotes,
+            [{"ts_code": "000001.SZ", "price": "10.2", "pre_close": "10", "trade_time": "20260817093005"}],
+            number=number,
+        )
         self.assertEqual(quotes["000001.SZ"]["price_source"], "longhuvip_watch_quote")
         self.assertEqual(quotes["000001.SZ"]["main_net_inflow"], 8.0)
         self.assertEqual(quotes["000001.SZ"]["pct_change"], 2.0)
@@ -33,18 +37,48 @@ class IntradayQuoteNormalizationTests(unittest.TestCase):
 
     def test_sina_and_eastmoney_keep_price_and_flow_semantics_separate(self) -> None:
         quotes: dict[str, dict[str, object]] = {}
-        merge_sina_watch_quotes(quotes, [{"ts_code": "000001.SZ", "close": "10.1", "pre_close": "10", "trade_date": "20260817", "trade_time": "093001"}], number=number)
-        merge_eastmoney_watch_flows(quotes, [{"ts_code": "000001.SZ", "main_net_inflow": "12", "volume_ratio": "3"}], number=number)
+        merge_sina_watch_quotes(
+            quotes,
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "close": "10.1",
+                    "pre_close": "10",
+                    "trade_date": "20260817",
+                    "trade_time": "093001",
+                }
+            ],
+            number=number,
+        )
+        merge_eastmoney_watch_flows(
+            quotes, [{"ts_code": "000001.SZ", "main_net_inflow": "12", "volume_ratio": "3"}], number=number
+        )
         self.assertEqual(quotes["000001.SZ"]["price_source"], "sina_batched_watch_quote")
         self.assertEqual(quotes["000001.SZ"]["main_net_inflow"], 12.0)
         self.assertIsNone(quotes["000001.SZ"]["main_flow_percentile"])
         self.assertEqual(observation_source(quotes["000001.SZ"]), "sina_free")
 
     def test_sina_never_overwrites_an_already_priced_quote(self) -> None:
-        quotes = {"000001.SZ": {"symbol": "000001.SZ", "price": 10.2, "pct_change": 2.0,
-                                 "price_source": "longhuvip_watch_quote", "raw": {}}}
+        quotes = {
+            "000001.SZ": {
+                "symbol": "000001.SZ",
+                "price": 10.2,
+                "pct_change": 2.0,
+                "price_source": "longhuvip_watch_quote",
+                "raw": {},
+            }
+        }
         merge_sina_watch_quotes(
-            quotes, [{"ts_code": "000001.SZ", "close": "99.9", "pre_close": "10", "trade_date": "20260817", "trade_time": "093001"}],
+            quotes,
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "close": "99.9",
+                    "pre_close": "10",
+                    "trade_date": "20260817",
+                    "trade_time": "093001",
+                }
+            ],
             number=number,
         )
         self.assertEqual(quotes["000001.SZ"]["price"], 10.2)

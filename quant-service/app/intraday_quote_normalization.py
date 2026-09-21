@@ -20,7 +20,10 @@ LONGHU_WATCH_QUOTE_VOLUME_UNIT = "lot"
 
 
 def merge_longhu_watch_quotes(
-    quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]], *, number: Callable[[Any], float | None],
+    quotes: dict[str, dict[str, Any]],
+    rows: list[dict[str, Any]],
+    *,
+    number: Callable[[Any], float | None],
 ) -> dict[str, dict[str, Any]]:
     """Overlay licensed watch quotes while preserving independently sourced flow.
 
@@ -37,20 +40,23 @@ def merge_longhu_watch_quotes(
         if not _SYMBOL.fullmatch(symbol) or price is None or price <= 0:
             continue
         existing = dict(quotes.get(symbol) or {"symbol": symbol, "name": row.get("name"), "raw": {}})
-        existing.update({
-            "name": row.get("name") or existing.get("name"),
-            "price": price,
-            "pct_change": (
-                round((price / pre_close - 1) * 100, 5)
-                if pre_close and pre_close > 0 else number(row.get("pct_change"))
-            ),
-            "price_source": "longhuvip_watch_quote",
-            # GetStockPanKou is a direct quote, not proof of Level-2 depth or
-            # order-cancellation evidence.
-            "price_observed_from_depth": False,
-            "price_trade_date": row.get("trade_date"),
-            "price_trade_time": row.get("trade_time"),
-        })
+        existing.update(
+            {
+                "name": row.get("name") or existing.get("name"),
+                "price": price,
+                "pct_change": (
+                    round((price / pre_close - 1) * 100, 5)
+                    if pre_close and pre_close > 0
+                    else number(row.get("pct_change"))
+                ),
+                "price_source": "longhuvip_watch_quote",
+                # GetStockPanKou is a direct quote, not proof of Level-2 depth or
+                # order-cancellation evidence.
+                "price_observed_from_depth": False,
+                "price_trade_date": row.get("trade_date"),
+                "price_trade_time": row.get("trade_time"),
+            }
+        )
         for key in ("volume", "amount", "turnover_rate", "volume_ratio"):
             value = number(row.get(key))
             if value is not None:
@@ -66,7 +72,10 @@ def merge_longhu_watch_quotes(
 
 
 def merge_sina_watch_quotes(
-    quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]], *, number: Callable[[Any], float | None],
+    quotes: dict[str, dict[str, Any]],
+    rows: list[dict[str, Any]],
+    *,
+    number: Callable[[Any], float | None],
 ) -> dict[str, dict[str, Any]]:
     """Use Sina only as a price fallback; do not fabricate flow fields.
 
@@ -85,17 +94,25 @@ def merge_sina_watch_quotes(
             continue
         existing = dict(quotes.get(symbol) or {"symbol": symbol, "name": row.get("name"), "raw": {}})
         existing["price"] = price
-        existing["pct_change"] = round((price / pre_close - 1) * 100, 5) if pre_close and pre_close > 0 else existing.get("pct_change")
+        existing["pct_change"] = (
+            round((price / pre_close - 1) * 100, 5) if pre_close and pre_close > 0 else existing.get("pct_change")
+        )
         existing["price_source"] = "sina_batched_watch_quote"
         existing["price_trade_date"] = row.get("trade_date")
         existing["price_trade_time"] = row.get("trade_time")
-        existing["raw"] = {**(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}), "sina_watch_quote": row}
+        existing["raw"] = {
+            **(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}),
+            "sina_watch_quote": row,
+        }
         quotes[symbol] = existing
     return quotes
 
 
 def merge_eastmoney_watch_flows(
-    quotes: dict[str, dict[str, Any]], rows: list[dict[str, Any]], *, number: Callable[[Any], float | None],
+    quotes: dict[str, dict[str, Any]],
+    rows: list[dict[str, Any]],
+    *,
+    number: Callable[[Any], float | None],
 ) -> dict[str, dict[str, Any]]:
     """Overlay bounded Eastmoney flow while preserving the actual price source."""
     for row in rows:
@@ -108,8 +125,10 @@ def merge_eastmoney_watch_flows(
             if value is not None:
                 existing[key] = value
         existing["main_flow_percentile"] = None
-        existing["raw"] = {**(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}),
-                           "eastmoney_watch_flow": row.get("raw") if isinstance(row.get("raw"), dict) else row}
+        existing["raw"] = {
+            **(existing.get("raw") if isinstance(existing.get("raw"), dict) else {}),
+            "eastmoney_watch_flow": row.get("raw") if isinstance(row.get("raw"), dict) else row,
+        }
         quotes[symbol] = existing
     return quotes
 
@@ -156,8 +175,11 @@ def exchange_time_status(quote: dict[str, Any] | None, observed_at: datetime, ma
     if exchange_at is None:
         return {"status": "invalid_timestamp", "max_age_seconds": max_age_seconds}
     age_seconds = (observed_at - exchange_at.astimezone(timezone.utc)).total_seconds()
-    result = {"observed_trade_time": exchange_at.isoformat(), "age_seconds": round(age_seconds, 3),
-              "max_age_seconds": max_age_seconds}
+    result = {
+        "observed_trade_time": exchange_at.isoformat(),
+        "age_seconds": round(age_seconds, 3),
+        "max_age_seconds": max_age_seconds,
+    }
     if age_seconds < -5:
         return {**result, "status": "future_timestamp"}
     if age_seconds > max_age_seconds:
@@ -167,6 +189,7 @@ def exchange_time_status(quote: dict[str, Any] | None, observed_at: datetime, ma
 
 def quote_from_fuyao(row: dict[str, Any]) -> dict[str, Any] | None:
     """Preserve the Fuyao adapter's normalized all-A row without fake flow."""
+
     def as_number(value: Any) -> float | None:
         try:
             return float(value) if value not in (None, "") else None
@@ -178,18 +201,25 @@ def quote_from_fuyao(row: dict[str, Any]) -> dict[str, Any] | None:
     if not _SYMBOL.fullmatch(symbol) or price is None or price <= 0:
         return None
     return {
-        "symbol": symbol, "name": row.get("name"), "price": price,
-        "pct_change": as_number(row.get("pct_change")), "turnover": as_number(row.get("turnover")),
-        "volume": as_number(row.get("volume")), "raw": dict(row.get("raw") or row),
-        "price_source": "fuyao_ths_all_a_snapshot", "price_observed_from_depth": False,
+        "symbol": symbol,
+        "name": row.get("name"),
+        "price": price,
+        "pct_change": as_number(row.get("pct_change")),
+        "turnover": as_number(row.get("turnover")),
+        "volume": as_number(row.get("volume")),
+        "raw": dict(row.get("raw") or row),
+        "price_source": "fuyao_ths_all_a_snapshot",
+        "price_observed_from_depth": False,
         "price_observed_at": row.get("price_observed_at"),
     }
 
 
 def annotate_flow_percentiles(quotes: dict[str, dict[str, Any]]) -> None:
     """Attach a same-snapshot main-flow percentile without assuming units."""
-    ranked = sorted((quote for quote in quotes.values() if quote.get("main_net_inflow") is not None),
-                    key=lambda quote: float(quote["main_net_inflow"]))
+    ranked = sorted(
+        (quote for quote in quotes.values() if quote.get("main_net_inflow") is not None),
+        key=lambda quote: float(quote["main_net_inflow"]),
+    )
     denominator = max(1, len(ranked) - 1)
     for index, quote in enumerate(ranked):
         quote["main_flow_percentile"] = round(index / denominator, 5)
@@ -198,7 +228,12 @@ def annotate_flow_percentiles(quotes: dict[str, dict[str, Any]]) -> None:
 
 
 __all__ = [
-    "LONGHU_WATCH_QUOTE_VOLUME_UNIT", "annotate_flow_percentiles", "exchange_time_status",
-    "merge_eastmoney_watch_flows", "merge_longhu_watch_quotes", "merge_sina_watch_quotes",
-    "observation_source", "quote_from_fuyao",
+    "LONGHU_WATCH_QUOTE_VOLUME_UNIT",
+    "annotate_flow_percentiles",
+    "exchange_time_status",
+    "merge_eastmoney_watch_flows",
+    "merge_longhu_watch_quotes",
+    "merge_sina_watch_quotes",
+    "observation_source",
+    "quote_from_fuyao",
 ]
