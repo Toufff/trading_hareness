@@ -54,7 +54,7 @@ onBeforeUnmount(() => window.removeEventListener('popstate', syncFromHistory));
         </nav>
       </header>
       <main class="decision-content">
-        <PersonalDecisionView :mode="mode" />
+        <PersonalDecisionView :key="mode" :mode="mode" />
       </main>
     </div>
   </el-config-provider>
