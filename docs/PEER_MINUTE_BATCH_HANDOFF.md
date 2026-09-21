@@ -107,4 +107,35 @@ stock_minutes_batch/_gateway_minutes_batch，而不只是磁盘上存在 49ecf02
 执行标准 owner 发布，保留当前已上线工作。回退使用 switch-stock-release.ps1 切回保留版本，
 不改 release 文件、不需要数据库恢复。回退后的 404 会让兼容客户端使用旧路径。
 
-本轮部署版本、测试统计和真实读回在完成后补充；不得提前视为生产验收已完成。
+### 2026-09-22 上线回执
+
+- owner release：`20260922T020134-964b19d10abc-clean`。
+- 源码：`964b19d10abca58c22d15531b030bd05846485b8`，干净提交，保留先前正式版本 9e917df 的 Git 祖先。
+- 前一版：`20260922T012644-9e917df1238b-clean`，仍保留可回退。
+- 标准发布门禁：后端 **3222 passed / 130 skipped / 890 subtests**；前端 **141 tests / 34 files**；typecheck/build 通过。
+- 相关专项：**76 passed / 10 subtests**，包括本次新增的 32 个测试；跳过项不冒充已验收。
+- 在线 OpenAPI **196 paths** 与 generated.ts 一致，在线 api:check 通过。
+- 共享隧道 `reused_without_reinstall`，未重建 peer 服务；02:06:22 shared-runtime verified。
+- owner 本地与 47 容器：缺 key/错 key 均 401，超出截止范围/301 只均 422，去重后两只批量 200；旧单股、两股报价、通用 catalog 均正常。
+- 47 实际调用 49ecf02 原版 `_gateway_minutes_batch` 方法成功，大小写键映射和逐股错误解析通过；未修改该方法，也未改运行中服务。
+- 凌晨真实供应商会话为 **2026-09-21**，单股各 241 行；批量返回 completed=0、逐股 `minute_batch_stale_or_invalid_rows`，证明没有错标今天。
+- **尚未实测边界**：本轮未等到 9 月 22 日开盘，真实当日成功行和大篮子 gzip/延迟在生产尚未观测；成功行、gzip、部分失败、取消和超时容量保护已有自动化测试，不混称盘中实测。
+- 两个现有 peer 容器内均未发现 stock_minutes_batch/_gateway_minutes_batch；请协作者确认自己的实际调用进程版本。仅更新 hotfix-src 仓库不会让旧容器自动切换。
+
+标准发布保留 6 份构建，清理旧构建 `20260921T175408-e6a120ed18c4-clean`（可由 Git 重建）；
+被占用的另一旧目录延后清理，未强杀或强删。前端存在既有 >500 kB chunk 告警，不影响本接口。
+
+完整脱敏证据在 owner `G:/StockPlatform/data/research/peer-minute-batch-20260922`，包含本机/peer/原版客户端
+JSON 回执、发布日志、测试日志、manifest、验收脚本和本文。peer 文档稳定位置：
+`/home/stockpeer/owner-api-handoff/PEER_MINUTE_BATCH_HANDOFF.md`。
+
+## 可直接转交给协作者的回复
+
+> owner 已单独上线与你 49ecf02 兼容的 GET /licensed/longhu/minutes?symbols=...，无需 owner SSH。
+> 请求参数、rows/errors、截止时间和 gzip 保持协议兼容；每个 owner 进程只容纳一个活跃篮子，
+> 包含截止后尚未结束的物理请求，503 请退避，不要回退成单股洪泛。
+> 没有合入教师策略、盘后结算或飞书逻辑，也没有变更 owner 线程池、环境或数据库。
+> 47 上已实测 200，并使用你的原版客户端方法解析成功；凌晨旧会话正确进入 errors。
+> 请确认实际运行进程已包含批量客户端；目前检查的两个旧容器没有该方法。
+> 已含该方法的客户端会在 404/405 负缓存到期后的下一次调用使用新路由，最长缓存 10 分钟；
+> 未含方法的旧服务需由你按自己的发布流程更新。开盘后请检查 completed/会话日期，不只看 HTTP 200。
