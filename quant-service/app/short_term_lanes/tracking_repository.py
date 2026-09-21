@@ -42,7 +42,7 @@ def refresh(database, result, day, *, write=True):
             (day-timedelta(days=60),day)).fetchall()
         if not records:
             return dict(status='empty',as_of_date=str(day),version=VERSION,items=[],total=0,note='暂无冻结观察，不代表策略成功或失败。')
-        old=[r['evidence'] for r in records];earliest=min(r['signal_date'] for r in old)
+        old=[r['evidence'] for r in records];earliest=min(scan_dated(r)['signal_date'] for r in old)
         calendar=c.execute('''SELECT calendar_date,bool_or(is_open) AS is_open
             FROM quant.market_trade_calendar WHERE exchange IN ('SSE','SZSE')
             AND calendar_date>%s AND calendar_date<=%s GROUP BY calendar_date ORDER BY calendar_date''',(earliest,day)).fetchall()
@@ -54,16 +54,17 @@ def refresh(database, result, day, *, write=True):
                               if (begin+timedelta(days=i)).weekday()<5)
         sessions=[str(r['calendar_date']) for r in calendar if r['is_open']]
         symbols=sorted({r['symbol'] for r in old})
-        bars=c.execute('''SELECT f.symbol,f.trading_date,f.raw->'screen_snapshot' AS snapshot,
-            b.open,b.high,b.low,b.limit_up,b.limit_down,b.adj_factor,b.is_suspended
-            FROM quant.stock_money_flow_daily f LEFT JOIN quant.canonical_bars_daily b
+        bars=c.execute('''SELECT b.symbol,b.trading_date,f.raw->'screen_snapshot' AS snapshot,
+            b.open,b.high,b.low,b.close,b.pre_close,b.limit_up,b.limit_down,b.adj_factor,b.is_suspended,
+            b.amount*1000 AS amount
+            FROM quant.canonical_bars_daily b LEFT JOIN quant.stock_money_flow_daily f
               ON b.symbol=f.symbol AND b.trading_date=f.trading_date
-            WHERE f.symbol=ANY(%s) AND f.trading_date>%s AND f.trading_date<=%s
               AND f.source='longhuvip_main_net' AND f.raw ? 'screen_snapshot'
-            ORDER BY f.trading_date''',(symbols,earliest,day)).fetchall()
+            WHERE b.symbol=ANY(%s) AND b.trading_date>=%s AND b.trading_date<=%s
+            ORDER BY b.trading_date''',(symbols,earliest,day)).fetchall()
     by=defaultdict(list)
     for b in bars:
-        by[b['symbol']].append({**b['snapshot'],**{k:v for k,v in b.items() if k not in ('snapshot','symbol')},'trading_date':str(b['trading_date'])})
+        by[b['symbol']].append({**(b['snapshot'] or {}),**{k:v for k,v in b.items() if k not in ('snapshot','symbol')},'trading_date':str(b['trading_date'])})
     ledger=[]
     for o in map(scan_dated,old):
         e=evaluate(o,sessions,by[o['symbol']],str(day))
