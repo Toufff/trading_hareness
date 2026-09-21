@@ -60,10 +60,11 @@ describe('PersonalDecisionView', () => {
 
     const wrapper = mount(PersonalDecisionView, { props: { mode: 'holdings' }, global: { plugins: [ElementPlus] } });
     await flushPromises();
+    // Wait for Vite's actual import graph, not a wall-clock guess about how
+    // quickly the discipline component can compile in a parallel full suite.
+    await vi.dynamicImportSettled();
     await flushPromises();
-    await vi.waitFor(() => {
-      expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/research/discipline/plans/latest?account_key=citics-primary'))).toBe(true);
-    }, { timeout: 5000 }); // The real lazily imported discipline module must finish loading.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/research/discipline/plans/latest?account_key=citics-primary'))).toBe(true);
 
     expect(wrapper.text()).toContain('我的持仓');
     expect(wrapper.text()).toContain('账户持仓建议');
