@@ -6,7 +6,15 @@ from datetime import date
 from unittest.mock import patch
 
 from app.strategy_origin import select_primary_origin
-from app.trade_thesis.scan_adapter import evaluate_source_run, intraday_evidence, market_evidence, scan_candidates, seed_thesis
+from app.trade_thesis.scan_adapter import (
+    evaluate_source_run,
+    intraday_evidence,
+    load_latest_pages,
+    market_evidence,
+    pages,
+    scan_candidates,
+    seed_thesis,
+)
 
 
 CUTOFF = "2026-09-18T16:00:00+08:00"
@@ -121,6 +129,100 @@ def test_explicit_empty_symbol_scope_never_expands_to_all_candidates():
             assert str(error) == "no_matching_source_or_tracked_symbols"
         else:
             raise AssertionError("an explicit empty scope must not evaluate every candidate")
+
+
+def test_scope_pages_keep_500_as_a_per_page_limit():
+    values = [f"{index:06d}.SZ" for index in range(1001)]
+    result = pages(values)
+    assert [len(page) for page in result] == [500, 500, 1]
+    assert [symbol for page in result for symbol in page] == values
+    assert pages(values[:500]) == [values[:500]]
+
+
+def test_tracked_theses_are_read_until_the_short_page(monkeypatch):
+    calls = []
+    rows = [{"thesis": {"symbol": f"{index:06d}.SZ"}} for index in range(1001)]
+
+    def paged(_connection, *, limit, namespace, offset):
+        calls.append((limit, namespace, offset))
+        return rows[offset:offset + limit]
+
+    monkeypatch.setattr("app.trade_thesis.scan_adapter.list_latest", paged)
+    assert load_latest_pages(object(), namespace="shadow") == rows
+    assert calls == [(500, "shadow", 0), (500, "shadow", 500), (500, "shadow", 1000)]
+
+
+def _evaluate_large_scope(monkeypatch, *, fail_last_page=False):
+    class Result:
+        def __init__(self, rows): self.rows = rows
+        def fetchone(self): return self.rows[0] if self.rows else None
+        def fetchall(self): return self.rows
+
+    class Connection:
+        def __init__(self): self.market_page_sizes = []
+        def execute(self, sql, params=()):
+            if "calendar_date>%s" in sql:
+                return Result([{"calendar_date": date(2026, 9, 21)}])
+            if "ORDER BY calendar_date DESC LIMIT 6" in sql:
+                return Result([{"calendar_date": value} for value in (
+                    date(2026, 9, 18), date(2026, 9, 17), date(2026, 9, 16),
+                    date(2026, 9, 15), date(2026, 9, 14), date(2026, 9, 11),
+                )])
+            if "FROM quant.canonical_bars_daily" in sql:
+                self.market_page_sizes.append(len(params[0]))
+                if fail_last_page and len(params[0]) == 1:
+                    raise RuntimeError("second page unavailable")
+                return Result([])
+            return Result([])
+
+    class Database:
+        def __init__(self): self.connection = Connection()
+        @contextmanager
+        def transaction(self):
+            yield self.connection
+
+    source = {"kind": "post_close", "run_id": "run-large", "data_date": "2026-09-17",
+              "available_at": "2026-09-17T16:00:00+08:00", "scan": scan([])}
+    tracked = [{"thesis": {
+        "thesis_id": f"thesis-{index}", "revision": 1, "symbol": f"{index:06d}.SZ",
+        "name": f"股票{index}", "origin_primary_lane": "trend", "original_rankings": [],
+        "claim": "原始观察", "original_structure": {},
+    }} for index in range(501)]
+
+    def captured(_database, thesis, _evidence, *_args, **_kwargs):
+        evaluation = {
+            "states": {"thesis_state": "pending", "entry_state": "waiting"},
+            "observations": [], "holding": {"status": "unbound"},
+            "scenario_projection": {}, "current_rankings": [], "changes_since_previous": [],
+        }
+        return {"evaluation_id": "evaluation-" + thesis["symbol"], "content_hash": "hash",
+                "status": "created", "evaluation": evaluation}
+
+    monkeypatch.setattr("app.trade_thesis.scan_adapter.load_source", lambda *_a, **_k: source)
+    monkeypatch.setattr("app.trade_thesis.scan_adapter.load_latest_pages", lambda *_a, **_k: tracked)
+    monkeypatch.setattr("app.trade_thesis.scan_adapter.capture_evaluate", captured)
+    monkeypatch.setattr("app.trade_thesis.bindings.load_bound_plan",
+                        lambda *_a, **_k: {"status": "unbound"})
+    database = Database()
+    receipt = evaluate_source_run(database, "run-large", cutoff_at=CUTOFF)
+    return receipt, database.connection.market_page_sizes
+
+
+def test_evaluate_source_run_processes_501_symbols_in_two_bounded_pages(monkeypatch):
+    receipt, page_sizes = _evaluate_large_scope(monkeypatch)
+    assert receipt["status"] == "completed"
+    assert receipt["evaluated"] == 501 and receipt["failed"] == 0
+    assert receipt["scope"]["targets"] == 501 and receipt["scope"]["pages"] == 2
+    assert page_sizes == [500, 1]
+
+
+def test_market_page_failure_keeps_completed_pages_and_marks_partial(monkeypatch):
+    receipt, page_sizes = _evaluate_large_scope(monkeypatch, fail_last_page=True)
+    assert receipt["status"] == "partial"
+    assert receipt["evaluated"] == 500 and receipt["failed"] == 1
+    assert receipt["page_failures"] == [{"page": 2, "size": 1, "error_type": "RuntimeError"}]
+    assert receipt["failures"] == [{"symbol": "000500.SZ", "error_type": "market_page_unavailable"}]
+    assert page_sizes == [500, 1]
 
 
 def test_intraday_observations_are_separate_from_settled_daily_conditions_and_ratios():

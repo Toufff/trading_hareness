@@ -20,13 +20,32 @@ from .evidence import parse_time
 from .repository import list_latest
 from .service import capture_evaluate
 
-VERSION = 'thesis-scan-adapter-20260920.1'
+VERSION = 'thesis-scan-adapter-20260920.2'
 SH = ZoneInfo('Asia/Shanghai')
 MAX_SYMBOLS = 500
 # quant.canonical_bars_daily follows the Tushare-compatible persistence
 # contract: daily ``amount`` is thousand CNY.  Thesis evidence and presentation
 # use CNY, matching money-flow and intraday quote amounts.
 CANONICAL_DAILY_AMOUNT_CNY_MULTIPLIER = 1000
+
+
+def pages(values, size=MAX_SYMBOLS):
+    """Return deterministic bounded pages; the 500 limit is per page, not per run."""
+    if size < 1 or size > MAX_SYMBOLS:
+        raise ValueError('invalid_thesis_page_size')
+    ordered = list(values)
+    return [ordered[start:start + size] for start in range(0, len(ordered), size)]
+
+
+def load_latest_pages(connection, *, namespace):
+    """Read every active tracked thesis through stable 500-row repository pages."""
+    rows, offset = [], 0
+    while True:
+        page = list_latest(connection, limit=MAX_SYMBOLS, namespace=namespace, offset=offset)
+        rows.extend(page)
+        if len(page) < MAX_SYMBOLS:
+            return rows
+        offset += len(page)
 
 
 def digest(value):
@@ -239,7 +258,7 @@ def evaluate_source_run(database, source_run_id=None, cutoff_at=None, symbols=No
     candidates = scan_candidates(source['scan'])
     with database.transaction() as c:
         c.execute('SET TRANSACTION READ ONLY')
-        existing = list_latest(c, limit=MAX_SYMBOLS, namespace=namespace)
+        existing = load_latest_pages(c, namespace=namespace)
         next_row = c.execute("SELECT calendar_date FROM quant.market_trade_calendar WHERE exchange='SSE' AND is_open AND calendar_date>%s ORDER BY calendar_date LIMIT 1", (source['data_date'],)).fetchone()
         session_end = cutoff.astimezone(SH).date() - (timedelta(days=1) if cutoff.astimezone(SH).time() < time(15) else timedelta())
         sessions = c.execute("SELECT calendar_date FROM quant.market_trade_calendar WHERE exchange='SSE' AND is_open AND calendar_date<=%s ORDER BY calendar_date DESC LIMIT 6", (session_end,)).fetchall()
@@ -257,23 +276,41 @@ def evaluate_source_run(database, source_run_id=None, cutoff_at=None, symbols=No
         targets = sorted(set(targets) & set(symbols))
         if not targets:
             raise ValueError('no_matching_source_or_tracked_symbols')
-    if len(targets) > MAX_SYMBOLS:
-        raise ValueError('thesis_scope_exceeds_500_page_required')
     bars_by, flows_by = {}, {}
-    with database.transaction() as c:
-        c.execute('SET TRANSACTION READ ONLY')
-        bars = c.execute('''SELECT symbol,trading_date,close,low,amount,available_at,source_observation_ids
-            FROM quant.canonical_bars_daily WHERE symbol=ANY(%s) AND trading_date=ANY(%s)
-              AND available_at<=%s ORDER BY symbol,trading_date''', (targets, [date.fromisoformat(d) for d in expected_days], cutoff)).fetchall()
-        flows = c.execute('''SELECT symbol,trading_date,net_amount,available_at FROM quant.stock_money_flow_daily
-            WHERE symbol=ANY(%s) AND trading_date=ANY(%s) AND source='longhuvip_main_net'
-              AND available_at<=%s ORDER BY symbol,trading_date''', (targets, [date.fromisoformat(d) for d in expected_days], cutoff)).fetchall()
-    for bar in bars:
-        bars_by.setdefault(bar['symbol'], []).append(dict(bar))
-    for flow in flows:
-        flows_by.setdefault(flow['symbol'], []).append(dict(flow))
-    items, failures = [], []
+    data_page_failures, unavailable_symbols = [], set()
+    target_pages = pages(targets)
+    for page_number, target_page in enumerate(target_pages, 1):
+        try:
+            with database.transaction() as c:
+                c.execute('SET TRANSACTION READ ONLY')
+                bars = c.execute('''SELECT symbol,trading_date,close,low,amount,available_at,source_observation_ids
+                    FROM quant.canonical_bars_daily WHERE symbol=ANY(%s) AND trading_date=ANY(%s)
+                      AND available_at<=%s ORDER BY symbol,trading_date''',
+                    (target_page, [date.fromisoformat(d) for d in expected_days], cutoff)).fetchall()
+                flows = c.execute('''SELECT symbol,trading_date,net_amount,available_at FROM quant.stock_money_flow_daily
+                    WHERE symbol=ANY(%s) AND trading_date=ANY(%s) AND source='longhuvip_main_net'
+                      AND available_at<=%s ORDER BY symbol,trading_date''',
+                    (target_page, [date.fromisoformat(d) for d in expected_days], cutoff)).fetchall()
+            for bar in bars:
+                bars_by.setdefault(bar['symbol'], []).append(dict(bar))
+            for flow in flows:
+                flows_by.setdefault(flow['symbol'], []).append(dict(flow))
+        except Exception as exc:
+            logging.getLogger(__name__).exception(
+                'thesis_market_page_failed source_run_id=%s page=%s size=%s',
+                source['run_id'], page_number, len(target_page),
+            )
+            unavailable_symbols.update(target_page)
+            data_page_failures.append(dict(
+                page=page_number, size=len(target_page), error_type=type(exc).__name__,
+            ))
+    items, failures = [], [
+        dict(symbol=symbol, error_type='market_page_unavailable')
+        for symbol in sorted(unavailable_symbols)
+    ]
     for symbol in targets:
+        if symbol in unavailable_symbols:
+            continue
         try:
             current = candidates.get(symbol)
             thesis = by_symbol.get(symbol)
@@ -343,9 +380,12 @@ def evaluate_source_run(database, source_run_id=None, cutoff_at=None, symbols=No
         except Exception as exc:
             logging.getLogger(__name__).exception('thesis_symbol_failed symbol=%s source_run_id=%s', symbol, source['run_id'])
             failures.append(dict(symbol=symbol, error_type=type(exc).__name__))
-    return dict(status='partial' if failures else 'completed', source_run_id=source['run_id'], source_kind=source['kind'],
+    return dict(status='partial' if failures or data_page_failures else 'completed', source_run_id=source['run_id'], source_kind=source['kind'],
         cutoff_at=cutoff.isoformat(), data_date=expected_date, namespace=namespace, live_effect='none',
-        decision_binding=False, evaluated=len(items), failed=len(failures), items=items, failures=failures, version=VERSION)
+        decision_binding=False, evaluated=len(items), failed=len(failures), items=items, failures=failures,
+        scope=dict(targets=len(targets), page_size=MAX_SYMBOLS, pages=len(target_pages),
+                   candidate_symbols=len(candidates), tracked_theses=len(existing)),
+        page_failures=data_page_failures, version=VERSION)
 
 
 def refresh_from_run(database, source_run_id, kind='post_close'):
@@ -355,7 +395,9 @@ def refresh_from_run(database, source_run_id, kind='post_close'):
     except Exception as exc:
         logging.getLogger(__name__).exception('trade_thesis_refresh_failed source_run_id=%s', source_run_id)
         receipt = dict(status='failed', source_run_id=str(source_run_id), live_effect='none',
-                       error_type=type(exc).__name__, version=VERSION)
+                       error_type=type(exc).__name__, reason_code=str(exc),
+                       user_message='旧候选跟踪未完成；主扫描结果仍然有效，详细原因已写入运行日志。',
+                       version=VERSION)
     with database.transaction() as c:
         if kind == 'post_close':
             from ..short_term_lanes.reports import make_bundle

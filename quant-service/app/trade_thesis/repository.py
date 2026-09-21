@@ -115,7 +115,7 @@ def active_thesis(connection: Any, thesis_id: str, *, as_of: str | None = None) 
 
 
 def list_latest(connection: Any, symbol: str | None = None, limit: int = 500,
-                namespace: str = "shadow") -> list[dict[str, Any]]:
+                namespace: str = "shadow", offset: int = 0) -> list[dict[str, Any]]:
     rows = connection.execute("""
         WITH active AS (
           SELECT DISTINCT ON (thesis_id) thesis_id,symbol,content_revision,payload,created_at
@@ -135,8 +135,8 @@ def list_latest(connection: Any, symbol: str | None = None, limit: int = 500,
         )
         SELECT active.payload AS thesis,evaluations.result AS evaluation
           FROM active LEFT JOIN evaluations USING(thesis_id)
-         ORDER BY active.created_at DESC LIMIT %s
-    """, (symbol, symbol, namespace, max(1, min(limit, 500)))).fetchall()
+         ORDER BY active.created_at DESC,active.thesis_id DESC LIMIT %s OFFSET %s
+    """, (symbol, symbol, namespace, max(1, min(limit, 500)), max(0, int(offset)))).fetchall()
     return [dict(row) for row in rows]
 
 

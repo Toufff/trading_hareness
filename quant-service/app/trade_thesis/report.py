@@ -4,6 +4,7 @@ LABELS = {'pending': '待验证', 'supported': '结构条件获支持', 'challen
           'complete': '完整', 'partial': '部分可验证', 'stale': '过时', 'conflict': '冲突',
           'waiting': '等待', 'eligible': '条件满足，非下单授权', 'suspended': '暂停新增',
           'cancelled': '已取消', 'unknown': '完整入场条件未确认'}
+STATUS_LABELS = {'completed': '已完成', 'partial': '部分完成', 'failed': '未完成'}
 
 
 def safe(value):
@@ -15,9 +16,10 @@ def sections(receipt, lane=None):
         return []
     lines = ['', '## 原始假设与本轮变化（影子评价，不改推荐排序）', '',
              '保留最初发现理由，不把今日排名下降直接解释成卖出；下列研究参考线不是账户止损。', '',
-             f"评价截点：{safe(receipt.get('cutoff_at'))}；行情日期：{safe(receipt.get('data_date'))}；状态：{safe(receipt.get('status'))}。", '']
+             f"评价截点：{safe(receipt.get('cutoff_at'))}；行情日期：{safe(receipt.get('data_date'))}；状态：{STATUS_LABELS.get(receipt.get('status'), '未知')}。", '']
     if receipt.get('status') == 'failed':
-        return lines + [f"本轮跟踪阶段失败：{safe(receipt.get('error_type'))}。其他扫描结论不被清空，不能把旧评价冒充本轮。", '']
+        message = receipt.get('user_message') or '旧候选跟踪未完成；详细原因已写入运行日志。'
+        return lines + [f"{safe(message)}其他扫描结论不受影响，也不会把旧评价冒充成本轮结果。", '']
     lines += ['| 股票 | 原始理由与结构 | 本轮量价事实 | 假设 / 新买 | 下一验证 |', '|---|---|---|---|---|']
     for item in receipt.get('items', []):
         if lane and not any(r.get('lane') == lane for r in item.get('original_rankings', []) + item.get('current_rankings', [])):
@@ -40,7 +42,9 @@ def sections(receipt, lane=None):
                 facts.append(f"{label}{obs[metric]['value']/divisor:.2f}{suffix}（{safe(obs[metric].get('effective_at'))}）")
         lines.append(f"| {safe(item.get('name'))}（{safe(item['symbol'])}） | {safe(item.get('claim'))}；原下沿{safe(structure.get('support'))}、上沿{safe(structure.get('reference'))} | {'；'.join(facts) or '本轮无可用当前行情'} | {LABELS.get(states['thesis_state'],states['thesis_state'])} / {LABELS.get(states['entry_state'],states['entry_state'])} | {safe(item.get('original_confirmation'))} |")
     lines += ['', '持仓动作：仍按已绑定且有效的纪律计划单独评价；本表不反推入场意图或生成卖出股数。',
-              f"同轮source_run_id：`{safe(receipt.get('source_run_id'))}`；评价ID与证据哈希可在交易假设面板或CLI读取。", '']
+              f"本轮追踪编号：`{safe(receipt.get('source_run_id'))}`；评价ID与证据哈希可在交易假设面板或CLI读取。", '']
+    if receipt.get('page_failures'):
+        lines += [f"候选范围共分{safe((receipt.get('scope') or {}).get('pages'))}批读取，其中{len(receipt['page_failures'])}批未完成；已完成批次已保留，技术原因见运行日志。", '']
     if receipt.get('failures'):
-        lines += ['部分失败：' + '；'.join(f"{safe(x['symbol'])} {safe(x['error_type'])}" for x in receipt['failures']), '']
+        lines += [f"部分股票跟踪未完成，共{len(receipt['failures'])}只；已完成结果仍然有效，技术原因见运行日志。", '']
     return lines
