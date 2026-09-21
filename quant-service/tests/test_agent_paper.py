@@ -209,8 +209,11 @@ class AgentPaperModelTests(unittest.TestCase):
         self.assertEqual(output, {"orders": [1]})
 
     def test_backend_selection_defaults_to_claude_cli_and_rejects_unknown(self):
+        from unittest.mock import patch
         from app.agent_paper.model import ClaudeCliModel, CodexCliModel, build_model
         self.assertIsInstance(build_model("claude_cli", model="claude-opus-5"), ClaudeCliModel)
+        with patch.dict(os.environ, {"AGENT_PAPER_MODEL": ""}):
+            self.assertEqual(build_model("claude_cli").model, "claude-sonnet-5")
         codex = build_model("codex_cli", model="gpt-5.6-sol", reasoning_effort="high")
         self.assertIsInstance(codex, CodexCliModel)
         self.assertEqual(codex.model, "gpt-5.6-sol/high")

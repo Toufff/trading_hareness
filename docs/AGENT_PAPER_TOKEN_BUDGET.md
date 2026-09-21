@@ -2,7 +2,7 @@
 
 面向后续接手模拟盘运维的人或 agent（预期是 Codex）。记录 `agent_paper` 三条订阅 backend 的实际消耗结构、已做的削减、**已否决的方案及其理由**，以及踩过的坑。
 
-数据基准：2026-09-18（`agent-claude-opus` 46 轮、`agent-dsh` 34 轮 + 5 轮失败），2026-09-20 复核。
+数据基准：2026-09-18（`agent-claude-opus` 46 轮、`agent-dsh` 34 轮 + 5 轮失败），2026-09-20 复核。2026-09-21 用户明确要求把 Claude 对照账户从 Opus 切换为 Sonnet；账户键保留以延续原资金、持仓和历史曲线。
 
 ---
 
@@ -73,7 +73,14 @@ DSH 同日 34 轮里 21 轮空单（62%）—— 它因为响应慢（单轮 100
 | E | DSH 用 `AGENTS.md` 首轮注入完整上下文，并用专用 patch 隐藏 coding/web/subagent 等工具 schema | `model.py`、`dsh-paper.patch.yml` | 不再读文件或因截断重读；最小实测由历史 100–200s 降至 **3.9s** |
 | F | 每轮把总字符数、分块字符数、明细级别和 backend token/字符用量写进 `usage` | `runner.py`、`model.py` | 后续能直接按轮量化优化，不再凭感觉 |
 
-**A 必须对三条 backend 同时生效。** 现在比较的是 Opus、DSH 与 Codex，同一交易日必须共用 15 分钟决策间隔，否则收益和 token 对照都失真。
+**A 必须对三条 backend 同时生效。** 当前比较的是 Sonnet、DSH 与 Codex，同一交易日必须共用 15 分钟决策间隔，否则收益和 token 对照都失真。
+
+### Claude 对照账户切换为 Sonnet（2026-09-21）
+
+- 稳定账户键仍为 `agent-claude-opus`，不迁移主键，不重置现金、持仓、挂单或历史净值。
+- 计划任务显式传入 `claude-sonnet-5`；`claude_cli` 的代码默认值也改为同一模型，避免日后重装任务时意外回退到 Opus。
+- 前端显示名改为 `Claude Sonnet`；历史决策仍按各自行上的 `model` 保留原 Opus 归属，新决策记录 Sonnet。
+- 本机 Claude Code 2.1.278 的最小真实调用确认 `sonnet` 别名解析为 canonical model `claude-sonnet-5`。同一输入 token 规模下，CLI 报告的名义费率约为 Opus 的 40%，因此预期显著降低订阅额度压力；订阅额度如何折算由供应商控制，不能把 60% 名义降幅承诺成精确的额度降幅。
 
 ### 熔断的语义（`runner.run_day`）
 
@@ -111,7 +118,7 @@ DSH 同日 34 轮里 21 轮空单（62%）—— 它因为响应慢（单轮 100
 |---|---|
 | 换 Messages API 直连以控制 `cache_control` | **需要 API key，会把名义消耗变成真实账单。** 这是方向相反的"优化" |
 | 按上述重排上下文、精确放缓存断点 | 依赖上一条，一并否决 |
-| 换更小的模型（Sonnet / Haiku） | 整件事就是 Opus 对 DSH 的对照，换模型等于作废实验。这是机主的决定，不是运维可以自行降级的 |
+| 运维自行换更小的模型（Sonnet / Haiku） | 2026-09-20 时否决，因为当时目标是 Opus 对 DSH；2026-09-21 用户明确改为 Sonnet，已覆盖该旧决定。以后仍不得由运维自行降级 |
 | 调 `effort` 降低思考深度 | 输出只占成本 8%，不值当 |
 | Batch API（五折） | 需要实时决策，不适用 |
 

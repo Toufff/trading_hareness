@@ -108,7 +108,7 @@ const int=v=>v==null?'—':Number(v).toLocaleString('zh-CN');
 const pct=v=>v==null?'—':(v>0?'+':'')+Number(v).toFixed(2)+'%';
 const sign=v=>v==null?'':v>0?'pos':v<0?'neg':'';
 const hm=s=>s?new Date(s).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}):'—';
-const NAMES={'agent-claude-opus':'Claude Opus','agent-dsh':'DSH','agent-codex-sol':'Codex 5.6 Sol'};
+const NAMES={'agent-claude-opus':'Claude Sonnet','agent-dsh':'DSH','agent-codex-sol':'Codex 5.6 Sol'};
 const AGENT_CLASSES=['a1','a2','a3'];
 const agentClass=i=>AGENT_CLASSES[i%AGENT_CLASSES.length];
 const SIDE={buy:'买入',sell:'卖出',cancel:'撤单'};

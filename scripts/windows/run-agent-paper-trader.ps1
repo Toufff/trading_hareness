@@ -10,7 +10,7 @@ param(
     # 2026-09-20: was 5. On 2026-09-18 Opus spent 46 rounds to place 4 orders - 42 of 46 (91%)
     # returned no orders at all. The claude_cli backend runs on the owner's Claude subscription, the
     # same quota as their interactive sessions, so over-sampling competes with their own work.
-    # Both backends must share one cadence or the Opus-vs-DSH comparison is confounded.
+    # All backends must share one cadence or the Sonnet-vs-DSH-vs-Codex comparison is confounded.
     [int]$DecisionMinutes = 15,
     # The Claude Code CLI needs the terminal proxy (same as the profile's `proxy`); only its subprocess uses it.
     [string]$CliProxy = 'http://127.0.0.1:4537'
