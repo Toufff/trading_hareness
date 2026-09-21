@@ -3,6 +3,7 @@ import '../../charts/registerResearchCharts';
 import { defineAsyncComponent, defineComponent, inject, reactive, toRefs } from 'vue';
 import { Refresh } from '@element-plus/icons-vue';
 import VChart from 'vue-echarts';
+import { guanshiChartTheme } from '../../theme/chart-theme';
 import { dashboardContextKey } from '../../dashboard-context';
 import TenDayLeaderRotationPanel from '../../components/TenDayLeaderRotationPanel.vue';
 import ResearchOnlyBadge from '../../components/ResearchOnlyBadge.vue';
@@ -20,7 +21,7 @@ export default defineComponent({
     if (!dashboard) throw new Error('research tab requires the dashboard shell context');
     // The shell exposes proxyRefs; spreading it snapshots initial null values.
     // Retain property references so late API responses and refreshes render.
-    return { ...toRefs(reactive(dashboard)), Refresh };
+    return { ...toRefs(reactive(dashboard)), Refresh, guanshiChartTheme };
   },
 });
 </script>
@@ -82,7 +83,7 @@ export default defineComponent({
       </el-row>
       <el-space wrap class="section-gap"><el-tag :type="marketFlowLatest?.status === 'ready' ? 'success' : 'warning'">{{ marketFlowLatest?.status ?? '等待采样' }}</el-tag><el-tag v-for="flag in marketFlowLatest?.quality_flags ?? []" :key="flag" type="warning" size="small">{{ flag }}</el-tag><el-tag type="info">晋级门禁 {{ marketFlow.research_gate?.observed_trading_days ?? 0 }}/{{ marketFlow.research_gate?.minimum_trading_days ?? 60 }}日 · {{ marketFlow.research_gate?.matured_independent_events ?? 0 }}/{{ marketFlow.research_gate?.minimum_independent_events ?? 200 }}成熟事件</el-tag></el-space>
       <el-empty v-if="!marketFlow.items.length" description="所选日期尚无量能资金特征；原始板块曲线仍可单独查看" :image-size="54"/>
-      <v-chart v-else :option="marketFlowChartOption" autoresize class="market-flow-state-chart"/>
+      <v-chart v-else :theme="guanshiChartTheme" :option="marketFlowChartOption" autoresize class="market-flow-state-chart"/>
       <el-table v-if="marketFlow.daily?.length" :data="marketFlow.daily" max-height="220" size="small" class="section-gap">
         <el-table-column prop="exchange_date" label="交易日" width="105"/>
         <el-table-column label="状态" width="105"><template #default="{ row }"><el-tag size="small" :type="marketFlowStateType(row.market_state)">{{ marketFlowStateLabel(row.market_state) }}</el-tag></template></el-table-column>
@@ -124,7 +125,7 @@ export default defineComponent({
     <template v-else>
       <div class="board-flow-toolbar"><el-space wrap><el-tag type="info">{{ boardFlowSeriesRows.length }} 个板块</el-tag><el-tag type="success">{{ boardFlowWindowText }}</el-tag><el-tag :type="boardFlowLatestSnapshot?.coverage ? 'success' : 'warning'">最新覆盖 {{ boardFlowLatestSnapshot?.coverage ?? 0 }}</el-tag><el-tag type="info">最后真实点 {{ chinaDateTime(boardFlowLatestSnapshot?.observed_at) }}</el-tag><el-tag v-if="boardFlowGaps" type="warning">{{ boardFlowGaps }} 段缺口已补点</el-tag></el-space><el-select v-model="boardFlowFocus" multiple filterable clearable collapse-tags collapse-tags-tooltip placeholder="可选重点板块；留空显示全部" class="board-flow-focus"><el-option v-for="item in boardFlowSeriesRows" :key="`${item.taxonomy_key}:${item.sector_key}`" :label="item.label" :value="`${item.taxonomy_key}:${item.sector_key}`"/></el-select></div>
       <el-empty v-if="!boardFlowSeriesRows.length" description="所选日期尚无板块分钟快照" :image-size="68"/>
-      <v-chart v-else :option="boardFlowChartOption" autoresize class="board-flow-chart"/>
+      <v-chart v-else :theme="guanshiChartTheme" :option="boardFlowChartOption" autoresize class="board-flow-chart"/>
       <el-text type="info" class="review-note">{{ boardFlowNotice || '时间轴以 Asia/Shanghai 交易所时钟生成；缺失分钟沿用最近真实值，悬浮时会标记为补点。' }}</el-text>
       <el-divider content-position="left">一分钟资金轮动事件</el-divider>
       <el-alert title="每 60 秒比较相邻同源快照：同类板块资金变化进入前 5%、变化不少于 2 亿元且当前净流绝对值不少于 1 亿元时入队；流出转流入、流入转流出和单向急剧加速均需下一分钟方向保持。事件只进入前端研究证据，不发送飞书。" type="info" :closable="false" show-icon/>

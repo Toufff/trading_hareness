@@ -1,0 +1,85 @@
+/* Shared surface rules. Feature layouts/data remain owned by their components. */
+html, body { background:var(--gs-ground); color:var(--gs-ink); font-family:var(--gs-font); }
+body { line-height:1.6; }
+button, input, select, textarea { font-family:inherit; }
+button, a, summary { -webkit-tap-highlight-color:transparent; }
+a { color:var(--gs-sky); text-underline-offset:3px; }
+button:focus-visible, a:focus-visible, summary:focus-visible { outline:2px solid var(--gs-sky); outline-offset:3px; }
+h1, h2, .el-card__header, .board-head h3 { font-family:var(--gs-title-font); letter-spacing:.02em; }
+h1, h2 { font-weight:600; }
+input, select, .el-statistic, .el-table, .metric-card strong { font-variant-numeric:tabular-nums; }
+.guanshi-shell > .el-container { min-width:0; flex-direction:column; }
+.guanshi-shell .topbar { height:auto; min-height:94px; padding:22px 28px 14px; background:transparent; border:0; width:100%; max-width:1496px; margin:0 auto; gap:16px; }
+.guanshi-shell .topbar h1 { font-size:26px; }
+.guanshi-shell .topbar span { color:var(--gs-muted); }
+.guanshi-shell .content { width:100%; max-width:1496px; margin:0 auto; padding-top:0; }
+.workspace-service-state { display:flex; justify-content:flex-end; align-items:center; gap:8px; margin:0 0 12px; }
+.decision-shell .decision-content { max-width:1496px; margin:auto; padding:24px 28px 48px; }
+.decision-shell .decision-toolbar { border:0; background:transparent; margin-bottom:8px; }
+.decision-toolbar > .el-card__body { padding:0 0 15px; }
+.decision-toolbar h2 { font-family:var(--gs-title-font); font-size:26px; }
+.decision-toolbar p { max-width:650px; font-size:13px; line-height:1.7; }
+.el-card { --el-card-bg-color:var(--gs-paper); border-radius:6px; box-shadow:none; }
+.el-card__header { border-bottom-color:var(--gs-line); padding:18px 22px; color:var(--gs-ink); font-size:16px; }
+.el-card__body { padding:22px; }
+.el-table { --el-table-header-bg-color:#f0ecdf; --el-table-row-hover-bg-color:var(--gs-wash); --el-table-bg-color:var(--gs-paper); --el-table-tr-bg-color:var(--gs-paper); }
+.el-table th.el-table__cell { font-weight:500; }
+.el-table .cell { line-height:1.65; }
+.el-tabs__item { font-weight:400; }
+.el-tabs__item.is-active { font-weight:600; }
+.el-tabs__nav-wrap::after { height:1px; }
+.el-tabs__active-bar { background:var(--gs-sky); }
+.el-tag { font-weight:400; border-radius:3px; }
+.el-button { border-radius:4px; }
+.el-button--primary:not(.is-plain):not(.is-text):not(.is-link) { color:var(--gs-cloud); }
+.el-alert { border-radius:4px; }
+.el-alert__title { line-height:1.65; }
+.el-dialog { max-width:calc(100vw - 24px); }
+.el-drawer__header { color:var(--gs-ink); border-bottom:1px solid var(--gs-line); padding-bottom:18px; margin-bottom:0; }
+.el-collapse { --el-collapse-header-bg-color:var(--gs-paper); --el-collapse-content-bg-color:var(--gs-paper); }
+.realtime-health-panel, .group-relay-status-panel { background:var(--gs-paper); }
+.personal-decision .status-tile { padding:10px 14px; border-radius:4px; background:#f1eee4; font-size:13px; }
+.personal-decision .action-card, .personal-decision .scan-card { border-radius:4px; }
+.personal-decision .section-title strong { font:600 18px/1.5 var(--gs-title-font); }
+.personal-decision .section-title small { font:12px/1.6 var(--gs-font); }
+.personal-decision .market-scan-section { border-top-color:var(--gs-gold); }
+.personal-decision .scan-heading strong, .personal-decision .action-heading strong { font-family:var(--gs-title-font); font-size:19px; }
+.personal-decision .recommendation-decision { background:var(--gs-paper); color:var(--gs-ink); border-color:var(--gs-line); border-top:3px solid var(--gs-gold); border-radius:5px; }
+.recommendation-decision .meta, .recommendation-decision header p { color:var(--gs-muted); }
+.recommendation-decision .picks article { background:var(--gs-paper); border-radius:4px; }
+.recommendation-decision .picks h3 { font:600 20px/1.5 var(--gs-title-font); }
+.recommendation-decision .stage { background:var(--gs-wash); color:var(--gs-sky); border-radius:3px; }
+.recommendation-decision .company-brief { background:var(--el-fill-color-light); border-left-color:var(--gs-gold); border-radius:0; }
+.recommendation-decision button { border-color:var(--gs-line); color:var(--gs-sky); }
+.recommendation-decision table.peers th { background:var(--el-fill-color-light); }
+.sector-page h1, .scan-page h1, .agent-page h1 { font-family:var(--gs-title-font); }
+.sector-page .page-eyebrow, .scan-page > header small, .agent-page > header small { font-size:12px; color:var(--gs-muted); letter-spacing:2px; }
+.sector-page .sector-page-header, .scan-page > header, .agent-page > header { padding:0 0 16px; border-bottom:1px solid var(--gs-line); margin-bottom:18px; }
+.scan-page .metrics > div, .agent-page .metrics > div { border-radius:4px; }
+.scan-page .list, .scan-page .detail, .agent-page section { border-radius:5px; }
+.scan-page .active { background:var(--gs-sky); color:var(--gs-cloud); border-color:var(--gs-sky); }
+.scan-page .stock.selected { background:var(--gs-wash); }
+.sector-heat-panel .leader-card, .sector-heat-panel .ranking-pane, .sector-heat-panel .detail-pane { border-radius:5px; }
+.sector-heat-panel .reading-note { background:#f1eee4; border-left-color:var(--gs-gold); }
+@media(max-width:760px) {
+  .guanshi-shell .topbar { padding:20px 14px 12px; align-items:flex-start; }
+  .guanshi-shell .topbar h1 { font-size:23px; }
+  .guanshi-shell .content { padding:0 12px 32px; }
+  .decision-shell .decision-content { padding:20px 12px 32px; }
+  .decision-toolbar h2 { font-size:24px; }
+  .el-card__header, .el-card__body { padding:14px; }
+  .decision-toolbar > .el-card__body { padding:0 2px 12px; }
+  .decision-shell .personal-decision .status-grid { grid-template-columns:1fr; gap:6px; }
+  .personal-decision .section-title, .personal-decision .action-heading { flex-wrap:wrap; gap:8px; }
+  .personal-decision .tracking-facts { grid-template-columns:1fr; }
+  .personal-decision .toolbar-row > .el-space { width:100%; }
+  .personal-decision .toolbar-row .el-space__item:first-child { flex:1; min-width:0; }
+  .personal-decision .chart-entry-card, .personal-decision .chart-symbol-input { width:100%; min-width:0; }
+  .personal-decision .status-tile strong { overflow-wrap:anywhere; text-align:right; }
+  .table-toolbar { flex-wrap:wrap; }
+  .el-descriptions__body { overflow-x:auto; }
+  .el-button, button:not(.el-switch__core), summary { min-height:40px; }
+}
+@media(prefers-reduced-motion:reduce) {
+  *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; scroll-behavior:auto !important; }
+}

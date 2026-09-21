@@ -3,10 +3,8 @@ import vue from '@vitejs/plugin-vue';
 import Components from 'unplugin-vue-components/vite';
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers';
 
-// The dashboard adapter (feishu-adapter, 127.0.0.1:5680) serves every path the
-// frontend calls at runtime -- including the `/api/*` routes it proxies on to
-// the quant-service API (127.0.0.1:5681). The frontend never talks to 5681
-// directly, so `npm run dev` only needs to forward to the adapter.
+// Most development routes use the dashboard adapter; the standalone sector
+// page uses the owner's v1 endpoint, matching the public gateway route.
 const adapterTarget = process.env.VITE_DEV_ADAPTER_TARGET ?? 'http://127.0.0.1:5680';
 
 export default defineConfig({
@@ -22,6 +20,8 @@ export default defineConfig({
   ],
   server: {
     proxy: {
+      // Standalone board UI uses the owner v1 route (not an adapter /api/research alias).
+      '/api/v1/sector-heat': { target: 'http://127.0.0.1:5681', changeOrigin: true },
       '/api': { target: adapterTarget, changeOrigin: true },
       '/events': { target: adapterTarget, changeOrigin: true, ws: true },
       '/manual-relay': { target: adapterTarget, changeOrigin: true },

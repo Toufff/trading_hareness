@@ -294,7 +294,7 @@ async function select(planId: string) {
 .list-item.rejected { border: 2px solid #ef4444; }
 .item-top { display: flex; align-items: baseline; gap: 6px; }
 .item-top small { color: var(--el-text-color-secondary); }
-.dot { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #ef4444; color: #fff; font-size: 11px; line-height: 18px; text-align: center; }
+.dot { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #ef4444; color: var(--gs-paper); font-size: 11px; line-height: 18px; text-align: center; }
 .item-tags, .item-facts { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
 .item-facts { color: var(--el-text-color-regular); }
 .stage-chip, .status { padding: 1px 7px; border-radius: 10px; font-size: 12px; white-space: nowrap; }

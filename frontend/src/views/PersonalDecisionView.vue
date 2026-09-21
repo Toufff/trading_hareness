@@ -18,6 +18,14 @@ const holdingHasSnapshot = computed(() => Boolean(workspace.brief?.holdings?.por
 // polled) only when the reader opens it, so it never pushes candidates down.
 const newsOpen = ref(false);
 
+function snapshotTime(value: unknown) {
+  if (!value) return '—';
+  const date = new Date(String(value));
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -146,7 +154,7 @@ function compactMoney(value: unknown): string {
       </div>
       <div v-else class="status-grid section-gap holdings-status-grid">
         <div class="status-tile"><span>账户持仓</span><el-tag :type="workspace.brief.delivery.holding_actions_eligible ? 'success' : 'danger'">{{ workspace.brief.delivery.holding_actions_eligible ? '当前且可用' : '同步不可用' }}</el-tag></div>
-        <div class="status-tile"><span>精确读取时间</span><strong>{{ displayValue(workspace.brief.holdings.portfolio_observed_at) }}</strong></div>
+        <div class="status-tile"><span>持仓读取时间</span><strong :title="String(workspace.brief.holdings.portfolio_observed_at || '')">{{ snapshotTime(workspace.brief.holdings.portfolio_observed_at) }}</strong></div>
       </div>
 
       <!-- 持仓页主区块：先今日动作汇总，再每只股票的纪律卡；下面的账户持仓建议为旧版文本计划。 -->

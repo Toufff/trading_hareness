@@ -49,7 +49,7 @@ function evidence(check: Check): string {
 </template>
 
 <style scoped>
-.business-coverage{border:1px solid #dce3ed;border-radius:12px;background:var(--el-bg-color,#fff);padding:20px;margin-bottom:20px;min-width:0}
+.business-coverage{border:1px solid var(--gs-line);border-radius:12px;background:var(--el-bg-color,var(--gs-paper));padding:20px;margin-bottom:20px;min-width:0}
 header{display:flex;justify-content:space-between;align-items:center;gap:16px}h2{font-size:18px;margin:0}h3{font-size:14px;margin:0}p,small{font-size:13px;line-height:1.7;overflow-wrap:anywhere}header p,small{color:var(--el-text-color-secondary,#66758b)}
-button{border:1px solid #347de0;color:#347de0;background:transparent;border-radius:6px;padding:9px 13px;cursor:pointer;flex-shrink:0}.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:12px}.checks article{border:1px solid #dce3ed;padding:14px;border-radius:8px;min-width:0}h3 span{float:right;font-size:12px;color:#2b7354}.attention{color:#a15c10!important}.overall{font-weight:600}@media(max-width:640px){header{align-items:flex-start;flex-direction:column}.business-coverage{padding:14px}}
+button{border:1px solid #347de0;color:#347de0;background:transparent;border-radius:6px;padding:9px 13px;cursor:pointer;flex-shrink:0}.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:12px}.checks article{border:1px solid var(--gs-line);padding:14px;border-radius:8px;min-width:0}h3 span{float:right;font-size:12px;color:#2b7354}.attention{color:#a15c10!important}.overall{font-weight:600}@media(max-width:640px){header{align-items:flex-start;flex-direction:column}.business-coverage{padding:14px}}
 </style>

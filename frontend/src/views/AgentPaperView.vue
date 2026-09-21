@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {computed,ref,onMounted,onBeforeUnmount} from 'vue';
 import {getJson} from '../api/http';
+import WorkspaceHeader from '../components/WorkspaceHeader.vue';
 type Daily={trading_date:string;agent_equity:number;agent_return_pct:number|null;human_equity:number|null;human_return_pct:number|null;human_basis?:string;human_comparable?:boolean;human_fills_imported_through:string|null;human_missing_prices:string[]};
 type Order={placed_at:string;symbol:string;name:string|null;side:string;order_type:string;quantity:number;limit_price:string|null;status:string;filled_quantity:number;fill_price:string|null;fees:string;reason:string|null;reject_reasons:string[]};
 type Decision={decided_at:string;status:string;market_view:string|null;notes:string|null;order_count:number|null;error:string|null;duration_ms:number|null};
@@ -25,8 +26,9 @@ onMounted(()=>{void load();timer=window.setInterval(()=>void load(),60000);});
 onBeforeUnmount(()=>{ctrl?.abort();if(timer)window.clearInterval(timer);});
 </script>
 <template>
+<WorkspaceHeader active="agent-paper" />
 <main class="agent-page">
-  <header><div><small>PAPER ONLY · 不连接券商</small><h1>AI 模拟盘 vs 实盘</h1><p v-if="data?.model">{{data.model}} · 起始 {{data.start_date}} · 初始权益 {{data.initial_equity}}</p></div>
+  <header><div><small>纸上演练 · 不连接券商</small><h1>模拟盘与实盘对照</h1><p v-if="data?.model">{{data.model}} · 起始 {{data.start_date}} · 初始权益 {{data.initial_equity}}</p></div>
     <button @click="load()" :disabled="loading">{{loading?'读取中…':'刷新'}}</button></header>
   <p v-if="error" role="alert" class="error">{{error}}</p>
   <p v-if="data?.status==='not_configured'">模拟账户 {{data.account_key}} 尚未初始化。</p>
@@ -53,13 +55,13 @@ onBeforeUnmount(()=>{ctrl?.abort();if(timer)window.clearInterval(timer);});
 </main>
 </template>
 <style scoped>
-.agent-page{max-width:1200px;margin:auto;padding:24px 16px;color:#22334b;font:14px/1.6 'Segoe UI','Microsoft YaHei',sans-serif;box-sizing:border-box}
-header{display:flex;justify-content:space-between;align-items:center;gap:12px}h1{font-size:26px;margin:2px 0}header small{letter-spacing:1px;color:#8293aa}header p,.note{color:#6f8097}
-button{font:inherit;border:1px solid #dce3ed;border-radius:7px;background:white;padding:8px 12px;cursor:pointer}
-.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.metrics div{padding:14px;background:white;border:1px solid #e1e7ef;border-radius:9px;min-width:0}
-.metrics small,.metrics strong,.metrics em{display:block}.metrics small{color:#7e8ca0}.metrics strong{font-size:18px;margin-top:6px}.metrics em{font-style:normal;color:#52647c}
-section{background:white;border:1px solid #e0e7ef;border-radius:10px;padding:14px;margin-top:14px;overflow-x:auto}h2{font-size:16px;margin:0 0 8px}
-table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #eff2f7;white-space:nowrap}td.reason{white-space:normal;min-width:260px}
-article{border-bottom:1px solid #eff2f7;padding:8px 0;overflow-wrap:anywhere}article.failed{color:#b34848}.error{background:#fff0ef;color:#b34848;padding:12px}
+.agent-page{max-width:1200px;margin:auto;padding:24px 16px;color:var(--gs-ink);font:14px/1.6 'Segoe UI','Microsoft YaHei',sans-serif;box-sizing:border-box}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px}h1{font-size:26px;margin:2px 0}header small{letter-spacing:1px;color:var(--gs-muted)}header p,.note{color:var(--gs-muted)}
+button{font:inherit;border:1px solid var(--gs-line);border-radius:7px;background:var(--gs-paper);padding:8px 12px;cursor:pointer}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.metrics div{padding:14px;background:var(--gs-paper);border:1px solid var(--gs-line);border-radius:9px;min-width:0}
+.metrics small,.metrics strong,.metrics em{display:block}.metrics small{color:var(--gs-muted)}.metrics strong{font-size:18px;margin-top:6px}.metrics em{font-style:normal;color:var(--gs-muted)}
+section{background:var(--gs-paper);border:1px solid var(--gs-line);border-radius:10px;padding:14px;margin-top:14px;overflow-x:auto}h2{font-size:16px;margin:0 0 8px}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--gs-line);white-space:nowrap}td.reason{white-space:normal;min-width:260px}
+article{border-bottom:1px solid var(--gs-line);padding:8px 0;overflow-wrap:anywhere}article.failed{color:var(--gs-up)}.error{background:var(--el-color-danger-light-9);color:var(--gs-up);padding:12px}
 @media(max-width:800px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>

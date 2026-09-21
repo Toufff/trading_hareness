@@ -2,9 +2,10 @@
 import { defineAsyncComponent } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import zhCn from 'element-plus/es/locale/lang/zh-cn';
-import { DataAnalysis, Document, Key, Operation, Refresh, TrendCharts, UploadFilled, Wallet } from '@element-plus/icons-vue';
+import { Key, Refresh } from '@element-plus/icons-vue';
 import { useDashboardWorkspace } from './composables/useDashboardWorkspace';
 import { getDashboardKey, setDashboardKey } from './api/http';
+import WorkspaceHeader from './components/WorkspaceHeader.vue';
 
 const dashboard = useDashboardWorkspace();
 
@@ -43,22 +44,12 @@ const FeishuWorkbenchView = defineAsyncComponent(() => import('./views/FeishuWor
 
 <template>
   <el-config-provider :locale="zhCn">
-  <el-container class="app-shell">
-    <el-aside width="236px" class="side-nav">
-      <div class="brand"><el-icon><DataAnalysis /></el-icon><div><strong>Quant Research</strong><span>投研与市场数据</span></div></div>
-      <el-menu :default-active="dashboard.activeSection" class="menu" @select="dashboard.selectActiveSection">
-        <el-menu-item index="research"><el-icon><DataAnalysis /></el-icon><span>量化研究台</span></el-menu-item>
-        <el-menu-item index="market-decision"><el-icon><TrendCharts /></el-icon><span>市场与选股</span></el-menu-item>
-        <el-menu-item index="holdings"><el-icon><Wallet /></el-icon><span>我的持仓</span></el-menu-item>
-        <el-menu-item index="monitor"><el-icon><Operation /></el-icon><span>导入监控</span></el-menu-item>
-        <el-menu-item index="workbench"><el-icon><Document /></el-icon><span>飞书工作台</span></el-menu-item>
-        <el-menu-item index="relay"><el-icon><UploadFilled /></el-icon><span>手动投递</span></el-menu-item>
-      </el-menu>
-      <div class="side-state"><el-tag :type="dashboard.connected ? 'success' : 'warning'" effect="plain">{{ dashboard.connected ? '事件流已连接' : '事件流重连中' }}</el-tag><el-button text :icon="Key" size="small" @click="openSetDashboardKey">设置 Key</el-button></div>
-    </el-aside>
+  <el-container class="app-shell guanshi-shell" direction="vertical">
+    <WorkspaceHeader :active="dashboard.activeSection === 'market-decision' ? 'market' : dashboard.activeSection" />
     <el-container>
       <el-header class="topbar"><div><h1>{{ dashboard.activeSection === 'research' ? '量化研究台' : dashboard.activeSection === 'market-decision' ? '市场与选股' : dashboard.activeSection === 'holdings' ? '我的持仓' : dashboard.activeSection === 'monitor' ? '导入监控' : dashboard.activeSection === 'workbench' ? '飞书工作台' : '手动投递' }}</h1><span>{{ dashboard.activeSection === 'research' ? '分析师证据、市场数据与研究候选池' : dashboard.activeSection === 'market-decision' ? '全市场扫描、盘面判断与独立新买研究' : dashboard.activeSection === 'holdings' ? '中信证券精确持仓与持仓内操作计划' : dashboard.activeSection === 'workbench' ? '汇总群协作闭环、可用能力与授权状态' : '本地持久化导入链路' }}</span></div><el-button v-if="!['market-decision', 'holdings'].includes(dashboard.activeSection)" :icon="Refresh" :loading="dashboard.activeSection === 'workbench' ? dashboard.feishuWorkbenchLoading : dashboard.loading" @click="dashboard.activeSection === 'workbench' ? dashboard.loadFeishuWorkbench() : dashboard.loadResearch()">刷新数据</el-button></el-header>
       <el-main class="content">
+        <div class="workspace-service-state"><el-tag :type="dashboard.connected ? 'success' : 'warning'" effect="plain">{{ dashboard.connected ? '事件流已连接' : '事件流重连中' }}</el-tag><el-button text :icon="Key" size="small" @click="openSetDashboardKey">访问设置</el-button></div>
         <template v-if="dashboard.activeSection === 'research'">
           <el-alert v-if="dashboard.researchError" :title="dashboard.researchError" type="error" show-icon :closable="false" class="section-gap" />
           <el-tabs v-model="dashboard.activeResearchTab" class="research-tabs">

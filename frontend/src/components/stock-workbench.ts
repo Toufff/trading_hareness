@@ -121,7 +121,7 @@ export function tradePlanAnnotations(workbench: StockWorkbench): WorkbenchAnnota
     const price = finiteNumber(value);
     if (price !== null) annotations.push({
       id: `active-plan-target-${index + 1}`, kind: 'price_line', label: `计划目标${index + 1}`,
-      detail: '来自当前有效交易计划', color: '#f59e0b', price,
+      detail: '来自当前有效交易计划', color: '#a16c2c', price,
     });
   });
   return annotations;
@@ -145,19 +145,19 @@ export function priceChartOption(
   const chartPoints = annotations.filter((item) => item.kind === 'point' && item.date && Number.isFinite(item.price));
   const chartRegions = annotations.filter((item) => item.kind === 'region' && item.start_date && item.end_date && Number.isFinite(item.low) && Number.isFinite(item.high));
   const referenceLines = view?.levels ? [
-    { name: '结构支撑', yAxis: view.levels.support, lineStyle: { color: '#38bdf8' } },
-    { name: '压力参考', yAxis: view.levels.resistance, lineStyle: { color: '#f4b65f' } },
-    { name: '失效参考', yAxis: view.levels.failure, lineStyle: { color: '#f87171' } },
+    { name: '结构支撑', yAxis: view.levels.support, lineStyle: { color: '#2d627c' } },
+    { name: '压力参考', yAxis: view.levels.resistance, lineStyle: { color: '#a16c2c' } },
+    { name: '失效参考', yAxis: view.levels.failure, lineStyle: { color: '#ae473c' } },
   ].filter((item) => Number.isFinite(item.yAxis)) : [];
   const eventPoints = overlays.has('event_markers') ? messages.filter((message) => message.chart_date && dates.includes(message.chart_date)).slice(-12)
     .map((message) => {
       const index = dates.indexOf(message.chart_date!);
-      return { name: message.title, coord: [message.chart_date, bars[index]?.high ?? null], itemStyle: { color: '#a78bfa' } };
+      return { name: message.title, coord: [message.chart_date, bars[index]?.high ?? null], itemStyle: { color: '#79617d' } };
     }) : [];
   const series: Record<string, unknown>[] = [{
     name: '价格', type: 'candlestick',
     data: bars.map((bar) => [bar.open, bar.close, bar.low, bar.high]),
-    itemStyle: { color: '#e15a5a', color0: '#1bad86', borderColor: '#e15a5a', borderColor0: '#1bad86' },
+    itemStyle: { color: '#ae473c', color0: '#387b66', borderColor: '#ae473c', borderColor0: '#387b66' },
     animationDurationUpdate: 360,
     markLine: referenceLines.length || priceLines.length ? {
       symbol: ['none', 'none'], label: { formatter: '{b} {c}', position: 'insideEndTop' },
@@ -179,28 +179,28 @@ export function priceChartOption(
     } : undefined,
     markArea: chartRegions.length ? {
       silent: true,
-      label: { color: '#d9f6fb', position: 'insideTopLeft' },
+      label: { color: '#263e48', position: 'insideTopLeft' },
       data: chartRegions.map((item) => ([
         { name: item.label, xAxis: item.start_date, yAxis: item.low, itemStyle: { color: annotationColor(item), opacity: 0.14, borderColor: annotationColor(item), borderWidth: 1 } },
         { xAxis: item.end_date, yAxis: item.high },
       ])),
     } : undefined,
   }];
-  if (overlays.has('ma5')) series.push(line('MA5', bars.map((bar) => bar.ma5), '#fbbf24'));
-  if (overlays.has('ma10')) series.push(line('MA10', bars.map((bar) => bar.ma10), '#60a5fa'));
-  if (overlays.has('ma20')) series.push(line('MA20', bars.map((bar) => bar.ma20), '#c084fc'));
+  if (overlays.has('ma5')) series.push(line('MA5', bars.map((bar) => bar.ma5), '#836026'));
+  if (overlays.has('ma10')) series.push(line('MA10', bars.map((bar) => bar.ma10), '#2d627c'));
+  if (overlays.has('ma20')) series.push(line('MA20', bars.map((bar) => bar.ma20), '#79617d'));
   if (overlays.has('boll')) {
-    series.push(line('布林上轨', bars.map((bar) => bar.boll_upper), '#fb7185', true));
-    series.push(line('布林中轨', bars.map((bar) => bar.boll_mid), '#94a3b8', true));
-    series.push(line('布林下轨', bars.map((bar) => bar.boll_lower), '#34d399', true));
+    series.push(line('布林上轨', bars.map((bar) => bar.boll_upper), '#ae473c', true));
+    series.push(line('布林中轨', bars.map((bar) => bar.boll_mid), '#626d6d', true));
+    series.push(line('布林下轨', bars.map((bar) => bar.boll_lower), '#387b66', true));
   }
   return {
     animation: true, animationDuration: 260, animationDurationUpdate: 360,
     tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-    legend: { top: 2, textStyle: { color: '#94a3b8' } },
+    legend: { top: 2, textStyle: { color: '#626d6d' } },
     grid: { left: 58, right: 68, top: 40, bottom: 58 },
-    xAxis: { type: 'category', data: dates, boundaryGap: true, axisLine: { lineStyle: { color: '#334155' } }, axisLabel: { color: '#94a3b8' } },
-    yAxis: { scale: true, splitLine: { lineStyle: { color: 'rgba(148,163,184,.12)' } }, axisLabel: { color: '#94a3b8' } },
+    xAxis: { type: 'category', data: dates, boundaryGap: true, axisLine: { lineStyle: { color: '#dcd6c5' } }, axisLabel: { color: '#626d6d' } },
+    yAxis: { scale: true, splitLine: { lineStyle: { color: '#dcd6c5' } }, axisLabel: { color: '#626d6d' } },
     dataZoom: [{ type: 'inside', start: zoomStart, end: zoomEnd }, { type: 'slider', start: zoomStart, end: zoomEnd, height: 20, bottom: 10, borderColor: 'transparent' }],
     series,
   };
@@ -211,18 +211,18 @@ export function metricChartOption(bars: WorkbenchBar[], workbench: StockWorkbenc
   const common = {
     animationDurationUpdate: 320, tooltip: { trigger: 'axis' },
     grid: { left: 58, right: 22, top: 30, bottom: 36 },
-    xAxis: { type: 'category', data: dates, axisLabel: { color: '#94a3b8', hideOverlap: true }, axisLine: { lineStyle: { color: '#334155' } } },
-    yAxis: { type: 'value', scale: true, splitLine: { lineStyle: { color: 'rgba(148,163,184,.12)' } }, axisLabel: { color: '#94a3b8' } },
+    xAxis: { type: 'category', data: dates, axisLabel: { color: '#626d6d', hideOverlap: true }, axisLine: { lineStyle: { color: '#dcd6c5' } } },
+    yAxis: { type: 'value', scale: true, splitLine: { lineStyle: { color: '#dcd6c5' } }, axisLabel: { color: '#626d6d' } },
   };
   if (metric === 'vendor_flow') {
     const byDate = new Map((workbench.flow.series ?? []).map((row) => [String(row.trading_date), Number(row.net_amount)]));
-    return { ...common, series: [{ name: '成交单规模净额', type: 'bar', data: dates.map((date) => byDate.get(date) ?? null), itemStyle: { color: (item: { value: number }) => item.value >= 0 ? '#e15a5a' : '#1bad86' } }] };
+    return { ...common, series: [{ name: '成交单规模净额', type: 'bar', data: dates.map((date) => byDate.get(date) ?? null), itemStyle: { color: (item: { value: number }) => item.value >= 0 ? '#ae473c' : '#387b66' } }] };
   }
-  if (metric === 'turnover') return { ...common, yAxis: { ...common.yAxis, name: '%' }, series: [line('换手率', bars.map((bar) => bar.turnover_rate), '#f59e0b')] };
+  if (metric === 'turnover') return { ...common, yAxis: { ...common.yAxis, name: '%' }, series: [line('换手率', bars.map((bar) => bar.turnover_rate), '#a16c2c')] };
   if (metric === 'macd') return { ...common, series: [
-    { name: 'MACD柱', type: 'bar', data: bars.map((bar) => bar.macd), itemStyle: { color: (item: { value: number }) => item.value >= 0 ? '#e15a5a' : '#1bad86' } },
-    line('DIF', bars.map((bar) => bar.dif), '#fbbf24'), line('DEA', bars.map((bar) => bar.dea), '#60a5fa'),
+    { name: 'MACD柱', type: 'bar', data: bars.map((bar) => bar.macd), itemStyle: { color: (item: { value: number }) => item.value >= 0 ? '#ae473c' : '#387b66' } },
+    line('DIF', bars.map((bar) => bar.dif), '#836026'), line('DEA', bars.map((bar) => bar.dea), '#2d627c'),
   ] };
-  if (metric === 'rsi') return { ...common, yAxis: { ...common.yAxis, min: 0, max: 100 }, series: [line('RSI14', bars.map((bar) => bar.rsi14), '#a78bfa')] };
-  return { ...common, series: [{ name: '成交额（亿元）', type: 'bar', data: bars.map((bar) => bar.amount == null ? null : bar.amount / 100_000_000), itemStyle: { color: '#38bdf8' } }] };
+  if (metric === 'rsi') return { ...common, yAxis: { ...common.yAxis, min: 0, max: 100 }, series: [line('RSI14', bars.map((bar) => bar.rsi14), '#79617d')] };
+  return { ...common, series: [{ name: '成交额（亿元）', type: 'bar', data: bars.map((bar) => bar.amount == null ? null : bar.amount / 100_000_000), itemStyle: { color: '#2d627c' } }] };
 }

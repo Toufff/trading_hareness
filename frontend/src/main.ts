@@ -1,5 +1,7 @@
 import { createApp } from 'vue';
 import './style.css';
+import './theme/tokens.css';
+import './theme/surfaces.css';
 import { setDashboardKey } from './api/http';
 
 // Element Plus is no longer installed as a full plugin (`app.use(ElementPlus)`

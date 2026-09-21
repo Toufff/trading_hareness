@@ -5,6 +5,7 @@
  * price the owner API returned (plan JSON / chart payload); nothing is derived here.
  */
 import VChart from 'vue-echarts';
+import { guanshiChartTheme } from '../../theme/chart-theme';
 import { use } from 'echarts/core';
 import { BarChart, CandlestickChart, LineChart } from 'echarts/charts';
 import {
@@ -152,6 +153,7 @@ const termColor = LINE_STYLE.hard.color;
     :data-labels="placedCount"
   >
     <VChart
+      :theme="guanshiChartTheme"
       ref="chartRef"
       :option="finalOption"
       autoresize
