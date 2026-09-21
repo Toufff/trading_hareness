@@ -98,6 +98,8 @@ def build(database, day, *, write=True, policy=Policy()):
     if write:result['evidence_artifact']=archive_json({'as_of_date':str(day),'rows':rows,'result':result})
     for group in result['groups']:group.pop('pairs',None)
     result['row_count']=len(rows)
+    from .diagnostics import describe
+    result['descriptive_diagnostics'] = describe(rows, result['groups'])
     result['manual_rows']=sum(r['source_kind']=='manual' for r in rows)
     result['manual_notice']='人工建议需用登记入口绑定原始候选与真实时间；未登记的聊天意见不自动归功或追认。'
     return result

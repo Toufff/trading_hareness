@@ -26,7 +26,7 @@ def session_closed_since(scan_date, now, sessions=None):
     return False
 
 
-def records(scan,lane,symbols,author,reason,*,now=None,sessions=None):
+def records(scan,lane,symbols,author,reason,*,now=None,sessions=None,attribution=None):
     now=now or datetime.now(SHANGHAI)
     if now.tzinfo is None:raise ValueError('Aware registration time required')
     day=now.astimezone(SHANGHAI).date().isoformat()
@@ -51,6 +51,10 @@ def records(scan,lane,symbols,author,reason,*,now=None,sessions=None):
         r['source']='manual_recommendation';r['timing']='prospective'
         r['effectiveness'].update(source_kind='manual',selected=r['symbol'] in chosen)
         r['manual']={'author':author,'reason':reason,'source_scan_date':scan['as_of_date'],'source_scan_hash':digest(scan)}
+        r['manual']['attribution'] = {'machine_rank':r['rank'], 'machine_display_rank':r['display_rank'],
+            'selected':r['symbol'] in chosen, 'editorial':deepcopy((attribution or {}).get(r['symbol'])),
+            'comparison_role':'selected' if r['symbol'] in chosen else 'nonselected_control',
+            'outcome_at_registration':None}
         # Stable across retries of the same recommendation on the same scan;
         # the scan hash and attached research change with every report rebuild,
         # so they stay out of the identity. Inserts preserve first availability.
@@ -60,13 +64,13 @@ def records(scan,lane,symbols,author,reason,*,now=None,sessions=None):
     return out
 
 
-def register(database,scan,lane,symbols,author,reason):
+def register(database,scan,lane,symbols,author,reason,*,attribution=None):
     now=datetime.now(SHANGHAI)
     with database.transaction() as c:
         sessions=[str(r['calendar_date']) for r in c.execute('''SELECT calendar_date FROM quant.market_trade_calendar
             WHERE exchange='SSE' AND is_open AND calendar_date>%s AND calendar_date<=%s ORDER BY calendar_date''',
             (scan['as_of_date'],now.date())).fetchall()]
-    out=records(scan,lane,symbols,author,reason,now=now,sessions=sessions)
+    out=records(scan,lane,symbols,author,reason,now=now,sessions=sessions,attribution=attribution)
     persist_origins(database,out)
     return {'status':'registered','selected':symbols,'comparison_universe':len(out),'live_effect':'none',
             'signal_date':out[0]['signal_date'],'available_at':out[0]['available_at']}

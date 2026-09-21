@@ -59,14 +59,14 @@ def run(db,*,refresh=True,cutoff=None,review=None,collector=collect,analyzer=mod
         if e['event_id'] not in current_ids and set(e['evidence_ids'])<=known_ids]
     events+=retained
     if retained and not result_review:analysis={**analysis,'retained_reviews':len(retained)}
-    prior={e['event_id'] for e in (previous or {}).get('events',[])}
-    for e in events:e['change']='retained' if e['event_id'] in prior else 'new'
+    from .impact_audit import annotate
+    events, retired_events = annotate(events, (previous or {}).get('events',[]), docs, cutoff)
     status=('failed' if health and all(h['status']=='failed' for h in health) else
         'no_news' if not docs else 'analyzed' if analysis['status']=='completed' else 'leads_only')
     result=dict(version=VERSION,run_id=str(uuid4()),cutoff=cutoff.isoformat(),status=status,
         input_hash=input_hash,document_ids=[d['document_id'] for d in docs],source_status=health,analysis=analysis,
         summary=(result_review or {}).get('summary','已获取消息线索，尚无通过引用校验的语义结论；不能据此声称没有利好。'),
-        events=events,leads=leads[:100],coverage=dict(documents=len(docs),routed=len(leads),review_input=len(chosen),
+        events=events,retired_events=retired_events,leads=leads[:100],coverage=dict(documents=len(docs),routed=len(leads),review_input=len(chosen),
         reviewed=len({i for e in events for i in e['evidence_ids']}),full_market_news=False),
         live_effect='research_only_no_weight_change',buy_authorized=False,
         published_at=datetime.now(timezone.utc).isoformat())
