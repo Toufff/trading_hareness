@@ -8,7 +8,7 @@ export type FollowupItem = {
   virtual_entry?: {state: string; execution?: {net_return_pct?: number; status?: string}};
   windows: Record<string, { status: string; return_pct: number | null }>;
 };
-export type Followup = { status: string; note: string; total: number; items: FollowupItem[] };
+export type Followup = { status: string; note: string; total: number; page_total?: number; items: FollowupItem[] };
 const props = defineProps<{ followup?: Followup; lane?: string }>();
 const query = ref(''); const all = ref(false); const count = ref(20);
 const items = computed(() => (props.followup?.items ?? []).filter(r =>
@@ -25,6 +25,7 @@ const value = (w: FollowupItem['windows'][string] | undefined) => w?.status === 
     <p v-if="!followup">这轮尚无跟踪账本，不能据此判断旧推荐成功或失败。</p>
     <template v-else>
       <p>{{ followup.note }}</p>
+      <p v-if="followup.page_total != null">本策略范围已加载 {{ followup.items.length }} / {{ followup.page_total }} 条；下方搜索及过滤只作用于已加载记录。</p>
       <p v-if="followup.status !== 'completed'" role="status">跟踪状态：{{ followup.status }}，与今日扫描结果分别核验。</p>
       <div class="controls"><input v-model="query" aria-label="搜索往期股票" placeholder="股票名称或代码" /><label><input v-model="all" type="checkbox" /> 包含非首屏候选</label><span>{{ items.length }}条记录（不同版本独立保留）</span></div>
       <div class="scroll"><table><thead><tr><th>股票 / 发现日</th><th>原策略 / 展示位</th><th>1日</th><th>3日</th><th>5日</th><th>10日</th><th>原结构检查</th></tr></thead><tbody>
@@ -35,7 +36,7 @@ const value = (w: FollowupItem['windows'][string] | undefined) => w?.status === 
           <td><details><summary>{{ labels[r.path_check] ?? r.path_check }}</summary><p>原确认：{{ r.original_confirmation }}</p><p>原失效：{{ r.original_invalidation }}</p><p v-if="r.original_analysis">当时公司复核：{{ r.original_analysis }}</p><p v-if="r.virtual_entry">独立买点实验：{{ entryLabels[r.virtual_entry.state] ?? '待核查' }}<span v-if="r.virtual_entry.execution?.net_return_pct != null"> · 扣费模拟 {{ r.virtual_entry.execution.net_return_pct.toFixed(2) }}%</span></p><p>日线代理实验不是原文字条件的完整确认，也不代表实际成交。</p></details></td>
         </tr>
       </tbody></table></div>
-      <p v-if="!items.length">当前筛选没有到期记录。</p><button v-if="items.length>count" @click="count+=40">显示更多记录</button>
+      <p v-if="!items.length">已加载记录中没有符合当前筛选的到期记录。<span v-if="followup.page_total != null && followup.items.length < followup.page_total">仍有未加载记录，请使用上方“往期跟踪”继续加载；不能据此认为没有历史候选。</span></p><button v-if="items.length>count" @click="count+=40">显示更多记录</button>
       <p class="boundary">涨跌幅以发现日收盘为基准，不是可成交收益。涨停不算已买入，跌停不假定能卖出；未到期、缺数据、历史补录分别保留。</p>
     </template>
   </section>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-export type Effectiveness = { status: string; as_of_date: string; finding_count?: number; reason?: string; manual_notice?: string;
+export type Effectiveness = { status: string; as_of_date: string; finding_count?: number; reason?: string; manual_notice?: string; page_total?: number;
   groups: { lane: string; profile: string; regime: string; source_kind: string; status: string; timing: string;
     independent_sessions: number; minimum_sessions: number; top_minus_rest_pp: number | null; finding: string | null;
     excluded_dates: number; overlapping_dates: number;
@@ -17,6 +17,7 @@ const pct=(v:number|null)=>v==null?'暂无':`${v>0?'+':''}${v.toFixed(2)} 个百
     <summary>策略效果反馈 <span>{{ !value ? '本轮未生成' : value.status!=='completed' ? '执行失败' : `${value.finding_count ?? 0} 项异常待复核` }}</span></summary>
     <p v-if="!value || value.status!=='completed'" role="alert">{{ value?.reason ?? '本轮没有效果评估，不能解释为策略有效。' }}</p>
     <template v-else>
+      <p v-if="value.page_total != null">本策略范围已加载 {{ value.groups.length }} / {{ value.page_total }} 组；未加载不表示没有样本。</p>
       <p>截至 {{ value.as_of_date }}。按版本、市场状态、来源隔离，日期等权、剔除重叠窗口。样本不足不等于通过；历史补录不算前瞻验证。</p>
       <div class="effect-table"><table><thead><tr><th>策略 / 来源</th><th>评估状态</th><th>独立日期</th><th>前排减后排</th></tr></thead>
         <tbody><tr v-for="g in groups" :key="[g.lane,g.profile,g.regime,g.source_kind,g.timing].join(':')">

@@ -28,6 +28,30 @@ function sample(): StrategyScan {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('independent strategy reports', () => {
+  it('filters paged history by the selected strategy and resets pages on strategy changes', async () => {
+    const read = vi.spyOn(http, 'getJson').mockImplementation(async (path) => {
+      const query = new URL(String(path), 'http://local').searchParams;
+      return {detail:{status:'completed',total:90,page_total:0,items:[],note:`范围：${query.get('key') ?? '全策略'}`}} as never;
+    });
+    const scan=sample();scan.detail_run_id='fixed-run';scan.details_deferred=true;
+    const wrapper=mount(ShortTermLanesPanel,{props:{summary:{strategy_lanes:scan}},global:{plugins:[ElementPlus]}});
+    await wrapper.get('[data-report-key="expansion"]').trigger('click');
+    await wrapper.findAll('.detail-controls button')[3]!.trigger('click');
+    await vi.waitFor(()=>expect(wrapper.text()).toContain('范围：expansion'));
+    expect(read.mock.calls.at(-1)?.[0]).toContain('key=expansion');
+    expect(wrapper.findAll('.detail-controls button')[3]!.attributes('disabled')).toBeDefined();
+    await wrapper.get('[data-report-key="pullback"]').trigger('click');
+    expect(wrapper.text()).not.toContain('范围：expansion');
+    await wrapper.findAll('.detail-controls button')[3]!.trigger('click');
+    await vi.waitFor(()=>expect(wrapper.text()).toContain('范围：pullback'));
+    expect(read.mock.calls.at(-1)?.[0]).toContain('key=pullback');
+    expect(read.mock.calls.at(-1)?.[0]).toContain('offset=0');
+    await wrapper.get('[data-report-key="overview"]').trigger('click');
+    await wrapper.findAll('.detail-controls button')[3]!.trigger('click');
+    await vi.waitFor(()=>expect(wrapper.text()).toContain('范围：全策略'));
+    expect(read.mock.calls.at(-1)?.[0]).not.toContain('&key=');
+    wrapper.unmount();
+  });
   it('loads historical evidence only on request and pins it to the displayed run', async () => {
     const read = vi.spyOn(http, 'getJson').mockResolvedValue({detail: {status:'completed', total:0, items:[], note:'同轮记录'}});
     const scan = sample(); scan.detail_run_id = 'fixed-run'; scan.details_deferred = true;

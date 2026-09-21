@@ -39,7 +39,7 @@ function evidence(check: Check): string {
     <p v-if="error" role="alert">{{ error }}</p>
     <template v-if="report">
       <p class="overall" :class="{ attention: report.status !== 'passed' }">{{ report.status === 'passed' ? '本次分项检查通过；不代表未来可靠性或收益保证。' : '存在未通过项，不能认定整套系统已可用。' }}</p>
-      <p>核查时点：{{ report.checked_at }}</p>
+      <p>核查时点：{{ new Date(report.checked_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) }}（北京时间）</p>
       <div class="checks"><article v-for="check in report.checks" :key="check.key">
         <h3>{{ check.label }} <span :class="{ attention: check.status !== 'passed' }">{{ check.status === 'passed' ? '本项通过' : '需要处理' }}</span></h3>
         <p>{{ evidence(check) }}</p><small>{{ check.reason }}</small>

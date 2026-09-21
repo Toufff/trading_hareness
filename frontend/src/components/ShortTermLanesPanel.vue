@@ -12,6 +12,7 @@ import { downloadStrategyReport, type StrategyScan, type StrategyLane, type Stra
 
 const props = defineProps<{ summary?: Record<string, unknown>; recommendation?: unknown }>();
 const loadedDetails = ref<Partial<StrategyScan>>({});
+const selected = ref('overview');
 const scan = computed(() => {
   const base = props.summary?.strategy_lanes as StrategyScan | undefined;
   return base ? { ...base, ...loadedDetails.value } : undefined;
@@ -22,8 +23,15 @@ watch(() => (props.summary?.strategy_lanes as StrategyScan | undefined)?.detail_
   detailController?.abort(); loadedDetails.value = {}; detailError.value = ''; loadingDetail.value = false;
 });
 onBeforeUnmount(() => detailController?.abort());
+watch(selected, () => {
+  detailController?.abort(); loadingDetail.value = false; detailError.value = '';
+  const retained = { ...loadedDetails.value };
+  delete retained.followup; delete retained.effectiveness;
+  loadedDetails.value = retained;
+});
 async function loadDetail(section: 'followup' | 'effectiveness' | 'research' | 'events', append = false) {
   const run = scan.value?.detail_run_id;
+  const scope = selected.value;
   if (!run || loadingDetail.value) return;
   detailController = new AbortController(); const controller = detailController;
   loadingDetail.value = true; detailError.value = '';
@@ -31,9 +39,10 @@ async function loadDetail(section: 'followup' | 'effectiveness' | 'research' | '
   const oldGroups = loadedDetails.value.effectiveness?.groups ?? [];
   const offset = section === 'effectiveness' ? oldGroups.length : old.length;
   const query = new URLSearchParams({ run_id: run, section, limit: '40', offset: String(append ? offset : 0) });
+  if (['followup', 'effectiveness'].includes(section) && scope !== 'overview') query.set('key', scope);
   try {
     const response = await getJson<{detail: unknown}>(`/api/research/strategy/post-close/detail?${query}`, {signal: controller.signal});
-    if (scan.value?.detail_run_id !== run || controller.signal.aborted) return;
+    if (scan.value?.detail_run_id !== run || selected.value !== scope || controller.signal.aborted) return;
     if (section === 'research') loadedDetails.value = {...loadedDetails.value, ...response.detail as Partial<StrategyScan>};
     else if (section === 'followup') {
       const next = response.detail as NonNullable<StrategyScan['followup']>;
@@ -55,7 +64,8 @@ async function downloadReport(report: StrategyReport) {
     downloadStrategyReport(response.detail);
   } catch (error) { detailError.value = String(error); }
 }
-const selected = ref('overview');
+const moreFollowup = computed(() => !loadedDetails.value.followup || loadedDetails.value.followup.page_total == null || loadedDetails.value.followup.items.length < loadedDetails.value.followup.page_total);
+const moreEffectiveness = computed(() => !loadedDetails.value.effectiveness || loadedDetails.value.effectiveness.page_total == null || loadedDetails.value.effectiveness.groups.length < loadedDetails.value.effectiveness.page_total);
 const reports = computed(() => scan.value?.report_bundle?.reports ?? []);
 const currentReport = computed(() => reports.value.find(r => r.key === selected.value));
 const currentLane = computed(() => scan.value?.lanes.find(l => l.key === selected.value));
@@ -81,8 +91,8 @@ const leadName = (lane: StrategyLane) => {
       <div v-if="scan.details_deferred" class="detail-controls" aria-label="按需加载同轮证据">
         <button :disabled="loadingDetail" @click="loadDetail('research')">公司研究详情</button>
         <button :disabled="loadingDetail" @click="loadDetail('events')">消息影响详情</button>
-        <button :disabled="loadingDetail" @click="loadDetail('effectiveness', !!loadedDetails.effectiveness)">策略效果样本{{ loadedDetails.effectiveness ? ' · 再加载40组' : '' }}</button>
-        <button :disabled="loadingDetail" @click="loadDetail('followup', !!loadedDetails.followup)">往期跟踪 · {{ loadedDetails.followup ? '再加载40条' : '加载40条' }}</button>
+        <button :disabled="loadingDetail || !moreEffectiveness" @click="loadDetail('effectiveness', !!loadedDetails.effectiveness)">策略效果样本{{ !moreEffectiveness ? ' · 已加载全部' : loadedDetails.effectiveness ? ' · 再加载40组' : '' }}</button>
+        <button :disabled="loadingDetail || !moreFollowup" @click="loadDetail('followup', !!loadedDetails.followup)">往期跟踪 · {{ !moreFollowup ? '已加载全部' : loadedDetails.followup ? '再加载40条' : '加载40条' }}</button>
         <span v-if="loadingDetail" role="status">正在读取同轮证据…</span>
       </div>
       <p v-if="detailError" role="alert">{{ detailError }}</p>
