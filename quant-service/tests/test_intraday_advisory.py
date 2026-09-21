@@ -11,11 +11,13 @@ from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 from app.intraday_advisory.rules import QuoteSample, evaluate
+from app.intraday_advisory.renderer import analysis_card, signal_card
+from app.intraday_advisory.presentation import ensure_readable_card
 from app.intraday_advisory.market_watch import index_sample_from_row
 from app.intraday_advisory.schedule import decide
 from app.intraday_advisory.scope import AdvisoryScope, ScopeItem
 from app.intraday_advisory.runtime import (
-    IntradayAdvisoryDependencies, RuntimeState, _context, run_intraday_advisory_cycle,
+    IntradayAdvisoryDependencies, RuntimeState, _analyze, _context, run_intraday_advisory_cycle,
 )
 
 
@@ -52,7 +54,7 @@ def test_schedule_uses_bounded_cadences_and_special_reports() -> None:
     regular = decide(MONDAY, last_fetch=MONDAY - timedelta(seconds=5),
                      last_deepseek=MONDAY - timedelta(minutes=10),
                      last_codex=MONDAY - timedelta(minutes=30))
-    assert regular.fetch_quotes and regular.run_deepseek and regular.run_codex
+    assert regular.fetch_quotes and not regular.run_deepseek and regular.run_codex
     assert regular.report_kind == "fixed"
     suppressed = decide(MONDAY.replace(hour=11, minute=30), last_fetch=None, last_deepseek=MONDAY,
                         last_codex=MONDAY.replace(hour=11, minute=0))
@@ -63,6 +65,49 @@ def test_schedule_uses_bounded_cadences_and_special_reports() -> None:
     tail = decide(MONDAY.replace(hour=14, minute=45), last_fetch=MONDAY, last_deepseek=MONDAY,
                   last_codex=MONDAY.replace(hour=14, minute=0))
     assert tail.run_codex and tail.report_kind == "tail"
+
+
+def test_cards_translate_internal_fields_and_bound_model_output() -> None:
+    signal = evaluate([
+        QuoteSample("002008.SZ", MONDAY - timedelta(seconds=70), 100, 100, 1_000_000,
+                    100, 50, 50, "大族激光"),
+        QuoteSample("002008.SZ", MONDAY, 101.3, 100, 7_000_000, 900, 750, 150, "大族激光"),
+    ])[0]
+    first = signal_card(signal, source="recommendation", dashboard_url="https://stock.toufai.top")
+    ensure_readable_card(first)
+    serialized = json.dumps(first, ensure_ascii=False)
+    assert "amount_ratio" not in serialized and "002008.SZ" not in serialized
+    report = analysis_card("deepseek", {
+        "market_state": "watch", "summary": "breakout_hold 进入复核",
+        "attention_symbols": ["002008.SZ"],
+        "guidance": ["buy_authorized=false"], "risks": ["quote=null"],
+    }, report_kind="ten_minute", generated_at=MONDAY)
+    ensure_readable_card(report)
+    rendered = json.dumps(report, ensure_ascii=False)
+    assert "需要关注" in rendered and "当前尚未满足买入条件" in rendered
+    assert "quote=null" not in rendered and "breakout_hold" not in rendered
+
+
+def test_incomplete_market_context_is_not_sent_to_a_model_or_user() -> None:
+    async def scenario() -> None:
+        model = AsyncMock()
+        deps = IntradayAdvisoryDependencies(
+            database=object(), run_database=AsyncMock(), fetch_quotes=AsyncMock(),
+            fetch_indices=AsyncMock(), post_text=AsyncMock(), post_card=AsyncMock(),
+            session_open=AsyncMock(), now=lambda: MONDAY, account_key=lambda: "citics-primary",
+            deepseek_factory=lambda: model,
+        )
+        scope = AdvisoryScope("citics-primary", (
+            ScopeItem("002008.SZ", "大族激光", "recommendation", {}),
+        ), "snapshot", "decision", ())
+        result = await _analyze(deps, RuntimeState(), scope, provider="deepseek",
+                                trigger_kind="scheduled", report_kind="ten_minute", always_push=False)
+        assert result["status"] == "skipped"
+        assert result["reason"] == "insufficient_fresh_market_context"
+        model.analyze.assert_not_awaited()
+        deps.post_card.assert_not_awaited()
+
+    asyncio.run(scenario())
 
 
 def test_rules_detect_amount_pulse_without_calling_it_institutional_money() -> None:

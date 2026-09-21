@@ -38,6 +38,16 @@ runtime configuration and ownership, not a long-lived server branch: releases
 publish a Git SHA and image/source provenance through the loopback health
 endpoints, while secret environment files remain outside version control.
 
+Feishu delivery has a separate presentation boundary.  Runtime/database
+payloads retain machine field names for replay, while
+`intraday_advisory/presentation.py` converts only allowlisted facts into
+human-facing Chinese and rejects cards that still contain raw variable names,
+booleans, UUIDs or task identifiers.  Holding discipline and recommendation
+eligibility are distinct semantics: a non-held recommendation may be paused or
+invalidated, but must never receive a reduce/exit instruction.  Incomplete
+quote or core-index coverage fails closed before a model is called or a
+trading-style report is delivered.
+
 `quant-service/app/main.py` is the composition root by design: it owns
 application lifespan, dependency assembly and router registration. As of the
 2026-09 audit it is also, in practice, a large historical compatibility

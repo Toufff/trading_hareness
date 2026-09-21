@@ -59,6 +59,7 @@ class IntradayAdvisoryDependencies:
     account_key: Callable[[], str]
     deepseek_factory: Callable[[], Any] = DeepSeekAdvisoryModel
     codex_factory: Callable[[], Any] = CodexAdvisoryModel
+    dashboard_url: Callable[[], str | None] = lambda: None
 
 
 @dataclass
@@ -177,7 +178,7 @@ async def _emit_signal(deps: IntradayAdvisoryDependencies, state: RuntimeState, 
     if previous and current - previous < timedelta(minutes=10):
         return
     text = render_signal(signal, source=source)
-    card = signal_card(signal, source=source)
+    card = signal_card(signal, source=source, dashboard_url=deps.dashboard_url())
     event = await deps.run_database(lambda: _persist_event_and_delivery(
         deps.database, signal, source, text, card))
     if not event:
@@ -211,6 +212,15 @@ async def _analyze(deps: IntradayAdvisoryDependencies, state: RuntimeState, scop
     now = deps.now()
     payload = _context(scope, state, now, trigger_kind=trigger_kind, report_kind=report_kind)
     started = now
+    quoted = sum(1 for item in scope.items if state.samples.get(item.symbol))
+    indices = sum(1 for values in state.index_samples.values() if values)
+    required_quotes = 0 if not scope.items else max(1, int(len(scope.items) * 0.8 + 0.999))
+    if indices < 4 or quoted < required_quotes:
+        return {
+            "status": "skipped", "provider": provider, "reason": "insufficient_fresh_market_context",
+            "coverage": {"quoted": quoted, "required_quotes": required_quotes,
+                         "indices": indices, "required_indices": 4},
+        }
     try:
         model = state.deepseek if provider == "deepseek" else state.codex
         if model is None:
@@ -232,7 +242,7 @@ async def _analyze(deps: IntradayAdvisoryDependencies, state: RuntimeState, scop
         if should_push:
             text = render_analysis(provider, result.output, report_kind=report_kind or trigger_kind, generated_at=completed)
             card = analysis_card(provider, result.output, report_kind=report_kind or trigger_kind,
-                                 generated_at=completed)
+                                 generated_at=completed, dashboard_url=deps.dashboard_url())
             key = f"analysis:{provider}:{stored['analysis_run_id']}"
             await deps.run_database(lambda: _enqueue_analysis(
                 deps.database, run_id=stored["analysis_run_id"], key=key, text=text, card=card))

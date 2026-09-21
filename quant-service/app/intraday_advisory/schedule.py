@@ -37,7 +37,10 @@ def decide(now: datetime, *, last_fetch: datetime | None, last_deepseek: datetim
     codex_due = special is not None or (regular_slot and not suppressed)
     if last_codex is not None and (now - last_codex).total_seconds() < (120 if special else 1500):
         codex_due = False
-    return ScheduleDecision(fetch, deepseek, codex_due, special or ("fixed" if codex_due else None))
+    # A full Codex checkpoint subsumes the ten-minute delta report.  Running
+    # both would create two near-identical user notifications in one cycle.
+    return ScheduleDecision(fetch, deepseek and not codex_due, codex_due,
+                            special or ("fixed" if codex_due else None))
 
 
 __all__ = ["ScheduleDecision", "decide"]

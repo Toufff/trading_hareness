@@ -12,7 +12,10 @@ from app.runtime_tasks import BackgroundTaskSpec
 from app.trade_discipline.alerts_eligibility import AlertScope, load_alert_scope
 from app.trade_discipline.alerts_evaluation import MinuteTapeRejected, validate_minute_tape
 from app.trade_discipline.alerts_repository import persist_evaluation_transitions
-from app.trade_discipline.alerts_runtime import DisciplineAlertRuntimeDependencies, run_discipline_alert_cycle
+from app.trade_discipline.alerts_renderer import discipline_alert_card, render_discipline_alert
+from app.trade_discipline.alerts_runtime import (
+    DisciplineAlertRuntimeDependencies, _deliver_due, run_discipline_alert_cycle,
+)
 from app.trade_discipline.contracts import (
     Action, Confirm, Derivation, DisciplinePlan, Evaluation, Line, LineState, PositionRef, QualityCheck,
 )
@@ -122,10 +125,11 @@ class _TransitionConnection:
             self.events[event_key] = row
             return _Result([row])
         if flat.startswith("INSERT INTO quant.discipline_alert_deliveries"):
-            event_id, text = params
+            event_id, text, card = params
             if event_id in self.deliveries:
                 return _Result()
-            row = {"delivery_id": f"delivery-{len(self.deliveries) + 1}", "message_text": text}
+            row = {"delivery_id": f"delivery-{len(self.deliveries) + 1}",
+                   "message_text": text, "message_card": card.obj}
             self.deliveries[event_id] = row
             return _Result([row])
         raise AssertionError(flat)
@@ -220,6 +224,17 @@ class EligibilityTests(unittest.TestCase):
 
 
 class TransitionPersistenceTests(unittest.TestCase):
+    def test_recommendation_candidate_never_receives_a_sell_instruction(self):
+        plan = alert_plan(kind="new_buy")
+        line = plan.lines[0].model_copy(update={"action": Action(type="reduce_by_pct", value=50)})
+        state = evaluation("triggered").line_states[0]
+        text = render_discipline_alert(plan, line, state)
+        card = discipline_alert_card(plan, line, state)
+        serialized = str(card)
+        self.assertIn("暂停新买", text)
+        self.assertNotIn("减仓", text)
+        self.assertNotIn("退出", serialized)
+
     def test_only_first_armed_to_triggered_edge_enters_dedicated_outbox(self):
         connection = _TransitionConnection()
         plan = alert_plan()
@@ -288,6 +303,7 @@ class RuntimeCoverageTests(unittest.TestCase):
         return DisciplineAlertRuntimeDependencies(
             database=object(), run_database=run_database, fetch_minutes=AsyncMock(),
             post_text=AsyncMock(return_value={"status": "sent"}),
+            post_card=AsyncMock(return_value={"status": "sent"}),
             session_open=AsyncMock(return_value=(active, "test_session")), dashboard_url=lambda: None,
             account_key=lambda: "citics-primary", now=lambda: AS_OF, interval_seconds=lambda: 30,
         )
@@ -302,6 +318,18 @@ class RuntimeCoverageTests(unittest.TestCase):
             result = asyncio.run(run_discipline_alert_cycle(deps, now=AS_OF))
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["reason"], "authoritative_scope_unavailable")
+
+    def test_native_card_is_preferred_over_text_for_delivery(self):
+        deps = self.deps(active=True)
+        card = {"header": {"title": {"content": "可读纪律提醒"}}}
+        with patch("app.trade_discipline.alerts_runtime._load_due",
+                   return_value=[{"delivery_id": "delivery-1", "message_text": "fallback",
+                                  "message_card": card}]), \
+             patch("app.trade_discipline.alerts_runtime._persist_outcome"):
+            result = asyncio.run(_deliver_due(deps))
+        self.assertEqual(result["sent"], 1)
+        deps.post_card.assert_awaited_once_with(card)
+        deps.post_text.assert_not_awaited()
 
     def test_weekend_post_close_is_idle_and_never_invokes_daily_evaluation(self):
         deps = self.deps(active=False)

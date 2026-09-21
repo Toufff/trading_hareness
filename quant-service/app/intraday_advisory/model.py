@@ -18,8 +18,11 @@ from ..event_research.model_config import settings as event_model_settings
 
 SYSTEM_PROMPT = """你是 A 股盘中研究助手。输入是只读行情、持仓事实、正式推荐池、纪律事件和确定性信号。
 只做风险提示、状态解释和条件式观察建议；禁止下单、禁止声称主动买卖量代表机构身份、禁止把缺失数据补写成事实。
-输出必须是 JSON。建议必须引用输入中的具体价格、幅度、成交额或触发线；持仓与推荐标的要明确区分。
-market_state 只能是 calm、watch、risk；attention_symbols 最多 8 个；guidance 最多 8 条。"""
+输出必须是 JSON。使用自然中文，不得输出变量名、JSON 路径、布尔值、空值、UUID、内部任务名。
+建议必须引用输入中的具体价格、幅度、成交额或触发线；持仓与推荐候选必须明确区分。
+推荐候选尚未持有时，只能说暂停新买、等待确认或候选条件失效，禁止说减仓、卖出、退出。
+十分钟报告只写相较上一轮的变化，最多三个重点对象；完整报告也只保留最重要的三条建议和三条风险。
+market_state 只能是 calm、watch、risk；attention_symbols 最多 3 个；guidance 最多 3 条。"""
 
 OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
@@ -42,10 +45,10 @@ def _normalize(value: Any) -> dict[str, Any]:
         state = "watch"
     output = {
         "market_state": state,
-        "summary": str(value.get("summary") or "")[:1200],
-        "attention_symbols": [str(item) for item in (value.get("attention_symbols") or [])[:8]],
-        "guidance": [str(item)[:500] for item in (value.get("guidance") or [])[:8]],
-        "risks": [str(item)[:500] for item in (value.get("risks") or [])[:8]],
+        "summary": str(value.get("summary") or "")[:240],
+        "attention_symbols": [str(item)[:40] for item in (value.get("attention_symbols") or [])[:3]],
+        "guidance": [str(item)[:140] for item in (value.get("guidance") or [])[:3]],
+        "risks": [str(item)[:140] for item in (value.get("risks") or [])[:3]],
     }
     # Do not let harmless wording variation create a ten-minute notification.
     # A push-worthy state change is a changed risk regime or attention set;

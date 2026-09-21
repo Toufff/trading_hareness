@@ -22,12 +22,14 @@ def build_notification_loops(*, database: Any, run_database: Any, fetch_minutes:
     now = lambda: datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai"))  # noqa: E731
     discipline = lambda: run_discipline_alert_loop(DisciplineAlertRuntimeDependencies(  # noqa: E731
         database=database, run_database=run_database, fetch_minutes=fetch_minutes, post_text=post_text,
+        post_card=post_card,
         session_open=session_open, dashboard_url=dashboard_url, account_key=discipline_account_key,
         now=now, interval_seconds=alert_interval_seconds))
     advisory = lambda: run_intraday_advisory_loop(IntradayAdvisoryDependencies(  # noqa: E731
         database=database, run_database=run_database, fetch_quotes=fetch_quotes, fetch_indices=fetch_indices,
         post_text=post_text, post_card=post_card,
-        session_open=session_open, now=now, account_key=advisory_account_key))
+        session_open=session_open, now=now, account_key=advisory_account_key,
+        dashboard_url=dashboard_url))
     return discipline, advisory
 
 

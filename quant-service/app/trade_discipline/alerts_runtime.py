@@ -37,6 +37,7 @@ MAX_FETCH_CONCURRENCY = 4
 DatabaseExecutor = Callable[[Callable[[], Any]], Awaitable[Any]]
 MinuteFetcher = Callable[[str], Awaitable[dict[str, Any]]]
 AlertSender = Callable[[str], Awaitable[dict[str, Any]]]
+CardSender = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 SessionCheck = Callable[..., Awaitable[tuple[bool, str]]]
 
 
@@ -46,6 +47,7 @@ class DisciplineAlertRuntimeDependencies:
     run_database: DatabaseExecutor
     fetch_minutes: MinuteFetcher
     post_text: AlertSender
+    post_card: CardSender
     session_open: SessionCheck
     dashboard_url: Callable[[], str | None]
     account_key: Callable[[], str]
@@ -96,7 +98,8 @@ async def _deliver_due(deps: DisciplineAlertRuntimeDependencies) -> dict[str, in
     rows = await deps.run_database(lambda: _load_due(deps.database))
     counts = {"attempted": 0, "sent": 0, "failed": 0, "disabled": 0}
     for row in rows:
-        outcome = await deps.post_text(str(row["message_text"]))
+        card = row.get("message_card") if isinstance(row.get("message_card"), dict) else {}
+        outcome = await deps.post_card(card) if card else await deps.post_text(str(row["message_text"]))
         counts["attempted"] += 1
         status = str(outcome.get("status") or "failed")
         if status not in {"sent", "failed", "disabled"}:

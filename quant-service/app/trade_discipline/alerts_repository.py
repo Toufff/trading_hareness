@@ -9,7 +9,7 @@ from typing import Any
 from psycopg.types.json import Json
 
 from .alerts_evaluation import alert_line_states, line_key
-from .alerts_renderer import render_discipline_alert
+from .alerts_renderer import discipline_alert_card, render_discipline_alert
 from .contracts import DisciplinePlan, Evaluation
 from .repository import persist_evaluation
 
@@ -108,11 +108,12 @@ def persist_evaluation_transitions(connection: Any, *, plan_id: str, plan: Disci
         if not event:
             continue
         text = render_discipline_alert(plan, line, state, dashboard_url=dashboard_url)
+        card = discipline_alert_card(plan, line, state, dashboard_url=dashboard_url)
         delivery = connection.execute("""
-            INSERT INTO quant.discipline_alert_deliveries(event_id,status,message_text,next_attempt_at)
-            VALUES(%s,'pending',%s,now())
+            INSERT INTO quant.discipline_alert_deliveries(event_id,status,message_text,message_card,next_attempt_at)
+            VALUES(%s,'pending',%s,%s,now())
             ON CONFLICT(event_id,channel) DO NOTHING RETURNING delivery_id""",
-            (event["event_id"], text)).fetchone()
+            (event["event_id"], text, Json(card))).fetchone()
         events.append({"event_id": str(event["event_id"]), "event_key": event["event_key"],
                        "delivery_id": str(delivery["delivery_id"]) if delivery else None,
                        "symbol": plan.symbol, "line_kind": line.kind, "state": state.state})
@@ -122,7 +123,7 @@ def persist_evaluation_transitions(connection: Any, *, plan_id: str, plan: Disci
 
 def due_deliveries(connection: Any, *, max_attempts: int = 8, limit: int = 10) -> list[dict[str, Any]]:
     rows = connection.execute("""
-        SELECT d.delivery_id,d.event_id,d.message_text,d.attempt_count
+        SELECT d.delivery_id,d.event_id,d.message_text,d.message_card,d.attempt_count
           FROM quant.discipline_alert_deliveries d
          WHERE d.status IN ('pending','failed') AND d.attempt_count<%s
            AND coalesce(d.next_attempt_at,d.created_at)<=now()
