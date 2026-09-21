@@ -59,6 +59,10 @@ describe('PersonalDecisionView', () => {
     const wrapper = mount(PersonalDecisionView, { props: { mode: 'holdings' }, global: { plugins: [ElementPlus] } });
     await flushPromises();
     await flushPromises();
+    // DisciplineBoard is lazy-loaded; settling fetch promises alone does not
+    // wait for its module graph to load on a cold Windows test worker.
+    await vi.dynamicImportSettled();
+    await flushPromises();
     await vi.waitFor(() => {
       expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/research/discipline/plans/latest?account_key=citics-primary'))).toBe(true);
     });
