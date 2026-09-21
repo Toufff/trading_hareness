@@ -19,6 +19,9 @@ from psycopg.types.json import Json
 from .analysis import as_utc
 from .instrument_lock_retry import execute_instrument_write
 from .request_models import DailyBar
+from .daily_asset_semantics import (
+    daily_asset_kind, close_conflicts, INDEX_AMOUNT_PROVIDERS, MAX_INDEX_AMOUNT_THOUSAND_CNY,
+)
 
 
 # The canonical daily contract -- the one every provider adapter must convert
@@ -80,7 +83,8 @@ def provider_priority(provider: str) -> int:
 
 
 def daily_amount_unit_mismatch(*, source: str, amount: Decimal | None,
-                               volume: Decimal | None, close: Decimal | None) -> bool:
+                               volume: Decimal | None, close: Decimal | None,
+                               symbol: str | None = None) -> bool:
     """Return whether a daily amount violates the canonical unit contract.
 
     This used to only check Tushare's own sources, leaving every other
@@ -99,6 +103,11 @@ def daily_amount_unit_mismatch(*, source: str, amount: Decimal | None,
     """
     if source in DAILY_AMOUNT_GUARD_EXEMPT_SOURCES:
         return False
+    if daily_asset_kind(symbol) == 'index':
+        if amount is None:
+            return False
+        return (source not in INDEX_AMOUNT_PROVIDERS or not amount.is_finite()
+                or amount < 0 or amount > MAX_INDEX_AMOUNT_THOUSAND_CNY)
     if amount is None or volume is None or close is None or amount <= 0 or volume <= 0 or close <= 0:
         return False
     ratio = amount / (volume * close)
@@ -107,7 +116,7 @@ def daily_amount_unit_mismatch(*, source: str, amount: Decimal | None,
 
 def _record_daily_amount_unit_issue(connection: Any, bar: DailyBar) -> None:
     """Record one unresolved issue per symbol/date without duplicating retries."""
-    implied_ratio = bar.amount / (bar.volume * bar.close)  # caller checked non-zero fields
+    implied_ratio = bar.amount / (bar.volume * bar.close) if bar.volume and bar.close else None
     connection.execute(
         """INSERT INTO quant.data_quality_issues(capability,symbol,trading_date,severity,code,message,details)
            SELECT 'daily_bar',%s,%s,'warning','daily_amount_unit_mismatch',
@@ -119,6 +128,7 @@ def _record_daily_amount_unit_issue(connection: Any, bar: DailyBar) -> None:
             )""",
         (bar.symbol, bar.trading_date, Json({
             "provider": bar.source,
+            "asset_kind": daily_asset_kind(bar.symbol),
             "amount": str(bar.amount), "volume_lot": str(bar.volume),
             "close": str(bar.close), "implied_amount_per_lot_close": str(implied_ratio),
             "expected_ratio_range": [str(TUSHARE_DAILY_AMOUNT_RATIO_MIN), str(TUSHARE_DAILY_AMOUNT_RATIO_MAX)],
@@ -165,13 +175,18 @@ def quarantine_tushare_daily_amount_mismatches(
                   NOT BETWEEN %s AND %s""" + date_filter,
         params,
     ).fetchall()
+    quarantined = 0
     for row in rows:
         bar = DailyBar(
             symbol=row["symbol"], trading_date=row["trading_date"], close=Decimal(row["close"]),
             volume=Decimal(row["volume"]), amount=Decimal(row["amount"]),
             source=str(row["selected_provider"]),
         )
+        if not daily_amount_unit_mismatch(symbol=bar.symbol, source=bar.source,
+                                          amount=bar.amount, volume=bar.volume, close=bar.close):
+            continue
         _record_daily_amount_unit_issue(connection, bar)
+        quarantined += 1
         connection.execute(
             """UPDATE quant.canonical_bars_daily
                   SET amount=NULL,
@@ -185,7 +200,7 @@ def quarantine_tushare_daily_amount_mismatches(
                 WHERE symbol=%s AND trading_date=%s AND source=%s""",
             (bar.symbol, bar.trading_date, bar.source),
         )
-    return len(rows)
+    return quarantined
 
 
 def in_instrument_lock_order(bars: Iterable[DailyBar]) -> list[DailyBar]:
@@ -237,7 +252,7 @@ def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
     ``in_instrument_lock_order(bars)``, never the raw payload.
     """
     amount_mismatch = daily_amount_unit_mismatch(
-        source=bar.source, amount=bar.amount, volume=bar.volume, close=bar.close,
+        source=bar.source, amount=bar.amount, volume=bar.volume, close=bar.close, symbol=bar.symbol,
     )
     promoted_amount = None if amount_mismatch else bar.amount
     # Single bar, so ``ORDER BY 1`` sorts one row and the real lock order is
@@ -293,7 +308,7 @@ def upsert_daily_bar(connection: Any, bar: DailyBar) -> None:
         "SELECT close,selected_provider,source_observation_ids FROM quant.canonical_bars_daily WHERE symbol=%s AND trading_date=%s",
         (bar.symbol, bar.trading_date),
     ).fetchone()
-    if existing and existing["close"] and abs(Decimal(existing["close"]) - bar.close) > Decimal("0.001"):
+    if existing and existing["close"] and close_conflicts(bar.symbol, Decimal(existing["close"]), bar.close):
         connection.execute(
             """INSERT INTO quant.data_quality_issues(capability,symbol,trading_date,severity,code,message,details)
                VALUES('daily_bar',%s,%s,'warning','provider_close_conflict','daily close differs across providers',%s)""",

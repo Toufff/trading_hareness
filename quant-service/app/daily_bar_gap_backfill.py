@@ -771,7 +771,7 @@ def persist_session(
     ).fetchall()
     observation_by_symbol = {row["symbol"]: str(row["observation_id"]) for row in observation_rows}
 
-    mismatch = [daily_amount_unit_mismatch(source=bar.source, amount=bar.amount, volume=bar.volume, close=bar.close)
+    mismatch = [daily_amount_unit_mismatch(source=bar.source, amount=bar.amount, volume=bar.volume, close=bar.close, symbol=bar.symbol)
                 for bar in ordered]
     amounts = [None if bad else bar.amount for bar, bad in zip(ordered, mismatch)]
     columns = (

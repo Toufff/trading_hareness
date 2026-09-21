@@ -29,6 +29,7 @@ from decimal import Decimal
 from typing import Any, Sequence
 
 from .analysis import as_utc
+from .daily_asset_semantics import close_conflicts
 from .instrument_lock_retry import execute_instrument_write
 from .daily_bar_repository import (
     TUSHARE_DAILY_AMOUNT_RATIO_MAX,
@@ -130,7 +131,7 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
     promoted_amount: list[Decimal | None] = []
     available_at_utc: list[datetime] = []
     for bar in bars:
-        mismatch = daily_amount_unit_mismatch(source=bar.source, amount=bar.amount, volume=bar.volume, close=bar.close)
+        mismatch = daily_amount_unit_mismatch(source=bar.source, amount=bar.amount, volume=bar.volume, close=bar.close, symbol=bar.symbol)
         amount_mismatch.append(mismatch)
         promoted_amount.append(None if mismatch else bar.amount)
         available_at_utc.append(as_utc(bar.available_at))
@@ -285,7 +286,7 @@ def upsert_daily_bars(connection: Any, bars: Sequence[DailyBar]) -> int:
         for index in indexes:
             merged_source_ids.append(str(observation_id_by_index[index]))
             bar = bars[index]
-            if selected_close is not None and abs(selected_close - bar.close) > Decimal("0.001"):
+            if selected_close is not None and close_conflicts(bar.symbol, selected_close, bar.close):
                 conflict_symbols.append(bar.symbol)
                 conflict_dates.append(bar.trading_date)
                 conflict_details.append(json.dumps({
