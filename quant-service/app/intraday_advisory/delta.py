@@ -83,6 +83,8 @@ def bind_output(output: dict[str,Any], payload: dict[str,Any]) -> dict[str,Any]:
             raise ModelFailure('candidate_sell_instruction',item['symbol'])
         # Every numeric claim must already exist in the bounded input, including price lines.
         import re
+        if re.search(r'[零一二三四五六七八九十百千\d.]+\s*(?:分钟|秒|倍|[%％]|基点|手)',action):
+            raise ModelFailure('model_repeated_computed_metric',item['symbol'])
         known = set(re.findall(r'\d+(?:\.\d+)?',json.dumps(source,ensure_ascii=False,default=str)))
         if any(x not in known for x in re.findall(r'\d+(?:\.\d+)?',action)):
             raise ModelFailure('unsupported_action_number',item['symbol'])

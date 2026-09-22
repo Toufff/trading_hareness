@@ -220,3 +220,18 @@ def test_neutral_noise_after_an_alert_is_not_a_new_event():
     original=pressure_event(series(pulse=6),None)
     quiet=series(side=.55,change=.05,pulse=1)
     assert pressure_event(quiet,{'metrics':original.metrics}) is None
+
+
+def test_model_cannot_turn_60_seconds_into_60_minutes():
+    data=prepare_delta(payload(),{})
+    with pytest.raises(ModelFailure,match='model_repeated_computed_metric'):
+        bind_output({'should_notify':True,'delta_items':[{'symbol':'600000.SH','name':'浦发银行',
+                    'action':'60分钟窗口内等待确认'}]},data)
+
+
+def test_longer_price_trigger_is_visible_not_hidden_by_flat_last_minute():
+    rows=series(side=.55,change=0,pulse=1)
+    # 3% climb in the earlier two minutes, then a flat minute.
+    rows=[replace(x,price=10+(max(0,min(i-72,24)))/24*.3) for i,x in enumerate(rows)]
+    event=pressure_event(rows,None)
+    assert event and '近3分钟上涨' in event.summary and '近1分钟持平' in event.summary

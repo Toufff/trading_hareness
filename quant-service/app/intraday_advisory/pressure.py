@@ -127,8 +127,9 @@ def pressure_event(rows, previous: dict[str,Any] | None) -> AdvisorySignal | Non
     feature = windows['60']
     if feature.get('status') != 'ready':
         return None
-    price_alarm = any(x.get('status') == 'ready' and abs(x['price_change_pct']) >= threshold
-                      for x,threshold in ((windows['60'],1.2),(windows['180'],2),(windows['300'],3)))
+    price_windows = [x for x,threshold in ((windows['60'],1.2),(windows['180'],2),(windows['300'],3))
+                     if x.get('status') == 'ready' and abs(x['price_change_pct']) >= threshold]
+    price_alarm = bool(price_windows)
     ratio = feature['amount_ratio'] or 0
     material = price_alarm or (feature['amount_delta'] >= 5000000 and ratio >= 3) or (
         ratio >= 1.5 and feature['pressure_state'] in {'buy_confirmed','sell_confirmed'})
@@ -162,7 +163,12 @@ def pressure_event(rows, previous: dict[str,Any] | None) -> AdvisorySignal | Non
     volume_text = {'expanded':'放量','contracted':'缩量','normal':'量能平稳','unknown':'量能基准不足'}[feature['volume_state']]
     price_text = '上涨' if direction=='up' else '下跌' if direction=='down' else '持平'
     summary = f"近1分钟{price_text} {abs(feature['price_change_pct']):.2f}% · {volume_text} · {feature['pressure_text']}"
+    trigger_window = price_windows[0] if price_windows else feature
+    if trigger_window['window_seconds'] != 60:
+        longer_change = trigger_window['price_change_pct']
+        summary = f"近{trigger_window['window_seconds']//60}分钟{'上涨' if longer_change>0 else '下跌'} {abs(longer_change):.2f}%；" + summary
     metrics = {**feature, 'windows':windows, 'state_signature':key,
+               'trigger_window_seconds':trigger_window['window_seconds'],
                'previous_pressure_text':prior.get('pressure_text'),
                'previous_volume_state':prior.get('volume_state')}
     current = rows[-1]
