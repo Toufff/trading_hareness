@@ -71,3 +71,37 @@ delivery_status 为 suppressed，不发送飞书。此次保留该策略，**没
 - 收盘后验收不能代替下一个交易日实流验收，也不能把飞书 API 接收成功说成手机已响铃。
 
 源代码针对性测试、完整发布门禁和部署读回结果在本次交付回执中分别记录。
+
+## 本次交付回执
+
+- 主实现提交：`2724f8210fcc241fcebc8d889e4a0024e9543ffa`。
+- 最终生产提交：`3d8b1f9b482c0d5823c0f085c1191da77dc0a387`。
+  后一提交修正状态接口/配置检查工具遗留的半小时说明，新增 HTTP 合同回归。
+- 最终 release：`20260922T165120-3d8b1f9b482c-clean`，
+  2026-09-22 16:55:42+08:00 激活。未使用 AllowDirty / SkipTests。
+- 针对性测试：52 passed；最终发布后端：3252 passed、130 skipped、893 subtests passed。
+  跳过项不计入真实环境验收。前端 36 文件 / 144 tests passed，typecheck / build 通过；
+  适配层 116 tests passed；Windows 生命周期门禁通过。
+- 新版生产目录运行只读验收：8 个 PostgreSQL 去重正反例全部通过，36 张今日历史卡片
+  渲染校验通过，另有 3 张明确标记的合成阶段简报预览。证据：
+  `G:/StockPlatform/data/research/intraday-notice-v2-20260922/production-acceptance.json`。
+- DeepSeek `deepseek-flash` 与 Codex `gpt-5.6-sol/medium` 的真实调用通过身份、条件、
+  数字单位和卡片结构验证；输入为合成测试，不落库、不推送，不是当前投资建议。
+- `/health` 和真实 adapter `/api/research/runtime/health` 均为 ok，并返回最终生产 SHA；
+  状态接口 `cadence` 与配置检查工具均显示 `notice-v2`、三次简报及不跟发。
+  mounted OpenAPI 与前端类型 196 条路径一致。
+- 最终后台心跳读回 `2026-09-22T16:57:48.652115+08:00`，晚于新版本激活；
+  `last_error=null`，收盘后 state=idle，notification_policy=notice-v2。
+  已等待旧租约自然到期，没有手工删除租约或把旧状态当作新版本运行证据。
+- 发布读回：本地 API、adapter、shared runtime 均 ok；remote owner / peer 均 200。
+  两次发布均复用共享隧道，没有因本次卡片改动重启它。
+- 本轮没有向飞书发送验收成功或测试卡；正常静默/故障去重/恢复语义通过隔离 CLI 测试验证。
+  没有验证用户手机的实际显示、声音或震动，也没有冒充已经验收下一交易日的真实触发。
+- 当前候选侧状态 `formal_recommendation_missing_or_inactive` 已单独核对：最新正式记录
+  创建于 09-21 19:24，有效期至 09-22 15:00；这是收盘后过期，不是发布造成。
+  收盘后 scope 为 4 只持仓，未擅自延长候选有效期。
+- 可回退到中间版 `20260922T164209-2724f8210fcc-clean`；如需撤回整个 v2，
+  使用仍保留的 `20260922T154232-fedabd5e10aa-clean`。
+- 发布器按六版本保留策略清理旧包 `20260922T012644-9e917df1238b-clean` 和
+  `20260922T020134-964b19d10abc-clean`；源码仍在 Git，可重建，不是业务数据删除。
+  旧 `20260920T195304-a82e80b5eb0f-clean` 的占用文件清理被延后，没有强制终止进程。
