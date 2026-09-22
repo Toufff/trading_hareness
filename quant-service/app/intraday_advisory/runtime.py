@@ -24,9 +24,12 @@ from .repository import (
     due_deliveries, enqueue_delivery, latest_delivered_deepseek_fingerprint, latest_sector_snapshot,
     persist_analysis, persist_delivery_outcome, persist_index_samples, persist_quote_samples,
     persist_signal, recent_discipline_events, update_status,
+    latest_pressure_states, latest_delivered_context,
 )
 from .presentation import ensure_readable_card, humanize_card, humanize_text
-from .rules import QuoteSample, evaluate, sample_from_row
+from .rules import QuoteSample, sample_from_row
+from .pressure import feature_bundle, pressure_event, VERSION
+from .delta import DELTA_KINDS, compact_facts, prepare_delta, bind_output
 from .schedule import decide
 from .scope import AdvisoryScope, load_scope
 
@@ -65,7 +68,7 @@ class IntradayAdvisoryDependencies:
 
 @dataclass
 class RuntimeState:
-    samples: dict[str, deque[QuoteSample]] = field(default_factory=lambda: defaultdict(lambda: deque(maxlen=180)))
+    samples: dict[str, deque[QuoteSample]] = field(default_factory=lambda: defaultdict(lambda: deque(maxlen=600)))
     last_fetch: datetime | None = None
     last_deepseek: datetime | None = None
     last_codex: datetime | None = None
@@ -86,6 +89,12 @@ class RuntimeState:
     last_signal_at: dict[tuple[str, str, str, str], datetime] = field(default_factory=dict)
     deepseek: Any = None
     codex: Any = None
+    analysis_task: Any = None
+    analysis_events: list[dict[str,Any]] = field(default_factory=list)
+    pressure_states: dict[str,Any] = field(default_factory=dict)
+    pressure_day: Any = None
+    last_pressure_refresh: datetime | None = None
+    last_drain: datetime | None = None
 
 
 def _fresh(row: dict[str, Any], now: datetime) -> bool:
@@ -112,6 +121,16 @@ def _persist_index_rows(database: Any, now: datetime, rows: list[dict[str, Any]]
 def _latest_sector_snapshot(database: Any, now: datetime) -> dict[str, Any] | None:
     with database.transaction() as connection:
         return latest_sector_snapshot(connection, at=now)
+
+
+def _pressure_states(database: Any, now: datetime):
+    with database.transaction() as connection:
+        return latest_pressure_states(connection, at=now)
+
+
+def _delivered_context(database: Any, now: datetime):
+    with database.transaction() as connection:
+        return latest_delivered_context(connection,at=now)
 
 
 def _persist_event_and_delivery(database: Any, signal: Any, source: str, text: str,
@@ -167,7 +186,8 @@ def _context(scope: AdvisoryScope, state: RuntimeState, now: datetime, *,
         sample = series[-1] if series else None
         latest.append({
             "symbol": item.symbol, "name": item.name, "scope": item.source,
-            "position_or_recommendation": item.facts,
+            "position_or_recommendation": compact_facts(item.facts) if report_kind in DELTA_KINDS else item.facts,
+            "windows": feature_bundle(list(series)) if series else {},
             "quote": ({"price": sample.price, "pre_close": sample.pre_close,
                        "pct_change": round((sample.price / sample.pre_close - 1) * 100, 3),
                        "cumulative_amount": sample.amount, "observed_at": sample.observed_at.isoformat()}
@@ -192,7 +212,7 @@ async def _emit_signal(deps: IntradayAdvisoryDependencies, state: RuntimeState, 
                        source: str, current: datetime, outcome: dict[str, Any]) -> None:
     cooldown_key = (signal.symbol, signal.kind, signal.direction, signal.severity)
     previous = state.last_signal_at.get(cooldown_key)
-    if previous and current - previous < timedelta(minutes=10):
+    if signal.kind != 'pressure_change' and previous and current - previous < timedelta(minutes=10):
         return
     text = render_signal(signal, source=source)
     card = signal_card(signal, source=source, dashboard_url=deps.dashboard_url())
@@ -201,9 +221,12 @@ async def _emit_signal(deps: IntradayAdvisoryDependencies, state: RuntimeState, 
     if not event:
         return
     state.last_signal_at[cooldown_key] = current
+    if signal.kind == 'pressure_change':
+        state.pressure_states[signal.symbol] = {'metrics':signal.metrics, 'status':'pending'}
     state.pending_events.append({"event_id": str(event["event_id"]), "symbol": signal.symbol,
                                  "kind": signal.kind, "direction": signal.direction,
                                  "summary": signal.summary, "source": source,
+                                 "metrics":signal.metrics,
                                  "observed_at": signal.observed_at.isoformat()})
     state.pending_since = state.pending_since or current
     outcome["events"] += 1
@@ -247,16 +270,27 @@ async def _analyze(deps: IntradayAdvisoryDependencies, state: RuntimeState, scop
     now = deps.now()
     payload = _context(scope, state, now, trigger_kind=trigger_kind, report_kind=report_kind)
     started = now
-    quoted = sum(1 for item in scope.items if state.samples.get(item.symbol))
-    indices = sum(1 for values in state.index_samples.values() if values)
-    required_quotes = 0 if not scope.items else max(1, int(len(scope.items) * 0.8 + 0.999))
-    if indices < 4 or quoted < required_quotes:
+    age_limit = 360 if report_kind=='midday' else 20
+    affected = {x.get('symbol') or (x.get('payload') or {}).get('symbol') for x in state.pending_events}
+    required_items = [item for item in scope.items if item.symbol in affected] if report_kind in {'event','discipline'} else scope.items
+    quoted = sum(1 for item in required_items if state.samples.get(item.symbol) and
+                 -timedelta(seconds=5) <= now-state.samples[item.symbol][-1].observed_at <= timedelta(seconds=age_limit))
+    indices = sum(1 for values in state.index_samples.values() if values and
+                  now-values[-1].observed_at <= timedelta(seconds=360 if report_kind=='midday' else 90))
+    required_quotes = 0 if not required_items else max(1, int(len(required_items) * 0.8 + 0.999))
+    # Event interpretation needs its affected stock, not unrelated market coverage.
+    if (report_kind not in {'event','discipline'} and indices < 4) or quoted < required_quotes:
         return {
             "status": "skipped", "provider": provider, "reason": "insufficient_fresh_market_context",
             "coverage": {"quoted": quoted, "required_quotes": required_quotes,
                          "indices": indices, "required_indices": 4},
         }
     try:
+        baseline = await deps.run_database(lambda: _delivered_context(deps.database,now))
+        if report_kind in DELTA_KINDS:
+            payload = prepare_delta(payload,baseline or {})
+            if not payload['scope'] and not payload['market_events']:
+                return {'status':'completed','provider':provider,'pushed':False,'reason':'no_material_delta'}
         model = state.deepseek if provider == "deepseek" else state.codex
         if model is None:
             model = deps.deepseek_factory() if provider == "deepseek" else deps.codex_factory()
@@ -266,22 +300,25 @@ async def _analyze(deps: IntradayAdvisoryDependencies, state: RuntimeState, scop
                 state.codex = model
         result = await model.analyze(payload)
         completed = deps.now()
+        output = bind_output(result.output,payload)
         stored = await deps.run_database(lambda: _persist_model_result(
             deps.database, provider=provider, trigger_kind=trigger_kind, report_kind=report_kind,
-            started_at=started, completed_at=completed, input_payload=payload, output=result.output,
+            started_at=started, completed_at=completed, input_payload=payload, output=output,
             status="completed"))
         should_push = always_push
-        if provider == "deepseek" and not should_push:
-            previous = await deps.run_database(lambda: _last_ds_fingerprint(deps.database))
-            should_push = _deepseek_push_worthy(result.output, previous)
+        if report_kind in DELTA_KINDS:
+            should_push = output.get('should_notify') is True
+            # An interpretation of a minute event is not current after a long model delay.
+            if completed-started > timedelta(seconds=90):
+                should_push = False
         if should_push:
-            text = render_analysis(provider, result.output, report_kind=report_kind or trigger_kind, generated_at=completed)
-            card = analysis_card(provider, result.output, report_kind=report_kind or trigger_kind,
+            text = render_analysis(provider, output, report_kind=report_kind or trigger_kind, generated_at=completed)
+            card = analysis_card(provider, output, report_kind=report_kind or trigger_kind,
                                  generated_at=completed, dashboard_url=deps.dashboard_url())
             key = f"analysis:{provider}:{stored['analysis_run_id']}"
             await deps.run_database(lambda: _enqueue_analysis(
                 deps.database, run_id=stored["analysis_run_id"], key=key, text=text, card=card))
-            await _drain(deps)
+            # The main loop owns transport; inference never blocks quote acquisition.
         return {"status": "completed", "provider": provider, "pushed": should_push,
                 "analysis_run_id": stored["analysis_run_id"]}
     except (ModelFailure, ValueError, OSError) as error:
@@ -312,10 +349,26 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
     decision = decide(current, last_fetch=state.last_fetch, last_deepseek=state.last_deepseek,
                       last_codex=state.last_codex)
     outcome: dict[str, Any] = {"state": "idle", "scope_size": len(scope.items), "events": 0,
-                               "blockers": list(scope.blockers)}
+                               "blockers": list(scope.blockers), 'feature_version':VERSION}
+    if state.analysis_task is not None and state.analysis_task.done():
+        task, state.analysis_task = state.analysis_task, None
+        try:
+            outcome['analysis'] = task.result()
+        except Exception as error:
+            outcome['analysis'] = {'status':'failed','error':safe_error_detail(str(error),300)}
+        if outcome['analysis'].get('status') == 'completed':
+            state.pending_events = [x for x in state.pending_events if x not in state.analysis_events]
+        state.pending_since = current if state.pending_events else None
+        state.analysis_events = []
+        await _drain(deps)
+        state.last_drain = current
     if decision.fetch_quotes:
         session_open, reason = await deps.session_open("order_book_quote", current)
         if session_open:
+            if state.pressure_day != current.date() or (state.last_pressure_refresh and current-state.last_pressure_refresh>=timedelta(seconds=60)):
+                state.pressure_states = await deps.run_database(lambda: _pressure_states(deps.database,current))
+                state.pressure_day = current.date()
+                state.last_pressure_refresh = current
             state.last_fetch = current
             index_due = state.last_index_fetch is None or current - state.last_index_fetch >= timedelta(seconds=15)
             stock_request = deps.fetch_quotes([item.symbol for item in scope.items], max_symbols=len(scope.items)) \
@@ -334,17 +387,22 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
                 await deps.run_database(lambda: _persist_rows(deps.database, current.astimezone(timezone.utc), fresh))
             source_by_symbol = {item.symbol: item.source for item in scope.items}
             for row in fresh:
-                sample = sample_from_row(row, current)
+                clock = exchange_time_status({'price_trade_time':row.get('trade_time')},current,20)
+                observed = datetime.fromisoformat(clock['observed_trade_time'])
+                sample = sample_from_row(row, observed)
                 if sample is None:
                     continue
                 series = state.samples[sample.symbol]
-                if series and (sample.observed_at <= series[-1].observed_at or sample.amount < series[-1].amount):
+                if series and sample.observed_at <= series[-1].observed_at:
                     continue
+                if series and (sample.amount < series[-1].amount or sample.volume_lot < series[-1].volume_lot):
+                    series.clear()
                 series.append(sample)
-                cutoff = current - timedelta(minutes=12)
+                cutoff = current - timedelta(minutes=45)
                 while series and series[0].observed_at < cutoff:
                     series.popleft()
-                for signal in evaluate(series):
+                signal = pressure_event(list(series),state.pressure_states.get(sample.symbol))
+                if signal:
                     source = source_by_symbol.get(signal.symbol, "recommendation")
                     await _emit_signal(deps, state, signal, source, current, outcome)
 
@@ -377,6 +435,7 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
                     await _emit_signal(deps, state, sector_signal, "sector", current, outcome)
             if outcome["events"]:
                 outcome["delivery"] = await _drain(deps)  # deterministic text goes first
+                state.last_drain = current
             outcome.update({"state": "healthy", "quotes_received": len(rows), "quotes_fresh": len(fresh),
                             "indices_received": state.last_indices_received,
                             "indices_fresh": state.last_indices_fresh})
@@ -391,23 +450,26 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
             state.pending_events.append({"source": "discipline", **item})
         state.pending_since = state.pending_since or current
 
-    if decision.run_deepseek:
+    if decision.run_deepseek and state.analysis_task is None:
         state.last_deepseek = current
-        outcome["deepseek"] = await _analyze(deps, state, scope, provider="deepseek",
-                                             trigger_kind="scheduled", report_kind="ten_minute", always_push=False)
+        state.analysis_events = list(state.pending_events)
+        state.analysis_task = asyncio.create_task(_analyze(deps, state, scope, provider="deepseek",
+                                             trigger_kind="scheduled", report_kind="ten_minute", always_push=False))
     event_due = bool(state.pending_since and current - state.pending_since >= timedelta(seconds=45))
-    if decision.run_codex or event_due:
+    if (decision.run_codex or event_due) and state.analysis_task is None:
         report_kind = decision.report_kind if decision.run_codex else (
             "discipline" if any(item.get("source") == "discipline" for item in state.pending_events) else "event")
         state.last_codex = current if decision.run_codex else state.last_codex
-        outcome["codex"] = await _analyze(deps, state, scope, provider="codex",
+        state.analysis_events = list(state.pending_events)
+        state.analysis_task = asyncio.create_task(_analyze(deps, state, scope, provider="codex",
                                           trigger_kind="scheduled" if decision.run_codex else "event",
-                                          report_kind=report_kind, always_push=True)
-        if outcome["codex"].get("status") == "completed":
-            state.pending_events.clear()
-            state.pending_since = None
-        elif event_due:
-            state.pending_since = current  # bounded retry; never busy-loop a paid model
+                                          report_kind=report_kind, always_push=decision.run_codex))
+    await asyncio.sleep(0)  # Start the bounded inference task without awaiting its result.
+    if state.last_drain is None:
+        state.last_drain = current
+    elif current-state.last_drain >= timedelta(seconds=30):
+        await _drain(deps)
+        state.last_drain = current
     # ``state`` is intentionally ``idle`` on the four local ticks between
     # five-second acquisitions.  Keep the last acquisition evidence separate
     # so an external opening guard can prove that real quotes are flowing
@@ -433,6 +495,8 @@ async def run_intraday_advisory_loop(deps: IntradayAdvisoryDependencies) -> None
         try:
             await run_intraday_advisory_cycle(deps, state)
         except asyncio.CancelledError:
+            if state.analysis_task is not None:
+                state.analysis_task.cancel()
             raise
         except Exception as error:  # one bad provider cycle must not kill the leased loop
             now = deps.now().astimezone(SHANGHAI)

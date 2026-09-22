@@ -33,6 +33,28 @@ notification_reason 要用一句人话说明为什么值得打扰用户；静默
 holding_focus 与 recommendation_focus 各最多 2 项，只放真正需要关注的对象；没有就返回空数组。
 每项必须包含股票代码、名称、当前状态、可核对证据和条件式应对。market_state 只能是 calm、watch、risk。"""
 
+DELTA_PROMPT = """你是盘中重要变化解释助手。只解释输入scope中的本次变化，禁止全量大盘/持仓/推荐池复述。
+数值、区间、多空状态已由代码计算，禁止自行计算、打分或把委比当买卖成交。
+只在变化会影响原有观察条件时should_notify=true；仅重复确定性异动摘要、普通波动、没有新解释则false。
+delta_items最多3项；代码与名称必须逐字匹配输入。action只写对原条件的影响或下一步确认点，最多100字。
+没有明确输入的价位不编造；不下单，不把候选当持仓，不把内外盘称为主力资金，不从快照推断撤单。
+previous_notified为空表示没有已通知的基线，不能编造此前判断。成交方向缺失不得补成零。
+有些事件刚已发送确定性证据卡；没有新增条件解释时不需要再发一张。输出JSON。"""
+
+DELTA_SCHEMA = {'type':'object','additionalProperties':False,'properties':{
+    'should_notify':{'type':'boolean'},'headline':{'type':'string'},
+    'delta_items':{'type':'array','items':{'type':'object','additionalProperties':False,
+        'properties':{k:{'type':'string'} for k in ('symbol','name','action')},
+        'required':['symbol','name','action']}}},'required':['should_notify','headline','delta_items']}
+
+
+def _normalized_response(value, payload):
+    if payload.get('delta_only'):
+        if not isinstance(value,dict):
+            raise ModelFailure('json_not_object')
+        return {**value,'delta_items':(value.get('delta_items') or [])[:3], 'market_state':'watch'}
+    return _normalize(value)
+
 
 FOCUS_ITEM_SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False,
@@ -131,14 +153,15 @@ class DeepSeekAdvisoryModel:
 
     def _run(self, payload: dict[str, Any]) -> ModelResult:
         started = time.monotonic()
-        schema = json.dumps(OUTPUT_SCHEMA, ensure_ascii=False)
-        messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n输出 schema：" + schema},
+        schema = json.dumps(DELTA_SCHEMA if payload.get('delta_only') else OUTPUT_SCHEMA, ensure_ascii=False)
+        prompt = DELTA_PROMPT if payload.get('delta_only') else SYSTEM_PROMPT
+        messages = [{"role": "system", "content": prompt + "\n输出 schema：" + schema},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)}]
         try:
             value, usage, returned_model = completion(messages, self.connection, started + self.timeout_seconds)
         except ModelReviewFailure as error:
             raise ModelFailure("provider_error", json.dumps(error.diagnostics, ensure_ascii=False)) from error
-        return ModelResult(_normalize(value), returned_model or self.connection[2],
+        return ModelResult(_normalized_response(value,payload), returned_model or self.connection[2],
                            int((time.monotonic() - started) * 1000), {"usage": usage})
 
     async def analyze(self, payload: dict[str, Any]) -> ModelResult:
@@ -157,13 +180,13 @@ class CodexAdvisoryModel:
 
     def _run(self, payload: dict[str, Any]) -> ModelResult:
         started = time.monotonic()
-        prompt = SYSTEM_PROMPT + "\n当前盘中证据：\n" + json.dumps(payload, ensure_ascii=False, default=str)
+        prompt = (DELTA_PROMPT if payload.get('delta_only') else SYSTEM_PROMPT) + "\n当前盘中证据：\n" + json.dumps(payload, ensure_ascii=False, default=str)
         env = dict(os.environ)
         env.pop("OPENAI_API_KEY", None)
         env.pop("CODEX_API_KEY", None)
         with tempfile.TemporaryDirectory(prefix="intraday-advisory-") as workdir:
             schema_path = Path(workdir, "schema.json")
-            schema_path.write_text(json.dumps(OUTPUT_SCHEMA, ensure_ascii=False), encoding="utf-8")
+            schema_path.write_text(json.dumps(DELTA_SCHEMA if payload.get('delta_only') else OUTPUT_SCHEMA, ensure_ascii=False), encoding="utf-8")
             command = [self.binary, "exec", "--ephemeral", "--ignore-user-config", "--ignore-rules",
                        "--skip-git-repo-check", "--sandbox", "read-only", "--json", "--color", "never",
                        "--model", self.model_id, "--config", f'model_reasoning_effort="{self.reasoning_effort}"',
@@ -181,7 +204,7 @@ class CodexAdvisoryModel:
         output, usage, transcript = parse_codex_stream(completed.stdout)
         if completed.returncode != 0:
             raise ModelFailure("codex_failed", completed.stderr[-400:], transcript)
-        return ModelResult(_normalize(output), f"{self.model_id}/{self.reasoning_effort}",
+        return ModelResult(_normalized_response(output,payload), f"{self.model_id}/{self.reasoning_effort}",
                            int((time.monotonic() - started) * 1000), usage, transcript)
 
     async def analyze(self, payload: dict[str, Any]) -> ModelResult:

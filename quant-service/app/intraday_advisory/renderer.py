@@ -131,6 +131,11 @@ def _primary_action(state: str, holdings: list[dict[str, str]],
 
 
 def render_signal(signal: AdvisorySignal, *, source: str) -> str:
+    if signal.kind == 'pressure_change':
+        from .presentation import pressure_evidence
+        previous = signal.metrics.get('previous_pressure_text')
+        change = f"{previous} → {signal.metrics['pressure_text']}" if previous else signal.metrics['pressure_text']
+        return f"【重要变化｜{symbol_text(signal.symbol,signal.name)}】\n{signal.summary}\n{pressure_evidence(signal.metrics)}\n{change}"
     evidence = "；".join(metric_lines(signal.metrics))
     action = "核对纪律线和板块承接" if source == "holding" else "观察延续性，未确认前不追价"
     return (f"【异动提醒｜{role_text(source)}】{symbol_text(signal.symbol, signal.name)}\n"
@@ -139,6 +144,23 @@ def render_signal(signal: AdvisorySignal, *, source: str) -> str:
 
 def signal_card(signal: AdvisorySignal, *, source: str,
                 dashboard_url: str | None = None) -> dict[str, Any]:
+    if signal.kind == 'pressure_change':
+        from .presentation import pressure_evidence, pressure_details
+        previous = signal.metrics.get('previous_pressure_text')
+        change = f"此前：{previous}\n现在：{signal.metrics['pressure_text']}" if previous else signal.metrics['pressure_text']
+        elements = [content_panel(f"**{signal.summary}**\n{pressure_evidence(signal.metrics)}",element_id='change',color='grey'),
+                    markdown(change),
+                    collapsible_panel('区间证据与盘口辅助',pressure_details(signal.metrics),element_id='evidence'),
+                    markdown(f"行情截至 {signal.observed_at:%H:%M:%S} · 描述性研究提醒，不是买卖指令",size='notation')]
+        url = market_decision_url(dashboard_url)
+        if url:
+            elements.append(open_url_button('查看原观察条件',url,element_id='open_dashboard'))
+        result = card_v2(title=f"重要变化｜{signal.name or signal.symbol.split('.')[0]}",
+                         subtitle=f"{role_text(source)} · {signal.observed_at:%H:%M:%S}",
+                         summary=f"{signal.name}：{signal.summary}",template='red' if signal.severity=='high' and signal.direction=='down' else 'orange',
+                         tags=[],elements=elements,card_url=url)
+        ensure_readable_card(result)
+        return result
     metrics = "\n".join(f"- {row}" for row in metric_lines(signal.metrics))
     action = {
         "holding": "核对纪律线与板块承接",
@@ -151,7 +173,8 @@ def signal_card(signal: AdvisorySignal, *, source: str,
     severity_color = "red" if signal.severity == "high" else "orange"
     elements = [
         content_panel(
-            f"**发生了什么**\n{humanize_text(signal.summary)}",
+            f"**发生了什么**\n{humanize_text(signal.summary)}" + (
+                '\n量能：缺少可比区间成交额，暂不判断放缩量' if source in {'market_index','sector'} else ''),
             element_id="event_summary",
             color="grey",
         ),
@@ -183,6 +206,13 @@ def signal_card(signal: AdvisorySignal, *, source: str,
 
 def render_analysis(provider: str, output: dict[str, Any], *, report_kind: str,
                     generated_at: datetime) -> str:
+    if report_kind in {'event','discipline','ten_minute'} and 'delta_items' in output:
+        sections = ['【重要变化补充】'+humanize_text(output.get('headline'))]
+        for item in output['delta_items']:
+            sections.append(f"{symbol_text(item['symbol'],item['name'])}｜{item['change']}\n{item['evidence']}\n观察条件：{item['action']}")
+        if output.get('market_delta'):
+            sections.append(humanize_text(output['market_delta']))
+        return '\n'.join(sections)
     title = REPORT_TITLES.get(report_kind, "盘中分析")
     headline_source = (output.get("notification_reason") if report_kind == "ten_minute" else None)
     headline = humanize_text(headline_source or output.get("headline") or output.get("summary"))
@@ -204,6 +234,20 @@ def render_analysis(provider: str, output: dict[str, Any], *, report_kind: str,
 
 def analysis_card(provider: str, output: dict[str, Any], *, report_kind: str,
                   generated_at: datetime, dashboard_url: str | None = None) -> dict[str, Any]:
+    if report_kind in {'event','discipline','ten_minute'} and 'delta_items' in output:
+        elements = []
+        for index,item in enumerate(output['delta_items']):
+            elements.append(content_panel(
+                f"**{symbol_text(item['symbol'],item['name'])}｜{item['change']}**\n{item['evidence']}\n**条件影响**　{humanize_text(item['action'])}",
+                element_id=f'delta_{index}',color='grey'))
+        if output.get('market_delta'):
+            elements.append(markdown(humanize_text(output['market_delta'])))
+        elements.append(markdown(f"证据截至 {str(output.get('data_as_of') or '')[11:19]} · 生成 {generated_at:%H:%M:%S} · {PROVIDER_TEXT.get(provider,provider)} 复核",size='notation'))
+        result = card_v2(title='重要变化补充',subtitle=f'{generated_at:%H:%M}',
+                         summary=humanize_text(output.get('headline')) or '观察条件发生变化',
+                         template='orange',tags=[],elements=elements,card_url=market_decision_url(dashboard_url))
+        ensure_readable_card(result)
+        return result
     title = REPORT_TITLES.get(report_kind, "盘中分析")
     state = str(output.get("market_state") or "watch")
     template = {"risk": "red", "watch": "orange", "calm": "blue"}.get(state, "orange")
@@ -266,7 +310,7 @@ def analysis_card(provider: str, output: dict[str, Any], *, report_kind: str,
             f"风险与数据边界（{len(risks)}）", "\n".join(f"- {item}" for item in risks),
             element_id="risk_details"))
     elements.append(markdown(
-        f"数据时点 {generated_at:%H:%M:%S} · {PROVIDER_TEXT.get(provider, provider)} 复核 · 研究提醒，不执行交易",
+        f"生成时间 {generated_at:%H:%M:%S} · {PROVIDER_TEXT.get(provider, provider)} 复核 · 研究提醒，不执行交易",
         size="notation",
     ))
     if decision_url:

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 from statistics import median
+from math import isfinite
 from typing import Any, Sequence
 
 
@@ -21,9 +22,11 @@ class QuoteSample:
     pre_close: float
     amount: float
     volume_lot: float
-    outer_lot: float
-    inner_lot: float
+    outer_lot: float | None
+    inner_lot: float | None
     name: str = ""
+    bid_depth: float | None = None
+    ask_depth: float | None = None
 
 
 @dataclass(frozen=True)
@@ -35,23 +38,39 @@ class AdvisorySignal:
     direction: str
     severity: str
     observed_at: datetime
-    metrics: dict[str, float]
+    metrics: dict[str, Any]
     summary: str
 
 
 def sample_from_row(row: dict[str, Any], observed_at: datetime) -> QuoteSample | None:
+    def optional(value: Any) -> float | None:
+        try:
+            number = float(value)
+            return number if isfinite(number) and number >= 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    def depth(key: str) -> float | None:
+        levels = row.get(key)
+        if not isinstance(levels, list) or len(levels) != 5:
+            return None
+        sizes = [optional(x.get('size')) if isinstance(x, dict) and
+                 (optional(x.get('price')) or 0) > 0 else None for x in levels]
+        return sum(sizes) if all(x is not None for x in sizes) else None
+
     try:
         sample = QuoteSample(
             symbol=str(row["ts_code"]), name=str(row.get("name") or ""), observed_at=observed_at,
             price=float(row["price"]), pre_close=float(row["pre_close"]),
             amount=float(row.get("cumulative_amount") or 0),
             volume_lot=float(row.get("cumulative_volume_lot") or 0),
-            outer_lot=float(row.get("outer_volume_lot") or 0),
-            inner_lot=float(row.get("inner_volume_lot") or 0),
+            outer_lot=optional(row.get("outer_volume_lot")),
+            inner_lot=optional(row.get("inner_volume_lot")),
+            bid_depth=depth('bids'), ask_depth=depth('asks'),
         )
     except (KeyError, TypeError, ValueError):
         return None
-    if sample.price <= 0 or sample.pre_close <= 0 or sample.amount < 0 or sample.volume_lot < 0:
+    if not all(isfinite(x) for x in (sample.price, sample.pre_close, sample.amount, sample.volume_lot)) or sample.price <= 0 or sample.pre_close <= 0 or sample.amount < 0 or sample.volume_lot < 0:
         return None
     return sample
 
@@ -102,6 +121,8 @@ def evaluate(samples: Sequence[QuoteSample]) -> tuple[AdvisorySignal, ...]:
     if prior_60 is not None:
         amount_delta = max(0.0, current.amount - prior_60.amount)
         volume_delta = max(0.0, current.volume_lot - prior_60.volume_lot)
+        if any(x is None for x in (current.outer_lot, prior_60.outer_lot, current.inner_lot, prior_60.inner_lot)):
+            return tuple(events)
         active_net = (current.outer_lot - prior_60.outer_lot) - (current.inner_lot - prior_60.inner_lot)
         active_ratio = active_net / volume_delta if volume_delta > 0 else 0.0
         baselines: list[float] = []

@@ -49,7 +49,8 @@ def test_model_context_normalizes_database_decimal_values() -> None:
     payload = _context(scope, state, MONDAY, trigger_kind="scheduled", report_kind="ten_minute")
 
     json.dumps(payload, ensure_ascii=False)
-    assert payload["scope"][0]["position_or_recommendation"]["market_price"] == "72.90"
+    assert payload["scope"][0]["position_or_recommendation"]["quantity"] == "100"
+    assert 'market_price' not in payload['scope'][0]['position_or_recommendation']  # stale snapshot price is not live
     assert payload["recent_events"][0]["trigger_price"] == "72.50"
     assert payload["recent_events"][0]["summary"] == "内盘增量占优只能作为内外盘方向信号"
 
@@ -284,7 +285,7 @@ def test_deterministic_delivery_precedes_bundled_codex_analysis() -> None:
 async def _deterministic_delivery_precedes_bundled_codex_analysis() -> None:
     scope = AdvisoryScope("citics-primary", (ScopeItem("600000.SH", "浦发银行", "holding", {}),),
                           "snapshot", "decision", ())
-    state = RuntimeState()
+    state = RuntimeState(pressure_day=MONDAY.date())
     state.last_deepseek = MONDAY
     state.last_codex = MONDAY
     for index in range(25):
@@ -324,7 +325,7 @@ async def _deterministic_delivery_precedes_bundled_codex_analysis() -> None:
         assert calls == ["alert"]
         deps = IntradayAdvisoryDependencies(**{**deps.__dict__, "now": lambda: MONDAY + timedelta(seconds=46)})
         await run_intraday_advisory_cycle(deps, state, now=MONDAY + timedelta(seconds=46))
-    assert calls[0] == "alert" and calls[-1] == "codex"
+    assert calls[0] == "alert" and calls.index('codex') > calls.index('alert')
 
 
 def test_quote_success_evidence_survives_intermediate_idle_ticks() -> None:
@@ -334,7 +335,7 @@ def test_quote_success_evidence_survives_intermediate_idle_ticks() -> None:
 async def _quote_success_evidence_survives_intermediate_idle_ticks() -> None:
     scope = AdvisoryScope("citics-primary", (ScopeItem("600000.SH", "浦发银行", "recommendation", {}),),
                           "snapshot", "decision", ())
-    state = RuntimeState(last_deepseek=MONDAY, last_codex=MONDAY)
+    state = RuntimeState(last_deepseek=MONDAY, last_codex=MONDAY, pressure_day=MONDAY.date())
     statuses: list[dict] = []
 
     async def run_database(call):

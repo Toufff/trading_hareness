@@ -63,6 +63,20 @@ def latest_sector_snapshot(connection: Any, *, at: datetime) -> dict[str, Any] |
 
 
 def persist_signal(connection: Any, signal: AdvisorySignal, *, scope_source: str) -> dict[str, Any] | None:
+    if signal.kind == 'pressure_change':
+        # The loop has one leased owner. Include the active outbox to avoid
+        # queueing duplicates while transport retries; sent is the user baseline.
+        previous = latest_pressure_states(connection, at=signal.observed_at).get(signal.symbol)
+        if previous and previous['metrics'].get('state_signature') == signal.metrics.get('state_signature'):
+            return None
+        row = connection.execute("""
+            INSERT INTO quant.intraday_advisory_events(
+                event_key,symbol,name,event_kind,direction,severity,observed_at,scope_source,metrics,summary)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(event_key) DO NOTHING RETURNING event_id,event_key""",
+            (signal.event_key,signal.symbol,signal.name,signal.kind,signal.direction,signal.severity,
+             signal.observed_at,scope_source,Json(signal.metrics),signal.summary)).fetchone()
+        return dict(row) if row else None
     row = connection.execute("""
         INSERT INTO quant.intraday_advisory_events(
             event_key,symbol,name,event_kind,direction,severity,observed_at,scope_source,metrics,summary)
@@ -141,6 +155,36 @@ def latest_delivered_deepseek_fingerprint(connection: Any) -> str | None:
          WHERE r.provider='deepseek' AND r.status='completed' AND d.status='sent'
          ORDER BY r.completed_at DESC LIMIT 1""").fetchone()
     return str(row["fingerprint"]) if row and row.get("fingerprint") else None
+
+
+def latest_pressure_states(connection: Any, *, at: datetime) -> dict[str, Any]:
+    rows = connection.execute("""
+        SELECT DISTINCT ON(e.symbol) e.symbol,e.metrics,e.observed_at,d.status
+          FROM quant.intraday_advisory_events e
+          JOIN quant.intraday_advisory_deliveries d USING(event_id)
+         WHERE e.event_kind='pressure_change' AND e.observed_at<=%s
+           AND e.observed_at>=date_trunc('day',%s AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai'
+           AND (d.status='sent' OR (d.status IN ('pending','failed') AND d.attempt_count<8))
+         ORDER BY e.symbol,e.observed_at DESC""",(at,at)).fetchall()
+    return {str(row['symbol']):dict(row) for row in rows}
+
+
+def latest_delivered_context(connection: Any, *, at: datetime) -> dict[str, Any]:
+    rows = connection.execute("""
+        SELECT r.input_payload,r.output FROM quant.intraday_advisory_analysis_runs r
+          JOIN quant.intraday_advisory_deliveries d USING(analysis_run_id)
+         WHERE d.status='sent' AND r.status='completed' AND r.completed_at<=%s
+           AND r.started_at>=date_trunc('day',%s AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai'
+         ORDER BY r.completed_at DESC LIMIT 50""",(at,at)).fetchall()
+    result = {}
+    for row in rows:
+        output = row.get('output') or {}
+        covered = {x.get('symbol') for x in output.get('delta_items', [])}
+        for item in (row.get('input_payload') or {}).get('scope',[]):
+            if covered and item.get('symbol') not in covered:
+                continue
+            result.setdefault(item.get('symbol'),item)
+    return result
 
 
 def recent_discipline_events(connection: Any, *, after: datetime, limit: int = 20) -> list[dict[str, Any]]:

@@ -101,6 +101,39 @@ def metric_lines(metrics: dict[str, Any]) -> list[str]:
     return rows or ["有效行情证据暂缺"]
 
 
+def pressure_evidence(feature: dict[str,Any]) -> str:
+    if feature.get('status') != 'ready':
+        return '连续区间证据不足，暂不判断多空'
+    start, end = str(feature['start_at'])[11:19], str(feature['end_at'])[11:19]
+    change = feature['price_change_pct']
+    move = f"{'上涨' if change>0 else '下跌' if change<0 else '持平'} {abs(change):.2f}%"
+    volume = {'expanded':'放量','contracted':'缩量','normal':'量能平稳','unknown':'量能基准不足'}[feature['volume_state']]
+    ratio = feature.get('amount_ratio')
+    ratio_text = f"（此前等长区间基准 {ratio:.1f} 倍）" if ratio is not None else ''
+    return f"{start}–{end} {move}；{volume}{ratio_text}；每分钟成交额 {amount_text(feature['amount_per_minute'])}"
+
+
+def pressure_details(metrics: dict[str,Any]) -> str:
+    rows = []
+    for key in ('60','180','300'):
+        item = (metrics.get('windows') or {}).get(key) or {}
+        rows.append(f"近{int(key)//60}分钟：{pressure_evidence(item)}")
+        active = item.get('active_ratio')
+        if active is not None:
+            rows.append(f"区间主动买卖差占已分类成交量 {active*100:+.1f}%（行情商分类）")
+        if item.get('interval_vwap') is not None:
+            rows.append(f"区间成交均价 {item['interval_vwap']:.3f} 元")
+        if item.get('price_impact_bps_per_10m') is not None:
+            rows.append(f"每千万元成交对应价格变化 {item['price_impact_bps_per_10m']:+.2f} 基点，仅为价格响应描述")
+    book = metrics.get('book') or {}
+    if book.get('status') == 'ready':
+        rows.append(f"五档委比 {book['weibi_pct']:+.1f}%，区间时间加权均值 {book['mean_weibi_pct']:+.1f}%")
+        rows.append(f"可见委买 {book['bid_depth_lot']:.0f} 手 / 委卖 {book['ask_depth_lot']:.0f} 手；挂单辅助证据，不参与多空判定，也不能识别撤单")
+    else:
+        rows.append('五档盘口连续证据不足，未使用委比')
+    return '\n'.join(rows)
+
+
 def humanize_text(value: Any) -> str:
     text = str(value or "").strip()
     for raw, readable in LEGACY_FLOW_TEXT.items():
