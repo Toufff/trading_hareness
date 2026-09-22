@@ -25,6 +25,7 @@ from .repository import (
     persist_analysis, persist_delivery_outcome, persist_index_samples, persist_quote_samples,
     persist_signal, recent_discipline_events, update_status,
     latest_pressure_states, latest_delivered_context,
+    notification_exists, signal_delivery_suppressed,
 )
 from .presentation import ensure_readable_card, humanize_card, humanize_text
 from .rules import QuoteSample, sample_from_row
@@ -32,6 +33,7 @@ from .pressure import feature_bundle, pressure_event, VERSION
 from .delta import DELTA_KINDS, compact_facts, prepare_delta, bind_output
 from .schedule import decide
 from .scope import AdvisoryScope, load_scope
+from .notice_policy import VERSION as NOTICE_VERSION
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -153,10 +155,26 @@ def _delivery_outcome(database: Any, delivery_id: Any, outcome: dict[str, Any]) 
         persist_delivery_outcome(connection, delivery_id, outcome)
 
 
+def _notice_exists(database: Any, key: str) -> bool:
+    with database.transaction() as connection:
+        return notification_exists(connection, key)
+
+
+def _discipline_covers(database: Any, event_id: Any, key: str) -> bool:
+    with database.transaction() as connection:
+        return signal_delivery_suppressed(connection, event_id, account_key=key)
+
+
 async def _drain(deps: IntradayAdvisoryDependencies) -> dict[str, int]:
     rows = await deps.run_database(lambda: _load_due(deps.database))
     counts = {"attempted": 0, "sent": 0, "failed": 0, "disabled": 0}
     for row in rows:
+        if row.get('event_id') and await deps.run_database(
+                lambda: _discipline_covers(deps.database,row['event_id'],deps.account_key())):
+            await deps.run_database(lambda: _delivery_outcome(deps.database,row['delivery_id'],
+                {'status':'disabled','reason':'covered_by_discipline'}))
+            counts['disabled'] += 1
+            continue
         card = row.get("message_card") if isinstance(row.get("message_card"), dict) else {}
         try:
             if card:
@@ -268,6 +286,9 @@ def _deepseek_push_worthy(output: Mapping[str, Any], previous_fingerprint: str |
 async def _analyze(deps: IntradayAdvisoryDependencies, state: RuntimeState, scope: AdvisoryScope,
                    *, provider: str, trigger_kind: str, report_kind: str | None, always_push: bool) -> dict[str, Any]:
     now = deps.now()
+    brief_key = f"brief:{now.astimezone(SHANGHAI).date()}:{report_kind}" if report_kind in {'fixed','midday','tail'} else None
+    if brief_key and await deps.run_database(lambda: _notice_exists(deps.database,brief_key)):
+        return {'status':'completed','provider':provider,'pushed':False,'reason':'brief_already_queued'}
     payload = _context(scope, state, now, trigger_kind=trigger_kind, report_kind=report_kind)
     started = now
     age_limit = 360 if report_kind=='midday' else 20
@@ -301,6 +322,15 @@ async def _analyze(deps: IntradayAdvisoryDependencies, state: RuntimeState, scop
         result = await model.analyze(payload)
         completed = deps.now()
         output = bind_output(result.output,payload)
+        if report_kind not in DELTA_KINDS:
+            from .delta import scope_signature
+            current_items = {x['symbol']:x for x in payload['scope']}
+            for group in ('holding_focus','recommendation_focus'):
+                output[group] = [x for x in output.get(group,[]) if
+                    x['symbol'] not in (baseline or {}) or
+                    scope_signature(current_items[x['symbol']]) != scope_signature(baseline[x['symbol']])]
+            clocks = [x.get('quote',{}).get('observed_at') for x in payload['scope']]
+            output['data_as_of'] = max((x for x in clocks if x),default=payload['as_of'])
         stored = await deps.run_database(lambda: _persist_model_result(
             deps.database, provider=provider, trigger_kind=trigger_kind, report_kind=report_kind,
             started_at=started, completed_at=completed, input_payload=payload, output=output,
@@ -315,7 +345,7 @@ async def _analyze(deps: IntradayAdvisoryDependencies, state: RuntimeState, scop
             text = render_analysis(provider, output, report_kind=report_kind or trigger_kind, generated_at=completed)
             card = analysis_card(provider, output, report_kind=report_kind or trigger_kind,
                                  generated_at=completed, dashboard_url=deps.dashboard_url())
-            key = f"analysis:{provider}:{stored['analysis_run_id']}"
+            key = brief_key or f"conditions:{now.astimezone(SHANGHAI).date()}:{output['state_fingerprint']}"
             await deps.run_database(lambda: _enqueue_analysis(
                 deps.database, run_id=stored["analysis_run_id"], key=key, text=text, card=card))
             # The main loop owns transport; inference never blocks quote acquisition.
@@ -349,7 +379,10 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
     decision = decide(current, last_fetch=state.last_fetch, last_deepseek=state.last_deepseek,
                       last_codex=state.last_codex)
     outcome: dict[str, Any] = {"state": "idle", "scope_size": len(scope.items), "events": 0,
-                               "blockers": list(scope.blockers), 'feature_version':VERSION}
+                               "blockers": list(scope.blockers), 'feature_version':VERSION,
+                               'notification_policy':NOTICE_VERSION,
+                               'briefing_times':['10:00','11:35','14:45'],
+                               'event_model_followup':False}
     if state.analysis_task is not None and state.analysis_task.done():
         task, state.analysis_task = state.analysis_task, None
         try:
@@ -455,15 +488,16 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
         state.analysis_events = list(state.pending_events)
         state.analysis_task = asyncio.create_task(_analyze(deps, state, scope, provider="deepseek",
                                              trigger_kind="scheduled", report_kind="ten_minute", always_push=False))
-    event_due = bool(state.pending_since and current - state.pending_since >= timedelta(seconds=45))
-    if (decision.run_codex or event_due) and state.analysis_task is None:
-        report_kind = decision.report_kind if decision.run_codex else (
-            "discipline" if any(item.get("source") == "discipline" for item in state.pending_events) else "event")
-        state.last_codex = current if decision.run_codex else state.last_codex
+    # Deterministic events and discipline already have their own cards. Do not
+    # launch a second model solely because such a card was sent.
+    if decision.run_codex and state.analysis_task is None:
+        report_kind = decision.report_kind
+        state.last_codex = current
         state.analysis_events = list(state.pending_events)
         state.analysis_task = asyncio.create_task(_analyze(deps, state, scope, provider="codex",
-                                          trigger_kind="scheduled" if decision.run_codex else "event",
-                                          report_kind=report_kind, always_push=decision.run_codex))
+                                          trigger_kind="scheduled",
+                                          report_kind=report_kind, always_push=True))
+    state.pending_events = state.pending_events[-100:]
     await asyncio.sleep(0)  # Start the bounded inference task without awaiting its result.
     if state.last_drain is None:
         state.last_drain = current

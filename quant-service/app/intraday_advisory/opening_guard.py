@@ -156,27 +156,30 @@ def evaluate_opening_guard(
 
 def opening_guard_card(verdict: OpeningGuardVerdict) -> dict[str, Any]:
     """Render a compact native Feishu card; never include credentials."""
-    stage_label = "盘前准备" if verdict.stage == "preopen" else "开盘实流"
     if verdict.status == READY:
-        title = f"{stage_label}自检通过"
-        template = "green"
-        summary = "服务、监控范围、通知通道与运行循环均正常。"
-        if verdict.stage == "live":
-            summary = "已收到新鲜盘中行情，监控与分析链正式进入今日运行。"
+        title = "提醒服务已恢复"
+        template = "blue"
+        summary = "此前通知的服务故障已通过本次检查。"
+        if verdict.stage == 'preopen':
+            summary += "盘前检查不代表已验证开盘后的实时行情。"
     elif verdict.status == SKIPPED:
-        title = f"{stage_label}自检跳过"
+        title = "服务检查跳过"
         template = "grey"
         summary = f"交易日历关闭：{verdict.calendar_reason}"
     else:
-        title = f"{stage_label}自检失败"
+        title = "服务异常｜盘中提醒可能不完整"
         template = "red"
-        names = "、".join(item["name"] for item in verdict.failed_checks) or "未知"
-        summary = f"失败项：{names}。系统未把本次运行误报为正常。"
+        names = {item['name'] for item in verdict.failed_checks}
+        impacts = []
+        if names & {'live_quote_flow','live_index_flow','monitor_scope','advisory_tick','runtime_loop:intraday_advisory'}:
+            impacts.append('行情变化提醒可能缺失或延迟')
+        if names & {'discipline_tick','runtime_loop:discipline_alerts'}:
+            impacts.append('纪律提醒可能延迟')
+        if 'feishu_transport' in names:
+            impacts.append('飞书通知通道异常')
+        summary = '；'.join(impacts) or '研究提醒服务暂未通过可用性检查'
+        summary += '。自动恢复后仍未通过检查，请暂时自行核对行情与原纪律条件。'
     recovery = "是" if verdict.recovery_attempted else "否"
-    rows = "\n".join(
-        f"- {'通过' if item['passed'] else '失败'} **{item['name']}**：{item['detail']}"
-        for item in verdict.checks
-    ) or "- 今日非交易日，无需启动盘中链路。"
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": template, "title": {"tag": "plain_text", "content": title}},
@@ -184,7 +187,8 @@ def opening_guard_card(verdict: OpeningGuardVerdict) -> dict[str, Any]:
             {"tag": "div", "text": {"tag": "lark_md", "content":
              f"**{summary}**\n\n检查时间：{verdict.checked_at:%Y-%m-%d %H:%M:%S}\n自动恢复尝试：{recovery}"}},
             {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md", "content": rows}},
+            {"tag": "div", "text": {"tag": "lark_md", "content":
+             "技术检查详情已写入后台运行日志。"}},
             {"tag": "note", "elements": [{"tag": "plain_text", "content":
              "仅验证研究与提醒链路；不会连接券商下单，也不会执行交易。"}]},
         ],

@@ -21,32 +21,26 @@ def _continuous(now: datetime) -> bool:
 
 def decide(now: datetime, *, last_fetch: datetime | None, last_deepseek: datetime | None,
            last_codex: datetime | None) -> ScheduleDecision:
-    """Five-second acquisition, aligned ten-minute checks and thirty-minute reports.
+    """Three briefings; other ten-minute slots check changed conditions silently.
 
-    Every third ten-minute slot belongs to Codex; DeepSeek runs only on the two
-    intervening slots.  11:35 and 14:45 replace the nearest 11:30 and 14:30
-    fixed reports, so the user does not receive duplicate summaries around the
-    special checkpoints.
+    The two-minute windows tolerate a busy worker. Durable delivery keys in the
+    runtime prevent duplicates across restarts; an attempt can retry after 60s.
     """
     if now.weekday() >= 5:
         return ScheduleDecision()
     fetch = _continuous(now) and (last_fetch is None or (now - last_fetch).total_seconds() >= 5)
     minute = now.hour * 60 + now.minute
-    special = "midday" if 11 * 60 + 35 <= minute < 11 * 60 + 37 else "tail" if 14 * 60 + 45 <= minute < 14 * 60 + 47 else None
-    regular_slot = _continuous(now) and now.minute in {0, 30}
-    suppressed = (now.hour == 11 and now.minute == 30) or (now.hour == 14 and now.minute == 30)
-    codex_due = special is not None or (regular_slot and not suppressed)
-    if last_codex is not None and (now - last_codex).total_seconds() < (120 if special else 1500):
+    special = next((kind for start, kind in ((600,'fixed'),(695,'midday'),(885,'tail'))
+                    if start <= minute < start+2), None)
+    codex_due = special is not None
+    if last_codex is not None and (now - last_codex).total_seconds() < 60:
         codex_due = False
-    ten_minute_slot = _continuous(now) and now.minute % 10 == 0 and not suppressed
-    deepseek_due = ten_minute_slot and not codex_due and (
+    ten_minute_slot = _continuous(now) and now.minute % 10 == 0 and minute not in {570,690,900}
+    deepseek_due = ten_minute_slot and special is None and (
         last_deepseek is None or (now - last_deepseek).total_seconds() >= 9 * 60
     )
-    # A full Codex checkpoint replaces every third DeepSeek check.  This keeps
-    # the model rhythm deterministic across restarts and prevents a restart at
-    # an arbitrary second from creating an extra ten-minute message.
     return ScheduleDecision(fetch, deepseek_due, codex_due,
-                            special or ("fixed" if codex_due else None))
+                            special)
 
 
 __all__ = ["ScheduleDecision", "decide"]

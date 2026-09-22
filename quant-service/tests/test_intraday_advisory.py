@@ -72,7 +72,7 @@ def test_schedule_uses_bounded_cadences_and_special_reports() -> None:
     assert tail.run_codex and tail.report_kind == "tail"
 
 
-def test_schedule_assigns_two_ten_minute_slots_to_deepseek_then_one_to_codex() -> None:
+def test_schedule_checks_conditions_between_three_briefings() -> None:
     ten = decide(MONDAY.replace(minute=10), last_fetch=MONDAY,
                  last_deepseek=MONDAY, last_codex=MONDAY)
     assert ten.run_deepseek and not ten.run_codex
@@ -81,7 +81,7 @@ def test_schedule_assigns_two_ten_minute_slots_to_deepseek_then_one_to_codex() -
     assert twenty.run_deepseek and not twenty.run_codex
     thirty = decide(MONDAY.replace(minute=30), last_fetch=MONDAY,
                     last_deepseek=MONDAY.replace(minute=20), last_codex=MONDAY)
-    assert not thirty.run_deepseek and thirty.run_codex
+    assert thirty.run_deepseek and not thirty.run_codex
     arbitrary_restart = decide(MONDAY.replace(minute=21), last_fetch=MONDAY,
                                last_deepseek=None, last_codex=MONDAY)
     assert not arbitrary_restart.run_deepseek and not arbitrary_restart.run_codex
@@ -278,7 +278,7 @@ def test_market_signal_metrics_are_human_readable() -> None:
     ]
 
 
-def test_deterministic_delivery_precedes_bundled_codex_analysis() -> None:
+def test_deterministic_delivery_does_not_spawn_a_second_model_card() -> None:
     asyncio.run(_deterministic_delivery_precedes_bundled_codex_analysis())
 
 
@@ -325,7 +325,7 @@ async def _deterministic_delivery_precedes_bundled_codex_analysis() -> None:
         assert calls == ["alert"]
         deps = IntradayAdvisoryDependencies(**{**deps.__dict__, "now": lambda: MONDAY + timedelta(seconds=46)})
         await run_intraday_advisory_cycle(deps, state, now=MONDAY + timedelta(seconds=46))
-    assert calls[0] == "alert" and calls.index('codex') > calls.index('alert')
+    assert calls[0] == "alert" and 'codex' not in calls
 
 
 def test_quote_success_evidence_survives_intermediate_idle_ticks() -> None:

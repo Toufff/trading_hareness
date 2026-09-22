@@ -109,7 +109,7 @@ def pressure_evidence(feature: dict[str,Any]) -> str:
     move = f"{'上涨' if change>0 else '下跌' if change<0 else '持平'} {abs(change):.2f}%"
     volume = {'expanded':'放量','contracted':'缩量','normal':'量能平稳','unknown':'量能基准不足'}[feature['volume_state']]
     ratio = feature.get('amount_ratio')
-    ratio_text = f"（此前等长区间基准 {ratio:.1f} 倍）" if ratio is not None else ''
+    ratio_text = f"（成交额速率为此前等长区间基准的 {ratio:.1f} 倍）" if ratio is not None else ''
     return f"{start}–{end} {move}；{volume}{ratio_text}；每分钟成交额 {amount_text(feature['amount_per_minute'])}"
 
 

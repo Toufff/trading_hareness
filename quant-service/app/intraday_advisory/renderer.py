@@ -22,7 +22,7 @@ from .presentation import ensure_readable_card, humanize_text, metric_lines, rol
 
 PROVIDER_TEXT = {"deepseek": "DeepSeek", "codex": "Codex"}
 REPORT_TITLES = {
-    "fixed": "盘中半小时复核", "midday": "午盘复核", "tail": "尾盘复核",
+    "fixed": "早盘简报", "midday": "午盘简报", "tail": "尾盘简报",
     "event": "异动补充分析", "discipline": "纪律线补充分析",
     "ten_minute": "盘中重要变化",
 }
@@ -119,15 +119,9 @@ def _legacy_entries(output: dict[str, Any]) -> tuple[list[dict[str, str]], list[
 
 def _primary_action(state: str, holdings: list[dict[str, str]],
                     recommendations: list[dict[str, str]]) -> str:
-    if holdings:
-        return holdings[0]["action"]
     if state == "risk":
-        return "先核对风险线与可交易状态，暂停新增仓位。"
-    if recommendations:
-        return recommendations[0]["action"]
-    if state == "calm":
-        return "按原计划观察，不因单次波动临时追价。"
-    return "先确认指数与主线板块是否共振，没有确认信号不追价。"
+        return "优先核对下列风险与已有纪律条件；市场风险提示不替代个股纪律确认。"
+    return "原纪律继续有效；下列仅列关键变化，未列对象不代表失去监控。"
 
 
 def render_signal(signal: AdvisorySignal, *, source: str) -> str:
@@ -148,16 +142,24 @@ def signal_card(signal: AdvisorySignal, *, source: str,
         from .presentation import pressure_evidence, pressure_details
         previous = signal.metrics.get('previous_pressure_text')
         change = f"此前：{previous}\n现在：{signal.metrics['pressure_text']}" if previous else signal.metrics['pressure_text']
-        elements = [content_panel(f"**{signal.summary}**\n{pressure_evidence(signal.metrics)}",element_id='change',color='grey'),
-                    markdown(change),
+        elements = [content_panel(pressure_evidence(signal.metrics),element_id='change',color='grey'),
+                    markdown(f"**多空变化**　{change}"),
+                    markdown('**计划影响**　这是行情变化，不代表原纪律或买入条件已经触发；请按原计划确认。'),
                     collapsible_panel('区间证据与盘口辅助',pressure_details(signal.metrics),element_id='evidence'),
                     markdown(f"行情截至 {signal.observed_at:%H:%M:%S} · 描述性研究提醒，不是买卖指令",size='notation')]
         url = market_decision_url(dashboard_url)
         if url:
-            elements.append(open_url_button('查看原观察条件',url,element_id='open_dashboard'))
-        result = card_v2(title=f"重要变化｜{signal.name or signal.symbol.split('.')[0]}",
+            elements.append(open_url_button('打开决策工作台',url,element_id='open_dashboard'))
+        # A longer-window trigger must remain visible even if the last minute is flat.
+        if signal.summary.startswith(('近3分钟','近5分钟')):
+            elements.insert(0,markdown(f'**触发变化**　{signal.summary.split("；")[0]}'))
+        label = {'buy_confirmed':'买方进攻获确认','sell_confirmed':'卖压增强',
+                 'buy_stalled':'买方进攻未获确认','sell_absorbed':'卖压下暂稳',
+                 'balanced':'买卖趋于均衡','divergent':'成交与价格背离',
+                 'insufficient':'价格异动，成交方向待确认'}.get(signal.metrics.get('pressure_state'),'行情变化')
+        result = card_v2(title=f"重要变化｜{signal.name or signal.symbol.split('.')[0]}：{label}",
                          subtitle=f"{role_text(source)} · {signal.observed_at:%H:%M:%S}",
-                         summary=f"{signal.name}：{signal.summary}",template='red' if signal.severity=='high' and signal.direction=='down' else 'orange',
+                         summary=f"{signal.name}：{signal.summary}",template='red' if source=='holding' and signal.severity=='high' and signal.direction=='down' else ('blue' if signal.metrics.get('pressure_state')=='balanced' else 'orange'),
                          tags=[],elements=elements,card_url=url)
         ensure_readable_card(result)
         return result
@@ -170,7 +172,7 @@ def signal_card(signal: AdvisorySignal, *, source: str,
     }.get(source, "先观察后续确认")
     decision_url = market_decision_url(dashboard_url)
     severity_text = "高优先级" if signal.severity == "high" else "需要关注"
-    severity_color = "red" if signal.severity == "high" else "orange"
+    severity_color = "red" if signal.severity == "high" and signal.direction == 'down' else "orange"
     elements = [
         content_panel(
             f"**发生了什么**\n{humanize_text(signal.summary)}" + (
@@ -185,14 +187,14 @@ def signal_card(signal: AdvisorySignal, *, source: str,
         content_panel(f"**现在怎么做**\n{action}", element_id="event_action", color="orange"),
         collapsible_panel("行情证据", metrics, element_id="event_evidence"),
         markdown(
-            f"{signal.observed_at:%H:%M:%S} · 内外盘仅表示成交方向，不代表主力资金 · 系统不下单",
+            f"行情截至 {signal.observed_at:%H:%M:%S} · 研究提醒，不执行交易",
             size="notation",
         ),
     ]
     if decision_url:
         elements.append(open_url_button("打开决策工作台", decision_url, element_id="open_dashboard"))
     result = card_v2(
-        title=f"异动提醒｜{signal.name or symbol_text(signal.symbol)}",
+        title=f"重要变化｜{signal.name or symbol_text(signal.symbol)}",
         subtitle=f"{role_text(source)} · {signal.observed_at:%H:%M:%S}",
         summary=f"{severity_text}：{signal.name or symbol_text(signal.symbol)} {humanize_text(signal.summary)}",
         template=severity_color,
@@ -207,9 +209,9 @@ def signal_card(signal: AdvisorySignal, *, source: str,
 def render_analysis(provider: str, output: dict[str, Any], *, report_kind: str,
                     generated_at: datetime) -> str:
     if report_kind in {'event','discipline','ten_minute'} and 'delta_items' in output:
-        sections = ['【重要变化补充】'+humanize_text(output.get('headline'))]
+        sections = ['【条件更新】'+humanize_text(output.get('headline'))]
         for item in output['delta_items']:
-            sections.append(f"{symbol_text(item['symbol'],item['name'])}｜{item['change']}\n{item['evidence']}\n观察条件：{item['action']}")
+            sections.append(f"{symbol_text(item['symbol'],item['name'])}｜{item['change']}\n{item.get('condition_evidence','')}\n{item['evidence']}\n观察条件：{item['action']}")
         if output.get('market_delta'):
             sections.append(humanize_text(output['market_delta']))
         return '\n'.join(sections)
@@ -238,19 +240,20 @@ def analysis_card(provider: str, output: dict[str, Any], *, report_kind: str,
         elements = []
         for index,item in enumerate(output['delta_items']):
             elements.append(content_panel(
-                f"**{symbol_text(item['symbol'],item['name'])}｜{item['change']}**\n{item['evidence']}\n**条件影响**　{humanize_text(item['action'])}",
+                f"**{role_text(item.get('scope','recommendation'))} · {symbol_text(item['symbol'],item['name'])}｜{item['change']}**\n{item.get('condition_evidence','')}\n{item['evidence']}\n**条件影响**　{humanize_text(item['action'])}",
                 element_id=f'delta_{index}',color='grey'))
         if output.get('market_delta'):
             elements.append(markdown(humanize_text(output['market_delta'])))
         elements.append(markdown(f"证据截至 {str(output.get('data_as_of') or '')[11:19]} · 生成 {generated_at:%H:%M:%S} · {PROVIDER_TEXT.get(provider,provider)} 复核",size='notation'))
-        result = card_v2(title='重要变化补充',subtitle=f'{generated_at:%H:%M}',
+        names = '、'.join(x['name'] for x in output['delta_items'][:2])
+        result = card_v2(title=f'条件更新｜{names}' if names else '重要变化｜市场环境',subtitle=f'{generated_at:%H:%M}',
                          summary=humanize_text(output.get('headline')) or '观察条件发生变化',
-                         template='orange',tags=[],elements=elements,card_url=market_decision_url(dashboard_url))
+                         template='blue',tags=[],elements=elements,card_url=market_decision_url(dashboard_url))
         ensure_readable_card(result)
         return result
     title = REPORT_TITLES.get(report_kind, "盘中分析")
     state = str(output.get("market_state") or "watch")
-    template = {"risk": "red", "watch": "orange", "calm": "blue"}.get(state, "orange")
+    template = 'red' if state=='risk' else 'blue'
     headline_source = (output.get("notification_reason") if report_kind == "ten_minute" else None)
     headline = humanize_text(headline_source or output.get("headline") or output.get("summary")) or "盘面暂无显著变化"
     market = humanize_text(output.get("market_summary") or output.get("summary")) or "暂无新增市场证据"
@@ -264,7 +267,7 @@ def analysis_card(provider: str, output: dict[str, Any], *, report_kind: str,
     risks = [humanize_text(item) for item in output.get("risks") or []]
     decision_url = market_decision_url(dashboard_url)
     action = _primary_action(state, holding_entries, recommendation_entries)
-    state_color = {"risk": "red", "watch": "orange", "calm": "green"}.get(state, "orange")
+    state_color = {"risk": "red", "watch": "orange", "calm": "blue"}.get(state, "blue")
     elements: list[dict[str, Any]] = [
         content_panel(
             f"<text_tag color='{state_color}'>大盘结论</text_tag> **{headline}**\n{market}",
@@ -276,8 +279,11 @@ def analysis_card(provider: str, output: dict[str, Any], *, report_kind: str,
             ("持仓关注", str(len(holding_entries))),
             ("推荐池关注", str(len(recommendation_entries))),
         ], element_id="attention_metrics"),
-        content_panel(f"**现在怎么做**\n{action}", element_id="primary_action", color=state_color),
+        content_panel(f"**关注顺序**\n{action}", element_id="primary_action", color=state_color),
     ]
+    if risks:
+        elements.insert(0,content_panel('**优先核对**\n'+'\n'.join(f'- {item}' for item in risks),
+                                       element_id='priority_risks',color='grey'))
     if holding_entries:
         elements.append(markdown("### 当前持仓", margin="4px 0 0 0"))
         elements.extend(_focus_panel(item, role="holding", index=index)
@@ -305,19 +311,16 @@ def analysis_card(provider: str, output: dict[str, Any], *, report_kind: str,
         elements.append(collapsible_panel(
             f"补充观察（{len(legacy_other)}）", "\n\n".join(legacy_other),
             element_id="legacy_more"))
-    if risks:
-        elements.append(collapsible_panel(
-            f"风险与数据边界（{len(risks)}）", "\n".join(f"- {item}" for item in risks),
-            element_id="risk_details"))
+    elements.append(collapsible_panel('阅读边界','仅列关键变化；原纪律条件继续有效。未列对象不代表失去监控。',element_id='brief_boundary'))
     elements.append(markdown(
-        f"生成时间 {generated_at:%H:%M:%S} · {PROVIDER_TEXT.get(provider, provider)} 复核 · 研究提醒，不执行交易",
+        f"证据截至 {str(output.get('data_as_of') or '')[11:19] or '未标注'} · 生成时间 {generated_at:%H:%M:%S} · {PROVIDER_TEXT.get(provider, provider)} 复核 · 研究提醒，不执行交易",
         size="notation",
     ))
     if decision_url:
         elements.append(open_url_button("打开决策工作台", decision_url, element_id="open_dashboard"))
     result = card_v2(
         title=title,
-        subtitle=f"{generated_at:%Y-%m-%d %H:%M} · {PROVIDER_TEXT.get(provider, provider)}",
+        subtitle=f"{generated_at:%Y-%m-%d %H:%M} · 阶段关键事项",
         summary=f"{state_text(state)}：{headline}",
         template=template,
         tags=[

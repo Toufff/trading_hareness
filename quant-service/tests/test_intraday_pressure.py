@@ -150,7 +150,7 @@ def test_slow_model_does_not_block_next_quote_cycle():
     from app.intraday_advisory.runtime import RuntimeState, IntradayAdvisoryDependencies, run_intraday_advisory_cycle
     from app.intraday_advisory.scope import AdvisoryScope,ScopeItem
     async def run():
-        state=RuntimeState(last_deepseek=AT,last_codex=AT,pressure_day=AT.date())
+        state=RuntimeState(last_deepseek=AT,last_codex=None,pressure_day=AT.date())
         state.pending_events=[{'symbol':'600000.SH','source':'holding'}]
         state.pending_since=AT-timedelta(seconds=46)
         gate=asyncio.Event()

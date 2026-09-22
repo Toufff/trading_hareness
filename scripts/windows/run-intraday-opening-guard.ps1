@@ -42,7 +42,8 @@ function Invoke-Guard([bool]$Notify, [bool]$RecoveryAttempted) {
 }
 
 # First pass is silent.  A failure receives exactly one bounded runtime restart,
-# then the final pass sends either the green recovered receipt or the red fault.
+# then the final pass only notifies an unrecovered fault or a previously
+# announced fault's recovery. Successful routine checks remain silent.
 $first = Invoke-Guard -Notify $false -RecoveryAttempted $false
 $recoveryAttempted = $false
 if ($first.ExitCode -ne 0) {

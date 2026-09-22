@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from ..agent_paper.model import ModelFailure
+from .notice_policy import condition_changes, condition_signature, condition_values, condition_evidence, CONDITION_LABELS
 
 DELTA_KINDS = {'event','discipline','ten_minute'}
 FACT_KEYS = {'quantity','sellable_quantity','position_weight_pct','trigger','invalidation',
@@ -34,6 +35,11 @@ def prepare_delta(payload, baseline):
     changed = []
     for item in payload['scope']:
         previous = baseline.get(item['symbol'])
+        changes = condition_changes(item, previous)
+        # Price/flow changes already have a deterministic card. The periodic
+        # model only explains independently changed plan facts, never a rewording.
+        if payload.get('report_kind') == 'ten_minute' and not changes:
+            continue
         ready = ((item.get('windows') or {}).get('60') or {}).get('status') == 'ready'
         if is_event and item['symbol'] not in symbols:
             continue
@@ -43,10 +49,14 @@ def prepare_delta(payload, baseline):
         if not is_event and (not ready or (previous and scope_signature(item)==scope_signature(previous))):
             continue
         item = dict(item)
-        item['previous_notified'] = {'windows':previous.get('windows'), 'quote':previous.get('quote')} if previous else None
+        item['previous_notified'] = {'windows':previous.get('windows'), 'quote':previous.get('quote'),
+                                    'notice_key':previous.get('_notification_key')} if previous else None
+        item['condition_changes'] = changes
+        item['previous_conditions'] = condition_values(previous) if previous else {}
         item['position_or_recommendation'] = compact_facts(item['position_or_recommendation'])
         changed.append(item)
-    market_events = [e for e in events if e.get('source') in {'market_index','sector'}]
+    market_events = [] if payload.get('report_kind') == 'ten_minute' else [
+        e for e in events if e.get('source') in {'market_index','sector'}]
     return {**payload,'scope':changed,'market_context':payload['market_context'] if market_events else {},
             'delta_only':True,'market_events':market_events}
 
@@ -77,6 +87,8 @@ def bind_output(output: dict[str,Any], payload: dict[str,Any]) -> dict[str,Any]:
         change = feature.get('pressure_text','区间证据不足')
         if previous.get('pressure_text'):
             change = previous['pressure_text']+' → '+change
+        if source.get('condition_changes'):
+            change = '、'.join(CONDITION_LABELS[k] for k in source['condition_changes'])+'已更新'
         action = str(item.get('action') or '')[:140]
         # A prospective candidate cannot receive a sell instruction.
         if source['scope'] != 'holding' and any(x in action for x in ('减仓','清仓','卖出','止损卖','退出持仓')):
@@ -88,8 +100,11 @@ def bind_output(output: dict[str,Any], payload: dict[str,Any]) -> dict[str,Any]:
         known = set(re.findall(r'\d+(?:\.\d+)?',json.dumps(source,ensure_ascii=False,default=str)))
         if any(x not in known for x in re.findall(r'\d+(?:\.\d+)?',action)):
             raise ModelFailure('unsupported_action_number',item['symbol'])
+        if not action.strip():
+            continue
         items.append({'symbol':source['symbol'],'name':source['name'],'scope':source['scope'],
-                      'change':change,'evidence':pressure_evidence(feature), 'action':action})
+                      'change':change,'evidence':pressure_evidence(feature), 'action':action,
+                      'condition_evidence':condition_evidence(source)})
     result['delta_items'] = items[:3]
     result['market_summary'] = ''
     result['market_delta'] = '；'.join(str(e.get('summary') or '') for e in payload.get('market_events',[]))[:250]
@@ -98,6 +113,7 @@ def bind_output(output: dict[str,Any], payload: dict[str,Any]) -> dict[str,Any]:
     result['data_as_of'] = max((x for x in clocks if x),default=payload['as_of'])
     result['headline'] = '；'.join(x['name']+'：'+x['change'] for x in items[:2]) or result['market_delta']
     result['state_fingerprint'] = sha256(json.dumps(
-        [(x['symbol'],scope_signature(expected[x['symbol']])) for x in items] +
+        [(x['symbol'],condition_signature(expected[x['symbol']]),
+          (expected[x['symbol']].get('previous_notified') or {}).get('notice_key')) for x in items] +
         [('market',result['market_delta'])],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     return result

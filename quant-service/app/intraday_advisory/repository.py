@@ -107,7 +107,7 @@ def enqueue_delivery(connection: Any, *, key: str, kind: str, text: str,
 
 def due_deliveries(connection: Any, *, limit: int = 20) -> list[dict[str, Any]]:
     return [dict(row) for row in connection.execute("""
-        SELECT delivery_id,idempotency_key,message_text,message_card,attempt_count,delivery_kind
+        SELECT delivery_id,idempotency_key,message_text,message_card,attempt_count,delivery_kind,event_id
           FROM quant.intraday_advisory_deliveries
          WHERE status IN ('pending','failed') AND attempt_count<8
            AND coalesce(next_attempt_at,created_at)<=now()
@@ -157,6 +157,29 @@ def latest_delivered_deepseek_fingerprint(connection: Any) -> str | None:
     return str(row["fingerprint"]) if row and row.get("fingerprint") else None
 
 
+def notification_exists(connection: Any, key: str) -> bool:
+    return connection.execute("""
+        SELECT 1 FROM quant.intraday_advisory_deliveries
+         WHERE idempotency_key=%s AND (status='sent' OR
+             (status IN ('pending','failed') AND attempt_count<8)) LIMIT 1""", (key,)).fetchone() is not None
+
+
+def signal_delivery_suppressed(connection: Any, event_id: Any, *, account_key: str) -> bool:
+    # Only the same holding's downside episode is covered. A profit-taking line
+    # must not suppress a selloff, nor a candidate/other account's alert.
+    return connection.execute("""
+        SELECT 1 AS covered FROM quant.intraday_advisory_events e
+         JOIN quant.discipline_alert_events de ON de.payload->>'symbol'=e.symbol
+         JOIN quant.discipline_alert_deliveries d ON d.event_id=de.event_id
+         WHERE e.event_id=%s AND e.scope_source='holding' AND e.direction='down'
+           AND de.payload->>'account_key'=%s AND de.to_state='triggered'
+           AND de.line_kind IN ('hard_stop','soft_stop','trail','time_stop')
+           AND de.observed_at BETWEEN e.observed_at-interval '90 seconds' AND e.observed_at+interval '90 seconds'
+           AND de.observed_at>=now()-interval '10 minutes'
+           AND d.status='sent'
+         LIMIT 1""", (event_id, account_key)).fetchone() is not None
+
+
 def latest_pressure_states(connection: Any, *, at: datetime) -> dict[str, Any]:
     rows = connection.execute("""
         SELECT DISTINCT ON(e.symbol) e.symbol,e.metrics,e.observed_at,d.status
@@ -171,7 +194,7 @@ def latest_pressure_states(connection: Any, *, at: datetime) -> dict[str, Any]:
 
 def latest_delivered_context(connection: Any, *, at: datetime) -> dict[str, Any]:
     rows = connection.execute("""
-        SELECT r.input_payload,r.output FROM quant.intraday_advisory_analysis_runs r
+        SELECT r.input_payload,r.output,d.idempotency_key FROM quant.intraday_advisory_analysis_runs r
           JOIN quant.intraday_advisory_deliveries d USING(analysis_run_id)
          WHERE d.status='sent' AND r.status='completed' AND r.completed_at<=%s
            AND r.started_at>=date_trunc('day',%s AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai'
@@ -181,9 +204,9 @@ def latest_delivered_context(connection: Any, *, at: datetime) -> dict[str, Any]
         output = row.get('output') or {}
         covered = {x.get('symbol') for x in output.get('delta_items', [])}
         for item in (row.get('input_payload') or {}).get('scope',[]):
-            if covered and item.get('symbol') not in covered:
+            if ((row.get('input_payload') or {}).get('delta_only') or covered) and item.get('symbol') not in covered:
                 continue
-            result.setdefault(item.get('symbol'),item)
+            result.setdefault(item.get('symbol'),{**item,'_notification_key':row.get('idempotency_key')})
     return result
 
 

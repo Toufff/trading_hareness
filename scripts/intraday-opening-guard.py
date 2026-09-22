@@ -25,6 +25,7 @@ from app.http_clients import close_http_clients  # noqa: E402
 from app.intraday_advisory.opening_guard import (  # noqa: E402
     FAILED, evaluate_opening_guard, opening_guard_card,
 )
+from app.intraday_advisory.notice_policy import guard_notification  # noqa: E402
 from app.market_session_repository import sse_calendar_status  # noqa: E402
 
 
@@ -39,6 +40,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--as-of", help="timezone-aware ISO instant; test/manual verification only")
     parser.add_argument("--notify", action="store_true")
     parser.add_argument("--recovery-attempted", action="store_true")
+    parser.add_argument("--notification-state", help="durable fault receipt; defaults beside runtime logs")
     return parser.parse_args()
 
 
@@ -92,14 +94,28 @@ def main() -> int:
         discipline=discipline, recovery_attempted=args.recovery_attempted,
     )
     payload = verdict.as_dict()
-    if args.notify and verdict.status != "skipped":
-        delivery = asyncio.run(_notify(opening_guard_card(verdict)))
-        payload["notification"] = {"status": delivery.get("status"),
-                                   "error": str(delivery.get("error") or delivery.get("reason") or "")[:300] or None}
+    payload['notification'] = {'status':'silent'}
+    if args.notify and not args.as_of:
+        state_path = Path(args.notification_state) if args.notification_state else (
+            Path(args.env_file).resolve().parent.parent / 'logs/runtime/opening-guard-notification.json')
+        state = json.loads(state_path.read_text(encoding='utf-8')) if state_path.exists() else {}
+        decision = guard_notification(verdict,state)
+        if decision:
+            delivery = asyncio.run(_notify(opening_guard_card(verdict)))
+            payload["notification"] = {"status": delivery.get("status"), 'kind':decision,
+                                       "error": str(delivery.get("error") or delivery.get("reason") or "")[:300] or None}
+            if delivery.get('status') == 'sent':
+                state = {'open_fault': sorted({x['name'] for x in verdict.failed_checks} |
+                         set(state.get('open_fault') or [])) if decision=='failure' else [],
+                         'notified_at':now.isoformat()}
+                state_path.parent.mkdir(parents=True,exist_ok=True)
+                temp = state_path.with_suffix('.tmp')
+                temp.write_text(json.dumps(state,ensure_ascii=False),encoding='utf-8')
+                temp.replace(state_path)
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
     if verdict.status == FAILED:
         return 2
-    if args.notify and verdict.status != "skipped" and payload["notification"]["status"] != "sent":
+    if payload['notification']['status'] not in {'sent','silent'}:
         return 3
     return 0
 
