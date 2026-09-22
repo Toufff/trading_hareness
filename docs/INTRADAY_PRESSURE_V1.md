@@ -86,3 +86,28 @@ G:\StockPlatform\current\.venv\Scripts\python.exe -X utf8 G:\StockPlatform\curre
 飞书 HTTP 接受不等于手机横幅/声音验收。收盘后部署不能证明次日开盘真实行情采集；保留原 09:25/09:32 开盘验收任务。
 当前运行状态 `GET /api/v1/intraday/advisory/status` 的 details 中应含 `feature_version=pressure-v1`。
 不需要数据库迁移或环境变量变更。回滚使用既有 release switch，不删除新 JSON 证据或历史回执。
+
+## 发布验收记录（2026-09-22）
+
+- 实现提交 `b43c76c7fd1fed167dc7339b7fc97bd792ae6874`；单位/多窗口摘要修正 `fedabd5e10aa705c7491a9d178316cd88852ff9c`。
+- 最终生产 release：`20260922T154232-fedabd5e10aa-clean`，15:46:11 切换。
+  `/health` 实际 build SHA 为 `fedabd5e10aa705c7491a9d178316cd88852ff9c`。
+- 发布未跳过测试：后端 3,240 passed / 130 skipped / 892 subtests passed；
+  前端 36 文件、144 测试通过，类型检查与构建通过。独立通知代理 116 测试通过。
+  本次针对性测试 36 项通过。跳过项不计为真实环境成功。
+- 部署后 OpenAPI 与前端 196 个路径一致；owner API、adapter、本地和远端共享服务验收通过。
+  公网无认证访问 `/health` 返回 401，是访问门禁，未绕过门禁，也不据此宣称公网登录态页面验收。
+- 15:48:45 的新循环心跳晚于最终切换时间；`enabled=true`、`transport_configured=true`、
+  `feature_version=pressure-v1`、`state=idle`（已收盘）、`last_error=null`。
+  重启后等待旧后台租约正常到期再读到新心跳，没有手工删除租约。
+- 最终 schema 两个真实模型调用通过：DeepSeek 724 ms、Codex 8,699 ms；
+  模型均可判静默，并不强迫输出一张卡。原模型/思考强度配置未变。
+- 昨日独立回放 13,968 行、26 张确定性卡；今日 15,039 行、36 张。不是收益回测或完整通知数量预测。
+- 已通过生产 transport 发送一张“历史回放”测试卡（神奇制药 09:58:20 历史片段）。
+  飞书回执 sent；没有将历史片段写成今日新信号或下单。手机实际声音/横幅仍需人工查看。
+- 证据目录：`G:\StockPlatform\data\research\intraday-pressure-20260922`。
+  关键文件 `deepseek-final.json`、`codex-final.json`、`replay-previous-day.json`、`feishu.json`。
+- 保留原开盘双阶段验收任务。次日真实连续采样、盘中通知效果仍是未来验收，未冒充已经完成。
+- 发布按既有保留策略清理了两个旧 release 快照，源码仍在 Git，回滚版本保留；
+  另一个旧 release 因后台 EXE 被占用延迟清理，未强制删除或终止进程。
+  完整回退本功能可切换到保留的 `20260922T024805-7114fe8eb22d-clean`。
