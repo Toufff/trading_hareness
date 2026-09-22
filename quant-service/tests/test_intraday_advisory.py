@@ -381,7 +381,9 @@ def test_feishu_env_manager_exposes_advisory_cadence(tmp_path: Path) -> None:
     status = json.loads(completed.stdout)
     assert status["intraday_advisory_enabled"]
     assert status["intraday_advisory_cadence"] == {
-        "fetch_seconds": 5, "local_tick_seconds": 1, "deepseek_seconds": 600, "codex_seconds": 1800,
+        "fetch_seconds": 5, "local_tick_seconds": 1, "deepseek_seconds": 600, "codex_seconds": None,
+        "briefing_times": ["10:00", "11:35", "14:45"], "event_model_followup": False,
+        "notification_policy": "notice-v2",
     }
 
 

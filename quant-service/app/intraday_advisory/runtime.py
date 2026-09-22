@@ -33,7 +33,7 @@ from .pressure import feature_bundle, pressure_event, VERSION
 from .delta import DELTA_KINDS, compact_facts, prepare_delta, bind_output
 from .schedule import decide
 from .scope import AdvisoryScope, load_scope
-from .notice_policy import VERSION as NOTICE_VERSION
+from .notice_policy import VERSION as NOTICE_VERSION, BRIEFING_TIMES
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -381,7 +381,7 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
     outcome: dict[str, Any] = {"state": "idle", "scope_size": len(scope.items), "events": 0,
                                "blockers": list(scope.blockers), 'feature_version':VERSION,
                                'notification_policy':NOTICE_VERSION,
-                               'briefing_times':['10:00','11:35','14:45'],
+                               'briefing_times':list(BRIEFING_TIMES),
                                'event_model_followup':False}
     if state.analysis_task is not None and state.analysis_task.done():
         task, state.analysis_task = state.analysis_task, None

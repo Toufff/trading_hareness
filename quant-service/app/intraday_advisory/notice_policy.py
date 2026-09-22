@@ -5,6 +5,19 @@ import json
 from hashlib import sha256
 
 VERSION = 'notice-v2'
+BRIEFING_TIMES = ('10:00','11:35','14:45')
+
+
+def cadence_status():
+    return {'quote_acquisition_seconds':5,'index_acquisition_seconds':15,
+            'industry_board_source_seconds':60,'local_evaluation_seconds':1,
+            'deepseek_seconds':600,'deepseek_delivery':'verified_condition_changes_only',
+            'codex_seconds':None,'codex_delivery':'three_daily_briefings',
+            'briefing_times':list(BRIEFING_TIMES),'event_model_followup':False,
+            'opening_guard_delivery':'persistent_failure_or_announced_recovery',
+            'notification_policy':VERSION}
+
+
 CONDITION_LABELS = {
     'scope':'跟踪身份', 'quantity':'持仓数量', 'sellable_quantity':'可卖数量',
     'trigger':'触发条件', 'invalidation':'失效条件', 'stop_loss':'止损条件',

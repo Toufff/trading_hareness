@@ -27,6 +27,26 @@ def test_only_three_briefing_windows_and_no_same_slot_deepseek():
     assert not result.run_codex and not result.run_deepseek
 
 
+def test_status_http_advertises_actual_schedule_not_retired_half_hour_pattern():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.routers.intraday_advisory import build_intraday_advisory_router
+    from app.intraday_advisory.notice_policy import BRIEFING_TIMES
+    app=FastAPI()
+    app.include_router(build_intraday_advisory_router(object(),read_status=AsyncMock(return_value={}),
+                       runtime_enabled=lambda:True,transport_configured=lambda:True))
+    with TestClient(app) as client:
+        response=client.get('/api/v1/intraday/advisory/status')
+    assert response.status_code==200
+    cadence=response.json()['cadence']
+    assert cadence['briefing_times']==list(BRIEFING_TIMES)
+    assert cadence['codex_seconds'] is None and cadence['event_model_followup'] is False
+    assert 'model_slot_pattern' not in cadence
+    for value in BRIEFING_TIMES:
+        hour,minute=map(int,value.split(':'))
+        assert decide(NOW.replace(hour=hour,minute=minute),last_fetch=None,last_deepseek=None,last_codex=None).run_codex
+
+
 def test_guard_success_silent_fault_dedup_and_recovery_only_if_announced():
     ready = OpeningGuardVerdict('live', READY, NOW, ({'name':'live_quote_flow','passed':True},))
     assert guard_notification(ready, {}) is None

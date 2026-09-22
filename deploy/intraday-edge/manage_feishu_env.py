@@ -131,10 +131,10 @@ def _status(path: Path) -> dict[str, Any]:
         "intraday_advisory_enabled": values.get("QUANT_INTRADAY_ADVISORY_ENABLED", "false").lower() == "true",
         "intraday_advisory_account_configured": bool(values.get("QUANT_INTRADAY_ADVISORY_ACCOUNT_KEY", "").strip()),
         "intraday_advisory_cadence": {
-            "fetch_seconds": int(values.get("QUANT_INTRADAY_ADVISORY_FETCH_SECONDS", "0") or 0),
-            "local_tick_seconds": int(values.get("QUANT_INTRADAY_ADVISORY_LOCAL_TICK_SECONDS", "0") or 0),
-            "deepseek_seconds": int(values.get("QUANT_INTRADAY_ADVISORY_DEEPSEEK_SECONDS", "0") or 0),
-            "codex_seconds": int(values.get("QUANT_INTRADAY_ADVISORY_CODEX_SECONDS", "0") or 0),
+            # These are code-owned timings, not the legacy env hints below.
+            "fetch_seconds": 5, "local_tick_seconds": 1, "deepseek_seconds": 600,
+            "codex_seconds": None, "briefing_times": ["10:00", "11:35", "14:45"],
+            "event_model_followup": False, "notification_policy": "notice-v2",
         },
         "env_file": str(path),
     }
