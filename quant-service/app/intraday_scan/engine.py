@@ -1,11 +1,10 @@
 """Frozen nine-lane intraday adapter. Never persists settled daily prices."""
 from collections import defaultdict
-from copy import deepcopy
 from datetime import datetime, timedelta
 import re
 from statistics import median
 from .ohlc import capture_matches_cutoff
-from .rules import digest, evaluate, LABELS, STATE_ORDER
+from .rules import digest, evaluate, LABELS as LABELS, STATE_ORDER
 from .tail import restore_settings
 from .presentation import build as build_presentation
 from ..short_term_lanes.rules import screen, Settings

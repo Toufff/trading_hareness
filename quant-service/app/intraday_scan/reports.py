@@ -1,7 +1,6 @@
 """One overview and one report per lane from the identical immutable result."""
 from pathlib import Path
 import re
-from .rules import STATE_ORDER
 STATES={'platform_observation':'平台内潜伏观察','confirmed_observation':'结构转强','wait_confirmation':'等待承接','execution_uncertain':'涨停附近/成交未证实','invalidated':'结构转弱','data_gap':'缺分钟或同刻证据'}
 
 def _reason(text, incomplete_day):
