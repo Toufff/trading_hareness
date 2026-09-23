@@ -12,7 +12,10 @@ publisher reran backend 3350 passed / 130 skipped / 939 subtests, frontend
 readback at 11:53: owner API and dashboard adapter healthy, shared/remote
 checks all green, focus GET through both owner and adapter shows `002315.SZ`
 焦点科技 focused until 15:05; advisory runtime reports one manual focus and no
-last error. Licensed Longhu tape for the symbol returned 121 rows, ending
+last error. The adapter's authenticated PUT was also exercised idempotently
+and read back. The 11:35 broker snapshot lists 1,800 shares; the 2026-09-23
+imported order-history timeline has zero executions, so exact new fill price,
+time and fees remain unverified. Licensed Longhu tape returned 121 rows, ending
 11:30, with no true minute high/low. A read-only replay of the released
 indicator implementation on 120 completed rows at 11:29 returned `sideways`.
 During lunch the live focus technical status is `pending`; no afternoon live
