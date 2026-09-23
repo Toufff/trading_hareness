@@ -32,6 +32,7 @@ foreach ($expected in @(
     Assert-True ($settings -contains $expected) "the managed configuration must set `"$expected`""
 }
 # Windows PostgreSQL has no posix_fadvise(): a non-zero value stops the server.
+Assert-True ((Get-StockPlatformManagedSettings -Port 55432 -LogDirectory 'G:\StockPlatform\logs' -MaxConnections 128) -contains 'max_connections = 128') 'an explicit tested connection budget must reach the generated settings'
 Assert-True ($text -notmatch 'effective_io_concurrency = [1-9]') 'effective_io_concurrency must stay 0 on Windows'
 # One assignment per setting, or the last silently wins in the running server.
 $assigned = $settings | Where-Object { $_ -match '^\s*([a-z_]+)\s*=' } | ForEach-Object { ($_ -split '=', 2)[0].Trim() }
@@ -84,10 +85,18 @@ try {
     $clusterConf = Join-Path $fakeData 'postgresql.conf'
     [IO.File]::WriteAllLines($clusterConf, @('# stock cluster', "max_connections = 100"), [Text.UTF8Encoding]::new($false))
     $managedPath = Join-Path $sandbox 'postgresql-stock-platform.conf'
+    Set-StockPlatformEnvValue -Path (Join-Path $sandbox 'runtime.env') -Name 'STOCK_PG_MAX_CONNECTIONS' -Value '128'
     $first = Write-StockPlatformManagedConfig -DataDirectory $fakeData -ManagedConfigPath $managedPath -Port 55432 -LogDirectory (Join-Path $sandbox 'logs')
     Assert-True (-not $first.include_already_present) 'the first generation must append the include line'
+    Assert-True (([IO.File]::ReadAllText($managedPath)) -match 'max_connections = 128') 'the adjacent private runtime env must control the generated connection budget'
     $second = Write-StockPlatformManagedConfig -DataDirectory $fakeData -ManagedConfigPath $managedPath -Port 55432 -LogDirectory (Join-Path $sandbox 'logs')
     Assert-True ($second.include_already_present) 're-generating must reuse the existing include line'
+    Set-StockPlatformEnvValue -Path (Join-Path $sandbox 'runtime.env') -Name 'STOCK_PG_MAX_CONNECTIONS' -Value 'invalid'
+    $invalidBudgetRejected = $false
+    try { [void](Write-StockPlatformManagedConfig -DataDirectory $fakeData -ManagedConfigPath $managedPath -Port 55432 -LogDirectory (Join-Path $sandbox 'logs')) } catch { $invalidBudgetRejected = $true }
+    Assert-True $invalidBudgetRejected 'an invalid connection budget must be rejected before rewriting the managed file'
+    Assert-True (([IO.File]::ReadAllText($managedPath)) -match 'max_connections = 128') 'invalid input must not overwrite the last good managed file'
+    Set-StockPlatformEnvValue -Path (Join-Path $sandbox 'runtime.env') -Name 'STOCK_PG_MAX_CONNECTIONS' -Value '128'
     $includeLines = @([IO.File]::ReadAllLines($clusterConf) | Where-Object { $_ -match '^include_if_exists' })
     Assert-True ($includeLines.Count -eq 1) 'the cluster configuration must carry exactly one include line'
     Assert-True (@([IO.File]::ReadAllLines($managedPath)).Count -eq $settings.Count) 'the generated file must hold every managed setting'

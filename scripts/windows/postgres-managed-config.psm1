@@ -122,8 +122,10 @@ function Get-StockPlatformManagedSettings {
     #>
     param(
         [Parameter(Mandatory)][int]$Port,
-        [Parameter(Mandatory)][string]$LogDirectory
+        [Parameter(Mandatory)][string]$LogDirectory,
+        [int]$MaxConnections = 100
     )
+    if ($MaxConnections -lt 1) { throw 'MaxConnections must be positive' }
     $logPath = ([IO.Path]::GetFullPath($LogDirectory)).Replace('\', '/')
     return [string[]]@(
         "listen_addresses = '127.0.0.1'"
@@ -131,9 +133,10 @@ function Get-StockPlatformManagedSettings {
         # Operational budget, not a hardware ceiling. A 2026-09-23 isolated
         # PostgreSQL 16.15 / 4 GB shared_buffers probe sustained 224 read
         # clients with zero failures; the useful throughput knee was near 64.
-        # 100 leaves room for the owner's 20-slot async pool, peer pools and
-        # scheduled jobs without declaring 224 a safe production workload.
-        'max_connections = 100'
+        # 100 is the fallback operating budget. A validated operator value
+        # from adjacent runtime.env can raise it after workload acceptance;
+        # neither value is a claim of a physical PostgreSQL ceiling.
+        "max_connections = $MaxConnections"
         # Windows refuses large shared segments long before the box runs out of
         # RAM ("could not reserve shared memory region", error 487, already
         # ~83/day at 4GB); keep the value and let the OS file cache do the rest.
@@ -188,7 +191,17 @@ function Write-StockPlatformManagedConfig {
         [Parameter(Mandatory)][int]$Port,
         [Parameter(Mandatory)][string]$LogDirectory
     )
-    $settings = Get-StockPlatformManagedSettings -Port $Port -LogDirectory $LogDirectory
+    $runtimeEnv = Join-Path (Split-Path -Parent $ManagedConfigPath) 'runtime.env'
+    $runtimeConfig = Read-StockPlatformEnvFile -Path $runtimeEnv
+    $maxConnections = 100
+    if ($runtimeConfig.ContainsKey('STOCK_PG_MAX_CONNECTIONS') -and
+        -not [string]::IsNullOrWhiteSpace([string]$runtimeConfig['STOCK_PG_MAX_CONNECTIONS'])) {
+        $raw = ([string]$runtimeConfig['STOCK_PG_MAX_CONNECTIONS']).Trim()
+        if (-not [int]::TryParse($raw, [ref]$maxConnections) -or $maxConnections -lt 1) {
+            throw "STOCK_PG_MAX_CONNECTIONS must be a positive integer, got '$raw'"
+        }
+    }
+    $settings = Get-StockPlatformManagedSettings -Port $Port -LogDirectory $LogDirectory -MaxConnections $maxConnections
     [IO.File]::WriteAllLines($ManagedConfigPath, $settings, [Text.UTF8Encoding]::new($false))
     $includeLine = "include_if_exists = '$($ManagedConfigPath.Replace('\', '/'))'"
     $postgresConfig = Join-Path $DataDirectory 'postgresql.conf'
