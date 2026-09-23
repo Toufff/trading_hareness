@@ -892,7 +892,7 @@ export interface paths {
         };
         /**
          * Post Close Watchlist
-         * @description Small holdings-independent watchlist for human decision surfaces.
+         * @description Current research watchlist, including a published noon decision.
          */
         get: operations["post_close_watchlist_api_v1_strategy_post_close_watchlist_latest_get"];
         put?: never;
