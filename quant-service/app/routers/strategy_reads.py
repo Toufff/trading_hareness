@@ -93,12 +93,15 @@ def build_strategy_reads_router(database: Any, decision_model_version: str, asyn
 
     @router.get("/api/v1/strategy/post-close/watchlist/latest")
     async def post_close_watchlist(limit: int = 16) -> dict[str, Any]:
-        """Small holdings-independent watchlist for human decision surfaces."""
+        """Current research watchlist, including a published noon decision."""
+        from ..recommendation_pool.read_model import active_noon, active_noon_async, watchlist_payload
         if async_database is not None:
-            payload = await latest_post_close_strategy(async_database)
+            noon_row = await active_noon_async(async_database)
+            payload = watchlist_payload(noon_row) if noon_row else await latest_post_close_strategy(async_database)
             tracked = await async_intraday_watchlists(async_database)
         else:
-            payload = sync_latest_post_close_strategy(database)
+            noon_row = active_noon(database)
+            payload = watchlist_payload(noon_row) if noon_row else sync_latest_post_close_strategy(database)
             tracked = sync_intraday_watchlists(database)
         return compact_post_close_watchlist(payload, limit, user_tracking=tracked.get("items") or [])
 

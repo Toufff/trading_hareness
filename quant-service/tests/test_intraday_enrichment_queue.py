@@ -1,4 +1,4 @@
-from app.intraday_scan.enrichment import history_queue, minute_queue
+from app.intraday_scan.enrichment import history_queue, minute_queue, unavailable_priority
 
 
 def _lane(key, symbols):
@@ -42,3 +42,11 @@ def test_budget_shortfall_is_explicit_not_a_successful_coverage_receipt():
     queue, coverage = history_queue(scan, [], [], limit=1)
     assert queue == ["001232.SZ"]
     assert coverage["priority_missing"] == ["600001.SH"]
+
+
+def test_requested_priority_with_source_failure_is_not_counted_as_covered():
+    selection = {'priority_symbols': ['001232.SZ', '600001.SH']}
+    history = {'001232.SZ': [{}] * 40, '600001.SH': [{}] * 39}
+    assert unavailable_priority(selection, history, min_rows=40) == ['600001.SH']
+    minutes = {'001232.SZ': [{'time': '1130'}], '600001.SH': [{'time': '1129'}]}
+    assert unavailable_priority(selection, minutes, final_time='1130') == ['600001.SH']

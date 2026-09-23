@@ -24,6 +24,7 @@ def _allocate(priority, old, fallback, limit):
     return selected, {
         "budget": limit,
         "priority_total": len(set(priority)),
+        "priority_symbols": list(dict.fromkeys(priority)),
         "priority_missing": [symbol for symbol in dict.fromkeys(priority) if symbol not in included],
         "old_display_deferred": len(set(old) - included),
         "fallback_deferred": len(set(fallback) - included),
@@ -60,3 +61,13 @@ def minute_queue(lanes, seeds, *, limit=EVIDENCE_BUDGET):
     fallback = _round_robin([[row["symbol"] for row in lane.get("items", [])]
                              for lane in lanes])
     return _allocate([*live, *formal], old, fallback, limit)
+
+
+def unavailable_priority(selection, payload, *, min_rows=1, final_time=None):
+    """Report requested front names that still lack usable source evidence."""
+    missing = []
+    for symbol in selection['priority_symbols']:
+        rows = payload.get(symbol) or []
+        if len(rows) < min_rows or (final_time and rows[-1].get('time') != final_time):
+            missing.append(symbol)
+    return missing

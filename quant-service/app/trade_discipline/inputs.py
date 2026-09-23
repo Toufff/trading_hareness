@@ -342,7 +342,10 @@ def recommendation_note(connection: Any, symbol: str, at: datetime) -> dict[str,
     """The reviewed pool's note for ``symbol`` - context for the human, never a price source."""
     row = _one(connection, """
         SELECT decision_id,as_of_date,result FROM quant.recommendation_pool_decisions
-         WHERE created_at<=%s ORDER BY created_at DESC LIMIT 1""", (at,))
+          WHERE created_at<=%s AND result->>'status'='ready'
+            AND coalesce((result->>'sync_allowed')::boolean,false)
+            AND (result->>'valid_until')::timestamptz>%s
+          ORDER BY as_of_date DESC,created_at DESC,decision_id DESC LIMIT 1""", (at, at))
     if row is None:
         return None
     for item in (row.get("result") or {}).get("recommended") or []:

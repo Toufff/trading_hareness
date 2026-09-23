@@ -398,8 +398,11 @@ def recommendation_pool(connection: Any, now: datetime) -> dict[str, Any] | None
     """The platform's latest reviewed recommendation/observation pool available at ``now``."""
     row = connection.execute(
         """SELECT as_of_date,created_at,result FROM quant.recommendation_pool_decisions
-            WHERE created_at<=%s ORDER BY created_at DESC LIMIT 1""",
-        (now,),
+             WHERE created_at<=%s AND result->>'status'='ready'
+               AND coalesce((result->>'sync_allowed')::boolean,false)
+               AND (result->>'valid_until')::timestamptz>%s
+             ORDER BY as_of_date DESC,created_at DESC,decision_id DESC LIMIT 1""",
+        (now, now),
     ).fetchone()
     if row is None:
         return None

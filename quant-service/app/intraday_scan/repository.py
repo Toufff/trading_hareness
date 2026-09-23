@@ -63,8 +63,8 @@ def seeds(database,day,cutoff):
             WHERE cutoff<%s AND cutoff>=%s AND state='completed'
             ORDER BY cutoff DESC,created_at DESC LIMIT 1''',(cutoff,day-timedelta(days=4))).fetchone()
         formal=c.execute('''SELECT result FROM quant.recommendation_pool_decisions
-            WHERE as_of_date<%s AND created_at<=%s AND result->>'status'='ready'
-              AND (result->>'valid_until')::timestamptz>=%s
+            WHERE as_of_date<=%s AND created_at<=%s AND result->>'status'='ready'
+              AND (result->>'valid_until')::timestamptz>%s
             ORDER BY as_of_date DESC,created_at DESC,decision_id DESC LIMIT 1''',
             (day,cutoff,cutoff)).fetchone()
     result={};baseline={}

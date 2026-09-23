@@ -79,6 +79,33 @@ def test_union_keeps_beyond_top_five_and_no_chat_required():
     assert b == compile_decision(deepcopy(c), deepcopy(r))
 
 
+def test_noon_recommendation_requires_fresh_minute_and_daily_evidence():
+    scan, _, _, review_item = fixture()
+    context = intake(scan, 'noon-run', {'推荐': ['9'], '观察': ['9', 'retained']},
+                     ['retained'], '2026-09-14', source_kind='noon',
+                     source_cutoff='2026-09-14T11:30:00+08:00',
+                     evidence_eligibility={'8': {'ready': False, 'gaps': ['minute_1130_missing']}})
+    item = review_item('8', 'recommend')
+    item['recommendation_note'] = note(context, '8')
+    item['evidence_available_at'] = '2026-09-14T12:00:00+08:00'
+    other = [review_item('0'), review_item('9')]
+    review = {'author': 'reviewer', 'market_assessment': 'mixed',
+              'reviewed_at': '2026-09-14T12:10:00+08:00',
+              'context_hash': context['context_hash'], 'items': [*other, item]}
+    blocked = compile_decision(context, review)
+    assert blocked['status'] == 'partial'
+    assert 'minute_1130_missing' in blocked['coverage']['errors']['8']
+    context['evidence_eligibility']['8'] = {'ready': True, 'gaps': []}
+    context['context_hash'] = digest({k: v for k, v in context.items() if k != 'context_hash'})
+    review['context_hash'] = context['context_hash']
+    accepted = compile_decision(context, review)
+    assert accepted['status'] == 'ready'
+    assert accepted['source_kind'] == 'noon'
+    assert accepted['valid_until'] == '2026-09-14T15:00:00+08:00'
+    item['evidence_available_at'] = '2026-09-14T12:11:00+08:00'
+    assert 'noon_company_evidence_time_invalid' in compile_decision(context, review)['coverage']['errors']['8']
+
+
 def test_old_recommendation_must_be_reviewed_and_errors_are_localized():
     _, c, r, _ = fixture()
     r['items'][2]['data_date'] = '2026-09-13'

@@ -8,7 +8,7 @@ type Note = { rank_assessment: string; entry_reason: string; priority_reason: st
 type PeerFact = { symbol: string; name?: string; scope?: string; sector_label?: string; sector_position?: number; best_lane?: string; best_rank?: number; best_population?: number; metrics?: Record<string, number | null> };
 type SectorOverview = { label?: string; members?: number; up_fraction?: number; return10_median?: number; recent_breadth?: number; breadth_acceleration?: number; flow_3d?: number; relative_strength?: string };
 type RankingReference = { lane_rankings: { lane: string; rank: number; population: number }[]; sector_label?: string; sector_position?: number; sector_candidates: number; outranked_count?: number; required_peers?: PeerFact[]; sector_overview?: SectorOverview | null; market?: { median_return10?: number; up_fraction?: number } };
-type Decision = { status: string; decision_id?: string; as_of_date?: string; market_assessment?: string; notice?: string; recommended?: Pick[]; coverage?: { candidates: number; reviewed: number; missing: string[]; errors?: Record<string,string> }; reviewed?: (Pick & { decision: string })[] };
+type Decision = { status: string; decision_id?: string; as_of_date?: string; source_kind?: string; source_cutoff?: string; valid_until?: string; market_assessment?: string; notice?: string; recommended?: Pick[]; coverage?: { candidates: number; reviewed: number; missing: string[]; errors?: Record<string,string> }; reviewed?: (Pick & { decision: string })[] };
 const props = defineProps<{ value?: unknown }>();
 const decision = computed(() => props.value as Decision | undefined);
 const stageNames: Record<string,string> = { accumulation: '横盘潜伏', initial_breakout: '初步启动', strong_pullback: '强势回踩', post_limit: '涨停后承接', other: '其他观察' };
@@ -44,7 +44,7 @@ const download = () => {
 </script>
 <template>
   <section class="recommendation-decision" aria-label="正式推荐决策" :data-decision-id="decision?.decision_id">
-    <header><div><h2>本轮重点与观察</h2><p>与持仓独立 · 来自同一份正式决策，不按聊天记录拼名单</p></div><button v-if="decision?.decision_id" @click="download">下载决策凭据</button></header>
+    <header><div><h2>本轮重点与观察</h2><p>{{ decision?.source_kind === 'noon' ? `午盘决策 · 行情截至 ${decision.source_cutoff || '11:30'} · 当日 15:00 到期` : '盘后决策' }} · 与持仓独立</p></div><button v-if="decision?.decision_id" @click="download">下载决策凭据</button></header>
     <p v-if="decision?.status !== 'ready'" role="status" class="warning">{{ decision?.notice || '本轮推荐决策尚未发布；下面的策略名单仅为扫描候选。' }}</p>
     <template v-if="decision?.decision_id">
       <p v-if="decision.coverage?.missing?.length" class="warning">本轮必核缺项：{{ decision.coverage.missing.join('、') }}。有效研究仍展示，不能据此覆盖完整推荐组。</p>

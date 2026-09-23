@@ -168,14 +168,16 @@ def markdown(bundle, scan=None, names=None):
     resolved = _stock_names(bundle, scan, names)
     coverage = bundle.get('coverage') or {}
     target = bundle.get('target_groups') or {}
-    lines = [f"# {bundle['as_of_date']} 盘后总扫描与推荐池更新", '', '## 一眼结论', '',
+    session = '午盘' if bundle.get('source_kind') == 'noon' else '盘后'
+    lines = [f"# {bundle['as_of_date']} {session}总扫描与推荐池更新", '', '## 一眼结论', '',
              bundle['market_assessment'], '',
              f"- 总扫描：九套策略已运行，形成 {coverage.get('candidates', '—')} 只去重候选；"
              f"深入复核 {coverage.get('reviewed', '—')} 只。",
              f"- 推荐池：{bundle['status']}；推荐 {len(target.get('推荐') or [])} 只，"
              f"观察 {len(target.get('观察') or [])} 只；决策编号 `{bundle['decision_id']}`。", '']
-    lines += _pool_change_lines(bundle, resolved)
-    lines += ['', *_scan_lines(scan), '## 本轮重点', '']
+    if bundle.get('source_kind') == 'noon':
+        lines += [f"- 午盘行情截止：{bundle.get('source_cutoff')}；本决定有效至当日 15:00，下午行情变化需重新核对。", '']
+    lines += ['## 本轮重点', '']
     for item in bundle['recommended']:
         lines += [f"### {item['priority']}. {item['name']}（{item['symbol'].split('.')[0]}）", '',
                   f"所属行业：{item.get('sector') or '本轮未登记'}。", '',
@@ -184,6 +186,8 @@ def markdown(bundle, scan=None, names=None):
                   f"同类比较：{item['peer_comparison']}", '', f"观察触发：{item['trigger']}", '',
                   f"取消条件：{item['invalidation']}", '', f"公司风险：{item['company_risk']}", '']
         lines += _recommendation_note_lines(item, resolved)
+    lines += _pool_change_lines(bundle, resolved)
+    lines += ['', *_scan_lines(scan)]
     lines += ['## 其余完成复核的结论', '']
     for item in bundle['reviewed']:
         if item['decision'] != 'recommend':

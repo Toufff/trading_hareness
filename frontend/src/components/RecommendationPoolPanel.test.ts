@@ -17,4 +17,12 @@ describe('formal recommendation panel', () => {
     await w.setProps({value:{...value,status:'stale',notice:'历史推荐不能同步'}});
     expect(w.find('[role="status"]').text()).toContain('历史推荐不能同步');
   });
+  it('labels a noon decision with its evidence cutoff and expiry', () => {
+    const w = mount(Panel, {props:{value:{status:'ready',decision_id:'noon-1',
+      source_kind:'noon',source_cutoff:'2026-09-23T11:30:00+08:00',
+      valid_until:'2026-09-23T15:00:00+08:00',recommended:[]}}});
+    expect(w.text()).toContain('午盘决策');
+    expect(w.text()).toContain('2026-09-23T11:30:00+08:00');
+    expect(w.text()).toContain('15:00 到期');
+  });
 });

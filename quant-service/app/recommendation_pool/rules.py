@@ -76,7 +76,8 @@ def scan_hash(scan):
     return digest(_scan_evidence(scan))
 
 
-def intake(scan, run_id, groups, user_tracking=(), next_session=None):
+def intake(scan, run_id, groups, user_tracking=(), next_session=None, *,
+           source_kind='post_close', source_cutoff=None, evidence_eligibility=None):
     if scan.get('status') != 'completed' or not scan.get('as_of_date'):
         raise ValueError('scan_not_completed')
     rows, required = {}, set(groups.get('推荐', []))
@@ -104,6 +105,8 @@ def intake(scan, run_id, groups, user_tracking=(), next_session=None):
     rows = sorted(rows.values(), key=lambda r: (r['symbol'] not in required, min((m['rank'] for m in r['memberships']), default=9999), r['symbol']))
     context = {'version': VERSION, 'run_id': str(run_id), 'as_of_date': scan['as_of_date'], 'scan_hash': scan_hash(scan),
                'valid_until': str(next_session) + 'T15:00:00+08:00' if next_session else None,
+               'source_kind': source_kind, 'source_cutoff': source_cutoff,
+               'evidence_eligibility': evidence_eligibility or {},
                'baseline': {g: sorted(set(groups.get(g, []))) for g in ('推荐', '观察')},
                'user_tracking': sorted(set(user_tracking)), 'market': scan.get('market'), 'settings': scan.get('settings'),
                'sector_overview': scan.get('sector_overview') or {},
@@ -420,6 +423,11 @@ def compile_decision(context, review):
         raise ValueError('review_for_different_context')
     if not review.get('author') or not review.get('market_assessment'):
         raise ValueError('author_and_market_assessment_required')
+    if context.get('source_kind') == 'noon':
+        cutoff = datetime.fromisoformat(context['source_cutoff'])
+        reviewed_at = datetime.fromisoformat(review.get('reviewed_at', ''))
+        if reviewed_at.tzinfo is None or reviewed_at < cutoff:
+            raise ValueError('noon_review_time_invalid')
     rows = {r['symbol']: r for r in context['candidates']}
     decisions, errors = {}, {}
     for item in review.get('items', []):
@@ -438,6 +446,13 @@ def compile_decision(context, review):
                 if not str(src.get('url', '')).startswith('https://') or not src.get('published_date') or src['published_date'] > context['as_of_date']:
                     raise ValueError('invalid_source_date')
             if item['decision'] == 'recommend':
+                if context.get('source_kind') == 'noon':
+                    status = (context.get('evidence_eligibility') or {}).get(s) or {}
+                    if not status.get('ready'):
+                        raise ValueError('noon_market_evidence_incomplete:' + ','.join(status.get('gaps') or ['missing_stock_evidence']))
+                    evidence_at = datetime.fromisoformat(item.get('evidence_available_at', ''))
+                    if evidence_at.tzinfo is None or evidence_at > reviewed_at:
+                        raise ValueError('noon_company_evidence_time_invalid')
                 if not item.get('trigger') or not item.get('peer_comparison'):
                     raise ValueError('recommendation_requires_trigger_and_peer_comparison')
                 if not isinstance(item.get('priority'), int) or item['priority'] < 1:
@@ -475,6 +490,8 @@ def compile_decision(context, review):
     ready = not errors and not missing
     result = {'version': VERSION, 'run_id': context['run_id'], 'as_of_date': context['as_of_date'],
               'valid_until': context.get('valid_until'),
+              'source_kind': context.get('source_kind', 'post_close'),
+              'source_cutoff': context.get('source_cutoff'),
               'scan_hash': context['scan_hash'], 'context_hash': context['context_hash'], 'baseline': context['baseline'],
               'status': 'ready' if ready else 'partial', 'sync_allowed': ready, 'research_only': True,
               'author': review['author'], 'market_assessment': review['market_assessment'],

@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import json
 import logging
 from . import engine, repository, reports, source
-from .enrichment import EVIDENCE_BUDGET, history_queue, minute_queue
+from .enrichment import EVIDENCE_BUDGET, history_queue, minute_queue, unavailable_priority
 from .rules import digest, validate_minute_health
 
 
@@ -52,7 +52,9 @@ def run(database, output_root):
             queue,max_symbols=EVIDENCE_BUDGET)
         data['ohlc_captured_at'] = datetime.now(now.tzinfo).isoformat()
         data['price_histories'],data['history_health']=merge(data['price_histories'],data['quote_snapshots'],
-                                                          data['cutoff'],data['ohlc_captured_at'])
+                                                            data['cutoff'],data['ohlc_captured_at'])
+        history_coverage['priority_unavailable'] = unavailable_priority(
+            history_coverage, data['price_histories'], min_rows=40)
         data['history_health']['selection'] = history_coverage
         data['observed_at'] = data['ohlc_captured_at']
         progress('formal_enriched'); preliminary = engine.formal(data)
@@ -64,6 +66,9 @@ def run(database, output_root):
             raise ValueError('minute_priority_budget_exceeded:' + ','.join(minute_coverage['priority_missing']))
         progress('minutes'); data['minutes'], errors = source.fetch_minutes(chosen, cutoff)
         validate_minute_health(data['minutes'], errors)
+        hhmm = cutoff.strftime('%H%M')
+        minute_coverage['priority_unavailable'] = unavailable_priority(
+            minute_coverage, data['minutes'], final_time=hhmm)
         data['minute_health'] = dict(requested=len(chosen), received=len(data['minutes']), errors=errors,
                                      selection=minute_coverage)
         data['observed_at'] = datetime.now(now.tzinfo).isoformat(); data['implementation_hash'] = engine.implementation_hash()

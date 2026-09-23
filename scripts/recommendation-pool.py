@@ -20,6 +20,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('command', choices=['prepare', 'publish', 'plan'])
     p.add_argument('--date', required=True)
+    p.add_argument('--intraday-run-id', help='Use an exact 11:30 intraday scan for the noon decision')
     p.add_argument('--snapshot', type=Path)
     p.add_argument('--directory', type=Path, required=True)
     p.add_argument('--review', type=Path)
@@ -35,13 +36,18 @@ def main():
     from app.recommendation_pool.rules import intake, sync_plan, current_view, note_template
     from app.recommendation_pool.repository import latest_target_groups, persist
     from app.recommendation_pool.report import markdown
+    from app.recommendation_pool import noon
     db = Database()
     try:
-        payload = latest_post_close_strategy(db, a.date)
-        run = payload.get('latest_completed') or {}
-        scan = (run.get('summary') or {}).get('strategy_lanes') or {}
-        if str(run.get('as_of_date')) != a.date or scan.get('status') != 'completed':
-            raise ValueError('no_completed_exact_date_scan')
+        if a.intraday_run_id:
+            scan, intraday_result, _, eligibility, cutoff = noon.load(db, a.intraday_run_id, a.date)
+            run = {'run_id': a.intraday_run_id, 'as_of_date': a.date}
+        else:
+            payload = latest_post_close_strategy(db, a.date)
+            run = payload.get('latest_completed') or {}
+            scan = (run.get('summary') or {}).get('strategy_lanes') or {}
+            if str(run.get('as_of_date')) != a.date or scan.get('status') != 'completed':
+                raise ValueError('no_completed_exact_date_scan')
         groups = {}
         if a.snapshot:
             receipt = json.loads(a.snapshot.read_text(encoding='utf-8-sig'))
@@ -54,11 +60,18 @@ def main():
             if not a.snapshot:
                 groups = latest_target_groups(db, a.date)
             tracked = [r['symbol'] for r in watchlists(db).get('items', []) if any(t.get('source') == 'user' and t.get('active') is not False for t in (r.get('metadata') or {}).get('tracking_tags', []))]
-            with db.transaction() as c:
-                nxt = c.execute("SELECT min(calendar_date) AS day FROM quant.market_trade_calendar WHERE exchange='SSE' AND is_open AND calendar_date>%s", (a.date,)).fetchone()
-            if not nxt or not nxt['day']:
-                raise ValueError('next_trading_session_missing')
-            context = intake(scan, run['run_id'], groups, tracked, nxt['day'])
+            if a.intraday_run_id:
+                next_session = a.date
+            else:
+                with db.transaction() as c:
+                    nxt = c.execute("SELECT min(calendar_date) AS day FROM quant.market_trade_calendar WHERE exchange='SSE' AND is_open AND calendar_date>%s", (a.date,)).fetchone()
+                if not nxt or not nxt['day']:
+                    raise ValueError('next_trading_session_missing')
+                next_session = nxt['day']
+            context = intake(scan, run['run_id'], groups, tracked, next_session,
+                             source_kind='noon' if a.intraday_run_id else 'post_close',
+                             source_cutoff=cutoff.isoformat() if a.intraday_run_id else None,
+                             evidence_eligibility=eligibility if a.intraday_run_id else None)
             write(a.directory / 'context.json', context)
             # The agent should spend its attention answering, not transcribing
             # ranks the scan already knows.  Every required review arrives as a
@@ -72,8 +85,12 @@ def main():
                       'sector': '', 'trigger': '', 'peer_comparison': '', 'sources': [],
                       'recommendation_note': notes[symbol]}
                      for symbol in context['required_reviews']]
+            if a.intraday_run_id:
+                for item in items:
+                    item['evidence_available_at'] = ''
             write(a.directory / 'review-template.json', {'context_hash': context['context_hash'], 'author': '',
-                                                         'market_assessment': '', 'attention_budget': 5, 'items': items})
+                                                         'market_assessment': '', 'reviewed_at': '' if a.intraday_run_id else None,
+                                                         'attention_budget': 5, 'items': items})
             write(a.directory / 'note-templates.json', notes)
             print(json.dumps({'context_hash': context['context_hash'], 'candidate_count': context['candidate_count'],
                               'required_reviews': context['required_reviews'],
@@ -85,7 +102,13 @@ def main():
                 raise ValueError('review_required')
             context = json.loads((a.directory / 'context.json').read_text(encoding='utf-8'))
             review = json.loads(a.review.read_text(encoding='utf-8-sig'))
-            bundle = persist(db, context, review)
+            bundle = noon.persist(db, context, review) if a.intraday_run_id else persist(db, context, review)
+            if a.intraday_run_id:
+                write(a.directory / 'decision.json', bundle)
+                write(a.directory / '推荐决策.md', markdown(bundle, scan))
+                print(json.dumps({'decision_id': bundle['decision_id'], 'status': bundle['status'],
+                                  'coverage': bundle['coverage'], 'source_kind': 'noon'}, ensure_ascii=False))
+                return 0 if bundle['sync_allowed'] else 2
             # Persist() enriches the existing same-run strategy publication
             # with this exact company research. Re-read it instead of using
             # the pre-publish snapshot held above.
@@ -126,7 +149,14 @@ def main():
         else:
             if not a.snapshot:
                 raise ValueError('fresh_ths_snapshot_required')
-            bundle = run['summary'].get('recommendation_pool') or {}
+            if a.intraday_run_id:
+                with db.transaction() as c:
+                    row = c.execute('''SELECT result FROM quant.recommendation_pool_decisions
+                        WHERE intraday_run_id=%s ORDER BY created_at DESC LIMIT 1''',
+                        (a.intraday_run_id,)).fetchone()
+                bundle = (row or {}).get('result') or {}
+            else:
+                bundle = run['summary'].get('recommendation_pool') or {}
             bundle = current_view(scan, bundle)
             plan = sync_plan(bundle, groups)
             write(a.directory / 'ths-plan.json', plan)

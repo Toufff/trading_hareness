@@ -5,21 +5,21 @@
 ## 单一产物与模块
 
 - `app/recommendation_pool/rules.py`：完整候选并集、旧推荐必核、用户跟踪、确定性编译、有效期和最小差异。其最低公司研究覆盖与九策略共用 `short_term_lanes.research_queue`，不另造一套首位规则。
-- `repository.py`：G盘PostgreSQL的`recommendation_pool_decisions`追加式版本，冻结context、review、result。相同输入幂等；实际扫描变化拒绝发布。发布时将已完成的推荐研究同步写入公司证据账本，并在不改变扫描哈希的前提下刷新同轮策略报告。
-- `report.py` / `RecommendationPoolPanel.vue`：读取同一个result，不重排；Markdown 先展示九策略总扫描和内部推荐/观察池的前后差异，再展示逐股研究；网页位于收盘复盘的多策略报告首屏。
+- `repository.py`与`noon.py`：G盘PostgreSQL的`recommendation_pool_decisions`追加式版本，分别绑定已结算盘后run_id或精确11:30的intraday_run_id（数据库约束仅允许二选一），冻结context、review、result。相同输入幂等；实际扫描变化拒绝发布。发布时将已完成的推荐研究同步写入公司证据账本。
+- `report.py` / `RecommendationPoolPanel.vue`：读取同一个result，不重排；Markdown 先给推荐重点和操作条件，再给池子变化、九策略和元数据。午盘网页投影在当日15:00前优先显示午盘决定，盘后显示已结算决定。
 - `projection_guard.py`：同花顺执行前读取当前正式结果，检查决策编号、动作完全一致以及用户并发修改。仅推荐、观察可被策略刷新修改；行业/ETF不在其动作域。
 - `followup.py`：将实际推荐及未选对照注册到既有前瞻观察账本；真实登记时间不回填成收盘前已推荐，日线跟踪不是实际交易收益。
 
 ## 使用
 
-使用生产`G:/StockPlatform/current/.venv/Scripts/python.exe`和同目录`scripts/recommendation-pool.py`。环境从外部runtime.env读取，不复制密钥。调用前使用ths-watchlist读取当前云端快照。
+使用生产`G:/StockPlatform/current/.venv/Scripts/python.exe`和同目录`scripts/recommendation-pool.py`。环境从外部runtime.env读取，不复制密钥。内部决策不依赖同花顺登录；只有用户要求外部自选同步时才需读取THS云端快照。
 
-1. `prepare --date YYYY-MM-DD --snapshot <本次THS回执> --directory <G盘本轮目录>`：保存context与已预填的review模板。读取的是完整tracking_candidates，而不是展示top5；包括旧推荐、观察、用户跟踪。市场/参数/完整名单有输入hash。同时写出：
+1. `prepare --date YYYY-MM-DD --directory <G盘本轮目录>`：盘后模式。午盘模式额外加`--intraday-run-id <11:30运行ID>`。保存context与已预填的review模板。读取的是完整tracking_candidates，而不是展示top5；包括旧推荐、观察、用户跟踪。市场/参数/完整名单有输入hash。同时写出：
    - `review-template.json`：`items` 为每个 `required_reviews` 生成骨架（编辑字段留空、`decision` 为空串，`data_date`/`name` 由系统填好），并附 `recommendation_note` 模板；
    - `note-templates.json`：`{symbol: note_template}`，覆盖**全部**候选，临时提拔某只股票不需要重跑 prepare。
    回执打印 `review_template_items`、`note_templates`、`sector_overview_sectors` 计数。
 2. 对完整并集做量价/板块比较，再实际调查优先挑战者和全部必核项。填写review.json。不能将“未复核”伪写为排除。优先序是有署名的研究判断，不伪称量化最优。
-3. `publish --date ... --directory ... --review ...`：逐股校验并追加保存，写decision.json、推荐决策.md；Markdown 是同一轮扫描+池子差异的总交付，不再要求读者手工拼接两个文件。真实登记前瞻跟踪。部分研究有效仍保留展示，缺少旧推荐复核时禁止整体覆盖THS，明确指出股票及字段。
+3. `publish --date ... --directory ... --review ...`：午盘模式保持同一`--intraday-run-id`，逐股校验并追加保存，写decision.json、推荐决策.md；Markdown 是同一轮扫描+池子差异的总交付。盘后模式真实登记前瞻跟踪并刷新同轮策略报告；午盘模式保留原扫描不可变，只以正式决定独立投影。部分研究有效仍保留展示，缺少旧推荐复核时禁止整体覆盖THS，明确指出股票及字段。
 4. 用户有自选同步授权时，重新snapshot，再`plan --date ... --directory ... --snapshot ...`生成ths-plan.json。只能将此计划交给ths-watchlist预演/apply；不手写策略推荐差异。
 5. 比对DB/owner/adapter/public的decision_id、报告和THS云端成员、远航版两份缓存。云端和缓存不证明手机UI；不要声称手机验收。
 
@@ -27,7 +27,7 @@
 
 ## review.json合同
 
-根字段：context_hash、author、market_assessment、attention_budget（人工阅读上限，默认5，不是组合仓位规则）、items。
+根字段：context_hash、author、market_assessment、attention_budget（人工阅读上限，默认5，不是组合仓位规则）、items。午盘另须`reviewed_at`，不得早于11:30截点或晚于实际审核时间；每只午盘推荐须填`evidence_available_at`并保证不晚于审核时间。午盘推荐还须通过当轮分钟、日K和状态证据门槛，15:00后不能补发为午盘决定。
 
 每股：symbol、name、data_date、decision（recommend/observe/exclude）、stage（accumulation/initial_breakout/strong_pullback/post_limit/other）、why_now、comparison、invalidation、business、company_risk、sector_assessment、sources（url,published_date）。
 推荐另需priority（不重复的编辑顺序）、trigger、peer_comparison、sector；同板块多只需same_sector_reason，不机械一板块一只。`display_observation:true`才把普通研究对象新增到THS观察，避免研究越多前台越臃肿。
