@@ -77,5 +77,50 @@ connection headroom, or error rates regress.
 
 ## Production result
 
-Pending deployment and live readback. Do not cite this section as acceptance
-until it is updated with the release ID, test results and recovery evidence.
+Release `20260923T184812-4635adb9a39a-clean` was published from commit
+`4635adb9a39ae173fa2b71acbc15fc5129a8feb1` after the normal release gates
+(3372 backend tests passed, 130 skipped; 145 frontend tests passed; typecheck,
+build and Windows storage-wiring checks passed). The managed PostgreSQL config
+was backed up in the private `G:\StockPlatform\config` directory before a
+controlled after-close restart. Live SQL readback returned
+`max_connections=100`; the owner `/health` endpoint returned `status=ok`,
+`async_database_pool.min_size=2` and `max_size=20` after its targeted restart.
+
+The production `/api/v1/data-readiness/features` route uses the native async
+read pool. Three waves of 20, 40 and 20 simultaneous GETs returned 80/80 HTTP
+200. Their P95 latencies were 401, 437 and 261 ms respectively; the 40-way
+wave grew the observed pool to 13 without a waiter. A separate 24-client
+read-only `pg_sleep(1.5)` probe on the running production database moved
+observed sessions from 49 to a peak of 73, completed 24/24, and returned to
+49 afterward. This proves the live cluster accepts more than the former 50
+configured slots; it does not authorize 73 expensive queries as a normal load.
+
+An additional **100-way burst did not pass**: 78 HTTP 200 and 22 HTTP 500.
+The pool reached its configured 20 connections, while its separate hardcoded
+`max_waiting=64` guard raised `psycopg_pool.TooManyRequests` for the excess
+arrivals. The failure was not PostgreSQL's 100-connection setting. A follow-up
+40-way wave returned 40/40 HTTP 200 (P95 272 ms), and the owner remained
+healthy. Consequently, this release is accepted for the requested 20 active
+async database lanes and measured 40-way short-read bursts, **not** for
+100-way simultaneous arrival or unbounded queuing. The `TooManyRequests` to
+HTTP 500 mapping should be improved separately if that arrival rate becomes a
+supported workload.
+
+The shared-runtime verifier returned `status=verified` after the restart:
+remote owner and peer API checks were both HTTP 200, with all three reverse
+tunnel ports present. It also printed one transient `curl` 10-second timeout
+while completing its other probes, so the peer path has not been certified
+latency-free. A final verifier run after the 100-way burst returned
+`status=verified` and both remote APIs HTTP 200 without that timeout.
+PostgreSQL logged no connection-slot exhaustion or temporary
+files during the acceptance window. It did continue to log Windows shared-
+memory reservation error 487 twice after the restart; the same log contained
+75 such events before the restart while the cap was still 50. That pre-existing
+host-level issue is not evidence that the new cap caused it and deserves its
+own investigation. A peer scheduler's recurring missing `known_at` column
+error is likewise outside this connection-capacity change.
+
+The prior managed PostgreSQL config and exact pre-change owner runtime env
+remain in private `G:\StockPlatform\config` as rollback materials. Neither
+contains evidence suitable for source control because the env file includes
+secrets.
