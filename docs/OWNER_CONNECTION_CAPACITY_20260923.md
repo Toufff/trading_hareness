@@ -124,3 +124,78 @@ The prior managed PostgreSQL config and exact pre-change owner runtime env
 remain in private `G:\StockPlatform\config` as rollback materials. Neither
 contains evidence suitable for source control because the env file includes
 secrets.
+
+## 2026-09-23 follow-up: highest accepted owner setting
+
+The 20-lane acceptance above was not a maximum-capacity test. The owner was
+subsequently tested in 24, 32, 40, 44, 46, 47, 48, 56, 60 and 64 lane stages,
+with a restart and live `/health` readback for each configured stage. The
+production version is now `20260923T195848-03e2ddf5db0b-clean`. It includes
+the cold-start queue fix from `2d169ee8485b5dd2bec60cdf641c848d9efeeaba`:
+the bounded async wait queue defaults to 128 and can be changed with
+`QUANT_ASYNC_READ_POOL_MAX_WAITING`. The separate PostgreSQL-budget override
+from `03e2ddf5db0b14a439aa2c589eed26324c0acc85` reads positive
+`STOCK_PG_MAX_CONNECTIONS` from the adjacent private `runtime.env`; its
+default remains 100. Both releases passed the normal publisher gates (3373
+backend tests passed, 130 skipped; 145 frontend tests passed; typecheck and
+build passed).
+
+The final **deployed** private settings are `STOCK_PG_MAX_CONNECTIONS=128` and
+`QUANT_ASYNC_READ_POOL_MAX_SIZE=47`; the queue uses its released default 128.
+The production PostgreSQL restart was at 20:04 CST, followed by a targeted
+owner API restart to rebuild connections. SQL returned 128. The final owner
+health returned `status=ok`, async max/current 47/47, waiting 0; the adapter
+returned `ok`. After the final 100-way mixed workload, 84 of 128 PostgreSQL
+sessions were present (2 active), leaving 44 slots at that observation time.
+
+Acceptance used two workloads rather than substituting a synthetic connection
+count for application behavior:
+
+- A mixed burst of short native-async reads (`features`, one market snapshot,
+  20 level-1 rows, one Tushare raw row and `metrics`): the final two 100-request
+  waves returned **200/200 HTTP 200**, P95 471 and 1144 ms. A 24-lane cold
+  start originally returned 13/80 HTTP 500 from the old fixed 64-waiter guard;
+  after the queue fix, the same 80-way cold burst returned 80/80 HTTP 200.
+- A longer, read-only `history-estimate?universe_symbols=5500` query: at final
+  max 47, two independent three-wave runs produced **282/282 HTTP 200**.
+  The pool reached 47/47. Their warm-wave P95 values were about 3.3–3.8 s;
+  `pg_stat_database.temp_bytes` increased by 0 in every measured wave. The
+  licensed peer verifier ran concurrently in both runs and returned
+  `status=verified`, remote owner/peer HTTP 200. In parallel, 32 extra owner
+  `/health` probes all returned 200, slowest 3.43 s.
+
+The important **failure boundary** is system-level, not the success of the
+business query alone. At 48, 56, 60 and 64 lanes, the corresponding read
+requests all returned 200, but a concurrent shared-runtime verification timed
+out its owner `/health` request after 5 s in the strict cold/continuous-load
+scenario. 40, 44, 46 and 47 passed that same scenario; 44, 46 and 47 each
+passed twice (cold and warm). Therefore 47 is the **highest repeatedly
+accepted setting in this defined workload**, not a physical ceiling or a
+promise that every future workload can run 47 expensive SQL plans safely.
+The health endpoint itself probes the shared async pool and then assembles a
+synchronous database/resource payload; contention there is the observed
+constraint. The full-history replay endpoint that previously spilled many GB
+was deliberately not stampede-tested at 47.
+
+Across the whole PostgreSQL-128 exploration there were nine Windows
+shared-memory reservation (487) log events, all between 20:07 and 20:16 CST
+during the higher-stage ramp. The error existed before this work; these events
+cannot be attributed to one stage with certainty, but they are **not** hidden
+as a clean log. Since the last such event, the final 47-lane acceptance had
+zero connection-slot exhaustion and zero logged temporary-file events. The
+peer scheduler's independent missing-`known_at` errors continue and are not
+counted as an owner capacity success.
+
+Rollback materials remain private and exact:
+
+- `G:\StockPlatform\config\runtime.env.pre-owner-async-capacity-20260923T1934`
+  is the earlier owner-20 environment.
+- `G:\StockPlatform\config\runtime.env.pre-pg128-20260923T2004` and
+  `G:\StockPlatform\config\postgresql-stock-platform.conf.pre-pg128-20260923T2004`
+  are the paired owner-56/PostgreSQL-100 checkpoint before the 128 restart.
+
+The safe rollback order is to restore the chosen private env/config pair,
+restart PostgreSQL only if its configured max changes, then restart the owner
+API and verify local and remote health. Do not copy these env backups into Git
+or a release: they contain credentials. Changing only the owner pool max
+requires just the targeted owner API restart.
