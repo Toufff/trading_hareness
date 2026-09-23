@@ -64,3 +64,17 @@ def test_noon_decision_cannot_be_backdated_after_the_afternoon_close():
     context = {'source_kind': 'noon', 'valid_until': f'{DAY}T15:00:00+08:00'}
     with pytest.raises(ValueError, match='noon_decision_window_expired'):
         noon.persist(_Database(None), context, {}, now=datetime(2026, 9, 23, 15, 1, tzinfo=TZ))
+
+
+def test_publish_rechecks_frozen_scan_cutoff_and_engine(monkeypatch):
+    monkeypatch.setattr(noon, 'compile_decision', lambda *_: {'reviewed': []})
+    monkeypatch.setattr(noon.engine, 'implementation_hash', lambda: 'new-version')
+    context = {'source_kind': 'noon', 'source_cutoff': f'{DAY}T11:30:00+08:00',
+               'as_of_date': DAY, 'valid_until': f'{DAY}T15:00:00+08:00', 'run_id': 'run-1'}
+    review = {'reviewed_at': f'{DAY}T12:01:00+08:00'}
+    now = datetime.fromisoformat(f'{DAY}T12:02:00+08:00')
+    with pytest.raises(ValueError, match='noon_scan_implementation_changed_during_review'):
+        noon.persist(_Database(_row()), context, review, now=now)
+    context['source_cutoff'] = f'{DAY}T11:25:00+08:00'
+    with pytest.raises(ValueError, match='noon_source_cutoff_changed_during_review'):
+        noon.persist(_Database(_row()), context, review, now=now)

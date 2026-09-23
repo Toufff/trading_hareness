@@ -54,3 +54,23 @@ def test_watchlist_route_prefers_active_noon_decision(monkeypatch):
     payload = asyncio.run(endpoint(16))
     assert payload['recommendation_pool']['decision_id'] == 'live-noon'
     assert any(item['symbol'] == '001232.SZ' for item in payload['items'])
+
+
+def test_agent_paper_does_not_read_expired_noon_pool():
+    from datetime import datetime
+    from app.agent_paper.context import recommendation_pool
+
+    class Connection:
+        def execute(self, sql, params):
+            self.sql, self.params = sql, params
+            return self
+
+        def fetchone(self):
+            return None
+
+    connection = Connection()
+    now = datetime.fromisoformat('2026-09-23T15:01:00+08:00')
+    assert recommendation_pool(connection, now) is None
+    assert "result->>'status'='ready'" in connection.sql
+    assert "result->>'valid_until'" in connection.sql
+    assert connection.params == (now, now)

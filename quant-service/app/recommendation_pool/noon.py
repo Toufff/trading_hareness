@@ -64,13 +64,20 @@ def persist(database, context, review, *, now=None):
     shared_reviews = from_recommendation(bundle['reviewed'])
     with database.transaction() as connection:
         row = connection.execute(
-            """SELECT state,input,result FROM quant.intraday_strategy_scans
+            """SELECT cutoff,state,input,result FROM quant.intraday_strategy_scans
                  WHERE run_id=%s FOR UPDATE""", (context['run_id'],),
         ).fetchone()
         if not row or row['state'] != 'completed':
             raise ValueError('noon_scan_unavailable_during_review')
+        cutoff = row['cutoff'].astimezone(ZoneInfo('Asia/Shanghai'))
+        if ((cutoff.hour, cutoff.minute) != (11, 30)
+                or cutoff.isoformat() != context['source_cutoff']
+                or cutoff.date().isoformat() != context['as_of_date']):
+            raise ValueError('noon_source_cutoff_changed_during_review')
         if row['result'].get('input_hash') != intraday_digest(row['input']):
             raise ValueError('noon_scan_changed_during_review')
+        if row['result'].get('implementation_hash') != engine.implementation_hash():
+            raise ValueError('noon_scan_implementation_changed_during_review')
         scan = engine.formal(row['input'])
         if scan_hash(scan) != context['scan_hash']:
             raise ValueError('noon_scan_changed_during_review')

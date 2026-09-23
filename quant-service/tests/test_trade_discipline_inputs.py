@@ -387,8 +387,14 @@ class DatabaseReadTests(unittest.TestCase):
                 "result": {"recommended": [{"symbol": "600664.SH", "priority": 1},
                                            {"symbol": SYMBOL, "priority": 2, "trigger": "站回8.70",
                                             "invalidation": "跌破8.04", "why_now": "急跌反抽", "stage": "反弹"}]}}
-        note = recommendation_note(FakeConnection(pool=pool), SYMBOL, AS_OF)
+        connection = FakeConnection(pool=pool)
+        note = recommendation_note(connection, SYMBOL, AS_OF)
         self.assertEqual((note["decision_id"], note["priority"], note["trigger"]), ("dec-1", 2, "站回8.70"))
+        sql, params = next((sql, params) for sql, params in connection.statements
+                           if 'FROM quant.recommendation_pool_decisions' in sql)
+        self.assertIn("result->>'status'='ready'", sql)
+        self.assertIn("result->>'valid_until'", sql)
+        self.assertEqual(params, (AS_OF, AS_OF))
         self.assertIsNone(recommendation_note(FakeConnection(pool=pool), "000001.SZ", AS_OF))
 
     def test_previous_plan_is_skipped_before_the_migration_is_applied(self):
