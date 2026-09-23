@@ -2,6 +2,7 @@
 from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta
+import re
 from statistics import median
 from .ohlc import capture_matches_cutoff
 from .rules import digest, evaluate, LABELS, STATE_ORDER
@@ -10,6 +11,14 @@ from .presentation import build as build_presentation
 from ..short_term_lanes.rules import screen, Settings
 
 VERSION = 'intraday-nine-20260916-2'
+
+
+def _reason_at_cutoff(reason, cutoff):
+    """Never describe a half-day/full-day amount ratio as live shrinkage."""
+    if datetime.fromisoformat(cutoff).hour >= 15:
+        return reason
+    return re.sub(r'成交额为前\d+日均值\d+(?:\.\d+)?倍',
+                  '当日成交额未结算，待同刻基线或收盘后比较', reason)
 
 
 def implementation_hash():
@@ -70,14 +79,15 @@ def candidates(data, scan):
         display = {r['symbol']: i + 1 for i, r in enumerate(lane.get('observation_list', []))}
         for r in lane.get('tracking_candidates', []):
             m = r['metrics']; advanced = m.get('advanced') or {}
+            live_reason = _reason_at_cutoff(r['reason'], data['cutoff'])
             reference = (advanced.get('reclaim_reference') if lane['key'] == 'reclaim' else
                          m.get('ma5') if lane['key'] in {'trend', 'pullback'} else m.get('prior_high'))
             support = advanced.get('panic_low') or m.get('recent_low') or m.get('ma10')
             item = dict(symbol=r['symbol'], name=r['name'], lane=lane['key'], source='new_intraday',
                         origin_id=digest([VERSION, data['cutoff'][:10], r['symbol'], lane['key']]),
                         reference=reference, support=support, display_rank=display.get(r['symbol']),
-                        original_reason=r['reason'], original_confirmation=r.get('confirmation'),
-                        current_reason=r['reason'],
+                        original_reason=live_reason, original_confirmation=r.get('confirmation'),
+                        current_reason=live_reason,
                         original_invalidation=r.get('invalidation'), formal_state=r['state'],
                         formal_rank=r.get('rank_score', r.get('score')), metrics=m)
             result[(r['symbol'], lane['key'])] = item

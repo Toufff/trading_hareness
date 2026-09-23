@@ -56,6 +56,22 @@ def test_failed_empty_and_unconfigured_are_different():
     assert failed!=empty
     assert '失败' in failed and '没有返回' in empty
 
+
+def test_stock_focused_digest_prioritizes_direct_evidence_and_bounds_length():
+    def event(name, category, symbol):
+        return dict(fact=name, category=category, expectation='未知', surprise='未知',
+                    transmission='待验证', horizon='今日', action='观察',
+                    counterevidence='无', invalidate='条件失效',
+                    symbols=[dict(symbol=symbol, name=name, relation='提及', direction='unknown')],
+                    sources=[])
+    payload=dict(status='analyzed', summary='本轮消息',
+                 events=[event('宏观甲','macro','000001.SZ'),
+                         event('宏观乙','macro','000002.SZ'),
+                         event('目标公司','company','600001.SH')], leads=[])
+    digest='\n'.join(sections(payload, {'600001.SH'}, max_events=1))
+    assert '目标公司' in digest and '宏观甲' not in digest
+    assert '另有2条保留在同轮原始结果中' in digest
+
 def test_markup_and_unsafe_urls():
     d=document(Content='<script>steal()</script><p>订单</p>',PushUrl='javascript:alert(1)')
     assert '<script>' not in d['body'] and d['url']==''

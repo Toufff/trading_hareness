@@ -117,3 +117,63 @@ def test_presentation_is_deterministic_and_report_puts_formal_first():
     report=render(result)['overview']
     assert report.index('昨日正式推荐跟踪') < report.index('各策略当前前排')
     assert '不得从混合表人工挑选' in report
+
+
+def test_unmatched_old_candidate_is_not_reported_as_current_front():
+    from app.intraday_scan.presentation import build as presentation
+    old = dict(symbol='600001.SH', name='旧候选', lane='rotation', source='previous',
+               state='platform_observation', matched_today=False, price=10, change_pct=1,
+               amount=2e8, reference=10.5, support=9.5, reason='仍在观察区')
+    lane = dict(key='rotation', label='轮动', items=[old], top=[old],
+                total_matches=0, data_gaps={}, discovery_scope='测试', status='completed')
+    projected = presentation([old], [lane])
+    assert projected['strategy_front']['rotation'] == []
+    assert [row['symbol'] for row in projected['strategy_followups']['rotation']] == ['600001.SH']
+    assert projected['research_plan']['target_count'] == 0
+
+
+def test_noon_research_floor_includes_each_current_lane_and_formal_carryover():
+    from app.intraday_scan.presentation import build as presentation
+    formal = dict(symbol='600000.SH', name='原推荐', lane='trend', source='previous',
+                  formal_recommendation=True, recommendation_priority=1,
+                  state='wait_confirmation', matched_today=False)
+    first = dict(symbol='600001.SH', name='本轮首位', lane='trend', source='new_intraday',
+                 state='confirmed_observation', matched_today=True, current_reason='本轮趋势转强')
+    peer = dict(symbol='600002.SH', name='同组对照', lane='trend', source='new_intraday',
+                state='wait_confirmation', matched_today=True)
+    same = dict(**{**first, 'lane': 'reclaim'})
+    lanes = [dict(key='trend', label='趋势', items=[first, peer, formal]),
+             dict(key='reclaim', label='修复', items=[same])]
+    p = presentation([formal, first, peer, same], lanes)
+    assert p['research_plan']['target_count'] == 2
+    targets = {row['symbol']: row for row in p['research_plan']['targets']}
+    assert set(targets) == {'600000.SH', '600001.SH'}
+    assert targets['600001.SH']['representative_lanes'] == ['trend', 'reclaim']
+    assert targets['600001.SH']['comparison_peer']['symbol'] == '600002.SH'
+
+
+def test_half_day_reason_does_not_treat_partial_amount_as_full_day_shrinkage():
+    text = '5日净额+2.09亿元，成交额为前5日均值0.56倍'
+    assert '0.56倍' not in engine._reason_at_cutoff(text, '2026-09-23T11:30:00+08:00')
+    assert '待同刻基线' in engine._reason_at_cutoff(text, '2026-09-23T11:30:00+08:00')
+    assert engine._reason_at_cutoff(text, '2026-09-23T15:00:00+08:00') == text
+
+
+def test_intraday_reports_put_stock_conclusions_before_news_and_diagnostics():
+    from app.intraday_scan.reports import render
+    row = dict(symbol='600001.SH', name='本轮候选', lane='trend', source='new_intraday',
+               state='confirmed_observation', matched_today=True, price=10, change_pct=1,
+               amount=2e8, reference=10.5, support=9.5, reason='趋势修复',
+               current_reason='本轮满足量价条件', original_reason='趋势修复',
+               evidence_gaps=[], entry_scenario='放量站稳后观察')
+    lane = dict(key='trend', label='趋势', items=[row], top=[row], total_matches=1,
+                data_gaps={}, discovery_scope='测试', status='completed')
+    result = dict(version='test', cutoff='2026-09-23T11:30:00+08:00', input_hash='hash',
+                  observed_at='2026-09-23T11:35:00+08:00', history_through='2026-09-22',
+                  market=dict(symbols=5000, up=2000, down=3000, median=-0.2), lanes=[lane],
+                  event_research=dict(status='analyzed', summary='相关消息', events=[], leads=[]))
+    reports = render(result)
+    assert reports['overview'].index('本轮候选') < reports['overview'].index('消息变化与方向影响')
+    assert reports['overview'].index('本轮候选') < reports['overview'].index('数据与边界')
+    assert reports['trend'].index('本轮候选') < reports['trend'].index('消息变化与方向影响')
+    assert '公司研究尚未由本报告完成' in reports['overview']

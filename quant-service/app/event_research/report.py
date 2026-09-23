@@ -2,7 +2,7 @@
 LABELS={'analyzed':'已完成有界消息研究','leads_only':'仅线索，语义研究未完成','failed':'消息链失败',
     'no_news':'来源没有返回消息','absent':'没有可用快照'}
 
-def sections(value,symbols=None):
+def sections(value,symbols=None,max_events=None,max_leads=12):
     if not value:return []
     lines=['','## 消息变化与方向影响','',LABELS.get(value.get('status'),str(value.get('status'))),
         value.get('summary',''),'']
@@ -10,8 +10,16 @@ def sections(value,symbols=None):
     analysis=value.get('analysis',{})
     if analysis.get('status')=='failed':
         lines += [f"失败阶段：{analysis.get('failure_stage','旧回执未细分')}；错误码：{analysis.get('failure_code','未记录')}。内容校验失败不等于连接失败。",'']
-    for e in value.get('events',[]):
-        if symbols is not None and e['category'] not in ('macro','policy') and not any(s['symbol'] in symbols for s in e['symbols']):continue
+    events=[e for e in value.get('events',[]) if symbols is None or e['category'] in ('macro','policy')
+            or any(s['symbol'] in symbols for s in e['symbols'])]
+    if symbols is not None:
+        # In a stock-focused report, direct company evidence precedes broad
+        # macro context while preserving source order within each group.
+        events.sort(key=lambda e: not any(s['symbol'] in symbols for s in e['symbols']))
+    shown=events if max_events is None else events[:max_events]
+    if max_events is not None and len(events)>len(shown):
+        lines += [f'本页只展示与观察范围相关的前{len(shown)}条消息；另有{len(events)-len(shown)}条保留在同轮原始结果中。','']
+    for e in shown:
         lines += [f"### {e['fact']}",'',f"- 预期：{e['expectation']}；预期差：{e['surprise']}。",
             f"- 传导与时间：{e['transmission']}；{e['horizon']}。",
             f"- 观察处理：{e['action']}。",f"- 反证与失效：{e['counterevidence']}；{e['invalidate']}。"]
@@ -23,7 +31,7 @@ def sections(value,symbols=None):
     leads=value.get('leads',[])
     if symbols is not None:leads=[l for l in leads if any(s['symbol'] in symbols for s in l['symbols'])]
     lines+=['### 线索附录（不是已核查利好）','']
-    for lead in leads[:12]:
+    for lead in leads[:max_leads]:
         lines += [f"- {lead['title']}："+'、'.join(f"{s['name']}（{s['symbol'].split('.')[0]}）" for s in lead['symbols'])+f"；{lead['published_at']}。"]
     lines+=['',f"消息轮次：{value.get('run_id','无')}；可知截止：{value.get('cutoff','未知')}。",
         '研究覆盖为有界快讯窗口，不代表全部消息；消息未自动改变策略权重或授予买入权限。','']
