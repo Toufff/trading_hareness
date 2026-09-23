@@ -1847,12 +1847,21 @@ class AsyncDatabase:
             async_max = max(async_min, int(os.getenv("QUANT_ASYNC_READ_POOL_MAX_SIZE", "8")))
         except ValueError:
             async_min, async_max = 2, 8
+        try:
+            # A cold-start burst can arrive before the pool grows from min_size.
+            # The old fixed 64 waiters rejected 13 of 80 measured read requests
+            # even with free PostgreSQL slots. Keep the queue bounded, but let
+            # operators size its admission budget independently of active lanes.
+            async_max_waiting = max(1, int(os.getenv("QUANT_ASYNC_READ_POOL_MAX_WAITING", "128")))
+        except ValueError:
+            async_max_waiting = 128
         self._pool_settings["min_size"] = async_min
         self._pool_settings["max_size"] = async_max
+        self._pool_settings["max_waiting"] = async_max_waiting
         self._pool = AsyncConnectionPool(
             conninfo="", kwargs=self._connect_kwargs, open=False,
             min_size=self._pool_settings["min_size"], max_size=self._pool_settings["max_size"],
-            timeout=self._pool_settings["timeout_seconds"], max_waiting=64,
+            timeout=self._pool_settings["timeout_seconds"], max_waiting=async_max_waiting,
         )
         self._opened = False
 

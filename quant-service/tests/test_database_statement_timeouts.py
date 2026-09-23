@@ -91,6 +91,18 @@ class DatabaseConnectOptionsWiringTests(unittest.TestCase):
             larger_database = AsyncDatabase(Database())
         self.assertEqual(larger_database._pool_settings["max_size"], 64)
 
+    def test_async_read_pool_waiting_budget_covers_measured_cold_start_burst(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {"QUANT_ASYNC_READ_POOL_MAX_WAITING": "128"}, clear=False):
+            async_database = AsyncDatabase(Database())
+        self.assertEqual(async_database._pool.max_waiting, 128)
+
+        with patch.dict(os.environ, {"QUANT_ASYNC_READ_POOL_MAX_WAITING": "256"}, clear=False):
+            larger_budget = AsyncDatabase(Database())
+        self.assertEqual(larger_budget._pool.max_waiting, 256)
+
 
 class _FakeCursor:
     def fetchone(self):
