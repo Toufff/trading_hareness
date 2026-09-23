@@ -179,8 +179,8 @@ def main() -> int:
             "QUANT_INTRADAY_ADVISORY_LOCAL_TICK_SECONDS": "1",
             "QUANT_INTRADAY_ADVISORY_DEEPSEEK_SECONDS": "600",
             "QUANT_INTRADAY_ADVISORY_CODEX_SECONDS": "1800",
-            "INTRADAY_ADVISORY_CODEX_MODEL": "gpt-5.6-sol",
-            "INTRADAY_ADVISORY_CODEX_REASONING": "medium",
+            "INTRADAY_ADVISORY_CODEX_MODEL": "gpt-6-sol",
+            "INTRADAY_ADVISORY_CODEX_REASONING": "high",
         }
         if transport == "custom_bot":
             webhook_url = _safe_value("webhook_url", payload.get("webhook_url"))

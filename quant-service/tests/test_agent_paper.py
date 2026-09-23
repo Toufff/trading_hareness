@@ -328,7 +328,7 @@ class AgentPaperModelTests(unittest.TestCase):
 class AgentPaperReviewPageTests(unittest.TestCase):
     def test_multi_account_page_has_codex_identity_initial_equity_and_dynamic_lanes(self):
         page = (Path(__file__).resolve().parents[2] / "scripts/agent-paper-review/index.html").read_text(encoding="utf-8")
-        self.assertIn("'agent-codex-sol':'Codex 5.6 Sol'", page)
+        self.assertIn("'agent-codex-sol':'Codex GPT-6 Sol'", page)
         self.assertIn("--a3:#c2410c", page)
         self.assertIn("num(started?(shownNav?shownNav.equity:a.initial_equity):null)", page)
         self.assertIn("尚无当日净值，显示 ${esc(a.latest_nav.trading_date)} 最近净值", page)

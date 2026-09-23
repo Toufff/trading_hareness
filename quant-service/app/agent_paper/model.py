@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_MODEL = "claude-sonnet-5"
-DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+DEFAULT_CODEX_MODEL = "gpt-6-sol"
 DEFAULT_CODEX_REASONING_EFFORT = "high"
 DEFAULT_TIMEOUT_SECONDS = 240
 DSH_CONTEXT_MAX_BYTES = 60_000

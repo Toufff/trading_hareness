@@ -177,8 +177,8 @@ class CodexAdvisoryModel:
 
     def __init__(self, *, model: str | None = None, reasoning_effort: str | None = None,
                  timeout_seconds: int = 240) -> None:
-        self.model_id = model or os.getenv("INTRADAY_ADVISORY_CODEX_MODEL") or "gpt-5.6-sol"
-        self.reasoning_effort = reasoning_effort or os.getenv("INTRADAY_ADVISORY_CODEX_REASONING") or "medium"
+        self.model_id = model or os.getenv("INTRADAY_ADVISORY_CODEX_MODEL") or "gpt-6-sol"
+        self.reasoning_effort = reasoning_effort or os.getenv("INTRADAY_ADVISORY_CODEX_REASONING") or "high"
         self.binary = os.getenv("INTRADAY_ADVISORY_CODEX_BIN") or "codex"
         self.timeout_seconds = timeout_seconds
 

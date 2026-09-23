@@ -96,7 +96,7 @@ DSH 同日 34 轮里 21 轮空单（62%）—— 它因为响应慢（单轮 100
 ### 新增 Codex 对照账户（2026-09-20）
 
 - account：`agent-codex-sol`
-- backend / 模型：`codex_cli` / `gpt-5.6-sol`，reasoning effort=`high`
+- backend / 当前模型：`codex_cli` / `gpt-6-sol`，reasoning effort=`high`（2026-09-23 从 `gpt-5.6-sol` 切换；历史决策保留各自原模型）
 - 认证：`codex login status` 回读为 ChatGPT 登录；最小真实调用 10.2s 成功、空订单
 - 基线：`citics-primary` 最新 `verified_exact` 快照（2026-09-18 15:10），起始权益 **98,996.26**；四只持仓数量、成本和可卖数量已读回一致
 - 注意：券商快照的显示现金 125.72 与 `总资产 - 持仓市值` 204.26 相差 78.54。现有基线规则优先保证总资产可对账，因此模拟账本现金是 **204.26**，并在 baseline 同时保留两个原值
@@ -181,7 +181,7 @@ pwsh -NoProfile -File F:\AIWorkflow\trading_hareness\scripts\windows\run-agent-p
 
 # Codex / DSH 探针
 pwsh -NoProfile -File F:\AIWorkflow\trading_hareness\scripts\windows\run-agent-paper-trader.ps1 `
-  -Command model-check -Backend codex_cli -Model gpt-5.6-sol -ReasoningEffort high
+  -Command model-check -Backend codex_cli -Model gpt-6-sol -ReasoningEffort high
 pwsh -NoProfile -File F:\AIWorkflow\trading_hareness\scripts\windows\run-agent-paper-trader.ps1 `
   -Command model-check -Backend dsh
 
