@@ -395,13 +395,19 @@ log_lock_waits = on
 log_temp_files = 10240                  # kB：溢出超过 10 MB 就记一行，因为临时文件吃热层预算
 ```
 
-保持不变、且**不要"优化"**的值：
+以下两项仍须保持不变，不能按 Linux 调优经验直接修改：
 
 - `shared_buffers = '4GB'`：Windows 在远未耗尽内存时就拒绝大共享段
   （"could not reserve shared memory region"，错误 487，4GB 下已经约 83 次/天）。调大会更频繁地启动失败。
 - `effective_io_concurrency = 0`：Windows 版 PostgreSQL 没有 `posix_fadvise()`，
   唯一合法值就是 0。改成 Linux 上的数值会导致服务器拒绝启动。
-- `max_connections = 50`。
+
+`max_connections = 100` 是 2026-09-23 容量复核后的**运行预算**，不是 PostgreSQL 或
+Windows 的硬上限。此前的 50 是人工配置值，没有对应的容量压测依据；同机隔离实例
+（PostgreSQL 16.15、`shared_buffers=4GB`）在 224 路缓存命中只读客户端下零失败，
+但吞吐约在 64 路后进入平台区。100 给 owner 的 20 槽异步池、协作者连接池与后台作业
+留出共享余量；高成本查询仍须单独按延迟、临时文件和协作者影响验收。
+这项设置只能随受控数据库重启及回退预案变更，不得把隔离读压测结果当成生产重查询容量。
 
 角色设置（由 `database-storage-tiers.py install` 幂等施加，**2026-09-19 已在生产集群生效**，
 `pg_db_role_setting` 里就这两条 `stock_peer` 值，没有别的）：

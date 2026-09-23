@@ -79,13 +79,17 @@ class DatabaseConnectOptionsWiringTests(unittest.TestCase):
         self.assertEqual(async_database._pool_settings["min_size"], 2)
         self.assertEqual(async_database._pool_settings["max_size"], 8)
 
-    def test_async_read_pool_max_size_can_now_exceed_the_old_hardcoded_ceiling_of_8(self) -> None:
+    def test_async_read_pool_respects_configured_size_above_old_hardcoded_ceiling(self) -> None:
         import os
         from unittest.mock import patch
 
-        with patch.dict(os.environ, {"QUANT_ASYNC_READ_POOL_MAX_SIZE": "16"}, clear=False):
+        with patch.dict(os.environ, {"QUANT_ASYNC_READ_POOL_MAX_SIZE": "20"}, clear=False):
             async_database = AsyncDatabase(Database())
-        self.assertEqual(async_database._pool_settings["max_size"], 16)
+        self.assertEqual(async_database._pool_settings["max_size"], 20)
+
+        with patch.dict(os.environ, {"QUANT_ASYNC_READ_POOL_MAX_SIZE": "64"}, clear=False):
+            larger_database = AsyncDatabase(Database())
+        self.assertEqual(larger_database._pool_settings["max_size"], 64)
 
 
 class _FakeCursor:

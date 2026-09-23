@@ -1838,14 +1838,13 @@ class AsyncDatabase:
         self._connect_kwargs = {**source._connect_kwargs}
         self._pool_settings = dict(source._pool_settings)
         try:
-            # Defaults raised from 1/4 to 2/8 (WP10 finding): every dashboard
-            # GET shares this pool, and two long pg_stat-estimate readiness
-            # projections could previously fill it alone. The hardcoded
-            # ``min(4, ...)``/``min(8, ...)`` ceilings also made
-            # QUANT_ASYNC_READ_POOL_MAX_SIZE unable to exceed 4/8 regardless
-            # of what an operator configured; the new ceiling is 16.
-            async_min = max(1, min(16, int(os.getenv("QUANT_ASYNC_READ_POOL_MIN_SIZE", "2"))))
-            async_max = max(async_min, min(16, int(os.getenv("QUANT_ASYNC_READ_POOL_MAX_SIZE", "8"))))
+            # WP10 raised the defaults from 1/4 to 2/8. Capacity is an
+            # operator setting, not a hardcoded claim about this machine:
+            # the old min(16, ...) clamp silently ignored values above 16.
+            # The shared PostgreSQL connection budget and workload-specific
+            # load tests govern the deployed value instead.
+            async_min = max(1, int(os.getenv("QUANT_ASYNC_READ_POOL_MIN_SIZE", "2")))
+            async_max = max(async_min, int(os.getenv("QUANT_ASYNC_READ_POOL_MAX_SIZE", "8")))
         except ValueError:
             async_min, async_max = 2, 8
         self._pool_settings["min_size"] = async_min

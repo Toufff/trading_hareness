@@ -17,7 +17,7 @@ $settings = Get-StockPlatformManagedSettings -Port 55432 -LogDirectory 'G:\Stock
 $text = $settings -join "`n"
 foreach ($expected in @(
     "port = 55432",
-    "max_connections = 50",
+    "max_connections = 100",
     "shared_buffers = '4GB'",
     "work_mem = '64MB'",
     "temp_file_limit = '20GB'",

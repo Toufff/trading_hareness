@@ -128,7 +128,12 @@ function Get-StockPlatformManagedSettings {
     return [string[]]@(
         "listen_addresses = '127.0.0.1'"
         "port = $Port"
-        'max_connections = 50'
+        # Operational budget, not a hardware ceiling. A 2026-09-23 isolated
+        # PostgreSQL 16.15 / 4 GB shared_buffers probe sustained 224 read
+        # clients with zero failures; the useful throughput knee was near 64.
+        # 100 leaves room for the owner's 20-slot async pool, peer pools and
+        # scheduled jobs without declaring 224 a safe production workload.
+        'max_connections = 100'
         # Windows refuses large shared segments long before the box runs out of
         # RAM ("could not reserve shared memory region", error 487, already
         # ~83/day at 4GB); keep the value and let the OS file cache do the rest.
