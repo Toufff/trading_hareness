@@ -363,6 +363,7 @@ class CodexCliModel:
         if self.reasoning_effort not in self.VALID_REASONING_EFFORTS:
             raise ValueError(f"unsupported Codex reasoning effort: {self.reasoning_effort}")
         self.model = f"{self.model_id}/{self.reasoning_effort}"
+        self._binary_pinned = binary is not None
         self.binary = binary or find_codex_executable()
         self.timeout_seconds = int(timeout_seconds or os.environ.get("AGENT_PAPER_TIMEOUT_SECONDS") or DEFAULT_TIMEOUT_SECONDS)
 
@@ -389,12 +390,26 @@ class CodexCliModel:
         with tempfile.TemporaryDirectory(prefix="agent-paper-codex-") as workdir:
             schema_path = os.path.join(workdir, "output-schema.json")
             Path(schema_path).write_text(json.dumps(CODEX_OUTPUT_SCHEMA, ensure_ascii=False), encoding="utf-8")
-            try:
-                completed = subprocess.run(
+
+            def run_cli() -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
                     self.command(schema_path), input=prompt, capture_output=True, text=True, encoding="utf-8",
                     timeout=self.timeout_seconds, cwd=workdir, env=self.environment(),
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
+            try:
+                try:
+                    completed = run_cli()
+                except FileNotFoundError:
+                    # The desktop app can replace its versioned bin directory while this day loop is alive.
+                    # Retrying only a failed process launch cannot duplicate a completed model decision.
+                    if self._binary_pinned:
+                        raise
+                    replacement = find_codex_executable()
+                    if replacement == self.binary:
+                        raise
+                    self.binary = replacement
+                    completed = run_cli()
             except subprocess.TimeoutExpired as error:
                 raise ModelFailure("timeout", f"{self.timeout_seconds}s") from error
             except OSError as error:

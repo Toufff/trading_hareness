@@ -91,7 +91,7 @@ DSH 同日 34 轮里 21 轮空单（62%）—— 它因为响应慢（单轮 100
 
 **为什么不退出进程：** 计划任务 `MultipleInstances=IgnoreNew`，每 10 分钟触发一次。运行中的进程占着槽位，新触发被忽略。一旦退出，下一次触发会起一个全新的 `run_day`，又烧 3 次尝试。**退出比不退出更糟。**
 
-**恢复方式：** 手动重启任务即可，重启会重新武装熔断（再给 3 次机会）。这是有意设计 —— 额度恢复后能自愈。
+**恢复方式：** 手动重启日内进程会重新武装熔断（再给 3 次机会）。Windows 上仅 `Stop-ScheduledTask` 可能留下占用单实例锁的 Python 子进程；重启前须核对并结束**仅该 account_key** 的旧进程，再启动任务并等待一轮成功决策。不要清空锁文件或重启其他账户。
 
 ### 新增 Codex 对照账户（2026-09-20）
 
@@ -101,6 +101,7 @@ DSH 同日 34 轮里 21 轮空单（62%）—— 它因为响应慢（单轮 100
 - 基线：`citics-primary` 最新 `verified_exact` 快照（2026-09-18 15:10），起始权益 **98,996.26**；四只持仓数量、成本和可卖数量已读回一致
 - 注意：券商快照的显示现金 125.72 与 `总资产 - 持仓市值` 204.26 相差 78.54。现有基线规则优先保证总资产可对账，因此模拟账本现金是 **204.26**，并在 baseline 同时保留两个原值
 - 计划任务：`trading-hareness-agent-paper-trader-codex`，每日 09:20 启动、每 10 分钟容灾重触发、模型决策间隔仍为 15 分钟；首次运行 2026-09-21 09:20
+- 2026-09-23 14:22 恢复记录：与桌面端 11:02 更新同期，长驻进程连续三次 `cli_unavailable: FileNotFoundError` 触发熔断；旧版本化 `codex.exe` 路径失效是基于时间和现存安装目录的推断。只重启 Codex 账户并清理它遗留的两个 Python 子进程后，14:22 的 `gpt-6-sol/high` 决策成功。传输层现对进程启动时的 `FileNotFoundError` 重新定位 CLI 并仅重试一次；显式指定的二进制不会被替换。
 
 ---
 
@@ -168,7 +169,7 @@ DSH 的 `agent-instructions` 会在首轮自动注入工作目录下的 `AGENTS.
 
 ### 模拟盘整条链跑在开发 checkout
 
-计划任务直接指向 `F:\AIWorkflow\trading_hareness\scripts\windows\run-agent-paper-trader.ps1`，它再调同一 checkout 的 `.venv` 和 `quant-service/app/agent_paper/`。**改动不需要发布，下一轮即生效** —— 但宿主 exe 来自 `G:\StockPlatform\current`，所以改完必须提交。
+计划任务直接指向 `F:\AIWorkflow\trading_hareness\scripts\windows\run-agent-paper-trader.ps1`，它再调同一 checkout 的 `.venv` 和 `quant-service/app/agent_paper/`。**改动不需要发布到 G:，但长驻 Python 进程已加载的模块要等重启后才生效**；宿主 exe 来自 `G:\StockPlatform\current`，所以改完必须提交。
 
 ---
 

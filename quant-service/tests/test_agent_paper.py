@@ -202,6 +202,45 @@ class AgentPaperModelTests(unittest.TestCase):
             model = CodexCliModel(model="gpt-5.6-sol", reasoning_effort="high")
         self.assertEqual(model.binary, "D:/managed/codex.exe")
 
+    def test_codex_transport_recovers_after_desktop_replaces_binary(self):
+        from unittest.mock import patch
+        from app.agent_paper.model import CodexCliModel
+
+        class Done:
+            returncode, stderr = 0, ""
+            stdout = "\n".join([
+                json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text":
+                           '{"analysis":"a","market_view":"v","orders":[],"focus_symbols":[],"notes":""}'}}),
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 12, "output_tokens": 8}}),
+            ])
+
+        seen = []
+
+        def fake_run(command, **_kwargs):
+            seen.append(command[0])
+            if len(seen) == 1:
+                raise FileNotFoundError("desktop replaced old CLI")
+            return Done()
+
+        with patch("app.agent_paper.model.find_codex_executable", side_effect=["old/codex.exe", "new/codex.exe"]), \
+             patch("app.agent_paper.model.subprocess.run", side_effect=fake_run):
+            model = CodexCliModel(model="gpt-6-sol", reasoning_effort="high")
+            result = model.decide('{"now":"t"}')
+        self.assertEqual(seen, ["old/codex.exe", "new/codex.exe"])
+        self.assertEqual(model.binary, "new/codex.exe")
+        self.assertEqual(result.output["orders"], [])
+
+    def test_codex_transport_does_not_replace_explicit_binary(self):
+        from unittest.mock import patch
+        from app.agent_paper.model import CodexCliModel
+
+        with patch("app.agent_paper.model.subprocess.run", side_effect=FileNotFoundError("missing")), \
+             patch("app.agent_paper.model.find_codex_executable") as find:
+            with self.assertRaises(ModelFailure) as caught:
+                CodexCliModel(binary="explicit/codex.exe").decide('{"now":"t"}')
+        self.assertEqual(caught.exception.code, "cli_unavailable")
+        find.assert_not_called()
+
     def test_structured_output_and_fenced_text_are_accepted(self):
         output, usage = parse_cli_result(json.dumps({"structured_output": {"orders": []}, "total_cost_usd": 0.4}))
         self.assertEqual((output, usage["total_cost_usd"]), ({"orders": []}, 0.4))
