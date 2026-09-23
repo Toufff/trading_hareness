@@ -31,7 +31,19 @@ JEV 不是聊天模型。官方 HTTP 接口为 `POST https://api.typesafe.ai/v1/
 `preview` 从已留存决策上下文进行一次历史复算，结果在 `G:/StockPlatform/reports/jev-pilot/`，绝不写订单或伪造过去收益。
 `model-check` 真实调用官方 API，但不会证明投资有效。
 
-初次试验没有安装定时任务。需要手动跑一个真实交易日时使用既有命令 `run-day`，追加 `--backend jev --account-key agent-jev-pilot --provider-env-file G:/StockPlatform/config/jev-paper.env --decision-minutes 15`。它仅调用模拟撮合。当前新入口只在开发 checkout，生产不可变 release 不作原地修改。
+初次试验没有安装定时任务。2026-09-23 增加了 Windows 任务的 JEV 后端和独立 provider 配置透传；用户要求从下一个交易日自动运行现有纯 JEV 账户，不创建混合账户、不重置本金或持仓。发布并验收后，任务名为 `trading-hareness-agent-paper-trader-jev`，使用 `G:/StockPlatform/current` 下的发布代码和现有 `agent-jev-pilot` 账本，不依赖开发 checkout。安装命令：
+
+```powershell
+pwsh G:/StockPlatform/current/scripts/windows/install-agent-paper-trader-task.ps1 `
+  -RepositoryRoot G:/StockPlatform/current `
+  -TaskName trading-hareness-agent-paper-trader-jev `
+  -AccountKey agent-jev-pilot -Backend jev -Model jev-1.13.0 `
+  -ProviderEnvFile G:/StockPlatform/config/jev-paper.env
+```
+
+任务每天 09:20 启动，崩溃后每 10 分钟尝试拉起；进程内由已核验的交易日历跳过休市日，在 09:30–11:27 和 13:00–14:56 的决策窗口按 15 分钟间隔调用。进程和账户锁防止重叠，15:01 收尾。任务是纯模拟撮合，不触碰券商。**任务注册、凭据 `model-check` 和明日交易时段真实首轮决策是三个不同的验收层级；收盘后不能声称明日首轮已通过。** 运行证据在 `G:/StockPlatform/logs/agent-paper-agent-jev-pilot.jsonl`，账本和决策从 `/api/v1/agent-paper/status?account_key=agent-jev-pilot` 读回。
+
+手动运行仍可用 `run-day --backend jev --account-key agent-jev-pilot --provider-env-file G:/StockPlatform/config/jev-paper.env --decision-minutes 15`，仅在排障时使用，不与定时任务并跑。
 
 ## 验收边界
 
