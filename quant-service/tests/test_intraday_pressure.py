@@ -166,6 +166,7 @@ def test_slow_model_does_not_block_next_quote_cycle():
         with patch('app.intraday_advisory.runtime._scope',return_value=scope), \
              patch('app.intraday_advisory.runtime._discipline',return_value=[]), \
              patch('app.intraday_advisory.runtime._latest_sector_snapshot',return_value=None), \
+             patch('app.intraday_advisory.runtime._recent_quotes',return_value=[]), \
              patch('app.intraday_advisory.runtime._status'), \
              patch('app.intraday_advisory.runtime._analyze',side_effect=slow):
             await asyncio.wait_for(run_intraday_advisory_cycle(deps,state,now=AT),1)

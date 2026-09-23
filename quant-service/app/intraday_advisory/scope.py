@@ -24,6 +24,7 @@ class AdvisoryScope:
     snapshot_id: str | None
     decision_id: str | None
     blockers: tuple[str, ...]
+    snapshot_observed_at: datetime | None = None
 
 
 def _one(connection: Any, sql: str, params: tuple[Any, ...]) -> dict[str, Any] | None:
@@ -40,12 +41,14 @@ def load_scope(connection: Any, *, account_key: str, as_of: datetime) -> Advisor
          WHERE account_key=%s AND verification='verified_exact' AND observed_at<=%s
          ORDER BY observed_at DESC,snapshot_id DESC LIMIT 1""", (account_key, as_of))
     snapshot_id: str | None = None
+    snapshot_observed_at: datetime | None = None
     if snapshot is None:
         blockers.append("holding_snapshot_missing")
     elif not broker_freshness(snapshot, as_of)["current"]:
         blockers.append("holding_snapshot_stale_or_unverified")
     else:
         snapshot_id = str(snapshot["snapshot_id"])
+        snapshot_observed_at = snapshot["observed_at"]
         rows = connection.execute("""
             SELECT symbol,name,quantity,sellable_quantity,average_cost,market_price,
                    market_value,unrealized_pnl,position_weight_pct
@@ -86,7 +89,8 @@ def load_scope(connection: Any, *, account_key: str, as_of: datetime) -> Advisor
             if symbol in by_symbol:  # A real position wins over a prospective idea.
                 continue
             by_symbol[symbol] = ScopeItem(symbol, str(item.get("name") or symbol), "recommendation", dict(item))
-    return AdvisoryScope(account_key, tuple(by_symbol.values()), snapshot_id, decision_id, tuple(blockers))
+    return AdvisoryScope(account_key, tuple(by_symbol.values()), snapshot_id, decision_id,
+                         tuple(blockers), snapshot_observed_at)
 
 
 __all__ = ["AdvisoryScope", "ScopeItem", "load_scope"]

@@ -43,6 +43,7 @@ class SectorSample:
     observed_at: datetime
     change_pct: float
     net_inflow: float | None
+    taxonomy_key: str = "eastmoney_industry"
 
 
 def _event_key(kind: str, direction: str, observed_at: datetime, labels: Sequence[str]) -> str:
@@ -79,16 +80,20 @@ def sector_samples_from_snapshot(snapshot: Mapping[str, Any] | None) -> tuple[Se
         return ()
     output: list[SectorSample] = []
     for row in snapshot["items"]:
-        if not isinstance(row, Mapping) or row.get("taxonomy_key") != "eastmoney_industry":
+        if not isinstance(row, Mapping) or row.get("taxonomy_key") not in {"eastmoney_industry", "longhu_ths_industry"}:
             continue
         try:
             change = float(row["change_pct"])
             flow = float(row["net_inflow"]) if row.get("net_inflow") is not None else None
         except (KeyError, TypeError, ValueError):
             continue
+        taxonomy = str(row["taxonomy_key"])
+        # Longhu's catalogue reports yuan; Eastmoney's normalized flow is 亿.
+        if flow is not None and taxonomy == "longhu_ths_industry":
+            flow /= 100_000_000
         output.append(SectorSample(str(row.get("sector_key") or row.get("label")),
                                    str(row.get("label") or row.get("sector_key")),
-                                   observed_at, change, flow))
+                                   observed_at, change, flow, taxonomy))
     return tuple(output)
 
 
@@ -177,19 +182,26 @@ def evaluate_sectors(series: Mapping[str, Sequence[SectorSample]]) -> AdvisorySi
 
 
 def market_context(index_series: Mapping[str, Sequence[IndexSample]],
-                   sector_series: Mapping[str, Sequence[SectorSample]]) -> dict[str, Any]:
+                   sector_series: Mapping[str, Sequence[SectorSample]], *,
+                   watched_sectors: Sequence[str] = ()) -> dict[str, Any]:
     indices = [samples[-1] for samples in index_series.values() if samples]
     sectors = [samples[-1] for samples in sector_series.values() if samples]
     sectors.sort(key=lambda item: item.change_pct, reverse=True)
+    def sector_item(item: SectorSample) -> dict[str, Any]:
+        return {"sector_key": item.sector_key, "taxonomy_key": item.taxonomy_key,
+                "label": item.label, "change_pct": item.change_pct,
+                "net_inflow_100m_cny": item.net_inflow,
+                "observed_at": item.observed_at.isoformat()}
+    watched = set(watched_sectors)
     return {
         "indices": [{"symbol": item.symbol, "name": item.name, "price": item.price,
                      "daily_pct": round(item.daily_pct, 3), "observed_at": item.observed_at.isoformat()}
                     for item in indices],
         "industry_boards": {
-            "leaders": [{"label": item.label, "change_pct": item.change_pct, "net_inflow": item.net_inflow}
-                        for item in sectors[:5]],
-            "laggards": [{"label": item.label, "change_pct": item.change_pct, "net_inflow": item.net_inflow}
-                         for item in sectors[-5:]],
+            "leaders": [sector_item(item) for item in sectors[:5]],
+            "laggards": [sector_item(item) for item in sectors[-5:]],
+            "watched": [sector_item(item) for item in sectors
+                        if item.sector_key in watched or item.label in watched],
         },
     }
 

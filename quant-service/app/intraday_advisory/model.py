@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ import tempfile
 import time
 from typing import Any
 
-from ..agent_paper.model import ModelFailure, ModelResult, parse_codex_stream
+from ..agent_paper.model import ModelFailure, ModelResult, find_codex_executable, parse_codex_stream
 from ..event_research.model_client import ModelReviewFailure, completion
 from ..event_research.model_config import settings as event_model_settings
 
@@ -35,7 +36,12 @@ holding_focus 与 recommendation_focus 各最多 2 项，只放真正需要关�
 持仓的 monitoring_focus 表示用户本交易日主动重点关注。优先复核它，但并不强制出卡，也不提高消息频率。
 focus_technicals 仅使用已完成的逐分钟收盘价、量额计算；若状态不为 ready 或时点过旧，不得据此判断。
 MACDFS、RSI、布林带及量价/VWAP 是相互印证或否定的证据，不是单指标买卖点；minute_kdj、minute_atr、minute_adx 不可用。
-没有同日真实成交价、数量、费用和核实可卖数量时，不得给确定 B/S、回补价位或收益承诺。
+真实成交明细与已核实持仓快照是两类证据。broker_evidence 给出快照核实时点时，
+可卖数量只在该时点已核实；若同日后续买卖未知，说明"快照后可卖量待核"，不得说"缺少核实可卖数量"。
+成交明细缺失不应自动列为优先风险；只有它直接阻止本轮具体判断时才说明。
+industry_boards.watched 是推荐候选所涉板块的精确匹配证据，按 observed_at 判断时效；
+不得因为板块不在涨跌榜前五就说"板块数据缺失"，也不得用过期快照冒充本时点。
+没有可核对的同日真实成交价、数量、费用时，不得给确定 B/S、回补价位或收益承诺。
 每项必须包含股票代码、名称、当前状态、可核对证据和条件式应对。market_state 只能是 calm、watch、risk。"""
 
 DELTA_PROMPT = """你是盘中重要变化解释助手。只解释输入scope中的本次变化，禁止全量大盘/持仓/推荐池复述。
@@ -61,7 +67,35 @@ def _normalized_response(value, payload):
         if not isinstance(value,dict):
             raise ModelFailure('json_not_object')
         return {**value,'delta_items':(value.get('delta_items') or [])[:3], 'market_state':'watch'}
-    return _normalize(value)
+    output = _normalize(value)
+    broker = payload.get('broker_evidence') or {}
+    snapshot_at = broker.get('holding_snapshot_observed_at')
+    boundaries: list[str] = []
+    if snapshot_at:
+        kept = []
+        for risk in output['risks']:
+            if '可卖数量' in risk and any(word in risk for word in ('缺少', '缺失', '未核实')):
+                boundaries.append(f"可卖数量截至 {str(snapshot_at)[11:16]} 的已核实持仓快照；此后变化待核。")
+                if any(word in risk for word in ('成交价', '费用', '成交明细')):
+                    boundaries.append('本轮未附同日成交明细，不据此推算做 T 收益。')
+            else:
+                kept.append(risk)
+        output['risks'] = kept
+    watched = (payload.get('market_context') or {}).get('industry_boards', {}).get('watched') or []
+    fresh_labels: set[str] = set()
+    for item in watched:
+        try:
+            age = datetime.fromisoformat(str(payload['as_of'])) - datetime.fromisoformat(str(item['observed_at']))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if timedelta(0) <= age <= timedelta(minutes=3):
+            fresh_labels.add(str(item.get('label')))
+    if fresh_labels:
+        output['risks'] = [risk for risk in output['risks'] if not (
+            '板块' in risk and any(word in risk for word in ('缺少', '缺失', '没有'))
+            and any(label in risk for label in fresh_labels))]
+    output['data_boundaries'] = list(dict.fromkeys(boundaries))
+    return output
 
 
 FOCUS_ITEM_SCHEMA: dict[str, Any] = {
@@ -183,7 +217,9 @@ class CodexAdvisoryModel:
                  timeout_seconds: int = 240) -> None:
         self.model_id = model or os.getenv("INTRADAY_ADVISORY_CODEX_MODEL") or "gpt-6-sol"
         self.reasoning_effort = reasoning_effort or os.getenv("INTRADAY_ADVISORY_CODEX_REASONING") or "high"
-        self.binary = os.getenv("INTRADAY_ADVISORY_CODEX_BIN") or "codex"
+        self.binary_pinned = bool(os.getenv("INTRADAY_ADVISORY_CODEX_BIN"))
+        self.binary = os.getenv("INTRADAY_ADVISORY_CODEX_BIN") or find_codex_executable(
+            {key: value for key, value in os.environ.items() if key != "AGENT_PAPER_CODEX_BIN"})
         self.timeout_seconds = timeout_seconds
 
     def _run(self, payload: dict[str, Any]) -> ModelResult:
@@ -207,6 +243,25 @@ class CodexAdvisoryModel:
                 )
             except subprocess.TimeoutExpired as error:
                 raise ModelFailure("timeout", f"{self.timeout_seconds}s") from error
+            except FileNotFoundError as error:
+                if self.binary_pinned:
+                    raise ModelFailure("cli_unavailable", type(error).__name__) from error
+                refreshed = find_codex_executable(
+                    {key: value for key, value in os.environ.items() if key != "AGENT_PAPER_CODEX_BIN"})
+                if refreshed == self.binary:
+                    raise ModelFailure("cli_unavailable", type(error).__name__) from error
+                self.binary = refreshed
+                command[0] = refreshed
+                try:
+                    completed = subprocess.run(
+                        command, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                        timeout=self.timeout_seconds, cwd=workdir, env=env,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                except subprocess.TimeoutExpired as retry_error:
+                    raise ModelFailure("timeout", f"{self.timeout_seconds}s") from retry_error
+                except OSError as retry_error:
+                    raise ModelFailure("cli_unavailable", type(retry_error).__name__) from retry_error
             except OSError as error:
                 raise ModelFailure("cli_unavailable", type(error).__name__) from error
         output, usage, transcript = parse_codex_stream(completed.stdout)

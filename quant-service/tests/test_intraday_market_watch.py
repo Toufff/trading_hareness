@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from app.intraday_advisory.market_watch import (
     IndexSample, SectorSample, evaluate_indices, evaluate_sectors, index_sample_from_row,
+    market_context, sector_samples_from_snapshot,
 )
 
 
@@ -53,3 +54,17 @@ def test_sector_alert_requires_confirmed_directional_acceleration() -> None:
     assert event.symbol == "MARKET.SECTOR"
     assert event.direction == "up"
     assert "净流" in event.summary
+
+
+def test_longhu_sector_is_available_with_yuan_flow_normalized_and_watched_context() -> None:
+    snapshot = {"snapshot_minute": NOW, "items": [{
+        "taxonomy_key": "longhu_ths_industry", "sector_key": "881270",
+        "label": "元件", "change_pct": 1.366, "net_inflow": -122_488_200,
+    }]}
+    (sample,) = sector_samples_from_snapshot(snapshot)
+    assert sample.net_inflow == -1.224882
+    context = market_context({}, {"longhu_ths_industry:881270": deque([sample])},
+                             watched_sectors=("881270",))
+    assert context["industry_boards"]["watched"][0]["label"] == "元件"
+    assert context["industry_boards"]["watched"][0]["net_inflow_100m_cny"] == -1.224882
+    assert context["industry_boards"]["watched"][0]["observed_at"] == NOW.isoformat()

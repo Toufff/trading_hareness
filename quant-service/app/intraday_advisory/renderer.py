@@ -242,6 +242,8 @@ def render_analysis(provider: str, output: dict[str, Any], *, report_kind: str,
     risks = [humanize_text(item) for item in output.get("risks") or []]
     if risks:
         sections.append("风险：\n" + "\n".join(f"- {item}" for item in risks))
+    if output.get('data_boundaries'):
+        sections.append('证据边界：' + '；'.join(humanize_text(item) for item in output['data_boundaries']))
     sections.append(f"复核：{PROVIDER_TEXT.get(provider, provider)}")
     return "\n".join(part for part in sections if part)
 
@@ -323,7 +325,9 @@ def analysis_card(provider: str, output: dict[str, Any], *, report_kind: str,
         elements.append(collapsible_panel(
             f"补充观察（{len(legacy_other)}）", "\n\n".join(legacy_other),
             element_id="legacy_more"))
-    elements.append(collapsible_panel('阅读边界','仅列关键变化；原纪律条件继续有效。未列对象不代表失去监控。',element_id='brief_boundary'))
+    boundaries = ['仅列关键变化；原纪律条件继续有效。未列对象不代表失去监控。',
+                  *(humanize_text(item) for item in output.get('data_boundaries') or [])]
+    elements.append(collapsible_panel('阅读边界','\n'.join(boundaries),element_id='brief_boundary'))
     elements.append(markdown(
         f"证据截至 {str(output.get('data_as_of') or '')[11:19] or '未标注'} · 生成时间 {generated_at:%H:%M:%S} · {PROVIDER_TEXT.get(provider, provider)} 复核 · 研究提醒，不执行交易",
         size="notation",

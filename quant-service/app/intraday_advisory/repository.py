@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha256
 import json
 from typing import Any
@@ -10,6 +10,26 @@ from typing import Any
 from psycopg.types.json import Json
 
 from .rules import AdvisorySignal
+
+
+def recent_quote_rows(connection: Any, *, symbols: list[str], at: datetime,
+                      limit_per_symbol: int = 600) -> list[dict[str, Any]]:
+    """Bounded same-session restart warm-up; never replays alert delivery."""
+    if not symbols:
+        return []
+    start = max(at - timedelta(minutes=45), at.replace(hour=9, minute=25, second=0, microsecond=0))
+    rows = connection.execute("""
+        SELECT history.symbol,history.observed_at,history.raw
+          FROM unnest(%s::text[]) AS wanted(symbol)
+          CROSS JOIN LATERAL (
+            SELECT symbol,observed_at,raw FROM quant.intraday_quote_observations
+             WHERE symbol=wanted.symbol AND source_name='longhu_order_book'
+               AND observed_at>=%s AND observed_at<=%s
+             ORDER BY observed_at DESC LIMIT %s
+          ) AS history
+         ORDER BY history.symbol,history.observed_at
+    """, (symbols, start, at, limit_per_symbol)).fetchall()
+    return [dict(row) for row in rows]
 
 
 def persist_quote_samples(connection: Any, observed_at: datetime, rows: list[dict[str, Any]]) -> int:

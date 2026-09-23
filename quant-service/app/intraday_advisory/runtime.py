@@ -26,7 +26,7 @@ from .repository import (
     persist_analysis, persist_delivery_outcome, persist_index_samples, persist_quote_samples,
     persist_signal, recent_discipline_events, update_status,
     latest_pressure_states, latest_delivered_context,
-    notification_exists, signal_delivery_suppressed,
+    notification_exists, signal_delivery_suppressed, recent_quote_rows,
 )
 from .presentation import ensure_readable_card, humanize_card, humanize_text
 from .rules import QuoteSample, sample_from_row
@@ -104,6 +104,8 @@ class RuntimeState:
     focus_last_fetch: datetime | None = None
     focus_task: Any = None
     focus_technicals: dict[str, dict[str, Any]] = field(default_factory=dict)
+    history_loaded_day: Any = None
+    history_loaded_symbols: set[str] = field(default_factory=set)
 
 
 def _fresh(row: dict[str, Any], now: datetime) -> bool:
@@ -130,6 +132,37 @@ def _persist_index_rows(database: Any, now: datetime, rows: list[dict[str, Any]]
 def _latest_sector_snapshot(database: Any, now: datetime) -> dict[str, Any] | None:
     with database.transaction() as connection:
         return latest_sector_snapshot(connection, at=now)
+
+
+def _recent_quotes(database: Any, symbols: list[str], now: datetime) -> list[dict[str, Any]]:
+    with database.transaction() as connection:
+        return recent_quote_rows(connection, symbols=symbols, at=now)
+
+
+def _hydrate_quotes(state: RuntimeState, rows: list[dict[str, Any]], now: datetime) -> None:
+    """Rebuild only valid vendor-time samples; never emit historical signals."""
+    for stored in rows:
+        raw = stored.get('raw')
+        observed_at = stored.get('observed_at')
+        if not isinstance(raw, dict) or not isinstance(observed_at, datetime):
+            continue
+        if observed_at.astimezone(SHANGHAI).date() != now.date():
+            continue
+        clock = exchange_time_status({'price_trade_time': raw.get('trade_time')}, observed_at, 20)
+        if clock.get('status') != 'fresh' or not clock.get('observed_trade_time'):
+            continue
+        trade_at = datetime.fromisoformat(clock['observed_trade_time'])
+        if not timedelta(0) <= now-trade_at <= timedelta(minutes=45):
+            continue
+        sample = sample_from_row(raw, trade_at)
+        if sample is None or sample.symbol != stored.get('symbol'):
+            continue
+        series = state.samples[sample.symbol]
+        if series and sample.observed_at <= series[-1].observed_at:
+            continue
+        if series and (sample.amount < series[-1].amount or sample.volume_lot < series[-1].volume_lot):
+            series.clear()
+        series.append(sample)
 
 
 def _pressure_states(database: Any, now: datetime):
@@ -249,7 +282,18 @@ def _context(scope: AdvisoryScope, state: RuntimeState, now: datetime, *,
         "as_of": now.isoformat(), "trigger_kind": trigger_kind, "report_kind": report_kind,
         "research_only": True, "live_orders": False,
         "scope": latest, "scope_blockers": list(scope.blockers),
-        "market_context": market_context(state.index_samples, state.sector_samples),
+        "broker_evidence": {
+            "holding_snapshot_status": "verified_exact_as_of" if scope.snapshot_observed_at else "unavailable",
+            "holding_snapshot_observed_at": scope.snapshot_observed_at.astimezone(SHANGHAI).isoformat()
+                                            if scope.snapshot_observed_at else None,
+            "sellable_quantity_is_as_of_snapshot": bool(scope.snapshot_observed_at),
+            "same_day_fills_not_inferred_from_snapshot": True,
+        },
+        "market_context": market_context(state.index_samples, state.sector_samples,
+            watched_sectors=tuple(str(value) for item in scope.items for value in (
+                (item.facts.get('ranking_reference') or {}).get('sector_key'),
+                (item.facts.get('ranking_reference') or {}).get('sector_label'),
+            ) if value)),
         "recent_events": recent_events,
     })
 
@@ -436,6 +480,15 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
     if decision.fetch_quotes:
         session_open, reason = await deps.session_open("order_book_quote", current)
         if session_open:
+            if state.history_loaded_day != current.date():
+                state.history_loaded_day = current.date()
+                state.history_loaded_symbols.clear()
+            missing_history = [item.symbol for item in scope.items
+                               if item.symbol not in state.history_loaded_symbols and not state.samples.get(item.symbol)]
+            if missing_history:
+                history = await deps.run_database(lambda: _recent_quotes(deps.database, missing_history, current))
+                _hydrate_quotes(state, history, current)
+                state.history_loaded_symbols.update(missing_history)
             if state.pressure_day != current.date() or (state.last_pressure_refresh and current-state.last_pressure_refresh>=timedelta(seconds=60)):
                 state.pressure_states = await deps.run_database(lambda: _pressure_states(deps.database,current))
                 state.pressure_day = current.date()
@@ -519,7 +572,7 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
                     state.last_sector_snapshot_at is None or snapshot_at > state.last_sector_snapshot_at):
                 state.last_sector_snapshot_at = snapshot_at
                 for sample in sector_samples_from_snapshot(snapshot):
-                    state.sector_samples[sample.sector_key].append(sample)
+                    state.sector_samples[f'{sample.taxonomy_key}:{sample.sector_key}'].append(sample)
                 if sector_signal := evaluate_sectors(state.sector_samples):
                     await _emit_signal(deps, state, sector_signal, "sector", current, outcome)
             if outcome["events"]:

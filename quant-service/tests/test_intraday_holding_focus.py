@@ -174,6 +174,7 @@ def test_slow_focus_minute_tape_cannot_block_five_second_quote_cycle():
         with patch('app.intraday_advisory.runtime._scope', return_value=scope), \
              patch('app.intraday_advisory.runtime._discipline', return_value=[]), \
              patch('app.intraday_advisory.runtime._latest_sector_snapshot', return_value=None), \
+             patch('app.intraday_advisory.runtime._recent_quotes', return_value=[]), \
              patch('app.intraday_advisory.runtime._status'):
             await asyncio.wait_for(run_intraday_advisory_cycle(deps, state, now=at), 1)
             assert state.focus_task is not None and not state.focus_task.done()

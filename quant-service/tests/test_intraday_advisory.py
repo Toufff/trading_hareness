@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 import asyncio
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -16,8 +17,12 @@ from app.intraday_advisory.presentation import ensure_readable_card, humanize_ca
 from app.intraday_advisory.market_watch import index_sample_from_row
 from app.intraday_advisory.schedule import decide
 from app.intraday_advisory.scope import AdvisoryScope, ScopeItem
+from app.intraday_advisory.repository import recent_quote_rows
+from app.intraday_advisory.model import CodexAdvisoryModel, _normalized_response
+from app.agent_paper.model import ModelFailure
 from app.intraday_advisory.runtime import (
     IntradayAdvisoryDependencies, RuntimeState, _analyze, _context, _deepseek_push_worthy, _drain,
+    _hydrate_quotes,
     run_intraday_advisory_cycle,
 )
 from app.async_intraday_advisory_read_repository import humanize_event
@@ -53,6 +58,101 @@ def test_model_context_normalizes_database_decimal_values() -> None:
     assert 'market_price' not in payload['scope'][0]['position_or_recommendation']  # stale snapshot price is not live
     assert payload["recent_events"][0]["trigger_price"] == "72.50"
     assert payload["recent_events"][0]["summary"] == "内盘增量占优只能作为内外盘方向信号"
+
+
+def test_context_preserves_verified_snapshot_time_and_exact_watched_sector() -> None:
+    scope = AdvisoryScope("test", (ScopeItem("603936.SH", "博敏电子", "recommendation", {
+        "ranking_reference": {"sector_key": "881270", "sector_label": "元件"},
+    }),), "snapshot", "decision", (), MONDAY - timedelta(hours=1))
+    state = RuntimeState()
+    from app.intraday_advisory.market_watch import SectorSample
+    state.sector_samples["longhu_ths_industry:881270"].append(
+        SectorSample("881270", "元件", MONDAY, 1.3, -1.2, "longhu_ths_industry"))
+    payload = _context(scope, state, MONDAY, trigger_kind="scheduled", report_kind="fixed")
+    assert payload["broker_evidence"]["holding_snapshot_observed_at"] == (
+        MONDAY - timedelta(hours=1)).isoformat()
+    assert payload["market_context"]["industry_boards"]["watched"][0]["label"] == "元件"
+
+
+def test_restart_hydrates_valid_same_session_history_without_emitting_signals() -> None:
+    state = RuntimeState()
+    rows = []
+    for offset in range(0, 181, 5):
+        at = MONDAY - timedelta(seconds=180-offset)
+        rows.append({"symbol": "600000.SH", "observed_at": at,
+                     "raw": {"ts_code": "600000.SH", "name": "浦发银行", "price": 10.0,
+                             "pre_close": 10.0, "cumulative_amount": 100_000 + offset * 1000,
+                             "cumulative_volume_lot": 1000 + offset * 10,
+                             "trade_time": at.strftime("%Y%m%d%H%M%S")}})
+    rows.insert(0, {"symbol": "600000.SH", "observed_at": MONDAY - timedelta(days=1),
+                    "raw": rows[0]["raw"]})
+    _hydrate_quotes(state, rows, MONDAY)
+    assert len(state.samples["600000.SH"]) == 37
+    assert state.samples["600000.SH"][-1].observed_at == MONDAY
+    assert state.pending_events == []
+    assert len(_context(AdvisoryScope("test", (ScopeItem("600000.SH", "浦发银行", "holding", {}),),
+                                      None, None, ()), state, MONDAY,
+                        trigger_kind="scheduled", report_kind="fixed")["scope"][0]["windows"]) > 0
+
+
+def test_restart_history_query_is_bounded_to_session_and_source() -> None:
+    class Connection:
+        def execute(self, sql, params):
+            self.sql, self.params = sql, params
+            return self
+
+        def fetchall(self):
+            return [{"symbol": "600000.SH", "observed_at": MONDAY, "raw": {}}]
+
+    connection = Connection()
+    rows = recent_quote_rows(connection, symbols=["600000.SH"], at=MONDAY)
+    assert rows[0]["symbol"] == "600000.SH"
+    assert "source_name='longhu_order_book'" in connection.sql
+    assert 'ORDER BY observed_at DESC LIMIT %s' in connection.sql
+    assert connection.params[1] == MONDAY - timedelta(minutes=35)  # 09:25 session floor
+    assert connection.params[3] == 600
+
+
+def test_codex_advisory_rediscovers_desktop_binary_after_upgrade() -> None:
+    with patch.dict(os.environ, {"INTRADAY_ADVISORY_CODEX_BIN": ""}), \
+         patch("app.intraday_advisory.model.find_codex_executable", side_effect=["old.exe", "new.exe"]), \
+         patch("app.intraday_advisory.model.subprocess.run", side_effect=[
+             FileNotFoundError(), subprocess.CompletedProcess([], 0, stdout="ok", stderr="")]) as run, \
+         patch("app.intraday_advisory.model.parse_codex_stream", return_value=({}, {}, [])), \
+         patch("app.intraday_advisory.model._normalized_response", return_value={"headline": "ok"}):
+        model = CodexAdvisoryModel()
+        result = model._run({})
+    assert result.output["headline"] == "ok"
+    assert run.call_count == 2
+    assert run.call_args.args[0][0] == "new.exe"
+
+
+def test_codex_advisory_respects_explicit_binary_pin() -> None:
+    with patch.dict(os.environ, {"INTRADAY_ADVISORY_CODEX_BIN": "missing.exe"}), \
+         patch("app.intraday_advisory.model.find_codex_executable") as find, \
+         patch("app.intraday_advisory.model.subprocess.run", side_effect=FileNotFoundError()):
+        model = CodexAdvisoryModel()
+        try:
+            model._run({})
+            assert False, "expected cli_unavailable"
+        except ModelFailure as error:
+            assert error.code == "cli_unavailable"
+    find.assert_not_called()
+
+
+def test_full_brief_downgrades_generic_missing_claims_to_as_of_boundary() -> None:
+    payload = {"as_of": MONDAY.isoformat(),
+               "broker_evidence": {"holding_snapshot_observed_at": (MONDAY-timedelta(hours=1)).isoformat()},
+               "market_context": {"industry_boards": {"watched": [{
+                   "label": "元件", "observed_at": (MONDAY-timedelta(minutes=1)).isoformat()}]}}}
+    output = _normalized_response({"market_state": "watch", "risks": [
+        "元件板块缺少本时点数据", "缺少成交价、费用及经核实的可卖数量", "跌破止损线"],
+        "holding_focus": [], "recommendation_focus": []}, payload)
+    assert output['risks'] == ["跌破止损线"]
+    assert any('09:00' in value and '已核实' in value for value in output['data_boundaries'])
+    card = analysis_card('codex', output, report_kind='tail', generated_at=MONDAY)
+    assert '阅读边界' in json.dumps(card, ensure_ascii=False)
+    assert '缺少成交价' not in json.dumps(card, ensure_ascii=False)
 
 
 def test_schedule_uses_bounded_cadences_and_special_reports() -> None:
@@ -313,6 +413,7 @@ async def _deterministic_delivery_precedes_bundled_codex_analysis() -> None:
     )
     with patch("app.intraday_advisory.runtime._scope", return_value=scope), \
          patch("app.intraday_advisory.runtime._persist_rows", return_value=1), \
+         patch("app.intraday_advisory.runtime._recent_quotes", return_value=[]), \
          patch("app.intraday_advisory.runtime._persist_event_and_delivery",
                return_value={"event_id": "event", "event_key": "key"}), \
          patch("app.intraday_advisory.runtime._discipline", return_value=[]), \
@@ -357,6 +458,7 @@ async def _quote_success_evidence_survives_intermediate_idle_ticks() -> None:
     )
     with patch("app.intraday_advisory.runtime._scope", return_value=scope), \
          patch("app.intraday_advisory.runtime._persist_rows", return_value=1), \
+         patch("app.intraday_advisory.runtime._recent_quotes", return_value=[]) as recent, \
          patch("app.intraday_advisory.runtime._discipline", return_value=[]), \
          patch("app.intraday_advisory.runtime._latest_sector_snapshot", return_value=None), \
          patch("app.intraday_advisory.runtime._status",
@@ -364,6 +466,7 @@ async def _quote_success_evidence_survives_intermediate_idle_ticks() -> None:
         first = await run_intraday_advisory_cycle(deps, state, now=MONDAY)
         second = await run_intraday_advisory_cycle(deps, state, now=MONDAY + timedelta(seconds=1))
     assert fetch.await_count == 1
+    assert recent.call_count == 1
     assert first["quote_evidence"]["fresh"] == 1
     assert second["state"] == "idle"
     assert second["quote_evidence"] == first["quote_evidence"]
