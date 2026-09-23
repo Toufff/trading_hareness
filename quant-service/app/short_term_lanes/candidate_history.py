@@ -13,7 +13,7 @@ def fetch(
     symbols: list[str], day: date, *, lookback_days: int = 80, workers: int = 8,
     source_factory: Callable[[], Any] = LonghuVendorSource,
 ) -> tuple[dict[str, list[dict]], dict]:
-    unique = list(dict.fromkeys(symbols))[:96]
+    unique = list(dict.fromkeys(symbols))[:128]
     histories: dict[str, list[dict]] = {}
     errors: dict[str, str] = {}
     strict_ready = 0

@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import json
 import logging
 from . import engine, repository, reports, source
+from .enrichment import EVIDENCE_BUDGET, history_queue, minute_queue
 from .rules import digest, validate_minute_health
 
 
@@ -39,30 +40,32 @@ def run(database, output_root):
                     minutes={}, previous_plans=repository.previous_plans(database, cutoff),
                     observed_at=datetime.now(now.tzinfo).isoformat(), event_research=news)
         progress('formal_prefilter'); preliminary = engine.formal(data)
-        queue = symbols(history + rows, sessions[-10:] + [str(cutoff.date())], preliminary)
-        manual = [r['symbol'] for r in seeds if r.get('manual_recommended') or r.get('display_rank') is not None]
-        queue = list(dict.fromkeys(manual + queue))[:96]
+        prefilter = symbols(history + rows, sessions[-10:] + [str(cutoff.date())], preliminary)
+        queue, history_coverage = history_queue(preliminary, seeds, prefilter)
+        if history_coverage['priority_missing']:
+            raise ValueError('strict_ohlc_priority_budget_exceeded:' + ','.join(history_coverage['priority_missing']))
         progress('strict_ohlc'); data['price_histories'], data['history_health'] = fetch(queue, cutoff.date())
         progress('forming_ohlc')
         from ..longhu_vendor_source import LonghuVendorSource
         from .ohlc import merge
-        data['quote_snapshots'],data['quote_health']=LonghuVendorSource().watch_quotes(queue,max_symbols=96)
+        data['quote_snapshots'],data['quote_health']=LonghuVendorSource().watch_quotes(
+            queue,max_symbols=EVIDENCE_BUDGET)
         data['ohlc_captured_at'] = datetime.now(now.tzinfo).isoformat()
         data['price_histories'],data['history_health']=merge(data['price_histories'],data['quote_snapshots'],
                                                           data['cutoff'],data['ohlc_captured_at'])
+        data['history_health']['selection'] = history_coverage
         data['observed_at'] = data['ohlc_captured_at']
         progress('formal_enriched'); preliminary = engine.formal(data)
         items = engine.candidates(data, preliminary)
         pools = [sorted([r for r in items if r['lane'] == key], key=lambda r: -(r.get('formal_rank') or 0)) for key in engine.LABELS]
-        chosen = list(dict.fromkeys(manual))
-        for i in range(max([len(p) for p in pools] + [0])):
-            for pool in pools:
-                if i < len(pool) and pool[i]['symbol'] not in chosen: chosen.append(pool[i]['symbol'])
-            if len(chosen) >= 96: break
-        chosen = chosen[:max(96, len(set(manual)))]
+        chosen, minute_coverage = minute_queue(
+            [dict(key=key, items=pool) for key, pool in zip(engine.LABELS, pools)], seeds)
+        if minute_coverage['priority_missing']:
+            raise ValueError('minute_priority_budget_exceeded:' + ','.join(minute_coverage['priority_missing']))
         progress('minutes'); data['minutes'], errors = source.fetch_minutes(chosen, cutoff)
         validate_minute_health(data['minutes'], errors)
-        data['minute_health'] = dict(requested=len(chosen), received=len(data['minutes']), errors=errors)
+        data['minute_health'] = dict(requested=len(chosen), received=len(data['minutes']), errors=errors,
+                                     selection=minute_coverage)
         data['observed_at'] = datetime.now(now.tzinfo).isoformat(); data['implementation_hash'] = engine.implementation_hash()
         data = json.loads(json.dumps(data, default=str, ensure_ascii=False))
         progress('evaluate'); result = engine.build(data)
