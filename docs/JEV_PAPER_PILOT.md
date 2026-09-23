@@ -43,6 +43,8 @@ pwsh G:/StockPlatform/current/scripts/windows/install-agent-paper-trader-task.ps
 
 任务每天 09:20 启动，崩溃后每 10 分钟尝试拉起；进程内由已核验的交易日历跳过休市日，在 09:30–11:27 和 13:00–14:56 的决策窗口按 15 分钟间隔调用。进程和账户锁防止重叠，15:01 收尾。任务是纯模拟撮合，不触碰券商。**任务注册、凭据 `model-check` 和明日交易时段真实首轮决策是三个不同的验收层级；收盘后不能声称明日首轮已通过。** 运行证据在 `G:/StockPlatform/logs/agent-paper-agent-jev-pilot.jsonl`，账本和决策从 `/api/v1/agent-paper/status?account_key=agent-jev-pilot` 读回。
 
+本机任务当前以 `Interactive` 用户令牌运行：锁屏不影响，但 Windows 用户必须保持登录；注销后不保证准点执行。2026-09-23 的一次性 `S4U`（无需交互登录）计划任务注册返回“拒绝访问”，未改变正式任务，不能把它描述为无人登录也能运行。
+
 手动运行仍可用 `run-day --backend jev --account-key agent-jev-pilot --provider-env-file G:/StockPlatform/config/jev-paper.env --decision-minutes 15`，仅在排障时使用，不与定时任务并跑。
 
 ## 验收边界
@@ -96,3 +98,11 @@ pwsh G:/StockPlatform/current/scripts/windows/install-agent-paper-trader-task.ps
 原始验收：`G:/StockPlatform/reports/jev-pilot/20260921T222922-readiness.json`。完整日志 `full-day-readiness.log` 与 `backend-readiness-tests.log` 同目录。新增入口和修复直接用于开发checkout运行的JEV模拟盘；没有重启或原地修改网站的不可变生产release。
 
 参考：[官方技能](https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai)、[HTTP API](https://docs.typesafe.ai/api)、[Choice](https://docs.typesafe.ai/primitives/choice)、[Function calling](https://docs.typesafe.ai/cookbooks/function_calling)、[模型及边界](https://docs.typesafe.ai/models)。
+
+### 2026-09-23 自动任务部署验收
+
+- 源码提交 `57173223ee81f6b01f1b81e09264eebeb4d91a81`；正式发布 `20260923T174136-57173223ee81-clean`，发布器返回 `published`，本机和共享链路最终验收为 `ok`。
+- Windows 任务契约测试通过；发布门禁后端 `3372 passed, 130 skipped, 940 subtests passed`，前端 `145 passed`、typecheck 和 build 通过。原生 Windows venv 的 2998 项 unittest 也通过（126 skipped）；开发 checkout 的 Docker Compose 命令因本机未提供 `FEISHU_APP_SECRET` 在启动前拒绝插值，不作为通过证据。
+- 发布版包装器真实 `model-check` 成功；一次性隐藏计划任务在正式 `Interactive` 用户身份下真实调用 JEV `jev-1.13.0` 成功，退出码 0、零委托。该一次性任务已删除。
+- 正式任务 `trading-hareness-agent-paper-trader-jev` 为 `Ready`，动作的 exe 和脚本均位于 `G:/StockPlatform/current`，含正确账户、后端、版本和私有配置路径；下次触发为 **2026-09-24 09:20 中国时间**。读回账户仍是 2026-09-22 的最后一轮，未借验收写入 2026-09-23 的模拟决策或委托。
+- **未验收事项**：2026-09-24 真实行情与首轮自动决策。第一轮的真实成功需检查任务结果、当日日志、状态 API 中同日期的决策记录及 `model_failed` 数量。
