@@ -58,11 +58,32 @@ def test_missing_flow_is_not_zero_and_never_becomes_bullish():
 
 def test_gaps_resets_and_auction_fail_closed():
     rows = series()
-    assert window_features(rows[:-8]+rows[-1:], 60)['status'] != 'ready'
-    assert window_features(rows[:-1]+[replace(rows[-1], amount=1)], 60)['status'] != 'ready'
+    gap = window_features(rows[:-8]+rows[-1:], 60)
+    assert gap['status'] == 'insufficient_window' and gap['reason'] == 'sample_gap'
+    assert gap['gap_seconds'] == 40
+    assert '采样中断' in gap['availability_note']
+    reset = window_features(rows[:-1]+[replace(rows[-1], amount=1)], 60)
+    assert reset['status'] == 'insufficient_window' and reset['reason'] == 'cumulative_reset'
     assert window_features([replace(x, observed_at=x.observed_at+timedelta(hours=5)) for x in rows], 60)['status'] != 'ready'
     bad = rows[:-1] + [replace(rows[-1], inner_lot=0)]
     assert window_features(bad, 60)['active_ratio'] is None
+
+
+def test_opening_baseline_shortfall_is_distinct_from_a_quote_gap():
+    rows = series()[-40:]
+    feature = window_features(rows, 60)
+    assert feature['status'] == 'ready'
+    assert feature['baseline_reason'] == 'fewer_than_three_prior_windows'
+    assert feature['volume_state'] == 'unknown'
+
+
+def test_gap_covering_window_start_reports_interruption_not_generic_coverage():
+    rows = [x for x in series() if not (AT-timedelta(minutes=3, seconds=23) < x.observed_at
+                                         < AT-timedelta(minutes=1, seconds=37))]
+    feature = window_features(rows, 180)
+    assert feature['reason'] == 'sample_gap'
+    assert feature['gap_seconds'] > 100
+    assert '采样中断' in feature['availability_note']
 
 
 def test_book_is_auxiliary_and_not_a_pressure_vote():

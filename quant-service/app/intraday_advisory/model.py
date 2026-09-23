@@ -41,6 +41,11 @@ MACDFS、RSI、布林带及量价/VWAP 是相互印证或否定的证据，不�
 成交明细缺失不应自动列为优先风险；只有它直接阻止本轮具体判断时才说明。
 industry_boards.watched 是推荐候选所涉板块的精确匹配证据，按 observed_at 判断时效；
 不得因为板块不在涨跌榜前五就说"板块数据缺失"，也不得用过期快照冒充本时点。
+windows 中 insufficient_window 的 reason 和 availability_note 解释为何不可算：
+sample_gap 是真实采样中断，必须说出中断时段而非泛称"信息缺失"；
+insufficient_coverage 是开盘或区间起点样本不足，不能与数据源失效混为一谈。
+baseline_reason=fewer_than_three_prior_windows 只表示历史对照窗口尚未积够，
+不能说成盘口、成交量或板块行情全部缺失。不得填补断采区间或推算其多空方向。
 没有可核对的同日真实成交价、数量、费用时，不得给确定 B/S、回补价位或收益承诺。
 每项必须包含股票代码、名称、当前状态、可核对证据和条件式应对。market_state 只能是 calm、watch、risk。"""
 
@@ -94,6 +99,21 @@ def _normalized_response(value, payload):
         output['risks'] = [risk for risk in output['risks'] if not (
             '板块' in risk and any(word in risk for word in ('缺少', '缺失', '没有'))
             and any(label in risk for label in fresh_labels))]
+    gap_notes: dict[str, set[str]] = {}
+    for item in payload.get('scope') or []:
+        windows = item.get('windows') or {}
+        for duration in ('180', '300'):
+            feature = windows.get(duration) or {}
+            if feature.get('reason') == 'sample_gap' and feature.get('availability_note'):
+                gap_notes.setdefault(str(feature['availability_note']), set()).add(
+                    str(item.get('name') or item.get('symbol') or '标的'))
+    if gap_notes:
+        output['risks'] = [risk for risk in output['risks'] if not (
+            '分钟' in risk and any(word in risk for word in ('缺少', '缺失', '不足')))]
+        for note, names in list(gap_notes.items())[:2]:
+            label = '、'.join(sorted(names)[:3])
+            suffix = f'等 {len(names)} 只标的' if len(names) > 3 else ''
+            boundaries.append(f'{label}{suffix}：{note}')
     output['data_boundaries'] = list(dict.fromkeys(boundaries))
     return output
 

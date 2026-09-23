@@ -29,22 +29,43 @@ def _session(at):
     return (local.date(), part) if part else None
 
 
-def _window(rows: Sequence[QuoteSample], seconds: int):
+def _window_with_diagnostic(rows: Sequence[QuoteSample], seconds: int):
+    def sample_gap(a: QuoteSample, b: QuoteSample, gap: float):
+        return [], {'reason': 'sample_gap', 'gap_seconds': gap,
+                    'gap_start_at': a.observed_at.isoformat(), 'gap_end_at': b.observed_at.isoformat(),
+                    'availability_note': f'{a.observed_at:%H:%M:%S}–{b.observed_at:%H:%M:%S} 采样中断 {gap:.0f} 秒，不能计算连续窗口。'}
+
     if not rows:
-        return []
+        return [], {'reason': 'no_samples', 'availability_note': '本轮尚无盘口采样。'}
     end = rows[-1]
     target = end.observed_at-timedelta(seconds=seconds)
     start = next((x for x in reversed(rows) if x.observed_at <= target), None)
+    if start is not None and (target-start.observed_at).total_seconds() > 15:
+        after = next((x for x in rows if x.observed_at > target), None)
+        if after is not None:
+            gap = (after.observed_at-start.observed_at).total_seconds()
+            if gap > 20:
+                return sample_gap(start, after, gap)
     if start is None or (target-start.observed_at).total_seconds() > 15:
-        return []
+        return [], {'reason': 'insufficient_coverage',
+                    'availability_note': f'区间起点 {target:%H:%M:%S} 附近没有有效采样，不能计算连续窗口。'}
     segment = [x for x in rows if start.observed_at <= x.observed_at <= end.observed_at]
     if not _session(end.observed_at) or any(_session(x.observed_at) != _session(end.observed_at) or
                                            x.symbol != end.symbol for x in segment):
-        return []
-    if any(not 0 < (b.observed_at-a.observed_at).total_seconds() <= 20 or
-           b.amount < a.amount or b.volume_lot < a.volume_lot for a,b in zip(segment,segment[1:])):
-        return []
-    return segment
+        return [], {'reason': 'session_boundary', 'availability_note': '区间跨越交易时段边界，不能拼接计算。'}
+    for a,b in zip(segment,segment[1:]):
+        gap = (b.observed_at-a.observed_at).total_seconds()
+        if gap > 20:
+            return sample_gap(a, b, gap)
+        if gap <= 0:
+            return [], {'reason': 'non_monotonic_clock', 'availability_note': '盘口时间戳未递增，不能计算连续窗口。'}
+        if b.amount < a.amount or b.volume_lot < a.volume_lot:
+            return [], {'reason': 'cumulative_reset', 'availability_note': '累计量额回退，不能跨回退点计算窗口。'}
+    return segment, {}
+
+
+def _window(rows: Sequence[QuoteSample], seconds: int):
+    return _window_with_diagnostic(rows, seconds)[0]
 
 
 def _rate(segment):
@@ -52,9 +73,10 @@ def _rate(segment):
 
 
 def window_features(rows: Sequence[QuoteSample], seconds: int) -> dict[str, Any]:
-    segment = _window(rows, seconds)
+    segment, diagnostic = _window_with_diagnostic(rows, seconds)
     if not segment:
-        return {'status':'insufficient_window', 'window_seconds':seconds, 'feature_version':VERSION}
+        return {'status':'insufficient_window', 'window_seconds':seconds,
+                'feature_version':VERSION, **diagnostic}
     first, last = segment[0], segment[-1]
     amount, volume = last.amount-first.amount, last.volume_lot-first.volume_lot
     change = (last.price/first.price-1)*100
@@ -105,6 +127,7 @@ def window_features(rows: Sequence[QuoteSample], seconds: int) -> dict[str, Any]
             'amount_per_minute':round(_rate(segment),2),
             'amount_ratio':round(ratio,3) if ratio is not None else None,
             'baseline_windows':len(baseline), 'baseline_kind':'prior_equal_window_median',
+            'baseline_reason':'fewer_than_three_prior_windows' if normal is None else None,
             'volume_state':'unknown' if ratio is None else 'expanded' if ratio>=1.5 else 'contracted' if ratio<=2/3 else 'normal',
             'active_ratio':round(active,4) if active is not None else None,
             'flow_coverage':round((outer+inner)/volume,3) if flow_valid else None,

@@ -155,6 +155,18 @@ def test_full_brief_downgrades_generic_missing_claims_to_as_of_boundary() -> Non
     assert '缺少成交价' not in json.dumps(card, ensure_ascii=False)
 
 
+def test_brief_names_real_quote_gap_instead_of_generic_missing_information() -> None:
+    payload = {"as_of": MONDAY.isoformat(), "scope": [{"symbol": "002315.SZ", "name": "焦点科技",
+        "windows": {"180": {"status": "insufficient_window", "reason": "sample_gap",
+            "availability_note": "09:56:36–09:58:24 采样中断 108 秒，不能计算连续窗口。"}}}]}
+    output = _normalized_response({"market_state": "watch", "risks": [
+        "近三分钟和五分钟信号不足，信息缺失", "跌破止损线"],
+        "holding_focus": [], "recommendation_focus": []}, payload)
+    assert output['risks'] == ["跌破止损线"]
+    assert output['data_boundaries'] == [
+        "焦点科技：09:56:36–09:58:24 采样中断 108 秒，不能计算连续窗口。"]
+
+
 def test_schedule_uses_bounded_cadences_and_special_reports() -> None:
     regular = decide(MONDAY, last_fetch=MONDAY - timedelta(seconds=5),
                      last_deepseek=MONDAY - timedelta(minutes=10),
