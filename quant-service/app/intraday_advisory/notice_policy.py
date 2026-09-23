@@ -26,12 +26,21 @@ CONDITION_LABELS = {
     'buy_authorized':'候选资格', 'stage':'计划阶段', 'decision':'研究结论',
     'entry_plan':'入场计划', 'exit':'退出条件', 'action_plan':'应对计划',
     'risk_notes':'风险说明', 'company_risk':'公司风险',
+    'technical_state':'重点监控量价状态',
 }
+
+FOCUS_STATES = {'bullish_confirmation':'量价与动量共同转强',
+                'bearish_confirmation':'量价与动量共同转弱',
+                'sideways':'持续横盘且量能收缩', 'mixed':'信号混合，暂无确认'}
 
 
 def condition_values(item):
     facts = item.get('position_or_recommendation') or {}
-    return {'scope':item.get('scope'), **{k:v for k,v in facts.items() if k in CONDITION_LABELS}}
+    result = {'scope':item.get('scope'), **{k:v for k,v in facts.items() if k in CONDITION_LABELS}}
+    technical = item.get('focus_technicals') or {}
+    if facts.get('monitoring_focus') and technical.get('status') == 'ready':
+        result['technical_state'] = FOCUS_STATES.get(technical.get('state'), '状态待确认')
+    return result
 
 
 def condition_signature(item):
@@ -43,7 +52,12 @@ def condition_changes(current, previous):
     if previous is None:
         return []
     before, after = condition_values(previous), condition_values(current)
-    return sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
+    changes = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
+    # A stale/failed minute feed is a data-quality fault, not a bearish turn.
+    if 'technical_state' in changes and ('technical_state' not in after or
+            ('technical_state' not in before and after['technical_state'] == FOCUS_STATES['mixed'])):
+        changes.remove('technical_state')
+    return changes
 
 
 def condition_evidence(current):

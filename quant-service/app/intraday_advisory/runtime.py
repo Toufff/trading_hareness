@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict, deque
+from dataclasses import replace
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import os
@@ -34,6 +35,8 @@ from .delta import DELTA_KINDS, compact_facts, prepare_delta, bind_output
 from .schedule import decide
 from .scope import AdvisoryScope, load_scope
 from .notice_policy import VERSION as NOTICE_VERSION, BRIEFING_TIMES
+from .focus_technicals import technical_evidence
+from ..trade_discipline.alerts_evaluation import validate_minute_tape
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -66,6 +69,7 @@ class IntradayAdvisoryDependencies:
     deepseek_factory: Callable[[], Any] = DeepSeekAdvisoryModel
     codex_factory: Callable[[], Any] = CodexAdvisoryModel
     dashboard_url: Callable[[], str | None] = lambda: None
+    fetch_minutes: Callable[[str], Awaitable[dict[str, Any]]] | None = None
 
 
 @dataclass
@@ -97,6 +101,9 @@ class RuntimeState:
     pressure_day: Any = None
     last_pressure_refresh: datetime | None = None
     last_drain: datetime | None = None
+    focus_last_fetch: datetime | None = None
+    focus_task: Any = None
+    focus_technicals: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _fresh(row: dict[str, Any], now: datetime) -> bool:
@@ -165,6 +172,19 @@ def _discipline_covers(database: Any, event_id: Any, key: str) -> bool:
         return signal_delivery_suppressed(connection, event_id, account_key=key)
 
 
+async def _fetch_focus_technicals(deps: IntradayAdvisoryDependencies, symbols: list[str],
+                                  current: datetime) -> dict[str, dict[str, Any]]:
+    async def one(symbol: str) -> tuple[str, dict[str, Any]]:
+        try:
+            assert deps.fetch_minutes is not None
+            session = await deps.fetch_minutes(symbol)
+            tape = validate_minute_tape(session, current)
+            return symbol, technical_evidence(tape)
+        except Exception as error:  # noqa: BLE001 - one tape cannot stop quotes
+            return symbol, {'status': 'unavailable', 'reason': safe_error_detail(str(error), 120)}
+    return dict(await asyncio.gather(*(one(symbol) for symbol in symbols)))
+
+
 async def _drain(deps: IntradayAdvisoryDependencies) -> dict[str, int]:
     rows = await deps.run_database(lambda: _load_due(deps.database))
     counts = {"attempted": 0, "sent": 0, "failed": 0, "disabled": 0}
@@ -202,10 +222,18 @@ def _context(scope: AdvisoryScope, state: RuntimeState, now: datetime, *,
     for item in scope.items:
         series = state.samples.get(item.symbol)
         sample = series[-1] if series else None
+        technical = state.focus_technicals.get(item.symbol) if item.facts.get('monitoring_focus') else None
+        if technical and technical.get('as_of'):
+            try:
+                if now-datetime.fromisoformat(technical['as_of']) > timedelta(minutes=10):
+                    technical = None
+            except (TypeError, ValueError):
+                technical = None
         latest.append({
             "symbol": item.symbol, "name": item.name, "scope": item.source,
             "position_or_recommendation": compact_facts(item.facts) if report_kind in DELTA_KINDS else item.facts,
             "windows": feature_bundle(list(series)) if series else {},
+            "focus_technicals": technical,
             "quote": ({"price": sample.price, "pre_close": sample.pre_close,
                        "pct_change": round((sample.price / sample.pre_close - 1) * 100, 3),
                        "cumulative_amount": sample.amount, "observed_at": sample.observed_at.isoformat()}
@@ -376,6 +404,14 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
     current = (now or deps.now()).astimezone(SHANGHAI)
     key = deps.account_key()
     scope = await deps.run_database(lambda: _scope(deps.database, key, current))
+    if state.focus_task is not None and state.focus_task.done():
+        try:
+            state.focus_technicals.update(state.focus_task.result())
+        except Exception as error:  # noqa: BLE001 - technical research must not stop quote acquisition
+            outcome_error = safe_error_detail(str(error), 120)
+            state.focus_technicals = {item.symbol: {'status': 'unavailable', 'reason': outcome_error}
+                                      for item in scope.items if item.facts.get('monitoring_focus')}
+        state.focus_task = None
     decision = decide(current, last_fetch=state.last_fetch, last_deepseek=state.last_deepseek,
                       last_codex=state.last_codex)
     outcome: dict[str, Any] = {"state": "idle", "scope_size": len(scope.items), "events": 0,
@@ -383,6 +419,8 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
                                'notification_policy':NOTICE_VERSION,
                                'briefing_times':list(BRIEFING_TIMES),
                                'event_model_followup':False}
+    outcome['manual_focus_count'] = sum(item.source == 'holding' and bool(item.facts.get('monitoring_focus'))
+                                        for item in scope.items)
     if state.analysis_task is not None and state.analysis_task.done():
         task, state.analysis_task = state.analysis_task, None
         try:
@@ -419,6 +457,15 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
             if fresh:
                 await deps.run_database(lambda: _persist_rows(deps.database, current.astimezone(timezone.utc), fresh))
             source_by_symbol = {item.symbol: item.source for item in scope.items}
+            focused_symbols = [item.symbol for item in scope.items if item.source == 'holding'
+                               and item.facts.get('monitoring_focus')]
+            if deps.fetch_minutes and focused_symbols and (state.focus_last_fetch is None or
+                    current-state.focus_last_fetch >= timedelta(seconds=60)) and state.focus_task is None:
+                state.focus_last_fetch = current
+                state.focus_task = asyncio.create_task(_fetch_focus_technicals(deps, focused_symbols, current))
+            for symbol in list(state.focus_technicals):
+                if symbol not in focused_symbols:
+                    del state.focus_technicals[symbol]
             for row in fresh:
                 clock = exchange_time_status({'price_trade_time':row.get('trade_time')},current,20)
                 observed = datetime.fromisoformat(clock['observed_trade_time'])
@@ -436,6 +483,15 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
                     series.popleft()
                 signal = pressure_event(list(series),state.pressure_states.get(sample.symbol))
                 if signal:
+                    if sample.symbol in focused_symbols:
+                        technical = state.focus_technicals.get(sample.symbol)
+                        if technical and technical.get('status') == 'ready' and technical.get('as_of'):
+                            try:
+                                fresh_technical = current-datetime.fromisoformat(technical['as_of']) <= timedelta(minutes=3)
+                            except (TypeError, ValueError):
+                                fresh_technical = False
+                            if fresh_technical:
+                                signal = replace(signal, metrics={**signal.metrics, 'focus_technicals': technical})
                     source = source_by_symbol.get(signal.symbol, "recommendation")
                     await _emit_signal(deps, state, signal, source, current, outcome)
 
@@ -517,6 +573,8 @@ async def run_intraday_advisory_cycle(deps: IntradayAdvisoryDependencies, state:
         "indices_received": state.last_indices_received,
         "indices_fresh": state.last_indices_fresh,
     }
+    outcome['focus_technical_status'] = {item.symbol: state.focus_technicals.get(item.symbol, {}).get('status', 'pending')
+                                         for item in scope.items if item.facts.get('monitoring_focus')}
     await deps.run_database(lambda: _status(
         deps.database, state=outcome["state"], account_key=key, now=current,
         scope_size=len(scope.items), details=outcome))
@@ -531,6 +589,8 @@ async def run_intraday_advisory_loop(deps: IntradayAdvisoryDependencies) -> None
         except asyncio.CancelledError:
             if state.analysis_task is not None:
                 state.analysis_task.cancel()
+            if state.focus_task is not None:
+                state.focus_task.cancel()
             raise
         except Exception as error:  # one bad provider cycle must not kill the leased loop
             now = deps.now().astimezone(SHANGHAI)

@@ -55,6 +55,17 @@ def load_scope(connection: Any, *, account_key: str, as_of: datetime) -> Advisor
         for raw in rows:
             row = dict(raw)
             by_symbol[str(row["symbol"])] = ScopeItem(str(row["symbol"]), str(row["name"]), "holding", row)
+        if by_symbol:
+            focused = connection.execute("""
+                SELECT symbol,intent,expires_at FROM quant.intraday_holding_focus
+                 WHERE account_key=%s AND expires_at>%s AND symbol=ANY(%s)""",
+                (account_key, as_of, list(by_symbol))).fetchall()
+            for raw in focused:
+                row = dict(raw)
+                item = by_symbol[row['symbol']]
+                by_symbol[item.symbol] = ScopeItem(item.symbol, item.name, item.source,
+                    {**item.facts, 'monitoring_focus': {'intent': row['intent'],
+                       'expires_at': row['expires_at']}})
 
     decision = _one(connection, """
         SELECT decision_id,result,created_at

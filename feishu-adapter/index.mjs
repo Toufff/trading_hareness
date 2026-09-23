@@ -1283,6 +1283,7 @@ const researchPaths = new Map([
 	['/api/research/events/announcements', '/api/v1/events/announcements'],
 	['/api/research/events/lhb', '/api/v1/events/lhb'],
 	['/api/research/theses', '/api/v1/research/theses'],
+	['/api/research/intraday/advisory/focus', '/api/v1/intraday/advisory/focus'],
 ]);
 
 const researchActions = new Map([
@@ -1334,7 +1335,7 @@ async function proxyResearch(path, search, response) {
 	response.end(body);
 }
 
-async function proxyResearchAction(path, request, response, method = 'POST') {
+async function proxyResearchAction(path, request, response, method = 'POST', search = '') {
 	if (!quantServiceUrl) throw new Error('量化研究服务未配置');
 	const chunks = []; let size = 0;
 	for await (const chunk of request) {
@@ -1344,7 +1345,7 @@ async function proxyResearchAction(path, request, response, method = 'POST') {
 	}
 	const longRunning = path.includes('/market/') || path.includes('/tushare/audit') || path.includes('/realtime/probe') || path.includes('/akshare/probe') || path.includes('/strategy/post-close/run') || path.includes('/strategy/pattern-mining/run') || path.includes('/strategy/watchlist-main-wave/run') || path.includes('/ten-day-leader-rotation/run');
 	const timeoutMs = path.includes('/market/post-close/refresh') ? 360_000 : longRunning ? 180_000 : 45_000;
-	const upstream = await fetch(`${quantServiceUrl}${path}`, {
+	const upstream = await fetch(`${quantServiceUrl}${path}${search}`, {
 		method,
 		headers: {
 			'content-type': 'application/json', accept: 'application/json',
@@ -1385,6 +1386,13 @@ const dashboard = createServer((request, response) => {
 	const researchAction = researchActions.get(url.pathname);
 	if (researchAction && request.method === 'POST') {
 		void proxyResearchAction(researchAction, request, response).catch(routeErrorHandler(response, 503));
+		return;
+	}
+	const intradayFocus = /^\/api\/research\/intraday\/advisory\/focus\/(\d{6}\.(?:SH|SZ|BJ))$/i.exec(url.pathname);
+	if (intradayFocus && (method === 'PUT' || method === 'DELETE')) {
+		const symbol = intradayFocus[1].toUpperCase();
+		void proxyResearchAction(`/api/v1/intraday/advisory/focus/${symbol}`, request, response,
+			method, url.search).catch(routeErrorHandler(response, 503));
 		return;
 	}
 	if (url.pathname === '/api/research/paper/accounts' && request.method === 'PUT') {

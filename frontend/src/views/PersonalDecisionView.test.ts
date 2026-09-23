@@ -69,12 +69,44 @@ describe('PersonalDecisionView', () => {
     expect(wrapper.text()).toContain('我的持仓');
     expect(wrapper.text()).toContain('账户持仓建议');
     expect(wrapper.text()).not.toContain('全市场扫描观察');
-    // Besides the holding advice, only the read-only discipline board is loaded - no market or scan endpoint.
+    // Besides holding advice, only the focus read and the read-only discipline board are loaded.
     const urls = fetchMock.mock.calls.map(([url]) => String(url));
     expect(urls.filter((url) => !url.startsWith('/api/research/discipline/'))).toEqual([
-      expect.stringContaining('/api/research/personal/holding-advice/latest')]);
+      expect.stringContaining('/api/research/personal/holding-advice/latest'),
+      expect.stringContaining('/api/research/intraday/advisory/focus?account_key=citics-primary')]);
     expect(urls.some((url) => url.startsWith('/api/research/discipline/plans/latest?account_key=citics-primary'))).toBe(true);
     expect(wrapper.find('[data-testid=discipline-board]').exists()).toBe(true);
+  });
+
+  it('lets the operator mark a verified holding for this session without placing an order', async () => {
+    let focused = false;
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.includes('/intraday/advisory/focus/002315.SZ') && options?.method === 'PUT') {
+        focused = true;
+        return Promise.resolve(jsonResponse({ symbol: '002315.SZ', focused }));
+      }
+      if (url.includes('/intraday/advisory/focus?')) return Promise.resolve(jsonResponse({
+        snapshot_at: '2026-09-22T15:19:00+08:00', snapshot_current: true,
+        items: [{ symbol: '002315.SZ', name: '焦点科技', quantity: 800, focused }],
+      }));
+      if (url.includes('holding-advice')) return Promise.resolve(jsonResponse({
+        status: 'ready', as_of_at: '2026-09-23T11:30:00+08:00',
+        portfolio_observed_at: '2026-09-22T15:19:00+08:00', freshness_status: 'current',
+        actions: [], delivery: { eligible: true },
+      }));
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const wrapper = mount(PersonalDecisionView, { props: { mode: 'holdings' }, global: { plugins: [ElementPlus] } });
+    await flushPromises();
+    const panel = wrapper.find('[data-testid=holding-focus-panel]');
+    expect(panel.text()).toContain('焦点科技');
+    await panel.find('.action-heading button').trigger('click');
+    await flushPromises();
+    expect(fetchMock.mock.calls.some(([url, options]) => String(url).includes('/focus/002315.SZ')
+      && (options as RequestInit)?.method === 'PUT')).toBe(true);
+    expect(panel.text()).toContain('今日盘中重点');
+    expect(panel.text()).toContain('不自动交易');
   });
 
   it('explains that stale holdings require a user-initiated sync and shows observed_at', async () => {

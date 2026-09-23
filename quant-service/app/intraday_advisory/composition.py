@@ -27,6 +27,7 @@ def build_notification_loops(*, database: Any, run_database: Any, fetch_minutes:
         now=now, interval_seconds=alert_interval_seconds))
     advisory = lambda: run_intraday_advisory_loop(IntradayAdvisoryDependencies(  # noqa: E731
         database=database, run_database=run_database, fetch_quotes=fetch_quotes, fetch_indices=fetch_indices,
+        fetch_minutes=fetch_minutes,
         post_text=post_text, post_card=post_card,
         session_open=session_open, now=now, account_key=advisory_account_key,
         dashboard_url=dashboard_url))

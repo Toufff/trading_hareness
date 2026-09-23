@@ -11,7 +11,8 @@ DELTA_KINDS = {'event','discipline','ten_minute'}
 FACT_KEYS = {'quantity','sellable_quantity','position_weight_pct','trigger','invalidation',
              'risk','risk_notes','action','action_plan','buy_condition','buy_conditions',
              'entry','entry_plan','exit','stop_loss','decision','stage','sector','why_now',
-             'trade_thesis','thesis','conditions','invalidation_price','buy_authorized','company_risk'}
+             'trade_thesis','thesis','conditions','invalidation_price','buy_authorized','company_risk',
+             'monitoring_focus'}
 
 
 def compact_facts(facts):
@@ -24,7 +25,8 @@ def scope_signature(item):
     change = feature.get('price_change_pct') or 0
     value = [feature.get('pressure_state'),feature.get('volume_state'),
              'up' if change>=.15 else 'down' if change<=-.15 else 'flat',
-             item.get('scope'),compact_facts(item.get('position_or_recommendation') or {})]
+             item.get('scope'),condition_values(item).get('technical_state'),
+             compact_facts(item.get('position_or_recommendation') or {})]
     return sha256(json.dumps(value,sort_keys=True,default=str,ensure_ascii=False).encode()).hexdigest()
 
 

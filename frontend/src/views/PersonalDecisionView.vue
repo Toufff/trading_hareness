@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue';
-import { computed, defineAsyncComponent, reactive, ref } from 'vue';
+import { computed, defineAsyncComponent, onMounted, reactive, ref, watch } from 'vue';
+import { deleteJson, getJson, putJson } from '../api/http';
 import { usePersonalDecisionWorkspace, type TradePlan } from '../composables/usePersonalDecisionWorkspace';
 import ResearchOnlyBadge from '../components/ResearchOnlyBadge.vue';
 import RecommendationPoolPanel from '../components/RecommendationPoolPanel.vue';
@@ -17,6 +18,47 @@ const holdingHasSnapshot = computed(() => Boolean(workspace.brief?.holdings?.por
 // News research is background context on the selection page: rendered (and
 // polled) only when the reader opens it, so it never pushes candidates down.
 const newsOpen = ref(false);
+type FocusItem = { symbol: string; name: string; quantity: string | number; focused: boolean; expires_at?: string | null };
+const focusItems = ref<FocusItem[]>([]);
+const focusSnapshotAt = ref<string | null>(null);
+const focusSnapshotCurrent = ref(false);
+const focusError = ref('');
+const focusBusy = ref(false);
+const focusUpdating = ref('');
+function focusPath(symbol?: string): string {
+  const base = '/api/research/intraday/advisory/focus';
+  return `${base}${symbol ? `/${encodeURIComponent(symbol)}` : ''}?account_key=${encodeURIComponent(workspace.accountKey)}`;
+}
+async function loadFocus() {
+  if (!isHoldingsView.value) return;
+  focusBusy.value = true;
+  focusError.value = '';
+  try {
+    const result = await getJson<{ snapshot_at: string | null; snapshot_current: boolean; items: FocusItem[] }>(focusPath());
+    focusItems.value = result.items;
+    focusSnapshotAt.value = result.snapshot_at;
+    focusSnapshotCurrent.value = result.snapshot_current;
+  } catch (error) {
+    focusError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    focusBusy.value = false;
+  }
+}
+async function toggleFocus(item: FocusItem) {
+  focusUpdating.value = item.symbol;
+  focusError.value = '';
+  try {
+    if (item.focused) await deleteJson(focusPath(item.symbol));
+    else await putJson(focusPath(item.symbol));
+    await loadFocus();
+  } catch (error) {
+    focusError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    focusUpdating.value = '';
+  }
+}
+onMounted(loadFocus);
+watch(() => workspace.accountKey, loadFocus);
 
 function snapshotTime(value: unknown) {
   if (!value) return '—';
@@ -239,6 +281,17 @@ function compactMoney(value: unknown): string {
         <p v-else class="context-hint">消息研究不进入选股结论，只解释方向；需要时再展开，避免挤占候选区域。</p>
       </el-card>
       </div>
+
+      <el-card v-if="isHoldingsView" shadow="never" class="section-gap decision-section holdings-only-section" data-testid="holding-focus-panel">
+        <template #header><div class="section-title"><div><strong>盘中重点监控</strong><small>仅在已核实持仓中手动标记；当日 15:05 自动失效，不提高例行消息频率，不自动交易。</small></div><el-button size="small" :loading="focusBusy" @click="loadFocus">刷新</el-button></div></template>
+        <el-alert v-if="focusError" :title="focusError" type="error" :closable="false" show-icon />
+        <p v-if="!focusItems.length" class="context-hint">没有可标记的已核实持仓快照。</p>
+        <p v-else class="context-hint">持仓快照：{{ snapshotTime(focusSnapshotAt) }}。{{ focusSnapshotCurrent ? '新增成交及可卖数量以最新券商同步为准。' : '快照已过期，请先主动同步持仓。' }}重点标记不是 B/S 点或买卖授权。</p>
+        <div v-for="item in focusItems" :key="item.symbol" class="action-heading">
+          <div><strong>{{ item.name }}</strong><span>（{{ item.symbol }}，{{ item.quantity }} 股）</span></div>
+          <el-space><el-tag v-if="item.focused" type="warning">今日盘中重点</el-tag><el-button size="small" :type="item.focused ? 'default' : 'primary'" :disabled="!item.focused && !focusSnapshotCurrent" :loading="focusUpdating === item.symbol" @click="toggleFocus(item)">{{ item.focused ? '取消重点' : '设为今日重点' }}</el-button></el-space>
+        </div>
+      </el-card>
 
       <el-card v-if="isHoldingsView" shadow="never" class="section-gap decision-section holdings-only-section">
         <template #header><div class="section-title"><div><strong>账户持仓建议</strong><small>独立券商链；持仓快照 {{ displayValue(workspace.brief.holdings.portfolio_observed_at) }}</small></div><el-space><el-input v-model="workspace.accountKey" aria-label="账户标识" class="account-input" @keyup.enter="workspace.load" /><span>{{ workspace.brief.holdings.actions?.length ?? 0 }} 项</span></el-space></div></template>

@@ -147,6 +147,18 @@ def signal_card(signal: AdvisorySignal, *, source: str,
                     markdown('**计划影响**　这是行情变化，不代表原纪律或买入条件已经触发；请按原计划确认。'),
                     collapsible_panel('区间证据与盘口辅助',pressure_details(signal.metrics),element_id='evidence'),
                     markdown(f"行情截至 {signal.observed_at:%H:%M:%S} · 描述性研究提醒，不是买卖指令",size='notation')]
+        focus = signal.metrics.get('focus_technicals') or {}
+        if focus.get('status') == 'ready':
+            from .notice_policy import FOCUS_STATES
+            state = FOCUS_STATES.get(focus.get('state'), '信号混合，暂无确认')
+            parts = [f"逐分钟收盘价的分时动量：{state}",
+                     f"近3分钟{'上涨' if focus['change_3m_pct'] > 0 else '下跌' if focus['change_3m_pct'] < 0 else '持平'} {abs(focus['change_3m_pct']):.2f}%",
+                     f"标准分时 MACD 柱 {focus['macdfs']:+.4f}", f"RSI14 {focus['rsi14']:.1f}"]
+            if focus.get('amount_ratio_3m') is not None:
+                parts.append(f"近3分钟每分钟成交额为前20分钟中位数的 {focus['amount_ratio_3m']:.1f} 倍")
+            elements.insert(3, content_panel('**今日重点监控**　'+'；'.join(parts)
+                +'。仅作量价确认，不是独立 B/S 点；当日成交与可卖数量须按券商记录核实。',
+                element_id='manual_focus', color='orange'))
         url = market_decision_url(dashboard_url)
         if url:
             elements.append(open_url_button('打开决策工作台',url,element_id='open_dashboard'))
