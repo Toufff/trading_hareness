@@ -61,6 +61,47 @@ def searches(transcript: list[dict[str, Any]] | None) -> list[dict[str, str]]:
     return found
 
 
+def collect_display_names(view: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+    """Resolve names already present in the day view; list symbols needing catalog fallback."""
+    names: dict[str, str] = {}
+    symbols: set[str] = set()
+
+    def collect(row: Any) -> None:
+        if not isinstance(row, dict):
+            return
+        symbol = str(row.get("symbol") or "").upper()
+        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
+            return
+        symbols.add(symbol)
+        name = str(row.get("name") or "").strip()
+        if name and symbol not in names:
+            names[symbol] = name
+
+    for order in (view.get("human_trades") or {}).get("orders") or []:
+        collect(order)
+    for account in view.get("accounts") or []:
+        for key in ("positions", "orders"):
+            for row in account.get(key) or []:
+                collect(row)
+        for decision in account.get("decisions") or []:
+            for key in ("proposed", "ledger_orders", "outcomes"):
+                for row in decision.get(key) or []:
+                    collect(row)
+                    collect(row.get("order") if isinstance(row, dict) else None)
+    return names, sorted(symbols - names.keys())
+
+
+def resolve_display_names(connection: Any, view: dict[str, Any]) -> dict[str, str]:
+    names, missing = collect_display_names(view)
+    if missing:
+        for row in connection.execute(
+            "SELECT symbol,name FROM quant.instruments WHERE symbol=ANY(%s)", (missing,)
+        ).fetchall():
+            if row["name"]:
+                names[row["symbol"]] = row["name"]
+    return names
+
+
 def day_view(connection: Any, day: date) -> dict[str, Any]:
     from app.agent_paper.report import status
     accounts = [row["account_key"] for row in connection.execute(
@@ -125,6 +166,7 @@ def day_view(connection: Any, day: date) -> dict[str, Any]:
             "latest_nav": latest_nav, "positions": positions, "orders": orders, "decisions": decisions,
         })
     result["human_trades"] = human_view(connection, day)
+    result["symbol_names"] = resolve_display_names(connection, result)
     return result
 
 

@@ -120,6 +120,7 @@ const REASONS={no_live_quote:'无实时行情',not_board_lot:'不是整百股',l
 const reason=r=>REASONS[r]||REASONS[String(r).split(':')[0]]||r;
 const CLS={me:'me'};
 let current=null,lastBody='',view='lanes',actorFilter=new Set(),roundAccount=null;
+const stockName=(d,symbol,name)=>String(name??'').trim()||String(d.symbol_names?.[symbol]??'').trim();
 
 async function api(path){const r=await fetch(path,{cache:'no-store'});const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j;}
 
@@ -179,7 +180,7 @@ function events(d){
   const notes=d.human_trades?.notes||{};
   for(const o of d.human_trades?.orders||[]){
     const note=notes[o.order_number]||{},fallback=journal[o.symbol];
-    rows.push({at:`${d.day}T${o.first_fill_time}+08:00`,actor:'me',side:o.side,symbol:o.symbol,name:o.name,
+    rows.push({at:`${d.day}T${o.first_fill_time}+08:00`,actor:'me',side:o.side,symbol:o.symbol,name:stockName(d,o.symbol,o.name),
       quantity:o.quantity,price:o.avg_price,status:'filled',order_number:o.order_number,
       note:o.fills>1?`分 ${o.fills} 笔成交`+(o.order_time?` · 委托 ${o.order_time}`:''):(o.order_time?`委托 ${o.order_time}`:''),
       why:note.body||(fallback?fallback.body:''),plan:note.plan||(fallback&&(fallback.plans||[])[0]?fallback.plans[0].plan:''),
@@ -189,7 +190,7 @@ function events(d){
     const byId=Object.fromEntries(a.decisions.flatMap(z=>(z.ledger_orders||[]).map(o=>[o.order_id,z])));
     for(const o of a.orders){
       const z=byId[o.order_id];
-      rows.push({at:o.placed_at,actor:a.account_key,side:o.side,symbol:o.symbol,name:o.name,quantity:o.quantity,
+      rows.push({at:o.placed_at,actor:a.account_key,side:o.side,symbol:o.symbol,name:stockName(d,o.symbol,o.name),quantity:o.quantity,
         price:o.fill_price??o.limit_price,status:o.status,
         note:[o.order_type==='limit'?`限价 ${num(o.limit_price)}`:'市价',o.filled_quantity?`成交 ${int(o.filled_quantity)} 股`:'',
               (o.reject_reasons||[]).map(reason).join('、')].filter(Boolean).join(' · '),
@@ -199,7 +200,7 @@ function events(d){
       for(const o of z.outcomes||[]){
         if(o.order_id)continue;
         const raw=o.order||{};
-        rows.push({at:z.decided_at,actor:a.account_key,side:raw.action,symbol:raw.symbol,name:'',quantity:raw.quantity,
+        rows.push({at:z.decided_at,actor:a.account_key,side:raw.action,symbol:raw.symbol,name:stockName(d,raw.symbol,raw.name),quantity:raw.quantity,
           price:raw.limit_price,status:o.status==='cancelled'?'cancelled':'rejected',
           note:'下单前被规则拒绝 · '+(o.reasons||[]).map(reason).join('、'),why:raw.reason});
       }
@@ -404,7 +405,7 @@ function symbolsView(d){
       if(hold)parts.push(`<div class="muted small">持仓 ${int(hold)} 股</div>`);
       return `<td class="nowrap">${parts.join('')}</td>`;
     }).join('');
-    return `<tr><td class="nowrap"><strong>${esc(names[symbol]||'')}</strong><div class="muted small">${esc(symbol)}</div></td>
+    return `<tr><td class="nowrap"><strong>${esc(stockName(d,symbol,names[symbol]))}</strong><div class="muted small">${esc(symbol)}</div></td>
       <td class="nowrap">${marks[symbol]?num(marks[symbol],3):'—'}</td>${tds}</tr>`;
   }).join('');
   return `<div class="panel"><h2><span>同一只票，${all.length}方各自怎么做的</span><span class="muted small">价格为最近一次记账价</span></h2>
@@ -418,24 +419,24 @@ function roundsView(d){
   roundAccount=d.accounts.some(a=>a.account_key===roundAccount)?roundAccount:d.accounts[0].account_key;
   const picker=d.accounts.map(a=>`<button data-account="${esc(a.account_key)}" aria-pressed="${a.account_key===roundAccount}">${esc(NAMES[a.account_key]||a.account_key)}</button>`).join('');
   const a=d.accounts.find(x=>x.account_key===roundAccount);
-  const rounds=a.decisions.slice().reverse().map(z=>round(z)).join('')||'<p class="empty">这一天没有决策记录。</p>';
+  const rounds=a.decisions.slice().reverse().map(z=>round(z,d)).join('')||'<p class="empty">这一天没有决策记录。</p>';
   return `<div class="panel"><h2><span>逐轮决策（最新在上）</span><span class="filters">${picker}</span></h2>${rounds}</div>`;
 }
-function round(z){
+function round(z,d){
   const st=z.status==='decided'?'<span class="badge b-ok">已决策</span>':`<span class="badge b-bad">${esc(z.status)}</span>`;
   const orders=[];
   for(const o of z.ledger_orders||[]){
     const [label,cls]=STATUS[o.status]||[o.status,'b-info'];
     const fill=o.filled_quantity?` ${int(o.filled_quantity)}@${num(o.fill_price,3)}`:'';
     const rej=(o.reject_reasons||[]).map(reason).join('、');
-    orders.push(`<div class="order ${esc(o.side)}"><div class="line"><span class="side-${esc(o.side)}">${SIDE[o.side]||o.side}</span> ${esc(o.name??'')} ${esc(o.symbol)} ${int(o.quantity)} 股
+    orders.push(`<div class="order ${esc(o.side)}"><div class="line"><span class="side-${esc(o.side)}">${SIDE[o.side]||o.side}</span> ${esc(stockName(d,o.symbol,o.name))} ${esc(o.symbol)} ${int(o.quantity)} 股
       · ${o.order_type==='limit'?'限价 '+num(o.limit_price,3):'市价'} <span class="badge ${cls}">${label}${fill}</span>${rej?`<span class="muted small">${esc(rej)}</span>`:''}</div>
       <div class="why clamp" data-clamp>${esc(o.reason)}</div></div>`);
   }
   for(const o of z.outcomes||[]){
     if(o.order_id)continue;
     const raw=o.order||{};
-    orders.push(`<div class="order ${esc(raw.action)}"><div class="line"><span class="side-${esc(raw.action)}">${SIDE[raw.action]||esc(raw.action)}</span> ${esc(raw.symbol)} ${int(raw.quantity)} 股
+    orders.push(`<div class="order ${esc(raw.action)}"><div class="line"><span class="side-${esc(raw.action)}">${SIDE[raw.action]||esc(raw.action)}</span> ${esc(stockName(d,raw.symbol,raw.name))} ${esc(raw.symbol)} ${int(raw.quantity)} 股
       <span class="badge b-bad">${o.status==='cancelled'?'已撤':'下单前被拒'}</span><span class="muted small">${esc((o.reasons||[]).map(reason).join('、'))}</span></div>
       <div class="why clamp" data-clamp>${esc(raw.reason)}</div></div>`);
   }
@@ -469,7 +470,7 @@ function bookView(d){
     const rows=pos.map(p=>{
       const price=Number(p.price||marks[p.symbol]||0),cost=Number(p.average_cost??p.avg_cost??0);
       const ret=price&&cost?(price/cost-1)*100:null;
-      return `<tr><td class="nowrap"><strong>${esc(p.name??'')}</strong><div class="muted small">${esc(p.symbol)}</div></td>
+      return `<tr><td class="nowrap"><strong>${esc(stockName(d,p.symbol,p.name))}</strong><div class="muted small">${esc(p.symbol)}</div></td>
         <td>${int(p.quantity)}</td><td>${int(p.sellable_quantity??0)}</td><td>${num(cost,3)}</td><td>${price?num(price,3):'—'}</td>
         <td class="${sign(ret)}">${pct(ret)}</td></tr>`;
     }).join('');

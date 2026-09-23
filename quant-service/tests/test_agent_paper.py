@@ -326,6 +326,40 @@ class AgentPaperModelTests(unittest.TestCase):
 
 
 class AgentPaperReviewPageTests(unittest.TestCase):
+    def test_rejected_proposals_use_known_names_and_request_missing_names(self):
+        path = Path(__file__).resolve().parents[2] / "scripts/serve-agent-paper-review.py"
+        spec = importlib.util.spec_from_file_location("agent_paper_review_names", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        payload = {
+            "accounts": [{
+                "positions": [{"symbol": "002156.SZ", "name": "通富微电"}],
+                "orders": [],
+                "decisions": [{"proposed": [], "ledger_orders": [], "outcomes": [
+                    {"order": {"symbol": "002156.SZ"}, "status": "rejected"},
+                    {"order": {"symbol": "300001.SZ"}, "status": "rejected"},
+                ]}],
+            }],
+            "human_trades": {"orders": []},
+        }
+        names, missing = module.collect_display_names(payload)
+        self.assertEqual(names, {"002156.SZ": "通富微电"})
+        self.assertEqual(missing, ["300001.SZ"])
+
+        class Catalog:
+            def execute(self, sql, values):
+                self.assertion = (sql, values)
+                return self
+
+            def fetchall(self):
+                return [{"symbol": "300001.SZ", "name": "特锐德"}]
+
+        catalog = Catalog()
+        self.assertEqual(module.resolve_display_names(catalog, payload), {
+            "002156.SZ": "通富微电", "300001.SZ": "特锐德",
+        })
+        self.assertEqual(catalog.assertion[1], (["300001.SZ"],))
+
     def test_multi_account_page_has_codex_identity_initial_equity_and_dynamic_lanes(self):
         page = (Path(__file__).resolve().parents[2] / "scripts/agent-paper-review/index.html").read_text(encoding="utf-8")
         self.assertIn("'agent-codex-sol':'Codex GPT-6 Sol'", page)
