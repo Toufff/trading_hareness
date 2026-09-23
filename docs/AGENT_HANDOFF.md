@@ -4,6 +4,22 @@ This is the authoritative entry point for an agent taking over the running
 Windows research platform. Read it together with the repository `AGENTS.md`;
 do not infer production state from the development checkout.
 
+Intraday holding focus (2026-09-23): release `20260923T114720-792d821ba2bc-clean`
+from source commit `792d821ba2bc0eb1b442db171f4536c4b905526a` was
+published at 11:51 CST with the explicit midday deploy-window override. The
+publisher reran backend 3350 passed / 130 skipped / 939 subtests, frontend
+145 passed, typecheck and build; adapter 116 tests passed separately. Live
+readback at 11:53: owner API and dashboard adapter healthy, shared/remote
+checks all green, focus GET through both owner and adapter shows `002315.SZ`
+焦点科技 focused until 15:05; advisory runtime reports one manual focus and no
+last error. Licensed Longhu tape for the symbol returned 121 rows, ending
+11:30, with no true minute high/low. A read-only replay of the released
+indicator implementation on 120 completed rows at 11:29 returned `sideways`.
+During lunch the live focus technical status is `pending`; no afternoon live
+alert or Feishu delivery is claimed yet. Details, fail-closed boundaries and
+API: [INTRADAY_HOLDING_FOCUS.md](INTRADAY_HOLDING_FOCUS.md). The current
+release identity must still be verified from `G:/StockPlatform/release-state.json`.
+
 Whole-system closure work (2026-09-22): [SYSTEM_CLOSURE_20260921.md](SYSTEM_CLOSURE_20260921.md).
 Read its business exceptions separately from code/deployment test results.
 The read-only `scripts/verify-business-coverage.py` and
